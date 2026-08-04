@@ -1,0 +1,126 @@
+{
+  "name": "rhwp-vscode",
+  "displayName": "HWP Viewer",
+  "description": "HWP/HWPX/HML 문서 뷰어 — rhwp 기반",
+  "version": "0.8.2",
+  "publisher": "edwardkim",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/edwardkim/rhwp"
+  },
+  "bugs": {
+    "url": "https://github.com/edwardkim/rhwp/issues"
+  },
+  "homepage": "https://github.com/edwardkim/rhwp/tree/main/rhwp-vscode",
+  "keywords": [
+    "hwp",
+    "hwpx",
+    "hml",
+    "한글",
+    "viewer",
+    "document"
+  ],
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "rhwp.hwpViewer",
+        "displayName": "HWP Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.hwp"
+          },
+          {
+            "filenamePattern": "*.hwpx"
+          },
+          {
+            "filenamePattern": "*.hml"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "rhwp.exportSvg",
+        "title": "HWP: SVG로 내보내기"
+      },
+      {
+        "command": "rhwp.debugOverlay",
+        "title": "HWP: 디버그 오버레이 보기"
+      },
+      {
+        "command": "rhwp.dumpParagraph",
+        "title": "HWP: 문단 덤프"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "rhwp.exportSvg",
+          "when": "resourceExtname == .hwp || resourceExtname == .hwpx || resourceExtname == .hml",
+          "group": "rhwp@1"
+        },
+        {
+          "command": "rhwp.debugOverlay",
+          "when": "resourceExtname == .hwp || resourceExtname == .hwpx || resourceExtname == .hml",
+          "group": "rhwp@2"
+        },
+        {
+          "command": "rhwp.dumpParagraph",
+          "when": "resourceExtname == .hwp || resourceExtname == .hwpx || resourceExtname == .hml",
+          "group": "rhwp@3"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "rhwp.exportSvg",
+          "when": "resourceExtname == .hwp || resourceExtname == .hwpx || resourceExtname == .hml",
+          "group": "rhwp@1"
+        },
+        {
+          "command": "rhwp.debugOverlay",
+          "when": "resourceExtname == .hwp || resourceExtname == .hwpx || resourceExtname == .hml",
+          "group": "rhwp@2"
+        },
+        {
+          "command": "rhwp.dumpParagraph",
+          "when": "resourceExtname == .hwp || resourceExtname == .hwpx || resourceExtname == .hml",
+          "group": "rhwp@3"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.webview.json",
+    "compile": "npm run typecheck && webpack --mode production",
+    "watch": "webpack --mode development --watch",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.2.0",
+    "canvaskit-wasm": "^0.41.1"
+  },
+  "devDependencies": {
+    "@types/node": "~18.15.0",
+    "@types/vscode": "~1.82.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "copy-webpack-plugin": "^14.0.0",
+    "null-loader": "^4.0.1",
+    "ts-loader": "^9.6.2",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "webpack": "^5.109.0",
+    "webpack-cli": "^7.2.1"
+  }
+}

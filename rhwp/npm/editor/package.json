@@ -1,0 +1,42 @@
+{
+  "name": "@rhwp/editor",
+  "version": "0.8.2",
+  "description": "HWP 에디터 웹 컴포넌트 — iframe 기반 임베드",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "transport.js",
+    "README.md"
+  ],
+  "keywords": [
+    "hwp",
+    "hwpx",
+    "hancom",
+    "hangul",
+    "한글",
+    "editor",
+    "viewer",
+    "wasm",
+    "webassembly"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/edwardkim/rhwp.git"
+  },
+  "homepage": "https://edwardkim.github.io/rhwp/",
+  "bugs": {
+    "url": "https://github.com/edwardkim/rhwp/issues"
+  },
+  "funding": "https://github.com/sponsors/edwardkim",
+  "license": "MIT",
+  "author": "Edward Kim",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

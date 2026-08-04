@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>HWP 링크 테스트</title>
+</head>
+<body>
+  <h1>Safari HWP 확장 테스트</h1>
+  <p>아래 링크를 클릭하면 HWP 뷰어가 열려야 합니다:</p>
+  <ul>
+    <li><a href="https://www.moel.go.kr/common/downloadFile.do?file_seq=20230600739&bbs_seq=20230600243&bbs_id=LOCAL0301">테스트 HWP 파일</a></li>
+    <li><a href="test.hwp">로컬 테스트.hwp</a></li>
+    <li><a href="sample.hwpx">로컬 테스트.hwpx</a></li>
+  </ul>
+  <p>확장 상태: <span id="status">확인 중...</span></p>
+  <script>
+    if (document.documentElement.getAttribute('data-hwp-extension')) {
+      document.getElementById('status').textContent = 'rhwp 확장 감지됨 ✅';
+    } else {
+      setTimeout(() => {
+        if (document.documentElement.getAttribute('data-hwp-extension')) {
+          document.getElementById('status').textContent = 'rhwp 확장 감지됨 ✅ (지연)';
+        } else {
+          document.getElementById('status').textContent = '확장 미감지 ❌';
+        }
+      }, 2000);
+    }
+  </script>
+</body>
+</html>

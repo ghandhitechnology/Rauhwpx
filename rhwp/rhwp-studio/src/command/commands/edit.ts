@@ -1,0 +1,280 @@
+import type { CommandDef } from '../types';
+import { FieldEditDialog } from '@/ui/field-edit-dialog';
+import { FindDialog } from '@/ui/find-dialog';
+import { GotoDialog } from '@/ui/goto-dialog';
+import { HistoryDialog } from '@/ui/history-dialog';
+import { CompareDialog } from '@/ui/compare-dialog';
+import { CompareSessionStore } from '@/compare/session';
+import { canExecuteFormatPaste } from '../format-paste-availability';
+
+/** 검색 대화상자 싱글톤 — 열려 있으면 재사용 */
+let findDialogInstance: FindDialog | null = null;
+/** 싱글톤: 문서 이력 관리 대화상자 */
+let historyDialogInstance: HistoryDialog | null = null;
+/** 싱글톤: 두 파일 문서 비교 대화상자 */
+let compareDialogInstance: CompareDialog | null = null;
+/** 비교/이력 공용 세션 스토어 */
+let compareSessionStore: CompareSessionStore | null = null;
+
+export const editCommands: CommandDef[] = [
+  {
+    id: 'edit:undo',
+    label: '되돌리기',
+    icon: 'icon-undo',
+    shortcutLabel: 'Ctrl+Z',
+    canExecute: (ctx) => ctx.hasDocument && ctx.canUndo,
+    execute(services) {
+      services.getInputHandler()?.performUndo();
+    },
+  },
+  {
+    id: 'edit:redo',
+    label: '다시 실행',
+    icon: 'icon-redo',
+    shortcutLabel: 'Ctrl+Shift+Z',
+    canExecute: (ctx) => ctx.hasDocument && ctx.canRedo,
+    execute(services) {
+      services.getInputHandler()?.performRedo();
+    },
+  },
+  {
+    id: 'edit:cut',
+    label: '오려 두기',
+    icon: 'icon-cut',
+    shortcutLabel: 'Ctrl+X',
+    canExecute: (ctx) => ctx.hasDocument && !ctx.isFormMode && (ctx.hasSelection || ctx.inPictureObjectSelection || ctx.inTableObjectSelection),
+    execute(services) {
+      services.getInputHandler()?.performCut();
+    },
+  },
+  {
+    id: 'edit:copy',
+    label: '복사하기',
+    icon: 'icon-copy',
+    shortcutLabel: 'Ctrl+C',
+    canExecute: (ctx) => ctx.hasDocument && (ctx.hasSelection || ctx.inPictureObjectSelection || ctx.inTableObjectSelection),
+    execute(services) {
+      services.getInputHandler()?.performCopy();
+    },
+  },
+  {
+    id: 'edit:paste',
+    label: '붙이기',
+    icon: 'icon-paste',
+    shortcutLabel: 'Ctrl+V',
+    canExecute: (ctx) => ctx.hasDocument && !ctx.isFormMode,
+    execute(services) {
+      services.getInputHandler()?.performPaste();
+    },
+  },
+  {
+    id: 'edit:format-copy',
+    label: '모양 복사',
+    icon: 'icon-format-copy',
+    shortcutLabel: 'Alt+C',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      services.getInputHandler()?.performFormatCopy();
+    },
+  },
+  {
+    id: 'edit:format-paste',
+    label: '모양 붙여넣기',
+    icon: 'icon-format-copy',
+    canExecute: canExecuteFormatPaste,
+    execute(services) {
+      services.getInputHandler()?.performFormatPaste();
+    },
+  },
+  {
+    id: 'edit:delete',
+    label: '지우기',
+    icon: 'icon-delete',
+    shortcutLabel: 'Ctrl+E',
+    canExecute: (ctx) => ctx.hasDocument && !ctx.isFormMode && (ctx.hasSelection || ctx.inPictureObjectSelection || ctx.inTableObjectSelection),
+    execute(services) {
+      services.getInputHandler()?.performDelete();
+    },
+  },
+  {
+    id: 'edit:select-all',
+    label: '모두 선택',
+    icon: 'icon-select-all',
+    shortcutLabel: 'Ctrl+A',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      services.getInputHandler()?.performSelectAll();
+    },
+  },
+  {
+    id: 'edit:find',
+    label: '찾기(F)',
+    icon: 'icon-find',
+    shortcutLabel: 'Ctrl+F',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      if (findDialogInstance && findDialogInstance.isOpen()) {
+        findDialogInstance.focusInput();
+        return;
+      }
+      findDialogInstance = new FindDialog(services, 'find');
+      findDialogInstance.show();
+    },
+  },
+  {
+    id: 'edit:find-replace',
+    label: '찾아 바꾸기(E)',
+    icon: 'icon-find-replace',
+    shortcutLabel: 'Ctrl+F2',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      if (findDialogInstance && findDialogInstance.isOpen()) {
+        findDialogInstance.switchMode('replace');
+        findDialogInstance.focusInput();
+        return;
+      }
+      findDialogInstance = new FindDialog(services, 'replace');
+      findDialogInstance.show();
+    },
+  },
+  {
+    id: 'edit:find-again',
+    label: '다시 찾기(X)',
+    shortcutLabel: 'Ctrl+L',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      if (findDialogInstance && findDialogInstance.isOpen()) {
+        findDialogInstance.findNext();
+      } else if (FindDialog.lastQuery) {
+        // 대화상자 없이 WASM 직접 검색
+        const ih = services.getInputHandler();
+        if (!ih) return;
+        const pos = ih.getCursorPosition();
+        const result = services.wasm.searchText(
+          FindDialog.lastQuery, pos.sectionIndex, pos.paragraphIndex,
+          pos.charOffset, true, FindDialog.lastCaseSensitive,
+        );
+        if (result.found) {
+          ih.moveCursorTo({
+            sectionIndex: result.sec!,
+            paragraphIndex: result.para!,
+            charOffset: result.charOffset!,
+          });
+          const cursor = (ih as any).cursor;
+          if (cursor) {
+            cursor.setAnchor();
+            cursor.moveTo({
+              sectionIndex: result.sec!,
+              paragraphIndex: result.para!,
+              charOffset: result.charOffset! + result.length!,
+            });
+          }
+          (ih as any).updateCaret?.();
+        }
+      }
+    },
+  },
+  {
+    id: 'edit:compare-documents',
+    label: '문서 비교',
+    shortcutLabel: 'Alt+Shift+V',
+    canExecute: () => true,
+    execute(services) {
+      if (!compareSessionStore) {
+        compareSessionStore = new CompareSessionStore(services.eventBus);
+      }
+      if (historyDialogInstance?.isOpen()) historyDialogInstance.hide();
+      if (compareDialogInstance && compareDialogInstance.isOpen()) return;
+      compareDialogInstance = new CompareDialog(services, compareSessionStore);
+      compareDialogInstance.show();
+    },
+  },
+  {
+    id: 'edit:document-history',
+    label: '문서 이력 관리',
+    shortcutLabel: 'Ctrl+Shift+H',
+    canExecute: () => true,
+    execute(services) {
+      if (!compareSessionStore) {
+        compareSessionStore = new CompareSessionStore(services.eventBus);
+      }
+      if (compareDialogInstance?.isOpen()) compareDialogInstance.hide();
+      if (historyDialogInstance && historyDialogInstance.isOpen()) {
+        return;
+      }
+      historyDialogInstance = new HistoryDialog(services, compareSessionStore);
+      historyDialogInstance.show();
+    },
+  },
+  {
+    id: 'edit:goto',
+    label: '찾아가기(G)',
+    shortcutLabel: 'Alt+G',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      const dialog = new GotoDialog(services);
+      dialog.show();
+    },
+  },
+  {
+    id: 'field:edit',
+    label: '누름틀 고치기(E)...',
+    shortcutLabel: 'Ctrl+M,K',
+    canExecute: (ctx) => ctx.hasDocument && !ctx.isFormMode && ctx.inField,
+    execute(services) {
+      const ih = services.getInputHandler();
+      if (!ih) return;
+      const fi = (ih as any).getFieldInfo?.();
+      console.log('[field:edit] fieldInfo:', fi);
+      if (!fi || fi.fieldId == null) return;
+      const props = services.wasm.getClickHereProps(fi.fieldId);
+      console.log('[field:edit] props:', props);
+      if (!props.ok) return;
+
+      const dialog = new FieldEditDialog();
+      const restoreEditorFocus = () => {
+        requestAnimationFrame(() => {
+          (ih as any).updateCaret?.();
+          ih.focus();
+        });
+      };
+      dialog.onApply = (newProps) => {
+        console.log('[field:edit] apply:', newProps);
+        try {
+          // [Task #2377] 누름틀 속성 갱신은 안내문 텍스트를 바꿀 수 있다(문자 수 변경) —
+          // snapshot 으로 라우팅(일반 모드 전용 커맨드). 실패 시 throw 로 엔트리 생성을 막는다.
+          ih.executeOperation({
+            kind: 'snapshot',
+            operationType: 'updateFieldProps',
+            operation: (wasm) => {
+              const result = wasm.updateClickHereProps(
+                fi.fieldId, newProps.guide, newProps.memo, newProps.name, newProps.editable,
+              );
+              if (!result.ok) throw new Error('updateClickHereProps not ok');
+              return ih.getCursorPosition();
+            },
+          });
+          services.eventBus.emit('document-mutated', 'field-edit');
+        } catch (err) {
+          console.warn('[field:edit] 누름틀 고치기 실패:', err);
+        }
+      };
+      dialog.onClose = restoreEditorFocus;
+      dialog.showWith({
+        guide: props.guide ?? '',
+        memo: props.memo ?? '',
+        name: props.name ?? '',
+        editable: props.editable ?? true,
+      });
+    },
+  },
+  {
+    id: 'field:remove',
+    label: '누름틀 지우기(J)',
+    canExecute: (ctx) => ctx.hasDocument && !ctx.isFormMode && ctx.inField,
+    execute(services) {
+      const ih = services.getInputHandler();
+      if (ih) (ih as any).confirmRemoveCurrentField?.();
+    },
+  },
+];

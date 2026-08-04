@@ -1,0 +1,174 @@
+name: Release Binary
+
+# Issue #612 — CLI 바이너리 릴리즈 파이프라인
+# 4 플랫폼 (Linux x86_64 / macOS x86_64 + aarch64 / Windows x86_64) matrix 빌드
+# release tag (v*) push 시 자동 트리거 + workflow_dispatch 수동 실행 (테스트용)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name (test build, no release attached)'
+        required: false
+        default: 'test'
+
+permissions:
+  contents: write  # release 자산 첨부 권한
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive: tar.gz
+            archive_suffix: linux-x86_64
+            binary_name: rhwp
+          - target: x86_64-apple-darwin
+            # macos-13 (Intel) runner 큐 적체 영역 회피 — Apple Silicon (macos-14)
+            # 에서 x86_64-apple-darwin 으로 cross-compile (Rust 표준 cross-compile).
+            # Intel binary 산출물 보존 + 큐 가용성 영역 정합.
+            runner: macos-14
+            archive: tar.gz
+            archive_suffix: macos-x86_64
+            binary_name: rhwp
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive: tar.gz
+            archive_suffix: macos-aarch64
+            binary_name: rhwp
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive: zip
+            archive_suffix: windows-x86_64
+            binary_name: rhwp.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Determine version tag
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 브랜치 (2026-08-01 시점)
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Ensure Rust target is installed
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.target }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release --bin rhwp --target ${{ matrix.target }}
+
+      - name: Verify binary (Linux/macOS)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          target/${{ matrix.target }}/release/${{ matrix.binary_name }} --version
+
+      - name: Verify binary (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          target/${{ matrix.target }}/release/${{ matrix.binary_name }} --version
+
+      - name: Package archive (Linux/macOS)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          ARCHIVE_NAME="rhwp-${{ steps.version.outputs.tag }}-${{ matrix.archive_suffix }}.tar.gz"
+          mkdir -p dist/rhwp
+          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/rhwp/
+          cp LICENSE dist/rhwp/
+          cp README.md dist/rhwp/
+          cd dist && tar -czf "../${ARCHIVE_NAME}" rhwp/
+          cd ..
+          ls -la "${ARCHIVE_NAME}"
+          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
+
+      - name: Package archive (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $archiveName = "rhwp-${{ steps.version.outputs.tag }}-${{ matrix.archive_suffix }}.zip"
+          New-Item -ItemType Directory -Force -Path dist/rhwp | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" dist/rhwp/
+          Copy-Item LICENSE dist/rhwp/
+          Copy-Item README.md dist/rhwp/
+          Compress-Archive -Path dist/rhwp -DestinationPath $archiveName -Force
+          Get-ChildItem $archiveName
+          "ARCHIVE_NAME=$archiveName" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: ${{ env.ARCHIVE_NAME }}
+          retention-days: 7
+
+  release:
+    name: Attach to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v'))
+
+    steps:
+      - name: Determine release tag
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        run: |
+          cd dist
+          ls -la
+          sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          generate_release_notes: false  # 본문은 별도 작성 (release manual 정합)

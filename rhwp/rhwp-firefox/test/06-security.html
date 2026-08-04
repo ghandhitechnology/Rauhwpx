@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>보안 테스트 — XSS 방어</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 800px; margin: 40px auto; line-height: 1.8; }
+    h1 { color: #dc2626; }
+    h2 { margin-top: 2em; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; }
+    .test-case { background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 16px; margin: 12px 0; }
+    .test-case p { margin: 4px 0; font-size: 13px; color: #991b1b; }
+    .expected { color: #15803d; font-weight: 600; }
+    code { background: #f1f5f9; padding: 2px 6px; border-radius: 3px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>🛡️ 보안 테스트 — XSS 방어</h1>
+  <p>아래 링크들은 <code>data-hwp-*</code> 속성에 악의적 HTML/JS를 삽입한 테스트 케이스입니다.</p>
+  <p class="expected">기대 결과: 호버 카드에 스크립트가 실행되지 않고, HTML 태그가 이스케이프되어 텍스트로 표시되어야 합니다.</p>
+
+  <h2>1. XSS via data-hwp-title (script 태그)</h2>
+  <div class="test-case">
+    <p>호버 시 alert가 실행되면 <strong>취약</strong></p>
+    <a href="test.hwp"
+       data-hwp="true"
+       data-hwp-title='<script>alert("XSS via title")</script>악의적 제목'
+       data-hwp-pages="10"
+       data-hwp-size="1024000"
+       data-hwp-format="hwp">
+      XSS 테스트 1: script 태그 주입
+    </a>
+  </div>
+
+  <h2>2. XSS via data-hwp-title (img onerror)</h2>
+  <div class="test-case">
+    <p>호버 시 alert가 실행되면 <strong>취약</strong></p>
+    <a href="test.hwp"
+       data-hwp="true"
+       data-hwp-title='<img src=x onerror=alert("XSS-img")>제목'
+       data-hwp-pages="5">
+      XSS 테스트 2: img onerror 주입
+    </a>
+  </div>
+
+  <h2>3. XSS via data-hwp-description</h2>
+  <div class="test-case">
+    <p>호버 시 설명 영역에서 스크립트가 실행되면 <strong>취약</strong></p>
+    <a href="test.hwp"
+       data-hwp="true"
+       data-hwp-title="정상 제목"
+       data-hwp-description='<svg onload=alert("XSS-svg")>악의적 설명'>
+      XSS 테스트 3: SVG onload 주입
+    </a>
+  </div>
+
+  <h2>4. XSS via data-hwp-author</h2>
+  <div class="test-case">
+    <p>호버 시 작성자 영역에서 실행되면 <strong>취약</strong></p>
+    <a href="test.hwp"
+       data-hwp="true"
+       data-hwp-title="정상 제목"
+       data-hwp-author='"><script>alert("XSS-author")</script>'
+       data-hwp-date="2026-04-09">
+      XSS 테스트 4: 작성자 필드 주입
+    </a>
+  </div>
+
+  <h2>5. XSS via data-hwp-thumbnail</h2>
+  <div class="test-case">
+    <p>썸네일 이미지 경로에 javascript: 프로토콜 주입</p>
+    <a href="test.hwp"
+       data-hwp="true"
+       data-hwp-title="정상 제목"
+       data-hwp-thumbnail='javascript:alert("XSS-thumb")'>
+      XSS 테스트 5: 썸네일 javascript: 프로토콜
+    </a>
+  </div>
+
+  <h2>6. XSS via data-hwp-category (이벤트 핸들러)</h2>
+  <div class="test-case">
+    <p>카테고리 영역에서 이벤트 핸들러 주입</p>
+    <a href="test.hwp"
+       data-hwp="true"
+       data-hwp-title="정상 제목"
+       data-hwp-category='" onmouseover="alert(1)" data-x="'>
+      XSS 테스트 6: 속성 탈출 시도
+    </a>
+  </div>
+
+  <h2>7. 정상 동작 확인 (비교용)</h2>
+  <div class="test-case" style="background: #f0fdf4; border-color: #bbf7d0;">
+    <p>정상적인 data-hwp 속성 — 호버 카드가 올바르게 표시되어야 합니다</p>
+    <a href="sample.hwp"
+       data-hwp="true"
+       data-hwp-title="2026년 업무 보고서"
+       data-hwp-pages="15"
+       data-hwp-size="2048000"
+       data-hwp-format="hwp"
+       data-hwp-author="홍길동"
+       data-hwp-date="2026-04-09"
+       data-hwp-category="업무"
+       data-hwp-description="분기별 업무 실적 보고서입니다.">
+      정상 테스트: 모든 메타데이터 포함
+    </a>
+  </div>
+
+  <hr>
+  <p><a href="index.html">← 테스트 목록</a></p>
+</body>
+</html>

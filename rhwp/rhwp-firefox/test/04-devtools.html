@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="hwp:integration" content="enabled">
+  <meta name="hwp:hover-preview" content="true">
+  <meta name="hwp:batch-enabled" content="true">
+  <title>rhwp 테스트 4: 개발자 도구</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    h1 { font-size: 20px; }
+    .desc { color: #64748b; font-size: 14px; margin-bottom: 8px; }
+    .section { border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    h2 { font-size: 16px; color: #475569; margin-top: 32px; }
+    code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+    pre { background: #1e293b; color: #e2e8f0; padding: 16px; border-radius: 8px; font-size: 13px; overflow-x: auto; }
+    .warn { background: #fef3c7; padding: 8px 12px; border-radius: 6px; font-size: 13px; border-left: 3px solid #f59e0b; }
+  </style>
+</head>
+<body>
+  <h1>rhwp 테스트 4: 개발자 도구 (rhwpDev)</h1>
+  <p class="desc">브라우저 개발자 도구(F12) → 콘솔 탭에서 아래 명령어를 실행하여 테스트합니다.</p>
+
+  <div class="section">
+    <h2>테스트 명령어</h2>
+    <pre>
+// 1. 도움말 출력
+rhwpDev.help()
+
+// 2. 페이지 전체 검사
+rhwpDev.inspect()
+
+// 3. 특정 링크 검사
+rhwpDev.inspectLink(document.querySelector('a[data-hwp]'))
+
+// 4. 버전 확인
+rhwpDev.version</pre>
+  </div>
+
+  <div class="section">
+    <h2>정상 링크 (개선 사항 없어야 함)</h2>
+    <ul>
+      <li>
+        <a href="/samples/biz_plan.hwp"
+           data-hwp="true"
+           data-hwp-title="완벽한 메타데이터"
+           data-hwp-pages="5"
+           data-hwp-size="153600"
+           data-hwp-author="행정안전부"
+           data-hwp-date="2026-04-01">
+          완벽한 메타데이터.hwp
+        </a>
+      </li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>개선 필요 링크 (inspect()에서 경고 표시)</h2>
+    <ul>
+      <li>
+        <a href="/samples/endnote-01.hwp">
+          data-hwp 누락 — 확장자 폴백 감지
+        </a>
+      </li>
+      <li>
+        <a href="/samples/eq-01.hwp"
+           data-hwp="true"
+           data-hwp-size="big">
+          data-hwp-size 잘못된 값
+        </a>
+      </li>
+      <li>
+        <a href="/samples/field-01.hwp"
+           data-hwp="true"
+           data-hwp-pages="많음">
+          data-hwp-pages 잘못된 값
+        </a>
+      </li>
+      <li>
+        <a href="/samples/draw-group.hwp"
+           data-hwp="true"
+           data-hwp-date="어제">
+          data-hwp-date 잘못된 값
+        </a>
+      </li>
+    </ul>
+  </div>
+
+  <div class="warn">
+    <strong>기대 결과:</strong> <code>rhwpDev.inspect()</code> 실행 시 정상 링크 1개 + 개선 사항 4건 (누락 1건, 유효성 3건)이 출력되어야 합니다.
+  </div>
+</body>
+</html>

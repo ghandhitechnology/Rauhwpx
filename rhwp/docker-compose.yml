@@ -1,0 +1,48 @@
+services:
+  dev:
+    build:
+      context: .
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    env_file: .env.docker
+    volumes:
+      - .:/app
+      - cargo-cache:/home/builder/.cargo/registry
+      - cargo-bin:/home/builder/.cargo/bin
+    working_dir: /app
+    command: cargo build
+
+  test:
+    build:
+      context: .
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    env_file: .env.docker
+    volumes:
+      - .:/app
+      - cargo-cache:/home/builder/.cargo/registry
+      - cargo-bin:/home/builder/.cargo/bin
+    working_dir: /app
+    command: cargo test
+
+  wasm:
+    build:
+      context: .
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    env_file: .env.docker
+    volumes:
+      - .:/app
+      - cargo-cache:/home/builder/.cargo/registry
+      - cargo-bin:/home/builder/.cargo/bin
+      - wasm-pack-cache:/home/builder/.cache/.wasm-pack
+    working_dir: /app
+    command: wasm-pack build --target web
+
+volumes:
+  cargo-cache:
+  cargo-bin:
+  wasm-pack-cache:

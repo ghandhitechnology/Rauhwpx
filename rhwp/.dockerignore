@@ -1,0 +1,4 @@
+target/
+pkg/
+.git/
+*.wasm

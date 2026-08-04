@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rhwp 설정</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+      color: #1d1d1f;
+      background: #f5f5f7;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      max-width: 480px;
+      margin: 0 auto;
+      -webkit-font-smoothing: antialiased;
+    }
+    /* 헤더 */
+    .header {
+      padding: 20px 20px 12px;
+      flex-shrink: 0;
+    }
+    .header h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: #1d1d1f;
+      letter-spacing: -0.02em;
+    }
+    /* 탭 바 — Apple 세그먼트 컨트롤 스타일 */
+    .tab-bar {
+      display: flex;
+      margin: 0 16px 12px;
+      background: rgba(0,0,0,0.06);
+      border-radius: 8px;
+      padding: 2px;
+      flex-shrink: 0;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 7px 4px;
+      font-size: 12px;
+      font-weight: 500;
+      color: #86868b;
+      background: none;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s ease;
+      letter-spacing: -0.01em;
+    }
+    .tab-btn:hover { color: #1d1d1f; }
+    .tab-btn.active {
+      color: #1d1d1f;
+      background: #fff;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
+      font-weight: 600;
+    }
+    /* 탭 콘텐츠 */
+    .tab-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0 16px 16px;
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    /* 카드 그룹 */
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      overflow: hidden;
+      margin-bottom: 12px;
+    }
+    .card-header {
+      font-size: 12px;
+      font-weight: 500;
+      color: #86868b;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      padding: 8px 16px 0;
+      margin-bottom: -4px;
+    }
+    /* 행 */
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 13px 16px;
+      border-bottom: 1px solid rgba(0,0,0,0.04);
+      min-height: 44px;
+    }
+    .row:last-child { border-bottom: none; }
+    .row-left { flex: 1; min-width: 0; }
+    .row-label { font-size: 15px; color: #1d1d1f; }
+    .row-desc { font-size: 12px; color: #86868b; margin-top: 1px; }
+    /* 토글 — Apple 스타일 */
+    .toggle { position: relative; width: 51px; height: 31px; flex-shrink: 0; margin-left: 12px; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle .slider {
+      position: absolute; cursor: pointer; inset: 0;
+      background: #e9e9eb; border-radius: 31px; transition: background 0.25s ease;
+    }
+    .toggle .slider::before {
+      content: ''; position: absolute; width: 27px; height: 27px;
+      left: 2px; bottom: 2px; background: #fff;
+      border-radius: 50%; transition: transform 0.25s ease;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+    }
+    .toggle input:checked + .slider { background: #34c759; }
+    .toggle input:checked + .slider::before { transform: translateX(20px); }
+    /* 도메인 목록 */
+    .domain-list { list-style: none; }
+    .domain-list li {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 16px;
+      border-bottom: 1px solid rgba(0,0,0,0.04);
+      font-size: 14px; font-family: 'SF Mono', SFMono-Regular, monospace;
+      color: #1d1d1f;
+    }
+    .domain-list li:last-child { border-bottom: none; }
+    .remove-btn {
+      background: none; border: none; color: #ff3b30;
+      cursor: pointer; font-size: 18px; padding: 0 4px; font-weight: 300;
+    }
+    .add-domain {
+      display: flex; gap: 8px; padding: 10px 16px;
+      border-top: 1px solid rgba(0,0,0,0.04);
+    }
+    .add-domain input {
+      flex: 1; padding: 8px 12px; border: 1px solid rgba(0,0,0,0.1);
+      border-radius: 8px; font-size: 14px; outline: none;
+      background: #f5f5f7;
+    }
+    .add-domain input:focus { border-color: #007aff; background: #fff; }
+    .add-domain button {
+      padding: 8px 16px; background: #007aff; color: #fff;
+      border: none; border-radius: 8px; font-size: 14px; font-weight: 500;
+      cursor: pointer;
+    }
+    .add-domain button:hover { background: #0066d6; }
+    .num-input {
+      width: 60px; padding: 6px 8px; border: 1px solid rgba(0,0,0,0.1);
+      border-radius: 8px; font-size: 14px; text-align: right;
+      background: #f5f5f7;
+    }
+    .num-input:focus { border-color: #007aff; background: #fff; outline: none; }
+    .warning { font-size: 11px; color: #ff3b30; margin-top: 2px; }
+    /* 로그 */
+    .log-actions { display: flex; gap: 8px; padding: 12px 16px; align-items: center; }
+    .log-btn {
+      padding: 8px 16px; border: none; border-radius: 8px;
+      font-size: 14px; font-weight: 500; cursor: pointer;
+    }
+    .log-btn-primary { background: #007aff; color: #fff; }
+    .log-btn-primary:hover { background: #0066d6; }
+    .log-btn-danger { background: #f5f5f7; color: #ff3b30; }
+    .log-btn-danger:hover { background: #fee2e2; }
+    .log-count { font-size: 13px; color: #86868b; }
+    .log-container {
+      max-height: calc(100vh - 220px); overflow: auto;
+      margin: 0 16px; border-radius: 10px;
+      border: 1px solid rgba(0,0,0,0.06);
+    }
+    .log-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .log-table th {
+      position: sticky; top: 0; background: #f5f5f7;
+      padding: 8px 10px; text-align: left; font-weight: 600;
+      color: #86868b; font-size: 11px; text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }
+    .log-table td {
+      padding: 7px 10px; border-bottom: 1px solid rgba(0,0,0,0.04);
+      color: #1d1d1f; word-break: break-all; max-width: 140px;
+    }
+    .log-table tr:hover td { background: rgba(0,122,255,0.04); }
+    .log-type {
+      display: inline-block; padding: 2px 7px; border-radius: 4px;
+      font-size: 10px; font-weight: 600;
+    }
+    .log-type-fetch { background: #fff3cd; color: #856404; }
+    .log-type-url { background: #ffe0e0; color: #c62828; }
+    .log-type-sender { background: #ede7f6; color: #4527a0; }
+    .log-type-signature { background: #e3f2fd; color: #1565c0; }
+    .log-empty { padding: 32px; text-align: center; color: #86868b; font-size: 14px; }
+    /* 저장 알림 */
+    .saved-msg {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      background: #1d1d1f; color: #fff; padding: 10px 20px;
+      border-radius: 20px; font-size: 14px; font-weight: 500; opacity: 0;
+      transition: opacity 0.3s; pointer-events: none; z-index: 10;
+    }
+    .saved-msg.show { opacity: 1; }
+    /* 다크 모드 */
+    @media (prefers-color-scheme: dark) {
+      body { background: #000; color: #f5f5f7; }
+      .header h1 { color: #f5f5f7; }
+      .tab-bar { background: rgba(255,255,255,0.08); }
+      .tab-btn { color: #86868b; }
+      .tab-btn:hover { color: #f5f5f7; }
+      .tab-btn.active { color: #f5f5f7; background: rgba(255,255,255,0.12); box-shadow: none; }
+      .card { background: #1c1c1e; }
+      .row { border-bottom-color: rgba(255,255,255,0.06); }
+      .row-label { color: #f5f5f7; }
+      .row-desc { color: #86868b; }
+      .toggle .slider { background: #39393d; }
+      .domain-list li { color: #f5f5f7; border-bottom-color: rgba(255,255,255,0.06); }
+      .add-domain input { background: #2c2c2e; border-color: rgba(255,255,255,0.1); color: #f5f5f7; }
+      .add-domain input:focus { background: #3a3a3c; }
+      .num-input { background: #2c2c2e; border-color: rgba(255,255,255,0.1); color: #f5f5f7; }
+      .log-container { border-color: rgba(255,255,255,0.08); }
+      .log-table th { background: #1c1c1e; color: #86868b; }
+      .log-table td { color: #f5f5f7; border-bottom-color: rgba(255,255,255,0.06); }
+      .log-table tr:hover td { background: rgba(0,122,255,0.08); }
+      .log-btn-danger { background: #2c2c2e; }
+      .saved-msg { background: #f5f5f7; color: #1d1d1f; }
+    }
+    @media (max-width: 400px) {
+      .tab-btn { font-size: 11px; padding: 7px 2px; }
+      .row-label { font-size: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header"><h1>rhwp 설정</h1></div>
+
+  <div class="tab-bar">
+    <button class="tab-btn active" data-tab="sites">사이트</button>
+    <button class="tab-btn" data-tab="features">기능</button>
+    <button class="tab-btn" data-tab="security">보안</button>
+    <button class="tab-btn" data-tab="dev">개발</button>
+    <button class="tab-btn" data-tab="log">로그</button>
+  </div>
+
+  <div class="tab-content">
+    <!-- 사이트 권한 -->
+    <div id="tab-sites" class="tab-panel active">
+      <div class="card">
+        <div class="row-desc" style="padding:12px 16px 0; color:#86868b;">HWP 링크를 자동 감지할 도메인</div>
+        <ul id="domain-list" class="domain-list"></ul>
+        <div class="add-domain">
+          <input id="new-domain" type="text" placeholder=".example.kr">
+          <button id="add-domain-btn">추가</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="row">
+          <div class="row-left">
+            <div class="row-label">모든 사이트에서 활성화</div>
+            <div class="warning">모든 웹사이트에서 확장이 동작합니다</div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="allSitesEnabled"><span class="slider"></span></label>
+        </div>
+      </div>
+    </div>
+
+    <!-- 기능 -->
+    <div id="tab-features" class="tab-panel">
+      <div class="card">
+        <div class="row">
+          <div class="row-left"><div class="row-label">HWP 링크 자동 열기</div></div>
+          <label class="toggle"><input type="checkbox" id="autoOpen"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <div class="row-left"><div class="row-label">링크 옆 배지(H) 표시</div></div>
+          <label class="toggle"><input type="checkbox" id="showBadges"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <div class="row-left"><div class="row-label">호버 시 미리보기 카드</div></div>
+          <label class="toggle"><input type="checkbox" id="hoverPreview"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <div class="row-left">
+            <div class="row-label">외부 웹폰트 사용 안 함</div>
+            <div class="row-desc">내부망/오프라인 환경에서 권장합니다. 일부 문서의 글꼴, 줄바꿈, 페이지 배치가 달라질 수 있습니다</div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="disableExternalWebFonts"><span class="slider"></span></label>
+        </div>
+      </div>
+    </div>
+
+    <!-- 보안 -->
+    <div id="tab-security" class="tab-panel">
+      <div class="card">
+        <div class="row">
+          <div class="row-left">
+            <div class="row-label">HTTP 연결 허용</div>
+            <div class="row-desc">비권장 — 문서 변조 위험</div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="allowHttp"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <div class="row-left"><div class="row-label">HTTP 경고 표시</div></div>
+          <label class="toggle"><input type="checkbox" id="httpWarning"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <div class="row-left"><div class="row-label">최대 파일 크기</div></div>
+          <div><input type="number" id="maxFileSize" class="num-input" min="1" max="100"> MB</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 개발 -->
+    <div id="tab-dev" class="tab-panel">
+      <div class="card">
+        <div class="row">
+          <div class="row-left">
+            <div class="row-label">개발자 도구</div>
+            <div class="row-desc">rhwpDev + localhost 접근 허용</div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="devMode"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <div class="row-left"><div class="row-label">보안 로그 기록</div></div>
+          <label class="toggle"><input type="checkbox" id="securityLog"><span class="slider"></span></label>
+        </div>
+      </div>
+    </div>
+
+    <!-- 보안 로그 -->
+    <div id="tab-log" class="tab-panel">
+      <div class="card">
+        <div class="log-actions">
+          <button id="load-log-btn" class="log-btn log-btn-primary">로그 보기</button>
+          <button id="clear-log-btn" class="log-btn log-btn-danger">초기화</button>
+          <span id="log-count" class="log-count"></span>
+        </div>
+      </div>
+      <div id="log-container" class="log-container" style="display:none;">
+        <table class="log-table">
+          <thead><tr><th>시간</th><th>유형</th><th>URL</th><th>사유</th></tr></thead>
+          <tbody id="log-tbody"></tbody>
+        </table>
+        <div id="log-empty" class="log-empty" style="display:none;">기록된 이벤트가 없습니다.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="saved-msg" class="saved-msg">저장되었습니다</div>
+  <script src="options.js"></script>
+</body>
+</html>

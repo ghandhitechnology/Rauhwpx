@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>rhwp 테스트 1: 자동 감지</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    h1 { font-size: 20px; }
+    h2 { font-size: 16px; color: #475569; margin-top: 32px; }
+    .desc { color: #64748b; font-size: 14px; margin-bottom: 8px; }
+    ul { line-height: 2; }
+    .pass { background: #dcfce7; padding: 2px 8px; border-radius: 4px; font-size: 13px; }
+    .section { border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <h1>rhwp 테스트 1: 확장자 기반 자동 감지</h1>
+  <p class="desc">data-hwp 속성 없이 확장자만으로 HWP 링크를 감지하는지 확인합니다.<br>
+  각 링크 옆에 파란색 <span class="pass">H</span> 배지가 표시되면 성공입니다.</p>
+
+  <div class="section">
+    <h2>기본 HWP 링크 (실제 파일)</h2>
+    <ul>
+      <li><a href="/samples/biz_plan.hwp">biz_plan.hwp</a></li>
+      <li><a href="/samples/table-vpos-01.hwpx">table-vpos-01.hwpx</a></li>
+      <li><a href="/samples/endnote-01.hwp">endnote-01.hwp</a></li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>쿼리 스트링 포함</h2>
+    <ul>
+      <li><a href="/samples/field-01.hwp?token=abc123">field-01.hwp (쿼리 스트링 포함)</a></li>
+      <li><a href="/samples/eq-01.hwp?download=true&id=99">eq-01.hwp (복수 파라미터)</a></li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>비-HWP 링크 (배지가 없어야 함)</h2>
+    <ul>
+      <li><a href="/README.md">README.md</a></li>
+      <li><a href="/Cargo.toml">Cargo.toml</a></li>
+      <li><a href="/rhwp-chrome/test/index.html">index.html (테스트 목록)</a></li>
+    </ul>
+  </div>
+</body>
+</html>
