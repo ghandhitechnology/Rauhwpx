@@ -25,7 +25,11 @@ export interface AgentBridge {
   getConnectionState(): 'connecting' | 'connected' | 'disconnected' | 'replaced';
   getActiveAgent(): AgentName | null;
   isTurnRunning(): boolean;
-  startChat(agent: AgentName, model?: string, effort?: string): void;
+  startChat(agent: AgentName, model?: string, effort?: string, force?: boolean): void;
+  /** 허브 세션을 폐기하고 새 채팅을 시작할 수 있게 한다. */
+  stopChat(): void;
+  /** gpt-5.6-luna 로 스레드 제목 생성 요청. */
+  requestTitle(threadId: string, preview: string): string;
   sendUserMessage(text: string): void;
   interrupt(): void;
   onEvent(cb: (e: SidebarEvent) => void): () => void;
@@ -64,8 +68,14 @@ class AgentBridgeImpl implements AgentBridge {
   private selectedEffort: string | null = null;
   private activeAgent: AgentName | null = null;
   private turnRunning = false;
-  private pendingChatStart: { agent: AgentName; model?: string; effort?: string } | null = null;
+  private pendingChatStart: {
+    agent: AgentName;
+    model?: string;
+    effort?: string;
+    force?: boolean;
+  } | null = null;
   private queuedMessages: string[] = [];
+  private titleRequestSeq = 0;
 
   constructor(deps: AgentBridgeDeps, opts?: AgentBridgeOptions) {
     this.revision = new RevisionTracker(deps.eventBus);
@@ -131,6 +141,7 @@ class AgentBridgeImpl implements AgentBridge {
           agent: pending.agent,
           ...(pending.model ? { model: pending.model } : {}),
           ...(pending.effort ? { effort: pending.effort } : {}),
+          ...(pending.force ? { force: true } : {}),
         });
       }
     };
@@ -248,6 +259,15 @@ class AgentBridgeImpl implements AgentBridge {
         });
         break;
       }
+      case 'title-result': {
+        this.emit({
+          type: 'title-result',
+          requestId: typeof msg.requestId === 'string' ? msg.requestId : '',
+          threadId: typeof msg.threadId === 'string' ? msg.threadId : '',
+          title: typeof msg.title === 'string' ? msg.title : null,
+        });
+        break;
+      }
       case 'agent-event': {
         const event = msg.event as AgentStreamEvent | undefined;
         if (!event || typeof event.type !== 'string') break;
@@ -325,7 +345,7 @@ class AgentBridgeImpl implements AgentBridge {
     return this.turnRunning;
   }
 
-  startChat(agent: AgentName, model?: string, effort?: string): void {
+  startChat(agent: AgentName, model?: string, effort?: string, force = false): void {
     this.selectedAgent = agent;
     if (model) this.selectedModel = model;
     if (effort) this.selectedEffort = effort;
@@ -335,6 +355,7 @@ class AgentBridgeImpl implements AgentBridge {
       agent,
       ...(this.selectedModel ? { model: this.selectedModel } : {}),
       ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
+      ...(force ? { force: true } : {}),
     };
     if (this.state === 'connected') {
       this.sendJson(payload);
@@ -343,8 +364,39 @@ class AgentBridgeImpl implements AgentBridge {
         agent,
         model: this.selectedModel ?? undefined,
         effort: this.selectedEffort ?? undefined,
+        force,
       };
     }
+  }
+
+  stopChat(): void {
+    this.queuedMessages = [];
+    this.pendingChatStart = null;
+    this.activeAgent = null;
+    this.turnRunning = false;
+    if (this.state === 'connected') {
+      this.sendJson({ v: 1, type: 'chat-stop' });
+    }
+    this.emit({ type: 'chat-stopped' });
+  }
+
+  requestTitle(threadId: string, preview: string): string {
+    const requestId = `title-${++this.titleRequestSeq}`;
+    if (this.state === 'connected') {
+      this.sendJson({
+        v: 1,
+        type: 'title-request',
+        requestId,
+        threadId,
+        preview,
+      });
+    } else {
+      // 오프라인이면 곧바로 폴백을 유도한다.
+      queueMicrotask(() => {
+        this.emit({ type: 'title-result', requestId, threadId, title: null });
+      });
+    }
+    return requestId;
   }
 
   sendUserMessage(text: string): void {

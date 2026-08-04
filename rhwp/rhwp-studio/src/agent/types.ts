@@ -46,6 +46,13 @@ export type SidebarEvent =
       model?: string;
       effort?: string;
     }
+  | { type: 'chat-stopped' }
+  | {
+      type: 'title-result';
+      requestId: string;
+      threadId: string;
+      title: string | null;
+    }
   | { type: 'agent'; event: AgentStreamEvent }
   | { type: 'hub-error'; code: string; message: string };
 

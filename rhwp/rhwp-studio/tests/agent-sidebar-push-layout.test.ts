@@ -23,7 +23,7 @@ test('agent sidebar push layout reserves editor-area width when open', () => {
 
 test('agent sidebar toggles body.ag-sidebar-open with collapse state', () => {
   assert.match(source, /document\.body\.classList\.toggle\('ag-sidebar-open', !collapsed\)/);
-  assert.match(source, /document\.body\.classList\.remove\('ag-sidebar-open'\)/);
+  assert.match(source, /document\.body\.classList\.remove\('ag-sidebar-open'/);
   assert.match(source, /setCollapsed\(false, \{ recenter: false \}\)/);
 });
 
@@ -40,4 +40,17 @@ test('agent sidebar asks canvas to recenter during inset animation', () => {
   assert.match(canvasSource, /recenterHorizontally\(/);
   assert.match(canvasSource, /repositionRenderedPages\(/);
   assert.match(canvasSource, /ag-sidebar-animating/);
+});
+
+test('agent sidebar supports drag resize up to half the viewport', () => {
+  assert.match(source, /ag-resize-handle/);
+  assert.match(source, /maxSidebarWidth/);
+  assert.match(source, /0\.5/);
+  assert.match(source, /ag-sidebar-resizing/);
+  assert.match(source, /applySidebarWidth/);
+  assert.match(source, /onCollapseTabPointerDown/);
+  assert.match(source, /RESIZE_DRAG_THRESHOLD_PX/);
+  assert.match(css, /\.ag-resize-handle/);
+  assert.match(css, /body\.ag-sidebar-resizing #editor-area/);
+  assert.match(css, /\.ag-collapse-tab\s*\{[^}]*cursor:\s*col-resize;/s);
 });

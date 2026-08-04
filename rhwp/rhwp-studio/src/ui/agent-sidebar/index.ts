@@ -27,7 +27,16 @@ import {
   resolveEffortForAgent,
   resolveModelForAgent,
 } from '../../agent/models.ts';
-import { createChevron } from '../chevron.ts';
+import {
+  createEmptyThread,
+  fallbackTitle,
+  getThread,
+  listThreads,
+  setThreadTitle,
+  upsertThread,
+  type ChatThread,
+} from '../../agent/threads.ts';
+import { createChevron, createColumnIcon } from '../chevron.ts';
 
 export interface AgentSidebarDeps {
   bridge: AgentBridge;
@@ -38,6 +47,60 @@ export interface AgentSidebarDeps {
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
 
 const AGENT_LABEL: Record<AgentName, string> = { claude: 'Claude', codex: 'Codex' };
+
+const PROVIDER_ICON_SRC: Record<AgentName, string> = {
+  claude: '/icons/provider-claude.png',
+  codex: '/icons/provider-codex.png',
+};
+
+const SIDEBAR_WIDTH_KEY = 'rhwp-agent-sidebar-width';
+const SIDEBAR_WIDTH_DEFAULT = 360;
+const SIDEBAR_WIDTH_MIN = 280;
+
+function maxSidebarWidth(viewportWidth = window.innerWidth): number {
+  return Math.max(SIDEBAR_WIDTH_MIN, Math.floor(viewportWidth * 0.5));
+}
+
+function clampSidebarWidth(width: number, viewportWidth = window.innerWidth): number {
+  return Math.min(maxSidebarWidth(viewportWidth), Math.max(SIDEBAR_WIDTH_MIN, Math.round(width)));
+}
+
+function readStoredSidebarWidth(): number {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    if (!raw) return SIDEBAR_WIDTH_DEFAULT;
+    const n = Number(raw);
+    return Number.isFinite(n) ? clampSidebarWidth(n) : SIDEBAR_WIDTH_DEFAULT;
+  } catch {
+    return SIDEBAR_WIDTH_DEFAULT;
+  }
+}
+
+function persistSidebarWidth(width: number): void {
+  try {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width));
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+function createProviderIcon(agent: AgentName): HTMLElement {
+  if (agent === 'codex') {
+    // 단색 로고 — currentColor 마스크로 라이트/다크에 맞춤
+    const mark = el('span', 'ag-provider-icon ag-provider-icon-mask');
+    mark.dataset.agent = agent;
+    mark.setAttribute('aria-hidden', 'true');
+    return mark;
+  }
+  const img = document.createElement('img');
+  img.className = 'ag-provider-icon';
+  img.dataset.agent = agent;
+  img.src = PROVIDER_ICON_SRC[agent];
+  img.alt = '';
+  img.draggable = false;
+  img.setAttribute('aria-hidden', 'true');
+  return img;
+}
 
 const CONN_LABEL: Record<ConnectionState, string> = {
   connected: '연결됨',
@@ -105,6 +168,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let streamBubble: HTMLElement | null = null;
   const toolRows = new Map<string, { status: HTMLElement; result: HTMLPreElement }>();
   let insetRecenterRaf: number | null = null;
+  let currentThread = createEmptyThread({
+    agent: selectedAgent,
+    model: selectedModel,
+    effort: selectedEffort,
+  });
+  let assistantBuffer = '';
+  let threadsPanelOpen = false;
 
   // ── DOM 구성 ──────────────────────────────────────────
   const root = document.createElement('aside');
@@ -117,6 +187,26 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   collapseTab.setAttribute('aria-label', '에이전트 사이드바 접기/펼치기');
   collapseTab.setAttribute('aria-expanded', 'true');
   collapseTab.appendChild(createChevron());
+
+  const resizeHandle = el('div', 'ag-resize-handle');
+  resizeHandle.setAttribute('role', 'separator');
+  resizeHandle.setAttribute('aria-label', '사이드바 너비 조절');
+  resizeHandle.setAttribute('aria-orientation', 'vertical');
+  resizeHandle.title = '드래그하여 너비 조절';
+  resizeHandle.tabIndex = 0;
+
+  let sidebarWidth = readStoredSidebarWidth();
+
+  function applySidebarWidth(width: number, opts?: { persist?: boolean; recenter?: boolean }): number {
+    sidebarWidth = clampSidebarWidth(width);
+    document.documentElement.style.setProperty('--ag-sidebar-width', `${sidebarWidth}px`);
+    resizeHandle.setAttribute('aria-valuenow', String(sidebarWidth));
+    resizeHandle.setAttribute('aria-valuemin', String(SIDEBAR_WIDTH_MIN));
+    resizeHandle.setAttribute('aria-valuemax', String(maxSidebarWidth()));
+    if (opts?.persist) persistSidebarWidth(sidebarWidth);
+    if (opts?.recenter !== false) notifyInsetChanged();
+    return sidebarWidth;
+  }
 
   function notifyInsetChanged(): void {
     eventBus?.emit('viewport-inset-changed');
@@ -165,8 +255,123 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (opts?.recenter !== false) startInsetRecenterLoop();
   }
 
-  collapseTab.addEventListener('click', () => {
-    setCollapsed(!root.classList.contains('ag-collapsed'));
+  applySidebarWidth(sidebarWidth, { persist: false, recenter: false });
+
+  const RESIZE_DRAG_THRESHOLD_PX = 4;
+  let resizing = false;
+  let resizeArmed = false;
+  let resizeFromCollapseTab = false;
+  let resizeStartX = 0;
+  let resizeStartWidth = sidebarWidth;
+  let resizeWasCollapsed = false;
+
+  function detachResizeWindowListeners(): void {
+    window.removeEventListener('pointermove', onResizePointerMove, true);
+    window.removeEventListener('pointerup', endSidebarResize, true);
+    window.removeEventListener('pointercancel', endSidebarResize, true);
+  }
+
+  function beginSidebarResize(startX: number): void {
+    resizing = true;
+    resizeArmed = false;
+    resizeStartX = startX;
+    resizeStartWidth = sidebarWidth;
+    resizeWasCollapsed = root.classList.contains('ag-collapsed');
+    if (resizeWasCollapsed) {
+      // 접힌 상태에서 드래그하면 먼저 펼친 뒤 폭을 조절한다.
+      setCollapsed(false, { recenter: false });
+    }
+    setProviderMenuOpen(false);
+    setLlmMenuOpen(false);
+    setEffortMenuOpen(false);
+    document.body.classList.add('ag-sidebar-resizing', 'ag-sidebar-animating');
+    window.addEventListener('pointermove', onResizePointerMove, true);
+    window.addEventListener('pointerup', endSidebarResize, true);
+    window.addEventListener('pointercancel', endSidebarResize, true);
+  }
+
+  function onResizePointerMove(e: PointerEvent): void {
+    if (!resizing) return;
+    e.preventDefault();
+    const dx = resizeStartX - e.clientX;
+    if (!resizeArmed) {
+      if (Math.abs(e.clientX - resizeStartX) < RESIZE_DRAG_THRESHOLD_PX) return;
+      resizeArmed = true;
+    }
+    // 왼쪽 가장자리를 왼쪽으로 끌면 폭이 커진다.
+    applySidebarWidth(resizeStartWidth + dx, { persist: false, recenter: true });
+  }
+
+  function endSidebarResize(): void {
+    if (!resizing) return;
+    const didDrag = resizeArmed;
+    const fromTab = resizeFromCollapseTab;
+    resizing = false;
+    resizeArmed = false;
+    resizeFromCollapseTab = false;
+    document.body.classList.remove('ag-sidebar-resizing', 'ag-sidebar-animating');
+    detachResizeWindowListeners();
+    if (didDrag) {
+      applySidebarWidth(sidebarWidth, { persist: true, recenter: true });
+      return;
+    }
+    // 접기 탭에서 클릭만 한 경우(드래그 없음) → 접기/펼치기
+    if (fromTab) {
+      if (resizeWasCollapsed) {
+        // begin 에서 이미 펼쳤으므로 그대로 두고 가운데 정렬만.
+        startInsetRecenterLoop();
+      } else {
+        setCollapsed(true);
+      }
+      return;
+    }
+    applySidebarWidth(sidebarWidth, { persist: true, recenter: true });
+  }
+
+  function onResizeHandlePointerDown(e: PointerEvent): void {
+    if (root.classList.contains('ag-collapsed')) return;
+    if (e.button !== 0 && e.pointerType !== 'touch') return;
+    e.preventDefault();
+    e.stopPropagation();
+    resizeFromCollapseTab = false;
+    beginSidebarResize(e.clientX);
+    resizeArmed = true;
+  }
+
+  function onCollapseTabPointerDown(e: PointerEvent): void {
+    if (e.button !== 0 && e.pointerType !== 'touch') return;
+    e.preventDefault();
+    e.stopPropagation();
+    resizeFromCollapseTab = true;
+    beginSidebarResize(e.clientX);
+  }
+
+  // click 은 pointer 로 처리하므로 기본 click 토글은 막는다.
+  collapseTab.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  collapseTab.addEventListener('pointerdown', onCollapseTabPointerDown);
+  collapseTab.style.cursor = 'col-resize';
+  collapseTab.title = '드래그하여 너비 조절 · 클릭하여 접기/펼치기';
+
+  resizeHandle.addEventListener('pointerdown', onResizeHandlePointerDown);
+  resizeHandle.addEventListener('keydown', (e) => {
+    if (root.classList.contains('ag-collapsed')) return;
+    const step = e.shiftKey ? 32 : 16;
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      applySidebarWidth(sidebarWidth + step, { persist: true, recenter: true });
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      applySidebarWidth(sidebarWidth - step, { persist: true, recenter: true });
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      applySidebarWidth(SIDEBAR_WIDTH_MIN, { persist: true, recenter: true });
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      applySidebarWidth(maxSidebarWidth(), { persist: true, recenter: true });
+    }
   });
 
   const agentOrder = ['claude', 'codex'] as const;
@@ -181,11 +386,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   providerTrigger.setAttribute('aria-haspopup', 'menu');
   providerTrigger.setAttribute('aria-expanded', 'false');
   providerTrigger.setAttribute('aria-label', '프로바이더 선택');
-  const providerDot = el('span', 'ag-model-dot');
-  providerDot.setAttribute('aria-hidden', 'true');
+  let providerIcon = createProviderIcon(selectedAgent);
   const providerName = el('span', 'ag-model-name', AGENT_LABEL[selectedAgent]);
   const providerCaret = createChevron('ag-model-caret');
-  providerTrigger.append(providerDot, providerName, providerCaret);
+  providerTrigger.append(providerIcon, providerName, providerCaret);
 
   const providerMenu = el('div', 'ag-model-menu');
   providerMenu.setAttribute('role', 'menu');
@@ -217,11 +421,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   for (const agent of agentOrder) {
-    const item = el('button', 'ag-model-item', AGENT_LABEL[agent]);
+    const item = el('button', 'ag-model-item ag-provider-item');
     item.type = 'button';
     item.dataset.agent = agent;
     item.setAttribute('role', 'menuitemradio');
     item.setAttribute('aria-checked', 'false');
+    item.append(createProviderIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
     item.addEventListener('click', () => selectAgent(agent));
     providerItems.set(agent, item);
     providerMenu.appendChild(item);
@@ -485,24 +690,56 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   };
   document.addEventListener('pointerdown', onDocPointerDown);
 
+  const threadsBtn = el('button', 'ag-threads-btn');
+  threadsBtn.type = 'button';
+  threadsBtn.setAttribute('aria-label', '채팅 목록');
+  threadsBtn.setAttribute('aria-expanded', 'false');
+  threadsBtn.setAttribute('aria-controls', 'ag-threads-panel');
+  threadsBtn.title = '채팅 목록';
+  threadsBtn.appendChild(createColumnIcon());
+
   const conn = el('span', 'ag-conn');
-  selectors.append(providerWrap, llmWrap, effortWrap);
+  selectors.append(providerWrap, llmWrap, effortWrap, threadsBtn);
   header.append(selectors, conn);
 
+  const stage = el('div', 'ag-stage');
+
+  const chatPage = el('div', 'ag-chat-page');
+  chatPage.setAttribute('aria-hidden', 'false');
   const messages = el('div', 'ag-messages');
   messages.setAttribute('role', 'log');
   messages.setAttribute('aria-live', 'polite');
-
   const review = el('div', 'ag-review');
-
   const composer = el('form', 'ag-composer');
   const input = el('textarea', 'ag-input');
-  input.placeholder = '문서에 대해 질문하거나 요청해 보세요…';
+  input.placeholder = '딸깍해보자..';
   input.rows = 1;
   input.setAttribute('aria-label', '에이전트 메시지 입력');
   const send = el('button', 'ag-send', '보내기');
   send.type = 'submit';
   composer.append(input, send);
+  // 헤더(모델 피커)까지 채팅 페이지에 포함해 목록 전환 시 함께 사라지게 한다.
+  chatPage.append(header, messages, review, composer);
+
+  const threadsPage = el('div', 'ag-threads-page');
+  threadsPage.id = 'ag-threads-panel';
+  threadsPage.setAttribute('role', 'region');
+  threadsPage.setAttribute('aria-label', '채팅 목록');
+  threadsPage.setAttribute('aria-hidden', 'true');
+  const threadsHeader = el('div', 'ag-threads-header');
+  const threadsTitle = el('span', 'ag-threads-title', '채팅');
+  const threadsClose = el('button', 'ag-threads-btn ag-threads-close');
+  threadsClose.type = 'button';
+  threadsClose.setAttribute('aria-label', '채팅으로 돌아가기');
+  threadsClose.title = '채팅으로 돌아가기';
+  threadsClose.appendChild(createColumnIcon());
+  threadsHeader.append(threadsTitle, threadsClose);
+  const threadsNew = el('button', 'ag-threads-new', '새 채팅');
+  threadsNew.type = 'button';
+  const threadsList = el('ul', 'ag-threads-list');
+  threadsPage.append(threadsHeader, threadsNew, threadsList);
+
+  stage.append(chatPage, threadsPage);
 
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -522,13 +759,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
     const text = input.value.trim();
     if (!text || connState !== 'connected') return;
+    if (threadsPanelOpen) setThreadsPanelOpen(false);
+    recordUserMessage(text);
     withAutoScroll(() => messages.appendChild(el('div', 'ag-msg ag-msg-user', text)));
     bridge.sendUserMessage(text);
     input.value = '';
     input.style.height = 'auto';
   });
 
-  root.append(collapseTab, header, messages, review, composer);
+  // resizeHandle 을 마지막에 두어 왼쪽 가장자리 히트 테스트를 확실히 가져간다.
+  root.append(collapseTab, stage, resizeHandle);
   document.body.appendChild(root);
   setCollapsed(false, { recenter: false });
 
@@ -539,15 +779,200 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       document.getElementById('status-bar')?.getBoundingClientRect().top ?? window.innerHeight;
     root.style.top = `${Math.max(0, top)}px`;
     root.style.bottom = `${Math.max(0, window.innerHeight - statusTop)}px`;
+    // 창이 줄면 최대 50% 제한에 맞춰 폭을 다시 클램프한다.
+    const clamped = clampSidebarWidth(sidebarWidth);
+    if (clamped !== sidebarWidth) {
+      applySidebarWidth(clamped, { persist: true, recenter: true });
+    }
   }
   window.addEventListener('resize', measure);
   measure();
+
+  // ── 스레드(채팅 목록) ─────────────────────────────────
+  function persistCurrentThread(): void {
+    currentThread.agent = selectedAgent;
+    currentThread.model = selectedModel;
+    currentThread.effort = selectedEffort;
+    if (currentThread.messages.length === 0) return;
+    if (!currentThread.title || currentThread.title === '새 채팅') {
+      currentThread.title = fallbackTitle(currentThread.messages);
+    }
+    upsertThread(currentThread);
+  }
+
+  function recordUserMessage(text: string): void {
+    currentThread.messages.push({ role: 'user', text });
+    currentThread.updatedAt = Date.now();
+    persistCurrentThread();
+    maybeRequestTitle();
+  }
+
+  function flushAssistantBuffer(): void {
+    const text = assistantBuffer.trim();
+    assistantBuffer = '';
+    if (!text) return;
+    currentThread.messages.push({
+      role: 'assistant',
+      text,
+      agent: selectedAgent,
+    });
+    persistCurrentThread();
+    maybeRequestTitle();
+  }
+
+  function maybeRequestTitle(): void {
+    if (currentThread.titleRequested) return;
+    if (!currentThread.messages.some((m) => m.role === 'user')) return;
+    currentThread.titleRequested = true;
+    persistCurrentThread();
+    const preview = currentThread.messages
+      .slice(0, 6)
+      .map((m) => `${m.role === 'user' ? '사용자' : '어시스턴트'}: ${m.text}`)
+      .join('\n')
+      .slice(0, 800);
+    bridge.requestTitle(currentThread.id, preview);
+  }
+
+  function renderMessagesFromThread(thread: ChatThread): void {
+    messages.replaceChildren();
+    streamBubble = null;
+    assistantBuffer = '';
+    toolRows.clear();
+    for (const msg of thread.messages) {
+      if (msg.role === 'user') {
+        messages.appendChild(el('div', 'ag-msg ag-msg-user', msg.text));
+      } else if (msg.role === 'assistant') {
+        const agent = msg.agent ?? thread.agent;
+        messages.appendChild(el('div', `ag-msg ag-msg-assistant ag-${agent}`, msg.text));
+      } else {
+        messages.appendChild(el('div', 'ag-msg ag-msg-system', msg.text));
+      }
+    }
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function clearChatUi(): void {
+    messages.replaceChildren();
+    streamBubble = null;
+    assistantBuffer = '';
+    sweepUnresolvedToolRows();
+  }
+
+  function applyThreadMeta(thread: ChatThread): void {
+    selectedModel = resolveModelForAgent(thread.agent, thread.model);
+    selectedEffort = resolveEffortForAgent(thread.agent, thread.effort, selectedModel);
+    setSelectedAgent(thread.agent);
+    rebuildLlmMenu();
+    rebuildEffortMenu();
+  }
+
+  function formatThreadMeta(thread: ChatThread): string {
+    const when = new Date(thread.updatedAt);
+    const hh = String(when.getHours()).padStart(2, '0');
+    const mm = String(when.getMinutes()).padStart(2, '0');
+    const day = `${when.getMonth() + 1}/${when.getDate()}`;
+    return `${AGENT_LABEL[thread.agent]} · ${day} ${hh}:${mm}`;
+  }
+
+  function rebuildThreadsList(): void {
+    threadsList.replaceChildren();
+    const items = listThreads();
+    if (items.length === 0) {
+      const empty = el('li', 'ag-threads-empty', '이전 채팅이 없습니다');
+      threadsList.appendChild(empty);
+      return;
+    }
+    for (const thread of items) {
+      const li = document.createElement('li');
+      const btn = el('button', 'ag-threads-item');
+      btn.type = 'button';
+      if (thread.id === currentThread.id) btn.classList.add('ag-active');
+      btn.appendChild(el('span', 'ag-threads-item-title', thread.title || '새 채팅'));
+      btn.appendChild(el('span', 'ag-threads-item-meta', formatThreadMeta(thread)));
+      btn.addEventListener('click', () => openThread(thread.id));
+      li.appendChild(btn);
+      threadsList.appendChild(li);
+    }
+  }
+
+  function setThreadsPanelOpen(open: boolean): void {
+    threadsPanelOpen = open;
+    root.classList.toggle('ag-threads-open', open);
+    threadsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    threadsPage.setAttribute('aria-hidden', open ? 'false' : 'true');
+    chatPage.setAttribute('aria-hidden', open ? 'true' : 'false');
+    if (open) {
+      closeAllMenus();
+      rebuildThreadsList();
+      threadsNew.focus();
+    }
+  }
+
+  function startNewChat(): void {
+    if (turnRunning) bridge.interrupt();
+    flushAssistantBuffer();
+    persistCurrentThread();
+    clearChatUi();
+    currentThread = createEmptyThread({
+      agent: selectedAgent,
+      model: selectedModel,
+      effort: selectedEffort,
+    });
+    bridge.stopChat();
+    bridge.startChat(selectedAgent, selectedModel, selectedEffort, true);
+    setThreadsPanelOpen(false);
+    input.focus();
+  }
+
+  function openThread(id: string): void {
+    if (id === currentThread.id) {
+      setThreadsPanelOpen(false);
+      return;
+    }
+    if (turnRunning) bridge.interrupt();
+    flushAssistantBuffer();
+    persistCurrentThread();
+    const loaded = getThread(id);
+    if (!loaded) return;
+    currentThread = {
+      ...loaded,
+      messages: loaded.messages.map((m) => ({ ...m })),
+      titleRequested: Boolean(loaded.titleRequested),
+    };
+    applyThreadMeta(currentThread);
+    renderMessagesFromThread(currentThread);
+    bridge.stopChat();
+    bridge.startChat(selectedAgent, selectedModel, selectedEffort, true);
+    setThreadsPanelOpen(false);
+    input.focus();
+  }
+
+  threadsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setThreadsPanelOpen(true);
+  });
+  threadsClose.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setThreadsPanelOpen(false);
+    threadsBtn.focus();
+  });
+  threadsNew.addEventListener('click', () => startNewChat());
+  threadsPage.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      setThreadsPanelOpen(false);
+      threadsBtn.focus();
+    }
+  });
 
   // ── 상태 반영 헬퍼 ────────────────────────────────────
   function setSelectedAgent(agent: AgentName): void {
     selectedAgent = agent;
     root.dataset.agent = agent;
     providerName.textContent = AGENT_LABEL[agent];
+    const nextIcon = createProviderIcon(agent);
+    providerIcon.replaceWith(nextIcon);
+    providerIcon = nextIcon;
     for (const [name, item] of providerItems) {
       const active = name === agent;
       item.classList.toggle('ag-active', active);
@@ -652,16 +1077,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     switch (event.type) {
       case 'turn-start':
         setTurnRunning(true);
+        assistantBuffer = '';
         openAssistantBubble(event.agent);
         break;
       case 'text-delta': {
         const bubble = streamBubble ?? openAssistantBubble(event.agent);
+        assistantBuffer += event.text;
         withAutoScroll(() => {
           bubble.textContent = (bubble.textContent ?? '') + event.text;
         });
         break;
       }
       case 'tool-call':
+        flushAssistantBuffer();
         addToolRow(event);
         break;
       case 'tool-result':
@@ -675,6 +1103,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       case 'turn-end':
         setTurnRunning(false);
         streamBubble = null;
+        flushAssistantBuffer();
         sweepUnresolvedToolRows();
         if (event.errorMessage) systemMessage(event.errorMessage);
         break;
@@ -703,10 +1132,35 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
           e.effort ?? selectedEffort,
           selectedModel,
         );
+        currentThread.agent = selectedAgent;
+        currentThread.model = selectedModel;
+        currentThread.effort = selectedEffort;
         rebuildLlmMenu();
         rebuildEffortMenu();
         updateComposer();
         break;
+      case 'chat-stopped':
+        setTurnRunning(false);
+        streamBubble = null;
+        break;
+      case 'title-result': {
+        if (e.threadId !== currentThread.id && !getThread(e.threadId)) break;
+        const title = e.title?.trim() || null;
+        if (title) {
+          setThreadTitle(e.threadId, title);
+          if (e.threadId === currentThread.id) {
+            currentThread.title = title;
+          }
+        } else if (e.threadId === currentThread.id) {
+          currentThread.title = fallbackTitle(currentThread.messages);
+          persistCurrentThread();
+        } else {
+          const t = getThread(e.threadId);
+          if (t) setThreadTitle(e.threadId, fallbackTitle(t.messages));
+        }
+        if (threadsPanelOpen) rebuildThreadsList();
+        break;
+      }
       case 'agent':
         handleAgentEvent(e.event);
         break;
@@ -804,8 +1258,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       unsubPending();
       window.removeEventListener('resize', measure);
       document.removeEventListener('pointerdown', onDocPointerDown);
+      endSidebarResize();
       clearInsetRecenterLoop();
-      document.body.classList.remove('ag-sidebar-open');
+      document.body.classList.remove('ag-sidebar-open', 'ag-sidebar-resizing');
       sweepUnresolvedToolRows();
       root.remove();
     },

@@ -2,6 +2,7 @@ import http from 'node:http';
 import { WebSocketServer } from 'ws';
 import { createClaudeSession } from './agents/claude.mjs';
 import { createCodexSession } from './agents/codex.mjs';
+import { generateChatTitle } from './agents/title.mjs';
 
 const PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
 const TOKEN = process.env.RHWP_AGENT_TOKEN ?? 'dev';
@@ -96,11 +97,12 @@ function disposeSession() {
   }
 }
 
-function startSession(agent, requestedModel, requestedEffort) {
+function startSession(agent, requestedModel, requestedEffort, force = false) {
   const model = resolveModel(agent, requestedModel);
   const effort = resolveEffort(agent, model, requestedEffort);
   if (
-    session
+    !force
+    && session
     && session.agent === agent
     && session.model === model
     && session.effort === effort
@@ -129,7 +131,7 @@ function handleStudioMessage(sock, msg) {
         return;
       }
       try {
-        const s = startSession(agent, msg.model, msg.effort);
+        const s = startSession(agent, msg.model, msg.effort, Boolean(msg.force));
         sendJson(sock, {
           v: 1,
           type: 'chat-started',
@@ -142,6 +144,39 @@ function handleStudioMessage(sock, msg) {
         disposeSession();
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
       }
+      return;
+    }
+    case 'title-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      const threadId = typeof msg.threadId === 'string' ? msg.threadId : null;
+      if (!requestId || !threadId) {
+        sendJson(sock, {
+          v: 1, type: 'chat-error', code: 'INVALID_REQUEST',
+          message: 'title-request requires requestId and threadId',
+        });
+        return;
+      }
+      const preview = typeof msg.preview === 'string' ? msg.preview : '';
+      generateChatTitle(preview)
+        .then((title) => {
+          sendJson(sock, {
+            v: 1,
+            type: 'title-result',
+            requestId,
+            threadId,
+            title: title ?? null,
+          });
+        })
+        .catch((e) => {
+          log(`title-request failed: ${e?.message ?? e}`);
+          sendJson(sock, {
+            v: 1,
+            type: 'title-result',
+            requestId,
+            threadId,
+            title: null,
+          });
+        });
       return;
     }
     case 'chat-user-message': {

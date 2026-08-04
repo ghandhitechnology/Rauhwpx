@@ -22,6 +22,16 @@ body.ag-sidebar-open #editor-area {
   margin-right: var(--ag-sidebar-width);
 }
 
+/* 드래그 리사이즈 중에는 지연 없이 폭·여백을 따라가게 한다. */
+body.ag-sidebar-resizing #editor-area {
+  transition: none;
+}
+
+body.ag-sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   #editor-area {
     transition: none;
@@ -80,6 +90,51 @@ body.ag-sidebar-open #editor-area {
   box-shadow: none;
 }
 
+/* 왼쪽 가장자리 드래그로 폭 조절 (최대 화면 50%) */
+.ag-resize-handle {
+  position: absolute;
+  left: -5px;
+  top: 0;
+  bottom: 0;
+  z-index: 80;
+  width: 12px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.ag-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background 120ms ease, opacity 120ms ease;
+  opacity: 0;
+}
+
+.ag-resize-handle:hover::after,
+.ag-resize-handle:focus-visible::after,
+body.ag-sidebar-resizing .ag-resize-handle::after {
+  background: var(--ag-accent);
+  opacity: 1;
+}
+
+.ag-resize-handle:focus-visible {
+  outline: none;
+}
+
+.ag-root.ag-collapsed .ag-resize-handle {
+  display: none;
+  pointer-events: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ag-root {
     transition: none;
@@ -102,6 +157,7 @@ body.ag-sidebar-open #editor-area {
   position: absolute;
   left: -22px;
   top: 50%;
+  z-index: 90;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -114,7 +170,13 @@ body.ag-sidebar-open #editor-area {
   border-radius: var(--radius-lg, 4px) 0 0 var(--radius-lg, 4px);
   background: var(--ag-bg);
   color: var(--ag-text-muted);
-  cursor: pointer;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+body.ag-sidebar-resizing .ag-collapse-tab {
+  background: var(--ui-hover);
+  color: var(--ag-text);
 }
 
 /* 열림: 오른쪽(접기), 접힘: 왼쪽(펼치기) */
@@ -147,10 +209,233 @@ body.ag-sidebar-open #editor-area {
 
 .ag-selectors {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 2px 6px;
+  width: 100%;
   max-width: 100%;
+  min-width: 0;
+}
+
+.ag-threads-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-lg, 4px);
+  background: transparent;
+  color: var(--ag-text-muted);
+  cursor: pointer;
+}
+
+.ag-threads-btn:hover {
+  background: var(--ui-hover);
+  color: var(--ag-text);
+}
+
+.ag-threads-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-threads-btn[aria-expanded='true'],
+.ag-threads-close {
+  background: var(--ui-selected);
+  color: var(--ag-text);
+}
+
+.ag-threads-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 2px;
+}
+
+.ag-threads-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--font-size-md, 13px);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ag-text);
+}
+
+.ag-threads-close {
+  margin-left: auto;
+}
+
+/* 채팅(헤더 포함) ↔ 목록: 전체 페이지 전환 */
+.ag-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ag-chat-page,
+.ag-threads-page {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--ag-bg);
+  transition:
+    opacity 240ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    transform 280ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    visibility 0s linear 0s;
+}
+
+.ag-chat-page {
+  opacity: 1;
+  transform: translateX(0);
+  visibility: visible;
+  pointer-events: auto;
+  z-index: 1;
+}
+
+.ag-threads-open .ag-chat-page {
+  opacity: 0;
+  transform: translateX(-16px);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 240ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    transform 280ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    visibility 0s linear 280ms;
+  z-index: 0;
+}
+
+.ag-threads-page {
+  gap: 10px;
+  padding: 12px 12px 16px;
+  opacity: 0;
+  transform: translateX(20px);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 240ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    transform 280ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    visibility 0s linear 280ms;
+  z-index: 0;
+}
+
+.ag-threads-open .ag-threads-page {
+  opacity: 1;
+  transform: translateX(0);
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity 240ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    transform 280ms var(--ag-sidebar-ease, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    visibility 0s linear 0s;
+  z-index: 1;
+}
+
+.ag-threads-new {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--radius-lg, 4px);
+  background: var(--ui-surface, var(--ag-bg));
+  color: var(--ag-text);
+  font: inherit;
+  font-size: var(--font-size-md, 13px);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ag-threads-new:hover {
+  background: var(--ui-hover);
+}
+
+.ag-threads-new:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-threads-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ag-threads-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-md, 3px);
+  background: transparent;
+  color: var(--ag-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-threads-item:hover,
+.ag-threads-item:focus-visible {
+  background: var(--ui-hover);
+  outline: none;
+}
+
+.ag-threads-item.ag-active {
+  background: var(--ui-selected);
+}
+
+.ag-threads-item-title {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-base, 12px);
+  font-weight: 600;
+}
+
+.ag-threads-item-meta {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm, 11px);
+  color: var(--ag-text-muted);
+}
+
+.ag-threads-empty {
+  padding: 18px 8px;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-base, 12px);
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-chat-page,
+  .ag-threads-page,
+  .ag-threads-open .ag-chat-page,
+  .ag-threads-open .ag-threads-page {
+    transition: none;
+  }
 }
 
 .ag-model {
@@ -192,12 +477,23 @@ body.ag-sidebar-open #editor-area {
   cursor: default;
 }
 
-.ag-model-dot {
+.ag-provider-icon {
   flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--ag-accent);
+  width: 14px;
+  height: 14px;
+  display: block;
+  object-fit: contain;
+}
+
+.ag-provider-icon-mask {
+  background-color: currentColor;
+  color: var(--ag-text);
+  -webkit-mask: url('/icons/provider-codex.png') center / contain no-repeat;
+  mask: url('/icons/provider-codex.png') center / contain no-repeat;
+}
+
+.ag-root[data-agent='codex'] .ag-provider .ag-provider-icon-mask {
+  color: var(--ag-codex);
 }
 
 .ag-model-name {
@@ -325,20 +621,16 @@ body.ag-sidebar-open #editor-area {
   cursor: pointer;
 }
 
-.ag-model-item::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--ag-text-muted);
+.ag-provider-item::before {
+  display: none;
 }
 
-.ag-model-item[data-agent='claude']::before {
-  background: var(--ag-claude);
+.ag-provider-item .ag-provider-icon-mask {
+  color: var(--ag-text);
 }
 
-.ag-model-item[data-agent='codex']::before {
-  background: var(--ag-codex);
+.ag-provider-item[data-agent='codex'] .ag-provider-icon-mask {
+  color: var(--ag-codex);
 }
 
 .ag-model-item:hover,

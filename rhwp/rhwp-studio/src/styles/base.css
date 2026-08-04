@@ -267,6 +267,14 @@ body {
   transition: transform 200ms var(--ease-out, cubic-bezier(0.2, 0.8, 0.2, 1));
 }
 
+.ui-column-icon {
+  display: block;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  color: inherit;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ui-chevron {
     transition: none;
