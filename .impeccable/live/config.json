@@ -1,0 +1,6 @@
+{
+  "files": ["rhwp/rhwp-studio/index.html"],
+  "insertBefore": "</body>",
+  "commentSyntax": "html",
+  "cspChecked": true
+}

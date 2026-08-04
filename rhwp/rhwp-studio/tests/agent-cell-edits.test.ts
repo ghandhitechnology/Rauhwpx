@@ -264,9 +264,24 @@ test('cell 검증: 표가 없는 문단/범위 밖 cellIdx/범위 밖 오프셋 
 
 function makeManager() {
   const { wasm, body, cells, calls } = makeCellWasm();
+  let snapshotId = 0;
+  const snapshots = new Map<number, { body: string[]; cells: string[][] }>();
+  Object.assign(wasm, {
+    saveSnapshot: () => {
+      const id = ++snapshotId;
+      snapshots.set(id, { body: structuredClone(body), cells: structuredClone(cells) });
+      return id;
+    },
+    restoreSnapshot: (id: number) => {
+      const saved = snapshots.get(id)!;
+      body.splice(0, body.length, ...structuredClone(saved.body));
+      cells.splice(0, cells.length, ...structuredClone(saved.cells));
+    },
+    discardSnapshot: (id: number) => { snapshots.delete(id); },
+  });
   const eventBus = new EventBus();
   const inputHandler = {
-    executeOperation: (op: { operation: (w: unknown) => unknown }) => { op.operation(wasm); },
+    executeOperation: (op: { operation?: (w: unknown) => unknown }) => { op.operation?.(wasm); },
     getCursorPosition: () => ({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 }),
   };
   const overlay = { setOps: () => {}, clear: () => {} };
@@ -302,12 +317,14 @@ test('pending: 셀 멀티라인 삽입은 splitParagraphInCell 을 쓰고 reject
   assert.deepEqual(cells[3], ['bar', 'baz']);
 });
 
-test('pending: 셀 삽입 approve 는 revert-then-replay 후 텍스트를 확정한다', () => {
-  const { mgr, cells } = makeManager();
+test('pending: 셀 삽입 approve 는 미리보기 텍스트를 재삽입 없이 확정한다', () => {
+  const { mgr, cells, calls } = makeManager();
   const r = mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0, cell: CELL_FOO }, 'Y');
   assert.equal(cells[2][0], 'Yfoo');
+  assert.equal(calls.filter((call) => call === 'insertTextInCell').length, 1);
   mgr.approve(r.changeSetId);
   assert.equal(cells[2][0], 'Yfoo');
+  assert.equal(calls.filter((call) => call === 'insertTextInCell').length, 1);
   assert.equal(mgr.hasPending(), false);
 });
 
@@ -325,11 +342,13 @@ test('pending: 셀 delete 마크는 셀 텍스트를 캡처하고 approve 시 �
 
 test('pending: 셀 서식은 applyCharFormatInCell 로 적용된다', () => {
   const { mgr, calls } = makeManager();
-  mgr.applyCharFormat('claude', {
+  const r = mgr.applyCharFormat('claude', {
     sectionIdx: 0, cell: CELL_FOO,
     startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 3,
   }, { bold: true });
-  assert.ok(calls.includes('applyCharFormatInCell'));
+  assert.equal(calls.filter((call) => call === 'applyCharFormatInCell').length, 1);
+  mgr.approve(r.changeSetId);
+  assert.equal(mgr.hasPending(), false);
 });
 
 test('pending: 본문 문단 추가 삽입이 표 앞이면 셀 op 의 부모 문단 인덱스가 이동한다', () => {

@@ -28,7 +28,8 @@ export interface OverlayOp {
  * SelectionRenderer 와 같은 방식: #scroll-content 안에 절대 배치 div 사각형을 그린다.
  */
 export class PendingOverlayRenderer {
-  private layer: HTMLDivElement;
+  private markerLayer: HTMLDivElement;
+  private inkRects: HTMLDivElement[] = [];
   private ops: OverlayOp[] = [];
   private unsubs: Array<() => void> = [];
   // 파라미터 프로퍼티 대신 명시적 할당 (node --test strip-only 모드 호환).
@@ -36,8 +37,8 @@ export class PendingOverlayRenderer {
 
   constructor(deps: { canvasView: CanvasView; wasm: WasmBridge; eventBus: EventBus }) {
     this.deps = deps;
-    this.layer = document.createElement('div');
-    this.layer.className = 'ag-pending-layer';
+    this.markerLayer = document.createElement('div');
+    this.markerLayer.className = 'ag-pending-layer ag-pending-marker-layer';
     const events = ['document-changed', 'document-page-invalidated', 'document-view-changed', 'zoom-changed'];
     for (const name of events) {
       this.unsubs.push(deps.eventBus.on(name, () => this.render()));
@@ -58,21 +59,41 @@ export class PendingOverlayRenderer {
     for (const un of this.unsubs) un();
     this.unsubs = [];
     this.ops = [];
-    this.layer.remove();
+    this.removeInkRects();
+    this.markerLayer.remove();
   }
 
   /** loadDocument 가 #scroll-content 를 비우므로 매 렌더마다 재부착한다 */
   private ensureAttached(scrollContent: HTMLElement): void {
-    if (this.layer.parentElement !== scrollContent) {
-      scrollContent.appendChild(this.layer);
+    if (this.markerLayer.parentElement !== scrollContent) {
+      scrollContent.appendChild(this.markerLayer);
     }
+  }
+
+  private removeInkRects(): void {
+    for (const rect of this.inkRects) rect.remove();
+    this.inkRects = [];
+  }
+
+  private positionRect(
+    div: HTMLDivElement,
+    rect: SelectionRect,
+    pageLeft: number,
+    pageTop: number,
+    zoom: number,
+  ): void {
+    div.style.left = `${(pageLeft + rect.x * zoom).toFixed(2)}px`;
+    div.style.top = `${(pageTop + rect.y * zoom).toFixed(2)}px`;
+    div.style.width = `${(rect.width * zoom).toFixed(2)}px`;
+    div.style.height = `${(rect.height * zoom).toFixed(2)}px`;
   }
 
   private render(): void {
     const scrollContent = document.getElementById('scroll-content');
     if (!scrollContent) return;
     this.ensureAttached(scrollContent);
-    this.layer.replaceChildren();
+    this.removeInkRects();
+    this.markerLayer.replaceChildren();
     if (this.ops.length === 0) return;
 
     const zoom = this.deps.canvasView.getViewportManager().getZoom();
@@ -107,13 +128,20 @@ export class PendingOverlayRenderer {
       for (const rect of rects) {
         const pl = vs.getPageLeft(rect.pageIndex);
         const pageLeft = pl >= 0 ? pl : (contentWidth - vs.getPageWidth(rect.pageIndex)) / 2;
-        const div = document.createElement('div');
-        div.className = `ag-pending-rect ag-${op.agent} ag-${op.kind}`;
-        div.style.left = `${(pageLeft + rect.x * zoom).toFixed(2)}px`;
-        div.style.top = `${(vs.getPageOffset(rect.pageIndex) + rect.y * zoom).toFixed(2)}px`;
-        div.style.width = `${(rect.width * zoom).toFixed(2)}px`;
-        div.style.height = `${(rect.height * zoom).toFixed(2)}px`;
-        this.layer.appendChild(div);
+        const pageTop = vs.getPageOffset(rect.pageIndex);
+
+        // ink 는 stacking-context wrapper 안에 넣으면 backdrop 이 투명해져 불투명
+        // 색상 막대로 렌더된다. scrollContent 직계 자식으로 두어 canvas와 직접 blend한다.
+        const ink = document.createElement('div');
+        ink.className = `ag-pending-rect ag-pending-ink ag-${op.agent}`;
+        this.positionRect(ink, rect, pageLeft, pageTop, zoom);
+        scrollContent.appendChild(ink);
+        this.inkRects.push(ink);
+
+        const marker = document.createElement('div');
+        marker.className = `ag-pending-rect ag-pending-marker ag-${op.agent} ag-${op.kind}`;
+        this.positionRect(marker, rect, pageLeft, pageTop, zoom);
+        this.markerLayer.appendChild(marker);
       }
     }
   }
