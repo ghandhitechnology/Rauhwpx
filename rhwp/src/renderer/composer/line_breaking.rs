@@ -995,61 +995,199 @@ fn char_level_break_hwp(
 ///
 /// 텍스트 편집(삽입/삭제) 후 호출하여 줄 바꿈을 재배치한다.
 /// `available_width_px`는 문단 여백을 제외한 사용 가능 너비(px)이다.
-fn inline_control_line_height_hwp(para: &Paragraph) -> Option<i32> {
-    para.controls
-        .iter()
-        .filter_map(|ctrl| match ctrl {
-            Control::Picture(pic) if pic.common.treat_as_char => Some(pic.common.height as i32),
-            Control::Shape(shape) if shape.common().treat_as_char => {
-                let common_h = shape.common().height as i32;
-                let current_h = shape.shape_attr().current_height as i32;
-                Some(common_h.max(current_h))
-            }
-            Control::Table(table) if table.common.treat_as_char => Some(table.common.height as i32),
-            Control::Equation(eq) if eq.common.treat_as_char => Some(eq.common.height as i32),
-            Control::Form(form) => Some(form.height as i32),
-            _ => None,
-        })
-        .filter(|height| *height > 0)
-        .max()
+#[derive(Debug, Clone, Copy)]
+struct InlineControlMetricsHwp {
+    width: i32,
+    height: i32,
+    baseline: i32,
 }
 
-fn inline_control_size_hwp(ctrl: &Control) -> Option<(i32, i32)> {
-    let (width, height) = match ctrl {
+fn inline_control_metrics_hwp(ctrl: &Control) -> Option<InlineControlMetricsHwp> {
+    let (width, height, baseline) = match ctrl {
         Control::Picture(pic) if pic.common.treat_as_char => {
-            (pic.common.width as i32, pic.common.height as i32)
+            let height = pic.common.height as i32;
+            (
+                pic.common.width as i32,
+                height,
+                (height as f64 * 0.85).round() as i32,
+            )
         }
         Control::Shape(shape) if shape.common().treat_as_char => {
             let common = shape.common();
             let shape_attr = shape.shape_attr();
-            (
-                (common.width as i32).max(shape_attr.current_width as i32),
-                (common.height as i32).max(shape_attr.current_height as i32),
-            )
+            let height = (common.height as i32).max(shape_attr.current_height as i32);
+            let width = (common.width as i32).max(shape_attr.current_width as i32);
+            (width, height, (height as f64 * 0.85).round() as i32)
         }
         Control::Table(table) if table.common.treat_as_char => {
             let width = table.get_column_widths().iter().sum::<u32>() as i32;
-            (width, table.common.height as i32)
+            let height = table.common.height as i32;
+            (width, height, (height as f64 * 0.85).round() as i32)
         }
         Control::Equation(eq) if eq.common.treat_as_char => {
-            (eq.common.width as i32, eq.common.height as i32)
+            let (natural_width, natural_height, natural_baseline) =
+                crate::renderer::equation::intrinsic_metrics_hwp(&eq.script, eq.font_size);
+            let width = (eq.common.width as i32).max(natural_width as i32);
+            let stored_height = eq.common.height as i32;
+            let natural_height = natural_height as i32;
+            let extra = (stored_height - natural_height).max(0);
+            // The painter uses the EqEdit layout baseline.  Split any larger
+            // stored object slot evenly around that visual box so the line
+            // still reserves the author's requested height without shifting
+            // the equation ink away from the surrounding text baseline.
+            let top_leading = extra / 2;
+            (
+                width,
+                natural_height + extra,
+                natural_baseline as i32 + top_leading,
+            )
         }
-        Control::Form(form) => (form.width as i32, form.height as i32),
+        Control::Form(form) => {
+            let height = form.height as i32;
+            (
+                form.width as i32,
+                height,
+                (height as f64 * 0.85).round() as i32,
+            )
+        }
         _ => return None,
     };
 
     if width > 0 && height > 0 {
-        Some((width, height))
+        Some(InlineControlMetricsHwp {
+            width,
+            height,
+            baseline: baseline.clamp(0, height),
+        })
     } else {
         None
     }
 }
 
-fn apply_inline_control_line_height(seg: &mut LineSeg, height_hwp: i32) {
-    if height_hwp > seg.line_height {
-        seg.line_height = height_hwp;
-        seg.text_height = height_hwp;
-        seg.baseline_distance = (height_hwp as f64 * 0.85).round() as i32;
+fn non_equation_inline_control_height_hwp(para: &Paragraph) -> Option<i32> {
+    para.controls
+        .iter()
+        .filter(|control| !matches!(control, Control::Equation(_)))
+        .filter_map(inline_control_metrics_hwp)
+        .map(|metrics| metrics.height)
+        .max()
+}
+
+fn apply_inline_control_line_metrics(seg: &mut LineSeg, metrics: InlineControlMetricsHwp) {
+    let current_ascent = seg.baseline_distance.clamp(0, seg.line_height.max(0));
+    let current_descent = (seg.line_height - current_ascent).max(0);
+    let control_ascent = metrics.baseline;
+    let control_descent = (metrics.height - metrics.baseline).max(0);
+    let ascent = current_ascent.max(control_ascent);
+    let descent = current_descent.max(control_descent);
+    let height = ascent.saturating_add(descent);
+
+    if height > seg.line_height || ascent > seg.baseline_distance {
+        seg.line_height = height;
+        seg.text_height = height;
+        seg.baseline_distance = ascent;
+    }
+}
+
+fn line_index_for_text_position(line_breaks: &[LineBreakResult], position: usize) -> usize {
+    line_breaks
+        .partition_point(|line| line.start_idx <= position)
+        .saturating_sub(1)
+        .min(line_breaks.len().saturating_sub(1))
+}
+
+fn apply_inline_control_metrics_to_text_lines(
+    para: &Paragraph,
+    line_breaks: &[LineBreakResult],
+    line_segs: &mut [LineSeg],
+) {
+    if line_breaks.is_empty() || line_segs.is_empty() {
+        return;
+    }
+
+    let positions = para.control_text_positions();
+    for (control_index, control) in para.controls.iter().enumerate() {
+        if !matches!(control, Control::Equation(_)) {
+            continue;
+        }
+        let Some(metrics) = inline_control_metrics_hwp(control) else {
+            continue;
+        };
+        let position = positions
+            .get(control_index)
+            .copied()
+            .unwrap_or_else(|| para.text.chars().count());
+        let line_index = line_index_for_text_position(line_breaks, position);
+        if let Some(line_seg) = line_segs.get_mut(line_index) {
+            apply_inline_control_line_metrics(line_seg, metrics);
+        }
+    }
+}
+
+#[cfg(test)]
+mod inline_equation_metric_tests {
+    use super::*;
+    use crate::model::control::Equation;
+    use crate::model::shape::CommonObjAttr;
+
+    #[test]
+    fn equation_metrics_are_applied_to_the_anchored_wrapped_line() {
+        let script = "W = sum_{i=1}^{n} u_i";
+        let (width, height, equation_baseline) =
+            crate::renderer::equation::intrinsic_metrics_hwp(script, 1000);
+        let equation = Equation {
+            common: CommonObjAttr {
+                treat_as_char: true,
+                width,
+                height,
+                ..Default::default()
+            },
+            script: script.to_string(),
+            font_size: 1000,
+            ..Default::default()
+        };
+        let mut para = Paragraph {
+            text: "abcdefghij".to_string(),
+            // One 8-code-unit control gap before character 5.
+            char_offsets: (0..10)
+                .map(|index| if index < 5 { index } else { index + 8 })
+                .collect(),
+            controls: vec![Control::Equation(Box::new(equation))],
+            ..Default::default()
+        };
+        para.char_count = 19;
+
+        let line_breaks = vec![
+            LineBreakResult {
+                start_idx: 0,
+                end_idx: 5,
+                max_font_size: 10.0,
+                has_line_break: false,
+            },
+            LineBreakResult {
+                start_idx: 5,
+                end_idx: 10,
+                max_font_size: 10.0,
+                has_line_break: false,
+            },
+        ];
+        let plain_line = LineSeg {
+            line_height: 1000,
+            text_height: 1000,
+            baseline_distance: 850,
+            ..Default::default()
+        };
+        let mut line_segs = vec![plain_line.clone(), plain_line.clone()];
+
+        apply_inline_control_metrics_to_text_lines(&para, &line_breaks, &mut line_segs);
+
+        assert_eq!(line_segs[0].line_height, plain_line.line_height);
+        assert_eq!(line_segs[0].baseline_distance, plain_line.baseline_distance);
+        assert_eq!(
+            line_segs[1].baseline_distance,
+            (equation_baseline as i32).max(plain_line.baseline_distance)
+        );
+        assert!(line_segs[1].line_height >= height as i32);
     }
 }
 
@@ -1110,30 +1248,33 @@ pub(crate) fn reflow_line_segs(
         let inline_sizes = para
             .controls
             .iter()
-            .filter_map(inline_control_size_hwp)
+            .filter_map(inline_control_metrics_hwp)
             .collect::<Vec<_>>();
         if !inline_sizes.is_empty() {
             let max_line_width = seg_width_hwp.max(1);
-            let mut line_specs: Vec<(usize, i32, i32)> = Vec::new();
+            let mut line_specs: Vec<(usize, i32, i32, i32)> = Vec::new();
             let mut line_start = 0usize;
             let mut line_width = 0i32;
-            let mut line_height = 0i32;
+            let mut line_ascent = 0i32;
+            let mut line_descent = 0i32;
 
-            for (idx, (ctrl_width, ctrl_height)) in inline_sizes.iter().copied().enumerate() {
-                if line_width > 0 && line_width + ctrl_width > max_line_width {
-                    line_specs.push((line_start, line_width, line_height));
+            for (idx, metrics) in inline_sizes.iter().copied().enumerate() {
+                if line_width > 0 && line_width + metrics.width > max_line_width {
+                    line_specs.push((line_start, line_width, line_ascent, line_descent));
                     line_start = idx;
                     line_width = 0;
-                    line_height = 0;
+                    line_ascent = 0;
+                    line_descent = 0;
                 }
-                line_width += ctrl_width;
-                line_height = line_height.max(ctrl_height);
+                line_width += metrics.width;
+                line_ascent = line_ascent.max(metrics.baseline);
+                line_descent = line_descent.max(metrics.height - metrics.baseline);
             }
-            line_specs.push((line_start, line_width, line_height));
+            line_specs.push((line_start, line_width, line_ascent, line_descent));
 
             let orig_line_segs = para.line_segs.clone();
             let mut new_line_segs = Vec::with_capacity(line_specs.len());
-            for (line_idx, (start_pos, _line_width, height_hwp)) in
+            for (line_idx, (start_pos, _line_width, ascent_hwp, descent_hwp)) in
                 line_specs.into_iter().enumerate()
             {
                 let mut seg = make_line_seg(start_pos as u32, 0.0);
@@ -1153,7 +1294,14 @@ pub(crate) fn reflow_line_segs(
                         seg.tag
                     };
                 }
-                apply_inline_control_line_height(&mut seg, height_hwp);
+                apply_inline_control_line_metrics(
+                    &mut seg,
+                    InlineControlMetricsHwp {
+                        width: 0,
+                        height: ascent_hwp.saturating_add(descent_hwp),
+                        baseline: ascent_hwp,
+                    },
+                );
                 new_line_segs.push(seg);
             }
 
@@ -1175,9 +1323,6 @@ pub(crate) fn reflow_line_segs(
             let mut seg = make_line_seg(0, font_size);
             if let Some(template) = orig.as_ref() {
                 seg.vertical_pos = template.vertical_pos;
-            }
-            if let Some(height_hwp) = inline_control_line_height_hwp(para) {
-                apply_inline_control_line_height(&mut seg, height_hwp);
             }
             para.line_segs = vec![seg];
         }
@@ -1244,14 +1389,22 @@ pub(crate) fn reflow_line_segs(
         new_line_segs.push(make_line_seg(0, 12.0));
     }
 
-    // 인라인 TAC 개체의 높이 반영: 개체가 포함된 줄의 line_height를 개체 높이 이상으로 보정
-    {
-        if let Some(height_hwp) = inline_control_line_height_hwp(para) {
-            if let Some(seg) = new_line_segs.first_mut() {
-                apply_inline_control_line_height(seg, height_hwp);
-            }
+    // 기존 비수식 TAC 개체의 첫 줄 보정은 유지한다. 수식만은 실제 anchor가
+    // 속한 줄에 painter와 동일한 EqEdit ascent/descent를 적용해야 tall
+    // operator/fraction이 인접 줄을 덮지 않고 주변 텍스트와 한 baseline에 놓인다.
+    if let Some(height_hwp) = non_equation_inline_control_height_hwp(para) {
+        if let Some(first_line) = new_line_segs.first_mut() {
+            apply_inline_control_line_metrics(
+                first_line,
+                InlineControlMetricsHwp {
+                    width: 0,
+                    height: height_hwp,
+                    baseline: (height_hwp as f64 * 0.85).round() as i32,
+                },
+            );
         }
     }
+    apply_inline_control_metrics_to_text_lines(para, &line_breaks, &mut new_line_segs);
 
     // vertical_pos 누적 계산 (각 줄의 문단 내 Y 오프셋)
     // 원본 첫 LineSeg의 vertical_pos를 보존하여 vpos 체계 연속성 유지
