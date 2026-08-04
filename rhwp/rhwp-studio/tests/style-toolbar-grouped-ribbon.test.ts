@@ -37,22 +37,21 @@ test('style toolbar shows its default before a document is loaded', () => {
   );
 });
 
-test('desktop formatting surface exposes visible ribbon hierarchy', () => {
+test('desktop formatting surface uses compact unlabeled ribbon groups', () => {
   assert.match(html, /class="sb-ribbon-group sb-field-ribbon-group"/);
   assert.match(html, /class="sb-ribbon-group sb-character-ribbon-group"/);
   assert.match(html, /class="sb-ribbon-group sb-color-ribbon-group"/);
   assert.match(html, /class="sb-ribbon-group sb-paragraph-ribbon-group"/);
 
-  for (const label of ['글꼴 및 간격', '글자 모양', '색', '문단']) {
-    assert.match(html, new RegExp(`<span class="sb-ribbon-label">${label}<\\/span>`));
-  }
+  assert.doesNotMatch(html, /class="sb-ribbon-label"/);
+  assert.doesNotMatch(html, /class="sb-field-label"/);
 
-  assert.match(styles, /#style-bar\s*\{[^}]*min-height:\s*68px;[^}]*align-items:\s*stretch;/s);
-  assert.match(styles, /\.sb-ribbon-group\s*\{[^}]*flex-direction:\s*column;/s);
-  assert.match(styles, /\.sb-ribbon-label\s*\{[^}]*display:\s*block;/s);
+  assert.match(styles, /#style-bar\s*\{[^}]*min-height:\s*36px;[^}]*align-items:\s*center;/s);
+  assert.match(styles, /\.sb-ribbon-group\s*\{[^}]*flex-direction:\s*row;/s);
+  assert.match(styles, /\.sb-ribbon-label\s*\{[^}]*display:\s*none;/s);
   assert.match(
     styles,
-    /\.sb-field-ribbon-group \.sb-field\s*\{[^}]*flex-direction:\s*column;/s,
+    /\.sb-field-ribbon-group \.sb-field\s*\{[^}]*flex-direction:\s*row;/s,
   );
 });
 

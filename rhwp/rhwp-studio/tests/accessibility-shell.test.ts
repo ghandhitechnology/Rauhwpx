@@ -20,7 +20,7 @@ test('편집기 셸은 제목과 header, main, footer landmark를 제공한다',
   assert.match(html, /<footer id="status-bar">/);
 });
 
-test('서식 도구 모음의 폼 컨트롤은 연결된 보이는 label을 제공한다', () => {
+test('서식 도구 모음의 폼 컨트롤은 접근 가능한 이름을 제공한다', () => {
   const html = source('index.html');
 
   for (const [id, label] of [
@@ -32,7 +32,7 @@ test('서식 도구 모음의 폼 컨트롤은 연결된 보이는 label을 제�
   ]) {
     assert.match(
       html,
-      new RegExp(`<label class="sb-field-label" for="${id}">${label}</label>[\\s\\S]*?id="${id}"`),
+      new RegExp(`id="${id}"[^>]*aria-label="${label}"|aria-label="${label}"[^>]*id="${id}"`),
     );
   }
 });
@@ -61,5 +61,5 @@ test('서식 도구 모음 컨트롤은 테마 토큰으로 전경색과 배경�
   const css = source('src/styles/style-bar.css');
 
   assert.match(css, /\.sb-size\s*\{[\s\S]*?color:\s*var\(--color-text\);[\s\S]*?background:\s*var\(--color-surface\);/);
-  assert.match(css, /\.sb-field-label\s*\{[\s\S]*?color:\s*var\(--color-text\);/);
+  assert.match(css, /\.sb-combo\s*\{[\s\S]*?background:\s*var\(--color-surface\);[\s\S]*?color:\s*var\(--color-text\);/);
 });

@@ -95,7 +95,7 @@ test('CanvasView consumes the zoom anchor and corrects both scroll axes', () => 
 
   assert.match(source, /eventBus\.on\('zoom-changed', \(zoom, anchor\)/);
   assert.match(source, /calculateAnchoredScroll\(/);
-  assert.match(source, /setScrollLeft\(nextScroll\.scrollLeft\)/);
+  assert.match(source, /wasHorizontallyCentered/);
   assert.match(source, /setScrollTop\(nextScroll\.scrollTop\)/);
 });
 

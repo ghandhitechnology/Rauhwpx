@@ -4,11 +4,11 @@
 #style-bar {
   display: flex;
   flex-wrap: wrap;
-  min-height: 68px;
-  align-items: stretch;
-  align-content: stretch;
+  min-height: 36px;
+  align-items: center;
+  align-content: center;
   gap: 0;
-  padding: 0 6px;
+  padding: 3px 6px;
   background: var(--color-bg);
   border-bottom: 1px solid var(--ui-border);
   flex-shrink: 0;
@@ -46,31 +46,24 @@
 
 .sb-ribbon-group {
   display: flex;
-  min-height: 68px;
+  min-height: 0;
   box-sizing: border-box;
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: space-between;
-  padding: 5px 7px 0;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  padding: 0 7px;
   border-right: 1px solid var(--ui-border);
 }
 
 .sb-ribbon-label {
-  display: block;
-  min-height: 15px;
-  box-sizing: border-box;
-  padding: 1px 4px 2px;
-  color: var(--color-text-secondary);
-  font-size: 10px;
-  line-height: 12px;
-  text-align: center;
+  display: none;
 }
 
 .sb-field-ribbon-group .sb-field {
   min-width: 0;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 3px;
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
 }
 
 .sb-field-ribbon-group .sb-field-label {

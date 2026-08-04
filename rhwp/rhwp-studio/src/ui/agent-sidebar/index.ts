@@ -2,11 +2,13 @@
  * AI 에이전트 사이드바 (ag- 접두어).
  *
  * AgentBridge 의 SidebarEvent 스트림을 렌더링하고, 대기 중인 에이전트
- * 편집(change-set)의 승인/거절 UI 를 제공한다. 기존 레이아웃을 건드리지
- * 않도록 document.body 에 고정 오버레이 패널로 마운트한다.
+ * 편집(change-set)의 승인/거절 UI 를 제공한다. 패널은 body 에 고정
+ * 마운트하되, 펼침 시 body.ag-sidebar-open 으로 #editor-area 를 밀어
+ * 눈금자·용지가 가려지지 않고 남은 폭 기준으로 다시 가운데 정렬되게 한다.
  */
 import './agent-sidebar.css';
 
+import type { EventBus } from '../../core/event-bus.ts';
 import type { AgentBridge } from '../../agent/bridge.ts';
 import type {
   AgentName,
@@ -19,6 +21,8 @@ import type {
 
 export interface AgentSidebarDeps {
   bridge: AgentBridge;
+  /** inset 전환 후 용지 가운데 정렬을 요청할 때 사용 */
+  eventBus?: EventBus;
 }
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
@@ -80,7 +84,7 @@ function opPreview(op: PendingOp): string {
 }
 
 export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; dispose(): void } {
-  const { bridge } = deps;
+  const { bridge, eventBus } = deps;
 
   let selectedAgent: AgentName = bridge.getActiveAgent() ?? 'claude';
   let connState: ConnectionState = bridge.getConnectionState();
@@ -88,6 +92,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   /** 현재 스트리밍 중인 assistant 말풍선 (tool-call 이후에는 새로 연다). */
   let streamBubble: HTMLElement | null = null;
   const toolRows = new Map<string, { status: HTMLElement; result: HTMLPreElement }>();
+  let insetRecenterRaf: number | null = null;
 
   // ── DOM 구성 ──────────────────────────────────────────
   const root = document.createElement('aside');
@@ -98,9 +103,58 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const collapseTab = el('button', 'ag-collapse-tab', '❯');
   collapseTab.type = 'button';
   collapseTab.setAttribute('aria-label', '에이전트 사이드바 접기/펼치기');
-  collapseTab.addEventListener('click', () => {
-    const collapsed = root.classList.toggle('ag-collapsed');
+  collapseTab.setAttribute('aria-expanded', 'true');
+
+  function notifyInsetChanged(): void {
+    eventBus?.emit('viewport-inset-changed');
+  }
+
+  function clearInsetRecenterLoop(): void {
+    if (insetRecenterRaf !== null) {
+      cancelAnimationFrame(insetRecenterRaf);
+      insetRecenterRaf = null;
+    }
+    document.body.classList.remove('ag-sidebar-animating');
+  }
+
+  /** inset 애니메이션 동안 매 프레임 용지 좌표·스크롤을 다시 맞춘다. */
+  function startInsetRecenterLoop(): void {
+    if (!eventBus) return;
+    clearInsetRecenterLoop();
+    document.body.classList.add('ag-sidebar-animating');
+
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduceMotion) {
+      notifyInsetChanged();
+      document.body.classList.remove('ag-sidebar-animating');
+      return;
+    }
+
+    const startedAt = performance.now();
+    const durationMs = 280;
+    const tick = (now: number) => {
+      notifyInsetChanged();
+      if (now - startedAt < durationMs) {
+        insetRecenterRaf = requestAnimationFrame(tick);
+        return;
+      }
+      insetRecenterRaf = null;
+      document.body.classList.remove('ag-sidebar-animating');
+      notifyInsetChanged();
+    };
+    insetRecenterRaf = requestAnimationFrame(tick);
+  }
+
+  function setCollapsed(collapsed: boolean, opts?: { recenter?: boolean }): void {
+    root.classList.toggle('ag-collapsed', collapsed);
+    document.body.classList.toggle('ag-sidebar-open', !collapsed);
     collapseTab.textContent = collapsed ? '❮' : '❯';
+    collapseTab.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    if (opts?.recenter !== false) startInsetRecenterLoop();
+  }
+
+  collapseTab.addEventListener('click', () => {
+    setCollapsed(!root.classList.contains('ag-collapsed'));
   });
 
   const header = el('header', 'ag-header');
@@ -164,6 +218,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   root.append(collapseTab, header, picker, messages, review, composer);
   document.body.appendChild(root);
+  setCollapsed(false, { recenter: false });
 
   // ── 배치: #editor-area ↔ #status-bar 사이에 맞춘다 ────
   function measure(): void {
@@ -418,6 +473,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       unsubBridge();
       unsubPending();
       window.removeEventListener('resize', measure);
+      clearInsetRecenterLoop();
+      document.body.classList.remove('ag-sidebar-open');
       sweepUnresolvedToolRows();
       root.remove();
     },

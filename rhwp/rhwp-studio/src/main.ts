@@ -515,7 +515,7 @@ async function initialize(): Promise<void> {
     // 선택(opt-in) 기능이므로 여기서 실패해도 렌더러 초기화를 실패로 만들지 않는다.
     try {
       const agentBridge = initAgentBridge({ wasm, eventBus, inputHandler, canvasView, documentState });
-      initAgentSidebar({ bridge: agentBridge });
+      initAgentSidebar({ bridge: agentBridge, eventBus });
       if (import.meta.env.DEV) {
         (window as any).__agentBridge = agentBridge;
       }

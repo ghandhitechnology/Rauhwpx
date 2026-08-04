@@ -1,7 +1,42 @@
 /* ─── AI 에이전트 사이드바 (ag- 접두어) ─────────────────────
    팔레트: Claude frontend 계열 아이보리/오트 배경 + 에이전트별 강조색
    (Claude #D97757 / Codex #3B82F6). top/bottom 은 index.ts 가 계산해
-   인라인으로 지정한다. */
+   인라인으로 지정한다. 펼침 시 body.ag-sidebar-open 이 #editor-area 를
+   같은 폭·같은 easing 으로 밀어 용지/눈금자가 가려지지 않게 한다. */
+
+:root {
+  --ag-sidebar-width: 360px;
+  --ag-sidebar-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ag-sidebar-duration: 220ms;
+}
+
+/* 편집 영역(가로 눈금자 + 용지)만 밀어 사이드바와 폭을 맞춘다.
+   scroll-container ResizeObserver → viewport-resize 경로가 가운데 정렬을 갱신한다. */
+#editor-area {
+  transition: margin-right var(--ag-sidebar-duration) var(--ag-sidebar-ease);
+  margin-right: 0;
+}
+
+body.ag-sidebar-open #editor-area {
+  margin-right: var(--ag-sidebar-width);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #editor-area {
+    transition: none;
+  }
+}
+
+/* 좁은 화면에서는 편집 영역을 짜부시키지 않고 오버레이로 유지한다. */
+@media (max-width: 767px) {
+  body.ag-sidebar-open #editor-area {
+    margin-right: 0;
+  }
+
+  .ag-root {
+    width: min(var(--ag-sidebar-width), 100vw);
+  }
+}
 
 .ag-root {
   --ag-bg: #faf9f5;
@@ -20,7 +55,7 @@
 
   position: fixed;
   right: 0;
-  width: 360px;
+  width: var(--ag-sidebar-width);
   z-index: 50;
   display: flex;
   flex-direction: column;
@@ -31,7 +66,8 @@
   font-family: var(--font-family-ui, sans-serif);
   font-size: 13px;
   line-height: 1.5;
-  transition: transform 0.2s ease;
+  transition: transform var(--ag-sidebar-duration) var(--ag-sidebar-ease);
+  will-change: transform;
 }
 
 .ag-root[data-agent='codex'] {
@@ -41,6 +77,13 @@
 .ag-root.ag-collapsed {
   transform: translateX(100%);
   box-shadow: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-root {
+    transition: none;
+    will-change: auto;
+  }
 }
 
 html[data-theme-effective='dark'] .ag-root {

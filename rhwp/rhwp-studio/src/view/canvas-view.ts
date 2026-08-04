@@ -86,6 +86,7 @@ export class CanvasView {
         if (!this.viewportManager.isZoomAnimating()) this.updateVisiblePages();
       }),
       eventBus.on('viewport-resize', () => this.onViewportResize()),
+      eventBus.on('viewport-inset-changed', () => this.recenterHorizontally()),
       eventBus.on('zoom-changed', (zoom, anchor) => {
         this.onZoomChanged(
           zoom as number,
@@ -527,6 +528,14 @@ export class CanvasView {
     const canPreserveCenter = previousViewport.width > 0 && previousViewport.height > 0;
     const scrollLeft = this.viewportManager.getScrollX();
     const scrollTop = this.viewportManager.getScrollY();
+    // pan-space 가 viewport 폭 함수라서 폭이 바뀌면 pageLeft 도 함께 변한다.
+    // 사이드바 inset 애니메이션 중이거나 이전에 가운데였으면 X 를 강제 재중앙 정렬한다.
+    const forceCenterX = document.body.classList.contains('ag-sidebar-animating');
+    const prevCenteredScrollLeft = canPreserveCenter
+      ? this.virtualScroll.getCenteredScrollLeft(previousViewport.width)
+      : 0;
+    const wasHorizontallyCentered = canPreserveCenter
+      && Math.abs(scrollLeft - prevCenteredScrollLeft) <= 2;
     const focusPage = canPreserveCenter
       ? this.virtualScroll.getPageAtPoint(
         scrollLeft + previousViewport.width / 2,
@@ -556,13 +565,21 @@ export class CanvasView {
         CENTER_ZOOM_ANCHOR,
         nextViewport,
       );
-      this.viewportManager.setScrollLeft(nextScroll.scrollLeft);
+      this.viewportManager.setScrollLeft(
+        forceCenterX || wasHorizontallyCentered
+          ? this.virtualScroll.getCenteredScrollLeft(nextViewport.width)
+          : nextScroll.scrollLeft,
+      );
       this.viewportManager.setScrollTop(nextScroll.scrollTop);
     } else {
       this.viewportManager.setScrollLeft(
         this.virtualScroll.getCenteredScrollLeft(nextViewport.width),
       );
     }
+
+    // 이미 pool 에 있는 canvas 는 renderPage 를 다시 타지 않으므로
+    // pageLeft 변경을 style.left 에 직접 반영해야 한다 (사이드바 close 시 핵심).
+    this.repositionRenderedPages();
 
     if (wasGrid || isGrid) {
       // 그리드 관련 변경 시 전체 재렌더링
@@ -572,6 +589,51 @@ export class CanvasView {
       this.pageRenderer.cancelAll();
     }
     this.updateVisiblePages();
+  }
+
+  /** 에이전트 사이드바 inset 전환 직후 용지를 남은 폭 기준으로 가운데 정렬한다. */
+  recenterHorizontally(): void {
+    if (this.pages.length === 0) return;
+    this.viewportManager.syncViewportSize();
+    this.recalcLayout();
+    const { width } = this.viewportManager.getViewportSize();
+    if (width <= 0) return;
+    this.viewportManager.setScrollLeft(this.virtualScroll.getCenteredScrollLeft(width));
+    this.repositionRenderedPages();
+    this.updateVisiblePages();
+  }
+
+  /**
+   * 가상 스크롤 좌표가 바뀐 뒤, 이미 렌더된 페이지/오버레이의 DOM 위치를 갱신한다.
+   * updateVisiblePages 는 pool hit 시 style.left 를 건드리지 않는다.
+   */
+  private repositionRenderedPages(): void {
+    for (const pageIdx of this.canvasPool.activePages) {
+      const canvas = this.canvasPool.getCanvas(pageIdx);
+      if (canvas) this.applyPageBox(canvas, pageIdx);
+      this.scrollContent.querySelectorAll<HTMLElement>(
+        `[data-rhwp-overlay-page="${pageIdx}"], [data-rhwp-grid-page="${pageIdx}"]`,
+      ).forEach((element) => this.applyPageBox(element, pageIdx));
+    }
+  }
+
+  private applyPageBox(element: HTMLElement, pageIdx: number): void {
+    element.style.top = `${this.virtualScroll.getPageOffset(pageIdx)}px`;
+    const pageLeft = this.virtualScroll.getPageLeft(pageIdx);
+    const zoomPreview = element.style.transformOrigin === 'top left';
+    if (pageLeft >= 0) {
+      element.style.left = `${pageLeft}px`;
+      if (!zoomPreview) {
+        element.style.transform = 'none';
+        element.style.transformOrigin = '';
+      }
+    } else {
+      element.style.left = '50%';
+      if (!zoomPreview) {
+        element.style.transform = 'translateX(-50%)';
+        element.style.transformOrigin = '';
+      }
+    }
   }
 
   private getZoomPageBox(pageIdx: number, viewportWidth: number): ZoomPageBox {

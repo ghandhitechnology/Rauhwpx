@@ -135,6 +135,11 @@ export class ViewportManager {
     this.viewportHeight = this.container.clientHeight;
   }
 
+  /** ResizeObserver 없이도 컨테이너 client size 를 다시 읽는다. */
+  syncViewportSize(): void {
+    this.updateViewportSize();
+  }
+
   getScrollY(): number {
     return this.scrollY;
   }
