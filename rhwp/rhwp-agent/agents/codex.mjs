@@ -1,6 +1,63 @@
 import { spawn } from 'node:child_process';
 import { createLineReader, truncate, SYSTEM_BRIEF } from './backend.mjs';
 
+const STDERR_TAIL_LIMIT = 16_000;
+
+/**
+ * Build a CLI invocation accepted by both `codex exec` and `codex exec resume`.
+ * Resume does not accept the top-level `--sandbox` or `-C` flags, so sandbox
+ * mode is supplied through the shared config surface and cwd through spawn().
+ *
+ * @param {import('./backend.mjs').BackendOptions} opts
+ * @param {string | null} threadId
+ */
+export function buildCodexArgv(opts, threadId) {
+  const cfg = [
+    '-c', 'mcp_servers.rhwp.command="node"',
+    '-c', `mcp_servers.rhwp.args=["${opts.mcpScriptPath}"]`,
+    '-c', `mcp_servers.rhwp.env={RHWP_WS_URL = "ws://127.0.0.1:${opts.hubPort}/mcp", RHWP_AGENT_TOKEN = "${opts.token}", RHWP_AGENT_NAME = "codex"}`,
+    '-c', 'mcp_servers.rhwp.startup_timeout_sec=20',
+    // Headless MCP calls cannot display an approval prompt. Use config keys
+    // understood by both the initial and resume subcommands.
+    '-c', 'approval_policy="never"',
+    '-c', 'sandbox_mode="danger-full-access"',
+    ...(opts.effort
+      ? ['-c', `model_reasoning_effort=${JSON.stringify(opts.effort)}`]
+      : []),
+  ];
+  const common = [
+    '--json', '--skip-git-repo-check', '--ignore-user-config',
+    '-m', opts.model ?? 'gpt-5.6-sol', ...cfg,
+  ];
+  return threadId
+    ? ['exec', 'resume', ...common, threadId, '-']
+    : ['exec', ...common, '-C', opts.rootDir, '-'];
+}
+
+/**
+ * Turn CLI stderr into a concise user-facing reason without leaking the
+ * session token embedded in the MCP config.
+ *
+ * @param {string} stderrText
+ * @param {number | null} code
+ * @param {NodeJS.Signals | null} signal
+ * @param {string} token
+ */
+export function formatCodexExitError(stderrText, code, signal, token) {
+  let clean = stderrText.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+  if (token) clean = clean.split(token).join('[redacted]');
+  const detail = clean
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^Usage:/i.test(line) && !/^For more information/i.test(line))
+    .slice(-8)
+    .join('\n');
+  const exit = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
+  return detail
+    ? `Codex 실행이 중단되었습니다 (${exit}).\n${truncate(detail, 1200)}`
+    : `Codex 실행이 중단되었습니다 (${exit}). Codex가 오류 설명을 제공하지 않았습니다.`;
+}
+
 /**
  * @param {import('./backend.mjs').BackendOptions} opts
  * @returns {import('./backend.mjs').AgentSession}
@@ -17,26 +74,7 @@ export function createCodexSession(opts) {
   let disposed = false;
   let loggedToolCallSample = false;
   let killTimer = null;
-
-  const cfg = [
-    '-c', 'mcp_servers.rhwp.command="node"',
-    '-c', `mcp_servers.rhwp.args=["${opts.mcpScriptPath}"]`,
-    '-c', `mcp_servers.rhwp.env={RHWP_WS_URL = "ws://127.0.0.1:${opts.hubPort}/mcp", RHWP_AGENT_TOKEN = "${opts.token}", RHWP_AGENT_NAME = "codex"}`,
-    '-c', 'mcp_servers.rhwp.startup_timeout_sec=20',
-    // codex 0.146 기준 headless(exec)에서 MCP 도구 호출은 승인 프롬프트를 띄울 수 없어
-    // "user cancelled MCP tool call"로 자동 취소된다. approval_policy=never 와
-    // sandbox danger-full-access 조합에서만 MCP 호출이 실행됨을 실측으로 확인했다.
-    // (read-only/workspace-write 샌드박스에서는 MCP 호출이 무조건 취소됨)
-    '-c', 'approval_policy="never"',
-    ...(opts.effort
-      ? ['-c', `model_reasoning_effort=${JSON.stringify(opts.effort)}`]
-      : []),
-  ];
-  const common = [
-    '--json', '--skip-git-repo-check', '--ignore-user-config',
-    '--sandbox', 'danger-full-access',
-    '-m', opts.model ?? 'gpt-5.6-sol', ...cfg,
-  ];
+  let stderrTail = '';
 
   function endTurn(evt) {
     if (!turnOpen) return;
@@ -168,9 +206,8 @@ export function createCodexSession(opts) {
       // 프롬프트는 positional 인자가 아니라 stdin('-')으로 전달한다: '-' 로 시작하는
       // 메시지가 CLI 플래그로 파싱되는 것과 초장문 메시지의 ARG_MAX 초과를 막는다.
       const prompt = threadId ? text : SYSTEM_BRIEF + '\n\n' + text;
-      const argv = threadId
-        ? ['exec', 'resume', threadId, ...common, '-']
-        : ['exec', ...common, '-C', opts.rootDir, '-'];
+      const argv = buildCodexArgv(opts, threadId);
+      stderrTail = '';
 
       let proc;
       try {
@@ -191,7 +228,9 @@ export function createCodexSession(opts) {
       proc.stdin.end(prompt);
       proc.stdout.on('data', createLineReader(makeHandler()));
       proc.stderr.on('data', (chunk) => {
-        for (const line of chunk.toString().split('\n')) {
+        const text = chunk.toString();
+        stderrTail = (stderrTail + text).slice(-STDERR_TAIL_LIMIT);
+        for (const line of text.split('\n')) {
           if (line.trim()) process.stderr.write(`[codex] ${line}\n`);
         }
       });
@@ -203,12 +242,16 @@ export function createCodexSession(opts) {
           endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'exited' });
         }
       });
-      proc.on('exit', (code) => {
+      proc.on('exit', (code, signal) => {
         if (proc !== child) return;
         if (killTimer) { clearTimeout(killTimer); killTimer = null; }
         if (turnOpen && !disposed) {
           if (!turnCompleted && code !== 0) {
-            onEvent({ type: 'error', agent: 'codex', message: `codex exited with code ${code}` });
+            onEvent({
+              type: 'error',
+              agent: 'codex',
+              message: formatCodexExitError(stderrTail, code, signal, opts.token),
+            });
             endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'exited' });
           } else {
             endTurn({ type: 'turn-end', agent: 'codex', stopReason: turnCompleted ? 'completed' : 'exited' });
