@@ -3,6 +3,7 @@ import type { EventBus } from '../core/event-bus.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
 import type { DocumentPosition, CharProperties } from '../core/types.ts';
+import { PreparedSnapshotCommand } from '../engine/prepared-snapshot-command.ts';
 import type {
   AgentName, CellAddr, CharFormatProps, DocPoint, DocRange,
   ObjectAnchor, ObjectOp, PendingChangeSet, PendingEditsChangeEvent, PendingOp,
@@ -59,7 +60,7 @@ const CHAR_FORMAT_KEYS = ['bold', 'italic', 'underline', 'strikethrough', 'fontS
  * 에이전트 대기 편집(pending edit) 관리자.
  *
  * Pending 단계의 변이는 의도적으로 히스토리를 우회한다(WasmBridge 직접 호출) —
- * undo 항목은 approve() 시 snapshot operation 하나로만 생성된다.
+ * undo 항목은 approve() 시 미리보기 상태를 그대로 채택하는 snapshot 하나로 생성된다.
  *
  * Phase-1 규칙(untracked drift): pending 중 사용자 편집은 허용되지만 주소로 관측하지
  * 않는다 — pending 범위는 이 관리자 자신이 수행한 변이에 대해서만 이동한다. 사용자
@@ -241,10 +242,7 @@ export class PendingEditManager {
     return this.sets.some((s) => s.ops.length > 0);
   }
 
-  /**
-   * approve — revert-then-replay 로 change-set 전체를 snapshot operation 하나
-   * (= undo 한 번)로 커밋한다.
-   */
+  /** approve — 적용된 미리보기는 재생성하지 않고 그대로 단일 undo 항목으로 채택한다. */
   approve(changeSetId: string): void {
     const set = this.sets.find((s) => s.id === changeSetId);
     if (!set) return;
@@ -259,27 +257,51 @@ export class PendingEditManager {
       return;
     }
 
-    const failedReverts = this.revertAppliedOps(set);
+    const wasm = this.deps.wasm;
+    const cursor = this.deps.inputHandler.getCursorPosition();
+    const previewState = this.capturePendingState();
+    let previewId: number | null = null;
+    let beforeId: number | null = null;
+    let command: PreparedSnapshotCommand | null = null;
 
-    let replayRan = false;
-    this.deps.inputHandler.executeOperation({
-      kind: 'snapshot',
-      operationType: 'agentApplyChangeSet',
-      operation: (wasm) => {
-        replayRan = true;
-        return this.replayOps(wasm, set, failedReverts);
-      },
-    });
+    try {
+      // preview + before + after 세 id가 잠시 공존한다. 오래된 history snapshot을
+      // 선제 정리해 WASM 저장소의 무통보 축출을 막는다.
+      this.deps.inputHandler.prepareSnapshotCapacity?.(3);
+      // before 캡처를 위해 잠시 되돌리되, 즉시 원본 스냅샷을 복원한다. 텍스트를
+      // 삭제 후 재삽입하지 않으므로 줄/문단/혼합 글자 서식이 미리보기와 동일하다.
+      previewId = wasm.saveSnapshot();
+      this.revertAppliedOps(set);
+      beforeId = wasm.saveSnapshot();
+      wasm.restoreSnapshot(previewId);
+      this.restorePendingState(previewState);
 
-    if (!replayRan) {
-      // form 편집 모드 등에서 executeOperation 이 조용히 no-op 된 경우 (Phase-1 한계):
-      // step-2 revert 를 되돌려 pending 상태를 복원한다. revert 에 실패한 op 은
-      // 여전히 적용 상태이므로 재적용하면 중복 생성된다 — skip (리뷰 확정 결함 수정).
-      this.reapplyOps(set, failedReverts);
+      command = new PreparedSnapshotCommand(
+        'agentApplyChangeSet', cursor, cursor, beforeId,
+        () => this.applyApprovalOnlyOps(set),
+      );
+      beforeId = null; // command가 소유권을 인수했다.
+      command.execute(wasm);
+      wasm.discardSnapshot(previewId);
+      previewId = null;
+      this.deps.inputHandler.executeOperation({
+        kind: 'record',
+        command,
+        meta: { refresh: 'full' },
+      });
+    } catch (err) {
+      if (previewId !== null) {
+        try { wasm.restoreSnapshot(previewId); } catch { /* best effort */ }
+        wasm.discardSnapshot(previewId);
+      }
+      if (beforeId !== null) wasm.discardSnapshot(beforeId);
+      command?.discard(wasm);
+      this.restorePendingState(previewState);
       set.status = 'awaiting-review';
       this.emitDocEvents('agent-pending-edit');
       this.syncOverlay();
-      this.emitChange({ type: 'invalidated', reason: 'edit blocked (form mode)' });
+      console.warn('[pending-edits] approve snapshot capture failed', err);
+      this.emitChange({ type: 'invalidated', reason: 'approval failed' });
       return;
     }
 
@@ -346,6 +368,17 @@ export class PendingEditManager {
   private removeSet(set: PendingChangeSet): void {
     this.sets = this.sets.filter((s) => s !== set);
     if (this.open === set) this.open = null;
+  }
+
+  private capturePendingState(): Array<{ id: string; ops: PendingOp[] }> {
+    return this.sets.map((set) => ({ id: set.id, ops: structuredClone(set.ops) }));
+  }
+
+  private restorePendingState(state: Array<{ id: string; ops: PendingOp[] }>): void {
+    for (const saved of state) {
+      const set = this.sets.find((candidate) => candidate.id === saved.id);
+      if (set) set.ops = saved.ops;
+    }
   }
 
   private discardAll(reason: string): void {
@@ -1193,10 +1226,7 @@ export class PendingEditManager {
     return skipped;
   }
 
-  /**
-   * step-2 revert: 이 set 의 적용된 op 을 역순으로 raw wasm 으로 되돌린다 (이벤트 없음).
-   * 반환: 되돌리기에 실패한 객체 op id — approve replay 에서 제외해 중복 생성을 막는다.
-   */
+  /** 적용된 op 을 역순으로 raw wasm 으로 되돌린다 (이벤트 없음). */
   private revertAppliedOps(set: PendingChangeSet): Set<string> {
     const wasm = this.deps.wasm;
     const failed = new Set<string>();
@@ -1207,15 +1237,13 @@ export class PendingEditManager {
           const r = { ...op.range };
           const res = this.deleteRangeRaw(r);
           if (res?.ok !== true) continue;
-          // 자신 포함 모든 pending 경계를 이동: 자신의 range 는 시작점으로 collapse 되어
-          // replay 시 삽입 주소가 된다.
+          // 자신 포함 모든 pending 경계를 문서의 임시 before 상태에 맞춘다.
           this.shiftAllAfterDelete(r);
         } else if (op.kind === 'format') {
           this.applyFormatRaw(op.range, op.inverse);
         } else if (op.kind === 'field') {
           wasm.setFieldValueByName(op.name, op.oldValue);
         } else if (op.kind === 'object' && isObjectOpApplied(op.obj)) {
-          // 객체 revert 실패 후 replay 하면 개체가 중복 생성된다 — 실패 op 은 replay 제외
           if (!this.revertObjectOp(op.obj)) failed.add(op.id);
         }
         // delete/mark-only 는 되돌릴 것이 없다
@@ -1227,130 +1255,50 @@ export class PendingEditManager {
     return failed;
   }
 
-  /** approve step-3 실패(form mode) 시 revert 를 다시 원상복구한다 */
-  private reapplyOps(set: PendingChangeSet, skipIds?: Set<string>): void {
+  /** 삭제·스타일 적용 등 승인 시점까지 mark-only 였던 연산만 현재 미리보기 위에 적용한다. */
+  private applyApprovalOnlyOps(set: PendingChangeSet): DocumentPosition {
     const wasm = this.deps.wasm;
-    for (const op of set.ops) {
-      if (skipIds?.has(op.id)) continue;
-      try {
-        if (op.kind === 'insert') {
-          const at = { paraIdx: op.range.startParaIdx, charOffset: op.range.startCharOffset };
-          const { range, addedParas } = this.performInsert(
-            op.range.sectionIdx, at.paraIdx, at.charOffset, op.text, op.range.cell,
-          );
-          op.range = range;
-          this.shiftAllAfterInsert(range.sectionIdx, {
-            paraIdx: at.paraIdx, charOffset: at.charOffset, addedParas,
-            endParaIdx: range.endParaIdx, endCharOffset: range.endCharOffset, textLen: op.text.length,
-          }, op, range.cell);
-        } else if (op.kind === 'format') {
-          this.applyFormatRaw(op.range, op.format);
-        } else if (op.kind === 'field') {
-          wasm.setFieldValueByName(op.name, op.newValue);
-        } else if (op.kind === 'object' && isObjectOpApplied(op.obj)) {
-          this.applyObjectOp(op.obj);
-        }
-      } catch (err) {
-        console.warn('[pending-edits] reapply failed for op', op.id, err);
-      }
-    }
-  }
-
-  /** approve step-3: snapshot operation 안에서 시간순으로 재적용한다 */
-  private replayOps(wasm: WasmBridge, set: PendingChangeSet, skipIds?: Set<string>): DocumentPosition {
     let last: { sectionIdx: number; paraIdx: number; charOffset: number } | null = null;
-    // 셀 내부 op 의 커서 목적지는 본문 좌표로 근사한다 (표를 담은 부모 문단).
     const bodyPos = (r: DocRange, paraIdx: number, charOffset: number) =>
       r.cell
         ? { sectionIdx: r.sectionIdx, paraIdx: r.cell.paraIdx, charOffset: 0 }
         : { sectionIdx: r.sectionIdx, paraIdx, charOffset };
+
     for (const op of set.ops) {
-      if (skipIds?.has(op.id)) continue;
       try {
-        if (op.kind === 'object') {
-          const obj = op.obj;
-          if (isObjectOpApplied(obj)) {
-            const oldAnchor = 'anchor' in obj && obj.anchor ? { ...obj.anchor } : undefined;
-            this.applyObjectOp(obj);
-            const newAnchor = 'anchor' in obj ? obj.anchor : undefined;
-            // replay 가 새 controlIdx/paraIdx 를 반환하면 이 표를 참조하는 셀 좌표를 재바인딩
-            if (oldAnchor && newAnchor
-              && (oldAnchor.paraIdx !== newAnchor.paraIdx || oldAnchor.controlIdx !== newAnchor.controlIdx)) {
-              this.rebindCellRefs(obj.sectionIdx, oldAnchor, newAnchor);
-            }
-          } else {
-            this.executeMarkedObjectOp(obj);
-          }
-          last = { sectionIdx: obj.sectionIdx, paraIdx: this.objectBodyParaIdx(obj), charOffset: 0 };
-          continue;
-        }
-        if (op.kind === 'insert') {
-          const at = { paraIdx: op.range.startParaIdx, charOffset: op.range.startCharOffset };
-          const { range, addedParas } = this.performInsert(
-            op.range.sectionIdx, at.paraIdx, at.charOffset, op.text, op.range.cell,
-          );
-          op.range = range;
-          this.shiftAllAfterInsert(range.sectionIdx, {
-            paraIdx: at.paraIdx, charOffset: at.charOffset, addedParas,
-            endParaIdx: range.endParaIdx, endCharOffset: range.endCharOffset, textLen: op.text.length,
-          }, op, range.cell);
-          last = bodyPos(range, range.endParaIdx, range.endCharOffset);
-        } else if (op.kind === 'delete') {
-          const r = { ...op.range };
+        if (op.kind === 'delete') {
+          const r: DocRange = {
+            ...op.range,
+            cell: op.range.cell ? { ...op.range.cell } : undefined,
+          };
           const res = this.deleteRangeRaw(r);
           if (res?.ok === true) {
             this.shiftAllAfterDelete(r, op);
             op.range = {
               sectionIdx: r.sectionIdx,
               cell: r.cell,
-              startParaIdx: r.startParaIdx, startCharOffset: r.startCharOffset,
-              endParaIdx: r.startParaIdx, endCharOffset: r.startCharOffset,
+              startParaIdx: r.startParaIdx,
+              startCharOffset: r.startCharOffset,
+              endParaIdx: r.startParaIdx,
+              endCharOffset: r.startCharOffset,
             };
             last = bodyPos(r, r.startParaIdx, r.startCharOffset);
           }
-        } else if (op.kind === 'format') {
-          this.applyFormatRaw(op.range, op.format);
-          last = bodyPos(op.range, op.range.endParaIdx, op.range.endCharOffset);
-        } else {
-          wasm.setFieldValueByName(op.name, op.newValue);
+        } else if (op.kind === 'object' && !isObjectOpApplied(op.obj)) {
+          const obj = op.obj;
+          this.executeMarkedObjectOp(obj);
+          last = { sectionIdx: obj.sectionIdx, paraIdx: this.objectBodyParaIdx(obj), charOffset: 0 };
         }
       } catch (err) {
-        console.warn('[pending-edits] replay failed for op', op.id, err);
+        console.warn('[pending-edits] approval-only op failed', op.id, err);
       }
     }
+
     if (!last) return this.deps.inputHandler.getCursorPosition();
     const paraCount = wasm.getParagraphCount(last.sectionIdx);
     const paraIdx = Math.max(0, Math.min(last.paraIdx, paraCount - 1));
     const len = wasm.getParagraphLength(last.sectionIdx, paraIdx);
     return { sectionIndex: last.sectionIdx, paragraphIndex: paraIdx, charOffset: Math.min(last.charOffset, len) };
-  }
-
-  /** replay 재바인딩: oldAnchor 의 표를 참조하는 모든 셀 좌표/객체 좌표를 newAnchor 로 교체 */
-  private rebindCellRefs(sectionIdx: number, oldAnchor: ObjectAnchor, newAnchor: ObjectAnchor): void {
-    const matches = (c: CellAddr | undefined): boolean =>
-      c !== undefined && c.paraIdx === oldAnchor.paraIdx && c.controlIdx === oldAnchor.controlIdx;
-    for (const set of this.sets) {
-      for (const op of set.ops) {
-        if (op.kind === 'field') continue;
-        if (op.kind === 'object') {
-          const o = op.obj;
-          if ((o.type === 'tableStructure' || o.type === 'tableStructureMarked'
-            || o.type === 'setCellProps' || o.type === 'setTableProps')
-            && o.sectionIdx === sectionIdx
-            && o.tableParaIdx === oldAnchor.paraIdx && o.controlIdx === oldAnchor.controlIdx) {
-            o.tableParaIdx = newAnchor.paraIdx;
-            o.controlIdx = newAnchor.controlIdx;
-          } else if ((o.type === 'paraFormat' || o.type === 'applyStyle')
-            && o.sectionIdx === sectionIdx && matches(o.cell)) {
-            o.cell = { ...o.cell!, paraIdx: newAnchor.paraIdx, controlIdx: newAnchor.controlIdx };
-          }
-          continue;
-        }
-        if (op.range.sectionIdx === sectionIdx && matches(op.range.cell)) {
-          op.range.cell = { ...op.range.cell!, paraIdx: newAnchor.paraIdx, controlIdx: newAnchor.controlIdx };
-        }
-      }
-    }
   }
 
   /** 객체 op 의 본문 기준 문단 인덱스 (커서 근사/overlay 용) */
