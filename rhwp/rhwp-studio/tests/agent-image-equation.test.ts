@@ -108,6 +108,27 @@ function makeEnv() {
     getSelectionRectsInCell: () => [],
   };
 
+  let snapshotId = 0;
+  const snapshots = new Map<number, { body: string[]; pics: FakePic[]; eqs: FakeEq[] }>();
+  Object.assign(wasm, {
+    saveSnapshot: () => {
+      const id = ++snapshotId;
+      snapshots.set(id, {
+        body: structuredClone(body),
+        pics: structuredClone(pics),
+        eqs: structuredClone(eqs),
+      });
+      return id;
+    },
+    restoreSnapshot: (id: number) => {
+      const saved = snapshots.get(id)!;
+      body.splice(0, body.length, ...structuredClone(saved.body));
+      pics.splice(0, pics.length, ...structuredClone(saved.pics));
+      eqs.splice(0, eqs.length, ...structuredClone(saved.eqs));
+    },
+    discardSnapshot: (id: number) => { snapshots.delete(id); },
+  });
+
   const bus = new EventBus();
   const revision = new RevisionTracker(bus);
   const inputHandler = {
@@ -196,14 +217,15 @@ test('insert_image → reject: deletePictureControl 로 사라진다', async () 
   assert.equal(pics.length, 0);
 });
 
-test('insert_image → approve: revert-then-replay 후 그림이 확정된다', async () => {
-  const { call, pending, pics } = makeEnv();
+test('insert_image → approve: 미리보기 그림을 재삽입 없이 확정한다', async () => {
+  const { call, pending, pics, calls } = makeEnv();
   const r = (await call('insert_image', {
     sectionIdx: 0, paraIdx: 1, charOffset: 0,
     imageBase64: PNG_B64, extension: 'png', naturalWidthPx: 10, naturalHeightPx: 10,
   })) as { changeSetId: string };
   pending.approve(r.changeSetId);
   assert.equal(pics.length, 1);
+  assert.equal(calls.filter((entry) => entry.m === 'insertPicture').length, 1);
   assert.equal(pending.hasPending(), false);
 });
 

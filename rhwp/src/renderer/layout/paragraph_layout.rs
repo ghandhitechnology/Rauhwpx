@@ -175,6 +175,95 @@ fn is_treat_as_char_equation_control(ctrl: Option<&Control>) -> bool {
     matches!(ctrl, Some(Control::Equation(eq)) if eq.common.treat_as_char)
 }
 
+/// Maximum inline-equation ascent/descent for one composed text line.
+///
+/// The values come from the same EqEdit layout tree that is painted later.
+/// Stored object height can add leading, but it must not replace the natural
+/// baseline: doing so pushes tall sums/fractions into the line below.
+fn line_equation_metrics_px(
+    para: Option<&Paragraph>,
+    line_tac_offsets: &[(usize, f64, usize)],
+    dpi: f64,
+) -> Option<(f64, f64)> {
+    let para = para?;
+    let mut max_ascent = 0.0f64;
+    let mut max_descent = 0.0f64;
+    let mut found = false;
+
+    for (_, _, control_index) in line_tac_offsets {
+        let Some(Control::Equation(eq)) = para.controls.get(*control_index) else {
+            continue;
+        };
+        if !eq.common.treat_as_char {
+            continue;
+        }
+
+        let metrics =
+            crate::renderer::equation::intrinsic_metrics_px(&eq.script, eq.font_size, dpi);
+        let stored_height = hwpunit_to_px(eq.common.height as i32, dpi);
+        let extra = (stored_height - metrics.height).max(0.0);
+        let top_leading = extra / 2.0;
+        let bottom_leading = extra - top_leading;
+        max_ascent = max_ascent.max(metrics.baseline + top_leading);
+        max_descent = max_descent.max(metrics.height - metrics.baseline + bottom_leading);
+        found = true;
+    }
+
+    found.then_some((max_ascent, max_descent))
+}
+
+fn align_line_metrics_to_equation(
+    line_height: f64,
+    baseline: f64,
+    max_font_size: f64,
+    equation_ascent: f64,
+    equation_descent: f64,
+) -> (f64, f64) {
+    let equation_height = equation_ascent + equation_descent;
+    let synthesized_object_baseline = line_height > 0.0
+        && equation_height > max_font_size * 1.2
+        && (baseline - line_height * 0.85).abs() <= 1.0;
+
+    let (text_ascent, text_descent) = if synthesized_object_baseline {
+        // Older edit paths enlarged the line to the object height and then
+        // assigned 85% of that height as its baseline.  Recover the text
+        // metrics before combining them with the equation's real box.
+        (max_font_size * 0.85, max_font_size * 0.15)
+    } else {
+        (baseline, (line_height - baseline).max(0.0))
+    };
+    let aligned_baseline = text_ascent.max(equation_ascent);
+    (
+        aligned_baseline + text_descent.max(equation_descent),
+        aligned_baseline,
+    )
+}
+
+#[cfg(test)]
+mod inline_equation_alignment_tests {
+    use super::align_line_metrics_to_equation;
+
+    #[test]
+    fn replaces_legacy_object_height_baseline_with_equation_baseline() {
+        let (height, baseline) = align_line_metrics_to_equation(
+            60.0, // legacy line enlarged to the whole equation box
+            51.0, // legacy 85% baseline
+            12.0, 31.0, 25.0,
+        );
+
+        assert!((baseline - 31.0).abs() < 0.01);
+        assert!((height - 56.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn preserves_authoritative_non_synthesized_text_descent() {
+        let (height, baseline) = align_line_metrics_to_equation(30.0, 18.0, 12.0, 20.0, 8.0);
+
+        assert!((baseline - 20.0).abs() < 0.01);
+        assert!((height - 32.0).abs() < 0.01);
+    }
+}
+
 fn is_caption_cell_context(cell_ctx: Option<&CellContext>) -> bool {
     cell_ctx
         .and_then(|ctx| ctx.path.last())
@@ -2375,21 +2464,13 @@ impl LayoutEngine {
                         font_size_px,
                     );
                     let hwp_eq_h = hwpunit_to_px(eq.common.height as i32, self.dpi);
-                    let eq_h = if hwp_eq_h > 0.0 {
-                        hwp_eq_h
-                    } else {
-                        layout_box.height
-                    };
+                    let eq_h = hwp_eq_h.max(layout_box.height);
                     let tac_row = tac_row_for(tac_k).min(row_inline_x.len() - 1);
                     let row_y = (y + tac_row as f64 * (line_height + line_spacing_px)
                         - zero_endnote_boundary_result_shift)
                         .max(col_area_y);
                     let inline_x = row_inline_x[tac_row];
-                    let eq_y = if cell_ctx.is_some() {
-                        (row_y + baseline - layout_box.baseline).max(row_y)
-                    } else {
-                        row_y + baseline - layout_box.baseline
-                    };
+                    let eq_y = row_y + baseline - layout_box.baseline;
                     let (eq_cell_idx, eq_cell_para_idx) = if let Some(ref ctx) = cell_ctx {
                         (
                             Some(ctx.path[0].cell_index),
@@ -3006,7 +3087,7 @@ impl LayoutEngine {
                         })
                     })
                     .unwrap_or(false);
-            let (line_height, baseline) = if text_before_picture_line {
+            let (mut line_height, mut baseline) = if text_before_picture_line {
                 let font_lh = max_fs.max(1.0);
                 let font_bl = max_fs * 0.85;
                 (font_lh, ensure_min_baseline(font_bl, max_fs))
@@ -3040,6 +3121,17 @@ impl LayoutEngine {
                     ),
                 )
             };
+            if let Some((equation_ascent, equation_descent)) =
+                line_equation_metrics_px(para, &line_tac_offsets_for_width, self.dpi)
+            {
+                (line_height, baseline) = align_line_metrics_to_equation(
+                    line_height,
+                    baseline,
+                    max_fs,
+                    equation_ascent,
+                    equation_descent,
+                );
+            }
             // 들여쓰기/내어쓰기: 문단 여백은 무조건 적용
             // - 보통(ind=0): 모든 줄 margin_left
             // - 들여쓰기(ind>0): 첫줄 margin_left+indent, 다음줄 margin_left
@@ -5001,22 +5093,11 @@ impl LayoutEngine {
                                 );
                             // HWP 저장 높이를 우선 사용 (한컴 조판 결과 기준)
                             let hwp_eq_h = hwpunit_to_px(eq.common.height as i32, self.dpi);
-                            let eq_h = if hwp_eq_h > 0.0 {
-                                hwp_eq_h
-                            } else {
-                                layout_box.height
-                            };
+                            let eq_h = hwp_eq_h.max(layout_box.height);
                             // 텍스트와 섞인 인라인 수식뿐 아니라 공백 run 안의 TAC 수식도
                             // baseline을 맞춘다. 수식 renderer는 bbox 높이로 세로 스케일하지
                             // 않으므로 y에 직접 붙이면 큰 루트/분수 수식이 아래 줄을 덮는다.
-                            let eq_y = if cell_ctx.is_none()
-                                && comp_line.runs.iter().all(|r| {
-                                    !r.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}')
-                                }) {
-                                y + baseline - layout_box.baseline
-                            } else {
-                                (y + baseline - layout_box.baseline).max(y)
-                            };
+                            let eq_y = y + baseline - layout_box.baseline;
                             let (eq_cell_idx, eq_cell_para_idx) = if let Some(ref ctx) = cell_ctx {
                                 (
                                     Some(ctx.path[0].cell_index),
