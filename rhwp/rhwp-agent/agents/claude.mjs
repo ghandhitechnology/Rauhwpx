@@ -51,6 +51,7 @@ export function createClaudeSession(opts) {
       '--permission-mode', 'dontAsk',
       '--append-system-prompt', SYSTEM_BRIEF,
       ...(opts.model ? ['--model', opts.model] : []),
+      ...(opts.effort ? ['--effort', opts.effort] : []),
     ];
   }
 

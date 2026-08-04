@@ -19,6 +19,7 @@
  * @property {number} hubPort
  * @property {string} token
  * @property {string} [model]
+ * @property {string} [effort]
  * @property {(evt: UnifiedAgentEvent) => void} onEvent
  *
  * @typedef {Object} AgentSession

@@ -39,7 +39,13 @@ export type AgentStreamEvent =
 
 export type SidebarEvent =
   | { type: 'connection'; state: 'connecting' | 'connected' | 'disconnected' | 'replaced' }
-  | { type: 'chat-started'; agent: AgentName; sessionId: string | null }
+  | {
+      type: 'chat-started';
+      agent: AgentName;
+      sessionId: string | null;
+      model?: string;
+      effort?: string;
+    }
   | { type: 'agent'; event: AgentStreamEvent }
   | { type: 'hub-error'; code: string; message: string };
 

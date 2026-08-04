@@ -25,7 +25,7 @@ export interface AgentBridge {
   getConnectionState(): 'connecting' | 'connected' | 'disconnected' | 'replaced';
   getActiveAgent(): AgentName | null;
   isTurnRunning(): boolean;
-  startChat(agent: AgentName): void;
+  startChat(agent: AgentName, model?: string, effort?: string): void;
   sendUserMessage(text: string): void;
   interrupt(): void;
   onEvent(cb: (e: SidebarEvent) => void): () => void;
@@ -60,9 +60,11 @@ class AgentBridgeImpl implements AgentBridge {
 
   private listeners = new Set<(e: SidebarEvent) => void>();
   private selectedAgent: AgentName = 'claude';
+  private selectedModel: string | null = null;
+  private selectedEffort: string | null = null;
   private activeAgent: AgentName | null = null;
   private turnRunning = false;
-  private pendingChatStart: AgentName | null = null;
+  private pendingChatStart: { agent: AgentName; model?: string; effort?: string } | null = null;
   private queuedMessages: string[] = [];
 
   constructor(deps: AgentBridgeDeps, opts?: AgentBridgeOptions) {
@@ -121,8 +123,15 @@ class AgentBridgeImpl implements AgentBridge {
       this.reconnectAttempt = 0;
       this.setState('connected');
       if (this.pendingChatStart !== null) {
-        this.sendJson({ v: 1, type: 'chat-start', agent: this.pendingChatStart });
+        const pending = this.pendingChatStart;
         this.pendingChatStart = null;
+        this.sendJson({
+          v: 1,
+          type: 'chat-start',
+          agent: pending.agent,
+          ...(pending.model ? { model: pending.model } : {}),
+          ...(pending.effort ? { effort: pending.effort } : {}),
+        });
       }
     };
     ws.onmessage = (ev) => {
@@ -219,10 +228,14 @@ class AgentBridgeImpl implements AgentBridge {
       }
       case 'chat-started': {
         if (isAgentName(msg.agent)) this.activeAgent = msg.agent;
+        if (typeof msg.model === 'string') this.selectedModel = msg.model;
+        if (typeof msg.effort === 'string') this.selectedEffort = msg.effort;
         this.emit({
           type: 'chat-started',
           agent: isAgentName(msg.agent) ? msg.agent : this.selectedAgent,
           sessionId: typeof msg.sessionId === 'string' ? msg.sessionId : null,
+          ...(typeof msg.model === 'string' ? { model: msg.model } : {}),
+          ...(typeof msg.effort === 'string' ? { effort: msg.effort } : {}),
         });
         this.flushQueuedMessages();
         break;
@@ -312,12 +325,25 @@ class AgentBridgeImpl implements AgentBridge {
     return this.turnRunning;
   }
 
-  startChat(agent: AgentName): void {
+  startChat(agent: AgentName, model?: string, effort?: string): void {
     this.selectedAgent = agent;
+    if (model) this.selectedModel = model;
+    if (effort) this.selectedEffort = effort;
+    const payload = {
+      v: 1 as const,
+      type: 'chat-start' as const,
+      agent,
+      ...(this.selectedModel ? { model: this.selectedModel } : {}),
+      ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
+    };
     if (this.state === 'connected') {
-      this.sendJson({ v: 1, type: 'chat-start', agent });
+      this.sendJson(payload);
     } else {
-      this.pendingChatStart = agent;
+      this.pendingChatStart = {
+        agent,
+        model: this.selectedModel ?? undefined,
+        effort: this.selectedEffort ?? undefined,
+      };
     }
   }
 
@@ -325,9 +351,19 @@ class AgentBridgeImpl implements AgentBridge {
     if (this.activeAgent === null) {
       this.queuedMessages.push(text);
       if (this.state === 'connected') {
-        this.sendJson({ v: 1, type: 'chat-start', agent: this.selectedAgent });
+        this.sendJson({
+          v: 1,
+          type: 'chat-start',
+          agent: this.selectedAgent,
+          ...(this.selectedModel ? { model: this.selectedModel } : {}),
+          ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
+        });
       } else {
-        this.pendingChatStart = this.selectedAgent;
+        this.pendingChatStart = {
+          agent: this.selectedAgent,
+          model: this.selectedModel ?? undefined,
+          effort: this.selectedEffort ?? undefined,
+        };
       }
       return;
     }

@@ -255,3 +255,20 @@ body {
   white-space: nowrap;
   border: 0;
 }
+
+/* 얇은 stroke 쉐브론 — 기본은 아래, 회전으로 방향 전환 */
+.ui-chevron {
+  display: block;
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  color: inherit;
+  transform-origin: center;
+  transition: transform 200ms var(--ease-out, cubic-bezier(0.2, 0.8, 0.2, 1));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-chevron {
+    transition: none;
+  }
+}

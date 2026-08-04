@@ -14,7 +14,12 @@ import { CommandDispatcher } from '@/command/dispatcher';
 import type { EditorContext, CommandServices, EditorEditMode } from '@/command/types';
 import { confirmSaveBeforeReplacingDocument, fileCommands } from '@/command/commands/file';
 import { editCommands } from '@/command/commands/edit';
-import { syncClipMenu, syncTextMarkMenu, viewCommands } from '@/command/commands/view';
+import {
+  setBasicToolboxExpanded,
+  syncClipMenu,
+  syncTextMarkMenu,
+  viewCommands,
+} from '@/command/commands/view';
 import { formatCommands } from '@/command/commands/format';
 import { insertCommands } from '@/command/commands/insert';
 import { tableCommands } from '@/command/commands/table';
@@ -430,7 +435,8 @@ async function initialize(): Promise<void> {
     });
 
     // 툴바 내 data-cmd 버튼 클릭 → 커맨드 디스패치
-    document.querySelectorAll('.tb-btn[data-cmd]').forEach(btn => {
+    // (.tb-btn + 서식바 접기 버튼 .sb-collapse-btn)
+    document.querySelectorAll('.tb-btn[data-cmd], .sb-collapse-btn[data-cmd]').forEach(btn => {
       btn.addEventListener('mousedown', (e) => {
         e.preventDefault();
         const cmd = (btn as HTMLElement).dataset.cmd;
@@ -811,6 +817,8 @@ function setupEventListeners(): void {
 
   eventBus.on('headerFooterModeChanged', (mode) => {
     const isActive = (mode as string) !== 'none';
+    // 접힌 기본 도구 상자는 머리말/꼬리말 전용 버튼을 가리므로 모드 진입 시 펼친다.
+    if (isActive) setBasicToolboxExpanded(true);
     // 도구상자 전환
     if (hfGroup) {
       hfGroup.style.display = isActive ? '' : 'none';
@@ -835,6 +843,7 @@ function setupEventListeners(): void {
   eventBus.on('footnoteModeChanged', (active) => {
     const isActive = active as boolean;
     noteToolbarActive = isActive;
+    if (isActive) setBasicToolboxExpanded(true);
     if (noteGroup) {
       noteGroup.style.display = isActive ? '' : 'none';
     }

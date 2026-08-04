@@ -48,6 +48,28 @@ export function syncTextMarkMenu(showControlCodes: boolean, showParagraphMarks: 
   });
 }
 
+/** 기본 도구 상자(#icon-toolbar) 접힘 UI를 메뉴/서식바 토글과 동기화한다. */
+export function syncBasicToolboxUi(expanded: boolean): void {
+  document.querySelectorAll('[data-cmd="view:toolbox-basic"]').forEach((btn) => {
+    btn.classList.toggle('active', expanded);
+    if (!(btn instanceof HTMLElement)) return;
+    btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    if (btn.classList.contains('sb-collapse-btn')) {
+      btn.title = expanded ? '기본 도구 상자 접기' : '기본 도구 상자 펼치기';
+      btn.setAttribute('aria-label', expanded ? '기본 도구 상자 접기' : '기본 도구 상자 펼치기');
+    }
+  });
+}
+
+/** 머리말/주석 모드처럼 도구 상자가 필요할 때 강제로 펼친다. */
+export function setBasicToolboxExpanded(expanded: boolean): void {
+  const el = document.getElementById('icon-toolbar');
+  if (!el) return;
+  el.classList.toggle('collapsed', !expanded);
+  syncBasicToolboxUi(expanded);
+  window.dispatchEvent(new Event('resize'));
+}
+
 /**
  * view:toggle-clip 내부 상태(clipEnabled). true=잘림 적용, false=오버플로 표시(짤림보기 켜짐).
  * 저장된 짤림보기 설정(clipView)에서 초기화한다. clipEnabled = !clipView.
@@ -313,23 +335,18 @@ export const viewCommands: CommandDef[] = [
       ).show();
     },
   },
-  (() => {
-    let visible: boolean | null = null;
-    return {
-      id: 'view:toolbox-basic',
-      label: '기본',
-      execute() {
-        const el = document.getElementById('icon-toolbar');
-        if (!el) return;
-        if (visible === null) visible = getComputedStyle(el).display !== 'none';
-        visible = !visible;
-        el.style.display = visible ? '' : 'none';
-        document.querySelectorAll('[data-cmd="view:toolbox-basic"]').forEach(btn => {
-          btn.classList.toggle('active', visible!);
-        });
-      },
-    } satisfies CommandDef;
-  })(),
+  {
+    id: 'view:toolbox-basic',
+    label: '기본',
+    execute() {
+      const el = document.getElementById('icon-toolbar');
+      if (!el) return;
+      const expanded = el.classList.toggle('collapsed') === false;
+      syncBasicToolboxUi(expanded);
+      // 헤더 높이 변화 → 편집 영역/사이드바 배치 갱신
+      window.dispatchEvent(new Event('resize'));
+    },
+  },
   (() => {
     let visible: boolean | null = null;
     return {

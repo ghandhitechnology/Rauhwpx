@@ -18,6 +18,46 @@
   overflow: visible;
 }
 
+/* Google Docs 스타일: 서식 바 우측에서 위 도구 상자 접기/펼치기 */
+.sb-collapse-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  align-self: stretch;
+  margin-left: auto;
+  min-width: 28px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ui-text-muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* 펼침: 위쪽(접기), 접힘: 아래쪽(펼치기) — aria-expanded 로 회전 */
+.sb-collapse-btn .ui-chevron {
+  transform: rotate(0deg);
+}
+
+.sb-collapse-btn[aria-expanded='true'] .ui-chevron {
+  transform: rotate(180deg);
+}
+
+.sb-collapse-btn:hover {
+  background: var(--ui-hover);
+  border-color: var(--ui-border-light);
+  color: var(--ui-text);
+}
+
+.sb-collapse-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
 .sb-command-band,
 .sb-command-group,
 .sb-field-grid {

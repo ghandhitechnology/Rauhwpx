@@ -28,6 +28,9 @@ export function createCodexSession(opts) {
     // sandbox danger-full-access 조합에서만 MCP 호출이 실행됨을 실측으로 확인했다.
     // (read-only/workspace-write 샌드박스에서는 MCP 호출이 무조건 취소됨)
     '-c', 'approval_policy="never"',
+    ...(opts.effort
+      ? ['-c', `model_reasoning_effort=${JSON.stringify(opts.effort)}`]
+      : []),
   ];
   const common = [
     '--json', '--skip-git-repo-check', '--ignore-user-config',

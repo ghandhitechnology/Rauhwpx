@@ -12,8 +12,33 @@ const STUDIO_TOOL_TIMEOUT_MS = 30_000;
 /** @type {import('ws').WebSocket | null} */
 let studioSocket = null;
 const mcpSockets = new Set();
-/** @type {{ agent: 'claude'|'codex', backend: any, status: 'idle'|'running', sessionId: string|null } | null} */
+/** @type {{ agent: 'claude'|'codex', model: string|null, effort: string|null, backend: any, status: 'idle'|'running', sessionId: string|null } | null} */
 let session = null;
+
+const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
+const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
+const DEFAULT_MODEL = { claude: 'sonnet', codex: 'gpt-5.6-sol' };
+const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const CLAUDE_EFFORTS_HAIKU = new Set(['low', 'medium', 'high']);
+const CODEX_EFFORTS = new Set(['low', 'medium', 'high']);
+const DEFAULT_EFFORT = { claude: 'high', codex: 'high' };
+
+function resolveModel(agent, requested) {
+  const allowed = agent === 'claude' ? CLAUDE_MODELS : CODEX_MODELS;
+  if (typeof requested === 'string' && allowed.has(requested)) return requested;
+  const envDefault = agent === 'claude' ? process.env.RHWP_CLAUDE_MODEL : process.env.RHWP_CODEX_MODEL;
+  if (typeof envDefault === 'string' && allowed.has(envDefault)) return envDefault;
+  return DEFAULT_MODEL[agent];
+}
+
+function resolveEffort(agent, model, requested) {
+  const allowed = agent === 'codex'
+    ? CODEX_EFFORTS
+    : (model === 'haiku' ? CLAUDE_EFFORTS_HAIKU : CLAUDE_EFFORTS);
+  if (typeof requested === 'string' && allowed.has(requested)) return requested;
+  const preferred = DEFAULT_EFFORT[agent];
+  return allowed.has(preferred) ? preferred : [...allowed][0];
+}
 /** @type {Map<number, { mcpSocket: any, clientId: number, timer: NodeJS.Timeout }>} */
 const pendingCalls = new Map();
 let nextHubId = 1;
@@ -34,7 +59,13 @@ function sendJson(sock, obj) {
 
 function sessionInfo() {
   return session
-    ? { agent: session.agent, sessionId: session.sessionId, status: session.status }
+    ? {
+      agent: session.agent,
+      model: session.model,
+      effort: session.effort,
+      sessionId: session.sessionId,
+      status: session.status,
+    }
     : null;
 }
 
@@ -65,19 +96,27 @@ function disposeSession() {
   }
 }
 
-function startSession(agent) {
-  if (session && session.agent === agent) return session;
+function startSession(agent, requestedModel, requestedEffort) {
+  const model = resolveModel(agent, requestedModel);
+  const effort = resolveEffort(agent, model, requestedEffort);
+  if (
+    session
+    && session.agent === agent
+    && session.model === model
+    && session.effort === effort
+  ) return session;
   disposeSession();
   const opts = {
     rootDir: ROOT,
     mcpScriptPath: MCP_SCRIPT,
     hubPort: PORT,
     token: TOKEN,
-    model: agent === 'claude' ? process.env.RHWP_CLAUDE_MODEL : process.env.RHWP_CODEX_MODEL,
+    model,
+    effort,
     onEvent: onBackendEvent,
   };
   const backend = agent === 'claude' ? createClaudeSession(opts) : createCodexSession(opts);
-  session = { agent, backend, status: 'idle', sessionId: backend.getSessionId() };
+  session = { agent, model, effort, backend, status: 'idle', sessionId: backend.getSessionId() };
   return session;
 }
 
@@ -90,8 +129,15 @@ function handleStudioMessage(sock, msg) {
         return;
       }
       try {
-        const s = startSession(agent);
-        sendJson(sock, { v: 1, type: 'chat-started', agent: s.agent, sessionId: s.sessionId });
+        const s = startSession(agent, msg.model, msg.effort);
+        sendJson(sock, {
+          v: 1,
+          type: 'chat-started',
+          agent: s.agent,
+          model: s.model,
+          effort: s.effort,
+          sessionId: s.sessionId,
+        });
       } catch (e) {
         disposeSession();
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });

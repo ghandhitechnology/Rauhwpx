@@ -15,6 +15,11 @@
   overflow: visible;
 }
 
+/* 기본 도구 상자 완전 접기 (토글은 서식 바에 둠) */
+#icon-toolbar.collapsed {
+  display: none;
+}
+
 .tb-group {
   display: flex;
   align-items: stretch;
