@@ -164,9 +164,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let selectedEffort = resolveEffortForAgent(selectedAgent, null, selectedModel);
   let connState: ConnectionState = bridge.getConnectionState();
   let turnRunning = bridge.isTurnRunning();
-  /** 현재 스트리밍 중인 assistant 말풍선 (tool-call 이후에는 새로 연다). */
+  /** 현재 스트리밍 중인 assistant 텍스트 (tool-call 이후에는 새로 연다). */
   let streamBubble: HTMLElement | null = null;
   const toolRows = new Map<string, { status: HTMLElement; result: HTMLPreElement }>();
+  let turnActivity: {
+    root: HTMLElement;
+    toggle: HTMLButtonElement;
+    label: HTMLElement;
+    content: HTMLElement;
+    startedAt: number;
+    toolCount: number;
+    failedToolCount: number;
+  } | null = null;
   let insetRecenterRaf: number | null = null;
   let currentThread = createEmptyThread({
     agent: selectedAgent,
@@ -807,10 +816,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     maybeRequestTitle();
   }
 
-  function flushAssistantBuffer(): void {
+  function flushAssistantBuffer(opts?: { persist?: boolean }): void {
     const text = assistantBuffer.trim();
     assistantBuffer = '';
     if (!text) return;
+    if (opts?.persist === false) return;
     currentThread.messages.push({
       role: 'assistant',
       text,
@@ -836,6 +846,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function renderMessagesFromThread(thread: ChatThread): void {
     messages.replaceChildren();
     streamBubble = null;
+    turnActivity = null;
     assistantBuffer = '';
     toolRows.clear();
     for (const msg of thread.messages) {
@@ -854,6 +865,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function clearChatUi(): void {
     messages.replaceChildren();
     streamBubble = null;
+    turnActivity = null;
     assistantBuffer = '';
     sweepUnresolvedToolRows();
   }
@@ -1022,13 +1034,140 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     return bubble;
   }
 
+  function animateActivityLabel(
+    activity: NonNullable<typeof turnActivity>,
+    text: string,
+  ): void {
+    if (activity.label.textContent === text) return;
+    activity.label.textContent = text;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    for (const animation of activity.label.getAnimations()) animation.cancel();
+    activity.label.animate(
+      [
+        { opacity: 0.35, transform: 'translateY(3px)' },
+        { opacity: 1, transform: 'translateY(0)' },
+      ],
+      {
+        duration: 200,
+        easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
+      },
+    );
+  }
+
+  function formatActivityDuration(startedAt: number): string {
+    const totalSeconds = Math.max(1, Math.round((performance.now() - startedAt) / 1000));
+    if (totalSeconds < 60) return `${totalSeconds}초`;
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return seconds > 0 ? `${minutes}분 ${seconds}초` : `${minutes}분`;
+  }
+
+  function ensureTurnActivity(
+    agent: AgentName,
+    anchor?: HTMLElement | null,
+  ): NonNullable<typeof turnActivity> {
+    if (turnActivity) return turnActivity;
+
+    const activity = el('div', `ag-activity ag-${agent} ag-activity-running`);
+    const toggle = el('button', 'ag-activity-toggle') as HTMLButtonElement;
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', 'true');
+    const label = el('span', 'ag-activity-label', '작업 중…');
+    const chevron = createChevron('ag-activity-chevron');
+    toggle.append(label, chevron);
+
+    const collapse = el('div', 'ag-activity-collapse');
+    const content = el('div', 'ag-activity-content');
+    collapse.appendChild(content);
+    activity.append(toggle, collapse);
+
+    toggle.addEventListener('click', () => {
+      const collapsed = activity.classList.toggle('ag-activity-collapsed');
+      toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    });
+
+    if (anchor?.parentElement === messages) {
+      messages.insertBefore(activity, anchor);
+    } else {
+      withAutoScroll(() => messages.appendChild(activity));
+    }
+
+    turnActivity = {
+      root: activity,
+      toggle,
+      label,
+      content,
+      startedAt: performance.now(),
+      toolCount: 0,
+      failedToolCount: 0,
+    };
+    return turnActivity;
+  }
+
+  /** 도구 호출 앞의 진행 설명을 activity 안으로 옮겨 최종 답변과 분리한다. */
+  function compactStreamIntoActivity(agent: AgentName): void {
+    const bubble = streamBubble;
+    if (!bubble) return;
+    if (!(bubble.textContent ?? '').trim()) {
+      bubble.remove();
+      streamBubble = null;
+      return;
+    }
+    const activity = ensureTurnActivity(agent, bubble);
+    bubble.className = 'ag-activity-note';
+    activity.content.appendChild(bubble);
+    streamBubble = null;
+  }
+
+  function completeTurnActivity(): void {
+    const activity = turnActivity;
+    if (!activity) return;
+    const count = activity.toolCount;
+    const duration = formatActivityDuration(activity.startedAt);
+    if (activity.failedToolCount > 0) {
+      animateActivityLabel(
+        activity,
+        `작업 종료 · ${activity.failedToolCount}개 오류 · ${duration}`,
+      );
+      activity.root.classList.add('ag-activity-error');
+    } else {
+      animateActivityLabel(activity, `작업 완료 · ${count}단계 · ${duration}`);
+      activity.root.classList.add('ag-activity-complete');
+    }
+    activity.root.classList.remove('ag-activity-running');
+    // 답변이 먼저 자리 잡은 뒤 작업 내역이 접혀 레이아웃 점프가 덜 느껴지게 한다.
+    window.setTimeout(() => {
+      withAutoScroll(() => {
+        activity.root.classList.add('ag-activity-collapsed');
+        activity.toggle.setAttribute('aria-expanded', 'false');
+      });
+    }, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 120);
+    turnActivity = null;
+  }
+
+  function appendCheckDocumentMessage(agent: AgentName): void {
+    const text = '작업을 마쳤습니다. 문서를 확인해 보세요.';
+    const message = openAssistantBubble(agent);
+    message.textContent = text;
+    message.classList.add('ag-msg-enter');
+    assistantBuffer = text;
+    flushAssistantBuffer();
+    streamBubble = null;
+  }
+
   function addToolRow(evt: Extract<AgentStreamEvent, { type: 'tool-call' }>): void {
+    const activity = ensureTurnActivity(evt.agent);
+    activity.toolCount += 1;
+    animateActivityLabel(activity, `작업 중 · ${activity.toolCount}단계`);
+
     const row = el('div', `ag-tool-row ag-${evt.agent}`);
-    const head = el('div', 'ag-tool-head');
+    const head = el('button', 'ag-tool-head');
+    head.type = 'button';
+    head.setAttribute('aria-expanded', 'false');
     const status = el('span', 'ag-tool-status ag-spin');
     const name = el('span', 'ag-tool-name', evt.tool);
     const summary = el('span', 'ag-tool-summary', truncate(evt.argsJson, 60));
-    const chevron = el('span', 'ag-tool-chevron', '▸');
+    const chevron = createChevron('ag-tool-chevron');
     head.append(status, name, summary, chevron);
 
     const body = el('div', 'ag-tool-body');
@@ -1039,13 +1178,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
     head.addEventListener('click', () => {
       body.hidden = !body.hidden;
-      chevron.textContent = body.hidden ? '▸' : '▾';
+      row.classList.toggle('ag-tool-open', !body.hidden);
+      head.setAttribute('aria-expanded', body.hidden ? 'false' : 'true');
     });
 
     row.append(head, body);
-    withAutoScroll(() => messages.appendChild(row));
+    withAutoScroll(() => activity.content.appendChild(row));
     toolRows.set(evt.callId, { status, result });
-    // 다음 text-delta 는 tool row 아래의 새 말풍선에 이어 쓴다 (시간순 유지).
+    // 다음 text-delta 는 activity 아래의 최종 답변 후보로 연다.
     streamBubble = null;
   }
 
@@ -1057,6 +1197,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     entry.status.classList.add(evt.ok ? 'ag-ok' : 'ag-err');
     entry.status.textContent = evt.ok ? '✓' : '✕';
     entry.result.textContent = evt.resultPreview;
+    if (!evt.ok && turnActivity) turnActivity.failedToolCount += 1;
   }
 
   /**
@@ -1078,18 +1219,24 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       case 'turn-start':
         setTurnRunning(true);
         assistantBuffer = '';
-        openAssistantBubble(event.agent);
+        streamBubble = null;
+        turnActivity = null;
         break;
       case 'text-delta': {
         const bubble = streamBubble ?? openAssistantBubble(event.agent);
         assistantBuffer += event.text;
         withAutoScroll(() => {
+          if (!bubble.classList.contains('ag-msg-enter')) {
+            bubble.classList.add('ag-msg-enter');
+          }
           bubble.textContent = (bubble.textContent ?? '') + event.text;
         });
         break;
       }
       case 'tool-call':
-        flushAssistantBuffer();
+        // 도구 전 설명은 이전 채팅 복원 시 별도 답변으로 남기지 않는다.
+        flushAssistantBuffer({ persist: false });
+        compactStreamIntoActivity(event.agent);
         addToolRow(event);
         break;
       case 'tool-result':
@@ -1100,13 +1247,27 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
           systemMessage(`MCP 서버 연결 실패: ${event.mcpStatus}`);
         }
         break;
-      case 'turn-end':
+      case 'turn-end': {
+        const finalBubble =
+          streamBubble?.parentElement === messages
+          && Boolean((streamBubble.textContent ?? '').trim());
         setTurnRunning(false);
-        streamBubble = null;
         flushAssistantBuffer();
         sweepUnresolvedToolRows();
         if (event.errorMessage) systemMessage(event.errorMessage);
+        const completed =
+          event.stopReason !== 'interrupted'
+          && event.stopReason !== 'failed'
+          && event.stopReason !== 'exited'
+          && !event.errorMessage
+          && (turnActivity?.failedToolCount ?? 0) === 0;
+        if (turnActivity && !finalBubble && completed) {
+          appendCheckDocumentMessage(event.agent);
+        }
+        completeTurnActivity();
+        streamBubble = null;
         break;
+      }
       case 'error':
         systemMessage(event.message);
         break;
