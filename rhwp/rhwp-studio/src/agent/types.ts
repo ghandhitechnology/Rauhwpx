@@ -74,8 +74,25 @@ export interface DocPoint {
   charOffset: number;
 }
 
+/**
+ * 표 셀 주소 (최상위 표만 — 중첩 표는 Phase-1 범위 밖).
+ * paraIdx = 표 컨트롤을 담은 본문 문단, cellIdx = flat 셀 인덱스.
+ */
+export interface CellAddr {
+  paraIdx: number;
+  controlIdx: number;
+  cellIdx: number;
+}
+
+export function sameCell(a: CellAddr | undefined, b: CellAddr | undefined): boolean {
+  if (!a || !b) return !a && !b;
+  return a.paraIdx === b.paraIdx && a.controlIdx === b.controlIdx && a.cellIdx === b.cellIdx;
+}
+
 export interface DocRange {
   sectionIdx: number;
+  /** 존재하면 startParaIdx/endParaIdx 는 이 셀 내부 문단 인덱스다 */
+  cell?: CellAddr;
   startParaIdx: number;
   startCharOffset: number;
   endParaIdx: number;
@@ -91,6 +108,152 @@ export interface CharFormatProps {
   fontSize?: number;
   /** '#RRGGBB' */
   textColor?: string;
+  /** findOrCreateFontId 로 해석된 숫자 id (fontFamily 는 executor 에서 변환) */
+  fontId?: number;
+}
+
+/** 표 등 컨트롤 앵커 — replay 후 재바인딩된다 */
+export interface ObjectAnchor {
+  paraIdx: number;
+  controlIdx: number;
+  /** 앵커 문단 내 삽입 지점 (shiftPoint 통과용; 모르면 0) */
+  charOffset: number;
+}
+
+/**
+ * 객체 연산 (Pair-Editing Phase 2). 데이터 전용 — apply/revert/verify 는
+ * pending-edits 의 switch 가 수행한다.
+ *
+ * 분류(설계 리뷰 확정):
+ * - applied-now(즉시 적용, reject 시 역연산): createTable(treatAsChar 경로),
+ *   insertImage, insertEquation, tableStructure(insert_row/col), paraFormat, pageLayout,
+ *   headerFooter(신규 생성일 때)
+ * - mark-only(approve 시 적용): tableStructure(delete_row/col/merge_cells),
+ *   setCellProps, setTableProps, applyStyle, headerFooter(기존 HF 수정)
+ */
+export type ObjectOp =
+  | {
+      type: 'createTable';
+      sectionIdx: number; paraIdx: number; charOffset: number;
+      rows: number; cols: number;
+      colWidthsHu?: number[];
+      headerRow: boolean; headerBold: boolean; headerFill?: string;
+      cells?: string[][];
+      anchor?: ObjectAnchor;
+      /** 드리프트 프로브 기준 크기 — 같은 pending 상태의 구조 op 이 적용/되돌려질 때 갱신 */
+      expectedRows?: number;
+      expectedCols?: number;
+    }
+  | {
+      type: 'insertImage';
+      sectionIdx: number; paraIdx: number; charOffset: number;
+      bytes: Uint8Array; extension: string;
+      widthHu: number; heightHu: number;
+      naturalWidthPx: number; naturalHeightPx: number;
+      description: string;
+      anchor?: ObjectAnchor;
+    }
+  | {
+      type: 'insertEquation';
+      sectionIdx: number; paraIdx: number; charOffset: number;
+      /** 존재하면 paraIdx 는 이 셀 내부 문단 인덱스, anchor.controlIdx 는 셀 문단 내 수식 인덱스 */
+      cell?: CellAddr;
+      script: string; fontSizeHu: number; colorRef: number;
+      anchor?: ObjectAnchor;
+    }
+  | {
+      type: 'tableStructure';
+      sectionIdx: number; tableParaIdx: number; controlIdx: number;
+      op: 'insert_row' | 'insert_col';
+      index: number; after: boolean;
+      /** 적용 후 역연산용 삽입 결과 인덱스 (after ? index+1 : index) */
+      insertedIndex?: number;
+      /** 드리프트 프로브용 적용 직후 크기 */
+      dims?: { rowCount: number; colCount: number };
+    }
+  | {
+      type: 'tableStructureMarked';
+      sectionIdx: number; tableParaIdx: number; controlIdx: number;
+      op: 'delete_row' | 'delete_col' | 'merge_cells';
+      rowIdx?: number; colIdx?: number;
+      startRow?: number; startCol?: number; endRow?: number; endCol?: number;
+      /** 마크 시점 크기 — 드리프트 프로브 */
+      dims: { rowCount: number; colCount: number };
+    }
+  | {
+      type: 'setCellProps';
+      sectionIdx: number; tableParaIdx: number; controlIdx: number; cellIdx: number;
+      props: Record<string, unknown>;
+      dims: { rowCount: number; colCount: number };
+    }
+  | {
+      type: 'setTableProps';
+      sectionIdx: number; tableParaIdx: number; controlIdx: number;
+      props: Record<string, unknown>;
+      dims: { rowCount: number; colCount: number };
+    }
+  | {
+      type: 'paraFormat';
+      sectionIdx: number; paraIdx: number; cell?: CellAddr;
+      propsJson: string;
+      /** applied-now 역연산: 문단별 이전 para_shape_id */
+      prevParaShapeId: number;
+      charOffset: number;
+      /** 드리프트 프로브용 문단 텍스트 지문 (등록 시점 앞 24자) */
+      textSample?: string;
+    }
+  | {
+      type: 'applyStyle';
+      sectionIdx: number; paraIdx: number; cell?: CellAddr;
+      styleId: number;
+      charOffset: number;
+      /** 드리프트 프로브용 문단 텍스트 지문 (등록 시점 앞 24자) */
+      textSample?: string;
+    }
+  | {
+      type: 'pageLayout';
+      sectionIdx: number;
+      pageDef?: { next: Record<string, unknown>; prev: Record<string, unknown> };
+      columns?: {
+        next: { columnCount: number; columnType: number; sameWidth: number; spacing: number };
+        prev: { columnCount: number; columnType: number; sameWidth: number; spacing: number };
+      };
+    }
+  | {
+      type: 'headerFooter';
+      sectionIdx: number; isHeader: boolean; applyTo: number;
+      text: string;
+      /** 'left'|'center'|'right' 위치의 쪽 번호 필드 추가 */
+      pageNumber?: string;
+      /** false = 이 op 이 HF 를 생성했다 (reject 시 삭제) */
+      existedBefore: boolean;
+    };
+
+/** applied-now 인지 mark-only 인지 — 분류는 op 데이터에서 유도된다 */
+export function isObjectOpApplied(obj: ObjectOp): boolean {
+  switch (obj.type) {
+    case 'createTable':
+    case 'insertImage':
+    case 'insertEquation':
+    case 'tableStructure':
+    case 'paraFormat':
+    case 'pageLayout':
+      return true;
+    case 'headerFooter':
+      return !obj.existedBefore;
+    default:
+      return false;
+  }
+}
+
+/** 이 객체 op 이 해당 표에 대한 파괴적 마크인가 (executor 가드용) */
+export function isDestructiveTableMark(
+  obj: ObjectOp, sectionIdx: number, tableParaIdx: number, controlIdx: number,
+): boolean {
+  return obj.type === 'tableStructureMarked'
+    && obj.sectionIdx === sectionIdx
+    && obj.tableParaIdx === tableParaIdx
+    && obj.controlIdx === controlIdx;
 }
 
 export type PendingOp =
@@ -104,7 +267,8 @@ export type PendingOp =
       format: CharFormatProps;
       inverse: CharFormatProps;
     } // applied
-  | { kind: 'field'; id: string; agent: AgentName; name: string; oldValue: string; newValue: string }; // applied
+  | { kind: 'field'; id: string; agent: AgentName; name: string; oldValue: string; newValue: string } // applied
+  | { kind: 'object'; id: string; agent: AgentName; obj: ObjectOp }; // applied 여부는 isObjectOpApplied(obj)
 
 export type ChangeSetStatus = 'open' | 'awaiting-review';
 

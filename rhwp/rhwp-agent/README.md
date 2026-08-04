@@ -77,19 +77,44 @@ Studio side (build-time, Vite): `VITE_RHWP_AGENT_URL` (default
 Each CLI spawns `mcp-stdio.mjs` as its MCP server; the hub passes
 `RHWP_WS_URL`, `RHWP_AGENT_TOKEN`, and `RHWP_AGENT_NAME` via env.
 
-## MCP tools (server name `rhwp`, 12 tools)
+## MCP tools (server name `rhwp`, 24 tools)
 
 Visible to Claude as `mcp__rhwp__<name>`.
 
-- Read: `get_structure` (entry point), `get_text_range`, `get_selection`,
-  `get_fields`, `get_document_info`, `find_text`, `render_page`
+- Read: `get_structure` (entry point; includes tables), `get_text_range`,
+  `get_selection`, `get_fields`, `get_document_info` (includes `fontsUsed`),
+  `find_text` (searches cells too), `render_page`, `list_styles`,
+  `preview_equation`
 - Write (all pending approval): `insert_text`, `delete_range`,
-  `replace_range`, `apply_char_format`, `set_field_value`
+  `replace_range`, `apply_char_format` (incl. `fontFamily`),
+  `set_field_value`, `create_table` (bulk cell fill + header row),
+  `edit_table` (rows/cols/merge/props), `apply_para_format`, `apply_style`,
+  `insert_image` (local `imagePath`; this process reads/measures the file),
+  `insert_equation` (HWP 수식 스크립트; render-validated before insert),
+  `insert_chart` (bar/line/pie/scatter → PNG), `set_page_layout`,
+  `edit_header_footer` (page-number fields), `insert_page_break`
+
+Write-tool approval model: non-destructive object ops (create table, insert
+image/equation/chart, para format, page layout, new header/footer) apply
+immediately as tinted pending changes and are reverted by inverse ops on
+reject; destructive ops (delete row/col, merge cells, cell/table props,
+apply style, editing an existing header/footer) are mark-only and execute
+when the user approves. A table with a pending destructive mark rejects
+further edits with `PENDING_DESTRUCTIVE_OP` until reviewed.
 
 Revision contract: every read response carries a `revision`; every write
 requires `expectedRevision`. A mismatch returns `REVISION_MISMATCH`, telling
 the model to re-read. Coordinates are body-text based:
 `sectionIdx` / `paraIdx` / `charOffset` (0-based).
+
+Table cells: `get_structure` lists every top-level table per section
+(`tables[]` with `paraIdx`/`controlIdx`, dimensions, and per-cell text), and
+`find_text` also matches text inside cells (such matches carry a `cell`
+object). `get_text_range`, `insert_text`, `delete_range`, `replace_range`
+and `apply_char_format` accept an optional
+`cell: { paraIdx, controlIdx, cellIdx }` — when present, paragraph indexes
+and offsets are relative to the inside of that cell. Nested tables are not
+addressable yet (Phase-1 limit).
 
 ## Troubleshooting
 

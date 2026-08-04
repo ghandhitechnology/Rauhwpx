@@ -857,6 +857,14 @@ impl HwpDocument {
         self.core.get_document_info()
     }
 
+    /// 등록된 글꼴 목록을 조회한다.
+    ///
+    /// 반환: JSON `[{"lang":0,"id":0,"name":"..."}]` — 대체 해소 없는 등록 원본 이름.
+    #[wasm_bindgen(js_name = getFontList)]
+    pub fn get_font_list(&self) -> String {
+        self.core.get_font_list()
+    }
+
     /// 특정 페이지의 텍스트 레이아웃 정보를 JSON 문자열로 반환한다.
     ///
     /// 각 TextRun의 위치, 텍스트, 글자별 X 좌표 경계값을 포함한다.
@@ -3544,6 +3552,30 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 표 셀 문단에서 수식 컨트롤을 삭제한다.
+    ///
+    /// 반환: JSON `{"ok":true}`
+    #[wasm_bindgen(js_name = deleteEquationControlInCell)]
+    pub fn delete_equation_control_in_cell(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: u32,
+        cell_para_idx: u32,
+        eq_control_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.delete_equation_control_in_cell_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            cell_idx as usize,
+            cell_para_idx as usize,
+            eq_control_idx as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 수식 컨트롤의 속성을 조회한다.
     ///
     /// 반환: JSON `{ script, fontSize, color, baseline, fontName }`
@@ -3691,6 +3723,31 @@ impl HwpDocument {
     ) -> Result<String, JsValue> {
         self.render_equation_preview_native(script, font_size_hwpunit, color)
             .map_err(|e| e.into())
+    }
+
+    /// 표 셀 문단에서 지정 인덱스의 수식 스크립트를 조회한다 (드리프트 프로브용).
+    /// 셀 문단에 수식이 여럿일 때 `eq_control_idx` 로 특정 수식을 읽는다.
+    ///
+    /// 반환: JSON `{"ok":true,"script":"..."}`
+    #[wasm_bindgen(js_name = getEquationScriptInCellAt)]
+    pub fn get_equation_script_in_cell_at_js(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: u32,
+        cell_para_idx: u32,
+        eq_control_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.get_equation_script_in_cell_at(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            cell_idx as usize,
+            cell_para_idx as usize,
+            eq_control_idx as usize,
+        )
+        .map_err(|e| e.into())
     }
 
     /// JSON에서 polygonPoints 배열 파싱
@@ -4020,6 +4077,36 @@ impl HwpDocument {
         self.insert_equation_native(
             section_idx as usize,
             para_idx as usize,
+            char_offset as usize,
+            script,
+            font_size,
+            color,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 표 셀 문단에 수식을 삽입한다.
+    ///
+    /// 반환: JSON `{"ok":true, "cellParaIdx":N, "controlIdx":N}`
+    #[wasm_bindgen(js_name = insertEquationInCell)]
+    pub fn insert_equation_in_cell(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: u32,
+        cell_para_idx: u32,
+        char_offset: u32,
+        script: &str,
+        font_size: u32,
+        color: u32,
+    ) -> Result<String, JsValue> {
+        self.insert_equation_in_cell_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            cell_idx as usize,
+            cell_para_idx as usize,
             char_offset as usize,
             script,
             font_size,
