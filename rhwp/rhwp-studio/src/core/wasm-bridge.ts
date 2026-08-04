@@ -1803,6 +1803,35 @@ export class WasmBridge {
     return JSON.parse((this.doc as any).insertEquation(sec, para, charOffset, script, fontSizeHwpunit, color));
   }
 
+  /** 표 셀 문단에 수식 삽입 — controlIdx 는 표 컨트롤 인덱스, 반환 controlIdx 는 셀 문단 내 수식 인덱스 */
+  insertEquationInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, charOffset: number, script: string, fontSizeHwpunit: number, color: number): { ok: boolean; cellParaIdx: number; controlIdx: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).insertEquationInCell(sec, parentPara, controlIdx, cellIdx, cellParaIdx, charOffset, script, fontSizeHwpunit, color));
+  }
+
+  /** 셀 문단의 수식 컨트롤 삭제 (insertEquationInCell 의 역연산) */
+  deleteEquationControlInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, eqControlIdx: number): { ok: boolean } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).deleteEquationControlInCell(sec, parentPara, controlIdx, cellIdx, cellParaIdx, eqControlIdx));
+  }
+
+  /**
+   * 셀 문단의 특정 인덱스 수식 스크립트 조회 (드리프트 프로브용).
+   * 구버전 wasm 에 메서드가 없으면 null (호출부가 첫-수식 조회로 폴백).
+   */
+  getEquationScriptInCellAt(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, eqControlIdx: number): string | null {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    if (typeof (this.doc as any).getEquationScriptInCellAt !== 'function') return null;
+    const parsed = JSON.parse((this.doc as any).getEquationScriptInCellAt(sec, parentPara, controlIdx, cellIdx, cellParaIdx, eqControlIdx)) as { ok?: boolean; script?: string };
+    return parsed?.ok === true && typeof parsed.script === 'string' ? parsed.script : null;
+  }
+
+  /** 등록된 글꼴 목록 [{lang, id, name}] — 이름은 findOrCreateFontId 와 같은 원본 이름 */
+  getFontList(): Array<{ lang: number; id: number; name: string }> {
+    if (!this.doc || typeof (this.doc as any).getFontList !== 'function') return [];
+    return JSON.parse((this.doc as any).getFontList());
+  }
+
   insertFootnote(sec: number, para: number, charOffset: number): { ok: boolean; paraIdx: number; controlIdx: number; footnoteNumber: number } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse((this.doc as any).insertFootnote(sec, para, charOffset));

@@ -141,8 +141,23 @@ function opGlyph(op: PendingOp): string {
     case 'delete': return '−';
     case 'format': return '✎';
     case 'field': return '⚑';
+    case 'object': return '▣';
   }
 }
+
+const OBJECT_OP_LABELS: Record<string, string> = {
+  createTable: '표 만들기',
+  insertImage: '그림 삽입',
+  insertEquation: '수식 삽입',
+  tableStructure: '표 구조 변경',
+  tableStructureMarked: '표 구조 변경(승인 시 적용)',
+  setCellProps: '셀 속성(승인 시 적용)',
+  setTableProps: '표 속성(승인 시 적용)',
+  paraFormat: '문단 서식',
+  applyStyle: '스타일 적용(승인 시 적용)',
+  pageLayout: '쪽 설정',
+  headerFooter: '머리말/꼬리말',
+};
 
 function opPreview(op: PendingOp): string {
   switch (op.kind) {
@@ -153,6 +168,15 @@ function opPreview(op: PendingOp): string {
       return JSON.stringify(op.format);
     case 'field':
       return `${op.name} → ${op.newValue}`;
+    case 'object': {
+      const label = OBJECT_OP_LABELS[op.obj.type] ?? op.obj.type;
+      if (op.obj.type === 'createTable') return `${label} ${op.obj.rows}×${op.obj.cols}`;
+      if (op.obj.type === 'insertEquation') return `${label} ${op.obj.script.slice(0, 40)}`;
+      if (op.obj.type === 'tableStructure' || op.obj.type === 'tableStructureMarked') {
+        return `${label}: ${op.obj.op}`;
+      }
+      return label;
+    }
   }
 }
 

@@ -260,39 +260,59 @@ impl DocumentCore {
         );
         Ok(svg)
     }
-    /// 수식(Equation) 컨트롤을 문단에서 삭제한다.
-    pub fn delete_equation_control_native(
-        &mut self,
+    /// 표 셀 문단에서 **지정 인덱스**의 수식 스크립트를 조회한다 (드리프트 프로브용).
+    /// `find_equation_ref` 셀 경로는 첫 번째 수식만 찾으므로, 한 셀 문단에 수식이
+    /// 여럿일 때 특정 수식을 읽으려면 이 API 를 쓴다.
+    /// 반환: JSON `{"ok":true,"script":"..."}`
+    pub fn get_equation_script_in_cell_at(
+        &self,
         section_idx: usize,
         parent_para_idx: usize,
         control_idx: usize,
+        cell_idx: usize,
+        cell_para_idx: usize,
+        eq_control_idx: usize,
     ) -> Result<String, HwpError> {
-        if section_idx >= self.document.sections.len() {
-            return Err(HwpError::RenderError(format!(
-                "구역 인덱스 {} 범위 초과",
-                section_idx
-            )));
-        }
-        let section = &mut self.document.sections[section_idx];
-        if parent_para_idx >= section.paragraphs.len() {
-            return Err(HwpError::RenderError(format!(
-                "문단 인덱스 {} 범위 초과",
-                parent_para_idx
-            )));
-        }
-        let para = &mut section.paragraphs[parent_para_idx];
-        if control_idx >= para.controls.len() {
-            return Err(HwpError::RenderError(format!(
-                "컨트롤 인덱스 {} 범위 초과",
-                control_idx
-            )));
-        }
-        if !matches!(&para.controls[control_idx], Control::Equation(_)) {
-            return Err(HwpError::RenderError(
+        let section = self.document.sections.get(section_idx).ok_or_else(|| {
+            HwpError::RenderError(format!("구역 인덱스 {} 범위 초과", section_idx))
+        })?;
+        let para = section.paragraphs.get(parent_para_idx).ok_or_else(|| {
+            HwpError::RenderError(format!("문단 인덱스 {} 범위 초과", parent_para_idx))
+        })?;
+        let table = match para.controls.get(control_idx) {
+            Some(Control::Table(t)) => t,
+            _ => {
+                return Err(HwpError::RenderError(
+                    "지정된 컨트롤이 표가 아닙니다".to_string(),
+                ))
+            }
+        };
+        let cell = table
+            .cells
+            .get(cell_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("셀 인덱스 {} 범위 초과", cell_idx)))?;
+        let cell_para = cell.paragraphs.get(cell_para_idx).ok_or_else(|| {
+            HwpError::RenderError(format!("셀 문단 인덱스 {} 범위 초과", cell_para_idx))
+        })?;
+        match cell_para.controls.get(eq_control_idx) {
+            Some(Control::Equation(eq)) => Ok(format!(
+                "{{\"ok\":true,\"script\":\"{}\"}}",
+                crate::document_core::helpers::json_escape(&eq.script)
+            )),
+            Some(_) => Err(HwpError::RenderError(
                 "지정된 컨트롤이 수식이 아닙니다".to_string(),
-            ));
+            )),
+            None => Err(HwpError::RenderError(format!(
+                "컨트롤 인덱스 {} 범위 초과",
+                eq_control_idx
+            ))),
         }
+    }
 
+    /// 인라인 수식 컨트롤 제거의 모델 변이 부분: 컨트롤 뒤 문자 오프셋을 8칸 되돌리고
+    /// 컨트롤·ctrl_data 레코드를 제거하며 char_count 를 8 감소시킨다.
+    /// 본문(`delete_equation_control_native`)과 셀 경로가 공유한다.
+    fn remove_equation_control_and_shift(para: &mut Paragraph, control_idx: usize) {
         let text_chars: Vec<char> = para.text.chars().collect();
         let mut ci = 0usize;
         let mut prev_end: u32 = 0;
@@ -338,6 +358,23 @@ impl DocumentCore {
                     *offset -= 8;
                 }
             }
+            // char_shapes/range_tags 도 char_offsets 와 함께 되돌린다 — 삽입 경로
+            // (shift_for_inline_control_insert)와 대칭되는 삭제측 시프트가 없으면
+            // 삭제 지점 이후 글자모양 run·range_tag 경계가 텍스트와 어긋난다
+            // (footnote_ops 의 삭제 경로와 동형; 문단 시작 pos 0 run 은 고정 유지).
+            for cs in &mut para.char_shapes {
+                if cs.start_pos > gs {
+                    cs.start_pos = cs.start_pos.saturating_sub(8);
+                }
+            }
+            for rt in &mut para.range_tags {
+                if rt.start >= gs {
+                    rt.start = rt.start.saturating_sub(8);
+                }
+                if rt.end >= gs {
+                    rt.end = rt.end.saturating_sub(8);
+                }
+            }
         }
 
         para.controls.remove(control_idx);
@@ -347,6 +384,42 @@ impl DocumentCore {
         if para.char_count >= 8 {
             para.char_count -= 8;
         }
+    }
+
+    /// 수식(Equation) 컨트롤을 문단에서 삭제한다.
+    pub fn delete_equation_control_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+    ) -> Result<String, HwpError> {
+        if section_idx >= self.document.sections.len() {
+            return Err(HwpError::RenderError(format!(
+                "구역 인덱스 {} 범위 초과",
+                section_idx
+            )));
+        }
+        let section = &mut self.document.sections[section_idx];
+        if parent_para_idx >= section.paragraphs.len() {
+            return Err(HwpError::RenderError(format!(
+                "문단 인덱스 {} 범위 초과",
+                parent_para_idx
+            )));
+        }
+        let para = &mut section.paragraphs[parent_para_idx];
+        if control_idx >= para.controls.len() {
+            return Err(HwpError::RenderError(format!(
+                "컨트롤 인덱스 {} 범위 초과",
+                control_idx
+            )));
+        }
+        if !matches!(&para.controls[control_idx], Control::Equation(_)) {
+            return Err(HwpError::RenderError(
+                "지정된 컨트롤이 수식이 아닙니다".to_string(),
+            ));
+        }
+
+        Self::remove_equation_control_and_shift(para, control_idx);
 
         Self::reflow_paragraph_line_segs_after_control_delete(para, &self.styles, self.dpi);
         section.raw_stream = None;
@@ -422,6 +495,14 @@ impl DocumentCore {
             idx
         };
 
+        // HWPX 로드 문서는 ctrl_data_records 가 controls 보다 짧을 수 있다(비동기 상태).
+        // 그대로 insert 하면 out-of-bounds panic 이므로 먼저 길이를 맞춘다
+        // (converters/hwpx_to_hwp.rs 의 패딩과 동형).
+        if paragraph.ctrl_data_records.len() < paragraph.controls.len() {
+            paragraph
+                .ctrl_data_records
+                .resize_with(paragraph.controls.len(), || None);
+        }
         paragraph
             .controls
             .insert(insert_idx, Control::Equation(Box::new(equation)));
@@ -462,6 +543,240 @@ impl DocumentCore {
             "{{\"ok\":true,\"paraIdx\":{},\"controlIdx\":{}}}",
             para_idx, insert_idx
         ))
+    }
+
+    /// 셀 문단 변이 후 재조판 경로 — `replace_text_in_cell_native_impl`(즉시 페이지네이션)
+    /// 과 동일한 순서를 따른다: 부모 컨트롤 dirty → 셀 폭 리플로우 → vpos 재계산 →
+    /// cell_units 캐시 무효화 → render normalization path dirty → raw stream 무효화 →
+    /// 페이지네이션 → CellTextChanged 이벤트.
+    fn reflow_cell_after_equation_edit(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+        cell_para_idx: usize,
+        local_contribution_before: bool,
+    ) -> Result<(), HwpError> {
+        self.mark_cell_control_dirty(section_idx, parent_para_idx, control_idx);
+        self.reflow_cell_paragraph(
+            section_idx,
+            parent_para_idx,
+            control_idx,
+            cell_idx,
+            cell_para_idx,
+        );
+        self.recalculate_cell_paragraph_vpos_native(
+            section_idx,
+            parent_para_idx,
+            control_idx,
+            cell_idx,
+            cell_para_idx,
+            None,
+        );
+
+        let local_contribution_after = self
+            .get_cell_paragraph_ref(
+                section_idx,
+                parent_para_idx,
+                control_idx,
+                cell_idx,
+                cell_para_idx,
+            )
+            .map(
+                crate::renderer::layout::LayoutEngine::paragraph_contributes_to_table_nested_text_flag,
+            )
+            .ok_or_else(|| {
+                HwpError::RenderError("편집 뒤 셀 문단을 다시 찾을 수 없습니다".to_string())
+            })?;
+
+        // Table의 일반 cell만 pointer-key layout cache의 owner다 (표 캡션 sentinel 제외).
+        if cell_idx != crate::document_core::TABLE_CAPTION_CELL_SENTINEL {
+            let control = &self.document.sections[section_idx].paragraphs[parent_para_idx].controls
+                [control_idx];
+            if let Control::Table(table) = control {
+                if let Some(edited_cell) = table.cells.get(cell_idx) {
+                    self.layout_engine.invalidate_cell_units_after_text_edit(
+                        edited_cell,
+                        table,
+                        local_contribution_before,
+                        local_contribution_after,
+                    );
+                }
+            }
+        }
+
+        let has_compat_projection = self
+            .render_normalization
+            .sections
+            .get(section_idx)
+            .is_some_and(|section| section.is_some());
+        self.mark_render_normalization_path_dirty(
+            section_idx,
+            parent_para_idx,
+            control_idx,
+            cell_idx,
+            cell_para_idx,
+        )?;
+        self.document.sections[section_idx].raw_stream = None;
+        if has_compat_projection {
+            self.invalidate_render_normalization_section(section_idx);
+        }
+        self.mark_section_pagination_dirty(section_idx);
+        self.invalidate_page_tree_cache_from(0);
+        self.paginate_if_needed();
+
+        self.event_log.push(DocumentEvent::CellTextChanged {
+            section: section_idx,
+            para: parent_para_idx,
+            ctrl: control_idx,
+            cell: cell_idx,
+        });
+        Ok(())
+    }
+
+    /// 표 셀 문단에 수식을 삽입한다.
+    /// 컨트롤 조립은 `insert_equation_native`(본문)와, 변이 후 재조판은
+    /// `insert_text_in_cell_native`(즉시 페이지네이션)와 동형이다.
+    /// 반환: JSON `{"ok":true, "cellParaIdx":N, "controlIdx":N}` — controlIdx 는 셀 문단
+    /// controls 내 수식 인덱스.
+    pub fn insert_equation_in_cell_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+        cell_para_idx: usize,
+        char_offset: usize,
+        script: &str,
+        font_size: u32,
+        color: u32,
+    ) -> Result<String, HwpError> {
+        use crate::model::control::Equation;
+        use crate::model::shape::CommonObjAttr;
+        use crate::parser::tags::CTRL_EQUATION;
+
+        let (width, height) = crate::renderer::equation::intrinsic_size_hwp(script, font_size);
+        let equation = Equation {
+            common: CommonObjAttr {
+                ctrl_id: CTRL_EQUATION,
+                treat_as_char: true,
+                width,
+                height,
+                ..Default::default()
+            },
+            script: script.to_string(),
+            font_size,
+            color,
+            font_name: "HYhwpEQ".to_string(),
+            ..Default::default()
+        };
+
+        // 셀 문단 접근 검증 및 컨트롤 삽입
+        let cell_para = self.get_cell_paragraph_mut(
+            section_idx,
+            parent_para_idx,
+            control_idx,
+            cell_idx,
+            cell_para_idx,
+        )?;
+        let local_contribution_before =
+            crate::renderer::layout::LayoutEngine::paragraph_contributes_to_table_nested_text_flag(
+                cell_para,
+            );
+
+        let insert_idx = {
+            let positions = crate::document_core::helpers::find_control_text_positions(cell_para);
+            let mut idx = cell_para.controls.len();
+            for (i, &pos) in positions.iter().enumerate() {
+                if pos > char_offset {
+                    idx = i;
+                    break;
+                }
+            }
+            idx
+        };
+
+        // HWPX 로드 문서는 ctrl_data_records 가 controls 보다 짧을 수 있다(비동기 상태).
+        // 그대로 insert 하면 out-of-bounds panic 이므로 먼저 길이를 맞춘다
+        // (converters/hwpx_to_hwp.rs 의 패딩과 동형).
+        if cell_para.ctrl_data_records.len() < cell_para.controls.len() {
+            cell_para
+                .ctrl_data_records
+                .resize_with(cell_para.controls.len(), || None);
+        }
+        cell_para
+            .controls
+            .insert(insert_idx, Control::Equation(Box::new(equation)));
+        cell_para.ctrl_data_records.insert(insert_idx, None);
+
+        cell_para.shift_for_inline_control_insert(char_offset);
+        cell_para.char_count += 8;
+        cell_para.control_mask |= 1u32 << 11;
+        cell_para.has_para_text = true;
+
+        self.reflow_cell_after_equation_edit(
+            section_idx,
+            parent_para_idx,
+            control_idx,
+            cell_idx,
+            cell_para_idx,
+            local_contribution_before,
+        )?;
+
+        Ok(format!(
+            "{{\"ok\":true,\"cellParaIdx\":{},\"controlIdx\":{}}}",
+            cell_para_idx, insert_idx
+        ))
+    }
+
+    /// 표 셀 문단에서 수식(Equation) 컨트롤을 삭제한다.
+    /// 모델 변이는 `delete_equation_control_native`(본문)와, 변이 후 재조판은
+    /// `insert_equation_in_cell_native`와 동일한 셀 경로를 공유한다.
+    pub fn delete_equation_control_in_cell_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+        cell_para_idx: usize,
+        eq_control_idx: usize,
+    ) -> Result<String, HwpError> {
+        let cell_para = self.get_cell_paragraph_mut(
+            section_idx,
+            parent_para_idx,
+            control_idx,
+            cell_idx,
+            cell_para_idx,
+        )?;
+        if eq_control_idx >= cell_para.controls.len() {
+            return Err(HwpError::RenderError(format!(
+                "컨트롤 인덱스 {} 범위 초과",
+                eq_control_idx
+            )));
+        }
+        if !matches!(&cell_para.controls[eq_control_idx], Control::Equation(_)) {
+            return Err(HwpError::RenderError(
+                "지정된 컨트롤이 수식이 아닙니다".to_string(),
+            ));
+        }
+        let local_contribution_before =
+            crate::renderer::layout::LayoutEngine::paragraph_contributes_to_table_nested_text_flag(
+                cell_para,
+            );
+
+        Self::remove_equation_control_and_shift(cell_para, eq_control_idx);
+
+        self.reflow_cell_after_equation_edit(
+            section_idx,
+            parent_para_idx,
+            control_idx,
+            cell_idx,
+            cell_para_idx,
+            local_contribution_before,
+        )?;
+
+        Ok(crate::document_core::helpers::json_ok())
     }
 }
 

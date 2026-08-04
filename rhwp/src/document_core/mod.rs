@@ -301,6 +301,28 @@ impl DocumentCore {
         )
     }
 
+    /// 등록된 글꼴 목록을 JSON 배열로 반환한다.
+    ///
+    /// 반환: `[{"lang":<슬롯 0~6>,"id":<슬롯 내 인덱스>,"name":"<등록 이름>"}]`
+    ///
+    /// `get_document_info`와 달리 대체 글꼴 해소(resolve_font_substitution)를 하지 않고
+    /// 등록된 원본 이름을 그대로 돌려준다 — `find_or_create_font_id`가 원본 이름으로
+    /// 매칭하므로 에이전트가 이 목록의 이름을 그대로 되돌려 써야 한다.
+    pub fn get_font_list(&self) -> String {
+        let mut entries = Vec::new();
+        for (lang_idx, lang_fonts) in self.document.doc_info.font_faces.iter().enumerate() {
+            for (font_idx, font) in lang_fonts.iter().enumerate() {
+                entries.push(format!(
+                    "{{\"lang\":{},\"id\":{},\"name\":\"{}\"}}",
+                    lang_idx,
+                    font_idx,
+                    helpers::json_escape(&font.name)
+                ));
+            }
+        }
+        format!("[{}]", entries.join(","))
+    }
+
     /// 이벤트 로그를 JSON 배열로 직렬화한다.
     pub fn serialize_event_log(&self) -> String {
         crate::model::event::serialize_event_log(&self.event_log)
