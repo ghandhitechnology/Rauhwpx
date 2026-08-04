@@ -74,6 +74,17 @@ export class CommandHistory {
     return effects;
   }
 
+  /** 복합 편집이 임시로 여러 snapshot id를 잡기 전에 WASM 저장소 여유를 확보한다. */
+  prepareSnapshotCapacity(wasm: WasmBridge, additionalIds: number): void {
+    const reserve = Math.max(0, Math.min(WASM_MAX_SNAPSHOTS, Math.trunc(additionalIds)));
+    // 새 편집은 어차피 redo를 무효화하므로 먼저 해제해 불필요한 undo 축출을 줄인다.
+    discardAll(this.redoStack, wasm);
+    this.redoStack = [];
+    while (this.liveSnapshotIds() + reserve > WASM_MAX_SNAPSHOTS && this.undoStack.length > 0) {
+      this.undoStack.shift()?.discard?.(wasm);
+    }
+  }
+
   /** 명령 실행 + 히스토리 기록. 실행 후 커서 위치 반환 */
   execute(command: EditCommand, wasm: WasmBridge): DocumentPosition {
     this.lastExecutionEffects = NO_TEXT_MUTATION_EFFECTS;
@@ -186,6 +197,10 @@ export class CommandHistory {
     if (this.undoStack.length > this.maxSize) {
       const evicted = this.undoStack.shift();
       if (wasm) evicted?.discard?.(wasm);
+    }
+    // 이미 실행된 스냅샷 명령도 일반 execute 경로와 같은 리소스 예산을 지킨다.
+    if (wasm && (command.snapshotResourceCount?.() ?? 0) > 0) {
+      this.enforceSnapshotBudget(wasm);
     }
   }
 

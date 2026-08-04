@@ -103,6 +103,35 @@ function makeEnv() {
     getSelectionRectsInCell: () => [],
   };
 
+  let snapshotId = 0;
+  const snapshots = new Map<number, {
+    pageDef: Record<string, unknown>;
+    columnDef: typeof columnDef;
+    hfs: Map<string, string>;
+    bodyParaShapes: number[];
+  }>();
+  Object.assign(wasm, {
+    saveSnapshot: () => {
+      const id = ++snapshotId;
+      snapshots.set(id, {
+        pageDef: structuredClone(pageDef),
+        columnDef: structuredClone(columnDef),
+        hfs: structuredClone(hfs),
+        bodyParaShapes: structuredClone(bodyParaShapes),
+      });
+      return id;
+    },
+    restoreSnapshot: (id: number) => {
+      const saved = snapshots.get(id)!;
+      pageDef = structuredClone(saved.pageDef);
+      columnDef = structuredClone(saved.columnDef);
+      hfs.clear();
+      for (const [key, value] of saved.hfs) hfs.set(key, value);
+      bodyParaShapes.splice(0, bodyParaShapes.length, ...structuredClone(saved.bodyParaShapes));
+    },
+    discardSnapshot: (id: number) => { snapshots.delete(id); },
+  });
+
   const bus = new EventBus();
   const revision = new RevisionTracker(bus);
   const inputHandler = {
@@ -233,9 +262,10 @@ test('insert_page_break: pageBreakBefore 속성 적용 + reject 는 para shape �
 });
 
 test('insert_page_break → approve: 한 번의 스냅샷으로 확정', async () => {
-  const { call, pending, getParaShape } = makeEnv();
+  const { call, pending, calls, getParaShape } = makeEnv();
   const r = (await call('insert_page_break', { sectionIdx: 0, paraIdx: 0 })) as { changeSetId: string };
   pending.approve(r.changeSetId);
   assert.equal(getParaShape(0), 99);
+  assert.equal(calls.filter((entry) => entry.m === 'applyParaFormat').length, 1);
   assert.equal(pending.hasPending(), false);
 });

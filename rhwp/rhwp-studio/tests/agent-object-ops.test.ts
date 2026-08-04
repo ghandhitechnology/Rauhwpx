@@ -2,7 +2,7 @@
  * 에이전트 객체 연산 (Phase 2: 표 생성/구조 변경, 문단 서식, 스타일, 폰트) 테스트.
  *
  * executor → 실제 PendingEditManager → 가짜 wasm 통합 경로로
- * apply / reject(역연산) / approve(revert-then-replay) / 가드 / 좌표 이동을 검증한다.
+ * apply / reject(역연산) / approve(미리보기 채택) / 가드 / 좌표 이동을 검증한다.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -243,6 +243,34 @@ function makeEnv() {
     }),
   };
 
+  let snapshotId = 0;
+  const snapshots = new Map<number, {
+    body: string[];
+    bodyParaShapes: number[];
+    tables: FakeTable[];
+    fonts: string[];
+  }>();
+  Object.assign(wasm, {
+    saveSnapshot: () => {
+      const id = ++snapshotId;
+      snapshots.set(id, {
+        body: structuredClone(body),
+        bodyParaShapes: structuredClone(bodyParaShapes),
+        tables: structuredClone(tables),
+        fonts: structuredClone(fonts),
+      });
+      return id;
+    },
+    restoreSnapshot: (id: number) => {
+      const saved = snapshots.get(id)!;
+      body.splice(0, body.length, ...structuredClone(saved.body));
+      bodyParaShapes.splice(0, bodyParaShapes.length, ...structuredClone(saved.bodyParaShapes));
+      tables.splice(0, tables.length, ...structuredClone(saved.tables));
+      fonts.splice(0, fonts.length, ...structuredClone(saved.fonts));
+    },
+    discardSnapshot: (id: number) => { snapshots.delete(id); },
+  });
+
   const bus = new EventBus();
   const revision = new RevisionTracker(bus);
   const inputHandler = {
@@ -322,14 +350,15 @@ test('create_table → reject: deleteTableControl 로 표가 사라진다', asyn
   assert.equal(tables.length, 0);
 });
 
-test('create_table → approve: revert-then-replay 후 표가 확정된다', async () => {
-  const { call, pending, tables } = makeEnv();
+test('create_table → approve: 미리보기 표를 재생성 없이 확정한다', async () => {
+  const { call, pending, tables, calls } = makeEnv();
   const r = (await call('create_table', {
     sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['A', 'B']], headerRow: false,
   })) as { changeSetId: string };
   pending.approve(r.changeSetId);
   assert.equal(tables.length, 1);
   assert.equal(tables[0].cells[0][0], 'A');
+  assert.equal(calls.filter((entry) => entry.m === 'createTableEx').length, 1);
   assert.equal(pending.hasPending(), false);
 });
 
@@ -368,7 +397,7 @@ test('edit_table delete_row 는 mark-only + 같은 표 후속 편집은 PENDING_
   }), 'PENDING_DESTRUCTIVE_OP');
   calls.length = 0;
   pending.approve(del.changeSetId);
-  assert.equal(t.rows, 2); // approve 시 실행
+  assert.equal(tables[0].rows, 2); // approve 시 실행 (snapshot restore 뒤의 현재 표)
   assert.ok(calls.some((x) => x.m === 'deleteTableRow'));
 });
 
