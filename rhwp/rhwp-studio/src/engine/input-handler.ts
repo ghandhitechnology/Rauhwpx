@@ -2328,6 +2328,11 @@ export class InputHandler {
     }
   }
 
+  /** 승인처럼 여러 임시 스냅샷이 필요한 외부 편집기의 저장소 여유를 확보한다. */
+  prepareSnapshotCapacity(additionalIds: number): void {
+    this.history.prepareSnapshotCapacity(this.wasm, additionalIds);
+  }
+
   /** Backspace 처리 */
   private handleBackspace(pos: DocumentPosition, inCell: boolean): void {
     _text.handleBackspace.call(this, pos, inCell);
