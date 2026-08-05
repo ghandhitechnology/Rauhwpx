@@ -67,6 +67,22 @@ interface HitRegion {
   height: number;
 }
 
+/** 문단이 끝나 줄이 바뀌는 지점 — 텍스트 끝에 붙는 개행 표시. */
+interface EnterMark {
+  pageIndex: number;
+  x: number;
+  y: number;
+  height: number;
+  /** 잉크 색 소유자. exact diff 는 provenance 와 분리된 의미 색(초록)을 쓴다. */
+  tone: AgentName | 'exact';
+}
+
+/** 한 범위의 화면 기하 — 텍스트 끝까지 잘린 rect 와 개행 표시. */
+interface MeasuredRange {
+  rects: SelectionRect[];
+  enters: EnterMark[];
+}
+
 /** key 하나가 소유하는 DOM 쌍. 렌더 간에 재사용해 애니메이션/스타일 상태를 보존한다. */
 interface PooledNode {
   ink: HTMLDivElement | null;
@@ -78,6 +94,12 @@ interface PooledNode {
 const HIT_SLOP_PX = 4;
 const POPOVER_MAX_SCALARS = 320;
 const EXACT_INK_GUTTER = 0.35;
+/** rect 와 캐럿을 같은 줄로 볼 세로 허용 오차(문서 단위). */
+const LINE_MATCH_SLOP = 2;
+/** 텍스트 끝과 개행 표시 사이의 간격(줄 높이 배수). */
+const ENTER_GAP_FACTOR = 0.18;
+/** 개행 표시의 크기(줄 높이 배수). */
+const ENTER_SIZE_FACTOR = 0.62;
 
 function comparePoint(
   a: { paraIdx: number; charOffset: number },
@@ -89,6 +111,27 @@ function comparePoint(
 function truncateScalars(text: string, max: number): string {
   const values = [...text];
   return values.length > max ? values.slice(0, max - 1).join('') + '…' : text;
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/**
+ * 개행 표시 — 12 그리드, currentColor, 1.25 스트로크, 둥근 캡 (프로젝트 아이콘 규약).
+ * 오른쪽 위에서 내려와 왼쪽으로 꺾이는 갈고리 + 화살촉.
+ */
+function createEnterGlyph(): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 12 12');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS(SVG_NS, 'path');
+  path.setAttribute('d', 'M10 2.5V6a1.5 1.5 0 0 1-1.5 1.5H3M5 5 2.5 7.5 5 10');
+  path.setAttribute('stroke', 'currentColor');
+  path.setAttribute('stroke-width', '1.25');
+  path.setAttribute('stroke-linecap', 'round');
+  path.setAttribute('stroke-linejoin', 'round');
+  svg.appendChild(path);
+  return svg;
 }
 
 function rangeKey(range: DocRange | undefined): string {
@@ -119,6 +162,7 @@ export class PendingOverlayRenderer {
   private nodePool = new Map<string, PooledNode>();
   private cachedExact: ExactVisual[] | null = null;
   private cachedLegacy: Array<{ op: LegacyOverlayOp; rects: SelectionRect[] }> | null = null;
+  private cachedEnters: EnterMark[] = [];
   private geometryDirty = true;
   private hitRegions: HitRegion[] = [];
   private interactionRoot: HTMLElement | null = null;
@@ -278,6 +322,82 @@ export class PendingOverlayRenderer {
       );
   }
 
+  private paragraphLength(range: DocRange, paraIdx: number): number {
+    const cell = range.cell;
+    return cell
+      ? this.deps.wasm.getCellParagraphLength(
+        range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx,
+      )
+      : this.deps.wasm.getParagraphLength(range.sectionIdx, paraIdx);
+  }
+
+  private caretRectAt(range: DocRange, paraIdx: number, charOffset: number): SelectionRect {
+    const cell = range.cell;
+    const rect = cell
+      ? this.deps.wasm.getCursorRectInCell(
+        range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset,
+      )
+      : this.deps.wasm.getCursorRect(range.sectionIdx, paraIdx, charOffset);
+    return { pageIndex: rect.pageIndex, x: rect.x, y: rect.y, width: 0, height: rect.height };
+  }
+
+  /**
+   * 범위의 rect 를 실제 텍스트 끝까지로 자르고, 문단이 끝나는 자리에 개행 표시를 만든다.
+   *
+   * 엔진의 selection rect 는 문단 마지막 줄을 여백까지 채워 반환한다(문단 부호를 포함하는
+   * 관습). 그대로 밑줄을 그으면 글자가 없는 곳까지 줄이 이어져, 여러 문단을 삽입했을 때
+   * 오른쪽이 죄다 그어진 표처럼 보인다. 문단 끝 캐럿 x 로 잘라 내고 그 자리에 개행
+   * 표시를 놓아 "여기서 줄이 바뀌었다"를 대신 말하게 한다.
+   */
+  private measureRange(range: DocRange, tone: AgentName | 'exact'): MeasuredRange {
+    const rects = this.rangeRects(range);
+    if (range.endParaIdx <= range.startParaIdx) return { rects, enters: [] };
+
+    // 문단별 텍스트 끝 캐럿. 마지막 문단은 범위 끝 오프셋이 곧 텍스트 끝이다.
+    const ends: Array<{ paraIdx: number; rect: SelectionRect }> = [];
+    for (let p = range.startParaIdx; p <= range.endParaIdx; p++) {
+      const offset = p === range.endParaIdx
+        ? range.endCharOffset
+        : this.paragraphLength(range, p);
+      try {
+        ends.push({ paraIdx: p, rect: this.caretRectAt(range, p, offset) });
+      } catch {
+        // 주소 드리프트 — 이 문단은 자르지 않고 원본 rect 를 유지한다.
+      }
+    }
+
+    const clamped: SelectionRect[] = [];
+    for (const rect of rects) {
+      const end = ends.find((candidate) => (
+        candidate.rect.pageIndex === rect.pageIndex
+        // 캐럿이 이 rect 의 줄 안에 있고, rect 가 캐럿을 지나 뻗어 있는가.
+        && candidate.rect.y + candidate.rect.height > rect.y + LINE_MATCH_SLOP
+        && candidate.rect.y < rect.y + rect.height - LINE_MATCH_SLOP
+        && candidate.rect.x >= rect.x - LINE_MATCH_SLOP
+        && candidate.rect.x <= rect.x + rect.width + LINE_MATCH_SLOP
+      ));
+      if (!end) {
+        clamped.push(rect);
+        continue;
+      }
+      const width = Math.max(0, end.rect.x - rect.x);
+      if (width > 0.05) clamped.push({ ...rect, width });
+    }
+
+    // 개행 표시는 rect 가 아니라 문단 끝 캐럿에서 만든다 — 빈 줄을 삽입하면
+    // 엔진이 rect 를 내주지 않으므로, rect 기준으로 만들면 그 줄만 표시가 없다.
+    const enters: EnterMark[] = ends
+      .filter((end) => end.paraIdx !== range.endParaIdx)
+      .map((end) => ({
+        pageIndex: end.rect.pageIndex,
+        x: end.rect.x,
+        y: end.rect.y,
+        height: end.rect.height,
+        tone,
+      }));
+    return { rects: clamped, enters };
+  }
+
   private cursorRect(op: ReplaceOverlayOp, scalarOffset: number): SelectionRect {
     const point = pointAtNewScalarOffset(op.range, op.newText, scalarOffset);
     const cell = op.range.cell;
@@ -290,7 +410,7 @@ export class PendingOverlayRenderer {
     return { pageIndex: rect.pageIndex, x: rect.x, y: rect.y, width: 0, height: rect.height };
   }
 
-  private collectExactVisuals(op: ReplaceOverlayOp): ExactVisual[] {
+  private collectExactVisuals(op: ReplaceOverlayOp, enters: EnterMark[]): ExactVisual[] {
     const visuals: ExactVisual[] = [];
     const result = this.diffFor(op);
     result.hunks.forEach((hunk, index) => {
@@ -298,7 +418,9 @@ export class PendingOverlayRenderer {
       const range = rangeForNewScalarOffsets(op.range, op.newText, hunk.newStart, hunk.newEnd);
       try {
         if (hunk.newEnd > hunk.newStart) {
-          for (const rect of this.rangeRects(range)) {
+          const measured = this.measureRange(range, 'exact');
+          enters.push(...measured.enters);
+          for (const rect of measured.rects) {
             visuals.push({ key, nodeKey: '', op, hunk, range, rect, anchor: false });
           }
         } else {
@@ -344,8 +466,9 @@ export class PendingOverlayRenderer {
   private recomputeGeometry(): void {
     const exactVisuals: ExactVisual[] = [];
     const legacyOps: LegacyOverlayOp[] = [];
+    const enters: EnterMark[] = [];
     for (const op of this.ops) {
-      if (op.kind === 'replace') exactVisuals.push(...this.collectExactVisuals(op));
+      if (op.kind === 'replace') exactVisuals.push(...this.collectExactVisuals(op, enters));
       else legacyOps.push(op);
     }
     const exactTextRects = exactVisuals.filter((visual) => !visual.anchor).map((visual) => visual.rect);
@@ -354,9 +477,14 @@ export class PendingOverlayRenderer {
     for (const op of legacyOps) {
       let rects: SelectionRect[];
       try {
-        if (op.objRef) rects = this.resolveObjectRects(op.objRef);
-        else if (op.range) rects = this.rangeRects(op.range);
-        else continue;
+        if (op.objRef) {
+          rects = this.resolveObjectRects(op.objRef);
+        } else if (op.range) {
+          const measured = this.measureRange(op.range, op.agent);
+          rects = measured.rects;
+          // 삭제 마크는 원문을 그대로 두므로 개행 표시를 붙이지 않는다.
+          if (op.kind !== 'delete') enters.push(...measured.enters);
+        } else continue;
       } catch {
         continue;
       }
@@ -376,6 +504,7 @@ export class PendingOverlayRenderer {
 
     this.cachedExact = exactVisuals;
     this.cachedLegacy = legacy;
+    this.cachedEnters = enters;
     this.geometryDirty = false;
   }
 
@@ -510,6 +639,30 @@ export class PendingOverlayRenderer {
         this.hitRegions.push({ ...pos, key: visual.key, oldText: visual.hunk.oldText, range: visual.range });
       }
     }
+
+    this.cachedEnters.forEach((mark, index) => {
+      const key = `E:${mark.pageIndex}:${index}`;
+      desired.add(key);
+      const pos = this.pagePosition(
+        { pageIndex: mark.pageIndex, x: mark.x, y: mark.y, width: 0, height: mark.height },
+        contentWidth,
+        zoom,
+      );
+      const size = pos.height * ENTER_SIZE_FACTOR;
+      const node = this.ensureNode(
+        key, scrollContent, null,
+        `ag-pending-enter ${mark.tone === 'exact' ? 'ag-enter-exact' : `ag-${mark.tone}`}`,
+        (marker) => marker.appendChild(createEnterGlyph()),
+      );
+      if (node.marker) {
+        this.positionRect(node.marker, {
+          left: pos.left + pos.height * ENTER_GAP_FACTOR,
+          top: pos.top + (pos.height - size) / 2,
+          width: size,
+          height: size,
+        });
+      }
+    });
 
     // 더 이상 쓰이지 않는 노드 정리
     for (const [key, node] of this.nodePool) {
