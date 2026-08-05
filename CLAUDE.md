@@ -54,11 +54,11 @@ Pipeline: **parser → model → document_core → renderer → serializer**, ex
 
 ### rhwp-studio (`rhwp-studio/src/`)
 
-TypeScript, no UI framework. `engine/` wraps the wasm module; `core/`, `view/`, `command/`, `history/` (undo), `ui/` (dialogs, command palette, `agent-sidebar/`), `hwpctl/`, `embed/`. The `agent/` directory is the studio side of the AI bridge: `bridge.ts` (WS client), `tool-executor.ts` (implements the 12 MCP tools against the engine), `pending-edits.ts` + `pending-overlay.ts` (approval queue — agent edits render as tinted/struck-through pending changes until the user approves, then commit as a single undo step).
+TypeScript, no UI framework. `engine/` wraps the wasm module; `core/`, `view/`, `command/`, `history/` (undo), `ui/` (dialogs, command palette, `agent-sidebar/`), `hwpctl/`, `embed/`. The `agent/` directory is the studio side of the AI bridge: `bridge.ts` (WS client), `tool-executor.ts` (implements the 29 MCP tools against the engine), `pending-edits.ts` + `pending-overlay.ts` (approval queue — agent edits render as tinted/struck-through pending changes until the user approves, then commit as a single undo step).
 
 ### rhwp-agent (`rhwp-agent/`)
 
-Thin local Node router — no document logic. `server.mjs` is a WS hub (`/studio`, `/mcp`, `/healthz`); `agents/claude.mjs` and `agents/codex.mjs` spawn the CLIs; each CLI spawns `mcp-stdio.mjs` as its MCP server, which forwards tool calls over WS to the hub and on to the studio tab. MCP tools are named `mcp__rhwp__<name>`: 7 read tools, 5 write tools (all pending approval). **Revision contract**: every read returns a `revision`, every write requires `expectedRevision`; mismatch → `REVISION_MISMATCH`, re-read. Coordinates are body-text based `sectionIdx`/`paraIdx`/`charOffset`, 0-based.
+Thin local Node router — no document logic. `server.mjs` is a WS hub (`/studio`, `/mcp`, `/healthz`); `agents/claude.mjs` and `agents/codex.mjs` spawn the CLIs; each CLI spawns `mcp-stdio.mjs` as its MCP server, which forwards tool calls over WS to the hub and on to the studio tab. MCP tools are named `mcp__rhwp__<name>`: 13 read tools, 16 write tools (all pending approval). **Revision contract**: every read returns a `revision`, every write requires `expectedRevision`; mismatch → `REVISION_MISMATCH`, re-read. Coordinates are body-text based `sectionIdx`/`paraIdx`/`charOffset`, 0-based.
 
 ### Other deliverables
 

@@ -725,15 +725,66 @@ export class DeleteSelectionCommand implements EditCommand {
 
 // ─── 글자 서식 적용 명령 ─────────────────────────────
 
+/** 균일 charShapeId 구간(run) 하나의 스팬 — undo/redo 복원 단위 */
+interface CharShapeSpan {
+  startOffset: number;
+  endOffset: number;
+  charShapeId: number;
+}
+
 /** 문단 하나에 대한 서식 적용 정보 */
 interface ParaFormatEntry {
   paraIndex: number;       // 본문: paragraphIndex, 셀: cellParaIndex
-  startOffset: number;
-  endOffset: number;
-  /** undo용: 적용 전 charShapeId */
-  beforeCharShapeId?: number;
-  /** redo용: 적용 후 charShapeId */
-  afterCharShapeId?: number;
+  /** undo용: 적용 전 run별 스팬 (startOffset~endOffset 을 빈틈없이 덮는다) */
+  beforeSpans: CharShapeSpan[];
+  /** redo용: 적용 후 run별 스팬 (첫 execute 에서 채움) */
+  afterSpans?: CharShapeSpan[];
+}
+
+/**
+ * 범위 내 run(균일 charShapeId 구간) 경계를 복원한다.
+ *
+ * WASM 에 run 열거 export 가 없어(wasm_api.rs) 오프셋별 charShapeId 샘플링으로
+ * 근사한다 — Rust 측 char_shape_runs_in_range 와 같은 방식으로 인접 오프셋의
+ * charShapeId 가 달라지는 지점을 경계로 삼는다. 인접 run 이 우연히 같은 id 를 공유할
+ * 때만 하나로 합쳐지는데, 어차피 같은 id 를 같은 구간에 복원하므로 행위 차이는 없다.
+ * 비용: 범위 길이만큼의 getCharPropertiesAt 호출(첫 execute 1회).
+ */
+function sampleCharShapeSpans(propsAt: (offset: number) => number, from: number, to: number): CharShapeSpan[] {
+  const spans: CharShapeSpan[] = [];
+  let runStart = from;
+  let runId = propsAt(from);
+  for (let o = from + 1; o < to; o++) {
+    const id = propsAt(o);
+    if (id !== runId) {
+      spans.push({ startOffset: runStart, endOffset: o, charShapeId: runId });
+      runStart = o;
+      runId = id;
+    }
+  }
+  spans.push({ startOffset: runStart, endOffset: to, charShapeId: runId });
+  return spans;
+}
+
+/**
+ * 적용 후 run별 파생 shape 를 캡처한다.
+ *
+ * Rust apply_char_mods_to_paragraph 는 base run 별로 파생 shape 를 하나씩 만들어
+ * 적용하므로 적용 후 경계는 적용 전 경계의 부분집합이다 — 각 전 스팬의 시작 오프셋만
+ * 샘플링하고(전수 재스캔 불필요), 인접 스팬의 파생 id 가 같으면 합친다.
+ */
+function deriveAfterSpans(beforeSpans: CharShapeSpan[], propsAt: (offset: number) => number): CharShapeSpan[] {
+  const spans: CharShapeSpan[] = [];
+  for (const before of beforeSpans) {
+    const charShapeId = propsAt(before.startOffset);
+    const last = spans[spans.length - 1];
+    if (last && last.charShapeId === charShapeId) {
+      last.endOffset = before.endOffset;
+    } else {
+      spans.push({ startOffset: before.startOffset, endOffset: before.endOffset, charShapeId });
+    }
+  }
+  return spans;
 }
 
 export class ApplyCharFormatCommand implements EditCommand {
@@ -749,7 +800,7 @@ export class ApplyCharFormatCommand implements EditCommand {
   ) {}
 
   execute(wasm: WasmBridge): DocumentPosition {
-    if (this.entries.length > 0 && this.entries.every((entry) => entry.afterCharShapeId !== undefined)) {
+    if (this.entries.length > 0 && this.entries.every((entry) => entry.afterSpans !== undefined)) {
       this.restoreCharShapeIds(wasm, 'after');
       return { ...this.start };
     }
@@ -773,12 +824,14 @@ export class ApplyCharFormatCommand implements EditCommand {
         const to = p === endPara ? end.charOffset : wasm.getCellParagraphLengthByPath(sec, ppi, pathP);
         if (to <= from) continue;
 
-        const prevProps = wasm.getCellCharPropertiesAtByPath(sec, ppi, pathP, from);
-        this.entries.push({ paraIndex: p, startOffset: from, endOffset: to, beforeCharShapeId: prevProps.charShapeId });
+        // Rust 가 MIXED 범위의 run별 서식을 보존하므로(apply_char_mods_to_paragraph)
+        // before/after 모두 run 단위 스팬으로 캡처한다 — 단일 ID 로는 redo 시 붕괴.
+        const propsAt = (o: number): number =>
+          wasm.getCellCharPropertiesAtByPath(sec, ppi, pathP, o).charShapeId ?? 0;
+        const beforeSpans = sampleCharShapeSpans(propsAt, from, to);
 
         wasm.applyCharFormatInCellByPath(sec, ppi, pathP, from, to, propsJson);
-        const afterProps = wasm.getCellCharPropertiesAtByPath(sec, ppi, pathP, from);
-        this.entries[this.entries.length - 1].afterCharShapeId = afterProps.charShapeId;
+        this.entries.push({ paraIndex: p, beforeSpans, afterSpans: deriveAfterSpans(beforeSpans, propsAt) });
       }
     } else {
       const sec = start.sectionIndex;
@@ -791,12 +844,12 @@ export class ApplyCharFormatCommand implements EditCommand {
         const to = p === endPara ? end.charOffset : wasm.getParagraphLength(sec, p);
         if (to <= from) continue;
 
-        const prevProps = wasm.getCharPropertiesAt(sec, p, from);
-        this.entries.push({ paraIndex: p, startOffset: from, endOffset: to, beforeCharShapeId: prevProps.charShapeId });
+        // 셀 분기와 같은 이유로 run 단위 스팬 캡처.
+        const propsAt = (o: number): number => wasm.getCharPropertiesAt(sec, p, o).charShapeId ?? 0;
+        const beforeSpans = sampleCharShapeSpans(propsAt, from, to);
 
         wasm.applyCharFormat(sec, p, from, to, propsJson);
-        const afterProps = wasm.getCharPropertiesAt(sec, p, from);
-        this.entries[this.entries.length - 1].afterCharShapeId = afterProps.charShapeId;
+        this.entries.push({ paraIndex: p, beforeSpans, afterSpans: deriveAfterSpans(beforeSpans, propsAt) });
       }
     }
 
@@ -811,17 +864,19 @@ export class ApplyCharFormatCommand implements EditCommand {
   private restoreCharShapeIds(wasm: WasmBridge, side: 'before' | 'after'): void {
     const { start } = this;
     for (const entry of this.entries) {
-      const charShapeId = side === 'before' ? entry.beforeCharShapeId : entry.afterCharShapeId;
-      if (charShapeId === undefined) continue;
+      const spans = side === 'before' ? entry.beforeSpans : entry.afterSpans;
+      if (!spans) continue;
 
-      if (isCell(start)) {
-        // 중첩 셀 축 정합: 최내곽 셀에 서식 ID 복원(execute 와 동일 축).
-        wasm.setCharShapeIdInCellByPath(
-          start.sectionIndex, start.parentParaIndex!, cellPathJsonForPara(start, entry.paraIndex),
-          entry.startOffset, entry.endOffset, charShapeId,
-        );
-      } else {
-        wasm.setCharShapeId(start.sectionIndex, entry.paraIndex, entry.startOffset, entry.endOffset, charShapeId);
+      for (const span of spans) {
+        if (isCell(start)) {
+          // 중첩 셀 축 정합: 최내곽 셀에 서식 ID 복원(execute 와 동일 축).
+          wasm.setCharShapeIdInCellByPath(
+            start.sectionIndex, start.parentParaIndex!, cellPathJsonForPara(start, entry.paraIndex),
+            span.startOffset, span.endOffset, span.charShapeId,
+          );
+        } else {
+          wasm.setCharShapeId(start.sectionIndex, entry.paraIndex, span.startOffset, span.endOffset, span.charShapeId);
+        }
       }
     }
   }

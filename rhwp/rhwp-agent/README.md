@@ -7,7 +7,7 @@ all document logic runs in the browser (studio).
 ```
 claude CLI ──spawn──┐                          ┌── ws://127.0.0.1:5175/studio ── rhwp-studio page
 codex CLI ──spawn───┤   rhwp-agent server.mjs  │      src/agent/bridge.ts (WS client)
-                    │   (WS hub, 127.0.0.1)    │        ├─ tool-executor.ts (12 MCP tools)
+                    │   (WS hub, 127.0.0.1)    │        ├─ tool-executor.ts (29 MCP tools)
 mcp-stdio.mjs ──────┴── ws://127.0.0.1:5175/mcp┘        ├─ pending-edits.ts (approval queue)
  (each CLI spawns it as its MCP server;                 └─ src/ui/agent-sidebar/ (chat UI)
   tool calls are forwarded to the hub)
@@ -68,7 +68,7 @@ Paths are relative to the repository root.
 |---|---|---|
 | `RHWP_AGENT_PORT` | `5175` | Hub port (binds to 127.0.0.1 only) |
 | `RHWP_AGENT_TOKEN` | `dev` | Shared token for WS connections (`?token=`) |
-| `RHWP_CLAUDE_MODEL` | (CLI default) | Model for Claude sessions |
+| `RHWP_CLAUDE_MODEL` | `sonnet` | Model for Claude sessions |
 | `RHWP_CODEX_MODEL` | `gpt-5.6-sol` | Model for Codex sessions |
 
 Studio side (build-time, Vite): `VITE_RHWP_AGENT_URL` (default
@@ -77,22 +77,35 @@ Studio side (build-time, Vite): `VITE_RHWP_AGENT_URL` (default
 Each CLI spawns `mcp-stdio.mjs` as its MCP server; the hub passes
 `RHWP_WS_URL`, `RHWP_AGENT_TOKEN`, and `RHWP_AGENT_NAME` via env.
 
-## MCP tools (server name `rhwp`, 24 tools)
+## MCP tools (server name `rhwp`, 29 tools)
 
 Visible to Claude as `mcp__rhwp__<name>`.
 
 - Read: `get_structure` (entry point; includes tables), `get_text_range`,
   `get_selection`, `get_fields`, `get_document_info` (includes `fontsUsed`),
-  `find_text` (searches cells too), `render_page`, `list_styles`,
-  `preview_equation`
+  `find_text` (searches cells too), `render_page` (SVG markup or PNG image),
+  `list_styles`, `list_numberings` (numbering/bullet definition ids),
+  `get_para_format` (sees real lists — HWP list numbers are not text),
+  `get_char_format` (char format at a point; documents the inheritance rule),
+  `preview_equation` (metrics + warnings), `verify_changes`
 - Write (all pending approval): `insert_text`, `delete_range`,
   `replace_range`, `apply_char_format` (incl. `fontFamily`),
   `set_field_value`, `create_table` (bulk cell fill + header row),
   `edit_table` (rows/cols/merge/props), `apply_para_format`, `apply_style`,
+  `apply_list` (real auto-renumbered HWP lists — never literal `1.` text),
   `insert_image` (local `imagePath`; this process reads/measures the file),
   `insert_equation` (HWP 수식 스크립트; render-validated before insert),
   `insert_chart` (bar/line/pie/scatter → PNG), `set_page_layout`,
   `edit_header_footer` (page-number fields), `insert_page_break`
+
+Verify workflow: the system brief and tool descriptions instruct the model to
+call `verify_changes` after a batch of edits and before ending its turn — it
+returns per-op status (applied-now vs awaiting-approval), post-edit text
+digests, affected pages and warnings, and with `includeImage:true` a PNG
+render of the first affected page showing the post-approval state.
+`render_page` can likewise return a PNG (`format:"png"`). Any tool result
+carrying an `image` field (`{ data: base64, mimeType }`) is forwarded to the
+model as an image content block it can visually inspect.
 
 Write-tool approval model: non-destructive object ops (create table, insert
 image/equation/chart, para format, page layout, new header/footer) apply
@@ -137,4 +150,6 @@ addressable yet (Phase-1 limit).
 - `agents/claude.mjs` — `claude -p` stream-json persistent-process backend
 - `agents/codex.mjs` — `codex exec --json` per-turn spawn backend (`exec resume` continuity)
 - `agents/backend.mjs` — shared helpers + `SYSTEM_BRIEF`
+- `tools.mjs` — MCP tool definitions (name/description/input schema/validation), single source of truth
 - `mcp-stdio.mjs` — MCP stdio server → WS forwarder (stdout reserved for MCP frames)
+- `tests/` — tool-definition contract tests (`npm test`)

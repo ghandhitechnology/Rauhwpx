@@ -57,6 +57,15 @@ export function shiftPointAfterDelete(p: DocPoint, del: DocRange): DocPoint {
 const CHAR_FORMAT_KEYS = ['bold', 'italic', 'underline', 'strikethrough', 'fontSize', 'textColor'] as const;
 
 /**
+ * [Task #2337-review 와 동일 원칙] wasm 텍스트 API 의 charOffset/count 는 Rust char
+ * (Unicode scalar) 단위다. JS String.length(UTF-16 code unit)를 쓰면 😀 같은 astral
+ * 문자에서 오프셋이 어긋나 삽입/삭제/검증이 모두 깨진다 → 코드포인트 수로 계산한다.
+ */
+function scalarLen(s: string): number {
+  return [...s].length;
+}
+
+/**
  * 에이전트 대기 편집(pending edit) 관리자.
  *
  * Pending 단계의 변이는 의도적으로 히스토리를 우회한다(WasmBridge 직접 호출) —
@@ -73,6 +82,10 @@ export class PendingEditManager {
   private listeners = new Set<(e: PendingEditsChangeEvent) => void>();
   private unsubs: Array<() => void> = [];
   private counter = 0;
+  /** op 등록 순번 — 같은/다른 set 을 가로지르는 적용 순서 판별용 */
+  private opSeq = 0;
+  /** withMarkedOpsApplied 로 mark-only op 이 현재 적용 중인 set id (재진입 가드) */
+  private speculativeSets = new Set<string>();
   private lastDigest: string | null;
   // 파라미터 프로퍼티 대신 명시적 할당 (node --test strip-only 모드 호환).
   private deps: PendingEditDeps;
@@ -89,8 +102,18 @@ export class PendingEditManager {
     this.unsubs.push(deps.eventBus.on('document-dirty-changed', () => {
       const digest = this.deps.wasm.documentDigest;
       if (digest === this.lastDigest) return;
+      // 문서 로드 자체는 dirty 전이를 만들지 않는다(로드 직후 항상 clean 이라
+      // markClean 이 no-op). 따라서 매니저 생성 시점에는 문서가 없어(null)
+      // 첫 에이전트 쓰기의 dirty false→true 전이에서 비로소 로드된 문서의
+      // digest 를 관측한다 — 이 null → blake3:… 전이는 "교체"가 아니라 초기
+      // 동기화이므로 폐기하면 첫 쓰기의 op 이 스스로 버려진다. pending op 은
+      // 항상 현재 로드된 문서에 대해 기록되므로(쓰기 자체가 첫 dirty 전이를
+      // 일으켜 그 시점 digest 를 채택한다), lastDigest === null 이면 아직
+      // 고아 op 이 존재할 수 없다. 진짜 교체/언로드(blake3:A → blake3:B 또는
+      // → null)는 기존처럼 전부 폐기한다.
+      const hadDocument = this.lastDigest !== null;
       this.lastDigest = digest;
-      if (this.sets.length > 0) this.discardAll('document loaded');
+      if (hadDocument && this.sets.length > 0) this.discardAll('document loaded');
     }));
   }
 
@@ -118,10 +141,10 @@ export class PendingEditManager {
     const { range, addedParas } = this.performInsert(addr.sectionIdx, addr.paraIdx, addr.charOffset, text, addr.cell);
     const set = this.ensureOpenSet(agent);
     const op: PendingOp = { kind: 'insert', id: this.nextId('op'), agent, range, text };
-    set.ops.push(op);
+    this.pushOp(set, op);
     this.shiftAllAfterInsert(range.sectionIdx, {
       paraIdx: addr.paraIdx, charOffset: addr.charOffset, addedParas,
-      endParaIdx: range.endParaIdx, endCharOffset: range.endCharOffset, textLen: text.length,
+      endParaIdx: range.endParaIdx, endCharOffset: range.endCharOffset, textLen: scalarLen(text),
     }, op, addr.cell);
     this.emitDocEvents('agent-pending-edit');
     this.syncOverlay();
@@ -138,10 +161,102 @@ export class PendingEditManager {
     const text = this.captureRangeText(range);
     const set = this.ensureOpenSet(agent);
     const op: PendingOp = { kind: 'delete', id: this.nextId('op'), agent, range: { ...range }, text };
-    set.ops.push(op);
+    this.pushOp(set, op);
     this.syncOverlay();
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, markedText: text.slice(0, 300) };
+  }
+
+  /**
+   * 원자적 교체 — 삭제 마크 + 끝 삽입 두 op 대신, 삭제+삽입을 하나의 op 로 즉시
+   * 적용한다 (live preview). 삽입은 범위 시작점에서 일어나고 시작 지점의 글자 모양을
+   * 삽입 텍스트에 입힌다. 되돌림은 변이 직전 스냅샷으로 원본 텍스트+서식을 정확히
+   * 복원한다 (approve 의 미리보기 채택 설계와 동일하게 메타데이터 재구성을 피한다).
+   */
+  replaceText(
+    range: DocRange,
+    text: string,
+    agent: AgentName,
+  ): { changeSetId: string; insertedRange: DocRange } {
+    if (range.endParaIdx < range.startParaIdx
+      || (range.endParaIdx === range.startParaIdx && range.endCharOffset <= range.startCharOffset)) {
+      throw new AgentToolError('INVALID_ARGS', 'replace range is empty or reversed');
+    }
+    const wasm = this.deps.wasm;
+    // 원본 텍스트/서식 캡처 (captureRangeText 가 범위 검증을 겸한다)
+    const deletedText = this.captureRangeText(range);
+    let charShapeId: number | null = null;
+    try {
+      const props = range.cell
+        ? wasm.getCellCharPropertiesAt(
+          range.sectionIdx, range.cell.paraIdx, range.cell.controlIdx, range.cell.cellIdx,
+          range.startParaIdx, range.startCharOffset,
+        )
+        : wasm.getCharPropertiesAt(range.sectionIdx, range.startParaIdx, range.startCharOffset);
+      if (typeof props.charShapeId === 'number') charShapeId = props.charShapeId;
+    } catch { /* 서식 캡처는 best-effort */ }
+    // 폴백 되돌림용 원본 문단별 paraShapeId (captureRangeText 와 같은 1줄=1문단 대응)
+    const paraShapeIds: number[] = [];
+    for (let p = range.startParaIdx; p <= range.endParaIdx; p++) {
+      try {
+        const props = range.cell
+          ? wasm.getCellParaPropertiesAt(range.sectionIdx, range.cell.paraIdx, range.cell.controlIdx, range.cell.cellIdx, p)
+          : wasm.getParaPropertiesAt(range.sectionIdx, p);
+        paraShapeIds.push(typeof props.paraShapeId === 'number' ? props.paraShapeId : -1);
+      } catch {
+        paraShapeIds.push(-1);
+      }
+    }
+
+    // 변이 직전 스냅샷 — 되돌림 시 원본(텍스트+서식)을 정확히 복원하는 소스.
+    const snapshotId = wasm.saveSnapshot();
+    let deleteShifted = false;
+    try {
+      const res = this.deleteRangeRaw(range);
+      if (res?.ok !== true) throw new AgentToolError('RPC_ERROR', 'replaceText: deleteRange failed');
+      this.shiftAllAfterDelete(range);
+      deleteShifted = true;
+      const start: DocPoint = { paraIdx: range.startParaIdx, charOffset: range.startCharOffset };
+      const ins = text.length > 0
+        ? this.performInsert(range.sectionIdx, start.paraIdx, start.charOffset, text, range.cell)
+        : {
+          range: {
+            sectionIdx: range.sectionIdx, cell: range.cell,
+            startParaIdx: start.paraIdx, startCharOffset: start.charOffset,
+            endParaIdx: start.paraIdx, endCharOffset: start.charOffset,
+          } as DocRange,
+          addedParas: 0,
+        };
+      // 캡처한 글자 모양을 삽입 텍스트 전체에 적용 (범위 끝 서식 상속 방지)
+      if (charShapeId !== null && text.length > 0) this.applyCharShapeToRange(ins.range, charShapeId);
+      const set = this.ensureOpenSet(agent);
+      const op: PendingOp = {
+        kind: 'replace', id: this.nextId('op'), agent,
+        range: ins.range, text, deletedText, charShapeId, paraShapeIds, snapshotId,
+      };
+      this.pushOp(set, op);
+      if (text.length > 0) {
+        this.shiftAllAfterInsert(range.sectionIdx, this.insertShiftFor(start, text), op, range.cell);
+      }
+      this.emitDocEvents('agent-pending-edit');
+      this.syncOverlay();
+      this.emitChange({ type: 'ops-changed' });
+      return { changeSetId: set.id, insertedRange: { ...ins.range } };
+    } catch (err) {
+      // 부분 적용 롤백 — 스냅샷으로 변이 전 상태를 그대로 복원한다.
+      try { wasm.restoreSnapshot(snapshotId); } catch { /* best effort */ }
+      wasm.discardSnapshot(snapshotId);
+      // 삭제 shift 는 이미 다른 op 들에 반영됐을 수 있다 — 원본이 다시 나타났으므로
+      // 재삽입과 동치인 shift 로 되돌린다.
+      if (deleteShifted) {
+        this.shiftAllAfterInsert(
+          range.sectionIdx,
+          this.insertShiftFor({ paraIdx: range.startParaIdx, charOffset: range.startCharOffset }, deletedText),
+          undefined, range.cell,
+        );
+      }
+      throw err;
+    }
   }
 
   applyCharFormat(agent: AgentName, range: DocRange, format: CharFormatProps): { changeSetId: string } {
@@ -177,11 +292,17 @@ export class PendingEditManager {
     }
     const raw = this.applyFormatRaw(range, format);
     this.parseOkLenient(raw, 'applyCharFormat');
+    // 되돌림 전 드리프트 프로브용 범위 텍스트 (best-effort — 캡처 실패 시 프로브 생략)
+    let rangeText: string | undefined;
+    try {
+      rangeText = this.captureRangeText(range);
+    } catch { /* 프로브 없이 동작 (기존 동작과 동일) */ }
     const set = this.ensureOpenSet(agent);
     const op: PendingOp = {
       kind: 'format', id: this.nextId('op'), agent, range: { ...range }, format: { ...format }, inverse,
+      text: rangeText,
     };
-    set.ops.push(op);
+    this.pushOp(set, op);
     this.emitDocEvents('agent-pending-edit');
     this.syncOverlay();
     this.emitChange({ type: 'ops-changed' });
@@ -192,14 +313,15 @@ export class PendingEditManager {
       { changeSetId: string; fieldId: number; oldValue: string; newValue: string } {
     const parsed = this.deps.wasm.setFieldValueByName(name, value);
     if (parsed?.ok !== true) {
-      throw new AgentToolError('RPC_ERROR', `setFieldValueByName('${name}') failed`);
+      throw new AgentToolError('FIELD_NOT_FOUND',
+        `field '${name}' not found or not settable — call get_fields first to list available field names`);
     }
     const set = this.ensureOpenSet(agent);
     const op: PendingOp = {
       kind: 'field', id: this.nextId('op'), agent, name,
       oldValue: parsed.oldValue, newValue: parsed.newValue,
     };
-    set.ops.push(op);
+    this.pushOp(set, op);
     this.emitDocEvents('agent-pending-edit');
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, fieldId: parsed.fieldId, oldValue: parsed.oldValue, newValue: parsed.newValue };
@@ -215,7 +337,7 @@ export class PendingEditManager {
     }
     const set = this.ensureOpenSet(agent);
     const op: PendingOp = { kind: 'object', id: this.nextId('op'), agent, obj };
-    set.ops.push(op);
+    this.pushOp(set, op);
     if (isObjectOpApplied(obj)) this.emitDocEvents('agent-pending-edit');
     this.syncOverlay();
     this.emitChange({ type: 'ops-changed' });
@@ -234,6 +356,86 @@ export class PendingEditManager {
     return false;
   }
 
+  /**
+   * executor 가드: 해당 표에 pending 구조 op(insert_row/col 적용됨 또는
+   * delete/merge 마크)이 하나라도 있으면 true — 구조 op 이 있으면 cellIdx 가
+   * 재번호 매겨지므로 승인 전 추가 표 편집을 막는 데 쓴다.
+   */
+  hasPendingStructureOp(sectionIdx: number, tableParaIdx: number, controlIdx: number): boolean {
+    for (const set of this.sets) {
+      for (const op of set.ops) {
+        if (op.kind !== 'object') continue;
+        const o = op.obj;
+        if ((o.type === 'tableStructure' || o.type === 'tableStructureMarked')
+          && o.sectionIdx === sectionIdx
+          && o.tableParaIdx === tableParaIdx && o.controlIdx === controlIdx) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 검증 루프용 change-set 요약. changeSetId 생략 시 가장 최근 set 을 대상으로 한다.
+   * summary 는 종류 + 짧은 텍스트 다이제스트(~80자) + 좌표 정보다.
+   */
+  describeChangeSet(changeSetId?: string): {
+    changeSetId: string | null;
+    status: string;
+    agent: string;
+    ops: Array<{ id: string; kind: string; applied: boolean; summary: string }>;
+  } {
+    const set = changeSetId !== undefined
+      ? this.sets.find((s) => s.id === changeSetId)
+      : this.sets[this.sets.length - 1];
+    if (!set) return { changeSetId: null, status: 'none', agent: '', ops: [] };
+    return {
+      changeSetId: set.id,
+      status: set.status,
+      agent: set.agent,
+      ops: set.ops.map((op) => ({
+        id: op.id,
+        kind: op.kind === 'object' ? `object:${op.obj.type}` : op.kind,
+        applied: op.kind === 'delete' ? false
+          : op.kind === 'object' ? isObjectOpApplied(op.obj)
+          : true,
+        summary: this.summarizeOp(op),
+      })),
+    };
+  }
+
+  /**
+   * 검증 루프용: set 의 mark-only op(삭제 마크/표 구조 마크 등)을 임시로 적용한
+   * 상태에서 fn() 을 실행하고, 반드시 원래 문서로 복원한다 (fn 이 throw 하든).
+   * approve 경로와 같은 plumbing(applyApprovalOnlyOps)을 쓰되 스냅샷으로 되돌리므로
+   * 문서에는 아무 흔적도 남지 않는다. 같은 set 에 대한 재진입은 fn 만 실행한다.
+   */
+  withMarkedOpsApplied<T>(changeSetId: string, fn: () => T): T {
+    const set = this.sets.find((s) => s.id === changeSetId);
+    if (!set) throw new AgentToolError('INVALID_ARGS', `unknown change set: ${changeSetId}`);
+    // 재진입 — 이미 이 set 의 마크 op 이 적용된 상태이므로 그대로 실행한다.
+    if (this.speculativeSets.has(changeSetId)) return fn();
+    const wasm = this.deps.wasm;
+    const pendingState = this.capturePendingState();
+    this.speculativeSets.add(changeSetId);
+    let snapId: number | null = null;
+    try {
+      snapId = wasm.saveSnapshot();
+      this.applyApprovalOnlyOps(set.ops);
+      this.emitDocEvents('agent-preview');
+      return fn();
+    } finally {
+      this.speculativeSets.delete(changeSetId);
+      if (snapId !== null) {
+        try { wasm.restoreSnapshot(snapId); } catch { /* best effort */ }
+        wasm.discardSnapshot(snapId);
+      }
+      this.restorePendingState(pendingState);
+      this.emitDocEvents('agent-preview');
+    }
+  }
+
   getChangeSets(): ReadonlyArray<PendingChangeSet> {
     return this.sets;
   }
@@ -247,15 +449,25 @@ export class PendingEditManager {
     const set = this.sets.find((s) => s.id === changeSetId);
     if (!set) return;
     if (set === this.open) this.open = null;
-    const skipped = this.dropDriftedOps(set);
+    const { kept, dropped } = this.partitionDriftedOps(set);
+    const skipped = dropped.length;
 
-    if (set.ops.length === 0) {
+    if (kept.length === 0 && dropped.length === 0) {
       this.removeSet(set);
       this.syncOverlay();
-      if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)` });
       this.emitChange({ type: 'approved', changeSetId });
       return;
     }
+
+    // kept 가 남았으면 kept 만 되돌려 before 를 캡처한다 (드리프트 미리보기는
+    // 사용자 소유로 before 에 남긴다). 전부 드리프트됐으면 드리프트분까지 되돌려
+    // before 를 캡처한 뒤 미리보기를 채택한다 — 그냥 반환하면 적용된 미리보기가
+    // 히스토리 항목 없이 문서에 방치된다.
+    const revertOps = kept.length > 0 ? kept : set.ops.slice();
+    const keepPreviewsOf = kept.length > 0 ? dropped : [];
+    // all-drifted 경로에서는 되돌림 동안 좌표 shift 추적이 필요하므로 set.ops 를
+    // 원본 그대로 유지한다 (승인 시점 연산은 kept 가 없으면 실행되지 않는다).
+    if (kept.length > 0) set.ops = kept;
 
     const wasm = this.deps.wasm;
     const cursor = this.deps.inputHandler.getCursorPosition();
@@ -271,14 +483,16 @@ export class PendingEditManager {
       // before 캡처를 위해 잠시 되돌리되, 즉시 원본 스냅샷을 복원한다. 텍스트를
       // 삭제 후 재삽입하지 않으므로 줄/문단/혼합 글자 서식이 미리보기와 동일하다.
       previewId = wasm.saveSnapshot();
-      this.revertAppliedOps(set);
+      this.revertAppliedOps(revertOps, keepPreviewsOf);
       beforeId = wasm.saveSnapshot();
       wasm.restoreSnapshot(previewId);
       this.restorePendingState(previewState);
 
       command = new PreparedSnapshotCommand(
         'agentApplyChangeSet', cursor, cursor, beforeId,
-        () => this.applyApprovalOnlyOps(set),
+        // 되돌림 과정에서 op 좌표가 before 상태로 이동했으므로, 미리보기 좌표로
+        // 복원된(restorePendingState) set.ops 의 클론을 대상으로 실행해야 한다.
+        () => this.applyApprovalOnlyOps(kept.length > 0 ? set.ops : []),
       );
       beforeId = null; // command가 소유권을 인수했다.
       command.execute(wasm);
@@ -297,6 +511,7 @@ export class PendingEditManager {
       if (beforeId !== null) wasm.discardSnapshot(beforeId);
       command?.discard(wasm);
       this.restorePendingState(previewState);
+      this.discardReplaceSnapshots(dropped);
       set.status = 'awaiting-review';
       this.emitDocEvents('agent-pending-edit');
       this.syncOverlay();
@@ -305,6 +520,7 @@ export class PendingEditManager {
       return;
     }
 
+    this.discardReplaceSnapshots([...kept, ...dropped]);
     this.removeSet(set);
     this.syncOverlay();
     if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)` });
@@ -316,9 +532,12 @@ export class PendingEditManager {
     const set = this.sets.find((s) => s.id === changeSetId);
     if (!set) return;
     if (set === this.open) this.open = null;
-    const skipped = this.dropDriftedOps(set);
-    this.revertAppliedOps(set);
+    const { kept, dropped } = this.partitionDriftedOps(set);
+    const skipped = dropped.length;
+    set.ops = kept;
+    this.revertAppliedOps(kept, dropped);
     this.emitDocEvents('agent-reject');
+    this.discardReplaceSnapshots([...kept, ...dropped]);
     this.removeSet(set);
     this.syncOverlay();
     if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)` });
@@ -382,6 +601,7 @@ export class PendingEditManager {
   }
 
   private discardAll(reason: string): void {
+    for (const set of this.sets) this.discardReplaceSnapshots(set.ops);
     this.sets = [];
     this.open = null;
     this.deps.overlay.clear();
@@ -398,15 +618,32 @@ export class PendingEditManager {
     let reverted = false;
     for (let i = this.sets.length - 1; i >= 0; i--) {
       const set = this.sets[i];
-      this.dropDriftedOps(set);
+      const { kept, dropped } = this.partitionDriftedOps(set);
+      set.ops = kept;
       if (set.ops.some((op) => op.kind !== 'delete')) reverted = true;
-      this.revertAppliedOps(set);
+      this.revertAppliedOps(kept, dropped);
+      this.discardReplaceSnapshots([...kept, ...dropped]);
     }
     this.sets = [];
     this.open = null;
     this.deps.overlay.clear();
     if (reverted) this.emitDocEvents('agent-invalidate');
     this.emitChange({ type: 'invalidated', reason });
+  }
+
+  /** op 에 전역 등록 순번을 부여하고 set 에 추가한다 */
+  private pushOp(set: PendingChangeSet, op: PendingOp): void {
+    op.seq = ++this.opSeq;
+    set.ops.push(op);
+  }
+
+  /** set 제거/폐기 시점에 replace op 들이 잡고 있는 wasm 스냅샷을 해제한다 */
+  private discardReplaceSnapshots(ops: PendingOp[]): void {
+    for (const op of ops) {
+      if (op.kind !== 'replace' || op.snapshotId === null) continue;
+      try { this.deps.wasm.discardSnapshot(op.snapshotId); } catch { /* best effort */ }
+      op.snapshotId = null;
+    }
   }
 
   private emitChange(e: PendingEditsChangeEvent): void {
@@ -477,6 +714,35 @@ export class PendingEditManager {
         return { sort: 'para', sectionIdx: obj.sectionIdx, paraIdx: obj.paraIdx, cell: obj.cell };
       default:
         return null;
+    }
+  }
+
+  /** describeChangeSet 용 한 줄 요약: 종류 + 텍스트 다이제스트(~80자) + 좌표 */
+  private summarizeOp(op: PendingOp): string {
+    const digest = (s: string): string => {
+      const oneLine = s.replace(/\n/g, '⏎');
+      return [...oneLine].length > 80 ? [...oneLine].slice(0, 77).join('') + '…' : oneLine;
+    };
+    const coord = (r: DocRange): string => {
+      const cell = r.cell ? ` cell(${r.cell.paraIdx}/${r.cell.controlIdx}/${r.cell.cellIdx})` : '';
+      return `s${r.sectionIdx}${cell} p${r.startParaIdx}:${r.startCharOffset}-p${r.endParaIdx}:${r.endCharOffset}`;
+    };
+    switch (op.kind) {
+      case 'insert':
+        return `insert "${digest(op.text)}" @${coord(op.range)}`;
+      case 'delete':
+        return `delete "${digest(op.text)}" @${coord(op.range)}`;
+      case 'replace':
+        return `replace "${digest(op.deletedText)}" → "${digest(op.text)}" @${coord(op.range)}`;
+      case 'format':
+        return `format ${JSON.stringify(op.format)} @${coord(op.range)}`;
+      case 'field':
+        return `field ${op.name}: "${digest(op.oldValue)}" → "${digest(op.newValue)}"`;
+      case 'object': {
+        const o = op.obj;
+        const at = 'tableParaIdx' in o ? `s${o.sectionIdx} p${o.tableParaIdx}` : `s${o.sectionIdx}`;
+        return `${o.type} @${at}`;
+      }
     }
   }
 
@@ -594,7 +860,7 @@ export class PendingEditManager {
               const firstLine = text.split('\n')[0];
               if (firstLine.length > 0) {
                 wasm.applyCharFormatInCell(
-                  obj.sectionIdx, res.paraIdx, res.controlIdx, c, 0, 0, firstLine.length,
+                  obj.sectionIdx, res.paraIdx, res.controlIdx, c, 0, 0, scalarLen(firstLine),
                   JSON.stringify({ bold: true }),
                 );
               }
@@ -842,7 +1108,7 @@ export class PendingEditManager {
     const touched = new Set<number>();
     for (const set of this.sets) {
       for (const op of set.ops) {
-        if (op.kind === 'insert' || op.kind === 'delete' || op.kind === 'format') {
+        if (op.kind === 'insert' || op.kind === 'delete' || op.kind === 'format' || op.kind === 'replace') {
           const c = op.range.cell;
           if (c && op.range.sectionIdx === sectionIdx
             && c.paraIdx === anchor.paraIdx && c.controlIdx === anchor.controlIdx) {
@@ -1059,16 +1325,17 @@ export class PendingEditManager {
     let para = 0;
     let off = 0;
     if (lines[0].length > 0) {
-      this.parseOk(wasm.insertTextInCell(sec, anchor.paraIdx, anchor.controlIdx, cellIdx, 0, 0, lines[0]), 'insertTextInCell');
-      off = lines[0].length;
+      // 오프셋은 스칼라 단위 — wasm 이 반환하는 charOffset 을 우선 쓴다
+      const res = this.parseOk(wasm.insertTextInCell(sec, anchor.paraIdx, anchor.controlIdx, cellIdx, 0, 0, lines[0]), 'insertTextInCell');
+      off = typeof res.charOffset === 'number' ? res.charOffset : scalarLen(lines[0]);
     }
     for (let i = 1; i < lines.length; i++) {
       this.parseOk(wasm.splitParagraphInCell(sec, anchor.paraIdx, anchor.controlIdx, cellIdx, para, off), 'splitParagraphInCell');
       para += 1;
       off = 0;
       if (lines[i].length > 0) {
-        this.parseOk(wasm.insertTextInCell(sec, anchor.paraIdx, anchor.controlIdx, cellIdx, para, 0, lines[i]), 'insertTextInCell');
-        off = lines[i].length;
+        const res = this.parseOk(wasm.insertTextInCell(sec, anchor.paraIdx, anchor.controlIdx, cellIdx, para, 0, lines[i]), 'insertTextInCell');
+        off = typeof res.charOffset === 'number' ? res.charOffset : scalarLen(lines[i]);
       }
     }
   }
@@ -1091,7 +1358,7 @@ export class PendingEditManager {
         wasm.insertTextInHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo, 0, 0, obj.text),
         'insertTextInHeaderFooter',
       );
-      off = obj.text.length;
+      off = scalarLen(obj.text); // 스칼라 단위 (astral 문자 대응)
     }
     if (obj.pageNumber) {
       wasm.insertFieldInHf(obj.sectionIdx, obj.isHeader, obj.applyTo, 0, off, 1); // 1 = 쪽 번호
@@ -1110,15 +1377,16 @@ export class PendingEditManager {
     const lines = text.split('\n');
     let curPara = para;
     let curOff = off;
-    const insertLine = (p: number, o: number, line: string) => {
-      if (cell) {
-        this.parseOk(
+    // wasm 은 삽입 후 오프셋을 스칼라 단위로 반환한다 — JS .length(UTF-16) 대신
+    // 반환값을 쓰면 astral 문자에서도 오프셋이 어긋나지 않는다.
+    const insertLine = (p: number, o: number, line: string): number => {
+      const res = cell
+        ? this.parseOk(
           wasm.insertTextInCell(sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, p, o, line),
           'insertTextInCell',
-        );
-      } else {
-        this.parseOk(wasm.insertText(sec, p, o, line), 'insertText');
-      }
+        )
+        : this.parseOk(wasm.insertText(sec, p, o, line), 'insertText');
+      return typeof res.charOffset === 'number' ? res.charOffset : o + scalarLen(line);
     };
     const splitPara = (p: number, o: number) => {
       if (cell) {
@@ -1132,16 +1400,14 @@ export class PendingEditManager {
     };
     try {
       if (lines[0].length > 0) {
-        insertLine(para, off, lines[0]);
-        curOff = off + lines[0].length;
+        curOff = insertLine(para, off, lines[0]);
       }
       for (let i = 1; i < lines.length; i++) {
         splitPara(curPara, curOff);
         curPara += 1;
         curOff = 0;
         if (lines[i].length > 0) {
-          insertLine(curPara, 0, lines[i]);
-          curOff = lines[i].length;
+          curOff = insertLine(curPara, 0, lines[i]);
         }
       }
     } catch (e) {
@@ -1184,54 +1450,136 @@ export class PendingEditManager {
     return parts.join('\n');
   }
 
-  /** approve/reject 검증: 저장된 텍스트가 아직 그 자리에 있는가 (멀티 문단은 첫 줄만 — 근사) */
-  private verifyOpText(op: Extract<PendingOp, { kind: 'insert' | 'delete' }>): boolean {
-    const r = op.range;
+  /** 범위 내 현재 텍스트를 읽는다 — 검증용 (읽기 실패/범위 이탈 시 null) */
+  private readRangeText(range: DocRange): string | null {
     try {
-      const paraCount = this.containerParaCount(r.sectionIdx, r.cell);
-      if (r.startParaIdx >= paraCount || r.endParaIdx >= paraCount) return false;
-      if (r.startParaIdx === r.endParaIdx) {
-        const len = this.containerParaLen(r.sectionIdx, r.startParaIdx, r.cell);
-        if (r.endCharOffset > len || r.startCharOffset > r.endCharOffset) return false;
-        return this.containerText(
-          r.sectionIdx, r.startParaIdx, r.startCharOffset, r.endCharOffset - r.startCharOffset, r.cell,
-        ) === op.text;
+      const sec = range.sectionIdx;
+      const paraCount = this.containerParaCount(sec, range.cell);
+      if (range.startParaIdx >= paraCount || range.endParaIdx >= paraCount) return null;
+      const parts: string[] = [];
+      for (let p = range.startParaIdx; p <= range.endParaIdx; p++) {
+        const len = this.containerParaLen(sec, p, range.cell);
+        const from = p === range.startParaIdx ? range.startCharOffset : 0;
+        const to = p === range.endParaIdx ? range.endCharOffset : len;
+        if (from > len || to > len || from > to) return null;
+        parts.push(to > from ? this.containerText(sec, p, from, to - from, range.cell) : '');
       }
-      const firstLine = op.text.split('\n')[0];
-      const len = this.containerParaLen(r.sectionIdx, r.startParaIdx, r.cell);
-      if (r.startCharOffset + firstLine.length > len) return false;
-      if (firstLine.length === 0) return true;
-      return this.containerText(r.sectionIdx, r.startParaIdx, r.startCharOffset, firstLine.length, r.cell) === firstLine;
+      return parts.join('\n');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 이 op 이후 적용된 텍스트 op(insert/replace)이 이 범위 안에 중첩된 경우 그
+   * 기여분을 반영한 기대 텍스트를 만든다 — 에이전트 자신의 나중 편집으로 범위가
+   * 커진 것을 드리프트로 오판하지 않기 위함이다. 사용자 편집은 여기에 기록되지
+   * 않으므로 여전히 불일치(=드리프트)로 잡힌다.
+   */
+  private expectedOpText(
+    op: Extract<PendingOp, { kind: 'insert' | 'delete' | 'replace' | 'format' }>,
+    base: string,
+  ): string {
+    interface Contrib { paraIdx: number; charOffset: number; ins: string; delLen: number; seq: number }
+    const r = op.range;
+    const contribs: Contrib[] = [];
+    for (const set of this.sets) {
+      for (const cand of set.ops) {
+        if (cand === op || (cand.seq ?? 0) <= (op.seq ?? 0)) continue;
+        if (cand.kind !== 'insert' && cand.kind !== 'replace') continue;
+        const cr = cand.range;
+        if (cr.sectionIdx !== r.sectionIdx || !sameCell(cr.cell, r.cell)) continue;
+        // 기여 시작점이 범위 남쪽이어야 한다 — 끝 경계의 삽입은 범위 밖이다
+        const afterStart = cr.startParaIdx > r.startParaIdx
+          || (cr.startParaIdx === r.startParaIdx && cr.startCharOffset >= r.startCharOffset);
+        const withinEnd = cr.endParaIdx < r.endParaIdx
+          || (cr.endParaIdx === r.endParaIdx && cr.endCharOffset <= r.endCharOffset);
+        if (!afterStart || !withinEnd) continue;
+        contribs.push({
+          paraIdx: cr.startParaIdx, charOffset: cr.startCharOffset,
+          ins: cand.text, delLen: cand.kind === 'replace' ? scalarLen(cand.deletedText) : 0,
+          seq: cand.seq ?? 0,
+        });
+      }
+    }
+    if (contribs.length === 0) return base;
+    // 문서 좌표 내림차순(같은 지점이면 등록 순)으로 splice 해야 앞쪽 오프셋이 안 밀린다
+    contribs.sort((a, b) => b.paraIdx - a.paraIdx || b.charOffset - a.charOffset || a.seq - b.seq);
+    let chars = [...base];
+    for (const c of contribs) {
+      const lines = chars.join('').split('\n');
+      const relPara = c.paraIdx - r.startParaIdx;
+      if (relPara < 0 || relPara >= lines.length) continue;
+      let idx = 0;
+      for (let i = 0; i < relPara; i++) idx += [...lines[i]].length + 1;
+      idx += relPara === 0 ? c.charOffset - r.startCharOffset : c.charOffset;
+      if (idx < 0 || idx > chars.length) continue;
+      chars.splice(idx, c.delLen, ...[...c.ins]);
+    }
+    return chars.join('');
+  }
+
+  /**
+   * approve/reject 검증: 기대 텍스트가 아직 그 자리에 있는가.
+   * 멀티 문단 op 는 첫 줄이 아니라 전체 텍스트를 비교한다.
+   */
+  private verifyOpText(op: Extract<PendingOp, { kind: 'insert' | 'delete' | 'replace' | 'format' }>): boolean {
+    // format 은 등록 시점 텍스트 지문이 없으면(캡처 실패) 검증을 건너뛴다 (기존 동작)
+    if (op.kind === 'format' && op.text === undefined) return true;
+    const base = op.kind === 'format' ? op.text! : op.text;
+    const current = this.readRangeText(op.range);
+    if (current === null) return false;
+    return current === this.expectedOpText(op, base);
+  }
+
+  /** 필드 되돌림 전 드리프트 프로브: 현재 값이 여전히 newValue 인가 (사용자 수정 시 되돌리지 않음) */
+  private verifyFieldOp(op: Extract<PendingOp, { kind: 'field' }>): boolean {
+    try {
+      const fields = this.deps.wasm.getFieldList();
+      const found = fields.find((f) => f.name === op.name);
+      if (!found) return false;
+      return found.value === op.newValue;
     } catch {
       return false;
     }
   }
 
-  /** 드리프트된 insert/delete/object op 을 set 에서 제거하고 개수를 반환 */
-  private dropDriftedOps(set: PendingChangeSet): number {
+  /**
+   * 드리프트된 op 을 kept/dropped 로 분할한다 (set.ops 는 호출자가 갱신한다).
+   * dropped 의 applied-now 미리보기는 사용자가 건드린 것으로 간주해 문서에 남긴다.
+   */
+  private partitionDriftedOps(set: PendingChangeSet): { kept: PendingOp[]; dropped: PendingOp[] } {
     const kept: PendingOp[] = [];
-    let skipped = 0;
+    const dropped: PendingOp[] = [];
     for (const op of set.ops) {
-      if ((op.kind === 'insert' || op.kind === 'delete') && !this.verifyOpText(op)) {
-        skipped += 1;
+      if ((op.kind === 'insert' || op.kind === 'delete' || op.kind === 'replace' || op.kind === 'format')
+        && !this.verifyOpText(op)) {
+        dropped.push(op);
+        continue;
+      }
+      if (op.kind === 'field' && !this.verifyFieldOp(op)) {
+        dropped.push(op);
         continue;
       }
       if (op.kind === 'object' && !this.verifyObjectOp(op.obj)) {
-        skipped += 1;
+        dropped.push(op);
         continue;
       }
       kept.push(op);
     }
-    set.ops = kept;
-    return skipped;
+    return { kept, dropped };
   }
 
-  /** 적용된 op 을 역순으로 raw wasm 으로 되돌린다 (이벤트 없음). */
-  private revertAppliedOps(set: PendingChangeSet): Set<string> {
+  /**
+   * 적용된 op 을 역순으로 raw wasm 으로 되돌린다 (이벤트 없음).
+   * keepPreviewsOf = 되돌리지 않고 문서에 남길(드리프트) op — replace 스냅샷
+   * 복원이 이들의 미리보기를 지우지 않도록 안전 판별에 쓰인다.
+   */
+  private revertAppliedOps(ops: PendingOp[], keepPreviewsOf: PendingOp[] = []): Set<string> {
     const wasm = this.deps.wasm;
     const failed = new Set<string>();
-    for (let i = set.ops.length - 1; i >= 0; i--) {
-      const op = set.ops[i];
+    for (let i = ops.length - 1; i >= 0; i--) {
+      const op = ops[i];
       try {
         if (op.kind === 'insert') {
           const r = { ...op.range };
@@ -1239,6 +1587,8 @@ export class PendingEditManager {
           if (res?.ok !== true) continue;
           // 자신 포함 모든 pending 경계를 문서의 임시 before 상태에 맞춘다.
           this.shiftAllAfterDelete(r);
+        } else if (op.kind === 'replace') {
+          this.revertReplaceOp(op, ops, keepPreviewsOf);
         } else if (op.kind === 'format') {
           this.applyFormatRaw(op.range, op.inverse);
         } else if (op.kind === 'field') {
@@ -1255,8 +1605,119 @@ export class PendingEditManager {
     return failed;
   }
 
+  /**
+   * replace op 되돌림. 기본은 변이 직전 스냅샷 복원(원본 텍스트+서식 정확히 복원).
+   * 단, 이 op 이후 적용된 미리보기가 되돌림 대상 밖(다른 set, 드리프트 잔류)에
+   * 남아 있으면 스냅샷 복원이 그것까지 지우므로 역연산 폴백 으로만 되돌린다.
+   */
+  private revertReplaceOp(
+    op: Extract<PendingOp, { kind: 'replace' }>,
+    revertSet: PendingOp[],
+    keepPreviewsOf: PendingOp[],
+  ): void {
+    const wasm = this.deps.wasm;
+    const start: DocPoint = { paraIdx: op.range.startParaIdx, charOffset: op.range.startCharOffset };
+    const reinsertShift = this.insertShiftFor(start, op.deletedText);
+    if (op.snapshotId !== null && !this.hasLaterAppliedOpsOutside(op, revertSet, keepPreviewsOf)) {
+      try {
+        wasm.restoreSnapshot(op.snapshotId);
+        // 문서가 "원본 복원" 상태로 바뀌었으므로 다른 op 들의 좌표를 맞춘다
+        // (삽입분 제거 + 원본 재삽입과 동치).
+        this.shiftAllAfterDelete(op.range, op);
+        this.shiftAllAfterInsert(op.range.sectionIdx, reinsertShift, op, op.range.cell);
+        return;
+      } catch (err) {
+        console.warn('[pending-edits] replace snapshot restore failed; falling back to inverse ops', err);
+      }
+    }
+    // 폴백: 삽입 텍스트를 지우고 원본 텍스트+캡처 서식을 다시 삽입한다
+    const res = this.deleteRangeRaw(op.range);
+    if (res?.ok !== true) throw new AgentToolError('RPC_ERROR', 'replace revert: deleteRange failed');
+    this.shiftAllAfterDelete(op.range, op);
+    if (op.deletedText.length > 0) {
+      const ins = this.performInsert(op.range.sectionIdx, start.paraIdx, start.charOffset, op.deletedText, op.range.cell);
+      if (op.charShapeId !== null) this.applyCharShapeToRange(ins.range, op.charShapeId);
+      // 원본 문단 서식 복원 (splitParagraph 는 시작 문단 모양을 물려주므로 줄별로 덮는다)
+      for (let i = 0; i < op.paraShapeIds.length; i++) {
+        const shapeId = op.paraShapeIds[i];
+        if (shapeId < 0) continue;
+        try {
+          if (op.range.cell) {
+            wasm.setCellParaShapeId(
+              op.range.sectionIdx, op.range.cell.paraIdx, op.range.cell.controlIdx, op.range.cell.cellIdx,
+              start.paraIdx + i, shapeId,
+            );
+          } else {
+            wasm.setParaShapeId(op.range.sectionIdx, start.paraIdx + i, shapeId);
+          }
+        } catch { /* best effort */ }
+      }
+    }
+    this.shiftAllAfterInsert(op.range.sectionIdx, reinsertShift, op, op.range.cell);
+  }
+
+  /** 텍스트를 지점에 삽입했을 때의 shift 서술자 (스칼라 단위) */
+  private insertShiftFor(start: DocPoint, text: string): InsertShift {
+    const lines = text.split('\n');
+    const addedParas = lines.length - 1;
+    const lastLen = scalarLen(lines[lines.length - 1]);
+    return {
+      paraIdx: start.paraIdx,
+      charOffset: start.charOffset,
+      addedParas,
+      endParaIdx: start.paraIdx + addedParas,
+      endCharOffset: addedParas === 0 ? start.charOffset + lastLen : lastLen,
+      textLen: scalarLen(text),
+    };
+  }
+
+  /**
+   * 이 op 이후(seq 가 더 큰) 적용된 applied-now 미리보기가 되돌림 대상 밖에 남아
+   * 있는가 — 있으면 replace 스냅샷 복원이 그 미리보기까지 지우므로 폴백 해야 한다.
+   */
+  private hasLaterAppliedOpsOutside(
+    op: PendingOp, revertSet: PendingOp[], keepPreviewsOf: PendingOp[],
+  ): boolean {
+    const isLaterApplied = (cand: PendingOp): boolean => {
+      if (cand === op || (cand.seq ?? 0) <= (op.seq ?? 0)) return false;
+      if (revertSet.includes(cand)) return false;
+      switch (cand.kind) {
+        case 'insert': case 'replace': case 'format': case 'field': return true;
+        case 'object': return isObjectOpApplied(cand.obj);
+        default: return false; // delete/mark-only 는 문서를 바꾸지 않는다
+      }
+    };
+    for (const set of this.sets) {
+      for (const cand of set.ops) {
+        if (isLaterApplied(cand)) return true;
+      }
+    }
+    for (const cand of keepPreviewsOf) {
+      if (isLaterApplied(cand)) return true;
+    }
+    return false;
+  }
+
+  /** 캡처한 글자 모양을 범위 전체에 적용한다 (멀티 문단은 문단별로 쪼갠다) */
+  private applyCharShapeToRange(range: DocRange, charShapeId: number): void {
+    const wasm = this.deps.wasm;
+    for (let p = range.startParaIdx; p <= range.endParaIdx; p++) {
+      const len = this.containerParaLen(range.sectionIdx, p, range.cell);
+      const from = p === range.startParaIdx ? range.startCharOffset : 0;
+      const to = p === range.endParaIdx ? range.endCharOffset : len;
+      if (to <= from) continue;
+      const raw = range.cell
+        ? wasm.setCharShapeIdInCell(
+          range.sectionIdx, range.cell.paraIdx, range.cell.controlIdx, range.cell.cellIdx,
+          p, from, to, charShapeId,
+        )
+        : wasm.setCharShapeId(range.sectionIdx, p, from, to, charShapeId);
+      this.parseOkLenient(raw, 'setCharShapeId');
+    }
+  }
+
   /** 삭제·스타일 적용 등 승인 시점까지 mark-only 였던 연산만 현재 미리보기 위에 적용한다. */
-  private applyApprovalOnlyOps(set: PendingChangeSet): DocumentPosition {
+  private applyApprovalOnlyOps(ops: PendingOp[]): DocumentPosition {
     const wasm = this.deps.wasm;
     let last: { sectionIdx: number; paraIdx: number; charOffset: number } | null = null;
     const bodyPos = (r: DocRange, paraIdx: number, charOffset: number) =>
@@ -1264,7 +1725,7 @@ export class PendingEditManager {
         ? { sectionIdx: r.sectionIdx, paraIdx: r.cell.paraIdx, charOffset: 0 }
         : { sectionIdx: r.sectionIdx, paraIdx, charOffset };
 
-    for (const op of set.ops) {
+    for (const op of ops) {
       try {
         if (op.kind === 'delete') {
           const r: DocRange = {
@@ -1356,6 +1817,7 @@ export class PendingEditManager {
             // 같은 셀 내부의 텍스트 변화만 셀 문단 좌표를 움직인다
             if (sameCell(obj.cell, insCell)) {
               obj.paraIdx = shift({ paraIdx: obj.paraIdx, charOffset: obj.charOffset }).paraIdx;
+              this.recaptureParaTextSample(obj);
             }
           } else {
             obj.cell = { ...obj.cell, paraIdx: shiftBody(obj.cell.paraIdx, 0).paraIdx };
@@ -1363,12 +1825,30 @@ export class PendingEditManager {
         } else if (!insCell) {
           const p = shiftBody(obj.paraIdx, obj.charOffset);
           obj.paraIdx = p.paraIdx; obj.charOffset = p.charOffset;
+          // 같은 단계의 삽입/삭제가 이 문단 텍스트를 바꿨을 수 있다 — 지문을
+          // 다시 캡처하지 않으면 되돌림 검증이 자신의 편집을 드리프트로 오판한다.
+          this.recaptureParaTextSample(obj);
         }
         return;
       }
       default:
         return; // pageLayout / headerFooter 는 문단 좌표가 없다
     }
+  }
+
+  /** shift 로 문단 좌표/내용이 바뀐 paraFormat/applyStyle op 의 텍스트 지문을 다시 캡처한다 */
+  private recaptureParaTextSample(obj: Extract<ObjectOp, { type: 'paraFormat' | 'applyStyle' }>): void {
+    if (obj.textSample === undefined) return;
+    const wasm = this.deps.wasm;
+    try {
+      const len = obj.cell
+        ? wasm.getCellParagraphLength(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx)
+        : wasm.getParagraphLength(obj.sectionIdx, obj.paraIdx);
+      const n = Math.min(len, 24);
+      obj.textSample = n === 0 ? '' : (obj.cell
+        ? wasm.getTextInCell(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx, 0, n)
+        : wasm.getTextRange(obj.sectionIdx, obj.paraIdx, 0, n));
+    } catch { /* 조회 실패 시 기존 지문 유지 */ }
   }
 
   private shiftAllAfterInsert(sectionIdx: number, ins: InsertShift, exclude?: PendingOp, cell?: CellAddr): void {
