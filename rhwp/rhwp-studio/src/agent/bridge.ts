@@ -19,6 +19,8 @@ import type {
   AgentName,
   PermissionProfile,
   ProductSkillFile,
+  WritingStyleLanguage,
+  WritingStyleUpload,
   AgentStreamEvent,
   SidebarEvent,
 } from './types.ts';
@@ -45,6 +47,8 @@ export interface AgentBridge {
   setSkillEnabled(name: string, enabled: boolean): string;
   deleteSkill(name: string): string;
   generateSkillDraft(input: { goal: string; triggerExamples?: string; nonTriggerExamples?: string; resourceNotes?: string; existingSkill?: string }): string;
+  requestWritingStyleStatus(): string;
+  calibrateWritingStyle(input: { language: WritingStyleLanguage; files: WritingStyleUpload[] }): string;
   interrupt(): void;
   onEvent(cb: (e: SidebarEvent) => void): () => void;
   dispose(): void;
@@ -328,6 +332,20 @@ class AgentBridgeImpl implements AgentBridge {
       case 'skills-error':
         this.emit({ type: 'skills-error', requestId: String(msg.requestId ?? ''), code: String(msg.code ?? 'SKILLS_ERROR'), message: String(msg.message ?? 'Skill request failed') });
         break;
+      case 'writing-style-status':
+        this.emit({ type: 'writing-style-status', requestId: String(msg.requestId ?? ''), status: msg.status });
+        break;
+      case 'writing-style-progress':
+        if (msg.state === 'reading' || msg.state === 'analyzing' || msg.state === 'saving') {
+          this.emit({ type: 'writing-style-progress', requestId: String(msg.requestId ?? ''), state: msg.state });
+        }
+        break;
+      case 'writing-style-result':
+        this.emit({ type: 'writing-style-result', requestId: String(msg.requestId ?? ''), status: msg.status });
+        break;
+      case 'writing-style-error':
+        this.emit({ type: 'writing-style-error', requestId: String(msg.requestId ?? ''), code: String(msg.code ?? 'CALIBRATION_FAILED'), message: String(msg.message ?? 'Writing-style calibration failed') });
+        break;
       case 'chat-error': {
         this.emit({
           type: 'hub-error',
@@ -566,6 +584,18 @@ class AgentBridgeImpl implements AgentBridge {
   generateSkillDraft(input: { goal: string; triggerExamples?: string; nonTriggerExamples?: string; resourceNotes?: string; existingSkill?: string }): string {
     const requestId = `skill-draft-${++this.requestSeq}`;
     this.sendJson({ v: 1, type: 'skill-draft-request', requestId, agent: this.selectedAgent, model: this.selectedModel, ...input });
+    return requestId;
+  }
+
+  requestWritingStyleStatus(): string {
+    const requestId = `writing-style-status-${++this.requestSeq}`;
+    this.sendJson({ v: 1, type: 'writing-style-status-request', requestId });
+    return requestId;
+  }
+
+  calibrateWritingStyle(input: { language: WritingStyleLanguage; files: WritingStyleUpload[] }): string {
+    const requestId = `writing-style-calibration-${++this.requestSeq}`;
+    this.sendJson({ v: 1, type: 'writing-style-calibrate', requestId, ...input });
     return requestId;
   }
 
