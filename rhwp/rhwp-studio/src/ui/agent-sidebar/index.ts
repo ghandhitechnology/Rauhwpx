@@ -46,6 +46,11 @@ export interface AgentSidebarDeps {
   bridge: AgentBridge;
   /** inset 전환 후 용지 가운데 정렬을 요청할 때 사용 */
   eventBus?: EventBus;
+  /** 헤더에 표시할 현재 문서와 선택 상태. */
+  getDocumentContext?: () => {
+    documentName: string | null;
+    selectionLabel: string | null;
+  };
 }
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
@@ -60,6 +65,7 @@ const PROVIDER_ICON_SRC: Record<AgentName, string> = {
 const SIDEBAR_WIDTH_KEY = 'rhwp-agent-sidebar-width';
 const SIDEBAR_WIDTH_DEFAULT = 360;
 const SIDEBAR_WIDTH_MIN = 280;
+const SIDEBAR_MOTION_DURATION_MS = 320;
 
 function maxSidebarWidth(viewportWidth = window.innerWidth): number {
   return Math.max(SIDEBAR_WIDTH_MIN, Math.floor(viewportWidth * 0.5));
@@ -177,7 +183,7 @@ function opPreview(op: PendingOp): string {
 }
 
 export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; dispose(): void } {
-  const { bridge, eventBus } = deps;
+  const { bridge, eventBus, getDocumentContext } = deps;
 
   let selectedAgent: AgentName = bridge.getActiveAgent() ?? 'claude';
   let selectedModel = defaultModelForAgent(selectedAgent);
@@ -217,6 +223,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let editingSkill: ProductSkill | null = null;
   let skillValidationReady = false;
   let skillDraftRevision = 0;
+  let configHideTimer: number | null = null;
   const skillValidationRequests = new Map<string, number>();
   let activeSkillDraftRequestId: string | null = null;
   const skillRequestActions = new Map<string, 'edit' | 'duplicate'>();
@@ -279,7 +286,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
 
     const startedAt = performance.now();
-    const durationMs = 280;
+    const durationMs = SIDEBAR_MOTION_DURATION_MS;
     const tick = (now: number) => {
       notifyInsetChanged();
       if (now - startedAt < durationMs) {
@@ -326,9 +333,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       // 접힌 상태에서 드래그하면 먼저 펼친 뒤 폭을 조절한다.
       setCollapsed(false, { recenter: false });
     }
-    setProviderMenuOpen(false);
-    setLlmMenuOpen(false);
-    setEffortMenuOpen(false);
+    setConfigPanelOpen(false);
     document.body.classList.add('ag-sidebar-resizing', 'ag-sidebar-animating');
     window.addEventListener('pointermove', onResizePointerMove, true);
     window.addEventListener('pointerup', endSidebarResize, true);
@@ -428,34 +433,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const providerWrap = el('div', 'ag-model ag-provider');
   const providerTrigger = el('button', 'ag-model-trigger');
   providerTrigger.type = 'button';
-  providerTrigger.setAttribute('aria-haspopup', 'menu');
   providerTrigger.setAttribute('aria-expanded', 'false');
+  providerTrigger.setAttribute('aria-controls', 'ag-config-panel');
   providerTrigger.setAttribute('aria-label', '프로바이더 선택');
   let providerIcon = createProviderIcon(selectedAgent);
   const providerName = el('span', 'ag-model-name', AGENT_LABEL[selectedAgent]);
-  const providerCaret = createChevron('ag-model-caret');
-  providerTrigger.append(providerIcon, providerName, providerCaret);
+  providerTrigger.append(providerIcon, providerName);
 
   const providerMenu = el('div', 'ag-model-menu');
   providerMenu.setAttribute('role', 'menu');
   providerMenu.setAttribute('aria-hidden', 'true');
   const providerItems = new Map<AgentName, HTMLButtonElement>();
 
-  function closeAllMenus(): void {
-    setProviderMenuOpen(false);
-    setLlmMenuOpen(false);
-    setEffortMenuOpen(false);
-  }
-
-  function setProviderMenuOpen(open: boolean): void {
-    providerTrigger.setAttribute('aria-expanded', open ? 'true' : 'false');
-    providerMenu.setAttribute('aria-hidden', open ? 'false' : 'true');
-    providerWrap.classList.toggle('ag-model-open', open);
-  }
-
   function selectAgent(agent: AgentName): void {
     if (turnRunning) return;
-    closeAllMenus();
     setSelectedAgent(agent);
     selectedModel = resolveModelForAgent(agent, selectedModel);
     selectedEffort = resolveEffortForAgent(agent, selectedEffort, selectedModel);
@@ -480,21 +471,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   providerTrigger.addEventListener('click', (e) => {
     e.stopPropagation();
     if (turnRunning) return;
-    const next = !providerWrap.classList.contains('ag-model-open');
-    setLlmMenuOpen(false);
-    setEffortMenuOpen(false);
-    setProviderMenuOpen(next);
+    setConfigPanelOpen(!modelSummary.classList.contains('ag-expanded'));
   });
   providerTrigger.addEventListener('keydown', (e) => {
     if (turnRunning) return;
-    if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+    if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setLlmMenuOpen(false);
-      setEffortMenuOpen(false);
-      setProviderMenuOpen(true);
+      setConfigPanelOpen(true);
       providerItems.get(selectedAgent)?.focus();
     } else if (e.key === 'Escape') {
-      setProviderMenuOpen(false);
+      setConfigPanelOpen(false);
     }
   });
   providerMenu.addEventListener('keydown', (e) => {
@@ -502,7 +488,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     const current = items.indexOf(document.activeElement as HTMLButtonElement);
     if (e.key === 'Escape') {
       e.preventDefault();
-      setProviderMenuOpen(false);
+      setConfigPanelOpen(false);
       providerTrigger.focus();
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -519,33 +505,25 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
   });
 
-  providerWrap.append(providerTrigger, providerMenu);
+  providerWrap.append(providerTrigger);
 
   // ── 모델 피커 (프로바이더에 따라 옵션 교체) ──────────
   const llmWrap = el('div', 'ag-model ag-llm');
   const llmTrigger = el('button', 'ag-model-trigger ag-llm-trigger');
   llmTrigger.type = 'button';
-  llmTrigger.setAttribute('aria-haspopup', 'menu');
   llmTrigger.setAttribute('aria-expanded', 'false');
+  llmTrigger.setAttribute('aria-controls', 'ag-config-panel');
   llmTrigger.setAttribute('aria-label', '모델 선택');
   const llmName = el('span', 'ag-llm-name', labelForModel(selectedAgent, selectedModel));
-  const llmCaret = createChevron('ag-model-caret');
-  llmTrigger.append(llmName, llmCaret);
+  llmTrigger.append(llmName);
 
   const llmMenu = el('div', 'ag-model-menu ag-llm-menu');
   llmMenu.setAttribute('role', 'menu');
   llmMenu.setAttribute('aria-hidden', 'true');
   let llmItems = new Map<string, HTMLButtonElement>();
 
-  function setLlmMenuOpen(open: boolean): void {
-    llmTrigger.setAttribute('aria-expanded', open ? 'true' : 'false');
-    llmMenu.setAttribute('aria-hidden', open ? 'false' : 'true');
-    llmWrap.classList.toggle('ag-model-open', open);
-  }
-
   function selectModel(modelId: string): void {
     if (turnRunning) return;
-    setLlmMenuOpen(false);
     selectedModel = resolveModelForAgent(selectedAgent, modelId);
     selectedEffort = resolveEffortForAgent(selectedAgent, selectedEffort, selectedModel);
     llmName.textContent = labelForModel(selectedAgent, selectedModel);
@@ -580,21 +558,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   llmTrigger.addEventListener('click', (e) => {
     e.stopPropagation();
     if (turnRunning) return;
-    const next = !llmWrap.classList.contains('ag-model-open');
-    setProviderMenuOpen(false);
-    setEffortMenuOpen(false);
-    setLlmMenuOpen(next);
+    setConfigPanelOpen(!modelSummary.classList.contains('ag-expanded'));
   });
   llmTrigger.addEventListener('keydown', (e) => {
     if (turnRunning) return;
-    if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+    if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setProviderMenuOpen(false);
-      setEffortMenuOpen(false);
-      setLlmMenuOpen(true);
+      setConfigPanelOpen(true);
       llmItems.get(selectedModel)?.focus();
     } else if (e.key === 'Escape') {
-      setLlmMenuOpen(false);
+      setConfigPanelOpen(false);
     }
   });
   llmMenu.addEventListener('keydown', (e) => {
@@ -603,7 +576,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     const current = items.indexOf(document.activeElement as HTMLButtonElement);
     if (e.key === 'Escape') {
       e.preventDefault();
-      setLlmMenuOpen(false);
+      setConfigPanelOpen(false);
       llmTrigger.focus();
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -621,37 +594,30 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   });
 
   rebuildLlmMenu();
-  llmWrap.append(llmTrigger, llmMenu);
+  llmWrap.append(llmTrigger);
 
   // ── Effort 피커 (프로바이더/모델이 지원하는 수준) ────
   const effortWrap = el('div', 'ag-model ag-effort');
   const effortTrigger = el('button', 'ag-model-trigger ag-effort-trigger');
   effortTrigger.type = 'button';
-  effortTrigger.setAttribute('aria-haspopup', 'menu');
   effortTrigger.setAttribute('aria-expanded', 'false');
+  effortTrigger.setAttribute('aria-controls', 'ag-config-panel');
   effortTrigger.setAttribute('aria-label', '추론 강도 선택');
   const effortName = el(
     'span',
     'ag-effort-name',
     labelForEffort(selectedAgent, selectedEffort, selectedModel),
   );
-  const effortCaret = createChevron('ag-model-caret');
-  effortTrigger.append(effortName, effortCaret);
+  const summaryCaret = createChevron('ag-summary-caret');
+  effortTrigger.append(effortName, summaryCaret);
 
   const effortMenu = el('div', 'ag-model-menu ag-effort-menu');
   effortMenu.setAttribute('role', 'menu');
   effortMenu.setAttribute('aria-hidden', 'true');
   let effortItems = new Map<string, HTMLButtonElement>();
 
-  function setEffortMenuOpen(open: boolean): void {
-    effortTrigger.setAttribute('aria-expanded', open ? 'true' : 'false');
-    effortMenu.setAttribute('aria-hidden', open ? 'false' : 'true');
-    effortWrap.classList.toggle('ag-model-open', open);
-  }
-
   function selectEffort(effortId: string): void {
     if (turnRunning) return;
-    setEffortMenuOpen(false);
     selectedEffort = resolveEffortForAgent(selectedAgent, effortId, selectedModel);
     effortName.textContent = labelForEffort(selectedAgent, selectedEffort, selectedModel);
     for (const [id, item] of effortItems) {
@@ -684,21 +650,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   effortTrigger.addEventListener('click', (e) => {
     e.stopPropagation();
     if (turnRunning) return;
-    const next = !effortWrap.classList.contains('ag-model-open');
-    setProviderMenuOpen(false);
-    setLlmMenuOpen(false);
-    setEffortMenuOpen(next);
+    setConfigPanelOpen(!modelSummary.classList.contains('ag-expanded'));
   });
   effortTrigger.addEventListener('keydown', (e) => {
     if (turnRunning) return;
-    if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+    if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setProviderMenuOpen(false);
-      setLlmMenuOpen(false);
-      setEffortMenuOpen(true);
+      setConfigPanelOpen(true);
       effortItems.get(selectedEffort)?.focus();
     } else if (e.key === 'Escape') {
-      setEffortMenuOpen(false);
+      setConfigPanelOpen(false);
     }
   });
   effortMenu.addEventListener('keydown', (e) => {
@@ -707,7 +668,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     const current = items.indexOf(document.activeElement as HTMLButtonElement);
     if (e.key === 'Escape') {
       e.preventDefault();
-      setEffortMenuOpen(false);
+      setConfigPanelOpen(false);
       effortTrigger.focus();
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -725,15 +686,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   });
 
   rebuildEffortMenu();
-  effortWrap.append(effortTrigger, effortMenu);
-
-  const onDocPointerDown = (e: PointerEvent) => {
-    const t = e.target as Node;
-    if (!providerWrap.contains(t)) setProviderMenuOpen(false);
-    if (!llmWrap.contains(t)) setLlmMenuOpen(false);
-    if (!effortWrap.contains(t)) setEffortMenuOpen(false);
-  };
-  document.addEventListener('pointerdown', onDocPointerDown);
+  effortWrap.append(effortTrigger);
 
   const threadsBtn = el('button', 'ag-threads-btn');
   threadsBtn.type = 'button';
@@ -754,8 +707,89 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   skillsBtn.setAttribute('aria-controls', 'ag-skills-panel');
 
   const conn = el('span', 'ag-conn');
-  selectors.append(providerWrap, llmWrap, effortWrap, permissionBtn, skillsBtn, threadsBtn);
-  header.append(selectors, conn);
+  conn.setAttribute('role', 'status');
+  conn.setAttribute('aria-live', 'polite');
+
+  const takeoverBtn = el('button', 'ag-takeover-btn', '이 탭에서 연결');
+  takeoverBtn.type = 'button';
+  takeoverBtn.hidden = true;
+  takeoverBtn.addEventListener('click', () => bridge.takeOverConnection());
+
+  const documentContext = el('div', 'ag-document-context');
+  const documentName = el('span', 'ag-document-name', '문서 없음');
+  const selectionContext = el('span', 'ag-selection-context', '선택 없음');
+  documentContext.append(documentName, selectionContext);
+
+  const headerActions = el('div', 'ag-header-actions');
+  threadsBtn.classList.add('ag-header-icon-btn');
+  headerActions.append(threadsBtn);
+
+  selectors.append(providerWrap, llmWrap, effortWrap);
+  const modelSummary = el('div', 'ag-model-summary');
+  modelSummary.append(selectors, headerActions);
+
+  const configPanel = el('div', 'ag-config-panel');
+  configPanel.id = 'ag-config-panel';
+  configPanel.hidden = true;
+  configPanel.setAttribute('role', 'group');
+  configPanel.setAttribute('aria-label', '에이전트 설정');
+  configPanel.setAttribute('aria-hidden', 'true');
+  const configPanelInner = el('div', 'ag-config-panel-inner');
+  const providerGroup = el('div', 'ag-config-group');
+  providerGroup.append(el('span', 'ag-config-label', '에이전트'), providerMenu);
+  const llmGroup = el('div', 'ag-config-group');
+  llmGroup.append(el('span', 'ag-config-label', '모델'), llmMenu);
+  const effortGroup = el('div', 'ag-config-group');
+  effortGroup.append(el('span', 'ag-config-label', '추론'), effortMenu);
+  configPanelInner.append(providerGroup, llmGroup, effortGroup);
+  configPanel.append(configPanelInner);
+
+  const contextRow = el('div', 'ag-context-row');
+  contextRow.append(documentContext);
+
+  const connectionRow = el('div', 'ag-connection-row');
+  connectionRow.append(conn, takeoverBtn);
+  header.append(modelSummary, configPanel, contextRow, connectionRow);
+
+  function updateDocumentContext(): void {
+    const context = getDocumentContext?.();
+    documentName.textContent = context?.documentName || '문서 없음';
+    documentName.title = context?.documentName || '';
+    selectionContext.textContent = context?.selectionLabel || '선택 없음';
+  }
+
+  function setConfigPanelOpen(open: boolean): void {
+    if (configHideTimer !== null) {
+      window.clearTimeout(configHideTimer);
+      configHideTimer = null;
+    }
+    if (open) {
+      configPanel.hidden = false;
+      // Ensure the collapsed grid is painted before expanding it.
+      void configPanel.offsetHeight;
+      configPanel.classList.add('ag-open');
+    } else {
+      configPanel.classList.remove('ag-open');
+      configHideTimer = window.setTimeout(() => {
+        if (!modelSummary.classList.contains('ag-expanded')) configPanel.hidden = true;
+        configHideTimer = null;
+      }, 240);
+    }
+    configPanel.setAttribute('aria-hidden', open ? 'false' : 'true');
+    modelSummary.classList.toggle('ag-expanded', open);
+    for (const trigger of [providerTrigger, llmTrigger, effortTrigger]) {
+      trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    for (const menu of [providerMenu, llmMenu, effortMenu]) {
+      menu.setAttribute('aria-hidden', open ? 'false' : 'true');
+    }
+  }
+
+  const onDocPointerDown = (e: PointerEvent) => {
+    const t = e.target as Node;
+    if (!header.contains(t)) setConfigPanelOpen(false);
+  };
+  document.addEventListener('pointerdown', onDocPointerDown);
 
   const stage = el('div', 'ag-stage');
 
@@ -779,6 +813,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     characterData: true,
   });
   const review = el('div', 'ag-review');
+  const composerUtilities = el('div', 'ag-composer-utilities');
+  composerUtilities.setAttribute('aria-label', '채팅 도구');
+  composerUtilities.append(permissionBtn, skillsBtn);
   const composer = el('form', 'ag-composer');
   const slashMenu = el('div', 'ag-slash-menu');
   slashMenu.id = 'ag-slash-menu';
@@ -786,7 +823,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   slashMenu.setAttribute('role', 'listbox');
   slashMenu.setAttribute('aria-label', '슬래시 명령과 스킬');
   const input = el('textarea', 'ag-input');
-  input.placeholder = '딸깍해보자..';
+  input.placeholder = '문서 작업을 입력하세요';
   input.rows = 1;
   input.setAttribute('aria-label', '에이전트 메시지 입력');
   input.setAttribute('role', 'combobox');
@@ -805,7 +842,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   composerField.append(input, send);
   composer.append(slashMenu, composerField);
   // 헤더(모델 피커)까지 채팅 페이지에 포함해 목록 전환 시 함께 사라지게 한다.
-  chatPage.append(header, messages, review, composer);
+  chatPage.append(header, messages, review, composerUtilities, composer);
 
   const threadsPage = el('div', 'ag-threads-page');
   threadsPage.id = 'ag-threads-panel';
@@ -908,7 +945,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function updatePermissionButton(): void {
     const unrestricted = permissionProfile === 'unrestricted';
-    permissionBtn.textContent = unrestricted ? '전체 접근' : '안전';
+    permissionBtn.textContent = unrestricted ? '권한: 전체 접근' : '권한: 안전';
     permissionBtn.setAttribute('aria-label', unrestricted ? '에이전트 권한: 전체 접근' : '에이전트 권한: 안전');
     permissionBtn.setAttribute('aria-pressed', unrestricted ? 'true' : 'false');
     permissionBtn.classList.toggle('ag-permission-unrestricted', unrestricted);
@@ -931,6 +968,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function setSkillsPanelOpen(open: boolean): void {
     skillsPanelOpen = open;
+    if (open) setConfigPanelOpen(false);
     threadsPanelOpen = false;
     root.classList.toggle('ag-skills-open', open);
     root.classList.remove('ag-threads-open');
@@ -941,7 +979,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     chatPage.setAttribute('aria-hidden', open ? 'true' : 'false');
     if (!open) showSkillList();
     if (open) {
-      closeAllMenus();
       bridge.listSkills();
       skillsSearch.focus();
     }
@@ -1414,6 +1451,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function setThreadsPanelOpen(open: boolean): void {
     threadsPanelOpen = open;
+    if (open) setConfigPanelOpen(false);
     if (open) skillsPanelOpen = false;
     root.classList.toggle('ag-threads-open', open);
     root.classList.remove('ag-skills-open');
@@ -1423,7 +1461,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     skillsPage.setAttribute('aria-hidden', 'true');
     chatPage.setAttribute('aria-hidden', open ? 'true' : 'false');
     if (open) {
-      closeAllMenus();
       rebuildThreadsList();
       threadsNew.focus();
     }
@@ -1505,6 +1542,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     connState = state;
     conn.className = `ag-conn ag-conn-${state}`;
     conn.textContent = CONN_LABEL[state];
+    takeoverBtn.hidden = state !== 'replaced';
+    if (state === 'replaced') setConfigPanelOpen(false);
     updateComposer();
   }
 
@@ -1525,7 +1564,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     llmTrigger.disabled = turnRunning;
     effortTrigger.disabled = turnRunning;
     permissionBtn.disabled = turnRunning || connState !== 'connected';
-    if (turnRunning) closeAllMenus();
+    if (turnRunning) setConfigPanelOpen(false);
   }
 
   function isConversationNearBottom(): boolean {
@@ -2049,11 +2088,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
     rebuildReview();
   });
+  const contextUnsubs = eventBus
+    ? [
+        eventBus.on('document-context-changed', updateDocumentContext),
+        eventBus.on('cursor-format-changed', updateDocumentContext),
+        eventBus.on('picture-object-selection-changed', updateDocumentContext),
+        eventBus.on('table-object-selection-changed', updateDocumentContext),
+      ]
+    : [];
 
   // 초기 상태 반영
   setSelectedAgent(selectedAgent);
   setConnection(connState);
   setTurnRunning(turnRunning);
+  updateDocumentContext();
   rebuildReview();
 
   return {
@@ -2061,8 +2109,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     dispose(): void {
       unsubBridge();
       unsubPending();
+      contextUnsubs.forEach((unsub) => unsub());
       messagesMutationObserver?.disconnect();
       messages.removeEventListener('scroll', onMessagesScroll);
+      if (configHideTimer !== null) window.clearTimeout(configHideTimer);
       if (conversationScrollRaf !== null) {
         window.cancelAnimationFrame(conversationScrollRaf);
         conversationScrollRaf = null;
