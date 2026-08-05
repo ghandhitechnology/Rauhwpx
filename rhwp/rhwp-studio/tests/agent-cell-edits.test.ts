@@ -125,12 +125,24 @@ function makeExecutor() {
       pendingCalls.push({ method: 'markDelete', args: [agent, range] });
       return { changeSetId: 'cs-1', markedText: 'marked' };
     },
+    replaceText: (range: { sectionIdx: number; startParaIdx: number; startCharOffset: number; cell?: CellAddr }, text: string, agent: string) => {
+      pendingCalls.push({ method: 'replaceText', args: [range, text, agent] });
+      return {
+        changeSetId: 'cs-1',
+        insertedRange: {
+          sectionIdx: range.sectionIdx, cell: range.cell,
+          startParaIdx: range.startParaIdx, startCharOffset: range.startCharOffset,
+          endParaIdx: range.startParaIdx, endCharOffset: range.startCharOffset + text.length,
+        },
+      };
+    },
     applyCharFormat: (agent: string, range: unknown, format: unknown) => {
       pendingCalls.push({ method: 'applyCharFormat', args: [agent, range, format] });
       return { changeSetId: 'cs-1' };
     },
     setFieldValue: () => ({ changeSetId: 'cs-1', fieldId: 1, oldValue: '', newValue: '' }),
     hasDestructiveTableMark: () => false,
+    hasPendingStructureOp: () => false,
   };
   const inputHandler = {
     getCursorPosition: () => ({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 }),
@@ -222,7 +234,7 @@ test('insert_text: cell 인자가 pending 으로 전달된다', async () => {
   assert.deepEqual(addr.cell, CELL_FOO);
 });
 
-test('replace_range: 삭제 마크와 삽입 모두 같은 cell 을 대상으로 한다', async () => {
+test('replace_range: 원자적 replaceText op 에 cell 이 그대로 전달된다', async () => {
   const { executor, pendingCalls } = makeExecutor();
   await executor.execute(
     'replace_range',
@@ -232,10 +244,11 @@ test('replace_range: 삭제 마크와 삽입 모두 같은 cell 을 대상으로
     },
     'claude',
   );
-  const del = pendingCalls.find((c) => c.method === 'markDelete')!.args[1] as { cell?: CellAddr };
-  const ins = pendingCalls.find((c) => c.method === 'insertText')!.args[1] as { cell?: CellAddr };
-  assert.deepEqual(del.cell, CELL_FOO);
-  assert.deepEqual(ins.cell, CELL_FOO);
+  // markDelete + insertText 조합이 아니라 단일 원자적 op 이다
+  assert.equal(pendingCalls.length, 1);
+  assert.equal(pendingCalls[0].method, 'replaceText');
+  const range = pendingCalls[0].args[0] as { cell?: CellAddr };
+  assert.deepEqual(range.cell, CELL_FOO);
 });
 
 test('cell 검증: 표가 없는 문단/범위 밖 cellIdx/범위 밖 오프셋 → INVALID_ARGS', async () => {

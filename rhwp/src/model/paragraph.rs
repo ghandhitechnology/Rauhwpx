@@ -739,6 +739,9 @@ impl Paragraph {
                 cs.start_pos = utf16_start;
             }
         }
+        // 클램핑으로 같은 위치에 쌓인 길이 0 엔트리/연속 동일 ID 정리
+        // (방치 시 HWPX 직렬화가 빈 <hp:run>을 만든다)
+        self.merge_adjacent_char_shapes();
 
         // 4. line_segs: 삭제 범위 이후 → utf16_delta만큼 감소
         for ls in &mut self.line_segs {
@@ -1128,6 +1131,9 @@ impl Paragraph {
                 char_shape_id: cs.char_shape_id,
             });
         }
+        // 병합 경계의 중복 위치/연속 동일 ID 엔트리 정리
+        // (split+merge 왕복에서 위치가 다른 같은 ID 경계가 누적되던 문제)
+        self.merge_adjacent_char_shapes();
 
         // 4. line_segs: 원본 치수를 보존하여 리플로우 시 올바른 줄간격 유지
         let orig_line_seg = self.line_segs.first().cloned();
@@ -1246,6 +1252,35 @@ impl Paragraph {
             }
         }
         Some(result_id)
+    }
+
+    /// [start_char_offset, end_char_offset) 범위와 겹치는 글자 모양 run 목록을 반환한다.
+    ///
+    /// 반환값: (run 시작 char 오프셋, run 끝 char 오프셋, char_shape_id) 의 벡터.
+    /// 구간은 겹치지 않고 요청 범위 전체를 덮는다. 범위 서식 적용 시 run 별 base를
+    /// 보존하기 위해 기존 run 경계를 노출한다 (혼합 서식 범위를 단일 shape로 붕괴하지
+    /// 않기 위함). char_shapes가 비어 있으면 ID 0 단일 run으로 간주한다.
+    pub fn char_shape_runs_in_range(
+        &self,
+        start_char_offset: usize,
+        end_char_offset: usize,
+    ) -> Vec<(usize, usize, u32)> {
+        let mut runs = Vec::new();
+        if start_char_offset >= end_char_offset {
+            return runs;
+        }
+        let mut run_start = start_char_offset;
+        let mut run_id = self.char_shape_id_at(start_char_offset).unwrap_or(0);
+        for i in (start_char_offset + 1)..end_char_offset {
+            let id = self.char_shape_id_at(i).unwrap_or(0);
+            if id != run_id {
+                runs.push((run_start, i, run_id));
+                run_start = i;
+                run_id = id;
+            }
+        }
+        runs.push((run_start, end_char_offset, run_id));
+        runs
     }
 
     /// 인라인 컨트롤이 텍스트의 어느 character 인덱스에 위치하는지 반환한다.
@@ -1560,16 +1595,26 @@ impl Paragraph {
         self.apply_char_shape_range(0, text_len, char_shape_id);
     }
 
+    /// 연속 동일 ID 병합 + 동일 start_pos(길이 0) 엔트리 정리.
+    ///
+    /// 삭제 클램핑(delete_text_at)과 병합 경계(merge_from)에서 같은 위치의 엔트리가
+    /// 연속으로 쌓일 수 있다. 엔트리 i는 start_pos[i]..start_pos[i+1] 구간을 덮으므로
+    /// 같은 위치의 앞 엔트리는 길이 0 — 직렬화 시 빈 run을 만든다. 뒤의 것으로 교체한다
+    /// (char_shape_id_at의 "같은 위치면 뒤 엔트리가 유효" 규칙과 동일).
     fn merge_adjacent_char_shapes(&mut self) {
-        let mut merged: Vec<CharShapeRef> = Vec::new();
+        let mut merged: Vec<CharShapeRef> = Vec::with_capacity(self.char_shapes.len());
         for csr in self.char_shapes.drain(..) {
-            if let Some(last) = merged.last() {
-                if last.char_shape_id == csr.char_shape_id {
+            if let Some(last) = merged.last_mut() {
+                if last.start_pos == csr.start_pos {
+                    // 동일 위치 연속 엔트리 — 앞의 것은 길이 0이므로 뒤의 것이 덮어쓴다
+                    *last = csr;
                     continue;
                 }
             }
             merged.push(csr);
         }
+        // 연속 동일 ID 병합 (위치 교체로 새로 인접해진 경우까지 정리)
+        merged.dedup_by(|next, prev| next.char_shape_id == prev.char_shape_id);
         self.char_shapes = merged;
     }
 }
