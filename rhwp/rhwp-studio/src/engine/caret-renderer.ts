@@ -27,8 +27,8 @@ const GLIDE_MAX_LINE_FACTOR = 2.2;
  * 보이되 지연으로 읽히지는 않는 지점이다. 빠르게 쳐도(초당 10자, 100ms
  * 간격) 다음 글자 전에 끝난다.
  */
-const GLIDE_MIN_MS = 85;
-const GLIDE_MAX_MS = 180;
+const GLIDE_MIN_MS = 70;
+const GLIDE_MAX_MS = 150;
 
 /**
  * Canvas 위에 캐럿을 렌더링한다.
