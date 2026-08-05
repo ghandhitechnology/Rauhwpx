@@ -3713,7 +3713,9 @@ impl HwpDocument {
 
     /// 수식 스크립트를 SVG로 렌더링하여 반환한다 (미리보기 전용).
     ///
-    /// 반환: 완전한 `<svg>` 문자열
+    /// 반환: JSON 문자열
+    /// `{"svg":string,"widthPx":number,"heightPx":number,"baselinePx":number,"warnings":string[]}`
+    /// (px 은 96dpi 기준). warnings 가 비어 있지 않으면 스크립트에 문제가 있는 것이다.
     #[wasm_bindgen(js_name = renderEquationPreview)]
     pub fn render_equation_preview(
         &self,
@@ -6263,8 +6265,10 @@ impl HwpDocument {
 
     /// 문서에 정의된 문단 번호(Numbering) 목록을 조회한다.
     ///
-    /// 반환값: JSON 배열 [{ id, levelFormats: [...] }, ...]
+    /// 반환값: JSON 배열 [{ id, levelFormats: [...], numberFormats: [...], startNumber }, ...]
     /// id는 1-based (ParaShape.numbering_id와 동일)
+    /// numberFormats는 수준별 번호 유형 코드(표 43)로, createNumbering의
+    /// numberFormats 입력과 같은 체계라 왕복 비교가 가능하다.
     #[wasm_bindgen(js_name = getNumberingList)]
     pub fn get_numbering_list(&self) -> String {
         let numberings = &self.core.document.doc_info.numberings;
@@ -6275,10 +6279,16 @@ impl HwpDocument {
                 .iter()
                 .map(|f| format!("\"{}\"", json_escape(f)))
                 .collect();
+            let codes: Vec<String> = n
+                .heads
+                .iter()
+                .map(|h| h.number_format.to_string())
+                .collect();
             items.push(format!(
-                "{{\"id\":{},\"levelFormats\":[{}],\"startNumber\":{}}}",
+                "{{\"id\":{},\"levelFormats\":[{}],\"numberFormats\":[{}],\"startNumber\":{}}}",
                 i + 1,
                 formats.join(","),
+                codes.join(","),
                 n.start_number
             ));
         }
