@@ -40,6 +40,7 @@ import {
   type ChatThread,
 } from '../../agent/threads.ts';
 import { createChevron, createColumnIcon } from '../chevron.ts';
+import { createIcon, createStopIcon, OP_ICON } from './icons.ts';
 
 export interface AgentSidebarDeps {
   bridge: AgentBridge;
@@ -135,17 +136,6 @@ function prettyJson(s: string): string {
     return JSON.stringify(JSON.parse(s), null, 2);
   } catch {
     return s;
-  }
-}
-
-function opGlyph(op: PendingOp): string {
-  switch (op.kind) {
-    case 'insert': return '+';
-    case 'delete': return '−';
-    case 'replace': return '⇄';
-    case 'format': return '✎';
-    case 'field': return '⚑';
-    case 'object': return '▣';
   }
 }
 
@@ -803,9 +793,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   input.setAttribute('aria-autocomplete', 'list');
   input.setAttribute('aria-controls', slashMenu.id);
   input.setAttribute('aria-expanded', 'false');
-  const send = el('button', 'ag-send', '보내기');
+  // 보내기 버튼은 입력 필드 '안'에 산다. 라벨은 아이콘이 대신하고
+  // 이름은 aria-label/title 로 남긴다.
+  const send = el('button', 'ag-send');
   send.type = 'submit';
-  composer.append(slashMenu, input, send);
+  send.append(createIcon('send'));
+  send.setAttribute('aria-label', '보내기');
+  send.title = '보내기';
+
+  const composerField = el('div', 'ag-composer-field');
+  composerField.append(input, send);
+  composer.append(slashMenu, composerField);
   // 헤더(모델 피커)까지 채팅 페이지에 포함해 목록 전환 시 함께 사라지게 한다.
   chatPage.append(header, messages, review, composer);
 
@@ -1518,7 +1516,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function updateComposer(): void {
     input.disabled = connState !== 'connected';
     send.disabled = connState !== 'connected';
-    send.textContent = turnRunning ? '중지' : '보내기';
+    const sendLabel = turnRunning ? '중지' : '보내기';
+    send.replaceChildren(turnRunning ? createStopIcon() : createIcon('send'));
+    send.setAttribute('aria-label', sendLabel);
+    send.title = sendLabel;
     send.classList.toggle('ag-stop', turnRunning);
     providerTrigger.disabled = turnRunning;
     llmTrigger.disabled = turnRunning;
@@ -1736,7 +1737,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     toolRows.delete(evt.callId);
     entry.status.classList.remove('ag-spin');
     entry.status.classList.add(evt.ok ? 'ag-ok' : 'ag-err');
-    entry.status.textContent = evt.ok ? '✓' : '✕';
+    entry.status.replaceChildren(createIcon(evt.ok ? 'check' : 'close'));
     entry.result.textContent = evt.resultPreview;
     scrollActivityToLatest(entry.scroller);
     if (!evt.ok && turnActivity) turnActivity.failedToolCount += 1;
@@ -1751,7 +1752,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     for (const entry of toolRows.values()) {
       entry.status.classList.remove('ag-spin');
       entry.status.classList.add('ag-err');
-      entry.status.textContent = '✕';
+      entry.status.replaceChildren(createIcon('close'));
       if (!entry.result.textContent) entry.result.textContent = '(결과 없이 종료됨)';
     }
     toolRows.clear();
@@ -1992,7 +1993,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     );
     for (const op of set.ops.slice(0, MAX_REVIEW_OP_LINES)) {
       const line = el('div', 'ag-review-op');
-      line.appendChild(el('span', `ag-op-glyph ag-op-${op.kind}`, opGlyph(op)));
+      const glyph = el('span', `ag-op-glyph ag-op-${op.kind}`);
+      glyph.appendChild(createIcon(OP_ICON[op.kind] ?? 'replace'));
+      line.appendChild(glyph);
       line.appendChild(el('span', 'ag-op-text', truncate(opPreview(op), 40)));
       summary.appendChild(line);
     }
