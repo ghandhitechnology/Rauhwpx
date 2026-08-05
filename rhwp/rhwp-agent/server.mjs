@@ -1,19 +1,39 @@
 import http from 'node:http';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { createClaudeSession } from './agents/claude.mjs';
 import { createCodexSession } from './agents/codex.mjs';
 import { generateChatTitle } from './agents/title.mjs';
+import { SkillRegistry } from './skills.mjs';
+import { generateSkillDraft } from './skill-generator.mjs';
 
 const PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
 const TOKEN = process.env.RHWP_AGENT_TOKEN ?? 'dev';
 const ROOT = new URL('..', import.meta.url).pathname;
 const MCP_SCRIPT = new URL('./mcp-stdio.mjs', import.meta.url).pathname;
+const BUNDLED_SKILLS = new URL('./skills', import.meta.url).pathname;
+const ISOLATED_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-agent-home-'));
+const ISOLATED_CODEX_HOME = path.join(ISOLATED_HOME, '.codex');
 const STUDIO_TOOL_TIMEOUT_MS = 30_000;
+await fs.mkdir(ISOLATED_CODEX_HOME, { recursive: true });
+const sourceCodexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex');
+try {
+  const authPath = path.join(sourceCodexHome, 'auth.json');
+  const authStat = await fs.lstat(authPath);
+  if (authStat.isFile() && !authStat.isSymbolicLink()) {
+    await fs.symlink(authPath, path.join(ISOLATED_CODEX_HOME, 'auth.json'));
+  }
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
+const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS }).init();
 
 /** @type {import('ws').WebSocket | null} */
 let studioSocket = null;
 const mcpSockets = new Set();
-/** @type {{ agent: 'claude'|'codex', model: string|null, effort: string|null, backend: any, status: 'idle'|'running', sessionId: string|null } | null} */
+/** @type {{ agent: 'claude'|'codex', model: string|null, effort: string|null, permissionProfile: 'safe'|'unrestricted', backend: any, status: 'idle'|'running', sessionId: string|null } | null} */
 let session = null;
 
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
@@ -77,6 +97,7 @@ function sessionInfo() {
       agent: session.agent,
       model: session.model,
       effort: session.effort,
+      permissionProfile: session.permissionProfile,
       sessionId: session.sessionId,
       status: session.status,
     }
@@ -110,15 +131,21 @@ function disposeSession() {
   }
 }
 
-function startSession(agent, requestedModel, requestedEffort, force = false) {
+function resolvePermissionProfile(value) {
+  return value === 'unrestricted' ? 'unrestricted' : 'safe';
+}
+
+function startSession(agent, requestedModel, requestedEffort, requestedPermission, force = false) {
   const model = resolveModel(agent, requestedModel);
   const effort = resolveEffort(agent, model, requestedEffort);
+  const permissionProfile = resolvePermissionProfile(requestedPermission);
   if (
     !force
     && session
     && session.agent === agent
     && session.model === model
     && session.effort === effort
+    && session.permissionProfile === permissionProfile
   ) return session;
   disposeSession();
   const opts = {
@@ -128,10 +155,13 @@ function startSession(agent, requestedModel, requestedEffort, force = false) {
     token: TOKEN,
     model,
     effort,
+    permissionProfile,
+    isolatedHome: ISOLATED_HOME,
+    codexHome: ISOLATED_CODEX_HOME,
     onEvent: onBackendEvent,
   };
   const backend = agent === 'claude' ? createClaudeSession(opts) : createCodexSession(opts);
-  session = { agent, model, effort, backend, status: 'idle', sessionId: backend.getSessionId() };
+  session = { agent, model, effort, permissionProfile, backend, status: 'idle', sessionId: backend.getSessionId() };
   return session;
 }
 
@@ -144,13 +174,14 @@ function handleStudioMessage(sock, msg) {
         return;
       }
       try {
-        const s = startSession(agent, msg.model, msg.effort, Boolean(msg.force));
+        const s = startSession(agent, msg.model, msg.effort, msg.permissionProfile, Boolean(msg.force));
         sendJson(sock, {
           v: 1,
           type: 'chat-started',
           agent: s.agent,
           model: s.model,
           effort: s.effort,
+          permissionProfile: s.permissionProfile,
           sessionId: s.sessionId,
         });
       } catch (e) {
@@ -205,13 +236,91 @@ function handleStudioMessage(sock, msg) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'chat-user-message requires text' });
         return;
       }
-      session.status = 'running';
-      try {
-        session.backend.sendUserMessage(msg.text);
-      } catch (e) {
-        session.status = 'idle';
-        sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
+      const activeSession = session;
+      activeSession.status = 'running';
+      void skillRegistry.promptContext(msg.text, typeof msg.skillName === 'string' ? msg.skillName : undefined)
+        .then((prompt) => {
+          if (session !== activeSession) throw new Error('Agent session changed before the message was dispatched');
+          activeSession.backend.sendUserMessage(prompt);
+        })
+        .catch((e) => {
+          if (session === activeSession) activeSession.status = 'idle';
+          sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
+        });
+      return;
+    }
+    case 'chat-permission-set': {
+      if (!session) {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_NOT_STARTED', message: 'Start a chat before changing permissions.' });
+        return;
       }
+      if (session.status === 'running') {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_BUSY', message: 'Permissions can only change between turns.' });
+        return;
+      }
+      const profile = resolvePermissionProfile(msg.permissionProfile);
+      try {
+        session.backend.setPermissionProfile(profile);
+        session.permissionProfile = profile;
+        sendJson(sock, { v: 1, type: 'chat-permission-changed', permissionProfile: profile });
+      } catch (e) {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'PERMISSION_CHANGE_FAILED', message: String(e?.message ?? e) });
+      }
+      return;
+    }
+    case 'skills-list': {
+      void skillRegistry.list()
+        .then((catalog) => sendJson(sock, { v: 1, type: 'skills-catalog', requestId: msg.requestId ?? null, ...catalog }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
+      return;
+    }
+    case 'skill-read': {
+      void skillRegistry.read(String(msg.name ?? ''))
+        .then((result) => sendJson(sock, { v: 1, type: 'skill-detail', requestId: msg.requestId ?? null, ...result }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
+      return;
+    }
+    case 'skill-save': {
+      void skillRegistry.save(msg.skill)
+        .then(async (result) => {
+          sendJson(sock, { v: 1, type: 'skill-saved', requestId: msg.requestId ?? null, ...result });
+          sendJson(sock, { v: 1, type: 'skills-catalog', ...(await skillRegistry.list()) });
+        })
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
+      return;
+    }
+    case 'skill-validate': {
+      void skillRegistry.validate(msg.skill)
+        .then((result) => sendJson(sock, { v: 1, type: 'skill-validated', requestId: msg.requestId ?? null, result }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
+      return;
+    }
+    case 'skill-enable': {
+      void skillRegistry.setEnabled(String(msg.name ?? ''), Boolean(msg.enabled))
+        .then((catalog) => sendJson(sock, { v: 1, type: 'skills-catalog', requestId: msg.requestId ?? null, ...catalog }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
+      return;
+    }
+    case 'skill-delete': {
+      void skillRegistry.delete(String(msg.name ?? ''))
+        .then(async (result) => {
+          sendJson(sock, { v: 1, type: 'skill-deleted', requestId: msg.requestId ?? null, ...result });
+          sendJson(sock, { v: 1, type: 'skills-catalog', ...(await skillRegistry.list()) });
+        })
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: e?.code ?? 'SKILLS_ERROR', message: String(e?.message ?? e) }));
+      return;
+    }
+    case 'skill-draft-request': {
+      if (typeof msg.goal !== 'string' || !msg.goal.trim()) {
+        sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'INVALID_REQUEST', message: 'Skill goal is required.' });
+        return;
+      }
+      const agent = msg.agent === 'codex' ? 'codex' : 'claude';
+      const model = resolveModel(agent, msg.model);
+      sendJson(sock, { v: 1, type: 'skill-draft-progress', requestId: msg.requestId ?? null, state: 'generating' });
+      void generateSkillDraft({ agent, model, goal: String(msg.goal ?? ''), triggerExamples: String(msg.triggerExamples ?? ''), nonTriggerExamples: String(msg.nonTriggerExamples ?? ''), resourceNotes: String(msg.resourceNotes ?? ''), existingSkill: typeof msg.existingSkill === 'string' ? msg.existingSkill : undefined })
+        .then((draft) => sendJson(sock, { v: 1, type: 'skill-draft-result', requestId: msg.requestId ?? null, draft }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'SKILL_GENERATION_FAILED', message: String(e?.message ?? e) }));
       return;
     }
     case 'chat-interrupt': {
@@ -257,6 +366,15 @@ function handleMcpMessage(sock, msg) {
   switch (msg.type) {
     case 'tool-call': {
       const clientId = msg.id;
+      if (msg.tool === 'read_product_skill') {
+        void skillRegistry.readResource(String(msg.args?.name ?? ''), String(msg.args?.resourcePath ?? 'SKILL.md'))
+          .then((result) => sendJson(sock, { v: 1, type: 'tool-result', id: clientId, ok: true, result }))
+          .catch((error) => sendJson(sock, {
+            v: 1, type: 'tool-result', id: clientId, ok: false,
+            error: { code: error?.code ?? 'SKILLS_ERROR', message: String(error?.message ?? error) },
+          }));
+        return;
+      }
       if (!studioSocket || studioSocket.readyState !== studioSocket.OPEN) {
         sendJson(sock, {
           v: 1, type: 'tool-result', id: clientId, ok: false,
@@ -371,6 +489,7 @@ httpServer.on('upgrade', (req, socket, head) => {
         }
       });
       sendJson(ws, { v: 1, type: 'welcome', protocol: 1, session: sessionInfo() });
+      void skillRegistry.list().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', ...catalog }));
       log('studio connected');
     } else {
       const agentLabel = url.searchParams.get('agent') ?? 'unknown';
@@ -400,5 +519,22 @@ httpServer.listen(PORT, '127.0.0.1', () => {
 
 httpServer.on('error', (err) => {
   log(`server error: ${err?.message ?? err}`);
-  process.exit(1);
+  void fs.rm(ISOLATED_HOME, { recursive: true, force: true }).finally(() => process.exit(1));
 });
+
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log(`shutting down (${signal})`);
+  disposeSession();
+  for (const sock of wss.clients) {
+    try { sock.close(1001, 'server shutting down'); } catch {}
+  }
+  await new Promise((resolve) => httpServer.close(resolve));
+  await fs.rm(ISOLATED_HOME, { recursive: true, force: true });
+}
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => { void shutdown(signal).finally(() => process.exit(0)); });
+}
