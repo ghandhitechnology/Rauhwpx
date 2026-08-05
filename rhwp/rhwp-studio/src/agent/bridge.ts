@@ -11,6 +11,7 @@ import { RevisionTracker } from './revision.ts';
 import { AgentToolExecutor } from './tool-executor.ts';
 import { PendingEditManager } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
+import { AgentTypewriterReveal } from './typewriter-reveal.ts';
 import { AGENT_PROTOCOL_VERSION, AgentToolError } from './types.ts';
 import type {
   AgentBridgeDeps,
@@ -65,6 +66,8 @@ class AgentBridgeImpl implements AgentBridge {
 
   private revision: RevisionTracker;
   private overlay: PendingOverlayRenderer;
+  private reveal: AgentTypewriterReveal;
+  private revealUnsub: (() => void) | null = null;
   private executor: AgentToolExecutor;
 
   private url: string;
@@ -106,6 +109,18 @@ class AgentBridgeImpl implements AgentBridge {
       inputHandler: deps.inputHandler,
       canvasView: deps.canvasView,
       overlay: this.overlay,
+    });
+    this.reveal = new AgentTypewriterReveal({
+      canvasView: deps.canvasView,
+      wasm: deps.wasm,
+      eventBus: deps.eventBus,
+    });
+    // 승인/거절/무효화 시 진행 중인 타자기 공개를 즉시 완료한다 — 커버가
+    // 사라진 op 위에 남지 않도록.
+    this.revealUnsub = this.pendingEdits.onChange((e) => {
+      if (e.type === 'approved' || e.type === 'rejected' || e.type === 'invalidated') {
+        this.reveal.finishAll();
+      }
     });
     this.executor = new AgentToolExecutor({
       wasm: deps.wasm,
@@ -591,6 +606,9 @@ class AgentBridgeImpl implements AgentBridge {
       // 이미 닫힌 소켓은 무시.
     }
     this.listeners.clear();
+    this.revealUnsub?.();
+    this.revealUnsub = null;
+    this.reveal.dispose();
     this.pendingEdits.dispose();
     this.overlay.dispose();
     this.revision.dispose();

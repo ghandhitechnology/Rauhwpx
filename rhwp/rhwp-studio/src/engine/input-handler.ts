@@ -2322,7 +2322,10 @@ export class InputHandler {
       case 'record': {
         const pos = this.cursor.getPosition();
         this.history.recordWithoutExecute(desc.command, this.wasm);
-        this.refreshAfterOperation(desc.meta?.refresh, 'none', desc.command.type, pos, pos);
+        this.refreshAfterOperation(
+          desc.meta?.refresh, 'none', desc.command.type, pos, pos, {}, false,
+          desc.meta?.scroll === 'preserve',
+        );
         break;
       }
     }
@@ -2401,7 +2404,7 @@ export class InputHandler {
   }
 
   /** 편집 후 처리: 재렌더링 + 캐럿 갱신 */
-  private afterEdit(flushDeferredPagination = true): void {
+  private afterEdit(flushDeferredPagination = true, skipCaretScroll = false): void {
     if (flushDeferredPagination) {
       this.flushDeferredPaginationIfNeeded('before-full-edit', false);
     } else if (this.deferredPaginationPending) {
@@ -2419,7 +2422,7 @@ export class InputHandler {
     this.clearTableResizeRuntimeCache();
     this.eventBus.emit('document-mutated', 'input-handler-edit');
     this.eventBus.emit('document-changed');
-    this.updateCaret();
+    this.updateCaret(skipCaretScroll);
   }
 
   /** 셀 내부 단일 텍스트 편집 후 처리: 현재 페이지 canvas만 갱신한다. */
@@ -2584,9 +2587,10 @@ export class InputHandler {
     afterPos: DocumentPosition,
     pageLocalOptions: PageLocalTextEditOptions = {},
     boundaryHandled = false,
+    skipCaretScroll = false,
   ): void {
     if (boundaryHandled) {
-      this.afterEdit(false);
+      this.afterEdit(false, skipCaretScroll);
       return;
     }
     const policy = requested ?? fallback;
@@ -2594,13 +2598,13 @@ export class InputHandler {
       case 'none':
         return;
       case 'selectionOnly':
-        this.updateCaret();
+        this.updateCaret(skipCaretScroll);
         return;
       case 'pageLocal':
         this.afterPageLocalEdit();
         return;
       case 'full':
-        this.afterEdit();
+        this.afterEdit(true, skipCaretScroll);
         return;
       case 'auto':
       default:
