@@ -23,8 +23,8 @@
 
 :root {
   --ag-sidebar-width: 360px;
-  --ag-sidebar-ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --ag-sidebar-duration: 220ms;
+  --ag-sidebar-ease: cubic-bezier(0.2, 0.72, 0, 1);
+  --ag-sidebar-duration: 320ms;
   --ag-motion-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ag-motion-smooth: cubic-bezier(0.65, 0, 0.35, 1);
   --ag-spring-soft: linear(
@@ -231,6 +231,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   width: 11px;
   height: 11px;
   transform: rotate(-90deg);
+  transition: transform var(--ag-sidebar-duration) var(--ag-sidebar-ease);
 }
 
 .ag-root.ag-collapsed .ag-collapse-tab .ui-chevron {
@@ -245,54 +246,217 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 /* ─── 헤더: 프로바이더 + 모델 피커 ───────────────────── */
 
 .ag-header {
+  position: relative;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  padding: 9px 12px 8px;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
   border-bottom: 1px solid var(--ag-border);
   background: var(--ag-raised);
 }
 
-/* 사이드바는 드래그로 폭이 변한다. 좁아지면 컨트롤을 찌그러뜨리는
-   대신 다음 줄로 흘린다 — 라벨이 서로 겹치는 것보다 낫다. */
-.ag-selectors {
+.ag-model-summary,
+.ag-context-row {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 2px 6px;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
+  gap: 8px;
 }
 
-.ag-threads-btn {
+.ag-model-summary {
+  min-height: 42px;
+  padding: 5px 10px 4px 12px;
+}
+
+.ag-context-row {
+  min-height: 38px;
+  padding: 6px 10px 4px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--ag-border) 72%, transparent);
+}
+
+.ag-document-context {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ag-document-name,
+.ag-selection-context {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-document-name {
+  color: var(--ag-text);
+  font-size: var(--font-size-md, 13px);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
+.ag-selection-context {
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.2;
+}
+
+.ag-header-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.ag-header-icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 auto;
-  margin-left: auto;
   width: 28px;
   height: 28px;
+  margin: 0;
   padding: 0;
-  border: none;
+  border: 0;
   border-radius: var(--ag-r-field);
   background: transparent;
   color: var(--ag-text-muted);
   cursor: pointer;
 }
 
-/* 헤더 컨트롤은 테두리 없는 고스트다. 실선 알약을 늘어놓으면
-   툴바가 아니라 폼처럼 읽힌다. */
+.ag-header-icon-btn .ag-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ag-header-icon-btn:hover,
+.ag-header-icon-btn.ag-active,
+.ag-header-icon-btn[aria-expanded='true'] {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-header-icon-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-config-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+  border-block: 1px solid transparent;
+  background: color-mix(in srgb, var(--ag-bg) 78%, var(--ag-raised));
+  opacity: 0;
+  transition:
+    grid-template-rows 240ms var(--ag-sidebar-ease),
+    opacity 180ms var(--ag-sidebar-ease),
+    border-color 180ms var(--ag-sidebar-ease);
+}
+
+.ag-config-panel.ag-open {
+  grid-template-rows: 1fr;
+  border-color: var(--ag-border);
+  opacity: 1;
+}
+
+.ag-config-panel[hidden] {
+  display: none;
+}
+
+.ag-config-panel-inner {
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 12px;
+  transition: padding 240ms var(--ag-sidebar-ease);
+}
+
+.ag-config-panel.ag-open .ag-config-panel-inner {
+  padding-block: 8px 9px;
+}
+
+.ag-config-group {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+}
+
+.ag-config-group + .ag-config-group {
+  margin-top: 6px;
+}
+
+.ag-config-label {
+  padding-top: 5px;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.ag-connection-row {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  gap: 8px;
+  padding: 0 12px 5px;
+}
+
+.ag-takeover-btn {
+  height: 22px;
+  margin-left: auto;
+  padding: 0 7px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg);
+  color: var(--ag-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  cursor: pointer;
+}
+
+.ag-takeover-btn:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-takeover-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* 사이드바 폭이 좁아져도 요약은 한 줄을 유지한다. 각 flex item 이
+   줄어들며 긴 모델명만 말줄임되고, 마지막의 단일 chevron 은 남는다. */
+.ag-selectors {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.ag-threads-btn {
+  flex: 0 0 auto;
+  margin-left: 0;
+}
+
 .ag-permission-btn,
 .ag-skills-btn {
   flex: 0 0 auto;
   min-height: 24px;
-  padding: 3px 7px;
-  border: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--ag-border);
   border-radius: var(--ag-r-chip);
-  background: transparent;
+  background: var(--ag-raised);
   color: var(--ag-text-secondary);
   font: inherit;
   font-size: var(--font-size-sm, 11px);
@@ -303,6 +467,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-permission-btn:hover:not(:disabled),
 .ag-skills-btn:hover {
   background: var(--ag-hover);
+  border-color: var(--ag-border);
   color: var(--ag-text);
 }
 
@@ -320,7 +485,10 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   outline-offset: 1px;
 }
 
-.ag-permission-btn:disabled { opacity: 0.5; }
+.ag-permission-btn:disabled {
+  opacity: 0.72;
+  cursor: default;
+}
 
 .ag-permission-btn.ag-permission-unrestricted {
   border-color: var(--ag-err);
@@ -340,8 +508,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 @media (max-width: 767px) {
-  .ag-selectors { flex-wrap: wrap; }
-  .ag-skills-btn { margin-left: auto; }
+  .ag-selectors { flex-wrap: nowrap; }
   .ag-threads-btn { margin-left: 0; }
 }
 
@@ -759,9 +926,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 /* min-width:0 이 없으면 flex item 의 min-width:auto 가 콘텐츠 폭을
    바닥으로 잡아, 모델명이 길 때 줄임표가 걸리지 않고 뒤쪽 버튼
-   (목록)이 헤더 밖으로 밀려 .ag-stage 에서 잘린다.
-   다만 한 줄에 6개를 욱여넣으면 라벨끼리 겹치므로, 자리가
-   부족하면 줄임표가 아니라 줄바꿈으로 흘린다(.ag-selectors). */
+   (목록)이 헤더 밖으로 밀려 .ag-stage 에서 잘린다. */
 .ag-model {
   position: relative;
   display: inline-flex;
@@ -880,15 +1045,16 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   opacity: 0.85;
 }
 
-.ag-model-caret {
+.ag-summary-caret {
   margin-left: 2px;
   width: 11px;
   height: 11px;
   color: var(--ag-text-muted);
   transform: rotate(0deg);
+  transition: transform 240ms var(--ag-sidebar-ease);
 }
 
-.ag-model-open .ag-model-caret {
+.ag-model-summary.ag-expanded .ag-summary-caret {
   transform: rotate(180deg);
 }
 
@@ -925,9 +1091,38 @@ body.ag-sidebar-resizing .ag-collapse-tab {
     visibility 0s linear 0s;
 }
 
+/* The compact summary opens one shared configuration surface. Its option
+   groups are static rows rather than three competing dropdowns. */
+.ag-config-panel .ag-model-menu {
+  position: static;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  opacity: 1;
+  transform: none;
+  visibility: visible;
+  pointer-events: auto;
+  transition: none;
+}
+
+.ag-config-panel .ag-model-item {
+  width: auto;
+  min-height: 24px;
+  padding: 4px 7px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ag-model-menu,
   .ag-model-open .ag-model-menu,
+  .ag-config-panel,
+  .ag-config-panel-inner,
+  .ag-summary-caret,
   .ag-collapse-tab .ui-chevron,
   .ag-root.ag-collapsed .ag-collapse-tab .ui-chevron {
     transition: none;
@@ -1615,11 +1810,21 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 /* 입력은 하나의 면이다: textarea 와 보내기 버튼이 같은 테두리
    안에 살고, 포커스 링은 개별 컨트롤이 아니라 필드 전체에 걸린다.
    버튼을 필드 밖에 두면 '채팅 앱' 배치로 되돌아간다. */
+.ag-composer-utilities {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-height: 30px;
+  padding: 3px 12px 1px;
+  background: var(--ag-bg);
+}
+
 .ag-composer {
   position: relative;
   flex: 0 0 auto;
-  padding: 10px 12px 12px;
-  border-top: 1px solid var(--ag-border);
+  padding: 3px 12px 12px;
   background: var(--ag-bg);
 }
 
