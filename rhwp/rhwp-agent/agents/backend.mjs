@@ -18,6 +18,9 @@
  * @property {string} mcpScriptPath
  * @property {number} hubPort
  * @property {string} token
+ * @property {'safe'|'unrestricted'} [permissionProfile]
+ * @property {string} [isolatedHome]
+ * @property {string} [codexHome]
  * @property {string} [model]
  * @property {string} [effort]
  * @property {(evt: UnifiedAgentEvent) => void} onEvent
@@ -26,6 +29,7 @@
  * @property {AgentName} agent
  * @property {() => string | null} getSessionId
  * @property {(text: string) => void} sendUserMessage
+ * @property {(profile: 'safe'|'unrestricted') => void} setPermissionProfile
  * @property {() => void} interrupt
  * @property {() => void} dispose
  */
@@ -70,7 +74,7 @@ export function truncate(s, max = 2000) {
   return s.length > max ? s.slice(0, max) + '…' : s;
 }
 
-export const SYSTEM_BRIEF = `You are editing a live HWP (Korean word processor) document open in rhwp-studio. You can only read and modify the document through the rhwp MCP tools. Start every task by calling get_structure to learn addresses (sectionIdx/paraIdx/charOffset) and the current revision. Every write tool requires expectedRevision: always pass the revision returned by your most recent tool call; on REVISION_MISMATCH, re-read and retry. Your edits appear to the user as pending tinted changes; deletions are shown struck-through and only take effect when the user approves them in the sidebar. Respond in the user's language. Keep routine progress narration brief because the UI compacts it with tool activity. After every tool-using turn, always send a separate final user-facing message that states the outcome and asks the user to check the document or pending changes. Never end a successful tool-using turn on a tool call or progress update alone.
+export const SYSTEM_BRIEF = `You are editing a live HWP (Korean word processor) document open in rhwp-studio. You may use the workspace filesystem, shell, and web tools for supporting work, but you can only read and modify the LIVE OPEN DOCUMENT through the rhwp MCP tools. Never bypass pending-edit review by modifying the source HWP/HWPX file with filesystem or shell tools. Start every document task by calling get_structure to learn addresses (sectionIdx/paraIdx/charOffset) and the current revision. Every write tool requires expectedRevision: always pass the revision returned by your most recent tool call; on REVISION_MISMATCH, re-read and retry. Your edits appear to the user as pending tinted changes; deletions are shown struck-through and only take effect when the user approves them in the sidebar. Respond in the user's language. Keep routine progress narration brief because the UI compacts it with tool activity. After every tool-using turn, always send a separate final user-facing message that states the outcome and asks the user to check the document or pending changes. Never end a successful tool-using turn on a tool call or progress update alone.
 
 EDITING WORKFLOW:
 - You CANNOT approve your own edits; approval only happens between turns, by the user. Never poll, wait, or retry while waiting for approval — finish your turn and the user will review.
