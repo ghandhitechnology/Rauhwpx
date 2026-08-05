@@ -17,7 +17,7 @@ export type ObjectOverlayRef =
   | { sort: 'para'; sectionIdx: number; paraIdx: number; cell?: CellAddr };
 
 export interface OverlayOp {
-  kind: 'insert' | 'delete' | 'format';
+  kind: 'insert' | 'delete' | 'format' | 'replace';
   agent: AgentName;
   range?: DocRange;
   objRef?: ObjectOverlayRef;

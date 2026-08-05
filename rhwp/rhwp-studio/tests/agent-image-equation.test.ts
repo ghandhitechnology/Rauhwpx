@@ -96,8 +96,12 @@ function makeEnv() {
     renderEquationPreview: (script: string, _fs: number, _c: number) => {
       record('renderEquationPreview', script);
       if (script.includes('BADTOKEN')) throw new Error('알 수 없는 토큰');
-      return `<svg xmlns="http://www.w3.org/2000/svg"><text>${script}</text></svg>`;
+      return JSON.stringify({
+        svg: `<svg xmlns="http://www.w3.org/2000/svg"><text>${script}</text></svg>`,
+        widthPx: 40, heightPx: 20, baselinePx: 15, warnings: [],
+      });
     },
+    getCharPropertiesAt: () => ({ fontFamily: '바탕', fontSize: 1250 }),
     getPageControlLayout: () => ({ controls: [] }),
     setFieldValueByName: () => ({ ok: true }),
     getSourceFormat: () => 'hwpx',
@@ -236,11 +240,23 @@ test('insert_equation: 렌더 검증 통과 후 pt→HU/색 변환으로 삽입'
   const r = (await call('insert_equation', {
     sectionIdx: 0, paraIdx: 0, charOffset: 5,
     script: 'x = {-b +- sqrt {b^2 - 4ac}} over {2a}', fontSizePt: 12, color: '#FF0000',
-  })) as { equation: { paraIdx: number; controlIdx: number } };
+  })) as { equation: { paraIdx: number; controlIdx: number }; fontSizePt: number; widthMm: number; warnings: string[] };
   assert.ok(calls.findIndex((c) => c.m === 'renderEquationPreview') < calls.findIndex((c) => c.m === 'insertEquation'));
   assert.equal(eqs[0].fontSizeHu, 1200);
   assert.equal(eqs[0].colorRef, 0x0000ff); // '#FF0000' → r|g<<8|b<<16
   assert.equal(r.equation.paraIdx, 0);
+  assert.equal(r.fontSizePt, 12);
+  assert.ok(Math.abs(r.widthMm - 40 * 25.4 / 96) < 0.01); // px(96dpi) → mm
+  assert.deepEqual(r.warnings, []);
+});
+
+test('insert_equation: fontSizePt 생략 시 삽입 지점 앞 글자 크기를 상속한다', async () => {
+  const { call, eqs } = makeEnv();
+  const r = (await call('insert_equation', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 5, script: 'a^2',
+  })) as { fontSizePt: number };
+  assert.equal(r.fontSizePt, 12.5); // getCharPropertiesAt fontSize 1250 HWPUNIT → 12.5pt
+  assert.equal(eqs[0].fontSizeHu, 1250);
 });
 
 test('insert_equation: 렌더 실패 스크립트는 INVALID_SCRIPT 로 거부되고 삽입되지 않는다', async () => {
@@ -261,10 +277,16 @@ test('insert_equation → reject: deleteEquationControl 로 사라진다', async
   assert.equal(eqs.length, 0);
 });
 
-test('preview_equation: 삽입 없이 SVG 만 반환', async () => {
+test('preview_equation: 삽입 없이 SVG + 메트릭 + warnings 를 반환', async () => {
   const { call, eqs } = makeEnv();
-  const r = (await call('preview_equation', { script: '{a} over {b}' })) as { svg: string };
+  const r = (await call('preview_equation', { script: '{a} over {b}' })) as {
+    svg: string; widthMm: number; heightMm: number; baselineMm: number; warnings: string[];
+  };
   assert.ok(r.svg.includes('<svg'));
+  assert.ok(Math.abs(r.widthMm - 40 * 25.4 / 96) < 0.01);
+  assert.ok(Math.abs(r.heightMm - 20 * 25.4 / 96) < 0.01);
+  assert.ok(Math.abs(r.baselineMm - 15 * 25.4 / 96) < 0.01);
+  assert.deepEqual(r.warnings, []);
   assert.equal(eqs.length, 0);
 });
 

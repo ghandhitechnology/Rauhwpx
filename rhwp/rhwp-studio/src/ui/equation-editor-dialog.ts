@@ -698,7 +698,13 @@ export class EquationEditorDialog {
     const color = hexToColorRef(this.colorInput.value);
 
     try {
-      const svg = this.wasm.renderEquationPreview(script, fontSizeHwpunit, color);
+      const raw = this.wasm.renderEquationPreview(script, fontSizeHwpunit, color);
+      // 신규 wasm 은 {"svg",widthPx,...} JSON 문자열 — 구버전은 SVG 문자열을 직접 반환
+      let svg = raw;
+      try {
+        const parsed = JSON.parse(raw) as { svg?: unknown };
+        if (parsed && typeof parsed.svg === 'string') svg = parsed.svg;
+      } catch { /* 구버전 wasm — raw 자체가 SVG 문자열이다 */ }
       this.previewContainer.replaceChildren();
       appendSvgMarkup(this.previewContainer, svg);
     } catch (err) {

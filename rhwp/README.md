@@ -12,7 +12,7 @@
 
 `rhwp-studio`, the web editor in this repo, includes a chat sidebar that puts a local Claude or Codex CLI agent to work on the document you have open:
 
-- **Reads the document** through 12 MCP tools — structure, text ranges, selection, fields, search, page rendering.
+- **Reads the document** through 29 MCP tools — structure, text ranges, selection, fields, search, list/format inspection, page rendering (SVG/PNG).
 - **Proposes edits** — insert, delete, replace, character formatting, field values. Nothing is applied silently: insertions are tinted, deletions struck through, formatting outlined.
 - **Waits for your call** — each turn ends with a review card in the sidebar. **Approve** commits the whole turn as a single undo step (one Ctrl+Z reverts it); **Reject** rolls it back.
 

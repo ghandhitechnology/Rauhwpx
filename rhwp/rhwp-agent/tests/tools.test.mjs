@@ -1,0 +1,140 @@
+// MCP 도구 정의 계약 테스트 — tools.mjs 만 임포트한다
+// (mcp-stdio.mjs 를 임포트하면 stdio 서버가 뜨므로 절대 임포트하지 않는다).
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { TOOL_DEFINITIONS, OFFSET_CAVEAT, toToolContent } from '../tools.mjs';
+
+const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
+
+test('도구는 정확히 29개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 29);
+  assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
+});
+
+test('신규 도구 5개가 모두 있다', () => {
+  for (const name of ['apply_list', 'list_numberings', 'get_para_format', 'get_char_format', 'verify_changes']) {
+    assert.ok(byName.has(name), `missing tool: ${name}`);
+  }
+});
+
+test('cell 파라미터를 받는 모든 도구에 조립 방법 안내가 있다', () => {
+  const cellTools = TOOL_DEFINITIONS.filter((d) => d.shape && 'cell' in d.shape);
+  assert.ok(cellTools.length >= 10, `expected >= 10 cell-taking tools, got ${cellTools.length}`);
+  for (const d of cellTools) {
+    const desc = d.shape.cell?._def?.description ?? '';
+    assert.ok(desc.length > 0, `${d.name}: cell param has no description`);
+    // get_structure 의 셀 항목에는 paraIdx/controlIdx 가 없으므로 테이블 항목 것과 조립해야 한다는 안내
+    assert.match(desc, /paraIdx\/controlIdx/, `${d.name}: cell desc missing paraIdx/controlIdx assembly note`);
+    assert.match(desc, /cellIdx/, `${d.name}: cell desc missing cellIdx`);
+    assert.match(desc, /find_text/, `${d.name}: cell desc missing find_text verbatim note`);
+  }
+});
+
+test('charOffset 계열 도구 전부에 OFFSET_CAVEAT 가 붙어 있다', () => {
+  const expected = [
+    'insert_text', 'delete_range', 'replace_range', 'apply_char_format',
+    'create_table', 'insert_image', 'insert_equation', 'insert_chart',
+  ];
+  for (const name of expected) {
+    const def = byName.get(name);
+    assert.ok(def, `missing tool: ${name}`);
+    assert.ok(def.description.includes(OFFSET_CAVEAT), `${name}: missing OFFSET_CAVEAT`);
+  }
+});
+
+test('verify_changes 설명에 셀프체크 지시와 취소선 안내가 있다', () => {
+  const desc = byName.get('verify_changes').description;
+  assert.match(desc, /self-check/i);
+  assert.match(desc, /struck-through/);
+  assert.match(desc, /includeImage/);
+  assert.match(desc, /applied-now/);
+  assert.match(desc, /awaiting-approval/);
+});
+
+test('apply_list 설명에 진짜 목록/리터럴 금지/가나다 기본값/bulletChar 안내가 있다', () => {
+  const desc = byName.get('apply_list').description;
+  assert.match(desc, /REAL HWP list/);
+  assert.match(desc, /never type literal/i);
+  assert.match(desc, /hanging indent/i);
+  assert.match(desc, /가,나,다/);
+  assert.match(desc, /bulletChar/);
+});
+
+test('apply_list 스키마: format enum·level 기본값 0·범위', () => {
+  const { shape } = byName.get('apply_list');
+  const formats = shape.format._def.values;
+  assert.deepEqual(formats, ['1.', '1)', '(1)', '①', 'a.', 'a)', 'A.', 'A)', 'I.', 'i.', 'i)', '가.', 'ㄱ.']);
+  for (const key of ['expectedRevision', 'sectionIdx', 'startParaIdx', 'endParaIdx', 'format']) {
+    assert.ok(key in shape, `apply_list missing ${key}`);
+  }
+  for (const key of ['level', 'startNumber', 'bulletChar']) {
+    assert.ok(key in shape, `apply_list missing optional ${key}`);
+  }
+});
+
+test('get_char_format 설명에 서식 상속 규칙이 있다', () => {
+  const desc = byName.get('get_char_format').description;
+  assert.match(desc, /INHERITANCE RULE/);
+  assert.match(desc, /character BEFORE the insertion point/);
+  assert.match(desc, /replace_range/);
+});
+
+test('render_page 에 format/scale 이 추가됐다', () => {
+  const { shape } = byName.get('render_page');
+  assert.ok('format' in shape && 'scale' in shape, 'render_page missing format/scale');
+  // .default(x).optional() 형태라 undefined 는 그대로 통과하고, 기본값은 스키마 메타에 든다
+  assert.equal(shape.format.parse(undefined), undefined);
+  assert.equal(shape.format._def.innerType._def.defaultValue(), 'svg');
+  assert.equal(shape.scale._def.innerType._def.defaultValue(), 2);
+  assert.ok(shape.format.safeParse('png').success);
+  assert.ok(!shape.format.safeParse('pdf').success);
+  assert.ok(shape.scale.safeParse(0.5).success && shape.scale.safeParse(3).success);
+  assert.ok(!shape.scale.safeParse(0.4).success && !shape.scale.safeParse(3.1).success);
+});
+
+test('apply_para_format 에 목록 속성(headType/numberingId/paraLevel/bulletChar)이 추가됐다', () => {
+  const { shape } = byName.get('apply_para_format');
+  for (const key of ['headType', 'numberingId', 'paraLevel', 'bulletChar']) {
+    assert.ok(key in shape, `apply_para_format missing ${key}`);
+  }
+});
+
+test('toToolContent: image 필드가 있으면 image 블록 + 나머지 JSON', () => {
+  const blocks = toToolContent({ image: { data: 'aGVsbG8=', mimeType: 'image/png' }, revision: 7, pages: [2] });
+  assert.equal(blocks.length, 2);
+  assert.deepEqual(blocks[0], { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' });
+  assert.equal(blocks[1].type, 'text');
+  assert.deepEqual(JSON.parse(blocks[1].text), { revision: 7, pages: [2] });
+});
+
+test('toToolContent: image 가 없거나 모양이 이상하면 text 만', () => {
+  const plain = toToolContent({ revision: 1 });
+  assert.deepEqual(plain, [{ type: 'text', text: '{"revision":1}' }]);
+  const malformed = toToolContent({ image: { data: 123 }, revision: 1 });
+  assert.equal(malformed.length, 1);
+  assert.equal(malformed[0].type, 'text');
+});
+
+test('create_table: rows+cols 나 cells 둘 중 하나는 필수', () => {
+  const { validate } = byName.get('create_table');
+  assert.ok(validate, 'create_table has no validate hook');
+  assert.throws(() => validate({}), (e) => e.code === 'INVALID_ARGS' && /rows\+cols/.test(e.message));
+  assert.throws(() => validate({ rows: 3 }), (e) => e.code === 'INVALID_ARGS');
+  validate({ rows: 3, cols: 2 }); // 통과
+  validate({ cells: [['a', 'b'], ['c', 'd']] }); // 통과
+});
+
+test('edit_table: op 별 필수 파라미터를 이름 붙여 즉시 실패', () => {
+  const { validate } = byName.get('edit_table');
+  assert.ok(validate, 'edit_table has no validate hook');
+  assert.throws(() => validate({ op: 'insert_row' }), (e) => e.code === 'INVALID_ARGS' && /rowIdx/.test(e.message));
+  assert.throws(() => validate({ op: 'insert_col' }), (e) => e.code === 'INVALID_ARGS' && /colIdx/.test(e.message));
+  assert.throws(
+    () => validate({ op: 'merge_cells', startRow: 0, startCol: 0 }),
+    (e) => e.code === 'INVALID_ARGS' && /endRow/.test(e.message) && /endCol/.test(e.message)
+  );
+  assert.throws(() => validate({ op: 'set_cell_props', cellIdx: 0 }), (e) => e.code === 'INVALID_ARGS' && /props/.test(e.message));
+  validate({ op: 'insert_row', rowIdx: 0 }); // 통과
+  validate({ op: 'merge_cells', startRow: 0, startCol: 0, endRow: 1, endCol: 1 }); // 통과
+  validate({ op: 'set_table_props', props: { repeatHeader: true } }); // 통과
+});
