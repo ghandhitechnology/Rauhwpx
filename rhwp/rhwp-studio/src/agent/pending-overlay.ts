@@ -49,6 +49,7 @@ interface CachedDiff {
 
 interface ExactVisual {
   key: string;
+  nodeKey: string;
   op: ReplaceOverlayOp;
   hunk: ExactDiffHunk;
   range: DocRange;
@@ -66,8 +67,14 @@ interface HitRegion {
   height: number;
 }
 
-const FLOW_STAGGER_MS = 45;
-const FLOW_STAGGER_CAP_MS = 700;
+/** key 하나가 소유하는 DOM 쌍. 렌더 간에 재사용해 애니메이션/스타일 상태를 보존한다. */
+interface PooledNode {
+  ink: HTMLDivElement | null;
+  marker: HTMLDivElement | null;
+  inkClass: string;
+  markerClass: string;
+}
+
 const HIT_SLOP_PX = 4;
 const POPOVER_MAX_SCALARS = 320;
 const EXACT_INK_GUTTER = 0.35;
@@ -84,20 +91,35 @@ function truncateScalars(text: string, max: number): string {
   return values.length > max ? values.slice(0, max - 1).join('') + '…' : text;
 }
 
+function rangeKey(range: DocRange | undefined): string {
+  if (!range) return '';
+  const cell = range.cell ? `c${range.cell.paraIdx}/${range.cell.controlIdx}/${range.cell.cellIdx}` : '';
+  return `s${range.sectionIdx}${cell}:${range.startParaIdx}.${range.startCharOffset}-${range.endParaIdx}.${range.endCharOffset}`;
+}
+
 /**
  * 에이전트 대기 편집(pending edit)을 표시하는 오버레이.
  * replace 는 view-only exact diff 로 쪼개고, 나머지 op 는 기존 범위 렌더링을 유지한다.
+ *
+ * 렌더는 두 단계로 나뉜다:
+ *  - 기하 재계산(wasm rect 프로브): 문서가 실제로 바뀐 이벤트에서만 수행한다.
+ *  - 배치(positioning): 줌/뷰포트/인셋 변경은 캐시된 페이지 좌표를 화면 좌표로만
+ *    다시 사영한다 — 사이드바 전환 중에도 프레임마다 값싸게 따라붙는다.
+ * DOM 은 key 로 재조정(reconcile)한다. 매 렌더마다 부수고 다시 만들지 않으므로
+ * 진행 중인 CSS 애니메이션이 끊기지 않고, 노드 생성 비용도 최초 1회뿐이다.
  */
 export class PendingOverlayRenderer {
   private markerLayer: HTMLDivElement;
   private popover: HTMLDivElement;
   private popoverText: HTMLDivElement;
   private liveRegion: HTMLDivElement;
-  private inkRects: HTMLDivElement[] = [];
   private ops: OverlayOp[] = [];
   private unsubs: Array<() => void> = [];
   private diffCache = new Map<string, CachedDiff>();
-  private animatedHunks = new Set<string>();
+  private nodePool = new Map<string, PooledNode>();
+  private cachedExact: ExactVisual[] | null = null;
+  private cachedLegacy: Array<{ op: LegacyOverlayOp; rects: SelectionRect[] }> | null = null;
+  private geometryDirty = true;
   private hitRegions: HitRegion[] = [];
   private interactionRoot: HTMLElement | null = null;
   private hoverKey: string | null = null;
@@ -125,16 +147,19 @@ export class PendingOverlayRenderer {
     this.liveRegion.className = 'ag-pending-live-region';
     this.liveRegion.setAttribute('aria-live', 'polite');
     this.liveRegion.setAttribute('aria-atomic', 'true');
+    this.markerLayer.append(this.popover, this.liveRegion);
 
-    const events = [
-      'document-changed',
-      'document-page-invalidated',
-      'document-view-changed',
-      'zoom-changed',
-      'viewport-resize',
-      'viewport-inset-changed',
-    ];
-    for (const name of events) {
+    // 문서 내용이 바뀌는 이벤트 — rect 프로브부터 다시 한다.
+    const geometryEvents = ['document-changed', 'document-page-invalidated', 'document-view-changed'];
+    for (const name of geometryEvents) {
+      this.unsubs.push(deps.eventBus.on(name, () => {
+        this.geometryDirty = true;
+        this.render();
+      }));
+    }
+    // 화면 사영만 바뀌는 이벤트 — 캐시된 기하를 다시 배치만 한다.
+    const projectionEvents = ['zoom-changed', 'viewport-resize', 'viewport-inset-changed'];
+    for (const name of projectionEvents) {
       this.unsubs.push(deps.eventBus.on(name, () => this.render()));
     }
     this.unsubs.push(deps.eventBus.on('cursor-rect-updated', () => this.inspectCaret()));
@@ -149,22 +174,19 @@ export class PendingOverlayRenderer {
     for (const id of this.diffCache.keys()) {
       if (!liveReplaceIds.has(id)) this.diffCache.delete(id);
     }
-    for (const key of this.animatedHunks) {
-      const opId = key.slice(0, key.lastIndexOf(':'));
-      if (!liveReplaceIds.has(opId)) this.animatedHunks.delete(key);
-    }
     if (this.pinnedKey && ![...liveReplaceIds].some((id) => this.pinnedKey!.startsWith(`${id}:`))) {
       this.pinnedKey = null;
     }
+    this.geometryDirty = true;
     this.render();
   }
 
   clear(): void {
     this.ops = [];
     this.diffCache.clear();
-    this.animatedHunks.clear();
     this.hoverKey = null;
     this.pinnedKey = null;
+    this.geometryDirty = true;
     this.render();
   }
 
@@ -175,9 +197,10 @@ export class PendingOverlayRenderer {
     this.detachInteractionRoot();
     this.ops = [];
     this.diffCache.clear();
-    this.animatedHunks.clear();
+    this.cachedExact = null;
+    this.cachedLegacy = null;
     this.hitRegions = [];
-    this.removeInkRects();
+    this.dropAllNodes();
     this.markerLayer.remove();
   }
 
@@ -201,9 +224,12 @@ export class PendingOverlayRenderer {
     this.interactionRoot = null;
   }
 
-  private removeInkRects(): void {
-    for (const rect of this.inkRects) rect.remove();
-    this.inkRects = [];
+  private dropAllNodes(): void {
+    for (const node of this.nodePool.values()) {
+      node.ink?.remove();
+      node.marker?.remove();
+    }
+    this.nodePool.clear();
   }
 
   private pagePosition(
@@ -273,49 +299,16 @@ export class PendingOverlayRenderer {
       try {
         if (hunk.newEnd > hunk.newStart) {
           for (const rect of this.rangeRects(range)) {
-            visuals.push({ key, op, hunk, range, rect, anchor: false });
+            visuals.push({ key, nodeKey: '', op, hunk, range, rect, anchor: false });
           }
         } else {
-          visuals.push({ key, op, hunk, range, rect: this.cursorRect(op, hunk.newStart), anchor: true });
+          visuals.push({ key, nodeKey: '', op, hunk, range, rect: this.cursorRect(op, hunk.newStart), anchor: true });
         }
       } catch {
         // 문서 미로드 / stale 주소 → 해당 hunk 는 조용히 건너뛴다.
       }
     });
     return visuals;
-  }
-
-  private renderLegacyOp(
-    op: LegacyOverlayOp,
-    scrollContent: HTMLElement,
-    contentWidth: number,
-    zoom: number,
-    exactTextRects: readonly SelectionRect[],
-  ): void {
-    let rects: SelectionRect[];
-    try {
-      if (op.objRef) rects = this.resolveObjectRects(op.objRef);
-      else if (op.range) rects = this.rangeRects(op.range);
-      else return;
-    } catch {
-      return;
-    }
-    if (op.range && exactTextRects.length > 0) {
-      rects = this.excludeExactTextRects(rects, exactTextRects);
-    }
-    for (const rect of rects) {
-      const pos = this.pagePosition(rect, contentWidth, zoom);
-      const ink = document.createElement('div');
-      ink.className = `ag-pending-rect ag-pending-ink ag-${op.agent}`;
-      this.positionRect(ink, pos);
-      scrollContent.appendChild(ink);
-      this.inkRects.push(ink);
-
-      const marker = document.createElement('div');
-      marker.className = `ag-pending-rect ag-pending-marker ag-${op.agent} ag-${op.kind}`;
-      this.positionRect(marker, pos);
-      this.markerLayer.appendChild(marker);
-    }
   }
 
   /** Overlapping screen-blend inks mix colors, so reserve exact text pixels for green. */
@@ -347,67 +340,8 @@ export class PendingOverlayRenderer {
     return pieces;
   }
 
-  private renderExactVisual(
-    visual: ExactVisual,
-    scrollContent: HTMLElement,
-    contentWidth: number,
-    zoom: number,
-    animate: boolean,
-    delay: number,
-  ): void {
-    const pos = this.pagePosition(visual.rect, contentWidth, zoom);
-    const isDeletion = visual.hunk.kind === 'delete';
-    if (visual.anchor) {
-      const marker = document.createElement('div');
-      marker.className = `ag-exact-anchor ${isDeletion ? 'ag-exact-anchor-delete' : 'ag-exact-anchor-insert'}`;
-      if (animate) {
-        marker.classList.add('ag-liquid-anchor-in');
-        marker.style.setProperty('--ag-flow-delay', `${delay}ms`);
-        marker.addEventListener('animationend', () => marker.classList.remove('ag-liquid-anchor-in'), { once: true });
-      }
-      const markerPos = { left: pos.left - 5, top: pos.top, width: 10, height: Math.max(pos.height, 12) };
-      this.positionRect(marker, markerPos);
-      marker.dataset.diffHunk = visual.key;
-      this.markerLayer.appendChild(marker);
-      if (visual.hunk.oldText) this.hitRegions.push({ ...markerPos, key: visual.key, oldText: visual.hunk.oldText, range: visual.range });
-      return;
-    }
-
-    const ink = document.createElement('div');
-    ink.className = 'ag-pending-rect ag-pending-ink ag-exact-ink';
-    if (animate) {
-      ink.classList.add('ag-liquid-flow-in');
-      ink.style.setProperty('--ag-flow-delay', `${delay}ms`);
-      ink.addEventListener('animationend', () => ink.classList.remove('ag-liquid-flow-in'), { once: true });
-    }
-    this.positionRect(ink, pos);
-    ink.dataset.diffHunk = visual.key;
-    scrollContent.appendChild(ink);
-    this.inkRects.push(ink);
-
-    const marker = document.createElement('div');
-    marker.className = 'ag-pending-rect ag-pending-marker ag-exact-change';
-    if (animate) {
-      marker.classList.add('ag-liquid-flow-in');
-      marker.style.setProperty('--ag-flow-delay', `${delay}ms`);
-      marker.addEventListener('animationend', () => marker.classList.remove('ag-liquid-flow-in'), { once: true });
-    }
-    this.positionRect(marker, pos);
-    marker.dataset.diffHunk = visual.key;
-    this.markerLayer.appendChild(marker);
-    if (visual.hunk.oldText) this.hitRegions.push({ ...pos, key: visual.key, oldText: visual.hunk.oldText, range: visual.range });
-  }
-
-  private render(): void {
-    const scrollContent = document.getElementById('scroll-content');
-    if (!scrollContent) return;
-    this.ensureAttached(scrollContent);
-    this.removeInkRects();
-    this.markerLayer.replaceChildren();
-    this.hitRegions = [];
-
-    const zoom = this.deps.canvasView.getViewportManager().getZoom();
-    const contentWidth = scrollContent.clientWidth;
+  /** 문서 기준 기하(페이지 좌표 rect 목록)를 다시 프로브한다. */
+  private recomputeGeometry(): void {
     const exactVisuals: ExactVisual[] = [];
     const legacyOps: LegacyOverlayOp[] = [];
     for (const op of this.ops) {
@@ -415,40 +349,176 @@ export class PendingOverlayRenderer {
       else legacyOps.push(op);
     }
     const exactTextRects = exactVisuals.filter((visual) => !visual.anchor).map((visual) => visual.rect);
+
+    const legacy: Array<{ op: LegacyOverlayOp; rects: SelectionRect[] }> = [];
     for (const op of legacyOps) {
-      this.renderLegacyOp(op, scrollContent, contentWidth, zoom, exactTextRects);
-    }
-
-    exactVisuals.sort((a, b) => (
-      a.rect.pageIndex - b.rect.pageIndex
-      || a.rect.y - b.rect.y
-      || a.rect.x - b.rect.x
-      || a.hunk.newStart - b.hunk.newStart
-    ));
-    const unseenKeys = new Set(exactVisuals.map((visual) => visual.key).filter((key) => !this.animatedHunks.has(key)));
-    const delays = new Map<string, number>();
-    let flowIndex = 0;
-    for (const visual of exactVisuals) {
-      if (!delays.has(visual.key)) {
-        if (unseenKeys.has(visual.key)) {
-          delays.set(visual.key, Math.min(flowIndex * FLOW_STAGGER_MS, FLOW_STAGGER_CAP_MS));
-          flowIndex++;
-        } else {
-          delays.set(visual.key, 0);
-        }
+      let rects: SelectionRect[];
+      try {
+        if (op.objRef) rects = this.resolveObjectRects(op.objRef);
+        else if (op.range) rects = this.rangeRects(op.range);
+        else continue;
+      } catch {
+        continue;
       }
-      this.renderExactVisual(
-        visual,
-        scrollContent,
-        contentWidth,
-        zoom,
-        unseenKeys.has(visual.key),
-        delays.get(visual.key)!,
-      );
+      if (op.range && exactTextRects.length > 0) {
+        rects = this.excludeExactTextRects(rects, exactTextRects);
+      }
+      legacy.push({ op, rects });
     }
-    for (const key of unseenKeys) this.animatedHunks.add(key);
 
-    this.markerLayer.append(this.popover, this.liveRegion);
+    // 같은 hunk 가 여러 줄 rect 를 갖는다 — DOM key 는 등장 순번으로 안정화한다.
+    const seen = new Map<string, number>();
+    for (const visual of exactVisuals) {
+      const n = seen.get(visual.key) ?? 0;
+      seen.set(visual.key, n + 1);
+      visual.nodeKey = `${visual.key}#${n}`;
+    }
+
+    this.cachedExact = exactVisuals;
+    this.cachedLegacy = legacy;
+    this.geometryDirty = false;
+  }
+
+  private legacyNodeKey(op: LegacyOverlayOp, rectIdx: number): string {
+    const at = op.objRef ? JSON.stringify(op.objRef) : rangeKey(op.range);
+    return `L:${op.kind}:${op.agent}:${at}#${rectIdx}`;
+  }
+
+  /**
+   * key 의 DOM 쌍을 확보한다. 이미 있으면 그대로 재사용해 진행 중인 애니메이션과
+   * 스타일 상태를 보존하고, 클래스가 달라졌을 때만 갱신한다.
+   */
+  private ensureNode(
+    key: string,
+    scrollContent: HTMLElement,
+    inkClass: string | null,
+    markerClass: string | null,
+    onCreateMarker?: (marker: HTMLDivElement) => void,
+  ): PooledNode {
+    let node = this.nodePool.get(key);
+    if (!node) {
+      node = { ink: null, marker: null, inkClass: '', markerClass: '' };
+      this.nodePool.set(key, node);
+    }
+    if (inkClass) {
+      if (!node.ink) {
+        node.ink = document.createElement('div');
+        node.ink.dataset.agKey = key;
+      }
+      if (node.inkClass !== inkClass) {
+        node.ink.className = inkClass;
+        node.inkClass = inkClass;
+      }
+      if (node.ink.parentElement !== scrollContent) scrollContent.appendChild(node.ink);
+    } else if (node.ink) {
+      node.ink.remove();
+      node.ink = null;
+      node.inkClass = '';
+    }
+    if (markerClass) {
+      const created = !node.marker;
+      if (!node.marker) {
+        node.marker = document.createElement('div');
+        node.marker.dataset.agKey = key;
+      }
+      if (node.markerClass !== markerClass) {
+        node.marker.className = markerClass;
+        node.markerClass = markerClass;
+      }
+      if (node.marker.parentElement !== this.markerLayer) this.markerLayer.appendChild(node.marker);
+      if (created && onCreateMarker) onCreateMarker(node.marker);
+    } else if (node.marker) {
+      node.marker.remove();
+      node.marker = null;
+      node.markerClass = '';
+    }
+    return node;
+  }
+
+  private render(): void {
+    const scrollContent = document.getElementById('scroll-content');
+    if (!scrollContent) return;
+    this.ensureAttached(scrollContent);
+
+    if (this.geometryDirty || !this.cachedExact || !this.cachedLegacy) {
+      this.recomputeGeometry();
+    }
+
+    const zoom = this.deps.canvasView.getViewportManager().getZoom();
+    const contentWidth = scrollContent.clientWidth;
+    this.hitRegions = [];
+    const desired = new Set<string>();
+
+    for (const { op, rects } of this.cachedLegacy!) {
+      rects.forEach((rect, rectIdx) => {
+        const key = this.legacyNodeKey(op, rectIdx);
+        desired.add(key);
+        const pos = this.pagePosition(rect, contentWidth, zoom);
+        const node = this.ensureNode(
+          key,
+          scrollContent,
+          `ag-pending-rect ag-pending-ink ag-${op.agent}`,
+          `ag-pending-rect ag-pending-marker ag-${op.agent} ag-${op.kind}`,
+        );
+        if (node.ink) this.positionRect(node.ink, pos);
+        if (node.marker) this.positionRect(node.marker, pos);
+      });
+    }
+
+    for (const visual of this.cachedExact!) {
+      desired.add(visual.nodeKey);
+      const pos = this.pagePosition(visual.rect, contentWidth, zoom);
+      if (visual.anchor) {
+        const isDeletion = visual.hunk.kind === 'delete';
+        const node = this.ensureNode(
+          visual.nodeKey,
+          scrollContent,
+          null,
+          `ag-exact-anchor ${isDeletion ? 'ag-exact-anchor-delete' : 'ag-exact-anchor-insert'}`,
+          (marker) => {
+            // 생성 시 1회만 재생 — 노드가 렌더 간에 살아남으므로 중복 재생이 없다.
+            marker.classList.add('ag-liquid-anchor-in');
+            marker.addEventListener('animationend', () => marker.classList.remove('ag-liquid-anchor-in'), { once: true });
+          },
+        );
+        const markerPos = { left: pos.left - 5, top: pos.top, width: 10, height: Math.max(pos.height, 12) };
+        if (node.marker) {
+          this.positionRect(node.marker, markerPos);
+          node.marker.dataset.diffHunk = visual.key;
+        }
+        if (visual.hunk.oldText) {
+          this.hitRegions.push({ ...markerPos, key: visual.key, oldText: visual.hunk.oldText, range: visual.range });
+        }
+        continue;
+      }
+
+      const node = this.ensureNode(
+        visual.nodeKey,
+        scrollContent,
+        'ag-pending-rect ag-pending-ink ag-exact-ink',
+        'ag-pending-rect ag-pending-marker ag-exact-change',
+      );
+      if (node.ink) {
+        this.positionRect(node.ink, pos);
+        node.ink.dataset.diffHunk = visual.key;
+      }
+      if (node.marker) {
+        this.positionRect(node.marker, pos);
+        node.marker.dataset.diffHunk = visual.key;
+      }
+      if (visual.hunk.oldText) {
+        this.hitRegions.push({ ...pos, key: visual.key, oldText: visual.hunk.oldText, range: visual.range });
+      }
+    }
+
+    // 더 이상 쓰이지 않는 노드 정리
+    for (const [key, node] of this.nodePool) {
+      if (desired.has(key)) continue;
+      node.ink?.remove();
+      node.marker?.remove();
+      this.nodePool.delete(key);
+    }
+
     this.restorePopoverAfterRender();
   }
 

@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 const pendingSrc = readFileSync(new URL('../src/agent/pending-edits.ts', import.meta.url), 'utf8');
 const overlaySrc = readFileSync(new URL('../src/agent/pending-overlay.ts', import.meta.url), 'utf8');
 const overlayCss = readFileSync(new URL('../src/agent/pending-overlay.css', import.meta.url), 'utf8');
+const revealSrc = readFileSync(new URL('../src/agent/typewriter-reveal.ts', import.meta.url), 'utf8');
 
 test('replace overlay receives both sides without changing the pending operation model', () => {
   assert.match(pendingSrc, /kind: 'replace',[\s\S]*id: op\.id,[\s\S]*oldText: op\.deletedText,[\s\S]*newText: op\.text/);
@@ -23,12 +24,26 @@ test('inspection observes pointer and caret state without intercepting editor in
   assert.match(overlaySrc, /event\.key !== 'Escape'/);
 });
 
-test('liquid flow is bounded, one-shot, and reduced-motion safe', () => {
-  assert.match(overlaySrc, /const FLOW_STAGGER_MS = 45/);
-  assert.match(overlaySrc, /const FLOW_STAGGER_CAP_MS = 700/);
-  assert.match(overlaySrc, /this\.animatedHunks\.has\(key\)/);
-  assert.match(overlayCss, /ag-liquid-flow 360ms cubic-bezier\(0\.16, 1, 0\.3, 1\)/);
+test('typewriter reveal is bounded, one-shot, and reduced-motion safe', () => {
+  // 청크 하나의 공개 시간은 상한이 있고, reduced-motion 은 공개 자체를 건너뛴다.
+  assert.match(revealSrc, /const REVEAL_MAX_MS = 900/);
+  assert.match(revealSrc, /this\.reduceMotion\?\.matches/);
+  // 커버(z9)는 잉크(z6)·마커(z7)·앵커(z8) 위, 캐럿(z10) 아래에 선다.
+  assert.match(overlayCss, /\.ag-reveal-cover[\s\S]*z-index: 9/);
+  assert.match(overlayCss, /\.ag-typewriter-caret[\s\S]*z-index: 10/);
+  // 앵커 등장 애니메이션은 노드 생성 시 1회만 재생된다 (노드는 렌더 간 재사용).
+  assert.match(overlaySrc, /marker\.classList\.add\('ag-liquid-anchor-in'\)/);
+  assert.match(overlaySrc, /animationend[\s\S]*ag-liquid-anchor-in/);
   assert.match(overlayCss, /@media \(prefers-reduced-motion: reduce\)[\s\S]*animation: none/);
+});
+
+test('overlay reconciles DOM by key and reprojects without reprobing on view changes', () => {
+  // 문서 변경 이벤트만 wasm rect 프로브를 다시 한다.
+  assert.match(overlaySrc, /geometryEvents = \['document-changed', 'document-page-invalidated', 'document-view-changed'\]/);
+  assert.match(overlaySrc, /projectionEvents = \['zoom-changed', 'viewport-resize', 'viewport-inset-changed'\]/);
+  // DOM 은 key 재조정 — 매 렌더 전체 파괴/재생성 금지.
+  assert.match(overlaySrc, /this\.nodePool\.get\(key\)/);
+  assert.doesNotMatch(overlaySrc, /replaceChildren\(\)/);
 });
 
 test('exact replace colors are semantic green and red', () => {

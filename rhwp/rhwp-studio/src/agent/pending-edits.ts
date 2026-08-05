@@ -148,6 +148,8 @@ export class PendingEditManager {
     }, op, addr.cell);
     this.emitDocEvents('agent-pending-edit');
     this.syncOverlay();
+    // 타자기 공개용 — op.range 라이브 참조를 넘겨 이후 shift 가 반영되게 한다.
+    this.deps.eventBus.emit('agent-text-inserted', { agent, range: op.range, text });
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, insertedRange: { ...range } };
   }
@@ -240,6 +242,9 @@ export class PendingEditManager {
       }
       this.emitDocEvents('agent-pending-edit');
       this.syncOverlay();
+      if (text.length > 0) {
+        this.deps.eventBus.emit('agent-text-inserted', { agent, range: op.range, text });
+      }
       this.emitChange({ type: 'ops-changed' });
       return { changeSetId: set.id, insertedRange: { ...ins.range } };
     } catch (err) {
@@ -501,7 +506,9 @@ export class PendingEditManager {
       this.deps.inputHandler.executeOperation({
         kind: 'record',
         command,
-        meta: { refresh: 'full' },
+        // 승인은 이미 보이는 미리보기를 채택하는 것 — 사용자가 보고 있는
+        // 지점(에이전트 편집 위치)에서 caret 위치로 카메라를 되돌리지 않는다.
+        meta: { refresh: 'full', scroll: 'preserve' },
       });
     } catch (err) {
       if (previewId !== null) {
