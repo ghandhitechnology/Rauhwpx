@@ -68,3 +68,156 @@
     inset 0 -1px 0 rgba(var(--ag-pending-ink), 0.58),
     inset 0 1px 0 rgba(var(--ag-pending-ink), 0.58);
 }
+
+/* replace_range exact diff: 의미 색상은 에이전트 provenance 와 분리한다. */
+.ag-exact-ink {
+  --ag-pending-ink: 35, 122, 75;
+}
+
+.ag-pending-marker.ag-exact-change {
+  background: rgba(35, 122, 75, 0.07);
+  box-shadow: inset 0 -2px 0 rgba(35, 122, 75, 0.82);
+}
+
+.ag-exact-anchor {
+  position: absolute;
+  z-index: 8;
+  pointer-events: none;
+  transform-origin: center bottom;
+}
+
+.ag-exact-anchor::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  bottom: 1px;
+  width: 2px;
+  border-radius: 2px;
+  background: #b23a48;
+  box-shadow: 0 1px 4px rgba(178, 58, 72, 0.22);
+}
+
+.ag-exact-anchor::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 0;
+  width: 6px;
+  height: 3px;
+  border-radius: 3px 3px 2px 2px;
+  background: #b23a48;
+}
+
+.ag-exact-anchor-insert::before,
+.ag-exact-anchor-insert::after {
+  background: #237a4b;
+}
+
+.ag-exact-popover {
+  position: absolute;
+  z-index: 11;
+  width: max-content;
+  max-width: 284px;
+  padding: 8px 10px 9px;
+  border: 1px solid rgba(178, 58, 72, 0.3);
+  border-radius: 8px;
+  background: #fff8f8;
+  color: #702832;
+  box-shadow: 0 5px 16px rgba(66, 25, 31, 0.16);
+  font-family: var(--font-family-ui, sans-serif);
+  pointer-events: none;
+}
+
+.ag-exact-popover[hidden] {
+  display: none;
+}
+
+.ag-exact-popover-label {
+  margin-bottom: 3px;
+  color: #8d2f3b;
+  font-size: var(--font-size-xs, 10px);
+  font-weight: 700;
+}
+
+.ag-exact-popover-text {
+  max-height: 132px;
+  overflow: hidden;
+  font-size: var(--font-size-base, 12px);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-decoration: line-through;
+  text-decoration-color: rgba(178, 58, 72, 0.82);
+  text-decoration-thickness: 1.5px;
+}
+
+.ag-pending-live-region {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 잉크가 왼쪽에서 스며들고 선두의 blur 가 마르는 한 번짜리 흐름. */
+.ag-liquid-flow-in {
+  animation: ag-liquid-flow 360ms cubic-bezier(0.16, 1, 0.3, 1) var(--ag-flow-delay, 0ms) both;
+  will-change: clip-path, filter, opacity;
+}
+
+.ag-liquid-anchor-in {
+  animation: ag-liquid-anchor 360ms cubic-bezier(0.16, 1, 0.3, 1) var(--ag-flow-delay, 0ms) both;
+  will-change: transform, filter, opacity;
+}
+
+@keyframes ag-liquid-flow {
+  0% {
+    clip-path: inset(0 100% 0 0 round 3px);
+    filter: blur(2px);
+    opacity: 0.42;
+  }
+  62% {
+    filter: blur(1px);
+    opacity: 0.94;
+  }
+  100% {
+    clip-path: inset(0 0 0 0 round 1px);
+    filter: blur(0);
+    opacity: 1;
+  }
+}
+
+@keyframes ag-liquid-anchor {
+  0% {
+    transform: scaleY(0.12);
+    filter: blur(2px);
+    opacity: 0.38;
+  }
+  68% {
+    transform: scaleY(1.06);
+    filter: blur(0.6px);
+    opacity: 1;
+  }
+  100% {
+    transform: scaleY(1);
+    filter: blur(0);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-liquid-flow-in,
+  .ag-liquid-anchor-in {
+    animation: none;
+    clip-path: none;
+    filter: none;
+    opacity: 1;
+    transform: none;
+    will-change: auto;
+  }
+}

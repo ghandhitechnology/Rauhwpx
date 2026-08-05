@@ -673,7 +673,18 @@ export class PendingEditManager {
           }
           continue;
         }
-        ops.push({ kind: op.kind, agent: op.agent, range: op.range });
+        if (op.kind === 'replace') {
+          ops.push({
+            kind: 'replace',
+            id: op.id,
+            agent: op.agent,
+            range: op.range,
+            oldText: op.deletedText,
+            newText: op.text,
+          });
+        } else {
+          ops.push({ kind: op.kind, agent: op.agent, range: op.range });
+        }
       }
     }
     this.deps.overlay.setOps(ops);
