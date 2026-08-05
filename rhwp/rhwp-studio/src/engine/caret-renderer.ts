@@ -1,7 +1,43 @@
 import type { CursorRect } from '@/core/types';
 import { VirtualScroll } from '@/view/virtual-scroll';
 
-/** Canvas 위에 깜박이는 캐럿을 렌더링한다 */
+/** 캐럿 이동을 애니메이션할지 즉시 반영할지. */
+type MoveMode = 'glide' | 'snap';
+
+/** 활자를 이어 치는 동안 깜박임을 멈춰 두는 시간(ms). */
+const TYPING_IDLE_MS = 620;
+
+/**
+ * '즉시 반영' 표시의 유효 기간(ms). pointerdown 뒤 캐럿 갱신은 한두
+ * 프레임 안에 오므로 넉넉하고, 클릭 후 바로 타자를 쳐도 그 글자까지
+ * 튀지 않을 만큼은 짧다.
+ */
+const SNAP_REQUEST_TTL_MS = 250;
+
+/** 이 거리를 넘어가는 이동은 '흐르는' 것이 아니라 '뛰는' 것이다. */
+const GLIDE_MAX_DISTANCE_PX = 600;
+
+/** 세로로 이 배수(줄 높이 기준)를 넘으면 다른 문단으로 뛴 것으로 본다. */
+const GLIDE_MAX_LINE_FACTOR = 2.2;
+
+/**
+ * 이동 거리에 따른 지속 시간 범위(ms). 타자 한 글자는 아래쪽 끝에 붙는다.
+ *
+ * 85ms 는 '즉각적인 피드백' 구간(100~150ms)의 아래쪽으로, 흐름이 눈에
+ * 보이되 지연으로 읽히지는 않는 지점이다. 빠르게 쳐도(초당 10자, 100ms
+ * 간격) 다음 글자 전에 끝난다.
+ */
+const GLIDE_MIN_MS = 70;
+const GLIDE_MAX_MS = 150;
+
+/**
+ * Canvas 위에 캐럿을 렌더링한다.
+ *
+ * 위치는 left/top 이 아니라 transform 으로 옮긴다 — 합성만으로 처리되어
+ * 레이아웃을 건드리지 않고, 타자 중에도 캔버스 렌더 루프와 경쟁하지 않는다.
+ * 높이는 애니메이션하지 않는다(글자 크기가 바뀌는 순간은 드물고,
+ * 높이를 트랜지션하면 레이아웃 속성을 움직이게 된다).
+ */
 export class CaretRenderer {
   private caretEl: HTMLDivElement;
   private blinkTimer: number | null = null;
@@ -12,14 +48,30 @@ export class CaretRenderer {
   private compEl: HTMLDivElement;
   private isCompMode = false;
 
+  // 부드러운 이동 상태
+  private lastX: number | null = null;
+  private lastY: number | null = null;
+  private lastPageIndex: number | null = null;
+  private typingIdleTimer: number | null = null;
+  private reduceMotion: MediaQueryList | null = null;
+  /**
+   * 다음 이동 한 번을 즉시 반영해야 하는 시각(ms). 줌처럼 화면이 통째로
+   * 다시 잡힌 직후, 그리고 포인터로 캐럿을 찍은 직후에 세운다.
+   * 소비되지 않은 채 남지 않도록 짧은 유효 기간을 둔다.
+   */
+  private snapRequestedAt: number | null = null;
+  private onPointerDown: (() => void) | null = null;
+
   constructor(
     private container: HTMLElement,
     private virtualScroll: VirtualScroll,
   ) {
     this.caretEl = document.createElement('div');
     this.caretEl.className = 'caret';
+    // 기하 정보만 인라인으로 둔다. 움직임/깜박임은 editor.css 가 갖는다.
     this.caretEl.style.cssText =
-      'position:absolute;width:2px;background:#000;pointer-events:none;z-index:10;display:none;';
+      'position:absolute;left:0;top:0;width:2px;background:var(--caret-color,#000);' +
+      'pointer-events:none;z-index:10;display:none;transform-origin:0 0;';
 
     // IME 조합 오버레이 (블랙박스 + 흰색 글자)
     this.compEl = document.createElement('div');
@@ -27,6 +79,17 @@ export class CaretRenderer {
     this.compEl.style.cssText =
       'position:absolute;background:#000;color:#fff;pointer-events:none;z-index:10;display:none;' +
       'line-height:1;overflow:hidden;white-space:pre;text-align:center;box-sizing:border-box;';
+
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      this.reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    }
+
+    // 클릭으로 찍은 자리는 '흘러가는' 곳이 아니라 '가리킨' 곳이다.
+    // 포인터로 옮긴 캐럿은 그 자리에 바로 나타나야 한다.
+    // update() 는 키보드와 마우스 양쪽에서 불리므로, 직전 pointerdown 을
+    // 근거로 이번 한 번을 즉시 반영한다.
+    this.onPointerDown = () => this.requestSnap();
+    container.addEventListener('pointerdown', this.onPointerDown, { capture: true });
 
     // scroll-content 안에 배치 (스크롤과 함께 이동)
     const scrollContent = container.querySelector('#scroll-content');
@@ -51,51 +114,65 @@ export class CaretRenderer {
   /** 캐럿을 숨긴다 */
   hide(): void {
     this.stopBlink();
+    this.clearTypingIdle();
     this.caretEl.style.display = 'none';
     this.compEl.style.display = 'none';
     this.isCompMode = false;
     this.currentRect = null;
+    this.forgetLastPosition();
   }
 
-  /** 줌/스크롤 변경 시 위치를 갱신한다 */
+  /**
+   * 줌/스크롤 변경 시 위치를 갱신한다.
+   *
+   * 줌은 화면 전체가 다시 잡히는 순간이라 캐럿만 뒤따라 흐르면 어긋나 보인다.
+   * 이 호출 자체를 즉시 반영하는 것만으로는 부족하다 — 줌 뒤에 커서 갱신
+   * 경로가 update() 를 한 번 더 부르기 때문에, 그 한 번도 흐르지 않게 막는다.
+   */
   updatePosition(zoom: number): void {
-    if (!this.currentRect) return;
-    const { pageIndex } = this.currentRect;
-    const { x, y, height } = this.clampCaretRect(this.currentRect, zoom);
-    const pageOffset = this.virtualScroll.getPageOffset(pageIndex);
-    const pageLeft = this.calcPageLeft(pageIndex);
-
-    this.caretEl.style.left = `${pageLeft + x * zoom}px`;
-    this.caretEl.style.top = `${pageOffset + y * zoom}px`;
-    this.caretEl.style.height = `${height * zoom}px`;
+    this.applyRect(zoom, 'snap');
+    this.requestSnap();
   }
 
-  /** 새 CursorRect로 갱신한다 (깜박임 리셋) */
+  /** 다음 이동 한 번을 즉시 반영하도록 표시한다. */
+  private requestSnap(): void {
+    this.snapRequestedAt = Date.now();
+  }
+
+  /**
+   * 표시가 서 있고 아직 유효하면 소비한다.
+   * 캐럿을 움직이지 않는 클릭(빈 곳 클릭 등) 뒤에 표시가 남아 다음
+   * 타자를 튀게 만들지 않도록, 지나간 표시는 그냥 버린다.
+   */
+  private consumeSnapRequest(): boolean {
+    if (this.snapRequestedAt === null) return false;
+    const fresh = Date.now() - this.snapRequestedAt < SNAP_REQUEST_TTL_MS;
+    this.snapRequestedAt = null;
+    return fresh;
+  }
+
+  /** 새 CursorRect로 갱신한다 (타자/커서 이동) */
   update(rect: CursorRect, zoom: number): void {
     this.ensureAttached();
     this.currentRect = rect;
-    this.updatePosition(zoom);
+    this.applyRect(zoom, 'glide');
     // 조합 모드가 아닐 때만 일반 캐럿 표시
     if (!this.isCompMode) {
       this.caretEl.style.display = 'block';
-      this.caretEl.style.opacity = '1';
       this.visible = true;
-      this.startBlink();
+      this.holdSolidWhileTyping();
     }
   }
 
-  /** 드래그 중 캐럿 위치를 갱신한다 (기존 깜박임 타이머 유지) */
+  /** 드래그 중 캐럿 위치를 갱신한다 — 포인터를 정확히 따라가야 하므로 즉시 반영 */
   updateLive(rect: CursorRect, zoom: number): void {
     this.ensureAttached();
     this.currentRect = rect;
-    this.updatePosition(zoom);
+    this.applyRect(zoom, 'snap');
     if (!this.isCompMode) {
       this.caretEl.style.display = 'block';
-      this.caretEl.style.opacity = '1';
       this.visible = true;
-      if (this.blinkTimer === null) {
-        this.startBlink();
-      }
+      this.holdSolidWhileTyping();
     }
   }
 
@@ -106,6 +183,8 @@ export class CaretRenderer {
 
     // 일반 캐럿 숨기기
     this.caretEl.style.display = 'none';
+    // 조합이 끝나고 캐럿이 돌아올 때 엉뚱한 지점에서 흐르지 않도록 기준점을 버린다.
+    this.forgetLastPosition();
 
     const { pageIndex } = startRect;
     const box = this.clampCompositionBox(startRect, charWidth);
@@ -118,6 +197,8 @@ export class CaretRenderer {
     const left = pageLeft + box.x * zoom;
     const top = pageOffset + box.y * zoom;
 
+    // 조합 중인 글자는 자모가 합쳐질 때마다 상자가 바뀐다. 이 상자는
+    // 입력을 그대로 비추는 거울이라 절대 애니메이션하지 않는다.
     this.compEl.style.left = `${left}px`;
     this.compEl.style.top = `${top}px`;
     this.compEl.style.width = `${w}px`;
@@ -127,7 +208,6 @@ export class CaretRenderer {
     this.compEl.style.lineHeight = `${h}px`;
     this.compEl.textContent = text;
     this.compEl.style.display = 'block';
-    this.compEl.style.opacity = '1';
     this.visible = true;
     this.startBlink();
   }
@@ -137,6 +217,98 @@ export class CaretRenderer {
     if (!this.isCompMode) return;
     this.isCompMode = false;
     this.compEl.style.display = 'none';
+    this.compEl.classList.remove('is-blinking');
+  }
+
+  /** 현재 rect 를 화면 좌표로 바꿔 적용한다. */
+  private applyRect(zoom: number, mode: MoveMode): void {
+    if (!this.currentRect) return;
+    const { pageIndex } = this.currentRect;
+    const { x, y, height } = this.clampCaretRect(this.currentRect, zoom);
+    const pageOffset = this.virtualScroll.getPageOffset(pageIndex);
+    const pageLeft = this.calcPageLeft(pageIndex);
+
+    const nextX = pageLeft + x * zoom;
+    const nextY = pageOffset + y * zoom;
+    const nextH = height * zoom;
+
+    const resolved = this.resolveMode(mode, nextX, nextY, nextH, pageIndex);
+    if (resolved === 'glide') {
+      const dist = Math.hypot(nextX - (this.lastX ?? nextX), nextY - (this.lastY ?? nextY));
+      this.caretEl.style.transitionDuration = `${this.glideDuration(dist)}ms`;
+      this.caretEl.classList.add('is-gliding');
+    } else {
+      this.caretEl.classList.remove('is-gliding');
+    }
+
+    this.caretEl.style.transform = `translate3d(${nextX}px, ${nextY}px, 0)`;
+    this.caretEl.style.height = `${nextH}px`;
+
+    this.lastX = nextX;
+    this.lastY = nextY;
+    this.lastPageIndex = pageIndex;
+  }
+
+  /**
+   * 흐르게 할지 뛰게 할지 정한다.
+   *
+   * 흐르는 것은 '이어지는 동작'일 때만 뜻이 있다. 페이지를 건너뛰거나
+   * 멀리 클릭한 이동까지 흐르면 느리게 반응하는 것처럼 느껴진다.
+   */
+  private resolveMode(
+    requested: MoveMode,
+    nextX: number,
+    nextY: number,
+    nextH: number,
+    pageIndex: number,
+  ): MoveMode {
+    if (requested === 'snap') return 'snap';
+    if (this.consumeSnapRequest()) return 'snap';
+    if (this.reduceMotion?.matches) return 'snap';
+    if (this.isCompMode) return 'snap';
+    if (this.lastX === null || this.lastY === null) return 'snap';
+    if (this.lastPageIndex !== pageIndex) return 'snap';
+
+    const dx = Math.abs(nextX - this.lastX);
+    const dy = Math.abs(nextY - this.lastY);
+    if (dy > Math.max(nextH, 1) * GLIDE_MAX_LINE_FACTOR) return 'snap';
+    if (Math.hypot(dx, dy) > GLIDE_MAX_DISTANCE_PX) return 'snap';
+    return 'glide';
+  }
+
+  /** 짧은 이동은 거의 즉시, 줄바꿈처럼 먼 이동은 조금 더 길게. */
+  private glideDuration(distance: number): number {
+    const t = Math.min(1, distance / GLIDE_MAX_DISTANCE_PX);
+    return Math.round(GLIDE_MIN_MS + (GLIDE_MAX_MS - GLIDE_MIN_MS) * t);
+  }
+
+  /**
+   * 타자를 치는 동안에는 깜박이지 않는다. 이동 중에 깜박임이 겹치면
+   * 캐럿이 사라졌다 나타나며 흐름이 끊긴다. 손을 멈추면 다시 깜박인다.
+   */
+  private holdSolidWhileTyping(): void {
+    this.stopBlink();
+    this.caretEl.classList.remove('is-blinking');
+    this.caretEl.style.opacity = '1';
+    this.clearTypingIdle();
+    this.typingIdleTimer = window.setTimeout(() => {
+      this.typingIdleTimer = null;
+      if (!this.isCompMode && this.currentRect) this.startBlink();
+    }, TYPING_IDLE_MS);
+  }
+
+  private clearTypingIdle(): void {
+    if (this.typingIdleTimer !== null) {
+      clearTimeout(this.typingIdleTimer);
+      this.typingIdleTimer = null;
+    }
+  }
+
+  private forgetLastPosition(): void {
+    this.lastX = null;
+    this.lastY = null;
+    this.lastPageIndex = null;
+    this.caretEl.classList.remove('is-gliding');
   }
 
   /** 셀 bbox가 있는 캐럿은 DOM 선 폭까지 셀 안에 남도록 보정한다. */
@@ -197,15 +369,16 @@ export class CaretRenderer {
     }
   }
 
+  /**
+   * 깜박임은 setInterval 로 opacity 를 끄고 켜는 대신 CSS 애니메이션에
+   * 맡긴다 — 딱딱하게 잘리지 않고 부드럽게 사그라든다.
+   */
   private startBlink(): void {
     this.stopBlink();
     this.visible = true;
     const target = this.isCompMode ? this.compEl : this.caretEl;
-    target.style.opacity = '1';
-    this.blinkTimer = window.setInterval(() => {
-      this.visible = !this.visible;
-      target.style.opacity = this.visible ? '1' : '0';
-    }, 500);
+    target.style.opacity = '';
+    target.classList.add('is-blinking');
   }
 
   private stopBlink(): void {
@@ -213,10 +386,17 @@ export class CaretRenderer {
       clearInterval(this.blinkTimer);
       this.blinkTimer = null;
     }
+    this.caretEl.classList.remove('is-blinking');
+    this.compEl.classList.remove('is-blinking');
   }
 
   dispose(): void {
     this.stopBlink();
+    this.clearTypingIdle();
+    if (this.onPointerDown) {
+      this.container.removeEventListener('pointerdown', this.onPointerDown, { capture: true });
+      this.onPointerDown = null;
+    }
     this.caretEl.remove();
     this.compEl.remove();
   }
