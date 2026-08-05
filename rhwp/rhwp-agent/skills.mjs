@@ -115,9 +115,10 @@ async function collectFiles(root) {
 }
 
 export class SkillRegistry {
-  constructor({ bundledRoot, userRoot = defaultSkillDataRoot() }) {
+  constructor({ bundledRoot, userRoot = defaultSkillDataRoot(), writingStyleStore = null }) {
     this.bundledRoot = bundledRoot;
     this.userRoot = userRoot;
+    this.writingStyleStore = writingStyleStore;
     this.statePath = path.join(userRoot, '.catalog-state.json');
     this.trashRoot = path.join(userRoot, '.trash');
     this.revision = 1;
@@ -325,6 +326,7 @@ export class SkillRegistry {
       const markdown = await fs.readFile(path.join(skill.root, 'SKILL.md'), 'utf8');
       activated = `\n\n<activated_product_skill name="${skill.name}" root="${skill.root}">\n${markdown}\n</activated_product_skill>`;
     }
-    return `<rhwp_product_skills revision="${catalog.revision}">\nOnly the skills in this catalog are product skills. If the request clearly matches one, call read_product_skill for its SKILL.md before acting, then read supporting resources progressively. Do not use provider-global skills.\n${metadata || '(no enabled skills)'}\n</rhwp_product_skills>${activated}\n\n<user_request>\n${text}\n</user_request>`;
+    const writingStyle = this.writingStyleStore ? await this.writingStyleStore.promptBlock() : '';
+    return `${writingStyle ? `${writingStyle}\n\n` : ''}<rhwp_product_skills revision="${catalog.revision}">\nOnly the skills in this catalog are product skills. If the request clearly matches one, call read_product_skill for its SKILL.md before acting, then read supporting resources progressively. Do not use provider-global skills.\n${metadata || '(no enabled skills)'}\n</rhwp_product_skills>${activated}\n\n<user_request>\n${text}\n</user_request>`;
   }
 }
