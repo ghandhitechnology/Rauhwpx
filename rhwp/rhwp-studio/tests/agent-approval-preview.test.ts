@@ -82,8 +82,8 @@ test('pending additions and formatting recolor glyphs with model-specific ink', 
     'inserted whitespace remains visibly marked');
   assert.match(overlayCss, /\.ag-pending-marker\.ag-format[\s\S]*box-shadow:/,
     'format-only edits remain identifiable even when glyph color is unchanged');
-  assert.match(overlaySrc, /scrollContent\.appendChild\(ink\)/,
+  assert.match(overlaySrc, /scrollContent\.appendChild\(node\.ink\)/,
     'ink rectangles must blend as direct canvas siblings, outside the marker stacking context');
-  assert.match(overlaySrc, /markerLayer\.appendChild\(marker\)/,
+  assert.match(overlaySrc, /markerLayer\.appendChild\(node\.marker\)/,
     'review markers render separately from the blended ink');
 });

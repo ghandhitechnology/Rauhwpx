@@ -57,6 +57,18 @@ test('문서 렌더링 이미지와 스크롤 영역은 보조 기술 및 키보
   assert.match(pageRenderer, /const element = new Image\(\);\s*element\.alt = '';/);
 });
 
+test('문서가 없을 때 파일 열기와 드롭 위치를 명확히 표시한다', () => {
+  const html = source('index.html');
+  const main = source('src/main.ts');
+
+  assert.match(html, /id="document-empty-state"/);
+  assert.match(html, /HWP, HWPX, HML 파일을 선택하거나 여기에 놓으세요\./);
+  assert.match(html, /id="document-open-action">HWP\/HWPX 열기<\/button>/);
+  assert.match(main, /document-open-action/);
+  assert.match(main, /dispatcher\.dispatch\('file:open'\)/);
+  assert.match(main, /emptyState\.hidden = true/);
+});
+
 test('서식 도구 모음 컨트롤은 테마 토큰으로 전경색과 배경색을 명시한다', () => {
   const css = source('src/styles/style-bar.css');
 
