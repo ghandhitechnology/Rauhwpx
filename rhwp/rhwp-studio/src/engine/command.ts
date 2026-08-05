@@ -142,6 +142,11 @@ export interface OperationMetadata {
   dirtyScope?: DirtyScope;
   /** selection/caret 복원 정책. 현재는 문서화용 metadata로만 사용한다. */
   selection?: SelectionPolicy;
+  /**
+   * mutation 후 뷰포트 정책. 'preserve' 는 caret 자동 스크롤(scrollCaretIntoView)을
+   * 생략한다 — 에이전트 승인처럼 사용자가 보고 있는 지점이 caret 과 다른 편집용.
+   */
+  scroll?: 'auto' | 'preserve';
 }
 
 /**
