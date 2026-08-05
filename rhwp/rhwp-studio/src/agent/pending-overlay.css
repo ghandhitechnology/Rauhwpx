@@ -69,6 +69,33 @@
     inset 0 1px 0 rgba(var(--ag-pending-ink), 0.58);
 }
 
+/* 문단이 끝난 자리의 개행 표시. 밑줄이 글자 끝에서 멈추는 대신 줄이 바뀌었다는
+   사실을 여기서 말한다. 본문보다 옅게 두어 글자와 경쟁하지 않는다. */
+.ag-pending-enter {
+  position: absolute;
+  z-index: 7;
+  pointer-events: none;
+  color: rgba(var(--ag-pending-ink, 168, 79, 49), 0.62);
+}
+
+.ag-pending-enter.ag-claude {
+  --ag-pending-ink: 168, 79, 49;
+}
+
+.ag-pending-enter.ag-codex {
+  --ag-pending-ink: 53, 105, 168;
+}
+
+.ag-pending-enter.ag-enter-exact {
+  --ag-pending-ink: 35, 122, 75;
+}
+
+.ag-pending-enter svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 /* replace_range exact diff: 의미 색상은 에이전트 provenance 와 분리한다. */
 .ag-exact-ink {
   --ag-pending-ink: 35, 122, 75;
@@ -164,32 +191,9 @@
   border: 0;
 }
 
-/* 잉크가 왼쪽에서 스며들고 선두의 blur 가 마르는 한 번짜리 흐름. */
-.ag-liquid-flow-in {
-  animation: ag-liquid-flow 360ms cubic-bezier(0.16, 1, 0.3, 1) var(--ag-flow-delay, 0ms) both;
-  will-change: clip-path, filter, opacity;
-}
-
+/* 삭제 앵커의 등장 — 생성 시 1회만 재생된다 (노드는 렌더 간에 재사용). */
 .ag-liquid-anchor-in {
-  animation: ag-liquid-anchor 360ms cubic-bezier(0.16, 1, 0.3, 1) var(--ag-flow-delay, 0ms) both;
-  will-change: transform, filter, opacity;
-}
-
-@keyframes ag-liquid-flow {
-  0% {
-    clip-path: inset(0 100% 0 0 round 3px);
-    filter: blur(2px);
-    opacity: 0.42;
-  }
-  62% {
-    filter: blur(1px);
-    opacity: 0.94;
-  }
-  100% {
-    clip-path: inset(0 0 0 0 round 1px);
-    filter: blur(0);
-    opacity: 1;
-  }
+  animation: ag-liquid-anchor 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 @keyframes ag-liquid-anchor {
@@ -210,14 +214,53 @@
   }
 }
 
+/* 타자기 공개: 아직 공개되지 않은 텍스트(+틴트/마커)를 용지색으로 덮는다.
+   z9 — 잉크(z6)·마커(z7)·앵커(z8) 위, 에이전트 캐럿(z10) 아래. */
+.ag-reveal-cover {
+  position: absolute;
+  z-index: 9;
+  pointer-events: none;
+  background: var(--doc-paper, #ffffff);
+}
+
+/* 공개 지점에 붙어 움직이는 에이전트 캐럿. 위치는 rAF 루프가 transform 으로
+   프레임마다 갱신하므로 transform 에는 트랜지션을 걸지 않는다. */
+.ag-typewriter-caret {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 2px;
+  border-radius: 1px;
+  z-index: 10;
+  pointer-events: none;
+  transform-origin: 0 0;
+  background: rgb(var(--ag-pending-ink, 168, 79, 49));
+  box-shadow: 0 0 6px rgba(var(--ag-pending-ink, 168, 79, 49), 0.35);
+  opacity: 0;
+  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ag-typewriter-caret.is-writing {
+  opacity: 1;
+}
+
+.ag-typewriter-caret.ag-claude {
+  --ag-pending-ink: 168, 79, 49;
+}
+
+.ag-typewriter-caret.ag-codex {
+  --ag-pending-ink: 53, 105, 168;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .ag-liquid-flow-in,
   .ag-liquid-anchor-in {
     animation: none;
-    clip-path: none;
     filter: none;
     opacity: 1;
     transform: none;
-    will-change: auto;
+  }
+
+  .ag-typewriter-caret {
+    display: none;
   }
 }

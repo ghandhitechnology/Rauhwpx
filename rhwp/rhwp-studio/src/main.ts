@@ -521,7 +521,20 @@ async function initialize(): Promise<void> {
     // 선택(opt-in) 기능이므로 여기서 실패해도 렌더러 초기화를 실패로 만들지 않는다.
     try {
       const agentBridge = initAgentBridge({ wasm, eventBus, inputHandler, canvasView, documentState });
-      initAgentSidebar({ bridge: agentBridge, eventBus });
+      initAgentSidebar({
+        bridge: agentBridge,
+        eventBus,
+        getDocumentContext: () => {
+          const documentName = wasm.pageCount > 0 ? wasm.fileName : null;
+          let selectionLabel: string | null = null;
+          if (inputHandler?.getSelectedPictureRef()) {
+            selectionLabel = '개체 선택됨';
+          } else if (inputHandler?.hasSelection()) {
+            selectionLabel = '텍스트 선택됨';
+          }
+          return { documentName, selectionLabel };
+        },
+      });
       if (import.meta.env.DEV) {
         (window as any).__agentBridge = agentBridge;
       }
@@ -572,6 +585,9 @@ function setupGlobalShortcuts(): void {
 
 function setupFileInput(): void {
   const fileInput = document.getElementById('file-input') as HTMLInputElement;
+  const openAction = document.getElementById('document-open-action') as HTMLButtonElement | null;
+
+  openAction?.addEventListener('click', () => dispatcher.dispatch('file:open'));
 
   fileInput.addEventListener('change', async (e) => {
     const input = e.target as HTMLInputElement;
@@ -929,6 +945,12 @@ async function initializeDocument(
     console.log('[initDoc] 8. inputHandler activateWithCaretPosition');
     await updateLoadProgress(96, '편집 상태 초기화 중...');
     inputHandler?.activateWithCaretPosition();
+    const emptyState = document.getElementById('document-empty-state');
+    if (emptyState) {
+      emptyState.hidden = true;
+      emptyState.setAttribute('aria-hidden', 'true');
+    }
+    eventBus.emit('document-context-changed');
     // 최종 단계 뒤에는 비동기 작업이 없으므로 100% progress paint를 기다리지 않는다.
     msg.textContent = displayName;
     console.log('[initDoc] 9. 완료');
