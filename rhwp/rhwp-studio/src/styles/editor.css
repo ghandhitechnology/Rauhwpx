@@ -94,7 +94,7 @@
    곡선은 easeOutCubic. 앞부분에 이동을 몰아넣는 (0.16,1,0.3,1) 보다
    거리를 고르게 나눠, 같은 시간에도 '흐르는' 구간이 실제로 더 보인다. */
 .caret.is-gliding {
-  transition: transform 90ms cubic-bezier(0.33, 1, 0.68, 1);
+  transition: transform 75ms cubic-bezier(0.33, 1, 0.68, 1);
 }
 
 /* 깜박임: opacity 를 껐다 켜는 대신 부드럽게 사그라들었다 돌아온다.

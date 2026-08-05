@@ -1,0 +1,12 @@
+{
+  "agentPort": 5176,
+  "studioPort": 7700,
+  "agentUrl": "http://127.0.0.1:5176/healthz",
+  "studioUrl": "http://127.0.0.1:7700/",
+  "wsUrl": "ws://127.0.0.1:5176",
+  "agentPidFile": "/Users/hataewook/projects/hobbies/claude-in-hwpx/rhwp/.run/agent.pid",
+  "studioPidFile": "/Users/hataewook/projects/hobbies/claude-in-hwpx/rhwp/.run/studio.pid",
+  "agentLog": "/Users/hataewook/projects/hobbies/claude-in-hwpx/rhwp/.run/agent.log",
+  "studioLog": "/Users/hataewook/projects/hobbies/claude-in-hwpx/rhwp/.run/studio.log",
+  "startedAt": "2026-08-05T05:45:14Z"
+}

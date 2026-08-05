@@ -1,0 +1,85 @@
+
+> start
+> node server.mjs
+
+[rhwp-agent] rhwp-agent hub listening on ws://127.0.0.1:5176 (token=dev)
+[rhwp-agent] claude/codex CLIs must be on PATH (e.g. ~/.local/bin)
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] mcp client connected (agent=claude)
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] mcp client disconnected (agent=claude)
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] mcp client connected (agent=claude)
+[rhwp-agent] mcp client disconnected (agent=claude)
+[rhwp-agent] mcp client connected (agent=codex)
+[codex] first mcp_tool_call item: {"id":"item_1","type":"mcp_tool_call","server":"rhwp","tool":"get_structure","arguments":{"maxParagraphs":500,"maxPreviewChars":500},"result":null,"error":null,"status":"in_progress"}
+[rhwp-agent] mcp client disconnected (agent=codex)
+[rhwp-agent] mcp client connected (agent=codex)
+[rhwp-agent] mcp client disconnected (agent=codex)
+[rhwp-agent] mcp client connected (agent=codex)
+[codex] first mcp_tool_call item: {"id":"item_1","type":"mcp_tool_call","server":"rhwp","tool":"get_structure","arguments":{"includeText":true},"result":null,"error":null,"status":"in_progress"}
+[rhwp-agent] mcp client disconnected (agent=codex)
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
