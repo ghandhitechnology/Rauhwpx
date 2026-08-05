@@ -35,6 +35,19 @@ pub(crate) enum BreakToken {
     Tab { idx: usize, max_font_size: f64 },
     /// 강제 줄 바꿈 (\n)
     LineBreak { idx: usize },
+    /// 인라인 개체 (treat_as_char 수식/그림/표 등).
+    /// 문자를 소비하지 않고 지정 폭(HWPUNIT)만큼 가로 공간만 예약한다.
+    /// idx는 개체가 삽입된 문자 위치 (개체 바로 다음 문자 인덱스와 동일).
+    /// own_line: 한컴이 전용 줄을 부여하는 블록형 개체(표/그림/도형) 여부.
+    /// true 이면 개체 줄에 뒤따르는 토큰이 넘칠 때 토큰 통째를 다음 줄로 본내
+    /// 글자 단위 분할(한 글자 run 조각남)을 피한다. 수식(false)은 텍스트 흐름
+    /// 개처이므로 기존 첫 글자 고정(pin) 동작을 유지한다.
+    InlineControl {
+        idx: usize,
+        width_hwp: i32,
+        max_font_size: f64,
+        own_line: bool,
+    },
 }
 
 /// 줄 채움 결과
@@ -157,6 +170,31 @@ pub(crate) fn tokenize_paragraph(
     english_break_unit: u8,
     korean_break_unit: u8,
 ) -> Vec<BreakToken> {
+    tokenize_paragraph_with_controls(
+        text_chars,
+        char_offsets,
+        char_shapes,
+        styles,
+        english_break_unit,
+        korean_break_unit,
+        &[],
+    )
+}
+
+/// 문단 텍스트를 줄 나눔 토큰으로 분할한다. 인라인 개체를 토큰에 포함하는 버전.
+///
+/// `inline_controls`: (문자 위치, HWPUNIT 폭, own_line) 목록 — 위치 오름차순 정렬 필요.
+/// 개체 위치에서 텍스트 토큰(어절/단어)을 강제로 분할하고 InlineControl 토큰을
+/// 삽입해 fill_lines가 개체 폭만큼 가로 공간을 예약하게 한다.
+fn tokenize_paragraph_with_controls(
+    text_chars: &[char],
+    char_offsets: &[u32],
+    char_shapes: &[CharShapeRef],
+    styles: &ResolvedStyleSet,
+    english_break_unit: u8,
+    korean_break_unit: u8,
+    inline_controls: &[(usize, i32, bool)],
+) -> Vec<BreakToken> {
     let text_len = text_chars.len();
     if text_len == 0 {
         return Vec::new();
@@ -165,8 +203,46 @@ pub(crate) fn tokenize_paragraph(
     let mut tokens = Vec::new();
     let mut i = 0;
     let mut current_lang: usize = 0;
+    let mut ctrls = inline_controls.iter().copied().peekable();
+
+    // 현재 문자 위치 i에 삽입된 인라인 개체 토큰을 방출한다 (문자를 소비하지 않음).
+    // 텍스트 토큰 폰트와 같은 활성 글자 모양 크기를 써서 줄 높이 계산이 흔들리지
+    // 않게 한다 (개체 실제 높이는 reflow의 metrics 패치가 별도로 반영).
+    macro_rules! emit_inline_controls_at {
+        ($pos:expr) => {{
+            let pos = $pos;
+            while let Some(&(cpos, width_hwp, own_line)) = ctrls.peek() {
+                if cpos > pos {
+                    break;
+                }
+                if cpos == pos {
+                    let utf16_pos = if pos < char_offsets.len() {
+                        char_offsets[pos]
+                    } else {
+                        pos as u32
+                    };
+                    let style_id = find_active_char_shape(char_shapes, utf16_pos);
+                    let ts = resolved_to_text_style(styles, style_id, current_lang);
+                    let fs = if ts.font_size > 0.0 {
+                        ts.font_size
+                    } else {
+                        12.0
+                    };
+                    tokens.push(BreakToken::InlineControl {
+                        idx: pos,
+                        width_hwp,
+                        max_font_size: fs,
+                        own_line,
+                    });
+                }
+                // cpos < pos 는 정렬 깨짐/중복 방어 — 건너뛴다
+                ctrls.next();
+            }
+        }};
+    }
 
     while i < text_len {
+        emit_inline_controls_at!(i);
         let ch = text_chars[i];
 
         // 강제 줄 바꿈
@@ -240,6 +316,10 @@ pub(crate) fn tokenize_paragraph(
                     if c == ' ' || c == '\n' || c == '\t' {
                         break;
                     }
+                    // 인라인 개체 위치에서는 어절 토큰을 분할
+                    if ctrls.peek().is_some_and(|&(p, ..)| p == i) {
+                        break;
+                    }
                     // 한글이 아니고 라틴이면 다른 토큰으로 분리
                     if !is_hangul(c) && is_latin(c) {
                         break;
@@ -281,6 +361,7 @@ pub(crate) fn tokenize_paragraph(
                     && is_line_start_forbidden(text_chars[i])
                     && text_chars[i] != '\n'
                     && text_chars[i] != '\t'
+                    && !ctrls.peek().is_some_and(|&(p, ..)| p == i)
                 {
                     let c = text_chars[i];
                     let utf16_pos = if i < char_offsets.len() {
@@ -366,6 +447,10 @@ pub(crate) fn tokenize_paragraph(
                 while i < text_len {
                     let c = text_chars[i];
                     if c == ' ' || c == '\n' || c == '\t' {
+                        break;
+                    }
+                    // 인라인 개체 위치에서는 단어 토큰을 분할
+                    if ctrls.peek().is_some_and(|&(p, ..)| p == i) {
                         break;
                     }
                     if !is_latin(c) && !is_lang_neutral(c) {
@@ -540,6 +625,9 @@ pub(crate) fn tokenize_paragraph(
         }
     }
 
+    // 텍스트 끝에 위치한 인라인 개체 (painter는 문단 끝 TAC를 마지막 줄에 방출)
+    emit_inline_controls_at!(text_len);
+
     tokens
 }
 
@@ -652,6 +740,10 @@ fn fill_lines(
     let mut space_savings_at_last_break = 0i32;
     let mut fs_at_last_break = 0.0f64;
 
+    // 한컴은 HWPUNIT 정수 양자화 시 미세한 반올림 차이를 허용
+    // 12 HU(~0.17mm) 이내의 초과는 줄에 포함 (경험적 허용 오차)
+    const LINE_BREAK_TOLERANCE: i32 = 15;
+
     let eff_w = |first: bool| -> i32 {
         if indent_px > 0.0 {
             if first {
@@ -749,6 +841,107 @@ fn fill_lines(
                 lw += space_hwp;
                 line_space_savings += condense_space_savings_hwp(space_hwp, condense_min_space);
             }
+            BreakToken::InlineControl {
+                idx,
+                width_hwp,
+                max_font_size,
+                ..
+            } => {
+                if *max_font_size > line_max_fs {
+                    line_max_fs = *max_font_size;
+                }
+                // 개체가 현재 줄에 들어가지 않으면 개체 앞에서 줄을 나눈다
+                // (줄 시작 개체는 넘치더라도 그대로 배치 — 분할 불가).
+                // 개체 직후는 break point로 등록하지 않는다: 줄 끝 경계와 개체
+                // 위치가 정확히 겹치면 painter/metrics가 개체를 다음 줄로 판정해
+                // (char_pos_in_line 반열림 규칙) anchor 줄이 어긋나기 때문이다.
+                if lw + width_hwp > eff_w(is_first_line) + LINE_BREAK_TOLERANCE
+                    && *idx > line_start_idx
+                {
+                    if last_break_token_idx.is_some() {
+                        let mut break_char = last_break_char_idx;
+                        let mut next_start = break_char;
+                        while next_start < text_chars.len() && text_chars[next_start] == ' ' {
+                            next_start += 1;
+                        }
+                        // 공백 흡수가 개체 위치를 지나치면 개체가 이전 줄 끝에
+                        // 좌초한다 (painter는 run 끝의 TAC를 현재 줄에 방출) —
+                        // 폭 예약은 다음 줄인데 잉크는 이전 줄에 그려지는 어긋남.
+                        // last_break 를 등록한 토큰이 단일 글자 토큰(kbu=1 한글/
+                        // CJK 글자 나눔 — 글자 경계 분할 허용)이면 한 글자 앞에서
+                        // 다시 나눠, 개체가 다음 줄 텍스트 중간에 놓이고 양 줄이
+                        // 공백으로 시작/끝나지 않게 한다 (경계 공백은 justify 로
+                        // 늘어나 그려져 컬럼을 넘는다). 그 외에는 개체가 새 줄
+                        // 선두가 되도록 되돌린다.
+                        if *idx < next_start {
+                            let step_back = last_break_token_idx.and_then(|bi| match &tokens[bi] {
+                                BreakToken::Text {
+                                    start_idx, end_idx, ..
+                                } if *end_idx == break_char
+                                    && *end_idx - *start_idx == 1
+                                    && *start_idx > line_start_idx =>
+                                {
+                                    Some(*start_idx)
+                                }
+                                _ => None,
+                            });
+                            if let Some(bp) = step_back {
+                                break_char = bp;
+                                next_start = bp;
+                            } else {
+                                next_start = *idx;
+                            }
+                        }
+                        results.push(LineBreakResult {
+                            start_idx: line_start_idx,
+                            end_idx: break_char,
+                            max_font_size: fs_at_last_break,
+                            has_line_break: false,
+                        });
+                        line_start_idx = next_start;
+                        lw = recalc_width_hwp(tokens, ti, next_start);
+                        line_space_savings =
+                            recalc_space_savings_hwp(tokens, ti, next_start, condense_min_space);
+                        lw += width_hwp;
+                        line_max_fs = *max_font_size;
+                        is_first_line = false;
+                        last_break_token_idx = None;
+                    } else {
+                        // 같은 위치에 연속으로 배치된 인라인 개체가 현재 줄에 있으면
+                        // 함께 다음 줄로 본낸다 — painter는 줄 끝 경계에 걸린 개체를
+                        // 다음 줄 선두로 판정하므로, 폭 예약 줄과 그리는 줄을 맞춘다.
+                        let mut carry_w = 0i32;
+                        let mut k = ti;
+                        while k > 0 {
+                            match &tokens[k - 1] {
+                                BreakToken::InlineControl {
+                                    idx: prev_idx,
+                                    width_hwp: prev_w,
+                                    ..
+                                } if *prev_idx == *idx => {
+                                    carry_w += prev_w;
+                                    k -= 1;
+                                }
+                                _ => break,
+                            }
+                        }
+                        results.push(LineBreakResult {
+                            start_idx: line_start_idx,
+                            end_idx: *idx,
+                            max_font_size: line_max_fs,
+                            has_line_break: false,
+                        });
+                        line_start_idx = *idx;
+                        lw = *width_hwp + carry_w;
+                        line_space_savings = 0;
+                        line_max_fs = *max_font_size;
+                        is_first_line = false;
+                        last_break_token_idx = None;
+                    }
+                } else {
+                    lw += width_hwp;
+                }
+            }
             BreakToken::Text {
                 start_idx,
                 end_idx,
@@ -761,7 +954,6 @@ fn fill_lines(
                 }
 
                 let w_hwp = to_hwp(*width);
-
                 // 단일 문자 CJK/한글 토큰의 줄바꿈 가능 지점 처리
                 // 이 글자를 포함한 후 break point 갱신 (end_idx 사용)
                 // → 초과 시 이 글자까지 L0에 포함하고 다음 토큰부터 다음 줄
@@ -787,8 +979,7 @@ fn fill_lines(
                     }
                 }
                 // 한컴은 HWPUNIT 정수 양자화 시 미세한 반올림 차이를 허용
-                // 12 HU(~0.17mm) 이내의 초과는 줄에 포함 (경험적 허용 오차)
-                const LINE_BREAK_TOLERANCE: i32 = 15;
+                // (LINE_BREAK_TOLERANCE — 함수 상단 선언 참조)
                 let effective_width = eff_w(is_first_line);
                 let natural_candidate = lw + w_hwp;
                 let condensed_candidate =
@@ -833,8 +1024,63 @@ fn fill_lines(
                             continue;
                         }
                     }
+                    // [pr_2219] 블록형 인라인 개체(표/그림/도형)만 놓인 줄의 선두
+                    // 토큰이 넘치면 토큰 통째를 다음 줄로 본내고 개체 줄을 빈 텍스트
+                    // 줄로 확정한다. char 분할로 첫 글자를 개체 줄에 억지 배치하면
+                    // 한 char shape 의 단어가 "e"+"fg" 처럼 한 글자 run 으로 조각나
+                    // paint/run 경계가 깨진다. 수식(own_line=false) 줄은 기존 첫 글자
+                    // 고정(pin) 동작을 유지한다 (painter anchor 모호성 회피).
+                    if *start_idx == line_start_idx
+                        && line_hosts_own_line_control(tokens, ti, line_start_idx)
+                    {
+                        results.push(LineBreakResult {
+                            start_idx: line_start_idx,
+                            end_idx: *start_idx, // == line_start_idx — 빈 텍스트 줄 (개체 호스트)
+                            max_font_size: line_max_fs,
+                            has_line_break: false,
+                        });
+                        // line_start_idx 는 유지 — 토큰이 새 줄 선두가 된다.
+                        lw = 0;
+                        line_space_savings = 0;
+                        line_max_fs = *max_font_size;
+                        is_first_line = false;
+                        last_break_token_idx = None;
+                        if w_hwp <= eff_w(false) + LINE_BREAK_TOLERANCE {
+                            lw += w_hwp;
+                        } else {
+                            // 빈 줄에도 넘치는 장문: 새 줄에서 글자 단위 분할.
+                            let cw_hwp: Vec<i32> = char_widths.iter().map(|w| to_hwp(*w)).collect();
+                            let (results_part, remaining_w, remaining_fs) = char_level_break_hwp(
+                                text_chars,
+                                *start_idx,
+                                *end_idx,
+                                &mut line_start_idx,
+                                lw,
+                                line_max_fs,
+                                eff_w(false),
+                                eff_w(false),
+                                false,
+                                &cw_hwp,
+                                false,
+                            );
+                            for r in results_part {
+                                results.push(r);
+                            }
+                            lw = remaining_w;
+                            line_max_fs = remaining_fs;
+                        }
+                        continue;
+                    }
                     // 토큰에 저장된 개별 글자 폭을 HWPUNIT로 변환
                     let cw_hwp: Vec<i32> = char_widths.iter().map(|w| to_hwp(*w)).collect();
+                    // 직전 토큰이 이 줄에 배치된 인라인 개체인 경우, 첫 글자에서 자륵면
+                    // 줄 끝이 개체 위치와 정확히 겹쳐 painter가 개체를 다음 줄로
+                    // 판정한다 (anchor 모호성). 첫 글자는 현재 줄에 고정해 피한다.
+                    let pin_first_char = *start_idx > line_start_idx
+                        && matches!(
+                            ti.checked_sub(1).and_then(|p| tokens.get(p)),
+                            Some(BreakToken::InlineControl { idx, .. }) if *idx == *start_idx
+                        );
                     let (results_part, remaining_w, remaining_fs) = char_level_break_hwp(
                         text_chars,
                         *start_idx,
@@ -846,6 +1092,7 @@ fn fill_lines(
                         eff_w(false),
                         is_first_line,
                         &cw_hwp,
+                        pin_first_char,
                     );
                     for r in results_part {
                         results.push(r);
@@ -870,6 +1117,8 @@ fn fill_lines(
             BreakToken::Space { idx, .. }
             | BreakToken::Tab { idx, .. }
             | BreakToken::LineBreak { idx } => *idx + 1,
+            // 인라인 개체는 문자를 소비하지 않으므로 삽입 위치를 그대로 반환
+            BreakToken::InlineControl { idx, .. } => *idx,
         })
         .unwrap_or(text_chars.len());
 
@@ -894,6 +1143,27 @@ fn fill_lines(
     results
 }
 
+/// 현재 줄에 own_line 인라인 개체(표/그림/도형)가 배치됐는지 판별한다.
+/// 개체 토큰은 문자를 소비하지 않으므로, idx >= line_start 인 개체가
+/// 현재 줄에 놓인 것으로 본다 (개체는 줄 바꿈과 함께 앞으로 이동하므로
+/// 이전 줄에 남은 개체가 현재 line_start 이상의 idx 를 가지는 일은 없다).
+fn line_hosts_own_line_control(
+    tokens: &[BreakToken],
+    current_token_idx: usize,
+    line_start: usize,
+) -> bool {
+    tokens[..current_token_idx].iter().any(|t| {
+        matches!(
+            t,
+            BreakToken::InlineControl {
+                idx,
+                own_line: true,
+                ..
+            } if *idx >= line_start
+        )
+    })
+}
+
 /// 줄 바꿈 지점 이후 토큰의 누적 폭 재계산 (HWPUNIT)
 fn recalc_width_hwp(tokens: &[BreakToken], current_token_idx: usize, new_line_start: usize) -> i32 {
     let mut w = 0i32;
@@ -906,6 +1176,9 @@ fn recalc_width_hwp(tokens: &[BreakToken], current_token_idx: usize, new_line_st
             }
             BreakToken::Space { idx, width, .. } if *idx >= new_line_start => {
                 w += to_hwp(*width);
+            }
+            BreakToken::InlineControl { idx, width_hwp, .. } if *idx >= new_line_start => {
+                w += width_hwp;
             }
             _ => {}
         }
@@ -939,6 +1212,8 @@ fn recalc_space_savings_hwp(
 
 /// 긴 단어 폴백: 글자 단위 분할 (HWPUNIT)
 /// char_widths_hwp: 토큰 내 각 글자의 HWPUNIT 폭 (None이면 휴리스틱)
+/// pin_first_char: true이면 첫 글자는 줄이 넘쳐도 현재 줄에 고정한다
+/// (직전 인라인 개체와의 anchor 모호성 회피 — fill_lines 호출부 주석 참조)
 fn char_level_break_hwp(
     text_chars: &[char],
     token_start: usize,
@@ -950,6 +1225,7 @@ fn char_level_break_hwp(
     normal_w: i32,
     mut is_first_line: bool,
     char_widths_hwp: &[i32], // 토큰 내 글자별 HWPUNIT 폭
+    pin_first_char: bool,
 ) -> (Vec<LineBreakResult>, i32, f64) {
     let mut results = Vec::new();
     let mut current_w = if is_first_line {
@@ -972,7 +1248,7 @@ fn char_level_break_hwp(
             to_hwp(char_w_px)
         };
 
-        if lw + char_w > current_w && ci > *line_start_idx {
+        if lw + char_w > current_w && ci > *line_start_idx && !(pin_first_char && rel_idx == 0) {
             results.push(LineBreakResult {
                 start_idx: *line_start_idx,
                 end_idx: ci,
@@ -1191,6 +1467,626 @@ mod inline_equation_metric_tests {
     }
 }
 
+#[cfg(test)]
+mod inline_equation_15pt_wrap_tests {
+    //! 회귀: 에이전트 삽입 인라인 수식의 줄넘침 (footnote-01.hwp e2e 결함 보고).
+    //!
+    //! 상속된 15pt(20px) 한글 문단에서 reflow 가 한글을 10pt 기본 서식(한글 ≈12.9~13.3px/char)으로
+    //! 잘못 측정하면 수식 폭 예약이 줄 끝에서 어긋나 수식 잉크가 컬럼 밖으로 나간다.
+    //! ① 토큰화가 각 위치의 유효 char shape(15pt)으로 측정하는지, ② 넓은 수식이
+    //! 삽입돼도 모든 줄이 컬럼 안에 들어오는지를 고정한다.
+    use super::*;
+    use crate::model::control::Equation;
+    use crate::model::shape::CommonObjAttr;
+    use crate::renderer::style_resolver::{ResolvedCharStyle, ResolvedParaStyle, ResolvedStyleSet};
+
+    /// footnote-01.hwp 구조 재현: id 0 = 기본 10pt(13.33px), id 1 = 본문 15pt(20px).
+    fn styles_10pt_default_15pt_body() -> ResolvedStyleSet {
+        ResolvedStyleSet {
+            hwp3_variant: false,
+            char_styles: vec![
+                ResolvedCharStyle {
+                    font_family: "함초롬바탕".to_string(),
+                    font_size: 40.0 / 3.0, // 10pt
+                    ratio: 1.0,
+                    ..Default::default()
+                },
+                ResolvedCharStyle {
+                    font_family: "한컴바탕".to_string(),
+                    font_size: 20.0, // 15pt
+                    ratio: 1.0,
+                    ..Default::default()
+                },
+            ],
+            para_styles: vec![ResolvedParaStyle::default()],
+            ..Default::default()
+        }
+    }
+
+    /// e2e 채움 문단 (76자) — agent-edit-loop.test.mjs 의 FILLER 와 동일.
+    const FILLER: &str = "에이전트 줄바꿈 검증용 채움 문단입니다 이 문장은 첫 줄을 가득 채우고 다음 줄로 넘어가야 하므로 일부러 아주 길게 작성한 문장입니다 끝";
+
+    /// footnote-01.hwp 본문 컬럼 폭 (48190 HWP = 642.53px).
+    const COLUMN_PX: f64 = 642.5333333333333;
+
+    fn tac_equation(width_hwp: u32, height_hwp: u32) -> Control {
+        Control::Equation(Box::new(Equation {
+            common: CommonObjAttr {
+                treat_as_char: true,
+                width: width_hwp,
+                height: height_hwp,
+                ..Default::default()
+            },
+            script: "x = {-b +- sqrt {b^2 - 4ac}} over {2a}".to_string(),
+            font_size: 1500,
+            ..Default::default()
+        }))
+    }
+
+    /// 각 줄의 잉크 폭(px): canonical 측정(estimate_text_width)으로 줄 텍스트를 합산하고,
+    /// 그 줄에 anchor 된 인라인 개체의 예약 폭을 더한다.
+    fn line_ink_widths_px(para: &Paragraph, styles: &ResolvedStyleSet) -> Vec<f64> {
+        let text_chars: Vec<char> = para.text.chars().collect();
+        let ctrl_positions = para.control_text_positions();
+        para.line_segs
+            .iter()
+            .enumerate()
+            .map(|(li, seg)| {
+                let end_u16 = para
+                    .line_segs
+                    .get(li + 1)
+                    .map(|s| s.text_start)
+                    .unwrap_or(u32::MAX);
+                let start_ci = para
+                    .char_offsets
+                    .iter()
+                    .position(|&o| o >= seg.text_start)
+                    .unwrap_or(0);
+                let end_ci = para
+                    .char_offsets
+                    .iter()
+                    .position(|&o| o >= end_u16)
+                    .unwrap_or(text_chars.len());
+                let mut w = 0.0f64;
+                let mut lang = 0usize;
+                for ci in start_ci..end_ci.min(text_chars.len()) {
+                    let c = text_chars[ci];
+                    if !is_lang_neutral(c) {
+                        lang = detect_lang_category(c);
+                    }
+                    let sid = find_active_char_shape(&para.char_shapes, para.char_offsets[ci]);
+                    let ts = resolved_to_text_style(styles, sid, lang);
+                    w += estimate_text_width(&c.to_string(), &ts);
+                }
+                for (k, &pos) in ctrl_positions.iter().enumerate() {
+                    if pos >= start_ci && pos < end_ci.max(start_ci + 1) {
+                        if let Some(m) = inline_control_metrics_hwp(&para.controls[k]) {
+                            w += m.width as f64 / 75.0;
+                        }
+                    }
+                }
+                w
+            })
+            .collect()
+    }
+
+    /// 문자 위치(인라인 개체 anchor)를 포함하는 줄의 시작 문자 인덱스.
+    fn line_start_char_of(para: &Paragraph, char_pos: usize) -> Option<usize> {
+        let mut starts: Vec<usize> = para
+            .line_segs
+            .iter()
+            .map(|seg| {
+                para.char_offsets
+                    .iter()
+                    .position(|&o| o >= seg.text_start)
+                    .unwrap_or(usize::MAX)
+            })
+            .collect();
+        starts.push(usize::MAX);
+        starts.windows(2).find_map(|w| {
+            if char_pos >= w[0] && char_pos < w[1] {
+                Some(w[0])
+            } else {
+                None
+            }
+        })
+    }
+
+    /// 15pt char shape 를 참조하는 한글 토큰은 글자당 20px 로 측정되어야 한다.
+    /// 기본 10pt 서식으로 잘못 해석되면 13.33px/char 가 된다 (보고된 오측정치).
+    #[test]
+    fn tokenize_measures_hangul_with_effective_15pt_shape_not_default_10pt() {
+        let styles = styles_10pt_default_15pt_body();
+        let text: Vec<char> = "에이전트 줄바꿈 검증".chars().collect();
+        let offsets: Vec<u32> = (0..text.len() as u32).collect();
+
+        for (shape_id, expect_w) in [(1u32, 80.0f64), (0u32, 51.733333)] {
+            let shapes = vec![CharShapeRef {
+                start_pos: 0,
+                char_shape_id: shape_id,
+            }];
+            let tokens = tokenize_paragraph(&text, &offsets, &shapes, &styles, 0, 0);
+            let width = tokens
+                .iter()
+                .find_map(|t| match t {
+                    BreakToken::Text {
+                        start_idx,
+                        end_idx,
+                        width,
+                        ..
+                    } if *start_idx == 0 && *end_idx == 4 => Some(*width),
+                    _ => None,
+                })
+                .expect("어절 토큰 '에이전트' 가 있어야 한다");
+            assert!(
+                (width - expect_w).abs() < 0.5,
+                "char_shape_id={} → '에이전트' 폭 {:.2}px (기대 {:.2}px)",
+                shape_id,
+                width,
+                expect_w
+            );
+        }
+    }
+
+    /// 15pt 한글 문단 첫 줄 끝에 컬럼 남은 폭보다 넓은 인라인 수식을 삽입하면
+    /// 수식이 다음 줄로 밀리고, 모든 줄의 잉크 폭이 컬럼 안에 들어와야 한다.
+    #[test]
+    fn reflow_wraps_wide_equation_inside_column_15pt_hangul() {
+        let styles = styles_10pt_default_15pt_body();
+        let n_chars = FILLER.chars().count();
+        let eq_pos = 34usize; // 첫 줄 끝(lineEnd=36) 근처 — e2e 삽입점과 동일
+        let char_offsets: Vec<u32> = (0..n_chars)
+            .map(|i| if i < eq_pos { i } else { i + 8 })
+            .map(|v| v as u32)
+            .collect();
+        let mut para = Paragraph {
+            text: FILLER.to_string(),
+            char_offsets,
+            char_shapes: vec![CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 1,
+            }],
+            controls: vec![tac_equation(13380, 5000)],
+            line_segs: vec![LineSeg::default()],
+            ..Default::default()
+        };
+        para.char_count = (n_chars + 8 + 1) as u32;
+
+        reflow_line_segs(&mut para, COLUMN_PX, &styles, 96.0);
+
+        // 수식(178.4px)이 첫 줄 남은 폭(~52px)보다 넓어 자기 줄로 밀려난다:
+        // anchor(문자 34)가 줄 시작(흡수된 공백 1자 이내)에 놓인다.
+        assert_eq!(
+            para.line_segs.len(),
+            3,
+            "수식 예약으로 3줄이 되어야 한다 (line_segs={:?})",
+            para.line_segs
+                .iter()
+                .map(|ls| ls.text_start)
+                .collect::<Vec<_>>()
+        );
+        let anchor_line_start =
+            line_start_char_of(&para, eq_pos).expect("수식 anchor 를 포함하는 줄이 있어야 한다");
+        assert!(
+            anchor_line_start >= eq_pos - 2 && anchor_line_start <= eq_pos,
+            "수식 anchor 가 줄 시작 근처에 와야 한다: line_start={} anchor={} (line_segs={:?})",
+            anchor_line_start,
+            eq_pos,
+            para.line_segs
+                .iter()
+                .map(|ls| ls.text_start)
+                .collect::<Vec<_>>()
+        );
+        // 모든 줄의 잉크 폭이 컬럼 안.
+        for (li, w) in line_ink_widths_px(&para, &styles).iter().enumerate() {
+            assert!(
+                *w <= COLUMN_PX + 0.2,
+                "line {} 잉크 폭 {:.1}px 가 컬럼 {:.1}px 를 넘는다",
+                li,
+                w,
+                COLUMN_PX
+            );
+        }
+    }
+
+    /// 실물 문서 회귀: footnote-01.hwp 로드 → 에이전트 편집 시퀀스(채움 문단 삽입
+    /// → 서식 편집 → 쪽 나눔 → 수식 삽입)를 그대로 재현해, 수식이 든 문단의
+    /// 모든 줄이 컬럼 안에 들어오는지 검증한다.
+    #[test]
+    fn footnote01_agent_equation_insert_stays_inside_column() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/footnote-01.hwp");
+        if !path.exists() {
+            eprintln!("테스트 파일 없음: {} — 건너뜀", path.display());
+            return;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let mut core = crate::document_core::DocumentCore::from_bytes(&bytes).unwrap();
+
+        // e2e performInsert 재현: 마지막 문단 끝에서 줄 단위 insertText + splitParagraph.
+        let seed_base = core.document().sections[0].paragraphs.len();
+        let seed_len = core.document().sections[0].paragraphs[seed_base - 1]
+            .text
+            .chars()
+            .count();
+        core.insert_text_native(0, seed_base - 1, seed_len, " ")
+            .unwrap();
+        let lines = [
+            "",
+            FILLER,
+            "첫째 에이전트 목록 항목입니다",
+            "둘째 항목의 원본 텍스트 구간입니다",
+            "셋째 에이전트 목록 항목입니다",
+        ];
+        let mut cur_para = seed_base - 1;
+        let mut cur_off = seed_len + 1;
+        for (li, line) in lines.iter().enumerate() {
+            if li > 0 {
+                core.split_paragraph_native(0, cur_para, cur_off, None)
+                    .unwrap();
+                cur_para += 1;
+                cur_off = 0;
+            }
+            if !line.is_empty() {
+                core.insert_text_native(0, cur_para, cur_off, line).unwrap();
+                cur_off += line.chars().count();
+            }
+        }
+        let filler_p = seed_base;
+        let l2_p = seed_base + 2;
+
+        // e2e 중간 편집: L2 볼드(새 char shape 추가) + 채움 문단 pageBreakBefore.
+        core.apply_char_format_native(0, l2_p, 6, 14, "{\"bold\":true}")
+            .unwrap();
+        core.apply_para_format_native(0, filler_p, "{\"pageBreakBefore\":true}")
+            .unwrap();
+
+        // 상속 서식이 15pt(20px)인지 먼저 고정한다.
+        let filler = &core.document().sections[0].paragraphs[filler_p];
+        let shape_id = filler
+            .char_shapes
+            .first()
+            .map(|cs| cs.char_shape_id)
+            .unwrap();
+        let font_size = core.styles.char_styles[shape_id as usize].font_size;
+        assert_eq!(font_size, 20.0, "채움 문단 상속 서식은 15pt(20px)여야 한다");
+
+        // 첫 줄 끝 근처(lineEnd - 2)에 15pt 수식 삽입.
+        let first_line_end_u16 = filler
+            .line_segs
+            .get(1)
+            .map(|ls| ls.text_start)
+            .unwrap_or(u32::MAX);
+        let line_end = filler
+            .char_offsets
+            .iter()
+            .position(|&o| o >= first_line_end_u16)
+            .unwrap_or(filler.char_offsets.len())
+            .saturating_sub(1);
+        core.insert_equation_native(
+            0,
+            filler_p,
+            line_end - 2,
+            "x = {-b +- sqrt {b^2 - 4ac}} over {2a}",
+            1500,
+            0,
+        )
+        .unwrap();
+
+        // 컬럼 폭: insert_equation_native 의 reflow 와 동일 산식.
+        let (column_px, eq_pos) = {
+            let core_styles = &core.styles;
+            let section = &core.document().sections[0];
+            let page_def = &section.section_def.page_def;
+            let text_width =
+                page_def.width as i32 - page_def.margin_left as i32 - page_def.margin_right as i32;
+            let para = &section.paragraphs[filler_p];
+            let para_style = core_styles.para_styles.get(para.para_shape_id as usize);
+            let ml = para_style.map(|s| s.margin_left).unwrap_or(0.0);
+            let mr = para_style.map(|s| s.margin_right).unwrap_or(0.0);
+            let col = (crate::renderer::hwpunit_to_px(text_width, 96.0) - ml - mr).max(0.0);
+            let pos = para.control_text_positions()[0];
+            (col, pos)
+        };
+
+        let para = &core.document().sections[0].paragraphs[filler_p];
+        let anchor_line_start =
+            line_start_char_of(para, eq_pos).expect("수식 anchor 를 포함하는 줄이 있어야 한다");
+        assert!(
+            anchor_line_start >= eq_pos - 2 && anchor_line_start <= eq_pos,
+            "수식이 자기 줄 시작으로 밀려야 한다: line_start={} anchor={} (line_segs={:?})",
+            anchor_line_start,
+            eq_pos,
+            para.line_segs
+                .iter()
+                .map(|ls| ls.text_start)
+                .collect::<Vec<_>>()
+        );
+        for (li, w) in line_ink_widths_px(para, &core.styles).iter().enumerate() {
+            assert!(
+                *w <= column_px + 0.5,
+                "line {} 잉크 폭 {:.1}px 가 컬럼 {:.1}px 를 넘는다",
+                li,
+                w,
+                column_px
+            );
+        }
+    }
+
+    /// 브라우저 e2e(agent-edit-loop f절)와 동일 경로의 실물 회귀.
+    ///
+    /// getCursorRect 로 찾은 첫 줄 끝 두 글자 앞에 15pt 수식을 삽입한다 — 이
+    /// 삽입점에서는 수식 anchor 가 공백과 같은 문자 위치에 놓인다. 공백 흡수형
+    /// 줄나눔이 개체를 이전 줄 끝에 좌초시켜(폭 예약 줄 ≠ painter 방출 줄)
+    /// 수식 잉크가 컬럼 밖으로 나가던 결함(eqRight=824 > rightEdge=718.1)을
+    /// 고정한다. anchor 가 줄 경계에 걸리는 이 시나리오만 잡는다 — 단순
+    /// line_segs 기반 삽입점(어절 경계)으로는 재현되지 않았다.
+    #[test]
+    fn footnote01_cursor_probe_equation_insert_matches_browser_layout() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/footnote-01.hwp");
+        if !path.exists() {
+            eprintln!("테스트 파일 없음: {} — 건너뜀", path.display());
+            return;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let mut doc = crate::wasm_api::HwpDocument::from_bytes(&bytes).unwrap();
+        doc.convert_to_editable().unwrap();
+
+        // TS performInsert 동형 시드 삽입 (마지막 문단 뒤에 4개 문단)
+        let seed_base = doc.document().sections[0].paragraphs.len();
+        let seed_len = doc.document().sections[0].paragraphs[seed_base - 1]
+            .text
+            .chars()
+            .count();
+        doc.insert_text_native(0, seed_base - 1, seed_len, " ")
+            .unwrap();
+        let lines = [
+            "",
+            FILLER,
+            "첫째 에이전트 목록 항목입니다",
+            "둘째 항목의 원본 텍스트 구간입니다",
+            "셋째 에이전트 목록 항목입니다",
+        ];
+        let mut cur_para = seed_base - 1;
+        let mut cur_off = seed_len + 1;
+        for (li, line) in lines.iter().enumerate() {
+            if li > 0 {
+                doc.split_paragraph_native(0, cur_para, cur_off, None)
+                    .unwrap();
+                cur_para += 1;
+                cur_off = 0;
+            }
+            if !line.is_empty() {
+                doc.insert_text_native(0, cur_para, cur_off, line).unwrap();
+                cur_off += line.chars().count();
+            }
+        }
+        let filler_p = seed_base;
+        doc.apply_para_format_native(0, filler_p, "{\"pageBreakBefore\":true}")
+            .unwrap();
+
+        // e2e probe: getCursorRect y 가 처음 바뀌는 지점 = 첫 줄 끝
+        let len = doc.document().sections[0].paragraphs[filler_p]
+            .text
+            .chars()
+            .count();
+        let r0 = doc.get_cursor_rect(0, filler_p as u32, 0).unwrap();
+        let r0y = json_f64(&r0, "y");
+        let page = json_f64(&r0, "pageIndex");
+        let mut line_end = len;
+        for o in 1..=len {
+            let r = doc.get_cursor_rect(0, filler_p as u32, o as u32).unwrap();
+            if json_f64(&r, "pageIndex") != page || json_f64(&r, "y") > r0y + 1.0 {
+                line_end = o - 1;
+                break;
+            }
+        }
+        let eq_offset = line_end - 2;
+        doc.insert_equation_native(
+            0,
+            filler_p,
+            eq_offset,
+            "x = {-b +- sqrt {b^2 - 4ac}} over {2a}",
+            1500,
+            0,
+        )
+        .unwrap();
+
+        let page_def = &doc.document().sections[0].section_def.page_def;
+        let margin_left = crate::renderer::hwpunit_to_px(page_def.margin_left as i32, 96.0);
+        let right_edge = crate::renderer::hwpunit_to_px(
+            page_def.width as i32 - page_def.margin_right as i32,
+            96.0,
+        );
+
+        // 수식 bbox (painter 가 실제 그린 위치)
+        let layout = doc.get_page_control_layout(page as u32).unwrap();
+        let (eq_x, eq_w) = find_equation_bbox(&layout, filler_p).expect("수식 bbox 가 있어야 한다");
+        assert!(
+            eq_x <= margin_left + 40.0,
+            "남은 폭보다 넓은 수식이 다음 줄로 밀려야 함: eq.x={:.1} marginLeft={:.1}",
+            eq_x,
+            margin_left
+        );
+        assert!(
+            eq_x + eq_w <= right_edge + 4.0,
+            "수식 bbox 가 열 안이어야 함: eqRight={:.1} rightEdge={:.1}",
+            eq_x + eq_w,
+            right_edge
+        );
+
+        // 어떤 커서 위치도 열 오른쪽을 넘지 않아야 한다 (e2e caretOk)
+        let mut max_x = 0.0f64;
+        for o in 0..=(len + 10) {
+            if let Ok(r) = doc.get_cursor_rect(0, filler_p as u32, o as u32) {
+                let x = json_f64(&r, "x");
+                if x > max_x {
+                    max_x = x;
+                }
+            }
+        }
+        assert!(
+            max_x <= right_edge + 4.0,
+            "수식 문단 어떤 런도 열 오른쪽을 넘지 않아야 함: maxX={:.1} rightEdge={:.1}",
+            max_x,
+            right_edge
+        );
+    }
+
+    fn json_f64(json: &str, key: &str) -> f64 {
+        let pat = format!("\"{}\":", key);
+        let Some(i) = json.find(&pat) else {
+            return -1.0;
+        };
+        let rest = &json[i + pat.len()..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+            .unwrap_or(rest.len());
+        rest[..end].parse().unwrap_or(-1.0)
+    }
+
+    fn find_equation_bbox(layout: &str, para_idx: usize) -> Option<(f64, f64)> {
+        let marker = format!("\"paraIdx\":{}", para_idx);
+        let mut rest = layout;
+        while let Some(i) = rest.find("\"type\":\"equation\"") {
+            let start = rest[..i].rfind('{')?;
+            let end = rest[i..].find('}').map(|e| i + e)?;
+            let obj = &rest[start..end];
+            if obj.contains(&marker) {
+                return Some((json_f64(obj, "x"), json_f64(obj, "w")));
+            }
+            rest = &rest[end..];
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod inline_control_wrap_tests {
+    use super::*;
+    use crate::model::control::Equation;
+    use crate::model::shape::CommonObjAttr;
+    use crate::renderer::style_resolver::{ResolvedCharStyle, ResolvedParaStyle, ResolvedStyleSet};
+
+    fn styles_16px() -> ResolvedStyleSet {
+        ResolvedStyleSet {
+            hwp3_variant: false,
+            char_styles: vec![ResolvedCharStyle {
+                font_size: 16.0,
+                ratio: 1.0,
+                ..Default::default()
+            }],
+            para_styles: vec![ResolvedParaStyle::default()],
+            ..Default::default()
+        }
+    }
+
+    fn tac_equation(width_hwp: u32, height_hwp: u32) -> Control {
+        Control::Equation(Box::new(Equation {
+            common: CommonObjAttr {
+                treat_as_char: true,
+                width: width_hwp,
+                height: height_hwp,
+                ..Default::default()
+            },
+            script: "x".to_string(),
+            font_size: 1000,
+            ..Default::default()
+        }))
+    }
+
+    /// 줄이 거의 찬 텍스트에 넓은 인라인 수식이 삽입되면 수식 폭을 예약해
+    /// 뒤따르는 텍스트가 다음 줄로 밀려나야 한다 (컬럼 밖 overflow 방지).
+    #[test]
+    fn reflow_reserves_inline_equation_width_and_wraps_trailing_text() {
+        let styles = styles_16px();
+        // 라틴 19자, 문자 위치 10 앞에 8 code-unit 컨트롤 갭 (수식 anchor)
+        let mut para = Paragraph {
+            text: "aaaa bbbb cccc dddd".to_string(),
+            char_offsets: (0..19u32).map(|i| if i < 10 { i } else { i + 8 }).collect(),
+            char_shapes: vec![CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 0,
+            }],
+            controls: vec![tac_equation(4000, 5000)],
+            line_segs: vec![LineSeg::default()],
+            ..Default::default()
+        };
+        para.char_count = 28;
+
+        // 컬럼 100px(7500 HWP): 단어 32px(2400 HWP), 수식 4000 HWP.
+        // 폭 예약이 없으면 2줄 [0,9),[10,19) — 2번째 줄이 수식+텍스트 8800+ HWP로
+        // 컬럼을 넘는다. 예약이 있으면 3줄로 나뉘고 각 줄이 컬럼 안에 들어간다.
+        reflow_line_segs(&mut para, 100.0, &styles, 96.0);
+
+        assert_eq!(para.line_segs.len(), 3);
+        assert_eq!(para.line_segs[0].text_start, 0);
+        // 2번째 줄은 수식 anchor(문자 10 → UTF-16 18)에서 시작
+        assert_eq!(para.line_segs[1].text_start, 18);
+        // 3번째 줄은 "dddd"(문자 15 → UTF-16 23)
+        assert_eq!(para.line_segs[2].text_start, 23);
+        // 수식이 놓인 2번째 줄만 수식 높이(5000 HWP)로 커진다
+        assert!(para.line_segs[1].line_height >= 5000);
+        assert_eq!(para.line_segs[0].line_height, 1200);
+        assert_eq!(para.line_segs[2].line_height, 1200);
+    }
+
+    /// 인라인 수식이 줄에 들어가면 불필요한 줄 나눔이 생기지 않는다.
+    #[test]
+    fn reflow_keeps_fitting_inline_equation_on_single_line() {
+        let styles = styles_16px();
+        // "aaaa bbbb", 문자 위치 5 앞에 컨트롤 갭
+        let mut para = Paragraph {
+            text: "aaaa bbbb".to_string(),
+            char_offsets: (0..9u32).map(|i| if i < 5 { i } else { i + 8 }).collect(),
+            char_shapes: vec![CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 0,
+            }],
+            controls: vec![tac_equation(1000, 1200)],
+            line_segs: vec![LineSeg::default()],
+            ..Default::default()
+        };
+        para.char_count = 18;
+
+        // 2400 + 공백 + 1000 + 2400 = 5800+ HWP < 7500 HWP → 1줄 유지
+        reflow_line_segs(&mut para, 100.0, &styles, 96.0);
+        assert_eq!(para.line_segs.len(), 1);
+    }
+
+    /// 단어 중간(straddle)에 삽입된 수식도 토큰을 분할해 폭을 예약한다.
+    /// break point(공백)가 없는 줄에서는 수식 바로 뒤 글자에서 잘리지 않고
+    /// (painter anchor 모호성) 그 다음 글자에서 줄이 나뉜다.
+    #[test]
+    fn reflow_splits_word_token_at_inline_equation() {
+        let styles = styles_16px();
+        // 라틴 10자 단어, 문자 위치 5 앞에 컨트롤 갭
+        let mut para = Paragraph {
+            text: "aaaaaaaaaa".to_string(),
+            char_offsets: (0..10u32).map(|i| if i < 5 { i } else { i + 8 }).collect(),
+            char_shapes: vec![CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 0,
+            }],
+            controls: vec![tac_equation(4000, 5000)],
+            line_segs: vec![LineSeg::default()],
+            ..Default::default()
+        };
+        para.char_count = 19;
+
+        // 3000(5글자) + 4000(수식) = 7000 ≤ 7500이라 수식은 1번째 줄에 배치.
+        // 뒤 5글자(3000)는 넘치므로 글자 단위 분할 — 단 첫 글자는 수식과 같은 줄에
+        // 고정되어 [0,6),[6,10) 으로 나뉜다 ([0,5),[5,10) 가 아님).
+        reflow_line_segs(&mut para, 100.0, &styles, 96.0);
+
+        assert_eq!(para.line_segs.len(), 2);
+        // 2번째 줄은 문자 6 (UTF-16 6+8=14)에서 시작
+        assert_eq!(para.line_segs[1].text_start, 14);
+        // 수식 anchor(위치 5)는 1번째 줄 [0,6) 안 → 1번째 줄만 높이 보정
+        assert!(para.line_segs[0].line_height >= 5000);
+        assert_eq!(para.line_segs[1].line_height, 1200);
+    }
+}
+
 pub(crate) fn reflow_line_segs(
     para: &mut Paragraph,
     available_width_px: f64,
@@ -1340,14 +2236,42 @@ pub(crate) fn reflow_line_segs(
     let condense_min_space = para_style.map(|s| s.condense_min_space).unwrap_or(0);
     let tab_width = para_style.map(|s| s.default_tab_width).unwrap_or(0.0);
 
+    // 인라인(treat_as_char) 개체를 줄 나눔 토큰에 반영한다 — 개체 폭을 예약하지
+    // 않으면 개체 삽입 편집 후 재배치 시 뒤따르는 텍스트가 컬럼 밖으로 밀려난다.
+    // Form은 인라인 흐름 개체가 아니므로 제외한다.
+    // own_line: 표/그림/도형은 한컴이 전용 줄을 부여하는 블록형 개체로 취급한다
+    // (수식은 텍스트 흐름 개체). 블록형 개체 줄에서 넘치는 후행 토큰은 통째로
+    // 다음 줄로 본내 한 글자 run 조각남을 피한다 (pr_2219).
+    let control_positions = para.control_text_positions();
+    let mut inline_controls: Vec<(usize, i32, bool)> = para
+        .controls
+        .iter()
+        .enumerate()
+        .filter(|(_, ctrl)| !matches!(ctrl, Control::Form(_)))
+        .filter_map(|(ci, ctrl)| {
+            inline_control_metrics_hwp(ctrl)
+                .map(|m| (ci, m.width, !matches!(ctrl, Control::Equation(_))))
+        })
+        .map(|(ci, width, own_line)| {
+            let pos = control_positions
+                .get(ci)
+                .copied()
+                .unwrap_or(text_len)
+                .min(text_len);
+            (pos, width, own_line)
+        })
+        .collect();
+    inline_controls.sort_by_key(|&(pos, _, _)| pos);
+
     // 토큰화 → 줄 채움 → LineSeg 생성
-    let tokens = tokenize_paragraph(
+    let tokens = tokenize_paragraph_with_controls(
         &text_chars,
         &para.char_offsets,
         &para.char_shapes,
         styles,
         english_break_unit,
         korean_break_unit,
+        &inline_controls,
     );
     let line_breaks = fill_lines(
         &tokens,

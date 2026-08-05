@@ -330,6 +330,80 @@ fn test_delete_text_empty_range() {
     assert_eq!(para.char_count, 2);
 }
 
+#[test]
+fn test_delete_text_drops_clamped_zero_length_char_shapes() {
+    // 삭제 범위 안의 run 경계는 삭제 시작으로 클램핑된다 — 이때 길이 0 엔트리(같은
+    // start_pos 연속)가 생기며, 직렬화 시 빈 run이 되므로 제거돼야 한다.
+    // 같은 위치에서는 뒤 엔트리가 유효하다(char_shape_id_at 규칙).
+    let mut para = Paragraph {
+        text: "ABCD".to_string(),
+        char_count: 4,
+        char_offsets: vec![0, 1, 2, 3],
+        char_shapes: vec![
+            CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 1,
+            },
+            CharShapeRef {
+                start_pos: 1,
+                char_shape_id: 2,
+            },
+            CharShapeRef {
+                start_pos: 2,
+                char_shape_id: 3,
+            },
+        ],
+        ..Default::default()
+    };
+    para.delete_text_at(1, 2); // 'B','C' 삭제 → "AD"
+    assert_eq!(para.text, "AD");
+    // 'B'의 shape(2)은 구간 전체가 삭제돼 길이 0 → 제거. 'D'의 shape(3)만 남는다.
+    let runs: Vec<(u32, u32)> = para
+        .char_shapes
+        .iter()
+        .map(|cs| (cs.start_pos, cs.char_shape_id))
+        .collect();
+    assert_eq!(runs, vec![(0, 1), (1, 3)]);
+    assert_eq!(para.char_shape_id_at(0), Some(1));
+    assert_eq!(para.char_shape_id_at(1), Some(3));
+}
+
+#[test]
+fn test_delete_text_merges_adjacent_same_id_after_clamp() {
+    // 클램핑으로 같은 ID가 인접해지면 하나로 병합한다.
+    // runs: [0:1][1:2][3:1] — 'B','C' 삭제 시 (3:1)이 pos 1로 시프트되어
+    // [(0:1),(1:2),(1:1)] → 길이 0인 (1:2) 제거 → [(0:1),(1:1)] → 동일 ID 병합 → [(0:1)]
+    let mut para = Paragraph {
+        text: "ABCD".to_string(),
+        char_count: 4,
+        char_offsets: vec![0, 1, 2, 3],
+        char_shapes: vec![
+            CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 1,
+            },
+            CharShapeRef {
+                start_pos: 1,
+                char_shape_id: 2,
+            },
+            CharShapeRef {
+                start_pos: 3,
+                char_shape_id: 1,
+            },
+        ],
+        ..Default::default()
+    };
+    para.delete_text_at(1, 2); // "AD"
+    let runs: Vec<(u32, u32)> = para
+        .char_shapes
+        .iter()
+        .map(|cs| (cs.start_pos, cs.char_shape_id))
+        .collect();
+    assert_eq!(runs, vec![(0, 1)]);
+    assert_eq!(para.char_shape_id_at(0), Some(1));
+    assert_eq!(para.char_shape_id_at(1), Some(1));
+}
+
 // === split_at 테스트 ===
 
 #[test]
@@ -554,6 +628,135 @@ fn test_merge_from_different_styles() {
     assert_eq!(para1.char_shapes[0].char_shape_id, 1);
     assert_eq!(para1.char_shapes[1].start_pos, 2);
     assert_eq!(para1.char_shapes[1].char_shape_id, 2);
+}
+
+#[test]
+fn test_merge_from_merges_same_style_boundary() {
+    // 같은 스타일의 문단 둘을 병합하면 경계에 위치만 다른 중복 엔트리가 남지 않아야 한다
+    // (split+merge 왕복에서 경계가 누적되던 문제).
+    let mut para1 = Paragraph {
+        text: "안녕".to_string(),
+        char_count: 3,
+        char_offsets: vec![0, 1],
+        char_shapes: vec![CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 1,
+        }],
+        line_segs: vec![LineSeg {
+            text_start: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let para2 = Paragraph {
+        text: "하세요".to_string(),
+        char_count: 4,
+        char_offsets: vec![0, 1, 2],
+        char_shapes: vec![CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 1,
+        }],
+        line_segs: vec![LineSeg {
+            text_start: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    para1.merge_from(&para2);
+
+    assert_eq!(para1.text, "안녕하세요");
+    let runs: Vec<(u32, u32)> = para1
+        .char_shapes
+        .iter()
+        .map(|cs| (cs.start_pos, cs.char_shape_id))
+        .collect();
+    assert_eq!(runs, vec![(0, 1)]);
+}
+
+#[test]
+fn test_merge_from_drops_zero_length_boundary_entry() {
+    // 앞 문단 끝의 길이 0 엔트리(삭제 클램핑 잔재)와 뒤 문단 첫 엔트리가 같은 위치에서
+    // 만나면 뒤의 것이 유효하다 — 앞 문단의 trailing 엔트리는 어떤 문자도 덮지 못한다.
+    let mut para1 = Paragraph {
+        text: "AA".to_string(),
+        char_count: 3,
+        char_offsets: vec![0, 1],
+        char_shapes: vec![
+            CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 1,
+            },
+            // 텍스트 끝(pos 2)의 길이 0 trailing 엔트리
+            CharShapeRef {
+                start_pos: 2,
+                char_shape_id: 2,
+            },
+        ],
+        line_segs: vec![LineSeg {
+            text_start: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let para2 = Paragraph {
+        text: "BB".to_string(),
+        char_count: 3,
+        char_offsets: vec![0, 1],
+        char_shapes: vec![CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 3,
+        }],
+        line_segs: vec![LineSeg {
+            text_start: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    para1.merge_from(&para2);
+
+    assert_eq!(para1.text, "AABB");
+    let runs: Vec<(u32, u32)> = para1
+        .char_shapes
+        .iter()
+        .map(|cs| (cs.start_pos, cs.char_shape_id))
+        .collect();
+    assert_eq!(runs, vec![(0, 1), (2, 3)]);
+    assert_eq!(para1.char_shape_id_at(1), Some(1));
+    assert_eq!(para1.char_shape_id_at(2), Some(3));
+}
+
+#[test]
+fn test_split_merge_roundtrip_no_redundant_boundary() {
+    // 단일 run 문단을 split → merge 왕복필 때 char_shapes가 원본과 동일해야 한다.
+    let mut para = Paragraph {
+        text: "안녕하세요".to_string(),
+        char_count: 6,
+        char_offsets: vec![0, 1, 2, 3, 4],
+        char_shapes: vec![CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 1,
+        }],
+        line_segs: vec![LineSeg {
+            text_start: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let new_para = para.split_at(2);
+    para.merge_from(&new_para);
+
+    assert_eq!(para.text, "안녕하세요");
+    let runs: Vec<(u32, u32)> = para
+        .char_shapes
+        .iter()
+        .map(|cs| (cs.start_pos, cs.char_shape_id))
+        .collect();
+    assert_eq!(runs, vec![(0, 1)]);
 }
 
 #[test]
@@ -1032,6 +1235,47 @@ fn test_char_shape_id_at() {
     assert_eq!(para.char_shape_id_at(1), Some(10));
     assert_eq!(para.char_shape_id_at(2), Some(20));
     assert_eq!(para.char_shape_id_at(4), Some(20));
+}
+
+#[test]
+fn test_char_shape_runs_in_range() {
+    let para = Paragraph {
+        text: "AAAABBBB".to_string(),
+        char_offsets: (0..8).collect(),
+        char_shapes: vec![
+            CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 10,
+            },
+            CharShapeRef {
+                start_pos: 4,
+                char_shape_id: 20,
+            },
+        ],
+        ..Default::default()
+    };
+    // 전체 범위 — run 경계(pos 4)에서 분할
+    assert_eq!(
+        para.char_shape_runs_in_range(0, 8),
+        vec![(0, 4, 10), (4, 8, 20)]
+    );
+    // 부분 범위 — 요청 범위로 클램핑된 run 구간
+    assert_eq!(
+        para.char_shape_runs_in_range(2, 6),
+        vec![(2, 4, 10), (4, 6, 20)]
+    );
+    // 단일 run 범위
+    assert_eq!(para.char_shape_runs_in_range(0, 4), vec![(0, 4, 10)]);
+    // 빈 범위
+    assert!(para.char_shape_runs_in_range(3, 3).is_empty());
+
+    // char_shapes가 비어 있으면 ID 0 단일 run으로 간주
+    let bare = Paragraph {
+        text: "AB".to_string(),
+        char_offsets: vec![0, 1],
+        ..Default::default()
+    };
+    assert_eq!(bare.char_shape_runs_in_range(0, 2), vec![(0, 2, 0)]);
 }
 
 #[test]

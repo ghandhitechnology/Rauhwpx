@@ -77,6 +77,21 @@ function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']])
       calls.push({ method: 'markDelete', args: [agent, range] });
       return { changeSetId: 'cs-1', markedText: 'marked' };
     },
+    replaceText: (range: { sectionIdx: number; startParaIdx: number; startCharOffset: number }, text: string, agent: string) => {
+      calls.push({ method: 'replaceText', args: [range, text, agent] });
+      bus.emit('document-mutated', 'agent-pending-edit');
+      bus.emit('document-changed');
+      return {
+        changeSetId: 'cs-1',
+        insertedRange: {
+          sectionIdx: range.sectionIdx,
+          startParaIdx: range.startParaIdx,
+          startCharOffset: range.startCharOffset,
+          endParaIdx: range.startParaIdx,
+          endCharOffset: range.startCharOffset + text.length,
+        },
+      };
+    },
     applyCharFormat: (agent: string, range: unknown, format: unknown) => {
       calls.push({ method: 'applyCharFormat', args: [agent, range, format] });
       bus.emit('document-mutated', 'agent-pending-edit');
@@ -87,6 +102,7 @@ function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']])
       bus.emit('document-mutated', 'agent-pending-edit');
       return { changeSetId: 'cs-1', fieldId: 7, oldValue: 'old', newValue: value };
     },
+    hasPendingStructureOp: () => false,
   };
   const inputHandler = {
     getCursorPosition: () => ({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 }),
@@ -217,16 +233,25 @@ test('executor: delete_range 빈 범위 → INVALID_ARGS', async () => {
   );
 });
 
-test('executor: replace_range = markDelete + insertText(끝 지점)', async () => {
+test('executor: replace_range = 원자적 pending.replaceText 위임', async () => {
   const { executor, calls } = makeExecutor([['hello world']]);
   const r = (await executor.execute('replace_range', {
     expectedRevision: 1, sectionIdx: 0,
     startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 5, text: 'goodbye',
   }, 'claude')) as any;
-  assert.deepEqual(calls.map((c) => c.method), ['markDelete', 'insertText']);
-  assert.deepEqual(calls[1].args[1], { sectionIdx: 0, paraIdx: 0, charOffset: 5 });
-  assert.equal(r.markedText, 'marked');
+  // markDelete + insertText 조합이 아니라 단일 원자적 op 이다
+  assert.deepEqual(calls.map((c) => c.method), ['replaceText']);
+  assert.deepEqual(calls[0].args[0], {
+    sectionIdx: 0, startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 5,
+  });
+  assert.equal(calls[0].args[1], 'goodbye');
+  assert.equal(calls[0].args[2], 'claude');
+  assert.equal(r.changeSetId, 'cs-1');
+  assert.deepEqual(r.insertedRange, {
+    startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 7,
+  });
   assert.equal(r.revision, 2);
+  assert.equal(typeof r.postEdit, 'string');
 });
 
 test('executor: apply_char_format은 서식 키 1개 이상 필요, fontSizePt → pt*100', async () => {

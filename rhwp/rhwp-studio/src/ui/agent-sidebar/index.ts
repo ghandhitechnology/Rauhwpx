@@ -139,6 +139,7 @@ function opGlyph(op: PendingOp): string {
   switch (op.kind) {
     case 'insert': return '+';
     case 'delete': return '−';
+    case 'replace': return '⇄';
     case 'format': return '✎';
     case 'field': return '⚑';
     case 'object': return '▣';
@@ -164,6 +165,8 @@ function opPreview(op: PendingOp): string {
     case 'insert':
     case 'delete':
       return op.text.replace(/\n/g, '⏎');
+    case 'replace':
+      return `${op.deletedText.replace(/\n/g, '⏎')} → ${op.text.replace(/\n/g, '⏎')}`;
     case 'format':
       return JSON.stringify(op.format);
     case 'field':

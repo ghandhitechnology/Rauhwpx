@@ -1117,8 +1117,10 @@ impl DocumentCore {
             mods.border_fill_id = Some(bf_id);
         }
 
-        // 셀 내 문단의 기존 char_shape_id를 기반으로 새 ID 생성
-        {
+        // 셀 내 문단의 기존 run 별 char_shape_id를 기반으로 새 ID 생성/적용.
+        // 본문 문단과 마찬가지로 혼합 서식 범위를 단일 shape으로 붕괴시키지 않고
+        // run 별 base에 mods를 병합한다 (apply_char_mods_to_paragraph와 동형).
+        let runs = {
             let para = self
                 .get_cell_paragraph_ref(
                     sec_idx,
@@ -1128,10 +1130,12 @@ impl DocumentCore {
                     cell_para_idx,
                 )
                 .ok_or_else(|| HwpError::RenderError("셀 문단을 찾을 수 없음".to_string()))?;
-            let base_id = para.char_shape_id_at(start_offset).unwrap_or(0);
+            para.char_shape_runs_in_range(start_offset, end_offset)
+        };
+        for (run_start, run_end, base_id) in runs {
             let new_id = self.document.find_or_create_char_shape(base_id, &mods);
 
-            // 셀 문단에 범위 적용
+            // 셀 문단에 run 구간 적용
             let cell_para = self.get_cell_paragraph_mut(
                 sec_idx,
                 parent_para_idx,
@@ -1139,7 +1143,7 @@ impl DocumentCore {
                 cell_idx,
                 cell_para_idx,
             )?;
-            cell_para.apply_char_shape_range(start_offset, end_offset, new_id);
+            cell_para.apply_char_shape_range(run_start, run_end, new_id);
         }
 
         // 텍스트 폭/높이에 영향을 주는 글자 모양 변경 시 셀 내 LineSeg 재계산.
@@ -1208,14 +1212,15 @@ impl DocumentCore {
             let bf_id = self.create_border_fill_from_json(props_json);
             mods.border_fill_id = Some(bf_id);
         }
-        let base_id = {
+        // run 별 base 보존 (flat 형제 apply_char_format_in_cell_native와 동형)
+        let runs = {
             let para = self.get_cell_paragraph_mut_by_path(sec_idx, parent_para_idx, path)?;
-            para.char_shape_id_at(start_offset).unwrap_or(0)
+            para.char_shape_runs_in_range(start_offset, end_offset)
         };
-        let new_id = self.document.find_or_create_char_shape(base_id, &mods);
-        {
+        for (run_start, run_end, base_id) in runs {
+            let new_id = self.document.find_or_create_char_shape(base_id, &mods);
             let para = self.get_cell_paragraph_mut_by_path(sec_idx, parent_para_idx, path)?;
-            para.apply_char_shape_range(start_offset, end_offset, new_id);
+            para.apply_char_shape_range(run_start, run_end, new_id);
         }
         // [#2755] 깊이 ≥ 2 중첩 셀도 텍스트 흐름에 영향 주는 변경 시 최내곽 셀 폭으로 재래핑한다
         // (apply_char_format_in_cell_native 의 char_shape_mods_affect_text_flow 게이팅과 동형 —
@@ -2022,6 +2027,11 @@ impl DocumentCore {
     }
 
     /// 본문 문단에 글자 서식 적용 헬퍼
+    ///
+    /// 범위 내 기존 run 경계를 따라 base 별로 새 shape을 파생한다. 범위 전체를 첫
+    /// 글자 기준 단일 shape으로 붕괴시키면 범위 안의 굵게/기울임 등 혼합 서식이
+    /// 사라지므로, distinct base마다 mods를 병합한 shape을 만들어 해당 run 구간에만
+    /// 적용한다.
     pub(crate) fn apply_char_mods_to_paragraph(
         &mut self,
         sec_idx: usize,
@@ -2030,15 +2040,13 @@ impl DocumentCore {
         end_offset: usize,
         mods: &crate::model::style::CharShapeMods,
     ) {
-        let base_id = self.document.sections[sec_idx].paragraphs[para_idx]
-            .char_shape_id_at(start_offset)
-            .unwrap_or(0);
-        let new_id = self.document.find_or_create_char_shape(base_id, mods);
-        self.document.sections[sec_idx].paragraphs[para_idx].apply_char_shape_range(
-            start_offset,
-            end_offset,
-            new_id,
-        );
+        let runs = self.document.sections[sec_idx].paragraphs[para_idx]
+            .char_shape_runs_in_range(start_offset, end_offset);
+        for (run_start, run_end, base_id) in runs {
+            let new_id = self.document.find_or_create_char_shape(base_id, mods);
+            self.document.sections[sec_idx].paragraphs[para_idx]
+                .apply_char_shape_range(run_start, run_end, new_id);
+        }
     }
 
     /// 문단 번호 시작 방식을 설정한다.
@@ -2318,6 +2326,212 @@ mod tests {
             inner_shape_id,
             Some(0),
             "복원 전에는 안쪽 셀만 새 ID여야 한다"
+        );
+    }
+
+    #[test]
+    fn apply_char_mods_mixed_range_derives_shape_per_run() {
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+
+        // base A(보통) / base B(기울임) 두 run 구성
+        let base_a = core.document.doc_info.char_shapes.len() as u32;
+        core.document.doc_info.char_shapes.push(Default::default());
+        let base_b = core.document.doc_info.char_shapes.len() as u32;
+        core.document
+            .doc_info
+            .char_shapes
+            .push(crate::model::style::CharShape {
+                italic: true,
+                ..Default::default()
+            });
+
+        let para_idx = core.document.sections[0].paragraphs.len();
+        core.document.sections[0].paragraphs.push(Paragraph {
+            text: "AAAABBBB".to_string(),
+            char_count: 9,
+            char_offsets: (0..8).collect(),
+            char_shapes: vec![
+                CharShapeRef {
+                    start_pos: 0,
+                    char_shape_id: base_a,
+                },
+                CharShapeRef {
+                    start_pos: 4,
+                    char_shape_id: base_b,
+                },
+            ],
+            ..Default::default()
+        });
+
+        let mods = CharShapeMods {
+            bold: Some(true),
+            ..Default::default()
+        };
+        core.apply_char_mods_to_paragraph(0, para_idx, 0, 8, &mods);
+
+        let para = &core.document.sections[0].paragraphs[para_idx];
+        let runs: Vec<(u32, u32)> = para
+            .char_shapes
+            .iter()
+            .map(|cs| (cs.start_pos, cs.char_shape_id))
+            .collect();
+        assert_eq!(
+            runs.len(),
+            2,
+            "혼합 서식 범위의 run이 유지돼야 한다: {:?}",
+            runs
+        );
+        assert_eq!(runs[0].0, 0);
+        assert_eq!(runs[1].0, 4);
+        assert_ne!(
+            runs[0].1, runs[1].1,
+            "서로 다른 base는 서로 다른 파생 shape을 만들어야 한다"
+        );
+        let shape_a = &core.document.doc_info.char_shapes[runs[0].1 as usize];
+        let shape_b = &core.document.doc_info.char_shapes[runs[1].1 as usize];
+        assert!(shape_a.bold && !shape_a.italic, "첫 run은 base A + bold");
+        assert!(
+            shape_b.bold && shape_b.italic,
+            "둘째 run은 base B의 italic을 보존한 채 bold"
+        );
+    }
+
+    #[test]
+    fn apply_char_format_native_preserves_bold_span_inside_range() {
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+
+        // [보통 | 굵게 | 보통] 3-run 문단에 전체 범위 italic 적용
+        let base_plain = core.document.doc_info.char_shapes.len() as u32;
+        core.document.doc_info.char_shapes.push(Default::default());
+        let base_bold = core.document.doc_info.char_shapes.len() as u32;
+        core.document
+            .doc_info
+            .char_shapes
+            .push(crate::model::style::CharShape {
+                bold: true,
+                ..Default::default()
+            });
+
+        let para_idx = core.document.sections[0].paragraphs.len();
+        core.document.sections[0].paragraphs.push(Paragraph {
+            text: "AABBBBAA".to_string(),
+            char_count: 9,
+            char_offsets: (0..8).collect(),
+            char_shapes: vec![
+                CharShapeRef {
+                    start_pos: 0,
+                    char_shape_id: base_plain,
+                },
+                CharShapeRef {
+                    start_pos: 2,
+                    char_shape_id: base_bold,
+                },
+                CharShapeRef {
+                    start_pos: 6,
+                    char_shape_id: base_plain,
+                },
+            ],
+            ..Default::default()
+        });
+
+        core.apply_char_format_native(0, para_idx, 0, 8, r#"{"italic":true}"#)
+            .unwrap();
+
+        let para = &core.document.sections[0].paragraphs[para_idx];
+        let runs: Vec<(u32, u32)> = para
+            .char_shapes
+            .iter()
+            .map(|cs| (cs.start_pos, cs.char_shape_id))
+            .collect();
+        // 붕괴 전 구현은 범위 전체를 첫 글자 기준 단일 shape으로 덮어 굵게 구간이
+        // 사라졌다. [plain+italic | bold+italic | plain+italic] 이 유지돼야 한다.
+        assert_eq!(runs.len(), 3, "굵게 구간이 유지돼야 한다: {:?}", runs);
+        assert_eq!(runs[0].0, 0);
+        assert_eq!(runs[1].0, 2);
+        assert_eq!(runs[2].0, 6);
+        assert_eq!(
+            runs[0].1, runs[2].1,
+            "같은 base는 같은 파생 shape을 재사용한다"
+        );
+        let plain_it = &core.document.doc_info.char_shapes[runs[0].1 as usize];
+        let bold_it = &core.document.doc_info.char_shapes[runs[1].1 as usize];
+        assert!(plain_it.italic && !plain_it.bold);
+        assert!(
+            bold_it.italic && bold_it.bold,
+            "굵게 속성이 보존되어야 한다"
+        );
+    }
+
+    #[test]
+    fn apply_char_format_in_cell_mixed_range_preserves_runs() {
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+
+        let base_plain = core.document.doc_info.char_shapes.len() as u32;
+        core.document.doc_info.char_shapes.push(Default::default());
+        let base_bold = core.document.doc_info.char_shapes.len() as u32;
+        core.document
+            .doc_info
+            .char_shapes
+            .push(crate::model::style::CharShape {
+                bold: true,
+                ..Default::default()
+            });
+
+        let cell_para = Paragraph {
+            text: "AAAABBBB".to_string(),
+            char_count: 9,
+            char_offsets: (0..8).collect(),
+            char_shapes: vec![
+                CharShapeRef {
+                    start_pos: 0,
+                    char_shape_id: base_plain,
+                },
+                CharShapeRef {
+                    start_pos: 4,
+                    char_shape_id: base_bold,
+                },
+            ],
+            ..Default::default()
+        };
+        let table = Table {
+            cells: vec![Cell {
+                paragraphs: vec![cell_para],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        core.document.sections[0].paragraphs[0]
+            .controls
+            .push(Control::Table(Box::new(table)));
+        let ctrl_idx = core.document.sections[0].paragraphs[0].controls.len() - 1;
+
+        core.apply_char_format_in_cell_native(0, 0, ctrl_idx, 0, 0, 0, 8, r#"{"italic":true}"#)
+            .unwrap();
+
+        let Control::Table(table) = &core.document.sections[0].paragraphs[0].controls[ctrl_idx]
+        else {
+            panic!("expected table");
+        };
+        let runs: Vec<(u32, u32)> = table.cells[0].paragraphs[0]
+            .char_shapes
+            .iter()
+            .map(|cs| (cs.start_pos, cs.char_shape_id))
+            .collect();
+        assert_eq!(
+            runs.len(),
+            2,
+            "셀 내 혼합 서식 범위의 run이 유지돼야 한다: {:?}",
+            runs
+        );
+        let shape_a = &core.document.doc_info.char_shapes[runs[0].1 as usize];
+        let shape_b = &core.document.doc_info.char_shapes[runs[1].1 as usize];
+        assert!(shape_a.italic && !shape_a.bold);
+        assert!(
+            shape_b.italic && shape_b.bold,
+            "셀 내 굵게 속성이 유지되어야 한다"
         );
     }
 }

@@ -60,3 +60,11 @@
 .ag-pending-marker.ag-format {
   box-shadow: inset 0 -1px 0 rgba(var(--ag-pending-ink), 0.28);
 }
+
+/* 교체는 삽입 밑줄 + 위쪽 실선으로 구분한다 (원본이 대체된 자리) */
+.ag-pending-marker.ag-replace {
+  background: rgba(var(--ag-pending-ink), 0.06);
+  box-shadow:
+    inset 0 -1px 0 rgba(var(--ag-pending-ink), 0.58),
+    inset 0 1px 0 rgba(var(--ag-pending-ink), 0.58);
+}

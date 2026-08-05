@@ -2663,7 +2663,9 @@ export class CanvasKitLayerRenderer {
           layout.kind.text,
           x,
           y + layout.baseline,
-          this.equationFontSizeFromBox(layout, fontSize),
+          // [Issue #900 정합] 복합 박스 높이가 아닌 부모 전달 fontSize 사용
+          // (canonical: src/renderer/equation/canvas_render.rs Text/Number/Symbol/MathSymbol arm).
+          fontSize,
           color,
           layout.kind.type === 'text' || italic,
           bold,
@@ -2676,7 +2678,8 @@ export class CanvasKitLayerRenderer {
           layout.kind.name,
           x,
           y + layout.baseline,
-          this.equationFontSizeFromBox(layout, fontSize),
+          // [Issue #900 정합] 부모 전달 fontSize 사용 (canvas_render.rs Function arm).
+          fontSize,
           color,
           italic,
           bold,
@@ -2688,9 +2691,11 @@ export class CanvasKitLayerRenderer {
           && this.drawEquationLine(
             canvas,
             x + fontSize * 0.05,
-            y + layout.baseline,
+            // 분수선은 baseline 에서 axis height(0.25em) 위 — canonical AXIS_HEIGHT 정합
+            // (svg_render.rs / canvas_render.rs 의 Fraction arm 과 동일).
+            y + layout.baseline - fontSize * 0.25,
             x + layout.width - fontSize * 0.05,
-            y + layout.baseline,
+            y + layout.baseline - fontSize * 0.25,
             color,
             fontSize * 0.04,
           )
@@ -2748,7 +2753,10 @@ export class CanvasKitLayerRenderer {
         return symbolDrawn && supDrawn && subDrawn;
       }
       case 'limit': {
-        const size = this.equationFontSizeFromBox(layout, fontSize);
+        // [Issue #900 정합] layout.height 는 'lim + 아래첨자' 전체 높이라 font size 로
+        // 쓰면 lim 글자가 비정상으로 커진다 — 부모 전달 fontSize 사용
+        // (canvas_render.rs Limit arm 과 동일).
+        const size = fontSize;
         const limitDrawn = this.drawEquationText(
           canvas,
           layout.kind.isUpper ? 'Lim' : 'lim',
@@ -2836,10 +2844,6 @@ export class CanvasKitLayerRenderer {
       && Number.isFinite(layout.baseline)
       && layout.width >= 0
       && layout.height >= 0;
-  }
-
-  private equationFontSizeFromBox(layout: LayerEquationLayoutBox, baseFontSize: number): number {
-    return Math.max(1, layout.height > 0 ? layout.height : baseFontSize);
   }
 
   private drawEquationText(
