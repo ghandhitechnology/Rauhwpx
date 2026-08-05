@@ -15,6 +15,21 @@ test('Korean word anchors refine to the changed grapheme', () => {
   ]);
 });
 
+test('dissimilar word swaps collapse instead of grapheme confetti', () => {
+  // 서로 다른 단어가 우연히 공유하는 글자('o','d' 등)에 LCS 가 맞춰지면
+  // 'bound'→'committed' 가 b→c / un→mmitte 조각으로 흩어진다 — 단어 덩어리
+  // 하나의 교체로 남아야 한다.
+  const result = computeExactTextDiff('rules are bound.', 'rules are committed.');
+  assert.deepEqual(result.hunks.map((h) => [h.kind, h.oldText, h.newText]), [
+    ['replace', 'boun', 'committe'],
+  ]);
+});
+
+test('typo-scale edits still refine to the changed grapheme', () => {
+  const result = computeExactTextDiff('보고서를 검토하고 잇습니다', '보고서를 검토하고 있습니다');
+  assert.deepEqual(result.hunks.map((h) => [h.oldText, h.newText]), [['잇', '있']]);
+});
+
 test('canonical-equivalent Hangul is visually unchanged', () => {
   const composed = '한글';
   const decomposed = composed.normalize('NFD');

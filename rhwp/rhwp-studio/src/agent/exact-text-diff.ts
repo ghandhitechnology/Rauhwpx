@@ -234,6 +234,14 @@ function hunkFromSegments(
   };
 }
 
+/**
+ * 자소 정밀화를 유지하는 최소 유사도(2·LCS / 총 자소 수). 이보다 다른 블록이
+ * 여러 훙크로 쪼개졌다면 오탈자 수정이 아니라 "서로 다른 단어들이 우연히
+ * 공유하는 글자"에 LCS 가 맞춰진 것이다 — 그대로 두면 짧은 블록 하나가 글자
+ * 단위 색종이(밑줄 조각 + 삭제 핀)로 흩어진다.
+ */
+const GRAPHEME_REFINE_MIN_SIMILARITY = 0.5;
+
 function refineGraphemes(
   oldText: string,
   newText: string,
@@ -245,11 +253,38 @@ function refineGraphemes(
   const oldSegments = graphemeSegments(oldText);
   const newSegments = graphemeSegments(newText);
   const result = sequenceDiff(oldSegments, newSegments, (segment) => segment.key, budget);
+  const refined: ExactDiffHunk[] = [];
   changedBlocks(result.edits, (oldValues, newValues, oldCursor, newCursor, fallback) => {
-    hunks.push(hunkFromSegments(
+    refined.push(hunkFromSegments(
       oldValues, newValues, oldBase, newBase, oldCursor, newCursor, fallback,
     ));
   }, result.fallback);
+  const sameCount = result.edits.filter((edit) => edit.kind === 'same').length;
+  const similarity = (2 * sameCount) / Math.max(1, oldSegments.length + newSegments.length);
+  if (refined.length <= 1 || similarity >= GRAPHEME_REFINE_MIN_SIMILARITY) {
+    hunks.push(...refined);
+    return;
+  }
+  // 색종이 붕괴: 공통 접두/접미는 남기고, 첫 변화부터 마지막 변화까지를
+  // 하나의 교체 훙크로 합친다.
+  const sliceScalars = (text: string, from: number, to: number): string =>
+    [...text].slice(from, to).join('');
+  const first = refined[0];
+  const last = refined[refined.length - 1];
+  const oldStart = first.oldStart;
+  const oldEnd = last.oldEnd;
+  const newStart = first.newStart;
+  const newEnd = last.newEnd;
+  hunks.push({
+    kind: oldStart === oldEnd ? 'insert' : newStart === newEnd ? 'delete' : 'replace',
+    oldStart,
+    oldEnd,
+    newStart,
+    newEnd,
+    oldText: sliceScalars(oldText, oldStart - oldBase, oldEnd - oldBase),
+    newText: sliceScalars(newText, newStart - newBase, newEnd - newBase),
+    fallback: refined.some((hunk) => hunk.fallback),
+  });
 }
 
 function diffParagraph(
