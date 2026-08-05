@@ -1,0 +1,527 @@
+.ag-calibration-launch {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-input-bg);
+  color: var(--ag-text-secondary);
+  box-shadow: var(--n-elev-1);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.ag-calibration-launch:hover {
+  border-color: var(--ag-border-strong);
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-calibration-launch.ag-active {
+  border-color: color-mix(in srgb, var(--ag-ok) 38%, var(--ag-border));
+  color: var(--ag-ok);
+}
+
+.ag-calibration-launch:focus-visible,
+.ag-calibration-language:focus-visible,
+.ag-calibration-primary:focus-visible,
+.ag-calibration-secondary:focus-visible,
+.ag-calibration-close:focus-visible,
+.ag-calibration-file-remove:focus-visible,
+.ag-calibration-dropzone:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.ag-calibration-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.ag-calibration-launch-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-calibration-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 420;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  background: rgba(12, 12, 14, 0.34);
+  opacity: 0;
+  transition: opacity 160ms ease-out;
+}
+
+.ag-calibration-overlay.ag-open {
+  opacity: 1;
+}
+
+.ag-calibration-dialog {
+  width: min(540px, calc(100vw - 24px));
+  max-height: min(720px, calc(100vh - 24px));
+  overflow: hidden;
+  border: 1px solid var(--n-hairline);
+  border-radius: var(--n-radius-panel);
+  background: var(--n-surface);
+  color: var(--n-text);
+  box-shadow: var(--n-elev-3);
+  font-family: var(--font-family-ui, -apple-system, BlinkMacSystemFont, '맑은 고딕', sans-serif);
+  transform: translateY(8px) scale(0.99);
+  transition: transform 180ms var(--ag-motion-out, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.ag-calibration-overlay.ag-open .ag-calibration-dialog {
+  transform: translateY(0) scale(1);
+}
+
+.ag-calibration-chrome {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px 4px 18px;
+  border-bottom: 1px solid var(--n-hairline);
+  background: var(--n-surface-raised);
+}
+
+.ag-calibration-step-label {
+  color: var(--n-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.ag-calibration-close,
+.ag-calibration-file-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--n-radius-chip);
+  background: transparent;
+  color: var(--n-text-muted);
+  cursor: pointer;
+}
+
+.ag-calibration-close {
+  width: 30px;
+  height: 30px;
+}
+
+.ag-calibration-close:hover,
+.ag-calibration-file-remove:hover {
+  background: var(--n-fill-hover);
+  color: var(--n-text);
+}
+
+.ag-calibration-close-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ag-calibration-body {
+  position: relative;
+  height: min(590px, calc(100vh - 90px));
+  min-height: 460px;
+  overflow: hidden;
+}
+
+.ag-calibration-panel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  padding: 32px 36px 28px;
+  opacity: 0;
+  transform: translateX(12px);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 150ms ease-out,
+    transform 180ms var(--ag-motion-out, cubic-bezier(0.16, 1, 0.3, 1)),
+    visibility 0s linear 180ms;
+}
+
+.ag-calibration-panel.ag-active {
+  opacity: 1;
+  transform: translateX(0);
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+
+.ag-calibration-title {
+  max-width: 22ch;
+  margin: 0 0 12px;
+  color: var(--n-text);
+  font-size: 24px;
+  font-weight: 760;
+  letter-spacing: -0.025em;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+
+.ag-calibration-statement,
+.ag-calibration-upload-statement {
+  max-width: 40ch;
+  margin: 0 0 8px;
+  color: var(--n-text);
+  font-size: 15px;
+  line-height: 1.6;
+  word-break: keep-all;
+}
+
+.ag-calibration-detail {
+  max-width: 56ch;
+  margin: 0;
+  color: var(--n-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: keep-all;
+}
+
+.ag-calibration-language-group {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 32px;
+}
+
+.ag-calibration-language {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: var(--n-radius-field);
+  background: var(--n-surface);
+  color: var(--n-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.ag-calibration-language:hover {
+  background: var(--n-fill-hover);
+}
+
+.ag-calibration-language.ag-selected {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 1px var(--accent-primary);
+}
+
+.ag-calibration-flag {
+  width: 30px;
+  height: 20px;
+  flex: 0 0 auto;
+  image-rendering: pixelated;
+}
+
+.ag-calibration-language-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ag-calibration-language-copy strong {
+  font-size: 13px;
+}
+
+.ag-calibration-language-copy span {
+  color: var(--n-text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ag-calibration-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 24px;
+}
+
+.ag-calibration-primary,
+.ag-calibration-secondary {
+  min-height: 34px;
+  padding: 7px 13px;
+  border-radius: var(--n-radius-field);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ag-calibration-primary {
+  border: 1px solid var(--accent-primary);
+  background: var(--accent-primary);
+  color: var(--n-on-accent);
+}
+
+.ag-calibration-primary:hover:not(:disabled) {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+}
+
+.ag-calibration-primary:disabled {
+  border-color: var(--n-hairline);
+  background: var(--n-fill-active);
+  color: var(--n-text-disabled);
+  cursor: default;
+}
+
+.ag-calibration-secondary {
+  border: 1px solid var(--n-hairline-strong);
+  background: transparent;
+  color: var(--n-text-secondary);
+}
+
+.ag-calibration-secondary:hover {
+  background: var(--n-fill-hover);
+  color: var(--n-text);
+}
+
+.ag-calibration-upload-statement {
+  margin-bottom: 22px;
+}
+
+.ag-calibration-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.ag-calibration-dropzone {
+  display: flex;
+  min-height: 138px;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 20px;
+  border: 1px dashed var(--n-hairline-strong);
+  border-radius: var(--n-radius-panel);
+  background: var(--n-surface-sunken);
+  color: var(--n-text);
+  text-align: center;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.ag-calibration-dropzone:hover,
+.ag-calibration-dropzone.ag-dragging {
+  border-color: var(--accent-primary);
+  background: var(--n-fill-selected);
+}
+
+.ag-calibration-upload-icon {
+  width: 26px;
+  height: 26px;
+  margin-bottom: 2px;
+  color: var(--accent-primary);
+}
+
+.ag-calibration-dropzone strong {
+  font-size: 13px;
+}
+
+.ag-calibration-dropzone span {
+  color: var(--n-text-muted);
+  font-size: 11px;
+}
+
+.ag-calibration-file-summary {
+  margin-top: 12px;
+  color: var(--n-text-muted);
+  font-size: 11px;
+}
+
+.ag-calibration-file-list {
+  max-height: 112px;
+  margin: 6px 0 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.ag-calibration-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 4px 2px;
+  border-top: 1px solid var(--n-hairline);
+}
+
+.ag-calibration-file-copy {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.ag-calibration-file-copy strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-calibration-file-copy span {
+  color: var(--n-text-muted);
+  font-size: 10px;
+}
+
+.ag-calibration-file-remove {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+}
+
+.ag-calibration-error {
+  min-height: 18px;
+  margin-top: 6px;
+  color: var(--color-error, #c8372d);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.ag-calibration-progress-track {
+  height: 3px;
+  margin-top: 38px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--n-fill-active);
+}
+
+.ag-calibration-progress-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent-primary);
+  transform: scaleX(0.18);
+  transform-origin: left center;
+  transition: transform 360ms var(--ag-motion-out, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.ag-calibration-progress-list {
+  display: grid;
+  gap: 14px;
+  margin: 24px 0 0;
+  padding: 0;
+  color: var(--n-text-muted);
+  font-size: 13px;
+  list-style: none;
+}
+
+.ag-calibration-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ag-calibration-progress-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: 50%;
+  background: var(--n-surface);
+}
+
+.ag-calibration-progress-row.ag-active {
+  color: var(--n-text);
+  font-weight: 650;
+}
+
+.ag-calibration-progress-row.ag-active .ag-calibration-progress-dot {
+  border-color: var(--accent-primary);
+  background: var(--accent-primary);
+  box-shadow: 0 0 0 3px var(--n-fill-selected);
+}
+
+.ag-calibration-progress-row.ag-complete .ag-calibration-progress-dot {
+  border-color: var(--accent-primary);
+  background: var(--accent-primary);
+}
+
+.ag-calibration-result-icon-wrap {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  margin-bottom: 20px;
+  border-radius: var(--n-radius-panel);
+  background: color-mix(in srgb, var(--color-success, #2f7d4f) 10%, var(--n-surface));
+  color: var(--color-success, #2f7d4f);
+}
+
+.ag-calibration-result-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.ag-calibration-result-meta {
+  margin: 24px 0 0;
+  color: var(--n-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 600px) {
+  .ag-calibration-dialog {
+    width: 100%;
+    max-height: calc(100vh - 16px);
+  }
+
+  .ag-calibration-body {
+    height: calc(100vh - 66px);
+    min-height: 0;
+  }
+
+  .ag-calibration-panel {
+    padding: 26px 20px 22px;
+  }
+
+  .ag-calibration-language-group {
+    grid-template-columns: 1fr;
+  }
+
+  .ag-calibration-title {
+    font-size: 21px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-calibration-launch,
+  .ag-calibration-overlay,
+  .ag-calibration-dialog,
+  .ag-calibration-panel,
+  .ag-calibration-language,
+  .ag-calibration-dropzone,
+  .ag-calibration-progress-fill {
+    transition: none;
+  }
+}
