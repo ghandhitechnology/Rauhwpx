@@ -1,49 +1,55 @@
-/* ─── 디자인 토큰 ───────────────────────────────────── */
+/* ─── 디자인 토큰 ─────────────────────────────────────
+   --ui-* 는 앱 전체가 쓰는 의미 계층이고, 그 값은 아래 --n-*
+   중성 램프에서 나온다. 색을 바꿀 일이 있으면 램프를 고친다.
+   경계는 실선(#c0c0c0)이 아니라 알파 헤어라인이라, 어떤 면 위에
+   올라가든 그 면의 톤을 따라간다. */
 :root {
-  /* 앱 UI semantic token */
-  --ui-bg: #f0f0f0;
-  --ui-bg-light: #f5f5f5;
-  --ui-surface: #ffffff;
-  --ui-surface-raised: #fafafa;
-  --ui-surface-muted: #e8e8e8;
-  --ui-border: #c0c0c0;
-  --ui-border-light: #d0d0d0;
-  --ui-border-subtle: #d8d8d8;
-  --ui-border-strong: #b4b4b4;
-  --ui-text: #333333;
-  --ui-text-secondary: #555555;
-  --ui-text-muted: #666666;
-  --ui-text-hint: #888888;
-  --ui-text-disabled: #aaaaaa;
-  --ui-text-placeholder: #999999;
-  --ui-text-on-accent: #ffffff;
+  /* 앱 UI semantic token — 값은 --n-* 램프에서 온다 */
+  --ui-bg: var(--n-canvas);
+  --ui-bg-light: var(--n-surface-raised);
+  --ui-surface: var(--n-surface);
+  --ui-surface-raised: var(--n-surface-raised);
+  --ui-surface-muted: var(--n-surface-sunken);
+  --ui-border: var(--n-hairline);
+  --ui-border-light: var(--n-hairline-strong);
+  --ui-border-subtle: var(--n-hairline);
+  --ui-border-strong: var(--n-hairline-strong);
+  --ui-text: var(--n-text);
+  --ui-text-secondary: var(--n-text-secondary);
+  --ui-text-muted: var(--n-text-muted);
+  --ui-text-hint: var(--n-text-muted);
+  --ui-text-disabled: var(--n-text-disabled);
+  --ui-text-placeholder: var(--n-text-placeholder);
+  --ui-text-on-accent: var(--n-on-accent);
   --ui-on-accent-overlay: rgba(255, 255, 255, 0.3);
-  --ui-hover: #e0e0e0;
-  --ui-hover-strong: #dfe4ec;
-  --ui-active: #c8c8c8;
-  --ui-selected: #e8f0fe;
-  --ui-menu-open: #3e62bb;
-  --ui-menu-open-border: #4c73d5;
-  --ui-toolbar-bg-start: #fafafa;
-  --ui-toolbar-bg-end: #f0f0f0;
-  --ui-accent-bg: #e7eaf4;
-  --ui-accent-bg-light: #f0f3fa;
-  --ui-note-bg: #f5f6fa;
-  --ui-note-border: #d0d4e2;
-  --ui-note-text: #444444;
-  --ui-warning-bg: #fffbea;
-  --ui-warning-border: #f0d060;
-  --ui-warning-text: #7a6200;
+  --ui-hover: var(--n-fill-hover);
+  --ui-hover-strong: var(--n-fill-active);
+  --ui-active: var(--n-fill-active);
+  --ui-selected: var(--n-fill-selected);
+  --ui-menu-open: var(--accent-strong);
+  --ui-menu-open-border: var(--accent-primary);
+  /* 그라디언트 폐기: 도구 모음도 하나의 평평한 면이다 */
+  --ui-toolbar-bg-start: var(--n-surface-raised);
+  --ui-toolbar-bg-end: var(--n-surface-raised);
+  --ui-accent-bg: var(--n-fill-selected);
+  --ui-accent-bg-light: var(--n-fill-selected-soft);
+  --ui-note-bg: var(--n-surface-raised);
+  --ui-note-border: var(--n-hairline);
+  --ui-note-text: var(--n-text-secondary);
+  --ui-warning-bg: #fff8e4;
+  --ui-warning-border: #e8c65c;
+  --ui-warning-text: #6b5500;
   --ui-link: #2563eb;
-  --ui-danger: #c44;
-  --ui-danger-strong: #dc3545;
-  --ui-danger-soft: rgba(220, 53, 69, 0.2);
-  --ui-focus-soft: rgba(74, 144, 217, 0.2);
+  --ui-danger: #c8372d;
+  --ui-danger-strong: #c8372d;
+  --ui-danger-soft: rgba(200, 55, 45, 0.16);
+  --ui-focus-soft: rgba(74, 144, 217, 0.22);
 
-  /* 문서 영역 token: 앱 테마와 문서 렌더를 분리한다. */
-  --doc-workspace: #e0e0e0;
+  /* 문서 영역 token: 앱 테마와 문서 렌더를 분리한다.
+     용지는 항상 흰색이고, 책상만 앱 톤에 맞춰 식힌다. */
+  --doc-workspace: #e9e9ed;
   --doc-paper: #ffffff;
-  --doc-shadow: rgba(0, 0, 0, 0.2);
+  --doc-shadow: rgba(0, 0, 0, 0.16);
 
   /* 포커스/선택/핸들 */
   --focus-ring: #4a90d9;
@@ -56,11 +62,11 @@
   --table-selection-stroke: #337ab7;
 
   /* 눈금자 */
-  --ruler-bg: #d0d0d0;
-  --ruler-body: #ffffff;
-  --ruler-tick: #555555;
-  --ruler-text: #333333;
-  --ruler-marker: #4080c0;
+  --ruler-bg: var(--n-surface-sunken);
+  --ruler-body: var(--n-surface);
+  --ruler-tick: var(--n-text-secondary);
+  --ruler-text: var(--n-text);
+  --ruler-marker: var(--accent-primary);
 
   /* 브랜드/강조 */
   --accent-primary: #6182d6;
@@ -101,9 +107,10 @@
   --color-selected-bg: var(--ui-selected);
   --color-focus-border: var(--focus-ring);
 
-  --shadow-dropdown: 2px 2px 8px rgba(0, 0, 0, 0.15);
-  --shadow-dialog: 4px 4px 12px rgba(0, 0, 0, 0.2);
-  --shadow-light: 2px 2px 6px rgba(0, 0, 0, 0.12);
+  /* 오프셋 그림자 → 높이 체계. 값은 --n-elev-* 에서 온다. */
+  --shadow-dropdown: var(--n-elev-2);
+  --shadow-dialog: var(--n-elev-3);
+  --shadow-light: var(--n-elev-1);
 
   --overlay-bg: rgba(0, 0, 0, 0.2);
 
@@ -128,10 +135,55 @@
   --space-10: 20px;
   --space-12: 24px;
 
-  /* 모서리 */
-  --radius-sm: 2px;
-  --radius-md: 3px;
-  --radius-lg: 4px;
+  /* 모서리 — 사이드바와 같은 보정값(칩 4 / 입력·버튼 6 / 패널 8).
+     기존 이름을 그대로 두어 30개 스타일시트가 자동으로 따라온다. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* ─── 모던 셸 토큰 (n-*) ────────────────────────────
+     Word for Mac 계열의 낮은 대비 중성 램프. 경계선 대신
+     톤과 그림자로 면을 나눈다. 기존 --ui-* 는 그대로 두고,
+     새로 단장한 표면부터 이 램프를 쓴다(현재: 에이전트
+     사이드바). 나머지 화면은 순차적으로 옮긴다. */
+
+  /* 면: 아래로 갈수록 가라앉는다 */
+  --n-surface: #ffffff;
+  --n-surface-raised: #f7f7f8;
+  --n-surface-sunken: #f1f1f4;
+  --n-canvas: #f5f5f7;
+
+  /* 경계: 실선이 아니라 헤어라인. 대부분 눈에 띄지 않는다 */
+  --n-hairline: rgba(0, 0, 0, 0.08);
+  --n-hairline-strong: rgba(0, 0, 0, 0.14);
+
+  /* 글자 */
+  /* muted/placeholder 도 본문 크기로 쓰이므로 4.5:1 을 넘긴다.
+     흰 배경 기준 #6e6e73 ≈ 5.1:1, #757579 ≈ 4.6:1. */
+  --n-text: #1d1d1f;
+  --n-text-secondary: #545458;
+  --n-text-muted: #6e6e73;
+  --n-text-placeholder: #757579;
+  --n-text-disabled: #adadb2;
+
+  /* 상태 채움: 알파라서 어떤 면 위에서도 같은 세기로 읽힌다 */
+  --n-fill-hover: rgba(0, 0, 0, 0.055);
+  --n-fill-active: rgba(0, 0, 0, 0.10);
+  --n-fill-selected: rgba(97, 130, 214, 0.14);
+  --n-fill-selected-soft: rgba(97, 130, 214, 0.07);
+
+  /* 밝은 테마의 액센트는 짙은 파랑이라 흰 글자가 맞는다. */
+  --n-on-accent: #ffffff;
+
+  /* 모서리: 칩 → 입력/버튼 → 패널 */
+  --n-radius-chip: 4px;
+  --n-radius-field: 6px;
+  --n-radius-panel: 8px;
+
+  /* 높이: 오프셋 + 부드러운 블러 */
+  --n-elev-1: 0 1px 2px rgba(0, 0, 0, 0.04), 0 1px 1px rgba(0, 0, 0, 0.03);
+  --n-elev-2: 0 4px 12px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --n-elev-3: 0 12px 32px rgba(0, 0, 0, 0.14), 0 2px 6px rgba(0, 0, 0, 0.06);
 
   /* 컨트롤 크기 */
   --control-height-sm: 22px;
@@ -146,48 +198,49 @@
 }
 
 :root[data-theme-effective="dark"] {
-  --ui-bg: #25292f;
-  --ui-bg-light: #2b3037;
-  --ui-surface: #2f343c;
-  --ui-surface-raised: #363c45;
-  --ui-surface-muted: #252a31;
-  --ui-border: #4d5561;
-  --ui-border-light: #596270;
-  --ui-border-subtle: #454d58;
-  --ui-border-strong: #687384;
-  --ui-text: #eef1f5;
-  --ui-text-secondary: #d5dbe3;
-  --ui-text-muted: #b6c0cc;
-  --ui-text-hint: #97a2b1;
-  --ui-text-disabled: #737d8b;
-  --ui-text-placeholder: #8a94a3;
-  --ui-text-on-accent: #ffffff;
+  /* 밝은 테마와 같은 구조. 값만 어두운 램프에서 가져온다. */
+  --ui-bg: var(--n-canvas);
+  --ui-bg-light: var(--n-surface-raised);
+  --ui-surface: var(--n-surface);
+  --ui-surface-raised: var(--n-surface-raised);
+  --ui-surface-muted: var(--n-surface-sunken);
+  --ui-border: var(--n-hairline);
+  --ui-border-light: var(--n-hairline-strong);
+  --ui-border-subtle: var(--n-hairline);
+  --ui-border-strong: var(--n-hairline-strong);
+  --ui-text: var(--n-text);
+  --ui-text-secondary: var(--n-text-secondary);
+  --ui-text-muted: var(--n-text-muted);
+  --ui-text-hint: var(--n-text-muted);
+  --ui-text-disabled: var(--n-text-disabled);
+  --ui-text-placeholder: var(--n-text-placeholder);
+  --ui-text-on-accent: var(--n-on-accent);
   --ui-on-accent-overlay: rgba(255, 255, 255, 0.24);
-  --ui-hover: #3b424d;
-  --ui-hover-strong: #424b58;
-  --ui-active: #4b5564;
-  --ui-selected: #244b75;
-  --ui-menu-open: #4f78d7;
-  --ui-menu-open-border: #6f96ec;
-  --ui-toolbar-bg-start: #343a43;
-  --ui-toolbar-bg-end: #2b3037;
-  --ui-accent-bg: #263b61;
-  --ui-accent-bg-light: #2d446f;
-  --ui-note-bg: #2d3440;
-  --ui-note-border: #465065;
-  --ui-note-text: #d8dee7;
-  --ui-warning-bg: #433b1d;
+  --ui-hover: var(--n-fill-hover);
+  --ui-hover-strong: var(--n-fill-active);
+  --ui-active: var(--n-fill-active);
+  --ui-selected: var(--n-fill-selected);
+  --ui-menu-open: var(--accent-primary);
+  --ui-menu-open-border: var(--accent-light);
+  --ui-toolbar-bg-start: var(--n-surface-raised);
+  --ui-toolbar-bg-end: var(--n-surface-raised);
+  --ui-accent-bg: var(--n-fill-selected);
+  --ui-accent-bg-light: var(--n-fill-selected-soft);
+  --ui-note-bg: var(--n-surface-raised);
+  --ui-note-border: var(--n-hairline);
+  --ui-note-text: var(--n-text-secondary);
+  --ui-warning-bg: #3d3617;
   --ui-warning-border: #7b6b23;
   --ui-warning-text: #f0dfa0;
   --ui-link: #8bb8ff;
-  --ui-danger: #ff8c8c;
-  --ui-danger-strong: #ff7373;
-  --ui-danger-soft: rgba(255, 115, 115, 0.22);
+  --ui-danger: #ff6b60;
+  --ui-danger-strong: #ff6b60;
+  --ui-danger-soft: rgba(255, 107, 96, 0.22);
   --ui-focus-soft: rgba(139, 184, 255, 0.24);
 
-  --doc-workspace: #1f2329;
+  --doc-workspace: #131315;
   --doc-paper: #ffffff;
-  --doc-shadow: rgba(0, 0, 0, 0.5);
+  --doc-shadow: rgba(0, 0, 0, 0.55);
 
   --focus-ring: #8bb8ff;
   --selection-fill: #315f91;
@@ -198,11 +251,11 @@
   --table-selection-fill: rgba(139, 184, 255, 0.28);
   --table-selection-stroke: #8bb8ff;
 
-  --ruler-bg: #2d333b;
-  --ruler-body: var(--ui-surface-raised);
-  --ruler-tick: #c2cad6;
-  --ruler-text: #e3e7ed;
-  --ruler-marker: #8bb8ff;
+  --ruler-bg: var(--n-surface-sunken);
+  --ruler-body: var(--n-surface-raised);
+  --ruler-tick: var(--n-text-secondary);
+  --ruler-text: var(--n-text);
+  --ruler-marker: var(--accent-light);
 
   --accent-primary: #7fa8ff;
   --accent-strong: #a9c3ff;
@@ -210,10 +263,39 @@
   --accent-hover: #5f78a8;
   --accent-subtle: #6f8ed6;
 
-  --shadow-dropdown: 2px 2px 12px rgba(0, 0, 0, 0.45);
-  --shadow-dialog: 4px 4px 16px rgba(0, 0, 0, 0.55);
-  --shadow-light: 2px 2px 8px rgba(0, 0, 0, 0.32);
-  --overlay-bg: rgba(0, 0, 0, 0.45);
+  --shadow-dropdown: var(--n-elev-2);
+  --shadow-dialog: var(--n-elev-3);
+  --shadow-light: var(--n-elev-1);
+  --overlay-bg: rgba(0, 0, 0, 0.5);
+
+  /* ─── 모던 셸 토큰: 어두운 테마 ─────────────────────
+     어두운 쪽에서는 면이 위로 올라올수록 밝아진다. */
+  --n-surface: #1e1e20;
+  --n-surface-raised: #26262a;
+  --n-surface-sunken: #171719;
+  --n-canvas: #141416;
+
+  --n-hairline: rgba(255, 255, 255, 0.10);
+  --n-hairline-strong: rgba(255, 255, 255, 0.17);
+
+  --n-text: #f5f5f7;
+  --n-text-secondary: #c7c7cc;
+  --n-text-muted: #a2a2a8;
+  --n-text-placeholder: #8f8f95;
+  --n-text-disabled: #6b6b71;
+  --n-fill-selected-soft: rgba(127, 168, 255, 0.09);
+
+  /* 어두운 테마의 액센트는 밝은 파랑이다. 그 위에 흰 글자를
+     올리면 2:1 대로 무너지므로, 채워진 버튼은 어두운 잉크를 쓴다. */
+  --n-on-accent: #10203c;
+
+  --n-fill-hover: rgba(255, 255, 255, 0.06);
+  --n-fill-active: rgba(255, 255, 255, 0.10);
+  --n-fill-selected: rgba(127, 168, 255, 0.18);
+
+  --n-elev-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 1px 1px rgba(0, 0, 0, 0.25);
+  --n-elev-2: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --n-elev-3: 0 12px 32px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.35);
 }
 
 /* ─── 리셋 ──────────────────────────────────────────── */
