@@ -23,8 +23,8 @@
 
 :root {
   --ag-sidebar-width: 360px;
-  --ag-sidebar-ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --ag-sidebar-duration: 220ms;
+  --ag-sidebar-ease: cubic-bezier(0.2, 0.72, 0, 1);
+  --ag-sidebar-duration: 320ms;
   --ag-motion-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ag-motion-smooth: cubic-bezier(0.65, 0, 0.35, 1);
   --ag-spring-soft: linear(
@@ -231,6 +231,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   width: 11px;
   height: 11px;
   transform: rotate(-90deg);
+  transition: transform var(--ag-sidebar-duration) var(--ag-sidebar-ease);
 }
 
 .ag-root.ag-collapsed .ag-collapse-tab .ui-chevron {
@@ -245,14 +246,151 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 /* ─── 헤더: 프로바이더 + 모델 피커 ───────────────────── */
 
 .ag-header {
+  position: relative;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  padding: 9px 12px 8px;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
   border-bottom: 1px solid var(--ag-border);
   background: var(--ag-raised);
+}
+
+.ag-context-row {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  gap: 8px;
+  padding: 6px 10px 4px 12px;
+}
+
+.ag-document-context {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ag-document-name,
+.ag-selection-context {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-document-name {
+  color: var(--ag-text);
+  font-size: var(--font-size-md, 13px);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
+.ag-selection-context {
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.2;
+}
+
+.ag-header-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.ag-header-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ag-r-field);
+  background: transparent;
+  color: var(--ag-text-muted);
+  cursor: pointer;
+}
+
+.ag-header-icon-btn .ag-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ag-header-icon-btn:hover,
+.ag-header-icon-btn.ag-active,
+.ag-header-icon-btn[aria-expanded='true'] {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-header-icon-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-config-panel {
+  position: absolute;
+  top: 40px;
+  right: 10px;
+  z-index: 120;
+  width: min(300px, calc(100% - 20px));
+  box-sizing: border-box;
+  padding: 7px 8px 6px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-panel);
+  background: var(--ag-bg);
+  box-shadow: var(--n-elev-2);
+}
+
+.ag-config-panel[hidden] {
+  display: none;
+}
+
+.ag-config-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--ag-border);
+}
+
+.ag-connection-row {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  gap: 8px;
+  padding: 0 12px 5px;
+}
+
+.ag-takeover-btn {
+  height: 22px;
+  margin-left: auto;
+  padding: 0 7px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg);
+  color: var(--ag-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  cursor: pointer;
+}
+
+.ag-takeover-btn:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-takeover-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 /* 사이드바는 드래그로 폭이 변한다. 좁아지면 컨트롤을 찌그러뜨리는
@@ -261,26 +399,15 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 2px 6px;
+  gap: 3px 6px;
   width: 100%;
   max-width: 100%;
   min-width: 0;
 }
 
 .ag-threads-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   flex: 0 0 auto;
-  margin-left: auto;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: none;
-  border-radius: var(--ag-r-field);
-  background: transparent;
-  color: var(--ag-text-muted);
-  cursor: pointer;
+  margin-left: 0;
 }
 
 /* 헤더 컨트롤은 테두리 없는 고스트다. 실선 알약을 늘어놓으면
@@ -288,8 +415,8 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-permission-btn,
 .ag-skills-btn {
   flex: 0 0 auto;
-  min-height: 24px;
-  padding: 3px 7px;
+  min-height: 22px;
+  padding: 2px 6px;
   border: 0;
   border-radius: var(--ag-r-chip);
   background: transparent;

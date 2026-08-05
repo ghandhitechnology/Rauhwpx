@@ -3,18 +3,22 @@
    ================================================================ */
 #icon-toolbar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: stretch;
-  align-content: flex-start;
-  padding: 2px 8px;
+  align-content: stretch;
+  gap: 0;
+  padding: 5px 8px 4px;
   /* 세로 그라디언트는 크롬을 낡아 보이게 하는 가장 큰 원인이었다.
      하나의 평평한 면 + 헤어라인으로 바꾼다. */
   background: var(--ui-toolbar-bg-start);
   border-bottom: 1px solid var(--ui-border);
   flex-shrink: 0;
-  height: auto;
-  min-height: 56px;
-  overflow: visible;
+  height: 60px;
+  min-height: 60px;
+  box-sizing: border-box;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
 
 /* 기본 도구 상자 완전 접기 (토글은 서식 바에 둠) */
@@ -25,7 +29,7 @@
 .tb-group {
   display: flex;
   align-items: stretch;
-  gap: 0;
+  gap: 2px;
   flex-shrink: 0;
 }
 
@@ -36,7 +40,7 @@
 
 .tb-sep {
   width: 1px;
-  margin: 4px 4px;
+  margin: 5px 7px;
   background: var(--ui-border);
   flex-shrink: 0;
 }
@@ -46,11 +50,12 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 1px;
-  min-width: 44px;
-  padding: 2px 4px;
+  gap: 3px;
+  min-width: 40px;
+  min-height: 50px;
+  padding: 4px 4px 3px;
   border: 1px solid transparent;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   background: transparent;
   cursor: pointer;
   color: var(--color-text);
@@ -58,14 +63,14 @@
 
 .tb-btn:hover {
   background: var(--ui-hover-strong);
-  border-color: var(--ui-border-light);
+  border-color: transparent;
 }
 
 /* 한컴 SVG 스프라이트 아이콘 시스템 */
 .tb-sprite {
   display: block;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   background-image: var(--ui-icon-sprite-url);
   background-repeat: no-repeat;
   flex-shrink: 0;
@@ -141,20 +146,24 @@
 .icon-zoom-menu-out { background-position: 0 -960px; }
 
 .tb-label {
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-sm);
   line-height: 1.1;
   text-align: center;
   color: var(--color-text-secondary);
   white-space: nowrap;
 }
 
+.tb-label br {
+  display: none;
+}
+
 /* 텍스트 기반 아이콘 (스프라이트 없는 버튼용) */
 .tb-icon-text {
   display: block;
-  width: 18px;
-  height: 18px;
-  font-size: var(--font-size-xl);
-  line-height: 18px;
+  width: 20px;
+  height: 20px;
+  font-size: var(--font-size-lg);
+  line-height: 20px;
   text-align: center;
   color: var(--accent-light);
   flex-shrink: 0;
@@ -231,7 +240,7 @@
 }
 
 .tb-paste {
-  min-width: 50px;
+  min-width: 42px;
 }
 
 /* 머리말/꼬리말 편집 모드 도구상자 */
