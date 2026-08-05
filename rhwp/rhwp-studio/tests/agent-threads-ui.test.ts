@@ -19,14 +19,27 @@ test('threads column control sits on the selector bar and opens a page', () => {
   assert.match(css, /\.ag-threads-open \.ag-threads-page/);
 });
 
-test('sidebar header foregrounds document context and demotes model controls', () => {
+test('sidebar header keeps one compact model summary and expands all settings together', () => {
   assert.match(source, /ag-document-context/);
   assert.match(source, /ag-document-name/);
   assert.match(source, /ag-selection-context/);
+  assert.match(source, /ag-model-summary/);
   assert.match(source, /ag-config-panel/);
-  assert.match(source, /settingsBtn\.setAttribute\('aria-controls', 'ag-config-panel'\)/);
-  assert.match(source, /configPanel\.append\(selectors, configActions\)/);
-  assert.match(css, /\.ag-config-panel\s*\{[^}]*position:\s*absolute;/s);
+  assert.match(source, /providerTrigger\.append\(providerIcon, providerName\)/);
+  assert.match(source, /llmTrigger\.append\(llmName\)/);
+  assert.match(source, /effortTrigger\.append\(effortName, summaryCaret\)/);
+  assert.doesNotMatch(source, /createChevron\('ag-model-caret'\)/);
+  assert.match(source, /configPanelInner\.append\(providerGroup, llmGroup, effortGroup\)/);
+  assert.match(css, /\.ag-config-panel\s*\{[^}]*display:\s*grid;/s);
+  assert.match(css, /\.ag-config-panel \.ag-model-menu\s*\{[^}]*position:\s*static;/s);
+});
+
+test('permission and skill utilities remain visible above the composer', () => {
+  assert.match(source, /ag-composer-utilities/);
+  assert.match(source, /composerUtilities\.append\(permissionBtn, skillsBtn\)/);
+  assert.match(source, /chatPage\.append\(header, messages, review, composerUtilities, composer\)/);
+  assert.match(source, /permissionBtn\.textContent = unrestricted \? '권한: 전체 접근' : '권한: 안전'/);
+  assert.match(css, /\.ag-composer-utilities\s*\{[^}]*justify-content:\s*flex-end;/s);
 });
 
 test('replaced connection state exposes an explicit takeover action', () => {
