@@ -41,6 +41,7 @@ import {
 } from '../../agent/threads.ts';
 import { createChevron, createColumnIcon } from '../chevron.ts';
 import { createIcon, createStopIcon, OP_ICON } from './icons.ts';
+import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 
 export interface AgentSidebarDeps {
   bridge: AgentBridge;
@@ -813,9 +814,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     characterData: true,
   });
   const review = el('div', 'ag-review');
+  const writingStyleCalibration = createWritingStyleCalibration(bridge);
   const composerUtilities = el('div', 'ag-composer-utilities');
   composerUtilities.setAttribute('aria-label', '채팅 도구');
-  composerUtilities.append(permissionBtn, skillsBtn);
+  const composerUtilityActions = el('div', 'ag-composer-utility-actions');
+  composerUtilityActions.append(permissionBtn, skillsBtn);
+  composerUtilities.append(writingStyleCalibration.button, composerUtilityActions);
   const composer = el('form', 'ag-composer');
   const slashMenu = el('div', 'ag-slash-menu');
   slashMenu.id = 'ag-slash-menu';
@@ -1863,6 +1867,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   function handleSidebarEvent(e: SidebarEvent): void {
+    writingStyleCalibration.handleEvent(e);
     switch (e.type) {
       case 'connection':
         setConnection(e.state);
@@ -1980,6 +1985,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         skillSave.disabled = false;
         invalidateSkillValidation();
         skillsStatus.textContent = `오류: ${e.message}`;
+        break;
+      case 'writing-style-status':
+      case 'writing-style-progress':
+      case 'writing-style-result':
+      case 'writing-style-error':
         break;
       case 'chat-stopped':
         setTurnRunning(false);
@@ -2121,6 +2131,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       document.removeEventListener('pointerdown', onDocPointerDown);
       endSidebarResize();
       clearInsetRecenterLoop();
+      writingStyleCalibration.dispose();
       document.body.classList.remove('ag-sidebar-open', 'ag-sidebar-resizing');
       sweepUnresolvedToolRows();
       root.remove();
