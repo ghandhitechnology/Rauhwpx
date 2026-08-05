@@ -2,6 +2,81 @@ import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import { createLineReader, truncate, SYSTEM_BRIEF } from './backend.mjs';
 
+const CORE_TOOLS = 'Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch';
+const STDERR_TAIL_LIMIT = 16_000;
+
+export function formatClaudeExitError(stderrText, code, signal, token) {
+  let clean = String(stderrText ?? '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+  if (token) clean = clean.split(token).join('[redacted]');
+  const detail = clean.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-8).join('\n');
+  const exit = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
+  return detail
+    ? `Claude 실행이 중단되었습니다 (${exit}).\n${truncate(detail, 1200)}`
+    : `Claude 실행이 중단되었습니다 (${exit}). Claude가 오류 설명을 제공하지 않았습니다.`;
+}
+
+function permissionPathRule(tool, value) {
+  const normalized = String(value ?? '').replace(/\\/g, '/');
+  return `${tool}(//${normalized.replace(/^\/+/, '')}/**)`;
+}
+
+export function buildClaudeArgv(opts, sessionId, resume) {
+  const unrestricted = opts.permissionProfile === 'unrestricted';
+  const mcpConfig = {
+    mcpServers: {
+      rhwp: {
+        command: 'node',
+        args: [opts.mcpScriptPath],
+        env: {
+          RHWP_WS_URL: `ws://127.0.0.1:${opts.hubPort}/mcp`,
+          RHWP_AGENT_TOKEN: opts.token,
+          RHWP_AGENT_NAME: 'claude',
+        },
+      },
+    },
+  };
+  const allow = [
+    permissionPathRule('Read', opts.rootDir),
+    permissionPathRule('Write', opts.rootDir),
+    permissionPathRule('Edit', opts.rootDir),
+    permissionPathRule('Glob', opts.rootDir),
+    permissionPathRule('Grep', opts.rootDir),
+    'Bash',
+    'WebSearch', 'WebFetch', 'mcp__rhwp__*',
+  ];
+  const settings = unrestricted ? {} : {
+    permissions: { allow },
+    sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      allowUnsandboxedCommands: false,
+      filesystem: {
+        allowRead: [opts.rootDir],
+        allowWrite: [opts.rootDir],
+      },
+    },
+  };
+  return [
+    '-p', '--verbose',
+    '--output-format', 'stream-json',
+    '--input-format', 'stream-json',
+    '--include-partial-messages',
+    ...(resume ? ['--resume', sessionId] : ['--session-id', sessionId]),
+    '--mcp-config', JSON.stringify(mcpConfig),
+    '--strict-mcp-config',
+    '--setting-sources', '',
+    '--disable-slash-commands',
+    '--tools', CORE_TOOLS,
+    '--settings', JSON.stringify(settings),
+    ...(unrestricted
+      ? ['--permission-mode', 'bypassPermissions', '--dangerously-skip-permissions']
+      : ['--permission-mode', 'dontAsk']),
+    '--append-system-prompt', SYSTEM_BRIEF,
+    ...(opts.model ? ['--model', opts.model] : []),
+    ...(opts.effort ? ['--effort', opts.effort] : []),
+  ];
+}
+
 /**
  * @param {import('./backend.mjs').BackendOptions} opts
  * @returns {import('./backend.mjs').AgentSession}
@@ -22,37 +97,11 @@ export function createClaudeSession(opts) {
   let sawTextDelta = false;
   let disposed = false;
   let killTimer = null;
-
-  const mcpConfig = {
-    mcpServers: {
-      rhwp: {
-        command: 'node',
-        args: [opts.mcpScriptPath],
-        env: {
-          RHWP_WS_URL: `ws://127.0.0.1:${opts.hubPort}/mcp`,
-          RHWP_AGENT_TOKEN: opts.token,
-          RHWP_AGENT_NAME: 'claude',
-        },
-      },
-    },
-  };
+  let restartReady = Promise.resolve();
+  let stderrTail = '';
 
   function buildArgv(resume) {
-    return [
-      '-p', '--verbose',
-      '--output-format', 'stream-json',
-      '--input-format', 'stream-json',
-      '--include-partial-messages',
-      ...(resume ? ['--resume', sessionId] : ['--session-id', sessionId]),
-      '--mcp-config', JSON.stringify(mcpConfig),
-      '--strict-mcp-config',
-      '--allowedTools', 'mcp__rhwp',
-      '--tools', '',
-      '--permission-mode', 'dontAsk',
-      '--append-system-prompt', SYSTEM_BRIEF,
-      ...(opts.model ? ['--model', opts.model] : []),
-      ...(opts.effort ? ['--effort', opts.effort] : []),
-    ];
+    return buildClaudeArgv(opts, sessionId, resume);
   }
 
   function endTurn(evt) {
@@ -151,8 +200,10 @@ export function createClaudeSession(opts) {
     });
     child = proc;
     childAlive = true;
+    stderrTail = '';
     proc.stdout.on('data', createLineReader(handleEvent));
     proc.stderr.on('data', (chunk) => {
+      stderrTail = (stderrTail + chunk.toString()).slice(-STDERR_TAIL_LIMIT);
       for (const line of chunk.toString().split('\n')) {
         if (line.trim()) process.stderr.write(`[claude] ${line}\n`);
       }
@@ -174,7 +225,7 @@ export function createClaudeSession(opts) {
         onEvent({
           type: 'error',
           agent: 'claude',
-          message: `claude exited unexpectedly (code=${code}, signal=${signal})`,
+          message: formatClaudeExitError(stderrTail, code, signal, opts.token),
         });
         endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
       }
@@ -204,20 +255,46 @@ export function createClaudeSession(opts) {
       turnOpen = true;
       sawTextDelta = false;
       onEvent({ type: 'turn-start', agent: 'claude' });
-      try {
-        if (!child || !childAlive) spawnChild();
-        const line = JSON.stringify({
-          type: 'user',
-          message: { role: 'user', content: [{ type: 'text', text }] },
-        }) + '\n';
-        child.stdin.write(line, (err) => {
-          if (err) {
-            process.stderr.write(`[claude] stdin write error: ${err.message}\n`);
-          }
+      void restartReady.then(() => {
+        if (disposed || !turnOpen) return;
+        try {
+          if (!child || !childAlive) spawnChild();
+          const line = JSON.stringify({
+            type: 'user',
+            message: { role: 'user', content: [{ type: 'text', text }] },
+          }) + '\n';
+          child.stdin.write(line, (err) => {
+            if (err) process.stderr.write(`[claude] stdin write error: ${err.message}\n`);
+          });
+        } catch (e) {
+          onEvent({ type: 'error', agent: 'claude', message: `failed to dispatch message: ${e?.message ?? e}` });
+          endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
+        }
+      });
+    },
+    setPermissionProfile(profile) {
+      if (turnOpen) throw new Error('Permission profile can only change between turns');
+      if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
+      if (opts.permissionProfile === profile) return;
+      opts.permissionProfile = profile;
+      const previous = child;
+      killChild();
+      child = null;
+      childAlive = false;
+      if (previous && previous.exitCode === null && previous.signalCode === null) {
+        restartReady = new Promise((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            resolve();
+          };
+          previous.once('exit', finish);
+          const timer = setTimeout(finish, 3500);
+          if (timer.unref) timer.unref();
         });
-      } catch (e) {
-        onEvent({ type: 'error', agent: 'claude', message: `failed to dispatch message: ${e?.message ?? e}` });
-        endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
+      } else {
+        restartReady = Promise.resolve();
       }
     },
     interrupt() {

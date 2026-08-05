@@ -78,6 +78,14 @@ const EQUATION_SYNTAX = 'Write HWP equation script (한컴 수식) — NOT LaTeX
  */
 export const TOOL_DEFINITIONS = [
   {
+    name: 'read_product_skill',
+    description: 'Read an enabled rhwp product skill or one of its supporting text resources. Use this after the enabled-skill catalog says a skill matches the request. Start with SKILL.md, then read only the referenced files needed for the current task. This never reads provider-global skills or arbitrary filesystem paths.',
+    shape: {
+      name: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/),
+      resourcePath: z.string().min(1).max(500).default('SKILL.md').optional(),
+    },
+  },
+  {
     name: 'get_structure',
     description: `Entry-point tool: returns the document outline — every section and paragraph with its address (sectionIdx/paraIdx), length and a text preview. Sections also carry tables[]: each table's location (paraIdx/controlIdx), dimensions, and every cell with its cellIdx, row/col and cell paragraph text — use those addresses as the cell parameter of read/write tools to work with text inside tables. Call this first to learn addresses and the current revision. ${REVISION_NOTE}`,
     shape: {
