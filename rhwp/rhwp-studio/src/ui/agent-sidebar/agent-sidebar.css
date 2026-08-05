@@ -1814,11 +1814,18 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  min-height: 30px;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
   padding: 3px 12px 1px;
   background: var(--ag-bg);
+}
+
+.ag-composer-utility-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
 }
 
 .ag-composer {
