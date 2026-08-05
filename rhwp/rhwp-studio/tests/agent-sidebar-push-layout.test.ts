@@ -7,6 +7,7 @@ const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.m
 
 test('agent sidebar push layout reserves editor-area width when open', () => {
   assert.match(css, /--ag-sidebar-width:\s*360px;/);
+  assert.match(css, /--ag-sidebar-duration:\s*320ms;/);
   assert.match(
     css,
     /body\.ag-sidebar-open #editor-area\s*\{[^}]*margin-right:\s*var\(--ag-sidebar-width\);/s,
@@ -31,6 +32,8 @@ test('agent sidebar asks canvas to recenter during inset animation', () => {
   assert.match(source, /eventBus\?\.emit\('viewport-inset-changed'\)/);
   assert.match(source, /ag-sidebar-animating/);
   assert.match(source, /startInsetRecenterLoop/);
+  assert.match(source, /SIDEBAR_MOTION_DURATION_MS\s*=\s*320/);
+  assert.match(source, /const durationMs = SIDEBAR_MOTION_DURATION_MS/);
 
   const canvasSource = readFileSync(
     new URL('../src/view/canvas-view.ts', import.meta.url),

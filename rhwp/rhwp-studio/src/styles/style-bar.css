@@ -3,19 +3,22 @@
    ================================================================ */
 #style-bar {
   display: flex;
-  flex-wrap: wrap;
-  min-height: 36px;
+  flex-wrap: nowrap;
+  min-height: 38px;
   align-items: center;
   align-content: center;
   gap: 0;
-  padding: 3px 6px;
-  background: var(--color-bg);
+  padding: 4px 8px;
+  box-sizing: border-box;
+  background: var(--ui-surface-raised);
   border-bottom: 1px solid var(--ui-border);
   flex-shrink: 0;
   white-space: nowrap;
   font-size: var(--font-size-base);
-  height: auto;
-  overflow: visible;
+  height: 38px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
 
 /* Google Docs 스타일: 서식 바 우측에서 위 도구 상자 접기/펼치기 */
@@ -91,7 +94,7 @@
   flex-direction: row;
   align-items: center;
   justify-content: center;
-  padding: 0 7px;
+  padding: 0 6px;
   border-right: 1px solid var(--ui-border);
 }
 
@@ -136,12 +139,12 @@
 }
 
 .sb-combo {
-  height: 27px;
+  height: 26px;
   box-sizing: border-box;
   border: 1px solid var(--ui-border-light);
   border-radius: var(--radius-sm);
   font-size: var(--font-size-base);
-  padding: 0 2px;
+  padding: 0 5px;
   outline: none;
   background: var(--color-surface);
   color: var(--color-text);
@@ -257,7 +260,7 @@
 
 .sb-size {
   width: 45px;
-  height: 27px;
+  height: 26px;
   box-sizing: border-box;
   border: 1px solid var(--ui-border-light);
   border-radius: var(--radius-sm) 0 0 2px;
@@ -272,9 +275,9 @@
 .sb-size:focus { border-color: var(--color-focus-border); }
 
 .sb-size-unit {
-  height: 27px;
+  height: 26px;
   box-sizing: border-box;
-  line-height: 25px;
+  line-height: 24px;
   padding: 0 3px;
   border: 1px solid var(--ui-border-light);
   border-left: none;
@@ -291,7 +294,7 @@
 
 .sb-arrow {
   width: 14px;
-  height: 13.5px;
+  height: 13px;
   box-sizing: border-box;
   border: 1px solid var(--ui-border-light);
   background: var(--ui-surface-muted);
@@ -318,8 +321,8 @@
 
 /* 서식 버튼 */
 .sb-btn {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -335,7 +338,7 @@
 
 .sb-btn:hover {
   background: var(--ui-hover-strong);
-  border-color: var(--ui-border-light);
+  border-color: transparent;
 }
 
 .sb-btn.active {
@@ -394,7 +397,7 @@
 
 /* 드롭다운 화살표 있는 버튼 */
 .sb-has-arrow {
-  width: 42px;
+  width: 38px;
   gap: 0;
 }
 
@@ -592,12 +595,12 @@
 .sb-ls-group {
   display: inline-flex;
   align-items: center;
-  height: 27px;
+  height: 26px;
 }
 
 .sb-ls-select {
   width: 72px;
-  height: 27px;
+  height: 26px;
   box-sizing: border-box;
   font-size: var(--font-size-sm);
   border: 1px solid var(--ui-border-light);
