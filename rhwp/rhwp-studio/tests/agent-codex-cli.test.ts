@@ -13,6 +13,7 @@ const opts = {
   token: 'secret-agent-token',
   model: 'gpt-5.6-sol',
   effort: 'high',
+  permissionProfile: 'unrestricted' as const,
   onEvent: () => {},
 };
 
@@ -36,6 +37,14 @@ test('initial Codex turns still set the working root explicitly', () => {
   assert.equal(argv[1], '--json');
   assert.equal(argv[rootFlag + 1], opts.rootDir);
   assert.equal(argv.at(-1), '-');
+});
+
+test('safe Codex turns use workspace-write while retaining core web and shell support', () => {
+  const argv = buildCodexArgv({ ...opts, permissionProfile: 'safe' }, null);
+  assert.ok(argv.includes('sandbox_mode="workspace-write"'));
+  assert.ok(argv.includes('--ignore-user-config'));
+  assert.ok(argv.includes('--ignore-rules'));
+  assert.ok(argv.includes('skill_search'));
 });
 
 test('Codex exit errors expose stderr while redacting the agent token', () => {
