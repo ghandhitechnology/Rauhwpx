@@ -46,6 +46,11 @@ export interface AgentSidebarDeps {
   bridge: AgentBridge;
   /** inset 전환 후 용지 가운데 정렬을 요청할 때 사용 */
   eventBus?: EventBus;
+  /** 헤더에 표시할 현재 문서와 선택 상태. */
+  getDocumentContext?: () => {
+    documentName: string | null;
+    selectionLabel: string | null;
+  };
 }
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
@@ -60,6 +65,7 @@ const PROVIDER_ICON_SRC: Record<AgentName, string> = {
 const SIDEBAR_WIDTH_KEY = 'rhwp-agent-sidebar-width';
 const SIDEBAR_WIDTH_DEFAULT = 360;
 const SIDEBAR_WIDTH_MIN = 280;
+const SIDEBAR_MOTION_DURATION_MS = 320;
 
 function maxSidebarWidth(viewportWidth = window.innerWidth): number {
   return Math.max(SIDEBAR_WIDTH_MIN, Math.floor(viewportWidth * 0.5));
@@ -177,7 +183,7 @@ function opPreview(op: PendingOp): string {
 }
 
 export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; dispose(): void } {
-  const { bridge, eventBus } = deps;
+  const { bridge, eventBus, getDocumentContext } = deps;
 
   let selectedAgent: AgentName = bridge.getActiveAgent() ?? 'claude';
   let selectedModel = defaultModelForAgent(selectedAgent);
@@ -279,7 +285,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
 
     const startedAt = performance.now();
-    const durationMs = 280;
+    const durationMs = SIDEBAR_MOTION_DURATION_MS;
     const tick = (now: number) => {
       notifyInsetChanged();
       if (now - startedAt < durationMs) {
@@ -727,14 +733,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   rebuildEffortMenu();
   effortWrap.append(effortTrigger, effortMenu);
 
-  const onDocPointerDown = (e: PointerEvent) => {
-    const t = e.target as Node;
-    if (!providerWrap.contains(t)) setProviderMenuOpen(false);
-    if (!llmWrap.contains(t)) setLlmMenuOpen(false);
-    if (!effortWrap.contains(t)) setEffortMenuOpen(false);
-  };
-  document.addEventListener('pointerdown', onDocPointerDown);
-
   const threadsBtn = el('button', 'ag-threads-btn');
   threadsBtn.type = 'button';
   threadsBtn.setAttribute('aria-label', '채팅 목록');
@@ -754,8 +752,73 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   skillsBtn.setAttribute('aria-controls', 'ag-skills-panel');
 
   const conn = el('span', 'ag-conn');
-  selectors.append(providerWrap, llmWrap, effortWrap, permissionBtn, skillsBtn, threadsBtn);
-  header.append(selectors, conn);
+  conn.setAttribute('role', 'status');
+  conn.setAttribute('aria-live', 'polite');
+
+  const takeoverBtn = el('button', 'ag-takeover-btn', '이 탭에서 연결');
+  takeoverBtn.type = 'button';
+  takeoverBtn.hidden = true;
+  takeoverBtn.addEventListener('click', () => bridge.takeOverConnection());
+
+  const settingsBtn = el('button', 'ag-header-icon-btn ag-settings-btn');
+  settingsBtn.type = 'button';
+  settingsBtn.title = '에이전트 설정';
+  settingsBtn.setAttribute('aria-label', '에이전트 설정');
+  settingsBtn.setAttribute('aria-expanded', 'false');
+  settingsBtn.setAttribute('aria-controls', 'ag-config-panel');
+  settingsBtn.appendChild(createIcon('settings'));
+
+  const documentContext = el('div', 'ag-document-context');
+  const documentName = el('span', 'ag-document-name', '문서 없음');
+  const selectionContext = el('span', 'ag-selection-context', '선택 없음');
+  documentContext.append(documentName, selectionContext);
+
+  const headerActions = el('div', 'ag-header-actions');
+  threadsBtn.classList.add('ag-header-icon-btn');
+  headerActions.append(settingsBtn, threadsBtn);
+
+  const contextRow = el('div', 'ag-context-row');
+  contextRow.append(documentContext, headerActions);
+
+  const configPanel = el('div', 'ag-config-panel');
+  configPanel.id = 'ag-config-panel';
+  configPanel.hidden = true;
+  selectors.append(providerWrap, llmWrap, effortWrap);
+  const configActions = el('div', 'ag-config-actions');
+  configActions.append(permissionBtn, skillsBtn);
+  configPanel.append(selectors, configActions);
+
+  const connectionRow = el('div', 'ag-connection-row');
+  connectionRow.append(conn, takeoverBtn);
+  header.append(contextRow, configPanel, connectionRow);
+
+  function updateDocumentContext(): void {
+    const context = getDocumentContext?.();
+    documentName.textContent = context?.documentName || '문서 없음';
+    documentName.title = context?.documentName || '';
+    selectionContext.textContent = context?.selectionLabel || '선택 없음';
+  }
+
+  function setConfigPanelOpen(open: boolean): void {
+    configPanel.hidden = !open;
+    settingsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    settingsBtn.classList.toggle('ag-active', open);
+    if (!open) closeAllMenus();
+  }
+
+  settingsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setConfigPanelOpen(configPanel.hidden !== false);
+  });
+
+  const onDocPointerDown = (e: PointerEvent) => {
+    const t = e.target as Node;
+    if (!providerWrap.contains(t)) setProviderMenuOpen(false);
+    if (!llmWrap.contains(t)) setLlmMenuOpen(false);
+    if (!effortWrap.contains(t)) setEffortMenuOpen(false);
+    if (!header.contains(t)) setConfigPanelOpen(false);
+  };
+  document.addEventListener('pointerdown', onDocPointerDown);
 
   const stage = el('div', 'ag-stage');
 
@@ -786,7 +849,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   slashMenu.setAttribute('role', 'listbox');
   slashMenu.setAttribute('aria-label', '슬래시 명령과 스킬');
   const input = el('textarea', 'ag-input');
-  input.placeholder = '딸깍해보자..';
+  input.placeholder = '문서 작업을 입력하세요';
   input.rows = 1;
   input.setAttribute('aria-label', '에이전트 메시지 입력');
   input.setAttribute('role', 'combobox');
@@ -931,6 +994,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function setSkillsPanelOpen(open: boolean): void {
     skillsPanelOpen = open;
+    if (open) setConfigPanelOpen(false);
     threadsPanelOpen = false;
     root.classList.toggle('ag-skills-open', open);
     root.classList.remove('ag-threads-open');
@@ -1414,6 +1478,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function setThreadsPanelOpen(open: boolean): void {
     threadsPanelOpen = open;
+    if (open) setConfigPanelOpen(false);
     if (open) skillsPanelOpen = false;
     root.classList.toggle('ag-threads-open', open);
     root.classList.remove('ag-skills-open');
@@ -1505,6 +1570,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     connState = state;
     conn.className = `ag-conn ag-conn-${state}`;
     conn.textContent = CONN_LABEL[state];
+    takeoverBtn.hidden = state !== 'replaced';
+    if (state === 'replaced') setConfigPanelOpen(false);
     updateComposer();
   }
 
@@ -2049,11 +2116,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
     rebuildReview();
   });
+  const contextUnsubs = eventBus
+    ? [
+        eventBus.on('document-context-changed', updateDocumentContext),
+        eventBus.on('cursor-format-changed', updateDocumentContext),
+        eventBus.on('picture-object-selection-changed', updateDocumentContext),
+        eventBus.on('table-object-selection-changed', updateDocumentContext),
+      ]
+    : [];
 
   // 초기 상태 반영
   setSelectedAgent(selectedAgent);
   setConnection(connState);
   setTurnRunning(turnRunning);
+  updateDocumentContext();
   rebuildReview();
 
   return {
@@ -2061,6 +2137,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     dispose(): void {
       unsubBridge();
       unsubPending();
+      contextUnsubs.forEach((unsub) => unsub());
       messagesMutationObserver?.disconnect();
       messages.removeEventListener('scroll', onMessagesScroll);
       if (conversationScrollRaf !== null) {

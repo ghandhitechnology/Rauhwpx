@@ -28,6 +28,8 @@ export interface AgentBridge {
   getActiveAgent(): AgentName | null;
   isTurnRunning(): boolean;
   getPermissionProfile(): PermissionProfile;
+  /** 다른 탭이 연결을 차지한 상태에서 현재 탭이 스튜디오 연결을 다시 가져온다. */
+  takeOverConnection(): void;
   startChat(agent: AgentName, model?: string, effort?: string, force?: boolean, permissionProfile?: PermissionProfile): void;
   /** 허브 세션을 폐기하고 새 채팅을 시작할 수 있게 한다. */
   stopChat(): void;
@@ -125,6 +127,16 @@ class AgentBridgeImpl implements AgentBridge {
     this.reconnectAttempt = 0;
     this.connect();
   };
+
+  takeOverConnection(): void {
+    if (this.disposed || this.state === 'connected' || this.state === 'connecting') return;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempt = 0;
+    this.connect();
+  }
 
   // ─── connection ───────────────────────────────────────────
 
