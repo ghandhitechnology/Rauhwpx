@@ -7,7 +7,9 @@
   align-items: stretch;
   align-content: flex-start;
   padding: 2px 8px;
-  background: linear-gradient(to bottom, var(--ui-toolbar-bg-start), var(--ui-toolbar-bg-end));
+  /* 세로 그라디언트는 크롬을 낡아 보이게 하는 가장 큰 원인이었다.
+     하나의 평평한 면 + 헤어라인으로 바꾼다. */
+  background: var(--ui-toolbar-bg-start);
   border-bottom: 1px solid var(--ui-border);
   flex-shrink: 0;
   height: auto;
