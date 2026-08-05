@@ -140,7 +140,7 @@ export class PendingEditManager {
     if (text.length === 0) throw new AgentToolError('INVALID_ARGS', 'text must not be empty');
     const { range, addedParas } = this.performInsert(addr.sectionIdx, addr.paraIdx, addr.charOffset, text, addr.cell);
     const set = this.ensureOpenSet(agent);
-    const op: PendingOp = { kind: 'insert', id: this.nextId('op'), agent, range, text };
+    const op: PendingOp = { kind: 'insert', id: this.nextId('op'), agent: set.agent, range, text };
     this.pushOp(set, op);
     this.shiftAllAfterInsert(range.sectionIdx, {
       paraIdx: addr.paraIdx, charOffset: addr.charOffset, addedParas,
@@ -149,7 +149,7 @@ export class PendingEditManager {
     this.emitDocEvents('agent-pending-edit');
     this.syncOverlay();
     // 타자기 공개용 — op.range 라이브 참조를 넘겨 이후 shift 가 반영되게 한다.
-    this.deps.eventBus.emit('agent-text-inserted', { agent, range: op.range, text });
+    this.deps.eventBus.emit('agent-text-inserted', { agent: op.agent, range: op.range, text });
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, insertedRange: { ...range } };
   }
@@ -162,7 +162,7 @@ export class PendingEditManager {
     // 문서 변이 없음(revision 불변): 텍스트만 캡처하고 마크만 기록한다.
     const text = this.captureRangeText(range);
     const set = this.ensureOpenSet(agent);
-    const op: PendingOp = { kind: 'delete', id: this.nextId('op'), agent, range: { ...range }, text };
+    const op: PendingOp = { kind: 'delete', id: this.nextId('op'), agent: set.agent, range: { ...range }, text };
     this.pushOp(set, op);
     this.syncOverlay();
     this.emitChange({ type: 'ops-changed' });
@@ -233,7 +233,7 @@ export class PendingEditManager {
       if (charShapeId !== null && text.length > 0) this.applyCharShapeToRange(ins.range, charShapeId);
       const set = this.ensureOpenSet(agent);
       const op: PendingOp = {
-        kind: 'replace', id: this.nextId('op'), agent,
+        kind: 'replace', id: this.nextId('op'), agent: set.agent,
         range: ins.range, text, deletedText, charShapeId, paraShapeIds, snapshotId,
       };
       this.pushOp(set, op);
@@ -243,7 +243,7 @@ export class PendingEditManager {
       this.emitDocEvents('agent-pending-edit');
       this.syncOverlay();
       if (text.length > 0) {
-        this.deps.eventBus.emit('agent-text-inserted', { agent, range: op.range, text });
+        this.deps.eventBus.emit('agent-text-inserted', { agent: op.agent, range: op.range, text });
       }
       this.emitChange({ type: 'ops-changed' });
       return { changeSetId: set.id, insertedRange: { ...ins.range } };
@@ -304,7 +304,7 @@ export class PendingEditManager {
     } catch { /* 프로브 없이 동작 (기존 동작과 동일) */ }
     const set = this.ensureOpenSet(agent);
     const op: PendingOp = {
-      kind: 'format', id: this.nextId('op'), agent, range: { ...range }, format: { ...format }, inverse,
+      kind: 'format', id: this.nextId('op'), agent: set.agent, range: { ...range }, format: { ...format }, inverse,
       text: rangeText,
     };
     this.pushOp(set, op);
@@ -323,7 +323,7 @@ export class PendingEditManager {
     }
     const set = this.ensureOpenSet(agent);
     const op: PendingOp = {
-      kind: 'field', id: this.nextId('op'), agent, name,
+      kind: 'field', id: this.nextId('op'), agent: set.agent, name,
       oldValue: parsed.oldValue, newValue: parsed.newValue,
     };
     this.pushOp(set, op);
@@ -341,7 +341,7 @@ export class PendingEditManager {
       this.applyObjectOp(obj);
     }
     const set = this.ensureOpenSet(agent);
-    const op: PendingOp = { kind: 'object', id: this.nextId('op'), agent, obj };
+    const op: PendingOp = { kind: 'object', id: this.nextId('op'), agent: set.agent, obj };
     this.pushOp(set, op);
     if (isObjectOpApplied(obj)) this.emitDocEvents('agent-pending-edit');
     this.syncOverlay();
@@ -571,8 +571,16 @@ export class PendingEditManager {
   }
 
   private ensureOpenSet(agent: AgentName): PendingChangeSet {
+    if (this.open) {
+      // 허브 세션은 한 번에 하나뿐이다 — 턴이 열려 있으면 그 턴이 귀속의 기준이다.
+      // 라벨이 어긋난다고 열린 턴을 닫고 다른 이름으로 새 set 을 열면, 리뷰 카드가
+      // 실제로 돌고 있는 에이전트와 다른 이름을 내건다.
+      if (this.open.agent !== agent) {
+        console.warn(`[pending-edits] tool call labeled '${agent}' during '${this.open.agent}' turn — 열린 턴 기준으로 기록`);
+      }
+      return this.open;
+    }
     // turn-start 를 놓친 write 도 수용: 해당 에이전트의 set 을 자동으로 연다.
-    if (this.open && this.open.agent === agent) return this.open;
     this.beginTurn(agent);
     return this.open!;
   }
