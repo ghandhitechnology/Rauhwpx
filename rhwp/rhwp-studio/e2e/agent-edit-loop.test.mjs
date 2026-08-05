@@ -307,6 +307,65 @@ try {
       });
       assert(typeof rep.changeSetId === 'string' && rep.changeSetId.length > 0, 'replace_range changeSetId 반환');
 
+      await page.waitForFunction(
+        () => document.querySelector('.ag-exact-change, .ag-exact-anchor') !== null,
+        { timeout: 5000 },
+      );
+      const exactOverlay = await page.evaluate(() => ({
+        exactHunks: new Set(
+          [...document.querySelectorAll('[data-diff-hunk]')]
+            .map((element) => element.getAttribute('data-diff-hunk')),
+        ).size,
+        legacyReplaceMarkers: document.querySelectorAll('.ag-pending-marker.ag-replace').length,
+      }));
+      assert(exactOverlay.exactHunks > 0, `replace_range exact canvas hunk 렌더링 (${exactOverlay.exactHunks}개)`);
+      assert(exactOverlay.legacyReplaceMarkers === 0, 'replace_range 전체 범위 marker 미렌더링');
+      await page.$eval('[data-diff-hunk]', (element) => {
+        element.scrollIntoView({ block: 'center', inline: 'center' });
+      });
+      const exactBox = await page.$eval('.ag-exact-change', (element) => {
+        const rect = element.getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      });
+      await page.mouse.move(exactBox.x, exactBox.y);
+      await page.waitForFunction(
+        () => document.querySelector('.ag-exact-popover')?.hidden === false,
+      );
+      const removedPreview = await page.$eval('.ag-exact-popover-text', (element) => element.textContent);
+      assert(removedPreview === '원본', `hover 가 삭제된 fragment 만 표시 ("${removedPreview}")`);
+      await page.mouse.click(exactBox.x, exactBox.y);
+      await page.mouse.move(0, 0);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const caretPinned = await page.$eval('.ag-exact-popover', (element) => element.hidden === false);
+      assert(caretPinned, 'exact hunk 클릭이 일반 caret 을 배치하고 popover 를 고정');
+      await page.keyboard.press('Escape');
+      const escaped = await page.$eval('.ag-exact-popover', (element) => element.hidden === true);
+      assert(escaped, 'Escape 로 exact diff popover 닫기');
+      await screenshot(page, 'agent-edit-loop-exact-diff-desktop');
+      await page.waitForFunction(
+        () => document.querySelectorAll('.ag-liquid-flow-in, .ag-liquid-anchor-in').length === 0,
+        { timeout: 2000 },
+      );
+      const desktopViewport = page.viewport();
+      await page.setViewport({ width: 390, height: 844 });
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const replayedAnimations = await page.$$eval(
+        '.ag-liquid-flow-in, .ag-liquid-anchor-in',
+        (elements) => elements.length,
+      );
+      assert(replayedAnimations === 0, 'viewport rerender 가 liquid reveal 을 재생하지 않음');
+      await page.click('.ag-collapse-tab');
+      await page.waitForFunction(
+        () => document.querySelector('#agent-sidebar')?.classList.contains('ag-collapsed') === true,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 320));
+      await page.$eval('[data-diff-hunk]', (element) => {
+        element.scrollIntoView({ block: 'center', inline: 'center' });
+      });
+      await screenshot(page, 'agent-edit-loop-exact-diff-mobile');
+      await page.click('.ag-collapse-tab');
+      await page.setViewport(desktopViewport ?? { width: 1280, height: 900 });
+
       const vB = must(await call('verify_changes', {}), 'verify_changes(b)');
       const kindsB = vB.ops.map((o) => o.kind);
       assert(
