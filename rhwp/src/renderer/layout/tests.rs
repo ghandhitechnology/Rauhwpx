@@ -1441,24 +1441,99 @@ fn test_expand_numbering_format_level_path_mixed_format() {
 fn test_numbering_format_to_number_format() {
     assert!(matches!(
         numbering_format_to_number_format(0),
-        NumFmt::Digit
+        NumberFormat::Digit
     ));
     assert!(matches!(
         numbering_format_to_number_format(1),
-        NumFmt::CircledDigit
+        NumberFormat::CircledDigit
     ));
     assert!(matches!(
         numbering_format_to_number_format(2),
-        NumFmt::RomanUpper
+        NumberFormat::UpperRoman
     ));
     assert!(matches!(
         numbering_format_to_number_format(8),
-        NumFmt::HangulGaNaDa
+        NumberFormat::HangulSyllable
     ));
     assert!(matches!(
         numbering_format_to_number_format(255),
-        NumFmt::Digit
+        NumberFormat::Digit
     ));
+}
+
+#[test]
+fn test_numbering_format_to_number_format_extended() {
+    // 표 43 코드 6/7/9/10/11 (원문자 알파벳/한글, ㄱㄴㄷ) — 종전에는 Digit fallback
+    assert!(matches!(
+        numbering_format_to_number_format(6),
+        NumberFormat::CircledUpperAlpha
+    ));
+    assert!(matches!(
+        numbering_format_to_number_format(7),
+        NumberFormat::CircledLowerAlpha
+    ));
+    assert!(matches!(
+        numbering_format_to_number_format(9),
+        NumberFormat::CircledHangulSyllable
+    ));
+    assert!(matches!(
+        numbering_format_to_number_format(10),
+        NumberFormat::HangulJamo
+    ));
+    assert!(matches!(
+        numbering_format_to_number_format(11),
+        NumberFormat::CircledHangulJamo
+    ));
+    assert!(matches!(
+        numbering_format_to_number_format(12),
+        NumberFormat::HangulDigit
+    ));
+    assert!(matches!(
+        numbering_format_to_number_format(13),
+        NumberFormat::HanjaDigit
+    ));
+}
+
+#[test]
+fn test_expand_numbering_format_extended_formats() {
+    // 수준별 number_format을 바꿔가며 ^1 확장 결과를 확인한다
+    let expand_with_code = |code: u8, counter: u32| {
+        let mut heads = [NumberingHead::default(); 7];
+        heads[0].number_format = code;
+        let numbering = Numbering {
+            raw_data: None,
+            heads,
+            level_formats: [
+                "^1.".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ],
+            start_number: 0,
+            level_start_numbers: [1, 1, 1, 1, 1, 1, 1],
+            raw_para_heads: None,
+        };
+        let counters = [counter, 0, 0, 0, 0, 0, 0];
+        expand_numbering_format(
+            "^1.",
+            &counters,
+            &numbering,
+            &numbering.level_start_numbers,
+            0,
+        )
+    };
+
+    assert_eq!(expand_with_code(6, 3), "Ⓒ."); // 원문자 영문 대문자
+    assert_eq!(expand_with_code(7, 2), "ⓑ."); // 원문자 영문 소문자
+    assert_eq!(expand_with_code(9, 4), "㉱."); // 원문자 한글 가나다
+    assert_eq!(expand_with_code(10, 3), "ㄷ."); // 한글 자모
+    assert_eq!(expand_with_code(11, 5), "㉤."); // 원문자 한글 자모
+
+    // 범위를 벗어나면 숫자 fallback (원문자 알파벳은 26까지)
+    assert_eq!(expand_with_code(6, 27), "27.");
 }
 
 // =====================================================================

@@ -44,6 +44,19 @@ function resolveEffort(agent, model, requested) {
 const pendingCalls = new Map();
 let nextHubId = 1;
 
+// 스튜디오 소켓이 닫히거나 새 탭 연결에 밀려나면 인플라이트 호출은 영원히 응답받지 못한다 —
+// 30초 타임아웃까지 기다리지 말고 즉시 NO_STUDIO 로 실패시킨다.
+function failAllPendingCalls(message) {
+  for (const [hubId, entry] of pendingCalls) {
+    clearTimeout(entry.timer);
+    pendingCalls.delete(hubId);
+    sendJson(entry.mcpSocket, {
+      v: 1, type: 'tool-result', id: entry.clientId, ok: false,
+      error: { code: 'NO_STUDIO', message },
+    });
+  }
+}
+
 function log(msg) {
   process.stderr.write(`[rhwp-agent] ${msg}\n`);
 }
@@ -256,13 +269,15 @@ function handleMcpMessage(sock, msg) {
         pendingCalls.delete(hubId);
         sendJson(sock, {
           v: 1, type: 'tool-result', id: clientId, ok: false,
-          error: { code: 'STUDIO_TIMEOUT', message: `Studio did not answer within ${STUDIO_TOOL_TIMEOUT_MS / 1000}s` },
+          error: { code: 'STUDIO_TIMEOUT', message: `Studio did not answer within ${STUDIO_TOOL_TIMEOUT_MS / 1000}s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates` },
         });
       }, STUDIO_TOOL_TIMEOUT_MS);
       pendingCalls.set(hubId, { mcpSocket: sock, clientId, timer });
       sendJson(studioSocket, {
         v: 1, type: 'tool-request', id: hubId,
-        agent: session?.agent ?? 'claude',
+        // 호출을 보낸 MCP 소켓의 에이전트 라벨을 단다 — 현재 세션 기준으로 찍으면
+        // 세션 교체 직후 남은 호출이 엉뚱한 에이전트로 기록될 수 있다.
+        agent: sock.agentLabel ?? session?.agent ?? 'claude',
         tool: String(msg.tool ?? ''),
         args: msg.args ?? {},
       });
@@ -341,6 +356,8 @@ httpServer.on('upgrade', (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => {
     if (path === '/studio') {
       if (studioSocket) {
+        // 새 탭에 밀려나면 구 소켓의 인플라이트 호출은 응답이 오지 않으므로 즉시 실패시킨다.
+        failAllPendingCalls('Studio connection was replaced by a new tab; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
         try {
           studioSocket.close(4000, 'replaced');
         } catch {}
@@ -348,12 +365,17 @@ httpServer.on('upgrade', (req, socket, head) => {
       studioSocket = ws;
       attachSocket(ws, 'studio');
       ws.on('close', () => {
-        if (studioSocket === ws) studioSocket = null;
+        if (studioSocket === ws) {
+          studioSocket = null;
+          failAllPendingCalls('Studio disconnected while tool calls were in flight; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
+        }
       });
       sendJson(ws, { v: 1, type: 'welcome', protocol: 1, session: sessionInfo() });
       log('studio connected');
     } else {
       const agentLabel = url.searchParams.get('agent') ?? 'unknown';
+      // 도구 호출에 찍을 에이전트 라벨 — 접속 시점 값을 소켓에 붙여 둔다 (없으면 null, 세션 값이 대신 쓰인다).
+      ws.agentLabel = url.searchParams.get('agent');
       mcpSockets.add(ws);
       attachSocket(ws, 'mcp');
       ws.on('close', () => {
