@@ -15,6 +15,31 @@ import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 export const AGENT_PROTOCOL_VERSION = 1;
 
 export type AgentName = 'claude' | 'codex';
+export type PermissionProfile = 'safe' | 'unrestricted';
+
+export interface ProductSkillFile {
+  path: string;
+  size?: number;
+  encoding?: 'utf8' | 'base64';
+  content?: string;
+}
+
+export interface ProductSkill {
+  name: string;
+  description: string;
+  origin: 'bundled' | 'user';
+  enabled: boolean;
+  invalid?: boolean;
+  hasScripts: boolean;
+  hasAssets: boolean;
+  fileCount: number;
+  files: ProductSkillFile[];
+}
+
+export interface SkillCatalog {
+  revision: number;
+  skills: ProductSkill[];
+}
 
 export class AgentToolError extends Error {
   // 파라미터 프로퍼티 대신 명시적 할당 (node --test strip-only 모드 호환).
@@ -45,8 +70,18 @@ export type SidebarEvent =
       sessionId: string | null;
       model?: string;
       effort?: string;
+      permissionProfile?: PermissionProfile;
     }
   | { type: 'chat-stopped' }
+  | { type: 'permission-changed'; permissionProfile: PermissionProfile }
+  | { type: 'skills-catalog'; catalog: SkillCatalog }
+  | { type: 'skill-detail'; requestId: string; revision: number; skill: ProductSkill }
+  | { type: 'skill-saved'; requestId: string; revision: number; skill: ProductSkill }
+  | { type: 'skill-validated'; requestId: string; result: { valid: boolean; name: string; warnings: string[]; hasScripts: boolean; hasAssets: boolean; fileCount: number } }
+  | { type: 'skill-deleted'; requestId: string; name: string; recoverable: boolean }
+  | { type: 'skill-draft-progress'; requestId: string; state: 'generating' }
+  | { type: 'skill-draft-result'; requestId: string; draft: { name: string; files: Array<{ path: string; content: string }> } }
+  | { type: 'skills-error'; requestId: string; code: string; message: string }
   | {
       type: 'title-result';
       requestId: string;

@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
 import { createLineReader, truncate, SYSTEM_BRIEF } from './backend.mjs';
 
 const STDERR_TAIL_LIMIT = 16_000;
@@ -12,6 +14,7 @@ const STDERR_TAIL_LIMIT = 16_000;
  * @param {string | null} threadId
  */
 export function buildCodexArgv(opts, threadId) {
+  const unrestricted = opts.permissionProfile === 'unrestricted';
   const cfg = [
     '-c', 'mcp_servers.rhwp.command="node"',
     '-c', `mcp_servers.rhwp.args=["${opts.mcpScriptPath}"]`,
@@ -20,13 +23,16 @@ export function buildCodexArgv(opts, threadId) {
     // Headless MCP calls cannot display an approval prompt. Use config keys
     // understood by both the initial and resume subcommands.
     '-c', 'approval_policy="never"',
-    '-c', 'sandbox_mode="danger-full-access"',
+    '-c', `sandbox_mode="${unrestricted ? 'danger-full-access' : 'workspace-write'}"`,
     ...(opts.effort
       ? ['-c', `model_reasoning_effort=${JSON.stringify(opts.effort)}`]
       : []),
   ];
   const common = [
-    '--json', '--skip-git-repo-check', '--ignore-user-config',
+    '--json', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules',
+    '--disable', 'apps', '--disable', 'browser_use', '--disable', 'computer_use',
+    '--disable', 'image_generation', '--disable', 'multi_agent', '--disable', 'plugins',
+    '--disable', 'skill_search',
     '-m', opts.model ?? 'gpt-5.6-sol', ...cfg,
   ];
   return threadId
@@ -159,6 +165,21 @@ export function createCodexSession(opts) {
           }
           return;
         }
+        if (itemType === 'file_change') {
+          if (type === 'item.started') {
+            onEvent({
+              type: 'tool-call', agent: 'codex', callId: itemId, tool: 'file_change',
+              argsJson: JSON.stringify({ changes: item.changes ?? item.path ?? item }),
+            });
+          } else if (type === 'item.completed' || type === 'item.failed') {
+            onEvent({
+              type: 'tool-result', agent: 'codex', callId: itemId,
+              ok: item.status !== 'failed' && type !== 'item.failed',
+              resultPreview: truncate(JSON.stringify(item.changes ?? item.result ?? item.error ?? null)),
+            });
+          }
+          return;
+        }
         return;
       }
       if (type === 'turn.completed') {
@@ -213,7 +234,11 @@ export function createCodexSession(opts) {
       try {
         proc = spawn('codex', argv, {
           cwd: opts.rootDir,
-          env: process.env,
+          env: {
+            ...process.env,
+            ...(opts.isolatedHome ? { HOME: opts.isolatedHome } : {}),
+            CODEX_HOME: opts.codexHome ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
+          },
           stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (e) {
@@ -258,6 +283,11 @@ export function createCodexSession(opts) {
           }
         }
       });
+    },
+    setPermissionProfile(profile) {
+      if (turnOpen) throw new Error('Permission profile can only change between turns');
+      if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
+      opts.permissionProfile = profile;
     },
     interrupt() {
       killChild();

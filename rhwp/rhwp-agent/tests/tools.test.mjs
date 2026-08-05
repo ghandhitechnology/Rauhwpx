@@ -6,8 +6,8 @@ import { TOOL_DEFINITIONS, OFFSET_CAVEAT, toToolContent } from '../tools.mjs';
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 29개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 29);
+test('도구는 정확히 30개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 30);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
