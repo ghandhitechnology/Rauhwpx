@@ -52,15 +52,25 @@ Paths are relative to the repository root.
    - Pick **Claude** or **Codex**, type an instruction, press Enter
      (Shift+Enter for a newline; "Stop" interrupts a running turn).
 
-4. **Tool calls in the chat log** — each MCP tool call appears as a row:
-   spinner while running, then ✓/✕, with the tool name and an argument summary.
-   Click a row to expand the full arguments and a result preview.
+4. **Agent activity in the chat log** — document tools, reads, commands, file
+   changes, and web operations appear as expandable rows: spinner while
+   running, then ✓/✕, with the tool name, arguments, and result preview.
 
 5. **Approve / reject (pending edits)** — agent edits are not committed
    immediately: insertions show tinted, deletions struck through, formatting
    with a dotted outline. When the turn ends, a review card appears at the
    bottom of the sidebar. **Approve** applies everything as a single undo step
    (Ctrl+Z reverts the whole turn); **Reject** rolls it back.
+
+6. **Core tools and permissions** — Claude and Codex can both use project files,
+   shell commands, and web search/fetch in addition to the rhwp document tools.
+   New chats start in **Safe** mode. The permission button can switch an idle
+   chat to **Full access** after a warning; the provider session resumes with
+   the new boundary. Full access can reach files anywhere on the laptop.
+
+7. **Product skills** — type `/` to browse enabled rhwp skills, `/skills` to
+   open the library, or `/skill-create` for the guided creator. These skills
+   are shared by both providers but isolated from their global skill folders.
 
 ## Environment variables
 
@@ -70,6 +80,7 @@ Paths are relative to the repository root.
 | `RHWP_AGENT_TOKEN` | `dev` | Shared token for WS connections (`?token=`) |
 | `RHWP_CLAUDE_MODEL` | `sonnet` | Model for Claude sessions |
 | `RHWP_CODEX_MODEL` | `gpt-5.6-sol` | Model for Codex sessions |
+| `RHWP_SKILLS_DIR` | OS application-data directory | Product-only user skill directory override |
 
 Studio side (build-time, Vite): `VITE_RHWP_AGENT_URL` (default
 `ws://127.0.0.1:5175`), `VITE_RHWP_AGENT_TOKEN` (default `dev`).
@@ -77,10 +88,12 @@ Studio side (build-time, Vite): `VITE_RHWP_AGENT_URL` (default
 Each CLI spawns `mcp-stdio.mjs` as its MCP server; the hub passes
 `RHWP_WS_URL`, `RHWP_AGENT_TOKEN`, and `RHWP_AGENT_NAME` via env.
 
-## MCP tools (server name `rhwp`, 29 tools)
+## MCP tools (server name `rhwp`, 30 tools)
 
 Visible to Claude as `mcp__rhwp__<name>`.
 
+- Product skill support: `read_product_skill` (enabled skills and their text
+  resources only; no arbitrary local paths)
 - Read: `get_structure` (entry point; includes tables), `get_text_range`,
   `get_selection`, `get_fields`, `get_document_info` (includes `fontsUsed`),
   `find_text` (searches cells too), `render_page` (SVG markup or PNG image),
@@ -129,6 +142,27 @@ and `apply_char_format` accept an optional
 and offsets are relative to the inside of that cell. Nested tables are not
 addressable yet (Phase-1 limit).
 
+## Product skill format
+
+Each skill is a folder containing `SKILL.md` with `name` and `description`
+frontmatter plus concise instructions. Optional `references/`, `scripts/`, and
+`assets/` folders are supported. Bundled skills under `rhwp-agent/skills/` are
+read-only. User skills live in rhwp's application-data directory and are never
+installed into `~/.claude`, `~/.agents`, or `~/.codex`.
+
+- `/skills` — open the library
+- `/skill-create` — create an AI-assisted draft
+- `/skill-edit <name>` / `/skill-delete <name>` — manage a user skill
+- `/<skill-name> [request]` — explicitly activate an enabled skill
+
+Skills containing scripts are marked in the UI. Review scripts before saving
+or invoking them; in Full access mode they inherit the agent's broad access.
+The library groups bundled and user skills and supports search, enable/disable,
+inspection, bundled-skill duplication, user-skill editing, and recoverable
+deletion. Disabled skills are omitted from invocation autocomplete. Unknown
+slash text is sent normally, while `//` sends a message beginning with a
+literal `/`.
+
 ## Troubleshooting
 
 - `HUB_UNAVAILABLE` — the hub (`node server.mjs`) is not running.
@@ -138,11 +172,9 @@ addressable yet (Phase-1 limit).
   `mcp-stdio.mjs`; check the hub's stderr log.
 - Only one studio connection is kept: a new tab replaces the previous one
   (close code 4000), which takes the connection back when refocused.
-- Codex tool calls failing with "user cancelled MCP tool call" — as of codex
-  0.146, headless (`exec`) runs MCP tools only with `approval_policy=never` +
-  `--sandbox danger-full-access` (applied by default in the backend). In this
-  mode codex shell commands also run unsandboxed — use only for trusted local
-  work.
+- Safe-mode startup failing with a sandbox error — install or enable the
+  provider's local sandbox prerequisites. rhwp fails closed instead of silently
+  running shell commands outside the selected boundary.
 
 ## Files
 
@@ -151,5 +183,6 @@ addressable yet (Phase-1 limit).
 - `agents/codex.mjs` — `codex exec --json` per-turn spawn backend (`exec resume` continuity)
 - `agents/backend.mjs` — shared helpers + `SYSTEM_BRIEF`
 - `tools.mjs` — MCP tool definitions (name/description/input schema/validation), single source of truth
+- `skills.mjs` / `skill-generator.mjs` — isolated skill storage, validation, prompt context, and AI drafts
 - `mcp-stdio.mjs` — MCP stdio server → WS forwarder (stdout reserved for MCP frames)
 - `tests/` — tool-definition contract tests (`npm test`)
