@@ -42,6 +42,104 @@ function hexColorRef(hex: string): number {
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 
+/** 96dpi 기준 px → mm (수식 미리보기 메트릭 변환용) */
+function pxToMm(px: number): number {
+  return Math.round((px * 25.4) / 96 * 100) / 100;
+}
+
+/**
+ * renderEquationPreview 의 JSON 계약 파서.
+ * 신규 wasm 은 `{"svg",widthPx,heightPx,baselinePx,warnings}` JSON 문자열을,
+ * 구버전(스테일 pkg)은 SVG 문자열을 그대로 반환한다 → 파싱 실패/svg 키 부재 시
+ * raw 를 SVG 로 간주한다 (메트릭 없음, warnings 빈 배열).
+ */
+interface EquationPreview {
+  svg: string;
+  widthPx?: number;
+  heightPx?: number;
+  baselinePx?: number;
+  warnings: string[];
+}
+
+function parseEquationPreview(raw: string): EquationPreview {
+  try {
+    const parsed = JSON.parse(raw) as Partial<EquationPreview> | null;
+    if (parsed && typeof parsed.svg === 'string') {
+      return {
+        svg: parsed.svg,
+        ...(typeof parsed.widthPx === 'number' ? { widthPx: parsed.widthPx } : {}),
+        ...(typeof parsed.heightPx === 'number' ? { heightPx: parsed.heightPx } : {}),
+        ...(typeof parsed.baselinePx === 'number' ? { baselinePx: parsed.baselinePx } : {}),
+        warnings: Array.isArray(parsed.warnings)
+          ? parsed.warnings.filter((w): w is string => typeof w === 'string')
+          : [],
+      };
+    }
+  } catch { /* 파싱 실패 = 구버전 wasm — raw 문자열 자체가 SVG */ }
+  // JSON 이지만 svg 키가 없으면 구버전(bare SVG) 응답으로 간주한다
+  return { svg: raw, warnings: [] };
+}
+
+/** PNG 바이트 → base64 (브라우저/Node 공용) */
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+interface PngCapture { data: string; widthPx: number; heightPx: number }
+
+/** renderPageToCanvas 가 그린 캔버스 → PNG base64 (OffscreenCanvas/HTMLCanvasElement 모두 지원) */
+async function canvasToPngBase64(canvas: OffscreenCanvas | HTMLCanvasElement): Promise<PngCapture> {
+  if (typeof (canvas as OffscreenCanvas).convertToBlob === 'function') {
+    const blob = await (canvas as OffscreenCanvas).convertToBlob({ type: 'image/png' });
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    return { data: bytesToBase64(bytes), widthPx: canvas.width, heightPx: canvas.height };
+  }
+  const dataUrl = (canvas as HTMLCanvasElement).toDataURL('image/png');
+  return { data: dataUrl.slice(dataUrl.indexOf(',') + 1), widthPx: canvas.width, heightPx: canvas.height };
+}
+
+// 번호 유형 코드 — numbering-defaults.ts 의 NumberingType(const enum)과 동일 값.
+// const enum 은 node --test strip-only 모드에서 import 되지 않으므로
+// numbering-dialog.ts 의 NUM_FMT 처럼 로컬 상수로 둔다.
+const LIST_NUM_FMT = {
+  DIGIT: 0,        // 1, 2, 3
+  CIRCLE_DIGIT: 1, // ①, ②, ③
+  ROMAN_UPPER: 2,  // I, II, III
+  ROMAN_LOWER: 3,  // i, ii, iii
+  ALPHA_UPPER: 4,  // A, B, C
+  ALPHA_LOWER: 5,  // a, b, c
+  HANGUL: 8,       // 가, 나, 다
+  HANGUL_JAMO: 10, // ㄱ, ㄴ, ㄷ
+} as const;
+
+/** apply_list format 토큰 → (번호 유형 코드, 레벨 서식 패턴). 패턴의 ^N 은 해당 레벨 번호로 치환된다 */
+const LIST_FORMAT_MAP: Record<string, { code: number; pattern: (level: number) => string }> = {
+  '1.': { code: LIST_NUM_FMT.DIGIT, pattern: (l) => `^${l + 1}.` },
+  '1)': { code: LIST_NUM_FMT.DIGIT, pattern: (l) => `^${l + 1})` },
+  '(1)': { code: LIST_NUM_FMT.DIGIT, pattern: (l) => `(^${l + 1})` },
+  '①': { code: LIST_NUM_FMT.CIRCLE_DIGIT, pattern: (l) => `^${l + 1}` },
+  'a.': { code: LIST_NUM_FMT.ALPHA_LOWER, pattern: (l) => `^${l + 1}.` },
+  'a)': { code: LIST_NUM_FMT.ALPHA_LOWER, pattern: (l) => `^${l + 1})` },
+  'A.': { code: LIST_NUM_FMT.ALPHA_UPPER, pattern: (l) => `^${l + 1}.` },
+  'A)': { code: LIST_NUM_FMT.ALPHA_UPPER, pattern: (l) => `^${l + 1})` },
+  'I.': { code: LIST_NUM_FMT.ROMAN_UPPER, pattern: (l) => `^${l + 1}.` },
+  'i.': { code: LIST_NUM_FMT.ROMAN_LOWER, pattern: (l) => `^${l + 1}.` },
+  'i)': { code: LIST_NUM_FMT.ROMAN_LOWER, pattern: (l) => `^${l + 1})` },
+  '가.': { code: LIST_NUM_FMT.HANGUL, pattern: (l) => `^${l + 1}.` },
+  'ㄱ.': { code: LIST_NUM_FMT.HANGUL_JAMO, pattern: (l) => `^${l + 1}.` },
+};
+
+// 미지정 레벨의 기본 7수준 패턴 — 한컴 기본 "1. 가. 1) 가) (1) (가) ①" (numbering-dialog PRESETS[1]과 동일)
+const LIST_DEFAULT_LEVEL_FORMATS = ['^1.', '^2.', '^3)', '^4)', '(^5)', '(^6)', '^7'];
+const LIST_DEFAULT_NUMBER_FORMATS: number[] = [
+  LIST_NUM_FMT.DIGIT, LIST_NUM_FMT.HANGUL, LIST_NUM_FMT.DIGIT, LIST_NUM_FMT.HANGUL,
+  LIST_NUM_FMT.DIGIT, LIST_NUM_FMT.HANGUL, LIST_NUM_FMT.CIRCLE_DIGIT,
+];
+
 function asRecord(args: unknown): Record<string, unknown> {
   if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
     return args as Record<string, unknown>;
@@ -79,10 +177,19 @@ function optCell(args: Record<string, unknown>): CellAddr | undefined {
   const v = args['cell'];
   if (v === undefined || v === null) return undefined;
   const rec = asRecord(v);
+  for (const key of ['paraIdx', 'controlIdx', 'cellIdx'] as const) {
+    const val = rec[key];
+    if (typeof val !== 'number' || !Number.isSafeInteger(val)) {
+      throw new AgentToolError(
+        'INVALID_ARGS',
+        `cell.${key} must be an integer (got ${JSON.stringify(val)}). cell.paraIdx/controlIdx are the TABLE's body paragraph address — assemble cell from a get_structure tables[] entry (its paraIdx/controlIdx) plus the target cell's cellIdx, or copy a find_text match's cell object verbatim.`,
+      );
+    }
+  }
   return {
-    paraIdx: reqInt(rec, 'paraIdx'),
-    controlIdx: reqInt(rec, 'controlIdx'),
-    cellIdx: reqInt(rec, 'cellIdx'),
+    paraIdx: rec['paraIdx'] as number,
+    controlIdx: rec['controlIdx'] as number,
+    cellIdx: rec['cellIdx'] as number,
   };
 }
 
@@ -117,10 +224,15 @@ export class AgentToolExecutor {
       case 'get_document_info': return this.getDocumentInfo();
       case 'find_text': return this.findText(args);
       case 'render_page': return this.renderPage(args);
+      case 'get_para_format': return this.getParaFormat(args);
+      case 'get_char_format': return this.getCharFormat(args);
+      case 'list_numberings': return this.listNumberings();
+      case 'verify_changes': return this.verifyChanges(args);
       case 'insert_text': return this.insertText(args, agent);
       case 'delete_range': return this.deleteRange(args, agent);
       case 'replace_range': return this.replaceRange(args, agent);
       case 'apply_char_format': return this.applyCharFormat(args, agent);
+      case 'apply_list': return this.applyList(args, agent);
       case 'set_field_value': return this.setFieldValue(args, agent);
       case 'create_table': return this.createTable(args, agent);
       case 'edit_table': return this.editTable(args, agent);
@@ -408,7 +520,18 @@ export class AgentToolExecutor {
     const { inputHandler, wasm } = this.deps;
     const cursor = inputHandler.getCursorPosition();
     const sel = inputHandler.getSelection();
-    const toIdx = (p: DocumentPosition) => {
+    // 커서/선택의 charOffset 은 논리 오프셋(텍스트 문자 + 앞선 인라인 컨트롤 1개당 +1)이다.
+    // 다른 툴은 텍스트 오프셋을 쓰므로 본문 문단은 logicalToTextOffset 로 변환해 반환한다.
+    // (셀 안쪽 문단은 변환 API 가 없어 논리 오프셋 그대로 — 응답 note 참고)
+    interface SelPoint { sectionIdx: number; paraIdx: number; charOffset: number; cell?: CellAddr }
+    const toTextOffset = (sec: number, para: number, logical: number): number => {
+      try {
+        return wasm.logicalToTextOffset(sec, para, logical);
+      } catch {
+        return logical; // 구버전 wasm 호환 — 변환 실패 시 원값 유지
+      }
+    };
+    const toIdx = (p: DocumentPosition): SelPoint => {
       if (p.parentParaIndex !== undefined) {
         // 셀 내부: write 툴에 그대로 넘길 수 있는 cell 주소 + 셀 내부 문단 좌표.
         // flat 필드는 최외곽 셀 기준(command.ts:229 참고) — 중첩 표에서는 근사값이다.
@@ -429,7 +552,7 @@ export class AgentToolExecutor {
       return {
         sectionIdx: p.sectionIndex,
         paraIdx: p.paragraphIndex,
-        charOffset: p.charOffset,
+        charOffset: toTextOffset(p.sectionIndex, p.paragraphIndex, p.charOffset),
       };
     };
     const inCell =
@@ -441,23 +564,19 @@ export class AgentToolExecutor {
       hasSelection: sel !== null,
       cursor: toIdx(cursor),
     };
-    if (inCell) result['inCell'] = true;
+    if (inCell) {
+      result['inCell'] = true;
+      result['note'] = 'charOffset inside table cells is a logical offset (text chars + 1 per preceding inline control); body paragraph offsets are converted text offsets';
+    }
     if (sel) {
-      const selection: Record<string, unknown> = { start: toIdx(sel.start), end: toIdx(sel.end) };
-      if (
-        !inCell &&
-        sel.start.sectionIndex === sel.end.sectionIndex &&
-        sel.start.paragraphIndex === sel.end.paragraphIndex
-      ) {
-        const count = Math.min(sel.end.charOffset - sel.start.charOffset, 500);
+      const start = toIdx(sel.start);
+      const end = toIdx(sel.end);
+      const selection: Record<string, unknown> = { start, end };
+      if (!inCell && start.sectionIdx === end.sectionIdx && start.paraIdx === end.paraIdx) {
+        const count = Math.min(end.charOffset - start.charOffset, 500);
         if (count > 0) {
           try {
-            selection['text'] = wasm.getTextRange(
-              sel.start.sectionIndex,
-              sel.start.paragraphIndex,
-              sel.start.charOffset,
-              count,
-            );
+            selection['text'] = wasm.getTextRange(start.sectionIdx, start.paraIdx, start.charOffset, count);
           } catch {
             // 선택 텍스트는 best-effort — 실패해도 좌표는 반환한다.
           }
@@ -519,7 +638,10 @@ export class AgentToolExecutor {
     const caseSensitive = args['caseSensitive'] === true;
     const maxResults = Math.min(Math.max(optInt(args, 'maxResults', 50), 1), 200);
     const { wasm } = this.deps;
-    const needle = caseSensitive ? query : query.toLowerCase();
+    // 정규식 기반 검색 — toLowerCase 경로는 길이가 바뀔 수 있어(İ 등) 오프셋이 깨진다.
+    // 'giu' 플래그로 원본 문자열에서 직접 찾고, charOffset/length 는 wasm 과 같은
+    // Unicode scalar 단위로 환산한다 (JS 의 UTF-16 인덱스가 아니다).
+    const re = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? 'gu' : 'giu');
     const matches: Array<{
       sectionIdx: number;
       paraIdx: number;
@@ -530,11 +652,8 @@ export class AgentToolExecutor {
     }> = [];
     let truncated = false;
     const pushMatches = (sec: number, para: number, text: string, cell?: CellAddr): boolean => {
-      const haystack = caseSensitive ? text : text.toLowerCase();
-      let from = 0;
-      while (from <= haystack.length - needle.length) {
-        const idx = haystack.indexOf(needle, from);
-        if (idx === -1) break;
+      re.lastIndex = 0;
+      for (let hit = re.exec(text); hit !== null; hit = re.exec(text)) {
         if (matches.length >= maxResults) {
           truncated = true;
           return false;
@@ -542,13 +661,12 @@ export class AgentToolExecutor {
         const m: (typeof matches)[number] = {
           sectionIdx: sec,
           paraIdx: para,
-          charOffset: idx,
-          length: query.length,
-          context: text.slice(Math.max(0, idx - 30), Math.min(text.length, idx + query.length + 30)),
+          charOffset: [...text.slice(0, hit.index)].length,
+          length: [...hit[0]].length,
+          context: text.slice(Math.max(0, hit.index - 30), Math.min(text.length, hit.index + hit[0].length + 30)),
         };
         if (cell) m.cell = cell;
         matches.push(m);
-        from = idx + Math.max(needle.length, 1);
       }
       return true;
     };
@@ -585,7 +703,7 @@ export class AgentToolExecutor {
     return { revision: this.revision, matches, truncated };
   }
 
-  private renderPage(args: Record<string, unknown>): unknown {
+  private async renderPage(args: Record<string, unknown>): Promise<unknown> {
     const pageIndex = reqInt(args, 'pageIndex');
     const { wasm } = this.deps;
     const pageCount = wasm.pageCount;
@@ -595,11 +713,274 @@ export class AgentToolExecutor {
     if (pageIndex < 0 || pageIndex >= pageCount) {
       throw new AgentToolError('INVALID_ARGS', `pageIndex ${pageIndex} out of range (0..${pageCount - 1})`);
     }
+    const format = args['format'] === undefined || args['format'] === null ? 'svg' : reqString(args, 'format');
+    if (format !== 'svg' && format !== 'png') {
+      throw new AgentToolError('INVALID_ARGS', `format must be "svg" or "png" (got ${JSON.stringify(format)})`);
+    }
+    if (format === 'png') {
+      const rawScale = args['scale'];
+      if (rawScale !== undefined && rawScale !== null && (typeof rawScale !== 'number' || !Number.isFinite(rawScale))) {
+        throw new AgentToolError('INVALID_ARGS', 'scale must be a number (clamped to 0.5..3)');
+      }
+      const scale = Math.min(3, Math.max(0.5, typeof rawScale === 'number' ? rawScale : 2));
+      // 래스터화는 동기(wasm 렌더) — blob 변환만 비동기다
+      const canvas = this.renderPageToCanvasElement(pageIndex, scale);
+      const png = await canvasToPngBase64(canvas);
+      return {
+        revision: this.revision,
+        pageIndex,
+        image: { data: png.data, mimeType: 'image/png' },
+        widthPx: png.widthPx,
+        heightPx: png.heightPx,
+      };
+    }
     const svg = wasm.renderPageSvg(pageIndex);
     if (svg.length > MAX_SVG_BYTES) {
       throw new AgentToolError('RESULT_TOO_LARGE', `SVG is ${svg.length} bytes; page too complex to return`);
     }
     return { revision: this.revision, pageIndex, svg };
+  }
+
+  /** 래스터화용 캔버스 생성 — 브라우저 document 우선, 아니면 OffscreenCanvas (테스트/비브라우저는 RENDER_UNAVAILABLE) */
+  private createRenderCanvas(): HTMLCanvasElement | OffscreenCanvas {
+    if (typeof document !== 'undefined') return document.createElement('canvas');
+    if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(1, 1);
+    throw new AgentToolError(
+      'RENDER_UNAVAILABLE',
+      'PNG rendering needs a canvas (browser environment); use format "svg" instead',
+    );
+  }
+
+  /** 페이지를 캔버스에 그린다 — wasm 이 캔버스 크기를 페이지 크기 × scale 로 설정한다 */
+  private renderPageToCanvasElement(pageIndex: number, scale: number): HTMLCanvasElement | OffscreenCanvas {
+    const canvas = this.createRenderCanvas();
+    this.deps.wasm.renderPageToCanvas(pageIndex, canvas as unknown as HTMLCanvasElement, scale);
+    return canvas;
+  }
+
+  private listNumberings(): unknown {
+    this.requireDocLoaded();
+    const { wasm } = this.deps;
+    let numberings: Array<{ id: number; levelFormats: string[]; startNumber: number }> = [];
+    let bullets: Array<{ id: number; char: string; rawCode: number }> = [];
+    try { numberings = wasm.getNumberingList(); } catch { /* 구버전 wasm 호환 */ }
+    try { bullets = wasm.getBulletList(); } catch { /* 구버전 wasm 호환 */ }
+    return { revision: this.revision, numberings, bullets };
+  }
+
+  /**
+   * 문단 서식 읽기 — getParaPropertiesAt 은 px(96dpi) 단위라 pt 로 환산해 반환한다
+   * (apply_para_format 의 pt 입력과 대칭). headType 은 소문자로 정규화한다.
+   */
+  private getParaFormat(args: Record<string, unknown>): unknown {
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    const paraIdx = reqInt(args, 'paraIdx');
+    const cell = optCell(args);
+    this.validateAddress(sectionIdx, paraIdx, undefined, cell);
+    const { wasm } = this.deps;
+    const props = cell
+      ? wasm.getCellParaPropertiesAt(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx)
+      : wasm.getParaPropertiesAt(sectionIdx, paraIdx);
+    const pxToPt = (px: number | undefined): number | undefined =>
+      (typeof px === 'number' ? Math.round(px * 72 / 96 * 10) / 10 : undefined);
+    return {
+      revision: this.revision,
+      alignment: props.alignment,
+      lineSpacingType: props.lineSpacingType,
+      ...(props.lineSpacingType === 'Percent' ? { lineSpacingPercent: Math.round(props.lineSpacing ?? 100) } : {}),
+      spaceBeforePt: pxToPt(props.spacingBefore),
+      spaceAfterPt: pxToPt(props.spacingAfter),
+      indentPt: pxToPt(props.indent),
+      marginLeftPt: pxToPt(props.marginLeft),
+      marginRightPt: pxToPt(props.marginRight),
+      pageBreakBefore: props.pageBreakBefore === true,
+      headType: (props.headType ?? 'None').toLowerCase(),
+      numberingId: props.numberingId ?? 0,
+      paraLevel: props.paraLevel ?? 0,
+      paraShapeId: props.paraShapeId,
+    };
+  }
+
+  /** 글자 서식 읽기 — getCharPropertiesAt 계열 (fontSize HWPUNIT → pt 환산) */
+  private getCharFormat(args: Record<string, unknown>): unknown {
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    const paraIdx = reqInt(args, 'paraIdx');
+    const charOffset = reqInt(args, 'charOffset');
+    const cell = optCell(args);
+    this.validateAddress(sectionIdx, paraIdx, charOffset, cell);
+    const { wasm } = this.deps;
+    const props = cell
+      ? wasm.getCellCharPropertiesAt(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset)
+      : wasm.getCharPropertiesAt(sectionIdx, paraIdx, charOffset);
+    return {
+      revision: this.revision,
+      fontFamily: props.fontFamily,
+      fontSizePt: typeof props.fontSize === 'number' ? props.fontSize / 100 : undefined,
+      bold: props.bold === true,
+      italic: props.italic === true,
+      underline: props.underline === true,
+      strikethrough: props.strikethrough === true,
+      superscript: props.superscript === true,
+      subscript: props.subscript === true,
+      textColor: props.textColor,
+      shadeColor: props.shadeColor,
+      fontId: props.fontId,
+      charShapeId: props.charShapeId,
+    };
+  }
+
+  /** 편집 직후 영향 문단 다이제스트 (~200자, best-effort — 실패 시 빈 문자열) */
+  private readPostEditDigest(sectionIdx: number, paraIdx: number, charOffset: number, cell?: CellAddr): string {
+    try {
+      const { wasm } = this.deps;
+      return cell
+        ? wasm.getTextInCell(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, charOffset, 200)
+        : wasm.getTextRange(sectionIdx, paraIdx, charOffset, 200);
+    } catch {
+      return '';
+    }
+  }
+
+  /** 문단이 표시되는 페이지 인덱스 (best-effort — 실패 시 null) */
+  private pageOfParagraph(sectionIdx: number, paraIdx: number, cell?: CellAddr): number | null {
+    const { wasm } = this.deps;
+    try {
+      const rect = cell
+        ? wasm.getCursorRectInCell(sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, 0)
+        : wasm.getCursorRect(sectionIdx, paraIdx, 0);
+      return rect && typeof rect.pageIndex === 'number' ? rect.pageIndex : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * verify_changes — 에이전트 셀프체크. change set 요약 + 영향 문단의 편집 후 텍스트
+   * 다이제스트 + 경고를 반환한다. includeImage 면 첫 영향 페이지를 mark-only op 까지
+   * 적용한 상태(승인 후 모습)로 PNG 렌더한다 (withMarkedOpsApplied — 문서에는 흔적 없음).
+   */
+  private async verifyChanges(args: Record<string, unknown>): Promise<unknown> {
+    this.requireDocLoaded();
+    const rawId = args['changeSetId'];
+    if (rawId !== undefined && rawId !== null && (typeof rawId !== 'string' || rawId.length < 1)) {
+      throw new AgentToolError('INVALID_ARGS', 'changeSetId must be a non-empty string');
+    }
+    const changeSetId = typeof rawId === 'string' ? rawId : undefined;
+    const includeImage = args['includeImage'] === true;
+    const { pending } = this.deps;
+    const summary = pending.describeChangeSet(changeSetId);
+    const sets = pending.getChangeSets();
+    const set = changeSetId !== undefined
+      ? sets.find((s) => s.id === changeSetId)
+      : sets[sets.length - 1];
+
+    const warnings: string[] = [];
+    if (!set) {
+      warnings.push('no pending change set found — edits may have been approved/rejected already, or none were made');
+    }
+
+    // op 좌표 → 영향 문단 수집 (dedupe, 상한 8)
+    interface AffectedPara { sectionIdx: number; paraIdx: number; cell?: CellAddr }
+    const affected: AffectedPara[] = [];
+    const seenPara = new Set<string>();
+    let hasDeleteMark = false;
+    let hasTableStructure = false;
+    const pushPara = (sectionIdx: number, paraIdx: number, cell?: CellAddr): void => {
+      const key = cell
+        ? `${sectionIdx}:c${cell.paraIdx}/${cell.controlIdx}/${cell.cellIdx}:${paraIdx}`
+        : `${sectionIdx}:b:${paraIdx}`;
+      if (seenPara.has(key) || affected.length >= 8) return;
+      seenPara.add(key);
+      affected.push(cell ? { sectionIdx, paraIdx, cell } : { sectionIdx, paraIdx });
+    };
+    for (const op of set?.ops ?? []) {
+      if (op.kind === 'delete') hasDeleteMark = true;
+      if (op.kind === 'object' && (op.obj.type === 'tableStructure' || op.obj.type === 'tableStructureMarked')) {
+        hasTableStructure = true;
+      }
+      if (op.kind === 'insert' || op.kind === 'delete' || op.kind === 'replace' || op.kind === 'format') {
+        const r = op.range;
+        for (let p = r.startParaIdx; p <= Math.min(r.endParaIdx, r.startParaIdx + 2); p++) {
+          pushPara(r.sectionIdx, p, r.cell);
+        }
+      } else if (op.kind === 'object') {
+        const o = op.obj;
+        switch (o.type) {
+          case 'paraFormat':
+          case 'applyStyle':
+            pushPara(o.sectionIdx, o.paraIdx, o.cell);
+            break;
+          case 'createTable':
+          case 'insertImage':
+            if (o.anchor) pushPara(o.sectionIdx, o.anchor.paraIdx);
+            break;
+          case 'insertEquation':
+            if (o.cell) pushPara(o.sectionIdx, o.paraIdx, o.cell);
+            else if (o.anchor) pushPara(o.sectionIdx, o.anchor.paraIdx);
+            break;
+          case 'tableStructure':
+          case 'tableStructureMarked':
+          case 'setCellProps':
+          case 'setTableProps':
+            pushPara(o.sectionIdx, o.tableParaIdx);
+            break;
+          default:
+            break; // pageLayout/headerFooter — 문단 좌표 없음
+        }
+      }
+    }
+    if (hasDeleteMark) {
+      warnings.push('deleted text remains visible struck-through until approval — expected, do not fix');
+    }
+    if (hasTableStructure) {
+      warnings.push(
+        'a table structure op is pending: cellIdx values of that table renumber only after the user approves — '
+        + 'further edits to it are rejected (PENDING_DESTRUCTIVE_OP) until then; re-read get_structure on your next turn',
+      );
+    }
+
+    // 편집 후 텍스트 다이제스트 (문단당 앞 200자 — 지금 문서에 보이는 그대로)
+    const postEditText = affected.map((a) => ({
+      sectionIdx: a.sectionIdx,
+      paraIdx: a.paraIdx,
+      ...(a.cell ? { cell: a.cell } : {}),
+      text: this.readPostEditDigest(a.sectionIdx, a.paraIdx, 0, a.cell),
+    }));
+    const affectedPages: number[] = [];
+    for (const a of affected) {
+      const page = this.pageOfParagraph(a.sectionIdx, a.paraIdx, a.cell);
+      if (page !== null && !affectedPages.includes(page)) affectedPages.push(page);
+    }
+
+    const result: Record<string, unknown> = {
+      changeSetId: summary.changeSetId,
+      status: summary.status,
+      agent: summary.agent,
+      ops: summary.ops,
+      postEditText,
+      affectedPages,
+      warnings,
+    };
+
+    if (includeImage) {
+      const page = affectedPages[0] ?? 0;
+      try {
+        // 마크 전용 op 까지 적용한 "승인 후" 상태로 렌더하고 반드시 원복된다
+        const canvas = set
+          ? pending.withMarkedOpsApplied(set.id, () => this.renderPageToCanvasElement(page, 2))
+          : this.renderPageToCanvasElement(page, 2);
+        const png = await canvasToPngBase64(canvas);
+        result['image'] = { data: png.data, mimeType: 'image/png' };
+        result['imagePageIndex'] = page;
+      } catch (e) {
+        if (e instanceof AgentToolError && e.code !== 'RENDER_UNAVAILABLE') throw e;
+        // 캔버스 없는 환경(테스트 등)이나 렌더 실패는 이미지 생략 + 경고로 degrade
+        const msg = e instanceof Error ? e.message : String(e);
+        warnings.push(`includeImage requested but the page render is unavailable here — image skipped (${msg.slice(0, 120)})`);
+      }
+    }
+    // withMarkedOpsApplied 가 미리보기 이벤트로 revision 을 올리므로 마지막에 읽는다
+    return { revision: this.revision, ...result };
   }
 
   // ─── write tools (PendingEditManager 위임) ─────────────────
@@ -610,9 +991,13 @@ export class AgentToolExecutor {
     const paraIdx = reqInt(args, 'paraIdx');
     const charOffset = reqInt(args, 'charOffset');
     const cell = optCell(args);
-    const text = reqString(args, 'text');
+    // \r\n / \r → \n 정규화 (wasm 은 \n 만 문단 분할로 처리한다)
+    const text = reqString(args, 'text').replace(/\r\n?/g, '\n');
     if (text.length < 1 || text.length > 10_000) {
-      throw new AgentToolError('INVALID_ARGS', `text must be 1..10000 chars (got ${text.length})`);
+      throw new AgentToolError(
+        'INVALID_ARGS',
+        `text must be 1..10000 chars (got ${text.length}); beyond the limit, split it into multiple insert_text calls, chaining each response's revision into the next call's expectedRevision`,
+      );
     }
     this.validateAddress(sectionIdx, paraIdx, charOffset, cell);
     if (cell) this.guardDestructiveMark(sectionIdx, cell.paraIdx, cell.controlIdx);
@@ -629,6 +1014,7 @@ export class AgentToolExecutor {
         endParaIdx: r.insertedRange.endParaIdx,
         endCharOffset: r.insertedRange.endCharOffset,
       },
+      postEdit: this.readPostEditDigest(sectionIdx, r.insertedRange.startParaIdx, r.insertedRange.startCharOffset, cell),
       note: PENDING_NOTE,
     };
   }
@@ -645,7 +1031,8 @@ export class AgentToolExecutor {
       revision: this.revision,
       changeSetId: r.changeSetId,
       markedText: r.markedText,
-      note: PENDING_NOTE,
+      postEdit: this.readPostEditDigest(range.sectionIdx, range.startParaIdx, range.startCharOffset, range.cell),
+      note: `deleted text remains visible struck-through until approval — expected, do not "fix" it. ${PENDING_NOTE}`,
     };
   }
 
@@ -660,21 +1047,18 @@ export class AgentToolExecutor {
     if (text.length < 1 || text.length > 10_000) {
       throw new AgentToolError('INVALID_ARGS', `text must be 1..10000 chars (got ${text.length})`);
     }
-    const del = this.deps.pending.markDelete(agent, range);
-    const insAddr: { sectionIdx: number; paraIdx: number; charOffset: number; cell?: CellAddr } =
-      { sectionIdx: range.sectionIdx, paraIdx: range.endParaIdx, charOffset: range.endCharOffset };
-    if (range.cell) insAddr.cell = range.cell;
-    const ins = this.deps.pending.insertText(agent, insAddr, text);
+    // 원자적 교체 (삭제 마크 + 끝 삽입 2-op 조합 폐기) — 서식 보존 + 스냅샷 기반 되돌림
+    const r = this.deps.pending.replaceText(range, text, agent);
     return {
       revision: this.revision,
-      changeSetId: ins.changeSetId,
-      markedText: del.markedText,
+      changeSetId: r.changeSetId,
       insertedRange: {
-        startParaIdx: ins.insertedRange.startParaIdx,
-        startCharOffset: ins.insertedRange.startCharOffset,
-        endParaIdx: ins.insertedRange.endParaIdx,
-        endCharOffset: ins.insertedRange.endCharOffset,
+        startParaIdx: r.insertedRange.startParaIdx,
+        startCharOffset: r.insertedRange.startCharOffset,
+        endParaIdx: r.insertedRange.endParaIdx,
+        endCharOffset: r.insertedRange.endCharOffset,
       },
+      postEdit: this.readPostEditDigest(range.sectionIdx, r.insertedRange.startParaIdx, r.insertedRange.startCharOffset, range.cell),
       note: PENDING_NOTE,
     };
   }
@@ -690,6 +1074,9 @@ export class AgentToolExecutor {
     this.validateAddress(sectionIdx, paraIdx, endOffset, cell);
     if (endOffset < startOffset) {
       throw new AgentToolError('INVALID_ARGS', 'endOffset must be >= startOffset');
+    }
+    if (endOffset === startOffset) {
+      throw new AgentToolError('INVALID_ARGS', 'range is empty (startOffset === endOffset) — formatting needs at least one character');
     }
     // props_json 키 인코딩은 hwpctl/actions/format.ts charShapeSetToJson 및
     // core/types.ts CharProperties와 동일: fontSize = pt*100, textColor = '#RRGGBB'.
@@ -784,12 +1171,16 @@ export class AgentToolExecutor {
     }
   }
 
-  /** 파괴적 마크가 걸린 표에 대한 후속 편집 차단 (설계 리뷰 확정 가드) */
+  /**
+   * 구조 op 이 걸린 표에 대한 후속 편집 차단 (설계 리뷰 확정 가드).
+   * insert_row/col 은 적용 즉시, delete_row/col·merge 는 승인 시 cellIdx 가 재번호
+   * 매겨지므로 승인 전에는 같은 표의 어떤 편집도 모호하다. 승인은 턴 사이에서만 일어난다.
+   */
   private guardDestructiveMark(sectionIdx: number, tableParaIdx: number, controlIdx: number): void {
-    if (this.deps.pending.hasDestructiveTableMark(sectionIdx, tableParaIdx, controlIdx)) {
+    if (this.deps.pending.hasPendingStructureOp(sectionIdx, tableParaIdx, controlIdx)) {
       throw new AgentToolError(
         'PENDING_DESTRUCTIVE_OP',
-        'This table has a pending destructive edit (delete_row/delete_col/merge_cells) that is not applied until the user approves it. Wait for approval before further edits to this table.',
+        'This table has a pending structure edit (insert/delete row/col or merge_cells) whose cellIdx renumbering is not final until the user approves it. Approval can only happen between turns: finish your turn now, the user approves in the sidebar, then re-read get_structure and retry with fresh coordinates on your next turn.',
       );
     }
   }
@@ -887,18 +1278,24 @@ export class AgentToolExecutor {
       if (v < 0 || v >= max) throw new AgentToolError('INVALID_ARGS', `${key} ${v} out of range (0..${max - 1})`);
       return v;
     };
+    const optBool = (key: string, fallback: boolean): boolean => {
+      const v = args[key];
+      if (v === undefined || v === null) return fallback;
+      if (typeof v !== 'boolean') throw new AgentToolError('INVALID_ARGS', `${key} must be a boolean`);
+      return v;
+    };
 
     switch (op) {
       case 'insert_row': {
         const rowIdx = reqIdx('rowIdx', dims.rowCount);
-        const obj: ObjectOp = { type: 'tableStructure', ...base, op: 'insert_row', index: rowIdx, after: args['below'] !== false };
+        const obj: ObjectOp = { type: 'tableStructure', ...base, op: 'insert_row', index: rowIdx, after: optBool('below', true) };
         const r = this.deps.pending.addObjectOp(agent, obj);
         const d = (r.obj as Extract<ObjectOp, { type: 'tableStructure' }>).dims!;
         return { revision: this.revision, changeSetId: r.changeSetId, rowCount: d.rowCount, colCount: d.colCount, note: PENDING_NOTE };
       }
       case 'insert_col': {
         const colIdx = reqIdx('colIdx', dims.colCount);
-        const obj: ObjectOp = { type: 'tableStructure', ...base, op: 'insert_col', index: colIdx, after: args['right'] !== false };
+        const obj: ObjectOp = { type: 'tableStructure', ...base, op: 'insert_col', index: colIdx, after: optBool('right', true) };
         const r = this.deps.pending.addObjectOp(agent, obj);
         const d = (r.obj as Extract<ObjectOp, { type: 'tableStructure' }>).dims!;
         return { revision: this.revision, changeSetId: r.changeSetId, rowCount: d.rowCount, colCount: d.colCount, note: PENDING_NOTE };
@@ -927,7 +1324,7 @@ export class AgentToolExecutor {
         }
         const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'merge_cells', startRow, startCol, endRow, endCol, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `cells are NOT merged yet — highlighted until the user approves. Merging renumbers cellIdx: re-read get_structure afterwards. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `cells are NOT merged yet — highlighted until the user approves. Merging renumbers cellIdx only on approval, so re-read get_structure on your next turn before editing this table again. ${PENDING_NOTE}` };
       }
       case 'set_cell_props': {
         const cellIdx = reqIdx('cellIdx', dims.cellCount);
@@ -1041,8 +1438,40 @@ export class AgentToolExecutor {
       }
       props['pageBreakBefore'] = args['pageBreakBefore'];
     }
+    // 목록 속성 — Rust parse_para_shape_mods 의 JSON 키("headType": "Outline"|"Number"|"Bullet"|"None" 등)로 매핑
+    const headType = args['headType'];
+    if (headType !== undefined && headType !== null) {
+      const headMap: Record<string, string> = { none: 'None', number: 'Number', bullet: 'Bullet', outline: 'Outline' };
+      if (typeof headType !== 'string' || !(headType in headMap)) {
+        throw new AgentToolError('INVALID_ARGS', 'headType must be one of none|number|bullet|outline');
+      }
+      props['headType'] = headMap[headType];
+    }
+    const numberingId = args['numberingId'];
+    if (numberingId !== undefined && numberingId !== null) {
+      if (typeof numberingId !== 'number' || !Number.isSafeInteger(numberingId) || numberingId < 0) {
+        throw new AgentToolError('INVALID_ARGS', 'numberingId must be a non-negative integer (see list_numberings)');
+      }
+      props['numberingId'] = numberingId;
+    }
+    const paraLevel = args['paraLevel'];
+    if (paraLevel !== undefined && paraLevel !== null) {
+      if (typeof paraLevel !== 'number' || !Number.isSafeInteger(paraLevel) || paraLevel < 0 || paraLevel > 6) {
+        throw new AgentToolError('INVALID_ARGS', 'paraLevel must be an integer 0..6');
+      }
+      props['paraLevel'] = paraLevel;
+    }
+    const bulletChar = args['bulletChar'];
+    if (bulletChar !== undefined && bulletChar !== null) {
+      if (typeof bulletChar !== 'string' || bulletChar.length < 1) {
+        throw new AgentToolError('INVALID_ARGS', 'bulletChar must be a non-empty string');
+      }
+      // 글머리표 문자 → 정의 id (없으면 생성). numberingId 를 덮어쓰고 기본 headType 은 Bullet
+      props['numberingId'] = this.deps.wasm.ensureDefaultBullet(bulletChar);
+      if (props['headType'] === undefined) props['headType'] = 'Bullet';
+    }
     if (Object.keys(props).length === 0) {
-      throw new AgentToolError('INVALID_ARGS', 'At least one paragraph format key is required (alignment/lineSpacingPercent/spaceBeforePt/spaceAfterPt/indentPt/marginLeftPt/marginRightPt/pageBreakBefore)');
+      throw new AgentToolError('INVALID_ARGS', 'At least one paragraph format key is required (alignment/lineSpacingPercent/spaceBeforePt/spaceAfterPt/indentPt/marginLeftPt/marginRightPt/pageBreakBefore/headType/numberingId/paraLevel/bulletChar)');
     }
     const obj: ObjectOp = {
       type: 'paraFormat', sectionIdx, paraIdx,
@@ -1052,6 +1481,100 @@ export class AgentToolExecutor {
     };
     const r = this.deps.pending.addObjectOp(agent, obj);
     return { revision: this.revision, changeSetId: r.changeSetId, applied: true, note: PENDING_NOTE };
+  }
+
+  /**
+   * apply_list — 문단 범위에 실제 HWP 목록(자동 번호/글머리표)을 적용한다.
+   * 번호 정의는 같은 레벨 서식의 기존 정의를 재사용하고 없으면 새로 만든다.
+   * 각 문단에는 paraFormat op 하나씩 (headType/numberingId/paraLevel) 이 걸린다.
+   */
+  private applyList(args: Record<string, unknown>, agent: AgentName): unknown {
+    this.requireRevision(args);
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    const startParaIdx = reqInt(args, 'startParaIdx');
+    const endParaIdx = reqInt(args, 'endParaIdx');
+    this.validateAddress(sectionIdx, startParaIdx);
+    this.validateAddress(sectionIdx, endParaIdx);
+    if (endParaIdx < startParaIdx) {
+      throw new AgentToolError('INVALID_ARGS', 'endParaIdx must be >= startParaIdx');
+    }
+    const level = optInt(args, 'level', 0);
+    if (level < 0 || level > 6) {
+      throw new AgentToolError('INVALID_ARGS', `level must be 0..6 (got ${level})`);
+    }
+    const rawStart = args['startNumber'];
+    const startNumber = rawStart === undefined || rawStart === null ? undefined : reqInt(args, 'startNumber');
+    if (startNumber !== undefined && startNumber < 1) {
+      throw new AgentToolError('INVALID_ARGS', 'startNumber must be >= 1');
+    }
+    const { wasm } = this.deps;
+
+    let headType: 'Number' | 'Bullet';
+    let numberingId: number;
+    const bulletChar = args['bulletChar'];
+    if (bulletChar !== undefined && bulletChar !== null) {
+      if (typeof bulletChar !== 'string' || bulletChar.length < 1) {
+        throw new AgentToolError('INVALID_ARGS', 'bulletChar must be a non-empty string');
+      }
+      headType = 'Bullet';
+      numberingId = wasm.ensureDefaultBullet(bulletChar);
+    } else {
+      headType = 'Number';
+      const format = reqString(args, 'format');
+      const fmt = LIST_FORMAT_MAP[format];
+      if (!fmt) {
+        throw new AgentToolError(
+          'INVALID_ARGS',
+          `format must be one of ${Object.keys(LIST_FORMAT_MAP).join('|')} (got ${JSON.stringify(format)})`,
+        );
+      }
+      // 7수준 정의: 요청 레벨만 요청 형식으로, 나머지는 한컴 기본 패턴으로 채운다
+      const levelFormats = LIST_DEFAULT_LEVEL_FORMATS.slice();
+      const numberFormats = LIST_DEFAULT_NUMBER_FORMATS.slice();
+      levelFormats[level] = fmt.pattern(level);
+      numberFormats[level] = fmt.code;
+      // 같은 레벨 서식(패턴)과 번호 유형 코드가 모두 일치하는 기존 정의가 있으면
+      // 재사용한다 (정의 중복 축적 방지). 패턴은 같아도 유형 코드가 일치하지
+      // 않으면 렌더 결과가 달라지므로('1.' 요청에 가,나,다 정의 재사용 등) 재사용하지 않는다.
+      // numberFormats 를 반환하지 않는 구버전 wasm 에서는 유형을 검증할 수 없어
+      // 재사용을 포기하고 새 정의를 만든다.
+      let existing: { id: number; levelFormats: string[]; numberFormats?: number[]; startNumber: number } | undefined;
+      try {
+        existing = wasm.getNumberingList().find(
+          (n) => n.levelFormats[level] === levelFormats[level]
+            && n.numberFormats?.[level] === numberFormats[level],
+        );
+      } catch { /* 구버전 wasm 호환 — 조회 실패 시 새로 생성 */ }
+      if (existing) {
+        numberingId = existing.id;
+        // 재사용 정의의 시작 번호는 문단의 NewNumber 컨트롤로만 바꿀 수 있다
+        if (startNumber !== undefined) {
+          try { wasm.setNumberingRestart(sectionIdx, startParaIdx, 2, startNumber); } catch { /* 미지원 wasm 무시 */ }
+        }
+      } else {
+        numberingId = wasm.createNumbering(JSON.stringify({
+          levelFormats, numberFormats, startNumber: startNumber ?? 1,
+        }));
+      }
+    }
+
+    let changeSetId = '';
+    for (let p = startParaIdx; p <= endParaIdx; p++) {
+      const obj: ObjectOp = {
+        type: 'paraFormat', sectionIdx, paraIdx: p,
+        propsJson: JSON.stringify({ headType, numberingId, paraLevel: level }),
+        prevParaShapeId: -1, charOffset: 0,
+        textSample: this.paraTextSample(sectionIdx, p),
+      };
+      changeSetId = this.deps.pending.addObjectOp(agent, obj).changeSetId;
+    }
+    return {
+      revision: this.revision,
+      changeSetId,
+      numberingId,
+      paragraphs: endParaIdx - startParaIdx + 1,
+      note: PENDING_NOTE,
+    };
   }
 
   // ─── 객체 툴 (Phase 2: 그림/수식) ──────────────────────────
@@ -1147,7 +1670,8 @@ export class AgentToolExecutor {
     const cell = optCell(args);
     this.validateAddress(sectionIdx, paraIdx, charOffset, cell);
     if (cell) this.guardDestructiveMark(sectionIdx, cell.paraIdx, cell.controlIdx);
-    const { script, fontSizeHu, colorRef } = this.validateEquationArgs(args);
+    const { script, fontSizeHu, fontSizePt, colorRef, preview } =
+      this.validateEquationArgs(args, { sectionIdx, paraIdx, charOffset, ...(cell ? { cell } : {}) });
     const obj: ObjectOp = {
       type: 'insertEquation', sectionIdx, paraIdx, charOffset,
       ...(cell ? { cell } : {}),
@@ -1159,52 +1683,86 @@ export class AgentToolExecutor {
       revision: this.revision,
       changeSetId: r.changeSetId,
       equation: { paraIdx: anchor.paraIdx, controlIdx: anchor.controlIdx },
+      fontSizePt,
+      ...(preview.widthPx !== undefined ? { widthMm: pxToMm(preview.widthPx) } : {}),
+      ...(preview.heightPx !== undefined ? { heightMm: pxToMm(preview.heightPx) } : {}),
+      ...(preview.baselinePx !== undefined ? { baselineMm: pxToMm(preview.baselinePx) } : {}),
+      warnings: preview.warnings,
       note: PENDING_NOTE,
     };
   }
 
   private previewEquation(args: Record<string, unknown>): unknown {
     this.requireDocLoaded();
-    const { svg } = this.validateEquationArgs(args);
-    if (svg.length > MAX_SVG_BYTES) {
-      throw new AgentToolError('RESULT_TOO_LARGE', `SVG is ${svg.length} bytes`);
+    const { preview } = this.validateEquationArgs(args);
+    if (preview.svg.length > MAX_SVG_BYTES) {
+      throw new AgentToolError('RESULT_TOO_LARGE', `SVG is ${preview.svg.length} bytes`);
     }
-    return { revision: this.revision, svg };
+    return {
+      revision: this.revision,
+      svg: preview.svg,
+      ...(preview.widthPx !== undefined ? { widthMm: pxToMm(preview.widthPx) } : {}),
+      ...(preview.heightPx !== undefined ? { heightMm: pxToMm(preview.heightPx) } : {}),
+      ...(preview.baselinePx !== undefined ? { baselineMm: pxToMm(preview.baselinePx) } : {}),
+      warnings: preview.warnings,
+    };
   }
 
   /**
    * 수식 스크립트 검증 게이트 — 삽입 전 renderEquationPreview 로 렌더해 보고,
    * 실패하면 INVALID_SCRIPT 로 거부한다 (깨진 수식이 문서에 들어가지 않는다).
+   * addr 이 있으면 fontSizePt 생략 시 삽입 지점 앞 문자의 글꼴 크기를 상속한다.
    */
-  private validateEquationArgs(args: Record<string, unknown>):
-      { script: string; fontSizeHu: number; colorRef: number; svg: string } {
+  private validateEquationArgs(
+    args: Record<string, unknown>,
+    addr?: { sectionIdx: number; paraIdx: number; charOffset: number; cell?: CellAddr },
+  ): { script: string; fontSizeHu: number; fontSizePt: number; colorRef: number; preview: EquationPreview } {
     const script = reqString(args, 'script');
     // 직렬화기 u16 길이 필드 보호 — studio MAX_EQUATION_SCRIPT_LEN 과 동일 상한
     if (script.length < 1 || script.length > 8000) {
       throw new AgentToolError('INVALID_ARGS', 'script must be 1..8000 chars');
     }
-    const fontSizePt = args['fontSizePt'];
+    let fontSizePt = args['fontSizePt'];
     if (fontSizePt !== undefined && fontSizePt !== null
       && (typeof fontSizePt !== 'number' || !(fontSizePt >= 1) || fontSizePt > 200)) {
       throw new AgentToolError('INVALID_ARGS', 'fontSizePt must be 1..200');
     }
+    if ((fontSizePt === undefined || fontSizePt === null) && addr) {
+      fontSizePt = this.ambientFontSizePt(addr);
+    }
+    const pt = typeof fontSizePt === 'number' ? fontSizePt : 10;
     const color = args['color'];
     if (color !== undefined && color !== null && (typeof color !== 'string' || !HEX_COLOR_RE.test(color))) {
       throw new AgentToolError('INVALID_ARGS', 'color must be "#RRGGBB"');
     }
-    const fontSizeHu = ptToHu(typeof fontSizePt === 'number' ? fontSizePt : 10);
+    const fontSizeHu = ptToHu(pt);
     const colorRef = typeof color === 'string' ? hexColorRef(color) : 0;
-    let svg: string;
+    let preview: EquationPreview;
     try {
-      svg = this.deps.wasm.renderEquationPreview(script, fontSizeHu, colorRef);
+      preview = parseEquationPreview(this.deps.wasm.renderEquationPreview(script, fontSizeHu, colorRef));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       throw new AgentToolError('INVALID_SCRIPT', `equation script failed to render: ${msg.slice(0, 300)}`);
     }
-    if (typeof svg !== 'string' || !svg.includes('<svg')) {
+    if (!preview.svg.includes('<svg')) {
       throw new AgentToolError('INVALID_SCRIPT', 'equation script rendered no output — check HWP equation syntax (over, sqrt {}, int _{a} ^{b}, PMATRIX{a & b # c & d}, …)');
     }
-    return { script, fontSizeHu, colorRef, svg };
+    return { script, fontSizeHu, fontSizePt: pt, colorRef, preview };
+  }
+
+  /** 삽입 지점 앞 문자의 글꼴 크기(pt) — 삽입 수식은 앞 문자 서식을 따라가므로 (best-effort) */
+  private ambientFontSizePt(addr: { sectionIdx: number; paraIdx: number; charOffset: number; cell?: CellAddr }): number | undefined {
+    try {
+      const probe = addr.charOffset > 0 ? addr.charOffset - 1 : 0;
+      const props = addr.cell
+        ? this.deps.wasm.getCellCharPropertiesAt(
+          addr.sectionIdx, addr.cell.paraIdx, addr.cell.controlIdx, addr.cell.cellIdx, addr.paraIdx, probe,
+        )
+        : this.deps.wasm.getCharPropertiesAt(addr.sectionIdx, addr.paraIdx, probe);
+      return typeof props.fontSize === 'number' && props.fontSize > 0 ? props.fontSize / 100 : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

@@ -31,6 +31,9 @@ pub struct Token {
     /// 이 토큰 앞에 일반 공백이 있었는지. 무브레이스 첨자 operand 의 경계 판정에 쓰인다
     /// (HWP 수식에서 일반 공백은 시각적으로는 무의미하나 operand 구분자 역할을 한다, #1304).
     pub space_before: bool,
+    /// LaTeX 스타일 백슬래시 명령어(`\foo`)에서 온 Command 토큰인지.
+    /// 파서가 미지 명령어 경고를 낼 때 일반 변수 식별자(베어워드)와 구분하기 위한 표시.
+    pub from_latex: bool,
 }
 
 impl Token {
@@ -40,6 +43,7 @@ impl Token {
             value: value.into(),
             pos,
             space_before: false,
+            from_latex: false,
         }
     }
 
@@ -49,6 +53,7 @@ impl Token {
             value: String::new(),
             pos,
             space_before: false,
+            from_latex: false,
         }
     }
 }
@@ -289,7 +294,9 @@ impl Tokenizer {
                 break;
             }
         }
-        Token::new(TokenType::Command, value, start)
+        let mut tok = Token::new(TokenType::Command, value, start);
+        tok.from_latex = true;
+        tok
     }
 
     /// 다중 문자 기호 읽기 (<=, >=, !=, ==, <<, >>, <<<, >>>)

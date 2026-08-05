@@ -21,7 +21,7 @@ test('agent approval records the rendered preview instead of replaying applied e
   const approve = between(pendingSrc, '  approve(changeSetId: string): void {', '\n  /** reject');
 
   assert.match(approve, /previewId = wasm\.saveSnapshot\(\)/, 'capture the exact rendered preview');
-  assert.match(approve, /this\.revertAppliedOps\(set\)[\s\S]*beforeId = wasm\.saveSnapshot\(\)/,
+  assert.match(approve, /this\.revertAppliedOps\(revertOps, keepPreviewsOf\)[\s\S]*beforeId = wasm\.saveSnapshot\(\)/,
     'capture undo state after reverting applied pending ops');
   assert.match(approve, /wasm\.restoreSnapshot\(previewId\)[\s\S]*this\.restorePendingState\(previewState\)/,
     'restore both the document and pending ranges before approval');

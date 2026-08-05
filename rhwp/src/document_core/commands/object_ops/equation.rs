@@ -234,6 +234,10 @@ impl DocumentCore {
         Ok(crate::document_core::helpers::json_ok())
     }
     /// 수식 스크립트를 SVG로 렌더링하여 반환한다 (미리보기 전용).
+    /// 반환: JSON 문자열
+    /// `{"svg":string,"widthPx":number,"heightPx":number,"baselinePx":number,"warnings":string[]}`
+    /// (px 은 self.dpi 기준, 기본 96dpi). warnings 는 파서가 수집한 검증 경고
+    /// (미지 LaTeX 명령어, 괄호 불일치, 빈 그룹, 중첩 깊이 초과)로 비어 있으면 유효한 스크립트다.
     pub fn render_equation_preview_native(
         &self,
         script: &str,
@@ -247,7 +251,8 @@ impl DocumentCore {
 
         let font_size_px = crate::renderer::hwpunit_to_px(font_size_hwpunit as i32, self.dpi);
         let tokens = tokenize(script);
-        let ast = EqParser::new(tokens).parse();
+        let mut parser = EqParser::new(tokens);
+        let ast = parser.parse();
         let layout_box = EqLayout::new(font_size_px).layout(&ast);
         let color_str = eq_color_to_svg(color);
         let svg_fragment = render_equation_svg(&layout_box, &color_str, font_size_px);
@@ -258,7 +263,20 @@ impl DocumentCore {
             "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {:.2} {:.2}\" width=\"{:.2}\" height=\"{:.2}\">{}</svg>",
             w, h, w, h, svg_fragment,
         );
-        Ok(svg)
+        let warnings_json = parser
+            .warnings()
+            .iter()
+            .map(|w| format!("\"{}\"", crate::document_core::helpers::json_escape(w)))
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(format!(
+            "{{\"svg\":\"{}\",\"widthPx\":{:.2},\"heightPx\":{:.2},\"baselinePx\":{:.2},\"warnings\":[{}]}}",
+            crate::document_core::helpers::json_escape(&svg),
+            w,
+            h,
+            layout_box.baseline,
+            warnings_json,
+        ))
     }
     /// 표 셀 문단에서 **지정 인덱스**의 수식 스크립트를 조회한다 (드리프트 프로브용).
     /// `find_equation_ref` 셀 경로는 첫 번째 수식만 찾으므로, 한 셀 문단에 수식이
@@ -464,7 +482,17 @@ impl DocumentCore {
             )));
         }
 
-        let (width, height) = crate::renderer::equation::intrinsic_size_hwp(script, font_size);
+        let (width, height, baseline_hwp) =
+            crate::renderer::equation::intrinsic_metrics_hwp(script, font_size);
+        // HWPX baseLine 은 높이 대비 백분율(스키마 기본값 85) — 레이아웃 기준선 비율로 채운다.
+        // 기존엔 ..Default::default() 로 0 이 남아 직렬화 시 baseLine="0" 이 방출됐다.
+        let baseline = if height > 0 {
+            ((baseline_hwp as f64 / height as f64) * 100.0)
+                .round()
+                .clamp(0.0, 100.0) as i16
+        } else {
+            85
+        };
         let equation = Equation {
             common: CommonObjAttr {
                 ctrl_id: CTRL_EQUATION,
@@ -476,6 +504,7 @@ impl DocumentCore {
             script: script.to_string(),
             font_size,
             color,
+            baseline,
             font_name: "HYhwpEQ".to_string(),
             ..Default::default()
         };
@@ -656,7 +685,17 @@ impl DocumentCore {
         use crate::model::shape::CommonObjAttr;
         use crate::parser::tags::CTRL_EQUATION;
 
-        let (width, height) = crate::renderer::equation::intrinsic_size_hwp(script, font_size);
+        let (width, height, baseline_hwp) =
+            crate::renderer::equation::intrinsic_metrics_hwp(script, font_size);
+        // HWPX baseLine 은 높이 대비 백분율(스키마 기본값 85) — 본문 삽입 경로와 동일하게
+        // 레이아웃 기준선 비율로 채운다 (기존엔 Default 0 방출).
+        let baseline = if height > 0 {
+            ((baseline_hwp as f64 / height as f64) * 100.0)
+                .round()
+                .clamp(0.0, 100.0) as i16
+        } else {
+            85
+        };
         let equation = Equation {
             common: CommonObjAttr {
                 ctrl_id: CTRL_EQUATION,
@@ -668,6 +707,7 @@ impl DocumentCore {
             script: script.to_string(),
             font_size,
             color,
+            baseline,
             font_name: "HYhwpEQ".to_string(),
             ..Default::default()
         };
@@ -783,7 +823,36 @@ impl DocumentCore {
 #[cfg(test)]
 mod tests {
     use crate::document_core::DocumentCore;
-    use crate::model::control::Equation;
+    use crate::model::control::{Control, Equation};
+    use crate::model::document::{Document, Section, SectionDef};
+    use crate::model::page::PageDef;
+    use crate::model::paragraph::Paragraph;
+
+    fn make_test_core() -> DocumentCore {
+        let mut doc = Document::default();
+        doc.sections.push(Section {
+            section_def: SectionDef {
+                page_def: PageDef {
+                    width: 59528,
+                    height: 84188,
+                    margin_left: 8504,
+                    margin_right: 8504,
+                    margin_top: 5668,
+                    margin_bottom: 4252,
+                    margin_header: 4252,
+                    margin_footer: 4252,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            paragraphs: vec![Paragraph::default()],
+            raw_stream: None,
+        });
+        let mut core = DocumentCore::new_empty();
+        // set_document이 composed/styles/pagination 벡터를 일관되게 초기화한다.
+        core.set_document(doc);
+        core
+    }
 
     /// .hwp 저장 시 serialize_equation_control 은 raw_ctrl_data 가 비어있지 않으면 원본
     /// CTRL_HEADER 를 그대로 방출한다. 속성 편집 후 raw_ctrl_data 가 비워지지 않으면
@@ -800,6 +869,66 @@ mod tests {
         assert!(
             eq.raw_ctrl_data.is_empty(),
             "apply_equation_properties 후 raw_ctrl_data 가 비워져야 편집이 .hwp 저장에 반영된다"
+        );
+    }
+
+    /// 미리보기는 bare SVG 가 아니라
+    /// `{"svg",...,"widthPx","heightPx","baselinePx","warnings"}` JSON 계약을 반환해야 한다.
+    #[test]
+    fn render_equation_preview_returns_json_contract() {
+        let core = make_test_core();
+        let json = core
+            .render_equation_preview_native("1 over 2", 1000, 0)
+            .expect("preview");
+        // TS 소비자가 JSON.parse 로 바로 쓸 수 있는 유효한 JSON 이어야 한다
+        let v: serde_json::Value = serde_json::from_str(&json).expect("유효한 JSON 이어야 함");
+        let svg = v["svg"].as_str().expect("svg: string");
+        assert!(svg.starts_with("<svg"), "svg 키는 SVG 마크업: {json}");
+        assert!(v["widthPx"].as_f64().expect("widthPx: number") > 0.0);
+        assert!(v["heightPx"].as_f64().expect("heightPx: number") > 0.0);
+        assert!(v["baselinePx"].as_f64().expect("baselinePx: number") > 0.0);
+        assert_eq!(
+            v["warnings"].as_array().expect("warnings: array").len(),
+            0,
+            "정상 스크립트는 경고가 비어 있어야 함: {json}"
+        );
+
+        // 미지 LaTeX 명령어는 warnings 로 수집된다 (검증 게이트가 소비)
+        let warned = core
+            .render_equation_preview_native(r"\unknowncmd x", 1000, 0)
+            .expect("preview");
+        let w: serde_json::Value = serde_json::from_str(&warned).expect("유효한 JSON 이어야 함");
+        let warnings = w["warnings"].as_array().expect("warnings: array");
+        assert!(
+            warnings
+                .iter()
+                .any(|m| m.as_str().unwrap_or("").contains("알 수 없는 수식 명령어")),
+            "미지 명령어 경고가 수집되어야 함: {warned}"
+        );
+    }
+
+    /// 삽입 시 Equation.baseline 이 HWPX baseLine 백분율(기본 85)로 채워져야 한다.
+    /// 기존엔 Default 0 으로 남아 직렬화 시 baseLine="0" 이 방출됐다.
+    #[test]
+    fn insert_equation_sets_baseline_percent() {
+        let mut core = make_test_core();
+        let res = core
+            .insert_equation_native(0, 0, 0, "1 over 2", 1000, 0)
+            .expect("insert");
+        assert!(res.contains("\"ok\":true"), "삽입 실패: {res}");
+        let para = &core.document.sections[0].paragraphs[0];
+        let eq = para
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Equation(e) => Some(e),
+                _ => None,
+            })
+            .expect("수식 컨트롤이 삽입되어야 함");
+        assert!(
+            eq.baseline > 0 && eq.baseline <= 100,
+            "baseline 은 1~100 백분율이어야 함 (기존 0 방출 회귀 방지): {}",
+            eq.baseline
         );
     }
 }

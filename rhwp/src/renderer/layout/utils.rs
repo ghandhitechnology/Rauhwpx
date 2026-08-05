@@ -116,7 +116,7 @@ pub(crate) fn expand_numbering_format(
         };
         let fmt_code = numbering.heads[idx].number_format;
         let num_fmt = numbering_format_to_number_format(fmt_code);
-        format_number(num as u16, num_fmt)
+        format_numbering_number(num as u16, num_fmt)
     };
 
     let mut result = String::new();
@@ -154,19 +154,71 @@ pub(crate) fn expand_numbering_format(
     result
 }
 
-/// HWP 표 43 번호 형식 코드 → NumberFormat 변환
-pub(crate) fn numbering_format_to_number_format(code: u8) -> NumFmt {
+/// HWP 표 43 번호 형식 코드 → NumberFormat 변환.
+/// 코드 체계는 각주 번호 모양(표 134)과 동일하다
+/// (`FootnoteShape::number_format_from_attr_code` 참조).
+pub(crate) fn numbering_format_to_number_format(code: u8) -> NumberFormat {
     match code {
-        0 => NumFmt::Digit,         // 1, 2, 3
-        1 => NumFmt::CircledDigit,  // ①, ②, ③
-        2 => NumFmt::RomanUpper,    // I, II, III
-        3 => NumFmt::RomanLower,    // i, ii, iii
-        4 => NumFmt::LatinUpper,    // A, B, C
-        5 => NumFmt::LatinLower,    // a, b, c
-        8 => NumFmt::HangulGaNaDa,  // 가, 나, 다
-        12 => NumFmt::HangulNumber, // 일, 이, 삼
-        13 => NumFmt::HanjaNumber,  // 一, 二, 三
-        _ => NumFmt::Digit,
+        0 => NumberFormat::Digit,                 // 1, 2, 3
+        1 => NumberFormat::CircledDigit,          // ①, ②, ③
+        2 => NumberFormat::UpperRoman,            // I, II, III
+        3 => NumberFormat::LowerRoman,            // i, ii, iii
+        4 => NumberFormat::UpperAlpha,            // A, B, C
+        5 => NumberFormat::LowerAlpha,            // a, b, c
+        6 => NumberFormat::CircledUpperAlpha,     // Ⓐ, Ⓑ, Ⓒ
+        7 => NumberFormat::CircledLowerAlpha,     // ⓐ, ⓑ, ⓒ
+        8 => NumberFormat::HangulSyllable,        // 가, 나, 다
+        9 => NumberFormat::CircledHangulSyllable, // ㉮, ㉯, ㉰
+        10 => NumberFormat::HangulJamo,           // ㄱ, ㄴ, ㄷ
+        11 => NumberFormat::CircledHangulJamo,    // ㉠, ㉡, ㉢
+        12 => NumberFormat::HangulDigit,          // 일, 이, 삼
+        13 => NumberFormat::HanjaDigit,           // 一, 二, 三
+        _ => NumberFormat::Digit,
+    }
+}
+
+/// 번호 매기기/개요의 NumberFormat으로 번호 문자열을 생성한다.
+///
+/// renderer::format_number가 지원하는 형식은 위임하고, 원문자 알파벳/한글 등
+/// 미지원 형식은 유니코드 연속 구간에서 직접 생성한다. 범위를 벗어난 번호와
+/// 렌더 컨텍스트가 필요한 형식(사용자 기호 등)은 숫자로 fallback한다
+/// (각주 경로 format_footnote_number와 동일 관례).
+pub(crate) fn format_numbering_number(number: u16, format: NumberFormat) -> String {
+    // 유니코드 연속 구간 원문자 변환 (1-based)
+    let circled = |start: u32, count: u16| -> String {
+        if number >= 1 && number <= count {
+            char::from_u32(start + (number - 1) as u32)
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| number.to_string())
+        } else {
+            number.to_string()
+        }
+    };
+    match format {
+        NumberFormat::Digit => format_number(number, NumFmt::Digit),
+        NumberFormat::CircledDigit => format_number(number, NumFmt::CircledDigit),
+        NumberFormat::UpperRoman => format_number(number, NumFmt::RomanUpper),
+        NumberFormat::LowerRoman => format_number(number, NumFmt::RomanLower),
+        NumberFormat::UpperAlpha => format_number(number, NumFmt::LatinUpper),
+        NumberFormat::LowerAlpha => format_number(number, NumFmt::LatinLower),
+        NumberFormat::HangulSyllable => format_number(number, NumFmt::HangulGaNaDa),
+        NumberFormat::HangulDigit => format_number(number, NumFmt::HangulNumber),
+        NumberFormat::HanjaDigit => format_number(number, NumFmt::HanjaNumber),
+        NumberFormat::CircledUpperAlpha => circled(0x24B6, 26), // Ⓐ-Ⓩ
+        NumberFormat::CircledLowerAlpha => circled(0x24D0, 26), // ⓐ-ⓩ
+        NumberFormat::CircledHangulSyllable => circled(0x326E, 14), // ㉮-㉻
+        NumberFormat::CircledHangulJamo => circled(0x3260, 14), // ㉠-㉭
+        NumberFormat::HangulJamo => {
+            const JAMO: [char; 14] = [
+                'ㄱ', 'ㄴ', 'ㄷ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅅ', 'ㅇ', 'ㅈ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ',
+            ];
+            if number >= 1 && number <= 14 {
+                JAMO[(number - 1) as usize].to_string()
+            } else {
+                number.to_string()
+            }
+        }
+        _ => number.to_string(),
     }
 }
 

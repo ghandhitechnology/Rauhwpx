@@ -257,8 +257,34 @@ export function isDestructiveTableMark(
 }
 
 export type PendingOp =
-  | { kind: 'insert'; id: string; agent: AgentName; range: DocRange; text: string } // applied
-  | { kind: 'delete'; id: string; agent: AgentName; range: DocRange; text: string } // marked only
+  | {
+      kind: 'insert'; id: string; agent: AgentName; range: DocRange; text: string;
+      /** 전역 등록 순번 — 중첩 검증·스냅샷 되돌림 안전 판별용 (pending-edits 가 부여) */
+      seq?: number;
+    } // applied
+  | {
+      kind: 'delete'; id: string; agent: AgentName; range: DocRange; text: string;
+      seq?: number;
+    } // marked only
+  | {
+      /** 원자적 교체 — 삭제+삽입을 하나의 op 로 즉시 적용 (live preview) */
+      kind: 'replace';
+      id: string;
+      agent: AgentName;
+      /** 삽입된 새 텍스트가 차지하는 범위 (shift 로 추적된다) */
+      range: DocRange;
+      /** 새 텍스트 */
+      text: string;
+      /** 원본 텍스트 — 되돌림 복원/검증 기준 */
+      deletedText: string;
+      /** 원본 시작 지점 글자 모양 id (삽입 서식 + 폴백 되돌림용) */
+      charShapeId: number | null;
+      /** 원본 문단별 paraShapeId (폴백 되돌림용, -1 = 캡처 실패) */
+      paraShapeIds: number[];
+      /** 변이 직전 스냅샷 — 되돌림 시 원본을 정확히 복원하는 소스 */
+      snapshotId: number | null;
+      seq?: number;
+    } // applied
   | {
       kind: 'format';
       id: string;
@@ -266,9 +292,15 @@ export type PendingOp =
       range: DocRange;
       format: CharFormatProps;
       inverse: CharFormatProps;
+      /** 되돌림 전 드리프트 프로브용 등록 시점 범위 텍스트 (캡처 실패 시 생략) */
+      text?: string;
+      seq?: number;
     } // applied
-  | { kind: 'field'; id: string; agent: AgentName; name: string; oldValue: string; newValue: string } // applied
-  | { kind: 'object'; id: string; agent: AgentName; obj: ObjectOp }; // applied 여부는 isObjectOpApplied(obj)
+  | {
+      kind: 'field'; id: string; agent: AgentName; name: string; oldValue: string; newValue: string;
+      seq?: number;
+    } // applied
+  | { kind: 'object'; id: string; agent: AgentName; obj: ObjectOp; seq?: number }; // applied 여부는 isObjectOpApplied(obj)
 
 export type ChangeSetStatus = 'open' | 'awaiting-review';
 
