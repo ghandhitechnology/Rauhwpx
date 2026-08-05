@@ -1,0 +1,839 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rhwp — Exact inline diff plan</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ui-bg: #f0f0f0;
+      --ui-bg-light: #f6f6f6;
+      --ui-surface: #ffffff;
+      --ui-surface-raised: #fafafa;
+      --ui-border: #c7c7c7;
+      --ui-border-light: #d8d8d8;
+      --ui-text: #292c32;
+      --ui-text-muted: #666b75;
+      --ui-text-hint: #858a93;
+      --ui-hover: #e7e7e7;
+      --ui-selected: #e8f0fe;
+      --doc-workspace: #dedede;
+      --doc-paper: #ffffff;
+      --accent: #4f78c9;
+      --accent-strong: #315aa7;
+      --insert: #1c6e46;
+      --insert-bg: #dff3e8;
+      --insert-line: #57a477;
+      --delete: #a53a46;
+      --delete-bg: #f8e1e4;
+      --delete-line: #cf6c78;
+      --warning-bg: #fff7dc;
+      --warning-line: #d3a62f;
+      --shadow: 0 12px 34px rgba(28, 31, 36, 0.15);
+      --font-ui: -apple-system, BlinkMacSystemFont, "Malgun Gothic", "맑은 고딕", "Segoe UI", sans-serif;
+      --font-doc: "Batang", "바탕", "Nanum Myeongjo", serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { background: #e7e7e7; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--ui-text);
+      background: var(--ui-bg);
+      font-family: var(--font-ui);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    button, textarea { font: inherit; }
+
+    button { color: inherit; }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      min-height: 58px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      padding: 9px 18px;
+      border-bottom: 1px solid var(--ui-border);
+      background: rgba(250, 250, 250, 0.97);
+      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.07);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 190px;
+    }
+
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 7px;
+      background: var(--accent-strong);
+      color: white;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+
+    .brand-copy { line-height: 1.2; }
+    .brand-copy strong { display: block; font-size: 14px; }
+    .brand-copy span { color: var(--ui-text-muted); font-size: 11px; }
+
+    .topbar-title {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--ui-text-muted);
+    }
+
+    .mode-switch {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px;
+      border: 1px solid var(--ui-border);
+      border-radius: 8px;
+      background: var(--ui-bg);
+    }
+
+    .mode-switch button {
+      min-height: 30px;
+      padding: 4px 12px;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: var(--ui-text-muted);
+      cursor: pointer;
+    }
+
+    .mode-switch button[aria-pressed="true"] {
+      background: var(--ui-surface);
+      color: var(--ui-text);
+      box-shadow: 0 2px 7px rgba(0, 0, 0, 0.11);
+      font-weight: 700;
+    }
+
+    button:focus-visible, textarea:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .workspace {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(660px, 1fr) 390px;
+    }
+
+    .canvas-area {
+      min-width: 0;
+      background: var(--doc-workspace);
+    }
+
+    .ruler {
+      height: 24px;
+      border-bottom: 1px solid #b7b7b7;
+      background:
+        linear-gradient(90deg, transparent 0 39px, #777 39px 40px, transparent 40px 79px) 20px 18px / 80px 5px repeat-x,
+        linear-gradient(#f8f8f8, #e8e8e8);
+    }
+
+    .ruler span {
+      display: block;
+      max-width: 740px;
+      margin: auto;
+      padding-left: 54px;
+      color: #696969;
+      font-size: 9px;
+      line-height: 16px;
+      letter-spacing: 39px;
+      user-select: none;
+    }
+
+    .canvas-scroll {
+      min-height: calc(100vh - 83px);
+      padding: 34px clamp(22px, 5vw, 76px) 64px;
+      overflow: auto;
+    }
+
+    .paper {
+      width: min(100%, 790px);
+      min-height: 815px;
+      margin: 0 auto;
+      padding: 70px clamp(44px, 8vw, 86px) 90px;
+      background: var(--doc-paper);
+      box-shadow: var(--shadow);
+      color: #16181c;
+      font-family: var(--font-doc);
+    }
+
+    .doc-heading {
+      margin: 0 0 42px;
+      text-align: center;
+      font-size: clamp(24px, 3vw, 34px);
+      font-weight: 700;
+      letter-spacing: -0.035em;
+    }
+
+    .doc-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      padding-bottom: 11px;
+      border-bottom: 1px solid #202020;
+      font-family: var(--font-ui);
+      font-size: 12px;
+      color: #4d5056;
+    }
+
+    .doc-section {
+      margin-top: 38px;
+    }
+
+    .doc-section h2 {
+      margin: 0 0 14px;
+      font-size: 17px;
+      letter-spacing: -0.02em;
+    }
+
+    .doc-section p {
+      margin: 0 0 17px;
+      font-size: 16px;
+      line-height: 2.05;
+      text-align: justify;
+      word-break: keep-all;
+    }
+
+    .diff-line {
+      position: relative;
+      padding: 5px 7px;
+      margin-inline: -7px !important;
+      border-radius: 3px;
+      transition: background 180ms ease, box-shadow 180ms ease;
+    }
+
+    .full-chunk, .inline-diff { display: none; }
+    body[data-mode="current"] .full-chunk { display: inline; }
+    body[data-mode="exact"] .inline-diff { display: inline; }
+
+    body[data-mode="current"] .diff-line {
+      background: rgba(79, 120, 201, 0.13);
+      box-shadow: inset 0 -2px 0 rgba(79, 120, 201, 0.55);
+    }
+
+    .inline-diff ins,
+    .live-output ins {
+      padding: 1px 2px 2px;
+      border-bottom: 2px solid var(--insert-line);
+      background: var(--insert-bg);
+      color: #124d31;
+      text-decoration: none;
+      border-radius: 2px;
+    }
+
+    .inline-diff del,
+    .live-output del {
+      padding: 1px 2px;
+      background: var(--delete-bg);
+      color: #8f2f3a;
+      text-decoration-color: var(--delete-line);
+      text-decoration-thickness: 2px;
+      border-radius: 2px;
+    }
+
+    .change-pin {
+      display: none;
+      position: absolute;
+      right: -37px;
+      top: 7px;
+      width: 24px;
+      height: 24px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--accent-strong);
+      color: white;
+      font-family: var(--font-ui);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    body[data-mode="exact"] .change-pin { display: grid; }
+
+    .sidebar {
+      position: sticky;
+      top: 58px;
+      align-self: start;
+      height: calc(100vh - 58px);
+      overflow: auto;
+      border-left: 1px solid var(--ui-border);
+      background: var(--ui-surface);
+    }
+
+    .sidebar-head {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      padding: 17px 18px 14px;
+      border-bottom: 1px solid var(--ui-border-light);
+      background: rgba(255, 255, 255, 0.97);
+    }
+
+    .sidebar-head h1 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: -0.025em;
+    }
+
+    .sidebar-head p {
+      margin: 5px 0 0;
+      color: var(--ui-text-muted);
+      font-size: 12px;
+    }
+
+    .panel-section {
+      padding: 18px;
+      border-bottom: 1px solid var(--ui-border-light);
+    }
+
+    .section-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .section-title h2 {
+      margin: 0;
+      font-size: 13px;
+      letter-spacing: -0.01em;
+    }
+
+    .badge {
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: var(--ui-selected);
+      color: var(--accent-strong);
+      font-size: 10px;
+      font-weight: 800;
+    }
+
+    .review-card {
+      border: 1px solid var(--ui-border);
+      border-radius: 9px;
+      background: var(--ui-surface);
+      box-shadow: 0 5px 14px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+    }
+
+    .review-main { padding: 13px 14px; }
+
+    .review-label {
+      margin-bottom: 9px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .preview-current,
+    .preview-exact {
+      min-height: 92px;
+      padding: 10px;
+      border-radius: 6px;
+      background: var(--ui-bg-light);
+      font-size: 13px;
+      line-height: 1.8;
+    }
+
+    .preview-current, .preview-exact { display: none; }
+    body[data-mode="current"] .preview-current { display: block; }
+    body[data-mode="exact"] .preview-exact { display: block; }
+
+    .preview-current .old,
+    .preview-current .new {
+      display: block;
+      padding: 2px 4px;
+    }
+
+    .preview-current .old {
+      color: var(--delete);
+      background: var(--delete-bg);
+      text-decoration: line-through;
+    }
+
+    .preview-current .new {
+      margin-top: 5px;
+      color: var(--insert);
+      background: var(--insert-bg);
+    }
+
+    .preview-exact {
+      color: #40444c;
+    }
+
+    .legend {
+      display: flex;
+      gap: 13px;
+      margin-top: 8px;
+      color: var(--ui-text-muted);
+      font-size: 10px;
+    }
+
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+
+    .legend i {
+      width: 9px;
+      height: 9px;
+      border-radius: 2px;
+      display: inline-block;
+    }
+
+    .legend .d { background: var(--delete-line); }
+    .legend .i { background: var(--insert-line); }
+
+    .review-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      padding: 10px;
+      border-top: 1px solid var(--ui-border-light);
+      background: var(--ui-bg-light);
+    }
+
+    .review-actions button {
+      min-height: 34px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .reject {
+      border: 1px solid var(--ui-border);
+      background: var(--ui-surface);
+    }
+
+    .approve {
+      border: 1px solid var(--accent-strong);
+      background: var(--accent-strong);
+      color: white;
+    }
+
+    .review-card[data-state="approved"] .review-main,
+    .review-card[data-state="rejected"] .review-main { opacity: 0.52; }
+
+    .review-card[data-state="approved"] .review-actions::before,
+    .review-card[data-state="rejected"] .review-actions::before {
+      grid-column: 1 / -1;
+      padding: 7px 9px;
+      border-radius: 5px;
+      text-align: center;
+      font-weight: 700;
+    }
+
+    .review-card[data-state="approved"] .review-actions::before {
+      content: "Approved — one undo step created";
+      background: var(--insert-bg);
+      color: var(--insert);
+    }
+
+    .review-card[data-state="rejected"] .review-actions::before {
+      content: "Rejected — original text restored";
+      background: var(--delete-bg);
+      color: var(--delete);
+    }
+
+    .review-card[data-state]:not([data-state="pending"]) .review-actions button { display: none; }
+
+    .plan-list {
+      display: grid;
+      gap: 5px;
+    }
+
+    .plan-step {
+      display: grid;
+      grid-template-columns: 24px 1fr;
+      gap: 8px;
+      padding: 9px 0;
+      border: 0;
+      border-bottom: 1px solid var(--ui-border-light);
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .plan-step:last-child { border-bottom: 0; }
+
+    .plan-step .n {
+      display: grid;
+      place-items: center;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--ui-selected);
+      color: var(--accent-strong);
+      font-size: 10px;
+      font-weight: 800;
+    }
+
+    .plan-step strong { display: block; font-size: 12px; }
+    .plan-step small { display: block; margin-top: 2px; color: var(--ui-text-muted); line-height: 1.45; }
+
+    .plan-step:hover strong,
+    .plan-step[aria-expanded="true"] strong { color: var(--accent-strong); }
+
+    .plan-detail {
+      margin-top: 10px;
+      padding: 10px 11px;
+      border-radius: 6px;
+      background: var(--ui-selected);
+      color: #314569;
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .try-fields { display: grid; gap: 9px; }
+
+    .try-fields label {
+      display: grid;
+      gap: 4px;
+      color: var(--ui-text-muted);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 66px;
+      resize: vertical;
+      padding: 8px 9px;
+      border: 1px solid var(--ui-border);
+      border-radius: 6px;
+      background: white;
+      color: var(--ui-text);
+      line-height: 1.5;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
+    .live-output {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--ui-border-light);
+      border-radius: 6px;
+      background: var(--ui-bg-light);
+      line-height: 1.85;
+      white-space: pre-wrap;
+    }
+
+    .acceptance {
+      display: grid;
+      gap: 7px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      color: var(--ui-text-muted);
+      font-size: 11px;
+    }
+
+    .acceptance li {
+      display: grid;
+      grid-template-columns: 15px 1fr;
+      gap: 7px;
+    }
+
+    .check {
+      width: 14px;
+      height: 14px;
+      margin-top: 1px;
+      border: 1px solid var(--insert-line);
+      border-radius: 50%;
+      background: var(--insert-bg);
+      position: relative;
+    }
+
+    .check::after {
+      content: "";
+      position: absolute;
+      left: 3px;
+      top: 2px;
+      width: 5px;
+      height: 3px;
+      border-left: 1.5px solid var(--insert);
+      border-bottom: 1.5px solid var(--insert);
+      transform: rotate(-45deg);
+    }
+
+    @media (max-width: 980px) {
+      .workspace { grid-template-columns: 1fr 340px; }
+      .paper { padding-inline: 42px; }
+      .topbar-title { display: none; }
+    }
+
+    @media (max-width: 760px) {
+      .topbar {
+        position: relative;
+        flex-wrap: wrap;
+        gap: 8px;
+        overflow: hidden;
+      }
+
+      .brand { flex: 1; }
+      .mode-switch { width: 100%; }
+      .mode-switch button { flex: 1; min-width: 0; padding-inline: 6px; font-size: 12px; }
+      .mode-label-long { display: none; }
+      .mode-label-short { display: inline; }
+
+      .workspace { display: flex; flex-direction: column; width: 100%; min-width: 0; overflow: hidden; }
+      .canvas-area,
+      .sidebar { width: 100%; min-width: 0; }
+      .sidebar { position: relative; top: 0; height: auto; border-left: 0; border-top: 1px solid var(--ui-border); }
+      .canvas-scroll { min-height: auto; padding: 18px 10px 30px; }
+      .paper { width: calc(100vw - 20px); min-height: 680px; padding: 42px 26px 60px; overflow: hidden; }
+      .doc-heading { margin-bottom: 28px; font-size: 24px; line-height: 1.3; word-break: keep-all; }
+      .doc-section { margin-top: 28px; }
+      .doc-section p { font-size: 14px; word-break: break-word; overflow-wrap: anywhere; }
+      .change-pin { right: -21px; width: 19px; height: 19px; font-size: 9px; }
+      .ruler { display: none; }
+    }
+
+    @media (min-width: 761px) {
+      .mode-label-short { display: none; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+    }
+  </style>
+</head>
+<body data-mode="exact">
+  <!--
+    THESIS: A review surface should point to changed characters, never punish the reader with whole-paragraph color.
+    OWN-WORLD: The existing rhwp studio's quiet gray editor shell, white paper, and restrained blue agent accent.
+    STORY: Compare the current block treatment, inspect a precise inline replacement, then follow a low-risk implementation plan.
+    FIRST VIEWPORT: A real document page occupies the canvas; its review card and plan stay visible in the right sidebar.
+    FORM: A working editor-state prototype, extending the incumbent Operate surface without altering its visual identity.
+  -->
+  <div class="app">
+    <header class="topbar">
+      <div class="brand" aria-label="rhwp studio prototype">
+        <div class="brand-mark">R</div>
+        <div class="brand-copy">
+          <strong>rhwp-studio</strong>
+          <span>exact diff prototype</span>
+        </div>
+      </div>
+      <div class="topbar-title">Implementation plan · pending agent edits</div>
+      <div class="mode-switch" role="group" aria-label="Diff display comparison">
+        <button type="button" data-mode-button="current" aria-pressed="false"><span class="mode-label-long">Current: whole chunk</span><span class="mode-label-short">Current</span></button>
+        <button type="button" data-mode-button="exact" aria-pressed="true"><span class="mode-label-long">Proposed: exact diff</span><span class="mode-label-short">Exact diff</span></button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="canvas-area" aria-label="Document diff demonstration">
+        <div class="ruler" aria-hidden="true"><span>1 2 3 4 5 6 7 8</span></div>
+        <div class="canvas-scroll">
+          <article class="paper">
+            <h1 class="doc-heading">2026년 업무 운영 계획</h1>
+            <div class="doc-meta">
+              <span>경영지원팀</span>
+              <span>2026. 08. 05.</span>
+            </div>
+            <section class="doc-section">
+              <h2>업무 보고 원칙</h2>
+              <p>각 부서는 핵심 과제의 진행 상황을 정기적으로 공유하고, 변경된 일정과 담당자를 업무 시스템에 반영한다.</p>
+              <p class="diff-line">
+                <span class="full-chunk">현재 각 부서는 주별 실적을 취합해 매주 금요일까지 제출해야 한다.</span>
+                <span class="inline-diff">현재 각 부서는 <del>월별</del><ins>주별</ins> 실적을 <del>취합하여</del><ins>취합해</ins> <del>매월 말일까지</del><ins>매주 금요일까지</ins> 제출해야 한다.</span>
+                <span class="change-pin" aria-label="Change 1">1</span>
+              </p>
+              <p>보고서에는 완료 항목, 지연 사유, 다음 주의 의사결정 요청을 구분해 기재한다.</p>
+            </section>
+            <section class="doc-section">
+              <h2>검토 및 확정</h2>
+              <p>제안된 변경은 담당자의 검토와 승인을 거친 뒤 문서 이력에 하나의 편집 단위로 기록한다.</p>
+            </section>
+          </article>
+        </div>
+      </section>
+
+      <aside class="sidebar" aria-label="Exact diff plan and review">
+        <div class="sidebar-head">
+          <h1>Show only what changed</h1>
+          <p>Keep unchanged context readable and uncolored.</p>
+        </div>
+
+        <section class="panel-section">
+          <div class="section-title">
+            <h2>Agent edit pending</h2>
+            <span class="badge">3 exact changes</span>
+          </div>
+          <div class="review-card" data-state="pending">
+            <div class="review-main">
+              <div class="review-label">Codex · replace range</div>
+              <div class="preview-current">
+                <span class="old">현재 각 부서는 월별 실적을 취합하여 매월 말일까지 제출해야 한다.</span>
+                <span class="new">현재 각 부서는 주별 실적을 취합해 매주 금요일까지 제출해야 한다.</span>
+              </div>
+              <div class="preview-exact">
+                현재 각 부서는 <del>월별</del><ins>주별</ins> 실적을 <del>취합하여</del><ins>취합해</ins> <del>매월 말일까지</del><ins>매주 금요일까지</ins> 제출해야 한다.
+              </div>
+              <div class="legend"><span><i class="d"></i>removed</span><span><i class="i"></i>added</span></div>
+            </div>
+            <div class="review-actions">
+              <button class="reject" type="button">Reject</button>
+              <button class="approve" type="button">Approve</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title"><h2>Implementation plan</h2><span class="badge">low-risk path</span></div>
+          <div class="plan-list">
+            <button class="plan-step" type="button" aria-expanded="true" data-detail="Use the existing deletedText + text pair on replace ops. Derive view-only spans; do not change snapshots, revision tracking, approval, rejection, or undo.">
+              <span class="n">1</span><span><strong>Derive granular spans</strong><small>Two-pass word diff, then grapheme refinement.</small></span>
+            </button>
+            <button class="plan-step" type="button" aria-expanded="false" data-detail="Add a view model such as DiffSpan { kind, oldStart, oldEnd, newStart, newEnd }. Segment with Intl.Segmenter and count Unicode scalars when converting back to document offsets.">
+              <span class="n">2</span><span><strong>Map spans to document ranges</strong><small>Preserve Korean, emoji, whitespace, and newlines.</small></span>
+            </button>
+            <button class="plan-step" type="button" aria-expanded="false" data-detail="Update the sidebar first: build DOM ins/del spans instead of a single textContent preview. Then ask the overlay renderer for rects only for changed new-text ranges; show deletions as anchored ghost marks.">
+              <span class="n">3</span><span><strong>Render exact review UI</strong><small>Unchanged text stays plain and readable.</small></span>
+            </button>
+            <button class="plan-step" type="button" aria-expanded="false" data-detail="Unit-test repeated phrases, decomposed Hangul, emoji, whitespace-only edits, multiple paragraphs, deletion-only hunks, and full replacements. Add one focused agent-edit-loop assertion; keep approve/reject behavior untouched.">
+              <span class="n">4</span><span><strong>Protect the edge cases</strong><small>Focused tests, then one editor smoke pass.</small></span>
+            </button>
+          </div>
+          <div class="plan-detail" aria-live="polite">Use the existing <strong>deletedText + text</strong> pair on replace ops. Derive view-only spans; do not change snapshots, revision tracking, approval, rejection, or undo.</div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title"><h2>Try the diff</h2><span class="badge">grapheme-safe demo</span></div>
+          <div class="try-fields">
+            <label>Before<textarea id="before-text">AI가 수정한 전체 문장이 변경으로 표시됩니다.</textarea></label>
+            <label>After<textarea id="after-text">AI가 수정한 단어만 변경으로 표시됩니다.</textarea></label>
+          </div>
+          <div class="live-output" id="live-output" aria-live="polite"></div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title"><h2>Done when</h2></div>
+          <ul class="acceptance">
+            <li><span class="check"></span><span>Only inserted and deleted graphemes receive color.</span></li>
+            <li><span class="check"></span><span>Unchanged text has no tint, underline, or strikethrough.</span></li>
+            <li><span class="check"></span><span>Approve, reject, undo, and revision behavior are unchanged.</span></li>
+            <li><span class="check"></span><span>Korean, emoji, multiline, and deletion-only edits stay aligned.</span></li>
+          </ul>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    const body = document.body;
+    const modeButtons = [...document.querySelectorAll('[data-mode-button]')];
+
+    function setMode(mode) {
+      body.dataset.mode = mode;
+      for (const button of modeButtons) {
+        button.setAttribute('aria-pressed', String(button.dataset.modeButton === mode));
+      }
+    }
+
+    for (const button of modeButtons) {
+      button.addEventListener('click', () => setMode(button.dataset.modeButton));
+    }
+
+    const reviewCard = document.querySelector('.review-card');
+    document.querySelector('.approve').addEventListener('click', () => { reviewCard.dataset.state = 'approved'; });
+    document.querySelector('.reject').addEventListener('click', () => { reviewCard.dataset.state = 'rejected'; });
+
+    const detail = document.querySelector('.plan-detail');
+    const planSteps = [...document.querySelectorAll('.plan-step')];
+    for (const step of planSteps) {
+      step.addEventListener('click', () => {
+        for (const other of planSteps) other.setAttribute('aria-expanded', String(other === step));
+        detail.textContent = step.dataset.detail;
+      });
+    }
+
+    const segmenter = typeof Intl.Segmenter === 'function'
+      ? new Intl.Segmenter('ko', { granularity: 'grapheme' })
+      : null;
+
+    function graphemes(text) {
+      return segmenter ? [...segmenter.segment(text)].map(part => part.segment) : [...text];
+    }
+
+    function diffGraphemes(before, after) {
+      const a = graphemes(before).slice(0, 320);
+      const b = graphemes(after).slice(0, 320);
+      const table = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1));
+      for (let i = a.length - 1; i >= 0; i--) {
+        for (let j = b.length - 1; j >= 0; j--) {
+          table[i][j] = a[i] === b[j]
+            ? table[i + 1][j + 1] + 1
+            : Math.max(table[i + 1][j], table[i][j + 1]);
+        }
+      }
+
+      const parts = [];
+      const push = (kind, value) => {
+        const last = parts[parts.length - 1];
+        if (last && last.kind === kind) last.value += value;
+        else parts.push({ kind, value });
+      };
+
+      let i = 0;
+      let j = 0;
+      while (i < a.length && j < b.length) {
+        if (a[i] === b[j]) {
+          push('same', a[i]); i++; j++;
+        } else if (table[i + 1][j] >= table[i][j + 1]) {
+          push('delete', a[i]); i++;
+        } else {
+          push('insert', b[j]); j++;
+        }
+      }
+      while (i < a.length) push('delete', a[i++]);
+      while (j < b.length) push('insert', b[j++]);
+      return parts;
+    }
+
+    function renderDiff() {
+      const output = document.getElementById('live-output');
+      const before = document.getElementById('before-text').value;
+      const after = document.getElementById('after-text').value;
+      output.replaceChildren();
+      for (const part of diffGraphemes(before, after)) {
+        const node = part.kind === 'same'
+          ? document.createTextNode(part.value)
+          : document.createElement(part.kind === 'delete' ? 'del' : 'ins');
+        if (node.nodeType === Node.ELEMENT_NODE) node.textContent = part.value;
+        output.appendChild(node);
+      }
+    }
+
+    document.getElementById('before-text').addEventListener('input', renderDiff);
+    document.getElementById('after-text').addEventListener('input', renderDiff);
+    renderDiff();
+  </script>
+</body>
+</html>
