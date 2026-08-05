@@ -16,6 +16,23 @@ export const AGENT_PROTOCOL_VERSION = 1;
 
 export type AgentName = 'claude' | 'codex';
 export type PermissionProfile = 'safe' | 'unrestricted';
+export type WritingStyleLanguage = 'ko' | 'en';
+
+export interface WritingStyleStatus {
+  active: boolean;
+  language: WritingStyleLanguage;
+  updatedAt: string | null;
+  sourceCount: number;
+  pageEstimate: number;
+  summary: string;
+}
+
+export interface WritingStyleUpload {
+  name: string;
+  type: string;
+  size: number;
+  content: string;
+}
 
 export interface ProductSkillFile {
   path: string;
@@ -82,6 +99,10 @@ export type SidebarEvent =
   | { type: 'skill-draft-progress'; requestId: string; state: 'generating' }
   | { type: 'skill-draft-result'; requestId: string; draft: { name: string; files: Array<{ path: string; content: string }> } }
   | { type: 'skills-error'; requestId: string; code: string; message: string }
+  | { type: 'writing-style-status'; requestId: string; status: WritingStyleStatus }
+  | { type: 'writing-style-progress'; requestId: string; state: 'reading' | 'analyzing' | 'saving' }
+  | { type: 'writing-style-result'; requestId: string; status: WritingStyleStatus }
+  | { type: 'writing-style-error'; requestId: string; code: string; message: string }
   | {
       type: 'title-result';
       requestId: string;

@@ -8,6 +8,8 @@ import { createCodexSession } from './agents/codex.mjs';
 import { generateChatTitle } from './agents/title.mjs';
 import { SkillRegistry } from './skills.mjs';
 import { generateSkillDraft } from './skill-generator.mjs';
+import { WritingStyleStore } from './writing-style.mjs';
+import { calibrateWritingStyle } from './style-calibrator.mjs';
 
 const PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
 const TOKEN = process.env.RHWP_AGENT_TOKEN ?? 'dev';
@@ -28,7 +30,9 @@ try {
 } catch (error) {
   if (error?.code !== 'ENOENT') throw error;
 }
-const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS }).init();
+const writingStyleStore = await new WritingStyleStore().init();
+const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
+let styleCalibrationRunning = false;
 
 /** @type {import('ws').WebSocket | null} */
 let studioSocket = null;
@@ -323,6 +327,41 @@ function handleStudioMessage(sock, msg) {
         .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'SKILL_GENERATION_FAILED', message: String(e?.message ?? e) }));
       return;
     }
+    case 'writing-style-status-request': {
+      void writingStyleStore.status()
+        .then((status) => sendJson(sock, { v: 1, type: 'writing-style-status', requestId: msg.requestId ?? null, status }))
+        .catch((e) => sendJson(sock, { v: 1, type: 'writing-style-error', requestId: msg.requestId ?? null, code: 'STYLE_STATUS_FAILED', message: String(e?.message ?? e) }));
+      return;
+    }
+    case 'writing-style-calibrate': {
+      const requestId = msg.requestId ?? null;
+      if (styleCalibrationRunning) {
+        sendJson(sock, { v: 1, type: 'writing-style-error', requestId, code: 'CALIBRATION_BUSY', message: 'A writing-style calibration is already running.' });
+        return;
+      }
+      styleCalibrationRunning = true;
+      sendJson(sock, { v: 1, type: 'writing-style-progress', requestId, state: 'reading' });
+      void Promise.resolve()
+        .then(() => {
+          sendJson(sock, { v: 1, type: 'writing-style-progress', requestId, state: 'analyzing' });
+          return calibrateWritingStyle({ language: msg.language, files: msg.files });
+        })
+        .then(async (profile) => {
+          sendJson(sock, { v: 1, type: 'writing-style-progress', requestId, state: 'saving' });
+          const status = await writingStyleStore.save(profile);
+          sendJson(sock, { v: 1, type: 'writing-style-result', requestId, status });
+          sendJson(sock, { v: 1, type: 'writing-style-status', requestId, status });
+        })
+        .catch((e) => sendJson(sock, {
+          v: 1,
+          type: 'writing-style-error',
+          requestId,
+          code: e?.code ?? 'CALIBRATION_FAILED',
+          message: String(e?.message ?? e),
+        }))
+        .finally(() => { styleCalibrationRunning = false; });
+      return;
+    }
     case 'chat-interrupt': {
       if (session) {
         try {
@@ -490,6 +529,7 @@ httpServer.on('upgrade', (req, socket, head) => {
       });
       sendJson(ws, { v: 1, type: 'welcome', protocol: 1, session: sessionInfo() });
       void skillRegistry.list().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', ...catalog }));
+      void writingStyleStore.status().then((status) => sendJson(ws, { v: 1, type: 'writing-style-status', status }));
       log('studio connected');
     } else {
       const agentLabel = url.searchParams.get('agent') ?? 'unknown';
