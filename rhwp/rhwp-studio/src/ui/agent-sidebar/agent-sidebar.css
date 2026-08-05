@@ -11,6 +11,11 @@
   --ag-sidebar-duration: 220ms;
   --ag-motion-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ag-motion-smooth: cubic-bezier(0.65, 0, 0.35, 1);
+  --ag-spring-soft: linear(
+    0, 0.016 2.3%, 0.141 7.2%, 0.601 16.5%, 0.815 21%,
+    0.929 25.2%, 0.987 29%, 1.025 33.5%, 1.042 38%,
+    1.027 50%, 1.013 57.5%, 1.005 67%, 1.001 79%, 1
+  );
 }
 
 /* 편집 영역(가로 눈금자 + 용지)만 밀어 사이드바와 폭을 맞춘다.
@@ -877,7 +882,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   opacity: 1;
   transform: translateY(0);
   transition:
-    grid-template-rows 340ms var(--ag-motion-out),
+    grid-template-rows 340ms var(--ag-spring-soft),
     opacity 180ms var(--ag-motion-out),
     transform 300ms var(--ag-motion-out);
 }
@@ -987,12 +992,12 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 .ag-tool-status.ag-ok {
   color: var(--ag-ok);
-  animation: ag-status-settle 280ms var(--ag-motion-out) both;
+  animation: ag-status-settle 280ms var(--ag-spring-soft) both;
 }
 
 .ag-tool-status.ag-err {
   color: var(--ag-err);
-  animation: ag-status-settle 280ms var(--ag-motion-out) both;
+  animation: ag-status-settle 280ms var(--ag-spring-soft) both;
 }
 
 @keyframes ag-status-settle {
