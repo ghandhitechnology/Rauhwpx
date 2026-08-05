@@ -953,6 +953,17 @@ export class WasmBridge {
     return this.doc.getParagraphLength(sec, para);
   }
 
+  /**
+   * 논리적 오프셋(텍스트 문자 + 인라인 컨트롤 1개당 +1) → 텍스트 오프셋 변환.
+   * 커서/선택 좌표는 논리 오프셋이라 에이전트 툴의 텍스트 오프셋과 맞추려면 필요하다.
+   * (본문 문단 전용 — 셀 난 낮은 수준 변환 API 가 없다)
+   */
+  logicalToTextOffset(sec: number, para: number, logicalOffset: number): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (this.doc as any).logicalToTextOffset(sec, para, logicalOffset);
+  }
+
   getParagraphCount(sec: number): number {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.getParagraphCount(sec);
@@ -2317,7 +2328,7 @@ export class WasmBridge {
 
   // ─── 번호/글머리표 API ─────────────────────────────────
 
-  getNumberingList(): Array<{ id: number; levelFormats: string[]; startNumber: number }> {
+  getNumberingList(): Array<{ id: number; levelFormats: string[]; numberFormats?: number[]; startNumber: number }> {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return JSON.parse((this.doc as any).getNumberingList());

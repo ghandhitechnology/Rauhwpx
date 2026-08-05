@@ -1183,6 +1183,10 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   color: var(--ag-err);
 }
 
+.ag-op-glyph.ag-op-replace {
+  color: var(--ag-accent);
+}
+
 .ag-op-text {
   flex: 1 1 auto;
   min-width: 0;

@@ -208,7 +208,10 @@ function makeEnv() {
     applyCharFormat: (...a: unknown[]) => { record('applyCharFormat', ...a); return okJson(); },
     // ─ 셀 수식 ─
     renderEquationPreview: (script: string) =>
-      `<svg xmlns="http://www.w3.org/2000/svg"><text>${script}</text></svg>`,
+      JSON.stringify({
+        svg: `<svg xmlns="http://www.w3.org/2000/svg"><text>${script}</text></svg>`,
+        widthPx: 40, heightPx: 20, baselinePx: 15, warnings: [],
+      }),
     insertEquationInCell: (_s: number, para: number, ctrl: number, cell: number, cp: number, _off: number, script: string) => {
       record('insertEquationInCell', para, ctrl, cell, cp, script);
       const ft = findTable(para, ctrl);
@@ -536,8 +539,11 @@ test('같은 표에 insert_row 두 번 → reject 가 둘 다 되돌린다 (형�
   const r1 = (await call('edit_table', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 1,
   })) as { changeSetId: string };
-  await call('edit_table', {
-    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 2,
+  // executor 가드가 같은 표의 후속 구조 편집을 PENDING_DESTRUCTIVE_OP 로 막으므로,
+  // 두 번째 insert 는 매니저에 직접 등록한다 (reject 역연산 회귀 검증이 목적)
+  pending.addObjectOp('claude', {
+    type: 'tableStructure', sectionIdx: 0, tableParaIdx: t.paraIdx, controlIdx: t.controlIdx,
+    op: 'insert_row', index: 2, after: true,
   });
   assert.equal(t.rows, 6);
   pending.reject(r1.changeSetId); // 두 op 은 같은 change-set 에 있다

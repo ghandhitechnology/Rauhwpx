@@ -9,15 +9,49 @@ use super::symbols::{
 };
 use super::tokenizer::{tokenize, Token, TokenType};
 
+/// 파서 재귀(중첩) 한도 — 비정상적으로 깊게 중첩된 스크립트(최대 8000자)가
+/// WASM 스택 오버플로를 일으키지 않도록 제한한다. 한도 초과 시 경고를 수집하고
+/// 해당 노드를 Empty 로 대체한다 (레이아웃 재귀 깊이도 AST 깊이에 의해 제한됨).
+pub(crate) const MAX_PARSE_DEPTH: usize = 64;
+
 /// 수식 파서
 pub struct EqParser {
     tokens: Vec<Token>,
     pos: usize,
+    /// 파싱 중 수집한 검증 경고 (미지 명령어, 괄호 불일치, 빈 그룹, 깊이 초과).
+    /// 파싱 자체는 기존과 동일하게 관대하게(tolerant) 진행하고, 경고는
+    /// 미리보기 검증 게이트(renderEquationPreview)가 소비한다.
+    warnings: Vec<String>,
+    /// 현재 재귀 깊이 (parse_element / parse_single_or_group 진입 시 증가)
+    depth: usize,
+    /// 깊이 초과 경고를 이미 냈는지 (중복 경고 방지)
+    depth_warned: bool,
 }
 
 impl EqParser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            warnings: Vec::new(),
+            depth: 0,
+            depth_warned: false,
+        }
+    }
+
+    /// 파싱 중 수집된 검증 경고 목록
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// 깊이 초과 경고 (한 번만 기록)
+    fn warn_depth_exceeded(&mut self) {
+        if !self.depth_warned {
+            self.depth_warned = true;
+            self.warnings.push(format!(
+                "수식 중첩 깊이가 한도({MAX_PARSE_DEPTH})를 초과했습니다"
+            ));
+        }
     }
 
     fn current(&self) -> Option<&Token> {
@@ -90,7 +124,14 @@ impl EqParser {
 
     /// 수식 전체 파싱 (엔트리 포인트)
     pub fn parse(&mut self) -> EqNode {
-        self.parse_expression()
+        let node = self.parse_expression();
+        // 최상위 parse_expression 은 RBrace/RIGHT 에서 중단한다 — 최상위에서
+        // 토큰이 남았다면 짝 없는 닫는 괄호가 있다는 뜻 (기존엔 조용히 유실됨).
+        if !self.at_end() {
+            self.warnings
+                .push("짝 없는 닫는 괄호가 있습니다".to_string());
+        }
+        node
     }
 
     /// OVER/ATOP 중위 연산자 처리. 현재 토큰이 OVER/ATOP 이면 children 의 마지막 요소를
@@ -147,8 +188,26 @@ impl EqParser {
         EqNode::Row(children).simplify()
     }
 
-    /// 단일 요소 파싱
+    /// 단일 요소 파싱 (재귀 깊이 가드 포함)
     fn parse_element(&mut self) -> EqNode {
+        if self.at_end() {
+            return EqNode::Empty;
+        }
+        if self.depth >= MAX_PARSE_DEPTH {
+            // 깊이 초과: 모든 수집 루프의 진행을 보장하기 위해 토큰 하나를
+            // 소비하고 빈 노드를 반환한다 (무한 루프/스택 오버플로 방지).
+            self.warn_depth_exceeded();
+            self.pos += 1;
+            return EqNode::Empty;
+        }
+        self.depth += 1;
+        let node = self.parse_element_inner();
+        self.depth -= 1;
+        node
+    }
+
+    /// 단일 요소 파싱
+    fn parse_element_inner(&mut self) -> EqNode {
         if self.at_end() {
             return EqNode::Empty;
         }
@@ -158,8 +217,9 @@ impl EqParser {
 
         match ty {
             TokenType::Command => {
+                let from_latex = self.tokens.get(self.pos).is_some_and(|t| t.from_latex);
                 self.pos += 1;
-                self.parse_command(&val)
+                self.parse_command(&val, from_latex)
             }
             TokenType::Number => {
                 self.pos += 1;
@@ -224,7 +284,9 @@ impl EqParser {
     }
 
     /// 명령어 처리
-    fn parse_command(&mut self, cmd: &str) -> EqNode {
+    /// `from_latex`: 백슬래시 명령어(`\foo`)에서 온 토큰이면 true — 미지 명령어
+    /// 경고는 이 경우에만 발생한다 (베어워드는 변수 식별자와 구분 불가).
+    fn parse_command(&mut self, cmd: &str, from_latex: bool) -> EqNode {
         let cmd_upper = cmd.to_ascii_uppercase();
         let cu = cmd_upper.as_str();
         // [#1204] hwpeq 명령은 대소문자 무시 — DECORATIONS/FONT_STYLES 는 소문자 키이므로
@@ -557,6 +619,12 @@ impl EqParser {
         }
 
         // 알 수 없는 명령어 → 텍스트로 처리
+        // LaTeX 스타일(\cmd) 미지 명령어만 경고한다 — hwpeq 베어워드는 일반 변수
+        // 식별자(x, mc 등)와 구분할 수 없어 경고하면 모든 스크립트가 오탐이 된다.
+        if from_latex {
+            self.warnings
+                .push(format!("알 수 없는 수식 명령어: \\{cmd}"));
+        }
         let node = EqNode::Text(cmd.to_string());
         self.try_parse_scripts(node)
     }
@@ -580,8 +648,15 @@ impl EqParser {
             children.push(self.parse_element());
         }
 
-        // 닫는 괄호 건너뛰기
-        self.expect(TokenType::RBrace);
+        // 닫는 괄호 건너뛰기 — EOF 까지 닫는 괄호가 없었으면 경고
+        // (기존과 동일하게 관대하게 파싱하되 검증 게이트용 경고만 남긴다)
+        if !self.expect(TokenType::RBrace) {
+            self.warnings
+                .push("닫는 중괄호 '}' 가 없습니다".to_string());
+        }
+        if children.is_empty() {
+            self.warnings.push("빈 그룹 '{}' 입니다".to_string());
+        }
 
         EqNode::Row(children).simplify()
     }
@@ -650,8 +725,28 @@ impl EqParser {
         }
     }
 
-    /// 단일 토큰 또는 그룹 파싱 (첨자/인자용)
+    /// 단일 토큰 또는 그룹 파싱 (첨자/인자용) — 재귀 깊이 가드 포함
     fn parse_single_or_group(&mut self) -> EqNode {
+        if self.at_end() {
+            return EqNode::Empty;
+        }
+        if self.depth >= MAX_PARSE_DEPTH {
+            // 깊이 초과: RBrace(그룹 종료 마커)는 소비하지 않는 기존 계약을 유지하고,
+            // 그 외 토큰은 하나 소비하여 진행을 보장한다.
+            self.warn_depth_exceeded();
+            if self.current_type() != TokenType::RBrace {
+                self.pos += 1;
+            }
+            return EqNode::Empty;
+        }
+        self.depth += 1;
+        let node = self.parse_single_or_group_inner();
+        self.depth -= 1;
+        node
+    }
+
+    /// 단일 토큰 또는 그룹 파싱 (첨자/인자용)
+    fn parse_single_or_group_inner(&mut self) -> EqNode {
         if self.at_end() {
             return EqNode::Empty;
         }
@@ -668,6 +763,7 @@ impl EqParser {
         // 단일 토큰
         let ty = self.current_type();
         let val = self.current_value().to_string();
+        let from_latex = self.tokens.get(self.pos).is_some_and(|t| t.from_latex);
         self.pos += 1;
 
         match ty {
@@ -680,7 +776,7 @@ impl EqParser {
                     // [#1204-B] decoration/구조 명령(bar, sqrt 등)도 단일 인자/body 로
                     // 올 수 있다 (`rm bar {...}`). parse_command 로 위임 — 미지 명령은
                     // parse_command 의 fall-through 가 Text 로 처리하므로 안전.
-                    self.parse_command(&val)
+                    self.parse_command(&val, from_latex)
                 }
             }
             TokenType::Number => EqNode::Number(val),
@@ -1907,6 +2003,71 @@ mod tests {
         assert!(
             !s.contains(r#"Text("root3")"#),
             "root3 이 텍스트로 leak 되면 안 됨: {s}"
+        );
+    }
+
+    // ── 검증 경고 / 재귀 깊이 한도 (미리보기 검증 게이트용) ─────────────
+
+    /// 파싱 후 수집된 경고를 반환하는 헬퍼
+    fn parse_warnings(script: &str) -> Vec<String> {
+        let mut parser = EqParser::new(tokenize(script));
+        parser.parse();
+        parser.warnings().to_vec()
+    }
+
+    /// 미지 LaTeX 명령어(`\foo`)는 텍스트로 관대하게 처리하되 경고를 남긴다.
+    #[test]
+    fn warns_on_unknown_latex_command() {
+        let w = parse_warnings(r"\unknowncmd x");
+        assert!(
+            w.iter().any(|m| m.contains("\\unknowncmd")),
+            "미지 LaTeX 명령어 경고가 있어야 함: {w:?}"
+        );
+        // 베어워드 변수 식별자(x, mc)는 경고하지 않는다 (오탐 방지)
+        let w2 = parse_warnings("E=mc^2");
+        assert!(w2.is_empty(), "일반 식별자에는 경고가 없어야 함: {w2:?}");
+    }
+
+    /// 괄호 불일치(열린 채 종료 / 짝 없는 닫힘)는 경고로 수집된다.
+    #[test]
+    fn warns_on_unbalanced_braces() {
+        let w = parse_warnings("{1 over 2");
+        assert!(
+            w.iter().any(|m| m.contains("닫는 중괄호")),
+            "닫히지 않은 그룹 경고가 있어야 함: {w:?}"
+        );
+        let w2 = parse_warnings("1 over 2}");
+        assert!(
+            w2.iter().any(|m| m.contains("짝 없는 닫는 괄호")),
+            "짝 없는 닫는 괄호 경고가 있어야 함: {w2:?}"
+        );
+    }
+
+    /// 빈 그룹 `{}` 도 경고로 수집된다.
+    #[test]
+    fn warns_on_empty_group() {
+        let w = parse_warnings("x^{}");
+        assert!(
+            w.iter().any(|m| m.contains("빈 그룹")),
+            "빈 그룹 경고가 있어야 함: {w:?}"
+        );
+    }
+
+    /// 비정상적으로 깊게 중첩된 스크립트(8000자 한도 내 최악)는 스택 오버플로
+    /// 없이 깊이 초과 경고로 수집되어야 한다.
+    #[test]
+    fn depth_cap_produces_warning_not_crash() {
+        let script = format!("{}{}", "{".repeat(3900), "}".repeat(3900));
+        let w = parse_warnings(&script);
+        assert!(
+            w.iter().any(|m| m.contains("중첩 깊이")),
+            "중첩 깊이 초과 경고가 있어야 함: {w:?}"
+        );
+        // 중첩 장식(`hat hat hat ...`)처럼 중괄호 없는 재귀도 막혀야 한다
+        let w2 = parse_warnings(&"hat ".repeat(3000));
+        assert!(
+            w2.iter().any(|m| m.contains("중첩 깊이")),
+            "중괄호 없는 재귀도 깊이 초과 경고가 있어야 함: {w2:?}"
         );
     }
 
