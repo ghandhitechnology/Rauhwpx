@@ -69,6 +69,33 @@
     inset 0 1px 0 rgba(var(--ag-pending-ink), 0.58);
 }
 
+/* 문단이 끝난 자리의 개행 표시. 밑줄이 글자 끝에서 멈추는 대신 줄이 바뀌었다는
+   사실을 여기서 말한다. 본문보다 옅게 두어 글자와 경쟁하지 않는다. */
+.ag-pending-enter {
+  position: absolute;
+  z-index: 7;
+  pointer-events: none;
+  color: rgba(var(--ag-pending-ink, 168, 79, 49), 0.62);
+}
+
+.ag-pending-enter.ag-claude {
+  --ag-pending-ink: 168, 79, 49;
+}
+
+.ag-pending-enter.ag-codex {
+  --ag-pending-ink: 53, 105, 168;
+}
+
+.ag-pending-enter.ag-enter-exact {
+  --ag-pending-ink: 35, 122, 75;
+}
+
+.ag-pending-enter svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 /* replace_range exact diff: 의미 색상은 에이전트 provenance 와 분리한다. */
 .ag-exact-ink {
   --ag-pending-ink: 35, 122, 75;
