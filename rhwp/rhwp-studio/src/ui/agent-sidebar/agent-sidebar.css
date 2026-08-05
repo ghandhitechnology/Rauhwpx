@@ -1,9 +1,25 @@
 /* ─── AI 에이전트 사이드바 (ag- 접두어) ─────────────────────
-   스튜디오 --ui-* 토큰을 셸로 쓰고, Claude/Codex 색은 조용한
-   액센트(슬라이더 테두리·점·선택 라벨)로만 남긴다.
    top/bottom 은 index.ts 가 계산해 인라인으로 지정한다.
    펼침 시 body.ag-sidebar-open 이 #editor-area 를 같은 폭·같은
-   easing 으로 밀어 용지/눈금자가 가려지지 않게 한다. */
+   easing 으로 밀어 용지/눈금자가 가려지지 않게 한다.
+
+   ── 방향 계약 (2026-08, redesign/modern) ────────────────
+   THESIS: 이 패널은 문서 프로그램의 한 면이지 서랍에 넣은 채팅
+   앱이 아니다. 거부하는 배치 — 양쪽 말풍선, 맨 textarea 옆에
+   붙은 파란 채움 버튼, #c0c0c0 실선으로 나눈 패널 크롬.
+   OWN-WORLD: Word for Mac 계열 중성 램프(--n-*). 흰 면,
+   거의 보이지 않는 헤어라인, 톤과 그림자로 나누는 경계.
+   모서리 칩 4 / 입력 6 / 패널 8. 11–13px 시스템 스택.
+   색 전략은 절제형 — 중성 + 액센트 하나. Claude/Codex 색은
+   1px 식별선과 점으로만 남기고 절대 면을 채우지 않는다.
+   STORY: 사용자가 문서를 열어둔 채 옆면에 지시하고, 제안된
+   편집을 눈으로 확인한 뒤 승인한다.
+   FIRST VIEWPORT: 헤더는 한 덩어리의 컴팩트 컨트롤 클러스터,
+   가운데는 대화 흐름, 아래는 보내기 버튼을 품은 단일 입력 필드.
+   FORM: 브리프가 지정한 세계(Word for Mac 현대화) — 사용자
+   고정이므로 방향 추첨 없음.
+   FINISH: unreviewed and undocumented is unfinished; this build
+   ends with the finish review, the verdict, and DESIGN.md */
 
 :root {
   --ag-sidebar-width: 360px;
@@ -57,20 +73,33 @@ body.ag-sidebar-resizing {
 
 }
 
+/* --ag-* 는 이 파일 전체가 쓰는 간접층이다. 여기서 새 중성
+   램프로 갈아끼우면 아래 규칙들이 함께 따라온다. */
 .ag-root {
-  --ag-bg: var(--ui-surface);
-  --ag-bg-2: var(--ui-bg);
-  --ag-text: var(--ui-text);
-  --ag-text-muted: var(--ui-text-muted);
-  --ag-border: var(--ui-border);
-  --ag-input-bg: var(--ui-surface);
+  --ag-bg: var(--n-surface);
+  --ag-bg-2: var(--n-surface-sunken);
+  --ag-raised: var(--n-surface-raised);
+  --ag-text: var(--n-text);
+  --ag-text-secondary: var(--n-text-secondary);
+  --ag-text-muted: var(--n-text-muted);
+  --ag-border: var(--n-hairline);
+  --ag-border-strong: var(--n-hairline-strong);
+  --ag-input-bg: var(--n-surface);
+  --ag-hover: var(--n-fill-hover);
+  --ag-active: var(--n-fill-active);
+  --ag-selected: var(--n-fill-selected);
   --ag-claude: #c4785a;
   --ag-codex: #5b8fd4;
-  --ag-claude-wash: rgba(196, 120, 90, 0.06);
-  --ag-codex-wash: rgba(91, 143, 212, 0.06);
+  --ag-claude-wash: rgba(196, 120, 90, 0.10);
+  --ag-codex-wash: rgba(91, 143, 212, 0.10);
   --ag-accent: var(--ag-claude);
-  --ag-ok: #3d7a47;
-  --ag-err: var(--ui-danger-strong);
+  --ag-ok: #2f7d4f;
+  --ag-err: #c8372d;
+
+  /* 모서리 한 벌 */
+  --ag-r-chip: var(--n-radius-chip);
+  --ag-r-field: var(--n-radius-field);
+  --ag-r-panel: var(--n-radius-panel);
 
   position: fixed;
   right: 0;
@@ -81,12 +110,21 @@ body.ag-sidebar-resizing {
   background: var(--ag-bg);
   color: var(--ag-text);
   border-left: 1px solid var(--ag-border);
-  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--n-elev-2);
   font-family: var(--font-family-ui, sans-serif);
   font-size: var(--font-size-md, 13px);
   line-height: 1.5;
   transition: transform var(--ag-sidebar-duration) var(--ag-sidebar-ease);
   will-change: transform;
+}
+
+/* 아이콘 한 벌: 굵기와 크기를 한 곳에서 통제한다. */
+.ag-icon {
+  display: block;
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  color: inherit;
 }
 
 .ag-root[data-agent='codex'] {
@@ -153,10 +191,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 :root[data-theme-effective='dark'] .ag-root {
   --ag-claude: #d49174;
   --ag-codex: #7aa8e0;
-  --ag-claude-wash: rgba(212, 145, 116, 0.1);
-  --ag-codex-wash: rgba(122, 168, 224, 0.1);
-  --ag-ok: #6bb078;
-  box-shadow: -2px 0 10px rgba(0, 0, 0, 0.28);
+  --ag-claude-wash: rgba(212, 145, 116, 0.16);
+  --ag-codex-wash: rgba(122, 168, 224, 0.16);
+  --ag-ok: #5cbb7f;
+  --ag-err: #ff6b60;
+  box-shadow: var(--n-elev-2);
 }
 
 /* ─── 접기 탭 ─────────────────────────────────────────── */
@@ -175,7 +214,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   padding: 0;
   border: 1px solid var(--ag-border);
   border-right: none;
-  border-radius: var(--radius-lg, 4px) 0 0 var(--radius-lg, 4px);
+  border-radius: var(--ag-r-field) 0 0 var(--ag-r-field);
   background: var(--ag-bg);
   color: var(--ag-text-muted);
   cursor: col-resize;
@@ -183,7 +222,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 body.ag-sidebar-resizing .ag-collapse-tab {
-  background: var(--ui-hover);
+  background: var(--ag-hover);
   color: var(--ag-text);
 }
 
@@ -199,7 +238,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 .ag-collapse-tab:hover {
-  background: var(--ui-hover);
+  background: var(--ag-hover);
   color: var(--ag-text);
 }
 
@@ -210,14 +249,17 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
-  padding: 10px 14px 8px;
+  gap: 3px;
+  padding: 9px 12px 8px;
   border-bottom: 1px solid var(--ag-border);
+  background: var(--ag-raised);
 }
 
+/* 사이드바는 드래그로 폭이 변한다. 좁아지면 컨트롤을 찌그러뜨리는
+   대신 다음 줄로 흘린다 — 라벨이 서로 겹치는 것보다 낫다. */
 .ag-selectors {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   gap: 2px 6px;
   width: 100%;
@@ -235,31 +277,41 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   height: 28px;
   padding: 0;
   border: none;
-  border-radius: var(--radius-lg, 4px);
+  border-radius: var(--ag-r-field);
   background: transparent;
   color: var(--ag-text-muted);
   cursor: pointer;
 }
 
+/* 헤더 컨트롤은 테두리 없는 고스트다. 실선 알약을 늘어놓으면
+   툴바가 아니라 폼처럼 읽힌다. */
 .ag-permission-btn,
 .ag-skills-btn {
   flex: 0 0 auto;
-  min-height: 26px;
+  min-height: 24px;
   padding: 3px 7px;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--radius-lg, 4px);
+  border: 0;
+  border-radius: var(--ag-r-chip);
   background: transparent;
-  color: var(--ag-text-muted);
+  color: var(--ag-text-secondary);
   font: inherit;
   font-size: var(--font-size-sm, 11px);
   cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
 }
 
 .ag-permission-btn:hover:not(:disabled),
 .ag-skills-btn:hover {
-  border-color: var(--ui-border-strong);
-  background: var(--ui-hover);
+  background: var(--ag-hover);
   color: var(--ag-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-permission-btn,
+  .ag-skills-btn,
+  .ag-send {
+    transition: none;
+  }
 }
 
 .ag-permission-btn:focus-visible,
@@ -278,7 +330,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 .ag-threads-btn:hover {
-  background: var(--ui-hover);
+  background: var(--ag-hover);
   color: var(--ag-text);
 }
 
@@ -295,7 +347,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 .ag-threads-btn[aria-expanded='true'],
 .ag-threads-close {
-  background: var(--ui-selected);
+  background: var(--ag-selected);
   color: var(--ag-text);
 }
 
@@ -418,7 +470,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-skill-field,
 .ag-skill-file-editor {
   border: 1px solid var(--ag-border);
-  border-radius: var(--radius-lg, 4px);
+  border-radius: var(--ag-r-field);
   background: var(--ag-input-bg);
   color: var(--ag-text);
   font: inherit;
@@ -435,9 +487,9 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-skill-save,
 .ag-skill-editor-back {
   border: 1px solid var(--accent-primary);
-  border-radius: var(--radius-lg, 4px);
+  border-radius: var(--ag-r-field);
   background: var(--accent-primary);
-  color: var(--ui-text-on-accent);
+  color: var(--n-on-accent);
   font: inherit;
   font-weight: 700;
   padding: 7px 10px;
@@ -520,8 +572,8 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: inline-block;
   margin-top: 4px;
   padding: 1px 5px;
-  border-radius: var(--radius-lg, 4px);
-  background: var(--ui-selected);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-selected);
   color: var(--ag-text-muted);
   font-size: 10px;
 }
@@ -532,7 +584,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-skill-file {
   padding: 4px 6px;
   border: 1px solid var(--ag-border);
-  border-radius: var(--radius-lg, 4px);
+  border-radius: var(--ag-r-field);
   background: transparent;
   color: var(--ag-text-muted);
   font: inherit;
@@ -540,7 +592,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   cursor: pointer;
 }
 .ag-skill-danger { color: var(--ag-err); }
-.ag-skill-file.ag-active { background: var(--ui-selected); color: var(--ag-text); }
+.ag-skill-file.ag-active { background: var(--ag-selected); color: var(--ag-text); }
 
 .ag-skill-editor {
   display: flex;
@@ -561,7 +613,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   max-width: 92px;
   padding: 4px 5px;
   border: 1px solid var(--ag-border);
-  border-radius: var(--radius-lg, 4px);
+  border-radius: var(--ag-r-field);
   background: var(--ag-input-bg);
   color: var(--ag-text);
   font: inherit;
@@ -579,7 +631,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   flex: 0 0 auto;
   padding: 4px 8px;
   border: 1px solid var(--ag-border);
-  border-radius: var(--radius-lg, 4px);
+  border-radius: var(--ag-r-field);
   background: var(--ui-surface-muted);
   cursor: pointer;
 }
@@ -614,7 +666,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   margin: 0;
   padding: 10px 12px;
   border: 1px solid var(--ag-border);
-  border-radius: var(--radius-lg, 4px);
+  border-radius: var(--ag-r-field);
   background: var(--ui-surface, var(--ag-bg));
   color: var(--ag-text);
   font: inherit;
@@ -624,7 +676,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 .ag-threads-new:hover {
-  background: var(--ui-hover);
+  background: var(--ag-hover);
 }
 
 .ag-threads-new:focus-visible {
@@ -653,7 +705,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   margin: 0;
   padding: 8px 10px;
   border: none;
-  border-radius: var(--radius-md, 3px);
+  border-radius: var(--ag-r-chip);
   background: transparent;
   color: var(--ag-text);
   font: inherit;
@@ -663,12 +715,12 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 .ag-threads-item:hover,
 .ag-threads-item:focus-visible {
-  background: var(--ui-hover);
+  background: var(--ag-hover);
   outline: none;
 }
 
 .ag-threads-item.ag-active {
-  background: var(--ui-selected);
+  background: var(--ag-selected);
 }
 
 .ag-threads-item-title {
@@ -705,9 +757,16 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   }
 }
 
+/* min-width:0 이 없으면 flex item 의 min-width:auto 가 콘텐츠 폭을
+   바닥으로 잡아, 모델명이 길 때 줄임표가 걸리지 않고 뒤쪽 버튼
+   (목록)이 헤더 밖으로 밀려 .ag-stage 에서 잘린다.
+   다만 한 줄에 6개를 욱여넣으면 라벨끼리 겹치므로, 자리가
+   부족하면 줄임표가 아니라 줄바꿈으로 흘린다(.ag-selectors). */
 .ag-model {
   position: relative;
   display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 100%;
 }
 
@@ -715,11 +774,12 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   max-width: 100%;
   margin: 0;
   padding: 2px 4px 2px 2px;
   border: none;
-  border-radius: var(--radius-lg, 4px);
+  border-radius: var(--ag-r-field);
   background: transparent;
   color: var(--ag-text);
   font: inherit;
@@ -731,7 +791,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 .ag-model-trigger:hover:not(:disabled) {
-  background: var(--ui-hover);
+  background: var(--ag-hover);
 }
 
 .ag-model-trigger:focus-visible {
@@ -763,8 +823,9 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   color: var(--ag-codex);
 }
 
+/* 줄어들더라도 최소 몇 글자는 남겨 무엇을 고르는 칸인지 읽히게 한다. */
 .ag-model-name {
-  min-width: 0;
+  min-width: 3ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -783,12 +844,15 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   color: var(--ag-text);
 }
 
+/* 모델명은 길어질 수 있다("Claude Opus 4.6 (1M context)").
+   혼자 한 줄을 차지하지 않도록 상한을 두고 줄임표로 흘린다. */
 .ag-llm-name {
   min-width: 0;
+  max-width: 16ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--ui-text-secondary, var(--ag-text-muted));
+  color: var(--ag-text-secondary);
 }
 
 .ag-llm-item::before,
@@ -836,7 +900,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   min-width: 148px;
   padding: 4px;
   border: 1px solid var(--ag-border);
-  border-radius: var(--radius-lg, 4px);
+  border-radius: var(--ag-r-field);
   background: var(--ag-bg);
   box-shadow: var(--shadow-dropdown, 2px 2px 8px rgba(0, 0, 0, 0.15));
   transform-origin: top left;
@@ -878,7 +942,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   margin: 0;
   padding: 6px 8px;
   border: none;
-  border-radius: var(--radius-md, 3px);
+  border-radius: var(--ag-r-chip);
   background: transparent;
   color: var(--ag-text);
   font: inherit;
@@ -902,12 +966,12 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 .ag-model-item:hover,
 .ag-model-item:focus-visible {
-  background: var(--ui-hover);
+  background: var(--ag-hover);
   outline: none;
 }
 
 .ag-model-item.ag-active {
-  background: var(--ui-selected);
+  background: var(--ag-selected);
   font-weight: 600;
 }
 
@@ -966,12 +1030,15 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   overflow-wrap: anywhere;
 }
 
+/* 꼬리 달린 비대칭 말풍선은 채팅 제품의 표식이다. 균일한
+   모서리에 가라앉은 면으로, 문서 앱의 인용 블록처럼 읽힌다. */
 .ag-msg-user {
   align-self: flex-end;
-  max-width: 85%;
+  max-width: 86%;
   padding: 7px 11px;
-  background: var(--ui-surface-muted);
-  border-radius: 12px 12px 3px 12px;
+  border-radius: var(--ag-r-panel);
+  background: var(--ag-raised);
+  box-shadow: inset 0 0 0 1px var(--ag-border);
   color: var(--ag-text);
 }
 
@@ -1246,18 +1313,21 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
-  font-weight: 700;
+}
+
+.ag-tool-status .ag-icon {
+  width: 11px;
+  height: 11px;
 }
 
 .ag-tool-status.ag-ok {
   color: var(--ag-ok);
-  animation: ag-status-settle 280ms var(--ag-spring-soft) both;
+  animation: ag-status-settle 260ms var(--ag-motion-out) both;
 }
 
 .ag-tool-status.ag-err {
   color: var(--ag-err);
-  animation: ag-status-settle 280ms var(--ag-spring-soft) both;
+  animation: ag-status-settle 260ms var(--ag-motion-out) both;
 }
 
 @keyframes ag-status-settle {
@@ -1348,7 +1418,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   max-height: 160px;
   overflow-y: auto;
   padding: 5px 6px;
-  border-radius: var(--radius-md, 3px);
+  border-radius: var(--ag-r-chip);
   background: var(--ag-bg-2);
   color: var(--ag-text);
   font-family: var(--font-family-mono, monospace);
@@ -1389,29 +1459,31 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   gap: 8px;
   max-height: 40%;
   overflow-y: auto;
-  padding: 10px 14px;
+  padding: 10px 12px;
   border-top: 1px solid var(--ag-border);
-  background: var(--ui-bg-light);
+  background: var(--ag-raised);
 }
 
 .ag-review:empty {
   display: none;
 }
 
+/* 어느 에이전트의 제안인지는 1px 식별선으로만 말한다.
+   2px 컬러 바는 카드를 경고문처럼 보이게 한다. */
 .ag-review-card {
-  border: 1px solid var(--ag-border);
-  border-radius: var(--radius-lg, 4px);
-  background: var(--ag-bg);
   padding: 8px 10px;
-  box-shadow: inset 2px 0 0 var(--ag-accent);
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-panel);
+  background: var(--ag-bg);
+  box-shadow: inset 1px 0 0 var(--ag-accent), var(--n-elev-1);
 }
 
 .ag-review-card.ag-claude {
-  box-shadow: inset 2px 0 0 var(--ag-claude);
+  box-shadow: inset 1px 0 0 var(--ag-claude), var(--n-elev-1);
 }
 
 .ag-review-card.ag-codex {
-  box-shadow: inset 2px 0 0 var(--ag-codex);
+  box-shadow: inset 1px 0 0 var(--ag-codex), var(--n-elev-1);
 }
 
 .ag-review-open {
@@ -1433,11 +1505,20 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   color: var(--ag-text-muted);
 }
 
+/* 편집 종류는 그려진 아이콘으로 말한다(유니코드 글리프 아님).
+   baseline 정렬된 행 안에서 광학 중심을 맞추려 살짝 내린다. */
 .ag-op-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 14px;
-  text-align: center;
-  font-family: var(--font-family-mono, monospace);
-  font-weight: 700;
+  align-self: center;
+  height: 14px;
+}
+
+.ag-op-glyph .ag-icon {
+  width: 11px;
+  height: 11px;
 }
 
 .ag-op-glyph.ag-op-insert {
@@ -1475,30 +1556,36 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-approve,
 .ag-reject {
   flex: 1;
+  min-height: 26px;
   padding: 5px 0;
-  border-radius: var(--radius-lg, 4px);
+  border-radius: var(--ag-r-chip);
   font: inherit;
   font-size: var(--font-size-base, 12px);
   font-weight: 600;
   cursor: pointer;
+  transition: background 120ms ease;
 }
 
+.ag-approve:focus-visible,
+.ag-reject:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-approve,
+  .ag-reject {
+    transition: none;
+  }
+}
+
+/* 어느 에이전트든 승인 버튼은 같은 모습이다. 카드 왼쪽 1px 선이
+   이미 출처를 말하므로, 버튼 안쪽에 에이전트 색 링을 덧대면
+   렌더 오류처럼 보인다. */
 .ag-approve {
   border: 1px solid var(--accent-primary);
   background: var(--accent-primary);
-  color: var(--ui-text-on-accent);
-}
-
-.ag-review-card.ag-claude .ag-approve {
-  border-color: var(--accent-primary);
-  background: var(--accent-primary);
-  box-shadow: inset 0 0 0 1px var(--ag-claude);
-}
-
-.ag-review-card.ag-codex .ag-approve {
-  border-color: var(--accent-primary);
-  background: var(--accent-primary);
-  box-shadow: inset 0 0 0 1px var(--ag-codex);
+  color: var(--n-on-accent);
 }
 
 .ag-approve:hover:not(:disabled) {
@@ -1513,7 +1600,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 .ag-reject:hover:not(:disabled) {
-  background: var(--ui-hover);
+  background: var(--ag-hover);
   border-color: var(--ui-border-strong);
 }
 
@@ -1525,29 +1612,55 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 /* ─── 입력 영역 ───────────────────────────────────────── */
 
+/* 입력은 하나의 면이다: textarea 와 보내기 버튼이 같은 테두리
+   안에 살고, 포커스 링은 개별 컨트롤이 아니라 필드 전체에 걸린다.
+   버튼을 필드 밖에 두면 '채팅 앱' 배치로 되돌아간다. */
 .ag-composer {
   position: relative;
   flex: 0 0 auto;
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  padding: 10px 14px;
+  padding: 10px 12px 12px;
   border-top: 1px solid var(--ag-border);
   background: var(--ag-bg);
 }
 
+.ag-composer-field {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 6px 6px 6px 10px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-input-bg);
+  box-shadow: var(--n-elev-1);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.ag-composer-field:focus-within {
+  border-color: var(--ag-accent);
+  box-shadow: var(--n-elev-1), 0 0 0 3px var(--ag-claude-wash);
+}
+
+.ag-root[data-agent='codex'] .ag-composer-field:focus-within {
+  box-shadow: var(--n-elev-1), 0 0 0 3px var(--ag-codex-wash);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-composer-field { transition: none; }
+}
+
 .ag-slash-menu {
   position: absolute;
-  right: 14px;
+  right: 12px;
   bottom: calc(100% + 6px);
-  left: 14px;
+  left: 12px;
   z-index: 6;
   max-height: 240px;
   overflow: auto;
+  padding: 4px;
   border: 1px solid var(--ag-border);
-  border-radius: var(--radius-lg, 4px);
+  border-radius: var(--ag-r-panel);
   background: var(--ag-bg);
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.16);
+  box-shadow: var(--n-elev-3);
 }
 
 .ag-slash-option {
@@ -1555,88 +1668,93 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   grid-template-columns: minmax(110px, auto) minmax(0, 1fr);
   gap: 10px;
   width: 100%;
-  padding: 8px 10px;
+  padding: 7px 8px;
   border: 0;
-  border-bottom: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-chip);
   background: transparent;
   color: var(--ag-text);
   font: inherit;
   text-align: left;
 }
-.ag-slash-option:last-child { border-bottom: 0; }
-.ag-slash-option.ag-active { background: var(--ui-selected); }
+.ag-slash-option.ag-active { background: var(--ag-selected); }
 .ag-slash-detail { overflow: hidden; color: var(--ag-text-muted); font-size: var(--font-size-sm, 11px); text-overflow: ellipsis; white-space: nowrap; }
 
 .ag-input {
   flex: 1 1 auto;
   min-width: 0;
-  min-height: 34px;
-  max-height: 120px;
+  min-height: 22px;
+  max-height: 132px;
+  padding: 5px 0 5px;
   resize: none;
-  padding: 7px 9px;
-  border: 1px solid var(--ui-border-light);
-  border-radius: var(--radius-lg, 4px);
-  background: var(--ag-input-bg);
+  border: 0;
+  background: transparent;
   color: var(--ag-text);
   font: inherit;
   font-size: var(--font-size-md, 13px);
-  line-height: 1.4;
-}
-
-.ag-input::placeholder {
-  color: var(--ui-text-placeholder);
+  line-height: 1.5;
 }
 
 .ag-input:focus {
   outline: none;
-  border-color: var(--focus-ring);
-  box-shadow: 0 0 0 2px var(--ui-focus-soft);
 }
 
-.ag-root[data-agent='claude'] .ag-input:focus {
-  border-color: var(--ag-claude);
-  box-shadow: 0 0 0 2px var(--ag-claude-wash);
-}
-
-.ag-root[data-agent='codex'] .ag-input:focus {
-  border-color: var(--ag-codex);
-  box-shadow: 0 0 0 2px var(--ag-codex-wash);
+.ag-input::placeholder {
+  color: var(--n-text-placeholder);
 }
 
 .ag-input:disabled {
   opacity: 0.55;
 }
 
+/* 필드 안쪽 오른쪽에 붙는 26px 정사각 버튼. 라벨은 aria 로 남긴다. */
 .ag-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
-  padding: 7px 14px;
-  border: 1px solid var(--accent-primary);
-  border-radius: var(--radius-lg, 4px);
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ag-r-chip);
   background: var(--accent-primary);
-  color: var(--ui-text-on-accent);
-  font: inherit;
-  font-size: var(--font-size-base, 12px);
-  font-weight: 600;
+  color: var(--n-on-accent);
   cursor: pointer;
+  transition: background 120ms ease, opacity 120ms ease;
+}
+
+.ag-send .ag-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .ag-send:hover:not(:disabled) {
   background: var(--accent-strong);
-  border-color: var(--accent-strong);
 }
 
+.ag-send:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* 보낼 내용이 없을 때는 사라지지 않고 가라앉는다 */
 .ag-send:disabled {
-  opacity: 0.5;
+  background: var(--n-fill-active);
+  color: var(--n-text-placeholder);
   cursor: default;
 }
 
 .ag-send.ag-stop {
-  background: transparent;
-  border-color: var(--ag-err);
-  color: var(--ag-err);
+  background: var(--ag-err);
+  color: #ffffff;
+}
+
+/* 어두운 테마의 err 는 밝은 산호색이라 흰 아이콘이 묻힌다. */
+:root[data-theme-effective='dark'] .ag-send.ag-stop {
+  color: #2a0d0a;
 }
 
 .ag-send.ag-stop:hover:not(:disabled) {
-  background: var(--ui-danger-soft);
-  filter: none;
+  background: var(--ag-err);
+  filter: brightness(0.92);
 }
