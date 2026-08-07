@@ -15,6 +15,8 @@ export interface ChatThread {
   title: string;
   /** Luna 제목 요청을 이미 보냈는지 */
   titleRequested: boolean;
+  /** 사용자가 직접 붙인 이름 — 이후 자동 제목이 덮어쓰지 않는다 */
+  titlePinned?: boolean;
   createdAt: number;
   updatedAt: number;
   agent: AgentName;
@@ -136,13 +138,33 @@ export function removeThread(id: string): void {
   saveAll(loadAll().filter((t) => t.id !== id));
 }
 
+/** 자동 제목(에이전트/폴백) — 사용자가 고정한 이름은 건드리지 않는다. */
 export function setThreadTitle(id: string, title: string): ChatThread | null {
   const all = loadAll();
   const idx = all.findIndex((t) => t.id === id);
   if (idx < 0) return null;
+  if (all[idx]!.titlePinned) return all[idx]!;
   const cleaned = title.trim().replace(/^["'「『]|["'」』]$/g, '').trim();
   if (!cleaned) return all[idx]!;
   const next = { ...all[idx]!, title: cleaned.slice(0, 48), updatedAt: Date.now() };
+  all[idx] = next;
+  saveAll(all);
+  return next;
+}
+
+/**
+ * 사용자가 직접 이름을 바꾼다. 자동 제목과 달리 titlePinned 를 세워
+ * 이후 에이전트 제목이 덮어쓰지 못하게 한다. 빈 이름은 무시한다.
+ * updatedAt 은 건드리지 않는다 — 이름 바꾸기는 대화 활동이 아니라서
+ * 목록 순서가 튀면 안 된다.
+ */
+export function renameThread(id: string, title: string): ChatThread | null {
+  const all = loadAll();
+  const idx = all.findIndex((t) => t.id === id);
+  if (idx < 0) return null;
+  const cleaned = title.trim().replace(/\s+/g, ' ');
+  if (!cleaned) return all[idx]!;
+  const next = { ...all[idx]!, title: cleaned.slice(0, 48), titlePinned: true };
   all[idx] = next;
   saveAll(all);
   return next;

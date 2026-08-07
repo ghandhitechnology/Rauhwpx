@@ -3,21 +3,23 @@
    펼침 시 body.ag-sidebar-open 이 #editor-area 를 같은 폭·같은
    easing 으로 밀어 용지/눈금자가 가려지지 않게 한다.
 
-   ── 방향 계약 (2026-08, redesign/modern) ────────────────
-   THESIS: 이 패널은 문서 프로그램의 한 면이지 서랍에 넣은 채팅
-   앱이 아니다. 거부하는 배치 — 양쪽 말풍선, 맨 textarea 옆에
-   붙은 파란 채움 버튼, #c0c0c0 실선으로 나눈 패널 크롬.
-   OWN-WORLD: Word for Mac 계열 중성 램프(--n-*). 흰 면,
-   거의 보이지 않는 헤어라인, 톤과 그림자로 나누는 경계.
-   모서리 칩 4 / 입력 6 / 패널 8. 11–13px 시스템 스택.
-   색 전략은 절제형 — 중성 + 액센트 하나. Claude/Codex 색은
-   1px 식별선과 점으로만 남기고 절대 면을 채우지 않는다.
-   STORY: 사용자가 문서를 열어둔 채 옆면에 지시하고, 제안된
-   편집을 눈으로 확인한 뒤 승인한다.
-   FIRST VIEWPORT: 헤더는 한 덩어리의 컴팩트 컨트롤 클러스터,
-   가운데는 대화 흐름, 아래는 보내기 버튼을 품은 단일 입력 필드.
-   FORM: 브리프가 지정한 세계(Word for Mac 현대화) — 사용자
-   고정이므로 방향 추첨 없음.
+   ── 방향 계약 (2026-08, operator console) ────────────────
+   THESIS: 이 패널은 대화창이 아니라 '주소가 붙은 오퍼레이션
+   스트림'이다. 에이전트가 문서 어디를 무엇으로 바꿨는지 로그
+   한 줄마다 좌표와 소요 시간으로 말한다. 거부하는 배치 —
+   양쪽 말풍선, 요약 문장만 있고 검토할 수 없는 승인 카드,
+   존재하지 않는 단축키를 그린 키캡.
+   OWN-WORLD: 색·면은 앞선 중성 램프(--n-*)를 그대로 쓴다.
+   바뀌는 것은 활자와 구조다 — 주소·수치·도구 이름은 모노,
+   산문만 UI 산세. 왼쪽 30px 거터 한 줄이 로그 전 구간을
+   관통하고 모든 항목이 거기에 정렬한다. 모서리는 2/3/4 로
+   조인다. diff 색은 새 색이 아니라 기존 ok/err 의 희석이다.
+   STORY: 사용자가 문서를 열어둔 채 옆면에 지시하고, −/+ diff
+   와 좌표로 제안된 편집을 검토한 뒤 승인한다.
+   FIRST VIEWPORT: 헤더는 컴팩트 컨트롤 클러스터 + 계기식
+   문서 readout, 가운데는 번호가 매겨진 작업 로그, 아래는
+   캐럿과 키캡을 품은 단일 입력 필드.
+   FORM: 사용자가 고른 방향(operator console) — 추첨 없음.
    FINISH: unreviewed and undocumented is unfinished; this build
    ends with the finish review, the verdict, and DESIGN.md */
 
@@ -96,10 +98,26 @@ body.ag-sidebar-resizing {
   --ag-ok: #2f7d4f;
   --ag-err: #c8372d;
 
-  /* 모서리 한 벌 */
-  --ag-r-chip: var(--n-radius-chip);
-  --ag-r-field: var(--n-radius-field);
-  --ag-r-panel: var(--n-radius-panel);
+  /* 모서리 한 벌 — 계측기 쪽으로 한 단계 조인다. 앱의 4/6/8 을 그대로
+     쓰면 로그 행과 diff 가 물러 보인다. 값만 바꾸고 층위는 유지. */
+  --ag-r-chip: 2px;
+  --ag-r-field: 3px;
+  --ag-r-panel: 4px;
+
+  /* ── 로그 레지스터 ─────────────────────────────────
+     주소·수치·도구 이름은 모노, 산문만 UI 산세. 두 활자를
+     섞지 않는 것이 이 패널이 '기계적'으로 읽히는 이유다. */
+  --ag-mono: var(--font-family-mono, monospace);
+  --ag-gutter: 30px;
+  --ag-micro: 10px;
+  --ag-track: 0.06em;
+  --ag-track-wide: 0.14em;
+
+  /* diff 색은 새 색이 아니라 기존 ok/err 을 희석한 것이다. */
+  --ag-diff-add: color-mix(in srgb, var(--ag-ok) 9%, transparent);
+  --ag-diff-del: color-mix(in srgb, var(--ag-err) 8%, transparent);
+  --ag-diff-add-rail: color-mix(in srgb, var(--ag-ok) 55%, transparent);
+  --ag-diff-del-rail: color-mix(in srgb, var(--ag-err) 55%, transparent);
 
   position: fixed;
   right: 0;
@@ -300,10 +318,14 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   line-height: 1.25;
 }
 
+/* 선택 상태는 문장이 아니라 계기 표시다 — 모노 + tabular. */
 .ag-selection-context {
   color: var(--ag-text-muted);
-  font-size: var(--font-size-sm, 11px);
-  line-height: 1.2;
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--ag-track);
+  line-height: 1.35;
 }
 
 .ag-header-actions {
@@ -824,22 +846,36 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-skill-save:disabled { opacity: 0.5; cursor: default; }
 .ag-skills-empty { padding: 28px 8px; color: var(--ag-text-muted); text-align: center; }
 
+/* 새 채팅은 장식 버튼이 아니라 명령 행이다 — 왼쪽 정렬 + 거터의 + 표식. */
 .ag-threads-new {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
   width: 100%;
   margin: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--ag-border);
+  padding: 9px 12px 9px var(--ag-gutter);
+  border: 1px solid var(--ag-border-strong);
   border-radius: var(--ag-r-field);
   background: var(--ui-surface, var(--ag-bg));
   color: var(--ag-text);
   font: inherit;
-  font-size: var(--font-size-md, 13px);
+  font-size: var(--font-size-base, 12px);
   font-weight: 600;
+  letter-spacing: var(--ag-track);
+  text-align: left;
   cursor: pointer;
+}
+
+.ag-threads-new::before {
+  content: '+';
+  position: absolute;
+  left: 0;
+  width: calc(var(--ag-gutter) - 9px);
+  color: var(--ag-accent);
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-base, 12px);
+  text-align: right;
 }
 
 .ag-threads-new:hover {
@@ -851,28 +887,42 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   outline-offset: 1px;
 }
 
+/* 채팅 목록도 로그와 같은 규칙을 따른다 — 번호가 붙은 레코드 행,
+   간격 대신 헤어라인, 계기식 메타. 대화 스트림과 같은 세계다. */
 .ag-threads-list {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  margin: 0;
+  gap: 0;
+  /* 페이지 여백을 뚫고 나가 구분선이 패널 폭을 가로지르게 한다. */
+  margin: 0 -12px;
   padding: 0;
+  border-top: 1px solid var(--ag-border);
   list-style: none;
+}
+
+.ag-threads-row {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  border-bottom: 1px solid var(--ag-border);
 }
 
 .ag-threads-item {
   display: flex;
-  flex-direction: column;
+  flex: 1 1 auto;
   align-items: flex-start;
-  gap: 2px;
+  gap: 0;
   width: 100%;
+  min-width: 0;
   margin: 0;
-  padding: 8px 10px;
+  padding: 8px 34px 8px 0;
   border: none;
-  border-radius: var(--ag-r-chip);
+  border-left: 2px solid transparent;
+  border-radius: 0;
   background: transparent;
   color: var(--ag-text);
   font: inherit;
@@ -886,8 +936,35 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   outline: none;
 }
 
+/* 열려 있는 대화는 채움이 아니라 왼쪽 레일로 표시한다. */
 .ag-threads-item.ag-active {
-  background: var(--ag-selected);
+  border-left-color: var(--ag-accent);
+  background: var(--ag-bg-2);
+}
+
+/* 행 번호: 로그의 op 번호와 같은 열, 같은 활자. */
+.ag-thread-idx {
+  flex: 0 0 auto;
+  width: calc(var(--ag-gutter) - 9px);
+  padding-top: 1px;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.ag-threads-item.ag-active .ag-thread-idx {
+  color: var(--ag-accent);
+}
+
+.ag-thread-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 9px;
 }
 
 .ag-threads-item-title {
@@ -904,8 +981,89 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--font-size-sm, 11px);
   color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--ag-track);
+}
+
+/* 이름 바꾸기는 행 오른쪽에 겹쳐 두고 hover/focus 에서만 드러낸다.
+   버튼 안에 버튼을 넣을 수 없어 형제로 두고 절대 배치한다. */
+.ag-thread-rename {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--ag-r-chip);
+  background: transparent;
+  color: var(--ag-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 120ms ease;
+}
+
+.ag-threads-row:hover .ag-thread-rename,
+.ag-thread-rename:focus-visible {
+  opacity: 1;
+}
+
+.ag-thread-rename:hover {
+  border-color: var(--ag-border-strong);
+  background: var(--ag-bg);
+  color: var(--ag-text);
+}
+
+.ag-thread-rename:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-thread-rename .ag-icon {
+  width: 12px;
+  height: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-thread-rename { transition: none; }
+}
+
+/* 편집 중인 행은 행 전체를 입력 필드로 바꾼다 — 자리가 튀지 않게
+   행 높이를 그대로 쓴다. */
+.ag-thread-rename-form {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px 6px calc(var(--ag-gutter) - 9px);
+}
+
+.ag-thread-rename-input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--ag-accent);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-input-bg);
+  color: var(--ag-text);
+  font: inherit;
+  font-size: var(--font-size-base, 12px);
+}
+
+.ag-thread-rename-input:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ag-claude-wash);
+}
+
+.ag-root[data-agent='codex'] .ag-thread-rename-input:focus {
+  box-shadow: 0 0 0 3px var(--ag-codex-wash);
 }
 
 .ag-threads-empty {
@@ -1206,17 +1364,27 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 /* ─── 메시지 목록 ─────────────────────────────────────── */
 
+/* 대화가 아니라 '주소가 붙은 오퍼레이션 스트림'이다. 왼쪽 거터 하나가
+   전 구간을 관통하고, 모든 항목이 그 선에 정렬한다. 거터 선은 요소마다
+   그리지 않고 스크롤 영역 배경으로 한 번에 긋는다(local 부착). */
 .ag-messages {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 14px 16px 18px;
+  gap: 10px;
+  padding: 12px 14px 18px var(--ag-gutter);
   scrollbar-width: thin;
   overscroll-behavior: contain;
   overflow-anchor: none;
+  background-image: linear-gradient(
+    to right,
+    transparent 0 calc(var(--ag-gutter) - 1px),
+    var(--ag-border) calc(var(--ag-gutter) - 1px) var(--ag-gutter),
+    transparent var(--ag-gutter)
+  );
+  background-attachment: local;
 }
 
 .ag-msg {
@@ -1225,16 +1393,29 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   overflow-wrap: anywhere;
 }
 
-/* 꼬리 달린 비대칭 말풍선은 채팅 제품의 표식이다. 균일한
-   모서리에 가라앉은 면으로, 문서 앱의 인용 블록처럼 읽힌다. */
+/* 사용자 입력은 오른쪽 말풍선이 아니라 로그에 기록된 지시문이다.
+   거터 밖으로 캐럿을 내밀어 '입력 행'임을 표시한다. */
 .ag-msg-user {
-  align-self: flex-end;
-  max-width: 86%;
-  padding: 7px 11px;
-  border-radius: var(--ag-r-panel);
-  background: var(--ag-raised);
-  box-shadow: inset 0 0 0 1px var(--ag-border);
+  position: relative;
+  align-self: stretch;
+  max-width: 100%;
+  padding: 5px 10px 6px 11px;
+  border-radius: 0 var(--ag-r-chip) var(--ag-r-chip) 0;
+  border-left: 2px solid var(--ag-accent);
+  background: var(--ag-bg-2);
   color: var(--ag-text);
+  font-size: var(--font-size-base, 12px);
+}
+
+.ag-msg-user::before {
+  content: '>';
+  position: absolute;
+  top: 5px;
+  left: calc(-1 * var(--ag-gutter) + 10px);
+  color: var(--ag-accent);
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.5;
 }
 
 .ag-msg-assistant {
@@ -1278,10 +1459,14 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 /* ─── 작업 내역: 진행 설명 + 도구 호출 ───────────────── */
 
+/* 작업 내역은 거터를 통째로 되찾아 op 번호 열을 자기 안에 품는다.
+   (content 가 overflow 스크롤러라 바깥으로 삐져나가면 잘린다) */
 .ag-activity {
   position: relative;
   align-self: stretch;
   min-width: 0;
+  margin-left: calc(-1 * var(--ag-gutter));
+  border-top: 1px solid var(--ag-border);
   border-bottom: 1px solid var(--ag-border);
   isolation: isolate;
   animation: ag-activity-arrive 360ms var(--ag-motion-out) both;
@@ -1348,16 +1533,36 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   align-items: center;
   gap: 7px;
   width: 100%;
-  min-height: 34px;
+  min-height: 30px;
   margin: 0;
-  padding: 5px 0 7px;
+  padding: 5px 8px 6px var(--ag-gutter);
   border: none;
   background: transparent;
   color: var(--ag-text-muted);
   font: inherit;
-  font-size: var(--font-size-base, 12px);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  letter-spacing: var(--ag-track);
+  font-variant-numeric: tabular-nums;
   text-align: left;
   cursor: pointer;
+}
+
+/* 헤더 행의 거터에는 실행 상태를 뜻하는 표식 하나만 둔다. */
+.ag-activity-toggle::before {
+  content: '▸';
+  position: absolute;
+  left: 11px;
+  color: var(--ag-text-muted);
+  font-size: 9px;
+}
+
+.ag-activity-running .ag-activity-toggle::before {
+  color: var(--ag-accent);
+}
+
+.ag-activity-error .ag-activity-toggle::before {
+  color: var(--ag-err);
 }
 
 .ag-activity-toggle:hover {
@@ -1439,8 +1644,9 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 .ag-activity-note {
+  position: relative;
   flex: 0 0 auto;
-  padding: 2px 0 6px 18px;
+  padding: 2px 8px 6px var(--ag-gutter);
   color: var(--ag-text-muted);
   font-size: var(--font-size-base, 12px);
   line-height: 1.55;
@@ -1474,14 +1680,27 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   }
 }
 
+/* 산문 노트도 로그 행이다 — 거터에 표식만 남기고 본문은 같은 열에 정렬한다. */
+.ag-activity-note::before {
+  content: '·';
+  position: absolute;
+  left: 0;
+  width: calc(var(--ag-gutter) - 9px);
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  text-align: right;
+}
+
 .ag-tool-head {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
   min-width: 0;
   margin: 0;
-  padding: 4px 0 4px 18px;
+  padding: 4px 8px 4px var(--ag-gutter);
   border: none;
   background: transparent;
   color: var(--ag-text);
@@ -1489,6 +1708,24 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   text-align: left;
   cursor: pointer;
   user-select: none;
+}
+
+.ag-tool-head:hover .ag-op-id {
+  color: var(--ag-text-secondary);
+}
+
+/* op 번호: 이 행의 주소. 거터 안에서 오른쪽 정렬해 자릿수를 맞춘다. */
+.ag-op-id {
+  position: absolute;
+  top: 5px;
+  left: 0;
+  width: calc(var(--ag-gutter) - 9px);
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  text-align: right;
 }
 
 .ag-tool-head:hover {
@@ -1568,10 +1805,13 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   }
 }
 
+/* 도구 이름은 식별자지 문장이 아니다 — 모노 고정. */
 .ag-tool-name {
   flex: 0 0 auto;
+  font-family: var(--ag-mono);
   font-size: var(--font-size-sm, 11px);
   font-weight: 500;
+  letter-spacing: var(--ag-track);
 }
 
 .ag-tool-summary {
@@ -1580,8 +1820,24 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--font-size-xs, 10px);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
   color: var(--ag-text-muted);
+}
+
+/* 소요 시간 readout — 자릿수가 흔들리지 않게 tabular. */
+.ag-tool-elapsed {
+  flex: 0 0 auto;
+  min-width: 0;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ag-tool-elapsed:empty {
+  display: none;
 }
 
 .ag-tool-chevron {
@@ -1600,7 +1856,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 5px 0 7px 18px;
+  padding: 5px 8px 7px var(--ag-gutter);
 }
 
 .ag-tool-body[hidden] {
@@ -1612,8 +1868,9 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   margin: 0;
   max-height: 160px;
   overflow-y: auto;
-  padding: 5px 6px;
-  border-radius: var(--ag-r-chip);
+  padding: 5px 7px;
+  border-left: 2px solid var(--ag-border-strong);
+  border-radius: 0 var(--ag-r-chip) var(--ag-r-chip) 0;
   background: var(--ag-bg-2);
   color: var(--ag-text);
   font-family: var(--font-family-mono, monospace);
@@ -1685,19 +1942,137 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   opacity: 0.75;
 }
 
+/* 카드 머리: 좌측 라벨 + 우측 건수 readout. 둘 사이는 헤어라인으로 끊는다. */
 .ag-review-title {
-  font-size: var(--font-size-base, 12px);
-  font-weight: 700;
-  margin-bottom: 4px;
-}
-
-.ag-review-op {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 8px;
+  margin-bottom: 7px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--ag-border);
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 700;
+  letter-spacing: var(--ag-track);
+}
+
+.ag-review-title-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-review-count {
+  flex: 0 0 auto;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+/* 편집 한 건 = 주소 머리줄 + diff 본문. */
+.ag-review-op {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
   font-size: var(--font-size-sm, 11px);
   color: var(--ag-text-muted);
+}
+
+.ag-review-op + .ag-review-op {
+  margin-top: 7px;
+}
+
+.ag-op-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+/* 좌표는 이 패널이 문서 위 어디를 건드리는지 말하는 유일한 수단이다. */
+.ag-op-addr {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--ag-track);
+}
+
+/* ── unified diff ────────────────────────────────────
+   부호 열은 색이 아니라 구조다. 색을 못 보는 사용자도
+   −/+ 로 방향을 읽는다. */
+.ag-op-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.ag-diff-line {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 5px 2px 4px;
+  border-left: 2px solid transparent;
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.45;
+}
+
+.ag-diff-sign {
+  flex: 0 0 auto;
+  width: 7px;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  line-height: 1.6;
+  text-align: center;
+}
+
+.ag-diff-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.ag-diff-add {
+  border-left-color: var(--ag-diff-add-rail);
+  background: var(--ag-diff-add);
+  color: var(--ag-text);
+}
+
+.ag-diff-add .ag-diff-sign {
+  color: var(--ag-ok);
+}
+
+.ag-diff-del {
+  border-left-color: var(--ag-diff-del-rail);
+  background: var(--ag-diff-del);
+  color: var(--ag-text-secondary);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--ag-err) 45%, transparent);
+}
+
+.ag-diff-del .ag-diff-sign {
+  color: var(--ag-err);
+  text-decoration: none;
+}
+
+.ag-diff-ctx {
+  border-left-color: var(--ag-border-strong);
+  background: var(--ag-bg-2);
+  color: var(--ag-text-secondary);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
 }
 
 /* 편집 종류는 그려진 아이콘으로 말한다(유니코드 글리프 아님).
@@ -1728,18 +2103,13 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   color: var(--ag-accent);
 }
 
-.ag-op-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .ag-review-more {
-  padding-left: 20px;
-  font-size: var(--font-size-sm, 11px);
+  margin-top: 6px;
+  padding-left: 6px;
   color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  letter-spacing: var(--ag-track);
 }
 
 .ag-review-actions {
@@ -1835,11 +2205,48 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   background: var(--ag-bg);
 }
 
+/* 프롬프트 캐럿 — 이 필드는 명령을 받는 자리다. */
+.ag-caret {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  padding-top: 5px;
+  color: var(--ag-accent);
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-md, 13px);
+  line-height: 1.5;
+  user-select: none;
+}
+
+/* 키캡: 실제로 존재하는 단축키만. 눌리는 것처럼 보이지 않게 채우지 않는다. */
+.ag-kbd {
+  flex: 0 0 auto;
+  align-self: center;
+  min-width: 18px;
+  padding: 1px 4px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-chip);
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  line-height: 1.5;
+  text-align: center;
+  user-select: none;
+}
+
+.ag-kbd[hidden] {
+  display: none;
+}
+
+.ag-composer-field:focus-within .ag-kbd {
+  color: var(--ag-text-secondary);
+  border-color: var(--ag-border-strong);
+}
+
 .ag-composer-field {
   display: flex;
   align-items: flex-end;
   gap: 6px;
-  padding: 6px 6px 6px 10px;
+  padding: 6px 6px 6px 9px;
   border: 1px solid var(--ag-border-strong);
   border-radius: var(--ag-r-field);
   background: var(--ag-input-bg);
