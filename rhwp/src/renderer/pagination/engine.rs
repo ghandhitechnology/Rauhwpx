@@ -18,6 +18,35 @@ fn para_is_layout_empty(para: &Paragraph) -> bool {
     !para_has_visible_text(para) && para.controls.is_empty()
 }
 
+fn find_leading_paragraph_fragment_target_page(
+    pages: &[PageContent],
+    current_items: &[PageItem],
+    para_index: usize,
+) -> Option<(usize, usize)> {
+    let is_leading_fragment = |item: &PageItem| {
+        matches!(item, PageItem::FullParagraph { para_index: pi } if *pi == para_index)
+            || matches!(
+                item,
+                PageItem::PartialParagraph {
+                    para_index: pi,
+                    start_line: 0,
+                    ..
+                } if *pi == para_index
+            )
+    };
+    if current_items.iter().any(is_leading_fragment) {
+        return None;
+    }
+
+    pages.iter().enumerate().find_map(|(page_index, page)| {
+        page.column_contents
+            .iter()
+            .enumerate()
+            .find(|(_, column)| column.items.iter().any(is_leading_fragment))
+            .map(|(column_index, _)| (page_index, column_index))
+    })
+}
+
 fn should_hide_page_bottom_empty_reset_bridge(
     para: &Paragraph,
     next_para: Option<&Paragraph>,
@@ -260,8 +289,32 @@ impl Paginator {
             // 표 컨트롤 여부 사전 감지
             let has_table = measured.paragraph_has_table(para_idx);
 
-            // 사전 측정된 문단 높이
-            let mut para_height = measured.get_paragraph_height(para_idx).unwrap_or(0.0);
+            // 사전 측정된 문단 높이. 저장 LINE_SEG가 흐름 위치를 담지 않은 visible-host
+            // Para-relative TopAndBottom 개체는 host text 앞의 선행 예약 높이를 별도 합산한다.
+            // renderer::layout_partial_paragraph와 같은 fallback 규칙을 사용해야 페이지 배정과
+            // 실제 paint 좌표가 갈리지 않는다.
+            let para_style = para_styles.get(para.para_shape_id as usize);
+            let para_margin_left_hu = crate::renderer::px_to_hwpunit(
+                para_style.map(|style| style.margin_left).unwrap_or(0.0),
+                self.dpi,
+            );
+            let para_margin_right_hu = crate::renderer::px_to_hwpunit(
+                para_style.map(|style| style.margin_right).unwrap_or(0.0),
+                self.dpi,
+            );
+            let leading_topbottom_flow_px = crate::renderer::hwpunit_to_px(
+                crate::renderer::layout::para_relative_topbottom_host_fallback_reservation_with_margins_hu(
+                    para,
+                    st.layout.column_width_hu(),
+                    para_margin_left_hu,
+                    para_margin_right_hu,
+                    crate::renderer::px_to_hwpunit(st.layout.body_area.height, self.dpi),
+                    crate::renderer::px_to_hwpunit(st.layout.page_height, self.dpi),
+                ),
+                self.dpi,
+            );
+            let mut para_height =
+                measured.get_paragraph_height(para_idx).unwrap_or(0.0) + leading_topbottom_flow_px;
 
             // 빈 줄 감추기 (구역 설정 bit 19)
             // 한컴 도움말: "각 쪽의 시작 부분에 빈 줄이 나오면, 두 개의 빈 줄까지는
@@ -781,6 +834,7 @@ impl Paginator {
                     para,
                     measured,
                     para_height,
+                    leading_topbottom_flow_px,
                     base_available_height,
                     respect_vpos_reset,
                 );
@@ -803,6 +857,8 @@ impl Paginator {
                 page_def,
                 height_before_controls,
                 tac_seg_width_fallback_hu,
+                para_margin_left_hu,
+                para_margin_right_hu,
             );
 
             let page_changed = st.pages.len() != page_count_before_controls;
@@ -1181,6 +1237,7 @@ impl Paginator {
         para: &Paragraph,
         measured: &MeasuredSection,
         para_height: f64,
+        leading_topbottom_flow_px: f64,
         base_available_height: f64,
         respect_vpos_reset: bool,
     ) {
@@ -1247,6 +1304,7 @@ impl Paginator {
                 para,
                 measured,
                 para_height,
+                leading_topbottom_flow_px,
                 &col_breaks,
             );
         } else if !forced_breaks.is_empty() {
@@ -1256,6 +1314,7 @@ impl Paginator {
                 para,
                 measured,
                 &forced_breaks,
+                leading_topbottom_flow_px,
                 base_available_height,
             );
         } else if {
@@ -1306,7 +1365,8 @@ impl Paginator {
                 st.current_height += para_height;
             } else {
                 // 남은 공간이 없거나 첫 줄도 못 넣으면 플러시
-                let first_line_h = mp.line_heights.first().copied().unwrap_or(0.0);
+                let first_line_h =
+                    mp.line_heights.first().copied().unwrap_or(0.0) + leading_topbottom_flow_px;
                 let remaining_for_lines = (available_now - st.current_height).max(0.0);
                 if (st.current_height >= available_now || remaining_for_lines < first_line_h)
                     && !st.current_items.is_empty()
@@ -1322,6 +1382,11 @@ impl Paginator {
                     } else {
                         0.0
                     };
+                    let leading_flow = if cursor_line == 0 {
+                        leading_topbottom_flow_px
+                    } else {
+                        0.0
+                    };
                     let page_avail = if cursor_line == 0 {
                         (base_available_height
                             - st.current_footnote_height
@@ -1334,7 +1399,7 @@ impl Paginator {
                     };
 
                     let sp_b = if cursor_line == 0 { sp_before } else { 0.0 };
-                    let avail_for_lines = (page_avail - sp_b).max(0.0);
+                    let avail_for_lines = (page_avail - sp_b - leading_flow).max(0.0);
 
                     // 현재 페이지에 들어갈 줄 범위 결정
                     let mut cumulative = 0.0;
@@ -1358,7 +1423,7 @@ impl Paginator {
                     } else {
                         0.0
                     };
-                    let part_height = sp_b + part_line_height + part_sp_after;
+                    let part_height = leading_flow + sp_b + part_line_height + part_sp_after;
 
                     if cursor_line == 0 && end_line >= line_count {
                         // 전체가 배치되었지만 오버플로 확인
@@ -1442,6 +1507,7 @@ impl Paginator {
         para: &Paragraph,
         measured: &MeasuredSection,
         forced_breaks: &[usize],
+        leading_topbottom_flow_px: f64,
         base_available_height: f64,
     ) {
         let Some(mp) = measured.get_measured_paragraph(para_idx) else {
@@ -1449,6 +1515,7 @@ impl Paginator {
             st.current_items.push(PageItem::FullParagraph {
                 para_index: para_idx,
             });
+            st.current_height += leading_topbottom_flow_px;
             return;
         };
 
@@ -1457,6 +1524,7 @@ impl Paginator {
             st.current_items.push(PageItem::FullParagraph {
                 para_index: para_idx,
             });
+            st.current_height += leading_topbottom_flow_px;
             return;
         }
 
@@ -1490,6 +1558,11 @@ impl Paginator {
                 } else {
                     0.0
                 };
+                let leading_flow = if cursor_line == 0 {
+                    leading_topbottom_flow_px
+                } else {
+                    0.0
+                };
                 let page_avail = if cursor_line == seg_start && win_idx == 0 {
                     (base_available_height
                         - st.current_footnote_height
@@ -1502,7 +1575,7 @@ impl Paginator {
                 };
 
                 let sp_b = if cursor_line == 0 { sp_before } else { 0.0 };
-                let avail_for_lines = (page_avail - sp_b).max(0.0);
+                let avail_for_lines = (page_avail - sp_b - leading_flow).max(0.0);
 
                 // 세그먼트 안에서만 줄 누적 (seg_end 초과 금지)
                 // [Task #643] 마지막 줄은 자체 line_height 만 차지 (트레일링 line_spacing 제외)
@@ -1538,10 +1611,11 @@ impl Paginator {
                 } else {
                     0.0
                 };
-                let part_height = sp_b + part_line_height + part_sp_after;
+                let part_height = leading_flow + sp_b + part_line_height + part_sp_after;
 
                 // 첫 줄도 안 들어가면 단/페이지 진행 후 재시도
-                let first_line_h = mp.line_heights.get(cursor_line).copied().unwrap_or(0.0);
+                let first_line_h =
+                    mp.line_heights.get(cursor_line).copied().unwrap_or(0.0) + leading_flow;
                 let remaining_for_lines = (st.available_height() - st.current_height).max(0.0);
                 if (st.current_height >= st.available_height()
                     || remaining_for_lines < first_line_h)
@@ -1594,6 +1668,7 @@ impl Paginator {
         para: &Paragraph,
         measured: &MeasuredSection,
         para_height: f64,
+        leading_topbottom_flow_px: f64,
         col_breaks: &[usize],
     ) {
         let line_count = para.line_segs.len();
@@ -1610,15 +1685,22 @@ impl Paginator {
 
             let safe_start = break_start.min(measured_line_count);
             let safe_end = break_end.min(measured_line_count);
-            let part_height: f64 = if safe_start < safe_end {
-                if let Some(mp) = measured.get_measured_paragraph(para_idx) {
-                    mp.line_advances_sum(safe_start..safe_end)
-                } else {
-                    para_height / col_breaks.len() as f64
-                }
+            let leading_flow = if break_start == 0 {
+                leading_topbottom_flow_px
             } else {
-                para_height / col_breaks.len() as f64
+                0.0
             };
+            let text_height = (para_height - leading_topbottom_flow_px).max(0.0);
+            let part_height: f64 = leading_flow
+                + if safe_start < safe_end {
+                    if let Some(mp) = measured.get_measured_paragraph(para_idx) {
+                        mp.line_advances_sum(safe_start..safe_end)
+                    } else {
+                        text_height / col_breaks.len() as f64
+                    }
+                } else {
+                    text_height / col_breaks.len() as f64
+                };
 
             if break_start == 0 && break_end == line_count {
                 st.current_items.push(PageItem::FullParagraph {
@@ -1654,6 +1736,8 @@ impl Paginator {
         page_def: &PageDef,
         para_start_height: f64,
         tac_seg_width_fallback_hu: i32,
+        para_margin_left_hu: i32,
+        para_margin_right_hu: i32,
     ) {
         for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
             match ctrl {
@@ -1732,6 +1816,16 @@ impl Paginator {
                     // [Issue #476] treat_as_char Shape 는 박스가 속한 line 이 라우팅된 페이지/단에 등록.
                     // paragraph 가 페이지 분할되면 process_controls 시점에 st.current_items 는 마지막
                     // 페이지 상태이므로, 그대로 push 하면 박스가 잘못된 페이지에 떠 있게 된다.
+                    let has_leading_topbottom_fallback =
+                        crate::renderer::layout::para_relative_topbottom_shape_fallback_bottom_with_margins_hu(
+                            para,
+                            ctrl_idx,
+                            st.layout.column_width_hu(),
+                            para_margin_left_hu,
+                            para_margin_right_hu,
+                            crate::renderer::px_to_hwpunit(st.layout.body_area.height, self.dpi),
+                            crate::renderer::px_to_hwpunit(st.layout.page_height, self.dpi),
+                        ) > 0;
                     let routed = if shape_obj.common().treat_as_char {
                         super::find_inline_control_target_page(
                             &st.pages,
@@ -1739,6 +1833,15 @@ impl Paginator {
                             para_idx,
                             ctrl_idx,
                             para,
+                        )
+                    } else if has_leading_topbottom_fallback {
+                        // The fallback is always reserved on start_line=0. Route explicitly to
+                        // that fragment instead of deriving a line from duplicate LINE_SEG
+                        // text_start values, which can point at a later control-only guide line.
+                        find_leading_paragraph_fragment_target_page(
+                            &st.pages,
+                            &st.current_items,
+                            para_idx,
                         )
                     } else {
                         None

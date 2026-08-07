@@ -18,7 +18,9 @@ use super::{CellContext, CellPathEntry};
 use crate::model::bin_data::BinDataContent;
 use crate::model::control::Control;
 use crate::model::paragraph::Paragraph;
-use crate::model::shape::{Caption, CommonObjAttr, DrawingObjAttr, ShapeObject, TextBox};
+use crate::model::shape::{
+    Caption, CaptionDirection, CommonObjAttr, DrawingObjAttr, ShapeObject, TextBox,
+};
 use crate::model::shape::{HorzAlign, HorzRelTo, VertAlign, VertRelTo};
 use crate::model::style::{Alignment, FillType};
 
@@ -50,6 +52,54 @@ fn shape_caption_for_layout(shape: &ShapeObject) -> Option<Caption> {
         ShapeObject::Picture(s) => s.caption.clone(),
         ShapeObject::Chart(s) => s.caption.clone().or_else(|| s.drawing.caption.clone()),
         ShapeObject::Ole(s) => s.caption.clone().or_else(|| s.drawing.caption.clone()),
+    }
+}
+
+fn caption_height_hu(caption: &Caption) -> i32 {
+    if caption.paragraphs.is_empty() {
+        return 0;
+    }
+
+    let mut line_seg_height = 0i32;
+    let mut composed_height = 0i32;
+    for para in &caption.paragraphs {
+        if let (Some(first), Some(last)) = (para.line_segs.first(), para.line_segs.last()) {
+            let para_top = first.vertical_pos.min(0);
+            let para_bottom = last.vertical_pos.saturating_add(last.line_height);
+            line_seg_height = line_seg_height.max(para_bottom.saturating_sub(para_top));
+        }
+
+        let composed = compose_paragraph(para);
+        if composed.lines.is_empty() {
+            composed_height = composed_height.saturating_add(400);
+        } else {
+            for (line_index, line) in composed.lines.iter().enumerate() {
+                composed_height = composed_height.saturating_add(line.line_height);
+                if line_index + 1 < composed.lines.len() {
+                    composed_height = composed_height.saturating_add(line.line_spacing);
+                }
+            }
+        }
+    }
+
+    line_seg_height.max(composed_height).max(0)
+}
+
+pub(super) fn shape_vertical_visual_extent_hu(shape: &ShapeObject, shape_height_hu: i32) -> i32 {
+    let shape_height_hu = shape_height_hu.max(0);
+    let Some(caption) = shape_caption_for_layout(shape) else {
+        return shape_height_hu;
+    };
+    let caption_height_hu = caption_height_hu(&caption);
+    if caption_height_hu == 0 {
+        return shape_height_hu;
+    }
+
+    match caption.direction {
+        CaptionDirection::Top | CaptionDirection::Bottom => shape_height_hu
+            .saturating_add(caption_height_hu)
+            .saturating_add(caption.spacing as i32),
+        CaptionDirection::Left | CaptionDirection::Right => shape_height_hu.max(caption_height_hu),
     }
 }
 
@@ -797,8 +847,6 @@ impl LayoutEngine {
         let caption_spacing = caption
             .map(|c| hwpunit_to_px(c.spacing as i32, self.dpi))
             .unwrap_or(0.0);
-
-        use crate::model::shape::CaptionDirection;
 
         // 캡션 방향에 따라 도형 위치 오프셋 계산
         let (caption_top_offset, caption_left_offset) = if let Some(c) = caption {
@@ -3479,9 +3527,10 @@ impl LayoutEngine {
                     continue;
                 }
 
-                // vert=Para: 문단 상대 위치 표/도형은 shape_reserved 제외
-                // 이 개체들은 앵커 문단의 y_offset에 따라 배치되므로
-                // 미리 공간을 예약하면 y_offset이 이중으로 밀려남
+                // vert=Para: generic shape_reserved 제외. 이 개체의 절대 bottom은 anchor
+                // paragraph y가 정해지기 전에는 계산할 수 없다. 저장 LINE_SEG flow가 없는
+                // visible-host Shape의 좁은 fallback은 paragraph_layout이 anchor-relative
+                // reservation을 먼저 소비하고 layout_shape_item이 receipt로 이중 진행을 막는다.
                 if matches!(common.vert_rel_to, crate::model::shape::VertRelTo::Para) {
                     continue;
                 }
