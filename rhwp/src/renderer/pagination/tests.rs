@@ -1,6 +1,11 @@
 use super::*;
+use crate::model::control::Control;
 use crate::model::page::{ColumnDef, PageDef};
 use crate::model::paragraph::{LineSeg, Paragraph};
+use crate::model::shape::{
+    Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, RectangleShape, ShapeObject,
+    SizeCriterion, TextWrap, VertAlign, VertRelTo,
+};
 
 fn a4_page_def() -> PageDef {
     PageDef {
@@ -146,6 +151,361 @@ fn page_bottom_empty_paragraph_before_vpos_reset_does_not_create_blank_page() {
         result.pages[1].column_contents[0].items.as_slice(),
         [PageItem::FullParagraph { para_index: 2 }]
     ));
+}
+
+#[test]
+fn visible_host_topbottom_shape_fallback_is_narrow_and_uses_furthest_bottom() {
+    let make_shape = |height: u32, vertical_offset: i32, margin_bottom: i16| {
+        let mut shape = RectangleShape {
+            common: CommonObjAttr {
+                width: 12000,
+                height,
+                vertical_offset: vertical_offset as u32,
+                margin: crate::model::Padding {
+                    bottom: margin_bottom,
+                    ..Default::default()
+                },
+                treat_as_char: false,
+                vert_rel_to: VertRelTo::Para,
+                vert_align: VertAlign::Top,
+                horz_rel_to: HorzRelTo::Para,
+                horz_align: HorzAlign::Left,
+                text_wrap: TextWrap::TopAndBottom,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        shape.drawing.shape_attr.current_width = 12000;
+        shape.drawing.shape_attr.current_height = height;
+        Control::Shape(Box::new(ShapeObject::Rectangle(shape)))
+    };
+    let para = Paragraph {
+        text: "VISIBLE".to_string(),
+        char_offsets: (16..23).collect(),
+        line_segs: vec![LineSeg {
+            vertical_pos: 0,
+            line_height: 1000,
+            ..Default::default()
+        }],
+        controls: vec![make_shape(3000, 0, 200), make_shape(5000, -1000, 100)],
+        ..Default::default()
+    };
+
+    assert_eq!(
+        crate::renderer::layout::para_relative_topbottom_host_fallback_reservation_hu(&para, 30000,),
+        4100,
+        "co-anchored shapes reserve their furthest bottom, not summed heights"
+    );
+
+    let mut whitespace = para.clone();
+    whitespace.text = " \t".to_string();
+    assert_eq!(
+        crate::renderer::layout::para_relative_topbottom_host_fallback_reservation_hu(
+            &whitespace,
+            30000,
+        ),
+        0
+    );
+
+    let mut stored_flow = para.clone();
+    stored_flow.line_segs[0].vertical_pos = 4100;
+    assert_eq!(
+        crate::renderer::layout::para_relative_topbottom_host_fallback_reservation_hu(
+            &stored_flow,
+            30000,
+        ),
+        0,
+        "authoritative stored flow remains the primary source"
+    );
+
+    let mut partial_stored_flow = para.clone();
+    partial_stored_flow.line_segs[0].vertical_pos = 1000;
+    assert_eq!(
+        crate::renderer::layout::para_relative_topbottom_host_fallback_reservation_hu(
+            &partial_stored_flow,
+            30000,
+        ),
+        3100,
+        "fallback fills only the gap not already encoded by the first visible LINE_SEG"
+    );
+
+    let mut control_guide_flow = para.clone();
+    control_guide_flow.line_segs = vec![
+        LineSeg {
+            text_start: 0,
+            vertical_pos: 0,
+            line_height: 1000,
+            ..Default::default()
+        },
+        LineSeg {
+            text_start: 0,
+            vertical_pos: 4100,
+            line_height: 1000,
+            ..Default::default()
+        },
+    ];
+    assert_eq!(
+        crate::renderer::layout::para_relative_topbottom_host_fallback_reservation_hu(
+            &control_guide_flow,
+            30000,
+        ),
+        0,
+        "a control-only guide line must not hide stored flow on the first visible line"
+    );
+
+    let mut captioned = para.clone();
+    captioned.controls.truncate(1);
+    let Control::Shape(shape) = &mut captioned.controls[0] else {
+        unreachable!();
+    };
+    let ShapeObject::Rectangle(rectangle) = shape.as_mut() else {
+        unreachable!();
+    };
+    rectangle.drawing.caption = Some(Caption {
+        direction: CaptionDirection::Bottom,
+        spacing: 100,
+        paragraphs: vec![Paragraph {
+            line_segs: vec![LineSeg {
+                line_height: 700,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    assert_eq!(
+        crate::renderer::layout::para_relative_topbottom_host_fallback_reservation_hu(
+            &captioned, 30000,
+        ),
+        4000,
+        "the reserved bottom includes a visible shape caption and its spacing"
+    );
+
+    let mut relative_height = para.clone();
+    relative_height.controls.truncate(1);
+    let Control::Shape(shape) = &mut relative_height.controls[0] else {
+        unreachable!();
+    };
+    shape.common_mut().height = 5000;
+    shape.common_mut().height_criterion = SizeCriterion::Page;
+    assert_eq!(
+        crate::renderer::layout::para_relative_topbottom_host_fallback_reservation_with_margins_hu(
+            &relative_height,
+            30000,
+            0,
+            0,
+            60000,
+            80000,
+        ),
+        30200,
+        "relative height uses the same page-body reference as shape paint"
+    );
+
+    let mut margin_shifted = para.clone();
+    margin_shifted.controls.truncate(1);
+    let Control::Shape(shape) = &mut margin_shifted.controls[0] else {
+        unreachable!();
+    };
+    shape.common_mut().width = 1200;
+    shape.common_mut().horizontal_offset = (-1500i32) as u32;
+    let ShapeObject::Rectangle(rectangle) = shape.as_mut() else {
+        unreachable!();
+    };
+    rectangle.drawing.shape_attr.current_width = 1200;
+    assert_eq!(
+        crate::renderer::layout::para_relative_topbottom_host_fallback_reservation_hu(
+            &margin_shifted,
+            30000,
+        ),
+        0,
+        "without the paragraph inset the shape is wholly left of the column"
+    );
+    assert_eq!(
+        crate::renderer::layout::para_relative_topbottom_host_fallback_reservation_with_margins_hu(
+            &margin_shifted,
+            30000,
+            2000,
+            0,
+            0,
+            0,
+        ),
+        3200,
+        "paragraph-relative intersection includes the paragraph's horizontal inset"
+    );
+
+    let mut shape_after_text = para.clone();
+    shape_after_text.text = "AB".to_string();
+    shape_after_text.char_offsets = vec![0, 9];
+    shape_after_text.controls.truncate(1);
+    assert_eq!(
+        crate::renderer::layout::para_relative_topbottom_host_fallback_reservation_hu(
+            &shape_after_text,
+            30000,
+        ),
+        0,
+        "a mid-paragraph shape must not push text that precedes its anchor"
+    );
+
+    let mut square = para;
+    for control in &mut square.controls {
+        if let Control::Shape(shape) = control {
+            shape.common_mut().text_wrap = TextWrap::Square;
+        }
+    }
+    assert_eq!(
+        crate::renderer::layout::para_relative_topbottom_host_fallback_reservation_hu(
+            &square, 30000,
+        ),
+        0
+    );
+}
+
+#[test]
+fn visible_host_topbottom_shape_reservation_moves_whole_paragraph_to_next_page() {
+    let paginator = Paginator::with_default_dpi();
+    let styles = ResolvedStyleSet::default();
+    let page_def = a4_page_def();
+    let body_height_hu = page_def
+        .height
+        .saturating_sub(page_def.margin_top)
+        .saturating_sub(page_def.margin_bottom)
+        .saturating_sub(page_def.margin_header)
+        .saturating_sub(page_def.margin_footer) as i32;
+
+    let lead = Paragraph {
+        text: "LEAD".to_string(),
+        line_segs: vec![LineSeg {
+            line_height: body_height_hu - 4000,
+            text_height: body_height_hu - 4000,
+            segment_width: 30000,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut banner = RectangleShape {
+        common: CommonObjAttr {
+            width: 12000,
+            height: 5000,
+            treat_as_char: false,
+            vert_rel_to: VertRelTo::Para,
+            vert_align: VertAlign::Top,
+            horz_rel_to: HorzRelTo::Para,
+            horz_align: HorzAlign::Left,
+            text_wrap: TextWrap::TopAndBottom,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    banner.drawing.shape_attr.current_width = 12000;
+    banner.drawing.shape_attr.current_height = 5000;
+    let host = Paragraph {
+        text: "HOST".to_string(),
+        line_segs: vec![LineSeg {
+            vertical_pos: 0,
+            line_height: 1000,
+            text_height: 1000,
+            segment_width: 30000,
+            ..Default::default()
+        }],
+        controls: vec![Control::Shape(Box::new(ShapeObject::Rectangle(banner)))],
+        ..Default::default()
+    };
+
+    let (result, _measured) = paginator.paginate(
+        &[lead, host],
+        &[],
+        &styles,
+        &page_def,
+        &ColumnDef::default(),
+        0,
+    );
+
+    assert_eq!(result.pages.len(), 2);
+    assert!(matches!(
+        result.pages[0].column_contents[0].items.as_slice(),
+        [PageItem::FullParagraph { para_index: 0 }]
+    ));
+    assert!(matches!(
+        result.pages[1].column_contents[0].items.as_slice(),
+        [
+            PageItem::FullParagraph { para_index: 1 },
+            PageItem::Shape {
+                para_index: 1,
+                control_index: 0
+            }
+        ]
+    ));
+}
+
+#[test]
+fn visible_host_topbottom_shape_stays_with_first_fragment_when_host_splits() {
+    let paginator = Paginator::with_default_dpi();
+    let styles = ResolvedStyleSet::default();
+    let page_def = a4_page_def();
+    let body_height_hu = page_def
+        .height
+        .saturating_sub(page_def.margin_top)
+        .saturating_sub(page_def.margin_bottom)
+        .saturating_sub(page_def.margin_header)
+        .saturating_sub(page_def.margin_footer) as i32;
+    let line_height = body_height_hu / 2;
+
+    let mut banner = RectangleShape {
+        common: CommonObjAttr {
+            width: 12000,
+            height: 5000,
+            treat_as_char: false,
+            vert_rel_to: VertRelTo::Para,
+            vert_align: VertAlign::Top,
+            horz_rel_to: HorzRelTo::Para,
+            horz_align: HorzAlign::Left,
+            text_wrap: TextWrap::TopAndBottom,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    banner.drawing.shape_attr.current_width = 12000;
+    banner.drawing.shape_attr.current_height = 5000;
+    let host = Paragraph {
+        text: "ABC".to_string(),
+        line_segs: (0..3)
+            .map(|_| LineSeg {
+                text_start: 0,
+                vertical_pos: 0,
+                line_height,
+                text_height: line_height,
+                segment_width: 30000,
+                ..Default::default()
+            })
+            .collect(),
+        controls: vec![Control::Shape(Box::new(ShapeObject::Rectangle(banner)))],
+        ..Default::default()
+    };
+
+    let (result, _measured) =
+        paginator.paginate(&[host], &[], &styles, &page_def, &ColumnDef::default(), 0);
+
+    assert_eq!(result.pages.len(), 2);
+    let first_items = &result.pages[0].column_contents[0].items;
+    assert!(first_items.iter().any(|item| matches!(
+        item,
+        PageItem::PartialParagraph {
+            para_index: 0,
+            start_line: 0,
+            ..
+        }
+    )));
+    assert!(first_items.iter().any(|item| matches!(
+        item,
+        PageItem::Shape {
+            para_index: 0,
+            control_index: 0
+        }
+    )));
+    assert!(result.pages[1].column_contents[0]
+        .items
+        .iter()
+        .all(|item| !matches!(item, PageItem::Shape { .. })));
 }
 
 #[test]

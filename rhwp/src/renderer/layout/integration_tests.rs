@@ -7,8 +7,13 @@
 mod tests {
     use std::path::Path;
 
+    use crate::model::control::Control;
     use crate::model::page::{ColumnDef, PageDef};
     use crate::model::paragraph::{LineSeg, Paragraph};
+    use crate::model::shape::{
+        CommonObjAttr, HorzAlign, HorzRelTo, RectangleShape, ShapeObject, TextWrap, VertAlign,
+        VertRelTo,
+    };
     use crate::model::style::{BorderLine, BorderLineType};
     use crate::renderer::composer::compose_paragraph;
     use crate::renderer::layout::LayoutEngine;
@@ -2472,6 +2477,182 @@ mod tests {
             (y - 161.3).abs() < 2.0,
             "next paragraph baseline {} px — expected ~161.3 (file lineSegArray              vertical_pos=4160); ~153.3 means the TAC host line_spacing was dropped",
             y
+        );
+    }
+
+    /// A visible paragraph can host a paragraph-relative TopAndBottom banner. HWP stores the
+    /// paragraph and its shape as separate controls, but Hancom lays them out atomically: the
+    /// banner stays at the paragraph anchor and the host text starts below its visual bottom.
+    ///
+    /// Regression: pagination emits `FullParagraph` before `Shape`. When LINE_SEG.vertical_pos is
+    /// zero, the paragraph used to paint at the anchor; only the later Shape item advanced the
+    /// cursor, so the first body line overlapped the banner while subsequent paragraphs recovered.
+    #[test]
+    fn para_relative_topbottom_shape_reserves_before_visible_host_text_once() {
+        let engine = LayoutEngine::with_default_dpi();
+        let page_def = PageDef {
+            width: 59528,
+            height: 84188,
+            margin_left: 8504,
+            margin_right: 8504,
+            margin_top: 5669,
+            margin_bottom: 4252,
+            margin_header: 4252,
+            margin_footer: 4252,
+            margin_gutter: 0,
+            ..Default::default()
+        };
+        let layout = PageLayoutInfo::from_page_def_default(&page_def, &ColumnDef::default());
+
+        let mut banner = RectangleShape {
+            common: CommonObjAttr {
+                width: 12000,
+                height: 3000,
+                margin: crate::model::Padding {
+                    bottom: 300,
+                    ..Default::default()
+                },
+                treat_as_char: false,
+                vert_rel_to: VertRelTo::Para,
+                vert_align: VertAlign::Top,
+                horz_rel_to: HorzRelTo::Para,
+                horz_align: HorzAlign::Left,
+                text_wrap: TextWrap::TopAndBottom,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        banner.drawing.shape_attr.original_width = 12000;
+        banner.drawing.shape_attr.original_height = 3000;
+        banner.drawing.shape_attr.current_width = 12000;
+        banner.drawing.shape_attr.current_height = 3000;
+        let mut short_banner = banner.clone();
+        short_banner.common.height = 2000;
+        short_banner.common.margin.bottom = 0;
+        short_banner.drawing.shape_attr.original_height = 2000;
+        short_banner.drawing.shape_attr.current_height = 2000;
+
+        let make_text_para = |text: &str| {
+            let len = text.chars().count() as u32;
+            Paragraph {
+                text: text.to_string(),
+                char_count: len + 1,
+                char_offsets: (0..len).collect(),
+                para_shape_id: 0,
+                line_segs: vec![LineSeg {
+                    vertical_pos: 0,
+                    line_height: 1000,
+                    text_height: 1000,
+                    baseline_distance: 850,
+                    segment_width: 30000,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        };
+        let mut host = make_text_para("HOST");
+        host.char_count += 16;
+        host.char_offsets = (16..20).collect();
+        host.line_segs[0].vertical_pos = 2500;
+        host.controls
+            .push(Control::Shape(Box::new(ShapeObject::Rectangle(
+                short_banner,
+            ))));
+        host.controls
+            .push(Control::Shape(Box::new(ShapeObject::Rectangle(banner))));
+        let paragraphs = vec![host, make_text_para("NEXT")];
+        let composed: Vec<_> = paragraphs.iter().map(compose_paragraph).collect();
+        let styles = ResolvedStyleSet {
+            hwp3_variant: false,
+            char_styles: vec![ResolvedCharStyle::default()],
+            para_styles: vec![ResolvedParaStyle::default()],
+            border_styles: Vec::new(),
+            numberings: Vec::new(),
+            bullets: Vec::new(),
+        };
+        let page_content = PageContent {
+            page_index: 0,
+            page_number: 0,
+            section_index: 0,
+            layout,
+            column_contents: vec![ColumnContent {
+                column_index: 0,
+                start_height: 0.0,
+                endnote_flow: false,
+                items: vec![
+                    PageItem::PartialParagraph {
+                        para_index: 0,
+                        start_line: 0,
+                        end_line: 1,
+                    },
+                    PageItem::Shape {
+                        para_index: 0,
+                        control_index: 0,
+                    },
+                    PageItem::Shape {
+                        para_index: 0,
+                        control_index: 1,
+                    },
+                    PageItem::FullParagraph { para_index: 1 },
+                ],
+                zone_layout: None,
+                zone_y_offset: 0.0,
+                wrap_around_paras: Vec::new(),
+                used_height: 0.0,
+                wrap_anchors: std::collections::HashMap::new(),
+            }],
+            active_header: None,
+            active_footer: None,
+            page_number_pos: None,
+            page_hide: None,
+            footnotes: Vec::new(),
+            active_master_page: None,
+            extra_master_pages: Vec::new(),
+        };
+
+        let tree = engine.build_render_tree(
+            &page_content,
+            &paragraphs,
+            &paragraphs,
+            &paragraphs,
+            &composed,
+            &styles,
+            &Default::default(),
+            &[],
+            None,
+            &[],
+            None,
+            0,
+            &[],
+        );
+        let mut nodes = Vec::new();
+        collect_render_nodes(&tree.root, &mut nodes);
+        let text_y = |needle: &str| {
+            nodes.iter().find_map(|node| match &node.node_type {
+                RenderNodeType::TextRun(run) if run.text == needle => Some(node.bbox.y),
+                _ => None,
+            })
+        };
+        let host_y = text_y("HOST").expect("HOST text run");
+        let next_y = text_y("NEXT").expect("NEXT text run");
+        let banner_bottom = nodes
+            .iter()
+            .filter_map(|node| match node.node_type {
+                RenderNodeType::Rectangle(_) if node.bbox.height > 20.0 => {
+                    Some(node.bbox.y + node.bbox.height)
+                }
+                _ => None,
+            })
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(banner_bottom.is_finite(), "banner rectangles");
+
+        assert!(
+            host_y + 0.5 >= banner_bottom,
+            "host text y={host_y} must start below banner bottom={banner_bottom}"
+        );
+        assert!(
+            next_y - host_y < 30.0,
+            "shape flow was consumed twice: HOST y={host_y}, NEXT y={next_y}"
         );
     }
 }
