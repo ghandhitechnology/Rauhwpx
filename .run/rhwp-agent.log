@@ -1,0 +1,34 @@
+
+> start
+> node server.mjs
+
+[rhwp-agent] rhwp-agent hub listening on ws://127.0.0.1:5175 (token=dev)
+[rhwp-agent] claude/codex CLIs must be on PATH (e.g. ~/.local/bin)
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] mcp client connected (agent=claude)
+[rhwp-agent] studio connected
+[rhwp-agent] studio connected
+[rhwp-agent] mcp client disconnected (agent=claude)
