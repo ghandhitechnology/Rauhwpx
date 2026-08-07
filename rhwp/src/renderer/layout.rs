@@ -28,8 +28,8 @@ use crate::model::header_footer::MasterPage;
 use crate::model::page::{PageBorderBasis, PageBorderFill};
 use crate::model::paragraph::Paragraph;
 use crate::model::shape::{
-    Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, ShapeObject, TextWrap,
-    VertAlign, VertRelTo,
+    Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, ShapeObject, SizeCriterion,
+    TextWrap, VertAlign, VertRelTo,
 };
 use crate::model::style::{
     Alignment, BorderLine, BorderLineType, HeadType, Numbering, UnderlineType,
@@ -650,6 +650,303 @@ impl CellContext {
 
 fn para_has_visible_text(para: &Paragraph) -> bool {
     para.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}')
+}
+
+fn proportional_hwpunit(reference_hu: i32, ratio: u32) -> i32 {
+    if reference_hu <= 0 {
+        return 0;
+    }
+    ((reference_hu as i64).saturating_mul(ratio as i64) / 10_000).clamp(0, i32::MAX as i64) as i32
+}
+
+fn para_relative_topbottom_horz_intersects_column(
+    common: &CommonObjAttr,
+    width_hu: i32,
+    column_width_hu: i32,
+    para_margin_left_hu: i32,
+    para_margin_right_hu: i32,
+) -> bool {
+    if matches!(
+        common.width_criterion,
+        SizeCriterion::Paper | SizeCriterion::Page
+    ) {
+        // The paragraph path does not own the page/body width. Treat an unresolved relative-width
+        // object as intersecting rather than risk leaving visible host text on top of it.
+        return true;
+    }
+
+    let (reference_left, reference_width) = match common.horz_rel_to {
+        HorzRelTo::Column => (0, column_width_hu),
+        HorzRelTo::Para => (
+            para_margin_left_hu,
+            column_width_hu
+                .saturating_sub(para_margin_left_hu)
+                .saturating_sub(para_margin_right_hu)
+                .max(0),
+        ),
+        HorzRelTo::Paper | HorzRelTo::Page => return true,
+    };
+
+    let h_offset = signed_hwpunit(common.horizontal_offset);
+    let left = match common.horz_align {
+        HorzAlign::Left | HorzAlign::Inside => reference_left.saturating_add(h_offset),
+        HorzAlign::Center => reference_left
+            .saturating_add((reference_width - width_hu) / 2)
+            .saturating_add(h_offset),
+        HorzAlign::Right | HorzAlign::Outside => reference_left
+            .saturating_add(reference_width)
+            .saturating_sub(width_hu)
+            .saturating_sub(h_offset),
+    };
+    let right = left.saturating_add(width_hu);
+    right > 0 && left < column_width_hu
+}
+
+/// Whether this paragraph contains a non-inline, paragraph-relative TopAndBottom object that
+/// blocks the current column. These objects and their visible host text form one flow unit even
+/// though pagination stores them as separate `FullParagraph` and `Shape` items.
+pub(crate) fn para_relative_topbottom_float_affecting_column(
+    para: &Paragraph,
+    column_width_hu: i32,
+    para_margin_left_hu: i32,
+    para_margin_right_hu: i32,
+) -> bool {
+    para.controls.iter().any(|ctrl| match ctrl {
+        Control::Picture(pic) => {
+            let (width_hu, _) = self::utils::picture_display_size_hu(pic);
+            !pic.common.treat_as_char
+                && matches!(pic.common.text_wrap, TextWrap::TopAndBottom)
+                && matches!(pic.common.vert_rel_to, VertRelTo::Para)
+                && para_relative_topbottom_horz_intersects_column(
+                    &pic.common,
+                    width_hu,
+                    column_width_hu,
+                    para_margin_left_hu,
+                    para_margin_right_hu,
+                )
+        }
+        Control::Shape(shape) => {
+            let common = shape.common();
+            let width_hu = match common.width_criterion {
+                SizeCriterion::Column | SizeCriterion::Para => {
+                    proportional_hwpunit(column_width_hu, common.width)
+                }
+                SizeCriterion::Absolute => signed_hwpunit(common.width)
+                    .max(shape.shape_attr().current_width as i32)
+                    .max(0),
+                SizeCriterion::Paper | SizeCriterion::Page => {
+                    (shape.shape_attr().current_width as i32).max(0)
+                }
+            };
+            !common.treat_as_char
+                && matches!(common.text_wrap, TextWrap::TopAndBottom)
+                && matches!(common.vert_rel_to, VertRelTo::Para)
+                && para_relative_topbottom_horz_intersects_column(
+                    common,
+                    width_hu,
+                    column_width_hu,
+                    para_margin_left_hu,
+                    para_margin_right_hu,
+                )
+        }
+        _ => false,
+    })
+}
+
+/// Fallback leading flow space for a visible host paragraph whose stored LINE_SEG data does not
+/// encode the position below its paragraph-relative TopAndBottom object.
+///
+/// The object is still painted at the original paragraph anchor. Only the host text moves below
+/// the furthest object bottom, and the later `Shape` item must not consume this space again.
+pub(crate) fn para_relative_topbottom_shape_fallback_bottom_hu(
+    para: &Paragraph,
+    control_index: usize,
+    column_width_hu: i32,
+) -> i32 {
+    para_relative_topbottom_shape_fallback_bottom_with_margins_hu(
+        para,
+        control_index,
+        column_width_hu,
+        0,
+        0,
+        0,
+        0,
+    )
+}
+
+fn para_relative_topbottom_shape_fallback_candidate(
+    para: &Paragraph,
+    control_index: usize,
+    column_width_hu: i32,
+    para_margin_left_hu: i32,
+    para_margin_right_hu: i32,
+) -> Option<(&ShapeObject, usize)> {
+    let first_visible_char = para
+        .text
+        .chars()
+        .position(|c| c > '\u{001F}' && c != '\u{FFFC}' && !c.is_whitespace())?;
+    if para
+        .control_text_positions()
+        .get(control_index)
+        .is_some_and(|position| *position > first_visible_char)
+    {
+        return None;
+    }
+
+    let Control::Shape(shape) = para.controls.get(control_index)? else {
+        return None;
+    };
+    if matches!(shape.as_ref(), ShapeObject::Picture(_)) {
+        return None;
+    }
+    let common = shape.common();
+    let width_hu = match common.width_criterion {
+        SizeCriterion::Column | SizeCriterion::Para => {
+            proportional_hwpunit(column_width_hu, common.width)
+        }
+        SizeCriterion::Absolute => signed_hwpunit(common.width)
+            .max(shape.shape_attr().current_width as i32)
+            .max(0),
+        SizeCriterion::Paper | SizeCriterion::Page => {
+            (shape.shape_attr().current_width as i32).max(0)
+        }
+    };
+    if common.treat_as_char
+        || !matches!(common.text_wrap, TextWrap::TopAndBottom)
+        || !matches!(common.vert_rel_to, VertRelTo::Para)
+        || !matches!(common.vert_align, VertAlign::Top | VertAlign::Inside)
+        || !para_relative_topbottom_horz_intersects_column(
+            common,
+            width_hu,
+            column_width_hu,
+            para_margin_left_hu,
+            para_margin_right_hu,
+        )
+    {
+        return None;
+    }
+
+    Some((shape.as_ref(), first_visible_char))
+}
+
+pub(crate) fn para_relative_topbottom_shape_is_fallback_candidate_with_margins(
+    para: &Paragraph,
+    control_index: usize,
+    column_width_hu: i32,
+    para_margin_left_hu: i32,
+    para_margin_right_hu: i32,
+) -> bool {
+    para_relative_topbottom_shape_fallback_candidate(
+        para,
+        control_index,
+        column_width_hu,
+        para_margin_left_hu,
+        para_margin_right_hu,
+    )
+    .is_some()
+}
+
+pub(crate) fn para_relative_topbottom_shape_fallback_bottom_with_margins_hu(
+    para: &Paragraph,
+    control_index: usize,
+    column_width_hu: i32,
+    para_margin_left_hu: i32,
+    para_margin_right_hu: i32,
+    body_height_hu: i32,
+    paper_height_hu: i32,
+) -> i32 {
+    let Some((shape, first_visible_char)) = para_relative_topbottom_shape_fallback_candidate(
+        para,
+        control_index,
+        column_width_hu,
+        para_margin_left_hu,
+        para_margin_right_hu,
+    ) else {
+        return 0;
+    };
+    let common = shape.common();
+    let height_hu = match common.height_criterion {
+        SizeCriterion::Paper if paper_height_hu > 0 => {
+            proportional_hwpunit(paper_height_hu, common.height)
+        }
+        SizeCriterion::Page if body_height_hu > 0 => {
+            proportional_hwpunit(body_height_hu, common.height)
+        }
+        SizeCriterion::Paper | SizeCriterion::Page => {
+            (shape.shape_attr().current_height as i32).max(0)
+        }
+        SizeCriterion::Absolute | SizeCriterion::Column | SizeCriterion::Para => {
+            signed_hwpunit(common.height)
+                .max(shape.shape_attr().current_height as i32)
+                .max(0)
+        }
+    };
+    let visual_height_hu = shape_layout::shape_vertical_visual_extent_hu(shape, height_hu);
+    let object_bottom = signed_hwpunit(common.vertical_offset)
+        .saturating_add(visual_height_hu)
+        .saturating_add(common.margin.bottom as i32)
+        .max(0);
+    let stored_leading_flow = if para
+        .line_segs
+        .windows(2)
+        .all(|pair| pair[1].vertical_pos >= pair[0].vertical_pos)
+    {
+        let first_visible_text_offset = para
+            .char_offsets
+            .get(first_visible_char)
+            .copied()
+            .map(|offset| offset as usize)
+            .unwrap_or(first_visible_char);
+        para.line_segs
+            .iter()
+            .rev()
+            .find(|seg| seg.text_start as usize <= first_visible_text_offset)
+            .map(|seg| seg.vertical_pos.max(0))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    object_bottom.saturating_sub(stored_leading_flow)
+}
+
+pub(crate) fn para_relative_topbottom_host_fallback_reservation_hu(
+    para: &Paragraph,
+    column_width_hu: i32,
+) -> i32 {
+    para_relative_topbottom_host_fallback_reservation_with_margins_hu(
+        para,
+        column_width_hu,
+        0,
+        0,
+        0,
+        0,
+    )
+}
+
+pub(crate) fn para_relative_topbottom_host_fallback_reservation_with_margins_hu(
+    para: &Paragraph,
+    column_width_hu: i32,
+    para_margin_left_hu: i32,
+    para_margin_right_hu: i32,
+    body_height_hu: i32,
+    paper_height_hu: i32,
+) -> i32 {
+    para.controls
+        .iter()
+        .enumerate()
+        .map(|(control_index, _)| {
+            para_relative_topbottom_shape_fallback_bottom_with_margins_hu(
+                para,
+                control_index,
+                column_width_hu,
+                para_margin_left_hu,
+                para_margin_right_hu,
+                body_height_hu,
+                paper_height_hu,
+            )
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn para_has_non_whitespace_text(para: &Paragraph) -> bool {
@@ -6122,6 +6419,9 @@ impl LayoutEngine {
                     } else {
                         y_offset
                     };
+                    if *start_line == 0 {
+                        para_start_y.entry(*para_index).or_insert(y_offset);
+                    }
                     let pp_y_out = self.layout_partial_paragraph(
                         tree,
                         col_node,
@@ -7920,6 +8220,64 @@ impl LayoutEngine {
             wrap_around_paras,
             ..
         } = ctx;
+        // A fallback reservation is consumed only when this exact Shape item follows the host's
+        // first paragraph fragment in the same column. Deriving the receipt from PageItem order
+        // avoids suppressing a sibling Shape or a Shape routed to a later partial-paragraph page.
+        let shape_follows_reserved_host_fragment = para_start_y.contains_key(&para_index)
+            && page_content.column_contents.iter().any(|column| {
+                column.items.iter().position(|item| {
+                    matches!(
+                        item,
+                        PageItem::Shape {
+                            para_index: pi,
+                            control_index: ci,
+                        } if *pi == para_index && *ci == control_index
+                    )
+                }).is_some_and(|shape_pos| {
+                    column.items[..shape_pos].iter().any(|item| {
+                        matches!(item, PageItem::FullParagraph { para_index: pi } if *pi == para_index)
+                            || matches!(
+                                item,
+                                PageItem::PartialParagraph {
+                                    para_index: pi,
+                                    start_line: 0,
+                                    ..
+                                } if *pi == para_index
+                            )
+                    })
+                })
+            });
+        let para_style = composed
+            .get(para_index)
+            .and_then(|value| styles.para_styles.get(value.para_style_id as usize));
+        let para_margin_left_hu = px_to_hwpunit(
+            para_style.map(|style| style.margin_left).unwrap_or(0.0),
+            self.dpi,
+        );
+        let para_margin_right_hu = px_to_hwpunit(
+            para_style.map(|style| style.margin_right).unwrap_or(0.0),
+            self.dpi,
+        );
+        let current_shape_fallback_flow_consumed = shape_follows_reserved_host_fragment
+            && paragraphs.get(para_index).is_some_and(|para| {
+                let column_width_hu = px_to_hwpunit(col_area.width, self.dpi);
+                para_relative_topbottom_host_fallback_reservation_with_margins_hu(
+                    para,
+                    column_width_hu,
+                    para_margin_left_hu,
+                    para_margin_right_hu,
+                    px_to_hwpunit(layout.body_area.height, self.dpi),
+                    px_to_hwpunit(layout.page_height, self.dpi),
+                ) > 0
+                    && para_relative_topbottom_shape_is_fallback_candidate_with_margins(
+                        para,
+                        control_index,
+                        column_width_hu,
+                        para_margin_left_hu,
+                        para_margin_right_hu,
+                    )
+            });
+
         // Task #402: 같은 paragraph 안에 TAC 컨트롤(표/그림/도형) 2개 이상이 서로 다른 line에
         // 배치된 경우, 두 번째 이후의 그림은 paragraph 시작 y가 아니라 진행된 y_offset
         // (선행 TAC 후속 위치)에 그려져야 표와 겹치지 않는다. control_index 이전에 같은
@@ -8720,7 +9078,8 @@ impl LayoutEngine {
                                 .unwrap_or(0.0);
                             result_y = result_y.max(y_offset + line_advance);
                         }
-                    } else if !common.treat_as_char
+                    } else if !current_shape_fallback_flow_consumed
+                        && !common.treat_as_char
                         && matches!(
                             common.text_wrap,
                             crate::model::shape::TextWrap::TopAndBottom
