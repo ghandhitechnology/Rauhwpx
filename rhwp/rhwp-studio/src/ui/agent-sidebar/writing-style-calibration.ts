@@ -130,7 +130,7 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
 
   const button = el('button', 'ag-calibration-launch');
   button.type = 'button';
-  button.append(createStyleIcon(), el('span', 'ag-calibration-launch-label', '말투 모방 캘리브레이션'));
+  button.append(createStyleIcon(), el('span', 'ag-calibration-launch-label', '말투 모방'));
 
   const overlay = el('div', 'ag-calibration-overlay');
   overlay.setAttribute('aria-hidden', 'true');
@@ -251,7 +251,7 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
   function updateLaunchButton(): void {
     const label = button.querySelector('.ag-calibration-launch-label');
     if (!label) return;
-    label.textContent = activeStatus?.active ? '말투 모방 · 활성' : '말투 모방 캘리브레이션';
+    label.textContent = activeStatus?.active ? '말투 모방 · 활성' : '말투 모방';
     button.classList.toggle('ag-active', Boolean(activeStatus?.active));
     button.title = activeStatus?.active && activeStatus.updatedAt
       ? `마지막 캘리브레이션: ${new Date(activeStatus.updatedAt).toLocaleDateString()}`

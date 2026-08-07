@@ -1,0 +1,50 @@
+
+> rhwp-studio@0.8.2 dev
+> vite
+
+
+  VITE v8.1.5  ready in 99 ms
+
+  ➜  Local:   http://127.0.0.1:7700/
+10:27:11 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:27:17 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:27:25 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:27:28 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:27:32 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:27:39 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:28:16 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:28:32 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:28:38 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:28:49 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:29:15 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:29:19 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:29:33 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:30:01 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:30:26 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:30:34 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:30:39 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:30:49 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:30:56 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:31:00 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:31:05 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:31:23 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:31:34 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:31:42 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:31:48 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:32:09 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:32:29 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:32:59 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:32:59 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:32:59 AM [vite] (client) page reload src/ui/agent-sidebar/writing-style-calibration.ts
+10:33:01 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:33:01 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:33:01 AM [vite] (client) page reload src/ui/agent-sidebar/writing-style-calibration.ts
+10:35:01 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:42:13 AM [vite] (client) page reload src/agent/threads.ts
+10:42:24 AM [vite] (client) page reload src/agent/threads.ts
+10:42:31 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:42:53 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:43:03 AM [vite] (client) page reload src/ui/agent-sidebar/index.ts
+10:43:30 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:43:42 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
+10:44:02 AM [vite] (client) hmr update /src/ui/agent-sidebar/agent-sidebar.css
