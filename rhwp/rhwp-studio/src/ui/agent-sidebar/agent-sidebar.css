@@ -2377,3 +2377,146 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   background: var(--ag-err);
   filter: brightness(0.92);
 }
+
+/* ─── 전체 화면 콘솔 ───────────────────────────────────
+   새 화면이 아니라 같은 무대의 다른 배치다. 페이지 3장이
+   겹쳐 넘어가던 것을 스레드·대화·검토 3열로 편다. 노드가
+   그대로 이동하므로 스레드·모델·승인 상태가 이어진다. */
+
+/* 문서는 완전히 가려지므로 편집 영역을 밀어 둘 이유가 없다. */
+body.ag-fullscreen-open #editor-area {
+  margin-right: 0;
+}
+
+/* 사이드바는 흐름상 위치에서 fixed 로 뜨므로 top 이 도구 모음 아래다.
+   전체 화면은 뷰포트를 통째로 덮어야 하니 네 변을 모두 못 박는다. */
+.ag-root.ag-fullscreen {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100vw;
+  height: 100dvh;
+  z-index: 60;
+  border-left: none;
+  box-shadow: none;
+  background: var(--ag-bg-2);
+}
+
+/* 폭 조절·접기는 사이드바의 조작이다. 전체 화면에서는 Esc 가 대신한다. */
+.ag-fullscreen .ag-collapse-tab,
+.ag-fullscreen .ag-resize-handle,
+.ag-fullscreen .ag-threads-close {
+  display: none;
+}
+
+/* 스레드 레일이 상시 보이므로 헤더의 목록 버튼은 자리를 비운다. */
+.ag-fullscreen .ag-header-actions .ag-threads-btn {
+  display: none;
+}
+
+.ag-fullscreen .ag-stage {
+  display: grid;
+  grid-template-columns: 264px minmax(0, 1fr) minmax(380px, 42%);
+  grid-template-rows: 100%;
+  gap: 0;
+  overflow: visible;
+}
+
+/* 세 칸은 겹쳐 넘어가지 않는다 — 전환 상태를 전부 되돌린다. */
+.ag-fullscreen .ag-chat-page,
+.ag-fullscreen .ag-threads-page,
+.ag-fullscreen .ag-review-column {
+  position: relative;
+  inset: auto;
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  pointer-events: auto;
+  min-height: 0;
+  min-width: 0;
+  transition: none;
+  z-index: auto;
+}
+
+/* DOM 순서는 채팅 → 스레드 → 검토라서 자동 배치에 맡기면 스레드가
+   두 번째 줄로 밀린다. 세 칸 모두 1행에 못 박는다. */
+.ag-fullscreen .ag-threads-page {
+  grid-column: 1;
+  grid-row: 1;
+  background: var(--ag-bg-2);
+  border-right: 1px solid var(--ag-border);
+  padding: 12px 10px 16px;
+  overflow-y: auto;
+}
+
+.ag-fullscreen .ag-chat-page {
+  grid-column: 2;
+  grid-row: 1;
+  background: var(--ag-bg);
+  border-right: 1px solid var(--ag-border);
+}
+
+/* 대화가 넓은 화면에서 한 줄로 늘어지지 않게 잰다. */
+.ag-fullscreen .ag-messages,
+.ag-fullscreen .ag-composer,
+.ag-fullscreen .ag-composer-utilities {
+  max-width: 760px;
+  width: 100%;
+  margin-inline: auto;
+}
+
+/* 스킬은 3열 위에 덮는 오버레이로 남는다. */
+.ag-fullscreen .ag-skills-page {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+}
+
+/* ── 검토 칸 ──────────────────────────────────────────
+   사이드바 폭에서는 diff 를 읽을 수 없다는 것이 이 모드의
+   존재 이유다. 가장 넓은 칸을 준다. */
+.ag-review-column {
+  display: none;
+}
+
+.ag-fullscreen .ag-review-column {
+  grid-column: 3;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--ag-bg-2);
+  overflow: hidden;
+}
+
+.ag-review-column-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--ag-border);
+}
+
+.ag-review-column-title {
+  font-size: var(--ag-micro);
+  letter-spacing: var(--ag-track-wide);
+  text-transform: uppercase;
+  color: var(--ag-text-muted);
+}
+
+.ag-fullscreen .ag-review-column .ag-review {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px 16px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-root.ag-fullscreen {
+    transition: none;
+  }
+}

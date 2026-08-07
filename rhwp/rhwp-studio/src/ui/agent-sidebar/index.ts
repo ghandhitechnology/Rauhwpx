@@ -252,6 +252,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let assistantBuffer = '';
   let threadsPanelOpen = false;
   let skillsPanelOpen = false;
+  /** 전체 화면 콘솔 — 무대를 3열로 펴고 문서를 덮는다. */
+  let fullscreen = false;
   let permissionProfile: PermissionProfile = bridge.getPermissionProfile();
   let skillCatalog: SkillCatalog = { revision: 0, skills: [] };
   let skillDraftFiles: Array<{ path: string; content: string; encoding: 'utf8' | 'base64' }> = [];
@@ -758,7 +760,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   const headerActions = el('div', 'ag-header-actions');
   threadsBtn.classList.add('ag-header-icon-btn');
-  headerActions.append(threadsBtn);
+
+  // 콘솔 펼치기 — 사이드바 폭에서는 diff 를 읽을 수 없어 전체 화면으로 넘긴다.
+  const fullscreenBtn = el('button', 'ag-header-icon-btn ag-fullscreen-btn');
+  fullscreenBtn.type = 'button';
+  fullscreenBtn.setAttribute('aria-pressed', 'false');
+  let fullscreenIcon = createIcon('expand');
+  fullscreenBtn.appendChild(fullscreenIcon);
+  fullscreenBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setFullscreen(!fullscreen);
+  });
+
+  headerActions.append(fullscreenBtn, threadsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
@@ -826,6 +840,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (!header.contains(t)) setConfigPanelOpen(false);
   };
   document.addEventListener('pointerdown', onDocPointerDown);
+
+  /* Esc 로 전체 화면을 접는다. 설정 패널이 열려 있으면 그쪽이 먼저
+     닫히고, 입력 중 IME 조합은 가로채지 않는다. */
+  const onDocKeyDown = (e: KeyboardEvent) => {
+    if (e.key !== 'Escape' || !fullscreen) return;
+    if (e.isComposing) return;
+    if (modelSummary.classList.contains('ag-expanded')) {
+      setConfigPanelOpen(false);
+      e.preventDefault();
+      return;
+    }
+    setFullscreen(false);
+    e.preventDefault();
+  };
+  document.addEventListener('keydown', onDocKeyDown);
 
   const stage = el('div', 'ag-stage');
 
@@ -987,7 +1016,62 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   skillEditor.append(skillEditorHeader, skillGoal, skillTriggers, skillNonTriggers, skillResourceRow, skillName, skillFiles, skillFileEditor, skillWarning, skillEditorActions);
   skillsPage.append(skillsHeader, skillsToolbar, skillsStatus, skillsList, skillEditor);
 
-  stage.append(chatPage, threadsPage, skillsPage);
+  /* 전체 화면에서 리뷰가 들어앉는 세 번째 칸. 사이드바로 돌아가면
+     비어 있고, .ag-review 노드 자체는 채팅 페이지로 되돌아간다. */
+  const reviewColumn = el('div', 'ag-review-column');
+  reviewColumn.setAttribute('role', 'region');
+  reviewColumn.setAttribute('aria-label', '검토');
+  const reviewColumnHead = el('div', 'ag-review-column-head');
+  reviewColumnHead.append(el('span', 'ag-review-column-title', '검토'));
+  reviewColumn.appendChild(reviewColumnHead);
+
+  stage.append(chatPage, threadsPage, skillsPage, reviewColumn);
+
+  /**
+   * 전체 화면 전환. 새 화면을 짓지 않고 무대의 배치만 바꾼다 —
+   * 페이지 3장이 겹쳐 넘어가던 것을 스레드·대화·검토 3열로 편다.
+   * 노드를 그대로 옮기므로 스레드·모델·승인 상태가 모두 이어진다.
+   */
+  function setFullscreen(on: boolean): void {
+    if (fullscreen === on) return;
+    fullscreen = on;
+
+    root.classList.toggle('ag-fullscreen', on);
+    document.body.classList.toggle('ag-fullscreen-open', on);
+    fullscreenBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    fullscreenBtn.setAttribute('aria-label', on ? '사이드바로 돌아가기' : '콘솔 전체 화면');
+    fullscreenBtn.title = on ? '사이드바로 돌아가기 (Esc)' : '콘솔 전체 화면';
+    const nextIcon = createIcon(on ? 'contract' : 'expand');
+    fullscreenIcon.replaceWith(nextIcon);
+    fullscreenIcon = nextIcon;
+
+    if (on) {
+      // 접힌 상태에서 바로 펼칠 수 있어야 한다.
+      setCollapsed(false, { recenter: false });
+      // 페이지 전환 상태를 걷어내고 세 칸을 동시에 세운다.
+      threadsPanelOpen = false;
+      skillsPanelOpen = false;
+      root.classList.remove('ag-threads-open', 'ag-skills-open');
+      threadsBtn.setAttribute('aria-expanded', 'false');
+      skillsBtn.setAttribute('aria-expanded', 'false');
+      chatPage.setAttribute('aria-hidden', 'false');
+      skillsPage.setAttribute('aria-hidden', 'true');
+      threadsPage.setAttribute('aria-hidden', 'false');
+      rebuildThreadsList();
+      reviewColumn.appendChild(review);
+    } else {
+      threadsPage.setAttribute('aria-hidden', 'true');
+      // 검토는 다시 채팅 페이지 안, 입력 필드 바로 위로 돌아간다.
+      chatPage.insertBefore(review, composerUtilities);
+    }
+
+    setConfigPanelOpen(false);
+    // 인라인 top/bottom 을 모드에 맞게 다시 잰다.
+    measure();
+    // 문서가 가려지거나 다시 드러나므로 용지 정렬을 다시 잡는다.
+    startInsetRecenterLoop();
+    scrollConversationToEnd();
+  }
 
   function updatePermissionButton(): void {
     const unrestricted = permissionProfile === 'unrestricted';
@@ -1369,6 +1453,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   // ── 배치: #editor-area ↔ #status-bar 사이에 맞춘다 ────
   function measure(): void {
+    // 전체 화면은 도구 모음·상태바까지 덮는다 — 인라인 배치를 걷어낸다.
+    if (fullscreen) {
+      root.style.top = '0px';
+      root.style.bottom = '0px';
+      return;
+    }
     const top = document.getElementById('editor-area')?.getBoundingClientRect().top ?? 96;
     const statusTop =
       document.getElementById('status-bar')?.getBoundingClientRect().top ?? window.innerHeight;
@@ -1568,6 +1658,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   function setThreadsPanelOpen(open: boolean): void {
+    // 전체 화면에서 스레드는 넘겨 보는 페이지가 아니라 상시 레일이다.
+    // 목록만 갱신하고 페이지 전환은 하지 않는다.
+    if (fullscreen) {
+      rebuildThreadsList();
+      return;
+    }
     threadsPanelOpen = open;
     if (open) setConfigPanelOpen(false);
     if (open) skillsPanelOpen = false;
@@ -2304,10 +2400,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       }
       window.removeEventListener('resize', measure);
       document.removeEventListener('pointerdown', onDocPointerDown);
+      document.removeEventListener('keydown', onDocKeyDown);
       endSidebarResize();
       clearInsetRecenterLoop();
       writingStyleCalibration.dispose();
-      document.body.classList.remove('ag-sidebar-open', 'ag-sidebar-resizing');
+      document.body.classList.remove('ag-sidebar-open', 'ag-sidebar-resizing', 'ag-fullscreen-open');
       sweepUnresolvedToolRows();
       root.remove();
     },

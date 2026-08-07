@@ -1,0 +1,1902 @@
+<!doctype html>
+<html lang="ko" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>rhwp-studio · 에이전트 콘솔 (리뷰 데크)</title>
+<style>
+/* ─────────────────────────────────────────────────────────────
+   토큰 — 중성 램프. 값은 DESIGN.md 와 동일하다.
+   ───────────────────────────────────────────────────────────── */
+:root {
+  --n-canvas: #f5f5f7;
+  --n-surface: #ffffff;
+  --n-surface-raised: #f7f7f8;
+  --n-surface-sunken: #f1f1f4;
+  --n-hairline: rgba(0, 0, 0, .08);
+  --n-hairline-strong: rgba(0, 0, 0, .14);
+  --n-text: #1d1d1f;
+  --n-text-secondary: #545458;
+  --n-text-muted: #6e6e73;
+  --n-text-placeholder: #757579;
+  --n-text-disabled: #adadb2;
+  --n-fill-hover: rgba(0, 0, 0, .055);
+  --n-fill-active: rgba(0, 0, 0, .10);
+  --n-fill-selected: rgba(97, 130, 214, .14);
+  --n-fill-selected-soft: rgba(97, 130, 214, .07);
+  --n-on-accent: #ffffff;
+  --accent-primary: #6182d6;
+  --accent-strong: #335095;
+  --ui-danger: #c8372d;
+  --ui-ok: #2f7d4f;
+  --n-elev-1: 0 1px 2px rgba(0, 0, 0, .04), 0 1px 1px rgba(0, 0, 0, .03);
+  --n-elev-2: 0 4px 12px rgba(0, 0, 0, .08), 0 1px 3px rgba(0, 0, 0, .04);
+  --n-elev-3: 0 12px 32px rgba(0, 0, 0, .14), 0 2px 6px rgba(0, 0, 0, .06);
+
+  --ag-claude: #c4785a;
+  --ag-codex: #5b8fd4;
+
+  --r-chip: 4px;
+  --r-field: 6px;
+  --r-panel: 8px;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, '맑은 고딕', 'Malgun Gothic', 'Segoe UI', sans-serif;
+  --font-mono: 'Consolas', 'Courier New', monospace;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-panel: cubic-bezier(0.2, .72, 0, 1);
+  --dur-panel: 320ms;
+
+  /* diff 지역 계층 — ok/danger 에서 파생한다 */
+  --diff-add-wash: color-mix(in srgb, var(--ui-ok) 10%, transparent);
+  --diff-add-mark: color-mix(in srgb, var(--ui-ok) 24%, transparent);
+  --diff-add-rail: color-mix(in srgb, var(--ui-ok) 75%, transparent);
+  --diff-add-num: color-mix(in srgb, var(--ui-ok) 88%, var(--n-text));
+  --diff-del-wash: color-mix(in srgb, var(--ui-danger) 8%, transparent);
+  --diff-del-mark: color-mix(in srgb, var(--ui-danger) 20%, transparent);
+  --diff-del-rail: color-mix(in srgb, var(--ui-danger) 72%, transparent);
+  --diff-del-num: color-mix(in srgb, var(--ui-danger) 88%, var(--n-text));
+  --diff-mod-wash: color-mix(in srgb, var(--accent-primary) 8%, transparent);
+  --diff-mod-mark: color-mix(in srgb, var(--accent-primary) 20%, transparent);
+  --diff-mod-rail: color-mix(in srgb, var(--accent-primary) 72%, transparent);
+  --diff-mod-num: color-mix(in srgb, var(--accent-strong) 90%, var(--n-text));
+
+  --drow-lh: 23px;
+
+  --rail-w: 250px;
+  --stream-w: 356px;
+}
+
+:root[data-theme="dark"] { color-scheme: dark; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { color-scheme: dark; } }
+
+:root[data-theme="dark"] {
+  --n-canvas: #141416;
+  --n-surface: #1e1e20;
+  --n-surface-raised: #26262a;
+  --n-surface-sunken: #171719;
+  --n-hairline: rgba(255, 255, 255, .10);
+  --n-hairline-strong: rgba(255, 255, 255, .17);
+  --n-text: #f5f5f7;
+  --n-text-secondary: #c7c7cc;
+  --n-text-muted: #a2a2a8;
+  --n-text-placeholder: #8f8f95;
+  --n-text-disabled: #6b6b71;
+  --n-fill-hover: rgba(255, 255, 255, .06);
+  --n-fill-active: rgba(255, 255, 255, .10);
+  --n-fill-selected: rgba(127, 168, 255, .18);
+  --n-fill-selected-soft: rgba(127, 168, 255, .09);
+  --n-on-accent: #10203c;
+  --accent-primary: #7fa8ff;
+  --accent-strong: #335095;
+  --ui-danger: #ff6b60;
+  --ui-ok: #5cbb7f;
+  --n-elev-1: 0 1px 2px rgba(0, 0, 0, .35), 0 1px 1px rgba(0, 0, 0, .25);
+  --n-elev-2: 0 4px 12px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .30);
+  --n-elev-3: 0 12px 32px rgba(0, 0, 0, .55), 0 2px 6px rgba(0, 0, 0, .35);
+  --ag-claude: #d49174;
+  --ag-codex: #7aa8e0;
+  --diff-add-wash: color-mix(in srgb, var(--ui-ok) 15%, transparent);
+  --diff-add-mark: color-mix(in srgb, var(--ui-ok) 32%, transparent);
+  --diff-add-num: var(--ui-ok);
+  --diff-del-wash: color-mix(in srgb, var(--ui-danger) 13%, transparent);
+  --diff-del-mark: color-mix(in srgb, var(--ui-danger) 28%, transparent);
+  --diff-del-num: var(--ui-danger);
+  --diff-mod-wash: color-mix(in srgb, var(--accent-primary) 11%, transparent);
+  --diff-mod-mark: color-mix(in srgb, var(--accent-primary) 26%, transparent);
+  --diff-mod-num: var(--accent-primary);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --n-canvas: #141416;
+    --n-surface: #1e1e20;
+    --n-surface-raised: #26262a;
+    --n-surface-sunken: #171719;
+    --n-hairline: rgba(255, 255, 255, .10);
+    --n-hairline-strong: rgba(255, 255, 255, .17);
+    --n-text: #f5f5f7;
+    --n-text-secondary: #c7c7cc;
+    --n-text-muted: #a2a2a8;
+    --n-text-placeholder: #8f8f95;
+    --n-text-disabled: #6b6b71;
+    --n-fill-hover: rgba(255, 255, 255, .06);
+    --n-fill-active: rgba(255, 255, 255, .10);
+    --n-fill-selected: rgba(127, 168, 255, .18);
+    --n-fill-selected-soft: rgba(127, 168, 255, .09);
+    --n-on-accent: #10203c;
+    --accent-primary: #7fa8ff;
+    --accent-strong: #335095;
+    --ui-danger: #ff6b60;
+    --ui-ok: #5cbb7f;
+    --n-elev-1: 0 1px 2px rgba(0, 0, 0, .35), 0 1px 1px rgba(0, 0, 0, .25);
+    --n-elev-2: 0 4px 12px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .30);
+    --n-elev-3: 0 12px 32px rgba(0, 0, 0, .55), 0 2px 6px rgba(0, 0, 0, .35);
+    --ag-claude: #d49174;
+    --ag-codex: #7aa8e0;
+    --diff-add-wash: color-mix(in srgb, var(--ui-ok) 15%, transparent);
+    --diff-add-mark: color-mix(in srgb, var(--ui-ok) 32%, transparent);
+    --diff-add-num: var(--ui-ok);
+    --diff-del-wash: color-mix(in srgb, var(--ui-danger) 13%, transparent);
+    --diff-del-mark: color-mix(in srgb, var(--ui-danger) 28%, transparent);
+    --diff-del-num: var(--ui-danger);
+    --diff-mod-wash: color-mix(in srgb, var(--accent-primary) 11%, transparent);
+    --diff-mod-mark: color-mix(in srgb, var(--accent-primary) 26%, transparent);
+    --diff-mod-num: var(--accent-primary);
+  }
+}
+
+/* ── 리셋 ─────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--n-canvas);
+  color: var(--n-text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+del, ins { text-decoration: none; }
+[hidden] { display: none !important; }
+h1, h2, h3, p, ul, ol { margin: 0; padding: 0; }
+ul, ol { list-style: none; }
+code, .mono { font-family: var(--font-mono); font-variant-ligatures: none; }
+:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+  border-radius: var(--r-chip);
+}
+::selection { background: var(--n-fill-selected); }
+
+/* 스크롤바 — 콘솔 톤에 맞춘 얇은 형태 */
+.scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--n-hairline-strong) transparent; }
+.scroll::-webkit-scrollbar { width: 9px; height: 9px; }
+.scroll::-webkit-scrollbar-thumb { background: var(--n-hairline-strong); border-radius: 9px; border: 3px solid transparent; background-clip: content-box; }
+.scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* ── 무대 / 셸 ────────────────────────────────────────── */
+.stage { position: fixed; inset: 0; }
+
+.shell {
+  position: absolute; inset: 0;
+  display: grid;
+  grid-template-rows: 46px 1fr 26px;
+  background: var(--n-canvas);
+  transition:
+    clip-path var(--dur-panel) var(--ease-panel),
+    opacity var(--dur-panel) var(--ease-panel),
+    transform var(--dur-panel) var(--ease-panel);
+  clip-path: inset(0 0 0 0);
+  transform-origin: 100% 0;
+}
+.shell.is-collapsed {
+  clip-path: inset(0 0 0 calc(100% - 360px));
+  opacity: .28;
+  transform: translateX(10px);
+  pointer-events: none;
+}
+
+/* ── 헤더 ─────────────────────────────────────────────── */
+.hdr {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 12px 0 10px;
+  background: var(--n-surface-raised);
+  border-bottom: 1px solid var(--n-hairline);
+}
+.hdr-mark {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 13px; font-weight: 600; letter-spacing: -.005em;
+}
+.hdr-mark .glyph {
+  width: 18px; height: 18px; border-radius: var(--r-chip);
+  display: grid; place-items: center;
+  background: var(--n-fill-selected-soft);
+  color: var(--accent-primary);
+  border: 1px solid var(--n-hairline);
+}
+.hdr-sep { width: 1px; height: 16px; background: var(--n-hairline); flex: none; }
+
+.doc-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 7px;
+  border-radius: var(--r-chip);
+  background: var(--n-surface);
+  border: 1px solid var(--n-hairline);
+  color: var(--n-text-secondary);
+  font-size: 11px; min-width: 0;
+}
+.doc-chip b { font-weight: 500; color: var(--n-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.doc-chip .mono { font-size: 10px; color: var(--n-text-muted); letter-spacing: .02em; }
+
+/* 모델 한 줄 요약 — 후행 셰브런 하나만 */
+.model-line {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px; padding: 0 7px 0 8px;
+  border-radius: var(--r-field);
+  color: var(--n-text-secondary); font-size: 12px;
+  transition: background 140ms var(--ease-out), color 140ms var(--ease-out);
+}
+.model-line:hover { background: var(--n-fill-hover); color: var(--n-text); }
+.model-line .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ag-claude); flex: none; }
+.model-line .div { color: var(--n-text-disabled); }
+.model-line .chev { color: var(--n-text-muted); margin-left: 1px; }
+
+.hdr-right { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.ibtn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 26px; min-width: 26px; padding: 0 7px;
+  border-radius: var(--r-field);
+  color: var(--n-text-muted);
+  transition: background 140ms var(--ease-out), color 140ms var(--ease-out);
+}
+.ibtn:hover { background: var(--n-fill-hover); color: var(--n-text); }
+.ibtn:active { background: var(--n-fill-active); }
+.ibtn[aria-expanded="true"] { background: var(--n-fill-active); color: var(--n-text); }
+.ibtn .kbd { font-family: var(--font-mono); font-size: 10px; letter-spacing: .04em; color: var(--n-text-disabled); }
+.ibtn.is-strong { color: var(--n-text-secondary); border: 1px solid var(--n-hairline); background: var(--n-surface); }
+.ibtn.is-strong:hover { color: var(--n-text); background: var(--n-fill-hover); }
+
+/* ── 팝오버 메뉴 ──────────────────────────────────────── */
+.menu-wrap { position: relative; display: inline-flex; }
+.menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
+  min-width: 152px; padding: 4px;
+  background: var(--n-surface);
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: var(--r-panel);
+  box-shadow: var(--n-elev-2);
+  display: flex; flex-direction: column; gap: 1px;
+  transform-origin: 100% 0;
+  animation: menu-in 160ms var(--ease-out) both;
+}
+@keyframes menu-in {
+  from { opacity: 0; transform: translateY(-4px) scale(.98); }
+  to { opacity: 1; transform: none; }
+}
+.menu button {
+  display: flex; align-items: center; gap: 8px;
+  height: 28px; padding: 0 8px;
+  border-radius: var(--r-field);
+  font-size: 12px; color: var(--n-text-secondary);
+  text-align: left; white-space: nowrap;
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+.menu button:hover { background: var(--n-fill-hover); color: var(--n-text); }
+.menu button .ic { color: var(--n-text-muted); display: grid; place-items: center; flex: none; }
+.menu button:hover .ic { color: var(--n-text-secondary); }
+.menu .msep { height: 1px; background: var(--n-hairline); margin: 3px 2px; flex: none; }
+
+/* ── 본체 3분할 ───────────────────────────────────────── */
+.main {
+  display: grid;
+  grid-template-columns: var(--rail-w) var(--stream-w) minmax(0, 1fr);
+  gap: 10px; padding: 10px; min-height: 0;
+}
+.panel {
+  min-height: 0; min-width: 0;
+  background: var(--n-surface);
+  border: 1px solid var(--n-hairline);
+  border-radius: var(--r-panel);
+  display: flex; flex-direction: column;
+}
+.panel-hd {
+  display: flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 10px; flex: none;
+  border-bottom: 1px solid var(--n-hairline);
+}
+.panel-hd h2 {
+  font-size: 11px; font-weight: 600; color: var(--n-text-secondary);
+  letter-spacing: .06em;
+}
+.panel-hd .count {
+  font-family: var(--font-mono); font-size: 10px; color: var(--n-text-muted);
+  letter-spacing: .02em; margin-left: auto;
+}
+
+/* 레일은 가라앉은 톤 — 데크가 가장 밝은 면이다 */
+.rail { background: var(--n-surface-raised); }
+.stream-panel { background: var(--n-surface); }
+.deck { box-shadow: var(--n-elev-2); }
+
+/* ── 레일: 스레드만 ───────────────────────────────────── */
+.rail-body { padding: 6px; display: flex; flex-direction: column; gap: 3px; }
+.thread {
+  display: grid; grid-template-columns: 1fr 7px; gap: 4px 8px;
+  width: 100%; text-align: left;
+  padding: 9px 9px 10px 10px;
+  border-radius: var(--r-field);
+  border-left: 1px solid transparent;
+  transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out);
+}
+.thread:hover { background: var(--n-fill-hover); }
+.thread.is-active { background: var(--n-fill-selected); border-left-color: var(--ag-claude); box-shadow: var(--n-elev-1); }
+.thread[data-agent="codex"].is-active { border-left-color: var(--ag-codex); }
+.thread.is-active .t-title { color: var(--n-text); font-weight: 500; }
+
+/* 제목 마퀴 — 넘칠 때만 움직인다 */
+.t-title {
+  font-size: 13px; color: var(--n-text-secondary);
+  overflow: hidden; white-space: nowrap; min-width: 0;
+  letter-spacing: -.004em;
+  mask-image: linear-gradient(90deg, #000 calc(100% - 14px), transparent);
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 14px), transparent);
+}
+.t-title.fits { mask-image: none; -webkit-mask-image: none; }
+.t-title .q {
+  display: inline-block; white-space: nowrap;
+  transform: translateX(0);
+  transition: transform var(--mq-dur, 0ms) var(--ease-out) var(--mq-delay, 0ms);
+}
+.thread .t-meta {
+  grid-column: 1 / -1;
+  font-family: var(--font-mono); font-size: 11px; color: var(--n-text-muted);
+  letter-spacing: .01em; display: flex; gap: 6px; align-items: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.thread .t-meta .sep { color: var(--n-text-disabled); }
+.thread .t-meta .st { color: var(--n-text-secondary); }
+.thread.is-active .t-meta .st { color: var(--n-text); }
+.thread .t-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--n-text-disabled); align-self: center; position: relative; }
+.thread[data-agent="claude"] .t-dot { background: var(--ag-claude); }
+.thread[data-agent="codex"] .t-dot { background: var(--ag-codex); }
+.thread.is-idle .t-dot { background: var(--n-text-disabled); }
+.thread.is-running .t-dot::after {
+  content: ''; position: absolute; inset: -3px; border-radius: 50%;
+  border: 1px solid var(--ag-claude);
+  animation: beat 2.1s var(--ease-out) infinite;
+}
+
+/* ── 전사(transcript) ─────────────────────────────────── */
+.stream { padding: 14px 14px 22px; display: flex; flex-direction: column; gap: 14px; }
+
+.msg-user {
+  background: var(--n-surface-sunken);
+  border-radius: var(--r-panel);
+  padding: 10px 12px;
+  font-size: 13px; color: var(--n-text);
+  line-height: 1.65;
+  word-break: keep-all;
+  animation: land 380ms var(--ease-out) both;
+}
+.msg-user .who {
+  display: block; font-size: 11px; color: var(--n-text-muted); margin-bottom: 3px;
+}
+
+.msg-agent {
+  border-left: 1px solid var(--ag-claude);
+  padding: 1px 0 1px 12px;
+  font-size: 13px; line-height: 1.78; color: var(--n-text);
+  word-break: keep-all;
+  animation: land 380ms var(--ease-out) both;
+}
+@keyframes land {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.msg-agent .caret {
+  display: inline-block; width: 6px; height: 13px; vertical-align: -2px;
+  background: var(--accent-primary); margin-left: 2px; border-radius: 1px;
+  animation: caret 1.05s steps(2, end) infinite;
+}
+@keyframes caret { 0%, 45% { opacity: 1; } 46%, 100% { opacity: .12; } }
+.msg-agent code {
+  font-size: 11px; color: var(--n-text-secondary);
+  background: var(--n-surface-raised);
+  border: 1px solid var(--n-hairline);
+  border-radius: var(--r-chip); padding: 0 4px;
+  letter-spacing: .01em;
+}
+.msg-agent code.err { color: var(--ui-danger); border-color: color-mix(in srgb, var(--ui-danger) 30%, transparent); background: color-mix(in srgb, var(--ui-danger) 9%, transparent); }
+
+/* ── 데크: 팬 헤더 ────────────────────────────────────── */
+.deck-hd {
+  flex: none; padding: 0 8px 0 10px;
+  border-bottom: 1px solid var(--n-hairline);
+}
+.deck-top { display: flex; align-items: center; gap: 8px; height: 36px; }
+.scope {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px; padding: 0 6px 0 8px;
+  border-radius: var(--r-field);
+  font-size: 13px; font-weight: 500; color: var(--n-text);
+  transition: background 140ms var(--ease-out);
+}
+.scope:hover { background: var(--n-fill-hover); }
+.scope .chev { color: var(--n-text-muted); display: grid; place-items: center; }
+.tally {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--font-mono); font-size: 12px; letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+}
+.tally .up { color: var(--ui-ok); }
+.tally .dn { color: var(--ui-danger); }
+.tally .md { color: var(--accent-strong); }
+:root[data-theme="dark"] .tally .md { color: var(--accent-primary); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .tally .md { color: var(--accent-primary); } }
+.tally span.is-bump { animation: tally-bump 420ms var(--ease-out); }
+@keyframes tally-bump {
+  from { transform: translateY(-3px); opacity: .3; }
+  to { transform: none; opacity: 1; }
+}
+.deck-top .right { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+
+/* 커밋 링 + 승인 행 */
+.deck-mid {
+  display: flex; align-items: center; gap: 11px;
+  padding: 2px 2px 9px 0;
+}
+.ring { position: relative; width: 32px; height: 32px; flex: none; }
+.ring svg { display: block; transform: rotate(-90deg); }
+.ring circle { fill: none; stroke-width: 2; }
+.ring .track { stroke: var(--n-hairline); }
+.ring .head {
+  stroke: var(--accent-primary); stroke-linecap: round;
+  transition: stroke-dashoffset 620ms var(--ease-out), stroke 300ms var(--ease-out);
+}
+.ring.is-done .head { stroke: var(--ui-ok); }
+.ring .num {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  font-family: var(--font-mono); font-size: 11px; color: var(--n-text);
+  font-variant-numeric: tabular-nums;
+}
+.ring .num svg { transform: none; color: var(--ui-ok); }
+
+.status-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 20px; padding: 0 7px; border-radius: var(--r-chip);
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .03em;
+  border: 1px solid var(--n-hairline-strong);
+  color: var(--n-text-muted); background: var(--n-surface-raised);
+}
+.status-pill[data-s="awaiting-review"] {
+  color: var(--accent-strong); border-color: color-mix(in srgb, var(--accent-primary) 40%, transparent);
+  background: var(--n-fill-selected-soft);
+}
+:root[data-theme="dark"] .status-pill[data-s="awaiting-review"] { color: var(--accent-primary); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .status-pill[data-s="awaiting-review"] { color: var(--accent-primary); } }
+.status-pill[data-s="committed"] { color: var(--ui-ok); border-color: color-mix(in srgb, var(--ui-ok) 45%, transparent); background: var(--diff-add-wash); }
+.deck-mid .csmeta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.deck-mid .csline { display: flex; align-items: center; gap: 6px; }
+.deck-note { font-size: 11px; color: var(--n-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.deck-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 10px;
+  border-radius: var(--r-field);
+  border: 1px solid var(--n-hairline-strong);
+  background: var(--n-surface);
+  color: var(--n-text-secondary); font-size: 12px;
+  transition: background 140ms var(--ease-out), color 140ms var(--ease-out), border-color 140ms var(--ease-out);
+}
+.btn:hover:not(:disabled) { background: var(--n-fill-hover); color: var(--n-text); }
+.btn:disabled { color: var(--n-text-disabled); border-color: var(--n-hairline); cursor: default; }
+.btn-primary {
+  background: var(--accent-primary); border-color: transparent; color: var(--n-on-accent); font-weight: 500;
+}
+.btn-primary:hover:not(:disabled) { background: var(--accent-strong); color: #fff; }
+:root[data-theme="dark"] .btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-primary) 80%, #fff); color: var(--n-on-accent); }
+.btn-primary:disabled { background: var(--n-fill-active); border-color: transparent; color: var(--n-text-disabled); }
+.btn .kbd { font-family: var(--font-mono); font-size: 10px; opacity: .7; }
+
+/* 주소 사다리 — 좌표가 곧 항해 장치다 */
+.ladder {
+  display: flex; align-items: center; gap: 4px;
+  padding: 0 0 8px; overflow-x: auto; scrollbar-width: none;
+}
+.ladder::-webkit-scrollbar { display: none; }
+.ladder .lab {
+  font-family: var(--font-mono); font-size: 10px; color: var(--n-text-disabled);
+  letter-spacing: .04em; flex: none; padding-right: 2px;
+}
+.addr-chip {
+  flex: none;
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 20px; padding: 0 7px; border-radius: var(--r-chip);
+  border: 1px solid var(--n-hairline);
+  background: var(--n-surface);
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .02em;
+  color: var(--n-text-secondary);
+  transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out), color 140ms var(--ease-out);
+  animation: land 320ms var(--ease-out) both;
+}
+.addr-chip:hover { background: var(--n-fill-hover); color: var(--n-text); }
+.addr-chip.is-active {
+  border-color: color-mix(in srgb, var(--accent-primary) 45%, transparent);
+  background: var(--n-fill-selected);
+  color: var(--n-text);
+}
+.addr-chip .pk { width: 5px; height: 5px; border-radius: 50%; background: var(--n-text-disabled); }
+.addr-chip[data-kind="insert"] .pk, .addr-chip[data-kind="object"] .pk { background: var(--ui-ok); }
+.addr-chip[data-kind="delete"] .pk { background: var(--ui-danger); }
+.addr-chip[data-kind="replace"] .pk { background: var(--accent-primary); }
+.addr-chip[data-kind="format"] .pk { background: var(--n-text-muted); }
+.addr-chip.is-resolved { opacity: .5; }
+.ladder .hint {
+  margin-left: auto; flex: none; padding-left: 10px;
+  font-family: var(--font-mono); font-size: 10px; color: var(--n-text-disabled); letter-spacing: .03em;
+}
+
+/* ── 데크: 통합 diff ──────────────────────────────────── */
+.hunks { padding: 8px 10px 44px; display: flex; flex-direction: column; gap: 6px; }
+
+/* 접힌 문맥 밴드 */
+.ctx { display: flex; flex-direction: column; animation: land 300ms var(--ease-out) both; }
+.ctx-band {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 5px 10px;
+  border-radius: var(--r-field);
+  background: var(--n-surface-raised);
+  color: var(--n-text-muted);
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: .02em;
+  transition: background 140ms var(--ease-out), color 140ms var(--ease-out);
+}
+.ctx-band:hover { background: var(--n-fill-active); color: var(--n-text-secondary); }
+.ctx-band .cv { display: grid; place-items: center; transition: transform 260ms var(--ease-out); }
+.ctx.is-open .ctx-band .cv { transform: rotate(90deg); }
+.ctx-band .rng { margin-left: auto; color: var(--n-text-disabled); }
+.ctx-rows { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 300ms var(--ease-out); }
+.ctx.is-open .ctx-rows { grid-template-rows: 1fr; }
+.ctx-rows > .inner { overflow: hidden; }
+.ctx-rows .drow:first-child { padding-top: 6px; }
+.ctx-rows .drow:last-child { padding-bottom: 6px; }
+
+/* 그룹 */
+.dgroup {
+  border: 1px solid var(--n-hairline);
+  border-radius: var(--r-panel);
+  background: var(--n-surface);
+  overflow: hidden;
+  scroll-margin: 12px;
+  animation: hunk-land 460ms var(--ease-out) both;
+  transition: border-color 240ms var(--ease-out), box-shadow 240ms var(--ease-out), opacity 240ms var(--ease-out);
+}
+@keyframes hunk-land {
+  from { opacity: 0; transform: translateY(8px); clip-path: inset(0 0 92% 0 round 8px); }
+  to { opacity: 1; transform: none; clip-path: inset(0 0 0 0 round 8px); }
+}
+.dgroup.is-active { border-color: color-mix(in srgb, var(--accent-primary) 40%, transparent); box-shadow: var(--n-elev-1); }
+.dgroup.is-resolved { opacity: .58; }
+
+.dg-hd {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 6px 6px 8px;
+  background: var(--n-surface-raised);
+  border-bottom: 1px solid var(--n-hairline);
+  cursor: pointer;
+  transition: background 140ms var(--ease-out);
+}
+.dg-hd:hover { background: var(--n-fill-hover); }
+.tbadge {
+  width: 17px; height: 17px; flex: none;
+  border-radius: var(--r-chip);
+  display: grid; place-items: center;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700; line-height: 1;
+  letter-spacing: 0;
+  border: 1px solid transparent;
+}
+.tbadge[data-kind="replace"] { color: var(--accent-strong); background: color-mix(in srgb, var(--accent-primary) 18%, transparent); border-color: color-mix(in srgb, var(--accent-primary) 32%, transparent); }
+.tbadge[data-kind="format"] { color: var(--n-text-secondary); background: var(--n-fill-active); border-color: var(--n-hairline-strong); }
+.tbadge[data-kind="delete"] { color: var(--ui-danger); background: color-mix(in srgb, var(--ui-danger) 15%, transparent); border-color: color-mix(in srgb, var(--ui-danger) 32%, transparent); }
+.tbadge[data-kind="insert"], .tbadge[data-kind="object"] { color: var(--ui-ok); background: color-mix(in srgb, var(--ui-ok) 15%, transparent); border-color: color-mix(in srgb, var(--ui-ok) 32%, transparent); }
+:root[data-theme="dark"] .tbadge[data-kind="replace"] { color: var(--accent-primary); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .tbadge[data-kind="replace"] { color: var(--accent-primary); } }
+
+.dg-addr {
+  font-family: var(--font-mono); font-size: 12px; letter-spacing: .01em;
+  color: var(--n-text); white-space: nowrap; flex: none;
+}
+.dg-addr .sec { color: var(--n-text-disabled); }
+.dg-tool {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .01em;
+  color: var(--n-text-muted); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.dg-counts {
+  margin-left: auto; flex: none;
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+}
+.dg-counts .up { color: var(--ui-ok); }
+.dg-counts .dn { color: var(--ui-danger); }
+.dg-counts .md { color: var(--accent-strong); }
+:root[data-theme="dark"] .dg-counts .md { color: var(--accent-primary); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .dg-counts .md { color: var(--accent-primary); } }
+
+.dg-acts { display: flex; align-items: center; gap: 2px; flex: none; }
+.hbtn {
+  width: 24px; height: 22px; border-radius: var(--r-chip);
+  display: grid; place-items: center;
+  color: var(--n-text-muted);
+  border: 1px solid transparent;
+  transition: background 140ms var(--ease-out), color 140ms var(--ease-out), border-color 140ms var(--ease-out);
+}
+.hbtn:hover { background: var(--n-fill-hover); color: var(--n-text); border-color: var(--n-hairline); }
+.hbtn.ok:hover { color: var(--ui-ok); border-color: color-mix(in srgb, var(--ui-ok) 40%, transparent); }
+.hbtn.no:hover { color: var(--ui-danger); border-color: color-mix(in srgb, var(--ui-danger) 40%, transparent); }
+.dg-verdict {
+  display: none; align-items: center; gap: 5px; flex: none;
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .03em;
+  padding-right: 4px;
+}
+.dgroup.is-resolved .dg-acts { display: none; }
+.dgroup.is-resolved .dg-verdict { display: inline-flex; }
+.dgroup[data-verdict="approved"] .dg-verdict { color: var(--ui-ok); }
+.dgroup[data-verdict="rejected"] .dg-verdict { color: var(--ui-danger); }
+
+.dg-body { display: grid; grid-template-rows: 1fr; transition: grid-template-rows 300ms var(--ease-out); }
+.dgroup.is-collapsed .dg-body { grid-template-rows: 0fr; }
+.dg-body > .inner { overflow: hidden; min-height: 0; }
+.dgroup.is-collapsed .dg-hd { border-bottom-color: transparent; }
+
+/* 코드 행 — 좌측 변경 게이지 · 문단 번호 · 본문 */
+.drow {
+  display: grid;
+  grid-template-columns: 3px 42px minmax(0, 1fr);
+  align-items: start;
+  padding: 2px 0;
+  animation: row-in 340ms var(--ease-out) both;
+}
+@keyframes row-in { from { opacity: 0; } to { opacity: 1; } }
+/* 게이지는 행 패딩까지 덮어야 블록 안에서 끊기지 않고 이어진다 */
+.drow .gut { align-self: stretch; margin: -2px 0; }
+.drow .num {
+  font-family: var(--font-mono); font-size: 11px; line-height: var(--drow-lh);
+  text-align: right; padding: 0 9px 0 5px;
+  color: var(--n-text-disabled);
+  font-variant-numeric: tabular-nums;
+  user-select: none; -webkit-user-select: none;
+}
+.drow .txt {
+  font-size: 13px; line-height: var(--drow-lh);
+  padding: 0 14px 0 6px;
+  color: var(--n-text);
+  word-break: keep-all; overflow-wrap: anywhere;
+}
+
+/* 삭제 행 — 전면 붉은 워시 + 빗금 게이지 */
+.drow.is-del { background: var(--diff-del-wash); }
+.drow.is-del .gut {
+  background: repeating-linear-gradient(135deg,
+    var(--diff-del-rail) 0 2px, transparent 2px 4.5px);
+}
+.drow.is-del .num { color: var(--diff-del-num); }
+.drow.is-del del {
+  background: var(--diff-del-mark); border-radius: 2px;
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--ui-danger) 62%, transparent);
+  text-decoration-thickness: 1px;
+  padding: 0 1px; margin: 0 -1px;
+}
+
+/* 추가 행 — 전면 초록 워시 + 실선 게이지 */
+.drow.is-add { background: var(--diff-add-wash); }
+.drow.is-add .gut { background: var(--diff-add-rail); }
+.drow.is-add .num { color: var(--diff-add-num); }
+.drow.is-add ins {
+  background: var(--diff-add-mark); border-radius: 2px;
+  padding: 0 1px; margin: 0 -1px;
+}
+
+/* 서식 행 — 글자는 그대로다. 옮겨간 것이 없으므로 붉거나 푸르게 물들이지 않는다 */
+.drow.is-mod { background: var(--diff-mod-wash); }
+.drow.is-mod .gut { background: var(--diff-mod-rail); }
+.drow.is-mod .num { color: var(--diff-mod-num); }
+.drow.is-mod .fmt {
+  font-weight: 700;
+  background: var(--diff-mod-mark); border-radius: 2px;
+  padding: 0 1px; margin: 0 -1px;
+}
+
+.drow.is-ctx .txt { color: var(--n-text-secondary); }
+
+/* 삽입 지점 표식 */
+.drow .anchor {
+  display: inline-block; width: 1px; height: 15px; background: var(--accent-primary);
+  vertical-align: -3px; margin-left: 1px;
+  animation: caret 1.05s steps(2, end) infinite;
+}
+
+/* 표 개체 미리보기 — 추가 행 안에 놓인다 */
+.tbl-prev {
+  border: 1px solid var(--n-hairline-strong); border-radius: var(--r-chip);
+  overflow: hidden; background: var(--n-surface);
+  display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr;
+  max-width: 380px; margin: 3px 0 4px;
+}
+.tbl-prev span {
+  padding: 4px 8px; font-family: var(--font-mono); font-size: 10px;
+  color: var(--n-text-secondary); letter-spacing: .01em; line-height: 1.5;
+  border-right: 1px solid var(--n-hairline); border-bottom: 1px solid var(--n-hairline);
+  font-variant-numeric: tabular-nums;
+}
+.tbl-prev span:nth-child(4n) { border-right: 0; }
+.tbl-prev span:nth-child(-n+4) { background: var(--n-surface-sunken); color: var(--n-text); }
+.tbl-prev span:nth-last-child(-n+4) { border-bottom: 0; }
+
+/* 그룹 꼬리표 */
+.dg-foot {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  padding: 7px 12px 8px 51px;
+  border-top: 1px solid var(--n-hairline);
+}
+.mini-tag {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .02em;
+  color: var(--n-text-muted);
+  border: 1px solid var(--n-hairline);
+  border-radius: var(--r-chip); padding: 1px 5px;
+  background: var(--n-surface-raised);
+}
+
+/* 데크 빈 상태 */
+.deck-empty {
+  flex: 1; display: grid; place-content: center; justify-items: center; gap: 10px;
+  color: var(--n-text-placeholder); padding: 40px 20px;
+}
+.deck-empty .ghost {
+  width: 240px; height: 70px; border-radius: var(--r-panel);
+  border: 1px dashed var(--n-hairline-strong);
+  display: grid; grid-template-rows: 1fr 1fr 1fr;
+}
+.deck-empty .ghost i { border-bottom: 1px solid var(--n-hairline); }
+.deck-empty .ghost i:last-child { border-bottom: 0; }
+.deck-empty p { font-size: 12px; }
+.deck-empty .mono { font-size: 10px; color: var(--n-text-disabled); letter-spacing: .03em; }
+
+/* ── 상태 밴드 ────────────────────────────────────────── */
+.band {
+  display: flex; align-items: center; gap: 0;
+  padding: 0 12px;
+  background: var(--n-surface-raised);
+  border-top: 1px solid var(--n-hairline);
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .03em;
+  color: var(--n-text-muted);
+  overflow: hidden; white-space: nowrap;
+}
+.band .cell { display: inline-flex; align-items: center; gap: 6px; padding: 0 11px; height: 100%; }
+.band .cell + .cell { box-shadow: inset 1px 0 0 var(--n-hairline); }
+.band .cell:first-child { padding-left: 0; }
+.band .v { color: var(--n-text); font-variant-numeric: tabular-nums; }
+.band .push { margin-left: auto; }
+
+/* WS 심박 */
+.ws { display: inline-flex; align-items: center; gap: 6px; }
+.ws .beat { width: 7px; height: 7px; border-radius: 50%; background: var(--n-text-disabled); position: relative; flex: none; }
+.ws[data-s="connected"] .beat { background: var(--ui-ok); }
+.ws[data-s="connecting"] .beat { background: var(--accent-primary); }
+.ws[data-s="disconnected"] .beat, .ws[data-s="replaced"] .beat { background: var(--ui-danger); }
+.ws[data-s="connected"] .beat::after {
+  content: ''; position: absolute; inset: -3px; border-radius: 50%;
+  border: 1px solid var(--ui-ok);
+  animation: beat 1.9s var(--ease-out) infinite;
+}
+@keyframes beat {
+  0% { transform: scale(.6); opacity: .85; }
+  70%, 100% { transform: scale(1.5); opacity: 0; }
+}
+.ws[data-s="connecting"] .beat { animation: pulse-dim 1s ease-in-out infinite; }
+@keyframes pulse-dim { 50% { opacity: .35; } }
+
+/* ── 사이드바 실루엣(축소 상태) ───────────────────────── */
+.silhouette {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 360px;
+  background: var(--n-surface);
+  border-left: 1px solid var(--n-hairline);
+  box-shadow: var(--n-elev-3);
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px;
+  opacity: 0; transform: translateX(10px); pointer-events: none;
+  transition: opacity var(--dur-panel) var(--ease-panel), transform var(--dur-panel) var(--ease-panel);
+}
+.stage.is-collapsed .silhouette { opacity: 1; transform: none; pointer-events: auto; }
+.sil-hd { display: flex; align-items: center; gap: 8px; }
+.sil-hd .t { font-size: 12px; font-weight: 600; }
+.sil-hd .mono { font-size: 10px; color: var(--n-text-muted); margin-left: auto; letter-spacing: .02em; }
+.sil-body { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.sil-block {
+  border: 1px solid var(--n-hairline); border-radius: var(--r-panel);
+  height: 54px; background: var(--n-surface-sunken);
+}
+.sil-block.tall { height: 92px; background: var(--n-surface); border-left: 1px solid var(--ag-claude); }
+.sil-field {
+  border: 1px solid var(--n-hairline-strong); border-radius: var(--r-field);
+  height: 60px; display: flex; align-items: flex-end; justify-content: flex-end; padding: 6px;
+}
+.sil-field .sq { width: 26px; height: 26px; border-radius: var(--r-chip); background: var(--n-fill-hover); }
+.sil-cta {
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  height: 30px; border-radius: var(--r-field);
+  border: 1px solid var(--n-hairline-strong); background: var(--n-surface-raised);
+  font-size: 12px; color: var(--n-text-secondary);
+  transition: background 140ms var(--ease-out), color 140ms var(--ease-out);
+}
+.sil-cta:hover { background: var(--n-fill-hover); color: var(--n-text); }
+.sil-cta .kbd { font-family: var(--font-mono); font-size: 10px; color: var(--n-text-disabled); }
+
+/* ── 반응형 ───────────────────────────────────────────── */
+@media (max-width: 1320px) {
+  :root { --rail-w: 226px; --stream-w: 318px; }
+  .drow .txt { padding-right: 10px; }
+}
+@media (max-width: 1180px) {
+  .main { grid-template-columns: minmax(0, 330px) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .rail { grid-column: 1 / -1; max-height: 96px; }
+  .rail .panel-hd { display: none; }
+  .rail .scroll { overflow-x: auto; overflow-y: hidden; }
+  .rail .rail-body { flex-direction: row; gap: 6px; align-items: stretch; }
+  .rail .thread { width: 236px; flex: none; align-content: center; }
+  .dg-foot { padding-left: 12px; }
+}
+@media (max-width: 900px) {
+  .main { grid-template-columns: minmax(0, 1fr); }
+  .stream-panel { display: none; }
+}
+
+/* ── 모션 축소 ────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+  .msg-agent .caret, .drow .anchor { animation: none; opacity: 1; }
+  .ws[data-s="connected"] .beat::after { display: none; }
+  .thread.is-running .t-dot::after { display: none; }
+  .t-title .q { transform: none !important; transition: none !important; }
+  .t-title { mask-image: none !important; -webkit-mask-image: none !important; text-overflow: ellipsis; }
+}
+</style>
+</head>
+<body>
+
+<div class="stage" id="stage">
+
+  <!-- 축소 시 드러나는 사이드바 실루엣 -->
+  <aside class="silhouette" aria-hidden="true" id="silhouette">
+    <div class="sil-hd">
+      <span class="t">에이전트</span>
+      <span class="mono">5 ops 검토 대기</span>
+    </div>
+    <div class="sil-body">
+      <div class="sil-block"></div>
+      <div class="sil-block tall"></div>
+      <div class="sil-block"></div>
+    </div>
+    <div class="sil-field"><div class="sq"></div></div>
+    <button class="sil-cta" id="btn-expand-sil" type="button">
+      <span data-icon="expand"></span>콘솔 확대<span class="kbd">Esc</span>
+    </button>
+  </aside>
+
+  <div class="shell" id="shell">
+
+    <!-- ── 헤더 ── -->
+    <header class="hdr">
+      <span class="hdr-mark">
+        <span class="glyph" data-icon="doc" aria-hidden="true"></span>
+        에이전트 콘솔
+      </span>
+      <span class="hdr-sep" aria-hidden="true"></span>
+
+      <span class="doc-chip" title="2026년 상반기 사업계획서.hwpx">
+        <b>2026년 상반기 사업계획서.hwpx</b>
+        <span class="mono">24쪽 · 표 8 · 이미지 3</span>
+      </span>
+
+      <button class="model-line" type="button" aria-label="프로바이더 · 모델 · 추론 강도 설정 열기">
+        <span class="dot" aria-hidden="true"></span>
+        Claude<span class="div" aria-hidden="true">·</span>Opus 5<span class="div" aria-hidden="true">·</span>추론 강도 높음
+        <span class="chev" data-icon="chevron" aria-hidden="true"></span>
+      </button>
+
+      <div class="hdr-right">
+        <button class="ibtn" id="btn-replay" type="button" title="턴 다시 재생">
+          <span data-icon="replay" aria-hidden="true"></span><span class="kbd">R</span>
+        </button>
+        <button class="ibtn" id="btn-theme" type="button" title="테마 전환" aria-label="테마 전환">
+          <span data-icon="moon" aria-hidden="true"></span>
+        </button>
+        <button class="ibtn is-strong" id="btn-collapse" type="button">
+          <span data-icon="collapse" aria-hidden="true"></span>축소<span class="kbd">Esc</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ── 본체 ── -->
+    <div class="main">
+
+      <!-- 레일: 스레드만 -->
+      <section class="panel rail" aria-label="스레드">
+        <div class="panel-hd"><h2>스레드</h2><span class="count" id="thread-count">6</span></div>
+        <div class="scroll" style="flex:1;">
+          <div class="rail-body" id="rail-body"></div>
+        </div>
+      </section>
+
+      <!-- 전사 -->
+      <section class="panel stream-panel" aria-label="대화">
+        <div class="panel-hd">
+          <h2>대화</h2>
+          <span class="count" id="stream-count">0개 메시지</span>
+        </div>
+        <div class="scroll" id="stream-scroll">
+          <div class="stream" id="stream"></div>
+        </div>
+      </section>
+
+      <!-- 리뷰 데크 -->
+      <section class="panel deck" aria-label="변경 검토">
+        <div class="deck-hd">
+          <div class="deck-top">
+            <button class="scope" id="btn-scope" type="button" aria-haspopup="menu" aria-expanded="false">
+              마지막 턴<span class="chev" data-icon="chevron" aria-hidden="true"></span>
+            </button>
+            <span class="tally" id="tally">
+              <span class="up" id="tally-up">+0</span>
+              <span class="dn" id="tally-dn">-0</span>
+              <span class="md" id="tally-md" hidden>~0</span>
+            </span>
+            <div class="right">
+              <span class="menu-wrap">
+                <button class="ibtn" id="btn-more" type="button" title="더 보기"
+                        aria-label="더 보기" aria-haspopup="menu" aria-expanded="false">
+                  <span data-icon="dots" aria-hidden="true"></span>
+                </button>
+                <div class="menu" id="more-menu" role="menu" aria-label="검토 옵션" hidden>
+                  <button role="menuitem" type="button" data-act="expand-ctx">
+                    <span class="ic" data-icon="expandv" aria-hidden="true"></span><span class="lb">문맥 모두 펼치기</span>
+                  </button>
+                  <button role="menuitem" type="button" data-act="collapse-ctx">
+                    <span class="ic" data-icon="collapsev" aria-hidden="true"></span><span class="lb">문맥 모두 접기</span>
+                  </button>
+                  <span class="msep" aria-hidden="true"></span>
+                  <button role="menuitem" type="button" data-act="hide-resolved">
+                    <span class="ic" data-icon="eye" aria-hidden="true"></span><span class="lb">처리된 그룹 숨기기</span>
+                  </button>
+                </div>
+              </span>
+              <button class="ibtn" id="btn-collapse-all" type="button" title="모두 접기" aria-label="모두 접기">
+                <span data-icon="collapsev" aria-hidden="true"></span>
+              </button>
+            </div>
+          </div>
+
+          <div class="deck-mid">
+            <div class="ring" id="commit-ring">
+              <svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true">
+                <circle class="track" cx="16" cy="16" r="14"></circle>
+                <circle class="head" cx="16" cy="16" r="14" stroke-dasharray="87.9" stroke-dashoffset="87.9"></circle>
+              </svg>
+              <span class="num" id="ring-num">0</span>
+            </div>
+            <div class="csmeta">
+              <div class="csline">
+                <span class="status-pill" id="cs-status" data-s="open">open</span>
+                <span class="status-pill mono" id="cs-id">cs_7d21</span>
+              </div>
+              <p class="deck-note" id="deck-note">승인 시 단일 실행 취소 단계</p>
+            </div>
+            <div class="deck-actions">
+              <button class="btn" id="btn-reject-all" type="button" disabled>
+                <span data-icon="close" aria-hidden="true"></span>전체 거부
+              </button>
+              <button class="btn btn-primary" id="btn-approve-all" type="button" disabled>
+                <span data-icon="check" aria-hidden="true"></span>전체 승인<span class="kbd">⏎</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="ladder" id="ladder">
+            <span class="lab">§0</span>
+            <span class="hint" id="ladder-hint">J / K 이동 · A 승인 · X 거부</span>
+          </div>
+        </div>
+
+        <div class="scroll" id="deck-scroll" style="flex:1;">
+          <div class="deck-empty" id="deck-empty">
+            <div class="ghost" aria-hidden="true"><i></i><i></i><i></i></div>
+            <p>대기 중인 편집 없음</p>
+            <span class="mono">§0 · ¶0–318 · 29 tools</span>
+          </div>
+          <div class="hunks" id="hunks" hidden></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ── 상태 밴드 ── -->
+    <footer class="band">
+      <span class="cell">
+        <span class="ws" id="ws" data-s="connecting"><span class="beat"></span><span class="v" id="ws-label">connecting</span></span>
+        ws://127.0.0.1:5175/studio
+      </span>
+      <span class="cell">tok <span class="v" id="b-tin">0</span>↑ <span class="v" id="b-tout">0</span>↓</span>
+      <span class="cell">경과 <span class="v" id="b-elapsed">00:00.0</span></span>
+      <span class="cell">stop <span class="v" id="b-stop">—</span></span>
+      <span class="cell push">MCP <span class="v">29</span> (읽기 13 · 쓰기 16)</span>
+      <span class="cell">§0 <span class="v">¶ 0–318</span></span>
+      <span class="cell">s_3f9c2a1b</span>
+    </footer>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ── 아이콘: 12 그리드, currentColor, 1.25 스트로크, 둥근 캡 ── */
+const ICON_PATHS = {
+  check: ['M2.5 6.4 5 8.9l4.5-5.4'],
+  close: ['M3.2 3.2l5.6 5.6M8.8 3.2l-5.6 5.6'],
+  insert: ['M6 2.6v6.8M2.6 6h6.8'],
+  delete: ['M2.6 6h6.8'],
+  replace: ['M2.5 4.3h6.2L6.9 2.6M9.5 7.7H3.3l1.8 1.7'],
+  format: ['M2.8 9.2 3.2 7.5l4.4-4.4 1.3 1.3-4.4 4.4zM2.8 9.2h2.4'],
+  field: ['M3.4 9.4V2.6h5.2L7.3 4.6l1.3 2H3.4'],
+  chevron: ['M3.4 4.9 6 7.5l2.6-2.6'],
+  chevronr: ['M4.9 3.4 7.5 6l-2.6 2.6'],
+  doc: ['M3.2 2.6h3.6l2.1 2.1v4.7H3.2zM6.8 2.6v2.1h2.1'],
+  dots: ['M3 6h.01M6 6h.01M9 6h.01'],
+  collapsev: ['M3.3 2.5 6 4.6l2.7-2.1', 'M3.3 9.5 6 7.4l2.7 2.1'],
+  expandv: ['M3.3 4.6 6 2.5l2.7 2.1', 'M3.3 7.4 6 9.5l2.7-2.1'],
+  eye: ['M1.6 6S3.4 3.1 6 3.1 10.4 6 10.4 6 8.6 8.9 6 8.9 1.6 6 1.6 6z', 'M6 4.9a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2z'],
+  search: ['M8.6 8.6 10 10', 'M5.1 8.2a3.1 3.1 0 1 0 0-6.2 3.1 3.1 0 0 0 0 6.2z'],
+  replay: ['M9.3 6A3.3 3.3 0 1 1 6 2.7', 'M5.9 1.4 7.4 2.7 5.9 4'],
+  moon: ['M8.9 7.5A3.5 3.5 0 0 1 4.6 3.2 3.7 3.7 0 1 0 8.9 7.5z'],
+  sun: ['M6 3.9a2.1 2.1 0 1 0 0 4.2 2.1 2.1 0 0 0 0-4.2z', 'M6 1.2v1.1M6 9.7v1.1M1.2 6h1.1M9.7 6h1.1M2.6 2.6l.8.8M8.6 8.6l.8.8M9.4 2.6l-.8.8M3.4 8.6l-.8.8'],
+  collapse: ['M2.4 2.4 4.9 4.9M4.9 4.9V2.8M4.9 4.9H2.8', 'M9.6 9.6 7.1 7.1M7.1 7.1v2.1M7.1 7.1h2.1'],
+  expand: ['M4.9 4.9 2.4 2.4M2.4 2.4v2.1M2.4 2.4h2.1', 'M7.1 7.1l2.5 2.5M9.6 9.6V7.5M9.6 9.6H7.5'],
+  table: ['M2.6 3.4h6.8v5.2H2.6zM2.6 5.4h6.8M5.4 5.4v3.2']
+};
+
+function iconSVG(name, size) {
+  const paths = ICON_PATHS[name];
+  const s = size || 12;
+  if (name === 'object') {
+    return '<svg viewBox="0 0 12 12" width="' + s + '" height="' + s + '" aria-hidden="true" focusable="false" style="display:block">' +
+      '<rect x="2.9" y="2.9" width="6.2" height="6.2" rx="1" fill="none" stroke="currentColor" stroke-width="1.25"/></svg>';
+  }
+  if (name === 'dots') {
+    return '<svg viewBox="0 0 12 12" width="' + s + '" height="' + s + '" aria-hidden="true" focusable="false" style="display:block">' +
+      '<circle cx="2.9" cy="6" r=".95" fill="currentColor"/><circle cx="6" cy="6" r=".95" fill="currentColor"/>' +
+      '<circle cx="9.1" cy="6" r=".95" fill="currentColor"/></svg>';
+  }
+  if (!paths) return '';
+  const body = paths.map(function (d) {
+    return '<path d="' + d + '" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>';
+  }).join('');
+  return '<svg viewBox="0 0 12 12" width="' + s + '" height="' + s + '" aria-hidden="true" focusable="false" style="display:block">' + body + '</svg>';
+}
+
+function paintIcons(root) {
+  (root || document).querySelectorAll('[data-icon]').forEach(function (n) {
+    n.innerHTML = iconSVG(n.getAttribute('data-icon'));
+  });
+}
+paintIcons();
+
+const $ = function (id) { return document.getElementById(id); };
+const REDUCED = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+/* ─────────────────────────────────────────────────────────
+   스레드 — 레일은 이제 스레드만 담는다
+   ───────────────────────────────────────────────────────── */
+const THREADS = [
+  { title: '3장 실적 요약 재작성과 표 3-2 수치 재인용', agent: 'claude', state: '실행 중', ops: 0, model: 'Opus 5', active: true, running: true },
+  { title: '4장 리스크 문단 전면 재작성 및 표 3-4 각주 번호 정리', agent: 'claude', state: '검토 대기', ops: 11, model: 'Opus 5' },
+  { title: '부록 B 인용 표기 통일 및 각주 번호 전체 재정렬과 상호 참조 갱신', agent: 'codex', state: '커밋됨', ops: 9, model: 'GPT-5' },
+  { title: '표 3-2 숫자 대조', agent: 'codex', state: '커밋됨', ops: 6, model: 'GPT-5' },
+  { title: '머리말·꼬리말 통일', agent: 'claude', state: '거부됨', ops: 2, model: 'Sonnet 5' },
+  { title: '1장 개요 어투 정리', agent: 'claude', state: '커밋됨', ops: 4, model: 'Sonnet 5' }
+];
+
+const MQ_SPEED = 58;   /* px/sec — 넘친 거리에 비례한다 */
+const MQ_HOLD_IN = 260;
+const MQ_HOLD_OUT = 120;
+
+function armMarquee(titleEl) {
+  const quill = titleEl.querySelector('.q');
+  const measure = function () {
+    return Math.max(0, quill.scrollWidth - titleEl.clientWidth);
+  };
+  const start = function () {
+    if (REDUCED) return;
+    const over = measure();
+    if (over < 2) { titleEl.classList.add('fits'); return; }
+    titleEl.classList.remove('fits');
+    const dur = Math.round((over / MQ_SPEED) * 1000);
+    quill.style.setProperty('--mq-dur', dur + 'ms');
+    quill.style.setProperty('--mq-delay', MQ_HOLD_IN + 'ms');
+    quill.style.transform = 'translateX(-' + over + 'px)';
+  };
+  const stop = function () {
+    const over = measure();
+    const dur = Math.round((over / MQ_SPEED) * 1000);
+    quill.style.setProperty('--mq-dur', Math.max(160, dur) + 'ms');
+    quill.style.setProperty('--mq-delay', MQ_HOLD_OUT + 'ms');
+    quill.style.transform = 'translateX(0)';
+  };
+  /* 넘치지 않는 제목은 페이드 마스크도 걸지 않는다 */
+  requestAnimationFrame(function () {
+    if (measure() < 2) titleEl.classList.add('fits');
+  });
+  const host = titleEl.closest('.thread');
+  host.addEventListener('mouseenter', start);
+  host.addEventListener('mouseleave', stop);
+  host.addEventListener('focus', start);
+  host.addEventListener('blur', stop);
+}
+
+function renderThreads() {
+  const box = $('rail-body');
+  box.innerHTML = THREADS.map(function (t, i) {
+    return '<button class="thread' + (t.active ? ' is-active' : ' is-idle') + (t.running ? ' is-running' : '') +
+      '" data-agent="' + t.agent + '" data-i="' + i + '" type="button">' +
+      '<span class="t-title" title="' + esc(t.title) + '"><span class="q">' + esc(t.title) + '</span></span>' +
+      '<span class="t-dot" aria-hidden="true"></span>' +
+      '<span class="t-meta"><span class="st"' + (t.active ? ' id="th-state"' : '') + '>' + t.state + '</span>' +
+      '<span class="sep">·</span><span' + (t.active ? ' id="th-ops"' : '') + '>' + t.ops + ' ops</span>' +
+      '<span class="sep">·</span><span>' + t.model + '</span></span>' +
+      '</button>';
+  }).join('');
+  box.querySelectorAll('.t-title').forEach(armMarquee);
+  $('thread-count').textContent = String(THREADS.length);
+}
+renderThreads();
+
+/* ─────────────────────────────────────────────────────────
+   변경 그룹 — 통합 diff. 주소·개정·도구는 실제 계약을 따른다
+   ───────────────────────────────────────────────────────── */
+const BADGE = { replace: 'R', format: 'F', delete: 'D', insert: 'I', object: 'O' };
+
+const GROUPS = [
+  {
+    id: 'g1', kind: 'replace', tool: 'replace_range', sec: '§0', para: '¶142', rev: 1284,
+    ctx: { n: 142, range: '¶0–141', rows: [
+      { n: 139, text: '3장 상반기 실적 요약' },
+      { n: 140, text: '이 장은 상반기 실적을 부문별로 정리한다. 수치는 모두 2026년 6월 30일 마감 기준이다.' },
+      { n: 141, text: '부문 구분은 1장 사업 구조도의 4개 부문을 그대로 따른다.' }
+    ] },
+    del: [
+      { n: 142, segs: [['t', '상반기 매출은 '], ['d', '전년 대비 '], ['t', '증가'], ['d', '하였으며'], ['t', ', 하반기에도 '], ['d', '비슷한'], ['t', ' 흐름이 이어질 것으로 '], ['d', '보인다'], ['t', '.']] },
+      { n: 143, segs: [['t', '세부 수치는 '], ['d', '3장 표에 정리되어 있다'], ['t', '.']] }
+    ],
+    add: [
+      { n: 142, segs: [['t', '상반기 매출은 '], ['a', '전년 동기 대비 18.4% '], ['t', '증가'], ['a', '했으며'], ['t', ', 하반기에도 '], ['a', '같은'], ['t', ' 흐름이 이어질 것으로 '], ['a', '전망된다'], ['t', '.']] },
+      { n: 143, segs: [['t', '세부 수치는 '], ['a', '3장 표 3-2 와 부록 A 표 A-1 에 나누어 실었다'], ['t', '.']] }
+    ],
+    tags: ['표 3-2 값 인용', '기준 rev 1284']
+  },
+  {
+    id: 'g2', kind: 'format', tool: 'apply_char_format', sec: '§0', para: '¶145', rev: 1285,
+    ctx: { n: 1, range: '¶144', rows: [
+      { n: 144, text: '지표 정의는 1장 용어 정리를 따르며, 분기 경계는 회계 기준일로 맞춘다.' }
+    ] },
+    mod: [
+      { n: 145, segs: [['t', '핵심 지표는 '], ['f', '계약 전환율과 이탈률'], ['t', '이며, 두 값은 3장 표 3-2 에 함께 싣는다.']] }
+    ],
+    tags: ['bold: true', '본문 스타일 유지', '기준 rev 1285']
+  },
+  {
+    id: 'g3', kind: 'delete', tool: 'delete_range', sec: '§0', para: '¶201', rev: 1286,
+    ctx: { n: 55, range: '¶146–200', rows: [
+      { n: 199, text: '부문별 원가율은 4장에서 다시 다룬다.' },
+      { n: 200, text: '이하 세 문단은 지난 분기 배포 자료에서 그대로 옮겨온 부분이다.' }
+    ] },
+    del: [
+      { n: 201, segs: [['t', '지난 분기 배포 자료의 요약은 부록 B 로 옮겼다.']] },
+      { n: 202, segs: [['t', '따라서 본문에서는 같은 내용을 다시 다루지 않으며, 필요한 경우에만 참조를 남긴다.']] },
+      { n: 203, segs: [['t', '관련 수치는 부록 B 표 B-2 를 참고한다.']] }
+    ],
+    tags: ['표시만 · 승인 시 제거', '기준 rev 1286']
+  },
+  {
+    id: 'g4', kind: 'insert', tool: 'insert_text', sec: '§0', para: '¶204', rev: 1287,
+    add: [
+      { n: 204, segs: [['t', '리스크 — 원가 상승분을 단가에 반영하지 못하면 하반기 영업이익률이 1.2%p 하락한다.']], anchor: true },
+      { n: 205, segs: [['t', '대응 — 3분기 중 주요 자재 3종의 단가 계약을 재협상하고, 결과를 4장 리스크 표에 반영한다.']] }
+    ],
+    tags: ['문단 신설', '번호 목록 상속', '기준 rev 1287']
+  },
+  {
+    id: 'g5', kind: 'object', tool: 'create_table', sec: '§0', para: '¶216', rev: 1288,
+    ctx: { n: 10, range: '¶206–215', rows: [
+      { n: 214, text: '분기 추이는 문장보다 표로 보는 편이 빠르다.' },
+      { n: 215, text: '아래 표의 단위는 억원이며, 반올림 오차는 표 아래 각주에 남긴다.' }
+    ] },
+    add: [
+      { n: 216, table: true }
+    ],
+    tags: ['3행 × 4열', '머리글 행 고정', '단위: 억원', '기준 rev 1288']
+  }
+];
+
+const TAIL_CTX = { n: 102, range: '¶217–318', rows: [
+  { n: 217, text: '4장 하반기 계획' },
+  { n: 218, text: '하반기 계획은 상반기 실적을 전제로 부문별 목표를 다시 배분한다.' }
+] };
+
+/* ── 상태 ── */
+const state = {
+  rev: 1283, tokIn: 0, tokOut: 0,
+  landed: [], resolved: {}, active: -1,
+  stopReason: '—',
+  csStatus: 'open', committed: false,
+  t0: 0, running: false, msgs: 0,
+  allCollapsed: false, hideResolved: false
+};
+
+/* ── 계측 ── */
+function fmtElapsed(ms) {
+  const s = Math.max(0, ms) / 1000;
+  const m = Math.floor(s / 60);
+  const r = (s - m * 60);
+  return String(m).padStart(2, '0') + ':' + (r < 10 ? '0' : '') + r.toFixed(1);
+}
+function num(n) { return Math.round(n).toLocaleString('en-US'); }
+
+function renderMetrics() {
+  $('b-tin').textContent = num(state.tokIn);
+  $('b-tout').textContent = num(state.tokOut);
+  $('b-stop').textContent = state.stopReason;
+  $('stream-count').textContent = state.msgs + '개 메시지';
+  const ops = $('th-ops');
+  if (ops) ops.textContent = state.landed.length + ' ops';
+}
+
+/* ── 전사: 사용자 메시지 + 에이전트 산문만 ── */
+const streamEl = $('stream');
+const streamScroll = $('stream-scroll');
+function makeEl(tag, cls, html) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (html != null) n.innerHTML = html;
+  return n;
+}
+function pushStream(node) {
+  streamEl.appendChild(node);
+  state.msgs++;
+  renderMetrics();
+  streamScroll.scrollTop = streamScroll.scrollHeight;
+  return node;
+}
+
+/* 문자 단위 스트리밍 — 출력 토큰 계측이 여기서 나온다.
+   [[…]] 로 감싼 조각은 기술 식별자라 code 로 굳힌다. */
+const streamJobs = [];
+function renderProse(node, text) {
+  node.innerHTML = esc(text)
+    .replace(/\[\[!(.+?)\]\]/g, '<code class="err">$1</code>')
+    .replace(/\[\[(.+?)\]\]/g, '<code>$1</code>');
+}
+function streamText(text, cps) {
+  const box = makeEl('div', 'msg-agent', '<span class="body"></span><span class="caret"></span>');
+  pushStream(box);
+  const body = box.querySelector('.body');
+  if (REDUCED) {
+    renderProse(body, text);
+    box.querySelector('.caret').remove();
+    state.tokOut += Math.round(text.length / 1.7);
+    return;
+  }
+  streamJobs.push({ node: body, box: box, text: text, i: 0, cps: cps || 44, acc: 0, last: performance.now() });
+}
+function tickStreams(now) {
+  for (let i = streamJobs.length - 1; i >= 0; i--) {
+    const j = streamJobs[i];
+    const dt = (now - j.last) / 1000;
+    j.last = now;
+    j.acc += dt * j.cps;
+    const add = Math.floor(j.acc);
+    if (add > 0) {
+      j.acc -= add;
+      const next = Math.min(j.text.length, j.i + add);
+      const chars = next - j.i;
+      j.i = next;
+      renderProse(j.node, j.text.slice(0, j.i));
+      state.tokOut += chars / 1.7;
+      streamScroll.scrollTop = streamScroll.scrollHeight;
+      if (j.i >= j.text.length) {
+        const c = j.box.querySelector('.caret');
+        if (c) c.remove();
+        streamJobs.splice(i, 1);
+      }
+    }
+  }
+}
+
+/* ─────────────────────────────────────────────────────────
+   데크
+   ───────────────────────────────────────────────────────── */
+const hunksEl = $('hunks');
+const ladderEl = $('ladder');
+const ladderHint = $('ladder-hint');
+
+/* ═════════════════════════════════════════════════════════
+   diff 렌더러 — 데이터 → DOM. 순수 빌더이며 콘솔 상태를 읽지 않는다.
+   그대로 떼어 studio 의 보류 편집 뷰로 옮길 수 있는 단위다.
+
+     countGroup(group)              → { add, del, mod }
+     buildInline(segs)              → string  (문자 단위 표식)
+     buildDiffRow(row, variant)     → HTMLElement  .drow
+     buildContextBand(ctx)          → HTMLElement  .ctx      (접기/펼치기 배선 포함)
+     buildDiffGroup(group, opts)    → HTMLElement  .dgroup
+
+   행 변형(variant): 'del' | 'mod' | 'add' | 'ctx'
+   행 데이터(row):   { n, segs } | { n, table:true } | { n, text }
+   조각(seg):        ['t'|'d'|'a'|'f', 문자열]
+   ═════════════════════════════════════════════════════════ */
+
+const ROW_VARIANT_CLASS = { del: 'is-del', mod: 'is-mod', add: 'is-add', ctx: 'is-ctx' };
+
+/* 그룹의 행 수 집계. 서식(mod)은 글자가 오가지 않으므로 +/- 와 별도로 센다. */
+function countGroup(g) {
+  return { add: (g.add || []).length, del: (g.del || []).length, mod: (g.mod || []).length };
+}
+
+/* 행 안의 문자 단위 표식. 행 워시 위에 같은 색을 더 진하게 얹는다. */
+function buildInline(segs) {
+  return segs.map(function (s) {
+    const kind = s[0], text = esc(s[1]);
+    if (kind === 'd') return '<del>' + text + '</del>';
+    if (kind === 'a') return '<ins>' + text + '</ins>';
+    if (kind === 'f') return '<span class="fmt">' + text + '</span>';
+    return text;
+  }).join('');
+}
+
+/* 표 개체 미리보기 — 개체 op 의 본문 자리에 들어간다. */
+function buildTablePreview() {
+  return '<div class="tbl-prev">' +
+    '<span>구분</span><span>1Q</span><span>2Q</span><span>3Q</span>' +
+    '<span>매출</span><span>128</span><span>141</span><span>152</span>' +
+    '<span>영업이익</span><span>11</span><span>13</span><span>15</span>' +
+    '</div>';
+}
+
+/* 한 행: [변경 게이지 3px][문단 번호][본문]. 본문은 접히고, 워시와 게이지는
+   접힌 높이 전체를 덮는다. 이어지는 줄에는 번호를 다시 찍지 않는다. */
+function buildDiffRow(row, variant) {
+  const el = document.createElement('div');
+  el.className = 'drow ' + ROW_VARIANT_CLASS[variant];
+  let body;
+  if (row.table) body = buildTablePreview();
+  else if (row.segs) body = buildInline(row.segs) + (row.anchor ? '<span class="anchor"></span>' : '');
+  else body = esc(row.text || '');
+  el.innerHTML =
+    '<span class="gut" aria-hidden="true"></span>' +
+    '<span class="num">' + row.n + '</span>' +
+    '<span class="txt">' + body + '</span>';
+  return el;
+}
+
+/* 그룹 사이의 접힌 문맥 밴드. 눌러서 실제 문맥 행을 펼친다. */
+function buildContextBand(ctx) {
+  const wrap = document.createElement('div');
+  wrap.className = 'ctx';
+  wrap.innerHTML =
+    '<button class="ctx-band" type="button" aria-expanded="false">' +
+      '<span class="cv" data-icon="chevronr" aria-hidden="true"></span>' +
+      '<span>문단 ' + ctx.n + '개 변경 없음</span>' +
+      '<span class="rng">' + esc(ctx.range) + '</span>' +
+    '</button>' +
+    '<div class="ctx-rows"><div class="inner"></div></div>';
+  const inner = wrap.querySelector('.ctx-rows .inner');
+  ctx.rows.forEach(function (r) { inner.appendChild(buildDiffRow(r, 'ctx')); });
+  paintIcons(wrap);
+
+  const band = wrap.querySelector('.ctx-band');
+  band.addEventListener('click', function () {
+    const open = wrap.classList.toggle('is-open');
+    band.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  return wrap;
+}
+
+/* 그룹 헤더: 종류 배지 · 주소(컨테이너는 흐리게, 대상은 또렷하게) ·
+   기록한 도구 · 그룹 단위 +N -N · 승인/거부. */
+function buildGroupHeader(g, counts) {
+  const hd = document.createElement('div');
+  hd.className = 'dg-hd';
+  let tally = '';
+  if (counts.add) tally += '<span class="up">+' + counts.add + '</span>';
+  if (counts.del) tally += '<span class="dn">-' + counts.del + '</span>';
+  if (counts.mod) tally += '<span class="md">~' + counts.mod + '</span>';
+  hd.innerHTML =
+    '<span class="tbadge" data-kind="' + g.kind + '" title="' + g.kind + '">' + BADGE[g.kind] + '</span>' +
+    '<code class="dg-addr"><span class="sec">' + g.sec + ' </span>' + g.para + '</code>' +
+    '<span class="dg-tool">' + g.tool + '</span>' +
+    '<span class="dg-counts">' + tally + '</span>' +
+    '<span class="dg-verdict"></span>' +
+    '<span class="dg-acts">' +
+      '<button class="hbtn no" type="button" data-act="reject" title="이 그룹 거부" aria-label="' + g.sec + ' ' + g.para + ' 거부">' + iconSVG('close') + '</button>' +
+      '<button class="hbtn ok" type="button" data-act="approve" title="이 그룹 승인" aria-label="' + g.sec + ' ' + g.para + ' 승인">' + iconSVG('check') + '</button>' +
+    '</span>';
+  return hd;
+}
+
+/* 그룹 본문: 삭제 블록 전체 → 서식 블록 → 추가 블록 전체. 통합·적층이며
+   좌우 대조도, 줄 단위 교차도 아니다. */
+function buildGroupBody(g) {
+  const body = document.createElement('div');
+  body.className = 'dg-body';
+  const inner = document.createElement('div');
+  inner.className = 'inner';
+  (g.del || []).forEach(function (r) { inner.appendChild(buildDiffRow(r, 'del')); });
+  (g.mod || []).forEach(function (r) { inner.appendChild(buildDiffRow(r, 'mod')); });
+  (g.add || []).forEach(function (r) { inner.appendChild(buildDiffRow(r, 'add')); });
+  if (g.tags && g.tags.length) {
+    const foot = document.createElement('div');
+    foot.className = 'dg-foot';
+    foot.innerHTML = g.tags.map(function (t) { return '<span class="mini-tag">' + esc(t) + '</span>'; }).join('');
+    inner.appendChild(foot);
+  }
+  body.appendChild(inner);
+  return body;
+}
+
+/* 그룹 하나. opts: { idx, onApprove, onReject, onSelect } */
+function buildDiffGroup(g, opts) {
+  const o = opts || {};
+  const el = document.createElement('section');
+  el.className = 'dgroup';
+  el.id = 'grp-' + g.id;
+  el.dataset.kind = g.kind;
+  if (o.idx != null) el.dataset.idx = String(o.idx);
+  el.setAttribute('tabindex', '-1');
+
+  const hd = buildGroupHeader(g, countGroup(g));
+  el.appendChild(hd);
+  el.appendChild(buildGroupBody(g));
+
+  hd.querySelector('[data-act="approve"]').addEventListener('click', function (e) {
+    e.stopPropagation(); if (o.onApprove) o.onApprove();
+  });
+  hd.querySelector('[data-act="reject"]').addEventListener('click', function (e) {
+    e.stopPropagation(); if (o.onReject) o.onReject();
+  });
+  hd.addEventListener('click', function () {
+    if (o.onSelect) o.onSelect();
+    el.classList.toggle('is-collapsed');
+  });
+  el.addEventListener('click', function () { if (o.onSelect) o.onSelect(); });
+  return el;
+}
+
+/* 주소 사다리 칩 — 그룹 헤더와 같은 좌표를 가리킨다. */
+function buildAddrChip(g, idx, onSelect) {
+  const chip = document.createElement('button');
+  chip.type = 'button';
+  chip.className = 'addr-chip';
+  chip.dataset.kind = g.kind;
+  chip.dataset.idx = String(idx);
+  chip.innerHTML = '<span class="pk"></span>' + g.para;
+  chip.addEventListener('click', onSelect);
+  return chip;
+}
+
+/* ── 데크에 그룹을 착지시킨다 (콘솔 측 배선) ── */
+function landGroup(idx) {
+  const g = GROUPS[idx];
+  $('deck-empty').hidden = true;
+  hunksEl.hidden = false;
+
+  if (g.ctx) hunksEl.appendChild(buildContextBand(g.ctx));
+
+  hunksEl.appendChild(buildDiffGroup(g, {
+    idx: idx,
+    onApprove: function () { resolveGroup(idx, 'approved'); },
+    onReject: function () { resolveGroup(idx, 'rejected'); },
+    onSelect: function () { setActive(idx); }
+  }));
+  state.landed.push(g.id);
+
+  ladderEl.insertBefore(buildAddrChip(g, idx, function () {
+    setActive(idx);
+    const node = document.getElementById('grp-' + g.id);
+    if (node) node.scrollIntoView({ block: 'nearest', behavior: REDUCED ? 'auto' : 'smooth' });
+  }), ladderHint);
+
+  setActive(idx);
+  updateDeck();
+  $('deck-scroll').scrollTop = $('deck-scroll').scrollHeight;
+}
+
+/* 마지막 그룹 뒤의 문맥 밴드 — 문서 끝까지 변경이 없다는 사실도 주소다. */
+function landTail() {
+  if (!hunksEl.querySelector('.dgroup')) return;
+  hunksEl.appendChild(buildContextBand(TAIL_CTX));
+}
+
+function setActive(idx) {
+  state.active = idx;
+  hunksEl.querySelectorAll('.dgroup').forEach(function (n) {
+    n.classList.toggle('is-active', Number(n.dataset.idx) === idx);
+  });
+  ladderEl.querySelectorAll('.addr-chip').forEach(function (n) {
+    n.classList.toggle('is-active', Number(n.dataset.idx) === idx);
+  });
+}
+
+function resolveGroup(idx, verdict) {
+  const g = GROUPS[idx];
+  if (!g || state.resolved[g.id]) return;
+  state.resolved[g.id] = verdict;
+  const art = document.getElementById('grp-' + g.id);
+  if (art) {
+    art.classList.add('is-resolved');
+    art.dataset.verdict = verdict;
+    art.querySelector('.dg-verdict').innerHTML =
+      iconSVG(verdict === 'approved' ? 'check' : 'close') + (verdict === 'approved' ? '승인' : '거부');
+    if (state.hideResolved) art.hidden = true;
+  }
+  const chip = ladderEl.querySelector('.addr-chip[data-idx="' + idx + '"]');
+  if (chip) chip.classList.add('is-resolved');
+  const next = GROUPS.findIndex(function (x, i) {
+    return i > idx && state.landed.indexOf(x.id) >= 0 && !state.resolved[x.id];
+  });
+  if (next >= 0) setActive(next);
+  updateDeck();
+}
+
+function bump(el, text) {
+  if (el.textContent === text) return;
+  el.textContent = text;
+  el.classList.remove('is-bump');
+  void el.offsetWidth;
+  el.classList.add('is-bump');
+}
+
+function updateDeck() {
+  const landed = state.landed.length;
+  const pending = state.landed.filter(function (id) { return !state.resolved[id]; }).length;
+
+  const ring = $('commit-ring');
+  const head = ring.querySelector('.head');
+  const p = landed / GROUPS.length;
+  head.setAttribute('stroke-dashoffset', String(87.9 * (1 - p)));
+  const allResolved = landed > 0 && pending === 0;
+  ring.classList.toggle('is-done', allResolved || state.committed);
+  $('ring-num').innerHTML = (allResolved || state.committed) ? iconSVG('check', 14) : String(landed);
+
+  let a = 0, d = 0, m = 0;
+  state.landed.forEach(function (id) {
+    const g = GROUPS.find(function (x) { return x.id === id; });
+    const c = countGroup(g);
+    a += c.add; d += c.del; m += c.mod;
+  });
+  bump($('tally-up'), '+' + a);
+  bump($('tally-dn'), '-' + d);
+  $('tally-md').hidden = m === 0;
+  if (m) bump($('tally-md'), '~' + m);
+
+  const status = $('cs-status');
+  if (state.committed) {
+    status.dataset.s = 'committed'; status.textContent = 'committed';
+  } else if (state.csStatus === 'awaiting-review') {
+    status.dataset.s = 'awaiting-review'; status.textContent = 'awaiting-review';
+  } else {
+    status.dataset.s = 'open'; status.textContent = 'open';
+  }
+
+  const canAct = pending > 0 && !state.committed;
+  $('btn-approve-all').disabled = !canAct;
+  $('btn-reject-all').disabled = !canAct;
+
+  $('deck-note').textContent = state.committed
+    ? '커밋됨 · 실행 취소 1단계'
+    : (pending > 0 ? pending + '개 미결 · 승인 시 단일 실행 취소 단계' : '승인 시 단일 실행 취소 단계');
+
+  renderMetrics();
+}
+
+function commitAll(verdict) {
+  GROUPS.forEach(function (g, i) {
+    if (state.landed.indexOf(g.id) >= 0 && !state.resolved[g.id]) resolveGroup(i, verdict);
+  });
+  state.committed = true;
+  updateDeck();
+  const st = $('th-state');
+  if (st) st.textContent = verdict === 'approved' ? '커밋됨' : '거부됨';
+}
+
+$('btn-approve-all').addEventListener('click', function () { commitAll('approved'); });
+$('btn-reject-all').addEventListener('click', function () { commitAll('rejected'); });
+
+/* 모두 접기 / 펼치기 */
+function setAllCollapsed(v) {
+  state.allCollapsed = v;
+  hunksEl.querySelectorAll('.dgroup').forEach(function (n) { n.classList.toggle('is-collapsed', v); });
+  const b = $('btn-collapse-all');
+  b.innerHTML = iconSVG(v ? 'expandv' : 'collapsev');
+  b.title = v ? '모두 펼치기' : '모두 접기';
+  b.setAttribute('aria-label', b.title);
+}
+$('btn-collapse-all').addEventListener('click', function () { setAllCollapsed(!state.allCollapsed); });
+
+/* ─────────────────────────────────────────────────────────
+   메뉴 — 바깥 클릭 · Esc 로 닫힌다
+   ───────────────────────────────────────────────────────── */
+let openMenu = null;
+function closeMenu() {
+  if (!openMenu) return;
+  openMenu.menu.hidden = true;
+  openMenu.btn.setAttribute('aria-expanded', 'false');
+  openMenu = null;
+}
+function bindMenu(btn, menu) {
+  btn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    const wasOpen = openMenu && openMenu.menu === menu;
+    closeMenu();
+    if (wasOpen) return;
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    openMenu = { btn: btn, menu: menu };
+    const first = menu.querySelector('button');
+    if (first) first.focus();
+  });
+  menu.addEventListener('click', function (e) { e.stopPropagation(); });
+}
+document.addEventListener('click', closeMenu);
+
+bindMenu($('btn-more'), $('more-menu'));
+$('more-menu').querySelectorAll('[data-act]').forEach(function (item) {
+  item.addEventListener('click', function () {
+    const act = item.dataset.act;
+    if (act === 'expand-ctx' || act === 'collapse-ctx') {
+      const open = act === 'expand-ctx';
+      hunksEl.querySelectorAll('.ctx').forEach(function (n) {
+        n.classList.toggle('is-open', open);
+        n.querySelector('.ctx-band').setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+    } else if (act === 'hide-resolved') {
+      state.hideResolved = !state.hideResolved;
+      item.querySelector('.lb').textContent = state.hideResolved ? '처리된 그룹 보이기' : '처리된 그룹 숨기기';
+      hunksEl.querySelectorAll('.dgroup.is-resolved').forEach(function (n) { n.hidden = state.hideResolved; });
+    }
+    closeMenu();
+  });
+});
+
+/* 범위 선택은 프로토타입에서 한 항목만 갖는다 */
+$('btn-scope').addEventListener('click', function (e) { e.stopPropagation(); closeMenu(); });
+
+/* ─────────────────────────────────────────────────────────
+   시나리오 — 약 27초 턴
+   ───────────────────────────────────────────────────────── */
+let schedule = [];
+let scheduleIdx = 0;
+
+function setRev(v) { state.rev = v; }
+function readIn(n) { state.tokIn += n; renderMetrics(); }
+
+function buildSchedule() {
+  const S = [];
+  const add = function (at, fn) { S.push({ at: at, fn: fn }); };
+
+  add(200, function () {
+    $('ws').dataset.s = 'connecting';
+    $('ws-label').textContent = 'connecting';
+  });
+  add(900, function () {
+    $('ws').dataset.s = 'connected';
+    $('ws-label').textContent = 'connected';
+  });
+  add(1300, function () {
+    pushStream(makeEl('div', 'msg-user', '<span class="who">나</span>3장 실적 요약을 표 3-2 숫자로 다시 쓰고, 중복 문단은 정리해 줘.'));
+  });
+
+  add(2000, function () {
+    readIn(1840);
+    streamText('3장 실적 요약부터 확인한다. 구조를 먼저 읽고 수정 대상 문단을 특정한다.', 46);
+  });
+  add(4600, function () {
+    readIn(420);
+    streamText('[[¶142]]–[[¶143]] 의 매출 문장이 수치 없이 서술돼 있다. 표 3-2 의 값을 넣어 다시 쓴다.', 46);
+  });
+
+  /* REVISION_MISMATCH — 산문으로 남긴다 */
+  add(8200, function () {
+    setRev(1284);
+    readIn(360);
+    streamText('쓰기 직전에 [[!REVISION_MISMATCH]] 가 돌아왔다. 문서가 [[1284]] 로 올라갔으니 같은 범위를 다시 읽고 편집을 그대로 다시 적용한다.', 47);
+  });
+
+  add(11600, function () {
+    state.csStatus = 'awaiting-review';
+    landGroup(0);
+  });
+  add(12600, function () {
+    readIn(280);
+    streamText('핵심 지표 두 개는 굵게 잡아 표와 눈이 맞도록 한다.', 45);
+  });
+  add(14300, function () { setRev(1285); landGroup(1); });
+
+  add(15300, function () {
+    readIn(310);
+    streamText('[[¶201]]–[[¶203]] 은 부록 B 와 내용이 겹친다. 본문에서 걷어낸다.', 45);
+  });
+  add(17400, function () { setRev(1286); landGroup(2); });
+
+  add(18300, function () {
+    readIn(260);
+    streamText('걷어낸 자리에는 원가 상승 리스크와 대응을 새 문단으로 넣는다.', 45);
+  });
+  add(20100, function () { setRev(1287); landGroup(3); });
+
+  add(21100, function () {
+    readIn(240);
+    streamText('분기 추이는 문장보다 표가 낫다. 3행 4열 표를 세우고 머리글 행을 고정한다.', 45);
+  });
+  add(22800, function () { setRev(1288); landGroup(4); landTail(); });
+
+  add(24100, function () {
+    readIn(520);
+    streamText('5개 작업을 하나의 변경 집합으로 묶었다. [[¶201]]–[[¶203]] 삭제는 표시만 되어 있고 승인할 때 제거된다.', 47);
+  });
+  add(26900, function () {
+    state.stopReason = 'end_turn';
+    const st = $('th-state');
+    if (st) st.textContent = '검토 대기';
+    const th = document.querySelector('.thread.is-running');
+    if (th) th.classList.remove('is-running');
+    updateDeck();
+    renderMetrics();
+    state.running = false;
+  });
+
+  return S;
+}
+
+/* ── 루프 ── */
+let rafId = 0;
+function frame(now) {
+  const t = now - state.t0;
+
+  while (scheduleIdx < schedule.length && t >= schedule[scheduleIdx].at) {
+    schedule[scheduleIdx].fn();
+    scheduleIdx++;
+  }
+
+  tickStreams(now);
+
+  $('b-elapsed').textContent = fmtElapsed(Math.min(t, 27000));
+  $('b-tout').textContent = num(state.tokOut);
+
+  rafId = requestAnimationFrame(frame);
+}
+
+function reset() {
+  streamEl.innerHTML = '';
+  hunksEl.innerHTML = '';
+  hunksEl.hidden = true;
+  $('deck-empty').hidden = false;
+  ladderEl.querySelectorAll('.addr-chip').forEach(function (n) { n.remove(); });
+  streamJobs.length = 0;
+
+  state.rev = 1283; state.tokIn = 0; state.tokOut = 0;
+  state.landed = []; state.resolved = {}; state.active = -1;
+  state.stopReason = '—'; state.csStatus = 'open'; state.committed = false;
+  state.msgs = 0; state.allCollapsed = false;
+
+  const th = document.querySelector('.thread.is-active');
+  if (th) th.classList.add('is-running');
+  const st = $('th-state');
+  if (st) st.textContent = '실행 중';
+  $('ws').dataset.s = 'connecting';
+  $('ws-label').textContent = 'connecting';
+  setAllCollapsed(false);
+  updateDeck();
+  renderMetrics();
+
+  schedule = buildSchedule();
+  scheduleIdx = 0;
+  state.t0 = performance.now();
+  state.running = true;
+  if (!rafId) rafId = requestAnimationFrame(frame);
+}
+
+/* ── 축소 / 확대 ── */
+const stage = $('stage');
+const shell = $('shell');
+function setCollapsed(v) {
+  stage.classList.toggle('is-collapsed', v);
+  shell.classList.toggle('is-collapsed', v);
+  $('silhouette').setAttribute('aria-hidden', v ? 'false' : 'true');
+  if (v) {
+    setTimeout(function () { $('btn-expand-sil').focus(); }, 340);
+  } else {
+    $('btn-collapse').focus();
+  }
+}
+$('btn-collapse').addEventListener('click', function () { setCollapsed(true); });
+$('btn-expand-sil').addEventListener('click', function () { setCollapsed(false); });
+
+/* ── 테마 ── */
+function currentTheme() {
+  const attr = document.documentElement.getAttribute('data-theme');
+  if (attr) return attr;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+function syncThemeIcon() {
+  $('btn-theme').innerHTML = iconSVG(currentTheme() === 'dark' ? 'sun' : 'moon');
+}
+$('btn-theme').addEventListener('click', function () {
+  document.documentElement.setAttribute('data-theme', currentTheme() === 'dark' ? 'light' : 'dark');
+  syncThemeIcon();
+});
+syncThemeIcon();
+
+/* ── 키보드 ── */
+document.addEventListener('keydown', function (e) {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key;
+  if (k === 'Escape') {
+    e.preventDefault();
+    if (openMenu) { const b = openMenu.btn; closeMenu(); b.focus(); return; }
+    setCollapsed(!stage.classList.contains('is-collapsed'));
+    return;
+  }
+  if (openMenu) return;
+  if (stage.classList.contains('is-collapsed')) {
+    if (k === 'Enter') { e.preventDefault(); setCollapsed(false); }
+    return;
+  }
+  const landedIdx = GROUPS.map(function (g, i) { return state.landed.indexOf(g.id) >= 0 ? i : -1; })
+    .filter(function (i) { return i >= 0; });
+  if (!landedIdx.length && k !== 'r' && k !== 'R') return;
+
+  if (k === 'j' || k === 'J' || k === 'k' || k === 'K') {
+    e.preventDefault();
+    const pos = landedIdx.indexOf(state.active);
+    const dir = (k === 'j' || k === 'J') ? 1 : -1;
+    const nextPos = Math.max(0, Math.min(landedIdx.length - 1, (pos < 0 ? 0 : pos + dir)));
+    const idx = landedIdx[nextPos];
+    setActive(idx);
+    const node = document.getElementById('grp-' + GROUPS[idx].id);
+    if (node) node.scrollIntoView({ block: 'nearest', behavior: REDUCED ? 'auto' : 'smooth' });
+  } else if (k === 'a' || k === 'A') {
+    e.preventDefault();
+    if (state.active >= 0) resolveGroup(state.active, 'approved');
+  } else if (k === 'x' || k === 'X') {
+    e.preventDefault();
+    if (state.active >= 0) resolveGroup(state.active, 'rejected');
+  } else if (k === 'r' || k === 'R') {
+    e.preventDefault();
+    reset();
+  } else if (k === 'Enter') {
+    if (!$('btn-approve-all').disabled) { e.preventDefault(); commitAll('approved'); }
+  }
+});
+
+$('btn-replay').addEventListener('click', reset);
+
+reset();
+</script>
+</body>
+</html>
