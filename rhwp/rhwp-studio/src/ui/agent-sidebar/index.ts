@@ -13,6 +13,7 @@ import type { AgentBridge } from '../../agent/bridge.ts';
 import type {
   AgentName,
   AgentStreamEvent,
+  DocRange,
   PermissionProfile,
   PendingChangeSet,
   PendingEditsChangeEvent,
@@ -35,6 +36,7 @@ import {
   fallbackTitle,
   getThread,
   listThreads,
+  renameThread,
   setThreadTitle,
   upsertThread,
   type ChatThread,
@@ -183,6 +185,32 @@ function opPreview(op: PendingOp): string {
   }
 }
 
+/**
+ * op 좌표 readout — `§1 ¶42 c0–18`. 편집이 어디에 걸리는지 카드가 스스로
+ * 말하게 한다(본문 좌표계, 0-based). 셀 안이면 셀 인덱스를 앞에 붙인다.
+ */
+function opAddress(range: DocRange): string {
+  const section = `§${range.sectionIdx + 1}`;
+  const cell = range.cell ? ` ▦${range.cell.cellIdx}` : '';
+  const sameParagraph = range.startParaIdx === range.endParaIdx;
+  const para = sameParagraph
+    ? `¶${range.startParaIdx}`
+    : `¶${range.startParaIdx}–${range.endParaIdx}`;
+  const chars = sameParagraph
+    ? ` c${range.startCharOffset}–${range.endCharOffset}`
+    : ` c${range.startCharOffset}→${range.endCharOffset}`;
+  return `${section}${cell} ${para}${chars}`;
+}
+
+/** 부호 열(−/+)을 가진 diff 한 줄. 부호는 장식이 아니라 정렬 기준이다. */
+function buildDiffLine(kind: 'add' | 'del' | 'ctx', text: string): HTMLElement {
+  const line = el('div', `ag-diff-line ag-diff-${kind}`);
+  const sign = el('span', 'ag-diff-sign', kind === 'add' ? '+' : kind === 'del' ? '−' : '·');
+  sign.setAttribute('aria-hidden', 'true');
+  line.append(sign, el('span', 'ag-diff-text', truncate(text.replace(/\n/g, '⏎'), 120)));
+  return line;
+}
+
 export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; dispose(): void } {
   const { bridge, eventBus, getDocumentContext } = deps;
 
@@ -195,7 +223,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let streamBubble: HTMLElement | null = null;
   const toolRows = new Map<
     string,
-    { status: HTMLElement; result: HTMLPreElement; scroller: HTMLElement }
+    {
+      status: HTMLElement;
+      result: HTMLPreElement;
+      scroller: HTMLElement;
+      /** 로그 행 오른쪽의 소요 시간 readout */
+      elapsed: HTMLElement;
+      startedAt: number;
+    }
   >();
   let turnActivity: {
     root: HTMLElement;
@@ -842,8 +877,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   send.setAttribute('aria-label', '보내기');
   send.title = '보내기';
 
+  // 프롬프트 캐럿: 이 필드가 명령을 받는 자리라는 표시. 순수 장식이라 aria 에서 숨긴다.
+  const caret = el('span', 'ag-caret', '>');
+  caret.setAttribute('aria-hidden', 'true');
+  // 실제로 존재하는 단축키만 노출한다 — 전송은 Enter, 줄바꿈은 Shift+Enter.
+  const sendHint = el('span', 'ag-kbd', '⏎');
+  sendHint.setAttribute('aria-hidden', 'true');
+
   const composerField = el('div', 'ag-composer-field');
-  composerField.append(input, send);
+  composerField.append(caret, input, sendHint, send);
   composer.append(slashMenu, composerField);
   // 헤더(모델 피커)까지 채팅 페이지에 포함해 목록 전환 시 함께 사라지게 한다.
   chatPage.append(header, messages, review, composerUtilities, composer);
@@ -1424,12 +1466,63 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     rebuildEffortMenu();
   }
 
+  /** 목록 행의 계기 표시 — 에이전트 · 날짜 시각 · 메시지 수. 자릿수를 맞춘다. */
   function formatThreadMeta(thread: ChatThread): string {
     const when = new Date(thread.updatedAt);
     const hh = String(when.getHours()).padStart(2, '0');
     const mm = String(when.getMinutes()).padStart(2, '0');
-    const day = `${when.getMonth() + 1}/${when.getDate()}`;
-    return `${AGENT_LABEL[thread.agent]} · ${day} ${hh}:${mm}`;
+    const month = String(when.getMonth() + 1).padStart(2, '0');
+    const day = String(when.getDate()).padStart(2, '0');
+    return `${AGENT_LABEL[thread.agent]} · ${month}/${day} ${hh}:${mm} · ${thread.messages.length}줄`;
+  }
+
+  /**
+   * 이름 바꾸기 — 행 자리에서 바로 편집한다. Enter 확정 / Esc 취소 /
+   * 포커스 이탈 시 확정. 확정된 이름은 고정되어 자동 제목이 덮지 않는다.
+   */
+  function beginThreadRename(thread: ChatThread, row: HTMLElement): void {
+    const form = el('form', 'ag-thread-rename-form');
+    const field = el('input', 'ag-thread-rename-input') as HTMLInputElement;
+    field.type = 'text';
+    field.value = thread.title || '';
+    field.maxLength = 48;
+    field.setAttribute('aria-label', '채팅 이름');
+    form.appendChild(field);
+
+    let settled = false;
+    const commit = (): void => {
+      if (settled) return;
+      settled = true;
+      const next = renameThread(thread.id, field.value);
+      if (next && thread.id === currentThread.id) {
+        currentThread.title = next.title;
+        currentThread.titlePinned = true;
+      }
+      rebuildThreadsList();
+    };
+    const cancel = (): void => {
+      if (settled) return;
+      settled = true;
+      rebuildThreadsList();
+    };
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      commit();
+    });
+    field.addEventListener('blur', commit);
+    field.addEventListener('keydown', (e) => {
+      // Esc 는 패널 전체를 닫는 핸들러가 위에 있다 — 여기서 멈춘다.
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        cancel();
+      }
+    });
+
+    row.replaceChildren(form);
+    field.focus();
+    field.select();
   }
 
   function rebuildThreadsList(): void {
@@ -1440,17 +1533,38 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       threadsList.appendChild(empty);
       return;
     }
-    for (const thread of items) {
-      const li = document.createElement('li');
+    items.forEach((thread, i) => {
+      const li = el('li', 'ag-threads-row');
+      if (thread.id === currentThread.id) li.classList.add('ag-current');
+
       const btn = el('button', 'ag-threads-item');
       btn.type = 'button';
       if (thread.id === currentThread.id) btn.classList.add('ag-active');
-      btn.appendChild(el('span', 'ag-threads-item-title', thread.title || '새 채팅'));
-      btn.appendChild(el('span', 'ag-threads-item-meta', formatThreadMeta(thread)));
+      const index = el('span', 'ag-thread-idx', String(i + 1).padStart(2, '0'));
+      index.setAttribute('aria-hidden', 'true');
+      const body = el('span', 'ag-thread-body');
+      body.append(
+        el('span', 'ag-threads-item-title', thread.title || '새 채팅'),
+        el('span', 'ag-threads-item-meta', formatThreadMeta(thread)),
+      );
+      btn.append(index, body);
+      // 두 번 누르기로는 열지 않는다 — 첫 클릭이 이미 대화를 열어버리므로
+      // 이름 바꾸기는 연필 버튼 하나로만 들어간다.
       btn.addEventListener('click', () => openThread(thread.id));
-      li.appendChild(btn);
+
+      const rename = el('button', 'ag-thread-rename');
+      rename.type = 'button';
+      rename.setAttribute('aria-label', `${thread.title || '새 채팅'} 이름 바꾸기`);
+      rename.title = '이름 바꾸기';
+      rename.appendChild(createIcon('format'));
+      rename.addEventListener('click', (e) => {
+        e.stopPropagation();
+        beginThreadRename(thread, li);
+      });
+
+      li.append(btn, rename);
       threadsList.appendChild(li);
-    }
+    });
   }
 
   function setThreadsPanelOpen(open: boolean): void {
@@ -1564,6 +1678,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     send.setAttribute('aria-label', sendLabel);
     send.title = sendLabel;
     send.classList.toggle('ag-stop', turnRunning);
+    // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
+    sendHint.hidden = turnRunning || connState !== 'connected';
     providerTrigger.disabled = turnRunning;
     llmTrigger.disabled = turnRunning;
     effortTrigger.disabled = turnRunning;
@@ -1627,6 +1743,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
       },
     );
+  }
+
+  /** 로그 행용 짧은 소요 시간 — 1초 미만은 ms, 그 위는 s. 폭이 흔들리지 않게 짧게. */
+  function formatElapsed(startedAt: number): string {
+    const ms = Math.max(0, performance.now() - startedAt);
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+    return `${Math.round(ms / 60_000)}m`;
   }
 
   function formatActivityDuration(startedAt: number): string {
@@ -1748,11 +1872,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     const head = el('button', 'ag-tool-head');
     head.type = 'button';
     head.setAttribute('aria-expanded', 'false');
+    // 로그 행의 주소: 왼쪽 거터의 op 번호 → 상태 → 도구 이름 → 인자 → 소요 시간.
+    const opId = el('span', 'ag-op-id', String(activity.toolCount).padStart(2, '0'));
+    opId.setAttribute('aria-hidden', 'true');
     const status = el('span', 'ag-tool-status ag-spin');
     const name = el('span', 'ag-tool-name', evt.tool);
     const summary = el('span', 'ag-tool-summary', truncate(evt.argsJson, 60));
+    const elapsed = el('span', 'ag-tool-elapsed');
     const chevron = createChevron('ag-tool-chevron');
-    head.append(status, name, summary, chevron);
+    head.append(opId, status, name, summary, elapsed, chevron);
 
     const body = el('div', 'ag-tool-body');
     body.hidden = true;
@@ -1769,7 +1897,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     row.append(head, body);
     withAutoScroll(() => activity.content.appendChild(row));
     scrollActivityToLatest(activity.content);
-    toolRows.set(evt.callId, { status, result, scroller: activity.content });
+    toolRows.set(evt.callId, {
+      status,
+      result,
+      scroller: activity.content,
+      elapsed,
+      startedAt: performance.now(),
+    });
     // 다음 text-delta 는 activity 아래의 최종 답변 후보로 연다.
     streamBubble = null;
   }
@@ -1781,6 +1915,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     entry.status.classList.remove('ag-spin');
     entry.status.classList.add(evt.ok ? 'ag-ok' : 'ag-err');
     entry.status.replaceChildren(createIcon(evt.ok ? 'check' : 'close'));
+    entry.elapsed.textContent = formatElapsed(entry.startedAt);
     entry.result.textContent = evt.resultPreview;
     scrollActivityToLatest(entry.scroller);
     if (!evt.ok && turnActivity) turnActivity.failedToolCount += 1;
@@ -1796,6 +1931,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       entry.status.classList.remove('ag-spin');
       entry.status.classList.add('ag-err');
       entry.status.replaceChildren(createIcon('close'));
+      if (!entry.elapsed.textContent) entry.elapsed.textContent = '중단';
       if (!entry.result.textContent) entry.result.textContent = '(결과 없이 종료됨)';
     }
     toolRows.clear();
@@ -2023,6 +2159,47 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
   }
 
+  /**
+   * 대기 편집 한 건 = 주소가 붙은 오퍼레이션. 머리줄이 좌표를 말하고
+   * 아랫줄이 실제 -/+ diff 를 보여준다 — 요약 문장 대신 검토 가능한 형태.
+   */
+  function buildReviewOp(op: PendingOp): HTMLElement {
+    const entry = el('div', `ag-review-op ag-review-op-${op.kind}`);
+    const head = el('div', 'ag-op-head');
+    const glyph = el('span', `ag-op-glyph ag-op-${op.kind}`);
+    glyph.appendChild(createIcon(OP_ICON[op.kind] ?? 'replace'));
+    // 좌표가 있는 op 만 주소를 말한다. 필드/개체는 대상 이름이 곧 주소다.
+    const addr = op.kind === 'field'
+      ? op.name
+      : op.kind === 'object'
+        ? (OBJECT_OP_LABELS[op.obj.type] ?? op.obj.type)
+        : opAddress(op.range);
+    head.append(glyph, el('span', 'ag-op-addr', addr));
+    entry.appendChild(head);
+
+    const diff = el('div', 'ag-op-diff');
+    switch (op.kind) {
+      case 'replace':
+        diff.append(buildDiffLine('del', op.deletedText), buildDiffLine('add', op.text));
+        break;
+      case 'insert':
+        diff.appendChild(buildDiffLine('add', op.text));
+        break;
+      case 'delete':
+        diff.appendChild(buildDiffLine('del', op.text));
+        break;
+      case 'field':
+        diff.append(buildDiffLine('del', op.oldValue), buildDiffLine('add', op.newValue));
+        break;
+      default:
+        // 서식/개체는 텍스트 diff 가 없다 — 중립 줄로 내용만 보인다.
+        diff.appendChild(buildDiffLine('ctx', opPreview(op)));
+        break;
+    }
+    entry.appendChild(diff);
+    return entry;
+  }
+
   // ── 리뷰 카드 (change-set 승인/거절) ──────────────────
   function buildReviewCard(set: PendingChangeSet): HTMLElement {
     const card = el('div', `ag-review-card ag-${set.agent}`);
@@ -2037,16 +2214,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       return card;
     }
 
-    summary.appendChild(
-      el('div', 'ag-review-title', `${AGENT_LABEL[set.agent]} 편집 ${set.ops.length}건 대기 중`),
+    const title = el('div', 'ag-review-title');
+    title.append(
+      el('span', 'ag-review-title-text', `${AGENT_LABEL[set.agent]} 편집 대기`),
+      el('span', 'ag-review-count', `${String(set.ops.length).padStart(2, '0')}건`),
     );
+    summary.appendChild(title);
     for (const op of set.ops.slice(0, MAX_REVIEW_OP_LINES)) {
-      const line = el('div', 'ag-review-op');
-      const glyph = el('span', `ag-op-glyph ag-op-${op.kind}`);
-      glyph.appendChild(createIcon(OP_ICON[op.kind] ?? 'replace'));
-      line.appendChild(glyph);
-      line.appendChild(el('span', 'ag-op-text', truncate(opPreview(op), 40)));
-      summary.appendChild(line);
+      summary.appendChild(buildReviewOp(op));
     }
     if (set.ops.length > MAX_REVIEW_OP_LINES) {
       summary.appendChild(
