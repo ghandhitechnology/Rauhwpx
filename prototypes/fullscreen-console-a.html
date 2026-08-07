@@ -1,0 +1,2567 @@
+<!doctype html>
+<html lang="ko" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rhwp — 에이전트 콘솔 (Instrument Deck)</title>
+<style>
+/* ══════════════════════════════════════════════════════════════════
+   rhwp-studio · 전체화면 에이전트 콘솔 — THE INSTRUMENT DECK
+
+   THESIS: 이 화면은 대화창이 아니라 '돌고 있는 기계의 계기판'이다.
+   문서는 숨는다. 남는 것은 측정값뿐 — 토큰이 오르고, 리비전이
+   올라가고, 도구 호출이 밀리초를 소모하며 끝난다. 밀도가 곧
+   전문성이고, 움직이는 것은 전부 실제 상태에 묶여 있다.
+
+   OWN-WORLD: 색·면은 사이드바의 중성 램프(--n-*)를 그대로 승계한다.
+   전체화면에서 바뀌는 것은 계층이다 — 상단 HUD 스트립이 구조물이
+   되고, 도구 스트림은 소요 시간 막대를 가진 타임라인이 되며,
+   diff 는 여러 계기 중 하나로 압축된다. 모서리 2/3/4, 경계는 알파
+   헤어라인, 네온·글로우·솔리드 실선 없음.
+
+   FORM: 사용자가 고른 방향(Instrument Deck) — 추첨 없음.
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── 중성 램프 ── */
+:root {
+  --n-canvas: #f5f5f7;
+  --n-surface: #ffffff;
+  --n-surface-raised: #f7f7f8;
+  --n-surface-sunken: #f1f1f4;
+  --n-hairline: rgba(0,0,0,.08);
+  --n-hairline-strong: rgba(0,0,0,.14);
+  --n-text: #1d1d1f;
+  --n-text-secondary: #545458;
+  --n-text-muted: #6e6e73;
+  --n-text-placeholder: #757579;
+  --n-text-disabled: #adadb2;
+  --n-fill-hover: rgba(0,0,0,.055);
+  --n-fill-active: rgba(0,0,0,.10);
+  --n-fill-selected: rgba(97,130,214,.14);
+  --n-fill-selected-soft: rgba(97,130,214,.07);
+  --n-on-accent: #ffffff;
+  --accent-primary: #6182d6;
+  --accent-strong: #335095;
+  --ui-danger: #c8372d;
+  --ui-danger-ink: #c8372d;
+  --ui-ok: #2f7d4f;
+  --ui-ok-ink: #2f7d4f;
+  --n-elev-1: 0 1px 2px rgba(0,0,0,.04), 0 1px 1px rgba(0,0,0,.03);
+  --n-elev-2: 0 4px 12px rgba(0,0,0,.08), 0 1px 3px rgba(0,0,0,.04);
+  --n-elev-3: 0 12px 32px rgba(0,0,0,.14), 0 2px 6px rgba(0,0,0,.06);
+
+  --ag-claude: #c4785a;
+  --ag-codex: #5b8fd4;
+
+  --r-chip: 2px;
+  --r-field: 3px;
+  --r-panel: 4px;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, '맑은 고딕', 'Malgun Gothic', 'Segoe UI', sans-serif;
+  --font-mono: 'Consolas', 'Courier New', monospace;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-panel: cubic-bezier(0.2, .72, 0, 1);
+  --dur-panel: 320ms;
+
+  --gutter: 30px;
+  --track-wide: 0.14em;
+
+  --diff-add: color-mix(in srgb, var(--ui-ok) 9%, transparent);
+  --diff-del: color-mix(in srgb, var(--ui-danger) 8%, transparent);
+  --diff-add-rail: color-mix(in srgb, var(--ui-ok) 55%, transparent);
+  --diff-del-rail: color-mix(in srgb, var(--ui-danger) 55%, transparent);
+
+  --rail-w: 236px;
+  --ops-w: 512px;
+  color-scheme: light;
+}
+
+/* 어두운 테마 — 이 방향이 노래하는 쪽. */
+:root[data-theme="dark"] {
+  --n-canvas: #141416;
+  --n-surface: #1e1e20;
+  --n-surface-raised: #26262a;
+  --n-surface-sunken: #171719;
+  --n-hairline: rgba(255,255,255,.10);
+  --n-hairline-strong: rgba(255,255,255,.17);
+  --n-text: #f5f5f7;
+  --n-text-secondary: #c7c7cc;
+  --n-text-muted: #a2a2a8;
+  --n-text-placeholder: #8f8f95;
+  --n-text-disabled: #6b6b71;
+  --n-fill-hover: rgba(255,255,255,.06);
+  --n-fill-active: rgba(255,255,255,.10);
+  --n-fill-selected: rgba(127,168,255,.18);
+  --n-fill-selected-soft: rgba(127,168,255,.09);
+  --n-on-accent: #10203c;
+  --accent-primary: #7fa8ff;
+  --accent-strong: #335095;
+  /* --ui-danger / --ui-ok 는 램프 값 그대로 두고, 어두운 면 위 '잉크'만
+     대비를 위해 밝힌다. 면·레일은 원래 값, 글자는 잉크 값. */
+  --ui-danger-ink: #e2695e;
+  --ui-ok-ink: #5fbb85;
+  --n-elev-1: 0 1px 2px rgba(0,0,0,.35), 0 1px 1px rgba(0,0,0,.25);
+  --n-elev-2: 0 4px 12px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.30);
+  --n-elev-3: 0 12px 32px rgba(0,0,0,.55), 0 2px 6px rgba(0,0,0,.35);
+  --diff-add: color-mix(in srgb, var(--ui-ok-ink) 13%, transparent);
+  --diff-del: color-mix(in srgb, var(--ui-danger-ink) 12%, transparent);
+  --diff-add-rail: color-mix(in srgb, var(--ui-ok-ink) 62%, transparent);
+  --diff-del-rail: color-mix(in srgb, var(--ui-danger-ink) 62%, transparent);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --n-canvas: #141416;
+    --n-surface: #1e1e20;
+    --n-surface-raised: #26262a;
+    --n-surface-sunken: #171719;
+    --n-hairline: rgba(255,255,255,.10);
+    --n-hairline-strong: rgba(255,255,255,.17);
+    --n-text: #f5f5f7;
+    --n-text-secondary: #c7c7cc;
+    --n-text-muted: #a2a2a8;
+    --n-text-placeholder: #8f8f95;
+    --n-text-disabled: #6b6b71;
+    --n-fill-hover: rgba(255,255,255,.06);
+    --n-fill-active: rgba(255,255,255,.10);
+    --n-fill-selected: rgba(127,168,255,.18);
+    --n-fill-selected-soft: rgba(127,168,255,.09);
+    --n-on-accent: #10203c;
+    --accent-primary: #7fa8ff;
+    --ui-danger-ink: #e2695e;
+    --ui-ok-ink: #5fbb85;
+    --n-elev-1: 0 1px 2px rgba(0,0,0,.35), 0 1px 1px rgba(0,0,0,.25);
+    --n-elev-2: 0 4px 12px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.30);
+    --n-elev-3: 0 12px 32px rgba(0,0,0,.55), 0 2px 6px rgba(0,0,0,.35);
+    --diff-add: color-mix(in srgb, var(--ui-ok-ink) 13%, transparent);
+    --diff-del: color-mix(in srgb, var(--ui-danger-ink) 12%, transparent);
+    --diff-add-rail: color-mix(in srgb, var(--ui-ok-ink) 62%, transparent);
+    --diff-del-rail: color-mix(in srgb, var(--ui-danger-ink) 62%, transparent);
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--n-canvas);
+  color: var(--n-text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 문서는 숨는다. 뒤에 남는 것은 앱 바탕뿐 — 문서 미리보기가 아니다. */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--n-canvas);
+}
+
+/* 숫자는 전부 등폭·표형. 자리수가 바뀌어도 열이 흔들리지 않는다. */
+.num, .mono, code, .op-time, .met-val, .dl-no {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.icon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
+:where(button, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+  border-radius: var(--r-chip);
+}
+
+.vh {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ══ 콘솔 셸 ══════════════════════════════════════════════════════ */
+
+.console {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--n-surface);
+  border: 1px solid transparent;
+  box-shadow: none;
+  overflow: hidden;
+  transition:
+    inset var(--dur-panel) var(--ease-panel),
+    border-radius var(--dur-panel) var(--ease-panel),
+    box-shadow var(--dur-panel) var(--ease-panel),
+    border-color var(--dur-panel) var(--ease-panel);
+}
+
+/* Esc → 사이드바 실루엣으로 축소. 폭·이징은 스튜디오 사이드바 계약과 동일. */
+.console.is-collapsed {
+  inset: 14px 14px 14px calc(100% - 374px);
+  border-radius: var(--r-panel);
+  border-color: var(--n-hairline);
+  box-shadow: var(--n-elev-3);
+}
+
+.console.is-collapsed .deck,
+.console.is-collapsed .hud-meters,
+.console.is-collapsed .hud-model,
+.console.is-collapsed .hud-doc {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.deck, .hud-meters, .hud-model, .hud-doc {
+  transition: opacity 160ms linear;
+}
+
+/* ══ HUD 스트립 — 계기판의 구조물. 항상 켜져 있고 항상 숫자로 찬다. ══ */
+
+.hud {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  height: 54px;
+  padding: 0 10px 0 12px;
+  background: var(--n-surface-raised);
+  border-bottom: 1px solid var(--n-hairline);
+  position: relative;
+  z-index: 2;
+}
+
+/* HUD 하단을 훑는 1px 주사선 — 턴이 도는 동안만 존재한다. */
+.hud::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--accent-primary) 70%, transparent) 45%,
+    color-mix(in srgb, var(--accent-primary) 70%, transparent) 55%,
+    transparent 100%);
+  transform: scaleX(.28);
+  transform-origin: left center;
+  opacity: 0;
+}
+
+body.is-running .hud::after {
+  opacity: 1;
+  animation: hud-scan 2.6s linear infinite;
+}
+
+@keyframes hud-scan {
+  from { transform: translateX(-30%) scaleX(.28); }
+  to   { transform: translateX(370%) scaleX(.28); }
+}
+
+.hud-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-right: 12px;
+  flex: none;
+}
+
+.brand-mark {
+  width: 20px; height: 20px;
+  display: grid;
+  place-items: center;
+  color: var(--ag-claude);
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: var(--r-chip);
+  background: var(--n-surface);
+}
+
+.brand-name {
+  font-size: 11px;
+  letter-spacing: var(--track-wide);
+  color: var(--n-text-secondary);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+}
+
+.hud-doc {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  padding: 0 14px;
+  border-left: 1px solid var(--n-hairline);
+  min-width: 0;
+  flex: none;
+  max-width: 230px;
+}
+
+.doc-name {
+  font-size: 12px;
+  color: var(--n-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.doc-stats {
+  font-size: 10px;
+  color: var(--n-text-muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 프로바이더·모델·강도 한 줄 요약 — 항목마다가 아니라 끝에 셰브런 하나. */
+.hud-model {
+  display: flex;
+  align-items: center;
+  flex: none;
+  border-left: 1px solid var(--n-hairline);
+  padding: 0 4px 0 12px;
+}
+
+.model-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: var(--r-field);
+  background: transparent;
+  color: var(--n-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms linear, border-color 120ms linear;
+}
+
+.model-summary:hover { background: var(--n-fill-hover); border-color: var(--n-hairline); }
+
+.model-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--ag-claude);
+  flex: none;
+}
+
+.model-summary b { font-weight: 600; color: var(--n-text); }
+.model-summary .sep { color: var(--n-text-disabled); }
+.model-summary .chev { color: var(--n-text-muted); }
+
+/* ── 계기 셀 ── */
+
+.hud-meters {
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: 8px;
+  overflow: hidden;
+}
+
+.met {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 14px;
+  border-left: 1px solid var(--n-hairline);
+  flex: none;
+  min-width: 0;
+}
+
+.met:first-child { border-left: 0; }
+
+.met-label {
+  font-size: 10px;
+  color: var(--n-text-muted);
+  letter-spacing: .04em;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.met-val {
+  font-size: 13px;
+  color: var(--n-text);
+  line-height: 1.15;
+  white-space: nowrap;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.met-val .u {
+  font-size: 10px;
+  color: var(--n-text-muted);
+}
+
+.met-val .sub {
+  font-size: 10px;
+  color: var(--n-text-muted);
+}
+
+.met-num { display: inline-block; text-align: right; }
+
+.met-tokens .met-val { gap: 8px; }
+.met-tokens .pair { display: flex; align-items: baseline; gap: 4px; }
+.met-tokens .k { font-size: 10px; color: var(--n-text-muted); }
+
+/* WS 하트비트 — 실제 ping 간격에 묶인 맥박. */
+.ws-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--n-text-disabled);
+  flex: none;
+  position: relative;
+}
+
+.ws-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  opacity: 0;
+}
+
+body[data-ws="connected"] .ws-dot { background: var(--ui-ok-ink); color: var(--ui-ok-ink); }
+body[data-ws="connecting"] .ws-dot { background: var(--n-text-muted); color: var(--n-text-muted); }
+body[data-ws="disconnected"] .ws-dot,
+body[data-ws="replaced"] .ws-dot { background: var(--ui-danger-ink); color: var(--ui-danger-ink); }
+
+.ws-dot.beat::after { animation: beat 620ms var(--ease-out); }
+
+@keyframes beat {
+  from { opacity: .8; transform: scale(1); }
+  to   { opacity: 0;  transform: scale(3.1); }
+}
+
+/* 리비전이 올라갈 때만 잠깐 액센트로 물든다. */
+.met-rev .met-val { transition: color 500ms linear; }
+.met-rev.bumped .met-val { color: var(--accent-primary); transition: none; }
+
+/* 지연 계기는 HUD 의 남는 폭을 전부 먹는다 — 빈자리 대신 추적선. */
+.met-lat { flex: 1 1 auto; min-width: 120px; }
+
+.spark {
+  display: block;
+  width: 100%;
+  height: 18px;
+  overflow: visible;
+}
+
+.spark .sp-line {
+  fill: none;
+  stroke: var(--n-text-disabled);
+  stroke-width: 1;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.spark .sp-last {
+  fill: var(--accent-primary);
+}
+
+.hud-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  padding-left: 10px;
+  border-left: 1px solid var(--n-hairline);
+  margin-left: auto;
+}
+
+.ibtn {
+  width: 26px; height: 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--r-field);
+  background: transparent;
+  color: var(--n-text-secondary);
+  cursor: pointer;
+  transition: background 120ms linear, color 120ms linear, border-color 120ms linear;
+}
+
+.ibtn:hover { background: var(--n-fill-hover); color: var(--n-text); border-color: var(--n-hairline); }
+.ibtn:active { background: var(--n-fill-active); }
+
+.esc-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px 0 7px;
+  margin-right: 4px;
+  border: 1px solid var(--n-hairline);
+  border-radius: var(--r-chip);
+  background: transparent;
+  color: var(--n-text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms linear, color 120ms linear;
+}
+
+.esc-hint:hover { background: var(--n-fill-hover); color: var(--n-text-secondary); }
+
+.kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .06em;
+  color: var(--n-text-secondary);
+  border: 1px solid var(--n-hairline);
+  border-radius: 2px;
+  padding: 0 3px;
+  line-height: 14px;
+}
+
+/* ══ 3분할 데크 ═══════════════════════════════════════════════════ */
+
+.deck {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--ops-w);
+  min-height: 0;
+  background: var(--n-surface);
+}
+
+.col {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.col + .col { border-left: 1px solid var(--n-hairline); }
+
+.col-head {
+  flex: none;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--n-hairline);
+  background: var(--n-surface);
+}
+
+.col-title {
+  font-size: 10px;
+  letter-spacing: var(--track-wide);
+  color: var(--n-text-muted);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.col-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--n-text-muted);
+}
+
+.scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--n-hairline-strong) transparent;
+}
+
+.scroll::-webkit-scrollbar { width: 9px; }
+.scroll::-webkit-scrollbar-thumb {
+  background: var(--n-hairline-strong);
+  border-radius: 9px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+/* ── 좌측: 스레드 + 계기 스택 ─────────────────────────────────── */
+
+.rail { background: var(--n-surface-sunken); }
+.rail .col-head { background: var(--n-surface-sunken); }
+
+.threads {
+  list-style: none;
+  margin: 0;
+  padding: 4px 6px 8px;
+}
+
+.thread {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 8px;
+  align-items: start;
+  width: 100%;
+  padding: 6px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--r-field);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms linear;
+}
+
+.thread:hover { background: var(--n-fill-hover); }
+
+.thread[aria-current="true"] {
+  background: var(--n-fill-selected-soft);
+  border-color: var(--n-hairline);
+}
+
+.th-idx {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--n-text-disabled);
+  padding-top: 2px;
+  text-align: right;
+}
+
+.thread[aria-current="true"] .th-idx { color: var(--accent-primary); }
+
+.th-title {
+  font-size: 12px;
+  color: var(--n-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.th-meta {
+  font-size: 10px;
+  color: var(--n-text-muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  margin-top: 1px;
+}
+
+/* 계기 스택 */
+.instr {
+  border-top: 1px solid var(--n-hairline);
+  padding: 11px 12px 12px;
+}
+
+.instr-title {
+  font-size: 10px;
+  letter-spacing: var(--track-wide);
+  color: var(--n-text-muted);
+  text-transform: uppercase;
+  margin: 0 0 9px;
+  font-weight: 500;
+}
+
+.kv {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0;
+  font-size: 11px;
+  color: var(--n-text-secondary);
+}
+
+.kv .v {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--n-text);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.kv .v .u { color: var(--n-text-muted); font-size: 10px; }
+
+/* 읽기/쓰기 분할 — 두 계열이면 액센트 하나 + 중성 하나. */
+.split {
+  height: 4px;
+  display: flex;
+  gap: 1px;
+  margin: 8px 0 7px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--n-fill-hover);
+}
+
+.split i {
+  display: block;
+  height: 100%;
+  transition: width 420ms var(--ease-out);
+}
+
+.split .s-read { background: var(--n-text-disabled); }
+.split .s-write { background: var(--accent-primary); }
+
+.legend {
+  display: flex;
+  gap: 12px;
+  font-size: 10px;
+  color: var(--n-text-muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+
+.swatch {
+  width: 6px; height: 6px;
+  border-radius: 1px;
+  flex: none;
+}
+
+.swatch.read { background: var(--n-text-disabled); }
+.swatch.write { background: var(--accent-primary); }
+
+/* 지연 히스토그램 — 해결된 호출 하나가 막대 하나. */
+.histo {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 34px;
+  margin: 6px 0 7px;
+  padding-bottom: 1px;
+  border-bottom: 1px solid var(--n-hairline);
+}
+
+.histo i {
+  flex: 1 1 0;
+  min-width: 2px;
+  background: var(--n-text-disabled);
+  border-radius: 1px 1px 0 0;
+  transform-origin: bottom;
+  transition: height 380ms var(--ease-out);
+}
+
+.histo i.err { background: var(--ui-danger); }
+.histo i.fresh { background: var(--accent-primary); }
+.histo i.enter { animation: bar-in 380ms var(--ease-out); }
+
+@keyframes bar-in {
+  from { transform: scaleY(.05); opacity: .3; }
+  to   { transform: scaleY(1); opacity: 1; }
+}
+
+.mcp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--n-text-muted);
+  margin-top: 2px;
+}
+
+/* ── 가운데: 트랜스크립트 ─────────────────────────────────────── */
+
+.transcript { background: var(--n-surface); }
+
+.tr-body {
+  padding: 14px 0 18px;
+}
+
+.turn-rule {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 20px;
+  margin: 16px 0 12px;
+  color: var(--n-text-muted);
+}
+
+.turn-rule:first-child { margin-top: 2px; }
+
+.turn-rule .line {
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--n-hairline);
+}
+
+.turn-rule .tag {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  letter-spacing: .06em;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.turn-rule .agent-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--ag-claude);
+}
+
+.msg { padding: 0 20px; }
+
+.msg-user {
+  margin: 0 20px 14px;
+  padding: 9px 11px;
+  background: var(--n-surface-sunken);
+  border: 1px solid var(--n-hairline);
+  border-radius: var(--r-panel);
+  font-size: 13px;
+  color: var(--n-text);
+  max-width: 62ch;
+}
+
+.msg-user .who {
+  display: block;
+  font-size: 10px;
+  letter-spacing: var(--track-wide);
+  color: var(--n-text-muted);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+  font-family: var(--font-mono);
+}
+
+.prose {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--n-text-secondary);
+  max-width: 66ch;
+  margin: 0 0 12px;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.prose strong { color: var(--n-text); font-weight: 600; }
+
+.prose code, .tok {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--n-text);
+  background: var(--n-fill-hover);
+  border: 1px solid var(--n-hairline);
+  border-radius: var(--r-chip);
+  padding: 0 3px;
+  white-space: nowrap;
+}
+
+/* 스트리밍 캐럿 — 실제로 글자가 들어오는 동안만 존재한다. */
+.caret {
+  display: none;
+  width: 6px;
+  height: 1.05em;
+  vertical-align: -.16em;
+  margin-left: 1px;
+  background: var(--accent-primary);
+  opacity: .85;
+}
+
+body.is-streaming .caret.live {
+  display: inline-block;
+  animation: caret 1s steps(1, end) infinite;
+}
+
+@keyframes caret { 50% { opacity: 0; } }
+
+/* 인라인 도구 참조 — 오른쪽 스트림의 같은 행을 가리킨다. */
+.opref {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--n-text);
+  border: 1px solid var(--n-hairline);
+  border-radius: var(--r-chip);
+  padding: 0 4px 0 3px;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  transition: background 120ms linear;
+}
+
+.opref:hover { background: var(--n-fill-hover); }
+.opref .n { color: var(--n-text-disabled); }
+
+.turn-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 20px 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--n-hairline);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--n-text-muted);
+}
+
+.turn-end .stop { color: var(--n-text-secondary); }
+
+.op-refs { border-top: 0; padding-top: 0; margin-top: 6px; flex-wrap: wrap; }
+.op-refs .stop { letter-spacing: var(--track-wide); }
+
+/* 스트림 행이 참조로 지목되면 잠깐 밝아진다. */
+.op.pinged { animation: ping 900ms var(--ease-out); }
+
+@keyframes ping {
+  from { background: var(--n-fill-selected); }
+  to   { background: transparent; }
+}
+
+/* 컴포저 */
+.composer {
+  flex: none;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--n-hairline);
+  background: var(--n-surface);
+}
+
+.composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--n-hairline);
+  border-radius: var(--r-chip);
+  background: transparent;
+  color: var(--n-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms linear, color 120ms linear;
+}
+
+.chip:hover { background: var(--n-fill-hover); color: var(--n-text); }
+
+.chip .v {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--n-text-muted);
+}
+
+.composer-ctx {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--n-text-muted);
+  white-space: nowrap;
+}
+
+/* 입력은 하나의 면이다 — 포커스 링은 필드 전체에 걸린다. */
+.field {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 7px 7px 7px 10px;
+  background: var(--n-surface);
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: var(--r-field);
+  transition: border-color 140ms linear, box-shadow 140ms linear;
+}
+
+.field:focus-within {
+  border-color: color-mix(in srgb, var(--ag-claude) 70%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ag-claude) 18%, transparent);
+}
+
+.field textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: var(--n-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  height: 40px;
+  padding: 0;
+}
+
+.field textarea::placeholder { color: var(--n-text-placeholder); }
+
+.send {
+  width: 26px; height: 26px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--n-hairline);
+  border-radius: var(--r-chip);
+  background: var(--n-surface-raised);
+  color: var(--n-text-secondary);
+  cursor: pointer;
+  transition: background 120ms linear, color 120ms linear;
+}
+
+.send:hover { background: var(--n-fill-hover); color: var(--n-text); }
+
+body.is-running .send { color: var(--ui-danger-ink); }
+
+/* ── 우측: 도구 스트림 + diff ─────────────────────────────────── */
+
+.ops { background: var(--n-surface); }
+
+.ops-stream {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 44%;
+}
+
+.ops-diff {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 56%;
+  border-top: 1px solid var(--n-hairline);
+}
+
+.oplist {
+  list-style: none;
+  margin: 0;
+  padding: 2px 0 10px;
+}
+
+/* 왼쪽 30px 거터 한 줄이 스트림 전 구간을 관통한다. */
+.op {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--gutter) minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0 10px;
+  padding: 7px 12px 8px 0;
+  border-bottom: 1px solid var(--n-hairline);
+}
+
+.op::before {
+  content: "";
+  position: absolute;
+  left: var(--gutter);
+  top: 0; bottom: 0;
+  width: 1px;
+  background: var(--n-hairline);
+}
+
+.op:last-child { border-bottom: 0; }
+
+.op-idx {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--n-text-disabled);
+  text-align: right;
+  padding: 2px 9px 0 0;
+  line-height: 1.4;
+}
+
+.op-main { min-width: 0; padding-left: 2px; }
+
+.op-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.op-tool {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--n-text);
+  letter-spacing: -.01em;
+}
+
+.op-kind {
+  font-size: 10px;
+  line-height: 13px;
+  padding: 0 4px;
+  border: 1px solid var(--n-hairline);
+  border-radius: 2px;
+  color: var(--n-text-muted);
+  flex: none;
+}
+
+.op[data-kind="write"] .op-kind {
+  color: var(--accent-primary);
+  border-color: color-mix(in srgb, var(--accent-primary) 40%, transparent);
+}
+
+.op-addr {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--n-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.op-note {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--n-text-muted);
+  line-height: 1.45;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.op-note .rev {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--n-text-secondary);
+}
+
+.op-err {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--ui-danger-ink);
+  line-height: 1.5;
+}
+
+.op-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 1px;
+  min-height: 16px;
+}
+
+.op-time {
+  font-size: 11px;
+  color: var(--n-text-secondary);
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.op-time i { font-style: normal; font-size: 10px; color: var(--n-text-muted); margin-left: 1px; }
+
+.op[data-state="run"] .op-time { color: var(--n-text-muted); }
+.op[data-state="err"] .op-time { color: var(--ui-danger-ink); }
+
+/* 진행 링 — 채워진 각도는 실제 경과 ms / 예상 ms 다. */
+.ring { width: 14px; height: 14px; flex: none; transform: rotate(-90deg); }
+.ring .trk { fill: none; stroke: var(--n-hairline-strong); stroke-width: 1.4; }
+.ring .arc {
+  fill: none;
+  stroke: var(--accent-primary);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
+.op-state-mark { width: 12px; height: 12px; flex: none; color: var(--n-text-disabled); }
+.op[data-state="ok"] .op-state-mark { color: var(--ui-ok-ink); }
+.op[data-state="err"] .op-state-mark { color: var(--ui-danger-ink); }
+
+/* 소요 시간 막대 — 행마다 바닥에 눕는 실제 지연. */
+.op-bar {
+  position: absolute;
+  left: var(--gutter);
+  right: 12px;
+  bottom: 0;
+  height: 2px;
+  background: var(--n-fill-hover);
+  pointer-events: none;
+}
+
+.op-bar i {
+  display: block;
+  height: 2px;
+  width: 0;
+  background: var(--n-text-disabled);
+  transition: width 300ms var(--ease-out);
+}
+
+.op[data-state="err"] .op-bar i { background: var(--ui-danger); }
+.op[data-state="run"] .op-bar i { background: var(--accent-primary); transition: none; }
+
+.op[data-state="run"] { background: var(--n-fill-selected-soft); }
+.op[data-state="err"] { background: color-mix(in srgb, var(--ui-danger) 5%, transparent); }
+
+/* 읽기 도구가 해결되는 동안 행을 훑는 주사선. 쓰기는 링만. */
+.op-scan {
+  position: absolute;
+  inset: 0 12px 0 var(--gutter);
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.op[data-state="run"][data-kind="read"] .op-scan { opacity: 1; }
+
+.op-scan::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 34%;
+  background: linear-gradient(90deg, transparent,
+    color-mix(in srgb, var(--accent-primary) 12%, transparent), transparent);
+  animation: op-scan 1.15s linear infinite;
+}
+
+@keyframes op-scan {
+  from { transform: translateX(-120%); }
+  to   { transform: translateX(400%); }
+}
+
+.op.enter { animation: op-in 260ms var(--ease-out); }
+
+@keyframes op-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ── 변경 세트 / diff ── */
+
+.cs-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--n-hairline);
+  background: var(--n-surface-raised);
+}
+
+.cs-ring { width: 22px; height: 22px; flex: none; transform: rotate(-90deg); }
+.cs-ring .trk { fill: none; stroke: var(--n-hairline-strong); stroke-width: 1.6; }
+.cs-ring .arc {
+  fill: none;
+  stroke: var(--accent-primary);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 420ms var(--ease-out);
+}
+
+.cs-meta { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+
+.cs-title {
+  font-size: 12px;
+  color: var(--n-text);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.cs-status {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .04em;
+  padding: 0 4px;
+  line-height: 14px;
+  border: 1px solid var(--n-hairline);
+  border-radius: 2px;
+  color: var(--n-text-muted);
+}
+
+.cs-status[data-s="awaiting-review"] {
+  color: var(--accent-primary);
+  border-color: color-mix(in srgb, var(--accent-primary) 45%, transparent);
+}
+
+.cs-sub {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--n-text-muted);
+}
+
+.cs-actions { margin-left: auto; display: flex; gap: 6px; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: var(--r-field);
+  background: var(--n-surface);
+  color: var(--n-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms linear, color 120ms linear, opacity 200ms linear;
+}
+
+.btn:hover:not(:disabled) { background: var(--n-fill-hover); color: var(--n-text); }
+.btn:disabled { opacity: .42; cursor: default; }
+
+.btn-primary {
+  background: var(--accent-primary);
+  border-color: transparent;
+  color: var(--n-on-accent);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-primary) 88%, var(--n-text));
+  color: var(--n-on-accent);
+}
+
+.diff-scroll { padding-bottom: 12px; }
+
+.hunk { border-bottom: 1px solid var(--n-hairline); }
+
+.hunk-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  background: var(--n-surface-sunken);
+  border-bottom: 1px solid var(--n-hairline);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--n-text-muted);
+}
+
+.hunk-op {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--n-text-secondary);
+}
+
+.hunk-addr { color: var(--n-text-secondary); }
+
+.hunk-rev { margin-left: auto; color: var(--n-text-muted); white-space: nowrap; }
+
+.dl {
+  display: grid;
+  grid-template-columns: 34px 12px minmax(0, 1fr);
+  align-items: start;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  border-left: 2px solid transparent;
+}
+
+.dl-no {
+  text-align: right;
+  padding: 1px 8px 1px 0;
+  color: var(--n-text-disabled);
+  font-size: 10px;
+  user-select: none;
+}
+
+.dl-sign {
+  color: var(--n-text-disabled);
+  user-select: none;
+  padding-top: 1px;
+}
+
+.dl-txt {
+  padding: 1px 12px 1px 2px;
+  color: var(--n-text-secondary);
+  white-space: pre-wrap;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.dl-add {
+  background: var(--diff-add);
+  border-left-color: var(--diff-add-rail);
+}
+
+.dl-add .dl-sign, .dl-add .dl-txt { color: var(--n-text); }
+.dl-add .dl-no { color: color-mix(in srgb, var(--ui-ok-ink) 70%, var(--n-text-disabled)); }
+
+.dl-del {
+  background: var(--diff-del);
+  border-left-color: var(--diff-del-rail);
+}
+
+.dl-del .dl-txt { color: var(--n-text-muted); text-decoration: line-through; text-decoration-thickness: 1px; }
+.dl-del .dl-no { color: color-mix(in srgb, var(--ui-danger-ink) 70%, var(--n-text-disabled)); }
+
+/* 서식 op 는 별도 행이 아니라 diff 안의 인라인 범위로 보인다. */
+.fmt {
+  border-bottom: 1px dashed color-mix(in srgb, var(--accent-primary) 70%, transparent);
+  background: var(--n-fill-selected-soft);
+  padding: 0 1px;
+}
+
+.dl.reveal { animation: dl-in 300ms var(--ease-out); }
+
+@keyframes dl-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.diff-empty {
+  padding: 34px 20px;
+  text-align: center;
+  color: var(--n-text-muted);
+  font-size: 12px;
+}
+
+.diff-empty .mono { display: block; margin-top: 5px; font-size: 10px; color: var(--n-text-disabled); }
+
+/* ── 축소 상태: 사이드바 실루엣 ─────────────────────────────── */
+
+.ghost {
+  position: absolute;
+  inset: 54px 0 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: var(--n-surface);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms linear 60ms;
+}
+
+.console.is-collapsed .ghost { opacity: 1; pointer-events: auto; }
+
+.ghost-line {
+  height: 9px;
+  border-radius: 2px;
+  background: var(--n-fill-hover);
+}
+
+.ghost-block {
+  height: 46px;
+  border: 1px solid var(--n-hairline);
+  border-radius: var(--r-panel);
+  background: var(--n-surface-sunken);
+}
+
+.ghost-foot { margin-top: auto; }
+
+.ghost-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--n-text-muted);
+  margin-bottom: 8px;
+}
+
+.expand-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: var(--r-field);
+  background: var(--n-surface);
+  color: var(--n-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.expand-btn:hover { background: var(--n-fill-hover); }
+
+/* ── 반응형 ── */
+
+@media (max-width: 1340px) {
+  :root { --ops-w: 452px; --rail-w: 214px; }
+  .met-turn { display: none; }
+}
+
+@media (max-width: 1180px) {
+  :root { --ops-w: 400px; --rail-w: 196px; }
+  .hud-doc { max-width: 176px; }
+  .met { padding: 0 10px; }
+  .met-lat { display: none; }
+}
+
+@media (max-width: 1040px) {
+  .hud-model .model-summary b + .sep,
+  .hud-brand .brand-name { display: none; }
+  .met-tokens .pair.out { display: none; }
+}
+
+/* ── 모션 축소 ── */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  body.is-running .hud::after { opacity: 0; }
+  .op[data-state="run"][data-kind="read"] .op-scan { opacity: 0; }
+}
+</style>
+</head>
+<body data-ws="connecting">
+
+<div class="backdrop" aria-hidden="true"></div>
+
+<!-- ══ 콘솔 ══════════════════════════════════════════════════════ -->
+<div class="console" id="console" role="region" aria-label="에이전트 콘솔">
+
+  <!-- ── HUD 스트립 ── -->
+  <header class="hud">
+    <div class="hud-brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg class="icon" viewBox="0 0 12 12" width="12" height="12" focusable="false">
+          <path d="M3.1 9.4V2.6h3.3a1.9 1.9 0 0 1 0 3.8H4.6l2.5 3M8.9 2.6v6.8"
+                fill="none" stroke="currentColor" stroke-width="1.25"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </span>
+      <span class="brand-name">rhwp</span>
+    </div>
+
+    <div class="hud-doc">
+      <span class="doc-name" title="2026년 상반기 사업계획서.hwpx">2026년 상반기 사업계획서.hwpx</span>
+      <span class="doc-stats">24쪽 · 8표 · 3그림 · 1,842¶</span>
+    </div>
+
+    <div class="hud-model">
+      <button type="button" class="model-summary" aria-expanded="false">
+        <span class="model-dot" aria-hidden="true"></span>
+        <span>Claude</span><span class="sep">·</span>
+        <b>Opus 5</b><span class="sep">·</span>
+        <span>추론 높음</span>
+        <svg class="icon chev" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+          <path d="M3.2 4.8 6 7.6l2.8-2.8" fill="none" stroke="currentColor"
+                stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- 계기 — 전부 살아 있는 값. -->
+    <div class="hud-meters" role="group" aria-label="세션 계기">
+      <div class="met met-ws">
+        <span class="met-label"><span class="ws-dot" id="wsDot" aria-hidden="true"></span>WS</span>
+        <span class="met-val"><span id="wsState">연결 중</span><span class="u" id="wsPing">—</span></span>
+      </div>
+
+      <div class="met met-elapsed">
+        <span class="met-label">경과</span>
+        <span class="met-val"><span class="met-num" id="elapsed">00:00.00</span></span>
+      </div>
+
+      <div class="met met-turn">
+        <span class="met-label">턴</span>
+        <span class="met-val"><span class="met-num" id="turns">2</span><span class="sub" id="stopReason">—</span></span>
+      </div>
+
+      <div class="met met-tokens">
+        <span class="met-label">토큰</span>
+        <span class="met-val">
+          <span class="pair in"><span class="k">입력</span><span class="met-num" id="tokIn">0</span></span>
+          <span class="pair out"><span class="k">출력</span><span class="met-num" id="tokOut">0</span></span>
+        </span>
+      </div>
+
+      <div class="met met-rev" id="metRev">
+        <span class="met-label">리비전</span>
+        <span class="met-val"><span class="met-num" id="revision">1284</span></span>
+      </div>
+
+      <div class="met met-lat">
+        <span class="met-label">지연 p50 <span class="num" id="p50">—</span></span>
+        <span class="met-val">
+          <svg class="spark" id="spark" viewBox="0 0 200 18" aria-hidden="true" focusable="false">
+            <polyline class="sp-line" id="sparkLine" points=""/>
+            <circle class="sp-last" id="sparkDot" cx="0" cy="0" r="1.6"/>
+          </svg>
+        </span>
+      </div>
+    </div>
+
+    <div class="hud-actions">
+      <button type="button" class="esc-hint" id="collapseBtn" title="사이드바로 축소">
+        <span class="kbd">Esc</span>축소
+      </button>
+      <button type="button" class="ibtn" id="replayBtn" title="세션 다시 재생" aria-label="세션 다시 재생">
+        <svg class="icon" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+          <path d="M9.5 6A3.5 3.5 0 1 1 8.4 3.5M9.7 1.6v2.2H7.5"
+                fill="none" stroke="currentColor" stroke-width="1.25"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <button type="button" class="ibtn" id="themeBtn" title="테마 전환" aria-label="테마 전환">
+        <svg class="icon" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+          <circle cx="6" cy="6" r="4.1" fill="none" stroke="currentColor" stroke-width="1.25"/>
+          <path d="M6 1.9a4.1 4.1 0 0 0 0 8.2z" fill="currentColor"/>
+        </svg>
+      </button>
+      <button type="button" class="ibtn" id="toggleBtn" title="전체화면 전환" aria-label="전체화면 전환">
+        <svg class="icon" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+          <path d="M1.9 4.4h2.5V1.9M10.1 4.4H7.6V1.9M7.6 7.6h2.5v2.5M4.4 10.1V7.6H1.9"
+                fill="none" stroke="currentColor" stroke-width="1.25"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ── 3분할 데크 ── -->
+  <main class="deck">
+
+    <!-- 좌: 스레드 + 계기 스택 -->
+    <section class="col rail" aria-label="스레드와 계기">
+      <div class="col-head">
+        <span class="col-title">스레드</span>
+        <span class="col-count">4</span>
+      </div>
+
+      <div class="scroll">
+        <ul class="threads">
+          <li><button type="button" class="thread" aria-current="true">
+            <span class="th-idx">04</span>
+            <span>
+              <span class="th-title">3장 일정·리스크 수정</span>
+              <span class="th-meta">방금 · 3턴</span>
+            </span>
+          </button></li>
+          <li><button type="button" class="thread">
+            <span class="th-idx">03</span>
+            <span>
+              <span class="th-title">표 3-1 열 폭 정리</span>
+              <span class="th-meta">14분 전 · 5턴</span>
+            </span>
+          </button></li>
+          <li><button type="button" class="thread">
+            <span class="th-idx">02</span>
+            <span>
+              <span class="th-title">머리말 서식 통일</span>
+              <span class="th-meta">어제 · 2턴</span>
+            </span>
+          </button></li>
+          <li><button type="button" class="thread">
+            <span class="th-idx">01</span>
+            <span>
+              <span class="th-title">초안 목차 생성</span>
+              <span class="th-meta">02-03 · 9턴</span>
+            </span>
+          </button></li>
+        </ul>
+
+        <div class="instr">
+          <h2 class="instr-title">도구 호출</h2>
+          <div class="split" role="img" aria-label="읽기와 쓰기 호출 비율">
+            <i class="s-read" id="splitRead" style="width:70%"></i>
+            <i class="s-write" id="splitWrite" style="width:30%"></i>
+          </div>
+          <div class="legend">
+            <span><i class="swatch read" aria-hidden="true"></i>읽기 <span id="cntRead">0</span></span>
+            <span><i class="swatch write" aria-hidden="true"></i>쓰기 <span id="cntWrite">0</span></span>
+          </div>
+        </div>
+
+        <div class="instr">
+          <h2 class="instr-title">지연 분포</h2>
+          <div class="histo" id="histo" role="img" aria-label="도구 호출 지연 히스토그램"></div>
+          <div class="kv"><span>p50</span><span class="v"><span id="p50b">—</span><span class="u">ms</span></span></div>
+          <div class="kv"><span>p95</span><span class="v"><span id="p95b">—</span><span class="u">ms</span></span></div>
+          <div class="kv"><span>합계</span><span class="v"><span id="latSum">—</span><span class="u">ms</span></span></div>
+        </div>
+
+        <div class="instr">
+          <h2 class="instr-title">문서</h2>
+          <div class="kv"><span>쪽</span><span class="v">24</span></div>
+          <div class="kv"><span>문단</span><span class="v">1,842</span></div>
+          <div class="kv"><span>표 · 그림</span><span class="v">8 · 3</span></div>
+          <div class="kv"><span>필드</span><span class="v">3</span></div>
+          <div class="kv"><span>선택</span><span class="v">§0 ¶142</span></div>
+        </div>
+
+        <div class="instr">
+          <h2 class="instr-title">MCP</h2>
+          <div class="kv"><span>도구</span><span class="v">29</span></div>
+          <div class="kv"><span>읽기 · 쓰기</span><span class="v">13 · 16</span></div>
+          <div class="mcp-row"><span>mcp-stdio</span><span>·</span><span id="mcpStatus">ready</span></div>
+          <div class="mcp-row"><span>session</span><span id="sessionId">—</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 가운데: 트랜스크립트 -->
+    <section class="col transcript" aria-label="대화">
+      <div class="col-head">
+        <span class="col-title">트랜스크립트</span>
+        <span class="col-count" id="trCount">턴 3</span>
+      </div>
+
+      <div class="scroll" id="trScroll">
+        <div class="tr-body" id="trBody" aria-live="polite"></div>
+      </div>
+
+      <div class="composer">
+        <div class="composer-tools">
+          <button type="button" class="chip">권한 <span class="v">검토 필요</span></button>
+          <button type="button" class="chip">스킬 <span class="v">3</span></button>
+          <span class="composer-ctx">§0 ¶142:0 · rev <span id="ctxRev">1284</span></span>
+        </div>
+        <div class="field">
+          <label class="vh" for="composerInput">에이전트에게 지시</label>
+          <textarea id="composerInput" placeholder="문서에 대해 지시하세요. Enter 로 전송, Shift+Enter 로 줄바꿈."></textarea>
+          <button type="button" class="send" id="sendBtn" aria-label="전송">
+            <svg class="icon" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+              <path d="M6 9.5v-7M2.9 5.6 6 2.5l3.1 3.1" fill="none" stroke="currentColor"
+                    stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 우: 도구 스트림 + diff -->
+    <section class="col ops" aria-label="도구 스트림과 변경 세트">
+      <div class="ops-stream">
+        <div class="col-head">
+          <span class="col-title">도구 스트림</span>
+          <span class="col-count"><span id="opsDone">0</span>/<span id="opsTotal">0</span></span>
+        </div>
+        <div class="scroll" id="opsScroll">
+          <ul class="oplist" id="opList"></ul>
+        </div>
+      </div>
+
+      <div class="ops-diff">
+        <div class="cs-head">
+          <svg class="cs-ring" viewBox="0 0 22 22" aria-hidden="true" focusable="false">
+            <circle class="trk" cx="11" cy="11" r="8.4"/>
+            <circle class="arc" id="csArc" cx="11" cy="11" r="8.4"
+                    stroke-dasharray="52.78" stroke-dashoffset="52.78"/>
+          </svg>
+          <div class="cs-meta">
+            <span class="cs-title">변경 세트 <span class="cs-status" id="csStatus" data-s="open">open</span></span>
+            <span class="cs-sub"><span id="csOps">0</span>/3 op · rev <span id="csRev">1284</span> · 1 undo</span>
+          </div>
+          <div class="cs-actions">
+            <button type="button" class="btn" id="rejectBtn" disabled>
+              <svg class="icon" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+                <path d="M3.2 3.2l5.6 5.6M8.8 3.2l-5.6 5.6" fill="none" stroke="currentColor"
+                      stroke-width="1.25" stroke-linecap="round"/>
+              </svg>거절
+            </button>
+            <button type="button" class="btn btn-primary" id="approveBtn" disabled>
+              <svg class="icon" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+                <path d="M2.5 6.4 5 8.9l4.5-5.4" fill="none" stroke="currentColor"
+                      stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>승인
+            </button>
+          </div>
+        </div>
+        <div class="scroll diff-scroll" id="diffScroll">
+          <div class="diff-empty" id="diffEmpty">
+            보류 중인 편집 없음
+            <span class="mono">rev 1284 · 0 op</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 축소 상태에서만 보이는 사이드바 실루엣 -->
+  <div class="ghost" aria-hidden="true">
+    <div class="ghost-line" style="width:62%"></div>
+    <div class="ghost-block"></div>
+    <div class="ghost-line" style="width:88%"></div>
+    <div class="ghost-line" style="width:74%"></div>
+    <div class="ghost-line" style="width:46%"></div>
+    <div class="ghost-block" style="height:38px"></div>
+    <div class="ghost-foot">
+      <div class="ghost-note">2026년 상반기 사업계획서.hwpx · rev 1288</div>
+      <button type="button" class="expand-btn" id="expandBtn">
+        <svg class="icon" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+          <path d="M4.4 1.9H1.9v2.5M7.6 1.9h2.5v2.5M10.1 7.6v2.5H7.6M1.9 7.6v2.5h2.5"
+                fill="none" stroke="currentColor" stroke-width="1.25"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>전체화면으로 확장
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+const REDUCED = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ─────────────────────────────────────────────────────────────────
+   아이콘 — 12 그리드, currentColor, 1.25 스트로크, 둥근 캡.
+   유니코드 글리프는 아이콘으로 쓰지 않는다.
+   ───────────────────────────────────────────────────────────────── */
+const PATHS = {
+  check:   'M2.5 6.4 5 8.9l4.5-5.4',
+  close:   'M3.2 3.2l5.6 5.6M8.8 3.2l-5.6 5.6',
+  insert:  'M6 2.6v6.8M2.6 6h6.8',
+  delete:  'M2.6 6h6.8',
+  replace: 'M2.5 4.3h6.2L6.9 2.6M9.5 7.7H3.3l1.8 1.7',
+  format:  'M2.8 9.2 3.2 7.5l4.4-4.4 1.3 1.3-4.4 4.4zM2.8 9.2h2.4',
+  field:   'M3.4 9.4V2.6h5.2L7.3 4.6l1.3 2H3.4',
+  warn:    'M6 2.4 10.2 9.6H1.8zM6 5.4v1.9M6 8.5v.05'
+};
+
+function icon(name, cls) {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('class', cls || '');
+  s.setAttribute('viewBox', '0 0 12 12');
+  s.setAttribute('width', '12');
+  s.setAttribute('height', '12');
+  s.setAttribute('aria-hidden', 'true');
+  s.setAttribute('focusable', 'false');
+  const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  p.setAttribute('d', PATHS[name]);
+  p.setAttribute('fill', 'none');
+  p.setAttribute('stroke', 'currentColor');
+  p.setAttribute('stroke-width', '1.25');
+  p.setAttribute('stroke-linecap', 'round');
+  p.setAttribute('stroke-linejoin', 'round');
+  s.appendChild(p);
+  return s;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   실제 도구 목록 — 읽기 13 / 쓰기 16.
+   ───────────────────────────────────────────────────────────────── */
+const READ_TOOLS = new Set(['get_structure','get_text_range','get_selection','get_fields',
+  'get_document_info','find_text','render_page','get_para_format','get_char_format',
+  'list_numberings','list_styles','preview_equation','verify_changes']);
+
+/* ─────────────────────────────────────────────────────────────────
+   상태
+   ───────────────────────────────────────────────────────────────── */
+const S = {
+  running: false,
+  turnStart: 0,
+  turnFrozen: 0,
+  tokIn: 0, tokOut: 0,
+  revision: 1284,
+  reads: 0, writes: 0,
+  lat: [128, 91, 214, 76, 163, 302, 118, 88, 240, 141],
+  inflight: new Map(),
+  ops: 0,
+  timers: [],
+  streamQueue: [],
+  streamTimer: null,
+  streamTarget: null
+};
+
+/* 굴러가는 숫자 — 툭 뛰지 않고 값 사이를 지난다. */
+const rollers = new Map();
+
+function roll(el, target, fmt) {
+  if (!el) return;
+  if (REDUCED) { el.textContent = (fmt || fmtInt)(target); return; }
+  const cur = rollers.get(el) || { v: 0, t: 0, fmt: fmt || fmtInt };
+  cur.t = target;
+  cur.fmt = fmt || fmtInt;
+  rollers.set(el, cur);
+}
+
+const fmtInt = (n) => Math.round(n).toLocaleString('en-US');
+const fmtPlain = (n) => String(Math.round(n));
+
+/* ─────────────────────────────────────────────────────────────────
+   HUD 갱신 — rAF 하나가 경과·링·오도미터·in-flight 라벨을 모두 민다.
+   ───────────────────────────────────────────────────────────────── */
+function fmtElapsed(ms) {
+  const m = Math.floor(ms / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  const c = Math.floor((ms % 1000) / 10);
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0') + '.' + String(c).padStart(2, '0');
+}
+
+const RING_C = 2 * Math.PI * 6;
+
+function frame() {
+  const now = performance.now();
+
+  // 경과
+  const el = S.running ? now - S.turnStart : S.turnFrozen;
+  $('elapsed').textContent = fmtElapsed(el);
+
+  // 진행 중 호출: 링 각도와 ms 라벨은 실제 경과에서 나온다.
+  S.inflight.forEach((info) => {
+    const dt = now - info.start;
+    const p = Math.max(0.04, Math.min(1, dt / info.expect));
+    info.arc.setAttribute('stroke-dasharray', String(RING_C));
+    info.arc.setAttribute('stroke-dashoffset', String(RING_C * (1 - p)));
+    info.time.firstChild.nodeValue = String(Math.round(dt));
+  });
+
+  // 오도미터
+  rollers.forEach((r, node) => {
+    if (Math.abs(r.t - r.v) < 0.5) { r.v = r.t; }
+    else { r.v += (r.t - r.v) * 0.14; }
+    node.textContent = r.fmt(r.v);
+  });
+
+  requestAnimationFrame(frame);
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   WS 하트비트 — 실제 ping 간격에 묶인 맥박.
+   ───────────────────────────────────────────────────────────────── */
+let beatTimer = null;
+
+function startHeartbeat() {
+  stopHeartbeat();
+  const tick = () => {
+    const dot = $('wsDot');
+    if (document.body.dataset.ws === 'connected') {
+      if (!REDUCED) {
+        dot.classList.remove('beat');
+        void dot.offsetWidth;
+        dot.classList.add('beat');
+      }
+      $('wsPing').textContent = (11 + Math.floor(Math.random() * 9)) + 'ms';
+    }
+    beatTimer = setTimeout(tick, 1500);
+  };
+  tick();
+}
+
+function stopHeartbeat() { if (beatTimer) clearTimeout(beatTimer); beatTimer = null; }
+
+function setWs(state) {
+  document.body.dataset.ws = state;
+  const label = { connecting: '연결 중', connected: '연결됨', disconnected: '끊김', replaced: '다른 탭' }[state];
+  $('wsState').textContent = label;
+  if (state !== 'connected') $('wsPing').textContent = '—';
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   지연 계기 — 스파크라인 · 히스토그램 · 백분위
+   ───────────────────────────────────────────────────────────────── */
+function pct(arr, q) {
+  if (!arr.length) return 0;
+  const a = arr.slice().sort((x, y) => x - y);
+  return a[Math.min(a.length - 1, Math.floor(a.length * q))];
+}
+
+function renderLatency(freshErr) {
+  const data = S.lat.slice(-40);
+  const max = Math.max(120, ...data);
+
+  // 스파크라인 — viewBox 를 실제 픽셀 폭에 맞춰 점이 타원으로 늘어나지 않게 한다.
+  const sp = $('spark');
+  const W = Math.max(60, Math.round(sp.clientWidth || 200));
+  sp.setAttribute('viewBox', '0 0 ' + W + ' 18');
+  const pts = data.map((v, i) => {
+    const x = data.length > 1 ? (i / (data.length - 1)) * (W - 3) + 1.5 : 1.5;
+    const y = 16.5 - (v / max) * 14;
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  });
+  $('sparkLine').setAttribute('points', pts.join(' '));
+  const last = pts[pts.length - 1];
+  if (last) {
+    const [lx, ly] = last.split(',');
+    $('sparkDot').setAttribute('cx', lx);
+    $('sparkDot').setAttribute('cy', ly);
+  }
+
+  // 히스토그램
+  const h = $('histo');
+  const bars = data.slice(-18);
+  const hmax = Math.max(120, ...bars);
+  while (h.children.length > bars.length) h.removeChild(h.firstChild);
+  bars.forEach((v, i) => {
+    let b = h.children[i];
+    if (!b) {
+      b = document.createElement('i');
+      h.appendChild(b);
+      if (!REDUCED) b.classList.add('enter');
+    }
+    b.style.height = Math.max(2, (v / hmax) * 32).toFixed(1) + 'px';
+    b.classList.toggle('fresh', i === bars.length - 1);
+    b.classList.toggle('err', i === bars.length - 1 && !!freshErr);
+  });
+
+  const p50 = pct(S.lat, 0.5), p95 = pct(S.lat, 0.95);
+  $('p50').textContent = p50;
+  $('p50b').textContent = p50;
+  $('p95b').textContent = p95;
+  $('latSum').textContent = fmtInt(S.lat.reduce((a, b) => a + b, 0));
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   트랜스크립트
+   ───────────────────────────────────────────────────────────────── */
+function trAppend(node) {
+  $('trBody').appendChild(node);
+  const sc = $('trScroll');
+  sc.scrollTop = sc.scrollHeight;
+  return node;
+}
+
+function turnRule(n, time) {
+  const d = document.createElement('div');
+  d.className = 'turn-rule';
+  d.innerHTML = '<span class="line"></span>' +
+    '<span class="tag"><span class="agent-dot"></span>턴 ' + n + ' · ' + time + '</span>' +
+    '<span class="line"></span>';
+  return trAppend(d);
+}
+
+function userMsg(text) {
+  const d = document.createElement('div');
+  d.className = 'msg-user';
+  const w = document.createElement('span');
+  w.className = 'who';
+  w.textContent = 'user';
+  d.appendChild(w);
+  d.appendChild(document.createTextNode(text));
+  return trAppend(d);
+}
+
+function proseBlock() {
+  const p = document.createElement('p');
+  p.className = 'prose msg';
+  const span = document.createElement('span');
+  p.appendChild(span);
+  const c = document.createElement('span');
+  c.className = 'caret live';
+  p.appendChild(c);
+  trAppend(p);
+  return span;
+}
+
+/* 이미 끝난 문단 — 스트리밍 없이 그대로 놓는다. */
+function staticProse(html) {
+  const p = document.createElement('p');
+  p.className = 'prose msg';
+  p.innerHTML = html;
+  return trAppend(p);
+}
+
+function turnEndRow(stop, calls, dur) {
+  const e = document.createElement('div');
+  e.className = 'turn-end';
+  e.innerHTML = '<span class="stop">turn-end</span><span>stopReason: ' + stop + '</span>' +
+    '<span>·</span><span>' + calls + ' call</span><span>·</span><span>' + dur + '</span>';
+  return trAppend(e);
+}
+
+/* 이전 턴들 — 세션에 실제 이력이 있어야 '턴 3' 이 참이 된다. */
+function history() {
+  turnRule(1, '14:09:52');
+  userMsg('표 3-1 열 폭이 들쭉날쭉해. 정리해줘.');
+  staticProse('표 3-1은 <code>§0 ¶151</code>. 6열 중 3열만 기본 폭이었다. 열 폭을 균등 배분하고 머리행 정렬을 가운데로 맞췄다.');
+  turnEndRow('end_turn', 4, '00:11.62');
+
+  turnRule(2, '14:16:31');
+  userMsg('2장 각주 번호가 하나 빠졌어.');
+  staticProse('<code>¶98</code> 뒤 각주 참조가 끊겨 있었다. 번호 매기기를 확인한 뒤 <code>§0 ¶98:44</code>에 참조를 다시 넣었다. 승인 후 rev 1284.');
+  turnEndRow('end_turn', 3, '00:08.04');
+}
+
+/* 글자 단위 스트리밍. 큐 하나를 한 인터벌이 비운다. */
+function pushText(str) {
+  if (REDUCED) {
+    if (!S.streamTarget) S.streamTarget = proseBlock();
+    S.streamTarget.textContent += str;
+    return;
+  }
+  S.streamQueue.push(...str.split(''));
+  if (!S.streamTimer) drainText();
+}
+
+function drainText() {
+  document.body.classList.add('is-streaming');
+  S.streamTimer = setInterval(() => {
+    if (!S.streamQueue.length) {
+      clearInterval(S.streamTimer);
+      S.streamTimer = null;
+      document.body.classList.remove('is-streaming');
+      return;
+    }
+    if (!S.streamTarget) S.streamTarget = proseBlock();
+    S.streamTarget.textContent += S.streamQueue.shift();
+    const sc = $('trScroll');
+    sc.scrollTop = sc.scrollHeight;
+  }, 17);
+}
+
+function newProse() {
+  const prev = document.querySelector('.caret.live');
+  if (prev) prev.classList.remove('live');
+  S.streamTarget = null;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   도구 스트림 — 행마다 시간이 들어 있는 타임라인
+   ───────────────────────────────────────────────────────────────── */
+const opNodes = new Map();
+let opCount = 0;
+
+function addCall(step) {
+  opCount++;
+  const kind = READ_TOOLS.has(step.tool) ? 'read' : 'write';
+  const li = document.createElement('li');
+  li.className = 'op' + (REDUCED ? '' : ' enter');
+  li.dataset.state = 'run';
+  li.dataset.kind = kind;
+  li.id = 'op-' + step.id;
+
+  const idx = document.createElement('span');
+  idx.className = 'op-idx';
+  idx.textContent = String(opCount).padStart(2, '0');
+
+  const main = document.createElement('span');
+  main.className = 'op-main';
+  const head = document.createElement('span');
+  head.className = 'op-head';
+  const tool = document.createElement('code');
+  tool.className = 'op-tool';
+  tool.textContent = step.tool;
+  const kindTag = document.createElement('span');
+  kindTag.className = 'op-kind';
+  kindTag.textContent = kind === 'read' ? '읽기' : '쓰기';
+  const addr = document.createElement('span');
+  addr.className = 'op-addr';
+  addr.textContent = step.addr;
+  head.append(tool, kindTag, addr);
+  main.appendChild(head);
+
+  const right = document.createElement('span');
+  right.className = 'op-right';
+  const time = document.createElement('span');
+  time.className = 'op-time';
+  time.append(document.createTextNode('0'), Object.assign(document.createElement('i'), { textContent: 'ms' }));
+
+  const ring = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  ring.setAttribute('class', 'ring');
+  ring.setAttribute('viewBox', '0 0 14 14');
+  ring.setAttribute('aria-hidden', 'true');
+  const trk = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  trk.setAttribute('class', 'trk'); trk.setAttribute('cx', '7'); trk.setAttribute('cy', '7'); trk.setAttribute('r', '6');
+  const arc = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  arc.setAttribute('class', 'arc'); arc.setAttribute('cx', '7'); arc.setAttribute('cy', '7'); arc.setAttribute('r', '6');
+  arc.setAttribute('stroke-dasharray', String(RING_C));
+  arc.setAttribute('stroke-dashoffset', String(RING_C));
+  ring.append(trk, arc);
+  right.append(time, ring);
+
+  const scan = document.createElement('span');
+  scan.className = 'op-scan';
+  const bar = document.createElement('span');
+  bar.className = 'op-bar';
+  bar.appendChild(document.createElement('i'));
+
+  li.append(scan, idx, main, right, bar);
+  $('opList').appendChild(li);
+  $('opsScroll').scrollTop = $('opsScroll').scrollHeight;
+
+  opNodes.set(step.id, { li, main, right, time, ring, bar });
+  S.inflight.set(step.id, { start: performance.now(), expect: step.ms, arc, time });
+
+  $('opsTotal').textContent = String(opCount);
+  if (kind === 'read') S.reads++; else S.writes++;
+  updateSplit();
+}
+
+function resolveCall(step) {
+  const n = opNodes.get(step.id);
+  if (!n) return;
+  S.inflight.delete(step.id);
+
+  n.li.dataset.state = step.ok === false ? 'err' : 'ok';
+  n.time.firstChild.nodeValue = String(step.ms);
+  n.ring.remove();
+  n.right.appendChild(icon(step.ok === false ? 'warn' : 'check', 'op-state-mark'));
+
+  // 소요 시간 막대 — 600ms 를 스트림 폭 전체로 본다.
+  n.bar.firstChild.style.width = Math.min(100, (step.ms / 600) * 100).toFixed(1) + '%';
+
+  if (step.note) {
+    const note = document.createElement('span');
+    note.className = 'op-note';
+    note.innerHTML = step.note;
+    n.main.appendChild(note);
+  }
+  if (step.err) {
+    const e = document.createElement('span');
+    e.className = 'op-err';
+    e.textContent = step.err;
+    n.main.appendChild(e);
+  }
+
+  S.lat.push(step.ms);
+  renderLatency(step.ok === false);
+  $('opsDone').textContent = String(
+    $('opList').querySelectorAll('.op[data-state="ok"], .op[data-state="err"]').length
+  );
+  $('opsScroll').scrollTop = $('opsScroll').scrollHeight;
+}
+
+function updateSplit() {
+  const t = Math.max(1, S.reads + S.writes);
+  $('splitRead').style.width = (S.reads / t * 100) + '%';
+  $('splitWrite').style.width = (S.writes / t * 100) + '%';
+  $('cntRead').textContent = S.reads;
+  $('cntWrite').textContent = S.writes;
+}
+
+function setRevision(v) {
+  S.revision = v;
+  $('revision').textContent = String(v);
+  $('ctxRev').textContent = String(v);
+  $('csRev').textContent = String(v);
+  const m = $('metRev');
+  m.classList.remove('bumped');
+  void m.offsetWidth;
+  m.classList.add('bumped');
+  setTimeout(() => m.classList.remove('bumped'), 60);
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   변경 세트 / diff
+   ───────────────────────────────────────────────────────────────── */
+const CS_C = 2 * Math.PI * 8.4;
+
+function setChangeSet(ops, status) {
+  S.ops = ops;
+  $('csOps').textContent = String(ops);
+  $('csArc').setAttribute('stroke-dashoffset', String(CS_C * (1 - ops / 3)));
+  const st = $('csStatus');
+  st.dataset.s = status;
+  st.textContent = status === 'awaiting-review' ? '검토 대기' : 'open';
+  const done = status === 'awaiting-review';
+  $('approveBtn').disabled = !done;
+  $('rejectBtn').disabled = !done;
+}
+
+function diffLine(no, sign, html, cls) {
+  const d = document.createElement('div');
+  d.className = 'dl ' + (cls || '') + (REDUCED ? '' : ' reveal');
+  d.innerHTML =
+    '<span class="dl-no">' + (no === '' ? '' : no) + '</span>' +
+    '<span class="dl-sign">' + sign + '</span>' +
+    '<span class="dl-txt">' + html + '</span>';
+  return d;
+}
+
+function addHunk(h) {
+  const empty = $('diffEmpty');
+  if (empty) empty.remove();
+
+  const wrap = document.createElement('div');
+  wrap.className = 'hunk';
+  wrap.id = 'hunk-' + h.id;
+
+  const head = document.createElement('div');
+  head.className = 'hunk-head';
+  const op = document.createElement('span');
+  op.className = 'hunk-op';
+  op.appendChild(icon(h.op, 'icon'));
+  op.appendChild(document.createTextNode(h.op));
+  const addr = document.createElement('span');
+  addr.className = 'hunk-addr';
+  addr.textContent = h.addr;
+  const rev = document.createElement('span');
+  rev.className = 'hunk-rev';
+  rev.textContent = 'rev ' + h.revFrom + ' → ' + h.revTo;
+  head.append(op, addr, rev);
+  wrap.appendChild(head);
+
+  h.lines.forEach((l) => wrap.appendChild(diffLine(l[0], l[1], l[2], l[3])));
+  $('diffScroll').appendChild(wrap);
+  $('diffScroll').scrollTop = $('diffScroll').scrollHeight;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   타임라인 — 하나의 현실적인 턴. 22초쯤 돌고 끝난 상태로 선다.
+   ───────────────────────────────────────────────────────────────── */
+const CALLS = {
+  c1:  { id: 'c1',  tool: 'get_structure',    addr: '§0',                    ms: 412, note: '섹션 1 · 문단 1,842 · 표 8 · rev <span class="rev">1284</span>' },
+  c2:  { id: 'c2',  tool: 'get_text_range',   addr: '§0 ¶131:0–¶158:0',      ms: 186, note: '28문단 · 3,104자' },
+  c3:  { id: 'c3',  tool: 'find_text',        addr: '"추진 일정"',            ms: 94,  note: '2건 · ¶142:0, ¶151:8' },
+  c4:  { id: 'c4',  tool: 'get_para_format',  addr: '§0 ¶142',               ms: 71,  note: '본문 · 좌 0 · 줄간 160%' },
+  c5:  { id: 'c5',  tool: 'replace_range',    addr: '§0 ¶142:0–¶142:37',     ms: 128, ok: false,
+         err: 'REVISION_MISMATCH  expected 1284, actual 1285' },
+  c6:  { id: 'c6',  tool: 'get_text_range',   addr: '§0 ¶140:0–¶145:0',      ms: 143, note: '재읽기 · rev <span class="rev">1285</span>' },
+  c7:  { id: 'c7',  tool: 'replace_range',    addr: '§0 ¶142:0–¶142:37',     ms: 209, note: 'expectedRevision 1285 → rev <span class="rev">1286</span>' },
+  c8:  { id: 'c8',  tool: 'apply_char_format',addr: '§0 ¶142:12–¶142:19',    ms: 96,  note: 'expectedRevision 1286 → rev <span class="rev">1287</span>' },
+  c9:  { id: 'c9',  tool: 'insert_text',      addr: '§0 ¶143:0',             ms: 174, note: 'expectedRevision 1287 → rev <span class="rev">1288</span>' },
+  c10: { id: 'c10', tool: 'verify_changes',   addr: '§0',                    ms: 331, note: '표 8 유지 · 필드 참조 3건 유지 · 페이지 24' }
+};
+
+const HUNK1 = {
+  id: 'h1', op: 'replace', addr: '§0 ¶142:0–¶142:37', revFrom: 1285, revTo: 1286,
+  lines: [
+    ['140', ' ', '3장. 추진 일정 및 자원 배분', ''],
+    ['141', ' ', '(표 3-1 참조)', ''],
+    ['142', '−', '상반기 추진 일정은 3월 착수, 6월 종료를 목표로 한다. 인력은 12명을 유지한다.', 'dl-del'],
+    ['142', '+', '상반기 추진 일정은 2월 착수, <span id="fmtMark">5월 종료</span>로 앞당긴다. 인력은 16명으로 늘린다.', 'dl-add'],
+    ['143', ' ', '세부 일정은 표 3-1에 정리했다.', '']
+  ]
+};
+
+const HUNK2 = {
+  id: 'h2', op: 'insert', addr: '§0 ¶143:0', revFrom: 1287, revTo: 1288,
+  lines: [
+    ['142', ' ', '상반기 추진 일정은 2월 착수, 5월 종료로 앞당긴다. 인력은 16명으로 늘린다.', ''],
+    ['143', '+', '리스크: 2월 착수는 1분기 예산 확정 전이므로 선집행 승인이 필요하다. 인력 4명 증원은 채용 리드타임 6주를 감안해 12월 중 공고해야 한다.', 'dl-add'],
+    ['144', ' ', '세부 일정은 표 3-1에 정리했다.', '']
+  ]
+};
+
+function TL() {
+  return [
+    [0,     () => { setWs('connecting'); }],
+    [600,   () => { setWs('connected'); startHeartbeat(); }],
+    [1000,  () => {
+      $('sessionId').textContent = 'a7f3c1e9';
+      $('mcpStatus').textContent = 'ready · 29';
+    }],
+    [1600,  () => {
+      document.body.classList.add('is-running');
+      S.running = true;
+      S.turnStart = performance.now();
+      $('turns').textContent = '3';
+      $('stopReason').textContent = '진행';
+      $('trCount').textContent = '턴 3';
+      turnRule(3, '14:22:07');
+      userMsg('3장 추진 일정 문단을 최신 수치로 고치고, 그 아래에 리스크 문단을 하나 추가해.');
+      roll($('tokIn'), 12480);
+    }],
+    [1900,  () => { pushText('구조부터 읽는다. 3장 범위와 표 위치를 확인한다.'); }],
+    [3400,  () => { addCall(CALLS.c1); }],
+    [3812,  () => { resolveCall(CALLS.c1); roll($('tokIn'), 14020); roll($('tokOut'), 240); }],
+    [4600,  () => { addCall(CALLS.c2); }],
+    [4786,  () => { resolveCall(CALLS.c2); roll($('tokIn'), 16310); }],
+    [5500,  () => { addCall(CALLS.c3); }],
+    [5594,  () => { resolveCall(CALLS.c3); }],
+    [6200,  () => {
+      newProse();
+      pushText('3장은 §0 ¶131–¶158. 추진 일정 문단은 ¶142, 표 3-1 바로 아래에 있다. 문단 서식을 확인하고 교체한다.');
+      roll($('tokOut'), 510);
+    }],
+    [8200,  () => { addCall(CALLS.c4); }],
+    [8271,  () => { resolveCall(CALLS.c4); }],
+    [9000,  () => { setRevision(1285); }],
+    [9400,  () => { addCall(CALLS.c5); }],
+    [9528,  () => { resolveCall(CALLS.c5); }],
+    [10400, () => {
+      newProse();
+      pushText('사용자 편집으로 리비전이 1285로 올라갔다. 같은 범위를 다시 읽고 재시도한다.');
+      roll($('tokOut'), 690);
+    }],
+    [12200, () => { addCall(CALLS.c6); }],
+    [12343, () => { resolveCall(CALLS.c6); roll($('tokIn'), 17240); }],
+    [13400, () => { addCall(CALLS.c7); }],
+    [13609, () => {
+      resolveCall(CALLS.c7);
+      setRevision(1286);
+      addHunk(HUNK1);
+      setChangeSet(1, 'open');
+      roll($('tokOut'), 1180);
+    }],
+    [15000, () => { addCall(CALLS.c8); }],
+    [15096, () => {
+      resolveCall(CALLS.c8);
+      setRevision(1287);
+      setChangeSet(2, 'open');
+      const m = $('fmtMark');
+      if (m) m.classList.add('fmt');
+    }],
+    [16400, () => { addCall(CALLS.c9); }],
+    [16574, () => {
+      resolveCall(CALLS.c9);
+      setRevision(1288);
+      addHunk(HUNK2);
+      setChangeSet(3, 'open');
+      roll($('tokOut'), 1760);
+    }],
+    [18000, () => { addCall(CALLS.c10); }],
+    [18331, () => { resolveCall(CALLS.c10); roll($('tokIn'), 18432); }],
+    [19200, () => {
+      newProse();
+      pushText('¶142를 교체하고 "5월 종료"에 강조를 걸었다. ¶143에 리스크 문단을 넣었다. 검증 결과 표 8개와 필드 참조 3건은 그대로다.');
+      roll($('tokOut'), 2107);
+    }],
+    [21800, () => {
+      S.running = false;
+      S.turnFrozen = performance.now() - S.turnStart;
+      document.body.classList.remove('is-running');
+      newProse();
+      $('stopReason').textContent = 'end_turn';
+      turnEndRow('end_turn', 10, fmtElapsed(S.turnFrozen));
+
+      // 이 턴의 쓰기 — 누르면 스트림의 같은 행으로 간다.
+      const refs = document.createElement('div');
+      refs.className = 'turn-end op-refs';
+      refs.innerHTML = '<span class="stop">쓰기</span>' +
+        '<button type="button" class="opref" data-op="c7"><span class="n">07</span>replace_range</button>' +
+        '<button type="button" class="opref" data-op="c8"><span class="n">08</span>apply_char_format</button>' +
+        '<button type="button" class="opref" data-op="c9"><span class="n">09</span>insert_text</button>';
+      trAppend(refs);
+      setChangeSet(3, 'awaiting-review');
+    }]
+  ];
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   재생 / 초기화
+   ───────────────────────────────────────────────────────────────── */
+function reset() {
+  S.timers.forEach(clearTimeout);
+  S.timers = [];
+  if (S.streamTimer) { clearInterval(S.streamTimer); S.streamTimer = null; }
+  S.streamQueue = [];
+  S.streamTarget = null;
+  S.inflight.clear();
+  rollers.clear();
+  opNodes.clear();
+  opCount = 0;
+  S.running = false;
+  S.turnFrozen = 0;
+  S.reads = 0; S.writes = 0;
+  S.lat = [128, 91, 214, 76, 163, 302, 118, 88, 240, 141];
+
+  document.body.classList.remove('is-running', 'is-streaming');
+  $('trBody').textContent = '';
+  $('opList').textContent = '';
+  $('diffScroll').textContent = '';
+  const empty = document.createElement('div');
+  empty.className = 'diff-empty';
+  empty.id = 'diffEmpty';
+  empty.innerHTML = '보류 중인 편집 없음<span class="mono">rev 1284 · 0 op</span>';
+  $('diffScroll').appendChild(empty);
+  $('histo').textContent = '';
+
+  $('tokIn').textContent = '0';
+  $('tokOut').textContent = '0';
+  $('elapsed').textContent = '00:00.00';
+  $('turns').textContent = '2';
+  $('stopReason').textContent = '—';
+  $('opsDone').textContent = '0';
+  $('opsTotal').textContent = '0';
+  setRevision(1284);
+  setChangeSet(0, 'open');
+  updateSplit();
+  renderLatency(false);
+  stopHeartbeat();
+  setWs('connecting');
+
+  history();
+}
+
+function play() {
+  reset();
+  TL().forEach(([t, fn]) => {
+    S.timers.push(setTimeout(fn, REDUCED ? Math.min(t, 1) : t));
+  });
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   전체화면 ↔ 사이드바 실루엣
+   ───────────────────────────────────────────────────────────────── */
+const consoleEl = $('console');
+
+function setCollapsed(v) {
+  consoleEl.classList.toggle('is-collapsed', v);
+  $('toggleBtn').setAttribute('aria-label', v ? '전체화면으로 확장' : '사이드바로 축소');
+  if (!v) $('toggleBtn').focus?.();
+}
+
+$('collapseBtn').addEventListener('click', () => setCollapsed(true));
+$('toggleBtn').addEventListener('click', () => setCollapsed(!consoleEl.classList.contains('is-collapsed')));
+$('expandBtn').addEventListener('click', () => setCollapsed(false));
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    setCollapsed(true);
+  }
+});
+
+/* 테마 */
+$('themeBtn').addEventListener('click', () => {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const sysDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const effective = cur || (sysDark ? 'dark' : 'light');
+  document.documentElement.setAttribute('data-theme', effective === 'dark' ? 'light' : 'dark');
+});
+
+$('replayBtn').addEventListener('click', play);
+
+/* 승인 / 거절 */
+$('approveBtn').addEventListener('click', () => {
+  setChangeSet(3, 'open');
+  $('csStatus').textContent = '승인됨';
+  $('approveBtn').disabled = true;
+  $('rejectBtn').disabled = true;
+  setRevision(1289);
+});
+
+$('rejectBtn').addEventListener('click', () => {
+  $('csStatus').textContent = '거절됨';
+  $('approveBtn').disabled = true;
+  $('rejectBtn').disabled = true;
+  $('diffScroll').textContent = '';
+  const empty = document.createElement('div');
+  empty.className = 'diff-empty';
+  empty.id = 'diffEmpty';
+  empty.innerHTML = '보류 중인 편집 없음<span class="mono">rev 1289 · 0 op</span>';
+  $('diffScroll').appendChild(empty);
+  setRevision(1289);
+  $('csArc').setAttribute('stroke-dashoffset', String(CS_C));
+});
+
+/* 인라인 op 참조 → 스트림의 같은 행으로 */
+$('trBody').addEventListener('click', (e) => {
+  const r = e.target.closest?.('.opref');
+  if (!r) return;
+  const n = $('op-' + r.dataset.op);
+  if (!n) return;
+  n.scrollIntoView({ block: 'center', behavior: REDUCED ? 'auto' : 'smooth' });
+  n.classList.remove('pinged');
+  void n.offsetWidth;
+  n.classList.add('pinged');
+});
+
+/* 부팅 */
+requestAnimationFrame(frame);
+play();
+})();
+</script>
+</body>
+</html>
