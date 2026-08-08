@@ -102,6 +102,107 @@ function persistSidebarWidth(width: number): void {
   }
 }
 
+const THREADS_RAIL_KEY = 'rhwp-agent-threads-rail-collapsed';
+
+function readStoredThreadsRailCollapsed(): boolean {
+  try {
+    return localStorage.getItem(THREADS_RAIL_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function persistThreadsRailCollapsed(collapsed: boolean): void {
+  try {
+    localStorage.setItem(THREADS_RAIL_KEY, collapsed ? '1' : '0');
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+/* 전체 화면 3열의 바깥 두 칸 폭. 가운데 대화 칸이 나머지를 먹으므로
+   레일·검토만 저장하고, 창이 줄면 비율 상한으로 다시 클램프한다. */
+const RAIL_WIDTH_KEY = 'rhwp-agent-rail-width';
+const RAIL_WIDTH_DEFAULT = 264;
+const RAIL_WIDTH_MIN = 200;
+const REVIEW_WIDTH_KEY = 'rhwp-agent-review-width';
+const REVIEW_WIDTH_MIN = 320;
+const REVIEW_COL_KEY = 'rhwp-agent-review-collapsed';
+
+function maxRailWidth(viewportWidth = window.innerWidth): number {
+  return Math.max(RAIL_WIDTH_MIN, Math.floor(viewportWidth * 0.3));
+}
+
+function clampRailWidth(width: number, viewportWidth = window.innerWidth): number {
+  return Math.min(maxRailWidth(viewportWidth), Math.max(RAIL_WIDTH_MIN, Math.round(width)));
+}
+
+function maxReviewWidth(viewportWidth = window.innerWidth): number {
+  return Math.max(REVIEW_WIDTH_MIN, Math.floor(viewportWidth * 0.45));
+}
+
+function clampReviewWidth(width: number, viewportWidth = window.innerWidth): number {
+  return Math.min(maxReviewWidth(viewportWidth), Math.max(REVIEW_WIDTH_MIN, Math.round(width)));
+}
+
+function defaultReviewWidth(): number {
+  return clampReviewWidth(window.innerWidth * 0.42);
+}
+
+function readStoredRailWidth(): number {
+  try {
+    const raw = localStorage.getItem(RAIL_WIDTH_KEY);
+    if (!raw) return clampRailWidth(RAIL_WIDTH_DEFAULT);
+    const n = Number(raw);
+    return Number.isFinite(n) ? clampRailWidth(n) : clampRailWidth(RAIL_WIDTH_DEFAULT);
+  } catch {
+    return clampRailWidth(RAIL_WIDTH_DEFAULT);
+  }
+}
+
+function persistRailWidth(width: number): void {
+  try {
+    localStorage.setItem(RAIL_WIDTH_KEY, String(width));
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+function readStoredReviewWidth(): number {
+  try {
+    const raw = localStorage.getItem(REVIEW_WIDTH_KEY);
+    if (!raw) return defaultReviewWidth();
+    const n = Number(raw);
+    return Number.isFinite(n) ? clampReviewWidth(n) : defaultReviewWidth();
+  } catch {
+    return defaultReviewWidth();
+  }
+}
+
+function persistReviewWidth(width: number): void {
+  try {
+    localStorage.setItem(REVIEW_WIDTH_KEY, String(width));
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+function readStoredReviewColCollapsed(): boolean {
+  try {
+    return localStorage.getItem(REVIEW_COL_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function persistReviewColCollapsed(collapsed: boolean): void {
+  try {
+    localStorage.setItem(REVIEW_COL_KEY, collapsed ? '1' : '0');
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
 function createProviderIcon(agent: AgentName): HTMLElement {
   if (agent === 'codex') {
     // 단색 로고 — currentColor 마스크로 라이트/다크에 맞춤
@@ -301,6 +402,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let skillsPanelOpen = false;
   /** 전체 화면 콘솔 — 무대를 3열로 펴고 문서를 덮는다. */
   let fullscreen = false;
+  let threadsRailCollapsed = readStoredThreadsRailCollapsed();
+  let reviewColCollapsed = readStoredReviewColCollapsed();
+  let railWidth = readStoredRailWidth();
+  let reviewWidth = readStoredReviewWidth();
   let permissionProfile: PermissionProfile = bridge.getPermissionProfile();
   let skillCatalog: SkillCatalog = { revision: 0, skills: [] };
   let skillDraftFiles: Array<{ path: string; content: string; encoding: 'utf8' | 'base64' }> = [];
@@ -834,7 +939,22 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     setFullscreen(!fullscreen);
   });
 
-  headerActions.append(fullscreenBtn, threadsBtn);
+  /* 검토 칸 접기 — 전체 화면에서만 뜻이 있어 사이드바에서는 숨는다.
+     목록 아이콘을 좌우로 뒤집어 오른쪽 칸임을 나타낸다(CSS). */
+  const reviewBtn = el('button', 'ag-header-icon-btn ag-review-toggle');
+  reviewBtn.type = 'button';
+  reviewBtn.setAttribute('aria-controls', 'ag-review-column');
+  reviewBtn.setAttribute('aria-expanded', 'true');
+  reviewBtn.setAttribute('aria-label', '검토');
+  reviewBtn.title = '검토';
+  reviewBtn.appendChild(createColumnIcon());
+  reviewBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!fullscreen) return;
+    setReviewColCollapsed(!reviewColCollapsed);
+  });
+
+  headerActions.append(reviewBtn, fullscreenBtn, threadsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
@@ -1113,19 +1233,165 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   /* 전체 화면에서 리뷰가 들어앉는 세 번째 칸. 사이드바로 돌아가면
      비어 있고, .ag-review 노드 자체는 채팅 페이지로 되돌아간다. */
   const reviewColumn = el('div', 'ag-review-column');
+  reviewColumn.id = 'ag-review-column';
   reviewColumn.setAttribute('role', 'region');
   reviewColumn.setAttribute('aria-label', '검토');
   const reviewColumnHead = el('div', 'ag-review-column-head');
   reviewColumnHead.append(el('span', 'ag-review-column-title', '검토'));
   reviewColumn.appendChild(reviewColumnHead);
 
-  stage.append(chatPage, threadsPage, skillsPage, reviewColumn);
+  /* 3열 경계에 얹는 폭 조절 손잡이. 칸이 grid 이므로 손잡이는
+     격자에 참여하지 않고 무대 위에 절대 배치된다(CSS). */
+  const railResize = el('div', 'ag-rail-resize');
+  railResize.setAttribute('role', 'separator');
+  railResize.setAttribute('aria-orientation', 'vertical');
+  railResize.setAttribute('aria-label', '채팅 목록 너비 조절');
+  railResize.title = '드래그하여 너비 조절';
+  railResize.tabIndex = 0;
+
+  const reviewResize = el('div', 'ag-review-resize');
+  reviewResize.setAttribute('role', 'separator');
+  reviewResize.setAttribute('aria-orientation', 'vertical');
+  reviewResize.setAttribute('aria-label', '검토 칸 너비 조절');
+  reviewResize.title = '드래그하여 너비 조절';
+  reviewResize.tabIndex = 0;
+
+  stage.append(chatPage, threadsPage, skillsPage, reviewColumn, railResize, reviewResize);
+
+  function applyRailWidth(width: number, opts?: { persist?: boolean }): void {
+    railWidth = clampRailWidth(width);
+    root.style.setProperty('--ag-rail-w', `${railWidth}px`);
+    railResize.setAttribute('aria-valuenow', String(railWidth));
+    railResize.setAttribute('aria-valuemin', String(RAIL_WIDTH_MIN));
+    railResize.setAttribute('aria-valuemax', String(maxRailWidth()));
+    if (opts?.persist) persistRailWidth(railWidth);
+  }
+
+  function applyReviewWidth(width: number, opts?: { persist?: boolean }): void {
+    reviewWidth = clampReviewWidth(width);
+    root.style.setProperty('--ag-review-w', `${reviewWidth}px`);
+    reviewResize.setAttribute('aria-valuenow', String(reviewWidth));
+    reviewResize.setAttribute('aria-valuemin', String(REVIEW_WIDTH_MIN));
+    reviewResize.setAttribute('aria-valuemax', String(maxReviewWidth()));
+    if (opts?.persist) persistReviewWidth(reviewWidth);
+  }
+
+  /* 두 손잡이는 같은 드래그 문법을 쓴다 — 포인터를 캡처해 무대
+     좌표계로 환산하고, 놓을 때만 저장한다. */
+  let columnResizing: 'rail' | 'review' | null = null;
+  let columnResizePointerId: number | null = null;
+
+  function columnHandle(kind: 'rail' | 'review'): HTMLElement {
+    return kind === 'rail' ? railResize : reviewResize;
+  }
+
+  function beginColumnResize(kind: 'rail' | 'review', e: PointerEvent): void {
+    if (!fullscreen) return;
+    // 이미 한 손가락이 끌고 있으면 두 번째 손가락은 무시한다.
+    if (columnResizing) return;
+    if (e.button !== 0 && e.pointerType !== 'touch') return;
+    e.preventDefault();
+    e.stopPropagation();
+    columnResizing = kind;
+    columnResizePointerId = e.pointerId;
+    try {
+      columnHandle(kind).setPointerCapture(e.pointerId);
+    } catch {
+      /* 캡처를 못 얻어도 pointermove 는 손잡이 위에서 계속 온다 */
+    }
+    root.classList.add('ag-col-resizing');
+    document.body.classList.add('ag-col-resizing');
+  }
+
+  function onColumnResizePointerMove(e: PointerEvent): void {
+    if (!columnResizing) return;
+    // 드래그를 시작한 포인터가 아니면 흘려보낸다.
+    if (e.pointerId !== columnResizePointerId) return;
+    e.preventDefault();
+    const rect = stage.getBoundingClientRect();
+    if (columnResizing === 'rail') applyRailWidth(e.clientX - rect.left);
+    else applyReviewWidth(rect.right - e.clientX);
+  }
+
+  function endColumnResize(e?: PointerEvent): void {
+    if (!columnResizing) {
+      root.classList.remove('ag-col-resizing');
+      document.body.classList.remove('ag-col-resizing');
+      return;
+    }
+    // 다른 손가락이 뗀 것이라면 진행 중인 드래그를 끝내지 않는다.
+    if (e && e.pointerId !== columnResizePointerId) return;
+    const kind = columnResizing;
+    const pointerId = e?.pointerId ?? columnResizePointerId;
+    columnResizing = null;
+    columnResizePointerId = null;
+    root.classList.remove('ag-col-resizing');
+    document.body.classList.remove('ag-col-resizing');
+    const handle = columnHandle(kind);
+    if (pointerId !== null && handle.hasPointerCapture(pointerId)) {
+      handle.releasePointerCapture(pointerId);
+    }
+    if (kind === 'rail') applyRailWidth(railWidth, { persist: true });
+    else applyReviewWidth(reviewWidth, { persist: true });
+  }
+
+  function onColumnResizeKeyDown(kind: 'rail' | 'review', e: KeyboardEvent): void {
+    if (!fullscreen) return;
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    // 손잡이가 눌린 방향으로 움직인다 — 검토 칸은 왼쪽 모서리라 반대다.
+    const delta = e.key === 'ArrowRight' ? 16 : -16;
+    if (kind === 'rail') applyRailWidth(railWidth + delta, { persist: true });
+    else applyReviewWidth(reviewWidth - delta, { persist: true });
+  }
+
+  for (const kind of ['rail', 'review'] as const) {
+    const handle = columnHandle(kind);
+    handle.addEventListener('pointerdown', (e) => beginColumnResize(kind, e));
+    handle.addEventListener('pointermove', onColumnResizePointerMove);
+    handle.addEventListener('pointerup', endColumnResize);
+    handle.addEventListener('pointercancel', endColumnResize);
+    handle.addEventListener('keydown', (e) => onColumnResizeKeyDown(kind, e));
+  }
 
   /**
    * 전체 화면 전환. 새 화면을 짓지 않고 무대의 배치만 바꾼다 —
    * 페이지 3장이 겹쳐 넘어가던 것을 스레드·대화·검토 3열로 편다.
    * 노드를 그대로 옮기므로 스레드·모델·승인 상태가 모두 이어진다.
    */
+  /* 스레드 레일 접기 — 전체 화면에서만 뜻이 있다. 헤더의 목록
+     버튼이 토글이고, 접힘 여부는 사이드바 폭처럼 세션 간 유지된다. */
+  function applyThreadsRailState(): void {
+    root.classList.toggle('ag-rail-collapsed', fullscreen && threadsRailCollapsed);
+    if (!fullscreen) return;
+    threadsBtn.setAttribute('aria-expanded', threadsRailCollapsed ? 'false' : 'true');
+    threadsBtn.title = threadsRailCollapsed ? '채팅 목록 열기' : '채팅 목록 접기';
+    threadsBtn.setAttribute('aria-label', threadsBtn.title);
+    threadsPage.setAttribute('aria-hidden', threadsRailCollapsed ? 'true' : 'false');
+  }
+
+  function setThreadsRailCollapsed(collapsed: boolean): void {
+    threadsRailCollapsed = collapsed;
+    persistThreadsRailCollapsed(collapsed);
+    applyThreadsRailState();
+  }
+
+  /* 검토 칸 접기 — 레일과 같은 규칙. 대화만 넓게 보고 싶을 때 쓴다. */
+  function applyReviewColState(): void {
+    root.classList.toggle('ag-review-collapsed', fullscreen && reviewColCollapsed);
+    if (!fullscreen) return;
+    reviewBtn.setAttribute('aria-expanded', reviewColCollapsed ? 'false' : 'true');
+    reviewBtn.title = reviewColCollapsed ? '검토 열기' : '검토 접기';
+    reviewBtn.setAttribute('aria-label', reviewBtn.title);
+    reviewColumn.setAttribute('aria-hidden', reviewColCollapsed ? 'true' : 'false');
+  }
+
+  function setReviewColCollapsed(collapsed: boolean): void {
+    reviewColCollapsed = collapsed;
+    persistReviewColCollapsed(collapsed);
+    applyReviewColState();
+  }
+
   function setFullscreen(on: boolean): void {
     if (fullscreen === on) return;
     fullscreen = on;
@@ -1152,8 +1418,27 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       skillsPage.setAttribute('aria-hidden', 'true');
       threadsPage.setAttribute('aria-hidden', 'false');
       rebuildThreadsList();
+      // 칸 폭은 클래스 규칙이 아니라 인라인 변수로 산다.
+      applyRailWidth(railWidth, { persist: false });
+      applyReviewWidth(reviewWidth, { persist: false });
+      applyThreadsRailState();
+      applyReviewColState();
+      // 목록 버튼은 콘솔에서 표준 사이드바 토글처럼 헤더 맨 왼쪽에 선다.
+      modelSummary.insertBefore(threadsBtn, selectors);
       reviewColumn.appendChild(review);
     } else {
+      endColumnResize();
+      // 사이드바에서는 다시 헤더 오른쪽 액션 묶음으로 돌아간다.
+      headerActions.appendChild(threadsBtn);
+      applyThreadsRailState();
+      applyReviewColState();
+      threadsBtn.setAttribute('aria-expanded', 'false');
+      threadsBtn.title = '채팅 목록';
+      threadsBtn.setAttribute('aria-label', '채팅 목록');
+      reviewBtn.setAttribute('aria-expanded', 'true');
+      reviewBtn.title = '검토';
+      reviewBtn.setAttribute('aria-label', '검토');
+      reviewColumn.setAttribute('aria-hidden', 'false');
       threadsPage.setAttribute('aria-hidden', 'true');
       // 검토는 다시 채팅 페이지 안, 입력 필드 바로 위로 돌아간다.
       chatPage.insertBefore(review, composerUtilities);
@@ -1197,9 +1482,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     root.classList.toggle('ag-skills-open', open);
     root.classList.remove('ag-threads-open');
     skillsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    threadsBtn.setAttribute('aria-expanded', 'false');
     skillsPage.setAttribute('aria-hidden', open ? 'false' : 'true');
-    threadsPage.setAttribute('aria-hidden', 'true');
+    if (fullscreen) {
+      // 전체 화면에서 이 두 속성은 레일 접힘 상태를 뜻하므로 덮어쓰지 않는다.
+      applyThreadsRailState();
+    } else {
+      threadsBtn.setAttribute('aria-expanded', 'false');
+      threadsPage.setAttribute('aria-hidden', 'true');
+    }
     chatPage.setAttribute('aria-hidden', open ? 'true' : 'false');
     if (!open) showSkillList();
     if (open) {
@@ -1557,6 +1847,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (fullscreen) {
       root.style.top = '0px';
       root.style.bottom = '0px';
+      // 창이 줄면 두 칸의 비율 상한이 내려간다 — 다시 클램프한다.
+      applyRailWidth(railWidth, { persist: false });
+      applyReviewWidth(reviewWidth, { persist: false });
       return;
     }
     const top = document.getElementById('editor-area')?.getBoundingClientRect().top ?? 96;
@@ -1830,6 +2123,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   threadsBtn.addEventListener('click', (e) => {
     e.stopPropagation();
+    // 전체 화면에서는 페이지 전환이 아니라 레일 접기 토글이다.
+    if (fullscreen) {
+      setThreadsRailCollapsed(!threadsRailCollapsed);
+      return;
+    }
     setThreadsPanelOpen(true);
   });
   threadsClose.addEventListener('click', (e) => {
@@ -2895,9 +3193,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       document.removeEventListener('pointerdown', onDocPointerDown);
       document.removeEventListener('keydown', onDocKeyDown);
       endSidebarResize();
+      endColumnResize();
+      root.classList.remove('ag-col-resizing');
       clearInsetRecenterLoop();
       writingStyleCalibration.dispose();
-      document.body.classList.remove('ag-sidebar-open', 'ag-sidebar-resizing', 'ag-fullscreen-open');
+      document.body.classList.remove(
+        'ag-sidebar-open',
+        'ag-sidebar-resizing',
+        'ag-fullscreen-open',
+        'ag-col-resizing',
+      );
       sweepUnresolvedToolRows();
       root.remove();
     },

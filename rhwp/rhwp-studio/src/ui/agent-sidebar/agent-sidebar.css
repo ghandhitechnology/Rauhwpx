@@ -2637,17 +2637,146 @@ body.ag-fullscreen-open #editor-area {
   display: none;
 }
 
-/* 스레드 레일이 상시 보이므로 헤더의 목록 버튼은 자리를 비운다. */
-.ag-fullscreen .ag-header-actions .ag-threads-btn {
+/* 전체 화면에서 헤더의 목록 버튼은 스레드 레일 접기 토글이 되고,
+   헤더 맨 왼쪽(로고 앞)으로 옮겨 앉는다. */
+.ag-fullscreen .ag-model-summary > .ag-threads-btn {
+  align-self: center;
+  margin-right: 4px;
+}
+
+/* 검토 접기 버튼은 콘솔에서만 뜻이 있다. 아이콘은 오른쪽 칸을
+   가리키도록 좌우로 뒤집는다. */
+.ag-review-toggle {
   display: none;
 }
 
+.ag-fullscreen .ag-review-toggle {
+  display: inline-flex;
+}
+
+.ag-review-toggle .ui-column-icon {
+  transform: scaleX(-1);
+}
+
+/* 바깥 두 칸의 폭은 인라인 변수로 산다 — 드래그가 곧 변수 갱신이다. */
 .ag-fullscreen .ag-stage {
+  position: relative;
   display: grid;
-  grid-template-columns: 264px minmax(0, 1fr) minmax(380px, 42%);
+  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr) var(--ag-review-w, 480px);
   grid-template-rows: 100%;
   gap: 0;
   overflow: visible;
+  transition: grid-template-columns 200ms ease;
+}
+
+/* 레일 접힘 — 표준 사이드바처럼 첫 칸 폭만 0 으로 줄인다. */
+.ag-fullscreen.ag-rail-collapsed .ag-stage {
+  grid-template-columns: 0 minmax(0, 1fr) var(--ag-review-w, 480px);
+}
+
+.ag-fullscreen.ag-review-collapsed .ag-stage {
+  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr) 0;
+}
+
+.ag-fullscreen.ag-rail-collapsed.ag-review-collapsed .ag-stage {
+  grid-template-columns: 0 minmax(0, 1fr) 0;
+}
+
+/* 접은 칸은 폭만 0 이 아니라 visibility 까지 감춘다 — 잘려 보이지 않을
+   뿐인 버튼이 Tab 차례에 남아 승인·거절이 눌리는 일을 막는다. */
+.ag-fullscreen.ag-rail-collapsed .ag-threads-page {
+  padding-inline: 0;
+  border-right: none;
+  overflow: hidden;
+  visibility: hidden;
+}
+
+/* 접힌 검토 칸의 테두리는 화면 오른쪽 끝에 남는 1px 선이 된다. */
+.ag-fullscreen.ag-review-collapsed .ag-review-column {
+  border-left: none;
+  overflow: hidden;
+  visibility: hidden;
+}
+
+.ag-fullscreen.ag-review-collapsed .ag-chat-page {
+  border-right: none;
+}
+
+/* ── 칸 경계 드래그 ───────────────────────────────────
+   격자에 참여하지 않고 경계 위에 얹는다. 접힌 칸의 손잡이는
+   잡을 자리가 없으므로 숨는다. */
+.ag-rail-resize,
+.ag-review-resize {
+  display: none;
+}
+
+.ag-fullscreen .ag-rail-resize,
+.ag-fullscreen .ag-review-resize {
+  display: block;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 2;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+  transition: left 200ms ease, right 200ms ease;
+}
+
+.ag-fullscreen .ag-rail-resize {
+  left: calc(var(--ag-rail-w, 264px) - 3px);
+}
+
+.ag-fullscreen .ag-review-resize {
+  right: calc(var(--ag-review-w, 480px) - 3px);
+}
+
+.ag-fullscreen .ag-rail-resize::after,
+.ag-fullscreen .ag-review-resize::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  opacity: 0;
+  transition: background 120ms ease, opacity 120ms ease;
+}
+
+.ag-fullscreen .ag-rail-resize:hover::after,
+.ag-fullscreen .ag-rail-resize:focus-visible::after,
+.ag-fullscreen .ag-review-resize:hover::after,
+.ag-fullscreen .ag-review-resize:focus-visible::after,
+.ag-fullscreen.ag-col-resizing .ag-rail-resize::after,
+.ag-fullscreen.ag-col-resizing .ag-review-resize::after {
+  background: var(--ag-accent);
+  opacity: 1;
+}
+
+.ag-fullscreen .ag-rail-resize:focus-visible,
+.ag-fullscreen .ag-review-resize:focus-visible {
+  outline: none;
+}
+
+.ag-fullscreen.ag-rail-collapsed .ag-rail-resize,
+.ag-fullscreen.ag-review-collapsed .ag-review-resize {
+  display: none;
+}
+
+/* 드래그 중에는 격자가 포인터를 뒤따라야 한다 — 보간을 끈다. */
+.ag-fullscreen.ag-col-resizing .ag-stage,
+.ag-fullscreen.ag-col-resizing .ag-threads-page,
+.ag-fullscreen.ag-col-resizing .ag-rail-resize,
+.ag-fullscreen.ag-col-resizing .ag-review-resize {
+  transition: none;
+}
+
+body.ag-col-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 /* 세 칸은 겹쳐 넘어가지 않는다 — 전환 상태를 전부 되돌린다. */
@@ -2675,6 +2804,7 @@ body.ag-fullscreen-open #editor-area {
   border-right: 1px solid var(--ag-border);
   padding: 12px 10px 16px;
   overflow-y: auto;
+  transition: padding 200ms ease;
 }
 
 .ag-fullscreen .ag-chat-page {
@@ -2744,6 +2874,15 @@ body.ag-fullscreen-open #editor-area {
 
 @media (prefers-reduced-motion: reduce) {
   .ag-root.ag-fullscreen {
+    transition: none;
+  }
+
+  .ag-fullscreen .ag-stage,
+  .ag-fullscreen .ag-threads-page,
+  .ag-fullscreen .ag-rail-resize,
+  .ag-fullscreen .ag-review-resize,
+  .ag-fullscreen .ag-rail-resize::after,
+  .ag-fullscreen .ag-review-resize::after {
     transition: none;
   }
 }
