@@ -69,6 +69,10 @@ const SIDEBAR_WIDTH_KEY = 'rhwp-agent-sidebar-width';
 const SIDEBAR_WIDTH_DEFAULT = 360;
 const SIDEBAR_WIDTH_MIN = 280;
 const SIDEBAR_MOTION_DURATION_MS = 320;
+/* 전체 화면 전환도 사이드바·용지와 같은 320ms 축을 쓴다(모션 계약).
+   타이머는 전이가 끝날 때까지의 여유분을 포함한다. */
+const FS_MOTION_SETTLE_MS = SIDEBAR_MOTION_DURATION_MS + 60;
+const FS_RETURN_SETTLE_MS = 240;
 
 function maxSidebarWidth(viewportWidth = window.innerWidth): number {
   return Math.max(SIDEBAR_WIDTH_MIN, Math.floor(viewportWidth * 0.5));
@@ -892,11 +896,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     setReviewColCollapsed(!reviewColCollapsed);
   });
 
-  headerActions.append(reviewBtn, fullscreenBtn, threadsBtn);
+  // 전체 화면 토글은 헤더 왼쪽 모서리에 고정한다 — 모드가 바뀌어도
+  // DOM 자리를 옮기지 않아 전환 애니메이션 동안 위치가 흔들리지 않는다.
+  headerActions.append(reviewBtn, threadsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
-  modelSummary.append(selectors, headerActions);
+  modelSummary.append(fullscreenBtn, selectors, headerActions);
 
   const configPanel = el('div', 'ag-config-panel');
   configPanel.id = 'ag-config-panel';
@@ -1298,11 +1304,79 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     applyReviewColState();
   }
 
+  /* 전체 화면 전환. 새 화면을 짓지 않고 무대의 배치만 바꾼다 —
+     페이지 3장이 겹쳐 넘어가던 것을 스레드·대화·검토 3열로 편다.
+     노드를 그대로 옮기므로 스레드·모델·승인 상태가 모두 이어진다.
+
+     전환은 clip-path 로 연다: 콘솔이 사이드바 자리에서 자라나고,
+     돌아갈 때는 그 자리로 접힌다. 내용물은 한 번만 배치하고 보이는
+     영역만 옮기므로 레이아웃 비용은 한 번뿐이다. 용지(#editor-area)는
+     같은 320ms 축으로 함께 움직인다 — 패널과 용지가 따로 놀지 않는다. */
+  let fsMotionTimer: number | null = null;
+  let fsReturnTimer: number | null = null;
+
+  function cancelFsMotionTimers(): void {
+    if (fsMotionTimer !== null) {
+      window.clearTimeout(fsMotionTimer);
+      fsMotionTimer = null;
+    }
+    if (fsReturnTimer !== null) {
+      window.clearTimeout(fsReturnTimer);
+      fsReturnTimer = null;
+    }
+  }
+
+  function setFsClipVars(top: number, bottom: number, left: number): void {
+    root.style.setProperty('--ag-fs-clip-top', `${Math.max(0, top)}px`);
+    root.style.setProperty('--ag-fs-clip-bottom', `${Math.max(0, bottom)}px`);
+    root.style.setProperty('--ag-fs-clip-left', `${Math.max(0, left)}px`);
+  }
+
+  /** 돌아갈 사이드바 자리. measure() 와 같은 기준이라 접힘 끝에서
+      clip 영역과 사이드바 상자가 정확히 포개져 교체가 보이지 않는다. */
+  function setFsClipVarsToSidebar(): void {
+    const top = document.getElementById('editor-area')?.getBoundingClientRect().top ?? 96;
+    const statusTop =
+      document.getElementById('status-bar')?.getBoundingClientRect().top ?? window.innerHeight;
+    const width = Math.min(sidebarWidth, window.innerWidth);
+    setFsClipVars(top, window.innerHeight - statusTop, window.innerWidth - width);
+  }
+
+  /** 전체 화면 무대를 걷고 사이드바 배치로 되돌린다. */
+  function restoreSidebarLayout(): void {
+    endColumnResize();
+    // 사이드바에서는 다시 헤더 오른쪽 액션 묶음으로 돌아간다.
+    headerActions.appendChild(threadsBtn);
+    applyThreadsRailState();
+    applyReviewColState();
+    threadsBtn.setAttribute('aria-expanded', 'false');
+    threadsBtn.title = '채팅 목록';
+    threadsBtn.setAttribute('aria-label', '채팅 목록');
+    reviewBtn.setAttribute('aria-expanded', 'true');
+    reviewBtn.title = '검토';
+    reviewBtn.setAttribute('aria-label', '검토');
+    reviewColumn.setAttribute('aria-hidden', 'false');
+    threadsPage.setAttribute('aria-hidden', 'true');
+    // 검토는 다시 채팅 페이지 안, 입력 필드 바로 위로 돌아간다.
+    chatPage.insertBefore(review, composerUtilities);
+  }
+
   function setFullscreen(on: boolean): void {
     if (fullscreen === on) return;
     fullscreen = on;
+    cancelFsMotionTimers();
 
-    root.classList.toggle('ag-fullscreen', on);
+    const animate = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // clip 이 자라나는 출발점 — 배치가 바뀌기 전에 잰다. 접히던
+    // 도중 되돌아가는 경우에는 현재 clip 값에서 이어가므로 잴 필요가 없다.
+    const enterRect =
+      on && animate && !root.classList.contains('ag-fs-to')
+        ? root.getBoundingClientRect()
+        : null;
+
+    // 돌아갈 때는 접힘이 끝난 뒤에 클래스를 걷는다 — 접히는 동안
+    // 전체 화면 배치(기하·3열·숨겨진 손잡이)가 유지되어야 한다.
+    if (on || !animate) root.classList.toggle('ag-fullscreen', on);
     document.body.classList.toggle('ag-fullscreen-open', on);
     fullscreenBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
     fullscreenBtn.setAttribute('aria-label', on ? '사이드바로 돌아가기' : '콘솔 전체 화면');
@@ -1312,6 +1386,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     fullscreenIcon = nextIcon;
 
     if (on) {
+      root.classList.remove('ag-fs-return', 'ag-fs-exiting');
+      if (animate) {
+        // 전환 자세는 배치 변경보다 먼저 세운다 — 첫 스타일 확정이
+        // 접힌 자세(ag-fs-from)여야 clip 이 펼침 방향으로만 보간된다.
+        if (enterRect) {
+          setFsClipVars(enterRect.top, window.innerHeight - enterRect.bottom, enterRect.left);
+        }
+        root.classList.add('ag-fs-motion', 'ag-fs-entering');
+        if (enterRect) root.classList.add('ag-fs-from');
+        // 접히던 도중 되돌아가기 — clip 이 현재 값에서 그대로 펼쳐진다.
+        else root.classList.remove('ag-fs-to');
+      } else {
+        root.classList.remove('ag-fs-motion', 'ag-fs-from', 'ag-fs-to');
+      }
+
       // 접힌 상태에서 바로 펼칠 수 있어야 한다.
       setCollapsed(false, { recenter: false });
       // 페이지 전환 상태를 걷어내고 세 칸을 동시에 세운다.
@@ -1329,33 +1418,58 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       applyReviewWidth(reviewWidth, { persist: false });
       applyThreadsRailState();
       applyReviewColState();
-      // 목록 버튼은 콘솔에서 표준 사이드바 토글처럼 헤더 맨 왼쪽에 선다.
+      // 목록 버튼은 전체 화면 토글 바로 옆(왼쪽 모서리 다음)에 선다.
+      // 전체 화면 버튼 자체는 옮기지 않는다 — 왼쪽 모서리에 고정.
       modelSummary.insertBefore(threadsBtn, selectors);
       reviewColumn.appendChild(review);
-    } else {
-      endColumnResize();
-      // 사이드바에서는 다시 헤더 오른쪽 액션 묶음으로 돌아간다.
-      headerActions.appendChild(threadsBtn);
-      applyThreadsRailState();
-      applyReviewColState();
-      threadsBtn.setAttribute('aria-expanded', 'false');
-      threadsBtn.title = '채팅 목록';
-      threadsBtn.setAttribute('aria-label', '채팅 목록');
-      reviewBtn.setAttribute('aria-expanded', 'true');
-      reviewBtn.title = '검토';
-      reviewBtn.setAttribute('aria-label', '검토');
-      reviewColumn.setAttribute('aria-hidden', 'false');
-      threadsPage.setAttribute('aria-hidden', 'true');
-      // 검토는 다시 채팅 페이지 안, 입력 필드 바로 위로 돌아간다.
-      chatPage.insertBefore(review, composerUtilities);
+
+      setConfigPanelOpen(false);
+      // 인라인 top/bottom 을 모드에 맞게 다시 잰다.
+      measure();
+      // 문서가 가려지거나 다시 드러나므로 용지 정렬을 다시 잡는다.
+      startInsetRecenterLoop();
+      scrollConversationToEnd();
+
+      if (!animate) return;
+      // 접힌 자세를 확정한 뒤 펼침으로 넘긴다.
+      void root.offsetHeight;
+      if (enterRect) root.classList.remove('ag-fs-from');
+      fsMotionTimer = window.setTimeout(() => {
+        root.classList.remove('ag-fs-motion', 'ag-fs-entering', 'ag-fs-to');
+        fsMotionTimer = null;
+      }, FS_MOTION_SETTLE_MS);
+      return;
     }
 
-    setConfigPanelOpen(false);
-    // 인라인 top/bottom 을 모드에 맞게 다시 잰다.
-    measure();
-    // 문서가 가려지거나 다시 드러나므로 용지 정렬을 다시 잡는다.
+    if (!animate) {
+      root.classList.remove('ag-fs-motion', 'ag-fs-from', 'ag-fs-to', 'ag-fs-entering', 'ag-fs-return');
+      restoreSidebarLayout();
+      setConfigPanelOpen(false);
+      measure();
+      startInsetRecenterLoop();
+      scrollConversationToEnd();
+      return;
+    }
+
+    // 접히는 동안 용지가 같은 시간축으로 제자리를 찾는다.
     startInsetRecenterLoop();
-    scrollConversationToEnd();
+    setFsClipVarsToSidebar();
+    root.classList.remove('ag-fs-entering', 'ag-fs-from', 'ag-fs-return');
+    root.classList.add('ag-fs-motion', 'ag-fs-exiting', 'ag-fs-to');
+    fsMotionTimer = window.setTimeout(() => {
+      fsMotionTimer = null;
+      root.classList.remove('ag-fullscreen', 'ag-fs-to', 'ag-fs-exiting');
+      restoreSidebarLayout();
+      setConfigPanelOpen(false);
+      measure();
+      scrollConversationToEnd();
+      // 돌아온 사이드바는 스며들며 마무리.
+      root.classList.add('ag-fs-return');
+      fsReturnTimer = window.setTimeout(() => {
+        root.classList.remove('ag-fs-motion', 'ag-fs-return');
+        fsReturnTimer = null;
+      }, FS_RETURN_SETTLE_MS);
+    }, FS_MOTION_SETTLE_MS);
   }
 
   function updatePermissionButton(): void {
@@ -1744,7 +1858,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   // ── 배치: #editor-area ↔ #status-bar 사이에 맞춘다 ────
   function measure(): void {
     // 전체 화면은 도구 모음·상태바까지 덮는다 — 인라인 배치를 걷어낸다.
-    if (fullscreen) {
+    // 접혀 돌아가는 동안(ag-fs-to)에도 전체 화면 기준을 유지한다.
+    if (fullscreen || root.classList.contains('ag-fs-to')) {
       root.style.top = '0px';
       root.style.bottom = '0px';
       // 창이 줄면 두 칸의 비율 상한이 내려간다 — 다시 클램프한다.

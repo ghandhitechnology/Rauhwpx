@@ -125,7 +125,7 @@ body.ag-sidebar-resizing {
   z-index: 50;
   display: flex;
   flex-direction: column;
-  background: var(--ag-bg);
+  background-color: var(--ag-bg);
   color: var(--ag-text);
   border-left: 1px solid var(--ag-border);
   box-shadow: var(--n-elev-2);
@@ -285,6 +285,14 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-model-summary {
   min-height: 42px;
   padding: 5px 10px 4px 12px;
+}
+
+/* 전체 화면 토글 — 헤더 왼쪽 모서리에 고정. 모드 전환 때
+   DOM 을 옮기지 않으므로 위치가 흔들리지 않는다. */
+.ag-model-summary > .ag-fullscreen-btn {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-right: 2px;
 }
 
 .ag-context-row {
@@ -2400,7 +2408,9 @@ body.ag-fullscreen-open #editor-area {
   z-index: 60;
   border-left: none;
   box-shadow: none;
-  background: var(--ag-bg-2);
+  background-color: var(--ag-bg-2);
+  /* 전환의 기준 자세 — clip 이 여기서 사이드바 자리로 오갔다 온다. */
+  clip-path: inset(0 0 0 0);
 }
 
 /* 폭 조절·접기는 사이드바의 조작이다. 전체 화면에서는 Esc 가 대신한다. */
@@ -2410,8 +2420,7 @@ body.ag-fullscreen-open #editor-area {
   display: none;
 }
 
-/* 전체 화면에서 헤더의 목록 버튼은 스레드 레일 접기 토글이 되고,
-   헤더 맨 왼쪽(로고 앞)으로 옮겨 앉는다. */
+/* 전체 화면에서 목록 버튼은 왼쪽 모서리의 전체 화면 토글 옆에 선다. */
 .ag-fullscreen .ag-model-summary > .ag-threads-btn {
   align-self: center;
   margin-right: 4px;
@@ -2439,7 +2448,7 @@ body.ag-fullscreen-open #editor-area {
   grid-template-rows: 100%;
   gap: 0;
   overflow: visible;
-  transition: grid-template-columns 200ms ease;
+  transition: grid-template-columns 240ms var(--ag-motion-out);
 }
 
 /* 레일 접힘 — 표준 사이드바처럼 첫 칸 폭만 0 으로 줄인다. */
@@ -2456,12 +2465,18 @@ body.ag-fullscreen-open #editor-area {
 }
 
 /* 접은 칸은 폭만 0 이 아니라 visibility 까지 감춘다 — 잘려 보이지 않을
-   뿐인 버튼이 Tab 차례에 남아 승인·거절이 눌리는 일을 막는다. */
+   뿐인 버튼이 Tab 차례에 남아 승인·거절이 눌리는 일을 막는다.
+   내용은 폭이 다 닫히기 전에 먼저 옅어져 줄바꿈 뭉개짐이 보이지 않는다. */
 .ag-fullscreen.ag-rail-collapsed .ag-threads-page {
   padding-inline: 0;
   border-right: none;
   overflow: hidden;
   visibility: hidden;
+  opacity: 0;
+  transition:
+    padding-inline 240ms var(--ag-motion-out),
+    opacity 130ms ease,
+    visibility 0s linear 130ms;
 }
 
 /* 접힌 검토 칸의 테두리는 화면 오른쪽 끝에 남는 1px 선이 된다. */
@@ -2469,6 +2484,10 @@ body.ag-fullscreen-open #editor-area {
   border-left: none;
   overflow: hidden;
   visibility: hidden;
+  opacity: 0;
+  transition:
+    opacity 130ms ease,
+    visibility 0s linear 130ms;
 }
 
 .ag-fullscreen.ag-review-collapsed .ag-chat-page {
@@ -2494,7 +2513,7 @@ body.ag-fullscreen-open #editor-area {
   background: transparent;
   cursor: col-resize;
   touch-action: none;
-  transition: left 200ms ease, right 200ms ease;
+  transition: left 240ms var(--ag-motion-out), right 240ms var(--ag-motion-out);
 }
 
 .ag-fullscreen .ag-rail-resize {
@@ -2577,7 +2596,12 @@ body.ag-col-resizing {
   border-right: 1px solid var(--ag-border);
   padding: 12px 10px 16px;
   overflow-y: auto;
-  transition: padding 200ms ease;
+  /* padding-inline 을 명시해야 접힘 여백이 실제로 보간된다 —
+     transition-property: padding 은 논리 longhand 를 덮지 못한다. */
+  transition:
+    padding-inline 240ms var(--ag-motion-out),
+    opacity 170ms var(--ag-motion-out),
+    visibility 0s linear 0s;
 }
 
 .ag-fullscreen .ag-chat-page {
@@ -2619,6 +2643,9 @@ body.ag-col-resizing {
   flex-direction: column;
   background: var(--ag-bg-2);
   overflow: hidden;
+  transition:
+    opacity 170ms var(--ag-motion-out),
+    visibility 0s linear 0s;
 }
 
 .ag-review-column-head {
@@ -2645,13 +2672,101 @@ body.ag-col-resizing {
   padding: 10px 12px 16px;
 }
 
+/* ── 전체 화면 전환 애니메이션 ─────────────────────────
+   콘솔은 사이드바 자리에서 자라나고 그 자리로 접혀 돌아간다.
+   clip-path 가 보이는 영역만 옮기므로 내용물은 한 번만 배치된다.
+   clip 변수는 index.ts 가 사이드바 자리를 재서 심는다. */
+.ag-root.ag-fs-motion {
+  transition:
+    clip-path var(--ag-sidebar-duration) var(--ag-sidebar-ease),
+    background-color var(--ag-sidebar-duration) ease,
+    box-shadow var(--ag-sidebar-duration) ease;
+  will-change: clip-path;
+}
+
+.ag-root.ag-fs-from,
+.ag-root.ag-fs-to {
+  clip-path: inset(
+    var(--ag-fs-clip-top, 0px) 0
+    var(--ag-fs-clip-bottom, 0px) var(--ag-fs-clip-left, 0px)
+  );
+}
+
+/* 새로 생기는 바깥 두 칸은 가장자리에서 스며든다. 가운데 대화는
+   같은 노드가 그대로 이어지는 기준축이라 움직이지 않는다. */
+.ag-root.ag-fs-entering:not(.ag-rail-collapsed) .ag-threads-page {
+  animation: ag-fs-rail-in 300ms var(--ag-motion-out) 50ms both;
+}
+
+.ag-root.ag-fs-entering:not(.ag-review-collapsed) .ag-review-column {
+  animation: ag-fs-review-in 300ms var(--ag-motion-out) 20ms both;
+}
+
+/* 돌아갈 때는 바깥 칸이 먼저 옅어지고 난 뒤 패널이 접힌다 —
+   접힘 끝의 스트립이 빈 패널 톤이라 사이드바로의 교체가 깨끗하다. */
+.ag-root.ag-fs-exiting .ag-threads-page,
+.ag-root.ag-fs-exiting .ag-review-column {
+  animation: ag-fs-col-out 140ms ease both;
+}
+
+/* 모드 전환과 겹쳐 닫히는 오버레이가 무대 위를 한 번 더 미끄러지지
+   않게, 전환 동안은 스킬 페이지의 페이지 전환을 끈다. */
+.ag-root.ag-fs-motion .ag-skills-page {
+  transition: none;
+}
+
+/* 돌아온 사이드바는 스며들며 마무리. */
+.ag-root.ag-fs-return .ag-stage {
+  animation: ag-fs-stage-in 190ms var(--ag-motion-out) both;
+}
+
+@keyframes ag-fs-rail-in {
+  from {
+    opacity: 0;
+    transform: translateX(-14px);
+  }
+}
+
+@keyframes ag-fs-review-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+}
+
+@keyframes ag-fs-col-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes ag-fs-stage-in {
+  from {
+    opacity: 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ag-root.ag-fullscreen {
     transition: none;
   }
 
+  .ag-root.ag-fs-motion {
+    transition: none;
+    will-change: auto;
+  }
+
+  .ag-root.ag-fs-entering:not(.ag-rail-collapsed) .ag-threads-page,
+  .ag-root.ag-fs-entering:not(.ag-review-collapsed) .ag-review-column,
+  .ag-root.ag-fs-exiting .ag-threads-page,
+  .ag-root.ag-fs-exiting .ag-review-column,
+  .ag-root.ag-fs-return .ag-stage {
+    animation: none;
+  }
+
   .ag-fullscreen .ag-stage,
   .ag-fullscreen .ag-threads-page,
+  .ag-fullscreen .ag-review-column,
   .ag-fullscreen .ag-rail-resize,
   .ag-fullscreen .ag-review-resize,
   .ag-fullscreen .ag-rail-resize::after,
