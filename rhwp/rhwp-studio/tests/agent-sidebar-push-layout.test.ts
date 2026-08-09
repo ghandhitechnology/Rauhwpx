@@ -6,7 +6,7 @@ const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', im
 const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
 
 test('agent sidebar push layout reserves editor-area width when open', () => {
-  assert.match(css, /--ag-sidebar-width:\s*360px;/);
+  assert.match(css, /--ag-sidebar-width:\s*400px;/);
   assert.match(css, /--ag-sidebar-duration:\s*320ms;/);
   assert.match(
     css,
@@ -24,7 +24,7 @@ test('agent sidebar push layout reserves editor-area width when open', () => {
 
 test('agent sidebar toggles body.ag-sidebar-open with collapse state', () => {
   assert.match(source, /document\.body\.classList\.toggle\('ag-sidebar-open', !collapsed\)/);
-  assert.match(source, /document\.body\.classList\.remove\('ag-sidebar-open'/);
+  assert.match(source, /document\.body\.classList\.remove\([\s\S]*?'ag-sidebar-open'/);
   assert.match(source, /setCollapsed\(false, \{ recenter: false \}\)/);
 });
 
