@@ -11,6 +11,8 @@ const subsecondWasmDir = resolve(
   'rhwp-subsecond-vite',
 );
 const useSubsecondWasm = process.env.RHWP_SUBSECOND === '1';
+const publicHost = process.env.RAU_PUBLIC_HOST;
+const publicHttpsPort = Number(process.env.RAU_PUBLIC_HTTPS_PORT || '443');
 
 export default defineConfig({
   define: {
@@ -28,6 +30,12 @@ export default defineConfig({
   server: {
     host: '127.0.0.1',
     port: 7700,
+    allowedHosts: publicHost ? [publicHost] : undefined,
+    hmr: publicHost ? {
+      protocol: 'wss',
+      host: publicHost,
+      clientPort: publicHttpsPort,
+    } : undefined,
     proxy: useSubsecondWasm ? {
       '/_dioxus': {
         target: 'http://127.0.0.1:7711',

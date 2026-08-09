@@ -34,13 +34,17 @@ test('sidebar header keeps one compact model summary and expands all settings to
   assert.match(css, /\.ag-config-panel \.ag-model-menu\s*\{[^}]*position:\s*static;/s);
 });
 
-test('permission and skill utilities remain visible above the composer', () => {
+test('model, permission, and skill utilities live in the composer accessory row', () => {
   assert.match(source, /ag-composer-utilities/);
+  assert.match(source, /ag-composer-meta/);
   assert.match(source, /composerWorkflowRow\.append\(workflowGroup, phaseBadge\)/);
   assert.match(source, /composerUtilityActions\.append\(writingStyleCalibration\.button, permissionBtn, skillsBtn\)/);
   assert.match(source, /composerUtilities\.append\(composerWorkflowRow, composerUtilityActions\)/);
-  assert.match(source, /chatPage\.append\(header, messages, review, composerUtilities, composer\)/);
+  assert.match(source, /composerMeta\.append\(selectors, composerUtilities\)/);
+  assert.match(source, /composer\.append\(slashMenu, composerField, composerMeta, configPanel\)/);
+  assert.match(source, /chatPage\.append\(header, messages, review, composer\)/);
   assert.match(source, /permissionBtn\.textContent = unrestricted \? '권한: 전체 접근' : '권한: 안전'/);
+  assert.match(css, /\.ag-composer-meta\s*\{/);
   assert.match(css, /\.ag-composer-utilities\s*\{[^}]*flex-direction:\s*column;/s);
 });
 

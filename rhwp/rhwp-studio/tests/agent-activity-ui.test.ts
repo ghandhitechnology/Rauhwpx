@@ -18,7 +18,7 @@ const backend = readFileSync(
 test('assistant responses render as flat transcript text', () => {
   assert.match(
     css,
-    /\.ag-msg-assistant\s*\{[^}]*padding:\s*2px 0;[^}]*line-height:\s*1\.65;/s,
+    /\.ag-msg-assistant\s*\{[^}]*padding:\s*0 2px;[^}]*line-height:\s*1\.7;/s,
   );
   assert.doesNotMatch(
     css,
@@ -30,7 +30,7 @@ test('assistant responses render as flat transcript text', () => {
   );
 });
 
-test('progress prose and tool calls compact into one smooth activity disclosure', () => {
+test('progress prose and tool calls compact into one calm activity disclosure', () => {
   assert.match(source, /compactStreamIntoActivity/);
   assert.match(source, /ensureTurnActivity/);
   assert.match(source, /completeTurnActivity/);
@@ -41,8 +41,9 @@ test('progress prose and tool calls compact into one smooth activity disclosure'
     css,
     /\.ag-activity-collapsed \.ag-activity-collapse\s*\{[^}]*grid-template-rows:\s*0fr;/s,
   );
+  assert.match(css, /@keyframes ag-message-arrive/);
   assert.match(css, /@keyframes ag-activity-arrive/);
-  assert.match(css, /@keyframes ag-activity-scan/);
+  assert.doesNotMatch(css, /@keyframes ag-activity-scan/);
   assert.match(css, /@keyframes ag-step-arrive/);
   assert.match(css, /@keyframes ag-status-settle/);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
