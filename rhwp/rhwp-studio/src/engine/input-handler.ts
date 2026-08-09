@@ -33,6 +33,7 @@ import { showConfirm } from '@/ui/confirm-dialog';
 import * as _mouse from './input-handler-mouse';
 import * as _table from './input-handler-table';
 import * as _keyboard from './input-handler-keyboard';
+import { getBodySelectionSegments } from './body-selection-range';
 import * as _text from './input-handler-text';
 import * as _picture from './input-handler-picture';
 import { computeHangingIndentPx } from './hanging-indent';
@@ -1939,12 +1940,11 @@ export class InputHandler {
       return targets;
     }
 
-    if (start.sectionIndex !== end.sectionIndex) return [];
-    const from = Math.min(start.paragraphIndex, end.paragraphIndex);
-    const to = Math.max(start.paragraphIndex, end.paragraphIndex);
     const targets: ParaFormatTarget[] = [];
-    for (let p = from; p <= to; p++) {
-      targets.push({ kind: 'body', sec: start.sectionIndex, para: p });
+    for (const segment of getBodySelectionSegments(this.wasm, start, end)) {
+      for (let p = segment.startParagraphIndex; p <= segment.endParagraphIndex; p++) {
+        targets.push({ kind: 'body', sec: segment.sectionIndex, para: p });
+      }
     }
     return targets;
   }
@@ -2940,10 +2940,14 @@ export class InputHandler {
         );
       } else if (!startInCell && !endInCell) {
         // 본문 선택
-        rects = this.wasm.getSelectionRects(
-          start.sectionIndex,
-          start.paragraphIndex, start.charOffset,
-          end.paragraphIndex, end.charOffset,
+        rects = getBodySelectionSegments(this.wasm, start, end).flatMap(segment =>
+          this.wasm.getSelectionRects(
+            segment.sectionIndex,
+            segment.startParagraphIndex,
+            segment.startCharOffset,
+            segment.endParagraphIndex,
+            segment.endCharOffset,
+          ),
         );
       } else {
         // 셀↔본문 또는 셀↔다른 셀 혼합 선택: 렌더링 생략

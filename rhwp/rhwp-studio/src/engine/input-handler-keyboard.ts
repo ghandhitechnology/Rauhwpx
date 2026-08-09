@@ -1508,11 +1508,16 @@ export function onCopy(this: any, e: ClipboardEvent): void {
         start.cellParaIndex!, start.charOffset,
         end.cellParaIndex!, end.charOffset,
       );
-    } else {
+    } else if (start.sectionIndex === end.sectionIndex) {
       this.wasm.copySelection(
         start.sectionIndex,
         start.paragraphIndex, start.charOffset,
         end.paragraphIndex, end.charOffset,
+      );
+    } else {
+      this.wasm.copySelectionAcrossSections(
+        start.sectionIndex, start.paragraphIndex, start.charOffset,
+        end.sectionIndex, end.paragraphIndex, end.charOffset,
       );
     }
 
@@ -1529,11 +1534,16 @@ export function onCopy(this: any, e: ClipboardEvent): void {
             start.cellParaIndex!, start.charOffset,
             end.cellParaIndex!, end.charOffset,
           );
-        } else {
+        } else if (start.sectionIndex === end.sectionIndex) {
           html = this.wasm.exportSelectionHtml(
             start.sectionIndex,
             start.paragraphIndex, start.charOffset,
             end.paragraphIndex, end.charOffset,
+          );
+        } else {
+          html = this.wasm.exportSelectionAcrossSectionsHtml(
+            start.sectionIndex, start.paragraphIndex, start.charOffset,
+            end.sectionIndex, end.paragraphIndex, end.charOffset,
           );
         }
       } catch { /* HTML 내보내기 실패는 fallback HTML 사용 */ }
