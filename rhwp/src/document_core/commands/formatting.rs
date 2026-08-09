@@ -1034,6 +1034,78 @@ impl DocumentCore {
         Ok("{\"ok\":true}".to_string())
     }
 
+    /// 여러 구역에 걸친 본문 선택에 글자 서식을 적용한다.
+    pub fn apply_char_format_across_sections_native(
+        &mut self,
+        start_section_idx: usize,
+        start_para_idx: usize,
+        start_char_offset: usize,
+        end_section_idx: usize,
+        end_para_idx: usize,
+        end_char_offset: usize,
+        props_json: &str,
+    ) -> Result<String, HwpError> {
+        if start_section_idx > end_section_idx {
+            return Err(HwpError::RenderError(
+                "시작 구역이 끝 구역보다 뒤에 있음".to_string(),
+            ));
+        }
+
+        let mut ranges = Vec::new();
+        for section_idx in start_section_idx..=end_section_idx {
+            let section =
+                self.document.sections.get(section_idx).ok_or_else(|| {
+                    HwpError::RenderError(format!("구역 {} 범위 초과", section_idx))
+                })?;
+            if section.paragraphs.is_empty() {
+                continue;
+            }
+            let range_start_para = if section_idx == start_section_idx {
+                start_para_idx
+            } else {
+                0
+            };
+            let range_end_para = if section_idx == end_section_idx {
+                end_para_idx
+            } else {
+                section.paragraphs.len() - 1
+            };
+            if range_start_para > range_end_para || range_end_para >= section.paragraphs.len() {
+                return Err(HwpError::RenderError(format!(
+                    "구역 {} 문단 범위 초과",
+                    section_idx
+                )));
+            }
+            for para_idx in range_start_para..=range_end_para {
+                let start_offset = if section_idx == start_section_idx && para_idx == start_para_idx
+                {
+                    start_char_offset
+                } else {
+                    0
+                };
+                let end_offset = if section_idx == end_section_idx && para_idx == end_para_idx {
+                    end_char_offset
+                } else {
+                    section.paragraphs[para_idx].text.chars().count()
+                };
+                if end_offset > start_offset {
+                    ranges.push((section_idx, para_idx, start_offset, end_offset));
+                }
+            }
+        }
+
+        for (section_idx, para_idx, start_offset, end_offset) in ranges {
+            self.apply_char_format_native(
+                section_idx,
+                para_idx,
+                start_offset,
+                end_offset,
+                props_json,
+            )?;
+        }
+        Ok("{\"ok\":true}".to_string())
+    }
+
     /// 글자 서식 ID 직접 복원 (네이티브) — 본문 문단.
     ///
     /// Undo/Redo에서는 `CharProperties` JSON을 다시 적용하지 않고, 적용 전/후
@@ -1454,6 +1526,57 @@ impl DocumentCore {
             section: sec_idx,
             para: para_idx,
         });
+        Ok("{\"ok\":true}".to_string())
+    }
+
+    /// 여러 구역에 걸친 본문 선택의 모든 문단에 문단 서식을 적용한다.
+    pub fn apply_para_format_across_sections_native(
+        &mut self,
+        start_section_idx: usize,
+        start_para_idx: usize,
+        end_section_idx: usize,
+        end_para_idx: usize,
+        props_json: &str,
+    ) -> Result<String, HwpError> {
+        if start_section_idx > end_section_idx {
+            return Err(HwpError::RenderError(
+                "시작 구역이 끝 구역보다 뒤에 있음".to_string(),
+            ));
+        }
+
+        let mut targets = Vec::new();
+        for section_idx in start_section_idx..=end_section_idx {
+            let section =
+                self.document.sections.get(section_idx).ok_or_else(|| {
+                    HwpError::RenderError(format!("구역 {} 범위 초과", section_idx))
+                })?;
+            if section.paragraphs.is_empty() {
+                continue;
+            }
+            let range_start = if section_idx == start_section_idx {
+                start_para_idx
+            } else {
+                0
+            };
+            let range_end = if section_idx == end_section_idx {
+                end_para_idx
+            } else {
+                section.paragraphs.len() - 1
+            };
+            if range_start > range_end || range_end >= section.paragraphs.len() {
+                return Err(HwpError::RenderError(format!(
+                    "구역 {} 문단 범위 초과",
+                    section_idx
+                )));
+            }
+            for para_idx in range_start..=range_end {
+                targets.push((section_idx, para_idx));
+            }
+        }
+
+        for (section_idx, para_idx) in targets {
+            self.apply_para_format_native(section_idx, para_idx, props_json)?;
+        }
         Ok("{\"ok\":true}".to_string())
     }
 

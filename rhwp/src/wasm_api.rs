@@ -5544,6 +5544,28 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 여러 구역에 걸친 본문 선택 영역을 삭제한다. 구역 구조는 유지된다.
+    #[wasm_bindgen(js_name = deleteRangeAcrossSections)]
+    pub fn delete_range_across_sections(
+        &mut self,
+        start_section_idx: u32,
+        start_para_idx: u32,
+        start_char_offset: u32,
+        end_section_idx: u32,
+        end_para_idx: u32,
+        end_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.delete_range_across_sections_native(
+            start_section_idx as usize,
+            start_para_idx as usize,
+            start_char_offset as usize,
+            end_section_idx as usize,
+            end_para_idx as usize,
+            end_char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 셀 내 선택 영역을 삭제한다.
     ///
     /// 반환: JSON `{"ok":true,"paraIdx":N,"charOffset":N}`
@@ -6643,6 +6665,30 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 여러 구역에 걸친 본문 선택에 글자 서식을 적용한다.
+    #[wasm_bindgen(js_name = applyCharFormatAcrossSections)]
+    pub fn apply_char_format_across_sections(
+        &mut self,
+        start_section_idx: usize,
+        start_para_idx: usize,
+        start_char_offset: usize,
+        end_section_idx: usize,
+        end_para_idx: usize,
+        end_char_offset: usize,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        self.apply_char_format_across_sections_native(
+            start_section_idx,
+            start_para_idx,
+            start_char_offset,
+            end_section_idx,
+            end_para_idx,
+            end_char_offset,
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 글자 서식 ID를 직접 복원한다 (본문 문단).
     #[wasm_bindgen(js_name = setCharShapeId)]
     pub fn set_char_shape_id(
@@ -6893,6 +6939,26 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 여러 구역에 걸친 본문 선택의 모든 문단에 문단 서식을 적용한다.
+    #[wasm_bindgen(js_name = applyParaFormatAcrossSections)]
+    pub fn apply_para_format_across_sections(
+        &mut self,
+        start_section_idx: usize,
+        start_para_idx: usize,
+        end_section_idx: usize,
+        end_para_idx: usize,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        self.apply_para_format_across_sections_native(
+            start_section_idx,
+            start_para_idx,
+            end_section_idx,
+            end_para_idx,
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 문단의 paraShapeId를 직접 설정한다.
     #[wasm_bindgen(js_name = setParaShapeId)]
     pub fn set_para_shape_id(
@@ -6987,6 +7053,28 @@ impl HwpDocument {
             section_idx as usize,
             start_para_idx as usize,
             start_char_offset as usize,
+            end_para_idx as usize,
+            end_char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 여러 구역에 걸친 본문 선택을 문서 순서대로 내부 클립보드에 복사한다.
+    #[wasm_bindgen(js_name = copySelectionAcrossSections)]
+    pub fn copy_selection_across_sections(
+        &mut self,
+        start_section_idx: u32,
+        start_para_idx: u32,
+        start_char_offset: u32,
+        end_section_idx: u32,
+        end_para_idx: u32,
+        end_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.copy_selection_across_sections_native(
+            start_section_idx as usize,
+            start_para_idx as usize,
+            start_char_offset as usize,
+            end_section_idx as usize,
             end_para_idx as usize,
             end_char_offset as usize,
         )
@@ -7162,6 +7250,28 @@ impl HwpDocument {
             section_idx as usize,
             start_para_idx as usize,
             start_char_offset as usize,
+            end_para_idx as usize,
+            end_char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 여러 구역에 걸친 본문 선택을 하나의 HTML fragment로 내보낸다.
+    #[wasm_bindgen(js_name = exportSelectionAcrossSectionsHtml)]
+    pub fn export_selection_across_sections_html(
+        &self,
+        start_section_idx: u32,
+        start_para_idx: u32,
+        start_char_offset: u32,
+        end_section_idx: u32,
+        end_para_idx: u32,
+        end_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.export_selection_across_sections_html_native(
+            start_section_idx as usize,
+            start_para_idx as usize,
+            start_char_offset as usize,
+            end_section_idx as usize,
             end_para_idx as usize,
             end_char_offset as usize,
         )
