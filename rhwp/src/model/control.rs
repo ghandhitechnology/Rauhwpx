@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::document::SectionDef;
+use super::document::{RawRecord, SectionDef};
 use super::footnote::{Endnote, Footnote};
 use super::header_footer::{Footer, Header};
 use super::image::Picture;
@@ -460,6 +460,15 @@ pub struct FormObject {
 pub struct UnknownControl {
     /// 컨트롤 ID
     pub ctrl_id: u32,
+    /// CTRL_HEADER 의 ctrl_id 뒤에 있던 원본 payload.
+    ///
+    /// 편집으로 Section::raw_stream 이 무효화되어도 미지원 컨트롤을 파괴적으로
+    /// 재구성하지 않도록 그대로 보존한다.
+    pub raw_ctrl_data: Vec<u8>,
+    /// CTRL_HEADER 하위 레코드의 원본 순서와 payload.
+    ///
+    /// `RawRecord::level` 은 CTRL_HEADER 레벨 기준 상대 깊이(직접 자식 = 1)다.
+    pub raw_child_records: Vec<RawRecord>,
 }
 
 #[cfg(test)]

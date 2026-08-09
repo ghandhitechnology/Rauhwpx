@@ -5634,6 +5634,11 @@ impl HwpDocument {
     ///   "bytesLen": 678912,
     ///   "pageCountBefore": 9,
     ///   "pageCountAfter": 9,
+    ///   "pageCountMatches": true,
+    ///   "structureBefore": { "textCount": 100, "controlCount": 4, "objectCount": 2, "opaqueControlBytes": 32 },
+    ///   "structureAfter": { "textCount": 100, "controlCount": 4, "objectCount": 2, "opaqueControlBytes": 32 },
+    ///   "structureMatches": true,
+    ///   "serializationLosses": [],
     ///   "recovered": true
     /// }
     /// ```
@@ -5643,10 +5648,18 @@ impl HwpDocument {
     #[wasm_bindgen(js_name = exportHwpVerify)]
     pub fn export_hwp_verify(&mut self) -> Result<String, JsValue> {
         let v = self.serialize_hwp_with_verify().map_err(JsValue::from)?;
-        Ok(format!(
-            "{{\"bytesLen\":{},\"pageCountBefore\":{},\"pageCountAfter\":{},\"recovered\":{}}}",
-            v.bytes_len, v.page_count_before, v.page_count_after, v.recovered
-        ))
+        Ok(serde_json::json!({
+            "bytesLen": v.bytes_len,
+            "pageCountBefore": v.page_count_before,
+            "pageCountAfter": v.page_count_after,
+            "pageCountMatches": v.page_count_matches,
+            "structureBefore": v.structure_before,
+            "structureAfter": v.structure_after,
+            "structureMatches": v.structure_matches,
+            "serializationLosses": v.serialization_losses,
+            "recovered": v.recovered,
+        })
+        .to_string())
     }
 
     /// 원본 파일 형식을 반환한다 ("hwp", "hwpx", 또는 "hml").
