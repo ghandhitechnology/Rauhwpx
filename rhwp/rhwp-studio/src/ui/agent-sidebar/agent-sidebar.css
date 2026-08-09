@@ -3139,3 +3139,502 @@ body.ag-col-resizing {
     transition: none;
   }
 }
+
+/* ================================================================
+   Fullscreen workspace shell
+   Fullscreen is an application mode, not an enlarged sidebar. The
+   title bar owns layout controls; navigation and work surfaces meet
+   edge-to-edge with stable one-pixel boundaries.
+   ================================================================ */
+
+.ag-workspace-bar {
+  display: none;
+}
+
+.ag-fullscreen .ag-stage,
+.ag-fullscreen.ag-rail-collapsed .ag-stage,
+.ag-fullscreen.ag-review-collapsed .ag-stage,
+.ag-fullscreen.ag-rail-collapsed.ag-review-collapsed .ag-stage {
+  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr);
+  grid-template-rows: 48px minmax(0, 1fr);
+  background: var(--ag-bg);
+}
+
+.ag-fullscreen.ag-rail-collapsed .ag-stage,
+.ag-fullscreen.ag-rail-collapsed.ag-review-collapsed .ag-stage {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+/* A class mirrors the compact breakpoint so an in-flight grid transition
+   cannot retain the desktop rail track after the viewport changes. */
+.ag-fullscreen.ag-workspace-compact .ag-stage,
+.ag-fullscreen.ag-workspace-compact.ag-rail-collapsed .ag-stage,
+.ag-fullscreen.ag-workspace-compact.ag-review-collapsed .ag-stage,
+.ag-fullscreen.ag-workspace-compact.ag-rail-collapsed.ag-review-collapsed .ag-stage {
+  grid-template-columns: minmax(0, 1fr);
+  transition: none;
+}
+
+.ag-fullscreen.ag-workspace-compact .ag-chat-page,
+.ag-fullscreen.ag-workspace-compact .ag-review-column {
+  grid-column: 1;
+}
+
+.ag-fullscreen.ag-workspace-compact .ag-threads-page {
+  position: absolute;
+  top: 48px;
+  bottom: 0;
+  left: 0;
+  z-index: 12;
+  width: min(var(--ag-rail-w, 264px), 86vw);
+  border-right: 1px solid var(--ag-border);
+  box-shadow: var(--n-elev-3);
+}
+
+.ag-fullscreen .ag-workspace-bar {
+  position: relative;
+  z-index: 20;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: grid;
+  grid-template-columns: minmax(230px, var(--ag-rail-w, 264px)) minmax(280px, 1fr) minmax(230px, auto);
+  align-items: stretch;
+  min-width: 0;
+  border-bottom: 1px solid var(--ag-border);
+  background: color-mix(in srgb, var(--ag-bg-2) 94%, var(--ag-bg));
+  color: var(--ag-text);
+  user-select: none;
+}
+
+.ag-workspace-leading,
+.ag-workspace-trailing {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.ag-workspace-leading {
+  gap: 7px;
+  padding: 0 10px;
+}
+
+.ag-workspace-trailing {
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 0 8px 0 12px;
+}
+
+.ag-workspace-mark {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--ag-accent) 44%, var(--ag-border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ag-accent) 12%, var(--ag-bg));
+  color: var(--ag-text);
+  font-family: var(--ag-mono);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.ag-workspace-icon-btn,
+.ag-workspace-exit-btn,
+.ag-workspace-tab {
+  border: 0;
+  background: transparent;
+  color: var(--ag-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.ag-workspace-icon-btn {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 5px;
+}
+
+.ag-workspace-icon-btn .ui-column-icon,
+.ag-workspace-icon-btn .ag-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ag-workspace-icon-btn:hover,
+.ag-workspace-exit-btn:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-workspace-icon-btn:focus-visible,
+.ag-workspace-exit-btn:focus-visible,
+.ag-workspace-tab:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.ag-workspace-document-context {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+  padding-left: 2px;
+}
+
+.ag-workspace-document-name,
+.ag-workspace-selection-context {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-workspace-document-name {
+  color: var(--ag-text);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.ag-workspace-selection-context {
+  color: var(--ag-text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.ag-workspace-tabs {
+  display: flex;
+  min-width: 0;
+  align-items: stretch;
+  justify-content: center;
+  gap: 2px;
+}
+
+.ag-workspace-tab {
+  position: relative;
+  display: inline-flex;
+  min-width: 86px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.ag-workspace-tab::after {
+  position: absolute;
+  right: 12px;
+  bottom: -1px;
+  left: 12px;
+  height: 2px;
+  background: transparent;
+  content: '';
+}
+
+.ag-workspace-tab:hover {
+  color: var(--ag-text);
+}
+
+.ag-workspace-tab[aria-selected='true'] {
+  color: var(--ag-text);
+}
+
+.ag-workspace-tab[aria-selected='true']::after {
+  background: var(--ag-accent);
+}
+
+.ag-workspace-review-badge {
+  display: inline-flex;
+  min-width: 17px;
+  height: 17px;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ag-accent) 20%, var(--ag-bg));
+  color: var(--ag-text);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.ag-workspace-review-badge[hidden] {
+  display: none;
+}
+
+.ag-workspace-agent-context {
+  overflow: hidden;
+  max-width: 190px;
+  color: var(--ag-text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-workspace-exit-btn {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border-left: 1px solid var(--ag-border);
+  border-radius: 0;
+  font-size: 11px;
+}
+
+.ag-workspace-exit-btn .ag-icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* Sidebar chrome gives way to the workspace title bar in focus mode. */
+.ag-fullscreen .ag-chat-page > .ag-header {
+  display: none;
+}
+
+.ag-fullscreen .ag-threads-page,
+.ag-fullscreen .ag-chat-page,
+.ag-fullscreen .ag-review-column {
+  grid-row: 2;
+}
+
+.ag-fullscreen .ag-threads-page {
+  grid-column: 1;
+  gap: 8px;
+  padding: 8px 9px 14px;
+  border-right: 1px solid var(--ag-border);
+  background: color-mix(in srgb, var(--ag-bg-2) 96%, var(--ag-bg));
+}
+
+.ag-fullscreen .ag-threads-header {
+  min-height: 38px;
+  padding: 0 4px;
+}
+
+.ag-fullscreen .ag-threads-title {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.ag-fullscreen .ag-threads-new {
+  min-height: 32px;
+  border-color: var(--ag-border);
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.ag-fullscreen .ag-threads-new:hover {
+  background: var(--ag-hover);
+}
+
+.ag-fullscreen .ag-threads-item {
+  min-height: 42px;
+  border-radius: 5px;
+}
+
+.ag-fullscreen .ag-chat-page {
+  grid-column: 2;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  background: var(--ag-bg);
+  transition: opacity 140ms ease, visibility 0s linear 0s;
+}
+
+.ag-fullscreen.ag-workspace-changes .ag-chat-page {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 120ms ease, visibility 0s linear 120ms;
+}
+
+.ag-fullscreen .ag-messages {
+  max-width: 860px;
+  padding: 34px 38px 40px;
+}
+
+.ag-fullscreen .ag-composer {
+  max-width: 860px;
+  width: calc(100% - 48px);
+  margin-bottom: 20px;
+  border-radius: 9px;
+  box-shadow: var(--n-elev-2);
+}
+
+/* Changes is a full workspace surface, never an inset drawer. */
+.ag-fullscreen .ag-review-column,
+.ag-fullscreen.ag-review-collapsed .ag-review-column {
+  position: relative;
+  inset: auto;
+  z-index: 4;
+  grid-column: 2;
+  display: flex;
+  width: auto;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--ag-bg);
+  box-shadow: none;
+  overflow: hidden;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: none;
+  transition: opacity 140ms ease, visibility 0s linear 140ms;
+}
+
+.ag-fullscreen.ag-workspace-changes .ag-review-column,
+.ag-fullscreen.ag-review-drawer-open:not(.ag-review-collapsed) .ag-review-column {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: none;
+  transition: opacity 140ms ease, visibility 0s linear 0s;
+}
+
+.ag-fullscreen .ag-review-column-head {
+  min-height: 52px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--ag-border);
+  background: color-mix(in srgb, var(--ag-bg-2) 82%, var(--ag-bg));
+}
+
+.ag-fullscreen .ag-review-column-title {
+  font-size: 13px;
+}
+
+.ag-fullscreen .ag-review-column-close {
+  display: none;
+}
+
+.ag-fullscreen .ag-review-column .ag-review {
+  width: min(100%, 980px);
+  box-sizing: border-box;
+  margin-inline: auto;
+  padding: 22px 28px 32px;
+  background: transparent;
+}
+
+.ag-fullscreen .ag-review-card {
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.ag-fullscreen .ag-review-card.ag-claude,
+.ag-fullscreen .ag-review-card.ag-codex {
+  box-shadow: none;
+}
+
+.ag-fullscreen .ag-review-column > .ag-composer {
+  width: min(calc(100% - 48px), 860px);
+  margin: 0 auto 20px;
+}
+
+.ag-fullscreen .ag-review-resize {
+  display: none;
+}
+
+.ag-fullscreen .ag-rail-resize {
+  top: 48px;
+  left: calc(var(--ag-rail-w, 264px) - 3px);
+}
+
+.ag-fullscreen.ag-rail-collapsed .ag-rail-resize {
+  display: none;
+}
+
+@media (max-width: 960px) {
+  .ag-fullscreen .ag-stage,
+  .ag-fullscreen.ag-rail-collapsed .ag-stage,
+  .ag-fullscreen.ag-review-collapsed .ag-stage,
+  .ag-fullscreen.ag-rail-collapsed.ag-review-collapsed .ag-stage {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 48px minmax(0, 1fr);
+  }
+
+  .ag-fullscreen .ag-workspace-bar {
+    grid-template-columns: minmax(190px, 1fr) auto minmax(150px, 1fr);
+  }
+
+  .ag-fullscreen .ag-chat-page,
+  .ag-fullscreen .ag-review-column {
+    grid-column: 1;
+  }
+
+  .ag-fullscreen .ag-threads-page {
+    top: 48px;
+    bottom: 0;
+    height: auto;
+  }
+
+  .ag-workspace-agent-context {
+    display: none;
+  }
+}
+
+@media (max-width: 680px) {
+  .ag-fullscreen .ag-workspace-bar {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .ag-workspace-mark,
+  .ag-workspace-selection-context,
+  .ag-workspace-exit-label {
+    display: none;
+  }
+
+  .ag-workspace-leading {
+    padding-inline: 8px;
+  }
+
+  .ag-workspace-tab {
+    min-width: 68px;
+    padding-inline: 8px;
+  }
+
+  .ag-workspace-exit-btn {
+    width: 34px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .ag-fullscreen .ag-messages {
+    padding: 22px 14px 28px;
+  }
+
+  .ag-fullscreen .ag-composer,
+  .ag-fullscreen .ag-review-column > .ag-composer {
+    width: calc(100% - 20px);
+    margin-bottom: 10px;
+  }
+
+  .ag-fullscreen .ag-review-column .ag-review {
+    padding: 14px 10px 22px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-fullscreen .ag-chat-page,
+  .ag-fullscreen .ag-review-column,
+  .ag-fullscreen .ag-workspace-tab::after {
+    transition: none;
+  }
+}
+
+/* Keep a hidden Changes surface from creating an implicit second grid track
+   after the workspace crosses into compact mode. */
+.ag-fullscreen.ag-workspace-compact .ag-review-column,
+.ag-fullscreen.ag-workspace-compact.ag-review-collapsed .ag-review-column {
+  grid-column: 1;
+}
