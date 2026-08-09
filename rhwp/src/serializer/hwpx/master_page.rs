@@ -11,6 +11,7 @@ use crate::model::header_footer::{HeaderFooterApply, MasterPage};
 
 use super::context::SerializeContext;
 use super::section::{render_hp_p_open, render_paragraph_parts};
+use super::SerializeError;
 
 /// `<masterPage>`/section XML 공용 네임스페이스 블록 (empty_section0.xml 와 동일).
 const XMLNS: &str = r#"xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" xmlns:hp10="http://www.hancom.co.kr/hwpml/2016/paragraph" xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core" xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" xmlns:hhs="http://www.hancom.co.kr/hwpml/2011/history" xmlns:hm="http://www.hancom.co.kr/hwpml/2011/master-page" xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf/" xmlns:ooxmlchart="http://www.hancom.co.kr/hwpml/2016/ooxmlchart" xmlns:hwpunitchar="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar" xmlns:epub="http://www.idpf.org/2007/ops" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0""#;
@@ -51,11 +52,15 @@ fn page_duplicate_str(mp: &MasterPage) -> &'static str {
 
 /// 바탕쪽 1개를 `Contents/masterpage{N}.xml` 내용으로 직렬화한다.
 /// `id` 는 manifest/idRef 와 일치해야 하는 식별자(예: `masterpage0`).
-pub fn render_master_page_xml(mp: &MasterPage, id: &str, ctx: &mut SerializeContext) -> String {
+pub fn render_master_page_xml(
+    mp: &MasterPage,
+    id: &str,
+    ctx: &mut SerializeContext,
+) -> Result<String, SerializeError> {
     let mut body = String::new();
     let mut vert_cursor: u32 = 0;
     for p in &mp.paragraphs {
-        let (runs, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx);
+        let (runs, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx)?;
         vert_cursor = advance;
         let pid = ctx.next_para_id();
         let sid = ctx.effective_style_id(p.style_id);
@@ -65,7 +70,7 @@ pub fn render_master_page_xml(mp: &MasterPage, id: &str, ctx: &mut SerializeCont
         body.push_str("</hp:p>");
     }
 
-    format!(
+    Ok(format!(
         concat!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>"#,
             r#"<masterPage {xmlns} id="{id}" type="{ty}" pageNumber="{pn}" pageDuplicate="{pd}" pageFront="{pf}">"#,
@@ -89,7 +94,7 @@ pub fn render_master_page_xml(mp: &MasterPage, id: &str, ctx: &mut SerializeCont
         tr = mp.text_ref,
         nr = mp.num_ref,
         body = body,
-    )
+    ))
 }
 
 /// secPr 내부에 삽입할 `<hp:masterPage idRef="..."/>` 참조 묶음.
@@ -115,7 +120,7 @@ mod tests {
         };
         let doc = Document::default();
         let mut ctx = SerializeContext::collect_from_document(&doc);
-        let xml = render_master_page_xml(&mp, "0", &mut ctx);
+        let xml = render_master_page_xml(&mp, "0", &mut ctx).unwrap();
         assert!(xml.contains(r#"pageFront="1""#), "pageFront=1 방출: {xml}");
 
         let parsed =
@@ -134,7 +139,7 @@ mod tests {
         };
         let doc = Document::default();
         let mut ctx = SerializeContext::collect_from_document(&doc);
-        let xml = render_master_page_xml(&mp, "0", &mut ctx);
+        let xml = render_master_page_xml(&mp, "0", &mut ctx).unwrap();
         assert!(
             xml.contains(r#"textDirection="VERTICAL""#),
             "textDirection=VERTICAL 방출: {xml}"
