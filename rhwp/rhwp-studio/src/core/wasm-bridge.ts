@@ -2064,6 +2064,13 @@ export class WasmBridge {
     return JSON.parse(this.doc.deleteRange(sec, startPara, startOffset, endPara, endOffset));
   }
 
+  deleteRangeAcrossSections(startSec: number, startPara: number, startOffset: number, endSec: number, endPara: number, endOffset: number): { ok: boolean; sectionIdx: number; paraIdx: number; charOffset: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(this.doc.deleteRangeAcrossSections(
+      startSec, startPara, startOffset, endSec, endPara, endOffset,
+    ));
+  }
+
   deleteRangeInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, startCellPara: number, startOffset: number, endCellPara: number, endOffset: number): { ok: boolean; paraIdx: number; charOffset: number } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.deleteRangeInCell(sec, parentPara, controlIdx, cellIdx, startCellPara, startOffset, endCellPara, endOffset));
@@ -2074,6 +2081,13 @@ export class WasmBridge {
   copySelection(sec: number, startPara: number, startOffset: number, endPara: number, endOffset: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.copySelection(sec, startPara, startOffset, endPara, endOffset);
+  }
+
+  copySelectionAcrossSections(startSec: number, startPara: number, startOffset: number, endSec: number, endPara: number, endOffset: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.copySelectionAcrossSections(
+      startSec, startPara, startOffset, endSec, endPara, endOffset,
+    );
   }
 
   copySelectionInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, startCellPara: number, startOffset: number, endCellPara: number, endOffset: number): string {
@@ -2143,6 +2157,13 @@ export class WasmBridge {
     return this.doc.exportSelectionHtml(sec, startPara, startOffset, endPara, endOffset);
   }
 
+  exportSelectionAcrossSectionsHtml(startSec: number, startPara: number, startOffset: number, endSec: number, endPara: number, endOffset: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.exportSelectionAcrossSectionsHtml(
+      startSec, startPara, startOffset, endSec, endPara, endOffset,
+    );
+  }
+
   exportSelectionInCellHtml(sec: number, parentPara: number, controlIdx: number, cellIdx: number, startCellPara: number, startOffset: number, endCellPara: number, endOffset: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.exportSelectionInCellHtml(sec, parentPara, controlIdx, cellIdx, startCellPara, startOffset, endCellPara, endOffset);
@@ -2184,6 +2205,13 @@ export class WasmBridge {
   applyCharFormat(sec: number, para: number, startOffset: number, endOffset: number, propsJson: string): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.applyCharFormat(sec, para, startOffset, endOffset, propsJson);
+  }
+
+  applyCharFormatAcrossSections(startSec: number, startPara: number, startOffset: number, endSec: number, endPara: number, endOffset: number, propsJson: string): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.applyCharFormatAcrossSections(
+      startSec, startPara, startOffset, endSec, endPara, endOffset, propsJson,
+    );
   }
 
   setCharShapeId(sec: number, para: number, startOffset: number, endOffset: number, charShapeId: number): string {
@@ -2243,6 +2271,11 @@ export class WasmBridge {
   applyParaFormat(sec: number, para: number, propsJson: string): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.applyParaFormat(sec, para, propsJson);
+  }
+
+  applyParaFormatAcrossSections(startSec: number, startPara: number, endSec: number, endPara: number, propsJson: string): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.applyParaFormatAcrossSections(startSec, startPara, endSec, endPara, propsJson);
   }
 
   setParaShapeId(sec: number, para: number, paraShapeId: number): string {

@@ -2,6 +2,7 @@ import type { RemovedParaMeta, WasmBridge } from '@/core/wasm-bridge';
 import type { DocumentPosition, CharProperties, ParaProperties, CellPathLike, CellPathEntry } from '@/core/types';
 import { MAX_PAGE_LOCAL_TEXT_EDIT_CHARS } from './input-edit-invalidation';
 import type { LineEndpoints as LineEndpointsLike } from './object-drag-record';
+import { getBodySelectionSegments } from './body-selection-range';
 
 /** 편집 명령 공통 인터페이스 */
 export interface EditCommand {
@@ -700,10 +701,17 @@ export class DeleteSelectionCommand implements EditCommand {
           cellParaIndexOf(start), start.charOffset, cellParaIndexOf(end), end.charOffset,
         );
       } else {
-        wasm.deleteRange(
-          start.sectionIndex, start.paragraphIndex, start.charOffset,
-          end.paragraphIndex, end.charOffset,
-        );
+        if (start.sectionIndex === end.sectionIndex) {
+          wasm.deleteRange(
+            start.sectionIndex, start.paragraphIndex, start.charOffset,
+            end.paragraphIndex, end.charOffset,
+          );
+        } else {
+          wasm.deleteRangeAcrossSections(
+            start.sectionIndex, start.paragraphIndex, start.charOffset,
+            end.sectionIndex, end.paragraphIndex, end.charOffset,
+          );
+        }
       }
       return { ...start };
     });
@@ -740,6 +748,7 @@ interface CharShapeSpan {
 /** 문단 하나에 대한 서식 적용 정보 */
 interface ParaFormatEntry {
   paraIndex: number;       // 본문: paragraphIndex, 셀: cellParaIndex
+  sectionIndex: number;
   /** undo용: 적용 전 run별 스팬 (startOffset~endOffset 을 빈틈없이 덮는다) */
   beforeSpans: CharShapeSpan[];
   /** redo용: 적용 후 run별 스팬 (첫 execute 에서 채움) */
@@ -836,25 +845,52 @@ export class ApplyCharFormatCommand implements EditCommand {
         const beforeSpans = sampleCharShapeSpans(propsAt, from, to);
 
         wasm.applyCharFormatInCellByPath(sec, ppi, pathP, from, to, propsJson);
-        this.entries.push({ paraIndex: p, beforeSpans, afterSpans: deriveAfterSpans(beforeSpans, propsAt) });
+        this.entries.push({
+          paraIndex: p,
+          beforeSpans,
+          afterSpans: deriveAfterSpans(beforeSpans, propsAt),
+          sectionIndex: sec,
+        });
       }
     } else {
-      const sec = start.sectionIndex;
-      const startPara = start.paragraphIndex;
-      const endPara = end.paragraphIndex;
-
       this.entries = [];
-      for (let p = startPara; p <= endPara; p++) {
-        const from = p === startPara ? start.charOffset : 0;
-        const to = p === endPara ? end.charOffset : wasm.getParagraphLength(sec, p);
-        if (to <= from) continue;
+      const segments = getBodySelectionSegments(wasm, start, end);
+      const isCrossSection = start.sectionIndex !== end.sectionIndex;
+      for (const segment of segments) {
+        const sec = segment.sectionIndex;
+        for (let p = segment.startParagraphIndex; p <= segment.endParagraphIndex; p++) {
+          const from = p === segment.startParagraphIndex ? segment.startCharOffset : 0;
+          const to = p === segment.endParagraphIndex
+            ? segment.endCharOffset
+            : wasm.getParagraphLength(sec, p);
+          if (to <= from) continue;
 
-        // 셀 분기와 같은 이유로 run 단위 스팬 캡처.
-        const propsAt = (o: number): number => wasm.getCharPropertiesAt(sec, p, o).charShapeId ?? 0;
-        const beforeSpans = sampleCharShapeSpans(propsAt, from, to);
+          // 셀 분기와 같은 이유로 run 단위 스팬 캡처.
+          const propsAt = (o: number): number => wasm.getCharPropertiesAt(sec, p, o).charShapeId ?? 0;
+          const beforeSpans = sampleCharShapeSpans(propsAt, from, to);
 
-        wasm.applyCharFormat(sec, p, from, to, propsJson);
-        this.entries.push({ paraIndex: p, beforeSpans, afterSpans: deriveAfterSpans(beforeSpans, propsAt) });
+          if (!isCrossSection) {
+            wasm.applyCharFormat(sec, p, from, to, propsJson);
+          }
+          this.entries.push({
+            paraIndex: p,
+            beforeSpans,
+            afterSpans: isCrossSection ? undefined : deriveAfterSpans(beforeSpans, propsAt),
+            sectionIndex: sec,
+          });
+        }
+      }
+      if (isCrossSection) {
+        wasm.applyCharFormatAcrossSections(
+          start.sectionIndex, start.paragraphIndex, start.charOffset,
+          end.sectionIndex, end.paragraphIndex, end.charOffset,
+          propsJson,
+        );
+        for (const entry of this.entries) {
+          const propsAt = (offset: number): number =>
+            wasm.getCharPropertiesAt(entry.sectionIndex, entry.paraIndex, offset).charShapeId ?? 0;
+          entry.afterSpans = deriveAfterSpans(entry.beforeSpans, propsAt);
+        }
       }
     }
 
@@ -880,7 +916,7 @@ export class ApplyCharFormatCommand implements EditCommand {
             span.startOffset, span.endOffset, span.charShapeId,
           );
         } else {
-          wasm.setCharShapeId(start.sectionIndex, entry.paraIndex, span.startOffset, span.endOffset, span.charShapeId);
+          wasm.setCharShapeId(entry.sectionIndex, entry.paraIndex, span.startOffset, span.endOffset, span.charShapeId);
         }
       }
     }
@@ -974,8 +1010,22 @@ export class ApplyParaFormatCommand implements EditCommand {
       beforeParaShapeId: getParaShapeId(wasm, target),
     }));
 
-    for (const entry of entries) {
-      applyParaFormatToTarget(wasm, entry.target, propsJson);
+    const firstTarget = entries[0]?.target;
+    const lastTarget = entries[entries.length - 1]?.target;
+    const isCrossSectionBodyRange = firstTarget?.kind === 'body'
+      && lastTarget?.kind === 'body'
+      && firstTarget.sec !== lastTarget.sec
+      && entries.every(entry => entry.target.kind === 'body');
+    if (isCrossSectionBodyRange) {
+      wasm.applyParaFormatAcrossSections(
+        firstTarget.sec, firstTarget.para,
+        lastTarget.sec, lastTarget.para,
+        propsJson,
+      );
+    } else {
+      for (const entry of entries) {
+        applyParaFormatToTarget(wasm, entry.target, propsJson);
+      }
     }
     for (const entry of entries) {
       entry.afterParaShapeId = getParaShapeId(wasm, entry.target);
