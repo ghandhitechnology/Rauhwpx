@@ -6,29 +6,43 @@
 //!
 //! 권위 정답지는 한글 2022 편집기 37쪽
 //! (`pdf/issue1921/59043_regulatory_analysis-2022.pdf`, 편집기 PageCount=37 정합).
-//! 잔여 +5는 2단 배치 밀도(부동 표 흐름 패킹) 축으로 #1921 후속 과제 — 본 테스트는
-//! 현재 도달값 42를 핀해 개선(37 방향)과 회귀(43+)를 모두 표면화한다.
+//! shared cell-cut normalization, wrapper ownership, saved rewind, column-tail packing을
+//! 정합한 뒤 37쪽과 핵심 표 fragment 경계를 함께 고정한다.
 
 use std::fs;
 use std::path::Path;
 
-fn page_count_of(rel: &str) -> u32 {
+fn load(rel: &str) -> rhwp::wasm_api::HwpDocument {
     let repo_root = env!("CARGO_MANIFEST_DIR");
     let path = Path::new(repo_root).join(rel);
     let bytes = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
-    let doc = rhwp::wasm_api::HwpDocument::from_bytes(&bytes)
-        .unwrap_or_else(|e| panic!("parse {}: {:?}", rel, e));
-    doc.page_count()
+    rhwp::wasm_api::HwpDocument::from_bytes(&bytes)
+        .unwrap_or_else(|e| panic!("parse {}: {:?}", rel, e))
 }
 
 #[test]
 fn regulatory_59043_page_count_pin() {
-    let pages = page_count_of("samples/issue1921/59043_regulatory_analysis.hwp");
-    assert_eq!(
-        pages, 41,
-        "issue1921 59043 핀 41쪽 (한글 2022 정답지 37쪽, 잔여 +4=배치 밀도 축; #2195 전각·outer margin·pad 정합으로 42→41). \
-         실측 {}p — 42p+면 sliver/과분할 회귀, 41p 미만이면 개선이므로 핀과 \
-         정답지(37)를 갱신할 것.",
-        pages
+    let doc = load("samples/issue1921/59043_regulatory_analysis.hwp");
+    assert_eq!(doc.page_count(), 37, "한글 2022 오라클은 37쪽");
+
+    let p11 = doc.dump_page_items(Some(10));
+    let p12 = doc.dump_page_items(Some(11));
+    let p13 = doc.dump_page_items(Some(12));
+    assert!(p11.contains("pi=98") && p11.contains("end_cut=[81]"));
+    assert!(p12.contains("pi=98") && p12.contains("start_cut=[81]") && p12.contains("end_cut=[]"));
+    assert!(
+        !p13.contains("pi=98"),
+        "6x1 그림 표는 두 쪽에서 끝나야 한다"
+    );
+
+    let p17 = doc.dump_page_items(Some(16));
+    let p18 = doc.dump_page_items(Some(17));
+    let p19 = doc.dump_page_items(Some(18));
+    assert!(p17.contains("pi=153") && p17.contains("rows=0..9"));
+    assert!(p18.contains("pi=153") && p18.contains("rows=9..50"));
+    assert!(p19.contains("pi=153") && p19.contains("rows=50..56"));
+    assert!(
+        p19.contains("pi=160"),
+        "후속 Canada 표는 같은 쪽 tail에 pack되어야 한다"
     );
 }

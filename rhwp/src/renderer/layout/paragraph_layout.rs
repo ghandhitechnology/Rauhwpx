@@ -2074,7 +2074,7 @@ impl LayoutEngine {
                     );
                     Some(cloned)
                 } else if column_inner_width > 0.0
-                    && crate::renderer::composer::masked_stored_lines_stale(
+                    && crate::renderer::composer::stored_lines_stale_for_body(
                         comp,
                         para,
                         column_inner_width,
