@@ -1618,6 +1618,117 @@ pub fn masked_stored_lines_stale(
     stale
 }
 
+/// 본문 저장 분할이 작은 treat-as-char 표식의 host 폭을 반영하지 않은 경우.
+///
+/// HWPX 편집 저장본에는 글머리 그림/도형과 텍스트가 한 줄에 함께 있으면서,
+/// lineSeg 는 표식이 차지하는 폭을 빼기 전의 분할로 남는 경우가 있다. 큰 인라인
+/// 그림이나 그림만 있는 문단은 대상이 아니며, 작은 1개 표식이 저장 줄 높이 안에
+/// 들어가고 fresh 조판이 실제로 더 많은 줄을 요구할 때만 저장 분할을 무효화한다.
+fn compact_tac_marker_stored_lines_stale(
+    composed: &ComposedParagraph,
+    para: &Paragraph,
+    inner_width_px: f64,
+    styles: &ResolvedStyleSet,
+) -> bool {
+    let stored = !para.line_segs.is_empty()
+        && para
+            .line_segs
+            .iter()
+            .all(|seg| seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0);
+    if !stored
+        || composed.lines.is_empty()
+        || composed.lines.len() != para.line_segs.len()
+        || inner_width_px <= 0.0
+        || !para
+            .text
+            .chars()
+            .any(|c| c > '\u{001F}' && c != '\u{FFFC}' && !c.is_whitespace())
+        || composed.tac_controls.len() != 1
+    {
+        return false;
+    }
+
+    let (_, width_hu, control_index) = composed.tac_controls[0];
+    let line_height_hu = para
+        .line_segs
+        .first()
+        .map(|seg| seg.line_height.max(1) as u32)
+        .unwrap_or(1);
+    let compact_marker = para
+        .controls
+        .get(control_index)
+        .and_then(|control| match control {
+            Control::Picture(pic) if pic.common.treat_as_char => {
+                Some((pic.common.width, pic.common.height))
+            }
+            Control::Shape(shape) if shape.common().treat_as_char => {
+                let common = shape.common();
+                Some((common.width, common.height))
+            }
+            _ => None,
+        })
+        .is_some_and(|(width, height)| {
+            width_hu > 0
+                && width <= line_height_hu.saturating_mul(2)
+                && height <= line_height_hu.saturating_mul(3) / 2
+        });
+    if !compact_marker {
+        return false;
+    }
+
+    let first_text_width = estimate_composed_line_width(&composed.lines[0], styles);
+    // 다중 저장줄은 첫 줄 자체가 현재 폰트 추정치와 5% 안에서 정합할 때만
+    // TAC host 폭 누락을 원인으로 귀속한다. 그보다 큰 차이는 일반 폰트 메트릭
+    // 오차와 구분할 수 없으므로 저장 분할을 유지한다. 단일 저장줄은 fresh 에서
+    // 실제 두 줄이 되는지가 그 자체로 강한 under-fill 증거다.
+    if composed.lines.len() > 1 && first_text_width > inner_width_px * 1.05 {
+        return false;
+    }
+
+    let mut probe = composed.clone();
+    let mut para_no_ls = para.clone();
+    para_no_ls.line_segs.clear();
+    let marker_width_px = para
+        .line_segs
+        .first()
+        .filter(|seg| seg.segment_width > 0)
+        .map(|seg| width_hu as f64 / seg.segment_width as f64 * inner_width_px)
+        .unwrap_or(0.0);
+    restyle_fallback_runs_by_char_shapes(&mut probe, &para_no_ls);
+    recompose_for_cell_width_impl(
+        &mut probe,
+        &para_no_ls,
+        inner_width_px,
+        styles,
+        marker_width_px,
+    );
+    let stale = probe.lines.len() > composed.lines.len();
+    if stale && std::env::var("RHWP_DIAG_REWRAP").is_ok() {
+        eprintln!(
+            "DIAG_REWRAP tac-host inner={:.0} first={:.1} marker={:.1} stored={} fresh={} text='{}'",
+            inner_width_px,
+            first_text_width,
+            marker_width_px,
+            composed.lines.len(),
+            probe.lines.len(),
+            para.text.chars().take(24).collect::<String>(),
+        );
+    }
+    stale
+}
+
+/// 본문 저장 lineSeg 를 신뢰할 수 없는 공통 판정. 마스킹/물리적 과밀과
+/// 작은 TAC 표식 host 폭 누락을 한 경로로 묶어 측정·조판·렌더가 같은 줄을 쓴다.
+pub fn stored_lines_stale_for_body(
+    composed: &ComposedParagraph,
+    para: &Paragraph,
+    inner_width_px: f64,
+    styles: &ResolvedStyleSet,
+) -> bool {
+    masked_stored_lines_stale(composed, para, inner_width_px, styles)
+        || compact_tac_marker_stored_lines_stale(composed, para, inner_width_px, styles)
+}
+
 /// [#2279] 본문(column) 판 부실-저장 예외 — 저장 분할이 실폭 모순(과잉)이거나
 /// 마스킹 문단의 저장 줄수가 fresh 와 다르면(과소 포함) 저장을 불신하고 본문
 /// 경로(`recompose_for_body_width` — 글자모양 재분할 포함)로 fresh 재래핑한다.
@@ -1628,12 +1739,31 @@ pub fn recompose_stored_lines_if_overflowing_body(
     column_inner_width_px: f64,
     styles: &ResolvedStyleSet,
 ) {
-    if !masked_stored_lines_stale(composed, para, column_inner_width_px, styles) {
+    if !stored_lines_stale_for_body(composed, para, column_inner_width_px, styles) {
         return;
     }
     let mut para_no_ls = para.clone();
     para_no_ls.line_segs.clear();
-    recompose_for_body_width(composed, &para_no_ls, column_inner_width_px, styles);
+    let first_line_reserve_px = if composed.tac_controls.len() == 1 {
+        para.line_segs
+            .first()
+            .filter(|seg| seg.segment_width > 0)
+            .map(|seg| {
+                composed.tac_controls[0].1.max(0) as f64 / seg.segment_width as f64
+                    * column_inner_width_px
+            })
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    restyle_fallback_runs_by_char_shapes(composed, &para_no_ls);
+    recompose_for_cell_width_impl(
+        composed,
+        &para_no_ls,
+        column_inner_width_px,
+        styles,
+        first_line_reserve_px,
+    );
 }
 
 pub fn recompose_for_cell_width(
@@ -1641,6 +1771,16 @@ pub fn recompose_for_cell_width(
     para: &Paragraph,
     cell_inner_width_px: f64,
     styles: &ResolvedStyleSet,
+) {
+    recompose_for_cell_width_impl(composed, para, cell_inner_width_px, styles, 0.0);
+}
+
+fn recompose_for_cell_width_impl(
+    composed: &mut ComposedParagraph,
+    para: &Paragraph,
+    cell_inner_width_px: f64,
+    styles: &ResolvedStyleSet,
+    first_line_reserve_px: f64,
 ) {
     let has_synthetic_line_segs = !para.line_segs.is_empty()
         && para
@@ -1675,7 +1815,7 @@ pub fn recompose_for_cell_width(
     // 종전 Task #671 전체 폭 유지 (이중 폭 적용 시 65 over-split, git bisect 0e21ec08).
     let hwp3_legacy_bullet =
         styles.hwp3_variant || is_hwp3_hwp5_missing_lineseg_legacy_bullet(para, composed, styles);
-    let (first_width_px, cont_width_px) = styles
+    let (mut first_width_px, cont_width_px) = styles
         .para_styles
         .get(para.para_shape_id as usize)
         .map(|ps| {
@@ -1691,6 +1831,7 @@ pub fn recompose_for_cell_width(
             }
         })
         .unwrap_or((cell_inner_width_px, cell_inner_width_px));
+    first_width_px = (first_width_px - first_line_reserve_px.max(0.0)).max(0.0);
     let text_width_px = first_width_px.max(cont_width_px);
     if text_width_px <= 0.0 {
         return;
