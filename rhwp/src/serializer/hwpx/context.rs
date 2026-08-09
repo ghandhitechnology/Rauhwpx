@@ -90,6 +90,9 @@ pub struct SerializeContext {
     pub style_ids: IdPool<u16>,
     /// `bin_data_id` (IR) → manifest 엔트리 매핑
     pub bin_data_map: HashMap<u16, BinDataEntry>,
+    /// HWPX-native OOXML chart bridge ID → Chart/chartN.xml.
+    /// These parts are deliberately separate from BinData/OLE.
+    chart_part_map: HashMap<u32, String>,
     /// 문서 전역 문단 ID 카운터 — `<hp:p id="...">` 에 발급한다.
     para_id_counter: u32,
     /// subList(셀·글상자) 직렬화 중첩 깊이 (#1379 3단계).
@@ -170,6 +173,13 @@ impl SerializeContext {
         // 순번(i+1) 명명은 링크 항목으로 id 에 구멍이 있는 문서(#1891 73504)에서
         // 이름과 id 가 어긋나 재파스 그림 참조가 엉킨다.
         for bd in doc.bin_data_content.iter() {
+            if bd.extension == "ooxml_chart" && bd.id > 60000 {
+                ctx.chart_part_map.insert(
+                    u32::from(bd.id),
+                    format!("Chart/chart{}.xml", bd.id - 60000),
+                );
+                continue;
+            }
             // 빈 확장자는 원본과 동일하게 확장자 없이(`image{id}.`) 재직렬화한다.
             // 예전엔 `.bin` 기본값을 붙였으나(#1981), 원본이 확장자 없는 BinData
             // (`BinData/image13.` 등, OLE·미상 임베드)를 담은 경우 라운드트립 확장자
@@ -232,6 +242,12 @@ impl SerializeContext {
         self.bin_data_map
             .get(&bin_data_id)
             .map(|e| e.manifest_id.as_str())
+    }
+
+    /// Synthetic renderer bridge IDs for native HWPX charts resolve back to
+    /// their editable Chart/chartN.xml package part.
+    pub fn resolve_chart_href(&self, bin_data_id: u32) -> Option<&str> {
+        self.chart_part_map.get(&bin_data_id).map(String::as_str)
     }
 
     /// 모든 참조가 해소되었는지 단언. 해소되지 않은 ID가 있으면 `SerializeError::XmlError` 반환.
