@@ -168,16 +168,20 @@ pub fn check_package(hwpx_bytes: &[u8], doc: &Document) -> PackageCheckReport {
 
     // 7. BinData 수·확장자 보존 (IR 기준)
     let zip_bin: Vec<&String> = names.iter().filter(|n| n.starts_with("BinData/")).collect();
-    if zip_bin.len() != doc.bin_data_content.len() {
+    let ir_bin_data: Vec<_> = doc
+        .bin_data_content
+        .iter()
+        .filter(|entry| entry.extension != "ooxml_chart")
+        .collect();
+    if zip_bin.len() != ir_bin_data.len() {
         report.push(format!(
             "BinData 엔트리 수 불일치: zip={} ir={}",
             zip_bin.len(),
-            doc.bin_data_content.len()
+            ir_bin_data.len()
         ));
     } else {
         let mut zip_exts: Vec<String> = zip_bin.iter().map(|n| extension_lower(n)).collect();
-        let mut ir_exts: Vec<String> = doc
-            .bin_data_content
+        let mut ir_exts: Vec<String> = ir_bin_data
             .iter()
             .map(|b| b.extension.to_ascii_lowercase())
             .collect();

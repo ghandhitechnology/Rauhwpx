@@ -405,6 +405,43 @@ pub(crate) fn write_ole<W: Write>(
     Ok(())
 }
 
+/// Write an HWPX-native editable chart reference.
+///
+/// `OleShape` is used internally as the layout bridge for parsed `<hp:chart>`
+/// controls, but its synthetic 60000+N ID must never escape as BinData/OLE.
+pub(crate) fn write_hwpx_chart<W: Write>(
+    w: &mut Writer<W>,
+    chart: &OleShape,
+    chart_href: &str,
+    ctx: &mut SerializeContext,
+) -> Result<(), SerializeError> {
+    let c = &chart.common;
+    let id = c.instance_id.to_string();
+    let z_order = c.z_order.to_string();
+    start_tag_attrs(
+        w,
+        "hp:chart",
+        &[
+            ("id", &id),
+            ("zOrder", &z_order),
+            ("numberingType", numbering_type_str(c.numbering_type)),
+            ("textWrap", text_wrap_str(c.text_wrap)),
+            ("textFlow", text_flow_str(c.text_flow)),
+            ("lock", bool01(c.locked)),
+            ("dropcapstyle", "None"),
+            ("chartIDRef", chart_href),
+        ],
+    )?;
+    write_sz(w, c)?;
+    write_pos(w, c)?;
+    write_out_margin(w, c)?;
+    if let Some(caption) = &chart.caption {
+        write_caption(w, caption, ctx)?;
+    }
+    write_shape_comment(w, c)?;
+    end_tag(w, "hp:chart")
+}
+
 // =====================================================================
 // <hp:drawText> — 글상자 내부 텍스트
 // =====================================================================
@@ -469,7 +506,11 @@ pub fn write_draw_text<W: Write>(
         let sid = ctx.effective_style_id(para.style_id);
         ctx.style_ids.reference(sid as u16);
 
-        let (runs, linesegs, advance) = render_paragraph_parts(para, vert_cursor, ctx);
+        let rendered = render_paragraph_parts(para, vert_cursor, ctx);
+        if rendered.is_err() {
+            ctx.sub_list_depth -= 1;
+        }
+        let (runs, linesegs, advance) = rendered?;
         vert_cursor = advance;
         let pid = ctx.next_para_id();
         let mut p_xml = render_hp_p_open(para, pid, sid);
