@@ -4,8 +4,9 @@
 - 출처: hwpdocs 코퍼스 `opinion_downloads/보건복지부/59043_규제영향분석서.hwp`
   (국민참여입법센터 공개 규제영향분석서, 원본 그대로 복사).
 - PR #2092(RowBreak 블록컷 sliver 흡수)의 핵심 개선 타깃 문서.
-  - 수정 전 rhwp 48쪽 → 수정 후 **42쪽** (한글 2022 편집기 **37쪽**, 잔여 +5).
-  - 잔여 +5는 2단 배치 밀도(부동 표 흐름 패킹) 축 — #1921 후속 과제.
+  - 최초 rhwp 48쪽 → sliver 수정 후 42쪽 → P0 parity 후 **37쪽**.
+  - Square/Tight 셀 개체의 저장 cut 축과 시각적 packed extent를 통일하고,
+    외곽 wrapper ownership·저장 page rewind·단 tail packing을 함께 정합했다.
 - 기준 PDF: `pdf/issue1921/59043_regulatory_analysis-2022.pdf`
   (한글 2022 COM, Print 액션 1-up 강제 출력 37쪽 = 편집기 PageCount 37 정합).
   - 주의: FileSaveAsPdf 경로는 sticky 인쇄 설정(모아찍기)을 따라가므로

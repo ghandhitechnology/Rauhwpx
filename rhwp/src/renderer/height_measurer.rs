@@ -556,7 +556,9 @@ impl HeightMeasurer {
                     );
                     Some(cloned)
                 } else if inner > 0.0
-                    && crate::renderer::composer::masked_stored_lines_stale(c, para, inner, styles)
+                    && crate::renderer::composer::stored_lines_stale_for_body(
+                        c, para, inner, styles,
+                    )
                 {
                     // [#2279] 마스킹 저장분할 stale(실폭-과잉/줄수-과소) 본문 문단
                     // fresh 재래핑 — typeset/paragraph_layout(렌더)와 동일.
@@ -999,39 +1001,10 @@ impl HeightMeasurer {
                 row_block_end: rbe,
             };
         }
-        // 1x1 래퍼 표 감지: 내부 표의 높이를 직접 측정.
-        // (Task #688) 셀 paragraphs 가 2개 이상이면 첫 nested 표만 unwrap 시 나머지
-        // paragraph 의 nested 표가 누락되므로 paragraphs.len() == 1 가드를 둔다.
-        // controls.len() == 1 가드는 두지 않는다 — table_layout 분기와 일관성을 위해
-        // 정렬 마커 등 다른 control 이 동거하는 케이스에서도 첫 nested table 만 추출한다.
-        if table.row_count == 1 && table.col_count == 1 && table.cells.len() == 1 {
-            let cell = &table.cells[0];
-            if cell.paragraphs.len() == 1 {
-                let p = &cell.paragraphs[0];
-                let has_visible_text = p
-                    .text
-                    .chars()
-                    .any(|ch| !ch.is_whitespace() && ch != '\r' && ch != '\n');
-                if !has_visible_text {
-                    if let Some(nested) = p.controls.iter().find_map(|c| {
-                        if let Control::Table(t) = c {
-                            Some(t.as_ref())
-                        } else {
-                            None
-                        }
-                    }) {
-                        return self.measure_table_impl(
-                            nested,
-                            para_index,
-                            control_index,
-                            styles,
-                            depth + 1,
-                            width_scale,
-                        );
-                    }
-                }
-            }
-        }
+        // A visually transparent 1x1 wrapper is still the table owned by pagination. Borrowing the
+        // nested row vector makes it disagree with the owner row count and lets RowBreak count the
+        // nested content twice. `cell_controls_height` includes the nested table, while
+        // `cell_units` exposes its rows if the wrapper must fragment. Paint may still unwrap it.
 
         let row_count = table.row_count as usize;
         let mut row_heights = vec![0.0f64; row_count];
@@ -1049,6 +1022,7 @@ impl HeightMeasurer {
                 }
             }
         }
+        let declared_row_heights = row_heights.clone();
 
         // 2단계: 셀 내 실제 컨텐츠 높이 계산 (layout_table과 동일)
         for cell in &table.cells {
@@ -1889,6 +1863,47 @@ impl HeightMeasurer {
                 if required_height > combined {
                     let deficit = required_height - combined;
                     row_heights[r + span - 1] += deficit;
+                }
+            }
+        }
+
+        // A RowBreak table can carry a complete saved row grid even when its cell paragraphs have
+        // no LINE_SEG records. Fallback font metrics are useful for rejecting a stale grid, but
+        // must not inflate a few rows repeatedly across a multi-page table. Treat the grid as
+        // coherent only when it covers almost every row and the complete content measurement is
+        // within 10% of it. Larger disagreements remain content-driven.
+        let declared_rows = declared_row_heights
+            .iter()
+            .filter(|height| **height > 0.0)
+            .count();
+        let all_cells_without_stored_lines = table.cells.iter().all(|cell| {
+            cell.paragraphs
+                .iter()
+                .all(crate::renderer::para_has_no_stored_line_segs)
+        });
+        let declared_grid_sum = row_heights
+            .iter()
+            .zip(&declared_row_heights)
+            .map(|(measured, declared)| {
+                if *declared > 0.0 {
+                    *declared
+                } else {
+                    *measured
+                }
+            })
+            .sum::<f64>();
+        let measured_grid_sum = row_heights.iter().sum::<f64>();
+        let coherent_declared_row_grid = matches!(table.page_break, TablePageBreak::RowBreak)
+            && row_count >= 16
+            && declared_rows * 10 >= row_count * 9
+            && all_cells_without_stored_lines
+            && declared_grid_sum > 0.0
+            && measured_grid_sum >= declared_grid_sum
+            && measured_grid_sum <= declared_grid_sum * 1.10;
+        if coherent_declared_row_grid {
+            for (height, declared) in row_heights.iter_mut().zip(&declared_row_heights) {
+                if *declared > 0.0 {
+                    *height = *declared;
                 }
             }
         }

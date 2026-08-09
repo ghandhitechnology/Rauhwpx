@@ -3009,7 +3009,8 @@ impl DocumentCore {
         let hwp3_origin_flow_spacing_before = uses_hwp3_origin_flow_spacing_before(&self.document);
         let measurer = HeightMeasurer::new(self.dpi)
             .with_hwp3_variant(profile.hwp3_layout())
-            .with_hwp3_origin_flow_spacing_before(hwp3_origin_flow_spacing_before);
+            .with_hwp3_origin_flow_spacing_before(hwp3_origin_flow_spacing_before)
+            .with_render_normalization(std::sync::Arc::clone(&self.render_normalization.overlay));
         let column_def = Self::find_initial_column_def(paragraphs);
         let layout =
             PageLayoutInfo::from_page_def(&section.section_def.page_def, &column_def, self.dpi);
@@ -3036,7 +3037,8 @@ impl DocumentCore {
         } else {
             measurer.measure_section(paragraphs, composed, &self.styles, Some(column_width))
         };
-        let typesetter = TypesetEngine::new(self.dpi);
+        let typesetter = TypesetEngine::new(self.dpi)
+            .with_render_normalization(std::sync::Arc::clone(&self.render_normalization.overlay));
         let Some(renderer_job) = typesetter.begin_resumable_table_pagination(
             paragraphs,
             composed,
@@ -3136,14 +3138,18 @@ impl DocumentCore {
                     page_count: self.page_count(),
                 };
             };
-            TypesetEngine::new(self.dpi).step_resumable_table_pagination(
-                &mut pending.renderer_job,
-                paragraph,
-                table,
-                measured_table,
-                &self.styles,
-                fragment_budget,
-            )
+            TypesetEngine::new(self.dpi)
+                .with_render_normalization(std::sync::Arc::clone(
+                    &self.render_normalization.overlay,
+                ))
+                .step_resumable_table_pagination(
+                    &mut pending.renderer_job,
+                    paragraph,
+                    table,
+                    measured_table,
+                    &self.styles,
+                    fragment_budget,
+                )
         };
         if !step.complete {
             self.pending_pagination_job = Some(pending);
@@ -3158,11 +3164,16 @@ impl DocumentCore {
         let section_index = pending.descriptor.section_index;
         let result = {
             let section = &self.document.sections[section_index];
-            let Some(mut result) = TypesetEngine::new(self.dpi).finish_resumable_table_pagination(
-                pending.renderer_job,
-                &section.paragraphs,
-                section_index,
-            ) else {
+            let Some(mut result) = TypesetEngine::new(self.dpi)
+                .with_render_normalization(std::sync::Arc::clone(
+                    &self.render_normalization.overlay,
+                ))
+                .finish_resumable_table_pagination(
+                    pending.renderer_job,
+                    &section.paragraphs,
+                    section_index,
+                )
+            else {
                 return DeferredPaginationStepResult {
                     state: DeferredPaginationJobState::Fallback,
                     revision,
@@ -3609,7 +3620,9 @@ impl DocumentCore {
                 } else {
                     EndnoteDeferral::None
                 };
-                let typesetter = TypesetEngine::new(self.dpi);
+                let typesetter = TypesetEngine::new(self.dpi).with_render_normalization(
+                    std::sync::Arc::clone(&self.render_normalization.overlay),
+                );
                 typesetter.typeset_section_with_variant(
                     para_src,
                     composed,

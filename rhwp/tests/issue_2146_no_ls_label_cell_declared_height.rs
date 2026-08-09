@@ -30,6 +30,14 @@ const SAMPLE: &str = "samples/task2146/21761835_jeonjik_exemption_table.hwp";
 fn issue_2146_no_ls_label_cell_keeps_declared_row_height() {
     let repo_root = env!("CARGO_MANIFEST_DIR");
     let data = fs::read(Path::new(repo_root).join(SAMPLE)).unwrap_or_else(|e| panic!("read: {e}"));
+    let doc = rhwp::wasm_api::HwpDocument::from_bytes(&data).expect("load pagination");
+    assert_eq!(doc.page_count(), 6, "한글 2022 오라클은 6쪽");
+    assert!(doc.dump_page_items(Some(0)).contains("rows=0..10"));
+    assert!(doc.dump_page_items(Some(1)).contains("rows=10..22"));
+    assert!(doc.dump_page_items(Some(4)).contains("rows=57..73"));
+    let p6 = doc.dump_page_items(Some(5));
+    assert!(p6.contains("rows=73..78") && p6.contains("pi=9"));
+
     let core = DocumentCore::from_bytes(&data).expect("load");
     let tree = core.build_page_render_tree(0).expect("render p1");
 

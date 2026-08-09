@@ -547,6 +547,9 @@ pub struct TypesetEngine {
     /// [#2403] 현재 조판 입력의 레이아웃 호환 프로파일 — typeset 진입 시 set.
     /// (HWPX 저장 시멘틱·HWP3 변환본 판단 등 소스분기의 단일 질의 표면.)
     profile: std::cell::Cell<crate::model::provenance::LayoutCompatibilityProfile>,
+    /// Shared derived geometry used by measurement, fragment cuts, and final layout.
+    render_normalization:
+        std::sync::Arc<crate::renderer::render_normalization::RenderNormalizationOverlay>,
 }
 
 /// 조판 중 현재 페이지/단 상태
@@ -882,6 +885,53 @@ fn para_has_non_whitespace_text(para: &Paragraph) -> bool {
     para.text
         .chars()
         .any(|c| c > '\u{001F}' && c != '\u{FFFC}' && !c.is_whitespace())
+}
+
+/// 저장 vpos 가 일정 간격으로 진행하는 빈 줄 묶음 뒤에 명시적 쪽나누기가
+/// 이어지는지 판정한다. 이는 단순 trailing empty 가 아니라 편집기가 의도적으로
+/// 현재 쪽을 채운 뒤 별도의 쪽나누기를 둔 구조이므로, reset-bridge 흡수 대상이
+/// 아니다.
+fn coherent_saved_empty_ladder_before_explicit_break(
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+) -> Option<(usize, usize)> {
+    let is_saved_empty = |p: &Paragraph| {
+        p.text.trim().is_empty()
+            && p.controls.is_empty()
+            && p.line_segs.len() == 1
+            && !is_synthetic_line_seg(&p.line_segs[0])
+    };
+    if !paragraphs.get(para_idx).is_some_and(is_saved_empty) {
+        return None;
+    }
+
+    let mut start = para_idx;
+    while start > 0 && paragraphs.get(start - 1).is_some_and(is_saved_empty) {
+        start -= 1;
+    }
+    let mut end = para_idx + 1;
+    while paragraphs.get(end).is_some_and(is_saved_empty) {
+        end += 1;
+    }
+    if end - start < 2
+        || !paragraphs.get(end).is_some_and(|p| {
+            matches!(
+                p.column_type,
+                ColumnBreakType::Page | ColumnBreakType::Section
+            )
+        })
+    {
+        return None;
+    }
+
+    let mut deltas = paragraphs[start..end]
+        .windows(2)
+        .map(|pair| pair[1].line_segs[0].vertical_pos - pair[0].line_segs[0].vertical_pos);
+    let first_delta = deltas.next()?;
+    if first_delta <= 0 || deltas.any(|delta| delta <= 0 || (delta - first_delta).abs() > 50) {
+        return None;
+    }
+    Some((start, end))
 }
 
 fn take_strict_plain_text_fit_after_empty_host_float_once(
@@ -1949,15 +1999,85 @@ fn saved_flow_marks_page_last(paragraphs: &[Paragraph], para_idx: usize) -> bool
         ) {
             return true;
         }
+        let internal_page_rewind = next_para.line_segs.windows(2).any(|pair| {
+            (pair[0].tag | pair[1].tag)
+                & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY
+                == 0
+                && pair[0].vertical_pos > 5000
+                && pair[1].vertical_pos <= 1500
+                && pair[1].vertical_pos < pair[0].vertical_pos
+        });
+        if internal_page_rewind
+            && next_para
+                .line_segs
+                .iter()
+                .find(|seg| !is_synthetic_line_seg(seg))
+                .is_some_and(|first| first.vertical_pos >= curr_vpos)
+        {
+            return true;
+        }
         if let Some(next) = next_para
             .line_segs
             .iter()
             .find(|ls| !is_synthetic_line_seg(ls))
         {
+            // Empty saved ladder entries between a visible tail and a reset are part of the
+            // page-bottom fill.  Continue through them instead of treating the first empty line
+            // as proof that the flow continues indefinitely on this page.
+            if next_para.text.trim().is_empty()
+                && next_para.controls.is_empty()
+                && next.vertical_pos >= curr_vpos
+            {
+                continue;
+            }
             return next.vertical_pos < curr_vpos;
         }
     }
     true
+}
+
+fn saved_flow_reaches_internal_page_rewind(paragraphs: &[Paragraph], para_idx: usize) -> bool {
+    let Some(mut previous_vpos) = paragraphs
+        .get(para_idx)
+        .and_then(|para| {
+            para.line_segs
+                .iter()
+                .rev()
+                .find(|seg| !is_synthetic_line_seg(seg))
+        })
+        .map(|seg| seg.vertical_pos)
+    else {
+        return false;
+    };
+
+    for next_para in paragraphs.iter().skip(para_idx + 1) {
+        if matches!(
+            next_para.column_type,
+            ColumnBreakType::Page | ColumnBreakType::Section
+        ) {
+            return true;
+        }
+        let saved: Vec<&LineSeg> = next_para
+            .line_segs
+            .iter()
+            .filter(|seg| !is_synthetic_line_seg(seg))
+            .collect();
+        let Some(first) = saved.first() else {
+            continue;
+        };
+        if first.vertical_pos < previous_vpos {
+            return false;
+        }
+        if saved.windows(2).any(|pair| {
+            pair[0].vertical_pos > 5000
+                && pair[1].vertical_pos <= 1500
+                && pair[1].vertical_pos < pair[0].vertical_pos
+        }) {
+            return true;
+        }
+        previous_vpos = saved.last().unwrap().vertical_pos;
+    }
+    false
 }
 
 fn positive_vpos_end_before_negative_wrap(para: &Paragraph) -> Option<i32> {
@@ -2424,6 +2544,9 @@ struct FormattedParagraph {
     spacing_after: f64,
     /// trailing line_spacing을 제외한 판단용 높이
     height_for_fit: f64,
+    /// 저장 lineSeg 를 불신하고 본문 폭으로 다시 조판했는지 여부. 이후 저장
+    /// vpos 사다리가 fresh 성장분을 역스냅하지 못하게 하는 구조 신호다.
+    fresh_recomposed: bool,
 }
 
 impl FormattedParagraph {
@@ -2789,7 +2912,18 @@ impl TypesetEngine {
         Self {
             dpi,
             profile: std::cell::Cell::new(Default::default()),
+            render_normalization: std::sync::Arc::new(
+                crate::renderer::render_normalization::RenderNormalizationOverlay::default(),
+            ),
         }
+    }
+
+    pub fn with_render_normalization(
+        mut self,
+        overlay: std::sync::Arc<crate::renderer::render_normalization::RenderNormalizationOverlay>,
+    ) -> Self {
+        self.render_normalization = overlay;
+        self
     }
 
     pub fn with_default_dpi() -> Self {
@@ -4171,6 +4305,11 @@ impl TypesetEngine {
             } else {
                 false
             };
+            let saved_empty_ladder = st
+                .profile
+                .hwpx_stored_layout()
+                .then(|| coherent_saved_empty_ladder_before_explicit_break(paragraphs, para_idx))
+                .flatten();
 
             // [Task #1725 v2] 현재 일반텍스트 tail 과 새 페이지(vpos-reset) 사이에 빈 문단이 1개
             // 끼어 immediate-next reset 을 놓치는 각주-tail 케이스(국제고속선기준 pi=537/2378).
@@ -4208,6 +4347,7 @@ impl TypesetEngine {
             // 이미 페이지 하단 vpos 를 가지고 있고, 뒤쪽 저장 flow 가 reset 을 명확히 보일 때만
             // 0-높이로 흡수한다.
             let empty_tail_bridge_to_reset = !next_will_vpos_reset
+                && saved_empty_ladder.is_none()
                 && !st.current_items.is_empty()
                 && !st
                     .current_items
@@ -4623,6 +4763,14 @@ impl TypesetEngine {
                     styles,
                     is_last_in_section,
                 );
+                if formatted.fresh_recomposed {
+                    st.vpos_ladder_dirty = true;
+                }
+                if saved_empty_ladder.is_some_and(|(_, end)| end == para_idx + 1) {
+                    // 저장 empty ladder 가 현재 쪽의 끝을 명시하고, 다음 문단의
+                    // explicit break 는 별도 경계다. 둘을 한 번으로 합치지 않는다.
+                    st.advance_column_or_new_page();
+                }
             } else {
                 // 표 문단: Phase 2에서 전환 예정. 현재는 기존 방식 호환용 stub.
                 self.typeset_table_paragraph(
@@ -11788,7 +11936,9 @@ impl TypesetEngine {
                     );
                     Some(cloned)
                 } else if inner > 0.0
-                    && crate::renderer::composer::masked_stored_lines_stale(c, para, inner, styles)
+                    && crate::renderer::composer::stored_lines_stale_for_body(
+                        c, para, inner, styles,
+                    )
                 {
                     // [#2279] 마스킹 저장분할 stale(실폭-과잉/줄수-과소) 본문 문단
                     // fresh 재래핑 — paragraph_layout(렌더)와 동일.
@@ -11806,6 +11956,9 @@ impl TypesetEngine {
             }
             _ => None,
         };
+        // NO_LS fallback 는 기존 post-place dirty 경로가 별도로 처리한다. 여기서는
+        // 저장 lineSeg 를 실제로 폐기한 경우만 뒤 사다리를 dirty 로 전파한다.
+        let fresh_recomposed = recomposed.is_some() && !para.line_segs.is_empty();
         let composed = recomposed.as_ref().or(composed);
         let raw_spacing_before = para_style.map(|s| s.spacing_before).unwrap_or(0.0);
         let spacing_after = para_style.map(|s| s.spacing_after).unwrap_or(0.0);
@@ -12171,6 +12324,7 @@ impl TypesetEngine {
             spacing_before,
             spacing_after,
             height_for_fit,
+            fresh_recomposed,
         }
     }
 
@@ -12323,7 +12477,16 @@ impl TypesetEngine {
         // 가드 2종: ①미주 흐름은 한 단 안에서도 vpos 가 크게 되감기므로 제외
         // (ColumnContent.endnote_flow 계약) ②되감김 목표가 단 상단 근방일 때만 인정
         // (detect_near_top_rewind_breaks — 페이지 중간 되감김은 어울림 흐름 잔재).
-        let col_breaks = if st.col_count > 1 && st.current_column == 0 {
+        let col_breaks = if st.col_count == 1
+            && para.controls.is_empty()
+            && para.line_segs.iter().all(|seg| !is_synthetic_line_seg(seg))
+        {
+            // Saved one-column layout also encodes a page boundary as an intra-paragraph
+            // rewind.  Previously only multi-column flow consumed that signal, so the prefix
+            // and next-page tail were accumulated on one page and following floating tables
+            // were deferred despite their saved anchor fitting the page.
+            Self::detect_near_top_rewind_breaks(para, st.layout.available_body_height(), self.dpi)
+        } else if st.col_count > 1 && st.current_column == 0 {
             Self::detect_column_breaks_in_paragraph(para)
         } else if st.col_count > 1 && st.current_column > 0 && !st.current_endnote_flow {
             Self::detect_near_top_rewind_breaks(para, st.layout.available_body_height(), self.dpi)
@@ -12484,7 +12647,8 @@ impl TypesetEngine {
             // [#2093] spacing_after 게이트(#1733) 제거: 신뢰 판정은 저장 줄의 시각
             // 경계(vpos~vpos+lh)로 하며, 한글은 쪽 마지막 줄의 아래 간격을 쪽 하단에서
             // 소비하지 않으므로 sa 는 배제 사유가 아니다 (1192000 해양수산 17→16쪽).
-            && saved_flow_marks_page_last(paragraphs, para_idx)
+            && (saved_flow_marks_page_last(paragraphs, para_idx)
+                || saved_flow_reaches_internal_page_rewind(paragraphs, para_idx))
             && current_page_vpos_base
                 .and_then(|base| single_line_visible_bounds_px(para, base, self.dpi))
                 .is_some_and(|bounds| {
@@ -12501,6 +12665,64 @@ impl TypesetEngine {
                     top + 16.0 >= st.current_height
                         && bottom <= st.available_height() + 0.5 + spill
                 });
+        let saved_multiline_tail_bottom_fits = !strict_after_empty_host_float
+            && forced_page_break_line.is_none()
+            && !omit_untrusted_empty
+            && st.col_count == 1
+            && fmt.line_heights.len() >= 2
+            && para.controls.is_empty()
+            && !st.current_items.is_empty()
+            && saved_flow_marks_page_last(paragraphs, para_idx)
+            && current_page_vpos_base
+                .and_then(|base| {
+                    let mut saved = para
+                        .line_segs
+                        .iter()
+                        .filter(|seg| !is_synthetic_line_seg(seg));
+                    let first = saved.next()?;
+                    let last = saved.last().unwrap_or(first);
+                    let top = first.vertical_pos.saturating_sub(base);
+                    let bottom = last
+                        .vertical_pos
+                        .saturating_add(last.line_height)
+                        .saturating_sub(base);
+                    (top >= 0 && bottom >= 0).then(|| {
+                        (
+                            hwpunit_to_px(top, self.dpi),
+                            hwpunit_to_px(bottom, self.dpi),
+                        )
+                    })
+                })
+                .is_some_and(|bounds| {
+                    saved_bounds_fit_at_flow_tail(bounds, st.current_height, st.available_height())
+                });
+        let saved_native_page_tail_fits = !strict_after_empty_host_float
+            && forced_page_break_line.is_none()
+            && st.profile.native_hwp5_layout()
+            && st.col_count == 1
+            && para.controls.is_empty()
+            && !st.current_items.is_empty()
+            && (saved_flow_marks_page_last(paragraphs, para_idx)
+                || saved_flow_reaches_internal_page_rewind(paragraphs, para_idx))
+            && {
+                let body_height_hu =
+                    crate::renderer::px_to_hwpunit(st.layout.available_body_height(), self.dpi);
+                let mut saved = para
+                    .line_segs
+                    .iter()
+                    .filter(|seg| !is_synthetic_line_seg(seg));
+                saved.next().is_some_and(|first| {
+                    let last = para
+                        .line_segs
+                        .iter()
+                        .rev()
+                        .find(|seg| !is_synthetic_line_seg(seg))
+                        .unwrap_or(first);
+                    first.vertical_pos >= body_height_hu * 2 / 3
+                        && last.vertical_pos >= first.vertical_pos
+                        && last.vertical_pos.saturating_add(last.line_height) <= body_height_hu + 40
+                })
+            };
         let saved_list_tail_body_vpos_fits = !strict_after_empty_host_float
             && forced_page_break_line.is_none()
             && !omit_untrusted_empty
@@ -12535,6 +12757,8 @@ impl TypesetEngine {
         if forced_page_break_line.is_none()
             && (st.current_height + page_end_fit_height <= available
                 || saved_single_line_bottom_fits
+                || saved_multiline_tail_bottom_fits
+                || saved_native_page_tail_fits
                 || saved_list_tail_body_vpos_fits)
         {
             // place: 전체 배치
@@ -16745,6 +16969,8 @@ impl TypesetEngine {
         // 셀 패딩/중첩 표 높이 계산에만 의존하므로 ad hoc 인스턴스로 충분하다.
         let layout_engine = crate::renderer::layout::LayoutEngine::new(self.dpi);
         layout_engine.set_layout_profile(st.profile);
+        layout_engine
+            .set_render_normalization_overlay(std::sync::Arc::clone(&self.render_normalization));
         // [Task #993] rowspan(row_span>1) 셀이 걸친 행 — 컷 모델(advance_row_cut)은
         // row_span==1 셀만 다루므로 rowspan 셀 높이를 측정하지 못한다. 구현계획서
         // §4대로 rowspan 행은 MeasuredTable 행 높이를 권위로 쓴다(렌더러도 동일).
