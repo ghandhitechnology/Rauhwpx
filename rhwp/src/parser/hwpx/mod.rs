@@ -294,6 +294,55 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
     ));
     let package_info = content::parse_content_hpf(&content_xml)?;
 
+    // Preserve package parts that are not represented by the IR.  In particular,
+    // Hancom stores document scripts and editable OOXML charts outside Contents/
+    // and BinData/.  Dropping those ZIP entries on save can disable scripts or
+    // turn a chart into an unusable fallback object.
+    let package_file_names = reader.file_names();
+    let mut modeled_paths: HashSet<String> = [
+        "mimetype",
+        "version.xml",
+        "settings.xml",
+        "Preview/PrvText.txt",
+        "Preview/PrvImage.png",
+        "Contents/header.xml",
+        "Contents/content.hpf",
+        "META-INF/container.rdf",
+        "META-INF/container.xml",
+        "META-INF/manifest.xml",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    modeled_paths.extend(package_info.section_files.iter().cloned());
+    modeled_paths.extend(
+        package_info
+            .master_page_items
+            .iter()
+            .map(|item| item.href.clone()),
+    );
+    modeled_paths.extend(
+        package_info
+            .bin_data_items
+            .iter()
+            // Some Hancom chart fallbacks incorrectly declare an internal
+            // BinData/*.ole part as isEmbeded="0".  It is still modeled and
+            // must not also enter the generic passthrough set.
+            .filter(|item| item.is_embedded || is_internal_bin_data_href(&item.href))
+            .map(|item| item.href.clone()),
+    );
+    for path in &package_file_names {
+        if modeled_paths.contains(path)
+            || hwpx_aux_entries.iter().any(|(saved, _)| saved == path)
+            || !is_safe_hwpx_passthrough_path(path)
+        {
+            continue;
+        }
+        if let Ok(bytes) = reader.read_file_bytes(path) {
+            hwpx_aux_entries.push((path.clone(), bytes));
+        }
+    }
+
     // 3. header.xml → DocInfo, DocProperties
     let header_xml = reader.read_file("Contents/header.xml")?;
     let (mut doc_info, doc_properties) = header::parse_hwpx_header(&header_xml)?;
@@ -380,8 +429,10 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
                 sections.push(section);
             }
             Err(e) => {
-                eprintln!("경고: {} 파싱 실패: {}", section_href, e);
-                sections.push(Section::default());
+                return Err(HwpxError::XmlError(format!(
+                    "{} 파싱 실패: {}",
+                    section_href, e
+                )));
             }
         }
     }
@@ -430,20 +481,19 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
         });
     }
 
-    // 5-1. Chart/*.xml (OOXML 차트) 로딩 — bin_data_id = 60000+N, extension="ooxml_chart"
-    // section 파서에서 <hp:chart chartIDRef="Chart/chartN.xml">를 만나면 동일 ID의 OleShape 생성
-    for n in 1..=64u16 {
-        let path = format!("Chart/chart{}.xml", n);
-        match reader.read_file_bytes(&path) {
-            Ok(data) => {
-                bin_data_content.push(BinDataContent {
-                    id: 60000 + n,
-                    data: data.into(),
-                    extension: "ooxml_chart".to_string(),
-                });
-            }
-            Err(_) => break,
-        }
+    // 5-1. Chart/chartN.xml (OOXML 차트) 로딩.  The synthetic ID is an
+    // in-memory renderer bridge only; the HWPX serializer maps it back to the
+    // native Chart/ package part and <hp:chart>, never to BinData/OLE.
+    for (n, path) in package_file_names
+        .iter()
+        .filter_map(|path| chart_number_from_path(path).map(|n| (n, path)))
+    {
+        let data = reader.read_file_bytes(path)?;
+        bin_data_content.push(BinDataContent {
+            id: 60000 + n,
+            data: data.into(),
+            extension: "ooxml_chart".to_string(),
+        });
     }
 
     // Document 조립
@@ -495,6 +545,24 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
     super::populate_link_image_paths(&mut doc);
 
     Ok(doc)
+}
+
+fn is_safe_hwpx_passthrough_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.ends_with('/')
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+fn chart_number_from_path(path: &str) -> Option<u16> {
+    path.strip_prefix("Chart/chart")?
+        .strip_suffix(".xml")?
+        .parse::<u16>()
+        .ok()
+        .filter(|number| *number > 0 && *number <= u16::MAX - 60000)
 }
 
 fn resolve_embedded_font_references(
