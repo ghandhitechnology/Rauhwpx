@@ -801,10 +801,153 @@ fn control_char_code_and_id(ctrl: &Control) -> (u16, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::control::{AutoNumber, Field, FieldType, NewNumber};
+    use crate::model::control::{AutoNumber, Control, Field, FieldType, NewNumber};
     use crate::model::document::{Section, SectionDef};
     use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph, RangeTag};
     use crate::parser::body_text::parse_body_text_section;
+
+    #[test]
+    fn edited_paragraph_preserves_opaque_controls_payload_children_and_order() {
+        fn paragraph_header() -> Record {
+            let mut data = Vec::new();
+            data.extend_from_slice(&1u32.to_le_bytes());
+            data.extend_from_slice(&(1u32 << 0x000b).to_le_bytes());
+            data.extend_from_slice(&0u16.to_le_bytes());
+            data.push(0);
+            data.push(0);
+            Record {
+                tag_id: tags::HWPTAG_PARA_HEADER,
+                level: 0,
+                size: data.len() as u32,
+                data,
+            }
+        }
+
+        fn ctrl_header(ctrl_id: u32, payload: &[u8]) -> Record {
+            let mut data = ctrl_id.to_le_bytes().to_vec();
+            data.extend_from_slice(payload);
+            Record {
+                tag_id: tags::HWPTAG_CTRL_HEADER,
+                level: 1,
+                size: data.len() as u32,
+                data,
+            }
+        }
+
+        let ruby_payload = vec![0x10, 0x20, 0x30, 0x40, 0x50];
+        let unknown_payload = vec![0xaa, 0xbb, 0xcc];
+        let source_records = vec![
+            paragraph_header(),
+            Record {
+                tag_id: tags::HWPTAG_PARA_CHAR_SHAPE,
+                level: 1,
+                size: 8,
+                data: vec![0; 8],
+            },
+            ctrl_header(tags::CTRL_CHAR_OVERLAP, &ruby_payload),
+            Record {
+                tag_id: tags::HWPTAG_CTRL_DATA,
+                level: 2,
+                size: 3,
+                data: vec![1, 2, 3],
+            },
+            Record {
+                tag_id: tags::HWPTAG_SHAPE_COMPONENT,
+                level: 3,
+                size: 2,
+                data: vec![4, 5],
+            },
+            Record {
+                tag_id: tags::HWPTAG_LIST_HEADER,
+                level: 2,
+                size: 1,
+                data: vec![6],
+            },
+            ctrl_header(0x1234_5678, &unknown_payload),
+            Record {
+                tag_id: tags::HWPTAG_CTRL_DATA,
+                level: 2,
+                size: 2,
+                data: vec![7, 8],
+            },
+        ];
+        let source = write_records(&source_records);
+        let mut section = parse_body_text_section(&source).expect("parse source controls");
+
+        let ids: Vec<u32> = section.paragraphs[0]
+            .controls
+            .iter()
+            .filter_map(|control| match control {
+                Control::Unknown(unknown) => Some(unknown.ctrl_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec![tags::CTRL_CHAR_OVERLAP, 0x1234_5678]);
+
+        // Any edit invalidates raw passthrough in production and forces reconstruction.
+        section.paragraphs[0].text = "unrelated edit".to_string();
+        section.raw_stream = None;
+        let saved = serialize_section(&section);
+        let saved_records = Record::read_all(&saved).expect("read saved records");
+
+        let opaque_headers: Vec<_> = saved_records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| record.tag_id == tags::HWPTAG_CTRL_HEADER)
+            .filter_map(|(index, record)| {
+                (record.data.len() >= 4).then(|| {
+                    (
+                        index,
+                        u32::from_le_bytes(record.data[0..4].try_into().unwrap()),
+                        record.data[4..].to_vec(),
+                    )
+                })
+            })
+            .filter(|(_, id, _)| *id == tags::CTRL_CHAR_OVERLAP || *id == 0x1234_5678)
+            .collect();
+        assert_eq!(
+            opaque_headers
+                .iter()
+                .map(|(_, id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![tags::CTRL_CHAR_OVERLAP, 0x1234_5678],
+            "unrelated text edits must preserve unsupported control order"
+        );
+        assert_eq!(opaque_headers[0].2, ruby_payload);
+        assert_eq!(opaque_headers[1].2, unknown_payload);
+
+        let ruby_start = opaque_headers[0].0;
+        let ruby_children: Vec<_> = saved_records[ruby_start + 1..]
+            .iter()
+            .take_while(|record| record.level > 1)
+            .map(|record| (record.tag_id, record.level, record.data.clone()))
+            .collect();
+        assert_eq!(
+            ruby_children,
+            vec![
+                (tags::HWPTAG_CTRL_DATA, 2, vec![1, 2, 3]),
+                (tags::HWPTAG_SHAPE_COMPONENT, 3, vec![4, 5]),
+                (tags::HWPTAG_LIST_HEADER, 2, vec![6]),
+            ],
+            "opaque Ruby subtree must remain byte-for-byte and in-order"
+        );
+
+        let reparsed = parse_body_text_section(&saved).expect("reparse saved controls");
+        match &reparsed.paragraphs[0].controls[0] {
+            Control::Unknown(unknown) => {
+                assert_eq!(unknown.raw_ctrl_data, ruby_payload);
+                assert_eq!(
+                    unknown
+                        .raw_child_records
+                        .iter()
+                        .map(|record| record.level)
+                        .collect::<Vec<_>>(),
+                    vec![1, 2, 1]
+                );
+            }
+            other => panic!("expected opaque Ruby control, got {other:?}"),
+        }
+    }
 
     /// 간단한 텍스트 문단 라운드트립
     #[test]
