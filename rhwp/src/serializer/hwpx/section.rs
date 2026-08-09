@@ -22,8 +22,8 @@
 use quick_xml::Writer;
 
 use crate::model::control::{
-    AutoNumber, AutoNumberType, CharOverlap, Control, Equation, Field, NewNumber, PageHide,
-    PageNumberPos, Ruby, EQUATION_LINE_MODE_BIT,
+    AutoNumber, AutoNumberType, CharOverlap, Control, Equation, Field, Hyperlink, NewNumber,
+    PageHide, PageNumberPos, Ruby, EQUATION_LINE_MODE_BIT,
 };
 use crate::model::document::{Document, Section, SectionDef};
 use crate::model::footnote::{Endnote, Footnote};
@@ -35,7 +35,9 @@ use crate::model::shape::{
 };
 
 use super::context::SerializeContext;
-use super::field::{write_bookmark, write_field_begin, write_field_end, write_field_end_full};
+use super::field::{
+    write_bookmark, write_field_begin, write_field_end, write_field_end_full, write_hyperlink_begin,
+};
 use super::utils::xml_escape;
 use super::SerializeError;
 use super::{picture, table};
@@ -1309,6 +1311,7 @@ pub(crate) fn is_hwpx_inline_slot(control: &Control) -> bool {
             | Control::Picture(_)
             | Control::CharOverlap(_)
             | Control::Ruby(_)
+            | Control::Hyperlink(_)
             | Control::Equation(_)
             | Control::Field(_)
             | Control::Form(_)
@@ -1442,6 +1445,10 @@ fn render_control_slot(
         // [Task #1587] 덧말(Ruby) 인라인 방출. is_hwpx_inline_slot 에 등록돼 슬롯 위치는
         // 자동이나 종전 방출 arm 부재로 드롭됐다. parse_dutmal 의 역매핑.
         Control::Ruby(r) => out.push_str(&render_dutmal(r)),
+        // HWP3 hypertext objects arrive as the legacy Hyperlink variant rather than
+        // Field + FieldRange. Lower them to a complete HWPX hyperlink field so the
+        // URL and rescued display text both survive export.
+        Control::Hyperlink(link) => render_legacy_hyperlink(out, link, ctx),
         // [Task #1379/#1584] 인라인 colPr 방출.
         // - subList(depth>0): 전부 인라인 방출(원본 XML 인라인 존재).
         // - 본문(depth 0): 첫 문단의 첫 ColumnDef 1개는 섹션 템플릿 colPr 앵커가 이미
@@ -1481,6 +1488,21 @@ fn render_dutmal(r: &Ruby) -> String {
         xml_escape(&r.main_text),
         xml_escape(&r.ruby_text),
     )
+}
+
+fn render_legacy_hyperlink(out: &mut String, link: &Hyperlink, ctx: &mut SerializeContext) {
+    let field_id = ctx.next_legacy_hyperlink_id();
+    let begin = writer_to_string(|w| write_hyperlink_begin(w, link, field_id));
+    let end = writer_to_string(|w| write_field_end(w, field_id));
+    if let (Ok(begin), Ok(end)) = (begin, end) {
+        out.push_str("<hp:ctrl>");
+        out.push_str(&begin);
+        out.push_str("</hp:ctrl><hp:t>");
+        out.push_str(&xml_escape(&link.text));
+        out.push_str("</hp:t><hp:ctrl>");
+        out.push_str(&end);
+        out.push_str("</hp:ctrl>");
+    }
 }
 
 fn generated_field_parameters(field: &Field) -> Option<String> {

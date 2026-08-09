@@ -95,6 +95,8 @@ pub struct SerializeContext {
     chart_part_map: HashMap<u32, String>,
     /// 문서 전역 문단 ID 카운터 — `<hp:p id="...">` 에 발급한다.
     para_id_counter: u32,
+    /// HWP3 legacy hyperlink를 HWPX field pair로 낮출 때 쓰는 문서 전역 ID.
+    legacy_hyperlink_id_counter: u32,
     /// subList(셀·글상자) 직렬화 중첩 깊이 (#1379 3단계).
     ///
     /// 본문 경로는 colPr 를 섹션 템플릿 첫 run 에서 처리하므로 인라인 미방출이
@@ -292,6 +294,13 @@ impl SerializeContext {
     pub fn next_para_id(&mut self) -> u32 {
         let id = self.para_id_counter;
         self.para_id_counter += 1;
+        id
+    }
+
+    /// Legacy hyperlink용 충돌 가능성이 낮은 결정론적 field id를 발급한다.
+    pub fn next_legacy_hyperlink_id(&mut self) -> u32 {
+        let id = 0x7000_0000u32.wrapping_add(self.legacy_hyperlink_id_counter);
+        self.legacy_hyperlink_id_counter = self.legacy_hyperlink_id_counter.wrapping_add(1);
         id
     }
 

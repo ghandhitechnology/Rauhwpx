@@ -1036,6 +1036,49 @@ mod tests {
     }
 
     #[test]
+    fn legacy_hyperlink_exports_as_complete_hwpx_field() {
+        use crate::model::control::{Control, FieldType, Hyperlink};
+
+        let mut doc = Document::default();
+        let mut section = crate::model::document::Section::default();
+        let mut para = crate::model::paragraph::Paragraph::default();
+        para.text = "\u{fffc}".to_string();
+        para.char_offsets = vec![0];
+        para.char_count = 2;
+        para.controls.push(Control::Hyperlink(Hyperlink {
+            url: "https://example.com/legacy".to_string(),
+            text: "legacy anchor".to_string(),
+        }));
+        section.paragraphs.push(para);
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize legacy hyperlink");
+        let reparsed = crate::parser::hwpx::parse_hwpx(&bytes).expect("reparse hyperlink");
+        let para = &reparsed.sections[0].paragraphs[0];
+        assert!(para.text.contains("legacy anchor"));
+        let field = para
+            .controls
+            .iter()
+            .find_map(|control| match control {
+                Control::Field(field) if field.field_type == FieldType::Hyperlink => Some(field),
+                _ => None,
+            })
+            .expect("legacy hyperlink must become a HWPX hyperlink field");
+        assert_eq!(field.command, "https://example.com/legacy");
+        assert!(
+            para.field_ranges.iter().any(|range| {
+                para.text
+                    .chars()
+                    .skip(range.start_char_idx)
+                    .take(range.end_char_idx.saturating_sub(range.start_char_idx))
+                    .collect::<String>()
+                    == "legacy anchor"
+            }),
+            "field range must cover the preserved display text"
+        );
+    }
+
+    #[test]
     fn task1591_bookmark_not_hoisted_before_slot() {
         // [#1591] 북마크가 슬롯 컨트롤(표 등) 뒤에 있을 때, 직렬화기가 북마크를 문단
         // 시작으로 hoisting 하면 컨트롤 순서가 뒤바뀐다. [#1591 v2] 슬롯 있는 문단의
