@@ -791,6 +791,14 @@ fn stage6_verify_recovered_for_hwpx_h_01() {
         v.page_count_before, v.page_count_after
     );
     assert_eq!(v.page_count_before, v.page_count_after);
+    assert!(v.page_count_matches);
+    assert!(
+        v.structure_matches,
+        "구조 카운트 불일치: before={:?}, after={:?}, losses={:?}",
+        v.structure_before, v.structure_after, v.serialization_losses
+    );
+    assert!(v.serialization_losses.is_empty());
+    assert!(v.structure_before.text_count > 0);
     assert!(v.bytes_len > 0);
 }
 

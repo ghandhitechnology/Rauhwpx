@@ -518,12 +518,12 @@ pub fn parse_paragraph_list(records: &[Record]) -> Vec<Paragraph> {
 /// ctrl_id(처음 4바이트)로 컨트롤 종류를 식별한다.
 fn parse_ctrl_header(records: &[Record]) -> Control {
     if records.is_empty() || records[0].tag_id != tags::HWPTAG_CTRL_HEADER {
-        return Control::Unknown(UnknownControl { ctrl_id: 0 });
+        return Control::Unknown(UnknownControl::default());
     }
 
     let data = &records[0].data;
     if data.len() < 4 {
-        return Control::Unknown(UnknownControl { ctrl_id: 0 });
+        return Control::Unknown(UnknownControl::default());
     }
 
     let ctrl_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);

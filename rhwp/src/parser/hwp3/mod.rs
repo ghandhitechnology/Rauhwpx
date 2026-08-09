@@ -1729,7 +1729,10 @@ fn parse_object_control_char(
         controls.push(crate::model::control::Control::Field(field));
     } else {
         controls.push(crate::model::control::Control::Unknown(
-            crate::model::control::UnknownControl { ctrl_id: ch as u32 },
+            crate::model::control::UnknownControl {
+                ctrl_id: ch as u32,
+                ..Default::default()
+            },
         ));
     }
     ctrl_data_records.push(None);
@@ -1839,13 +1842,17 @@ fn parse_field_control_char(
                         crate::model::control::Control::PageHide(hide)
                     } else {
                         crate::model::control::Control::Unknown(
-                            crate::model::control::UnknownControl { ctrl_id: ch as u32 },
+                            crate::model::control::UnknownControl {
+                                ctrl_id: ch as u32,
+                                ..Default::default()
+                            },
                         )
                     }
                 }
                 _ => {
                     crate::model::control::Control::Unknown(crate::model::control::UnknownControl {
                         ctrl_id: ch as u32,
+                        ..Default::default()
                     })
                 }
             };
@@ -2111,7 +2118,10 @@ fn parse_simple_control_char(
                 utf16_len += 1;
                 text_string.push('\u{FFFC}');
                 controls.push(crate::model::control::Control::Unknown(
-                    crate::model::control::UnknownControl { ctrl_id: ch as u32 },
+                    crate::model::control::UnknownControl {
+                        ctrl_id: ch as u32,
+                        ..Default::default()
+                    },
                 ));
                 ctrl_data_records.push(None);
             }

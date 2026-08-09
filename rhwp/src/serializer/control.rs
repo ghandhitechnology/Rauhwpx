@@ -173,29 +173,39 @@ pub fn serialize_control(
         }
         // [Task #852 Stage 2.4] 양식 개체 직렬화 — CTRL_HEADER + HWPTAG_FORM_OBJECT
         Control::Form(form) => serialize_form_control(form, level, records),
-        // 미구현 컨트롤은 최소한의 CTRL_HEADER만 생성
-        Control::Hyperlink(_) | Control::Ruby(_) | Control::Unknown(_) => {
-            let ctrl_id = match ctrl {
-                Control::Unknown(u) => u.ctrl_id,
-                _ => 0,
-            };
-            if ctrl_id != 0 {
-                let mut data = Vec::new();
-                data.extend_from_slice(&ctrl_id.to_le_bytes());
-                records.push(Record {
-                    tag_id: tags::HWPTAG_CTRL_HEADER,
+        // 미구현 HWP 컨트롤은 원본 CTRL_HEADER payload와 전체 자식 subtree를
+        // 그대로 복원한다. Section raw passthrough가 편집으로 무효화된 뒤에도
+        // 컨트롤이 ctrl_id 4바이트로 축소되지 않게 하는 보존 경로다.
+        Control::Unknown(unknown) => {
+            if unknown.ctrl_id != 0 {
+                records.push(make_ctrl_record(
+                    unknown.ctrl_id,
                     level,
-                    size: data.len() as u32,
-                    data,
-                });
+                    &unknown.raw_ctrl_data,
+                ));
+                records.extend(unknown.raw_child_records.iter().map(|raw| Record {
+                    tag_id: raw.tag_id,
+                    level: level.saturating_add(raw.level),
+                    size: raw.data.len() as u32,
+                    data: raw.data.clone(),
+                }));
             }
         }
+        // HWP3 legacy hyperlink and HWPX Ruby have no fully validated HWP5 lowering
+        // here. Verification reports their loss explicitly instead of claiming success.
+        Control::Hyperlink(_) | Control::Ruby(_) => {}
     }
 
     // CTRL_DATA 레코드 복원: 일반 컨트롤은 CTRL_HEADER 바로 다음에 삽입한다.
     // Picture/Shape 컨트롤은 각 serializer가 SHAPE_COMPONENT 자식(level+2)으로 배치한다.
     if let Some(data) = ctrl_data_record {
-        if !matches!(ctrl, Control::Picture(_) | Control::Shape(_)) {
+        let unknown_already_has_children =
+            matches!(ctrl, Control::Unknown(u) if !u.raw_child_records.is_empty());
+        let wrote_header = records.len() > insert_pos;
+        if wrote_header
+            && !matches!(ctrl, Control::Picture(_) | Control::Shape(_))
+            && !unknown_already_has_children
+        {
             let ctrl_data_pos = insert_pos + 1; // CTRL_HEADER 바로 다음
             records.insert(
                 ctrl_data_pos,

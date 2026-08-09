@@ -31,8 +31,158 @@ pub struct HwpExportVerification {
     pub page_count_before: u32,
     /// 직렬화 → 재로드 후 페이지 수
     pub page_count_after: u32,
-    /// `page_count_before == page_count_after` 여부
+    /// 페이지 수 일치 여부
+    pub page_count_matches: bool,
+    /// 직렬화 입력의 구조 카운트
+    pub structure_before: HwpStructureCounts,
+    /// 직렬화 → 재로드 후 구조 카운트
+    pub structure_after: HwpStructureCounts,
+    /// text/control/object/opaque payload 카운트가 모두 일치하는지 여부
+    pub structure_matches: bool,
+    /// 직렬화 전 탐지되었거나 재로드 비교에서 확인된 손실 진단.
+    /// 빈 배열이 아니면 `recovered` 는 false다.
+    pub serialization_losses: Vec<String>,
+    /// 페이지와 구조가 모두 일치하고 명시적 손실 진단도 없는 경우에만 true.
     pub recovered: bool,
+}
+
+/// 저장 전후를 저비용으로 비교하는 실용적 구조 무결성 신호.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HwpStructureCounts {
+    /// 본문/컨트롤에 담긴 표시 텍스트의 Unicode scalar 수
+    pub text_count: u64,
+    /// 중첩 문단까지 포함한 Control 수
+    pub control_count: u64,
+    /// 표/도형/그림/수식/양식 개체 수
+    pub object_count: u64,
+    /// opaque UnknownControl의 CTRL_HEADER payload + 자식 payload 바이트 수
+    pub opaque_control_bytes: u64,
+}
+
+fn hwp_structure_counts(document: &Document) -> (HwpStructureCounts, Vec<String>) {
+    let mut counts = HwpStructureCounts::default();
+    let mut losses = Vec::new();
+    for section in &document.sections {
+        count_paragraphs(&section.paragraphs, &mut counts, &mut losses);
+        for master_page in &section.section_def.master_pages {
+            count_paragraphs(&master_page.paragraphs, &mut counts, &mut losses);
+        }
+    }
+    (counts, losses)
+}
+
+fn export_is_recovered(
+    page_count_matches: bool,
+    structure_before: HwpStructureCounts,
+    structure_after: HwpStructureCounts,
+    serialization_losses: &[String],
+) -> bool {
+    page_count_matches && structure_before == structure_after && serialization_losses.is_empty()
+}
+
+fn count_paragraphs(
+    paragraphs: &[Paragraph],
+    counts: &mut HwpStructureCounts,
+    losses: &mut Vec<String>,
+) {
+    for paragraph in paragraphs {
+        // U+FFFC is the parser's object replacement marker. The corresponding
+        // control contributes its semantic text below where applicable.
+        counts.text_count += paragraph
+            .text
+            .chars()
+            .filter(|ch| *ch != '\u{fffc}')
+            .count() as u64;
+        for control in &paragraph.controls {
+            count_control(control, counts, losses);
+        }
+    }
+}
+
+fn count_control(control: &Control, counts: &mut HwpStructureCounts, losses: &mut Vec<String>) {
+    counts.control_count += 1;
+    match control {
+        Control::Table(table) => {
+            counts.object_count += 1;
+            if let Some(caption) = &table.caption {
+                count_paragraphs(&caption.paragraphs, counts, losses);
+            }
+            for cell in &table.cells {
+                count_paragraphs(&cell.paragraphs, counts, losses);
+            }
+        }
+        Control::Shape(shape) => count_shape(shape, counts, losses),
+        Control::Picture(picture) => {
+            counts.object_count += 1;
+            if let Some(caption) = &picture.caption {
+                count_paragraphs(&caption.paragraphs, counts, losses);
+            }
+        }
+        Control::Header(header) => count_paragraphs(&header.paragraphs, counts, losses),
+        Control::Footer(footer) => count_paragraphs(&footer.paragraphs, counts, losses),
+        Control::Footnote(note) => count_paragraphs(&note.paragraphs, counts, losses),
+        Control::Endnote(note) => count_paragraphs(&note.paragraphs, counts, losses),
+        Control::HiddenComment(comment) => count_paragraphs(&comment.paragraphs, counts, losses),
+        Control::Equation(_) => counts.object_count += 1,
+        Control::Form(form) => {
+            counts.object_count += 1;
+            counts.text_count += form.text.chars().count() as u64;
+        }
+        Control::Field(field) => count_paragraphs(&field.memo_paragraphs, counts, losses),
+        Control::Hyperlink(link) => {
+            counts.text_count += link.text.chars().count() as u64;
+            losses.push(
+                "legacy Hyperlink has no lossless HWP5 lowering; use HWPX export to preserve it"
+                    .to_string(),
+            );
+        }
+        Control::Ruby(ruby) => {
+            counts.text_count +=
+                (ruby.main_text.chars().count() + ruby.ruby_text.chars().count()) as u64;
+            losses.push(
+                "Ruby has no validated HWP5 lowering; native HWP opaque Ruby records are preserved"
+                    .to_string(),
+            );
+        }
+        Control::Unknown(unknown) => {
+            counts.opaque_control_bytes += unknown.raw_ctrl_data.len() as u64;
+            counts.opaque_control_bytes += unknown
+                .raw_child_records
+                .iter()
+                .map(|record| record.data.len() as u64)
+                .sum::<u64>();
+        }
+        _ => {}
+    }
+}
+
+fn count_shape(shape: &ShapeObject, counts: &mut HwpStructureCounts, losses: &mut Vec<String>) {
+    counts.object_count += 1;
+    if let Some(drawing) = shape.drawing() {
+        if let Some(text_box) = &drawing.text_box {
+            count_paragraphs(&text_box.paragraphs, counts, losses);
+        }
+        if let Some(caption) = &drawing.caption {
+            count_paragraphs(&caption.paragraphs, counts, losses);
+        }
+    }
+    match shape {
+        ShapeObject::Group(group) => {
+            if let Some(caption) = &group.caption {
+                count_paragraphs(&caption.paragraphs, counts, losses);
+            }
+            for child in &group.children {
+                count_shape(child, counts, losses);
+            }
+        }
+        ShapeObject::Picture(picture) => {
+            if let Some(caption) = &picture.caption {
+                count_paragraphs(&caption.paragraphs, counts, losses);
+            }
+        }
+        _ => {}
+    }
 }
 
 impl DocumentCore {
@@ -1152,7 +1302,9 @@ impl DocumentCore {
     /// - `page_count_before`: 어댑터 적용 직전 페이지 수
     /// - `page_count_after`: 직렬화 → 재로드 후 페이지 수
     /// - `bytes_len`: HWP 바이트 길이
-    /// - `recovered`: `before == after` 면 true
+    /// - `structure_before` / `structure_after`: text/control/object/opaque payload 카운트
+    /// - `serialization_losses`: 미지원 lowering 또는 재로드 구조 손실 진단
+    /// - `recovered`: 페이지와 구조가 모두 일치하고 손실 진단이 없을 때만 true
     ///
     /// ## 비용
     ///
@@ -1160,17 +1312,59 @@ impl DocumentCore {
     /// 큰 문서 수백 ms 가능.
     pub fn serialize_hwp_with_verify(&mut self) -> Result<HwpExportVerification, HwpError> {
         let page_count_before = self.page_count();
-        let bytes = self.export_hwp_with_adapter()?;
+        use crate::document_core::converters::hwpx_to_hwp::convert_if_hwpx_source;
+        let _report = convert_if_hwpx_source(&mut self.document, self.source_format);
+        let (structure_before, mut serialization_losses) = hwp_structure_counts(&self.document);
+        let bytes = self.export_hwp_native()?;
         let bytes_len = bytes.len();
         let reloaded = DocumentCore::from_bytes(&bytes)?;
         let page_count_after = reloaded.page_count();
+        let (structure_after, _) = hwp_structure_counts(reloaded.document());
+        let page_count_matches = page_count_before == page_count_after;
+        let structure_matches = structure_before == structure_after;
+
+        if structure_before.text_count != structure_after.text_count {
+            serialization_losses.push(format!(
+                "text count changed during serialization: {} -> {}",
+                structure_before.text_count, structure_after.text_count
+            ));
+        }
+        if structure_before.control_count != structure_after.control_count {
+            serialization_losses.push(format!(
+                "control count changed during serialization: {} -> {}",
+                structure_before.control_count, structure_after.control_count
+            ));
+        }
+        if structure_before.object_count != structure_after.object_count {
+            serialization_losses.push(format!(
+                "object count changed during serialization: {} -> {}",
+                structure_before.object_count, structure_after.object_count
+            ));
+        }
+        if structure_before.opaque_control_bytes != structure_after.opaque_control_bytes {
+            serialization_losses.push(format!(
+                "opaque control payload bytes changed during serialization: {} -> {}",
+                structure_before.opaque_control_bytes, structure_after.opaque_control_bytes
+            ));
+        }
+        let recovered = export_is_recovered(
+            page_count_matches,
+            structure_before,
+            structure_after,
+            &serialization_losses,
+        );
 
         Ok(HwpExportVerification {
             bytes,
             bytes_len,
             page_count_before,
             page_count_after,
-            recovered: page_count_before == page_count_after,
+            page_count_matches,
+            structure_before,
+            structure_after,
+            structure_matches,
+            serialization_losses,
+            recovered,
         })
     }
 
@@ -2137,5 +2331,71 @@ mod validate_linesegs_tests {
         seg.line_height = 1000;
         para.line_segs.push(seg);
         assert!(!DocumentCore::needs_reflow_broadly(&para));
+    }
+
+    #[test]
+    fn matching_page_count_cannot_hide_structural_loss() {
+        let before = HwpStructureCounts {
+            text_count: 20,
+            control_count: 3,
+            object_count: 1,
+            opaque_control_bytes: 48,
+        };
+        let after = HwpStructureCounts {
+            control_count: 2,
+            opaque_control_bytes: 0,
+            ..before
+        };
+
+        assert!(
+            !export_is_recovered(true, before, after, &[]),
+            "same page count must not report recovery after control/payload loss"
+        );
+    }
+
+    #[test]
+    fn structure_counts_include_nested_text_controls_objects_and_opaque_bytes() {
+        use crate::model::control::{Control, UnknownControl};
+        use crate::model::document::RawRecord;
+        use crate::model::table::{Cell, Table};
+
+        let nested = Paragraph {
+            text: "cell".to_string(),
+            controls: vec![Control::Unknown(UnknownControl {
+                ctrl_id: 0x1234_5678,
+                raw_ctrl_data: vec![1, 2, 3],
+                raw_child_records: vec![RawRecord {
+                    tag_id: 99,
+                    level: 1,
+                    data: vec![4, 5],
+                }],
+            })],
+            ..Default::default()
+        };
+        let root = Paragraph {
+            text: "body".to_string(),
+            controls: vec![Control::Table(Box::new(Table {
+                cells: vec![Cell {
+                    paragraphs: vec![nested],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))],
+            ..Default::default()
+        };
+        let document = Document {
+            sections: vec![Section {
+                paragraphs: vec![root],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (counts, losses) = hwp_structure_counts(&document);
+        assert_eq!(counts.text_count, 8);
+        assert_eq!(counts.control_count, 2);
+        assert_eq!(counts.object_count, 1);
+        assert_eq!(counts.opaque_control_bytes, 5);
+        assert!(losses.is_empty());
     }
 }
