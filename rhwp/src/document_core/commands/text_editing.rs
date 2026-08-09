@@ -2197,6 +2197,99 @@ impl DocumentCore {
         }
     }
 
+    /// 여러 구역에 걸친 본문 선택을 정확한 구역별 조각으로 삭제한다.
+    ///
+    /// 구역 나눔 자체는 문서 구조이므로 유지하고, 각 구역에서 선택된 본문만 삭제한다.
+    /// 역순 실행은 뒤 구역의 문단 축약이 앞 구역 endpoint 계산에 영향을 주지 않게 한다.
+    pub fn delete_range_across_sections_native(
+        &mut self,
+        start_section_idx: usize,
+        start_para_idx: usize,
+        start_char_offset: usize,
+        end_section_idx: usize,
+        end_para_idx: usize,
+        end_char_offset: usize,
+    ) -> Result<String, HwpError> {
+        if start_section_idx > end_section_idx {
+            return Err(HwpError::RenderError(
+                "시작 구역이 끝 구역보다 뒤에 있음".to_string(),
+            ));
+        }
+        if start_section_idx == end_section_idx {
+            return self.delete_range_native(
+                start_section_idx,
+                start_para_idx,
+                start_char_offset,
+                end_para_idx,
+                end_char_offset,
+                None,
+            );
+        }
+
+        let mut ranges = Vec::new();
+        for section_idx in start_section_idx..=end_section_idx {
+            let section = self.document.sections.get(section_idx).ok_or_else(|| {
+                HwpError::RenderError(format!("구역 인덱스 {} 범위 초과", section_idx))
+            })?;
+            if section.paragraphs.is_empty() {
+                continue;
+            }
+            let range_start_para = if section_idx == start_section_idx {
+                start_para_idx
+            } else {
+                0
+            };
+            let range_end_para = if section_idx == end_section_idx {
+                end_para_idx
+            } else {
+                section.paragraphs.len() - 1
+            };
+            if range_start_para > range_end_para || range_end_para >= section.paragraphs.len() {
+                return Err(HwpError::RenderError(format!(
+                    "구역 {} 문단 범위 초과",
+                    section_idx
+                )));
+            }
+            let range_start_offset = if section_idx == start_section_idx {
+                start_char_offset
+            } else {
+                0
+            };
+            let range_end_offset = if section_idx == end_section_idx {
+                end_char_offset
+            } else {
+                section.paragraphs[range_end_para].text.chars().count()
+            };
+            ranges.push((
+                section_idx,
+                range_start_para,
+                range_start_offset,
+                range_end_para,
+                range_end_offset,
+            ));
+        }
+
+        for (section_idx, range_start_para, range_start_offset, range_end_para, range_end_offset) in
+            ranges.into_iter().rev()
+        {
+            self.delete_range_native(
+                section_idx,
+                range_start_para,
+                range_start_offset,
+                range_end_para,
+                range_end_offset,
+                None,
+            )?;
+        }
+
+        self.document.doc_properties.caret_list_id = start_section_idx as u32;
+        self.document.doc_properties.caret_para_id = start_para_idx as u32;
+        Ok(super::super::helpers::json_ok_with(&format!(
+            "\"sectionIdx\":{},\"paraIdx\":{},\"charOffset\":{}",
+            start_section_idx, start_para_idx, start_char_offset
+        )))
+    }
+
     /// 표 셀에 대한 가변 참조를 얻는다.
     pub(crate) fn get_cell_mut(
         &mut self,

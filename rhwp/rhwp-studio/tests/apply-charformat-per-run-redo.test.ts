@@ -35,7 +35,11 @@ test('서식 이력은 문단당 단일 ID 가 아니라 run 단위 스팬(befor
   // 단일 ID 캡처가 남아 있으면 MIXED 범위 redo 붕괴가 재발한다.
   assert.doesNotMatch(commandSrc, /beforeCharShapeId/, '단일 beforeCharShapeId 캡처 금지');
   assert.doesNotMatch(commandSrc, /afterCharShapeId/, '단일 afterCharShapeId 캡처 금지');
-  assert.match(block, /entries\.push\(\{ paraIndex: p, beforeSpans, afterSpans:/, '문단별 스팬 엔트리 축적');
+  assert.match(
+    block,
+    /entries\.push\(\{\s*paraIndex: p,\s*beforeSpans,\s*afterSpans:/,
+    '문단별 스팬 엔트리 축적',
+  );
 });
 
 test('execute 는 서식 적용 전 run 경계를 샘플링하고 적용 후 run별 파생 shape 를 캡처한다', () => {
