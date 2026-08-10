@@ -11,7 +11,7 @@ import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 import type { DocumentPosition } from '../core/types.ts';
 import type { RevisionTracker } from './revision.ts';
 import type { PendingEditManager } from './pending-edits.ts';
-import type { AgentName, CellAddr, CharFormatProps, DocRange, ObjectOp } from './types.ts';
+import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, ObjectOp } from './types.ts';
 import { AgentToolError } from './types.ts';
 import { renderChartPng, validateChartSpec } from './chart-render.ts';
 import type { ChartSpec } from './chart-render.ts';
@@ -27,6 +27,63 @@ export interface AgentToolExecutorDeps {
 const DOC_NOT_LOADED_MESSAGE = '문서가 로드되지 않았습니다';
 const MAX_SVG_BYTES = 800_000;
 const PENDING_NOTE = 'pending until user approves in the sidebar';
+
+/** Every Studio tool that can create or stage a document mutation. */
+export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
+  'insert_text',
+  'delete_range',
+  'replace_range',
+  'apply_char_format',
+  'apply_list',
+  'set_field_value',
+  'create_table',
+  'edit_table',
+  'apply_para_format',
+  'apply_style',
+  'insert_image',
+  'insert_equation',
+  'set_page_layout',
+  'edit_header_footer',
+  'insert_page_break',
+  'insert_chart',
+]);
+
+export function isDocumentWriteTool(tool: string) {
+  return DOCUMENT_WRITE_TOOLS.has(tool);
+}
+
+export interface ToolCapabilityContext {
+  workflow: AgentWorkflow;
+  /** Phase and epoch carried by this tool-request. Kept unknown so malformed frames fail closed. */
+  phase?: unknown;
+  capabilityEpoch?: unknown;
+  /** Server state last synchronized by the Studio bridge. */
+  activePhase?: AgentPhase;
+  activeCapabilityEpoch?: number | null;
+}
+
+/** Enforce plan-mode write authority before dispatch can touch document state. */
+export function assertToolCapability(tool: string, capability?: ToolCapabilityContext) {
+  if (!isDocumentWriteTool(tool) || capability?.workflow !== 'plan') return;
+  if (capability.phase !== 'implementing' || capability.activePhase !== 'implementing') {
+    throw new AgentToolError(
+      'PLAN_MODE_READ_ONLY',
+      'Document-write tools are disabled while a plan workflow is not implementing an approved plan.',
+    );
+  }
+  const requestEpoch = capability.capabilityEpoch;
+  const activeEpoch = capability.activeCapabilityEpoch;
+  if (typeof requestEpoch !== 'number'
+    || !Number.isSafeInteger(requestEpoch)
+    || typeof activeEpoch !== 'number'
+    || !Number.isSafeInteger(activeEpoch)
+    || requestEpoch !== activeEpoch) {
+    throw new AgentToolError(
+      'STALE_CAPABILITY_EPOCH',
+      `Tool capability epoch ${String(requestEpoch)} does not match the active epoch ${String(activeEpoch)}.`,
+    );
+  }
+}
 
 /** HWPUNIT 변환: 1/7200 inch. 1pt = 100 HU, 1mm ≈ 283.465 HU */
 const HU_PER_MM = 7200 / 25.4;
@@ -200,8 +257,14 @@ export class AgentToolExecutor {
     this.deps = deps;
   }
 
-  async execute(tool: string, args: unknown, agent: AgentName = 'claude'): Promise<unknown> {
+  async execute(
+    tool: string,
+    args: unknown,
+    agent: AgentName = 'claude',
+    capability?: ToolCapabilityContext,
+  ): Promise<unknown> {
     try {
+      assertToolCapability(tool, capability);
       // await 필수 — 비동기 툴(insert_chart)의 rejection 도 여기서 에러 코드로 매핑된다
       return await this.dispatch(tool, args, agent);
     } catch (e) {

@@ -1,7 +1,15 @@
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { createLineReader, truncate, SYSTEM_BRIEF } from './backend.mjs';
+import {
+  createLineReader,
+  isPlanningRestricted,
+  mcpCapabilityEnv,
+  normalizeExecutionMode,
+  systemBriefFor,
+  truncate,
+  validateExecutionMode,
+} from './backend.mjs';
 
 const STDERR_TAIL_LIMIT = 16_000;
 
@@ -15,15 +23,26 @@ const STDERR_TAIL_LIMIT = 16_000;
  */
 export function buildCodexArgv(opts, threadId) {
   const unrestricted = opts.permissionProfile === 'unrestricted';
+  const planningRestricted = isPlanningRestricted(opts);
+  const capabilityEnv = {
+    RHWP_WS_URL: `ws://127.0.0.1:${opts.hubPort}/mcp`,
+    RHWP_AGENT_TOKEN: opts.token,
+    RHWP_AGENT_NAME: 'codex',
+    ...mcpCapabilityEnv(opts),
+  };
+  const mcpEnv = Object.entries(capabilityEnv)
+    .map(([key, value]) => `${key} = ${JSON.stringify(String(value))}`)
+    .join(', ');
   const cfg = [
     '-c', 'mcp_servers.rhwp.command="node"',
     '-c', `mcp_servers.rhwp.args=["${opts.mcpScriptPath}"]`,
-    '-c', `mcp_servers.rhwp.env={RHWP_WS_URL = "ws://127.0.0.1:${opts.hubPort}/mcp", RHWP_AGENT_TOKEN = "${opts.token}", RHWP_AGENT_NAME = "codex"}`,
+    '-c', `mcp_servers.rhwp.env={${mcpEnv}}`,
     '-c', 'mcp_servers.rhwp.startup_timeout_sec=20',
     // Headless MCP calls cannot display an approval prompt. Use config keys
     // understood by both the initial and resume subcommands.
     '-c', 'approval_policy="never"',
-    '-c', `sandbox_mode="${unrestricted ? 'danger-full-access' : 'workspace-write'}"`,
+    '-c', `sandbox_mode="${planningRestricted ? 'read-only' : (unrestricted ? 'danger-full-access' : 'workspace-write')}"`,
+    ...(opts.workflow === 'plan' ? ['-c', 'web_search="live"'] : []),
     ...(opts.effort
       ? ['-c', `model_reasoning_effort=${JSON.stringify(opts.effort)}`]
       : []),
@@ -31,7 +50,9 @@ export function buildCodexArgv(opts, threadId) {
   const common = [
     '--json', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules',
     '--disable', 'apps', '--disable', 'browser_use', '--disable', 'computer_use',
-    '--disable', 'image_generation', '--disable', 'multi_agent', '--disable', 'plugins',
+    '--disable', 'image_generation',
+    ...(opts.workflow === 'plan' ? ['--enable', 'multi_agent'] : ['--disable', 'multi_agent']),
+    '--disable', 'plugins',
     '--disable', 'skill_search',
     '-m', opts.model ?? 'gpt-5.6-sol', ...cfg,
   ];
@@ -68,7 +89,7 @@ export function formatCodexExitError(stderrText, code, signal, token) {
  * @param {import('./backend.mjs').BackendOptions} opts
  * @returns {import('./backend.mjs').AgentSession}
  */
-export function createCodexSession(opts) {
+export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
   const onEvent = opts.onEvent;
 
   /** @type {string | null} */
@@ -77,10 +98,13 @@ export function createCodexSession(opts) {
   let child = null;
   let turnOpen = false;
   let turnCompleted = false;
+  let turnFailureMessage = null;
   let disposed = false;
   let loggedToolCallSample = false;
   let killTimer = null;
   let stderrTail = '';
+  let childExitPromise = Promise.resolve();
+  let resolveChildExit = null;
 
   function endTurn(evt) {
     if (!turnOpen) return;
@@ -137,6 +161,30 @@ export function createCodexSession(opts) {
           }
           return;
         }
+        if (itemType === 'collab_tool_call') {
+          const tool = String(item.tool ?? 'subagent');
+          if (type === 'item.started') {
+            onEvent({
+              type: 'tool-call',
+              agent: 'codex',
+              callId: itemId,
+              tool: `subagent:${tool}`,
+              argsJson: JSON.stringify({
+                prompt: item.prompt ?? undefined,
+                receiverThreadIds: item.receiver_thread_ids ?? [],
+              }),
+            });
+          } else if (type === 'item.completed' || type === 'item.failed') {
+            onEvent({
+              type: 'tool-result',
+              agent: 'codex',
+              callId: itemId,
+              ok: item.status !== 'failed' && type !== 'item.failed',
+              resultPreview: truncate(JSON.stringify(item.agents_states ?? item.result ?? item.error ?? null)),
+            });
+          }
+          return;
+        }
         if (itemType === 'command_execution' || itemType === 'web_search') {
           if (type === 'item.started') {
             onEvent({
@@ -183,15 +231,16 @@ export function createCodexSession(opts) {
         return;
       }
       if (type === 'turn.completed') {
+        // Codex can emit its logical completion before the CLI process exits. Keep
+        // the hub turn open until exit so a resumed implementation never overlaps it.
         turnCompleted = true;
-        endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'completed' });
         return;
       }
       if (type === 'turn.failed') {
         turnCompleted = true;
         const message = String(e.error?.message ?? e.message ?? 'turn failed');
+        turnFailureMessage = message;
         onEvent({ type: 'error', agent: 'codex', message });
-        endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: message });
         return;
       }
       if (type === 'error') {
@@ -222,17 +271,21 @@ export function createCodexSession(opts) {
       if (disposed) return;
       turnOpen = true;
       turnCompleted = false;
+      turnFailureMessage = null;
       onEvent({ type: 'turn-start', agent: 'codex' });
 
       // 프롬프트는 positional 인자가 아니라 stdin('-')으로 전달한다: '-' 로 시작하는
       // 메시지가 CLI 플래그로 파싱되는 것과 초장문 메시지의 ARG_MAX 초과를 막는다.
-      const prompt = threadId ? text : SYSTEM_BRIEF + '\n\n' + text;
+      const mode = normalizeExecutionMode(opts);
+      const prompt = threadId && mode.workflow === 'direct'
+        ? text
+        : systemBriefFor(opts) + '\n\n' + text;
       const argv = buildCodexArgv(opts, threadId);
       stderrTail = '';
 
       let proc;
       try {
-        proc = spawn('codex', argv, {
+        proc = spawnProcess('codex', argv, {
           cwd: opts.rootDir,
           env: {
             ...process.env,
@@ -247,6 +300,7 @@ export function createCodexSession(opts) {
         return;
       }
       child = proc;
+      childExitPromise = new Promise((resolve) => { resolveChildExit = resolve; });
       proc.stdin.on('error', (err) => {
         process.stderr.write(`[codex] stdin write error: ${err?.message ?? err}\n`);
       });
@@ -271,7 +325,9 @@ export function createCodexSession(opts) {
         if (proc !== child) return;
         if (killTimer) { clearTimeout(killTimer); killTimer = null; }
         if (turnOpen && !disposed) {
-          if (!turnCompleted && code !== 0) {
+          if (turnFailureMessage) {
+            endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: turnFailureMessage });
+          } else if (!turnCompleted && code !== 0) {
             onEvent({
               type: 'error',
               agent: 'codex',
@@ -282,12 +338,30 @@ export function createCodexSession(opts) {
             endTurn({ type: 'turn-end', agent: 'codex', stopReason: turnCompleted ? 'completed' : 'exited' });
           }
         }
+        child = null;
+        resolveChildExit?.();
+        resolveChildExit = null;
+      });
+      proc.on('close', () => {
+        if (proc !== child) return;
+        child = null;
+        resolveChildExit?.();
+        resolveChildExit = null;
       });
     },
     setPermissionProfile(profile) {
       if (turnOpen) throw new Error('Permission profile can only change between turns');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
       opts.permissionProfile = profile;
+    },
+    async setExecutionMode(mode) {
+      if (turnOpen) throw new Error('Execution mode can only change between turns');
+      validateExecutionMode(mode);
+      if (child && child.exitCode === null && child.signalCode === null) killChild();
+      await childExitPromise;
+      opts.workflow = mode.workflow;
+      opts.phase = mode.phase;
+      opts.capabilityEpoch = mode.capabilityEpoch;
     },
     interrupt() {
       killChild();

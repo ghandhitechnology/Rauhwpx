@@ -96,6 +96,15 @@ rhwp 프로젝트가 사용하는 서드파티 라이브러리 및 리소스의 
 | vite-plugin-pwa | 1.3.0 | MIT | PWA 빌드 보조 |
 | workbox-window | 7.4.1 | MIT | Service worker runtime 보조 |
 
+### rhwp-agent
+
+| 패키지 | Lock 버전 | 라이선스 | 용도 |
+|--------|-----------|---------|------|
+| @browserbasehq/mcp | 3.0.0 | Apache-2.0 | 계획 모드의 Browserbase 원격 브라우저 sidecar |
+| @modelcontextprotocol/sdk | 1.30.0 | MIT | 에이전트·브라우저 MCP 서버/클라이언트 |
+| ws | 8.21.2 | MIT | 로컬 hub WebSocket transport |
+| zod | 3.25.76 | MIT | MCP 도구 입력 검증 |
+
 ### rhwp-chrome / rhwp-firefox
 
 | 패키지 | Lock 버전 | 라이선스 | 용도 |

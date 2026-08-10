@@ -2,13 +2,76 @@
 // (mcp-stdio.mjs 를 임포트하면 stdio 서버가 뜨므로 절대 임포트하지 않는다).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TOOL_DEFINITIONS, OFFSET_CAVEAT, toToolContent } from '../tools.mjs';
+import {
+  TOOL_CATEGORIES,
+  TOOL_CLASSIFICATIONS,
+  TOOL_DEFINITIONS,
+  IMPLEMENTATION_PLAN_SHAPE,
+  OFFSET_CAVEAT,
+  filterToolDefinitions,
+  toToolContent,
+} from '../tools.mjs';
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 30개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 30);
+test('도구는 정확히 38개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 38);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
+});
+
+test('모든 도구가 허용된 카테고리로 명시 분류된다', () => {
+  assert.equal(Object.keys(TOOL_CLASSIFICATIONS).length, TOOL_DEFINITIONS.length);
+  for (const definition of TOOL_DEFINITIONS) {
+    assert.ok(TOOL_CATEGORIES.includes(definition.category), `${definition.name}: invalid category`);
+    assert.equal(TOOL_CLASSIFICATIONS[definition.name], definition.category);
+  }
+});
+
+test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
+  const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
+  assert.equal(direct.size, 30);
+  assert.ok(direct.has('insert_text'));
+  assert.ok(!direct.has('download_file'));
+  assert.ok(!direct.has('present_implementation_plan'));
+
+  const planning = new Set(filterToolDefinitions('planning').map((definition) => definition.name));
+  assert.ok(planning.has('get_structure'));
+  assert.ok(planning.has('download_file'));
+  assert.ok(planning.has('browserbase_act'));
+  assert.ok(planning.has('present_implementation_plan'));
+  assert.ok(!planning.has('insert_text'));
+
+  const implementing = new Set(filterToolDefinitions('implementing').map((definition) => definition.name));
+  assert.equal(implementing.size, TOOL_DEFINITIONS.length - 1);
+  assert.ok(implementing.has('insert_text'));
+  assert.ok(implementing.has('download_file'));
+  assert.ok(implementing.has('browserbase_act'));
+  assert.ok(!implementing.has('present_implementation_plan'));
+});
+
+test('present_implementation_plan 스키마가 완전한 구조를 강제한다', () => {
+  const definition = byName.get('present_implementation_plan');
+  assert.deepEqual(Object.keys(definition.shape), [
+    'goal', 'title', 'summary', 'assumptions', 'decisions', 'steps',
+    'files', 'validation', 'risks', 'exclusions',
+  ]);
+  assert.equal(definition.shape, IMPLEMENTATION_PLAN_SHAPE);
+  const valid = {
+    goal: 'Ship planning',
+    title: 'Planning workflow',
+    summary: 'Add an authoritative state machine.',
+    assumptions: [],
+    decisions: ['Hub owns state because one authority prevents drift'],
+    steps: [{ title: 'Add state', details: 'Implement transitions.', files: ['server.mjs'] }],
+    files: ['server.mjs'],
+    validation: ['Run npm test'],
+    risks: ['Stale calls are rejected with capability epochs'],
+    exclusions: ['Provider backend implementation'],
+  };
+  for (const [key, schema] of Object.entries(IMPLEMENTATION_PLAN_SHAPE)) {
+    assert.ok(schema.safeParse(valid[key]).success, `schema rejected ${key}`);
+  }
+  assert.ok(!IMPLEMENTATION_PLAN_SHAPE.steps.safeParse([]).success);
 });
 
 test('신규 도구 5개가 모두 있다', () => {
@@ -113,6 +176,11 @@ test('toToolContent: image 가 없거나 모양이 이상하면 text 만', () =>
   const malformed = toToolContent({ image: { data: 123 }, revision: 1 });
   assert.equal(malformed.length, 1);
   assert.equal(malformed[0].type, 'text');
+});
+
+test('toToolContent: proxied MCP content blocks stay intact', () => {
+  const content = [{ type: 'text', text: '{"success":true}' }];
+  assert.equal(toToolContent({ mcpContent: content }), content);
 });
 
 test('create_table: rows+cols 나 cells 둘 중 하나는 필수', () => {

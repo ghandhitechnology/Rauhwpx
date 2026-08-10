@@ -4,7 +4,7 @@
  * Normative shapes shared by the studio bridge (bridge.ts / tool-executor.ts /
  * revision.ts), the pending-edit manager (pending-edits.ts / pending-overlay.ts)
  * and the sidebar UI (ui/agent-sidebar/). Wire shapes mirror the rhwp-agent hub
- * protocol v1.
+ * protocol v2.
  */
 import type { WasmBridge } from '../core/wasm-bridge.ts';
 import type { EventBus } from '../core/event-bus.ts';
@@ -12,11 +12,87 @@ import type { InputHandler } from '../engine/input-handler.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 
-export const AGENT_PROTOCOL_VERSION = 1;
+export const AGENT_PROTOCOL_VERSION = 2;
 
 export type AgentName = 'claude' | 'codex';
 export type PermissionProfile = 'safe' | 'unrestricted';
 export type WritingStyleLanguage = 'ko' | 'en';
+export type AgentWorkflow = 'direct' | 'plan';
+export type AgentPhase = 'direct' | 'planning' | 'awaiting-approval' | 'switching' | 'implementing';
+
+export interface StructuredPlanStep {
+  title: string;
+  details: string;
+  files?: string[];
+}
+
+/** Server-authored plan. Its epoch is descriptive; capabilityEpoch is the write authority. */
+export interface StructuredPlan {
+  planId: string;
+  title: string;
+  goal: string;
+  summary: string;
+  assumptions: string[];
+  decisions: string[];
+  steps: StructuredPlanStep[];
+  files: string[];
+  validation: string[];
+  risks: string[];
+  exclusions: string[];
+  createdAt: string;
+  epoch: number;
+}
+
+export interface AgentWorkflowState {
+  workflow: AgentWorkflow;
+  phase: AgentPhase;
+  /** null means the server did not provide a usable capability epoch. */
+  capabilityEpoch: number | null;
+  latestPlan: StructuredPlan | null;
+}
+
+export function isAgentWorkflow(value: unknown): value is AgentWorkflow {
+  return value === 'direct' || value === 'plan';
+}
+
+export function isAgentPhase(value: unknown): value is AgentPhase {
+  return value === 'direct'
+    || value === 'planning'
+    || value === 'awaiting-approval'
+    || value === 'switching'
+    || value === 'implementing';
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+export function isStructuredPlan(value: unknown): value is StructuredPlan {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const plan = value as Record<string, unknown>;
+  return typeof plan['planId'] === 'string'
+    && typeof plan['title'] === 'string'
+    && typeof plan['goal'] === 'string'
+    && typeof plan['summary'] === 'string'
+    && isStringArray(plan['assumptions'])
+    && isStringArray(plan['decisions'])
+    && Array.isArray(plan['steps'])
+    && plan['steps'].every((step) => {
+      if (!step || typeof step !== 'object' || Array.isArray(step)) return false;
+      const item = step as Record<string, unknown>;
+      return typeof item['title'] === 'string'
+        && typeof item['details'] === 'string'
+        && (item['files'] === undefined || isStringArray(item['files']));
+    })
+    && isStringArray(plan['files'])
+    && isStringArray(plan['validation'])
+    && isStringArray(plan['risks'])
+    && isStringArray(plan['exclusions'])
+    && typeof plan['createdAt'] === 'string'
+    && typeof plan['epoch'] === 'number'
+    && Number.isSafeInteger(plan['epoch'])
+    && plan['epoch'] >= 0;
+}
 
 export interface WritingStyleStatus {
   active: boolean;
@@ -88,9 +164,18 @@ export type SidebarEvent =
       model?: string;
       effort?: string;
       permissionProfile?: PermissionProfile;
+      workflow: AgentWorkflow;
+      phase: AgentPhase;
+      capabilityEpoch: number | null;
+      latestPlan: StructuredPlan | null;
     }
   | { type: 'chat-stopped' }
   | { type: 'permission-changed'; permissionProfile: PermissionProfile }
+  | ({ type: 'workflow-changed' } & AgentWorkflowState)
+  | ({ type: 'plan-ready'; plan: StructuredPlan } & AgentWorkflowState)
+  | ({ type: 'plan-approved'; planId: string } & AgentWorkflowState)
+  | ({ type: 'plan-invalidated'; planId: string | null; reason?: string } & AgentWorkflowState)
+  | ({ type: 'implementation-started'; planId: string } & AgentWorkflowState)
   | { type: 'skills-catalog'; catalog: SkillCatalog }
   | { type: 'skill-detail'; requestId: string; revision: number; skill: ProductSkill }
   | { type: 'skill-saved'; requestId: string; revision: number; skill: ProductSkill }
