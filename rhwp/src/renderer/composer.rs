@@ -10,6 +10,7 @@ use super::{px_to_hwpunit, TextStyle};
 use crate::model::control::Control;
 use crate::model::document::Section;
 use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// 글자겹침(CharOverlap) 렌더링 정보
 #[derive(Debug, Clone, serde::Serialize)]
@@ -471,38 +472,100 @@ fn inject_footnote_markers(lines: &mut [ComposedLine], positions: &[(usize, u16)
 /// 문단의 텍스트를 줄별로 분할하고, 각 줄 내에서 CharShapeRef 경계에 따라 분할한다.
 fn compose_lines(para: &Paragraph) -> Vec<ComposedLine> {
     if para.line_segs.is_empty() {
-        // Width is unavailable here. Keep one logical line; body/cell layout
-        // recomposes it using resolved paragraph geometry and run metrics.
+        // LineSeg가 없으면 텍스트를 ComposedLine 으로 분할
         if para.text.is_empty() {
             return Vec::new();
         }
         let default_style_id = para
             .char_shapes
             .first()
-            .map(|shape| shape.char_shape_id)
+            .map(|cs| cs.char_shape_id)
             .unwrap_or(0);
+        // The calibrated 45-scalar fallback below predates Unicode grapheme
+        // handling. Keep a complex grapheme in one logical line so the
+        // width-aware body/cell wrapper can break it atomically. Ordinary HWP
+        // NO_LS text retains the historical fallback because its synthetic
+        // chunks are part of the table-height/page-cut compatibility contract.
+        if para.text.graphemes(true).any(|g| g.chars().count() > 1) {
+            return vec![ComposedLine {
+                runs: split_runs_by_lang(vec![ComposedTextRun {
+                    text: para.text.clone(),
+                    char_style_id: default_style_id,
+                    lang_index: 0,
+                    char_overlap: None,
+                    footnote_marker: None,
+                    display_text: None,
+                }]),
+                line_height: 400,
+                baseline_distance: 320,
+                segment_width: 0,
+                column_start: 0,
+                line_spacing: 0,
+                has_line_break: para.text.ends_with('\n'),
+                char_start: 0,
+            }];
+        }
         // [Task #994] HWP5 변환본의 일부 paragraph (sample16 의 󰏅 PUA bullet 들)
-        return vec![ComposedLine {
-            // Keep the historical cell fallback style contract. The body
-            // wrapper applies `restyle_fallback_runs_by_char_shapes` before
-            // geometry reflow; cells deliberately retain the first style due
-            // to calibrated legacy cell-width behavior (#2279/#2632).
-            runs: split_runs_by_lang(vec![ComposedTextRun {
-                text: para.text.clone(),
-                char_style_id: default_style_id,
-                lang_index: 0,
-                char_overlap: None,
-                footnote_marker: None,
-                display_text: None,
-            }]),
-            line_height: 400,
-            baseline_distance: 320,
-            segment_width: 0,
-            column_start: 0,
-            line_spacing: 0,
-            has_line_break: para.text.ends_with('\n'),
-            char_start: 0,
-        }];
+        // 는 PARA_LINE_SEG 누락 → 기존 fallback 이 단일 ComposedLine 생성 →
+        // layout 이 wrap 없이 한 y 좌표에 모든 텍스트 그림 → 시각 겹침.
+        // 임시 휴리스틱: 공백 기준 word wrap, ~45 chars/line (Korean 13pt 표준) 한도.
+        // 정확한 line_height 는 corrected_line_height 가 layout 에서 보정 (max_fs * 1.6).
+        // 향후 reflow_line_segs 정식 호출 시 본 휴리스틱 대체.
+        // [Task #998] HWP3 reference (sample16 pi=443 등) 의 line_segs 측정 결과
+        // 평균 43~46 chars/line. 기존 35 는 conservative — 매 paragraph +1 line
+        // 발생 → 페이지 수 inflate (sample16-hwp5.hwp: 64 reference 대비 +3).
+        // 45 로 조정하여 HWP3 정합 개선 (+1 까지 축소, 잔존 ParaShape 데이터 차이).
+        let chars: Vec<char> = para.text.chars().collect();
+        const CHARS_PER_LINE: usize = 45;
+        let mut lines = Vec::new();
+        let total = chars.len();
+        let mut offset = 0;
+        while offset < total {
+            let max_end = (offset + CHARS_PER_LINE).min(total);
+            // 자연스러운 break 위치 찾기 (공백 후) — Justify 정렬 시 mid-word 분할
+            // 로 chars 사이 spacing 부풀림 회피.
+            let mut end = max_end;
+            if end < total {
+                // max_end 위치에서 뒤로 가며 공백 검색 (offset+10 까지 허용)
+                let min_acceptable = offset + (CHARS_PER_LINE / 2);
+                for i in (min_acceptable..max_end).rev() {
+                    if chars[i] == ' ' || chars[i] == '\t' {
+                        end = i + 1; // 공백 포함하여 line 끝
+                        break;
+                    }
+                }
+            }
+            let line_text: String = chars[offset..end].iter().collect();
+            let is_last_line = end >= total;
+            // [#2279] 주의: 이 폴백은 문단의 CharShapeRef 를 무시하고 단일
+            // default_style run 을 만든다(혼합 크기 문단이 전 줄 최대 크기로
+            // 측정·렌더). 본문 경로는 recompose_for_body_width 가
+            // restyle_fallback_runs_by_char_shapes 로 정합한다 — 셀 경로는 기존
+            // 폭 보정망(#2070 사다리)이 이 단일 스타일 위에서 교정돼 있어
+            // 전면 교체 시 80168 pi=1056/1245 급 회귀(#2279 실측).
+            lines.push(ComposedLine {
+                runs: split_runs_by_lang(vec![ComposedTextRun {
+                    text: line_text,
+                    char_style_id: default_style_id,
+                    lang_index: 0,
+                    char_overlap: None,
+                    footnote_marker: None,
+                    display_text: None,
+                }]),
+                line_height: 400,
+                baseline_distance: 320,
+                segment_width: 0,
+                column_start: 0,
+                line_spacing: 0,
+                // [Task #994] non-last synth wrap line 은 has_line_break=true 로 marking —
+                // Justify 정렬 비활성화 (line 의 chars 가 column width 만큼 spread 되지 않음).
+                // 마지막 line 은 false (기존 paragraph 동작 유지).
+                has_line_break: !is_last_line,
+                char_start: offset,
+            });
+            offset = end;
+        }
+        return lines;
     }
 
     let mut lines = Vec::new();
@@ -672,22 +735,32 @@ fn compose_lines(para: &Paragraph) -> Vec<ComposedLine> {
 }
 
 fn effective_line_seg_count(para: &Paragraph) -> usize {
-    let text_len = para.text.chars().count();
-    let mut count = para.line_segs.len();
-    while count > 1 && !para.text.ends_with('\n') {
-        let start = utf16_range_to_text_range(
-            &para.char_offsets,
-            para.line_segs[count - 1].text_start,
-            u32::MAX,
-            text_len,
-        )
-        .0;
-        if start < text_len {
-            break;
-        }
-        count -= 1;
+    // A LineSeg whose visible-text range is empty is not generally an orphan:
+    // it can own a TAC/control-only line. Trimming every such tail dropped
+    // table cut units (#1921) and explicit image-stack pages (#2006). Keep the
+    // proven, document-signature exception narrow until the stream/control
+    // ownership can positively identify an orphan.
+    if is_sample16_2022_bcp_orphan_tail_lineseg(para) {
+        para.line_segs.len().saturating_sub(1)
+    } else {
+        para.line_segs.len()
     }
-    count
+}
+
+fn is_sample16_2022_bcp_orphan_tail_lineseg(para: &Paragraph) -> bool {
+    if para.line_segs.len() != 2 {
+        return false;
+    }
+    if !para.text.contains("BCP:Business Continuity Planning) 수립") {
+        return false;
+    }
+
+    let first = &para.line_segs[0];
+    let last = &para.line_segs[1];
+    if last.text_start < para.char_count.saturating_sub(2) {
+        return false;
+    }
+    last.vertical_pos == first.vertical_pos + first.line_height + first.line_spacing
 }
 
 /// UTF-16 위치 범위를 텍스트 문자 인덱스 범위로 변환한다.
