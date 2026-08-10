@@ -12,6 +12,7 @@ use crate::renderer::layout::{
 };
 use crate::renderer::px_to_hwpunit;
 use crate::renderer::style_resolver::{detect_lang_category, ResolvedStyleSet};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// 줄 나눔 토큰
 #[derive(Debug, Clone)]
@@ -161,6 +162,95 @@ fn is_cjk_ideograph(ch: char) -> bool {
     lang == 2 || lang == 3 // Chinese or Japanese
 }
 
+fn grapheme_end_map(chars: &[char]) -> Vec<usize> {
+    let text: String = chars.iter().collect();
+    let mut ends = vec![0; chars.len()];
+    let mut start = 0;
+    for grapheme in text.graphemes(true) {
+        let end = start + grapheme.chars().count();
+        for slot in &mut ends[start..end] {
+            *slot = end;
+        }
+        start = end;
+    }
+    ends
+}
+
+fn grapheme_char_widths(width: f64, len: usize) -> Vec<f64> {
+    let mut widths = vec![0.0; len];
+    if let Some(first) = widths.first_mut() {
+        *first = width;
+    }
+    widths
+}
+
+fn measure_grapheme_metrics(
+    text_chars: &[char],
+    start: usize,
+    end: usize,
+    char_offsets: &[u32],
+    char_shapes: &[CharShapeRef],
+    styles: &ResolvedStyleSet,
+    default_lang: usize,
+) -> (f64, f64, usize) {
+    let cluster: String = text_chars[start..end].iter().collect();
+    let width = measure_token_width(
+        &cluster,
+        start,
+        char_offsets,
+        char_shapes,
+        styles,
+        default_lang,
+    );
+    let mut max_font_size = 0.0f64;
+    let mut current_lang = default_lang;
+    for (offset, ch) in text_chars[start..end].iter().copied().enumerate() {
+        let index = start + offset;
+        let utf16_pos = char_offsets.get(index).copied().unwrap_or(index as u32);
+        let style_id = find_active_char_shape(char_shapes, utf16_pos);
+        let lang = if is_lang_neutral(ch) {
+            current_lang
+        } else {
+            current_lang = detect_lang_category(ch);
+            current_lang
+        };
+        let style = resolved_to_text_style(styles, style_id, lang);
+        max_font_size = max_font_size.max(style.font_size.max(12.0));
+    }
+    (width, max_font_size, current_lang)
+}
+
+fn measure_grapheme_advances(
+    text_chars: &[char],
+    start: usize,
+    end: usize,
+    grapheme_ends: &[usize],
+    char_offsets: &[u32],
+    char_shapes: &[CharShapeRef],
+    styles: &ResolvedStyleSet,
+    default_lang: usize,
+) -> Vec<f64> {
+    let mut widths = vec![0.0; end - start];
+    let mut previous_prefix_width = 0.0;
+    let mut index = start;
+    while index < end {
+        let cluster_end = grapheme_ends[index].min(end).max(index + 1);
+        let prefix: String = text_chars[start..cluster_end].iter().collect();
+        let prefix_width = measure_token_width(
+            &prefix,
+            start,
+            char_offsets,
+            char_shapes,
+            styles,
+            default_lang,
+        );
+        widths[index - start] = prefix_width - previous_prefix_width;
+        previous_prefix_width = prefix_width;
+        index = cluster_end;
+    }
+    widths
+}
+
 /// 문단 텍스트를 줄 나눔 토큰으로 분할한다.
 pub(crate) fn tokenize_paragraph(
     text_chars: &[char],
@@ -201,6 +291,7 @@ fn tokenize_paragraph_with_controls(
     }
 
     let mut tokens = Vec::new();
+    let grapheme_ends = grapheme_end_map(text_chars);
     let mut i = 0;
     let mut current_lang: usize = 0;
     let mut ctrls = inline_controls.iter().copied().peekable();
@@ -409,29 +500,27 @@ fn tokenize_paragraph_with_controls(
                 }
                 continue;
             } else {
-                // 글자 모드: 한글 개별 분할
-                let utf16_pos = if i < char_offsets.len() {
-                    char_offsets[i]
-                } else {
-                    i as u32
-                };
-                let style_id = find_active_char_shape(char_shapes, utf16_pos);
+                // 글자 모드에서도 Unicode grapheme cluster는 분할하지 않는다.
                 current_lang = detect_lang_category(ch);
-                let ts = resolved_to_text_style(styles, style_id, current_lang);
-                let fs = if ts.font_size > 0.0 {
-                    ts.font_size
-                } else {
-                    12.0
-                };
-                let w = estimate_text_width_unrounded(&ch.to_string(), &ts);
+                let end = grapheme_ends[i];
+                let (w, fs, lang) = measure_grapheme_metrics(
+                    text_chars,
+                    i,
+                    end,
+                    char_offsets,
+                    char_shapes,
+                    styles,
+                    current_lang,
+                );
+                current_lang = lang;
                 tokens.push(BreakToken::Text {
                     start_idx: i,
-                    end_idx: i + 1,
+                    end_idx: end,
                     width: w,
                     max_font_size: fs,
-                    char_widths: vec![],
+                    char_widths: grapheme_char_widths(w, end - i),
                 });
-                i += 1;
+                i = end;
                 continue;
             }
         }
@@ -514,20 +603,16 @@ fn tokenize_paragraph_with_controls(
                         current_lang,
                     );
                     // 개별 글자 폭 수집 (char_level_break용)
-                    let cw: Vec<f64> = (start..i)
-                        .map(|ci| {
-                            let c = text_chars[ci];
-                            let u16p = if ci < char_offsets.len() {
-                                char_offsets[ci]
-                            } else {
-                                ci as u32
-                            };
-                            let sid = find_active_char_shape(char_shapes, u16p);
-                            let lang = if is_lang_neutral(c) { current_lang } else { 1 };
-                            let ts = resolved_to_text_style(styles, sid, lang);
-                            estimate_text_width_unrounded(&c.to_string(), &ts)
-                        })
-                        .collect();
+                    let cw = measure_grapheme_advances(
+                        text_chars,
+                        start,
+                        i,
+                        &grapheme_ends,
+                        char_offsets,
+                        char_shapes,
+                        styles,
+                        current_lang,
+                    );
                     tokens.push(BreakToken::Text {
                         start_idx: start,
                         end_idx: i,
@@ -538,68 +623,58 @@ fn tokenize_paragraph_with_controls(
                 }
                 continue;
             } else {
-                // 글자 모드
-                let utf16_pos = if i < char_offsets.len() {
-                    char_offsets[i]
-                } else {
-                    i as u32
-                };
-                let style_id = find_active_char_shape(char_shapes, utf16_pos);
+                // 글자 모드 (grapheme cluster 단위)
                 current_lang = 1;
-                let ts = resolved_to_text_style(styles, style_id, current_lang);
-                let fs = if ts.font_size > 0.0 {
-                    ts.font_size
-                } else {
-                    12.0
-                };
-                let w = estimate_text_width_unrounded(&ch.to_string(), &ts);
+                let end = grapheme_ends[i];
+                let (w, fs, lang) = measure_grapheme_metrics(
+                    text_chars,
+                    i,
+                    end,
+                    char_offsets,
+                    char_shapes,
+                    styles,
+                    current_lang,
+                );
+                current_lang = lang;
                 tokens.push(BreakToken::Text {
                     start_idx: i,
-                    end_idx: i + 1,
+                    end_idx: end,
                     width: w,
                     max_font_size: fs,
-                    char_widths: vec![],
+                    char_widths: grapheme_char_widths(w, end - i),
                 });
-                i += 1;
+                i = end;
                 continue;
             }
         }
 
         // CJK 한자/일본어: 항상 개별 토큰
         if is_cjk_ideograph(ch) {
-            let utf16_pos = if i < char_offsets.len() {
-                char_offsets[i]
-            } else {
-                i as u32
-            };
-            let style_id = find_active_char_shape(char_shapes, utf16_pos);
             current_lang = detect_lang_category(ch);
-            let ts = resolved_to_text_style(styles, style_id, current_lang);
-            let fs = if ts.font_size > 0.0 {
-                ts.font_size
-            } else {
-                12.0
-            };
-            let w = estimate_text_width_unrounded(&ch.to_string(), &ts);
+            let end = grapheme_ends[i];
+            let (w, fs, lang) = measure_grapheme_metrics(
+                text_chars,
+                i,
+                end,
+                char_offsets,
+                char_shapes,
+                styles,
+                current_lang,
+            );
+            current_lang = lang;
             tokens.push(BreakToken::Text {
                 start_idx: i,
-                end_idx: i + 1,
+                end_idx: end,
                 width: w,
                 max_font_size: fs,
-                char_widths: vec![],
+                char_widths: grapheme_char_widths(w, end - i),
             });
-            i += 1;
+            i = end;
             continue;
         }
 
         // 기타 문자 (기호, NonBreakingSpace 등): 개별 Text 토큰
         {
-            let utf16_pos = if i < char_offsets.len() {
-                char_offsets[i]
-            } else {
-                i as u32
-            };
-            let style_id = find_active_char_shape(char_shapes, utf16_pos);
             let lang = if is_lang_neutral(ch) {
                 current_lang
             } else {
@@ -607,21 +682,25 @@ fn tokenize_paragraph_with_controls(
                 current_lang = detected;
                 detected
             };
-            let ts = resolved_to_text_style(styles, style_id, lang);
-            let fs = if ts.font_size > 0.0 {
-                ts.font_size
-            } else {
-                12.0
-            };
-            let w = estimate_text_width_unrounded(&ch.to_string(), &ts);
+            let end = grapheme_ends[i];
+            let (w, fs, lang) = measure_grapheme_metrics(
+                text_chars,
+                i,
+                end,
+                char_offsets,
+                char_shapes,
+                styles,
+                lang,
+            );
+            current_lang = lang;
             tokens.push(BreakToken::Text {
                 start_idx: i,
-                end_idx: i + 1,
+                end_idx: end,
                 width: w,
                 max_font_size: fs,
-                char_widths: vec![],
+                char_widths: grapheme_char_widths(w, end - i),
             });
-            i += 1;
+            i = end;
         }
     }
 
@@ -642,6 +721,9 @@ fn measure_token_width(
 ) -> f64 {
     let mut total = 0.0;
     let mut current_lang = default_lang;
+    let mut run_text = String::new();
+    let mut run_style = None;
+    let mut run_lang = current_lang;
     for (offset, ch) in text.chars().enumerate() {
         let idx = start_char_idx + offset;
         let utf16_pos = if idx < char_offsets.len() {
@@ -657,8 +739,20 @@ fn measure_token_width(
             current_lang = detected;
             detected
         };
-        let ts = resolved_to_text_style(styles, style_id, lang);
-        total += estimate_text_width_unrounded(&ch.to_string(), &ts);
+        if run_style != Some(style_id) || run_lang != lang {
+            if let Some(active_style) = run_style {
+                let ts = resolved_to_text_style(styles, active_style, run_lang);
+                total += estimate_text_width_unrounded(&run_text, &ts);
+                run_text.clear();
+            }
+            run_style = Some(style_id);
+            run_lang = lang;
+        }
+        run_text.push(ch);
+    }
+    if let Some(active_style) = run_style {
+        let ts = resolved_to_text_style(styles, active_style, run_lang);
+        total += estimate_text_width_unrounded(&run_text, &ts);
     }
     total
 }
@@ -957,7 +1051,10 @@ fn fill_lines(
                 // 단일 문자 CJK/한글 토큰의 줄바꿈 가능 지점 처리
                 // 이 글자를 포함한 후 break point 갱신 (end_idx 사용)
                 // → 초과 시 이 글자까지 L0에 포함하고 다음 토큰부터 다음 줄
-                if *end_idx - *start_idx == 1 && *start_idx > line_start_idx {
+                let is_single_grapheme = !char_widths.is_empty()
+                    && char_widths.iter().skip(1).all(|width| *width == 0.0);
+                if (*end_idx - *start_idx == 1 || is_single_grapheme) && *start_idx > line_start_idx
+                {
                     let c = text_chars[*start_idx];
                     let allow_break = if is_hangul(c) {
                         // [#2185] bit7=1 = 글자 단위 break 허용 (위 주석 참조)
@@ -1234,10 +1331,15 @@ fn char_level_break_hwp(
         normal_w
     };
 
-    for ci in token_start..token_end {
+    let grapheme_ends = grapheme_end_map(text_chars);
+    let mut ci = token_start;
+    while ci < token_end {
+        let cluster_end = grapheme_ends[ci].min(token_end).max(ci + 1);
         let rel_idx = ci - token_start;
-        let char_w = if rel_idx < char_widths_hwp.len() {
-            char_widths_hwp[rel_idx]
+        let cluster_w = if rel_idx < char_widths_hwp.len() {
+            char_widths_hwp[rel_idx..(cluster_end - token_start).min(char_widths_hwp.len())]
+                .iter()
+                .sum()
         } else {
             let ch = text_chars[ci];
             let char_w_px = if is_cjk_char(ch) {
@@ -1248,7 +1350,7 @@ fn char_level_break_hwp(
             to_hwp(char_w_px)
         };
 
-        if lw + char_w > current_w && ci > *line_start_idx && !(pin_first_char && rel_idx == 0) {
+        if lw + cluster_w > current_w && ci > *line_start_idx && !(pin_first_char && rel_idx == 0) {
             results.push(LineBreakResult {
                 start_idx: *line_start_idx,
                 end_idx: ci,
@@ -1256,15 +1358,140 @@ fn char_level_break_hwp(
                 has_line_break: false,
             });
             *line_start_idx = ci;
-            lw = char_w;
+            lw = cluster_w;
             is_first_line = false;
             current_w = normal_w;
         } else {
-            lw += char_w;
+            lw += cluster_w;
         }
+        ci = cluster_end;
     }
 
     (results, lw, line_max_fs)
+}
+
+#[cfg(test)]
+mod grapheme_reflow_tests {
+    use super::*;
+    use crate::renderer::style_resolver::{ResolvedCharStyle, ResolvedParaStyle};
+
+    fn styles() -> ResolvedStyleSet {
+        ResolvedStyleSet {
+            char_styles: vec![
+                ResolvedCharStyle {
+                    font_family: "Noto Sans KR".to_string(),
+                    font_families: vec!["Noto Sans KR".to_string(); 7],
+                    font_size: 12.0,
+                    ..Default::default()
+                },
+                ResolvedCharStyle {
+                    font_family: "Noto Sans KR".to_string(),
+                    font_families: vec!["Noto Sans KR".to_string(); 7],
+                    font_size: 24.0,
+                    ..Default::default()
+                },
+            ],
+            para_styles: vec![ResolvedParaStyle {
+                english_break_unit: 2,
+                korean_break_unit: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn overwide_grapheme_is_not_split_by_long_token_fallback() {
+        let chars: Vec<char> = "e\u{301}x".chars().collect();
+        let mut line_start = 0;
+        let (lines, remaining_width, _) = char_level_break_hwp(
+            &chars,
+            0,
+            chars.len(),
+            &mut line_start,
+            0,
+            12.0,
+            1000,
+            1000,
+            true,
+            &[1500, 0, 500],
+            false,
+        );
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!((lines[0].start_idx, lines[0].end_idx), (0, 2));
+        assert_eq!(line_start, 2);
+        assert_eq!(remaining_width, 500);
+    }
+
+    #[test]
+    fn grapheme_measurement_respects_style_boundary_after_field_gap() {
+        let chars: Vec<char> = "e\u{301}x".chars().collect();
+        // A field/control stream gap precedes the combining mark. The char-shape
+        // boundary uses stream offsets, not visible character indexes.
+        let offsets = vec![0, 9, 10];
+        let shapes = vec![
+            CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 0,
+            },
+            CharShapeRef {
+                start_pos: 9,
+                char_shape_id: 1,
+            },
+        ];
+        let tokens = tokenize_paragraph(&chars, &offsets, &shapes, &styles(), 2, 1);
+        let BreakToken::Text {
+            start_idx,
+            end_idx,
+            width,
+            max_font_size,
+            ..
+        } = &tokens[0]
+        else {
+            panic!("expected grapheme text token");
+        };
+        assert_eq!((*start_idx, *end_idx), (0, 2));
+        assert_eq!(*max_font_size, 24.0);
+        let expected = measure_token_width("e\u{301}", 0, &offsets, &shapes, &styles(), 1);
+        assert!((*width - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn inline_control_after_grapheme_keeps_token_and_anchor_order() {
+        let chars: Vec<char> = "e\u{301}x".chars().collect();
+        let offsets = vec![0, 1, 2];
+        let shapes = vec![CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 0,
+        }];
+        let tokens = tokenize_paragraph_with_controls(
+            &chars,
+            &offsets,
+            &shapes,
+            &styles(),
+            2,
+            1,
+            &[(2, 500, false)],
+        );
+
+        assert!(matches!(
+            tokens.as_slice(),
+            [
+                BreakToken::Text {
+                    start_idx: 0,
+                    end_idx: 2,
+                    ..
+                },
+                BreakToken::InlineControl { idx: 2, .. },
+                BreakToken::Text {
+                    start_idx: 2,
+                    end_idx: 3,
+                    ..
+                }
+            ]
+        ));
+    }
 }
 
 /// 문단의 line_segs를 텍스트 내용과 컬럼 너비에 맞게 재계산한다.

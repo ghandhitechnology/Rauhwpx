@@ -4,6 +4,7 @@ use super::super::font_metrics_data;
 use super::super::style_resolver::ResolvedStyleSet;
 use super::super::{hwpunit_to_px, TabLeaderInfo, TabStop, TextStyle};
 use crate::model::style::UnderlineType;
+use unicode_segmentation::UnicodeSegmentation;
 
 // ── TextMeasurer trait ──────────────────────────────────────────────
 
@@ -25,25 +26,15 @@ pub trait TextMeasurer {
 ///
 /// 한글 자모 조합(초+중+종)을 1개 클러스터로 묶는다.
 /// cluster_len[i] > 0: 클러스터 시작 (길이), 0: 클러스터 내부 (이전 문자와 동일 위치)
-fn build_cluster_len(chars: &[char]) -> Vec<u8> {
+fn build_cluster_len(chars: &[char]) -> Vec<usize> {
     let char_count = chars.len();
-    let mut cluster_len = vec![0u8; char_count];
+    let mut cluster_len = vec![0usize; char_count];
+    let text: String = chars.iter().collect();
     let mut ci = 0;
-    while ci < char_count {
-        if is_hangul_choseong(chars[ci]) {
-            let start = ci;
-            ci += 1;
-            if ci < char_count && is_hangul_jungseong(chars[ci]) {
-                ci += 1;
-                if ci < char_count && is_hangul_jongseong(chars[ci]) {
-                    ci += 1;
-                }
-            }
-            cluster_len[start] = (ci - start) as u8;
-        } else {
-            cluster_len[ci] = 1;
-            ci += 1;
-        }
+    for grapheme in text.graphemes(true) {
+        let len = grapheme.chars().count();
+        cluster_len[ci] = len;
+        ci += len;
     }
     cluster_len
 }
@@ -133,7 +124,7 @@ pub(crate) fn find_next_tab_stop(
 /// 지정 인덱스부터 다음 탭(또는 문자열 끝)까지의 세그먼트 폭을 측정한다.
 fn measure_segment_from(
     chars: &[char],
-    cluster_len: &[u8],
+    cluster_len: &[usize],
     start: usize,
     char_width: &dyn Fn(usize) -> f64,
 ) -> f64 {
@@ -308,8 +299,8 @@ pub fn extract_tab_leaders_with_extended(
 fn compute_char_positions_walk(
     text: &str,
     style: &TextStyle,
-    char_px_raw: &dyn Fn(usize, char, &[char], &[u8]) -> f64,
-    inline_tab_x: &dyn Fn(usize, f64, &[u16; 7], &[char], &[u8], &dyn Fn(usize) -> f64) -> f64,
+    char_px_raw: &dyn Fn(usize, char, &[char], &[usize]) -> f64,
+    inline_tab_x: &dyn Fn(usize, f64, &[u16; 7], &[char], &[usize], &dyn Fn(usize) -> f64) -> f64,
 ) -> Vec<f64> {
     let (font_size, ratio, tab_w) = style_params(style);
     let chars: Vec<char> = text.chars().collect();
@@ -448,10 +439,243 @@ fn compute_char_positions_walk(
     positions
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static METRIC_FONT_DB: std::cell::RefCell<usvg::fontdb::Database> = {
+        let mut db = usvg::fontdb::Database::new();
+        crate::renderer::font_paths::load_into_fontdb(&mut db, &[]);
+        std::cell::RefCell::new(db)
+    };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn normalized_family_name(name: &str) -> String {
+    name.chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn metric_face_for_family(
+    db: &usvg::fontdb::Database,
+    family: &str,
+    style: &TextStyle,
+) -> Option<usvg::fontdb::ID> {
+    use usvg::fontdb::{Family, Query, Stretch, Style, Weight};
+
+    let family = family.trim().trim_matches(['\'', '"']);
+    if family.is_empty() {
+        return None;
+    }
+    let families = [Family::Name(family)];
+    let query = Query {
+        families: &families,
+        weight: if style.bold {
+            Weight::BOLD
+        } else {
+            Weight::NORMAL
+        },
+        stretch: Stretch::Normal,
+        style: if style.italic {
+            Style::Italic
+        } else {
+            Style::Normal
+        },
+    };
+    if let Some(id) = db.query(&query) {
+        return Some(id);
+    }
+
+    let normalized = normalized_family_name(family);
+    db.faces()
+        .find(|face| {
+            normalized_family_name(&face.post_script_name) == normalized
+                || face
+                    .families
+                    .iter()
+                    .any(|(name, _)| normalized_family_name(name) == normalized)
+        })
+        .map(|face| face.id)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_ignorable_shaping_char(ch: char) -> bool {
+    ch == '\u{200D}' || matches!(ch as u32, 0xFE00..=0xFE0F | 0xE0100..=0xE01EF)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn face_supports_grapheme(
+    db: &usvg::fontdb::Database,
+    face_id: usvg::fontdb::ID,
+    grapheme: &str,
+) -> bool {
+    db.with_face_data(face_id, |data, index| {
+        let Ok(face) = ttf_parser::Face::parse(data, index) else {
+            return false;
+        };
+        grapheme
+            .chars()
+            .filter(|ch| !is_ignorable_shaping_char(*ch))
+            .all(|ch| face.glyph_index(ch).is_some())
+    })
+    .unwrap_or(false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn shape_face_run_advances(
+    db: &usvg::fontdb::Database,
+    face_id: usvg::fontdb::ID,
+    graphemes: &[&str],
+    apply_kerning: bool,
+) -> Option<Vec<f64>> {
+    db.with_face_data(face_id, |data, index| {
+        let face = rustybuzz::Face::from_slice(data, index)?;
+        let units_per_em = face.units_per_em() as f64;
+        let mut text = String::new();
+        let mut byte_starts = Vec::with_capacity(graphemes.len());
+        for grapheme in graphemes {
+            byte_starts.push(text.len());
+            text.push_str(grapheme);
+        }
+
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(&text);
+        // HWP exposes kerning but not discretionary Latin ligatures. Keeping
+        // `liga`/`clig` disabled preserves one caret advance per grapheme while
+        // required script shaping (`rlig`, mark attachment, etc.) stays active.
+        let mut features = vec![
+            rustybuzz::Feature::new(ttf_parser::Tag::from_bytes(b"liga"), 0, ..),
+            rustybuzz::Feature::new(ttf_parser::Tag::from_bytes(b"clig"), 0, ..),
+        ];
+        if !apply_kerning {
+            features.push(rustybuzz::Feature::new(
+                ttf_parser::Tag::from_bytes(b"kern"),
+                0,
+                ..,
+            ));
+        }
+        let shaped = rustybuzz::shape(&face, &features, buffer);
+        let mut advances = vec![0.0; graphemes.len()];
+        for (info, position) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
+            let byte = info.cluster as usize;
+            let grapheme_index = byte_starts.partition_point(|start| *start <= byte) - 1;
+            advances[grapheme_index] += position.x_advance as f64 / units_per_em;
+        }
+        Some(advances)
+    })?
+}
+
+/// Measure a run from available sfnt faces. Consecutive graphemes using the
+/// same face are shaped together so GPOS kerning and combining-mark placement
+/// agree with the paint backend. Font fallback remains grapheme-atomic.
+#[cfg(not(target_arch = "wasm32"))]
+fn measure_char_positions_ttf(text: &str, style: &TextStyle) -> Option<Vec<f64>> {
+    if text.is_empty()
+        || style.font_family.trim().is_empty()
+        || text
+            .chars()
+            .any(|ch| matches!(ch, '\t' | '\u{FFFC}' | '\u{F081C}'))
+    {
+        return None;
+    }
+
+    METRIC_FONT_DB.with(|cell| {
+        let db = cell.borrow();
+        let requested: Vec<&str> = style
+            .font_family
+            .split(',')
+            .map(|name| name.trim().trim_matches(['\'', '"']))
+            .filter(|name| !name.is_empty())
+            .collect();
+        let requested_faces: Vec<_> = requested
+            .iter()
+            .filter_map(|name| metric_face_for_family(&db, name, style))
+            .collect();
+        if requested_faces.is_empty() {
+            return None;
+        }
+        let fallback_face = metric_face_for_family(&db, "Noto Sans KR", style);
+        let font_size = style.font_size.max(12.0);
+        let ratio = if style.ratio > 0.0 { style.ratio } else { 1.0 };
+        let graphemes: Vec<&str> = text.graphemes(true).collect();
+        let faces: Vec<_> = graphemes
+            .iter()
+            .map(|grapheme| {
+                requested_faces
+                    .iter()
+                    .copied()
+                    .find(|id| face_supports_grapheme(&db, *id, grapheme))
+                    .or_else(|| {
+                        fallback_face.filter(|id| face_supports_grapheme(&db, *id, grapheme))
+                    })
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        let mut advances_em = vec![0.0; graphemes.len()];
+        let mut run_start = 0;
+        while run_start < graphemes.len() {
+            let face_id = faces[run_start];
+            let mut run_end = run_start + 1;
+            while run_end < graphemes.len() && faces[run_end] == face_id {
+                run_end += 1;
+            }
+            let run_advances = shape_face_run_advances(
+                &db,
+                face_id,
+                &graphemes[run_start..run_end],
+                style.kerning,
+            )?;
+            advances_em[run_start..run_end].copy_from_slice(&run_advances);
+            run_start = run_end;
+        }
+
+        let mut total = 0.0;
+        let mut positions = vec![0.0];
+        for (index, grapheme) in graphemes.iter().enumerate() {
+            let cluster_start = total;
+            let base = advances_em[index] * font_size * ratio;
+            let mut advance = base
+                + glyph_letter_spacing(style.letter_spacing, base, font_size)
+                + style.extra_char_spacing
+                + if *grapheme == " " {
+                    style.extra_word_spacing
+                } else {
+                    0.0
+                };
+            if style.letter_spacing + style.extra_char_spacing < 0.0 {
+                advance = advance.max(base * 0.5);
+            }
+            total += advance;
+            let cluster_len = grapheme.chars().count();
+            positions.extend((0..cluster_len).map(|index| {
+                if index + 1 == cluster_len {
+                    total
+                } else {
+                    cluster_start
+                }
+            }));
+        }
+        Some(positions)
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn measure_char_positions_ttf(_text: &str, _style: &TextStyle) -> Option<Vec<f64>> {
+    None
+}
+
+fn measure_text_width_ttf(text: &str, style: &TextStyle) -> Option<f64> {
+    measure_char_positions_ttf(text, style).and_then(|positions| positions.last().copied())
+}
+
 pub struct EmbeddedTextMeasurer;
 
 impl TextMeasurer for EmbeddedTextMeasurer {
     fn estimate_text_width(&self, text: &str, style: &TextStyle) -> f64 {
+        if let Some(width) = measure_text_width_ttf(text, style) {
+            return width;
+        }
         let (font_size, ratio, tab_w) = style_params(style);
         let chars: Vec<char> = text.chars().collect();
         let cluster_len = build_cluster_len(&chars);
@@ -678,9 +902,12 @@ impl TextMeasurer for EmbeddedTextMeasurer {
     }
 
     fn compute_char_positions(&self, text: &str, style: &TextStyle) -> Vec<f64> {
+        if let Some(positions) = measure_char_positions_ttf(text, style) {
+            return positions;
+        }
         let (font_size, _ratio, _tab_w) = style_params(style);
         // [#2132] 폭 산출원 훅 — embedded 메트릭 lookup + 폴백 사다리 (Task #257 포함).
-        let char_px_raw = |_i: usize, c: char, _chars: &[char], cluster_len: &[u8]| -> f64 {
+        let char_px_raw = |_i: usize, c: char, _chars: &[char], cluster_len: &[usize]| -> f64 {
             let i = _i;
             if let Some(w) = (c == '\u{318D}')
                 .then(|| area_dot_fallback_width(&style.font_family, font_size))
@@ -710,7 +937,7 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                             x_in: f64,
                             ext: &[u16; 7],
                             chars: &[char],
-                            cluster_len: &[u8],
+                            cluster_len: &[usize],
                             char_width: &dyn Fn(usize) -> f64|
          -> f64 {
             let mut x = x_in;
@@ -1261,7 +1488,7 @@ impl TextMeasurer for WasmTextMeasurer {
             font_size,
         );
         // [#2132] 폭 산출원 훅 — wasm canvas 측정.
-        let char_px_raw = |i: usize, c: char, _chars: &[char], cluster_len: &[u8]| -> f64 {
+        let char_px_raw = |i: usize, c: char, _chars: &[char], cluster_len: &[usize]| -> f64 {
             if cluster_len[i] > 1 {
                 hangul_hwp as f64 / 75.0
             } else {
@@ -1281,7 +1508,7 @@ impl TextMeasurer for WasmTextMeasurer {
                             x_in: f64,
                             ext: &[u16; 7],
                             chars: &[char],
-                            cluster_len: &[u8],
+                            cluster_len: &[usize],
                             char_width: &dyn Fn(usize) -> f64|
          -> f64 {
             let mut x = x_in;
@@ -1431,6 +1658,7 @@ pub(crate) fn resolved_to_text_style(
             strikethrough: cs.strikethrough,
             letter_spacing: cs.letter_spacing_for_lang(lang_index),
             ratio: cs.ratio_for_lang(lang_index),
+            kerning: cs.kerning,
             default_tab_width: 0.0,
             tab_stops: Vec::new(),
             auto_tab_right: false,
@@ -1629,7 +1857,13 @@ fn measure_char_width_embedded(
     if let Some(w) = kopub_char_width(primary_name, c, font_size) {
         return Some(w);
     }
-    let mm = font_metrics_data::find_metric(primary_name, bold, italic)?;
+    let mm = match font_metrics_data::find_metric(primary_name, bold, italic) {
+        Some(metric) if c == ' ' || metric.metric.get_width(c).is_some() => metric,
+        _ => {
+            let (_, fallback_chain) = font_family.split_once(',')?;
+            return measure_char_width_embedded(fallback_chain, bold, italic, c, font_size);
+        }
+    };
     // HWP 반각 처리: space 및 한컴이 반각으로 처리하는 구두점/기호
     let w = if c == ' ' {
         mm.metric.em_size / 2
@@ -1701,7 +1935,9 @@ pub(crate) fn estimate_text_width(text: &str, style: &TextStyle) -> f64 {
 /// 한컴은 HWPUNIT 정수로 폭을 누적하므로, round 없이 px를 합산한 뒤
 /// 줄바꿈 비교 시점에서 available_width와 비교하는 것이 더 정확하다.
 pub(crate) fn estimate_text_width_unrounded(text: &str, style: &TextStyle) -> f64 {
-    let measurer = EmbeddedTextMeasurer;
+    if let Some(width) = measure_text_width_ttf(text, style) {
+        return width;
+    }
     let (font_size, ratio, tab_w) = style_params(style);
     let chars: Vec<char> = text.chars().collect();
     let cluster_len = build_cluster_len(&chars);
@@ -2586,6 +2822,55 @@ mod tests {
         let chars: Vec<char> = "A\u{1100}\u{1161}B".chars().collect();
         let cl = build_cluster_len(&chars);
         assert_eq!(cl, vec![1, 2, 0, 1]);
+    }
+
+    #[test]
+    fn unicode_grapheme_positions_keep_combining_sequence_atomic() {
+        let style = TextStyle {
+            font_family: "Noto Sans KR".to_string(),
+            font_size: 20.0,
+            ..Default::default()
+        };
+        let positions = EmbeddedTextMeasurer.compute_char_positions("e\u{301}x", &style);
+        assert_eq!(positions.len(), 4);
+        assert_eq!(positions[0], positions[1]);
+        assert!(positions[2] > positions[1]);
+        assert!(positions[3] > positions[2]);
+        assert_eq!(
+            EmbeddedTextMeasurer.estimate_text_width("e\u{301}x", &style),
+            *positions.last().unwrap()
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn opentype_kerning_matches_width_and_position_measurement() {
+        let base = TextStyle {
+            font_family: "Noto Sans KR".to_string(),
+            font_size: 48.0,
+            kerning: false,
+            ..Default::default()
+        };
+        let kerned = TextStyle {
+            kerning: true,
+            ..base.clone()
+        };
+        let plain_width = estimate_text_width_unrounded("AV", &base);
+        let kerned_width = estimate_text_width_unrounded("AV", &kerned);
+        let kerned_positions = EmbeddedTextMeasurer.compute_char_positions("AV", &kerned);
+
+        assert!(
+            kerned_width < plain_width,
+            "Noto Sans KR GPOS kerning should tighten AV: plain={plain_width}, kerned={kerned_width}"
+        );
+        assert!((kerned_width - kerned_positions[2]).abs() < 1e-9);
+        assert_eq!(
+            kerned_width,
+            EmbeddedTextMeasurer.estimate_text_width("AV", &kerned)
+        );
+
+        let caret_positions = EmbeddedTextMeasurer.compute_char_positions("office", &kerned);
+        assert!(caret_positions.windows(2).all(|pair| pair[1] > pair[0]));
     }
 
     // ── narrow glyph advance 회귀 (Task #257) ──
