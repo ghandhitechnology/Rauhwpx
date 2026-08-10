@@ -3,7 +3,20 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
+const baseCss = readFileSync(new URL('../src/styles/base.css', import.meta.url), 'utf8');
+const calibrationCss = readFileSync(
+  new URL('../src/ui/agent-sidebar/writing-style-calibration.css', import.meta.url),
+  'utf8',
+);
 const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
+
+test('agent sidebar and fullscreen workspace use bundled NanumSquare typography', () => {
+  assert.match(baseCss, /url\('\/fonts\/NanumSquare-Regular\.woff2'\)/);
+  assert.match(baseCss, /url\('\/fonts\/NanumSquare-Bold\.woff2'\)/);
+  assert.match(css, /--ag-font:\s*'NanumSquare',\s*'나눔스퀘어'/);
+  assert.match(css, /\.ag-root\s*\{[^}]*font-family:\s*var\(--ag-font\);/s);
+  assert.match(calibrationCss, /font-family:\s*var\(--ag-font,/);
+});
 
 test('agent sidebar push layout reserves editor-area width when open', () => {
   assert.match(css, /--ag-sidebar-width:\s*600px;/);
