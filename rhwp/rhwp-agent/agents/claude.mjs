@@ -1,8 +1,18 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
-import { createLineReader, truncate, SYSTEM_BRIEF } from './backend.mjs';
+import {
+  createLineReader,
+  isPlanningRestricted,
+  mcpCapabilityEnv,
+  normalizeExecutionMode,
+  systemBriefFor,
+  truncate,
+  validateExecutionMode,
+} from './backend.mjs';
 
-const CORE_TOOLS = 'Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch';
+const DIRECT_TOOLS = 'Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch';
+const PLAN_IMPLEMENTATION_TOOLS = `${DIRECT_TOOLS},Agent`;
+const PLANNING_TOOLS = 'Read,Glob,Grep,Bash,WebSearch,WebFetch,Agent';
 const STDERR_TAIL_LIMIT = 16_000;
 
 export function formatClaudeExitError(stderrText, code, signal, token) {
@@ -22,6 +32,12 @@ function permissionPathRule(tool, value) {
 
 export function buildClaudeArgv(opts, sessionId, resume) {
   const unrestricted = opts.permissionProfile === 'unrestricted';
+  const planningRestricted = isPlanningRestricted(opts);
+  const planWorkflow = opts.workflow === 'plan';
+  const activeTools = planWorkflow
+    ? (planningRestricted ? PLANNING_TOOLS : PLAN_IMPLEMENTATION_TOOLS)
+    : DIRECT_TOOLS;
+  const capabilityEnv = mcpCapabilityEnv(opts);
   const mcpConfig = {
     mcpServers: {
       rhwp: {
@@ -31,20 +47,23 @@ export function buildClaudeArgv(opts, sessionId, resume) {
           RHWP_WS_URL: `ws://127.0.0.1:${opts.hubPort}/mcp`,
           RHWP_AGENT_TOKEN: opts.token,
           RHWP_AGENT_NAME: 'claude',
+          ...capabilityEnv,
         },
       },
     },
   };
   const allow = [
     permissionPathRule('Read', opts.rootDir),
-    permissionPathRule('Write', opts.rootDir),
-    permissionPathRule('Edit', opts.rootDir),
+    ...(!planningRestricted ? [
+      permissionPathRule('Write', opts.rootDir),
+      permissionPathRule('Edit', opts.rootDir),
+    ] : []),
     permissionPathRule('Glob', opts.rootDir),
     permissionPathRule('Grep', opts.rootDir),
     'Bash',
-    'WebSearch', 'WebFetch', 'mcp__rhwp__*',
+    'WebSearch', 'WebFetch', ...(planWorkflow ? ['Agent'] : []), 'mcp__rhwp__*',
   ];
-  const settings = unrestricted ? {} : {
+  const settings = unrestricted && !planningRestricted ? {} : {
     permissions: { allow },
     sandbox: {
       enabled: true,
@@ -52,7 +71,7 @@ export function buildClaudeArgv(opts, sessionId, resume) {
       allowUnsandboxedCommands: false,
       filesystem: {
         allowRead: [opts.rootDir],
-        allowWrite: [opts.rootDir],
+        allowWrite: planningRestricted ? [] : [opts.rootDir],
       },
     },
   };
@@ -61,17 +80,18 @@ export function buildClaudeArgv(opts, sessionId, resume) {
     '--output-format', 'stream-json',
     '--input-format', 'stream-json',
     '--include-partial-messages',
+    ...(planWorkflow ? ['--forward-subagent-text'] : []),
     ...(resume ? ['--resume', sessionId] : ['--session-id', sessionId]),
     '--mcp-config', JSON.stringify(mcpConfig),
     '--strict-mcp-config',
     '--setting-sources', '',
     '--disable-slash-commands',
-    '--tools', CORE_TOOLS,
+    '--tools', activeTools,
     '--settings', JSON.stringify(settings),
-    ...(unrestricted
+    ...(unrestricted && !planningRestricted
       ? ['--permission-mode', 'bypassPermissions', '--dangerously-skip-permissions']
       : ['--permission-mode', 'dontAsk']),
-    '--append-system-prompt', SYSTEM_BRIEF,
+    '--append-system-prompt', systemBriefFor(opts),
     ...(opts.model ? ['--model', opts.model] : []),
     ...(opts.effort ? ['--effort', opts.effort] : []),
   ];
@@ -81,7 +101,7 @@ export function buildClaudeArgv(opts, sessionId, resume) {
  * @param {import('./backend.mjs').BackendOptions} opts
  * @returns {import('./backend.mjs').AgentSession}
  */
-export function createClaudeSession(opts) {
+export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
   let sessionId = crypto.randomUUID();
   const onEvent = opts.onEvent;
 
@@ -94,7 +114,8 @@ export function createClaudeSession(opts) {
   // 영구히 실패한다. 재스폰 시 완료된 turn 이 없으면 새 UUID 를 발급한다.
   let sessionIdConsumed = false;
   let turnOpen = false;
-  let sawTextDelta = false;
+  let sawRootTextDelta = false;
+  const streamedSubagents = new Set();
   let disposed = false;
   let killTimer = null;
   let restartReady = Promise.resolve();
@@ -126,7 +147,8 @@ export function createClaudeSession(opts) {
     if (e?.type === 'stream_event') {
       const ev = e.event;
       if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
-        sawTextDelta = true;
+        if (e.parent_tool_use_id) streamedSubagents.add(String(e.parent_tool_use_id));
+        else sawRootTextDelta = true;
         if (ev.delta.text) onEvent({ type: 'text-delta', agent: 'claude', text: ev.delta.text });
       }
       return;
@@ -134,6 +156,10 @@ export function createClaudeSession(opts) {
     if (e?.type === 'assistant') {
       const blocks = e.message?.content;
       if (!Array.isArray(blocks)) return;
+      const parentToolUseId = e.parent_tool_use_id ? String(e.parent_tool_use_id) : null;
+      const alreadyStreamed = parentToolUseId
+        ? streamedSubagents.has(parentToolUseId)
+        : sawRootTextDelta;
       for (const block of blocks) {
         if (block?.type === 'tool_use') {
           onEvent({
@@ -144,7 +170,9 @@ export function createClaudeSession(opts) {
             argsJson: JSON.stringify(block.input ?? {}),
           });
         } else if (block?.type === 'text') {
-          if (!sawTextDelta && block.text) {
+          // Subagent assistant messages carry parent_tool_use_id. Deduplicate
+          // them independently so a root text delta never suppresses child text.
+          if (!alreadyStreamed && block.text) {
             onEvent({ type: 'text-delta', agent: 'claude', text: block.text });
           }
         }
@@ -193,7 +221,7 @@ export function createClaudeSession(opts) {
       sessionId = crypto.randomUUID();
     }
     sessionIdConsumed = true;
-    const proc = spawn('claude', buildArgv(resume), {
+    const proc = spawnProcess('claude', buildArgv(resume), {
       cwd: opts.rootDir,
       env: process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -245,6 +273,34 @@ export function createClaudeSession(opts) {
     if (killTimer.unref) killTimer.unref();
   }
 
+  function restartForConfigChange() {
+    const priorReady = restartReady;
+    const previous = child;
+    killChild();
+    child = null;
+    childAlive = false;
+    let shutdownReady;
+    if (previous && previous.exitCode === null && previous.signalCode === null) {
+      shutdownReady = new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        previous.once('exit', finish);
+        const timer = setTimeout(finish, 3500);
+        if (timer.unref) timer.unref();
+      });
+    } else {
+      shutdownReady = Promise.resolve();
+    }
+    // Preserve an earlier in-flight restart barrier when permission and
+    // execution-mode updates arrive back-to-back.
+    restartReady = Promise.all([priorReady, shutdownReady]).then(() => {});
+    return restartReady;
+  }
+
   return {
     agent: 'claude',
     getSessionId() {
@@ -253,7 +309,8 @@ export function createClaudeSession(opts) {
     sendUserMessage(text) {
       if (disposed) return;
       turnOpen = true;
-      sawTextDelta = false;
+      sawRootTextDelta = false;
+      streamedSubagents.clear();
       onEvent({ type: 'turn-start', agent: 'claude' });
       void restartReady.then(() => {
         if (disposed || !turnOpen) return;
@@ -277,25 +334,22 @@ export function createClaudeSession(opts) {
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
       if (opts.permissionProfile === profile) return;
       opts.permissionProfile = profile;
-      const previous = child;
-      killChild();
-      child = null;
-      childAlive = false;
-      if (previous && previous.exitCode === null && previous.signalCode === null) {
-        restartReady = new Promise((resolve) => {
-          let settled = false;
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            resolve();
-          };
-          previous.once('exit', finish);
-          const timer = setTimeout(finish, 3500);
-          if (timer.unref) timer.unref();
-        });
-      } else {
-        restartReady = Promise.resolve();
+      void restartForConfigChange();
+    },
+    async setExecutionMode(mode) {
+      if (turnOpen) throw new Error('Execution mode can only change between turns');
+      validateExecutionMode(mode);
+      const current = normalizeExecutionMode(opts);
+      if (current.workflow === mode.workflow
+        && current.phase === mode.phase
+        && String(current.capabilityEpoch) === String(mode.capabilityEpoch)) {
+        await restartReady;
+        return;
       }
+      opts.workflow = mode.workflow;
+      opts.phase = mode.phase;
+      opts.capabilityEpoch = mode.capabilityEpoch;
+      await restartForConfigChange();
     },
     interrupt() {
       killChild();

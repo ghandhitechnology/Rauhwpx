@@ -2183,19 +2183,246 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-composer-utilities {
   display: flex;
   flex: 0 0 auto;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 34px;
-  padding: 3px 12px 1px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 4px 12px 1px;
   background: var(--ag-bg);
 }
 
+.ag-composer-workflow-row,
 .ag-composer-utility-actions {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.ag-composer-workflow-row {
+  gap: 6px;
+}
+
+.ag-composer-utility-actions {
+  gap: 4px;
+}
+
+.ag-composer-utility-actions .ag-permission-btn {
+  margin-left: auto;
+}
+
+/* 작업 방식(바로 실행 / 계획)은 권한(안전 / 전체 접근)과 다른 축이다.
+   권한보다 먼저 읽히는 독립 행에 세그먼트와 현재 단계를 함께 둔다. */
+.ag-workflow {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
+  padding: 1px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg-2);
+}
+
+.ag-workflow-item {
+  min-height: 20px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: calc(var(--ag-r-chip) - 1px);
+  background: transparent;
+  color: var(--ag-text-muted);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.ag-workflow-item.ag-active {
+  background: var(--ag-bg);
+  color: var(--ag-text);
+  font-weight: 600;
+  box-shadow: var(--n-elev-1);
+}
+
+.ag-workflow-item:hover:not(:disabled):not(.ag-active) {
+  color: var(--ag-text);
+}
+
+.ag-workflow-item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-workflow-item:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 단계 배지는 항상 같은 자리에 있는 계기다. 색면이 아니라 헤어라인 칩. */
+.ag-phase-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-chip);
+  color: var(--ag-text-secondary);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  letter-spacing: var(--ag-track);
+  white-space: nowrap;
+}
+
+.ag-phase-badge[data-phase='awaiting-approval'] {
+  border-color: color-mix(in srgb, var(--accent-primary) 45%, var(--ag-border));
+  color: var(--accent-primary);
+}
+
+.ag-phase-badge[data-phase='switching'],
+.ag-phase-badge[data-phase='implementing'] {
+  color: var(--ag-text);
+}
+
+/* ─── 계획 카드 ───────────────────────────────────────
+   말풍선이 아니다. 고정 리뷰 영역의 운영 콘솔 카드로, 편집 검토
+   카드와 같은 면·같은 1px 식별선 규약을 쓴다. */
+.ag-plan-card {
+  padding: 9px 10px 8px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-panel);
+  background: var(--ag-bg);
+  box-shadow: inset 1px 0 0 var(--ag-accent), var(--n-elev-1);
+}
+
+.ag-plan-card.ag-claude { box-shadow: inset 1px 0 0 var(--ag-claude), var(--n-elev-1); }
+.ag-plan-card.ag-codex { box-shadow: inset 1px 0 0 var(--ag-codex), var(--n-elev-1); }
+
+.ag-plan-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--ag-border);
+}
+
+.ag-plan-kicker {
+  flex: 0 0 auto;
+  color: var(--ag-text-muted);
+  font-size: var(--ag-micro);
+  font-weight: 700;
+  letter-spacing: var(--ag-track-wide);
+  text-transform: uppercase;
+}
+
+.ag-plan-phase {
+  flex: 0 0 auto;
+  color: var(--ag-text-secondary);
+  font-size: var(--ag-micro);
+}
+
+.ag-plan-id {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  letter-spacing: var(--ag-track);
+}
+
+.ag-plan-title {
+  margin: 7px 0 0;
+  font-size: var(--font-size-base, 12px);
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.ag-plan-summary {
+  margin: 4px 0 0;
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.5;
+}
+
+.ag-plan-section {
+  margin-top: 8px;
+}
+
+.ag-plan-section-title {
+  margin: 0 0 3px;
+  color: var(--ag-text-muted);
+  font-size: var(--ag-micro);
+  font-weight: 700;
+  letter-spacing: var(--ag-track);
+}
+
+.ag-plan-steps,
+.ag-plan-list {
+  margin: 0;
+  padding-left: 16px;
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.55;
+}
+
+.ag-plan-step,
+.ag-plan-list-item {
+  color: var(--ag-text);
+}
+
+.ag-plan-step-title { display: block; }
+
+.ag-plan-step-detail {
+  display: block;
+  color: var(--ag-text-muted);
+}
+
+.ag-plan-list-item {
+  color: var(--ag-text-secondary);
+}
+
+.ag-plan-disclosure {
+  display: inline-flex;
+  align-items: center;
   gap: 4px;
+  margin-top: 8px;
+  padding: 2px 6px 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ag-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  cursor: pointer;
+}
+
+.ag-plan-disclosure:hover { color: var(--ag-text); }
+
+.ag-plan-disclosure:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-plan-disclosure[aria-expanded='true'] .ag-plan-chevron {
+  transform: rotate(180deg);
+}
+
+.ag-plan-chevron {
+  transition: transform 160ms var(--ag-motion-out);
+}
+
+.ag-plan-detail {
+  margin-top: 2px;
+}
+
+.ag-plan-note {
+  margin: 6px 0 0;
+  color: var(--ag-text-muted);
+  font-size: var(--ag-micro);
+  line-height: 1.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-workflow-item,
+  .ag-plan-chevron {
+    transition: none;
+  }
 }
 
 .ag-composer {

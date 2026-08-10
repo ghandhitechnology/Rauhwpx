@@ -3,13 +3,17 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import WebSocket from 'ws';
-import { TOOL_DEFINITIONS, toToolContent } from './tools.mjs';
+import { filterToolDefinitions, toToolContent } from './tools.mjs';
 
 const WS_URL = process.env.RHWP_WS_URL ?? 'ws://127.0.0.1:5175/mcp';
 const TOKEN = process.env.RHWP_AGENT_TOKEN ?? 'dev';
 const AGENT_NAME = process.env.RHWP_AGENT_NAME ?? 'unknown';
+const WORKFLOW = process.env.RHWP_AGENT_WORKFLOW ?? process.env.RHWP_WORKFLOW ?? 'direct';
+const PHASE = process.env.RHWP_AGENT_PHASE ?? process.env.RHWP_PLAN_PHASE ?? (WORKFLOW === 'plan' ? 'planning' : 'implementing');
+const CAPABILITY_EPOCH = process.env.RHWP_CAPABILITY_EPOCH;
+const TOOL_PROFILE = process.env.RHWP_TOOL_PROFILE ?? (WORKFLOW === 'plan' ? PHASE : 'direct');
 const CONNECT_TIMEOUT_MS = 5_000;
-const CALL_TIMEOUT_MS = 60_000;
+const CALL_TIMEOUT_MS = 180_000;
 
 function log(msg) {
   process.stderr.write(`[rhwp-mcp] ${msg}\n`);
@@ -41,7 +45,7 @@ function ensureConnected() {
   if (ws && ws.readyState === WebSocket.OPEN) return Promise.resolve(ws);
   if (connecting) return connecting;
   connecting = new Promise((resolve, reject) => {
-    const url = `${WS_URL}?token=${encodeURIComponent(TOKEN)}&agent=${encodeURIComponent(AGENT_NAME)}`;
+    const url = `${WS_URL}?token=${encodeURIComponent(TOKEN)}&agent=${encodeURIComponent(AGENT_NAME)}&workflow=${encodeURIComponent(WORKFLOW)}${CAPABILITY_EPOCH ? `&capabilityEpoch=${encodeURIComponent(CAPABILITY_EPOCH)}` : ''}`;
     let sock;
     try {
       sock = new WebSocket(url);
@@ -104,11 +108,19 @@ async function callHub(tool, args) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       inflight.delete(id);
-      reject(hubError('STUDIO_TIMEOUT', 'Studio did not respond within 60s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates'));
+      reject(hubError('TOOL_TIMEOUT', 'The hub did not respond within 180s; if this was a document edit, re-read before retrying to avoid duplicates'));
     }, CALL_TIMEOUT_MS);
     inflight.set(id, { resolve, reject, timer });
     try {
-      sock.send(JSON.stringify({ v: 1, type: 'tool-call', id, tool, args }));
+      sock.send(JSON.stringify({
+        v: 2,
+        type: 'tool-call',
+        id,
+        tool,
+        args,
+        workflow: WORKFLOW,
+        ...(CAPABILITY_EPOCH ? { capabilityEpoch: CAPABILITY_EPOCH } : {}),
+      }));
     } catch (e) {
       inflight.delete(id);
       clearTimeout(timer);
@@ -120,7 +132,16 @@ async function callHub(tool, args) {
 const server = new McpServer({ name: 'rhwp', version: '0.1.0' });
 
 function registerTool(def) {
-  server.registerTool(def.name, { description: def.description, inputSchema: def.shape }, async (args) => {
+  server.registerTool(def.name, {
+    description: def.description,
+    inputSchema: def.shape,
+    annotations: {
+      readOnlyHint: def.category === 'document-read',
+      destructiveHint: def.category === 'document-write' || def.category === 'download-write',
+      openWorldHint: def.category === 'browser' || def.category === 'download-write',
+    },
+    _meta: { 'rhwp/toolCategory': def.category },
+  }, async (args) => {
     try {
       def.validate?.(args ?? {});
       const result = await callHub(def.name, args ?? {});
@@ -132,7 +153,8 @@ function registerTool(def) {
 }
 
 // 도구 정의는 tools.mjs 가 단일 소스 — 테스트가 같은 정의를 임포트해 계약을 검증한다.
-for (const def of TOOL_DEFINITIONS) {
+const visibleTools = filterToolDefinitions(TOOL_PROFILE);
+for (const def of visibleTools) {
   // insert_image 만 파일 읽기가 필요해 아래 커스텀 핸들러로 등록한다.
   if (def.name === 'insert_image') registerInsertImageTool(def);
   else registerTool(def);
@@ -186,6 +208,8 @@ function registerInsertImageTool(def) {
     {
       description: def.description,
       inputSchema: def.shape,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      _meta: { 'rhwp/toolCategory': def.category },
     },
     async (args) => {
       try {
@@ -247,7 +271,7 @@ await server.connect(transport);
 server.server.onclose = () => shutdown('stdio transport closed');
 process.stdin.on('end', () => shutdown('stdin EOF'));
 process.stdin.on('close', () => shutdown('stdin closed'));
-log(`rhwp MCP stdio server started (agent=${AGENT_NAME}, hub=${WS_URL})`);
+log(`rhwp MCP stdio server started (agent=${AGENT_NAME}, hub=${WS_URL}, workflow=${WORKFLOW}, profile=${TOOL_PROFILE}, epoch=${CAPABILITY_EPOCH ?? 'legacy'})`);
 
 ensureConnected().then(
   () => log('eager hub connection established'),

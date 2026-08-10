@@ -9,6 +9,7 @@ import {
   setThreadTitle,
   upsertThread,
 } from '../src/agent/threads.ts';
+import type { StructuredPlan } from '../src/agent/types.ts';
 
 const mem = new Map<string, string>();
 const storage = {
@@ -51,4 +52,53 @@ test('setThreadTitle updates a persisted thread', () => {
   upsertThread(t);
   setThreadTitle(t.id, '"문서 요약 요청"');
   assert.equal(getThread(t.id)?.title, '문서 요약 요청');
+});
+
+test('legacy threads migrate to direct workflow', () => {
+  mem.clear();
+  storage.setItem('rhwp-agent-threads', JSON.stringify([{
+    id: 'legacy',
+    title: '이전 대화',
+    titleRequested: false,
+    createdAt: 1,
+    updatedAt: 2,
+    agent: 'claude',
+    model: 'sonnet',
+    effort: 'high',
+    messages: [{ role: 'user', text: '기존 메시지' }],
+  }]));
+  assert.equal(getThread('legacy')?.workflow, 'direct');
+});
+
+test('workflow and latest plan persist as history without approval authority', () => {
+  mem.clear();
+  const plan: StructuredPlan = {
+    planId: 'plan-1',
+    title: '문서 정리',
+    goal: '문서 구조 개선',
+    summary: '제목과 본문을 정리한다.',
+    assumptions: ['원문 의미 유지'],
+    decisions: ['제목 체계 통일'],
+    steps: [{ title: '제목 수정', details: '제목 스타일을 통일한다.', files: ['report.hwpx'] }],
+    files: ['report.hwpx'],
+    validation: ['렌더 확인'],
+    risks: ['페이지 재배치'],
+    exclusions: ['내용 재작성'],
+    createdAt: '2026-08-07T00:00:00.000Z',
+    epoch: 7,
+  };
+  const t = createEmptyThread({
+    agent: 'codex', model: 'gpt-5.6-sol', effort: 'high', workflow: 'plan',
+  });
+  t.latestPlan = plan;
+  t.messages.push({ role: 'user', text: '계획을 세워줘' });
+  upsertThread(t);
+
+  const restored = getThread(t.id);
+  assert.equal(restored?.workflow, 'plan');
+  assert.deepEqual(restored?.latestPlan, plan);
+  const stored = JSON.parse(mem.get('rhwp-agent-threads') ?? '[]') as Array<Record<string, unknown>>;
+  assert.equal('phase' in stored[0]!, false);
+  assert.equal('capabilityEpoch' in stored[0]!, false);
+  assert.equal('approved' in stored[0]!, false);
 });

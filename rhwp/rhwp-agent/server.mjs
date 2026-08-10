@@ -1,4 +1,5 @@
 import http from 'node:http';
+import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,15 +11,22 @@ import { SkillRegistry } from './skills.mjs';
 import { generateSkillDraft } from './skill-generator.mjs';
 import { WritingStyleStore } from './writing-style.mjs';
 import { calibrateWritingStyle } from './style-calibrator.mjs';
+import { TOOL_DEFINITIONS } from './tools.mjs';
+import { PlanningState, authorizeToolCall, buildApprovedPlanPrompt, workflowError } from './planning-state.mjs';
+import { DownloadManager } from './download-manager.mjs';
+import { BrowserbaseSession } from './browserbase-session.mjs';
+import { z } from 'zod';
 
 const PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
 const TOKEN = process.env.RHWP_AGENT_TOKEN ?? 'dev';
+const PROTOCOL_VERSION = 2;
 const ROOT = new URL('..', import.meta.url).pathname;
 const MCP_SCRIPT = new URL('./mcp-stdio.mjs', import.meta.url).pathname;
 const BUNDLED_SKILLS = new URL('./skills', import.meta.url).pathname;
 const ISOLATED_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-agent-home-'));
 const ISOLATED_CODEX_HOME = path.join(ISOLATED_HOME, '.codex');
 const STUDIO_TOOL_TIMEOUT_MS = 30_000;
+const toolDefinitionsByName = new Map(TOOL_DEFINITIONS.map((definition) => [definition.name, definition]));
 await fs.mkdir(ISOLATED_CODEX_HOME, { recursive: true });
 const sourceCodexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex');
 try {
@@ -37,8 +45,9 @@ let styleCalibrationRunning = false;
 /** @type {import('ws').WebSocket | null} */
 let studioSocket = null;
 const mcpSockets = new Set();
-/** @type {{ agent: 'claude'|'codex', model: string|null, effort: string|null, permissionProfile: 'safe'|'unrestricted', backend: any, status: 'idle'|'running', sessionId: string|null } | null} */
+/** @type {{ agent: 'claude'|'codex', model: string|null, effort: string|null, permissionProfile: 'safe'|'unrestricted', backend: any, status: 'idle'|'running', sessionId: string|null, chatId: string, planning: PlanningState } | null} */
 let session = null;
+let nextCapabilityEpoch = 1;
 
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
 const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
@@ -85,10 +94,13 @@ function log(msg) {
   process.stderr.write(`[rhwp-agent] ${msg}\n`);
 }
 
+const downloadManager = new DownloadManager({ rootDir: ROOT });
+const browserbaseSession = new BrowserbaseSession({ log });
+
 function sendJson(sock, obj) {
   if (sock && sock.readyState === sock.OPEN) {
     try {
-      sock.send(JSON.stringify(obj));
+      sock.send(JSON.stringify(obj?.v === 1 ? { ...obj, v: PROTOCOL_VERSION } : obj));
     } catch (e) {
       log(`send failed: ${e?.message ?? e}`);
     }
@@ -104,6 +116,7 @@ function sessionInfo() {
       permissionProfile: session.permissionProfile,
       sessionId: session.sessionId,
       status: session.status,
+      ...session.planning.snapshot(),
     }
     : null;
 }
@@ -125,6 +138,7 @@ function disposeSession() {
     log(`session dispose error: ${e?.message ?? e}`);
   }
   session = null;
+  void browserbaseSession.cleanup('session disposed');
   if (wasRunning) {
     // backend.dispose() 는 turnOpen 을 먼저 닫아 turn-end 를 내보내지 않는다 —
     // 스튜디오의 turnRunning/pending change-set 이 열린 채 남지 않도록 합성해 보낸다.
@@ -139,10 +153,20 @@ function resolvePermissionProfile(value) {
   return value === 'unrestricted' ? 'unrestricted' : 'safe';
 }
 
-function startSession(agent, requestedModel, requestedEffort, requestedPermission, force = false) {
+function resolveWorkflow(value) {
+  return value === 'plan' ? 'plan' : 'direct';
+}
+
+function emitWorkflowState(extra = {}) {
+  if (!session) return;
+  sendJson(studioSocket, { v: 1, type: 'workflow-changed', ...session.planning.snapshot(), ...extra });
+}
+
+function startSession(agent, requestedModel, requestedEffort, requestedPermission, requestedWorkflow, force = false) {
   const model = resolveModel(agent, requestedModel);
   const effort = resolveEffort(agent, model, requestedEffort);
   const permissionProfile = resolvePermissionProfile(requestedPermission);
+  const workflow = resolveWorkflow(requestedWorkflow);
   if (
     !force
     && session
@@ -150,8 +174,14 @@ function startSession(agent, requestedModel, requestedEffort, requestedPermissio
     && session.model === model
     && session.effort === effort
     && session.permissionProfile === permissionProfile
+    && session.planning.workflow === workflow
   ) return session;
   disposeSession();
+  const planning = new PlanningState({
+    workflow,
+    initialCapabilityEpoch: nextCapabilityEpoch++,
+    allocateEpoch: () => nextCapabilityEpoch++,
+  });
   const opts = {
     rootDir: ROOT,
     mcpScriptPath: MCP_SCRIPT,
@@ -163,10 +193,165 @@ function startSession(agent, requestedModel, requestedEffort, requestedPermissio
     isolatedHome: ISOLATED_HOME,
     codexHome: ISOLATED_CODEX_HOME,
     onEvent: onBackendEvent,
+    workflow,
+    phase: workflow === 'direct' ? 'implementing' : planning.phase,
+    capabilityEpoch: planning.capabilityEpoch,
+    toolProfile: planning.mcpEnvironment().RHWP_TOOL_PROFILE,
+    mcpEnvironment: planning.mcpEnvironment(),
   };
   const backend = agent === 'claude' ? createClaudeSession(opts) : createCodexSession(opts);
-  session = { agent, model, effort, permissionProfile, backend, status: 'idle', sessionId: backend.getSessionId() };
+  session = {
+    agent,
+    model,
+    effort,
+    permissionProfile,
+    backend,
+    status: 'idle',
+    sessionId: backend.getSessionId(),
+    chatId: crypto.randomUUID(),
+    planning,
+    workflowTransition: Promise.resolve(),
+  };
   return session;
+}
+
+function sendChatError(sock, error, fallbackCode = 'WORKFLOW_ERROR') {
+  sendJson(sock, {
+    v: 1,
+    type: 'chat-error',
+    code: error?.code ?? fallbackCode,
+    message: String(error?.message ?? error),
+  });
+}
+
+function providerModeRequest(activeSession, phase) {
+  return {
+    workflow: 'plan',
+    phase,
+    capabilityEpoch: activeSession.planning.capabilityEpoch,
+  };
+}
+
+function requireWorkflowSwitchBackend(activeSession) {
+  if (typeof activeSession.backend.setExecutionMode !== 'function') {
+    throw workflowError(
+      'BACKEND_WORKFLOW_UNSUPPORTED',
+      'This provider backend does not yet implement setExecutionMode(); update the provider integration before approving or revising plans.',
+    );
+  }
+}
+
+async function approveImplementationPlan(sock, msg) {
+  const activeSession = session;
+  if (!activeSession) throw workflowError('AGENT_NOT_STARTED', 'Start a chat before approving a plan');
+  requireWorkflowSwitchBackend(activeSession);
+  const transition = activeSession.planning.beginApproval({
+    planId: String(msg.planId ?? ''),
+    sessionStatus: activeSession.status,
+  });
+  sendJson(sock, { v: 1, type: 'plan-approved', ...activeSession.planning.snapshot() });
+  try {
+    await activeSession.backend.setExecutionMode(providerModeRequest(activeSession, 'implementing'));
+    if (session !== activeSession || activeSession.planning.phase !== 'switching') return;
+    activeSession.planning.completeSwitch(transition.approvedPlan.planId);
+    sendJson(sock, {
+      v: 1,
+      type: 'implementation-started',
+      planId: transition.approvedPlan.planId,
+      ...activeSession.planning.snapshot(),
+    });
+    activeSession.status = 'running';
+    activeSession.backend.sendUserMessage(buildApprovedPlanPrompt(transition.approvedPlan));
+  } catch (error) {
+    if (session === activeSession && activeSession.planning.phase === 'switching') {
+      activeSession.planning.failSwitch(transition.approvedPlan.planId);
+      activeSession.status = 'idle';
+      emitWorkflowState({ reason: 'provider-switch-failed' });
+    }
+    sendChatError(sock, error, 'BACKEND_SWITCH_FAILED');
+  }
+}
+
+async function requestImplementationPlanChanges(sock, msg) {
+  const activeSession = session;
+  if (!activeSession) throw workflowError('AGENT_NOT_STARTED', 'Start a chat before requesting plan changes');
+  requireWorkflowSwitchBackend(activeSession);
+  activeSession.planning.requestChanges({
+    planId: String(msg.planId ?? ''),
+    sessionStatus: activeSession.status,
+  });
+  sendJson(sock, {
+    v: 1,
+    type: 'plan-invalidated',
+    planId: String(msg.planId ?? ''),
+    reason: typeof msg.feedback === 'string' ? msg.feedback : 'changes-requested',
+    ...activeSession.planning.snapshot(),
+    latestPlan: null,
+  });
+  try {
+    await activeSession.backend.setExecutionMode(providerModeRequest(activeSession, 'planning'));
+    if (session !== activeSession) return;
+    if (typeof msg.feedback === 'string' && msg.feedback.trim()) {
+      activeSession.status = 'running';
+      activeSession.backend.sendUserMessage([
+        'The user requested changes to the latest implementation plan.',
+        'Revise the plan in response and present the complete replacement with present_implementation_plan.',
+        `Feedback: ${msg.feedback.trim()}`,
+      ].join('\n\n'));
+    }
+  } catch (error) {
+    if (session === activeSession) activeSession.status = 'idle';
+    sendChatError(sock, error, 'BACKEND_SWITCH_FAILED');
+  }
+}
+
+async function setChatWorkflow(sock, msg) {
+  if (msg.workflow !== 'direct' && msg.workflow !== 'plan') {
+    throw workflowError('INVALID_WORKFLOW', `Unknown workflow: ${String(msg.workflow)}`);
+  }
+  const activeSession = session;
+  if (!activeSession) {
+    sendJson(sock, {
+      v: 1,
+      type: 'workflow-changed',
+      workflow: msg.workflow,
+      phase: msg.workflow === 'plan' ? 'planning' : 'direct',
+      capabilityEpoch: null,
+      latestPlan: null,
+    });
+    return;
+  }
+  if (activeSession.status !== 'idle') throw workflowError('AGENT_BUSY', 'Workflow can only change while the agent is idle');
+  if (activeSession.planning.workflow === msg.workflow) {
+    emitWorkflowState();
+    return;
+  }
+  requireWorkflowSwitchBackend(activeSession);
+  const previousPlanId = activeSession.planning.latestPlan?.planId ?? null;
+  const nextPlanning = new PlanningState({
+    workflow: msg.workflow,
+    initialCapabilityEpoch: nextCapabilityEpoch++,
+    allocateEpoch: () => nextCapabilityEpoch++,
+  });
+  const phase = msg.workflow === 'plan' ? 'planning' : 'implementing';
+  await activeSession.backend.setExecutionMode({
+    workflow: msg.workflow,
+    phase,
+    capabilityEpoch: nextPlanning.capabilityEpoch,
+  });
+  if (session !== activeSession) return;
+  activeSession.planning = nextPlanning;
+  if (msg.workflow === 'direct') void browserbaseSession.cleanup('workflow changed to direct');
+  if (previousPlanId) {
+    sendJson(sock, {
+      v: 1,
+      type: 'plan-invalidated',
+      planId: previousPlanId,
+      reason: 'workflow-changed',
+      ...nextPlanning.snapshot(),
+    });
+  }
+  emitWorkflowState();
 }
 
 function handleStudioMessage(sock, msg) {
@@ -178,7 +363,7 @@ function handleStudioMessage(sock, msg) {
         return;
       }
       try {
-        const s = startSession(agent, msg.model, msg.effort, msg.permissionProfile, Boolean(msg.force));
+        const s = startSession(agent, msg.model, msg.effort, msg.permissionProfile, msg.workflow, Boolean(msg.force));
         sendJson(sock, {
           v: 1,
           type: 'chat-started',
@@ -187,6 +372,7 @@ function handleStudioMessage(sock, msg) {
           effort: s.effort,
           permissionProfile: s.permissionProfile,
           sessionId: s.sessionId,
+          ...s.planning.snapshot(),
         });
       } catch (e) {
         disposeSession();
@@ -236,6 +422,24 @@ function handleStudioMessage(sock, msg) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_BUSY', message: 'A turn is already in progress.' });
         return;
       }
+      if (session.planning.phase === 'awaiting-approval') {
+        const planId = session.planning.latestPlan?.planId;
+        if (!planId) {
+          sendJson(sock, { v: 1, type: 'chat-error', code: 'PLAN_NOT_FOUND', message: 'The latest plan is unavailable; return to planning and present it again.' });
+          return;
+        }
+        if (typeof msg.text !== 'string' || msg.text.length === 0) {
+          sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'chat-user-message requires text' });
+          return;
+        }
+        void requestImplementationPlanChanges(sock, { planId, feedback: msg.text })
+          .catch((error) => sendChatError(sock, error));
+        return;
+      }
+      if (session.planning.phase === 'switching') {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'WORKFLOW_SWITCHING', message: 'The provider is switching into implementation mode.' });
+        return;
+      }
       if (typeof msg.text !== 'string' || msg.text.length === 0) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'chat-user-message requires text' });
         return;
@@ -270,6 +474,32 @@ function handleStudioMessage(sock, msg) {
       } catch (e) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'PERMISSION_CHANGE_FAILED', message: String(e?.message ?? e) });
       }
+      return;
+    }
+    case 'chat-workflow-set': {
+      const transitionOwner = session;
+      if (!transitionOwner) {
+        void setChatWorkflow(sock, msg).catch((error) => sendChatError(sock, error));
+        return;
+      }
+      const transition = transitionOwner.workflowTransition.then(() => {
+        if (session !== transitionOwner) return undefined;
+        return setChatWorkflow(sock, msg);
+      });
+      transitionOwner.workflowTransition = transition.catch(() => undefined);
+      void transition.catch((error) => sendChatError(sock, error));
+      return;
+    }
+    case 'chat-plan-approve':
+    case 'implementation-plan-approve':
+    case 'plan-approve': {
+      void approveImplementationPlan(sock, msg).catch((error) => sendChatError(sock, error));
+      return;
+    }
+    case 'chat-plan-request-changes':
+    case 'implementation-plan-request-changes':
+    case 'plan-request-changes': {
+      void requestImplementationPlanChanges(sock, msg).catch((error) => sendChatError(sock, error));
       return;
     }
     case 'skills-list': {
@@ -405,20 +635,89 @@ function handleMcpMessage(sock, msg) {
   switch (msg.type) {
     case 'tool-call': {
       const clientId = msg.id;
-      if (msg.tool === 'read_product_skill') {
-        void skillRegistry.readResource(String(msg.args?.name ?? ''), String(msg.args?.resourcePath ?? 'SKILL.md'))
-          .then((result) => sendJson(sock, { v: 1, type: 'tool-result', id: clientId, ok: true, result }))
-          .catch((error) => sendJson(sock, {
-            v: 1, type: 'tool-result', id: clientId, ok: false,
-            error: { code: error?.code ?? 'SKILLS_ERROR', message: String(error?.message ?? error) },
-          }));
+      const tool = String(msg.tool ?? '');
+      const definition = toolDefinitionsByName.get(tool);
+      const sendResult = (result) => sendJson(sock, { v: 1, type: 'tool-result', id: clientId, ok: true, result });
+      const sendError = (error, fallback = 'TOOL_ERROR') => sendJson(sock, {
+        v: 1,
+        type: 'tool-result',
+        id: clientId,
+        ok: false,
+        error: { code: error?.code ?? fallback, message: String(error?.message ?? error) },
+      });
+      if (!definition) {
+        sendError(workflowError('UNKNOWN_TOOL', `Unknown tool: ${tool}`));
+        return;
+      }
+      let args;
+      try {
+        const schema = z.object(definition.shape);
+        args = (tool === 'insert_image' ? schema.passthrough() : schema.strict()).parse(msg.args ?? {});
+        definition.validate?.(args);
+        if (!session && tool !== 'read_product_skill') {
+          throw workflowError('AGENT_NOT_STARTED', 'No active chat session');
+        }
+        if (session) {
+          if (msg.workflow && msg.workflow !== session.planning.workflow) {
+            throw workflowError('WORKFLOW_MISMATCH', `MCP call declared ${msg.workflow} but the active workflow is ${session.planning.workflow}`);
+          }
+          authorizeToolCall({
+            category: definition.category,
+            tool,
+            workflow: session.planning.workflow,
+            phase: session.planning.phase,
+            expectedEpoch: session.planning.capabilityEpoch,
+            receivedEpoch: msg.capabilityEpoch,
+          });
+        }
+      } catch (error) {
+        if (error?.name === 'ZodError') error.code = 'INVALID_ARGS';
+        sendError(error, 'INVALID_ARGS');
+        return;
+      }
+      if (tool === 'read_product_skill') {
+        void skillRegistry.readResource(String(args.name ?? ''), String(args.resourcePath ?? 'SKILL.md'))
+          .then(sendResult)
+          .catch((error) => sendError(error, 'SKILLS_ERROR'));
+        return;
+      }
+      if (tool === 'present_implementation_plan') {
+        if (!studioSocket || studioSocket.readyState !== studioSocket.OPEN) {
+          sendError(workflowError('NO_STUDIO', 'Studio must be connected to review an implementation plan'));
+          return;
+        }
+        try {
+          const record = session.planning.present(args);
+          sendJson(studioSocket, {
+            v: 1,
+            type: 'plan-ready',
+            planId: record.planId,
+            plan: record.plan,
+            ...session.planning.snapshot(),
+          });
+          emitWorkflowState({ reason: 'plan-presented' });
+          const { workflow, phase, capabilityEpoch } = session.planning.snapshot();
+          sendResult({ planId: record.planId, workflow, phase, capabilityEpoch });
+        } catch (error) {
+          sendError(error);
+        }
+        return;
+      }
+      if (tool === 'download_file') {
+        void downloadManager.download({ sessionId: session.chatId, ...args })
+          .then(sendResult)
+          .catch((error) => sendError(error, 'DOWNLOAD_FAILED'));
+        return;
+      }
+      if (definition.category === 'browser') {
+        const sidecarTool = tool.replace(/^browserbase_/, '');
+        void browserbaseSession.call(session.chatId, sidecarTool, args)
+          .then(sendResult)
+          .catch((error) => sendError(error, 'BROWSERBASE_TOOL_FAILED'));
         return;
       }
       if (!studioSocket || studioSocket.readyState !== studioSocket.OPEN) {
-        sendJson(sock, {
-          v: 1, type: 'tool-result', id: clientId, ok: false,
-          error: { code: 'NO_STUDIO', message: 'Studio is not connected; open rhwp-studio in a browser' },
-        });
+        sendError(workflowError('NO_STUDIO', 'Studio is not connected; open rhwp-studio in a browser'));
         return;
       }
       const hubId = nextHubId++;
@@ -435,8 +734,10 @@ function handleMcpMessage(sock, msg) {
         // 호출을 보낸 MCP 소켓의 에이전트 라벨을 단다 — 현재 세션 기준으로 찍으면
         // 세션 교체 직후 남은 호출이 엉뚱한 에이전트로 기록될 수 있다.
         agent: sock.agentLabel ?? session?.agent ?? 'claude',
-        tool: String(msg.tool ?? ''),
-        args: msg.args ?? {},
+        tool,
+        args,
+        phase: session?.planning.snapshot().phase,
+        capabilityEpoch: session?.planning.capabilityEpoch,
       });
       return;
     }
@@ -458,10 +759,10 @@ function attachSocket(sock, role) {
       sock.close(4400, 'malformed JSON');
       return;
     }
-    if (msg?.v !== 1) {
+    if (msg?.v !== PROTOCOL_VERSION) {
       sendJson(sock, {
         v: 1, type: 'protocol-error', code: 'UNSUPPORTED_VERSION',
-        message: `protocol version ${String(msg?.v)} is not supported`, supportedVersions: [1],
+        message: `protocol version ${String(msg?.v)} is not supported`, supportedVersions: [PROTOCOL_VERSION],
       });
       sock.close(1002, 'unsupported protocol version');
       return;
@@ -481,10 +782,11 @@ const httpServer = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({
       ok: true,
-      protocol: 1,
+      protocol: PROTOCOL_VERSION,
       studioConnected: !!studioSocket && studioSocket.readyState === studioSocket.OPEN,
       mcpClients: mcpSockets.size,
       session: sessionInfo(),
+      browserbase: browserbaseSession.status(),
     }));
     return;
   }
@@ -527,7 +829,16 @@ httpServer.on('upgrade', (req, socket, head) => {
           failAllPendingCalls('Studio disconnected while tool calls were in flight; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
         }
       });
-      sendJson(ws, { v: 1, type: 'welcome', protocol: 1, session: sessionInfo() });
+      sendJson(ws, { v: 1, type: 'welcome', protocol: PROTOCOL_VERSION, session: sessionInfo() });
+      if (session?.planning.latestPlan && session.planning.phase === 'awaiting-approval') {
+        sendJson(ws, {
+          v: 1,
+          type: 'plan-ready',
+          planId: session.planning.latestPlan.planId,
+          plan: structuredClone(session.planning.latestPlan.plan),
+          ...session.planning.snapshot(),
+        });
+      }
       void skillRegistry.list().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', ...catalog }));
       void writingStyleStore.status().then((status) => sendJson(ws, { v: 1, type: 'writing-style-status', status }));
       log('studio connected');
@@ -535,6 +846,8 @@ httpServer.on('upgrade', (req, socket, head) => {
       const agentLabel = url.searchParams.get('agent') ?? 'unknown';
       // 도구 호출에 찍을 에이전트 라벨 — 접속 시점 값을 소켓에 붙여 둔다 (없으면 null, 세션 값이 대신 쓰인다).
       ws.agentLabel = url.searchParams.get('agent');
+      ws.workflow = url.searchParams.get('workflow');
+      ws.capabilityEpoch = url.searchParams.get('capabilityEpoch');
       mcpSockets.add(ws);
       attachSocket(ws, 'mcp');
       ws.on('close', () => {
@@ -568,6 +881,7 @@ async function shutdown(signal) {
   shuttingDown = true;
   log(`shutting down (${signal})`);
   disposeSession();
+  await browserbaseSession.cleanup('hub shutdown');
   for (const sock of wss.clients) {
     try { sock.close(1001, 'server shutting down'); } catch {}
   }

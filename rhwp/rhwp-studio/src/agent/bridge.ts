@@ -12,13 +12,23 @@ import { AgentToolExecutor } from './tool-executor.ts';
 import { PendingEditManager } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
 import { AgentTypewriterReveal } from './typewriter-reveal.ts';
-import { AGENT_PROTOCOL_VERSION, AgentToolError } from './types.ts';
+import {
+  AGENT_PROTOCOL_VERSION,
+  AgentToolError,
+  isAgentPhase,
+  isAgentWorkflow,
+  isStructuredPlan,
+} from './types.ts';
 import type {
   AgentBridgeDeps,
   AgentBridgeOptions,
   AgentName,
+  AgentPhase,
+  AgentWorkflow,
+  AgentWorkflowState,
   PermissionProfile,
   ProductSkillFile,
+  StructuredPlan,
   WritingStyleLanguage,
   WritingStyleUpload,
   AgentStreamEvent,
@@ -31,14 +41,18 @@ export interface AgentBridge {
   getActiveAgent(): AgentName | null;
   isTurnRunning(): boolean;
   getPermissionProfile(): PermissionProfile;
+  getWorkflowState(): AgentWorkflowState;
   /** 다른 탭이 연결을 차지한 상태에서 현재 탭이 스튜디오 연결을 다시 가져온다. */
   takeOverConnection(): void;
-  startChat(agent: AgentName, model?: string, effort?: string, force?: boolean, permissionProfile?: PermissionProfile): void;
+  startChat(agent: AgentName, model?: string, effort?: string, force?: boolean, permissionProfile?: PermissionProfile, workflow?: AgentWorkflow): void;
   /** 허브 세션을 폐기하고 새 채팅을 시작할 수 있게 한다. */
   stopChat(): void;
   /** gpt-5.6-luna 로 스레드 제목 생성 요청. */
   requestTitle(threadId: string, preview: string): string;
   sendUserMessage(text: string, skillName?: string): void;
+  setWorkflow(workflow: AgentWorkflow): void;
+  approvePlan(planId: string): void;
+  requestPlanChanges(planId: string, feedback?: string): void;
   setPermissionProfile(profile: PermissionProfile): void;
   listSkills(): void;
   readSkill(name: string): string;
@@ -65,6 +79,10 @@ function isAgentName(v: unknown): v is AgentName {
   return v === 'claude' || v === 'codex';
 }
 
+function readCapabilityEpoch(value: unknown) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 class AgentBridgeImpl implements AgentBridge {
   readonly pendingEdits: PendingEditManager;
 
@@ -87,13 +105,19 @@ class AgentBridgeImpl implements AgentBridge {
   private selectedModel: string | null = null;
   private selectedEffort: string | null = null;
   private permissionProfile: PermissionProfile = 'safe';
+  private workflow: AgentWorkflow = 'direct';
+  private phase: AgentPhase = 'direct';
+  private capabilityEpoch: number | null = null;
+  private latestPlan: StructuredPlan | null = null;
   private activeAgent: AgentName | null = null;
   private turnRunning = false;
+  private pendingTurnOpen = false;
   private pendingChatStart: {
     agent: AgentName;
     model?: string;
     effort?: string;
     permissionProfile?: PermissionProfile;
+    workflow: AgentWorkflow;
     force?: boolean;
   } | null = null;
   private queuedMessages: Array<{ text: string; skillName?: string }> = [];
@@ -181,9 +205,10 @@ class AgentBridgeImpl implements AgentBridge {
         const pending = this.pendingChatStart;
         this.pendingChatStart = null;
         this.sendJson({
-          v: 1,
+          v: AGENT_PROTOCOL_VERSION,
           type: 'chat-start',
           agent: pending.agent,
+          workflow: pending.workflow,
           ...(pending.model ? { model: pending.model } : {}),
           ...(pending.effort ? { effort: pending.effort } : {}),
           ...(pending.permissionProfile ? { permissionProfile: pending.permissionProfile } : {}),
@@ -241,6 +266,62 @@ class AgentBridgeImpl implements AgentBridge {
     return false;
   }
 
+  private workflowState() {
+    return {
+      workflow: this.workflow,
+      phase: this.phase,
+      capabilityEpoch: this.capabilityEpoch,
+      latestPlan: this.latestPlan,
+    };
+  }
+
+  private resetWorkflowState(workflow: AgentWorkflow = 'direct') {
+    this.workflow = workflow;
+    this.phase = workflow === 'plan' ? 'planning' : 'direct';
+    this.capabilityEpoch = null;
+    this.latestPlan = null;
+  }
+
+  private syncWorkflowState(
+    source: Record<string, unknown>,
+    fallbackWorkflow: AgentWorkflow,
+    fallbackPhase: AgentPhase,
+    preservePlan = false,
+  ) {
+    this.workflow = isAgentWorkflow(source['workflow']) ? source['workflow'] : fallbackWorkflow;
+    this.phase = this.workflow === 'direct'
+      ? 'direct'
+      : (isAgentPhase(source['phase']) ? source['phase'] : fallbackPhase);
+    this.capabilityEpoch = readCapabilityEpoch(source['capabilityEpoch']);
+    const hasPlan = Object.prototype.hasOwnProperty.call(source, 'latestPlan')
+      || Object.prototype.hasOwnProperty.call(source, 'plan');
+    if (hasPlan) {
+      const candidate = source['latestPlan'] ?? source['plan'];
+      this.latestPlan = isStructuredPlan(candidate) ? candidate : null;
+    } else if (!preservePlan) {
+      this.latestPlan = null;
+    }
+  }
+
+  private canStagePendingEdits() {
+    return this.workflow === 'direct' || this.phase === 'implementing';
+  }
+
+  private beginPendingTurn(agent: AgentName) {
+    if (this.pendingTurnOpen || !this.canStagePendingEdits()) return;
+    this.pendingEdits.beginTurn(agent);
+    this.pendingTurnOpen = true;
+  }
+
+  private endPendingTurn() {
+    if (!this.pendingTurnOpen) return;
+    try {
+      this.pendingEdits.endTurn();
+    } finally {
+      this.pendingTurnOpen = false;
+    }
+  }
+
   // ─── incoming frames ──────────────────────────────────────
 
   private handleFrame(data: unknown): void {
@@ -255,11 +336,11 @@ class AgentBridgeImpl implements AgentBridge {
     if (msg === null || typeof msg !== 'object') return;
     if (msg.v !== AGENT_PROTOCOL_VERSION) {
       this.sendJson({
-        v: 1,
+        v: AGENT_PROTOCOL_VERSION,
         type: 'protocol-error',
         code: 'UNSUPPORTED_VERSION',
         message: `Unsupported protocol version: ${msg.v}`,
-        supportedVersions: [1],
+        supportedVersions: [AGENT_PROTOCOL_VERSION],
       });
       return;
     }
@@ -278,10 +359,33 @@ class AgentBridgeImpl implements AgentBridge {
           this.activeAgent = session.agent;
           this.turnRunning = session.status === 'running';
           this.permissionProfile = session.permissionProfile === 'unrestricted' ? 'unrestricted' : 'safe';
+          this.syncWorkflowState(session, 'direct', 'direct');
+          if (this.turnRunning) {
+            try {
+              this.beginPendingTurn(session.agent);
+            } catch (e) {
+              console.warn('[AgentBridge] reconnect beginTurn 실패:', e);
+            }
+          } else if (this.pendingTurnOpen) {
+            try {
+              this.endPendingTurn();
+            } catch (e) {
+              console.warn('[AgentBridge] reconnect endTurn 실패:', e);
+            }
+          }
         } else {
           this.activeAgent = null;
           this.turnRunning = false;
+          if (this.pendingTurnOpen) {
+            try {
+              this.endPendingTurn();
+            } catch (e) {
+              console.warn('[AgentBridge] reconnect endTurn 실패:', e);
+            }
+          }
+          this.resetWorkflowState();
         }
+        this.emit({ type: 'workflow-changed', ...this.workflowState() });
         break;
       }
       case 'chat-started': {
@@ -289,6 +393,7 @@ class AgentBridgeImpl implements AgentBridge {
         if (typeof msg.model === 'string') this.selectedModel = msg.model;
         if (typeof msg.effort === 'string') this.selectedEffort = msg.effort;
         if (msg.permissionProfile === 'safe' || msg.permissionProfile === 'unrestricted') this.permissionProfile = msg.permissionProfile;
+        this.syncWorkflowState(msg, 'direct', 'direct');
         this.emit({
           type: 'chat-started',
           agent: isAgentName(msg.agent) ? msg.agent : this.selectedAgent,
@@ -296,6 +401,7 @@ class AgentBridgeImpl implements AgentBridge {
           ...(typeof msg.model === 'string' ? { model: msg.model } : {}),
           ...(typeof msg.effort === 'string' ? { effort: msg.effort } : {}),
           permissionProfile: this.permissionProfile,
+          ...this.workflowState(),
         });
         this.flushQueuedMessages();
         break;
@@ -305,6 +411,43 @@ class AgentBridgeImpl implements AgentBridge {
           this.permissionProfile = msg.permissionProfile;
           this.emit({ type: 'permission-changed', permissionProfile: this.permissionProfile });
         }
+        break;
+      }
+      case 'workflow-changed': {
+        this.syncWorkflowState(msg, 'direct', 'planning');
+        this.emit({ type: 'workflow-changed', ...this.workflowState() });
+        break;
+      }
+      case 'plan-ready': {
+        if (!isStructuredPlan(msg.plan)) {
+          this.emit({ type: 'hub-error', code: 'INVALID_PLAN', message: 'The hub sent an invalid structured plan.' });
+          break;
+        }
+        this.syncWorkflowState(msg, 'plan', 'awaiting-approval');
+        this.latestPlan = msg.plan;
+        this.emit({ type: 'plan-ready', plan: msg.plan, ...this.workflowState() });
+        break;
+      }
+      case 'plan-approved': {
+        this.syncWorkflowState(msg, 'plan', 'switching', true);
+        const planId = typeof msg.planId === 'string' ? msg.planId : (this.latestPlan?.planId ?? '');
+        this.emit({ type: 'plan-approved', planId, ...this.workflowState() });
+        break;
+      }
+      case 'plan-invalidated': {
+        this.syncWorkflowState(msg, 'plan', 'planning', true);
+        this.emit({
+          type: 'plan-invalidated',
+          planId: typeof msg.planId === 'string' ? msg.planId : (this.latestPlan?.planId ?? null),
+          ...(typeof msg.reason === 'string' ? { reason: msg.reason } : {}),
+          ...this.workflowState(),
+        });
+        break;
+      }
+      case 'implementation-started': {
+        this.syncWorkflowState(msg, 'plan', 'implementing', true);
+        const planId = typeof msg.planId === 'string' ? msg.planId : (this.latestPlan?.planId ?? '');
+        this.emit({ type: 'implementation-started', planId, ...this.workflowState() });
         break;
       }
       case 'skills-catalog': {
@@ -384,17 +527,19 @@ class AgentBridgeImpl implements AgentBridge {
       case 'turn-start':
         this.turnRunning = true;
         try {
-          this.pendingEdits.beginTurn(event.agent);
+          this.beginPendingTurn(event.agent);
         } catch (e) {
           console.warn('[AgentBridge] beginTurn 실패:', e);
         }
         break;
       case 'turn-end':
         this.turnRunning = false;
-        try {
-          this.pendingEdits.endTurn();
-        } catch (e) {
-          console.warn('[AgentBridge] endTurn 실패:', e);
+        if (this.pendingTurnOpen) {
+          try {
+            this.endPendingTurn();
+          } catch (e) {
+            console.warn('[AgentBridge] endTurn 실패:', e);
+          }
         }
         break;
       case 'session-info':
@@ -413,16 +558,22 @@ class AgentBridgeImpl implements AgentBridge {
     const args = msg.args;
     const agent: AgentName = isAgentName(msg.agent) ? msg.agent : (this.activeAgent ?? 'claude');
     void this.executor
-      .execute(tool, args, agent)
+      .execute(tool, args, agent, {
+        workflow: this.workflow,
+        phase: msg.phase,
+        capabilityEpoch: msg.capabilityEpoch,
+        activePhase: this.phase,
+        activeCapabilityEpoch: this.capabilityEpoch,
+      })
       .then((result) => {
-        this.sendJson({ v: 1, type: 'tool-response', id, ok: true, result });
+        this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: true, result });
       })
       .catch((e: unknown) => {
         const error =
           e instanceof AgentToolError
             ? { code: e.code, message: e.message }
             : { code: 'RPC_ERROR', message: e instanceof Error ? e.message : String(e) };
-        this.sendJson({ v: 1, type: 'tool-response', id, ok: false, error });
+        this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: false, error });
       });
   }
 
@@ -444,15 +595,28 @@ class AgentBridgeImpl implements AgentBridge {
     return this.permissionProfile;
   }
 
-  startChat(agent: AgentName, model?: string, effort?: string, force = false, permissionProfile: PermissionProfile = this.permissionProfile): void {
+  getWorkflowState() {
+    return this.workflowState();
+  }
+
+  startChat(
+    agent: AgentName,
+    model?: string,
+    effort?: string,
+    force = false,
+    permissionProfile: PermissionProfile = this.permissionProfile,
+    workflow: AgentWorkflow = 'direct',
+  ): void {
     this.selectedAgent = agent;
     if (model) this.selectedModel = model;
     if (effort) this.selectedEffort = effort;
     this.permissionProfile = permissionProfile;
+    this.resetWorkflowState(workflow);
     const payload = {
-      v: 1 as const,
+      v: AGENT_PROTOCOL_VERSION,
       type: 'chat-start' as const,
       agent,
+      workflow,
       ...(this.selectedModel ? { model: this.selectedModel } : {}),
       ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
       permissionProfile: this.permissionProfile,
@@ -466,6 +630,7 @@ class AgentBridgeImpl implements AgentBridge {
         model: this.selectedModel ?? undefined,
         effort: this.selectedEffort ?? undefined,
         permissionProfile: this.permissionProfile,
+        workflow,
         force,
       };
     }
@@ -479,8 +644,9 @@ class AgentBridgeImpl implements AgentBridge {
     // Full access is deliberately scoped to one live chat and never becomes
     // the default for a new or reopened thread.
     this.permissionProfile = 'safe';
+    this.resetWorkflowState();
     if (this.state === 'connected') {
-      this.sendJson({ v: 1, type: 'chat-stop' });
+      this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-stop' });
     }
     this.emit({ type: 'chat-stopped' });
   }
@@ -489,7 +655,7 @@ class AgentBridgeImpl implements AgentBridge {
     const requestId = `title-${++this.titleRequestSeq}`;
     if (this.state === 'connected') {
       this.sendJson({
-        v: 1,
+        v: AGENT_PROTOCOL_VERSION,
         type: 'title-request',
         requestId,
         threadId,
@@ -509,9 +675,10 @@ class AgentBridgeImpl implements AgentBridge {
       this.queuedMessages.push({ text, skillName });
       if (this.state === 'connected') {
         this.sendJson({
-          v: 1,
+          v: AGENT_PROTOCOL_VERSION,
           type: 'chat-start',
           agent: this.selectedAgent,
+          workflow: this.workflow,
           ...(this.selectedModel ? { model: this.selectedModel } : {}),
           ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
           permissionProfile: this.permissionProfile,
@@ -522,6 +689,7 @@ class AgentBridgeImpl implements AgentBridge {
           model: this.selectedModel ?? undefined,
           effort: this.selectedEffort ?? undefined,
           permissionProfile: this.permissionProfile,
+          workflow: this.workflow,
         };
       }
       return;
@@ -531,7 +699,7 @@ class AgentBridgeImpl implements AgentBridge {
       this.flushQueuedMessages();
       return;
     }
-    this.sendJson({ v: 1, type: 'chat-user-message', text, ...(skillName ? { skillName } : {}) });
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-user-message', text, ...(skillName ? { skillName } : {}) });
   }
 
   private flushQueuedMessages(): void {
@@ -539,68 +707,85 @@ class AgentBridgeImpl implements AgentBridge {
     const queued = this.queuedMessages;
     this.queuedMessages = [];
     for (const message of queued) {
-      this.sendJson({ v: 1, type: 'chat-user-message', text: message.text, ...(message.skillName ? { skillName: message.skillName } : {}) });
+      this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-user-message', text: message.text, ...(message.skillName ? { skillName: message.skillName } : {}) });
     }
   }
 
+  setWorkflow(workflow: AgentWorkflow): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-workflow-set', workflow });
+  }
+
+  approvePlan(planId: string): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-plan-approve', planId });
+  }
+
+  requestPlanChanges(planId: string, feedback?: string): void {
+    this.sendJson({
+      v: AGENT_PROTOCOL_VERSION,
+      type: 'chat-plan-request-changes',
+      planId,
+      ...(feedback ? { feedback } : {}),
+    });
+  }
+
   setPermissionProfile(profile: PermissionProfile): void {
-    this.sendJson({ v: 1, type: 'chat-permission-set', permissionProfile: profile });
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-permission-set', permissionProfile: profile });
   }
 
   listSkills(): void {
-    this.sendJson({ v: 1, type: 'skills-list', requestId: `skills-${++this.requestSeq}` });
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skills-list', requestId: `skills-${++this.requestSeq}` });
   }
 
   readSkill(name: string): string {
     const requestId = `skill-read-${++this.requestSeq}`;
-    this.sendJson({ v: 1, type: 'skill-read', requestId, name });
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-read', requestId, name });
     return requestId;
   }
 
   saveSkill(skill: { name: string; files: ProductSkillFile[] }): string {
     const requestId = `skill-save-${++this.requestSeq}`;
-    this.sendJson({ v: 1, type: 'skill-save', requestId, skill });
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-save', requestId, skill });
     return requestId;
   }
 
   validateSkill(skill: { name: string; files: ProductSkillFile[] }): string {
     const requestId = `skill-validate-${++this.requestSeq}`;
-    this.sendJson({ v: 1, type: 'skill-validate', requestId, skill });
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-validate', requestId, skill });
     return requestId;
   }
 
   setSkillEnabled(name: string, enabled: boolean): string {
     const requestId = `skill-enable-${++this.requestSeq}`;
-    this.sendJson({ v: 1, type: 'skill-enable', requestId, name, enabled });
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-enable', requestId, name, enabled });
     return requestId;
   }
 
   deleteSkill(name: string): string {
     const requestId = `skill-delete-${++this.requestSeq}`;
-    this.sendJson({ v: 1, type: 'skill-delete', requestId, name });
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-delete', requestId, name });
     return requestId;
   }
 
   generateSkillDraft(input: { goal: string; triggerExamples?: string; nonTriggerExamples?: string; resourceNotes?: string; existingSkill?: string }): string {
     const requestId = `skill-draft-${++this.requestSeq}`;
-    this.sendJson({ v: 1, type: 'skill-draft-request', requestId, agent: this.selectedAgent, model: this.selectedModel, ...input });
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-draft-request', requestId, agent: this.selectedAgent, model: this.selectedModel, ...input });
     return requestId;
   }
 
   requestWritingStyleStatus(): string {
     const requestId = `writing-style-status-${++this.requestSeq}`;
-    this.sendJson({ v: 1, type: 'writing-style-status-request', requestId });
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'writing-style-status-request', requestId });
     return requestId;
   }
 
   calibrateWritingStyle(input: { language: WritingStyleLanguage; files: WritingStyleUpload[] }): string {
     const requestId = `writing-style-calibration-${++this.requestSeq}`;
-    this.sendJson({ v: 1, type: 'writing-style-calibrate', requestId, ...input });
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'writing-style-calibrate', requestId, ...input });
     return requestId;
   }
 
   interrupt(): void {
-    this.sendJson({ v: 1, type: 'chat-interrupt' });
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' });
   }
 
   onEvent(cb: (e: SidebarEvent) => void): () => void {
