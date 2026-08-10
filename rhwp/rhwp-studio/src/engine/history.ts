@@ -38,13 +38,30 @@ export class CommandHistory {
   private redoStack: EditCommand[] = [];
   private maxSize = 1000;
   private lastExecutionEffects: TextMutationEffects = NO_TEXT_MUTATION_EFFECTS;
+  /**
+   * [Task #2328] 히스토리 밖에서 장기 점유 중인 WASM 스냅샷 id 수
+   * (에이전트 pending replace 의 되돌림 스냅샷 등). 같은 Rust 저장소를 쓰므로
+   * 예산 계산에 포함하지 않으면 WASM 이 우리가 아직 참조하는 오래된 undo
+   * 엔트리의 스냅샷을 무통보 축출한다.
+   */
+  private externalSnapshotIds = 0;
 
-  /** undo/redo 양 스택의 살아있는 스냅샷 id 총합. */
+  /** 외부(히스토리 밖) 스냅샷 id 점유 1개를 예산에 등록한다. */
+  retainExternalSnapshot(count = 1): void {
+    this.externalSnapshotIds += Math.max(0, Math.trunc(count));
+  }
+
+  /** 외부 스냅샷 id 점유를 해제한다 (음수로 내려가지 않는다). */
+  releaseExternalSnapshot(count = 1): void {
+    this.externalSnapshotIds = Math.max(0, this.externalSnapshotIds - Math.max(0, Math.trunc(count)));
+  }
+
+  /** undo/redo 양 스택 + 외부 점유의 살아있는 스냅샷 id 총합. */
   private liveSnapshotIds(): number {
     let n = 0;
     for (const cmd of this.undoStack) n += cmd.snapshotResourceCount?.() ?? 0;
     for (const cmd of this.redoStack) n += cmd.snapshotResourceCount?.() ?? 0;
-    return n;
+    return n + this.externalSnapshotIds;
   }
 
   /**

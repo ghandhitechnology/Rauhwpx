@@ -184,7 +184,7 @@ function makeFakeWasm(initial: FakePara[]) {
   };
 }
 
-function makeManager(initial: FakePara[]) {
+function makeManager(initial: FakePara[], inputHandlerExtras: Record<string, unknown> = {}) {
   const fake = makeFakeWasm(initial);
   const eventBus = new EventBus();
   const recorded: Array<{ kind: string; command: { undo(w: unknown): void; execute(w: unknown): void } }> = [];
@@ -195,6 +195,7 @@ function makeManager(initial: FakePara[]) {
       else desc.operation?.(fake.wasm);
     },
     prepareSnapshotCapacity: () => {},
+    ...inputHandlerExtras,
   };
   const overlayOps: Array<Array<{ kind: string }>> = [];
   const overlay = {
@@ -210,7 +211,17 @@ function makeManager(initial: FakePara[]) {
   });
   const events: string[] = [];
   mgr.onChange((e) => events.push(e.type));
-  return { mgr, fake, recorded, overlayOps, events };
+  return { mgr, fake, recorded, overlayOps, events, eventBus };
+}
+
+/** 사용자(비-에이전트) 편집 시뮬레이션 — 문서 변이 + InputHandler 와 같은 이벤트 */
+function userEdit(
+  fake: ReturnType<typeof makeFakeWasm>, eventBus: EventBus,
+  paraIdx: number, fn: (p: FakePara) => void,
+): void {
+  fake.mutatePara(paraIdx, fn);
+  eventBus.emit('document-mutated', 'input-handler-edit');
+  eventBus.emit('document-changed');
 }
 
 // ─── 원자적 교체 ─────────────────────────────────────────
@@ -430,9 +441,13 @@ test('all-drifted approve: 미리보기를 방치하지 않고 채택하며 히�
   assert.equal(fake.text(0), 'baseAG!!ENT'); // 사용자 수정을 지우지 않는다
   assert.equal(recorded.length, 1); // 히스토리 항목이 남는다 (방치 아님)
   assert.ok(events.includes('approved'));
-  // undo 하면 미리보기분이 제거된다
+  // undo 는 무해한 no-op 이어야 한다. 드리프트된 미리보기는 사용자가 손댄
+  // 텍스트라 되돌림 대상이 아니다 — 예전처럼 op 범위를 지워 before 를 만들면
+  // undo 가 사용자의 '!!' 까지 잘라내고 에이전트 글자 'NT' 만 남긴다("baseNT").
   recorded[0].command.undo(fake.wasm);
-  assert.ok(!fake.text(0).includes('AG!!ENT'));
+  assert.equal(fake.text(0), 'baseAG!!ENT');
+  assert.ok(fake.text(0).includes('!!'), '사용자 편집이 보존되어야 한다');
+  assert.notEqual(fake.text(0), 'baseNT', '사용자 글자를 잘라낸 상태로 되돌아가면 안 된다');
 });
 
 // ─── 새 public API ────────────────────────────────────────
@@ -530,4 +545,111 @@ test('withMarkedOpsApplied: 마크 op 을 임시 적용하고 항상 복원한�
   // 복원 후 approve 는 정상 동작해야 한다 (op 좌표가 깨지지 않았다)
   mgr.approve(ins.changeSetId);
   assert.equal(fake.text(0), 'A keep  rest');
+});
+
+// ─── 관측되지 않는 사용자 편집(untracked drift) 보호 ──────
+
+test('replaceText reject: 스냅샷 이후 사용자 편집이 있으면 전체 복원 대신 역연산으로 되돌린다', () => {
+  const { mgr, fake, eventBus } = makeManager([paraOf('hello world'), paraOf('user line')]);
+  const r = mgr.replaceText(
+    { sectionIdx: 0, startParaIdx: 0, startCharOffset: 6, endParaIdx: 0, endCharOffset: 11 },
+    'XYZ',
+    'claude',
+  );
+  assert.equal(fake.text(0), 'hello XYZ');
+  // 사용자가 pending 범위 밖(문단 1)을 편집한다 — op 범위 검증으로는 잡히지 않아
+  // 스냅샷 전체 복원 경로가 그대로 열려 있으면 이 문단이 통째로 사라진다.
+  userEdit(fake, eventBus, 1, (p) => { p.chars.push('!'); p.shapes.push(0); });
+  assert.equal(fake.text(1), 'user line!');
+
+  mgr.reject(r.changeSetId);
+  assert.equal(fake.text(0), 'hello world'); // 교체는 되돌아가고
+  assert.equal(fake.text(1), 'user line!');  // 사용자 편집은 살아남는다
+});
+
+test('replaceText approve: 사용자 편집이 있으면 undo 대상(before)도 그 편집을 보존한다', () => {
+  const { mgr, fake, recorded, eventBus } = makeManager([paraOf('hello world'), paraOf('user line')]);
+  const r = mgr.replaceText(
+    { sectionIdx: 0, startParaIdx: 0, startCharOffset: 6, endParaIdx: 0, endCharOffset: 11 },
+    'XYZ',
+    'claude',
+  );
+  userEdit(fake, eventBus, 1, (p) => { p.chars.push('!'); p.shapes.push(0); });
+
+  mgr.approve(r.changeSetId);
+  assert.equal(fake.text(0), 'hello XYZ');
+  assert.equal(fake.text(1), 'user line!');
+  recorded[0].command.undo(fake.wasm);
+  assert.equal(fake.text(0), 'hello world');
+  assert.equal(fake.text(1), 'user line!'); // undo 가 사용자 편집을 지우지 않는다
+});
+
+// ─── 스냅샷 예산 정합 ────────────────────────────────────
+
+/**
+ * [Task #2328] pending replace 가 잡고 있는 wasm 스냅샷은 히스토리 밖에 있지만
+ * 같은 Rust 저장소를 쓴다. 예산에 등록되지 않으면 WASM 이 상한(100)을 넘겨
+ * 아직 참조 중인 오래된 undo 스냅샷을 무통보 축출한다.
+ *
+ * CommandHistory 자체는 확장자 없는 상대 import 때문에 node --test 에서 직접
+ * 실행할 수 없으므로, 예산 규칙만 최소 모델로 재현하고 배선(prepare/retain/
+ * release 호출)은 실제 PendingEditManager 가 수행하게 한다.
+ */
+test('pending replace 스냅샷은 예산에 등록되어 WASM 상한을 넘기지 않는다', () => {
+  const WASM_MAX = 100;
+  const paras = Array.from({ length: 40 }, (_, i) => paraOf(`para ${i} text`));
+  // 히스토리(오래된 것부터) — 엔트리당 before/after 2개 id
+  let historyEntries: Array<[number, number]> = [];
+  let external = 0;
+  const live = (): number => historyEntries.length * 2 + external;
+
+  let fakeRef: ReturnType<typeof makeFakeWasm>;
+  const extras = {
+    prepareSnapshotCapacity: (n: number) => {
+      while (live() + n > WASM_MAX && historyEntries.length > 0) {
+        const [a, b] = historyEntries.shift()!;
+        fakeRef.wasm.discardSnapshot(a);
+        fakeRef.wasm.discardSnapshot(b);
+      }
+    },
+    retainExternalSnapshot: () => { external++; },
+    releaseExternalSnapshot: () => { external = Math.max(0, external - 1); },
+  };
+  const { mgr, fake } = makeManager(paras, extras);
+  fakeRef = fake;
+
+  // 히스토리를 예산 한계까지 채운다 (48 엔트리 = 96 id)
+  for (let i = 0; i < 48; i++) {
+    historyEntries.push([fake.wasm.saveSnapshot(), fake.wasm.saveSnapshot()]);
+  }
+  const oldestBefore = historyEntries[0][0];
+  assert.equal(fake.snapshotCount(), 96);
+
+  // 에이전트가 replace 를 연달아 수행한다 — 각각 스냅샷 1개를 리뷰 창 내내 점유
+  const ids: string[] = [];
+  for (let i = 0; i < 12; i++) {
+    const r = mgr.replaceText(
+      { sectionIdx: 0, startParaIdx: i, startCharOffset: 0, endParaIdx: i, endCharOffset: 4 },
+      `NEW${i}`,
+      'claude',
+    );
+    ids.push(r.changeSetId);
+    mgr.endTurn(); // 턴마다 별도 set — 부분 해제를 관측하기 위해
+    assert.ok(fake.snapshotCount() <= WASM_MAX,
+      `스냅샷 저장소 상한 초과: ${fake.snapshotCount()} (i=${i})`);
+    assert.ok(live() <= WASM_MAX, `예산 초과: ${live()} (i=${i})`);
+  }
+  // 남아 있는 가장 오래된 undo 엔트리는 여전히 복원 가능해야 한다
+  const oldest = historyEntries[0];
+  assert.doesNotThrow(() => fake.wasm.restoreSnapshot(oldest[0]));
+  // 예산을 위해 축출된 엔트리는 우리가 명시적으로 discard 한 것뿐이다
+  assert.ok(historyEntries.length < 48, '예산 확보를 위해 오래된 엔트리가 정리되어야 한다');
+  assert.equal(external, 12);
+  assert.notEqual(oldestBefore, oldest[0]);
+
+  // 승인/거절로 점유가 반환된다
+  mgr.reject(ids[0]);
+  assert.equal(external, 11);
+  for (const id of ids.slice(1)) mgr.reject(id);
+  assert.equal(external, 0);
 });

@@ -21,8 +21,12 @@ test('agent approval records the rendered preview instead of replaying applied e
   const approve = between(pendingSrc, '  approve(changeSetId: string): void {', '\n  /** reject');
 
   assert.match(approve, /previewId = wasm\.saveSnapshot\(\)/, 'capture the exact rendered preview');
-  assert.match(approve, /this\.revertAppliedOps\(revertOps, keepPreviewsOf\)[\s\S]*beforeId = wasm\.saveSnapshot\(\)/,
+  assert.match(approve, /this\.revertAppliedOps\(kept, keepPreviewsOf, userEditSeqNow\)[\s\S]*beforeId = wasm\.saveSnapshot\(\)/,
     'capture undo state after reverting applied pending ops');
+  // 전부 드리프트된 경우엔 되돌리지 않는다 — 드리프트 미리보기는 사용자 소유라
+  // 지워서 before 를 만들면 undo 가 사용자 글자를 잘라낸다.
+  assert.match(approve, /if \(kept\.length > 0\) \{\s*\n\s*this\.revertAppliedOps\(/,
+    'only revert when something survived drift detection');
   assert.match(approve, /wasm\.restoreSnapshot\(previewId\)[\s\S]*this\.restorePendingState\(previewState\)/,
     'restore both the document and pending ranges before approval');
   assert.match(approve, /prepareSnapshotCapacity\?\.\(3\)/,

@@ -95,7 +95,9 @@ function ensureConnected() {
       }
     });
     sock.on('close', () => {
-      if (ws === sock) ws = null;
+      // 대체된 옛 소켓의 close 가 현재 연결의 in-flight 호출을 죽이면 안 된다.
+      if (ws !== sock) return;
+      ws = null;
       failAllInflight(hubError('HUB_UNAVAILABLE', 'connection to rhwp-agent hub was closed'));
     });
   });

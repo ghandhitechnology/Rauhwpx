@@ -3,28 +3,16 @@
    펼침 시 body.ag-sidebar-open 이 #editor-area 를 같은 폭·같은
    easing 으로 밀어 용지/눈금자가 가려지지 않게 한다.
 
-   ── 방향 계약 (2026-08, operator console) ────────────────
-   THESIS: 이 패널은 대화창이 아니라 '주소가 붙은 오퍼레이션
-   스트림'이다. 에이전트가 문서 어디를 무엇으로 바꿨는지 로그
-   한 줄마다 좌표와 소요 시간으로 말한다. 거부하는 배치 —
-   양쪽 말풍선, 요약 문장만 있고 검토할 수 없는 승인 카드,
-   존재하지 않는 단축키를 그린 키캡.
-   OWN-WORLD: 색·면은 앞선 중성 램프(--n-*)를 그대로 쓴다.
-   바뀌는 것은 활자와 구조다 — 주소·수치·도구 이름은 모노,
-   산문만 UI 산세. 왼쪽 30px 거터 한 줄이 로그 전 구간을
-   관통하고 모든 항목이 거기에 정렬한다. 모서리는 2/3/4 로
-   조인다. diff 색은 새 색이 아니라 기존 ok/err 의 희석이다.
-   STORY: 사용자가 문서를 열어둔 채 옆면에 지시하고, −/+ diff
-   와 좌표로 제안된 편집을 검토한 뒤 승인한다.
-   FIRST VIEWPORT: 헤더는 컴팩트 컨트롤 클러스터 + 계기식
-   문서 readout, 가운데는 번호가 매겨진 작업 로그, 아래는
-   캐럿과 키캡을 품은 단일 입력 필드.
-   FORM: 사용자가 고른 방향(operator console) — 추첨 없음.
-   FINISH: unreviewed and undocumented is unfinished; this build
-   ends with the finish review, the verdict, and DESIGN.md */
+   ── 방향 계약 (2026-08, document workspace) ──────────────
+   문서가 주인공이고 에이전트는 그 옆의 조용한 협업자다. 사이드바와
+   포커스 모드는 같은 정보 구조를 공유한다: 위에는 문서 맥락, 가운데는
+   읽기 편한 대화, 아래에는 입력과 실행 설정이 한 면에 모인다. 기술
+   좌표와 원시 도구 출력은 필요할 때 펼쳐 보고, 검토는 변경이 있을 때만
+   여는 문맥 패널이다. 색은 기존 중성 램프를 유지하고 모서리, 여백,
+   활자 위계만 제품 전반의 SaaS 셸과 맞춘다. */
 
 :root {
-  --ag-sidebar-width: 360px;
+  --ag-sidebar-width: 600px;
   --ag-sidebar-ease: cubic-bezier(0.2, 0.72, 0, 1);
   --ag-sidebar-duration: 320ms;
   --ag-motion-out: cubic-bezier(0.16, 1, 0.3, 1);
@@ -98,20 +86,16 @@ body.ag-sidebar-resizing {
   --ag-ok: #2f7d4f;
   --ag-err: #c8372d;
 
-  /* 모서리 한 벌 — 계측기 쪽으로 한 단계 조인다. 앱의 4/6/8 을 그대로
-     쓰면 로그 행과 diff 가 물러 보인다. 값만 바꾸고 층위는 유지. */
-  --ag-r-chip: 2px;
-  --ag-r-field: 3px;
-  --ag-r-panel: 4px;
+  /* A softer but still compact application geometry. */
+  --ag-r-chip: 6px;
+  --ag-r-field: 10px;
+  --ag-r-panel: 14px;
 
-  /* ── 로그 레지스터 ─────────────────────────────────
-     주소·수치·도구 이름은 모노, 산문만 UI 산세. 두 활자를
-     섞지 않는 것이 이 패널이 '기계적'으로 읽히는 이유다. */
+  /* Monospace is reserved for raw tool details and exact coordinates. */
+  --ag-font: 'NanumSquare', '나눔스퀘어', var(--font-family-ui, sans-serif);
   --ag-mono: var(--font-family-mono, monospace);
-  --ag-gutter: 30px;
-  --ag-micro: 10px;
-  --ag-track: 0.06em;
-  --ag-track-wide: 0.14em;
+  --ag-micro: 11px;
+  --ag-track: 0;
 
   /* diff 색은 새 색이 아니라 기존 ok/err 을 희석한 것이다. */
   --ag-diff-add: color-mix(in srgb, var(--ag-ok) 9%, transparent);
@@ -125,13 +109,14 @@ body.ag-sidebar-resizing {
   z-index: 50;
   display: flex;
   flex-direction: column;
-  background: var(--ag-bg);
+  background-color: var(--ag-bg);
   color: var(--ag-text);
-  border-left: 1px solid var(--ag-border);
-  box-shadow: var(--n-elev-2);
-  font-family: var(--font-family-ui, sans-serif);
+  border-left: 1px solid var(--ag-border-strong);
+  /* 아래로 떨어지는 그림자가 아니라 왼쪽으로 드리우는 판 가장자리 */
+  box-shadow: var(--shadow-panel);
+  font-family: var(--ag-font);
   font-size: var(--font-size-md, 13px);
-  line-height: 1.5;
+  line-height: 1.55;
   transition: transform var(--ag-sidebar-duration) var(--ag-sidebar-ease);
   will-change: transform;
 }
@@ -261,7 +246,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   color: var(--ag-text);
 }
 
-/* ─── 헤더: 프로바이더 + 모델 피커 ───────────────────── */
+/* ─── 헤더: 문서 맥락 + 작업 공간 액션 ──────────────── */
 
 .ag-header {
   position: relative;
@@ -272,7 +257,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   gap: 0;
   padding: 0;
   border-bottom: 1px solid var(--ag-border);
-  background: var(--ag-raised);
+  background: color-mix(in srgb, var(--ag-raised) 88%, transparent);
 }
 
 .ag-model-summary,
@@ -283,14 +268,23 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 .ag-model-summary {
-  min-height: 42px;
-  padding: 5px 10px 4px 12px;
+  min-height: 52px;
+  padding: 6px 10px;
+}
+
+/* 전체 화면 토글 — 헤더 왼쪽 모서리에 고정. 모드 전환 때
+   DOM 을 옮기지 않으므로 위치가 흔들리지 않는다. */
+.ag-model-summary > .ag-fullscreen-btn {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-right: 0;
 }
 
 .ag-context-row {
-  min-height: 38px;
-  padding: 6px 10px 4px 12px;
-  border-top: 1px solid color-mix(in srgb, var(--ag-border) 72%, transparent);
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 2px;
 }
 
 .ag-document-context {
@@ -318,13 +312,11 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   line-height: 1.25;
 }
 
-/* 선택 상태는 문장이 아니라 계기 표시다 — 모노 + tabular. */
+/* Selection context stays secondary to the document title. */
 .ag-selection-context {
   color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
+  font-size: var(--font-size-sm, 11px);
   font-variant-numeric: tabular-nums;
-  letter-spacing: var(--ag-track);
   line-height: 1.35;
 }
 
@@ -339,8 +331,8 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   margin: 0;
   padding: 0;
   border: 0;
@@ -374,8 +366,9 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   min-width: 0;
   box-sizing: border-box;
   overflow: hidden;
-  border-block: 1px solid transparent;
-  background: color-mix(in srgb, var(--ag-bg) 78%, var(--ag-raised));
+  border: 1px solid transparent;
+  border-radius: var(--ag-r-field);
+  background: var(--ag-raised);
   opacity: 0;
   transition:
     grid-template-rows 240ms var(--ag-sidebar-ease),
@@ -387,6 +380,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   grid-template-rows: 1fr;
   border-color: var(--ag-border);
   opacity: 1;
+  box-shadow: var(--n-elev-2);
 }
 
 .ag-config-panel[hidden] {
@@ -396,12 +390,12 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-config-panel-inner {
   min-height: 0;
   overflow: hidden;
-  padding: 0 12px;
+  padding: 0 10px;
   transition: padding 240ms var(--ag-sidebar-ease);
 }
 
 .ag-config-panel.ag-open .ag-config-panel-inner {
-  padding-block: 8px 9px;
+  padding-block: 10px;
 }
 
 .ag-config-group {
@@ -428,11 +422,11 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   align-items: center;
   min-height: 24px;
   gap: 8px;
-  padding: 0 12px 5px;
+  padding: 0 12px 7px;
 }
 
 .ag-takeover-btn {
-  height: 22px;
+  height: 26px;
   margin-left: auto;
   padding: 0 7px;
   border: 1px solid var(--ag-border-strong);
@@ -461,7 +455,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   flex: 1 1 auto;
   flex-wrap: nowrap;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
   max-width: 100%;
   min-width: 0;
 }
@@ -474,11 +468,11 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-permission-btn,
 .ag-skills-btn {
   flex: 0 0 auto;
-  min-height: 24px;
-  padding: 3px 8px;
-  border: 1px solid var(--ag-border);
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
   border-radius: var(--ag-r-chip);
-  background: var(--ag-raised);
+  background: transparent;
   color: var(--ag-text-secondary);
   font: inherit;
   font-size: var(--font-size-sm, 11px);
@@ -489,7 +483,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-permission-btn:hover:not(:disabled),
 .ag-skills-btn:hover {
   background: var(--ag-hover);
-  border-color: var(--ag-border);
+  border-color: transparent;
   color: var(--ag-text);
 }
 
@@ -567,7 +561,9 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
+  /* clip 은 무대를 스크롤 컨테이너로 만들지 않는다 — 숨은 overflow 가
+     있어도 focus()·scrollIntoView 가 판 전체를 밀어낼 수 없다. */
+  overflow: clip;
 }
 
 .ag-chat-page,
@@ -846,23 +842,23 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-skill-save:disabled { opacity: 0.5; cursor: default; }
 .ag-skills-empty { padding: 28px 8px; color: var(--ag-text-muted); text-align: center; }
 
-/* 새 채팅은 장식 버튼이 아니라 명령 행이다 — 왼쪽 정렬 + 거터의 + 표식. */
+/* Thread navigation follows the same calm row pattern as the app shell. */
 .ag-threads-new {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
   margin: 0;
-  padding: 9px 12px 9px var(--ag-gutter);
-  border: 1px solid var(--ag-border-strong);
+  min-height: 36px;
+  padding: 8px 11px 8px 34px;
+  border: 1px solid var(--ag-border);
   border-radius: var(--ag-r-field);
   background: var(--ui-surface, var(--ag-bg));
   color: var(--ag-text);
   font: inherit;
-  font-size: var(--font-size-base, 12px);
+  font-size: var(--font-size-md, 13px);
   font-weight: 600;
-  letter-spacing: var(--ag-track);
   text-align: left;
   cursor: pointer;
 }
@@ -870,12 +866,13 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-threads-new::before {
   content: '+';
   position: absolute;
-  left: 0;
-  width: calc(var(--ag-gutter) - 9px);
-  color: var(--ag-accent);
-  font-family: var(--ag-mono);
-  font-size: var(--font-size-base, 12px);
-  text-align: right;
+  left: 12px;
+  width: 14px;
+  color: var(--ag-text-secondary);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1;
+  text-align: center;
 }
 
 .ag-threads-new:hover {
@@ -887,20 +884,99 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   outline-offset: 1px;
 }
 
-/* 채팅 목록도 로그와 같은 규칙을 따른다 — 번호가 붙은 레코드 행,
-   간격 대신 헤어라인, 계기식 메타. 대화 스트림과 같은 세계다. */
 .ag-threads-list {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   display: flex;
   flex-direction: column;
-  gap: 0;
-  /* 페이지 여백을 뚫고 나가 구분선이 패널 폭을 가로지르게 한다. */
-  margin: 0 -12px;
-  padding: 0;
-  border-top: 1px solid var(--ag-border);
+  gap: 3px;
+  margin: 0 -3px;
+  padding: 2px 3px 8px;
   list-style: none;
+}
+
+/* 문서 그룹 헤더 — 채팅은 문서 아래에 산다. 접힘/펼침은 쉐브론이 말한다. */
+.ag-threads-group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid var(--ag-border);
+  background: var(--ag-bg);
+}
+
+.ag-threads-group-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 7px 12px 7px 8px;
+  border: none;
+  border-radius: 0;
+  background: var(--ag-bg-2);
+  color: var(--ag-text);
+  font: inherit;
+  font-size: var(--font-size-base, 12px);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-threads-group-btn:hover,
+.ag-threads-group-btn:focus-visible {
+  background: var(--ag-hover);
+  outline: none;
+}
+
+.ag-threads-group-chevron {
+  flex: 0 0 auto;
+  color: var(--ag-text-muted);
+  transform: rotate(-90deg);
+  transition: transform 120ms ease;
+}
+
+.ag-threads-group-btn[aria-expanded='true'] .ag-threads-group-chevron {
+  transform: none;
+}
+
+.ag-threads-group-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-threads-group-count {
+  flex: 0 0 auto;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-threads-group-badge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-chip);
+  color: var(--ag-accent);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  font-weight: 500;
+  letter-spacing: var(--ag-track);
+}
+
+.ag-threads-group.ag-current-doc .ag-threads-group-name {
+  color: var(--ag-accent);
+}
+
+/* 다른 문서의 채팅 행 — 열람만 가능하다는 걸 살짝 가라앉혀 보여준다. */
+.ag-threads-row.ag-foreign .ag-threads-item {
+  opacity: 0.72;
 }
 
 .ag-threads-row {
@@ -908,7 +984,6 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: flex;
   align-items: stretch;
   min-width: 0;
-  border-bottom: 1px solid var(--ag-border);
 }
 
 .ag-threads-item {
@@ -919,10 +994,9 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   width: 100%;
   min-width: 0;
   margin: 0;
-  padding: 8px 34px 8px 0;
+  padding: 8px 34px 8px 10px;
   border: none;
-  border-left: 2px solid transparent;
-  border-radius: 0;
+  border-radius: var(--ag-r-field);
   background: transparent;
   color: var(--ag-text);
   font: inherit;
@@ -930,32 +1004,30 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   cursor: pointer;
 }
 
-.ag-threads-item:hover,
+.ag-threads-item:hover {
+  background: var(--ag-hover);
+}
+
 .ag-threads-item:focus-visible {
   background: var(--ag-hover);
-  outline: none;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
 }
 
-/* 열려 있는 대화는 채움이 아니라 왼쪽 레일로 표시한다. */
 .ag-threads-item.ag-active {
-  border-left-color: var(--ag-accent);
-  background: var(--ag-bg-2);
+  background: var(--ag-selected);
 }
 
-/* 행 번호: 로그의 op 번호와 같은 열, 같은 활자. */
+/* Sequence numbers stay in the DOM for compatibility but not in the visual UI. */
 .ag-thread-idx {
-  flex: 0 0 auto;
-  width: calc(var(--ag-gutter) - 9px);
-  padding-top: 1px;
-  color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
-.ag-threads-item.ag-active .ag-thread-idx {
-  color: var(--ag-accent);
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .ag-thread-body {
@@ -964,7 +1036,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   min-width: 0;
   flex-direction: column;
   gap: 2px;
-  padding-left: 9px;
+  padding-left: 0;
 }
 
 .ag-threads-item-title {
@@ -972,7 +1044,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--font-size-base, 12px);
+  font-size: var(--font-size-md, 13px);
   font-weight: 600;
 }
 
@@ -982,10 +1054,8 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
+  font-size: var(--font-size-sm, 11px);
   font-variant-numeric: tabular-nums;
-  letter-spacing: var(--ag-track);
 }
 
 /* 이름 바꾸기는 행 오른쪽에 겹쳐 두고 hover/focus 에서만 드러낸다.
@@ -1041,7 +1111,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: flex;
   width: 100%;
   min-width: 0;
-  padding: 6px 8px 6px calc(var(--ag-gutter) - 9px);
+  padding: 6px 8px;
 }
 
 .ag-thread-rename-input {
@@ -1050,11 +1120,11 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   height: 28px;
   padding: 0 8px;
   border: 1px solid var(--ag-accent);
-  border-radius: var(--ag-r-chip);
+  border-radius: var(--ag-r-field);
   background: var(--ag-input-bg);
   color: var(--ag-text);
   font: inherit;
-  font-size: var(--font-size-base, 12px);
+  font-size: var(--font-size-md, 13px);
 }
 
 .ag-thread-rename-input:focus {
@@ -1212,7 +1282,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   transition: transform 240ms var(--ag-sidebar-ease);
 }
 
-.ag-model-summary.ag-expanded .ag-summary-caret {
+.ag-composer-meta.ag-expanded .ag-summary-caret {
   transform: rotate(180deg);
 }
 
@@ -1364,27 +1434,19 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 /* ─── 메시지 목록 ─────────────────────────────────────── */
 
-/* 대화가 아니라 '주소가 붙은 오퍼레이션 스트림'이다. 왼쪽 거터 하나가
-   전 구간을 관통하고, 모든 항목이 그 선에 정렬한다. 거터 선은 요소마다
-   그리지 않고 스크롤 영역 배경으로 한 번에 긋는다(local 부착). */
+/* Conversation is prose-first; operational detail is available by disclosure. */
 .ag-messages {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px 14px 18px var(--ag-gutter);
+  gap: 16px;
+  padding: 18px 14px 24px;
   scrollbar-width: thin;
   overscroll-behavior: contain;
   overflow-anchor: none;
-  background-image: linear-gradient(
-    to right,
-    transparent 0 calc(var(--ag-gutter) - 1px),
-    var(--ag-border) calc(var(--ag-gutter) - 1px) var(--ag-gutter),
-    transparent var(--ag-gutter)
-  );
-  background-attachment: local;
+  background: var(--ag-bg);
 }
 
 .ag-msg {
@@ -1393,37 +1455,28 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   overflow-wrap: anywhere;
 }
 
-/* 사용자 입력은 오른쪽 말풍선이 아니라 로그에 기록된 지시문이다.
-   거터 밖으로 캐럿을 내밀어 '입력 행'임을 표시한다. */
 .ag-msg-user {
-  position: relative;
-  align-self: stretch;
-  max-width: 100%;
-  padding: 5px 10px 6px 11px;
-  border-radius: 0 var(--ag-r-chip) var(--ag-r-chip) 0;
-  border-left: 2px solid var(--ag-accent);
-  background: var(--ag-bg-2);
+  align-self: flex-end;
+  max-width: 92%;
+  padding: 8px 11px;
+  border: 1px solid color-mix(in srgb, var(--ag-border) 74%, transparent);
+  border-radius: var(--ag-r-panel);
+  background: var(--ag-raised);
   color: var(--ag-text);
-  font-size: var(--font-size-base, 12px);
+  font-size: var(--font-size-md, 13px);
+  line-height: 1.55;
 }
 
 .ag-msg-user::before {
-  content: '>';
-  position: absolute;
-  top: 5px;
-  left: calc(-1 * var(--ag-gutter) + 10px);
-  color: var(--ag-accent);
-  font-family: var(--ag-mono);
-  font-size: var(--font-size-sm, 11px);
-  line-height: 1.5;
+  content: none;
 }
 
 .ag-msg-assistant {
   align-self: stretch;
-  padding: 2px 0;
+  padding: 0 2px;
   color: var(--ag-text);
   font-size: var(--font-size-md, 13px);
-  line-height: 1.65;
+  line-height: 1.7;
 }
 
 .ag-msg-assistant.ag-msg-enter {
@@ -1433,13 +1486,11 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 @keyframes ag-message-arrive {
   from {
     opacity: 0;
-    transform: translateY(6px);
-    filter: blur(2px);
+    transform: translateY(4px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
-    filter: blur(0);
   }
 }
 
@@ -1459,43 +1510,24 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 /* ─── 작업 내역: 진행 설명 + 도구 호출 ───────────────── */
 
-/* 작업 내역은 거터를 통째로 되찾아 op 번호 열을 자기 안에 품는다.
-   (content 가 overflow 스크롤러라 바깥으로 삐져나가면 잘린다) */
 .ag-activity {
   position: relative;
   align-self: stretch;
   min-width: 0;
-  margin-left: calc(-1 * var(--ag-gutter));
-  border-top: 1px solid var(--ag-border);
-  border-bottom: 1px solid var(--ag-border);
-  isolation: isolate;
-  animation: ag-activity-arrive 360ms var(--ag-motion-out) both;
+  margin: -2px 0 0;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-field);
+  background: color-mix(in srgb, var(--ag-bg-2) 68%, transparent);
+  overflow: hidden;
+  animation: ag-activity-arrive 240ms var(--ag-motion-out) both;
 }
 
 .ag-activity::after {
-  content: '';
-  position: absolute;
-  right: 0;
-  bottom: -1px;
-  left: 0;
-  z-index: -1;
-  height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--ag-accent) 42%,
-    var(--ag-accent) 58%,
-    transparent 100%
-  );
-  opacity: 0;
-  transform: scaleX(0.18);
-  transform-origin: center;
-  pointer-events: none;
+  content: none;
 }
 
 .ag-activity-running::after {
-  opacity: 0.55;
-  animation: ag-activity-scan 1.8s var(--ag-motion-smooth) infinite;
+  animation: none;
 }
 
 .ag-root.ag-collapsed .ag-activity-running::after,
@@ -1506,25 +1538,11 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 @keyframes ag-activity-arrive {
   from {
     opacity: 0;
-    transform: translateY(7px);
-    clip-path: inset(0 0 100% 0);
+    transform: translateY(4px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
-    clip-path: inset(0);
-  }
-}
-
-@keyframes ag-activity-scan {
-  0%,
-  100% {
-    transform: translateX(-36%) scaleX(0.2);
-    opacity: 0.2;
-  }
-  50% {
-    transform: translateX(36%) scaleX(0.55);
-    opacity: 0.7;
   }
 }
 
@@ -1533,36 +1551,34 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   align-items: center;
   gap: 7px;
   width: 100%;
-  min-height: 30px;
+  min-height: 34px;
   margin: 0;
-  padding: 5px 8px 6px var(--ag-gutter);
+  padding: 6px 9px;
   border: none;
   background: transparent;
   color: var(--ag-text-muted);
   font: inherit;
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
-  letter-spacing: var(--ag-track);
+  font-size: var(--font-size-base, 12px);
   font-variant-numeric: tabular-nums;
   text-align: left;
   cursor: pointer;
 }
 
-/* 헤더 행의 거터에는 실행 상태를 뜻하는 표식 하나만 둔다. */
 .ag-activity-toggle::before {
-  content: '▸';
-  position: absolute;
-  left: 11px;
-  color: var(--ag-text-muted);
-  font-size: 9px;
+  content: '';
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ag-text-muted);
 }
 
 .ag-activity-running .ag-activity-toggle::before {
-  color: var(--ag-accent);
+  background: var(--ag-accent);
 }
 
 .ag-activity-error .ag-activity-toggle::before {
-  color: var(--ag-err);
+  background: var(--ag-err);
 }
 
 .ag-activity-toggle:hover {
@@ -1631,7 +1647,8 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
-  padding: 0 4px 8px 0;
+  padding: 1px 6px 8px;
+  border-top: 1px solid var(--ag-border);
 }
 
 .ag-activity-content:focus-visible {
@@ -1646,7 +1663,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-activity-note {
   position: relative;
   flex: 0 0 auto;
-  padding: 2px 8px 6px var(--ag-gutter);
+  padding: 6px 5px 4px;
   color: var(--ag-text-muted);
   font-size: var(--font-size-base, 12px);
   line-height: 1.55;
@@ -1670,26 +1687,16 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 @keyframes ag-step-arrive {
   from {
     opacity: 0;
-    transform: translateY(5px);
-    filter: blur(1.5px);
+    transform: translateY(3px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
-    filter: blur(0);
   }
 }
 
-/* 산문 노트도 로그 행이다 — 거터에 표식만 남기고 본문은 같은 열에 정렬한다. */
 .ag-activity-note::before {
-  content: '·';
-  position: absolute;
-  left: 0;
-  width: calc(var(--ag-gutter) - 9px);
-  color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
-  text-align: right;
+  content: none;
 }
 
 .ag-tool-head {
@@ -1700,7 +1707,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   width: 100%;
   min-width: 0;
   margin: 0;
-  padding: 4px 8px 4px var(--ag-gutter);
+  padding: 5px;
   border: none;
   background: transparent;
   color: var(--ag-text);
@@ -1714,18 +1721,8 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   color: var(--ag-text-secondary);
 }
 
-/* op 번호: 이 행의 주소. 거터 안에서 오른쪽 정렬해 자릿수를 맞춘다. */
 .ag-op-id {
-  position: absolute;
-  top: 5px;
-  left: 0;
-  width: calc(var(--ag-gutter) - 9px);
-  color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.5;
-  text-align: right;
+  display: none;
 }
 
 .ag-tool-head:hover {
@@ -1805,7 +1802,6 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   }
 }
 
-/* 도구 이름은 식별자지 문장이 아니다 — 모노 고정. */
 .ag-tool-name {
   flex: 0 0 auto;
   font-family: var(--ag-mono);
@@ -1820,8 +1816,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
+  font-size: var(--font-size-sm, 11px);
   color: var(--ag-text-muted);
 }
 
@@ -1830,8 +1825,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   flex: 0 0 auto;
   min-width: 0;
   color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
+  font-size: var(--font-size-sm, 11px);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1856,7 +1850,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 5px 8px 7px var(--ag-gutter);
+  padding: 5px 6px 7px 25px;
 }
 
 .ag-tool-body[hidden] {
@@ -1870,7 +1864,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   overflow-y: auto;
   padding: 5px 7px;
   border-left: 2px solid var(--ag-border-strong);
-  border-radius: 0 var(--ag-r-chip) var(--ag-r-chip) 0;
+  border-radius: var(--ag-r-chip);
   background: var(--ag-bg-2);
   color: var(--ag-text);
   font-family: var(--font-family-mono, monospace);
@@ -1908,34 +1902,34 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
   max-height: 40%;
   overflow-y: auto;
-  padding: 10px 12px;
+  padding: 12px;
   border-top: 1px solid var(--ag-border);
-  background: var(--ag-raised);
+  background: var(--ag-bg-2);
 }
 
 .ag-review:empty {
   display: none;
 }
 
-/* 어느 에이전트의 제안인지는 1px 식별선으로만 말한다.
-   2px 컬러 바는 카드를 경고문처럼 보이게 한다. */
+/* Review cards use the same neutral elevation as other contextual surfaces. */
 .ag-review-card {
-  padding: 8px 10px;
+  overflow: hidden;
+  padding: 0;
   border: 1px solid var(--ag-border);
   border-radius: var(--ag-r-panel);
   background: var(--ag-bg);
-  box-shadow: inset 1px 0 0 var(--ag-accent), var(--n-elev-1);
+  box-shadow: none;
 }
 
 .ag-review-card.ag-claude {
-  box-shadow: inset 1px 0 0 var(--ag-claude), var(--n-elev-1);
+  box-shadow: var(--n-elev-1);
 }
 
 .ag-review-card.ag-codex {
-  box-shadow: inset 1px 0 0 var(--ag-codex), var(--n-elev-1);
+  box-shadow: var(--n-elev-1);
 }
 
 .ag-review-open {
@@ -1947,12 +1941,12 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  margin-bottom: 7px;
-  padding-bottom: 5px;
+  margin: 0;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--ag-border);
-  font-size: var(--font-size-sm, 11px);
+  background: var(--ag-raised);
+  font-size: var(--font-size-base, 12px);
   font-weight: 700;
-  letter-spacing: var(--ag-track);
 }
 
 .ag-review-title-text {
@@ -1966,8 +1960,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-review-count {
   flex: 0 0 auto;
   color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
+  font-size: var(--font-size-sm, 11px);
   font-variant-numeric: tabular-nums;
   font-weight: 500;
 }
@@ -1976,21 +1969,25 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-review-op {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0;
   min-width: 0;
-  font-size: var(--font-size-sm, 11px);
+  font-size: var(--font-size-base, 12px);
   color: var(--ag-text-muted);
 }
 
 .ag-review-op + .ag-review-op {
-  margin-top: 7px;
+  border-top: 1px solid var(--ag-border);
 }
 
 .ag-op-head {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   min-width: 0;
+  min-height: 28px;
+  padding: 0 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ag-border) 72%, transparent);
+  background: color-mix(in srgb, var(--ag-bg-2) 74%, transparent);
 }
 
 /* 좌표는 이 패널이 문서 위 어디를 건드리는지 말하는 유일한 수단이다. */
@@ -2002,9 +1999,8 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   white-space: nowrap;
   color: var(--ag-text-muted);
   font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
+  font-size: var(--font-size-sm, 11px);
   font-variant-numeric: tabular-nums;
-  letter-spacing: var(--ag-track);
 }
 
 /* ── unified diff ────────────────────────────────────
@@ -2013,23 +2009,26 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-op-diff {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0;
   min-width: 0;
+  padding: 5px 0;
+  background: var(--ag-bg);
 }
 
 .ag-diff-line {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
-  padding: 2px 5px 2px 4px;
-  border-left: 2px solid transparent;
-  font-size: var(--font-size-sm, 11px);
+  padding: 4px 10px 4px 0;
+  border-left: 3px solid transparent;
+  font-size: var(--font-size-base, 12px);
   line-height: 1.45;
 }
 
 .ag-diff-sign {
   flex: 0 0 auto;
-  width: 7px;
+  width: 24px;
+  border-right: 1px solid color-mix(in srgb, var(--ag-border) 65%, transparent);
   color: var(--ag-text-muted);
   font-family: var(--ag-mono);
   font-size: var(--ag-micro);
@@ -2104,26 +2103,28 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 .ag-review-more {
-  margin-top: 6px;
-  padding-left: 6px;
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--ag-border);
   color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
-  letter-spacing: var(--ag-track);
+  font-size: var(--font-size-sm, 11px);
 }
 
 .ag-review-actions {
   display: flex;
   gap: 8px;
-  margin-top: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--ag-border);
+  background: var(--ag-raised);
 }
 
 .ag-approve,
 .ag-reject {
   flex: 1;
-  min-height: 26px;
+  min-height: 32px;
   padding: 5px 0;
-  border-radius: var(--ag-r-chip);
+  border-radius: var(--ag-r-field);
   font: inherit;
   font-size: var(--font-size-base, 12px);
   font-weight: 600;
@@ -2177,85 +2178,30 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 /* ─── 입력 영역 ───────────────────────────────────────── */
 
-/* 입력은 하나의 면이다: textarea 와 보내기 버튼이 같은 테두리
-   안에 살고, 포커스 링은 개별 컨트롤이 아니라 필드 전체에 걸린다.
-   버튼을 필드 밖에 두면 '채팅 앱' 배치로 되돌아간다. */
+/* Prompt, model context, and actions share one composed surface. */
 .ag-composer-utilities {
   display: flex;
   flex: 0 0 auto;
-  flex-direction: column;
-  align-items: stretch;
+  align-items: center;
   gap: 4px;
-  padding: 4px 12px 1px;
-  background: var(--ag-bg);
+  min-width: 0;
+  min-height: 28px;
+  padding: 0;
+  background: transparent;
 }
 
-.ag-composer-workflow-row,
 .ag-composer-utility-actions {
   display: flex;
   align-items: center;
-  min-width: 0;
-}
-
-.ag-composer-workflow-row {
-  gap: 6px;
-}
-
-.ag-composer-utility-actions {
   gap: 4px;
+  min-width: 0;
 }
 
 .ag-composer-utility-actions .ag-permission-btn {
   margin-left: auto;
 }
 
-/* 작업 방식(바로 실행 / 계획)은 권한(안전 / 전체 접근)과 다른 축이다.
-   권한보다 먼저 읽히는 독립 행에 세그먼트와 현재 단계를 함께 둔다. */
-.ag-workflow {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  padding: 1px;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-chip);
-  background: var(--ag-bg-2);
-}
-
-.ag-workflow-item {
-  min-height: 20px;
-  padding: 2px 8px;
-  border: 0;
-  border-radius: calc(var(--ag-r-chip) - 1px);
-  background: transparent;
-  color: var(--ag-text-muted);
-  font: inherit;
-  font-size: var(--font-size-sm, 11px);
-  cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
-}
-
-.ag-workflow-item.ag-active {
-  background: var(--ag-bg);
-  color: var(--ag-text);
-  font-weight: 600;
-  box-shadow: var(--n-elev-1);
-}
-
-.ag-workflow-item:hover:not(:disabled):not(.ag-active) {
-  color: var(--ag-text);
-}
-
-.ag-workflow-item:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
-
-.ag-workflow-item:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-/* 단계 배지는 항상 같은 자리에 있는 계기다. 색면이 아니라 헤어라인 칩. */
+/* 계획 모드일 때만 보이는 읽기 전용 상태다. 모드 전환은 /plan, /build로 한다. */
 .ag-phase-badge {
   flex: 0 0 auto;
   padding: 1px 6px;
@@ -2419,7 +2365,6 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ag-workflow-item,
   .ag-plan-chevron {
     transition: none;
   }
@@ -2428,36 +2373,83 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-composer {
   position: relative;
   flex: 0 0 auto;
-  padding: 3px 12px 12px;
-  background: var(--ag-bg);
-}
-
-/* 프롬프트 캐럿 — 이 필드는 명령을 받는 자리다. */
-.ag-caret {
-  flex: 0 0 auto;
-  align-self: flex-start;
-  padding-top: 5px;
-  color: var(--ag-accent);
-  font-family: var(--ag-mono);
-  font-size: var(--font-size-md, 13px);
-  line-height: 1.5;
-  user-select: none;
-}
-
-/* 키캡: 실제로 존재하는 단축키만. 눌리는 것처럼 보이지 않게 채우지 않는다. */
-.ag-kbd {
-  flex: 0 0 auto;
-  align-self: center;
-  min-width: 18px;
-  padding: 1px 4px;
+  margin: 0 12px 12px;
+  padding: 6px 8px 5px;
   border: 1px solid var(--ag-border-strong);
-  border-radius: var(--ag-r-chip);
+  border-radius: var(--ag-r-panel);
+  background: var(--ag-input-bg);
+  box-shadow: var(--n-elev-2);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.ag-composer:focus-within {
+  border-color: color-mix(in srgb, var(--ag-accent) 72%, var(--ag-border-strong));
+  box-shadow: var(--n-elev-2), 0 0 0 3px var(--ag-claude-wash);
+}
+
+.ag-root[data-agent='codex'] .ag-composer:focus-within {
+  box-shadow: var(--n-elev-2), 0 0 0 3px var(--ag-codex-wash);
+}
+
+.ag-composer-meta {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0 0;
+  border-top: 1px solid color-mix(in srgb, var(--ag-border) 76%, transparent);
+}
+
+.ag-composer-meta .ag-selectors {
+  flex: 1 1 auto;
+  min-width: 138px;
+  overflow: hidden;
+}
+
+.ag-composer-meta .ag-composer-utilities {
+  margin-left: auto;
+}
+
+.ag-composer-meta .ag-model-trigger {
+  gap: 4px;
+  min-height: 27px;
+  padding: 3px 4px;
   color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
-  line-height: 1.5;
-  text-align: center;
-  user-select: none;
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.ag-composer-meta .ag-provider-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.ag-composer > .ag-config-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 8;
+  width: auto;
+  max-height: min(360px, 50vh);
+  overflow-y: auto;
+  transform-origin: bottom center;
+}
+
+.ag-composer > .ag-config-panel.ag-open {
+  box-shadow: var(--n-elev-3);
+}
+
+/* The old command caret is retained in the DOM for compatibility only. */
+.ag-caret {
+  display: none;
+}
+
+.ag-kbd {
+  display: none;
 }
 
 .ag-kbd[hidden] {
@@ -2473,21 +2465,19 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   display: flex;
   align-items: flex-end;
   gap: 6px;
-  padding: 6px 6px 6px 9px;
-  border: 1px solid var(--ag-border-strong);
-  border-radius: var(--ag-r-field);
-  background: var(--ag-input-bg);
-  box-shadow: var(--n-elev-1);
-  transition: border-color 140ms ease, box-shadow 140ms ease;
+  min-height: 54px;
+  padding: 3px 2px 5px 4px;
+  border: 0;
+  background: transparent;
 }
 
 .ag-composer-field:focus-within {
-  border-color: var(--ag-accent);
-  box-shadow: var(--n-elev-1), 0 0 0 3px var(--ag-claude-wash);
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .ag-root[data-agent='codex'] .ag-composer-field:focus-within {
-  box-shadow: var(--n-elev-1), 0 0 0 3px var(--ag-codex-wash);
+  box-shadow: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2496,15 +2486,15 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 .ag-slash-menu {
   position: absolute;
-  right: 12px;
-  bottom: calc(100% + 6px);
-  left: 12px;
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: 0;
   z-index: 6;
   max-height: 240px;
   overflow: auto;
   padding: 4px;
   border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-panel);
+  border-radius: var(--ag-r-field);
   background: var(--ag-bg);
   box-shadow: var(--n-elev-3);
 }
@@ -2528,9 +2518,9 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-input {
   flex: 1 1 auto;
   min-width: 0;
-  min-height: 22px;
+  min-height: 36px;
   max-height: 132px;
-  padding: 5px 0 5px;
+  padding: 5px 2px;
   resize: none;
   border: 0;
   background: transparent;
@@ -2552,17 +2542,26 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   opacity: 0.55;
 }
 
-/* 필드 안쪽 오른쪽에 붙는 26px 정사각 버튼. 라벨은 aria 로 남긴다. */
+/* 다른 문서의 채팅 열람 중 — 필드 전체가 잠겨 있음을 보여준다. */
+.ag-composer.ag-readonly .ag-composer-field {
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+.ag-composer.ag-readonly .ag-caret {
+  opacity: 0.4;
+}
+
 .ag-send {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border: 0;
-  border-radius: var(--ag-r-chip);
+  border-radius: 9px;
   background: var(--accent-primary);
   color: var(--n-on-accent);
   cursor: pointer;
@@ -2603,4 +2602,1103 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-send.ag-stop:hover:not(:disabled) {
   background: var(--ag-err);
   filter: brightness(0.92);
+}
+
+/* ─── 전체 화면 작업 공간 ─────────────────────────────
+   Thread navigation and a centered conversation form the stable shell.
+   Review is contextual and opens over the right edge as a drawer. */
+
+/* 문서는 완전히 가려지므로 편집 영역을 밀어 둘 이유가 없다. */
+body.ag-fullscreen-open #editor-area {
+  margin-right: 0;
+}
+
+/* 사이드바는 흐름상 위치에서 fixed 로 뜨므로 top 이 도구 모음 아래다.
+   전체 화면은 뷰포트를 통째로 덮어야 하니 네 변을 모두 못 박는다. */
+.ag-root.ag-fullscreen {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100vw;
+  height: 100dvh;
+  z-index: 60;
+  border-left: none;
+  box-shadow: none;
+  background-color: var(--ag-bg-2);
+  /* 전환의 기준 자세 — clip 이 여기서 사이드바 자리로 오갔다 온다. */
+  clip-path: inset(0 0 0 0);
+}
+
+/* 폭 조절·접기는 사이드바의 조작이다. 전체 화면에서는 Esc 가 대신한다. */
+.ag-fullscreen .ag-collapse-tab,
+.ag-fullscreen .ag-resize-handle,
+.ag-fullscreen .ag-threads-close {
+  display: none;
+}
+
+/* Stable navigation + main work surface. Column widths are defined by the
+   fullscreen workspace shell below. */
+.ag-fullscreen .ag-stage {
+  position: relative;
+  display: grid;
+  gap: 0;
+  overflow: clip;
+  transition: grid-template-columns 240ms var(--ag-motion-out);
+}
+
+/* 접은 칸은 폭만 0 이 아니라 visibility 까지 감춘다 — 잘려 보이지 않을
+   뿐인 버튼이 Tab 차례에 남아 승인·거절이 눌리는 일을 막는다.
+   내용은 폭이 다 닫히기 전에 먼저 옅어져 줄바꿈 뭉개짐이 보이지 않는다. */
+.ag-fullscreen.ag-rail-collapsed .ag-threads-page {
+  padding-inline: 0;
+  border-right: none;
+  overflow: hidden;
+  visibility: hidden;
+  opacity: 0;
+  transition:
+    padding-inline 240ms var(--ag-motion-out),
+    opacity 130ms ease,
+    visibility 0s linear 130ms;
+}
+
+/* ── 칸 경계 드래그 ───────────────────────────────────
+   격자에 참여하지 않고 경계 위에 얹는다. 접힌 칸의 손잡이는
+   잡을 자리가 없으므로 숨는다. */
+.ag-rail-resize,
+.ag-review-resize {
+  display: none;
+}
+
+.ag-fullscreen .ag-rail-resize,
+.ag-fullscreen .ag-review-resize {
+  display: block;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 7;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+  transition: left 240ms var(--ag-motion-out), right 240ms var(--ag-motion-out);
+}
+
+.ag-fullscreen .ag-rail-resize {
+  left: calc(var(--ag-rail-w, 260px) - 3px);
+}
+
+.ag-fullscreen .ag-review-resize {
+  right: calc(var(--ag-review-w, 480px) + 6px);
+}
+
+.ag-fullscreen .ag-rail-resize::after,
+.ag-fullscreen .ag-review-resize::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  opacity: 0;
+  transition: background 120ms ease, opacity 120ms ease;
+}
+
+.ag-fullscreen .ag-rail-resize:hover::after,
+.ag-fullscreen .ag-rail-resize:focus-visible::after,
+.ag-fullscreen .ag-review-resize:hover::after,
+.ag-fullscreen .ag-review-resize:focus-visible::after,
+.ag-fullscreen.ag-col-resizing .ag-rail-resize::after,
+.ag-fullscreen.ag-col-resizing .ag-review-resize::after {
+  background: var(--ag-accent);
+  opacity: 1;
+}
+
+.ag-fullscreen .ag-rail-resize:focus-visible,
+.ag-fullscreen .ag-review-resize:focus-visible {
+  outline: none;
+}
+
+.ag-fullscreen.ag-rail-collapsed .ag-rail-resize,
+.ag-fullscreen.ag-review-collapsed .ag-review-resize,
+.ag-fullscreen:not(.ag-review-drawer-open) .ag-review-resize {
+  display: none;
+}
+
+/* 드래그 중에는 격자가 포인터를 뒤따라야 한다 — 보간을 끈다. */
+.ag-fullscreen.ag-col-resizing .ag-stage,
+.ag-fullscreen.ag-col-resizing .ag-threads-page,
+.ag-fullscreen.ag-col-resizing .ag-rail-resize,
+.ag-fullscreen.ag-col-resizing .ag-review-resize {
+  transition: none;
+}
+
+body.ag-col-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* The two stable pages leave the sidebar page-transition system. */
+.ag-fullscreen .ag-chat-page,
+.ag-fullscreen .ag-threads-page {
+  position: relative;
+  inset: auto;
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  pointer-events: auto;
+  min-height: 0;
+  min-width: 0;
+  transition: none;
+  z-index: auto;
+}
+
+.ag-fullscreen .ag-threads-page {
+  grid-column: 1;
+  grid-row: 1;
+  background: color-mix(in srgb, var(--ag-bg-2) 92%, var(--ag-bg));
+  border-right: 1px solid var(--ag-border);
+  padding: 6px 10px 16px;
+  overflow-y: auto;
+  /* padding-inline 을 명시해야 접힘 여백이 실제로 보간된다 —
+     transition-property: padding 은 논리 longhand 를 덮지 못한다. */
+  transition:
+    padding-inline 240ms var(--ag-motion-out),
+    opacity 170ms var(--ag-motion-out),
+    visibility 0s linear 0s;
+}
+
+.ag-fullscreen .ag-threads-header {
+  min-height: 46px;
+}
+
+.ag-fullscreen .ag-chat-page {
+  grid-column: 2;
+  grid-row: 1;
+  background: var(--ag-bg);
+  border-right: none;
+}
+
+/* 대화가 넓은 화면에서 한 줄로 늘어지지 않게 잰다. */
+.ag-fullscreen .ag-messages,
+.ag-fullscreen .ag-composer {
+  box-sizing: border-box;
+  max-width: 760px;
+  width: 100%;
+  margin-inline: auto;
+}
+
+.ag-fullscreen .ag-messages {
+  padding-inline: 24px;
+}
+
+.ag-fullscreen .ag-composer {
+  width: calc(100% - 32px);
+  margin-bottom: 18px;
+}
+
+/* Skills temporarily covers the workspace without changing its shell.
+   사이드바 페이지 전환의 대기 자세(translateX(20px))는 무대 폭을 20px
+   넘겨 숨은 가로 overflow 를 만들므로 전체 화면에서는 걷어낸다. */
+.ag-fullscreen .ag-skills-page {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  transform: none;
+}
+
+/* ── Contextual review drawer ───────────────────────── */
+.ag-review-column {
+  display: none;
+}
+
+.ag-review-column-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-height: 56px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--ag-border);
+}
+
+.ag-review-column-heading {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ag-review-column-title {
+  font-size: var(--font-size-md, 13px);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--ag-text);
+}
+
+.ag-review-column-meta {
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-review-column-close {
+  margin-left: auto;
+}
+
+.ag-fullscreen .ag-review-column .ag-review {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  padding: 14px 16px 18px;
+  border-top: 0;
+  background: transparent;
+}
+
+.ag-review-empty {
+  display: flex;
+  min-height: 220px;
+  padding: 28px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  text-align: center;
+}
+
+.ag-review-empty-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  margin-bottom: 12px;
+  place-items: center;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-raised);
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: 15px;
+}
+
+.ag-review-empty-title {
+  color: var(--ag-text);
+  font-size: var(--font-size-md, 13px);
+  font-weight: 650;
+}
+
+.ag-review-empty-copy {
+  max-width: 280px;
+  margin-top: 5px;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-base, 12px);
+  line-height: 1.55;
+}
+
+.ag-root:not(.ag-fullscreen) .ag-review:has(> .ag-review-empty:only-child) {
+  display: none;
+}
+
+@media (max-width: 960px) {
+  .ag-fullscreen .ag-stage,
+  .ag-fullscreen.ag-rail-collapsed .ag-stage,
+  .ag-fullscreen.ag-review-collapsed .ag-stage,
+  .ag-fullscreen.ag-rail-collapsed.ag-review-collapsed .ag-stage {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ag-fullscreen .ag-chat-page {
+    grid-column: 1;
+  }
+
+  .ag-fullscreen .ag-threads-page {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 5;
+    width: min(var(--ag-rail-w, 260px), 86vw);
+    border-right: 1px solid var(--ag-border);
+    box-shadow: var(--n-elev-3);
+  }
+
+  .ag-fullscreen.ag-rail-collapsed .ag-threads-page {
+    transform: translateX(-100%);
+  }
+
+  .ag-fullscreen .ag-rail-resize,
+  .ag-fullscreen .ag-review-resize {
+    display: none;
+  }
+}
+
+@media (max-width: 600px) {
+  .ag-fullscreen .ag-model-summary {
+    padding-inline: 8px;
+  }
+
+  .ag-fullscreen .ag-messages {
+    padding: 16px 12px 22px;
+  }
+
+  .ag-fullscreen .ag-composer {
+    width: calc(100% - 20px);
+    margin-bottom: 10px;
+  }
+
+  .ag-fullscreen .ag-review-column {
+    top: 8px;
+    right: 8px;
+    bottom: 8px;
+    width: calc(100% - 16px);
+  }
+}
+
+/* ── 전체 화면 전환 애니메이션 ─────────────────────────
+   작업 공간은 사이드바 자리에서 자라나고 그 자리로 접혀 돌아간다.
+   clip-path 가 보이는 영역만 옮기므로 내용물은 한 번만 배치된다.
+   clip 변수는 index.ts 가 사이드바 자리를 재서 심는다. */
+.ag-root.ag-fs-motion {
+  transition:
+    clip-path var(--ag-sidebar-duration) var(--ag-sidebar-ease),
+    background-color var(--ag-sidebar-duration) ease,
+    box-shadow var(--ag-sidebar-duration) ease;
+  will-change: clip-path;
+}
+
+.ag-root.ag-fs-from,
+.ag-root.ag-fs-to {
+  clip-path: inset(
+    var(--ag-fs-clip-top, 0px) 0
+    var(--ag-fs-clip-bottom, 0px) var(--ag-fs-clip-left, 0px)
+  );
+}
+
+/* 새로 생기는 바깥 두 칸은 가장자리에서 스며든다. 가운데 대화는
+   같은 노드가 그대로 이어지는 기준축이라 움직이지 않는다. */
+.ag-root.ag-fs-entering:not(.ag-rail-collapsed) .ag-threads-page {
+  animation: ag-fs-rail-in 300ms var(--ag-motion-out) 50ms both;
+}
+
+.ag-root.ag-fs-entering:not(.ag-review-collapsed) .ag-review-column {
+  animation: ag-fs-review-in 300ms var(--ag-motion-out) 20ms both;
+}
+
+/* 돌아갈 때는 바깥 칸이 먼저 옅어지고 난 뒤 패널이 접힌다 —
+   접힘 끝의 스트립이 빈 패널 톤이라 사이드바로의 교체가 깨끗하다. */
+.ag-root.ag-fs-exiting .ag-threads-page,
+.ag-root.ag-fs-exiting .ag-review-column {
+  animation: ag-fs-col-out 140ms ease both;
+}
+
+/* 모드 전환과 겹쳐 닫히는 오버레이가 무대 위를 한 번 더 미끄러지지
+   않게, 전환 동안은 스킬 페이지의 페이지 전환을 끈다. */
+.ag-root.ag-fs-motion .ag-skills-page {
+  transition: none;
+}
+
+/* 돌아온 사이드바는 스며들며 마무리. */
+.ag-root.ag-fs-return .ag-stage {
+  animation: ag-fs-stage-in 190ms var(--ag-motion-out) both;
+}
+
+@keyframes ag-fs-rail-in {
+  from {
+    opacity: 0;
+    transform: translateX(-14px);
+  }
+}
+
+@keyframes ag-fs-review-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+}
+
+@keyframes ag-fs-col-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes ag-fs-stage-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-root.ag-fullscreen {
+    transition: none;
+  }
+
+  .ag-root.ag-fs-motion {
+    transition: none;
+    will-change: auto;
+  }
+
+  .ag-root.ag-fs-entering:not(.ag-rail-collapsed) .ag-threads-page,
+  .ag-root.ag-fs-entering:not(.ag-review-collapsed) .ag-review-column,
+  .ag-root.ag-fs-exiting .ag-threads-page,
+  .ag-root.ag-fs-exiting .ag-review-column,
+  .ag-root.ag-fs-return .ag-stage {
+    animation: none;
+  }
+
+  .ag-fullscreen .ag-stage,
+  .ag-fullscreen .ag-threads-page,
+  .ag-fullscreen .ag-review-column,
+  .ag-fullscreen .ag-rail-resize,
+  .ag-fullscreen .ag-review-resize,
+  .ag-fullscreen .ag-rail-resize::after,
+  .ag-fullscreen .ag-review-resize::after {
+    transition: none;
+  }
+
+  .ag-composer {
+    transition: none;
+  }
+}
+
+/* ================================================================
+   Fullscreen workspace shell
+   Fullscreen is an application mode, not an enlarged sidebar. The
+   title bar owns layout controls; navigation and work surfaces meet
+   edge-to-edge with stable one-pixel boundaries.
+   ================================================================ */
+
+.ag-workspace-bar {
+  display: none;
+}
+
+.ag-fullscreen .ag-stage,
+.ag-fullscreen.ag-review-collapsed .ag-stage {
+  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr) 0;
+  grid-template-rows: 48px minmax(0, 1fr);
+  background: var(--ag-bg);
+}
+
+.ag-fullscreen.ag-rail-collapsed .ag-stage,
+.ag-fullscreen.ag-rail-collapsed.ag-review-collapsed .ag-stage {
+  grid-template-columns: 0 minmax(0, 1fr) 0;
+}
+
+.ag-fullscreen.ag-review-drawer-open:not(.ag-review-collapsed) .ag-stage {
+  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr) var(--ag-review-w, 480px);
+}
+
+.ag-fullscreen.ag-rail-collapsed.ag-review-drawer-open:not(.ag-review-collapsed) .ag-stage {
+  grid-template-columns: 0 minmax(0, 1fr) var(--ag-review-w, 480px);
+}
+
+/* A class mirrors the compact breakpoint so an in-flight grid transition
+   cannot retain the desktop rail track after the viewport changes. */
+.ag-fullscreen.ag-workspace-compact .ag-stage,
+.ag-fullscreen.ag-workspace-compact.ag-rail-collapsed .ag-stage,
+.ag-fullscreen.ag-workspace-compact.ag-review-collapsed .ag-stage,
+.ag-fullscreen.ag-workspace-compact.ag-rail-collapsed.ag-review-collapsed .ag-stage {
+  grid-template-columns: minmax(0, 1fr);
+  transition: none;
+}
+
+.ag-fullscreen.ag-workspace-compact .ag-chat-page,
+.ag-fullscreen.ag-workspace-compact .ag-review-column {
+  grid-column: 1;
+}
+
+.ag-fullscreen.ag-workspace-compact .ag-threads-page {
+  position: absolute;
+  top: 48px;
+  bottom: 0;
+  left: 0;
+  z-index: 12;
+  width: min(var(--ag-rail-w, 264px), 86vw);
+  border-right: 1px solid var(--ag-border);
+  box-shadow: var(--n-elev-3);
+}
+
+.ag-fullscreen .ag-workspace-bar {
+  position: relative;
+  z-index: 20;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: grid;
+  grid-template-columns: minmax(230px, var(--ag-rail-w, 264px)) minmax(280px, 1fr) minmax(230px, auto);
+  align-items: stretch;
+  min-width: 0;
+  border-bottom: 1px solid var(--ag-border);
+  background: color-mix(in srgb, var(--ag-bg-2) 94%, var(--ag-bg));
+  color: var(--ag-text);
+  user-select: none;
+}
+
+.ag-workspace-leading,
+.ag-workspace-trailing {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.ag-workspace-leading {
+  gap: 7px;
+  padding: 0 10px;
+}
+
+.ag-workspace-trailing {
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 0 8px 0 12px;
+}
+
+.ag-environment-wrap {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.ag-fullscreen .ag-environment-wrap {
+  position: static;
+}
+
+.ag-workspace-icon-btn,
+.ag-workspace-exit-btn {
+  border: 0;
+  background: transparent;
+  color: var(--ag-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.ag-workspace-icon-btn {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 5px;
+}
+
+.ag-workspace-icon-btn .ui-column-icon,
+.ag-workspace-icon-btn .ag-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ag-workspace-icon-btn:hover,
+.ag-workspace-exit-btn:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-environment-toggle.ag-active {
+  background: var(--ag-active);
+  color: var(--ag-text);
+}
+
+.ag-workspace-icon-btn:focus-visible,
+.ag-workspace-exit-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* Focus-mode environment: persistent context, not an auto-dismissing menu. */
+.ag-environment-panel {
+  position: absolute;
+  top: calc(100% + 14px);
+  right: 0;
+  z-index: 30;
+  width: min(360px, calc(100vw - 24px));
+  padding: 16px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--ag-raised) 96%, var(--ag-bg));
+  box-shadow: var(--n-elev-3);
+  color: var(--ag-text);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  clip-path: inset(0 0 100% 0 round 14px);
+  transform: translateY(-7px) scale(0.985);
+  transform-origin: top right;
+  transition:
+    opacity 160ms var(--ag-motion-out),
+    transform 220ms var(--ag-motion-out),
+    clip-path 220ms var(--ag-motion-out),
+    visibility 0s linear 220ms;
+}
+
+.ag-environment-panel.ag-open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  clip-path: inset(0 0 0 0 round 14px);
+  transform: translateY(0) scale(1);
+  transition-delay: 0s;
+}
+
+.ag-fullscreen .ag-environment-panel {
+  right: 8px;
+}
+
+.ag-environment-title {
+  margin: 0 0 10px;
+  color: var(--ag-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.ag-environment-file-row,
+.ag-environment-changes {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  min-height: 38px;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--ag-text);
+}
+
+.ag-environment-file-row {
+  padding: 0 9px;
+  cursor: default;
+}
+
+.ag-environment-file-row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.ag-environment-file-row .ag-icon,
+.ag-environment-changes .ag-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--ag-text-secondary);
+}
+
+.ag-environment-filename-viewport {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ag-environment-filename-track {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ag-text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-environment-file-row.ag-filename-overflow:hover .ag-environment-filename-track,
+.ag-environment-file-row.ag-filename-overflow:focus-visible .ag-environment-filename-track {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  animation: ag-filename-marquee var(--ag-filename-duration, 6s) ease-in-out 400ms infinite alternate;
+}
+
+@keyframes ag-filename-marquee {
+  0%, 12% { transform: translateX(0); }
+  88%, 100% { transform: translateX(calc(0px - var(--ag-filename-distance, 0px))); }
+}
+
+.ag-environment-changes {
+  grid-template-columns: 18px minmax(0, 1fr) auto 12px;
+  width: 100%;
+  padding: 0 9px;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.ag-environment-changes:hover {
+  background: var(--ag-hover);
+}
+
+.ag-environment-changes.ag-active {
+  background: var(--ag-active);
+}
+
+.ag-environment-changes:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.ag-environment-changes-label {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ag-environment-diff-summary {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 7px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ag-environment-additions {
+  color: var(--ag-ok);
+}
+
+.ag-environment-deletions {
+  color: var(--ag-err);
+}
+
+.ag-environment-diff-neutral {
+  color: var(--ag-text-muted);
+}
+
+.ag-environment-changes-chevron {
+  color: var(--ag-text-muted);
+  transform: rotate(-90deg);
+}
+
+.ag-workspace-document-context {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+  padding-left: 2px;
+}
+
+.ag-workspace-document-name,
+.ag-workspace-selection-context {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-workspace-document-name {
+  color: var(--ag-text);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.ag-workspace-selection-context {
+  color: var(--ag-text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.ag-workspace-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  color: var(--ag-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.ag-workspace-agent-context {
+  overflow: hidden;
+  max-width: 190px;
+  color: var(--ag-text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-workspace-exit-btn {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border-left: 1px solid var(--ag-border);
+  border-radius: 0;
+  font-size: 11px;
+}
+
+.ag-workspace-exit-btn .ag-icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* Sidebar chrome gives way to the workspace title bar in focus mode. */
+.ag-fullscreen .ag-chat-page > .ag-header {
+  display: none;
+}
+
+.ag-fullscreen .ag-threads-page,
+.ag-fullscreen .ag-chat-page {
+  grid-row: 2;
+}
+
+.ag-fullscreen .ag-threads-page {
+  grid-column: 1;
+  gap: 8px;
+  padding: 8px 9px 14px;
+  border-right: 1px solid var(--ag-border);
+  background: color-mix(in srgb, var(--ag-bg-2) 96%, var(--ag-bg));
+}
+
+.ag-fullscreen .ag-threads-header {
+  min-height: 38px;
+  padding: 0 4px;
+}
+
+.ag-fullscreen .ag-threads-title {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.ag-fullscreen .ag-threads-new {
+  min-height: 32px;
+  border-color: var(--ag-border);
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.ag-fullscreen .ag-threads-new:hover {
+  background: var(--ag-hover);
+}
+
+.ag-fullscreen .ag-threads-item {
+  min-height: 42px;
+  border-radius: 5px;
+}
+
+/* 전체 화면 레일의 문서 그룹 — sticky 머리가 레일 표면색을 그대로 이어
+   받아야 스크롤할 때 밑의 행이 비쳐 보이지 않는다. 행이 카드형이므로
+   그룹 머리도 같은 radius 언어를 쓴다. */
+.ag-fullscreen .ag-threads-group {
+  background: color-mix(in srgb, var(--ag-bg-2) 92%, var(--ag-bg));
+  border-bottom: none;
+}
+
+.ag-fullscreen .ag-threads-group-btn {
+  border-radius: 5px;
+  background: transparent;
+}
+
+.ag-fullscreen .ag-threads-group-btn:hover,
+.ag-fullscreen .ag-threads-group-btn:focus-visible {
+  background: var(--ag-hover);
+}
+
+.ag-fullscreen .ag-chat-page {
+  --ag-chat-content-left: max(24px, calc((100vw - var(--ag-rail-w, 264px) - 860px) / 2));
+
+  grid-column: 2;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  background: var(--ag-bg);
+}
+
+.ag-fullscreen .ag-messages {
+  max-width: 860px;
+  width: min(860px, calc(100% - var(--ag-chat-content-left) - 24px));
+  margin-right: 0;
+  margin-left: var(--ag-chat-content-left);
+  padding: 34px 38px 40px;
+}
+
+.ag-fullscreen .ag-composer {
+  max-width: 860px;
+  width: min(860px, calc(100% - var(--ag-chat-content-left) - 24px));
+  margin-right: 0;
+  margin-left: var(--ag-chat-content-left);
+  margin-bottom: 20px;
+  border-radius: 9px;
+  box-shadow: var(--n-elev-2);
+}
+
+/* 변경 사항은 대화를 유지한 채 오른쪽 열을 차지하는 docked drawer다. */
+.ag-fullscreen .ag-review-column,
+.ag-fullscreen.ag-review-collapsed .ag-review-column {
+  position: relative;
+  z-index: 4;
+  grid-column: 3;
+  grid-row: 2;
+  display: flex;
+  width: auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border: 0;
+  border-left: 1px solid var(--ag-border);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--ag-bg-2) 96%, var(--ag-bg));
+  box-shadow: none;
+  overflow: hidden;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 140ms ease-out,
+    visibility 0s linear 240ms;
+}
+
+.ag-fullscreen.ag-review-drawer-open:not(.ag-review-collapsed) .ag-review-column {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity 160ms ease-out,
+    visibility 0s linear 0s;
+}
+
+.ag-fullscreen .ag-review-column-head {
+  min-height: 58px;
+  padding: 0 16px 0 18px;
+  border-bottom: 1px solid var(--ag-border);
+  background: color-mix(in srgb, var(--ag-raised) 72%, var(--ag-bg-2));
+}
+
+.ag-fullscreen .ag-review-column-title {
+  font-size: 13px;
+}
+
+.ag-fullscreen .ag-review-column-close {
+  display: inline-flex;
+}
+
+.ag-fullscreen .ag-review-column .ag-review {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 14px 14px 24px;
+  background: transparent;
+}
+
+.ag-fullscreen .ag-review-card {
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.ag-fullscreen .ag-review-card.ag-claude,
+.ag-fullscreen .ag-review-card.ag-codex {
+  box-shadow: none;
+}
+
+.ag-fullscreen .ag-review-resize {
+  top: 48px;
+  right: calc(var(--ag-review-w, 480px) - 3px);
+}
+
+.ag-fullscreen .ag-rail-resize {
+  top: 48px;
+  left: calc(var(--ag-rail-w, 264px) - 3px);
+}
+
+.ag-fullscreen.ag-rail-collapsed .ag-rail-resize {
+  display: none;
+}
+
+@media (max-width: 960px) {
+  .ag-fullscreen .ag-stage,
+  .ag-fullscreen.ag-rail-collapsed .ag-stage,
+  .ag-fullscreen.ag-review-collapsed .ag-stage,
+  .ag-fullscreen.ag-rail-collapsed.ag-review-collapsed .ag-stage {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 48px minmax(0, 1fr);
+  }
+
+  .ag-fullscreen .ag-workspace-bar {
+    grid-template-columns: minmax(190px, 1fr) auto minmax(150px, 1fr);
+  }
+
+  .ag-fullscreen .ag-chat-page,
+  .ag-fullscreen .ag-review-column {
+    grid-column: 1;
+  }
+
+  .ag-fullscreen .ag-threads-page {
+    top: 48px;
+    bottom: 0;
+    height: auto;
+  }
+
+  .ag-workspace-agent-context {
+    display: none;
+  }
+}
+
+@media (max-width: 680px) {
+  .ag-fullscreen .ag-workspace-bar {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .ag-workspace-selection-context,
+  .ag-workspace-exit-label {
+    display: none;
+  }
+
+  .ag-workspace-leading {
+    padding-inline: 8px;
+  }
+
+  .ag-workspace-exit-btn {
+    width: 34px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .ag-environment-panel {
+    width: min(340px, calc(100vw - 16px));
+  }
+
+  .ag-fullscreen .ag-messages {
+    padding: 22px 14px 28px;
+  }
+
+  .ag-fullscreen .ag-composer {
+    width: calc(100% - 20px);
+    margin-bottom: 10px;
+  }
+
+  .ag-fullscreen .ag-review-column .ag-review {
+    padding: 14px 10px 22px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-environment-panel,
+  .ag-environment-changes {
+    transition: none;
+  }
+
+  .ag-environment-file-row.ag-filename-overflow:hover .ag-environment-filename-track,
+  .ag-environment-file-row.ag-filename-overflow:focus-visible .ag-environment-filename-track {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    animation: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-fullscreen .ag-chat-page,
+  .ag-fullscreen .ag-review-column {
+    transition: none;
+  }
+}
+
+/* Keep the hidden drawer out of compact workspace grid calculations. */
+.ag-fullscreen.ag-workspace-compact .ag-review-column,
+.ag-fullscreen.ag-workspace-compact.ag-review-collapsed .ag-review-column {
+  grid-column: 1;
 }

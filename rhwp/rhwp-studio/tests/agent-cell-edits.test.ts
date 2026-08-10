@@ -103,7 +103,7 @@ const CELL_BARBAZ: CellAddr = { paraIdx: 1, controlIdx: 0, cellIdx: 3 }; // ['ba
 
 // ─── AgentToolExecutor ──────────────────────────────────────
 
-function makeExecutor() {
+function makeExecutor(cursor?: Record<string, unknown>) {
   const { wasm, body, cells, calls } = makeCellWasm();
   const bus = new EventBus();
   const revision = new RevisionTracker(bus);
@@ -145,7 +145,7 @@ function makeExecutor() {
     hasPendingStructureOp: () => false,
   };
   const inputHandler = {
-    getCursorPosition: () => ({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 }),
+    getCursorPosition: () => cursor ?? { sectionIndex: 0, paragraphIndex: 0, charOffset: 0 },
     getSelection: () => null,
   };
   const executor = new AgentToolExecutor({
@@ -377,4 +377,46 @@ test('pending: 본문 문단 추가 삽입이 표 앞이면 셀 op 의 부모 �
   // reject 는 이동한 주소 기준으로도 성공해야 한다
   mgr.reject(cellOp.changeSetId);
   assert.equal(cells[2][0], 'foo');
+});
+
+// ─── get_selection: 중첩 표 좌표 축 혼용 방지 ─────────────────
+
+test('get_selection: 1중첩(깊이 1) 셀은 기존대로 write 가능한 cell 주소를 준다', async () => {
+  const { executor } = makeExecutor({
+    sectionIndex: 0, paragraphIndex: 1, charOffset: 2,
+    parentParaIndex: 1, controlIndex: 0, cellIndex: 2, cellParaIndex: 0,
+    cellPath: [{ parentParaIndex: 1, controlIndex: 0, cellIndex: 2, cellParaIndex: 0 }],
+  });
+  const r = (await executor.execute('get_selection', {}, 'claude')) as {
+    cursor: { cell?: unknown; paraIdx: number; charOffset: number; nested?: boolean };
+    nested?: boolean;
+  };
+  assert.deepEqual(r.cursor.cell, { paraIdx: 1, controlIdx: 0, cellIdx: 2 });
+  assert.equal(r.cursor.paraIdx, 0);
+  assert.equal(r.cursor.charOffset, 2);
+  assert.equal(r.cursor.nested, undefined);
+  assert.equal(r.nested, undefined);
+});
+
+test('get_selection: 중첩 표(깊이 2)에서는 cell 주소를 생략하고 nested/cellPath 로 알린다', async () => {
+  const path = [
+    { parentParaIndex: 1, controlIndex: 0, cellIndex: 2, cellParaIndex: 0 },
+    { parentParaIndex: 0, controlIndex: 0, cellIndex: 3, cellParaIndex: 1 },
+  ];
+  const { executor } = makeExecutor({
+    sectionIndex: 0, paragraphIndex: 1, charOffset: 4,
+    parentParaIndex: 1, controlIndex: 0, cellIndex: 2, cellParaIndex: 0,
+    cellPath: path,
+  });
+  const r = (await executor.execute('get_selection', {}, 'claude')) as {
+    cursor: { cell?: unknown; paraIdx: number; charOffset: number; nested?: boolean; cellPath?: unknown };
+    nested?: boolean; note?: string;
+  };
+  assert.equal(r.cursor.cell, undefined); // 최외곽 셀 주소 + 최내곽 문단 인덱스 혼용 금지
+  assert.equal(r.cursor.nested, true);
+  assert.equal(r.cursor.paraIdx, 1); // 최내곽 셀 문단
+  assert.equal(r.cursor.charOffset, 4);
+  assert.deepEqual(r.cursor.cellPath, path);
+  assert.equal(r.nested, true);
+  assert.ok(r.note && r.note.includes('get_structure'));
 });
