@@ -355,6 +355,7 @@ class AgentBridgeImpl implements AgentBridge {
     switch (msg.type) {
       case 'welcome': {
         const session = msg.session;
+        const wasRunning = this.turnRunning;
         if (session && isAgentName(session.agent)) {
           this.activeAgent = session.agent;
           this.turnRunning = session.status === 'running';
@@ -386,6 +387,19 @@ class AgentBridgeImpl implements AgentBridge {
           this.resetWorkflowState();
         }
         this.emit({ type: 'workflow-changed', ...this.workflowState() });
+        if (wasRunning && !this.turnRunning) {
+          // 연결이 끊긴 사이에 끝난 턴 — 잃어버린 turn-end 를 합성해 UI 를 되돌린다.
+          if (this.pendingTurnOpen) {
+            try {
+              this.endPendingTurn();
+            } catch (e) {
+              console.warn('[AgentBridge] endTurn 실패:', e);
+            }
+          }
+          // setState 는 상태가 같으면 무시하므로 직접 emit 해 사이드바가
+          // isTurnRunning() 으로 재동기화하도록 한다.
+          this.emit({ type: 'connection', state: this.state });
+        }
         break;
       }
       case 'chat-started': {

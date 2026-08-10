@@ -110,8 +110,8 @@ test('verify_changes 설명에 셀프체크 지시와 취소선 안내가 있다
   assert.match(desc, /self-check/i);
   assert.match(desc, /struck-through/);
   assert.match(desc, /includeImage/);
-  assert.match(desc, /applied-now/);
-  assert.match(desc, /awaiting-approval/);
+  // 응답의 실제 모양(describeChangeSet)은 per-op kind + applied 불리언이다
+  assert.match(desc, /applied flag/);
 });
 
 test('apply_list 설명에 진짜 목록/리터럴 금지/가나다 기본값/bulletChar 안내가 있다', () => {
@@ -124,15 +124,20 @@ test('apply_list 설명에 진짜 목록/리터럴 금지/가나다 기본값/bu
 });
 
 test('apply_list 스키마: format enum·level 기본값 0·범위', () => {
-  const { shape } = byName.get('apply_list');
-  const formats = shape.format._def.values;
+  const { shape, validate } = byName.get('apply_list');
+  // format 은 optional enum — bulletChar 글머리표 목록에는 필요 없다
+  const formats = shape.format._def.innerType._def.values;
   assert.deepEqual(formats, ['1.', '1)', '(1)', '①', 'a.', 'a)', 'A.', 'A)', 'I.', 'i.', 'i)', '가.', 'ㄱ.']);
-  for (const key of ['expectedRevision', 'sectionIdx', 'startParaIdx', 'endParaIdx', 'format']) {
+  for (const key of ['expectedRevision', 'sectionIdx', 'startParaIdx', 'endParaIdx']) {
     assert.ok(key in shape, `apply_list missing ${key}`);
   }
-  for (const key of ['level', 'startNumber', 'bulletChar']) {
+  for (const key of ['format', 'level', 'startNumber', 'bulletChar']) {
     assert.ok(key in shape, `apply_list missing optional ${key}`);
   }
+  // 번호 목록인데 format 이 없으면 즉시 실패, bulletChar 가 있으면 format 생략 가능
+  assert.throws(() => validate({ }), /format/);
+  assert.doesNotThrow(() => validate({ format: '1.' }));
+  assert.doesNotThrow(() => validate({ bulletChar: '•' }));
 });
 
 test('get_char_format 설명에 서식 상속 규칙이 있다', () => {
