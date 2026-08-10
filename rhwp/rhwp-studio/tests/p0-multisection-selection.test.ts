@@ -98,7 +98,13 @@ test('Studio routes copy/delete/format/render through cross-section APIs or segm
   assert.match(keyboard, /copySelectionAcrossSections\(/);
   assert.match(keyboard, /exportSelectionAcrossSectionsHtml\(/);
   assert.match(command, /deleteRangeAcrossSections\(/);
-  assert.match(command, /applyCharFormatAcrossSections\(/);
-  assert.match(command, /applyParaFormatAcrossSections\(/);
+  // Formatting now uses the shared editable-target command path so the same
+  // undo/redo implementation also covers cells, HF and notes. Body ranges are
+  // still segmented across sections by InputHandler, then applied one target
+  // at a time here.
+  assert.match(command, /for \(const range of this\.ranges\)/);
+  assert.match(command, /applyCharFormatToTarget\(wasm, range, propsJson\)/);
+  assert.match(command, /for \(const entry of entries\)/);
+  assert.match(command, /applyParaFormatToTarget\(wasm, entry\.target, propsJson\)/);
   assert.match(inputHandler, /getBodySelectionSegments\(this\.wasm, start, end\)\.flatMap/);
 });
