@@ -12,7 +12,7 @@
    활자 위계만 제품 전반의 SaaS 셸과 맞춘다. */
 
 :root {
-  --ag-sidebar-width: 400px;
+  --ag-sidebar-width: 600px;
   --ag-sidebar-ease: cubic-bezier(0.2, 0.72, 0, 1);
   --ag-sidebar-duration: 320ms;
   --ag-motion-out: cubic-bezier(0.16, 1, 0.3, 1);
@@ -2095,8 +2095,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-composer-utilities {
   display: flex;
   flex: 0 0 auto;
-  flex-direction: column;
-  align-items: flex-end;
+  align-items: center;
   gap: 4px;
   min-width: 0;
   min-height: 28px;
@@ -2104,72 +2103,18 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   background: transparent;
 }
 
-.ag-composer-workflow-row,
 .ag-composer-utility-actions {
   display: flex;
   align-items: center;
-  min-width: 0;
-}
-
-.ag-composer-workflow-row {
-  gap: 6px;
-}
-
-.ag-composer-utility-actions {
   gap: 4px;
+  min-width: 0;
 }
 
 .ag-composer-utility-actions .ag-permission-btn {
   margin-left: auto;
 }
 
-/* 작업 방식(바로 실행 / 계획)은 권한(안전 / 전체 접근)과 다른 축이다.
-   권한보다 먼저 읽히는 독립 행에 세그먼트와 현재 단계를 함께 둔다. */
-.ag-workflow {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  padding: 1px;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-chip);
-  background: var(--ag-bg-2);
-}
-
-.ag-workflow-item {
-  min-height: 20px;
-  padding: 2px 8px;
-  border: 0;
-  border-radius: calc(var(--ag-r-chip) - 1px);
-  background: transparent;
-  color: var(--ag-text-muted);
-  font: inherit;
-  font-size: var(--font-size-sm, 11px);
-  cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
-}
-
-.ag-workflow-item.ag-active {
-  background: var(--ag-bg);
-  color: var(--ag-text);
-  font-weight: 600;
-  box-shadow: var(--n-elev-1);
-}
-
-.ag-workflow-item:hover:not(:disabled):not(.ag-active) {
-  color: var(--ag-text);
-}
-
-.ag-workflow-item:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
-
-.ag-workflow-item:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-/* 단계 배지는 항상 같은 자리에 있는 계기다. 색면이 아니라 헤어라인 칩. */
+/* 계획 모드일 때만 보이는 읽기 전용 상태다. 모드 전환은 /plan, /build로 한다. */
 .ag-phase-badge {
   flex: 0 0 auto;
   padding: 1px 6px;
@@ -2333,7 +2278,6 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ag-workflow-item,
   .ag-plan-chevron {
     transition: none;
   }
@@ -2362,7 +2306,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 .ag-composer-meta {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
@@ -2379,26 +2323,6 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 .ag-composer-meta .ag-composer-utilities {
   margin-left: auto;
-}
-
-.ag-composer-meta .ag-calibration-launch {
-  min-height: 28px;
-  padding: 4px 6px;
-  border-color: transparent;
-  border-radius: var(--ag-r-chip);
-  background: transparent;
-  box-shadow: none;
-  font-weight: 500;
-}
-
-.ag-composer-meta .ag-calibration-launch:hover {
-  border-color: transparent;
-  background: var(--ag-hover);
-}
-
-.ag-composer-meta .ag-calibration-launch.ag-active {
-  border-color: transparent;
-  background: color-mix(in srgb, var(--ag-ok) 8%, transparent);
 }
 
 .ag-composer-meta .ag-model-trigger {
@@ -2614,44 +2538,6 @@ body.ag-fullscreen-open #editor-area {
 .ag-fullscreen .ag-resize-handle,
 .ag-fullscreen .ag-threads-close {
   display: none;
-}
-
-/* Changes is a first-class workspace action; the badge appears only when needed. */
-.ag-review-toggle {
-  position: relative;
-  display: inline-flex;
-}
-
-.ag-fullscreen .ag-review-toggle {
-  display: inline-flex;
-}
-
-.ag-review-badge {
-  position: absolute;
-  top: 1px;
-  right: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 4px;
-  border: 2px solid var(--ag-raised);
-  border-radius: 999px;
-  background: var(--ag-accent);
-  color: #fff;
-  font-size: 9px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.ag-review-badge[hidden] {
-  display: none;
-}
-
-.ag-review-toggle .ui-column-icon {
-  transform: scaleX(-1);
 }
 
 /* Stable navigation + main work surface. Review is not a grid track. */
@@ -3224,19 +3110,11 @@ body.ag-col-resizing {
   padding: 0 8px 0 12px;
 }
 
-.ag-workspace-mark {
-  display: grid;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
-  place-items: center;
-  border: 1px solid color-mix(in srgb, var(--ag-accent) 44%, var(--ag-border));
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--ag-accent) 12%, var(--ag-bg));
-  color: var(--ag-text);
-  font-family: var(--ag-mono);
-  font-size: 11px;
-  font-weight: 750;
+.ag-environment-wrap {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
 }
 
 .ag-workspace-icon-btn,
@@ -3272,11 +3150,166 @@ body.ag-col-resizing {
   color: var(--ag-text);
 }
 
+.ag-environment-toggle.ag-active {
+  background: var(--ag-active);
+  color: var(--ag-text);
+}
+
 .ag-workspace-icon-btn:focus-visible,
 .ag-workspace-exit-btn:focus-visible,
 .ag-workspace-tab:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
+}
+
+/* Focus-mode environment: persistent context, not an auto-dismissing menu. */
+.ag-environment-panel {
+  position: absolute;
+  top: calc(100% + 14px);
+  right: 0;
+  z-index: 30;
+  width: min(360px, calc(100vw - 24px));
+  padding: 16px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--ag-raised) 96%, var(--ag-bg));
+  box-shadow: var(--n-elev-3);
+  color: var(--ag-text);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  clip-path: inset(0 0 100% 0 round 14px);
+  transform: translateY(-7px) scale(0.985);
+  transform-origin: top right;
+  transition:
+    opacity 160ms var(--ag-motion-out),
+    transform 220ms var(--ag-motion-out),
+    clip-path 220ms var(--ag-motion-out),
+    visibility 0s linear 220ms;
+}
+
+.ag-environment-panel.ag-open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  clip-path: inset(0 0 0 0 round 14px);
+  transform: translateY(0) scale(1);
+  transition-delay: 0s;
+}
+
+.ag-environment-title {
+  margin: 0 0 10px;
+  color: var(--ag-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.ag-environment-file-row,
+.ag-environment-changes {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  min-height: 38px;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--ag-text);
+}
+
+.ag-environment-file-row {
+  padding: 0 9px;
+  cursor: default;
+}
+
+.ag-environment-file-row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.ag-environment-file-row .ag-icon,
+.ag-environment-changes .ag-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--ag-text-secondary);
+}
+
+.ag-environment-filename-viewport {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ag-environment-filename-track {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ag-text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-environment-file-row.ag-filename-overflow:hover .ag-environment-filename-track,
+.ag-environment-file-row.ag-filename-overflow:focus-visible .ag-environment-filename-track {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  animation: ag-filename-marquee var(--ag-filename-duration, 6s) ease-in-out 400ms infinite alternate;
+}
+
+@keyframes ag-filename-marquee {
+  0%, 12% { transform: translateX(0); }
+  88%, 100% { transform: translateX(calc(0px - var(--ag-filename-distance, 0px))); }
+}
+
+.ag-environment-changes {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  width: 100%;
+  padding: 0 9px;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.ag-environment-changes:hover {
+  background: var(--ag-hover);
+}
+
+.ag-environment-changes:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.ag-environment-changes-label {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ag-environment-diff-summary {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 7px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ag-environment-additions {
+  color: var(--ag-ok);
+}
+
+.ag-environment-deletions {
+  color: var(--ag-err);
+}
+
+.ag-environment-diff-neutral {
+  color: var(--ag-text-muted);
 }
 
 .ag-workspace-document-context {
@@ -3588,7 +3621,6 @@ body.ag-col-resizing {
     grid-template-columns: minmax(0, 1fr) auto auto;
   }
 
-  .ag-workspace-mark,
   .ag-workspace-selection-context,
   .ag-workspace-exit-label {
     display: none;
@@ -3609,6 +3641,11 @@ body.ag-col-resizing {
     padding: 0;
   }
 
+  .ag-environment-panel {
+    right: -42px;
+    width: min(340px, calc(100vw - 16px));
+  }
+
   .ag-fullscreen .ag-messages {
     padding: 22px 14px 28px;
   }
@@ -3621,6 +3658,21 @@ body.ag-col-resizing {
 
   .ag-fullscreen .ag-review-column .ag-review {
     padding: 14px 10px 22px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-environment-panel,
+  .ag-environment-changes {
+    transition: none;
+  }
+
+  .ag-environment-file-row.ag-filename-overflow:hover .ag-environment-filename-track,
+  .ag-environment-file-row.ag-filename-overflow:focus-visible .ag-environment-filename-track {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    animation: none;
   }
 }
 

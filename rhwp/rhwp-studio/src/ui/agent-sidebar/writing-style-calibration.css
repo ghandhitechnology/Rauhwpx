@@ -1,33 +1,3 @@
-.ag-calibration-launch {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 7px;
-  border: 1px solid var(--ag-border-strong);
-  border-radius: var(--ag-r-field);
-  background: var(--ag-input-bg);
-  color: var(--ag-text-secondary);
-  box-shadow: var(--n-elev-1);
-  font: inherit;
-  font-size: var(--font-size-sm, 11px);
-  font-weight: 650;
-  cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
-}
-
-.ag-calibration-launch:hover {
-  border-color: var(--ag-border-strong);
-  background: var(--ag-hover);
-  color: var(--ag-text);
-}
-
-.ag-calibration-launch.ag-active {
-  border-color: color-mix(in srgb, var(--ag-ok) 38%, var(--ag-border));
-  color: var(--ag-ok);
-}
-
-.ag-calibration-launch:focus-visible,
 .ag-calibration-language:focus-visible,
 .ag-calibration-primary:focus-visible,
 .ag-calibration-secondary:focus-visible,
@@ -36,18 +6,6 @@
 .ag-calibration-dropzone:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
-}
-
-.ag-calibration-icon {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
-}
-
-.ag-calibration-launch-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .ag-calibration-overlay {
@@ -515,7 +473,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ag-calibration-launch,
   .ag-calibration-overlay,
   .ag-calibration-dialog,
   .ag-calibration-panel,
