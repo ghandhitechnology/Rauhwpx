@@ -21,6 +21,8 @@ test('workspace keeps document context in the header and execution settings with
 });
 
 test('focus mode is a dedicated shell with navigation and a tabbed workspace', () => {
+  assert.doesNotMatch(source, /workspaceMark|ag-workspace-mark/);
+  assert.doesNotMatch(css, /\.ag-workspace-mark/);
   assert.match(
     source,
     /if \(raw === null\) return true;[\s\S]*?return raw !== '0';/,
@@ -47,16 +49,31 @@ test('focus mode is a dedicated shell with navigation and a tabbed workspace', (
   );
 });
 
-test('changes stay discoverable while pending edits drive only the badge', () => {
-  assert.match(source, /const reviewBadge = el\('span', 'ag-review-badge', '0'\)/);
-  assert.match(source, /reviewBadge\.hidden = true;/);
-  assert.match(source, /if \(!fullscreen\) \{[\s\S]*?setReviewColCollapsed\(false\);[\s\S]*?setFullscreen\(true\)/);
-  assert.match(source, /opCount \+= set\.ops\.length;[\s\S]*?updateReviewControl\(opCount\)/);
-  assert.match(source, /reviewBadge\.textContent = String\(pendingReviewOpCount\)/);
-  assert.match(source, /reviewBadge\.hidden = !hasPending;/);
-  assert.doesNotMatch(source, /reviewBtn\.hidden = !hasPending/);
-  assert.match(css, /\.ag-review-badge\s*\{/);
-  assert.match(css, /\.ag-review-badge\[hidden\]\s*\{[^}]*display:\s*none;/s);
+test('changes stay discoverable in focus mode while pending edits drive the workspace badge', () => {
+  assert.doesNotMatch(source, /ag-review-toggle|const reviewBtn|const reviewBadge/);
+  assert.match(source, /const workspaceReviewBadge = el\('span', 'ag-workspace-review-badge', '0'\)/);
+  assert.match(source, /workspaceReviewBadge\.hidden = true;/);
+  assert.match(source, /const diff = summarizePendingDiffs\(changeSets\)/);
+  assert.match(source, /updateReviewControl\(changeSets\)/);
+  assert.match(source, /workspaceReviewBadge\.textContent = String\(pendingReviewOpCount\)/);
+  assert.match(source, /workspaceReviewBadge\.hidden = !hasPending;/);
+  assert.doesNotMatch(css, /\.ag-review-toggle|\.ag-review-badge/);
+});
+
+test('focus mode environment panel is persistent, informative, and opens changes explicitly', () => {
+  assert.match(source, /ENVIRONMENT_PANEL_OPEN_KEY/);
+  assert.match(source, /localStorage\.getItem\(ENVIRONMENT_PANEL_OPEN_KEY\) !== '0'/);
+  assert.match(source, /persistEnvironmentPanelOpen\(open\)/);
+  assert.match(source, /environmentPanel\.append\(environmentTitle, environmentFileRow, environmentChanges\)/);
+  assert.match(source, /workspaceTrailing\.append\(workspaceAgentContext, environmentWrap, workspaceExitBtn\)/);
+  assert.match(source, /environmentToggle\.addEventListener\('click',[\s\S]*setEnvironmentPanelOpen\(!environmentPanelOpen\)/);
+  assert.match(source, /environmentChanges\.addEventListener\('click',[\s\S]*setReviewColCollapsed\(false\)/);
+  assert.match(source, /updateEnvironmentFilename\(currentDocumentName\)/);
+  assert.match(source, /파일 첨부나 대화 브랜치 기능이 생기면/);
+  assert.doesNotMatch(source, /environmentPanel[\s\S]{0,120}pointerdown/);
+  assert.match(css, /\.ag-environment-panel\s*\{[^}]*position:\s*absolute;[^}]*box-shadow:\s*var\(--n-elev-3\)/s);
+  assert.match(css, /@keyframes ag-filename-marquee/);
+  assert.match(css, /prefers-reduced-motion:[^)]*reduce[\s\S]*\.ag-environment-panel/s);
 });
 
 test('changes workspace presents a full-surface unified diff and an intentional empty state', () => {
@@ -73,8 +90,6 @@ test('changes workspace presents a full-surface unified diff and an intentional 
 });
 
 test('changes tab exposes synchronized accessible state', () => {
-  assert.match(source, /reviewBtn\.setAttribute\('aria-controls', 'ag-review-column'\)/);
-  assert.match(source, /reviewBtn\.setAttribute\('aria-expanded', changesActive \? 'true' : 'false'\)/);
   assert.match(source, /conversationTab\.setAttribute\('aria-selected', changesActive \? 'false' : 'true'\)/);
   assert.match(source, /changesTab\.setAttribute\('aria-selected', changesActive \? 'true' : 'false'\)/);
   assert.match(source, /reviewColumn\.setAttribute\('role', 'region'\)/);
