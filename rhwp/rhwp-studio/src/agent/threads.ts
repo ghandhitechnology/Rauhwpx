@@ -24,6 +24,8 @@ export interface ChatThread {
   model: string;
   effort: string;
   workflow: AgentWorkflow;
+  /** 이 채팅이 속한 문서(파일 이름). null = 문서 없이 시작한 채팅. */
+  docKey: string | null;
   /** Historical display data only. Phase/approval/capability authority is never persisted. */
   latestPlan?: StructuredPlan;
   messages: ThreadMessage[];
@@ -34,11 +36,13 @@ export interface ThreadDraft {
   model: string;
   effort: string;
   workflow?: AgentWorkflow;
+  docKey?: string | null;
 }
 
-type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan'> & {
+type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan' | 'docKey'> & {
   workflow?: unknown;
   latestPlan?: unknown;
+  docKey?: unknown;
 };
 
 function canUseStorage(): boolean {
@@ -88,10 +92,11 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
 
 function normalizeStoredThread(thread: StoredChatThread): ChatThread {
   const latestPlan = isStructuredPlan(thread.latestPlan) ? thread.latestPlan : undefined;
-  const { workflow: _storedWorkflow, latestPlan: _storedPlan, ...rest } = thread;
+  const { workflow: _storedWorkflow, latestPlan: _storedPlan, docKey: storedDocKey, ...rest } = thread;
   return {
     ...rest,
     workflow: isAgentWorkflow(thread.workflow) ? thread.workflow : 'direct',
+    docKey: typeof storedDocKey === 'string' && storedDocKey ? storedDocKey : null,
     ...(latestPlan ? { latestPlan } : {}),
   };
 }
@@ -122,6 +127,7 @@ export function createEmptyThread(draft: ThreadDraft): ChatThread {
     model: draft.model,
     effort: draft.effort,
     workflow: draft.workflow ?? 'direct',
+    docKey: draft.docKey ?? null,
     messages: [],
   };
 }
@@ -131,6 +137,26 @@ export function listThreads(): ChatThread[] {
   return loadAll()
     .filter((t) => t.messages.length > 0)
     .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export interface DocumentThreadGroup {
+  docKey: string | null;
+  threads: ChatThread[];
+}
+
+/**
+ * 문서별 채팅 묶음 — 그룹 순서는 가장 최근에 움직인 채팅 기준이고,
+ * 그룹 안도 최신순이다(listThreads 정렬을 그대로 물려받는다).
+ */
+export function listThreadsByDocument(): DocumentThreadGroup[] {
+  const groups = new Map<string | null, ChatThread[]>();
+  for (const thread of listThreads()) {
+    const key = thread.docKey ?? null;
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(thread);
+    else groups.set(key, [thread]);
+  }
+  return [...groups.entries()].map(([docKey, threads]) => ({ docKey, threads }));
 }
 
 export function getThread(id: string): ChatThread | null {

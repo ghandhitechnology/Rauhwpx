@@ -40,7 +40,7 @@ import {
   createEmptyThread,
   fallbackTitle,
   getThread,
-  listThreads,
+  listThreadsByDocument,
   renameThread,
   setThreadTitle,
   upsertThread,
@@ -413,10 +413,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let followConversation = true;
   let conversationScrollRaf: number | null = null;
   let insetRecenterRaf: number | null = null;
+  // ── 문서별 채팅 격리 ──────────────────────────────────
+  // 채팅은 만들어질 때의 문서(docKey)에 묶인다. 문서가 바뀌면 새 채팅을
+  // 자동으로 시작하고, 다른 문서의 채팅은 읽기 전용으로만 열린다.
+  let currentDocKey: string | null = getDocumentContext?.().documentName ?? null;
+  /** 읽기 전용으로 열람 중인 다른 문서 채팅의 문서 라벨 (null = 정상 모드). */
+  let readOnlyDocLabel: string | null = null;
+  /** 문서 그룹 접힘/펼침 — 사용자가 손댄 그룹만 기억한다(키: docKey ?? ''). */
+  const docGroupToggles = new Map<string, boolean>();
   let currentThread = createEmptyThread({
     agent: selectedAgent,
     model: selectedModel,
     effort: selectedEffort,
+    docKey: currentDocKey,
   });
   let assistantBuffer = '';
   let threadsPanelOpen = false;
@@ -1008,6 +1017,38 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     workspaceDocumentName.title = context?.documentName || '';
     workspaceSelectionContext.textContent = context?.selectionLabel || '선택 없음';
     updateEnvironmentFilename(currentDocumentName);
+    const nextKey = context?.documentName ?? null;
+    if (nextKey !== currentDocKey) handleDocumentSwitch(nextKey);
+  }
+
+  /** 스레드 목록이 지금 화면에 있는가 — 사이드바에선 패널일 때만,
+      전체 화면에선 레일이 접혀 있지 않으면 항상 보인다. */
+  function threadsListVisible(): boolean {
+    return threadsPanelOpen || (fullscreen && !threadsRailCollapsed);
+  }
+
+  /**
+   * 문서가 바뀌면 채팅도 갈아탄다 — 이전 문서의 대화가 새 문서로
+   * 넘어오지 못하게 하는 격리 지점. 진행 중이던 채팅은 자기 문서
+   * 그룹 아래에 저장되고, 새 문서용 빈 채팅이 열린다.
+   */
+  function handleDocumentSwitch(nextKey: string | null): void {
+    currentDocKey = nextKey;
+    // 읽기 전용으로 보던 채팅의 문서가 실제로 열렸다면 그 자리에서 이어간다.
+    if (readOnlyDocLabel !== null && currentThread.docKey === nextKey) {
+      exitReadOnlyMode();
+      bridge.stopChat();
+      bridge.startChat(selectedAgent, selectedModel, selectedEffort, true, permissionProfile, chatWorkflow);
+      return;
+    }
+    if (readOnlyDocLabel === null && currentThread.messages.length === 0) {
+      // 빈 채팅은 새 문서에 다시 묶기만 하면 된다.
+      currentThread.docKey = nextKey;
+      if (threadsListVisible()) rebuildThreadsList();
+      return;
+    }
+    startNewChat({ silent: true });
+    if (threadsListVisible()) rebuildThreadsList();
   }
 
   function setConfigPanelOpen(open: boolean): void {
@@ -1543,6 +1584,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     threadsRailCollapsed = collapsed;
     persistThreadsRailCollapsed(collapsed);
     applyThreadsRailState();
+    // 접혀 있는 동안 문서가 바뀌었을 수 있다 — 다시 펼칠 때 새로 그린다.
+    if (fullscreen && !collapsed) rebuildThreadsList();
   }
 
   /* Conversation / Changes workspace tab. 기존 collapsed preference를
@@ -2118,6 +2161,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   });
   composer.addEventListener('submit', (e) => {
     e.preventDefault();
+    if (readOnlyDocLabel !== null) return;
     if (turnRunning) {
       bridge.interrupt();
       return;
@@ -2351,46 +2395,87 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     field.select();
   }
 
+  function docGroupLabel(docKey: string | null): string {
+    return docKey ?? '문서 없음';
+  }
+
+  function buildThreadRow(thread: ChatThread, indexInGroup: number): HTMLElement {
+    const li = el('li', 'ag-threads-row');
+    if (thread.id === currentThread.id) li.classList.add('ag-current');
+
+    const btn = el('button', 'ag-threads-item');
+    btn.type = 'button';
+    if (thread.id === currentThread.id) btn.classList.add('ag-active');
+    const index = el('span', 'ag-thread-idx', String(indexInGroup + 1).padStart(2, '0'));
+    index.setAttribute('aria-hidden', 'true');
+    const body = el('span', 'ag-thread-body');
+    body.append(
+      el('span', 'ag-threads-item-title', thread.title || '새 채팅'),
+      el('span', 'ag-threads-item-meta', formatThreadMeta(thread)),
+    );
+    btn.append(index, body);
+    // 두 번 누르기로는 열지 않는다 — 첫 클릭이 이미 대화를 열어버리므로
+    // 이름 바꾸기는 연필 버튼 하나로만 들어간다.
+    btn.addEventListener('click', () => openThread(thread.id));
+
+    const rename = el('button', 'ag-thread-rename');
+    rename.type = 'button';
+    rename.setAttribute('aria-label', `${thread.title || '새 채팅'} 이름 바꾸기`);
+    rename.title = '이름 바꾸기';
+    rename.appendChild(createIcon('format'));
+    rename.addEventListener('click', (e) => {
+      e.stopPropagation();
+      beginThreadRename(thread, li);
+    });
+
+    li.append(btn, rename);
+    return li;
+  }
+
+  /**
+   * 문서별 그룹 목록 — 현재 문서 그룹이 맨 위에 펼쳐져 있고,
+   * 다른 문서 그룹은 접힌 채로 최근 활동순으로 이어진다.
+   */
   function rebuildThreadsList(): void {
     threadsList.replaceChildren();
-    const items = listThreads();
-    if (items.length === 0) {
-      const empty = el('li', 'ag-threads-empty', '이전 채팅이 없습니다');
-      threadsList.appendChild(empty);
+    const groups = listThreadsByDocument();
+    if (groups.length === 0) {
+      threadsList.appendChild(el('li', 'ag-threads-empty', '이전 채팅이 없습니다'));
       return;
     }
-    items.forEach((thread, i) => {
-      const li = el('li', 'ag-threads-row');
-      if (thread.id === currentThread.id) li.classList.add('ag-current');
+    const currentIdx = groups.findIndex((g) => g.docKey === currentDocKey);
+    if (currentIdx > 0) groups.unshift(groups.splice(currentIdx, 1)[0]!);
 
-      const btn = el('button', 'ag-threads-item');
-      btn.type = 'button';
-      if (thread.id === currentThread.id) btn.classList.add('ag-active');
-      const index = el('span', 'ag-thread-idx', String(i + 1).padStart(2, '0'));
-      index.setAttribute('aria-hidden', 'true');
-      const body = el('span', 'ag-thread-body');
-      body.append(
-        el('span', 'ag-threads-item-title', thread.title || '새 채팅'),
-        el('span', 'ag-threads-item-meta', formatThreadMeta(thread)),
-      );
-      btn.append(index, body);
-      // 두 번 누르기로는 열지 않는다 — 첫 클릭이 이미 대화를 열어버리므로
-      // 이름 바꾸기는 연필 버튼 하나로만 들어간다.
-      btn.addEventListener('click', () => openThread(thread.id));
+    for (const group of groups) {
+      const toggleKey = group.docKey ?? '';
+      const isCurrentDoc = group.docKey === currentDocKey;
+      const expanded = docGroupToggles.get(toggleKey) ?? isCurrentDoc;
 
-      const rename = el('button', 'ag-thread-rename');
-      rename.type = 'button';
-      rename.setAttribute('aria-label', `${thread.title || '새 채팅'} 이름 바꾸기`);
-      rename.title = '이름 바꾸기';
-      rename.appendChild(createIcon('format'));
-      rename.addEventListener('click', (e) => {
-        e.stopPropagation();
-        beginThreadRename(thread, li);
+      const groupLi = el('li', 'ag-threads-group');
+      if (isCurrentDoc) groupLi.classList.add('ag-current-doc');
+      const groupBtn = el('button', 'ag-threads-group-btn');
+      groupBtn.type = 'button';
+      groupBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      const chevron = createChevron('ag-threads-group-chevron');
+      const name = el('span', 'ag-threads-group-name', docGroupLabel(group.docKey));
+      name.title = docGroupLabel(group.docKey);
+      const count = el('span', 'ag-threads-group-count', String(group.threads.length));
+      groupBtn.append(chevron, name, count);
+      if (isCurrentDoc) groupBtn.append(el('span', 'ag-threads-group-badge', '현재'));
+      groupBtn.addEventListener('click', () => {
+        docGroupToggles.set(toggleKey, !expanded);
+        rebuildThreadsList();
       });
+      groupLi.appendChild(groupBtn);
+      threadsList.appendChild(groupLi);
 
-      li.append(btn, rename);
-      threadsList.appendChild(li);
-    });
+      if (!expanded) continue;
+      group.threads.forEach((thread, i) => {
+        const row = buildThreadRow(thread, i);
+        if (!isCurrentDoc) row.classList.add('ag-foreign');
+        threadsList.appendChild(row);
+      });
+    }
   }
 
   function setThreadsPanelOpen(open: boolean): void {
@@ -2416,21 +2501,44 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
   }
 
-  function startNewChat(): void {
+  /** 다른 문서의 채팅을 열람만 한다 — 입력 잠금은 updateComposer 가 관리한다. */
+  function enterReadOnlyMode(docLabel: string): void {
+    readOnlyDocLabel = docLabel;
+    input.value = '';
+    composer.classList.add('ag-readonly');
+    const note = el('div', 'ag-msg ag-msg-system ag-readonly-note',
+      `"${docLabel}" 문서의 채팅입니다. 그 문서를 열면 이어서 대화할 수 있습니다.`);
+    messages.appendChild(note);
+    messages.scrollTop = messages.scrollHeight;
+    updateComposer();
+  }
+
+  function exitReadOnlyMode(): void {
+    if (readOnlyDocLabel === null) return;
+    readOnlyDocLabel = null;
+    composer.classList.remove('ag-readonly');
+    messages.querySelectorAll('.ag-readonly-note').forEach((n) => n.remove());
+    updateComposer();
+  }
+
+  function startNewChat(opts?: { silent?: boolean }): void {
     if (turnRunning) bridge.interrupt();
     flushAssistantBuffer();
     persistCurrentThread();
     clearChatUi();
+    exitReadOnlyMode();
     const nextThread = createEmptyThread({
       agent: selectedAgent,
       model: selectedModel,
       effort: selectedEffort,
+      docKey: currentDocKey,
     });
     // 새 채팅은 언제나 '바로 실행'에서 시작하고, 원격 브라우저 경고도 다시 받는다.
     restorePlanningForThread(nextThread.id);
     currentThread = nextThread;
     bridge.stopChat();
     bridge.startChat(selectedAgent, selectedModel, selectedEffort, true, permissionProfile, chatWorkflow);
+    if (opts?.silent) return;
     setThreadsPanelOpen(false);
     input.focus();
   }
@@ -2456,6 +2564,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     applyThreadMeta(currentThread);
     renderMessagesFromThread(currentThread);
     bridge.stopChat();
+    if (loaded.docKey !== currentDocKey) {
+      // 다른 문서의 채팅 — 열람은 되지만 이어가지는 못한다.
+      enterReadOnlyMode(docGroupLabel(loaded.docKey));
+      setThreadsPanelOpen(false);
+      return;
+    }
+    exitReadOnlyMode();
     bridge.startChat(selectedAgent, selectedModel, selectedEffort, true, permissionProfile, chatWorkflow);
     setThreadsPanelOpen(false);
     input.focus();
@@ -2516,21 +2631,28 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   function updateComposer(): void {
-    input.disabled = connState !== 'connected';
-    send.disabled = connState !== 'connected';
-    input.placeholder =
-      chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'
-        ? '계획에서 바꿀 부분을 알려주세요'
-        : chatWorkflow === 'plan' && planningPhase === 'planning'
-          ? '무엇을 계획할지 입력하세요'
-          : '문서 작업을 입력하세요';
+    // 다른 문서의 채팅 열람 중에는 연결/작업 상태와 무관하게 잠긴다.
+    if (readOnlyDocLabel !== null) {
+      input.disabled = true;
+      send.disabled = true;
+      input.placeholder = `"${readOnlyDocLabel}" 문서의 채팅 — 읽기 전용`;
+    } else {
+      input.disabled = connState !== 'connected';
+      send.disabled = connState !== 'connected';
+      input.placeholder =
+        chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'
+          ? '계획에서 바꿀 부분을 알려주세요'
+          : chatWorkflow === 'plan' && planningPhase === 'planning'
+            ? '무엇을 계획할지 입력하세요'
+            : '문서 작업을 입력하세요';
+    }
     const sendLabel = turnRunning ? '중지' : '보내기';
     send.replaceChildren(turnRunning ? createStopIcon() : createIcon('send'));
     send.setAttribute('aria-label', sendLabel);
     send.title = sendLabel;
     send.classList.toggle('ag-stop', turnRunning);
     // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
-    sendHint.hidden = turnRunning || connState !== 'connected';
+    sendHint.hidden = turnRunning || connState !== 'connected' || readOnlyDocLabel !== null;
     // 실행 중이거나 작업 방식/계획→실행 전환 중에는 모드·모델·권한을 잠근다.
     const controlsLocked = isControlLocked();
     providerTrigger.disabled = controlsLocked;
@@ -3003,7 +3125,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
           const t = getThread(e.threadId);
           if (t) setThreadTitle(e.threadId, fallbackTitle(t.messages));
         }
-        if (threadsPanelOpen) rebuildThreadsList();
+        if (threadsListVisible()) rebuildThreadsList();
         break;
       }
       case 'agent':

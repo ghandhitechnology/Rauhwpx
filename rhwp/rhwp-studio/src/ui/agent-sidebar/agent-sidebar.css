@@ -110,8 +110,9 @@ body.ag-sidebar-resizing {
   flex-direction: column;
   background-color: var(--ag-bg);
   color: var(--ag-text);
-  border-left: 1px solid var(--ag-border);
-  box-shadow: var(--n-elev-2);
+  border-left: 1px solid var(--ag-border-strong);
+  /* 아래로 떨어지는 그림자가 아니라 왼쪽으로 드리우는 판 가장자리 */
+  box-shadow: var(--shadow-panel);
   font-family: var(--font-family-ui, sans-serif);
   font-size: var(--font-size-md, 13px);
   line-height: 1.55;
@@ -890,6 +891,89 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   margin: 0 -3px;
   padding: 2px 3px 8px;
   list-style: none;
+}
+
+/* 문서 그룹 헤더 — 채팅은 문서 아래에 산다. 접힘/펼침은 쉐브론이 말한다. */
+.ag-threads-group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid var(--ag-border);
+  background: var(--ag-bg);
+}
+
+.ag-threads-group-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 7px 12px 7px 8px;
+  border: none;
+  border-radius: 0;
+  background: var(--ag-bg-2);
+  color: var(--ag-text);
+  font: inherit;
+  font-size: var(--font-size-base, 12px);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-threads-group-btn:hover,
+.ag-threads-group-btn:focus-visible {
+  background: var(--ag-hover);
+  outline: none;
+}
+
+.ag-threads-group-chevron {
+  flex: 0 0 auto;
+  color: var(--ag-text-muted);
+  transform: rotate(-90deg);
+  transition: transform 120ms ease;
+}
+
+.ag-threads-group-btn[aria-expanded='true'] .ag-threads-group-chevron {
+  transform: none;
+}
+
+.ag-threads-group-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-threads-group-count {
+  flex: 0 0 auto;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-threads-group-badge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-chip);
+  color: var(--ag-accent);
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  font-weight: 500;
+  letter-spacing: var(--ag-track);
+}
+
+.ag-threads-group.ag-current-doc .ag-threads-group-name {
+  color: var(--ag-accent);
+}
+
+/* 다른 문서의 채팅 행 — 열람만 가능하다는 걸 살짝 가라앉혀 보여준다. */
+.ag-threads-row.ag-foreign .ag-threads-item {
+  opacity: 0.72;
 }
 
 .ag-threads-row {
@@ -2455,6 +2539,16 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   opacity: 0.55;
 }
 
+/* 다른 문서의 채팅 열람 중 — 필드 전체가 잠겨 있음을 보여준다. */
+.ag-composer.ag-readonly .ag-composer-field {
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+.ag-composer.ag-readonly .ag-caret {
+  opacity: 0.4;
+}
+
 .ag-send {
   display: inline-flex;
   align-items: center;
@@ -3473,6 +3567,24 @@ body.ag-col-resizing {
 .ag-fullscreen .ag-threads-item {
   min-height: 42px;
   border-radius: 5px;
+}
+
+/* 전체 화면 레일의 문서 그룹 — sticky 머리가 레일 표면색을 그대로 이어
+   받아야 스크롤할 때 밑의 행이 비쳐 보이지 않는다. 행이 카드형이므로
+   그룹 머리도 같은 radius 언어를 쓴다. */
+.ag-fullscreen .ag-threads-group {
+  background: color-mix(in srgb, var(--ag-bg-2) 92%, var(--ag-bg));
+  border-bottom: none;
+}
+
+.ag-fullscreen .ag-threads-group-btn {
+  border-radius: 5px;
+  background: transparent;
+}
+
+.ag-fullscreen .ag-threads-group-btn:hover,
+.ag-fullscreen .ag-threads-group-btn:focus-visible {
+  background: var(--ag-hover);
 }
 
 .ag-fullscreen .ag-chat-page {
