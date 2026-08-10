@@ -446,7 +446,9 @@ function handleStudioMessage(sock, msg) {
       }
       const activeSession = session;
       activeSession.status = 'running';
-      void skillRegistry.promptContext(msg.text, typeof msg.skillName === 'string' ? msg.skillName : undefined)
+      void skillRegistry.promptContext(msg.text, typeof msg.skillName === 'string' ? msg.skillName : undefined, {
+        phase: activeSession.planning.snapshot().phase,
+      })
         .then((prompt) => {
           if (session !== activeSession) throw new Error('Agent session changed before the message was dispatched');
           activeSession.backend.sendUserMessage(prompt);
