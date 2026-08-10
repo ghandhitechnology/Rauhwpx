@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 
+import { humanizerPromptBlock } from './humanizer.mjs';
+
 export const WORKFLOWS = Object.freeze(['direct', 'plan']);
 export const PLAN_PHASES = Object.freeze(['planning', 'awaiting-approval', 'switching', 'implementing']);
 
@@ -176,6 +178,8 @@ export function buildApprovedPlanPrompt(approved) {
     'The user approved the following hub-authoritative implementation plan.',
     `Plan ID: ${approved.planId}`,
     'Implement this canonical plan now. Do not re-plan or substitute a different plan. Respect the current permission profile and report any blocker.',
+    // 승인 메시지는 promptContext 를 거치지 않는다 — 구현 단계 첫 턴이 규율 없이 시작하지 않도록 여기서 얹는다.
+    humanizerPromptBlock('implementing'),
     JSON.stringify(approved.plan, null, 2),
-  ].join('\n\n');
+  ].filter(Boolean).join('\n\n');
 }
