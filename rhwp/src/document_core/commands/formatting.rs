@@ -13,7 +13,7 @@ use crate::renderer::composer::reflow_line_segs;
 use crate::renderer::page_layout::PageLayoutInfo;
 use crate::renderer::style_resolver::{resolve_styles, ResolvedStyleSet};
 
-fn char_shape_mods_affect_text_flow(mods: &crate::model::style::CharShapeMods) -> bool {
+pub(crate) fn char_shape_mods_affect_text_flow(mods: &crate::model::style::CharShapeMods) -> bool {
     mods.base_size.is_some()
         || mods.font_ids.is_some()
         || mods.ratios.is_some()
@@ -46,6 +46,21 @@ fn body_available_width_for_para_shape(
 }
 
 impl DocumentCore {
+    /// 임의 editable scope의 문단에 적용할 run별 파생 글자모양 ID를 만든다.
+    /// 대상 문단 borrow와 doc_info mutation을 분리해 본문/HF/note/cell이 같은 규칙을 쓴다.
+    pub(crate) fn derive_char_shape_applications(
+        &mut self,
+        runs: Vec<(usize, usize, u32)>,
+        mods: &crate::model::style::CharShapeMods,
+    ) -> Vec<(usize, usize, u32)> {
+        runs.into_iter()
+            .map(|(start, end, base_id)| {
+                let new_id = self.document.find_or_create_char_shape(base_id, mods);
+                (start, end, new_id)
+            })
+            .collect()
+    }
+
     pub fn get_char_properties_at_native(
         &self,
         sec_idx: usize,
@@ -1496,8 +1511,8 @@ impl DocumentCore {
         let new_id = self.document.find_or_create_para_shape(base_id, &mods);
         self.document.sections[sec_idx].paragraphs[para_idx].para_shape_id = new_id;
 
-        // 줄간격 변경 시 LineSeg 재계산 (compose는 LineSeg 값을 그대로 사용하므로)
-        if mods.line_spacing.is_some() || mods.line_spacing_type.is_some() {
+        // 여백/들여쓰기/머리 모양도 줄 폭과 높이를 바꾸므로 항상 재계산한다.
+        {
             let styles = resolve_styles(&self.document.doc_info, self.dpi);
             let section = &self.document.sections[sec_idx];
             let page_def = &section.section_def.page_def;
@@ -1717,15 +1732,13 @@ impl DocumentCore {
         // [자체 발견] apply_char_format_in_cell_native 와 동일한 결함 — 페이지 본문 단 폭을
         // 셀 리플로우에 썼다. undo 형제 set_cell_para_shape_id_native(:1538)는 이미
         // reflow_cell_paragraph 를 쓴다. 그 헬퍼로 통일해 폭 계산과 dirty 마킹을 함께 맞춘다.
-        if mods.line_spacing.is_some() || mods.line_spacing_type.is_some() {
-            self.reflow_cell_paragraph(
-                sec_idx,
-                parent_para_idx,
-                control_idx,
-                cell_idx,
-                cell_para_idx,
-            );
-        }
+        self.reflow_cell_paragraph(
+            sec_idx,
+            parent_para_idx,
+            control_idx,
+            cell_idx,
+            cell_para_idx,
+        );
 
         // 표 dirty 마킹 — measure_section_incremental이 셀 높이를 재계산하도록
         self.mark_cell_control_dirty(sec_idx, parent_para_idx, control_idx);
@@ -1782,6 +1795,107 @@ impl DocumentCore {
             section: sec_idx,
             para: parent_para_idx,
         });
+        Ok("{\"ok\":true}".to_string())
+    }
+
+    /// 중첩 표/글상자 경로의 문단 속성 조회.
+    pub fn get_cell_para_properties_at_by_path(
+        &mut self,
+        sec_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+    ) -> Result<String, HwpError> {
+        let para_shape_id = self
+            .get_cell_paragraph_mut_by_path(sec_idx, parent_para_idx, path)?
+            .para_shape_id;
+        Ok(self.build_para_properties_json(para_shape_id, sec_idx))
+    }
+
+    /// 중첩 표/글상자 경로의 문단 서식 적용.
+    pub fn apply_para_format_in_cell_by_path(
+        &mut self,
+        sec_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        props_json: &str,
+    ) -> Result<String, HwpError> {
+        if path.is_empty() {
+            return Err(HwpError::RenderError("셀 경로가 비어 있습니다".into()));
+        }
+        if path.len() == 1 {
+            let (control_idx, cell_idx, cell_para_idx) = path[0];
+            return self.apply_para_format_in_cell_native(
+                sec_idx,
+                parent_para_idx,
+                control_idx,
+                cell_idx,
+                cell_para_idx,
+                props_json,
+            );
+        }
+
+        let base_id = self
+            .get_cell_paragraph_mut_by_path(sec_idx, parent_para_idx, path)?
+            .para_shape_id;
+        let mut mods = parse_para_shape_mods(props_json);
+        if json_has_tab_keys(props_json) {
+            let base_tab_def_id = self
+                .document
+                .doc_info
+                .para_shapes
+                .get(base_id as usize)
+                .map(|shape| shape.tab_def_id)
+                .unwrap_or(0);
+            let tab_def = build_tab_def_from_json(
+                props_json,
+                base_tab_def_id,
+                &self.document.doc_info.tab_defs,
+            );
+            mods.tab_def_id = Some(self.document.find_or_create_tab_def(tab_def));
+        }
+        if json_has_border_keys(props_json) {
+            mods.border_fill_id = Some(self.create_border_fill_from_json(props_json));
+        }
+        if let Some(spacing) = parse_json_i16_array(props_json, "borderSpacing", 4) {
+            mods.border_spacing = Some([spacing[0], spacing[1], spacing[2], spacing[3]]);
+        }
+        let new_id = self.document.find_or_create_para_shape(base_id, &mods);
+        self.get_cell_paragraph_mut_by_path(sec_idx, parent_para_idx, path)?
+            .para_shape_id = new_id;
+
+        let inner_para_idx = path.last().map(|entry| entry.2).unwrap_or(0);
+        self.reflow_cell_paragraph_by_path(sec_idx, parent_para_idx, path, inner_para_idx);
+        self.mark_cell_control_dirty(sec_idx, parent_para_idx, path[0].0);
+        self.document.sections[sec_idx].raw_stream = None;
+        self.rebuild_section(sec_idx);
+        self.event_log.push(DocumentEvent::ParaFormatChanged {
+            section: sec_idx,
+            para: parent_para_idx,
+        });
+        Ok("{\"ok\":true}".to_string())
+    }
+
+    /// 중첩 표/글상자 문단 모양 undo/redo용 ID 직접 복원.
+    pub fn set_cell_para_shape_id_by_path(
+        &mut self,
+        sec_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+        para_shape_id: u16,
+    ) -> Result<String, HwpError> {
+        if path.is_empty() {
+            return Err(HwpError::RenderError("셀 경로가 비어 있습니다".into()));
+        }
+        if para_shape_id as usize >= self.document.doc_info.para_shapes.len() {
+            return Err(HwpError::RenderError("문단 모양 ID 범위 초과".into()));
+        }
+        self.get_cell_paragraph_mut_by_path(sec_idx, parent_para_idx, path)?
+            .para_shape_id = para_shape_id;
+        let inner_para_idx = path.last().map(|entry| entry.2).unwrap_or(0);
+        self.reflow_cell_paragraph_by_path(sec_idx, parent_para_idx, path, inner_para_idx);
+        self.mark_cell_control_dirty(sec_idx, parent_para_idx, path[0].0);
+        self.document.sections[sec_idx].raw_stream = None;
+        self.rebuild_section(sec_idx);
         Ok("{\"ok\":true}".to_string())
     }
 
@@ -2450,6 +2564,72 @@ mod tests {
             Some(0),
             "복원 전에는 안쪽 셀만 새 ID여야 한다"
         );
+    }
+
+    #[test]
+    fn apply_para_format_in_nested_cell_by_path_preserves_outer_cell_and_restores_id() {
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+        if core.document.doc_info.para_shapes.is_empty() {
+            core.document.doc_info.para_shapes.push(Default::default());
+        }
+
+        let nested_table = Table {
+            cells: vec![Cell {
+                paragraphs: vec![Paragraph {
+                    text: "INNER".to_string(),
+                    char_count: 6,
+                    char_offsets: (0..5).collect(),
+                    para_shape_id: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut outer_para = Paragraph {
+            text: "OUTER".to_string(),
+            char_count: 6,
+            char_offsets: (0..5).collect(),
+            para_shape_id: 0,
+            ..Default::default()
+        };
+        outer_para
+            .controls
+            .push(Control::Table(Box::new(nested_table)));
+        let nested_ctrl_idx = outer_para.controls.len() - 1;
+        let outer_table = Table {
+            cells: vec![Cell {
+                paragraphs: vec![outer_para],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        core.document.sections[0].paragraphs[0]
+            .controls
+            .push(Control::Table(Box::new(outer_table)));
+        let outer_ctrl_idx = core.document.sections[0].paragraphs[0].controls.len() - 1;
+        let path = [(outer_ctrl_idx, 0, 0), (nested_ctrl_idx, 0, 0)];
+
+        core.apply_para_format_in_cell_by_path(0, 0, &path, r#"{"marginLeft":1200}"#)
+            .unwrap();
+
+        let Control::Table(outer) =
+            &core.document.sections[0].paragraphs[0].controls[outer_ctrl_idx]
+        else {
+            panic!("expected outer table");
+        };
+        assert_eq!(outer.cells[0].paragraphs[0].para_shape_id, 0);
+        let Control::Table(inner) = &outer.cells[0].paragraphs[0].controls[nested_ctrl_idx] else {
+            panic!("expected nested table");
+        };
+        assert_ne!(inner.cells[0].paragraphs[0].para_shape_id, 0);
+
+        core.set_cell_para_shape_id_by_path(0, 0, &path, 0).unwrap();
+        let restored = core
+            .get_cell_para_properties_at_by_path(0, 0, &path)
+            .unwrap();
+        assert!(restored.contains("\"paraShapeId\":0"), "{restored}");
     }
 
     #[test]

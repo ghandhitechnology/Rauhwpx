@@ -2,7 +2,11 @@ import type { RemovedParaMeta, WasmBridge } from '@/core/wasm-bridge';
 import type { DocumentPosition, CharProperties, ParaProperties, CellPathLike, CellPathEntry } from '@/core/types';
 import { MAX_PAGE_LOCAL_TEXT_EDIT_CHARS } from './input-edit-invalidation';
 import type { LineEndpoints as LineEndpointsLike } from './object-drag-record';
-import { getBodySelectionSegments } from './body-selection-range';
+import {
+  targetCellPathJson,
+  type EditableParagraphTarget,
+  type EditableTextRange,
+} from './edit-target';
 
 /** 편집 명령 공통 인터페이스 */
 export interface EditCommand {
@@ -224,14 +228,6 @@ export function canUseLocalBodyTextReplace(
 /** cellPath를 WASM용 JSON 문자열로 변환 */
 function cellPathJson(pos: DocumentPosition): string {
   return JSON.stringify(pos.cellPath ?? []);
-}
-
-/** cellPath 의 최내곽(마지막) 엔트리의 cellParaIndex 를 지정 값으로 바꾼 pathJson.
- *  중첩 셀의 문단별 ByPath 호출(삭제 undo 저장과 문자 서식 적용/undo)에 쓴다. */
-function cellPathJsonForPara(pos: DocumentPosition, cellParaIndex: number): string {
-  const path = (pos.cellPath ?? []).map((e) => ({ ...e }));
-  if (path.length > 0) path[path.length - 1].cellParaIndex = cellParaIndex;
-  return JSON.stringify(path);
 }
 
 /**
@@ -747,8 +743,7 @@ interface CharShapeSpan {
 
 /** 문단 하나에 대한 서식 적용 정보 */
 interface ParaFormatEntry {
-  paraIndex: number;       // 본문: paragraphIndex, 셀: cellParaIndex
-  sectionIndex: number;
+  target: EditableParagraphTarget;
   /** undo용: 적용 전 run별 스팬 (startOffset~endOffset 을 빈틈없이 덮는다) */
   beforeSpans: CharShapeSpan[];
   /** redo용: 적용 후 run별 스팬 (첫 execute 에서 채움) */
@@ -801,6 +796,323 @@ function deriveAfterSpans(beforeSpans: CharShapeSpan[], propsAt: (offset: number
   return spans;
 }
 
+function useContainerPath(target: Extract<EditableParagraphTarget, { kind: 'container' }>) {
+  return target.cellPath.length > 1 || (target.cellPath.length > 0 && !target.isTextBox);
+}
+
+function getCharPropertiesAtTarget(
+  wasm: WasmBridge,
+  target: EditableParagraphTarget,
+  offset: number,
+): CharProperties {
+  switch (target.kind) {
+    case 'body':
+      return wasm.getCharPropertiesAt(target.sectionIndex, target.paragraphIndex, offset);
+    case 'container':
+      return useContainerPath(target)
+        ? wasm.getCellCharPropertiesAtByPath(
+            target.sectionIndex,
+            target.parentParagraphIndex,
+            targetCellPathJson(target),
+            offset,
+          )
+        : wasm.getCellCharPropertiesAt(
+            target.sectionIndex,
+            target.parentParagraphIndex,
+            target.controlIndex,
+            target.cellIndex,
+            target.paragraphIndex,
+            offset,
+          );
+    case 'headerFooter':
+      return wasm.getCharPropertiesInHf(
+        target.sectionIndex,
+        target.isHeader,
+        target.applyTo,
+        target.paragraphIndex,
+        offset,
+      );
+    case 'note':
+      return wasm.getCharPropertiesInFootnote(
+        target.sectionIndex,
+        target.hostParagraphIndex,
+        target.controlIndex,
+        target.paragraphIndex,
+        offset,
+      );
+  }
+}
+
+function applyCharFormatToTarget(wasm: WasmBridge, range: EditableTextRange, propsJson: string) {
+  const { target, startOffset, endOffset } = range;
+  switch (target.kind) {
+    case 'body':
+      wasm.applyCharFormat(target.sectionIndex, target.paragraphIndex, startOffset, endOffset, propsJson);
+      break;
+    case 'container':
+      if (useContainerPath(target)) {
+        wasm.applyCharFormatInCellByPath(
+          target.sectionIndex,
+          target.parentParagraphIndex,
+          targetCellPathJson(target),
+          startOffset,
+          endOffset,
+          propsJson,
+        );
+      } else {
+        wasm.applyCharFormatInCell(
+          target.sectionIndex,
+          target.parentParagraphIndex,
+          target.controlIndex,
+          target.cellIndex,
+          target.paragraphIndex,
+          startOffset,
+          endOffset,
+          propsJson,
+        );
+      }
+      break;
+    case 'headerFooter':
+      wasm.applyCharFormatInHf(
+        target.sectionIndex,
+        target.isHeader,
+        target.applyTo,
+        target.paragraphIndex,
+        startOffset,
+        endOffset,
+        propsJson,
+      );
+      break;
+    case 'note':
+      wasm.applyCharFormatInFootnote(
+        target.sectionIndex,
+        target.hostParagraphIndex,
+        target.controlIndex,
+        target.paragraphIndex,
+        startOffset,
+        endOffset,
+        propsJson,
+      );
+      break;
+  }
+}
+
+function setCharShapeIdAtTarget(
+  wasm: WasmBridge,
+  target: EditableParagraphTarget,
+  span: CharShapeSpan,
+) {
+  const { startOffset, endOffset, charShapeId } = span;
+  switch (target.kind) {
+    case 'body':
+      wasm.setCharShapeId(target.sectionIndex, target.paragraphIndex, startOffset, endOffset, charShapeId);
+      break;
+    case 'container':
+      if (useContainerPath(target)) {
+        wasm.setCharShapeIdInCellByPath(
+          target.sectionIndex,
+          target.parentParagraphIndex,
+          targetCellPathJson(target),
+          startOffset,
+          endOffset,
+          charShapeId,
+        );
+      } else {
+        wasm.setCharShapeIdInCell(
+          target.sectionIndex,
+          target.parentParagraphIndex,
+          target.controlIndex,
+          target.cellIndex,
+          target.paragraphIndex,
+          startOffset,
+          endOffset,
+          charShapeId,
+        );
+      }
+      break;
+    case 'headerFooter':
+      wasm.setCharShapeIdInHf(
+        target.sectionIndex,
+        target.isHeader,
+        target.applyTo,
+        target.paragraphIndex,
+        startOffset,
+        endOffset,
+        charShapeId,
+      );
+      break;
+    case 'note':
+      wasm.setCharShapeIdInFootnote(
+        target.sectionIndex,
+        target.hostParagraphIndex,
+        target.controlIndex,
+        target.paragraphIndex,
+        startOffset,
+        endOffset,
+        charShapeId,
+      );
+      break;
+  }
+}
+
+function getParaPropertiesAtTarget(wasm: WasmBridge, target: EditableParagraphTarget) {
+  switch (target.kind) {
+    case 'body':
+      return wasm.getParaPropertiesAt(target.sectionIndex, target.paragraphIndex);
+    case 'container':
+      return useContainerPath(target)
+        ? wasm.getCellParaPropertiesAtByPath(
+            target.sectionIndex,
+            target.parentParagraphIndex,
+            targetCellPathJson(target),
+          )
+        : wasm.getCellParaPropertiesAt(
+            target.sectionIndex,
+            target.parentParagraphIndex,
+            target.controlIndex,
+            target.cellIndex,
+            target.paragraphIndex,
+          );
+    case 'headerFooter':
+      return wasm.getParaPropertiesInHf(
+        target.sectionIndex,
+        target.isHeader,
+        target.applyTo,
+        target.paragraphIndex,
+      );
+    case 'note':
+      return wasm.getParaPropertiesInFootnote(
+        target.sectionIndex,
+        target.hostParagraphIndex,
+        target.controlIndex,
+        target.paragraphIndex,
+      );
+  }
+}
+
+function applyParaFormatAtTarget(
+  wasm: WasmBridge,
+  target: EditableParagraphTarget,
+  propsJson: string,
+) {
+  switch (target.kind) {
+    case 'body':
+      wasm.applyParaFormat(target.sectionIndex, target.paragraphIndex, propsJson);
+      break;
+    case 'container':
+      if (useContainerPath(target)) {
+        wasm.applyParaFormatInCellByPath(
+          target.sectionIndex,
+          target.parentParagraphIndex,
+          targetCellPathJson(target),
+          propsJson,
+        );
+      } else {
+        wasm.applyParaFormatInCell(
+          target.sectionIndex,
+          target.parentParagraphIndex,
+          target.controlIndex,
+          target.cellIndex,
+          target.paragraphIndex,
+          propsJson,
+        );
+      }
+      break;
+    case 'headerFooter':
+      wasm.applyParaFormatInHf(
+        target.sectionIndex,
+        target.isHeader,
+        target.applyTo,
+        target.paragraphIndex,
+        propsJson,
+      );
+      break;
+    case 'note':
+      wasm.applyParaFormatInFootnote(
+        target.sectionIndex,
+        target.hostParagraphIndex,
+        target.controlIndex,
+        target.paragraphIndex,
+        propsJson,
+      );
+      break;
+  }
+}
+
+function setParaShapeIdAtTarget(
+  wasm: WasmBridge,
+  target: EditableParagraphTarget,
+  paraShapeId: number,
+) {
+  switch (target.kind) {
+    case 'body':
+      wasm.setParaShapeId(target.sectionIndex, target.paragraphIndex, paraShapeId);
+      break;
+    case 'container':
+      if (useContainerPath(target)) {
+        wasm.setCellParaShapeIdByPath(
+          target.sectionIndex,
+          target.parentParagraphIndex,
+          targetCellPathJson(target),
+          paraShapeId,
+        );
+      } else {
+        wasm.setCellParaShapeId(
+          target.sectionIndex,
+          target.parentParagraphIndex,
+          target.controlIndex,
+          target.cellIndex,
+          target.paragraphIndex,
+          paraShapeId,
+        );
+      }
+      break;
+    case 'headerFooter':
+      wasm.setParaShapeIdInHf(
+        target.sectionIndex,
+        target.isHeader,
+        target.applyTo,
+        target.paragraphIndex,
+        paraShapeId,
+      );
+      break;
+    case 'note':
+      wasm.setParaShapeIdInFootnote(
+        target.sectionIndex,
+        target.hostParagraphIndex,
+        target.controlIndex,
+        target.paragraphIndex,
+        paraShapeId,
+      );
+      break;
+  }
+}
+
+function editContextForTarget(target: EditableParagraphTarget | undefined): EditContext | undefined {
+  if (target?.kind === 'headerFooter') {
+    return {
+      mode: 'headerFooter',
+      sectionIdx: target.sectionIndex,
+      isHeader: target.isHeader,
+      applyTo: target.applyTo,
+      paraIdx: target.paragraphIndex,
+      charOffset: 0,
+    };
+  }
+  if (target?.kind === 'note') {
+    return {
+      mode: 'footnote',
+      sectionIdx: target.sectionIndex,
+      paraIdx: target.hostParagraphIndex,
+      controlIdx: target.controlIndex,
+      footnoteIndex: target.footnoteIndex,
+      pageNum: target.pageNum,
+      innerParaIdx: target.paragraphIndex,
+      charOffset: 0,
+    };
+  }
+}
+
 export class ApplyCharFormatCommand implements EditCommand {
   readonly type = 'applyCharFormat';
   readonly timestamp = Date.now();
@@ -808,118 +1120,54 @@ export class ApplyCharFormatCommand implements EditCommand {
   private entries: ParaFormatEntry[] = [];
 
   constructor(
-    private start: DocumentPosition,
-    private end: DocumentPosition,
+    private ranges: EditableTextRange[],
     private props: Partial<CharProperties>,
+    private cursorBefore: DocumentPosition,
+    private contextBefore?: EditContext,
   ) {}
 
   execute(wasm: WasmBridge): DocumentPosition {
     if (this.entries.length > 0 && this.entries.every((entry) => entry.afterSpans !== undefined)) {
       this.restoreCharShapeIds(wasm, 'after');
-      return { ...this.start };
+      return { ...this.cursorBefore };
     }
 
-    const { start, end } = this;
     const propsJson = JSON.stringify(this.props);
-
-    if (isCell(start)) {
-      // 중첩 셀 좌표 축 정합: flat controlIndex/cellIndex 는 cellPath[0](최외곽)이라 중첩
-      // 셀에서 바깥 셀에 서식을 적용한다. 최내곽 셀을 ...ByPath 로 라우팅하고 문단 인덱스는
-      // cellPath[last](cellParaIndexOf)에서 읽는다. undo(restoreCharShapeIds)도 같은 축.
-      const sec = start.sectionIndex;
-      const ppi = start.parentParaIndex!;
-      const startPara = cellParaIndexOf(start);
-      const endPara = cellParaIndexOf(end);
-
-      this.entries = [];
-      for (let p = startPara; p <= endPara; p++) {
-        const pathP = cellPathJsonForPara(start, p);
-        const from = p === startPara ? start.charOffset : 0;
-        const to = p === endPara ? end.charOffset : wasm.getCellParagraphLengthByPath(sec, ppi, pathP);
-        if (to <= from) continue;
-
-        // Rust 가 MIXED 범위의 run별 서식을 보존하므로(apply_char_mods_to_paragraph)
-        // before/after 모두 run 단위 스팬으로 캡처한다 — 단일 ID 로는 redo 시 붕괴.
-        const propsAt = (o: number): number =>
-          wasm.getCellCharPropertiesAtByPath(sec, ppi, pathP, o).charShapeId ?? 0;
-        const beforeSpans = sampleCharShapeSpans(propsAt, from, to);
-
-        wasm.applyCharFormatInCellByPath(sec, ppi, pathP, from, to, propsJson);
-        this.entries.push({
-          paraIndex: p,
-          beforeSpans,
-          afterSpans: deriveAfterSpans(beforeSpans, propsAt),
-          sectionIndex: sec,
-        });
-      }
-    } else {
-      this.entries = [];
-      const segments = getBodySelectionSegments(wasm, start, end);
-      const isCrossSection = start.sectionIndex !== end.sectionIndex;
-      for (const segment of segments) {
-        const sec = segment.sectionIndex;
-        for (let p = segment.startParagraphIndex; p <= segment.endParagraphIndex; p++) {
-          const from = p === segment.startParagraphIndex ? segment.startCharOffset : 0;
-          const to = p === segment.endParagraphIndex
-            ? segment.endCharOffset
-            : wasm.getParagraphLength(sec, p);
-          if (to <= from) continue;
-
-          // 셀 분기와 같은 이유로 run 단위 스팬 캡처.
-          const propsAt = (o: number): number => wasm.getCharPropertiesAt(sec, p, o).charShapeId ?? 0;
-          const beforeSpans = sampleCharShapeSpans(propsAt, from, to);
-
-          if (!isCrossSection) {
-            wasm.applyCharFormat(sec, p, from, to, propsJson);
-          }
-          this.entries.push({
-            paraIndex: p,
-            beforeSpans,
-            afterSpans: isCrossSection ? undefined : deriveAfterSpans(beforeSpans, propsAt),
-            sectionIndex: sec,
-          });
-        }
-      }
-      if (isCrossSection) {
-        wasm.applyCharFormatAcrossSections(
-          start.sectionIndex, start.paragraphIndex, start.charOffset,
-          end.sectionIndex, end.paragraphIndex, end.charOffset,
-          propsJson,
-        );
-        for (const entry of this.entries) {
-          const propsAt = (offset: number): number =>
-            wasm.getCharPropertiesAt(entry.sectionIndex, entry.paraIndex, offset).charShapeId ?? 0;
-          entry.afterSpans = deriveAfterSpans(entry.beforeSpans, propsAt);
-        }
-      }
+    this.entries = [];
+    for (const range of this.ranges) {
+      if (range.endOffset <= range.startOffset) continue;
+      const propsAt = (offset: number) =>
+        getCharPropertiesAtTarget(wasm, range.target, offset).charShapeId ?? 0;
+      const beforeSpans = sampleCharShapeSpans(propsAt, range.startOffset, range.endOffset);
+      applyCharFormatToTarget(wasm, range, propsJson);
+      this.entries.push({
+        target: range.target,
+        beforeSpans,
+        afterSpans: deriveAfterSpans(beforeSpans, propsAt),
+      });
     }
 
-    return { ...this.start };
+    return { ...this.cursorBefore };
   }
 
   undo(wasm: WasmBridge): DocumentPosition {
     this.restoreCharShapeIds(wasm, 'before');
-    return { ...this.start };
+    return { ...this.cursorBefore };
   }
 
   private restoreCharShapeIds(wasm: WasmBridge, side: 'before' | 'after'): void {
-    const { start } = this;
     for (const entry of this.entries) {
       const spans = side === 'before' ? entry.beforeSpans : entry.afterSpans;
       if (!spans) continue;
 
       for (const span of spans) {
-        if (isCell(start)) {
-          // 중첩 셀 축 정합: 최내곽 셀에 서식 ID 복원(execute 와 동일 축).
-          wasm.setCharShapeIdInCellByPath(
-            start.sectionIndex, start.parentParaIndex!, cellPathJsonForPara(start, entry.paraIndex),
-            span.startOffset, span.endOffset, span.charShapeId,
-          );
-        } else {
-          wasm.setCharShapeId(entry.sectionIndex, entry.paraIndex, span.startOffset, span.endOffset, span.charShapeId);
-        }
+        setCharShapeIdAtTarget(wasm, entry.target, span);
       }
     }
+  }
+
+  editContext(): EditContext | null {
+    return this.contextBefore ?? editContextForTarget(this.ranges[0]?.target) ?? null;
   }
 
   mergeWith(): null { return null; }
@@ -927,9 +1175,7 @@ export class ApplyCharFormatCommand implements EditCommand {
 
 // ─── 문단 서식 적용 명령 ─────────────────────────────
 
-export type ParaFormatTarget =
-  | { kind: 'body'; sec: number; para: number }
-  | { kind: 'cell'; sec: number; parentPara: number; controlIdx: number; cellIdx: number; cellParaIdx: number };
+export type ParaFormatTarget = EditableParagraphTarget;
 
 interface ParaShapeHistoryEntry {
   target: ParaFormatTarget;
@@ -938,15 +1184,7 @@ interface ParaShapeHistoryEntry {
 }
 
 function getParaShapeId(wasm: WasmBridge, target: ParaFormatTarget): number {
-  const props = target.kind === 'body'
-    ? wasm.getParaPropertiesAt(target.sec, target.para)
-    : wasm.getCellParaPropertiesAt(
-        target.sec,
-        target.parentPara,
-        target.controlIdx,
-        target.cellIdx,
-        target.cellParaIdx,
-      );
+  const props = getParaPropertiesAtTarget(wasm, target);
   const paraShapeId = props.paraShapeId;
   if (paraShapeId === undefined) {
     throw new Error('문단 모양 ID를 조회할 수 없습니다');
@@ -955,33 +1193,11 @@ function getParaShapeId(wasm: WasmBridge, target: ParaFormatTarget): number {
 }
 
 function applyParaFormatToTarget(wasm: WasmBridge, target: ParaFormatTarget, propsJson: string): void {
-  if (target.kind === 'body') {
-    wasm.applyParaFormat(target.sec, target.para, propsJson);
-    return;
-  }
-  wasm.applyParaFormatInCell(
-    target.sec,
-    target.parentPara,
-    target.controlIdx,
-    target.cellIdx,
-    target.cellParaIdx,
-    propsJson,
-  );
+  applyParaFormatAtTarget(wasm, target, propsJson);
 }
 
 function restoreParaShapeId(wasm: WasmBridge, target: ParaFormatTarget, paraShapeId: number): void {
-  if (target.kind === 'body') {
-    wasm.setParaShapeId(target.sec, target.para, paraShapeId);
-    return;
-  }
-  wasm.setCellParaShapeId(
-    target.sec,
-    target.parentPara,
-    target.controlIdx,
-    target.cellIdx,
-    target.cellParaIdx,
-    paraShapeId,
-  );
+  setParaShapeIdAtTarget(wasm, target, paraShapeId);
 }
 
 export class ApplyParaFormatCommand implements EditCommand {
@@ -994,6 +1210,7 @@ export class ApplyParaFormatCommand implements EditCommand {
     private targets: ParaFormatTarget[],
     private props: Partial<ParaProperties>,
     private cursorBefore: DocumentPosition,
+    private contextBefore?: EditContext,
   ) {}
 
   execute(wasm: WasmBridge): DocumentPosition {
@@ -1010,22 +1227,8 @@ export class ApplyParaFormatCommand implements EditCommand {
       beforeParaShapeId: getParaShapeId(wasm, target),
     }));
 
-    const firstTarget = entries[0]?.target;
-    const lastTarget = entries[entries.length - 1]?.target;
-    const isCrossSectionBodyRange = firstTarget?.kind === 'body'
-      && lastTarget?.kind === 'body'
-      && firstTarget.sec !== lastTarget.sec
-      && entries.every(entry => entry.target.kind === 'body');
-    if (isCrossSectionBodyRange) {
-      wasm.applyParaFormatAcrossSections(
-        firstTarget.sec, firstTarget.para,
-        lastTarget.sec, lastTarget.para,
-        propsJson,
-      );
-    } else {
-      for (const entry of entries) {
-        applyParaFormatToTarget(wasm, entry.target, propsJson);
-      }
+    for (const entry of entries) {
+      applyParaFormatToTarget(wasm, entry.target, propsJson);
     }
     for (const entry of entries) {
       entry.afterParaShapeId = getParaShapeId(wasm, entry.target);
@@ -1040,6 +1243,10 @@ export class ApplyParaFormatCommand implements EditCommand {
       restoreParaShapeId(wasm, entry.target, entry.beforeParaShapeId);
     }
     return { ...this.cursorBefore };
+  }
+
+  editContext(): EditContext | null {
+    return this.contextBefore ?? editContextForTarget(this.targets[0]) ?? null;
   }
 
   mergeWith(): null { return null; }
