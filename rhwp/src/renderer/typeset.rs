@@ -5106,8 +5106,11 @@ impl TypesetEngine {
                             // overflow 로 잘림). pagination 측에서도 layout 과 동일하게
                             // 개체 높이를 current_height 에 누적.
                             use crate::model::shape::{TextWrap, VertRelTo};
-                            // (obj_h, extra=obj_h+margin_bottom, h_left, h_right px)
-                            let pushdown_h: Option<(f64, f64, f64, f64)> = match ctrl {
+                            // (obj_h, exclusion_bottom, h_left, h_right, allow_overlap), px.
+                            // Use placed horizontal geometry instead of treating horzOffset as an
+                            // absolute left edge; right/center and page/paragraph references must
+                            // reserve the lane in which the object is actually painted.
+                            let pushdown_h: Option<(f64, f64, f64, f64, bool)> = match ctrl {
                                 Control::Picture(pic)
                                     if !pic.common.treat_as_char
                                         && matches!(
@@ -5119,12 +5122,33 @@ impl TypesetEngine {
                                     let h = hwpunit_to_px(pic.common.height as i32, self.dpi);
                                     let mb =
                                         hwpunit_to_px(pic.common.margin.bottom as i32, self.dpi);
-                                    let hl = hwpunit_to_px(
-                                        pic.common.horizontal_offset as i32,
-                                        self.dpi,
-                                    );
-                                    let hr = hl + hwpunit_to_px(pic.common.width as i32, self.dpi);
-                                    Some((h, h + mb, hl, hr))
+                                    let mt = hwpunit_to_px(pic.common.margin.left as i32, self.dpi);
+                                    let mr =
+                                        hwpunit_to_px(pic.common.margin.right as i32, self.dpi);
+                                    let column = st
+                                        .layout
+                                        .column_areas
+                                        .get(st.current_column as usize)
+                                        .copied()
+                                        .unwrap_or(st.layout.body_area);
+                                    let para_style = composed.get(para_idx).and_then(|comp| {
+                                        styles.para_styles.get(comp.para_style_id as usize)
+                                    });
+                                    let placement = FloatPlacementContext::new(column)
+                                        .with_body_area(st.layout.body_area)
+                                        .with_paper_width(st.layout.page_width)
+                                        .with_host_margins(
+                                            para_style
+                                                .map(|style| style.margin_left)
+                                                .unwrap_or(0.0),
+                                            para_style
+                                                .map(|style| style.margin_right)
+                                                .unwrap_or(0.0),
+                                        );
+                                    let width = hwpunit_to_px(pic.common.width as i32, self.dpi);
+                                    let (hl, hr) =
+                                        horizontal_range(&pic.common, width, placement, self.dpi);
+                                    Some((h, h + mb, hl - mt, hr + mr, pic.common.allow_overlap))
                                 }
                                 Control::Shape(s)
                                     if !s.common().treat_as_char
@@ -5137,13 +5161,36 @@ impl TypesetEngine {
                                     let cm = s.common();
                                     let h = hwpunit_to_px(cm.height as i32, self.dpi);
                                     let mb = hwpunit_to_px(cm.margin.bottom as i32, self.dpi);
-                                    let hl = hwpunit_to_px(cm.horizontal_offset as i32, self.dpi);
-                                    let hr = hl + hwpunit_to_px(cm.width as i32, self.dpi);
-                                    Some((h, h + mb, hl, hr))
+                                    let ml = hwpunit_to_px(cm.margin.left as i32, self.dpi);
+                                    let mr = hwpunit_to_px(cm.margin.right as i32, self.dpi);
+                                    let column = st
+                                        .layout
+                                        .column_areas
+                                        .get(st.current_column as usize)
+                                        .copied()
+                                        .unwrap_or(st.layout.body_area);
+                                    let para_style = composed.get(para_idx).and_then(|comp| {
+                                        styles.para_styles.get(comp.para_style_id as usize)
+                                    });
+                                    let placement = FloatPlacementContext::new(column)
+                                        .with_body_area(st.layout.body_area)
+                                        .with_paper_width(st.layout.page_width)
+                                        .with_host_margins(
+                                            para_style
+                                                .map(|style| style.margin_left)
+                                                .unwrap_or(0.0),
+                                            para_style
+                                                .map(|style| style.margin_right)
+                                                .unwrap_or(0.0),
+                                        );
+                                    let width = hwpunit_to_px(cm.width as i32, self.dpi);
+                                    let (hl, hr) = horizontal_range(cm, width, placement, self.dpi);
+                                    Some((h, h + mb, hl - ml, hr + mr, cm.allow_overlap))
                                 }
                                 _ => None,
                             };
-                            if let Some((obj_h, extra, h_left, h_right)) = pushdown_h {
+                            if let Some((obj_h, extra, h_left, h_right, allow_overlap)) = pushdown_h
+                            {
                                 // [Task #1079] 파일 vpos 가 이미 그림 공간을 반영(그림 para 줄
                                 // 앞 gap ≥ 그림 높이)하면 VPOS_CORR sync 가 그 공간을 따르므로
                                 // pushdown 가산은 이중 계상. gap 이 그림 높이 미만(파일 vpos
@@ -5240,7 +5287,15 @@ impl TypesetEngine {
                                         for &i in overlapping.iter().rev() {
                                             topbottom_cols.remove(i);
                                         }
-                                        topbottom_cols.push((new_l, new_r, base + extra));
+                                        topbottom_cols.push((
+                                            new_l,
+                                            new_r,
+                                            if allow_overlap {
+                                                base.max(extra)
+                                            } else {
+                                                base + extra
+                                            },
+                                        ));
                                     }
                                     let applied_after =
                                         topbottom_cols.iter().map(|c| c.2).fold(0.0_f64, f64::max);
@@ -14498,7 +14553,11 @@ impl TypesetEngine {
         let v_offset_px = hwpunit_to_px(signed_hwpunit(table.common.vertical_offset), self.dpi);
         let raw_top = (para_start_height + v_offset_px).max(para_start_height);
         let reserved_height = ft.effective_height + ft.host_spacing.after_for_fit;
-        let lane_top = lanes.pushed_top(x_start, x_end, raw_top);
+        let lane_top = if table.common.allow_overlap {
+            raw_top
+        } else {
+            lanes.pushed_top(x_start, x_end, raw_top)
+        };
         let lane_bottom = lane_top + reserved_height;
 
         let total_footnote =
@@ -14520,7 +14579,13 @@ impl TypesetEngine {
             para_index: para_idx,
             control_index: ctrl_idx,
         });
-        lanes.place(x_start, x_end, raw_top, reserved_height);
+        lanes.place_with_policy(
+            x_start,
+            x_end,
+            raw_top,
+            reserved_height,
+            table.common.allow_overlap,
+        );
         st.current_height = st.current_height.max(lanes.max_bottom());
         true
     }
