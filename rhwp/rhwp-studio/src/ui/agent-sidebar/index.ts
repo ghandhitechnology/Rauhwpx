@@ -49,6 +49,7 @@ import {
 import { createChevron, createColumnIcon } from '../chevron.ts';
 import { createIcon, createStopIcon, OP_ICON } from './icons.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
+import { summarizePendingDiffs } from './pending-diff-summary.ts';
 
 export interface AgentSidebarDeps {
   bridge: AgentBridge;
@@ -71,8 +72,8 @@ const PROVIDER_ICON_SRC: Record<AgentName, string> = {
 };
 
 const SIDEBAR_WIDTH_KEY = 'rhwp-agent-sidebar-width';
-const SIDEBAR_WIDTH_DEFAULT = 400;
-const SIDEBAR_WIDTH_MIN = 280;
+const SIDEBAR_WIDTH_DEFAULT = 600;
+const SIDEBAR_WIDTH_MIN = 600;
 const SIDEBAR_MOTION_DURATION_MS = 320;
 /* 전체 화면 전환도 사이드바·용지와 같은 320ms 축을 쓴다(모션 계약).
    타이머는 전이가 끝날 때까지의 여유분을 포함한다. */
@@ -107,6 +108,7 @@ function persistSidebarWidth(width: number): void {
 }
 
 const THREADS_RAIL_KEY = 'rhwp-agent-threads-rail-collapsed';
+const ENVIRONMENT_PANEL_OPEN_KEY = 'rhwp-agent-environment-panel-open';
 
 function readStoredThreadsRailCollapsed(): boolean {
   try {
@@ -119,6 +121,22 @@ function readStoredThreadsRailCollapsed(): boolean {
 function persistThreadsRailCollapsed(collapsed: boolean): void {
   try {
     localStorage.setItem(THREADS_RAIL_KEY, collapsed ? '1' : '0');
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+function readStoredEnvironmentPanelOpen(): boolean {
+  try {
+    return localStorage.getItem(ENVIRONMENT_PANEL_OPEN_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+function persistEnvironmentPanelOpen(open: boolean): void {
+  try {
+    localStorage.setItem(ENVIRONMENT_PANEL_OPEN_KEY, open ? '1' : '0');
   } catch {
     /* ignore quota / private mode */
   }
@@ -244,11 +262,6 @@ const MAX_REVIEW_OP_LINES = 6;
    AgentWorkflowState)와 `agent/bridge.ts`(getWorkflowState · setWorkflow ·
    approvePlan · requestPlanChanges)에 있다. 사이드바는 그 상태를 그리고,
    승인/수정 요청 두 동작만 되돌려 보낸다. */
-
-const WORKFLOW_LABEL: Record<AgentWorkflow, string> = {
-  direct: '바로 실행',
-  plan: '계획',
-};
 
 /** 지속 표시용 단계 라벨. direct 는 배지를 띄우지 않는다(소음). */
 const PLANNING_PHASE_LABEL: Record<AgentPhase, string> = {
@@ -411,6 +424,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   /** 에이전트 집중 모드 — 스레드 레일과 대화 무대로 문서를 덮는다. */
   let fullscreen = false;
   let threadsRailCollapsed = readStoredThreadsRailCollapsed();
+  let environmentPanelOpen = readStoredEnvironmentPanelOpen();
   let reviewColCollapsed = readStoredReviewColCollapsed();
   let pendingReviewOpCount = 0;
   let railWidth = readStoredRailWidth();
@@ -438,6 +452,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let planDetailOpen = false;
   /** 이 채팅에서 원격 브라우저 전체 제어 경고를 이미 받았는가. */
   let browserbaseAcknowledged = chatWorkflow === 'plan';
+  /** 계획 모드 전환이 서버에서 확인된 뒤에만 활성화 안내를 표시한다. */
+  let browserbaseNoticePending = false;
   let planHistory: StructuredPlan[] = activePlan ? [activePlan] : [];
   /** 채팅별 계획 기록/모드 — 목록에서 되돌아왔을 때 표시를 복원한다. */
   const planArchives = new Map<string, StructuredPlan[]>();
@@ -952,29 +968,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     setFullscreen(!fullscreen);
   });
 
-  /* 변경 사항 workspace 토글. badge로 실제 편집 op 수를 알린다. */
-  const reviewBtn = el('button', 'ag-header-icon-btn ag-review-toggle');
-  reviewBtn.type = 'button';
-  reviewBtn.setAttribute('aria-controls', 'ag-review-column');
-  reviewBtn.setAttribute('aria-expanded', 'false');
-  reviewBtn.setAttribute('aria-label', '변경 사항 열기');
-  reviewBtn.title = '변경 사항';
-  const reviewBadge = el('span', 'ag-review-badge', '0');
-  reviewBadge.setAttribute('aria-hidden', 'true');
-  reviewBadge.hidden = true;
-  reviewBtn.append(createColumnIcon(), reviewBadge);
-  reviewBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (!fullscreen) {
-      setReviewColCollapsed(false);
-      setFullscreen(true);
-      return;
-    }
-    setReviewColCollapsed(!reviewColCollapsed);
-  });
-
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
-  headerActions.append(reviewBtn, threadsBtn);
+  headerActions.append(threadsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
@@ -1005,12 +1000,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function updateDocumentContext(): void {
     const context = getDocumentContext?.();
-    documentName.textContent = context?.documentName || '문서 없음';
+    const currentDocumentName = context?.documentName || '문서 없음';
+    documentName.textContent = currentDocumentName;
     documentName.title = context?.documentName || '';
     selectionContext.textContent = context?.selectionLabel || '선택 없음';
-    workspaceDocumentName.textContent = context?.documentName || '문서 없음';
+    workspaceDocumentName.textContent = currentDocumentName;
     workspaceDocumentName.title = context?.documentName || '';
     workspaceSelectionContext.textContent = context?.selectionLabel || '선택 없음';
+    updateEnvironmentFilename(currentDocumentName);
   }
 
   function setConfigPanelOpen(open: boolean): void {
@@ -1059,7 +1056,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
     if (root.classList.contains('ag-review-drawer-open')) {
       setReviewColCollapsed(true);
-      reviewBtn.focus();
+      conversationTab.focus();
       e.preventDefault();
       return;
     }
@@ -1075,8 +1072,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
      workspace tab, 실행 맥락과 종료 동작을 한 축에 고정한다. */
   const workspaceBar = el('header', 'ag-workspace-bar');
   const workspaceLeading = el('div', 'ag-workspace-leading');
-  const workspaceMark = el('span', 'ag-workspace-mark', 'R');
-  workspaceMark.setAttribute('aria-hidden', 'true');
   const workspaceThreadsBtn = el('button', 'ag-workspace-icon-btn ag-workspace-threads-btn');
   workspaceThreadsBtn.type = 'button';
   workspaceThreadsBtn.setAttribute('aria-controls', 'ag-threads-panel');
@@ -1089,7 +1084,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const workspaceDocumentName = el('span', 'ag-workspace-document-name', '문서 없음');
   const workspaceSelectionContext = el('span', 'ag-workspace-selection-context', '선택 없음');
   workspaceDocumentContext.append(workspaceDocumentName, workspaceSelectionContext);
-  workspaceLeading.append(workspaceMark, workspaceThreadsBtn, workspaceDocumentContext);
+  workspaceLeading.append(workspaceThreadsBtn, workspaceDocumentContext);
 
   const workspaceTabs = el('div', 'ag-workspace-tabs');
   workspaceTabs.setAttribute('role', 'tablist');
@@ -1116,13 +1111,80 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     'ag-workspace-agent-context',
     `${AGENT_LABEL[selectedAgent]} · ${labelForModel(selectedAgent, selectedModel)}`,
   );
+  const environmentWrap = el('div', 'ag-environment-wrap');
+  const environmentToggle = el('button', 'ag-workspace-icon-btn ag-environment-toggle');
+  environmentToggle.type = 'button';
+  environmentToggle.setAttribute('aria-controls', 'ag-environment-panel');
+  environmentToggle.appendChild(createIcon('environment'));
+
+  const environmentPanel = el('section', 'ag-environment-panel');
+  environmentPanel.id = 'ag-environment-panel';
+  environmentPanel.setAttribute('aria-labelledby', 'ag-environment-title');
+  const environmentTitle = el('h2', 'ag-environment-title', '환경');
+  environmentTitle.id = 'ag-environment-title';
+
+  const environmentFileRow = el('div', 'ag-environment-file-row');
+  environmentFileRow.tabIndex = 0;
+  environmentFileRow.appendChild(createIcon('document'));
+  const environmentFilenameViewport = el('span', 'ag-environment-filename-viewport');
+  const environmentFilenameTrack = el('span', 'ag-environment-filename-track', '문서 없음');
+  environmentFilenameViewport.appendChild(environmentFilenameTrack);
+  environmentFileRow.appendChild(environmentFilenameViewport);
+
+  const environmentChanges = el('button', 'ag-environment-changes');
+  environmentChanges.type = 'button';
+  environmentChanges.appendChild(createIcon('changes'));
+  const environmentChangesLabel = el('span', 'ag-environment-changes-label', '변경 사항');
+  const environmentDiffSummary = el('span', 'ag-environment-diff-summary');
+  const environmentAdditions = el('span', 'ag-environment-additions');
+  const environmentDeletions = el('span', 'ag-environment-deletions');
+  const environmentDiffNeutral = el('span', 'ag-environment-diff-neutral', '변경 없음');
+  environmentDiffSummary.append(environmentAdditions, environmentDeletions, environmentDiffNeutral);
+  environmentChanges.append(environmentChangesLabel, environmentDiffSummary);
+
+  // TODO: 파일 첨부나 대화 브랜치 기능이 생기면 해당 source/branch 상태를 이 환경 패널에 표시한다.
+  environmentPanel.append(environmentTitle, environmentFileRow, environmentChanges);
+  environmentWrap.append(environmentToggle, environmentPanel);
+
   const workspaceExitBtn = el('button', 'ag-workspace-exit-btn');
   workspaceExitBtn.type = 'button';
   workspaceExitBtn.setAttribute('aria-label', '문서 편집기로 돌아가기');
   workspaceExitBtn.title = '문서 편집기로 돌아가기 (Esc)';
   workspaceExitBtn.append(createIcon('contract'), el('span', 'ag-workspace-exit-label', '편집기로 돌아가기'));
-  workspaceTrailing.append(workspaceAgentContext, workspaceExitBtn);
+  workspaceTrailing.append(workspaceAgentContext, environmentWrap, workspaceExitBtn);
   workspaceBar.append(workspaceLeading, workspaceTabs, workspaceTrailing);
+
+  function refreshEnvironmentFilenameMarquee(): void {
+    if (!fullscreen || !environmentPanelOpen) return;
+    const distance = Math.max(0, environmentFilenameTrack.scrollWidth - environmentFilenameViewport.clientWidth);
+    environmentFileRow.classList.toggle('ag-filename-overflow', distance > 1);
+    environmentFileRow.style.setProperty('--ag-filename-distance', `${Math.ceil(distance)}px`);
+    environmentFileRow.style.setProperty('--ag-filename-duration', `${Math.max(4.8, distance / 26 + 2.4).toFixed(1)}s`);
+  }
+
+  function updateEnvironmentFilename(name: string): void {
+    environmentFilenameTrack.textContent = name;
+    environmentFileRow.title = name === '문서 없음' ? '' : name;
+    environmentFileRow.setAttribute('aria-label', `현재 문서: ${name}`);
+    window.requestAnimationFrame(refreshEnvironmentFilenameMarquee);
+  }
+
+  function applyEnvironmentPanelState(): void {
+    environmentPanel.classList.toggle('ag-open', environmentPanelOpen);
+    environmentPanel.setAttribute('aria-hidden', environmentPanelOpen ? 'false' : 'true');
+    environmentPanel.inert = !environmentPanelOpen;
+    environmentToggle.classList.toggle('ag-active', environmentPanelOpen);
+    environmentToggle.setAttribute('aria-expanded', environmentPanelOpen ? 'true' : 'false');
+    environmentToggle.setAttribute('aria-label', environmentPanelOpen ? '환경 패널 닫기' : '환경 패널 열기');
+    environmentToggle.title = environmentPanelOpen ? '환경 패널 닫기' : '환경 패널 열기';
+    if (environmentPanelOpen) window.requestAnimationFrame(refreshEnvironmentFilenameMarquee);
+  }
+
+  function setEnvironmentPanelOpen(open: boolean): void {
+    environmentPanelOpen = open;
+    persistEnvironmentPanelOpen(open);
+    applyEnvironmentPanelState();
+  }
 
   function updateWorkspaceAgentContext(): void {
     workspaceAgentContext.textContent =
@@ -1139,7 +1201,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   changesTab.addEventListener('click', () => {
     setReviewColCollapsed(false);
   });
+  environmentToggle.addEventListener('click', () => {
+    setEnvironmentPanelOpen(!environmentPanelOpen);
+  });
+  environmentFileRow.addEventListener('pointerenter', refreshEnvironmentFilenameMarquee);
+  environmentFileRow.addEventListener('focus', refreshEnvironmentFilenameMarquee);
+  environmentChanges.addEventListener('click', () => {
+    setReviewColCollapsed(false);
+    changesTab.focus();
+  });
   workspaceExitBtn.addEventListener('click', () => setFullscreen(false));
+  applyEnvironmentPanelState();
 
   const chatPage = el('div', 'ag-chat-page');
   chatPage.id = 'ag-chat-page';
@@ -1166,40 +1238,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const composerUtilities = el('div', 'ag-composer-utilities');
   composerUtilities.setAttribute('aria-label', '채팅 도구');
 
-  // ── 작업 방식 (바로 실행 / 계획) ──────────────────────
-  // 권한(안전/전체 접근)과 다른 축이다. 권한은 '어디까지 만질 수 있나',
-  // 작업 방식은 '먼저 계획을 승인받고 실행하나'를 정한다.
-  const workflowGroup = el('div', 'ag-workflow');
-  workflowGroup.setAttribute('role', 'radiogroup');
-  workflowGroup.setAttribute('aria-label', '에이전트 작업 방식');
-  const workflowItems = new Map<AgentWorkflow, HTMLButtonElement>();
-  for (const workflow of ['direct', 'plan'] as const) {
-    const item = el('button', 'ag-workflow-item', WORKFLOW_LABEL[workflow]);
-    item.type = 'button';
-    item.dataset.workflow = workflow;
-    item.setAttribute('role', 'radio');
-    item.setAttribute('aria-checked', 'false');
-    item.addEventListener('click', () => requestWorkflow(workflow));
-    workflowItems.set(workflow, item);
-    workflowGroup.appendChild(item);
-  }
-  workflowGroup.addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-    e.preventDefault();
-    requestWorkflow(chatWorkflow === 'plan' ? 'direct' : 'plan');
-  });
-
-  /** 계획 단계 배지 — 항상 같은 자리에 있고, direct 에서만 사라진다. */
+  /** 계획 단계 배지 — 계획 모드에서만 보이는 작고 읽기 전용인 상태 표시다. */
   const phaseBadge = el('span', 'ag-phase-badge');
   phaseBadge.setAttribute('role', 'status');
   phaseBadge.setAttribute('aria-live', 'polite');
   phaseBadge.hidden = true;
 
-  const composerWorkflowRow = el('div', 'ag-composer-workflow-row');
-  composerWorkflowRow.append(workflowGroup, phaseBadge);
   const composerUtilityActions = el('div', 'ag-composer-utility-actions');
-  composerUtilityActions.append(writingStyleCalibration.button, permissionBtn, skillsBtn);
-  composerUtilities.append(composerWorkflowRow, composerUtilityActions);
+  composerUtilityActions.append(phaseBadge, permissionBtn, skillsBtn);
+  composerUtilities.append(composerUtilityActions);
   const composer = el('form', 'ag-composer');
   const composerMeta = el('div', 'ag-composer-meta');
   composerMeta.setAttribute('aria-label', '에이전트 및 채팅 설정');
@@ -1350,7 +1397,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   reviewColumnClose.appendChild(createIcon('close'));
   reviewColumnClose.addEventListener('click', () => {
     setReviewColCollapsed(true);
-    reviewBtn.focus();
+    conversationTab.focus();
   });
   const reviewColumnHeading = el('div', 'ag-review-column-heading');
   const reviewColumnTitle = el('span', 'ag-review-column-title', '변경 사항');
@@ -1507,7 +1554,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     root.classList.toggle('ag-review-collapsed', focusLayoutActive && !changesActive);
     root.classList.toggle('ag-review-drawer-open', changesActive);
     root.classList.toggle('ag-workspace-changes', changesActive);
-    reviewBtn.setAttribute('aria-expanded', changesActive ? 'true' : 'false');
     conversationTab.setAttribute('aria-selected', changesActive ? 'false' : 'true');
     changesTab.setAttribute('aria-selected', changesActive ? 'true' : 'false');
     reviewColumn.setAttribute('aria-hidden', changesActive ? 'false' : 'true');
@@ -1519,8 +1565,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       else chatPage.appendChild(composer);
     }
     if (!focusLayoutActive) return;
-    reviewBtn.title = changesActive ? '대화로 돌아가기' : '변경 사항 열기';
-    reviewBtn.setAttribute('aria-label', reviewBtn.title);
   }
 
   function setReviewColCollapsed(collapsed: boolean): void {
@@ -1529,20 +1573,30 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     applyReviewColState();
   }
 
-  function updateReviewControl(count: number): void {
-    pendingReviewOpCount = Math.max(0, count);
+  function updateReviewControl(changeSets: readonly PendingChangeSet[]): void {
+    const diff = summarizePendingDiffs(changeSets);
+    pendingReviewOpCount = diff.opCount;
     const hasPending = pendingReviewOpCount > 0;
-    reviewBadge.textContent = String(pendingReviewOpCount);
-    reviewBadge.hidden = !hasPending;
     workspaceReviewBadge.textContent = String(pendingReviewOpCount);
     workspaceReviewBadge.hidden = !hasPending;
     reviewColumnMeta.textContent = hasPending
       ? `${pendingReviewOpCount}개 변경 검토 대기`
       : '대기 중인 변경 없음';
-    if (!fullscreen) {
-      reviewBtn.title = hasPending ? `변경 사항 열기 · ${pendingReviewOpCount}개 대기` : '변경 사항 열기';
-      reviewBtn.setAttribute('aria-label', reviewBtn.title);
-    }
+    const hasTextDiff = diff.additions > 0 || diff.deletions > 0;
+    environmentAdditions.hidden = diff.additions === 0;
+    environmentAdditions.textContent = `+${diff.additions.toLocaleString('ko-KR')}`;
+    environmentDeletions.hidden = diff.deletions === 0;
+    environmentDeletions.textContent = `−${diff.deletions.toLocaleString('ko-KR')}`;
+    environmentDiffNeutral.hidden = hasTextDiff;
+    environmentDiffNeutral.textContent = hasPending
+      ? `${diff.nonTextChanges || pendingReviewOpCount}개 변경`
+      : '변경 없음';
+    environmentChanges.setAttribute(
+      'aria-label',
+      hasPending
+        ? `변경 사항 열기, 추가 ${diff.additions}자, 삭제 ${diff.deletions}자, 기타 ${diff.nonTextChanges}개`
+        : '변경 사항 열기, 대기 중인 변경 없음',
+    );
     applyReviewColState();
   }
 
@@ -1592,11 +1646,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     threadsBtn.setAttribute('aria-expanded', 'false');
     threadsBtn.title = '채팅 목록';
     threadsBtn.setAttribute('aria-label', '채팅 목록');
-    reviewBtn.setAttribute('aria-expanded', 'false');
-    reviewBtn.title = pendingReviewOpCount > 0
-      ? `변경 사항 열기 · ${pendingReviewOpCount}개 대기`
-      : '변경 사항 열기';
-    reviewBtn.setAttribute('aria-label', reviewBtn.title);
     reviewColumn.setAttribute('aria-hidden', 'true');
     threadsPage.setAttribute('aria-hidden', 'true');
     root.classList.remove('ag-workspace-changes');
@@ -1671,6 +1720,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       setConfigPanelOpen(false);
       // 인라인 top/bottom 을 모드에 맞게 다시 잰다.
       measure();
+      window.requestAnimationFrame(refreshEnvironmentFilenameMarquee);
       // 문서가 가려지거나 다시 드러나므로 용지 정렬을 다시 잡는다.
       startInsetRecenterLoop();
       scrollConversationToEnd();
@@ -1719,7 +1769,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function updatePermissionButton(): void {
     const unrestricted = permissionProfile === 'unrestricted';
-    permissionBtn.textContent = unrestricted ? '권한: 전체 접근' : '권한: 안전';
+    permissionBtn.textContent = unrestricted ? '전체' : '안전';
     permissionBtn.setAttribute('aria-label', unrestricted ? '에이전트 권한: 전체 접근' : '에이전트 권한: 안전');
     permissionBtn.setAttribute('aria-pressed', unrestricted ? 'true' : 'false');
     permissionBtn.classList.toggle('ag-permission-unrestricted', unrestricted);
@@ -1972,7 +2022,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     skillResources.value = '';
   });
 
-  type SlashOption = { value: string; label: string; detail: string; local?: 'skills' | 'create' };
+  type SlashOption = {
+    value: string;
+    label: string;
+    detail: string;
+    local?: 'skills' | 'create' | 'calibration';
+    workflow?: AgentWorkflow;
+  };
   let slashOptions: SlashOption[] = [];
   let slashIndex = 0;
 
@@ -1987,6 +2043,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (!match || input.value.trimStart().startsWith('//')) { setSlashMenuOpen(false); return; }
     const query = match[1].toLowerCase();
     const base: SlashOption[] = [
+      { value: '/plan', label: '/plan', detail: '계획 모드로 전환', workflow: 'plan' },
+      { value: '/build', label: '/build', detail: '바로 실행 모드로 전환', workflow: 'direct' },
+      { value: '/calibration', label: '/calibration', detail: '말투 모방 캘리브레이션 열기', local: 'calibration' },
       { value: '/skills', label: '/skills', detail: '스킬 라이브러리 열기', local: 'skills' },
       { value: '/skill-create', label: '/skill-create', detail: '새 스킬 만들기', local: 'create' },
       { value: '/skill-edit', label: '/skill-edit', detail: '사용자 스킬 편집' },
@@ -2016,6 +2075,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function chooseSlashOption(option: SlashOption): void {
     setSlashMenuOpen(false);
+    if (option.workflow) {
+      input.value = '';
+      requestWorkflow(option.workflow);
+      return;
+    }
+    if (option.local === 'calibration') { input.value = ''; writingStyleCalibration.open(); return; }
     if (option.local === 'skills') { input.value = ''; setSkillsPanelOpen(true); return; }
     if (option.local === 'create') { input.value = ''; beginSkillCreate(); return; }
     input.value = `${option.value} `;
@@ -2061,6 +2126,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     let text = input.value.trim();
     if (!text || connState !== 'connected') return;
     if (text.startsWith('//')) text = text.slice(1);
+    if (text === '/plan' || text === '/build') {
+      input.value = '';
+      setSlashMenuOpen(false);
+      requestWorkflow(text === '/plan' ? 'plan' : 'direct');
+      return;
+    }
+    if (text === '/calibration') { input.value = ''; writingStyleCalibration.open(); return; }
     if (text === '/skills') { input.value = ''; setSkillsPanelOpen(true); return; }
     if (text === '/skill-create') { input.value = ''; beginSkillCreate(); return; }
     const editCommand = text.match(/^\/skill-edit\s+([a-z0-9-]+)$/);
@@ -2999,20 +3071,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   function updateWorkflowControl(): void {
-    const locked = isControlLocked() || connState !== 'connected';
-    for (const [workflow, item] of workflowItems) {
-      const active = workflow === chatWorkflow;
-      item.classList.toggle('ag-active', active);
-      item.setAttribute('aria-checked', active ? 'true' : 'false');
-      item.tabIndex = active ? 0 : -1;
-      item.disabled = locked;
-    }
-    workflowGroup.classList.toggle('ag-workflow-locked', locked);
-    workflowGroup.dataset.workflow = chatWorkflow;
     const planActive = chatWorkflow === 'plan';
-    workflowItems.get('plan')!.title = planActive
-      ? '계획을 먼저 만들고, 승인한 뒤 실행합니다'
-      : '계획 모드: 원격 브라우저 전체 제어 · 계획 승인 후 실행';
     phaseBadge.hidden = !planActive || planningPhase === 'direct';
     phaseBadge.textContent = PLANNING_PHASE_LABEL[planningPhase];
     phaseBadge.dataset.phase = planningPhase;
@@ -3049,7 +3108,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
    */
   function requestWorkflow(next: AgentWorkflow): void {
     if (next === chatWorkflow) {
-      workflowItems.get(next)?.focus();
+      input.focus();
       return;
     }
     if (isControlLocked() || connState !== 'connected') {
@@ -3072,17 +3131,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       if (!browserbaseAcknowledged) {
         if (!window.confirm(BROWSERBASE_FULL_CONTROL_WARNING)) {
           updateWorkflowControl();
-          workflowItems.get(chatWorkflow)?.focus();
+          input.focus();
           return;
         }
         browserbaseAcknowledged = true;
-        systemMessage(BROWSERBASE_ENABLED_NOTICE);
+        browserbaseNoticePending = true;
       }
     }
     workflowTransitionPending = true;
     applyWorkflow(next);
     bridge.setWorkflow(next);
-    workflowItems.get(next)?.focus();
+    input.focus();
   }
 
   function recordPlan(plan: StructuredPlan): void {
@@ -3283,6 +3342,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         workflowTransitionPending = false;
         applyWorkflow(e.workflow);
         setPlanningPhase(e.phase);
+        if (e.workflow === 'plan' && browserbaseNoticePending) {
+          browserbaseNoticePending = false;
+          systemMessage(BROWSERBASE_ENABLED_NOTICE);
+        } else if (e.workflow === 'direct') {
+          browserbaseNoticePending = false;
+        }
         return true;
       case 'plan-ready':
         activePlan = e.plan;
@@ -3417,9 +3482,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       review.appendChild(buildPlanCard(activePlan));
     }
     const changeSets = bridge.pendingEdits.getChangeSets();
-    let opCount = 0;
     for (const set of changeSets) {
-      opCount += set.ops.length;
       review.appendChild(buildReviewCard(set));
     }
     if (changeSets.length === 0 && !planShown) {
@@ -3431,7 +3494,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       );
       review.appendChild(empty);
     }
-    updateReviewControl(opCount);
+    updateReviewControl(changeSets);
   }
 
   // ── 구독 ──────────────────────────────────────────────

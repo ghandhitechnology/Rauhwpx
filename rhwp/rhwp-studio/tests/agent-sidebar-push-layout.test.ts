@@ -6,7 +6,7 @@ const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', im
 const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
 
 test('agent sidebar push layout reserves editor-area width when open', () => {
-  assert.match(css, /--ag-sidebar-width:\s*400px;/);
+  assert.match(css, /--ag-sidebar-width:\s*600px;/);
   assert.match(css, /--ag-sidebar-duration:\s*320ms;/);
   assert.match(
     css,
@@ -46,6 +46,8 @@ test('agent sidebar asks canvas to recenter during inset animation', () => {
 });
 
 test('agent sidebar supports drag resize up to half the viewport', () => {
+  assert.match(source, /SIDEBAR_WIDTH_DEFAULT\s*=\s*600/);
+  assert.match(source, /SIDEBAR_WIDTH_MIN\s*=\s*600/);
   assert.match(source, /ag-resize-handle/);
   assert.match(source, /maxSidebarWidth/);
   assert.match(source, /0\.5/);
@@ -56,4 +58,10 @@ test('agent sidebar supports drag resize up to half the viewport', () => {
   assert.match(css, /\.ag-resize-handle/);
   assert.match(css, /body\.ag-sidebar-resizing #editor-area/);
   assert.match(css, /\.ag-collapse-tab\s*\{[^}]*cursor:\s*col-resize;/s);
+});
+
+test('composer metadata stays on one row at the minimum sidebar width', () => {
+  assert.match(css, /\.ag-composer-meta\s*\{[^}]*flex-wrap:\s*nowrap;/s);
+  assert.match(css, /\.ag-composer-meta \.ag-selectors\s*\{[^}]*overflow:\s*hidden;/s);
+  assert.match(css, /\.ag-composer-meta \.ag-composer-utilities\s*\{[^}]*margin-left:\s*auto;/s);
 });
