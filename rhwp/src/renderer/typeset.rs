@@ -894,6 +894,7 @@ fn para_has_non_whitespace_text(para: &Paragraph) -> bool {
 fn coherent_saved_empty_ladder_before_explicit_break(
     paragraphs: &[Paragraph],
     para_idx: usize,
+    body_height_hu: i32,
 ) -> Option<(usize, usize)> {
     let is_saved_empty = |p: &Paragraph| {
         p.text.trim().is_empty()
@@ -913,14 +914,15 @@ fn coherent_saved_empty_ladder_before_explicit_break(
     while paragraphs.get(end).is_some_and(is_saved_empty) {
         end += 1;
     }
-    if end - start < 2
-        || !paragraphs.get(end).is_some_and(|p| {
-            matches!(
-                p.column_type,
-                ColumnBreakType::Page | ColumnBreakType::Section
-            )
-        })
-    {
+    let Some(explicit_break) = paragraphs.get(end).filter(|p| {
+        matches!(
+            p.column_type,
+            ColumnBreakType::Page | ColumnBreakType::Section
+        )
+    }) else {
+        return None;
+    };
+    if end - start < 2 {
         return None;
     }
 
@@ -929,6 +931,21 @@ fn coherent_saved_empty_ladder_before_explicit_break(
         .map(|pair| pair[1].line_segs[0].vertical_pos - pair[0].line_segs[0].vertical_pos);
     let first_delta = deltas.next()?;
     if first_delta <= 0 || deltas.any(|delta| delta <= 0 || (delta - first_delta).abs() > 50) {
+        return None;
+    }
+    // A pair of trailing blanks that already reaches the page-bottom band followed by a visible
+    // explicit-break paragraph represents ordinary spacing up to that same boundary. Counting both
+    // signals creates a nearly empty extra page. Longer ladders and dedicated empty break paragraphs
+    // remain distinct evidence of an intentionally filled page.
+    let last_blank = &paragraphs[end - 1].line_segs[0];
+    let last_blank_bottom = last_blank
+        .vertical_pos
+        .saturating_add(last_blank.line_height);
+    let redundant_two_line_bottom_boundary = end - start == 2
+        && !explicit_break.text.trim().is_empty()
+        && body_height_hu > 0
+        && last_blank_bottom.saturating_mul(10) >= body_height_hu.saturating_mul(9);
+    if redundant_two_line_bottom_boundary {
         return None;
     }
     Some((start, end))
@@ -4308,7 +4325,13 @@ impl TypesetEngine {
             let saved_empty_ladder = st
                 .profile
                 .hwpx_stored_layout()
-                .then(|| coherent_saved_empty_ladder_before_explicit_break(paragraphs, para_idx))
+                .then(|| {
+                    coherent_saved_empty_ladder_before_explicit_break(
+                        paragraphs,
+                        para_idx,
+                        crate::renderer::px_to_hwpunit(st.layout.available_body_height(), self.dpi),
+                    )
+                })
                 .flatten();
 
             // [Task #1725 v2] 현재 일반텍스트 tail 과 새 페이지(vpos-reset) 사이에 빈 문단이 1개
@@ -19311,6 +19334,40 @@ mod tests {
         page_break_next.column_type = ColumnBreakType::Page;
         let cumulative_with_break = vec![para_at_vpos(137484), page_break_next];
         assert!(saved_flow_marks_page_last(&cumulative_with_break, 0));
+    }
+
+    #[test]
+    fn saved_empty_ladder_collapses_only_redundant_bottom_boundary() {
+        let mut page_break = para_at_vpos(0);
+        page_break.text = "next page".to_string();
+        page_break.column_type = ColumnBreakType::Page;
+
+        let two_blanks = vec![para_at_vpos(63000), para_at_vpos(64800), page_break.clone()];
+        assert_eq!(
+            coherent_saved_empty_ladder_before_explicit_break(&two_blanks, 0, 70000),
+            None,
+            "two saved blanks already at the bottom must not duplicate a visible page break"
+        );
+
+        let mid_page_two_blanks =
+            vec![para_at_vpos(36000), para_at_vpos(37980), page_break.clone()];
+        assert_eq!(
+            coherent_saved_empty_ladder_before_explicit_break(&mid_page_two_blanks, 0, 70000,),
+            Some((0, 2)),
+            "a mid-page ladder remains distinct from the following explicit break"
+        );
+
+        let three_blanks = vec![
+            para_at_vpos(1000),
+            para_at_vpos(2800),
+            para_at_vpos(4600),
+            page_break,
+        ];
+        assert_eq!(
+            coherent_saved_empty_ladder_before_explicit_break(&three_blanks, 1, 70000),
+            Some((0, 3)),
+            "three coherent saved blanks are strong evidence of an intentional page fill"
+        );
     }
 
     fn page_with_items(items: Vec<PageItem>) -> PageContent {
