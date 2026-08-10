@@ -157,7 +157,8 @@ test('sidebar consumes the planning bridge contract and its sidebar events', () 
 test('pending HWP review stays unchanged for plan-driven implementations', () => {
   assert.match(source, /bridge\.pendingEdits\.approve\(set\.id\)/);
   assert.match(source, /bridge\.pendingEdits\.reject\(set\.id\)/);
-  assert.match(source, /for \(const set of bridge\.pendingEdits\.getChangeSets\(\)\) \{/);
+  assert.match(source, /const changeSets = bridge\.pendingEdits\.getChangeSets\(\);/);
+  assert.match(source, /for \(const set of changeSets\) \{/);
   assert.match(source, /실행 중입니다\. 문서 편집은 기존처럼 검토 후 승인합니다\./);
 });
 
