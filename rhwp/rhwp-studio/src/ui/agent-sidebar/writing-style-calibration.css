@@ -33,7 +33,7 @@
   background: var(--n-surface);
   color: var(--n-text);
   box-shadow: var(--n-elev-3);
-  font-family: var(--font-family-ui, -apple-system, BlinkMacSystemFont, '맑은 고딕', sans-serif);
+  font-family: var(--ag-font, 'NanumSquare', '나눔스퀘어', sans-serif);
   transform: translateY(8px) scale(0.99);
   transition: transform 180ms var(--ag-motion-out, cubic-bezier(0.16, 1, 0.3, 1));
 }

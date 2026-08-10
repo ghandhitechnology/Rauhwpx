@@ -142,14 +142,13 @@ function persistEnvironmentPanelOpen(open: boolean): void {
   }
 }
 
-/* 전체 화면의 대화 목록 폭. review 폭 key는 이전 3열 workspace의
-   저장값과 호환하기 위해 유지한다. */
+/* 전체 화면의 대화 목록과 변경 사항 drawer 폭. */
 const RAIL_WIDTH_KEY = 'rhwp-agent-rail-width';
 const RAIL_WIDTH_DEFAULT = 264;
 const RAIL_WIDTH_MIN = 200;
 const REVIEW_WIDTH_KEY = 'rhwp-agent-review-width';
+const REVIEW_WIDTH_DEFAULT = 480;
 const REVIEW_WIDTH_MIN = 320;
-const REVIEW_COL_KEY = 'rhwp-agent-review-collapsed';
 
 function maxRailWidth(viewportWidth = window.innerWidth): number {
   return Math.max(RAIL_WIDTH_MIN, Math.floor(viewportWidth * 0.3));
@@ -168,7 +167,7 @@ function clampReviewWidth(width: number, viewportWidth = window.innerWidth): num
 }
 
 function defaultReviewWidth(): number {
-  return clampReviewWidth(window.innerWidth * 0.42);
+  return clampReviewWidth(REVIEW_WIDTH_DEFAULT);
 }
 
 function readStoredRailWidth(): number {
@@ -204,26 +203,6 @@ function readStoredReviewWidth(): number {
 function persistReviewWidth(width: number): void {
   try {
     localStorage.setItem(REVIEW_WIDTH_KEY, String(width));
-  } catch {
-    /* ignore quota / private mode */
-  }
-}
-
-function readStoredReviewColCollapsed(): boolean {
-  try {
-    const raw = localStorage.getItem(REVIEW_COL_KEY);
-    // 새 사용자에게는 대화 workspace가 기본이다.
-    // 이전에 사용자가 열림('0')/닫힘('1')을 고른 경우만 그 선호를 존중한다.
-    if (raw === null) return true;
-    return raw !== '0';
-  } catch {
-    return true;
-  }
-}
-
-function persistReviewColCollapsed(collapsed: boolean): void {
-  try {
-    localStorage.setItem(REVIEW_COL_KEY, collapsed ? '1' : '0');
   } catch {
     /* ignore quota / private mode */
   }
@@ -434,7 +413,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let fullscreen = false;
   let threadsRailCollapsed = readStoredThreadsRailCollapsed();
   let environmentPanelOpen = readStoredEnvironmentPanelOpen();
-  let reviewColCollapsed = readStoredReviewColCollapsed();
+  // 검토 drawer는 focus mode에 들어갈 때마다 닫힌 상태로 시작하며,
+  // 환경 패널의 `변경 사항` 행을 눌렀을 때만 열린다.
+  let reviewColCollapsed = true;
   let pendingReviewOpCount = 0;
   let railWidth = readStoredRailWidth();
   let reviewWidth = readStoredReviewWidth();
@@ -1097,7 +1078,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
     if (root.classList.contains('ag-review-drawer-open')) {
       setReviewColCollapsed(true);
-      conversationTab.focus();
+      environmentToggle.focus();
       e.preventDefault();
       return;
     }
@@ -1110,7 +1091,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   /* 집중 모드는 사이드바를 늘린 화면이 아니라 독립된 작업 공간이다.
      이 bar는 viewport 전체를 가로지르며 pane 토글, 문서 맥락,
-     workspace tab, 실행 맥락과 종료 동작을 한 축에 고정한다. */
+     대화 제목, 실행 맥락과 종료 동작을 한 축에 고정한다. */
   const workspaceBar = el('header', 'ag-workspace-bar');
   const workspaceLeading = el('div', 'ag-workspace-leading');
   const workspaceThreadsBtn = el('button', 'ag-workspace-icon-btn ag-workspace-threads-btn');
@@ -1127,24 +1108,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   workspaceDocumentContext.append(workspaceDocumentName, workspaceSelectionContext);
   workspaceLeading.append(workspaceThreadsBtn, workspaceDocumentContext);
 
-  const workspaceTabs = el('div', 'ag-workspace-tabs');
-  workspaceTabs.setAttribute('role', 'tablist');
-  workspaceTabs.setAttribute('aria-label', '에이전트 작업 공간');
-  const conversationTab = el('button', 'ag-workspace-tab', '대화');
-  conversationTab.type = 'button';
-  conversationTab.setAttribute('role', 'tab');
-  conversationTab.setAttribute('aria-controls', 'ag-chat-page');
-  conversationTab.setAttribute('aria-selected', 'true');
-  const changesTab = el('button', 'ag-workspace-tab', '변경 사항');
-  changesTab.type = 'button';
-  changesTab.setAttribute('role', 'tab');
-  changesTab.setAttribute('aria-controls', 'ag-review-column');
-  changesTab.setAttribute('aria-selected', 'false');
-  const workspaceReviewBadge = el('span', 'ag-workspace-review-badge', '0');
-  workspaceReviewBadge.setAttribute('aria-hidden', 'true');
-  workspaceReviewBadge.hidden = true;
-  changesTab.appendChild(workspaceReviewBadge);
-  workspaceTabs.append(conversationTab, changesTab);
+  const workspaceTitle = el('div', 'ag-workspace-title', '대화');
 
   const workspaceTrailing = el('div', 'ag-workspace-trailing');
   const workspaceAgentContext = el(
@@ -1174,14 +1138,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   const environmentChanges = el('button', 'ag-environment-changes');
   environmentChanges.type = 'button';
+  environmentChanges.setAttribute('aria-controls', 'ag-review-column');
+  environmentChanges.setAttribute('aria-expanded', 'false');
   environmentChanges.appendChild(createIcon('changes'));
   const environmentChangesLabel = el('span', 'ag-environment-changes-label', '변경 사항');
   const environmentDiffSummary = el('span', 'ag-environment-diff-summary');
   const environmentAdditions = el('span', 'ag-environment-additions');
   const environmentDeletions = el('span', 'ag-environment-deletions');
   const environmentDiffNeutral = el('span', 'ag-environment-diff-neutral', '변경 없음');
+  const environmentChangesChevron = createChevron('ag-environment-changes-chevron');
   environmentDiffSummary.append(environmentAdditions, environmentDeletions, environmentDiffNeutral);
-  environmentChanges.append(environmentChangesLabel, environmentDiffSummary);
+  environmentChanges.append(environmentChangesLabel, environmentDiffSummary, environmentChangesChevron);
 
   // TODO: 파일 첨부나 대화 브랜치 기능이 생기면 해당 source/branch 상태를 이 환경 패널에 표시한다.
   environmentPanel.append(environmentTitle, environmentFileRow, environmentChanges);
@@ -1193,7 +1160,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   workspaceExitBtn.title = '문서 편집기로 돌아가기 (Esc)';
   workspaceExitBtn.append(createIcon('contract'), el('span', 'ag-workspace-exit-label', '편집기로 돌아가기'));
   workspaceTrailing.append(workspaceAgentContext, environmentWrap, workspaceExitBtn);
-  workspaceBar.append(workspaceLeading, workspaceTabs, workspaceTrailing);
+  workspaceBar.append(workspaceLeading, workspaceTitle, workspaceTrailing);
 
   function refreshEnvironmentFilenameMarquee(): void {
     if (!fullscreen || !environmentPanelOpen) return;
@@ -1235,13 +1202,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   workspaceThreadsBtn.addEventListener('click', () => {
     setThreadsRailCollapsed(!threadsRailCollapsed);
   });
-  conversationTab.addEventListener('click', () => {
-    setReviewColCollapsed(true);
-    input.focus();
-  });
-  changesTab.addEventListener('click', () => {
-    setReviewColCollapsed(false);
-  });
   environmentToggle.addEventListener('click', () => {
     setEnvironmentPanelOpen(!environmentPanelOpen);
   });
@@ -1249,7 +1209,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   environmentFileRow.addEventListener('focus', refreshEnvironmentFilenameMarquee);
   environmentChanges.addEventListener('click', () => {
     setReviewColCollapsed(false);
-    changesTab.focus();
+    setEnvironmentPanelOpen(false);
+    window.requestAnimationFrame(() => reviewColumnClose.focus());
   });
   workspaceExitBtn.addEventListener('click', () => setFullscreen(false));
   applyEnvironmentPanelState();
@@ -1424,12 +1385,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   skillEditor.append(skillEditorHeader, skillGoal, skillTriggers, skillNonTriggers, skillResourceRow, skillName, skillFiles, skillFileEditor, skillWarning, skillEditorActions);
   skillsPage.append(skillsHeader, skillsToolbar, skillsStatus, skillsList, skillEditor);
 
-  /* 집중 모드의 변경 사항 workspace. 사이드바로 돌아가면 비어 있고,
-     .ag-review 노드 자체는 채팅 페이지의 inline 자리로 되돌아간다. */
-  const reviewColumn = el('div', 'ag-review-column');
+  /* 집중 모드의 변경 사항 drawer. 대화 위의 오른쪽 가장자리에서 열리고,
+     사이드바로 돌아가면 .ag-review 노드는 기존 inline 자리로 되돌아간다. */
+  const reviewColumn = el('aside', 'ag-review-column');
   reviewColumn.id = 'ag-review-column';
-  reviewColumn.setAttribute('role', 'region');
-  reviewColumn.setAttribute('aria-label', '검토');
+  reviewColumn.setAttribute('aria-labelledby', 'ag-review-column-title');
   const reviewColumnHead = el('div', 'ag-review-column-head');
   const reviewColumnClose = el('button', 'ag-header-icon-btn ag-review-column-close');
   reviewColumnClose.type = 'button';
@@ -1438,17 +1398,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   reviewColumnClose.appendChild(createIcon('close'));
   reviewColumnClose.addEventListener('click', () => {
     setReviewColCollapsed(true);
-    conversationTab.focus();
+    environmentToggle.focus();
   });
   const reviewColumnHeading = el('div', 'ag-review-column-heading');
   const reviewColumnTitle = el('span', 'ag-review-column-title', '변경 사항');
+  reviewColumnTitle.id = 'ag-review-column-title';
   const reviewColumnMeta = el('span', 'ag-review-column-meta', '대기 중인 변경 없음');
   reviewColumnHeading.append(reviewColumnTitle, reviewColumnMeta);
   reviewColumnHead.append(reviewColumnHeading, reviewColumnClose);
   reviewColumn.appendChild(reviewColumnHead);
 
-  /* 레일 경계 폭 조절 손잡이. reviewResize는 이전 3열 배치와의
-     상태 호환을 위해 남겨 두되 새 workspace에서는 비활성이다. */
+  /* 레일과 변경 사항 drawer의 경계 폭 조절 손잡이. */
   const railResize = el('div', 'ag-rail-resize');
   railResize.setAttribute('role', 'separator');
   railResize.setAttribute('aria-orientation', 'vertical');
@@ -1492,6 +1452,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     return kind === 'rail' ? railResize : reviewResize;
   }
 
+  function detachColumnResizeWindowListeners(): void {
+    window.removeEventListener('pointermove', onColumnResizePointerMove, true);
+    window.removeEventListener('pointerup', endColumnResize, true);
+    window.removeEventListener('pointercancel', endColumnResize, true);
+    window.removeEventListener('blur', onColumnResizeWindowBlur);
+  }
+
+  function onColumnResizeWindowBlur(): void {
+    endColumnResize();
+  }
+
   function beginColumnResize(kind: 'rail' | 'review', e: PointerEvent): void {
     if (!fullscreen) return;
     // 이미 한 손가락이 끌고 있으면 두 번째 손가락은 무시한다.
@@ -1508,6 +1479,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
     root.classList.add('ag-col-resizing');
     document.body.classList.add('ag-col-resizing');
+    // The divider moves with the grid, so pointer events must continue even
+    // after the cursor leaves its narrow hit target or pointer capture fails.
+    window.addEventListener('pointermove', onColumnResizePointerMove, true);
+    window.addEventListener('pointerup', endColumnResize, true);
+    window.addEventListener('pointercancel', endColumnResize, true);
+    window.addEventListener('blur', onColumnResizeWindowBlur);
   }
 
   function onColumnResizePointerMove(e: PointerEvent): void {
@@ -1522,6 +1499,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function endColumnResize(e?: PointerEvent): void {
     if (!columnResizing) {
+      detachColumnResizeWindowListeners();
       root.classList.remove('ag-col-resizing');
       document.body.classList.remove('ag-col-resizing');
       return;
@@ -1532,11 +1510,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     const pointerId = e?.pointerId ?? columnResizePointerId;
     columnResizing = null;
     columnResizePointerId = null;
+    detachColumnResizeWindowListeners();
     root.classList.remove('ag-col-resizing');
     document.body.classList.remove('ag-col-resizing');
     const handle = columnHandle(kind);
-    if (pointerId !== null && handle.hasPointerCapture(pointerId)) {
-      handle.releasePointerCapture(pointerId);
+    try {
+      if (pointerId !== null && handle.hasPointerCapture(pointerId)) {
+        handle.releasePointerCapture(pointerId);
+      }
+    } catch {
+      /* the pointer may already be gone after a window blur */
     }
     if (kind === 'rail') applyRailWidth(railWidth, { persist: true });
     else applyReviewWidth(reviewWidth, { persist: true });
@@ -1555,16 +1538,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   for (const kind of ['rail', 'review'] as const) {
     const handle = columnHandle(kind);
     handle.addEventListener('pointerdown', (e) => beginColumnResize(kind, e));
-    handle.addEventListener('pointermove', onColumnResizePointerMove);
-    handle.addEventListener('pointerup', endColumnResize);
-    handle.addEventListener('pointercancel', endColumnResize);
     handle.addEventListener('keydown', (e) => onColumnResizeKeyDown(kind, e));
   }
 
   /**
-   * 전체 화면은 대화 목록 + 탭 workspace가 기본인 agent-focus 무대다.
-   * 변경 사항은 중앙 surface 전체를 차지하며 대기 편집이 없어도 열 수 있다.
-   * 같은 DOM을 옮겨 스레드·승인·입력 상태를 유지한다.
+   * 전체 화면은 대화 목록 + 대화가 기본인 agent-focus 무대다.
+   * 변경 사항은 환경 패널에서만 여는 오른쪽 drawer다.
    */
   /* 스레드 레일 접기 — 전체 화면에서만 뜻이 있다. 헤더의 목록
      버튼이 토글이고, 접힘 여부는 사이드바 폭처럼 세션 간 유지된다. */
@@ -1588,31 +1567,28 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (fullscreen && !collapsed) rebuildThreadsList();
   }
 
-  /* Conversation / Changes workspace tab. 기존 collapsed preference를
-     그대로 사용해 업그레이드 뒤에도 사용자가 보던 기본 surface를 지킨다. */
+  /* 검토 drawer는 대화를 가리거나 composer를 옮기지 않는다. */
   function applyReviewColState(): void {
     // 나가는 애니메이션 중에도 전체 화면 DOM은 아직 유효하다.
     const focusLayoutActive = fullscreen || root.classList.contains('ag-fullscreen');
     const changesActive = focusLayoutActive && !reviewColCollapsed;
     root.classList.toggle('ag-review-collapsed', focusLayoutActive && !changesActive);
     root.classList.toggle('ag-review-drawer-open', changesActive);
-    root.classList.toggle('ag-workspace-changes', changesActive);
-    conversationTab.setAttribute('aria-selected', changesActive ? 'false' : 'true');
-    changesTab.setAttribute('aria-selected', changesActive ? 'true' : 'false');
+    environmentChanges.classList.toggle('ag-active', changesActive);
+    environmentChanges.setAttribute('aria-expanded', changesActive ? 'true' : 'false');
     reviewColumn.setAttribute('aria-hidden', changesActive ? 'false' : 'true');
-    reviewResize.setAttribute('aria-hidden', 'true');
-    reviewResize.tabIndex = -1;
+    reviewColumn.inert = !changesActive;
+    reviewResize.setAttribute('aria-hidden', changesActive ? 'false' : 'true');
+    reviewResize.tabIndex = changesActive ? 0 : -1;
+    reviewResize.inert = !changesActive;
     if (focusLayoutActive) {
-      chatPage.setAttribute('aria-hidden', changesActive ? 'true' : 'false');
-      if (changesActive) reviewColumn.appendChild(composer);
-      else chatPage.appendChild(composer);
+      chatPage.setAttribute('aria-hidden', 'false');
+      if (composer.parentElement !== chatPage) chatPage.appendChild(composer);
     }
-    if (!focusLayoutActive) return;
   }
 
   function setReviewColCollapsed(collapsed: boolean): void {
     reviewColCollapsed = collapsed;
-    persistReviewColCollapsed(collapsed);
     applyReviewColState();
   }
 
@@ -1620,8 +1596,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     const diff = summarizePendingDiffs(changeSets);
     pendingReviewOpCount = diff.opCount;
     const hasPending = pendingReviewOpCount > 0;
-    workspaceReviewBadge.textContent = String(pendingReviewOpCount);
-    workspaceReviewBadge.hidden = !hasPending;
     reviewColumnMeta.textContent = hasPending
       ? `${pendingReviewOpCount}개 변경 검토 대기`
       : '대기 중인 변경 없음';
@@ -1644,7 +1618,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   /* 전체 화면 전환. 새 화면을 짓지 않고 무대의 배치만 바꾼다.
-     스레드·대화는 안정적인 shell로 남고 검토는 peer workspace로 옮긴다.
+     스레드·대화는 안정적인 shell로 남고 검토는 오른쪽 drawer로 옮긴다.
      DOM을 재생성하지 않으므로 스레드·모델·승인 상태가 모두 이어진다.
 
      전환은 clip-path 로 연다: 콘솔이 사이드바 자리에서 자라나고,
@@ -1691,9 +1665,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     threadsBtn.setAttribute('aria-label', '채팅 목록');
     reviewColumn.setAttribute('aria-hidden', 'true');
     threadsPage.setAttribute('aria-hidden', 'true');
-    root.classList.remove('ag-workspace-changes');
-    conversationTab.setAttribute('aria-selected', 'true');
-    changesTab.setAttribute('aria-selected', 'false');
     chatPage.setAttribute('aria-hidden', 'false');
     // 검토와 입력기는 다시 채팅 페이지의 inline 흐름으로 돌아간다.
     chatPage.append(review, composer);
@@ -1754,9 +1725,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       // 칸 폭은 클래스 규칙이 아니라 인라인 변수로 산다.
       applyRailWidth(railWidth, { persist: false });
       applyReviewWidth(reviewWidth, { persist: false });
-      // 검토 surface를 먼저 옮겨 둬야 Changes가 기본 탭인 경우에도
-      // compact composer가 항상 내용 아래에 놓인다.
+      // 검토 surface는 열림 여부와 무관하게 drawer 안에 둔다.
       reviewColumn.appendChild(review);
+      reviewColCollapsed = true;
       applyThreadsRailState();
       applyReviewColState();
 
@@ -3609,8 +3580,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
     if (changeSets.length === 0 && !planShown) {
       const empty = el('div', 'ag-review-empty');
+      const emptyIcon = el('div', 'ag-review-empty-icon');
+      emptyIcon.appendChild(createIcon('changes'));
       empty.append(
-        el('div', 'ag-review-empty-icon', '±'),
+        emptyIcon,
         el('div', 'ag-review-empty-title', '변경 사항 없음'),
         el('div', 'ag-review-empty-copy', '에이전트가 문서를 수정하면 여기에서 원문과 변경 내용을 비교할 수 있습니다.'),
       );
