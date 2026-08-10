@@ -424,6 +424,11 @@ export type PendingOp =
       paraShapeIds: number[];
       /** 변이 직전 스냅샷 — 되돌림 시 원본을 정확히 복원하는 소스 */
       snapshotId: number | null;
+      /**
+       * 스냅샷을 찍은 시점의 사용자(비-에이전트) 편집 카운터. 되돌림 시점 값과
+       * 다르면 스냅샷 복원이 그 사용자 편집을 지우므로 역연산 폴백을 쓴다.
+       */
+      userEditSeqAtSnapshot?: number;
       seq?: number;
     } // applied
   | {

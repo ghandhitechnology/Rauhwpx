@@ -62,6 +62,14 @@ const EDIT_TABLE_REQUIRED_PARAMS = {
   set_table_props: ['props'],
 };
 
+// apply_list: 번호 목록이면 format 필수, bulletChar 가 있으면 글머리표 목록이라 format 불필요.
+function validateApplyList(args) {
+  const hasBullet = typeof args.bulletChar === 'string' && args.bulletChar.length > 0;
+  if (!hasBullet && (args.format === undefined || args.format === null)) {
+    throw invalidArgs('apply_list requires format for a numbered list (or bulletChar for a bullet list)');
+  }
+}
+
 function validateEditTable(args) {
   const required = EDIT_TABLE_REQUIRED_PARAMS[args.op];
   if (!required) return; // op 값 자체는 enum 스키마가 걸러낸다
@@ -320,12 +328,13 @@ const BASE_TOOL_DEFINITIONS = [
       sectionIdx: z.number().int().min(0),
       startParaIdx: z.number().int().min(0),
       endParaIdx: z.number().int().min(0),
-      format: z.enum(['1.', '1)', '(1)', '①', 'a.', 'a)', 'A.', 'A)', 'I.', 'i.', 'i)', '가.', 'ㄱ.'])
-        .describe('Number format — determines 1,2,3 vs a,b,c vs 가,나,다 rendering'),
+      format: z.enum(['1.', '1)', '(1)', '①', 'a.', 'a)', 'A.', 'A)', 'I.', 'i.', 'i)', '가.', 'ㄱ.']).optional()
+        .describe('Number format — determines 1,2,3 vs a,b,c vs 가,나,다 rendering. Required unless bulletChar is set'),
       level: z.number().int().min(0).max(6).default(0).optional().describe('List depth 0-6 (default 0)'),
       startNumber: z.number().int().min(1).optional().describe('First number (default: continue/1)'),
       bulletChar: z.string().min(1).optional().describe('Bullet character (e.g. "•") — switches the list to a bullet list'),
     },
+    validate: validateApplyList,
   },
   {
     name: 'list_styles',
@@ -467,7 +476,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'verify_changes',
-    description: `Self-check your work after a batch of edits: returns the current/open change set — per-op status ('applied-now' vs 'awaiting-approval'), post-edit text digests, affected pages and warnings. With includeImage:true the response also carries a PNG render (image block) of the first affected page showing the post-approval state. ALWAYS call this after completing a batch of edits, fix any problems you find, and only then end your turn. Note: text deleted by delete_range/replace_range stays visible struck-through until the user approves — that is expected, do NOT try to "fix" it. ${REVISION_NOTE}`,
+    description: `Self-check your work after a batch of edits: returns the current/open change set — per-op kind and an applied flag (true = already visible in the document, false = applies on approval), post-edit text digests, affected pages and warnings. With includeImage:true the response also carries a PNG render (image block) of the first affected page showing the post-approval state. ALWAYS call this after completing a batch of edits, fix any problems you find, and only then end your turn. Note: text deleted by delete_range/replace_range stays visible struck-through until the user approves — that is expected, do NOT try to "fix" it. ${REVISION_NOTE}`,
     shape: {
       changeSetId: z.string().min(1).optional().describe('Specific change set id (default: the current open change set)'),
       includeImage: z.boolean().default(false).optional()
