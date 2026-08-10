@@ -303,6 +303,78 @@ impl DocumentCore {
         }
     }
 
+    fn append_body_range_to_clipboard(
+        &self,
+        clip_paragraphs: &mut Vec<Paragraph>,
+        section_idx: usize,
+        start_para_idx: usize,
+        start_char_offset: usize,
+        end_para_idx: usize,
+        end_char_offset: usize,
+    ) -> Result<(), HwpError> {
+        let section = self.document.sections.get(section_idx).ok_or_else(|| {
+            HwpError::RenderError(format!("구역 인덱스 {} 범위 초과", section_idx))
+        })?;
+        if start_para_idx >= section.paragraphs.len() || end_para_idx >= section.paragraphs.len() {
+            return Err(HwpError::RenderError(format!(
+                "문단 인덱스 범위 초과 (start={}, end={}, total={})",
+                start_para_idx,
+                end_para_idx,
+                section.paragraphs.len()
+            )));
+        }
+        if start_para_idx > end_para_idx
+            || (start_para_idx == end_para_idx && start_char_offset > end_char_offset)
+        {
+            return Err(HwpError::RenderError(
+                "시작 위치가 끝 위치보다 뒤에 있음".to_string(),
+            ));
+        }
+
+        if start_para_idx == end_para_idx {
+            clip_paragraphs.push(clip_paragraph_text_range_for_clipboard(
+                &section.paragraphs[start_para_idx],
+                start_char_offset,
+                end_char_offset,
+            ));
+            return Ok(());
+        }
+
+        let first_text_len = section.paragraphs[start_para_idx].text.chars().count();
+        clip_paragraphs.push(clip_paragraph_text_range_for_clipboard(
+            &section.paragraphs[start_para_idx],
+            start_char_offset,
+            first_text_len,
+        ));
+        for para_idx in (start_para_idx + 1)..end_para_idx {
+            clip_paragraphs.push(section.paragraphs[para_idx].clone());
+        }
+        clip_paragraphs.push(clip_paragraph_text_range_for_clipboard(
+            &section.paragraphs[end_para_idx],
+            0,
+            end_char_offset,
+        ));
+        Ok(())
+    }
+
+    fn store_body_clipboard(&mut self, mut clip_paragraphs: Vec<Paragraph>) -> String {
+        // SectionDef/ColumnDef are section structure, not selected text.
+        for para in &mut clip_paragraphs {
+            strip_structural_controls_for_text_clipboard(para);
+        }
+        let plain_text = clip_paragraphs
+            .iter()
+            .map(|paragraph| paragraph.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let escaped = super::super::helpers::json_escape(&plain_text);
+        self.clipboard = Some(ClipboardData {
+            paragraphs: clip_paragraphs,
+            plain_text,
+        });
+        super::super::helpers::json_ok_with(&format!("\"text\":\"{}\"", escaped))
+    }
+
     /// 선택 영역을 내부 클립보드에 복사한다.
     ///
     /// 같은 구역 내 start ~ end 범위의 문단을 클립보드에 저장.
@@ -315,83 +387,73 @@ impl DocumentCore {
         end_para_idx: usize,
         end_char_offset: usize,
     ) -> Result<String, HwpError> {
-        // 인덱스 범위 검증
-        if section_idx >= self.document.sections.len() {
-            return Err(HwpError::RenderError(format!(
-                "구역 인덱스 {} 범위 초과",
-                section_idx
-            )));
-        }
-        let section = &self.document.sections[section_idx];
-        if start_para_idx >= section.paragraphs.len() || end_para_idx >= section.paragraphs.len() {
-            return Err(HwpError::RenderError(format!(
-                "문단 인덱스 범위 초과 (start={}, end={}, total={})",
-                start_para_idx,
-                end_para_idx,
-                section.paragraphs.len()
-            )));
-        }
-        if start_para_idx > end_para_idx {
+        let mut clip_paragraphs = Vec::new();
+        self.append_body_range_to_clipboard(
+            &mut clip_paragraphs,
+            section_idx,
+            start_para_idx,
+            start_char_offset,
+            end_para_idx,
+            end_char_offset,
+        )?;
+        Ok(self.store_body_clipboard(clip_paragraphs))
+    }
+
+    /// 여러 구역에 걸친 본문 선택을 문서 순서대로 내부 클립보드에 복사한다.
+    pub fn copy_selection_across_sections_native(
+        &mut self,
+        start_section_idx: usize,
+        start_para_idx: usize,
+        start_char_offset: usize,
+        end_section_idx: usize,
+        end_para_idx: usize,
+        end_char_offset: usize,
+    ) -> Result<String, HwpError> {
+        if start_section_idx > end_section_idx {
             return Err(HwpError::RenderError(
-                "시작 위치가 끝 위치보다 뒤에 있음".to_string(),
+                "시작 구역이 끝 구역보다 뒤에 있음".to_string(),
             ));
         }
 
         let mut clip_paragraphs = Vec::new();
-
-        if start_para_idx == end_para_idx {
-            // 단일 문단 내 선택
-            clip_paragraphs.push(clip_paragraph_text_range_for_clipboard(
-                &section.paragraphs[start_para_idx],
-                start_char_offset,
-                end_char_offset,
-            ));
-        } else {
-            // 다중 문단 선택
-            // 첫 번째 문단: start_offset부터 끝까지
-            let first_text_len = section.paragraphs[start_para_idx].text.chars().count();
-            clip_paragraphs.push(clip_paragraph_text_range_for_clipboard(
-                &section.paragraphs[start_para_idx],
-                start_char_offset,
-                first_text_len,
-            ));
-
-            // 중간 문단: 전체 복사
-            for i in (start_para_idx + 1)..end_para_idx {
-                clip_paragraphs.push(section.paragraphs[i].clone());
+        for section_idx in start_section_idx..=end_section_idx {
+            let section = self.document.sections.get(section_idx).ok_or_else(|| {
+                HwpError::RenderError(format!("구역 인덱스 {} 범위 초과", section_idx))
+            })?;
+            if section.paragraphs.is_empty() {
+                continue;
             }
-
-            // 마지막 문단: 처음부터 end_offset까지
-            clip_paragraphs.push(clip_paragraph_text_range_for_clipboard(
-                &section.paragraphs[end_para_idx],
-                0,
-                end_char_offset,
-            ));
+            let range_start_para = if section_idx == start_section_idx {
+                start_para_idx
+            } else {
+                0
+            };
+            let range_end_para = if section_idx == end_section_idx {
+                end_para_idx
+            } else {
+                section.paragraphs.len() - 1
+            };
+            let range_start_offset = if section_idx == start_section_idx {
+                start_char_offset
+            } else {
+                0
+            };
+            let range_end_offset = if section_idx == end_section_idx {
+                end_char_offset
+            } else {
+                section.paragraphs[range_end_para].text.chars().count()
+            };
+            self.append_body_range_to_clipboard(
+                &mut clip_paragraphs,
+                section_idx,
+                range_start_para,
+                range_start_offset,
+                range_end_para,
+                range_end_offset,
+            )?;
         }
 
-        // 구조적 컨트롤(SectionDef, ColumnDef 등) 제거 — 텍스트 복사에 불필요
-        for para in &mut clip_paragraphs {
-            strip_structural_controls_for_text_clipboard(para);
-        }
-
-        // 플레인 텍스트 추출
-        let plain_text: String = clip_paragraphs
-            .iter()
-            .map(|p| p.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let escaped = super::super::helpers::json_escape(&plain_text);
-
-        self.clipboard = Some(ClipboardData {
-            paragraphs: clip_paragraphs,
-            plain_text: plain_text.clone(),
-        });
-
-        Ok(super::super::helpers::json_ok_with(&format!(
-            "\"text\":\"{}\"",
-            escaped
-        )))
+        Ok(self.store_body_clipboard(clip_paragraphs))
     }
 
     /// 표 셀 내부 선택 영역을 내부 클립보드에 복사한다.
@@ -1239,6 +1301,59 @@ impl DocumentCore {
             html.push_str(&self.paragraph_to_html(para, start, end));
         }
 
+        html.push_str("<!--EndFragment-->\n</body></html>");
+        Ok(html)
+    }
+
+    /// 여러 구역의 본문 선택을 하나의 HTML fragment로 문서 순서대로 내보낸다.
+    pub fn export_selection_across_sections_html_native(
+        &self,
+        start_section_idx: usize,
+        start_para_idx: usize,
+        start_char_offset: usize,
+        end_section_idx: usize,
+        end_para_idx: usize,
+        end_char_offset: usize,
+    ) -> Result<String, HwpError> {
+        if start_section_idx > end_section_idx {
+            return Err(HwpError::RenderError(
+                "시작 구역이 끝 구역보다 뒤에 있음".to_string(),
+            ));
+        }
+
+        let mut html = String::from("<html><body>\n<!--StartFragment-->\n");
+        for section_idx in start_section_idx..=end_section_idx {
+            let section =
+                self.document.sections.get(section_idx).ok_or_else(|| {
+                    HwpError::RenderError(format!("구역 {} 범위 초과", section_idx))
+                })?;
+            if section.paragraphs.is_empty() {
+                continue;
+            }
+            let range_start = if section_idx == start_section_idx {
+                start_para_idx
+            } else {
+                0
+            };
+            let range_end = if section_idx == end_section_idx {
+                end_para_idx
+            } else {
+                section.paragraphs.len() - 1
+            };
+            if range_start > range_end || range_end >= section.paragraphs.len() {
+                return Err(HwpError::RenderError(format!(
+                    "구역 {} 문단 범위 초과",
+                    section_idx
+                )));
+            }
+            for para_idx in range_start..=range_end {
+                let start = (section_idx == start_section_idx && para_idx == start_para_idx)
+                    .then_some(start_char_offset);
+                let end = (section_idx == end_section_idx && para_idx == end_para_idx)
+                    .then_some(end_char_offset);
+                html.push_str(&self.paragraph_to_html(&section.paragraphs[para_idx], start, end));
+            }
+        }
         html.push_str("<!--EndFragment-->\n</body></html>");
         Ok(html)
     }

@@ -22,8 +22,8 @@
 use quick_xml::Writer;
 
 use crate::model::control::{
-    AutoNumber, AutoNumberType, CharOverlap, Control, Equation, Field, NewNumber, PageHide,
-    PageNumberPos, Ruby, EQUATION_LINE_MODE_BIT,
+    AutoNumber, AutoNumberType, CharOverlap, Control, Equation, Field, Hyperlink, NewNumber,
+    PageHide, PageNumberPos, Ruby, EQUATION_LINE_MODE_BIT,
 };
 use crate::model::document::{Document, Section, SectionDef};
 use crate::model::footnote::{Endnote, Footnote};
@@ -35,7 +35,9 @@ use crate::model::shape::{
 };
 
 use super::context::SerializeContext;
-use super::field::{write_bookmark, write_field_begin, write_field_end, write_field_end_full};
+use super::field::{
+    write_bookmark, write_field_begin, write_field_end, write_field_end_full, write_hyperlink_begin,
+};
 use super::utils::xml_escape;
 use super::SerializeError;
 use super::{picture, table};
@@ -413,7 +415,7 @@ pub fn write_section(
     // XML 방출만 1회 억제한다(슬롯 위치는 보존). 렌더 직후 reset 하여 추가 문단 누설 방지.
     ctx.body_coldef_template_pending = true;
     let (first_runs, first_linesegs, first_advance) = match first_para {
-        Some(p) => render_paragraph_parts(p, vert_cursor, ctx),
+        Some(p) => render_paragraph_parts(p, vert_cursor, ctx)?,
         // 문단이 없는 섹션(비파싱 IR) — linesegarray 방출 생략 (#1380)
         None => (String::new(), String::new(), vert_cursor),
     };
@@ -502,7 +504,7 @@ pub fn write_section(
     if section.paragraphs.len() > 1 {
         let mut extra = String::new();
         for p in section.paragraphs.iter().skip(1) {
-            let (runs, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx);
+            let (runs, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx)?;
             vert_cursor = advance;
             let pid = ctx.next_para_id();
             let sid = ctx.effective_style_id(p.style_id);
@@ -559,8 +561,8 @@ pub(crate) fn render_paragraph_parts(
     para: &Paragraph,
     vert_start: u32,
     ctx: &mut SerializeContext,
-) -> (String, String, u32) {
-    let runs_xml = render_runs(para, ctx);
+) -> Result<(String, String, u32), SerializeError> {
+    let runs_xml = render_runs(para, ctx)?;
 
     if !para.line_segs.is_empty() {
         // IR 기반 출력 — 원본 lineseg 값 보존 (#177)
@@ -571,10 +573,10 @@ pub(crate) fn render_paragraph_parts(
             LINESEG_SLOT_CLOSE
         );
         let vert_end = next_vert_cursor_from_ir(&para.line_segs, vert_start);
-        (runs_xml, linesegs, vert_end)
+        Ok((runs_xml, linesegs, vert_end))
     } else {
         // IR 에 line_segs 없음 — linesegarray 방출 생략 (#1380)
-        (runs_xml, String::new(), vert_start)
+        Ok((runs_xml, String::new(), vert_start))
     }
 }
 
@@ -708,7 +710,11 @@ impl RunSplitter {
 }
 
 /// `<hp:ctrl><hp:fieldEnd beginIDRef=".."/></hp:ctrl>` 방출 공통 경로.
-fn emit_field_end(out: &mut String, para: &Paragraph, fr: &FieldRange) {
+fn emit_field_end(
+    out: &mut String,
+    para: &Paragraph,
+    fr: &FieldRange,
+) -> Result<(), SerializeError> {
     if let Some(Control::Field(f)) = para.controls.get(fr.control_idx) {
         // [Task #bookmark-hyperlink] 짝(matched) fieldEnd 자신의 fieldid 는 fieldBegin 의
         // id(f.field_id, beginIDRef 로 사용)와 별개 값 — 파싱된 fr.end_field_id 를 그대로
@@ -719,21 +725,21 @@ fn emit_field_end(out: &mut String, para: &Paragraph, fr: &FieldRange) {
         } else {
             writer_to_string(|w| write_field_end_full(w, f.field_id, fr.end_field_id))
         };
-        if let Ok(xml) = xml_result {
-            out.push_str("<hp:ctrl>");
-            out.push_str(&xml);
-            out.push_str("</hp:ctrl>");
-        }
-    }
-}
-
-/// 고아(다단락) fieldEnd 를 `<hp:ctrl><hp:fieldEnd .../></hp:ctrl>` 로 방출 (Task #1556).
-fn emit_orphan_field_end(out: &mut String, ofe: &OrphanFieldEnd) {
-    if let Ok(xml) = writer_to_string(|w| write_field_end_full(w, ofe.begin_id_ref, ofe.field_id)) {
+        let xml = xml_result?;
         out.push_str("<hp:ctrl>");
         out.push_str(&xml);
         out.push_str("</hp:ctrl>");
     }
+    Ok(())
+}
+
+/// 고아(다단락) fieldEnd 를 `<hp:ctrl><hp:fieldEnd .../></hp:ctrl>` 로 방출 (Task #1556).
+fn emit_orphan_field_end(out: &mut String, ofe: &OrphanFieldEnd) -> Result<(), SerializeError> {
+    let xml = writer_to_string(|w| write_field_end_full(w, ofe.begin_id_ref, ofe.field_id))?;
+    out.push_str("<hp:ctrl>");
+    out.push_str(&xml);
+    out.push_str("</hp:ctrl>");
+    Ok(())
 }
 
 /// 문단 텍스트 전체를 char_shapes 경계로 분할하며 `splitter` 에 누적한다.
@@ -768,7 +774,7 @@ fn split_text_into(splitter: &mut RunSplitter, para: &Paragraph, tab_idx: &mut u
 }
 
 /// Paragraph 본문을 완전한 `<hp:run>` 시퀀스로 직렬화한다 (#1378 다중 run 분할).
-fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
+fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, SerializeError> {
     // ID 참조 무결성 (구현계획서 1.5): 실제 char_shapes entry 만 reference.
     // 빈 IR 의 fallback 0 은 제외 — char_shapes 미등록 문서(`Document::default()`)의
     // 직렬화를 깨지 않도록.
@@ -786,7 +792,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
         && para.field_ranges.is_empty()
         && para.orphan_field_ends.is_empty()
     {
-        return String::new();
+        return Ok(String::new());
     }
 
     let mut splitter = RunSplitter::new(para);
@@ -881,11 +887,10 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
     if !bm_inorder {
         for ctrl in &para.controls {
             if let Control::Bookmark(bm) = ctrl {
-                if let Ok(xml) = writer_to_string(|w| write_bookmark(w, bm)) {
-                    splitter.content.push_str("<hp:ctrl>");
-                    splitter.content.push_str(&xml);
-                    splitter.content.push_str("</hp:ctrl>");
-                }
+                let xml = writer_to_string(|w| write_bookmark(w, bm))?;
+                splitter.content.push_str("<hp:ctrl>");
+                splitter.content.push_str(&xml);
+                splitter.content.push_str("</hp:ctrl>");
             }
         }
     }
@@ -900,7 +905,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
     {
         let t = render_hp_t_content(&para.text, &para.tab_extended, &mut tab_idx);
         splitter.content.push_str(&t);
-        return splitter.finish();
+        return Ok(splitter.finish());
     }
 
     // mismatch 경로: 슬롯 위치 추정 불가 — 텍스트(경계 분할 포함) 후 슬롯 일괄 방출
@@ -915,26 +920,26 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                     para,
                     &mut bm_done,
                     slot_ctrl_indices[si],
-                );
+                )?;
             }
-            render_control_slot(&mut splitter.content, slot, ctx);
+            render_control_slot(&mut splitter.content, slot, ctx)?;
         }
         if bm_inorder {
             // 마지막 slot 뒤에 오는 trailing bookmark.
-            emit_inorder_bookmarks(&mut splitter.content, para, &mut bm_done, usize::MAX);
+            emit_inorder_bookmarks(&mut splitter.content, para, &mut bm_done, usize::MAX)?;
         }
         // [Task #1591 v2] 균형 field_ranges 의 닫는 fieldEnd 도 말미 복원 — 이 경로는
         // fieldBegin(슬롯)만 방출하고 fieldEnd 방출 코드가 없어 same-para 균형 필드가
         // 1/0 으로 깨지며 cc −8 (#1593). #1556 고아 복원과 동형(위치 대신 말미 일괄).
         for fr in &para.field_ranges {
-            emit_field_end(&mut splitter.content, para, fr);
+            emit_field_end(&mut splitter.content, para, fr)?;
         }
         // [Task #1556] 위치 추정 불가 경로에서도 고아 fieldEnd 의 8유닛 슬롯은 복원한다
         // (정확한 위치 대신 말미 일괄 — 최소한 char_count 보존).
         for ofe in &para.orphan_field_ends {
-            emit_orphan_field_end(&mut splitter.content, ofe);
+            emit_orphan_field_end(&mut splitter.content, ofe)?;
         }
-        return splitter.finish();
+        return Ok(splitter.finish());
     }
 
     // 메인 경로 — UTF-16 위치 축 위에서 슬롯/필드/문자/경계를 함께 처리
@@ -962,16 +967,16 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                     para,
                     &mut bm_done,
                     slot_ctrl_indices[slot_idx],
-                );
+                )?;
             }
-            render_control_slot(&mut splitter.content, slots[slot_idx], ctx);
+            render_control_slot(&mut splitter.content, slots[slot_idx], ctx)?;
             slot_idx += 1;
             expected_utf16_pos = expected_utf16_pos.saturating_add(8);
         }
         for (i, fr) in para.field_ranges.iter().enumerate() {
             if fr.start_char_idx == fr.end_char_idx && !field_end_emitted[i] {
                 splitter.cut_before(expected_utf16_pos);
-                emit_field_end(&mut splitter.content, para, fr);
+                emit_field_end(&mut splitter.content, para, fr)?;
                 expected_utf16_pos = expected_utf16_pos.saturating_add(8);
                 field_end_emitted[i] = true;
             }
@@ -980,7 +985,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
         for (i, ofe) in para.orphan_field_ends.iter().enumerate() {
             if ofe.char_idx == 0 && !orphan_emitted[i] {
                 splitter.cut_before(expected_utf16_pos);
-                emit_orphan_field_end(&mut splitter.content, ofe);
+                emit_orphan_field_end(&mut splitter.content, ofe)?;
                 expected_utf16_pos = expected_utf16_pos.saturating_add(8);
                 orphan_emitted[i] = true;
             }
@@ -1016,7 +1021,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                     &mut tab_idx,
                 );
                 splitter.cut_before(expected_utf16_pos);
-                emit_orphan_field_end(&mut splitter.content, &para.orphan_field_ends[oi]);
+                emit_orphan_field_end(&mut splitter.content, &para.orphan_field_ends[oi])?;
                 expected_utf16_pos = expected_utf16_pos.saturating_add(8);
                 orphan_emitted[oi] = true;
                 continue;
@@ -1035,9 +1040,9 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                     para,
                     &mut bm_done,
                     slot_ctrl_indices[slot_idx],
-                );
+                )?;
             }
-            render_control_slot(&mut splitter.content, slots[slot_idx], ctx);
+            render_control_slot(&mut splitter.content, slots[slot_idx], ctx)?;
             let emitted_ctrl_idx = slot_ctrl_indices[slot_idx];
             slot_idx += 1;
             expected_utf16_pos = expected_utf16_pos.saturating_add(8);
@@ -1052,7 +1057,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                     && fr.control_idx == emitted_ctrl_idx
                 {
                     splitter.cut_before(expected_utf16_pos);
-                    emit_field_end(&mut splitter.content, para, fr);
+                    emit_field_end(&mut splitter.content, para, fr)?;
                     expected_utf16_pos = expected_utf16_pos.saturating_add(8);
                     field_end_emitted[i] = true;
                 }
@@ -1069,7 +1074,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                     &mut tab_idx,
                 );
                 splitter.cut_before(expected_utf16_pos);
-                emit_orphan_field_end(&mut splitter.content, ofe);
+                emit_orphan_field_end(&mut splitter.content, ofe)?;
                 expected_utf16_pos = expected_utf16_pos.saturating_add(8);
                 orphan_emitted[i] = true;
             }
@@ -1090,7 +1095,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                     &mut tab_idx,
                 );
                 splitter.cut_before(expected_utf16_pos);
-                emit_field_end(&mut splitter.content, para, fr);
+                emit_field_end(&mut splitter.content, para, fr)?;
                 field_end_emitted[i] = true;
             }
         }
@@ -1121,7 +1126,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                 &mut tab_idx,
             );
             splitter.cut_before(expected_utf16_pos);
-            render_control_slot(&mut splitter.content, slots[slot_idx], ctx);
+            render_control_slot(&mut splitter.content, slots[slot_idx], ctx)?;
             slot_idx += 1;
             expected_utf16_pos = expected_utf16_pos.saturating_add(8);
             continue;
@@ -1161,7 +1166,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                     &mut tab_idx,
                 );
                 splitter.cut_before(expected_utf16_pos);
-                emit_field_end(&mut splitter.content, para, fr);
+                emit_field_end(&mut splitter.content, para, fr)?;
                 // [#1407] fieldEnd 는 8유닛 슬롯을 소비한다. expected 를 +8 진행하지
                 // 않으면 다음 idx 에서 텍스트-끝 슬롯(newNum 등)이 이 8유닛 갭을
                 // 가로채 텍스트가 +8 밀린다 (143E 문단 0.14: char_offsets[3] 27→35).
@@ -1193,7 +1198,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                 continue;
             }
             splitter.cut_before(expected_utf16_pos);
-            emit_field_end(&mut splitter.content, para, fr);
+            emit_field_end(&mut splitter.content, para, fr)?;
             expected_utf16_pos = expected_utf16_pos.saturating_add(8);
             field_end_emitted[i] = true;
         }
@@ -1207,7 +1212,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                 "미방출 고아 fieldEnd 는 텍스트 끝이어야 함"
             );
             splitter.cut_before(expected_utf16_pos);
-            emit_orphan_field_end(&mut splitter.content, ofe);
+            emit_orphan_field_end(&mut splitter.content, ofe)?;
             expected_utf16_pos = expected_utf16_pos.saturating_add(8);
             orphan_emitted[i] = true;
         }
@@ -1221,9 +1226,9 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                 para,
                 &mut bm_done,
                 slot_ctrl_indices[slot_idx],
-            );
+            )?;
         }
-        render_control_slot(&mut splitter.content, slots[slot_idx], ctx);
+        render_control_slot(&mut splitter.content, slots[slot_idx], ctx)?;
         let emitted_ctrl_idx = slot_ctrl_indices[slot_idx];
         slot_idx += 1;
         expected_utf16_pos = expected_utf16_pos.saturating_add(8);
@@ -1235,7 +1240,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
                 && fr.control_idx == emitted_ctrl_idx
             {
                 splitter.cut_before(expected_utf16_pos);
-                emit_field_end(&mut splitter.content, para, fr);
+                emit_field_end(&mut splitter.content, para, fr)?;
                 expected_utf16_pos = expected_utf16_pos.saturating_add(8);
                 field_end_emitted[i] = true;
             }
@@ -1245,17 +1250,17 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> String {
     for (i, fr) in para.field_ranges.iter().enumerate() {
         if !field_end_emitted[i] {
             splitter.cut_before(expected_utf16_pos);
-            emit_field_end(&mut splitter.content, para, fr);
+            emit_field_end(&mut splitter.content, para, fr)?;
             expected_utf16_pos = expected_utf16_pos.saturating_add(8);
             field_end_emitted[i] = true;
         }
     }
     if bm_inorder {
         // 마지막 슬롯 뒤(컨트롤 순서 후미)의 trailing bookmark.
-        emit_inorder_bookmarks(&mut splitter.content, para, &mut bm_done, usize::MAX);
+        emit_inorder_bookmarks(&mut splitter.content, para, &mut bm_done, usize::MAX)?;
     }
 
-    splitter.finish()
+    Ok(splitter.finish())
 }
 
 fn inferred_control_slot_count(para: &Paragraph) -> usize {
@@ -1306,6 +1311,7 @@ pub(crate) fn is_hwpx_inline_slot(control: &Control) -> bool {
             | Control::Picture(_)
             | Control::CharOverlap(_)
             | Control::Ruby(_)
+            | Control::Hyperlink(_)
             | Control::Equation(_)
             | Control::Field(_)
             | Control::Form(_)
@@ -1340,7 +1346,7 @@ fn emit_inorder_bookmarks(
     para: &Paragraph,
     bm_done: &mut [bool],
     upto_ctrl_idx: usize,
-) {
+) -> Result<(), SerializeError> {
     for (i, ctrl) in para.controls.iter().enumerate() {
         if i >= upto_ctrl_idx {
             break;
@@ -1349,37 +1355,39 @@ fn emit_inorder_bookmarks(
             continue;
         }
         if let Control::Bookmark(bm) = ctrl {
-            if let Ok(xml) = writer_to_string(|w| write_bookmark(w, bm)) {
-                content.push_str("<hp:ctrl>");
-                content.push_str(&xml);
-                content.push_str("</hp:ctrl>");
-            }
+            let xml = writer_to_string(|w| write_bookmark(w, bm))?;
+            content.push_str("<hp:ctrl>");
+            content.push_str(&xml);
+            content.push_str("</hp:ctrl>");
             bm_done[i] = true;
         }
     }
+    Ok(())
 }
 
-fn render_control_slot(out: &mut String, control: &Control, ctx: &mut SerializeContext) {
+fn render_control_slot(
+    out: &mut String,
+    control: &Control,
+    ctx: &mut SerializeContext,
+) -> Result<(), SerializeError> {
     match control {
         Control::Equation(eq) => {
             out.push_str(&render_equation(eq));
         }
-        Control::Table(tbl) => match writer_to_string(|w| table::write_table(w, tbl, ctx)) {
-            Ok(xml) => out.push_str(&xml),
-            Err(e) => eprintln!("[hwpx] Table 직렬화 실패: {e}"),
-        },
-        Control::Picture(pic) => match writer_to_string(|w| picture::write_picture(w, pic, ctx)) {
-            Ok(xml) => out.push_str(&xml),
-            Err(e) => eprintln!("[hwpx] Picture 직렬화 실패: {e}"),
-        },
+        Control::Table(tbl) => {
+            out.push_str(&writer_to_string(|w| table::write_table(w, tbl, ctx))?);
+        }
+        Control::Picture(pic) => {
+            out.push_str(&writer_to_string(|w| picture::write_picture(w, pic, ctx))?);
+        }
         Control::Shape(shape) => {
-            out.push_str(&render_shape(shape, ctx));
+            out.push_str(&render_shape(shape, ctx)?);
         }
         Control::Footnote(note) => {
-            out.push_str(&render_footnote(note, ctx));
+            out.push_str(&render_footnote(note, ctx)?);
         }
         Control::Endnote(note) => {
-            out.push_str(&render_endnote(note, ctx));
+            out.push_str(&render_endnote(note, ctx)?);
         }
         Control::Field(f) => {
             // fieldBegin은 <hp:ctrl>...</hp:ctrl>로 감싸야 함 (Table/Picture와 달리)
@@ -1407,7 +1415,7 @@ fn render_control_slot(out: &mut String, control: &Control, ctx: &mut SerializeC
                         let sid = ctx.effective_style_id(para.style_id);
                         ctx.style_ids.reference(sid as u16);
                         let (runs, linesegs, advance) =
-                            render_paragraph_parts(para, vert_cursor, ctx);
+                            render_paragraph_parts(para, vert_cursor, ctx)?;
                         vert_cursor = advance;
                         let pid = ctx.next_para_id();
                         out.push_str(&render_hp_p_open(para, pid, sid));
@@ -1419,28 +1427,28 @@ fn render_control_slot(out: &mut String, control: &Control, ctx: &mut SerializeC
                 }
                 out.push_str("</hp:fieldBegin>");
             } else {
-                match writer_to_string(|w| write_field_begin(w, f)) {
-                    Ok(xml) => out.push_str(&xml),
-                    Err(e) => eprintln!("[hwpx] Field 직렬화 실패: {e}"),
-                }
+                out.push_str(&writer_to_string(|w| write_field_begin(w, f))?);
             }
             out.push_str("</hp:ctrl>");
         }
         Control::PageHide(ph) => out.push_str(&render_page_hiding(ph)),
         Control::PageNumberPos(pn) => out.push_str(&render_page_num(pn)),
         Control::NewNumber(nn) => out.push_str(&render_new_num(nn)),
-        Control::Header(h) => out.push_str(&render_header(h, ctx)),
-        Control::Footer(f) => out.push_str(&render_footer(f, ctx)),
+        Control::Header(h) => out.push_str(&render_header(h, ctx)?),
+        Control::Footer(f) => out.push_str(&render_footer(f, ctx)?),
         Control::AutoNumber(an) => out.push_str(&render_autonum(an)),
-        Control::Form(form) => match writer_to_string(|w| super::form::write_form(w, form)) {
-            // 폼은 <hp:run> 직접 자식 (Table/Picture와 동일, <hp:ctrl> 비포장)
-            Ok(xml) => out.push_str(&xml),
-            Err(e) => eprintln!("[hwpx] Form 직렬화 실패: {e}"),
-        },
+        // 폼은 <hp:run> 직접 자식 (Table/Picture와 동일, <hp:ctrl> 비포장)
+        Control::Form(form) => {
+            out.push_str(&writer_to_string(|w| super::form::write_form(w, form))?);
+        }
         Control::CharOverlap(co) => out.push_str(&render_compose(co)),
         // [Task #1587] 덧말(Ruby) 인라인 방출. is_hwpx_inline_slot 에 등록돼 슬롯 위치는
         // 자동이나 종전 방출 arm 부재로 드롭됐다. parse_dutmal 의 역매핑.
         Control::Ruby(r) => out.push_str(&render_dutmal(r)),
+        // HWP3 hypertext objects arrive as the legacy Hyperlink variant rather than
+        // Field + FieldRange. Lower them to a complete HWPX hyperlink field so the
+        // URL and rescued display text both survive export.
+        Control::Hyperlink(link) => render_legacy_hyperlink(out, link, ctx),
         // [Task #1379/#1584] 인라인 colPr 방출.
         // - subList(depth>0): 전부 인라인 방출(원본 XML 인라인 존재).
         // - 본문(depth 0): 첫 문단의 첫 ColumnDef 1개는 섹션 템플릿 colPr 앵커가 이미
@@ -1455,6 +1463,7 @@ fn render_control_slot(out: &mut String, control: &Control, ctx: &mut SerializeC
         }
         _ => {}
     }
+    Ok(())
 }
 
 /// 덧말(Ruby) `<hp:dutmal>` 직렬화 (#1587). `parse_dutmal` 의 역매핑.
@@ -1479,6 +1488,21 @@ fn render_dutmal(r: &Ruby) -> String {
         xml_escape(&r.main_text),
         xml_escape(&r.ruby_text),
     )
+}
+
+fn render_legacy_hyperlink(out: &mut String, link: &Hyperlink, ctx: &mut SerializeContext) {
+    let field_id = ctx.next_legacy_hyperlink_id();
+    let begin = writer_to_string(|w| write_hyperlink_begin(w, link, field_id));
+    let end = writer_to_string(|w| write_field_end(w, field_id));
+    if let (Ok(begin), Ok(end)) = (begin, end) {
+        out.push_str("<hp:ctrl>");
+        out.push_str(&begin);
+        out.push_str("</hp:ctrl><hp:t>");
+        out.push_str(&xml_escape(&link.text));
+        out.push_str("</hp:t><hp:ctrl>");
+        out.push_str(&end);
+        out.push_str("</hp:ctrl>");
+    }
 }
 
 fn generated_field_parameters(field: &Field) -> Option<String> {
@@ -1641,7 +1665,7 @@ fn render_header_footer(
     tag: &str,
     h: HeaderFooterFields<'_>,
     ctx: &mut SerializeContext,
-) -> String {
+) -> Result<String, SerializeError> {
     let mut out = format!(
         concat!(
             r#"<hp:ctrl><hp:{tag} id="{id}" applyPageType="{apply}">"#,
@@ -1659,7 +1683,7 @@ fn render_header_footer(
     );
     let mut vert_cursor: u32 = 0;
     for p in h.paragraphs.iter() {
-        let (runs, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx);
+        let (runs, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx)?;
         vert_cursor = advance;
         let pid = ctx.next_para_id();
         let sid = ctx.effective_style_id(p.style_id);
@@ -1669,7 +1693,7 @@ fn render_header_footer(
         out.push_str("</hp:p>");
     }
     out.push_str(&format!("</hp:subList></hp:{tag}></hp:ctrl>", tag = tag));
-    out
+    Ok(out)
 }
 
 /// render_header_footer 공통 인자 묶음 (Header/Footer가 동일 필드를 가짐).
@@ -1690,7 +1714,7 @@ fn hwpx_header_footer_id(raw_ctrl_extra: &[u8]) -> u32 {
         .unwrap_or(0)
 }
 
-fn render_header(h: &Header, ctx: &mut SerializeContext) -> String {
+fn render_header(h: &Header, ctx: &mut SerializeContext) -> Result<String, SerializeError> {
     render_header_footer(
         "header",
         HeaderFooterFields {
@@ -1706,7 +1730,7 @@ fn render_header(h: &Header, ctx: &mut SerializeContext) -> String {
     )
 }
 
-fn render_footer(f: &Footer, ctx: &mut SerializeContext) -> String {
+fn render_footer(f: &Footer, ctx: &mut SerializeContext) -> Result<String, SerializeError> {
     render_header_footer(
         "footer",
         HeaderFooterFields {
@@ -1826,49 +1850,28 @@ where
         .map_err(|e| SerializeError::XmlError(format!("invalid UTF-8 from XML writer: {e}")))
 }
 
-fn render_shape(shape: &ShapeObject, ctx: &mut SerializeContext) -> String {
+fn render_shape(shape: &ShapeObject, ctx: &mut SerializeContext) -> Result<String, SerializeError> {
     // Rectangle: Writer-based serializer (drawText 포함)
     if let ShapeObject::Rectangle(r) = shape {
-        return match writer_to_string(|w| super::shape::write_rect(w, r, ctx)) {
-            Ok(xml) => xml,
-            Err(e) => {
-                eprintln!("[hwpx] Shape::Rectangle 직렬화 실패: {e}");
-                String::new()
-            }
-        };
+        return writer_to_string(|w| super::shape::write_rect(w, r, ctx));
     }
     // Line: Writer-based serializer
     if let ShapeObject::Line(l) = shape {
-        return match writer_to_string(|w| super::shape::write_line(w, l, ctx)) {
-            Ok(xml) => xml,
-            Err(e) => {
-                eprintln!("[hwpx] Shape::Line 직렬화 실패: {e}");
-                String::new()
-            }
-        };
+        return writer_to_string(|w| super::shape::write_line(w, l, ctx));
     }
     if let ShapeObject::Group(g) = shape {
-        let mut xml = match writer_to_string(|w| {
-            super::shape::write_container_open(w, &g.common, &g.shape_attr)
-        }) {
-            Ok(xml) => xml,
-            Err(e) => {
-                eprintln!("[hwpx] Shape::Group 직렬화 실패: {e}");
-                String::new()
-            }
-        };
+        let mut xml =
+            writer_to_string(|w| super::shape::write_container_open(w, &g.common, &g.shape_attr))?;
         for child in &g.children {
-            xml.push_str(&render_shape(child, ctx));
+            xml.push_str(&render_shape(child, ctx)?);
         }
         // 캡션 (#1403) 은 자식 도형 뒤에 방출 — 한컴 실물(aift.hwpx) 순서
         // 설명(#1392)은 캡션 직후 (write_container_close 내부)
-        match writer_to_string(|w| {
+        let close = writer_to_string(|w| {
             super::shape::write_container_close(w, g.caption.as_ref(), &g.common, ctx)
-        }) {
-            Ok(close) => xml.push_str(&close),
-            Err(e) => eprintln!("[hwpx] Shape::Group 닫기 실패: {e}"),
-        }
-        return xml;
+        })?;
+        xml.push_str(&close);
+        return Ok(xml);
     }
     const NO_PTS: &[crate::model::Point] = &[];
     let (tag, c, caption, drawing, points): (
@@ -1909,23 +1912,16 @@ fn render_shape(shape: &ShapeObject, ctx: &mut SerializeContext) -> String {
         ),
         ShapeObject::Group(_) => unreachable!(),
         ShapeObject::Picture(pic) => {
-            return match writer_to_string(|w| picture::write_picture(w, pic, ctx)) {
-                Ok(xml) => xml,
-                Err(e) => {
-                    eprintln!("[hwpx] Shape::Picture 직렬화 실패: {e}");
-                    String::new()
-                }
-            };
+            return writer_to_string(|w| picture::write_picture(w, pic, ctx));
         }
         ShapeObject::Chart(ch) => ("chart", &ch.common, &ch.caption, None, NO_PTS),
         ShapeObject::Ole(o) => {
-            return match writer_to_string(|w| super::shape::write_ole(w, o, ctx)) {
-                Ok(xml) => xml,
-                Err(e) => {
-                    eprintln!("[hwpx] Shape::Ole 직렬화 실패: {e}");
-                    String::new()
-                }
-            };
+            if let Some(chart_href) = ctx.resolve_chart_href(o.bin_data_id).map(str::to_string) {
+                return writer_to_string(|w| {
+                    super::shape::write_hwpx_chart(w, o, &chart_href, ctx)
+                });
+            }
+            return writer_to_string(|w| super::shape::write_ole(w, o, ctx));
         }
     };
     // [Task #1598] ellipse / arc 전용 지오메트리(center/축/시작끝점) — 미방출 시 한글이
@@ -1962,45 +1958,39 @@ fn render_common_shape_xml(
     points: &[crate::model::Point],
     geom_tail: &str,
     ctx: &mut SerializeContext,
-) -> String {
+) -> Result<String, SerializeError> {
     // 도형 좌표계 블록(offset/orgSz/curSz/flip/rotationInfo/renderingInfo) — 누락 시
     // 회전/뒤집힘이 소실되어 bbox 가 전치되는 등 렌더가 어긋난다(#1501 동류, polygon 등).
-    let shape_block = drawing
-        .map(|d| {
-            writer_to_string(|w| super::shape::write_shape_component_block(w, &d.shape_attr))
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
+    let shape_block = match drawing {
+        Some(d) => {
+            writer_to_string(|w| super::shape::write_shape_component_block(w, &d.shape_attr))?
+        }
+        None => String::new(),
+    };
     // [#1596] 지오메트리(lineShape/fillBrush/shadow/꼭짓점) — 종전 드롭으로 도형 형상 소실 →
     // 페이지 붕괴(#1589 잔여). write_rect 와 동형 순서(shape_block 직후, sz 직전).
-    let geometry = drawing
-        .map(|d| {
-            let ls = writer_to_string(|w| super::shape::write_line_shape(w, &d.border_line))
-                .unwrap_or_default();
-            let fb = writer_to_string(|w| super::shape::write_fill_brush(w, &d.fill, ctx))
-                .unwrap_or_default();
-            let sh = writer_to_string(|w| super::shape::write_shadow(w, d)).unwrap_or_default();
+    let geometry = match drawing {
+        Some(d) => {
+            let ls = writer_to_string(|w| super::shape::write_line_shape(w, &d.border_line))?;
+            let fb = writer_to_string(|w| super::shape::write_fill_brush(w, &d.fill, ctx))?;
+            let sh = writer_to_string(|w| super::shape::write_shadow(w, d))?;
             // [Issue #1944] drawText(도형 내 글상자 문단) — rect 경로(shape.rs write_rect)는
             // shadow 직후 방출하나 legacy 공용 경로(ellipse/arc/polygon/curve)는 누락해
             // 도형 안 텍스트가 저장 시 소실됐다(순서도 마름모 라벨 등). OWPML 순서
             // (shadow → drawText → hc:pt) 대로 shadow 와 points 사이에 방출한다.
-            let dt = d
-                .text_box
-                .as_ref()
-                .filter(|tb| !tb.paragraphs.is_empty())
-                .map(|tb| {
-                    writer_to_string(|w| super::shape::write_draw_text(w, tb, ctx))
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default();
+            let dt = match d.text_box.as_ref().filter(|tb| !tb.paragraphs.is_empty()) {
+                Some(tb) => writer_to_string(|w| super::shape::write_draw_text(w, tb, ctx))?,
+                None => String::new(),
+            };
             let pts: String = points
                 .iter()
                 .map(|p| format!(r#"<hc:pt x="{}" y="{}"/>"#, p.x, p.y))
                 .collect();
             // [#1598] ellipse/arc 전용 지오메트리(center/축/시작끝점)는 hc:pt 와 상호배타.
             format!("{ls}{fb}{sh}{dt}{pts}{geom_tail}")
-        })
-        .unwrap_or_default();
+        }
+        None => String::new(),
+    };
     // 태그 부수 속성 — numberingType/dropcapstyle/href/groupLevel/instid (rect/line 동형).
     let group_level = drawing.map(|d| d.shape_attr.group_level).unwrap_or(0);
     let instid = drawing
@@ -2053,20 +2043,18 @@ fn render_common_shape_xml(
     // 캡션 (#1403) — HWP5 파서는 모든 도형의 캡션을 적재하므로(parser/control/shape.rs)
     // legacy 경로(ellipse/arc/polygon/curve/chart/ole)도 방출해야 소실되지 않는다.
     if let Some(cap) = caption {
-        match writer_to_string(|w| super::table::write_caption(w, cap, ctx)) {
-            Ok(xml) => out.push_str(&xml),
-            Err(e) => eprintln!("[hwpx] Shape({tag}) 캡션 직렬화 실패: {e}"),
-        }
+        out.push_str(&writer_to_string(|w| {
+            super::table::write_caption(w, cap, ctx)
+        })?);
     }
     // 설명 (#1451) — caption 직후 (OWPML AbstractShapeObjectType: outMargin→caption→shapeComment).
     // picture.rs:104 선례와 동일 순서. legacy 경로(ellipse/arc/polygon/curve/chart/ole) 보존.
     // 빈 description 미방출은 write_shape_comment 내부 가드로 보장된다.
-    match writer_to_string(|w| super::shape::write_shape_comment(w, c)) {
-        Ok(xml) => out.push_str(&xml),
-        Err(e) => eprintln!("[hwpx] Shape({tag}) shapeComment 직렬화 실패: {e}"),
-    }
+    out.push_str(&writer_to_string(|w| {
+        super::shape::write_shape_comment(w, c)
+    })?);
     out.push_str(&format!("</hp:{tag}>"));
-    out
+    Ok(out)
 }
 
 /// [#2716] `<hp:footNote>` / `<hp:endNote>` 의 IR 보존 속성 묶음.
@@ -2146,7 +2134,7 @@ fn render_note_sublist(
     attrs: NoteAttrs,
     paragraphs: &[Paragraph],
     ctx: &mut SerializeContext,
-) -> String {
+) -> Result<String, SerializeError> {
     let mut out = format!(
         r#"<hp:ctrl><hp:{tag}{attrs}><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"#,
         tag = tag,
@@ -2154,7 +2142,7 @@ fn render_note_sublist(
     );
     let mut vert_cursor: u32 = 0;
     for p in paragraphs.iter() {
-        let (runs, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx);
+        let (runs, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx)?;
         vert_cursor = advance;
         let pid = ctx.next_para_id();
         let sid = ctx.effective_style_id(p.style_id);
@@ -2164,10 +2152,10 @@ fn render_note_sublist(
         out.push_str("</hp:p>");
     }
     out.push_str(&format!("</hp:subList></hp:{tag}></hp:ctrl>", tag = tag));
-    out
+    Ok(out)
 }
 
-fn render_footnote(note: &Footnote, ctx: &mut SerializeContext) -> String {
+fn render_footnote(note: &Footnote, ctx: &mut SerializeContext) -> Result<String, SerializeError> {
     // [#2716] IR 이 보존한 장식 문자/번호 모양/고유 ID 를 모두 방출한다. 종전엔 number 만
     // 써서 저장 왕복마다 앞 장식('문')이 사라지고 뒤 장식이 ')' 로 변조됐다.
     render_note_sublist(
@@ -2184,7 +2172,7 @@ fn render_footnote(note: &Footnote, ctx: &mut SerializeContext) -> String {
     )
 }
 
-fn render_endnote(note: &Endnote, ctx: &mut SerializeContext) -> String {
+fn render_endnote(note: &Endnote, ctx: &mut SerializeContext) -> Result<String, SerializeError> {
     // [#2716] Footnote 와 동일 계약.
     render_note_sublist(
         "endNote",
@@ -2648,7 +2636,8 @@ mod tests {
         let c = CommonObjAttr::default();
         let mut ctx = SerializeContext::default();
 
-        let xml = render_common_shape_xml("polygon", &c, &None, Some(&drawing), &[], "", &mut ctx);
+        let xml = render_common_shape_xml("polygon", &c, &None, Some(&drawing), &[], "", &mut ctx)
+            .unwrap();
         assert!(
             xml.contains("<hp:drawText"),
             "polygon 도형이 drawText 를 방출해야 함: {xml}"
@@ -2663,7 +2652,7 @@ mod tests {
             ..Default::default()
         };
         let xml_empty =
-            render_common_shape_xml("polygon", &c, &None, Some(&empty), &[], "", &mut ctx);
+            render_common_shape_xml("polygon", &c, &None, Some(&empty), &[], "", &mut ctx).unwrap();
         assert!(
             !xml_empty.contains("<hp:drawText"),
             "빈 글상자는 drawText 를 방출하지 않아야 함"
@@ -2689,7 +2678,8 @@ mod tests {
         let mut ctx = SerializeContext::default();
 
         for tag in ["ellipse", "arc", "polygon", "curve", "chart"] {
-            let xml = render_common_shape_xml(tag, &c, &None, Some(&drawing), &[], "", &mut ctx);
+            let xml =
+                render_common_shape_xml(tag, &c, &None, Some(&drawing), &[], "", &mut ctx).unwrap();
             assert!(
                 xml.contains(r#"widthRelTo="COLUMN""#),
                 "{tag}: 너비 기준 COLUMN 이 보존되어야 함: {xml}"
@@ -2720,7 +2710,8 @@ mod tests {
         let drawing = DrawingObjAttr::default();
         let mut ctx = SerializeContext::default();
 
-        let xml = render_common_shape_xml("polygon", &c, &None, Some(&drawing), &[], "", &mut ctx);
+        let xml = render_common_shape_xml("polygon", &c, &None, Some(&drawing), &[], "", &mut ctx)
+            .unwrap();
         assert!(
             xml.contains(r#"protect="0""#),
             "size_protect=false 여도 protect=\"0\" 속성이 방출되어야 함: {xml}"
@@ -2757,7 +2748,8 @@ mod tests {
                 ..Default::default()
             };
             let xml =
-                render_common_shape_xml("polygon", &c, &None, Some(&drawing), &[], "", &mut ctx);
+                render_common_shape_xml("polygon", &c, &None, Some(&drawing), &[], "", &mut ctx)
+                    .unwrap();
             assert!(
                 xml.contains(&format!(r#"heightRelTo="{expected}""#)),
                 "{criterion:?} → heightRelTo=\"{expected}\" 이어야 함: {xml}"
@@ -4146,7 +4138,7 @@ mod tests {
     fn runs_of(para: &Paragraph) -> String {
         let doc = Document::default();
         let mut ctx = SerializeContext::collect_from_document(&doc);
-        render_runs(para, &mut ctx)
+        render_runs(para, &mut ctx).unwrap()
     }
 
     #[test]
@@ -4453,7 +4445,7 @@ mod tests {
         poly.drawing.border_line.width = 50;
         poly.drawing.shadow_type = 1;
         let mut ctx = SerializeContext::collect_from_document(&Document::default());
-        let xml = render_shape(&ShapeObject::Polygon(poly), &mut ctx);
+        let xml = render_shape(&ShapeObject::Polygon(poly), &mut ctx).unwrap();
         assert!(xml.contains("<hc:pt "), "폴리곤 꼭짓점(hc:pt) 방출: {xml}");
         assert!(xml.contains("<hp:lineShape"), "lineShape 방출: {xml}");
         assert!(xml.contains("<hp:shadow"), "shadow 방출: {xml}");

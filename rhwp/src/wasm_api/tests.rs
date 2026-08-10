@@ -4499,6 +4499,95 @@ fn test_clipboard_copy_paste_multi_paragraph() {
 }
 
 #[test]
+fn p0_multisection_range_copy_format_delete_and_snapshot_restore() {
+    let mut doc = HwpDocument::create_empty();
+    doc.create_blank_document_native().unwrap();
+
+    let make_para = |text: &str| {
+        let mut para = Paragraph::default();
+        para.text = text.to_string();
+        para.char_count = text.chars().count() as u32 + 1;
+        para.char_offsets = text.chars().enumerate().map(|(i, _)| i as u32).collect();
+        para.char_shapes = vec![crate::model::paragraph::CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 0,
+        }];
+        para.has_para_text = true;
+        para
+    };
+
+    let mut document = doc.document().clone();
+    let template = document.sections[0].clone();
+    document.sections = vec![template.clone(), template.clone(), template];
+    document.sections[0].paragraphs = vec![make_para("S0-HEAD"), make_para("S0-TAIL")];
+    document.sections[1].paragraphs = vec![make_para("S1-ONLY")];
+    document.sections[2].paragraphs = vec![make_para("S2-HEAD"), make_para("S2-TAIL")];
+    doc.set_document(document);
+
+    doc.copy_selection_across_sections_native(0, 0, 3, 2, 1, 2)
+        .expect("cross-section copy");
+    assert_eq!(
+        doc.get_clipboard_text_native(),
+        "HEAD\nS0-TAIL\nS1-ONLY\nS2-HEAD\nS2",
+        "all section sentinels must be copied in document order"
+    );
+
+    doc.apply_char_format_across_sections_native(0, 0, 3, 2, 1, 2, r#"{"bold":true}"#)
+        .expect("cross-section character formatting");
+    let char_props = |doc: &HwpDocument, sec, para, offset| -> Value {
+        serde_json::from_str(
+            &doc.get_char_properties_at_native(sec, para, offset)
+                .expect("char props"),
+        )
+        .expect("char props json")
+    };
+    assert_eq!(char_props(&doc, 0, 0, 3)["bold"], true);
+    assert_eq!(char_props(&doc, 1, 0, 0)["bold"], true);
+    assert_eq!(char_props(&doc, 2, 1, 1)["bold"], true);
+    assert_eq!(char_props(&doc, 0, 0, 1)["bold"], false);
+    assert_eq!(char_props(&doc, 2, 1, 3)["bold"], false);
+
+    doc.apply_para_format_across_sections_native(0, 0, 2, 1, r#"{"alignment":"center"}"#)
+        .expect("cross-section paragraph formatting");
+    for (section_idx, section) in doc.document().sections.iter().enumerate() {
+        for para_idx in 0..section.paragraphs.len() {
+            let props: Value = serde_json::from_str(
+                &doc.get_para_properties_at_native(section_idx, para_idx)
+                    .expect("para props"),
+            )
+            .expect("para props json");
+            assert_eq!(props["alignment"], "center");
+        }
+    }
+
+    let snapshot = doc.save_snapshot_native();
+    doc.delete_range_across_sections_native(0, 0, 3, 2, 1, 2)
+        .expect("cross-section delete");
+    let texts: Vec<Vec<&str>> = doc
+        .document()
+        .sections
+        .iter()
+        .map(|section| {
+            section
+                .paragraphs
+                .iter()
+                .map(|para| para.text.as_str())
+                .collect()
+        })
+        .collect();
+    assert_eq!(texts, vec![vec!["S0-"], vec![""], vec!["-TAIL"]]);
+
+    doc.restore_snapshot_native(snapshot)
+        .expect("cross-section delete undo snapshot");
+    doc.copy_selection_across_sections_native(0, 0, 3, 2, 1, 2)
+        .expect("copy after snapshot restore");
+    assert_eq!(
+        doc.get_clipboard_text_native(),
+        "HEAD\nS0-TAIL\nS1-ONLY\nS2-HEAD\nS2"
+    );
+}
+
+#[test]
 fn test_clipboard_copy_control() {
     let mut doc = create_doc_with_table();
 

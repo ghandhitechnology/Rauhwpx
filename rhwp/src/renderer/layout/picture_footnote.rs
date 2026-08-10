@@ -1,6 +1,9 @@
 //! 그림/캡션 레이아웃 + 각주 영역 레이아웃
 
 use super::super::composer::{compose_paragraph, ComposedParagraph};
+use super::super::float_placement::{
+    flow_cursor_after_float, object_frame, ObjectPlacementContext,
+};
 use super::super::page_layout::LayoutRect;
 use super::super::pagination::{FootnoteRef, FootnoteSource};
 use super::super::render_tree::*;
@@ -309,9 +312,6 @@ impl LayoutEngine {
         para_y: f64,
         alignment: Alignment,
     ) -> (f64, f64) {
-        let h_offset = hwpunit_to_px(common.horizontal_offset as i32, self.dpi);
-        let v_offset = hwpunit_to_px(common.vertical_offset as i32, self.dpi);
-
         let x = if common.treat_as_char {
             match alignment {
                 Alignment::Center | Alignment::Distribute => {
@@ -321,36 +321,39 @@ impl LayoutEngine {
                 _ => container.x,
             }
         } else {
-            // 가로 기준 영역 결정
-            let (ref_x, ref_w) = match common.horz_rel_to {
-                HorzRelTo::Paper => (paper_area.x, paper_area.width),
-                HorzRelTo::Page => (body_area.x, body_area.width),
-                HorzRelTo::Column => (col_area.x, col_area.width),
-                HorzRelTo::Para => (container.x, container.width),
-            };
-            // 가로 정렬 방식 적용
-            match common.horz_align {
-                HorzAlign::Left | HorzAlign::Inside => ref_x + h_offset,
-                HorzAlign::Center => ref_x + (ref_w - obj_width) / 2.0 + h_offset,
-                HorzAlign::Right | HorzAlign::Outside => ref_x + ref_w - obj_width - h_offset,
-            }
+            object_frame(
+                common,
+                obj_width,
+                obj_height,
+                ObjectPlacementContext {
+                    paper: *paper_area,
+                    page: *body_area,
+                    column: *col_area,
+                    paragraph: *container,
+                    line_y: para_y,
+                },
+                self.dpi,
+            )
+            .x
         };
 
         let y = if common.treat_as_char {
             para_y
         } else {
-            // 세로 기준 영역 결정
-            let (ref_y, ref_h) = match common.vert_rel_to {
-                VertRelTo::Paper => (paper_area.y, paper_area.height),
-                VertRelTo::Page => (body_area.y, body_area.height),
-                VertRelTo::Para => (para_y, container.height),
-            };
-            // 세로 정렬 방식 적용
-            match common.vert_align {
-                VertAlign::Top | VertAlign::Inside => ref_y + v_offset,
-                VertAlign::Center => ref_y + (ref_h - obj_height) / 2.0 + v_offset,
-                VertAlign::Bottom | VertAlign::Outside => ref_y + ref_h - obj_height - v_offset,
-            }
+            object_frame(
+                common,
+                obj_width,
+                obj_height,
+                ObjectPlacementContext {
+                    paper: *paper_area,
+                    page: *body_area,
+                    column: *col_area,
+                    paragraph: *container,
+                    line_y: para_y,
+                },
+                self.dpi,
+            )
+            .y
         };
 
         (x, y)
@@ -485,7 +488,21 @@ impl LayoutEngine {
                 ),
                 BoundingBox::new(adjusted_pic_x, pic_y, pic_width, pic_height),
             ));
-            return total_height;
+            if vpos_accounts_for_height {
+                return base_y;
+            }
+            return flow_cursor_after_float(
+                &picture.common,
+                LayoutRect {
+                    x: pic_x,
+                    y: base_y,
+                    width: total_width,
+                    height: total_height,
+                },
+                *col_area,
+                y_offset,
+                self.dpi,
+            );
         }
 
         // 그림 자르기
@@ -593,20 +610,23 @@ impl LayoutEngine {
         // base_y는 vert_offset이 적용된 실제 그림 상단 y이므로, base_y + total_height가
         // 그림 하단 y가 된다. y_offset(앵커 단락 y) 대신 base_y를 기준으로 반환해야
         // vert_offset이 있는 혼합 단락(텍스트+그림)에서 후속 단락이 그림 위로 겹치지 않는다.
-        let total_height = pic_height
-            + caption_height
-            + if caption_height > 0.0 {
-                caption_spacing
-            } else {
-                0.0
-            };
-        match (picture.common.vert_rel_to, picture.common.text_wrap) {
-            (VertRelTo::Para, TextWrap::BehindText | TextWrap::InFrontOfText) => y_offset,
-            // [Task #1079] 파일 vpos 가 그림 공간을 이미 반영하면 그림은 gap 안에 그려졌고
-            // 후속 문단은 파일 vpos(그림 para 줄)로 흐르므로 추가 진행 없이 base_y 반환.
-            (VertRelTo::Para, _) if vpos_accounts_for_height => base_y,
-            (VertRelTo::Para, _) => base_y + total_height,
-            (VertRelTo::Page | VertRelTo::Paper, _) => y_offset,
+        if vpos_accounts_for_height {
+            // 파일 vpos 가 그림 공간을 이미 반영하면 그림은 gap 안에 그려졌고
+            // 후속 문단은 파일 vpos(그림 para 줄)로 흐르므로 추가 진행하지 않는다.
+            base_y
+        } else {
+            flow_cursor_after_float(
+                &picture.common,
+                LayoutRect {
+                    x: pic_x,
+                    y: base_y,
+                    width: total_width,
+                    height: total_height,
+                },
+                *col_area,
+                y_offset,
+                self.dpi,
+            )
         }
     }
 

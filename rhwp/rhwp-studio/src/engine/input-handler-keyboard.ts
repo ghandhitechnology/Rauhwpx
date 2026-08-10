@@ -520,6 +520,10 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
 
   // ─── 머리말/꼬리말 편집 모드 키보드 처리 ──────────────────
   if (this.cursor.isInHeaderFooter()) {
+    if (e.ctrlKey || e.metaKey) {
+      this.handleCtrlKey(e);
+      return;
+    }
     // Shift+Esc 또는 Esc → 편집 모드 탈출
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -546,8 +550,11 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       e.preventDefault();
       const delta = e.key === 'ArrowLeft' ? -1 : 1;
+      if (e.shiftKey) this.cursor.setHfAnchor();
+      else this.cursor.clearSelection();
       this.cursor.moveHorizontalInHf(delta);
       this.updateCaret();
+      if (e.shiftKey) this.updateSelection();
       return;
     }
 
@@ -601,6 +608,10 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
 
   // ─── 각주 편집 모드 키보드 처리 ──────────────────────────
   if (this.cursor.isInFootnote()) {
+    if (e.ctrlKey || e.metaKey) {
+      this.handleCtrlKey(e);
+      return;
+    }
     // Shift+Esc 또는 Escape → 주석 편집 모드 탈출
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -615,8 +626,11 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       e.preventDefault();
       const delta = e.key === 'ArrowLeft' ? -1 : 1;
+      if (e.shiftKey) this.cursor.setFnAnchor();
+      else this.cursor.clearSelection();
       this.cursor.moveHorizontalInFn(delta);
       this.updateCaret();
+      if (e.shiftKey) this.updateSelection();
       return;
     }
 
@@ -662,11 +676,37 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
       } else {
         // Delete(forward): 커서는 fnOff 유지 → undo 후에도 fnOff.
         try {
-          const res = this.wasm.deleteTextInFootnote(target.sectionIdx, target.paraIdx, target.controlIdx, innerParaIdx, fnOff, 1);
-          // 문단 끝(삭제 대상 없음)에서는 clamp 로 실삭제 0 → 유령 undo 엔트리를 만들지
-          // 않도록 실제로 삭제됐을 때만 기록한다(HF Delete 의 charCount 가드와 동형).
-          if (res.deletedText) {
-            this.executeOperation({ kind: 'record', command: new DeleteTextInFootnoteCommand(target, innerParaIdx, fnOff, res.deletedText, fnOff) });
+          const info = this.wasm.getFootnoteInfo(
+            target.sectionIdx,
+            target.paraIdx,
+            target.controlIdx,
+          );
+          const paragraphLength = Array.from(info.texts[innerParaIdx] ?? '').length;
+          if (fnOff < paragraphLength) {
+            const res = this.wasm.deleteTextInFootnote(target.sectionIdx, target.paraIdx, target.controlIdx, innerParaIdx, fnOff, 1);
+            if (res.deletedText) {
+              this.executeOperation({ kind: 'record', command: new DeleteTextInFootnoteCommand(target, innerParaIdx, fnOff, res.deletedText, fnOff) });
+            }
+          } else if (innerParaIdx + 1 < info.paraCount) {
+            const result = this.wasm.mergeParagraphInFootnote(
+              target.sectionIdx,
+              target.paraIdx,
+              target.controlIdx,
+              innerParaIdx + 1,
+            );
+            this.executeOperation({
+              kind: 'record',
+              command: new MergeParagraphInFootnoteCommand(
+                target,
+                innerParaIdx + 1,
+                result.fnParaIndex,
+                result.charOffset,
+                innerParaIdx,
+                fnOff,
+                result.removedParaMeta,
+              ),
+            });
+            this.cursor.setFnCursorPosition(innerParaIdx, fnOff);
           }
           this.afterEdit();
         } catch { /* ignore */ }
@@ -1508,11 +1548,16 @@ export function onCopy(this: any, e: ClipboardEvent): void {
         start.cellParaIndex!, start.charOffset,
         end.cellParaIndex!, end.charOffset,
       );
-    } else {
+    } else if (start.sectionIndex === end.sectionIndex) {
       this.wasm.copySelection(
         start.sectionIndex,
         start.paragraphIndex, start.charOffset,
         end.paragraphIndex, end.charOffset,
+      );
+    } else {
+      this.wasm.copySelectionAcrossSections(
+        start.sectionIndex, start.paragraphIndex, start.charOffset,
+        end.sectionIndex, end.paragraphIndex, end.charOffset,
       );
     }
 
@@ -1529,11 +1574,16 @@ export function onCopy(this: any, e: ClipboardEvent): void {
             start.cellParaIndex!, start.charOffset,
             end.cellParaIndex!, end.charOffset,
           );
-        } else {
+        } else if (start.sectionIndex === end.sectionIndex) {
           html = this.wasm.exportSelectionHtml(
             start.sectionIndex,
             start.paragraphIndex, start.charOffset,
             end.paragraphIndex, end.charOffset,
+          );
+        } else {
+          html = this.wasm.exportSelectionAcrossSectionsHtml(
+            start.sectionIndex, start.paragraphIndex, start.charOffset,
+            end.sectionIndex, end.paragraphIndex, end.charOffset,
           );
         }
       } catch { /* HTML 내보내기 실패는 fallback HTML 사용 */ }

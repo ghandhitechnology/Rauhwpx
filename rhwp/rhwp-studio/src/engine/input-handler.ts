@@ -33,6 +33,7 @@ import { showConfirm } from '@/ui/confirm-dialog';
 import * as _mouse from './input-handler-mouse';
 import * as _table from './input-handler-table';
 import * as _keyboard from './input-handler-keyboard';
+import { getBodySelectionSegments } from './body-selection-range';
 import * as _text from './input-handler-text';
 import * as _picture from './input-handler-picture';
 import { computeHangingIndentPx } from './hanging-indent';
@@ -40,6 +41,12 @@ import { isPageLocalTextEditCommand, type PageLocalTextEditOptions } from './inp
 import type { NavigationKeyInput } from './navigation-keymap';
 import { isPointNearBoxBorder } from './table-border-hit';
 import { DeferredPaginationRunner } from './deferred-pagination-runner';
+import {
+  editableTargetFromPosition,
+  positionsShareEditableContainer,
+  type EditableParagraphTarget,
+  type EditableTextRange,
+} from './edit-target';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DRAG_SCROLL_EDGE_PX = 48;
@@ -1802,15 +1809,19 @@ export class InputHandler {
 
   /** 선택 범위에 글자 서식을 적용한다 */
   private applyCharFormat(props: Partial<CharProperties>): void {
-    const sel = this.cursor.getSelectionOrdered();
-    if (!sel) return;
-    const cmd = new ApplyCharFormatCommand(sel.start, sel.end, props);
+    const ranges = this.getCharFormatRangesAtCursor();
+    if (ranges.length === 0) return;
+    const cmd = new ApplyCharFormatCommand(
+      ranges,
+      props,
+      this.cursor.getPosition(),
+      this.getCurrentEditContext(),
+    );
     this.executeOperation({ kind: 'command', command: cmd });
   }
 
   /** 토글 서식 적용 (상호 배타 처리 포함) */
   private applyToggleFormat(prop: 'bold' | 'italic' | 'underline' | 'strikethrough' | 'emboss' | 'engrave' | 'outline' | 'superscript' | 'subscript'): void {
-    if (!this.cursor.hasSelection()) return;
     const current = this.getCharPropertiesAtCursor();
 
     if (prop === 'emboss') {
@@ -1843,6 +1854,26 @@ export class InputHandler {
 
   /** 커서 위치의 글자 서식을 조회한다 */
   private getCharPropertiesAtCursor(): CharProperties {
+    if (this.cursor.isInHeaderFooter()) {
+      const offset = this.cursor.hfCharOffset > 0 ? this.cursor.hfCharOffset - 1 : 0;
+      return this.wasm.getCharPropertiesInHf(
+        this.cursor.hfSectionIdx,
+        this.cursor.headerFooterMode === 'header',
+        this.cursor.hfApplyTo,
+        this.cursor.hfParaIdx,
+        offset,
+      );
+    }
+    if (this.cursor.isInFootnote()) {
+      const offset = this.cursor.fnCharOffset > 0 ? this.cursor.fnCharOffset - 1 : 0;
+      return this.wasm.getCharPropertiesInFootnote(
+        this.cursor.fnSectionIdx,
+        this.cursor.fnParaIdx,
+        this.cursor.fnControlIdx,
+        this.cursor.fnInnerParaIdx,
+        offset,
+      );
+    }
     const pos = this.cursor.getPosition();
     // offset이 0이면 해당 위치, 아니면 offset-1 위치의 서식 반환 (커서 앞 글자 기준)
     const queryOffset = pos.charOffset > 0 ? pos.charOffset - 1 : 0;
@@ -1880,7 +1911,12 @@ export class InputHandler {
       console.info('[InputHandler] 문단 서식 Undo/Redo: unsupported context');
       return false;
     }
-    const cmd = new ApplyParaFormatCommand(targets, props as Partial<ParaProperties>, this.cursor.getPosition());
+    const cmd = new ApplyParaFormatCommand(
+      targets,
+      props as Partial<ParaProperties>,
+      this.cursor.getPosition(),
+      this.getCurrentEditContext(),
+    );
     this.executeOperation({ kind: 'command', command: cmd });
     return true;
   }
@@ -1893,18 +1929,48 @@ export class InputHandler {
   }
 
   private getParaFormatTargetsForRange(start: DocumentPosition, end: DocumentPosition): ParaFormatTarget[] {
-    if (this.cursor.isInHeaderFooter() || this.cursor.isInFootnote()) return [];
-    if (start.isTextBox || end.isTextBox) return [];
-    if ((start.cellPath?.length ?? 0) > 1 || (end.cellPath?.length ?? 0) > 1) return [];
+    if (this.cursor.isInHeaderFooter()) {
+      const selection = this.cursor.getHeaderFooterSelectionOrdered();
+      const from = selection?.start.paraIdx ?? this.cursor.hfParaIdx;
+      const to = selection?.end.paraIdx ?? this.cursor.hfParaIdx;
+      const targets: ParaFormatTarget[] = [];
+      for (let paragraphIndex = from; paragraphIndex <= to; paragraphIndex++) {
+        targets.push({
+          kind: 'headerFooter',
+          sectionIndex: this.cursor.hfSectionIdx,
+          isHeader: this.cursor.headerFooterMode === 'header',
+          applyTo: this.cursor.hfApplyTo,
+          paragraphIndex,
+        });
+      }
+      return targets;
+    }
+    if (this.cursor.isInFootnote()) {
+      const selection = this.cursor.getFootnoteSelectionOrdered();
+      const from = selection?.start.fnParaIdx ?? this.cursor.fnInnerParaIdx;
+      const to = selection?.end.fnParaIdx ?? this.cursor.fnInnerParaIdx;
+      const targets: ParaFormatTarget[] = [];
+      for (let paragraphIndex = from; paragraphIndex <= to; paragraphIndex++) {
+        targets.push({
+          kind: 'note',
+          sectionIndex: this.cursor.fnSectionIdx,
+          hostParagraphIndex: this.cursor.fnParaIdx,
+          controlIndex: this.cursor.fnControlIdx,
+          paragraphIndex,
+          footnoteIndex: this.cursor.fnFootnoteIndex,
+          pageNum: this.cursor.fnPageNum,
+        });
+      }
+      return targets;
+    }
 
     const startInCell = start.parentParaIndex !== undefined;
     const endInCell = end.parentParaIndex !== undefined;
     if (startInCell || endInCell) {
       if (!startInCell || !endInCell) return [];
-      if (start.sectionIndex !== end.sectionIndex) return [];
-      if (start.parentParaIndex !== end.parentParaIndex) return [];
-      const startPath = start.cellPath?.[0];
-      const endPath = end.cellPath?.[0];
+      if (!positionsShareEditableContainer(start, end)) return [];
+      const startPath = start.cellPath?.at(-1);
+      const endPath = end.cellPath?.at(-1);
       const startControl = startPath?.controlIndex ?? start.controlIndex;
       const endControl = endPath?.controlIndex ?? end.controlIndex;
       const startCell = startPath?.cellIndex ?? start.cellIndex;
@@ -1927,26 +1993,202 @@ export class InputHandler {
       const to = Math.max(startCellPara, endCellPara);
       const targets: ParaFormatTarget[] = [];
       for (let cp = from; cp <= to; cp++) {
-        targets.push({
-          kind: 'cell',
-          sec: start.sectionIndex,
-          parentPara: start.parentParaIndex!,
-          controlIdx: startControl,
-          cellIdx: startCell,
-          cellParaIdx: cp,
-        });
+        targets.push(editableTargetFromPosition(start, cp));
       }
       return targets;
     }
 
-    if (start.sectionIndex !== end.sectionIndex) return [];
-    const from = Math.min(start.paragraphIndex, end.paragraphIndex);
-    const to = Math.max(start.paragraphIndex, end.paragraphIndex);
     const targets: ParaFormatTarget[] = [];
-    for (let p = from; p <= to; p++) {
-      targets.push({ kind: 'body', sec: start.sectionIndex, para: p });
+    for (const segment of getBodySelectionSegments(this.wasm, start, end)) {
+      for (let p = segment.startParagraphIndex; p <= segment.endParagraphIndex; p++) {
+        targets.push({
+          kind: 'body',
+          sectionIndex: segment.sectionIndex,
+          paragraphIndex: p,
+        });
+      }
     }
     return targets;
+  }
+
+  private getCurrentEditContext(): EditContext | undefined {
+    if (this.cursor.isInHeaderFooter()) {
+      return {
+        mode: 'headerFooter',
+        sectionIdx: this.cursor.hfSectionIdx,
+        isHeader: this.cursor.headerFooterMode === 'header',
+        applyTo: this.cursor.hfApplyTo,
+        paraIdx: this.cursor.hfParaIdx,
+        charOffset: this.cursor.hfCharOffset,
+      };
+    }
+    if (this.cursor.isInFootnote()) {
+      return {
+        mode: 'footnote',
+        sectionIdx: this.cursor.fnSectionIdx,
+        paraIdx: this.cursor.fnParaIdx,
+        controlIdx: this.cursor.fnControlIdx,
+        footnoteIndex: this.cursor.fnFootnoteIndex,
+        pageNum: this.cursor.fnPageNum,
+        innerParaIdx: this.cursor.fnInnerParaIdx,
+        charOffset: this.cursor.fnCharOffset,
+      };
+    }
+  }
+
+  private characterRangeAtCaret(target: EditableParagraphTarget, offset: number): EditableTextRange[] {
+    const length = this.getEditableParagraphLength(target);
+    if (length === 0) return [];
+    const startOffset = offset > 0 ? Math.min(offset - 1, length - 1) : 0;
+    return [{ target, startOffset, endOffset: startOffset + 1 }];
+  }
+
+  private getEditableParagraphLength(target: EditableParagraphTarget): number {
+    switch (target.kind) {
+      case 'body':
+        return this.wasm.getParagraphLength(target.sectionIndex, target.paragraphIndex);
+      case 'container': {
+        const usePath = target.cellPath.length > 1
+          || (target.cellPath.length > 0 && !target.isTextBox);
+        return usePath
+          ? this.wasm.getCellParagraphLengthByPath(
+              target.sectionIndex,
+              target.parentParagraphIndex,
+              JSON.stringify(target.cellPath),
+            )
+          : this.wasm.getCellParagraphLength(
+              target.sectionIndex,
+              target.parentParagraphIndex,
+              target.controlIndex,
+              target.cellIndex,
+              target.paragraphIndex,
+            );
+      }
+      case 'headerFooter': {
+        const info = JSON.parse(this.wasm.getHeaderFooterParaInfo(
+          target.sectionIndex,
+          target.isHeader,
+          target.applyTo,
+          target.paragraphIndex,
+        )) as { charCount: number };
+        return info.charCount;
+      }
+      case 'note': {
+        const info = this.wasm.getFootnoteInfo(
+          target.sectionIndex,
+          target.hostParagraphIndex,
+          target.controlIndex,
+        );
+        return Array.from(info.texts[target.paragraphIndex] ?? '').length;
+      }
+    }
+  }
+
+  private getCharFormatRangesAtCursor(): EditableTextRange[] {
+    if (this.cursor.isInHeaderFooter()) {
+      const selection = this.cursor.getHeaderFooterSelectionOrdered();
+      const startPara = selection?.start.paraIdx ?? this.cursor.hfParaIdx;
+      const endPara = selection?.end.paraIdx ?? this.cursor.hfParaIdx;
+      const ranges: EditableTextRange[] = [];
+      for (let paragraphIndex = startPara; paragraphIndex <= endPara; paragraphIndex++) {
+        const target: EditableParagraphTarget = {
+          kind: 'headerFooter',
+          sectionIndex: this.cursor.hfSectionIdx,
+          isHeader: this.cursor.headerFooterMode === 'header',
+          applyTo: this.cursor.hfApplyTo,
+          paragraphIndex,
+        };
+        if (!selection) return this.characterRangeAtCaret(target, this.cursor.hfCharOffset);
+        const startOffset = paragraphIndex === startPara ? selection.start.charOffset : 0;
+        const endOffset = paragraphIndex === endPara
+          ? selection.end.charOffset
+          : this.getEditableParagraphLength(target);
+        if (endOffset > startOffset) ranges.push({ target, startOffset, endOffset });
+      }
+      return ranges;
+    }
+
+    if (this.cursor.isInFootnote()) {
+      const selection = this.cursor.getFootnoteSelectionOrdered();
+      const startPara = selection?.start.fnParaIdx ?? this.cursor.fnInnerParaIdx;
+      const endPara = selection?.end.fnParaIdx ?? this.cursor.fnInnerParaIdx;
+      const ranges: EditableTextRange[] = [];
+      for (let paragraphIndex = startPara; paragraphIndex <= endPara; paragraphIndex++) {
+        const target: EditableParagraphTarget = {
+          kind: 'note',
+          sectionIndex: this.cursor.fnSectionIdx,
+          hostParagraphIndex: this.cursor.fnParaIdx,
+          controlIndex: this.cursor.fnControlIdx,
+          paragraphIndex,
+          footnoteIndex: this.cursor.fnFootnoteIndex,
+          pageNum: this.cursor.fnPageNum,
+        };
+        if (!selection) return this.characterRangeAtCaret(target, this.cursor.fnCharOffset);
+        const startOffset = paragraphIndex === startPara ? selection.start.charOffset : 0;
+        const endOffset = paragraphIndex === endPara
+          ? selection.end.charOffset
+          : this.getEditableParagraphLength(target);
+        if (endOffset > startOffset) ranges.push({ target, startOffset, endOffset });
+      }
+      return ranges;
+    }
+
+    const selection = this.cursor.getSelectionOrdered();
+    if (!selection) {
+      const position = this.cursor.getPosition();
+      return this.characterRangeAtCaret(
+        editableTargetFromPosition(position),
+        position.charOffset,
+      );
+    }
+    return this.getCharFormatRangesForDocumentRange(selection.start, selection.end);
+  }
+
+  private getCharFormatRangesForDocumentRange(
+    start: DocumentPosition,
+    end: DocumentPosition,
+  ): EditableTextRange[] {
+    if (start.parentParaIndex !== undefined || end.parentParaIndex !== undefined) {
+      if (start.parentParaIndex === undefined || end.parentParaIndex === undefined) return [];
+      if (!positionsShareEditableContainer(start, end)) return [];
+      const startPara = start.cellPath?.at(-1)?.cellParaIndex
+        ?? start.cellParaIndex
+        ?? start.paragraphIndex;
+      const endPara = end.cellPath?.at(-1)?.cellParaIndex
+        ?? end.cellParaIndex
+        ?? end.paragraphIndex;
+      const ranges: EditableTextRange[] = [];
+      for (let paragraphIndex = startPara; paragraphIndex <= endPara; paragraphIndex++) {
+        const target = editableTargetFromPosition(start, paragraphIndex);
+        const startOffset = paragraphIndex === startPara ? start.charOffset : 0;
+        const endOffset = paragraphIndex === endPara
+          ? end.charOffset
+          : this.getEditableParagraphLength(target);
+        if (endOffset > startOffset) ranges.push({ target, startOffset, endOffset });
+      }
+      return ranges;
+    }
+
+    const ranges: EditableTextRange[] = [];
+    for (const segment of getBodySelectionSegments(this.wasm, start, end)) {
+      for (let paragraphIndex = segment.startParagraphIndex;
+        paragraphIndex <= segment.endParagraphIndex;
+        paragraphIndex++) {
+        const target: EditableParagraphTarget = {
+          kind: 'body',
+          sectionIndex: segment.sectionIndex,
+          paragraphIndex,
+        };
+        const startOffset = paragraphIndex === segment.startParagraphIndex
+          ? segment.startCharOffset
+          : 0;
+        const endOffset = paragraphIndex === segment.endParagraphIndex
+          ? segment.endCharOffset
+          : this.getEditableParagraphLength(target);
+        if (endOffset > startOffset) ranges.push({ target, startOffset, endOffset });
+      }
+    }
+    return ranges;
   }
 
   /** 한컴식 Shift+Tab: 첫 줄 시작 위치를 기준으로 문단 내어쓰기를 설정한다. */
@@ -2021,14 +2263,7 @@ export class InputHandler {
 
         const hangingPx = computeHangingIndentPx(cursorRect.x, firstLineStartRect.x);
         this.executeParaFormatCommand(
-          [{
-            kind: 'cell',
-            sec: pos.sectionIndex,
-            parentPara: pos.parentParaIndex,
-            controlIdx: controlIndex,
-            cellIdx: cellIndex,
-            cellParaIdx: cellParaIndex,
-          }],
+          [editableTargetFromPosition(pos, cellParaIndex)],
           { indent: -pxToRaw2x(hangingPx) },
         );
         return true;
@@ -2044,7 +2279,11 @@ export class InputHandler {
 
       const hangingPx = computeHangingIndentPx(cursorRect.x, firstLineStartRect.x);
       this.executeParaFormatCommand(
-        [{ kind: 'body', sec: pos.sectionIndex, para: pos.paragraphIndex }],
+        [{
+          kind: 'body',
+          sectionIndex: pos.sectionIndex,
+          paragraphIndex: pos.paragraphIndex,
+        }],
         { indent: -pxToRaw2x(hangingPx) },
       );
       return true;
@@ -2940,10 +3179,14 @@ export class InputHandler {
         );
       } else if (!startInCell && !endInCell) {
         // 본문 선택
-        rects = this.wasm.getSelectionRects(
-          start.sectionIndex,
-          start.paragraphIndex, start.charOffset,
-          end.paragraphIndex, end.charOffset,
+        rects = getBodySelectionSegments(this.wasm, start, end).flatMap(segment =>
+          this.wasm.getSelectionRects(
+            segment.sectionIndex,
+            segment.startParagraphIndex,
+            segment.startCharOffset,
+            segment.endParagraphIndex,
+            segment.endCharOffset,
+          ),
         );
       } else {
         // 셀↔본문 또는 셀↔다른 셀 혼합 선택: 렌더링 생략
@@ -4425,7 +4668,6 @@ export class InputHandler {
 
   /** 글꼴 크기 증감 (커맨드 시스템용, delta: HWPUNIT, 1pt=100) */
   adjustFontSize(delta: number): void {
-    if (!this.cursor.hasSelection()) return;
     const current = this.getCharPropertiesAtCursor();
     const newSize = Math.max(100, (current.fontSize ?? 1000) + delta); // 최소 1pt
     this.applyCharFormat({ fontSize: newSize });
@@ -4433,7 +4675,6 @@ export class InputHandler {
 
   /** 장평 증감 (커맨드 시스템용, delta: percent point) */
   adjustCharRatio(delta: number): void {
-    if (!this.cursor.hasSelection()) return;
     const current = this.getCharPropertiesAtCursor();
     const currentRatio = current.ratios?.[0] ?? 100;
     const nextRatio = Math.max(50, Math.min(200, Math.round(currentRatio + delta)));
@@ -4442,7 +4683,6 @@ export class InputHandler {
 
   /** 자간 증감 (커맨드 시스템용, delta: percent point) */
   adjustCharSpacing(delta: number): void {
-    if (!this.cursor.hasSelection()) return;
     const current = this.getCharPropertiesAtCursor();
     const currentSpacing = current.spacings?.[0] ?? 0;
     const nextSpacing = Math.max(-50, Math.min(50, Math.round(currentSpacing + delta)));
@@ -4458,15 +4698,16 @@ export class InputHandler {
       const operation = (wasm: WasmBridge): DocumentPosition => {
         for (const target of targets) {
           if (target.kind === 'body') {
-            wasm.applyStyle(target.sec, target.para, styleId);
+            wasm.applyStyle(target.sectionIndex, target.paragraphIndex, styleId);
             continue;
           }
+          if (target.kind !== 'container' || target.cellPath.length > 1) continue;
           wasm.applyCellStyle(
-            target.sec,
-            target.parentPara,
-            target.controlIdx,
-            target.cellIdx,
-            target.cellParaIdx,
+            target.sectionIndex,
+            target.parentParagraphIndex,
+            target.controlIndex,
+            target.cellIndex,
+            target.paragraphIndex,
             styleId,
           );
         }
@@ -4644,7 +4885,14 @@ export class InputHandler {
     end: DocumentPosition,
     props: Partial<CharProperties>,
   ): void {
-    const cmd = new ApplyCharFormatCommand(start, end, props);
+    const ranges = this.getCharFormatRangesForDocumentRange(start, end);
+    if (ranges.length === 0) return;
+    const cmd = new ApplyCharFormatCommand(
+      ranges,
+      props,
+      this.cursor.getPosition(),
+      this.getCurrentEditContext(),
+    );
     this.executeOperation({ kind: 'command', command: cmd });
   }
 

@@ -22,7 +22,8 @@ export const MUTATING_METHODS: readonly string[] = [
   // 쪽/구역/다단
   'setPageDef', 'setSectionDef', 'setSectionDefAll', 'setPageBorderFill', 'setColumnDef',
   // 본문 텍스트/문단
-  'insertText', 'replaceBodyTextLocal', 'deleteText', 'deleteRange', 'splitParagraph', 'mergeParagraph',
+  'insertText', 'replaceBodyTextLocal', 'deleteText', 'deleteRange', 'deleteRangeAcrossSections',
+  'splitParagraph', 'mergeParagraph',
   'insertPageBreak', 'insertColumnBreak', 'insertNewNumber', 'setNumberingRestart',
   // 셀 텍스트/문단
   'insertTextInCell', 'insertTextInCellDeferredPagination', 'deleteTextInCell',
@@ -49,13 +50,17 @@ export const MUTATING_METHODS: readonly string[] = [
   'insertFootnote', 'insertEndnote', 'deleteFootnote', 'applyEndnoteShape',
   'insertTextInFootnote', 'deleteTextInFootnote', 'splitParagraphInFootnote',
   'mergeParagraphInFootnote', 'applyParaFormatInFootnote',
+  'applyCharFormatInFootnote', 'setCharShapeIdInFootnote', 'setParaShapeIdInFootnote',
   // 붙여넣기
   'pasteInternal', 'pasteInternalInCell', 'pasteInternalInCellByPath', 'pasteControl',
   'pasteHtml', 'pasteHtmlInCell', 'pasteHtmlInCellByPath',
   // 글자/문단 모양
-  'applyCharFormat', 'setCharShapeId', 'applyCharFormatInCell', 'applyCharFormatInCellByPath',
+  'applyCharFormat', 'applyCharFormatAcrossSections', 'setCharShapeId',
+  'applyCharFormatInCell', 'applyCharFormatInCellByPath',
   'setCharShapeIdInCell', 'setCharShapeIdInCellByPath',
-  'applyParaFormat', 'setParaShapeId', 'applyParaFormatInCell', 'setCellParaShapeId',
+  'applyParaFormat', 'applyParaFormatAcrossSections', 'setParaShapeId',
+  'applyParaFormatInCell', 'setCellParaShapeId',
+  'applyParaFormatInCellByPath', 'setCellParaShapeIdByPath',
   // 스타일/번호 정의 (DocInfo 변이 포함)
   'updateStyle', 'updateStyleShapes', 'createStyle', 'deleteStyle', 'applyStyle',
   'applyCellStyle', 'createNumbering', 'ensureDefaultNumbering', 'ensureDefaultBullet',
@@ -64,6 +69,7 @@ export const MUTATING_METHODS: readonly string[] = [
   'createHeaderFooter', 'deleteHeaderFooter', 'toggleHideHeaderFooter',
   'insertTextInHeaderFooter', 'deleteTextInHeaderFooter', 'splitParagraphInHeaderFooter',
   'mergeParagraphInHeaderFooter', 'applyParaFormatInHf', 'insertFieldInHf', 'applyHfTemplate',
+  'applyCharFormatInHf', 'setCharShapeIdInHf', 'setParaShapeIdInHf',
   // 필드/양식/찾아바꾸기/책갈피
   'setFieldValue', 'setFieldValueByName', 'removeFieldAt', 'insertClickHereField',
   'updateClickHereProps', 'setFormValue', 'setFormValueInCell',

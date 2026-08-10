@@ -11,7 +11,7 @@
 
 use super::{
     BarGrouping, LegendPos, OfPieInfo, OfPieSplitType, OfPieType, OoxmlChart, OoxmlChartType,
-    OoxmlSeries, ScatterStyle, SeriesMarker, View3D,
+    OoxmlSeries, RadarStyle, ScatterStyle, SeriesMarker, View3D,
 };
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -28,6 +28,8 @@ struct ParseState {
     in_x_val: bool, // c:xVal (분산형 X 값)
     in_y_val: bool, // c:yVal (분산형 Y 값)
     in_chart_title: bool,
+    in_axis_title: bool,
+    in_cat_ax: bool,
     in_v: bool,
     in_a_t: bool,
     in_sp_pr: bool,      // c:spPr — 시리즈/figure의 shape properties
@@ -37,6 +39,8 @@ struct ParseState {
     // c:dPt(점별 속성) 블록 내부 — 점별 explosion 을 계열로 승격하지 않기 위한
     // 문맥 게이트 (PR #2500 후속)
     in_d_pt: bool,
+    in_d_lbls: bool,
+    in_d_lbl: bool,
     bar_dir: Option<BarDir>,
     // 현재 파싱 중인 plot 블록 (barChart/lineChart/pieChart) 안에 있는지
     cur_plot_type: Option<OoxmlChartType>,
@@ -50,6 +54,8 @@ struct ParseState {
     cur_val_ax_pos: Option<String>,
     // axId → axPos 매핑 (l/r/t/b)
     val_ax_map: HashMap<String, String>,
+    val_ax_titles: HashMap<String, String>,
+    cur_axis_title: String,
 }
 
 #[derive(Clone, Copy)]
@@ -170,6 +176,13 @@ pub fn parse_chart_xml(xml: &[u8]) -> Option<OoxmlChart> {
         }
     }
 
+    chart.primary_value_axis_title = primary_axid
+        .as_ref()
+        .and_then(|id| state.val_ax_titles.get(id).cloned());
+    chart.secondary_value_axis_title = secondary_axid
+        .as_ref()
+        .and_then(|id| state.val_ax_titles.get(id).cloned());
+
     Some(chart)
 }
 
@@ -194,6 +207,28 @@ fn handle_start(e: &quick_xml::events::BytesStart, chart: &mut OoxmlChart, st: &
         b"pieChart" => {
             chart.chart_type = OoxmlChartType::Pie;
             st.cur_plot_type = Some(OoxmlChartType::Pie);
+            st.cur_plot_ax_ids.clear();
+            st.cur_plot_series_start = chart.series.len();
+        }
+        b"doughnutChart" => {
+            chart.chart_type = OoxmlChartType::Doughnut;
+            chart.doughnut_hole_size = Some(50.0);
+            st.cur_plot_type = Some(OoxmlChartType::Doughnut);
+            st.cur_plot_ax_ids.clear();
+            st.cur_plot_series_start = chart.series.len();
+        }
+        b"areaChart" | b"area3DChart" => {
+            if chart.chart_type == OoxmlChartType::Unknown {
+                chart.chart_type = OoxmlChartType::Area;
+            }
+            chart.is_3d = name_bytes == b"area3DChart";
+            st.cur_plot_type = Some(OoxmlChartType::Area);
+            st.cur_plot_ax_ids.clear();
+            st.cur_plot_series_start = chart.series.len();
+        }
+        b"radarChart" => {
+            chart.chart_type = OoxmlChartType::Radar;
+            st.cur_plot_type = Some(OoxmlChartType::Radar);
             st.cur_plot_ax_ids.clear();
             st.cur_plot_series_start = chart.series.len();
         }
@@ -342,6 +377,20 @@ fn handle_start(e: &quick_xml::events::BytesStart, chart: &mut OoxmlChart, st: &
                 };
             }
         }
+        b"holeSize" => {
+            if st.cur_plot_type == Some(OoxmlChartType::Doughnut) {
+                chart.doughnut_hole_size = attr_f64(e).map(|v| v.clamp(10.0, 90.0));
+            }
+        }
+        b"radarStyle" => {
+            if let Some(val) = attr_val(e, "val") {
+                chart.radar_style = match val.as_str() {
+                    "marker" => RadarStyle::Marker,
+                    "filled" => RadarStyle::Filled,
+                    _ => RadarStyle::Standard,
+                };
+            }
+        }
         b"ofPieType" => {
             if let (Some(of), Some(val)) = (chart.of_pie.as_mut(), attr_val(e, "val")) {
                 if val == "bar" {
@@ -402,6 +451,7 @@ fn handle_start(e: &quick_xml::events::BytesStart, chart: &mut OoxmlChart, st: &
                 match st.cur_plot_type {
                     Some(OoxmlChartType::Column | OoxmlChartType::Bar) => chart.grouping = g,
                     Some(OoxmlChartType::Line) => chart.line_grouping = g,
+                    Some(OoxmlChartType::Area) => chart.area_grouping = g,
                     _ => {}
                 }
             }
@@ -448,6 +498,17 @@ fn handle_start(e: &quick_xml::events::BytesStart, chart: &mut OoxmlChart, st: &
             }
         }
         b"dPt" => st.in_d_pt = true,
+        b"dLbls" => st.in_d_lbls = true,
+        b"dLbl" if st.in_d_lbls => st.in_d_lbl = true,
+        b"showVal" if st.in_d_lbls && !st.in_d_lbl => {
+            chart.data_labels.show_value = attr_bool(e);
+        }
+        b"showCatName" if st.in_d_lbls && !st.in_d_lbl => {
+            chart.data_labels.show_category_name = attr_bool(e);
+        }
+        b"showSerName" if st.in_d_lbls && !st.in_d_lbl => {
+            chart.data_labels.show_series_name = attr_bool(e);
+        }
         b"ser" => {
             let mut ser = OoxmlSeries::default();
             if let Some(t) = st.cur_plot_type {
@@ -461,10 +522,16 @@ fn handle_start(e: &quick_xml::events::BytesStart, chart: &mut OoxmlChart, st: &
         b"xVal" => st.in_x_val = true,
         b"yVal" => st.in_y_val = true,
         b"title" => {
-            st.in_chart_title = true;
+            st.in_axis_title = st.in_cat_ax || st.in_val_ax;
+            st.in_chart_title = !st.in_axis_title;
+            if st.in_axis_title {
+                st.cur_axis_title.clear();
+            }
             // C1c #1882 갭①: 요소 존재만 기록 (텍스트 유무는 chart.title이 담당 —
             // 한컴은 텍스트 없어도 autoTitleDeleted=0이면 자동 제목을 그림)
-            chart.has_title_elem = true;
+            if st.in_chart_title {
+                chart.has_title_elem = true;
+            }
         }
         b"autoTitleDeleted" => {
             if let Some(val) = attr_val(e, "val") {
@@ -547,6 +614,10 @@ fn handle_start(e: &quick_xml::events::BytesStart, chart: &mut OoxmlChart, st: &
             st.cur_val_ax_id = None;
             st.cur_val_ax_pos = None;
         }
+        b"catAx" => {
+            st.in_cat_ax = true;
+            st.cur_axis_title.clear();
+        }
         _ => {}
     }
 }
@@ -590,7 +661,9 @@ fn handle_end(name: &[u8], chart: &mut OoxmlChart, st: &mut ParseState) {
         b"t" => {
             st.in_a_t = false;
             let text = std::mem::take(&mut st.cur_text_buf);
-            if st.in_chart_title && !text.is_empty() {
+            if st.in_axis_title && !text.is_empty() {
+                st.cur_axis_title.push_str(&text);
+            } else if st.in_chart_title && !text.is_empty() {
                 match chart.title.as_mut() {
                     Some(s) => s.push_str(&text),
                     None => chart.title = Some(text),
@@ -601,9 +674,14 @@ fn handle_end(name: &[u8], chart: &mut OoxmlChart, st: &mut ParseState) {
         b"cat" => st.in_cat = false,
         b"val" => st.in_val = false,
         b"dPt" => st.in_d_pt = false,
+        b"dLbl" => st.in_d_lbl = false,
+        b"dLbls" => st.in_d_lbls = false,
         b"xVal" => st.in_x_val = false,
         b"yVal" => st.in_y_val = false,
-        b"title" => st.in_chart_title = false,
+        b"title" => {
+            st.in_chart_title = false;
+            st.in_axis_title = false;
+        }
         b"ser" => {
             if let Some(ser) = st.cur_series.take() {
                 // axIds는 plot 종료 시 일괄 할당 (XML 구조상 axId가 ser 뒤에 옴)
@@ -618,6 +696,12 @@ fn handle_end(name: &[u8], chart: &mut OoxmlChart, st: &mut ParseState) {
         b"numCache" => st.in_num_cache = false,
         b"valAx" => {
             st.in_val_ax = false;
+            if let Some(id) = st.cur_val_ax_id.as_ref() {
+                if !st.cur_axis_title.is_empty() {
+                    st.val_ax_titles
+                        .insert(id.clone(), std::mem::take(&mut st.cur_axis_title));
+                }
+            }
             if let (Some(id), Some(pos)) = (st.cur_val_ax_id.take(), st.cur_val_ax_pos.take()) {
                 st.val_ax_map.insert(id, pos);
             } else if let Some(id) = st.cur_val_ax_id.take() {
@@ -625,8 +709,15 @@ fn handle_end(name: &[u8], chart: &mut OoxmlChart, st: &mut ParseState) {
                 st.cur_val_ax_pos = None;
             }
         }
-        b"barChart" | b"lineChart" | b"pieChart" | b"bar3DChart" | b"pie3DChart"
-        | b"ofPieChart" | b"scatterChart" | b"stockChart" | b"line3DChart" => {
+        b"catAx" => {
+            st.in_cat_ax = false;
+            if !st.cur_axis_title.is_empty() && chart.category_axis_title.is_none() {
+                chart.category_axis_title = Some(std::mem::take(&mut st.cur_axis_title));
+            }
+        }
+        b"barChart" | b"lineChart" | b"pieChart" | b"doughnutChart" | b"areaChart"
+        | b"area3DChart" | b"radarChart" | b"bar3DChart" | b"pie3DChart" | b"ofPieChart"
+        | b"scatterChart" | b"stockChart" | b"line3DChart" => {
             // plot 종료 — 이 plot에 속한 시리즈에 axIds 복사
             let start = st.cur_plot_series_start;
             for ser in chart.series.iter_mut().skip(start) {
@@ -651,6 +742,10 @@ fn attr_val(e: &quick_xml::events::BytesStart, key: &str) -> Option<String> {
 /// `val` 속성을 f64로. view3D/gapDepth 등 수치 단일 속성 요소용. (C2b #2278 v2)
 fn attr_f64(e: &quick_xml::events::BytesStart) -> Option<f64> {
     attr_val(e, "val").and_then(|s| s.parse().ok())
+}
+
+fn attr_bool(e: &quick_xml::events::BytesStart) -> bool {
+    attr_val(e, "val").is_none_or(|v| matches!(v.as_str(), "1" | "true"))
 }
 
 fn parse_rgb_hex(s: &str) -> Option<u32> {
