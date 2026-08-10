@@ -561,7 +561,9 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
+  /* clip 은 무대를 스크롤 컨테이너로 만들지 않는다 — 숨은 overflow 가
+     있어도 focus()·scrollIntoView 가 판 전체를 밀어낼 수 없다. */
+  overflow: clip;
 }
 
 .ag-chat-page,
@@ -2641,7 +2643,7 @@ body.ag-fullscreen-open #editor-area {
   position: relative;
   display: grid;
   gap: 0;
-  overflow: hidden;
+  overflow: clip;
   transition: grid-template-columns 240ms var(--ag-motion-out);
 }
 
@@ -2797,13 +2799,16 @@ body.ag-col-resizing {
   margin-bottom: 18px;
 }
 
-/* Skills temporarily covers the workspace without changing its shell. */
+/* Skills temporarily covers the workspace without changing its shell.
+   사이드바 페이지 전환의 대기 자세(translateX(20px))는 무대 폭을 20px
+   넘겨 숨은 가로 overflow 를 만들므로 전체 화면에서는 걷어낸다. */
 .ag-fullscreen .ag-skills-page {
   grid-column: 1 / -1;
   grid-row: 1;
   position: absolute;
   inset: 0;
   z-index: 3;
+  transform: none;
 }
 
 /* ── Contextual review drawer ───────────────────────── */
