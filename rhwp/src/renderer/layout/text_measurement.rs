@@ -293,6 +293,10 @@ pub fn extract_tab_leaders_with_extended(
 /// font_metrics_data의 582개 폰트 메트릭을 사용하여 문자 폭을 측정한다.
 /// 메트릭이 없는 폰트는 CJK=font_size, Latin=font_size×0.5 휴리스틱을 사용한다.
 /// 모든 플랫폼에서 동일하게 동작한다 (WASM 포함).
+/// 레이아웃은 설치 폰트나 현재 작업 디렉터리에 의존하지 않도록 이 메트릭만 사용한다.
+/// 현재 DB에는 pair-kerning 값이 없으므로 `TextStyle::kerning`은 직렬화/페인팅에는
+/// 보존되지만 폭 계산에는 적용하지 않는다. 공유 shaping 자산이 생기기 전까지 native와
+/// WASM의 동일한 줄바꿈을 우선한다.
 /// [#2132] 공용 글자-워크 — Embedded/Wasm measurer 의 compute_char_positions 중복 소거.
 /// 폭 산출원(char_px_raw)과 인라인 탭 divergent 경로(inline_tab_x)만 measurer 별 훅.
 /// 나머지(특수문자, dash leader, 자간 클램프, 공백, 커스텀/기본 탭)는 1벌.
@@ -354,9 +358,16 @@ fn compute_char_positions_walk(
     };
 
     let mut tab_char_idx = 0usize; // inline_tabs 인덱스
+    let mut pending_cluster: Option<(usize, f64)> = None;
     for i in 0..char_count {
         let c = chars[i];
         if cluster_len[i] == 0 {
+            if let Some((end, advance)) = pending_cluster {
+                if i == end {
+                    x += advance;
+                    pending_cluster = None;
+                }
+            }
             positions.push(x);
             continue;
         }
@@ -432,250 +443,25 @@ fn compute_char_positions_walk(
             positions.push(x);
             continue;
         }
-        x += char_width(i);
+        let advance = char_width(i);
+        if cluster_len[i] > 1 {
+            // A caret must not split an extended grapheme. Keep every internal
+            // scalar boundary at the cluster start, then apply the advance at
+            // the final scalar boundary. This is shared by native and WASM.
+            pending_cluster = Some((i + cluster_len[i] - 1, advance));
+        } else {
+            x += advance;
+        }
         positions.push(x);
     }
 
     positions
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-thread_local! {
-    static METRIC_FONT_DB: std::cell::RefCell<usvg::fontdb::Database> = {
-        let mut db = usvg::fontdb::Database::new();
-        crate::renderer::font_paths::load_into_fontdb(&mut db, &[]);
-        std::cell::RefCell::new(db)
-    };
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn normalized_family_name(name: &str) -> String {
-    name.chars()
-        .filter(|ch| ch.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn metric_face_for_family(
-    db: &usvg::fontdb::Database,
-    family: &str,
-    style: &TextStyle,
-) -> Option<usvg::fontdb::ID> {
-    use usvg::fontdb::{Family, Query, Stretch, Style, Weight};
-
-    let family = family.trim().trim_matches(['\'', '"']);
-    if family.is_empty() {
-        return None;
-    }
-    let families = [Family::Name(family)];
-    let query = Query {
-        families: &families,
-        weight: if style.bold {
-            Weight::BOLD
-        } else {
-            Weight::NORMAL
-        },
-        stretch: Stretch::Normal,
-        style: if style.italic {
-            Style::Italic
-        } else {
-            Style::Normal
-        },
-    };
-    if let Some(id) = db.query(&query) {
-        return Some(id);
-    }
-
-    let normalized = normalized_family_name(family);
-    db.faces()
-        .find(|face| {
-            normalized_family_name(&face.post_script_name) == normalized
-                || face
-                    .families
-                    .iter()
-                    .any(|(name, _)| normalized_family_name(name) == normalized)
-        })
-        .map(|face| face.id)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn is_ignorable_shaping_char(ch: char) -> bool {
-    ch == '\u{200D}' || matches!(ch as u32, 0xFE00..=0xFE0F | 0xE0100..=0xE01EF)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn face_supports_grapheme(
-    db: &usvg::fontdb::Database,
-    face_id: usvg::fontdb::ID,
-    grapheme: &str,
-) -> bool {
-    db.with_face_data(face_id, |data, index| {
-        let Ok(face) = ttf_parser::Face::parse(data, index) else {
-            return false;
-        };
-        grapheme
-            .chars()
-            .filter(|ch| !is_ignorable_shaping_char(*ch))
-            .all(|ch| face.glyph_index(ch).is_some())
-    })
-    .unwrap_or(false)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn shape_face_run_advances(
-    db: &usvg::fontdb::Database,
-    face_id: usvg::fontdb::ID,
-    graphemes: &[&str],
-    apply_kerning: bool,
-) -> Option<Vec<f64>> {
-    db.with_face_data(face_id, |data, index| {
-        let face = rustybuzz::Face::from_slice(data, index)?;
-        let units_per_em = face.units_per_em() as f64;
-        let mut text = String::new();
-        let mut byte_starts = Vec::with_capacity(graphemes.len());
-        for grapheme in graphemes {
-            byte_starts.push(text.len());
-            text.push_str(grapheme);
-        }
-
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str(&text);
-        // HWP exposes kerning but not discretionary Latin ligatures. Keeping
-        // `liga`/`clig` disabled preserves one caret advance per grapheme while
-        // required script shaping (`rlig`, mark attachment, etc.) stays active.
-        let mut features = vec![
-            rustybuzz::Feature::new(ttf_parser::Tag::from_bytes(b"liga"), 0, ..),
-            rustybuzz::Feature::new(ttf_parser::Tag::from_bytes(b"clig"), 0, ..),
-        ];
-        if !apply_kerning {
-            features.push(rustybuzz::Feature::new(
-                ttf_parser::Tag::from_bytes(b"kern"),
-                0,
-                ..,
-            ));
-        }
-        let shaped = rustybuzz::shape(&face, &features, buffer);
-        let mut advances = vec![0.0; graphemes.len()];
-        for (info, position) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
-            let byte = info.cluster as usize;
-            let grapheme_index = byte_starts.partition_point(|start| *start <= byte) - 1;
-            advances[grapheme_index] += position.x_advance as f64 / units_per_em;
-        }
-        Some(advances)
-    })?
-}
-
-/// Measure a run from available sfnt faces. Consecutive graphemes using the
-/// same face are shaped together so GPOS kerning and combining-mark placement
-/// agree with the paint backend. Font fallback remains grapheme-atomic.
-#[cfg(not(target_arch = "wasm32"))]
-fn measure_char_positions_ttf(text: &str, style: &TextStyle) -> Option<Vec<f64>> {
-    if text.is_empty()
-        || style.font_family.trim().is_empty()
-        || text
-            .chars()
-            .any(|ch| matches!(ch, '\t' | '\u{FFFC}' | '\u{F081C}'))
-    {
-        return None;
-    }
-
-    METRIC_FONT_DB.with(|cell| {
-        let db = cell.borrow();
-        let requested: Vec<&str> = style
-            .font_family
-            .split(',')
-            .map(|name| name.trim().trim_matches(['\'', '"']))
-            .filter(|name| !name.is_empty())
-            .collect();
-        let requested_faces: Vec<_> = requested
-            .iter()
-            .filter_map(|name| metric_face_for_family(&db, name, style))
-            .collect();
-        if requested_faces.is_empty() {
-            return None;
-        }
-        let fallback_face = metric_face_for_family(&db, "Noto Sans KR", style);
-        let font_size = style.font_size.max(12.0);
-        let ratio = if style.ratio > 0.0 { style.ratio } else { 1.0 };
-        let graphemes: Vec<&str> = text.graphemes(true).collect();
-        let faces: Vec<_> = graphemes
-            .iter()
-            .map(|grapheme| {
-                requested_faces
-                    .iter()
-                    .copied()
-                    .find(|id| face_supports_grapheme(&db, *id, grapheme))
-                    .or_else(|| {
-                        fallback_face.filter(|id| face_supports_grapheme(&db, *id, grapheme))
-                    })
-            })
-            .collect::<Option<Vec<_>>>()?;
-
-        let mut advances_em = vec![0.0; graphemes.len()];
-        let mut run_start = 0;
-        while run_start < graphemes.len() {
-            let face_id = faces[run_start];
-            let mut run_end = run_start + 1;
-            while run_end < graphemes.len() && faces[run_end] == face_id {
-                run_end += 1;
-            }
-            let run_advances = shape_face_run_advances(
-                &db,
-                face_id,
-                &graphemes[run_start..run_end],
-                style.kerning,
-            )?;
-            advances_em[run_start..run_end].copy_from_slice(&run_advances);
-            run_start = run_end;
-        }
-
-        let mut total = 0.0;
-        let mut positions = vec![0.0];
-        for (index, grapheme) in graphemes.iter().enumerate() {
-            let cluster_start = total;
-            let base = advances_em[index] * font_size * ratio;
-            let mut advance = base
-                + glyph_letter_spacing(style.letter_spacing, base, font_size)
-                + style.extra_char_spacing
-                + if *grapheme == " " {
-                    style.extra_word_spacing
-                } else {
-                    0.0
-                };
-            if style.letter_spacing + style.extra_char_spacing < 0.0 {
-                advance = advance.max(base * 0.5);
-            }
-            total += advance;
-            let cluster_len = grapheme.chars().count();
-            positions.extend((0..cluster_len).map(|index| {
-                if index + 1 == cluster_len {
-                    total
-                } else {
-                    cluster_start
-                }
-            }));
-        }
-        Some(positions)
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-fn measure_char_positions_ttf(_text: &str, _style: &TextStyle) -> Option<Vec<f64>> {
-    None
-}
-
-fn measure_text_width_ttf(text: &str, style: &TextStyle) -> Option<f64> {
-    measure_char_positions_ttf(text, style).and_then(|positions| positions.last().copied())
-}
-
 pub struct EmbeddedTextMeasurer;
 
 impl TextMeasurer for EmbeddedTextMeasurer {
     fn estimate_text_width(&self, text: &str, style: &TextStyle) -> f64 {
-        if let Some(width) = measure_text_width_ttf(text, style) {
-            return width;
-        }
         let (font_size, ratio, tab_w) = style_params(style);
         let chars: Vec<char> = text.chars().collect();
         let cluster_len = build_cluster_len(&chars);
@@ -902,9 +688,6 @@ impl TextMeasurer for EmbeddedTextMeasurer {
     }
 
     fn compute_char_positions(&self, text: &str, style: &TextStyle) -> Vec<f64> {
-        if let Some(positions) = measure_char_positions_ttf(text, style) {
-            return positions;
-        }
         let (font_size, _ratio, _tab_w) = style_params(style);
         // [#2132] 폭 산출원 훅 — embedded 메트릭 lookup + 폴백 사다리 (Task #257 포함).
         let char_px_raw = |_i: usize, c: char, _chars: &[char], cluster_len: &[usize]| -> f64 {
@@ -1935,9 +1718,6 @@ pub(crate) fn estimate_text_width(text: &str, style: &TextStyle) -> f64 {
 /// 한컴은 HWPUNIT 정수로 폭을 누적하므로, round 없이 px를 합산한 뒤
 /// 줄바꿈 비교 시점에서 available_width와 비교하는 것이 더 정확하다.
 pub(crate) fn estimate_text_width_unrounded(text: &str, style: &TextStyle) -> f64 {
-    if let Some(width) = measure_text_width_ttf(text, style) {
-        return width;
-    }
     let (font_size, ratio, tab_w) = style_params(style);
     let chars: Vec<char> = text.chars().collect();
     let cluster_len = build_cluster_len(&chars);
@@ -2837,14 +2617,13 @@ mod tests {
         assert!(positions[2] > positions[1]);
         assert!(positions[3] > positions[2]);
         assert_eq!(
-            EmbeddedTextMeasurer.estimate_text_width("e\u{301}x", &style),
+            estimate_text_width_unrounded("e\u{301}x", &style),
             *positions.last().unwrap()
         );
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn opentype_kerning_matches_width_and_position_measurement() {
+    fn embedded_metrics_make_kerning_layout_neutral_on_all_targets() {
         let base = TextStyle {
             font_family: "Noto Sans KR".to_string(),
             font_size: 48.0,
@@ -2859,18 +2638,133 @@ mod tests {
         let kerned_width = estimate_text_width_unrounded("AV", &kerned);
         let kerned_positions = EmbeddedTextMeasurer.compute_char_positions("AV", &kerned);
 
-        assert!(
-            kerned_width < plain_width,
-            "Noto Sans KR GPOS kerning should tighten AV: plain={plain_width}, kerned={kerned_width}"
-        );
+        assert_eq!(kerned_width, plain_width);
         assert!((kerned_width - kerned_positions[2]).abs() < 1e-9);
         assert_eq!(
-            kerned_width,
+            kerned_width.round(),
             EmbeddedTextMeasurer.estimate_text_width("AV", &kerned)
         );
+    }
 
-        let caret_positions = EmbeddedTextMeasurer.compute_char_positions("office", &kerned);
-        assert!(caret_positions.windows(2).all(|pair| pair[1] > pair[0]));
+    #[test]
+    fn calibrated_width_is_the_layout_authority() {
+        let style = TextStyle {
+            font_family: "Noto Sans KR".to_string(),
+            font_size: 40.0 / 3.0,
+            ..Default::default()
+        };
+        let expected: f64 = "Noto"
+            .chars()
+            .map(|c| {
+                measure_char_width_embedded(
+                    &style.font_family,
+                    style.bold,
+                    style.italic,
+                    c,
+                    style.font_size,
+                )
+                .expect("Noto Sans KR ASCII must be calibrated")
+            })
+            .sum();
+
+        assert_eq!(estimate_text_width_unrounded("Noto", &style), expected);
+        assert_eq!(
+            *EmbeddedTextMeasurer
+                .compute_char_positions("Noto", &style)
+                .last()
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn ordinary_width_is_cwd_independent() {
+        const PROBE_ENV: &str = "RHWP_TEXT_METRIC_CWD_PROBE";
+        const PROBE_PREFIX: &str = "RHWP_TEXT_METRIC_WIDTH=";
+        if std::env::var_os(PROBE_ENV).is_some() {
+            let style = TextStyle {
+                font_family: "Noto Sans KR".to_string(),
+                font_size: 40.0 / 3.0,
+                ..Default::default()
+            };
+            println!(
+                "{PROBE_PREFIX}{:.17}",
+                estimate_text_width_unrounded("Noto AV 가나다", &style)
+            );
+            return;
+        }
+
+        let test_exe = std::env::current_exe().expect("current test executable");
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_dir = crate_dir.parent().expect("repository root");
+        let measure_from = |cwd: &std::path::Path| {
+            let output = std::process::Command::new(&test_exe)
+                .args([
+                    "--exact",
+                    "renderer::layout::text_measurement::tests::ordinary_width_is_cwd_independent",
+                    "--nocapture",
+                ])
+                .current_dir(cwd)
+                .env(PROBE_ENV, "1")
+                .output()
+                .unwrap_or_else(|error| panic!("run metric probe from {}: {error}", cwd.display()));
+            assert!(
+                output.status.success(),
+                "metric probe failed from {}: {}",
+                cwd.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| line.strip_prefix(PROBE_PREFIX))
+                .unwrap_or_else(|| panic!("metric probe output missing from {}", cwd.display()))
+                .parse::<f64>()
+                .expect("metric probe width")
+        };
+
+        assert_eq!(measure_from(repo_dir), measure_from(crate_dir));
+    }
+
+    #[test]
+    fn calibrated_metrics_respect_sub_twelve_pixel_font_sizes() {
+        let small = TextStyle {
+            font_family: "Noto Sans KR".to_string(),
+            font_size: 8.0,
+            ..Default::default()
+        };
+        let large = TextStyle {
+            font_size: 16.0,
+            ..small.clone()
+        };
+        let small_width = estimate_text_width_unrounded("가", &small);
+        let large_width = estimate_text_width_unrounded("가", &large);
+
+        assert!(small_width < 12.0, "8px text was clamped: {small_width}");
+        assert!(
+            (small_width * 2.0 - large_width).abs() <= 1.0 / 75.0,
+            "embedded advance must scale with the requested size: small={small_width}, large={large_width}"
+        );
+    }
+
+    #[test]
+    fn extended_grapheme_positions_are_atomic_without_native_fonts() {
+        let style = TextStyle {
+            font_family: UNREGISTERED_FONT.to_string(),
+            font_size: 20.0,
+            ..Default::default()
+        };
+        let text = "\u{1F469}\u{200D}\u{1F4BB}x";
+        let positions = EmbeddedTextMeasurer.compute_char_positions(text, &style);
+
+        assert_eq!(positions.len(), text.chars().count() + 1);
+        assert_eq!(&positions[..3], &[0.0, 0.0, 0.0]);
+        assert!(positions[3] > positions[2]);
+        assert!(positions[4] > positions[3]);
+        assert_eq!(
+            *positions.last().unwrap(),
+            estimate_text_width_unrounded(text, &style)
+        );
     }
 
     // ── narrow glyph advance 회귀 (Task #257) ──
@@ -2956,9 +2850,8 @@ mod tests {
         );
     }
 
-    /// [Task #1735] 방점 U+302E/U+302F 는 렌더 경로에서 좁은 가운데 점(·)으로
-    /// 치환·렌더되므로, 측정 폭도 narrow(≤0.35em)로 분류해 측정-렌더 폭 정합을
-    /// 유지한다(0.5em 기본 폴백 방지).
+    /// [Task #1735] 방점 U+302E/U+302F 는 앞 음절의 combining mark다. 별도 caret이나
+    /// advance를 만들지 않고 음절과 원자적으로 이동해야 한다.
     #[test]
     fn test_narrow_glyph_tone_marks() {
         let m = EmbeddedTextMeasurer;
@@ -2970,13 +2863,12 @@ mod tests {
         };
         for text in &["가\u{302E}나", "가\u{302F}나"] {
             let positions = m.compute_char_positions(text, &style);
-            let advance = positions[2] - positions[1];
-            assert!(
-                advance <= style.font_size * 0.35,
-                "tone mark advance should be ≤ font_size * 0.35 ({:.2}), got {:.2} for {:?}",
-                style.font_size * 0.35,
-                advance,
-                text
+            assert_eq!(positions[0], positions[1], "caret split in {text:?}");
+            assert!(positions[2] > positions[1]);
+            assert_eq!(
+                estimate_text_width_unrounded(text, &style),
+                estimate_text_width_unrounded("가나", &style),
+                "combining tone mark must not add layout width for {text:?}"
             );
         }
     }
