@@ -115,6 +115,7 @@ export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
   function makeHandler() {
     const lastText = new Map();
     return (e) => {
+      if (disposed) return; // 폐기 후 죽어가는 CLI 가 흘리는 stdout 은 무시한다.
       const type = e?.type;
       if (type === 'thread.started') {
         if (e.thread_id) {
@@ -370,6 +371,8 @@ export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
     dispose() {
       disposed = true;
       turnOpen = false;
+      // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
+      try { child?.stdout?.removeAllListeners('data'); } catch {}
       killChild();
     },
   };

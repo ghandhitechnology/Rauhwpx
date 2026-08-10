@@ -117,3 +117,36 @@ test('SnapshotCommand 는 점유 스냅샷 id 수를 보고한다(예산 계산�
   const block = methodBlock(command, 'snapshotResourceCount(): number {');
   assert.match(block, /beforeId !== null[\s\S]*afterId !== null/, 'before/after 살아있는 id 수 반환');
 });
+
+// [Task #2328 후속] 히스토리 밖에서 장기 점유되는 스냅샷(에이전트 pending replace)
+// 배선 — 예산에 포함되지 않으면 WASM 이 아직 참조 중인 undo 스냅샷을 무통보 축출한다.
+
+const inputHandler = source('src/engine/input-handler.ts');
+const pendingEdits = source('src/agent/pending-edits.ts');
+
+test('외부 점유 스냅샷도 예산에 합산된다(retain/release, 음수 클램프)', () => {
+  const live = methodBlock(history, 'liveSnapshotIds(): number {');
+  assert.match(live, /this\.externalSnapshotIds/,
+    '히스토리 밖 점유 id 를 합산해야 함(누락 시 WASM 무통보 축출)');
+  const retain = methodBlock(history, 'retainExternalSnapshot(count = 1): void {');
+  assert.match(retain, /this\.externalSnapshotIds \+=/, 'retain 은 점유 수를 늘린다');
+  const release = methodBlock(history, 'releaseExternalSnapshot(count = 1): void {');
+  assert.match(release, /Math\.max\(0,/, 'release 는 0 미만으로 내려가지 않아야 함');
+  // InputHandler 패스스루 (에이전트 측 진입점)
+  assert.match(inputHandler, /retainExternalSnapshot\(count = 1\): void \{\s*\n\s*this\.history\.retainExternalSnapshot\(count\);/);
+  assert.match(inputHandler, /releaseExternalSnapshot\(count = 1\): void \{\s*\n\s*this\.history\.releaseExternalSnapshot\(count\);/);
+});
+
+test('pending replace 스냅샷은 prepare+retain 하고 폐기 시 release 한다', () => {
+  // replaceText: 예약 → 저장 → 점유 등록
+  assert.match(pendingEdits,
+    /prepareSnapshotCapacity\?\.\(1\);\s*\n\s*const snapshotId = wasm\.saveSnapshot\(\);\s*\n\s*this\.deps\.inputHandler\.retainExternalSnapshot\?\.\(\);/,
+    'replaceText 는 스냅샷 자리 예약 후 점유를 등록해야 함');
+  // 모든 폐기 경로에서 반환한다: 실패 롤백 / discardReplaceSnapshots / withMarkedOpsApplied
+  const discard = methodBlock(pendingEdits, 'discardReplaceSnapshots(ops: PendingOp[]): void {');
+  assert.match(discard, /releaseExternalSnapshot\?\.\(\)/, 'discard 시 점유 반환');
+  const marked = methodBlock(pendingEdits, 'withMarkedOpsApplied<T>(changeSetId: string, fn: () => T): T {');
+  assert.match(marked, /prepareSnapshotCapacity\?\.\(1\)/, '투기적 스냅샷도 자리를 예약');
+  assert.match(marked, /retainExternalSnapshot\?\.\(\)/, '투기적 스냅샷 점유 등록');
+  assert.match(marked, /releaseExternalSnapshot\?\.\(\)/, 'finally 에서 점유 반환');
+});
