@@ -2,6 +2,8 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { humanizerPromptBlock } from './humanizer.mjs';
+
 const SKILL_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const MAX_FILES = 100;
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -316,7 +318,7 @@ export class SkillRegistry {
     return { name: skill.name, resourcePath: rel, content };
   }
 
-  async promptContext(text, explicitName) {
+  async promptContext(text, explicitName, { phase = 'direct' } = {}) {
     const catalog = await this.list();
     const enabled = catalog.skills.filter((skill) => skill.enabled && !skill.invalid);
     const metadata = enabled.map((skill) => `- ${skill.name}: ${skill.description}`).join('\n').slice(0, 8000);
@@ -327,6 +329,9 @@ export class SkillRegistry {
       activated = `\n\n<activated_product_skill name="${skill.name}" root="${skill.root}">\n${markdown}\n</activated_product_skill>`;
     }
     const writingStyle = this.writingStyleStore ? await this.writingStyleStore.promptBlock() : '';
-    return `${writingStyle ? `${writingStyle}\n\n` : ''}<rhwp_product_skills revision="${catalog.revision}">\nOnly the skills in this catalog are product skills. If the request clearly matches one, call read_product_skill for its SKILL.md before acting, then read supporting resources progressively. Do not use provider-global skills.\n${metadata || '(no enabled skills)'}\n</rhwp_product_skills>${activated}\n\n<user_request>\n${text}\n</user_request>`;
+    // 문서에 글이 들어가는 단계에서만 작문 규율을 얹는다. 개인 문체 프로필이 먼저 오고,
+    // 규율 블록은 그 아래에서 "문서 > 개인 문체 > 규율" 우선순위를 스스로 밝힌다.
+    const humanizer = humanizerPromptBlock(phase);
+    return `${writingStyle ? `${writingStyle}\n\n` : ''}${humanizer ? `${humanizer}\n\n` : ''}<rhwp_product_skills revision="${catalog.revision}">\nOnly the skills in this catalog are product skills. If the request clearly matches one, call read_product_skill for its SKILL.md before acting, then read supporting resources progressively. Do not use provider-global skills.\n${metadata || '(no enabled skills)'}\n</rhwp_product_skills>${activated}\n\n<user_request>\n${text}\n</user_request>`;
   }
 }
