@@ -2009,6 +2009,7 @@ fn saved_flow_marks_page_last(paragraphs: &[Paragraph], para_idx: usize) -> bool
         Some(ls) => ls.vertical_pos,
         None => return false,
     };
+    let mut skipped_increasing_empty = false;
     for next_para in paragraphs.iter().skip(para_idx + 1) {
         if matches!(
             next_para.column_type,
@@ -2045,12 +2046,17 @@ fn saved_flow_marks_page_last(paragraphs: &[Paragraph], para_idx: usize) -> bool
                 && next_para.controls.is_empty()
                 && next.vertical_pos >= curr_vpos
             {
+                skipped_increasing_empty = true;
                 continue;
             }
             return next.vertical_pos < curr_vpos;
         }
     }
-    true
+    // A later increasing saved line is still evidence that flow continues unless the scan
+    // actually reaches the reset/break promised by the empty-ladder exception above.  Treating
+    // an unterminated empty ladder as document-end evidence reintroduces the cumulative-vpos
+    // overfill guarded by task #1749.
+    !skipped_increasing_empty
 }
 
 fn saved_flow_reaches_internal_page_rewind(paragraphs: &[Paragraph], para_idx: usize) -> bool {
@@ -19328,7 +19334,12 @@ mod tests {
         ];
         assert!(!saved_flow_marks_page_last(&with_empty, 0));
 
-        // (e) 누적좌표라도 다음 문단이 명시적 쪽나누기면 페이지-마지막 증거로 신뢰
+        // (e) 증가하는 빈 saved ladder는 뒤에서 실제 reset을 찾은 경우에만 건너뜀
+        let empty_ladder_before_reset =
+            vec![para_at_vpos(72626), para_at_vpos(74902), para_at_vpos(700)];
+        assert!(saved_flow_marks_page_last(&empty_ladder_before_reset, 0));
+
+        // (f) 누적좌표라도 다음 문단이 명시적 쪽나누기면 페이지-마지막 증거로 신뢰
         //     (36375752 pi26→pi27 [쪽나누기]: vpos 137484→140204 리셋 없음)
         let mut page_break_next = para_at_vpos(140204);
         page_break_next.column_type = ColumnBreakType::Page;
