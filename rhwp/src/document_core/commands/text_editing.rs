@@ -1973,7 +1973,7 @@ impl DocumentCore {
 
     /// [#2755] path 기반 셀 문단 vpos 재계산 (깊이 ≥ 2 중첩 표 지원).
     /// `recalculate_cell_paragraph_vpos_native` 의 path 변형.
-    fn recalculate_cell_paragraph_vpos_by_path(
+    pub(crate) fn recalculate_cell_paragraph_vpos_by_path(
         &mut self,
         section_idx: usize,
         parent_para_idx: usize,
