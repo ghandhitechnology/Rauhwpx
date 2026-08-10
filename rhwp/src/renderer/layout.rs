@@ -5,8 +5,9 @@
 
 use super::composer::{compose_paragraph, effective_text_for_metrics, ComposedParagraph};
 use super::float_placement::{
-    horizontal_range, is_para_topbottom_float, native_empty_host_rowbreak_line_advance_hu,
-    signed_hwpunit, FloatLaneSet, FloatPlacementContext,
+    float_exclusion, flow_cursor_after_float, horizontal_range, is_para_topbottom_float,
+    native_empty_host_rowbreak_line_advance_hu, signed_hwpunit, FloatLaneSet,
+    FloatPlacementContext,
 };
 use super::font_metrics_data;
 use super::height_cursor::HeightCursor;
@@ -6495,6 +6496,7 @@ impl LayoutEngine {
                     col_node,
                     paper_images,
                     para_start_y,
+                    para_float_lanes,
                     para_inline_state,
                     *para_index,
                     *control_index,
@@ -6915,10 +6917,12 @@ impl LayoutEngine {
                         v_offset_px,
                         fragment_outer_top_px,
                     );
-                    let lane_top = para_float_lanes
-                        .entry(para_index)
-                        .or_default()
-                        .pushed_top(x_start, x_end, raw_top);
+                    let lanes = para_float_lanes.entry(para_index).or_default();
+                    let lane_top = if t.common.allow_overlap {
+                        raw_top
+                    } else {
+                        lanes.pushed_top(x_start, x_end, raw_top)
+                    };
                     para_float_lane_info = Some((x_start, x_end, raw_top, lane_top, y_offset));
                 }
             }
@@ -7672,7 +7676,13 @@ impl LayoutEngine {
             {
                 let reserved_height = (y_offset - lane_top).max(0.0);
                 let lanes = para_float_lanes.entry(para_index).or_default();
-                lanes.place(x_start, x_end, raw_top, reserved_height);
+                let allow_overlap = para
+                    .controls
+                    .get(control_index)
+                    .is_some_and(|control| {
+                        matches!(control, Control::Table(table) if table.common.allow_overlap)
+                    });
+                lanes.place_with_policy(x_start, x_end, raw_top, reserved_height, allow_overlap);
                 let single_positive_empty_float_before_plain_text = para
                     .controls
                     .get(control_index)
@@ -8192,13 +8202,13 @@ impl LayoutEngine {
 
     /// Shape PageItem 레이아웃 (layout_column_item에서 분리)
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn layout_shape_item(
         &self,
         tree: &mut PageRenderTree,
         col_node: &mut RenderNode,
         paper_images: &mut Vec<RenderNode>,
         para_start_y: &mut std::collections::HashMap<usize, f64>,
+        para_float_lanes: &mut ParaFloatLanes,
         // [Task #1151 v9 결함 D] sibling TAC picture 가로 분배 cursor state.
         para_inline_state: &mut std::collections::HashMap<
             usize,
@@ -8784,14 +8794,13 @@ impl LayoutEngine {
                             let para_style_id = comp
                                 .map(|c| c.para_style_id as usize)
                                 .unwrap_or(para.para_shape_id as usize);
-                            let alignment = styles
-                                .para_styles
-                                .get(para_style_id)
+                            let para_style_ref = styles.para_styles.get(para_style_id);
+                            let alignment = para_style_ref
                                 .map(|s| s.alignment)
                                 .unwrap_or(Alignment::Left);
                             let para_base_y =
                                 para_start_y.get(&para_index).copied().unwrap_or(y_offset);
-                            let pic_y = if matches!(
+                            let mut pic_y = if matches!(
                                 pic.common.text_wrap,
                                 crate::model::shape::TextWrap::Square
                             ) && matches!(
@@ -8804,12 +8813,90 @@ impl LayoutEngine {
                             } else {
                                 para_base_y
                             };
-                            let pic_container = LayoutRect {
-                                x: col_area.x,
+                            let para_margin_left =
+                                para_style_ref.map(|style| style.margin_left).unwrap_or(0.0);
+                            let para_margin_right = para_style_ref
+                                .map(|style| style.margin_right)
+                                .unwrap_or(0.0);
+                            let mut pic_container = LayoutRect {
+                                x: col_area.x + para_margin_left,
                                 y: pic_y,
-                                width: col_area.width,
+                                width: (col_area.width - para_margin_left - para_margin_right)
+                                    .max(0.0),
                                 height: col_area.height - (pic_y - col_area.y),
                             };
+                            if matches!(pic.common.text_wrap, TextWrap::TopAndBottom)
+                                && matches!(pic.common.vert_rel_to, VertRelTo::Para)
+                            {
+                                let (pic_width_hu, pic_height_hu) = picture_flow_frame_size_hu(pic);
+                                let picture_w = hwpunit_to_px(pic_width_hu, self.dpi);
+                                let picture_h = hwpunit_to_px(pic_height_hu, self.dpi);
+                                let caption_h = self.calculate_caption_height(&pic.caption, styles);
+                                let caption_spacing = pic
+                                    .caption
+                                    .as_ref()
+                                    .map(|caption| hwpunit_to_px(caption.spacing as i32, self.dpi))
+                                    .unwrap_or(0.0);
+                                let (frame_w, frame_h) = match pic.caption.as_ref() {
+                                    Some(caption)
+                                        if matches!(
+                                            caption.direction,
+                                            CaptionDirection::Top | CaptionDirection::Bottom
+                                        ) =>
+                                    {
+                                        (picture_w, picture_h + caption_h + caption_spacing)
+                                    }
+                                    Some(caption) => (
+                                        picture_w
+                                            + hwpunit_to_px(caption.width as i32, self.dpi)
+                                            + caption_spacing,
+                                        picture_h.max(caption_h),
+                                    ),
+                                    None => (picture_w, picture_h),
+                                };
+                                let paper_area = LayoutRect {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: layout.page_width,
+                                    height: layout.page_height,
+                                };
+                                let (frame_x, frame_y) = self.compute_object_position(
+                                    &pic.common,
+                                    frame_w,
+                                    frame_h,
+                                    &pic_container,
+                                    col_area,
+                                    &layout.body_area,
+                                    &paper_area,
+                                    pic_y,
+                                    alignment,
+                                );
+                                if let Some(exclusion) = float_exclusion(
+                                    &pic.common,
+                                    LayoutRect {
+                                        x: frame_x,
+                                        y: frame_y,
+                                        width: frame_w,
+                                        height: frame_h,
+                                    },
+                                    self.dpi,
+                                ) {
+                                    let lane = para_float_lanes
+                                        .entry(para_index)
+                                        .or_default()
+                                        .place_with_policy(
+                                            exclusion.rect.x,
+                                            exclusion.rect.x + exclusion.rect.width,
+                                            exclusion.rect.y,
+                                            exclusion.rect.height,
+                                            pic.common.allow_overlap,
+                                        );
+                                    let shift = lane.top - exclusion.rect.y;
+                                    pic_y += shift;
+                                    pic_container.y += shift;
+                                    pic_container.height = (pic_container.height - shift).max(0.0);
+                                }
+                            }
                             let saved_y_offset = y_offset;
                             // [Task #1079] 파일 vpos 가 이미 그림 공간을 반영(그림 para 줄 앞
                             // gap ≥ 그림 높이)하면 그림 높이 추가 진행 생략(typeset pushdown
@@ -8833,9 +8920,14 @@ impl LayoutEngine {
                                     _ => false,
                                 }
                             };
+                            let mut picture_parent = RenderNode::new(
+                                tree.next_id(),
+                                RenderNodeType::Column(0),
+                                col_node.bbox.clone(),
+                            );
                             result_y = self.layout_body_picture(
                                 tree,
-                                col_node,
+                                &mut picture_parent,
                                 pic,
                                 &pic_container,
                                 col_area,
@@ -8855,6 +8947,15 @@ impl LayoutEngine {
                                 control_index,
                                 vpos_accounts_for_height,
                             );
+                            let layer = Self::render_layer_from_common(
+                                &pic.common,
+                                para_index,
+                                control_index,
+                            );
+                            for mut child in picture_parent.children.drain(..) {
+                                child.set_layer(layer);
+                                col_node.children.push(child);
+                            }
                             // layout_body_picture needs the host paragraph y for Para-relative
                             // positioning, but InFront pictures must not rewind the
                             // already-advanced text flow cursor back to that paragraph y.
@@ -9086,17 +9187,112 @@ impl LayoutEngine {
                         )
                         && matches!(common.vert_rel_to, crate::model::shape::VertRelTo::Para)
                     {
-                        // [Issue #1156] 비-TAC 자리차지(TopAndBottom) 객체(차트 OLE 등):
-                        // 자리차지 객체는 본문 텍스트를 위/아래로 밀어내므로, 후속 콘텐츠
-                        // 시작 y(result_y)를 객체 높이 + 아래 여백만큼 진행시켜 텍스트가
-                        // 객체 영역과 겹치지 않게 한다. (typeset.rs Stage 2 의 current_height
-                        // 가산과 layout 정합 — 단 이동 후 단 시작 y_offset 기준.)
-                        let shape_h = hwpunit_to_px(common.height as i32, self.dpi);
-                        let margin_bottom = hwpunit_to_px(common.margin.bottom as i32, self.dpi);
-                        let advance = shape_h + margin_bottom;
-                        if y_offset + advance > result_y {
-                            result_y = y_offset + advance;
+                        let para_margin_left =
+                            para_style.map(|style| style.margin_left).unwrap_or(0.0);
+                        let para_margin_right =
+                            para_style.map(|style| style.margin_right).unwrap_or(0.0);
+                        let paragraph_y =
+                            para_start_y.get(&para_index).copied().unwrap_or(y_offset);
+                        let paragraph_area = LayoutRect {
+                            x: col_area.x + para_margin_left,
+                            y: paragraph_y,
+                            width: (col_area.width - para_margin_left - para_margin_right).max(0.0),
+                            height: (col_area.y + col_area.height - paragraph_y).max(0.0),
+                        };
+                        let paper_area = LayoutRect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: layout.page_width,
+                            height: layout.page_height,
+                        };
+                        let (mut shape_w, shape_h) = self.resolve_object_size(
+                            common,
+                            col_area,
+                            &layout.body_area,
+                            &paper_area,
+                        );
+                        if matches!(common.width_criterion, SizeCriterion::Para) {
+                            shape_w = paragraph_area.width * common.width as f64 / 10_000.0;
                         }
+                        let caption = shape_layout::shape_caption_for_layout(shape.as_ref());
+                        let caption_h = self.calculate_caption_height(&caption, styles);
+                        let caption_spacing = caption
+                            .as_ref()
+                            .map(|value| hwpunit_to_px(value.spacing as i32, self.dpi))
+                            .unwrap_or(0.0);
+                        let (frame_w, frame_h) = match caption.as_ref() {
+                            Some(value)
+                                if matches!(
+                                    value.direction,
+                                    CaptionDirection::Top | CaptionDirection::Bottom
+                                ) =>
+                            {
+                                (shape_w, shape_h + caption_h + caption_spacing)
+                            }
+                            Some(value) => (
+                                shape_w
+                                    + hwpunit_to_px(value.width as i32, self.dpi)
+                                    + caption_spacing,
+                                shape_h.max(caption_h),
+                            ),
+                            None => (shape_w, shape_h),
+                        };
+                        let (frame_x, mut frame_y) = self.compute_object_position(
+                            common,
+                            frame_w,
+                            frame_h,
+                            &paragraph_area,
+                            col_area,
+                            &layout.body_area,
+                            &paper_area,
+                            paragraph_y,
+                            para_style
+                                .map(|style| style.alignment)
+                                .unwrap_or(Alignment::Left),
+                        );
+                        if common.flow_with_text {
+                            let body_bottom = col_area.y + col_area.height - frame_h;
+                            frame_y = frame_y.min(body_bottom.max(col_area.y));
+                        }
+                        if let Some(exclusion) = float_exclusion(
+                            common,
+                            LayoutRect {
+                                x: frame_x,
+                                y: frame_y,
+                                width: frame_w,
+                                height: frame_h,
+                            },
+                            self.dpi,
+                        ) {
+                            let lanes = para_float_lanes.entry(para_index).or_default();
+                            let lane = lanes.place_with_policy(
+                                exclusion.rect.x,
+                                exclusion.rect.x + exclusion.rect.width,
+                                exclusion.rect.y,
+                                exclusion.rect.height,
+                                common.allow_overlap,
+                            );
+                            frame_y += lane.top - exclusion.rect.y;
+                            tree.set_floating_shape_position(
+                                page_content.section_index,
+                                para_index,
+                                control_index,
+                                frame_x,
+                                frame_y,
+                            );
+                        }
+                        result_y = flow_cursor_after_float(
+                            common,
+                            LayoutRect {
+                                x: frame_x,
+                                y: frame_y,
+                                width: frame_w,
+                                height: frame_h,
+                            },
+                            **col_area,
+                            result_y,
+                            self.dpi,
+                        );
                     }
                 }
             }
@@ -9629,9 +9825,14 @@ impl LayoutEngine {
                     paper_images.append(&mut temp_parent.children);
                 }
             } else {
+                let mut temp_parent = RenderNode::new(
+                    tree.next_id(),
+                    RenderNodeType::Column(0),
+                    col_node.bbox.clone(),
+                );
                 self.layout_shape(
                     tree,
-                    col_node,
+                    &mut temp_parent,
                     paragraphs,
                     para_index,
                     control_index,
@@ -9646,6 +9847,17 @@ impl LayoutEngine {
                     &overflow_map,
                     false,
                 );
+                if let Some(layer) = ctrl
+                    .and_then(Self::control_common_attr)
+                    .map(|common| Self::render_layer_from_common(common, para_index, control_index))
+                {
+                    for mut child in temp_parent.children.drain(..) {
+                        child.set_layer(layer);
+                        col_node.children.push(child);
+                    }
+                } else {
+                    col_node.children.append(&mut temp_parent.children);
+                }
             }
             // [Task #525] 비-TAC Picture/Shape Square wrap 의 어울림 문단 렌더링은
             // layout_shape_item:3106 (PageItem::Shape 처리 시) 에서 수행. 본 패스에서
@@ -9654,6 +9866,22 @@ impl LayoutEngine {
             // 제거. Task #604 Stage 2 의 wrap_anchors 메타데이터 채널로 FullParagraph
             // path 가 cs offset 을 정확히 적용하므로 별도 호출 불필요.
         }
+
+        // Behind/Text/normal-float/InFront are paint planes. z-order orders objects
+        // inside a plane, but never participates in exclusion geometry.
+        col_node.children.sort_by_key(|node| {
+            let plane = match node.layer.and_then(|layer| layer.text_wrap) {
+                Some(TextWrap::BehindText) => 0u8,
+                None => 1u8,
+                Some(TextWrap::InFrontOfText) => 3u8,
+                Some(_) => 2u8,
+            };
+            let (z_order, stable_index) = node
+                .layer
+                .map(|layer| (layer.z_order, layer.stable_index))
+                .unwrap_or((0, 0));
+            (plane, z_order, stable_index)
+        });
     }
 
     /// `Control::Shape(ShapeObject::Picture)` 형태의 글자처럼 취급 그림은

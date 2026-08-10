@@ -35,20 +35,21 @@ test('서식 이력은 문단당 단일 ID 가 아니라 run 단위 스팬(befor
   // 단일 ID 캡처가 남아 있으면 MIXED 범위 redo 붕괴가 재발한다.
   assert.doesNotMatch(commandSrc, /beforeCharShapeId/, '단일 beforeCharShapeId 캡처 금지');
   assert.doesNotMatch(commandSrc, /afterCharShapeId/, '단일 afterCharShapeId 캡처 금지');
-  assert.match(block, /entries\.push\(\{ paraIndex: p, beforeSpans, afterSpans:/, '문단별 스팬 엔트리 축적');
+  assert.match(
+    block,
+    /entries\.push\(\{\s*target: range\.target,\s*beforeSpans,\s*afterSpans:/,
+    '문단별 스팬 엔트리 축적',
+  );
 });
 
 test('execute 는 서식 적용 전 run 경계를 샘플링하고 적용 후 run별 파생 shape 를 캡처한다', () => {
   const block = classBlock('ApplyCharFormatCommand');
-  for (const applyCall of ['wasm.applyCharFormat(', 'wasm.applyCharFormatInCellByPath(']) {
-    const applyIdx = block.indexOf(applyCall);
-    assert.notEqual(applyIdx, -1, `${applyCall} 호출 not found`);
-    const sampleIdx = block.lastIndexOf('sampleCharShapeSpans(', applyIdx);
-    const deriveIdx = block.indexOf('deriveAfterSpans(', applyIdx);
-    assert.ok(sampleIdx !== -1 && sampleIdx < applyIdx,
-      `${applyCall} 전에 run 경계 샘플링(beforeSpans)이 와야 함`);
-    assert.ok(deriveIdx !== -1, `${applyCall} 후에 after run 스팬 캡처가 와야 함`);
-  }
+  const sampleIdx = block.indexOf('sampleCharShapeSpans(');
+  const applyIdx = block.indexOf('applyCharFormatToTarget(');
+  const deriveIdx = block.indexOf('deriveAfterSpans(', applyIdx);
+  assert.ok(sampleIdx !== -1 && sampleIdx < applyIdx,
+    '대상별 서식 적용 전에 run 경계 샘플링(beforeSpans)이 와야 함');
+  assert.ok(deriveIdx > applyIdx, '대상별 서식 적용 후 after run 스팬을 캡처해야 함');
 });
 
 test('run 경계 샘플링은 오프셋별 charShapeId 비교로 균일 구간을 자른다', () => {
@@ -81,14 +82,24 @@ test('redo(재실행)는 before 가 아니라 after run 스팬을 복원한다',
   assert.match(undo, /restoreCharShapeIds\(wasm, 'before'\)/, 'undo 는 before 스팬 복원');
 });
 
-test('undo/redo 복원은 스팬별 setCharShapeId 호출이다(본문·셀 모두)', () => {
+test('undo/redo 복원은 모든 editable scope에서 스팬별 setCharShapeId 호출이다', () => {
   const block = classBlock('ApplyCharFormatCommand');
   const rIdx = block.indexOf('private restoreCharShapeIds(');
   assert.notEqual(rIdx, -1, 'restoreCharShapeIds not found');
   const restore = block.slice(rIdx);
   assert.match(restore, /for \(const span of spans\)/, '스팬 순회 복원');
-  assert.match(restore, /wasm\.setCharShapeId\([^)]*span\.startOffset, span\.endOffset, span\.charShapeId\)/s,
-    '본문은 스팬 경계로 setCharShapeId');
-  assert.match(restore, /wasm\.setCharShapeIdInCellByPath\([\s\S]*?span\.startOffset, span\.endOffset, span\.charShapeId\)/,
-    '셀은 ...ByPath 로 스팬 경계 복원(중첩 셀 축 정합 유지)');
+  assert.match(restore, /setCharShapeIdAtTarget\(wasm, entry\.target, span\)/,
+    '복원은 대상 라우터에 스팬을 그대로 넘긴다');
+  const routerStart = commandSrc.indexOf('function setCharShapeIdAtTarget(');
+  const routerEnd = commandSrc.indexOf('\nfunction getParaPropertiesAtTarget(', routerStart);
+  const router = commandSrc.slice(routerStart, routerEnd);
+  for (const call of [
+    'wasm.setCharShapeId(',
+    'wasm.setCharShapeIdInCellByPath(',
+    'wasm.setCharShapeIdInCell(',
+    'wasm.setCharShapeIdInHf(',
+    'wasm.setCharShapeIdInFootnote(',
+  ]) {
+    assert.match(router, new RegExp(call.replace(/[.(]/g, '\\$&')), `${call} 라우팅`);
+  }
 });

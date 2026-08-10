@@ -2495,6 +2495,90 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    #[wasm_bindgen(js_name = getCharPropertiesInHf)]
+    pub fn get_char_properties_in_hf(
+        &self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: usize,
+        char_offset: usize,
+    ) -> Result<String, JsValue> {
+        self.get_char_properties_in_hf_native(
+            section_idx,
+            is_header,
+            apply_to,
+            hf_para_idx,
+            char_offset,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = applyCharFormatInHf)]
+    pub fn apply_char_format_in_hf(
+        &mut self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: usize,
+        start_offset: usize,
+        end_offset: usize,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        self.apply_char_format_in_hf_native(
+            section_idx,
+            is_header,
+            apply_to,
+            hf_para_idx,
+            start_offset,
+            end_offset,
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = setCharShapeIdInHf)]
+    pub fn set_char_shape_id_in_hf(
+        &mut self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: usize,
+        start_offset: usize,
+        end_offset: usize,
+        char_shape_id: u32,
+    ) -> Result<String, JsValue> {
+        self.set_char_shape_id_in_hf_native(
+            section_idx,
+            is_header,
+            apply_to,
+            hf_para_idx,
+            start_offset,
+            end_offset,
+            char_shape_id,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = setParaShapeIdInHf)]
+    pub fn set_para_shape_id_in_hf(
+        &mut self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: usize,
+        para_shape_id: u16,
+    ) -> Result<String, JsValue> {
+        self.set_para_shape_id_in_hf_native(
+            section_idx,
+            is_header,
+            apply_to,
+            hf_para_idx,
+            para_shape_id,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 머리말/꼬리말 문단에 문단 서식을 적용한다.
     #[wasm_bindgen(js_name = applyParaFormatInHf)]
     pub fn apply_para_format_in_hf(
@@ -4357,6 +4441,90 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    #[wasm_bindgen(js_name = getCharPropertiesInFootnote)]
+    pub fn get_char_properties_in_footnote(
+        &self,
+        section_idx: u32,
+        para_idx: u32,
+        control_idx: u32,
+        fn_para_idx: u32,
+        char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.get_char_properties_in_footnote_native(
+            section_idx as usize,
+            para_idx as usize,
+            control_idx as usize,
+            fn_para_idx as usize,
+            char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = applyCharFormatInFootnote)]
+    pub fn apply_char_format_in_footnote(
+        &mut self,
+        section_idx: u32,
+        para_idx: u32,
+        control_idx: u32,
+        fn_para_idx: u32,
+        start_offset: u32,
+        end_offset: u32,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        self.apply_char_format_in_footnote_native(
+            section_idx as usize,
+            para_idx as usize,
+            control_idx as usize,
+            fn_para_idx as usize,
+            start_offset as usize,
+            end_offset as usize,
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = setCharShapeIdInFootnote)]
+    pub fn set_char_shape_id_in_footnote(
+        &mut self,
+        section_idx: u32,
+        para_idx: u32,
+        control_idx: u32,
+        fn_para_idx: u32,
+        start_offset: u32,
+        end_offset: u32,
+        char_shape_id: u32,
+    ) -> Result<String, JsValue> {
+        self.set_char_shape_id_in_footnote_native(
+            section_idx as usize,
+            para_idx as usize,
+            control_idx as usize,
+            fn_para_idx as usize,
+            start_offset as usize,
+            end_offset as usize,
+            char_shape_id,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = setParaShapeIdInFootnote)]
+    pub fn set_para_shape_id_in_footnote(
+        &mut self,
+        section_idx: u32,
+        para_idx: u32,
+        control_idx: u32,
+        fn_para_idx: u32,
+        para_shape_id: u16,
+    ) -> Result<String, JsValue> {
+        self.set_para_shape_id_in_footnote_native(
+            section_idx as usize,
+            para_idx as usize,
+            control_idx as usize,
+            fn_para_idx as usize,
+            para_shape_id,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 각주/미주 내부 문단 속성 적용
     #[wasm_bindgen(js_name = applyParaFormatInFootnote)]
     pub fn apply_para_format_in_footnote(
@@ -5544,6 +5712,28 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 여러 구역에 걸친 본문 선택 영역을 삭제한다. 구역 구조는 유지된다.
+    #[wasm_bindgen(js_name = deleteRangeAcrossSections)]
+    pub fn delete_range_across_sections(
+        &mut self,
+        start_section_idx: u32,
+        start_para_idx: u32,
+        start_char_offset: u32,
+        end_section_idx: u32,
+        end_para_idx: u32,
+        end_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.delete_range_across_sections_native(
+            start_section_idx as usize,
+            start_para_idx as usize,
+            start_char_offset as usize,
+            end_section_idx as usize,
+            end_para_idx as usize,
+            end_char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 셀 내 선택 영역을 삭제한다.
     ///
     /// 반환: JSON `{"ok":true,"paraIdx":N,"charOffset":N}`
@@ -5634,6 +5824,11 @@ impl HwpDocument {
     ///   "bytesLen": 678912,
     ///   "pageCountBefore": 9,
     ///   "pageCountAfter": 9,
+    ///   "pageCountMatches": true,
+    ///   "structureBefore": { "textCount": 100, "controlCount": 4, "objectCount": 2, "opaqueControlBytes": 32 },
+    ///   "structureAfter": { "textCount": 100, "controlCount": 4, "objectCount": 2, "opaqueControlBytes": 32 },
+    ///   "structureMatches": true,
+    ///   "serializationLosses": [],
     ///   "recovered": true
     /// }
     /// ```
@@ -5643,10 +5838,18 @@ impl HwpDocument {
     #[wasm_bindgen(js_name = exportHwpVerify)]
     pub fn export_hwp_verify(&mut self) -> Result<String, JsValue> {
         let v = self.serialize_hwp_with_verify().map_err(JsValue::from)?;
-        Ok(format!(
-            "{{\"bytesLen\":{},\"pageCountBefore\":{},\"pageCountAfter\":{},\"recovered\":{}}}",
-            v.bytes_len, v.page_count_before, v.page_count_after, v.recovered
-        ))
+        Ok(serde_json::json!({
+            "bytesLen": v.bytes_len,
+            "pageCountBefore": v.page_count_before,
+            "pageCountAfter": v.page_count_after,
+            "pageCountMatches": v.page_count_matches,
+            "structureBefore": v.structure_before,
+            "structureAfter": v.structure_after,
+            "structureMatches": v.structure_matches,
+            "serializationLosses": v.serialization_losses,
+            "recovered": v.recovered,
+        })
+        .to_string())
     }
 
     /// 원본 파일 형식을 반환한다 ("hwp", "hwpx", 또는 "hml").
@@ -6630,6 +6833,30 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 여러 구역에 걸친 본문 선택에 글자 서식을 적용한다.
+    #[wasm_bindgen(js_name = applyCharFormatAcrossSections)]
+    pub fn apply_char_format_across_sections(
+        &mut self,
+        start_section_idx: usize,
+        start_para_idx: usize,
+        start_char_offset: usize,
+        end_section_idx: usize,
+        end_para_idx: usize,
+        end_char_offset: usize,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        self.apply_char_format_across_sections_native(
+            start_section_idx,
+            start_para_idx,
+            start_char_offset,
+            end_section_idx,
+            end_para_idx,
+            end_char_offset,
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 글자 서식 ID를 직접 복원한다 (본문 문단).
     #[wasm_bindgen(js_name = setCharShapeId)]
     pub fn set_char_shape_id(
@@ -6880,6 +7107,26 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 여러 구역에 걸친 본문 선택의 모든 문단에 문단 서식을 적용한다.
+    #[wasm_bindgen(js_name = applyParaFormatAcrossSections)]
+    pub fn apply_para_format_across_sections(
+        &mut self,
+        start_section_idx: usize,
+        start_para_idx: usize,
+        end_section_idx: usize,
+        end_para_idx: usize,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        self.apply_para_format_across_sections_native(
+            start_section_idx,
+            start_para_idx,
+            end_section_idx,
+            end_para_idx,
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 문단의 paraShapeId를 직접 설정한다.
     #[wasm_bindgen(js_name = setParaShapeId)]
     pub fn set_para_shape_id(
@@ -6936,6 +7183,58 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    #[wasm_bindgen(js_name = getCellParaPropertiesAtByPath)]
+    pub fn get_cell_para_properties_at_by_path_api(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.get_cell_para_properties_at_by_path(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = applyParaFormatInCellByPath)]
+    pub fn apply_para_format_in_cell_by_path_api(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.apply_para_format_in_cell_by_path(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = setCellParaShapeIdByPath)]
+    pub fn set_cell_para_shape_id_by_path_api(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        para_shape_id: u16,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.set_cell_para_shape_id_by_path(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            para_shape_id,
+        )
+        .map_err(|e| e.into())
+    }
+
     // =====================================================================
     // 클립보드 API (WASM 바인딩)
     // =====================================================================
@@ -6974,6 +7273,28 @@ impl HwpDocument {
             section_idx as usize,
             start_para_idx as usize,
             start_char_offset as usize,
+            end_para_idx as usize,
+            end_char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 여러 구역에 걸친 본문 선택을 문서 순서대로 내부 클립보드에 복사한다.
+    #[wasm_bindgen(js_name = copySelectionAcrossSections)]
+    pub fn copy_selection_across_sections(
+        &mut self,
+        start_section_idx: u32,
+        start_para_idx: u32,
+        start_char_offset: u32,
+        end_section_idx: u32,
+        end_para_idx: u32,
+        end_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.copy_selection_across_sections_native(
+            start_section_idx as usize,
+            start_para_idx as usize,
+            start_char_offset as usize,
+            end_section_idx as usize,
             end_para_idx as usize,
             end_char_offset as usize,
         )
@@ -7149,6 +7470,28 @@ impl HwpDocument {
             section_idx as usize,
             start_para_idx as usize,
             start_char_offset as usize,
+            end_para_idx as usize,
+            end_char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 여러 구역에 걸친 본문 선택을 하나의 HTML fragment로 내보낸다.
+    #[wasm_bindgen(js_name = exportSelectionAcrossSectionsHtml)]
+    pub fn export_selection_across_sections_html(
+        &self,
+        start_section_idx: u32,
+        start_para_idx: u32,
+        start_char_offset: u32,
+        end_section_idx: u32,
+        end_para_idx: u32,
+        end_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.export_selection_across_sections_html_native(
+            start_section_idx as usize,
+            start_para_idx as usize,
+            start_char_offset as usize,
+            end_section_idx as usize,
             end_para_idx as usize,
             end_char_offset as usize,
         )

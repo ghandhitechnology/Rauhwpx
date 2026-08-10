@@ -1973,7 +1973,7 @@ impl DocumentCore {
 
     /// [#2755] path 기반 셀 문단 vpos 재계산 (깊이 ≥ 2 중첩 표 지원).
     /// `recalculate_cell_paragraph_vpos_native` 의 path 변형.
-    fn recalculate_cell_paragraph_vpos_by_path(
+    pub(crate) fn recalculate_cell_paragraph_vpos_by_path(
         &mut self,
         section_idx: usize,
         parent_para_idx: usize,
@@ -2195,6 +2195,99 @@ impl DocumentCore {
                 start_para, start_offset
             )))
         }
+    }
+
+    /// 여러 구역에 걸친 본문 선택을 정확한 구역별 조각으로 삭제한다.
+    ///
+    /// 구역 나눔 자체는 문서 구조이므로 유지하고, 각 구역에서 선택된 본문만 삭제한다.
+    /// 역순 실행은 뒤 구역의 문단 축약이 앞 구역 endpoint 계산에 영향을 주지 않게 한다.
+    pub fn delete_range_across_sections_native(
+        &mut self,
+        start_section_idx: usize,
+        start_para_idx: usize,
+        start_char_offset: usize,
+        end_section_idx: usize,
+        end_para_idx: usize,
+        end_char_offset: usize,
+    ) -> Result<String, HwpError> {
+        if start_section_idx > end_section_idx {
+            return Err(HwpError::RenderError(
+                "시작 구역이 끝 구역보다 뒤에 있음".to_string(),
+            ));
+        }
+        if start_section_idx == end_section_idx {
+            return self.delete_range_native(
+                start_section_idx,
+                start_para_idx,
+                start_char_offset,
+                end_para_idx,
+                end_char_offset,
+                None,
+            );
+        }
+
+        let mut ranges = Vec::new();
+        for section_idx in start_section_idx..=end_section_idx {
+            let section = self.document.sections.get(section_idx).ok_or_else(|| {
+                HwpError::RenderError(format!("구역 인덱스 {} 범위 초과", section_idx))
+            })?;
+            if section.paragraphs.is_empty() {
+                continue;
+            }
+            let range_start_para = if section_idx == start_section_idx {
+                start_para_idx
+            } else {
+                0
+            };
+            let range_end_para = if section_idx == end_section_idx {
+                end_para_idx
+            } else {
+                section.paragraphs.len() - 1
+            };
+            if range_start_para > range_end_para || range_end_para >= section.paragraphs.len() {
+                return Err(HwpError::RenderError(format!(
+                    "구역 {} 문단 범위 초과",
+                    section_idx
+                )));
+            }
+            let range_start_offset = if section_idx == start_section_idx {
+                start_char_offset
+            } else {
+                0
+            };
+            let range_end_offset = if section_idx == end_section_idx {
+                end_char_offset
+            } else {
+                section.paragraphs[range_end_para].text.chars().count()
+            };
+            ranges.push((
+                section_idx,
+                range_start_para,
+                range_start_offset,
+                range_end_para,
+                range_end_offset,
+            ));
+        }
+
+        for (section_idx, range_start_para, range_start_offset, range_end_para, range_end_offset) in
+            ranges.into_iter().rev()
+        {
+            self.delete_range_native(
+                section_idx,
+                range_start_para,
+                range_start_offset,
+                range_end_para,
+                range_end_offset,
+                None,
+            )?;
+        }
+
+        self.document.doc_properties.caret_list_id = start_section_idx as u32;
+        self.document.doc_properties.caret_para_id = start_para_idx as u32;
+        Ok(super::super::helpers::json_ok_with(&format!(
+            "\"sectionIdx\":{},\"paraIdx\":{},\"charOffset\":{}",
+            start_section_idx, start_para_idx, start_char_offset
+        )))
     }
 
     /// 표 셀에 대한 가변 참조를 얻는다.
@@ -2457,6 +2550,9 @@ impl DocumentCore {
             if !self.document.sections[section_idx].paragraphs[i]
                 .field_ranges
                 .is_empty()
+                || !self.document.sections[section_idx].paragraphs[i]
+                    .orphan_field_ends
+                    .is_empty()
             {
                 rebuild_char_offsets(&mut self.document.sections[section_idx].paragraphs[i]);
             }
@@ -3170,7 +3266,6 @@ impl DocumentCore {
             }
             _ => {}
         }
-
         // 양쪽 문단 리플로우
         self.reflow_cell_paragraph(
             section_idx,
@@ -3304,7 +3399,6 @@ impl DocumentCore {
                 ));
             }
         }
-
         // 병합된 문단 리플로우
         self.reflow_cell_paragraph(
             section_idx,
@@ -4364,47 +4458,22 @@ impl DocumentCore {
         // [#2755] 리플로우 후 재적용할 원본 vpos(분할 대상 문단 첫 seg).
         let mut split_origin_vpos: Option<i32> = None;
 
-        // 셀에 접근하여 문단 분할
-        let section = self
-            .document
-            .sections
-            .get_mut(section_idx)
-            .ok_or_else(|| HwpError::RenderError("구역 범위 초과".to_string()))?;
-        let mut para: &mut Paragraph = section
-            .paragraphs
-            .get_mut(parent_para_idx)
-            .ok_or_else(|| HwpError::RenderError("문단 범위 초과".to_string()))?;
-
-        // path를 따라 마지막 셀까지 진입
-        for (i, &(ctrl_idx, cell_idx, _cpi)) in path.iter().enumerate() {
-            let table = match para.controls.get_mut(ctrl_idx) {
-                Some(Control::Table(t)) => t.as_mut(),
-                _ => return Err(HwpError::RenderError("경로: 표가 아닙니다".to_string())),
-            };
-            let cell = table
-                .cells
-                .get_mut(cell_idx)
-                .ok_or_else(|| HwpError::RenderError("셀 범위 초과".to_string()))?;
-            if i == path.len() - 1 {
-                // 이 셀에서 문단 분할. 리플로우/shift/recalc 는 borrow 해제 후 루프 밖에서 한다.
-                if cell_para_idx >= cell.paragraphs.len() {
-                    return Err(HwpError::RenderError("셀문단 범위 초과".to_string()));
-                }
-                split_origin_vpos = cell.paragraphs[cell_para_idx]
-                    .line_segs
-                    .first()
-                    .map(|seg| seg.vertical_pos);
-                let mut new_para = cell.paragraphs[cell_para_idx].split_at(char_offset);
-                if let Some(meta) = restore_meta {
-                    new_para.apply_meta(meta);
-                }
-                cell.paragraphs.insert(cell_para_idx + 1, new_para);
-                break;
+        // 공통 path resolver는 표뿐 아니라 글상자/캡션을 거쳐 하강하는 경로도 처리한다.
+        {
+            let paragraphs =
+                self.get_cell_paragraphs_mut_by_path(section_idx, parent_para_idx, path)?;
+            if cell_para_idx >= paragraphs.len() {
+                return Err(HwpError::RenderError("셀문단 범위 초과".to_string()));
             }
-            para = cell
-                .paragraphs
-                .get_mut(_cpi)
-                .ok_or_else(|| HwpError::RenderError("셀문단 범위 초과".to_string()))?;
+            split_origin_vpos = paragraphs[cell_para_idx]
+                .line_segs
+                .first()
+                .map(|seg| seg.vertical_pos);
+            let mut new_para = paragraphs[cell_para_idx].split_at(char_offset);
+            if let Some(meta) = restore_meta {
+                new_para.apply_meta(meta);
+            }
+            paragraphs.insert(cell_para_idx + 1, new_para);
         }
 
         // [#2755] flat split 형제(:2387)와 동일하게 분할된 두 문단을 셀 폭으로 재래핑한 뒤
@@ -4468,47 +4537,24 @@ impl DocumentCore {
         // [#2755] 리플로우 후 재적용할 원본 vpos(병합 생존 문단 첫 seg).
         let mut merge_origin_vpos: Option<i32> = None;
 
-        let section = self
-            .document
-            .sections
-            .get_mut(section_idx)
-            .ok_or_else(|| HwpError::RenderError("구역 범위 초과".to_string()))?;
-        let mut para: &mut Paragraph = section
-            .paragraphs
-            .get_mut(parent_para_idx)
-            .ok_or_else(|| HwpError::RenderError("문단 범위 초과".to_string()))?;
-
         let mut merge_point = 0usize;
         // 사라지는 문단의 스코프 메타 — undo(split)가 되돌릴 값이다 (Task #2342).
         let mut removed_meta: Option<ParaMeta> = None;
-        for (i, &(ctrl_idx, cell_idx, _cpi)) in path.iter().enumerate() {
-            let table = match para.controls.get_mut(ctrl_idx) {
-                Some(Control::Table(t)) => t.as_mut(),
-                _ => return Err(HwpError::RenderError("경로: 표가 아닙니다".to_string())),
-            };
-            let cell = table
-                .cells
-                .get_mut(cell_idx)
-                .ok_or_else(|| HwpError::RenderError("셀 범위 초과".to_string()))?;
-            if i == path.len() - 1 {
-                if cell_para_idx >= cell.paragraphs.len() {
-                    return Err(HwpError::RenderError("셀문단 범위 초과".to_string()));
-                }
-                merge_origin_vpos = cell.paragraphs[prev_idx]
-                    .line_segs
-                    .first()
-                    .map(|seg| seg.vertical_pos);
-                let removed = cell.paragraphs.remove(cell_para_idx);
-                removed_meta = Some(removed.capture_meta());
-                let prev = &mut cell.paragraphs[prev_idx];
-                merge_point = prev.text.chars().count();
-                prev.merge_from(&removed);
-                break;
+        {
+            let paragraphs =
+                self.get_cell_paragraphs_mut_by_path(section_idx, parent_para_idx, path)?;
+            if cell_para_idx >= paragraphs.len() {
+                return Err(HwpError::RenderError("셀문단 범위 초과".to_string()));
             }
-            para = cell
-                .paragraphs
-                .get_mut(_cpi)
-                .ok_or_else(|| HwpError::RenderError("셀문단 범위 초과".to_string()))?;
+            merge_origin_vpos = paragraphs[prev_idx]
+                .line_segs
+                .first()
+                .map(|seg| seg.vertical_pos);
+            let removed = paragraphs.remove(cell_para_idx);
+            removed_meta = Some(removed.capture_meta());
+            let prev = &mut paragraphs[prev_idx];
+            merge_point = prev.text.chars().count();
+            prev.merge_from(&removed);
         }
 
         // [#2755] flat merge 형제(:2486)와 동일하게 병합 생존 문단을 셀 폭으로 재래핑한 뒤

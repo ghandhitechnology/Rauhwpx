@@ -315,10 +315,11 @@ impl DocumentCore {
         let location = fi.location.clone();
         let fri = fi.field_range_index;
         let old_value = fi.value.clone();
+        let stored_end = para_at_location(self, &location)
+            .and_then(crate::renderer::composer::paragraph_flow_end);
 
-        let section_index = location.section_index;
         self.set_field_text_at(&location, fri, value)?;
-        self.recompose_section(section_index);
+        self.refresh_field_layout(&location, stored_end);
 
         Ok(format!(
             "{{\"ok\":true,\"fieldId\":{},\"oldValue\":{},\"newValue\":{}}}",
@@ -341,6 +342,8 @@ impl DocumentCore {
         let fri = fi.field_range_index;
         let old_value = fi.value.clone();
         let is_cell_field = fi.field.ctrl_id == 0; // 가상 셀 필드
+        let stored_end = para_at_location(self, &location)
+            .and_then(crate::renderer::composer::paragraph_flow_end);
 
         let section_index = location.section_index;
 
@@ -356,7 +359,7 @@ impl DocumentCore {
         if let Some(sec) = self.document.sections.get_mut(section_index) {
             sec.raw_stream = None;
         }
-        self.recompose_section(section_index);
+        self.refresh_field_layout(&location, stored_end);
 
         Ok(format!(
             "{{\"ok\":true,\"fieldId\":{},\"oldValue\":{},\"newValue\":{}}}",
@@ -555,6 +558,67 @@ impl DocumentCore {
         Ok(())
     }
 
+    fn refresh_field_layout(&mut self, location: &FieldLocation, stored_end: Option<i32>) {
+        let section_idx = location.section_index;
+        if self.composed.len() <= section_idx {
+            self.composed.resize_with(section_idx + 1, Vec::new);
+        }
+        if location.nested_path.is_empty() {
+            self.reflow_paragraph(section_idx, location.para_index);
+            let hwp3_layout = self.document.layout_profile().hwp3_layout();
+            crate::renderer::composer::recalculate_section_vpos(
+                &mut self.document.sections[section_idx].paragraphs,
+                location.para_index,
+                None,
+                stored_end,
+                &self.styles,
+                self.dpi,
+                hwp3_layout,
+            );
+            if self.composed[section_idx].len() > location.para_index {
+                self.recompose_paragraph(section_idx, location.para_index);
+            } else {
+                self.recompose_section(section_idx);
+            }
+        } else {
+            let path: Vec<(usize, usize, usize)> = location
+                .nested_path
+                .iter()
+                .map(|entry| match entry {
+                    NestedEntry::TableCell {
+                        control_index,
+                        cell_index,
+                        para_index,
+                    } => (*control_index, *cell_index, *para_index),
+                    NestedEntry::TextBox {
+                        control_index,
+                        para_index,
+                    } => (*control_index, 0, *para_index),
+                })
+                .collect();
+            let target_para = path.last().map(|entry| entry.2).unwrap_or(0);
+            if let Some((outer_control, _, _)) = path.first().copied() {
+                self.mark_cell_control_dirty(section_idx, location.para_index, outer_control);
+            }
+            self.reflow_cell_paragraph_by_path(
+                section_idx,
+                location.para_index,
+                &path,
+                target_para,
+            );
+            self.recalculate_cell_paragraph_vpos_by_path(
+                section_idx,
+                location.para_index,
+                &path,
+                target_para,
+                None,
+            );
+            self.recompose_section(section_idx);
+        }
+        self.paginate_if_needed();
+        self.invalidate_page_tree_cache();
+    }
+
     /// FieldLocation에 해당하는 Paragraph의 가변 참조를 반환한다.
     ///
     /// 중첩 표/글상자를 재귀적으로 탐색하여 임의 깊이를 지원한다.
@@ -653,6 +717,13 @@ impl DocumentCore {
         para_idx: usize,
         char_offset: usize,
     ) -> Result<String, HwpError> {
+        let location = FieldLocation {
+            section_index: section_idx,
+            para_index: para_idx,
+            nested_path: Vec::new(),
+        };
+        let stored_end = para_at_location(self, &location)
+            .and_then(crate::renderer::composer::paragraph_flow_end);
         let para = self
             .document
             .sections
@@ -666,7 +737,7 @@ impl DocumentCore {
         if let Some(section) = self.document.sections.get_mut(section_idx) {
             section.raw_stream = None;
         }
-        self.recompose_section(section_idx);
+        self.refresh_field_layout(&location, stored_end);
         Ok(r#"{"ok":true}"#.to_string())
     }
 
@@ -681,6 +752,24 @@ impl DocumentCore {
         char_offset: usize,
         is_textbox: bool,
     ) -> Result<String, HwpError> {
+        let location = FieldLocation {
+            section_index: section_idx,
+            para_index: parent_para_idx,
+            nested_path: vec![if is_textbox {
+                NestedEntry::TextBox {
+                    control_index: control_idx,
+                    para_index: cell_para_idx,
+                }
+            } else {
+                NestedEntry::TableCell {
+                    control_index: control_idx,
+                    cell_index: cell_idx,
+                    para_index: cell_para_idx,
+                }
+            }],
+        };
+        let stored_end = para_at_location(self, &location)
+            .and_then(crate::renderer::composer::paragraph_flow_end);
         let para = {
             let host = self
                 .document
@@ -727,7 +816,7 @@ impl DocumentCore {
         if let Some(section) = self.document.sections.get_mut(section_idx) {
             section.raw_stream = None;
         }
-        self.recompose_section(section_idx);
+        self.refresh_field_layout(&location, stored_end);
         Ok(r#"{"ok":true}"#.to_string())
     }
 
@@ -1415,6 +1504,10 @@ pub(crate) fn rebuild_char_offsets(para: &mut Paragraph) {
         let idx = fr.end_char_idx.min(text_len);
         field_end_at[idx] += 1;
     }
+    for orphan in &para.orphan_field_ends {
+        let idx = orphan.char_idx.min(text_len);
+        field_end_at[idx] += 1;
+    }
 
     if text_len == 0 {
         para.char_offsets = Vec::new();
@@ -1581,6 +1674,60 @@ mod tests {
         );
         let bytes = crate::serializer::body_text::serialize_section(&core.document.sections[0]);
         assert_ne!(bytes, vec![0xAB; 64]);
+    }
+
+    #[test]
+    fn setting_body_field_reflows_and_recomposes_changed_text() {
+        let mut core = DocumentCore::new_empty();
+        core.document.sections.push(Section {
+            paragraphs: vec![para_with_click_here_field()],
+            ..Default::default()
+        });
+        core.composed = vec![Vec::new()];
+        core.dirty_sections = vec![true];
+        core.dirty_paragraphs = vec![None];
+
+        let replacement = "AV cafe\u{301} 한글 ".repeat(120);
+        core.set_field_value_by_id(100, &replacement).unwrap();
+
+        let para = &core.document.sections[0].paragraphs[0];
+        assert!(para.line_segs.len() > 1);
+        assert_eq!(
+            para.field_ranges[0].end_char_idx,
+            3 + replacement.chars().count()
+        );
+        assert_eq!(core.composed[0][0].lines.len(), para.line_segs.len());
+    }
+
+    #[test]
+    fn setting_nested_field_reflows_cell_before_section_recompose() {
+        let table = Table {
+            cells: vec![Cell {
+                width: 6000,
+                paragraphs: vec![para_with_click_here_field()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut core = DocumentCore::new_empty();
+        core.document.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Table(Box::new(table))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        core.composed = vec![Vec::new()];
+        core.dirty_sections = vec![true];
+        core.dirty_paragraphs = vec![None];
+
+        core.set_field_value_by_id(100, &"nested field text ".repeat(40))
+            .unwrap();
+
+        let Control::Table(table) = &core.document.sections[0].paragraphs[0].controls[0] else {
+            panic!("expected table");
+        };
+        assert!(table.cells[0].paragraphs[0].line_segs.len() > 1);
     }
 
     #[test]

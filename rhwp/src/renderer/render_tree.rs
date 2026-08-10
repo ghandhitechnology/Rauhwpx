@@ -1287,6 +1287,11 @@ pub struct PageRenderTree {
     /// 인라인 Shape 좌표 맵: (section, para, control, cell_path) → (x, y)
     #[serde(skip)]
     inline_shape_positions: std::collections::HashMap<InlineShapeKey, (f64, f64)>,
+    /// Final lane-adjusted positions for non-inline floating shapes. Keeping this
+    /// separate prevents paragraph-layout's inline/fallback registrations from
+    /// overriding signed float geometry during the later shape paint pass.
+    #[serde(skip)]
+    floating_shape_positions: std::collections::HashMap<InlineShapeKey, (f64, f64)>,
 }
 
 /// `clip_overlapping_same_bin_images` 전용 대략적 replay plane 분류.
@@ -1333,6 +1338,7 @@ impl PageRenderTree {
             root,
             next_id: 1,
             inline_shape_positions: std::collections::HashMap::new(),
+            floating_shape_positions: std::collections::HashMap::new(),
         }
     }
 
@@ -1390,6 +1396,29 @@ impl PageRenderTree {
     /// 인라인 Shape 좌표 전체 참조 (hitTest용)
     pub fn inline_shape_positions(&self) -> &std::collections::HashMap<InlineShapeKey, (f64, f64)> {
         &self.inline_shape_positions
+    }
+
+    pub(crate) fn set_floating_shape_position(
+        &mut self,
+        sec: usize,
+        para: usize,
+        ctrl: usize,
+        x: f64,
+        y: f64,
+    ) {
+        self.floating_shape_positions
+            .insert((sec, para, ctrl, Vec::new()), (x, y));
+    }
+
+    pub(crate) fn get_floating_shape_position(
+        &self,
+        sec: usize,
+        para: usize,
+        ctrl: usize,
+    ) -> Option<(f64, f64)> {
+        self.floating_shape_positions
+            .get(&(sec, para, ctrl, Vec::new()))
+            .copied()
     }
 
     /// 새 노드 ID 할당
@@ -1970,5 +1999,21 @@ mod tests {
 
         assert_eq!(image_bbox(&tree.root.children[0]).height, 200.0);
         assert_eq!(image_crop(&tree.root.children[0]), Some((0, 0, 100, 100)));
+    }
+
+    #[test]
+    fn floating_positions_do_not_overwrite_inline_registrations() {
+        let mut tree = PageRenderTree::new(0, 600.0, 800.0);
+        tree.set_inline_shape_position(0, 4, 2, None, 10.0, 20.0);
+        tree.set_floating_shape_position(0, 4, 2, 30.0, 40.0);
+
+        assert_eq!(
+            tree.get_inline_shape_position(0, 4, 2, None),
+            Some((10.0, 20.0))
+        );
+        assert_eq!(
+            tree.get_floating_shape_position(0, 4, 2),
+            Some((30.0, 40.0))
+        );
     }
 }

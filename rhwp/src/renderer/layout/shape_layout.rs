@@ -1,6 +1,7 @@
 //! 도형/글상자/그룹 개체 레이아웃
 
 use super::super::composer::{compose_paragraph, reflow_line_segs, ComposedParagraph};
+use super::super::float_placement::{float_exclusion, horizontal_range, FloatPlacementContext};
 use super::super::page_layout::LayoutRect;
 use super::super::pagination::PageItem;
 use super::super::render_tree::*;
@@ -40,7 +41,7 @@ fn textbox_contains_non_tac_picture(text_box: &TextBox) -> bool {
     })
 }
 
-fn shape_caption_for_layout(shape: &ShapeObject) -> Option<Caption> {
+pub(super) fn shape_caption_for_layout(shape: &ShapeObject) -> Option<Caption> {
     match shape {
         ShapeObject::Line(s) => s.drawing.caption.clone(),
         ShapeObject::Rectangle(s) => s.drawing.caption.clone(),
@@ -743,26 +744,6 @@ impl LayoutEngine {
         };
 
         let common = shape.common();
-        let adjusted_common;
-        let common_for_position = if clamp_negative_para_offset
-            && !common.treat_as_char
-            && matches!(common.vert_rel_to, crate::model::shape::VertRelTo::Para)
-            && matches!(
-                common.vert_align,
-                crate::model::shape::VertAlign::Top | crate::model::shape::VertAlign::Inside
-            )
-            && (common.vertical_offset as i32) < 0
-        {
-            adjusted_common = {
-                let mut common = common.clone();
-                common.vertical_offset = 0;
-                common
-            };
-            &adjusted_common
-        } else {
-            common
-        };
-
         let (mut shape_w, mut shape_h) =
             self.resolve_object_size(common, col_area, body_area, paper_area);
 
@@ -790,13 +771,46 @@ impl LayoutEngine {
         });
         let para_margin_left = composed_para.map(|ps| ps.margin_left).unwrap_or(0.0);
         let para_margin_right = composed_para.map(|ps| ps.margin_right).unwrap_or(0.0);
+        if matches!(
+            common.width_criterion,
+            crate::model::shape::SizeCriterion::Para
+        ) {
+            let para_width = (col_area.width - para_margin_left - para_margin_right).max(0.0);
+            shape_w = para_width * common.width as f64 / 10_000.0;
+        }
+
+        // Position and exclude the complete visual frame, including captions. This keeps
+        // center/right/bottom alignment and text reservation on the same geometry.
+        let caption_opt = shape_caption_for_layout(shape);
+        let caption = caption_opt.as_ref();
+        let caption_height = self.calculate_caption_height(&caption_opt, styles);
+        let caption_spacing = caption
+            .map(|c| hwpunit_to_px(c.spacing as i32, self.dpi))
+            .unwrap_or(0.0);
+        let (total_width, total_height) = match caption {
+            Some(c)
+                if matches!(
+                    c.direction,
+                    CaptionDirection::Top | CaptionDirection::Bottom
+                ) =>
+            {
+                (shape_w, shape_h + caption_height + caption_spacing)
+            }
+            Some(c) => (
+                shape_w + hwpunit_to_px(c.width as i32, self.dpi) + caption_spacing,
+                shape_h.max(caption_height),
+            ),
+            None => (shape_w, shape_h),
+        };
 
         // 인라인 Shape: paragraph_layout에서 계산된 좌표가 있으면 사용
-        let inline_pos = if common.treat_as_char {
-            tree.get_inline_shape_position(section_index, para_index, control_index, None)
-        } else {
-            None
-        };
+        let inline_pos = common
+            .treat_as_char
+            .then(|| tree.get_inline_shape_position(section_index, para_index, control_index, None))
+            .flatten();
+        let floating_pos = (!common.treat_as_char)
+            .then(|| tree.get_floating_shape_position(section_index, para_index, control_index))
+            .flatten();
         // [Issue #476] treat_as_char Shape는 paragraph_layout이 inline_pos 등록 후
         // 본 함수가 그려야 한다. inline_pos 가 없는 경우는 paginator 가 PageItem::Shape 를
         // 잘못된 페이지(박스가 속한 line이 라우팅되지 않은 페이지)에 등록한 결과이며,
@@ -824,13 +838,13 @@ impl LayoutEngine {
             width: col_area.width - para_margin_left - para_margin_right,
             height: col_area.height - (para_y - col_area.y).max(0.0),
         };
-        let (shape_x, shape_y) = if let Some((ix, iy)) = inline_pos {
+        let (shape_x, shape_y) = if let Some((ix, iy)) = inline_pos.or(floating_pos) {
             (ix, iy)
         } else {
             self.compute_object_position(
-                common_for_position,
-                shape_w,
-                shape_h,
+                common,
+                total_width,
+                total_height,
                 &shape_container,
                 col_area,
                 body_area,
@@ -839,14 +853,6 @@ impl LayoutEngine {
                 alignment,
             )
         };
-
-        // 캡션 높이 및 간격 계산
-        let caption_opt = shape_caption_for_layout(shape);
-        let caption = caption_opt.as_ref();
-        let caption_height = self.calculate_caption_height(&caption_opt, styles);
-        let caption_spacing = caption
-            .map(|c| hwpunit_to_px(c.spacing as i32, self.dpi))
-            .unwrap_or(0.0);
 
         // 캡션 방향에 따라 도형 위치 오프셋 계산
         let (caption_top_offset, caption_left_offset) = if let Some(c) = caption {
@@ -872,14 +878,7 @@ impl LayoutEngine {
             && common.flow_with_text
             && matches!(common.vert_rel_to, crate::model::shape::VertRelTo::Para)
         {
-            let total_h = shape_h
-                + caption_height
-                + if caption_height > 0.0 {
-                    caption_spacing
-                } else {
-                    0.0
-                };
-            let body_bottom = col_area.y + col_area.height - total_h;
+            let body_bottom = col_area.y + col_area.height - total_height;
             shape_y.min(body_bottom.max(col_area.y))
         } else {
             shape_y
@@ -1967,25 +1966,42 @@ impl LayoutEngine {
                 parent.children.push(img_node);
             }
             ShapeObject::Chart(chart) => {
-                // Task #195: 차트 placeholder (점선 테두리 + "차트" 라벨)
-                let _chart = chart;
-                let node_id = tree.next_id();
-                let node = RenderNode::new(
-                    node_id,
-                    RenderNodeType::Placeholder(
-                        crate::renderer::render_tree::PlaceholderNode::new(
-                            0xFFE8F0FE,
-                            0xFF4A90E2,
-                            "차트 (Chart)".to_string(),
+                // Native legacy CHART_DATA can carry either an OOXML chart
+                // payload or already-decoded series in ChartShape. Route both
+                // through the established chart renderers; do not infer values
+                // from opaque bytes.
+                let ooxml = crate::ooxml_chart::OoxmlChart::parse(&chart.raw_chart_data);
+                if let Some(chart) = ooxml {
+                    push_raw_svg_render_node(
+                        tree,
+                        parent,
+                        BoundingBox::new(render_x, render_y, render_w, render_h),
+                        chart.render_svg(render_x, render_y, render_w, render_h),
+                    );
+                } else if let Some(chart_ir) = crate::ole_chart::chart_shape_to_ir(chart) {
+                    push_raw_svg_render_node(
+                        tree,
+                        parent,
+                        BoundingBox::new(render_x, render_y, render_w, render_h),
+                        crate::ole_chart::render_ole_chart_svg_fragment(
+                            &chart_ir, render_x, render_y, render_w, render_h, 0,
                         ),
-                    ),
-                    BoundingBox::new(render_x, render_y, render_w, render_h),
-                );
-                parent.children.push(node);
+                    );
+                } else {
+                    push_placeholder_render_node(
+                        tree,
+                        parent,
+                        BoundingBox::new(render_x, render_y, render_w, render_h),
+                        0xFFE8F0FE,
+                        0xFF4A90E2,
+                        "차트 개체 (CHART_DATA undecodable)".to_string(),
+                    );
+                }
             }
             ShapeObject::Ole(ole) => {
                 // Task #195 단계 8: BinData에서 OOXML 차트 시도 → 성공 시 네이티브 SVG 렌더
                 let mut rendered = false;
+                let mut decode_error: Option<String> = None;
                 if let Some(content) = find_bin_data(bin_data_content, ole.bin_data_id as u16) {
                     // HWPX에서 주입된 OOXML 차트 XML 직접 경로 (CFB 컨테이너 없음)
                     if content.extension == "ooxml_chart" {
@@ -2057,23 +2073,12 @@ impl LayoutEngine {
                                             rendered = true;
                                         }
                                         Err(error) => {
-                                            push_ole_placeholder_render_node(
-                                                tree,
-                                                parent,
-                                                BoundingBox::new(
-                                                    render_x, render_y, render_w, render_h,
-                                                ),
-                                                0xFFFFF4E5,
-                                                0xFFB45F06,
-                                                ole_chart_fallback_label(
-                                                    error.stable_message(),
-                                                    ole.bin_data_id,
-                                                ),
-                                                section_index,
-                                                para_index,
-                                                control_index,
-                                            );
-                                            rendered = true;
+                                            // An undecodable Contents stream does not
+                                            // invalidate a real presentation preview.
+                                            // Keep the diagnostic for the final stable
+                                            // object representation and continue through
+                                            // EMF/WMF/native-image fallbacks first.
+                                            decode_error = Some(error.stable_message());
                                         }
                                     }
                                 }
@@ -2197,8 +2202,12 @@ impl LayoutEngine {
                 }
 
                 if !rendered {
-                    // 폴백: placeholder
-                    let label = format!("OLE 개체 (BinData #{})", ole.bin_data_id);
+                    // Truly undecodable OLE remains a stable, selectable object.
+                    // The label reports what was actually observed and never
+                    // fabricates chart type, series, or values.
+                    let label = decode_error
+                        .map(|message| ole_chart_fallback_label(message, ole.bin_data_id))
+                        .unwrap_or_else(|| format!("OLE 개체 (BinData #{})", ole.bin_data_id));
                     push_ole_placeholder_render_node(
                         tree,
                         parent,
@@ -3586,22 +3595,34 @@ impl LayoutEngine {
         col_area: &LayoutRect,
         body_area: &LayoutRect,
     ) -> (f64, f64) {
-        use crate::model::shape::{VertAlign, VertRelTo};
-        let v_offset = hwpunit_to_px(common.vertical_offset as i32, self.dpi);
-        let shape_h = hwpunit_to_px(common.height as i32, self.dpi);
-        let (ref_y, ref_h) = match common.vert_rel_to {
-            VertRelTo::Paper => (0.0_f64, body_area.y + body_area.height + body_area.y),
-            VertRelTo::Page => (body_area.y, body_area.height),
-            VertRelTo::Para => (col_area.y, col_area.height),
+        let paper_area = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: body_area.x * 2.0 + body_area.width,
+            height: body_area.y * 2.0 + body_area.height,
         };
-        let shape_y = match common.vert_align {
-            VertAlign::Top | VertAlign::Inside => ref_y + v_offset,
-            VertAlign::Center => ref_y + (ref_h - shape_h) / 2.0 + v_offset,
-            VertAlign::Bottom | VertAlign::Outside => ref_y + ref_h - shape_h - v_offset,
+        let (shape_w, shape_h) = self.resolve_object_size(common, col_area, body_area, &paper_area);
+        let (shape_x, shape_y) = self.compute_object_position(
+            common,
+            shape_w,
+            shape_h,
+            col_area,
+            col_area,
+            body_area,
+            &paper_area,
+            col_area.y,
+            Alignment::Left,
+        );
+        let frame = LayoutRect {
+            x: shape_x,
+            y: shape_y,
+            width: shape_w,
+            height: shape_h,
         };
-        // 바깥 여백(margin.bottom) 포함 — 본문이 여백 이후부터 시작
-        let margin_bottom = hwpunit_to_px(common.margin.bottom as i32, self.dpi);
-        (shape_y + shape_h + margin_bottom, shape_y)
+        let bottom = float_exclusion(common, frame, self.dpi)
+            .map(|exclusion| exclusion.rect.y + exclusion.rect.height)
+            .unwrap_or(shape_y + shape_h);
+        (bottom, shape_y)
     }
 
     /// 다단 레이아웃에서 body_area 전체에 걸치는 TopAndBottom 개체의 예약 높이 계산
@@ -3657,7 +3678,14 @@ impl LayoutEngine {
                     }
                 }
                 // body_area 너비의 80% 이상 차지하는 개체만 (2단에 걸치는 개체)
-                let shape_w = hwpunit_to_px(common.width as i32, self.dpi);
+                let paper_area = LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: body_area.x * 2.0 + body_area.width,
+                    height: body_area.y * 2.0 + body_area.height,
+                };
+                let (shape_w, _) =
+                    self.resolve_object_size(common, body_area, body_area, &paper_area);
                 if shape_w < body_area.width * 0.8 {
                     continue;
                 }
@@ -3727,23 +3755,22 @@ impl LayoutEngine {
         col_area: &LayoutRect,
         body_area: &LayoutRect,
     ) -> bool {
-        use crate::model::shape::{HorzAlign, HorzRelTo};
-        let h_offset = hwpunit_to_px(common.horizontal_offset as i32, self.dpi);
-        let shape_w = hwpunit_to_px(common.width as i32, self.dpi);
-        let (ref_x, ref_w) = match common.horz_rel_to {
-            HorzRelTo::Paper => (0.0_f64, body_area.x + body_area.width + body_area.x),
-            HorzRelTo::Page => (body_area.x, body_area.width),
-            HorzRelTo::Column => (col_area.x, col_area.width),
-            _ => (col_area.x, col_area.width),
+        let paper_width = body_area.x * 2.0 + body_area.width;
+        let paper_area = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: paper_width,
+            height: body_area.y * 2.0 + body_area.height,
         };
-        let shape_x = match common.horz_align {
-            HorzAlign::Left | HorzAlign::Inside => ref_x + h_offset,
-            HorzAlign::Center => ref_x + (ref_w - shape_w) / 2.0 + h_offset,
-            HorzAlign::Right | HorzAlign::Outside => ref_x + ref_w - shape_w - h_offset,
-        };
-        let shape_right = shape_x + shape_w;
+        let (shape_w, _) = self.resolve_object_size(common, col_area, body_area, &paper_area);
+        let placement = FloatPlacementContext::new(*col_area)
+            .with_body_area(*body_area)
+            .with_paper_width(paper_width);
+        let (shape_x, shape_right) = horizontal_range(common, shape_w, placement, self.dpi);
+        let shape_x = shape_x - hwpunit_to_px(common.margin.left as i32, self.dpi);
+        let shape_right = shape_right + hwpunit_to_px(common.margin.right as i32, self.dpi);
         let col_right = col_area.x + col_area.width;
-        shape_right >= col_area.x && shape_x <= col_right
+        shape_right > col_area.x && shape_x < col_right
     }
 }
 
