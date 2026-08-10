@@ -2,7 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventBus } from '../src/core/event-bus.ts';
 import { RevisionTracker } from '../src/agent/revision.ts';
-import { AgentToolExecutor } from '../src/agent/tool-executor.ts';
+import {
+  AgentToolExecutor,
+  DOCUMENT_WRITE_TOOLS,
+  isDocumentWriteTool,
+} from '../src/agent/tool-executor.ts';
 import { AgentToolError } from '../src/agent/types.ts';
 
 function microtask(): Promise<void> {
@@ -133,6 +137,93 @@ async function expectToolError(p: Promise<unknown>, code: string): Promise<Agent
 test('executor: 알 수 없는 툴 → UNKNOWN_TOOL', async () => {
   const { executor } = makeExecutor();
   await expectToolError(executor.execute('bogus_tool', {}, 'claude'), 'UNKNOWN_TOOL');
+});
+
+test('executor: document-write helper covers every mutating tool', () => {
+  assert.deepEqual([...DOCUMENT_WRITE_TOOLS].sort(), [
+    'apply_char_format',
+    'apply_list',
+    'apply_para_format',
+    'apply_style',
+    'create_table',
+    'delete_range',
+    'edit_header_footer',
+    'edit_table',
+    'insert_chart',
+    'insert_equation',
+    'insert_image',
+    'insert_page_break',
+    'insert_text',
+    'replace_range',
+    'set_field_value',
+    'set_page_layout',
+  ]);
+  assert.equal(isDocumentWriteTool('insert_text'), true);
+  assert.equal(isDocumentWriteTool('get_structure'), false);
+});
+
+test('executor: planning and unknown phases reject every write before mutation', async () => {
+  const { executor, calls } = makeExecutor();
+  for (const tool of DOCUMENT_WRITE_TOOLS) {
+    await expectToolError(executor.execute(tool, {}, 'claude', {
+      workflow: 'plan',
+      phase: 'planning',
+      capabilityEpoch: 4,
+      activePhase: 'planning',
+      activeCapabilityEpoch: 4,
+    }), 'PLAN_MODE_READ_ONLY');
+  }
+  await expectToolError(executor.execute('insert_text', {}, 'claude', {
+    workflow: 'plan',
+    phase: 'future-phase',
+    capabilityEpoch: 4,
+    activePhase: 'implementing',
+    activeCapabilityEpoch: 4,
+  }), 'PLAN_MODE_READ_ONLY');
+  assert.deepEqual(calls, []);
+});
+
+test('executor: implementing requires the current capability epoch', async () => {
+  const { executor, calls } = makeExecutor();
+  await expectToolError(executor.execute('insert_text', {
+    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
+  }, 'claude', {
+    workflow: 'plan',
+    phase: 'implementing',
+    capabilityEpoch: 3,
+    activePhase: 'implementing',
+    activeCapabilityEpoch: 4,
+  }), 'STALE_CAPABILITY_EPOCH');
+  await expectToolError(executor.execute('insert_text', {
+    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
+  }, 'claude', {
+    workflow: 'plan',
+    phase: 'implementing',
+    activePhase: 'implementing',
+    activeCapabilityEpoch: 4,
+  }), 'STALE_CAPABILITY_EPOCH');
+  assert.deepEqual(calls, []);
+});
+
+test('executor: planning reads and authorized implementation writes remain available', async () => {
+  const { executor, calls } = makeExecutor();
+  const structure = await executor.execute('get_structure', {}, 'claude', {
+    workflow: 'plan',
+    phase: 'planning',
+    activePhase: 'planning',
+  }) as { revision: number };
+  assert.equal(structure.revision, 1);
+
+  await executor.execute('insert_text', {
+    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
+  }, 'claude', {
+    workflow: 'plan',
+    phase: 'implementing',
+    capabilityEpoch: 8,
+    activePhase: 'implementing',
+    activeCapabilityEpoch: 8,
+  });
+  assert.equal(calls[0]?.method, 'insertText');
 });
 
 test('executor: get_structure가 revision/미리보기를 반환', async () => {

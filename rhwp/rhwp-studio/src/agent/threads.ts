@@ -1,4 +1,5 @@
-import type { AgentName } from './types.ts';
+import { isAgentWorkflow, isStructuredPlan } from './types.ts';
+import type { AgentName, AgentWorkflow, StructuredPlan } from './types.ts';
 
 const STORAGE_KEY = 'rhwp-agent-threads';
 const MAX_THREADS = 40;
@@ -22,6 +23,9 @@ export interface ChatThread {
   agent: AgentName;
   model: string;
   effort: string;
+  workflow: AgentWorkflow;
+  /** Historical display data only. Phase/approval/capability authority is never persisted. */
+  latestPlan?: StructuredPlan;
   messages: ThreadMessage[];
 }
 
@@ -29,7 +33,13 @@ export interface ThreadDraft {
   agent: AgentName;
   model: string;
   effort: string;
+  workflow?: AgentWorkflow;
 }
+
+type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan'> & {
+  workflow?: unknown;
+  latestPlan?: unknown;
+};
 
 function canUseStorage(): boolean {
   try {
@@ -46,7 +56,7 @@ function loadAll(): ChatThread[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isChatThread);
+    return parsed.filter(isStoredChatThread).map(normalizeStoredThread);
   } catch {
     return [];
   }
@@ -61,7 +71,7 @@ function saveAll(threads: ChatThread[]): void {
   }
 }
 
-function isChatThread(v: unknown): v is ChatThread {
+function isStoredChatThread(v: unknown): v is StoredChatThread {
   if (!v || typeof v !== 'object') return false;
   const t = v as Record<string, unknown>;
   return (
@@ -74,6 +84,16 @@ function isChatThread(v: unknown): v is ChatThread {
     && typeof t.effort === 'string'
     && Array.isArray(t.messages)
   );
+}
+
+function normalizeStoredThread(thread: StoredChatThread): ChatThread {
+  const latestPlan = isStructuredPlan(thread.latestPlan) ? thread.latestPlan : undefined;
+  const { workflow: _storedWorkflow, latestPlan: _storedPlan, ...rest } = thread;
+  return {
+    ...rest,
+    workflow: isAgentWorkflow(thread.workflow) ? thread.workflow : 'direct',
+    ...(latestPlan ? { latestPlan } : {}),
+  };
 }
 
 export function createThreadId(): string {
@@ -101,6 +121,7 @@ export function createEmptyThread(draft: ThreadDraft): ChatThread {
     agent: draft.agent,
     model: draft.model,
     effort: draft.effort,
+    workflow: draft.workflow ?? 'direct',
     messages: [],
   };
 }
@@ -128,6 +149,8 @@ export function upsertThread(thread: ChatThread): void {
     updatedAt: Date.now(),
     title: thread.title.trim() || fallbackTitle(thread.messages),
     titleRequested: Boolean(thread.titleRequested),
+    workflow: isAgentWorkflow(thread.workflow) ? thread.workflow : 'direct',
+    ...(isStructuredPlan(thread.latestPlan) ? { latestPlan: thread.latestPlan } : { latestPlan: undefined }),
   };
   const all = loadAll().filter((t) => t.id !== capped.id);
   all.unshift(capped);

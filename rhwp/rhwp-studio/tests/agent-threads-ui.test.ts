@@ -36,10 +36,12 @@ test('sidebar header keeps one compact model summary and expands all settings to
 
 test('permission and skill utilities remain visible above the composer', () => {
   assert.match(source, /ag-composer-utilities/);
-  assert.match(source, /composerUtilities\.append\(permissionBtn, skillsBtn\)/);
+  assert.match(source, /composerWorkflowRow\.append\(workflowGroup, phaseBadge\)/);
+  assert.match(source, /composerUtilityActions\.append\(writingStyleCalibration\.button, permissionBtn, skillsBtn\)/);
+  assert.match(source, /composerUtilities\.append\(composerWorkflowRow, composerUtilityActions\)/);
   assert.match(source, /chatPage\.append\(header, messages, review, composerUtilities, composer\)/);
   assert.match(source, /permissionBtn\.textContent = unrestricted \? '권한: 전체 접근' : '권한: 안전'/);
-  assert.match(css, /\.ag-composer-utilities\s*\{[^}]*justify-content:\s*flex-end;/s);
+  assert.match(css, /\.ag-composer-utilities\s*\{[^}]*flex-direction:\s*column;/s);
 });
 
 test('replaced connection state exposes an explicit takeover action', () => {

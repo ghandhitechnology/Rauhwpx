@@ -58,6 +58,9 @@ Thumbs.db
 .env
 .env.docker
 
+# 계획 모드의 채팅별 다운로드
+/.rhwp-agent/downloads/
+
 # E2E 스크린샷
 rhwp-studio/e2e/screenshots/
 

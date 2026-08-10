@@ -23,6 +23,7 @@ An HWP editor with agentic features as a first-class part of the product—not a
 - Users open HWP/HWPX (and related formats) in `rhwp-studio` in the browser (PWA).
 - A local Node hub (`rhwp-agent`) bridges Claude or Codex CLI to the studio tab via MCP tools.
 - AI writes appear as pending, reviewable edits (tint / strikethrough) until the user Approves or Rejects; Approve commits as one undo step.
+- A separate planning workflow can research with web, subagents, Browserbase, and chat-scoped downloads while local files and the live document remain read-only. The agent presents a structured plan; only an explicit `Approve & execute` action unlocks implementation.
 - Everything document-related runs locally in the browser WASM engine; the agent hub is a thin localhost router with no document logic.
 - Adjacent surfaces exist (browser extensions, VS Code viewer, embeddable npm editor, CLI) but the primary product experience for this record is the studio editor + AI sidebar.
 
@@ -30,7 +31,7 @@ An HWP editor with agentic features as a first-class part of the product—not a
 
 - Parse/edit/render Korean HWP ecosystem formats (HWP 5.0, HWPX, HML; HWP3 read); serialize with roundtrip fidelity as a core concern.
 - MCP tools use body-text addresses (`sectionIdx` / `paraIdx` / `charOffset`, 0-based) and a revision contract (`expectedRevision` / `REVISION_MISMATCH`).
-- AI must not apply document mutations silently; human approval is part of the product.
+- AI must not apply document mutations silently; human approval is part of the product. Planning approval does not replace the existing review of pending HWP changes.
 - Independent of Hancom; “한글,” “한컴,” “HWP,” and “HWPX” are Hancom trademarks—do not imply affiliation, sponsorship, or approval.
 - UI and product language are Korean-first where the studio already is (`lang="ko"`).
 - Open: exact collaboration model beyond single-user AI review (multi-user co-editing, sharing) is desired as success direction but not fully specified yet.

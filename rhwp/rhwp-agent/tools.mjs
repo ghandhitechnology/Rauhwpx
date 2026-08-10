@@ -28,6 +28,9 @@ function invalidArgs(message) {
  * 나머지 필드는 text(JSON) 블록에 담는다 (render_page png, verify_changes includeImage).
  */
 export function toToolContent(result) {
+  if (result && typeof result === 'object' && Array.isArray(result.mcpContent)) {
+    return result.mcpContent;
+  }
   const image = result && typeof result === 'object' ? result.image : null;
   if (image && typeof image === 'object' && typeof image.data === 'string' && typeof image.mimeType === 'string') {
     const { image: _omit, ...rest } = result;
@@ -72,11 +75,36 @@ const UNIT_NOTE = 'Lengths are in mm, font sizes in pt, colors "#RRGGBB". (Inter
 
 const EQUATION_SYNTAX = 'Write HWP equation script (한컴 수식) — NOT LaTeX. Core tokens: {a} over {b} (fraction) · sqrt {x} / root n of x · x^{2} y_{i} (sup/sub) · int _{0} ^{inf}, sum _{k=1} ^{n}, prod, lim _{x -> 0} · PMATRIX{ a & b # c & d } (또한 MATRIX/BMATRIX/DMATRIX; & = column, # = row) · cases{...} · greek by name: alpha beta pi omega, uppercase GAMMA SIGMA · arrows: ->, <-, <-> · decorations: bar x, vec x, hat x, dot x · rm/it font toggle · ~ thin space, # line break. Examples: "x = {-b +- sqrt {b^2 - 4ac}} over {2a}" · "int _{0} ^{inf} e^{-x^2} dx = {sqrt pi} over 2" · "sum _{k=1} ^{n} k = {n(n+1)} over 2". The script is validated by actually rendering it BEFORE insertion; syntax errors return INVALID_SCRIPT and nothing is inserted.';
 
+export const TOOL_CATEGORIES = Object.freeze([
+  'document-read',
+  'document-write',
+  'download-write',
+  'planning-control',
+  'browser',
+]);
+
+export const IMPLEMENTATION_PLAN_SHAPE = Object.freeze({
+  goal: z.string().min(1).max(2_000).describe('The user outcome this plan will achieve'),
+  title: z.string().min(1).max(200).describe('Short implementation plan title'),
+  summary: z.string().min(1).max(5_000).describe('Concise approach and intended outcome'),
+  assumptions: z.array(z.string().min(1).max(1_000)).max(50),
+  decisions: z.array(z.string().min(1).max(2_000)).min(1).max(100),
+  steps: z.array(z.object({
+    title: z.string().min(1).max(300),
+    details: z.string().min(1).max(3_000),
+    files: z.array(z.string().min(1).max(1_000)).max(100).optional(),
+  }).strict()).min(1).max(100),
+  files: z.array(z.string().min(1).max(1_000)).max(200),
+  validation: z.array(z.string().min(1).max(1_000)).min(1).max(100),
+  risks: z.array(z.string().min(1).max(2_000)).max(100),
+  exclusions: z.array(z.string().min(1).max(1_000)).max(100),
+});
+
 /**
  * 전체 도구 정의 목록. 순서가 MCP 클라이언트에 노출되는 순서다.
  * @type {Array<{ name: string, description: string, shape: Record<string, any>, validate?: (args: any) => void }>}
  */
-export const TOOL_DEFINITIONS = [
+const BASE_TOOL_DEFINITIONS = [
   {
     name: 'read_product_skill',
     description: 'Read an enabled rhwp product skill or one of its supporting text resources. Use this after the enabled-skill catalog says a skill matches the request. Start with SKILL.md, then read only the referenced files needed for the current task. This never reads provider-global skills or arbitrary filesystem paths.',
@@ -446,4 +474,119 @@ export const TOOL_DEFINITIONS = [
         .describe('Also return a PNG render of the first affected page (default false)'),
     },
   },
+  {
+    name: 'present_implementation_plan',
+    description: 'Present a complete implementation plan for user review. The hub assigns the authoritative planId, stores the canonical plan, emits plan-ready to Studio, and moves the plan workflow to awaiting-approval. This is a control action, not document approval.',
+    shape: IMPLEMENTATION_PLAN_SHAPE,
+  },
+  {
+    name: 'download_file',
+    description: 'Download an HTTP(S) resource into this chat\'s hub-managed download directory. The hub chooses and confines the destination path; filename is only a sanitized naming hint. Returns the local path, MIME type, byte size, source URL, and SHA-256 checksum.',
+    shape: {
+      url: z.string().url().max(8_000).refine((value) => /^https?:\/\//i.test(value), 'url must use http or https'),
+      filename: z.string().min(1).max(255).optional().describe('Optional filename hint only; directory components are discarded'),
+    },
+  },
+  {
+    name: 'browserbase_start',
+    description: 'Create or reuse the hub-owned Browserbase session for this chat.',
+    shape: {},
+  },
+  {
+    name: 'browserbase_end',
+    description: 'End the hub-owned Browserbase browser session for this chat.',
+    shape: {},
+  },
+  {
+    name: 'browserbase_navigate',
+    description: 'Navigate the shared Browserbase session to an HTTP(S) URL.',
+    shape: { url: z.string().url().max(8_000).refine((value) => /^https?:\/\//i.test(value), 'url must use http or https') },
+  },
+  {
+    name: 'browserbase_act',
+    description: 'Perform a natural-language action in the shared Browserbase session without per-action confirmation.',
+    shape: { action: z.string().min(1).max(5_000) },
+  },
+  {
+    name: 'browserbase_observe',
+    description: 'Observe actionable elements in the shared Browserbase session.',
+    shape: { instruction: z.string().min(1).max(5_000) },
+  },
+  {
+    name: 'browserbase_extract',
+    description: 'Extract structured information from the current page in the shared Browserbase session. Text output is truncated at 50KB.',
+    shape: { instruction: z.string().min(1).max(5_000).optional() },
+  },
 ];
+
+/** @type {Readonly<Record<string, 'document-read'|'document-write'|'download-write'|'planning-control'|'browser'>>} */
+export const TOOL_CLASSIFICATIONS = Object.freeze({
+  read_product_skill: 'document-read',
+  get_structure: 'document-read',
+  get_text_range: 'document-read',
+  get_selection: 'document-read',
+  get_fields: 'document-read',
+  get_document_info: 'document-read',
+  find_text: 'document-read',
+  render_page: 'document-read',
+  get_para_format: 'document-read',
+  get_char_format: 'document-read',
+  insert_text: 'document-write',
+  delete_range: 'document-write',
+  replace_range: 'document-write',
+  apply_char_format: 'document-write',
+  create_table: 'document-write',
+  edit_table: 'document-write',
+  apply_para_format: 'document-write',
+  apply_list: 'document-write',
+  list_styles: 'document-read',
+  list_numberings: 'document-read',
+  apply_style: 'document-write',
+  insert_image: 'document-write',
+  insert_equation: 'document-write',
+  preview_equation: 'document-read',
+  insert_chart: 'document-write',
+  set_page_layout: 'document-write',
+  edit_header_footer: 'document-write',
+  insert_page_break: 'document-write',
+  set_field_value: 'document-write',
+  verify_changes: 'document-read',
+  present_implementation_plan: 'planning-control',
+  download_file: 'download-write',
+  browserbase_start: 'browser',
+  browserbase_end: 'browser',
+  browserbase_navigate: 'browser',
+  browserbase_act: 'browser',
+  browserbase_observe: 'browser',
+  browserbase_extract: 'browser',
+});
+
+export const TOOL_DEFINITIONS = Object.freeze(BASE_TOOL_DEFINITIONS.map((definition) => {
+  const category = TOOL_CLASSIFICATIONS[definition.name];
+  if (!category) throw new Error(`Tool ${definition.name} has no classification`);
+  return Object.freeze({ ...definition, category });
+}));
+
+export const TOOL_PROFILES = Object.freeze({
+  direct: Object.freeze(['document-read', 'document-write']),
+  planning: Object.freeze(['document-read', 'download-write', 'planning-control', 'browser']),
+  'awaiting-approval': Object.freeze(['document-read', 'download-write', 'browser']),
+  implementing: Object.freeze(['document-read', 'document-write', 'download-write', 'browser']),
+  all: TOOL_CATEGORIES,
+});
+
+/**
+ * Resolve a named profile or comma-separated category/tool allowlist.
+ * Unknown entries are ignored so a typo cannot accidentally broaden access.
+ * @param {string | undefined} profile
+ */
+export function filterToolDefinitions(profile) {
+  const value = String(profile ?? 'direct').trim();
+  const named = TOOL_PROFILES[value];
+  if (named) {
+    const categories = new Set(named);
+    return TOOL_DEFINITIONS.filter((definition) => categories.has(definition.category));
+  }
+  const entries = new Set(value.split(',').map((entry) => entry.trim()).filter(Boolean));
+  return TOOL_DEFINITIONS.filter((definition) => entries.has(definition.name) || entries.has(definition.category));
+}
