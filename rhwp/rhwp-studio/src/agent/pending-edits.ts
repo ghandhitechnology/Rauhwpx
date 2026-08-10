@@ -87,12 +87,28 @@ export class PendingEditManager {
   /** withMarkedOpsApplied 로 mark-only op 이 현재 적용 중인 set id (재진입 가드) */
   private speculativeSets = new Set<string>();
   private lastDigest: string | null;
+  /**
+   * 사용자(비-에이전트) 문서 변이 카운터. replace op 의 스냅샷은 문서 전체 클론이라
+   * 복원하면 스냅샷 이후의 모든 변이를 지운다 — pending 중 사용자 편집은 주소로
+   * 관측하지 않으므로(untracked drift), 이 카운터가 스냅샷 시점과 달라졌으면
+   * 전체 복원 대신 범위-국소 역연산 폴백으로만 되돌린다.
+   */
+  private userEditSeq = 0;
+  /** 매니저 자신의 변이(approve/reject/무효화) 중 카운터 증가 억제 — 재진입 가드 */
+  private selfMutating = 0;
   // 파라미터 프로퍼티 대신 명시적 할당 (node --test strip-only 모드 호환).
   private deps: PendingEditDeps;
 
   constructor(deps: PendingEditDeps) {
     this.deps = deps;
     this.lastDigest = deps.wasm.documentDigest;
+    this.unsubs.push(deps.eventBus.on('document-mutated', (reason) => {
+      // 매니저 자신의 변이는 'agent-*' 이유로 발행되지만, approve 가 부르는
+      // InputHandler 경로는 'input-handler-edit' 로 재진입하므로 플래그로도 막는다.
+      if (this.selfMutating > 0) return;
+      if (typeof reason === 'string' && reason.startsWith('agent-')) return;
+      this.userEditSeq++;
+    }));
     this.unsubs.push(deps.eventBus.on('history-jumped', () => {
       // undo/redo 후에는 대기 편집을 유지할 수 없다. 다만 그냥 버리면(R3 위반)
       // 이미 적용된 에이전트 삽입/서식이 승인 절차 없이 문서에 영구히 남으므로,
@@ -211,7 +227,12 @@ export class PendingEditManager {
     }
 
     // 변이 직전 스냅샷 — 되돌림 시 원본(텍스트+서식)을 정확히 복원하는 소스.
+    // 리뷰 창 내내 점유되므로 히스토리 예산에 자리를 만들고(prepare) 점유를
+    // 등록한다(retain) — 등록하지 않으면 WASM 저장소가 우리가 아직 참조하는
+    // 오래된 undo 스냅샷을 무통보 축출한다.
+    this.deps.inputHandler.prepareSnapshotCapacity?.(1);
     const snapshotId = wasm.saveSnapshot();
+    this.deps.inputHandler.retainExternalSnapshot?.();
     let deleteShifted = false;
     try {
       const res = this.deleteRangeRaw(range);
@@ -235,6 +256,7 @@ export class PendingEditManager {
       const op: PendingOp = {
         kind: 'replace', id: this.nextId('op'), agent: set.agent,
         range: ins.range, text, deletedText, charShapeId, paraShapeIds, snapshotId,
+        userEditSeqAtSnapshot: this.userEditSeq,
       };
       this.pushOp(set, op);
       if (text.length > 0) {
@@ -251,6 +273,7 @@ export class PendingEditManager {
       // 부분 적용 롤백 — 스냅샷으로 변이 전 상태를 그대로 복원한다.
       try { wasm.restoreSnapshot(snapshotId); } catch { /* best effort */ }
       wasm.discardSnapshot(snapshotId);
+      this.deps.inputHandler.releaseExternalSnapshot?.();
       // 삭제 shift 는 이미 다른 op 들에 반영됐을 수 있다 — 원본이 다시 나타났으므로
       // 재삽입과 동치인 shift 로 되돌린다.
       if (deleteShifted) {
@@ -426,7 +449,9 @@ export class PendingEditManager {
     this.speculativeSets.add(changeSetId);
     let snapId: number | null = null;
     try {
+      this.deps.inputHandler.prepareSnapshotCapacity?.(1);
       snapId = wasm.saveSnapshot();
+      this.deps.inputHandler.retainExternalSnapshot?.();
       this.applyApprovalOnlyOps(set.ops);
       this.emitDocEvents('agent-preview');
       return fn();
@@ -435,6 +460,7 @@ export class PendingEditManager {
       if (snapId !== null) {
         try { wasm.restoreSnapshot(snapId); } catch { /* best effort */ }
         wasm.discardSnapshot(snapId);
+        this.deps.inputHandler.releaseExternalSnapshot?.();
       }
       this.restorePendingState(pendingState);
       this.emitDocEvents('agent-preview');
@@ -453,6 +479,18 @@ export class PendingEditManager {
   approve(changeSetId: string): void {
     const set = this.sets.find((s) => s.id === changeSetId);
     if (!set) return;
+    // 되돌림이 시작되기 전에 사용자 편집 카운터를 한 번만 샘플링한다 —
+    // revertAppliedOps 자체가 문서를 바꾸므로 중간에 읽으면 판정이 오염된다.
+    const userEditSeqNow = this.userEditSeq;
+    this.selfMutating++;
+    try {
+      this.approveInner(set, changeSetId, userEditSeqNow);
+    } finally {
+      this.selfMutating--;
+    }
+  }
+
+  private approveInner(set: PendingChangeSet, changeSetId: string, userEditSeqNow: number): void {
     if (set === this.open) this.open = null;
     const { kept, dropped } = this.partitionDriftedOps(set);
     const skipped = dropped.length;
@@ -465,13 +503,13 @@ export class PendingEditManager {
     }
 
     // kept 가 남았으면 kept 만 되돌려 before 를 캡처한다 (드리프트 미리보기는
-    // 사용자 소유로 before 에 남긴다). 전부 드리프트됐으면 드리프트분까지 되돌려
-    // before 를 캡처한 뒤 미리보기를 채택한다 — 그냥 반환하면 적용된 미리보기가
-    // 히스토리 항목 없이 문서에 방치된다.
-    const revertOps = kept.length > 0 ? kept : set.ops.slice();
+    // 사용자 소유로 before 에 남긴다). 전부 드리프트됐으면 되돌릴 것이 없다 —
+    // 드리프트 미리보기는 이미 사용자가 손댄 텍스트라, 이를 지워 before 를 만들면
+    // undo 가 사용자 글자까지 잘라낸다. 현재 상태를 before 로 잡아 undo 를 무해한
+    // no-op 으로 만들고 히스토리 항목만 남긴다(미리보기 방치 방지).
     const keepPreviewsOf = kept.length > 0 ? dropped : [];
-    // all-drifted 경로에서는 되돌림 동안 좌표 shift 추적이 필요하므로 set.ops 를
-    // 원본 그대로 유지한다 (승인 시점 연산은 kept 가 없으면 실행되지 않는다).
+    // all-drifted 경로에서는 set.ops 를 원본 그대로 유지한다
+    // (승인 시점 연산은 kept 가 없으면 실행되지 않는다).
     if (kept.length > 0) set.ops = kept;
 
     const wasm = this.deps.wasm;
@@ -479,6 +517,17 @@ export class PendingEditManager {
     const previewState = this.capturePendingState();
     let previewId: number | null = null;
     let beforeId: number | null = null;
+    // 히스토리 밖에서 점유 중인 id 수 (preview/before) — 예산 정합용
+    let heldExternal = 0;
+    const retainExternal = (): void => {
+      heldExternal++;
+      this.deps.inputHandler.retainExternalSnapshot?.();
+    };
+    const releaseExternal = (n = 1): void => {
+      const count = Math.min(n, heldExternal);
+      heldExternal -= count;
+      for (let i = 0; i < count; i++) this.deps.inputHandler.releaseExternalSnapshot?.();
+    };
     let command: PreparedSnapshotCommand | null = null;
 
     try {
@@ -488,10 +537,18 @@ export class PendingEditManager {
       // before 캡처를 위해 잠시 되돌리되, 즉시 원본 스냅샷을 복원한다. 텍스트를
       // 삭제 후 재삽입하지 않으므로 줄/문단/혼합 글자 서식이 미리보기와 동일하다.
       previewId = wasm.saveSnapshot();
-      this.revertAppliedOps(revertOps, keepPreviewsOf);
-      beforeId = wasm.saveSnapshot();
-      wasm.restoreSnapshot(previewId);
-      this.restorePendingState(previewState);
+      retainExternal();
+      if (kept.length > 0) {
+        this.revertAppliedOps(kept, keepPreviewsOf, userEditSeqNow);
+        beforeId = wasm.saveSnapshot();
+        retainExternal();
+        wasm.restoreSnapshot(previewId);
+        this.restorePendingState(previewState);
+      } else {
+        // 전부 드리프트: 미리보기는 사용자 소유이므로 되돌리지 않는다.
+        beforeId = wasm.saveSnapshot();
+        retainExternal();
+      }
 
       command = new PreparedSnapshotCommand(
         'agentApplyChangeSet', cursor, cursor, beforeId,
@@ -510,6 +567,8 @@ export class PendingEditManager {
         // 지점(에이전트 편집 위치)에서 caret 위치로 카메라를 되돌리지 않는다.
         meta: { refresh: 'full', scroll: 'preserve' },
       });
+      // 히스토리가 command(before/after)를 세므로 외부 점유를 전부 반환한다.
+      releaseExternal(heldExternal);
     } catch (err) {
       if (previewId !== null) {
         try { wasm.restoreSnapshot(previewId); } catch { /* best effort */ }
@@ -517,6 +576,7 @@ export class PendingEditManager {
       }
       if (beforeId !== null) wasm.discardSnapshot(beforeId);
       command?.discard(wasm);
+      releaseExternal(heldExternal);
       this.restorePendingState(previewState);
       this.discardReplaceSnapshots(dropped);
       set.status = 'awaiting-review';
@@ -539,16 +599,23 @@ export class PendingEditManager {
     const set = this.sets.find((s) => s.id === changeSetId);
     if (!set) return;
     if (set === this.open) this.open = null;
-    const { kept, dropped } = this.partitionDriftedOps(set);
-    const skipped = dropped.length;
-    set.ops = kept;
-    this.revertAppliedOps(kept, dropped);
-    this.emitDocEvents('agent-reject');
-    this.discardReplaceSnapshots([...kept, ...dropped]);
-    this.removeSet(set);
-    this.syncOverlay();
-    if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)` });
-    this.emitChange({ type: 'rejected', changeSetId });
+    // approve 와 같은 이유로 되돌림 시작 전에 한 번만 샘플링한다.
+    const userEditSeqNow = this.userEditSeq;
+    this.selfMutating++;
+    try {
+      const { kept, dropped } = this.partitionDriftedOps(set);
+      const skipped = dropped.length;
+      set.ops = kept;
+      this.revertAppliedOps(kept, dropped, userEditSeqNow);
+      this.emitDocEvents('agent-reject');
+      this.discardReplaceSnapshots([...kept, ...dropped]);
+      this.removeSet(set);
+      this.syncOverlay();
+      if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)` });
+      this.emitChange({ type: 'rejected', changeSetId });
+    } finally {
+      this.selfMutating--;
+    }
   }
 
   onChange(cb: (e: PendingEditsChangeEvent) => void): () => void {
@@ -658,6 +725,7 @@ export class PendingEditManager {
       if (op.kind !== 'replace' || op.snapshotId === null) continue;
       try { this.deps.wasm.discardSnapshot(op.snapshotId); } catch { /* best effort */ }
       op.snapshotId = null;
+      this.deps.inputHandler.releaseExternalSnapshot?.();
     }
   }
 
@@ -1600,8 +1668,12 @@ export class PendingEditManager {
    * 적용된 op 을 역순으로 raw wasm 으로 되돌린다 (이벤트 없음).
    * keepPreviewsOf = 되돌리지 않고 문서에 남길(드리프트) op — replace 스냅샷
    * 복원이 이들의 미리보기를 지우지 않도록 안전 판별에 쓰인다.
+   * userEditSeqNow = 되돌림 시작 시점의 사용자 편집 카운터 (호출자가 변이 전에
+   * 한 번만 샘플링해 넘긴다). replace 의 전체 스냅샷 복원 가부 판정에 쓰인다.
    */
-  private revertAppliedOps(ops: PendingOp[], keepPreviewsOf: PendingOp[] = []): Set<string> {
+  private revertAppliedOps(
+    ops: PendingOp[], keepPreviewsOf: PendingOp[] = [], userEditSeqNow: number = this.userEditSeq,
+  ): Set<string> {
     const wasm = this.deps.wasm;
     const failed = new Set<string>();
     for (let i = ops.length - 1; i >= 0; i--) {
@@ -1614,7 +1686,7 @@ export class PendingEditManager {
           // 자신 포함 모든 pending 경계를 문서의 임시 before 상태에 맞춘다.
           this.shiftAllAfterDelete(r);
         } else if (op.kind === 'replace') {
-          this.revertReplaceOp(op, ops, keepPreviewsOf);
+          this.revertReplaceOp(op, ops, keepPreviewsOf, userEditSeqNow);
         } else if (op.kind === 'format') {
           this.applyFormatRaw(op.range, op.inverse);
         } else if (op.kind === 'field') {
@@ -1633,18 +1705,24 @@ export class PendingEditManager {
 
   /**
    * replace op 되돌림. 기본은 변이 직전 스냅샷 복원(원본 텍스트+서식 정확히 복원).
-   * 단, 이 op 이후 적용된 미리보기가 되돌림 대상 밖(다른 set, 드리프트 잔류)에
-   * 남아 있으면 스냅샷 복원이 그것까지 지우므로 역연산 폴백 으로만 되돌린다.
+   * 단, 스냅샷은 문서 전체 클론이라 복원하면 그 이후의 모든 변이가 사라진다.
+   * 그러므로 (a) 이 op 이후 적용된 미리보기가 되돌림 대상 밖(다른 set, 드리프트
+   * 잔류)에 남아 있거나, (b) 스냅샷 이후 사용자(비-에이전트) 편집이 한 번이라도
+   * 있었으면 — pending 중 사용자 편집은 주소로 관측하지 않으므로 op 범위 밖의
+   * 편집은 드리프트 검사로도 잡히지 않는다 — 범위-국소 역연산 폴백으로만 되돌린다.
    */
   private revertReplaceOp(
     op: Extract<PendingOp, { kind: 'replace' }>,
     revertSet: PendingOp[],
     keepPreviewsOf: PendingOp[],
+    userEditSeqNow: number,
   ): void {
     const wasm = this.deps.wasm;
     const start: DocPoint = { paraIdx: op.range.startParaIdx, charOffset: op.range.startCharOffset };
     const reinsertShift = this.insertShiftFor(start, op.deletedText);
-    if (op.snapshotId !== null && !this.hasLaterAppliedOpsOutside(op, revertSet, keepPreviewsOf)) {
+    const userEditedSinceSnapshot = (op.userEditSeqAtSnapshot ?? -1) !== userEditSeqNow;
+    if (op.snapshotId !== null && !userEditedSinceSnapshot
+      && !this.hasLaterAppliedOpsOutside(op, revertSet, keepPreviewsOf)) {
       try {
         wasm.restoreSnapshot(op.snapshotId);
         // 문서가 "원본 복원" 상태로 바뀌었으므로 다른 op 들의 좌표를 맞춘다

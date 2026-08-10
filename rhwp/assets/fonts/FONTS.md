@@ -1,7 +1,7 @@
 # 웹 폰트 목록
 
-웹 배포에 사용하는 WOFF2 폰트의 canonical source 목록이다. Git에는 36개 WOFF2,
-총 22,651,296 bytes가 포함된다. Studio와 legacy `/web`은 각각의 `fonts/` runtime URL을 유지하면서
+웹 배포에 사용하는 WOFF2 폰트의 canonical source 목록이다. Git에는 38개 WOFF2,
+총 22,994,348 bytes가 포함된다. Studio와 legacy `/web`은 각각의 `fonts/` runtime URL을 유지하면서
 이 디렉토리를 참조하고, extension build는 여기에서 배포 산출물로 복사한다.
 
 저작권 보호가 필요한 폰트는 Git에 포함하지 않으며, 별도로 준비해야 한다.
@@ -60,6 +60,8 @@
 | NanumGothic-Regular.woff2 | 나눔고딕 Regular | SIL OFL 1.1 | Google Fonts | 나눔고딕 (동일) |
 | NanumGothic-Bold.woff2 | 나눔고딕 Bold | SIL OFL 1.1 | Google Fonts | 나눔고딕 Bold |
 | NanumGothic-ExtraBold.woff2 | 나눔고딕 ExtraBold | SIL OFL 1.1 | Google Fonts | 나눔고딕 ExtraBold |
+| NanumSquare-Regular.woff2 | 나눔스퀘어 Regular | SIL OFL 1.1 | NAVER 한글한글 아름답게 | Studio 에이전트 UI |
+| NanumSquare-Bold.woff2 | 나눔스퀘어 Bold | SIL OFL 1.1 | NAVER 한글한글 아름답게 | Studio 에이전트 UI Bold |
 | GowunDodum-Regular.woff2 | 고운돋움 Regular | SIL OFL 1.1 | Google Fonts | HY고딕 대체 |
 | SpoqaHanSans-Regular.woff2 | 스포카 한 산스 | SIL OFL 1.1 | GitHub | 보조 Sans |
 

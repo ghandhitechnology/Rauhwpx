@@ -146,6 +146,7 @@ rhwp 프로젝트가 사용하는 서드파티 라이브러리 및 리소스의 
 | Nanum Myeongjo (3종) | SIL Open Font License 1.1 | Google Fonts | Serif fallback |
 | Nanum Gothic (3종) | SIL Open Font License 1.1 | Google Fonts | Sans-serif fallback |
 | Nanum Gothic Coding (2종) | SIL Open Font License 1.1 | Google Fonts | Monospace fallback |
+| Nanum Square (2종) | SIL Open Font License 1.1 | NAVER | Studio agent UI |
 | Gowun Batang (2종) | SIL Open Font License 1.1 | Google Fonts | Serif fallback |
 | Gowun Dodum | SIL Open Font License 1.1 | Google Fonts | Sans-serif fallback |
 | D2 Coding (2종) | SIL Open Font License 1.1 | NAVER | Monospace fallback |

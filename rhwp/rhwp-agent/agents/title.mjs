@@ -55,6 +55,9 @@ export function generateChatTitle(preview) {
 
     const timer = setTimeout(() => {
       try { proc.kill('SIGTERM'); } catch {}
+      // SIGTERM 을 무시하는 자식이 남지 않도록 강제 종료로 승격한다.
+      const killTimer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 3_000);
+      if (killTimer.unref) killTimer.unref();
       finish(cleanTitle(lastAssistant) || null);
     }, 45_000);
     if (timer.unref) timer.unref();

@@ -2575,6 +2575,20 @@ export class InputHandler {
     this.history.prepareSnapshotCapacity(this.wasm, additionalIds);
   }
 
+  /**
+   * 히스토리 밖에서 오래 점유하는 스냅샷 id 를 예산에 등록한다
+   * (에이전트 pending replace 의 되돌림 스냅샷 등). 등록하지 않으면 WASM 저장소
+   * 상한을 넘겨 아직 참조 중인 undo 스냅샷이 무통보 축출된다.
+   */
+  retainExternalSnapshot(count = 1): void {
+    this.history.retainExternalSnapshot(count);
+  }
+
+  /** 외부 점유 스냅샷 해제 — discardSnapshot 과 짝을 이룬다. */
+  releaseExternalSnapshot(count = 1): void {
+    this.history.releaseExternalSnapshot(count);
+  }
+
   /** Backspace 처리 */
   private handleBackspace(pos: DocumentPosition, inCell: boolean): void {
     _text.handleBackspace.call(this, pos, inCell);
