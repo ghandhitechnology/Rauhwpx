@@ -24,18 +24,19 @@ function classBlock(name: string): string {
 }
 
 test('ApplyCharFormatCommand 셀 서식 적용/복원이 최내곽 셀 대상 ...ByPath 로 라우팅한다', () => {
-  const block = classBlock('ApplyCharFormatCommand');
-  assert.match(block, /applyCharFormatInCellByPath\(/, 'execute 는 applyCharFormatInCellByPath 로 최내곽 셀 적용');
-  assert.match(block, /getCellCharPropertiesAtByPath\(/, 'before/after charShapeId 도 ...ByPath 로 조회');
-  assert.match(block, /setCharShapeIdInCellByPath\(/, 'undo(restoreCharShapeIds)도 ...ByPath 로 복원');
+  const routingBlock = commandSrc.slice(
+    commandSrc.indexOf('function useContainerPath('),
+    commandSrc.indexOf('export class ApplyCharFormatCommand'),
+  );
+  assert.match(routingBlock, /target\.cellPath\.length > 1/, '중첩 컨테이너는 path 라우팅');
+  assert.match(routingBlock, /applyCharFormatInCellByPath\(/, 'execute 는 applyCharFormatInCellByPath 로 최내곽 셀 적용');
+  assert.match(routingBlock, /getCellCharPropertiesAtByPath\(/, 'before/after charShapeId 도 ...ByPath 로 조회');
+  assert.match(routingBlock, /setCharShapeIdInCellByPath\(/, 'undo(restoreCharShapeIds)도 ...ByPath 로 복원');
 });
 
-test('ApplyCharFormatCommand 가 flat 셀 축 API/좌표를 쓰지 않는다', () => {
+test('ApplyCharFormatCommand 는 컨테이너 target을 보존하고 legacy 시작 위치에 의존하지 않는다', () => {
   const block = classBlock('ApplyCharFormatCommand');
-  assert.doesNotMatch(block, /wasm\.applyCharFormatInCell\(/, 'flat applyCharFormatInCell 은 바깥 셀에 적용된다');
-  assert.doesNotMatch(block, /wasm\.getCellCharPropertiesAt\(/, 'flat getCellCharPropertiesAt 금지');
-  assert.doesNotMatch(block, /wasm\.setCharShapeIdInCell\(/, 'flat setCharShapeIdInCell 은 undo 를 바깥 셀에 복원한다');
-  assert.doesNotMatch(block, /wasm\.getCellParagraphLength\(/, 'flat getCellParagraphLength 금지');
+  assert.match(block, /target: range\.target/, '각 범위의 최내곽 target을 undo/redo에 보존');
   assert.doesNotMatch(block, /start\.cellParaIndex!/, '중첩 셀에서 start.cellParaIndex 는 바깥 셀 값 (cellParaIndexOf 사용)');
   assert.doesNotMatch(block, /end\.cellParaIndex!/, '중첩 셀에서 end.cellParaIndex 는 바깥 셀 값 (cellParaIndexOf 사용)');
 });

@@ -35,6 +35,8 @@ export class CursorState {
   private anchor: DocumentPosition | null = null;
   /** 각주/미주 내부 선택 시작점. 본문 anchor와 별도로 관리한다. */
   private fnAnchor: { fnParaIdx: number; charOffset: number } | null = null;
+  /** 머리말/꼬리말 내부 선택 시작점. */
+  private hfAnchor: { paraIdx: number; charOffset: number } | null = null;
 
   // ─── 머리말/꼬리말 편집 모드 ──────────────────────────────
   private _headerFooterMode: 'none' | 'header' | 'footer' = 'none';
@@ -90,7 +92,7 @@ export class CursorState {
 
   /** 선택 영역이 있는지 반환한다 */
   hasSelection(): boolean {
-    return this.anchor !== null || this.fnAnchor !== null;
+    return this.anchor !== null || this.fnAnchor !== null || this.hfAnchor !== null;
   }
 
   /** 선택 영역 (anchor → focus)을 반환한다 */
@@ -152,6 +154,20 @@ export class CursorState {
     };
   }
 
+  getHeaderFooterSelectionOrdered(): {
+    start: { paraIdx: number; charOffset: number };
+    end: { paraIdx: number; charOffset: number };
+  } | null {
+    if (!this.hfAnchor) return null;
+    const focus = { paraIdx: this._hfParaIdx, charOffset: this._hfCharOffset };
+    const before = this.hfAnchor.paraIdx < focus.paraIdx
+      || (this.hfAnchor.paraIdx === focus.paraIdx
+        && this.hfAnchor.charOffset <= focus.charOffset);
+    return before
+      ? { start: { ...this.hfAnchor }, end: focus }
+      : { start: focus, end: { ...this.hfAnchor } };
+  }
+
   /** 현재 위치를 anchor로 설정 (선택 시작) */
   setAnchor(): void {
     if (!this.anchor) {
@@ -169,10 +185,17 @@ export class CursorState {
     }
   }
 
+  setHfAnchor(): void {
+    if (!this.hfAnchor) {
+      this.hfAnchor = { paraIdx: this._hfParaIdx, charOffset: this._hfCharOffset };
+    }
+  }
+
   /** 선택을 해제한다 */
   clearSelection(): void {
     this.anchor = null;
     this.fnAnchor = null;
+    this.hfAnchor = null;
   }
 
   static compareFootnotePositions(
@@ -1760,7 +1783,7 @@ export class CursorState {
       const paraCount = info.paraCount;
       // 현재 문단의 텍스트 길이
       const currentText = info.texts[this._fnInnerParaIdx] ?? '';
-      const charCount = currentText.length;
+      const charCount = Array.from(currentText).length;
 
       const newOffset = this._fnCharOffset + delta;
 
@@ -1772,7 +1795,7 @@ export class CursorState {
       } else if (delta < 0 && this._fnInnerParaIdx > 0) {
         this._fnInnerParaIdx--;
         const prevText = info.texts[this._fnInnerParaIdx] ?? '';
-        this._fnCharOffset = prevText.length;
+        this._fnCharOffset = Array.from(prevText).length;
       }
     } catch {
       // WASM 호출 실패 시 무시

@@ -48,7 +48,29 @@ pub fn parse_control(ctrl_id: u32, ctrl_data: &[u8], child_records: &[Record]) -
         tags::CTRL_EQUATION => parse_equation_control(ctrl_data, child_records),
         tags::CTRL_FORM => parse_form_control(ctrl_data, child_records),
         id if tags::is_field_ctrl_id(id) => parse_field_control(id, ctrl_data),
-        _ => Control::Unknown(UnknownControl { ctrl_id }),
+        _ => {
+            // Unsupported controls are opaque, not disposable.  The first child is a
+            // direct child in a valid HWP record tree, so its level minus one is the
+            // CTRL_HEADER base level.  Normalizing to relative levels lets copied or
+            // nested paragraphs serialize the subtree at their new location.
+            let base_level = child_records
+                .first()
+                .map(|record| record.level.saturating_sub(1))
+                .unwrap_or(0);
+            let raw_child_records = child_records
+                .iter()
+                .map(|record| crate::model::document::RawRecord {
+                    tag_id: record.tag_id,
+                    level: record.level.saturating_sub(base_level),
+                    data: record.data.clone(),
+                })
+                .collect();
+            Control::Unknown(UnknownControl {
+                ctrl_id,
+                raw_ctrl_data: ctrl_data.to_vec(),
+                raw_child_records,
+            })
+        }
     }
 }
 

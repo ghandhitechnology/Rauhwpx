@@ -47,6 +47,7 @@ mod tests {
             series: vec![OleChartSeries {
                 name: Some("적립금".to_string()),
                 values: vec![328.0, 812.0],
+                color: None,
             }],
         }
     }

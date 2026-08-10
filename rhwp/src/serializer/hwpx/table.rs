@@ -358,7 +358,11 @@ fn write_sub_list_paragraphs<W: Write>(
         let sid = ctx.effective_style_id(para.style_id);
         ctx.style_ids.reference(sid as u16);
 
-        let (runs, linesegs, advance) = render_paragraph_parts(para, vert_cursor, ctx);
+        let rendered = render_paragraph_parts(para, vert_cursor, ctx);
+        if rendered.is_err() {
+            ctx.sub_list_depth -= 1;
+        }
+        let (runs, linesegs, advance) = rendered?;
         vert_cursor = advance;
         let pid = ctx.next_para_id();
         let mut p_xml = render_hp_p_open(para, pid, sid);

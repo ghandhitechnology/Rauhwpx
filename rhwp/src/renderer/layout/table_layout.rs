@@ -5997,8 +5997,76 @@ impl LayoutEngine {
             );
         }
 
-        let units =
+        let mut units =
             Self::delay_empty_anchor_topandbottom_flow_units_before_hard_break(units, cell, table);
+
+        // Square/Tight/Through objects in a saved RowBreak cell are overlays on the cell's
+        // paragraph columns.  The row measurer and painter use their absolute visual bottom,
+        // while the cut model above historically appended every object's full height.  That
+        // made fragmentation consume the same packed image collage two or three times.  Keep
+        // the existing units (and therefore control-to-fragment visibility), but project their
+        // common axis onto the authoritative saved extent used by layout.
+        let has_packed_wrap_object = cell.paragraphs.iter().any(|para| {
+            para.controls.iter().any(|control| match control {
+                Control::Picture(picture) => {
+                    !picture.common.treat_as_char
+                        && matches!(
+                            picture.common.text_wrap,
+                            TextWrap::Square | TextWrap::Tight | TextWrap::Through
+                        )
+                }
+                Control::Shape(shape) => {
+                    let common = shape.common();
+                    !common.treat_as_char
+                        && matches!(
+                            common.text_wrap,
+                            TextWrap::Square | TextWrap::Tight | TextWrap::Through
+                        )
+                }
+                _ => false,
+            })
+        });
+        let has_top_and_bottom_object = cell
+            .paragraphs
+            .iter()
+            .any(|para| self.paragraph_top_and_bottom_non_inline_flow_height(&para.controls) > 0.5);
+        let all_lines_are_saved = !cell.paragraphs.is_empty()
+            && cell.paragraphs.iter().all(|para| {
+                !para.line_segs.is_empty()
+                    && para.line_segs.iter().all(|seg| !line_seg_is_synthetic(seg))
+            });
+        if is_block_rowbreak_table
+            && has_packed_wrap_object
+            && !has_top_and_bottom_object
+            && all_lines_are_saved
+        {
+            let (stored_extent, stored_line_sum) = cell
+                .paragraphs
+                .iter()
+                .flat_map(|para| para.line_segs.iter())
+                .filter(|seg| seg.vertical_pos >= 0 && seg.line_height > 0)
+                .map(|seg| {
+                    (
+                        hwpunit_to_px(seg.vertical_pos + seg.line_height, self.dpi),
+                        hwpunit_to_px(seg.line_height, self.dpi),
+                    )
+                })
+                .fold((0.0f64, 0.0f64), |(extent, sum), (end, height)| {
+                    (extent.max(end), sum + height)
+                });
+            let packed_extent =
+                stored_extent.max(self.calc_cell_wrap_objects_bottom_height(&cell.paragraphs));
+            let unit_extent = units.iter().map(|unit| unit.height).sum::<f64>();
+            let coherent_saved_extent = packed_extent > 0.5
+                && packed_extent + 0.5 < unit_extent
+                && packed_extent + 0.5 >= stored_line_sum * 0.5;
+            if coherent_saved_extent {
+                let scale = packed_extent / unit_extent;
+                for unit in &mut units {
+                    unit.height *= scale;
+                }
+            }
+        }
 
         let _ = (pad_top, pad_bottom); // [Task #1022] cell.height 필러 제거 — row_cut_content_height 가 셀별 max(cell.height, content+pad) 로 행 단계에서 정합.
         units
