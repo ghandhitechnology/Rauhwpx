@@ -66,6 +66,12 @@
   border-color: transparent;
 }
 
+/* 누르면 실제로 들어간다 — 채움만 바꾸는 것보다 손끝에 맞는다 */
+.tb-btn:active {
+  background: var(--ui-active);
+  box-shadow: var(--ui-pressed-inset);
+}
+
 /* 한컴 SVG 스프라이트 아이콘 시스템 */
 .tb-sprite {
   display: block;

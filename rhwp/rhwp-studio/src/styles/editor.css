@@ -17,14 +17,14 @@
 /* 눈금자 교차 코너 (좌상단) */
 #ruler-corner {
   background: var(--ruler-bg);
-  border-right: 1px solid var(--ui-border-strong);
-  border-bottom: 1px solid var(--ui-border-strong);
+  border-right: 1px solid var(--ui-border);
+  border-bottom: 1px solid var(--ui-border);
 }
 
 /* 가로 눈금자 */
 #h-ruler {
   display: block;
-  border-bottom: 1px solid var(--ui-border-strong);
+  border-bottom: 1px solid var(--ui-border);
   background: var(--ruler-bg);
   cursor: default;
 }
@@ -32,7 +32,7 @@
 /* 세로 눈금자 */
 #v-ruler {
   display: block;
-  border-right: 1px solid var(--ui-border-strong);
+  border-right: 1px solid var(--ui-border);
   background: var(--ruler-bg);
   cursor: default;
 }
@@ -45,6 +45,9 @@
      setScrollLeft 가운데 정렬을 되돌려 용지가 한쪽으로 남는 것을 막는다. */
   overflow-anchor: none;
   background: var(--doc-workspace);
+  /* 작업 영역은 크롬보다 한 단 아래로 파여 있다. inset 그림자는
+     스크롤과 무관하게 테두리에 붙어 있어 경계에서만 읽힌다. */
+  box-shadow: var(--ui-canvas-inset);
 }
 
 #document-empty-state {
@@ -61,9 +64,11 @@
   justify-content: center;
   gap: 8px;
   padding: 24px 28px;
-  border: 1px dashed var(--ui-border-strong);
+  border: 1px solid var(--ui-border);
   border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--ui-surface) 86%, transparent);
+  /* 빈 작업 영역 위에 떠 있는 카드 */
+  background: var(--ui-surface);
+  box-shadow: var(--shadow-dialog);
   color: var(--ui-text);
   text-align: center;
   transform: translate(-50%, -50%);
@@ -98,11 +103,16 @@
   font-size: var(--font-size-base);
   font-weight: 600;
   cursor: pointer;
+  box-shadow: var(--shadow-light);
 }
 
 #document-open-action:hover {
   background: var(--accent-strong);
   border-color: var(--accent-strong);
+}
+
+#document-open-action:active {
+  box-shadow: var(--ui-pressed-inset);
 }
 
 #document-open-action:focus-visible {
@@ -125,7 +135,8 @@
   left: 50%;
   transform: translateX(-50%);
   z-index: 0;
-  box-shadow: none;
+  /* 용지는 책상 위에 놓인 한 장이다 — 파인 작업 영역 위로 떠오른다 */
+  box-shadow: var(--doc-paper-shadow);
   background: var(--doc-paper);
 }
 
@@ -134,8 +145,9 @@
   mix-blend-mode: multiply;
 }
 
+/* 여러 쪽이 나란히 놓이는 모드에서는 그림자를 한 단 낮춰 겹침을 줄인다 */
 #scroll-content.grid-mode canvas {
-  box-shadow: 0 1px 4px var(--overlay-bg);
+  box-shadow: var(--n-elev-2);
 }
 
 /* Drag & Drop */

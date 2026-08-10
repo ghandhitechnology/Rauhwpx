@@ -341,9 +341,16 @@
   border-color: transparent;
 }
 
+.sb-btn:active {
+  background: var(--ui-active);
+  box-shadow: var(--ui-pressed-inset);
+}
+
+/* 켜진 상태는 눌린 채로 머문다 */
 .sb-btn.active {
   background: var(--ui-active);
   border-color: var(--ui-border-strong);
+  box-shadow: var(--ui-pressed-inset);
 }
 
 .sb-btn:focus-visible {
