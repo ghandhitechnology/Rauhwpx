@@ -9,7 +9,7 @@ const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 
 test('sidebar exposes safe/full permissions without allowing changes during a turn', () => {
   assert.match(source, /permissionProfile === 'safe'/);
   assert.match(source, /window\.confirm\('전체 접근/);
-  assert.match(source, /permissionBtn\.disabled = turnRunning/);
+  assert.match(source, /permissionBtn\.disabled = controlsLocked \|\| connState !== 'connected'/);
   assert.match(bridge, /chat-permission-set/);
   assert.match(bridge, /this\.permissionProfile = 'safe'/);
 });
