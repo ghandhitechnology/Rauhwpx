@@ -3,8 +3,10 @@
 //! `parser::hwpx::content`의 역방향. 한컴 호환을 위해 14개 네임스페이스와
 //! 기본 metadata를 선언한다.
 
+use std::collections::HashSet;
 use std::io::{Cursor, Write};
 
+use quick_xml::events::Event;
 use quick_xml::Writer;
 
 use super::utils::{empty_tag, end_tag, start_tag_attrs, text, write_xml_decl};
@@ -18,6 +20,15 @@ pub struct BinDataEntry {
     pub media_type: String,
     /// content.hpf `isEmbeded` — false 면 외부 파일 참조 (ZIP 엔트리 없음, #1891)
     pub is_embedded: bool,
+}
+
+#[derive(Debug)]
+struct PassthroughManifestItem {
+    id: String,
+    href: String,
+    media_type: String,
+    is_embedded: Option<String>,
+    in_spine: bool,
 }
 
 /// 원본 content.hpf 에서 `<opf:metadata> … </opf:metadata>` 블록(태그 포함)을
@@ -38,11 +49,15 @@ pub fn write_content_hpf(
     section_hrefs: &[String],
     bin_data: &[BinDataEntry],
     master_items: &[(String, String)],
+    passthrough_hrefs: &[String],
     original_content_hpf: Option<&[u8]>,
 ) -> Result<Vec<u8>, SerializeError> {
     // 원본 metadata 블록(있으면) — 본문과 무관한 저작자/일자/주제 보존용.
     let original_str = original_content_hpf.and_then(|b| std::str::from_utf8(b).ok());
     let original_metadata = original_str.and_then(extract_metadata_block);
+    let passthrough_items = original_str
+        .map(|xml| extract_passthrough_manifest_items(xml, passthrough_hrefs))
+        .unwrap_or_default();
 
     let buf = Cursor::new(Vec::new());
     let mut w = Writer::new(buf);
@@ -180,6 +195,27 @@ pub fn write_content_hpf(
         )?;
     }
 
+    let mut used_ids: HashSet<String> = HashSet::from(["header".into(), "settings".into()]);
+    used_ids.extend((0..section_hrefs.len()).map(|index| format!("section{index}")));
+    used_ids.extend(master_items.iter().map(|(id, _)| id.clone()));
+    used_ids.extend(bin_data.iter().map(|entry| entry.id.clone()));
+    let mut emitted_passthrough_ids = HashSet::new();
+    for item in &passthrough_items {
+        if !used_ids.insert(item.id.clone()) {
+            continue;
+        }
+        let mut attrs = vec![
+            ("id", item.id.as_str()),
+            ("href", item.href.as_str()),
+            ("media-type", item.media_type.as_str()),
+        ];
+        if let Some(is_embedded) = &item.is_embedded {
+            attrs.push(("isEmbeded", is_embedded.as_str()));
+        }
+        empty_tag(&mut w, "opf:item", &attrs)?;
+        emitted_passthrough_ids.insert(item.id.as_str());
+    }
+
     end_tag(&mut w, "opf:manifest")?;
 
     // <opf:spine> — 한컴 원본은 itemref 마다 linear="yes"(OPF 기본값)를 명시한다.
@@ -197,11 +233,86 @@ pub fn write_content_hpf(
             &[("idref", id.as_str()), ("linear", "yes")],
         )?;
     }
+    for item in &passthrough_items {
+        if item.in_spine && emitted_passthrough_ids.contains(item.id.as_str()) {
+            empty_tag(
+                &mut w,
+                "opf:itemref",
+                &[("idref", item.id.as_str()), ("linear", "yes")],
+            )?;
+        }
+    }
     end_tag(&mut w, "opf:spine")?;
 
     end_tag(&mut w, "opf:package")?;
 
     Ok(w.into_inner().into_inner())
+}
+
+fn extract_passthrough_manifest_items(
+    original: &str,
+    passthrough_hrefs: &[String],
+) -> Vec<PassthroughManifestItem> {
+    let allowed: HashSet<&str> = passthrough_hrefs.iter().map(String::as_str).collect();
+    if allowed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut reader = quick_xml::Reader::from_str(original);
+    let mut items = Vec::new();
+    let mut spine_ids = HashSet::new();
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(event)) | Ok(Event::Start(event)) => {
+                let name = event.name();
+                let local = name
+                    .as_ref()
+                    .split(|byte| *byte == b':')
+                    .next_back()
+                    .unwrap_or(name.as_ref());
+                if local == b"item" {
+                    let mut id = String::new();
+                    let mut href = String::new();
+                    let mut media_type = String::new();
+                    let mut is_embedded = None;
+                    for attr in event.attributes().flatten() {
+                        let value = String::from_utf8_lossy(attr.value.as_ref()).into_owned();
+                        match attr.key.as_ref() {
+                            b"id" => id = value,
+                            b"href" => href = value,
+                            b"media-type" => media_type = value,
+                            b"isEmbeded" => is_embedded = Some(value),
+                            _ => {}
+                        }
+                    }
+                    if allowed.contains(href.as_str()) && !id.is_empty() {
+                        items.push(PassthroughManifestItem {
+                            id,
+                            href,
+                            media_type,
+                            is_embedded,
+                            in_spine: false,
+                        });
+                    }
+                } else if local == b"itemref" {
+                    for attr in event.attributes().flatten() {
+                        if attr.key.as_ref() == b"idref" {
+                            spine_ids
+                                .insert(String::from_utf8_lossy(attr.value.as_ref()).into_owned());
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    for item in &mut items {
+        item.in_spine = spine_ids.contains(&item.id);
+    }
+    items
 }
 
 #[cfg(test)]
@@ -216,6 +327,7 @@ mod tests {
         let original = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package xmlns:opf="http://www.idpf.org/2007/opf/"><opf:metadata><opf:title/><opf:language>ko</opf:language><opf:meta name="creator" content="text">손규현</opf:meta><opf:meta name="lastsaveby" content="text">stevek</opf:meta><opf:meta name="CreatedDate" content="text">2012-05-24T02:06:03Z</opf:meta></opf:metadata><opf:manifest/><opf:spine/></opf:package>"#;
         let out = write_content_hpf(
             &["Contents/section0.xml".to_string()],
+            &[],
             &[],
             &[],
             Some(original.as_bytes()),
@@ -254,7 +366,7 @@ mod tests {
     /// 원본이 없으면(HWP5 등) 하드코딩 metadata 로 폴백한다.
     #[test]
     fn metadata_falls_back_when_no_original() {
-        let out = write_content_hpf(&["Contents/section0.xml".to_string()], &[], &[], None)
+        let out = write_content_hpf(&["Contents/section0.xml".to_string()], &[], &[], &[], None)
             .expect("serialize");
         let s = String::from_utf8(out).expect("utf8");
         assert!(s.contains(r#"<opf:meta name="creator" content="text">rhwp</opf:meta>"#));

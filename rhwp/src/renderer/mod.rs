@@ -135,6 +135,8 @@ pub struct TextStyle {
     pub letter_spacing: f64,
     /// 장평 비율 (1.0 = 100%, 0.8 = 80%)
     pub ratio: f64,
+    /// 글자 모양의 커닝 적용 여부
+    pub kerning: bool,
     /// 기본 탭 간격 (px, 0이면 font_size 기반 fallback)
     pub default_tab_width: f64,
     /// 커스텀 탭 정지 목록 (position 오름차순)
@@ -246,6 +248,7 @@ impl Default for TextStyle {
             strikethrough: false,
             letter_spacing: 0.0,
             ratio: 1.0,
+            kerning: false,
             default_tab_width: 0.0,
             tab_stops: Vec::new(),
             auto_tab_right: false,

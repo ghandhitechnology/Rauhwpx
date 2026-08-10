@@ -58,8 +58,8 @@ test('HF/FN 인라인 편집부는 병합 결과의 removedParaMeta 를 커맨�
   }
 
   const fnSites = keyboardSrc.match(/new MergeParagraphInFootnoteCommand\([^)]*\)/g) ?? [];
-  assert.equal(fnSites.length, 1, 'FN 병합 커맨드 생성 지점');
+  assert.equal(fnSites.length, 2, 'FN 병합 커맨드 생성 지점은 Backspace/Delete 두 곳');
   for (const site of fnSites) {
-    assert.match(site, /result\.removedParaMeta\)$/, `FN 인라인 전달: ${site}`);
+    assert.match(site, /result\.removedParaMeta,?\s*\)$/, `FN 인라인 전달: ${site}`);
   }
 });

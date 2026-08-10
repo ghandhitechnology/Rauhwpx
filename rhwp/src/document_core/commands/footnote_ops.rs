@@ -1,8 +1,8 @@
 //! 각주 내용 편집 관련 native 메서드
 
 use super::super::helpers::{
-    build_tab_def_from_json, json_has_border_keys, json_has_tab_keys, parse_json_i16_array,
-    parse_para_shape_mods,
+    build_tab_def_from_json, json_has_border_keys, json_has_tab_keys, parse_char_shape_mods,
+    parse_json_i16_array, parse_para_shape_mods,
 };
 use crate::document_core::DocumentCore;
 use crate::error::HwpError;
@@ -12,6 +12,116 @@ use crate::model::paragraph::{ParaMeta, Paragraph};
 use crate::renderer::composer::reflow_line_segs;
 
 impl DocumentCore {
+    /// 각주/미주 내부 문단의 글자 속성을 조회한다.
+    pub fn get_char_properties_in_footnote_native(
+        &self,
+        section_idx: usize,
+        para_idx: usize,
+        control_idx: usize,
+        fn_para_idx: usize,
+        char_offset: usize,
+    ) -> Result<String, HwpError> {
+        let para = self
+            .get_footnote_paragraph_ref(section_idx, para_idx, control_idx, fn_para_idx)
+            .ok_or_else(|| HwpError::RenderError("각주/미주 문단을 찾을 수 없음".into()))?;
+        Ok(self.build_char_properties_json(para, char_offset))
+    }
+
+    /// 각주/미주 문단에 run 보존 글자 서식을 적용한다.
+    pub fn apply_char_format_in_footnote_native(
+        &mut self,
+        section_idx: usize,
+        para_idx: usize,
+        control_idx: usize,
+        fn_para_idx: usize,
+        start_offset: usize,
+        end_offset: usize,
+        props_json: &str,
+    ) -> Result<String, HwpError> {
+        let mut mods = parse_char_shape_mods(props_json);
+        if json_has_border_keys(props_json) {
+            mods.border_fill_id = Some(self.create_border_fill_from_json(props_json));
+        }
+        let runs = self
+            .get_footnote_paragraph_ref(section_idx, para_idx, control_idx, fn_para_idx)
+            .ok_or_else(|| HwpError::RenderError("각주/미주 문단을 찾을 수 없음".into()))?
+            .char_shape_runs_in_range(start_offset, end_offset);
+        let applications = self.derive_char_shape_applications(runs, &mods);
+        for (start, end, shape_id) in applications {
+            self.get_footnote_paragraph_mut(section_idx, para_idx, control_idx, fn_para_idx)?
+                .apply_char_shape_range(start, end, shape_id);
+        }
+        if super::formatting::char_shape_mods_affect_text_flow(&mods) {
+            self.reflow_footnote_paragraph(section_idx, para_idx, control_idx, fn_para_idx);
+        }
+        self.document.sections[section_idx].raw_stream = None;
+        // Newly-derived shapes are immediately addressable from doc_info, but
+        // property queries and rendering resolve them through `styles`.
+        // Rebuild just like body/cell/header formatting so the shape is visible
+        // within the same command turn.
+        self.rebuild_section(section_idx);
+        self.event_log.push(DocumentEvent::CharFormatChanged {
+            section: section_idx,
+            para: para_idx,
+            start: start_offset,
+            end: end_offset,
+        });
+        Ok("{\"ok\":true}".to_string())
+    }
+
+    /// 각주/미주 글자 서식 undo/redo용 ID 직접 복원.
+    pub fn set_char_shape_id_in_footnote_native(
+        &mut self,
+        section_idx: usize,
+        para_idx: usize,
+        control_idx: usize,
+        fn_para_idx: usize,
+        start_offset: usize,
+        end_offset: usize,
+        char_shape_id: u32,
+    ) -> Result<String, HwpError> {
+        if char_shape_id as usize >= self.document.doc_info.char_shapes.len() {
+            return Err(HwpError::RenderError("글자 모양 ID 범위 초과".into()));
+        }
+        self.get_footnote_paragraph_mut(section_idx, para_idx, control_idx, fn_para_idx)?
+            .apply_char_shape_range(start_offset, end_offset, char_shape_id);
+        self.reflow_footnote_paragraph(section_idx, para_idx, control_idx, fn_para_idx);
+        self.document.sections[section_idx].raw_stream = None;
+        self.rebuild_section(section_idx);
+        self.event_log.push(DocumentEvent::CharFormatChanged {
+            section: section_idx,
+            para: para_idx,
+            start: start_offset,
+            end: end_offset,
+        });
+        Ok("{\"ok\":true}".to_string())
+    }
+
+    /// 각주/미주 문단 모양 undo/redo용 ID 직접 복원.
+    pub fn set_para_shape_id_in_footnote_native(
+        &mut self,
+        section_idx: usize,
+        para_idx: usize,
+        control_idx: usize,
+        fn_para_idx: usize,
+        para_shape_id: u16,
+    ) -> Result<String, HwpError> {
+        if para_shape_id as usize >= self.document.doc_info.para_shapes.len() {
+            return Err(HwpError::RenderError("문단 모양 ID 범위 초과".into()));
+        }
+        self.get_footnote_paragraph_mut(section_idx, para_idx, control_idx, fn_para_idx)?
+            .para_shape_id = para_shape_id;
+        self.reflow_footnote_paragraph(section_idx, para_idx, control_idx, fn_para_idx);
+        self.document.sections[section_idx].raw_stream = None;
+        self.mark_section_dirty(section_idx);
+        self.paginate_if_needed();
+        self.event_log.push(DocumentEvent::ParaFormatChanged {
+            section: section_idx,
+            para: para_idx,
+        });
+        Ok("{\"ok\":true}".to_string())
+    }
+
     fn renumber_footnotes_in_section(&mut self, section_idx: usize) {
         let mut number = 1u16;
         for para in &mut self.document.sections[section_idx].paragraphs {
@@ -422,14 +532,7 @@ impl DocumentCore {
             fn_para.para_shape_id = new_id;
         }
 
-        if mods.line_spacing.is_some()
-            || mods.line_spacing_type.is_some()
-            || mods.margin_left.is_some()
-            || mods.margin_right.is_some()
-            || mods.indent.is_some()
-        {
-            self.reflow_footnote_paragraph(section_idx, para_idx, control_idx, fn_para_idx);
-        }
+        self.reflow_footnote_paragraph(section_idx, para_idx, control_idx, fn_para_idx);
 
         self.document.sections[section_idx].raw_stream = None;
         self.rebuild_section(section_idx);
@@ -772,6 +875,38 @@ mod tests {
             remaining_endnote_number, 1,
             "각주 삭제 후 본문 최상위 미주 번호가 1로 재계산되어야 함"
         );
+    }
+
+    #[test]
+    fn footnote_char_format_supports_query_apply_and_id_restore() {
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+        if core.document.doc_info.char_shapes.is_empty() {
+            core.document.doc_info.char_shapes.push(Default::default());
+        }
+        core.insert_text_native(0, 0, 0, "a").unwrap();
+        core.insert_footnote_native(0, 0, 0).unwrap();
+        let ctrl_idx = core.document.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .position(|control| matches!(control, Control::Footnote(_)))
+            .expect("footnote control");
+        core.insert_text_in_footnote_native(0, 0, ctrl_idx, 0, 0, "AB")
+            .unwrap();
+
+        core.apply_char_format_in_footnote_native(0, 0, ctrl_idx, 0, 0, 2, r#"{"italic":true}"#)
+            .unwrap();
+        let applied = core
+            .get_char_properties_in_footnote_native(0, 0, ctrl_idx, 0, 0)
+            .unwrap();
+        assert!(applied.contains("\"italic\":true"), "{applied}");
+
+        core.set_char_shape_id_in_footnote_native(0, 0, ctrl_idx, 0, 0, 2, 0)
+            .unwrap();
+        let restored = core
+            .get_char_properties_in_footnote_native(0, 0, ctrl_idx, 0, 0)
+            .unwrap();
+        assert!(restored.contains("\"italic\":false"), "{restored}");
     }
 
     /// 각주 문단 병합의 undo 가 사라진 문단의 스코프 메타데이터를 되돌리는지 (Task #2342).

@@ -10,6 +10,7 @@ use super::{px_to_hwpunit, TextStyle};
 use crate::model::control::Control;
 use crate::model::document::Section;
 use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// 글자겹침(CharOverlap) 렌더링 정보
 #[derive(Debug, Clone, serde::Serialize)]
@@ -480,6 +481,30 @@ fn compose_lines(para: &Paragraph) -> Vec<ComposedLine> {
             .first()
             .map(|cs| cs.char_shape_id)
             .unwrap_or(0);
+        // The calibrated 45-scalar fallback below predates Unicode grapheme
+        // handling. Keep a complex grapheme in one logical line so the
+        // width-aware body/cell wrapper can break it atomically. Ordinary HWP
+        // NO_LS text retains the historical fallback because its synthetic
+        // chunks are part of the table-height/page-cut compatibility contract.
+        if para.text.graphemes(true).any(|g| g.chars().count() > 1) {
+            return vec![ComposedLine {
+                runs: split_runs_by_lang(vec![ComposedTextRun {
+                    text: para.text.clone(),
+                    char_style_id: default_style_id,
+                    lang_index: 0,
+                    char_overlap: None,
+                    footnote_marker: None,
+                    display_text: None,
+                }]),
+                line_height: 400,
+                baseline_distance: 320,
+                segment_width: 0,
+                column_start: 0,
+                line_spacing: 0,
+                has_line_break: para.text.ends_with('\n'),
+                char_start: 0,
+            }];
+        }
         // [Task #994] HWP5 변환본의 일부 paragraph (sample16 의 󰏅 PUA bullet 들)
         // 는 PARA_LINE_SEG 누락 → 기존 fallback 이 단일 ComposedLine 생성 →
         // layout 이 wrap 없이 한 y 좌표에 모든 텍스트 그림 → 시각 겹침.
@@ -710,6 +735,11 @@ fn compose_lines(para: &Paragraph) -> Vec<ComposedLine> {
 }
 
 fn effective_line_seg_count(para: &Paragraph) -> usize {
+    // A LineSeg whose visible-text range is empty is not generally an orphan:
+    // it can own a TAC/control-only line. Trimming every such tail dropped
+    // table cut units (#1921) and explicit image-stack pages (#2006). Keep the
+    // proven, document-signature exception narrow until the stream/control
+    // ownership can positively identify an orphan.
     if is_sample16_2022_bcp_orphan_tail_lineseg(para) {
         para.line_segs.len().saturating_sub(1)
     } else {
@@ -1562,6 +1592,54 @@ pub fn stored_lines_overflow(
     fired
 }
 
+fn stored_line_segs_structurally_coherent(para: &Paragraph) -> bool {
+    if para.line_segs.is_empty() {
+        return false;
+    }
+    let text_len = para.text.chars().count();
+    let visible_end = para
+        .char_offsets
+        .last()
+        .copied()
+        .zip(para.text.chars().last())
+        .map(|(offset, ch)| offset.saturating_add(ch.len_utf16() as u32))
+        .unwrap_or(0);
+    let stream_end = visible_end.max(para.char_count.saturating_sub(1));
+
+    let chars: Vec<char> = para.text.chars().collect();
+    let is_stream_boundary = |position: u32| {
+        para.char_offsets
+            .iter()
+            .copied()
+            .zip(chars.iter().copied())
+            .all(|(offset, ch)| {
+                let char_end = offset.saturating_add(ch.len_utf16() as u32);
+                position <= offset || position >= char_end
+            })
+    };
+
+    for (index, seg) in para.line_segs.iter().enumerate() {
+        if seg.line_height <= 0
+            || seg.text_height < 0
+            || seg.baseline_distance < 0
+            || seg.segment_width < 0
+            || seg.text_start > stream_end
+            || !is_stream_boundary(seg.text_start)
+        {
+            return false;
+        }
+        let visible_start =
+            utf16_range_to_text_range(&para.char_offsets, seg.text_start, u32::MAX, text_len).0;
+        if index == 0 && visible_start != 0 {
+            return false;
+        }
+        if index > 0 && seg.text_start <= para.line_segs[index - 1].text_start {
+            return false;
+        }
+    }
+    true
+}
+
 /// [#2279 stale-과소] 마스킹 문단의 저장 분할이 fresh 재래핑보다 **많은 줄**
 /// 인 경우 — 마스킹 치환('*')으로 원문보다 좁아졌는데 저장 분할은 원문 기준
 /// 줄수를 남긴 부실 저장. 한글은 fresh 재계산으로 줄수를 줄인다(36341511
@@ -1618,6 +1696,126 @@ pub fn masked_stored_lines_stale(
     stale
 }
 
+/// 본문 저장 분할이 작은 treat-as-char 표식의 host 폭을 반영하지 않은 경우.
+///
+/// HWPX 편집 저장본에는 글머리 그림/도형과 텍스트가 한 줄에 함께 있으면서,
+/// lineSeg 는 표식이 차지하는 폭을 빼기 전의 분할로 남는 경우가 있다. 큰 인라인
+/// 그림이나 그림만 있는 문단은 대상이 아니며, 작은 1개 표식이 저장 줄 높이 안에
+/// 들어가고 fresh 조판이 실제로 더 많은 줄을 요구할 때만 저장 분할을 무효화한다.
+fn compact_tac_marker_stored_lines_stale(
+    composed: &ComposedParagraph,
+    para: &Paragraph,
+    inner_width_px: f64,
+    styles: &ResolvedStyleSet,
+) -> bool {
+    let stored = !para.line_segs.is_empty()
+        && para
+            .line_segs
+            .iter()
+            .all(|seg| seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0);
+    if !stored
+        || composed.lines.is_empty()
+        || composed.lines.len() != para.line_segs.len()
+        || inner_width_px <= 0.0
+        || !para
+            .text
+            .chars()
+            .any(|c| c > '\u{001F}' && c != '\u{FFFC}' && !c.is_whitespace())
+        || composed.tac_controls.len() != 1
+    {
+        return false;
+    }
+
+    let (_, width_hu, control_index) = composed.tac_controls[0];
+    let line_height_hu = para
+        .line_segs
+        .first()
+        .map(|seg| seg.line_height.max(1) as u32)
+        .unwrap_or(1);
+    let compact_marker = para
+        .controls
+        .get(control_index)
+        .and_then(|control| match control {
+            Control::Picture(pic) if pic.common.treat_as_char => {
+                Some((pic.common.width, pic.common.height))
+            }
+            Control::Shape(shape) if shape.common().treat_as_char => {
+                let common = shape.common();
+                Some((common.width, common.height))
+            }
+            _ => None,
+        })
+        .is_some_and(|(width, height)| {
+            width_hu > 0
+                && width <= line_height_hu.saturating_mul(2)
+                && height <= line_height_hu.saturating_mul(3) / 2
+        });
+    if !compact_marker {
+        return false;
+    }
+
+    let first_text_width = estimate_composed_line_width(&composed.lines[0], styles);
+    // 다중 저장줄은 첫 줄 자체가 현재 폰트 추정치와 5% 안에서 정합할 때만
+    // TAC host 폭 누락을 원인으로 귀속한다. 그보다 큰 차이는 일반 폰트 메트릭
+    // 오차와 구분할 수 없으므로 저장 분할을 유지한다. 단일 저장줄은 fresh 에서
+    // 실제 두 줄이 되는지가 그 자체로 강한 under-fill 증거다.
+    if composed.lines.len() > 1 && first_text_width > inner_width_px * 1.05 {
+        return false;
+    }
+
+    let mut probe = composed.clone();
+    let mut para_no_ls = para.clone();
+    para_no_ls.line_segs.clear();
+    let marker_width_px = para
+        .line_segs
+        .first()
+        .filter(|seg| seg.segment_width > 0)
+        .map(|seg| width_hu as f64 / seg.segment_width as f64 * inner_width_px)
+        .unwrap_or(0.0);
+    restyle_fallback_runs_by_char_shapes(&mut probe, &para_no_ls);
+    recompose_for_cell_width_impl(
+        &mut probe,
+        &para_no_ls,
+        inner_width_px,
+        styles,
+        marker_width_px,
+    );
+    let stale = probe.lines.len() > composed.lines.len();
+    if stale && std::env::var("RHWP_DIAG_REWRAP").is_ok() {
+        eprintln!(
+            "DIAG_REWRAP tac-host inner={:.0} first={:.1} marker={:.1} stored={} fresh={} text='{}'",
+            inner_width_px,
+            first_text_width,
+            marker_width_px,
+            composed.lines.len(),
+            probe.lines.len(),
+            para.text.chars().take(24).collect::<String>(),
+        );
+    }
+    stale
+}
+
+/// 본문 저장 lineSeg 를 신뢰할 수 없는 공통 판정. 마스킹/물리적 과밀과
+/// 작은 TAC 표식 host 폭 누락을 한 경로로 묶어 측정·조판·렌더가 같은 줄을 쓴다.
+pub fn stored_lines_stale_for_body(
+    composed: &ComposedParagraph,
+    para: &Paragraph,
+    inner_width_px: f64,
+    styles: &ResolvedStyleSet,
+) -> bool {
+    if !stored_line_segs_structurally_coherent(para) {
+        return true;
+    }
+    let physically_overflowing = inner_width_px > 0.0
+        && composed
+            .lines
+            .iter()
+            .any(|line| estimate_composed_line_width(line, styles) > inner_width_px * 1.5);
+    physically_overflowing
+        || masked_stored_lines_stale(composed, para, inner_width_px, styles)
+        || compact_tac_marker_stored_lines_stale(composed, para, inner_width_px, styles)
+}
+
 /// [#2279] 본문(column) 판 부실-저장 예외 — 저장 분할이 실폭 모순(과잉)이거나
 /// 마스킹 문단의 저장 줄수가 fresh 와 다르면(과소 포함) 저장을 불신하고 본문
 /// 경로(`recompose_for_body_width` — 글자모양 재분할 포함)로 fresh 재래핑한다.
@@ -1628,12 +1826,31 @@ pub fn recompose_stored_lines_if_overflowing_body(
     column_inner_width_px: f64,
     styles: &ResolvedStyleSet,
 ) {
-    if !masked_stored_lines_stale(composed, para, column_inner_width_px, styles) {
+    if !stored_lines_stale_for_body(composed, para, column_inner_width_px, styles) {
         return;
     }
     let mut para_no_ls = para.clone();
     para_no_ls.line_segs.clear();
-    recompose_for_body_width(composed, &para_no_ls, column_inner_width_px, styles);
+    let first_line_reserve_px = if composed.tac_controls.len() == 1 {
+        para.line_segs
+            .first()
+            .filter(|seg| seg.segment_width > 0)
+            .map(|seg| {
+                composed.tac_controls[0].1.max(0) as f64 / seg.segment_width as f64
+                    * column_inner_width_px
+            })
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    restyle_fallback_runs_by_char_shapes(composed, &para_no_ls);
+    recompose_for_cell_width_impl(
+        composed,
+        &para_no_ls,
+        column_inner_width_px,
+        styles,
+        first_line_reserve_px,
+    );
 }
 
 pub fn recompose_for_cell_width(
@@ -1641,6 +1858,16 @@ pub fn recompose_for_cell_width(
     para: &Paragraph,
     cell_inner_width_px: f64,
     styles: &ResolvedStyleSet,
+) {
+    recompose_for_cell_width_impl(composed, para, cell_inner_width_px, styles, 0.0);
+}
+
+fn recompose_for_cell_width_impl(
+    composed: &mut ComposedParagraph,
+    para: &Paragraph,
+    cell_inner_width_px: f64,
+    styles: &ResolvedStyleSet,
+    first_line_reserve_px: f64,
 ) {
     let has_synthetic_line_segs = !para.line_segs.is_empty()
         && para
@@ -1675,7 +1902,7 @@ pub fn recompose_for_cell_width(
     // 종전 Task #671 전체 폭 유지 (이중 폭 적용 시 65 over-split, git bisect 0e21ec08).
     let hwp3_legacy_bullet =
         styles.hwp3_variant || is_hwp3_hwp5_missing_lineseg_legacy_bullet(para, composed, styles);
-    let (first_width_px, cont_width_px) = styles
+    let (mut first_width_px, cont_width_px) = styles
         .para_styles
         .get(para.para_shape_id as usize)
         .map(|ps| {
@@ -1691,6 +1918,7 @@ pub fn recompose_for_cell_width(
             }
         })
         .unwrap_or((cell_inner_width_px, cell_inner_width_px));
+    first_width_px = (first_width_px - first_line_reserve_px.max(0.0)).max(0.0);
     let text_width_px = first_width_px.max(cont_width_px);
     if text_width_px <= 0.0 {
         return;
@@ -2601,5 +2829,160 @@ pub(crate) use line_breaking::{
 mod lineseg_compare_tests;
 #[cfg(test)]
 mod re_sample_gen;
+#[cfg(test)]
+mod p1_text_reflow_tests {
+    use super::*;
+    use crate::renderer::style_resolver::{ResolvedCharStyle, ResolvedParaStyle, ResolvedStyleSet};
+
+    fn styles() -> ResolvedStyleSet {
+        ResolvedStyleSet {
+            char_styles: vec![ResolvedCharStyle {
+                font_family: "Noto Sans KR".to_string(),
+                font_families: vec!["Noto Sans KR".to_string(); 7],
+                font_size: 16.0,
+                ratio: 1.0,
+                kerning: true,
+                ..Default::default()
+            }],
+            para_styles: vec![ResolvedParaStyle {
+                indent: 18.0,
+                default_tab_width: 48.0,
+                korean_break_unit: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn paragraph(text: &str) -> Paragraph {
+        let mut offset = 0u32;
+        let char_offsets = text
+            .chars()
+            .map(|ch| {
+                let current = offset;
+                offset += ch.len_utf16() as u32;
+                current
+            })
+            .collect();
+        Paragraph {
+            text: text.to_string(),
+            char_offsets,
+            char_count: offset + 1,
+            char_shapes: vec![CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 0,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn missing_line_seg_reflows_mixed_scripts_by_geometry_without_splitting_graphemes() {
+        let text = "AV cafe\u{301} 한글 漢字 カナ\t1234 ".repeat(12);
+        let mut para = paragraph(&text);
+        let logical = compose_paragraph(&para);
+        assert_eq!(
+            logical.lines.len(),
+            1,
+            "composer must not invent 45-char lines"
+        );
+
+        reflow_line_segs(&mut para, 180.0, &styles(), 96.0);
+
+        assert!(para.line_segs.len() > 3);
+        let chars: Vec<char> = para.text.chars().collect();
+        for seg in para.line_segs.iter().skip(1) {
+            let char_index = para
+                .char_offsets
+                .iter()
+                .position(|offset| *offset == seg.text_start)
+                .expect("line starts must be visible character boundaries");
+            assert_ne!(
+                chars[char_index], '\u{301}',
+                "combining mark split from base"
+            );
+        }
+        assert!(para
+            .line_segs
+            .iter()
+            .all(|seg| seg.segment_width == px_to_hwpunit(180.0, 96.0)));
+    }
+
+    #[test]
+    fn short_mixed_script_run_stays_on_one_line() {
+        let mut para = paragraph("A한漢カe\u{301}");
+        reflow_line_segs(&mut para, 400.0, &styles(), 96.0);
+        assert_eq!(para.line_segs.len(), 1);
+    }
+
+    #[test]
+    fn coherent_saved_line_is_kept_but_invalid_boundary_is_stale() {
+        let styles = styles();
+        let mut para = paragraph("저장된 줄 분할");
+        para.line_segs = vec![LineSeg {
+            text_start: 0,
+            line_height: 1200,
+            text_height: 1200,
+            baseline_distance: 1000,
+            segment_width: 30000,
+            ..Default::default()
+        }];
+        let composed = compose_paragraph(&para);
+        assert!(!stored_lines_stale_for_body(
+            &composed, &para, 400.0, &styles
+        ));
+
+        para.line_segs.push(LineSeg {
+            text_start: 9999,
+            line_height: 1200,
+            text_height: 1200,
+            baseline_distance: 1000,
+            segment_width: 30000,
+            ..Default::default()
+        });
+        let composed = compose_paragraph(&para);
+        assert!(stored_lines_stale_for_body(
+            &composed, &para, 400.0, &styles
+        ));
+    }
+
+    #[test]
+    fn saved_line_boundaries_allow_control_gaps_but_reject_surrogate_interior() {
+        let styles = styles();
+        let mut para = paragraph("😀x");
+        // Eight UTF-16 stream units of leading controls before the visible
+        // text are valid; the second character begins after the surrogate.
+        para.char_offsets = vec![8, 10];
+        para.char_count = 11;
+        para.line_segs = vec![
+            LineSeg {
+                text_start: 8,
+                line_height: 1200,
+                text_height: 1200,
+                baseline_distance: 1000,
+                segment_width: 30000,
+                ..Default::default()
+            },
+            LineSeg {
+                text_start: 10,
+                line_height: 1200,
+                text_height: 1200,
+                baseline_distance: 1000,
+                segment_width: 30000,
+                ..Default::default()
+            },
+        ];
+        let composed = compose_paragraph(&para);
+        assert!(!stored_lines_stale_for_body(
+            &composed, &para, 400.0, &styles
+        ));
+
+        para.line_segs[1].text_start = 9;
+        let composed = compose_paragraph(&para);
+        assert!(stored_lines_stale_for_body(
+            &composed, &para, 400.0, &styles
+        ));
+    }
+}
 #[cfg(test)]
 mod tests;

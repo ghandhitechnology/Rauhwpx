@@ -19,11 +19,12 @@
 //!   `c:scatterStyle`로 표식/직선/곡선 구분 (C1b #1660).
 //! - `c:stockChart` (주식형) — `c:hiLowLines` 고저선 + `c:upDownBars` 캔들,
 //!   계열 역할은 XML 순서 규약(3계열=고/저/종, 4계열=시/고/저/종) (C2a #2277).
+//! - `c:areaChart`, `c:doughnutChart`, `c:radarChart`
 //! - **콤보 차트** (barChart + lineChart 혼합) — 시리즈별 타입 보존
 //! - **이중 Y축** (primary + secondary) — 시리즈별 축 그룹 매핑
 //!
 //! ## 범위 외
-//! - 영역형, 추세선, 애니메이션, 세밀 스타일
+//! - 추세선, 애니메이션, 세밀 스타일
 
 pub mod parser;
 pub mod renderer;
@@ -54,6 +55,9 @@ pub struct OoxmlChart {
     /// 막대 grouping과 별도 필드인 이유: 콤보(bar+line 공존)에서 단일 필드 공유 시
     /// XML 문서 순서에 따라 상호 오염. (C1d #2129)
     pub line_grouping: BarGrouping,
+    /// 영역 plot의 `c:grouping` (`standard`, `stacked`, `percentStacked`).
+    /// Separate from bar/line grouping so combo plot order cannot overwrite it.
+    pub area_grouping: BarGrouping,
     /// 라인 plot 레벨 `<c:marker val="1"/>` — 표식(마커) 표시 여부. 계열 내부
     /// `<c:marker>`(val 없음, symbol/size 래퍼)와 구분됨. (C1d #2129)
     pub line_markers: bool,
@@ -86,6 +90,32 @@ pub struct OoxmlChart {
     /// ofPie(원형대원형/원형대가로막대형) 보조플롯 정보. chart_type은 Pie를 유지하고
     /// (#1453 라우팅 앵커) 이 필드 유무로 render_of_pie를 분기. (C2b #2278)
     pub of_pie: Option<OfPieInfo>,
+    /// Doughnut hole size in percent. `Some` distinguishes doughnut from pie.
+    pub doughnut_hole_size: Option<f64>,
+    /// Radar rendering style (`standard`, `marker`, or `filled`).
+    pub radar_style: RadarStyle,
+    /// Axis titles retained from the chart XML.
+    pub category_axis_title: Option<String>,
+    pub primary_value_axis_title: Option<String>,
+    pub secondary_value_axis_title: Option<String>,
+    /// Plot-level data-label switches. OOXML allows finer per-point overrides;
+    /// these common switches cover native HWPX charts without inventing labels.
+    pub data_labels: DataLabelOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RadarStyle {
+    #[default]
+    Standard,
+    Marker,
+    Filled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DataLabelOptions {
+    pub show_value: bool,
+    pub show_category_name: bool,
+    pub show_series_name: bool,
 }
 
 /// `c:ofPieChart` 보조플롯 파라미터 (C2b #2278)
@@ -261,6 +291,9 @@ pub enum OoxmlChartType {
     Line,
     /// 원형
     Pie,
+    Doughnut,
+    Area,
+    Radar,
     /// 분산형 (x,y 산점도) (C1b #1660)
     Scatter,
     /// 주식형 (hiLowLines 고저선 / upDownBars 캔들) (C2a #2277)
@@ -276,6 +309,9 @@ impl OoxmlChartType {
             Self::Bar => "가로 막대",
             Self::Line => "꺾은선",
             Self::Pie => "원형",
+            Self::Doughnut => "도넛형",
+            Self::Area => "영역형",
+            Self::Radar => "방사형",
             Self::Scatter => "분산형",
             Self::Stock => "주식형",
             Self::Unknown => "미지원",

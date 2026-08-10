@@ -547,6 +547,9 @@ pub struct TypesetEngine {
     /// [#2403] 현재 조판 입력의 레이아웃 호환 프로파일 — typeset 진입 시 set.
     /// (HWPX 저장 시멘틱·HWP3 변환본 판단 등 소스분기의 단일 질의 표면.)
     profile: std::cell::Cell<crate::model::provenance::LayoutCompatibilityProfile>,
+    /// Shared derived geometry used by measurement, fragment cuts, and final layout.
+    render_normalization:
+        std::sync::Arc<crate::renderer::render_normalization::RenderNormalizationOverlay>,
 }
 
 /// 조판 중 현재 페이지/단 상태
@@ -882,6 +885,70 @@ fn para_has_non_whitespace_text(para: &Paragraph) -> bool {
     para.text
         .chars()
         .any(|c| c > '\u{001F}' && c != '\u{FFFC}' && !c.is_whitespace())
+}
+
+/// 저장 vpos 가 일정 간격으로 진행하는 빈 줄 묶음 뒤에 명시적 쪽나누기가
+/// 이어지는지 판정한다. 이는 단순 trailing empty 가 아니라 편집기가 의도적으로
+/// 현재 쪽을 채운 뒤 별도의 쪽나누기를 둔 구조이므로, reset-bridge 흡수 대상이
+/// 아니다.
+fn coherent_saved_empty_ladder_before_explicit_break(
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    body_height_hu: i32,
+) -> Option<(usize, usize)> {
+    let is_saved_empty = |p: &Paragraph| {
+        p.text.trim().is_empty()
+            && p.controls.is_empty()
+            && p.line_segs.len() == 1
+            && !is_synthetic_line_seg(&p.line_segs[0])
+    };
+    if !paragraphs.get(para_idx).is_some_and(is_saved_empty) {
+        return None;
+    }
+
+    let mut start = para_idx;
+    while start > 0 && paragraphs.get(start - 1).is_some_and(is_saved_empty) {
+        start -= 1;
+    }
+    let mut end = para_idx + 1;
+    while paragraphs.get(end).is_some_and(is_saved_empty) {
+        end += 1;
+    }
+    let Some(explicit_break) = paragraphs.get(end).filter(|p| {
+        matches!(
+            p.column_type,
+            ColumnBreakType::Page | ColumnBreakType::Section
+        )
+    }) else {
+        return None;
+    };
+    if end - start < 2 {
+        return None;
+    }
+
+    let mut deltas = paragraphs[start..end]
+        .windows(2)
+        .map(|pair| pair[1].line_segs[0].vertical_pos - pair[0].line_segs[0].vertical_pos);
+    let first_delta = deltas.next()?;
+    if first_delta <= 0 || deltas.any(|delta| delta <= 0 || (delta - first_delta).abs() > 50) {
+        return None;
+    }
+    // A pair of trailing blanks that already reaches the page-bottom band followed by a visible
+    // explicit-break paragraph represents ordinary spacing up to that same boundary. Counting both
+    // signals creates a nearly empty extra page. Longer ladders and dedicated empty break paragraphs
+    // remain distinct evidence of an intentionally filled page.
+    let last_blank = &paragraphs[end - 1].line_segs[0];
+    let last_blank_bottom = last_blank
+        .vertical_pos
+        .saturating_add(last_blank.line_height);
+    let redundant_two_line_bottom_boundary = end - start == 2
+        && !explicit_break.text.trim().is_empty()
+        && body_height_hu > 0
+        && last_blank_bottom.saturating_mul(10) >= body_height_hu.saturating_mul(9);
+    if redundant_two_line_bottom_boundary {
+        return None;
+    }
+    Some((start, end))
 }
 
 fn take_strict_plain_text_fit_after_empty_host_float_once(
@@ -1942,6 +2009,7 @@ fn saved_flow_marks_page_last(paragraphs: &[Paragraph], para_idx: usize) -> bool
         Some(ls) => ls.vertical_pos,
         None => return false,
     };
+    let mut skipped_increasing_empty = false;
     for next_para in paragraphs.iter().skip(para_idx + 1) {
         if matches!(
             next_para.column_type,
@@ -1949,15 +2017,90 @@ fn saved_flow_marks_page_last(paragraphs: &[Paragraph], para_idx: usize) -> bool
         ) {
             return true;
         }
+        let internal_page_rewind = next_para.line_segs.windows(2).any(|pair| {
+            (pair[0].tag | pair[1].tag)
+                & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY
+                == 0
+                && pair[0].vertical_pos > 5000
+                && pair[1].vertical_pos <= 1500
+                && pair[1].vertical_pos < pair[0].vertical_pos
+        });
+        if internal_page_rewind
+            && next_para
+                .line_segs
+                .iter()
+                .find(|seg| !is_synthetic_line_seg(seg))
+                .is_some_and(|first| first.vertical_pos >= curr_vpos)
+        {
+            return true;
+        }
         if let Some(next) = next_para
             .line_segs
             .iter()
             .find(|ls| !is_synthetic_line_seg(ls))
         {
+            // Empty saved ladder entries between a visible tail and a reset are part of the
+            // page-bottom fill.  Continue through them instead of treating the first empty line
+            // as proof that the flow continues indefinitely on this page.
+            if next_para.text.trim().is_empty()
+                && next_para.controls.is_empty()
+                && next.vertical_pos >= curr_vpos
+            {
+                skipped_increasing_empty = true;
+                continue;
+            }
             return next.vertical_pos < curr_vpos;
         }
     }
-    true
+    // A later increasing saved line is still evidence that flow continues unless the scan
+    // actually reaches the reset/break promised by the empty-ladder exception above.  Treating
+    // an unterminated empty ladder as document-end evidence reintroduces the cumulative-vpos
+    // overfill guarded by task #1749.
+    !skipped_increasing_empty
+}
+
+fn saved_flow_reaches_internal_page_rewind(paragraphs: &[Paragraph], para_idx: usize) -> bool {
+    let Some(mut previous_vpos) = paragraphs
+        .get(para_idx)
+        .and_then(|para| {
+            para.line_segs
+                .iter()
+                .rev()
+                .find(|seg| !is_synthetic_line_seg(seg))
+        })
+        .map(|seg| seg.vertical_pos)
+    else {
+        return false;
+    };
+
+    for next_para in paragraphs.iter().skip(para_idx + 1) {
+        if matches!(
+            next_para.column_type,
+            ColumnBreakType::Page | ColumnBreakType::Section
+        ) {
+            return true;
+        }
+        let saved: Vec<&LineSeg> = next_para
+            .line_segs
+            .iter()
+            .filter(|seg| !is_synthetic_line_seg(seg))
+            .collect();
+        let Some(first) = saved.first() else {
+            continue;
+        };
+        if first.vertical_pos < previous_vpos {
+            return false;
+        }
+        if saved.windows(2).any(|pair| {
+            pair[0].vertical_pos > 5000
+                && pair[1].vertical_pos <= 1500
+                && pair[1].vertical_pos < pair[0].vertical_pos
+        }) {
+            return true;
+        }
+        previous_vpos = saved.last().unwrap().vertical_pos;
+    }
+    false
 }
 
 fn positive_vpos_end_before_negative_wrap(para: &Paragraph) -> Option<i32> {
@@ -2424,6 +2567,9 @@ struct FormattedParagraph {
     spacing_after: f64,
     /// trailing line_spacing을 제외한 판단용 높이
     height_for_fit: f64,
+    /// 저장 lineSeg 를 불신하고 본문 폭으로 다시 조판했는지 여부. 이후 저장
+    /// vpos 사다리가 fresh 성장분을 역스냅하지 못하게 하는 구조 신호다.
+    fresh_recomposed: bool,
 }
 
 impl FormattedParagraph {
@@ -2789,7 +2935,18 @@ impl TypesetEngine {
         Self {
             dpi,
             profile: std::cell::Cell::new(Default::default()),
+            render_normalization: std::sync::Arc::new(
+                crate::renderer::render_normalization::RenderNormalizationOverlay::default(),
+            ),
         }
+    }
+
+    pub fn with_render_normalization(
+        mut self,
+        overlay: std::sync::Arc<crate::renderer::render_normalization::RenderNormalizationOverlay>,
+    ) -> Self {
+        self.render_normalization = overlay;
+        self
     }
 
     pub fn with_default_dpi() -> Self {
@@ -4171,6 +4328,17 @@ impl TypesetEngine {
             } else {
                 false
             };
+            let saved_empty_ladder = st
+                .profile
+                .hwpx_stored_layout()
+                .then(|| {
+                    coherent_saved_empty_ladder_before_explicit_break(
+                        paragraphs,
+                        para_idx,
+                        crate::renderer::px_to_hwpunit(st.layout.available_body_height(), self.dpi),
+                    )
+                })
+                .flatten();
 
             // [Task #1725 v2] 현재 일반텍스트 tail 과 새 페이지(vpos-reset) 사이에 빈 문단이 1개
             // 끼어 immediate-next reset 을 놓치는 각주-tail 케이스(국제고속선기준 pi=537/2378).
@@ -4208,6 +4376,7 @@ impl TypesetEngine {
             // 이미 페이지 하단 vpos 를 가지고 있고, 뒤쪽 저장 flow 가 reset 을 명확히 보일 때만
             // 0-높이로 흡수한다.
             let empty_tail_bridge_to_reset = !next_will_vpos_reset
+                && saved_empty_ladder.is_none()
                 && !st.current_items.is_empty()
                 && !st
                     .current_items
@@ -4623,6 +4792,14 @@ impl TypesetEngine {
                     styles,
                     is_last_in_section,
                 );
+                if formatted.fresh_recomposed {
+                    st.vpos_ladder_dirty = true;
+                }
+                if saved_empty_ladder.is_some_and(|(_, end)| end == para_idx + 1) {
+                    // 저장 empty ladder 가 현재 쪽의 끝을 명시하고, 다음 문단의
+                    // explicit break 는 별도 경계다. 둘을 한 번으로 합치지 않는다.
+                    st.advance_column_or_new_page();
+                }
             } else {
                 // 표 문단: Phase 2에서 전환 예정. 현재는 기존 방식 호환용 stub.
                 self.typeset_table_paragraph(
@@ -4958,8 +5135,11 @@ impl TypesetEngine {
                             // overflow 로 잘림). pagination 측에서도 layout 과 동일하게
                             // 개체 높이를 current_height 에 누적.
                             use crate::model::shape::{TextWrap, VertRelTo};
-                            // (obj_h, extra=obj_h+margin_bottom, h_left, h_right px)
-                            let pushdown_h: Option<(f64, f64, f64, f64)> = match ctrl {
+                            // (obj_h, exclusion_bottom, h_left, h_right, allow_overlap), px.
+                            // Use placed horizontal geometry instead of treating horzOffset as an
+                            // absolute left edge; right/center and page/paragraph references must
+                            // reserve the lane in which the object is actually painted.
+                            let pushdown_h: Option<(f64, f64, f64, f64, bool)> = match ctrl {
                                 Control::Picture(pic)
                                     if !pic.common.treat_as_char
                                         && matches!(
@@ -4971,12 +5151,33 @@ impl TypesetEngine {
                                     let h = hwpunit_to_px(pic.common.height as i32, self.dpi);
                                     let mb =
                                         hwpunit_to_px(pic.common.margin.bottom as i32, self.dpi);
-                                    let hl = hwpunit_to_px(
-                                        pic.common.horizontal_offset as i32,
-                                        self.dpi,
-                                    );
-                                    let hr = hl + hwpunit_to_px(pic.common.width as i32, self.dpi);
-                                    Some((h, h + mb, hl, hr))
+                                    let mt = hwpunit_to_px(pic.common.margin.left as i32, self.dpi);
+                                    let mr =
+                                        hwpunit_to_px(pic.common.margin.right as i32, self.dpi);
+                                    let column = st
+                                        .layout
+                                        .column_areas
+                                        .get(st.current_column as usize)
+                                        .copied()
+                                        .unwrap_or(st.layout.body_area);
+                                    let para_style = composed.get(para_idx).and_then(|comp| {
+                                        styles.para_styles.get(comp.para_style_id as usize)
+                                    });
+                                    let placement = FloatPlacementContext::new(column)
+                                        .with_body_area(st.layout.body_area)
+                                        .with_paper_width(st.layout.page_width)
+                                        .with_host_margins(
+                                            para_style
+                                                .map(|style| style.margin_left)
+                                                .unwrap_or(0.0),
+                                            para_style
+                                                .map(|style| style.margin_right)
+                                                .unwrap_or(0.0),
+                                        );
+                                    let width = hwpunit_to_px(pic.common.width as i32, self.dpi);
+                                    let (hl, hr) =
+                                        horizontal_range(&pic.common, width, placement, self.dpi);
+                                    Some((h, h + mb, hl - mt, hr + mr, pic.common.allow_overlap))
                                 }
                                 Control::Shape(s)
                                     if !s.common().treat_as_char
@@ -4989,13 +5190,36 @@ impl TypesetEngine {
                                     let cm = s.common();
                                     let h = hwpunit_to_px(cm.height as i32, self.dpi);
                                     let mb = hwpunit_to_px(cm.margin.bottom as i32, self.dpi);
-                                    let hl = hwpunit_to_px(cm.horizontal_offset as i32, self.dpi);
-                                    let hr = hl + hwpunit_to_px(cm.width as i32, self.dpi);
-                                    Some((h, h + mb, hl, hr))
+                                    let ml = hwpunit_to_px(cm.margin.left as i32, self.dpi);
+                                    let mr = hwpunit_to_px(cm.margin.right as i32, self.dpi);
+                                    let column = st
+                                        .layout
+                                        .column_areas
+                                        .get(st.current_column as usize)
+                                        .copied()
+                                        .unwrap_or(st.layout.body_area);
+                                    let para_style = composed.get(para_idx).and_then(|comp| {
+                                        styles.para_styles.get(comp.para_style_id as usize)
+                                    });
+                                    let placement = FloatPlacementContext::new(column)
+                                        .with_body_area(st.layout.body_area)
+                                        .with_paper_width(st.layout.page_width)
+                                        .with_host_margins(
+                                            para_style
+                                                .map(|style| style.margin_left)
+                                                .unwrap_or(0.0),
+                                            para_style
+                                                .map(|style| style.margin_right)
+                                                .unwrap_or(0.0),
+                                        );
+                                    let width = hwpunit_to_px(cm.width as i32, self.dpi);
+                                    let (hl, hr) = horizontal_range(cm, width, placement, self.dpi);
+                                    Some((h, h + mb, hl - ml, hr + mr, cm.allow_overlap))
                                 }
                                 _ => None,
                             };
-                            if let Some((obj_h, extra, h_left, h_right)) = pushdown_h {
+                            if let Some((obj_h, extra, h_left, h_right, allow_overlap)) = pushdown_h
+                            {
                                 // [Task #1079] 파일 vpos 가 이미 그림 공간을 반영(그림 para 줄
                                 // 앞 gap ≥ 그림 높이)하면 VPOS_CORR sync 가 그 공간을 따르므로
                                 // pushdown 가산은 이중 계상. gap 이 그림 높이 미만(파일 vpos
@@ -5092,7 +5316,15 @@ impl TypesetEngine {
                                         for &i in overlapping.iter().rev() {
                                             topbottom_cols.remove(i);
                                         }
-                                        topbottom_cols.push((new_l, new_r, base + extra));
+                                        topbottom_cols.push((
+                                            new_l,
+                                            new_r,
+                                            if allow_overlap {
+                                                base.max(extra)
+                                            } else {
+                                                base + extra
+                                            },
+                                        ));
                                     }
                                     let applied_after =
                                         topbottom_cols.iter().map(|c| c.2).fold(0.0_f64, f64::max);
@@ -11788,7 +12020,9 @@ impl TypesetEngine {
                     );
                     Some(cloned)
                 } else if inner > 0.0
-                    && crate::renderer::composer::masked_stored_lines_stale(c, para, inner, styles)
+                    && crate::renderer::composer::stored_lines_stale_for_body(
+                        c, para, inner, styles,
+                    )
                 {
                     // [#2279] 마스킹 저장분할 stale(실폭-과잉/줄수-과소) 본문 문단
                     // fresh 재래핑 — paragraph_layout(렌더)와 동일.
@@ -11806,6 +12040,9 @@ impl TypesetEngine {
             }
             _ => None,
         };
+        // NO_LS fallback 는 기존 post-place dirty 경로가 별도로 처리한다. 여기서는
+        // 저장 lineSeg 를 실제로 폐기한 경우만 뒤 사다리를 dirty 로 전파한다.
+        let fresh_recomposed = recomposed.is_some() && !para.line_segs.is_empty();
         let composed = recomposed.as_ref().or(composed);
         let raw_spacing_before = para_style.map(|s| s.spacing_before).unwrap_or(0.0);
         let spacing_after = para_style.map(|s| s.spacing_after).unwrap_or(0.0);
@@ -12171,6 +12408,7 @@ impl TypesetEngine {
             spacing_before,
             spacing_after,
             height_for_fit,
+            fresh_recomposed,
         }
     }
 
@@ -12323,7 +12561,16 @@ impl TypesetEngine {
         // 가드 2종: ①미주 흐름은 한 단 안에서도 vpos 가 크게 되감기므로 제외
         // (ColumnContent.endnote_flow 계약) ②되감김 목표가 단 상단 근방일 때만 인정
         // (detect_near_top_rewind_breaks — 페이지 중간 되감김은 어울림 흐름 잔재).
-        let col_breaks = if st.col_count > 1 && st.current_column == 0 {
+        let col_breaks = if st.col_count == 1
+            && para.controls.is_empty()
+            && para.line_segs.iter().all(|seg| !is_synthetic_line_seg(seg))
+        {
+            // Saved one-column layout also encodes a page boundary as an intra-paragraph
+            // rewind.  Previously only multi-column flow consumed that signal, so the prefix
+            // and next-page tail were accumulated on one page and following floating tables
+            // were deferred despite their saved anchor fitting the page.
+            Self::detect_near_top_rewind_breaks(para, st.layout.available_body_height(), self.dpi)
+        } else if st.col_count > 1 && st.current_column == 0 {
             Self::detect_column_breaks_in_paragraph(para)
         } else if st.col_count > 1 && st.current_column > 0 && !st.current_endnote_flow {
             Self::detect_near_top_rewind_breaks(para, st.layout.available_body_height(), self.dpi)
@@ -12484,7 +12731,8 @@ impl TypesetEngine {
             // [#2093] spacing_after 게이트(#1733) 제거: 신뢰 판정은 저장 줄의 시각
             // 경계(vpos~vpos+lh)로 하며, 한글은 쪽 마지막 줄의 아래 간격을 쪽 하단에서
             // 소비하지 않으므로 sa 는 배제 사유가 아니다 (1192000 해양수산 17→16쪽).
-            && saved_flow_marks_page_last(paragraphs, para_idx)
+            && (saved_flow_marks_page_last(paragraphs, para_idx)
+                || saved_flow_reaches_internal_page_rewind(paragraphs, para_idx))
             && current_page_vpos_base
                 .and_then(|base| single_line_visible_bounds_px(para, base, self.dpi))
                 .is_some_and(|bounds| {
@@ -12501,6 +12749,64 @@ impl TypesetEngine {
                     top + 16.0 >= st.current_height
                         && bottom <= st.available_height() + 0.5 + spill
                 });
+        let saved_multiline_tail_bottom_fits = !strict_after_empty_host_float
+            && forced_page_break_line.is_none()
+            && !omit_untrusted_empty
+            && st.col_count == 1
+            && fmt.line_heights.len() >= 2
+            && para.controls.is_empty()
+            && !st.current_items.is_empty()
+            && saved_flow_marks_page_last(paragraphs, para_idx)
+            && current_page_vpos_base
+                .and_then(|base| {
+                    let mut saved = para
+                        .line_segs
+                        .iter()
+                        .filter(|seg| !is_synthetic_line_seg(seg));
+                    let first = saved.next()?;
+                    let last = saved.last().unwrap_or(first);
+                    let top = first.vertical_pos.saturating_sub(base);
+                    let bottom = last
+                        .vertical_pos
+                        .saturating_add(last.line_height)
+                        .saturating_sub(base);
+                    (top >= 0 && bottom >= 0).then(|| {
+                        (
+                            hwpunit_to_px(top, self.dpi),
+                            hwpunit_to_px(bottom, self.dpi),
+                        )
+                    })
+                })
+                .is_some_and(|bounds| {
+                    saved_bounds_fit_at_flow_tail(bounds, st.current_height, st.available_height())
+                });
+        let saved_native_page_tail_fits = !strict_after_empty_host_float
+            && forced_page_break_line.is_none()
+            && st.profile.native_hwp5_layout()
+            && st.col_count == 1
+            && para.controls.is_empty()
+            && !st.current_items.is_empty()
+            && (saved_flow_marks_page_last(paragraphs, para_idx)
+                || saved_flow_reaches_internal_page_rewind(paragraphs, para_idx))
+            && {
+                let body_height_hu =
+                    crate::renderer::px_to_hwpunit(st.layout.available_body_height(), self.dpi);
+                let mut saved = para
+                    .line_segs
+                    .iter()
+                    .filter(|seg| !is_synthetic_line_seg(seg));
+                saved.next().is_some_and(|first| {
+                    let last = para
+                        .line_segs
+                        .iter()
+                        .rev()
+                        .find(|seg| !is_synthetic_line_seg(seg))
+                        .unwrap_or(first);
+                    first.vertical_pos >= body_height_hu * 2 / 3
+                        && last.vertical_pos >= first.vertical_pos
+                        && last.vertical_pos.saturating_add(last.line_height) <= body_height_hu + 40
+                })
+            };
         let saved_list_tail_body_vpos_fits = !strict_after_empty_host_float
             && forced_page_break_line.is_none()
             && !omit_untrusted_empty
@@ -12535,6 +12841,8 @@ impl TypesetEngine {
         if forced_page_break_line.is_none()
             && (st.current_height + page_end_fit_height <= available
                 || saved_single_line_bottom_fits
+                || saved_multiline_tail_bottom_fits
+                || saved_native_page_tail_fits
                 || saved_list_tail_body_vpos_fits)
         {
             // place: 전체 배치
@@ -14274,7 +14582,11 @@ impl TypesetEngine {
         let v_offset_px = hwpunit_to_px(signed_hwpunit(table.common.vertical_offset), self.dpi);
         let raw_top = (para_start_height + v_offset_px).max(para_start_height);
         let reserved_height = ft.effective_height + ft.host_spacing.after_for_fit;
-        let lane_top = lanes.pushed_top(x_start, x_end, raw_top);
+        let lane_top = if table.common.allow_overlap {
+            raw_top
+        } else {
+            lanes.pushed_top(x_start, x_end, raw_top)
+        };
         let lane_bottom = lane_top + reserved_height;
 
         let total_footnote =
@@ -14296,7 +14608,13 @@ impl TypesetEngine {
             para_index: para_idx,
             control_index: ctrl_idx,
         });
-        lanes.place(x_start, x_end, raw_top, reserved_height);
+        lanes.place_with_policy(
+            x_start,
+            x_end,
+            raw_top,
+            reserved_height,
+            table.common.allow_overlap,
+        );
         st.current_height = st.current_height.max(lanes.max_bottom());
         true
     }
@@ -16745,6 +17063,8 @@ impl TypesetEngine {
         // 셀 패딩/중첩 표 높이 계산에만 의존하므로 ad hoc 인스턴스로 충분하다.
         let layout_engine = crate::renderer::layout::LayoutEngine::new(self.dpi);
         layout_engine.set_layout_profile(st.profile);
+        layout_engine
+            .set_render_normalization_overlay(std::sync::Arc::clone(&self.render_normalization));
         // [Task #993] rowspan(row_span>1) 셀이 걸친 행 — 컷 모델(advance_row_cut)은
         // row_span==1 셀만 다루므로 rowspan 셀 높이를 측정하지 못한다. 구현계획서
         // §4대로 rowspan 행은 MeasuredTable 행 높이를 권위로 쓴다(렌더러도 동일).
@@ -19014,12 +19334,51 @@ mod tests {
         ];
         assert!(!saved_flow_marks_page_last(&with_empty, 0));
 
-        // (e) 누적좌표라도 다음 문단이 명시적 쪽나누기면 페이지-마지막 증거로 신뢰
+        // (e) 증가하는 빈 saved ladder는 뒤에서 실제 reset을 찾은 경우에만 건너뜀
+        let empty_ladder_before_reset =
+            vec![para_at_vpos(72626), para_at_vpos(74902), para_at_vpos(700)];
+        assert!(saved_flow_marks_page_last(&empty_ladder_before_reset, 0));
+
+        // (f) 누적좌표라도 다음 문단이 명시적 쪽나누기면 페이지-마지막 증거로 신뢰
         //     (36375752 pi26→pi27 [쪽나누기]: vpos 137484→140204 리셋 없음)
         let mut page_break_next = para_at_vpos(140204);
         page_break_next.column_type = ColumnBreakType::Page;
         let cumulative_with_break = vec![para_at_vpos(137484), page_break_next];
         assert!(saved_flow_marks_page_last(&cumulative_with_break, 0));
+    }
+
+    #[test]
+    fn saved_empty_ladder_collapses_only_redundant_bottom_boundary() {
+        let mut page_break = para_at_vpos(0);
+        page_break.text = "next page".to_string();
+        page_break.column_type = ColumnBreakType::Page;
+
+        let two_blanks = vec![para_at_vpos(63000), para_at_vpos(64800), page_break.clone()];
+        assert_eq!(
+            coherent_saved_empty_ladder_before_explicit_break(&two_blanks, 0, 70000),
+            None,
+            "two saved blanks already at the bottom must not duplicate a visible page break"
+        );
+
+        let mid_page_two_blanks =
+            vec![para_at_vpos(36000), para_at_vpos(37980), page_break.clone()];
+        assert_eq!(
+            coherent_saved_empty_ladder_before_explicit_break(&mid_page_two_blanks, 0, 70000,),
+            Some((0, 2)),
+            "a mid-page ladder remains distinct from the following explicit break"
+        );
+
+        let three_blanks = vec![
+            para_at_vpos(1000),
+            para_at_vpos(2800),
+            para_at_vpos(4600),
+            page_break,
+        ];
+        assert_eq!(
+            coherent_saved_empty_ladder_before_explicit_break(&three_blanks, 1, 70000),
+            Some((0, 3)),
+            "three coherent saved blanks are strong evidence of an intentional page fill"
+        );
     }
 
     fn page_with_items(items: Vec<PageItem>) -> PageContent {

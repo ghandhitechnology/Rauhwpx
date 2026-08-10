@@ -28,6 +28,24 @@ import {
  */
 export type RemovedParaMeta = Record<string, unknown>;
 
+interface ScopedFormattingDocument {
+  getCharPropertiesInHf(sec: number, isHeader: boolean, applyTo: number, para: number, offset: number): string;
+  applyCharFormatInHf(sec: number, isHeader: boolean, applyTo: number, para: number, start: number, end: number, props: string): string;
+  setCharShapeIdInHf(sec: number, isHeader: boolean, applyTo: number, para: number, start: number, end: number, shapeId: number): string;
+  setParaShapeIdInHf(sec: number, isHeader: boolean, applyTo: number, para: number, shapeId: number): string;
+  getCharPropertiesInFootnote(sec: number, para: number, control: number, notePara: number, offset: number): string;
+  applyCharFormatInFootnote(sec: number, para: number, control: number, notePara: number, start: number, end: number, props: string): string;
+  setCharShapeIdInFootnote(sec: number, para: number, control: number, notePara: number, start: number, end: number, shapeId: number): string;
+  setParaShapeIdInFootnote(sec: number, para: number, control: number, notePara: number, shapeId: number): string;
+  getCellParaPropertiesAtByPath(sec: number, parentPara: number, path: string): string;
+  applyParaFormatInCellByPath(sec: number, parentPara: number, path: string, props: string): string;
+  setCellParaShapeIdByPath(sec: number, parentPara: number, path: string, shapeId: number): string;
+}
+
+function scopedFormattingDocument(doc: HwpDocument) {
+  return doc as unknown as ScopedFormattingDocument;
+}
+
 function serializeParaMeta(meta: RemovedParaMeta | undefined): string | undefined {
   return meta && JSON.stringify(meta);
 }
@@ -1953,6 +1971,34 @@ export class WasmBridge {
     return (this.doc as any).applyParaFormatInFootnote(sec, para, controlIdx, fnParaIdx, propsJson);
   }
 
+  getCharPropertiesInFootnote(sec: number, para: number, controlIdx: number, fnParaIdx: number, charOffset: number): CharProperties {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(scopedFormattingDocument(this.doc).getCharPropertiesInFootnote(
+      sec, para, controlIdx, fnParaIdx, charOffset,
+    ));
+  }
+
+  applyCharFormatInFootnote(sec: number, para: number, controlIdx: number, fnParaIdx: number, startOffset: number, endOffset: number, propsJson: string): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return scopedFormattingDocument(this.doc).applyCharFormatInFootnote(
+      sec, para, controlIdx, fnParaIdx, startOffset, endOffset, propsJson,
+    );
+  }
+
+  setCharShapeIdInFootnote(sec: number, para: number, controlIdx: number, fnParaIdx: number, startOffset: number, endOffset: number, charShapeId: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return scopedFormattingDocument(this.doc).setCharShapeIdInFootnote(
+      sec, para, controlIdx, fnParaIdx, startOffset, endOffset, charShapeId,
+    );
+  }
+
+  setParaShapeIdInFootnote(sec: number, para: number, controlIdx: number, fnParaIdx: number, paraShapeId: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return scopedFormattingDocument(this.doc).setParaShapeIdInFootnote(
+      sec, para, controlIdx, fnParaIdx, paraShapeId,
+    );
+  }
+
   moveLineEndpoint(sec: number, para: number, ci: number, sx: number, sy: number, ex: number, ey: number): void {
     if (!this.doc) return;
     (this.doc as any).moveLineEndpoint(sec, para, ci, sx, sy, ex, ey);
@@ -2064,6 +2110,13 @@ export class WasmBridge {
     return JSON.parse(this.doc.deleteRange(sec, startPara, startOffset, endPara, endOffset));
   }
 
+  deleteRangeAcrossSections(startSec: number, startPara: number, startOffset: number, endSec: number, endPara: number, endOffset: number): { ok: boolean; sectionIdx: number; paraIdx: number; charOffset: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(this.doc.deleteRangeAcrossSections(
+      startSec, startPara, startOffset, endSec, endPara, endOffset,
+    ));
+  }
+
   deleteRangeInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, startCellPara: number, startOffset: number, endCellPara: number, endOffset: number): { ok: boolean; paraIdx: number; charOffset: number } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.deleteRangeInCell(sec, parentPara, controlIdx, cellIdx, startCellPara, startOffset, endCellPara, endOffset));
@@ -2074,6 +2127,13 @@ export class WasmBridge {
   copySelection(sec: number, startPara: number, startOffset: number, endPara: number, endOffset: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.copySelection(sec, startPara, startOffset, endPara, endOffset);
+  }
+
+  copySelectionAcrossSections(startSec: number, startPara: number, startOffset: number, endSec: number, endPara: number, endOffset: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.copySelectionAcrossSections(
+      startSec, startPara, startOffset, endSec, endPara, endOffset,
+    );
   }
 
   copySelectionInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, startCellPara: number, startOffset: number, endCellPara: number, endOffset: number): string {
@@ -2143,6 +2203,13 @@ export class WasmBridge {
     return this.doc.exportSelectionHtml(sec, startPara, startOffset, endPara, endOffset);
   }
 
+  exportSelectionAcrossSectionsHtml(startSec: number, startPara: number, startOffset: number, endSec: number, endPara: number, endOffset: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.exportSelectionAcrossSectionsHtml(
+      startSec, startPara, startOffset, endSec, endPara, endOffset,
+    );
+  }
+
   exportSelectionInCellHtml(sec: number, parentPara: number, controlIdx: number, cellIdx: number, startCellPara: number, startOffset: number, endCellPara: number, endOffset: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.exportSelectionInCellHtml(sec, parentPara, controlIdx, cellIdx, startCellPara, startOffset, endCellPara, endOffset);
@@ -2184,6 +2251,13 @@ export class WasmBridge {
   applyCharFormat(sec: number, para: number, startOffset: number, endOffset: number, propsJson: string): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.applyCharFormat(sec, para, startOffset, endOffset, propsJson);
+  }
+
+  applyCharFormatAcrossSections(startSec: number, startPara: number, startOffset: number, endSec: number, endPara: number, endOffset: number, propsJson: string): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.applyCharFormatAcrossSections(
+      startSec, startPara, startOffset, endSec, endPara, endOffset, propsJson,
+    );
   }
 
   setCharShapeId(sec: number, para: number, startOffset: number, endOffset: number, charShapeId: number): string {
@@ -2245,6 +2319,11 @@ export class WasmBridge {
     return this.doc.applyParaFormat(sec, para, propsJson);
   }
 
+  applyParaFormatAcrossSections(startSec: number, startPara: number, endSec: number, endPara: number, propsJson: string): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.applyParaFormatAcrossSections(startSec, startPara, endSec, endPara, propsJson);
+  }
+
   setParaShapeId(sec: number, para: number, paraShapeId: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return (this.doc as any).setParaShapeId(sec, para, paraShapeId);
@@ -2260,6 +2339,27 @@ export class WasmBridge {
     return (this.doc as any).setCellParaShapeId(sec, parentPara, controlIdx, cellIdx, cellParaIdx, paraShapeId);
   }
 
+  getCellParaPropertiesAtByPath(sec: number, parentPara: number, pathJson: string): ParaProperties {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(scopedFormattingDocument(this.doc).getCellParaPropertiesAtByPath(
+      sec, parentPara, pathJson,
+    ));
+  }
+
+  applyParaFormatInCellByPath(sec: number, parentPara: number, pathJson: string, propsJson: string): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return scopedFormattingDocument(this.doc).applyParaFormatInCellByPath(
+      sec, parentPara, pathJson, propsJson,
+    );
+  }
+
+  setCellParaShapeIdByPath(sec: number, parentPara: number, pathJson: string, paraShapeId: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return scopedFormattingDocument(this.doc).setCellParaShapeIdByPath(
+      sec, parentPara, pathJson, paraShapeId,
+    );
+  }
+
   /** 머리말/꼬리말 문단의 문단 속성을 조회한다 */
   getParaPropertiesInHf(sec: number, isHeader: boolean, applyTo: number, hfParaIdx: number): ParaProperties {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
@@ -2270,6 +2370,34 @@ export class WasmBridge {
   applyParaFormatInHf(sec: number, isHeader: boolean, applyTo: number, hfParaIdx: number, propsJson: string): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.applyParaFormatInHf(sec, isHeader, applyTo, hfParaIdx, propsJson);
+  }
+
+  getCharPropertiesInHf(sec: number, isHeader: boolean, applyTo: number, hfParaIdx: number, charOffset: number): CharProperties {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(scopedFormattingDocument(this.doc).getCharPropertiesInHf(
+      sec, isHeader, applyTo, hfParaIdx, charOffset,
+    ));
+  }
+
+  applyCharFormatInHf(sec: number, isHeader: boolean, applyTo: number, hfParaIdx: number, startOffset: number, endOffset: number, propsJson: string): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return scopedFormattingDocument(this.doc).applyCharFormatInHf(
+      sec, isHeader, applyTo, hfParaIdx, startOffset, endOffset, propsJson,
+    );
+  }
+
+  setCharShapeIdInHf(sec: number, isHeader: boolean, applyTo: number, hfParaIdx: number, startOffset: number, endOffset: number, charShapeId: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return scopedFormattingDocument(this.doc).setCharShapeIdInHf(
+      sec, isHeader, applyTo, hfParaIdx, startOffset, endOffset, charShapeId,
+    );
+  }
+
+  setParaShapeIdInHf(sec: number, isHeader: boolean, applyTo: number, hfParaIdx: number, paraShapeId: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return scopedFormattingDocument(this.doc).setParaShapeIdInHf(
+      sec, isHeader, applyTo, hfParaIdx, paraShapeId,
+    );
   }
 
   /**

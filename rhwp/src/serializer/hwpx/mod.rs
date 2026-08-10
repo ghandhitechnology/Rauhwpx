@@ -83,7 +83,7 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
         for mp in &sec.section_def.master_pages {
             let id = format!("masterpage{}", mp_global);
             let href = format!("Contents/masterpage{}.xml", mp_global);
-            let xml = master_page::render_master_page_xml(mp, &id, &mut ctx);
+            let xml = master_page::render_master_page_xml(mp, &id, &mut ctx)?;
             z.write_deflated(&href, xml.as_bytes())?;
             master_items.push((id, href));
             mp_global += 1;
@@ -143,6 +143,64 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
         zip_bin_entries.insert(entry.href.clone());
     }
 
+    // HWPX-native OOXML charts are package parts, not BinData.  The parser's
+    // 60000+N ID exists only so the renderer can locate chart XML in the IR.
+    let mut chart_entries = HashSet::new();
+    for chart in doc
+        .bin_data_content
+        .iter()
+        .filter(|entry| entry.extension == "ooxml_chart" && entry.id > 60000)
+    {
+        let href = format!("Chart/chart{}.xml", chart.id - 60000);
+        if !chart_entries.insert(href.clone()) {
+            return Err(SerializeError::XmlError(format!(
+                "duplicate HWPX chart part: {href}"
+            )));
+        }
+        z.write_deflated(&href, &chart.data.load())?;
+    }
+
+    // Preserve safe, unmodeled package entries (Scripts/* and vendor extension
+    // parts among them).  Regenerated/modelled entries are excluded to avoid
+    // duplicate ZIP names and stale core XML.
+    let mut generated_entries: HashSet<String> = [
+        "mimetype",
+        "version.xml",
+        "settings.xml",
+        "Preview/PrvText.txt",
+        "Preview/PrvImage.png",
+        "Contents/header.xml",
+        "Contents/content.hpf",
+        "META-INF/container.rdf",
+        "META-INF/container.xml",
+        "META-INF/manifest.xml",
+        HWP5_ORIGIN_HWPX_MARKER_PATH,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    generated_entries.extend(section_hrefs.iter().cloned());
+    generated_entries.extend(master_items.iter().map(|(_, href)| href.clone()));
+    generated_entries.extend(
+        bin_entries
+            .iter()
+            .filter(|entry| entry.is_embedded)
+            .map(|entry| entry.href.clone()),
+    );
+    generated_entries.extend(chart_entries);
+
+    let mut passthrough_hrefs = Vec::new();
+    for (path, data) in &doc.hwpx_aux_entries {
+        if generated_entries.contains(path) || !is_safe_passthrough_path(path) {
+            continue;
+        }
+        if passthrough_hrefs.iter().any(|written| written == path) {
+            continue;
+        }
+        z.write_deflated(path, data)?;
+        passthrough_hrefs.push(path.clone());
+    }
+
     // 9. Contents/content.hpf — 항상 동적 경로 + BinData 매니페스트 엔트리
     let content_bin_entries: Vec<ContentBinDataEntry> = bin_entries
         .iter()
@@ -157,6 +215,7 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
         &section_hrefs,
         &content_bin_entries,
         &master_items,
+        &passthrough_hrefs,
         doc.hwpx_aux_entry("Contents/content.hpf"),
     )?;
     z.write_deflated("Contents/content.hpf", &content_hpf)?;
@@ -184,6 +243,16 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
     assert_bin_data_3way(&bin_entries, &zip_bin_entries)?;
 
     z.finish()
+}
+
+fn is_safe_passthrough_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.ends_with('/')
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
 fn write_container_rdf(section_hrefs: &[String]) -> String {
@@ -301,6 +370,188 @@ mod tests {
         let mut got = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut got).expect("read");
         assert_eq!(got, static_assets::VERSION_XML.as_bytes());
+    }
+
+    fn zip_entry(bytes: &[u8], path: &str) -> Vec<u8> {
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("open HWPX archive");
+        let mut entry = archive
+            .by_name(path)
+            .unwrap_or_else(|_| panic!("missing ZIP entry {path}"));
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).expect("read ZIP entry");
+        data
+    }
+
+    #[test]
+    fn native_chart_and_scripts_survive_save_as_package_parts() {
+        let fixtures = [
+            "samples/chart/원형/2차원원형.hwpx",
+            "samples/chart/라인/꺽은선형.hwpx",
+        ];
+        for relative in fixtures {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            let original = std::fs::read(&path).expect("read chart fixture");
+            let original_chart = zip_entry(&original, "Chart/chart1.xml");
+            let original_header_script = zip_entry(&original, "Scripts/headerScripts.js");
+            let original_source_script = zip_entry(&original, "Scripts/sourceScripts.js");
+
+            let doc = parse_hwpx(&original).expect("parse chart fixture");
+            let saved = serialize_hwpx(&doc).expect("save chart fixture");
+            let package_report = package_check::check_package(&saved, &doc);
+            assert!(
+                package_report.is_ok(),
+                "{relative}: package integrity check failed: {}",
+                package_report.summary()
+            );
+
+            assert_eq!(
+                zip_entry(&saved, "Chart/chart1.xml"),
+                original_chart,
+                "{relative}: editable chart XML must be preserved verbatim"
+            );
+            assert_eq!(
+                zip_entry(&saved, "Scripts/headerScripts.js"),
+                original_header_script,
+                "{relative}: header script must survive"
+            );
+            assert_eq!(
+                zip_entry(&saved, "Scripts/sourceScripts.js"),
+                original_source_script,
+                "{relative}: source script must survive"
+            );
+
+            let section = String::from_utf8(zip_entry(&saved, "Contents/section0.xml"))
+                .expect("section UTF-8");
+            assert!(
+                section.contains(r#"<hp:chart"#)
+                    && section.contains(r#"chartIDRef="Chart/chart1.xml""#),
+                "{relative}: section must retain native chart semantics"
+            );
+            assert!(
+                !section.contains("image60001")
+                    && zip::ZipArchive::new(std::io::Cursor::new(&saved))
+                        .expect("saved ZIP")
+                        .by_name("BinData/image60001.ooxml_chart")
+                        .is_err(),
+                "{relative}: renderer bridge must not leak as synthetic BinData/OLE"
+            );
+
+            let content = String::from_utf8(zip_entry(&saved, "Contents/content.hpf"))
+                .expect("content.hpf UTF-8");
+            assert!(
+                content.contains(r#"href="Scripts/headerScripts.js""#)
+                    && content.contains(r#"href="Scripts/sourceScripts.js""#)
+                    && content.contains(r#"idref="headersc""#)
+                    && content.contains(r#"idref="sourcesc""#),
+                "{relative}: script manifest and spine bindings must survive"
+            );
+            parse_hwpx(&saved).expect("reparse chart round-trip");
+        }
+    }
+
+    fn missing_picture() -> crate::model::image::Picture {
+        crate::model::image::Picture {
+            image_attr: crate::model::image::ImageAttr {
+                bin_data_id: 77,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn document_with_control(control: crate::model::control::Control) -> Document {
+        let mut paragraph = crate::model::paragraph::Paragraph {
+            char_count: 9,
+            ..Default::default()
+        };
+        paragraph.controls.push(control);
+        let mut section = crate::model::document::Section::default();
+        section.paragraphs.push(paragraph);
+        let mut doc = Document::default();
+        doc.sections.push(section);
+        doc
+    }
+
+    #[test]
+    fn object_serialization_failures_abort_save_instead_of_omitting_controls() {
+        use crate::model::control::{Control, Field, FieldType};
+        use crate::model::shape::ShapeObject;
+        use crate::model::table::{Cell, Table};
+
+        let direct = document_with_control(Control::Picture(Box::new(missing_picture())));
+        assert!(
+            serialize_hwpx(&direct).is_err(),
+            "picture error must escape"
+        );
+
+        let nested_paragraph = document_with_control(Control::Picture(Box::new(missing_picture())))
+            .sections
+            .remove(0)
+            .paragraphs
+            .remove(0);
+        let table = Table {
+            row_count: 1,
+            col_count: 1,
+            cells: vec![Cell {
+                col_span: 1,
+                row_span: 1,
+                paragraphs: vec![nested_paragraph.clone()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(
+            serialize_hwpx(&document_with_control(Control::Table(Box::new(table)))).is_err(),
+            "nested table object error must escape"
+        );
+
+        assert!(
+            serialize_hwpx(&document_with_control(Control::Shape(Box::new(
+                ShapeObject::Picture(Box::new(missing_picture()))
+            ))))
+            .is_err(),
+            "shape writer error must escape"
+        );
+
+        let field = Field {
+            field_type: FieldType::Memo,
+            memo_paragraphs: vec![nested_paragraph],
+            ..Default::default()
+        };
+        assert!(
+            serialize_hwpx(&document_with_control(Control::Field(field))).is_err(),
+            "nested field object error must escape"
+        );
+    }
+
+    #[test]
+    fn malformed_section_fails_parse_instead_of_becoming_empty_default() {
+        let mut doc = Document::default();
+        doc.sections
+            .push(crate::model::document::Section::default());
+        let valid = serialize_hwpx(&doc).expect("serialize valid package");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(valid)).expect("open ZIP");
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).expect("entry");
+            let name = entry.name().to_string();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).expect("read entry");
+            if name == "Contents/section0.xml" {
+                data = b"<hs:sec><hp:p></hs:sec>".to_vec();
+            }
+            writer.start_file(name, options).expect("start entry");
+            std::io::Write::write_all(&mut writer, &data).expect("write entry");
+        }
+        let malformed = writer.finish().expect("finish ZIP").into_inner();
+        let error = parse_hwpx(&malformed).expect_err("malformed section must reject package");
+        assert!(
+            error.to_string().contains("Contents/section0.xml"),
+            "error must identify the lossy section: {error}"
+        );
     }
 
     #[test]
@@ -782,6 +1033,49 @@ mod tests {
         assert_eq!(r.sz_ratio, 80, "szRatio 보존");
         assert_eq!(r.option, 3, "option 보존");
         assert_eq!(r.style_id_ref, 5, "styleIDRef 보존");
+    }
+
+    #[test]
+    fn legacy_hyperlink_exports_as_complete_hwpx_field() {
+        use crate::model::control::{Control, FieldType, Hyperlink};
+
+        let mut doc = Document::default();
+        let mut section = crate::model::document::Section::default();
+        let mut para = crate::model::paragraph::Paragraph::default();
+        para.text = "\u{fffc}".to_string();
+        para.char_offsets = vec![0];
+        para.char_count = 2;
+        para.controls.push(Control::Hyperlink(Hyperlink {
+            url: "https://example.com/legacy".to_string(),
+            text: "legacy anchor".to_string(),
+        }));
+        section.paragraphs.push(para);
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize legacy hyperlink");
+        let reparsed = crate::parser::hwpx::parse_hwpx(&bytes).expect("reparse hyperlink");
+        let para = &reparsed.sections[0].paragraphs[0];
+        assert!(para.text.contains("legacy anchor"));
+        let field = para
+            .controls
+            .iter()
+            .find_map(|control| match control {
+                Control::Field(field) if field.field_type == FieldType::Hyperlink => Some(field),
+                _ => None,
+            })
+            .expect("legacy hyperlink must become a HWPX hyperlink field");
+        assert_eq!(field.command, "https://example.com/legacy");
+        assert!(
+            para.field_ranges.iter().any(|range| {
+                para.text
+                    .chars()
+                    .skip(range.start_char_idx)
+                    .take(range.end_char_idx.saturating_sub(range.start_char_idx))
+                    .collect::<String>()
+                    == "legacy anchor"
+            }),
+            "field range must cover the preserved display text"
+        );
     }
 
     #[test]

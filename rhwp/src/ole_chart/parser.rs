@@ -27,6 +27,8 @@ pub enum OleChartType {
     Bar,
     Line,
     Pie,
+    Area,
+    Scatter,
     #[default]
     Unknown,
 }
@@ -37,6 +39,7 @@ pub enum OleChartType {
 pub struct OleChartSeries {
     pub name: Option<String>,
     pub values: Vec<f64>,
+    pub color: Option<u32>,
 }
 
 /// OLE `Contents` 스트림 진단 정보.
@@ -168,6 +171,7 @@ fn parse_legacy_hwp_chart_contents(
         series.push(OleChartSeries {
             name: Some(name),
             values: series_values,
+            color: None,
         });
     }
 

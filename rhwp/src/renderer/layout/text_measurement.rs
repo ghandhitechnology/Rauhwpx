@@ -4,6 +4,7 @@ use super::super::font_metrics_data;
 use super::super::style_resolver::ResolvedStyleSet;
 use super::super::{hwpunit_to_px, TabLeaderInfo, TabStop, TextStyle};
 use crate::model::style::UnderlineType;
+use unicode_segmentation::UnicodeSegmentation;
 
 // ── TextMeasurer trait ──────────────────────────────────────────────
 
@@ -25,25 +26,15 @@ pub trait TextMeasurer {
 ///
 /// 한글 자모 조합(초+중+종)을 1개 클러스터로 묶는다.
 /// cluster_len[i] > 0: 클러스터 시작 (길이), 0: 클러스터 내부 (이전 문자와 동일 위치)
-fn build_cluster_len(chars: &[char]) -> Vec<u8> {
+fn build_cluster_len(chars: &[char]) -> Vec<usize> {
     let char_count = chars.len();
-    let mut cluster_len = vec![0u8; char_count];
+    let mut cluster_len = vec![0usize; char_count];
+    let text: String = chars.iter().collect();
     let mut ci = 0;
-    while ci < char_count {
-        if is_hangul_choseong(chars[ci]) {
-            let start = ci;
-            ci += 1;
-            if ci < char_count && is_hangul_jungseong(chars[ci]) {
-                ci += 1;
-                if ci < char_count && is_hangul_jongseong(chars[ci]) {
-                    ci += 1;
-                }
-            }
-            cluster_len[start] = (ci - start) as u8;
-        } else {
-            cluster_len[ci] = 1;
-            ci += 1;
-        }
+    for grapheme in text.graphemes(true) {
+        let len = grapheme.chars().count();
+        cluster_len[ci] = len;
+        ci += len;
     }
     cluster_len
 }
@@ -133,7 +124,7 @@ pub(crate) fn find_next_tab_stop(
 /// 지정 인덱스부터 다음 탭(또는 문자열 끝)까지의 세그먼트 폭을 측정한다.
 fn measure_segment_from(
     chars: &[char],
-    cluster_len: &[u8],
+    cluster_len: &[usize],
     start: usize,
     char_width: &dyn Fn(usize) -> f64,
 ) -> f64 {
@@ -302,14 +293,18 @@ pub fn extract_tab_leaders_with_extended(
 /// font_metrics_data의 582개 폰트 메트릭을 사용하여 문자 폭을 측정한다.
 /// 메트릭이 없는 폰트는 CJK=font_size, Latin=font_size×0.5 휴리스틱을 사용한다.
 /// 모든 플랫폼에서 동일하게 동작한다 (WASM 포함).
+/// 레이아웃은 설치 폰트나 현재 작업 디렉터리에 의존하지 않도록 이 메트릭만 사용한다.
+/// 현재 DB에는 pair-kerning 값이 없으므로 `TextStyle::kerning`은 직렬화/페인팅에는
+/// 보존되지만 폭 계산에는 적용하지 않는다. 공유 shaping 자산이 생기기 전까지 native와
+/// WASM의 동일한 줄바꿈을 우선한다.
 /// [#2132] 공용 글자-워크 — Embedded/Wasm measurer 의 compute_char_positions 중복 소거.
 /// 폭 산출원(char_px_raw)과 인라인 탭 divergent 경로(inline_tab_x)만 measurer 별 훅.
 /// 나머지(특수문자, dash leader, 자간 클램프, 공백, 커스텀/기본 탭)는 1벌.
 fn compute_char_positions_walk(
     text: &str,
     style: &TextStyle,
-    char_px_raw: &dyn Fn(usize, char, &[char], &[u8]) -> f64,
-    inline_tab_x: &dyn Fn(usize, f64, &[u16; 7], &[char], &[u8], &dyn Fn(usize) -> f64) -> f64,
+    char_px_raw: &dyn Fn(usize, char, &[char], &[usize]) -> f64,
+    inline_tab_x: &dyn Fn(usize, f64, &[u16; 7], &[char], &[usize], &dyn Fn(usize) -> f64) -> f64,
 ) -> Vec<f64> {
     let (font_size, ratio, tab_w) = style_params(style);
     let chars: Vec<char> = text.chars().collect();
@@ -363,9 +358,16 @@ fn compute_char_positions_walk(
     };
 
     let mut tab_char_idx = 0usize; // inline_tabs 인덱스
+    let mut pending_cluster: Option<(usize, f64)> = None;
     for i in 0..char_count {
         let c = chars[i];
         if cluster_len[i] == 0 {
+            if let Some((end, advance)) = pending_cluster {
+                if i == end {
+                    x += advance;
+                    pending_cluster = None;
+                }
+            }
             positions.push(x);
             continue;
         }
@@ -441,7 +443,15 @@ fn compute_char_positions_walk(
             positions.push(x);
             continue;
         }
-        x += char_width(i);
+        let advance = char_width(i);
+        if cluster_len[i] > 1 {
+            // A caret must not split an extended grapheme. Keep every internal
+            // scalar boundary at the cluster start, then apply the advance at
+            // the final scalar boundary. This is shared by native and WASM.
+            pending_cluster = Some((i + cluster_len[i] - 1, advance));
+        } else {
+            x += advance;
+        }
         positions.push(x);
     }
 
@@ -680,7 +690,7 @@ impl TextMeasurer for EmbeddedTextMeasurer {
     fn compute_char_positions(&self, text: &str, style: &TextStyle) -> Vec<f64> {
         let (font_size, _ratio, _tab_w) = style_params(style);
         // [#2132] 폭 산출원 훅 — embedded 메트릭 lookup + 폴백 사다리 (Task #257 포함).
-        let char_px_raw = |_i: usize, c: char, _chars: &[char], cluster_len: &[u8]| -> f64 {
+        let char_px_raw = |_i: usize, c: char, _chars: &[char], cluster_len: &[usize]| -> f64 {
             let i = _i;
             if let Some(w) = (c == '\u{318D}')
                 .then(|| area_dot_fallback_width(&style.font_family, font_size))
@@ -710,7 +720,7 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                             x_in: f64,
                             ext: &[u16; 7],
                             chars: &[char],
-                            cluster_len: &[u8],
+                            cluster_len: &[usize],
                             char_width: &dyn Fn(usize) -> f64|
          -> f64 {
             let mut x = x_in;
@@ -1261,7 +1271,7 @@ impl TextMeasurer for WasmTextMeasurer {
             font_size,
         );
         // [#2132] 폭 산출원 훅 — wasm canvas 측정.
-        let char_px_raw = |i: usize, c: char, _chars: &[char], cluster_len: &[u8]| -> f64 {
+        let char_px_raw = |i: usize, c: char, _chars: &[char], cluster_len: &[usize]| -> f64 {
             if cluster_len[i] > 1 {
                 hangul_hwp as f64 / 75.0
             } else {
@@ -1281,7 +1291,7 @@ impl TextMeasurer for WasmTextMeasurer {
                             x_in: f64,
                             ext: &[u16; 7],
                             chars: &[char],
-                            cluster_len: &[u8],
+                            cluster_len: &[usize],
                             char_width: &dyn Fn(usize) -> f64|
          -> f64 {
             let mut x = x_in;
@@ -1431,6 +1441,7 @@ pub(crate) fn resolved_to_text_style(
             strikethrough: cs.strikethrough,
             letter_spacing: cs.letter_spacing_for_lang(lang_index),
             ratio: cs.ratio_for_lang(lang_index),
+            kerning: cs.kerning,
             default_tab_width: 0.0,
             tab_stops: Vec::new(),
             auto_tab_right: false,
@@ -1629,7 +1640,13 @@ fn measure_char_width_embedded(
     if let Some(w) = kopub_char_width(primary_name, c, font_size) {
         return Some(w);
     }
-    let mm = font_metrics_data::find_metric(primary_name, bold, italic)?;
+    let mm = match font_metrics_data::find_metric(primary_name, bold, italic) {
+        Some(metric) if c == ' ' || metric.metric.get_width(c).is_some() => metric,
+        _ => {
+            let (_, fallback_chain) = font_family.split_once(',')?;
+            return measure_char_width_embedded(fallback_chain, bold, italic, c, font_size);
+        }
+    };
     // HWP 반각 처리: space 및 한컴이 반각으로 처리하는 구두점/기호
     let w = if c == ' ' {
         mm.metric.em_size / 2
@@ -1701,7 +1718,6 @@ pub(crate) fn estimate_text_width(text: &str, style: &TextStyle) -> f64 {
 /// 한컴은 HWPUNIT 정수로 폭을 누적하므로, round 없이 px를 합산한 뒤
 /// 줄바꿈 비교 시점에서 available_width와 비교하는 것이 더 정확하다.
 pub(crate) fn estimate_text_width_unrounded(text: &str, style: &TextStyle) -> f64 {
-    let measurer = EmbeddedTextMeasurer;
     let (font_size, ratio, tab_w) = style_params(style);
     let chars: Vec<char> = text.chars().collect();
     let cluster_len = build_cluster_len(&chars);
@@ -2588,6 +2604,169 @@ mod tests {
         assert_eq!(cl, vec![1, 2, 0, 1]);
     }
 
+    #[test]
+    fn unicode_grapheme_positions_keep_combining_sequence_atomic() {
+        let style = TextStyle {
+            font_family: "Noto Sans KR".to_string(),
+            font_size: 20.0,
+            ..Default::default()
+        };
+        let positions = EmbeddedTextMeasurer.compute_char_positions("e\u{301}x", &style);
+        assert_eq!(positions.len(), 4);
+        assert_eq!(positions[0], positions[1]);
+        assert!(positions[2] > positions[1]);
+        assert!(positions[3] > positions[2]);
+        assert_eq!(
+            estimate_text_width_unrounded("e\u{301}x", &style),
+            *positions.last().unwrap()
+        );
+    }
+
+    #[test]
+    fn embedded_metrics_make_kerning_layout_neutral_on_all_targets() {
+        let base = TextStyle {
+            font_family: "Noto Sans KR".to_string(),
+            font_size: 48.0,
+            kerning: false,
+            ..Default::default()
+        };
+        let kerned = TextStyle {
+            kerning: true,
+            ..base.clone()
+        };
+        let plain_width = estimate_text_width_unrounded("AV", &base);
+        let kerned_width = estimate_text_width_unrounded("AV", &kerned);
+        let kerned_positions = EmbeddedTextMeasurer.compute_char_positions("AV", &kerned);
+
+        assert_eq!(kerned_width, plain_width);
+        assert!((kerned_width - kerned_positions[2]).abs() < 1e-9);
+        assert_eq!(
+            kerned_width.round(),
+            EmbeddedTextMeasurer.estimate_text_width("AV", &kerned)
+        );
+    }
+
+    #[test]
+    fn calibrated_width_is_the_layout_authority() {
+        let style = TextStyle {
+            font_family: "Noto Sans KR".to_string(),
+            font_size: 40.0 / 3.0,
+            ..Default::default()
+        };
+        let expected: f64 = "Noto"
+            .chars()
+            .map(|c| {
+                measure_char_width_embedded(
+                    &style.font_family,
+                    style.bold,
+                    style.italic,
+                    c,
+                    style.font_size,
+                )
+                .expect("Noto Sans KR ASCII must be calibrated")
+            })
+            .sum();
+
+        assert_eq!(estimate_text_width_unrounded("Noto", &style), expected);
+        assert_eq!(
+            *EmbeddedTextMeasurer
+                .compute_char_positions("Noto", &style)
+                .last()
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn ordinary_width_is_cwd_independent() {
+        const PROBE_ENV: &str = "RHWP_TEXT_METRIC_CWD_PROBE";
+        const PROBE_PREFIX: &str = "RHWP_TEXT_METRIC_WIDTH=";
+        if std::env::var_os(PROBE_ENV).is_some() {
+            let style = TextStyle {
+                font_family: "Noto Sans KR".to_string(),
+                font_size: 40.0 / 3.0,
+                ..Default::default()
+            };
+            println!(
+                "{PROBE_PREFIX}{:.17}",
+                estimate_text_width_unrounded("Noto AV 가나다", &style)
+            );
+            return;
+        }
+
+        let test_exe = std::env::current_exe().expect("current test executable");
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_dir = crate_dir.parent().expect("repository root");
+        let measure_from = |cwd: &std::path::Path| {
+            let output = std::process::Command::new(&test_exe)
+                .args([
+                    "--exact",
+                    "renderer::layout::text_measurement::tests::ordinary_width_is_cwd_independent",
+                    "--nocapture",
+                ])
+                .current_dir(cwd)
+                .env(PROBE_ENV, "1")
+                .output()
+                .unwrap_or_else(|error| panic!("run metric probe from {}: {error}", cwd.display()));
+            assert!(
+                output.status.success(),
+                "metric probe failed from {}: {}",
+                cwd.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| line.strip_prefix(PROBE_PREFIX))
+                .unwrap_or_else(|| panic!("metric probe output missing from {}", cwd.display()))
+                .parse::<f64>()
+                .expect("metric probe width")
+        };
+
+        assert_eq!(measure_from(repo_dir), measure_from(crate_dir));
+    }
+
+    #[test]
+    fn calibrated_metrics_respect_sub_twelve_pixel_font_sizes() {
+        let small = TextStyle {
+            font_family: "Noto Sans KR".to_string(),
+            font_size: 8.0,
+            ..Default::default()
+        };
+        let large = TextStyle {
+            font_size: 16.0,
+            ..small.clone()
+        };
+        let small_width = estimate_text_width_unrounded("가", &small);
+        let large_width = estimate_text_width_unrounded("가", &large);
+
+        assert!(small_width < 12.0, "8px text was clamped: {small_width}");
+        assert!(
+            (small_width * 2.0 - large_width).abs() <= 1.0 / 75.0,
+            "embedded advance must scale with the requested size: small={small_width}, large={large_width}"
+        );
+    }
+
+    #[test]
+    fn extended_grapheme_positions_are_atomic_without_native_fonts() {
+        let style = TextStyle {
+            font_family: UNREGISTERED_FONT.to_string(),
+            font_size: 20.0,
+            ..Default::default()
+        };
+        let text = "\u{1F469}\u{200D}\u{1F4BB}x";
+        let positions = EmbeddedTextMeasurer.compute_char_positions(text, &style);
+
+        assert_eq!(positions.len(), text.chars().count() + 1);
+        assert_eq!(&positions[..3], &[0.0, 0.0, 0.0]);
+        assert!(positions[3] > positions[2]);
+        assert!(positions[4] > positions[3]);
+        assert_eq!(
+            *positions.last().unwrap(),
+            estimate_text_width_unrounded(text, &style)
+        );
+    }
+
     // ── narrow glyph advance 회귀 (Task #257) ──
     //
     // `is_narrow_punctuation` 폴백 분기 검증. 메트릭 DB 및 `resolve_metric_alias`
@@ -2671,9 +2850,8 @@ mod tests {
         );
     }
 
-    /// [Task #1735] 방점 U+302E/U+302F 는 렌더 경로에서 좁은 가운데 점(·)으로
-    /// 치환·렌더되므로, 측정 폭도 narrow(≤0.35em)로 분류해 측정-렌더 폭 정합을
-    /// 유지한다(0.5em 기본 폴백 방지).
+    /// [Task #1735] 방점 U+302E/U+302F 는 앞 음절의 combining mark다. 별도 caret이나
+    /// advance를 만들지 않고 음절과 원자적으로 이동해야 한다.
     #[test]
     fn test_narrow_glyph_tone_marks() {
         let m = EmbeddedTextMeasurer;
@@ -2685,13 +2863,12 @@ mod tests {
         };
         for text in &["가\u{302E}나", "가\u{302F}나"] {
             let positions = m.compute_char_positions(text, &style);
-            let advance = positions[2] - positions[1];
-            assert!(
-                advance <= style.font_size * 0.35,
-                "tone mark advance should be ≤ font_size * 0.35 ({:.2}), got {:.2} for {:?}",
-                style.font_size * 0.35,
-                advance,
-                text
+            assert_eq!(positions[0], positions[1], "caret split in {text:?}");
+            assert!(positions[2] > positions[1]);
+            assert_eq!(
+                estimate_text_width_unrounded(text, &style),
+                estimate_text_width_unrounded("가나", &style),
+                "combining tone mark must not add layout width for {text:?}"
             );
         }
     }
