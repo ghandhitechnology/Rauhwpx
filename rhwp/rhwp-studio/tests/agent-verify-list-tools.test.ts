@@ -311,7 +311,25 @@ test('apply_list: 새 번호 정의를 만들고 문단별 paraFormat op 을 건
   }
 });
 
-test('apply_list: 같은 레벨 서식의 기존 정의를 재사용하고 startNumber 는 restart 로 처리', async () => {
+test('apply_list: 레벨 서식과 시작 번호가 모두 같은 기존 정의는 재사용한다', async () => {
+  const { call, calls, numberings } = makeEnv();
+  numberings.push({
+    id: 1,
+    levelFormats: ['^1.', '^2.', '^3)', '^4)', '(^5)', '(^6)', '^7'],
+    numberFormats: [0, 8, 0, 8, 0, 8, 1],
+    startNumber: 1,
+  });
+  const r = (await call('apply_list', {
+    sectionIdx: 0, startParaIdx: 0, endParaIdx: 1, format: '1.',
+  })) as { numberingId: number };
+  assert.equal(r.numberingId, 1); // 재사용 — 새 정의 없음
+  assert.equal(numberings.length, 1);
+  assert.ok(!calls.some((c) => c.m === 'createNumbering'));
+  // pending 밖 문서 변경 금지 — 문단 재시작을 직접 쓰지 않는다
+  assert.ok(!calls.some((c) => c.m === 'setNumberingRestart'));
+});
+
+test('apply_list: 시작 번호가 다르면 재사용하지 않고 startNumber 를 품은 새 정의를 만든다', async () => {
   const { call, calls, numberings } = makeEnv();
   numberings.push({
     id: 1,
@@ -322,11 +340,12 @@ test('apply_list: 같은 레벨 서식의 기존 정의를 재사용하고 start
   const r = (await call('apply_list', {
     sectionIdx: 0, startParaIdx: 0, endParaIdx: 1, format: '1.', startNumber: 3,
   })) as { numberingId: number };
-  assert.equal(r.numberingId, 1); // 재사용 — 새 정의 없음
-  assert.equal(numberings.length, 1);
-  assert.ok(!calls.some((c) => c.m === 'createNumbering'));
-  const restart = calls.find((c) => c.m === 'setNumberingRestart')!;
-  assert.deepEqual(restart.a, [0, 0, 2, 3]); // (section, startParaIdx, 새 번호 시작, 3)
+  assert.equal(r.numberingId, 2); // 시작 번호 불일치 → 신규 정의
+  assert.equal(numberings.length, 2);
+  const created = calls.find((c) => c.m === 'createNumbering')!.a[0] as { startNumber: number };
+  assert.equal(created.startNumber, 3);
+  // setNumberingRestart 는 pending 을 우회하는 문서 변경이라 호출하면 안 된다
+  assert.ok(!calls.some((c) => c.m === 'setNumberingRestart'));
 });
 
 test('apply_list: 패턴은 같지만 번호 유형 코드가 일치하지 않으면 재사용하지 않고 새 정의를 만든다', async () => {
