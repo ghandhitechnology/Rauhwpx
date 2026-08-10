@@ -471,76 +471,38 @@ fn inject_footnote_markers(lines: &mut [ComposedLine], positions: &[(usize, u16)
 /// 문단의 텍스트를 줄별로 분할하고, 각 줄 내에서 CharShapeRef 경계에 따라 분할한다.
 fn compose_lines(para: &Paragraph) -> Vec<ComposedLine> {
     if para.line_segs.is_empty() {
-        // LineSeg가 없으면 텍스트를 ComposedLine 으로 분할
+        // Width is unavailable here. Keep one logical line; body/cell layout
+        // recomposes it using resolved paragraph geometry and run metrics.
         if para.text.is_empty() {
             return Vec::new();
         }
         let default_style_id = para
             .char_shapes
             .first()
-            .map(|cs| cs.char_shape_id)
+            .map(|shape| shape.char_shape_id)
             .unwrap_or(0);
         // [Task #994] HWP5 변환본의 일부 paragraph (sample16 의 󰏅 PUA bullet 들)
-        // 는 PARA_LINE_SEG 누락 → 기존 fallback 이 단일 ComposedLine 생성 →
-        // layout 이 wrap 없이 한 y 좌표에 모든 텍스트 그림 → 시각 겹침.
-        // 임시 휴리스틱: 공백 기준 word wrap, ~45 chars/line (Korean 13pt 표준) 한도.
-        // 정확한 line_height 는 corrected_line_height 가 layout 에서 보정 (max_fs * 1.6).
-        // 향후 reflow_line_segs 정식 호출 시 본 휴리스틱 대체.
-        // [Task #998] HWP3 reference (sample16 pi=443 등) 의 line_segs 측정 결과
-        // 평균 43~46 chars/line. 기존 35 는 conservative — 매 paragraph +1 line
-        // 발생 → 페이지 수 inflate (sample16-hwp5.hwp: 64 reference 대비 +3).
-        // 45 로 조정하여 HWP3 정합 개선 (+1 까지 축소, 잔존 ParaShape 데이터 차이).
-        let chars: Vec<char> = para.text.chars().collect();
-        const CHARS_PER_LINE: usize = 45;
-        let mut lines = Vec::new();
-        let total = chars.len();
-        let mut offset = 0;
-        while offset < total {
-            let max_end = (offset + CHARS_PER_LINE).min(total);
-            // 자연스러운 break 위치 찾기 (공백 후) — Justify 정렬 시 mid-word 분할
-            // 로 chars 사이 spacing 부풀림 회피.
-            let mut end = max_end;
-            if end < total {
-                // max_end 위치에서 뒤로 가며 공백 검색 (offset+10 까지 허용)
-                let min_acceptable = offset + (CHARS_PER_LINE / 2);
-                for i in (min_acceptable..max_end).rev() {
-                    if chars[i] == ' ' || chars[i] == '\t' {
-                        end = i + 1; // 공백 포함하여 line 끝
-                        break;
-                    }
-                }
-            }
-            let line_text: String = chars[offset..end].iter().collect();
-            let is_last_line = end >= total;
-            // [#2279] 주의: 이 폴백은 문단의 CharShapeRef 를 무시하고 단일
-            // default_style run 을 만든다(혼합 크기 문단이 전 줄 최대 크기로
-            // 측정·렌더). 본문 경로는 recompose_for_body_width 가
-            // restyle_fallback_runs_by_char_shapes 로 정합한다 — 셀 경로는 기존
-            // 폭 보정망(#2070 사다리)이 이 단일 스타일 위에서 교정돼 있어
-            // 전면 교체 시 80168 pi=1056/1245 급 회귀(#2279 실측).
-            lines.push(ComposedLine {
-                runs: split_runs_by_lang(vec![ComposedTextRun {
-                    text: line_text,
-                    char_style_id: default_style_id,
-                    lang_index: 0,
-                    char_overlap: None,
-                    footnote_marker: None,
-                    display_text: None,
-                }]),
-                line_height: 400,
-                baseline_distance: 320,
-                segment_width: 0,
-                column_start: 0,
-                line_spacing: 0,
-                // [Task #994] non-last synth wrap line 은 has_line_break=true 로 marking —
-                // Justify 정렬 비활성화 (line 의 chars 가 column width 만큼 spread 되지 않음).
-                // 마지막 line 은 false (기존 paragraph 동작 유지).
-                has_line_break: !is_last_line,
-                char_start: offset,
-            });
-            offset = end;
-        }
-        return lines;
+        return vec![ComposedLine {
+            // Keep the historical cell fallback style contract. The body
+            // wrapper applies `restyle_fallback_runs_by_char_shapes` before
+            // geometry reflow; cells deliberately retain the first style due
+            // to calibrated legacy cell-width behavior (#2279/#2632).
+            runs: split_runs_by_lang(vec![ComposedTextRun {
+                text: para.text.clone(),
+                char_style_id: default_style_id,
+                lang_index: 0,
+                char_overlap: None,
+                footnote_marker: None,
+                display_text: None,
+            }]),
+            line_height: 400,
+            baseline_distance: 320,
+            segment_width: 0,
+            column_start: 0,
+            line_spacing: 0,
+            has_line_break: para.text.ends_with('\n'),
+            char_start: 0,
+        }];
     }
 
     let mut lines = Vec::new();
@@ -710,27 +672,22 @@ fn compose_lines(para: &Paragraph) -> Vec<ComposedLine> {
 }
 
 fn effective_line_seg_count(para: &Paragraph) -> usize {
-    if is_sample16_2022_bcp_orphan_tail_lineseg(para) {
-        para.line_segs.len().saturating_sub(1)
-    } else {
-        para.line_segs.len()
+    let text_len = para.text.chars().count();
+    let mut count = para.line_segs.len();
+    while count > 1 && !para.text.ends_with('\n') {
+        let start = utf16_range_to_text_range(
+            &para.char_offsets,
+            para.line_segs[count - 1].text_start,
+            u32::MAX,
+            text_len,
+        )
+        .0;
+        if start < text_len {
+            break;
+        }
+        count -= 1;
     }
-}
-
-fn is_sample16_2022_bcp_orphan_tail_lineseg(para: &Paragraph) -> bool {
-    if para.line_segs.len() != 2 {
-        return false;
-    }
-    if !para.text.contains("BCP:Business Continuity Planning) 수립") {
-        return false;
-    }
-
-    let first = &para.line_segs[0];
-    let last = &para.line_segs[1];
-    if last.text_start < para.char_count.saturating_sub(2) {
-        return false;
-    }
-    last.vertical_pos == first.vertical_pos + first.line_height + first.line_spacing
+    count
 }
 
 /// UTF-16 위치 범위를 텍스트 문자 인덱스 범위로 변환한다.
@@ -1562,6 +1519,54 @@ pub fn stored_lines_overflow(
     fired
 }
 
+fn stored_line_segs_structurally_coherent(para: &Paragraph) -> bool {
+    if para.line_segs.is_empty() {
+        return false;
+    }
+    let text_len = para.text.chars().count();
+    let visible_end = para
+        .char_offsets
+        .last()
+        .copied()
+        .zip(para.text.chars().last())
+        .map(|(offset, ch)| offset.saturating_add(ch.len_utf16() as u32))
+        .unwrap_or(0);
+    let stream_end = visible_end.max(para.char_count.saturating_sub(1));
+
+    let chars: Vec<char> = para.text.chars().collect();
+    let is_stream_boundary = |position: u32| {
+        para.char_offsets
+            .iter()
+            .copied()
+            .zip(chars.iter().copied())
+            .all(|(offset, ch)| {
+                let char_end = offset.saturating_add(ch.len_utf16() as u32);
+                position <= offset || position >= char_end
+            })
+    };
+
+    for (index, seg) in para.line_segs.iter().enumerate() {
+        if seg.line_height <= 0
+            || seg.text_height < 0
+            || seg.baseline_distance < 0
+            || seg.segment_width < 0
+            || seg.text_start > stream_end
+            || !is_stream_boundary(seg.text_start)
+        {
+            return false;
+        }
+        let visible_start =
+            utf16_range_to_text_range(&para.char_offsets, seg.text_start, u32::MAX, text_len).0;
+        if index == 0 && visible_start != 0 {
+            return false;
+        }
+        if index > 0 && seg.text_start <= para.line_segs[index - 1].text_start {
+            return false;
+        }
+    }
+    true
+}
+
 /// [#2279 stale-과소] 마스킹 문단의 저장 분할이 fresh 재래핑보다 **많은 줄**
 /// 인 경우 — 마스킹 치환('*')으로 원문보다 좁아졌는데 저장 분할은 원문 기준
 /// 줄수를 남긴 부실 저장. 한글은 fresh 재계산으로 줄수를 줄인다(36341511
@@ -1725,7 +1730,16 @@ pub fn stored_lines_stale_for_body(
     inner_width_px: f64,
     styles: &ResolvedStyleSet,
 ) -> bool {
-    masked_stored_lines_stale(composed, para, inner_width_px, styles)
+    if !stored_line_segs_structurally_coherent(para) {
+        return true;
+    }
+    let physically_overflowing = inner_width_px > 0.0
+        && composed
+            .lines
+            .iter()
+            .any(|line| estimate_composed_line_width(line, styles) > inner_width_px * 1.5);
+    physically_overflowing
+        || masked_stored_lines_stale(composed, para, inner_width_px, styles)
         || compact_tac_marker_stored_lines_stale(composed, para, inner_width_px, styles)
 }
 
@@ -2742,5 +2756,160 @@ pub(crate) use line_breaking::{
 mod lineseg_compare_tests;
 #[cfg(test)]
 mod re_sample_gen;
+#[cfg(test)]
+mod p1_text_reflow_tests {
+    use super::*;
+    use crate::renderer::style_resolver::{ResolvedCharStyle, ResolvedParaStyle, ResolvedStyleSet};
+
+    fn styles() -> ResolvedStyleSet {
+        ResolvedStyleSet {
+            char_styles: vec![ResolvedCharStyle {
+                font_family: "Noto Sans KR".to_string(),
+                font_families: vec!["Noto Sans KR".to_string(); 7],
+                font_size: 16.0,
+                ratio: 1.0,
+                kerning: true,
+                ..Default::default()
+            }],
+            para_styles: vec![ResolvedParaStyle {
+                indent: 18.0,
+                default_tab_width: 48.0,
+                korean_break_unit: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn paragraph(text: &str) -> Paragraph {
+        let mut offset = 0u32;
+        let char_offsets = text
+            .chars()
+            .map(|ch| {
+                let current = offset;
+                offset += ch.len_utf16() as u32;
+                current
+            })
+            .collect();
+        Paragraph {
+            text: text.to_string(),
+            char_offsets,
+            char_count: offset + 1,
+            char_shapes: vec![CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 0,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn missing_line_seg_reflows_mixed_scripts_by_geometry_without_splitting_graphemes() {
+        let text = "AV cafe\u{301} 한글 漢字 カナ\t1234 ".repeat(12);
+        let mut para = paragraph(&text);
+        let logical = compose_paragraph(&para);
+        assert_eq!(
+            logical.lines.len(),
+            1,
+            "composer must not invent 45-char lines"
+        );
+
+        reflow_line_segs(&mut para, 180.0, &styles(), 96.0);
+
+        assert!(para.line_segs.len() > 3);
+        let chars: Vec<char> = para.text.chars().collect();
+        for seg in para.line_segs.iter().skip(1) {
+            let char_index = para
+                .char_offsets
+                .iter()
+                .position(|offset| *offset == seg.text_start)
+                .expect("line starts must be visible character boundaries");
+            assert_ne!(
+                chars[char_index], '\u{301}',
+                "combining mark split from base"
+            );
+        }
+        assert!(para
+            .line_segs
+            .iter()
+            .all(|seg| seg.segment_width == px_to_hwpunit(180.0, 96.0)));
+    }
+
+    #[test]
+    fn short_mixed_script_run_stays_on_one_line() {
+        let mut para = paragraph("A한漢カe\u{301}");
+        reflow_line_segs(&mut para, 400.0, &styles(), 96.0);
+        assert_eq!(para.line_segs.len(), 1);
+    }
+
+    #[test]
+    fn coherent_saved_line_is_kept_but_invalid_boundary_is_stale() {
+        let styles = styles();
+        let mut para = paragraph("저장된 줄 분할");
+        para.line_segs = vec![LineSeg {
+            text_start: 0,
+            line_height: 1200,
+            text_height: 1200,
+            baseline_distance: 1000,
+            segment_width: 30000,
+            ..Default::default()
+        }];
+        let composed = compose_paragraph(&para);
+        assert!(!stored_lines_stale_for_body(
+            &composed, &para, 400.0, &styles
+        ));
+
+        para.line_segs.push(LineSeg {
+            text_start: 9999,
+            line_height: 1200,
+            text_height: 1200,
+            baseline_distance: 1000,
+            segment_width: 30000,
+            ..Default::default()
+        });
+        let composed = compose_paragraph(&para);
+        assert!(stored_lines_stale_for_body(
+            &composed, &para, 400.0, &styles
+        ));
+    }
+
+    #[test]
+    fn saved_line_boundaries_allow_control_gaps_but_reject_surrogate_interior() {
+        let styles = styles();
+        let mut para = paragraph("😀x");
+        // Eight UTF-16 stream units of leading controls before the visible
+        // text are valid; the second character begins after the surrogate.
+        para.char_offsets = vec![8, 10];
+        para.char_count = 11;
+        para.line_segs = vec![
+            LineSeg {
+                text_start: 8,
+                line_height: 1200,
+                text_height: 1200,
+                baseline_distance: 1000,
+                segment_width: 30000,
+                ..Default::default()
+            },
+            LineSeg {
+                text_start: 10,
+                line_height: 1200,
+                text_height: 1200,
+                baseline_distance: 1000,
+                segment_width: 30000,
+                ..Default::default()
+            },
+        ];
+        let composed = compose_paragraph(&para);
+        assert!(!stored_lines_stale_for_body(
+            &composed, &para, 400.0, &styles
+        ));
+
+        para.line_segs[1].text_start = 9;
+        let composed = compose_paragraph(&para);
+        assert!(stored_lines_stale_for_body(
+            &composed, &para, 400.0, &styles
+        ));
+    }
+}
 #[cfg(test)]
 mod tests;
