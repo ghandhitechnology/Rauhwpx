@@ -9,13 +9,13 @@
       "health": "/",
       "https_port": 8443,
       "env": {
-        "RAU_PUBLIC_HOST": "${TS_DNSNAME}",
-        "RAU_PUBLIC_HTTPS_PORT": "${HTTPS_PORT}",
+        "RHWP_PUBLIC_HOST": "${TS_DNSNAME}",
+        "RHWP_PUBLIC_HTTPS_PORT": "${HTTPS_PORT}",
         "VITE_RHWP_AGENT_URL": "wss://${TS_DNSNAME}:8444"
       }
     },
     {
-      "name": "agent",
+      "name": "agent-hub",
       "cmd": "npm start",
       "cwd": "rhwp/rhwp-agent",
       "port": 5175,
@@ -31,8 +31,8 @@
     {
       "type": "require-marker",
       "file": "rhwp/rhwp-studio/vite.config.ts",
-      "marker": "RAU_PUBLIC_HOST",
-      "hint": "Configure Vite allowedHosts and secure HMR for the Tailscale hostname."
+      "marker": "RHWP_PUBLIC_HOST",
+      "hint": "vite.config.ts 에 RHWP_PUBLIC_HOST 블록(allowedHosts + wss HMR dial-back) 추가"
     }
   ]
 }
