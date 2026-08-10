@@ -6,8 +6,9 @@
   align-items: center;
   gap: 0;
   padding: 0 8px;
-  background: var(--color-bg-light);
-  border-bottom: 1px solid var(--ui-border-light);
+  /* 크롬 안에서 한 단 뒤로 물러난 면 — 도구 모음이 그 위에 얹힌다 */
+  background: var(--ui-chrome-menu);
+  border-bottom: 1px solid var(--ui-border);
   flex-shrink: 0;
   height: 28px;
   font-size: var(--font-size-md);
