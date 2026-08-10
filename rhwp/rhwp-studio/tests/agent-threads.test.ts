@@ -6,6 +6,7 @@ import {
   fallbackTitle,
   getThread,
   listThreads,
+  listThreadsByDocument,
   setThreadTitle,
   upsertThread,
 } from '../src/agent/threads.ts';
@@ -68,6 +69,54 @@ test('legacy threads migrate to direct workflow', () => {
     messages: [{ role: 'user', text: '기존 메시지' }],
   }]));
   assert.equal(getThread('legacy')?.workflow, 'direct');
+});
+
+test('threads keep their document key and legacy threads fall back to null', () => {
+  mem.clear();
+  const t = createEmptyThread({
+    agent: 'claude', model: 'sonnet', effort: 'high', docKey: '보고서.hwpx',
+  });
+  t.messages.push({ role: 'user', text: '표 정리해줘' });
+  upsertThread(t);
+  assert.equal(getThread(t.id)?.docKey, '보고서.hwpx');
+
+  storage.setItem('rhwp-agent-threads', JSON.stringify([{
+    id: 'legacy',
+    title: '이전 대화',
+    titleRequested: false,
+    createdAt: 1,
+    updatedAt: 2,
+    agent: 'claude',
+    model: 'sonnet',
+    effort: 'high',
+    messages: [{ role: 'user', text: '기존 메시지' }],
+  }]));
+  assert.equal(getThread('legacy')?.docKey, null);
+});
+
+test('listThreadsByDocument groups by document, groups ordered by recent activity', () => {
+  mem.clear();
+  const mk = (docKey: string | null, text: string, updatedAt: number) => {
+    const t = createEmptyThread({ agent: 'claude', model: 'sonnet', effort: 'high', docKey });
+    t.messages.push({ role: 'user', text });
+    upsertThread(t);
+    // upsertThread 가 updatedAt 을 지금으로 찍으므로 저장본을 직접 되감는다.
+    const stored = JSON.parse(mem.get('rhwp-agent-threads') ?? '[]') as Array<Record<string, unknown>>;
+    stored.find((s) => s.id === t.id)!.updatedAt = updatedAt;
+    mem.set('rhwp-agent-threads', JSON.stringify(stored));
+    return t;
+  };
+  mk('a.hwpx', 'a 첫 채팅', 10);
+  mk('b.hwpx', 'b 채팅', 30);
+  mk('a.hwpx', 'a 최근 채팅', 20);
+  mk(null, '문서 없는 채팅', 5);
+
+  const groups = listThreadsByDocument();
+  assert.deepEqual(groups.map((g) => g.docKey), ['b.hwpx', 'a.hwpx', null]);
+  assert.deepEqual(
+    groups[1]!.threads.map((t) => t.messages[0]!.text),
+    ['a 최근 채팅', 'a 첫 채팅'],
+  );
 });
 
 test('workflow and latest plan persist as history without approval authority', () => {

@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const CANONICAL_DIR = path.join(ROOT, 'assets/fonts');
-const EXPECTED_FONT_COUNT = 36;
-const EXPECTED_TOTAL_BYTES = 22_651_296;
+const EXPECTED_FONT_COUNT = 38;
+const EXPECTED_TOTAL_BYTES = 22_994_348;
 const EXPECTED_NOTO_SANS_KR_SHA256 = 'd1bf8649914a4fe9477a8735bf056383e44e466141fb3d61897252e06d900c1a';
 const VSCODE_FONT_FILES = [
   'NotoSerifKR-Regular.woff2',

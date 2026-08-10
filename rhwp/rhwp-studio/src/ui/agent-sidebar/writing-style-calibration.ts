@@ -36,13 +36,6 @@ function addSvgShape(parent: SVGSVGElement, tag: 'path' | 'rect' | 'circle', att
   parent.appendChild(shape);
 }
 
-function createStyleIcon(className = 'ag-calibration-icon'): SVGSVGElement {
-  const icon = svg(className);
-  addSvgShape(icon, 'path', { d: 'M4.5 18.5 6 14l8.8-8.8a2.1 2.1 0 0 1 3 3L9 17l-4.5 1.5Z', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
-  addSvgShape(icon, 'path', { d: 'm13.5 6.5 4 4M14.5 17.5h5M17 15v5', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.5', 'stroke-linecap': 'round' });
-  return icon;
-}
-
 function createCloseIcon(): SVGSVGElement {
   const icon = svg('ag-calibration-close-icon');
   addSvgShape(icon, 'path', { d: 'm7 7 10 10M17 7 7 17', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.5', 'stroke-linecap': 'round' });
@@ -111,7 +104,7 @@ function errorCopy(code: string, fallback: string): string {
 }
 
 export interface WritingStyleCalibrationUi {
-  button: HTMLButtonElement;
+  open(): void;
   handleEvent(event: SidebarEvent): void;
   dispose(): void;
 }
@@ -127,10 +120,6 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
   let activeStatus: WritingStyleStatus | null = null;
   let lastFocus: HTMLElement | null = null;
   let disposed = false;
-
-  const button = el('button', 'ag-calibration-launch');
-  button.type = 'button';
-  button.append(createStyleIcon(), el('span', 'ag-calibration-launch-label', '말투 모방'));
 
   const overlay = el('div', 'ag-calibration-overlay');
   overlay.setAttribute('aria-hidden', 'true');
@@ -248,16 +237,6 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
     }
   }
 
-  function updateLaunchButton(): void {
-    const label = button.querySelector('.ag-calibration-launch-label');
-    if (!label) return;
-    label.textContent = activeStatus?.active ? '말투 모방 · 활성' : '말투 모방';
-    button.classList.toggle('ag-active', Boolean(activeStatus?.active));
-    button.title = activeStatus?.active && activeStatus.updatedAt
-      ? `마지막 캘리브레이션: ${new Date(activeStatus.updatedAt).toLocaleDateString()}`
-      : '내 글로 문서 작성 말투를 캘리브레이션';
-  }
-
   function setStep(step: number): void {
     currentStep = step;
     dialog.dataset.step = String(step);
@@ -343,7 +322,6 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
     activeStatus = status;
     requestId = null;
     resultMeta.textContent = `${status.sourceCount}개 파일 · 약 ${status.pageEstimate}쪽 분석 · ${status.language === 'ko' ? '한국어' : 'English'}`;
-    updateLaunchButton();
     setStep(3);
   }
 
@@ -364,7 +342,7 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
 
   function open(): void {
     if (disposed || overlay.isConnected) return;
-    lastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : button;
+    lastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     document.body.appendChild(overlay);
     overlay.setAttribute('aria-hidden', 'false');
     if (activeStatus?.active && !requestId) showResult(activeStatus);
@@ -427,7 +405,6 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
     }
   }
 
-  button.addEventListener('click', open);
   close.addEventListener('click', dismiss);
   introLater.addEventListener('click', dismiss);
   introNext.addEventListener('click', () => setStep(1));
@@ -469,11 +446,10 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
 
   setLanguage(language);
   renderFiles();
-  updateLaunchButton();
   bridge.requestWritingStyleStatus();
 
   return {
-    button,
+    open,
     handleEvent(event: SidebarEvent): void {
       if (event.type === 'connection') {
         connectionState = event.state;
@@ -483,7 +459,6 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
       }
       if (event.type === 'writing-style-status') {
         activeStatus = event.status;
-        updateLaunchButton();
         return;
       }
       if (event.type === 'writing-style-progress' && event.requestId === requestId) {

@@ -6,20 +6,20 @@ const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.m
 const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
 const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
 
-test('workflow control offers direct/plan and stays separate from the permission profile', () => {
-  assert.match(source, /WORKFLOW_LABEL: Record<AgentWorkflow, string> = \{\s*direct: '바로 실행',\s*plan: '계획',/);
-  assert.match(source, /workflowGroup\.setAttribute\('role', 'radiogroup'\)/);
-  assert.match(source, /workflowGroup\.setAttribute\('aria-label', '에이전트 작업 방식'\)/);
-  assert.match(source, /item\.setAttribute\('role', 'radio'\)/);
-  assert.match(source, /composerWorkflowRow\.append\(workflowGroup, phaseBadge\)/);
-  assert.match(source, /composerUtilities\.append\(composerWorkflowRow, composerUtilityActions\)/);
-  // 작업 방식은 권한보다 위의 독립 행이고, 권한 칩은 그대로 남는다.
-  assert.match(source, /composerUtilityActions\.append\(writingStyleCalibration\.button, permissionBtn, skillsBtn\)/);
-  assert.match(css, /\.ag-composer-utilities\s*\{[^}]*flex-direction:\s*column;/s);
-  assert.match(css, /\.ag-composer-utility-actions \.ag-permission-btn\s*\{[^}]*margin-left:\s*auto;/s);
-  assert.match(source, /permissionBtn\.textContent = unrestricted \? '권한: 전체 접근' : '권한: 안전'/);
-  assert.match(css, /\.ag-workflow \{/);
-  assert.match(css, /\.ag-workflow-item\.ag-active/);
+test('workflow switches use local slash commands and stay separate from the permission profile', () => {
+  assert.match(source, /value: '\/plan',[^\n]*workflow: 'plan'/);
+  assert.match(source, /value: '\/build',[^\n]*workflow: 'direct'/);
+  assert.match(source, /if \(option\.workflow\) \{\s*input\.value = '';\s*requestWorkflow\(option\.workflow\);\s*return;/);
+  assert.match(source, /if \(text === '\/plan' \|\| text === '\/build'\) \{[\s\S]*requestWorkflow\(text === '\/plan' \? 'plan' : 'direct'\);\s*return;/);
+  // 로컬 명령은 사용자 메시지 기록과 에이전트 전송 전에 끝난다.
+  assert.ok(source.indexOf("if (text === '/plan' || text === '/build')") < source.indexOf('recordUserMessage(visibleText)'));
+  assert.ok(source.indexOf("if (text === '/plan' || text === '/build')") < source.indexOf('bridge.sendUserMessage(text, skillNameForMessage)'));
+  assert.doesNotMatch(source, /ag-workflow-item|workflowGroup|workflowItems/);
+  assert.doesNotMatch(css, /\.ag-workflow(?:-item)?\s*\{/);
+  assert.match(source, /composerUtilityActions\.append\(phaseBadge, permissionBtn, skillsBtn\)/);
+  assert.match(source, /composerUtilities\.append\(composerUtilityActions\)/);
+  assert.doesNotMatch(css, /\.ag-composer-utilities\s*\{[^}]*flex-direction:\s*column;/s);
+  assert.match(source, /permissionBtn\.textContent = unrestricted \? '전체' : '안전'/);
 });
 
 test('planning phase shows a persistent compact Korean label and skips a badge in direct mode', () => {
@@ -91,6 +91,15 @@ test('plan mode warns once about full remote-browser control and scoped download
   assert.match(source, /이 채팅 전용 다운로드 폴더에만 저장됩니다/);
   assert.match(source, /if \(!browserbaseAcknowledged\)/);
   assert.match(source, /browserbaseAcknowledged = true/);
+  assert.match(source, /browserbaseNoticePending = true/);
+  assert.match(
+    source,
+    /case 'workflow-changed':[\s\S]*applyWorkflow\(e\.workflow\);[\s\S]*if \(e\.workflow === 'plan' && browserbaseNoticePending\) \{\s*browserbaseNoticePending = false;\s*systemMessage\(BROWSERBASE_ENABLED_NOTICE\);/,
+  );
+  assert.doesNotMatch(
+    source,
+    /browserbaseAcknowledged = true;\s*systemMessage\(BROWSERBASE_ENABLED_NOTICE\)/,
+  );
   // 동작마다 다시 묻지 않는다.
   assert.match(source, /동작마다 다시 묻지 않고/);
 });
@@ -104,7 +113,7 @@ test('mode, model and permission switches are locked while a turn runs or the ch
   assert.match(source, /llmTrigger\.disabled = controlsLocked/);
   assert.match(source, /effortTrigger\.disabled = controlsLocked/);
   assert.match(source, /permissionBtn\.disabled = controlsLocked \|\| connState !== 'connected'/);
-  assert.match(source, /item\.disabled = locked/);
+  assert.match(source, /if \(isControlLocked\(\) \|\| connState !== 'connected'\)/);
 });
 
 test('entering plan mode is blocked while document edits await review', () => {
@@ -157,14 +166,13 @@ test('sidebar consumes the planning bridge contract and its sidebar events', () 
 test('pending HWP review stays unchanged for plan-driven implementations', () => {
   assert.match(source, /bridge\.pendingEdits\.approve\(set\.id\)/);
   assert.match(source, /bridge\.pendingEdits\.reject\(set\.id\)/);
-  assert.match(source, /for \(const set of bridge\.pendingEdits\.getChangeSets\(\)\) \{/);
+  assert.match(source, /const changeSets = bridge\.pendingEdits\.getChangeSets\(\);/);
+  assert.match(source, /for \(const set of changeSets\) \{/);
   assert.match(source, /실행 중입니다\. 문서 편집은 기존처럼 검토 후 승인합니다\./);
 });
 
-test('planning UI honors icon, motion and keyboard conventions', () => {
+test('planning UI honors icon and motion conventions', () => {
   assert.match(source, /createChevron\('ag-plan-chevron'\)/);
   assert.doesNotMatch(source, /ag-plan[\s\S]{0,400}[▶▼✓✕→]/);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\n\s*\.ag-workflow-item,\s*\n\s*\.ag-plan-chevron/);
-  assert.match(source, /workflowGroup\.addEventListener\('keydown'/);
-  assert.match(source, /item\.tabIndex = active \? 0 : -1/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\n\s*\.ag-plan-chevron/);
 });

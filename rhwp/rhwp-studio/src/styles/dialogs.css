@@ -20,7 +20,8 @@
   box-sizing: border-box;
   font-size: var(--font-size-base);
   color: var(--color-text);
-  box-shadow: var(--shadow-dropdown);
+  /* 모달은 드롭다운보다 한 층 위다 */
+  box-shadow: var(--shadow-dialog);
 }
 
 .dialog-title {

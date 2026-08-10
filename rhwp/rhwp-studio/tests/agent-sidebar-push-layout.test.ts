@@ -3,10 +3,23 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
+const baseCss = readFileSync(new URL('../src/styles/base.css', import.meta.url), 'utf8');
+const calibrationCss = readFileSync(
+  new URL('../src/ui/agent-sidebar/writing-style-calibration.css', import.meta.url),
+  'utf8',
+);
 const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
 
+test('agent sidebar and fullscreen workspace use bundled NanumSquare typography', () => {
+  assert.match(baseCss, /url\('\/fonts\/NanumSquare-Regular\.woff2'\)/);
+  assert.match(baseCss, /url\('\/fonts\/NanumSquare-Bold\.woff2'\)/);
+  assert.match(css, /--ag-font:\s*'NanumSquare',\s*'나눔스퀘어'/);
+  assert.match(css, /\.ag-root\s*\{[^}]*font-family:\s*var\(--ag-font\);/s);
+  assert.match(calibrationCss, /font-family:\s*var\(--ag-font,/);
+});
+
 test('agent sidebar push layout reserves editor-area width when open', () => {
-  assert.match(css, /--ag-sidebar-width:\s*360px;/);
+  assert.match(css, /--ag-sidebar-width:\s*600px;/);
   assert.match(css, /--ag-sidebar-duration:\s*320ms;/);
   assert.match(
     css,
@@ -24,7 +37,7 @@ test('agent sidebar push layout reserves editor-area width when open', () => {
 
 test('agent sidebar toggles body.ag-sidebar-open with collapse state', () => {
   assert.match(source, /document\.body\.classList\.toggle\('ag-sidebar-open', !collapsed\)/);
-  assert.match(source, /document\.body\.classList\.remove\('ag-sidebar-open'/);
+  assert.match(source, /document\.body\.classList\.remove\([\s\S]*?'ag-sidebar-open'/);
   assert.match(source, /setCollapsed\(false, \{ recenter: false \}\)/);
 });
 
@@ -46,6 +59,8 @@ test('agent sidebar asks canvas to recenter during inset animation', () => {
 });
 
 test('agent sidebar supports drag resize up to half the viewport', () => {
+  assert.match(source, /SIDEBAR_WIDTH_DEFAULT\s*=\s*600/);
+  assert.match(source, /SIDEBAR_WIDTH_MIN\s*=\s*600/);
   assert.match(source, /ag-resize-handle/);
   assert.match(source, /maxSidebarWidth/);
   assert.match(source, /0\.5/);
@@ -56,4 +71,10 @@ test('agent sidebar supports drag resize up to half the viewport', () => {
   assert.match(css, /\.ag-resize-handle/);
   assert.match(css, /body\.ag-sidebar-resizing #editor-area/);
   assert.match(css, /\.ag-collapse-tab\s*\{[^}]*cursor:\s*col-resize;/s);
+});
+
+test('composer metadata stays on one row at the minimum sidebar width', () => {
+  assert.match(css, /\.ag-composer-meta\s*\{[^}]*flex-wrap:\s*nowrap;/s);
+  assert.match(css, /\.ag-composer-meta \.ag-selectors\s*\{[^}]*overflow:\s*hidden;/s);
+  assert.match(css, /\.ag-composer-meta \.ag-composer-utilities\s*\{[^}]*margin-left:\s*auto;/s);
 });

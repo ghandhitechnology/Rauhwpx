@@ -132,6 +132,7 @@ export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
   }
 
   function handleEvent(e) {
+    if (disposed) return; // 폐기 후 죽어가는 CLI 가 흘리는 stdout 은 무시한다.
     if (e?.type === 'system' && e.subtype === 'init') {
       // CLI 가 보고하는 실제 세션 ID 를 추적한다 (--resume 이 새 ID 로 fork 할 수 있다).
       if (e.session_id) sessionId = String(e.session_id);
@@ -359,6 +360,8 @@ export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
     dispose() {
       disposed = true;
       turnOpen = false;
+      // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
+      try { child?.stdout?.removeAllListeners('data'); } catch {}
       killChild();
       childAlive = false;
     },

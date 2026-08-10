@@ -8,7 +8,7 @@
 import type { WasmBridge } from '../core/wasm-bridge.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
-import type { DocumentPosition } from '../core/types.ts';
+import type { CellPathEntry, DocumentPosition } from '../core/types.ts';
 import type { RevisionTracker } from './revision.ts';
 import type { PendingEditManager } from './pending-edits.ts';
 import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, ObjectOp } from './types.ts';
@@ -505,7 +505,7 @@ export class AgentToolExecutor {
       }>;
     }
     const tablesBySection = new Map<number, StructTable[]>();
-    outer: for (const t of this.listTables()) {
+    for (const t of this.listTables()) {
       let table: StructTable;
       try {
         const dims = wasm.getTableDimensions(t.sectionIdx, t.paraIdx, t.controlIdx);
@@ -519,9 +519,11 @@ export class AgentToolExecutor {
           const cellParaCount = wasm.getCellParagraphCount(t.sectionIdx, t.paraIdx, t.controlIdx, cellIdx);
           const cellParas: Array<{ cellParaIdx: number; length: number; text: string }> = [];
           for (let cp = 0; cp < cellParaCount; cp++) {
+            // 예산 소진 시에도 표/셀 좌표(주소 지정에 필수)는 계속 내보내고
+            // 셀 텍스트 수집만 멈춘다 — 표가 통째로 사라지면 셀 주소를 만들 수 없다.
             if (total >= maxParagraphs) {
               truncated = true;
-              break outer;
+              break;
             }
             const length = wasm.getCellParagraphLength(t.sectionIdx, t.paraIdx, t.controlIdx, cellIdx, cp);
             const previewLen = Math.min(length, maxPreviewChars);
@@ -586,7 +588,16 @@ export class AgentToolExecutor {
     // 커서/선택의 charOffset 은 논리 오프셋(텍스트 문자 + 앞선 인라인 컨트롤 1개당 +1)이다.
     // 다른 툴은 텍스트 오프셋을 쓰므로 본문 문단은 logicalToTextOffset 로 변환해 반환한다.
     // (셀 안쪽 문단은 변환 API 가 없어 논리 오프셋 그대로 — 응답 note 참고)
-    interface SelPoint { sectionIdx: number; paraIdx: number; charOffset: number; cell?: CellAddr }
+    interface SelPoint {
+      sectionIdx: number;
+      paraIdx: number;
+      charOffset: number;
+      cell?: CellAddr;
+      /** 중첩 표(깊이 2 이상) — cell 주소를 생략했다는 표시 */
+      nested?: boolean;
+      /** 진단용 전체 셀 경로 (중첩일 때만) */
+      cellPath?: CellPathEntry[];
+    }
     const toTextOffset = (sec: number, para: number, logical: number): number => {
       try {
         return wasm.logicalToTextOffset(sec, para, logical);
@@ -597,9 +608,21 @@ export class AgentToolExecutor {
     const toIdx = (p: DocumentPosition): SelPoint => {
       if (p.parentParaIndex !== undefined) {
         // 셀 내부: write 툴에 그대로 넘길 수 있는 cell 주소 + 셀 내부 문단 좌표.
-        // flat 필드는 최외곽 셀 기준(command.ts:229 참고) — 중첩 표에서는 근사값이다.
-        const cellParaIdx = p.cellPath && p.cellPath.length > 0
-          ? p.cellPath[p.cellPath.length - 1].cellParaIndex
+        // flat 필드는 최외곽 셀 기준(command.ts:229 참고)이고 cellPath 의 마지막
+        // 항목은 최내곽 셀 기준이라 축이 다르다. 중첩 표(깊이 2 이상)에서 둘을
+        // 섞으면 엉뚱한 셀에 조용히 기록되므로 cell 주소를 아예 내보내지 않는다.
+        const path = p.cellPath ?? [];
+        if (path.length > 1) {
+          return {
+            sectionIdx: p.sectionIndex,
+            paraIdx: path[path.length - 1].cellParaIndex,
+            charOffset: p.charOffset,
+            nested: true,
+            cellPath: path,
+          };
+        }
+        const cellParaIdx = path.length > 0
+          ? path[path.length - 1].cellParaIndex
           : p.cellParaIndex ?? 0;
         return {
           sectionIdx: p.sectionIndex,
@@ -622,18 +645,31 @@ export class AgentToolExecutor {
       cursor.parentParaIndex !== undefined ||
       sel?.start.parentParaIndex !== undefined ||
       sel?.end.parentParaIndex !== undefined;
+    const cursorPoint = toIdx(cursor);
+    const startPoint = sel ? toIdx(sel.start) : null;
+    const endPoint = sel ? toIdx(sel.end) : null;
+    const nested = cursorPoint.nested === true
+      || startPoint?.nested === true
+      || endPoint?.nested === true;
     const result: Record<string, unknown> = {
       revision: this.revision,
       hasSelection: sel !== null,
-      cursor: toIdx(cursor),
+      cursor: cursorPoint,
     };
     if (inCell) {
       result['inCell'] = true;
       result['note'] = 'charOffset inside table cells is a logical offset (text chars + 1 per preceding inline control); body paragraph offsets are converted text offsets';
     }
-    if (sel) {
-      const start = toIdx(sel.start);
-      const end = toIdx(sel.end);
+    if (nested) {
+      result['nested'] = true;
+      // 중첩 표 좌표는 3필드 cell 인자로 표현할 수 없다 — 에이전트가 flat 주소를
+      // 지어내지 않도록 note 로 명시하고 get_structure 재조회를 요구한다.
+      const nestedNote = 'cursor is inside a nested table; nested cells cannot be addressed with the 3-field cell argument (paraIdx/controlIdx/cellIdx), so no cell address is returned — re-derive coordinates with get_structure before writing. cellPath is diagnostic only.';
+      result['note'] = result['note'] ? `${nestedNote} ${result['note'] as string}` : nestedNote;
+    }
+    if (sel && startPoint && endPoint) {
+      const start = startPoint;
+      const end = endPoint;
       const selection: Record<string, unknown> = { start, end };
       if (!inCell && start.sectionIdx === end.sectionIdx && start.paraIdx === end.paraIdx) {
         const count = Math.min(end.charOffset - start.charOffset, 500);
@@ -1601,19 +1637,20 @@ export class AgentToolExecutor {
       // 않으면 렌더 결과가 달라지므로('1.' 요청에 가,나,다 정의 재사용 등) 재사용하지 않는다.
       // numberFormats 를 반환하지 않는 구버전 wasm 에서는 유형을 검증할 수 없어
       // 재사용을 포기하고 새 정의를 만든다.
+      // 시작 번호도 일치해야 재사용한다 — 다르면 문단에 직접 재시작을 쓰는 대신
+      // (pending 밖 문서 변경이라 거절/실행 취소로 되돌릴 수 없다) 시작 번호를
+      // 품은 새 정의를 만든다.
+      const wantStart = startNumber ?? 1;
       let existing: { id: number; levelFormats: string[]; numberFormats?: number[]; startNumber: number } | undefined;
       try {
         existing = wasm.getNumberingList().find(
           (n) => n.levelFormats[level] === levelFormats[level]
-            && n.numberFormats?.[level] === numberFormats[level],
+            && n.numberFormats?.[level] === numberFormats[level]
+            && (n.startNumber ?? 1) === wantStart,
         );
       } catch { /* 구버전 wasm 호환 — 조회 실패 시 새로 생성 */ }
       if (existing) {
         numberingId = existing.id;
-        // 재사용 정의의 시작 번호는 문단의 NewNumber 컨트롤로만 바꿀 수 있다
-        if (startNumber !== undefined) {
-          try { wasm.setNumberingRestart(sectionIdx, startParaIdx, 2, startNumber); } catch { /* 미지원 wasm 무시 */ }
-        }
       } else {
         numberingId = wasm.createNumbering(JSON.stringify({
           levelFormats, numberFormats, startNumber: startNumber ?? 1,
@@ -1911,7 +1948,7 @@ export class AgentToolExecutor {
       } else {
         const rec = asRecord(paper);
         const w = rec['widthMm']; const h = rec['heightMm'];
-        if (typeof w !== 'number' || typeof h !== 'number' || !(w > 30) || !(h > 30) || w > 1000 || h > 1000) {
+        if (typeof w !== 'number' || typeof h !== 'number' || w < 30 || h < 30 || w > 1000 || h > 1000) {
           throw new AgentToolError('INVALID_ARGS', 'paper.widthMm/heightMm must be 30..1000');
         }
         wMm = w; hMm = h;
@@ -2018,11 +2055,18 @@ export class AgentToolExecutor {
       throw new AgentToolError('INVALID_ARGS', 'text or pageNumber is required');
     }
     const isHeader = which === 'header';
-    const applyTo = 0; // Both
+    const applyTo = 0; // Both — 이 도구는 항상 양쪽 페이지 대상 컨트롤을 쓴다
     let existedBefore = false;
+    let oddEvenExists = false;
     try {
       const raw = JSON.parse(wasm.getHeaderFooter(sectionIdx, isHeader, applyTo)) as { exists?: boolean };
       existedBefore = raw?.exists === true;
+      // 홀수/짝수 전용 컨트롤(applyTo 1/2)은 교체 대상이 아니므로 따로 조회해
+      // "없다"고 잘못 안내한 채 중복 컨트롤을 만드는 일을 막는다.
+      for (const scoped of [1, 2]) {
+        const r = JSON.parse(wasm.getHeaderFooter(sectionIdx, isHeader, scoped)) as { exists?: boolean };
+        if (r?.exists === true) oddEvenExists = true;
+      }
     } catch { /* 조회 실패 시 신규 취급 */ }
     const obj: ObjectOp = {
       type: 'headerFooter', sectionIdx, isHeader, applyTo, text,
@@ -2033,9 +2077,11 @@ export class AgentToolExecutor {
     return {
       revision: this.revision,
       changeSetId: r.changeSetId,
-      note: existedBefore
+      note: (oddEvenExists
+        ? `this section also has an odd/even-page-only ${which} which this tool does NOT replace — the new both-pages ${which} may render alongside it. `
+        : '') + (existedBefore
         ? `existing ${which} will be replaced on approval. ${PENDING_NOTE}`
-        : PENDING_NOTE,
+        : PENDING_NOTE),
     };
   }
 

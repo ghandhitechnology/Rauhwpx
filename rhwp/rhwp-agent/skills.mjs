@@ -191,8 +191,9 @@ export class SkillRegistry {
     const disabled = new Set(state.disabled);
     const bundled = await this._scanRoot(this.bundledRoot, 'bundled', disabled);
     const users = await this._scanRoot(this.userRoot, 'user', disabled);
-    const bundledNames = new Set(bundled.map((skill) => skill.name));
-    const skills = [...bundled, ...users.filter((skill) => !bundledNames.has(skill.name))]
+    // 같은 이름이면 사용자 스킬이 번들 스킬을 덮어쓴다 — 사용자 스킬이 보이지 않거나 지울 수 없게 되면 안 된다.
+    const userNames = new Set(users.map((skill) => skill.name));
+    const skills = [...bundled.filter((skill) => !userNames.has(skill.name)), ...users]
       .sort((a, b) => a.origin.localeCompare(b.origin) || a.name.localeCompare(b.name));
     return { revision: this.revision, skills };
   }
@@ -265,7 +266,7 @@ export class SkillRegistry {
       for (const file of decoded) {
         const dest = path.join(temp, file.path);
         await fs.mkdir(path.dirname(dest), { recursive: true });
-        await fs.writeFile(dest, file.bytes, { mode: file.path.startsWith('scripts/') ? 0o600 : 0o600 });
+        await fs.writeFile(dest, file.bytes, { mode: file.path.startsWith('scripts/') ? 0o700 : 0o600 });
       }
       try {
         await fs.rename(target, backup);
