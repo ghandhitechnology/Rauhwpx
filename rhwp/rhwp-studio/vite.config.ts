@@ -12,6 +12,12 @@ const subsecondWasmDir = resolve(
 );
 const useSubsecondWasm = process.env.RHWP_SUBSECOND === '1';
 
+// 원격 접속(serve-remote): RHWP_PUBLIC_HOST 가 있으면 tailscale serve TLS 프록시 뒤에서
+// 동작한다. 바인딩은 그대로 127.0.0.1 — Host 허용과 HMR 되돌이 연결만 공개 주소로 맞춘다.
+// clientPort 가 없으면 HMR 웹소켓이 로컬 포트로 붙으려다 조용히 실패한다.
+const publicHost = process.env.RHWP_PUBLIC_HOST;
+const publicHttpsPort = Number(process.env.RHWP_PUBLIC_HTTPS_PORT ?? 443);
+
 export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
@@ -28,6 +34,12 @@ export default defineConfig({
   server: {
     host: '127.0.0.1',
     port: 7700,
+    ...(publicHost
+      ? {
+        allowedHosts: [publicHost],
+        hmr: { protocol: 'wss', host: publicHost, clientPort: publicHttpsPort },
+      }
+      : {}),
     proxy: useSubsecondWasm ? {
       '/_dioxus': {
         target: 'http://127.0.0.1:7711',

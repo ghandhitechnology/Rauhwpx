@@ -6,8 +6,12 @@
   align-items: center;
   height: 22px;
   padding: 0 10px;
-  background: var(--color-surface-raised);
-  border-top: 1px solid var(--ui-border-strong);
+  /* 본문의 연장이 아니라 바닥 판이다 — 위쪽 가장자리를 드리운다 */
+  position: relative;
+  z-index: 5;
+  background: var(--ui-footer-bg);
+  border-top: 1px solid var(--ui-border);
+  box-shadow: var(--ui-footer-edge);
   flex-shrink: 0;
   font-size: var(--font-size-sm);
   color: var(--color-text);
@@ -39,8 +43,8 @@
   top: 0;
   bottom: 0;
   left: 10px;
+  /* 흰 베벨 한 줄은 어두운 테마에서 밝은 선으로 튄다 — 헤어라인 하나로 */
   border-left: 1px solid var(--ui-border-strong);
-  border-right: 1px solid var(--doc-paper);
 }
 
 /* 상태 메시지 — 한컴 .status_bar .message */

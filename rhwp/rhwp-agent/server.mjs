@@ -121,11 +121,23 @@ function sessionInfo() {
     : null;
 }
 
-function onBackendEvent(evt) {
-  if (!session) return;
-  if (evt.type === 'session-info' && evt.sessionId) session.sessionId = evt.sessionId;
-  if (evt.type === 'turn-end') session.status = 'idle';
-  sendJson(studioSocket, { v: 1, type: 'agent-event', event: evt });
+// 폐기된 백엔드가 죽는 동안 흘리는 이벤트가 새 세션 상태를 덮어쓰지 않도록
+// 세션마다 generation 을 발급해 이벤트 핸들러에 묶는다.
+let sessionGeneration = 0;
+/** 스튜디오 소켓이 끊긴 사이에 끝난 턴 — 다음 접속 때 한 번 재생한다. */
+let missedTurnEnd = null;
+
+function makeBackendEventHandler(generation) {
+  return (evt) => {
+    if (!session || session.generation !== generation) return; // 폐기된 백엔드 → 폐기
+    if (evt.type === 'session-info' && evt.sessionId) session.sessionId = evt.sessionId;
+    if (evt.type === 'turn-start') missedTurnEnd = null;
+    if (evt.type === 'turn-end') {
+      session.status = 'idle';
+      if (!studioSocket || studioSocket.readyState !== studioSocket.OPEN) missedTurnEnd = evt;
+    }
+    sendJson(studioSocket, { v: 1, type: 'agent-event', event: evt });
+  };
 }
 
 function disposeSession() {
@@ -142,10 +154,9 @@ function disposeSession() {
   if (wasRunning) {
     // backend.dispose() 는 turnOpen 을 먼저 닫아 turn-end 를 내보내지 않는다 —
     // 스튜디오의 turnRunning/pending change-set 이 열린 채 남지 않도록 합성해 보낸다.
-    sendJson(studioSocket, {
-      v: 1, type: 'agent-event',
-      event: { type: 'turn-end', agent, stopReason: 'interrupted' },
-    });
+    const evt = { type: 'turn-end', agent, stopReason: 'interrupted' };
+    if (!studioSocket || studioSocket.readyState !== studioSocket.OPEN) missedTurnEnd = evt;
+    sendJson(studioSocket, { v: 1, type: 'agent-event', event: evt });
   }
 }
 
@@ -182,6 +193,9 @@ function startSession(agent, requestedModel, requestedEffort, requestedPermissio
     initialCapabilityEpoch: nextCapabilityEpoch++,
     allocateEpoch: () => nextCapabilityEpoch++,
   });
+  // onEvent 는 createXSession 이 반환하기 전에 필요하므로 backend 비교 대신
+  // generation 을 먼저 발급해 핸들러에 캡처시킨다.
+  const generation = ++sessionGeneration;
   const opts = {
     rootDir: ROOT,
     mcpScriptPath: MCP_SCRIPT,
@@ -192,7 +206,7 @@ function startSession(agent, requestedModel, requestedEffort, requestedPermissio
     permissionProfile,
     isolatedHome: ISOLATED_HOME,
     codexHome: ISOLATED_CODEX_HOME,
-    onEvent: onBackendEvent,
+    onEvent: makeBackendEventHandler(generation),
     workflow,
     phase: workflow === 'direct' ? 'implementing' : planning.phase,
     capabilityEpoch: planning.capabilityEpoch,
@@ -206,6 +220,7 @@ function startSession(agent, requestedModel, requestedEffort, requestedPermissio
     effort,
     permissionProfile,
     backend,
+    generation,
     status: 'idle',
     sessionId: backend.getSessionId(),
     chatId: crypto.randomUUID(),
@@ -840,6 +855,12 @@ httpServer.on('upgrade', (req, socket, head) => {
           plan: structuredClone(session.planning.latestPlan.plan),
           ...session.planning.snapshot(),
         });
+      }
+      if (missedTurnEnd) {
+        // 소켓이 끊긴 사이에 끝난 턴 — welcome 직후 한 번 재생해 UI 를 닫아준다.
+        const evt = missedTurnEnd;
+        missedTurnEnd = null;
+        sendJson(ws, { v: 1, type: 'agent-event', event: evt });
       }
       void skillRegistry.list().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', ...catalog }));
       void writingStyleStore.status().then((status) => sendJson(ws, { v: 1, type: 'writing-style-status', status }));
