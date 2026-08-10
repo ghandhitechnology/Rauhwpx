@@ -2,7 +2,9 @@
 
 use crate::model::control::Control;
 use crate::model::paragraph::Paragraph;
-use crate::model::shape::{CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertAlign, VertRelTo};
+use crate::model::shape::{
+    CommonObjAttr, HorzAlign, HorzRelTo, TextFlow, TextWrap, VertAlign, VertRelTo,
+};
 use crate::model::table::{Table, TablePageBreak};
 use crate::model::HwpUnit;
 
@@ -140,6 +142,217 @@ impl FloatPlacementContext {
     }
 }
 
+/// Complete reference boxes used to position a floating object.
+///
+/// `paragraph` is the paragraph's usable horizontal box. `line_y` is the current
+/// anchor-line top; HWP's paragraph-relative vertical coordinate moves with this
+/// value when the paragraph is repaginated or moved to another column.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ObjectPlacementContext {
+    pub paper: LayoutRect,
+    pub page: LayoutRect,
+    pub column: LayoutRect,
+    pub paragraph: LayoutRect,
+    pub line_y: f64,
+}
+
+/// Resolve a non-inline object's visual frame from the common object attributes.
+/// Offsets are deliberately interpreted as signed HWPUNIT values.
+pub(crate) fn object_frame(
+    common: &CommonObjAttr,
+    width: f64,
+    height: f64,
+    ctx: ObjectPlacementContext,
+    dpi: f64,
+) -> LayoutRect {
+    let h_offset = hwpunit_to_px(signed_hwpunit(common.horizontal_offset), dpi);
+    let v_offset = hwpunit_to_px(signed_hwpunit(common.vertical_offset), dpi);
+    let (ref_x, ref_w) = match common.horz_rel_to {
+        HorzRelTo::Paper => (ctx.paper.x, ctx.paper.width),
+        HorzRelTo::Page => (ctx.page.x, ctx.page.width),
+        HorzRelTo::Column => (ctx.column.x, ctx.column.width),
+        HorzRelTo::Para => (ctx.paragraph.x, ctx.paragraph.width),
+    };
+    let x = match common.horz_align {
+        HorzAlign::Left | HorzAlign::Inside => ref_x + h_offset,
+        HorzAlign::Center => ref_x + (ref_w - width) / 2.0 + h_offset,
+        HorzAlign::Right | HorzAlign::Outside => ref_x + ref_w - width - h_offset,
+    };
+
+    let (ref_y, ref_h) = match common.vert_rel_to {
+        VertRelTo::Paper => (ctx.paper.y, ctx.paper.height),
+        VertRelTo::Page => (ctx.page.y, ctx.page.height),
+        // Paragraph-relative placement is anchored to the current line, while the
+        // remaining paragraph/column extent supplies center and bottom alignment.
+        VertRelTo::Para => (
+            ctx.line_y,
+            (ctx.paragraph.y + ctx.paragraph.height - ctx.line_y).max(0.0),
+        ),
+    };
+    let y = match common.vert_align {
+        VertAlign::Top | VertAlign::Inside => ref_y + v_offset,
+        VertAlign::Center => ref_y + (ref_h - height) / 2.0 + v_offset,
+        VertAlign::Bottom | VertAlign::Outside => ref_y + ref_h - height - v_offset,
+    };
+
+    LayoutRect {
+        x,
+        y,
+        width: width.max(0.0),
+        height: height.max(0.0),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum WrapGeometry {
+    /// Rectangular contour fallback. Tight/Through use this until native contours
+    /// are available in the IR.
+    Side(TextFlow),
+    TopAndBottom,
+}
+
+/// Text-exclusion rectangle, kept separate from paint order. Callers may sort
+/// render nodes by z-order without changing this geometry.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FloatExclusion {
+    pub rect: LayoutRect,
+    pub geometry: WrapGeometry,
+}
+
+pub(crate) fn float_exclusion(
+    common: &CommonObjAttr,
+    frame: LayoutRect,
+    dpi: f64,
+) -> Option<FloatExclusion> {
+    if common.treat_as_char {
+        return None;
+    }
+    let geometry = match common.text_wrap {
+        TextWrap::Square | TextWrap::Tight | TextWrap::Through => {
+            WrapGeometry::Side(common.text_flow)
+        }
+        TextWrap::TopAndBottom => WrapGeometry::TopAndBottom,
+        TextWrap::BehindText | TextWrap::InFrontOfText => return None,
+    };
+    let left = hwpunit_to_px(common.margin.left as i32, dpi);
+    let right = hwpunit_to_px(common.margin.right as i32, dpi);
+    let top = hwpunit_to_px(common.margin.top as i32, dpi);
+    let bottom = hwpunit_to_px(common.margin.bottom as i32, dpi);
+    Some(FloatExclusion {
+        rect: LayoutRect {
+            x: frame.x - left,
+            y: frame.y - top,
+            width: frame.width + left + right,
+            height: frame.height + top + bottom,
+        },
+        geometry,
+    })
+}
+
+fn rect_intersects_band(rect: LayoutRect, top: f64, bottom: f64) -> bool {
+    rect.y < bottom && top < rect.y + rect.height
+}
+
+/// Return the horizontal text intervals available in a line band after applying
+/// every active float exclusion. Input order is ignored, so z-order cannot affect
+/// line geometry.
+pub(crate) fn available_text_intervals(
+    column: LayoutRect,
+    line_top: f64,
+    line_bottom: f64,
+    exclusions: &[FloatExclusion],
+) -> Vec<(f64, f64)> {
+    let column_right = column.x + column.width;
+    let mut intervals = vec![(column.x, column_right)];
+
+    let mut active: Vec<_> = exclusions
+        .iter()
+        .copied()
+        .filter(|exclusion| rect_intersects_band(exclusion.rect, line_top, line_bottom))
+        .collect();
+    active.sort_by(|a, b| {
+        a.rect
+            .x
+            .total_cmp(&b.rect.x)
+            .then_with(|| a.rect.width.total_cmp(&b.rect.width))
+    });
+
+    for exclusion in active {
+        if matches!(exclusion.geometry, WrapGeometry::TopAndBottom)
+            && exclusion.rect.x < column_right
+            && exclusion.rect.x + exclusion.rect.width > column.x
+        {
+            return Vec::new();
+        }
+
+        let (cut_left, cut_right) = match exclusion.geometry {
+            WrapGeometry::TopAndBottom => continue,
+            WrapGeometry::Side(TextFlow::BothSides) => {
+                (exclusion.rect.x, exclusion.rect.x + exclusion.rect.width)
+            }
+            WrapGeometry::Side(TextFlow::LeftOnly) => (exclusion.rect.x, column_right),
+            WrapGeometry::Side(TextFlow::RightOnly) => {
+                (column.x, exclusion.rect.x + exclusion.rect.width)
+            }
+            WrapGeometry::Side(TextFlow::LargestOnly) => {
+                let left_width = (exclusion.rect.x - column.x).max(0.0);
+                let right_width =
+                    (column_right - (exclusion.rect.x + exclusion.rect.width)).max(0.0);
+                if left_width >= right_width {
+                    (exclusion.rect.x, column_right)
+                } else {
+                    (column.x, exclusion.rect.x + exclusion.rect.width)
+                }
+            }
+        };
+        let cut_left = cut_left.max(column.x);
+        let cut_right = cut_right.min(column_right);
+        if cut_left >= cut_right {
+            continue;
+        }
+        let mut next = Vec::new();
+        for (start, end) in intervals {
+            if end <= cut_left || start >= cut_right {
+                next.push((start, end));
+            } else {
+                if start < cut_left {
+                    next.push((start, cut_left));
+                }
+                if cut_right < end {
+                    next.push((cut_right, end));
+                }
+            }
+        }
+        intervals = next;
+    }
+    intervals
+}
+
+/// Advance the flow cursor for a placed paragraph-relative TopAndBottom object.
+/// Side wraps and overlay planes never consume the object's full height.
+pub(crate) fn flow_cursor_after_float(
+    common: &CommonObjAttr,
+    frame: LayoutRect,
+    column: LayoutRect,
+    current_y: f64,
+    dpi: f64,
+) -> f64 {
+    if !matches!(common.vert_rel_to, VertRelTo::Para)
+        || !matches!(common.text_wrap, TextWrap::TopAndBottom)
+    {
+        return current_y;
+    }
+    let Some(exclusion) = float_exclusion(common, frame, dpi) else {
+        return current_y;
+    };
+    let exclusion_right = exclusion.rect.x + exclusion.rect.width;
+    let column_right = column.x + column.width;
+    if exclusion_right <= column.x || exclusion.rect.x >= column_right {
+        return current_y;
+    }
+    current_y.max(exclusion.rect.y + exclusion.rect.height)
+}
+
 /// Compute the same depth-0 horizontal range used by table layout.
 pub(crate) fn horizontal_range(
     common: &CommonObjAttr,
@@ -166,7 +379,7 @@ pub(crate) fn horizontal_range(
             .unwrap_or((col_area.x, col_area.width)),
         HorzRelTo::Para => (
             col_area.x + ctx.host_margin_left,
-            col_area.width - ctx.host_margin_left,
+            (col_area.width - ctx.host_margin_left - ctx.host_margin_right).max(0.0),
         ),
         HorzRelTo::Column => (col_area.x, col_area.width),
     };
@@ -184,6 +397,7 @@ pub(crate) fn horizontal_range(
 pub(crate) struct FloatLane {
     pub x_start: f64,
     pub x_end: f64,
+    pub top: f64,
     pub bottom: f64,
 }
 
@@ -230,6 +444,33 @@ impl FloatLaneSet {
         let lane = FloatLane {
             x_start,
             x_end,
+            top,
+            bottom: top + height.max(0.0),
+        };
+        self.lanes.push(lane);
+        lane
+    }
+
+    /// Place a float according to HWP's allowOverlap contract. Overlap-enabled
+    /// objects retain their requested top but are still recorded so a later
+    /// overlap-disabled object can avoid them.
+    pub(crate) fn place_with_policy(
+        &mut self,
+        x_start: f64,
+        x_end: f64,
+        raw_top: f64,
+        height: f64,
+        allow_overlap: bool,
+    ) -> FloatLane {
+        let top = if allow_overlap {
+            raw_top
+        } else {
+            self.pushed_top(x_start, x_end, raw_top)
+        };
+        let lane = FloatLane {
+            x_start,
+            x_end,
+            top,
             bottom: top + height.max(0.0),
         };
         self.lanes.push(lane);
@@ -255,7 +496,7 @@ pub(crate) fn ranges_overlap(a_start: f64, a_end: f64, b_start: f64, b_end: f64)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::shape::{HorzAlign, HorzRelTo};
+    use crate::model::shape::{HorzAlign, HorzRelTo, TextFlow, VertAlign};
 
     fn base_common() -> CommonObjAttr {
         CommonObjAttr {
@@ -351,5 +592,242 @@ mod tests {
 
         assert_eq!(x0, 140.0);
         assert_eq!(x1, 240.0);
+    }
+
+    #[test]
+    fn object_frame_resolves_references_alignments_and_negative_offsets() {
+        let ctx = ObjectPlacementContext {
+            paper: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 600.0,
+                height: 800.0,
+            },
+            page: LayoutRect {
+                x: 50.0,
+                y: 70.0,
+                width: 500.0,
+                height: 660.0,
+            },
+            column: LayoutRect {
+                x: 60.0,
+                y: 70.0,
+                width: 230.0,
+                height: 660.0,
+            },
+            paragraph: LayoutRect {
+                x: 80.0,
+                y: 100.0,
+                width: 180.0,
+                height: 630.0,
+            },
+            line_y: 140.0,
+        };
+        let mut common = base_common();
+        common.horz_rel_to = HorzRelTo::Para;
+        common.horz_align = HorzAlign::Right;
+        common.horizontal_offset = (-10i32) as u32;
+        common.vert_rel_to = VertRelTo::Para;
+        common.vert_align = VertAlign::Top;
+        common.vertical_offset = (-20i32) as u32;
+
+        let frame = object_frame(&common, 40.0, 30.0, ctx, 7200.0);
+        // Right/Outside offsets are distances inward, so a negative value moves right.
+        assert_eq!(frame.x, 230.0);
+        assert_eq!(frame.y, 120.0);
+    }
+
+    #[test]
+    fn page_relative_position_stays_fixed_across_column_transitions() {
+        let mut common = base_common();
+        common.horz_rel_to = HorzRelTo::Page;
+        common.horz_align = HorzAlign::Center;
+        common.vert_rel_to = VertRelTo::Page;
+        common.vert_align = VertAlign::Top;
+        let base = ObjectPlacementContext {
+            paper: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 600.0,
+                height: 800.0,
+            },
+            page: LayoutRect {
+                x: 50.0,
+                y: 70.0,
+                width: 500.0,
+                height: 660.0,
+            },
+            column: LayoutRect {
+                x: 50.0,
+                y: 70.0,
+                width: 240.0,
+                height: 660.0,
+            },
+            paragraph: LayoutRect {
+                x: 50.0,
+                y: 100.0,
+                width: 240.0,
+                height: 630.0,
+            },
+            line_y: 100.0,
+        };
+        let next_column = ObjectPlacementContext {
+            column: LayoutRect {
+                x: 310.0,
+                ..base.column
+            },
+            paragraph: LayoutRect {
+                x: 310.0,
+                ..base.paragraph
+            },
+            line_y: 90.0,
+            ..base
+        };
+        assert_eq!(
+            object_frame(&common, 100.0, 40.0, base, 7200.0).x,
+            object_frame(&common, 100.0, 40.0, next_column, 7200.0).x
+        );
+
+        common.horz_rel_to = HorzRelTo::Column;
+        assert_ne!(
+            object_frame(&common, 100.0, 40.0, base, 7200.0).x,
+            object_frame(&common, 100.0, 40.0, next_column, 7200.0).x
+        );
+    }
+
+    #[test]
+    fn side_exclusion_keeps_text_on_both_sides_and_applies_margins() {
+        let mut common = base_common();
+        common.text_wrap = TextWrap::Square;
+        common.text_flow = TextFlow::BothSides;
+        common.margin.left = 5;
+        common.margin.right = 10;
+        let exclusion = float_exclusion(
+            &common,
+            LayoutRect {
+                x: 80.0,
+                y: 10.0,
+                width: 40.0,
+                height: 50.0,
+            },
+            7200.0,
+        )
+        .unwrap();
+        let available = available_text_intervals(
+            LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 300.0,
+            },
+            20.0,
+            30.0,
+            &[exclusion],
+        );
+        assert_eq!(available, vec![(0.0, 75.0), (130.0, 200.0)]);
+    }
+
+    #[test]
+    fn exclusions_are_independent_of_z_order_or_input_order() {
+        let mut common = base_common();
+        common.text_wrap = TextWrap::Tight;
+        let left = float_exclusion(
+            &common,
+            LayoutRect {
+                x: 20.0,
+                y: 0.0,
+                width: 40.0,
+                height: 50.0,
+            },
+            7200.0,
+        )
+        .unwrap();
+        let right = float_exclusion(
+            &common,
+            LayoutRect {
+                x: 140.0,
+                y: 0.0,
+                width: 30.0,
+                height: 50.0,
+            },
+            7200.0,
+        )
+        .unwrap();
+        let col = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 300.0,
+        };
+        assert_eq!(
+            available_text_intervals(col, 10.0, 20.0, &[left, right]),
+            available_text_intervals(col, 10.0, 20.0, &[right, left])
+        );
+        assert_eq!(
+            available_text_intervals(col, 10.0, 20.0, &[left, right]),
+            vec![(0.0, 20.0), (60.0, 140.0), (170.0, 200.0)]
+        );
+    }
+
+    #[test]
+    fn top_bottom_blocks_band_while_overlay_wraps_do_not() {
+        let frame = LayoutRect {
+            x: 20.0,
+            y: 10.0,
+            width: 40.0,
+            height: 50.0,
+        };
+        let col = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 300.0,
+        };
+        let mut common = base_common();
+        let top_bottom = float_exclusion(&common, frame, 7200.0).unwrap();
+        assert!(available_text_intervals(col, 20.0, 30.0, &[top_bottom]).is_empty());
+
+        common.text_wrap = TextWrap::BehindText;
+        assert!(float_exclusion(&common, frame, 7200.0).is_none());
+        common.text_wrap = TextWrap::InFrontOfText;
+        assert!(float_exclusion(&common, frame, 7200.0).is_none());
+    }
+
+    #[test]
+    fn overlap_policy_stacks_only_when_overlap_is_disallowed() {
+        let mut lanes = FloatLaneSet::new();
+        lanes.place_with_policy(0.0, 100.0, 10.0, 40.0, false);
+        let allowed = lanes.place_with_policy(20.0, 80.0, 10.0, 20.0, true);
+        let blocked = lanes.place_with_policy(20.0, 80.0, 10.0, 20.0, false);
+        assert_eq!(allowed.bottom, 30.0);
+        assert_eq!(blocked.bottom, 70.0);
+    }
+
+    #[test]
+    fn flow_advance_uses_placed_bottom_and_ignores_side_wraps() {
+        let column = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 300.0,
+        };
+        let frame = LayoutRect {
+            x: 20.0,
+            y: 70.0,
+            width: 50.0,
+            height: 40.0,
+        };
+        let mut common = base_common();
+        common.margin.bottom = 10;
+        assert_eq!(
+            flow_cursor_after_float(&common, frame, column, 50.0, 7200.0),
+            120.0
+        );
+
+        common.text_wrap = TextWrap::Square;
+        assert_eq!(
+            flow_cursor_after_float(&common, frame, column, 50.0, 7200.0),
+            50.0
+        );
     }
 }
