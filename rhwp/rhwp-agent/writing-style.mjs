@@ -4,6 +4,7 @@ import path from 'node:path';
 
 const PROFILE_FILE = 'style.md';
 const METADATA_FILE = 'metadata.json';
+const STRUCTURED_FILE = 'profile.json';
 
 export function defaultWritingStyleRoot(env = process.env, platform = process.platform, home = os.homedir()) {
   if (env.RHWP_WRITING_STYLE_DIR) return path.resolve(env.RHWP_WRITING_STYLE_DIR);
@@ -25,6 +26,7 @@ export class WritingStyleStore {
     this.root = root;
     this.profilePath = path.join(root, PROFILE_FILE);
     this.metadataPath = path.join(root, METADATA_FILE);
+    this.structuredPath = path.join(root, STRUCTURED_FILE);
   }
 
   async init() {
@@ -54,7 +56,13 @@ export class WritingStyleStore {
     }
   }
 
-  async save({ markdown, language, sourceCount, pageEstimate, summary }) {
+  /** 정량 계층. 없으면 null — 구버전 프로필이거나 원고를 추출하지 못한 경우다. */
+  async profile() {
+    const value = await readJson(this.structuredPath, null);
+    return value && typeof value === 'object' ? value : null;
+  }
+
+  async save({ markdown, language, sourceCount, pageEstimate, summary, profile = null }) {
     if (typeof markdown !== 'string' || markdown.trim().length < 200) {
       throw new Error('The generated style guide is incomplete.');
     }
@@ -75,6 +83,14 @@ export class WritingStyleStore {
     await fs.writeFile(metadataTemp, `${JSON.stringify(metadata, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     await fs.rename(profileTemp, this.profilePath);
     await fs.rename(metadataTemp, this.metadataPath);
+    if (profile && typeof profile === 'object') {
+      const structuredTemp = `${this.structuredPath}.tmp-${process.pid}-${Date.now()}`;
+      await fs.writeFile(structuredTemp, `${JSON.stringify(profile, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+      await fs.rename(structuredTemp, this.structuredPath);
+    } else {
+      // 새 프로필에 정량 계층이 없으면 이전 캘리브레이션의 수치를 남겨 두지 않는다.
+      await fs.rm(this.structuredPath, { force: true });
+    }
     return this.status();
   }
 
@@ -82,7 +98,15 @@ export class WritingStyleStore {
     try {
       const markdown = await fs.readFile(this.profilePath, 'utf8');
       if (!markdown.trim()) return '';
-      return `<personal_writing_style>\nThe following style guide was derived from writing the user confirmed as their own. Apply it when drafting or rewriting a document for the user. Do not imitate mechanically, reuse distinctive passages, or let style override facts, recipient expectations, genre conventions, accessibility, or the requested level of formality. Adapt the guide to the situation. Do not apply it to routine chat unless the user asks.\n\n${markdown.trim()}\n</personal_writing_style>`;
+      return `<personal_writing_style>
+This is the user's own writing profile, measured from documents they confirmed they wrote. It is a specification for producing text, not a checklist for grading it. Compose within it from the first sentence rather than drafting freely and correcting afterwards.
+
+How to read it: the baselines are targets you write toward, not limits you check against. Sections marked as rules carry enough evidence to follow directly. Sections marked advisory are thin — apply them where they fit and drop them where they fight the document.
+
+Precedence: what the open document already does comes first, the genre and recipient come second, this profile third. It never overrides facts, quoted wording, legal or official phrasing, accessibility, or a formality level the user asked for. Do not reuse distinctive passages from the profile as if they were the user's sentences, and do not apply it to ordinary chat replies unless the user asks.
+
+${markdown.trim()}
+</personal_writing_style>`;
     } catch (error) {
       if (error?.code === 'ENOENT') return '';
       throw error;

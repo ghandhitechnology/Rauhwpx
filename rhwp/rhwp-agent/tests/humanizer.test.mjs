@@ -27,6 +27,26 @@ test('규율 블록은 금지 패턴과 보정 규칙을 함께 싣는다', () =
   assert.match(block, /Over 50%: stop and ask/);
   assert.match(block, /Read 2-3 paragraphs around the insertion point/);
   assert.match(block, /does not apply to your chat replies/);
+  assert.match(block, /Meaning is invariant/);
+  assert.match(block, /Style decides how a sentence is built, never what it asserts/);
+});
+
+test('개인 프로필이 있으면 리듬 수치를 프로필에 넘긴다', () => {
+  const generic = humanizerPromptBlock('direct');
+  const profiled = humanizerPromptBlock('direct', { personalProfile: true });
+  assert.match(generic, /Put an 8자 sentence next to a 40자 one/);
+  assert.doesNotMatch(profiled, /Put an 8자 sentence next to a 40자 one/);
+  assert.match(profiled, /come from the user's personal profile above/);
+});
+
+test('영어 프로필에는 영어 규율 블록이 붙는다', () => {
+  const english = humanizerPromptBlock('implementing', { language: 'en' });
+  assert.match(english, /<english_writing_discipline>/);
+  assert.doesNotMatch(english, /<korean_writing_discipline>/);
+  assert.match(english, /In today's fast-paced world/);
+  assert.match(english, /Meaning is invariant/);
+  assert.match(english, /at most ~20% of sentences/);
+  assert.equal(humanizerPromptBlock('planning', { language: 'en' }), '');
 });
 
 test('promptContext 는 단계에 따라 규율을 켜고 끈다', async () => {
