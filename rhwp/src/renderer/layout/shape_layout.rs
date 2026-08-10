@@ -1967,25 +1967,42 @@ impl LayoutEngine {
                 parent.children.push(img_node);
             }
             ShapeObject::Chart(chart) => {
-                // Task #195: 차트 placeholder (점선 테두리 + "차트" 라벨)
-                let _chart = chart;
-                let node_id = tree.next_id();
-                let node = RenderNode::new(
-                    node_id,
-                    RenderNodeType::Placeholder(
-                        crate::renderer::render_tree::PlaceholderNode::new(
-                            0xFFE8F0FE,
-                            0xFF4A90E2,
-                            "차트 (Chart)".to_string(),
+                // Native legacy CHART_DATA can carry either an OOXML chart
+                // payload or already-decoded series in ChartShape. Route both
+                // through the established chart renderers; do not infer values
+                // from opaque bytes.
+                let ooxml = crate::ooxml_chart::OoxmlChart::parse(&chart.raw_chart_data);
+                if let Some(chart) = ooxml {
+                    push_raw_svg_render_node(
+                        tree,
+                        parent,
+                        BoundingBox::new(render_x, render_y, render_w, render_h),
+                        chart.render_svg(render_x, render_y, render_w, render_h),
+                    );
+                } else if let Some(chart_ir) = crate::ole_chart::chart_shape_to_ir(chart) {
+                    push_raw_svg_render_node(
+                        tree,
+                        parent,
+                        BoundingBox::new(render_x, render_y, render_w, render_h),
+                        crate::ole_chart::render_ole_chart_svg_fragment(
+                            &chart_ir, render_x, render_y, render_w, render_h, 0,
                         ),
-                    ),
-                    BoundingBox::new(render_x, render_y, render_w, render_h),
-                );
-                parent.children.push(node);
+                    );
+                } else {
+                    push_placeholder_render_node(
+                        tree,
+                        parent,
+                        BoundingBox::new(render_x, render_y, render_w, render_h),
+                        0xFFE8F0FE,
+                        0xFF4A90E2,
+                        "차트 개체 (CHART_DATA undecodable)".to_string(),
+                    );
+                }
             }
             ShapeObject::Ole(ole) => {
                 // Task #195 단계 8: BinData에서 OOXML 차트 시도 → 성공 시 네이티브 SVG 렌더
                 let mut rendered = false;
+                let mut decode_error: Option<String> = None;
                 if let Some(content) = find_bin_data(bin_data_content, ole.bin_data_id as u16) {
                     // HWPX에서 주입된 OOXML 차트 XML 직접 경로 (CFB 컨테이너 없음)
                     if content.extension == "ooxml_chart" {
@@ -2057,23 +2074,12 @@ impl LayoutEngine {
                                             rendered = true;
                                         }
                                         Err(error) => {
-                                            push_ole_placeholder_render_node(
-                                                tree,
-                                                parent,
-                                                BoundingBox::new(
-                                                    render_x, render_y, render_w, render_h,
-                                                ),
-                                                0xFFFFF4E5,
-                                                0xFFB45F06,
-                                                ole_chart_fallback_label(
-                                                    error.stable_message(),
-                                                    ole.bin_data_id,
-                                                ),
-                                                section_index,
-                                                para_index,
-                                                control_index,
-                                            );
-                                            rendered = true;
+                                            // An undecodable Contents stream does not
+                                            // invalidate a real presentation preview.
+                                            // Keep the diagnostic for the final stable
+                                            // object representation and continue through
+                                            // EMF/WMF/native-image fallbacks first.
+                                            decode_error = Some(error.stable_message());
                                         }
                                     }
                                 }
@@ -2197,8 +2203,12 @@ impl LayoutEngine {
                 }
 
                 if !rendered {
-                    // 폴백: placeholder
-                    let label = format!("OLE 개체 (BinData #{})", ole.bin_data_id);
+                    // Truly undecodable OLE remains a stable, selectable object.
+                    // The label reports what was actually observed and never
+                    // fabricates chart type, series, or values.
+                    let label = decode_error
+                        .map(|message| ole_chart_fallback_label(message, ole.bin_data_id))
+                        .unwrap_or_else(|| format!("OLE 개체 (BinData #{})", ole.bin_data_id));
                     push_ole_placeholder_render_node(
                         tree,
                         parent,

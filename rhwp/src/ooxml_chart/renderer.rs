@@ -6,7 +6,7 @@
 
 use super::{
     BarGrouping, LegendPos, OfPieInfo, OfPieType, OoxmlChart, OoxmlChartType, OoxmlSeries,
-    ScatterStyle, SeriesMarker, View3D,
+    RadarStyle, ScatterStyle, SeriesMarker, View3D,
 };
 
 /// 기본 시리즈 색상 팔레트 (시리즈 색상 미지정 시 순환 사용)
@@ -187,9 +187,11 @@ pub fn render_chart_svg(chart: &OoxmlChart, x: f64, y: f64, w: f64, h: f64) -> S
     }
 
     let mut svg = String::new();
+    // A nested SVG establishes a chart-local viewport. This keeps labels,
+    // markers, and thick strokes inside the source object's bbox in every
+    // renderer without globally-scoped clipPath IDs.
     svg.push_str(&format!(
-        "<g class=\"hwp-ooxml-chart\"><rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"#ffffff\" stroke=\"#cccccc\" stroke-width=\"0.5\"/>\n",
-        x, y, w, h
+        "<svg class=\"hwp-ooxml-chart-viewport\" x=\"{x:.2}\" y=\"{y:.2}\" width=\"{w:.2}\" height=\"{h:.2}\" viewBox=\"{x:.2} {y:.2} {w:.2} {h:.2}\" overflow=\"hidden\"><g class=\"hwp-ooxml-chart\"><rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{w:.2}\" height=\"{h:.2}\" fill=\"#ffffff\" stroke=\"#cccccc\" stroke-width=\"0.5\"/>\n"
     ));
 
     // C1c #1882 갭①: 명시 제목이 없어도 c:title 요소가 있고 autoTitleDeleted=0이면
@@ -208,8 +210,10 @@ pub fn render_chart_svg(chart: &OoxmlChart, x: f64, y: f64, w: f64, h: f64) -> S
     let title_h = if effective_title.is_some() { 22.0 } else { 4.0 };
     // 파이는 카테고리 기반 범례라 시리즈 이름과 무관하게 항상 그려진다(파이 분기가
     // render_legend/render_legend_right를 무조건 호출) — 공간 예약도 그에 맞춰야 함.
-    let legend_visible =
-        chart.chart_type == OoxmlChartType::Pie || chart.series.iter().any(|s| !s.name.is_empty());
+    let legend_visible = matches!(
+        chart.chart_type,
+        OoxmlChartType::Pie | OoxmlChartType::Doughnut
+    ) || chart.series.iter().any(|s| !s.name.is_empty());
     // C1c #1882 갭③: legendPos=r(한컴 코퍼스 전 샘플)은 우측 세로 스택 — 하단 슬롯
     // 대신 우측 폭(legend_w)을 확보. 그 외 위치는 현행 하단 가로 유지.
     // `w * 0.30 >= 50.0` 가드: 폭이 좁으면(<167px) 하단 폴백 — 아래 clamp의
@@ -235,17 +239,28 @@ pub fn render_chart_svg(chart: &OoxmlChart, x: f64, y: f64, w: f64, h: f64) -> S
     // 좌측에 오므로 카테고리 폭 기준 — 숫자 폭(2자≈32px)으로 잡으면 라벨이 잘림.
     let horizontal_bars =
         chart.chart_type == OoxmlChartType::Bar && !chart.is_combo() && !chart.has_secondary_axis;
-    let left_pad = if horizontal_bars {
+    let mut left_pad = if horizontal_bars {
         estimate_category_label_width(chart, w)
     } else {
         estimate_axis_label_width(chart, 0)
     };
-    let right_pad = if chart.has_secondary_axis {
+    if chart.primary_value_axis_title.is_some() {
+        left_pad += 16.0;
+    }
+    let mut right_pad = if chart.has_secondary_axis {
         estimate_axis_label_width(chart, 1)
     } else {
         16.0
     };
-    let bottom_pad = 26.0;
+    if chart.secondary_value_axis_title.is_some() {
+        right_pad += 16.0;
+    }
+    let axis_title_h = if chart.category_axis_title.is_some() {
+        16.0
+    } else {
+        0.0
+    };
+    let bottom_pad = 26.0 + axis_title_h;
     let plot_x = x + left_pad;
     let plot_y = y + title_h + 4.0;
     let plot_w = (w - left_pad - right_pad - legend_w).max(10.0);
@@ -262,9 +277,14 @@ pub fn render_chart_svg(chart: &OoxmlChart, x: f64, y: f64, w: f64, h: f64) -> S
     }
 
     // 파이 차트는 단독 경로 (ofPie 보조플롯 / 3D 타원+측벽 — 2D 경로 무접촉)
-    if chart.chart_type == OoxmlChartType::Pie {
+    if matches!(
+        chart.chart_type,
+        OoxmlChartType::Pie | OoxmlChartType::Doughnut
+    ) {
         if let Some(of) = &chart.of_pie {
             render_of_pie(&mut svg, chart, of, plot_x, plot_y, plot_w, plot_h);
+        } else if chart.chart_type == OoxmlChartType::Doughnut {
+            render_doughnut(&mut svg, chart, plot_x, plot_y, plot_w, plot_h);
         } else if chart.is_3d {
             render_pie_3d(&mut svg, chart, plot_x, plot_y, plot_w, plot_h);
         } else {
@@ -282,7 +302,9 @@ pub fn render_chart_svg(chart: &OoxmlChart, x: f64, y: f64, w: f64, h: f64) -> S
                 legend_h,
             );
         }
-        svg.push_str("</g>\n");
+        render_data_labels(&mut svg, chart, plot_x, plot_y, plot_w, plot_h);
+        render_axis_titles(&mut svg, chart, plot_x, plot_y, plot_w, plot_h);
+        svg.push_str("</g></svg>\n");
         return svg;
     }
 
@@ -302,9 +324,14 @@ pub fn render_chart_svg(chart: &OoxmlChart, x: f64, y: f64, w: f64, h: f64) -> S
                 render_scatter(&mut svg, chart, plot_x, plot_y, plot_w, plot_h)
             }
             OoxmlChartType::Stock => render_stock(&mut svg, chart, plot_x, plot_y, plot_w, plot_h),
+            OoxmlChartType::Area => render_area(&mut svg, chart, plot_x, plot_y, plot_w, plot_h),
+            OoxmlChartType::Radar => render_radar(&mut svg, chart, plot_x, plot_y, plot_w, plot_h),
             _ => {}
         }
     }
+
+    render_data_labels(&mut svg, chart, plot_x, plot_y, plot_w, plot_h);
+    render_axis_titles(&mut svg, chart, plot_x, plot_y, plot_w, plot_h);
 
     if legend_right {
         render_legend_right(&mut svg, chart, x + w - legend_w + 4.0, plot_y, plot_h);
@@ -318,7 +345,7 @@ pub fn render_chart_svg(chart: &OoxmlChart, x: f64, y: f64, w: f64, h: f64) -> S
             legend_h,
         );
     }
-    svg.push_str("</g>\n");
+    svg.push_str("</g></svg>\n");
     svg
 }
 
@@ -798,6 +825,200 @@ fn render_line(svg: &mut String, chart: &OoxmlChart, px: f64, py: f64, pw: f64, 
     render_category_labels(svg, chart, px, py, pw, ph, max_len, false);
 }
 
+// ---------------- Area ----------------
+
+fn render_area(svg: &mut String, chart: &OoxmlChart, px: f64, py: f64, pw: f64, ph: f64) {
+    let count = chart
+        .series
+        .iter()
+        .map(|series| series.values.len())
+        .max()
+        .unwrap_or(0);
+    if count == 0 {
+        return;
+    }
+    let stacked = matches!(
+        chart.area_grouping,
+        BarGrouping::Stacked | BarGrouping::PercentStacked
+    );
+    let percent = chart.area_grouping == BarGrouping::PercentStacked;
+    let (vmin, vmax, vstep) = if percent {
+        (0.0, 100.0, 20.0)
+    } else if stacked {
+        let max_sum = (0..count)
+            .map(|index| category_positive_sum(chart, index))
+            .fold(0.0_f64, f64::max);
+        nice_axis(0.0, max_sum.max(1.0), VERTICAL_AXIS_TICKS)
+    } else {
+        value_range(chart, VERTICAL_AXIS_TICKS)
+    };
+    svg.push_str(&format!(
+        "<rect class=\"hwp-chart-area-plot\" x=\"{px:.2}\" y=\"{py:.2}\" width=\"{pw:.2}\" height=\"{ph:.2}\" fill=\"#ffffff\" stroke=\"#cccccc\" stroke-width=\"0.5\"/>\n"
+    ));
+    render_value_grid(
+        svg,
+        px,
+        py,
+        pw,
+        ph,
+        vmin,
+        vmax,
+        vstep,
+        chart.series.first().and_then(|s| s.format_code.as_deref()),
+        false,
+        false,
+        percent,
+        false,
+    );
+    let span = pw / count.max(1) as f64;
+    let baseline_t = ((0.0 - vmin) / (vmax - vmin).max(1e-9)).clamp(0.0, 1.0);
+    let baseline_y = py + ph * (1.0 - baseline_t);
+    let mut cumulative = vec![0.0_f64; count];
+    let mut previous_boundary: Vec<(f64, f64)> = (0..count)
+        .map(|index| (px + span * (index as f64 + 0.5), baseline_y))
+        .collect();
+    for (si, series) in chart.series.iter().enumerate() {
+        let mut points = Vec::with_capacity(series.values.len());
+        for (i, value) in series.values.iter().copied().enumerate() {
+            let plotted = if stacked {
+                cumulative[i] += value.max(0.0);
+                if percent {
+                    let total = category_positive_sum(chart, i);
+                    if total > 0.0 {
+                        cumulative[i] / total * 100.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    cumulative[i]
+                }
+            } else {
+                value
+            };
+            let t = ((plotted - vmin) / (vmax - vmin).max(1e-9)).clamp(0.0, 1.0);
+            points.push((px + span * (i as f64 + 0.5), py + ph * (1.0 - t)));
+        }
+        if points.is_empty() {
+            continue;
+        }
+        let color = series_color(series, si);
+        let lower_boundary = if stacked {
+            previous_boundary.as_slice()
+        } else {
+            &[]
+        };
+        let mut d = if let Some(first) = lower_boundary.first() {
+            format!(
+                "M{:.2},{:.2} L{:.2},{:.2}",
+                first.0, first.1, points[0].0, points[0].1
+            )
+        } else {
+            format!(
+                "M{:.2},{:.2} L{:.2},{:.2}",
+                points[0].0, baseline_y, points[0].0, points[0].1
+            )
+        };
+        for point in points.iter().skip(1) {
+            d.push_str(&format!(" L{:.2},{:.2}", point.0, point.1));
+        }
+        if stacked {
+            for point in lower_boundary.iter().rev() {
+                d.push_str(&format!(" L{:.2},{:.2}", point.0, point.1));
+            }
+        } else {
+            d.push_str(&format!(
+                " L{:.2},{:.2}",
+                points.last().unwrap().0,
+                baseline_y
+            ));
+        }
+        d.push_str(" Z");
+        svg.push_str(&format!(
+            "<path class=\"hwp-chart-area-series\" d=\"{d}\" fill=\"{color}\" fill-opacity=\"0.55\" stroke=\"{color}\" stroke-width=\"1.5\"/>\n"
+        ));
+        if stacked {
+            previous_boundary = points;
+        }
+    }
+    render_category_labels(svg, chart, px, py, pw, ph, count, false);
+}
+
+// ---------------- Radar ----------------
+
+fn render_radar(svg: &mut String, chart: &OoxmlChart, px: f64, py: f64, pw: f64, ph: f64) {
+    let count = chart.categories.len().max(
+        chart
+            .series
+            .iter()
+            .map(|s| s.values.len())
+            .max()
+            .unwrap_or(0),
+    );
+    if count < 3 {
+        return render_line(svg, chart, px, py, pw, ph);
+    }
+    let cx = px + pw / 2.0;
+    let cy = py + ph / 2.0;
+    let radius = pw.min(ph) * 0.38;
+    let (_, vmax, _) = value_range(chart, VERTICAL_AXIS_TICKS);
+    let angle =
+        |i: usize| -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * i as f64 / count as f64;
+    for ring in 1..=5 {
+        let rr = radius * ring as f64 / 5.0;
+        let points: Vec<(f64, f64)> = (0..count)
+            .map(|i| (cx + rr * angle(i).cos(), cy + rr * angle(i).sin()))
+            .collect();
+        svg.push_str(&format!(
+            "<path class=\"hwp-chart-radar-grid\" d=\"{} Z\" fill=\"none\" stroke=\"#dddddd\" stroke-width=\"0.75\"/>\n",
+            polyline_path(&points)
+        ));
+    }
+    for i in 0..count {
+        let a = angle(i);
+        let x = cx + radius * a.cos();
+        let y = cy + radius * a.sin();
+        svg.push_str(&format!(
+            "<line x1=\"{cx:.2}\" y1=\"{cy:.2}\" x2=\"{x:.2}\" y2=\"{y:.2}\" stroke=\"#dddddd\" stroke-width=\"0.75\"/>\n"
+        ));
+        let label = chart.categories.get(i).map(String::as_str).unwrap_or("");
+        svg.push_str(&format!(
+            "<text x=\"{:.2}\" y=\"{:.2}\" font-family=\"sans-serif\" font-size=\"10\" fill=\"#333\" text-anchor=\"middle\">{}</text>\n",
+            cx + radius * 1.14 * a.cos(),
+            cy + radius * 1.14 * a.sin() + 3.0,
+            xml_escape(label)
+        ));
+    }
+    for (si, series) in chart.series.iter().enumerate() {
+        let points: Vec<(f64, f64)> = (0..count)
+            .map(|i| {
+                let rr =
+                    radius * series.values.get(i).copied().unwrap_or(0.0).max(0.0) / vmax.max(1e-9);
+                (cx + rr * angle(i).cos(), cy + rr * angle(i).sin())
+            })
+            .collect();
+        let color = series_color(series, si);
+        let fill = if chart.radar_style == RadarStyle::Filled {
+            color.as_str()
+        } else {
+            "none"
+        };
+        let opacity = if chart.radar_style == RadarStyle::Filled {
+            0.35
+        } else {
+            1.0
+        };
+        svg.push_str(&format!(
+            "<path class=\"hwp-chart-radar-series\" d=\"{} Z\" fill=\"{fill}\" fill-opacity=\"{opacity}\" stroke=\"{color}\" stroke-width=\"2\"/>\n",
+            polyline_path(&points)
+        ));
+        if chart.radar_style == RadarStyle::Marker {
+            for (x, y) in points {
+                push_marker(svg, "hwp-chart-marker", si, x, y, 3.5, &color);
+            }
+        }
+    }
+}
+
 // ---------------- Stock (주식형, hiLowLines/upDownBars) ----------------
 
 /// stock (주식형). 계열 역할 = XML 순서 규약: 3계열=고/저/종, 4계열=시/고/저/종
@@ -1134,8 +1355,13 @@ fn render_pie(svg: &mut String, chart: &OoxmlChart, px: f64, py: f64, pw: f64, p
         Some(s) => s,
         None => return,
     };
-    let total: f64 = first.values.iter().sum();
-    if total <= 0.0 {
+    let total: f64 = first
+        .values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .sum();
+    if !total.is_finite() || total <= 0.0 {
         return;
     }
     let cx = px + pw / 2.0;
@@ -1147,21 +1373,180 @@ fn render_pie(svg: &mut String, chart: &OoxmlChart, px: f64, py: f64, pw: f64, p
     let r = (pw.min(ph) / 2.0) * 0.9 / (1.0 + explode);
 
     let mut start_angle = -std::f64::consts::FRAC_PI_2;
+    let positive_count = first
+        .values
+        .iter()
+        .filter(|value| value.is_finite() && **value > 0.0)
+        .count();
     for (i, &v) in first.values.iter().enumerate() {
-        let sweep = v / total * std::f64::consts::TAU;
+        let value = if v.is_finite() { v.max(0.0) } else { 0.0 };
+        if value == 0.0 {
+            continue;
+        }
+        let sweep = value / total * std::f64::consts::TAU;
         let end_angle = start_angle + sweep;
         let mid = start_angle + sweep / 2.0;
         let (ox, oy) = (cx + r * explode * mid.cos(), cy + r * explode * mid.sin());
+        let color = color_hex(first.color.unwrap_or_else(|| palette(i)));
+        if positive_count == 1 {
+            svg.push_str(&format!(
+                "<circle class=\"hwp-chart-pie-slice\" cx=\"{ox:.2}\" cy=\"{oy:.2}\" r=\"{r:.2}\" fill=\"{color}\"/>\n"
+            ));
+            start_angle = end_angle;
+            continue;
+        }
         let (x1, y1) = (ox + r * start_angle.cos(), oy + r * start_angle.sin());
         let (x2, y2) = (ox + r * end_angle.cos(), oy + r * end_angle.sin());
         let large = if sweep > std::f64::consts::PI { 1 } else { 0 };
-        let color = color_hex(first.color.unwrap_or_else(|| palette(i)));
         svg.push_str(&format!(
             "<path d=\"M{:.2},{:.2} L{:.2},{:.2} A{:.2},{:.2} 0 {} 1 {:.2},{:.2} Z\" fill=\"{}\"/>\n",
             ox, oy, x1, y1, r, r, large, x2, y2, color
         ));
         start_angle = end_angle;
     }
+}
+
+fn render_doughnut(svg: &mut String, chart: &OoxmlChart, px: f64, py: f64, pw: f64, ph: f64) {
+    render_pie(svg, chart, px, py, pw, ph);
+    let outer = pw.min(ph) * 0.45;
+    let inner = outer * chart.doughnut_hole_size.unwrap_or(50.0).clamp(10.0, 90.0) / 100.0;
+    svg.push_str(&format!(
+        "<circle class=\"hwp-chart-doughnut-hole\" cx=\"{:.2}\" cy=\"{:.2}\" r=\"{inner:.2}\" fill=\"#ffffff\"/>\n",
+        px + pw / 2.0,
+        py + ph / 2.0,
+    ));
+}
+
+fn render_axis_titles(svg: &mut String, chart: &OoxmlChart, px: f64, py: f64, pw: f64, ph: f64) {
+    if let Some(title) = chart.category_axis_title.as_deref() {
+        svg.push_str(&format!(
+            "<text class=\"hwp-chart-axis-title hwp-chart-category-axis-title\" x=\"{:.2}\" y=\"{:.2}\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#333\" text-anchor=\"middle\">{}</text>\n",
+            px + pw / 2.0,
+            py + ph + 24.0,
+            xml_escape(title)
+        ));
+    }
+    if let Some(title) = chart.primary_value_axis_title.as_deref() {
+        svg.push_str(&format!(
+            "<text class=\"hwp-chart-axis-title hwp-chart-primary-axis-title\" x=\"{:.2}\" y=\"{:.2}\" transform=\"rotate(-90 {:.2} {:.2})\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#333\" text-anchor=\"middle\">{}</text>\n",
+            px - 30.0,
+            py + ph / 2.0,
+            px - 30.0,
+            py + ph / 2.0,
+            xml_escape(title)
+        ));
+    }
+    if let Some(title) = chart.secondary_value_axis_title.as_deref() {
+        svg.push_str(&format!(
+            "<text class=\"hwp-chart-axis-title hwp-chart-secondary-axis-title\" x=\"{:.2}\" y=\"{:.2}\" transform=\"rotate(90 {:.2} {:.2})\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#333\" text-anchor=\"middle\">{}</text>\n",
+            px + pw + 30.0,
+            py + ph / 2.0,
+            px + pw + 30.0,
+            py + ph / 2.0,
+            xml_escape(title)
+        ));
+    }
+}
+
+fn render_data_labels(svg: &mut String, chart: &OoxmlChart, px: f64, py: f64, pw: f64, ph: f64) {
+    let options = chart.data_labels;
+    if !(options.show_value || options.show_category_name || options.show_series_name) {
+        return;
+    }
+    if matches!(
+        chart.chart_type,
+        OoxmlChartType::Pie | OoxmlChartType::Doughnut
+    ) {
+        let Some(series) = chart.series.first() else {
+            return;
+        };
+        let total: f64 = series
+            .values
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .sum();
+        if !total.is_finite() || total <= 0.0 {
+            return;
+        }
+        let (cx, cy) = (px + pw / 2.0, py + ph / 2.0);
+        let radius = pw.min(ph) * 0.32;
+        let mut start = -std::f64::consts::FRAC_PI_2;
+        for (i, value) in series.values.iter().copied().enumerate() {
+            if !value.is_finite() || value <= 0.0 {
+                continue;
+            }
+            let sweep = value / total * std::f64::consts::TAU;
+            let mid = start + sweep / 2.0;
+            push_data_label(
+                svg,
+                chart,
+                series,
+                i,
+                value,
+                cx + radius * mid.cos(),
+                cy + radius * mid.sin(),
+            );
+            start += sweep;
+        }
+        return;
+    }
+    if matches!(
+        chart.chart_type,
+        OoxmlChartType::Radar | OoxmlChartType::Scatter
+    ) {
+        return;
+    }
+    let count = chart
+        .series
+        .iter()
+        .map(|s| s.values.len())
+        .max()
+        .unwrap_or(0);
+    if count == 0 {
+        return;
+    }
+    let (vmin, vmax, _) = value_range(chart, VERTICAL_AXIS_TICKS);
+    let cat_span = pw / count as f64;
+    for (si, series) in chart.series.iter().enumerate() {
+        for (i, value) in series.values.iter().copied().enumerate() {
+            let x = px
+                + cat_span * (i as f64 + 0.5)
+                + (si as f64 - (chart.series.len().saturating_sub(1)) as f64 / 2.0) * 4.0;
+            let y = py + ph - ph * (value - vmin) / (vmax - vmin).max(1e-9) - 4.0;
+            push_data_label(svg, chart, series, i, value, x, y);
+        }
+    }
+}
+
+fn push_data_label(
+    svg: &mut String,
+    chart: &OoxmlChart,
+    series: &OoxmlSeries,
+    point_index: usize,
+    value: f64,
+    x: f64,
+    y: f64,
+) {
+    let mut parts = Vec::new();
+    if chart.data_labels.show_series_name && !series.name.is_empty() {
+        parts.push(series.name.clone());
+    }
+    if chart.data_labels.show_category_name {
+        if let Some(category) = chart.categories.get(point_index) {
+            parts.push(category.clone());
+        }
+    }
+    if chart.data_labels.show_value {
+        parts.push(format_num(value, series.format_code.as_deref()));
+    }
+    if parts.is_empty() {
+        return;
+    }
+    svg.push_str(&format!(
+        "<text class=\"hwp-chart-data-label\" x=\"{x:.2}\" y=\"{y:.2}\" font-family=\"sans-serif\" font-size=\"9\" fill=\"#222\" text-anchor=\"middle\">{}</text>\n",
+        xml_escape(&parts.join(" "))
+    ));
 }
 
 /// ofPie — 주 원(앞 n−k 카테고리 + 결합 슬라이스) + 보조 플롯(pie|bar) + serLines.
@@ -1493,6 +1878,12 @@ fn render_combo(svg: &mut String, chart: &OoxmlChart, px: f64, py: f64, pw: f64,
         .enumerate()
         .filter(|(_, s)| s.series_type == OoxmlChartType::Line)
         .collect();
+    let area_series: Vec<(usize, &OoxmlSeries)> = chart
+        .series
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.series_type == OoxmlChartType::Area)
+        .collect();
 
     let cat_span = pw / cat_count as f64;
     // 막대 그룹 너비를 더 좁혀 라인이 바 양옆으로 가려지지 않게 함
@@ -1502,6 +1893,40 @@ fn render_combo(svg: &mut String, chart: &OoxmlChart, px: f64, py: f64, pw: f64,
     } else {
         bar_group_w / bar_series.len() as f64
     };
+
+    // Area plots are painted first so bars, lines, and markers remain legible
+    // in mixed OOXML charts. Each series uses its assigned value axis.
+    for (si, ser) in &area_series {
+        if ser.values.is_empty() {
+            continue;
+        }
+        let (vmin, vmax) = if ser.axis_group == 1 {
+            (sec_min, sec_max)
+        } else {
+            (pri_min, pri_max)
+        };
+        let baseline = py + ph - ph * ((0.0 - vmin) / (vmax - vmin).max(1e-9)).clamp(0.0, 1.0);
+        let mut points = Vec::with_capacity(ser.values.len());
+        for (index, value) in ser.values.iter().copied().enumerate() {
+            let t = ((value - vmin) / (vmax - vmin).max(1e-9)).clamp(0.0, 1.0);
+            points.push((px + cat_span * (index as f64 + 0.5), py + ph * (1.0 - t)));
+        }
+        let color = series_color(ser, *si);
+        let mut d = format!(
+            "M{:.2},{baseline:.2} L{:.2},{:.2}",
+            points[0].0, points[0].0, points[0].1
+        );
+        for point in points.iter().skip(1) {
+            d.push_str(&format!(" L{:.2},{:.2}", point.0, point.1));
+        }
+        d.push_str(&format!(
+            " L{:.2},{baseline:.2} Z",
+            points.last().unwrap().0
+        ));
+        svg.push_str(&format!(
+            "<path class=\"hwp-chart-area-series hwp-chart-combo-area-series\" d=\"{d}\" fill=\"{color}\" fill-opacity=\"0.35\" stroke=\"{color}\" stroke-width=\"1.5\"/>\n"
+        ));
+    }
 
     // 막대 렌더 (각 시리즈 축 기준)
     for ci in 0..cat_count {
@@ -2113,7 +2538,7 @@ fn swatch_kind(chart: &OoxmlChart, s: &OoxmlSeries, i: usize) -> SwatchKind {
 /// (색·글리프 매핑 후 `legend_order_reversed`면 역순 나열).
 fn legend_items(chart: &OoxmlChart) -> Vec<(String, u32, SwatchKind)> {
     match chart.chart_type {
-        OoxmlChartType::Pie => {
+        OoxmlChartType::Pie | OoxmlChartType::Doughnut => {
             let first = chart.series.first();
             first
                 .map(|s| {
