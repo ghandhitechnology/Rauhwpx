@@ -2495,6 +2495,90 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    #[wasm_bindgen(js_name = getCharPropertiesInHf)]
+    pub fn get_char_properties_in_hf(
+        &self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: usize,
+        char_offset: usize,
+    ) -> Result<String, JsValue> {
+        self.get_char_properties_in_hf_native(
+            section_idx,
+            is_header,
+            apply_to,
+            hf_para_idx,
+            char_offset,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = applyCharFormatInHf)]
+    pub fn apply_char_format_in_hf(
+        &mut self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: usize,
+        start_offset: usize,
+        end_offset: usize,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        self.apply_char_format_in_hf_native(
+            section_idx,
+            is_header,
+            apply_to,
+            hf_para_idx,
+            start_offset,
+            end_offset,
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = setCharShapeIdInHf)]
+    pub fn set_char_shape_id_in_hf(
+        &mut self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: usize,
+        start_offset: usize,
+        end_offset: usize,
+        char_shape_id: u32,
+    ) -> Result<String, JsValue> {
+        self.set_char_shape_id_in_hf_native(
+            section_idx,
+            is_header,
+            apply_to,
+            hf_para_idx,
+            start_offset,
+            end_offset,
+            char_shape_id,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = setParaShapeIdInHf)]
+    pub fn set_para_shape_id_in_hf(
+        &mut self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: usize,
+        para_shape_id: u16,
+    ) -> Result<String, JsValue> {
+        self.set_para_shape_id_in_hf_native(
+            section_idx,
+            is_header,
+            apply_to,
+            hf_para_idx,
+            para_shape_id,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 머리말/꼬리말 문단에 문단 서식을 적용한다.
     #[wasm_bindgen(js_name = applyParaFormatInHf)]
     pub fn apply_para_format_in_hf(
@@ -4353,6 +4437,90 @@ impl HwpDocument {
             para_idx as usize,
             control_idx as usize,
             fn_para_idx as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = getCharPropertiesInFootnote)]
+    pub fn get_char_properties_in_footnote(
+        &self,
+        section_idx: u32,
+        para_idx: u32,
+        control_idx: u32,
+        fn_para_idx: u32,
+        char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.get_char_properties_in_footnote_native(
+            section_idx as usize,
+            para_idx as usize,
+            control_idx as usize,
+            fn_para_idx as usize,
+            char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = applyCharFormatInFootnote)]
+    pub fn apply_char_format_in_footnote(
+        &mut self,
+        section_idx: u32,
+        para_idx: u32,
+        control_idx: u32,
+        fn_para_idx: u32,
+        start_offset: u32,
+        end_offset: u32,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        self.apply_char_format_in_footnote_native(
+            section_idx as usize,
+            para_idx as usize,
+            control_idx as usize,
+            fn_para_idx as usize,
+            start_offset as usize,
+            end_offset as usize,
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = setCharShapeIdInFootnote)]
+    pub fn set_char_shape_id_in_footnote(
+        &mut self,
+        section_idx: u32,
+        para_idx: u32,
+        control_idx: u32,
+        fn_para_idx: u32,
+        start_offset: u32,
+        end_offset: u32,
+        char_shape_id: u32,
+    ) -> Result<String, JsValue> {
+        self.set_char_shape_id_in_footnote_native(
+            section_idx as usize,
+            para_idx as usize,
+            control_idx as usize,
+            fn_para_idx as usize,
+            start_offset as usize,
+            end_offset as usize,
+            char_shape_id,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = setParaShapeIdInFootnote)]
+    pub fn set_para_shape_id_in_footnote(
+        &mut self,
+        section_idx: u32,
+        para_idx: u32,
+        control_idx: u32,
+        fn_para_idx: u32,
+        para_shape_id: u16,
+    ) -> Result<String, JsValue> {
+        self.set_para_shape_id_in_footnote_native(
+            section_idx as usize,
+            para_idx as usize,
+            control_idx as usize,
+            fn_para_idx as usize,
+            para_shape_id,
         )
         .map_err(|e| e.into())
     }
@@ -7010,6 +7178,58 @@ impl HwpDocument {
             control_idx,
             cell_idx,
             cell_para_idx,
+            para_shape_id,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = getCellParaPropertiesAtByPath)]
+    pub fn get_cell_para_properties_at_by_path_api(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.get_cell_para_properties_at_by_path(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = applyParaFormatInCellByPath)]
+    pub fn apply_para_format_in_cell_by_path_api(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.apply_para_format_in_cell_by_path(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = setCellParaShapeIdByPath)]
+    pub fn set_cell_para_shape_id_by_path_api(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        para_shape_id: u16,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.set_cell_para_shape_id_by_path(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
             para_shape_id,
         )
         .map_err(|e| e.into())

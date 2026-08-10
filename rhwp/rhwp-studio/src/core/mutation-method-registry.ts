@@ -50,6 +50,7 @@ export const MUTATING_METHODS: readonly string[] = [
   'insertFootnote', 'insertEndnote', 'deleteFootnote', 'applyEndnoteShape',
   'insertTextInFootnote', 'deleteTextInFootnote', 'splitParagraphInFootnote',
   'mergeParagraphInFootnote', 'applyParaFormatInFootnote',
+  'applyCharFormatInFootnote', 'setCharShapeIdInFootnote', 'setParaShapeIdInFootnote',
   // 붙여넣기
   'pasteInternal', 'pasteInternalInCell', 'pasteInternalInCellByPath', 'pasteControl',
   'pasteHtml', 'pasteHtmlInCell', 'pasteHtmlInCellByPath',
@@ -59,6 +60,7 @@ export const MUTATING_METHODS: readonly string[] = [
   'setCharShapeIdInCell', 'setCharShapeIdInCellByPath',
   'applyParaFormat', 'applyParaFormatAcrossSections', 'setParaShapeId',
   'applyParaFormatInCell', 'setCellParaShapeId',
+  'applyParaFormatInCellByPath', 'setCellParaShapeIdByPath',
   // 스타일/번호 정의 (DocInfo 변이 포함)
   'updateStyle', 'updateStyleShapes', 'createStyle', 'deleteStyle', 'applyStyle',
   'applyCellStyle', 'createNumbering', 'ensureDefaultNumbering', 'ensureDefaultBullet',
@@ -67,6 +69,7 @@ export const MUTATING_METHODS: readonly string[] = [
   'createHeaderFooter', 'deleteHeaderFooter', 'toggleHideHeaderFooter',
   'insertTextInHeaderFooter', 'deleteTextInHeaderFooter', 'splitParagraphInHeaderFooter',
   'mergeParagraphInHeaderFooter', 'applyParaFormatInHf', 'insertFieldInHf', 'applyHfTemplate',
+  'applyCharFormatInHf', 'setCharShapeIdInHf', 'setParaShapeIdInHf',
   // 필드/양식/찾아바꾸기/책갈피
   'setFieldValue', 'setFieldValueByName', 'removeFieldAt', 'insertClickHereField',
   'updateClickHereProps', 'setFormValue', 'setFormValueInCell',

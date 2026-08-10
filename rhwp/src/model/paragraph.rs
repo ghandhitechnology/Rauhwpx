@@ -320,6 +320,15 @@ pub struct OrphanFieldEnd {
 }
 
 impl Paragraph {
+    /// 문단 분할 때 위치에 따라 앞/뒤 문단으로 이동해야 하는 zero-width 컨트롤.
+    ///
+    /// `is_split_movable_control`은 커서의 logical offset을 한 칸 소비하는 인라인
+    /// 개체만 뜻한다. 책갈피는 폭을 소비하지 않지만 분할 위치 뒤에 있으면 새 문단으로
+    /// 이동해야 하므로 별도 분류한다.
+    fn is_split_positioned_control(ctrl: &Control) -> bool {
+        Self::is_split_movable_control(ctrl) || matches!(ctrl, Control::Bookmark(_))
+    }
+
     pub(crate) fn is_split_movable_control(ctrl: &Control) -> bool {
         matches!(
             ctrl,
@@ -360,12 +369,13 @@ impl Paragraph {
         text: &str,
         controls: &[Control],
         field_ranges: &[FieldRange],
+        orphan_field_ends: &[OrphanFieldEnd],
     ) -> u32 {
         let mut mask = 0u32;
         for ctrl in controls {
             mask |= 1u32 << Self::control_mask_bit(ctrl);
         }
-        if !field_ranges.is_empty() {
+        if !field_ranges.is_empty() || !orphan_field_ends.is_empty() {
             mask |= 1u32 << 0x0004;
         }
         if text.contains('\t') {
@@ -942,7 +952,8 @@ impl Paragraph {
             ..Default::default()
         }];
 
-        // 5. range_tags 분할
+        // 5. range_tags 분할. 경계를 가로지르는 태그도 두 문단의 해당 구간으로
+        // 나눠 보존한다. 종전에는 양쪽에서 모두 제거해 편집 한 번으로 메타가 소실됐다.
         let mut new_range_tags: Vec<RangeTag> = Vec::new();
         let mut kept_range_tags: Vec<RangeTag> = Vec::new();
         for rt in &self.range_tags {
@@ -956,13 +967,24 @@ impl Paragraph {
             } else if rt.end <= utf16_split {
                 // 완전히 원래 문단 쪽
                 kept_range_tags.push(rt.clone());
+            } else {
+                kept_range_tags.push(RangeTag {
+                    start: rt.start,
+                    end: utf16_split,
+                    tag: rt.tag,
+                });
+                new_range_tags.push(RangeTag {
+                    start: 0,
+                    end: rt.end - utf16_split,
+                    tag: rt.tag,
+                });
             }
-            // 경계에 걸치는 태그는 양쪽에서 제거 (단순화)
         }
         self.range_tags = kept_range_tags;
 
         // 5-1. field_ranges 분할
         let mut new_field_ranges: Vec<FieldRange> = Vec::new();
+        let mut new_orphan_field_ends: Vec<OrphanFieldEnd> = Vec::new();
         let mut kept_field_ranges: Vec<FieldRange> = Vec::new();
         // 5-1a. controls 분할 시 control_idx 리매핑을 위한 맵 (old → new)
         let mut moved_control_idx_map: std::collections::HashMap<usize, usize> =
@@ -980,16 +1002,33 @@ impl Paragraph {
                 // 완전히 원래 문단 쪽
                 kept_field_ranges.push(fr.clone());
             } else {
-                // 경계에 걸친 필드: 원래 문단에서 종료
-                kept_field_ranges.push(FieldRange {
-                    start_char_idx: fr.start_char_idx,
-                    end_char_idx: split_pos,
-                    control_idx: fr.control_idx,
-                    end_field_id: fr.end_field_id,
-                });
+                // 경계에 걸친 필드는 fieldBegin을 앞 문단에 두고 fieldEnd만 새 문단으로
+                // 옮긴다. 앞 문단에 잘린 FieldRange를 남기면 저장 시 가짜 fieldEnd가
+                // 하나 더 생겨 필드가 둘로 복제된다. HWPX의 교차 문단 표현과 동일하게
+                // 새 문단의 orphan_field_ends로 보존한다.
+                if let Some(Control::Field(field)) = self.controls.get(fr.control_idx) {
+                    new_orphan_field_ends.push(OrphanFieldEnd {
+                        char_idx: fr.end_char_idx - split_pos,
+                        begin_id_ref: field.field_id,
+                        field_id: fr.end_field_id,
+                    });
+                }
             }
         }
         self.field_ranges = kept_field_ranges;
+
+        // 이미 교차 문단이던 fieldEnd도 분할 위치에 맞춰 이동한다. 경계의 zero-width
+        // 마커는 Enter가 삽입한 새 문단의 시작에 붙는 것이 Hancom 동작과 일치한다.
+        let mut kept_orphan_field_ends = Vec::new();
+        for mut orphan in std::mem::take(&mut self.orphan_field_ends) {
+            if orphan.char_idx >= split_pos {
+                orphan.char_idx -= split_pos;
+                new_orphan_field_ends.push(orphan);
+            } else {
+                kept_orphan_field_ends.push(orphan);
+            }
+        }
+        self.orphan_field_ends = kept_orphan_field_ends;
 
         // Field는 보이는 문자 오프셋에서 한 글자를 차지하지 않는다. 다만 새 문단으로
         // 이관되는 FieldRange가 참조하는 Field control은 범위와 함께 이동해야 한다.
@@ -1014,7 +1053,7 @@ impl Paragraph {
 
         for (ci, ctrl) in old_controls.into_iter().enumerate() {
             let data = old_ctrl_data.get(ci).cloned().flatten();
-            let move_to_new = (Self::is_split_movable_control(&ctrl)
+            let move_to_new = (Self::is_split_positioned_control(&ctrl)
                 && control_positions.get(ci).copied().unwrap_or(usize::MAX) >= char_offset)
                 || moved_field_control_indices.contains(&ci);
 
@@ -1039,19 +1078,47 @@ impl Paragraph {
         // 6. char_count 갱신
         //    원본 문단에 남은 controls는 각각 8 code unit을 차지하므로 반영 필요
         let new_text_char_count = new_text.chars().count() as u32;
-        let ctrl_code_units: u32 = self.controls.len() as u32 * 8;
+        let ctrl_code_units: u32 =
+            (self.controls.len() + self.field_ranges.len() + self.orphan_field_ends.len()) as u32
+                * 8;
         self.char_count = split_pos as u32 + ctrl_code_units + 1; // +1 for paragraph end marker
-        let new_char_count = new_text_char_count + new_controls.len() as u32 * 8 + 1;
+        let new_char_count = new_text_char_count
+            + (new_controls.len() + new_field_ranges.len() + new_orphan_field_ends.len()) as u32
+                * 8
+            + 1;
 
         // 7. has_para_text: 빈 문단(텍스트 없고 컨트롤 없음)이면 PARA_TEXT 불필요
         //    HWP 프로그램은 cc=1(빈 문단)에 PARA_TEXT가 있으면 파일 손상으로 판단
-        self.has_para_text = !(self.text.is_empty() && self.controls.is_empty());
-        let new_has_para_text = !new_text.is_empty() || !new_controls.is_empty();
+        self.has_para_text = !(self.text.is_empty()
+            && self.controls.is_empty()
+            && self.field_ranges.is_empty()
+            && self.orphan_field_ends.is_empty());
+        let new_has_para_text = !new_text.is_empty()
+            || !new_controls.is_empty()
+            || !new_field_ranges.is_empty()
+            || !new_orphan_field_ends.is_empty();
 
-        self.control_mask =
-            Self::compute_control_mask_for(&self.text, &self.controls, &self.field_ranges);
-        let new_control_mask =
-            Self::compute_control_mask_for(&new_text, &new_controls, &new_field_ranges);
+        self.control_mask = Self::compute_control_mask_for(
+            &self.text,
+            &self.controls,
+            &self.field_ranges,
+            &self.orphan_field_ends,
+        );
+        let new_control_mask = Self::compute_control_mask_for(
+            &new_text,
+            &new_controls,
+            &new_field_ranges,
+            &new_orphan_field_ends,
+        );
+
+        // TAB 확장 레코드는 텍스트의 탭 순서와 1:1이다. 분할점 뒤의 탭 메타를 새
+        // 문단으로 이동해 앞 문단에 중복해서 남기지 않는다.
+        let kept_tab_count = self.text.chars().filter(|&ch| ch == '\t').count();
+        let new_tab_extended = if kept_tab_count < self.tab_extended.len() {
+            self.tab_extended.split_off(kept_tab_count)
+        } else {
+            Vec::new()
+        };
 
         Paragraph {
             text: new_text,
@@ -1060,7 +1127,7 @@ impl Paragraph {
             line_segs: new_line_segs,
             range_tags: new_range_tags,
             field_ranges: new_field_ranges, // 새 문단으로 이관된 필드 범위
-            orphan_field_ends: Vec::new(),
+            orphan_field_ends: new_orphan_field_ends,
             char_count: new_char_count,
             para_shape_id: self.para_shape_id,
             style_id: self.style_id,
@@ -1070,9 +1137,11 @@ impl Paragraph {
             controls: new_controls,
             ctrl_data_records: new_ctrl_data_records,
             char_count_msb: false,
-            raw_header_extra: self.raw_header_extra.clone(),
+            // instanceId/change-tracking tail은 문단 고유 메타다. Enter로 만든 문단에
+            // 복제하지 않고, merge undo인 경우에만 apply_meta가 원래 값을 복원한다.
+            raw_header_extra: Vec::new(),
             has_para_text: new_has_para_text,
-            tab_extended: Vec::new(),
+            tab_extended: new_tab_extended,
             numbering_restart: None,
         }
     }
@@ -1083,7 +1152,12 @@ impl Paragraph {
     /// 반환값: 병합 지점의 char offset (원래 텍스트의 길이).
     pub fn merge_from(&mut self, other: &Paragraph) -> usize {
         // 텍스트 없이 컨트롤만 있는 문단(예: 그림 복사 클립보드)도 병합 대상 (#1323)
-        if other.text.is_empty() && other.controls.is_empty() {
+        if other.text.is_empty()
+            && other.controls.is_empty()
+            && other.field_ranges.is_empty()
+            && other.orphan_field_ends.is_empty()
+            && other.range_tags.is_empty()
+        {
             return self.text.chars().count();
         }
 
@@ -1098,13 +1172,28 @@ impl Paragraph {
             .filter(|&&p| p >= self_text_len)
             .count() as u32
             * 8;
+        // A fieldEnd at the paragraph end has no following character whose char_offset can carry
+        // its eight-unit slot. When another paragraph is appended, its first character must begin
+        // after those trailing markers as well as after ordinary trailing controls.
+        let trailing_field_end_units = (self
+            .field_ranges
+            .iter()
+            .filter(|range| range.end_char_idx >= self_text_len)
+            .count()
+            + self
+                .orphan_field_ends
+                .iter()
+                .filter(|end| end.char_idx >= self_text_len)
+                .count()) as u32
+            * 8;
         let utf16_end: u32 = if !self.char_offsets.is_empty() {
             let last = self.char_offsets.len() - 1;
             let text_chars: Vec<char> = self.text.chars().collect();
             self.char_offsets[last] + Self::char_utf16_len(text_chars[last])
         } else {
             0
-        } + trailing_ctrl_units;
+        } + trailing_ctrl_units
+            + trailing_field_end_units;
 
         // 1. 텍스트 결합
         self.text.push_str(&other.text);
@@ -1186,6 +1275,48 @@ impl Paragraph {
             });
         }
 
+        // 교차 문단 fieldEnd가 병합 경계를 넘어 같은 문단으로 들어오면 대응하는
+        // fieldBegin과 다시 FieldRange로 결합한다. 짝을 찾지 못한 end만 orphan으로
+        // 유지한다. 이 역변환이 있어야 split/merge 및 undo/redo가 fieldEnd를 중복하거나
+        // 고아로 영구 고정하지 않는다.
+        let control_positions = self.control_text_positions();
+        for orphan in &other.orphan_field_ends {
+            let matching_control = self
+                .controls
+                .iter()
+                .enumerate()
+                .find_map(|(index, control)| match control {
+                    Control::Field(field)
+                        if field.field_id == orphan.begin_id_ref
+                            && !self
+                                .field_ranges
+                                .iter()
+                                .any(|range| range.control_idx == index) =>
+                    {
+                        Some(index)
+                    }
+                    _ => None,
+                });
+            if let Some(control_idx) = matching_control {
+                self.field_ranges.push(FieldRange {
+                    start_char_idx: control_positions
+                        .get(control_idx)
+                        .copied()
+                        .unwrap_or(self_text_len)
+                        .min(self_text_len),
+                    end_char_idx: self_text_len + orphan.char_idx,
+                    control_idx,
+                    end_field_id: orphan.field_id,
+                });
+            } else {
+                self.orphan_field_ends.push(OrphanFieldEnd {
+                    char_idx: self_text_len + orphan.char_idx,
+                    begin_id_ref: orphan.begin_id_ref,
+                    field_id: orphan.field_id,
+                });
+            }
+        }
+
         // 5-2. controls / ctrl_data_records / control_mask 병합 (#1323)
         //      ctrl_data_records[i]는 controls[i] 대응이므로 self 쪽을 None 패딩 후 이어붙인다.
         if !other.controls.is_empty() {
@@ -1198,21 +1329,31 @@ impl Paragraph {
             }
             self.controls.extend(other.controls.iter().cloned());
         }
+        self.tab_extended.extend(other.tab_extended.iter().copied());
         // control_mask는 tab/개행 등 텍스트 기반 비트(#1323 이후 확장분)도 포함하므로,
         // other.controls가 비어 있어도 other.text의 tab/개행이 손실되지 않도록
         // split_at과 동일하게 병합 후 상태 전체를 재계산한다.
-        self.control_mask =
-            Self::compute_control_mask_for(&self.text, &self.controls, &self.field_ranges);
+        self.control_mask = Self::compute_control_mask_for(
+            &self.text,
+            &self.controls,
+            &self.field_ranges,
+            &self.orphan_field_ends,
+        );
 
         // 6. char_count 갱신: 텍스트 + 컨트롤(각 8 code unit) + 문단끝(1)
         //    split_at의 ctrl_code_units 계산과 정합. HWPX 직렬화가 char_count에서
         //    컨트롤 수를 역산하므로 컨트롤 유닛 포함 필수.
         self.char_count = (self_text_len + other.text.chars().count()) as u32
-            + self.controls.len() as u32 * 8
+            + (self.controls.len() + self.field_ranges.len() + self.orphan_field_ends.len()) as u32
+                * 8
             + 1;
 
         // 7. has_para_text: 병합 후 텍스트/컨트롤이 있으면 PARA_TEXT 필요
-        if !self.text.is_empty() || !self.controls.is_empty() {
+        if !self.text.is_empty()
+            || !self.controls.is_empty()
+            || !self.field_ranges.is_empty()
+            || !self.orphan_field_ends.is_empty()
+        {
             self.has_para_text = true;
         }
 
