@@ -330,9 +330,14 @@ export class SkillRegistry {
       activated = `\n\n<activated_product_skill name="${skill.name}" root="${skill.root}">\n${markdown}\n</activated_product_skill>`;
     }
     const writingStyle = this.writingStyleStore ? await this.writingStyleStore.promptBlock() : '';
+    const styleStatus = this.writingStyleStore && writingStyle ? await this.writingStyleStore.status() : null;
     // 문서에 글이 들어가는 단계에서만 작문 규율을 얹는다. 개인 문체 프로필이 먼저 오고,
     // 규율 블록은 그 아래에서 "문서 > 개인 문체 > 규율" 우선순위를 스스로 밝힌다.
-    const humanizer = humanizerPromptBlock(phase);
+    // 프로필이 있으면 리듬 수치는 프로필 쪽 기준선 하나만 남긴다.
+    const humanizer = humanizerPromptBlock(phase, {
+      language: styleStatus?.language === 'en' ? 'en' : 'ko',
+      personalProfile: Boolean(styleStatus?.active),
+    });
     return `${writingStyle ? `${writingStyle}\n\n` : ''}${humanizer ? `${humanizer}\n\n` : ''}<rhwp_product_skills revision="${catalog.revision}">\nOnly the skills in this catalog are product skills. If the request clearly matches one, call read_product_skill for its SKILL.md before acting, then read supporting resources progressively. Do not use provider-global skills.\n${metadata || '(no enabled skills)'}\n</rhwp_product_skills>${activated}\n\n<user_request>\n${text}\n</user_request>`;
   }
 }
