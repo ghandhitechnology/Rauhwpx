@@ -85,39 +85,46 @@ pub fn render_ole_chart_svg_body(chart: &OleChart, width: f64, height: f64) -> S
         ));
     }
 
-    for i in 0..=4 {
-        let ratio = i as f64 / 4.0;
-        let y = top + plot_h - plot_h * ratio;
-        let value = max_value * ratio;
+    if chart.chart_type != OleChartType::Pie {
+        for i in 0..=4 {
+            let ratio = i as f64 / 4.0;
+            let y = top + plot_h - plot_h * ratio;
+            let value = max_value * ratio;
+            svg.push_str(&format!(
+                "<line x1=\"{left:.2}\" y1=\"{y:.2}\" x2=\"{:.2}\" y2=\"{y:.2}\" stroke=\"#e5e7eb\" stroke-width=\"1\"/>\
+                 <text x=\"{:.2}\" y=\"{:.2}\" font-family=\"sans-serif\" font-size=\"9\" fill=\"#64748b\" \
+                 text-anchor=\"end\">{}</text>",
+                left + plot_w,
+                left - 4.0,
+                y + 3.0,
+                format_axis_value(value),
+            ));
+        }
+
         svg.push_str(&format!(
-            "<line x1=\"{left:.2}\" y1=\"{y:.2}\" x2=\"{:.2}\" y2=\"{y:.2}\" stroke=\"#e5e7eb\" stroke-width=\"1\"/>\
-             <text x=\"{:.2}\" y=\"{:.2}\" font-family=\"sans-serif\" font-size=\"9\" fill=\"#64748b\" \
-             text-anchor=\"end\">{}</text>",
+            "<line x1=\"{left:.2}\" y1=\"{top:.2}\" x2=\"{left:.2}\" y2=\"{:.2}\" stroke=\"#94a3b8\" stroke-width=\"1\"/>\
+             <line x1=\"{left:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#94a3b8\" stroke-width=\"1\"/>",
+            top + plot_h,
+            top + plot_h,
             left + plot_w,
-            left - 4.0,
-            y + 3.0,
-            format_axis_value(value),
+            top + plot_h,
         ));
     }
 
-    svg.push_str(&format!(
-        "<line x1=\"{left:.2}\" y1=\"{top:.2}\" x2=\"{left:.2}\" y2=\"{:.2}\" stroke=\"#94a3b8\" stroke-width=\"1\"/>\
-         <line x1=\"{left:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#94a3b8\" stroke-width=\"1\"/>",
-        top + plot_h,
-        top + plot_h,
-        left + plot_w,
-        top + plot_h,
-    ));
-
     match chart.chart_type {
-        OleChartType::Line => {
+        OleChartType::Line | OleChartType::Area | OleChartType::Scatter => {
             render_line_series(&mut svg, chart, left, top, plot_w, plot_h, max_value)
         }
+        OleChartType::Pie => render_pie_series(&mut svg, chart, left, top, plot_w, plot_h),
         _ => render_bar_series(&mut svg, chart, left, top, plot_w, plot_h, max_value),
     }
 
-    render_category_labels(&mut svg, chart, left, top, plot_w, plot_h);
-    render_legend(&mut svg, chart, left, top + plot_h + 28.0, plot_w);
+    if chart.chart_type == OleChartType::Pie {
+        render_pie_legend(&mut svg, chart, left, top + plot_h + 28.0, plot_w);
+    } else {
+        render_category_labels(&mut svg, chart, left, top, plot_w, plot_h);
+        render_legend(&mut svg, chart, left, top + plot_h + 28.0, plot_w);
+    }
     svg
 }
 
@@ -146,7 +153,7 @@ fn render_bar_series(
                 "<rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{:.2}\" height=\"{bar_h:.2}\" \
                  fill=\"{}\"/>",
                 (bar_w - 1.0).max(1.0),
-                chart_color(series_idx),
+                chart_color(series.color, series_idx),
             ));
         }
     }
@@ -183,7 +190,7 @@ fn render_line_series(
         for (x, y) in points.iter().skip(1) {
             d.push_str(&format!(" L {x:.2} {y:.2}"));
         }
-        let color = chart_color(series_idx);
+        let color = chart_color(series.color, series_idx);
         svg.push_str(&format!(
             "<path d=\"{d}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2\"/>"
         ));
@@ -192,6 +199,92 @@ fn render_line_series(
                 "<circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"2.4\" fill=\"{color}\"/>"
             ));
         }
+    }
+}
+
+fn render_pie_series(
+    svg: &mut String,
+    chart: &OleChart,
+    left: f64,
+    top: f64,
+    plot_w: f64,
+    plot_h: f64,
+) {
+    let Some(series) = chart.series.first() else {
+        return;
+    };
+    let total: f64 = series
+        .values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .sum();
+    if !total.is_finite() || total <= 0.0 {
+        return;
+    }
+    let (cx, cy) = (left + plot_w / 2.0, top + plot_h / 2.0);
+    let radius = plot_w.min(plot_h) * 0.43;
+    let mut start = -std::f64::consts::FRAC_PI_2;
+    let positive_count = series
+        .values
+        .iter()
+        .filter(|value| value.is_finite() && **value > 0.0)
+        .count();
+    for (index, value) in series.values.iter().copied().enumerate() {
+        let value = if value.is_finite() {
+            value.max(0.0)
+        } else {
+            0.0
+        };
+        if value == 0.0 {
+            continue;
+        }
+        let color = chart_color(series.color, index);
+        if positive_count == 1 {
+            svg.push_str(&format!(
+                "<circle class=\"hwp-ole-chart-pie-slice\" cx=\"{cx:.2}\" cy=\"{cy:.2}\" r=\"{radius:.2}\" fill=\"{color}\"/>"
+            ));
+            continue;
+        }
+        let sweep = value / total * std::f64::consts::TAU;
+        let end = start + sweep;
+        let (x1, y1) = (cx + radius * start.cos(), cy + radius * start.sin());
+        let (x2, y2) = (cx + radius * end.cos(), cy + radius * end.sin());
+        let large = usize::from(sweep > std::f64::consts::PI);
+        svg.push_str(&format!(
+            "<path class=\"hwp-ole-chart-pie-slice\" d=\"M{cx:.2},{cy:.2} L{x1:.2},{y1:.2} A{radius:.2},{radius:.2} 0 {large} 1 {x2:.2},{y2:.2} Z\" fill=\"{}\"/>",
+            color
+        ));
+        start = end;
+    }
+}
+
+fn render_pie_legend(svg: &mut String, chart: &OleChart, left: f64, y: f64, plot_w: f64) {
+    let Some(series) = chart.series.first() else {
+        return;
+    };
+    let mut x = left + 4.0;
+    let max_x = left + plot_w;
+    for (index, _) in series.values.iter().enumerate() {
+        if x > max_x - 38.0 {
+            break;
+        }
+        let name = chart
+            .categories
+            .get(index)
+            .map(String::as_str)
+            .unwrap_or("Category");
+        svg.push_str(&format!(
+            "<rect x=\"{x:.2}\" y=\"{:.2}\" width=\"9\" height=\"9\" fill=\"{}\"/>\
+             <text x=\"{:.2}\" y=\"{:.2}\" font-family=\"sans-serif\" font-size=\"9\" \
+             fill=\"#334155\">{}</text>",
+            y - 8.0,
+            chart_color(series.color, index),
+            x + 13.0,
+            y,
+            escape_xml_text(name),
+        ));
+        x += 58.0;
     }
 }
 
@@ -232,7 +325,7 @@ fn render_legend(svg: &mut String, chart: &OleChart, left: f64, y: f64, plot_w: 
              <text x=\"{:.2}\" y=\"{:.2}\" font-family=\"sans-serif\" font-size=\"9\" \
              fill=\"#334155\">{}</text>",
             y - 8.0,
-            chart_color(idx),
+            chart_color(series.color, idx),
             x + 13.0,
             y,
             escape_xml_text(name),
@@ -241,11 +334,14 @@ fn render_legend(svg: &mut String, chart: &OleChart, left: f64, y: f64, plot_w: 
     }
 }
 
-fn chart_color(idx: usize) -> &'static str {
+fn chart_color(color: Option<u32>, idx: usize) -> String {
+    if let Some(color) = color {
+        return format!("#{:06x}", color & 0x00ff_ffff);
+    }
     const COLORS: &[&str] = &[
         "#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2",
     ];
-    COLORS[idx % COLORS.len()]
+    COLORS[idx % COLORS.len()].to_string()
 }
 
 fn format_axis_value(value: f64) -> String {
@@ -302,6 +398,7 @@ mod tests {
             series: vec![OleChartSeries {
                 name: Some("적립금".to_string()),
                 values: vec![328.0, 812.0],
+                color: None,
             }],
         }
     }
