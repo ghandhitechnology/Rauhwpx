@@ -1152,6 +1152,181 @@ fn test_split_moves_field_with_range_without_consuming_visible_offset() {
 }
 
 #[test]
+fn test_split_and_merge_preserves_cross_paragraph_field_end() {
+    let mut para = Paragraph {
+        text: "ABCD".to_string(),
+        // fieldBegin occupies the eight UTF-16 units before the first visible character.
+        char_count: 21,
+        char_offsets: vec![8, 9, 10, 11],
+        controls: vec![Control::Field(crate::model::control::Field {
+            field_type: crate::model::control::FieldType::ClickHere,
+            field_id: 41,
+            ..Default::default()
+        })],
+        field_ranges: vec![FieldRange {
+            start_char_idx: 0,
+            end_char_idx: 4,
+            control_idx: 0,
+            end_field_id: 77,
+        }],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    let second = para.split_at(2);
+
+    assert_eq!(para.text, "AB");
+    assert!(
+        para.field_ranges.is_empty(),
+        "split must not synthesize an early fieldEnd"
+    );
+    assert!(matches!(para.controls.as_slice(), [Control::Field(_)]));
+    assert_eq!(second.text, "CD");
+    assert!(second.controls.is_empty());
+    assert_eq!(
+        second
+            .orphan_field_ends
+            .iter()
+            .map(|end| (end.char_idx, end.begin_id_ref, end.field_id))
+            .collect::<Vec<_>>(),
+        vec![(2, 41, 77)],
+    );
+    assert_ne!(second.control_mask & (1 << 0x0004), 0);
+
+    para.merge_from(&second);
+
+    assert_eq!(para.text, "ABCD");
+    assert!(para.orphan_field_ends.is_empty());
+    assert_eq!(
+        para.field_ranges
+            .iter()
+            .map(|range| {
+                (
+                    range.start_char_idx,
+                    range.end_char_idx,
+                    range.control_idx,
+                    range.end_field_id,
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![(0, 4, 0, 77)],
+    );
+    assert_eq!(
+        para.char_count, 21,
+        "text + fieldBegin + fieldEnd + paragraph end"
+    );
+    assert_eq!(para.char_offsets, vec![8, 9, 10, 11]);
+}
+
+#[test]
+fn test_merge_places_following_text_after_trailing_field_end() {
+    let mut first = Paragraph {
+        text: "AB".to_string(),
+        char_count: 19,
+        char_offsets: vec![8, 9],
+        controls: vec![Control::Field(crate::model::control::Field {
+            field_id: 41,
+            ..Default::default()
+        })],
+        field_ranges: vec![FieldRange {
+            start_char_idx: 0,
+            end_char_idx: 2,
+            control_idx: 0,
+            end_field_id: 77,
+        }],
+        ..Default::default()
+    };
+    let second = Paragraph {
+        text: "C".to_string(),
+        char_count: 2,
+        char_offsets: vec![0],
+        ..Default::default()
+    };
+
+    first.merge_from(&second);
+
+    assert_eq!(first.text, "ABC");
+    assert_eq!(
+        first.char_offsets,
+        vec![8, 9, 18],
+        "appended text must follow the trailing fieldEnd slot",
+    );
+}
+
+#[test]
+fn test_split_and_merge_keep_orphan_only_paragraph_serializable() {
+    let mut para = Paragraph {
+        orphan_field_ends: vec![OrphanFieldEnd {
+            char_idx: 0,
+            begin_id_ref: 41,
+            field_id: 77,
+        }],
+        char_count: 9,
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    let second = para.split_at(0);
+    assert!(para.orphan_field_ends.is_empty());
+    assert_eq!(second.orphan_field_ends.len(), 1);
+    assert!(second.has_para_text, "fieldEnd needs a PARA_TEXT record");
+
+    para.merge_from(&second);
+    assert_eq!(para.orphan_field_ends.len(), 1);
+    assert!(para.has_para_text);
+}
+
+#[test]
+fn test_split_and_merge_preserves_range_tags_tabs_and_unique_header_tail() {
+    let first_tab = [100, 0, 0x0200, 0, 0, 0, 1];
+    let second_tab = [200, 0, 0x0200, 0, 0, 0, 2];
+    let mut para = Paragraph {
+        text: "A\tBC\tD".to_string(),
+        char_count: 7,
+        char_offsets: (0..6).collect(),
+        range_tags: vec![RangeTag {
+            start: 1,
+            end: 5,
+            tag: 0xAA,
+        }],
+        raw_header_extra: vec![0, 0, 0, 0, 0, 0, 1, 2, 3, 4],
+        tab_extended: vec![first_tab, second_tab],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    let second = para.split_at(3);
+
+    assert_eq!(para.text, "A\tB");
+    assert_eq!(second.text, "C\tD");
+    assert_eq!(
+        para.range_tags
+            .iter()
+            .map(|r| (r.start, r.end, r.tag))
+            .collect::<Vec<_>>(),
+        vec![(1, 3, 0xAA)]
+    );
+    assert_eq!(
+        second
+            .range_tags
+            .iter()
+            .map(|r| (r.start, r.end, r.tag))
+            .collect::<Vec<_>>(),
+        vec![(0, 2, 0xAA)]
+    );
+    assert_eq!(para.tab_extended, vec![first_tab]);
+    assert_eq!(second.tab_extended, vec![second_tab]);
+    assert!(
+        second.raw_header_extra.is_empty(),
+        "a new paragraph needs its own instance metadata"
+    );
+
+    para.merge_from(&second);
+    assert_eq!(para.text, "A\tBC\tD");
+    assert_eq!(para.tab_extended, vec![first_tab, second_tab]);
+}
+
+#[test]
 fn test_merge_undo_restores_second_paragraph_meta() {
     // 병합 undo 는 split_at 으로 문단을 되살리는데, 새 문단의 메타데이터는 앞 문단에서
     // 상속되므로 사라진 문단의 원래 값을 재현할 수 없다. capture_meta/apply_meta 로

@@ -1,8 +1,8 @@
 //! 머리말/꼬리말 생성·조회·텍스트 편집 관련 native 메서드
 
 use crate::document_core::helpers::{
-    build_tab_def_from_json, json_has_border_keys, json_has_tab_keys, parse_json_i16_array,
-    parse_para_shape_mods,
+    build_tab_def_from_json, json_has_border_keys, json_has_tab_keys, parse_char_shape_mods,
+    parse_json_i16_array, parse_para_shape_mods,
 };
 use crate::document_core::DocumentCore;
 use crate::error::HwpError;
@@ -40,6 +40,111 @@ fn apply_label(a: HeaderFooterApply) -> &'static str {
 }
 
 impl DocumentCore {
+    /// 머리말/꼬리말 문단의 글자 속성을 조회한다.
+    pub fn get_char_properties_in_hf_native(
+        &self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: usize,
+        char_offset: usize,
+    ) -> Result<String, HwpError> {
+        let para = self
+            .get_hf_paragraph_ref(section_idx, is_header, apply_to, hf_para_idx)
+            .ok_or_else(|| HwpError::RenderError("머리말/꼬리말 문단을 찾을 수 없음".into()))?;
+        Ok(self.build_char_properties_json(para, char_offset))
+    }
+
+    /// 머리말/꼬리말 문단에 run 보존 글자 서식을 적용한다.
+    pub fn apply_char_format_in_hf_native(
+        &mut self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: usize,
+        start_offset: usize,
+        end_offset: usize,
+        props_json: &str,
+    ) -> Result<String, HwpError> {
+        let mut mods = parse_char_shape_mods(props_json);
+        if json_has_border_keys(props_json) {
+            mods.border_fill_id = Some(self.create_border_fill_from_json(props_json));
+        }
+        let runs = self
+            .get_hf_paragraph_ref(section_idx, is_header, apply_to, hf_para_idx)
+            .ok_or_else(|| HwpError::RenderError("머리말/꼬리말 문단을 찾을 수 없음".into()))?
+            .char_shape_runs_in_range(start_offset, end_offset);
+        let applications = self.derive_char_shape_applications(runs, &mods);
+        for (start, end, shape_id) in applications {
+            self.get_hf_paragraph_mut(section_idx, is_header, apply_to, hf_para_idx)?
+                .apply_char_shape_range(start, end, shape_id);
+        }
+        if super::formatting::char_shape_mods_affect_text_flow(&mods) {
+            self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
+        }
+        self.document.sections[section_idx].raw_stream = None;
+        self.rebuild_section(section_idx);
+        self.event_log.push(DocumentEvent::CharFormatChanged {
+            section: section_idx,
+            para: hf_para_idx,
+            start: start_offset,
+            end: end_offset,
+        });
+        Ok("{\"ok\":true}".to_string())
+    }
+
+    /// HF 글자 서식 undo/redo용 ID 직접 복원.
+    pub fn set_char_shape_id_in_hf_native(
+        &mut self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: usize,
+        start_offset: usize,
+        end_offset: usize,
+        char_shape_id: u32,
+    ) -> Result<String, HwpError> {
+        if char_shape_id as usize >= self.document.doc_info.char_shapes.len() {
+            return Err(HwpError::RenderError("글자 모양 ID 범위 초과".into()));
+        }
+        self.get_hf_paragraph_mut(section_idx, is_header, apply_to, hf_para_idx)?
+            .apply_char_shape_range(start_offset, end_offset, char_shape_id);
+        self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
+        self.document.sections[section_idx].raw_stream = None;
+        self.rebuild_section(section_idx);
+        self.event_log.push(DocumentEvent::CharFormatChanged {
+            section: section_idx,
+            para: hf_para_idx,
+            start: start_offset,
+            end: end_offset,
+        });
+        Ok("{\"ok\":true}".to_string())
+    }
+
+    /// HF 문단 모양 undo/redo용 ID 직접 복원.
+    pub fn set_para_shape_id_in_hf_native(
+        &mut self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: usize,
+        para_shape_id: u16,
+    ) -> Result<String, HwpError> {
+        if para_shape_id as usize >= self.document.doc_info.para_shapes.len() {
+            return Err(HwpError::RenderError("문단 모양 ID 범위 초과".into()));
+        }
+        self.get_hf_paragraph_mut(section_idx, is_header, apply_to, hf_para_idx)?
+            .para_shape_id = para_shape_id;
+        self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
+        self.document.sections[section_idx].raw_stream = None;
+        self.rebuild_section(section_idx);
+        self.event_log.push(DocumentEvent::ParaFormatChanged {
+            section: section_idx,
+            para: hf_para_idx,
+        });
+        Ok("{\"ok\":true}".to_string())
+    }
+
     /// 구역의 문단들에서 특정 apply_to의 머리말 또는 꼬리말 컨트롤 위치를 찾는다.
     /// 반환: (para_index, control_index)
     fn find_header_footer_control(
@@ -855,10 +960,7 @@ impl DocumentCore {
             para.para_shape_id = new_id;
         }
 
-        // 줄간격 변경 시 LineSeg 재계산
-        if mods.line_spacing.is_some() || mods.line_spacing_type.is_some() {
-            self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
-        }
+        self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
 
         self.document.sections[section_idx].raw_stream = None;
         self.rebuild_section(section_idx);
@@ -1164,6 +1266,37 @@ mod tests {
 
         let result = core.get_header_footer_native(0, true, 0).unwrap();
         assert!(result.contains("Hello"));
+    }
+
+    #[test]
+    fn header_char_format_supports_query_apply_and_id_restore() {
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+        if core.document.doc_info.char_shapes.is_empty() {
+            core.document.doc_info.char_shapes.push(Default::default());
+        }
+        core.create_header_footer_native(0, true, 0).unwrap();
+        core.insert_text_in_header_footer_native(0, true, 0, 0, 0, "AB")
+            .unwrap();
+
+        let before = core
+            .get_char_properties_in_hf_native(0, true, 0, 0, 0)
+            .unwrap();
+        assert!(before.contains("\"bold\":false"), "{before}");
+
+        core.apply_char_format_in_hf_native(0, true, 0, 0, 0, 2, r#"{"bold":true}"#)
+            .unwrap();
+        let applied = core
+            .get_char_properties_in_hf_native(0, true, 0, 0, 0)
+            .unwrap();
+        assert!(applied.contains("\"bold\":true"), "{applied}");
+
+        core.set_char_shape_id_in_hf_native(0, true, 0, 0, 0, 2, 0)
+            .unwrap();
+        let restored = core
+            .get_char_properties_in_hf_native(0, true, 0, 0, 0)
+            .unwrap();
+        assert!(restored.contains("\"bold\":false"), "{restored}");
     }
 
     /// 필드 삽입의 반환 오프셋은 실제로 삽입된 자리를 가리킨다.

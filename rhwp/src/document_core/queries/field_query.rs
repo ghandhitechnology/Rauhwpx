@@ -1415,6 +1415,10 @@ pub(crate) fn rebuild_char_offsets(para: &mut Paragraph) {
         let idx = fr.end_char_idx.min(text_len);
         field_end_at[idx] += 1;
     }
+    for orphan in &para.orphan_field_ends {
+        let idx = orphan.char_idx.min(text_len);
+        field_end_at[idx] += 1;
+    }
 
     if text_len == 0 {
         para.char_offsets = Vec::new();
