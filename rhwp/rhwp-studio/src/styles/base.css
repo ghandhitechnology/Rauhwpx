@@ -1,3 +1,27 @@
+@font-face {
+  font-family: 'NanumSquare';
+  src:
+    local('NanumSquare Regular'),
+    local('NanumSquareR'),
+    local('나눔스퀘어'),
+    url('/fonts/NanumSquare-Regular.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'NanumSquare';
+  src:
+    local('NanumSquare Bold'),
+    local('NanumSquareB'),
+    local('나눔스퀘어 Bold'),
+    url('/fonts/NanumSquare-Bold.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
 /* ─── 디자인 토큰 ─────────────────────────────────────
    --ui-* 는 앱 전체가 쓰는 의미 계층이고, 그 값은 아래 --n-*
    중성 램프에서 나온다. 색을 바꿀 일이 있으면 램프를 고친다.

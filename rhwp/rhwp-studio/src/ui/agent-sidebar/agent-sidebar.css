@@ -92,6 +92,7 @@ body.ag-sidebar-resizing {
   --ag-r-panel: 14px;
 
   /* Monospace is reserved for raw tool details and exact coordinates. */
+  --ag-font: 'NanumSquare', '나눔스퀘어', var(--font-family-ui, sans-serif);
   --ag-mono: var(--font-family-mono, monospace);
   --ag-micro: 11px;
   --ag-track: 0;
@@ -113,7 +114,7 @@ body.ag-sidebar-resizing {
   border-left: 1px solid var(--ag-border-strong);
   /* 아래로 떨어지는 그림자가 아니라 왼쪽으로 드리우는 판 가장자리 */
   box-shadow: var(--shadow-panel);
-  font-family: var(--font-family-ui, sans-serif);
+  font-family: var(--ag-font);
   font-size: var(--font-size-md, 13px);
   line-height: 1.55;
   transition: transform var(--ag-sidebar-duration) var(--ag-sidebar-ease);
@@ -2634,27 +2635,14 @@ body.ag-fullscreen-open #editor-area {
   display: none;
 }
 
-/* Stable navigation + main work surface. Review is not a grid track. */
+/* Stable navigation + main work surface. Column widths are defined by the
+   fullscreen workspace shell below. */
 .ag-fullscreen .ag-stage {
   position: relative;
   display: grid;
-  grid-template-columns: var(--ag-rail-w, 260px) minmax(0, 1fr);
-  grid-template-rows: 100%;
   gap: 0;
   overflow: hidden;
   transition: grid-template-columns 240ms var(--ag-motion-out);
-}
-
-.ag-fullscreen.ag-rail-collapsed .ag-stage {
-  grid-template-columns: 0 minmax(0, 1fr);
-}
-
-.ag-fullscreen.ag-review-collapsed .ag-stage {
-  grid-template-columns: var(--ag-rail-w, 260px) minmax(0, 1fr);
-}
-
-.ag-fullscreen.ag-rail-collapsed.ag-review-collapsed .ag-stage {
-  grid-template-columns: 0 minmax(0, 1fr);
 }
 
 /* 접은 칸은 폭만 0 이 아니라 visibility 까지 감춘다 — 잘려 보이지 않을
@@ -2670,21 +2658,6 @@ body.ag-fullscreen-open #editor-area {
     padding-inline 240ms var(--ag-motion-out),
     opacity 130ms ease,
     visibility 0s linear 130ms;
-}
-
-.ag-fullscreen.ag-review-collapsed .ag-review-column {
-  visibility: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateX(calc(100% + 20px));
-  transition:
-    opacity 160ms ease,
-    transform 220ms var(--ag-motion-out),
-    visibility 0s linear 130ms;
-}
-
-.ag-fullscreen.ag-review-collapsed .ag-chat-page {
-  border-right: none;
 }
 
 /* ── 칸 경계 드래그 ───────────────────────────────────
@@ -2836,42 +2809,6 @@ body.ag-col-resizing {
 /* ── Contextual review drawer ───────────────────────── */
 .ag-review-column {
   display: none;
-}
-
-.ag-fullscreen .ag-review-column {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  bottom: 12px;
-  z-index: 6;
-  display: flex;
-  width: min(var(--ag-review-w, 520px), calc(100% - 32px));
-  min-width: 0;
-  flex-direction: column;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-panel);
-  background: var(--ag-raised);
-  box-shadow: var(--n-elev-3);
-  overflow: hidden;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transform: translateX(calc(100% + 20px));
-  transition:
-    opacity 180ms var(--ag-motion-out),
-    transform 240ms var(--ag-motion-out),
-    visibility 0s linear 240ms;
-}
-
-.ag-fullscreen.ag-review-drawer-open:not(.ag-review-collapsed) .ag-review-column {
-  opacity: 1;
-  visibility: visible;
-  pointer-events: auto;
-  transform: translateX(0);
-  transition:
-    opacity 180ms var(--ag-motion-out),
-    transform 240ms var(--ag-motion-out),
-    visibility 0s linear 0s;
 }
 
 .ag-review-column-head {
@@ -3132,17 +3069,23 @@ body.ag-col-resizing {
 }
 
 .ag-fullscreen .ag-stage,
-.ag-fullscreen.ag-rail-collapsed .ag-stage,
-.ag-fullscreen.ag-review-collapsed .ag-stage,
-.ag-fullscreen.ag-rail-collapsed.ag-review-collapsed .ag-stage {
-  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr);
+.ag-fullscreen.ag-review-collapsed .ag-stage {
+  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr) 0;
   grid-template-rows: 48px minmax(0, 1fr);
   background: var(--ag-bg);
 }
 
 .ag-fullscreen.ag-rail-collapsed .ag-stage,
 .ag-fullscreen.ag-rail-collapsed.ag-review-collapsed .ag-stage {
-  grid-template-columns: 0 minmax(0, 1fr);
+  grid-template-columns: 0 minmax(0, 1fr) 0;
+}
+
+.ag-fullscreen.ag-review-drawer-open:not(.ag-review-collapsed) .ag-stage {
+  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr) var(--ag-review-w, 480px);
+}
+
+.ag-fullscreen.ag-rail-collapsed.ag-review-drawer-open:not(.ag-review-collapsed) .ag-stage {
+  grid-template-columns: 0 minmax(0, 1fr) var(--ag-review-w, 480px);
 }
 
 /* A class mirrors the compact breakpoint so an in-flight grid transition
@@ -3211,9 +3154,12 @@ body.ag-col-resizing {
   align-items: center;
 }
 
+.ag-fullscreen .ag-environment-wrap {
+  position: static;
+}
+
 .ag-workspace-icon-btn,
-.ag-workspace-exit-btn,
-.ag-workspace-tab {
+.ag-workspace-exit-btn {
   border: 0;
   background: transparent;
   color: var(--ag-text-muted);
@@ -3250,8 +3196,7 @@ body.ag-col-resizing {
 }
 
 .ag-workspace-icon-btn:focus-visible,
-.ag-workspace-exit-btn:focus-visible,
-.ag-workspace-tab:focus-visible {
+.ag-workspace-exit-btn:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
@@ -3288,6 +3233,10 @@ body.ag-col-resizing {
   clip-path: inset(0 0 0 0 round 14px);
   transform: translateY(0) scale(1);
   transition-delay: 0s;
+}
+
+.ag-fullscreen .ag-environment-panel {
+  right: 8px;
 }
 
 .ag-environment-title {
@@ -3359,7 +3308,7 @@ body.ag-col-resizing {
 }
 
 .ag-environment-changes {
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr) auto 12px;
   width: 100%;
   padding: 0 9px;
   background: transparent;
@@ -3371,6 +3320,10 @@ body.ag-col-resizing {
 
 .ag-environment-changes:hover {
   background: var(--ag-hover);
+}
+
+.ag-environment-changes.ag-active {
+  background: var(--ag-active);
 }
 
 .ag-environment-changes:focus-visible {
@@ -3406,6 +3359,11 @@ body.ag-col-resizing {
   color: var(--ag-text-muted);
 }
 
+.ag-environment-changes-chevron {
+  color: var(--ag-text-muted);
+  transform: rotate(-90deg);
+}
+
 .ag-workspace-document-context {
   display: flex;
   min-width: 0;
@@ -3434,66 +3392,15 @@ body.ag-col-resizing {
   line-height: 1.2;
 }
 
-.ag-workspace-tabs {
+.ag-workspace-title {
   display: flex;
   min-width: 0;
-  align-items: stretch;
-  justify-content: center;
-  gap: 2px;
-}
-
-.ag-workspace-tab {
-  position: relative;
-  display: inline-flex;
-  min-width: 86px;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  padding: 0 14px;
+  color: var(--ag-text-secondary);
   font-size: 12px;
-  font-weight: 550;
-}
-
-.ag-workspace-tab::after {
-  position: absolute;
-  right: 12px;
-  bottom: -1px;
-  left: 12px;
-  height: 2px;
-  background: transparent;
-  content: '';
-}
-
-.ag-workspace-tab:hover {
-  color: var(--ag-text);
-}
-
-.ag-workspace-tab[aria-selected='true'] {
-  color: var(--ag-text);
-}
-
-.ag-workspace-tab[aria-selected='true']::after {
-  background: var(--ag-accent);
-}
-
-.ag-workspace-review-badge {
-  display: inline-flex;
-  min-width: 17px;
-  height: 17px;
-  box-sizing: border-box;
-  align-items: center;
-  justify-content: center;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--ag-accent) 20%, var(--ag-bg));
-  color: var(--ag-text);
-  font-size: 9px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 700;
-}
-
-.ag-workspace-review-badge[hidden] {
-  display: none;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .ag-workspace-agent-context {
@@ -3527,8 +3434,7 @@ body.ag-col-resizing {
 }
 
 .ag-fullscreen .ag-threads-page,
-.ag-fullscreen .ag-chat-page,
-.ag-fullscreen .ag-review-column {
+.ag-fullscreen .ag-chat-page {
   grid-row: 2;
 }
 
@@ -3588,71 +3494,73 @@ body.ag-col-resizing {
 }
 
 .ag-fullscreen .ag-chat-page {
+  --ag-chat-content-left: max(24px, calc((100vw - var(--ag-rail-w, 264px) - 860px) / 2));
+
   grid-column: 2;
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
   background: var(--ag-bg);
-  transition: opacity 140ms ease, visibility 0s linear 0s;
-}
-
-.ag-fullscreen.ag-workspace-changes .ag-chat-page {
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition: opacity 120ms ease, visibility 0s linear 120ms;
 }
 
 .ag-fullscreen .ag-messages {
   max-width: 860px;
+  width: min(860px, calc(100% - var(--ag-chat-content-left) - 24px));
+  margin-right: 0;
+  margin-left: var(--ag-chat-content-left);
   padding: 34px 38px 40px;
 }
 
 .ag-fullscreen .ag-composer {
   max-width: 860px;
-  width: calc(100% - 48px);
+  width: min(860px, calc(100% - var(--ag-chat-content-left) - 24px));
+  margin-right: 0;
+  margin-left: var(--ag-chat-content-left);
   margin-bottom: 20px;
   border-radius: 9px;
   box-shadow: var(--n-elev-2);
 }
 
-/* Changes is a full workspace surface, never an inset drawer. */
+/* 변경 사항은 대화를 유지한 채 오른쪽 열을 차지하는 docked drawer다. */
 .ag-fullscreen .ag-review-column,
 .ag-fullscreen.ag-review-collapsed .ag-review-column {
   position: relative;
-  inset: auto;
   z-index: 4;
-  grid-column: 2;
+  grid-column: 3;
+  grid-row: 2;
   display: flex;
   width: auto;
   min-width: 0;
   min-height: 0;
+  flex-direction: column;
   border: 0;
+  border-left: 1px solid var(--ag-border);
   border-radius: 0;
-  background: var(--ag-bg);
+  background: color-mix(in srgb, var(--ag-bg-2) 96%, var(--ag-bg));
   box-shadow: none;
   overflow: hidden;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transform: none;
-  transition: opacity 140ms ease, visibility 0s linear 140ms;
+  transition:
+    opacity 140ms ease-out,
+    visibility 0s linear 240ms;
 }
 
-.ag-fullscreen.ag-workspace-changes .ag-review-column,
 .ag-fullscreen.ag-review-drawer-open:not(.ag-review-collapsed) .ag-review-column {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
-  transform: none;
-  transition: opacity 140ms ease, visibility 0s linear 0s;
+  transition:
+    opacity 160ms ease-out,
+    visibility 0s linear 0s;
 }
 
 .ag-fullscreen .ag-review-column-head {
-  min-height: 52px;
-  padding: 0 22px;
+  min-height: 58px;
+  padding: 0 16px 0 18px;
   border-bottom: 1px solid var(--ag-border);
-  background: color-mix(in srgb, var(--ag-bg-2) 82%, var(--ag-bg));
+  background: color-mix(in srgb, var(--ag-raised) 72%, var(--ag-bg-2));
 }
 
 .ag-fullscreen .ag-review-column-title {
@@ -3660,14 +3568,14 @@ body.ag-col-resizing {
 }
 
 .ag-fullscreen .ag-review-column-close {
-  display: none;
+  display: inline-flex;
 }
 
 .ag-fullscreen .ag-review-column .ag-review {
-  width: min(100%, 980px);
+  width: 100%;
   box-sizing: border-box;
-  margin-inline: auto;
-  padding: 22px 28px 32px;
+  margin: 0;
+  padding: 14px 14px 24px;
   background: transparent;
 }
 
@@ -3681,13 +3589,9 @@ body.ag-col-resizing {
   box-shadow: none;
 }
 
-.ag-fullscreen .ag-review-column > .ag-composer {
-  width: min(calc(100% - 48px), 860px);
-  margin: 0 auto 20px;
-}
-
 .ag-fullscreen .ag-review-resize {
-  display: none;
+  top: 48px;
+  right: calc(var(--ag-review-w, 480px) - 3px);
 }
 
 .ag-fullscreen .ag-rail-resize {
@@ -3742,11 +3646,6 @@ body.ag-col-resizing {
     padding-inline: 8px;
   }
 
-  .ag-workspace-tab {
-    min-width: 68px;
-    padding-inline: 8px;
-  }
-
   .ag-workspace-exit-btn {
     width: 34px;
     justify-content: center;
@@ -3754,7 +3653,6 @@ body.ag-col-resizing {
   }
 
   .ag-environment-panel {
-    right: -42px;
     width: min(340px, calc(100vw - 16px));
   }
 
@@ -3762,8 +3660,7 @@ body.ag-col-resizing {
     padding: 22px 14px 28px;
   }
 
-  .ag-fullscreen .ag-composer,
-  .ag-fullscreen .ag-review-column > .ag-composer {
+  .ag-fullscreen .ag-composer {
     width: calc(100% - 20px);
     margin-bottom: 10px;
   }
@@ -3790,14 +3687,12 @@ body.ag-col-resizing {
 
 @media (prefers-reduced-motion: reduce) {
   .ag-fullscreen .ag-chat-page,
-  .ag-fullscreen .ag-review-column,
-  .ag-fullscreen .ag-workspace-tab::after {
+  .ag-fullscreen .ag-review-column {
     transition: none;
   }
 }
 
-/* Keep a hidden Changes surface from creating an implicit second grid track
-   after the workspace crosses into compact mode. */
+/* Keep the hidden drawer out of compact workspace grid calculations. */
 .ag-fullscreen.ag-workspace-compact .ag-review-column,
 .ag-fullscreen.ag-workspace-compact.ag-review-collapsed .ag-review-column {
   grid-column: 1;
