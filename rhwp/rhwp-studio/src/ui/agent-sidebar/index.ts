@@ -1210,7 +1210,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   environmentChanges.addEventListener('click', () => {
     setReviewColCollapsed(false);
     setEnvironmentPanelOpen(false);
-    window.requestAnimationFrame(() => reviewColumnClose.focus());
+    // drawer 가 열리는 도중의 focus 가 조상 스크롤을 밀어 판 전체를
+    // 옮기지 않도록 스크롤 없이 초점만 옮긴다.
+    window.requestAnimationFrame(() => reviewColumnClose.focus({ preventScroll: true }));
   });
   workspaceExitBtn.addEventListener('click', () => setFullscreen(false));
   applyEnvironmentPanelState();
