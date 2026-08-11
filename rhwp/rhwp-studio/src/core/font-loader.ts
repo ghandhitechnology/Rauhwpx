@@ -6,6 +6,8 @@
  *   2. FontFace API로 즉시 로드 + document.fonts.add()
  */
 
+import { createFontProbeContext, isFontFamilyAvailable } from './font-presence.ts';
+
 interface FontEntry {
   name: string;
   file: string;
@@ -83,7 +85,9 @@ const FONT_LIST: FontEntry[] = [
   // 기존 미등록 → 체인의 'Malgun Gothic'(Pretendard) 가 먼저 매칭되어 굵게 렌더됐다.
   { name: 'Haansoft Dotum', file: 'fonts/NotoSansKR-ExtraLight.woff2' },
   { name: '바탕', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: '바탕체', file: 'fonts/D2Coding-Regular.woff2' },
+  // 바탕체는 고정폭 '명조' 다. D2Coding(고딕 고정폭)으로 대체하면 serif→sans 로 서체
+  // 계열이 뒤집혀 본문 인상이 완전히 달라진다. 고정폭보다 명조 계열 보존이 우선이다.
+  { name: '바탕체', file: 'fonts/NotoSerifKR-Regular.woff2' },
   { name: '궁서', file: 'fonts/GowunBatang-Regular.woff2' },
   { name: '궁서체', file: 'fonts/GowunBatang-Regular.woff2' },
   { name: '새궁서', file: 'fonts/GowunBatang-Regular.woff2' },
@@ -249,17 +253,36 @@ function registerFontFaces(options?: WebFontLoadOptions): void {
     style.id = styleId;
     document.head.appendChild(style);
   }
+  // 실제로 설치된 서체는 @font-face 로 덮지 않는다.
+  // CSS 글꼴 매칭에서 @font-face 는 동명의 시스템 서체보다 항상 우선하므로,
+  // 무조건 등록하면 사용자가 진짜 가진 바탕/굴림체/맑은 고딕을 대체 파일이 가로챈다
+  // (예: 바탕체(명조 고정폭) → D2Coding(고딕) 로 serif→sans 뒤바뀜).
+  const shadowed: string[] = [];
   style.textContent = selectableFontList(options).map(f => {
+    if (detectedOSFonts.has(f.name)) {
+      shadowed.push(f.name);
+      return `/* ${f.name}: OS 설치 서체 사용 (대체 등록 생략) */`;
+    }
     const fmt = f.format ?? 'woff2';
     const ur = f.unicodeRange ? ` unicode-range: ${f.unicodeRange};` : '';
     return `@font-face { font-family: "${f.name}"; src: url("${f.file}") format("${fmt}"); font-display: swap;${ur} }`;
   }).join('\n');
+  if (shadowed.length > 0) {
+    console.log(`[FontLoader] OS 설치 서체 우선 적용(대체 등록 생략): ${shadowed.join(', ')}`);
+  }
   fontFaceRegistrationMode = mode;
 }
 
 /**
- * OS에 설치된 폰트인지 감지한다 (document.fonts.check 기반).
+ * OS에 설치된 폰트인지 감지한다 (캔버스 글립 폭 프로브 기반).
  * @font-face 등록 전에 호출해야 정확하다.
+ *
+ * [수정] 과거에는 document.fonts.check() 를 썼으나, 이 API 는 "매칭되는 @font-face 중
+ * 로드가 필요한 것이 없는가" 를 묻는 것이라 존재하지 않는 서체에도 항상 true 를 준다.
+ * 그 결과 아래 후보 19개가 플랫폼과 무관하게 전부 "설치됨" 으로 잡혀
+ *   ① 대체 웹폰트 로딩이 통째로 생략되고(로드 대상이 함초롬 2개로 축소)
+ *   ② macOS/Linux 에서 바탕·돋움·굴림·맑은 고딕이 브라우저 기본 서체로 떨어졌다.
+ * 실제 설치 여부는 font-presence.ts 의 글립 폭 프로브로 판정한다.
  */
 const OS_FONT_CANDIDATES = [
   // Windows
@@ -274,16 +297,20 @@ const detectedOSFonts = new Set<string>();
 
 /** OS 폰트 감지 실행 (@font-face 등록 전에 호출) */
 function detectOSFonts(): void {
+  const ctx = createFontProbeContext();
+  if (!ctx) return;
   for (const name of OS_FONT_CANDIDATES) {
     try {
-      if (document.fonts.check(`16px "${name}"`)) {
+      if (isFontFamilyAvailable(name, ctx)) {
         detectedOSFonts.add(name);
       }
     } catch { /* 무시 */ }
   }
-  if (detectedOSFonts.size > 0) {
-    console.log(`[FontLoader] OS 폰트 감지: ${Array.from(detectedOSFonts).join(', ')}`);
-  }
+  console.log(
+    detectedOSFonts.size > 0
+      ? `[FontLoader] OS 폰트 감지: ${Array.from(detectedOSFonts).join(', ')}`
+      : '[FontLoader] OS 설치 한글 폰트 없음 — 전량 웹폰트로 대체',
+  );
 }
 
 /** 감지된 OS 폰트 목록 (외부 참조용) */
