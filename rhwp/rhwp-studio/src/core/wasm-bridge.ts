@@ -154,7 +154,13 @@ function substituteCssFontFamily(cssFont: string): string {
   if (!match) return cssFont;
 
   const fontName = match[1];
-  return prefix + fontFamilyChainForDisplay(fontName, 0, 0);
+  const substituted = fontFamilyChainForDisplay(fontName, 0, 0);
+
+  // 엔진이 직접 만든 나머지 fallback 체인을 버리지 않는다.
+  // 기존에는 첫 서체만 남기고 잘라내어, FONT_LIST(약 60개)에 없는 문서 서체는
+  // 엔진이 계산해 둔 대체 후보를 전부 잃고 브라우저 기본 서체로 떨어졌다.
+  const rest = familyPart.substring(match[0].length).replace(/^\s*,\s*/, '');
+  return rest ? `${prefix}${substituted}, ${rest}` : prefix + substituted;
 }
 
 let canvasFontSubstitutionInstalled = false;

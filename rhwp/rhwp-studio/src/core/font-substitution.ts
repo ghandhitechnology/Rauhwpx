@@ -221,12 +221,19 @@ function pushUniqueFontFamily(families: string[], fontName: string): void {
 
 function systemFallbackFamilies(fontName: string): string[] {
   if (GENERIC_FONTS.has(fontName)) return [fontName];
-  // Monospace 판별
-  if (/굴림체|바탕체|gulimche|batangche|coding|courier/i.test(fontName)) {
+  // 고정폭 '명조' (바탕체) — 고정폭보다 명조 계열 보존이 우선이다.
+  // 고딕 고정폭(D2Coding)으로 떨어뜨리면 serif→sans 로 계열이 뒤집힌다.
+  if (/바탕체|batangche/i.test(fontName)) {
+    return ['BatangChe', 'Batang', 'AppleMyungjo', 'Noto Serif KR', 'serif'];
+  }
+  // 고정폭 '고딕' (굴림체/코딩 서체)
+  if (/굴림체|gulimche|coding|courier/i.test(fontName)) {
     return ['GulimChe', 'D2Coding', 'Noto Sans Mono', 'monospace'];
   }
-  // Serif 판별
-  if (/[바탕명조궁서]|hymjre|times|palatino|georgia|batang|gungsuh/i.test(fontName)) {
+  // Serif 판별 — 문자 클래스가 아니라 실제 서체명 토큰으로 검사한다.
+  // (기존 `[바탕명조궁서]` 는 '서울남산체'·'고딕서체' 처럼 해당 글자가 스치기만 해도
+  //  명조로 오분류했다.)
+  if (/바탕|명조|궁서|hymjre|times|palatino|georgia|batang|gungsuh|myungjo|myeongjo|serif/i.test(fontName)) {
     return ['Batang', 'AppleMyungjo', 'Noto Serif KR', 'serif'];
   }
   // Sans-serif (기본)
