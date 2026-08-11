@@ -35,6 +35,14 @@ import {
 } from './navigation-keymap';
 
 /**
+ * compositionend 직후의 '유령 input' 을 억제하는 유효 시간(ms).
+ *
+ * 유령 input 은 같은 이벤트 루프 턴에 즉시 뒤따르므로 한 프레임이면 충분하다.
+ * 이 창을 넘긴 입력은 사용자가 실제로 다시 친 것이므로 삼키면 안 된다.
+ */
+const GHOST_INPUT_WINDOW_MS = 50;
+
+/**
  * [#2548] WASM 삭제/조회 count 는 Rust `Paragraph::delete_text_at` 의 char(Unicode
  * scalar) 단위다. JS `String.length`(UTF-16 code unit)를 넘기면 astral 문자(😀 등)에서
  * 실제보다 많이 지워 인접 문자를 잃는다 — [#2337-review] 가 undo/HF/FN 경로에 적용한
@@ -419,6 +427,7 @@ export function onCompositionEnd(this: any): void {
   // 더블 자음 분리 방지: compositionEnd 시점에 조합 완료된 텍스트 기억
   // 직후 유령 input 이벤트에서 동일 텍스트가 오면 무시
   this._lastComposedText = (finalLength > 0 && this._lastCompositionText) ? this._lastCompositionText : '';
+  this._lastComposedAt = performance.now();
 
   // 조합 중 WASM 직접 호출로 이미 문서에 삽입된 텍스트를
   // Command로 기록하여 Undo 가능하게 한다.
@@ -476,7 +485,11 @@ export function getTextAt(this: any, pos: DocumentPosition, count: number): stri
 export function onInput(this: any, e?: InputEvent): void {
   if (!this.active) return;
 
-  const text = this.textarea.value;
+  // 줄바꿈은 문단 분할 Command 로만 들어온다. textarea 의 기본 동작으로 값에 섞여 들어온
+  // \r\n 을 그대로 삽입하면 문단 안에 리터럴 개행 문자가 박힌다.
+  // (조합 중 Enter 는 preventDefault 하지 않고 브라우저에 조합 종료를 맡기므로
+  //  textarea.value 에 개행이 남고, 조합 분기·일반 분기 양쪽으로 흘러든다.)
+  const text = this.textarea.value.replace(/[\r\n]+/g, '');
   // const inputType = e?.inputType ?? 'unknown';
   // const inputData = e?.data ?? '';
   // const isComp = e?.isComposing ?? false;
@@ -581,11 +594,21 @@ export function onInput(this: any, e?: InputEvent): void {
   }
 
   // 일반 입력 (비조합) → Command로 실행
-  if (!text) return;
+  if (!text) {
+    // 개행만 들어온 경우 textarea 를 비워 다음 입력에 새지 않게 한다.
+    if (this.textarea.value) this.textarea.value = '';
+    return;
+  }
 
   // 더블 자음 분리 방지: compositionEnd 직후 유령 input 이벤트 감지
   // 각주/머리말꼬리말 모드에서 조합 완료 직후 동일 텍스트가 오면 무시
-  if (this._lastComposedText && text === this._lastComposedText) {
+  //
+  // 유령 input 은 compositionend 와 같은 이벤트 루프 턴에 바로 뒤따른다.
+  // 만료 시간을 두지 않으면 이 억제 상태가 무기한 살아남아, 한참 뒤에 같은
+  // 글자를 다시 친 '진짜' 입력 한 번을 통째로 삼킨다(사용자에겐 씹힘으로 보인다).
+  const ghostAge = performance.now() - (this._lastComposedAt ?? 0);
+  if (this._lastComposedText && text === this._lastComposedText
+      && ghostAge <= GHOST_INPUT_WINDOW_MS) {
     this._lastComposedText = '';
     this.textarea.value = '';
     return;
