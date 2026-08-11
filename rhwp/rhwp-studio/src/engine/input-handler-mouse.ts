@@ -266,6 +266,10 @@ export function onClick(this: any, e: MouseEvent): void {
     return;
   }
 
+  // 커서가 움직이기 전에 열려 있는 IME 조합을 확정한다 —
+  // 그러지 않으면 옛 anchor 가 살아남아 다음 입력이 엉뚱한 자리를 덮어쓴다.
+  this.finalizeCompositionBeforeCursorMove?.();
+
   // 연결선 드로잉 모드: 연결점 클릭으로 시작/끝
   if (this.connectorDrawingMode && e.button === 0) {
     const target = e.target as HTMLElement;
