@@ -462,6 +462,8 @@ export class InputHandler {
   private compositionLength = 0; // 문서에 삽입된 조합 텍스트 길이
   private _lastCompositionText = '';
   private _lastComposedText = '';
+  /** `_lastComposedText` 가 기록된 시각 — 유령 input 억제 창의 기준점. */
+  private _lastComposedAt = 0;
   private _pendingNavAfterIME: NavigationKeyInput | null = null;
   // iOS 폴백: composition 이벤트 없이 input만으로 한글 조합 처리
   private _iosComposing = false;
@@ -2623,6 +2625,29 @@ export class InputHandler {
   /** IME 조합 완료 — 조합 텍스트를 Command로 기록 */
   private onCompositionEnd(): void {
     _text.onCompositionEnd.call(this);
+  }
+
+  /**
+   * 커서를 옮기기 전에 열려 있는 IME 조합을 확정한다.
+   *
+   * 캔버스 클릭은 숨은 textarea 의 포커스도 selection 도 바꾸지 않으므로
+   * 브라우저가 조합을 끝낼 이유가 없어 compositionend 가 발생하지 않는다.
+   * 그대로 두면 `compositionAnchor`(클릭 전 위치)가 살아남아, 다음 입력이
+   * 클릭한 자리가 아니라 옛 anchor 자리의 글자를 지우고 덮어쓴다.
+   *
+   * 여기서 조합분을 먼저 히스토리에 확정하고, textarea 를 재포커스해
+   * 브라우저 쪽 조합 상태(InputMethodController)도 함께 리셋한다.
+   */
+  finalizeCompositionBeforeCursorMove(): void {
+    if (!this.isComposing) return;
+    _text.onCompositionEnd.call(this);
+    // blur→focus 로 IME 조합 버퍼를 비운다. 조합 중 값이 남아 있으면
+    // 다음 input 이 옛 preedit 를 다시 흘려보낸다.
+    this.textarea.value = '';
+    try {
+      this.textarea.blur();
+      this.textarea.focus();
+    } catch { /* 포커스 이동 실패는 무시 — 상태는 이미 확정됨 */ }
   }
 
   /** 위치에서 텍스트를 읽는다 (본문/셀 자동 분기) */
