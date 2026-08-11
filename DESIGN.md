@@ -89,6 +89,24 @@ Mode: **Operate**. 표현보다 스캔 가능성·일관성·익숙한 조작이
 조밀한 내부 정보는 앱의 `4 / 6 / 8px` 체계를 유지한다. 작업 로그라는
 이유로 전체 작업 공간을 더 각지게 만들지 않는다.
 
+## Agent buttons: 손그림 윤곽
+
+에이전트 사이드바와 전체 화면 작업 공간의 버튼은 위의 고른 반경 대신
+펜으로 그린 듯한 윤곽을 쓴다. 두 가지 장치다:
+
+1. 모서리마다 미묘하게 다른 `border-radius`(두 축 `a b c d / e f g h`
+   형태). 고른 반경은 기계적으로 읽힌다.
+2. `--ag-sketch-line` = `url(#ag-sketch-line)` displacement 필터.
+   `feTurbulence`(fractalNoise) + `feDisplacementMap` 조합이고, 정의는
+   `src/ui/agent-sidebar/index.ts` 가 사이드바 루트에 한 번 심는다.
+   `display:none` 으로 숨기면 Safari 가 참조를 무시하므로 0 크기
+   `.ag-sketch-defs` 로 둔다.
+
+규칙은 `agent-sidebar.css` 끝의 "손그림 버튼" 절에 모여 있다. 색·호버·
+비활성은 기존 규칙을 그대로 쓰고 윤곽만 얹는다 — 필터가 테두리, 채움,
+포커스 링을 함께 흔들기 때문이다. 편집기 크롬(도구 모음, 대화상자)과
+캘리브레이션 마법사처럼 사이드바 밖의 표면에는 적용하지 않는다.
+
 ## Elevation
 
 오프셋 + 부드러운 블러 2겹. 0-오프셋 컬러 헤일로는 쓰지 않는다.

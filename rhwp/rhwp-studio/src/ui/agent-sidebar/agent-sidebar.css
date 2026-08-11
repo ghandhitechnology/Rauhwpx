@@ -91,6 +91,9 @@ body.ag-sidebar-resizing {
   --ag-r-field: 10px;
   --ag-r-panel: 14px;
 
+  /* 손그림 버튼 윤곽 — index.ts 가 문서에 심는 #ag-sketch-line 필터 참조. */
+  --ag-sketch-line: url(#ag-sketch-line);
+
   /* Monospace is reserved for raw tool details and exact coordinates. */
   --ag-font: 'NanumSquare', '나눔스퀘어', var(--font-family-ui, sans-serif);
   --ag-mono: var(--font-family-mono, monospace);
@@ -2601,7 +2604,8 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 .ag-send.ag-stop:hover:not(:disabled) {
   background: var(--ag-err);
-  filter: brightness(0.92);
+  /* 손그림 윤곽을 유지하면서 어둡게 — filter 를 교체하지 않고 누적한다. */
+  filter: var(--ag-sketch-line) brightness(0.92);
 }
 
 /* ─── 전체 화면 작업 공간 ─────────────────────────────
@@ -3701,4 +3705,65 @@ body.ag-col-resizing {
 .ag-fullscreen.ag-workspace-compact .ag-review-column,
 .ag-fullscreen.ag-workspace-compact.ag-review-collapsed .ag-review-column {
   grid-column: 1;
+}
+
+/* ─── 손그림 버튼 ─────────────────────────────────────
+   사이드바와 전체 화면 작업 공간의 버튼은 기계적인 고른 모서리 대신 펜으로
+   그린 듯한 윤곽을 쓴다. 두 가지를 함께 쓴다:
+   1. 모서리마다 미묘하게 다른 border-radius — 고른 반경은 그린 선처럼
+      보이지 않는다.
+   2. var(--ag-sketch-line) displacement 필터 — 정의는 index.ts 가 문서에
+      한 번 심는다. 테두리·채움·포커스 링이 같은 필터를 타므로 상태별
+      추가 규칙 없이 호버/비활성이 그대로 흔들린다.
+   색·호버·비활성 동작 자체는 위의 기존 규칙을 바꾸지 않는다. 파일 끝에
+   둬 같은 specificity 의 기존 radius 규칙을 소스 순서로 이긴다. */
+
+/* display:none 이면 Safari 가 filter url() 참조를 무시하므로 0 크기로 숨긴다. */
+.ag-sketch-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* 채움·테두리가 있는 동작 버튼 */
+.ag-send,
+.ag-approve,
+.ag-reject,
+.ag-takeover-btn,
+.ag-threads-new,
+.ag-skills-new,
+.ag-skill-generate,
+.ag-skill-save,
+.ag-skill-copy,
+.ag-skill-secondary,
+.ag-skill-danger,
+.ag-skill-toggle,
+.ag-skill-upload-label,
+.ag-workspace-exit-btn {
+  border-radius: 9px 12px 8px 13px / 12px 8px 13px 9px;
+  filter: var(--ag-sketch-line);
+}
+
+/* 테두리 없이 호버 면적만 있는 고스트·아이콘 버튼 */
+.ag-header-icon-btn,
+.ag-workspace-icon-btn,
+.ag-permission-btn,
+.ag-skills-btn,
+.ag-model-trigger,
+.ag-thread-rename,
+.ag-environment-changes {
+  border-radius: 7px 9px 6px 10px / 9px 6px 10px 7px;
+  filter: var(--ag-sketch-line);
+}
+
+/* 접기 탭은 패널에 붙은 왼쪽 두 모서리만 그린다. */
+.ag-collapse-tab {
+  border-radius: 10px 0 0 12px / 7px 0 0 11px;
+  filter: var(--ag-sketch-line);
+}
+
+/* 전체 화면 레일의 새 채팅 버튼은 5px 언어를 쓰므로 그 크기대로 흔든다. */
+.ag-fullscreen .ag-threads-new {
+  border-radius: 5px 7px 4px 8px / 7px 4px 8px 5px;
 }
