@@ -33,8 +33,9 @@ use crate::renderer::{
 // rendering.rs에서 paragraphs + endnote_paragraphs를 합쳐서 전달.
 use super::pagination::{
     estimate_footnote_note_height, footnote_between_notes_margin_px,
-    footnote_separator_overhead_px, ColumnContent, EndnoteDeferral, EndnoteParaSource, EndnoteRef,
-    FootnoteRef, FootnoteSource, HeaderFooterRef, PageContent, PageItem, PaginationResult,
+    footnote_separator_overhead_px, is_inline_tac_control, ColumnContent, EndnoteDeferral,
+    EndnoteParaSource, EndnoteRef, FootnoteRef, FootnoteSource, HeaderFooterRef, PageContent,
+    PageItem, PaginationResult,
 };
 
 /// [#2085] 표 행-스캔 분할점 캐리 (값 왕복). split_end_cut 은 move.
@@ -5057,13 +5058,13 @@ impl TypesetEngine {
                 match ctrl {
                     Control::Shape(_) | Control::Picture(_) | Control::Equation(_) => {
                         if !has_table {
-                            // [Issue #476] treat_as_char Shape 는 박스가 속한 line 이 라우팅된
-                            // 페이지/단에 등록. paragraph 가 페이지 분할되면 이 시점의
-                            // st.current_items 는 마지막 페이지 상태이므로, 그대로 push 하면
-                            // 박스가 잘못된 페이지에 떠 있게 된다.
-                            let is_tac_shape = matches!(ctrl,
-                                Control::Shape(s) if s.common().treat_as_char);
-                            let routed = if is_tac_shape {
+                            // [Issue #476] treat_as_char 인라인 객체는 박스가 속한 line 이
+                            // 라우팅된 페이지/단에 등록. paragraph 가 페이지 분할되면 이
+                            // 시점의 st.current_items 는 마지막 페이지 상태이므로, 그대로
+                            // push 하면 박스가 잘못된 페이지에 떠 있게 된다.
+                            // [PR #17] Shape 뿐 아니라 Picture/Equation 도 동일하게 라우팅
+                            // — 그림만 라우팅에서 빠져 분할 문단에서 이중 렌더되었다.
+                            let routed = if is_inline_tac_control(ctrl) {
                                 crate::renderer::pagination::find_inline_control_target_page(
                                     &st.pages,
                                     &st.current_items,
@@ -18013,7 +18014,11 @@ impl TypesetEngine {
         for i in 1..para.line_segs.len() {
             let prev = &para.line_segs[i - 1];
             let curr = &para.line_segs[i];
-            if curr.vertical_pos < prev.vertical_pos
+            // 되감김 목표는 저장된 쪽/단 상단 좌표라 항상 0 이상이다. 음수 vpos 는
+            // 어울림 흐름/변환 잔재이므로 쪽 경계로 오인하면 안 된다
+            // (hwp3-sample16-hwp5-2022 para 140: 57560→-13060 이 65쪽 over-split 유발).
+            if curr.vertical_pos >= 0
+                && curr.vertical_pos < prev.vertical_pos
                 && crate::renderer::hwpunit_to_px(curr.vertical_pos, dpi)
                     <= body_height_px * NEAR_TOP_RATIO
             {

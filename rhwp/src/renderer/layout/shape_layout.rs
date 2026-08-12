@@ -129,6 +129,10 @@ fn textbox_vpos_px(vertical_pos: i32, origin_hu: Option<i32>, dpi: f64) -> f64 {
     hwpunit_to_px(normalize_textbox_vpos_hu(vertical_pos, origin_hu), dpi)
 }
 
+/// 글상자 인라인 개체 줄바꿈 판정 허용 오차(px).
+/// 폭 추정 오차로 딱 맞는 개체가 불필요하게 다음 행으로 접히는 것을 막는다.
+const TEXTBOX_INLINE_WRAP_EPS_PX: f64 = 0.5;
+
 /// 평탄화된 HWPX 그룹(matrix group) 자식의 "글상자 보조선"(검정 얇은 SOLID 테두리)은
 /// 한컴 실물에서 인쇄되지 않는다(편람 장 표지 "행정업무 운영 개요" 제목/목록 글상자).
 /// 오탐 방지를 위해 매우 좁게 한정: 그룹 자식(group_level>0) + 회전/전단 없음 + 검정
@@ -309,12 +313,30 @@ fn ole_chart_fallback_label(message: impl AsRef<str>, bin_data_id: u32) -> Strin
     format!("{} (BinData #{bin_data_id})", message.as_ref())
 }
 
+/// composed 문단에서 `char_pos` 가 속한 줄 인덱스를 찾는다.
+/// (줄 경계는 `ComposedLine::char_start` 기준 — para.text 의 절대 char 인덱스)
+fn composed_line_index_for_char(composed: &ComposedParagraph, char_pos: usize) -> usize {
+    let mut idx = 0usize;
+    for (i, line) in composed.lines.iter().enumerate() {
+        if line.char_start <= char_pos {
+            idx = i;
+        } else {
+            break;
+        }
+    }
+    idx
+}
+
+/// `line_index` 가 주어지면 해당 줄에 속한 런만 누적한다.
+/// 글상자 인라인 개체는 자신이 속한 줄 기준으로 x 를 잡아야 하며, 모든 줄의
+/// 텍스트 폭을 합산하면 개체가 글상자 오른쪽 밖으로 밀려나 클립된다.
 fn measure_composed_text_range_width(
     composed: &ComposedParagraph,
     styles: &ResolvedStyleSet,
     start: usize,
     end: usize,
     space_advance_override: Option<f64>,
+    line_index: Option<usize>,
 ) -> f64 {
     if start >= end {
         return 0.0;
@@ -327,7 +349,15 @@ fn measure_composed_text_range_width(
         .unwrap_or(0.0);
     let mut width = 0.0;
 
-    for line in &composed.lines {
+    let scanned_lines: &[_] = match line_index {
+        Some(li) => composed
+            .lines
+            .get(li)
+            .map(std::slice::from_ref)
+            .unwrap_or(&[]),
+        None => &composed.lines,
+    };
+    for line in scanned_lines {
         let mut run_start = line.char_start;
         for run in &line.runs {
             let run_len = run.text.chars().count();
@@ -473,7 +503,7 @@ fn reflow_matrix_textbox_para(
     const MATRIX_TEXT_FIT_TOLERANCE_PX: f64 = 3.0;
     let composed = compose_paragraph(para);
     let text_len = para.text.chars().count();
-    let full_width = measure_composed_text_range_width(&composed, styles, 0, text_len, None);
+    let full_width = measure_composed_text_range_width(&composed, styles, 0, text_len, None, None);
 
     if full_width <= available_width + MATRIX_TEXT_FIT_TOLERANCE_PX {
         if let Some(first_seg) = para.line_segs.first().cloned() {
@@ -2860,23 +2890,95 @@ impl LayoutEngine {
             let control_text_positions = para.control_text_positions();
             let mut text_cursor = 0usize;
 
+            // 인라인(글자처럼 취급) 개체의 줄 인식 배치.
+            // 개체가 속한 줄(char offset 기준)로 행을 내리고, 그래도 안쪽 영역
+            // 오른쪽 끝을 넘으면 다음 행으로 접는다. 접지 않으면 TextBox clip
+            // (paint/builder.rs ClipKind::TextBox) 에 잘려 개체가 통째로 사라진다.
+            let composed_para = composed_paras.get(pi);
+            let line_seg_dy = |li: usize| -> f64 {
+                if li == 0 {
+                    return 0.0;
+                }
+                // line_segs 와 composed line 이 1:1 일 때만 vertical_pos 를 신뢰한다
+                // (강제 줄바꿈 분할 시 개수가 어긋난다)
+                if composed_para.map(|c| c.lines.len()) == Some(para.line_segs.len()) {
+                    if let (Some(first), Some(seg)) =
+                        (para.line_segs.first(), para.line_segs.get(li))
+                    {
+                        let d = seg.vertical_pos.saturating_sub(first.vertical_pos);
+                        if d > 0 {
+                            return hwpunit_to_px(d, self.dpi);
+                        }
+                    }
+                }
+                // reflow 등으로 vertical_pos 가 0 인 경우 줄 높이 누적으로 대체
+                composed_para
+                    .map(|c| {
+                        c.lines
+                            .iter()
+                            .take(li)
+                            .map(|l| hwpunit_to_px(l.line_height.max(0), self.dpi))
+                            .sum()
+                    })
+                    .unwrap_or(0.0)
+            };
+            let inline_right_edge = inner_area.x + inner_area.width;
+            // cur_line: 현재 행에 대응하는 composed line 인덱스
+            // row_dy: 첫 줄 기준 누적 세로 오프셋 / row_h: 현재 행 개체의 최대 높이
+            let mut cur_line = 0usize;
+            let mut row_dy = 0.0f64;
+            let mut row_h = 0.0f64;
+            // 개체를 놓을 자리를 확정하고 첫 줄 기준 세로 오프셋을 반환한다.
+            let mut place_inline_slot = |inline_x: &mut f64,
+                                         text_cursor: &mut usize,
+                                         ctrl_text_pos: usize,
+                                         item_w: f64,
+                                         item_h: f64|
+             -> f64 {
+                // 1) 개체가 속한 줄로 행 이동
+                if let Some(composed) = composed_para {
+                    let target_line = composed_line_index_for_char(composed, ctrl_text_pos);
+                    if target_line > cur_line {
+                        cur_line = target_line;
+                        row_dy = line_seg_dy(target_line).max(row_dy + row_h);
+                        row_h = 0.0;
+                        *inline_x = inner_area.x;
+                        if let Some(line) = composed.lines.get(target_line) {
+                            *text_cursor = (*text_cursor).max(line.char_start);
+                        }
+                    }
+                }
+                // 2) 같은 줄 안에서 개체 앞 텍스트만큼 advance
+                if ctrl_text_pos > *text_cursor {
+                    if let Some(composed) = composed_para {
+                        *inline_x += measure_composed_text_range_width(
+                            composed,
+                            styles,
+                            *text_cursor,
+                            ctrl_text_pos,
+                            space_advance_override,
+                            Some(cur_line),
+                        );
+                    }
+                    *text_cursor = ctrl_text_pos;
+                }
+                // 3) 폴백 줄바꿈: 오른쪽 끝을 넘으면 다음 행으로 접는다
+                if *inline_x + item_w > inline_right_edge + TEXTBOX_INLINE_WRAP_EPS_PX
+                    && *inline_x > inner_area.x
+                {
+                    *inline_x = inner_area.x;
+                    row_dy += row_h;
+                    row_h = 0.0;
+                }
+                row_h = row_h.max(item_h);
+                row_dy
+            };
+
             for (ctrl_idx_in_para, ctrl) in para.controls.iter().enumerate() {
                 let ctrl_text_pos = control_text_positions
                     .get(ctrl_idx_in_para)
                     .copied()
                     .unwrap_or(text_cursor);
-                let mut advance_to_control = |inline_x: &mut f64| {
-                    if ctrl_text_pos > text_cursor && pi < composed_paras.len() {
-                        *inline_x += measure_composed_text_range_width(
-                            &composed_paras[pi],
-                            styles,
-                            text_cursor,
-                            ctrl_text_pos,
-                            space_advance_override,
-                        );
-                        text_cursor = ctrl_text_pos;
-                    }
-                };
 
                 match ctrl {
                     Control::Shape(shape) => {
@@ -2886,11 +2988,18 @@ impl LayoutEngine {
                         let child_h = hwpunit_to_px(child_common.height as i32, self.dpi);
 
                         let (child_x, child_y) = if child_common.treat_as_char {
-                            // 인라인 도형: 텍스트 내 삽입 위치까지의 advance를 반영하여 배치
-                            advance_to_control(&mut inline_x);
+                            // 인라인 도형: 텍스트 내 삽입 위치까지의 advance + 줄 인식
+                            // 배치(필요 시 다음 행으로 접기)를 반영하여 배치
+                            let row_dy = place_inline_slot(
+                                &mut inline_x,
+                                &mut text_cursor,
+                                ctrl_text_pos,
+                                child_w,
+                                child_h,
+                            );
                             let x = inline_x;
                             inline_x += child_w;
-                            (x, para_start_y)
+                            (x, para_start_y + row_dy)
                         } else {
                             // 절대 위치 도형
                             (
@@ -2951,8 +3060,8 @@ impl LayoutEngine {
                             },
                         };
                         if pic.common.treat_as_char {
-                            // 인라인 이미지: 텍스트 내 삽입 위치까지의 advance를 반영하여 배치
-                            advance_to_control(&mut inline_x);
+                            // 인라인 이미지: 텍스트 내 삽입 위치까지의 advance + 줄 인식
+                            // 배치(필요 시 다음 행으로 접기)를 반영하여 배치
                             let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
                             let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
                             // [Task #477] 도형 컨테이너 폭 초과 시 비율 유지 클램프
@@ -2962,9 +3071,16 @@ impl LayoutEngine {
                             } else {
                                 pic_h
                             };
+                            let row_dy = place_inline_slot(
+                                &mut inline_x,
+                                &mut text_cursor,
+                                ctrl_text_pos,
+                                clamped_w,
+                                clamped_h,
+                            );
                             let pic_container = LayoutRect {
                                 x: inline_x,
-                                y: inline_y,
+                                y: inline_y + row_dy,
                                 width: clamped_w,
                                 height: clamped_h,
                             };
@@ -3121,9 +3237,12 @@ impl LayoutEngine {
                     _ => {}
                 }
             }
-            // 인라인 컨트롤의 최대 높이만큼 y 전진
-            if max_inline_height > 0.0 {
-                inline_y += max_inline_height;
+            // 인라인 컨트롤의 최대 높이만큼 y 전진.
+            // 줄바꿈이 발생했다면 접힌 행들의 높이(row_dy + row_h)까지 포함해야
+            // expand_inline_textbox_to_content 가 늘어난 행을 반영할 수 있다.
+            let inline_advance = max_inline_height.max(row_dy + row_h);
+            if inline_advance > 0.0 {
+                inline_y += inline_advance;
             }
         }
         if !textbox_node.children.is_empty() {
@@ -3726,25 +3845,41 @@ impl LayoutEngine {
         for cell in &table.cells {
             if cell.row_span == 1 && (cell.row as usize) < row_count {
                 let r = cell.row as usize;
+                // 패딩은 파일 원본값(i16)이 그대로 보존되어 음수일 수 있고
+                // (samples/issue1891 의 cellMargin top="-19516" 참조), line_seg 값도
+                // i32 이므로 u32 로 바로 캐스팅하면 4.29e9 로 뒤집혀 덧셈이 오버플로한다.
+                // document_core/commands/object_ops/table.rs:153 과 동일하게
+                // 음수는 0 으로 클램프하고 i64 로 누산한 뒤 포화 축소한다.
                 let (pad_top, pad_bottom) = if cell.apply_inner_margin {
-                    (cell.padding.top as u32, cell.padding.bottom as u32)
+                    (
+                        cell.padding.top.max(0) as i64,
+                        cell.padding.bottom.max(0) as i64,
+                    )
                 } else {
-                    (table.padding.top as u32, table.padding.bottom as u32)
+                    (
+                        table.padding.top.max(0) as i64,
+                        table.padding.bottom.max(0) as i64,
+                    )
                 };
-                let content_h: i32 = cell
+                let content_h: i64 = cell
                     .paragraphs
                     .iter()
                     .flat_map(|p| p.line_segs.last())
-                    .map(|s| s.vertical_pos + s.line_height)
+                    .map(|s| s.vertical_pos as i64 + s.line_height as i64)
                     .max()
-                    .unwrap_or(0);
-                let required = content_h as u32 + pad_top + pad_bottom;
+                    .unwrap_or(0)
+                    .max(0);
+                let required = (content_h + pad_top + pad_bottom).clamp(0, u32::MAX as i64) as u32;
                 if required > row_heights[r] {
                     row_heights[r] = required;
                 }
             }
         }
-        let total: u32 = row_heights.iter().sum();
+        // 행 높이 합도 포화 덧셈 (cell.height 가 0x7FFFFFFF 에 근접한 행이 여럿이면
+        // 단순 sum 은 그 자체로 오버플로한다)
+        let total: u32 = row_heights
+            .iter()
+            .fold(0u32, |acc, &h| acc.saturating_add(h));
         total.max(table.common.height)
     }
 
@@ -3821,5 +3956,260 @@ mod tests {
         assert_eq!(para.line_segs.len(), 1);
         assert_eq!(para.line_segs[0].text_start, 0);
         assert_eq!(para.line_segs[0].segment_width, px_to_hwpunit(80.0, 96.0));
+    }
+
+    // ---------------------------------------------------------------------
+    // [PR #17] measure_table_actual_height 부호 혼합 오버플로 회귀
+    // ---------------------------------------------------------------------
+
+    fn table_with_cell_padding(pad_top: i16, pad_bottom: i16) -> crate::model::table::Table {
+        use crate::model::table::{Cell, Table};
+        use crate::model::Padding;
+        Table {
+            row_count: 1,
+            col_count: 1,
+            row_sizes: vec![1],
+            cells: vec![Cell {
+                row: 0,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                width: 3000,
+                height: 1200,
+                apply_inner_margin: true,
+                padding: Padding {
+                    left: 0,
+                    right: 0,
+                    top: pad_top,
+                    bottom: pad_bottom,
+                },
+                paragraphs: vec![Paragraph {
+                    text: "A".to_string(),
+                    line_segs: vec![line_seg(0, 0)],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            common: CommonObjAttr {
+                width: 3000,
+                height: 1200,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// samples/issue1891 의 `cellMargin top="-19516"` 같은 음수 안쪽 여백이
+    /// u32 로 뒤집혀 덧셈 오버플로(패닉/천문학적 높이)를 내지 않아야 한다.
+    #[test]
+    fn measure_table_actual_height_clamps_negative_cell_padding() {
+        let engine = LayoutEngine::new(96.0);
+        let table = table_with_cell_padding(-19516, -10668);
+
+        let measured = engine.measure_table_actual_height(&table);
+
+        // line_seg 콘텐츠 높이(2000)만 반영되고 음수 패딩은 0 으로 클램프된다
+        assert_eq!(measured, 2000, "음수 패딩이 0 으로 클램프되어야 한다");
+    }
+
+    /// 양수 패딩은 그대로 더해져야 한다 (클램프가 정상 경로를 죽이지 않음).
+    #[test]
+    fn measure_table_actual_height_keeps_positive_cell_padding() {
+        let engine = LayoutEngine::new(96.0);
+        let table = table_with_cell_padding(500, 300);
+
+        assert_eq!(engine.measure_table_actual_height(&table), 2800);
+    }
+
+    /// 표 기본 패딩(apply_inner_margin=false) 이 음수인 경우도 동일하게 방어된다.
+    #[test]
+    fn measure_table_actual_height_clamps_negative_table_padding() {
+        use crate::model::Padding;
+        let engine = LayoutEngine::new(96.0);
+        let mut table = table_with_cell_padding(0, 0);
+        table.cells[0].apply_inner_margin = false;
+        table.padding = Padding {
+            left: 0,
+            right: 0,
+            top: -19516,
+            bottom: -10668,
+        };
+
+        assert_eq!(engine.measure_table_actual_height(&table), 2000);
+    }
+
+    /// 행 높이 합도 포화 덧셈이어야 한다 (u32 sum 자체의 오버플로 차단).
+    #[test]
+    fn measure_table_actual_height_saturates_row_height_sum() {
+        use crate::model::table::{Cell, Table};
+        let engine = LayoutEngine::new(96.0);
+        let cells: Vec<Cell> = (0..3u16)
+            .map(|row| Cell {
+                row,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                width: 3000,
+                height: 0x7FFF_FFFF,
+                ..Default::default()
+            })
+            .collect();
+        let table = Table {
+            row_count: 3,
+            col_count: 1,
+            row_sizes: vec![1, 1, 1],
+            cells,
+            ..Default::default()
+        };
+
+        // 패닉 없이 u32::MAX 로 포화
+        assert_eq!(engine.measure_table_actual_height(&table), u32::MAX);
+    }
+
+    // ---------------------------------------------------------------------
+    // [PR #17] 글상자 내 인라인(글자처럼 취급) 개체 줄바꿈 회귀
+    // ---------------------------------------------------------------------
+
+    /// 96 DPI 기준 1 px = 75 HWPUNIT.
+    fn px_hu(px: i32) -> u32 {
+        (px * 75) as u32
+    }
+
+    fn inline_picture(width_px: i32, height_px: i32) -> crate::model::image::Picture {
+        crate::model::image::Picture {
+            common: CommonObjAttr {
+                treat_as_char: true,
+                width: px_hu(width_px),
+                height: px_hu(height_px),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// 글상자 안에 인라인 그림 3 개를 두고 레이아웃한 뒤 자식 노드 bbox 를 돌려준다.
+    fn layout_textbox_with_inline_pictures(
+        box_w: f64,
+        box_h: f64,
+        pic_px: i32,
+    ) -> (BoundingBox, Vec<BoundingBox>) {
+        use crate::model::shape::{DrawingObjAttr, TextBox};
+        let para = Paragraph {
+            char_count: 0,
+            text: String::new(),
+            line_segs: vec![line_seg(0, 0)],
+            controls: vec![
+                Control::Picture(Box::new(inline_picture(pic_px, pic_px))),
+                Control::Picture(Box::new(inline_picture(pic_px, pic_px))),
+                Control::Picture(Box::new(inline_picture(pic_px, pic_px))),
+            ],
+            ..Default::default()
+        };
+        let drawing = DrawingObjAttr {
+            text_box: Some(TextBox {
+                paragraphs: vec![para],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let engine = LayoutEngine::new(96.0);
+        let mut tree = PageRenderTree::new(0, 800.0, 1000.0);
+        let mut shape_node = RenderNode::new(
+            tree.next_id(),
+            RenderNodeType::Group(GroupNode {
+                section_index: Some(0),
+                para_index: Some(0),
+                control_index: Some(0),
+            }),
+            BoundingBox::new(0.0, 0.0, box_w, box_h),
+        );
+        let styles = ResolvedStyleSet::default();
+        let overflow_map = std::collections::HashMap::new();
+        engine.layout_textbox_content(
+            &mut tree,
+            &mut shape_node,
+            &drawing,
+            0.0,
+            0.0,
+            box_w,
+            box_h,
+            0,
+            0,
+            0,
+            &styles,
+            &[],
+            &overflow_map,
+            &[],
+            true,
+            false,
+            None,
+        );
+
+        let textbox = shape_node
+            .children
+            .iter()
+            .find(|c| matches!(c.node_type, RenderNodeType::TextBox))
+            .expect("TextBox 노드가 생성되어야 한다");
+        // BinData 가 없으므로 그림은 MissingPicture Placeholder 로 방출된다.
+        // 위치 계산 경로는 ImageNode 와 동일하다.
+        let boxes = textbox
+            .children
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.node_type,
+                    RenderNodeType::Image(_) | RenderNodeType::Placeholder(_)
+                )
+            })
+            .map(|c| c.bbox)
+            .collect();
+        (textbox.bbox, boxes)
+    }
+
+    /// 인라인 그림이 글상자 안쪽 폭을 넘으면 다음 행으로 접혀야 한다.
+    /// (접지 않으면 TextBox clip 에 잘려 개체가 통째로 사라진다)
+    #[test]
+    fn textbox_inline_pictures_wrap_at_inner_right_edge() {
+        let (tb_bbox, boxes) = layout_textbox_with_inline_pictures(250.0, 150.0, 100);
+
+        assert_eq!(boxes.len(), 3, "인라인 그림 3 개가 모두 방출되어야 한다");
+
+        let right_edge = tb_bbox.x + tb_bbox.width;
+        for (i, b) in boxes.iter().enumerate() {
+            assert!(
+                b.x + b.width <= right_edge + 0.5,
+                "{i}번째 인라인 그림이 글상자 오른쪽 밖으로 나감: {b:?}, right={right_edge}"
+            );
+        }
+
+        // 1, 2번째는 같은 행, 3번째는 접혀서 아래 행
+        assert!((boxes[0].y - boxes[1].y).abs() < 0.5, "boxes={boxes:?}");
+        assert!(boxes[2].y > boxes[0].y + 0.5, "boxes={boxes:?}");
+        assert!((boxes[2].x - boxes[0].x).abs() < 0.5, "boxes={boxes:?}");
+    }
+
+    /// 접힌 행만큼 글상자 높이도 늘어나야 한다 (expand_inline_textbox_to_content).
+    #[test]
+    fn textbox_expands_vertically_for_wrapped_inline_row() {
+        let (tb_bbox, boxes) = layout_textbox_with_inline_pictures(250.0, 150.0, 100);
+        let content_bottom = boxes.iter().map(|b| b.y + b.height).fold(0.0f64, f64::max);
+
+        assert!(
+            tb_bbox.y + tb_bbox.height >= content_bottom - 0.5,
+            "글상자 높이가 접힌 행을 포함해야 한다: tb={tb_bbox:?}, bottom={content_bottom}"
+        );
+    }
+
+    /// 한 행에 다 들어가는 경우에는 접지 않는다 (기존 동작 유지).
+    #[test]
+    fn textbox_inline_pictures_stay_on_one_row_when_they_fit() {
+        let (_, boxes) = layout_textbox_with_inline_pictures(400.0, 150.0, 100);
+
+        assert_eq!(boxes.len(), 3);
+        assert!((boxes[0].y - boxes[1].y).abs() < 0.5, "boxes={boxes:?}");
+        assert!((boxes[0].y - boxes[2].y).abs() < 0.5, "boxes={boxes:?}");
+        assert!(boxes[1].x > boxes[0].x, "boxes={boxes:?}");
+        assert!(boxes[2].x > boxes[1].x, "boxes={boxes:?}");
     }
 }

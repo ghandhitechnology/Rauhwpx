@@ -6,10 +6,17 @@
 use super::{find_active_char_shape, is_lang_neutral};
 use crate::model::control::Control;
 use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph};
+use crate::model::shape::{TextWrap, VertRelTo};
 use crate::model::style::LineSpacingType;
+use crate::renderer::float_placement::{
+    available_text_intervals, float_exclusion, object_frame, FloatExclusion,
+    ObjectPlacementContext, WrapGeometry,
+};
+use crate::renderer::hwpunit_to_px;
 use crate::renderer::layout::{
     estimate_text_width, estimate_text_width_unrounded, is_cjk_char, resolved_to_text_style,
 };
+use crate::renderer::page_layout::LayoutRect;
 use crate::renderer::px_to_hwpunit;
 use crate::renderer::style_resolver::{detect_lang_category, ResolvedStyleSet};
 use unicode_segmentation::UnicodeSegmentation;
@@ -58,6 +65,146 @@ struct LineBreakResult {
     end_idx: usize, // exclusive
     max_font_size: f64,
     has_line_break: bool, // 강제 줄 바꿈 여부
+}
+
+/// 문단-로컬 어울림(Square/Tight/Through) 배제 계획.
+///
+/// 편집 재배치(reflow)는 저장 LINE_SEG 의 column_start/segment_width 를 통째로
+/// 재생성하는데, 종전에는 전 줄을 단 전체 폭으로 채워 같은 문단에 앵커된 어울림
+/// 개체 위로 텍스트가 그대로 겹쳤다(감사 finding #7: available_text_intervals 는
+/// 사장 코드였다). 이 계획은 문단 자신이 소유한 비-TAC 어울림 개체의 배제
+/// 사각형을 문단-로컬 좌표(단 좌측=0, 문단 상단=0)로 만들어 두고, 줄 채움과
+/// 재생성 seg 지오메트리가 **동일한 결정적 계산**으로 줄별 (시작 x, 폭)을
+/// 얻게 한다. 렌더러(paragraph_layout)는 이렇게 기록된 wrap zone 을 저장
+/// 지오메트리와 똑같이 재생하므로 별도 재생 경로가 필요 없다.
+///
+/// 근사 2가지(주석 계약): ① 앵커 줄 y 는 전폭 1차 채움으로 추정한다(그림 옆
+/// 문단의 지배적 케이스인 문단 선두 앵커에서는 오차 0). ② 줄 대역 조회는
+/// 해당 줄의 실제 폰트가 아니라 직전 줄들의 누적 전진량을 쓴다.
+pub(crate) struct LineBandPlan {
+    exclusions: Vec<FloatExclusion>,
+    column_w_px: f64,
+    ls_type: LineSpacingType,
+    ls_value: f64,
+    dpi: f64,
+}
+
+impl LineBandPlan {
+    /// make_line_seg 와 동일 산식의 줄 전진량(px).
+    fn advance_px(&self, max_font_size: f64) -> f64 {
+        let fs = if max_font_size > 0.0 { max_font_size } else { 12.0 };
+        let line_height_hwp = font_size_to_line_height(fs, self.dpi);
+        let line_spacing_hwp =
+            compute_line_spacing_hwp(self.ls_type, self.ls_value, line_height_hwp, self.dpi);
+        hwpunit_to_px(line_height_hwp + line_spacing_hwp, self.dpi)
+    }
+
+    /// 앞선 줄들의 폰트 크기 목록으로 현재 줄 대역 상단 y 를 얻는다.
+    fn band_top(&self, prior_font_sizes: impl Iterator<Item = f64>) -> f64 {
+        prior_font_sizes.map(|fs| self.advance_px(fs)).sum()
+    }
+
+    /// 대역 [y, y+한 줄 전진량) 에서 쓸 수 있는 가장 넓은 구간 (시작 x, 폭).
+    /// 렌더러 재생이 줄당 단일 세그먼트만 지원하므로 구간이 갈리면 넓은 쪽을
+    /// 택한다(양쪽 어울림의 반대편은 비워 둔다 — 겹침 없음이 우선).
+    /// 배제가 대역을 전부 덮으면 전폭으로 되돌린다(현행과 동일한 안전망).
+    fn interval_at(&self, band_top: f64, band_font_size: f64) -> (f64, f64) {
+        let column = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: self.column_w_px,
+            height: f64::INFINITY,
+        };
+        let band_bottom = band_top + self.advance_px(band_font_size).max(1.0);
+        let widest = available_text_intervals(column, band_top, band_bottom, &self.exclusions)
+            .into_iter()
+            .max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0)));
+        match widest {
+            Some((start, end)) if end - start >= 1.0 => (start, end - start),
+            _ => (0.0, self.column_w_px),
+        }
+    }
+
+    /// 계획이 실제로 어떤 줄이라도 좁히는지 (전부 전폭이면 seg 기록 생략).
+    fn narrows(&self, x: f64, w: f64) -> bool {
+        x > 0.5 || w < self.column_w_px - 0.5
+    }
+}
+
+/// 같은 문단에 앵커된 비-TAC 어울림(Square/Tight/Through) 그림/도형에서
+/// 문단-로컬 배제 계획을 만든다. 대상이 없으면 None (기존 경로 그대로).
+///
+/// 문단-로컬로 해석 가능한 기준만 다룬다: VertRelTo::Para (앵커 줄 기준),
+/// HorzRelTo 는 단/문단 박스를 available_width 로 근사한다. 쪽/용지 기준
+/// 세로 배치는 쪽 배치가 끝나야 위치가 정해지므로 여기서 다루지 않는다.
+fn paragraph_local_wrap_plan(
+    para: &Paragraph,
+    available_width_px: f64,
+    anchor_line_y: impl Fn(usize) -> f64,
+    ls_type: LineSpacingType,
+    ls_value: f64,
+    dpi: f64,
+) -> Option<LineBandPlan> {
+    let control_positions = para.control_text_positions();
+    let mut exclusions = Vec::new();
+    for (ci, ctrl) in para.controls.iter().enumerate() {
+        let common = match ctrl {
+            Control::Picture(pic) => &pic.common,
+            Control::Shape(shape) => shape.common(),
+            _ => continue,
+        };
+        if common.treat_as_char
+            || !matches!(
+                common.text_wrap,
+                TextWrap::Square | TextWrap::Tight | TextWrap::Through
+            )
+            || !matches!(common.vert_rel_to, VertRelTo::Para)
+        {
+            continue;
+        }
+        let w_px = hwpunit_to_px(common.width as i32, dpi);
+        let h_px = hwpunit_to_px(common.height as i32, dpi);
+        if w_px <= 0.0 || h_px <= 0.0 {
+            continue;
+        }
+        let anchor_pos = control_positions.get(ci).copied().unwrap_or(0);
+        let line_y = anchor_line_y(anchor_pos);
+        let local_box = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: available_width_px,
+            height: f64::INFINITY,
+        };
+        let frame = object_frame(
+            common,
+            w_px,
+            h_px,
+            ObjectPlacementContext {
+                paper: local_box,
+                page: local_box,
+                column: local_box,
+                paragraph: local_box,
+                line_y,
+            },
+            dpi,
+        );
+        if let Some(excl) = float_exclusion(common, frame, dpi) {
+            // 자리차지(TopAndBottom)는 줄 폭이 아니라 흐름 예약으로 처리된다.
+            if matches!(excl.geometry, WrapGeometry::Side(_)) {
+                exclusions.push(excl);
+            }
+        }
+    }
+    if exclusions.is_empty() {
+        return None;
+    }
+    Some(LineBandPlan {
+        exclusions,
+        column_w_px: available_width_px,
+        ls_type,
+        ls_value,
+        dpi,
+    })
 }
 
 /// 줄 머리 금칙: 줄 시작에 올 수 없는 문자
@@ -801,6 +948,7 @@ fn fill_lines(
     default_tab_width: f64,
     korean_break_unit: u8,
     condense_min_space: u8,
+    band_plan: Option<&LineBandPlan>,
 ) -> Vec<LineBreakResult> {
     if tokens.is_empty() {
         return vec![LineBreakResult {
@@ -838,21 +986,36 @@ fn fill_lines(
     // 12 HU(~0.17mm) 이내의 초과는 줄에 포함 (경험적 허용 오차)
     const LINE_BREAK_TOLERANCE: i32 = 15;
 
+    // 어울림 배제 계획이 있으면 현재 줄의 가용 폭을 대역별로 좁힌다. 줄이
+    // 확정될 때마다(results.push 직후) 다음 줄 대역으로 갱신한다. 계획이 없으면
+    // 항상 전폭 — 기존 동작과 바이트 동일.
+    let current_line_w = std::cell::Cell::new(match band_plan {
+        Some(plan) => plan.interval_at(0.0, 0.0).1,
+        None => available_width_px,
+    });
+    let advance_band = |results: &[LineBreakResult]| {
+        if let Some(plan) = band_plan {
+            let y = plan.band_top(results.iter().map(|r| r.max_font_size));
+            let fs = results.last().map(|r| r.max_font_size).unwrap_or(0.0);
+            current_line_w.set(plan.interval_at(y, fs).1);
+        }
+    };
     let eff_w = |first: bool| -> i32 {
+        let base_w = current_line_w.get();
         if indent_px > 0.0 {
             if first {
-                to_hwp((available_width_px - indent_px).max(1.0))
+                to_hwp((base_w - indent_px).max(1.0))
             } else {
-                to_hwp(available_width_px)
+                to_hwp(base_w)
             }
         } else if indent_px < 0.0 {
             if first {
-                to_hwp(available_width_px)
+                to_hwp(base_w)
             } else {
-                to_hwp((available_width_px + indent_px).max(1.0))
+                to_hwp((base_w + indent_px).max(1.0))
             }
         } else {
-            to_hwp(available_width_px)
+            to_hwp(base_w)
         }
     };
 
@@ -865,6 +1028,7 @@ fn fill_lines(
                     max_font_size: line_max_fs,
                     has_line_break: true,
                 });
+                advance_band(&results);
                 line_start_idx = *idx + 1;
                 lw = 0;
                 line_space_savings = 0;
@@ -889,6 +1053,7 @@ fn fill_lines(
                             max_font_size: fs_at_last_break,
                             has_line_break: false,
                         });
+                        advance_band(&results);
                         line_start_idx = last_break_char_idx;
                         lw = lw - width_at_last_break;
                         line_space_savings -= space_savings_at_last_break;
@@ -899,6 +1064,7 @@ fn fill_lines(
                             max_font_size: line_max_fs,
                             has_line_break: false,
                         });
+                        advance_band(&results);
                         line_start_idx = *idx;
                         lw = 0;
                         line_space_savings = 0;
@@ -992,6 +1158,7 @@ fn fill_lines(
                             max_font_size: fs_at_last_break,
                             has_line_break: false,
                         });
+                        advance_band(&results);
                         line_start_idx = next_start;
                         lw = recalc_width_hwp(tokens, ti, next_start);
                         line_space_savings =
@@ -1025,6 +1192,7 @@ fn fill_lines(
                             max_font_size: line_max_fs,
                             has_line_break: false,
                         });
+                        advance_band(&results);
                         line_start_idx = *idx;
                         lw = *width_hwp + carry_w;
                         line_space_savings = 0;
@@ -1102,6 +1270,7 @@ fn fill_lines(
                                 max_font_size: fs_at_last_break,
                                 has_line_break: false,
                             });
+                            advance_band(&results);
                             let mut next_start = last_break_char_idx;
                             while next_start < text_chars.len() && text_chars[next_start] == ' ' {
                                 next_start += 1;
@@ -1136,6 +1305,7 @@ fn fill_lines(
                             max_font_size: line_max_fs,
                             has_line_break: false,
                         });
+                        advance_band(&results);
                         // line_start_idx 는 유지 — 토큰이 새 줄 선두가 된다.
                         lw = 0;
                         line_space_savings = 0;
@@ -1162,6 +1332,7 @@ fn fill_lines(
                             );
                             for r in results_part {
                                 results.push(r);
+                                advance_band(&results);
                             }
                             lw = remaining_w;
                             line_max_fs = remaining_fs;
@@ -1193,6 +1364,7 @@ fn fill_lines(
                     );
                     for r in results_part {
                         results.push(r);
+                        advance_band(&results);
                         is_first_line = false;
                     }
                     lw = remaining_w;
@@ -2500,7 +2672,15 @@ pub(crate) fn reflow_line_segs(
         korean_break_unit,
         &inline_controls,
     );
-    let line_breaks = fill_lines(
+    // 1차: 전폭 채움. 어울림 개체가 있으면 여기서 앵커 줄 y 를 추정해 배제
+    // 계획을 만들고, 2차 채움과 seg 지오메트리가 같은 계산으로 wrap zone 을 쓴다.
+    let advance_px_of = |fs: f64| -> f64 {
+        let f = if fs > 0.0 { fs } else { 12.0 };
+        let lh = font_size_to_line_height(f, dpi);
+        let sp = compute_line_spacing_hwp(ls_type, ls_value, lh, dpi);
+        hwpunit_to_px(lh + sp, dpi)
+    };
+    let line_breaks_full = fill_lines(
         &tokens,
         &text_chars,
         available_width_px,
@@ -2508,7 +2688,38 @@ pub(crate) fn reflow_line_segs(
         tab_width,
         korean_break_unit,
         condense_min_space,
+        None,
     );
+    let wrap_plan = paragraph_local_wrap_plan(
+        para,
+        available_width_px,
+        |anchor_pos: usize| -> f64 {
+            let mut y = 0.0;
+            for lb in &line_breaks_full {
+                if anchor_pos < lb.end_idx {
+                    break;
+                }
+                y += advance_px_of(lb.max_font_size);
+            }
+            y
+        },
+        ls_type,
+        ls_value,
+        dpi,
+    );
+    let line_breaks = match &wrap_plan {
+        Some(plan) => fill_lines(
+            &tokens,
+            &text_chars,
+            available_width_px,
+            indent_px,
+            tab_width,
+            korean_break_unit,
+            condense_min_space,
+            Some(plan),
+        ),
+        None => line_breaks_full,
+    };
     let mut new_line_segs: Vec<LineSeg> = Vec::new();
     for lb in &line_breaks {
         let utf16_start = if new_line_segs.is_empty() {
@@ -2556,6 +2767,27 @@ pub(crate) fn reflow_line_segs(
         }
     }
     apply_inline_control_metrics_to_text_lines(para, &line_breaks, &mut new_line_segs);
+
+    // 어울림 배제 계획이 있으면 줄별 wrap zone 을 seg 에 기록한다 — 채움(2차
+    // fill_lines)과 동일한 결정적 대역 계산이라 텍스트가 기록 폭을 넘지 않는다.
+    // 렌더러는 이 column_start/segment_width 를 저장 지오메트리처럼 재생한다.
+    if let Some(plan) = &wrap_plan {
+        let mut y = 0.0;
+        for i in 0..new_line_segs.len() {
+            let band_fs = if i == 0 {
+                0.0
+            } else {
+                line_breaks.get(i - 1).map(|lb| lb.max_font_size).unwrap_or(0.0)
+            };
+            let (x, w) = plan.interval_at(y, band_fs);
+            if plan.narrows(x, w) {
+                new_line_segs[i].column_start = px_to_hwpunit(x, dpi);
+                new_line_segs[i].segment_width = px_to_hwpunit(w, dpi).max(1);
+            }
+            let line_fs = line_breaks.get(i).map(|lb| lb.max_font_size).unwrap_or(0.0);
+            y += advance_px_of(line_fs);
+        }
+    }
 
     // vertical_pos 누적 계산 (각 줄의 문단 내 Y 오프셋)
     // 원본 첫 LineSeg의 vertical_pos를 보존하여 vpos 체계 연속성 유지
