@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const IDENTITY = 'Developer ID Application: TAEWOOK HA (C8M34MMT8W)';
+const CERTIFICATE_SELECTOR = 'TAEWOOK HA (C8M34MMT8W)';
+const EXPECTED_AUTHORITY = `Developer ID Application: ${CERTIFICATE_SELECTOR}`;
 const rootPackage = JSON.parse(
   readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'),
 ) as {
@@ -25,10 +26,14 @@ const desktopMain = readFileSync(
   'utf8',
 );
 
-test('macOS releases pin and notarize with the Xcode Developer ID identity', () => {
-  assert.equal(rootPackage.build?.mac?.identity, IDENTITY);
+test('macOS releases select and verify the Xcode Developer ID identity', () => {
+  assert.equal(rootPackage.build?.mac?.identity, CERTIFICATE_SELECTOR);
   assert.equal(rootPackage.build?.mac?.notarize, true);
-  assert.match(releaseWorkflow, new RegExp(`CSC_NAME:\\s*"?${IDENTITY.replace(/[()]/g, '\\$&')}"?`));
+  assert.match(
+    releaseWorkflow,
+    new RegExp(`CSC_NAME:\\s*"?${CERTIFICATE_SELECTOR.replace(/[()]/g, '\\$&')}"?`),
+  );
+  assert.match(releaseWorkflow, new RegExp(EXPECTED_AUTHORITY.replace(/[()]/g, '\\$&')));
   assert.match(releaseWorkflow, /APPLE_APP_SPECIFIC_PASSWORD/);
   assert.match(releaseWorkflow, /xcrun stapler validate/);
   assert.match(releaseWorkflow, /Authority=Apple Development/);
