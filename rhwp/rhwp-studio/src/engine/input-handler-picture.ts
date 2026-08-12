@@ -2,7 +2,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { MovePictureCommand, MoveShapeCommand, ResizeObjectCommand } from './command';
-import type { ObjectResizeTarget } from './command';
+import type { HeaderFooterObjectRef, ObjectResizeTarget } from './command';
 import { computeArrowResize, MIN_SIZE_HWP, type ArrowKey } from './picture-resize';
 import { computeRotationRecord } from './object-drag-record';
 import type { CellPathLike } from '@/core/types';
@@ -22,7 +22,8 @@ type PictureObjectRef = {
   y1?: number;
   x2?: number;
   y2?: number;
-  headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
+  /** [Task #825] 머리말/꼬리말 그림 marker — Undo 커맨드까지 그대로 전달해야 한다. */
+  headerFooter?: HeaderFooterObjectRef;
   /** [Task #2230] 그림 미지정 placeholder — 더블클릭 시 그림 지정 진입. */
   missing?: boolean;
 };
@@ -617,6 +618,7 @@ export function resizeSelectedPicture(this: any, key: ArrowKey): void {
           ci: r.ci,
           type: r.type,
           cellPath: r.cellPath,
+          headerFooter: r.headerFooter,
           before: resized.before,
           after: resized.after,
         },
@@ -907,7 +909,7 @@ export function finishPictureResizeDrag(this: any, e: MouseEvent): void {
         const changed = Object.keys(updated).some(key => updated[key] !== before[key]);
         if (!changed) continue;
         setObjectProperties.call(this, r, updated);
-        historyTargets.push({ sec: r.sec, ppi: r.ppi, ci: r.ci, type: r.type, cellPath: r.cellPath, before, after: updated });
+        historyTargets.push({ sec: r.sec, ppi: r.ppi, ci: r.ci, type: r.type, cellPath: r.cellPath, headerFooter: r.headerFooter, before, after: updated });
       }
       if (historyTargets.length > 0) {
         this.executeOperation({ kind: 'record', command: new ResizeObjectCommand(historyTargets) });
@@ -964,7 +966,7 @@ export function finishPictureResizeDrag(this: any, e: MouseEvent): void {
       setObjectProperties.call(this, state.ref, updated);
       this.executeOperation({
         kind: 'record',
-        command: new ResizeObjectCommand([{ sec: state.ref.sec, ppi: state.ref.ppi, ci: state.ref.ci, type: state.ref.type, cellPath: state.ref.cellPath, before, after: updated }]),
+        command: new ResizeObjectCommand([{ sec: state.ref.sec, ppi: state.ref.ppi, ci: state.ref.ci, type: state.ref.type, cellPath: state.ref.cellPath, headerFooter: state.ref.headerFooter, before, after: updated }]),
       });
       this.eventBus.emit('document-changed');
     }
@@ -1081,6 +1083,7 @@ export function finishPictureMoveDrag(this: any): void {
             totalDeltaH, totalDeltaV,
             r.origHorzOffset, r.origVertOffset,
             r.cellPath,
+            r.headerFooter,
           ),
           meta: { domain: 'object', refresh: 'none', dirtyScope: 'object' },
         });
@@ -1153,6 +1156,7 @@ export function finishPictureRotateDrag(this: any, _e: MouseEvent): void {
           command: new ResizeObjectCommand([{
             sec: state.ref.sec, ppi: state.ref.ppi, ci: state.ref.ci,
             type: state.ref.type, cellPath: state.ref.cellPath,
+            headerFooter: state.ref.headerFooter,
             before: record.before, after: record.after,
           }]),
         });
