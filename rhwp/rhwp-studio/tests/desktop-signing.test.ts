@@ -35,7 +35,7 @@ test('macOS releases pin and notarize with the Xcode Developer ID identity', () 
       : undefined,
     TEAM_ID,
   );
-  assert.match(releaseWorkflow, new RegExp(`CSC_NAME:\\s*${IDENTITY.replace(/[()]/g, '\\$&')}`));
+  assert.match(releaseWorkflow, new RegExp(`CSC_NAME:\\s*"?${IDENTITY.replace(/[()]/g, '\\$&')}"?`));
   assert.match(releaseWorkflow, /APPLE_APP_SPECIFIC_PASSWORD/);
   assert.match(releaseWorkflow, /xcrun stapler validate/);
   assert.match(releaseWorkflow, /Authority=Apple Development/);
