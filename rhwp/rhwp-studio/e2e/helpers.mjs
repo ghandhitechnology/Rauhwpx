@@ -351,7 +351,9 @@ export async function captureCanvasScreenshot(
   if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
   const element = await page.$(selector);
   if (!element) throw new Error(`캡처할 편집 영역 요소를 찾을 수 없습니다: ${selector}`);
-  const buffer = await element.screenshot({ path: outputPath });
+  // 최신 puppeteer 는 Uint8Array 를 반환한다 — pngjs(readUInt32BE)가 요구하는
+  // Buffer 로 감싸 소비자(PNG.sync.read) 호환을 유지한다.
+  const buffer = Buffer.from(await element.screenshot({ path: outputPath }));
   console.log(`  ${logLabel}: ${outputPath}`);
   _lastScreenshot = path.basename(outputPath);
   return { path: outputPath, buffer };
