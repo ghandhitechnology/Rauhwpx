@@ -5,7 +5,7 @@
  *  1. 연결 — 허브 소켓과 로컬 CLI(claude/codex) 상태, 재연결·세션 재시작
  *  2. 기본 설정 — 다음 대화부터 쓸 프로바이더·모델·강도·권한
  *  3. 글쓰기 보정 — 문체 보정 상태와 재보정 진입
- *  4. 사용량 — 요금제별 5시간·주간 한도 소진율, 오늘 누적, 모델별 내역
+ *  4. 사용량 — CLIProxyAPI 연결, 요금제별 5시간·주간 한도, 오늘 누적, 모델별 내역
  *
  * 페이지 전환(열기/닫기)은 index.ts 가 클래스로 관리하고, 이 모듈은
  * 자기 DOM 과 데이터 갱신만 맡는다.
@@ -21,7 +21,7 @@ import {
 } from '../../agent/models.ts';
 import { loadAgentPrefs, saveAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
 import { createIcon } from './icons.ts';
-import { formatRelativeTime, formatShortDate, formatTokens } from './usage-format.ts';
+import { formatRelativeTime, formatResetAt, formatShortDate, formatTokens } from './usage-format.ts';
 import type { AgentBridge } from '../../agent/bridge.ts';
 import type {
   AgentName,
@@ -29,6 +29,7 @@ import type {
   ProviderStatusMap,
   ProviderUsage,
   SidebarEvent,
+  CliproxyStatus,
   UsageSummary,
   UsageWindow,
   WritingStyleStatus,
@@ -114,6 +115,22 @@ function createSection(title: string): { root: HTMLElement; body: HTMLElement } 
   const body = el('div', 'ag-settings-section-body');
   root.append(heading, body);
   return { root, body };
+}
+
+function createTextField(
+  label: string,
+  opts: { type?: string; placeholder?: string; autocomplete?: string } = {},
+): { field: HTMLElement; input: HTMLInputElement } {
+  const field = el('label', 'ag-settings-field');
+  field.append(el('span', 'ag-settings-field-label', label));
+  const input = document.createElement('input');
+  input.className = 'ag-settings-input';
+  input.type = opts.type ?? 'text';
+  if (opts.placeholder) input.placeholder = opts.placeholder;
+  input.autocomplete = opts.autocomplete ?? 'off';
+  input.spellcheck = false;
+  field.append(input);
+  return { field, input };
 }
 
 function createSelect(
@@ -303,6 +320,65 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // ── 4. 사용량 ─────────────────────────────────────────
   const usageSection = createSection('사용량');
+  const cliproxyCard = el('div', 'ag-settings-usage-block ag-settings-cliproxy');
+  const cliproxyHead = el('div', 'ag-settings-usage-head');
+  const cliproxyName = el('span', 'ag-settings-row-name');
+  const cliproxyDot = el('span', 'ag-settings-dot');
+  cliproxyDot.setAttribute('aria-hidden', 'true');
+  cliproxyName.append(cliproxyDot, document.createTextNode('CLIProxyAPI'));
+  const cliproxyState = el('span', 'ag-settings-row-detail', '연결 안 됨');
+  cliproxyHead.append(cliproxyName, cliproxyState);
+  const cliproxyNote = el(
+    'p',
+    'ag-settings-note',
+    '연결하면 요금제의 실제 사용량을 보여줘요. 관리 키는 config.yaml 의 remote-management.secret-key 예요.',
+  );
+  const cliproxyUrl = createTextField('주소', {
+    placeholder: 'http://127.0.0.1:8317',
+    autocomplete: 'off',
+  });
+  cliproxyUrl.input.value = 'http://127.0.0.1:8317';
+  const cliproxyKey = createTextField('관리 키', {
+    type: 'password',
+    placeholder: 'secret-key',
+    autocomplete: 'new-password',
+  });
+  const cliproxyError = el('p', 'ag-settings-cliproxy-error');
+  cliproxyError.hidden = true;
+  const cliproxyActions = el('div', 'ag-settings-actions');
+  const cliproxyConnect = el('button', 'ag-settings-primary', '연결');
+  cliproxyConnect.type = 'button';
+  const cliproxyRefresh = el('button', 'ag-settings-btn', '사용량 새로고침');
+  cliproxyRefresh.type = 'button';
+  const cliproxyDisconnect = el('button', 'ag-settings-btn', '끊기');
+  cliproxyDisconnect.type = 'button';
+  cliproxyActions.append(cliproxyConnect, cliproxyRefresh, cliproxyDisconnect);
+  cliproxyCard.append(
+    cliproxyHead,
+    cliproxyNote,
+    cliproxyUrl.field,
+    cliproxyKey.field,
+    cliproxyError,
+    cliproxyActions,
+  );
+  usageSection.body.appendChild(cliproxyCard);
+
+  cliproxyConnect.addEventListener('click', () => {
+    void connectCliproxy();
+  });
+  cliproxyKey.input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void connectCliproxy();
+    }
+  });
+  cliproxyRefresh.addEventListener('click', () => {
+    void refreshUsage(true);
+  });
+  cliproxyDisconnect.addEventListener('click', () => {
+    void disconnectCliproxy();
+  });
+
   const usageBlocks = new Map<
     AgentName,
     {
@@ -426,16 +502,24 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     calibrationBtn.textContent = '보정 시작';
   }
 
-  function buildMeter(label: string, window_: UsageWindow | null, limit: number | null): HTMLElement {
+  function buildMeter(
+    label: string,
+    window_: UsageWindow | null,
+    limit: number | null,
+    actual: boolean,
+  ): HTMLElement {
     const row = el('div', 'ag-settings-meter');
     const head = el('div', 'ag-settings-meter-head');
     const hasLimit = limit !== null && limit > 0;
-    const percent = window_ && hasLimit
-      ? (window_.percent ?? (window_.weightedTokens / limit!) * 100)
+    const percent = window_ && (actual || hasLimit)
+      ? (window_.percent ?? (hasLimit ? (window_.weightedTokens / limit!) * 100 : null))
       : null;
     let value: string;
     if (!window_) value = '기록 없음';
-    else if (percent !== null) {
+    else if (percent !== null && actual) {
+      const reset = formatResetAt(window_.resetsAt);
+      value = reset ? `${percent.toFixed(1)}% · ${reset}` : `${percent.toFixed(1)}%`;
+    } else if (percent !== null) {
       value = `${percent.toFixed(1)}% · ${formatTokens(window_.weightedTokens)} / ${formatTokens(limit!)} 토큰`;
     } else {
       value = `${formatTokens(window_.weightedTokens)} 토큰 · ${window_.turns}턴`;
@@ -474,24 +558,74 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     return rows;
   }
 
+  function cliproxyStatus(): CliproxyStatus | null {
+    return usage?.cliproxy ?? null;
+  }
+
+  function renderCliproxy(): void {
+    const status = cliproxyStatus();
+    const configured = status?.configured === true;
+    const connected = status?.connected === true;
+    cliproxyDot.dataset.state = connected
+      ? 'connected'
+      : configured
+        ? 'disconnected'
+        : 'unknown';
+    cliproxyState.textContent = connected
+      ? (status?.url ?? '연결됨')
+      : configured
+        ? (status?.error ?? '연결 안 됨')
+        : '연결 안 됨';
+    cliproxyUrl.field.hidden = configured;
+    cliproxyKey.field.hidden = configured;
+    cliproxyConnect.hidden = configured;
+    cliproxyRefresh.hidden = !configured;
+    cliproxyDisconnect.hidden = !configured;
+    cliproxyNote.textContent = configured
+      ? (connected
+        ? '공식 요금제 사용량이에요. 오늘·모델별 숫자는 이 앱에서 센 값이에요.'
+        : '연결을 다시 확인하거나 관리 키를 다시 입력해 주세요.')
+      : '연결하면 요금제의 실제 사용량을 보여줘요. 관리 키는 config.yaml 의 remote-management.secret-key 예요.';
+    if (status?.url && !cliproxyUrl.input.value.trim()) cliproxyUrl.input.value = status.url;
+    const message = status?.error ?? '';
+    cliproxyError.textContent = message;
+    cliproxyError.hidden = !message;
+    cliproxyConnect.disabled = connectionState !== 'connected';
+    cliproxyRefresh.disabled = connectionState !== 'connected';
+    cliproxyDisconnect.disabled = connectionState !== 'connected';
+  }
+
   function renderUsage(): void {
+    renderCliproxy();
     for (const agent of AGENTS) {
       const ui = usageBlocks.get(agent);
       if (!ui) continue;
       const providerUsage = usage?.providers?.[agent] ?? null;
+      const actual = providerUsage?.source === 'cliproxy';
       const plan = usage?.plans?.[agent] ?? DEFAULT_PLAN[agent];
       if (USAGE_PLANS[agent].some((option) => option.id === plan)) ui.plan.value = plan;
+      ui.plan.hidden = actual;
       ui.meters.replaceChildren(
-        buildMeter('5시간', providerUsage?.session ?? null, providerUsage?.limit.session5h ?? null),
-        buildMeter('주간', providerUsage?.week ?? null, providerUsage?.limit.week ?? null),
+        buildMeter('5시간', providerUsage?.session ?? null, providerUsage?.limit.session5h ?? null, actual),
+        buildMeter('주간', providerUsage?.week ?? null, providerUsage?.limit.week ?? null, actual),
       );
+      const account = (usage?.cliproxy?.accounts ?? []).find((item) => item.agent === agent);
+      const accountLine = actual && account
+        ? [account.email ?? account.name, account.planType].filter(Boolean).join(' · ')
+        : '';
       ui.day.textContent = providerUsage
-        ? `오늘 · ${formatTokens(providerUsage.day.weightedTokens)} 토큰 · ${providerUsage.day.turns}턴`
+        ? [
+          `오늘 · ${formatTokens(providerUsage.day.weightedTokens)} 토큰 · ${providerUsage.day.turns}턴`,
+          accountLine,
+        ].filter(Boolean).join(' · ')
         : '오늘 · 기록 없음';
       ui.models.replaceChildren(...buildModelRows(providerUsage, agent));
-      ui.updated.textContent = providerUsage?.updatedAt
+      const stamp = providerUsage?.updatedAt
         ? `${formatRelativeTime(providerUsage.updatedAt)} 기록`
         : '';
+      ui.updated.textContent = stamp
+        ? `${stamp} · ${actual ? '실제' : '추정'}`
+        : (actual ? '실제' : '추정');
     }
   }
 
@@ -504,9 +638,34 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     renderProviders();
   }
 
-  async function refreshUsage(): Promise<void> {
-    const result = await bridge.requestUsage();
+  async function refreshUsage(refresh = false): Promise<void> {
+    const result = await bridge.requestUsage(refresh);
     if (disposed) return;
+    if (result) usage = result;
+    renderUsage();
+  }
+
+  async function connectCliproxy(): Promise<void> {
+    cliproxyConnect.disabled = true;
+    cliproxyError.hidden = true;
+    const result = await bridge.connectCliproxy(cliproxyUrl.input.value, cliproxyKey.input.value);
+    if (disposed) return;
+    cliproxyConnect.disabled = false;
+    if (result) {
+      usage = result;
+      if (result.cliproxy?.connected) cliproxyKey.input.value = '';
+      renderUsage();
+      return;
+    }
+    cliproxyError.textContent = '연결하지 못했어요. 주소와 관리 키를 확인하세요.';
+    cliproxyError.hidden = false;
+  }
+
+  async function disconnectCliproxy(): Promise<void> {
+    cliproxyDisconnect.disabled = true;
+    const result = await bridge.disconnectCliproxy();
+    if (disposed) return;
+    cliproxyDisconnect.disabled = false;
     if (result) usage = result;
     renderUsage();
   }
@@ -540,6 +699,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           connectionState = ev.state;
           renderConnection();
           renderProviders();
+          renderCliproxy();
           break;
         case 'provider-status':
           providers = ev.providers;
