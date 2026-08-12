@@ -46,7 +46,7 @@ test('desktop formatting surface uses compact unlabeled ribbon groups', () => {
   assert.doesNotMatch(html, /class="sb-ribbon-label"/);
   assert.doesNotMatch(html, /class="sb-field-label"/);
 
-  assert.match(styles, /#style-bar\s*\{[^}]*min-height:\s*36px;[^}]*align-items:\s*center;/s);
+  assert.match(styles, /#style-bar\s*\{[^}]*min-height:\s*38px;[^}]*align-items:\s*center;/s);
   assert.match(styles, /\.sb-ribbon-group\s*\{[^}]*flex-direction:\s*row;/s);
   assert.match(styles, /\.sb-ribbon-label\s*\{[^}]*display:\s*none;/s);
   assert.match(
