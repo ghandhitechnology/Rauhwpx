@@ -24,6 +24,18 @@ export function formatRelativeTime(timestamp: number, now = Date.now()): string 
   return `${Math.floor(hours / 24)}일 전`;
 }
 
+/** n분 후 리셋 / n시간 후 리셋 — 공식 창이 언제 열리는지. */
+export function formatResetAt(timestamp: number | null | undefined, now = Date.now()): string {
+  if (!timestamp || !Number.isFinite(timestamp)) return '';
+  const diff = timestamp - now;
+  if (diff <= 0) return '곧 리셋';
+  const minutes = Math.ceil(diff / 60_000);
+  if (minutes < 60) return `${minutes}분 후 리셋`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}시간 후 리셋`;
+  return `${Math.floor(hours / 24)}일 후 리셋`;
+}
+
 /** YYYY.MM.DD — 보정 시각처럼 날짜만 필요한 자리. */
 export function formatShortDate(iso: string | null): string {
   if (!iso) return '';
