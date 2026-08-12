@@ -6,7 +6,7 @@
 use super::{find_active_char_shape, is_lang_neutral};
 use crate::model::control::Control;
 use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph};
-use crate::model::shape::{TextWrap, VertRelTo};
+use crate::model::shape::{HorzRelTo, TextWrap, VertRelTo};
 use crate::model::style::LineSpacingType;
 use crate::renderer::float_placement::{
     available_text_intervals, float_exclusion, object_frame, FloatExclusion,
@@ -138,9 +138,10 @@ impl LineBandPlan {
 /// 같은 문단에 앵커된 비-TAC 어울림(Square/Tight/Through) 그림/도형에서
 /// 문단-로컬 배제 계획을 만든다. 대상이 없으면 None (기존 경로 그대로).
 ///
-/// 문단-로컬로 해석 가능한 기준만 다룬다: VertRelTo::Para (앵커 줄 기준),
-/// HorzRelTo 는 단/문단 박스를 available_width 로 근사한다. 쪽/용지 기준
-/// 세로 배치는 쪽 배치가 끝나야 위치가 정해지므로 여기서 다루지 않는다.
+/// 문단-로컬로 해석 가능한 기준만 다룬다: VertRelTo::Para (앵커 줄 기준) ×
+/// HorzRelTo::Column/Para (단·문단 박스를 available_width 로 근사). 쪽/용지 기준은
+/// 가로든 세로든 쪽 배치가 끝나야 위치가 정해지므로 계획에서 제외한다 — 잘못된
+/// 위치에 배제를 만드는 것보다 종전(전폭) 동작이 안전하다.
 fn paragraph_local_wrap_plan(
     para: &Paragraph,
     available_width_px: f64,
@@ -163,6 +164,7 @@ fn paragraph_local_wrap_plan(
                 TextWrap::Square | TextWrap::Tight | TextWrap::Through
             )
             || !matches!(common.vert_rel_to, VertRelTo::Para)
+            || !matches!(common.horz_rel_to, HorzRelTo::Column | HorzRelTo::Para)
         {
             continue;
         }
