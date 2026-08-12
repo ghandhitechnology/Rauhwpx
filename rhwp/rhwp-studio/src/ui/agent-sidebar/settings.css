@@ -1,0 +1,328 @@
+/* ─── 설정 탭 (ag-settings-*) ─────────────────────────────
+   페이지 자체의 위치·전환은 agent-sidebar.css 의 페이지 계약
+   (.ag-chat-page / .ag-threads-page / .ag-skills-page 와 같은 규칙)이
+   맡는다. 이 파일은 페이지 안쪽 — 섹션, 행, 셀렉트, 미터만 다룬다.
+   색은 모두 .ag-root 의 --ag-* 토큰을 지나가므로 다크 테마는 자동이다. */
+
+.ag-settings-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 2px 2px 12px;
+}
+
+.ag-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ag-settings-section-title {
+  margin: 0;
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ag-text-muted);
+}
+
+.ag-settings-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ── 행 (허브 · 프로바이더) ─────────────────────────── */
+
+.ag-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-bg-2);
+}
+
+.ag-settings-provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ag-settings-row-text {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ag-settings-row-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--ag-text);
+}
+
+.ag-settings-row-detail {
+  overflow: hidden;
+  font-size: var(--font-size-sm, 11px);
+  color: var(--ag-text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-settings-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ag-text-muted);
+}
+
+.ag-settings-dot[data-state='connected'] {
+  background: var(--ag-ok);
+}
+
+.ag-settings-dot[data-state='connecting'] {
+  background: var(--ui-warning-border, #f0d060);
+}
+
+.ag-settings-dot[data-state='replaced'] {
+  background: var(--ui-warning-border, #f0d060);
+}
+
+.ag-settings-dot[data-state='disconnected'] {
+  background: var(--ag-err);
+}
+
+/* ── 버튼 ───────────────────────────────────────────── */
+
+.ag-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ag-settings-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg);
+  color: var(--ag-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  cursor: pointer;
+}
+
+.ag-settings-btn:hover:not(:disabled) {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-settings-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ag-settings-primary {
+  align-self: flex-start;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--accent-primary);
+  border-radius: var(--ag-r-field);
+  background: var(--accent-primary);
+  color: var(--n-on-accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ag-settings-primary:hover:not(:disabled) {
+  filter: var(--ag-sketch-line) brightness(0.94);
+}
+
+.ag-settings-btn:focus-visible,
+.ag-settings-primary:focus-visible,
+.ag-settings-select:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* ── 기본 설정 (native select) ───────────────────────── */
+
+.ag-settings-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.ag-settings-field-label {
+  flex: 0 0 auto;
+  color: var(--ag-text-secondary);
+}
+
+.ag-settings-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-input-bg);
+  color: var(--ag-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.ag-settings-note,
+.ag-settings-current {
+  margin: 0;
+  font-size: var(--font-size-sm, 11px);
+  color: var(--ag-text-muted);
+}
+
+.ag-settings-status {
+  margin: 0;
+  color: var(--ag-text);
+}
+
+/* ── 사용량 ─────────────────────────────────────────── */
+
+.ag-settings-usage-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-panel);
+  background: var(--ag-bg-2);
+}
+
+.ag-settings-usage-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.ag-settings-plan-select {
+  flex: 0 0 auto;
+  max-width: 45%;
+}
+
+.ag-settings-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ag-settings-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ag-settings-meter-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.ag-settings-meter-label {
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-settings-meter-value {
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-sm, 11px);
+  color: var(--ag-text);
+}
+
+.ag-settings-meter-track {
+  height: 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ag-text-muted) 22%, transparent);
+  overflow: hidden;
+}
+
+.ag-settings-meter-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--ag-accent);
+  transition: width 220ms var(--ag-motion-out, ease-out);
+}
+
+.ag-settings-meter-warn .ag-settings-meter-fill {
+  background: color-mix(in srgb, var(--ag-err) 78%, var(--ag-accent));
+}
+
+.ag-settings-meter-warn .ag-settings-meter-value {
+  color: color-mix(in srgb, var(--ag-err) 80%, var(--ag-text));
+}
+
+.ag-settings-usage-day {
+  font-size: var(--font-size-sm, 11px);
+  color: var(--ag-text-secondary);
+}
+
+.ag-settings-usage-models {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ag-settings-usage-models-title {
+  font-size: var(--ag-micro);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ag-text-muted);
+}
+
+.ag-settings-model-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-settings-model-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ag-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-settings-model-turns,
+.ag-settings-model-tokens {
+  flex: 0 0 auto;
+  font-family: var(--ag-mono);
+  color: var(--ag-text-secondary);
+}
+
+.ag-settings-usage-updated {
+  font-size: var(--ag-micro);
+  color: var(--ag-text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-settings-meter-fill {
+    transition: none;
+  }
+}
