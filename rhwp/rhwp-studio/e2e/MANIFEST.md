@@ -14,6 +14,10 @@ e2e 스크립트의 **단일 권위 목록**이다. 파일 추가/변경/폐기 
 | 파일 | 분류 | 상태 | 용도 | 샘플 | 배선 | 비고 |
 |------|------|------|------|------|------|------|
 | `agent-edit-loop.test.mjs` | 상시 | active | 에이전트 편집 루프 종단간 (hub→bridge→executor→pending→wasm): revision 게이트 / 원자 replace_range / apply_list 숫자 서식 / 수식 미리보기·삽입 / verify_changes PNG / 수식 줄넘침 / 승인 영속 | footnote-01.hwp | npm e2e:agent-edit-loop |  |
+| `agent-settings-reconnect.test.mjs` | 상시 | active | 허브 재연결 수명주기 + 설정 페이지: 허브 부재 배너 / 기동 후 자동 재연결 / 설정 네 구역·제공자 프로브 / 중단 감지·수동 재시도 / 재기동 복구 | (문서 불필요) | npm e2e:agent-settings-reconnect |  |
+| `agent-sidebar-center.check.mjs` | 상시 | active | 진단: 사이드바 inset 직후 문서 로드 시 용지 가운데 정렬 (stale viewport 폭 회귀) | — | 수동 | legacy-name |
+| `agent-workspace-shell.test.mjs` | 상시 | active | 전체 화면 워크스페이스 셸 기하: 상단 바/대화·변경 탭 전환/레일·검토 칸 배치 | — | 수동 |  |
+| `ime-composition-cursor-move.test.mjs` | 상시 | active | IME 조합 중 캔버스 클릭으로 커서 이동 시 옛 anchor 덮어쓰기 회귀 방지 (조합 확정 후 이동) | — | 수동 |  |
 | `reference-files-flow.test.mjs` | 상시 | active | 참고자료 UI/허브 종단간: 채팅·문서·전역 업로드, 내용 검색, 새 채팅 범위 격리, MCP 검색 상속 | — | npm e2e:reference-files |  |
 | `autosave-recovery.test.mjs` | 상시 | active | Task #1448 — 미저장 문서 자동 백업 복구 E2E | — | 수동 |  |
 | `blogform.test.mjs` | 상시 | active | BlogForm_BookReview.hwp 누름틀 안내문 | BlogForm_BookReview.hwp | 수동 |  |

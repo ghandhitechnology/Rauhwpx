@@ -51,6 +51,9 @@ test('filled sidebar action buttons are hand-drawn', () => {
     '.ag-skill-danger',
     '.ag-skill-toggle',
     '.ag-skill-upload-label',
+    '.ag-settings-primary',
+    '.ag-conn-banner-retry',
+    '.ag-hub-retry-btn',
     '.ag-workspace-exit-btn',
   ]) {
     assert.ok(selectors.includes(sel), `${sel} should use the sketch filter`);
