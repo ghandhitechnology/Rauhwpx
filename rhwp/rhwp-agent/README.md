@@ -91,6 +91,7 @@ Paths are relative to the repository root.
 | `RHWP_CODEX_MODEL` | `gpt-5.6-sol` | Model for Codex sessions |
 | `RHWP_SKILLS_DIR` | OS application-data directory | Product-only user skill directory override |
 | `RHWP_USAGE_DIR` | OS application-data directory | Token-usage log and plan directory override |
+| `RHWP_REFERENCES_DIR` | OS application-data directory | Persistent reference metadata, deduplicated blobs, and search index override |
 | `BROWSERBASE_API_KEY` | — | Browserbase API key (required for Browserbase tools) |
 | `BROWSERBASE_PROJECT_ID` | — | Browserbase project id (required for Browserbase tools) |
 | `GEMINI_API_KEY` | — | Gemini key used by the pinned Browserbase MCP sidecar |
@@ -161,12 +162,39 @@ Every MCP call carries its capability epoch. Plan-workflow calls without an
 epoch fail closed; calls with an old epoch are rejected. Direct workflow keeps
 legacy compatibility when an older MCP client omits the epoch.
 
-## MCP tools (server name `rhwp`, 38 tools)
+## Reference files
+
+The hub keeps reference files in three isolated scopes: one chat (`threadId`),
+one open document (`documentId`), or global. Global files are available to every
+chat. The Studio uploads raw bytes to the loopback-only HTTP API with the same
+bearer token as the WebSocket connection:
+
+- `POST /reference-files?scope=chat|document|global&scopeId=...` with
+  `Authorization: Bearer …`, `X-File-Name`, and `Content-Type`
+- `GET /reference-files?scope=...&scopeId=...`
+- `GET /reference-search?scope=...&scopeId=...&q=...&limit=...`
+- `DELETE /reference-files/:id?scope=...&scopeId=...`
+
+Uploads are streamed through bounded staging files, SHA-256 deduplicated, and
+persisted with atomic metadata updates. Supported formats are plain text,
+Markdown, CSV/TSV, JSON, HTML/XML, PDF, DOCX, HWP, HWPX, and HML. HWP-family
+extraction uses this project's `rhwp export-text` binary when available and
+fails explicitly when it is not. Search uses a Korean-aware lexical/BM25 index.
+The hub adds a bounded set of relevant global, document, and chat excerpts to
+each user turn as untrusted reference data.
+
+`chat-start` accepts stable `threadId`, `documentId`, and `documentName` fields.
+Studio should repeat the IDs on `chat-user-message`; the hub rejects stale IDs
+before retrieval while continuing to accept legacy messages that omit them.
+
+## MCP tools (server name `rhwp`, 41 tools)
 
 Visible to Claude as `mcp__rhwp__<name>`.
 
 - Product skill support: `read_product_skill` (enabled skills and their text
   resources only; no arbitrary local paths)
+- Reference read: `list_reference_files`, `search_reference_files`,
+  `read_reference_chunk` (restricted to global + active document + active chat)
 - Read: `get_structure` (entry point; includes tables), `get_text_range`,
   `get_selection`, `get_fields`, `get_document_info` (includes `fontsUsed`),
   `find_text` (searches cells too), `render_page` (SVG markup or PNG image),
@@ -190,7 +218,7 @@ Visible to Claude as `mcp__rhwp__<name>`.
   `browserbase_extract`
 
 Every definition has one explicit category: `document-read`, `document-write`,
-`download-write`, `planning-control`, or `browser`. Browser, download, and
+`reference-read`, `download-write`, `planning-control`, or `browser`. Browser, download, and
 planning-control calls are accepted only for plan-origin chats (including the
 implementing phase). Document writes are rejected by the hub during planning
 and awaiting approval.

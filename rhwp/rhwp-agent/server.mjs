@@ -17,6 +17,10 @@ import { DownloadManager } from './download-manager.mjs';
 import { BrowserbaseSession } from './browserbase-session.mjs';
 import { createProviderHealth } from './provider-health.mjs';
 import { createUsageStore } from './usage-store.mjs';
+import { ReferenceStore } from './reference-store.mjs';
+import { createReferenceHttpHandler } from './reference-http.mjs';
+import { assertMessageScope, referenceScopesForSession, resolveSessionIdentity } from './reference-session.mjs';
+import { executeReferenceTool } from './reference-tools.mjs';
 import { z } from 'zod';
 
 const PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
@@ -44,12 +48,14 @@ const writingStyleStore = await new WritingStyleStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
 const providerHealth = createProviderHealth();
 const usageStore = await createUsageStore().init();
+const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
+const handleReferenceHttp = createReferenceHttpHandler({ store: referenceStore, token: TOKEN });
 let styleCalibrationRunning = false;
 
 /** @type {import('ws').WebSocket | null} */
 let studioSocket = null;
 const mcpSockets = new Set();
-/** @type {{ agent: 'claude'|'codex', model: string|null, effort: string|null, permissionProfile: 'safe'|'unrestricted', backend: any, status: 'idle'|'running', sessionId: string|null, chatId: string, planning: PlanningState } | null} */
+/** @type {{ agent: 'claude'|'codex', model: string|null, effort: string|null, permissionProfile: 'safe'|'unrestricted', backend: any, status: 'idle'|'running', sessionId: string|null, threadId: string, documentId: string|null, documentName: string|null, chatId: string, planning: PlanningState } | null} */
 let session = null;
 let nextCapabilityEpoch = 1;
 
@@ -125,6 +131,9 @@ function sessionInfo() {
       effort: session.effort,
       permissionProfile: session.permissionProfile,
       sessionId: session.sessionId,
+      threadId: session.threadId,
+      documentId: session.documentId,
+      documentName: session.documentName,
       status: session.status,
       ...session.planning.snapshot(),
     }
@@ -184,16 +193,47 @@ function resolveWorkflow(value) {
   return value === 'plan' ? 'plan' : 'direct';
 }
 
+function referenceScopes(activeSession = session) {
+  return referenceScopesForSession(activeSession);
+}
+
+function addReferenceContext(activeSession, query, prompt) {
+  try {
+    const block = referenceStore.promptContext({ query, scopes: referenceScopes(activeSession) });
+    return block ? `${block}\n\n${prompt}` : prompt;
+  } catch (error) {
+    log(`reference retrieval failed: ${error?.message ?? error}`);
+    return prompt;
+  }
+}
+
 function emitWorkflowState(extra = {}) {
   if (!session) return;
   sendJson(studioSocket, { v: 1, type: 'workflow-changed', ...session.planning.snapshot(), ...extra });
 }
 
-function startSession(agent, requestedModel, requestedEffort, requestedPermission, requestedWorkflow, force = false) {
+function startSession(
+  agent,
+  requestedModel,
+  requestedEffort,
+  requestedPermission,
+  requestedWorkflow,
+  requestedThreadId,
+  requestedDocumentId,
+  requestedDocumentName,
+  force = false,
+) {
   const model = resolveModel(agent, requestedModel);
   const effort = resolveEffort(agent, model, requestedEffort);
   const permissionProfile = resolvePermissionProfile(requestedPermission);
   const workflow = resolveWorkflow(requestedWorkflow);
+  const { threadId, documentId, documentName } = resolveSessionIdentity({
+    threadId: requestedThreadId,
+    documentId: requestedDocumentId,
+    documentName: requestedDocumentName,
+    existing: session,
+    force,
+  });
   if (
     !force
     && session
@@ -202,7 +242,12 @@ function startSession(agent, requestedModel, requestedEffort, requestedPermissio
     && session.effort === effort
     && session.permissionProfile === permissionProfile
     && session.planning.workflow === workflow
-  ) return session;
+    && session.threadId === threadId
+    && session.documentId === documentId
+  ) {
+    session.documentName = documentName;
+    return session;
+  }
   disposeSession();
   const planning = new PlanningState({
     workflow,
@@ -239,7 +284,12 @@ function startSession(agent, requestedModel, requestedEffort, requestedPermissio
     generation,
     status: 'idle',
     sessionId: backend.getSessionId(),
-    chatId: crypto.randomUUID(),
+    threadId,
+    documentId,
+    documentName,
+    // Legacy download/browser code uses chatId. It is now the stable Studio
+    // thread identity rather than an unrelated hub-generated UUID.
+    chatId: threadId,
     planning,
     workflowTransition: Promise.resolve(),
   };
@@ -292,7 +342,12 @@ async function approveImplementationPlan(sock, msg) {
       ...activeSession.planning.snapshot(),
     });
     activeSession.status = 'running';
-    activeSession.backend.sendUserMessage(buildApprovedPlanPrompt(transition.approvedPlan));
+    const approvedPrompt = buildApprovedPlanPrompt(transition.approvedPlan);
+    activeSession.backend.sendUserMessage(addReferenceContext(
+      activeSession,
+      JSON.stringify(transition.approvedPlan.plan),
+      approvedPrompt,
+    ));
   } catch (error) {
     if (session === activeSession && activeSession.planning.phase === 'switching') {
       activeSession.planning.failSwitch(transition.approvedPlan.planId);
@@ -324,11 +379,12 @@ async function requestImplementationPlanChanges(sock, msg) {
     if (session !== activeSession) return;
     if (typeof msg.feedback === 'string' && msg.feedback.trim()) {
       activeSession.status = 'running';
-      activeSession.backend.sendUserMessage([
+      const revisionPrompt = [
         'The user requested changes to the latest implementation plan.',
         'Revise the plan in response and present the complete replacement with present_implementation_plan.',
         `Feedback: ${msg.feedback.trim()}`,
-      ].join('\n\n'));
+      ].join('\n\n');
+      activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.feedback, revisionPrompt));
     }
   } catch (error) {
     if (session === activeSession) activeSession.status = 'idle';
@@ -394,7 +450,17 @@ function handleStudioMessage(sock, msg) {
         return;
       }
       try {
-        const s = startSession(agent, msg.model, msg.effort, msg.permissionProfile, msg.workflow, Boolean(msg.force));
+        const s = startSession(
+          agent,
+          msg.model,
+          msg.effort,
+          msg.permissionProfile,
+          msg.workflow,
+          msg.threadId,
+          msg.documentId,
+          msg.documentName,
+          Boolean(msg.force),
+        );
         sendJson(sock, {
           v: 1,
           type: 'chat-started',
@@ -403,11 +469,14 @@ function handleStudioMessage(sock, msg) {
           effort: s.effort,
           permissionProfile: s.permissionProfile,
           sessionId: s.sessionId,
+          threadId: s.threadId,
+          documentId: s.documentId,
+          documentName: s.documentName,
           ...s.planning.snapshot(),
         });
       } catch (e) {
         disposeSession();
-        sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
+        sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
       }
       return;
     }
@@ -449,6 +518,12 @@ function handleStudioMessage(sock, msg) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_NOT_STARTED', message: 'No agent session; send chat-start first.' });
         return;
       }
+      try {
+        assertMessageScope(session, msg);
+      } catch (error) {
+        sendChatError(sock, error, 'INVALID_REQUEST');
+        return;
+      }
       if (session.status === 'running') {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_BUSY', message: 'A turn is already in progress.' });
         return;
@@ -482,7 +557,7 @@ function handleStudioMessage(sock, msg) {
       })
         .then((prompt) => {
           if (session !== activeSession) throw new Error('Agent session changed before the message was dispatched');
-          activeSession.backend.sendUserMessage(prompt);
+          activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.text, prompt));
         })
         .catch((e) => {
           if (session === activeSession) activeSession.status = 'idle';
@@ -740,6 +815,15 @@ function handleMcpMessage(sock, msg) {
           .catch((error) => sendError(error, 'SKILLS_ERROR'));
         return;
       }
+      if (definition.category === 'reference-read') {
+        void executeReferenceTool({ tool, args, store: referenceStore, session })
+          .then(({ handled, result }) => {
+            if (!handled) throw workflowError('UNKNOWN_TOOL', `Unknown reference tool: ${tool}`);
+            sendResult(result);
+          })
+          .catch((error) => sendError(error, 'REFERENCE_READ_FAILED'));
+        return;
+      }
       if (tool === 'present_implementation_plan') {
         if (!studioSocket || studioSocket.readyState !== studioSocket.OPEN) {
           sendError(workflowError('NO_STUDIO', 'Studio must be connected to review an implementation plan'));
@@ -837,21 +921,29 @@ function attachSocket(sock, role) {
 }
 
 const httpServer = http.createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/healthz') {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({
-      ok: true,
-      protocol: PROTOCOL_VERSION,
-      studioConnected: !!studioSocket && studioSocket.readyState === studioSocket.OPEN,
-      mcpClients: mcpSockets.size,
-      session: sessionInfo(),
-      providers: providerHealth.cached(),
-      browserbase: browserbaseSession.status(),
-    }));
-    return;
-  }
-  res.writeHead(404, { 'content-type': 'text/plain' });
-  res.end('not found');
+  void Promise.resolve().then(async () => {
+    const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`);
+    if (await handleReferenceHttp(req, res, url)) return;
+    if (req.method === 'GET' && url.pathname === '/healthz') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        protocol: PROTOCOL_VERSION,
+        studioConnected: !!studioSocket && studioSocket.readyState === studioSocket.OPEN,
+        mcpClients: mcpSockets.size,
+        session: sessionInfo(),
+        providers: providerHealth.cached(),
+        browserbase: browserbaseSession.status(),
+      }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    res.end('not found');
+  }).catch((error) => {
+    log(`http request failed: ${error?.stack ?? error}`);
+    if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
+    if (!res.writableEnded) res.end(JSON.stringify({ status: 'error', message: 'Internal server error' }));
+  });
 });
 
 const wss = new WebSocketServer({ noServer: true });
@@ -939,7 +1031,7 @@ httpServer.on('upgrade', (req, socket, head) => {
 });
 
 httpServer.listen(PORT, '127.0.0.1', () => {
-  log(`rhwp-agent hub listening on ws://127.0.0.1:${PORT} (token=${TOKEN})`);
+  log(`rhwp-agent hub listening on ws://127.0.0.1:${PORT} (bearer token configured)`);
   log(`claude/codex CLIs must be on PATH (e.g. ~/.local/bin)`);
 });
 

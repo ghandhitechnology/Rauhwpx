@@ -138,7 +138,7 @@ function registerTool(def) {
     description: def.description,
     inputSchema: def.shape,
     annotations: {
-      readOnlyHint: def.category === 'document-read',
+      readOnlyHint: def.category === 'document-read' || def.category === 'reference-read',
       destructiveHint: def.category === 'document-write' || def.category === 'download-write',
       openWorldHint: def.category === 'browser' || def.category === 'download-write',
     },
