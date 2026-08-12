@@ -28,6 +28,10 @@ import type {
   AgentWorkflowState,
   PermissionProfile,
   ProductSkillFile,
+  ReferenceFile,
+  ReferenceScope,
+  ReferenceScopeContext,
+  ReferenceSearchHit,
   StructuredPlan,
   WritingStyleLanguage,
   WritingStyleUpload,
@@ -44,12 +48,17 @@ export interface AgentBridge {
   getWorkflowState(): AgentWorkflowState;
   /** 다른 탭이 연결을 차지한 상태에서 현재 탭이 스튜디오 연결을 다시 가져온다. */
   takeOverConnection(): void;
-  startChat(agent: AgentName, model?: string, effort?: string, force?: boolean, permissionProfile?: PermissionProfile, workflow?: AgentWorkflow): void;
+  startChat(agent: AgentName, model?: string, effort?: string, force?: boolean, permissionProfile?: PermissionProfile, workflow?: AgentWorkflow, threadId?: string, documentId?: string | null, documentName?: string | null): void;
   /** 허브 세션을 폐기하고 새 채팅을 시작할 수 있게 한다. */
   stopChat(): void;
   /** gpt-5.6-luna 로 스레드 제목 생성 요청. */
   requestTitle(threadId: string, preview: string): string;
   sendUserMessage(text: string, skillName?: string): void;
+  /** 참고자료 원본은 HTTP로 스트리밍하고, 브라우저에는 메타데이터만 돌려준다. */
+  uploadReference(scope: ReferenceScope, scopeId: string, file: File): Promise<ReferenceFile>;
+  listReferences(scope: ReferenceScope, scopeId: string): Promise<ReferenceFile[]>;
+  searchReferences(query: string, scope: ReferenceScope, scopeId: string, limit?: number): Promise<ReferenceSearchHit[]>;
+  deleteReference(file: Pick<ReferenceFile, 'id' | 'scope' | 'scopeId'>): Promise<void>;
   setWorkflow(workflow: AgentWorkflow): void;
   approvePlan(planId: string): void;
   requestPlanChanges(planId: string, feedback?: string): void;
@@ -79,6 +88,79 @@ function isAgentName(v: unknown): v is AgentName {
   return v === 'claude' || v === 'codex';
 }
 
+function isReferenceScope(value: unknown): value is ReferenceScope {
+  return value === 'chat' || value === 'document' || value === 'global';
+}
+
+function referenceStatus(value: unknown): ReferenceFile['status'] {
+  return value === 'uploading' || value === 'extracting' || value === 'indexing'
+    || value === 'ready' || value === 'error'
+    ? value
+    : 'ready';
+}
+
+/** 백엔드의 전방 호환 필드 별칭을 받아 UI의 단일 메타데이터 형태로 좁힌다. */
+export function normalizeReferenceFile(
+  value: unknown,
+  fallback?: { scope: ReferenceScope; scopeId: string },
+): ReferenceFile | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  const id = item.id ?? item.referenceId;
+  const name = item.name ?? item.fileName ?? item.filename;
+  const scope = isReferenceScope(item.scope) ? item.scope : fallback?.scope;
+  const scopeId = typeof item.scopeId === 'string' ? item.scopeId : fallback?.scopeId;
+  if (typeof id !== 'string' || !id || typeof name !== 'string' || !name || !scope || !scopeId) {
+    return null;
+  }
+  const size = Number(item.size ?? item.byteLength ?? 0);
+  const chunkCount = Number(item.chunkCount);
+  return {
+    id,
+    name,
+    scope,
+    scopeId,
+    mimeType: typeof (item.mimeType ?? item.contentType) === 'string'
+      ? String(item.mimeType ?? item.contentType)
+      : 'application/octet-stream',
+    size: Number.isFinite(size) && size >= 0 ? size : 0,
+    status: referenceStatus(item.status ?? item.state),
+    createdAt: typeof (item.createdAt ?? item.uploadedAt) === 'string'
+      ? String(item.createdAt ?? item.uploadedAt)
+      : new Date(0).toISOString(),
+    ...(typeof item.sha256 === 'string' ? { sha256: item.sha256 } : {}),
+    ...(Number.isSafeInteger(chunkCount) && chunkCount >= 0 ? { chunkCount } : {}),
+    ...(typeof item.error === 'string' && item.error ? { error: item.error } : {}),
+  };
+}
+
+export function normalizeReferenceSearchHit(
+  value: unknown,
+  fallback?: { scope: ReferenceScope; scopeId: string },
+): ReferenceSearchHit | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  const referenceId = item.referenceId ?? item.fileId ?? item.id;
+  const name = item.name ?? item.fileName ?? item.filename;
+  const scope = isReferenceScope(item.scope) ? item.scope : fallback?.scope;
+  const scopeId = typeof item.scopeId === 'string' ? item.scopeId : fallback?.scopeId;
+  if (typeof referenceId !== 'string' || typeof name !== 'string' || !scope || !scopeId) return null;
+  const score = Number(item.score ?? 0);
+  const chunkIndex = Number(item.chunkIndex);
+  const page = Number(item.page);
+  return {
+    referenceId,
+    name,
+    scope,
+    scopeId,
+    score: Number.isFinite(score) ? score : 0,
+    snippet: typeof (item.snippet ?? item.text) === 'string' ? String(item.snippet ?? item.text) : '',
+    ...(Number.isSafeInteger(chunkIndex) && chunkIndex >= 0 ? { chunkIndex } : {}),
+    ...(typeof item.chunkId === 'string' ? { chunkId: item.chunkId } : {}),
+    ...(item.page === null ? { page: null } : Number.isSafeInteger(page) && page >= 0 ? { page } : {}),
+  };
+}
+
 function readCapabilityEpoch(value: unknown) {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
@@ -94,6 +176,7 @@ class AgentBridgeImpl implements AgentBridge {
 
   private url: string;
   private token: string;
+  private httpBaseUrl: string;
   private ws: WebSocket | null = null;
   private state: ConnectionState = 'disconnected';
   private reconnectAttempt = 0;
@@ -118,9 +201,19 @@ class AgentBridgeImpl implements AgentBridge {
     effort?: string;
     permissionProfile?: PermissionProfile;
     workflow: AgentWorkflow;
+    threadId: string;
+    documentId: string | null;
+    documentName: string | null;
     force?: boolean;
   } | null = null;
-  private queuedMessages: Array<{ text: string; skillName?: string }> = [];
+  private queuedMessages: Array<{
+    text: string;
+    skillName?: string;
+    context: ReferenceScopeContext;
+  }> = [];
+  private threadId = '';
+  private documentId: string | null = null;
+  private documentName: string | null = null;
   private titleRequestSeq = 0;
   private requestSeq = 0;
 
@@ -160,6 +253,7 @@ class AgentBridgeImpl implements AgentBridge {
 
     this.url = opts?.url ?? (import.meta as any).env?.VITE_RHWP_AGENT_URL ?? 'ws://127.0.0.1:5175';
     this.token = opts?.token ?? (import.meta as any).env?.VITE_RHWP_AGENT_TOKEN ?? 'dev';
+    this.httpBaseUrl = this.url.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:').replace(/\/$/, '');
     window.addEventListener('focus', this.onWindowFocus);
     this.connect();
   }
@@ -209,6 +303,9 @@ class AgentBridgeImpl implements AgentBridge {
           type: 'chat-start',
           agent: pending.agent,
           workflow: pending.workflow,
+          threadId: pending.threadId,
+          documentId: pending.documentId,
+          documentName: pending.documentName,
           ...(pending.model ? { model: pending.model } : {}),
           ...(pending.effort ? { effort: pending.effort } : {}),
           ...(pending.permissionProfile ? { permissionProfile: pending.permissionProfile } : {}),
@@ -407,6 +504,9 @@ class AgentBridgeImpl implements AgentBridge {
         if (typeof msg.model === 'string') this.selectedModel = msg.model;
         if (typeof msg.effort === 'string') this.selectedEffort = msg.effort;
         if (msg.permissionProfile === 'safe' || msg.permissionProfile === 'unrestricted') this.permissionProfile = msg.permissionProfile;
+        if (typeof msg.threadId === 'string') this.threadId = msg.threadId;
+        if (typeof msg.documentId === 'string' || msg.documentId === null) this.documentId = msg.documentId;
+        if (typeof msg.documentName === 'string' || msg.documentName === null) this.documentName = msg.documentName;
         this.syncWorkflowState(msg, 'direct', 'direct');
         this.emit({
           type: 'chat-started',
@@ -414,6 +514,9 @@ class AgentBridgeImpl implements AgentBridge {
           sessionId: typeof msg.sessionId === 'string' ? msg.sessionId : null,
           ...(typeof msg.model === 'string' ? { model: msg.model } : {}),
           ...(typeof msg.effort === 'string' ? { effort: msg.effort } : {}),
+          ...(typeof msg.threadId === 'string' ? { threadId: msg.threadId } : {}),
+          ...(typeof msg.documentId === 'string' || msg.documentId === null ? { documentId: msg.documentId } : {}),
+          ...(typeof msg.documentName === 'string' || msg.documentName === null ? { documentName: msg.documentName } : {}),
           permissionProfile: this.permissionProfile,
           ...this.workflowState(),
         });
@@ -620,17 +723,26 @@ class AgentBridgeImpl implements AgentBridge {
     force = false,
     permissionProfile: PermissionProfile = this.permissionProfile,
     workflow: AgentWorkflow = 'direct',
+    threadId = this.threadId,
+    documentId: string | null = this.documentId,
+    documentName: string | null = this.documentName,
   ): void {
     this.selectedAgent = agent;
     if (model) this.selectedModel = model;
     if (effort) this.selectedEffort = effort;
     this.permissionProfile = permissionProfile;
+    this.threadId = threadId;
+    this.documentId = documentId;
+    this.documentName = documentName;
     this.resetWorkflowState(workflow);
     const payload = {
       v: AGENT_PROTOCOL_VERSION,
       type: 'chat-start' as const,
       agent,
       workflow,
+      threadId,
+      documentId,
+      documentName,
       ...(this.selectedModel ? { model: this.selectedModel } : {}),
       ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
       permissionProfile: this.permissionProfile,
@@ -645,6 +757,9 @@ class AgentBridgeImpl implements AgentBridge {
         effort: this.selectedEffort ?? undefined,
         permissionProfile: this.permissionProfile,
         workflow,
+        threadId,
+        documentId,
+        documentName,
         force,
       };
     }
@@ -685,14 +800,18 @@ class AgentBridgeImpl implements AgentBridge {
   }
 
   sendUserMessage(text: string, skillName?: string): void {
+    const context = this.referenceContext();
     if (this.activeAgent === null) {
-      this.queuedMessages.push({ text, skillName });
+      this.queuedMessages.push({ text, skillName, context });
       if (this.state === 'connected') {
         this.sendJson({
           v: AGENT_PROTOCOL_VERSION,
           type: 'chat-start',
           agent: this.selectedAgent,
           workflow: this.workflow,
+          threadId: context.threadId,
+          documentId: context.documentId,
+          documentName: context.documentName ?? null,
           ...(this.selectedModel ? { model: this.selectedModel } : {}),
           ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
           permissionProfile: this.permissionProfile,
@@ -704,16 +823,26 @@ class AgentBridgeImpl implements AgentBridge {
           effort: this.selectedEffort ?? undefined,
           permissionProfile: this.permissionProfile,
           workflow: this.workflow,
+          threadId: context.threadId,
+          documentId: context.documentId,
+          documentName: context.documentName ?? null,
         };
       }
       return;
     }
     if (this.queuedMessages.length > 0) {
-      this.queuedMessages.push({ text, skillName });
+      this.queuedMessages.push({ text, skillName, context });
       this.flushQueuedMessages();
       return;
     }
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-user-message', text, ...(skillName ? { skillName } : {}) });
+    this.sendJson({
+      v: AGENT_PROTOCOL_VERSION,
+      type: 'chat-user-message',
+      text,
+      threadId: context.threadId,
+      documentId: context.documentId,
+      ...(skillName ? { skillName } : {}),
+    });
   }
 
   private flushQueuedMessages(): void {
@@ -721,8 +850,137 @@ class AgentBridgeImpl implements AgentBridge {
     const queued = this.queuedMessages;
     this.queuedMessages = [];
     for (const message of queued) {
-      this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-user-message', text: message.text, ...(message.skillName ? { skillName: message.skillName } : {}) });
+      this.sendJson({
+        v: AGENT_PROTOCOL_VERSION,
+        type: 'chat-user-message',
+        text: message.text,
+        threadId: message.context.threadId,
+        documentId: message.context.documentId,
+        ...(message.skillName ? { skillName: message.skillName } : {}),
+      });
     }
+  }
+
+  private referenceContext(): ReferenceScopeContext {
+    return {
+      threadId: this.threadId,
+      documentId: this.documentId,
+      documentName: this.documentName,
+    };
+  }
+
+  private referenceUrl(pathname: string, params?: Record<string, string | number | undefined>): string {
+    const url = new URL(pathname, `${this.httpBaseUrl}/`);
+    for (const [key, value] of Object.entries(params ?? {})) {
+      if (value !== undefined) url.searchParams.set(key, String(value));
+    }
+    return url.toString();
+  }
+
+  private async referenceFetch(pathname: string, init?: RequestInit): Promise<unknown> {
+    let response: Response;
+    try {
+      response = await fetch(pathname, {
+        ...init,
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          ...init?.headers,
+        },
+      });
+    } catch (error) {
+      throw new Error(`참고자료 서버에 연결하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const contentType = response.headers.get('content-type') ?? '';
+    let payload: unknown = null;
+    if (contentType.includes('application/json')) {
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+    } else {
+      const text = await response.text();
+      payload = text ? { message: text } : null;
+    }
+    if (!response.ok) {
+      const body = payload && typeof payload === 'object' ? payload as any : null;
+      const message = typeof body?.error?.message === 'string'
+        ? body.error.message
+        : typeof body?.message === 'string'
+          ? body.message
+          : `참고자료 요청이 실패했습니다 (${response.status})`;
+      throw new Error(message);
+    }
+    return payload;
+  }
+
+  async uploadReference(scope: ReferenceScope, scopeId: string, file: File): Promise<ReferenceFile> {
+    const payload = await this.referenceFetch(
+      this.referenceUrl('/reference-files', { scope, scopeId }),
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+          // Fetch 헤더는 ByteString 이므로 비 ASCII 파일명은 percent-encode 한다.
+          'X-File-Name': encodeURIComponent(file.name),
+        },
+        body: file,
+      },
+    );
+    const source = payload && typeof payload === 'object'
+      ? ((payload as any).file ?? (payload as any).reference ?? payload)
+      : payload;
+    const normalized = normalizeReferenceFile(source, { scope, scopeId });
+    if (!normalized) throw new Error('참고자료 서버가 잘못된 파일 정보를 반환했습니다.');
+    return normalized;
+  }
+
+  async listReferences(scope: ReferenceScope, scopeId: string): Promise<ReferenceFile[]> {
+    const payload = await this.referenceFetch(
+      this.referenceUrl('/reference-files', { scope, scopeId }),
+    );
+    const source = Array.isArray(payload)
+      ? payload
+      : payload && typeof payload === 'object'
+        ? ((payload as any).files ?? (payload as any).references ?? [])
+        : [];
+    return Array.isArray(source)
+      ? source.map((item) => normalizeReferenceFile(item, { scope, scopeId })).filter((item): item is ReferenceFile => item !== null)
+      : [];
+  }
+
+  async searchReferences(
+    query: string,
+    scope: ReferenceScope,
+    scopeId: string,
+    limit = 20,
+  ): Promise<ReferenceSearchHit[]> {
+    const payload = await this.referenceFetch(
+      this.referenceUrl('/reference-search', {
+        scope,
+        scopeId,
+        q: query,
+        maxResults: Math.max(1, Math.min(20, Math.round(limit))),
+      }),
+    );
+    const source = Array.isArray(payload)
+      ? payload
+      : payload && typeof payload === 'object'
+        ? ((payload as any).hits ?? (payload as any).results ?? [])
+        : [];
+    return Array.isArray(source)
+      ? source.map((item) => normalizeReferenceSearchHit(item, { scope, scopeId })).filter((item): item is ReferenceSearchHit => item !== null)
+      : [];
+  }
+
+  async deleteReference(file: Pick<ReferenceFile, 'id' | 'scope' | 'scopeId'>): Promise<void> {
+    await this.referenceFetch(
+      this.referenceUrl(`/reference-files/${encodeURIComponent(file.id)}`, {
+        scope: file.scope,
+        scopeId: file.scopeId,
+      }),
+      { method: 'DELETE' },
+    );
   }
 
   setWorkflow(workflow: AgentWorkflow): void {

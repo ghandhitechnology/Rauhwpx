@@ -14,8 +14,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 38개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 38);
+test('도구는 정확히 41개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 41);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -29,8 +29,9 @@ test('모든 도구가 허용된 카테고리로 명시 분류된다', () => {
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 30);
+  assert.equal(direct.size, 33);
   assert.ok(direct.has('insert_text'));
+  assert.ok(direct.has('search_reference_files'));
   assert.ok(!direct.has('download_file'));
   assert.ok(!direct.has('present_implementation_plan'));
 
@@ -39,6 +40,7 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(planning.has('download_file'));
   assert.ok(planning.has('browserbase_act'));
   assert.ok(planning.has('present_implementation_plan'));
+  assert.ok(planning.has('read_reference_chunk'));
   assert.ok(!planning.has('insert_text'));
 
   const implementing = new Set(filterToolDefinitions('implementing').map((definition) => definition.name));
@@ -78,6 +80,16 @@ test('신규 도구 5개가 모두 있다', () => {
   for (const name of ['apply_list', 'list_numberings', 'get_para_format', 'get_char_format', 'verify_changes']) {
     assert.ok(byName.has(name), `missing tool: ${name}`);
   }
+});
+
+test('reference tools are read-only and carry bounded schemas', () => {
+  for (const name of ['list_reference_files', 'search_reference_files', 'read_reference_chunk']) {
+    assert.equal(byName.get(name)?.category, 'reference-read');
+  }
+  assert.ok(byName.get('search_reference_files').shape.maxResults.safeParse(20).success);
+  assert.ok(!byName.get('search_reference_files').shape.maxResults.safeParse(21).success);
+  assert.ok(byName.get('read_reference_chunk').shape.maxChars.safeParse(20_000).success);
+  assert.ok(!byName.get('read_reference_chunk').shape.chunkId.safeParse('../secret').success);
 });
 
 test('cell 파라미터를 받는 모든 도구에 조립 방법 안내가 있다', () => {
