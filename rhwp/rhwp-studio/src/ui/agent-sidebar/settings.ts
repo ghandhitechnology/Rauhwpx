@@ -119,7 +119,7 @@ function createSection(title: string): { root: HTMLElement; body: HTMLElement } 
 
 function createTextField(
   label: string,
-  opts: { type?: string; placeholder?: string; autocomplete?: string } = {},
+  opts: { type?: string; placeholder?: string; autocomplete?: HTMLInputElement['autocomplete'] } = {},
 ): { field: HTMLElement; input: HTMLInputElement } {
   const field = el('label', 'ag-settings-field');
   field.append(el('span', 'ag-settings-field-label', label));
