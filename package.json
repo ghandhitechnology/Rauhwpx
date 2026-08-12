@@ -1,0 +1,94 @@
+{
+  "name": "rauhwpx",
+  "productName": "Rauhwpx",
+  "version": "0.1.0",
+  "description": "HWP/HWPX editor with a local Claude/Codex agent sidebar.",
+  "author": "Hataewook",
+  "private": true,
+  "main": "desktop/main.mjs",
+  "scripts": {
+    "dev:desktop": "wait-on http://127.0.0.1:7700 && cross-env RHWP_DEV_URL=http://127.0.0.1:7700 electron .",
+    "build:studio": "npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
+    "desktop": "npm run build:studio && electron .",
+    "dist:mac": "npm run build:studio && electron-builder --mac dmg zip --arm64 --publish never"
+  },
+  "dependencies": {
+    "@browserbasehq/mcp": "3.0.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "electron-updater": "^6.8.9",
+    "mammoth": "^1.12.1",
+    "pdfjs-dist": "^4.10.38",
+    "ws": "^8.21.2",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
+    "wait-on": "^9.1.0"
+  },
+  "build": {
+    "appId": "com.hataewook.rauhwpx",
+    "productName": "Rauhwpx",
+    "artifactName": "Rauhwpx-${version}-${arch}.${ext}",
+    "asar": true,
+    "files": [
+      "desktop/**/*",
+      "rhwp/rhwp-studio/dist/**/*",
+      "rhwp/rhwp-agent/**/*",
+      "!rhwp/rhwp-agent/tests/**",
+      "!rhwp/rhwp-agent/node_modules/**"
+    ],
+    "asarUnpack": [
+      "rhwp/rhwp-agent/**"
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "ghandhitechnology",
+      "repo": "Rauhwpx"
+    },
+    "electronLanguages": [
+      "en",
+      "ko"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
+      "identity": "TAEWOOK HA (C8M34MMT8W)",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "notarize": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "dmg": {
+      "title": "Rauhwpx",
+      "backgroundColor": "#f5f5f7",
+      "window": {
+        "width": 540,
+        "height": 380
+      },
+      "contents": [
+        {
+          "x": 150,
+          "y": 190,
+          "type": "file"
+        },
+        {
+          "x": 390,
+          "y": 190,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    }
+  }
+}
