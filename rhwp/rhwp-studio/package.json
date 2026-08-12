@@ -15,6 +15,7 @@
     "test": "node --test tests/*.test.ts ../npm/editor/tests/*.test.mjs",
     "e2e": "node e2e/text-flow.test.mjs",
     "e2e:agent-edit-loop": "node e2e/agent-edit-loop.test.mjs --mode=headless",
+    "e2e:agent-settings-reconnect": "node e2e/agent-settings-reconnect.test.mjs --mode=headless",
     "e2e:reference-files": "node e2e/reference-files-flow.test.mjs --mode=headless",
     "e2e:form-edit-escape": "node e2e/form-edit-escape-cancel.test.mjs --mode=headless",
     "e2e:unsaved-guard": "node e2e/unsaved-changes-guard.test.mjs",

@@ -90,6 +90,7 @@ Paths are relative to the repository root.
 | `RHWP_CLAUDE_MODEL` | `sonnet` | Model for Claude sessions |
 | `RHWP_CODEX_MODEL` | `gpt-5.6-sol` | Model for Codex sessions |
 | `RHWP_SKILLS_DIR` | OS application-data directory | Product-only user skill directory override |
+| `RHWP_USAGE_DIR` | OS application-data directory | Token-usage log and plan directory override |
 | `RHWP_REFERENCES_DIR` | OS application-data directory | Persistent reference metadata, deduplicated blobs, and search index override |
 | `BROWSERBASE_API_KEY` | — | Browserbase API key (required for Browserbase tools) |
 | `BROWSERBASE_PROJECT_ID` | — | Browserbase project id (required for Browserbase tools) |
@@ -106,6 +107,28 @@ Each CLI spawns `mcp-stdio.mjs` as its MCP server. In addition to
 comma-separated allowlist of tool names/categories. If omitted, the MCP server
 derives the profile from workflow and phase. Visibility is advisory; the hub
 always rechecks the authoritative state and epoch.
+
+## Provider health and usage (v2)
+
+Studio can send `provider-status-request` (`{ requestId, refresh? }`) and the hub
+answers `provider-status` with `{ claude, codex }` entries of
+`{ available, version, error, checkedAt }`, probed from `claude --version` /
+`codex --version` and cached for 60s. `GET /healthz` carries the same cached
+object under `providers` (`null` until the first probe).
+
+Token usage rides the same socket: `usage-request` (`{ requestId }`) and
+`usage-plan-set` (`{ requestId, agent, plan }`) both answer `usage-report`
+(`{ usage }`); an unknown agent/plan answers `usage-error` with code
+`INVALID_PLAN`. Claude plans are `pro | max5x | max20x | api`, Codex plans are
+`plus | pro | api`. The hub also pushes `provider-status` and `usage-report`
+right after a studio connects, and a fresh `usage-report` whenever a provider
+turn reports token usage.
+
+Usage totals come from rolling windows (session 5h, day 24h, week 7d) over
+weighted tokens (`input + output + cacheCreation + cacheRead/10`); plan budgets
+are estimates, so `percent` is a guide, not billing. Records live in
+`<app data>/rhwp/usage/` as append-only `events.jsonl` (pruned to 8 days) plus
+`plans.json`, overridable with `RHWP_USAGE_DIR`.
 
 ## Planning protocol (v2)
 
@@ -296,6 +319,8 @@ literal `/`.
 - `server.mjs` — WS hub + authoritative chat/workflow manager (`/studio`, `/mcp`, `GET /healthz`)
 - `planning-state.mjs` — plan transitions, canonical plan ids, epochs, and hub gates
 - `download-manager.mjs` — confined per-chat downloader
+- `provider-health.mjs` — cached `claude`/`codex` CLI version probes (single-flight)
+- `usage-store.mjs` — token-usage JSONL log, plan budgets, rolling-window summary
 - `browserbase-session.mjs` — lazy official Browserbase MCP sidecar proxy
 - `agents/claude.mjs` — `claude -p` stream-json persistent-process backend
 - `agents/codex.mjs` — `codex exec --json` per-turn spawn backend (`exec resume` continuity)
