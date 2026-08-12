@@ -82,7 +82,7 @@ jobs:
       - name: Build signed and notarized macOS installers
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: true
-          CSC_NAME: "Developer ID Application: TAEWOOK HA (C8M34MMT8W)"
+          CSC_NAME: "TAEWOOK HA (C8M34MMT8W)"
           CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
