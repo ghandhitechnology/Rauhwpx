@@ -1,0 +1,147 @@
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import test from 'node:test';
+
+import { createProviderHealth } from '../provider-health.mjs';
+
+class FakeStream extends EventEmitter {}
+
+class FakeProcess extends EventEmitter {
+  stdout = new FakeStream();
+  stderr = new FakeStream();
+  killed = null;
+
+  kill(signal) {
+    this.killed = signal;
+    return true;
+  }
+
+  succeed(version) {
+    if (version !== undefined) this.stdout.emit('data', `${version}\n`);
+    this.emit('close', 0, null);
+  }
+
+  fail(code, stderrText) {
+    if (stderrText) this.stderr.emit('data', stderrText);
+    this.emit('close', code, null);
+  }
+
+  enoent() {
+    const error = new Error('spawn claude ENOENT');
+    error.code = 'ENOENT';
+    this.emit('error', error);
+  }
+}
+
+/** 명령별로 프로세스를 만들어 두고, 스폰 순서/횟수를 기록한다. */
+function fakeSpawner(onSpawn) {
+  const spawns = [];
+  const spawnProcess = (command, argv) => {
+    const proc = new FakeProcess();
+    spawns.push({ command, argv, proc });
+    queueMicrotask(() => onSpawn?.(command, proc));
+    return proc;
+  };
+  return { spawns, spawnProcess };
+}
+
+test('probes report versions from the first stdout line', async () => {
+  const { spawns, spawnProcess } = fakeSpawner((command, proc) => {
+    proc.succeed(command === 'claude' ? '  2.1.0 (Claude Code)  ' : 'codex-cli 0.9.3');
+  });
+  const health = createProviderHealth({ spawnProcess });
+  const result = await health.check();
+
+  assert.deepEqual(spawns.map((s) => [s.command, ...s.argv]), [
+    ['claude', '--version'],
+    ['codex', '--version'],
+  ]);
+  assert.equal(result.claude.available, true);
+  assert.equal(result.claude.version, '2.1.0 (Claude Code)');
+  assert.equal(result.claude.error, null);
+  assert.ok(Number.isFinite(result.claude.checkedAt));
+  assert.equal(result.codex.available, true);
+  assert.equal(result.codex.version, 'codex-cli 0.9.3');
+});
+
+test('ENOENT reports a missing command without a version', async () => {
+  const { spawnProcess } = fakeSpawner((command, proc) => {
+    if (command === 'claude') proc.enoent();
+    else proc.succeed('codex 1.0.0');
+  });
+  const result = await createProviderHealth({ spawnProcess }).check();
+
+  assert.equal(result.claude.available, false);
+  assert.equal(result.claude.version, null);
+  assert.match(result.claude.error, /명령을 찾을 수 없습니다/);
+  assert.equal(result.codex.available, true);
+});
+
+test('a nonzero exit surfaces the stderr tail', async () => {
+  const { spawnProcess } = fakeSpawner((command, proc) => {
+    if (command === 'codex') proc.fail(2, 'first line\nnot logged in\n');
+    else proc.succeed('2.1.0');
+  });
+  const result = await createProviderHealth({ spawnProcess }).check();
+
+  assert.equal(result.codex.available, false);
+  assert.equal(result.codex.version, null);
+  assert.match(result.codex.error, /code 2/);
+  assert.match(result.codex.error, /not logged in/);
+});
+
+test('a hung probe times out and kills the child', async () => {
+  const { spawns, spawnProcess } = fakeSpawner((command, proc) => {
+    if (command === 'claude') proc.succeed('2.1.0');
+    // codex 는 응답하지 않는다.
+  });
+  const result = await createProviderHealth({ spawnProcess, timeoutMs: 10 }).check();
+
+  assert.equal(result.claude.available, true);
+  assert.equal(result.codex.available, false);
+  assert.match(result.codex.error, /응답하지 않았습니다/);
+  assert.equal(spawns.find((s) => s.command === 'codex').proc.killed, 'SIGKILL');
+});
+
+test('results are cached for the ttl and refresh forces a re-probe', async () => {
+  const { spawns, spawnProcess } = fakeSpawner((command, proc) => proc.succeed(`${command} 1.0`));
+  let clock = 1_000;
+  const health = createProviderHealth({ spawnProcess, now: () => clock });
+
+  assert.equal(health.cached(), null);
+  const first = await health.check();
+  assert.equal(spawns.length, 2);
+  assert.equal(health.cached(), first);
+
+  clock += 59_000;
+  assert.equal(await health.check(), first);
+  assert.equal(spawns.length, 2);
+
+  const refreshed = await health.check(true);
+  assert.notEqual(refreshed, first);
+  assert.equal(spawns.length, 4);
+
+  clock += 61_000;
+  await health.check();
+  assert.equal(spawns.length, 6);
+});
+
+test('concurrent checks share a single in-flight probe', async () => {
+  const { spawns, spawnProcess } = fakeSpawner((command, proc) => proc.succeed(`${command} 1.0`));
+  const health = createProviderHealth({ spawnProcess });
+
+  const [a, b, c] = await Promise.all([health.check(), health.check(), health.check()]);
+  assert.equal(spawns.length, 2);
+  assert.equal(a, b);
+  assert.equal(b, c);
+});
+
+test('an exit without close still settles the probe', async () => {
+  const { spawnProcess } = fakeSpawner((command, proc) => {
+    proc.stdout.emit('data', `${command} 3.0.0\n`);
+    proc.emit('exit', 0, null);
+  });
+  const result = await createProviderHealth({ spawnProcess }).check();
+  assert.equal(result.claude.version, 'claude 3.0.0');
+  assert.equal(result.codex.version, 'codex 3.0.0');
+});

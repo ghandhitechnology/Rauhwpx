@@ -15,6 +15,8 @@ import { TOOL_DEFINITIONS } from './tools.mjs';
 import { PlanningState, authorizeToolCall, buildApprovedPlanPrompt, workflowError } from './planning-state.mjs';
 import { DownloadManager } from './download-manager.mjs';
 import { BrowserbaseSession } from './browserbase-session.mjs';
+import { createProviderHealth } from './provider-health.mjs';
+import { createUsageStore } from './usage-store.mjs';
 import { z } from 'zod';
 
 const PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
@@ -40,6 +42,8 @@ try {
 }
 const writingStyleStore = await new WritingStyleStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
+const providerHealth = createProviderHealth();
+const usageStore = await createUsageStore().init();
 let styleCalibrationRunning = false;
 
 /** @type {import('ws').WebSocket | null} */
@@ -107,6 +111,12 @@ function sendJson(sock, obj) {
   }
 }
 
+// 비동기 응답이 도착할 때쯤 스튜디오 탭이 교체되었을 수 있다 — 현재 소켓에만 보낸다.
+function replyToStudio(sock, obj) {
+  if (sock !== studioSocket) return;
+  sendJson(sock, obj);
+}
+
 function sessionInfo() {
   return session
     ? {
@@ -131,6 +141,12 @@ function makeBackendEventHandler(generation) {
   return (evt) => {
     if (!session || session.generation !== generation) return; // 폐기된 백엔드 → 폐기
     if (evt.type === 'session-info' && evt.sessionId) session.sessionId = evt.sessionId;
+    if (evt.type === 'usage') {
+      // 사용량은 원본 이벤트가 아니라 집계 리포트로만 스튜디오에 전달한다.
+      usageStore.record({ agent: session.agent, model: evt.model, ...(evt.usage ?? {}) });
+      sendJson(studioSocket, { v: 1, type: 'usage-report', usage: usageStore.summary() });
+      return;
+    }
     if (evt.type === 'turn-start') missedTurnEnd = null;
     if (evt.type === 'turn-end') {
       session.status = 'idle';
@@ -574,6 +590,32 @@ function handleStudioMessage(sock, msg) {
         .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'SKILL_GENERATION_FAILED', message: String(e?.message ?? e) }));
       return;
     }
+    case 'provider-status-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void providerHealth.check(msg.refresh === true)
+        .then((providers) => replyToStudio(sock, { v: 1, type: 'provider-status', requestId, providers }))
+        .catch((e) => replyToStudio(sock, {
+          v: 1, type: 'provider-error', requestId,
+          code: 'PROVIDER_PROBE_FAILED', message: String(e?.message ?? e),
+        }));
+      return;
+    }
+    case 'usage-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      replyToStudio(sock, { v: 1, type: 'usage-report', requestId, usage: usageStore.summary() });
+      return;
+    }
+    case 'usage-plan-set': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void Promise.resolve()
+        .then(() => usageStore.setPlan(msg.agent, msg.plan))
+        .then((usage) => replyToStudio(sock, { v: 1, type: 'usage-report', requestId, usage }))
+        .catch((e) => replyToStudio(sock, {
+          v: 1, type: 'usage-error', requestId,
+          code: e?.code ?? 'INVALID_PLAN', message: String(e?.message ?? e),
+        }));
+      return;
+    }
     case 'writing-style-status-request': {
       void writingStyleStore.status()
         .then((status) => sendJson(sock, { v: 1, type: 'writing-style-status', requestId: msg.requestId ?? null, status }))
@@ -803,6 +845,7 @@ const httpServer = http.createServer((req, res) => {
       studioConnected: !!studioSocket && studioSocket.readyState === studioSocket.OPEN,
       mcpClients: mcpSockets.size,
       session: sessionInfo(),
+      providers: providerHealth.cached(),
       browserbase: browserbaseSession.status(),
     }));
     return;
@@ -864,6 +907,13 @@ httpServer.on('upgrade', (req, socket, head) => {
       }
       void skillRegistry.list().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', ...catalog }));
       void writingStyleStore.status().then((status) => sendJson(ws, { v: 1, type: 'writing-style-status', status }));
+      // 프로바이더 프로브로 접속을 붙잡아 두지 않는다 — 캐시를 먼저 주고 결과가 오면 갱신한다.
+      const cachedProviders = providerHealth.cached();
+      if (cachedProviders) sendJson(ws, { v: 1, type: 'provider-status', providers: cachedProviders });
+      void providerHealth.check().then((providers) => {
+        if (providers !== cachedProviders) replyToStudio(ws, { v: 1, type: 'provider-status', providers });
+      });
+      sendJson(ws, { v: 1, type: 'usage-report', usage: usageStore.summary() });
       log('studio connected');
     } else {
       const agentLabel = url.searchParams.get('agent') ?? 'unknown';

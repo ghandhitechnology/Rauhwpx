@@ -36,6 +36,7 @@ import {
   resolveEffortForAgent,
   resolveModelForAgent,
 } from '../../agent/models.ts';
+import { loadAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
 import {
   createEmptyThread,
   fallbackTitle,
@@ -48,6 +49,7 @@ import {
 } from '../../agent/threads.ts';
 import { createChevron, createColumnIcon } from '../chevron.ts';
 import { createIcon, createStopIcon, OP_ICON } from './icons.ts';
+import { createSettingsPanel } from './settings.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
 
@@ -389,10 +391,16 @@ function createSketchFilterDefs(): SVGSVGElement {
 export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; dispose(): void } {
   const { bridge, eventBus, getDocumentContext } = deps;
 
-  let selectedAgent: AgentName = bridge.getActiveAgent() ?? 'claude';
-  let selectedModel = defaultModelForAgent(selectedAgent);
-  let selectedEffort = resolveEffortForAgent(selectedAgent, null, selectedModel);
+  // 개인 기본값(설정 탭에서 저장) — 새 대화가 이 조합으로 열린다.
+  let agentPrefs: AgentPrefs = loadAgentPrefs();
+  let selectedAgent: AgentName = bridge.getActiveAgent() ?? agentPrefs.defaultAgent;
+  let selectedModel = resolveModelForAgent(selectedAgent, agentPrefs.defaultModel);
+  let selectedEffort = resolveEffortForAgent(selectedAgent, agentPrefs.defaultEffort, selectedModel);
   let connState: ConnectionState = bridge.getConnectionState();
+  /** 지금까지 실패한 연결 시도 수 · 다음 자동 재시도 시각 (배너 카운트다운). */
+  let connAttempt = 0;
+  let connRetryAt: number | null = null;
+  let connCountdownTimer: number | null = null;
   let turnRunning = bridge.isTurnRunning();
   let workflowTransitionPending = false;
   /** 현재 스트리밍 중인 assistant 텍스트 (tool-call 이후에는 새로 연다). */
@@ -437,6 +445,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let assistantBuffer = '';
   let threadsPanelOpen = false;
   let skillsPanelOpen = false;
+  let settingsPanelOpen = false;
   /** 에이전트 집중 모드 — 스레드 레일과 대화 무대로 문서를 덮는다. */
   let fullscreen = false;
   let threadsRailCollapsed = readStoredThreadsRailCollapsed();
@@ -447,7 +456,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let pendingReviewOpCount = 0;
   let railWidth = readStoredRailWidth();
   let reviewWidth = readStoredReviewWidth();
-  let permissionProfile: PermissionProfile = bridge.getPermissionProfile();
+  // 살아 있는 세션의 권한이 우선이고, 새로 시작하는 경우에만 기본값을 쓴다.
+  let permissionProfile: PermissionProfile = bridge.getActiveAgent() !== null
+    ? bridge.getPermissionProfile()
+    : agentPrefs.defaultPermissionProfile;
   let skillCatalog: SkillCatalog = { revision: 0, skills: [] };
   let skillDraftFiles: Array<{ path: string; content: string; encoding: 'utf8' | 'base64' }> = [];
   let selectedSkillFile = 'SKILL.md';
@@ -987,8 +999,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     setFullscreen(!fullscreen);
   });
 
+  // 설정 — 연결/기본값/사용량이 사는 페이지. 헤더 아이콘 한 자리만 쓴다.
+  const settingsBtn = el('button', 'ag-header-icon-btn ag-settings-btn');
+  settingsBtn.type = 'button';
+  settingsBtn.setAttribute('aria-label', '설정');
+  settingsBtn.setAttribute('aria-expanded', 'false');
+  settingsBtn.setAttribute('aria-controls', 'ag-settings-panel');
+  settingsBtn.title = '설정';
+  settingsBtn.appendChild(createIcon('gear'));
+  settingsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setSettingsPanelOpen(true);
+  });
+
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
-  headerActions.append(threadsBtn);
+  headerActions.append(threadsBtn, settingsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
@@ -1249,6 +1274,24 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const chatPage = el('div', 'ag-chat-page');
   chatPage.id = 'ag-chat-page';
   chatPage.setAttribute('aria-hidden', 'false');
+
+  /* 허브 연결이 끊겼을 때만 나타나는 줄. 첫 연결 시도(attempt 0)에는
+     아무 말도 하지 않는다 — 시작할 때마다 경고처럼 보이면 안 된다. */
+  const connBanner = el('div', 'ag-conn-banner');
+  connBanner.hidden = true;
+  connBanner.setAttribute('role', 'status');
+  connBanner.setAttribute('aria-live', 'polite');
+  const connBannerText = el('span', 'ag-conn-banner-text');
+  const connBannerRetry = el('button', 'ag-conn-banner-retry', '지금 다시 연결');
+  connBannerRetry.type = 'button';
+  connBannerRetry.addEventListener('click', () => {
+    connBannerText.textContent = '다시 연결 중…';
+    bridge.reconnectNow();
+  });
+  const connBannerHint = el('span', 'ag-conn-banner-hint', '허브 실행: rhwp-agent에서 npm start');
+  connBannerHint.hidden = true;
+  connBanner.append(connBannerText, connBannerRetry, connBannerHint);
+
   const messages = el('div', 'ag-messages');
   messages.setAttribute('role', 'log');
   messages.setAttribute('aria-live', 'polite');
@@ -1317,7 +1360,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   composer.append(slashMenu, composerField, composerMeta, configPanel);
   // 사이드바에서는 문서 맥락이 먼저이고, 검토는 입력기 바로 위의
   // 기존 inline 흐름을 유지한다. 모델/권한은 입력기 accessory로 내린다.
-  chatPage.append(header, messages, review, composer);
+  chatPage.append(header, connBanner, messages, review, composer);
 
   const threadsPage = el('div', 'ag-threads-page');
   threadsPage.id = 'ag-threads-panel';
@@ -1447,6 +1490,33 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   railResize.title = '드래그하여 너비 조절';
   railResize.tabIndex = 0;
 
+  /* 설정 페이지 — 자기 DOM 은 settings.ts 가 짓고, 페이지 전환만
+     여기서 관리한다(스킬 페이지와 같은 계약). */
+  const settingsPanel = createSettingsPanel({
+    bridge,
+    getSelection: () => ({
+      agent: selectedAgent,
+      model: selectedModel,
+      effort: selectedEffort,
+      permission: permissionProfile,
+    }),
+    applyDefaults: (prefs) => applyAgentPrefs(prefs),
+    openCalibration: () => writingStyleCalibration.open(),
+    reconnectSession: () => restartAgentSession(),
+  });
+  const settingsPage = settingsPanel.element;
+  settingsPage.addEventListener('ag-settings-close', () => {
+    setSettingsPanelOpen(false);
+    settingsBtn.focus();
+  });
+  settingsPage.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    setSettingsPanelOpen(false);
+    settingsBtn.focus();
+  });
+
   const reviewResize = el('div', 'ag-review-resize');
   reviewResize.setAttribute('role', 'separator');
   reviewResize.setAttribute('aria-orientation', 'vertical');
@@ -1454,7 +1524,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   reviewResize.title = '드래그하여 너비 조절';
   reviewResize.tabIndex = 0;
 
-  stage.append(workspaceBar, chatPage, threadsPage, skillsPage, reviewColumn, railResize, reviewResize);
+  stage.append(workspaceBar, chatPage, threadsPage, skillsPage, settingsPage, reviewColumn, railResize, reviewResize);
 
   function applyRailWidth(width: number, opts?: { persist?: boolean }): void {
     railWidth = clampRailWidth(width);
@@ -1746,6 +1816,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       // 페이지 전환 상태를 걷어내고 레일 + 대화 무대를 세운다.
       threadsPanelOpen = false;
       skillsPanelOpen = false;
+      closeSettingsPage();
       root.classList.remove('ag-threads-open', 'ag-skills-open');
       threadsBtn.setAttribute('aria-expanded', 'false');
       skillsBtn.setAttribute('aria-expanded', 'false');
@@ -1835,10 +1906,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   });
   updatePermissionButton();
 
+  /** 스킬·설정·목록 세 페이지는 서로를 닫는다 — 무대에는 하나만 선다. */
+  function closeSettingsPage(): void {
+    settingsPanelOpen = false;
+    root.classList.remove('ag-settings-open');
+    settingsBtn.setAttribute('aria-expanded', 'false');
+    settingsPage.setAttribute('aria-hidden', 'true');
+    settingsPanel.close();
+  }
+
   function setSkillsPanelOpen(open: boolean): void {
     skillsPanelOpen = open;
     if (open) setConfigPanelOpen(false);
     threadsPanelOpen = false;
+    closeSettingsPage();
     root.classList.toggle('ag-skills-open', open);
     root.classList.remove('ag-threads-open');
     skillsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -1855,6 +1936,36 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (open) {
       bridge.listSkills();
       skillsSearch.focus();
+    }
+  }
+
+  /** 설정 페이지 — setSkillsPanelOpen 과 같은 문법(무대 전환 + 상호 배제). */
+  function setSettingsPanelOpen(open: boolean): void {
+    settingsPanelOpen = open;
+    if (open) {
+      setConfigPanelOpen(false);
+      threadsPanelOpen = false;
+      skillsPanelOpen = false;
+      root.classList.remove('ag-threads-open', 'ag-skills-open');
+      skillsBtn.setAttribute('aria-expanded', 'false');
+      skillsPage.setAttribute('aria-hidden', 'true');
+    }
+    root.classList.toggle('ag-settings-open', open);
+    settingsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    settingsPage.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if (fullscreen) {
+      // 전체 화면에서 목록 관련 aria 는 레일 접힘 상태를 뜻하므로 덮어쓰지 않는다.
+      applyThreadsRailState();
+    } else if (open) {
+      threadsBtn.setAttribute('aria-expanded', 'false');
+      threadsPage.setAttribute('aria-hidden', 'true');
+    }
+    chatPage.setAttribute('aria-hidden', open ? 'true' : 'false');
+    if (open) {
+      settingsPanel.open();
+      settingsPage.querySelector<HTMLElement>('.ag-settings-close')?.focus();
+    } else {
+      settingsPanel.close();
     }
   }
 
@@ -2071,7 +2182,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     value: string;
     label: string;
     detail: string;
-    local?: 'skills' | 'create' | 'calibration';
+    local?: 'skills' | 'create' | 'calibration' | 'settings';
     workflow?: AgentWorkflow;
   };
   let slashOptions: SlashOption[] = [];
@@ -2091,6 +2202,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       { value: '/plan', label: '/plan', detail: '계획 모드로 전환', workflow: 'plan' },
       { value: '/build', label: '/build', detail: '바로 실행 모드로 전환', workflow: 'direct' },
       { value: '/calibration', label: '/calibration', detail: '말투 모방 캘리브레이션 열기', local: 'calibration' },
+      { value: '/settings', label: '/settings', detail: '설정 열기 (연결·기본값·사용량)', local: 'settings' },
       { value: '/skills', label: '/skills', detail: '스킬 라이브러리 열기', local: 'skills' },
       { value: '/skill-create', label: '/skill-create', detail: '새 스킬 만들기', local: 'create' },
       { value: '/skill-edit', label: '/skill-edit', detail: '사용자 스킬 편집' },
@@ -2126,6 +2238,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       return;
     }
     if (option.local === 'calibration') { input.value = ''; writingStyleCalibration.open(); return; }
+    if (option.local === 'settings') { input.value = ''; setSettingsPanelOpen(true); return; }
     if (option.local === 'skills') { input.value = ''; setSkillsPanelOpen(true); return; }
     if (option.local === 'create') { input.value = ''; beginSkillCreate(); return; }
     input.value = `${option.value} `;
@@ -2179,6 +2292,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       return;
     }
     if (text === '/calibration') { input.value = ''; writingStyleCalibration.open(); return; }
+    if (text === '/settings') { input.value = ''; setSettingsPanelOpen(true); return; }
     if (text === '/skills') { input.value = ''; setSkillsPanelOpen(true); return; }
     if (text === '/skill-create') { input.value = ''; beginSkillCreate(); return; }
     const editCommand = text.match(/^\/skill-edit\s+([a-z0-9-]+)$/);
@@ -2204,6 +2318,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
     if (threadsPanelOpen) setThreadsPanelOpen(false);
     if (skillsPanelOpen) setSkillsPanelOpen(false);
+    if (settingsPanelOpen) setSettingsPanelOpen(false);
     const visibleText = skillNameForMessage ? `/${skillNameForMessage}${text ? ` ${text}` : ''}` : text;
     // 승인 대기 중 입력은 언제나 계획 수정 의견이다. '네'/'승인' 같은
     // 텍스트로는 절대 승인되지 않는다 — 승인은 계획 카드의 버튼뿐.
@@ -2490,6 +2605,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     threadsPanelOpen = open;
     if (open) setConfigPanelOpen(false);
     if (open) skillsPanelOpen = false;
+    closeSettingsPage();
     root.classList.toggle('ag-threads-open', open);
     root.classList.remove('ag-skills-open');
     threadsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -2501,6 +2617,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       rebuildThreadsList();
       threadsNew.focus();
     }
+  }
+
+  /** 저장된 기본값을 지금 선택으로 세운다 (새 대화 진입점에서만 부른다). */
+  function applyDefaultSelection(): void {
+    const nextAgent = agentPrefs.defaultAgent;
+    const nextModel = resolveModelForAgent(nextAgent, agentPrefs.defaultModel);
+    const nextEffort = resolveEffortForAgent(nextAgent, agentPrefs.defaultEffort, nextModel);
+    selectedModel = nextModel;
+    selectedEffort = nextEffort;
+    setSelectedAgent(nextAgent);
+    rebuildLlmMenu();
+    rebuildEffortMenu();
+    permissionProfile = agentPrefs.defaultPermissionProfile;
+    updatePermissionButton();
   }
 
   /** 다른 문서의 채팅을 열람만 한다 — 입력 잠금은 updateComposer 가 관리한다. */
@@ -2529,6 +2659,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     persistCurrentThread();
     clearChatUi();
     exitReadOnlyMode();
+    // 새 대화는 개인 기본값으로 열린다 — 이전 대화의 임시 선택을 물려받지 않는다.
+    applyDefaultSelection();
     const nextThread = createEmptyThread({
       agent: selectedAgent,
       model: selectedModel,
@@ -2617,13 +2749,64 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     updateWorkspaceAgentContext();
   }
 
-  function setConnection(state: ConnectionState): void {
+  function setConnection(
+    state: ConnectionState,
+    meta?: { attempt?: number; retryInMs?: number },
+  ): void {
     connState = state;
+    if (typeof meta?.attempt === 'number') connAttempt = meta.attempt;
+    if (state === 'connected') connAttempt = 0;
+    connRetryAt = typeof meta?.retryInMs === 'number' ? Date.now() + meta.retryInMs : null;
     conn.className = `ag-conn ag-conn-${state}`;
     conn.textContent = CONN_LABEL[state];
     takeoverBtn.hidden = state !== 'replaced';
     if (state === 'replaced') setConfigPanelOpen(false);
+    renderConnBanner();
     updateComposer();
+  }
+
+  function clearConnCountdown(): void {
+    if (connCountdownTimer === null) return;
+    window.clearInterval(connCountdownTimer);
+    connCountdownTimer = null;
+  }
+
+  /** "n초 후 재시도" 를 1초마다 갱신한다. 남은 시간은 예약된 백오프에서 온다. */
+  function paintConnCountdown(): void {
+    const remainMs = connRetryAt === null ? null : Math.max(0, connRetryAt - Date.now());
+    connBannerText.textContent = remainMs === null
+      ? '에이전트 허브와 연결이 끊어졌어요'
+      : `에이전트 허브와 연결이 끊어졌어요 · ${Math.ceil(remainMs / 1000)}초 후 재시도`;
+  }
+
+  function renderConnBanner(): void {
+    // 연결돼 있거나 다른 탭이 쓰는 중이면(전용 takeover 버튼이 있다) 배너는 없다.
+    if (connState === 'connected' || connState === 'replaced') {
+      clearConnCountdown();
+      connBanner.hidden = true;
+      return;
+    }
+    if (connState === 'connecting') {
+      clearConnCountdown();
+      // 첫 시도가 진행 중일 때는 조용히 지나간다.
+      if (connAttempt === 0) {
+        connBanner.hidden = true;
+        return;
+      }
+      connBanner.hidden = false;
+      connBannerText.textContent = `다시 연결 중… (${connAttempt}번째 시도)`;
+      connBannerRetry.hidden = true;
+      connBannerHint.hidden = connAttempt < 3;
+      return;
+    }
+    connBanner.hidden = false;
+    connBannerRetry.hidden = false;
+    connBannerHint.hidden = connAttempt < 3;
+    paintConnCountdown();
+    clearConnCountdown();
+    if (connRetryAt !== null) {
+      connCountdownTimer = window.setInterval(paintConnCountdown, 1000);
+    }
   }
 
   function setTurnRunning(running: boolean): void {
@@ -2694,6 +2877,31 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function systemMessage(text: string): void {
     withAutoScroll(() => messages.appendChild(el('div', 'ag-msg ag-msg-system', text)));
+  }
+
+  /** 현재 대화의 CLI 세션을 강제로 다시 띄운다 (설정 탭·스폰 실패 재시도 공용). */
+  function restartAgentSession(): void {
+    bridge.startChat(selectedAgent, selectedModel, selectedEffort, true, permissionProfile, chatWorkflow);
+  }
+
+  /** 허브가 CLI 를 못 띄웠을 때 — 실패 메시지 아래에 재시도 한 줄을 놓는다. */
+  function appendSpawnRetryAction(): void {
+    const row = el('div', 'ag-msg ag-msg-system ag-hub-error-actions');
+    const label = el('span', 'ag-hub-error-copy', `${AGENT_LABEL[selectedAgent]} CLI 를 시작하지 못했습니다.`);
+    const retry = el('button', 'ag-hub-retry-btn', '다시 시도');
+    retry.type = 'button';
+    retry.addEventListener('click', () => {
+      retry.disabled = true;
+      restartAgentSession();
+      row.remove();
+    });
+    row.append(label, retry);
+    withAutoScroll(() => messages.appendChild(row));
+  }
+
+  /** 설정 탭에서 저장된 기본값 — 새 대화부터 적용된다. */
+  function applyAgentPrefs(prefs: AgentPrefs): void {
+    agentPrefs = prefs;
   }
 
   function openAssistantBubble(agent: AgentName): HTMLElement {
@@ -2982,10 +3190,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function handleSidebarEvent(e: SidebarEvent): void {
     writingStyleCalibration.handleEvent(e);
+    // 설정 탭은 연결·프로바이더·사용량·문체 상태를 그대로 받아 그린다.
+    settingsPanel.handleEvent(e);
     if (handlePlanningSidebarEvent(e)) return;
     switch (e.type) {
       case 'connection':
-        setConnection(e.state);
+        setConnection(e.state, { attempt: e.attempt, retryInMs: e.retryInMs });
         // 재연결 시 진행 상태를 브리지와 다시 동기화한다.
         setTurnRunning(bridge.isTurnRunning());
         break;
@@ -3107,6 +3317,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       case 'writing-style-progress':
       case 'writing-style-result':
       case 'writing-style-error':
+      // 프로바이더 상태·사용량은 설정 탭이 이미 받아 그렸다.
+      case 'provider-status':
+      case 'usage-report':
         break;
       case 'chat-stopped':
         setTurnRunning(false);
@@ -3135,6 +3348,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         break;
       case 'hub-error':
         systemMessage(`오류 (${e.code}): ${e.message}`);
+        if (e.code === 'AGENT_SPAWN_FAILED') appendSpawnRetryAction();
         workflowTransitionPending = false;
         syncPlanningFromBridge();
         setTurnRunning(bridge.isTurnRunning());
@@ -3669,7 +3883,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       endColumnResize();
       root.classList.remove('ag-col-resizing');
       clearInsetRecenterLoop();
+      clearConnCountdown();
       writingStyleCalibration.dispose();
+      settingsPanel.dispose();
       document.body.classList.remove(
         'ag-sidebar-open',
         'ag-sidebar-resizing',

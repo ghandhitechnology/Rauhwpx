@@ -9,9 +9,16 @@
  *   | { type: 'text-delta';   agent: AgentName; text: string }
  *   | { type: 'tool-call';    agent: AgentName; callId: string; tool: string; argsJson: string }
  *   | { type: 'tool-result';  agent: AgentName; callId: string; ok: boolean; resultPreview: string }
+ *   | { type: 'usage';        agent: AgentName; model: string|null; usage: UsageTokens }
  *   | { type: 'turn-end';     agent: AgentName; stopReason?: string; errorMessage?: string }
  *   | { type: 'error';        agent: AgentName; message: string }
  * )} UnifiedAgentEvent
+ *
+ * @typedef {Object} UsageTokens
+ * @property {number} inputTokens
+ * @property {number} outputTokens
+ * @property {number} cacheReadTokens
+ * @property {number} cacheCreationTokens
  *
  * @typedef {Object} BackendOptions
  * @property {string} rootDir
@@ -68,6 +75,35 @@ export function createLineReader(onLine) {
       }
     }
   };
+}
+
+function usageCount(...candidates) {
+  for (const candidate of candidates) {
+    if (candidate === undefined || candidate === null) continue;
+    const n = Number(candidate);
+    if (Number.isFinite(n) && n > 0) return Math.round(n);
+  }
+  return 0;
+}
+
+/**
+ * CLI 가 보고하는 usage 객체를 통일된 토큰 카운트로 정규화한다.
+ * snake_case(claude result.usage)와 camelCase(result.modelUsage) 둘 다 받는다.
+ * 값이 전부 0 이거나 객체가 아니면 기록할 것이 없으므로 null 을 돌려준다.
+ *
+ * @param {any} raw
+ * @returns {import('./backend.mjs').UsageTokens | null}
+ */
+export function normalizeUsageTokens(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const usage = {
+    inputTokens: usageCount(raw.input_tokens, raw.inputTokens),
+    outputTokens: usageCount(raw.output_tokens, raw.outputTokens),
+    cacheReadTokens: usageCount(raw.cache_read_input_tokens, raw.cacheReadInputTokens, raw.cached_input_tokens, raw.cacheReadTokens),
+    cacheCreationTokens: usageCount(raw.cache_creation_input_tokens, raw.cacheCreationInputTokens, raw.cacheCreationTokens),
+  };
+  const total = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheCreationTokens;
+  return total > 0 ? usage : null;
 }
 
 /**

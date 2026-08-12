@@ -11,6 +11,7 @@ import { RevisionTracker } from './revision.ts';
 import { AgentToolExecutor } from './tool-executor.ts';
 import { PendingEditManager } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
+import { PendingRequestRegistry } from './pending-requests.ts';
 import { AgentTypewriterReveal } from './typewriter-reveal.ts';
 import {
   AGENT_PROTOCOL_VERSION,
@@ -28,7 +29,13 @@ import type {
   AgentWorkflowState,
   PermissionProfile,
   ProductSkillFile,
+  ProviderHealth,
+  ProviderStatusMap,
+  ProviderUsage,
   StructuredPlan,
+  UsageModelBreakdown,
+  UsageSummary,
+  UsageWindow,
   WritingStyleLanguage,
   WritingStyleUpload,
   AgentStreamEvent,
@@ -44,6 +51,14 @@ export interface AgentBridge {
   getWorkflowState(): AgentWorkflowState;
   /** 다른 탭이 연결을 차지한 상태에서 현재 탭이 스튜디오 연결을 다시 가져온다. */
   takeOverConnection(): void;
+  /** 예약된 백오프를 취소하고 즉시 다시 연결한다. 이미 연결/연결 중이면 무시. */
+  reconnectNow(): void;
+  /** 로컬 CLI 설치 상태. refresh=true 면 허브가 새로 프로브한다. */
+  requestProviderStatus(refresh?: boolean): Promise<ProviderStatusMap | null>;
+  /** 누적 사용량 요약. 응답이 없으면 null. */
+  requestUsage(): Promise<UsageSummary | null>;
+  /** 요금제를 바꾸고 갱신된 요약을 돌려받는다. */
+  setUsagePlan(agent: AgentName, plan: string): Promise<UsageSummary | null>;
   startChat(agent: AgentName, model?: string, effort?: string, force?: boolean, permissionProfile?: PermissionProfile, workflow?: AgentWorkflow): void;
   /** 허브 세션을 폐기하고 새 채팅을 시작할 수 있게 한다. */
   stopChat(): void;
@@ -75,12 +90,103 @@ const CLOSE_CODE_REPLACED = 4000;
 
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000];
 
+/** 요청/응답 대기 상한 — 넘기면 null 로 안착한다(던지지 않는다). */
+const REQUEST_TIMEOUT_MS = 10_000;
+
 function isAgentName(v: unknown): v is AgentName {
   return v === 'claude' || v === 'codex';
 }
 
 function readCapabilityEpoch(value: unknown) {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function num(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function nullableNum(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function readProviderHealth(value: unknown): ProviderHealth {
+  const src = (value ?? {}) as Record<string, unknown>;
+  return {
+    available: src['available'] === true,
+    version: typeof src['version'] === 'string' ? src['version'] : null,
+    error: typeof src['error'] === 'string' ? src['error'] : null,
+    checkedAt: num(src['checkedAt']),
+  };
+}
+
+/** 허브가 보낸 provider-status 를 항상 두 프로바이더가 있는 형태로 정규화한다. */
+function readProviderStatus(value: unknown): ProviderStatusMap {
+  const src = (value ?? {}) as Record<string, unknown>;
+  return {
+    claude: readProviderHealth(src['claude']),
+    codex: readProviderHealth(src['codex']),
+  };
+}
+
+function readUsageWindow(value: unknown): UsageWindow {
+  const src = (value ?? {}) as Record<string, unknown>;
+  return {
+    turns: num(src['turns']),
+    inputTokens: num(src['inputTokens']),
+    outputTokens: num(src['outputTokens']),
+    cacheReadTokens: num(src['cacheReadTokens']),
+    cacheCreationTokens: num(src['cacheCreationTokens']),
+    weightedTokens: num(src['weightedTokens']),
+    percent: nullableNum(src['percent']),
+  };
+}
+
+function readUsageByModel(value: unknown): Record<string, UsageModelBreakdown> {
+  const out: Record<string, UsageModelBreakdown> = {};
+  if (!value || typeof value !== 'object') return out;
+  for (const [model, raw] of Object.entries(value as Record<string, unknown>)) {
+    const src = (raw ?? {}) as Record<string, unknown>;
+    out[model] = {
+      turns: num(src['turns']),
+      inputTokens: num(src['inputTokens']),
+      outputTokens: num(src['outputTokens']),
+      weightedTokens: num(src['weightedTokens']),
+    };
+  }
+  return out;
+}
+
+function readProviderUsage(value: unknown): ProviderUsage {
+  const src = (value ?? {}) as Record<string, unknown>;
+  const limit = (src['limit'] ?? {}) as Record<string, unknown>;
+  return {
+    session: readUsageWindow(src['session']),
+    day: readUsageWindow(src['day']),
+    week: readUsageWindow(src['week']),
+    byModel: readUsageByModel(src['byModel']),
+    limit: {
+      session5h: nullableNum(limit['session5h']),
+      week: nullableNum(limit['week']),
+    },
+    updatedAt: nullableNum(src['updatedAt']),
+  };
+}
+
+function readUsageSummary(value: unknown): UsageSummary | null {
+  if (!value || typeof value !== 'object') return null;
+  const src = value as Record<string, unknown>;
+  const plans = (src['plans'] ?? {}) as Record<string, unknown>;
+  const providers = (src['providers'] ?? {}) as Record<string, unknown>;
+  return {
+    plans: {
+      claude: typeof plans['claude'] === 'string' ? plans['claude'] : 'pro',
+      codex: typeof plans['codex'] === 'string' ? plans['codex'] : 'plus',
+    },
+    providers: {
+      claude: readProviderUsage(providers['claude']),
+      codex: readProviderUsage(providers['codex']),
+    },
+  };
 }
 
 class AgentBridgeImpl implements AgentBridge {
@@ -96,8 +202,10 @@ class AgentBridgeImpl implements AgentBridge {
   private token: string;
   private ws: WebSocket | null = null;
   private state: ConnectionState = 'disconnected';
+  /** 지금까지 실패한 연결 시도 수. 연결이 열리면 0 으로 돌아간다. */
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private requests = new PendingRequestRegistry();
   private disposed = false;
 
   private listeners = new Set<(e: SidebarEvent) => void>();
@@ -171,7 +279,8 @@ class AgentBridgeImpl implements AgentBridge {
     this.connect();
   };
 
-  takeOverConnection(): void {
+  /** 백오프를 접고 지금 붙는다 — takeover(다른 탭)와 수동 재연결이 공유한다. */
+  private connectImmediately(): void {
     if (this.disposed || this.state === 'connected' || this.state === 'connecting') return;
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
@@ -179,6 +288,14 @@ class AgentBridgeImpl implements AgentBridge {
     }
     this.reconnectAttempt = 0;
     this.connect();
+  }
+
+  takeOverConnection(): void {
+    this.connectImmediately();
+  }
+
+  reconnectNow(): void {
+    this.connectImmediately();
   }
 
   // ─── connection ───────────────────────────────────────────
@@ -193,6 +310,8 @@ class AgentBridgeImpl implements AgentBridge {
       ws = new WebSocket(wsUrl);
     } catch (e) {
       console.warn('[AgentBridge] WebSocket 생성 실패:', e);
+      this.reconnectAttempt++;
+      this.setState('disconnected');
       this.scheduleReconnect();
       return;
     }
@@ -224,12 +343,15 @@ class AgentBridgeImpl implements AgentBridge {
       if (this.ws !== ws) return;
       this.ws = null;
       if (this.disposed) return;
+      // 응답을 기다리던 요청은 연결과 함께 사라진다 — null 로 닫아 UI 가 멈추지 않게.
+      this.requests.cancelAll();
       if (ev.code === CLOSE_CODE_REPLACED) {
         // 다른 탭이 허브를 차지했다. 자동 재접속하면 서로 끝없이 밀어내므로
         // 이 탭이 다시 포커스를 받을 때까지 대기한다(마지막 활성 탭 우선).
         this.setState('replaced');
         return;
       }
+      this.reconnectAttempt++;
       this.setState('disconnected');
       this.scheduleReconnect();
     };
@@ -240,18 +362,33 @@ class AgentBridgeImpl implements AgentBridge {
 
   private scheduleReconnect(): void {
     if (this.disposed || this.reconnectTimer !== null) return;
-    const delay = RECONNECT_DELAYS_MS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
-    this.reconnectAttempt++;
+    const step = Math.min(
+      Math.max(0, this.reconnectAttempt - 1),
+      RECONNECT_DELAYS_MS.length - 1,
+    );
+    const delay = RECONNECT_DELAYS_MS[step]!;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
     }, delay);
+    // 사이드바가 "n초 후 재시도" 를 셀 수 있도록 남은 시간을 함께 알린다.
+    this.emitConnection(delay);
+  }
+
+  /** 재시도 계기(시도 횟수·남은 시간)를 실은 connection 이벤트. */
+  private emitConnection(retryInMs?: number): void {
+    this.emit({
+      type: 'connection',
+      state: this.state,
+      attempt: this.reconnectAttempt,
+      ...(retryInMs !== undefined ? { retryInMs } : {}),
+    });
   }
 
   private setState(state: ConnectionState): void {
     if (this.state === state) return;
     this.state = state;
-    this.emit({ type: 'connection', state });
+    this.emitConnection();
   }
 
   private sendJson(obj: unknown): boolean {
@@ -398,7 +535,7 @@ class AgentBridgeImpl implements AgentBridge {
           }
           // setState 는 상태가 같으면 무시하므로 직접 emit 해 사이드바가
           // isTurnRunning() 으로 재동기화하도록 한다.
-          this.emit({ type: 'connection', state: this.state });
+          this.emitConnection();
         }
         break;
       }
@@ -503,6 +640,25 @@ class AgentBridgeImpl implements AgentBridge {
       case 'writing-style-error':
         this.emit({ type: 'writing-style-error', requestId: String(msg.requestId ?? ''), code: String(msg.code ?? 'CALIBRATION_FAILED'), message: String(msg.message ?? 'Writing-style calibration failed') });
         break;
+      case 'provider-status': {
+        const providers = readProviderStatus(msg.providers);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, providers);
+        this.emit({ type: 'provider-status', providers });
+        break;
+      }
+      case 'usage-report': {
+        const usage = readUsageSummary(msg.usage);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, usage);
+        if (usage) this.emit({ type: 'usage-report', usage });
+        break;
+      }
+      case 'usage-error':
+      case 'provider-error': {
+        // 사용량·프로브는 부수 정보다 — 실패는 던지지 않고 "모름(null)" 으로 닫는다.
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        console.warn('[AgentBridge]', msg.type + ':', msg.code, msg.message);
+        break;
+      }
       case 'chat-error': {
         this.emit({
           type: 'hub-error',
@@ -802,6 +958,34 @@ class AgentBridgeImpl implements AgentBridge {
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' });
   }
 
+  /**
+   * 요청 하나를 대기표에 올리고 보낸다. 오프라인이거나 전송이 실패하면
+   * 곧바로 null 로 안착한다 — 호출자는 언제나 값 또는 null 만 본다.
+   */
+  private request<T>(payload: Record<string, unknown> & { type: string }, prefix: string): Promise<T | null> {
+    if (this.state !== 'connected') return Promise.resolve(null);
+    const requestId = `${prefix}-${++this.requestSeq}`;
+    const promise = this.requests.create<T>(requestId, REQUEST_TIMEOUT_MS);
+    const sent = this.sendJson({ v: AGENT_PROTOCOL_VERSION, requestId, ...payload });
+    if (!sent) this.requests.settle(requestId, null);
+    return promise;
+  }
+
+  requestProviderStatus(refresh = false): Promise<ProviderStatusMap | null> {
+    return this.request<ProviderStatusMap>(
+      { type: 'provider-status-request', ...(refresh ? { refresh: true } : {}) },
+      'provider-status',
+    );
+  }
+
+  requestUsage(): Promise<UsageSummary | null> {
+    return this.request<UsageSummary>({ type: 'usage-request' }, 'usage');
+  }
+
+  setUsagePlan(agent: AgentName, plan: string): Promise<UsageSummary | null> {
+    return this.request<UsageSummary>({ type: 'usage-plan-set', agent, plan }, 'usage-plan');
+  }
+
   onEvent(cb: (e: SidebarEvent) => void): () => void {
     this.listeners.add(cb);
     return () => {
@@ -827,6 +1011,7 @@ class AgentBridgeImpl implements AgentBridge {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.requests.cancelAll();
     const ws = this.ws;
     this.ws = null;
     try {
