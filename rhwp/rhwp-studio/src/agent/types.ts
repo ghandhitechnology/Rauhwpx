@@ -148,7 +148,8 @@ export interface WritingStyleUpload {
 
 /* ── 프로바이더 상태 · 사용량 (프로토콜 v2 추가분) ──────────
    허브가 로컬 CLI(claude/codex)의 설치 여부를 프로브해 provider-status 로,
-   턴마다 기록한 토큰 사용량을 usage-report 로 보낸다. 두 메시지는 요청
+   턴마다 기록한 토큰 사용량을 usage-report 로 보낸다. CLIProxyAPI 가 연결되어
+   있으면 5시간·주간 percent 는 공식 요금제 값이다. 두 메시지는 요청
    응답으로도 오고(requestId), 연결 직후·턴 종료 후 밀어주기도 한다. */
 
 /** 로컬 CLI 한 벌의 실행 가능 여부. */
@@ -177,6 +178,35 @@ export interface UsageWindow {
   weightedTokens: number;
   /** 0–100 (초과 가능, 소수 첫째 자리). 한도가 없으면 null. */
   percent: number | null;
+  /** epoch ms — CLIProxyAPI 가 알려 준 창 리셋 시각. */
+  resetsAt?: number | null;
+}
+
+/** 5시간·주간 막대의 출처. cliproxy 는 공식 요금제 %, estimate 는 로컬 추정치. */
+export type UsageSource = 'estimate' | 'cliproxy';
+
+export interface CliproxyWindow {
+  percent: number | null;
+  resetsAt: number | null;
+}
+
+export interface CliproxyAccount {
+  agent: AgentName;
+  name: string;
+  email: string | null;
+  planType: string | null;
+  session: CliproxyWindow;
+  week: CliproxyWindow;
+  error: string | null;
+}
+
+export interface CliproxyStatus {
+  configured: boolean;
+  connected: boolean;
+  url: string | null;
+  error: string | null;
+  checkedAt: number | null;
+  accounts: CliproxyAccount[];
 }
 
 export interface UsageModelBreakdown {
@@ -194,11 +224,13 @@ export interface ProviderUsage {
   limit: { session5h: number | null; week: number | null };
   /** epoch ms — 마지막으로 사용량이 기록된 시각. */
   updatedAt: number | null;
+  source?: UsageSource;
 }
 
 export interface UsageSummary {
   plans: { claude: string; codex: string };
   providers: Record<AgentName, ProviderUsage>;
+  cliproxy?: CliproxyStatus;
 }
 
 export function isClaudeUsagePlan(value: unknown): value is ClaudeUsagePlan {

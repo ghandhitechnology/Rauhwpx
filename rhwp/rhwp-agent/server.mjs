@@ -17,6 +17,7 @@ import { DownloadManager } from './download-manager.mjs';
 import { BrowserbaseSession } from './browserbase-session.mjs';
 import { createProviderHealth } from './provider-health.mjs';
 import { createUsageStore } from './usage-store.mjs';
+import { createCliproxyClient } from './cliproxy.mjs';
 import { ReferenceStore } from './reference-store.mjs';
 import { createReferenceHttpHandler } from './reference-http.mjs';
 import { assertMessageScope, referenceScopesForSession, resolveSessionIdentity } from './reference-session.mjs';
@@ -48,6 +49,7 @@ const writingStyleStore = await new WritingStyleStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
 const providerHealth = createProviderHealth();
 const usageStore = await createUsageStore().init();
+const cliproxy = await createCliproxyClient({ rootDir: usageStore.rootDir }).init();
 const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
 const handleReferenceHttp = createReferenceHttpHandler({ store: referenceStore, token: TOKEN });
 let styleCalibrationRunning = false;
@@ -123,6 +125,15 @@ function replyToStudio(sock, obj) {
   sendJson(sock, obj);
 }
 
+function usageSnapshot() {
+  return cliproxy.applyToSummary(usageStore.summary());
+}
+
+async function usageSnapshotRefreshing(refresh = false) {
+  if (cliproxy.configured()) await cliproxy.refresh(refresh === true);
+  return usageSnapshot();
+}
+
 function sessionInfo() {
   return session
     ? {
@@ -153,7 +164,7 @@ function makeBackendEventHandler(generation) {
     if (evt.type === 'usage') {
       // 사용량은 원본 이벤트가 아니라 집계 리포트로만 스튜디오에 전달한다.
       usageStore.record({ agent: session.agent, model: evt.model, ...(evt.usage ?? {}) });
-      sendJson(studioSocket, { v: 1, type: 'usage-report', usage: usageStore.summary() });
+      sendJson(studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
       return;
     }
     if (evt.type === 'turn-start') missedTurnEnd = null;
@@ -677,17 +688,51 @@ function handleStudioMessage(sock, msg) {
     }
     case 'usage-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      replyToStudio(sock, { v: 1, type: 'usage-report', requestId, usage: usageStore.summary() });
+      void usageSnapshotRefreshing(msg.refresh === true)
+        .then((usage) => replyToStudio(sock, { v: 1, type: 'usage-report', requestId, usage }))
+        .catch((e) => replyToStudio(sock, {
+          v: 1, type: 'usage-error', requestId,
+          code: e?.code ?? 'CLIPROXY_FAILED', message: String(e?.message ?? e),
+        }));
       return;
     }
     case 'usage-plan-set': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void Promise.resolve()
         .then(() => usageStore.setPlan(msg.agent, msg.plan))
+        .then(() => usageSnapshotRefreshing(false))
         .then((usage) => replyToStudio(sock, { v: 1, type: 'usage-report', requestId, usage }))
         .catch((e) => replyToStudio(sock, {
           v: 1, type: 'usage-error', requestId,
           code: e?.code ?? 'INVALID_PLAN', message: String(e?.message ?? e),
+        }));
+      return;
+    }
+    case 'cliproxy-connect': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void cliproxy.connect({ url: msg.url, key: msg.key })
+        .then((status) => replyToStudio(sock, {
+          v: 1, type: 'usage-report', requestId, usage: cliproxy.applyToSummary(usageStore.summary()),
+        }))
+        .catch((e) => {
+          const usage = cliproxy.applyToSummary(usageStore.summary());
+          usage.cliproxy = {
+            ...usage.cliproxy,
+            configured: false,
+            connected: false,
+            error: String(e?.message ?? e),
+          };
+          replyToStudio(sock, { v: 1, type: 'usage-report', requestId, usage });
+        });
+      return;
+    }
+    case 'cliproxy-disconnect': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void cliproxy.disconnect()
+        .then(() => replyToStudio(sock, { v: 1, type: 'usage-report', requestId, usage: usageSnapshot() }))
+        .catch((e) => replyToStudio(sock, {
+          v: 1, type: 'usage-error', requestId,
+          code: e?.code ?? 'CLIPROXY_DISCONNECT_FAILED', message: String(e?.message ?? e),
         }));
       return;
     }
@@ -1005,7 +1050,12 @@ httpServer.on('upgrade', (req, socket, head) => {
       void providerHealth.check().then((providers) => {
         if (providers !== cachedProviders) replyToStudio(ws, { v: 1, type: 'provider-status', providers });
       });
-      sendJson(ws, { v: 1, type: 'usage-report', usage: usageStore.summary() });
+      sendJson(ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });
+      if (cliproxy.configured()) {
+        void cliproxy.refresh(false).then((status) => {
+          if (status.connected || status.error) replyToStudio(ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });
+        });
+      }
       log('studio connected');
     } else {
       const agentLabel = url.searchParams.get('agent') ?? 'unknown';

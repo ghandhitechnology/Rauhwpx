@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 // settings.ts 는 CSS 를 가져오므로 Node 에서 불러올 수 없다 — 계기판 숫자
 // 규칙만 css 없는 모듈에서 실제로 검증하고, DOM 계약은 소스 텍스트로 본다.
-import { formatRelativeTime, formatTokens } from '../src/ui/agent-sidebar/usage-format.ts';
+import { formatRelativeTime, formatResetAt, formatTokens } from '../src/ui/agent-sidebar/usage-format.ts';
 
 const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
 const settings = readFileSync(new URL('../src/ui/agent-sidebar/settings.ts', import.meta.url), 'utf8');
@@ -135,6 +135,22 @@ test('사용량 미터는 5시간·주간·오늘·모델별을 보여주고 80%
   assert.match(settingsCss, /color-mix\(in srgb, var\(--ag-err\)/);
 });
 
+test('사용량 묶음에서 CLIProxyAPI 를 연결할 수 있다', () => {
+  assert.match(settings, /document\.createTextNode\('CLIProxyAPI'\)/);
+  assert.match(settings, /createTextField\('주소'/);
+  assert.match(settings, /createTextField\('관리 키'/);
+  assert.match(settings, /placeholder: 'http:\/\/127\.0\.0\.1:8317'/);
+  assert.match(settings, /bridge\.connectCliproxy\(cliproxyUrl\.input\.value, cliproxyKey\.input\.value\)/);
+  assert.match(settings, /bridge\.disconnectCliproxy\(\)/);
+  assert.match(settings, /void refreshUsage\(true\)/);
+  assert.match(settings, /실제 사용량을 보여줘요/);
+  assert.match(settings, /remote-management\.secret-key/);
+  assert.match(settings, /ui\.plan\.hidden = actual/);
+  assert.match(settings, /actual \? '실제' : '추정'/);
+  assert.match(settingsCss, /\.ag-settings-input/);
+  assert.match(settingsCss, /\.ag-settings-cliproxy-error/);
+});
+
 test('한도가 없으면 누적치만 말한다', () => {
   assert.match(settings, /\$\{formatTokens\(window_\.weightedTokens\)\} 토큰 · \$\{window_\.turns\}턴/);
 });
@@ -159,6 +175,9 @@ test('토큰·시각 표기는 짧게 (폭이 흔들리지 않게)', () => {
   assert.equal(formatRelativeTime(now - 5 * 60_000, now), '5분 전');
   assert.equal(formatRelativeTime(now - 3 * 3_600_000, now), '3시간 전');
   assert.equal(formatRelativeTime(now - 50 * 3_600_000, now), '2일 전');
+  assert.equal(formatResetAt(now + 5 * 60_000, now), '5분 후 리셋');
+  assert.equal(formatResetAt(now + 3 * 3_600_000, now), '3시간 후 리셋');
+  assert.equal(formatResetAt(now - 1_000, now), '곧 리셋');
 });
 
 test('설정의 채움 버튼도 손그림 윤곽을 쓴다', () => {

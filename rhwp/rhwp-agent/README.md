@@ -91,6 +91,8 @@ Paths are relative to the repository root.
 | `RHWP_CODEX_MODEL` | `gpt-5.6-sol` | Model for Codex sessions |
 | `RHWP_SKILLS_DIR` | OS application-data directory | Product-only user skill directory override |
 | `RHWP_USAGE_DIR` | OS application-data directory | Token-usage log and plan directory override |
+| `RHWP_CLIPROXY_URL` | `http://127.0.0.1:8317` | CLIProxyAPI base URL for official plan usage |
+| `RHWP_CLIPROXY_KEY` | — | CLIProxyAPI management key (`remote-management.secret-key`) |
 | `RHWP_REFERENCES_DIR` | OS application-data directory | Persistent reference metadata, deduplicated blobs, and search index override |
 | `BROWSERBASE_API_KEY` | — | Browserbase API key (required for Browserbase tools) |
 | `BROWSERBASE_PROJECT_ID` | — | Browserbase project id (required for Browserbase tools) |
@@ -126,7 +128,11 @@ turn reports token usage.
 
 Usage totals come from rolling windows (session 5h, day 24h, week 7d) over
 weighted tokens (`input + output + cacheCreation + cacheRead/10`); plan budgets
-are estimates, so `percent` is a guide, not billing. Records live in
+are estimates, so `percent` is a guide, not billing. Connect CLIProxyAPI in
+Settings → 사용량 (URL + management key) to replace the 5-hour and weekly
+percents with the official plan meters. `cliproxy-connect` / `cliproxy-disconnect`
+answer the same `usage-report`; the key is stored next to the usage log as
+`cliproxy.json` (mode 0600) and is never sent back to the studio. Records live in
 `<app data>/rhwp/usage/` as append-only `events.jsonl` (pruned to 8 days) plus
 `plans.json`, overridable with `RHWP_USAGE_DIR`.
 
@@ -321,6 +327,7 @@ literal `/`.
 - `download-manager.mjs` — confined per-chat downloader
 - `provider-health.mjs` — cached `claude`/`codex` CLI version probes (single-flight)
 - `usage-store.mjs` — token-usage JSONL log, plan budgets, rolling-window summary
+- `cliproxy.mjs` — CLIProxyAPI management client for official 5h/weekly plan usage
 - `browserbase-session.mjs` — lazy official Browserbase MCP sidecar proxy
 - `agents/claude.mjs` — `claude -p` stream-json persistent-process backend
 - `agents/codex.mjs` — `codex exec --json` per-turn spawn backend (`exec resume` continuity)

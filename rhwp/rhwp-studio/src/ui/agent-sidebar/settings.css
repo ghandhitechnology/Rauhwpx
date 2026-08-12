@@ -154,6 +154,7 @@
 
 .ag-settings-btn:focus-visible,
 .ag-settings-primary:focus-visible,
+.ag-settings-input:focus-visible,
 .ag-settings-select:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
@@ -173,6 +174,7 @@
   color: var(--ag-text-secondary);
 }
 
+.ag-settings-input,
 .ag-settings-select {
   flex: 1 1 auto;
   min-width: 0;
@@ -184,7 +186,16 @@
   background: var(--ag-input-bg);
   color: var(--ag-text);
   font: inherit;
+}
+
+.ag-settings-select {
   cursor: pointer;
+}
+
+.ag-settings-cliproxy-error {
+  margin: 0;
+  font-size: var(--font-size-sm, 11px);
+  color: color-mix(in srgb, var(--ag-err) 80%, var(--ag-text));
 }
 
 .ag-settings-note,
