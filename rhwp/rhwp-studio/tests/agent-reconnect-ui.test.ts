@@ -70,9 +70,9 @@ test('CLI 스폰 실패는 대화 안에서 다시 시도할 수 있다', () => 
   assert.match(source, /if \(e\.code === 'AGENT_SPAWN_FAILED'\) appendSpawnRetryAction\(\)/);
   assert.match(source, /function appendSpawnRetryAction\(\): void/);
   assert.match(source, /el\('button', 'ag-hub-retry-btn', '다시 시도'\)/);
-  // 강제 재시작(force=true)이어야 죽은 세션 자리에 새 CLI 가 뜬다.
+  // 강제 재시작(force=true)이어야 죽은 세션 자리에 새 CLI 가 뜬다. 스레드/문서 식별자도 같이 간다.
   assert.match(
     source,
-    /function restartAgentSession\(\): void \{\s*bridge\.startChat\(selectedAgent, selectedModel, selectedEffort, true, permissionProfile, chatWorkflow\);/,
+    /function restartAgentSession\(\): void \{\s*startCurrentBridgeChat\(true\);/,
   );
 });

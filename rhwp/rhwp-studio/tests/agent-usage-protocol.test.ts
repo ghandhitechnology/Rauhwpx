@@ -78,8 +78,8 @@ test('허브 메시지는 대기 중인 요청을 풀고 사이드바 이벤트�
     bridge,
     /case 'usage-report': \{[\s\S]*this\.requests\.settle\(msg\.requestId, usage\)[\s\S]*this\.emit\(\{ type: 'usage-report', usage \}\)/,
   );
-  // usage-error 는 던지지 않고 null 로 닫는다.
-  assert.match(bridge, /case 'usage-error': \{[\s\S]*settle\(msg\.requestId, null\)/);
+  // usage-error/provider-error 는 던지지 않고 null 로 닫는다.
+  assert.match(bridge, /case 'usage-error':\s*case 'provider-error': \{[\s\S]*settle\(msg\.requestId, null\)/);
   assert.match(bridge, /this\.requests\.cancelAll\(\)/);
 });
 

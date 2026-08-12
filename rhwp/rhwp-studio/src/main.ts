@@ -122,9 +122,19 @@ let rendererRuntimeRequest: EmbedRendererRuntimeRequestV1 | null = null;
 let renderBackendFallbackReason: RenderBackendFallbackReason | null = null;
 let rendererInitializationError: string | null = null;
 let rendererInitialized = false;
+/**
+ * 현재 편집 세션의 논리 문서 ID. 파일명/Save As 대상과 분리되어 문서가 열린
+ * 동안 유지되고, 재열기 시 recent-store가 handle/digest로 이전 ID를 복원한다.
+ */
+let activeDocumentId: string | null = null;
 let extensionViewerSettings: ExtensionViewerSettings = {
   disableExternalWebFonts: false,
 };
+
+function createActiveDocumentId(): string {
+  return globalThis.crypto?.randomUUID?.()
+    ?? `document_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
 
 
 // ─── 커맨드 시스템 ─────────────────────────────
@@ -532,7 +542,7 @@ async function initialize(): Promise<void> {
           } else if (inputHandler?.hasSelection()) {
             selectionLabel = '텍스트 선택됨';
           }
-          return { documentName, selectionLabel };
+          return { documentId: activeDocumentId, documentName, selectionLabel };
         },
       });
       if (import.meta.env.DEV) {
@@ -795,6 +805,28 @@ function setupEventListeners(): void {
     eventBus.emit('command-state-changed');
   });
 
+  eventBus.on('document-file-handle-saved', (payload) => {
+    const saved = payload as {
+      fileHandle: FileSystemFileHandleLike;
+      fileName: string;
+      sourceFormat: string;
+    };
+    const documentId = activeDocumentId;
+    const sourceDigest = wasm.documentDigest;
+    if (!documentId || !sourceDigest) return;
+
+    // Save/Save As changes storage metadata, not logical document identity. Explicitly
+    // bind the new handle to the active ID so reopening it in a later session restores
+    // the same document-scoped references. Download fallbacks emit no such event.
+    void addRecentDoc({
+      documentId,
+      sourceDigest,
+      fileName: saved.fileName,
+      sourceFormat: saved.sourceFormat,
+      handle: saved.fileHandle,
+    }).catch((err) => console.warn('[recent] 저장 핸들 identity 갱신 실패:', err));
+  });
+
   eventBus.on('autosave-settings-changed', () => {
     autosaveManager.updateSchedule(autosaveScheduleFromUserSettings());
   });
@@ -1039,6 +1071,7 @@ async function loadBytes(
     await updateLoadProgress(0, '문서 데이터 준비 중...');
   }
   await updateLoadProgress(25, '문서 파싱 및 쪽 계산 중...');
+  activeDocumentId = null;
   const docInfo = wasm.loadDocument(data, fileName);
   prepareCanvasRendererDocument();
   await updateLoadProgress(45, '자동 저장 준비 중...');
@@ -1050,11 +1083,27 @@ async function loadBytes(
   // 메타-only 로 기록한다 — 목록에는 남기되 자동 재열기는 핸들 있는 항목만 가능하다.
   // 자동저장 복구본은 options.skipRecent 로 제외.
   if (!options.skipRecent) {
-    void addRecentDoc({
-      fileName: wasm.fileName,
-      sourceFormat: wasm.getSourceFormat(),
-      handle: fileHandle,
-    }).catch((err) => console.warn('[recent] 최근 문서 기록 실패:', err));
+    const sourceDigest = wasm.documentDigest;
+    if (!sourceDigest) {
+      activeDocumentId = createActiveDocumentId();
+      console.warn('[recent] 원본 digest가 없어 세션 전용 문서 ID를 사용합니다.');
+    } else {
+      try {
+        const recent = await addRecentDoc({
+          sourceDigest,
+          fileName: wasm.fileName,
+          sourceFormat: wasm.getSourceFormat(),
+          handle: fileHandle,
+        });
+        activeDocumentId = recent.documentId;
+      } catch (err) {
+        activeDocumentId = createActiveDocumentId();
+        console.warn('[recent] 최근 문서 기록 실패, 세션 전용 문서 ID를 사용합니다:', err);
+      }
+    }
+  } else {
+    // 복구본은 원본 최근 항목을 가장하지 않는 독립 문서 세션이다.
+    activeDocumentId = createActiveDocumentId();
   }
 
   await autosaveManager.beginDocument(
@@ -1185,7 +1234,9 @@ async function createNewDocument(): Promise<void> {
   const msg = sbMessage();
   try {
     msg.textContent = '새 문서 생성 중...';
+    activeDocumentId = null;
     const docInfo = wasm.createNewDocument();
+    activeDocumentId = createActiveDocumentId();
     prepareCanvasRendererDocument();
     await autosaveManager.beginDocument(
       { fileName: wasm.fileName, sourceFormat: wasm.getSourceFormat() },
