@@ -26,6 +26,8 @@ export interface ChatThread {
   workflow: AgentWorkflow;
   /** 이 채팅이 속한 문서(파일 이름). null = 문서 없이 시작한 채팅. */
   docKey: string | null;
+  /** 서버의 문서별 참고자료 범위에 쓰는 안정적인 논리 문서 ID. */
+  documentId: string | null;
   /** Historical display data only. Phase/approval/capability authority is never persisted. */
   latestPlan?: StructuredPlan;
   messages: ThreadMessage[];
@@ -37,12 +39,14 @@ export interface ThreadDraft {
   effort: string;
   workflow?: AgentWorkflow;
   docKey?: string | null;
+  documentId?: string | null;
 }
 
-type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan' | 'docKey'> & {
+type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan' | 'docKey' | 'documentId'> & {
   workflow?: unknown;
   latestPlan?: unknown;
   docKey?: unknown;
+  documentId?: unknown;
 };
 
 function canUseStorage(): boolean {
@@ -92,11 +96,18 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
 
 function normalizeStoredThread(thread: StoredChatThread): ChatThread {
   const latestPlan = isStructuredPlan(thread.latestPlan) ? thread.latestPlan : undefined;
-  const { workflow: _storedWorkflow, latestPlan: _storedPlan, docKey: storedDocKey, ...rest } = thread;
+  const {
+    workflow: _storedWorkflow,
+    latestPlan: _storedPlan,
+    docKey: storedDocKey,
+    documentId: storedDocumentId,
+    ...rest
+  } = thread;
   return {
     ...rest,
     workflow: isAgentWorkflow(thread.workflow) ? thread.workflow : 'direct',
     docKey: typeof storedDocKey === 'string' && storedDocKey ? storedDocKey : null,
+    documentId: typeof storedDocumentId === 'string' && storedDocumentId ? storedDocumentId : null,
     ...(latestPlan ? { latestPlan } : {}),
   };
 }
@@ -128,6 +139,7 @@ export function createEmptyThread(draft: ThreadDraft): ChatThread {
     effort: draft.effort,
     workflow: draft.workflow ?? 'direct',
     docKey: draft.docKey ?? null,
+    documentId: draft.documentId ?? null,
     messages: [],
   };
 }
