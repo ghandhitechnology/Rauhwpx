@@ -406,6 +406,21 @@ pub enum PageItem {
     },
 }
 
+/// [PR #17] paragraph_layout 이 줄 안에 직접 그리는 인라인(treat_as_char) 컨트롤인가.
+///
+/// Shape/Picture/Equation 이 여기 해당한다. 이 컨트롤들의 `PageItem::Shape` 는
+/// [Issue #476] 라우팅을 거쳐 "박스가 속한 줄이 놓인 페이지" 에 등록되어야 한다.
+/// 그림만 라우팅에서 빠져 있어, 페이지 분할된 문단의 인라인 그림이 줄 안에 한 번 +
+/// 다음 페이지 fallback 으로 한 번, 총 두 번 그려지는 결함이 있었다.
+pub fn is_inline_tac_control(ctrl: &Control) -> bool {
+    match ctrl {
+        Control::Shape(s) => s.common().treat_as_char,
+        Control::Picture(p) => p.common.treat_as_char,
+        Control::Equation(e) => e.common.treat_as_char,
+        _ => false,
+    }
+}
+
 /// [Issue #476] 인라인(treat_as_char) 컨트롤이 라우팅된 페이지/단을 찾는다.
 ///
 /// `pages`: 이미 finalize 된 이전 페이지들의 ColumnContent(items 포함).

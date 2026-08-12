@@ -222,11 +222,11 @@ impl PageAreas {
             if page_def.binding == BindingMethod::DuplexSided && is_even_page {
                 (
                     page_def.margin_right,
-                    page_def.margin_left + page_def.margin_gutter,
+                    page_def.margin_left.saturating_add(page_def.margin_gutter),
                 )
             } else {
                 (
-                    page_def.margin_left + page_def.margin_gutter,
+                    page_def.margin_left.saturating_add(page_def.margin_gutter),
                     page_def.margin_right,
                 )
             };
@@ -234,7 +234,9 @@ impl PageAreas {
         let mut content_left = effective_left;
         let mut content_right = page_width.saturating_sub(effective_right);
         // HWP 본문 시작 = margin_header + margin_top (한컴 도움말 기준)
-        let mut content_top = page_def.margin_header + page_def.margin_top;
+        // 손상된 문서(예: margin_header가 음수 HWPUNIT를 부호없는 값으로 오인)에서
+        // 두 여백의 합이 u32 범위를 넘을 수 있으므로 saturating_add로 방어한다.
+        let mut content_top = page_def.margin_header.saturating_add(page_def.margin_top);
         // HWP 본문 끝 = height - margin_footer - margin_bottom
         let mut content_bottom = page_height
             .saturating_sub(page_def.margin_footer)
@@ -264,11 +266,16 @@ impl PageAreas {
             bottom: content_bottom as i32,
         };
 
+        // margin_footer가 용지 높이를 초과하면(손상 문서) 언더플로우를 방지하고
+        // footer_area가 뒤집히지 않도록 content_bottom 아래로 내려가지 않게 한다.
+        let footer_bottom = page_height
+            .saturating_sub(page_def.margin_footer)
+            .max(content_bottom);
         let footer_area = Rect {
             left: content_left as i32,
             top: content_bottom as i32,
             right: content_right as i32,
-            bottom: (page_height - page_def.margin_footer) as i32,
+            bottom: footer_bottom as i32,
         };
 
         PageAreas {
