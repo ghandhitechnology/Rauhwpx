@@ -58,7 +58,7 @@
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "build/icon.icns",
-      "identity": "Developer ID Application: TAEWOOK HA (C8M34MMT8W)",
+      "identity": "TAEWOOK HA (C8M34MMT8W)",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "notarize": true,
