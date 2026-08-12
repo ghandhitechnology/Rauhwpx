@@ -190,6 +190,7 @@ async function tryFileSystemSave(
 function completeHandleSave(
   services: CommandServices,
   sourceFormat: string,
+  savedFormat: SaveFormat,
   result: SaveDocumentResult,
   reason: 'save' | 'save-as',
 ): void {
@@ -197,6 +198,16 @@ function completeHandleSave(
   services.wasm.currentFileHandle = result.handle;
   services.wasm.fileName = result.fileName;
   services.documentState.markClean(reason);
+  if (result.handle) {
+    // Handle-backed saves can be reopened across browser sessions. Keep this event
+    // deliberately limited to the durable handle/name association; fallback downloads
+    // have no handle and remain session-only.
+    services.eventBus.emit('document-file-handle-saved', {
+      fileHandle: result.handle,
+      fileName: result.fileName,
+      sourceFormat: savedFormat,
+    });
+  }
 }
 
 function downloadBlob(blob: Blob, fileName: string): void {
@@ -233,7 +244,7 @@ async function saveAsFormat(services: CommandServices, format: SaveFormat): Prom
     );
     if (result === 'cancelled') return;
     if (result.method !== 'fallback') {
-      completeHandleSave(services, sourceFormat, result, 'save-as');
+      completeHandleSave(services, sourceFormat, format, result, 'save-as');
       return;
     }
     const downloadName = await promptFallbackName(saveName, format);
@@ -285,7 +296,7 @@ export async function saveCurrentDocument(services: CommandServices): Promise<Sa
     );
     if (result === 'cancelled') return 'cancelled';
     if (result.method !== 'fallback') {
-      completeHandleSave(services, sourceFormat, result, 'save');
+      completeHandleSave(services, sourceFormat, target.format, result, 'save');
       return 'saved';
     }
     const downloadName = await fallbackNameForCurrentSave(services, target);
