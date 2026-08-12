@@ -24,8 +24,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // 검증 방식: 소스 복제 없이 실제 cursor.ts 를 로드해 comparePositions/getSelectionOrdered 를
 // 직접 호출한다. CursorState 는 constructor(private wasm) parameter property 때문에 Node 의
 // strip-only 로더로는 직접 import 가 불가하므로(`TypeScript parameter property is not supported
-// in strip-only mode`), process.execPath 자식 프로세스를 --experimental-transform-types 로
-// 띄우고 module.registerHooks 로 `@/` 별칭과 확장자 없는 상대 import 를 매핑한다.
+// in strip-only mode`), process.execPath 자식 프로세스에 support/ts-transform-hooks.mjs 를
+// --import 로 등록해 TS 를 변환하고(Node 26 에서 --experimental-transform-types 제거),
+// 드라이버의 module.registerHooks 로 `@/` 별칭과 확장자 없는 상대 import 를 매핑한다.
 // node_modules/.bin 실행 파일에 의존하지 않아 플랫폼 무관하게 동작한다.
 
 const studioRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -130,9 +131,10 @@ result.reflexivity = sign(cmp(aAnchor, { ...aAnchor })) === 0;
 process.stdout.write('###' + JSON.stringify(result) + '###');
 `);
 
+const transformHooks = pathToFileURL(path.join(studioRoot, 'tests', 'support', 'ts-transform-hooks.mjs')).href;
 const run = spawnSync(
   process.execPath,
-  ['--experimental-transform-types', '--no-warnings', driverPath],
+  ['--no-warnings', '--import', transformHooks, driverPath],
   { cwd: studioRoot, encoding: 'utf8' },
 );
 
