@@ -252,6 +252,7 @@ export class ReferenceStore {
     maxGlobalFiles = DEFAULT_MAX_GLOBAL_FILES,
     now = () => new Date().toISOString(),
     createId = () => crypto.randomUUID(),
+    persistMetadata = atomicWriteJson,
   } = {}) {
     this.root = path.resolve(root);
     this.blobsDir = path.join(this.root, 'blobs');
@@ -264,6 +265,7 @@ export class ReferenceStore {
     this.maxFiles = { chat: maxChatFiles, document: maxDocumentFiles, global: maxGlobalFiles };
     this.now = now;
     this.createId = createId;
+    this.persistMetadata = persistMetadata;
     this.metadata = { schemaVersion: SCHEMA_VERSION, files: [] };
     this.objects = new Map();
     this.indexChunks = new Map();
@@ -391,7 +393,7 @@ export class ReferenceStore {
   }
 
   async #persist() {
-    await atomicWriteJson(this.metadataPath, this.metadata);
+    await this.persistMetadata(this.metadataPath, this.metadata);
   }
 
   async addBuffer(options) {
@@ -466,10 +468,17 @@ export class ReferenceStore {
         }
         const object = { schemaVersion: SCHEMA_VERSION, sha256, extractedChars: extracted.text.length, chunks };
         const objectPath = this.#objectPath(sha256);
-        if (!await pathIsPlainFile(objectPath)) await atomicWriteJson(objectPath, object);
+        const objectExisted = await pathIsPlainFile(objectPath);
+        if (!objectExisted) await atomicWriteJson(objectPath, object);
         const blobPath = this.#blobPath(sha256);
-        if (await pathIsPlainFile(blobPath)) await fs.unlink(staging);
-        else await fs.rename(staging, blobPath);
+        const blobExisted = await pathIsPlainFile(blobPath);
+        try {
+          if (blobExisted) await fs.unlink(staging);
+          else await fs.rename(staging, blobPath);
+        } catch (error) {
+          if (!objectExisted) await fs.unlink(objectPath).catch(() => undefined);
+          throw error;
+        }
         const record = {
           id: recordId,
           ...scoped,
@@ -482,8 +491,16 @@ export class ReferenceStore {
           chunkCount: chunks.length,
           extractedChars: extracted.text.length,
         };
-        this.metadata = { ...this.metadata, files: [...this.metadata.files, record] };
-        await this.#persist();
+        const previousMetadata = this.metadata;
+        this.metadata = { ...previousMetadata, files: [...previousMetadata.files, record] };
+        try {
+          await this.#persist();
+        } catch (error) {
+          this.metadata = previousMetadata;
+          if (!blobExisted) await fs.unlink(blobPath).catch(() => undefined);
+          if (!objectExisted) await fs.unlink(objectPath).catch(() => undefined);
+          throw error;
+        }
         this.#indexObject(object);
         return publicFile(record);
       });
@@ -522,8 +539,14 @@ export class ReferenceStore {
       const record = this.metadata.files[index];
       const files = this.metadata.files.slice();
       files.splice(index, 1);
-      this.metadata = { ...this.metadata, files };
-      await this.#persist();
+      const previousMetadata = this.metadata;
+      this.metadata = { ...previousMetadata, files };
+      try {
+        await this.#persist();
+      } catch (error) {
+        this.metadata = previousMetadata;
+        throw error;
+      }
       const retained = files.some((file) => file.sha256 === record.sha256);
       if (!retained) {
         this.#dropIndexedObject(record.sha256);

@@ -195,3 +195,44 @@ test('unsafe generated ids cannot escape staging or enter persisted metadata', a
   );
   assert.deepEqual(await fs.readdir(store.stagingDir), []);
 });
+
+test('metadata write failures roll back uploads and deletions in memory and on disk', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-rollback-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const root = path.join(parent, 'references');
+  let failNextWrite = true;
+  const persistMetadata = async (file, value) => {
+    if (failNextWrite) {
+      failNextWrite = false;
+      throw Object.assign(new Error('simulated metadata disk failure'), { code: 'ENOSPC' });
+    }
+    await fs.writeFile(file, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  };
+  const store = await new ReferenceStore({ root, persistMetadata }).init();
+  const upload = {
+    scope: 'chat', scopeId: 'rollback-chat', name: 'rollback.txt', bytes: Buffer.from('rollback searchable text'),
+  };
+
+  await assert.rejects(store.addBuffer(upload), /simulated metadata disk failure/);
+  assert.deepEqual(store.list({ scope: 'chat', scopeId: 'rollback-chat' }), []);
+  assert.deepEqual(await fs.readdir(store.stagingDir), []);
+  assert.deepEqual(await fs.readdir(store.blobsDir), []);
+  assert.deepEqual(await fs.readdir(store.objectsDir), []);
+  assert.deepEqual(JSON.parse(await fs.readFile(store.metadataPath, 'utf8')).files, []);
+
+  const saved = await store.addBuffer(upload);
+  const afterUploadRestart = await new ReferenceStore({ root }).init();
+  assert.deepEqual(afterUploadRestart.list({ scope: 'chat', scopeId: 'rollback-chat' }).map((file) => file.id), [saved.id]);
+
+  failNextWrite = true;
+  await assert.rejects(
+    store.remove({ fileId: saved.id, scope: 'chat', scopeId: 'rollback-chat' }),
+    /simulated metadata disk failure/,
+  );
+  assert.deepEqual(store.list({ scope: 'chat', scopeId: 'rollback-chat' }).map((file) => file.id), [saved.id]);
+  const afterDeleteFailureRestart = await new ReferenceStore({ root }).init();
+  assert.deepEqual(afterDeleteFailureRestart.list({ scope: 'chat', scopeId: 'rollback-chat' }).map((file) => file.id), [saved.id]);
+
+  await store.remove({ fileId: saved.id, scope: 'chat', scopeId: 'rollback-chat' });
+  assert.deepEqual(store.list({ scope: 'chat', scopeId: 'rollback-chat' }), []);
+});
