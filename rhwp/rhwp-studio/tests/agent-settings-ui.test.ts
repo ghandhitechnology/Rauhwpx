@@ -14,7 +14,7 @@ const icons = readFileSync(new URL('../src/ui/agent-sidebar/icons.ts', import.me
 test('설정 페이지는 무대에 다른 페이지와 나란히 선다', () => {
   assert.match(
     source,
-    /stage\.append\(workspaceBar, chatPage, threadsPage, skillsPage, settingsPage, reviewColumn, railResize, reviewResize\)/,
+    /stage\.append\(\s*workspaceBar,\s*chatPage,\s*threadsPage,\s*skillsPage,\s*referenceLibrary\.page,\s*settingsPage,\s*reviewColumn,\s*railResize,\s*reviewResize,?\s*\)/,
   );
   assert.match(settings, /element\.id = 'ag-settings-panel'/);
   assert.match(settings, /element\.setAttribute\('role', 'region'\)/);
@@ -37,9 +37,11 @@ test('목록·스킬·설정 세 페이지는 서로를 닫는다', () => {
     source,
     /if \(open\) \{\s*setConfigPanelOpen\(false\);\s*threadsPanelOpen = false;\s*skillsPanelOpen = false;\s*root\.classList\.remove\('ag-threads-open', 'ag-skills-open'\);/,
   );
-  // 목록/스킬/전체 화면으로 넘어가면 설정이 닫힌다.
+  // 목록/스킬/참고자료/전체 화면으로 넘어가면 설정이 닫힌다.
   assert.match(source, /function closeSettingsPage\(\): void \{[\s\S]*root\.classList\.remove\('ag-settings-open'\)/);
-  assert.equal((source.match(/closeSettingsPage\(\);/g) ?? []).length, 3);
+  assert.equal((source.match(/closeSettingsPage\(\);/g) ?? []).length, 4);
+  // 설정과 참고자료 페이지는 서로를 닫는다.
+  assert.match(source, /if \(open && referenceLibrary\.isOpen\(\)\) referenceLibrary\.setOpen\(false\);\s*settingsPanelOpen = open;/);
 });
 
 test('헤더에 설정(기어) 버튼이 있다', () => {

@@ -14,6 +14,7 @@ e2e 스크립트의 **단일 권위 목록**이다. 파일 추가/변경/폐기 
 | 파일 | 분류 | 상태 | 용도 | 샘플 | 배선 | 비고 |
 |------|------|------|------|------|------|------|
 | `agent-edit-loop.test.mjs` | 상시 | active | 에이전트 편집 루프 종단간 (hub→bridge→executor→pending→wasm): revision 게이트 / 원자 replace_range / apply_list 숫자 서식 / 수식 미리보기·삽입 / verify_changes PNG / 수식 줄넘침 / 승인 영속 | footnote-01.hwp | npm e2e:agent-edit-loop |  |
+| `reference-files-flow.test.mjs` | 상시 | active | 참고자료 UI/허브 종단간: 채팅·문서·전역 업로드, 내용 검색, 새 채팅 범위 격리, MCP 검색 상속 | — | npm e2e:reference-files |  |
 | `autosave-recovery.test.mjs` | 상시 | active | Task #1448 — 미저장 문서 자동 백업 복구 E2E | — | 수동 |  |
 | `blogform.test.mjs` | 상시 | active | BlogForm_BookReview.hwp 누름틀 안내문 | BlogForm_BookReview.hwp | 수동 |  |
 | `body-outside-click-fallback.test.mjs` | 진단 | hold | 보류 ② 본문 외곽 클릭 fallback 결함 — 가설 (b) master page 글상자 hit 확정 e2e | hwpctl_Action_Table__v1.1.hwp | 수동 | legacy-name · 보류② 이슈 종속 |

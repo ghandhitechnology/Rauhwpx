@@ -20,6 +20,42 @@ export type WritingStyleLanguage = 'ko' | 'en';
 export type AgentWorkflow = 'direct' | 'plan';
 export type AgentPhase = 'direct' | 'planning' | 'awaiting-approval' | 'switching' | 'implementing';
 
+/** 에이전트 참고자료의 수명 범위. 파일 본문은 허브가 보관하며 브라우저에는 메타데이터만 둔다. */
+export type ReferenceScope = 'chat' | 'document' | 'global';
+export type ReferenceFileStatus = 'uploading' | 'extracting' | 'indexing' | 'ready' | 'error';
+
+export interface ReferenceFile {
+  id: string;
+  scope: ReferenceScope;
+  scopeId: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  status: ReferenceFileStatus;
+  createdAt: string;
+  sha256?: string;
+  chunkCount?: number;
+  error?: string;
+}
+
+export interface ReferenceSearchHit {
+  referenceId: string;
+  name: string;
+  scope: ReferenceScope;
+  scopeId: string;
+  score: number;
+  snippet: string;
+  chunkIndex?: number;
+  chunkId?: string;
+  page?: number | null;
+}
+
+export interface ReferenceScopeContext {
+  threadId: string;
+  documentId: string | null;
+  documentName?: string | null;
+}
+
 export interface StructuredPlanStep {
   title: string;
   details: string;
@@ -238,6 +274,9 @@ export type SidebarEvent =
       model?: string;
       effort?: string;
       permissionProfile?: PermissionProfile;
+      threadId?: string;
+      documentId?: string | null;
+      documentName?: string | null;
       workflow: AgentWorkflow;
       phase: AgentPhase;
       capabilityEpoch: number | null;
