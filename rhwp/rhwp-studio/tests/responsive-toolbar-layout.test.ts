@@ -6,10 +6,10 @@ const toolbar = readFileSync(new URL('../src/styles/toolbar.css', import.meta.ur
 const styleBar = readFileSync(new URL('../src/styles/style-bar.css', import.meta.url), 'utf8');
 const responsive = readFileSync(new URL('../src/styles/responsive.css', import.meta.url), 'utf8');
 
-test('icon toolbar wraps complete groups and grows to its row count', () => {
-  assert.match(toolbar, /#icon-toolbar\s*\{[^}]*flex-wrap:\s*wrap;/s);
-  assert.match(toolbar, /#icon-toolbar\s*\{[^}]*height:\s*auto;/s);
-  assert.match(toolbar, /#icon-toolbar\s*\{[^}]*min-height:\s*56px;/s);
+test('icon toolbar keeps a single fixed-height row that scrolls horizontally', () => {
+  assert.match(toolbar, /#icon-toolbar\s*\{[^}]*flex-wrap:\s*nowrap;/s);
+  assert.match(toolbar, /#icon-toolbar\s*\{[^}]*min-height:\s*60px;/s);
+  assert.match(toolbar, /#icon-toolbar\s*\{[^}]*overflow-x:\s*auto;/s);
   assert.match(toolbar, /\.tb-group\s*\{[^}]*flex-shrink:\s*0;/s);
 });
 
@@ -31,11 +31,10 @@ test('constrained layouts hide top-level separators and do not scroll the toolba
   assert.doesNotMatch(mobileToolbar[1], /-webkit-overflow-scrolling/);
 });
 
-test('style ribbon wraps complete groups and grows to its row count', () => {
-  assert.match(styleBar, /#style-bar\s*\{[^}]*flex-wrap:\s*wrap;/s);
-  assert.match(styleBar, /#style-bar\s*\{[^}]*height:\s*auto;/s);
-  assert.match(styleBar, /#style-bar\s*\{[^}]*min-height:\s*68px;/s);
-  assert.match(styleBar, /#style-bar\s*\{[^}]*overflow:\s*visible;/s);
+test('style ribbon keeps a single fixed-height row that scrolls horizontally', () => {
+  assert.match(styleBar, /#style-bar\s*\{[^}]*flex-wrap:\s*nowrap;/s);
+  assert.match(styleBar, /#style-bar\s*\{[^}]*min-height:\s*38px;/s);
+  assert.match(styleBar, /#style-bar\s*\{[^}]*overflow-x:\s*auto;/s);
 
   assert.match(
     responsive,
