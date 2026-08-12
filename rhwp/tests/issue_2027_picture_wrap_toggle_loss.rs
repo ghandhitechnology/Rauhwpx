@@ -242,12 +242,29 @@ fn picture_survives_wrap_and_tac_toggle_sequence() {
 }
 
 /// tac 토글 왕복 후 앵커 문단 line_segs 가 원본으로 복원되는지 (마이그레이션 비가역성 검증).
+///
+/// text_start 는 비교에서 제외한다 — 한컴 정합 마이그레이션(#1151 v2)은 tac off 후에도
+/// vert_rel_to=Para/offset(0,0) 을 유지하므로, 어울림 배제 반영 reflow(PR #17)가 그림
+/// 옆 줄을 좁혀 줄 바꿈 지점이 원본(Paper 앵커, 흐름 무영향)과 달라지는 것이 정상이다.
+/// 본 테스트의 관심사(그림 높이로 부풀려진 줄 "크기"의 복원)는 그대로 핀한다.
 #[test]
 fn tac_roundtrip_preserves_anchor_line_segs() {
     let mut core = load_core();
     let (para_idx, ci) = insert_test_picture(&mut core);
 
-    let before = seg_keys(&core.document().sections[0].paragraphs[para_idx].line_segs);
+    let size_keys = |segs: &[LineSeg]| -> Vec<(i32, i32, i32, i32)> {
+        segs.iter()
+            .map(|s| {
+                (
+                    s.line_height,
+                    s.text_height,
+                    s.baseline_distance,
+                    s.line_spacing,
+                )
+            })
+            .collect()
+    };
+    let before = size_keys(&core.document().sections[0].paragraphs[para_idx].line_segs);
 
     set_props(&mut core, para_idx, ci, r#"{"treatAsChar":true}"#, "tac on");
     set_props(
@@ -258,10 +275,10 @@ fn tac_roundtrip_preserves_anchor_line_segs() {
         "tac off",
     );
 
-    let after = seg_keys(&core.document().sections[0].paragraphs[para_idx].line_segs);
+    let after = size_keys(&core.document().sections[0].paragraphs[para_idx].line_segs);
     assert_eq!(
         before, after,
-        "tac on→off 왕복 후 앵커 문단 line_segs 가 원본과 달라짐 (비가역 마이그레이션)"
+        "tac on→off 왕복 후 앵커 문단 줄 크기 메트릭이 원본과 달라짐 (비가역 마이그레이션)"
     );
 }
 

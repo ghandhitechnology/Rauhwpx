@@ -55,6 +55,51 @@ struct ColumnItemCtx<'a> {
     wrap_anchors: &'a std::collections::HashMap<usize, super::pagination::WrapAnchorRef>,
 }
 
+/// [PR #17] 인라인 컨트롤이 놓인 줄 인덱스.
+///
+/// `find_inline_control_target_page` (pagination.rs) 와 동일한 규칙 —
+/// 컨트롤의 char 위치 이하인 마지막 LINE_SEG. 위치 정보가 없으면 첫 줄로 본다.
+fn inline_control_line_index(para: &Paragraph, control_index: usize) -> usize {
+    let positions = para.control_text_positions();
+    let Some(&ctrl_text_pos) = positions.get(control_index) else {
+        return 0;
+    };
+    para.line_segs
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, ls)| (ls.text_start as usize) <= ctrl_text_pos)
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+/// [PR #17] 호스트 문단이 이 페이지에서 이미 조판되었는지 (= 인라인 객체를 줄 안에
+/// 그렸는지) 판정한다.
+///
+/// `PageItem::FullParagraph` 뿐 아니라 컨트롤이 속한 줄을 포함하는
+/// `PageItem::PartialParagraph` 조각도 "조판 완료" 로 본다. 문단이 페이지 분할되면
+/// 어느 페이지에도 FullParagraph 가 남지 않으므로, FullParagraph 만 확인하는 기존
+/// 조건은 항상 거짓이 되어 Shape fallback 이 같은 그림을 한 번 더 합성했다.
+fn host_para_laid_out_on_page(
+    page_content: &PageContent,
+    para: &Paragraph,
+    para_index: usize,
+    control_index: usize,
+) -> bool {
+    let target_line = inline_control_line_index(para, control_index);
+    page_content.column_contents.iter().any(|cc| {
+        cc.items.iter().any(|it| match it {
+            PageItem::FullParagraph { para_index: pi } => *pi == para_index,
+            PageItem::PartialParagraph {
+                para_index: pi,
+                start_line,
+                end_line,
+            } => *pi == para_index && (*start_line..*end_line).contains(&target_line),
+            _ => false,
+        })
+    })
+}
+
 const ENDNOTE_BETWEEN_NOTES_BASE_FLOW_HU: i32 = 1984;
 
 #[derive(Debug, Clone, Copy)]
@@ -8496,6 +8541,16 @@ impl LayoutEngine {
                                 )
                             })
                         });
+                        // [PR #17] 페이지 분할된 호스트에는 FullParagraph 가 없고
+                        // PartialParagraph 조각만 남는다. 컨트롤의 줄을 담은 조각이 이
+                        // 페이지에 있으면 paragraph_layout 이 이미 줄 안에 그렸으므로
+                        // fallback emit 을 억제한다 (같은 그림 이중 합성 방지).
+                        let host_para_laid_out = host_para_laid_out_on_page(
+                            page_content,
+                            para,
+                            para_index,
+                            control_index,
+                        );
                         // [Task #418/#376] paragraph_layout 의 빈 문단 + TAC Picture 분기에서
                         // 이미 ImageNode 가 emit 되어 inline_shape_position 이 등록된 경우,
                         // 여기서 또 push 하면 이중 emit 이 된다. 등록된 경우 push 를 스킵하고
@@ -8542,7 +8597,7 @@ impl LayoutEngine {
                             }
                         }
 
-                        if !already_registered && !has_full_para_item {
+                        if !already_registered && !host_para_laid_out {
                             let bin_data_id = pic.image_attr.bin_data_id;
                             let image_data =
                                 find_bin_data(bin_data_content, bin_data_id).map(|c| c.data.load());
@@ -9076,16 +9131,14 @@ impl LayoutEngine {
                             // 하지 않는다 — 이중 가산 방지(Task #974 c3e32151 회귀).
                             // FullParagraph 항목이 없으면(선행 표 등에 이어 붙은
                             // Shape, 예: hy-001 pi=27) Task #974 동작을 유지한다.
-                            let has_full_para_item =
-                                page_content.column_contents.iter().any(|cc| {
-                                    cc.items.iter().any(|it| {
-                                        matches!(
-                                            it,
-                                            PageItem::FullParagraph { para_index: pi }
-                                                if *pi == para_index
-                                        )
-                                    })
-                                });
+                            // [PR #17] 페이지 분할된 호스트의 PartialParagraph 조각도
+                            // 동일하게 "조판 완료" 로 본다.
+                            let has_full_para_item = host_para_laid_out_on_page(
+                                page_content,
+                                para,
+                                para_index,
+                                control_index,
+                            );
                             let para_start =
                                 para_start_y.get(&para_index).copied().unwrap_or(y_offset);
                             let shape_y = if let Some((_, registered_y)) = registered_inline_pos {

@@ -140,6 +140,72 @@ export function visibleFlowImageBbox(image: FlowImagePaintOp): FlowImageBbox | n
   return image.clip === null ? image.bbox : intersectBboxes(image.bbox, image.clip);
 }
 
+/** DOM flow-image 의 clip wrapper 배치 계획. needsWrapper 가 false 면 wrapper 없이 붙인다. */
+export interface FlowImageClipPlan {
+  host: FlowImageBbox;
+  needsWrapper: boolean;
+}
+
+/**
+ * 회전한 프레임이 실제로 덮는 축 정렬 영역(AABB)을 구한다.
+ * web_canvas.rs::open_shape_transform 과 같이 bbox 중심을 기준으로 회전하므로
+ * 폭/높이는 |w·cosθ| + |h·sinθ| / |w·sinθ| + |h·cosθ| 가 되고 중심은 그대로다.
+ */
+export function rotatedFrameExtent(bbox: FlowImageBbox, rotationDeg: number): FlowImageBbox {
+  const radians = (finiteNumber(rotationDeg) * Math.PI) / 180;
+  const cos = Math.abs(Math.cos(radians));
+  const sin = Math.abs(Math.sin(radians));
+  const width = bbox.width * cos + bbox.height * sin;
+  const height = bbox.width * sin + bbox.height * cos;
+  const centerX = bbox.x + bbox.width / 2;
+  const centerY = bbox.y + bbox.height / 2;
+  return { x: centerX - width / 2, y: centerY - height / 2, width, height };
+}
+
+/**
+ * flow 그림 하나를 어떤 상자에 잘라 넣을지 결정한다.
+ *
+ * 회전이 없으면 기존 동작 그대로 — clip 이 그림을 실제로 깎을 때만 wrapper 를 둔다.
+ * 회전이 있으면 그림 자신의 미회전 bbox 가 아니라 회전 후 AABB 를 clip 과 교차시킨다.
+ * bbox 로 자르면 회전으로 bbox 밖으로 나간 모서리가 잘려 canvas/PDF 경로와 갈라진다.
+ * 교차 결과가 없으면 null — 그림 전체가 clip 밖이라 그리지 않는다.
+ */
+export function planFlowImageClip(image: FlowImagePaintOp): FlowImageClipPlan | null {
+  if (image.rotation === 0 || !Number.isFinite(image.rotation)) {
+    const visible = visibleFlowImageBbox(image);
+    if (visible === null) return null;
+    return { host: visible, needsWrapper: image.clip !== null && !sameBbox(visible, image.bbox) };
+  }
+
+  const extent = rotatedFrameExtent(image.bbox, image.rotation);
+  if (image.clip === null || containsBbox(image.clip, extent)) {
+    return { host: extent, needsWrapper: false };
+  }
+  const host = intersectBboxes(image.clip, extent);
+  if (host === null) return null;
+  return { host, needsWrapper: true };
+}
+
+/** outer 가 inner 를 모두 품는지. 회전 AABB 는 무리수라 부동소수 오차를 허용한다. */
+function containsBbox(outer: FlowImageBbox, inner: FlowImageBbox): boolean {
+  const epsilon = 1e-6;
+  return (
+    inner.x >= outer.x - epsilon &&
+    inner.y >= outer.y - epsilon &&
+    inner.x + inner.width <= outer.x + outer.width + epsilon &&
+    inner.y + inner.height <= outer.y + outer.height + epsilon
+  );
+}
+
+function sameBbox(first: FlowImageBbox, second: FlowImageBbox): boolean {
+  return (
+    first.x === second.x &&
+    first.y === second.y &&
+    first.width === second.width &&
+    first.height === second.height
+  );
+}
+
 function isLayerNode(value: unknown): value is LayerNodeLike {
   return value !== null && typeof value === 'object';
 }
