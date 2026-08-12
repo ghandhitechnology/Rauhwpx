@@ -358,6 +358,34 @@ function buildDiffLine(kind: 'add' | 'del' | 'ctx', text: string): HTMLElement {
   return line;
 }
 
+/**
+ * 손그림 버튼용 displacement 필터 정의. CSS 의 filter: url(#ag-sketch-line)
+ * 참조는 문서 안의 실제 정의를 필요로 하므로 사이드바 루트에 한 번 심는다.
+ * display:none 으로 숨기면 Safari 가 참조를 무시하므로 0 크기로만 둔다
+ * (.ag-sketch-defs).
+ */
+function createSketchFilterDefs(): SVGSVGElement {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.classList.add('ag-sketch-defs');
+  svg.setAttribute('aria-hidden', 'true');
+  const filter = document.createElementNS(NS, 'filter');
+  filter.setAttribute('id', 'ag-sketch-line');
+  const turbulence = document.createElementNS(NS, 'feTurbulence');
+  turbulence.setAttribute('type', 'fractalNoise');
+  turbulence.setAttribute('baseFrequency', '0.04');
+  turbulence.setAttribute('numOctaves', '2');
+  turbulence.setAttribute('seed', '7');
+  turbulence.setAttribute('result', 'noise');
+  const displacement = document.createElementNS(NS, 'feDisplacementMap');
+  displacement.setAttribute('in', 'SourceGraphic');
+  displacement.setAttribute('in2', 'noise');
+  displacement.setAttribute('scale', '3');
+  filter.append(turbulence, displacement);
+  svg.appendChild(filter);
+  return svg;
+}
+
 export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; dispose(): void } {
   const { bridge, eventBus, getDocumentContext } = deps;
 
@@ -454,6 +482,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   root.id = 'agent-sidebar';
   root.className = 'ag-root';
   root.dataset.agent = selectedAgent;
+  root.appendChild(createSketchFilterDefs());
 
   const collapseTab = el('button', 'ag-collapse-tab');
   collapseTab.type = 'button';
