@@ -63,14 +63,52 @@ jobs:
           npm ci
           npm --prefix rhwp/rhwp-studio ci
 
-      - name: Build signed macOS installers
+      - name: Verify Developer ID and Apple ID notarization secrets
         env:
           CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "Required macos-release secret is missing: ${name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build signed and notarized macOS installers
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: true
+          CSC_NAME: Developer ID Application: TAEWOOK HA (C8M34MMT8W)
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: npm run dist:mac
+
+      - name: Verify Developer ID signature and notarization
+        env:
+          EXPECTED_IDENTITY: Developer ID Application: TAEWOOK HA (C8M34MMT8W)
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' app_path; do
+            codesign --verify --deep --strict --verbose=2 "${app_path}"
+            signing_info="$(codesign -dv --verbose=4 "${app_path}" 2>&1)"
+            printf '%s\n' "${signing_info}"
+            if ! grep -F "Authority=${EXPECTED_IDENTITY}" <<<"${signing_info}"; then
+              echo "App was not signed with ${EXPECTED_IDENTITY}: ${app_path}" >&2
+              exit 1
+            fi
+            if grep -E 'Signature=(adhoc|unofficial)|Authority=Apple Development' <<<"${signing_info}"; then
+              echo "Rejected development or ad-hoc signature: ${app_path}" >&2
+              exit 1
+            fi
+            xcrun stapler validate "${app_path}"
+          done < <(find release -type d -name 'Rauhwpx.app' -print0)
 
       - name: Generate checksums
         run: |
