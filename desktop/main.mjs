@@ -158,11 +158,16 @@ async function createWindow() {
     return { action: 'deny' };
   });
   const url = devUrl || studioOrigin;
-  await window.loadURL(url);
-  window.once('ready-to-show', () => window.show());
+  // Attach before loadURL. ready-to-show often fires during load, so a
+  // listener registered afterwards leaves the hidden window stuck.
+  window.once('ready-to-show', () => {
+    if (!window.isDestroyed()) window.show();
+  });
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = null;
   });
+  await window.loadURL(url);
+  if (!window.isDestroyed() && !window.isVisible()) window.show();
 }
 
 function stopChildren() {
@@ -179,10 +184,12 @@ function stopChildren() {
 app.whenReady().then(async () => {
   installMenu();
   if (!devUrl) await startStudioServer();
-  startAgent();
   await createWindow();
+  startAgent();
   if (app.isPackaged) {
-    void autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    setTimeout(() => {
+      void autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    }, 4000);
   }
   app.on('activate', () => {
     if (!mainWindow) void createWindow();
