@@ -5,6 +5,7 @@ import {
   isPlanningRestricted,
   mcpCapabilityEnv,
   normalizeExecutionMode,
+  normalizeUsageTokens,
   systemBriefFor,
   truncate,
   validateExecutionMode,
@@ -120,6 +121,8 @@ export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
   let killTimer = null;
   let restartReady = Promise.resolve();
   let stderrTail = '';
+  // usage 집계에 붙일 모델 — CLI 가 보고한 실제 모델을 우선한다.
+  let currentModel = opts.model ?? null;
 
   function buildArgv(resume) {
     return buildClaudeArgv(opts, sessionId, resume);
@@ -131,11 +134,29 @@ export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
     onEvent(evt);
   }
 
+  /**
+   * result 메시지의 토큰 사용량을 usage 이벤트로 흘려보낸다.
+   * modelUsage 가 있으면 모델별로 쪼개 보내고 aggregate 는 버린다 — 이중 집계 방지.
+   */
+  function emitUsage(e) {
+    const perModel = e?.modelUsage;
+    if (perModel && typeof perModel === 'object' && !Array.isArray(perModel) && Object.keys(perModel).length > 0) {
+      for (const [model, raw] of Object.entries(perModel)) {
+        const usage = normalizeUsageTokens(raw);
+        if (usage) onEvent({ type: 'usage', agent: 'claude', model: String(model), usage });
+      }
+      return;
+    }
+    const usage = normalizeUsageTokens(e?.usage);
+    if (usage) onEvent({ type: 'usage', agent: 'claude', model: currentModel, usage });
+  }
+
   function handleEvent(e) {
     if (disposed) return; // 폐기 후 죽어가는 CLI 가 흘리는 stdout 은 무시한다.
     if (e?.type === 'system' && e.subtype === 'init') {
       // CLI 가 보고하는 실제 세션 ID 를 추적한다 (--resume 이 새 ID 로 fork 할 수 있다).
       if (e.session_id) sessionId = String(e.session_id);
+      if (typeof e.model === 'string' && e.model) currentModel = e.model;
       onEvent({
         type: 'session-info',
         agent: 'claude',
@@ -198,6 +219,7 @@ export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
     }
     if (e?.type === 'result') {
       hasCompletedTurn = true;
+      emitUsage(e);
       if (e.permission_denials?.length) {
         const names = e.permission_denials
           .map((d) => d?.tool_name ?? d?.tool ?? JSON.stringify(d))
