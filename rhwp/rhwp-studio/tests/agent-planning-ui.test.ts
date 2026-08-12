@@ -149,7 +149,7 @@ test('sidebar consumes the planning bridge contract and its sidebar events', () 
   assert.match(source, /bridge\.approvePlan\(planId\)/);
   assert.match(source, /bridge\.requestPlanChanges\(planId\)/);
   // 모델·에이전트 전환으로 세션을 다시 열어도 작업 방식은 유지된다.
-  assert.match(source, /bridge\.startChat\([^)]*chatWorkflow\)/);
+  assert.match(source, /bridge\.startChat\([^)]*chatWorkflow,[^)]*currentThread\.id/);
   for (const event of [
     'workflow-changed',
     'plan-ready',
