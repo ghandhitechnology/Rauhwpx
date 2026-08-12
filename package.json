@@ -1,7 +1,7 @@
 {
   "name": "rauhwpx",
   "productName": "Rauhwpx",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "HWP/HWPX editor with a local Claude/Codex agent sidebar.",
   "author": "Hataewook",
   "private": true,
@@ -58,10 +58,12 @@
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "build/icon.icns",
-      "identity": "TAEWOOK HA (C8M34MMT8W)",
+      "identity": "Developer ID Application: TAEWOOK HA (C8M34MMT8W)",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
-      "notarize": false,
+      "notarize": {
+        "teamId": "C8M34MMT8W"
+      },
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "target": [
