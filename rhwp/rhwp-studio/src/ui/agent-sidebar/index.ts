@@ -50,6 +50,7 @@ import { createChevron, createColumnIcon } from '../chevron.ts';
 import { createIcon, createStopIcon, OP_ICON } from './icons.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
+import { createReferenceLibrary } from './reference-library.ts';
 
 export interface AgentSidebarDeps {
   bridge: AgentBridge;
@@ -57,6 +58,7 @@ export interface AgentSidebarDeps {
   eventBus?: EventBus;
   /** 헤더에 표시할 현재 문서와 선택 상태. */
   getDocumentContext?: () => {
+    documentId?: string | null;
     documentName: string | null;
     selectionLabel: string | null;
   };
@@ -424,6 +426,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   // 채팅은 만들어질 때의 문서(docKey)에 묶인다. 문서가 바뀌면 새 채팅을
   // 자동으로 시작하고, 다른 문서의 채팅은 읽기 전용으로만 열린다.
   let currentDocKey: string | null = getDocumentContext?.().documentName ?? null;
+  let currentDocumentId: string | null = getDocumentContext?.().documentId ?? null;
   /** 읽기 전용으로 열람 중인 다른 문서 채팅의 문서 라벨 (null = 정상 모드). */
   let readOnlyDocLabel: string | null = null;
   /** 문서 그룹 접힘/펼침 — 사용자가 손댄 그룹만 기억한다(키: docKey ?? ''). */
@@ -433,6 +436,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     model: selectedModel,
     effort: selectedEffort,
     docKey: currentDocKey,
+    documentId: currentDocumentId,
   });
   let assistantBuffer = '';
   let threadsPanelOpen = false;
@@ -476,6 +480,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   /** 채팅별 계획 기록/모드 — 목록에서 되돌아왔을 때 표시를 복원한다. */
   const planArchives = new Map<string, StructuredPlan[]>();
   const threadWorkflows = new Map<string, AgentWorkflow>();
+
+  function startCurrentBridgeChat(force = false): void {
+    bridge.startChat(selectedAgent, selectedModel, selectedEffort, force, permissionProfile, chatWorkflow,
+      currentThread.id, currentThread.documentId, currentThread.docKey);
+  }
 
   // ── DOM 구성 ──────────────────────────────────────────
   const root = document.createElement('aside');
@@ -703,7 +712,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     rebuildLlmMenu();
     rebuildEffortMenu();
     updateWorkspaceAgentContext();
-    bridge.startChat(agent, selectedModel, selectedEffort, false, permissionProfile, chatWorkflow);
+    startCurrentBridgeChat();
     providerTrigger.focus();
   }
 
@@ -785,7 +794,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
     rebuildEffortMenu();
     updateWorkspaceAgentContext();
-    bridge.startChat(selectedAgent, selectedModel, selectedEffort, false, permissionProfile, chatWorkflow);
+    startCurrentBridgeChat();
     llmTrigger.focus();
   }
 
@@ -877,7 +886,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       item.classList.toggle('ag-active', active);
       item.setAttribute('aria-checked', active ? 'true' : 'false');
     }
-    bridge.startChat(selectedAgent, selectedModel, selectedEffort, false, permissionProfile, chatWorkflow);
+    startCurrentBridgeChat();
     updateWorkspaceAgentContext();
     effortTrigger.focus();
   }
@@ -1028,7 +1037,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     workspaceSelectionContext.textContent = context?.selectionLabel || '선택 없음';
     updateEnvironmentFilename(currentDocumentName);
     const nextKey = context?.documentName ?? null;
-    if (nextKey !== currentDocKey) handleDocumentSwitch(nextKey);
+    const nextDocumentId = context?.documentId ?? null;
+    if (nextKey !== currentDocKey || nextDocumentId !== currentDocumentId) {
+      handleDocumentSwitch(nextKey, nextDocumentId);
+    }
   }
 
   /** 스레드 목록이 지금 화면에 있는가 — 사이드바에선 패널일 때만,
@@ -1042,18 +1054,31 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
    * 넘어오지 못하게 하는 격리 지점. 진행 중이던 채팅은 자기 문서
    * 그룹 아래에 저장되고, 새 문서용 빈 채팅이 열린다.
    */
-  function handleDocumentSwitch(nextKey: string | null): void {
+  function handleDocumentSwitch(nextKey: string | null, nextDocumentId: string | null): void {
     currentDocKey = nextKey;
+    currentDocumentId = nextDocumentId;
     // 읽기 전용으로 보던 채팅의 문서가 실제로 열렸다면 그 자리에서 이어간다.
-    if (readOnlyDocLabel !== null && currentThread.docKey === nextKey) {
+    const currentThreadMatches = currentThread.documentId
+      ? currentThread.documentId === nextDocumentId
+      : currentThread.docKey === nextKey;
+    if (readOnlyDocLabel !== null && currentThreadMatches) {
+      // Promote legacy filename-only threads to the editor's stable document identity
+      // before restarting, so document-scoped references join the resumed session.
+      currentThread.docKey = nextKey;
+      currentThread.documentId = nextDocumentId;
       exitReadOnlyMode();
+      referenceLibrary.contextChanged();
       bridge.stopChat();
-      bridge.startChat(selectedAgent, selectedModel, selectedEffort, true, permissionProfile, chatWorkflow);
+      startCurrentBridgeChat(true);
       return;
     }
     if (readOnlyDocLabel === null && currentThread.messages.length === 0) {
       // 빈 채팅은 새 문서에 다시 묶기만 하면 된다.
       currentThread.docKey = nextKey;
+      currentThread.documentId = nextDocumentId;
+      referenceLibrary.contextChanged();
+      bridge.stopChat();
+      startCurrentBridgeChat(true);
       if (threadsListVisible()) rebuildThreadsList();
       return;
     }
@@ -1416,6 +1441,39 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   skillEditor.append(skillEditorHeader, skillGoal, skillTriggers, skillNonTriggers, skillResourceRow, skillName, skillFiles, skillFileEditor, skillWarning, skillEditorActions);
   skillsPage.append(skillsHeader, skillsToolbar, skillsStatus, skillsList, skillEditor);
 
+  const referenceLibrary = createReferenceLibrary({
+    bridge,
+    getContext: () => ({
+      threadId: currentThread.id,
+      documentId: currentDocumentId,
+      documentName: getDocumentContext?.().documentName ?? currentDocKey,
+    }),
+    onOpenChange(open) {
+      root.classList.toggle('ag-references-open', open);
+      if (open) {
+        setConfigPanelOpen(false);
+        threadsPanelOpen = false;
+        skillsPanelOpen = false;
+        root.classList.remove('ag-threads-open', 'ag-skills-open');
+        threadsBtn.setAttribute('aria-expanded', 'false');
+        skillsBtn.setAttribute('aria-expanded', 'false');
+        skillsPage.setAttribute('aria-hidden', 'true');
+        skillsPage.inert = true;
+        threadsPage.inert = true;
+      } else if (fullscreen) {
+        threadsPage.inert = threadsRailCollapsed;
+        applyThreadsRailState();
+      } else {
+        threadsPage.inert = true;
+      }
+      chatPage.setAttribute('aria-hidden', open ? 'true' : 'false');
+      chatPage.inert = open;
+    },
+  });
+  composerUtilityActions.insertBefore(referenceLibrary.trigger, permissionBtn);
+  composerField.insertBefore(referenceLibrary.quickAddButton, sendHint);
+  composer.insertBefore(referenceLibrary.quickUploads, composerField);
+
   /* 집중 모드의 변경 사항 drawer. 대화 위의 오른쪽 가장자리에서 열리고,
      사이드바로 돌아가면 .ag-review 노드는 기존 inline 자리로 되돌아간다. */
   const reviewColumn = el('aside', 'ag-review-column');
@@ -1454,7 +1512,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   reviewResize.title = '드래그하여 너비 조절';
   reviewResize.tabIndex = 0;
 
-  stage.append(workspaceBar, chatPage, threadsPage, skillsPage, reviewColumn, railResize, reviewResize);
+  stage.append(
+    workspaceBar,
+    chatPage,
+    threadsPage,
+    skillsPage,
+    referenceLibrary.page,
+    reviewColumn,
+    railResize,
+    reviewResize,
+  );
 
   function applyRailWidth(width: number, opts?: { persist?: boolean }): void {
     railWidth = clampRailWidth(width);
@@ -1836,6 +1903,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   updatePermissionButton();
 
   function setSkillsPanelOpen(open: boolean): void {
+    if (open && referenceLibrary.isOpen()) referenceLibrary.setOpen(false);
     skillsPanelOpen = open;
     if (open) setConfigPanelOpen(false);
     threadsPanelOpen = false;
@@ -2487,6 +2555,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       rebuildThreadsList();
       return;
     }
+    if (open && referenceLibrary.isOpen()) referenceLibrary.setOpen(false);
     threadsPanelOpen = open;
     if (open) setConfigPanelOpen(false);
     if (open) skillsPanelOpen = false;
@@ -2534,12 +2603,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       model: selectedModel,
       effort: selectedEffort,
       docKey: currentDocKey,
+      documentId: currentDocumentId,
     });
     // 새 채팅은 언제나 '바로 실행'에서 시작하고, 원격 브라우저 경고도 다시 받는다.
     restorePlanningForThread(nextThread.id);
     currentThread = nextThread;
+    referenceLibrary.contextChanged();
     bridge.stopChat();
-    bridge.startChat(selectedAgent, selectedModel, selectedEffort, true, permissionProfile, chatWorkflow);
+    startCurrentBridgeChat(true);
     if (opts?.silent) return;
     setThreadsPanelOpen(false);
     input.focus();
@@ -2563,17 +2634,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       messages: loaded.messages.map((m) => ({ ...m })),
       titleRequested: Boolean(loaded.titleRequested),
     };
+    referenceLibrary.contextChanged();
     applyThreadMeta(currentThread);
     renderMessagesFromThread(currentThread);
     bridge.stopChat();
-    if (loaded.docKey !== currentDocKey) {
+    const matchesCurrentDocument = loaded.documentId
+      ? loaded.documentId === currentDocumentId
+      : loaded.docKey === currentDocKey;
+    if (!matchesCurrentDocument) {
       // 다른 문서의 채팅 — 열람은 되지만 이어가지는 못한다.
       enterReadOnlyMode(docGroupLabel(loaded.docKey));
       setThreadsPanelOpen(false);
       return;
     }
     exitReadOnlyMode();
-    bridge.startChat(selectedAgent, selectedModel, selectedEffort, true, permissionProfile, chatWorkflow);
+    startCurrentBridgeChat(true);
     setThreadsPanelOpen(false);
     input.focus();
   }
@@ -2623,6 +2698,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     conn.textContent = CONN_LABEL[state];
     takeoverBtn.hidden = state !== 'replaced';
     if (state === 'replaced') setConfigPanelOpen(false);
+    referenceLibrary.setConnectionState(state);
     updateComposer();
   }
 
@@ -3670,6 +3746,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       root.classList.remove('ag-col-resizing');
       clearInsetRecenterLoop();
       writingStyleCalibration.dispose();
+      referenceLibrary.dispose();
       document.body.classList.remove(
         'ag-sidebar-open',
         'ag-sidebar-resizing',
