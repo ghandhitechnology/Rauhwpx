@@ -1,5 +1,7 @@
 use super::*;
+use crate::model::control::Control;
 use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph};
+use crate::model::shape::{HorzAlign, HorzRelTo, TextFlow, TextWrap, VertAlign, VertRelTo};
 
 /// [#2632] `recompose_for_body_width` 는 `recompose_for_cell_width` 의 superset
 /// (`restyle_fallback_runs_by_char_shapes` 를 추가로 적용)이다. line_segs 가
@@ -538,6 +540,131 @@ fn test_reflow_latin_text() {
     assert_eq!(para.line_segs.len(), 2);
     assert_eq!(para.line_segs[0].text_start, 0);
     assert_eq!(para.line_segs[1].text_start, 5);
+}
+
+// === reflow 어울림 wrap zone 재생성 테스트 (PR #17) ===
+// 편집 재배치가 같은 문단의 비-TAC 어울림 개체 옆으로 줄을 좁혀
+// column_start/segment_width 를 저장 wrap zone 과 같은 형태로 기록하는지 검증.
+
+/// 어울림 그림이 있는 20자 CJK 문단 (컬럼 200px, 그림 100px 폭)
+fn make_wrap_para(text_wrap: TextWrap, horz_align: HorzAlign, height_hwp: u32) -> Paragraph {
+    let mut picture = crate::model::image::Picture::default();
+    picture.common.treat_as_char = false;
+    picture.common.text_wrap = text_wrap;
+    picture.common.text_flow = TextFlow::BothSides;
+    picture.common.horz_rel_to = HorzRelTo::Column;
+    picture.common.horz_align = horz_align;
+    picture.common.vert_rel_to = VertRelTo::Para;
+    picture.common.vert_align = VertAlign::Top;
+    picture.common.width = 7500; // 100px @96dpi
+    picture.common.height = height_hwp;
+    Paragraph {
+        text: "가나다라마바사아자차가나다라마바사아자차".to_string(),
+        // 첫 offset 의 gap 8 = 확장 컨트롤 1개가 문단 선두(위치 0)에 앵커
+        // (control_text_positions 의 gap 분석 계약).
+        char_offsets: (0..20).map(|i| i + 8).collect(),
+        char_count: 21,
+        char_shapes: vec![CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 0,
+        }],
+        line_segs: vec![LineSeg {
+            text_start: 0,
+            ..Default::default()
+        }],
+        controls: vec![Control::Picture(Box::new(picture))],
+        ..Default::default()
+    }
+}
+
+/// 좌측 어울림 그림 옆에서 모든 줄이 우측 구간으로 좁혀진다.
+#[test]
+fn reflow_wraps_lines_beside_left_square_picture() {
+    let styles = make_styles_with_font_size(16.0);
+    // 그림 높이 19200HU(≈256px) — 전 줄이 wrap zone 안.
+    let mut para = make_wrap_para(TextWrap::Square, HorzAlign::Left, 19200);
+    reflow_line_segs(&mut para, 200.0, &styles, 96.0);
+
+    // 전폭(200px)이면 12자/줄 → 2줄. 100px 로 좁혀지면 6자/줄 → 4줄.
+    assert!(
+        para.line_segs.len() >= 3,
+        "어울림 폭 축소로 줄 수가 늘어야 함: {}줄",
+        para.line_segs.len()
+    );
+    for (i, seg) in para.line_segs.iter().enumerate() {
+        assert!(
+            seg.column_start >= 7000,
+            "줄 {i}: 좌측 그림(100px=7500HU)을 비껴 시작해야 함, column_start={}",
+            seg.column_start
+        );
+        assert!(
+            seg.segment_width <= 8000,
+            "줄 {i}: 우측 구간 폭(≈100px)으로 좁혀져야 함, segment_width={}",
+            seg.segment_width
+        );
+    }
+}
+
+/// 그림 높이 아래의 줄은 전폭으로 복귀한다.
+#[test]
+fn reflow_returns_to_full_width_below_picture() {
+    let styles = make_styles_with_font_size(16.0);
+    // 줄 전진량 = lh 1200 + spacing 720 = 1920HU. 그림 높이 3800HU ≈ 두 줄 대역.
+    let mut para = make_wrap_para(TextWrap::Square, HorzAlign::Left, 3800);
+    reflow_line_segs(&mut para, 200.0, &styles, 96.0);
+
+    assert!(para.line_segs.len() >= 3, "줄 수: {}", para.line_segs.len());
+    assert!(
+        para.line_segs[0].column_start >= 7000,
+        "첫 줄은 좁혀져야 함: cs={}",
+        para.line_segs[0].column_start
+    );
+    let last = para.line_segs.last().unwrap();
+    assert_eq!(last.column_start, 0, "그림 아래 줄은 단 좌측에서 시작");
+    assert!(
+        last.segment_width >= 14000,
+        "그림 아래 줄은 전폭(200px=15000HU) 복귀: sw={}",
+        last.segment_width
+    );
+}
+
+/// 우측 정렬 그림이면 좌측 구간을 쓴다 (column_start 0 유지, 폭만 축소).
+#[test]
+fn reflow_keeps_left_interval_for_right_anchored_picture() {
+    let styles = make_styles_with_font_size(16.0);
+    let mut para = make_wrap_para(TextWrap::Square, HorzAlign::Right, 19200);
+    reflow_line_segs(&mut para, 200.0, &styles, 96.0);
+
+    for (i, seg) in para.line_segs.iter().enumerate() {
+        assert_eq!(seg.column_start, 0, "줄 {i}: 좌측 구간 시작이어야 함");
+        assert!(
+            seg.segment_width <= 8000,
+            "줄 {i}: 좌측 구간 폭으로 좁혀져야 함, segment_width={}",
+            seg.segment_width
+        );
+    }
+}
+
+/// 글 뒤로(BehindText)/글자처럼 취급 개체는 줄 폭에 영향을 주지 않는다.
+#[test]
+fn reflow_ignores_behind_text_and_tac_objects() {
+    let styles = make_styles_with_font_size(16.0);
+    let mut para = make_wrap_para(TextWrap::BehindText, HorzAlign::Left, 19200);
+    reflow_line_segs(&mut para, 200.0, &styles, 96.0);
+    assert_eq!(para.line_segs.len(), 2, "전폭 12자/줄 → 2줄이어야 함");
+    for seg in &para.line_segs {
+        assert_eq!(seg.column_start, 0);
+        assert_eq!(seg.segment_width, 15000, "전폭 200px=15000HU 유지");
+    }
+
+    let mut tac = make_wrap_para(TextWrap::Square, HorzAlign::Left, 19200);
+    if let Control::Picture(pic) = &mut tac.controls[0] {
+        pic.common.treat_as_char = true;
+    }
+    reflow_line_segs(&mut tac, 200.0, &styles, 96.0);
+    for seg in &tac.line_segs {
+        assert_eq!(seg.column_start, 0, "TAC 개체는 wrap zone 을 만들지 않음");
+    }
 }
 
 /// line_height가 올바르게 설정되는지 검증
