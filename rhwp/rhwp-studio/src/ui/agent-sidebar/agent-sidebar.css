@@ -451,6 +451,87 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   outline-offset: 1px;
 }
 
+/* ─── 연결 끊김 배너 ──────────────────────────────────
+   첫 연결 시도 중에는 아무것도 띄우지 않는다 — 실패한 뒤에만 나타나
+   남은 대기 시간을 세고, 기다리지 않고 바로 붙는 버튼을 준다. */
+.ag-conn-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  margin: 0 12px 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--ag-err) 35%, var(--ag-border-strong));
+  border-radius: var(--ag-r-field);
+  background: color-mix(in srgb, var(--ag-err) 7%, var(--ag-bg-2));
+  font-size: var(--font-size-sm, 11px);
+  color: var(--ag-text);
+}
+
+.ag-conn-banner[hidden] {
+  display: none;
+}
+
+.ag-conn-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ag-conn-banner-retry {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--accent-primary);
+  background: var(--accent-primary);
+  color: var(--n-on-accent);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ag-conn-banner-retry:hover {
+  filter: var(--ag-sketch-line) brightness(0.94);
+}
+
+.ag-conn-banner-retry:focus-visible,
+.ag-hub-retry-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-conn-banner-hint {
+  flex: 1 1 100%;
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  color: var(--ag-text-muted);
+}
+
+/* 허브가 CLI 를 띄우지 못했을 때 대화 안에 놓이는 재시도 줄. */
+.ag-hub-error-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ag-hub-retry-btn {
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--accent-primary);
+  background: var(--accent-primary);
+  color: var(--n-on-accent);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ag-hub-retry-btn:hover {
+  filter: var(--ag-sketch-line) brightness(0.94);
+}
+
 /* 사이드바 폭이 좁아져도 요약은 한 줄을 유지한다. 각 flex item 이
    줄어들며 긴 모델명만 말줄임되고, 마지막의 단일 chevron 은 남는다. */
 .ag-selectors {
@@ -571,7 +652,8 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 
 .ag-chat-page,
 .ag-threads-page,
-.ag-skills-page {
+.ag-skills-page,
+.ag-settings-page {
   position: absolute;
   inset: 0;
   display: flex;
@@ -592,7 +674,8 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 .ag-threads-open .ag-chat-page,
-.ag-skills-open .ag-chat-page {
+.ag-skills-open .ag-chat-page,
+.ag-settings-open .ag-chat-page {
   opacity: 0;
   transform: translateX(-16px);
   visibility: hidden;
@@ -605,7 +688,8 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 .ag-threads-page,
-.ag-skills-page {
+.ag-skills-page,
+.ag-settings-page {
   gap: 10px;
   padding: 12px 12px 16px;
   opacity: 0;
@@ -631,7 +715,8 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   z-index: 1;
 }
 
-.ag-skills-open .ag-skills-page {
+.ag-skills-open .ag-skills-page,
+.ag-settings-open .ag-settings-page {
   opacity: 1;
   transform: translateX(0);
   visibility: visible;
@@ -1149,8 +1234,11 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 @media (prefers-reduced-motion: reduce) {
   .ag-chat-page,
   .ag-threads-page,
+  .ag-settings-page,
   .ag-threads-open .ag-chat-page,
-  .ag-threads-open .ag-threads-page {
+  .ag-threads-open .ag-threads-page,
+  .ag-settings-open .ag-chat-page,
+  .ag-settings-open .ag-settings-page {
     transition: none;
   }
 }
@@ -2806,7 +2894,8 @@ body.ag-col-resizing {
 /* Skills temporarily covers the workspace without changing its shell.
    사이드바 페이지 전환의 대기 자세(translateX(20px))는 무대 폭을 20px
    넘겨 숨은 가로 overflow 를 만들므로 전체 화면에서는 걷어낸다. */
-.ag-fullscreen .ag-skills-page {
+.ag-fullscreen .ag-skills-page,
+.ag-fullscreen .ag-settings-page {
   grid-column: 1 / -1;
   grid-row: 1;
   position: absolute;
@@ -2998,7 +3087,8 @@ body.ag-col-resizing {
 
 /* 모드 전환과 겹쳐 닫히는 오버레이가 무대 위를 한 번 더 미끄러지지
    않게, 전환 동안은 스킬 페이지의 페이지 전환을 끈다. */
-.ag-root.ag-fs-motion .ag-skills-page {
+.ag-root.ag-fs-motion .ag-skills-page,
+.ag-root.ag-fs-motion .ag-settings-page {
   transition: none;
 }
 
@@ -3740,6 +3830,9 @@ body.ag-col-resizing {
 .ag-skill-danger,
 .ag-skill-toggle,
 .ag-skill-upload-label,
+.ag-settings-primary,
+.ag-conn-banner-retry,
+.ag-hub-retry-btn,
 .ag-workspace-exit-btn {
   border-radius: 9px 12px 8px 13px / 12px 8px 13px 9px;
   filter: var(--ag-sketch-line);
