@@ -47,6 +47,34 @@ fn find_leading_paragraph_fragment_target_page(
     })
 }
 
+/// [PR #17] 라우팅 결과에 따라 `PageItem::Shape` 를 대상 페이지/단 또는 현재 페이지에 넣는다.
+///
+/// 대상 페이지/단이 사라졌으면(방어) 현재 페이지로 되돌려 항목이 유실되지 않게 한다.
+fn push_routed_shape_item(
+    st: &mut PaginationState,
+    routed: Option<(usize, usize)>,
+    para_idx: usize,
+    ctrl_idx: usize,
+) {
+    let item = PageItem::Shape {
+        para_index: para_idx,
+        control_index: ctrl_idx,
+    };
+    match routed {
+        Some((page_idx, col_idx)) => {
+            match st
+                .pages
+                .get_mut(page_idx)
+                .and_then(|page| page.column_contents.get_mut(col_idx))
+            {
+                Some(col) => col.items.push(item),
+                None => st.current_items.push(item),
+            }
+        }
+        None => st.current_items.push(item),
+    }
+}
+
 fn should_hide_page_bottom_empty_reset_bridge(
     para: &Paragraph,
     next_para: Option<&Paragraph>,
@@ -1893,10 +1921,22 @@ impl Paginator {
                     }
                 }
                 Control::Picture(pic) => {
-                    st.current_items.push(PageItem::Shape {
-                        para_index: para_idx,
-                        control_index: ctrl_idx,
-                    });
+                    // [Issue #476 / PR #17] 인라인(treat_as_char) 그림도 Shape 와 동일하게
+                    // 박스가 속한 줄이 놓인 페이지/단으로 라우팅한다. 라우팅 없이 그대로
+                    // push 하면 페이지 분할된 문단에서 그림이 마지막 페이지에 한 번 더
+                    // 그려진다.
+                    let routed = if pic.common.treat_as_char {
+                        super::find_inline_control_target_page(
+                            &st.pages,
+                            &st.current_items,
+                            para_idx,
+                            ctrl_idx,
+                            para,
+                        )
+                    } else {
+                        None
+                    };
+                    push_routed_shape_item(st, routed, para_idx, ctrl_idx);
                     // 비-TAC 그림: 본문 공간을 차지하는 배치이면 높이 추가 (Task #10)
                     if !pic.common.treat_as_char
                         && matches!(
@@ -1916,11 +1956,20 @@ impl Paginator {
                         st.current_height += pic_h + margin_top + margin_bottom;
                     }
                 }
-                Control::Equation(_) => {
-                    st.current_items.push(PageItem::Shape {
-                        para_index: para_idx,
-                        control_index: ctrl_idx,
-                    });
+                Control::Equation(eq) => {
+                    // [Issue #476 / PR #17] 인라인 수식도 동일 라우팅.
+                    let routed = if eq.common.treat_as_char {
+                        super::find_inline_control_target_page(
+                            &st.pages,
+                            &st.current_items,
+                            para_idx,
+                            ctrl_idx,
+                            para,
+                        )
+                    } else {
+                        None
+                    };
+                    push_routed_shape_item(st, routed, para_idx, ctrl_idx);
                 }
                 Control::Footnote(fn_ctrl) => {
                     if let Some(page) = st.pages.last_mut() {

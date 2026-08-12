@@ -2627,6 +2627,28 @@ impl LayoutEngine {
                 })
             })
             .unwrap_or(false);
+        // 저장/재생성 wrap zone 재생 게이트용 — Tight/Through 도 사각 배제 근사로
+        // Side wrap 이므로(FloatExclusion::Side 계약) Square 와 동일하게 재생한다.
+        // skip_advance_empty_wrap 등 Square 전용 휴리스틱에는 쓰지 않는다.
+        let has_picture_shape_side_wrap = para
+            .map(|p| {
+                p.controls.iter().any(|c| {
+                    let common_opt = match c {
+                        Control::Picture(pic) if !pic.common.treat_as_char => Some(&pic.common),
+                        Control::Shape(s) if !s.common().treat_as_char => Some(s.common()),
+                        _ => None,
+                    };
+                    common_opt
+                        .map(|cm| {
+                            matches!(
+                                cm.text_wrap,
+                                TextWrap::Square | TextWrap::Tight | TextWrap::Through
+                            )
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
         let has_ole_shape_square_wrap = para
             .map(|p| {
                 p.controls.iter().any(|c| {
@@ -3204,7 +3226,7 @@ impl LayoutEngine {
                 && comp_line.column_start > 0
                 && comp_line.segment_width > 0
                 && comp_line.segment_width < col_area_w_hu;
-            let uses_stored_segment_geometry = (has_picture_shape_square_wrap
+            let uses_stored_segment_geometry = (has_picture_shape_side_wrap
                 || line_has_inline_tac_table
                 || precomputed_body_wrap_line
                 || empty_stored_wrap_line)

@@ -21,7 +21,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // 검증 방식: 소스 복제 없이 실제 input-handler-text.ts 를 로드해 executeOperation/wasm 호출을
 // 캡처한다. command.ts 의 parameter property 때문에 Node 의 strip-only 로더로는 직접 import 가
 // 불가하므로(`TypeScript parameter property is not supported in strip-only mode`),
-// process.execPath 자식 프로세스를 --experimental-transform-types 로 띄우고
+// process.execPath 자식 프로세스에 support/ts-transform-hooks.mjs 를 --import 로 등록해
+// TS 를 변환하고(Node 26 에서 --experimental-transform-types 제거), 드라이버의
 // module.registerHooks 로 `@/` 별칭만 매핑한다. node_modules/.bin 실행 파일에 의존하지 않아
 // 플랫폼 무관하게 동작한다.
 
@@ -146,9 +147,10 @@ result.flatFirstPara = backspace(flatPos(0)).ops.map((o) => o.command?.type ?? o
 process.stdout.write('###' + JSON.stringify(result) + '###');
 `);
 
+const transformHooks = pathToFileURL(path.join(studioRoot, 'tests', 'support', 'ts-transform-hooks.mjs')).href;
 const run = spawnSync(
   process.execPath,
-  ['--experimental-transform-types', '--no-warnings', driverPath],
+  ['--no-warnings', '--import', transformHooks, driverPath],
   { cwd: studioRoot, encoding: 'utf8' },
 );
 

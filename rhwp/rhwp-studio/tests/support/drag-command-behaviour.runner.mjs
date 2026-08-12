@@ -1,7 +1,7 @@
 // [Task #2759] 행위 러너 — command.ts 의 커맨드 클래스를 실제 로드해 execute/undo 를
 // mock WasmBridge 로 검증한다. cursor.ts:85 의 TS 파라미터 프로퍼티 때문에 기본 test
 // 러너(strip-only)는 엔진 클래스를 import 하지 못하므로, 이 러너를 부모 테스트가
-// --experimental-transform-types 로 spawn 한다(별도 PR #2720 방식). 실패 시 비정상 종료.
+// support/ts-transform-hooks.mjs 를 --import 로 등록해 spawn 한다. 실패 시 비정상 종료.
 import { registerHooks } from 'node:module';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';

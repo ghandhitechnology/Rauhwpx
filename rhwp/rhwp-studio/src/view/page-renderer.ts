@@ -5,7 +5,7 @@ import type { CanvasKitLayerRenderer, CanvasKitRenderDiagnostics } from './canva
 import { collectVectorRawSvgDataUrls } from './raw-svg-prefetch';
 import {
   collectFlowImagePaintOps,
-  visibleFlowImageBbox,
+  planFlowImageClip,
   type FlowImagePaintOp,
 } from './flow-image-clip';
 import type { RenderBackend } from './render-backend';
@@ -419,33 +419,29 @@ export class PageRenderer {
     layer.style.background = 'var(--doc-paper)';
 
     for (const image of images) {
-      const visibleBbox = visibleFlowImageBbox(image);
-      if (!visibleBbox) continue;
-
       // clip이 실제 그림보다 작을 때만 별도 wrapper를 둔다. 일반 그림은 기존 DOM
       // 경로를 그대로 사용해 정적 이미지 분리의 비용 이점을 유지한다.
-      const needsClipWrapper = image.clip !== null && (
-        visibleBbox.x !== image.bbox.x ||
-        visibleBbox.y !== image.bbox.y ||
-        visibleBbox.width !== image.bbox.width ||
-        visibleBbox.height !== image.bbox.height ||
-        image.rotation !== 0
-      );
+      // 회전한 그림은 미회전 bbox 가 아니라 회전 후 AABB 로 판단한다 — bbox 로 자르면
+      // 회전으로 밀려난 모서리가 잘려 canvas/PDF 경로와 결과가 갈라진다.
+      const plan = planFlowImageClip(image);
+      if (!plan) continue;
+      const hostBbox = plan.host;
+      const needsClipWrapper = plan.needsWrapper;
       const clipHost = needsClipWrapper ? document.createElement('div') : layer;
       if (needsClipWrapper) {
         clipHost.style.position = 'absolute';
-        clipHost.style.left = `${visibleBbox.x * displayScale}px`;
-        clipHost.style.top = `${visibleBbox.y * displayScale}px`;
-        clipHost.style.width = `${visibleBbox.width * displayScale}px`;
-        clipHost.style.height = `${visibleBbox.height * displayScale}px`;
+        clipHost.style.left = `${hostBbox.x * displayScale}px`;
+        clipHost.style.top = `${hostBbox.y * displayScale}px`;
+        clipHost.style.width = `${hostBbox.width * displayScale}px`;
+        clipHost.style.height = `${hostBbox.height * displayScale}px`;
         clipHost.style.overflow = 'hidden';
         clipHost.style.pointerEvents = 'none';
       }
 
       const frame = document.createElement('div');
       frame.style.position = 'absolute';
-      frame.style.left = `${(image.bbox.x - (needsClipWrapper ? visibleBbox.x : 0)) * displayScale}px`;
-      frame.style.top = `${(image.bbox.y - (needsClipWrapper ? visibleBbox.y : 0)) * displayScale}px`;
+      frame.style.left = `${(image.bbox.x - (needsClipWrapper ? hostBbox.x : 0)) * displayScale}px`;
+      frame.style.top = `${(image.bbox.y - (needsClipWrapper ? hostBbox.y : 0)) * displayScale}px`;
       frame.style.width = `${image.bbox.width * displayScale}px`;
       frame.style.height = `${image.bbox.height * displayScale}px`;
       frame.style.overflow = 'hidden';
