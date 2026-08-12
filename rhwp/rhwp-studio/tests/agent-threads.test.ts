@@ -94,6 +94,27 @@ test('threads keep their document key and legacy threads fall back to null', () 
   assert.equal(getThread('legacy')?.docKey, null);
 });
 
+test('threads persist only stable document reference identity, never reference blobs', () => {
+  mem.clear();
+  const t = createEmptyThread({
+    agent: 'codex',
+    model: 'gpt-5.6-sol',
+    effort: 'high',
+    docKey: '보고서.hwpx',
+    documentId: 'doc-stable-1',
+  });
+  t.messages.push({ role: 'user', text: '첨부한 자료로 고쳐줘' });
+  upsertThread(t);
+  assert.equal(getThread(t.id)?.documentId, 'doc-stable-1');
+  const raw = mem.get('rhwp-agent-threads') ?? '';
+  assert.doesNotMatch(raw, /base64|arrayBuffer|blob:/i);
+
+  const stored = JSON.parse(raw) as Array<Record<string, unknown>>;
+  delete stored[0]!.documentId;
+  mem.set('rhwp-agent-threads', JSON.stringify(stored));
+  assert.equal(getThread(t.id)?.documentId, null);
+});
+
 test('listThreadsByDocument groups by document, groups ordered by recent activity', () => {
   mem.clear();
   const mk = (docKey: string | null, text: string, updatedAt: number) => {
