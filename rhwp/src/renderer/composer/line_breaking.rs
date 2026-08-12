@@ -92,7 +92,11 @@ pub(crate) struct LineBandPlan {
 impl LineBandPlan {
     /// make_line_seg 와 동일 산식의 줄 전진량(px).
     fn advance_px(&self, max_font_size: f64) -> f64 {
-        let fs = if max_font_size > 0.0 { max_font_size } else { 12.0 };
+        let fs = if max_font_size > 0.0 {
+            max_font_size
+        } else {
+            12.0
+        };
         let line_height_hwp = font_size_to_line_height(fs, self.dpi);
         let line_spacing_hwp =
             compute_line_spacing_hwp(self.ls_type, self.ls_value, line_height_hwp, self.dpi);
@@ -2777,7 +2781,10 @@ pub(crate) fn reflow_line_segs(
             let band_fs = if i == 0 {
                 0.0
             } else {
-                line_breaks.get(i - 1).map(|lb| lb.max_font_size).unwrap_or(0.0)
+                line_breaks
+                    .get(i - 1)
+                    .map(|lb| lb.max_font_size)
+                    .unwrap_or(0.0)
             };
             let (x, w) = plan.interval_at(y, band_fs);
             if plan.narrows(x, w) {

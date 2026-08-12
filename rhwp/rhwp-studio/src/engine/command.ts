@@ -1848,28 +1848,69 @@ function sameCellPath(a?: CellPathLike, b?: CellPathLike): boolean {
   return JSON.stringify(a ?? []) === JSON.stringify(b ?? []);
 }
 
-/** 개체 이동 명령용 속성 조회 — cellPath 존재 시 by-path API 로 분기 */
+/**
+ * [Task #825] 머리말/꼬리말 안의 그림을 가리키는 marker.
+ *
+ * 머리말/꼬리말의 내부 문단 인덱스는 본문 문단 목록과 완전히 다른 인덱스 공간이라
+ * `sec/ppi/ci` 만으로는 대상을 찾을 수 없다. 바깥쪽(본문) 문단·컨트롤 인덱스를 함께
+ * 넘겨야 `setHeaderFooterPictureProperties` 가 올바른 그림에 도달한다.
+ * PictureObjectRef.headerFooter (input-handler-picture.ts) 와 동일한 형태.
+ */
+export type HeaderFooterObjectRef = {
+  kind: 'header' | 'footer';
+  outerParaIdx: number;
+  outerControlIdx: number;
+};
+
+/** 두 headerFooter marker 가 동일한지 비교 (undefined 는 본문으로 동일 취급) */
+function sameHeaderFooter(a?: HeaderFooterObjectRef, b?: HeaderFooterObjectRef): boolean {
+  if (!a || !b) return !a && !b;
+  return a.kind === b.kind &&
+    a.outerParaIdx === b.outerParaIdx &&
+    a.outerControlIdx === b.outerControlIdx;
+}
+
+/**
+ * 개체 이동 명령용 속성 조회 — headerFooter 우선, 없으면 cellPath 로 분기.
+ * (input-handler-picture.ts 의 getObjectProperties 와 동일한 분기 순서)
+ */
 function moveGetProps(
   wasm: WasmBridge, kind: 'image' | 'shape',
   sec: number, ppi: number, ci: number, cellPath?: CellPathLike,
+  headerFooter?: HeaderFooterObjectRef,
 ): { horzOffset: number; vertOffset: number } {
   const nested = !!cellPath && cellPath.length > 0;
   if (kind === 'shape') {
     return nested ? wasm.getCellShapePropertiesByPath(sec, ppi, cellPath!, ci) : wasm.getShapeProperties(sec, ppi, ci);
   }
+  if (headerFooter) {
+    return wasm.getHeaderFooterPictureProperties(
+      sec, headerFooter.outerParaIdx, headerFooter.outerControlIdx, ppi, ci,
+    );
+  }
   return nested ? wasm.getCellPicturePropertiesByPath(sec, ppi, cellPath!, ci) : wasm.getPictureProperties(sec, ppi, ci);
 }
 
-/** 개체 이동 명령용 속성 변경 — cellPath 존재 시 by-path API 로 분기 */
+/**
+ * 개체 이동 명령용 속성 변경 — headerFooter 우선, 없으면 cellPath 로 분기.
+ * (input-handler-picture.ts 의 setObjectProperties 와 동일한 분기 순서)
+ */
 function moveSetProps(
   wasm: WasmBridge, kind: 'image' | 'shape',
   sec: number, ppi: number, ci: number, cellPath: CellPathLike | undefined,
   props: Record<string, unknown>,
+  headerFooter?: HeaderFooterObjectRef,
 ): void {
   const nested = !!cellPath && cellPath.length > 0;
   if (kind === 'shape') {
     if (nested) { wasm.setCellShapePropertiesByPath(sec, ppi, cellPath!, ci, props); return; }
     wasm.setShapeProperties(sec, ppi, ci, props);
+    return;
+  }
+  if (headerFooter) {
+    wasm.setHeaderFooterPictureProperties(
+      sec, headerFooter.outerParaIdx, headerFooter.outerControlIdx, ppi, ci, props,
+    );
     return;
   }
   if (nested) { wasm.setCellPicturePropertiesByPath(sec, ppi, cellPath!, ci, props); return; }
@@ -1889,17 +1930,20 @@ export class MovePictureCommand implements EditCommand {
     private origHorzOffset: number,
     private origVertOffset: number,
     private cellPath?: CellPathLike,
+    private headerFooter?: HeaderFooterObjectRef,
     timestamp?: number,
   ) {
     this.timestamp = timestamp ?? Date.now();
   }
 
   execute(wasm: WasmBridge): DocumentPosition {
-    const props = moveGetProps(wasm, 'image', this.sec, this.ppi, this.ci, this.cellPath);
+    const props = moveGetProps(
+      wasm, 'image', this.sec, this.ppi, this.ci, this.cellPath, this.headerFooter,
+    );
     moveSetProps(wasm, 'image', this.sec, this.ppi, this.ci, this.cellPath, {
       horzOffset: props.horzOffset + this.deltaH,
       vertOffset: props.vertOffset + this.deltaV,
-    });
+    }, this.headerFooter);
     return { sectionIndex: this.sec, paragraphIndex: this.ppi, charOffset: 0 };
   }
 
@@ -1907,7 +1951,7 @@ export class MovePictureCommand implements EditCommand {
     moveSetProps(wasm, 'image', this.sec, this.ppi, this.ci, this.cellPath, {
       horzOffset: this.origHorzOffset,
       vertOffset: this.origVertOffset,
-    });
+    }, this.headerFooter);
     return { sectionIndex: this.sec, paragraphIndex: this.ppi, charOffset: 0 };
   }
 
@@ -1915,6 +1959,9 @@ export class MovePictureCommand implements EditCommand {
     if (!(other instanceof MovePictureCommand)) return null;
     if (other.sec !== this.sec || other.ppi !== this.ppi || other.ci !== this.ci) return null;
     if (!sameCellPath(other.cellPath, this.cellPath)) return null;
+    // [Task #825] 머리말/꼬리말 그림은 본문 그림과 sec/ppi/ci 가 겹칠 수 있어
+    // marker 까지 같아야 병합한다.
+    if (!sameHeaderFooter(other.headerFooter, this.headerFooter)) return null;
     if (other.timestamp - this.timestamp > 500) return null;
 
     return new MovePictureCommand(
@@ -1924,6 +1971,7 @@ export class MovePictureCommand implements EditCommand {
       this.origHorzOffset,
       this.origVertOffset,
       this.cellPath,
+      this.headerFooter,
       this.timestamp,
     );
   }
@@ -1942,17 +1990,20 @@ export class MoveShapeCommand implements EditCommand {
     private origHorzOffset: number,
     private origVertOffset: number,
     private cellPath?: CellPathLike,
+    private headerFooter?: HeaderFooterObjectRef,
     timestamp?: number,
   ) {
     this.timestamp = timestamp ?? Date.now();
   }
 
   execute(wasm: WasmBridge): DocumentPosition {
-    const props = moveGetProps(wasm, 'shape', this.sec, this.ppi, this.ci, this.cellPath);
+    const props = moveGetProps(
+      wasm, 'shape', this.sec, this.ppi, this.ci, this.cellPath, this.headerFooter,
+    );
     moveSetProps(wasm, 'shape', this.sec, this.ppi, this.ci, this.cellPath, {
       horzOffset: props.horzOffset + this.deltaH,
       vertOffset: props.vertOffset + this.deltaV,
-    });
+    }, this.headerFooter);
     return { sectionIndex: this.sec, paragraphIndex: this.ppi, charOffset: 0 };
   }
 
@@ -1960,7 +2011,7 @@ export class MoveShapeCommand implements EditCommand {
     moveSetProps(wasm, 'shape', this.sec, this.ppi, this.ci, this.cellPath, {
       horzOffset: this.origHorzOffset,
       vertOffset: this.origVertOffset,
-    });
+    }, this.headerFooter);
     return { sectionIndex: this.sec, paragraphIndex: this.ppi, charOffset: 0 };
   }
 
@@ -1968,6 +2019,7 @@ export class MoveShapeCommand implements EditCommand {
     if (!(other instanceof MoveShapeCommand)) return null;
     if (other.sec !== this.sec || other.ppi !== this.ppi || other.ci !== this.ci) return null;
     if (!sameCellPath(other.cellPath, this.cellPath)) return null;
+    if (!sameHeaderFooter(other.headerFooter, this.headerFooter)) return null;
     if (other.timestamp - this.timestamp > 500) return null;
 
     return new MoveShapeCommand(
@@ -1977,6 +2029,7 @@ export class MoveShapeCommand implements EditCommand {
       this.origHorzOffset,
       this.origVertOffset,
       this.cellPath,
+      this.headerFooter,
       this.timestamp,
     );
   }
@@ -1991,6 +2044,8 @@ export type ObjectResizeTarget = {
   ci: number;
   type: string;
   cellPath?: CellPathLike;
+  /** [Task #825] 머리말/꼬리말 내부 그림이면 반드시 함께 기록해야 undo 가 같은 개체를 찾는다. */
+  headerFooter?: HeaderFooterObjectRef;
   before: Record<string, unknown>;
   after: Record<string, unknown>;
 };
@@ -2018,6 +2073,19 @@ export class ResizeObjectCommand implements EditCommand {
       }
       wasm.setShapeProperties(target.sec, target.ppi, target.ci, props);
     } else {
+      // [Task #825] 머리말/꼬리말 그림은 내부 문단 인덱스 공간을 쓰므로 cellPath 보다 우선
+      // 분기한다 (input-handler-picture.ts 의 setObjectProperties 와 동일 순서).
+      if (target.type === 'image' && target.headerFooter) {
+        wasm.setHeaderFooterPictureProperties(
+          target.sec,
+          target.headerFooter.outerParaIdx,
+          target.headerFooter.outerControlIdx,
+          target.ppi,
+          target.ci,
+          props,
+        );
+        return;
+      }
       if (target.type === 'image' && target.cellPath && target.cellPath.length > 0) {
         wasm.setCellPicturePropertiesByPath(target.sec, target.ppi, target.cellPath, target.ci, props);
         return;
