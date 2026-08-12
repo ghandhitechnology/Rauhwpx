@@ -1316,8 +1316,9 @@ export function moveSelectedPicture(this: any, key: 'ArrowUp' | 'ArrowDown' | 'A
         vertOffset: newVertOffset,
       });
       const CmdClass = r.type === 'shape' || r.type === 'line' || r.type === 'group' ? MoveShapeCommand : MovePictureCommand;
+      // [Task #825] 머리말/꼬리말 개체는 marker 를 함께 기록해야 Undo 가 본문 좌표계로 새지 않는다.
       this.executeOperation({ kind: 'record', command:
-        new CmdClass(r.sec, r.ppi, r.ci, deltaH, deltaV, props.horzOffset, props.vertOffset, r.cellPath),
+        new CmdClass(r.sec, r.ppi, r.ci, deltaH, deltaV, props.horzOffset, props.vertOffset, r.cellPath, r.headerFooter),
       });
     }
     // 연결선 자동 추적
