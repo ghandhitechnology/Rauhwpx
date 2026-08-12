@@ -3,8 +3,6 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const IDENTITY = 'Developer ID Application: TAEWOOK HA (C8M34MMT8W)';
-const TEAM_ID = 'C8M34MMT8W';
-
 const rootPackage = JSON.parse(
   readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'),
 ) as {
@@ -12,7 +10,7 @@ const rootPackage = JSON.parse(
   build?: {
     mac?: {
       identity?: string;
-      notarize?: { teamId?: string } | boolean;
+      notarize?: boolean;
     };
   };
 };
@@ -29,12 +27,7 @@ const desktopMain = readFileSync(
 
 test('macOS releases pin and notarize with the Xcode Developer ID identity', () => {
   assert.equal(rootPackage.build?.mac?.identity, IDENTITY);
-  assert.equal(
-    typeof rootPackage.build?.mac?.notarize === 'object'
-      ? rootPackage.build.mac.notarize.teamId
-      : undefined,
-    TEAM_ID,
-  );
+  assert.equal(rootPackage.build?.mac?.notarize, true);
   assert.match(releaseWorkflow, new RegExp(`CSC_NAME:\\s*"?${IDENTITY.replace(/[()]/g, '\\$&')}"?`));
   assert.match(releaseWorkflow, /APPLE_APP_SPECIFIC_PASSWORD/);
   assert.match(releaseWorkflow, /xcrun stapler validate/);
