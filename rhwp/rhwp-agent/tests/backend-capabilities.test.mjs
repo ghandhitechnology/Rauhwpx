@@ -247,6 +247,136 @@ test('Claude waits for an idle restart and resumes with the new phase', async ()
   session.dispose();
 });
 
+async function runClaudeResult(result, opts = {}) {
+  const events = [];
+  let child;
+  const session = createClaudeSession(
+    { ...baseOpts, ...opts, permissionProfile: 'safe', onEvent: (event) => events.push(event) },
+    { spawnProcess() { child = new FakeProcess(); return child; } },
+  );
+  session.sendUserMessage('go');
+  await nextTask();
+  child.emitJson(...(opts.prelude ?? []), { type: 'result', stop_reason: 'end_turn', ...result });
+  session.dispose();
+  return events;
+}
+
+test('Claude turns result usage into a usage event before the turn ends', async () => {
+  const events = await runClaudeResult({
+    usage: {
+      input_tokens: 120,
+      output_tokens: 45,
+      cache_read_input_tokens: 9000,
+      cache_creation_input_tokens: 300,
+    },
+  });
+  const usage = events.filter((event) => event.type === 'usage');
+  assert.equal(usage.length, 1);
+  assert.deepEqual(usage[0], {
+    type: 'usage',
+    agent: 'claude',
+    model: 'test-model',
+    usage: { inputTokens: 120, outputTokens: 45, cacheReadTokens: 9000, cacheCreationTokens: 300 },
+  });
+  assert.ok(
+    events.indexOf(usage[0]) < events.findIndex((event) => event.type === 'turn-end'),
+    'usage must precede turn-end',
+  );
+});
+
+test('Claude usage adopts the model reported by the CLI', async () => {
+  const events = await runClaudeResult(
+    { usage: { input_tokens: 10, output_tokens: 1 } },
+    { prelude: [{ type: 'system', subtype: 'init', session_id: sessionId, model: 'claude-sonnet-9-9' }] },
+  );
+  assert.equal(events.find((event) => event.type === 'usage').model, 'claude-sonnet-9-9');
+});
+
+test('Claude prefers modelUsage over the aggregate to avoid double counting', async () => {
+  const events = await runClaudeResult({
+    usage: { input_tokens: 999, output_tokens: 999 },
+    modelUsage: {
+      'claude-opus-5': { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 500, cacheCreationInputTokens: 10 },
+      'claude-haiku-5': { inputTokens: 7, outputTokens: 3 },
+      'claude-idle-5': { inputTokens: 0, outputTokens: 0 },
+    },
+  });
+  const usage = events.filter((event) => event.type === 'usage');
+  assert.deepEqual(usage.map((event) => event.model), ['claude-opus-5', 'claude-haiku-5']);
+  assert.deepEqual(usage[0].usage, {
+    inputTokens: 100, outputTokens: 20, cacheReadTokens: 500, cacheCreationTokens: 10,
+  });
+  assert.deepEqual(usage[1].usage, {
+    inputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheCreationTokens: 0,
+  });
+  assert.equal(usage.some((event) => event.usage.inputTokens === 999), false);
+});
+
+test('Claude emits no usage event for missing or malformed usage', async () => {
+  for (const result of [
+    {},
+    { usage: null },
+    { usage: 'lots' },
+    { usage: { input_tokens: 'abc', output_tokens: null } },
+    { usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 } },
+    { usage: { input_tokens: 5 }, modelUsage: {} },
+  ]) {
+    const events = await runClaudeResult(result);
+    const usage = events.filter((event) => event.type === 'usage');
+    if (result.modelUsage) {
+      // modelUsage 가 빈 객체면 aggregate 로 되돌아온다.
+      assert.equal(usage.length, 1, JSON.stringify(result));
+      assert.equal(usage[0].usage.inputTokens, 5);
+    } else {
+      assert.deepEqual(usage, [], JSON.stringify(result));
+    }
+    assert.equal(events.filter((event) => event.type === 'turn-end').length, 1);
+  }
+});
+
+test('Codex maps turn.completed usage and keeps it ahead of turn-end', () => {
+  const events = [];
+  let child;
+  const session = createCodexSession(
+    { ...baseOpts, permissionProfile: 'safe', onEvent: (event) => events.push(event) },
+    { spawnProcess() { child = new FakeProcess(); return child; } },
+  );
+  session.sendUserMessage('go');
+  child.emitJson({
+    type: 'turn.completed',
+    usage: { input_tokens: 4000, cached_input_tokens: 3000, output_tokens: 120 },
+  });
+  const usage = events.filter((event) => event.type === 'usage');
+  assert.equal(usage.length, 1);
+  assert.deepEqual(usage[0], {
+    type: 'usage',
+    agent: 'codex',
+    model: 'test-model',
+    usage: { inputTokens: 4000, outputTokens: 120, cacheReadTokens: 3000, cacheCreationTokens: 0 },
+  });
+  assert.equal(events.some((event) => event.type === 'turn-end'), false);
+
+  child.exitCode = 0;
+  child.emit('exit', 0, null);
+  assert.ok(events.indexOf(usage[0]) < events.findIndex((event) => event.type === 'turn-end'));
+  session.dispose();
+});
+
+test('Codex emits no usage event when turn.completed carries none', () => {
+  for (const message of [{ type: 'turn.completed' }, { type: 'turn.completed', usage: {} }, { type: 'turn.completed', usage: { input_tokens: -1 } }]) {
+    const events = [];
+    let child;
+    const session = createCodexSession(
+      { ...baseOpts, permissionProfile: 'safe', onEvent: (event) => events.push(event) },
+      { spawnProcess() { child = new FakeProcess(); return child; } },
+    );
+    session.sendUserMessage('go');
+    child.emitJson(message);
+    assert.deepEqual(events.filter((event) => event.type === 'usage'), [], JSON.stringify(message));
+    session.dispose();
+  }
+});
+
 test('Codex normalizes stable multi-agent lifecycle items', () => {
   const emitted = [];
   let process;

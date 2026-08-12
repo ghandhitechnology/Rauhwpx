@@ -6,12 +6,14 @@ import {
   isPlanningRestricted,
   mcpCapabilityEnv,
   normalizeExecutionMode,
+  normalizeUsageTokens,
   systemBriefFor,
   truncate,
   validateExecutionMode,
 } from './backend.mjs';
 
 const STDERR_TAIL_LIMIT = 16_000;
+const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
 
 /**
  * Build a CLI invocation accepted by both `codex exec` and `codex exec resume`.
@@ -54,7 +56,7 @@ export function buildCodexArgv(opts, threadId) {
     ...(opts.workflow === 'plan' ? ['--enable', 'multi_agent'] : ['--disable', 'multi_agent']),
     '--disable', 'plugins',
     '--disable', 'skill_search',
-    '-m', opts.model ?? 'gpt-5.6-sol', ...cfg,
+    '-m', opts.model ?? DEFAULT_CODEX_MODEL, ...cfg,
   ];
   return threadId
     ? ['exec', 'resume', ...common, threadId, '-']
@@ -235,6 +237,16 @@ export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
         // Codex can emit its logical completion before the CLI process exits. Keep
         // the hub turn open until exit so a resumed implementation never overlaps it.
         turnCompleted = true;
+        const usage = normalizeUsageTokens(e.usage);
+        if (usage) {
+          onEvent({
+            type: 'usage',
+            agent: 'codex',
+            model: opts.model ?? DEFAULT_CODEX_MODEL,
+            // Codex 는 캐시 생성 토큰을 따로 보고하지 않는다.
+            usage: { ...usage, cacheCreationTokens: 0 },
+          });
+        }
         return;
       }
       if (type === 'turn.failed') {

@@ -110,6 +110,73 @@ export interface WritingStyleUpload {
   content: string;
 }
 
+/* ── 프로바이더 상태 · 사용량 (프로토콜 v2 추가분) ──────────
+   허브가 로컬 CLI(claude/codex)의 설치 여부를 프로브해 provider-status 로,
+   턴마다 기록한 토큰 사용량을 usage-report 로 보낸다. 두 메시지는 요청
+   응답으로도 오고(requestId), 연결 직후·턴 종료 후 밀어주기도 한다. */
+
+/** 로컬 CLI 한 벌의 실행 가능 여부. */
+export interface ProviderHealth {
+  available: boolean;
+  version: string | null;
+  error: string | null;
+  /** epoch ms */
+  checkedAt: number;
+}
+
+export type ProviderStatusMap = Record<AgentName, ProviderHealth>;
+
+/** 요금제 — 한도 계산의 기준이 되므로 프로바이더별로 값이 다르다. */
+export type ClaudeUsagePlan = 'pro' | 'max5x' | 'max20x' | 'api';
+export type CodexUsagePlan = 'plus' | 'pro' | 'api';
+export type UsagePlan = ClaudeUsagePlan | CodexUsagePlan;
+
+/** 한 창(세션 5시간 / 오늘 / 주간)의 누적치. percent 는 한도가 없으면 null. */
+export interface UsageWindow {
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  weightedTokens: number;
+  /** 0–100 (초과 가능, 소수 첫째 자리). 한도가 없으면 null. */
+  percent: number | null;
+}
+
+export interface UsageModelBreakdown {
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  weightedTokens: number;
+}
+
+export interface ProviderUsage {
+  session: UsageWindow;
+  day: UsageWindow;
+  week: UsageWindow;
+  byModel: Record<string, UsageModelBreakdown>;
+  limit: { session5h: number | null; week: number | null };
+  /** epoch ms — 마지막으로 사용량이 기록된 시각. */
+  updatedAt: number | null;
+}
+
+export interface UsageSummary {
+  plans: { claude: string; codex: string };
+  providers: Record<AgentName, ProviderUsage>;
+}
+
+export function isClaudeUsagePlan(value: unknown): value is ClaudeUsagePlan {
+  return value === 'pro' || value === 'max5x' || value === 'max20x' || value === 'api';
+}
+
+export function isCodexUsagePlan(value: unknown): value is CodexUsagePlan {
+  return value === 'plus' || value === 'pro' || value === 'api';
+}
+
+export function isUsagePlanForAgent(agent: AgentName, value: unknown): boolean {
+  return agent === 'claude' ? isClaudeUsagePlan(value) : isCodexUsagePlan(value);
+}
+
 export interface ProductSkillFile {
   path: string;
   size?: number;
@@ -156,7 +223,14 @@ export type AgentStreamEvent =
   | { type: 'error'; agent: AgentName; message: string };
 
 export type SidebarEvent =
-  | { type: 'connection'; state: 'connecting' | 'connected' | 'disconnected' | 'replaced' }
+  | {
+      type: 'connection';
+      state: 'connecting' | 'connected' | 'disconnected' | 'replaced';
+      /** 지금까지 실패한 연결 시도 수 (0 = 첫 시도가 진행 중). */
+      attempt?: number;
+      /** 다음 자동 재시도까지 남은 시간 — 재시도가 예약된 'disconnected' 에만 온다. */
+      retryInMs?: number;
+    }
   | {
       type: 'chat-started';
       agent: AgentName;
@@ -188,6 +262,8 @@ export type SidebarEvent =
   | { type: 'writing-style-progress'; requestId: string; state: 'reading' | 'analyzing' | 'saving' }
   | { type: 'writing-style-result'; requestId: string; status: WritingStyleStatus }
   | { type: 'writing-style-error'; requestId: string; code: string; message: string }
+  | { type: 'provider-status'; providers: ProviderStatusMap }
+  | { type: 'usage-report'; usage: UsageSummary }
   | {
       type: 'title-result';
       requestId: string;
