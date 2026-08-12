@@ -645,6 +645,25 @@ fn reflow_keeps_left_interval_for_right_anchored_picture() {
     }
 }
 
+/// 쪽/용지 가로 기준 개체는 문단-로컬로 위치를 알 수 없어 계획에서 제외한다
+/// (잘못된 배제보다 전폭 유지가 안전 — greptile P1).
+#[test]
+fn reflow_skips_page_and_paper_horz_relative_floats() {
+    let styles = make_styles_with_font_size(16.0);
+    for rel in [HorzRelTo::Page, HorzRelTo::Paper] {
+        let mut para = make_wrap_para(TextWrap::Square, HorzAlign::Left, 19200);
+        if let Control::Picture(pic) = &mut para.controls[0] {
+            pic.common.horz_rel_to = rel;
+        }
+        reflow_line_segs(&mut para, 200.0, &styles, 96.0);
+        assert_eq!(para.line_segs.len(), 2, "{rel:?}: 전폭 유지 → 2줄");
+        for seg in &para.line_segs {
+            assert_eq!(seg.column_start, 0, "{rel:?}: wrap zone 미기록");
+            assert_eq!(seg.segment_width, 15000, "{rel:?}: 전폭 200px=15000HU");
+        }
+    }
+}
+
 /// 글 뒤로(BehindText)/글자처럼 취급 개체는 줄 폭에 영향을 주지 않는다.
 #[test]
 fn reflow_ignores_behind_text_and_tac_objects() {
