@@ -1,1 +1,6 @@
 .worktrees/
+node_modules/
+release/
+build/icon.iconset/
+.DS_Store
+
