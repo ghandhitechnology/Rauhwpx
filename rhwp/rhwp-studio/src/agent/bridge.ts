@@ -38,8 +38,11 @@ import type {
   ReferenceSearchHit,
   StructuredPlan,
   UsageModelBreakdown,
+  UsageSource,
   UsageSummary,
   UsageWindow,
+  CliproxyAccount,
+  CliproxyStatus,
   WritingStyleLanguage,
   WritingStyleUpload,
   AgentStreamEvent,
@@ -60,9 +63,13 @@ export interface AgentBridge {
   /** 로컬 CLI 설치 상태. refresh=true 면 허브가 새로 프로브한다. */
   requestProviderStatus(refresh?: boolean): Promise<ProviderStatusMap | null>;
   /** 누적 사용량 요약. 응답이 없으면 null. */
-  requestUsage(): Promise<UsageSummary | null>;
+  requestUsage(refresh?: boolean): Promise<UsageSummary | null>;
   /** 요금제를 바꾸고 갱신된 요약을 돌려받는다. */
   setUsagePlan(agent: AgentName, plan: string): Promise<UsageSummary | null>;
+  /** CLIProxyAPI 관리 API 에 연결해 공식 요금제 사용량을 받는다. */
+  connectCliproxy(url: string, key: string): Promise<UsageSummary | null>;
+  /** 저장된 CLIProxyAPI 연결을 끊는다. */
+  disconnectCliproxy(): Promise<UsageSummary | null>;
   startChat(agent: AgentName, model?: string, effort?: string, force?: boolean, permissionProfile?: PermissionProfile, workflow?: AgentWorkflow, threadId?: string, documentId?: string | null, documentName?: string | null): void;
   /** 허브 세션을 폐기하고 새 채팅을 시작할 수 있게 한다. */
   stopChat(): void;
@@ -220,6 +227,52 @@ function readUsageWindow(value: unknown): UsageWindow {
     cacheCreationTokens: num(src['cacheCreationTokens']),
     weightedTokens: num(src['weightedTokens']),
     percent: nullableNum(src['percent']),
+    resetsAt: nullableNum(src['resetsAt']),
+  };
+}
+
+function readUsageSource(value: unknown): UsageSource {
+  return value === 'cliproxy' ? 'cliproxy' : 'estimate';
+}
+
+function readCliproxyWindow(value: unknown): { percent: number | null; resetsAt: number | null } {
+  const src = (value ?? {}) as Record<string, unknown>;
+  return {
+    percent: nullableNum(src['percent']),
+    resetsAt: nullableNum(src['resetsAt']),
+  };
+}
+
+function readCliproxyAccounts(value: unknown): CliproxyAccount[] {
+  if (!Array.isArray(value)) return [];
+  const out: CliproxyAccount[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') continue;
+    const src = raw as Record<string, unknown>;
+    const agent = src['agent'] === 'codex' ? 'codex' : src['agent'] === 'claude' ? 'claude' : null;
+    if (!agent) continue;
+    out.push({
+      agent,
+      name: typeof src['name'] === 'string' && src['name'] ? src['name'] : 'unknown',
+      email: typeof src['email'] === 'string' ? src['email'] : null,
+      planType: typeof src['planType'] === 'string' ? src['planType'] : null,
+      session: readCliproxyWindow(src['session']),
+      week: readCliproxyWindow(src['week']),
+      error: typeof src['error'] === 'string' ? src['error'] : null,
+    });
+  }
+  return out;
+}
+
+function readCliproxyStatus(value: unknown): CliproxyStatus {
+  const src = (value ?? {}) as Record<string, unknown>;
+  return {
+    configured: src['configured'] === true,
+    connected: src['connected'] === true,
+    url: typeof src['url'] === 'string' && src['url'] ? src['url'] : null,
+    error: typeof src['error'] === 'string' ? src['error'] : null,
+    checkedAt: nullableNum(src['checkedAt']),
+    accounts: readCliproxyAccounts(src['accounts']),
   };
 }
 
@@ -251,6 +304,7 @@ function readProviderUsage(value: unknown): ProviderUsage {
       week: nullableNum(limit['week']),
     },
     updatedAt: nullableNum(src['updatedAt']),
+    source: readUsageSource(src['source']),
   };
 }
 
@@ -268,6 +322,7 @@ function readUsageSummary(value: unknown): UsageSummary | null {
       claude: readProviderUsage(providers['claude']),
       codex: readProviderUsage(providers['codex']),
     },
+    cliproxy: readCliproxyStatus(src['cliproxy']),
   };
 }
 
@@ -1220,10 +1275,14 @@ class AgentBridgeImpl implements AgentBridge {
    * 요청 하나를 대기표에 올리고 보낸다. 오프라인이거나 전송이 실패하면
    * 곧바로 null 로 안착한다 — 호출자는 언제나 값 또는 null 만 본다.
    */
-  private request<T>(payload: Record<string, unknown> & { type: string }, prefix: string): Promise<T | null> {
+  private request<T>(
+    payload: Record<string, unknown> & { type: string },
+    prefix: string,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+  ): Promise<T | null> {
     if (this.state !== 'connected') return Promise.resolve(null);
     const requestId = `${prefix}-${++this.requestSeq}`;
-    const promise = this.requests.create<T>(requestId, REQUEST_TIMEOUT_MS);
+    const promise = this.requests.create<T>(requestId, timeoutMs);
     const sent = this.sendJson({ v: AGENT_PROTOCOL_VERSION, requestId, ...payload });
     if (!sent) this.requests.settle(requestId, null);
     return promise;
@@ -1236,12 +1295,24 @@ class AgentBridgeImpl implements AgentBridge {
     );
   }
 
-  requestUsage(): Promise<UsageSummary | null> {
-    return this.request<UsageSummary>({ type: 'usage-request' }, 'usage');
+  requestUsage(refresh = false): Promise<UsageSummary | null> {
+    return this.request<UsageSummary>(
+      { type: 'usage-request', ...(refresh ? { refresh: true } : {}) },
+      'usage',
+      refresh ? 20_000 : REQUEST_TIMEOUT_MS,
+    );
   }
 
   setUsagePlan(agent: AgentName, plan: string): Promise<UsageSummary | null> {
     return this.request<UsageSummary>({ type: 'usage-plan-set', agent, plan }, 'usage-plan');
+  }
+
+  connectCliproxy(url: string, key: string): Promise<UsageSummary | null> {
+    return this.request<UsageSummary>({ type: 'cliproxy-connect', url, key }, 'cliproxy-connect', 20_000);
+  }
+
+  disconnectCliproxy(): Promise<UsageSummary | null> {
+    return this.request<UsageSummary>({ type: 'cliproxy-disconnect' }, 'cliproxy-disconnect');
   }
 
   onEvent(cb: (e: SidebarEvent) => void): () => void {
