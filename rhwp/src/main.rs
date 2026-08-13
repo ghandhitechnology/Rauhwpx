@@ -88,6 +88,7 @@ fn main() {
         Some("thumbnail") => exit_with(extract_thumbnail(&args[2..])),
         Some("fields") => exit_with(show_fields(&args[2..])),
         Some("edit") => exit_with(run_edit(&args[2..])),
+        Some("edit-stress") => rhwp::diagnostics::edit_stress::run(&args[2..]),
         // [#2707] 알 수 없는 명령·명령 누락은 사용법 오류다. 표준 CLI 관례대로 stderr 로 안내하고
         // 종료 코드 2로 끝낸다(기존에는 stdout + 0이라 오타 낸 명령이 스크립트에서 성공으로 보였다).
         other => {
@@ -646,6 +647,7 @@ fn show_capabilities(args: &[String]) -> i32 {
         cmd("hwp5-contract-probe", "diagnostic", "HWP5 저장 계약 프로브"),
         cmd("hwp5-ctrl-data-trace", "diagnostic", "CTRL_DATA 추적"),
         cmd("hwp5-table-probe", "diagnostic", "표 저장 프로브"),
+        cmd("edit-stress", "diagnostic", "단일 문서 고강도 편집 내성 진단"),
         cmd(
             "hwp5-mel-personnel-probe",
             "diagnostic",
@@ -890,6 +892,9 @@ fn print_help() {
     println!();
     println!("  hwp5-table-probe <oracle.hwp> <generated.hwp> --out-dir <폴더>");
     println!("      TABLE/CTRL_HEADER(Table) field 축별 판정용 HWP probe 생성");
+    println!();
+    println!("  edit-stress <파일.hwpx> [-o report.json]");
+    println!("      편집 배터리(텍스트·표·그림·서식) + 렌더 스모크 + 저장 왕복 대조 진단 (결함 시 exit 1)");
     println!();
     println!("  hwp5-mel-personnel-probe <oracle.hwp> <generated.hwp> --out-dir <폴더>");
     println!("      mel-001 인원현황 표 TABLE/LIST_HEADER/PARA_HEADER 축별 판정용 HWP probe 생성");

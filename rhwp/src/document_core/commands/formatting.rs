@@ -1010,31 +1010,28 @@ impl DocumentCore {
 
         // 텍스트 폭/높이에 영향을 주는 글자 모양 변경 시 LineSeg 재계산.
         // 장평/자간은 글꼴 크기처럼 줄나눔과 페이지네이션을 바꾼다.
+        //
+        // 텍스트 편집 명령과 동일한 리플로우 경로를 쓴다. 종전의 전용 블록은
+        // line_segs 를 비운 뒤 reflow_line_segs 를 불러 흐름 앵커(첫 LineSeg 의
+        // vertical_pos)를 0 으로 만들었고, 문서 중간의 vpos=0 은 저장흐름 리셋으로
+        // 읽혀 가짜 페이지가 생겼다 — 저장 후 다시 열면 사라지는 쪽수 표류의 원인.
+        // 또 항상 첫 단(column 0) 폭으로 리플로우해 다단 문서에서 폭이 틀렸다.
         if char_shape_mods_affect_text_flow(&mods) {
-            let styles = resolve_styles(&self.document.doc_info, self.dpi);
-            let section = &self.document.sections[sec_idx];
-            let page_def = &section.section_def.page_def;
-            let column_def = DocumentCore::find_initial_column_def(&section.paragraphs);
-            let layout = PageLayoutInfo::from_page_def(page_def, &column_def, self.dpi);
-            let col_width = layout
-                .column_areas
-                .first()
-                .map(|a| a.width)
-                .unwrap_or(layout.body_area.width);
-            let para_shape_id = self.document.sections[sec_idx].paragraphs[para_idx].para_shape_id;
-            let para_style = styles.para_styles.get(para_shape_id as usize);
-            let margin_left = para_style.map(|s| s.margin_left).unwrap_or(0.0);
-            let margin_right = para_style.map(|s| s.margin_right).unwrap_or(0.0);
-            let available_width = (col_width - margin_left - margin_right).max(1.0);
-            // 원본 LineSeg 무효화 → reflow가 max_font_size에서 새로 계산
-            self.document.sections[sec_idx].paragraphs[para_idx]
-                .line_segs
-                .clear();
-            reflow_line_segs(
-                &mut self.document.sections[sec_idx].paragraphs[para_idx],
-                available_width,
-                &styles,
+            // 방금 만든 char shape 가 캐시에 없을 수 있으므로 스타일부터 갱신한다.
+            self.styles = resolve_styles(&self.document.doc_info, self.dpi);
+            let stored_end_for_reset = crate::renderer::composer::paragraph_flow_end(
+                &self.document.sections[sec_idx].paragraphs[para_idx],
+            );
+            self.reflow_paragraph(sec_idx, para_idx);
+            let doc_hwp3_layout = self.document.layout_profile().hwp3_layout();
+            crate::renderer::composer::recalculate_section_vpos(
+                &mut self.document.sections[sec_idx].paragraphs,
+                para_idx,
+                None,
+                stored_end_for_reset,
+                &self.styles,
                 self.dpi,
+                doc_hwp3_layout,
             );
         }
 
@@ -2053,7 +2050,10 @@ impl DocumentCore {
             .get_mut(sec_idx)
             .and_then(|s| s.paragraphs.get_mut(para_idx))
         {
-            para.line_segs.clear();
+            // line_segs 를 비우지 않는다 — reflow_line_segs 는 첫 LineSeg 의
+            // vertical_pos 를 흐름 앵커로 보존하며, 줄 높이는 항상 현재 글자
+            // 모양에서 새로 계산한다. 비우면 앵커가 0 이 되어 문서 중간에서
+            // 저장흐름 리셋으로 오인된다 (가짜 페이지 → 저장 후 쪽수 표류).
             reflow_line_segs(para, available_width, &styles, self.dpi);
         }
     }

@@ -2693,6 +2693,13 @@ impl DocumentCore {
             doc_hwp3_layout,
         );
 
+        // 문단 삽입에 맞춰 측정 캐시 인덱스를 먼저 밀어야 한다. recompose_section 은
+        // composed 만 다시 만들 뿐 measured_sections 의 표 측정값은 (para_index,
+        // control_index) 키 그대로 남아, 밀리지 않으면 삽입점 뒤의 표가 이웃 표의
+        // 측정 geometry 를 그대로 재사용해 쪽 나눔이 무너진다 (쪽수 감소·표 통짜 배치).
+        if section_idx < self.measured_sections.len() {
+            self.measured_sections[section_idx].shift_for_insert(new_para_idx);
+        }
         // 전체 구역 재구성 + 재페이지네이션
         self.recompose_section(section_idx);
         self.paginate_if_needed();
@@ -2767,6 +2774,11 @@ impl DocumentCore {
             doc_hwp3_layout,
         );
 
+        // 쪽 나눔과 동일 — 문단 삽입 후 측정 캐시 인덱스를 밀지 않으면
+        // 삽입점 뒤의 표가 이웃 표의 측정 geometry 를 재사용한다.
+        if section_idx < self.measured_sections.len() {
+            self.measured_sections[section_idx].shift_for_insert(new_para_idx);
+        }
         self.recompose_section(section_idx);
         self.paginate_if_needed();
         self.invalidate_page_tree_cache();
