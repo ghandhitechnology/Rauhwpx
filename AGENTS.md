@@ -55,3 +55,13 @@ Keep PR descriptions detailed but relevant. Do not pad them with boilerplate, re
 
 - Do not run heavy smoke tests for simply booting an app or for trivial code changes.
 - Run appropriate smoke tests for new features and changes that could break existing behavior.
+
+## Cursor Cloud specific instructions
+
+Standard commands live in `rhwp/CLAUDE.md` and `README.md`; only the non-obvious cloud caveats are here. The update script runs `npm ci` for `rhwp/rhwp-studio` and `rhwp/rhwp-agent`; everything below is already set up in the VM snapshot.
+
+- **Node version gotcha (important):** the default `node` on `PATH` is `/exec-daemon/node` = v22.14, which **cannot run the studio `.ts` tests** (`npm test` → `ERR_UNKNOWN_FILE_EXTENSION`, because native TS type-stripping is off before Node 22.18). Setup installed Node 22.23 via `nvm` and appended a `PATH` prepend to `~/.bashrc` so **login shells** get it. Always run npm commands from a login shell (the default shell here is login-mode; if `node --version` shows 22.14, run under `bash -lc '...'`).
+- **wasm is a prerequisite, not a service:** `rhwp/rhwp-studio` (`npm run dev` → http://127.0.0.1:7700) loads the engine from `rhwp/pkg/` via the Vite `@wasm` alias. `pkg/` is gitignored and built with `wasm-pack build --target web` (run from `rhwp/`, wasm-pack 0.15.0, ~5 min). It is already built in the snapshot; **rebuild it after changing any Rust engine code** or the studio will load a stale/absent engine. `wasm-pack` is installed at `/usr/local/cargo/bin/wasm-pack`.
+- **Rust toolchain** auto-installs 1.93.1 (incl. `wasm32-unknown-unknown`) via `rhwp/rust-toolchain.toml` on first `cargo` invocation inside `rhwp/`.
+- **AI sidebar is optional:** the `rhwp-agent` hub (`rhwp/rhwp-agent`, `npm start` → 127.0.0.1:5175) plus a `claude`/`codex` CLI are only needed to test the AI sidebar. Without them the sidebar shows `연결 끊김` (disconnected) — this is expected and does not affect the editor.
+- **Known pre-existing test failure (not an environment problem):** `cargo test --test issue_1082_endnote_multicolumn_drift` fails 3 layout-drift threshold assertions on this commit; the rest of `cargo test` (57/58 binaries, 3300+ tests) and `npm test` (970/979; the 9 "cancelled" come from an `.unref()`'d timeout in `tests/agent-usage-protocol.test.ts`, not the environment) pass.
