@@ -37,6 +37,57 @@ impl DocumentCore {
         navigate_path_to_table(&mut section.paragraphs, path)
     }
 
+    /// TAC(글자처럼 취급) 표의 높이가 바뀌면 host 문단의 "표 줄" LINE_SEG 높이도 맞춘다.
+    ///
+    /// HWPX 저장 시 `hp:tbl/hp:sz@height` 와 host 문단의 `hp:lineseg@vertsize` 가
+    /// 어긋나면, 재파싱 때 `reflow_zero_height_paragraphs` 의 TAC lh 보정
+    /// (commands/document.rs)이 발동해 `body_line_seg_changed = true` 가 되고,
+    /// 그 결과 **구역 전체 vpos 사다리가 0부터 재계산**되어 편집 지점보다 **앞선**
+    /// 문단의 쪽나눔까지 바뀐다 (편람 s1p50 행 삽입 → s1p37 이 13쪽→12쪽,
+    /// 재파싱 390→389쪽). 한컴 저장본은 `vertsize >= 표 높이` 불변식을 항상
+    /// 지킨다 — 편집 경로도 지켜야 한다.
+    ///
+    /// 표 높이와 **정확히 같은** LINE_SEG 하나만 갱신한다: 제목줄+표줄 문단(#1068)의
+    /// 제목줄 lh 를 표 높이로 오염시키면 렌더러의 lh 기반 표 줄 탐지가 오매칭된다.
+    fn sync_tac_table_host_line_seg(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        old_height: u32,
+    ) {
+        let Some(section) = self.document.sections.get_mut(section_idx) else {
+            return;
+        };
+        let Some(para) = section.paragraphs.get_mut(parent_para_idx) else {
+            return;
+        };
+        let Some(Control::Table(table)) = para.controls.get(control_idx) else {
+            return;
+        };
+        // 재파싱 게이트(document.rs 의 TAC lh 보정)와 동일 조건에서만 동작.
+        if !table.common.treat_as_char || !table.raw_ctrl_data.is_empty() {
+            return;
+        }
+        let new_height = table.common.height;
+        if new_height == 0 || new_height == old_height {
+            return;
+        }
+        let (old_lh, new_lh) = (old_height as i32, new_height as i32);
+        for seg in para.line_segs.iter_mut() {
+            if seg.line_height != old_lh {
+                continue;
+            }
+            if seg.text_height == old_lh {
+                seg.text_height = new_lh;
+            }
+            seg.line_height = new_lh;
+            // baseline = round(lh × 0.85) — object_ops/table.rs 의 인라인 표 동기화와 동일 식.
+            seg.baseline_distance = ((new_lh as i64 * 17 + 10) / 20).min(i32::MAX as i64) as i32;
+            break;
+        }
+    }
+
     /// 표에 행을 삽입한다 (네이티브).
     pub fn insert_table_row_native(
         &mut self,
@@ -47,6 +98,7 @@ impl DocumentCore {
         below: bool,
     ) -> Result<String, HwpError> {
         let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        let old_table_height = table.common.height;
         table
             .insert_row(row_idx, below)
             .map_err(|e| HwpError::RenderError(e))?;
@@ -63,6 +115,12 @@ impl DocumentCore {
         table.local_resize_cell_widths.clear();
         table.local_resize_cell_heights.clear();
 
+        self.sync_tac_table_host_line_seg(
+            section_idx,
+            parent_para_idx,
+            control_idx,
+            old_table_height,
+        );
         self.document.sections[section_idx].raw_stream = None;
         self.recompose_section(section_idx);
         self.paginate_if_needed();
@@ -125,6 +183,7 @@ impl DocumentCore {
         row_idx: u16,
     ) -> Result<String, HwpError> {
         let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        let old_table_height = table.common.height;
         table
             .delete_row(row_idx)
             .map_err(|e| HwpError::RenderError(e))?;
@@ -141,6 +200,12 @@ impl DocumentCore {
         table.local_resize_cell_widths.clear();
         table.local_resize_cell_heights.clear();
 
+        self.sync_tac_table_host_line_seg(
+            section_idx,
+            parent_para_idx,
+            control_idx,
+            old_table_height,
+        );
         self.document.sections[section_idx].raw_stream = None;
         self.recompose_section(section_idx);
         self.paginate_if_needed();
