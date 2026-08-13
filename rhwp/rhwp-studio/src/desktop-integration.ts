@@ -14,6 +14,12 @@ export interface RhwpDesktopApi {
 
 export interface DesktopHost {
   rhwpDesktop?: RhwpDesktopApi;
+  navigator?: {
+    serviceWorker?: {
+      getRegistrations: () => Promise<ReadonlyArray<{ unregister: () => Promise<boolean> }>>;
+      addEventListener: (type: string, listener: () => void) => void;
+    };
+  };
 }
 
 let inflight: Promise<boolean> | null = null;
@@ -70,4 +76,48 @@ export async function ensureDesktopAgentHub(win?: DesktopHost): Promise<boolean>
     if (inflight === run) inflight = null;
   });
   return run;
+}
+
+type ServiceWorkerLike = NonNullable<NonNullable<DesktopHost['navigator']>['serviceWorker']>;
+
+function serviceWorkerContainer(win?: DesktopHost): ServiceWorkerLike | undefined {
+  const host = desktopHost(win);
+  return host?.navigator?.serviceWorker
+    ?? (typeof navigator !== 'undefined'
+      ? navigator.serviceWorker as unknown as ServiceWorkerLike
+      : undefined);
+}
+
+/** Electron 셸에서는 PWA SW가 IndexedDB 할당량 정리로 최근문서/자동저장 open을 멈출 수 있다. */
+export async function suppressDesktopServiceWorker(win?: DesktopHost): Promise<void> {
+  if (!isDesktopApp(win)) return;
+  const sw = serviceWorkerContainer(win);
+  if (!sw?.getRegistrations) return;
+  const unregisterAll = async () => {
+    try {
+      const regs = await sw.getRegistrations();
+      await Promise.all(regs.map((reg) => reg.unregister()));
+    } catch {
+      /* ignore */
+    }
+  };
+  await unregisterAll();
+  sw.addEventListener?.('controllerchange', () => {
+    void unregisterAll();
+  });
+}
+
+/** 브라우저 PWA만 등록하고, Electron 은 기존 SW를 끈다. */
+export function installWebAppShell(win?: DesktopHost): void {
+  if (isDesktopApp(win)) {
+    void suppressDesktopServiceWorker(win);
+    return;
+  }
+  void import('virtual:pwa-register')
+    .then(({ registerSW }) => {
+      registerSW({ immediate: true });
+    })
+    .catch(() => {
+      /* 테스트·개발 번들에는 virtual module이 없을 수 있다 */
+    });
 }

@@ -63,6 +63,7 @@ import {
 } from '@/view/render-backend';
 import { calculateFitPageZoom, calculateFitWidthZoom } from '@/view/zoom-fit';
 import { installEmbedRuntime } from '@/embed/runtime';
+import { installWebAppShell } from '@/desktop-integration';
 import { initAgentBridge } from './agent/bridge.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
@@ -305,6 +306,7 @@ function prepareCanvasKitLocalFonts(fontNames: readonly string[] | undefined): v
 }
 
 async function initialize(): Promise<void> {
+  installWebAppShell();
   const msg = sbMessage();
   try {
     extensionViewerSettings = await loadExtensionViewerSettings();
