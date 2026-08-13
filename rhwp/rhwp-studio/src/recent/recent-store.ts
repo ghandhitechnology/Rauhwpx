@@ -16,11 +16,17 @@
  */
 
 import type { FileSystemFileHandleLike } from '@/command/file-system-access';
+import {
+  IDB_OPERATION_TIMEOUT_MS,
+  openIndexedDatabase,
+  withTimeout,
+} from '../core/idb-open.ts';
 
 const DB_NAME = 'rhwpStudioRecent';
 const DB_VER = 2;
 const STORE = 'recent';
 const MAX_RECENT = 8;
+const SAME_ENTRY_TIMEOUT_MS = 200;
 
 export interface RecentDoc {
   /** 최근 문서 레코드 ID (메뉴 항목/삭제 key). */
@@ -74,21 +80,15 @@ function createDocumentId(): string {
 
 function openDb(): Promise<IDBDatabase | null> {
   if (!idbAvailable()) return Promise.resolve(null);
-  return new Promise((resolve) => {
-    const req = indexedDB.open(DB_NAME, DB_VER);
-    req.onerror = () => resolve(null);
-    req.onsuccess = () => resolve(req.result);
-    req.onupgradeneeded = (event) => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE)) {
-        db.createObjectStore(STORE, { keyPath: 'id' });
-      } else if (event.oldVersion < 2) {
-        // v1 rows have no digest/documentId. A filename-derived migration would recreate
-        // the identity collision this schema is designed to remove, so discard only the
-        // ephemeral recent list and rebuild it as documents are opened.
-        req.transaction?.objectStore(STORE).clear();
-      }
-    };
+  return openIndexedDatabase(DB_NAME, DB_VER, (db, event) => {
+    if (!db.objectStoreNames.contains(STORE)) {
+      db.createObjectStore(STORE, { keyPath: 'id' });
+    } else if (event.oldVersion < 2) {
+      // v1 rows have no digest/documentId. A filename-derived migration would recreate
+      // the identity collision this schema is designed to remove, so discard only the
+      // ephemeral recent list and rebuild it as documents are opened.
+      (event.target as IDBOpenDBRequest | null)?.transaction?.objectStore(STORE).clear();
+    }
   });
 }
 
@@ -96,7 +96,10 @@ async function withDb<T>(fn: (db: IDBDatabase) => Promise<T>, fallback: () => Pr
   const db = await openDb();
   if (!db) return fallback();
   try {
-    return await fn(db);
+    return await withTimeout(fn(db), IDB_OPERATION_TIMEOUT_MS, DB_NAME);
+  } catch (error) {
+    console.warn(`[recent] IndexedDB 지연, 메모리 폴백:`, error);
+    return fallback();
   } finally {
     db.close();
   }
@@ -112,12 +115,12 @@ function getAllRows(db: IDBDatabase): Promise<RecentDoc[]> {
 }
 
 function putRow(db: IDBDatabase, row: RecentDoc): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return withTimeout(new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
     tx.objectStore(STORE).put(row);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
-  });
+  }), 800, 'recent-put');
 }
 
 function deleteRow(db: IDBDatabase, id: string): Promise<void> {
@@ -137,9 +140,13 @@ async function isSameFile(a: RecentDocInput, existing: RecentDoc): Promise<boole
   const hb = existing.handle;
   if (ha && hb && typeof ha.isSameEntry === 'function') {
     try {
-      return await ha.isSameEntry(hb);
+      return await withTimeout(
+        ha.isSameEntry(hb),
+        SAME_ENTRY_TIMEOUT_MS,
+        'isSameEntry',
+      );
     } catch {
-      // 권한/브라우저 제약으로 비교 자체가 불가능하면 digest로 폴백한다.
+      // 권한/브라우저 제약·무응답이면 digest로 폴백한다.
     }
   }
   return a.sourceDigest === existing.sourceDigest;
