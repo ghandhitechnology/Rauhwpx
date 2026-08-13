@@ -86,7 +86,9 @@ const SIDEBAR_MOTION_DURATION_MS = 320;
 /* 전체 화면 전환도 사이드바·용지와 같은 320ms 축을 쓴다(모션 계약).
    타이머는 전이가 끝날 때까지의 여유분을 포함한다. */
 const FS_MOTION_SETTLE_MS = SIDEBAR_MOTION_DURATION_MS + 60;
-const FS_RETURN_SETTLE_MS = 240;
+/* The sidebar handoff briefly staggers its chrome after the fullscreen shell
+   has folded away. Keep the class alive through the last control's entrance. */
+const FS_RETURN_SETTLE_MS = 300;
 
 function maxSidebarWidth(minWidth: number, viewportWidth = window.innerWidth): number {
   return Math.max(minWidth, Math.floor(viewportWidth * 0.5));
