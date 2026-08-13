@@ -144,7 +144,7 @@ try {
     const bannerText = await page.evaluate(
       () => document.querySelector('.ag-conn-banner-text')?.textContent ?? '',
     );
-    assert(bannerText.includes('연결이 끊어졌어요'), `배너 문구: ${bannerText}`);
+    assert(bannerText.includes('연결하는 중'), `배너 문구: ${bannerText}`);
     const retryVisible = await page.evaluate(() => {
       const btn = document.querySelector('.ag-conn-banner-retry');
       return !!btn && btn.offsetParent !== null && btn.textContent === '지금 다시 연결';
@@ -221,7 +221,7 @@ try {
       () => document.querySelector('.ag-conn-banner-text')?.textContent ?? '',
     );
     assert(
-      retryText.includes('다시 연결 중') || retryText.includes('재시도'),
+      retryText.includes('연결하는 중') || retryText.includes('다시 시도'),
       `수동 재시도 후 배너 문구: ${retryText}`,
     );
     await screenshot(page, 'reconnect-banner-after-kill');
