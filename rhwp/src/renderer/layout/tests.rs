@@ -1049,6 +1049,151 @@ fn test_layout_table_basic() {
 }
 
 #[test]
+fn tac_in_front_table_keeps_following_paragraph_below_painted_bottom() {
+    use crate::model::control::Control;
+
+    let engine = LayoutEngine::with_default_dpi();
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+
+    // Hancom commonly persists decorative heading bars as TAC tables whose wrap flag still
+    // says InFrontOfText. Treat-as-character must win for vertical flow in that combination.
+    let table = Table {
+        common: CommonObjAttr {
+            width: 47058,
+            height: 2719,
+            treat_as_char: true,
+            text_wrap: TextWrap::InFrontOfText,
+            ..Default::default()
+        },
+        outer_margin_top: 283,
+        outer_margin_bottom: 283,
+        row_count: 1,
+        col_count: 1,
+        row_sizes: vec![1],
+        cells: vec![Cell {
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            width: 47058,
+            height: 2719,
+            paragraphs: vec![Paragraph {
+                text: "HEADER".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let paragraphs = vec![
+        Paragraph {
+            controls: vec![Control::Table(Box::new(table))],
+            line_segs: vec![LineSeg {
+                line_height: 3285,
+                text_height: 3285,
+                line_spacing: 360,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        Paragraph {
+            text: "NEXT".to_string(),
+            char_count: 5,
+            char_offsets: vec![0, 1, 2, 3],
+            line_segs: vec![LineSeg {
+                line_height: 1300,
+                text_height: 1300,
+                baseline_distance: 1105,
+                line_spacing: 392,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    ];
+    let composed: Vec<_> = paragraphs.iter().map(compose_paragraph).collect();
+    let styles = ResolvedStyleSet::default();
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            start_height: 0.0,
+            endnote_flow: false,
+            items: vec![
+                PageItem::Table {
+                    para_index: 0,
+                    control_index: 0,
+                },
+                PageItem::FullParagraph { para_index: 1 },
+            ],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+    };
+
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &styles,
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+    let column = tree
+        .root
+        .children
+        .iter()
+        .find(|node| matches!(node.node_type, RenderNodeType::Body { .. }))
+        .and_then(|body| body.children.first())
+        .expect("body column");
+    let table_box = column
+        .children
+        .iter()
+        .find(|node| matches!(node.node_type, RenderNodeType::Table(_)))
+        .map(|node| node.bbox)
+        .expect("TAC table");
+    let next_box = column
+        .children
+        .iter()
+        .filter_map(|line| match &line.node_type {
+            RenderNodeType::TextLine(_) => line
+                .children
+                .iter()
+                .find(|run| matches!(&run.node_type, RenderNodeType::TextRun(text) if text.text == "NEXT"))
+                .map(|_| line.bbox),
+            _ => None,
+        })
+        .next()
+        .expect("following paragraph");
+
+    assert!(
+        next_box.y + 0.5 >= table_box.y + table_box.height,
+        "following paragraph top {:.1}px overlaps TAC table bottom {:.1}px",
+        next_box.y,
+        table_box.y + table_box.height,
+    );
+}
+
+#[test]
 fn test_layout_table_cell_positions() {
     use crate::model::control::Control;
     use crate::model::table::{Cell, Table};
