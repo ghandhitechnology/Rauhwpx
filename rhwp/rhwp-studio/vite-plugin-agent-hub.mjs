@@ -2,12 +2,17 @@
  * Vite dev middleware that starts rhwp-agent next to the studio.
  *
  * Studio in the browser cannot spawn Node. Without this, `npm run dev` shows a
- * permanent hub-disconnected banner unless a second terminal runs `npm start`.
+ * permanent hub-disconnected banner unless the hub is already running
+ * (`npm start` at the repo root starts it in the background).
  * `/__rhwp/ensure-agent-hub` lets the "지금 다시 연결" button restart a dead hub.
  */
-import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
-import { ensureAgentHub, isHubHealthy } from '../../desktop/agent-hub.mjs';
+import {
+  ensureAgentHub,
+  isHubHealthy,
+  spawnHubProcess,
+  stopHubChild,
+} from '../../desktop/agent-hub.mjs';
 
 const DEFAULT_PORT = 5175;
 export const AGENT_HUB_ENSURE_PATH = '/__rhwp/ensure-agent-hub';
@@ -28,45 +33,25 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
 
   function startHub() {
     if (child) return true;
-    const spawned = spawn(process.execPath, [script], {
+    const spawned = spawnHubProcess({
+      command: process.execPath,
+      args: [script],
       cwd,
       env: { ...process.env, RHWP_AGENT_PORT: String(port) },
-      stdio: ['ignore', 'pipe', 'pipe'],
+    }, {
+      onExit: (code, signal) => {
+        console.warn(`[rhwp-agent] hub exited (${code ?? signal ?? 'unknown'})`);
+        if (child === spawned) child = null;
+      },
     });
     child = spawned;
-    spawned.stdout?.on('data', (chunk) => process.stdout.write(chunk));
-    spawned.stderr?.on('data', (chunk) => process.stderr.write(chunk));
-    spawned.on('exit', (code, signal) => {
-      console.warn(`[rhwp-agent] hub exited (${code ?? signal ?? 'unknown'})`);
-      if (child === spawned) child = null;
-    });
     return true;
   }
 
   function stopHub() {
     const current = child;
-    if (!current) return Promise.resolve();
     child = null;
-    return new Promise((resolveStop) => {
-      const finish = () => {
-        clearTimeout(timer);
-        resolveStop();
-      };
-      const timer = setTimeout(() => {
-        try {
-          current.kill('SIGKILL');
-        } catch {
-          /* already gone */
-        }
-        resolveStop();
-      }, 2000);
-      current.once('exit', finish);
-      try {
-        current.kill('SIGTERM');
-      } catch {
-        finish();
-      }
-    });
+    return stopHubChild(current);
   }
 
   function ensureHub({ restartUnhealthy = false } = {}) {

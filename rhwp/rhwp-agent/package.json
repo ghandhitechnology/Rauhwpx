@@ -4,6 +4,9 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
+    "start:bg": "node ctl.mjs start",
+    "stop": "node ctl.mjs stop",
+    "status": "node ctl.mjs status",
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
