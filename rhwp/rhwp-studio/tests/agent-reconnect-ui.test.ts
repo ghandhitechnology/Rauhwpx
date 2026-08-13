@@ -30,13 +30,16 @@ test('실패한 시도만 세고 연결이 열리면 0으로 돌아간다', () =
   assert.match(bridge, /const CONNECT_TIMEOUT_MS = 4000/);
 });
 
-test('reconnectNow 는 예약된 백오프를 접고 연결 중이어도 즉시 붙는다', () => {
-  assert.match(bridge, /reconnectNow\(\): Promise<void>|reconnectNow\(\): void/);
+test('reconnectNow 는 허브가 뜬 뒤에 붙는다', () => {
+  assert.match(bridge, /reconnectNow\(\): Promise<void>/);
   assert.match(bridge, /if \(this\.disposed \|\| this\.state === 'connected'\) return;/);
   assert.match(bridge, /private forceReconnect\(\): void/);
   assert.match(bridge, /this\.abortSocket\(\)/);
   assert.match(bridge, /takeOverConnection\(\): void \{\s*this\.forceReconnect\(\);/);
-  assert.match(bridge, /reconnectNow\(\): void \{[\s\S]*this\.requestHubLaunch\(\);[\s\S]*this\.forceReconnect\(\);/);
+  assert.match(
+    bridge,
+    /async reconnectNow\(\): Promise<void> \{[\s\S]*await this\.requestHubLaunch\(\);[\s\S]*this\.forceReconnect\(\);/,
+  );
   assert.doesNotMatch(
     bridge,
     /private connectImmediately\(\): void \{\s*if \(this\.disposed \|\| this\.state === 'connected' \|\| this\.state === 'connecting'\) return;/,
@@ -95,11 +98,15 @@ test('CLI 스폰 실패는 대화 안에서 다시 시도할 수 있다', () => 
 
 test('끊기면 허브 기동을 요청하고 포커스·온라인·가시성에서 다시 붙는다', () => {
   assert.match(bridge, /import \{ ensureDesktopAgentHub \} from '\.\.\/desktop-integration\.ts'/);
-  assert.match(bridge, /private requestHubLaunch\(\): void \{\s*void ensureDesktopAgentHub\(\);/);
   assert.match(
     bridge,
-    /private scheduleReconnect\(\): void \{\s*if \(this\.disposed \|\| this\.reconnectTimer !== null\) return;\s*this\.requestHubLaunch\(\);/,
+    /private requestHubLaunch\(\): Promise<boolean> \{\s*if \(!this\.hubLaunch\) \{\s*this\.hubLaunch = ensureDesktopAgentHub\(\)/,
   );
+  assert.match(
+    bridge,
+    /private scheduleReconnect\(\): void \{\s*if \(this\.disposed \|\| this\.reconnectTimer !== null\) return;\s*void this\.requestHubLaunch\(\);/,
+  );
+  assert.match(bridge, /private async connectAfterHub\(seq: number\): Promise<void>/);
   assert.match(bridge, /window\.addEventListener\('focus', this\.onResume\)/);
   assert.match(bridge, /window\.addEventListener\('online', this\.onResume\)/);
   assert.match(bridge, /document\.addEventListener\('visibilitychange', this\.onVisibility\)/);
