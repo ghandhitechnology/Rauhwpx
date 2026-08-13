@@ -3675,29 +3675,37 @@ impl DocumentCore {
                         && converge_page < new_page_count
                         && converge_page < old_page_count
                     {
-                        // 검증: full pagination에서 수렴 이후 페이지가 old+offset와 일치하는지 확인
+                        // 검증: full pagination에서 수렴 이후 페이지가 old+offset와 일치하는지 확인.
+                        // 오프셋/센티널 규칙은 matches_with_offset 단일 구현에 위임한다 —
+                        // 종전의 수동 인덱스 투영은 EndnoteSeparator 의 usize::MAX 센티널을
+                        // 실제 인덱스처럼 이동시키고, 음수 합을 usize 로 랩시켜 항상 실패했다.
                         let mut verified = true;
                         let check_end = result.pages.len().min(old_page_count);
                         for pi in converge_page..check_end {
                             let new_page = &result.pages[pi];
                             let old_page = &old_result.pages[pi];
-                            let new_items: Vec<usize> = new_page
+                            let new_items: Vec<_> = new_page
                                 .column_contents
                                 .iter()
-                                .flat_map(|cc| cc.items.iter().map(|it| it.para_index()))
+                                .flat_map(|cc| cc.items.iter())
                                 .collect();
-                            let old_items: Vec<usize> = old_page
+                            let old_items: Vec<_> = old_page
                                 .column_contents
                                 .iter()
-                                .flat_map(|cc| {
-                                    cc.items
-                                        .iter()
-                                        .map(|it| (it.para_index() as i64 + offset as i64) as usize)
-                                })
+                                .flat_map(|cc| cc.items.iter())
                                 .collect();
-                            if new_items != old_items {
-                                eprintln!("CONVERGENCE_VERIFY_FAIL: sec{} page {} new={:?} old+offset={:?}",
-                                    idx, pi + 1, new_items, old_items);
+                            let page_matches = new_items.len() == old_items.len()
+                                && new_items
+                                    .iter()
+                                    .zip(old_items.iter())
+                                    .all(|(n, o)| n.matches_with_offset(o, offset));
+                            if !page_matches {
+                                eprintln!(
+                                    "CONVERGENCE_VERIFY_FAIL: sec{} page {} (offset {}) 항목 불일치",
+                                    idx,
+                                    pi + 1,
+                                    offset
+                                );
                                 verified = false;
                                 break;
                             }
