@@ -1,14 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   ensureAgentHub,
   hubHealthUrl,
+  hubPidFromHealth,
+  hubRunPaths,
   isHubHealthy,
+  isProcessAlive,
   nextHubRestartDelay,
+  readPidFile,
+  removePidFile,
   resolveHubLaunch,
+  stopHubChild,
   waitForHub,
+  writePidFile,
 } from '../../../desktop/agent-hub.mjs';
 
 const desktopMain = readFileSync(new URL('../../../desktop/main.mjs', import.meta.url), 'utf8');
@@ -229,11 +239,12 @@ test('desktop shell ensures the hub before showing the window and exposes IPC', 
   assert.match(desktopMain, /preload: PRELOAD_PATH/);
   assert.match(desktopMain, /function scheduleAgentRestart\(\)/);
   assert.match(desktopMain, /resolveHubLaunch\(/);
-  assert.match(desktopMain, /spawn\(launch\.command, launch\.args/);
-  assert.match(desktopMain, /child\.on\('exit'/);
+  assert.match(desktopMain, /spawnHubProcess\(/);
+  assert.match(desktopMain, /onExit: \(code, signal\) => \{/);
   assert.doesNotMatch(desktopMain, /utilityProcess/);
   assert.match(desktopMain, /sandbox: false/);
   assert.match(desktopMain, /function stopAgent\(\)/);
+  assert.match(desktopMain, /stopHubChild\(/);
   assert.match(desktopMain, /restartUnhealthy:\s*true/);
   assert.match(desktopMain, /if \(agentProcess !== child\) return;/);
   assert.match(preload, /ensureAgentHub: \(\) => ipcRenderer\.invoke\('agent-hub:ensure'\)/);
@@ -241,9 +252,56 @@ test('desktop shell ensures the hub before showing the window and exposes IPC', 
 
 test('studio dev server and repo npm start both boot the hub', () => {
   assert.match(viteConfig, /rhwpAgentHubPlugin\(__dirname\)/);
-  assert.match(viteHubPlugin, /spawn\(process\.execPath, \[script\]/);
+  assert.match(viteHubPlugin, /spawnHubProcess\(\{/);
+  assert.match(viteHubPlugin, /process\.execPath/);
   assert.match(viteHubPlugin, /RHWP_SKIP_AGENT_HUB/);
   assert.match(viteHubPlugin, /\/__rhwp\/ensure-agent-hub/);
   assert.match(viteHubPlugin, /restartUnhealthy:\s*true/);
-  assert.match(rootPackage, /"start": "node rhwp\/rhwp-agent\/server.mjs"/);
+  assert.match(viteHubPlugin, /stopHubChild\(/);
+  assert.match(rootPackage, /"start": "node rhwp\/rhwp-agent\/ctl.mjs start"/);
+  assert.match(rootPackage, /"start:fg": "node rhwp\/rhwp-agent\/server.mjs"/);
+  assert.match(rootPackage, /"stop": "node rhwp\/rhwp-agent\/ctl.mjs stop"/);
+});
+
+test('healthz JSON exposes pid for process control', () => {
+  assert.equal(hubPidFromHealth({ ok: true, pid: 1234 }), 1234);
+  assert.equal(hubPidFromHealth({ ok: true, pid: 'nope' }), null);
+  const server = readFileSync(new URL('../../rhwp-agent/server.mjs', import.meta.url), 'utf8');
+  assert.match(server, /function healthzBody\(\)/);
+  assert.match(server, /pid: process\.pid/);
+  assert.match(server, /name: HUB_NAME/);
+});
+
+test('pid files round-trip and ignore junk', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rhwp-hub-'));
+  const paths = hubRunPaths(dir);
+  try {
+    writePidFile(paths.pid, 4321);
+    assert.equal(readPidFile(paths.pid), 4321);
+    removePidFile(paths.pid);
+    assert.equal(readPidFile(paths.pid), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('isProcessAlive reports this process and rejects nonsense', () => {
+  assert.equal(isProcessAlive(process.pid), true);
+  assert.equal(isProcessAlive(0), false);
+  assert.equal(isProcessAlive(-1), false);
+});
+
+test('stopHubChild SIGTERM then resolves on exit', async () => {
+  const signals = [];
+  const child = new EventEmitter();
+  child.kill = (signal) => {
+    signals.push(signal);
+    if (signal === 'SIGTERM') queueMicrotask(() => child.emit('exit', 0, null));
+  };
+  await stopHubChild(child);
+  assert.deepEqual(signals, ['SIGTERM']);
+});
+
+test('stopHubChild is a no-op without a child', async () => {
+  await stopHubChild(null);
 });

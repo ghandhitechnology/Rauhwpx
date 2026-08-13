@@ -30,12 +30,12 @@ Requirements: Node ≥ 20, and the `claude` and/or `codex` CLI on your `PATH`.
 1. **Start the agent hub**
 
    ```sh
-   cd rhwp-agent
-   npm install     # first time only
-   npm start       # WS hub on 127.0.0.1:5175
+   npm start       # from the Rauhwpx repo root; background, no attached terminal
    ```
 
-2. **Start the editor** (second terminal)
+   Or inside this tree: `cd rhwp-agent && npm start` (foreground).
+
+2. **Start the editor**
 
    ```sh
    cd rhwp-studio

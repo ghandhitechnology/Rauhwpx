@@ -7,7 +7,11 @@
   "private": true,
   "main": "desktop/main.mjs",
   "scripts": {
-    "start": "node rhwp/rhwp-agent/server.mjs",
+    "start": "node rhwp/rhwp-agent/ctl.mjs start",
+    "start:fg": "node rhwp/rhwp-agent/server.mjs",
+    "stop": "node rhwp/rhwp-agent/ctl.mjs stop",
+    "restart": "node rhwp/rhwp-agent/ctl.mjs restart",
+    "status": "node rhwp/rhwp-agent/ctl.mjs status",
     "dev:desktop": "wait-on http://127.0.0.1:7700 && cross-env RHWP_DEV_URL=http://127.0.0.1:7700 electron .",
     "build:studio": "npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
     "build:agent": "npm --prefix rhwp/rhwp-agent ci --omit=dev",

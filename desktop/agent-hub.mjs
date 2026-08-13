@@ -7,7 +7,16 @@
  * otherwise miss). Packaged builds fall back to Electron-as-Node.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 
 export const DEFAULT_HUB_PORT = 5175;
@@ -25,23 +34,33 @@ export function nextHubRestartDelay(attempt, delays = HUB_RESTART_DELAYS_MS) {
   return delays[index];
 }
 
-export async function isHubHealthy(port, {
+export async function readHubHealth(port, {
   fetchImpl = globalThis.fetch,
   timeoutMs = DEFAULT_HEALTH_TIMEOUT_MS,
 } = {}) {
-  if (typeof fetchImpl !== 'function') return false;
+  if (typeof fetchImpl !== 'function') return null;
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
     const response = await fetchImpl(hubHealthUrl(port), { signal: ac.signal });
-    if (!response.ok) return false;
+    if (!response.ok) return null;
     const body = await response.json();
-    return body?.ok === true;
+    return body && typeof body === 'object' ? body : null;
   } catch {
-    return false;
+    return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function isHubHealthy(port, options = {}) {
+  const body = await readHubHealth(port, options);
+  return body?.ok === true;
+}
+
+export function hubPidFromHealth(body) {
+  const pid = Number(body?.pid);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
 export async function waitForHub(port, {
@@ -235,4 +254,254 @@ export function resolveHubLaunch({
     env: sanitizeHubEnv(baseEnv, { electronAsNode: true }),
     via: 'electron-as-node',
   };
+}
+
+export const PID_FILE_NAME = 'rhwp-agent.pid';
+export const LOG_FILE_NAME = 'rhwp-agent.log';
+export const DEFAULT_STOP_TIMEOUT_MS = 5000;
+
+export function hubRunDir(repoRoot) {
+  return join(repoRoot, '.run');
+}
+
+export function hubRunPaths(runDir) {
+  return {
+    dir: runDir,
+    pid: join(runDir, PID_FILE_NAME),
+    log: join(runDir, LOG_FILE_NAME),
+  };
+}
+
+export function ensureRunDir(runDir) {
+  mkdirSync(runDir, { recursive: true });
+  return runDir;
+}
+
+export function writePidFile(pidPath, pid) {
+  mkdirSync(dirname(pidPath), { recursive: true });
+  writeFileSync(pidPath, `${pid}\n`, 'utf8');
+}
+
+export function readPidFile(pidPath) {
+  try {
+    const n = Number(String(readFileSync(pidPath, 'utf8')).trim());
+    return Number.isInteger(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+export function removePidFile(pidPath) {
+  try {
+    unlinkSync(pidPath);
+  } catch {
+    /* already gone */
+  }
+}
+
+export function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function killPid(pid, {
+  timeoutMs = DEFAULT_STOP_TIMEOUT_MS,
+  wait = sleep,
+  now = Date.now,
+} = {}) {
+  if (!isProcessAlive(pid)) return { killed: false, alive: false };
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    return { killed: false, alive: isProcessAlive(pid) };
+  }
+  const deadline = now() + timeoutMs;
+  while (now() < deadline && isProcessAlive(pid)) {
+    await wait(50);
+  }
+  if (isProcessAlive(pid)) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  }
+  return { killed: true, alive: isProcessAlive(pid) };
+}
+
+/**
+ * Spawn the hub as a child of this process. Desktop and Vite keep the child
+ * attached so they can restart or tear it down with the parent.
+ */
+export function spawnHubProcess(launch, {
+  detached = false,
+  stdio,
+  windowsHide = true,
+  forwardStdio = !detached,
+  onError,
+  onExit,
+  log = console,
+} = {}) {
+  const child = spawn(launch.command, launch.args, {
+    cwd: launch.cwd,
+    env: launch.env,
+    detached,
+    stdio: stdio ?? ['ignore', 'pipe', 'pipe'],
+    windowsHide,
+  });
+  if (forwardStdio) {
+    child.stdout?.on('data', (chunk) => process.stdout.write(chunk));
+    child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
+  }
+  if (typeof onError === 'function') {
+    child.on('error', onError);
+  } else {
+    child.on('error', (error) => {
+      log.warn?.('[rauhwpx] agent hub spawn error:', error);
+    });
+  }
+  if (typeof onExit === 'function') {
+    child.on('exit', (code, signal) => onExit(code, signal, child));
+  }
+  if (detached) child.unref();
+  return child;
+}
+
+export function stopHubChild(child, { timeoutMs = 2000 } = {}) {
+  if (!child) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      resolve();
+    }, timeoutMs);
+    child.once('exit', finish);
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      finish();
+    }
+  });
+}
+
+export async function resolveHubPid(port, {
+  pidPath,
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  const body = await readHubHealth(port, { fetchImpl });
+  return hubPidFromHealth(body) ?? (pidPath ? readPidFile(pidPath) : null);
+}
+
+export async function stopHubByPort(port, {
+  pidPath,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = DEFAULT_STOP_TIMEOUT_MS,
+} = {}) {
+  const pid = await resolveHubPid(port, { pidPath, fetchImpl });
+  if (!pid) {
+    if (pidPath) removePidFile(pidPath);
+    return { stopped: false, ready: await isHubHealthy(port, { fetchImpl }), pid: null };
+  }
+  await killPid(pid, { timeoutMs });
+  if (pidPath) removePidFile(pidPath);
+  const ready = await isHubHealthy(port, { fetchImpl });
+  return { stopped: !ready, ready, pid };
+}
+
+export async function startDetachedHub({
+  port = DEFAULT_HUB_PORT,
+  scriptPath,
+  agentDir,
+  runDir,
+  home,
+  env = process.env,
+  extraDirs = [],
+  exists = existsSync,
+  platform = process.platform,
+  fetchImpl = globalThis.fetch,
+  execPath,
+  log = console,
+  readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS,
+} = {}) {
+  const paths = hubRunPaths(runDir);
+  if (await isHubHealthy(port, { fetchImpl })) {
+    return {
+      started: false,
+      ready: true,
+      alreadyRunning: true,
+      pid: await resolveHubPid(port, { pidPath: paths.pid, fetchImpl }),
+      log: paths.log,
+    };
+  }
+
+  const stalePid = readPidFile(paths.pid);
+  if (stalePid && isProcessAlive(stalePid)) {
+    await killPid(stalePid);
+  }
+  if (paths.pid) removePidFile(paths.pid);
+
+  const launch = resolveHubLaunch({
+    packaged: false,
+    execPath,
+    scriptPath,
+    agentDir,
+    home,
+    env: { ...env, RHWP_AGENT_PORT: String(port) },
+    extraDirs,
+    exists,
+    platform,
+  });
+  if (!launch) {
+    log.warn?.('[rauhwpx] agent hub launch command not found:', scriptPath);
+    return { started: false, ready: false, pid: null, log: paths.log };
+  }
+
+  ensureRunDir(paths.dir);
+  const logFd = openSync(paths.log, 'a');
+  let child;
+  try {
+    child = spawnHubProcess(launch, {
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      forwardStdio: false,
+      log,
+    });
+  } finally {
+    try {
+      closeSync(logFd);
+    } catch {
+      /* fd handed to child */
+    }
+  }
+
+  if (!child?.pid) {
+    log.warn?.('[rauhwpx] detached agent hub spawn produced no pid');
+    return { started: false, ready: false, pid: null, log: paths.log };
+  }
+
+  writePidFile(paths.pid, child.pid);
+  const ready = await waitForHub(port, { fetchImpl, timeoutMs: readyTimeoutMs });
+  if (!ready) {
+    await killPid(child.pid);
+    removePidFile(paths.pid);
+    log.warn?.('[rauhwpx] detached agent hub did not become ready');
+    return { started: true, ready: false, pid: child.pid, log: paths.log };
+  }
+  return { started: true, ready: true, pid: child.pid, log: paths.log };
 }
