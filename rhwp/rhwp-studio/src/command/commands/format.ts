@@ -72,6 +72,7 @@ export const formatCommands: CommandDef[] = [
   {
     id: 'format:superscript',
     label: '위 첨자',
+    shortcutLabel: 'Alt+Shift+P',
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       services.getInputHandler()?.toggleFormat('superscript');
@@ -80,9 +81,40 @@ export const formatCommands: CommandDef[] = [
   {
     id: 'format:subscript',
     label: '아래 첨자',
+    shortcutLabel: 'Alt+Shift+S',
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       services.getInputHandler()?.toggleFormat('subscript');
+    },
+  },
+  // 위 첨자/아래 첨자/보통 순환 (한컴 Ctrl+Alt+A)
+  {
+    id: 'format:script-cycle',
+    label: '위 첨자/아래 첨자/보통',
+    shortcutLabel: 'Ctrl+Alt+A',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      services.getInputHandler()?.cycleScriptFormat();
+    },
+  },
+  // 보통 모양: 굵게/기울임/밑줄 등 강조 속성 일괄 해제
+  {
+    id: 'format:normal-shape',
+    label: '보통 모양',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      services.getInputHandler()?.clearEmphasisFormat();
+    },
+  },
+  // 글자 색 (한컴 Ctrl+M,? 색상 chord 에서 params.color 로 호출)
+  {
+    id: 'format:text-color',
+    label: '글자 색',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services, params) {
+      const color = params?.color as string | undefined;
+      if (!color) return;
+      services.getInputHandler()?.applyTextColor(color);
     },
   },
   // 줄 간격
