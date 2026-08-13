@@ -62,7 +62,9 @@ test('agent sidebar supports drag resize up to half the viewport', () => {
   assert.match(source, /SIDEBAR_WIDTH_DEFAULT\s*=\s*600/);
   assert.match(source, /SIDEBAR_WIDTH_MIN_FALLBACK\s*=\s*280/);
   assert.match(source, /refreshSidebarWidthMin/);
-  assert.match(source, /packedFlexWidth/);
+  assert.match(source, /measureComposerMetaFloor/);
+  assert.match(source, /ag-measuring-min/);
+  assert.match(source, /max-content/);
   assert.match(source, /ag-resize-handle/);
   assert.match(source, /maxSidebarWidth/);
   assert.match(source, /0\.5/);
@@ -70,16 +72,21 @@ test('agent sidebar supports drag resize up to half the viewport', () => {
   assert.match(source, /applySidebarWidth/);
   assert.match(source, /onCollapseTabPointerDown/);
   assert.match(source, /RESIZE_DRAG_THRESHOLD_PX/);
+  assert.match(source, /requestAnimationFrame\(applyResizeMove\)/);
+  assert.match(source, /recenter: false/);
   assert.match(css, /\.ag-resize-handle/);
   assert.match(css, /body\.ag-sidebar-resizing #editor-area/);
+  assert.match(css, /body\.ag-sidebar-resizing \.ag-root,\s*body\.ag-sidebar-animating \.ag-root\s*\{[^}]*--ag-sketch-line:\s*none;/s);
   assert.match(css, /\.ag-collapse-tab\s*\{[^}]*cursor:\s*col-resize;/s);
 });
 
 test('composer metadata stays on one row at the minimum sidebar width', () => {
   assert.match(css, /\.ag-composer-meta\s*\{[^}]*flex-wrap:\s*nowrap;/s);
-  assert.match(css, /\.ag-composer-meta \.ag-selectors\s*\{[^}]*flex:\s*0 1 auto;/s);
+  assert.match(css, /\.ag-composer-meta \.ag-selectors\s*\{[^}]*flex:\s*1 1 auto;/s);
   assert.match(css, /\.ag-composer-meta \.ag-selectors\s*\{[^}]*min-width:\s*0;/s);
   assert.match(css, /\.ag-composer-meta \.ag-selectors\s*\{[^}]*overflow:\s*hidden;/s);
   assert.match(css, /\.ag-composer-meta \.ag-composer-utilities\s*\{[^}]*flex:\s*0 0 auto;/s);
   assert.match(css, /\.ag-composer-meta \.ag-composer-utilities\s*\{[^}]*margin-left:\s*auto;/s);
+  assert.match(css, /\.ag-composer-meta \.ag-references-btn-label\s*\{[^}]*display:\s*none;/s);
+  assert.match(css, /\.ag-root\.ag-measuring-min \.ag-composer-meta \.ag-llm-name\s*\{[^}]*max-width:\s*6ch;/s);
 });
