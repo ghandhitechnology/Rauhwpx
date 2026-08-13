@@ -60,7 +60,9 @@ test('agent sidebar asks canvas to recenter during inset animation', () => {
 
 test('agent sidebar supports drag resize up to half the viewport', () => {
   assert.match(source, /SIDEBAR_WIDTH_DEFAULT\s*=\s*600/);
-  assert.match(source, /SIDEBAR_WIDTH_MIN\s*=\s*600/);
+  assert.match(source, /SIDEBAR_WIDTH_MIN_FALLBACK\s*=\s*280/);
+  assert.match(source, /refreshSidebarWidthMin/);
+  assert.match(source, /packedFlexWidth/);
   assert.match(source, /ag-resize-handle/);
   assert.match(source, /maxSidebarWidth/);
   assert.match(source, /0\.5/);
@@ -75,6 +77,9 @@ test('agent sidebar supports drag resize up to half the viewport', () => {
 
 test('composer metadata stays on one row at the minimum sidebar width', () => {
   assert.match(css, /\.ag-composer-meta\s*\{[^}]*flex-wrap:\s*nowrap;/s);
+  assert.match(css, /\.ag-composer-meta \.ag-selectors\s*\{[^}]*flex:\s*0 1 auto;/s);
+  assert.match(css, /\.ag-composer-meta \.ag-selectors\s*\{[^}]*min-width:\s*0;/s);
   assert.match(css, /\.ag-composer-meta \.ag-selectors\s*\{[^}]*overflow:\s*hidden;/s);
+  assert.match(css, /\.ag-composer-meta \.ag-composer-utilities\s*\{[^}]*flex:\s*0 0 auto;/s);
   assert.match(css, /\.ag-composer-meta \.ag-composer-utilities\s*\{[^}]*margin-left:\s*auto;/s);
 });

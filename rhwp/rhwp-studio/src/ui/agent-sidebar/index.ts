@@ -78,30 +78,63 @@ const PROVIDER_ICON_SRC: Record<AgentName, string> = {
 
 const SIDEBAR_WIDTH_KEY = 'rhwp-agent-sidebar-width';
 const SIDEBAR_WIDTH_DEFAULT = 600;
-const SIDEBAR_WIDTH_MIN = 600;
+/* 레이아웃 전·측정 실패 시 바닥. 실제 최솟값은 입력기 하단 한 줄의
+   묶인 폭으로 매 프레임 다시 잰다. */
+const SIDEBAR_WIDTH_MIN_FALLBACK = 280;
+const SIDEBAR_PACKED_BUFFER_PX = 8;
 const SIDEBAR_MOTION_DURATION_MS = 320;
 /* 전체 화면 전환도 사이드바·용지와 같은 320ms 축을 쓴다(모션 계약).
    타이머는 전이가 끝날 때까지의 여유분을 포함한다. */
 const FS_MOTION_SETTLE_MS = SIDEBAR_MOTION_DURATION_MS + 60;
 const FS_RETURN_SETTLE_MS = 240;
 
-function maxSidebarWidth(viewportWidth = window.innerWidth): number {
-  return Math.max(SIDEBAR_WIDTH_MIN, Math.floor(viewportWidth * 0.5));
+function maxSidebarWidth(minWidth: number, viewportWidth = window.innerWidth): number {
+  return Math.max(minWidth, Math.floor(viewportWidth * 0.5));
 }
 
-function clampSidebarWidth(width: number, viewportWidth = window.innerWidth): number {
-  return Math.min(maxSidebarWidth(viewportWidth), Math.max(SIDEBAR_WIDTH_MIN, Math.round(width)));
+function clampSidebarWidth(
+  width: number,
+  minWidth: number,
+  viewportWidth = window.innerWidth,
+): number {
+  return Math.min(
+    maxSidebarWidth(minWidth, viewportWidth),
+    Math.max(minWidth, Math.round(width)),
+  );
 }
 
-function readStoredSidebarWidth(): number {
+function readStoredSidebarWidth(minWidth = SIDEBAR_WIDTH_MIN_FALLBACK): number {
   try {
     const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
     if (!raw) return SIDEBAR_WIDTH_DEFAULT;
     const n = Number(raw);
-    return Number.isFinite(n) ? clampSidebarWidth(n) : SIDEBAR_WIDTH_DEFAULT;
+    return Number.isFinite(n) ? clampSidebarWidth(n, minWidth) : SIDEBAR_WIDTH_DEFAULT;
   } catch {
     return SIDEBAR_WIDTH_DEFAULT;
   }
+}
+
+function visibleFlexChildren(el: HTMLElement): HTMLElement[] {
+  return [...el.children].filter((child): child is HTMLElement => {
+    if (!(child instanceof HTMLElement) || child.hidden) return false;
+    return getComputedStyle(child).display !== 'none';
+  });
+}
+
+function flexGapPx(el: HTMLElement): number {
+  return Number.parseFloat(getComputedStyle(el).columnGap || getComputedStyle(el).gap) || 0;
+}
+
+function packedFlexWidth(el: HTMLElement): number {
+  const kids = visibleFlexChildren(el);
+  if (kids.length === 0) return 0;
+  const widths = kids.reduce((sum, child) => sum + child.getBoundingClientRect().width, 0);
+  return widths + flexGapPx(el) * (kids.length - 1);
+}
+
+function horizontalChrome(el: HTMLElement, props: string[]): number {
+  const style = getComputedStyle(el);
+  return props.reduce((sum, prop) => sum + (Number.parseFloat(style.getPropertyValue(prop)) || 0), 0);
 }
 
 function persistSidebarWidth(width: number): void {
@@ -519,14 +552,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   resizeHandle.title = '드래그하여 너비 조절';
   resizeHandle.tabIndex = 0;
 
-  let sidebarWidth = readStoredSidebarWidth();
+  let sidebarWidthMin = SIDEBAR_WIDTH_MIN_FALLBACK;
+  let sidebarWidth = readStoredSidebarWidth(sidebarWidthMin);
 
   function applySidebarWidth(width: number, opts?: { persist?: boolean; recenter?: boolean }): number {
-    sidebarWidth = clampSidebarWidth(width);
+    sidebarWidth = clampSidebarWidth(width, sidebarWidthMin);
     document.documentElement.style.setProperty('--ag-sidebar-width', `${sidebarWidth}px`);
     resizeHandle.setAttribute('aria-valuenow', String(sidebarWidth));
-    resizeHandle.setAttribute('aria-valuemin', String(SIDEBAR_WIDTH_MIN));
-    resizeHandle.setAttribute('aria-valuemax', String(maxSidebarWidth()));
+    resizeHandle.setAttribute('aria-valuemin', String(sidebarWidthMin));
+    resizeHandle.setAttribute('aria-valuemax', String(maxSidebarWidth(sidebarWidthMin)));
     if (opts?.persist) persistSidebarWidth(sidebarWidth);
     if (opts?.recenter !== false) notifyInsetChanged();
     return sidebarWidth;
@@ -689,10 +723,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       applySidebarWidth(sidebarWidth - step, { persist: true, recenter: true });
     } else if (e.key === 'Home') {
       e.preventDefault();
-      applySidebarWidth(SIDEBAR_WIDTH_MIN, { persist: true, recenter: true });
+      applySidebarWidth(sidebarWidthMin, { persist: true, recenter: true });
     } else if (e.key === 'End') {
       e.preventDefault();
-      applySidebarWidth(maxSidebarWidth(), { persist: true, recenter: true });
+      applySidebarWidth(maxSidebarWidth(sidebarWidthMin), { persist: true, recenter: true });
     }
   });
 
@@ -726,6 +760,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     rebuildEffortMenu();
     updateWorkspaceAgentContext();
     startCurrentBridgeChat();
+    refreshSidebarWidthMin();
     providerTrigger.focus();
   }
 
@@ -808,6 +843,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     rebuildEffortMenu();
     updateWorkspaceAgentContext();
     startCurrentBridgeChat();
+    refreshSidebarWidthMin();
     llmTrigger.focus();
   }
 
@@ -901,6 +937,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
     startCurrentBridgeChat();
     updateWorkspaceAgentContext();
+    refreshSidebarWidthMin();
     effortTrigger.focus();
   }
 
@@ -1394,6 +1431,34 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   // 사이드바에서는 문서 맥락이 먼저이고, 검토는 입력기 바로 위의
   // 기존 inline 흐름을 유지한다. 모델/권한은 입력기 accessory로 내린다.
   chatPage.append(header, connBanner, messages, review, composer);
+
+  /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다. */
+  function refreshSidebarWidthMin(): number {
+    if (!composer.isConnected) return sidebarWidthMin;
+    const selectorWidth = packedFlexWidth(selectors);
+    const utilityWidth = packedFlexWidth(composerUtilityActions);
+    const packed = selectorWidth + (selectorWidth && utilityWidth ? flexGapPx(composerMeta) : 0) + utilityWidth;
+    if (packed <= 0) return sidebarWidthMin;
+    const chrome = horizontalChrome(composer, [
+      'margin-left',
+      'margin-right',
+      'padding-left',
+      'padding-right',
+      'border-left-width',
+      'border-right-width',
+    ]) + horizontalChrome(root, ['border-left-width']);
+    const nextMin = Math.max(
+      SIDEBAR_WIDTH_MIN_FALLBACK,
+      Math.ceil(packed + chrome + SIDEBAR_PACKED_BUFFER_PX),
+    );
+    if (nextMin === sidebarWidthMin) {
+      resizeHandle.setAttribute('aria-valuemin', String(sidebarWidthMin));
+      return sidebarWidthMin;
+    }
+    sidebarWidthMin = nextMin;
+    applySidebarWidth(sidebarWidth, { persist: true, recenter: true });
+    return sidebarWidthMin;
+  }
 
   const threadsPage = el('div', 'ag-threads-page');
   threadsPage.id = 'ag-threads-panel';
@@ -1969,6 +2034,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     permissionBtn.title = unrestricted
       ? '파일·명령이 노트북 전체에 접근할 수 있습니다. 클릭하여 안전 모드로 전환'
       : '프로젝트 안에서만 파일과 명령을 사용합니다';
+    refreshSidebarWidthMin();
   }
 
   permissionBtn.addEventListener('click', () => {
@@ -2436,14 +2502,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       document.getElementById('status-bar')?.getBoundingClientRect().top ?? window.innerHeight;
     root.style.top = `${Math.max(0, top)}px`;
     root.style.bottom = `${Math.max(0, window.innerHeight - statusTop)}px`;
-    // 창이 줄면 최대 50% 제한에 맞춰 폭을 다시 클램프한다.
-    const clamped = clampSidebarWidth(sidebarWidth);
+    refreshSidebarWidthMin();
+    const clamped = clampSidebarWidth(sidebarWidth, sidebarWidthMin);
     if (clamped !== sidebarWidth) {
       applySidebarWidth(clamped, { persist: true, recenter: true });
     }
   }
   window.addEventListener('resize', measure);
   measure();
+  void document.fonts?.ready?.then(() => refreshSidebarWidthMin());
 
   // ── 스레드(채팅 목록) ─────────────────────────────────
   function persistCurrentThread(): void {
@@ -3507,6 +3574,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     phaseBadge.dataset.phase = planningPhase;
     root.dataset.workflow = chatWorkflow;
     root.dataset.planningPhase = planningPhase;
+    refreshSidebarWidthMin();
   }
 
   function setPlanningPhase(phase: AgentPhase): void {
