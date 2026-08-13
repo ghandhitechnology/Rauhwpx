@@ -7153,7 +7153,7 @@ impl LayoutEngine {
                 let table_visual_end = if tac_already_rendered_inline {
                     table_y_start + table_visual_height
                 } else {
-                    self.layout_table(
+                    let flow_end = self.layout_table(
                         tree,
                         col_node,
                         t,
@@ -7175,7 +7175,18 @@ impl LayoutEngine {
                         Some(para_y_for_table + visible_outer_top_px),
                         allow_para_top_bleed,
                         false,
-                    )
+                    );
+                    // A TAC table remains an inline flow object even when its persisted wrap
+                    // mode says Behind/InFrontOfText. `layout_table` correctly returns the
+                    // unchanged cursor for floating overlays, but using that value here for a
+                    // TAC table collapses its flow height and lets the next paragraph paint on
+                    // top of the table. Hancom gives treat-as-character precedence, so retain
+                    // the painted bottom as the minimum visual/flow end for every TAC table.
+                    if is_tac {
+                        flow_end.max(table_y_start + table_visual_height)
+                    } else {
+                        flow_end
+                    }
                 };
                 if is_tac {
                     let marker_x = tbl_inline_x.unwrap_or(col_area.x + effective_margin);
