@@ -502,7 +502,7 @@ class AgentBridgeImpl implements AgentBridge {
     this.abortSocket();
     this.setState('connecting');
     await this.requestHubLaunch();
-    if (this.disposed || seq !== this.reconnectSeq || this.state === 'connected') return;
+    if (this.disposed || seq !== this.reconnectSeq || this.getConnectionState() === 'connected') return;
     this.forceReconnect();
   }
 
