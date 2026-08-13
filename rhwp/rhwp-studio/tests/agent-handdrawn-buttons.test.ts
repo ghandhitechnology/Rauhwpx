@@ -70,7 +70,6 @@ test('ghost and icon buttons in sidebar and fullscreen are hand-drawn', () => {
     '.ag-model-trigger',
     '.ag-thread-rename',
     '.ag-environment-changes',
-    '.ag-collapse-tab',
   ]) {
     assert.ok(selectors.includes(sel), `${sel} should use the sketch filter`);
   }

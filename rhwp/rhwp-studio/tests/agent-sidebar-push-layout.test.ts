@@ -19,7 +19,7 @@ test('agent sidebar and fullscreen workspace use bundled NanumSquare typography'
 });
 
 test('agent sidebar push layout reserves editor-area width when open', () => {
-  assert.match(css, /--ag-sidebar-width:\s*600px;/);
+  assert.match(css, /--ag-sidebar-width:\s*480px;/);
   assert.match(css, /--ag-sidebar-duration:\s*320ms;/);
   assert.match(
     css,
@@ -59,7 +59,9 @@ test('agent sidebar asks canvas to recenter during inset animation', () => {
 });
 
 test('agent sidebar supports drag resize up to half the viewport', () => {
-  assert.match(source, /SIDEBAR_WIDTH_DEFAULT\s*=\s*600/);
+  assert.match(source, /SIDEBAR_WIDTH_DEFAULT\s*=\s*480/);
+  assert.match(source, /rhwp-agent-sidebar-width-v3/);
+  assert.match(source, /const nextMin = Math\.min\(\s*SIDEBAR_WIDTH_DEFAULT,/s);
   assert.match(source, /SIDEBAR_WIDTH_MIN_FALLBACK\s*=\s*280/);
   assert.match(source, /refreshSidebarWidthMin/);
   assert.match(source, /measureComposerMetaFloor/);
@@ -70,14 +72,26 @@ test('agent sidebar supports drag resize up to half the viewport', () => {
   assert.match(source, /0\.5/);
   assert.match(source, /ag-sidebar-resizing/);
   assert.match(source, /applySidebarWidth/);
-  assert.match(source, /onCollapseTabPointerDown/);
   assert.match(source, /RESIZE_DRAG_THRESHOLD_PX/);
   assert.match(source, /requestAnimationFrame\(applyResizeMove\)/);
   assert.match(source, /recenter: false/);
   assert.match(css, /\.ag-resize-handle/);
   assert.match(css, /body\.ag-sidebar-resizing #editor-area/);
   assert.match(css, /body\.ag-sidebar-resizing \.ag-root,\s*body\.ag-sidebar-animating \.ag-root\s*\{[^}]*--ag-sketch-line:\s*none;/s);
-  assert.match(css, /\.ag-collapse-tab\s*\{[^}]*cursor:\s*col-resize;/s);
+});
+
+test('rau icon toggle hides the sidebar completely from the toolbar', () => {
+  assert.match(source, /el\('span', 'ag-rau-icon'\)/);
+  assert.match(source, /getElementById\('icon-toolbar'\)\?\.appendChild\(collapseTab\)/);
+  assert.match(source, /setCollapsed\(!root\.classList\.contains\('ag-collapsed'\)\)/);
+  assert.match(source, /collapseTab\.remove\(\)/);
+  assert.match(css, /\.ag-rau-icon\s*\{[^}]*mask:\s*url\('\/icons\/rau\.png'\)/s);
+  assert.match(css, /\.ag-collapse-tab\s*\{[^}]*position:\s*sticky;/s);
+  assert.match(css, /\.ag-collapse-tab\s*\{[^}]*margin:\s*0 0 0 auto;/s);
+  assert.match(css, /\.ag-collapse-tab\s*\{[^}]*cursor:\s*pointer;/s);
+  assert.doesNotMatch(css, /\.ag-collapse-tab\s*\{[^}]*cursor:\s*col-resize;/s);
+  assert.match(css, /\.ag-root\.ag-collapsed\s*\{[^}]*pointer-events:\s*none;/s);
+  assert.match(css, /body\.ag-fullscreen-open \.ag-collapse-tab/);
 });
 
 test('composer metadata stays on one row at the minimum sidebar width', () => {

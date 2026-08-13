@@ -76,8 +76,8 @@ const PROVIDER_ICON_SRC: Record<AgentName, string> = {
   codex: '/icons/provider-codex.png',
 };
 
-const SIDEBAR_WIDTH_KEY = 'rhwp-agent-sidebar-width';
-const SIDEBAR_WIDTH_DEFAULT = 600;
+const SIDEBAR_WIDTH_KEY = 'rhwp-agent-sidebar-width-v3';
+const SIDEBAR_WIDTH_DEFAULT = 480;
 /* 레이아웃 전·측정 실패 시 바닥. 실제 최솟값은 입력기 하단 한 줄의
    묶인 폭으로 매 프레임 다시 잰다. */
 const SIDEBAR_WIDTH_MIN_FALLBACK = 280;
@@ -525,9 +525,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   const collapseTab = el('button', 'ag-collapse-tab');
   collapseTab.type = 'button';
-  collapseTab.setAttribute('aria-label', '에이전트 사이드바 접기/펼치기');
+  collapseTab.setAttribute('aria-label', '에이전트 사이드바 숨기기');
   collapseTab.setAttribute('aria-expanded', 'true');
-  collapseTab.appendChild(createChevron());
+  collapseTab.title = '에이전트 사이드바 숨기기';
+  const rauIcon = el('span', 'ag-rau-icon');
+  rauIcon.setAttribute('aria-hidden', 'true');
+  collapseTab.appendChild(rauIcon);
 
   const resizeHandle = el('div', 'ag-resize-handle');
   resizeHandle.setAttribute('role', 'separator');
@@ -593,7 +596,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function setCollapsed(collapsed: boolean, opts?: { recenter?: boolean }): void {
     root.classList.toggle('ag-collapsed', collapsed);
     document.body.classList.toggle('ag-sidebar-open', !collapsed);
+    const label = collapsed ? '에이전트 사이드바 펼치기' : '에이전트 사이드바 숨기기';
     collapseTab.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    collapseTab.setAttribute('aria-label', label);
+    collapseTab.title = label;
     if (opts?.recenter !== false) startInsetRecenterLoop();
   }
 
@@ -602,10 +608,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const RESIZE_DRAG_THRESHOLD_PX = 4;
   let resizing = false;
   let resizeArmed = false;
-  let resizeFromCollapseTab = false;
   let resizeStartX = 0;
   let resizeStartWidth = sidebarWidth;
-  let resizeWasCollapsed = false;
 
   function detachResizeWindowListeners(): void {
     window.removeEventListener('pointermove', onResizePointerMove, true);
@@ -618,11 +622,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     resizeArmed = false;
     resizeStartX = startX;
     resizeStartWidth = sidebarWidth;
-    resizeWasCollapsed = root.classList.contains('ag-collapsed');
-    if (resizeWasCollapsed) {
-      // 접힌 상태에서 드래그하면 먼저 펼친 뒤 폭을 조절한다.
-      setCollapsed(false, { recenter: false });
-    }
     setConfigPanelOpen(false);
     document.body.classList.add('ag-sidebar-resizing', 'ag-sidebar-animating');
     window.addEventListener('pointermove', onResizePointerMove, true);
@@ -658,27 +657,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       cancelAnimationFrame(resizeMoveRaf);
       applyResizeMove();
     }
-    const didDrag = resizeArmed;
-    const fromTab = resizeFromCollapseTab;
     resizing = false;
     resizeArmed = false;
-    resizeFromCollapseTab = false;
     document.body.classList.remove('ag-sidebar-resizing', 'ag-sidebar-animating');
     detachResizeWindowListeners();
-    if (didDrag) {
-      applySidebarWidth(sidebarWidth, { persist: true, recenter: true });
-      return;
-    }
-    // 접기 탭에서 클릭만 한 경우(드래그 없음) → 접기/펼치기
-    if (fromTab) {
-      if (resizeWasCollapsed) {
-        // begin 에서 이미 펼쳤으므로 그대로 두고 가운데 정렬만.
-        startInsetRecenterLoop();
-      } else {
-        setCollapsed(true);
-      }
-      return;
-    }
     applySidebarWidth(sidebarWidth, { persist: true, recenter: true });
   }
 
@@ -687,27 +669,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (e.button !== 0 && e.pointerType !== 'touch') return;
     e.preventDefault();
     e.stopPropagation();
-    resizeFromCollapseTab = false;
     beginSidebarResize(e.clientX);
     resizeArmed = true;
   }
 
-  function onCollapseTabPointerDown(e: PointerEvent): void {
-    if (e.button !== 0 && e.pointerType !== 'touch') return;
-    e.preventDefault();
-    e.stopPropagation();
-    resizeFromCollapseTab = true;
-    beginSidebarResize(e.clientX);
-  }
-
-  // click 은 pointer 로 처리하므로 기본 click 토글은 막는다.
   collapseTab.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
+    if (fullscreen) return;
+    setCollapsed(!root.classList.contains('ag-collapsed'));
   });
-  collapseTab.addEventListener('pointerdown', onCollapseTabPointerDown);
-  collapseTab.style.cursor = 'col-resize';
-  collapseTab.title = '드래그하여 너비 조절 · 클릭하여 접기/펼치기';
 
   resizeHandle.addEventListener('pointerdown', onResizeHandlePointerDown);
   resizeHandle.addEventListener('keydown', (e) => {
@@ -1456,9 +1427,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       'border-left-width',
       'border-right-width',
     ]) + horizontalChrome(root, ['border-left-width']);
-    const nextMin = Math.max(
-      SIDEBAR_WIDTH_MIN_FALLBACK,
-      Math.ceil(packed + chrome + SIDEBAR_PACKED_BUFFER_PX),
+    const nextMin = Math.min(
+      SIDEBAR_WIDTH_DEFAULT,
+      Math.max(
+        SIDEBAR_WIDTH_MIN_FALLBACK,
+        Math.ceil(packed + chrome + SIDEBAR_PACKED_BUFFER_PX),
+      ),
     );
     if (nextMin === sidebarWidthMin) {
       resizeHandle.setAttribute('aria-valuemin', String(sidebarWidthMin));
@@ -2489,8 +2463,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   });
 
   // resizeHandle 을 마지막에 두어 왼쪽 가장자리 히트 테스트를 확실히 가져간다.
-  root.append(collapseTab, stage, resizeHandle);
+  // 토글은 상단 아이콘 도구 모음의 오른쪽 끝에 둔다.
+  root.append(stage, resizeHandle);
   document.body.appendChild(root);
+  document.getElementById('icon-toolbar')?.appendChild(collapseTab);
   setCollapsed(false, { recenter: false });
 
   // ── 배치: #editor-area ↔ #status-bar 사이에 맞춘다 ────
@@ -4067,6 +4043,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         'ag-col-resizing',
       );
       sweepUnresolvedToolRows();
+      collapseTab.remove();
       root.remove();
     },
   };
