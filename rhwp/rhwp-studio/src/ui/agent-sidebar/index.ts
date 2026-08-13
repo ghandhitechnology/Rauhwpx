@@ -53,6 +53,7 @@ import { createSettingsPanel } from './settings.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
 import { createReferenceLibrary } from './reference-library.ts';
+import { isDesktopApp } from '../../desktop-integration.ts';
 
 export interface AgentSidebarDeps {
   bridge: AgentBridge;
@@ -1310,10 +1311,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const connBannerRetry = el('button', 'ag-conn-banner-retry', '지금 다시 연결');
   connBannerRetry.type = 'button';
   connBannerRetry.addEventListener('click', () => {
-    connBannerText.textContent = '다시 연결 중…';
+    connBannerText.textContent = '연결하는 중…';
     bridge.reconnectNow();
   });
-  const connBannerHint = el('span', 'ag-conn-banner-hint', '허브 실행: rhwp-agent에서 npm start');
+  const managedHub = isDesktopApp() || Boolean((import.meta as any).env?.DEV);
+  const connBannerHint = el(
+    'span',
+    'ag-conn-banner-hint',
+    managedHub
+      ? '잠시만 기다리면 다시 붙어요.'
+      : '저장소 루트에서 npm start 로 허브를 켜 주세요.',
+  );
   connBannerHint.hidden = true;
   connBanner.append(connBannerText, connBannerRetry, connBannerHint);
 
@@ -2835,8 +2843,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (typeof meta?.attempt === 'number') connAttempt = meta.attempt;
     if (state === 'connected') connAttempt = 0;
     connRetryAt = typeof meta?.retryInMs === 'number' ? Date.now() + meta.retryInMs : null;
-    conn.className = `ag-conn ag-conn-${state}`;
-    conn.textContent = CONN_LABEL[state];
+    const visual = state === 'disconnected' ? 'connecting' : state;
+    conn.className = `ag-conn ag-conn-${visual}`;
+    conn.textContent = state === 'connected' || state === 'replaced'
+      ? CONN_LABEL[state]
+      : '연결 중…';
     takeoverBtn.hidden = state !== 'replaced';
     if (state === 'replaced') setConfigPanelOpen(false);
     renderConnBanner();
@@ -2854,8 +2865,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function paintConnCountdown(): void {
     const remainMs = connRetryAt === null ? null : Math.max(0, connRetryAt - Date.now());
     connBannerText.textContent = remainMs === null
-      ? '에이전트 허브와 연결이 끊어졌어요'
-      : `에이전트 허브와 연결이 끊어졌어요 · ${Math.ceil(remainMs / 1000)}초 후 재시도`;
+      ? '에이전트에 연결하는 중이에요'
+      : `에이전트에 연결하는 중이에요 · ${Math.ceil(remainMs / 1000)}초 후 다시 시도`;
   }
 
   function renderConnBanner(): void {
@@ -2873,14 +2884,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         return;
       }
       connBanner.hidden = false;
-      connBannerText.textContent = `다시 연결 중… (${connAttempt}번째 시도)`;
-      connBannerRetry.hidden = true;
-      connBannerHint.hidden = connAttempt < 3;
+      connBanner.classList.toggle('ag-conn-banner-wait', connAttempt < 4);
+      connBannerText.textContent = `연결하는 중… (${connAttempt}번째 시도)`;
+      connBannerRetry.hidden = false;
+      connBannerHint.hidden = managedHub || connAttempt < 6;
       return;
     }
     connBanner.hidden = false;
+    connBanner.classList.toggle('ag-conn-banner-wait', connAttempt < 4);
     connBannerRetry.hidden = false;
-    connBannerHint.hidden = connAttempt < 3;
+    connBannerHint.hidden = managedHub || connAttempt < 6;
     paintConnCountdown();
     clearConnCountdown();
     if (connRetryAt !== null) {
