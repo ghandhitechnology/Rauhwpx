@@ -334,14 +334,43 @@ const chordMapK: Record<string, string> = {
  * 한컴 표준 영역 영역 Ctrl+N 영역 영역 chord 시작 영역 영역 Chrome 영역 영역 reserved shortcut
  * (새 창) 영역 영역 JS 차단 불가 영역 영역 Ctrl+M 영역 영역 변경 (PR #786 후속 정정).
  */
-const chordMapM: Record<string, string> = {
+const chordMapM: Record<string, string | [string, Record<string, unknown>]> = {
   n: 'insert:footnote',
   ㅜ: 'insert:footnote', // 한글 IME
   s: 'page:hide',
   ㄴ: 'page:hide', // 한글 IME
   m: 'insert:equation',
   ㅡ: 'insert:equation', // 한글 IME
+  // 글자 색 chord (한컴 Ctrl+M,? 정합 — 검정/빨강/파랑/자주/초록/노랑/청록/흰색)
+  k: ['format:text-color', { color: '#000000' }],
+  ㅏ: ['format:text-color', { color: '#000000' }], // 한글 IME
+  r: ['format:text-color', { color: '#FF0000' }],
+  ㄱ: ['format:text-color', { color: '#FF0000' }], // 한글 IME
+  b: ['format:text-color', { color: '#0000FF' }],
+  ㅠ: ['format:text-color', { color: '#0000FF' }], // 한글 IME
+  d: ['format:text-color', { color: '#800080' }],
+  ㅇ: ['format:text-color', { color: '#800080' }], // 한글 IME
+  g: ['format:text-color', { color: '#008000' }],
+  ㅎ: ['format:text-color', { color: '#008000' }], // 한글 IME
+  y: ['format:text-color', { color: '#FFFF00' }],
+  ㅛ: ['format:text-color', { color: '#FFFF00' }], // 한글 IME
+  c: ['format:text-color', { color: '#008080' }],
+  ㅊ: ['format:text-color', { color: '#008080' }], // 한글 IME
+  w: ['format:text-color', { color: '#FFFFFF' }],
+  ㅈ: ['format:text-color', { color: '#FFFFFF' }], // 한글 IME
 };
+
+/** chordMapM 항목을 dispatch 한다 (색상 chord 는 params 동반). */
+function dispatchChordM(
+  dispatcher: { dispatch: (id: string, params?: Record<string, unknown>) => boolean },
+  entry: string | [string, Record<string, unknown>],
+): void {
+  if (Array.isArray(entry)) {
+    dispatcher.dispatch(entry[0], entry[1]);
+  } else {
+    dispatcher.dispatch(entry);
+  }
+}
 
 /** 코드 단축키 → 커맨드 ID 매핑 (Alt+V,? 형태 — 보기 메뉴) */
 const chordMapV: Record<string, string> = {
@@ -398,10 +427,10 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
   if (this._pendingChordM) {
     this._pendingChordM = false;
     const key = e.key.toLowerCase();
-    const cmdId = chordMapM[key];
-    if (cmdId && this.dispatcher) {
+    const entry = chordMapM[key];
+    if (entry && this.dispatcher) {
       e.preventDefault();
-      this.dispatcher.dispatch(cmdId);
+      dispatchChordM(this.dispatcher, entry);
       return;
     }
   }
@@ -489,13 +518,15 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
       this._pendingChordM = false;
       const codeToKey: Record<string, string> = {
         KeyM: 'm', KeyN: 'n', KeyS: 's', KeyF: 'f', KeyK: 'k',
+        KeyR: 'r', KeyB: 'b', KeyD: 'd', KeyG: 'g', KeyY: 'y',
+        KeyC: 'c', KeyW: 'w',
       };
       const key = codeToKey[e.code];
       if (key && this.dispatcher) {
-        const cmdId = chordMapM[key];
-        if (cmdId) {
+        const entry = chordMapM[key];
+        if (entry) {
           e.preventDefault();
-          this.dispatcher.dispatch(cmdId);
+          dispatchChordM(this.dispatcher, entry);
           return;
         }
       }
