@@ -31,6 +31,7 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             rhwp/rhwp-studio/package-lock.json
+            rhwp/rhwp-agent/package-lock.json
 
       - name: Require a version tag matching package.json
         env:
@@ -62,6 +63,7 @@ jobs:
         run: |
           npm ci
           npm --prefix rhwp/rhwp-studio ci
+          npm --prefix rhwp/rhwp-agent ci --omit=dev
 
       - name: Verify Developer ID and Apple ID notarization secrets
         env:
