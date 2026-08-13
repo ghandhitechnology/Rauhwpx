@@ -3136,6 +3136,21 @@ body.ag-col-resizing {
   animation: ag-fs-col-out 140ms ease both;
 }
 
+/* The fullscreen chrome should leave before its clipped shell reaches the
+   sidebar-sized endpoint. Otherwise its right-hand actions survive until the
+   layout swap and appear to pop into the compact header. */
+.ag-root.ag-fs-exiting .ag-workspace-bar {
+  animation: ag-fs-toolbar-out 180ms var(--ag-motion-out) both;
+}
+
+.ag-root.ag-fs-exiting .ag-chat-page > .ag-messages {
+  animation: ag-fs-content-out 150ms ease both;
+}
+
+.ag-root.ag-fs-exiting .ag-chat-page > .ag-composer {
+  animation: ag-fs-composer-out 180ms var(--ag-motion-out) both;
+}
+
 /* 모드 전환과 겹쳐 닫히는 오버레이가 무대 위를 한 번 더 미끄러지지
    않게, 전환 동안은 스킬 페이지의 페이지 전환을 끈다. */
 .ag-root.ag-fs-motion .ag-skills-page,
@@ -3143,9 +3158,34 @@ body.ag-col-resizing {
   transition: none;
 }
 
-/* 돌아온 사이드바는 스며들며 마무리. */
+/* 돌아온 사이드바는 표면보다 내부 자산이 한 박자 늦게 날아들며
+   마무리된다. 전체 화면 chrome 과 compact chrome 의 교체를 가린다. */
 .ag-root.ag-fs-return .ag-stage {
-  animation: ag-fs-stage-in 190ms var(--ag-motion-out) both;
+  animation: ag-fs-stage-in 220ms var(--ag-motion-out) both;
+}
+
+.ag-root.ag-fs-return .ag-header {
+  animation: ag-fs-sidebar-asset-in 220ms var(--ag-motion-out) 20ms both;
+}
+
+.ag-root.ag-fs-return .ag-model-summary > .ag-fullscreen-btn {
+  animation: ag-fs-sidebar-button-in 180ms var(--ag-motion-out) 35ms both;
+}
+
+.ag-root.ag-fs-return .ag-model-summary > .ag-context-row {
+  animation: ag-fs-sidebar-button-in 190ms var(--ag-motion-out) 55ms both;
+}
+
+.ag-root.ag-fs-return .ag-model-summary > .ag-header-actions {
+  animation: ag-fs-sidebar-button-in 180ms var(--ag-motion-out) 75ms both;
+}
+
+.ag-root.ag-fs-return .ag-composer {
+  animation: ag-fs-sidebar-composer-in 230ms var(--ag-motion-out) 25ms both;
+}
+
+.ag-root.ag-fs-return .ag-composer-meta > * {
+  animation: ag-fs-sidebar-button-in 180ms var(--ag-motion-out) 80ms both;
 }
 
 @keyframes ag-fs-rail-in {
@@ -3168,9 +3208,51 @@ body.ag-col-resizing {
   }
 }
 
+@keyframes ag-fs-toolbar-out {
+  to {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes ag-fs-content-out {
+  to {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+}
+
+@keyframes ag-fs-composer-out {
+  to {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+}
+
 @keyframes ag-fs-stage-in {
   from {
     opacity: 0;
+  }
+}
+
+@keyframes ag-fs-sidebar-asset-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+}
+
+@keyframes ag-fs-sidebar-button-in {
+  from {
+    opacity: 0;
+    transform: translateX(10px) scale(0.94);
+  }
+}
+
+@keyframes ag-fs-sidebar-composer-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.985);
   }
 }
 
@@ -3188,7 +3270,14 @@ body.ag-col-resizing {
   .ag-root.ag-fs-entering:not(.ag-review-collapsed) .ag-review-column,
   .ag-root.ag-fs-exiting .ag-threads-page,
   .ag-root.ag-fs-exiting .ag-review-column,
-  .ag-root.ag-fs-return .ag-stage {
+  .ag-root.ag-fs-exiting .ag-workspace-bar,
+  .ag-root.ag-fs-exiting .ag-chat-page > .ag-messages,
+  .ag-root.ag-fs-exiting .ag-chat-page > .ag-composer,
+  .ag-root.ag-fs-return .ag-stage,
+  .ag-root.ag-fs-return .ag-header,
+  .ag-root.ag-fs-return .ag-model-summary > *,
+  .ag-root.ag-fs-return .ag-composer,
+  .ag-root.ag-fs-return .ag-composer-meta > * {
     animation: none;
   }
 
