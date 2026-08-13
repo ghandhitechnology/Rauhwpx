@@ -66,7 +66,7 @@ test('배너 카운트다운은 1초마다 갱신되고 정리된다', () => {
 
 test('배너 버튼은 즉시 재연결을, 관리되지 않는 환경에서만 실행 힌트를 준다', () => {
   assert.match(source, /connBannerRetry[\s\S]{0,160}bridge\.reconnectNow\(\)/);
-  assert.match(source, /저장소 루트에서 npm start 로 허브를 켜 주세요/);
+  assert.match(source, /저장소 루트에서 npm start 를 한 번 실행하세요/);
   assert.match(source, /잠시만 기다리면 다시 붙어요/);
   assert.match(source, /connBannerHint\.hidden = managedHub \|\| connAttempt < 6/);
   assert.match(

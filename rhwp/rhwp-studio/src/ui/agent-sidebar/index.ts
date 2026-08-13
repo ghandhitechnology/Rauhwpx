@@ -1320,7 +1320,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     'ag-conn-banner-hint',
     managedHub
       ? '잠시만 기다리면 다시 붙어요.'
-      : '저장소 루트에서 npm start 로 허브를 켜 주세요.',
+      : '저장소 루트에서 npm start 를 한 번 실행하세요. 터미널을 닫아도 허브는 유지됩니다.',
   );
   connBannerHint.hidden = true;
   connBanner.append(connBannerText, connBannerRetry, connBannerHint);

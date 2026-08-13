@@ -18,6 +18,10 @@ Signing uses the `macos-release` environment: `MACOS_CERTIFICATE`, `MACOS_CERTIF
 ## Web development
 
 ```sh
-cd rhwp/rhwp-agent && npm start
+npm start                            # hub in the background — terminal can close
 cd rhwp/rhwp-studio && npm run dev   # http://127.0.0.1:7700
 ```
+
+`npm start` waits until `http://127.0.0.1:5175/healthz` is ready, then returns. Logs go to `.run/rhwp-agent.log`. Use `npm stop` / `npm run status`. For a foreground hub that stays in the terminal: `npm run start:fg`.
+
+Studio `npm run dev` will also start the hub if it is not already running.
