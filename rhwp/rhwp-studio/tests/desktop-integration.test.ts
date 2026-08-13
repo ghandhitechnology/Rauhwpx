@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { ensureDesktopAgentHub, isDesktopApp } from '../src/desktop-integration.ts';
+import { ensureDesktopAgentHub, isDesktopApp, requestDevAgentHub } from '../src/desktop-integration.ts';
 
 const source = readFileSync(new URL('../src/desktop-integration.ts', import.meta.url), 'utf8');
 const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
@@ -42,9 +42,27 @@ test('desktop integration asks the shell to launch a missing hub', async () => {
   assert.deepEqual(await Promise.all([first, second]), [true, true]);
 });
 
+test('dev ensure path asks Vite to start a missing hub', async () => {
+  assert.match(source, /\/__rhwp\/ensure-agent-hub/);
+  let calls = 0;
+  const ready = await requestDevAgentHub(async (url, init) => {
+    calls += 1;
+    assert.equal(url, '/__rhwp/ensure-agent-hub');
+    assert.equal((init as { method?: string })?.method, 'POST');
+    return {
+      ok: true,
+      json: async () => ({ started: true, ready: true }),
+    } as Response;
+  });
+  assert.equal(ready, true);
+  assert.equal(calls, 1);
+});
+
 test('브리지와 설정 재연결이 데스크톱 허브 기동을 탄다', () => {
-  assert.match(bridge, /void ensureDesktopAgentHub\(\)/);
-  assert.match(settings, /void ensureDesktopAgentHub\(\)/);
+  assert.match(bridge, /await this\.requestHubLaunch\(\)/);
+  assert.match(bridge, /async reconnectNow\(\): Promise<void>/);
+  assert.match(settings, /void bridge\.reconnectNow\(\)/);
+  assert.doesNotMatch(settings, /ensureDesktopAgentHub/);
   assert.match(settings, /hubReconnect\.disabled = connectionState === 'connected'/);
   assert.doesNotMatch(
     settings,

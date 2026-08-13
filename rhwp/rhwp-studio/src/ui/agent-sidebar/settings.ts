@@ -22,7 +22,6 @@ import {
 import { loadAgentPrefs, saveAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
 import { createIcon } from './icons.ts';
 import { formatRelativeTime, formatResetAt, formatShortDate, formatTokens } from './usage-format.ts';
-import { ensureDesktopAgentHub } from '../../desktop-integration.ts';
 import type { AgentBridge } from '../../agent/bridge.ts';
 import type {
   AgentName,
@@ -229,8 +228,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const hubReconnect = el('button', 'ag-settings-btn', '다시 연결');
   hubReconnect.type = 'button';
   hubReconnect.addEventListener('click', () => {
-    void ensureDesktopAgentHub();
-    bridge.reconnectNow();
+    void bridge.reconnectNow();
     renderConnection();
   });
   hubRow.append(hubDot, hubText, hubReconnect);
