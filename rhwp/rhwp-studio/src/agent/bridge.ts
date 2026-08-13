@@ -97,6 +97,7 @@ export interface AgentBridge {
   generateSkillDraft(input: { goal: string; triggerExamples?: string; nonTriggerExamples?: string; resourceNotes?: string; existingSkill?: string }): string;
   requestWritingStyleStatus(): string;
   calibrateWritingStyle(input: { language: WritingStyleLanguage; files: WritingStyleUpload[] }): string;
+  setWritingStyleInstruction(instruction: string): string;
   interrupt(): void;
   onEvent(cb: (e: SidebarEvent) => void): () => void;
   dispose(): void;
@@ -355,7 +356,7 @@ class AgentBridgeImpl implements AgentBridge {
   private disposed = false;
 
   private listeners = new Set<(e: SidebarEvent) => void>();
-  private selectedAgent: AgentName = 'claude';
+  private selectedAgent: AgentName = 'codex';
   private selectedModel: string | null = null;
   private selectedEffort: string | null = null;
   private permissionProfile: PermissionProfile = 'safe';
@@ -1344,6 +1345,17 @@ class AgentBridgeImpl implements AgentBridge {
   calibrateWritingStyle(input: { language: WritingStyleLanguage; files: WritingStyleUpload[] }): string {
     const requestId = `writing-style-calibration-${++this.requestSeq}`;
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'writing-style-calibrate', requestId, ...input });
+    return requestId;
+  }
+
+  setWritingStyleInstruction(instruction: string): string {
+    const requestId = `writing-style-instruction-${++this.requestSeq}`;
+    this.sendJson({
+      v: AGENT_PROTOCOL_VERSION,
+      type: 'writing-style-instruction-set',
+      requestId,
+      instruction,
+    });
     return requestId;
   }
 

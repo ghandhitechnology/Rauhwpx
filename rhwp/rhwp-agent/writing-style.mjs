@@ -5,6 +5,8 @@ import path from 'node:path';
 const PROFILE_FILE = 'style.md';
 const METADATA_FILE = 'metadata.json';
 const STRUCTURED_FILE = 'profile.json';
+const ADDITIONAL_INSTRUCTION_FILE = 'additional-instruction.md';
+const MAX_ADDITIONAL_INSTRUCTION_CHARS = 4_000;
 
 export function defaultWritingStyleRoot(env = process.env, platform = process.platform, home = os.homedir()) {
   if (env.RHWP_WRITING_STYLE_DIR) return path.resolve(env.RHWP_WRITING_STYLE_DIR);
@@ -27,6 +29,7 @@ export class WritingStyleStore {
     this.profilePath = path.join(root, PROFILE_FILE);
     this.metadataPath = path.join(root, METADATA_FILE);
     this.structuredPath = path.join(root, STRUCTURED_FILE);
+    this.additionalInstructionPath = path.join(root, ADDITIONAL_INSTRUCTION_FILE);
   }
 
   async init() {
@@ -36,9 +39,13 @@ export class WritingStyleStore {
 
   async status() {
     try {
-      const [markdown, metadata] = await Promise.all([
+      const [markdown, metadata, additionalInstruction] = await Promise.all([
         fs.readFile(this.profilePath, 'utf8'),
         readJson(this.metadataPath, {}),
+        fs.readFile(this.additionalInstructionPath, 'utf8').catch((error) => {
+          if (error?.code === 'ENOENT') return '';
+          throw error;
+        }),
       ]);
       return {
         active: Boolean(markdown.trim()),
@@ -47,10 +54,19 @@ export class WritingStyleStore {
         sourceCount: Number.isFinite(metadata.sourceCount) ? metadata.sourceCount : 0,
         pageEstimate: Number.isFinite(metadata.pageEstimate) ? metadata.pageEstimate : 0,
         summary: typeof metadata.summary === 'string' ? metadata.summary : '',
+        additionalInstruction: additionalInstruction.trim(),
       };
     } catch (error) {
       if (error?.code === 'ENOENT') {
-        return { active: false, language: 'ko', updatedAt: null, sourceCount: 0, pageEstimate: 0, summary: '' };
+        return {
+          active: false,
+          language: 'ko',
+          updatedAt: null,
+          sourceCount: 0,
+          pageEstimate: 0,
+          summary: '',
+          additionalInstruction: '',
+        };
       }
       throw error;
     }
@@ -94,10 +110,36 @@ export class WritingStyleStore {
     return this.status();
   }
 
+  async setAdditionalInstruction(value) {
+    const status = await this.status();
+    if (!status.active) throw new Error('Calibrate a writing style before adding a tone instruction.');
+    const instruction = String(value ?? '').trim();
+    if (instruction.length > MAX_ADDITIONAL_INSTRUCTION_CHARS) {
+      throw new Error(`The additional instruction must be ${MAX_ADDITIONAL_INSTRUCTION_CHARS} characters or fewer.`);
+    }
+    if (!instruction) {
+      await fs.rm(this.additionalInstructionPath, { force: true });
+      return this.status();
+    }
+    const temp = `${this.additionalInstructionPath}.tmp-${process.pid}-${Date.now()}`;
+    await fs.writeFile(temp, `${instruction}\n`, { encoding: 'utf8', mode: 0o600 });
+    await fs.rename(temp, this.additionalInstructionPath);
+    return this.status();
+  }
+
   async promptBlock() {
     try {
-      const markdown = await fs.readFile(this.profilePath, 'utf8');
+      const [markdown, additionalInstruction] = await Promise.all([
+        fs.readFile(this.profilePath, 'utf8'),
+        fs.readFile(this.additionalInstructionPath, 'utf8').catch((error) => {
+          if (error?.code === 'ENOENT') return '';
+          throw error;
+        }),
+      ]);
       if (!markdown.trim()) return '';
+      const instructionBlock = additionalInstruction.trim()
+        ? `\n\n<personal_writing_instruction>\nApply this user-authored instruction in addition to the measured profile. It may refine tone and delivery, but it follows the same precedence and factual boundaries as the profile.\n\n${additionalInstruction.trim()}\n</personal_writing_instruction>`
+        : '';
       return `<personal_writing_style>
 This is the user's own writing profile, measured from documents they confirmed they wrote. It is a specification for producing text, not a checklist for grading it. Compose within it from the first sentence rather than drafting freely and correcting afterwards.
 
@@ -106,7 +148,7 @@ How to read it: the baselines are targets you write toward, not limits you check
 Precedence: what the open document already does comes first, the genre and recipient come second, this profile third. It never overrides facts, quoted wording, legal or official phrasing, accessibility, or a formality level the user asked for. Do not reuse distinctive passages from the profile as if they were the user's sentences, and do not apply it to ordinary chat replies unless the user asks.
 
 ${markdown.trim()}
-</personal_writing_style>`;
+</personal_writing_style>${instructionBlock}`;
     } catch (error) {
       if (error?.code === 'ENOENT') return '';
       throw error;

@@ -54,7 +54,9 @@ const usageStore = await createUsageStore().init();
 const cliproxy = await createCliproxyClient({ rootDir: usageStore.rootDir }).init();
 const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
 const handleReferenceHttp = createReferenceHttpHandler({ store: referenceStore, token: TOKEN });
-let styleCalibrationRunning = false;
+/** The calibration process outlives a Studio WebSocket. Keeping its request
+ * identity and phase lets a reconnecting tab resume the same progress UI. */
+let styleCalibration = null;
 
 /** @type {import('ws').WebSocket | null} */
 let studioSocket = null;
@@ -69,7 +71,7 @@ const DEFAULT_MODEL = { claude: 'sonnet', codex: 'gpt-5.6-sol' };
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const CLAUDE_EFFORTS_HAIKU = new Set(['low', 'medium', 'high']);
 const CODEX_EFFORTS = new Set(['low', 'medium', 'high']);
-const DEFAULT_EFFORT = { claude: 'high', codex: 'high' };
+const DEFAULT_EFFORT = { claude: 'high', codex: 'medium' };
 
 function resolveModel(agent, requested) {
   const allowed = agent === 'claude' ? CLAUDE_MODELS : CODEX_MODELS;
@@ -746,31 +748,50 @@ function handleStudioMessage(sock, msg) {
     }
     case 'writing-style-calibrate': {
       const requestId = msg.requestId ?? null;
-      if (styleCalibrationRunning) {
+      if (styleCalibration) {
         sendJson(sock, { v: 1, type: 'writing-style-error', requestId, code: 'CALIBRATION_BUSY', message: 'A writing-style calibration is already running.' });
         return;
       }
-      styleCalibrationRunning = true;
+      styleCalibration = { requestId, state: 'reading' };
       sendJson(sock, { v: 1, type: 'writing-style-progress', requestId, state: 'reading' });
       void Promise.resolve()
         .then(() => {
-          sendJson(sock, { v: 1, type: 'writing-style-progress', requestId, state: 'analyzing' });
+          if (styleCalibration?.requestId === requestId) styleCalibration.state = 'analyzing';
+          sendJson(studioSocket, { v: 1, type: 'writing-style-progress', requestId, state: 'analyzing' });
           return calibrateWritingStyle({ language: msg.language, files: msg.files });
         })
         .then(async (profile) => {
-          sendJson(sock, { v: 1, type: 'writing-style-progress', requestId, state: 'saving' });
+          if (styleCalibration?.requestId === requestId) styleCalibration.state = 'saving';
+          sendJson(studioSocket, { v: 1, type: 'writing-style-progress', requestId, state: 'saving' });
           const status = await writingStyleStore.save(profile);
-          sendJson(sock, { v: 1, type: 'writing-style-result', requestId, status });
-          sendJson(sock, { v: 1, type: 'writing-style-status', requestId, status });
+          sendJson(studioSocket, { v: 1, type: 'writing-style-result', requestId, status });
+          sendJson(studioSocket, { v: 1, type: 'writing-style-status', requestId, status });
         })
-        .catch((e) => sendJson(sock, {
+        .catch((e) => sendJson(studioSocket, {
           v: 1,
           type: 'writing-style-error',
           requestId,
           code: e?.code ?? 'CALIBRATION_FAILED',
           message: String(e?.message ?? e),
         }))
-        .finally(() => { styleCalibrationRunning = false; });
+        .finally(() => {
+          if (styleCalibration?.requestId === requestId) styleCalibration = null;
+        });
+      return;
+    }
+    case 'writing-style-instruction-set': {
+      const requestId = msg.requestId ?? null;
+      void writingStyleStore.setAdditionalInstruction(msg.instruction)
+        .then((status) => sendJson(studioSocket, {
+          v: 1, type: 'writing-style-status', requestId, status,
+        }))
+        .catch((e) => sendJson(studioSocket, {
+          v: 1,
+          type: 'writing-style-error',
+          requestId,
+          code: 'STYLE_INSTRUCTION_FAILED',
+          message: String(e?.message ?? e),
+        }));
       return;
     }
     case 'chat-interrupt': {
@@ -1060,6 +1081,14 @@ httpServer.on('upgrade', (req, socket, head) => {
       }
       void skillRegistry.list().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', ...catalog }));
       void writingStyleStore.status().then((status) => sendJson(ws, { v: 1, type: 'writing-style-status', status }));
+      if (styleCalibration) {
+        sendJson(ws, {
+          v: 1,
+          type: 'writing-style-progress',
+          requestId: styleCalibration.requestId,
+          state: styleCalibration.state,
+        });
+      }
       // 프로바이더 프로브로 접속을 붙잡아 두지 않는다 — 캐시를 먼저 주고 결과가 오면 갱신한다.
       const cachedProviders = providerHealth.cached();
       if (cachedProviders) sendJson(ws, { v: 1, type: 'provider-status', providers: cachedProviders });

@@ -13,6 +13,8 @@ const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
 const ANALYSIS_TIMEOUT_MS = 120_000;
 const EXTRACT_TIMEOUT_MS = 180_000;
 const REQUIRED_PAGES = 10;
+const CALIBRATION_MODEL = 'gpt-5.6-sol';
+const CALIBRATION_EFFORT = 'medium';
 const ALLOWED_EXTENSIONS = new Set([
   '.txt', '.md', '.markdown', '.pdf', '.docx', '.rtf', '.html', '.htm', '.csv', '.hwp', '.hwpx',
 ]);
@@ -46,7 +48,7 @@ const EXTRACT_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['source', 'extracted'],
+        required: ['source', 'extracted', 'reason'],
         properties: {
           source: { type: 'string' },
           extracted: { type: 'boolean' },
@@ -72,7 +74,7 @@ const ANALYSIS_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['axis', 'evidenceCount', 'observation', 'directives'],
+        required: ['axis', 'evidenceCount', 'observation', 'directives', 'patterns'],
         properties: {
           axis: { type: 'string', enum: AXIS_IDS },
           evidenceCount: { type: 'integer', minimum: 0 },
@@ -176,7 +178,7 @@ For every file: read it, then use Write to save its body text verbatim to extrac
 - Keep headings, list items, and table cell text on their own lines.
 - If a file is unreadable or contains no authored prose, skip it, write no file for it, and report extracted=false with a short reason.
 
-Report one entry per source file. Do not comment on writing quality.`;
+Report one entry per source file. Set reason to an empty string when extraction succeeds. Do not comment on writing quality.`;
 }
 
 /** 분석 패스 프롬프트. 계산 가능한 값은 이미 코드가 냈으므로 해석만 요구한다. */
@@ -238,25 +240,31 @@ Give up to four entries covering formal report, email, explanatory prose, and pe
 - \`summary\` is one or two sentences in ${targetLanguage} describing the voice, for the user to read in the UI.`;
 }
 
-function runClaude(args, stdin, cwd, timeoutMs = ANALYSIS_TIMEOUT_MS) {
+function runCodex(args, stdin, cwd, timeoutMs = ANALYSIS_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
-    const child = spawn('claude', args, { cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn('codex', args, { cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
       child.kill('SIGTERM');
-      reject(new StyleCalibrationError('TIMEOUT', 'Opus 5 took too long to analyze the samples. Try fewer or smaller files.'));
+      reject(new StyleCalibrationError('TIMEOUT', 'GPT-5.6 Sol took too long to analyze the samples. Try fewer or smaller files.'));
     }, timeoutMs);
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-8000); });
     child.on('error', (error) => {
       clearTimeout(timer);
-      reject(new StyleCalibrationError('OPUS_UNAVAILABLE', String(error?.message ?? error)));
+      reject(new StyleCalibrationError('CODEX_UNAVAILABLE', String(error?.message ?? error)));
     });
     child.on('exit', (code) => {
       clearTimeout(timer);
       if (code === 0) resolve(stdout);
-      else reject(new StyleCalibrationError('ANALYSIS_FAILED', stderr.trim() || `Claude exited with code ${code}`));
+      else {
+        const message = stderr.trim() || `Codex exited with code ${code}`;
+        const errorCode = /authenticate|oauth|login|not logged in/i.test(message)
+          ? 'CODEX_UNAVAILABLE'
+          : 'ANALYSIS_FAILED';
+        reject(new StyleCalibrationError(errorCode, message));
+      }
     });
     child.stdin.end(stdin);
   });
@@ -264,20 +272,56 @@ function runClaude(args, stdin, cwd, timeoutMs = ANALYSIS_TIMEOUT_MS) {
 
 function extractStructuredResult(output) {
   try {
-    const parsed = JSON.parse(output);
-    if (parsed?.is_error) {
-      const message = String(parsed.result || parsed.error || 'Opus 5 failed to analyze the samples.');
-      const code = /authenticate|oauth|login/i.test(message) ? 'OPUS_UNAVAILABLE' : 'ANALYSIS_FAILED';
-      throw new StyleCalibrationError(code, message);
+    // Tests and older callers may return a single structured object. Codex
+    // itself emits JSONL and places the schema-constrained JSON in its final
+    // agent_message item.
+    try {
+      const parsed = JSON.parse(output);
+      if (parsed?.is_error) {
+        const message = String(parsed.result || parsed.error || 'GPT-5.6 Sol failed to analyze the samples.');
+        const code = /authenticate|oauth|login/i.test(message) ? 'CODEX_UNAVAILABLE' : 'ANALYSIS_FAILED';
+        throw new StyleCalibrationError(code, message);
+      }
+      if (parsed?.structured_output) return parsed.structured_output;
+      if (!parsed?.type) return parsed;
+    } catch (error) {
+      if (error instanceof StyleCalibrationError) throw error;
     }
-    return parsed.structured_output ?? JSON.parse(parsed.result);
+    let finalText = '';
+    let failure = '';
+    for (const line of String(output).split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line);
+      if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
+        finalText = String(event.item.text ?? '');
+      } else if (event.type === 'turn.failed') {
+        failure = String(event.error?.message ?? event.message ?? 'Codex calibration failed.');
+      }
+    }
+    if (failure) {
+      const code = /authenticate|oauth|login/i.test(failure) ? 'CODEX_UNAVAILABLE' : 'ANALYSIS_FAILED';
+      throw new StyleCalibrationError(code, failure);
+    }
+    return JSON.parse(finalText);
   } catch (error) {
     if (error instanceof StyleCalibrationError) throw error;
-    throw new StyleCalibrationError('INVALID_RESULT', 'Opus 5 returned an unreadable style analysis. Please try again.');
+    throw new StyleCalibrationError('INVALID_RESULT', 'GPT-5.6 Sol returned an unreadable style analysis. Please try again.');
   }
 }
 
-async function gatherCorpus(checked, temp, run) {
+function codexArgs(schemaPath, sandbox) {
+  return [
+    'exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules',
+    '--disable', 'apps', '--disable', 'browser_use', '--disable', 'computer_use',
+    '--disable', 'image_generation', '--disable', 'multi_agent', '--disable', 'plugins',
+    '--disable', 'skill_search', '--sandbox', sandbox, '--output-schema', schemaPath,
+    '--model', CALIBRATION_MODEL,
+    '-c', `model_reasoning_effort=${JSON.stringify(CALIBRATION_EFFORT)}`,
+    '-',
+  ];
+}
+
+async function gatherCorpus(checked, temp, run, extractionSchemaPath) {
   const chunks = [];
   const failed = [];
   for (const file of checked.files) {
@@ -287,11 +331,12 @@ async function gatherCorpus(checked, temp, run) {
   if (binaries.length > 0) {
     await fs.mkdir(path.join(temp, 'extracted'), { recursive: true });
     try {
-      const output = await run([
-        '-p', '--safe-mode', '--output-format', 'json', '--disable-slash-commands',
-        '--tools', 'Read,Write', '--model', 'opus', '--effort', 'low',
-        '--json-schema', JSON.stringify(EXTRACT_SCHEMA),
-      ], buildExtractionPrompt(binaries), temp, EXTRACT_TIMEOUT_MS);
+      const output = await run(
+        codexArgs(extractionSchemaPath, 'workspace-write'),
+        buildExtractionPrompt(binaries),
+        temp,
+        EXTRACT_TIMEOUT_MS,
+      );
       const report = extractStructuredResult(output);
       for (const entry of Array.isArray(report?.files) ? report.files : []) {
         if (!entry?.extracted) failed.push(String(entry?.source ?? ''));
@@ -306,7 +351,7 @@ async function gatherCorpus(checked, temp, run) {
     } catch (error) {
       // 추출이 통째로 실패해도 분석 패스는 파일을 직접 읽을 수 있다. 정량 계층만
       // 포기하고, 그 사실이 프로필에 신뢰도로 남는다.
-      if (error instanceof StyleCalibrationError && error.code === 'OPUS_UNAVAILABLE') throw error;
+      if (error instanceof StyleCalibrationError && error.code === 'CODEX_UNAVAILABLE') throw error;
       for (const file of binaries) failed.push(file.safeName);
     }
   }
@@ -408,7 +453,7 @@ export function renderStyleMarkdown({ language, axes, adaptation, bands, metrics
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-export async function calibrateWritingStyle(input, { run = runClaude } = {}) {
+export async function calibrateWritingStyle(input, { run = runCodex } = {}) {
   const checked = validateCalibrationInput(input);
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-style-calibration-'));
   try {
@@ -416,7 +461,13 @@ export async function calibrateWritingStyle(input, { run = runClaude } = {}) {
       await fs.writeFile(path.join(temp, file.safeName), file.bytes, { mode: 0o600 });
     }
 
-    const corpus = await gatherCorpus(checked, temp, run);
+    const extractionSchemaPath = path.join(temp, 'extraction-schema.json');
+    const analysisSchemaPath = path.join(temp, 'analysis-schema.json');
+    await Promise.all([
+      fs.writeFile(extractionSchemaPath, JSON.stringify(EXTRACT_SCHEMA), 'utf8'),
+      fs.writeFile(analysisSchemaPath, JSON.stringify(ANALYSIS_SCHEMA), 'utf8'),
+    ]);
+    const corpus = await gatherCorpus(checked, temp, run, extractionSchemaPath);
     let metrics = null;
     let stability = 0;
     let confidence = 'low';
@@ -439,11 +490,7 @@ export async function calibrateWritingStyle(input, { run = runClaude } = {}) {
     }
 
     const prompt = buildCalibrationPrompt({ ...checked, metrics });
-    const output = await run([
-      '-p', '--safe-mode', '--output-format', 'json', '--disable-slash-commands',
-      '--tools', 'Read', '--model', 'opus', '--effort', 'medium',
-      '--json-schema', JSON.stringify(ANALYSIS_SCHEMA),
-    ], prompt, temp);
+    const output = await run(codexArgs(analysisSchemaPath, 'read-only'), prompt, temp);
     const result = extractStructuredResult(output);
 
     // 정량 계층이 없을 때만 모델의 표본 판단에 기댄다.
@@ -459,7 +506,7 @@ export async function calibrateWritingStyle(input, { run = runClaude } = {}) {
 
     const axes = orderedAxes(result?.axes);
     if (!axes.some((axis) => axis.directives.length > 0)) {
-      throw new StyleCalibrationError('INVALID_RESULT', 'Opus 5 did not produce usable writing directives. Please try again.');
+      throw new StyleCalibrationError('INVALID_RESULT', 'GPT-5.6 Sol did not produce usable writing directives. Please try again.');
     }
     const adaptation = (Array.isArray(result?.adaptation) ? result.adaptation : [])
       .filter((entry) => entry?.genre && entry?.guidance)
