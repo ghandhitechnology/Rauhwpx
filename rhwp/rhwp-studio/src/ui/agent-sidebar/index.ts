@@ -114,24 +114,6 @@ function readStoredSidebarWidth(minWidth = SIDEBAR_WIDTH_MIN_FALLBACK): number {
   }
 }
 
-function visibleFlexChildren(el: HTMLElement): HTMLElement[] {
-  return [...el.children].filter((child): child is HTMLElement => {
-    if (!(child instanceof HTMLElement) || child.hidden) return false;
-    return getComputedStyle(child).display !== 'none';
-  });
-}
-
-function flexGapPx(el: HTMLElement): number {
-  return Number.parseFloat(getComputedStyle(el).columnGap || getComputedStyle(el).gap) || 0;
-}
-
-function packedFlexWidth(el: HTMLElement): number {
-  const kids = visibleFlexChildren(el);
-  if (kids.length === 0) return 0;
-  const widths = kids.reduce((sum, child) => sum + child.getBoundingClientRect().width, 0);
-  return widths + flexGapPx(el) * (kids.length - 1);
-}
-
 function horizontalChrome(el: HTMLElement, props: string[]): number {
   const style = getComputedStyle(el);
   return props.reduce((sum, prop) => sum + (Number.parseFloat(style.getPropertyValue(prop)) || 0), 0);
@@ -464,6 +446,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let followConversation = true;
   let conversationScrollRaf: number | null = null;
   let insetRecenterRaf: number | null = null;
+  let resizeMoveRaf: number | null = null;
+  let resizeMoveX = 0;
   // ── 문서별 채팅 격리 ──────────────────────────────────
   // 채팅은 만들어질 때의 문서(docKey)에 묶인다. 문서가 바뀌면 새 채팅을
   // 자동으로 시작하고, 다른 문서의 채팅은 읽기 전용으로만 열린다.
@@ -646,20 +630,34 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     window.addEventListener('pointercancel', endSidebarResize, true);
   }
 
+  function applyResizeMove(): void {
+    resizeMoveRaf = null;
+    if (!resizing || !resizeArmed) return;
+    applySidebarWidth(resizeStartWidth + (resizeStartX - resizeMoveX), {
+      persist: false,
+      recenter: false,
+    });
+  }
+
   function onResizePointerMove(e: PointerEvent): void {
     if (!resizing) return;
     e.preventDefault();
-    const dx = resizeStartX - e.clientX;
+    resizeMoveX = e.clientX;
     if (!resizeArmed) {
-      if (Math.abs(e.clientX - resizeStartX) < RESIZE_DRAG_THRESHOLD_PX) return;
+      if (Math.abs(resizeMoveX - resizeStartX) < RESIZE_DRAG_THRESHOLD_PX) return;
       resizeArmed = true;
     }
-    // 왼쪽 가장자리를 왼쪽으로 끌면 폭이 커진다.
-    applySidebarWidth(resizeStartWidth + dx, { persist: false, recenter: true });
+    // pointermove 는 프레임보다 잦다. 폭·용지 정렬은 한 프레임에 한 번만 한다.
+    if (resizeMoveRaf !== null) return;
+    resizeMoveRaf = requestAnimationFrame(applyResizeMove);
   }
 
   function endSidebarResize(): void {
     if (!resizing) return;
+    if (resizeMoveRaf !== null) {
+      cancelAnimationFrame(resizeMoveRaf);
+      applyResizeMove();
+    }
     const didDrag = resizeArmed;
     const fromTab = resizeFromCollapseTab;
     resizing = false;
@@ -1432,12 +1430,23 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   // 기존 inline 흐름을 유지한다. 모델/권한은 입력기 accessory로 내린다.
   chatPage.append(header, connBanner, messages, review, composer);
 
-  /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다. */
+  /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다.
+   *  펼쳐진 사이드바의 현재 폭이 아니라 max-content(말줄임 바닥)로 잰다.
+   *  space-between 으로 벌어진 빈 칸이 최솟값에 섞이면 전자 앱에서 600px
+   *  근처로 다시 잠긴다. */
+  function measureComposerMetaFloor(): number {
+    root.classList.add('ag-measuring-min');
+    const prevWidth = composerMeta.style.width;
+    composerMeta.style.width = 'max-content';
+    const packed = composerMeta.getBoundingClientRect().width;
+    composerMeta.style.width = prevWidth;
+    root.classList.remove('ag-measuring-min');
+    return packed;
+  }
+
   function refreshSidebarWidthMin(): number {
     if (!composer.isConnected) return sidebarWidthMin;
-    const selectorWidth = packedFlexWidth(selectors);
-    const utilityWidth = packedFlexWidth(composerUtilityActions);
-    const packed = selectorWidth + (selectorWidth && utilityWidth ? flexGapPx(composerMeta) : 0) + utilityWidth;
+    const packed = measureComposerMetaFloor();
     if (packed <= 0) return sidebarWidthMin;
     const chrome = horizontalChrome(composer, [
       'margin-left',
@@ -4043,6 +4052,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       endColumnResize();
       root.classList.remove('ag-col-resizing');
       clearInsetRecenterLoop();
+      if (resizeMoveRaf !== null) {
+        cancelAnimationFrame(resizeMoveRaf);
+        resizeMoveRaf = null;
+      }
       clearConnCountdown();
       writingStyleCalibration.dispose();
       settingsPanel.dispose();

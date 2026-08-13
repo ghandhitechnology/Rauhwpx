@@ -21,6 +21,7 @@ test('composer exposes chat-scoped quick add and a separate reference library pa
   assert.match(sidebar, /composerUtilityActions\.insertBefore\(referenceLibrary\.trigger, permissionBtn\)/);
   assert.match(sidebar, /referenceLibrary\.page/);
   assert.match(library, /이 채팅에 참고자료 추가/);
+  assert.match(library, /trigger\.title = '참고자료'/);
   assert.match(library, /targetFor\('chat', options\.getContext\(\)\)/);
   assert.match(css, /\.ag-references-open \.ag-references-page/);
 });

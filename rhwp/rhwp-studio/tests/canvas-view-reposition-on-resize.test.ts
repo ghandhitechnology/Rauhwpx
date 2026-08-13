@@ -12,4 +12,6 @@ test('viewport resize repositions pooled canvases after pageLeft changes', () =>
     /updateVisiblePages 는 pool hit 시 style\.left 를 건드리지 않는다/,
   );
   assert.match(source, /syncViewportSize\(\)/);
+  assert.match(source, /sidebarInsetIsMoving/);
+  assert.match(source, /if \(!this\.sidebarInsetIsMoving\(\)\) this\.updateVisiblePages\(\)/);
 });
