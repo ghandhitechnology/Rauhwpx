@@ -69,8 +69,13 @@ test('설정은 연결·기본 설정·글쓰기 보정·사용량 네 묶음이
 });
 
 test('연결 묶음은 허브 상태와 프로바이더 상태, 세 동작을 갖는다', () => {
-  assert.match(settings, /bridge\.reconnectNow\(\)/);
+  assert.match(settings, /void bridge\.reconnectNow\(\)/);
+  assert.doesNotMatch(settings, /ensureDesktopAgentHub/);
   assert.match(settings, /hubReconnect\.disabled = connectionState === 'connected'/);
+  assert.doesNotMatch(
+    settings,
+    /hubReconnect\.disabled = connectionState === 'connected' \|\| connectionState === 'connecting'/,
+  );
   assert.match(settings, /'상태 새로고침'/);
   assert.match(settings, /void refreshProviders\(true\)/);
   assert.match(settings, /bridge\.requestProviderStatus\(refresh\)/);

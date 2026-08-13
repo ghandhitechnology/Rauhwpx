@@ -5,8 +5,11 @@
  *  - 허브의 tool-request를 AgentToolExecutor로 실행하고 tool-response로 응답
  *  - agent-event 스트림을 사이드바용 SidebarEvent로 중계
  *  - turn-start/turn-end로 PendingEditManager의 change-set 수명주기를 구동
- * 접속이 끊기면 1s → 2s → 5s → 10s 백오프로 무한 재시도한다.
+ * 접속이 끊기면 250ms → 500ms → 1s → 2s → 5s 백오프로 무한 재시도한다.
+ * 연결 시도가 멈추면 제한 시간 후 소켓을 접고, 데스크톱에서는 허브 프로세스도
+ * 다시 띄운다. 포커스·온라인 복구 시에도 즉시 붙는다.
  */
+import { ensureDesktopAgentHub } from '../desktop-integration.ts';
 import { RevisionTracker } from './revision.ts';
 import { AgentToolExecutor } from './tool-executor.ts';
 import { PendingEditManager } from './pending-edits.ts';
@@ -58,8 +61,8 @@ export interface AgentBridge {
   getWorkflowState(): AgentWorkflowState;
   /** 다른 탭이 연결을 차지한 상태에서 현재 탭이 스튜디오 연결을 다시 가져온다. */
   takeOverConnection(): void;
-  /** 예약된 백오프를 취소하고 즉시 다시 연결한다. 이미 연결/연결 중이면 무시. */
-  reconnectNow(): void;
+  /** 예약된 백오프를 취소하고 허브를 띄운 뒤 즉시 다시 연결한다. 이미 연결돼 있으면 무시. 연결 중이어도 소켓을 접고 다시 붙는다. */
+  reconnectNow(): Promise<void>;
   /** 로컬 CLI 설치 상태. refresh=true 면 허브가 새로 프로브한다. */
   requestProviderStatus(refresh?: boolean): Promise<ProviderStatusMap | null>;
   /** 누적 사용량 요약. 응답이 없으면 null. */
@@ -104,7 +107,9 @@ type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
 /** 허브가 다른 스튜디오 탭에게 자리를 내주며 보내는 close code (server.mjs와 동일 값). */
 const CLOSE_CODE_REPLACED = 4000;
 
-const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000];
+const RECONNECT_DELAYS_MS = [250, 500, 1000, 2000, 5000];
+/** localhost 핸드셰이크가 이보다 길면 소켓을 접고 다음 백오프로 넘긴다. */
+const CONNECT_TIMEOUT_MS = 4000;
 
 /** 요청/응답 대기 상한 — 넘기면 null 로 안착한다(던지지 않는다). */
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -343,6 +348,9 @@ class AgentBridgeImpl implements AgentBridge {
   /** 지금까지 실패한 연결 시도 수. 연결이 열리면 0 으로 돌아간다. */
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  private hubLaunch: Promise<boolean> | null = null;
+  private reconnectSeq = 0;
   private requests = new PendingRequestRegistry();
   private disposed = false;
 
@@ -417,40 +425,92 @@ class AgentBridgeImpl implements AgentBridge {
     this.url = opts?.url ?? (import.meta as any).env?.VITE_RHWP_AGENT_URL ?? 'ws://127.0.0.1:5175';
     this.token = opts?.token ?? (import.meta as any).env?.VITE_RHWP_AGENT_TOKEN ?? 'dev';
     this.httpBaseUrl = this.url.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:').replace(/\/$/, '');
-    window.addEventListener('focus', this.onWindowFocus);
+    window.addEventListener('focus', this.onResume);
+    window.addEventListener('online', this.onResume);
+    document.addEventListener('visibilitychange', this.onVisibility);
+    this.requestHubLaunch();
     this.connect();
   }
 
-  /** 'replaced' 상태에서 탭이 다시 활성화되면 허브 연결을 되찾는다. */
-  private onWindowFocus = (): void => {
-    if (this.disposed || this.state !== 'replaced') return;
-    this.reconnectAttempt = 0;
-    this.connect();
+  /** 끊겼거나 다른 탭에 밀려난 뒤 창이 다시 살아나면 즉시 붙는다. */
+  private onResume = (): void => {
+    if (this.disposed || this.state === 'connected' || this.state === 'connecting') return;
+    void this.reconnectNow();
   };
 
-  /** 백오프를 접고 지금 붙는다 — takeover(다른 탭)와 수동 재연결이 공유한다. */
-  private connectImmediately(): void {
-    if (this.disposed || this.state === 'connected' || this.state === 'connecting') return;
-    if (this.reconnectTimer !== null) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
+  private onVisibility = (): void => {
+    if (document.visibilityState !== 'visible') return;
+    this.onResume();
+  };
+
+  /** 데스크톱·Vite 가 있으면 허브를 확인하고, 죽어 있으면 다시 띄운 뒤 준비될 때까지 기다린다. */
+  private requestHubLaunch(): Promise<boolean> {
+    if (!this.hubLaunch) {
+      this.hubLaunch = ensureDesktopAgentHub().finally(() => {
+        this.hubLaunch = null;
+      });
     }
+    return this.hubLaunch;
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer === null) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer === null) return;
+    clearTimeout(this.connectTimer);
+    this.connectTimer = null;
+  }
+
+  /** 진행 중 소켓을 핸들러 없이 닫아, 닫힘 이벤트가 재시도를 이중으로 걸지 않게 한다. */
+  private abortSocket(): void {
+    const ws = this.ws;
+    this.ws = null;
+    this.clearConnectTimer();
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    try {
+      ws.close();
+    } catch {
+      // 이미 닫힌 소켓은 무시.
+    }
+  }
+
+  /** 백오프와 멈춘 핸드셰이크를 접고 지금 붙는다. */
+  private forceReconnect(): void {
+    if (this.disposed) return;
+    this.clearReconnectTimer();
+    this.abortSocket();
     this.reconnectAttempt = 0;
     this.connect();
   }
 
   takeOverConnection(): void {
-    this.connectImmediately();
+    this.forceReconnect();
   }
 
-  reconnectNow(): void {
-    this.connectImmediately();
+  async reconnectNow(): Promise<void> {
+    if (this.disposed || this.state === 'connected') return;
+    const seq = ++this.reconnectSeq;
+    this.clearReconnectTimer();
+    this.abortSocket();
+    this.setState('connecting');
+    await this.requestHubLaunch();
+    if (this.disposed || seq !== this.reconnectSeq || this.state === 'connected') return;
+    this.forceReconnect();
   }
 
   // ─── connection ───────────────────────────────────────────
 
   private connect(): void {
     if (this.disposed) return;
+    this.abortSocket();
     const base = this.url.replace(/\/$/, '');
     const wsUrl = `${base}/studio?token=${encodeURIComponent(this.token)}`;
     this.setState('connecting');
@@ -465,8 +525,18 @@ class AgentBridgeImpl implements AgentBridge {
       return;
     }
     this.ws = ws;
+    this.connectTimer = setTimeout(() => {
+      this.connectTimer = null;
+      if (this.disposed || this.ws !== ws || this.state !== 'connecting') return;
+      try {
+        ws.close();
+      } catch {
+        // onclose 가 뒤따른다.
+      }
+    }, CONNECT_TIMEOUT_MS);
     ws.onopen = () => {
       if (this.disposed || this.ws !== ws) return;
+      this.clearConnectTimer();
       this.reconnectAttempt = 0;
       this.setState('connected');
       if (this.pendingChatStart !== null) {
@@ -494,6 +564,7 @@ class AgentBridgeImpl implements AgentBridge {
     ws.onclose = (ev) => {
       if (this.ws !== ws) return;
       this.ws = null;
+      this.clearConnectTimer();
       if (this.disposed) return;
       // 응답을 기다리던 요청은 연결과 함께 사라진다 — null 로 닫아 UI 가 멈추지 않게.
       this.requests.cancelAll();
@@ -514,17 +585,26 @@ class AgentBridgeImpl implements AgentBridge {
 
   private scheduleReconnect(): void {
     if (this.disposed || this.reconnectTimer !== null) return;
+    void this.requestHubLaunch();
     const step = Math.min(
       Math.max(0, this.reconnectAttempt - 1),
       RECONNECT_DELAYS_MS.length - 1,
     );
     const delay = RECONNECT_DELAYS_MS[step]!;
+    const seq = this.reconnectSeq;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.connect();
+      void this.connectAfterHub(seq);
     }, delay);
     // 사이드바가 "n초 후 재시도" 를 셀 수 있도록 남은 시간을 함께 알린다.
     this.emitConnection(delay);
+  }
+
+  /** 허브가 뜰 때까지 기다린 다음 소켓을 연다. 그 사이 수동 재연결이 있으면 접는다. */
+  private async connectAfterHub(seq: number): Promise<void> {
+    await this.requestHubLaunch();
+    if (this.disposed || seq !== this.reconnectSeq || this.state === 'connected') return;
+    this.connect();
   }
 
   /** 재시도 계기(시도 횟수·남은 시간)를 실은 connection 이벤트. */
@@ -1335,19 +1415,12 @@ class AgentBridgeImpl implements AgentBridge {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    window.removeEventListener('focus', this.onWindowFocus);
-    if (this.reconnectTimer !== null) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
+    window.removeEventListener('focus', this.onResume);
+    window.removeEventListener('online', this.onResume);
+    document.removeEventListener('visibilitychange', this.onVisibility);
+    this.clearReconnectTimer();
     this.requests.cancelAll();
-    const ws = this.ws;
-    this.ws = null;
-    try {
-      ws?.close();
-    } catch {
-      // 이미 닫힌 소켓은 무시.
-    }
+    this.abortSocket();
     this.listeners.clear();
     this.revealUnsub?.();
     this.revealUnsub = null;

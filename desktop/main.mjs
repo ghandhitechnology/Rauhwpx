@@ -1,17 +1,25 @@
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { extname, join, normalize, sep } from 'node:path';
+import { dirname, extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   app,
   BrowserWindow,
   Menu,
   dialog,
+  ipcMain,
   nativeTheme,
   shell,
-  utilityProcess,
 } from 'electron';
 import electronUpdater from 'electron-updater';
+import {
+  DEFAULT_HUB_PORT,
+  ensureAgentHub,
+  isHubHealthy,
+  nextHubRestartDelay,
+  resolveHubLaunch,
+} from './agent-hub.mjs';
 
 const { autoUpdater } = electronUpdater;
 const mime = {
@@ -34,7 +42,8 @@ const mime = {
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const RELEASES_URL = 'https://github.com/ghandhitechnology/Rauhwpx/releases/latest';
-const AGENT_PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
+const AGENT_PORT = Number(process.env.RHWP_AGENT_PORT ?? DEFAULT_HUB_PORT);
+const PRELOAD_PATH = join(__dirname, 'preload.cjs');
 const devUrl = process.env.RHWP_DEV_URL || '';
 
 app.setName('Rauhwpx');
@@ -43,6 +52,10 @@ let mainWindow = null;
 let studioServer = null;
 let studioOrigin = '';
 let agentProcess = null;
+let agentChain = Promise.resolve();
+let agentRestartTimer = null;
+let agentRestartAttempt = 0;
+let quitting = false;
 
 function studioDist() {
   return join(__dirname, '..', 'rhwp', 'rhwp-studio', 'dist');
@@ -87,22 +100,117 @@ function startStudioServer() {
   });
 }
 
-function startAgent() {
-  const script = agentScript();
-  if (!existsSync(script)) {
-    console.warn('[rauhwpx] agent script missing:', script);
-    return;
+function clearAgentRestart() {
+  if (agentRestartTimer !== null) {
+    clearTimeout(agentRestartTimer);
+    agentRestartTimer = null;
   }
-  agentProcess = utilityProcess.fork(script, [], {
-    serviceName: 'rhwp-agent',
-    stdio: 'pipe',
+}
+
+function scheduleAgentRestart() {
+  if (quitting || agentRestartTimer !== null) return;
+  const delay = nextHubRestartDelay(agentRestartAttempt);
+  agentRestartAttempt += 1;
+  console.warn(`[rauhwpx] agent hub exited; restarting in ${delay}ms`);
+  agentRestartTimer = setTimeout(() => {
+    agentRestartTimer = null;
+    void ensureAgent();
+  }, delay);
+}
+
+function startAgent() {
+  if (agentProcess) return true;
+  const script = agentScript();
+  const launch = resolveHubLaunch({
+    packaged: app.isPackaged,
+    execPath: process.execPath,
+    scriptPath: script,
+    agentDir: dirname(script),
+    home: app.getPath('home'),
+    extraDirs: [join(__dirname, '..', 'node_modules', '.bin')],
     env: {
       ...process.env,
       RHWP_AGENT_PORT: String(AGENT_PORT),
     },
   });
-  agentProcess.stdout?.on('data', (chunk) => process.stdout.write(chunk));
-  agentProcess.stderr?.on('data', (chunk) => process.stderr.write(chunk));
+  if (!launch) {
+    console.warn('[rauhwpx] agent hub launch command not found:', script);
+    return false;
+  }
+  console.log(`[rauhwpx] starting agent hub via ${launch.via}: ${launch.command} ${launch.args.join(' ')}`);
+  const child = spawn(launch.command, launch.args, {
+    cwd: launch.cwd,
+    env: launch.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  agentProcess = child;
+  child.stdout?.on('data', (chunk) => process.stdout.write(chunk));
+  child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
+  child.on('error', (error) => {
+    console.warn('[rauhwpx] agent hub spawn error:', error);
+    if (agentProcess !== child) return;
+    agentProcess = null;
+    if (!quitting) scheduleAgentRestart();
+  });
+  child.on('exit', (code, signal) => {
+    console.warn('[rauhwpx] agent hub process exit:', code, signal ?? '');
+    if (agentProcess !== child) return;
+    agentProcess = null;
+    if (!quitting) scheduleAgentRestart();
+  });
+  return true;
+}
+
+function stopAgent() {
+  const child = agentProcess;
+  if (!child) return Promise.resolve();
+  agentProcess = null;
+  clearAgentRestart();
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      resolve();
+    }, 2000);
+    child.once('exit', finish);
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      finish();
+    }
+  });
+}
+
+async function runEnsure({ restartUnhealthy = false } = {}) {
+  const result = await ensureAgentHub({
+    port: AGENT_PORT,
+    processAlive: Boolean(agentProcess),
+    restartUnhealthy,
+    stop: stopAgent,
+    start: startAgent,
+  });
+  if (result.ready) {
+    agentRestartAttempt = 0;
+    clearAgentRestart();
+  }
+  return result;
+}
+
+function ensureAgent(opts = {}) {
+  const job = agentChain.then(
+    () => runEnsure(opts),
+    () => runEnsure(opts),
+  );
+  agentChain = job.then(() => undefined, () => undefined);
+  return job;
 }
 
 function installMenu() {
@@ -147,12 +255,16 @@ async function createWindow() {
     show: false,
     backgroundColor,
     webPreferences: {
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      sandbox: false,
     },
   });
   mainWindow = window;
+  window.webContents.on('preload-error', (_event, preloadPath, error) => {
+    console.warn('[rauhwpx] preload error', preloadPath, error);
+  });
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/i.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
@@ -171,6 +283,7 @@ async function createWindow() {
 }
 
 function stopChildren() {
+  clearAgentRestart();
   try {
     agentProcess?.kill();
   } catch {
@@ -181,18 +294,32 @@ function stopChildren() {
   studioServer = null;
 }
 
+ipcMain.handle('agent-hub:ensure', async () => {
+  if (quitting) return { started: false, ready: false };
+  if (await isHubHealthy(AGENT_PORT)) {
+    agentRestartAttempt = 0;
+    return { started: false, ready: true };
+  }
+  return ensureAgent({ restartUnhealthy: true });
+});
+
 app.whenReady().then(async () => {
   installMenu();
   if (!devUrl) await startStudioServer();
+  // Bring the hub up before the window so the first WebSocket is not refused.
+  await ensureAgent();
   await createWindow();
-  startAgent();
   if (app.isPackaged) {
     setTimeout(() => {
       void autoUpdater.checkForUpdatesAndNotify().catch(() => {});
     }, 4000);
   }
   app.on('activate', () => {
-    if (!mainWindow) void createWindow();
+    if (!mainWindow) {
+      void ensureAgent().then(() => createWindow());
+      return;
+    }
+    void ensureAgent();
   });
 }).catch((error) => {
   dialog.showErrorBox('Rauhwpx could not open', error instanceof Error ? error.message : String(error));
@@ -204,5 +331,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  quitting = true;
   stopChildren();
 });
