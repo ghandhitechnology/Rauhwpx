@@ -970,7 +970,14 @@ const httpServer = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`);
     if (await handleReferenceHttp(req, res, url)) return;
     if (req.method === 'GET' && url.pathname === '/healthz') {
-      res.writeHead(200, { 'content-type': 'application/json' });
+      const origin = typeof req.headers.origin === 'string' ? req.headers.origin : null;
+      const allowOrigin = origin && /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/i.test(origin)
+        ? origin
+        : null;
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        ...(allowOrigin ? { 'access-control-allow-origin': allowOrigin, vary: 'Origin' } : {}),
+      });
       res.end(JSON.stringify({
         ok: true,
         protocol: PROTOCOL_VERSION,

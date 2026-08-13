@@ -45,5 +45,7 @@ test('desktop window shows even if ready-to-show already fired during load', () 
   const fallbackIdx = desktopMain.indexOf('!window.isVisible()) window.show()');
   assert.ok(readyIdx >= 0 && loadIdx >= 0 && readyIdx < loadIdx);
   assert.ok(fallbackIdx > loadIdx);
-  assert.match(desktopMain, /await createWindow\(\);\s*startAgent\(\);/s);
+  assert.match(desktopMain, /await ensureAgent\(\);\s*await createWindow\(\);/s);
+  assert.match(desktopMain, /preload: PRELOAD_PATH/);
+  assert.match(desktopMain, /ipcMain.handle\('agent-hub:ensure'/);
 });
