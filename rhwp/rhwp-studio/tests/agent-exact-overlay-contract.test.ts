@@ -50,3 +50,16 @@ test('exact replace colors are semantic green and red', () => {
   assert.match(overlayCss, /\.ag-exact-ink[\s\S]*--ag-pending-ink: 35, 122, 75/);
   assert.match(overlayCss, /\.ag-exact-anchor::before[\s\S]*background: #b23a48/);
 });
+
+test('agent ink and typewriter covers clamp forced line-end spaces', () => {
+  const inkSrc = readFileSync(new URL('../src/agent/selection-ink.ts', import.meta.url), 'utf8');
+  assert.match(inkSrc, /export function measureInkRange/);
+  assert.match(inkSrc, /newlineOffsets\(text, startOff\)/);
+  assert.match(inkSrc, /clampRectsToTextEnds/);
+  assert.match(overlaySrc, /measureInkRange\(range,/);
+  assert.doesNotMatch(
+    overlaySrc,
+    /if \(range\.endParaIdx <= range\.startParaIdx\) return \{ rects, enters: \[\] \}/,
+  );
+  assert.match(revealSrc, /measureInkRange\(r,/);
+});

@@ -11,6 +11,7 @@ import {
   type ExactDiffHunk,
   type ExactDiffResult,
 } from './exact-text-diff.ts';
+import { measureInkRange } from './selection-ink.ts';
 
 /** 객체 op 의 overlay 좌표 해석 참조 — 렌더 시점에 wasm 프로브로 rect 를 구한다 */
 export type ObjectOverlayRef =
@@ -94,8 +95,6 @@ interface PooledNode {
 const HIT_SLOP_PX = 4;
 const POPOVER_MAX_SCALARS = 320;
 const EXACT_INK_GUTTER = 0.35;
-/** rect 와 캐럿을 같은 줄로 볼 세로 허용 오차(문서 단위). */
-const LINE_MATCH_SLOP = 2;
 /** 텍스트 끝과 개행 표시 사이의 간격(줄 높이 배수). */
 const ENTER_GAP_FACTOR = 0.18;
 /** 개행 표시의 크기(줄 높이 배수). */
@@ -344,58 +343,36 @@ export class PendingOverlayRenderer {
   /**
    * 범위의 rect 를 실제 텍스트 끝까지로 자르고, 문단이 끝나는 자리에 개행 표시를 만든다.
    *
-   * 엔진의 selection rect 는 문단 마지막 줄을 여백까지 채워 반환한다(문단 부호를 포함하는
-   * 관습). 그대로 밑줄을 그으면 글자가 없는 곳까지 줄이 이어져, 여러 문단을 삽입했을 때
-   * 오른쪽이 죄다 그어진 표처럼 보인다. 문단 끝 캐럿 x 로 잘라 내고 그 자리에 개행
-   * 표시를 놓아 "여기서 줄이 바뀌었다"를 대신 말하게 한다.
+   * 엔진의 selection rect 는 강제 줄바꿈·문단 부호를 여백까지 밀어 반환한다.
+   * 그대로 밑줄을 그으면 글자가 없는 곳까지 큰 공백이 튀어 나온다. 줄 끝 캐럿
+   * x 로 잘라 내고, 문단이 바뀌는 자리에 개행 표시를 놓는다.
    */
   private measureRange(range: DocRange, tone: AgentName | 'exact'): MeasuredRange {
-    const rects = this.rangeRects(range);
-    if (range.endParaIdx <= range.startParaIdx) return { rects, enters: [] };
+    const measured = measureInkRange(range, {
+      rects: () => this.rangeRects(range),
+      paragraphLength: (paraIdx) => this.paragraphLength(range, paraIdx),
+      text: (paraIdx, start, count) => this.rangeText(range, paraIdx, start, count),
+      caret: (paraIdx, offset) => this.caretRectAt(range, paraIdx, offset),
+    });
+    const enters: EnterMark[] = measured.paraEnds.map((end) => ({
+      pageIndex: end.rect.pageIndex,
+      x: end.rect.x,
+      y: end.rect.y,
+      height: end.rect.height,
+      tone,
+    }));
+    return { rects: measured.rects, enters };
+  }
 
-    // 문단별 텍스트 끝 캐럿. 마지막 문단은 범위 끝 오프셋이 곧 텍스트 끝이다.
-    const ends: Array<{ paraIdx: number; rect: SelectionRect }> = [];
-    for (let p = range.startParaIdx; p <= range.endParaIdx; p++) {
-      const offset = p === range.endParaIdx
-        ? range.endCharOffset
-        : this.paragraphLength(range, p);
-      try {
-        ends.push({ paraIdx: p, rect: this.caretRectAt(range, p, offset) });
-      } catch {
-        // 주소 드리프트 — 이 문단은 자르지 않고 원본 rect 를 유지한다.
-      }
-    }
-
-    const clamped: SelectionRect[] = [];
-    for (const rect of rects) {
-      const end = ends.find((candidate) => (
-        candidate.rect.pageIndex === rect.pageIndex
-        // 캐럿이 이 rect 의 줄 안에 있고, rect 가 캐럿을 지나 뻗어 있는가.
-        && candidate.rect.y + candidate.rect.height > rect.y + LINE_MATCH_SLOP
-        && candidate.rect.y < rect.y + rect.height - LINE_MATCH_SLOP
-        && candidate.rect.x >= rect.x - LINE_MATCH_SLOP
-        && candidate.rect.x <= rect.x + rect.width + LINE_MATCH_SLOP
-      ));
-      if (!end) {
-        clamped.push(rect);
-        continue;
-      }
-      const width = Math.max(0, end.rect.x - rect.x);
-      if (width > 0.05) clamped.push({ ...rect, width });
-    }
-
-    // 개행 표시는 rect 가 아니라 문단 끝 캐럿에서 만든다 — 빈 줄을 삽입하면
-    // 엔진이 rect 를 내주지 않으므로, rect 기준으로 만들면 그 줄만 표시가 없다.
-    const enters: EnterMark[] = ends
-      .filter((end) => end.paraIdx !== range.endParaIdx)
-      .map((end) => ({
-        pageIndex: end.rect.pageIndex,
-        x: end.rect.x,
-        y: end.rect.y,
-        height: end.rect.height,
-        tone,
-      }));
-    return { rects: clamped, enters };
+  private rangeText(range: DocRange, paraIdx: number, start: number, count: number): string {
+    if (count <= 0) return '';
+    const cell = range.cell;
+    return cell
+      ? this.deps.wasm.getTextInCell(
+        range.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
+        paraIdx, start, count,
+      )
+      : this.deps.wasm.getTextRange(range.sectionIdx, paraIdx, start, count);
   }
 
   private cursorRect(op: ReplaceOverlayOp, scalarOffset: number): SelectionRect {
