@@ -5,6 +5,12 @@
  * IndexedDB를 사용할 수 없는 테스트/제한 환경에서는 메모리 저장소로 폴백한다.
  */
 
+import {
+  IDB_OPERATION_TIMEOUT_MS,
+  openIndexedDatabase,
+  withTimeout,
+} from '../core/idb-open.ts';
+
 const DB_NAME = 'rhwpStudioAutosave';
 const DB_VER = 1;
 const DRAFTS = 'drafts';
@@ -60,16 +66,10 @@ function draftToRow(draft: AutosaveDraft): DraftRow {
 
 function openDb(): Promise<IDBDatabase | null> {
   if (!idbAvailable()) return Promise.resolve(null);
-  return new Promise((resolve) => {
-    const req = indexedDB.open(DB_NAME, DB_VER);
-    req.onerror = () => resolve(null);
-    req.onsuccess = () => resolve(req.result);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(DRAFTS)) {
-        db.createObjectStore(DRAFTS, { keyPath: 'id' });
-      }
-    };
+  return openIndexedDatabase(DB_NAME, DB_VER, (db) => {
+    if (!db.objectStoreNames.contains(DRAFTS)) {
+      db.createObjectStore(DRAFTS, { keyPath: 'id' });
+    }
   });
 }
 
@@ -77,7 +77,10 @@ async function withDb<T>(fn: (db: IDBDatabase) => Promise<T>, fallback: () => Pr
   const db = await openDb();
   if (!db) return fallback();
   try {
-    return await fn(db);
+    return await withTimeout(fn(db), IDB_OPERATION_TIMEOUT_MS, DB_NAME);
+  } catch (error) {
+    console.warn(`[autosave] IndexedDB 지연, 메모리 폴백:`, error);
+    return fallback();
   } finally {
     db.close();
   }

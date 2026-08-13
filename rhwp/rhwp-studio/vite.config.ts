@@ -107,6 +107,7 @@ export default defineConfig({
     },
     VitePWA({
       registerType: 'autoUpdate',
+      injectRegister: false,
       includeAssets: ['favicon.ico', 'icons/*.png'],
       manifest: {
         name: 'rhwp-studio',

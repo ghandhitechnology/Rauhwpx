@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { ensureDesktopAgentHub, isDesktopApp, requestDevAgentHub } from '../src/desktop-integration.ts';
+import { ensureDesktopAgentHub, installWebAppShell, isDesktopApp, requestDevAgentHub, suppressDesktopServiceWorker } from '../src/desktop-integration.ts';
 
 const source = readFileSync(new URL('../src/desktop-integration.ts', import.meta.url), 'utf8');
 const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
@@ -70,4 +70,30 @@ test('브리지와 설정 재연결이 데스크톱 허브 기동을 탄다', ()
   );
   assert.match(source, /rhwpDesktop\?\.ensureAgentHub/);
   assert.match(source, /\/Electron\/i\.test\(ua\)/);
+});
+
+test('데스크톱 셸은 서비스 워커를 끄고 PWA 등록을 건너뛴다', async () => {
+  const vite = readFileSync(new URL('../vite.config.ts', import.meta.url), 'utf8');
+  const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  assert.match(vite, /injectRegister:\s*false/);
+  assert.match(main, /installWebAppShell\(\)/);
+
+  const unregisters: string[] = [];
+  await suppressDesktopServiceWorker({
+    rhwpDesktop: { ensureAgentHub: async () => true },
+    navigator: {
+      serviceWorker: {
+        getRegistrations: async () => [{
+          unregister: async () => {
+            unregisters.push('sw');
+            return true;
+          },
+        }],
+        addEventListener: () => {},
+      },
+    },
+  });
+  assert.deepEqual(unregisters, ['sw']);
+
+  installWebAppShell({});
 });
