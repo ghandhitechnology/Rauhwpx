@@ -32,7 +32,7 @@ All code lives under `rhwp/` — run every command below from that directory unl
 
 ### rhwp-agent (AI sidebar hub, from `rhwp/rhwp-agent/`)
 
-- `npm start` → WS hub on 127.0.0.1:5175 (`curl http://127.0.0.1:5175/healthz` to check); then run the studio dev server and use the sidebar in the browser.
+- `npm start` → background WS hub on 127.0.0.1:5175 (`npm stop` to quit; `npm run start:fg` for a foreground process). Then `cd rhwp-studio && npm run dev` and use the sidebar in the browser.
 
 ### Verification tools
 
