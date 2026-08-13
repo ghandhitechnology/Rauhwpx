@@ -742,6 +742,14 @@ impl WebCanvasRenderer {
             self.ctx.set_text_align("center");
             self.ctx.set_text_baseline("middle");
             let _ = self.ctx.fill_text(run.display_or_text(), 0.0, 0.0);
+            if run.style.bold {
+                // 합성 굵기 (draw_text 의 synthetic_bold 와 동일 근거)
+                self.ctx
+                    .set_stroke_style_str(&color_to_css(run.style.color));
+                self.ctx.set_line_width((font_size * 0.04).clamp(0.25, 1.4));
+                self.ctx.set_line_join("round");
+                let _ = self.ctx.stroke_text(run.display_or_text(), 0.0, 0.0);
+            }
             self.ctx.restore();
         } else {
             self.draw_text(
@@ -2283,6 +2291,15 @@ impl Renderer for WebCanvasRenderer {
                     }
                 }
             }
+            // 합성 굵기: 웹폰트는 regular 웨이트만 등록되고 Canvas2D 는 CSS 와 달리
+            // faux bold 를 합성하지 않으므로, ctx.font 의 "bold" 만으로는 굵게가
+            // 그려지지 않는다. 글리프 fill 위에 동일 색 얇은 stroke 를 덧그려 근사한다.
+            let synthetic_bold = style.bold;
+            if synthetic_bold {
+                self.ctx.set_stroke_style_str(&color_to_css(style.color));
+                self.ctx.set_line_width((font_size * 0.04).clamp(0.25, 1.4));
+                self.ctx.set_line_join("round");
+            }
             for (cluster_idx, (char_idx, cluster_str)) in clusters.iter().enumerate() {
                 if cluster_str == " " || cluster_str == "\t" || cluster_str == "\u{2007}" {
                     continue;
@@ -2321,6 +2338,9 @@ impl Renderer for WebCanvasRenderer {
                     );
                     self.ctx.set_font(&fallback_font);
                     let _ = self.ctx.fill_text(cluster_str, char_x, y);
+                    if synthetic_bold {
+                        let _ = self.ctx.stroke_text(cluster_str, char_x, y);
+                    }
                     self.ctx.restore();
                     self.ctx.set_font(&font); // 원래 폰트 복원
                     continue;
@@ -2336,6 +2356,9 @@ impl Renderer for WebCanvasRenderer {
                     self.ctx.translate(char_x, y).unwrap_or(());
                     self.ctx.scale(0.5, 1.0).unwrap_or(());
                     let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
+                    if synthetic_bold {
+                        let _ = self.ctx.stroke_text(cluster_str, 0.0, 0.0);
+                    }
                     self.ctx.restore();
                 } else {
                     let cluster_advance = {
@@ -2371,6 +2394,9 @@ impl Renderer for WebCanvasRenderer {
                         .scale(ratio * fit_scale.unwrap_or(1.0), 1.0)
                         .unwrap_or(());
                     let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
+                    if synthetic_bold {
+                        let _ = self.ctx.stroke_text(cluster_str, 0.0, 0.0);
+                    }
                     self.ctx.restore();
                 }
             }
