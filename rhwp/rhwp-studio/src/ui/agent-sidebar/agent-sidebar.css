@@ -469,6 +469,11 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   color: var(--ag-text);
 }
 
+.ag-conn-banner.ag-conn-banner-wait {
+  border-color: color-mix(in srgb, var(--accent-primary) 35%, var(--ag-border-strong));
+  background: color-mix(in srgb, var(--accent-primary) 7%, var(--ag-bg-2));
+}
+
 .ag-conn-banner[hidden] {
   display: none;
 }
