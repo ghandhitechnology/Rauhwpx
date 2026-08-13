@@ -61,8 +61,8 @@ export interface AgentBridge {
   getWorkflowState(): AgentWorkflowState;
   /** 다른 탭이 연결을 차지한 상태에서 현재 탭이 스튜디오 연결을 다시 가져온다. */
   takeOverConnection(): void;
-  /** 예약된 백오프를 취소하고 즉시 다시 연결한다. 이미 연결돼 있으면 무시. 연결 중이어도 소켓을 접고 다시 붙는다. */
-  reconnectNow(): void;
+  /** 예약된 백오프를 취소하고 허브를 띄운 뒤 즉시 다시 연결한다. 이미 연결돼 있으면 무시. 연결 중이어도 소켓을 접고 다시 붙는다. */
+  reconnectNow(): Promise<void>;
   /** 로컬 CLI 설치 상태. refresh=true 면 허브가 새로 프로브한다. */
   requestProviderStatus(refresh?: boolean): Promise<ProviderStatusMap | null>;
   /** 누적 사용량 요약. 응답이 없으면 null. */
@@ -349,6 +349,8 @@ class AgentBridgeImpl implements AgentBridge {
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  private hubLaunch: Promise<boolean> | null = null;
+  private reconnectSeq = 0;
   private requests = new PendingRequestRegistry();
   private disposed = false;
 
@@ -433,7 +435,7 @@ class AgentBridgeImpl implements AgentBridge {
   /** 끊겼거나 다른 탭에 밀려난 뒤 창이 다시 살아나면 즉시 붙는다. */
   private onResume = (): void => {
     if (this.disposed || this.state === 'connected' || this.state === 'connecting') return;
-    this.reconnectNow();
+    void this.reconnectNow();
   };
 
   private onVisibility = (): void => {
@@ -441,9 +443,14 @@ class AgentBridgeImpl implements AgentBridge {
     this.onResume();
   };
 
-  /** 데스크톱 셸이 있으면 허브 프로세스를 확인하고, 없으면 다시 띄운다. */
-  private requestHubLaunch(): void {
-    void ensureDesktopAgentHub();
+  /** 데스크톱·Vite 가 있으면 허브를 확인하고, 죽어 있으면 다시 띄운 뒤 준비될 때까지 기다린다. */
+  private requestHubLaunch(): Promise<boolean> {
+    if (!this.hubLaunch) {
+      this.hubLaunch = ensureDesktopAgentHub().finally(() => {
+        this.hubLaunch = null;
+      });
+    }
+    return this.hubLaunch;
   }
 
   private clearReconnectTimer(): void {
@@ -488,9 +495,14 @@ class AgentBridgeImpl implements AgentBridge {
     this.forceReconnect();
   }
 
-  reconnectNow(): void {
+  async reconnectNow(): Promise<void> {
     if (this.disposed || this.state === 'connected') return;
-    this.requestHubLaunch();
+    const seq = ++this.reconnectSeq;
+    this.clearReconnectTimer();
+    this.abortSocket();
+    this.setState('connecting');
+    await this.requestHubLaunch();
+    if (this.disposed || seq !== this.reconnectSeq || this.state === 'connected') return;
     this.forceReconnect();
   }
 
@@ -573,18 +585,26 @@ class AgentBridgeImpl implements AgentBridge {
 
   private scheduleReconnect(): void {
     if (this.disposed || this.reconnectTimer !== null) return;
-    this.requestHubLaunch();
+    void this.requestHubLaunch();
     const step = Math.min(
       Math.max(0, this.reconnectAttempt - 1),
       RECONNECT_DELAYS_MS.length - 1,
     );
     const delay = RECONNECT_DELAYS_MS[step]!;
+    const seq = this.reconnectSeq;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.connect();
+      void this.connectAfterHub(seq);
     }, delay);
     // 사이드바가 "n초 후 재시도" 를 셀 수 있도록 남은 시간을 함께 알린다.
     this.emitConnection(delay);
+  }
+
+  /** 허브가 뜰 때까지 기다린 다음 소켓을 연다. 그 사이 수동 재연결이 있으면 접는다. */
+  private async connectAfterHub(seq: number): Promise<void> {
+    await this.requestHubLaunch();
+    if (this.disposed || seq !== this.reconnectSeq || this.state === 'connected') return;
+    this.connect();
   }
 
   /** 재시도 계기(시도 횟수·남은 시간)를 실은 connection 이벤트. */

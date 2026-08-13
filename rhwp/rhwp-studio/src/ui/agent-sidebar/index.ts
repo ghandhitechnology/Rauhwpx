@@ -1312,7 +1312,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   connBannerRetry.type = 'button';
   connBannerRetry.addEventListener('click', () => {
     connBannerText.textContent = '연결하는 중…';
-    bridge.reconnectNow();
+    void bridge.reconnectNow();
   });
   const managedHub = isDesktopApp() || Boolean((import.meta as any).env?.DEV);
   const connBannerHint = el(

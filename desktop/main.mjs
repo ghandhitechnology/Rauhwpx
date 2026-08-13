@@ -52,7 +52,7 @@ let mainWindow = null;
 let studioServer = null;
 let studioOrigin = '';
 let agentProcess = null;
-let agentEnsure = null;
+let agentChain = Promise.resolve();
 let agentRestartTimer = null;
 let agentRestartAttempt = 0;
 let quitting = false;
@@ -149,34 +149,68 @@ function startAgent() {
   child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
   child.on('error', (error) => {
     console.warn('[rauhwpx] agent hub spawn error:', error);
-    if (agentProcess === child) agentProcess = null;
+    if (agentProcess !== child) return;
+    agentProcess = null;
     if (!quitting) scheduleAgentRestart();
   });
   child.on('exit', (code, signal) => {
     console.warn('[rauhwpx] agent hub process exit:', code, signal ?? '');
-    if (agentProcess === child) agentProcess = null;
+    if (agentProcess !== child) return;
+    agentProcess = null;
     if (!quitting) scheduleAgentRestart();
   });
   return true;
 }
 
-async function ensureAgent() {
-  if (agentEnsure) return agentEnsure;
-  agentEnsure = (async () => {
-    const result = await ensureAgentHub({
-      port: AGENT_PORT,
-      processAlive: Boolean(agentProcess),
-      start: startAgent,
-    });
-    if (result.ready) {
-      agentRestartAttempt = 0;
-      clearAgentRestart();
+function stopAgent() {
+  const child = agentProcess;
+  if (!child) return Promise.resolve();
+  agentProcess = null;
+  clearAgentRestart();
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      resolve();
+    }, 2000);
+    child.once('exit', finish);
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      finish();
     }
-    return result;
-  })().finally(() => {
-    agentEnsure = null;
   });
-  return agentEnsure;
+}
+
+async function runEnsure({ restartUnhealthy = false } = {}) {
+  const result = await ensureAgentHub({
+    port: AGENT_PORT,
+    processAlive: Boolean(agentProcess),
+    restartUnhealthy,
+    stop: stopAgent,
+    start: startAgent,
+  });
+  if (result.ready) {
+    agentRestartAttempt = 0;
+    clearAgentRestart();
+  }
+  return result;
+}
+
+function ensureAgent(opts = {}) {
+  const job = agentChain.then(
+    () => runEnsure(opts),
+    () => runEnsure(opts),
+  );
+  agentChain = job.then(() => undefined, () => undefined);
+  return job;
 }
 
 function installMenu() {
@@ -266,7 +300,7 @@ ipcMain.handle('agent-hub:ensure', async () => {
     agentRestartAttempt = 0;
     return { started: false, ready: true };
   }
-  return ensureAgent();
+  return ensureAgent({ restartUnhealthy: true });
 });
 
 app.whenReady().then(async () => {

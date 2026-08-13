@@ -90,6 +90,34 @@ test('ensureAgentHub does not fork a second listener when a process is already a
   assert.equal(started, 0);
 });
 
+test('ensureAgentHub restarts a hung process after it misses the first wait', async () => {
+  let stopped = 0;
+  let started = 0;
+  let waits = 0;
+  const result = await ensureAgentHub({
+    port: 5175,
+    processAlive: true,
+    restartUnhealthy: true,
+    stop: async () => {
+      stopped += 1;
+    },
+    start: () => {
+      started += 1;
+      return true;
+    },
+    isHealthy: async () => false,
+    wait: async () => {
+      waits += 1;
+      return waits >= 2;
+    },
+    log: { log() {}, warn() {} },
+  });
+  assert.deepEqual(result, { started: true, ready: true });
+  assert.equal(stopped, 1);
+  assert.equal(started, 1);
+  assert.equal(waits, 2);
+});
+
 test('ensureAgentHub stops if start() cannot launch', async () => {
   const result = await ensureAgentHub({
     port: 5175,
@@ -205,6 +233,9 @@ test('desktop shell ensures the hub before showing the window and exposes IPC', 
   assert.match(desktopMain, /child\.on\('exit'/);
   assert.doesNotMatch(desktopMain, /utilityProcess/);
   assert.match(desktopMain, /sandbox: false/);
+  assert.match(desktopMain, /function stopAgent\(\)/);
+  assert.match(desktopMain, /restartUnhealthy:\s*true/);
+  assert.match(desktopMain, /if \(agentProcess !== child\) return;/);
   assert.match(preload, /ensureAgentHub: \(\) => ipcRenderer\.invoke\('agent-hub:ensure'\)/);
 });
 
@@ -212,5 +243,7 @@ test('studio dev server and repo npm start both boot the hub', () => {
   assert.match(viteConfig, /rhwpAgentHubPlugin\(__dirname\)/);
   assert.match(viteHubPlugin, /spawn\(process\.execPath, \[script\]/);
   assert.match(viteHubPlugin, /RHWP_SKIP_AGENT_HUB/);
+  assert.match(viteHubPlugin, /\/__rhwp\/ensure-agent-hub/);
+  assert.match(viteHubPlugin, /restartUnhealthy:\s*true/);
   assert.match(rootPackage, /"start": "node rhwp\/rhwp-agent\/server.mjs"/);
 });

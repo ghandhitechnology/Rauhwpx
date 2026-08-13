@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 
 export const DEFAULT_HUB_PORT = 5175;
 export const DEFAULT_HEALTH_TIMEOUT_MS = 500;
-export const DEFAULT_READY_TIMEOUT_MS = 8000;
+export const DEFAULT_READY_TIMEOUT_MS = 15000;
 export const DEFAULT_POLL_INTERVAL_MS = 150;
 export const HUB_RESTART_DELAYS_MS = [500, 1000, 2000, 5000];
 
@@ -72,7 +72,9 @@ export async function waitForHub(port, {
 export async function ensureAgentHub({
   port,
   start,
+  stop,
   processAlive = false,
+  restartUnhealthy = false,
   fetchImpl = globalThis.fetch,
   isHealthy = isHubHealthy,
   wait = waitForHub,
@@ -93,9 +95,22 @@ export async function ensureAgentHub({
     started = true;
   }
 
-  const ready = await wait(port, { fetchImpl, isHealthy, timeoutMs: readyTimeoutMs });
-  if (!ready) log.warn?.('[rauhwpx] agent hub did not become ready');
-  return { started, ready };
+  let ready = await wait(port, { fetchImpl, isHealthy, timeoutMs: readyTimeoutMs });
+  if (ready) return { started, ready: true };
+
+  if (!restartUnhealthy || typeof stop !== 'function') {
+    log.warn?.('[rauhwpx] agent hub did not become ready');
+    return { started, ready: false };
+  }
+
+  await stop();
+  const relaunched = start?.();
+  if (relaunched === false) {
+    return { started: false, ready: false };
+  }
+  ready = await wait(port, { fetchImpl, isHealthy, timeoutMs: readyTimeoutMs });
+  if (!ready) log.warn?.('[rauhwpx] agent hub did not become ready after restart');
+  return { started: true, ready };
 }
 
 export function pathDelimiter(platform = process.platform) {
