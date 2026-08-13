@@ -228,7 +228,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const hubReconnect = el('button', 'ag-settings-btn', '다시 연결');
   hubReconnect.type = 'button';
   hubReconnect.addEventListener('click', () => {
-    bridge.reconnectNow();
+    void bridge.reconnectNow();
     renderConnection();
   });
   hubRow.append(hubDot, hubText, hubReconnect);
@@ -462,7 +462,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   function renderConnection(): void {
     hubDot.dataset.state = connectionState;
     hubLabel.textContent = CONN_LABEL[connectionState];
-    hubReconnect.disabled = connectionState === 'connected' || connectionState === 'connecting';
+    hubReconnect.disabled = connectionState === 'connected';
     const online = connectionState === 'connected';
     refreshBtn.disabled = !online;
     restartBtn.disabled = !online;
