@@ -9,7 +9,7 @@
 //! 사용:
 //!     rhwp edit-stress <파일.hwpx> [-o report.json]
 //!
-//! 종료 코드: 0 = 결함 없음, 1 = 결함 발견, 2 = 사용법/파싱 오류.
+//! 종료 코드: 0 = 결함 없음, 1 = 결함 발견(파서 panic 포함), 2 = 사용법 오류·파싱 거부.
 //! stdout 으로 JSON 리포트(사람용 요약은 stderr). op 단위 panic 은 catch_unwind 로
 //! 격리하고, panic 후에는 문서를 재적재해 다음 그룹을 계속 진행한다.
 
@@ -269,6 +269,11 @@ fn table_group(report: &mut Report, doc: &mut HwpDocument, loc: &TableLoc) -> Re
     let Some((rows0, cols0, _)) = table_dims(doc, loc) else {
         return Ok(());
     };
+    // 행/열 0짜리 퇴화 표는 rows0-1/cols0-1 이 u16 underflow 를 일으키므로 건너뛴다
+    // (디버그 빌드 panic, 릴리스 빌드 65535 전달로 가짜 OP_ERR 유발).
+    if rows0 == 0 || cols0 == 0 {
+        return Ok(());
+    }
 
     let ok = run_op(report, doc, "table_row_insert", tgt.clone(), true, |d| {
         d.insert_table_row_native(sec, p, c, rows0 - 1, true)
@@ -548,7 +553,8 @@ pub fn run(args: &[String]) {
                     "bugs": [], "ops": []
                 }),
             );
-            std::process::exit(1);
+            // 정상적인 파싱 거부는 편집 결함이 아니다 — 문서화된 사용법/파싱 오류 코드.
+            std::process::exit(2);
         }
         Err(_) => {
             panic::set_hook(prev_hook);
