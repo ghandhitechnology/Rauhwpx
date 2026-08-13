@@ -45,6 +45,13 @@ body.ag-sidebar-resizing {
   user-select: none;
 }
 
+/* 움직이는 동안 손그림 displacement 필터를 끈다. 매 프레임 재래스터가
+   용지 정렬보다 비싸다. */
+body.ag-sidebar-resizing .ag-root,
+body.ag-sidebar-animating .ag-root {
+  --ag-sketch-line: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   #editor-area {
     transition: none;
@@ -120,6 +127,8 @@ body.ag-sidebar-resizing {
   font-family: var(--ag-font);
   font-size: var(--font-size-md, 13px);
   line-height: 1.55;
+  isolation: isolate;
+  contain: layout style;
   transition: transform var(--ag-sidebar-duration) var(--ag-sidebar-ease);
   will-change: transform;
 }
@@ -1543,6 +1552,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   overscroll-behavior: contain;
   overflow-anchor: none;
   background: var(--ag-bg);
+  contain: layout paint;
 }
 
 .ag-msg {
@@ -2499,7 +2509,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 .ag-composer-meta .ag-selectors {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
 }
@@ -2507,6 +2517,21 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 .ag-composer-meta .ag-composer-utilities {
   flex: 0 0 auto;
   margin-left: auto;
+}
+
+/* 입력기 줄에서는 아이콘·개수만 두고 긴 '참고자료' 라벨은 숨긴다.
+   최솟값이 전자 앱에서 다시 600px 근처로 잠기지 않게 한다. */
+.ag-composer-meta .ag-references-btn-label {
+  display: none;
+}
+
+/* 최솟값 측정 때 모델·추론 칸을 말줄임 바닥까지 줄인다. */
+.ag-root.ag-measuring-min .ag-composer-meta .ag-llm-name {
+  max-width: 6ch;
+}
+
+.ag-root.ag-measuring-min .ag-composer-meta .ag-effort-name {
+  max-width: 4ch;
 }
 
 .ag-composer-meta .ag-model-trigger {

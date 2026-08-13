@@ -517,6 +517,18 @@ export class CanvasView {
 
   /** 뷰포트 리사이즈 처리 */
   private onViewportResize(): void {
+    // 접기/펼치기 전이 프레임은 inset rAF 루프가 맡는다. ResizeObserver 와
+    // 겹치면 같은 프레임에 레이아웃을 두 번 탄다.
+    if (
+      document.body.classList.contains('ag-sidebar-animating')
+      && !document.body.classList.contains('ag-sidebar-resizing')
+    ) {
+      return;
+    }
+    if (this.sidebarInsetIsMoving()) {
+      this.recenterHorizontally();
+      return;
+    }
     const nextViewport = this.viewportManager.getViewportSize();
     if (this.pages.length === 0) {
       this.layoutViewportSize = nextViewport;
@@ -600,7 +612,13 @@ export class CanvasView {
     if (width <= 0) return;
     this.viewportManager.setScrollLeft(this.virtualScroll.getCenteredScrollLeft(width));
     this.repositionRenderedPages();
-    this.updateVisiblePages();
+    // 드래그/전이 중에는 페이지 재렌더·프리페치를 미룬다.
+    if (!this.sidebarInsetIsMoving()) this.updateVisiblePages();
+  }
+
+  private sidebarInsetIsMoving(): boolean {
+    const { classList } = document.body;
+    return classList.contains('ag-sidebar-resizing') || classList.contains('ag-sidebar-animating');
   }
 
   /**

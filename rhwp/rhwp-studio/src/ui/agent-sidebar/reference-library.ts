@@ -105,6 +105,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
   trigger.setAttribute('aria-controls', 'ag-references-panel');
   trigger.setAttribute('aria-expanded', 'false');
   trigger.setAttribute('aria-label', '참고자료 열기');
+  trigger.title = '참고자료';
   trigger.append(createIcon('references'), el('span', 'ag-references-btn-label', '참고자료'));
   const count = el('span', 'ag-references-count', '0');
   count.setAttribute('aria-hidden', 'true');
