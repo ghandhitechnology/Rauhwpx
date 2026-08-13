@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import { resolve, extname, join } from 'path';
 import { readFileSync, readFile } from 'fs';
 import { VitePWA } from 'vite-plugin-pwa';
+import { rhwpAgentHubPlugin } from './vite-plugin-agent-hub.mjs';
 
 const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8'));
 const subsecondWasmDir = resolve(
@@ -64,6 +65,7 @@ export default defineConfig({
     },
   },
   plugins: [
+    rhwpAgentHubPlugin(__dirname),
     {
       name: 'ignore-subsecond-patch-artifacts',
       handleHotUpdate(context) {

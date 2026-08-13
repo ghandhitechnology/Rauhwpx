@@ -7,10 +7,12 @@
   "private": true,
   "main": "desktop/main.mjs",
   "scripts": {
+    "start": "node rhwp/rhwp-agent/server.mjs",
     "dev:desktop": "wait-on http://127.0.0.1:7700 && cross-env RHWP_DEV_URL=http://127.0.0.1:7700 electron .",
     "build:studio": "npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
+    "build:agent": "npm --prefix rhwp/rhwp-agent ci --omit=dev",
     "desktop": "npm run build:studio && electron .",
-    "dist:mac": "npm run build:studio && electron-builder --mac dmg zip --arm64 --publish never"
+    "dist:mac": "npm run build:studio && npm run build:agent && electron-builder --mac dmg zip --arm64 --publish never"
   },
   "dependencies": {
     "@browserbasehq/mcp": "3.0.0",
@@ -36,8 +38,7 @@
       "desktop/**/*",
       "rhwp/rhwp-studio/dist/**/*",
       "rhwp/rhwp-agent/**/*",
-      "!rhwp/rhwp-agent/tests/**",
-      "!rhwp/rhwp-agent/node_modules/**"
+      "!rhwp/rhwp-agent/tests/**"
     ],
     "asarUnpack": [
       "rhwp/rhwp-agent/**"
