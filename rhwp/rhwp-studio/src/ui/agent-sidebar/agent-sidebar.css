@@ -2499,12 +2499,13 @@ body.ag-sidebar-resizing .ag-collapse-tab {
 }
 
 .ag-composer-meta .ag-selectors {
-  flex: 1 1 auto;
-  min-width: 138px;
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
 }
 
 .ag-composer-meta .ag-composer-utilities {
+  flex: 0 0 auto;
   margin-left: auto;
 }
 
