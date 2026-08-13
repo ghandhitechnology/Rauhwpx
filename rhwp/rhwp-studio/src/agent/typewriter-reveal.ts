@@ -4,6 +4,7 @@ import type { CanvasView } from '../view/canvas-view.ts';
 import type { SelectionRect } from '../core/types.ts';
 import type { AgentName, DocRange } from './types.ts';
 import { pointAtNewScalarOffset } from './exact-text-diff.ts';
+import { measureInkRange } from './selection-ink.ts';
 
 /** insertText/replaceText 가 emit 하는 이벤트 페이로드. range 는 op.range 의
  * 라이브 참조다 — 이후 op 들의 좌표 shift 가 그대로 반영된다. */
@@ -367,14 +368,39 @@ export class AgentTypewriterReveal {
   private probeRects(item: RevealItem): SelectionRect[] {
     const r = item.range;
     const cell = r.cell;
-    return cell
-      ? this.deps.wasm.getSelectionRectsInCell(
-        r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
-        r.startParaIdx, r.startCharOffset, r.endParaIdx, r.endCharOffset,
-      )
-      : this.deps.wasm.getSelectionRects(
-        r.sectionIdx, r.startParaIdx, r.startCharOffset, r.endParaIdx, r.endCharOffset,
-      );
+    const wasm = this.deps.wasm;
+    return measureInkRange(r, {
+      rects: () => cell
+        ? wasm.getSelectionRectsInCell(
+          r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
+          r.startParaIdx, r.startCharOffset, r.endParaIdx, r.endCharOffset,
+        )
+        : wasm.getSelectionRects(
+          r.sectionIdx, r.startParaIdx, r.startCharOffset, r.endParaIdx, r.endCharOffset,
+        ),
+      paragraphLength: (paraIdx) => cell
+        ? wasm.getCellParagraphLength(
+          r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx,
+        )
+        : wasm.getParagraphLength(r.sectionIdx, paraIdx),
+      text: (paraIdx, start, count) => {
+        if (count <= 0) return '';
+        return cell
+          ? wasm.getTextInCell(
+            r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
+            paraIdx, start, count,
+          )
+          : wasm.getTextRange(r.sectionIdx, paraIdx, start, count);
+      },
+      caret: (paraIdx, offset) => {
+        const rect = cell
+          ? wasm.getCursorRectInCell(
+            r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx, paraIdx, offset,
+          )
+          : wasm.getCursorRect(r.sectionIdx, paraIdx, offset);
+        return { pageIndex: rect.pageIndex, x: rect.x, y: rect.y, width: 0, height: rect.height };
+      },
+    }).rects;
   }
 
   private probeCaret(item: RevealItem, scalarOffset: number): SelectionRect {
