@@ -197,6 +197,27 @@ test('최대 8개 상한 — 가장 오래된 항목부터 밀려난다', async 
   assert.ok(!names.includes('f0.hwp') && !names.includes('f1.hwp'), '가장 오래된 2개 제거');
 });
 
+test('isSameEntry가 멈추면 digest로 같은 문서를 병합한다', async () => {
+  await clearRecentDocs();
+  const first = await addRecentDoc({
+    sourceDigest: 'blake3:same-bytes',
+    fileName: '원본.hwp',
+    sourceFormat: 'hwp',
+    handle: makeHandle('old'),
+  });
+  const hanging = {
+    ...makeHandle('new'),
+    isSameEntry: () => new Promise<boolean>(() => {}),
+  } as FileSystemFileHandleLike;
+  const reopened = await addRecentDoc({
+    sourceDigest: 'blake3:same-bytes',
+    fileName: '원본.hwp',
+    sourceFormat: 'hwp',
+    handle: hanging,
+  });
+  assert.equal(reopened.documentId, first.documentId);
+});
+
 test('removeRecentDoc / clearRecentDocs', async () => {
   await clearRecentDocs();
   await addRecentDoc({ sourceDigest: 'blake3:x', fileName: 'x.hwp', sourceFormat: 'hwp', handle: makeHandle('x') });
@@ -206,4 +227,11 @@ test('removeRecentDoc / clearRecentDocs', async () => {
   assert.equal((await listRecentDocs()).length, 1);
   await clearRecentDocs();
   assert.equal((await listRecentDocs()).length, 0);
+});
+
+test('최근 문서 저장소는 IndexedDB 무응답에 타임아웃한다', () => {
+  const store = readFileSync(new URL('../src/recent/recent-store.ts', import.meta.url), 'utf8');
+  assert.match(store, /openIndexedDatabase/);
+  assert.match(store, /withTimeout/);
+  assert.match(store, /SAME_ENTRY_TIMEOUT_MS/);
 });
