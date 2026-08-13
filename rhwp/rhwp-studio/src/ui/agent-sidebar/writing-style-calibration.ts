@@ -13,7 +13,9 @@ const MAX_FILES = 20;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
 const ACK_TIMEOUT_MS = 10_000;
-const ANALYSIS_TIMEOUT_MS = 130_000;
+/* Binary extraction and analysis are separate model passes. The server keeps
+   the job alive across reconnects, so the UI deadline must cover both. */
+const ANALYSIS_TIMEOUT_MS = 360_000;
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -96,7 +98,7 @@ function toBase64(buffer: ArrayBuffer): string {
 function errorCopy(code: string, fallback: string): string {
   switch (code) {
     case 'INSUFFICIENT_SAMPLE': return '읽을 수 있는 글이 10쪽보다 적습니다. 더 긴 원고를 추가해 다시 분석해 주세요.';
-    case 'OPUS_UNAVAILABLE': return 'Opus 5를 시작하지 못했습니다. 로컬 Claude 연결을 확인한 뒤 다시 시도해 주세요.';
+    case 'CODEX_UNAVAILABLE': return 'GPT-5.6 Sol을 시작하지 못했습니다. 로컬 Codex 연결을 확인한 뒤 다시 시도해 주세요.';
     case 'CALIBRATION_BUSY': return '이미 다른 문체 분석이 진행 중입니다. 잠시 후 다시 시도해 주세요.';
     case 'TIMEOUT': return '분석 시간이 너무 길어 중단했습니다. 파일 수나 용량을 줄여 다시 시도해 주세요.';
     default: return fallback || '문체 분석을 완료하지 못했습니다. 파일을 확인한 뒤 다시 시도해 주세요.';
@@ -114,6 +116,8 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
   let selectedFiles: File[] = [];
   let currentStep = 0;
   let requestId: string | null = null;
+  let instructionRequestId: string | null = null;
+  let calibrationBaselineUpdatedAt: string | null = null;
   let ackTimer: number | null = null;
   let analysisTimer: number | null = null;
   let connectionState = bridge.getConnectionState();
@@ -195,12 +199,12 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
   const uploadActions = el('div', 'ag-calibration-actions');
   const uploadBack = el('button', 'ag-calibration-secondary', '이전');
   uploadBack.type = 'button';
-  const analyze = el('button', 'ag-calibration-primary', 'Opus 5로 분석');
+  const analyze = el('button', 'ag-calibration-primary', 'GPT-5.6 Sol로 분석');
   analyze.type = 'button';
   uploadActions.append(uploadBack, analyze);
   panels[1]!.append(uploadTitle, uploadStatement, dropzone, uploadInput, fileSummary, fileList, uploadError, uploadActions);
 
-  const progressTitle = el('h2', 'ag-calibration-title', 'Opus 5가 문체를 분석하고 있습니다');
+  const progressTitle = el('h2', 'ag-calibration-title', 'GPT-5.6 Sol이 문체를 분석하고 있습니다');
   const progressTrack = el('div', 'ag-calibration-progress-track');
   const progressFill = el('span', 'ag-calibration-progress-fill');
   progressTrack.appendChild(progressFill);
@@ -217,13 +221,30 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
   resultIconWrap.appendChild(createCheckIcon());
   const resultTitle = el('h2', 'ag-calibration-title', 'style.md가 준비되었습니다');
   const resultMeta = el('p', 'ag-calibration-result-meta');
+  const instructionLabel = el('label', 'ag-calibration-instruction-label', '에이전트 말투에 추가할 지침');
+  const instruction = el('textarea', 'ag-calibration-instruction') as HTMLTextAreaElement;
+  instruction.rows = 4;
+  instruction.maxLength = 4_000;
+  instruction.placeholder = '예: 결론은 단정적으로 쓰되, 독자에게 지시하는 표현은 부드럽게 써 주세요.';
+  instructionLabel.appendChild(instruction);
+  const instructionHint = el('p', 'ag-calibration-instruction-hint', '캘리브레이션된 문체 위에 별도로 적용됩니다. 비워 두면 추가 지침을 사용하지 않습니다.');
+  const resultError = el('div', 'ag-calibration-error');
+  resultError.setAttribute('role', 'alert');
   const resultActions = el('div', 'ag-calibration-actions');
   const recalibrate = el('button', 'ag-calibration-secondary', '다시 캘리브레이션');
   recalibrate.type = 'button';
-  const done = el('button', 'ag-calibration-primary', '완료');
+  const done = el('button', 'ag-calibration-primary', '저장 및 완료');
   done.type = 'button';
   resultActions.append(recalibrate, done);
-  panels[3]!.append(resultIconWrap, resultTitle, resultMeta, resultActions);
+  panels[3]!.append(
+    resultIconWrap,
+    resultTitle,
+    resultMeta,
+    instructionLabel,
+    instructionHint,
+    resultError,
+    resultActions,
+  );
 
   dialog.append(chrome, body);
   overlay.appendChild(dialog);
@@ -309,6 +330,9 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
   }
 
   function updateProgress(state: 'reading' | 'analyzing' | 'saving'): void {
+    progressTitle.textContent = state === 'saving'
+      ? '문체 프로필을 저장하고 있습니다'
+      : 'GPT-5.6 Sol이 문체를 분석하고 있습니다';
     const activeIndex = state === 'reading' ? 0 : state === 'analyzing' ? 1 : 2;
     progressRows.forEach((row, index) => {
       row.classList.toggle('ag-active', index === activeIndex);
@@ -321,6 +345,10 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
     clearRequestTimers();
     activeStatus = status;
     requestId = null;
+    instructionRequestId = null;
+    instruction.value = status.additionalInstruction ?? '';
+    resultError.textContent = '';
+    done.disabled = false;
     resultMeta.textContent = `${status.sourceCount}개 파일 · 약 ${status.pageEstimate}쪽 분석 · ${status.language === 'ko' ? '한국어' : 'English'}`;
     setStep(3);
   }
@@ -372,6 +400,7 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
         files.push({ name: file.name, type: file.type, size: file.size, content: toBase64(await file.arrayBuffer()) });
       }
       requestId = bridge.calibrateWritingStyle({ language, files });
+      calibrationBaselineUpdatedAt = activeStatus?.updatedAt ?? null;
       ackTimer = window.setTimeout(() => {
         failRequest('에이전트가 응답하지 않습니다. 에이전트를 다시 시작한 뒤 재시도하세요.');
       }, ACK_TIMEOUT_MS);
@@ -410,7 +439,21 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
   introNext.addEventListener('click', () => setStep(1));
   uploadBack.addEventListener('click', () => setStep(0));
   analyze.addEventListener('click', () => { void analyzeFiles(); });
-  done.addEventListener('click', dismiss);
+  done.addEventListener('click', () => {
+    if (!activeStatus) return;
+    const nextInstruction = instruction.value.trim();
+    if (nextInstruction === (activeStatus.additionalInstruction ?? '')) {
+      dismiss();
+      return;
+    }
+    if (connectionState !== 'connected') {
+      resultError.textContent = '연결을 복구한 뒤 추가 지침을 저장해 주세요.';
+      return;
+    }
+    resultError.textContent = '';
+    done.disabled = true;
+    instructionRequestId = bridge.setWritingStyleInstruction(nextInstruction);
+  });
   recalibrate.addEventListener('click', () => {
     selectedFiles = [];
     renderFiles();
@@ -453,12 +496,29 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
     handleEvent(event: SidebarEvent): void {
       if (event.type === 'connection') {
         connectionState = event.state;
-        if (requestId && event.state !== 'connected') failRequest('에이전트 연결이 끊겼습니다. 다시 연결한 뒤 재시도하세요.');
+        if (requestId && event.state !== 'connected') {
+          if (ackTimer !== null) window.clearTimeout(ackTimer);
+          ackTimer = null;
+          progressTitle.textContent = '연결을 복구하고 있습니다';
+        } else if (requestId && event.state === 'connected') {
+          bridge.requestWritingStyleStatus();
+        }
         updateAnalyzeButton();
         return;
       }
       if (event.type === 'writing-style-status') {
         activeStatus = event.status;
+        if (
+          requestId
+          && event.status.active
+          && event.status.updatedAt !== calibrationBaselineUpdatedAt
+        ) {
+          showResult(event.status);
+        } else if (instructionRequestId && event.requestId === instructionRequestId) {
+          instructionRequestId = null;
+          done.disabled = false;
+          dismiss();
+        }
         return;
       }
       if (event.type === 'writing-style-progress' && event.requestId === requestId) {
@@ -475,6 +535,12 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
         const message = errorCopy(event.code, event.message);
         failRequest(message);
         uploadError.title = event.message;
+        return;
+      }
+      if (event.type === 'writing-style-error' && event.requestId === instructionRequestId) {
+        instructionRequestId = null;
+        done.disabled = false;
+        resultError.textContent = event.message || '추가 지침을 저장하지 못했습니다.';
       }
     },
     dispose(): void {
