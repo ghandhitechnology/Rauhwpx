@@ -27,13 +27,14 @@ Paths are relative to the repository root.
 1. **Start the hub**
 
    ```sh
-   cd rhwp-agent
-   npm install     # first time only
-   npm start       # = node server.mjs
+   npm start       # from the repository root; returns when healthz is ready
    # check: curl http://127.0.0.1:5175/healthz
+   # stop:  npm stop
    ```
 
-   Or from the studio directory: `cd rhwp-studio && npm run agent`.
+   The hub detaches, so the terminal is free. Logs: `.run/rhwp-agent.log`.
+   Foreground (old behavior): `npm run start:fg`, or `cd rhwp-agent && npm start`.
+   From the studio directory: `cd rhwp-studio && npm run agent` (foreground).
 
 2. **Start the studio dev server**
 
@@ -323,6 +324,7 @@ literal `/`.
 ## Files
 
 - `server.mjs` — WS hub + authoritative chat/workflow manager (`/studio`, `/mcp`, `GET /healthz`)
+- `ctl.mjs` — background start/stop/status (`npm start` at the repo root)
 - `planning-state.mjs` — plan transitions, canonical plan ids, epochs, and hub gates
 - `download-manager.mjs` — confined per-chat downloader
 - `provider-health.mjs` — cached `claude`/`codex` CLI version probes (single-flight)

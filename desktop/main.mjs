@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, normalize, sep } from 'node:path';
@@ -19,6 +18,8 @@ import {
   isHubHealthy,
   nextHubRestartDelay,
   resolveHubLaunch,
+  spawnHubProcess,
+  stopHubChild,
 } from './agent-hub.mjs';
 
 const { autoUpdater } = electronUpdater;
@@ -138,55 +139,29 @@ function startAgent() {
     return false;
   }
   console.log(`[rauhwpx] starting agent hub via ${launch.via}: ${launch.command} ${launch.args.join(' ')}`);
-  const child = spawn(launch.command, launch.args, {
-    cwd: launch.cwd,
-    env: launch.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
+  const child = spawnHubProcess(launch, {
+    onError: (error) => {
+      console.warn('[rauhwpx] agent hub spawn error:', error);
+      if (agentProcess !== child) return;
+      agentProcess = null;
+      if (!quitting) scheduleAgentRestart();
+    },
+    onExit: (code, signal) => {
+      console.warn('[rauhwpx] agent hub process exit:', code, signal ?? '');
+      if (agentProcess !== child) return;
+      agentProcess = null;
+      if (!quitting) scheduleAgentRestart();
+    },
   });
   agentProcess = child;
-  child.stdout?.on('data', (chunk) => process.stdout.write(chunk));
-  child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
-  child.on('error', (error) => {
-    console.warn('[rauhwpx] agent hub spawn error:', error);
-    if (agentProcess !== child) return;
-    agentProcess = null;
-    if (!quitting) scheduleAgentRestart();
-  });
-  child.on('exit', (code, signal) => {
-    console.warn('[rauhwpx] agent hub process exit:', code, signal ?? '');
-    if (agentProcess !== child) return;
-    agentProcess = null;
-    if (!quitting) scheduleAgentRestart();
-  });
   return true;
 }
 
 function stopAgent() {
   const child = agentProcess;
-  if (!child) return Promise.resolve();
   agentProcess = null;
   clearAgentRestart();
-  return new Promise((resolve) => {
-    const finish = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        /* already gone */
-      }
-      resolve();
-    }, 2000);
-    child.once('exit', finish);
-    try {
-      child.kill('SIGTERM');
-    } catch {
-      finish();
-    }
-  });
+  return stopHubChild(child);
 }
 
 async function runEnsure({ restartUnhealthy = false } = {}) {

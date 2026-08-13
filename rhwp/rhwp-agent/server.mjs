@@ -27,6 +27,8 @@ import { z } from 'zod';
 const PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
 const TOKEN = process.env.RHWP_AGENT_TOKEN ?? 'dev';
 const PROTOCOL_VERSION = 2;
+const HUB_NAME = 'rhwp-agent';
+const STARTED_AT = Date.now();
 const ROOT = new URL('..', import.meta.url).pathname;
 const MCP_SCRIPT = new URL('./mcp-stdio.mjs', import.meta.url).pathname;
 const BUNDLED_SKILLS = new URL('./skills', import.meta.url).pathname;
@@ -965,6 +967,21 @@ function attachSocket(sock, role) {
   sock.on('error', (err) => log(`${role} socket error: ${err?.message ?? err}`));
 }
 
+function healthzBody() {
+  return {
+    ok: true,
+    name: HUB_NAME,
+    pid: process.pid,
+    uptimeMs: Date.now() - STARTED_AT,
+    protocol: PROTOCOL_VERSION,
+    studioConnected: !!studioSocket && studioSocket.readyState === studioSocket.OPEN,
+    mcpClients: mcpSockets.size,
+    session: sessionInfo(),
+    providers: providerHealth.cached(),
+    browserbase: browserbaseSession.status(),
+  };
+}
+
 const httpServer = http.createServer((req, res) => {
   void Promise.resolve().then(async () => {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`);
@@ -978,15 +995,7 @@ const httpServer = http.createServer((req, res) => {
         'content-type': 'application/json',
         ...(allowOrigin ? { 'access-control-allow-origin': allowOrigin, vary: 'Origin' } : {}),
       });
-      res.end(JSON.stringify({
-        ok: true,
-        protocol: PROTOCOL_VERSION,
-        studioConnected: !!studioSocket && studioSocket.readyState === studioSocket.OPEN,
-        mcpClients: mcpSockets.size,
-        session: sessionInfo(),
-        providers: providerHealth.cached(),
-        browserbase: browserbaseSession.status(),
-      }));
+      res.end(JSON.stringify(healthzBody()));
       return;
     }
     res.writeHead(404, { 'content-type': 'text/plain' });
