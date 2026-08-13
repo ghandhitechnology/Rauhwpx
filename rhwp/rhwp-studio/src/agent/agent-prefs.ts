@@ -48,7 +48,7 @@ function resolveStorage(storage?: AgentPrefsStorage | null): AgentPrefsStorage |
 }
 
 export function defaultAgentPrefs(): AgentPrefs {
-  const agent: AgentName = 'claude';
+  const agent: AgentName = 'codex';
   const model = defaultModelForAgent(agent);
   return {
     defaultAgent: agent,
@@ -61,7 +61,7 @@ export function defaultAgentPrefs(): AgentPrefs {
 /** 어떤 입력이 와도 쓸 수 있는 조합으로 접는다. */
 export function normalizeAgentPrefs(raw: unknown): AgentPrefs {
   const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-  const agent: AgentName = isAgentName(src['defaultAgent']) ? src['defaultAgent'] : 'claude';
+  const agent: AgentName = isAgentName(src['defaultAgent']) ? src['defaultAgent'] : 'codex';
   const model = resolveModelForAgent(
     agent,
     typeof src['defaultModel'] === 'string' ? src['defaultModel'] : null,

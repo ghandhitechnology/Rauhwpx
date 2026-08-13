@@ -25,12 +25,12 @@ function makeStorage(seed?: unknown) {
   };
 }
 
-test('빈 저장소는 Claude/Sonnet/High/안전 기본값을 준다', () => {
+test('빈 저장소는 Codex/Sol/Medium/안전 기본값을 준다', () => {
   const prefs = loadAgentPrefs(makeStorage());
   assert.deepEqual(prefs, {
-    defaultAgent: 'claude',
-    defaultModel: 'sonnet',
-    defaultEffort: 'high',
+    defaultAgent: 'codex',
+    defaultModel: 'gpt-5.6-sol',
+    defaultEffort: 'medium',
     defaultPermissionProfile: 'safe',
   });
   assert.deepEqual(prefs, defaultAgentPrefs());
@@ -63,9 +63,9 @@ test('지원되는 조합은 그대로 살아남는다', () => {
   assert.equal(prefs.defaultEffort, 'xhigh');
 });
 
-test('모르는 프로바이더는 claude, 모르는 권한 프로필은 safe', () => {
+test('모르는 프로바이더는 codex, 모르는 권한 프로필은 safe', () => {
   const prefs = normalizeAgentPrefs({ defaultAgent: 'gemini', defaultPermissionProfile: 'root' });
-  assert.equal(prefs.defaultAgent, 'claude');
+  assert.equal(prefs.defaultAgent, 'codex');
   assert.equal(prefs.defaultPermissionProfile, 'safe');
 });
 
@@ -81,7 +81,7 @@ test('깨진 JSON 이나 배열이 들어 있어도 기본값으로 복구한다
 
 test('저장은 부분 갱신이고, 저장된 값은 다시 읽힌다', () => {
   const storage = makeStorage();
-  const saved = saveAgentPrefs({ defaultModel: 'opus', defaultEffort: 'max' }, storage);
+  const saved = saveAgentPrefs({ defaultAgent: 'claude', defaultModel: 'opus', defaultEffort: 'max' }, storage);
   assert.equal(saved.defaultAgent, 'claude');
   assert.equal(saved.defaultModel, 'opus');
   assert.equal(saved.defaultEffort, 'max');
@@ -90,7 +90,7 @@ test('저장은 부분 갱신이고, 저장된 값은 다시 읽힌다', () => {
   // 프로바이더를 바꾸면 남아 있던 모델/강도가 새 프로바이더 기준으로 접힌다.
   const switched = saveAgentPrefs({ defaultAgent: 'codex' }, storage);
   assert.equal(switched.defaultModel, 'gpt-5.6-sol');
-  assert.equal(switched.defaultEffort, 'high');
+  assert.equal(switched.defaultEffort, 'medium');
   assert.equal(JSON.parse(storage.map.get(AGENT_PREFS_STORAGE_KEY)!).defaultAgent, 'codex');
 });
 
@@ -102,7 +102,7 @@ test('저장소가 없으면 정규화된 값만 돌려주고 던지지 않는�
 
 test('쓰기가 실패해도 호출자는 값을 받는다', () => {
   const prefs = saveAgentPrefs(
-    { defaultModel: 'opus' },
+    { defaultAgent: 'claude', defaultModel: 'opus' },
     {
       getItem: () => null,
       setItem: () => {

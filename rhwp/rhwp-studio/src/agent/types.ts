@@ -137,6 +137,7 @@ export interface WritingStyleStatus {
   sourceCount: number;
   pageEstimate: number;
   summary: string;
+  additionalInstruction: string;
 }
 
 export interface WritingStyleUpload {
