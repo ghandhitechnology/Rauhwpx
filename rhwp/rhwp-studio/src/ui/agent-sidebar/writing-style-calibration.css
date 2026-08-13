@@ -3,7 +3,8 @@
 .ag-calibration-secondary:focus-visible,
 .ag-calibration-close:focus-visible,
 .ag-calibration-file-remove:focus-visible,
-.ag-calibration-dropzone:focus-visible {
+.ag-calibration-dropzone:focus-visible,
+.ag-calibration-instruction:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
@@ -446,6 +447,42 @@
   color: var(--n-text-muted);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+}
+
+.ag-calibration-instruction-label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 22px;
+  color: var(--n-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ag-calibration-instruction {
+  width: 100%;
+  min-height: 92px;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 10px 11px;
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: var(--n-radius-field);
+  background: var(--n-surface-sunken);
+  color: var(--n-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.ag-calibration-instruction::placeholder {
+  color: var(--n-text-muted);
+}
+
+.ag-calibration-instruction-hint {
+  margin: 7px 0 0;
+  color: var(--n-text-muted);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 @media (max-width: 600px) {

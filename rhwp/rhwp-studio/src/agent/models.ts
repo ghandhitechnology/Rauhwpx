@@ -57,7 +57,7 @@ export const DEFAULT_AGENT_MODEL: Record<AgentName, string> = {
 
 export const DEFAULT_AGENT_EFFORT: Record<AgentName, string> = {
   claude: 'high',
-  codex: 'high',
+  codex: 'medium',
 };
 
 export function modelsForAgent(agent: AgentName): readonly AgentModelOption[] {

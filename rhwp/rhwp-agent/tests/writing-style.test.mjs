@@ -119,7 +119,7 @@ test('calibration measures the corpus itself and returns a structured profile', 
       run: async (args, prompt, cwd) => {
         argsByCall.push(args);
         assert.match(prompt, /Korean/);
-        assert.equal((await fs.readdir(cwd)).length, 1);
+        assert.ok((await fs.readdir(cwd)).includes('01-essay.txt'));
         return JSON.stringify({
           structured_output: {
             enoughSample: true,
@@ -136,8 +136,8 @@ test('calibration measures the corpus itself and returns a structured profile', 
   // 원고가 전부 평문이므로 추출 패스는 돌지 않는다.
   assert.equal(argsByCall.length, 1);
   const args = argsByCall[0];
-  assert.deepEqual(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2), ['--model', 'opus']);
-  assert.deepEqual(args.slice(args.indexOf('--effort'), args.indexOf('--effort') + 2), ['--effort', 'medium']);
+  assert.deepEqual(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2), ['--model', 'gpt-5.6-sol']);
+  assert.ok(args.includes('model_reasoning_effort="medium"'));
   // 쪽수는 모델의 자기 신고(0)가 아니라 측정값에서 나온다.
   assert.ok(result.pageEstimate >= 10);
   assert.equal(result.profile.version, 2);
@@ -197,7 +197,7 @@ test('a failed extraction degrades to an advisory profile instead of failing', a
     { language: 'ko', files: [upload('report.hwp', 'binary-ish')] },
     {
       run: async (args) => {
-        if (args.includes('Read,Write')) return JSON.stringify({ structured_output: { files: [{ source: '01-report.hwp', extracted: false, reason: 'unreadable' }] } });
+        if (args[args.indexOf('--sandbox') + 1] === 'workspace-write') return JSON.stringify({ structured_output: { files: [{ source: '01-report.hwp', extracted: false, reason: 'unreadable' }] } });
         return JSON.stringify({
           structured_output: {
             enoughSample: true, pageEquivalent: 14, summary: '요약.',
@@ -214,13 +214,13 @@ test('a failed extraction degrades to an advisory profile instead of failing', a
   assert.ok(result.profile.unsupportedFiles.includes('01-report.hwp'));
 });
 
-test('calibration surfaces an expired Claude login instead of treating it as a result', async () => {
+test('calibration surfaces an expired Codex login instead of treating it as a result', async () => {
   await assert.rejects(
     calibrateWritingStyle(
       { language: 'ko', files: [upload('essay.txt', longKoreanSample())] },
       { run: async () => JSON.stringify({ is_error: true, result: 'Failed to authenticate: OAuth session expired' }) },
     ),
-    (error) => error?.code === 'OPUS_UNAVAILABLE' && /authenticate/i.test(error.message),
+    (error) => error?.code === 'CODEX_UNAVAILABLE' && /authenticate/i.test(error.message),
   );
 });
 
@@ -240,12 +240,22 @@ test('writing-style store persists the structured profile and injects generative
   });
   assert.equal(status.active, true);
   assert.equal(status.sourceCount, 3);
+  assert.equal(status.additionalInstruction, '');
   assert.equal((await store.profile()).confidence, 'medium');
   const block = await store.promptBlock();
   assert.match(block, /specification for producing text, not a checklist for grading it/);
   assert.match(block, /baselines are targets you write toward/);
   assert.match(block, /Precedence/);
   assert.match(block, /Prefer concrete verbs/);
+
+  const instructed = await store.setAdditionalInstruction('Keep the voice warm and avoid rhetorical questions.');
+  assert.match(instructed.additionalInstruction, /voice warm/);
+  const instructedBlock = await store.promptBlock();
+  assert.match(instructedBlock, /personal_writing_instruction/);
+  assert.match(instructedBlock, /avoid rhetorical questions/);
+
+  const cleared = await store.setAdditionalInstruction('   ');
+  assert.equal(cleared.additionalInstruction, '');
 });
 
 test('re-calibrating without measurements clears the stale quantitative layer', async (t) => {
