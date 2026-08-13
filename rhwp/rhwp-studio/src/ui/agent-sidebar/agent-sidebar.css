@@ -12,7 +12,7 @@
    활자 위계만 제품 전반의 SaaS 셸과 맞춘다. */
 
 :root {
-  --ag-sidebar-width: 600px;
+  --ag-sidebar-width: 480px;
   --ag-sidebar-ease: cubic-bezier(0.2, 0.72, 0, 1);
   --ag-sidebar-duration: 320ms;
   --ag-motion-out: cubic-bezier(0.16, 1, 0.3, 1);
@@ -149,6 +149,7 @@ body.ag-sidebar-animating .ag-root {
 .ag-root.ag-collapsed {
   transform: translateX(100%);
   box-shadow: none;
+  pointer-events: none;
 }
 
 /* 왼쪽 가장자리 드래그로 폭 조절 (최대 화면 50%) */
@@ -213,49 +214,70 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   box-shadow: var(--n-elev-2);
 }
 
-/* ─── 접기 탭 ─────────────────────────────────────────── */
+/* ─── 사이드바 토글 (라우 아이콘) ─────────────────────────
+   상단 아이콘 도구 모음의 오른쪽 끝에서 다른 도구와 한 줄로 정렬한다. */
 
 .ag-collapse-tab {
-  position: absolute;
-  left: -22px;
-  top: 50%;
-  z-index: 90;
+  position: sticky;
+  right: 0;
+  z-index: 2;
   display: inline-flex;
+  flex: 0 0 48px;
+  align-self: stretch;
   align-items: center;
   justify-content: center;
-  transform: translateY(-50%);
-  width: 22px;
-  height: 56px;
-  padding: 0;
-  border: 1px solid var(--ag-border);
-  border-right: none;
-  border-radius: var(--ag-r-field) 0 0 var(--ag-r-field);
-  background: var(--ag-bg);
-  color: var(--ag-text-muted);
-  cursor: col-resize;
-  touch-action: none;
+  width: 48px;
+  min-height: 50px;
+  margin: 0 0 0 auto;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--ui-toolbar-bg-start);
+  color: var(--color-text);
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+  transition:
+    transform 180ms var(--ag-sidebar-ease),
+    background-color 160ms ease,
+    color 160ms ease;
 }
 
-body.ag-sidebar-resizing .ag-collapse-tab {
-  background: var(--ag-hover);
-  color: var(--ag-text);
-}
-
-/* 열림: 오른쪽(접기), 접힘: 왼쪽(펼치기) */
-.ag-collapse-tab .ui-chevron {
-  width: 11px;
-  height: 11px;
-  transform: rotate(-90deg);
-  transition: transform var(--ag-sidebar-duration) var(--ag-sidebar-ease);
-}
-
-.ag-root.ag-collapsed .ag-collapse-tab .ui-chevron {
-  transform: rotate(90deg);
+.ag-rau-icon {
+  display: block;
+  width: 30px;
+  height: 30px;
+  background-color: currentColor;
+  -webkit-mask: url('/icons/rau.png') center / contain no-repeat;
+  mask: url('/icons/rau.png') center / contain no-repeat;
 }
 
 .ag-collapse-tab:hover {
-  background: var(--ag-hover);
-  color: var(--ag-text);
+  background: var(--ui-hover-strong);
+  color: var(--color-text);
+  transform: scale(1.04);
+}
+
+.ag-collapse-tab:active {
+  transform: scale(0.94);
+  background: var(--ui-active);
+  box-shadow: var(--ui-pressed-inset);
+}
+
+.ag-collapse-tab:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-collapse-tab {
+    transition: none;
+  }
+
+  .ag-collapse-tab:hover,
+  .ag-collapse-tab:active {
+    transform: none;
+  }
 }
 
 /* ─── 헤더: 문서 맥락 + 작업 공간 액션 ──────────────── */
@@ -1455,9 +1477,7 @@ body.ag-sidebar-resizing .ag-collapse-tab {
   .ag-model-open .ag-model-menu,
   .ag-config-panel,
   .ag-config-panel-inner,
-  .ag-summary-caret,
-  .ag-collapse-tab .ui-chevron,
-  .ag-root.ag-collapsed .ag-collapse-tab .ui-chevron {
+  .ag-summary-caret {
     transition: none;
   }
 }
@@ -2754,7 +2774,7 @@ body.ag-fullscreen-open #editor-area {
 }
 
 /* 폭 조절·접기는 사이드바의 조작이다. 전체 화면에서는 Esc 가 대신한다. */
-.ag-fullscreen .ag-collapse-tab,
+body.ag-fullscreen-open .ag-collapse-tab,
 .ag-fullscreen .ag-resize-handle,
 .ag-fullscreen .ag-threads-close {
   display: none;
@@ -3878,12 +3898,6 @@ body.ag-col-resizing {
 .ag-thread-rename,
 .ag-environment-changes {
   border-radius: 7px 9px 6px 10px / 9px 6px 10px 7px;
-  filter: var(--ag-sketch-line);
-}
-
-/* 접기 탭은 패널에 붙은 왼쪽 두 모서리만 그린다. */
-.ag-collapse-tab {
-  border-radius: 10px 0 0 12px / 7px 0 0 11px;
   filter: var(--ag-sketch-line);
 }
 
