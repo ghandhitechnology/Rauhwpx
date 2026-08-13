@@ -564,13 +564,18 @@ impl PageItem {
     }
 
     /// 두 항목이 구조적으로 동일한지 비교 (para_index offset 적용).
-    fn matches_with_offset(&self, other: &PageItem, offset: i32) -> bool {
-        let adj = |pi: usize| (pi as i64 + offset as i64) as usize;
+    ///
+    /// offset 이 음수(문단 삭제)이고 para_index 가 작으면 합이 음수가 되므로
+    /// i64 로 비교한다 — 종전의 `as usize` 캐스팅은 u64::MAX 근방으로 랩되어
+    /// 비교 결과가 무의미해졌다.
+    pub(crate) fn matches_with_offset(&self, other: &PageItem, offset: i32) -> bool {
+        let adj = |pi: usize| (pi as i64).saturating_add(offset as i64);
+        let eq = |a: usize, b: usize| (a as i64) == adj(b);
         match (self, other) {
             (
                 PageItem::FullParagraph { para_index: a },
                 PageItem::FullParagraph { para_index: b },
-            ) => *a == adj(*b),
+            ) => eq(*a, *b),
             (
                 PageItem::PartialParagraph {
                     para_index: a,
@@ -582,7 +587,7 @@ impl PageItem {
                     start_line: s2,
                     end_line: e2,
                 },
-            ) => *a == adj(*b) && s1 == s2 && e1 == e2,
+            ) => eq(*a, *b) && s1 == s2 && e1 == e2,
             (
                 PageItem::Table {
                     para_index: a,
@@ -592,7 +597,7 @@ impl PageItem {
                     para_index: b,
                     control_index: c2,
                 },
-            ) => *a == adj(*b) && c1 == c2,
+            ) => eq(*a, *b) && c1 == c2,
             (
                 PageItem::PartialTable {
                     para_index: a,
@@ -608,7 +613,7 @@ impl PageItem {
                     end_row: er2,
                     ..
                 },
-            ) => *a == adj(*b) && c1 == c2 && sr1 == sr2 && er1 == er2,
+            ) => eq(*a, *b) && c1 == c2 && sr1 == sr2 && er1 == er2,
             (
                 PageItem::Shape {
                     para_index: a,
@@ -618,7 +623,7 @@ impl PageItem {
                     para_index: b,
                     control_index: c2,
                 },
-            ) => *a == adj(*b) && c1 == c2,
+            ) => eq(*a, *b) && c1 == c2,
             (PageItem::EndnoteSeparator { .. }, PageItem::EndnoteSeparator { .. }) => true,
             _ => false,
         }
