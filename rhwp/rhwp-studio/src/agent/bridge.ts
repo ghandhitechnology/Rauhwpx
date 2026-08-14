@@ -1033,6 +1033,13 @@ class AgentBridgeImpl implements AgentBridge {
           requestId: typeof msg.requestId === 'string' ? msg.requestId : '',
           state: msg.state,
           ...(typeof msg.detail === 'string' ? { detail: msg.detail } : {}),
+          ...(typeof msg.receivedBytes === 'number' && Number.isFinite(msg.receivedBytes)
+            ? { receivedBytes: msg.receivedBytes }
+            : {}),
+          ...(typeof msg.totalBytes === 'number' && Number.isFinite(msg.totalBytes)
+            ? { totalBytes: msg.totalBytes }
+            : {}),
+          ...(msg.activity === true ? { activity: true } : {}),
         });
         break;
       }

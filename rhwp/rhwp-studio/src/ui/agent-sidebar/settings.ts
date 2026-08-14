@@ -259,6 +259,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let piBusy = false;
   let piMessage = '';
   let piProgress = '';
+  /** 활동 신호가 끊기면 움직이는 막대를 멈추는 타이머. */
+  let piActivityPause: ReturnType<typeof setTimeout> | null = null;
   let piDraft: PiDraftModel[] = [];
   /** 이름 칸이 지금 물고 있는 초안 — 같은 객체면 다시 세우지 않는다. */
   let piNamingRendered: readonly PiDraftModel[] = [];
@@ -356,7 +358,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   piInstallBtn.append(providerIcon('pi'), el('span', '', 'Pi 연결'));
   const piProgressLine = el('p', 'ag-settings-note');
   piProgressLine.hidden = true;
-  piInstallStep.append(piInstallNote, piInstallBtn, piProgressLine);
+  // 내려받기 진행 막대 — 크기를 알면 채움 폭, 모르면 신호가 올 때만 흐르는 줄무늬.
+  const piProgressTrack = el('div', 'ag-settings-meter-track ag-pi-progress');
+  const piProgressFill = el('div', 'ag-settings-meter-fill');
+  piProgressTrack.appendChild(piProgressFill);
+  piProgressTrack.hidden = true;
+  piInstallStep.append(piInstallNote, piInstallBtn, piProgressTrack, piProgressLine);
 
   // 2단계 — OpenRouter 키
   const piKeyStep = el('div', 'ag-pi-step');
@@ -1103,16 +1110,55 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     piRekey.disabled = piBusy || !online;
   }
 
+  function formatMb(bytes: number): string {
+    return `${(bytes / 1048576).toFixed(1)}MB`;
+  }
+
+  /** 결정적 진행률 — 채움 폭을 퍼센트로 그린다. */
+  function piBarDeterminate(percent: number): void {
+    if (piActivityPause) {
+      clearTimeout(piActivityPause);
+      piActivityPause = null;
+    }
+    piProgressTrack.hidden = false;
+    piProgressTrack.classList.remove('ag-pi-progress-indeterminate', 'ag-pi-progress-paused');
+    piProgressFill.style.width = `${Math.min(100, Math.max(0, percent)).toFixed(1)}%`;
+  }
+
+  /** 크기를 모를 때 — 새 신호가 올 때만 흐르고, 잠잠해지면 멈추는 막대. */
+  function piBarNudge(): void {
+    piProgressTrack.hidden = false;
+    piProgressTrack.classList.add('ag-pi-progress-indeterminate');
+    piProgressTrack.classList.remove('ag-pi-progress-paused');
+    piProgressFill.style.width = '';
+    if (piActivityPause) clearTimeout(piActivityPause);
+    piActivityPause = setTimeout(() => {
+      piProgressTrack.classList.add('ag-pi-progress-paused');
+    }, 1200);
+  }
+
+  function piBarHide(): void {
+    if (piActivityPause) {
+      clearTimeout(piActivityPause);
+      piActivityPause = null;
+    }
+    piProgressTrack.hidden = true;
+    piProgressTrack.classList.remove('ag-pi-progress-indeterminate', 'ag-pi-progress-paused');
+    piProgressFill.style.width = '0%';
+  }
+
   async function runPiInstall(): Promise<void> {
     if (piBusy) return;
     piBusy = true;
     piMessage = '';
     piProgress = PI_PROGRESS_LABEL['downloading'] ?? '';
+    piBarNudge();
     renderPi();
     const status = await bridge.installPi();
     if (disposed) return;
     piBusy = false;
     piProgress = '';
+    piBarHide();
     if (status) {
       piStatus = status;
       piStepOverride = null;
@@ -1291,6 +1337,22 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           break;
         case 'pi-setup-progress':
           piProgress = PI_PROGRESS_LABEL[ev.state] ?? '';
+          if (ev.state === 'done') {
+            piBarHide();
+          } else if (typeof ev.receivedBytes === 'number') {
+            const total = typeof ev.totalBytes === 'number' && ev.totalBytes > 0 ? ev.totalBytes : null;
+            if (total) {
+              const percent = (ev.receivedBytes / total) * 100;
+              piBarDeterminate(percent);
+              piProgress = `${PI_PROGRESS_LABEL['downloading']} · ${formatMb(ev.receivedBytes)} / ${formatMb(total)} (${Math.floor(percent)}%)`;
+            } else {
+              piBarNudge();
+              piProgress = `${PI_PROGRESS_LABEL['downloading']} · ${formatMb(ev.receivedBytes)}`;
+            }
+          } else {
+            // 숫자 없는 단계 — 신호가 도착할 때만 막대가 흐른다.
+            piBarNudge();
+          }
           renderPi();
           break;
         case 'pi-catalog':
@@ -1307,6 +1369,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     },
     dispose(): void {
       disposed = true;
+      if (piActivityPause) {
+        clearTimeout(piActivityPause);
+        piActivityPause = null;
+      }
       element.remove();
     },
   };

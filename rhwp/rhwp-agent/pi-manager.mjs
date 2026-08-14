@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -29,6 +30,10 @@ const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 8_192;
 const STDERR_TAIL_LIMIT = 1_200;
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+const REGISTRY_BASE = 'https://registry.npmjs.org';
+const REGISTRY_TIMEOUT_MS = 10_000;
+/** 진행 이벤트는 이 간격으로만 내보낸다 — 청크마다 WS 를 두드리지 않는다. */
+const PROGRESS_INTERVAL_MS = 150;
 
 /** 이 파일 기준 경로 — 확장/스킬은 저장소 안에 있고, pi 홈은 그것을 가리키기만 한다. */
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -284,14 +289,77 @@ export function createPiManager({
     await writeAtomic(modelsPath, `${JSON.stringify(payload, null, 2)}\n`);
   }
 
-  function runNpmInstall(emit) {
+  /**
+   * 레지스트리에서 최신 타르볼 주소와 무결성 해시를 알아낸다.
+   * 버전이 박힌 스펙이면 npm 에 그대로 맡기려고 null 을 돌려준다.
+   */
+  async function resolveDist() {
+    if (packageSpec.lastIndexOf('@') > 0) return null;
+    const url = `${REGISTRY_BASE}/${packageSpec.replace('/', '%2F')}/latest`;
+    const response = await fetchImpl(url, { signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS) });
+    if (!response.ok) throw new Error(`registry HTTP ${response.status}`);
+    const meta = await response.json();
+    const tarball = meta?.dist?.tarball;
+    if (typeof tarball !== 'string' || !tarball) throw new Error('registry: tarball 주소가 없어요');
+    return {
+      tarball,
+      integrity: typeof meta?.dist?.integrity === 'string' ? meta.dist.integrity : null,
+    };
+  }
+
+  /**
+   * 타르볼을 직접 내려받아 바이트 단위 진행률을 emit 한다. content-length 가 없으면
+   * totalBytes 는 null 이고, UI 는 새 바이트가 올 때만 움직이는 막대로 처리한다.
+   * 무결성 실패는 PI_INSTALL_FAILED 로 던진다 — npm 폴백으로 넘어가지 않는다.
+   */
+  async function downloadTarball(dist, emit) {
+    const response = await fetchImpl(dist.tarball, { signal: AbortSignal.timeout(INSTALL_TIMEOUT_MS) });
+    if (!response.ok || !response.body) throw new Error(`tarball HTTP ${response.status}`);
+    const declared = Number(response.headers?.get?.('content-length'));
+    const totalBytes = Number.isFinite(declared) && declared > 0 ? declared : null;
+    const cacheDir = path.join(rootDir, 'cache');
+    await fs.mkdir(cacheDir, { recursive: true });
+    const filePath = path.join(cacheDir, 'pi-package.tgz');
+    const hash = createHash('sha512');
+    let receivedBytes = 0;
+    let lastEmit = 0;
+    const handle = await fs.open(filePath, 'w', 0o600);
+    try {
+      for await (const rawChunk of response.body) {
+        const chunk = Buffer.from(rawChunk);
+        receivedBytes += chunk.length;
+        hash.update(chunk);
+        await handle.write(chunk);
+        const ts = now();
+        if (ts - lastEmit >= PROGRESS_INTERVAL_MS) {
+          lastEmit = ts;
+          emit({ state: 'downloading', receivedBytes, totalBytes });
+        }
+      }
+    } finally {
+      await handle.close().catch(() => {});
+    }
+    if (dist.integrity?.startsWith('sha512-')) {
+      if (`sha512-${hash.digest('base64')}` !== dist.integrity) {
+        await fs.unlink(filePath).catch(() => {});
+        throw piError('PI_INSTALL_FAILED', '내려받은 pi 패키지가 무결성 검증에 실패했어요');
+      }
+    }
+    emit({ state: 'downloading', receivedBytes, totalBytes: totalBytes ?? receivedBytes });
+    return filePath;
+  }
+
+  function runNpmInstall(emit, localTarball = null) {
     return new Promise((resolve, reject) => {
       const argv = [
-        'install', '--prefix', prefixDir, '--no-fund', '--no-audit', '--loglevel=error', packageSpec,
+        'install', '--prefix', prefixDir, '--no-fund', '--no-audit',
+        // 폴백(npm 이 직접 내려받는) 경로에서는 http 로그가 활동 신호가 된다.
+        localTarball ? '--loglevel=error' : '--loglevel=http',
+        localTarball ?? packageSpec,
       ];
       let settled = false;
-      let sawOutput = false;
       let stderrText = '';
+      let lastActivity = 0;
       /** @type {NodeJS.Timeout | null} */
       let timer = null;
 
@@ -317,15 +385,17 @@ export function createPiManager({
       }, INSTALL_TIMEOUT_MS);
       if (timer?.unref) timer.unref();
 
-      const noteOutput = () => {
-        if (sawOutput) return;
-        sawOutput = true;
-        emit({ state: 'installing' });
+      // npm 출력이 나올 때마다 "일이 진행 중" 신호를 흘린다 — 멈추면 UI 막대도 멈춘다.
+      const noteActivity = () => {
+        const ts = now();
+        if (ts - lastActivity < PROGRESS_INTERVAL_MS) return;
+        lastActivity = ts;
+        emit({ state: 'installing', activity: true });
       };
-      proc.stdout?.on?.('data', noteOutput);
+      proc.stdout?.on?.('data', noteActivity);
       proc.stdout?.on?.('error', () => {});
       proc.stderr?.on?.('data', (chunk) => {
-        noteOutput();
+        noteActivity();
         stderrText += chunk.toString();
       });
       proc.stderr?.on?.('error', () => {});
@@ -413,7 +483,8 @@ export function createPiManager({
     /**
      * pi CLI 를 설치하고 확장/스킬/설정을 동기화한다. 동시에 부르면 하나만 돈다.
      *
-     * @param {(progress: { state: string, detail?: string }) => void} [onProgress]
+     * @param {(progress: { state: string, detail?: string, receivedBytes?: number,
+     *   totalBytes?: number|null, activity?: boolean }) => void} [onProgress]
      * @returns {Promise<PiStatus>}
      */
     async install(onProgress) {
@@ -438,7 +509,19 @@ export function createPiManager({
           await load();
           emit({ state: 'downloading' });
           await fs.mkdir(prefixDir, { recursive: true });
-          await runNpmInstall(emit);
+          // 결정적 진행률: 타르볼을 직접 받아 바이트를 센다. 레지스트리/네트워크가
+          // 협조하지 않으면 npm 폴백으로 넘어가 활동 신호만 흘린다.
+          let tarballPath = null;
+          try {
+            const dist = await resolveDist();
+            if (dist) tarballPath = await downloadTarball(dist, emit);
+          } catch (error) {
+            if (error?.code === 'PI_INSTALL_FAILED') throw error; // 무결성 실패는 폴백 금지
+            tarballPath = null;
+          }
+          emit({ state: 'installing' });
+          await runNpmInstall(emit, tarballPath);
+          if (tarballPath) await fs.unlink(tarballPath).catch(() => {});
           emit({ state: 'configuring' });
           await syncAssets();
           installedVersion = await readInstalledVersion();
