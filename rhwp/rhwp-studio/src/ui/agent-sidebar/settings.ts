@@ -65,7 +65,7 @@ const CONN_LABEL: Record<ConnectionState, string> = {
 };
 
 const PERMISSION_OPTIONS: ReadonlyArray<{ id: PermissionProfile; label: string }> = [
-  { id: 'safe', label: '안전 — 프로젝트 안에서만' },
+  { id: 'safe', label: '안전 — 문서 편집, 파일은 프로젝트 안에서만' },
   { id: 'unrestricted', label: '전체 접근 — 노트북 전체' },
 ];
 
