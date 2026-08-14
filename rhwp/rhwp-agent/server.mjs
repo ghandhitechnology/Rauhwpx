@@ -6,6 +6,7 @@ import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { createClaudeSession } from './agents/claude.mjs';
 import { createCodexSession, prepareCodexHome } from './agents/codex.mjs';
+import { createPiSession } from './agents/pi.mjs';
 import { generateChatTitle } from './agents/title.mjs';
 import { SkillRegistry } from './skills.mjs';
 import { generateSkillDraft } from './skill-generator.mjs';
@@ -18,6 +19,9 @@ import { BrowserbaseSession } from './browserbase-session.mjs';
 import { createProviderHealth } from './provider-health.mjs';
 import { createUsageStore } from './usage-store.mjs';
 import { createCliproxyClient } from './cliproxy.mjs';
+import { createPiManager, defaultPiRoot } from './pi-manager.mjs';
+import { createOpenRouter } from './openrouter.mjs';
+import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
 import { ReferenceStore } from './reference-store.mjs';
 import { createReferenceHttpHandler } from './reference-http.mjs';
 import { assertMessageScope, referenceScopesForSession, resolveSessionIdentity } from './reference-session.mjs';
@@ -56,7 +60,20 @@ for (const sourceCodexHome of sourceCodexHomes) {
 prepareCodexHome(ISOLATED_CODEX_HOME, sourceCodexAuthPath);
 const writingStyleStore = await new WritingStyleStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
-const providerHealth = createProviderHealth();
+const PI_ROOT = defaultPiRoot();
+const openRouter = createOpenRouter({ cacheDir: PI_ROOT });
+const piManager = await createPiManager({ rootDir: PI_ROOT, openRouter }).init();
+/** pi 상태는 동기 경로(resolveModel/startSession)에서도 필요해 캐시해 둔다. */
+let piStatus = await piManager.status();
+/** OpenRouter 잔액. 키가 있을 때만 채워지고 사용량 리포트에 얹힌다. */
+let openRouterCredits = null;
+if (piStatus.installed) {
+  // 저장소가 갱신되면 확장/스킬도 따라와야 한다 — 실패해도 허브는 그대로 뜬다.
+  await piManager.syncAssets().catch((error) => log(`pi asset sync failed: ${error?.message ?? error}`));
+}
+const providerHealth = createProviderHealth({
+  piBin: () => (piStatus.installed ? piManager.piBin : null),
+});
 const usageStore = await createUsageStore().init();
 const cliproxy = await createCliproxyClient({ rootDir: usageStore.rootDir }).init();
 const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
@@ -68,7 +85,7 @@ let styleCalibration = null;
 /** @type {import('ws').WebSocket | null} */
 let studioSocket = null;
 const mcpSockets = new Set();
-/** @type {{ agent: 'claude'|'codex', model: string|null, effort: string|null, permissionProfile: 'safe'|'unrestricted', backend: any, status: 'idle'|'running', sessionId: string|null, threadId: string, documentId: string|null, documentName: string|null, chatId: string, planning: PlanningState } | null} */
+/** @type {{ agent: 'claude'|'codex'|'pi', model: string|null, effort: string|null, permissionProfile: 'safe'|'unrestricted', backend: any, status: 'idle'|'running', sessionId: string|null, threadId: string, documentId: string|null, documentName: string|null, chatId: string, planning: PlanningState } | null} */
 let session = null;
 let nextCapabilityEpoch = 1;
 
@@ -80,7 +97,22 @@ const CLAUDE_EFFORTS_HAIKU = new Set(['low', 'medium', 'high']);
 const CODEX_EFFORTS = new Set(['low', 'medium', 'high']);
 const DEFAULT_EFFORT = { claude: 'high', codex: 'medium' };
 
+/** pi 모델은 사용자가 고른 것뿐이다 — 정적 목록이 아니라 캐시된 상태에서 찾는다. */
+function piModelConfig(id) {
+  return piStatus.models.find((model) => model.id === id) ?? null;
+}
+
+async function refreshPiStatus() {
+  piStatus = await piManager.status();
+  return piStatus;
+}
+
 function resolveModel(agent, requested) {
+  if (agent === 'pi') {
+    if (typeof requested === 'string' && piModelConfig(requested)) return requested;
+    if (piStatus.defaultModelId && piModelConfig(piStatus.defaultModelId)) return piStatus.defaultModelId;
+    return piStatus.models[0]?.id ?? null;
+  }
   const allowed = agent === 'claude' ? CLAUDE_MODELS : CODEX_MODELS;
   if (typeof requested === 'string' && allowed.has(requested)) return requested;
   const envDefault = agent === 'claude' ? process.env.RHWP_CLAUDE_MODEL : process.env.RHWP_CODEX_MODEL;
@@ -89,6 +121,14 @@ function resolveModel(agent, requested) {
 }
 
 function resolveEffort(agent, model, requested) {
+  if (agent === 'pi') {
+    // 추론을 지원하지 않는 모델은 effort 자체가 없다 — 붙이면 요청이 거부된다.
+    const efforts = piModelConfig(model)?.efforts ?? [];
+    if (efforts.length === 0) return null;
+    if (typeof requested === 'string' && efforts.includes(requested)) return requested;
+    const preferred = piModelConfig(model)?.defaultEffort;
+    return efforts.includes(preferred) ? preferred : efforts[0];
+  }
   const allowed = agent === 'codex'
     ? CODEX_EFFORTS
     : (model === 'haiku' ? CLAUDE_EFFORTS_HAIKU : CLAUDE_EFFORTS);
@@ -137,12 +177,55 @@ function replyToStudio(sock, obj) {
 }
 
 function usageSnapshot() {
-  return cliproxy.applyToSummary(usageStore.summary());
+  const usage = cliproxy.applyToSummary(usageStore.summary());
+  if (openRouterCredits) usage.openrouter = openRouterCredits;
+  return usage;
+}
+
+/** 잔액 조회는 5분 캐시된다 — refresh 일 때만 실제로 다시 부른다. */
+async function refreshOpenRouterCredits(refresh = false) {
+  if (!piStatus.keyConfigured) {
+    openRouterCredits = null;
+    return;
+  }
+  try {
+    openRouterCredits = await piManager.credits(refresh === true);
+  } catch (error) {
+    openRouterCredits = {
+      balanceUsd: 0,
+      totalCreditsUsd: 0,
+      totalUsageUsd: 0,
+      checkedAt: Date.now(),
+      error: String(error?.message ?? error),
+    };
+  }
 }
 
 async function usageSnapshotRefreshing(refresh = false) {
   if (cliproxy.configured()) await cliproxy.refresh(refresh === true);
+  await refreshOpenRouterCredits(refresh);
   return usageSnapshot();
+}
+
+/**
+ * 보조 작업(제목·스킬 초안·문체 분석)을 OpenRouter 로 돌릴지 정한다.
+ * pi 를 고른 사용자거나, CLI 가 없는데 pi 설정은 끝나 있는 경우다.
+ *
+ * @param {string|null|undefined} requestedAgent
+ * @param {'claude'|'codex'} cliAgent 이 작업이 원래 쓰는 CLI
+ */
+function auxDeps(requestedAgent, cliAgent) {
+  const agent = requestedAgent === 'pi' || requestedAgent === 'claude' || requestedAgent === 'codex'
+    ? requestedAgent
+    : (session?.agent ?? null);
+  const health = providerHealth.cached();
+  // 프로브 전이면 CLI 가 있다고 보고 기존 경로를 먼저 태운다.
+  const cliAvailable = health ? health[cliAgent]?.available !== false : true;
+  return {
+    useOpenRouter: piStatus.setupComplete && (agent === 'pi' || !cliAvailable),
+    piManager,
+    openRouter,
+  };
 }
 
 function sessionInfo() {
@@ -174,7 +257,10 @@ function makeBackendEventHandler(generation) {
     if (evt.type === 'session-info' && evt.sessionId) session.sessionId = evt.sessionId;
     if (evt.type === 'usage') {
       // 사용량은 원본 이벤트가 아니라 집계 리포트로만 스튜디오에 전달한다.
-      usageStore.record({ agent: session.agent, model: evt.model, ...(evt.usage ?? {}) });
+      // pi 는 OpenRouter 청구액(costUsd)을 이벤트 바깥에 달고 온다.
+      usageStore.record({
+        agent: session.agent, model: evt.model, costUsd: evt.costUsd, ...(evt.usage ?? {}),
+      });
       sendJson(studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
       return;
     }
@@ -296,8 +382,14 @@ function startSession(
     capabilityEpoch: planning.capabilityEpoch,
     toolProfile: planning.mcpEnvironment().RHWP_TOOL_PROFILE,
     mcpEnvironment: planning.mcpEnvironment(),
+    // pi 전용 — 설치 경로와 영속 루트, 그리고 선택한 모델의 추론 지원 여부.
+    piBin: piManager.piBin,
+    piRoot: piManager.rootDir,
+    reasoning: agent === 'pi' ? Boolean(piModelConfig(model)?.reasoning) : false,
   };
-  const backend = agent === 'claude' ? createClaudeSession(opts) : createCodexSession(opts);
+  const backend = agent === 'claude'
+    ? createClaudeSession(opts)
+    : (agent === 'pi' ? createPiSession(opts) : createCodexSession(opts));
   session = {
     agent,
     model,
@@ -323,6 +415,17 @@ function sendChatError(sock, error, fallbackCode = 'WORKFLOW_ERROR') {
   sendJson(sock, {
     v: 1,
     type: 'chat-error',
+    code: error?.code ?? fallbackCode,
+    message: String(error?.message ?? error),
+  });
+}
+
+/** pi 요청 실패는 채팅 오류가 아니라 설정 카드에 붙는다. 키는 절대 되돌려 보내지 않는다. */
+function sendPiError(sock, requestId, error, fallbackCode) {
+  replyToStudio(sock, {
+    v: 1,
+    type: 'pi-error',
+    requestId,
     code: error?.code ?? fallbackCode,
     message: String(error?.message ?? error),
   });
@@ -468,8 +571,16 @@ function handleStudioMessage(sock, msg) {
   switch (msg.type) {
     case 'chat-start': {
       const agent = msg.agent;
-      if (agent !== 'claude' && agent !== 'codex') {
+      if (agent !== 'claude' && agent !== 'codex' && agent !== 'pi') {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: `unknown agent: ${String(agent)}` });
+        return;
+      }
+      // 설정이 끝나지 않은 pi 로는 세션을 열지 않는다 — 살아 있는 세션도 건드리지 않는다.
+      if (agent === 'pi' && !piStatus.setupComplete) {
+        sendJson(sock, {
+          v: 1, type: 'chat-error', code: 'PI_NOT_CONFIGURED',
+          message: 'Pi 설정을 먼저 끝내 주세요 (설치 · OpenRouter 키 · 모델 선택).',
+        });
         return;
       }
       try {
@@ -514,7 +625,7 @@ function handleStudioMessage(sock, msg) {
         return;
       }
       const preview = typeof msg.preview === 'string' ? msg.preview : '';
-      generateChatTitle(preview)
+      generateChatTitle(preview, auxDeps(msg.agent, 'codex'))
         .then((title) => {
           sendJson(sock, {
             v: 1,
@@ -680,10 +791,13 @@ function handleStudioMessage(sock, msg) {
         sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'INVALID_REQUEST', message: 'Skill goal is required.' });
         return;
       }
-      const agent = msg.agent === 'codex' ? 'codex' : 'claude';
+      const agent = msg.agent === 'codex' || msg.agent === 'pi' ? msg.agent : 'claude';
       const model = resolveModel(agent, msg.model);
       sendJson(sock, { v: 1, type: 'skill-draft-progress', requestId: msg.requestId ?? null, state: 'generating' });
-      void generateSkillDraft({ agent, model, goal: String(msg.goal ?? ''), triggerExamples: String(msg.triggerExamples ?? ''), nonTriggerExamples: String(msg.nonTriggerExamples ?? ''), resourceNotes: String(msg.resourceNotes ?? ''), existingSkill: typeof msg.existingSkill === 'string' ? msg.existingSkill : undefined })
+      void generateSkillDraft(
+        { agent, model, goal: String(msg.goal ?? ''), triggerExamples: String(msg.triggerExamples ?? ''), nonTriggerExamples: String(msg.nonTriggerExamples ?? ''), resourceNotes: String(msg.resourceNotes ?? ''), existingSkill: typeof msg.existingSkill === 'string' ? msg.existingSkill : undefined },
+        auxDeps(agent, agent === 'claude' ? 'claude' : 'codex'),
+      )
         .then((draft) => sendJson(sock, { v: 1, type: 'skill-draft-result', requestId: msg.requestId ?? null, draft }))
         .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'SKILL_GENERATION_FAILED', message: String(e?.message ?? e) }));
       return;
@@ -718,6 +832,62 @@ function handleStudioMessage(sock, msg) {
           v: 1, type: 'usage-error', requestId,
           code: e?.code ?? 'INVALID_PLAN', message: String(e?.message ?? e),
         }));
+      return;
+    }
+    case 'pi-status-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void refreshPiStatus()
+        .then((status) => replyToStudio(sock, { v: 1, type: 'pi-status', requestId, status }))
+        .catch((e) => sendPiError(sock, requestId, e, 'PI_STATUS_FAILED'));
+      return;
+    }
+    case 'pi-install': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void piManager.install((progress) => replyToStudio(sock, {
+        v: 1,
+        type: 'pi-setup-progress',
+        requestId,
+        state: progress.state,
+        ...(progress.detail ? { detail: progress.detail } : {}),
+      }))
+        .then((status) => {
+          piStatus = status;
+          replyToStudio(sock, { v: 1, type: 'pi-status', requestId, status });
+          // 설치 직후 프로바이더 목록에 pi 가 나타나야 한다.
+          void providerHealth.check(true)
+            .then((providers) => replyToStudio(sock, { v: 1, type: 'provider-status', providers }))
+            .catch(() => {});
+        })
+        .catch((e) => sendPiError(sock, requestId, e, 'PI_INSTALL_FAILED'));
+      return;
+    }
+    case 'pi-set-key': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void piManager.setApiKey(String(msg.key ?? ''))
+        .then(async (status) => {
+          piStatus = status;
+          replyToStudio(sock, { v: 1, type: 'pi-status', requestId, status });
+          await refreshOpenRouterCredits(true);
+          replyToStudio(sock, { v: 1, type: 'usage-report', usage: usageSnapshot() });
+        })
+        .catch((e) => sendPiError(sock, requestId, e, 'OPENROUTER_KEY_INVALID'));
+      return;
+    }
+    case 'pi-catalog-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void piManager.catalog(msg.refresh === true)
+        .then((models) => replyToStudio(sock, { v: 1, type: 'pi-catalog', requestId, models }))
+        .catch((e) => sendPiError(sock, requestId, e, 'OPENROUTER_UNREACHABLE'));
+      return;
+    }
+    case 'pi-set-models': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void piManager.setModels(Array.isArray(msg.models) ? msg.models : [])
+        .then((status) => {
+          piStatus = status;
+          replyToStudio(sock, { v: 1, type: 'pi-status', requestId, status });
+        })
+        .catch((e) => sendPiError(sock, requestId, e, 'PI_MODELS_INVALID'));
       return;
     }
     case 'cliproxy-connect': {
@@ -766,7 +936,10 @@ function handleStudioMessage(sock, msg) {
         .then(() => {
           if (styleCalibration?.requestId === requestId) styleCalibration.state = 'analyzing';
           sendJson(studioSocket, { v: 1, type: 'writing-style-progress', requestId, state: 'analyzing' });
-          return calibrateWritingStyle({ language: msg.language, files: msg.files });
+          return calibrateWritingStyle(
+            { language: msg.language, files: msg.files },
+            auxDeps(msg.agent, 'codex'),
+          );
         })
         .then(async (profile) => {
           if (styleCalibration?.requestId === requestId) styleCalibration.state = 'saving';
@@ -1027,6 +1200,13 @@ const httpServer = http.createServer((req, res) => {
       res.end(JSON.stringify(healthzBody()));
       return;
     }
+    // pi 확장은 MCP 대신 이 엔드포인트로 도구 정의를 받아 간다.
+    if (req.method === 'GET' && url.pathname === '/pi/tool-definitions') {
+      const { status, body } = handlePiToolDefinitions({ url, token: TOKEN });
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+      return;
+    }
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
   }).catch((error) => {
@@ -1103,7 +1283,13 @@ httpServer.on('upgrade', (req, socket, head) => {
       void providerHealth.check().then((providers) => {
         if (providers !== cachedProviders) replyToStudio(ws, { v: 1, type: 'provider-status', providers });
       });
+      sendJson(ws, { v: 1, type: 'pi-status', status: piStatus });
       sendJson(ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });
+      if (piStatus.keyConfigured && !openRouterCredits) {
+        // 잔액도 접속을 붙잡지 않는다 — 도착하면 사용량 리포트를 한 번 더 보낸다.
+        void refreshOpenRouterCredits(false)
+          .then(() => replyToStudio(ws, { v: 1, type: 'usage-report', usage: usageSnapshot() }));
+      }
       if (cliproxy.configured()) {
         void cliproxy.refresh(false).then((status) => {
           if (status.connected || status.error) replyToStudio(ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });

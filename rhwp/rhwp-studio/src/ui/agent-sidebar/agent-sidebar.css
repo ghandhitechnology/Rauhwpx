@@ -87,8 +87,10 @@ body.ag-sidebar-animating .ag-root {
   --ag-selected: var(--n-fill-selected);
   --ag-claude: #c4785a;
   --ag-codex: #5b8fd4;
+  --ag-pi: #4a9a86;
   --ag-claude-wash: rgba(196, 120, 90, 0.10);
   --ag-codex-wash: rgba(91, 143, 212, 0.10);
+  --ag-pi-wash: rgba(74, 154, 134, 0.10);
   --ag-accent: var(--ag-claude);
   --ag-ok: #2f7d4f;
   --ag-err: #c8372d;
@@ -144,6 +146,10 @@ body.ag-sidebar-animating .ag-root {
 
 .ag-root[data-agent='codex'] {
   --ag-accent: var(--ag-codex);
+}
+
+.ag-root[data-agent='pi'] {
+  --ag-accent: var(--ag-pi);
 }
 
 .ag-root.ag-collapsed {
@@ -207,8 +213,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 :root[data-theme-effective='dark'] .ag-root {
   --ag-claude: #d49174;
   --ag-codex: #7aa8e0;
+  --ag-pi: #6cc0aa;
   --ag-claude-wash: rgba(212, 145, 116, 0.16);
   --ag-codex-wash: rgba(122, 168, 224, 0.16);
+  --ag-pi-wash: rgba(108, 192, 170, 0.16);
   --ag-ok: #5cbb7f;
   --ag-err: #ff6b60;
   box-shadow: var(--n-elev-2);
@@ -1260,6 +1268,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   box-shadow: 0 0 0 3px var(--ag-codex-wash);
 }
 
+.ag-root[data-agent='pi'] .ag-thread-rename-input:focus {
+  box-shadow: 0 0 0 3px var(--ag-pi-wash);
+}
+
 .ag-threads-empty {
   padding: 18px 8px;
   color: var(--ag-text-muted);
@@ -1339,8 +1351,18 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   mask: url('/icons/provider-codex.png') center / contain no-repeat;
 }
 
+/* π 는 우리가 그린 단색 글리프 — 같은 마스크 계약을 탄다. */
+.ag-provider-icon-mask[data-agent='pi'] {
+  -webkit-mask-image: url('/icons/provider-pi.svg');
+  mask-image: url('/icons/provider-pi.svg');
+}
+
 .ag-root[data-agent='codex'] .ag-provider .ag-provider-icon-mask {
   color: var(--ag-codex);
+}
+
+.ag-root[data-agent='pi'] .ag-provider .ag-provider-icon-mask {
+  color: var(--ag-pi);
 }
 
 /* 줄어들더라도 최소 몇 글자는 남겨 무엇을 고르는 칸인지 읽히게 한다. */
@@ -1357,6 +1379,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-root[data-agent='codex'] .ag-provider .ag-model-name {
   color: var(--ag-codex);
+}
+
+.ag-root[data-agent='pi'] .ag-provider .ag-model-name {
+  color: var(--ag-pi);
 }
 
 .ag-llm-trigger {
@@ -1510,6 +1536,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-provider-item[data-agent='codex'] .ag-provider-icon-mask {
   color: var(--ag-codex);
+}
+
+.ag-provider-item[data-agent='pi'] .ag-provider-icon-mask {
+  color: var(--ag-pi);
 }
 
 .ag-model-item:hover,
@@ -2363,6 +2393,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-plan-card.ag-claude { box-shadow: inset 1px 0 0 var(--ag-claude), var(--n-elev-1); }
 .ag-plan-card.ag-codex { box-shadow: inset 1px 0 0 var(--ag-codex), var(--n-elev-1); }
+.ag-plan-card.ag-pi { box-shadow: inset 1px 0 0 var(--ag-pi), var(--n-elev-1); }
 
 .ag-plan-head {
   display: flex;
@@ -2515,6 +2546,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-root[data-agent='codex'] .ag-composer:focus-within {
   box-shadow: var(--n-elev-2), 0 0 0 3px var(--ag-codex-wash);
+}
+
+.ag-root[data-agent='pi'] .ag-composer:focus-within {
+  box-shadow: var(--n-elev-2), 0 0 0 3px var(--ag-pi-wash);
 }
 
 .ag-composer-meta {
