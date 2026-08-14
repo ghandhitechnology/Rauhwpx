@@ -40,7 +40,9 @@ test('typewriter reveal is bounded, one-shot, and reduced-motion safe', () => {
 test('overlay reconciles DOM by key and reprojects without reprobing on view changes', () => {
   // 문서 변경 이벤트만 wasm rect 프로브를 다시 한다.
   assert.match(overlaySrc, /geometryEvents = \['document-changed', 'document-page-invalidated', 'document-view-changed'\]/);
-  assert.match(overlaySrc, /projectionEvents = \['zoom-changed', 'viewport-resize', 'viewport-inset-changed'\]/);
+  assert.match(overlaySrc, /projectionEvents = \['zoom-changed', 'viewport-resize', 'viewport-inset-changed', 'page-layout-changed'\]/);
+  // 가상 스크롤 배치 확정(page-layout-changed) 시 재배치 — 배치 전 페이지는 그리지 않는다.
+  assert.match(overlaySrc, /if \(rect\.pageIndex >= vs\.pageCount\) return null/);
   // DOM 은 key 재조정 — 매 렌더 전체 파괴/재생성 금지.
   assert.match(overlaySrc, /this\.nodePool\.get\(key\)/);
   assert.doesNotMatch(overlaySrc, /replaceChildren\(\)/);

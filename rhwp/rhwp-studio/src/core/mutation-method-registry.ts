@@ -88,6 +88,7 @@ export const EXCLUDED_NON_DOCUMENT: readonly string[] = [
   'clearLayerResourceCache', // 렌더 캐시
   'setShowParagraphMarks', 'setShowControlCodes', 'setShowTransparentBorders', // 표시 토글
   'setClipEnabled', // 렌더 클립 옵션
+  'refreshLayout', // 현재 IR에서 파생 조판 캐시만 재구성
   'setActiveField', 'clearActiveField', // 편집 세션 상태 (직렬화 비대상)
   'moveVertical', 'moveVerticalByPath', // 캐럿 세로 탐색 (조회)
   'ensureParagraphStableIds', // 런타임 추적 id 부여

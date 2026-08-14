@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rau — Pending preview pagination repair plan</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #eef0ec;
+      --paper: #fffef9;
+      --surface: #ffffff;
+      --ink: #202520;
+      --muted: #687068;
+      --line: #d5d9d1;
+      --accent: #315f4d;
+      --accent-soft: #e4f0e9;
+      --danger: #a4433d;
+      --danger-soft: #fae9e6;
+      --warn: #8a641c;
+      --warn-soft: #fff4d9;
+      --blue: #385f8a;
+      --blue-soft: #e8f0f8;
+      --shadow: 0 18px 50px rgba(41, 50, 42, .12);
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { background: var(--bg); }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 0%, rgba(49, 95, 77, .09), transparent 26rem),
+        var(--bg);
+      font: 14px/1.55 var(--sans);
+    }
+
+    button { font: inherit; }
+
+    .shell {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 30px 0 64px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: end;
+      padding: 32px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255, 254, 249, .94);
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 760px;
+      margin: 0;
+      font-size: clamp(30px, 5vw, 54px);
+      line-height: 1.03;
+      letter-spacing: -.055em;
+    }
+
+    .lede {
+      max-width: 770px;
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .verdict {
+      min-width: 205px;
+      padding: 15px 17px;
+      border: 1px solid #e4c2bd;
+      border-radius: 12px;
+      background: var(--danger-soft);
+      color: #6f2d29;
+    }
+
+    .verdict strong,
+    .verdict span { display: block; }
+
+    .verdict.done {
+      border-color: #b8d4c3;
+      background: var(--accent-soft);
+      color: #244c3b;
+    }
+
+    .verdict strong { font-size: 13px; }
+    .verdict span { margin-top: 3px; font-size: 12px; }
+
+    .tabs {
+      display: inline-flex;
+      gap: 4px;
+      margin: 22px 0 0;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, .72);
+    }
+
+    .tabs button {
+      padding: 8px 13px;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .tabs button[aria-pressed="true"] {
+      background: var(--surface);
+      color: var(--ink);
+      box-shadow: 0 2px 8px rgba(42, 50, 43, .12);
+      font-weight: 750;
+    }
+
+    .mode-panel { display: none; }
+    body[data-mode="failure"] .mode-panel.failure,
+    body[data-mode="target"] .mode-panel.target { display: block; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(360px, .95fr);
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .card {
+      padding: 23px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: rgba(255, 255, 255, .9);
+      box-shadow: 0 8px 25px rgba(42, 50, 43, .06);
+    }
+
+    .card h2 {
+      margin: 0 0 7px;
+      font-size: 17px;
+      letter-spacing: -.025em;
+    }
+
+    .card > p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .flow-step {
+      position: relative;
+      min-height: 160px;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: var(--paper);
+    }
+
+    .flow-step:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      right: -20px;
+      top: 68px;
+      z-index: 2;
+      color: #8b938b;
+      font-size: 18px;
+      font-weight: 800;
+    }
+
+    .flow-step small {
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .07em;
+      text-transform: uppercase;
+    }
+
+    .flow-step strong {
+      display: block;
+      margin: 5px 0 9px;
+      font-size: 13px;
+    }
+
+    .flow-step code,
+    .code-ref {
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .mini-page {
+      display: grid;
+      gap: 5px;
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid #d9d8ce;
+      border-radius: 4px;
+      background: white;
+      box-shadow: 0 3px 8px rgba(0, 0, 0, .06);
+    }
+
+    .mini-line { height: 5px; border-radius: 9px; background: #bfc6bd; }
+    .mini-line.short { width: 62%; }
+    .mini-line.old { background: #d69690; }
+    .mini-line.new { background: #78a991; }
+
+    .cause-list,
+    .checks,
+    .steps {
+      margin: 17px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .cause-list { display: grid; gap: 10px; }
+
+    .cause-list li {
+      padding: 12px 13px;
+      border-left: 3px solid var(--danger);
+      border-radius: 4px 9px 9px 4px;
+      background: #fff8f6;
+    }
+
+    .cause-list strong { display: block; margin-bottom: 3px; }
+    .cause-list span { color: var(--muted); }
+
+    .finding {
+      margin-top: 16px;
+      padding: 14px;
+      border: 1px solid #d8c07d;
+      border-radius: 10px;
+      background: var(--warn-soft);
+      color: #694b16;
+    }
+
+    .finding strong { display: block; margin-bottom: 4px; }
+
+    .steps {
+      display: grid;
+      gap: 0;
+      counter-reset: plan;
+    }
+
+    .steps li {
+      counter-increment: plan;
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr);
+      gap: 12px;
+      padding: 16px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .steps li::before {
+      content: counter(plan);
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 850;
+    }
+
+    .steps strong { display: block; margin-bottom: 3px; }
+    .steps p { margin: 0; color: var(--muted); }
+
+    .file-map {
+      display: grid;
+      gap: 9px;
+      margin-top: 15px;
+    }
+
+    .file {
+      padding: 12px 13px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--paper);
+    }
+
+    .file code {
+      display: block;
+      overflow-wrap: anywhere;
+      color: var(--blue);
+      font: 11px/1.45 var(--mono);
+    }
+
+    .file span { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+
+    .status {
+      display: inline-block;
+      margin-left: 5px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: var(--blue-soft);
+      color: var(--blue);
+      font-size: 9px;
+      font-weight: 850;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      vertical-align: 1px;
+    }
+
+    .checks { display: grid; gap: 9px; }
+
+    .checks li {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr);
+      gap: 9px;
+      color: var(--muted);
+    }
+
+    .checks li::before {
+      content: "✓";
+      display: grid;
+      place-items: center;
+      width: 17px;
+      height: 17px;
+      border-radius: 50%;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 10px;
+      font-weight: 900;
+    }
+
+    .metric {
+      margin-top: 15px;
+      padding: 14px;
+      border: 1px solid #bfd0e2;
+      border-radius: 10px;
+      background: var(--blue-soft);
+      color: #294c72;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .wide { grid-column: 1 / -1; }
+
+    footer {
+      padding: 20px 4px 0;
+      color: var(--muted);
+      font-size: 11px;
+      text-align: center;
+    }
+
+    @media (max-width: 860px) {
+      .shell { width: min(100% - 20px, 720px); padding-top: 10px; }
+      .hero { grid-template-columns: 1fr; padding: 24px; }
+      .verdict { min-width: 0; }
+      .grid { grid-template-columns: 1fr; }
+      .wide { grid-column: auto; }
+      .flow { grid-template-columns: 1fr; }
+      .flow-step { min-height: 0; }
+      .flow-step:not(:last-child)::after {
+        content: "↓";
+        right: 50%;
+        top: auto;
+        bottom: -20px;
+      }
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .mode-panel { animation: reveal 160ms ease-out; }
+      @keyframes reveal { from { opacity: .5; transform: translateY(3px); } }
+    }
+  </style>
+</head>
+<body data-mode="failure">
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Engineering investigation · implemented 15 Aug 2026</p>
+        <h1>Pending preview pagination repair</h1>
+        <p class="lede">Make the document shown before approval use the same content and page breaks as the approved result. Review decoration stays visual; it must never add content to the paginator.</p>
+      </div>
+      <aside class="verdict done" aria-label="Implementation verdict">
+        <strong>Implemented and verified</strong>
+        <span>Pending, approved, and rebuilt page maps now agree.</span>
+      </aside>
+    </header>
+
+    <nav class="tabs" aria-label="Diagram mode">
+      <button type="button" data-mode="failure" aria-pressed="true">Failure path</button>
+      <button type="button" data-mode="target" aria-pressed="false">Target invariant</button>
+    </nav>
+
+    <section class="mode-panel failure card" aria-labelledby="failure-title">
+      <h2 id="failure-title">Why the preview grew—and why approval sometimes did not heal it</h2>
+      <p>Two defects overlapped. The old <code>delete_range</code> path left deleted text in layout until approval. Separately, agent multiline insertion copied <code>pageBreakBefore</code> into every new paragraph; that flag lives in document IR, so approval correctly preserved the broken pagination.</p>
+      <div class="flow" aria-label="Failure sequence">
+        <article class="flow-step">
+          <small>1 · Pending delete</small>
+          <strong>Old paragraphs stay in layout</strong>
+          <code>markDelete(range)</code>
+          <div class="mini-page" aria-hidden="true">
+            <i class="mini-line old"></i><i class="mini-line old short"></i>
+          </div>
+        </article>
+        <article class="flow-step">
+          <small>2 · Pending insert</small>
+          <strong>New paragraphs are added too</strong>
+          <code>performInsert(text)</code>
+          <div class="mini-page" aria-hidden="true">
+            <i class="mini-line new"></i><i class="mini-line old"></i><i class="mini-line new short"></i><i class="mini-line old short"></i>
+          </div>
+        </article>
+        <article class="flow-step">
+          <small>3 · Approval</small>
+          <strong>Old text is removed; layout rebuilds</strong>
+          <code>restoreSnapshot()</code>
+          <div class="mini-page" aria-hidden="true">
+            <i class="mini-line new"></i><i class="mini-line new short"></i>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="mode-panel target card" aria-labelledby="target-title">
+      <h2 id="target-title">The invariant to enforce</h2>
+      <p>For every applied-now text operation, pending and approved states contain identical document content. Approval changes review state and history ownership, not pagination.</p>
+      <div class="flow" aria-label="Target sequence">
+        <article class="flow-step">
+          <small>1 · Atomic rewrite</small>
+          <strong>Delete and insert the real content</strong>
+          <code>replaceText(range, text)</code>
+        </article>
+        <article class="flow-step">
+          <small>2 · Review rendering</small>
+          <strong>Keep deleted text in metadata only</strong>
+          <code>oldText → overlay/popover</code>
+        </article>
+        <article class="flow-step">
+          <small>3 · Approval</small>
+          <strong>Page map remains unchanged</strong>
+          <code>pendingPages === approvedPages</code>
+        </article>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Confirmed findings</h2>
+        <p>The issue is in the agent pending-edit path, not the normal document renderer.</p>
+        <ul class="cause-list">
+          <li>
+            <strong>Layout received both sides of a rewrite.</strong>
+            <span>The legacy deletion operation was mark-only, while insertions were applied immediately.</span>
+          </li>
+          <li>
+            <strong>Approval concealed the mismatch.</strong>
+            <span><span class="code-ref">approveInner()</span> saves, restores, recomposes, and fully paginates a snapshot; that authoritative rebuild makes the page flow look normal.</span>
+          </li>
+          <li>
+            <strong>Multiline insertion persisted a forced break on every paragraph.</strong>
+            <span><span class="code-ref">splitParagraph()</span> has normal Enter semantics and inherits the source paragraph shape. Agent-inserted continuation paragraphs must clear only the inherited <span class="code-ref">pageBreakBefore</span>.</span>
+          </li>
+          <li>
+            <strong>Incremental layout had no explicit operation boundary.</strong>
+            <span>Compound agent edits could expose intermediate cache state. A new IR-preserving <span class="code-ref">refreshLayout()</span> now recomposes and paginates once the logical operation is complete.</span>
+          </li>
+        </ul>
+        <div class="finding">
+          <strong>Repository status · complete</strong>
+          <code>delete_range</code> is applied immediately, continuation paragraphs no longer inherit forced page breaks, and approval records an authoritative page map. HWP and HWPX browser probes both pass.
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Primary code locations</h2>
+        <p>Keep the implementation narrow and centered on the existing pending-edit boundary.</p>
+        <div class="file-map">
+          <div class="file">
+            <code>rhwp/rhwp-studio/src/agent/tool-executor.ts</code>
+            <span><code>deleteRange()</code>: route deletions through an applied-now operation and return the shifted insertion point.</span>
+          </div>
+          <div class="file">
+            <code>rhwp/rhwp-studio/src/agent/pending-edits.ts</code>
+            <span><code>performInsert()</code> clears inherited continuation breaks; applied mutations, approval, reject, and speculative review reconcile authoritative layout.</span>
+          </div>
+          <div class="file">
+            <code>rhwp/rhwp-studio/src/agent/pending-overlay.ts</code>
+            <span>Render removed text from operation metadata; overlays remain layout-neutral.</span>
+          </div>
+          <div class="file">
+            <code>rhwp/rhwp-studio/e2e/agent-edit-loop.test.mjs</code>
+            <span>Asserts continuation metadata plus page-count and paragraph-page parity around approval and full refresh.</span>
+          </div>
+          <div class="file">
+            <code>rhwp/src/document_core/commands/document.rs · rhwp/src/wasm_api.rs</code>
+            <span>Add the non-IR-mutating <code>refreshLayout</code> engine boundary and share it with snapshot restoration.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>Implementation plan</h2>
+        <p>Use approval’s full snapshot rebuild as a diagnostic oracle, not as the routine preview fix.</p>
+        <ol class="steps">
+          <li>
+            <div>
+              <strong>Capture a deterministic failing fixture. <span class="status">done</span></strong>
+              <p>Reproduced in HWP and HWPX by inserting several paragraphs into a <code>pageBreakBefore</code> paragraph. Captured the page count, affected paragraph page indexes, and break metadata.</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Make deletion and replacement layout-real. <span class="status">done</span></strong>
+              <p><code>delete_range → replaceText(range, '')</code> remains the production path. Deleted text lives in pending metadata for review UI, reject, and undo—not in the paginator.</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Reconcile compound mutations once. <span class="status">done</span></strong>
+              <p>The engine now rebuilds styles, composed paragraphs, measurements, page maps, and render caches from the current IR at logical agent-operation boundaries. This is not a snapshot save/restore and does not change document content.</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Add a pre/post-approval parity gate. <span class="status">done</span></strong>
+              <p>The browser E2E asserts equal page count and affected paragraph page indexes before approval, after approval, and after explicit authoritative refresh. Unit tests cover reject plus undo/redo.</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Exercise adjacent edit types. <span class="status">done</span></strong>
+              <p>The full Studio suite covers insert, delete, replace, formatting, list, object, body, and cell paths. The agent edit-loop E2E combines multiline insert, replace, paragraph/list formatting, and approval.</p>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>Acceptance criteria</h2>
+        <ul class="checks">
+          <li>Pending page count equals approved page count for the reproduction document.</li>
+          <li>Affected paragraph page indexes do not change when Approve is clicked.</li>
+          <li>The pending canvas shows only post-edit text; deleted text appears only in review UI.</li>
+          <li>Reject restores original text, paragraph structure, formatting, and pagination.</li>
+          <li>Approve creates exactly one undo step, and undo/redo preserve the same page map.</li>
+          <li>No regression for Unicode offsets, table-cell edits, typewriter reveal, or exact-diff overlays.</li>
+        </ul>
+        <div class="metric">preview.pageMap === approved.pageMap === refreshed.pageMap === redo.pageMap</div>
+      </section>
+
+      <section class="card">
+        <h2>Scope and risk</h2>
+        <ul class="cause-list">
+          <li style="border-left-color: var(--warn)">
+            <strong>Coordinate shift after immediate deletion</strong>
+            <span>Agents must use the returned <code>collapsedAt</code> point or prefer atomic <code>replace_range</code>; stale coordinates should continue to fail by revision guard.</span>
+          </li>
+          <li style="border-left-color: var(--blue)">
+            <strong>Deliberate non-goals</strong>
+            <span>The approval UI, diff colors, and one-step undo contract are unchanged. Reconciliation rebuilds derived layout from current IR; it does not replay edits or create throwaway snapshots.</span>
+          </li>
+        </ul>
+      </section>
+    </div>
+
+    <footer>Implemented on <code>fix/preview</code>. Studio tests: 1,034 passing · Rust refresh-layout test passing · agent edit-loop E2E passing · HWP/HWPX live page-map probes passing.</footer>
+  </main>
+
+  <script>
+    const buttons = Array.from(document.querySelectorAll('[data-mode]')).filter((el) => el.tagName === 'BUTTON');
+    for (const button of buttons) {
+      button.addEventListener('click', () => {
+        const mode = button.dataset.mode;
+        document.body.dataset.mode = mode;
+        for (const candidate of buttons) {
+          candidate.setAttribute('aria-pressed', String(candidate === button));
+        }
+      });
+    }
+  </script>
+</body>
+</html>

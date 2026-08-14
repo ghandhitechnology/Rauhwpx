@@ -87,6 +87,7 @@ function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']])
       bus.emit('document-changed');
       return {
         changeSetId: 'cs-1',
+        deletedText: 'marked',
         insertedRange: {
           sectionIdx: range.sectionIdx,
           startParaIdx: range.startParaIdx,
