@@ -143,6 +143,7 @@ function makeExecutor(cursor?: Record<string, unknown>) {
     setFieldValue: () => ({ changeSetId: 'cs-1', fieldId: 1, oldValue: '', newValue: '' }),
     hasDestructiveTableMark: () => false,
     hasPendingStructureOp: () => false,
+    findDeleteMarkContaining: () => null as null | { range: Record<string, number>; text: string },
   };
   const inputHandler = {
     getCursorPosition: () => cursor ?? { sectionIndex: 0, paragraphIndex: 0, charOffset: 0 },
@@ -155,7 +156,7 @@ function makeExecutor(cursor?: Record<string, unknown>) {
     revision,
     pending: pending as never,
   });
-  return { executor, pendingCalls, body, cells, calls };
+  return { executor, pending, pendingCalls, body, cells, calls };
 }
 
 async function expectToolError(p: Promise<unknown>, code: string): Promise<void> {
@@ -220,6 +221,23 @@ test('get_text_range: cell 인자로 셀 문단을 읽는다', async () => {
   )) as { text: string; paraLength: number };
   assert.equal(r.text, 'foo');
   assert.equal(r.paraLength, 3);
+});
+
+test('insert_text: pending 삭제 마크 내부 지점은 PENDING_DELETE_OVERLAP 으로 거부된다', async () => {
+  const { executor, pending, pendingCalls } = makeExecutor();
+  pending.findDeleteMarkContaining = () => ({
+    range: { startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 3 },
+    text: 'foo',
+  });
+  await expectToolError(
+    executor.execute(
+      'insert_text',
+      { expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 1, text: 'X' },
+      'claude',
+    ),
+    'PENDING_DELETE_OVERLAP',
+  );
+  assert.equal(pendingCalls.length, 0, '가드에 걸리면 pending 에 도달하지 않아야 한다');
 });
 
 test('insert_text: cell 인자가 pending 으로 전달된다', async () => {
