@@ -14,8 +14,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 41개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 41);
+test('도구는 정확히 48개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 48);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -29,8 +29,12 @@ test('모든 도구가 허용된 카테고리로 명시 분류된다', () => {
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 33);
+  assert.equal(direct.size, 40);
   assert.ok(direct.has('insert_text'));
+  assert.ok(direct.has('replace_all'));
+  assert.ok(direct.has('insert_footnote'));
+  assert.ok(direct.has('set_bookmark'));
+  assert.ok(direct.has('get_outline'));
   assert.ok(direct.has('search_reference_files'));
   assert.ok(!direct.has('download_file'));
   assert.ok(!direct.has('present_implementation_plan'));

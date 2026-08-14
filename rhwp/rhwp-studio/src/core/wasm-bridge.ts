@@ -2893,6 +2893,17 @@ export class WasmBridge {
     return JSON.parse((this.doc as any).getPageOfPosition(sectionIdx, paraIdx));
   }
 
+  /** 문서 구조(개요/조문) 트리 — mode: 'auto' | 'outline' | 'clause' */
+  getOutlineStructure(mode: string): {
+    mode: string; node_count: number; preamble?: string[];
+    roots: Array<Record<string, unknown>>;
+  } | null {
+    if (!this.doc || typeof (this.doc as any).getStructure !== 'function') return null;
+    try {
+      return JSON.parse((this.doc as any).getStructure(mode));
+    } catch { return null; }
+  }
+
   // ── 책갈피 API ──
 
   getBookmarks(): BookmarkInfo[] {
