@@ -1,15 +1,21 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { existsSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import { createClaudeSession, buildClaudeArgv } from '../agents/claude.mjs';
 import { createCodexSession, buildCodexArgv } from '../agents/codex.mjs';
 import { systemBriefFor } from '../agents/backend.mjs';
 
+const testHome = mkdtempSync(path.join(os.tmpdir(), 'rhwp-backend-test-'));
+test.after(() => rmSync(testHome, { recursive: true, force: true }));
+
 const baseOpts = {
   rootDir: '/tmp/rhwp',
-  isolatedHome: '/tmp/rhwp-home',
-  codexHome: '/tmp/codex-home',
+  isolatedHome: testHome,
+  codexHome: path.join(testHome, '.codex'),
   mcpScriptPath: '/tmp/mcp-stdio.mjs',
   hubPort: 5175,
   token: 'secret-token',
@@ -177,6 +183,41 @@ test('sessions expose an async idle execution-mode switch', async () => {
     );
     session.dispose();
   }
+});
+
+test('Codex recreates a purged isolated home before spawning', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-codex-home-test-'));
+  const isolatedHome = path.join(root, 'isolated');
+  const codexHome = path.join(isolatedHome, '.codex');
+  const authPath = path.join(root, 'auth.json');
+  writeFileSync(authPath, '{}');
+  rmSync(isolatedHome, { recursive: true, force: true });
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  let child;
+  let spawnEnv;
+  const session = createCodexSession({
+    ...baseOpts,
+    isolatedHome,
+    codexHome,
+    codexAuthPath: authPath,
+    permissionProfile: 'safe',
+  }, {
+    spawnProcess(command, argv, options) {
+      assert.equal(existsSync(codexHome), true);
+      assert.equal(path.resolve(codexHome, readlinkSync(path.join(codexHome, 'auth.json'))), authPath);
+      spawnEnv = options.env;
+      child = new FakeProcess();
+      return child;
+    },
+  });
+
+  session.sendUserMessage('inspect');
+  assert.equal(spawnEnv.HOME, isolatedHome);
+  assert.equal(spawnEnv.CODEX_HOME, codexHome);
+  child.exitCode = 0;
+  child.emit('exit', 0, null);
+  session.dispose();
 });
 
 test('Codex keeps a completed turn open until its process exits', async () => {
