@@ -332,6 +332,9 @@ const OBJECT_OP_LABELS: Record<string, string> = {
   applyStyle: '스타일 적용(승인 시 적용)',
   pageLayout: '쪽 설정',
   headerFooter: '머리말/꼬리말',
+  insertNote: '각주/미주 삽입',
+  setNoteText: '각주/미주 수정',
+  bookmark: '책갈피',
 };
 
 function opPreview(op: PendingOp): string {
@@ -351,6 +354,14 @@ function opPreview(op: PendingOp): string {
       if (op.obj.type === 'insertEquation') return `${label} ${op.obj.script.slice(0, 40)}`;
       if (op.obj.type === 'tableStructure' || op.obj.type === 'tableStructureMarked') {
         return `${label}: ${op.obj.op}`;
+      }
+      if (op.obj.type === 'insertNote') {
+        return `${op.obj.noteKind === 'endnote' ? '미주' : '각주'} 삽입: ${op.obj.text.slice(0, 40)}`;
+      }
+      if (op.obj.type === 'setNoteText') return `${label}: ${op.obj.text.slice(0, 40)}`;
+      if (op.obj.type === 'bookmark') {
+        const opName = op.obj.op === 'add' ? '추가' : op.obj.op === 'delete' ? '삭제' : '이름 변경';
+        return `${label} ${opName}${op.obj.name ? `: ${op.obj.name}` : ''}`;
       }
       return label;
     }
