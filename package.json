@@ -16,7 +16,8 @@
     "build:studio": "npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
     "build:agent": "npm --prefix rhwp/rhwp-agent ci --omit=dev",
     "desktop": "npm run build:studio && electron .",
-    "dist:mac": "npm run build:studio && npm run build:agent && electron-builder --mac dmg zip --arm64 --publish never"
+    "dist:mac": "npm run build:studio && npm run build:agent && electron-builder --mac dmg zip --arm64 --publish never",
+    "dist:win": "npm run build:studio && npm run build:agent && electron-builder --win --publish never"
   },
   "dependencies": {
     "@browserbasehq/mcp": "3.0.0",
@@ -73,6 +74,21 @@
         "dmg",
         "zip"
       ]
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     },
     "dmg": {
       "title": "Rauhwpx",
