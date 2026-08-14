@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+// cross-spawn: Windows에서 npm .cmd 심을 인자 이스케이프 손상 없이 실행한다.
+import spawn from 'cross-spawn';
 import crypto from 'node:crypto';
 import {
   createLineReader,
@@ -248,6 +249,7 @@ export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
       cwd: opts.rootDir,
       env: process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
     });
     child = proc;
     childAlive = true;

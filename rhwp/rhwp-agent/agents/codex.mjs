@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+// cross-spawn: Windows에서 npm .cmd 심을 인자 이스케이프 손상 없이 실행한다.
+import spawn from 'cross-spawn';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -306,6 +307,7 @@ export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
             CODEX_HOME: opts.codexHome ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
           },
           stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
         });
       } catch (e) {
         onEvent({ type: 'error', agent: 'codex', message: `failed to spawn codex: ${e?.message ?? e}` });
