@@ -136,6 +136,41 @@ test('concurrent checks share a single in-flight probe', async () => {
   assert.equal(b, c);
 });
 
+test('pi reports 설치되지 않았어요 until a bin path exists', async () => {
+  const { spawns, spawnProcess } = fakeSpawner((command, proc) => proc.succeed(`${command} 1.0`));
+  const result = await createProviderHealth({ spawnProcess }).check();
+
+  assert.equal(spawns.length, 2, 'pi 미설치면 프로브를 걸지 않는다');
+  assert.equal(result.pi.available, false);
+  assert.equal(result.pi.version, null);
+  assert.equal(result.pi.error, '설치되지 않았어요');
+  assert.ok(Number.isFinite(result.pi.checkedAt));
+});
+
+test('an installed pi is probed through its own bin path', async () => {
+  const piBin = '/pi/prefix/node_modules/.bin/pi';
+  const { spawns, spawnProcess } = fakeSpawner((command, proc) => {
+    proc.succeed(command === piBin ? 'pi 0.84.1' : `${command} 1.0`);
+  });
+  const result = await createProviderHealth({ spawnProcess, piBin: () => piBin }).check();
+
+  assert.deepEqual(spawns.map((s) => s.command), ['claude', 'codex', piBin]);
+  assert.equal(result.pi.available, true);
+  assert.equal(result.pi.version, 'pi 0.84.1');
+  assert.equal(result.pi.error, null);
+});
+
+test('a stale pi bin path falls back to the not-installed message', async () => {
+  const { spawnProcess } = fakeSpawner((command, proc) => {
+    if (command === '/gone/pi') proc.enoent();
+    else proc.succeed(`${command} 1.0`);
+  });
+  const result = await createProviderHealth({ spawnProcess, piBin: () => '/gone/pi' }).check();
+
+  assert.equal(result.pi.available, false);
+  assert.equal(result.pi.error, '설치되지 않았어요');
+});
+
 test('an exit without close still settles the probe', async () => {
   const { spawnProcess } = fakeSpawner((command, proc) => {
     proc.stdout.emit('data', `${command} 3.0.0\n`);

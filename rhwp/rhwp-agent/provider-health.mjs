@@ -6,6 +6,9 @@ const PROBE_TIMEOUT_MS = 5_000;
 const CACHE_TTL_MS = 60_000;
 const STDERR_TAIL_LIMIT = 2_000;
 
+/** pi 는 PATH 가 아니라 우리가 설치한 경로에 있다 — 미설치면 프로브 자체를 걸지 않는다. */
+const PI_NOT_INSTALLED = '설치되지 않았어요';
+
 /**
  * @typedef {Object} ProviderHealth
  * @property {boolean} available
@@ -37,17 +40,21 @@ function firstLine(text) {
  * 프로바이더 CLI 설치 여부를 캐시와 함께 조사한다. 결과는 60초간 유효하고,
  * 동시에 들어온 요청은 하나의 프로브를 공유한다(single-flight).
  *
- * @param {{ spawnProcess?: typeof spawn, timeoutMs?: number, cacheTtlMs?: number, now?: () => number }} [deps]
+ * piBin 은 게터로 받는다 — pi 는 설치 도중에 생기므로 부팅 시점 값에 묶으면 안 된다.
+ *
+ * @param {{ spawnProcess?: typeof spawn, timeoutMs?: number, cacheTtlMs?: number,
+ *           now?: () => number, piBin?: () => string|null }} [deps]
  */
 export function createProviderHealth({
   spawnProcess = spawn,
   timeoutMs = PROBE_TIMEOUT_MS,
   cacheTtlMs = CACHE_TTL_MS,
   now = Date.now,
+  piBin = () => null,
 } = {}) {
-  /** @type {{ result: { claude: ProviderHealth, codex: ProviderHealth }, checkedAt: number } | null} */
+  /** @type {{ result: { claude: ProviderHealth, codex: ProviderHealth, pi: ProviderHealth }, checkedAt: number } | null} */
   let cache = null;
-  /** @type {Promise<{ claude: ProviderHealth, codex: ProviderHealth }> | null} */
+  /** @type {Promise<{ claude: ProviderHealth, codex: ProviderHealth, pi: ProviderHealth }> | null} */
   let inFlight = null;
 
   /**
@@ -131,6 +138,25 @@ export function createProviderHealth({
     });
   }
 
+  /** pi 는 우리가 설치한 바이너리를 직접 부른다. 경로가 없으면 프로브를 건너뛴다. */
+  function probePi() {
+    let bin = null;
+    try {
+      bin = piBin();
+    } catch {
+      bin = null;
+    }
+    if (typeof bin !== 'string' || !bin) {
+      return Promise.resolve({
+        available: false, version: null, error: PI_NOT_INSTALLED, checkedAt: now(),
+      });
+    }
+    // 경로는 있는데 실행 파일이 없으면(설치본 삭제) 미설치로 되돌린다.
+    return probe(bin).then((health) => (!health.available && /찾을 수 없습니다/.test(health.error ?? '')
+      ? { ...health, error: PI_NOT_INSTALLED }
+      : health));
+  }
+
   return {
     /** 캐시된 결과. 첫 프로브 전에는 null 이다. */
     cached() {
@@ -138,16 +164,16 @@ export function createProviderHealth({
     },
     /**
      * @param {boolean} [refresh] true 면 캐시를 무시하고 다시 프로브한다.
-     * @returns {Promise<{ claude: ProviderHealth, codex: ProviderHealth }>}
+     * @returns {Promise<{ claude: ProviderHealth, codex: ProviderHealth, pi: ProviderHealth }>}
      */
     check(refresh = false) {
       if (!refresh && cache && now() - cache.checkedAt < cacheTtlMs) {
         return Promise.resolve(cache.result);
       }
       if (inFlight) return inFlight;
-      const probing = Promise.all([probe(PROBE_COMMANDS.claude), probe(PROBE_COMMANDS.codex)])
-        .then(([claude, codex]) => {
-          const result = { claude, codex };
+      const probing = Promise.all([probe(PROBE_COMMANDS.claude), probe(PROBE_COMMANDS.codex), probePi()])
+        .then(([claude, codex, pi]) => {
+          const result = { claude, codex, pi };
           cache = { result, checkedAt: now() };
           return result;
         });
