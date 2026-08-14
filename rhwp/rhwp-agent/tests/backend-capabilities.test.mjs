@@ -115,6 +115,7 @@ for (const entry of matrix) {
 
     const codex = buildCodexArgv(opts, null);
     assert.ok(codex.includes(`sandbox_mode="${entry.codexSandbox}"`));
+    assert.ok(codex.includes('mcp_servers.rhwp.default_tools_approval_mode="auto"'));
     const multiAgentIndex = codex.indexOf('multi_agent');
     assert.notEqual(multiAgentIndex, -1);
     assert.equal(codex[multiAgentIndex - 1], entry.planCapabilities ? '--enable' : '--disable');

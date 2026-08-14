@@ -1664,31 +1664,71 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: var(--ag-text-muted);
 }
 
-/* ─── 작업 내역: 진행 설명 + 도구 호출 ───────────────── */
+/* ─── 진행 타임라인 + 접힌 도구 호출 ────────────────── */
+
+.ag-progress-step {
+  position: relative;
+  display: flex;
+  align-self: stretch;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+  padding-left: 17px;
+  animation: ag-step-arrive 280ms var(--ag-motion-out) both;
+}
+
+.ag-progress-step::before {
+  content: '';
+  position: absolute;
+  top: 9px;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+  background: color-mix(in srgb, var(--ag-border-strong) 72%, transparent);
+}
+
+.ag-progress-step::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: 1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ag-accent);
+  box-shadow: 0 0 0 3px var(--ag-bg);
+}
+
+.ag-progress-step-tools-only {
+  padding-left: 0;
+}
+
+.ag-progress-step-tools-only::before,
+.ag-progress-step-tools-only::after {
+  content: none;
+}
+
+.ag-progress-milestone {
+  min-width: 0;
+  padding: 0 2px;
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-base, 12px);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
 
 .ag-activity {
   position: relative;
   align-self: stretch;
   min-width: 0;
-  margin: -2px 0 0;
+  margin: 0;
   border: 1px solid var(--ag-border);
   border-radius: var(--ag-r-field);
   background: color-mix(in srgb, var(--ag-bg-2) 68%, transparent);
   overflow: hidden;
   animation: ag-activity-arrive 240ms var(--ag-motion-out) both;
-}
-
-.ag-activity::after {
-  content: none;
-}
-
-.ag-activity-running::after {
-  animation: none;
-}
-
-.ag-root.ag-collapsed .ag-activity-running::after,
-.ag-threads-open .ag-activity-running::after {
-  animation-play-state: paused;
 }
 
 @keyframes ag-activity-arrive {
@@ -1716,6 +1756,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font: inherit;
   font-size: var(--font-size-base, 12px);
   font-variant-numeric: tabular-nums;
+  line-height: 1;
   text-align: left;
   cursor: pointer;
 }
@@ -1752,6 +1793,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1;
 }
 
 .ag-activity-complete .ag-activity-label {
@@ -1816,19 +1858,6 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   overflow: hidden;
 }
 
-.ag-activity-note {
-  position: relative;
-  flex: 0 0 auto;
-  padding: 6px 5px 4px;
-  color: var(--ag-text-muted);
-  font-size: var(--font-size-base, 12px);
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-  animation: ag-step-arrive 280ms var(--ag-motion-out) both;
-}
-
 .ag-tool-row {
   flex: 0 0 auto;
   min-width: 0;
@@ -1851,10 +1880,6 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   }
 }
 
-.ag-activity-note::before {
-  content: none;
-}
-
 .ag-tool-head {
   position: relative;
   display: flex;
@@ -1868,6 +1893,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   background: transparent;
   color: var(--ag-text);
   font: inherit;
+  line-height: 1;
   text-align: left;
   cursor: pointer;
   user-select: none;
@@ -1959,11 +1985,14 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-tool-name {
+  display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
   font-family: var(--ag-mono);
   font-size: var(--font-size-sm, 11px);
   font-weight: 500;
   letter-spacing: var(--ag-track);
+  line-height: 1;
 }
 
 .ag-tool-summary {
@@ -2036,9 +2065,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 @media (prefers-reduced-motion: reduce) {
   .ag-msg-assistant.ag-msg-enter,
+  .ag-progress-step,
   .ag-activity,
-  .ag-activity-running::after,
-  .ag-activity-note,
   .ag-tool-row,
   .ag-tool-status.ag-ok,
   .ag-tool-status.ag-err {
@@ -2072,12 +2100,26 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 /* Review cards use the same neutral elevation as other contextual surfaces. */
 .ag-review-card {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
   overflow: hidden;
   padding: 0;
   border: 1px solid var(--ag-border);
   border-radius: var(--ag-r-panel);
   background: var(--ag-bg);
   box-shadow: none;
+}
+
+/* Keep review decisions reachable when a diff contains a long text payload.
+   The card header and diff scroll together while the action row stays outside
+   the scrollport at the bottom of the card. */
+.ag-review-summary {
+  min-height: 0;
+  max-height: 26dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .ag-review-card.ag-claude {
@@ -2268,6 +2310,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-review-actions {
   display: flex;
+  flex: 0 0 auto;
   gap: 8px;
   margin: 0;
   padding: 10px 12px;
@@ -3037,6 +3080,10 @@ body.ag-col-resizing {
   padding: 14px 16px 18px;
   border-top: 0;
   background: transparent;
+}
+
+.ag-fullscreen .ag-review-column .ag-review-summary {
+  max-height: calc(100dvh - 166px);
 }
 
 .ag-review-empty {

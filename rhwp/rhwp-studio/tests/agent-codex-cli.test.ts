@@ -42,6 +42,7 @@ test('initial Codex turns still set the working root explicitly', () => {
 test('safe Codex turns use workspace-write while retaining core web and shell support', () => {
   const argv = buildCodexArgv({ ...opts, permissionProfile: 'safe' }, null);
   assert.ok(argv.includes('sandbox_mode="workspace-write"'));
+  assert.ok(argv.includes('mcp_servers.rhwp.default_tools_approval_mode="auto"'));
   assert.ok(argv.includes('--ignore-user-config'));
   assert.ok(argv.includes('--ignore-rules'));
   assert.ok(argv.includes('skill_search'));
