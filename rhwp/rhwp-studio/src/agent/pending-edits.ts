@@ -181,6 +181,11 @@ export class PendingEditManager {
     return { changeSetId: set.id, insertedRange: { ...range } };
   }
 
+  /**
+   * [legacy] 마크 전용 삭제 — 도구 경로는 더 이상 쓰지 않는다(delete_range 는
+   * replaceText(range, '') 로 즉시 적용된다). 마크가 원문을 레이아웃에 남겨
+   * 편집이 많은 턴에서 미리보기 쪽나눔이 최종본과 크게 어긋났기 때문이다.
+   */
   markDelete(agent: AgentName, range: DocRange): { changeSetId: string; markedText: string } {
     if (range.endParaIdx < range.startParaIdx
       || (range.endParaIdx === range.startParaIdx && range.endCharOffset <= range.startCharOffset)) {
@@ -206,7 +211,7 @@ export class PendingEditManager {
     range: DocRange,
     text: string,
     agent: AgentName,
-  ): { changeSetId: string; insertedRange: DocRange } {
+  ): { changeSetId: string; insertedRange: DocRange; deletedText: string } {
     if (range.endParaIdx < range.startParaIdx
       || (range.endParaIdx === range.startParaIdx && range.endCharOffset <= range.startCharOffset)) {
       throw new AgentToolError('INVALID_ARGS', 'replace range is empty or reversed');
@@ -279,7 +284,7 @@ export class PendingEditManager {
         this.deps.eventBus.emit('agent-text-inserted', { agent: op.agent, range: op.range, text });
       }
       this.emitChange({ type: 'ops-changed' });
-      return { changeSetId: set.id, insertedRange: { ...ins.range } };
+      return { changeSetId: set.id, insertedRange: { ...ins.range }, deletedText };
     } catch (err) {
       // 부분 적용 롤백 — 스냅샷으로 변이 전 상태를 그대로 복원한다.
       try { wasm.restoreSnapshot(snapshotId); } catch { /* best effort */ }
@@ -459,7 +464,9 @@ export class PendingEditManager {
       agent: set.agent,
       ops: set.ops.map((op) => ({
         id: op.id,
-        kind: op.kind === 'object' ? `object:${op.obj.type}` : op.kind,
+        kind: op.kind === 'object' ? `object:${op.obj.type}`
+          : op.kind === 'replace' && op.text.length === 0 ? 'delete'
+          : op.kind,
         applied: op.kind === 'delete' ? false
           : op.kind === 'object' ? isObjectOpApplied(op.obj)
           : true,
@@ -862,6 +869,8 @@ export class PendingEditManager {
       case 'delete':
         return `delete "${digest(op.text)}" @${coord(op.range)}`;
       case 'replace':
+        // 빈 새 텍스트 = 즉시 적용된 삭제 (delete_range 경로)
+        if (op.text.length === 0) return `delete "${digest(op.deletedText)}" @${coord(op.range)}`;
         return `replace "${digest(op.deletedText)}" → "${digest(op.text)}" @${coord(op.range)}`;
       case 'format':
         return `format ${JSON.stringify(op.format)} @${coord(op.range)}`;

@@ -72,7 +72,9 @@ test('focus mode environment panel is persistent, informative, and opens changes
 test('changes drawer presents a unified diff and an intentional empty state', () => {
   assert.match(source, /reviewColumnTitle = el\('span', 'ag-review-column-title', '변경 사항'\)/);
   assert.match(source, /el\('div', 'ag-review-empty-title', '변경 사항 없음'\)/);
-  assert.match(source, /diff\.append\(buildDiffLine\('del', op\.deletedText\), buildDiffLine\('add', op\.text\)\)/);
+  assert.match(source, /diff\.appendChild\(buildDiffLine\('del', op\.deletedText\)\)/);
+  // 빈 새 텍스트(즉시 적용 삭제)는 add 줄을 만들지 않는다
+  assert.match(source, /if \(op\.text\.length > 0\) diff\.appendChild\(buildDiffLine\('add', op\.text\)\)/);
   assert.match(css, /\.ag-op-head\s*\{[^}]*border-bottom:[^}]*background:/s);
   assert.match(css, /\.ag-diff-sign\s*\{[^}]*border-right:/s);
   assert.match(css, /\.ag-review-actions\s*\{[^}]*border-top:[^}]*background:/s);
