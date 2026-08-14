@@ -91,3 +91,23 @@ test('replace_range 시나리오: 삭제 마크 끝 = 삽입 지점이면 삽입
   const ins = { paraIdx: 1, charOffset: 6, addedParas: 0, endParaIdx: 1, endCharOffset: 8, textLen: 2 };
   assert.deepEqual(shiftPointAfterInsert(markEnd, ins), { paraIdx: 1, charOffset: 6 });
 });
+
+// ─── 시작 경계 규칙 (재작성 패턴 버그 수정) ─────────────────
+
+test('시작 경계: 삽입 지점과 정확히 같은 시작은 삽입 길이만큼 밀린다 (단일 라인)', () => {
+  // 마크 시작 (2,5) 에 "abc" 삽입 → 마크의 기존 텍스트는 (2,8) 부터
+  assert.deepEqual(shiftPointAfterInsert({ paraIdx: 2, charOffset: 5 }, singleLineIns, true),
+    { paraIdx: 2, charOffset: 8 });
+});
+
+test('시작 경계: 삽입 지점과 정확히 같은 시작은 삽입 끝으로 밀린다 (멀티 라인)', () => {
+  assert.deepEqual(shiftPointAfterInsert({ paraIdx: 2, charOffset: 5 }, multiLineIns, true),
+    { paraIdx: 3, charOffset: 2 });
+});
+
+test('시작 경계: 삽입 지점보다 앞이면 불변', () => {
+  assert.deepEqual(shiftPointAfterInsert({ paraIdx: 2, charOffset: 4 }, singleLineIns, true),
+    { paraIdx: 2, charOffset: 4 });
+  assert.deepEqual(shiftPointAfterInsert({ paraIdx: 1, charOffset: 9 }, multiLineIns, true),
+    { paraIdx: 1, charOffset: 9 });
+});
