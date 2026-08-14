@@ -28,8 +28,14 @@ export const CODEX_PLANS = {
   api: { session5h: null, week: null },
 };
 
-export const DEFAULT_PLANS = { claude: 'pro', codex: 'plus' };
-export const PLAN_TABLES = { claude: CLAUDE_PLANS, codex: CODEX_PLANS };
+/** pi 는 OpenRouter 종량제뿐이다 — 토큰 한도 대신 잔액(usage.openrouter)을 본다. */
+export const PI_PLANS = {
+  api: { session5h: null, week: null },
+};
+
+export const AGENTS = /** @type {const} */ (['claude', 'codex', 'pi']);
+export const DEFAULT_PLANS = { claude: 'pro', codex: 'plus', pi: 'api' };
+export const PLAN_TABLES = { claude: CLAUDE_PLANS, codex: CODEX_PLANS, pi: PI_PLANS };
 
 export function defaultUsageRoot(env = process.env, platform = process.platform, home = os.homedir()) {
   if (env.RHWP_USAGE_DIR) return path.resolve(env.RHWP_USAGE_DIR);
@@ -45,7 +51,14 @@ function toCount(value) {
 }
 
 function normalizeAgent(agent) {
-  return agent === 'claude' || agent === 'codex' ? agent : null;
+  return AGENTS.includes(agent) ? agent : null;
+}
+
+/** USD 비용. 음수/NaN 은 0 으로 보고 6자리에서 자른다(부동소수 찌꺼기 방지). */
+function toCost(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.round(n * 1e6) / 1e6;
 }
 
 export function weightedTokensOf({ inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens }) {
@@ -63,6 +76,7 @@ function emptyWindow() {
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
     weightedTokens: 0,
+    costUsd: 0,
     percent: null,
   };
 }
@@ -74,6 +88,7 @@ function addToWindow(window, event) {
   window.cacheReadTokens += event.cacheReadTokens;
   window.cacheCreationTokens += event.cacheCreationTokens;
   window.weightedTokens += event.weightedTokens;
+  window.costUsd = toCost(window.costUsd + event.costUsd);
 }
 
 function percentOf(weightedTokens, limit) {
@@ -99,6 +114,7 @@ function parseEventLine(line) {
     outputTokens: toCount(raw.outputTokens),
     cacheReadTokens: toCount(raw.cacheReadTokens),
     cacheCreationTokens: toCount(raw.cacheCreationTokens),
+    costUsd: toCost(raw.costUsd),
     weightedTokens: 0,
   };
   event.weightedTokens = Number.isFinite(Number(raw.weightedTokens)) && Number(raw.weightedTokens) > 0
@@ -115,7 +131,7 @@ function parseEventLine(line) {
 export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now } = {}) {
   const eventsPath = path.join(rootDir, EVENTS_FILE);
   const plansPath = path.join(rootDir, PLANS_FILE);
-  /** @type {Array<{ ts: number, agent: 'claude'|'codex', model: string, inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheCreationTokens: number, weightedTokens: number }>} */
+  /** @type {Array<{ ts: number, agent: 'claude'|'codex'|'pi', model: string, inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheCreationTokens: number, costUsd: number, weightedTokens: number }>} */
   let events = [];
   let plans = { ...DEFAULT_PLANS };
   /** 파일 쓰기는 직렬화한다 — 같은 줄에 두 이벤트가 섞이지 않도록. */
@@ -152,7 +168,7 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
     const session = emptyWindow();
     const day = emptyWindow();
     const week = emptyWindow();
-    /** @type {Record<string, { turns: number, inputTokens: number, outputTokens: number, weightedTokens: number }>} */
+    /** @type {Record<string, { turns: number, inputTokens: number, outputTokens: number, weightedTokens: number, costUsd: number }>} */
     const byModel = {};
     let updatedAt = null;
     for (const event of events) {
@@ -165,12 +181,13 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
       addToWindow(week, event);
       // 모델별 내역은 주간 창(7일) 기준이다 — 한도 표시와 같은 범위를 쓴다.
       const entry = byModel[event.model] ?? (byModel[event.model] = {
-        turns: 0, inputTokens: 0, outputTokens: 0, weightedTokens: 0,
+        turns: 0, inputTokens: 0, outputTokens: 0, weightedTokens: 0, costUsd: 0,
       });
       entry.turns += 1;
       entry.inputTokens += event.inputTokens;
       entry.outputTokens += event.outputTokens;
       entry.weightedTokens += event.weightedTokens;
+      entry.costUsd = toCost(entry.costUsd + event.costUsd);
     }
     session.percent = percentOf(session.weightedTokens, limit.session5h);
     week.percent = percentOf(week.weightedTokens, limit.week);
@@ -186,7 +203,7 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
       await fs.mkdir(rootDir, { recursive: true });
       try {
         const raw = JSON.parse(await fs.readFile(plansPath, 'utf8'));
-        for (const agent of ['claude', 'codex']) {
+        for (const agent of AGENTS) {
           if (validPlan(agent, raw?.[agent])) plans[agent] = raw[agent];
         }
       } catch {
@@ -219,7 +236,9 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
      * 한 턴의 사용량을 기록한다. 파일 append 는 fire-and-forget 이지만 순서는 보장된다.
      * @returns {object|null} 기록된 이벤트, 입력이 유효하지 않으면 null
      */
-    record({ agent, model, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens } = {}) {
+    record({
+      agent, model, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUsd,
+    } = {}) {
       const normalizedAgent = normalizeAgent(agent);
       if (!normalizedAgent) return null;
       const event = {
@@ -230,6 +249,8 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
         outputTokens: toCount(outputTokens),
         cacheReadTokens: toCount(cacheReadTokens),
         cacheCreationTokens: toCount(cacheCreationTokens),
+        // pi 는 OpenRouter 청구액을 그대로 들고 온다 — 다른 프로바이더는 0 이다.
+        costUsd: toCost(costUsd),
         weightedTokens: 0,
       };
       event.weightedTokens = weightedTokensOf(event);
@@ -252,7 +273,7 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
     },
 
     /**
-     * @param {'claude'|'codex'} agent
+     * @param {'claude'|'codex'|'pi'} agent
      * @param {string} plan
      */
     async setPlan(agent, plan) {
@@ -273,6 +294,7 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
         providers: {
           claude: providerUsage('claude'),
           codex: providerUsage('codex'),
+          pi: providerUsage('pi'),
         },
       };
     },

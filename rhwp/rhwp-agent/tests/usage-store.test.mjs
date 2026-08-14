@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   CLAUDE_PLANS,
   CODEX_PLANS,
+  PI_PLANS,
   createUsageStore,
   defaultUsageRoot,
   weightedTokensOf,
@@ -58,7 +59,7 @@ test('summary aggregates rolling windows, weights and percents', async () => {
   const store = await createUsageStore({ rootDir, now: time.now }).init();
 
   const empty = store.summary();
-  assert.deepEqual(empty.plans, { claude: 'pro', codex: 'plus' });
+  assert.deepEqual(empty.plans, { claude: 'pro', codex: 'plus', pi: 'api' });
   assert.equal(empty.providers.claude.updatedAt, null);
   assert.equal(empty.providers.claude.session.turns, 0);
   assert.equal(empty.providers.claude.session.percent, 0);
@@ -100,7 +101,7 @@ test('summary aggregates rolling windows, weights and percents', async () => {
   );
   assert.deepEqual(Object.keys(claude.byModel).sort(), ['opus', 'sonnet']);
   assert.deepEqual(claude.byModel.sonnet, {
-    turns: 2, inputTokens: 250, outputTokens: 125, weightedTokens: 430,
+    turns: 2, inputTokens: 250, outputTokens: 125, weightedTokens: 430, costUsd: 0,
   });
 
   const codex = store.summary().providers.codex;
@@ -147,12 +148,12 @@ test('plans are validated, persisted and reloaded', async () => {
   await store.setPlan('codex', 'pro');
 
   const saved = JSON.parse(await fs.readFile(path.join(rootDir, 'plans.json'), 'utf8'));
-  assert.deepEqual(saved, { claude: 'max20x', codex: 'pro' });
+  assert.deepEqual(saved, { claude: 'max20x', codex: 'pro', pi: 'api' });
   const stat = await fs.stat(path.join(rootDir, 'plans.json'));
   assert.equal(stat.mode & 0o777, 0o600);
 
   const reloaded = await createUsageStore({ rootDir, now: time.now }).init();
-  assert.deepEqual(reloaded.plans(), { claude: 'max20x', codex: 'pro' });
+  assert.deepEqual(reloaded.plans(), { claude: 'max20x', codex: 'pro', pi: 'api' });
   assert.deepEqual(reloaded.summary().providers.claude.limit, CLAUDE_PLANS.max20x);
 
   await store.flush();
@@ -200,6 +201,47 @@ test('load prunes events older than eight days and rewrites the log', async () =
   const again = await createUsageStore({ rootDir, now: time.now }).init();
   assert.equal(again.summary().providers.claude.week.turns, 1);
 
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('pi records OpenRouter cost alongside tokens and replays it', async () => {
+  const rootDir = await tmpRoot();
+  const time = clock();
+  const store = await createUsageStore({ rootDir, now: time.now }).init();
+
+  store.record({ agent: 'pi', model: 'deepseek/deepseek-chat-v3.1', inputTokens: 1000, outputTokens: 200, costUsd: 0.0125 });
+  time.advance(HOUR);
+  store.record({ agent: 'pi', model: 'deepseek/deepseek-chat-v3.1', inputTokens: 500, outputTokens: 100, costUsd: 0.005 });
+  // 비용이 없는 프로바이더는 0 으로 남는다.
+  store.record({ agent: 'claude', model: 'opus', inputTokens: 10, outputTokens: 10 });
+
+  const usage = store.summary();
+  assert.deepEqual(usage.providers.pi.limit, PI_PLANS.api);
+  assert.equal(usage.providers.pi.session.percent, null);
+  assert.equal(usage.providers.pi.week.percent, null);
+  assert.equal(usage.providers.pi.session.costUsd, 0.0175);
+  assert.equal(usage.providers.pi.day.costUsd, 0.0175);
+  assert.deepEqual(usage.providers.pi.byModel['deepseek/deepseek-chat-v3.1'], {
+    turns: 2, inputTokens: 1500, outputTokens: 300, weightedTokens: 1800, costUsd: 0.0175,
+  });
+  assert.equal(usage.providers.claude.session.costUsd, 0);
+
+  await store.flush();
+  const reloaded = await createUsageStore({ rootDir, now: time.now }).init();
+  assert.equal(reloaded.summary().providers.pi.week.costUsd, 0.0175);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('api is the only pi plan', async () => {
+  const rootDir = await tmpRoot();
+  const store = await createUsageStore({ rootDir, now: clock().now }).init();
+
+  await assert.rejects(() => store.setPlan('pi', 'pro'), (error) => error.code === 'INVALID_PLAN');
+  const usage = await store.setPlan('pi', 'api');
+  assert.equal(usage.plans.pi, 'api');
+
+  await store.flush();
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
