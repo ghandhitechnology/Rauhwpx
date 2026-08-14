@@ -489,6 +489,80 @@ const BASE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'replace_all',
+    description: `Find-and-replace every occurrence of a string across the document body and table cells in ONE call — far better than looping find_text + replace_range yourself (each write shifts coordinates; this tool handles that internally by replacing back-to-front). Each occurrence becomes one pending replace shown to the user; they approve or reject the whole batch. Matches inside ranges already marked for deletion are skipped (reported as skippedPendingDelete). Up to maxMatches (default 100, max 200) per call; if truncated, call again with the returned revision. ${WRITE_NOTE}`,
+    shape: {
+      expectedRevision: z.number().int(),
+      query: z.string().min(1),
+      replacement: z.string().max(1000).describe('Replacement text; empty string deletes every occurrence'),
+      caseSensitive: z.boolean().default(false).optional(),
+      maxMatches: z.number().int().min(1).max(200).default(100).optional(),
+    },
+  },
+  {
+    name: 'get_outline',
+    description: `Get the document's heading structure as a tree — outline-numbered headings or Korean legal clause markers (조/항/호/목), depending on mode ('auto' default, 'outline', 'clause'). Each node carries level, kind, marker, heading text and its body-paragraph address (sectionIdx/paraIdx) so you can jump straight to a section in long documents instead of paging through get_structure. ${REVISION_NOTE}`,
+    shape: {
+      mode: z.enum(['auto', 'outline', 'clause']).default('auto').optional(),
+    },
+  },
+  {
+    name: 'list_footnotes',
+    description: `List the document's footnotes and endnotes with their body anchor addresses (sectionIdx, paraIdx, controlIdx), number and text. sourceType 'body' anchors can be edited with edit_footnote; markers inside table cells or shapes ('table'/'shape') are listed address-only. ${REVISION_NOTE}`,
+    shape: {},
+  },
+  {
+    name: 'insert_footnote',
+    description: `Insert a footnote (bottom of page) or endnote (end of document) marker at (sectionIdx, paraIdx, charOffset) with the given single-paragraph text. Numbering is automatic and renumbers on later insertions/deletions. Returns the note's anchor {paraIdx, controlIdx} for edit_footnote. ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    shape: {
+      expectedRevision: z.number().int(),
+      sectionIdx: z.number().int().min(0),
+      paraIdx: z.number().int().min(0),
+      charOffset: z.number().int().min(0),
+      text: z.string().min(1).max(2000).describe('Note content — one paragraph, no newlines'),
+      kind: z.enum(['footnote', 'endnote']).default('footnote').optional(),
+    },
+  },
+  {
+    name: 'edit_footnote',
+    description: `Replace the text of an existing footnote/endnote addressed by its body anchor (sectionIdx, paraIdx, controlIdx — from list_footnotes or insert_footnote's response). Only single-paragraph notes can be edited (NOTE_MULTIPARA otherwise). ${WRITE_NOTE}`,
+    shape: {
+      expectedRevision: z.number().int(),
+      sectionIdx: z.number().int().min(0),
+      paraIdx: z.number().int().min(0),
+      controlIdx: z.number().int().min(0),
+      text: z.string().max(2000).describe('New note content — one paragraph, no newlines; empty string clears it'),
+    },
+  },
+  {
+    name: 'list_bookmarks',
+    description: `List the document's bookmarks: name, sectionIdx, paraIdx, charOffset. Use with set_bookmark (delete/rename address bookmarks by name). ${REVISION_NOTE}`,
+    shape: {},
+  },
+  {
+    name: 'set_bookmark',
+    description: `Add, delete or rename a bookmark. op 'add' needs name + position (sectionIdx, paraIdx, charOffset); 'delete' needs only name; 'rename' needs name + newName. Bookmark names are unique. ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    shape: {
+      expectedRevision: z.number().int(),
+      op: z.enum(['add', 'delete', 'rename']),
+      name: z.string().min(1).max(80).describe("'add': new bookmark's name; 'delete'/'rename': the existing bookmark's name"),
+      newName: z.string().min(1).max(80).optional().describe("'rename' only: the new name"),
+      sectionIdx: z.number().int().min(0).optional().describe("'add' only"),
+      paraIdx: z.number().int().min(0).optional().describe("'add' only"),
+      charOffset: z.number().int().min(0).optional().describe("'add' only"),
+    },
+    validate: (args) => {
+      if (args.op === 'add') {
+        for (const key of ['sectionIdx', 'paraIdx', 'charOffset']) {
+          if (typeof args[key] !== 'number') throw Object.assign(new Error(`op "add" requires ${key}`), { code: 'INVALID_ARGS' });
+        }
+      }
+      if (args.op === 'rename' && typeof args.newName !== 'string') {
+        throw Object.assign(new Error('op "rename" requires newName'), { code: 'INVALID_ARGS' });
+      }
+    },
+  },
+  {
     name: 'set_field_value',
     description: `Set a form field's value by field name. Applied immediately (listed as a pending change in the sidebar). ${WRITE_NOTE}`,
     shape: {
@@ -585,6 +659,13 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   edit_header_footer: 'document-write',
   insert_page_break: 'document-write',
   set_field_value: 'document-write',
+  replace_all: 'document-write',
+  get_outline: 'document-read',
+  list_footnotes: 'document-read',
+  insert_footnote: 'document-write',
+  edit_footnote: 'document-write',
+  list_bookmarks: 'document-read',
+  set_bookmark: 'document-write',
   verify_changes: 'document-read',
   present_implementation_plan: 'planning-control',
   download_file: 'download-write',
