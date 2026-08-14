@@ -2051,7 +2051,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     permissionBtn.classList.toggle('ag-permission-unrestricted', unrestricted);
     permissionBtn.title = unrestricted
       ? '파일·명령이 노트북 전체에 접근할 수 있습니다. 클릭하여 안전 모드로 전환'
-      : '프로젝트 안에서만 파일과 명령을 사용합니다';
+      : '문서는 편집할 수 있습니다. 파일과 명령은 프로젝트 안에서만 사용합니다';
     refreshSidebarWidthMin();
   }
 
@@ -3407,7 +3407,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       case 'permission-changed':
         permissionProfile = e.permissionProfile;
         updatePermissionButton();
-        systemMessage(permissionProfile === 'unrestricted' ? '전체 접근을 켰습니다. 이 채팅의 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다.' : '안전 모드로 돌아왔습니다. 파일과 명령은 프로젝트 범위로 제한됩니다.');
+        systemMessage(permissionProfile === 'unrestricted' ? '전체 접근을 켰습니다. 이 채팅의 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다.' : '안전 모드로 돌아왔습니다. 문서는 편집할 수 있고, 파일과 명령은 프로젝트 범위로 제한됩니다.');
         break;
       case 'skills-catalog':
         skillCatalog = e.catalog;
