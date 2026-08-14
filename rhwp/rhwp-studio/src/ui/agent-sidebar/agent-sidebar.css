@@ -1812,13 +1812,15 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-activity-toggle {
+  position: relative;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 7px;
   width: 100%;
   min-height: 34px;
   margin: 0;
-  padding: 6px 9px;
+  padding: 6px 32px;
   border: none;
   background: transparent;
   color: var(--ag-text-muted);
@@ -1826,7 +1828,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font-size: var(--font-size-base, 12px);
   font-variant-numeric: tabular-nums;
   line-height: 1;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
 }
 
@@ -1857,7 +1859,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-activity-label {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1876,6 +1878,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-activity-chevron {
+  position: absolute;
+  right: 10px;
   width: 12px;
   height: 12px;
   color: currentColor;
