@@ -69,6 +69,27 @@ export interface AgentSidebarDeps {
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
 
+interface TurnActivityState {
+  root: HTMLElement;
+  label: HTMLElement;
+  content: HTMLElement;
+  startedAt: number;
+  toolCount: number;
+  failedToolCount: number;
+  activeTools: Map<string, string>;
+  acceptingTools: boolean;
+  settled: boolean;
+}
+
+interface ToolRowState {
+  status: HTMLElement;
+  result: HTMLPreElement;
+  scroller: HTMLElement;
+  elapsed: HTMLElement;
+  startedAt: number;
+  activity: TurnActivityState;
+}
+
 const AGENT_LABEL: Record<AgentName, string> = { claude: 'Claude', codex: 'Codex', pi: 'Pi' };
 
 /** 단색 로고는 마스크로 그린다 — currentColor 를 타고 테마에 맞는다. */
@@ -439,26 +460,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let workflowTransitionPending = false;
   /** 현재 스트리밍 중인 assistant 텍스트 (tool-call 이후에는 새로 연다). */
   let streamBubble: HTMLElement | null = null;
-  const toolRows = new Map<
-    string,
-    {
-      status: HTMLElement;
-      result: HTMLPreElement;
-      scroller: HTMLElement;
-      /** 로그 행 오른쪽의 소요 시간 readout */
-      elapsed: HTMLElement;
-      startedAt: number;
-    }
-  >();
-  let turnActivity: {
-    root: HTMLElement;
-    toggle: HTMLButtonElement;
-    label: HTMLElement;
-    content: HTMLElement;
-    startedAt: number;
-    toolCount: number;
-    failedToolCount: number;
-  } | null = null;
+  const toolRows = new Map<string, ToolRowState>();
+  let turnActivity: TurnActivityState | null = null;
+  let turnToolCount = 0;
+  let turnFailedToolCount = 0;
   let followConversation = true;
   let conversationScrollRaf: number | null = null;
   let insetRecenterRaf: number | null = null;
@@ -2554,7 +2559,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     maybeRequestTitle();
   }
 
-  function flushAssistantBuffer(opts?: { persist?: boolean }): void {
+  function flushAssistantBuffer(opts?: { persist?: boolean; kind?: 'progress' }): void {
     const text = assistantBuffer.trim();
     assistantBuffer = '';
     if (!text) return;
@@ -2563,6 +2568,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       role: 'assistant',
       text,
       agent: selectedAgent,
+      ...(opts?.kind ? { kind: opts.kind } : {}),
     });
     persistCurrentThread();
     maybeRequestTitle();
@@ -2593,7 +2599,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         messages.appendChild(el('div', 'ag-msg ag-msg-user', msg.text));
       } else if (msg.role === 'assistant') {
         const agent = msg.agent ?? thread.agent;
-        messages.appendChild(el('div', `ag-msg ag-msg-assistant ag-${agent}`, msg.text));
+        if (msg.kind === 'progress') {
+          const step = el('div', 'ag-progress-step ag-progress-step-restored');
+          step.appendChild(el('div', `ag-msg ag-progress-milestone ag-${agent}`, msg.text));
+          messages.appendChild(step);
+        } else {
+          messages.appendChild(el('div', `ag-msg ag-msg-assistant ag-${agent}`, msg.text));
+        }
       } else {
         messages.appendChild(el('div', 'ag-msg ag-msg-system', msg.text));
       }
@@ -3092,7 +3104,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   function animateActivityLabel(
-    activity: NonNullable<typeof turnActivity>,
+    activity: TurnActivityState,
     text: string,
   ): void {
     if (activity.label.textContent === text) return;
@@ -3127,24 +3139,51 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     return seconds > 0 ? `${minutes}분 ${seconds}초` : `${minutes}분`;
   }
 
-  function ensureTurnActivity(
-    agent: AgentName,
-    anchor?: HTMLElement | null,
-  ): NonNullable<typeof turnActivity> {
+  function activeToolLabel(activity: TurnActivityState) {
+    const active = [...activity.activeTools.values()];
+    if (active.length === 1) return `도구 호출 · ${active[0]} 실행 중`;
+    if (active.length > 1) return `도구 호출 · ${active[0]} 외 ${active.length - 1}개 실행 중`;
+    return `도구 호출 · ${activity.toolCount}개 완료`;
+  }
+
+  function settleActivity(activity: TurnActivityState) {
+    if (activity.settled || activity.acceptingTools || activity.activeTools.size > 0) return;
+    activity.settled = true;
+    const duration = formatActivityDuration(activity.startedAt);
+    if (activity.failedToolCount > 0) {
+      animateActivityLabel(activity, `도구 호출 · ${activity.failedToolCount}개 오류 · ${duration}`);
+      activity.root.classList.add('ag-activity-error');
+    } else {
+      animateActivityLabel(activity, `도구 호출 · ${activity.toolCount}개 완료 · ${duration}`);
+      activity.root.classList.add('ag-activity-complete');
+    }
+    activity.root.classList.remove('ag-activity-running');
+  }
+
+  function closeCurrentActivityGroup() {
+    const activity = turnActivity;
+    if (!activity) return;
+    activity.acceptingTools = false;
+    turnActivity = null;
+    settleActivity(activity);
+  }
+
+  function ensureTurnActivity(agent: AgentName, milestone?: HTMLElement | null) {
     if (turnActivity) return turnActivity;
 
-    const activity = el('div', `ag-activity ag-${agent} ag-activity-running`);
+    const activity = el('div', `ag-activity ag-${agent} ag-activity-running ag-activity-collapsed`);
     const toggle = el('button', 'ag-activity-toggle') as HTMLButtonElement;
     toggle.type = 'button';
-    toggle.setAttribute('aria-expanded', 'true');
-    const label = el('span', 'ag-activity-label', '작업 중…');
+    toggle.setAttribute('aria-expanded', 'false');
+    const label = el('span', 'ag-activity-label', '도구 호출');
+    label.setAttribute('aria-live', 'polite');
     const chevron = createChevron('ag-activity-chevron');
     toggle.append(label, chevron);
 
     const collapse = el('div', 'ag-activity-collapse');
     const content = el('div', 'ag-activity-content');
-    content.tabIndex = 0;
-    content.setAttribute('aria-label', '실시간 도구 실행 내역');
+    content.tabIndex = -1;
+    content.setAttribute('aria-label', '도구 호출 내역');
     collapse.appendChild(content);
     activity.append(toggle, collapse);
 
@@ -3158,65 +3197,49 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       }
     });
 
-    if (anchor?.parentElement === messages) {
-      messages.insertBefore(activity, anchor);
+    if (milestone) {
+      withAutoScroll(() => milestone.appendChild(activity));
     } else {
-      withAutoScroll(() => messages.appendChild(activity));
+      const toolsOnly = el('div', 'ag-progress-step ag-progress-step-tools-only');
+      toolsOnly.appendChild(activity);
+      withAutoScroll(() => messages.appendChild(toolsOnly));
     }
 
     turnActivity = {
       root: activity,
-      toggle,
       label,
       content,
       startedAt: performance.now(),
       toolCount: 0,
       failedToolCount: 0,
+      activeTools: new Map(),
+      acceptingTools: true,
+      settled: false,
     };
     return turnActivity;
   }
 
-  /** 도구 호출 앞의 진행 설명을 activity 안으로 옮겨 최종 답변과 분리한다. */
-  function compactStreamIntoActivity(agent: AgentName): void {
+  /** 도구 호출 앞의 진행 설명을 타임라인 이정표로 확정한다. */
+  function compactStreamIntoActivity(agent: AgentName) {
     const bubble = streamBubble;
-    if (!bubble) return;
+    if (!bubble) return null;
     if (!(bubble.textContent ?? '').trim()) {
       bubble.remove();
       streamBubble = null;
-      return;
+      return null;
     }
-    const activity = ensureTurnActivity(agent, bubble);
-    bubble.className = 'ag-activity-note';
-    withAutoScroll(() => activity.content.appendChild(bubble));
-    scrollActivityToLatest(activity.content);
+    const milestone = el('div', 'ag-progress-step');
+    withAutoScroll(() => {
+      messages.insertBefore(milestone, bubble);
+      bubble.className = `ag-msg ag-progress-milestone ag-${agent}`;
+      milestone.appendChild(bubble);
+    });
     streamBubble = null;
+    return milestone;
   }
 
-  function completeTurnActivity(): void {
-    const activity = turnActivity;
-    if (!activity) return;
-    const count = activity.toolCount;
-    const duration = formatActivityDuration(activity.startedAt);
-    if (activity.failedToolCount > 0) {
-      animateActivityLabel(
-        activity,
-        `작업 종료 · ${activity.failedToolCount}개 오류 · ${duration}`,
-      );
-      activity.root.classList.add('ag-activity-error');
-    } else {
-      animateActivityLabel(activity, `작업 완료 · ${count}단계 · ${duration}`);
-      activity.root.classList.add('ag-activity-complete');
-    }
-    activity.root.classList.remove('ag-activity-running');
-    // 답변이 먼저 자리 잡은 뒤 작업 내역이 접혀 레이아웃 점프가 덜 느껴지게 한다.
-    window.setTimeout(() => {
-      withAutoScroll(() => {
-        activity.root.classList.add('ag-activity-collapsed');
-        activity.toggle.setAttribute('aria-expanded', 'false');
-        activity.content.tabIndex = -1;
-      });
-    }, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 120);
-    turnActivity = null;
+  function completeTurnActivity() {
+    closeCurrentActivityGroup();
   }
 
   function appendCheckDocumentMessage(agent: AgentName): void {
@@ -3229,10 +3252,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     streamBubble = null;
   }
 
-  function addToolRow(evt: Extract<AgentStreamEvent, { type: 'tool-call' }>): void {
-    const activity = ensureTurnActivity(evt.agent);
+  function addToolRow(
+    evt: Extract<AgentStreamEvent, { type: 'tool-call' }>,
+    milestone?: HTMLElement | null,
+  ): void {
+    const activity = ensureTurnActivity(evt.agent, milestone);
     activity.toolCount += 1;
-    animateActivityLabel(activity, `작업 중 · ${activity.toolCount}단계`);
+    activity.activeTools.set(evt.callId, evt.tool);
+    turnToolCount += 1;
+    animateActivityLabel(activity, activeToolLabel(activity));
 
     const row = el('div', `ag-tool-row ag-${evt.agent}`);
     const head = el('button', 'ag-tool-head');
@@ -3269,6 +3297,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       scroller: activity.content,
       elapsed,
       startedAt: performance.now(),
+      activity,
     });
     // 다음 text-delta 는 activity 아래의 최종 답변 후보로 연다.
     streamBubble = null;
@@ -3283,8 +3312,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     entry.status.replaceChildren(createIcon(evt.ok ? 'check' : 'close'));
     entry.elapsed.textContent = formatElapsed(entry.startedAt);
     entry.result.textContent = evt.resultPreview;
+    entry.activity.activeTools.delete(evt.callId);
+    if (!evt.ok) {
+      entry.activity.failedToolCount += 1;
+      turnFailedToolCount += 1;
+    }
+    animateActivityLabel(entry.activity, activeToolLabel(entry.activity));
+    settleActivity(entry.activity);
     scrollActivityToLatest(entry.scroller);
-    if (!evt.ok && turnActivity) turnActivity.failedToolCount += 1;
   }
 
   /**
@@ -3292,31 +3327,42 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
    * 정리한다 — 스피너가 영원히 돌거나 Map 엔트리가 새는 것을 막는다.
    */
   function sweepUnresolvedToolRows(): void {
-    const unresolvedCount = toolRows.size;
-    for (const entry of toolRows.values()) {
+    const touchedActivities = new Set<TurnActivityState>();
+    for (const [callId, entry] of toolRows) {
       entry.status.classList.remove('ag-spin');
       entry.status.classList.add('ag-err');
       entry.status.replaceChildren(createIcon('close'));
       if (!entry.elapsed.textContent) entry.elapsed.textContent = '중단';
       if (!entry.result.textContent) entry.result.textContent = '(결과 없이 종료됨)';
+      entry.activity.activeTools.delete(callId);
+      entry.activity.failedToolCount += 1;
+      turnFailedToolCount += 1;
+      touchedActivities.add(entry.activity);
     }
     toolRows.clear();
-    if (turnActivity && unresolvedCount > 0) {
-      turnActivity.failedToolCount += unresolvedCount;
+    for (const activity of touchedActivities) {
+      animateActivityLabel(activity, activeToolLabel(activity));
+      settleActivity(activity);
     }
   }
 
   function handleAgentEvent(event: AgentStreamEvent): void {
     switch (event.type) {
       case 'turn-start':
+        // 이전 턴이 비정상 종료돼 남긴 실행 상태를 먼저 닫는다.
+        sweepUnresolvedToolRows();
+        completeTurnActivity();
         setTurnRunning(true);
         followConversation = true;
         scrollConversationToEnd();
         assistantBuffer = '';
         streamBubble = null;
         turnActivity = null;
+        turnToolCount = 0;
+        turnFailedToolCount = 0;
         break;
       case 'text-delta': {
+        if (!streamBubble && turnActivity) closeCurrentActivityGroup();
         const bubble = streamBubble ?? openAssistantBubble(event.agent);
         assistantBuffer += event.text;
         withAutoScroll(() => {
@@ -3327,12 +3373,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         });
         break;
       }
-      case 'tool-call':
-        // 도구 전 설명은 이전 채팅 복원 시 별도 답변으로 남기지 않는다.
-        flushAssistantBuffer({ persist: false });
-        compactStreamIntoActivity(event.agent);
-        addToolRow(event);
+      case 'tool-call': {
+        // 도구 전 설명은 최종 답변과 구분된 진행 이정표로 보관한다.
+        flushAssistantBuffer({ kind: 'progress' });
+        const milestone = compactStreamIntoActivity(event.agent);
+        addToolRow(event, milestone);
         break;
+      }
       case 'tool-result':
         resolveToolRow(event);
         break;
@@ -3354,8 +3401,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
           && event.stopReason !== 'failed'
           && event.stopReason !== 'exited'
           && !event.errorMessage
-          && (turnActivity?.failedToolCount ?? 0) === 0;
-        if (turnActivity && !finalBubble && completed) {
+          && turnFailedToolCount === 0;
+        if (turnToolCount > 0 && !finalBubble && completed) {
           appendCheckDocumentMessage(event.agent);
         }
         completeTurnActivity();
@@ -3518,6 +3565,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         break;
       case 'chat-stopped':
         setTurnRunning(false);
+        flushAssistantBuffer();
+        sweepUnresolvedToolRows();
+        completeTurnActivity();
         streamBubble = null;
         break;
       case 'title-result': {
