@@ -2,6 +2,8 @@
 // (mcp-stdio.mjs 를 임포트하면 stdio 서버가 뜨므로 절대 임포트하지 않는다).
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   TOOL_CATEGORIES,
   TOOL_CLASSIFICATIONS,
@@ -10,12 +12,13 @@ import {
   OFFSET_CAVEAT,
   filterToolDefinitions,
   toToolContent,
+  toolAnnotations,
 } from '../tools.mjs';
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 41개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 41);
+test('도구는 정확히 48개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 48);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -27,10 +30,29 @@ test('모든 도구가 허용된 카테고리로 명시 분류된다', () => {
   }
 });
 
+test('document-write annotations stay non-destructive so safe mode can edit', () => {
+  assert.deepEqual(toolAnnotations('document-read'), {
+    readOnlyHint: true, destructiveHint: false, openWorldHint: false,
+  });
+  assert.deepEqual(toolAnnotations('document-write'), {
+    readOnlyHint: false, destructiveHint: false, openWorldHint: false,
+  });
+  assert.deepEqual(toolAnnotations('download-write'), {
+    readOnlyHint: false, destructiveHint: true, openWorldHint: true,
+  });
+  const mcpStdio = readFileSync(fileURLToPath(new URL('../mcp-stdio.mjs', import.meta.url)), 'utf8');
+  assert.match(mcpStdio, /annotations: toolAnnotations\(def\.category\)/);
+  assert.doesNotMatch(mcpStdio, /destructiveHint:\s*true/);
+});
+
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 33);
+  assert.equal(direct.size, 40);
   assert.ok(direct.has('insert_text'));
+  assert.ok(direct.has('replace_all'));
+  assert.ok(direct.has('insert_footnote'));
+  assert.ok(direct.has('set_bookmark'));
+  assert.ok(direct.has('get_outline'));
   assert.ok(direct.has('search_reference_files'));
   assert.ok(!direct.has('download_file'));
   assert.ok(!direct.has('present_implementation_plan'));

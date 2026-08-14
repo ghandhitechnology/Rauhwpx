@@ -91,7 +91,9 @@ test('Claude unrestricted and Codex profiles change only the permission boundary
   const safeCodex = buildCodexArgv({ ...backendOpts, permissionProfile: 'safe' }, null);
   const fullCodex = buildCodexArgv({ ...backendOpts, permissionProfile: 'unrestricted' }, 'thread');
   assert.ok(safeCodex.includes('sandbox_mode="workspace-write"'));
+  assert.ok(safeCodex.includes('mcp_servers.rhwp.default_tools_approval_mode="auto"'));
   assert.ok(fullCodex.includes('sandbox_mode="danger-full-access"'));
+  assert.ok(fullCodex.includes('mcp_servers.rhwp.default_tools_approval_mode="auto"'));
   assert.ok(safeCodex.includes('--ignore-user-config'));
   assert.ok(safeCodex.includes('skill_search'));
 });
