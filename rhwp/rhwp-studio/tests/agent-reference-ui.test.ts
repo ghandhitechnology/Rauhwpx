@@ -20,7 +20,7 @@ test('composer exposes chat-scoped quick add and a separate reference library pa
   assert.match(sidebar, /composerField\.insertBefore\(referenceLibrary\.quickAddButton, sendHint\)/);
   assert.match(sidebar, /composerUtilityActions\.insertBefore\(referenceLibrary\.trigger, permissionBtn\)/);
   assert.match(sidebar, /referenceLibrary\.page/);
-  assert.match(library, /이 채팅에 참고자료 추가/);
+  assert.match(library, /메시지에 참고자료 첨부/);
   assert.match(library, /trigger\.title = '참고자료'/);
   assert.match(library, /targetFor\('chat', options\.getContext\(\)\)/);
   assert.match(css, /\.ag-references-open \.ag-references-page/);
@@ -54,13 +54,26 @@ test('library searches backend content and exposes loading/error/keyboard semant
   assert.doesNotMatch(library, /innerHTML/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(library, /revision !== countRevision/);
-  assert.match(library, /contextChanged\(\): void \{\s*requestRevision\+\+;\s*countRevision\+\+;/);
+  assert.match(library, /contextChanged\(\): void \{\s*contextRevision\+\+;\s*requestRevision\+\+;\s*countRevision\+\+;/);
 });
 
-test('failed quick uploads retain an accessible retry bound to the original scope', () => {
-  assert.match(library, /const retryTarget = \{ \.\.\.target \}/);
+test('composer attachments stay as removable drafts until their message is sent', () => {
+  assert.match(library, /const draftUploads: UploadChip\[\] = \[\]/);
+  assert.match(library, /openPicker\(targetFor\('chat', options\.getContext\(\)\), true\)/);
+  assert.match(library, /if \(draft\) stageFiles\(selected\)/);
+  assert.match(library, /state = el\('span', 'ag-reference-upload-chip-state', '전송 대기'\)/);
+  assert.match(library, /`\$\{file\.name\} 첨부 취소`/);
+  assert.match(library, /async function commitDraftsAfter\(messageSent: Promise<string \| null>\)/);
+  assert.match(library, /const messageId = await messageSent;[\s\S]*uploadOne\(chip\.file/);
+  assert.match(sidebar, /if \(!input\.value\) referenceLibrary\.discardDrafts\(\)/);
+  assert.match(sidebar, /bridge\.sendUserMessage\(text, skillNameForMessage, hasDrafts\)[\s\S]*commitDraftsAfter\(messageSent\)/);
+  assert.match(css, /\.ag-reference-upload-remove:focus-visible/);
+});
+
+test('failed post-send uploads retain an accessible retry bound to the sent chat scope', () => {
+  assert.match(library, /chip\.target = \{ \.\.\.target \}/);
   assert.match(library, /`\$\{file\.name\} 참고자료 업로드 다시 시도`/);
-  assert.match(library, /await uploadOne\(file, retryTarget, \{ root, state, retry \}\)/);
+  assert.match(library, /await uploadOne\(file, chip\.target, chip\)/);
   assert.match(library, /chip\.retry\.hidden = false/);
   assert.match(library, /다시 시도하거나 파일을 다시 추가해 주세요/);
   assert.match(css, /\.ag-reference-upload-retry:focus-visible/);

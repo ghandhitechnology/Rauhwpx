@@ -73,13 +73,7 @@ async function chooseScope(page, scope) {
   await page.click(`.ag-reference-tab[data-scope="${scope}"]`);
 }
 
-async function uploadFile(page, { scope, name, content }) {
-  if (scope === 'chat') {
-    await page.click('.ag-reference-quick-add');
-  } else {
-    await chooseScope(page, scope);
-    await page.click('.ag-reference-add');
-  }
+async function chooseFile(page, { name, content }) {
   await page.evaluate(({ fileName, fileContent }) => {
     const input = document.querySelector('.ag-reference-file-input');
     if (!(input instanceof HTMLInputElement)) throw new Error('Reference input not found');
@@ -88,6 +82,17 @@ async function uploadFile(page, { scope, name, content }) {
     input.files = transfer.files;
     input.dispatchEvent(new Event('change', { bubbles: true }));
   }, { fileName: name, fileContent: content });
+}
+
+async function uploadFile(page, { scope, name, content }) {
+  await chooseScope(page, scope);
+  await page.click('.ag-reference-add');
+  await chooseFile(page, { name, content });
+}
+
+async function stageQuickFile(page, { name, content }) {
+  await page.click('.ag-reference-quick-add');
+  await chooseFile(page, { name, content });
 }
 
 async function waitForCount(page, expected) {
@@ -160,6 +165,29 @@ try {
       return tab instanceof HTMLButtonElement && !tab.disabled;
     });
 
+    await page.type('.ag-input', 'draft message');
+    await stageQuickFile(page, {
+      name: 'discarded-draft.txt',
+      content: 'THIS_DRAFT_MUST_NOT_REACH_THE_REFERENCE_STACK',
+    });
+    await page.waitForFunction(() => document.querySelector('.ag-reference-upload-chip-state')?.textContent === '전송 대기');
+    const beforeErase = await page.evaluate(async () => ({
+      drafts: document.querySelectorAll('.ag-reference-upload-chip').length,
+      references: (await window.__agentBridge.listReferences('chat', window.__agentBridge.threadId)).length,
+    }));
+    await page.evaluate(() => {
+      const input = document.querySelector('.ag-input');
+      if (!(input instanceof HTMLTextAreaElement)) throw new Error('Composer input not found');
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await page.waitForFunction(() => document.querySelectorAll('.ag-reference-upload-chip').length === 0);
+    const afterErase = await page.evaluate(async () => (
+      await window.__agentBridge.listReferences('chat', window.__agentBridge.threadId)
+    ).length);
+    assert(beforeErase.drafts === 1 && beforeErase.references === 0 && afterErase === 0,
+      'quick attachments stay draft-only and erasing the message discards them');
+
     await uploadFile(page, {
       scope: 'chat',
       name: 'chat-secret.txt',
@@ -167,7 +195,6 @@ try {
     });
     await waitForCount(page, 1);
 
-    await chooseScope(page, 'chat');
     await page.type('.ag-reference-search', 'CHAT_ONLY_MARKER');
     await page.waitForFunction(() => document.querySelector('.ag-reference-search-snippet')?.textContent?.includes('CHAT_ONLY_MARKER'));
     assert(true, 'chat-scoped file uploads and content search returns its indexed excerpt');

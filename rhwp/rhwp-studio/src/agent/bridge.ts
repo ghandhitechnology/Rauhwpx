@@ -78,7 +78,8 @@ export interface AgentBridge {
   stopChat(): void;
   /** gpt-5.6-luna 로 스레드 제목 생성 요청. */
   requestTitle(threadId: string, preview: string): string;
-  sendUserMessage(text: string, skillName?: string): void;
+  sendUserMessage(text: string, skillName?: string, waitForReferences?: boolean): Promise<string | null>;
+  completeReferenceUploads(messageId: string): void;
   /** 참고자료 원본은 HTTP로 스트리밍하고, 브라우저에는 메타데이터만 돌려준다. */
   uploadReference(scope: ReferenceScope, scopeId: string, file: File): Promise<ReferenceFile>;
   listReferences(scope: ReferenceScope, scopeId: string): Promise<ReferenceFile[]>;
@@ -382,6 +383,8 @@ class AgentBridgeImpl implements AgentBridge {
     text: string;
     skillName?: string;
     context: ReferenceScopeContext;
+    messageId?: string;
+    resolve(messageId: string | null): void;
   }> = [];
   private threadId = '';
   private documentId: string | null = null;
@@ -1058,6 +1061,7 @@ class AgentBridgeImpl implements AgentBridge {
   }
 
   stopChat(): void {
+    for (const message of this.queuedMessages) message.resolve(null);
     this.queuedMessages = [];
     this.pendingChatStart = null;
     this.activeAgent = null;
@@ -1091,66 +1095,75 @@ class AgentBridgeImpl implements AgentBridge {
     return requestId;
   }
 
-  sendUserMessage(text: string, skillName?: string): void {
+  sendUserMessage(text: string, skillName?: string, waitForReferences = false): Promise<string | null> {
     const context = this.referenceContext();
-    if (this.activeAgent === null) {
-      this.queuedMessages.push({ text, skillName, context });
-      if (this.state === 'connected') {
-        this.sendJson({
-          v: AGENT_PROTOCOL_VERSION,
-          type: 'chat-start',
-          agent: this.selectedAgent,
-          workflow: this.workflow,
-          threadId: context.threadId,
-          documentId: context.documentId,
-          documentName: context.documentName ?? null,
-          ...(this.selectedModel ? { model: this.selectedModel } : {}),
-          ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
-          permissionProfile: this.permissionProfile,
-        });
-      } else {
-        this.pendingChatStart = {
-          agent: this.selectedAgent,
-          model: this.selectedModel ?? undefined,
-          effort: this.selectedEffort ?? undefined,
-          permissionProfile: this.permissionProfile,
-          workflow: this.workflow,
-          threadId: context.threadId,
-          documentId: context.documentId,
-          documentName: context.documentName ?? null,
-        };
+    const messageId = waitForReferences ? `message-${++this.requestSeq}` : undefined;
+    return new Promise((resolve) => {
+      const message = { text, skillName, context, messageId, resolve };
+      if (this.activeAgent === null) {
+        this.queuedMessages.push(message);
+        if (this.state === 'connected') {
+          this.sendJson({
+            v: AGENT_PROTOCOL_VERSION,
+            type: 'chat-start',
+            agent: this.selectedAgent,
+            workflow: this.workflow,
+            threadId: context.threadId,
+            documentId: context.documentId,
+            documentName: context.documentName ?? null,
+            ...(this.selectedModel ? { model: this.selectedModel } : {}),
+            ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
+            permissionProfile: this.permissionProfile,
+          });
+        } else {
+          this.pendingChatStart = {
+            agent: this.selectedAgent,
+            model: this.selectedModel ?? undefined,
+            effort: this.selectedEffort ?? undefined,
+            permissionProfile: this.permissionProfile,
+            workflow: this.workflow,
+            threadId: context.threadId,
+            documentId: context.documentId,
+            documentName: context.documentName ?? null,
+          };
+        }
+        return;
       }
-      return;
-    }
-    if (this.queuedMessages.length > 0) {
-      this.queuedMessages.push({ text, skillName, context });
-      this.flushQueuedMessages();
-      return;
-    }
+      if (this.queuedMessages.length > 0) {
+        this.queuedMessages.push(message);
+        this.flushQueuedMessages();
+        return;
+      }
+      this.dispatchUserMessage(message);
+    });
+  }
+
+  completeReferenceUploads(messageId: string): void {
     this.sendJson({
       v: AGENT_PROTOCOL_VERSION,
-      type: 'chat-user-message',
-      text,
-      threadId: context.threadId,
-      documentId: context.documentId,
-      ...(skillName ? { skillName } : {}),
+      type: 'chat-reference-uploads-complete',
+      messageId,
     });
+  }
+
+  private dispatchUserMessage(message: (typeof this.queuedMessages)[number]): void {
+    const sent = this.sendJson({
+      v: AGENT_PROTOCOL_VERSION,
+      type: 'chat-user-message',
+      text: message.text,
+      threadId: message.context.threadId,
+      documentId: message.context.documentId,
+      ...(message.skillName ? { skillName: message.skillName } : {}),
+      ...(message.messageId ? { messageId: message.messageId, referencesPending: true } : {}),
+    });
+    message.resolve(sent ? (message.messageId ?? null) : null);
   }
 
   private flushQueuedMessages(): void {
     if (this.state !== 'connected') return;
     const queued = this.queuedMessages;
     this.queuedMessages = [];
-    for (const message of queued) {
-      this.sendJson({
-        v: AGENT_PROTOCOL_VERSION,
-        type: 'chat-user-message',
-        text: message.text,
-        threadId: message.context.threadId,
-        documentId: message.context.documentId,
-        ...(message.skillName ? { skillName: message.skillName } : {}),
-      });
-    }
+    for (const message of queued) this.dispatchUserMessage(message);
   }
 
   private referenceContext(): ReferenceScopeContext {
