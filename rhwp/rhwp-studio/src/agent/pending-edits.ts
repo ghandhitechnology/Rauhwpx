@@ -173,6 +173,7 @@ export class PendingEditManager {
       paraIdx: addr.paraIdx, charOffset: addr.charOffset, addedParas,
       endParaIdx: range.endParaIdx, endCharOffset: range.endCharOffset, textLen: scalarLen(text),
     }, op, addr.cell);
+    this.reconcilePreviewLayout();
     this.emitDocEvents('agent-pending-edit');
     this.syncOverlay();
     // 타자기 공개용 — op.range 라이브 참조를 넘겨 이후 shift 가 반영되게 한다.
@@ -278,6 +279,7 @@ export class PendingEditManager {
       if (text.length > 0) {
         this.shiftAllAfterInsert(range.sectionIdx, this.insertShiftFor(start, text), op, range.cell);
       }
+      this.reconcilePreviewLayout();
       this.emitDocEvents('agent-pending-edit');
       this.syncOverlay();
       if (text.length > 0) {
@@ -347,6 +349,7 @@ export class PendingEditManager {
       text: rangeText,
     };
     this.pushOp(set, op);
+    this.reconcilePreviewLayout();
     this.emitDocEvents('agent-pending-edit');
     this.syncOverlay();
     this.emitChange({ type: 'ops-changed' });
@@ -366,6 +369,7 @@ export class PendingEditManager {
       oldValue: parsed.oldValue, newValue: parsed.newValue,
     };
     this.pushOp(set, op);
+    this.reconcilePreviewLayout();
     this.emitDocEvents('agent-pending-edit');
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, fieldId: parsed.fieldId, oldValue: parsed.oldValue, newValue: parsed.newValue };
@@ -382,7 +386,10 @@ export class PendingEditManager {
     const set = this.ensureOpenSet(agent);
     const op: PendingOp = { kind: 'object', id: this.nextId('op'), agent: set.agent, obj };
     this.pushOp(set, op);
-    if (isObjectOpApplied(obj)) this.emitDocEvents('agent-pending-edit');
+    if (isObjectOpApplied(obj)) {
+      this.reconcilePreviewLayout();
+      this.emitDocEvents('agent-pending-edit');
+    }
     this.syncOverlay();
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, obj };
@@ -495,6 +502,7 @@ export class PendingEditManager {
       snapId = wasm.saveSnapshot();
       this.deps.inputHandler.retainExternalSnapshot?.();
       this.applyApprovalOnlyOps(set.ops);
+      this.reconcilePreviewLayout();
       this.emitDocEvents('agent-preview');
       return fn();
     } finally {
@@ -534,6 +542,9 @@ export class PendingEditManager {
 
   private approveInner(set: PendingChangeSet, changeSetId: string, userEditSeqNow: number): void {
     if (set === this.open) this.open = null;
+    // 승인 직전에도 현재 IR에서 권위 조판을 다시 만든다. 미리보기 캐시가 어긋난
+    // 상태를 after snapshot으로 굳히거나, 승인 뒤에만 우연히 고쳐지는 일을 막는다.
+    this.reconcilePreviewLayout();
     const { kept, dropped } = this.partitionDriftedOps(set);
     const skipped = dropped.length;
 
@@ -596,7 +607,11 @@ export class PendingEditManager {
         'agentApplyChangeSet', cursor, cursor, beforeId,
         // 되돌림 과정에서 op 좌표가 before 상태로 이동했으므로, 미리보기 좌표로
         // 복원된(restorePendingState) set.ops 의 클론을 대상으로 실행해야 한다.
-        () => this.applyApprovalOnlyOps(kept.length > 0 ? set.ops : []),
+        () => {
+          const position = this.applyApprovalOnlyOps(kept.length > 0 ? set.ops : []);
+          this.reconcilePreviewLayout();
+          return position;
+        },
       );
       beforeId = null; // command가 소유권을 인수했다.
       command.execute(wasm);
@@ -649,6 +664,7 @@ export class PendingEditManager {
       const skipped = dropped.length;
       set.ops = kept;
       this.revertAppliedOps(kept, dropped, userEditSeqNow);
+      this.reconcilePreviewLayout();
       this.emitDocEvents('agent-reject');
       this.discardReplaceSnapshots([...kept, ...dropped]);
       this.removeSet(set);
@@ -748,6 +764,7 @@ export class PendingEditManager {
       this.revertAppliedOps(kept, dropped);
       this.discardReplaceSnapshots([...kept, ...dropped]);
     }
+    if (reverted) this.reconcilePreviewLayout();
     this.sets = [];
     this.open = null;
     this.deps.overlay.clear();
@@ -780,6 +797,13 @@ export class PendingEditManager {
   private emitDocEvents(reason: string): void {
     this.deps.eventBus.emit('document-mutated', reason);
     this.deps.eventBus.emit('document-changed');
+  }
+
+  /** 한 논리 에이전트 연산이 끝난 IR에서 증분 조판 상태를 권위 조판으로 교체한다. */
+  private reconcilePreviewLayout(): void {
+    // 테스트 더블/이전 WASM 번들과도 호환되도록 호출 자체는 feature-detect 한다.
+    // 현재 번들의 WasmBridge.refreshLayout은 실패를 로깅하고 안전하게 반환한다.
+    this.deps.wasm.refreshLayout?.();
   }
 
   private syncOverlay(): void {
@@ -1534,6 +1558,24 @@ export class PendingEditManager {
         );
       } else {
         this.parseOk(wasm.splitParagraph(sec, p, o), 'splitParagraph');
+      }
+
+      // splitParagraph는 Enter 의미로 문단 모양을 상속한다. 에이전트의 `\n`은 한
+      // 논리 삽입 안의 문단 경계이므로 source의 pageBreakBefore까지 복제하면 새
+      // 문단마다 강제 쪽 나눔이 영구 저장된다. 원래 문단의 break는 유지하고 새로
+      // 생긴 continuation에서만 제거한다(다른 문단/글자 서식은 그대로 상속).
+      const newPara = p + 1;
+      const props = cell
+        ? wasm.getCellParaPropertiesAt(sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, newPara)
+        : wasm.getParaPropertiesAt(sec, newPara);
+      if (props.pageBreakBefore === true) {
+        const raw = cell
+          ? wasm.applyParaFormatInCell(
+            sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, newPara,
+            JSON.stringify({ pageBreakBefore: false }),
+          )
+          : wasm.applyParaFormat(sec, newPara, JSON.stringify({ pageBreakBefore: false }));
+        this.parseOkLenient(raw, 'clear inherited pageBreakBefore');
       }
     };
     try {
