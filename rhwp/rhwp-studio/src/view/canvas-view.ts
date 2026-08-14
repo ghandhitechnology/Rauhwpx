@@ -292,6 +292,10 @@ export class CanvasView {
 
     // 그리드 모드 CSS 클래스 토글
     this.scrollContent.classList.toggle('grid-mode', this.virtualScroll.isGridMode());
+
+    // 가상 스크롤 페이지 배치가 확정된 뒤에만 화면 좌표가 유효하다 — 문서 변이
+    // 직후(비동기 refresh 이전)에 그린 오버레이가 여기서 재배치된다.
+    this.eventBus.emit('page-layout-changed');
   }
 
   /** 스크롤/리사이즈 시 보이는 페이지를 갱신한다 */
