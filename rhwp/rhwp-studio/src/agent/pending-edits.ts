@@ -26,13 +26,24 @@ interface InsertShift {
 }
 
 /**
- * 삽입 이후 좌표 이동 — strictly-after 규칙: 삽입 지점과 정확히 같은 경계는 움직이지
- * 않는다 (replace_range 의 삭제 마크 끝이 삽입 텍스트를 삼키지 않도록).
+ * 삽입 이후 좌표 이동. 경계 규칙은 그 점이 범위의 어느 끝인지에 따라 다르다:
+ *
+ * - 끝(end) 경계 — strictly-after: 삽입 지점과 정확히 같은 끝은 움직이지 않는다
+ *   (범위 끝에 덧붙인 텍스트가 기존 마크/범위에 삼켜지지 않도록).
+ * - 시작(start) 경계 — at-or-after (`isStartBoundary`): 삽입 지점과 정확히 같은
+ *   시작은 삽입 길이만큼 밀린다. 그 자리에 삽입된 텍스트는 물리적으로 범위의
+ *   기존 텍스트를 뒤로 밀므로, 시작이 제자리에 남으면 범위가 새 텍스트를 삼킨다
+ *   (삭제 마크 시작점에 재작성 텍스트를 삽입하면 승인 시 새 텍스트까지 지워지는 버그).
  */
-export function shiftPointAfterInsert(p: DocPoint, ins: InsertShift): DocPoint {
+export function shiftPointAfterInsert(
+  p: DocPoint, ins: InsertShift, isStartBoundary = false,
+): DocPoint {
   if (p.paraIdx < ins.paraIdx) return { paraIdx: p.paraIdx, charOffset: p.charOffset };
   if (p.paraIdx === ins.paraIdx) {
-    if (p.charOffset <= ins.charOffset) return { paraIdx: p.paraIdx, charOffset: p.charOffset };
+    const staysBefore = isStartBoundary
+      ? p.charOffset < ins.charOffset
+      : p.charOffset <= ins.charOffset;
+    if (staysBefore) return { paraIdx: p.paraIdx, charOffset: p.charOffset };
     if (ins.addedParas === 0) return { paraIdx: p.paraIdx, charOffset: p.charOffset + ins.textLen };
     return { paraIdx: ins.endParaIdx, charOffset: ins.endCharOffset + (p.charOffset - ins.charOffset) };
   }
@@ -370,6 +381,30 @@ export class PendingEditManager {
     this.syncOverlay();
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, obj };
+  }
+
+  /**
+   * executor 가드: 삽입 지점이 pending 삭제 마크 범위의 **내부**(경계 제외)에
+   * 있으면 그 마크의 요약을 반환한다. 마크 내부에 삽입된 텍스트는 승인 시 마크와
+   * 함께 삭제되므로, 명확한 에러로 막아 에이전트의 작업 유실을 예방한다.
+   */
+  findDeleteMarkContaining(
+    sectionIdx: number, paraIdx: number, charOffset: number, cell?: CellAddr,
+  ): { range: DocRange; text: string } | null {
+    const after = (aPara: number, aOff: number, bPara: number, bOff: number): boolean =>
+      aPara > bPara || (aPara === bPara && aOff > bOff);
+    for (const set of this.sets) {
+      for (const op of set.ops) {
+        if (op.kind !== 'delete') continue;
+        const r = op.range;
+        if (r.sectionIdx !== sectionIdx || !sameCell(r.cell, cell)) continue;
+        if (after(paraIdx, charOffset, r.startParaIdx, r.startCharOffset)
+          && after(r.endParaIdx, r.endCharOffset, paraIdx, charOffset)) {
+          return { range: { ...r }, text: op.text };
+        }
+      }
+    }
+    return null;
   }
 
   /** executor 가드: 해당 표에 파괴적 마크(delete_row/col, merge)가 걸려 있는가 */
@@ -1965,7 +2000,7 @@ export class PendingEditManager {
         }
         if (op.range.sectionIdx !== sectionIdx) continue;
         if (sameCell(op.range.cell, cell)) {
-          this.shiftRange(op.range, (p) => shiftPointAfterInsert(p, ins));
+          this.shiftRangeAfterInsert(op.range, ins);
         } else if (!cell && op.range.cell && ins.addedParas > 0 && ins.paraIdx < op.range.cell.paraIdx) {
           // 본문 문단 추가가 표 앞에서 일어나면 셀 op 의 부모 문단 인덱스만 이동한다.
           op.range.cell = { ...op.range.cell, paraIdx: op.range.cell.paraIdx + ins.addedParas };
@@ -1997,6 +2032,23 @@ export class PendingEditManager {
   private shiftRange(range: DocRange, shift: (p: DocPoint) => DocPoint): void {
     const s = shift({ paraIdx: range.startParaIdx, charOffset: range.startCharOffset });
     const e = shift({ paraIdx: range.endParaIdx, charOffset: range.endCharOffset });
+    range.startParaIdx = s.paraIdx;
+    range.startCharOffset = s.charOffset;
+    range.endParaIdx = e.paraIdx;
+    range.endCharOffset = e.charOffset;
+  }
+
+  /** 삽입 shift 를 범위에 적용 — 시작은 at-or-after, 끝은 strictly-after 규칙 */
+  private shiftRangeAfterInsert(range: DocRange, ins: InsertShift): void {
+    // 빈 범위(시작==끝)는 한 점으로 움직인다 — 시작만 밀리면 범위가 뒤집힌다.
+    const empty = range.startParaIdx === range.endParaIdx
+      && range.startCharOffset === range.endCharOffset;
+    const s = shiftPointAfterInsert(
+      { paraIdx: range.startParaIdx, charOffset: range.startCharOffset }, ins, !empty,
+    );
+    const e = shiftPointAfterInsert(
+      { paraIdx: range.endParaIdx, charOffset: range.endCharOffset }, ins,
+    );
     range.startParaIdx = s.paraIdx;
     range.startCharOffset = s.charOffset;
     range.endParaIdx = e.paraIdx;
