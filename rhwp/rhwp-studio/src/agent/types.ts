@@ -579,6 +579,41 @@ export type ObjectOp =
       pageNumber?: string;
       /** false = 이 op 이 HF 를 생성했다 (reject 시 삭제) */
       existedBefore: boolean;
+    }
+  | {
+      type: 'insertNote';
+      noteKind: 'footnote' | 'endnote';
+      sectionIdx: number; paraIdx: number; charOffset: number;
+      /** 각주/미주 내용 (단일 문단) */
+      text: string;
+      anchor?: ObjectAnchor;
+      /** 적용 시 부여된 번호 (응답용) */
+      number?: number;
+      /**
+       * 적용 직후 실제 각주 텍스트 — 엔진이 기본 내용(공백 등)을 덧붙일 수 있어
+       * 드리프트 검증은 요청 텍스트가 아니라 이 값과 비교한다.
+       */
+      appliedText?: string;
+    }
+  | {
+      type: 'setNoteText';
+      sectionIdx: number; paraIdx: number; controlIdx: number;
+      text: string;
+      /** applied-now 역연산용 이전 내용 (적용 시 캡처) */
+      prevText?: string;
+    }
+  | {
+      type: 'bookmark';
+      op: 'add' | 'delete' | 'rename';
+      sectionIdx: number; paraIdx: number;
+      /** add 전용 삽입 지점 */
+      charOffset?: number;
+      /** delete/rename 대상 컨트롤 (적용 시 add 도 채워진다) */
+      ctrlIdx?: number;
+      /** add/rename 의 새 이름 */
+      name?: string;
+      /** delete/rename 역연산용 이전 상태 (적용 시 캡처) */
+      prev?: { name: string; para: number; charPos: number; ctrlIdx: number };
     };
 
 /** applied-now 인지 mark-only 인지 — 분류는 op 데이터에서 유도된다 */
@@ -590,6 +625,9 @@ export function isObjectOpApplied(obj: ObjectOp): boolean {
     case 'tableStructure':
     case 'paraFormat':
     case 'pageLayout':
+    case 'insertNote':
+    case 'setNoteText':
+    case 'bookmark':
       return true;
     case 'headerFooter':
       return !obj.existedBefore;
