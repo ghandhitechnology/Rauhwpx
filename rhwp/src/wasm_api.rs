@@ -6002,6 +6002,12 @@ impl HwpDocument {
         self.end_batch_native().map_err(|e| e.into())
     }
 
+    /// 문서 IR을 바꾸지 않고 현재 문서의 조판 파생 캐시를 모두 재구성한다.
+    #[wasm_bindgen(js_name = refreshLayout)]
+    pub fn refresh_layout(&mut self) {
+        self.refresh_layout_native();
+    }
+
     /// 현재 이벤트 로그를 JSON으로 반환한다.
     #[wasm_bindgen(js_name = getEventLog)]
     pub fn get_event_log(&self) -> String {
