@@ -233,7 +233,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'delete_range',
-    description: `Mark a text range for deletion. The text is NOT removed yet — it is shown struck-through to the user and removed only on approval. ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    description: `Mark a text range for deletion. The text is NOT removed yet — it is shown struck-through to the user and removed only on approval, so re-reads still show it; that is expected, do NOT delete it again. To rewrite a section, prefer replace_range; if you do use delete_range + insert_text, insert at the mark's start or after its end (inserting strictly inside a marked range is rejected with PENDING_DELETE_OVERLAP because that text would be deleted with the mark on approval). ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),

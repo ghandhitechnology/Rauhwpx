@@ -1100,6 +1100,17 @@ export class AgentToolExecutor {
     }
     this.validateAddress(sectionIdx, paraIdx, charOffset, cell);
     if (cell) this.guardDestructiveMark(sectionIdx, cell.paraIdx, cell.controlIdx);
+    const mark = this.deps.pending.findDeleteMarkContaining?.(sectionIdx, paraIdx, charOffset, cell);
+    if (mark) {
+      throw new AgentToolError(
+        'PENDING_DELETE_OVERLAP',
+        `insertion point p${paraIdx}:${charOffset} is inside a range already marked for deletion `
+        + `(p${mark.range.startParaIdx}:${mark.range.startCharOffset}-p${mark.range.endParaIdx}:${mark.range.endCharOffset}) — `
+        + 'text inserted there would be deleted together on approval. Insert at the mark start '
+        + `(p${mark.range.startParaIdx}:${mark.range.startCharOffset}) or after its end instead, `
+        + 'or use replace_range for delete+insert in one atomic op.',
+      );
+    }
     const addr: { sectionIdx: number; paraIdx: number; charOffset: number; cell?: CellAddr } =
       { sectionIdx, paraIdx, charOffset };
     if (cell) addr.cell = cell;

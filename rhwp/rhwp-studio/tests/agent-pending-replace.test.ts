@@ -653,3 +653,67 @@ test('pending replace 스냅샷은 예산에 등록되어 WASM 상한을 넘기�
   for (const id of ids.slice(1)) mgr.reject(id);
   assert.equal(external, 0);
 });
+
+// ─── 재작성 패턴: 삭제 마크 시작점에 삽입 (버그 수정 회귀) ─────────
+
+test('재작성 패턴 approve: 마크 시작점의 삽입 텍스트는 살아남고 옛 텍스트만 지워진다', () => {
+  const { mgr, fake } = makeManager([
+    paraOf('head'), paraOf('old1'), paraOf('old2'), paraOf('tail'),
+  ]);
+  const d = mgr.markDelete('claude', {
+    sectionIdx: 0, startParaIdx: 1, startCharOffset: 0, endParaIdx: 2, endCharOffset: 4,
+  });
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 1, charOffset: 0 }, 'new1\nnew2');
+  // 미리보기: 삽입은 즉시 반영, 마크는 옛 텍스트 위에만 남는다
+  assert.equal(fake.text(1), 'new1');
+  assert.equal(fake.text(2), 'new2old1');
+  // 마크 범위가 옛 텍스트를 정확히 가리켜야 한다 (삽입 텍스트를 삼키면 안 된다)
+  const mark = mgr.getChangeSets()[0].ops.find((o) => o.kind === 'delete')!;
+  assert.deepEqual(
+    [mark.range.startParaIdx, mark.range.startCharOffset, mark.range.endParaIdx, mark.range.endCharOffset],
+    [2, 4, 3, 4],
+  );
+  mgr.approve(d.changeSetId);
+  assert.equal(fake.paraCount(), 4);
+  assert.equal(fake.text(0), 'head');
+  assert.equal(fake.text(1), 'new1');
+  assert.equal(fake.text(2), 'new2');
+  assert.equal(fake.text(3), 'tail');
+});
+
+test('재작성 패턴 reject: 삽입이 되돌아가고 옛 텍스트가 그대로 남는다', () => {
+  const { mgr, fake } = makeManager([
+    paraOf('head'), paraOf('old1'), paraOf('old2'), paraOf('tail'),
+  ]);
+  const d = mgr.markDelete('claude', {
+    sectionIdx: 0, startParaIdx: 1, startCharOffset: 0, endParaIdx: 2, endCharOffset: 4,
+  });
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 1, charOffset: 0 }, 'new1\nnew2');
+  mgr.reject(d.changeSetId);
+  assert.equal(fake.paraCount(), 4);
+  assert.deepEqual([fake.text(0), fake.text(1), fake.text(2), fake.text(3)],
+    ['head', 'old1', 'old2', 'tail']);
+});
+
+test('재작성 패턴 (단일 문단): 마크 시작점 삽입 후 approve', () => {
+  const { mgr, fake } = makeManager([paraOf('hello world')]);
+  const d = mgr.markDelete('claude', {
+    sectionIdx: 0, startParaIdx: 0, startCharOffset: 6, endParaIdx: 0, endCharOffset: 11,
+  });
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 6 }, 'NEW');
+  assert.equal(fake.text(0), 'hello NEWworld');
+  mgr.approve(d.changeSetId);
+  assert.equal(fake.text(0), 'hello NEW');
+});
+
+test('findDeleteMarkContaining: 내부만 잡고 경계는 허용한다', () => {
+  const { mgr } = makeManager([paraOf('head'), paraOf('old1'), paraOf('old2'), paraOf('tail')]);
+  mgr.markDelete('claude', {
+    sectionIdx: 0, startParaIdx: 1, startCharOffset: 0, endParaIdx: 2, endCharOffset: 4,
+  });
+  assert.notEqual(mgr.findDeleteMarkContaining(0, 1, 2), null);   // 내부
+  assert.notEqual(mgr.findDeleteMarkContaining(0, 2, 0), null);   // 내부 (둘째 문단)
+  assert.equal(mgr.findDeleteMarkContaining(0, 1, 0), null);      // 시작 경계
+  assert.equal(mgr.findDeleteMarkContaining(0, 2, 4), null);      // 끝 경계
+  assert.equal(mgr.findDeleteMarkContaining(0, 0, 2), null);      // 범위 밖
+});
