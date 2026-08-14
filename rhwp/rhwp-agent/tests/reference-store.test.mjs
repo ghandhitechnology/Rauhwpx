@@ -18,6 +18,48 @@ async function storeFor(t, options = {}) {
   return new ReferenceStore({ root: path.join(parent, 'references'), ...options }).init();
 }
 
+async function stageText(store, { scopeId = 'chat-a', name = 'draft.txt', text = '임시 참고자료 본문' } = {}) {
+  const bytes = Buffer.from(text);
+  async function* stream() { yield bytes; }
+  return store.stageStream({ scopeId, name, mimeType: 'text/plain', contentLength: bytes.length, stream: stream() });
+}
+
+test('staged message files stay out of counts, survive restart, and promote into their chat', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-stage-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const root = path.join(parent, 'references');
+  const first = await new ReferenceStore({ root }).init();
+  const staged = await stageText(first);
+  assert.equal(first.list({ scope: 'chat', scopeId: 'chat-a' }).length, 0);
+
+  const restarted = await new ReferenceStore({ root }).init();
+  assert.equal((await restarted.getStaged({ stageId: staged.id, scopeId: 'chat-a' })).name, 'draft.txt');
+  await assert.rejects(
+    restarted.getStaged({ stageId: staged.id, scopeId: 'chat-b' }),
+    (error) => error.code === 'REFERENCE_STAGE_NOT_FOUND',
+  );
+  const promoted = await restarted.promoteStaged({ stageId: staged.id, scopeId: 'chat-a' });
+  assert.equal(promoted.status, 'ready');
+  assert.equal(restarted.list({ scope: 'chat', scopeId: 'chat-a' }).length, 1);
+  await assert.rejects(
+    restarted.getStaged({ stageId: staged.id, scopeId: 'chat-a' }),
+    (error) => error.code === 'REFERENCE_STAGE_NOT_FOUND',
+  );
+});
+
+test('abandoned staged message files expire after twelve hours', async (t) => {
+  let nowMs = Date.parse('2026-08-15T00:00:00.000Z');
+  const store = await storeFor(t, { now: () => new Date(nowMs).toISOString() });
+  const staged = await stageText(store);
+  assert.equal(staged.expiresAt, '2026-08-15T12:00:00.000Z');
+  nowMs += 12 * 60 * 60 * 1000;
+  assert.equal(await store.cleanupStaged(), 1);
+  await assert.rejects(
+    store.getStaged({ stageId: staged.id, scopeId: 'chat-a' }),
+    (error) => error.code === 'REFERENCE_STAGE_NOT_FOUND',
+  );
+});
+
 test('chat/document/global scope isolation and Korean BM25 ranking', async (t) => {
   const store = await storeFor(t);
   const a = await store.addBuffer({

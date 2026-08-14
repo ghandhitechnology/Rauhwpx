@@ -11,6 +11,18 @@ export interface ThreadMessage {
   agent?: AgentName;
   /** Concise in-turn milestone, rendered separately from the final answer. */
   kind?: 'progress';
+  messageId?: string;
+  attachments?: ThreadAttachment[];
+}
+
+export interface ThreadAttachment {
+  stageId: string;
+  fileId?: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  status: 'processing' | 'ready' | 'error' | 'deleted';
+  error?: string;
 }
 
 export interface ChatThread {
@@ -107,6 +119,41 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
   } = thread;
   return {
     ...rest,
+    messages: rest.messages.flatMap((raw): ThreadMessage[] => {
+      if (!raw || typeof raw !== 'object') return [];
+      const message = raw as unknown as Record<string, unknown>;
+      if ((message.role !== 'user' && message.role !== 'assistant' && message.role !== 'system')
+        || typeof message.text !== 'string') return [];
+      const attachments = Array.isArray(message.attachments)
+        ? message.attachments.flatMap((item): ThreadAttachment[] => {
+          if (!item || typeof item !== 'object') return [];
+          const attachment = item as Record<string, unknown>;
+          if (typeof attachment.stageId !== 'string' || typeof attachment.name !== 'string'
+            || typeof attachment.mimeType !== 'string' || !Number.isFinite(Number(attachment.size))
+            || (attachment.status !== 'processing' && attachment.status !== 'ready'
+              && attachment.status !== 'error' && attachment.status !== 'deleted')) return [];
+          return [{
+            stageId: attachment.stageId,
+            ...(typeof attachment.fileId === 'string' ? { fileId: attachment.fileId } : {}),
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            size: Math.max(0, Number(attachment.size)),
+            status: attachment.status,
+            ...(typeof attachment.error === 'string' ? { error: attachment.error } : {}),
+          }];
+        })
+        : undefined;
+      return [{
+        role: message.role,
+        text: message.text,
+        ...(message.agent === 'claude' || message.agent === 'codex' || message.agent === 'pi'
+          ? { agent: message.agent }
+          : {}),
+        ...(message.kind === 'progress' ? { kind: message.kind } : {}),
+        ...(typeof message.messageId === 'string' ? { messageId: message.messageId } : {}),
+        ...(attachments?.length ? { attachments } : {}),
+      }];
+    }),
     workflow: isAgentWorkflow(thread.workflow) ? thread.workflow : 'direct',
     docKey: typeof storedDocKey === 'string' && storedDocKey ? storedDocKey : null,
     documentId: typeof storedDocumentId === 'string' && storedDocumentId ? storedDocumentId : null,

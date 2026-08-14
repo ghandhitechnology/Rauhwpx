@@ -53,7 +53,7 @@ test('writing-style calibration opens from a local slash command', () => {
   assert.match(source, /value: '\/calibration'[^\n]*local: 'calibration'/);
   assert.match(source, /option\.local === 'calibration'[^\n]*writingStyleCalibration\.open\(\)/);
   assert.match(source, /text === '\/calibration'[^\n]*writingStyleCalibration\.open\(\)/);
-  assert.ok(source.indexOf("if (text === '/calibration')") < source.indexOf('recordUserMessage(visibleText)'));
+  assert.ok(source.indexOf("if (text === '/calibration')") < source.indexOf('recordUserMessage(visibleText,'));
   assert.match(calibration, /export interface WritingStyleCalibrationUi \{\s*open\(\): void;/);
   assert.match(calibration, /if \(activeStatus\?\.active && !requestId\) showResult\(activeStatus\);\s*else setStep\(requestId \? 2 : 0\);/);
   assert.doesNotMatch(calibration, /ag-calibration-launch/);

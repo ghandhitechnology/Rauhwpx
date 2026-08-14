@@ -28,6 +28,8 @@ function bearerMatches(req, token) {
 function errorStatus(error) {
   switch (error?.code) {
     case 'REFERENCE_NOT_FOUND': return 404;
+    case 'REFERENCE_STAGE_NOT_FOUND': return 404;
+    case 'REFERENCE_STAGE_EXPIRED': return 410;
     case 'REFERENCE_TYPE_UNSUPPORTED':
     case 'REFERENCE_TYPE_MISMATCH': return 415;
     case 'REFERENCE_FILE_TOO_LARGE':
@@ -48,8 +50,10 @@ function decodeUploadName(header) {
 
 function isReferencePath(pathname) {
   return pathname === '/reference-files'
+    || pathname === '/reference-staging'
     || pathname === '/reference-search'
-    || pathname.startsWith('/reference-files/');
+    || pathname.startsWith('/reference-files/')
+    || pathname.startsWith('/reference-staging/');
 }
 
 /**
@@ -85,6 +89,23 @@ export function createReferenceHttpHandler({ store, token }) {
     try {
       const scope = url.searchParams.get('scope');
       const scopeId = url.searchParams.get('scopeId');
+      if (req.method === 'POST' && url.pathname === '/reference-staging') {
+        const result = await store.stageStream({
+          stream: req,
+          name: decodeUploadName(req.headers['x-file-name']),
+          mimeType: req.headers['content-type'],
+          contentLength: req.headers['content-length'],
+          scopeId,
+        });
+        sendJson(res, 201, { staged: result, error: null }, origin);
+        return true;
+      }
+      if (req.method === 'DELETE' && url.pathname.startsWith('/reference-staging/')) {
+        const stageId = decodeURIComponent(url.pathname.slice('/reference-staging/'.length));
+        const result = await store.discardStaged({ stageId, scopeId });
+        sendJson(res, 200, { status: 'deleted', staged: result }, origin);
+        return true;
+      }
       if (req.method === 'POST' && url.pathname === '/reference-files') {
         const result = await store.addStream({
           stream: req,
