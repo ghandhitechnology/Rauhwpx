@@ -1136,13 +1136,17 @@ export class AgentToolExecutor {
     if (range.startParaIdx === range.endParaIdx && range.startCharOffset === range.endCharOffset) {
       throw new AgentToolError('INVALID_ARGS', 'Range is empty; nothing to delete');
     }
-    const r = this.deps.pending.markDelete(agent, range);
+    // 즉시 적용 삭제(빈 교체) — 마크 전용이던 시절엔 원문이 레이아웃에 남아
+    // 편집이 많은 턴에서 미리보기 쪽나눔이 최종본과 어긋났다. 삭제된 텍스트는
+    // 앵커/팝오버와 사이드바 카드로 검토하고, 거절 시 스냅샷으로 복원된다.
+    const r = this.deps.pending.replaceText(range, '', agent);
     return {
       revision: this.revision,
       changeSetId: r.changeSetId,
-      markedText: r.markedText,
+      deletedText: r.deletedText.slice(0, 300),
+      collapsedAt: { paraIdx: range.startParaIdx, charOffset: range.startCharOffset },
       postEdit: this.readPostEditDigest(range.sectionIdx, range.startParaIdx, range.startCharOffset, range.cell),
-      note: `deleted text remains visible struck-through until approval — expected, do not "fix" it. ${PENDING_NOTE}`,
+      note: `text removed from the live preview now; finalized on approval, restored on reject. Coordinates after the range have shifted — use collapsedAt to insert replacement text. ${PENDING_NOTE}`,
     };
   }
 

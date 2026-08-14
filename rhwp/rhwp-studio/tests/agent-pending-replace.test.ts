@@ -717,3 +717,71 @@ test('findDeleteMarkContaining: 내부만 잡고 경계는 허용한다', () => 
   assert.equal(mgr.findDeleteMarkContaining(0, 2, 4), null);      // 끝 경계
   assert.equal(mgr.findDeleteMarkContaining(0, 0, 2), null);      // 범위 밖
 });
+
+// ─── 즉시 적용 삭제 (delete_range = replaceText(range, '')) ─────────────
+// 마크 전용 삭제는 원문을 레이아웃에 남겨, 편집이 많은 턴에서 미리보기 쪽나눔이
+// 최종본과 어긋났다(문서가 부풀어 여러 쪽으로 쪼개짐). delete_range 는 이제
+// 빈 교체로 즉시 적용된다 — 미리보기가 곧 승인 후 상태다.
+
+test('빈 교체(삭제): 텍스트가 즉시 제거되고 op 은 replace 로 기록된다', () => {
+  const { mgr, fake, overlayOps } = makeManager([paraOf('hello world')]);
+  const r = mgr.replaceText(
+    { sectionIdx: 0, startParaIdx: 0, startCharOffset: 5, endParaIdx: 0, endCharOffset: 11 },
+    '',
+    'claude',
+  );
+  assert.equal(r.deletedText, ' world');
+  assert.equal(fake.text(0), 'hello');
+  assert.deepEqual(r.insertedRange, {
+    sectionIdx: 0, cell: undefined, startParaIdx: 0, startCharOffset: 5, endParaIdx: 0, endCharOffset: 5,
+  });
+  const last = overlayOps[overlayOps.length - 1];
+  assert.equal(last.length, 1);
+  assert.equal(last[0].kind, 'replace'); // exact diff 가 삭제 앵커로 렌더한다
+  // describeChangeSet 은 에이전트에게 delete 로 보고한다
+  const d = mgr.describeChangeSet(r.changeSetId);
+  assert.deepEqual(d.ops.map((o) => ({ kind: o.kind, applied: o.applied })),
+    [{ kind: 'delete', applied: true }]);
+});
+
+test('빈 교체(삭제) reject: 스냅샷 복원으로 원본 텍스트/서식이 돌아온다', () => {
+  const head = paraOf('keep ');
+  const tail = paraOf('gone', 7);
+  const merged: FakePara = {
+    chars: [...head.chars, ...tail.chars],
+    shapes: [...head.shapes, ...tail.shapes],
+    paraShapeId: 1,
+  };
+  const { mgr, fake } = makeManager([merged]);
+  const r = mgr.replaceText(
+    { sectionIdx: 0, startParaIdx: 0, startCharOffset: 5, endParaIdx: 0, endCharOffset: 9 },
+    '',
+    'claude',
+  );
+  assert.equal(fake.text(0), 'keep ');
+  mgr.reject(r.changeSetId);
+  assert.equal(fake.text(0), 'keep gone');
+  assert.deepEqual(fake.shapes(0), [0, 0, 0, 0, 0, 7, 7, 7, 7]);
+  assert.equal(mgr.hasPending(), false);
+});
+
+test('빈 교체(삭제) 멀티 문단: 문단 병합이 즉시 반영되고 approve 는 단일 히스토리 항목이다', () => {
+  const { mgr, fake, recorded } = makeManager([
+    paraOf('head'), paraOf('old1'), paraOf('old2'), paraOf('tail'),
+  ]);
+  const r = mgr.replaceText(
+    { sectionIdx: 0, startParaIdx: 1, startCharOffset: 0, endParaIdx: 2, endCharOffset: 4 },
+    '',
+    'claude',
+  );
+  assert.equal(fake.paraCount(), 3);
+  assert.deepEqual([fake.text(0), fake.text(1), fake.text(2)], ['head', '', 'tail']);
+  mgr.approve(r.changeSetId);
+  assert.equal(recorded.length, 1);
+  assert.deepEqual([fake.text(0), fake.text(1), fake.text(2)], ['head', '', 'tail']);
+  // undo 는 원본을 복원한다
+  recorded[0].command.undo(fake.wasm);
+  assert.equal(fake.paraCount(), 4);
+  assert.deepEqual([fake.text(0), fake.text(1), fake.text(2), fake.text(3)],
+    ['head', 'old1', 'old2', 'tail']);
+});
