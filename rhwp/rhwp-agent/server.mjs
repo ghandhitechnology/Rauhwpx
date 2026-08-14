@@ -849,6 +849,9 @@ function handleStudioMessage(sock, msg) {
         requestId,
         state: progress.state,
         ...(progress.detail ? { detail: progress.detail } : {}),
+        ...(Number.isFinite(progress.receivedBytes) ? { receivedBytes: progress.receivedBytes } : {}),
+        ...(Number.isFinite(progress.totalBytes) ? { totalBytes: progress.totalBytes } : {}),
+        ...(progress.activity === true ? { activity: true } : {}),
       }))
         .then((status) => {
           piStatus = status;

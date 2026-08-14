@@ -390,6 +390,12 @@ export type SidebarEvent =
       requestId: string;
       state: 'downloading' | 'installing' | 'configuring' | 'done';
       detail?: string;
+      /** 내려받은 바이트 — 있으면 결정적 진행률을 그릴 수 있다. */
+      receivedBytes?: number;
+      /** 전체 바이트 — 서버가 크기를 알려주지 않으면 빠진다. */
+      totalBytes?: number;
+      /** 숫자 없는 "일이 진행 중" 신호 — 움직이는 막대를 깨우는 용도. */
+      activity?: boolean;
     }
   | { type: 'pi-catalog'; requestId: string; models: PiCatalogModel[] }
   | { type: 'pi-error'; requestId: string; code: string; message: string }
