@@ -206,7 +206,17 @@ export class PendingEditManager {
     range: DocRange,
     text: string,
     agent: AgentName,
+    opts: {
+      /**
+       * false 면 되돌림용 스냅샷을 리뷰 창 동안 점유하지 않는다 (에러 롤백에만 쓰고
+       * 즉시 해제). 되돌림은 역연산 폴백(원본 텍스트+서식 재삽입)으로 수행된다.
+       * replace_all 처럼 op 이 수십 개 쌓이는 벌크 경로용 — op 당 스냅샷을 점유하면
+       * WASM 스냅샷 예산(100)이 undo 히스토리를 밀어낸다.
+       */
+      retainSnapshot?: boolean;
+    } = {},
   ): { changeSetId: string; insertedRange: DocRange } {
+    const retainSnapshot = opts.retainSnapshot !== false;
     if (range.endParaIdx < range.startParaIdx
       || (range.endParaIdx === range.startParaIdx && range.endCharOffset <= range.startCharOffset)) {
       throw new AgentToolError('INVALID_ARGS', 'replace range is empty or reversed');
@@ -264,9 +274,15 @@ export class PendingEditManager {
       // 캡처한 글자 모양을 삽입 텍스트 전체에 적용 (범위 끝 서식 상속 방지)
       if (charShapeId !== null && text.length > 0) this.applyCharShapeToRange(ins.range, charShapeId);
       const set = this.ensureOpenSet(agent);
+      if (!retainSnapshot) {
+        // 벌크 경로: 에러 롤백용 스냅샷은 성공 즉시 반환한다 — 되돌림은 역연산 폴백.
+        wasm.discardSnapshot(snapshotId);
+        this.deps.inputHandler.releaseExternalSnapshot?.();
+      }
       const op: PendingOp = {
         kind: 'replace', id: this.nextId('op'), agent: set.agent,
-        range: ins.range, text, deletedText, charShapeId, paraShapeIds, snapshotId,
+        range: ins.range, text, deletedText, charShapeId, paraShapeIds,
+        snapshotId: retainSnapshot ? snapshotId : null,
         userEditSeqAtSnapshot: this.userEditSeq,
       };
       this.pushOp(set, op);
@@ -405,6 +421,68 @@ export class PendingEditManager {
       }
     }
     return null;
+  }
+
+  /**
+   * executor 가드: 범위가 pending 삭제 마크와 **겹치면** 그 마크의 요약을 반환한다
+   * (경계 접촉은 겹침이 아니다). 마크와 겹치는 교체는 마크 텍스트를 부분 삭제해
+   * 마크를 드리프트시키거나, 승인 시 교체 텍스트 일부까지 지우므로 사전에 막는다.
+   */
+  findDeleteMarkOverlapping(range: DocRange): { range: DocRange; text: string } | null {
+    const atOrBefore = (aPara: number, aOff: number, bPara: number, bOff: number): boolean =>
+      aPara < bPara || (aPara === bPara && aOff <= bOff);
+    for (const set of this.sets) {
+      for (const op of set.ops) {
+        if (op.kind !== 'delete') continue;
+        const r = op.range;
+        if (r.sectionIdx !== range.sectionIdx || !sameCell(r.cell, range.cell)) continue;
+        const disjoint =
+          atOrBefore(range.endParaIdx, range.endCharOffset, r.startParaIdx, r.startCharOffset)
+          || atOrBefore(r.endParaIdx, r.endCharOffset, range.startParaIdx, range.startCharOffset);
+        if (!disjoint) return { range: { ...r }, text: op.text };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 원자적 벌크 교체 — 모든 항목이 성공해야 등록된다. 중간 실패 시 문서(스냅샷)와
+   * pending 상태(op 좌표·추가 op·새 set)를 배치 이전으로 통째로 되돌리고 던진다 —
+   * 부분 적용된 찾아-바꾸기 배치가 리뷰에 남는 것을 막는다 (replace_all 전용).
+   * 항목은 호출자가 문서 좌표 역순으로 정렬해 넘긴다.
+   */
+  replaceTextBatch(
+    items: Array<{ range: DocRange; text: string }>,
+    agent: AgentName,
+  ): { changeSetId: string } {
+    if (items.length === 0) throw new AgentToolError('INVALID_ARGS', 'batch is empty');
+    const wasm = this.deps.wasm;
+    const pendingState = this.capturePendingState();
+    const setIdsBefore = new Set(this.sets.map((s) => s.id));
+    const openBefore = this.open;
+    this.deps.inputHandler.prepareSnapshotCapacity?.(1);
+    const snapId = wasm.saveSnapshot();
+    this.deps.inputHandler.retainExternalSnapshot?.();
+    try {
+      let changeSetId = '';
+      for (const item of items) {
+        changeSetId = this.replaceText(item.range, item.text, agent, { retainSnapshot: false }).changeSetId;
+      }
+      return { changeSetId };
+    } catch (err) {
+      try { wasm.restoreSnapshot(snapId); } catch { /* best effort */ }
+      // 배치가 만든 set 은 통째로 제거하고, 기존 set 들의 op 은 배치 이전 좌표로 복원한다.
+      this.sets = this.sets.filter((s) => setIdsBefore.has(s.id));
+      this.open = openBefore && setIdsBefore.has(openBefore.id) ? openBefore : null;
+      this.restorePendingState(pendingState);
+      this.emitDocEvents('agent-pending-edit');
+      this.syncOverlay();
+      this.emitChange({ type: 'ops-changed' });
+      throw err;
+    } finally {
+      wasm.discardSnapshot(snapId);
+      this.deps.inputHandler.releaseExternalSnapshot?.();
+    }
   }
 
   /** executor 가드: 해당 표에 파괴적 마크(delete_row/col, merge)가 걸려 있는가 */
@@ -841,6 +919,13 @@ export class PendingEditManager {
       case 'paraFormat':
       case 'applyStyle':
         return { sort: 'para', sectionIdx: obj.sectionIdx, paraIdx: obj.paraIdx, cell: obj.cell };
+      case 'insertNote':
+        // 마커가 놓인 본문 문단을 틴트 (각주 영역 자체 bbox API 는 없다)
+        return obj.anchor
+          ? { sort: 'para', sectionIdx: obj.sectionIdx, paraIdx: obj.anchor.paraIdx }
+          : null;
+      case 'setNoteText':
+        return { sort: 'para', sectionIdx: obj.sectionIdx, paraIdx: obj.paraIdx };
       default:
         return null;
     }
@@ -1078,6 +1163,82 @@ export class PendingEditManager {
         this.writeHeaderFooterContent(obj);
         return;
       }
+      case 'insertNote': {
+        const res = obj.noteKind === 'endnote'
+          ? wasm.insertEndnote(obj.sectionIdx, obj.paraIdx, obj.charOffset)
+          : wasm.insertFootnote(obj.sectionIdx, obj.paraIdx, obj.charOffset);
+        if (!res.ok) throw new AgentToolError('RPC_ERROR', `insert${obj.noteKind === 'endnote' ? 'Endnote' : 'Footnote'} failed`);
+        obj.anchor = { paraIdx: res.paraIdx, controlIdx: res.controlIdx, charOffset: obj.charOffset };
+        obj.number = obj.noteKind === 'endnote'
+          ? (res as { endnoteNumber?: number }).endnoteNumber
+          : (res as { footnoteNumber?: number }).footnoteNumber;
+        this.shiftControlIdxRefs(obj.sectionIdx, res.paraIdx, res.controlIdx, 1, obj);
+        if (obj.text.length > 0) {
+          const t = wasm.insertTextInFootnote(obj.sectionIdx, res.paraIdx, res.controlIdx, 0, 0, obj.text);
+          if (t?.ok !== true) {
+            // 내용 삽입 실패 시 마커를 남기지 않는다 — 통째로 되돌리고 실패 보고
+            try { wasm.deleteFootnote(obj.sectionIdx, res.paraIdx, res.controlIdx); } catch { /* best effort */ }
+            this.shiftControlIdxRefs(obj.sectionIdx, res.paraIdx, res.controlIdx, -1, obj);
+            obj.anchor = undefined;
+            throw new AgentToolError('RPC_ERROR', 'insertTextInFootnote failed');
+          }
+        }
+        // 엔진이 기본 내용(공백 등)을 덧붙일 수 있다 — 검증 기준을 실제 적용 결과로 잡는다
+        try {
+          const info = wasm.getFootnoteInfo(obj.sectionIdx, res.paraIdx, res.controlIdx);
+          if (info?.ok === true) obj.appliedText = info.texts[0] ?? obj.text;
+        } catch { /* 검증은 appliedText ?? text 폴백 */ }
+        return;
+      }
+      case 'setNoteText': {
+        const info = wasm.getFootnoteInfo(obj.sectionIdx, obj.paraIdx, obj.controlIdx);
+        if (info?.ok !== true) throw new AgentToolError('NOTE_NOT_FOUND', 'footnote/endnote not found at that address — list_footnotes for valid addresses');
+        if (info.paraCount !== 1) {
+          throw new AgentToolError('NOTE_MULTIPARA',
+            `this note has ${info.paraCount} paragraphs — edit_footnote only supports single-paragraph notes`);
+        }
+        // replay(approve 재적용) 시 이전 내용을 다시 캡처하지 않는다 — 최초 적용 값이 원본이다.
+        if (obj.prevText === undefined) obj.prevText = info.texts[0] ?? '';
+        const prevLen = [...(info.texts[0] ?? '')].length;
+        if (prevLen > 0) {
+          const d = wasm.deleteTextInFootnote(obj.sectionIdx, obj.paraIdx, obj.controlIdx, 0, 0, prevLen);
+          if (d?.ok !== true) throw new AgentToolError('RPC_ERROR', 'deleteTextInFootnote failed');
+        }
+        if (obj.text.length > 0) {
+          const t = wasm.insertTextInFootnote(obj.sectionIdx, obj.paraIdx, obj.controlIdx, 0, 0, obj.text);
+          if (t?.ok !== true) throw new AgentToolError('RPC_ERROR', 'insertTextInFootnote failed');
+        }
+        return;
+      }
+      case 'bookmark': {
+        if (obj.op === 'add') {
+          const r = wasm.addBookmark(obj.sectionIdx, obj.paraIdx, obj.charOffset ?? 0, obj.name ?? '');
+          if (r?.ok !== true) {
+            throw new AgentToolError('BOOKMARK_FAILED', `addBookmark failed: ${String((r as { error?: string })?.error ?? 'unknown')}`);
+          }
+          // 역연산용 ctrlIdx 를 목록에서 찾는다 (같은 문단·이름 매칭)
+          const added = wasm.getBookmarks().find(
+            (b) => b.sec === obj.sectionIdx && b.para === obj.paraIdx && b.name === obj.name,
+          );
+          if (added) obj.ctrlIdx = added.ctrlIdx;
+          return;
+        }
+        const target = wasm.getBookmarks().find(
+          (b) => b.sec === obj.sectionIdx && b.para === obj.paraIdx && b.ctrlIdx === obj.ctrlIdx,
+        );
+        if (!target) throw new AgentToolError('BOOKMARK_NOT_FOUND', 'bookmark not found — list_bookmarks for current addresses');
+        if (obj.prev === undefined) {
+          obj.prev = { name: target.name, para: target.para, charPos: target.charPos, ctrlIdx: target.ctrlIdx };
+        }
+        if (obj.op === 'delete') {
+          const r = wasm.deleteBookmark(obj.sectionIdx, obj.paraIdx, obj.ctrlIdx!);
+          if (r?.ok !== true) throw new AgentToolError('BOOKMARK_FAILED', 'deleteBookmark failed');
+        } else {
+          const r = wasm.renameBookmark(obj.sectionIdx, obj.paraIdx, obj.ctrlIdx!, obj.name ?? '');
+          if (r?.ok !== true) throw new AgentToolError('BOOKMARK_FAILED', 'renameBookmark failed');
+        }
+        return;
+      }
       default:
         throw new AgentToolError('RPC_ERROR', `applyObjectOp: ${obj.type} is mark-only`);
     }
@@ -1148,6 +1309,36 @@ export class PendingEditManager {
         case 'headerFooter': {
           wasm.deleteHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo);
           return true;
+        }
+        case 'insertNote': {
+          if (!obj.anchor) return false;
+          const ok = wasm.deleteFootnote(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx)?.ok === true;
+          if (ok) this.shiftControlIdxRefs(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx, -1, obj);
+          return ok;
+        }
+        case 'setNoteText': {
+          if (obj.prevText === undefined) return false;
+          const info = wasm.getFootnoteInfo(obj.sectionIdx, obj.paraIdx, obj.controlIdx);
+          if (info?.ok !== true || info.paraCount !== 1) return false;
+          const curLen = [...(info.texts[0] ?? '')].length;
+          if (curLen > 0) {
+            if (wasm.deleteTextInFootnote(obj.sectionIdx, obj.paraIdx, obj.controlIdx, 0, 0, curLen)?.ok !== true) return false;
+          }
+          if (obj.prevText.length > 0) {
+            if (wasm.insertTextInFootnote(obj.sectionIdx, obj.paraIdx, obj.controlIdx, 0, 0, obj.prevText)?.ok !== true) return false;
+          }
+          return true;
+        }
+        case 'bookmark': {
+          if (obj.op === 'add') {
+            if (obj.ctrlIdx === undefined) return false;
+            return wasm.deleteBookmark(obj.sectionIdx, obj.paraIdx, obj.ctrlIdx)?.ok === true;
+          }
+          if (!obj.prev) return false;
+          if (obj.op === 'delete') {
+            return wasm.addBookmark(obj.sectionIdx, obj.prev.para, obj.prev.charPos, obj.prev.name)?.ok === true;
+          }
+          return wasm.renameBookmark(obj.sectionIdx, obj.paraIdx, obj.prev.ctrlIdx, obj.prev.name)?.ok === true;
         }
         default:
           return true; // mark-only 는 되돌릴 것이 없다
@@ -1363,6 +1554,31 @@ export class PendingEditManager {
           const raw = JSON.parse(wasm.getHeaderFooter(obj.sectionIdx, obj.isHeader, obj.applyTo)) as { exists?: boolean };
           return raw?.exists === true;
         }
+        case 'insertNote': {
+          if (!obj.anchor) return false;
+          const info = wasm.getFootnoteInfo(obj.sectionIdx, obj.anchor.paraIdx, obj.anchor.controlIdx);
+          if (info?.ok !== true) return false;
+          // 내용 지문 — 사용자가 각주 내용을 손댔으면 드리프트로 남긴다.
+          // 기준은 적용 직후 실제 텍스트(appliedText) — 엔진 기본 내용이 붙을 수 있다.
+          return (info.texts[0] ?? '') === (obj.appliedText ?? obj.text);
+        }
+        case 'setNoteText': {
+          const info = wasm.getFootnoteInfo(obj.sectionIdx, obj.paraIdx, obj.controlIdx);
+          if (info?.ok !== true || info.paraCount !== 1) return false;
+          return (info.texts[0] ?? '') === obj.text;
+        }
+        case 'bookmark': {
+          if (obj.op === 'add' || obj.op === 'rename') {
+            return wasm.getBookmarks().some(
+              (b) => b.sec === obj.sectionIdx && b.para === obj.paraIdx && b.name === obj.name,
+            );
+          }
+          // delete: 대상이 다시 나타났으면(사용자 재추가 등) 드리프트
+          return !wasm.getBookmarks().some(
+            (b) => b.sec === obj.sectionIdx && b.para === obj.paraIdx
+              && obj.prev !== undefined && b.name === obj.prev.name && b.charPos === obj.prev.charPos,
+          );
+        }
         default:
           return false;
       }
@@ -1436,6 +1652,17 @@ export class PendingEditManager {
             && o.cell && o.sectionIdx === sectionIdx
             && o.cell.paraIdx === paraIdx && hit(o.cell.controlIdx)) {
             o.cell = { ...o.cell, controlIdx: o.cell.controlIdx + delta };
+          } else if (o.type === 'insertNote'
+            && o.sectionIdx === sectionIdx && o.anchor
+            && o.anchor.paraIdx === paraIdx && hit(o.anchor.controlIdx)) {
+            o.anchor = { ...o.anchor, controlIdx: o.anchor.controlIdx + delta };
+          } else if (o.type === 'setNoteText'
+            && o.sectionIdx === sectionIdx && o.paraIdx === paraIdx && hit(o.controlIdx)) {
+            o.controlIdx += delta;
+          } else if (o.type === 'bookmark'
+            && o.sectionIdx === sectionIdx && o.paraIdx === paraIdx
+            && o.ctrlIdx !== undefined && hit(o.ctrlIdx)) {
+            o.ctrlIdx += delta;
           }
           continue;
         }
