@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { openRouterReady } from './agents/title.mjs';
 import {
   analyzeText, baselineLines, confidenceFor, deriveBands, splitHalfStability,
 } from './style-metrics.mjs';
@@ -181,8 +182,11 @@ For every file: read it, then use Write to save its body text verbatim to extrac
 Report one entry per source file. Set reason to an empty string when extraction succeeds. Do not comment on writing quality.`;
 }
 
-/** 분석 패스 프롬프트. 계산 가능한 값은 이미 코드가 냈으므로 해석만 요구한다. */
-export function buildCalibrationPrompt({ language, files, metrics }) {
+/**
+ * 분석 패스 프롬프트. 계산 가능한 값은 이미 코드가 냈으므로 해석만 요구한다.
+ * inline 은 도구 없이 도는 OpenRouter 경로용이다 — 원고가 프롬프트에 같이 실린다.
+ */
+export function buildCalibrationPrompt({ language, files, metrics, inline = false }) {
   const targetLanguage = language === 'ko' ? 'Korean' : 'English';
   const manifest = files.map((file) => `- ${file.safeName} (original name: ${file.name})`).join('\n');
   const axisList = STYLE_AXES
@@ -198,7 +202,11 @@ ${JSON.stringify(metrics, null, 2)}
 Explain what the numbers cannot: why the author writes this way, what job each habit does, and what a writer must decide to produce prose that reads as theirs.`
     : 'No quantitative profile is available for this corpus, so judge the sample scale yourself and keep every claim conservative.';
 
-  return `Profile the writing style of the attached samples, which the user confirms they wrote themselves. Use the Read tool on every readable file in the current directory. The profile language is ${targetLanguage}.
+  const access = inline
+    ? 'The sample text is included at the end of this message.'
+    : 'Use the Read tool on every readable file in the current directory.';
+
+  return `Profile the writing style of the attached samples, which the user confirms they wrote themselves. ${access} The profile language is ${targetLanguage}.
 
 Files:
 ${manifest}
@@ -321,14 +329,17 @@ function codexArgs(schemaPath, sandbox) {
   ];
 }
 
-async function gatherCorpus(checked, temp, run, extractionSchemaPath) {
+async function gatherCorpus(checked, temp, run, extractionSchemaPath, canExtract = true) {
   const chunks = [];
   const failed = [];
   for (const file of checked.files) {
     if (file.native) chunks.push(plainTextFromNative(file.bytes, file.extension));
   }
   const binaries = checked.files.filter((file) => !file.native);
-  if (binaries.length > 0) {
+  if (binaries.length > 0 && !canExtract) {
+    // OpenRouter 경로에는 파일을 열 도구가 없다 — 평문 원고만 읽는다.
+    for (const file of binaries) failed.push(file.safeName);
+  } else if (binaries.length > 0) {
     await fs.mkdir(path.join(temp, 'extracted'), { recursive: true });
     try {
       const output = await run(
@@ -356,6 +367,52 @@ async function gatherCorpus(checked, temp, run, extractionSchemaPath) {
     }
   }
   return { text: chunks.join('\n\n').trim(), unextractable: failed };
+}
+
+/** 프롬프트에 실을 원고 상한. 컨텍스트를 넘기지 않으면서 문체는 충분히 보인다. */
+const OPENROUTER_CORPUS_LIMIT = 120_000;
+
+/** OpenRouter 는 스키마 강제 모드가 없다 — 지시문으로 요구하고 여기서 파싱한다. */
+async function analyzeViaOpenRouter({ prompt, corpusText, piManager, openRouter }) {
+  const model = piManager.defaultModel();
+  if (!model) throw new StyleCalibrationError('PI_NOT_CONFIGURED', 'Pi 모델이 설정되지 않았어요.');
+  const sample = String(corpusText ?? '').slice(0, OPENROUTER_CORPUS_LIMIT);
+  if (!sample.trim()) {
+    throw new StyleCalibrationError('INSUFFICIENT_SAMPLE', 'No readable text was found in the samples.');
+  }
+  let text;
+  try {
+    text = await openRouter.chat({
+      key: piManager.apiKey(),
+      model: model.id,
+      messages: [{
+        role: 'user',
+        content: [
+          prompt,
+          '',
+          '## Samples',
+          '',
+          sample,
+          '',
+          'Return ONLY a JSON object matching this JSON Schema. No prose, no code fences.',
+          JSON.stringify(ANALYSIS_SCHEMA),
+        ].join('\n'),
+      }],
+      maxTokens: 8_000,
+      timeout: ANALYSIS_TIMEOUT_MS,
+    });
+  } catch (error) {
+    throw new StyleCalibrationError('ANALYSIS_FAILED', String(error?.message ?? error));
+  }
+  const raw = String(text ?? '').trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  try {
+    if (start < 0 || end <= start) throw new Error('no JSON object');
+    return JSON.parse(raw.slice(start, end + 1));
+  } catch {
+    throw new StyleCalibrationError('INVALID_RESULT', 'The model returned an unreadable style analysis. Please try again.');
+  }
 }
 
 function orderedAxes(axes) {
@@ -453,7 +510,12 @@ export function renderStyleMarkdown({ language, axes, adaptation, bands, metrics
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-export async function calibrateWritingStyle(input, { run = runCodex } = {}) {
+/**
+ * @param {object} input
+ * @param {{ run?: typeof runCodex, useOpenRouter?: boolean, piManager?: any, openRouter?: any }} [deps]
+ */
+export async function calibrateWritingStyle(input, { run = runCodex, ...deps } = {}) {
+  const viaOpenRouter = openRouterReady(deps);
   const checked = validateCalibrationInput(input);
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-style-calibration-'));
   try {
@@ -467,7 +529,7 @@ export async function calibrateWritingStyle(input, { run = runCodex } = {}) {
       fs.writeFile(extractionSchemaPath, JSON.stringify(EXTRACT_SCHEMA), 'utf8'),
       fs.writeFile(analysisSchemaPath, JSON.stringify(ANALYSIS_SCHEMA), 'utf8'),
     ]);
-    const corpus = await gatherCorpus(checked, temp, run, extractionSchemaPath);
+    const corpus = await gatherCorpus(checked, temp, run, extractionSchemaPath, !viaOpenRouter);
     let metrics = null;
     let stability = 0;
     let confidence = 'low';
@@ -489,9 +551,10 @@ export async function calibrateWritingStyle(input, { run = runCodex } = {}) {
       bands = deriveBands(metrics, confidence);
     }
 
-    const prompt = buildCalibrationPrompt({ ...checked, metrics });
-    const output = await run(codexArgs(analysisSchemaPath, 'read-only'), prompt, temp);
-    const result = extractStructuredResult(output);
+    const prompt = buildCalibrationPrompt({ ...checked, metrics, inline: viaOpenRouter });
+    const result = viaOpenRouter
+      ? await analyzeViaOpenRouter({ prompt, corpusText: corpus.text, ...deps })
+      : extractStructuredResult(await run(codexArgs(analysisSchemaPath, 'read-only'), prompt, temp));
 
     // 정량 계층이 없을 때만 모델의 표본 판단에 기댄다.
     if (!metrics && !result?.enoughSample) {

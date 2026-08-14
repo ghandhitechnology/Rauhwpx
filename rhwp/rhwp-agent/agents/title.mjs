@@ -1,11 +1,22 @@
 import { spawn } from 'node:child_process';
 
+/** 제목 자체는 짧지만 추론 모델은 생각에도 토큰을 쓴다 — 잘리지 않을 만큼만 준다. */
+const TITLE_MAX_TOKENS = 256;
+
+/** OpenRouter 폴백을 실제로 탈 수 있는지 — 어떤 경우에 태울지는 서버가 정한다. */
+export function openRouterReady({ useOpenRouter, piManager, openRouter } = {}) {
+  return Boolean(useOpenRouter && openRouter && piManager?.apiKey?.());
+}
+
 /**
- * gpt-5.6-luna 로 짧은 채팅 제목을 만든다 (문서 MCP 세션과 분리).
+ * 짧은 채팅 제목을 만든다 (문서 MCP 세션과 분리).
+ * 기본은 gpt-5.6-luna CLI, pi 사용자는 OpenRouter 의 가장 싼 모델을 쓴다.
+ *
  * @param {string} preview
+ * @param {{ useOpenRouter?: boolean, piManager?: any, openRouter?: any }} [deps]
  * @returns {Promise<string | null>}
  */
-export function generateChatTitle(preview) {
+export function generateChatTitle(preview, deps = {}) {
   const text = String(preview ?? '').trim().slice(0, 800);
   if (!text) return Promise.resolve(null);
 
@@ -15,6 +26,8 @@ export function generateChatTitle(preview) {
     '',
     text,
   ].join('\n');
+
+  if (openRouterReady(deps)) return titleViaOpenRouter(prompt, deps);
 
   return new Promise((resolve) => {
     let settled = false;
@@ -99,6 +112,25 @@ export function generateChatTitle(preview) {
       finish(null);
     }
   });
+}
+
+/** 실패하면 제목 없이 넘어간다 — 제목은 있으면 좋은 정도의 정보다. */
+async function titleViaOpenRouter(prompt, { piManager, openRouter }) {
+  try {
+    const model = piManager.cheapestModel();
+    if (!model) return null;
+    const text = await openRouter.chat({
+      key: piManager.apiKey(),
+      model: model.id,
+      messages: [{ role: 'user', content: prompt }],
+      maxTokens: TITLE_MAX_TOKENS,
+      temperature: 0.2,
+      timeout: 30_000,
+    });
+    return cleanTitle(text) || null;
+  } catch {
+    return null;
+  }
 }
 
 function cleanTitle(raw) {
