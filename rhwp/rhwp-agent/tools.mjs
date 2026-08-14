@@ -92,6 +92,23 @@ export const TOOL_CATEGORIES = Object.freeze([
   'browser',
 ]);
 
+/**
+ * Codex/Claude 가 headless 승인에 쓰는 MCP 주석.
+ *
+ * 문서 쓰기는 사이드바 승인 전까지 pending 이므로 destructive 로 표시하지 않는다.
+ * 그렇게 표시하면 Codex 안전 모드(`workspace-write` + `approval_policy=never`)가
+ * 문서 편집 도구를 거절한다.
+ *
+ * @param {'document-read'|'document-write'|'reference-read'|'download-write'|'planning-control'|'browser'} category
+ */
+export function toolAnnotations(category) {
+  return {
+    readOnlyHint: category === 'document-read' || category === 'reference-read',
+    destructiveHint: category === 'download-write',
+    openWorldHint: category === 'browser' || category === 'download-write',
+  };
+}
+
 export const IMPLEMENTATION_PLAN_SHAPE = Object.freeze({
   goal: z.string().min(1).max(2_000).describe('The user outcome this plan will achieve'),
   title: z.string().min(1).max(200).describe('Short implementation plan title'),
