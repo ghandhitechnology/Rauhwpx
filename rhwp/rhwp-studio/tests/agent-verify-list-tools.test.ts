@@ -59,6 +59,9 @@ function makeEnv() {
       for (const t of tables) if (t.paraIdx > p) t.paraIdx += 1;
       return okJson();
     },
+    splitParagraphLogical(this: any, s: number, p: number, off: number) {
+      return this.splitParagraph(s, p, off);
+    },
     deleteRange: (_s: number, sp: number, so: number, ep: number, eo: number) => {
       const head = [...body[sp]].slice(0, so).join('');
       const tail = [...body[ep]].slice(eo).join('');
@@ -121,6 +124,9 @@ function makeEnv() {
       const cur = ft.cells[cell][cp];
       ft.cells[cell].splice(cp, 1, cur.slice(0, off), cur.slice(off));
       return okJson();
+    },
+    splitParagraphInCellLogical(this: any, s: number, para: number, ctrl: number, cell: number, cp: number, off: number) {
+      return this.splitParagraphInCell(s, para, ctrl, cell, cp, off);
     },
     deleteRangeInCell: (_s: number, para: number, ctrl: number, cell: number, sp: number, so: number, ep: number, eo: number) => {
       const ft = findTable(para, ctrl);

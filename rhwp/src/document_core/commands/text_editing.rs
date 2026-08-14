@@ -11,10 +11,18 @@ use crate::model::event::DocumentEvent;
 use crate::model::page::ColumnDef;
 use crate::model::paragraph::{ParaMeta, Paragraph};
 use crate::model::shape::{ShapeObject, TextWrap, VertRelTo};
+use crate::model::style::ParaShapeMods;
 use crate::renderer::composer::{compose_paragraph, reflow_line_segs, ComposedParagraph};
 use crate::renderer::page_layout::PageLayoutInfo;
 use crate::renderer::pagination::PageItem;
 use crate::renderer::style_resolver::{resolve_styles, ResolvedStyleSet};
+
+#[derive(Debug, Clone)]
+enum ParagraphSplitIntent {
+    UserEnter,
+    LogicalContinuation,
+    RestoreMetadata(ParaMeta),
+}
 
 fn recalculate_cell_paragraph_vpos(
     paragraphs: &mut [Paragraph],
@@ -39,12 +47,15 @@ fn recalculate_cell_paragraph_vpos(
         .enumerate()
         .skip(start_para)
         .find_map(|(idx, pair)| {
-            let previous = pair[0].line_segs.first()?.vertical_pos;
+            let previous_seg = pair[0].line_segs.first()?;
+            let previous = previous_seg.vertical_pos;
             let current_seg = pair[1].line_segs.first()?;
             let current = current_seg.vertical_pos;
-            let is_synthetic = current_seg.tag
-                & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY
-                != 0;
+            // 되감김의 양쪽 모두 저장 레이아웃 증거(비합성 seg)여야 분할 신호다 —
+            // 한쪽이라도 배치 전 placeholder 면 저장 좌표 비교가 성립하지 않는다.
+            let synthetic = crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY;
+            let is_synthetic =
+                (current_seg.tag & synthetic != 0) || (previous_seg.tag & synthetic != 0);
             let reset_para = idx + 1;
             let is_inserted_paragraph = ignore_reset_at == Some(reset_para);
             (current < previous && !is_inserted_paragraph && !is_synthetic).then_some(reset_para)
@@ -2353,7 +2364,31 @@ impl DocumentCore {
         }
     }
 
-    /// 문단을 분할한다.
+    fn apply_paragraph_split_intent(
+        &mut self,
+        paragraph: &mut Paragraph,
+        intent: &ParagraphSplitIntent,
+    ) {
+        match intent {
+            ParagraphSplitIntent::UserEnter => {}
+            ParagraphSplitIntent::LogicalContinuation => {
+                let mods = ParaShapeMods {
+                    page_break_before: Some(false),
+                    ..Default::default()
+                };
+                paragraph.para_shape_id = self
+                    .document
+                    .find_or_create_para_shape(paragraph.para_shape_id, &mods);
+                paragraph.column_type = crate::model::paragraph::ColumnBreakType::None;
+                paragraph.raw_break_type = 0;
+            }
+            ParagraphSplitIntent::RestoreMetadata(meta) => {
+                paragraph.apply_meta(meta.clone());
+            }
+        }
+    }
+
+    /// 문단을 사용자 Enter 의미로 분할한다.
     ///
     /// `restore_meta` 는 병합 undo 전용이다 — 병합으로 사라졌던 문단의 스코프
     /// 메타데이터를 새 문단에 되돌린다. 일반 Enter 분할은 `None` 으로 앞 문단의
@@ -2364,6 +2399,36 @@ impl DocumentCore {
         para_idx: usize,
         char_offset: usize,
         restore_meta: Option<ParaMeta>,
+    ) -> Result<String, HwpError> {
+        let intent = restore_meta
+            .map(ParagraphSplitIntent::RestoreMetadata)
+            .unwrap_or(ParagraphSplitIntent::UserEnter);
+        self.split_paragraph_with_intent_native(section_idx, para_idx, char_offset, intent)
+    }
+
+    /// 한 논리 삽입 안의 줄 경계를 만든다.
+    ///
+    /// 글꼴·목록·문단 여백은 이어받되 새 continuation에 강제 쪽/단 경계는 만들지 않는다.
+    pub fn split_paragraph_logical_native(
+        &mut self,
+        section_idx: usize,
+        para_idx: usize,
+        char_offset: usize,
+    ) -> Result<String, HwpError> {
+        self.split_paragraph_with_intent_native(
+            section_idx,
+            para_idx,
+            char_offset,
+            ParagraphSplitIntent::LogicalContinuation,
+        )
+    }
+
+    fn split_paragraph_with_intent_native(
+        &mut self,
+        section_idx: usize,
+        para_idx: usize,
+        char_offset: usize,
+        intent: ParagraphSplitIntent,
     ) -> Result<String, HwpError> {
         if section_idx >= self.document.sections.len() {
             return Err(HwpError::RenderError(format!(
@@ -2391,9 +2456,7 @@ impl DocumentCore {
             let mut new_para = empty_paragraph_after_table_anchor(
                 &self.document.sections[section_idx].paragraphs[para_idx],
             );
-            if let Some(meta) = restore_meta {
-                new_para.apply_meta(meta);
-            }
+            self.apply_paragraph_split_intent(&mut new_para, &intent);
             self.document.sections[section_idx]
                 .paragraphs
                 .insert(new_para_idx, new_para);
@@ -2497,9 +2560,7 @@ impl DocumentCore {
             // square-OLE wrap도 merge의 역연산으로 문단을 되살리는 경로다. Enter의
             // 기본 상속은 유지하되, merge undo가 준 원래 문단 메타는 모든 생성 분기에서
             // 동일하게 적용해야 한다 (Task #2342 review).
-            if let Some(meta) = restore_meta {
-                new_para.apply_meta(meta);
-            }
+            self.apply_paragraph_split_intent(&mut new_para, &intent);
             self.document.sections[section_idx]
                 .paragraphs
                 .insert(new_para_idx, new_para);
@@ -2537,9 +2598,7 @@ impl DocumentCore {
         // 문단 분리
         let mut new_para =
             self.document.sections[section_idx].paragraphs[para_idx].split_at(char_offset);
-        if let Some(meta) = restore_meta {
-            new_para.apply_meta(meta);
-        }
+        self.apply_paragraph_split_intent(&mut new_para, &intent);
 
         // 새 문단을 현재 문단 뒤에 삽입
         let new_para_idx = para_idx + 1;
@@ -3240,6 +3299,51 @@ impl DocumentCore {
         char_offset: usize,
         restore_meta: Option<ParaMeta>,
     ) -> Result<String, HwpError> {
+        let intent = restore_meta
+            .map(ParagraphSplitIntent::RestoreMetadata)
+            .unwrap_or(ParagraphSplitIntent::UserEnter);
+        self.split_paragraph_in_cell_with_intent_native(
+            section_idx,
+            parent_para_idx,
+            control_idx,
+            cell_idx,
+            cell_para_idx,
+            char_offset,
+            intent,
+        )
+    }
+
+    pub fn split_paragraph_in_cell_logical_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+        cell_para_idx: usize,
+        char_offset: usize,
+    ) -> Result<String, HwpError> {
+        self.split_paragraph_in_cell_with_intent_native(
+            section_idx,
+            parent_para_idx,
+            control_idx,
+            cell_idx,
+            cell_para_idx,
+            char_offset,
+            ParagraphSplitIntent::LogicalContinuation,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn split_paragraph_in_cell_with_intent_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+        cell_para_idx: usize,
+        char_offset: usize,
+        intent: ParagraphSplitIntent,
+    ) -> Result<String, HwpError> {
         // 셀 문단 검증 및 분할
         let cell_para = self.get_cell_paragraph_mut(
             section_idx,
@@ -3250,9 +3354,7 @@ impl DocumentCore {
         )?;
         let original_vpos = cell_para.line_segs.first().map(|seg| seg.vertical_pos);
         let mut new_para = cell_para.split_at(char_offset);
-        if let Some(meta) = restore_meta {
-            new_para.apply_meta(meta);
-        }
+        self.apply_paragraph_split_intent(&mut new_para, &intent);
 
         // 새 문단을 셀/글상자에 삽입
         let new_cell_para_idx = cell_para_idx + 1;
