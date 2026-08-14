@@ -1,5 +1,6 @@
 // cross-spawn: Windows에서 npm .cmd 심을 인자 이스케이프 손상 없이 실행한다.
 import spawn from 'cross-spawn';
+import { lstatSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -15,6 +16,39 @@ import {
 
 const STDERR_TAIL_LIMIT = 16_000;
 const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
+
+/**
+ * Recreate the isolated Codex home if the OS purged its temporary parent while
+ * the long-running hub was idle. The auth link is restored with the directory.
+ *
+ * @param {string} codexHome
+ * @param {string} [authPath]
+ */
+export function prepareCodexHome(codexHome, authPath) {
+  mkdirSync(codexHome, { recursive: true });
+  if (!authPath) return;
+
+  let authStat;
+  try {
+    authStat = lstatSync(authPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+  if (!authStat.isFile() || authStat.isSymbolicLink()) return;
+
+  const target = path.join(codexHome, 'auth.json');
+  try {
+    const targetStat = lstatSync(target);
+    if (!targetStat.isSymbolicLink()) return;
+    const existingTarget = path.resolve(codexHome, readlinkSync(target));
+    if (existingTarget === path.resolve(authPath)) return;
+    unlinkSync(target);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  symlinkSync(authPath, target);
+}
 
 /**
  * Build a CLI invocation accepted by both `codex exec` and `codex exec resume`.
@@ -297,20 +331,22 @@ export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
       const argv = buildCodexArgv(opts, threadId);
       stderrTail = '';
 
+      const codexHome = opts.codexHome ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex');
       let proc;
       try {
+        prepareCodexHome(codexHome, opts.codexAuthPath);
         proc = spawnProcess('codex', argv, {
           cwd: opts.rootDir,
           env: {
             ...process.env,
             ...(opts.isolatedHome ? { HOME: opts.isolatedHome } : {}),
-            CODEX_HOME: opts.codexHome ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
+            CODEX_HOME: codexHome,
           },
           stdio: ['pipe', 'pipe', 'pipe'],
           windowsHide: true,
         });
       } catch (e) {
-        onEvent({ type: 'error', agent: 'codex', message: `failed to spawn codex: ${e?.message ?? e}` });
+        onEvent({ type: 'error', agent: 'codex', message: `failed to start codex: ${e?.message ?? e}` });
         endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'exited' });
         return;
       }
