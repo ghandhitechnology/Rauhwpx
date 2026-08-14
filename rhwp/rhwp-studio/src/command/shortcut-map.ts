@@ -43,6 +43,21 @@ export const defaultShortcuts: [ShortcutDef, string][] = [
   [{ key: 'b', ctrl: true }, 'format:bold'],
   [{ key: 'i', ctrl: true }, 'format:italic'],
   [{ key: 'u', ctrl: true }, 'format:underline'],
+  // 서식 – 한컴 Alt+Shift 계열 (진하게/기울임/밑줄/위 첨자/아래 첨자).
+  // macOS 는 Alt+글쇠가 특수문자로 해석되므로 물리 키 code 로도 매칭한다.
+  [{ key: 'b', code: 'KeyB', alt: true, shift: true }, 'format:bold'],
+  [{ key: 'ㅠ', alt: true, shift: true }, 'format:bold'],
+  [{ key: 'i', code: 'KeyI', alt: true, shift: true }, 'format:italic'],
+  [{ key: 'ㅑ', alt: true, shift: true }, 'format:italic'],
+  [{ key: 'u', code: 'KeyU', alt: true, shift: true }, 'format:underline'],
+  [{ key: 'ㅕ', alt: true, shift: true }, 'format:underline'],
+  [{ key: 'p', code: 'KeyP', alt: true, shift: true }, 'format:superscript'],
+  [{ key: 'ㅔ', alt: true, shift: true }, 'format:superscript'],
+  [{ key: 's', code: 'KeyS', alt: true, shift: true }, 'format:subscript'],
+  [{ key: 'ㄴ', alt: true, shift: true }, 'format:subscript'],
+  // 위 첨자/아래 첨자/보통 순환 (한컴 Ctrl+Alt+A)
+  [{ key: 'a', code: 'KeyA', ctrl: true, alt: true }, 'format:script-cycle'],
+  [{ key: 'ㅁ', ctrl: true, alt: true }, 'format:script-cycle'],
   [{ key: 'l', alt: true }, 'format:char-shape'],
   [{ key: 'ㄹ', alt: true }, 'format:char-shape'],
   [{ key: 't', alt: true }, 'format:para-shape'],
