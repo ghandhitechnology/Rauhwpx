@@ -74,6 +74,11 @@ test('tool calls stay collapsed while the header names active tools', () => {
   );
   assert.match(css, /\.ag-tool-row\s*\{[^}]*flex:\s*0 0 auto;/s);
   assert.match(css, /\.ag-activity-collapsed \.ag-activity-content\s*\{[^}]*overflow:\s*hidden;/s);
+  assert.match(
+    css,
+    /\.ag-activity-toggle\s*\{[^}]*align-items:\s*center;[^}]*line-height:\s*1;/s,
+  );
+  assert.match(css, /\.ag-activity-label\s*\{[^}]*line-height:\s*1;/s);
 });
 
 test('long tasks request meaningful updates without artificial heartbeats', () => {

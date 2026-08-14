@@ -1756,6 +1756,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font: inherit;
   font-size: var(--font-size-base, 12px);
   font-variant-numeric: tabular-nums;
+  line-height: 1;
   text-align: left;
   cursor: pointer;
 }
@@ -1792,6 +1793,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1;
 }
 
 .ag-activity-complete .ag-activity-label {
@@ -1891,6 +1893,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   background: transparent;
   color: var(--ag-text);
   font: inherit;
+  line-height: 1;
   text-align: left;
   cursor: pointer;
   user-select: none;
@@ -1982,11 +1985,14 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-tool-name {
+  display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
   font-family: var(--ag-mono);
   font-size: var(--font-size-sm, 11px);
   font-weight: 500;
   letter-spacing: var(--ag-track);
+  line-height: 1;
 }
 
 .ag-tool-summary {
