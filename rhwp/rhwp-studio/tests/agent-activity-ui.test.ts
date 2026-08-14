@@ -30,12 +30,16 @@ test('assistant responses render as flat transcript text', () => {
   );
 });
 
-test('progress prose and tool calls compact into one calm activity disclosure', () => {
+test('meaningful progress stays visible as a milestone timeline with nested tool calls', () => {
   assert.match(source, /compactStreamIntoActivity/);
   assert.match(source, /ensureTurnActivity/);
   assert.match(source, /completeTurnActivity/);
   assert.match(source, /animateActivityLabel/);
-  assert.match(source, /flushAssistantBuffer\(\{ persist: false \}\)/);
+  assert.match(source, /flushAssistantBuffer\(\{ kind: 'progress' \}\)/);
+  assert.match(source, /ag-progress-step ag-progress-step-restored/);
+  assert.match(source, /milestone\.appendChild\(activity\)/);
+  assert.match(css, /\.ag-progress-step\s*\{[^}]*flex-direction:\s*column;/s);
+  assert.match(css, /\.ag-progress-milestone\s*\{[^}]*line-height:\s*1\.6;/s);
   assert.match(css, /\.ag-activity-collapse\s*\{[^}]*grid-template-rows:\s*1fr;/s);
   assert.match(
     css,
@@ -57,16 +61,30 @@ test('conversation follows streamed output until the user scrolls away', () => {
   assert.match(source, /followConversation = isConversationNearBottom\(\)/);
 });
 
-test('running tool activity is a bounded self-scrolling stream', () => {
+test('tool calls stay collapsed while the header names active tools', () => {
   assert.match(source, /scrollActivityToLatest/);
   assert.match(source, /content\.scrollTop = content\.scrollHeight/);
-  assert.match(source, /실시간 도구 실행 내역/);
+  assert.match(source, /ag-activity-running ag-activity-collapsed/);
+  assert.match(source, /toggle\.setAttribute\('aria-expanded', 'false'\)/);
+  assert.match(source, /`도구 호출 · \$\{active\[0\]\} 실행 중`/);
+  assert.match(source, /도구 호출 내역/);
   assert.match(
     css,
     /\.ag-activity-content\s*\{[^}]*max-height:\s*clamp\([^;]+;[^}]*overflow-y:\s*auto;/s,
   );
   assert.match(css, /\.ag-tool-row\s*\{[^}]*flex:\s*0 0 auto;/s);
   assert.match(css, /\.ag-activity-collapsed \.ag-activity-content\s*\{[^}]*overflow:\s*hidden;/s);
+  assert.match(
+    css,
+    /\.ag-activity-toggle\s*\{[^}]*align-items:\s*center;[^}]*line-height:\s*1;/s,
+  );
+  assert.match(css, /\.ag-activity-label\s*\{[^}]*line-height:\s*1;/s);
+});
+
+test('long tasks request meaningful updates without artificial heartbeats', () => {
+  assert.match(backend, /roughly every 30 seconds when there is concrete new progress/);
+  assert.match(backend, /Do not send heartbeat or filler updates/);
+  assert.match(backend, /nests related tool calls beneath them/);
 });
 
 test('tool turns always produce a final document-check handoff', () => {

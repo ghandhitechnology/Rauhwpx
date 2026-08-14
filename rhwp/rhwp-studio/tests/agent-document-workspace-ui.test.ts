@@ -78,6 +78,9 @@ test('changes drawer presents a unified diff and an intentional empty state', ()
   assert.match(css, /\.ag-op-head\s*\{[^}]*border-bottom:[^}]*background:/s);
   assert.match(css, /\.ag-diff-sign\s*\{[^}]*border-right:/s);
   assert.match(css, /\.ag-review-actions\s*\{[^}]*border-top:[^}]*background:/s);
+  assert.match(css, /\.ag-review-summary\s*\{[^}]*max-height:\s*26dvh;[^}]*overflow-y:\s*auto;/s);
+  assert.match(css, /\.ag-review-actions\s*\{[^}]*flex:\s*0 0 auto;/s);
+  assert.match(css, /\.ag-fullscreen \.ag-review-column \.ag-review-summary\s*\{[^}]*max-height:\s*calc\(100dvh - 166px\);/s);
   assert.match(css, /\.ag-fullscreen\.ag-review-drawer-open:not\(\.ag-review-collapsed\) \.ag-stage\s*\{[^}]*grid-template-columns:[^;]*var\(--ag-review-w, 480px\)/s);
   assert.match(css, /\.ag-fullscreen\.ag-review-collapsed \.ag-stage\s*\{[^}]*grid-template-columns:[^;]*minmax\(0, 1fr\) 0;/s);
   assert.match(css, /\.ag-fullscreen \.ag-review-column,[\s\S]*?position:\s*relative;[\s\S]*?grid-column:\s*3;[\s\S]*?grid-row:\s*2;[\s\S]*?border-left:\s*1px solid var\(--ag-border\);/);

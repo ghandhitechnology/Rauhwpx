@@ -66,9 +66,11 @@ Paths are relative to the repository root.
 
 6. **Core tools and permissions** — Claude and Codex can both use project files,
    shell commands, and web search/fetch in addition to the rhwp document tools.
-   New chats start in **Safe** mode. The permission button can switch an idle
-   chat to **Full access** after a warning; the provider session resumes with
-   the new boundary. Full access can reach files anywhere on the laptop.
+   New chats start in **Safe** mode. Live-document MCP writes still work
+   (pending sidebar approval); file and shell tools stay inside the project.
+   The permission button can switch an idle chat to **Full access** after a
+   warning; the provider session resumes with the new boundary. Full access
+   can reach files anywhere on the laptop.
 
 7. **Product skills** — type `/` to browse enabled rhwp skills, `/skills` to
    open the library, or `/skill-create` for the guided creator. These skills
