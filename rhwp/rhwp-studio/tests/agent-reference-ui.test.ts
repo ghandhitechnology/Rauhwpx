@@ -57,26 +57,37 @@ test('library searches backend content and exposes loading/error/keyboard semant
   assert.match(library, /contextChanged\(\): void \{\s*contextRevision\+\+;\s*requestRevision\+\+;\s*countRevision\+\+;/);
 });
 
-test('composer attachments stay as removable drafts until their message is sent', () => {
+test('composer attachments upload into removable staging drafts before their message is sent', () => {
   assert.match(library, /const draftUploads: UploadChip\[\] = \[\]/);
   assert.match(library, /openPicker\(targetFor\('chat', options\.getContext\(\)\), true\)/);
   assert.match(library, /if \(draft\) stageFiles\(selected\)/);
   assert.match(library, /state = el\('span', 'ag-reference-upload-chip-state', '전송 대기'\)/);
   assert.match(library, /`\$\{file\.name\} 첨부 취소`/);
-  assert.match(library, /async function commitDraftsAfter\(messageSent: Promise<string \| null>\)/);
-  assert.match(library, /const messageId = await messageSent;[\s\S]*uploadOne\(chip\.file/);
+  assert.match(library, /async function stageOne\(chip: UploadChip\)/);
+  assert.match(library, /bridge\.stageReference\(chip\.target\.scopeId, chip\.file\)/);
+  assert.match(library, /hasBlockingDrafts: \(\) => draftUploads\.some/);
+  assert.match(library, /function takeReadyDrafts\(\): StagedReference\[\]/);
   assert.match(sidebar, /if \(!input\.value\) referenceLibrary\.discardDrafts\(\)/);
-  assert.match(sidebar, /bridge\.sendUserMessage\(text, skillNameForMessage, hasDrafts\)[\s\S]*commitDraftsAfter\(messageSent\)/);
+  assert.match(sidebar, /referenceLibrary\.takeReadyDrafts\(\)/);
+  assert.match(sidebar, /bridge\.sendUserMessage\(text, skillNameForMessage, staged\.map/);
+  assert.match(sidebar, /send\.disabled = connState !== 'connected' \|\| attachmentsSending \|\| referenceLibrary\.hasBlockingDrafts\(\)/);
   assert.match(css, /\.ag-reference-upload-remove:focus-visible/);
 });
 
-test('failed post-send uploads retain an accessible retry bound to the sent chat scope', () => {
-  assert.match(library, /chip\.target = \{ \.\.\.target \}/);
+test('failed staged uploads retain an accessible retry bound to the selected chat scope', () => {
+  assert.match(library, /chip\.target = target/);
   assert.match(library, /`\$\{file\.name\} 참고자료 업로드 다시 시도`/);
-  assert.match(library, /await uploadOne\(file, chip\.target, chip\)/);
+  assert.match(library, /await stageOne\(chip\)/);
   assert.match(library, /chip\.retry\.hidden = false/);
-  assert.match(library, /다시 시도하거나 파일을 다시 추가해 주세요/);
+  assert.match(library, /파일을 업로드하지 못했습니다/);
   assert.match(css, /\.ag-reference-upload-retry:focus-visible/);
+});
+
+test('sent user messages persist attachment pills that open the reference library', () => {
+  assert.match(sidebar, /function renderUserMessage\(message: ThreadMessage\)/);
+  assert.match(sidebar, /ag-msg-attachments/);
+  assert.match(sidebar, /referenceLibrary\.openFile\(attachment\.fileId!\)/);
+  assert.match(sidebar, /attachment\.status = 'deleted'/);
 });
 
 test('sidebar always starts provider sessions with stable thread and document identity', () => {

@@ -58,7 +58,7 @@ test('/settings 슬래시 명령이 설정 페이지를 연다', () => {
   assert.match(source, /value: '\/settings'[^\n]*local: 'settings'/);
   assert.match(source, /option\.local === 'settings'[^\n]*setSettingsPanelOpen\(true\)/);
   assert.match(source, /text === '\/settings'[^\n]*setSettingsPanelOpen\(true\)/);
-  assert.ok(source.indexOf("if (text === '/settings')") < source.indexOf('recordUserMessage(visibleText)'));
+  assert.ok(source.indexOf("if (text === '/settings')") < source.indexOf('recordUserMessage(visibleText,'));
 });
 
 test('설정은 연결·기본 설정·글쓰기 보정·사용량 네 묶음이다', () => {

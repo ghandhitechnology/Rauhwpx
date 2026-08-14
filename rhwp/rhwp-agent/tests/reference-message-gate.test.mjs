@@ -18,6 +18,13 @@ test('reference-bearing messages wait for post-send uploads before agent dispatc
   );
 });
 
+test('pre-uploaded message attachments promote before agent dispatch and report status', () => {
+  assert.match(server, /async function dispatchStagedUserMessage/);
+  assert.match(server, /referenceStore\.promoteStaged\(\{ stageId, scopeId: activeSession\.threadId \}\)/);
+  assert.match(server, /type: 'chat-reference-status'/);
+  assert.match(server, /if \(session === activeSession\) dispatchUserMessage\(sock, msg, activeSession\)/);
+});
+
 test('staged messages cannot leak across stopped or disconnected studio sessions', () => {
   assert.match(server, /function disposeSession\(\) \{\s*pendingReferenceMessage = null/);
   assert.match(server, /studioSocket = null;\s*pendingReferenceMessage = null;/);
