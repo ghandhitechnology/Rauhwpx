@@ -38,6 +38,25 @@ export interface ReferenceFile {
   error?: string;
 }
 
+export interface StagedReference {
+  id: string;
+  scope: 'chat';
+  scopeId: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  status: 'ready';
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface MessageReferenceStatus {
+  stageId: string;
+  status: 'processing' | 'ready' | 'error';
+  file?: ReferenceFile;
+  error?: string;
+}
+
 export interface ReferenceSearchHit {
   referenceId: string;
   name: string;
@@ -316,6 +335,7 @@ export type SidebarEvent =
       latestPlan: StructuredPlan | null;
     }
   | { type: 'chat-stopped' }
+  | { type: 'reference-status'; messageId: string; attachments: MessageReferenceStatus[] }
   | { type: 'permission-changed'; permissionProfile: PermissionProfile }
   | ({ type: 'workflow-changed' } & AgentWorkflowState)
   | ({ type: 'plan-ready'; plan: StructuredPlan } & AgentWorkflowState)

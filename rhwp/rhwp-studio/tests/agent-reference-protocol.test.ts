@@ -23,13 +23,14 @@ test('search hit normalizer accepts results without injecting content into marku
 test('bridge sends stable chat scope and uses authenticated streaming HTTP endpoints', () => {
   assert.match(source, /type: 'chat-start' as const,[\s\S]*threadId,[\s\S]*documentId,[\s\S]*documentName/);
   assert.match(source, /type: 'chat-user-message',[\s\S]*threadId: message\.context\.threadId,[\s\S]*documentId: message\.context\.documentId/);
-  assert.match(source, /messageId: message\.messageId, referencesPending: true/);
-  assert.match(source, /type: 'chat-reference-uploads-complete',[\s\S]*messageId/);
+  assert.match(source, /messageId: message\.messageId, stagedReferenceIds: message\.stagedReferenceIds/);
+  assert.match(source, /case 'chat-reference-status'/);
   assert.match(source, /context: ReferenceScopeContext/);
   assert.match(source, /threadId: message\.context\.threadId/);
   assert.match(source, /documentId: message\.context\.documentId/);
   assert.match(source, /Authorization: `Bearer \$\{this\.token\}`/);
   assert.match(source, /this\.referenceUrl\('\/reference-files', \{ scope, scopeId \}\)/);
+  assert.match(source, /this\.referenceUrl\('\/reference-staging', \{ scopeId \}\)/);
   assert.match(source, /'X-File-Name': encodeURIComponent\(file\.name\)/);
   assert.match(source, /this\.referenceUrl\('\/reference-search'/);
   assert.match(source, /q: query/);

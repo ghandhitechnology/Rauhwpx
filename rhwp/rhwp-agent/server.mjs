@@ -61,6 +61,10 @@ const usageStore = await createUsageStore().init();
 const cliproxy = await createCliproxyClient({ rootDir: usageStore.rootDir }).init();
 const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
 const handleReferenceHttp = createReferenceHttpHandler({ store: referenceStore, token: TOKEN });
+const stagedReferenceCleanupTimer = setInterval(() => {
+  void referenceStore.cleanupStaged().catch((error) => log(`staged reference cleanup failed: ${error?.message ?? error}`));
+}, 15 * 60 * 1000);
+stagedReferenceCleanupTimer.unref?.();
 /** The calibration process outlives a Studio WebSocket. Keeping its request
  * identity and phase lets a reconnecting tab resume the same progress UI. */
 let styleCalibration = null;
@@ -259,6 +263,34 @@ function dispatchUserMessage(sock, msg, activeSession) {
       if (session === activeSession) activeSession.status = 'idle';
       sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
     });
+}
+
+async function dispatchStagedUserMessage(sock, msg, activeSession) {
+  const rawIds = Array.isArray(msg.stagedReferenceIds) ? msg.stagedReferenceIds : [];
+  const stageIds = [...new Set(rawIds.filter((id) => typeof id === 'string' && id))];
+  if (stageIds.length === 0 || stageIds.length !== rawIds.length || stageIds.length > 10) {
+    throw Object.assign(new Error('Message attachments require 1-10 unique staged reference ids'), { code: 'INVALID_REFERENCE_MESSAGE' });
+  }
+  pendingReferenceMessage = { messageId: msg.messageId, message: msg, owner: activeSession };
+  sendJson(sock, {
+    v: 1,
+    type: 'chat-reference-status',
+    messageId: msg.messageId,
+    attachments: stageIds.map((stageId) => ({ stageId, status: 'processing' })),
+  });
+  const settled = await Promise.allSettled(
+    stageIds.map(async (stageId) => ({ stageId, file: await referenceStore.promoteStaged({ stageId, scopeId: activeSession.threadId }) })),
+  );
+  const attachments = settled.map((entry, index) => entry.status === 'fulfilled'
+    ? { stageId: entry.value.stageId, status: 'ready', file: entry.value.file }
+    : {
+      stageId: stageIds[index],
+      status: 'error',
+      error: String(entry.reason?.message ?? entry.reason ?? 'Attachment processing failed'),
+    });
+  sendJson(sock, { v: 1, type: 'chat-reference-status', messageId: msg.messageId, attachments });
+  if (pendingReferenceMessage?.messageId === msg.messageId) pendingReferenceMessage = null;
+  if (session === activeSession) dispatchUserMessage(sock, msg, activeSession);
 }
 
 function emitWorkflowState(extra = {}) {
@@ -585,6 +617,18 @@ function handleStudioMessage(sock, msg) {
       }
       if (typeof msg.text !== 'string' || msg.text.length === 0) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'chat-user-message requires text' });
+        return;
+      }
+      if (Array.isArray(msg.stagedReferenceIds) && msg.stagedReferenceIds.length > 0) {
+        if (typeof msg.messageId !== 'string' || !msg.messageId) {
+          sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REFERENCE_MESSAGE', message: 'Attachment messages require messageId' });
+          return;
+        }
+        void dispatchStagedUserMessage(sock, msg, session)
+          .catch((error) => {
+            if (pendingReferenceMessage?.messageId === msg.messageId) pendingReferenceMessage = null;
+            sendChatError(sock, error, 'REFERENCE_COMMIT_FAILED');
+          });
         return;
       }
       if (msg.referencesPending === true) {
@@ -1168,6 +1212,7 @@ let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  clearInterval(stagedReferenceCleanupTimer);
   log(`shutting down (${signal})`);
   disposeSession();
   await browserbaseSession.cleanup('hub shutdown');
