@@ -85,7 +85,11 @@ function makeCellWasm() {
       return okJson();
     },
     getCellCharPropertiesAt: () => ({}),
+    getCellParaPropertiesAt: () => ({ pageBreakBefore: false }),
+    applyParaFormatInCell: () => okJson(),
     getCharPropertiesAt: () => ({}),
+    getParaPropertiesAt: () => ({ pageBreakBefore: false }),
+    applyParaFormat: () => okJson(),
     applyCharFormat: () => okJson(),
     setFieldValueByName: () => ({ ok: true }),
     getSourceFormat: () => 'hwpx',
@@ -94,6 +98,7 @@ function makeCellWasm() {
     renderPageSvg: (_pg: number) => '<svg/>',
     getSelectionRects: () => [],
     getSelectionRectsInCell: () => [],
+    refreshLayout: () => {},
   };
   return { wasm, body, cells, calls };
 }
