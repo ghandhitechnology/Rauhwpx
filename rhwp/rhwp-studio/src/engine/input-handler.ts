@@ -1854,31 +1854,48 @@ export class InputHandler {
     }
   }
 
-  /** 커서 위치의 글자 서식을 조회한다 */
+  /** 커서 위치의 글자 서식을 조회한다.
+   *
+   * 선택 영역이 있으면 선택 **첫 글자**의 서식을 기준으로 한다. 커서가 선택
+   * 시작 쪽(왼쪽 확장 선택)에 있을 때 커서 앞 글자를 읽으면 선택 밖 글자의
+   * 서식으로 토글 방향이 정해져 Ctrl+B/I/U 가 해제되지 않는 결함이 있었다
+   * (한컴은 선택 첫 글자 기준).
+   */
   private getCharPropertiesAtCursor(): CharProperties {
     if (this.cursor.isInHeaderFooter()) {
-      const offset = this.cursor.hfCharOffset > 0 ? this.cursor.hfCharOffset - 1 : 0;
+      const sel = this.cursor.getHeaderFooterSelectionOrdered();
+      const paraIdx = sel ? sel.start.paraIdx : this.cursor.hfParaIdx;
+      const offset = sel
+        ? sel.start.charOffset
+        : (this.cursor.hfCharOffset > 0 ? this.cursor.hfCharOffset - 1 : 0);
       return this.wasm.getCharPropertiesInHf(
         this.cursor.hfSectionIdx,
         this.cursor.headerFooterMode === 'header',
         this.cursor.hfApplyTo,
-        this.cursor.hfParaIdx,
+        paraIdx,
         offset,
       );
     }
     if (this.cursor.isInFootnote()) {
-      const offset = this.cursor.fnCharOffset > 0 ? this.cursor.fnCharOffset - 1 : 0;
+      const sel = this.cursor.getFootnoteSelectionOrdered();
+      const innerParaIdx = sel ? sel.start.fnParaIdx : this.cursor.fnInnerParaIdx;
+      const offset = sel
+        ? sel.start.charOffset
+        : (this.cursor.fnCharOffset > 0 ? this.cursor.fnCharOffset - 1 : 0);
       return this.wasm.getCharPropertiesInFootnote(
         this.cursor.fnSectionIdx,
         this.cursor.fnParaIdx,
         this.cursor.fnControlIdx,
-        this.cursor.fnInnerParaIdx,
+        innerParaIdx,
         offset,
       );
     }
-    const pos = this.cursor.getPosition();
-    // offset이 0이면 해당 위치, 아니면 offset-1 위치의 서식 반환 (커서 앞 글자 기준)
-    const queryOffset = pos.charOffset > 0 ? pos.charOffset - 1 : 0;
+    const sel = this.cursor.getSelectionOrdered();
+    const pos = sel ? sel.start : this.cursor.getPosition();
+    // 선택이 있으면 선택 첫 글자, 없으면 커서 앞 글자 기준
+    const queryOffset = sel
+      ? pos.charOffset
+      : (pos.charOffset > 0 ? pos.charOffset - 1 : 0);
     if (pos.parentParaIndex !== undefined) {
       // [#2756] 중첩 표는 최내곽 셀 대상 ...ByPath 로 조회한다. flat controlIndex/cellIndex/
       // cellParaIndex 는 hit-test 가 cellPath[0](최외곽)에서 채우므로 그대로 넘기면 **바깥
@@ -4693,6 +4710,38 @@ export class InputHandler {
   /** 서식 토글 (커맨드 시스템용) */
   toggleFormat(prop: 'bold' | 'italic' | 'underline' | 'strikethrough' | 'emboss' | 'engrave' | 'outline' | 'superscript' | 'subscript'): void {
     this.applyToggleFormat(prop);
+  }
+
+  /** 위 첨자 → 아래 첨자 → 보통 순환 (한컴 Ctrl+Alt+A) */
+  cycleScriptFormat(): void {
+    const cur = this.getCharPropertiesAtCursor();
+    if (cur.superscript) {
+      this.applyCharFormat({ superscript: false, subscript: true });
+    } else if (cur.subscript) {
+      this.applyCharFormat({ subscript: false });
+    } else {
+      this.applyCharFormat({ superscript: true, subscript: false });
+    }
+  }
+
+  /** 보통 모양: 글자 강조 속성 일괄 해제 (한컴 서식-글자 모양의 보통 모양) */
+  clearEmphasisFormat(): void {
+    this.applyCharFormat({
+      bold: false,
+      italic: false,
+      underline: false,
+      strikethrough: false,
+      emboss: false,
+      engrave: false,
+      outlineType: 0,
+      superscript: false,
+      subscript: false,
+    });
+  }
+
+  /** 글자 색 적용 (한컴 Ctrl+M,? 색상 chord) */
+  applyTextColor(color: string): void {
+    this.applyCharFormat({ textColor: color });
   }
 
   /** 문단 정렬 적용 (커맨드 시스템용) */

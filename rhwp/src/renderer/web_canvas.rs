@@ -742,6 +742,14 @@ impl WebCanvasRenderer {
             self.ctx.set_text_align("center");
             self.ctx.set_text_baseline("middle");
             let _ = self.ctx.fill_text(run.display_or_text(), 0.0, 0.0);
+            if run.style.bold {
+                // 합성 굵기 (draw_text 의 synthetic_bold 와 동일 근거)
+                self.ctx
+                    .set_stroke_style_str(&color_to_css(run.style.color));
+                self.ctx.set_line_width((font_size * 0.04).clamp(0.25, 1.4));
+                self.ctx.set_line_join("round");
+                let _ = self.ctx.stroke_text(run.display_or_text(), 0.0, 0.0);
+            }
             self.ctx.restore();
         } else {
             self.draw_text(
@@ -2283,6 +2291,15 @@ impl Renderer for WebCanvasRenderer {
                     }
                 }
             }
+            // 합성 굵기: 웹폰트는 regular 웨이트만 등록되고 Canvas2D 는 CSS 와 달리
+            // faux bold 를 합성하지 않으므로, ctx.font 의 "bold" 만으로는 굵게가
+            // 그려지지 않는다. 글리프 fill 위에 동일 색 얇은 stroke 를 덧그려 근사한다.
+            let synthetic_bold = style.bold;
+            if synthetic_bold {
+                self.ctx.set_stroke_style_str(&color_to_css(style.color));
+                self.ctx.set_line_width((font_size * 0.04).clamp(0.25, 1.4));
+                self.ctx.set_line_join("round");
+            }
             for (cluster_idx, (char_idx, cluster_str)) in clusters.iter().enumerate() {
                 if cluster_str == " " || cluster_str == "\t" || cluster_str == "\u{2007}" {
                     continue;
@@ -2321,6 +2338,9 @@ impl Renderer for WebCanvasRenderer {
                     );
                     self.ctx.set_font(&fallback_font);
                     let _ = self.ctx.fill_text(cluster_str, char_x, y);
+                    if synthetic_bold {
+                        let _ = self.ctx.stroke_text(cluster_str, char_x, y);
+                    }
                     self.ctx.restore();
                     self.ctx.set_font(&font); // 원래 폰트 복원
                     continue;
@@ -2336,6 +2356,9 @@ impl Renderer for WebCanvasRenderer {
                     self.ctx.translate(char_x, y).unwrap_or(());
                     self.ctx.scale(0.5, 1.0).unwrap_or(());
                     let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
+                    if synthetic_bold {
+                        let _ = self.ctx.stroke_text(cluster_str, 0.0, 0.0);
+                    }
                     self.ctx.restore();
                 } else {
                     let cluster_advance = {
@@ -2371,8 +2394,16 @@ impl Renderer for WebCanvasRenderer {
                         .scale(ratio * fit_scale.unwrap_or(1.0), 1.0)
                         .unwrap_or(());
                     let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
+                    if synthetic_bold {
+                        let _ = self.ctx.stroke_text(cluster_str, 0.0, 0.0);
+                    }
                     self.ctx.restore();
                 }
+            }
+            if synthetic_bold {
+                // line join 누수 방지: 이후 도형 stroke 는 join 을 재설정하지
+                // 않으므로 canvas 기본값(miter)으로 되돌린다.
+                self.ctx.set_line_join("miter");
             }
         }
 
@@ -2886,6 +2917,14 @@ impl WebCanvasRenderer {
             }
         };
 
+        // 합성 굵기 (draw_text 의 synthetic_bold 와 동일 근거): 효과 pass 도
+        // fill 위에 동일 색 stroke 를 덧그려 굵게를 근사한다.
+        let bold_stroke = style.bold;
+        let bold_w = (font_size * 0.04).clamp(0.25, 1.4);
+        if bold_stroke {
+            self.ctx.set_line_join("round");
+        }
+
         // 양각/음각 (상호 배타적, 다른 효과보다 우선)
         if style.emboss || style.engrave {
             let offset = (font_size / 20.0).max(1.0);
@@ -2896,9 +2935,12 @@ impl WebCanvasRenderer {
             } else {
                 ("#808080", "#ffffff")
             };
-            render_pass(&self.ctx, -offset, -offset, first_color, false, "", 0.0);
-            render_pass(&self.ctx, offset, offset, second_color, false, "", 0.0);
-            render_pass(&self.ctx, 0.0, 0.0, &text_color_css, false, "", 0.0);
+            render_pass(&self.ctx, -offset, -offset, first_color, bold_stroke, first_color, bold_w);
+            render_pass(&self.ctx, offset, offset, second_color, bold_stroke, second_color, bold_w);
+            render_pass(&self.ctx, 0.0, 0.0, &text_color_css, bold_stroke, &text_color_css, bold_w);
+            if bold_stroke {
+                self.ctx.set_line_join("miter");
+            }
             return;
         }
 
@@ -2907,12 +2949,13 @@ impl WebCanvasRenderer {
             let shadow_css = color_to_css(style.shadow_color);
             let dx = style.shadow_offset_x;
             let dy = style.shadow_offset_y;
-            render_pass(&self.ctx, dx, dy, &shadow_css, false, "", 0.0);
+            render_pass(&self.ctx, dx, dy, &shadow_css, bold_stroke, &shadow_css, bold_w);
         }
 
         // 외곽선 (fillText(흰색) + strokeText(글자색))
         if style.outline_type > 0 {
-            let line_width = (font_size / 25.0).max(0.5);
+            // 굵게 시 외곽선 폭을 합성 굵기만큼 더해 근사
+            let line_width = (font_size / 25.0).max(0.5) + if bold_stroke { bold_w } else { 0.0 };
             render_pass(
                 &self.ctx,
                 0.0,
@@ -2924,7 +2967,10 @@ impl WebCanvasRenderer {
             );
         } else {
             // 일반 텍스트 (그림자 위에 원본)
-            render_pass(&self.ctx, 0.0, 0.0, &text_color_css, false, "", 0.0);
+            render_pass(&self.ctx, 0.0, 0.0, &text_color_css, bold_stroke, &text_color_css, bold_w);
+        }
+        if bold_stroke {
+            self.ctx.set_line_join("miter");
         }
     }
 
