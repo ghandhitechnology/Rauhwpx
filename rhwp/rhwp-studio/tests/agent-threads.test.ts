@@ -55,6 +55,17 @@ test('setThreadTitle updates a persisted thread', () => {
   assert.equal(getThread(t.id)?.title, '문서 요약 요청');
 });
 
+test('progress milestones survive thread persistence', () => {
+  mem.clear();
+  const t = createEmptyThread({ agent: 'claude', model: 'sonnet', effort: 'high' });
+  t.messages.push(
+    { role: 'user', text: '문서를 정리해줘' },
+    { role: 'assistant', text: '문서 구조를 확인했습니다. 이제 표를 정리합니다.', agent: 'claude', kind: 'progress' },
+  );
+  upsertThread(t);
+  assert.equal(getThread(t.id)?.messages[1]?.kind, 'progress');
+});
+
 test('legacy threads migrate to direct workflow', () => {
   mem.clear();
   storage.setItem('rhwp-agent-threads', JSON.stringify([{
