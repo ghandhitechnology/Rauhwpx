@@ -46,6 +46,8 @@ import {
   setThreadTitle,
   upsertThread,
   type ChatThread,
+  type ThreadMessage,
+  type ThreadAttachment,
 } from '../../agent/threads.ts';
 import { createChevron, createColumnIcon } from '../chevron.ts';
 import { createIcon, createStopIcon, OP_ICON } from './icons.ts';
@@ -1572,6 +1574,23 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       chatPage.setAttribute('aria-hidden', open ? 'true' : 'false');
       chatPage.inert = open;
     },
+    onDraftStateChange() {
+      updateComposer();
+    },
+    onFileDeleted(fileId) {
+      let changed = false;
+      for (const message of currentThread.messages) {
+        for (const attachment of message.attachments ?? []) {
+          if (attachment.fileId !== fileId) continue;
+          attachment.status = 'deleted';
+          changed = true;
+        }
+      }
+      if (changed) {
+        persistCurrentThread();
+        renderMessagesFromThread(currentThread);
+      }
+    },
   });
   composerUtilityActions.insertBefore(referenceLibrary.trigger, permissionBtn);
   composerField.insertBefore(referenceLibrary.quickAddButton, sendHint);
@@ -2413,7 +2432,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       bridge.interrupt();
       return;
     }
-    if (planningPhase === 'switching' || attachmentsSending) return;
+    if (planningPhase === 'switching' || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
     let text = input.value.trim();
     if (!text || connState !== 'connected') return;
     if (text.startsWith('//')) text = text.slice(1);
@@ -2457,26 +2476,29 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (chatWorkflow === 'plan' && planningPhase === 'awaiting-approval') {
       setPlanningPhase('planning');
     }
-    recordUserMessage(visibleText);
+    const staged = referenceLibrary.takeReadyDrafts();
+    const messageAttachments: ThreadAttachment[] = staged.map((file) => ({
+      stageId: file.id,
+      name: file.name,
+      mimeType: file.mimeType,
+      size: file.size,
+      status: 'processing',
+    }));
+    const userMessage = recordUserMessage(visibleText, messageAttachments);
     followConversation = true;
-    withAutoScroll(() => messages.appendChild(el('div', 'ag-msg ag-msg-user', visibleText)));
-    const hasDrafts = referenceLibrary.hasDrafts();
-    const messageSent = bridge.sendUserMessage(text, skillNameForMessage, hasDrafts);
-    if (hasDrafts) {
+    withAutoScroll(() => messages.appendChild(renderUserMessage(userMessage)));
+    const messageSent = bridge.sendUserMessage(text, skillNameForMessage, staged.map((file) => file.id));
+    if (staged.length > 0) {
       attachmentsSending = true;
       updateComposer();
-      const attachmentCommit = referenceLibrary.commitDraftsAfter(messageSent);
-      void (async () => {
-        const messageId = await messageSent;
-        try {
-          await attachmentCommit;
-        } finally {
-          if (messageId) bridge.completeReferenceUploads(messageId);
+      void messageSent.then((messageId) => {
+        if (!messageId) {
           attachmentsSending = false;
           updateComposer();
+          return;
         }
-      })().catch((error) => {
-        systemMessage(`첨부 파일을 처리하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+        userMessage.messageId = messageId;
+        persistCurrentThread();
       });
     } else {
       void messageSent;
@@ -2536,11 +2558,54 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     upsertThread(currentThread);
   }
 
-  function recordUserMessage(text: string): void {
-    currentThread.messages.push({ role: 'user', text });
+  function recordUserMessage(text: string, attachments: ThreadAttachment[] = []): ThreadMessage {
+    const message: ThreadMessage = {
+      role: 'user',
+      text,
+      ...(attachments.length ? { attachments } : {}),
+    };
+    currentThread.messages.push(message);
     currentThread.updatedAt = Date.now();
     persistCurrentThread();
     maybeRequestTitle();
+    return message;
+  }
+
+  function formatAttachmentBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function renderUserMessage(message: ThreadMessage): HTMLElement {
+    const bubble = el('div', 'ag-msg ag-msg-user');
+    bubble.appendChild(el('div', 'ag-msg-user-text', message.text));
+    if (message.attachments?.length) {
+      const row = el('div', 'ag-msg-attachments');
+      for (const attachment of message.attachments) {
+        const pill = el('button', `ag-msg-attachment ag-${attachment.status}`);
+        pill.type = 'button';
+        pill.disabled = attachment.status !== 'ready' || !attachment.fileId;
+        pill.append(
+          createIcon('document'),
+          el('span', 'ag-msg-attachment-name', attachment.name),
+          el('span', 'ag-msg-attachment-meta', attachment.status === 'processing'
+            ? '처리 중'
+            : attachment.status === 'error'
+              ? '실패'
+              : attachment.status === 'deleted'
+                ? '삭제됨'
+                : formatAttachmentBytes(attachment.size)),
+        );
+        pill.title = attachment.error || attachment.name;
+        if (attachment.fileId && attachment.status === 'ready') {
+          pill.addEventListener('click', () => { void referenceLibrary.openFile(attachment.fileId!); });
+        }
+        row.appendChild(pill);
+      }
+      bubble.appendChild(row);
+    }
+    return bubble;
   }
 
   function flushAssistantBuffer(opts?: { persist?: boolean }): void {
@@ -2579,7 +2644,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     toolRows.clear();
     for (const msg of thread.messages) {
       if (msg.role === 'user') {
-        messages.appendChild(el('div', 'ag-msg ag-msg-user', msg.text));
+        messages.appendChild(renderUserMessage(msg));
       } else if (msg.role === 'assistant') {
         const agent = msg.agent ?? thread.agent;
         messages.appendChild(el('div', `ag-msg ag-msg-assistant ag-${agent}`, msg.text));
@@ -2991,7 +3056,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       input.placeholder = `"${readOnlyDocLabel}" 문서의 채팅 — 읽기 전용`;
     } else {
       input.disabled = connState !== 'connected' || attachmentsSending;
-      send.disabled = connState !== 'connected' || attachmentsSending;
+      send.disabled = connState !== 'connected' || attachmentsSending || referenceLibrary.hasBlockingDrafts();
       input.placeholder =
         chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'
           ? '계획에서 바꿀 부분을 알려주세요'
@@ -3005,7 +3070,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     send.title = sendLabel;
     send.classList.toggle('ag-stop', turnRunning);
     // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
-    sendHint.hidden = turnRunning || attachmentsSending || connState !== 'connected' || readOnlyDocLabel !== null;
+    sendHint.hidden = turnRunning || attachmentsSending || referenceLibrary.hasBlockingDrafts()
+      || connState !== 'connected' || readOnlyDocLabel !== null;
     // 실행 중이거나 작업 방식/계획→실행 전환 중에는 모드·모델·권한을 잠근다.
     const controlsLocked = isControlLocked();
     providerTrigger.disabled = controlsLocked;
@@ -3397,6 +3463,29 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         updatePermissionButton();
         systemMessage(permissionProfile === 'unrestricted' ? '전체 접근을 켰습니다. 이 채팅의 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다.' : '안전 모드로 돌아왔습니다. 파일과 명령은 프로젝트 범위로 제한됩니다.');
         break;
+      case 'reference-status': {
+        const message = currentThread.messages.find((item) => item.messageId === e.messageId);
+        if (!message?.attachments) break;
+        for (const update of e.attachments) {
+          const attachment = message.attachments.find((item) => item.stageId === update.stageId);
+          if (!attachment) continue;
+          attachment.status = update.status;
+          if (update.file) {
+            attachment.fileId = update.file.id;
+            attachment.name = update.file.name;
+            attachment.mimeType = update.file.mimeType;
+            attachment.size = update.file.size;
+          }
+          if (update.error) attachment.error = update.error;
+          else delete attachment.error;
+        }
+        attachmentsSending = message.attachments.some((item) => item.status === 'processing');
+        persistCurrentThread();
+        renderMessagesFromThread(currentThread);
+        updateComposer();
+        if (!attachmentsSending) void referenceLibrary.refresh();
+        break;
+      }
       case 'skills-catalog':
         skillCatalog = e.catalog;
         skillsStatus.textContent = `${skillCatalog.skills.length}개 스킬`;
@@ -3515,6 +3604,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         handleAgentEvent(e.event);
         break;
       case 'hub-error':
+        if (e.code === 'REFERENCE_COMMIT_FAILED' || e.code === 'INVALID_REFERENCE_MESSAGE') {
+          attachmentsSending = false;
+          for (const message of currentThread.messages) {
+            for (const attachment of message.attachments ?? []) {
+              if (attachment.status === 'processing') {
+                attachment.status = 'error';
+                attachment.error = e.message;
+              }
+            }
+          }
+          persistCurrentThread();
+          renderMessagesFromThread(currentThread);
+          updateComposer();
+        }
         systemMessage(`오류 (${e.code}): ${e.message}`);
         if (e.code === 'AGENT_SPAWN_FAILED') appendSpawnRetryAction();
         workflowTransitionPending = false;

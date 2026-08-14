@@ -316,6 +316,11 @@
 .ag-reference-upload-chip.ag-ready { border-color: color-mix(in srgb, var(--ag-ok) 40%, var(--ag-border)); }
 .ag-reference-upload-chip.ag-error { border-color: color-mix(in srgb, var(--ag-err) 55%, var(--ag-border)); }
 
+.ag-reference-file-focused {
+  outline: 2px solid var(--ag-focus);
+  outline-offset: 2px;
+}
+
 .ag-reference-upload-retry {
   min-height: 24px;
   border: 1px solid var(--ag-border);
