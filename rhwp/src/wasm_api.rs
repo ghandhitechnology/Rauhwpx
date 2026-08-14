@@ -1294,6 +1294,30 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 셀 내부 문단을 논리 삽입 줄 경계로 분할한다 (에이전트 다줄 삽입).
+    ///
+    /// 규약은 `splitParagraphLogical` 과 동일하다.
+    #[wasm_bindgen(js_name = splitParagraphInCellLogical)]
+    pub fn split_paragraph_in_cell_logical(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: u32,
+        cell_para_idx: u32,
+        char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.split_paragraph_in_cell_logical_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            cell_idx as usize,
+            cell_para_idx as usize,
+            char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 셀 내부 문단을 이전 문단에 병합한다 (셀 내 Backspace at start).
     ///
     /// 반환값: JSON `{"ok":true,"cellParaIndex":<prev_idx>,"charOffset":<merge_point>}`
@@ -1940,6 +1964,25 @@ impl HwpDocument {
             para_idx as usize,
             char_offset as usize,
             parse_removed_para_meta(removed_para_meta)?,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 한 논리 삽입 안의 줄 경계로 문단을 분할한다 (에이전트 다줄 삽입).
+    ///
+    /// Enter 분할과 같은 상속을 따르되, 새 continuation 문단의 강제 쪽/단
+    /// 경계는 만들지 않는다. 반환값 규약은 `splitParagraph` 와 동일하다.
+    #[wasm_bindgen(js_name = splitParagraphLogical)]
+    pub fn split_paragraph_logical(
+        &mut self,
+        section_idx: u32,
+        para_idx: u32,
+        char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.split_paragraph_logical_native(
+            section_idx as usize,
+            para_idx as usize,
+            char_offset as usize,
         )
         .map_err(|e| e.into())
     }
@@ -6322,7 +6365,8 @@ impl HwpDocument {
                 }
                 para.replace_style_char_shape_preserving_overrides(old_csid, new_csid);
             }
-            self.core.reflow_body_paragraph(sec_idx, para_idx);
+            self.core
+                .reflow_body_para_and_recalc_flow(sec_idx, para_idx);
             if let Some(section) = self.core.document.sections.get_mut(sec_idx) {
                 section.raw_stream = None;
             }

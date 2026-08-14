@@ -26313,3 +26313,207 @@ fn local_body_replace_paginates_immediately_at_flow_boundary() {
             .sum::<usize>() as u32
     );
 }
+
+// ─── 문단 분할 의도(ParagraphSplitIntent) 계약 ──────────────────────────
+// 에이전트 다줄 삽입의 `\n` 은 한 논리 삽입 안의 줄 경계다. Enter 분할처럼
+// 문단 모양을 상속하되, 강제 쪽 나눔(pageBreakBefore)까지 복제하면 줄마다
+// 새 쪽이 생긴다. 논리 continuation 은 경계 전용 메타만 벗겨야 한다.
+
+/// Enter 분할: 새 문단이 강제 쪽 나눔을 그대로 상속한다 (기존 동작 유지).
+#[test]
+fn test_split_user_enter_inherits_page_break_before() {
+    let mut doc = HwpDocument::create_empty();
+    doc.insert_text_native(0, 0, 0, "머리글 이어지는 본문")
+        .unwrap();
+    doc.apply_para_format_native(0, 0, r#"{"pageBreakBefore":true}"#)
+        .unwrap();
+
+    doc.split_paragraph_native(0, 0, 3, None).unwrap();
+
+    let ps_id = doc.document.sections[0].paragraphs[1].para_shape_id;
+    let ps = &doc.document.doc_info.para_shapes[ps_id as usize];
+    assert!(
+        (ps.attr1 >> 19) & 1 == 1 || (ps.attr2 >> 8) & 1 == 1,
+        "Enter 분할 새 문단은 쪽 나눔을 상속해야 한다 (attr1={:#x}, attr2={:#x})",
+        ps.attr1,
+        ps.attr2
+    );
+}
+
+/// 논리 continuation 분할: 새 문단에서 강제 쪽 나눔만 벗기고 나머지 서식은 상속한다.
+#[test]
+fn test_split_logical_clears_page_break_before() {
+    let mut doc = HwpDocument::create_empty();
+    doc.insert_text_native(0, 0, 0, "머리글 이어지는 본문")
+        .unwrap();
+    doc.apply_para_format_native(
+        0,
+        0,
+        r#"{"pageBreakBefore":true,"marginLeft":2000,"spacingBefore":600}"#,
+    )
+    .unwrap();
+    let src_ps_id = doc.document.sections[0].paragraphs[0].para_shape_id;
+    let src_ps = doc.document.doc_info.para_shapes[src_ps_id as usize].clone();
+
+    doc.split_paragraph_logical_native(0, 0, 3).unwrap();
+
+    let paras = &doc.document.sections[0].paragraphs;
+    assert_eq!(paras[0].text, "머리글", "분할 앞 절반 텍스트");
+    assert_eq!(paras[1].text, " 이어지는 본문", "분할 뒤 절반 텍스트");
+
+    // 원본 문단의 쪽 나눔은 유지된다
+    let kept = &doc.document.doc_info.para_shapes[paras[0].para_shape_id as usize];
+    assert!(
+        (kept.attr1 >> 19) & 1 == 1 || (kept.attr2 >> 8) & 1 == 1,
+        "원본 문단의 쪽 나눔은 유지돼야 한다"
+    );
+
+    // continuation 은 두 인코딩 모두에서 쪽 나눔이 해제된다
+    let cont = &doc.document.doc_info.para_shapes[paras[1].para_shape_id as usize];
+    assert_eq!((cont.attr1 >> 19) & 1, 0, "attr1 bit19 해제");
+    assert_eq!((cont.attr2 >> 8) & 1, 0, "attr2 bit8 해제");
+
+    // 쪽 나눔 비트 외의 서식은 원본에서 그대로 상속된다
+    assert_eq!(cont.margin_left, src_ps.margin_left, "marginLeft 상속");
+    assert_eq!(
+        cont.spacing_before, src_ps.spacing_before,
+        "spacingBefore 상속"
+    );
+    assert_eq!(
+        cont.attr1 & !(1 << 19),
+        src_ps.attr1 & !(1 << 19),
+        "attr1 은 bit19 외 동일해야 한다"
+    );
+    assert_eq!(
+        cont.attr2 & !(1 << 8),
+        src_ps.attr2 & !(1 << 8),
+        "attr2 는 bit8 외 동일해야 한다"
+    );
+
+    // 경계 전용 메타도 continuation 에는 없다
+    assert_eq!(
+        paras[1].column_type,
+        crate::model::paragraph::ColumnBreakType::None,
+        "단 나눔 미상속"
+    );
+    assert_eq!(paras[1].raw_break_type, 0, "raw break 미상속");
+}
+
+/// 셀 내부 논리 분할도 같은 계약을 따른다.
+#[test]
+fn test_split_logical_in_cell_clears_page_break_before() {
+    use crate::model::control::Control;
+
+    let mut doc = HwpDocument::create_empty();
+    doc.insert_text_native(0, 0, 0, "표 앞").unwrap();
+    doc.create_table_ex_native(0, 0, 2, 2, 2, true, None, None)
+        .unwrap();
+    let ctrl_idx = doc.document.sections[0].paragraphs[0]
+        .controls
+        .iter()
+        .position(|c| matches!(c, Control::Table(_)))
+        .expect("표 컨트롤");
+
+    doc.insert_text_in_cell_native(0, 0, ctrl_idx, 0, 0, 0, "셀머리 셀본문")
+        .unwrap();
+    doc.apply_para_format_in_cell_native(0, 0, ctrl_idx, 0, 0, r#"{"pageBreakBefore":true}"#)
+        .unwrap();
+
+    doc.split_paragraph_in_cell_logical_native(0, 0, ctrl_idx, 0, 0, 3)
+        .unwrap();
+
+    let Control::Table(table) = &doc.document.sections[0].paragraphs[0].controls[ctrl_idx] else {
+        panic!("표 컨트롤이어야 한다");
+    };
+    let cell_paras = &table.cells[0].paragraphs;
+    assert_eq!(cell_paras[0].text, "셀머리");
+    assert_eq!(cell_paras[1].text, " 셀본문");
+
+    let cont = &doc.document.doc_info.para_shapes[cell_paras[1].para_shape_id as usize];
+    assert_eq!(
+        (cont.attr1 >> 19) & 1,
+        0,
+        "셀 continuation attr1 bit19 해제"
+    );
+    assert_eq!((cont.attr2 >> 8) & 1, 0, "셀 continuation attr2 bit8 해제");
+}
+
+/// pageBreakBefore 설정/해제는 HWP(attr1 bit19)·HWPX(attr2 bit8) 인코딩에 함께 반영된다.
+#[test]
+fn test_page_break_before_mods_update_both_encodings() {
+    let mut doc = HwpDocument::create_empty();
+    doc.insert_text_native(0, 0, 0, "본문").unwrap();
+
+    doc.apply_para_format_native(0, 0, r#"{"pageBreakBefore":true}"#)
+        .unwrap();
+    let ps_id = doc.document.sections[0].paragraphs[0].para_shape_id;
+    let ps = &doc.document.doc_info.para_shapes[ps_id as usize];
+    assert_eq!((ps.attr1 >> 19) & 1, 1, "set: attr1 bit19");
+    assert_eq!((ps.attr2 >> 8) & 1, 1, "set: attr2 bit8");
+
+    // HWPX 로 저장해도 쪽 나눔이 살아남아야 한다 (serializer 는 attr2 bit8 을 읽는다)
+    let out = doc.export_hwpx_native().expect("HWPX 직렬화");
+    let reparsed = HwpDocument::from_bytes(&out).expect("재파싱");
+    assert_eq!(
+        reparsed.page_count(),
+        doc.page_count(),
+        "쪽 나눔이 HWPX 저장/재열기에서 보존돼야 한다"
+    );
+
+    doc.apply_para_format_native(0, 0, r#"{"pageBreakBefore":false}"#)
+        .unwrap();
+    let ps_id = doc.document.sections[0].paragraphs[0].para_shape_id;
+    let ps = &doc.document.doc_info.para_shapes[ps_id as usize];
+    assert_eq!((ps.attr1 >> 19) & 1, 0, "clear: attr1 bit19");
+    assert_eq!((ps.attr2 >> 8) & 1, 0, "clear: attr2 bit8");
+}
+
+/// [task1750] 논리 다줄 삽입은 새 암묵 쪽/단 리셋(vpos 되감김)을 만들지 않는다.
+///
+/// 실문서의 vpos 사다리에는 저작된 쪽 경계에서만 되감김이 있다. 삽입으로
+/// 되감김 지점이 늘어나면 fresh 문단의 vpos=0 placeholder 가 저장흐름 리셋으로
+/// 오인된 것이다 (쪽수 뻥튀기의 신호).
+#[test]
+fn test_multiline_logical_insert_keeps_vpos_rewind_signature() {
+    let bytes = std::fs::read("samples/task1750/split_guard_spacing_before.hwp").unwrap();
+    let mut doc = HwpDocument::from_bytes(&bytes).unwrap();
+    doc.convert_to_editable_native().unwrap();
+
+    let rewinds = |doc: &HwpDocument| -> usize {
+        let paras = &doc.document.sections[0].paragraphs;
+        let mut prev: Option<i32> = None;
+        let mut count = 0usize;
+        for p in paras {
+            if let Some(seg) = p.line_segs.first() {
+                if let Some(pv) = prev {
+                    if seg.vertical_pos < pv {
+                        count += 1;
+                    }
+                }
+                prev = Some(seg.vertical_pos);
+            }
+        }
+        count
+    };
+
+    let rewinds_before = rewinds(&doc);
+    let pages_before = doc.page_count();
+
+    // 문단 5 중간에 에이전트 다줄 삽입 (performInsert 순서)
+    doc.insert_text_native(0, 5, 1, "첫줄").unwrap();
+    doc.split_paragraph_logical_native(0, 5, 3).unwrap();
+    doc.insert_text_native(0, 6, 0, "둘째줄").unwrap();
+    doc.split_paragraph_logical_native(0, 6, 3).unwrap();
+    doc.insert_text_native(0, 7, 0, "셋째줄").unwrap();
+
+    let rewinds_after = rewinds(&doc);
+    assert!(
+        rewinds_after <= rewinds_before + 1,
+        "삽입 후 vpos 되감김이 늘면 안 된다 (before={rewinds_before}, after={rewinds_after})"
+    );
+    let pages_after = doc.page_count();
+    assert!(
+        pages_after as i64 - pages_before as i64 <= 1,
+        "쪽수 증가는 1 이내: {pages_before} → {pages_after}"
+    );
+}

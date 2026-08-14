@@ -972,7 +972,7 @@ impl DocumentCore {
             } else if lh.ends_with("px") {
                 if let Ok(px) = lh.trim_end_matches("px").parse::<f64>() {
                     // px → HWPUNIT (1px ≈ 75 HWPUNIT at 96dpi)
-                    ps.line_spacing = (px * 7200.0 / 25.4 / (self.dpi / 25.4)).round() as i32;
+                    ps.line_spacing = crate::renderer::px_to_hwpunit_round(px, self.dpi);
                     ps.line_spacing_type = LineSpacingType::Fixed;
                 }
             }

@@ -976,7 +976,11 @@ impl ParaShapeMods {
             set_bit(&mut ps.attr1, 18, v);
         }
         if let Some(v) = self.page_break_before {
+            // HWP5 는 attr1 bit19, HWPX 파서/직렬화기는 attr2 bit8 을 쓴다
+            // (style_resolver 는 OR 로 읽는다). 한쪽만 바꾸면 반대 포맷 저장에서
+            // 값이 사라지거나 해제가 무시되므로 두 인코딩을 함께 갱신한다.
             set_bit(&mut ps.attr1, 19, v);
+            set_bit(&mut ps.attr2, 8, v);
         }
         if let Some(v) = self.font_line_height {
             set_bit(&mut ps.attr1, 22, v);
