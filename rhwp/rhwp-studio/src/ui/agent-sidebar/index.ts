@@ -364,6 +364,8 @@ function opPreview(op: PendingOp): string {
     case 'delete':
       return op.text.replace(/\n/g, '⏎');
     case 'replace':
+      // 빈 새 텍스트 = 즉시 적용된 삭제
+      if (op.text.length === 0) return op.deletedText.replace(/\n/g, '⏎');
       return `${op.deletedText.replace(/\n/g, '⏎')} → ${op.text.replace(/\n/g, '⏎')}`;
     case 'format':
       return JSON.stringify(op.format);
@@ -3608,8 +3610,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function buildReviewOp(op: PendingOp): HTMLElement {
     const entry = el('div', `ag-review-op ag-review-op-${op.kind}`);
     const head = el('div', 'ag-op-head');
-    const glyph = el('span', `ag-op-glyph ag-op-${op.kind}`);
-    glyph.appendChild(createIcon(OP_ICON[op.kind] ?? 'replace'));
+    // 빈 새 텍스트의 replace = 즉시 적용된 삭제 — 삭제로 표시한다
+    const displayKind = op.kind === 'replace' && op.text.length === 0 ? 'delete' : op.kind;
+    const glyph = el('span', `ag-op-glyph ag-op-${displayKind}`);
+    glyph.appendChild(createIcon(OP_ICON[displayKind] ?? 'replace'));
     // 좌표가 있는 op 만 주소를 말한다. 필드/개체는 대상 이름이 곧 주소다.
     const addr = op.kind === 'field'
       ? op.name
@@ -3622,7 +3626,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     const diff = el('div', 'ag-op-diff');
     switch (op.kind) {
       case 'replace':
-        diff.append(buildDiffLine('del', op.deletedText), buildDiffLine('add', op.text));
+        diff.appendChild(buildDiffLine('del', op.deletedText));
+        if (op.text.length > 0) diff.appendChild(buildDiffLine('add', op.text));
         break;
       case 'insert':
         diff.appendChild(buildDiffLine('add', op.text));

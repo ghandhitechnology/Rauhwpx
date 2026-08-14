@@ -250,7 +250,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'delete_range',
-    description: `Mark a text range for deletion. The text is NOT removed yet — it is shown struck-through to the user and removed only on approval, so re-reads still show it; that is expected, do NOT delete it again. To rewrite a section, prefer replace_range; if you do use delete_range + insert_text, insert at the mark's start or after its end (inserting strictly inside a marked range is rejected with PENDING_DELETE_OVERLAP because that text would be deleted with the mark on approval). ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    description: `Delete a text range. The text is removed from the live preview immediately (pending user approval; reject restores it), so re-reads no longer show it and coordinates after the range shift — the response's collapsedAt gives the collapse point for inserting replacement text. To rewrite a section, prefer replace_range (one atomic op). ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -263,7 +263,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'replace_range',
-    description: `Replace a text range: marks the range for deletion (struck-through until approved) and inserts the new text right after it. Prefer this over delete_range + insert_text — it is one atomic op and preserves formatting. ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    description: `Replace a text range: the old text is swapped for the new text in the live preview immediately (pending user approval; reject restores the original). Prefer this over delete_range + insert_text — it is one atomic op and preserves formatting. ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -590,7 +590,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'verify_changes',
-    description: `Self-check your work after a batch of edits: returns the current/open change set — per-op kind and an applied flag (true = already visible in the document, false = applies on approval), post-edit text digests, affected pages and warnings. With includeImage:true the response also carries a PNG render (image block) of the first affected page showing the post-approval state. ALWAYS call this after completing a batch of edits, fix any problems you find, and only then end your turn. Note: text deleted by delete_range/replace_range stays visible struck-through until the user approves — that is expected, do NOT try to "fix" it. ${REVISION_NOTE}`,
+    description: `Self-check your work after a batch of edits: returns the current/open change set — per-op kind and an applied flag (true = already visible in the document, false = applies on approval), post-edit text digests, affected pages and warnings. With includeImage:true the response also carries a PNG render (image block) of the first affected page showing the post-approval state. ALWAYS call this after completing a batch of edits, fix any problems you find, and only then end your turn. Note: delete_range/replace_range already show their result in the live preview; the removed text is gone from re-reads until the user rejects — do NOT re-insert it. ${REVISION_NOTE}`,
     shape: {
       changeSetId: z.string().min(1).optional().describe('Specific change set id (default: the current open change set)'),
       includeImage: z.boolean().default(false).optional()
