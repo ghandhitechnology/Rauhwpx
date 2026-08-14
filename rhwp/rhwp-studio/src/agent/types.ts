@@ -14,7 +14,7 @@ import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 
 export const AGENT_PROTOCOL_VERSION = 2;
 
-export type AgentName = 'claude' | 'codex';
+export type AgentName = 'claude' | 'codex' | 'pi';
 export type PermissionProfile = 'safe' | 'unrestricted';
 export type WritingStyleLanguage = 'ko' | 'en';
 export type AgentWorkflow = 'direct' | 'plan';
@@ -215,6 +215,8 @@ export interface UsageModelBreakdown {
   inputTokens: number;
   outputTokens: number;
   weightedTokens: number;
+  /** USD — pi(OpenRouter) 모델만 온다. */
+  costUsd?: number;
 }
 
 export interface ProviderUsage {
@@ -229,9 +231,55 @@ export interface ProviderUsage {
 }
 
 export interface UsageSummary {
-  plans: { claude: string; codex: string };
+  plans: { claude: string; codex: string; pi: string };
   providers: Record<AgentName, ProviderUsage>;
   cliproxy?: CliproxyStatus;
+  /** pi(OpenRouter) 가 설정돼 있을 때만 온다. */
+  openrouter?: OpenRouterCredits;
+}
+
+/** pi 사용자가 OpenRouter 카탈로그에서 고른 모델 하나 (최대 3개). */
+export interface PiModelConfig {
+  id: string;
+  name: string;
+  reasoning: boolean;
+  efforts: string[];
+  defaultEffort: string;
+  contextLength: number;
+  pricing: { prompt: number; completion: number };
+}
+
+/** OpenRouter 라이브 카탈로그 항목 — 모델 선택 UI 의 검색 결과. */
+export interface PiCatalogModel {
+  id: string;
+  name: string;
+  provider: string;
+  contextLength: number;
+  pricing: { prompt: number; completion: number };
+  reasoning: boolean;
+}
+
+/** pi 하네스(설치 · 키 · 모델) 설정 상태. */
+export interface PiStatus {
+  installed: boolean;
+  installing: boolean;
+  version: string | null;
+  keyConfigured: boolean;
+  keyTail: string | null;
+  models: PiModelConfig[];
+  defaultModelId: string | null;
+  setupComplete: boolean;
+  error: string | null;
+}
+
+/** OpenRouter 잔액 — pi 사용량 카드에 표시. */
+export interface OpenRouterCredits {
+  balanceUsd: number;
+  totalCreditsUsd: number;
+  totalUsageUsd: number;
+  /** epoch ms */
+  checkedAt: number | null;
+  error: string | null;
 }
 
 export function isClaudeUsagePlan(value: unknown): value is ClaudeUsagePlan {
@@ -336,6 +384,21 @@ export type SidebarEvent =
   | { type: 'writing-style-error'; requestId: string; code: string; message: string }
   | { type: 'provider-status'; providers: ProviderStatusMap }
   | { type: 'usage-report'; usage: UsageSummary }
+  | { type: 'pi-status'; status: PiStatus }
+  | {
+      type: 'pi-setup-progress';
+      requestId: string;
+      state: 'downloading' | 'installing' | 'configuring' | 'done';
+      detail?: string;
+      /** 내려받은 바이트 — 있으면 결정적 진행률을 그릴 수 있다. */
+      receivedBytes?: number;
+      /** 전체 바이트 — 서버가 크기를 알려주지 않으면 빠진다. */
+      totalBytes?: number;
+      /** 숫자 없는 "일이 진행 중" 신호 — 움직이는 막대를 깨우는 용도. */
+      activity?: boolean;
+    }
+  | { type: 'pi-catalog'; requestId: string; models: PiCatalogModel[] }
+  | { type: 'pi-error'; requestId: string; code: string; message: string }
   | {
       type: 'title-result';
       requestId: string;

@@ -7,6 +7,8 @@ import {
   normalizeAgentPrefs,
   saveAgentPrefs,
 } from '../src/agent/agent-prefs.ts';
+import { setPiModels } from '../src/agent/models.ts';
+import type { PiModelConfig } from '../src/agent/types.ts';
 
 /** localStorage 대역 — 테스트는 브라우저 없이 돌아간다. */
 function makeStorage(seed?: unknown) {
@@ -98,6 +100,55 @@ test('저장소가 없으면 정규화된 값만 돌려주고 던지지 않는�
   const prefs = saveAgentPrefs({ defaultAgent: 'codex' }, null);
   assert.equal(prefs.defaultAgent, 'codex');
   assert.equal(prefs.defaultModel, 'gpt-5.6-sol');
+});
+
+const PI_MODEL: PiModelConfig = {
+  id: 'deepseek/deepseek-chat-v3.1',
+  name: '내 모델',
+  reasoning: true,
+  efforts: ['low', 'medium', 'high'],
+  defaultEffort: 'medium',
+  contextLength: 128000,
+  pricing: { prompt: 0.000001, completion: 0.000002 },
+};
+
+test('pi 레지스트리가 비어 있으면 저장된 pi 모델/강도를 뭉개지 않는다', () => {
+  setPiModels([]);
+  try {
+    const prefs = normalizeAgentPrefs({
+      defaultAgent: 'pi',
+      defaultModel: 'deepseek/deepseek-chat-v3.1',
+      defaultEffort: 'high',
+    });
+    assert.equal(prefs.defaultAgent, 'pi');
+    assert.equal(prefs.defaultModel, 'deepseek/deepseek-chat-v3.1');
+    assert.equal(prefs.defaultEffort, 'high');
+  } finally {
+    setPiModels([]);
+  }
+});
+
+test('pi 레지스트리가 채워지면 모르는 모델은 레지스트리 기본값으로 접힌다', () => {
+  setPiModels([PI_MODEL]);
+  try {
+    const prefs = normalizeAgentPrefs({
+      defaultAgent: 'pi',
+      defaultModel: 'unknown/model',
+      defaultEffort: 'high',
+    });
+    assert.equal(prefs.defaultModel, 'deepseek/deepseek-chat-v3.1');
+    assert.equal(prefs.defaultEffort, 'high');
+
+    const known = normalizeAgentPrefs({
+      defaultAgent: 'pi',
+      defaultModel: 'deepseek/deepseek-chat-v3.1',
+      defaultEffort: 'xhigh',
+    });
+    assert.equal(known.defaultModel, 'deepseek/deepseek-chat-v3.1');
+    assert.equal(known.defaultEffort, 'medium');
+  } finally {
+    setPiModels([]);
+  }
 });
 
 test('쓰기가 실패해도 호출자는 값을 받는다', () => {

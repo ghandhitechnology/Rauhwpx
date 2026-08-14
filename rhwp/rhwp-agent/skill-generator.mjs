@@ -3,6 +3,8 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { openRouterReady } from './agents/title.mjs';
+
 const SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -56,7 +58,90 @@ function extractCodex(output) {
   return JSON.parse(text);
 }
 
-export async function generateSkillDraft(input) {
+/** OpenRouter 는 스키마 강제 모드가 없다 — 지시문으로 요구하고 결과를 여기서 검증한다. */
+function openRouterPrompt(input) {
+  return [
+    promptFor(input),
+    '',
+    'Return ONLY a JSON object matching this JSON Schema. No prose, no code fences.',
+    JSON.stringify(SCHEMA),
+  ].join('\n');
+}
+
+function parseJsonObject(text) {
+  const raw = String(text ?? '').trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error('Skill draft was not JSON');
+  return JSON.parse(raw.slice(start, end + 1));
+}
+
+/**
+ * SCHEMA 를 허브에서 직접 검증한다 (CLI 의 --json-schema 대체).
+ * 통과하면 정리된 초안을, 아니면 사람이 읽을 이유를 담아 던진다.
+ *
+ * @param {unknown} draft
+ */
+export function validateSkillDraft(draft) {
+  if (!draft || typeof draft !== 'object' || Array.isArray(draft)) throw new Error('draft is not an object');
+  const name = draft.name;
+  if (typeof name !== 'string' || !new RegExp(SCHEMA.properties.name.pattern).test(name)) {
+    throw new Error('name must be lowercase hyphen-case');
+  }
+  const files = draft.files;
+  if (!Array.isArray(files) || files.length === 0 || files.length > SCHEMA.properties.files.maxItems) {
+    throw new Error('files must hold 1-30 entries');
+  }
+  const normalized = files.map((file) => {
+    if (!file || typeof file.path !== 'string' || !file.path.trim() || typeof file.content !== 'string') {
+      throw new Error('every file needs a path and content');
+    }
+    return { path: file.path.trim(), content: file.content };
+  });
+  if (!normalized.some((file) => /(^|\/)SKILL\.md$/.test(file.path))) {
+    throw new Error('files must include SKILL.md');
+  }
+  return { name, files: normalized };
+}
+
+/** 한 번 더 시킨다 — 형식만 틀린 경우가 대부분이라 재시도로 붙는다. */
+async function draftViaOpenRouter(input, { piManager, openRouter }) {
+  const model = piManager.defaultModel();
+  if (!model) {
+    const error = new Error('Pi 모델이 설정되지 않았어요');
+    error.code = 'PI_NOT_CONFIGURED';
+    throw error;
+  }
+  const messages = [{ role: 'user', content: openRouterPrompt(input) }];
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const text = await openRouter.chat({
+      key: piManager.apiKey(),
+      model: model.id,
+      messages,
+      maxTokens: 8_000,
+      timeout: 120_000,
+    });
+    try {
+      return validateSkillDraft(parseJsonObject(text));
+    } catch (error) {
+      lastError = error;
+      messages.push({ role: 'assistant', content: text });
+      messages.push({
+        role: 'user',
+        content: `That reply was rejected: ${error.message}. Reply again with only the JSON object.`,
+      });
+    }
+  }
+  throw new Error(`Skill draft did not match the schema: ${lastError?.message ?? 'unknown'}`);
+}
+
+/**
+ * @param {object} input
+ * @param {{ useOpenRouter?: boolean, piManager?: any, openRouter?: any }} [deps]
+ */
+export async function generateSkillDraft(input, deps = {}) {
+  if (openRouterReady(deps)) return draftViaOpenRouter(input, deps);
   const prompt = promptFor(input);
   if (input.agent === 'claude') {
     const output = await run('claude', [

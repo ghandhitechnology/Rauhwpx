@@ -69,9 +69,12 @@ export interface AgentSidebarDeps {
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
 
-const AGENT_LABEL: Record<AgentName, string> = { claude: 'Claude', codex: 'Codex' };
+const AGENT_LABEL: Record<AgentName, string> = { claude: 'Claude', codex: 'Codex', pi: 'Pi' };
 
-const PROVIDER_ICON_SRC: Record<AgentName, string> = {
+/** 단색 로고는 마스크로 그린다 — currentColor 를 타고 테마에 맞는다. */
+const MASK_ICON_AGENTS: readonly AgentName[] = ['codex', 'pi'];
+
+const PROVIDER_ICON_SRC: Partial<Record<AgentName, string>> = {
   claude: '/icons/provider-claude.png',
   codex: '/icons/provider-codex.png',
 };
@@ -231,7 +234,7 @@ function persistReviewWidth(width: number): void {
 }
 
 function createProviderIcon(agent: AgentName): HTMLElement {
-  if (agent === 'codex') {
+  if (MASK_ICON_AGENTS.includes(agent)) {
     // 단색 로고 — currentColor 마스크로 라이트/다크에 맞춤
     const mark = el('span', 'ag-provider-icon ag-provider-icon-mask');
     mark.dataset.agent = agent;
@@ -241,7 +244,7 @@ function createProviderIcon(agent: AgentName): HTMLElement {
   const img = document.createElement('img');
   img.className = 'ag-provider-icon';
   img.dataset.agent = agent;
-  img.src = PROVIDER_ICON_SRC[agent];
+  img.src = PROVIDER_ICON_SRC[agent] ?? '';
   img.alt = '';
   img.draggable = false;
   img.setAttribute('aria-hidden', 'true');
@@ -701,7 +704,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
   });
 
-  const agentOrder = ['claude', 'codex'] as const;
+  const agentOrder = ['claude', 'codex', 'pi'] as const;
+  /* pi 는 설치·키·모델이 다 끝나야 입력기 메뉴에 선다 (설정 탭에는 늘 있다). */
+  let piSetupComplete = false;
 
   const header = el('header', 'ag-header');
   const selectors = el('div', 'ag-selectors');
@@ -747,6 +752,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     providerMenu.appendChild(item);
   }
 
+  /** 메뉴에 실제로 서 있는 항목만 (숨은 pi 는 건너뛴다). */
+  function visibleProviderItems(): HTMLButtonElement[] {
+    return agentOrder
+      .map((name) => providerItems.get(name))
+      .filter((item): item is HTMLButtonElement => !!item && !item.hidden);
+  }
+
+  function syncProviderMenu(): void {
+    const pi = providerItems.get('pi');
+    if (pi) pi.hidden = !piSetupComplete && selectedAgent !== 'pi';
+  }
+
+  syncProviderMenu();
+
   providerTrigger.addEventListener('click', (e) => {
     e.stopPropagation();
     if (isControlLocked()) return;
@@ -763,7 +782,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
   });
   providerMenu.addEventListener('keydown', (e) => {
-    const items = agentOrder.map((name) => providerItems.get(name)!);
+    const items = visibleProviderItems();
     const current = items.indexOf(document.activeElement as HTMLButtonElement);
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -915,7 +934,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function rebuildEffortMenu(): void {
     effortMenu.replaceChildren();
     effortItems = new Map();
-    for (const opt of effortsForAgent(selectedAgent, selectedModel)) {
+    const options = effortsForAgent(selectedAgent, selectedModel);
+    // 추론 강도를 받지 않는 모델(pi 의 비추론 모델)에서는 칸 자체를 접는다.
+    effortWrap.hidden = options.length === 0;
+    for (const opt of options) {
       const item = el('button', 'ag-model-item ag-effort-item', opt.label);
       item.type = 'button';
       item.dataset.effort = opt.id;
@@ -2886,6 +2908,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       item.classList.toggle('ag-active', active);
       item.setAttribute('aria-checked', active ? 'true' : 'false');
     }
+    syncProviderMenu();
     updateWorkspaceAgentContext();
   }
 
@@ -3459,13 +3482,28 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         invalidateSkillValidation();
         skillsStatus.textContent = `오류: ${e.message}`;
         break;
+      case 'pi-status':
+        // 브리지가 모델 레지스트리를 먼저 갱신했다 — 라벨과 강도를 다시 읽는다.
+        piSetupComplete = e.status.setupComplete;
+        syncProviderMenu();
+        if (selectedAgent === 'pi') {
+          selectedModel = resolveModelForAgent('pi', selectedModel);
+          selectedEffort = resolveEffortForAgent('pi', selectedEffort, selectedModel);
+        }
+        rebuildLlmMenu();
+        rebuildEffortMenu();
+        refreshSidebarWidthMin();
+        break;
       case 'writing-style-status':
       case 'writing-style-progress':
       case 'writing-style-result':
       case 'writing-style-error':
-      // 프로바이더 상태·사용량은 설정 탭이 이미 받아 그렸다.
+      // 프로바이더 상태·사용량·pi 설정 진행은 설정 탭이 이미 받아 그렸다.
       case 'provider-status':
       case 'usage-report':
+      case 'pi-setup-progress':
+      case 'pi-catalog':
+      case 'pi-error':
         break;
       case 'chat-stopped':
         setTurnRunning(false);
