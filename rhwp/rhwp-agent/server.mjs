@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { createClaudeSession } from './agents/claude.mjs';
-import { createCodexSession } from './agents/codex.mjs';
+import { createCodexSession, prepareCodexHome } from './agents/codex.mjs';
 import { generateChatTitle } from './agents/title.mjs';
 import { SkillRegistry } from './skills.mjs';
 import { generateSkillDraft } from './skill-generator.mjs';
@@ -36,17 +36,24 @@ const ISOLATED_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-agent-home-'
 const ISOLATED_CODEX_HOME = path.join(ISOLATED_HOME, '.codex');
 const STUDIO_TOOL_TIMEOUT_MS = 30_000;
 const toolDefinitionsByName = new Map(TOOL_DEFINITIONS.map((definition) => [definition.name, definition]));
-await fs.mkdir(ISOLATED_CODEX_HOME, { recursive: true });
-const sourceCodexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex');
-try {
+let sourceCodexAuthPath;
+const sourceCodexHomes = [...new Set([
+  process.env.CODEX_HOME,
+  path.join(os.homedir(), '.codex'),
+].filter(Boolean))];
+for (const sourceCodexHome of sourceCodexHomes) {
   const authPath = path.join(sourceCodexHome, 'auth.json');
-  const authStat = await fs.lstat(authPath);
-  if (authStat.isFile() && !authStat.isSymbolicLink()) {
-    await fs.symlink(authPath, path.join(ISOLATED_CODEX_HOME, 'auth.json'));
+  try {
+    const authStat = await fs.lstat(authPath);
+    if (authStat.isFile() && !authStat.isSymbolicLink()) {
+      sourceCodexAuthPath = authPath;
+      break;
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
   }
-} catch (error) {
-  if (error?.code !== 'ENOENT') throw error;
 }
+prepareCodexHome(ISOLATED_CODEX_HOME, sourceCodexAuthPath);
 const writingStyleStore = await new WritingStyleStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
 const providerHealth = createProviderHealth();
@@ -282,6 +289,7 @@ function startSession(
     permissionProfile,
     isolatedHome: ISOLATED_HOME,
     codexHome: ISOLATED_CODEX_HOME,
+    codexAuthPath: sourceCodexAuthPath,
     onEvent: makeBackendEventHandler(generation),
     workflow,
     phase: workflow === 'direct' ? 'implementing' : planning.phase,
