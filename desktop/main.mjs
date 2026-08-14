@@ -189,33 +189,45 @@ function ensureAgent(opts = {}) {
 }
 
 function installMenu() {
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    {
-      label: 'Rauhwpx',
-      submenu: [
-        { role: 'about' },
-        { type: 'separator' },
-        {
-          label: 'Check for Updates…',
-          click: () => {
-            if (!app.isPackaged) {
-              void shell.openExternal(RELEASES_URL);
-              return;
-            }
-            void autoUpdater.checkForUpdatesAndNotify();
-          },
-        },
-        { type: 'separator' },
-        { role: 'hide' },
-        { role: 'hideOthers' },
-        { role: 'unhide' },
-        { type: 'separator' },
-        { role: 'quit' },
-      ],
+  const isMac = process.platform === 'darwin';
+  const checkForUpdates = {
+    label: 'Check for Updates…',
+    click: () => {
+      if (!app.isPackaged) {
+        void shell.openExternal(RELEASES_URL);
+        return;
+      }
+      void autoUpdater.checkForUpdatesAndNotify();
     },
+  };
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    isMac
+      ? {
+        label: 'Rauhwpx',
+        submenu: [
+          { role: 'about' },
+          { type: 'separator' },
+          checkForUpdates,
+          { type: 'separator' },
+          { role: 'hide' },
+          { role: 'hideOthers' },
+          { role: 'unhide' },
+          { type: 'separator' },
+          { role: 'quit' },
+        ],
+      }
+      : {
+        label: 'File',
+        submenu: [
+          checkForUpdates,
+          { type: 'separator' },
+          { role: 'quit' },
+        ],
+      },
     { role: 'editMenu' },
     { role: 'viewMenu' },
     { role: 'windowMenu' },
+    ...(isMac ? [] : [{ role: 'help', submenu: [{ role: 'about' }] }]),
   ]));
 }
 
