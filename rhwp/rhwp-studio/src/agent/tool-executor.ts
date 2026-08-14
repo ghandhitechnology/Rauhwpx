@@ -849,24 +849,30 @@ export class AgentToolExecutor {
       || cellKey(a.cell).localeCompare(cellKey(b.cell))
       || b.paraIdx - a.paraIdx
       || b.charOffset - a.charOffset);
-    let replacedCount = 0;
     let skippedPendingDelete = 0;
-    let changeSetId: string | null = null;
+    const items: Array<{ range: DocRange; text: string }> = [];
     for (const m of ordered) {
-      // 삭제 마크 내부의 매치는 건너뛴다 — 교체해도 승인 시 마크와 함께 지워진다
-      if (this.deps.pending.findDeleteMarkContaining?.(m.sectionIdx, m.paraIdx, m.charOffset, m.cell)) {
-        skippedPendingDelete++;
-        continue;
-      }
       const range: DocRange = {
         sectionIdx: m.sectionIdx,
         startParaIdx: m.paraIdx, startCharOffset: m.charOffset,
         endParaIdx: m.paraIdx, endCharOffset: m.charOffset + m.length,
       };
       if (m.cell) range.cell = m.cell;
-      const r = this.deps.pending.replaceText(range, replacement, agent, { retainSnapshot: false });
-      changeSetId = r.changeSetId;
-      replacedCount++;
+      // 삭제 마크와 겹치는 매치는 건너뛴다 — 일부만 겹쳐도 마크가 드리프트하거나
+      // 승인 시 교체 텍스트가 함께 지워진다 (시작점만 보면 부분 겹침을 놓친다)
+      if (this.deps.pending.findDeleteMarkOverlapping?.(range)) {
+        skippedPendingDelete++;
+        continue;
+      }
+      items.push({ range, text: replacement });
+    }
+    // 전부-또는-전무: 중간 실패 시 pending/문서가 배치 이전으로 복원되고 에러가 난다 —
+    // 부분 적용된 배치가 리뷰 카드에 남지 않는다.
+    let replacedCount = 0;
+    let changeSetId: string | null = null;
+    if (items.length > 0) {
+      changeSetId = this.deps.pending.replaceTextBatch(items, agent).changeSetId;
+      replacedCount = items.length;
     }
     return {
       revision: this.revision,
@@ -1429,6 +1435,14 @@ export class AgentToolExecutor {
     const text = reqString(args, 'text');
     if (text.length < 1 || text.length > 10_000) {
       throw new AgentToolError('INVALID_ARGS', `text must be 1..10000 chars (got ${text.length})`);
+    }
+    const mark = this.deps.pending.findDeleteMarkOverlapping?.(range);
+    if (mark) {
+      throw new AgentToolError('PENDING_DELETE_OVERLAP',
+        `range overlaps a range already marked for deletion `
+        + `(p${mark.range.startParaIdx}:${mark.range.startCharOffset}-p${mark.range.endParaIdx}:${mark.range.endCharOffset}) — `
+        + 'replacing marked text corrupts the pending delete. Either replace outside the mark, '
+        + 'or skip the delete_range and use replace_range alone for that region.');
     }
     // 원자적 교체 (삭제 마크 + 끝 삽입 2-op 조합 폐기) — 서식 보존 + 스냅샷 기반 되돌림
     const r = this.deps.pending.replaceText(range, text, agent);

@@ -423,6 +423,68 @@ export class PendingEditManager {
     return null;
   }
 
+  /**
+   * executor 가드: 범위가 pending 삭제 마크와 **겹치면** 그 마크의 요약을 반환한다
+   * (경계 접촉은 겹침이 아니다). 마크와 겹치는 교체는 마크 텍스트를 부분 삭제해
+   * 마크를 드리프트시키거나, 승인 시 교체 텍스트 일부까지 지우므로 사전에 막는다.
+   */
+  findDeleteMarkOverlapping(range: DocRange): { range: DocRange; text: string } | null {
+    const atOrBefore = (aPara: number, aOff: number, bPara: number, bOff: number): boolean =>
+      aPara < bPara || (aPara === bPara && aOff <= bOff);
+    for (const set of this.sets) {
+      for (const op of set.ops) {
+        if (op.kind !== 'delete') continue;
+        const r = op.range;
+        if (r.sectionIdx !== range.sectionIdx || !sameCell(r.cell, range.cell)) continue;
+        const disjoint =
+          atOrBefore(range.endParaIdx, range.endCharOffset, r.startParaIdx, r.startCharOffset)
+          || atOrBefore(r.endParaIdx, r.endCharOffset, range.startParaIdx, range.startCharOffset);
+        if (!disjoint) return { range: { ...r }, text: op.text };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 원자적 벌크 교체 — 모든 항목이 성공해야 등록된다. 중간 실패 시 문서(스냅샷)와
+   * pending 상태(op 좌표·추가 op·새 set)를 배치 이전으로 통째로 되돌리고 던진다 —
+   * 부분 적용된 찾아-바꾸기 배치가 리뷰에 남는 것을 막는다 (replace_all 전용).
+   * 항목은 호출자가 문서 좌표 역순으로 정렬해 넘긴다.
+   */
+  replaceTextBatch(
+    items: Array<{ range: DocRange; text: string }>,
+    agent: AgentName,
+  ): { changeSetId: string } {
+    if (items.length === 0) throw new AgentToolError('INVALID_ARGS', 'batch is empty');
+    const wasm = this.deps.wasm;
+    const pendingState = this.capturePendingState();
+    const setIdsBefore = new Set(this.sets.map((s) => s.id));
+    const openBefore = this.open;
+    this.deps.inputHandler.prepareSnapshotCapacity?.(1);
+    const snapId = wasm.saveSnapshot();
+    this.deps.inputHandler.retainExternalSnapshot?.();
+    try {
+      let changeSetId = '';
+      for (const item of items) {
+        changeSetId = this.replaceText(item.range, item.text, agent, { retainSnapshot: false }).changeSetId;
+      }
+      return { changeSetId };
+    } catch (err) {
+      try { wasm.restoreSnapshot(snapId); } catch { /* best effort */ }
+      // 배치가 만든 set 은 통째로 제거하고, 기존 set 들의 op 은 배치 이전 좌표로 복원한다.
+      this.sets = this.sets.filter((s) => setIdsBefore.has(s.id));
+      this.open = openBefore && setIdsBefore.has(openBefore.id) ? openBefore : null;
+      this.restorePendingState(pendingState);
+      this.emitDocEvents('agent-pending-edit');
+      this.syncOverlay();
+      this.emitChange({ type: 'ops-changed' });
+      throw err;
+    } finally {
+      wasm.discardSnapshot(snapId);
+      this.deps.inputHandler.releaseExternalSnapshot?.();
+    }
+  }
+
   /** executor 가드: 해당 표에 파괴적 마크(delete_row/col, merge)가 걸려 있는가 */
   hasDestructiveTableMark(sectionIdx: number, tableParaIdx: number, controlIdx: number): boolean {
     for (const set of this.sets) {

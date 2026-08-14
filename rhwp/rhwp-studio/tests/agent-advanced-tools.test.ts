@@ -209,6 +209,53 @@ test('replace_all: 삭제 마크 내부의 매치는 건너뛰고 개수로 보�
   assert.equal(h.text(0).startsWith('X 유지'), true);
 });
 
+test('replace_all: 삭제 마크에 일부만 겹치는 매치도 건너뛴다 (시작점 밖 + 끝 겹침)', async () => {
+  // "긴단어들" 의 뒤 두 글자부터 삭제 마크 — 매치는 마크 앞에서 시작해 안으로 뻗는다
+  const h = makeHarness(['앞 긴단어들 뒤']);
+  h.pending.markDelete('claude', {
+    sectionIdx: 0, startParaIdx: 0, startCharOffset: 4, endParaIdx: 0, endCharOffset: 8,
+  }); // "어들 뒤"
+  const r = await run(h, 'replace_all', { query: '긴단어들', replacement: 'X' }) as {
+    replacedCount: number; skippedPendingDelete: number;
+  };
+  assert.equal(r.replacedCount, 0);
+  assert.equal(r.skippedPendingDelete, 1);
+  assert.equal(h.text(0), '앞 긴단어들 뒤'); // 문서 불변
+});
+
+test('replace_all: 중간 실패 시 배치 전체가 롤백되고 pending 에 아무것도 남지 않는다', async () => {
+  const h = makeHarness(['foo 하나 foo 둘 foo 셋']);
+  // 두 번째 교체(문서 역순이라 가운데 매치)의 삽입에서 실패를 주입한다
+  const realInsert = h.wasm.insertText.bind(h.wasm);
+  let calls = 0;
+  (h.wasm as { insertText: unknown }).insertText = (s: number, p: number, off: number, t: string) => {
+    calls++;
+    if (calls === 2) throw new Error('주입된 실패');
+    return realInsert(s, p, off, t);
+  };
+  await assert.rejects(run(h, 'replace_all', { query: 'foo', replacement: 'BAR' }));
+  assert.equal(h.text(0), 'foo 하나 foo 둘 foo 셋'); // 문서 원상 복구
+  assert.equal(h.pending.hasPending(), false, '부분 배치가 pending 에 남으면 안 된다');
+});
+
+test('replace_range: 삭제 마크와 겹치는 범위는 PENDING_DELETE_OVERLAP', async () => {
+  const h = makeHarness(['가나다라마바사']);
+  h.pending.markDelete('claude', {
+    sectionIdx: 0, startParaIdx: 0, startCharOffset: 2, endParaIdx: 0, endCharOffset: 5,
+  });
+  await assert.rejects(
+    run(h, 'replace_range', {
+      sectionIdx: 0, startParaIdx: 0, startCharOffset: 4, endParaIdx: 0, endCharOffset: 7, text: 'X',
+    }),
+    (e: unknown) => e instanceof AgentToolError && e.code === 'PENDING_DELETE_OVERLAP',
+  );
+  // 경계 접촉(마크 끝 == 범위 시작)은 허용
+  const ok = await run(h, 'replace_range', {
+    sectionIdx: 0, startParaIdx: 0, startCharOffset: 5, endParaIdx: 0, endCharOffset: 7, text: 'XY',
+  }) as { changeSetId: string };
+  assert.ok(ok.changeSetId);
+});
+
 test('replace_all: 빈 replacement 는 전부 삭제한다', async () => {
   const h = makeHarness(['지우기foo좋은foo날']);
   const r = await run(h, 'replace_all', { query: 'foo', replacement: '' }) as { replacedCount: number };
