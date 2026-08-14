@@ -70,6 +70,8 @@ let studioSocket = null;
 const mcpSockets = new Set();
 /** @type {{ agent: 'claude'|'codex', model: string|null, effort: string|null, permissionProfile: 'safe'|'unrestricted', backend: any, status: 'idle'|'running', sessionId: string|null, threadId: string, documentId: string|null, documentName: string|null, chatId: string, planning: PlanningState } | null} */
 let session = null;
+/** @type {{ messageId: string, message: any, owner: any } | null} */
+let pendingReferenceMessage = null;
 let nextCapabilityEpoch = 1;
 
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
@@ -188,6 +190,7 @@ function makeBackendEventHandler(generation) {
 }
 
 function disposeSession() {
+  pendingReferenceMessage = null;
   if (!session) return;
   const wasRunning = session.status === 'running';
   const agent = session.agent;
@@ -227,6 +230,35 @@ function addReferenceContext(activeSession, query, prompt) {
     log(`reference retrieval failed: ${error?.message ?? error}`);
     return prompt;
   }
+}
+
+function dispatchUserMessage(sock, msg, activeSession) {
+  if (activeSession.planning.phase === 'awaiting-approval') {
+    const planId = activeSession.planning.latestPlan?.planId;
+    if (!planId) {
+      sendJson(sock, { v: 1, type: 'chat-error', code: 'PLAN_NOT_FOUND', message: 'The latest plan is unavailable; return to planning and present it again.' });
+      return;
+    }
+    void requestImplementationPlanChanges(sock, { planId, feedback: msg.text })
+      .catch((error) => sendChatError(sock, error));
+    return;
+  }
+  if (activeSession.planning.phase === 'switching') {
+    sendJson(sock, { v: 1, type: 'chat-error', code: 'WORKFLOW_SWITCHING', message: 'The provider is switching into implementation mode.' });
+    return;
+  }
+  activeSession.status = 'running';
+  void skillRegistry.promptContext(msg.text, typeof msg.skillName === 'string' ? msg.skillName : undefined, {
+    phase: activeSession.planning.snapshot().phase,
+  })
+    .then((prompt) => {
+      if (session !== activeSession) throw new Error('Agent session changed before the message was dispatched');
+      activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.text, prompt));
+    })
+    .catch((e) => {
+      if (session === activeSession) activeSession.status = 'idle';
+      sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
+    });
 }
 
 function emitWorkflowState(extra = {}) {
@@ -547,45 +579,33 @@ function handleStudioMessage(sock, msg) {
         sendChatError(sock, error, 'INVALID_REQUEST');
         return;
       }
-      if (session.status === 'running') {
+      if (session.status === 'running' || pendingReferenceMessage) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_BUSY', message: 'A turn is already in progress.' });
-        return;
-      }
-      if (session.planning.phase === 'awaiting-approval') {
-        const planId = session.planning.latestPlan?.planId;
-        if (!planId) {
-          sendJson(sock, { v: 1, type: 'chat-error', code: 'PLAN_NOT_FOUND', message: 'The latest plan is unavailable; return to planning and present it again.' });
-          return;
-        }
-        if (typeof msg.text !== 'string' || msg.text.length === 0) {
-          sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'chat-user-message requires text' });
-          return;
-        }
-        void requestImplementationPlanChanges(sock, { planId, feedback: msg.text })
-          .catch((error) => sendChatError(sock, error));
-        return;
-      }
-      if (session.planning.phase === 'switching') {
-        sendJson(sock, { v: 1, type: 'chat-error', code: 'WORKFLOW_SWITCHING', message: 'The provider is switching into implementation mode.' });
         return;
       }
       if (typeof msg.text !== 'string' || msg.text.length === 0) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'chat-user-message requires text' });
         return;
       }
-      const activeSession = session;
-      activeSession.status = 'running';
-      void skillRegistry.promptContext(msg.text, typeof msg.skillName === 'string' ? msg.skillName : undefined, {
-        phase: activeSession.planning.snapshot().phase,
-      })
-        .then((prompt) => {
-          if (session !== activeSession) throw new Error('Agent session changed before the message was dispatched');
-          activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.text, prompt));
-        })
-        .catch((e) => {
-          if (session === activeSession) activeSession.status = 'idle';
-          sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
-        });
+      if (msg.referencesPending === true) {
+        if (typeof msg.messageId !== 'string' || !msg.messageId) {
+          sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'Reference-bearing messages require messageId' });
+          return;
+        }
+        pendingReferenceMessage = { messageId: msg.messageId, message: msg, owner: session };
+        return;
+      }
+      dispatchUserMessage(sock, msg, session);
+      return;
+    }
+    case 'chat-reference-uploads-complete': {
+      const pending = pendingReferenceMessage;
+      if (!pending || pending.owner !== session || msg.messageId !== pending.messageId) {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REFERENCE_MESSAGE', message: 'No matching message is waiting for reference uploads.' });
+        return;
+      }
+      pendingReferenceMessage = null;
+      dispatchUserMessage(sock, pending.message, pending.owner);
       return;
     }
     case 'chat-permission-set': {
@@ -1068,6 +1088,7 @@ httpServer.on('upgrade', (req, socket, head) => {
       ws.on('close', () => {
         if (studioSocket === ws) {
           studioSocket = null;
+          pendingReferenceMessage = null;
           failAllPendingCalls('Studio disconnected while tool calls were in flight; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
         }
       });

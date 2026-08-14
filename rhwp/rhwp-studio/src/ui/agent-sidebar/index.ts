@@ -467,6 +467,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     documentId: currentDocumentId,
   });
   let assistantBuffer = '';
+  let attachmentsSending = false;
   let threadsPanelOpen = false;
   let skillsPanelOpen = false;
   let settingsPanelOpen = false;
@@ -2402,6 +2403,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   input.addEventListener('input', () => {
     input.style.height = 'auto';
     input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
+    if (!input.value) referenceLibrary.discardDrafts();
     rebuildSlashMenu();
   });
   composer.addEventListener('submit', (e) => {
@@ -2411,7 +2413,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       bridge.interrupt();
       return;
     }
-    if (planningPhase === 'switching') return;
+    if (planningPhase === 'switching' || attachmentsSending) return;
     let text = input.value.trim();
     if (!text || connState !== 'connected') return;
     if (text.startsWith('//')) text = text.slice(1);
@@ -2458,7 +2460,27 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     recordUserMessage(visibleText);
     followConversation = true;
     withAutoScroll(() => messages.appendChild(el('div', 'ag-msg ag-msg-user', visibleText)));
-    bridge.sendUserMessage(text, skillNameForMessage);
+    const hasDrafts = referenceLibrary.hasDrafts();
+    const messageSent = bridge.sendUserMessage(text, skillNameForMessage, hasDrafts);
+    if (hasDrafts) {
+      attachmentsSending = true;
+      updateComposer();
+      const attachmentCommit = referenceLibrary.commitDraftsAfter(messageSent);
+      void (async () => {
+        const messageId = await messageSent;
+        try {
+          await attachmentCommit;
+        } finally {
+          if (messageId) bridge.completeReferenceUploads(messageId);
+          attachmentsSending = false;
+          updateComposer();
+        }
+      })().catch((error) => {
+        systemMessage(`첨부 파일을 처리하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    } else {
+      void messageSent;
+    }
     input.value = '';
     setSlashMenuOpen(false);
     input.style.height = 'auto';
@@ -2968,8 +2990,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       send.disabled = true;
       input.placeholder = `"${readOnlyDocLabel}" 문서의 채팅 — 읽기 전용`;
     } else {
-      input.disabled = connState !== 'connected';
-      send.disabled = connState !== 'connected';
+      input.disabled = connState !== 'connected' || attachmentsSending;
+      send.disabled = connState !== 'connected' || attachmentsSending;
       input.placeholder =
         chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'
           ? '계획에서 바꿀 부분을 알려주세요'
@@ -2983,7 +3005,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     send.title = sendLabel;
     send.classList.toggle('ag-stop', turnRunning);
     // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
-    sendHint.hidden = turnRunning || connState !== 'connected' || readOnlyDocLabel !== null;
+    sendHint.hidden = turnRunning || attachmentsSending || connState !== 'connected' || readOnlyDocLabel !== null;
     // 실행 중이거나 작업 방식/계획→실행 전환 중에는 모드·모델·권한을 잠근다.
     const controlsLocked = isControlLocked();
     providerTrigger.disabled = controlsLocked;
@@ -3545,9 +3567,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   // ── 계획 모드 ────────────────────────────────────────
 
-  /** 실행 중이거나 전환 중에는 모드·모델·권한을 바꿀 수 없다. */
+  /** 실행 중이거나 첨부를 커밋하거나 전환 중에는 모드·모델·권한을 바꿀 수 없다. */
   function isControlLocked(): boolean {
-    return turnRunning || workflowTransitionPending || planningPhase === 'switching';
+    return turnRunning || attachmentsSending || workflowTransitionPending || planningPhase === 'switching';
   }
 
   function hasPendingDocumentEdits(): boolean {
