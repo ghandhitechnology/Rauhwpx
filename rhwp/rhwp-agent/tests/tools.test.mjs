@@ -117,10 +117,12 @@ test('charOffset 계열 도구 전부에 OFFSET_CAVEAT 가 붙어 있다', () =>
   }
 });
 
-test('verify_changes 설명에 셀프체크 지시와 취소선 안내가 있다', () => {
+test('verify_changes 설명에 셀프체크 지시와 라이브 미리보기 안내가 있다', () => {
   const desc = byName.get('verify_changes').description;
   assert.match(desc, /self-check/i);
-  assert.match(desc, /struck-through/);
+  // 삭제/교체는 라이브 미리보기에 즉시 반영 — 재삽입 금지 안내
+  assert.match(desc, /live preview/);
+  assert.match(desc, /do NOT re-insert/);
   assert.match(desc, /includeImage/);
   // 응답의 실제 모양(describeChangeSet)은 per-op kind + applied 불리언이다
   assert.match(desc, /applied flag/);
