@@ -44,6 +44,8 @@ import type {
   ReferenceScope,
   ReferenceScopeContext,
   ReferenceSearchHit,
+  StagedReference,
+  MessageReferenceStatus,
   StructuredPlan,
   UsageModelBreakdown,
   UsageSource,
@@ -95,7 +97,10 @@ export interface AgentBridge {
   stopChat(): void;
   /** gpt-5.6-luna 로 스레드 제목 생성 요청. */
   requestTitle(threadId: string, preview: string): string;
-  sendUserMessage(text: string, skillName?: string): void;
+  sendUserMessage(text: string, skillName?: string, stagedReferenceIds?: string[]): Promise<string | null>;
+  completeReferenceUploads(messageId: string): void;
+  stageReference(scopeId: string, file: File): Promise<StagedReference>;
+  discardStagedReference(scopeId: string, stageId: string): Promise<void>;
   /** 참고자료 원본은 HTTP로 스트리밍하고, 브라우저에는 메타데이터만 돌려준다. */
   uploadReference(scope: ReferenceScope, scopeId: string, file: File): Promise<ReferenceFile>;
   listReferences(scope: ReferenceScope, scopeId: string): Promise<ReferenceFile[]>;
@@ -501,6 +506,9 @@ class AgentBridgeImpl implements AgentBridge {
     text: string;
     skillName?: string;
     context: ReferenceScopeContext;
+    messageId?: string;
+    stagedReferenceIds?: string[];
+    resolve(messageId: string | null): void;
   }> = [];
   private threadId = '';
   private documentId: string | null = null;
@@ -922,6 +930,23 @@ class AgentBridgeImpl implements AgentBridge {
         }
         break;
       }
+      case 'chat-reference-status': {
+        const attachments = Array.isArray(msg.attachments)
+          ? msg.attachments.flatMap((raw: any): MessageReferenceStatus[] => {
+            if (!raw || typeof raw.stageId !== 'string'
+              || (raw.status !== 'processing' && raw.status !== 'ready' && raw.status !== 'error')) return [];
+            const file = raw.file ? normalizeReferenceFile(raw.file) : null;
+            return [{
+              stageId: raw.stageId,
+              status: raw.status,
+              ...(file ? { file } : {}),
+              ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
+            }];
+          })
+          : [];
+        this.emit({ type: 'reference-status', messageId: String(msg.messageId ?? ''), attachments });
+        break;
+      }
       case 'workflow-changed': {
         this.syncWorkflowState(msg, 'direct', 'planning');
         this.emit({ type: 'workflow-changed', ...this.workflowState() });
@@ -1223,6 +1248,7 @@ class AgentBridgeImpl implements AgentBridge {
   }
 
   stopChat(): void {
+    for (const message of this.queuedMessages) message.resolve(null);
     this.queuedMessages = [];
     this.pendingChatStart = null;
     this.activeAgent = null;
@@ -1256,66 +1282,75 @@ class AgentBridgeImpl implements AgentBridge {
     return requestId;
   }
 
-  sendUserMessage(text: string, skillName?: string): void {
+  sendUserMessage(text: string, skillName?: string, stagedReferenceIds: string[] = []): Promise<string | null> {
     const context = this.referenceContext();
-    if (this.activeAgent === null) {
-      this.queuedMessages.push({ text, skillName, context });
-      if (this.state === 'connected') {
-        this.sendJson({
-          v: AGENT_PROTOCOL_VERSION,
-          type: 'chat-start',
-          agent: this.selectedAgent,
-          workflow: this.workflow,
-          threadId: context.threadId,
-          documentId: context.documentId,
-          documentName: context.documentName ?? null,
-          ...(this.selectedModel ? { model: this.selectedModel } : {}),
-          ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
-          permissionProfile: this.permissionProfile,
-        });
-      } else {
-        this.pendingChatStart = {
-          agent: this.selectedAgent,
-          model: this.selectedModel ?? undefined,
-          effort: this.selectedEffort ?? undefined,
-          permissionProfile: this.permissionProfile,
-          workflow: this.workflow,
-          threadId: context.threadId,
-          documentId: context.documentId,
-          documentName: context.documentName ?? null,
-        };
+    const messageId = stagedReferenceIds.length > 0 ? `message-${++this.requestSeq}` : undefined;
+    return new Promise((resolve) => {
+      const message = { text, skillName, context, messageId, stagedReferenceIds: [...stagedReferenceIds], resolve };
+      if (this.activeAgent === null) {
+        this.queuedMessages.push(message);
+        if (this.state === 'connected') {
+          this.sendJson({
+            v: AGENT_PROTOCOL_VERSION,
+            type: 'chat-start',
+            agent: this.selectedAgent,
+            workflow: this.workflow,
+            threadId: context.threadId,
+            documentId: context.documentId,
+            documentName: context.documentName ?? null,
+            ...(this.selectedModel ? { model: this.selectedModel } : {}),
+            ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
+            permissionProfile: this.permissionProfile,
+          });
+        } else {
+          this.pendingChatStart = {
+            agent: this.selectedAgent,
+            model: this.selectedModel ?? undefined,
+            effort: this.selectedEffort ?? undefined,
+            permissionProfile: this.permissionProfile,
+            workflow: this.workflow,
+            threadId: context.threadId,
+            documentId: context.documentId,
+            documentName: context.documentName ?? null,
+          };
+        }
+        return;
       }
-      return;
-    }
-    if (this.queuedMessages.length > 0) {
-      this.queuedMessages.push({ text, skillName, context });
-      this.flushQueuedMessages();
-      return;
-    }
+      if (this.queuedMessages.length > 0) {
+        this.queuedMessages.push(message);
+        this.flushQueuedMessages();
+        return;
+      }
+      this.dispatchUserMessage(message);
+    });
+  }
+
+  completeReferenceUploads(messageId: string): void {
     this.sendJson({
       v: AGENT_PROTOCOL_VERSION,
-      type: 'chat-user-message',
-      text,
-      threadId: context.threadId,
-      documentId: context.documentId,
-      ...(skillName ? { skillName } : {}),
+      type: 'chat-reference-uploads-complete',
+      messageId,
     });
+  }
+
+  private dispatchUserMessage(message: (typeof this.queuedMessages)[number]): void {
+    const sent = this.sendJson({
+      v: AGENT_PROTOCOL_VERSION,
+      type: 'chat-user-message',
+      text: message.text,
+      threadId: message.context.threadId,
+      documentId: message.context.documentId,
+      ...(message.skillName ? { skillName: message.skillName } : {}),
+      ...(message.messageId ? { messageId: message.messageId, stagedReferenceIds: message.stagedReferenceIds } : {}),
+    });
+    message.resolve(sent ? (message.messageId ?? null) : null);
   }
 
   private flushQueuedMessages(): void {
     if (this.state !== 'connected') return;
     const queued = this.queuedMessages;
     this.queuedMessages = [];
-    for (const message of queued) {
-      this.sendJson({
-        v: AGENT_PROTOCOL_VERSION,
-        type: 'chat-user-message',
-        text: message.text,
-        threadId: message.context.threadId,
-        documentId: message.context.documentId,
-        ...(message.skillName ? { skillName: message.skillName } : {}),
-      });
-    }
+    for (const message of queued) this.dispatchUserMessage(message);
   }
 
   private referenceContext(): ReferenceScopeContext {
@@ -1390,6 +1425,43 @@ class AgentBridgeImpl implements AgentBridge {
     const normalized = normalizeReferenceFile(source, { scope, scopeId });
     if (!normalized) throw new Error('참고자료 서버가 잘못된 파일 정보를 반환했습니다.');
     return normalized;
+  }
+
+  async stageReference(scopeId: string, file: File): Promise<StagedReference> {
+    const payload = await this.referenceFetch(
+      this.referenceUrl('/reference-staging', { scopeId }),
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+          'X-File-Name': encodeURIComponent(file.name),
+        },
+        body: file,
+      },
+    );
+    const source = payload && typeof payload === 'object' ? (payload as any).staged : null;
+    if (!source || typeof source.id !== 'string' || typeof source.name !== 'string'
+      || typeof source.scopeId !== 'string' || typeof source.expiresAt !== 'string') {
+      throw new Error('참고자료 서버가 잘못된 임시 파일 정보를 반환했습니다.');
+    }
+    return {
+      id: source.id,
+      scope: 'chat',
+      scopeId: source.scopeId,
+      name: source.name,
+      mimeType: typeof source.mimeType === 'string' ? source.mimeType : 'application/octet-stream',
+      size: Number(source.size) || 0,
+      status: 'ready',
+      createdAt: String(source.createdAt ?? new Date(0).toISOString()),
+      expiresAt: source.expiresAt,
+    };
+  }
+
+  async discardStagedReference(scopeId: string, stageId: string): Promise<void> {
+    await this.referenceFetch(
+      this.referenceUrl(`/reference-staging/${encodeURIComponent(stageId)}`, { scopeId }),
+      { method: 'DELETE' },
+    );
   }
 
   async listReferences(scope: ReferenceScope, scopeId: string): Promise<ReferenceFile[]> {

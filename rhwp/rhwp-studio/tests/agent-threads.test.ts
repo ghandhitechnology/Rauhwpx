@@ -126,6 +126,36 @@ test('threads persist only stable document reference identity, never reference b
   assert.equal(getThread(t.id)?.documentId, null);
 });
 
+test('user message attachment metadata persists without file bytes', () => {
+  mem.clear();
+  const t = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high' });
+  t.messages.push({
+    role: 'user',
+    text: '이 파일을 참고해줘',
+    messageId: 'message-1',
+    attachments: [{
+      stageId: 'stage-1',
+      fileId: 'file-1',
+      name: '보고서.pdf',
+      mimeType: 'application/pdf',
+      size: 2048,
+      status: 'ready',
+    }],
+  });
+  upsertThread(t);
+  const message = getThread(t.id)?.messages[0];
+  assert.equal(message?.messageId, 'message-1');
+  assert.deepEqual(message?.attachments?.[0], {
+    stageId: 'stage-1',
+    fileId: 'file-1',
+    name: '보고서.pdf',
+    mimeType: 'application/pdf',
+    size: 2048,
+    status: 'ready',
+  });
+  assert.doesNotMatch(mem.get('rhwp-agent-threads') ?? '', /data:application\/pdf|base64/i);
+});
+
 test('listThreadsByDocument groups by document, groups ordered by recent activity', () => {
   mem.clear();
   const mk = (docKey: string | null, text: string, updatedAt: number) => {

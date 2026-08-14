@@ -1627,6 +1627,75 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   content: none;
 }
 
+.ag-msg-user-text {
+  white-space: pre-wrap;
+}
+
+.ag-msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.ag-msg-attachment {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 7px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg-2);
+  color: var(--ag-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-msg-attachment:hover:not(:disabled) {
+  border-color: var(--ag-focus);
+  background: var(--ag-hover);
+}
+
+.ag-msg-attachment:focus-visible {
+  outline: 2px solid var(--ag-focus);
+  outline-offset: 1px;
+}
+
+.ag-msg-attachment:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.ag-msg-attachment.ag-ready {
+  border-color: color-mix(in srgb, var(--ag-ok) 40%, var(--ag-border));
+}
+
+.ag-msg-attachment.ag-error,
+.ag-msg-attachment.ag-deleted {
+  border-color: color-mix(in srgb, var(--ag-err) 38%, var(--ag-border));
+}
+
+.ag-msg-attachment .ag-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
+.ag-msg-attachment-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-msg-attachment-meta {
+  color: var(--ag-text-muted);
+  white-space: nowrap;
+}
+
 .ag-msg-assistant {
   align-self: stretch;
   padding: 0 2px;

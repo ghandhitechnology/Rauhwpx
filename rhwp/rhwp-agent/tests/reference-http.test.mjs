@@ -72,6 +72,31 @@ test('raw upload/list/search/delete API is bearer-authenticated and CORS-safe', 
   assert.equal((await removed.json()).status, 'deleted');
 });
 
+test('message attachment staging is invisible until promotion and can be discarded', async (t) => {
+  const { base, store } = await fixture(t);
+  const headers = {
+    Authorization: 'Bearer test-secret',
+    'Content-Type': 'text/plain',
+    'X-File-Name': 'draft.txt',
+  };
+  const response = await fetch(`${base}/reference-staging?scopeId=chat-a`, {
+    method: 'POST', headers, body: '메시지 전송 전 임시 파일',
+  });
+  assert.equal(response.status, 201);
+  const staged = (await response.json()).staged;
+  assert.equal(staged.status, 'ready');
+  assert.equal(store.list({ scope: 'chat', scopeId: 'chat-a' }).length, 0);
+
+  const wrongChat = await fetch(`${base}/reference-staging/${staged.id}?scopeId=chat-b`, {
+    method: 'DELETE', headers: { Authorization: 'Bearer test-secret' },
+  });
+  assert.equal(wrongChat.status, 404);
+  const discarded = await fetch(`${base}/reference-staging/${staged.id}?scopeId=chat-a`, {
+    method: 'DELETE', headers: { Authorization: 'Bearer test-secret' },
+  });
+  assert.equal(discarded.status, 200);
+});
+
 test('non-loopback browser origins are denied with a top-level error message', async (t) => {
   const { base } = await fixture(t);
   const response = await fetch(`${base}/reference-files?scope=global`, {

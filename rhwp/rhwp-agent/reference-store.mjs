@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,6 +18,7 @@ const DEFAULT_MAX_CHAT_FILES = 20;
 const DEFAULT_MAX_DOCUMENT_FILES = 20;
 const DEFAULT_MAX_GLOBAL_FILES = 100;
 const MAX_READ_CHARS = 20_000;
+export const DEFAULT_STAGED_REFERENCE_TTL_MS = 12 * 60 * 60 * 1000;
 
 export class ReferenceStoreError extends Error {
   constructor(code, message) {
@@ -253,6 +255,7 @@ export class ReferenceStore {
     now = () => new Date().toISOString(),
     createId = () => crypto.randomUUID(),
     persistMetadata = atomicWriteJson,
+    stagedReferenceTtlMs = DEFAULT_STAGED_REFERENCE_TTL_MS,
   } = {}) {
     this.root = path.resolve(root);
     this.blobsDir = path.join(this.root, 'blobs');
@@ -266,6 +269,7 @@ export class ReferenceStore {
     this.now = now;
     this.createId = createId;
     this.persistMetadata = persistMetadata;
+    this.stagedReferenceTtlMs = stagedReferenceTtlMs;
     this.metadata = { schemaVersion: SCHEMA_VERSION, files: [] };
     this.objects = new Map();
     this.indexChunks = new Map();
@@ -301,6 +305,7 @@ export class ReferenceStore {
         // rather than silently deleting user data after an interrupted write.
       }
     }
+    await this.cleanupStaged();
     return this;
   }
 
@@ -316,6 +321,181 @@ export class ReferenceStore {
 
   #objectPath(sha256) {
     return path.join(this.objectsDir, `${sha256}.json`);
+  }
+
+  #stagedDataPath(stageId) {
+    return path.join(this.stagingDir, `.draft-${stageId}.bin`);
+  }
+
+  #stagedMetadataPath(stageId) {
+    return path.join(this.stagingDir, `.draft-${stageId}.json`);
+  }
+
+  async #readStaged(stageId) {
+    if (!isSafeRecordId(stageId)) {
+      throw new ReferenceStoreError('REFERENCE_STAGE_ID_INVALID', 'Invalid staged reference id');
+    }
+    let raw;
+    try {
+      raw = JSON.parse(await fs.readFile(this.#stagedMetadataPath(stageId), 'utf8'));
+    } catch (error) {
+      if (error?.code === 'ENOENT') throw new ReferenceStoreError('REFERENCE_STAGE_NOT_FOUND', 'Staged reference was not found');
+      throw metadataCorrupt('Staged reference metadata is invalid');
+    }
+    if (!isPlainObject(raw)
+      || raw.id !== stageId
+      || raw.scope !== 'chat'
+      || typeof raw.scopeId !== 'string'
+      || typeof raw.name !== 'string'
+      || typeof raw.mimeType !== 'string'
+      || !Number.isSafeInteger(raw.size)
+      || raw.size <= 0
+      || typeof raw.createdAt !== 'string'
+      || typeof raw.expiresAt !== 'string') {
+      throw metadataCorrupt('Staged reference metadata is invalid');
+    }
+    const scoped = normalizeReferenceScope('chat', raw.scopeId);
+    const name = sanitizeReferenceName(raw.name);
+    if (scoped.scopeId !== raw.scopeId || name !== raw.name || normalizeMime(raw.mimeType) !== raw.mimeType) {
+      throw metadataCorrupt('Staged reference metadata is invalid');
+    }
+    if (!await pathIsPlainFile(this.#stagedDataPath(stageId))) {
+      throw new ReferenceStoreError('REFERENCE_STAGE_NOT_FOUND', 'Staged reference data was not found');
+    }
+    return { ...raw, status: 'ready' };
+  }
+
+  async stageStream({ stream, name, mimeType, scopeId, contentLength }) {
+    const scoped = normalizeReferenceScope('chat', scopeId);
+    const safeName = sanitizeReferenceName(name);
+    const declared = Number(contentLength);
+    if (Number.isFinite(declared) && (declared <= 0 || declared > this.maxFileBytes)) {
+      throw new ReferenceStoreError('REFERENCE_FILE_TOO_LARGE', `Reference files must be 1-${this.maxFileBytes} bytes`);
+    }
+    const stageId = requireGeneratedId(this.createId());
+    const dataPath = this.#stagedDataPath(stageId);
+    const handle = await fs.open(dataPath, 'wx', 0o600);
+    let size = 0;
+    try {
+      try {
+        for await (const raw of stream) {
+          const chunk = Buffer.from(raw);
+          size += chunk.length;
+          if (size > this.maxFileBytes) {
+            throw new ReferenceStoreError('REFERENCE_FILE_TOO_LARGE', `Reference file exceeds the ${this.maxFileBytes}-byte limit`);
+          }
+          await handle.write(chunk);
+        }
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      if (size === 0) throw new ReferenceStoreError('REFERENCE_FILE_EMPTY', 'Reference file is empty');
+      if (Number.isFinite(declared) && declared !== size) {
+        throw new ReferenceStoreError('REFERENCE_SIZE_MISMATCH', 'Reference upload length did not match Content-Length');
+      }
+      const createdAt = this.now();
+      const expiresAt = new Date(Date.parse(createdAt) + this.stagedReferenceTtlMs).toISOString();
+      const staged = {
+        id: stageId,
+        ...scoped,
+        name: safeName,
+        mimeType: normalizeMime(mimeType),
+        size,
+        createdAt,
+        expiresAt,
+      };
+      await atomicWriteJson(this.#stagedMetadataPath(stageId), staged);
+      return { ...staged, status: 'ready' };
+    } catch (error) {
+      await fs.unlink(dataPath).catch(() => undefined);
+      await fs.unlink(this.#stagedMetadataPath(stageId)).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async getStaged({ stageId, scopeId }) {
+    const staged = await this.#readStaged(stageId);
+    const scoped = normalizeReferenceScope('chat', scopeId);
+    if (staged.scopeId !== scoped.scopeId) {
+      throw new ReferenceStoreError('REFERENCE_STAGE_NOT_FOUND', 'Staged reference was not found in this chat');
+    }
+    if (Date.parse(staged.expiresAt) <= Date.parse(this.now())) {
+      await this.discardStaged({ stageId, scopeId });
+      throw new ReferenceStoreError('REFERENCE_STAGE_EXPIRED', 'Staged reference has expired');
+    }
+    return staged;
+  }
+
+  async discardStaged({ stageId, scopeId }) {
+    const staged = await this.#readStaged(stageId);
+    const scoped = normalizeReferenceScope('chat', scopeId);
+    if (staged.scopeId !== scoped.scopeId) {
+      throw new ReferenceStoreError('REFERENCE_STAGE_NOT_FOUND', 'Staged reference was not found in this chat');
+    }
+    await Promise.all([
+      fs.unlink(this.#stagedDataPath(stageId)).catch((error) => { if (error?.code !== 'ENOENT') throw error; }),
+      fs.unlink(this.#stagedMetadataPath(stageId)).catch((error) => { if (error?.code !== 'ENOENT') throw error; }),
+    ]);
+    return { ...staged, status: 'discarded' };
+  }
+
+  async promoteStaged({ stageId, scopeId }) {
+    const staged = await this.getStaged({ stageId, scopeId });
+    const file = await this.addStream({
+      stream: createReadStream(this.#stagedDataPath(stageId)),
+      name: staged.name,
+      mimeType: staged.mimeType,
+      contentLength: staged.size,
+      scope: 'chat',
+      scopeId: staged.scopeId,
+    });
+    await this.discardStaged({ stageId, scopeId });
+    return file;
+  }
+
+  async cleanupStaged() {
+    const now = Date.parse(this.now());
+    const entries = await fs.readdir(this.stagingDir);
+    let removed = 0;
+    for (const entry of entries) {
+      const match = /^\.draft-([A-Za-z0-9_-]{1,128})\.json$/.exec(entry);
+      if (!match) continue;
+      const stageId = match[1];
+      try {
+        const staged = await this.#readStaged(stageId);
+        if (Date.parse(staged.expiresAt) > now) continue;
+        await this.discardStaged({ stageId, scopeId: staged.scopeId });
+        removed += 1;
+      } catch (error) {
+        if (error?.code === 'REFERENCE_STORE_CORRUPT') {
+          await Promise.all([
+            fs.unlink(this.#stagedDataPath(stageId)).catch(() => undefined),
+            fs.unlink(this.#stagedMetadataPath(stageId)).catch(() => undefined),
+          ]);
+          removed += 1;
+        } else if (error?.code === 'REFERENCE_STAGE_NOT_FOUND') {
+          await Promise.all([
+            fs.unlink(this.#stagedDataPath(stageId)).catch(() => undefined),
+            fs.unlink(this.#stagedMetadataPath(stageId)).catch(() => undefined),
+          ]);
+          removed += 1;
+        } else {
+          throw error;
+        }
+      }
+    }
+    for (const entry of entries) {
+      const match = /^\.draft-([A-Za-z0-9_-]{1,128})\.bin$/.exec(entry);
+      if (!match || entries.includes(`.draft-${match[1]}.json`)) continue;
+      const file = path.join(this.stagingDir, entry);
+      const stat = await fs.lstat(file);
+      if (stat.isFile() && !stat.isSymbolicLink() && stat.mtimeMs + this.stagedReferenceTtlMs <= now) {
+        await fs.unlink(file);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   async #readObject(sha256) {
