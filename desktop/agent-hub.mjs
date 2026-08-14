@@ -350,13 +350,19 @@ export function spawnHubProcess(launch, {
   onError,
   onExit,
   log = console,
+  platform = process.platform,
 } = {}) {
-  const child = spawn(launch.command, launch.args, {
+  // Windows에서 .cmd/.bat 셸 스크립트는 셸 없이 spawn하면 EINVAL이 난다
+  // (CVE-2024-27980 이후 Node 정책). 이 경로는 npm.cmd start뿐이라 인자
+  // 이스케이프 문제는 없다.
+  const needsShell = platform === 'win32' && /\.(cmd|bat)$/i.test(launch.command);
+  const child = spawn(needsShell ? `"${launch.command}"` : launch.command, launch.args, {
     cwd: launch.cwd,
     env: launch.env,
     detached,
     stdio: stdio ?? ['ignore', 'pipe', 'pipe'],
     windowsHide,
+    shell: needsShell,
   });
   if (forwardStdio) {
     child.stdout?.on('data', (chunk) => process.stdout.write(chunk));
