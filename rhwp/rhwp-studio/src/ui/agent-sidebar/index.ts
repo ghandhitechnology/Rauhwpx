@@ -4160,24 +4160,36 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     card.appendChild(summary);
 
     const actions = el('div', 'ag-review-actions');
-    const approve = el('button', 'ag-approve', '승인');
+    const approve = el('button', 'ag-approve ag-change-action');
     approve.type = 'button';
+    approve.append(
+      createIcon('check', 'ag-review-action-icon'),
+      el('span', 'ag-review-action-label', '변경 수락'),
+    );
     approve.addEventListener('click', () => {
       approve.disabled = true;
+      reject.disabled = true;
       try {
         bridge.pendingEdits.approve(set.id);
       } catch (err) {
         approve.disabled = false;
+        reject.disabled = false;
         systemMessage(`승인 실패: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
-    const reject = el('button', 'ag-reject', '거절');
+    const reject = el('button', 'ag-reject ag-change-action');
     reject.type = 'button';
+    reject.append(
+      createIcon('close', 'ag-review-action-icon'),
+      el('span', 'ag-review-action-label', '변경 거절'),
+    );
     reject.addEventListener('click', () => {
+      approve.disabled = true;
       reject.disabled = true;
       try {
         bridge.pendingEdits.reject(set.id);
       } catch (err) {
+        approve.disabled = false;
         reject.disabled = false;
         systemMessage(`거절 실패: ${err instanceof Error ? err.message : String(err)}`);
       }

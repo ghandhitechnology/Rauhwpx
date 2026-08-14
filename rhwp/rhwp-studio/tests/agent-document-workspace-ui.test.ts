@@ -120,3 +120,13 @@ test('the same review node returns to its inline sidebar position after focus mo
   assert.match(source, /chatPage\.append\(review, composer\)/);
   assert.doesNotMatch(source, /chatPage\.insertBefore\(review, composerUtilities\)/);
 });
+
+test('inline sidebar review offers icon-labeled accept and decline actions', () => {
+  assert.match(source, /createIcon\('check', 'ag-review-action-icon'\)/);
+  assert.match(source, /el\('span', 'ag-review-action-label', '변경 수락'\)/);
+  assert.match(source, /createIcon\('close', 'ag-review-action-icon'\)/);
+  assert.match(source, /el\('span', 'ag-review-action-label', '변경 거절'\)/);
+  assert.match(source, /bridge\.pendingEdits\.approve\(set\.id\)/);
+  assert.match(source, /bridge\.pendingEdits\.reject\(set\.id\)/);
+  assert.match(css, /\.ag-change-action\s*\{[^}]*display:\s*inline-flex;[^}]*gap:\s*7px;/s);
+});
