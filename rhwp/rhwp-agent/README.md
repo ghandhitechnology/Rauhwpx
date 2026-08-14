@@ -178,6 +178,8 @@ bearer token as the WebSocket connection:
 
 - `POST /reference-files?scope=chat|document|global&scopeId=...` with
   `Authorization: Bearer …`, `X-File-Name`, and `Content-Type`
+- `POST /reference-staging?scopeId=...` stages a chat attachment without adding
+  it to reference counts; `DELETE /reference-staging/:id?scopeId=...` discards it
 - `GET /reference-files?scope=...&scopeId=...`
 - `GET /reference-search?scope=...&scopeId=...&q=...&limit=...`
 - `DELETE /reference-files/:id?scope=...&scopeId=...`
@@ -189,6 +191,12 @@ extraction uses this project's `rhwp export-text` binary when available and
 fails explicitly when it is not. Search uses a Korean-aware lexical/BM25 index.
 The hub adds a bounded set of relevant global, document, and chat excerpts to
 each user turn as untrusted reference data.
+
+Message attachments use a two-phase path. Studio uploads bytes to
+`/reference-staging` as soon as they are selected, then sends the returned IDs
+on `chat-user-message`. The hub promotes and indexes those files before agent
+dispatch and reports `chat-reference-status` updates. Unsent staged files never
+enter scope counts and expire after 12 hours.
 
 `chat-start` accepts stable `threadId`, `documentId`, and `documentName` fields.
 Studio should repeat the IDs on `chat-user-message`; the hub rejects stale IDs

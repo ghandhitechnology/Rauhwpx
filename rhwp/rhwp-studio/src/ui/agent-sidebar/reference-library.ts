@@ -5,6 +5,7 @@ import type {
   ReferenceFile,
   ReferenceScope,
   ReferenceSearchHit,
+  StagedReference,
 } from '../../agent/types.ts';
 import { createIcon } from './icons.ts';
 
@@ -62,6 +63,8 @@ export interface ReferenceLibraryOptions {
   bridge: AgentBridge;
   getContext(): ReferenceLibraryContext;
   onOpenChange?(open: boolean): void;
+  onDraftStateChange?(): void;
+  onFileDeleted?(fileId: string): void;
 }
 
 export interface ReferenceLibraryUi {
@@ -74,8 +77,10 @@ export interface ReferenceLibraryUi {
   setConnectionState(state: ReturnType<AgentBridge['getConnectionState']>): void;
   contextChanged(): void;
   hasDrafts(): boolean;
+  hasBlockingDrafts(): boolean;
+  takeReadyDrafts(): StagedReference[];
   discardDrafts(): void;
-  commitDraftsAfter(messageSent: Promise<string | null>): Promise<string | null>;
+  openFile(fileId: string): Promise<void>;
   refresh(): Promise<void>;
   dispose(): void;
 }
@@ -263,6 +268,8 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     const list = el('ul', 'ag-reference-file-list');
     for (const file of files) {
       const item = el('li', 'ag-reference-file');
+      item.dataset.referenceId = file.id;
+      item.tabIndex = -1;
       const icon = createIcon('document');
       const copy = el('span', 'ag-reference-file-copy');
       const name = el('strong', 'ag-reference-file-name', file.name);
@@ -286,6 +293,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
         showError();
         try {
           await bridge.deleteReference(file);
+          options.onFileDeleted?.(file.id);
           status.textContent = `${file.name} 참고자료를 제거했습니다.`;
           await Promise.all([refreshActiveScope(), refreshCounts()]);
         } catch (caught) {
@@ -425,6 +433,9 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     retry: HTMLButtonElement;
     remove: HTMLButtonElement;
     target: ScopeTarget | null;
+    staged: StagedReference | null;
+    uploadState: 'uploading' | 'ready' | 'error';
+    cancelled: boolean;
   };
 
   function pendingChip(file: File): UploadChip {
@@ -439,11 +450,18 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     remove.setAttribute('aria-label', `${file.name} 첨부 취소`);
     remove.title = '첨부 취소';
     remove.appendChild(createIcon('close'));
-    const chip: UploadChip = { file, root, state, retry, remove, target: null };
+    const chip: UploadChip = {
+      file, root, state, retry, remove, target: null, staged: null, uploadState: 'uploading', cancelled: false,
+    };
     remove.addEventListener('click', () => {
+      chip.cancelled = true;
       const index = draftUploads.indexOf(chip);
       if (index >= 0) draftUploads.splice(index, 1);
       root.remove();
+      if (chip.staged && chip.target) {
+        void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
+      }
+      options.onDraftStateChange?.();
     });
     retry.addEventListener('click', async () => {
       if (!chip.target) return;
@@ -451,9 +469,8 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       showError();
       status.textContent = `${file.name} 다시 업로드 중…`;
       try {
-        await uploadOne(file, chip.target, chip);
-        status.textContent = `${file.name} 참고자료를 추가했습니다.`;
-        await Promise.all([refreshCounts(), open ? refreshActiveScope() : Promise.resolve()]);
+        await stageOne(chip);
+        status.textContent = `${file.name} 첨부 준비가 끝났습니다.`;
       } catch (caught) {
         showError(`${file.name} 파일을 추가하지 못했습니다. 다시 시도하거나 파일을 다시 추가해 주세요. ${errorMessage(caught)}`);
         status.textContent = `${file.name} 업로드 실패`;
@@ -468,7 +485,44 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     );
     quickUploads.appendChild(root);
     draftUploads.push(chip);
+    options.onDraftStateChange?.();
     return chip;
+  }
+
+  async function stageOne(chip: UploadChip): Promise<void> {
+    if (!chip.target) throw new Error('현재 채팅에 파일을 첨부할 수 없습니다.');
+    chip.uploadState = 'uploading';
+    chip.cancelled = false;
+    chip.staged = null;
+    chip.root.classList.remove('ag-ready', 'ag-error');
+    chip.root.removeAttribute('title');
+    chip.state.textContent = '업로드 중';
+    chip.retry.hidden = true;
+    chip.remove.hidden = true;
+    options.onDraftStateChange?.();
+    try {
+      const staged = await bridge.stageReference(chip.target.scopeId, chip.file);
+      if (chip.cancelled) {
+        await bridge.discardStagedReference(chip.target.scopeId, staged.id).catch(() => undefined);
+        return;
+      }
+      chip.staged = staged;
+      chip.uploadState = 'ready';
+      chip.root.classList.add('ag-ready');
+      chip.state.textContent = '준비됨';
+      chip.remove.hidden = false;
+    } catch (caught) {
+      chip.uploadState = 'error';
+      chip.root.classList.add('ag-error');
+      chip.state.textContent = '실패';
+      chip.root.title = errorMessage(caught);
+      chip.retry.hidden = false;
+      chip.retry.disabled = false;
+      chip.remove.hidden = false;
+      throw caught;
+    } finally {
+      options.onDraftStateChange?.();
+    }
   }
 
   async function uploadOne(file: File, target: ScopeTarget, chip: UploadChip | null): Promise<ReferenceFile> {
@@ -502,7 +556,16 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
   }
 
   function stageFiles(files: File[]): void {
-    for (const file of validateFiles(files)) pendingChip(file);
+    const target = targetFor('chat', options.getContext());
+    if (!target) return;
+    for (const file of validateFiles(files)) {
+      const chip = pendingChip(file);
+      chip.target = target;
+      void stageOne(chip).catch((caught) => {
+        showError(`${file.name} 파일을 업로드하지 못했습니다. ${errorMessage(caught)}`);
+        status.textContent = `${file.name} 업로드 실패`;
+      });
+    }
   }
 
   async function uploadFiles(files: File[], target: ScopeTarget): Promise<void> {
@@ -530,40 +593,32 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
   }
 
   function discardDrafts(): void {
-    for (const chip of draftUploads.splice(0)) chip.root.remove();
+    for (const chip of draftUploads.splice(0)) {
+      chip.cancelled = true;
+      chip.root.remove();
+      if (chip.staged && chip.target) {
+        void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
+      }
+    }
+    options.onDraftStateChange?.();
   }
 
-  async function commitDraftsAfter(messageSent: Promise<string | null>): Promise<string | null> {
-    const target = targetFor('chat', options.getContext());
-    const revision = contextRevision;
+  function takeReadyDrafts(): StagedReference[] {
+    if (draftUploads.some((chip) => chip.uploadState !== 'ready' || !chip.staged)) return [];
     const batch = draftUploads.splice(0);
-    const messageId = await messageSent;
-    if (!messageId || !target) {
-      if (revision !== contextRevision) {
-        for (const chip of batch) chip.root.remove();
-        return null;
-      }
-      for (const chip of batch) {
-        chip.state.textContent = '전송 대기';
-        chip.remove.hidden = false;
-        draftUploads.push(chip);
-      }
-      return null;
-    }
-    status.textContent = `${batch.length}개 파일 업로드 중…`;
-    const settled = await Promise.allSettled(
-      batch.map((chip) => uploadOne(chip.file, { ...target }, chip)),
-    );
-    const failed = settled.filter((entry) => entry.status === 'rejected');
-    if (failed.length > 0) {
-      const first = failed[0] as PromiseRejectedResult;
-      showError(`${failed.length}개 파일을 추가하지 못했습니다. 다시 시도하거나 파일을 다시 추가해 주세요. ${errorMessage(first.reason)}`);
-      status.textContent = `${settled.length - failed.length}개 추가, ${failed.length}개 실패`;
-    } else {
-      status.textContent = `${settled.length}개 참고자료를 추가했습니다.`;
-    }
-    await Promise.all([refreshCounts(), open ? refreshActiveScope() : Promise.resolve()]);
-    return messageId;
+    for (const chip of batch) chip.root.remove();
+    options.onDraftStateChange?.();
+    return batch.map((chip) => chip.staged!);
+  }
+
+  async function openFile(fileId: string): Promise<void> {
+    setOpen(true, 'chat');
+    await refreshActiveScope();
+    const item = results.querySelector<HTMLElement>(`[data-reference-id="${CSS.escape(fileId)}"]`);
+    item?.scrollIntoView({ block: 'nearest' });
+    item?.focus();
+    item?.classList.add('ag-reference-file-focused');
+    window.setTimeout(() => item?.classList.remove('ag-reference-file-focused'), 1400);
   }
 
   function setOpen(next: boolean, scope: ReferenceScope = activeScope): void {
@@ -681,8 +736,10 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       if (open) void refreshActiveScope();
     },
     hasDrafts: () => draftUploads.length > 0,
+    hasBlockingDrafts: () => draftUploads.some((chip) => chip.uploadState !== 'ready'),
+    takeReadyDrafts,
     discardDrafts,
-    commitDraftsAfter,
+    openFile,
     async refresh(): Promise<void> {
       await Promise.all([refreshCounts(), open ? refreshActiveScope() : Promise.resolve()]);
     },
