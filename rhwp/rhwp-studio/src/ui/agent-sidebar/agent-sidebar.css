@@ -1664,31 +1664,71 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: var(--ag-text-muted);
 }
 
-/* ─── 작업 내역: 진행 설명 + 도구 호출 ───────────────── */
+/* ─── 진행 타임라인 + 접힌 도구 호출 ────────────────── */
+
+.ag-progress-step {
+  position: relative;
+  display: flex;
+  align-self: stretch;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+  padding-left: 17px;
+  animation: ag-step-arrive 280ms var(--ag-motion-out) both;
+}
+
+.ag-progress-step::before {
+  content: '';
+  position: absolute;
+  top: 9px;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+  background: color-mix(in srgb, var(--ag-border-strong) 72%, transparent);
+}
+
+.ag-progress-step::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: 1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ag-accent);
+  box-shadow: 0 0 0 3px var(--ag-bg);
+}
+
+.ag-progress-step-tools-only {
+  padding-left: 0;
+}
+
+.ag-progress-step-tools-only::before,
+.ag-progress-step-tools-only::after {
+  content: none;
+}
+
+.ag-progress-milestone {
+  min-width: 0;
+  padding: 0 2px;
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-base, 12px);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
 
 .ag-activity {
   position: relative;
   align-self: stretch;
   min-width: 0;
-  margin: -2px 0 0;
+  margin: 0;
   border: 1px solid var(--ag-border);
   border-radius: var(--ag-r-field);
   background: color-mix(in srgb, var(--ag-bg-2) 68%, transparent);
   overflow: hidden;
   animation: ag-activity-arrive 240ms var(--ag-motion-out) both;
-}
-
-.ag-activity::after {
-  content: none;
-}
-
-.ag-activity-running::after {
-  animation: none;
-}
-
-.ag-root.ag-collapsed .ag-activity-running::after,
-.ag-threads-open .ag-activity-running::after {
-  animation-play-state: paused;
 }
 
 @keyframes ag-activity-arrive {
@@ -1816,19 +1856,6 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   overflow: hidden;
 }
 
-.ag-activity-note {
-  position: relative;
-  flex: 0 0 auto;
-  padding: 6px 5px 4px;
-  color: var(--ag-text-muted);
-  font-size: var(--font-size-base, 12px);
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-  animation: ag-step-arrive 280ms var(--ag-motion-out) both;
-}
-
 .ag-tool-row {
   flex: 0 0 auto;
   min-width: 0;
@@ -1849,10 +1876,6 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
     opacity: 1;
     transform: translateY(0);
   }
-}
-
-.ag-activity-note::before {
-  content: none;
 }
 
 .ag-tool-head {
@@ -2036,9 +2059,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 @media (prefers-reduced-motion: reduce) {
   .ag-msg-assistant.ag-msg-enter,
+  .ag-progress-step,
   .ag-activity,
-  .ag-activity-running::after,
-  .ag-activity-note,
   .ag-tool-row,
   .ag-tool-status.ag-ok,
   .ag-tool-status.ag-err {
