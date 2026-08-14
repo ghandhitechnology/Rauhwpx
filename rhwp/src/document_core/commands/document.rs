@@ -1691,6 +1691,33 @@ impl DocumentCore {
         id
     }
 
+    /// 현재 Document IR은 건드리지 않고, 그로부터 파생된 모든 조판 캐시를 다시 만든다.
+    ///
+    /// 여러 저수준 편집을 연달아 수행하는 호출자는 각 단계의 증분 캐시를 최종 결과로
+    /// 노출하면 안 된다. 특히 에이전트 미리보기처럼 split/delete/format을 한 논리
+    /// 연산으로 묶는 경로는 이 메서드로 연산 경계에서 단 한 번 권위 조판을 확정한다.
+    pub fn refresh_layout_native(&mut self) {
+        self.styles = resolve_styles(&self.document.doc_info, self.dpi);
+        self.composed = self
+            .document
+            .sections
+            .iter()
+            .map(|s| compose_section(s))
+            .collect();
+
+        let section_count = self.document.sections.len();
+        self.dirty_sections.resize(section_count, true);
+        self.mark_all_sections_dirty();
+        self.measured_tables.clear();
+        self.measured_sections.clear();
+        self.dirty_paragraphs.clear();
+        self.para_column_map.clear();
+        self.para_offset = vec![0; section_count];
+        self.invalidate_page_tree_cache();
+        self.overflow_links_cache.borrow_mut().clear();
+        self.paginate();
+    }
+
     /// 지정 ID의 스냅샷으로 Document를 복원한다.
     /// 스타일 재해소 + 문단 구성 + 페이지네이션까지 수행.
     pub fn restore_snapshot_native(&mut self, id: u32) -> Result<String, HwpError> {
@@ -1701,22 +1728,7 @@ impl DocumentCore {
             .ok_or_else(|| HwpError::RenderError(format!("스냅샷 {} 없음", id)))?;
         let (_, doc) = self.snapshot_store[idx].clone();
         self.document = doc;
-        // 캐시 전체 재구성
-        self.styles = resolve_styles(&self.document.doc_info, self.dpi);
-        self.composed = self
-            .document
-            .sections
-            .iter()
-            .map(|s| compose_section(s))
-            .collect();
-        self.mark_all_sections_dirty();
-        self.measured_tables.clear();
-        self.measured_sections.clear();
-        self.dirty_paragraphs.clear();
-        self.para_column_map.clear();
-        self.page_tree_cache.borrow_mut().clear();
-        self.overflow_links_cache.borrow_mut().clear();
-        self.paginate();
+        self.refresh_layout_native();
         Ok(super::super::helpers::json_ok())
     }
 

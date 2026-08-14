@@ -201,7 +201,10 @@ export class PendingOverlayRenderer {
       }));
     }
     // 화면 사영만 바뀌는 이벤트 — 캐시된 기하를 다시 배치만 한다.
-    const projectionEvents = ['zoom-changed', 'viewport-resize', 'viewport-inset-changed'];
+    // page-layout-changed: 문서 변이 시 캔버스 뷰의 페이지 재수집은 비동기라,
+    // document-changed 시점의 배치는 낡은(또는 아직 없는) 페이지 좌표를 쓴다.
+    // 가상 스크롤 배치가 확정되면 캐시된 페이지 기하를 다시 사영한다.
+    const projectionEvents = ['zoom-changed', 'viewport-resize', 'viewport-inset-changed', 'page-layout-changed'];
     for (const name of projectionEvents) {
       this.unsubs.push(deps.eventBus.on(name, () => this.render()));
     }
@@ -275,12 +278,14 @@ export class PendingOverlayRenderer {
     this.nodePool.clear();
   }
 
+  /** 가상 스크롤이 아직 모르는 페이지(변이 직후 새로 생긴 페이지)는 null — 그리지 않는다. */
   private pagePosition(
     rect: SelectionRect,
     contentWidth: number,
     zoom: number,
-  ): { left: number; top: number; width: number; height: number } {
+  ): { left: number; top: number; width: number; height: number } | null {
     const vs = this.deps.canvasView.getVirtualScroll();
+    if (rect.pageIndex >= vs.pageCount) return null;
     const pl = vs.getPageLeft(rect.pageIndex);
     const pageLeft = pl >= 0 ? pl : (contentWidth - vs.getPageWidth(rect.pageIndex)) / 2;
     return {
@@ -557,9 +562,10 @@ export class PendingOverlayRenderer {
 
     for (const { op, rects } of this.cachedLegacy!) {
       rects.forEach((rect, rectIdx) => {
+        const pos = this.pagePosition(rect, contentWidth, zoom);
+        if (!pos) return;
         const key = this.legacyNodeKey(op, rectIdx);
         desired.add(key);
-        const pos = this.pagePosition(rect, contentWidth, zoom);
         const node = this.ensureNode(
           key,
           scrollContent,
@@ -572,8 +578,9 @@ export class PendingOverlayRenderer {
     }
 
     for (const visual of this.cachedExact!) {
-      desired.add(visual.nodeKey);
       const pos = this.pagePosition(visual.rect, contentWidth, zoom);
+      if (!pos) continue;
+      desired.add(visual.nodeKey);
       if (visual.anchor) {
         const isDeletion = visual.hunk.kind === 'delete';
         const node = this.ensureNode(
@@ -618,13 +625,14 @@ export class PendingOverlayRenderer {
     }
 
     this.cachedEnters.forEach((mark, index) => {
-      const key = `E:${mark.pageIndex}:${index}`;
-      desired.add(key);
       const pos = this.pagePosition(
         { pageIndex: mark.pageIndex, x: mark.x, y: mark.y, width: 0, height: mark.height },
         contentWidth,
         zoom,
       );
+      if (!pos) return;
+      const key = `E:${mark.pageIndex}:${index}`;
+      desired.add(key);
       const size = pos.height * ENTER_SIZE_FACTOR;
       const node = this.ensureNode(
         key, scrollContent, null,

@@ -254,23 +254,31 @@ export class AgentTypewriterReveal {
     scrollContent: HTMLElement,
     contentWidth: number,
     zoom: number,
-  ): { left: number; top: number; height: number } {
+  ): { left: number; top: number; height: number } | null {
     const caretRect = this.probeCaret(item, revealedChars);
     const caretPos = this.pagePosition(caretRect, contentWidth, zoom);
-    const caretBottom = caretPos.top + Math.max(caretPos.height, 1);
+    const caretBottom = caretPos ? caretPos.top + Math.max(caretPos.height, 1) : null;
 
     for (const rect of this.probeRects(item)) {
       const pos = this.pagePosition(rect, contentWidth, zoom);
+      if (!pos) continue;
       const bottom = pos.top + pos.height;
-      // 캐럿 줄보다 위에서 끝나는 줄은 이미 공개됐다.
-      if (bottom <= caretPos.top + 0.5) continue;
-      const onCaretLine = pos.top < caretBottom - 0.5 && bottom > caretPos.top + 0.5;
-      const coverLeft = onCaretLine ? Math.max(pos.left, caretPos.left) : pos.left;
-      const coverWidth = pos.left + pos.width - coverLeft;
-      if (coverWidth <= 0.5) continue;
-      this.placeCover(scrollContent, coverLeft, pos.top, coverWidth + 1, pos.height);
+      // 캐럿 배치 불가(새 페이지 미확정) 동안은 항목 전체를 덮는다.
+      if (caretPos !== null && caretBottom !== null) {
+        // 캐럿 줄보다 위에서 끝나는 줄은 이미 공개됐다.
+        if (bottom <= caretPos.top + 0.5) continue;
+        const onCaretLine = pos.top < caretBottom - 0.5 && bottom > caretPos.top + 0.5;
+        const coverLeft = onCaretLine ? Math.max(pos.left, caretPos.left) : pos.left;
+        const coverWidth = pos.left + pos.width - coverLeft;
+        if (coverWidth <= 0.5) continue;
+        this.placeCover(scrollContent, coverLeft, pos.top, coverWidth + 1, pos.height);
+      } else {
+        this.placeCover(scrollContent, pos.left, pos.top, pos.width + 1, pos.height);
+      }
     }
-    return { left: caretPos.left, top: caretPos.top, height: Math.max(caretPos.height, 12) };
+    return caretPos
+      ? { left: caretPos.left, top: caretPos.top, height: Math.max(caretPos.height, 12) }
+      : null;
   }
 
   private placeCover(scrollContent: HTMLElement, left: number, top: number, width: number, height: number): void {
@@ -355,6 +363,7 @@ export class AgentTypewriterReveal {
       const zoom = vm.getZoom();
       const rect = this.probeCaret({ range, text: '', textLen: 0 } as RevealItem, 0);
       const pos = this.pagePosition(rect, scrollContent.clientWidth, zoom);
+      if (!pos) return;
       const { height: viewHeight } = vm.getViewportSize();
       const scrollY = vm.getScrollY();
       if (pos.top < scrollY || pos.top + pos.height > scrollY + viewHeight) {
@@ -419,12 +428,14 @@ export class AgentTypewriterReveal {
     return { pageIndex: rect.pageIndex, x: rect.x, y: rect.y, width: 0, height: rect.height };
   }
 
+  /** 가상 스크롤이 아직 모르는 페이지(변이 직후 새로 생긴 페이지)는 null. */
   private pagePosition(
     rect: SelectionRect,
     contentWidth: number,
     zoom: number,
-  ): { left: number; top: number; width: number; height: number } {
+  ): { left: number; top: number; width: number; height: number } | null {
     const vs = this.deps.canvasView.getVirtualScroll();
+    if (rect.pageIndex >= vs.pageCount) return null;
     const pl = vs.getPageLeft(rect.pageIndex);
     const pageLeft = pl >= 0 ? pl : (contentWidth - vs.getPageWidth(rect.pageIndex)) / 2;
     return {
