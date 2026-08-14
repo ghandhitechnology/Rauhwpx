@@ -12,8 +12,8 @@ test('workflow switches use local slash commands and stay separate from the perm
   assert.match(source, /if \(option\.workflow\) \{\s*input\.value = '';\s*requestWorkflow\(option\.workflow\);\s*return;/);
   assert.match(source, /if \(text === '\/plan' \|\| text === '\/build'\) \{[\s\S]*requestWorkflow\(text === '\/plan' \? 'plan' : 'direct'\);\s*return;/);
   // 로컬 명령은 사용자 메시지 기록과 에이전트 전송 전에 끝난다.
-  assert.ok(source.indexOf("if (text === '/plan' || text === '/build')") < source.indexOf('recordUserMessage(visibleText)'));
-  assert.ok(source.indexOf("if (text === '/plan' || text === '/build')") < source.indexOf('bridge.sendUserMessage(text, skillNameForMessage)'));
+  assert.ok(source.indexOf("if (text === '/plan' || text === '/build')") < source.indexOf('recordUserMessage(visibleText,'));
+  assert.ok(source.indexOf("if (text === '/plan' || text === '/build')") < source.indexOf('bridge.sendUserMessage(text, skillNameForMessage,'));
   assert.doesNotMatch(source, /ag-workflow-item|workflowGroup|workflowItems/);
   assert.doesNotMatch(css, /\.ag-workflow(?:-item)?\s*\{/);
   assert.match(source, /composerUtilityActions\.append\(phaseBadge, permissionBtn, skillsBtn\)/);
@@ -79,7 +79,7 @@ test('approval immediately switches to implementation with a disabled, announced
   assert.match(source, /setPlanningPhase\('switching'\);\s*\n\s*systemMessage\('계획을 승인했습니다\. 실행 단계로 전환 중입니다\.'\)/);
   assert.match(source, /case 'implementation-started':\s*\n\s*planApprovable = false;\s*\n\s*setPlanningPhase\(e\.phase\)/);
   assert.match(source, /approve\.disabled = !approvableNow/);
-  assert.match(source, /if \(planningPhase === 'switching'\) return;/);
+  assert.match(source, /if \(planningPhase === 'switching' \|\| attachmentsSending \|\| referenceLibrary\.hasBlockingDrafts\(\)\) return;/);
   assert.match(source, /if \(planningPhase === 'switching'\)[\s\S]*else if \(!planApprovable\)/);
 });
 
@@ -105,7 +105,7 @@ test('plan mode warns once about full remote-browser control and scoped download
 });
 
 test('mode, model and permission switches are locked while a turn runs or the chat is switching', () => {
-  assert.match(source, /function isControlLocked\(\): boolean \{\s*\n\s*return turnRunning \|\| workflowTransitionPending \|\| planningPhase === 'switching';/);
+  assert.match(source, /function isControlLocked\(\): boolean \{\s*\n\s*return turnRunning \|\| attachmentsSending \|\| workflowTransitionPending \|\| planningPhase === 'switching';/);
   assert.match(source, /workflowTransitionPending = true;[\s\S]*bridge\.setWorkflow\(next\)/);
   assert.match(source, /case 'workflow-changed':[\s\S]*workflowTransitionPending = false/);
   assert.match(source, /const controlsLocked = isControlLocked\(\)/);
