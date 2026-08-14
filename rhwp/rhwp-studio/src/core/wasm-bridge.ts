@@ -927,6 +927,12 @@ export class WasmBridge {
     return this.doc.splitParagraph(sec, para, charOffset, serializeParaMeta(removedParaMeta));
   }
 
+  /** 한 논리 삽입 안의 줄 경계 분할 — Enter 상속에서 강제 쪽/단 나눔만 뺀다. */
+  splitParagraphLogical(sec: number, para: number, charOffset: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).splitParagraphLogical(sec, para, charOffset);
+  }
+
   insertPageBreak(sec: number, para: number, charOffset: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return (this.doc as any).insertPageBreak(sec, para, charOffset);
@@ -960,6 +966,12 @@ export class WasmBridge {
   splitParagraphInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, charOffset: number, removedParaMeta?: RemovedParaMeta): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.splitParagraphInCell(sec, parentPara, controlIdx, cellIdx, cellParaIdx, charOffset, serializeParaMeta(removedParaMeta));
+  }
+
+  /** 셀 내부 논리 삽입 줄 경계 분할 — `splitParagraphLogical` 과 같은 계약. */
+  splitParagraphInCellLogical(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, charOffset: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).splitParagraphInCellLogical(sec, parentPara, controlIdx, cellIdx, cellParaIdx, charOffset);
   }
 
   mergeParagraphInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number): string {

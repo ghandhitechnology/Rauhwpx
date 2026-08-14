@@ -1719,7 +1719,7 @@ export class PendingEditManager {
       off = typeof res.charOffset === 'number' ? res.charOffset : scalarLen(lines[0]);
     }
     for (let i = 1; i < lines.length; i++) {
-      this.parseOk(wasm.splitParagraphInCell(sec, anchor.paraIdx, anchor.controlIdx, cellIdx, para, off), 'splitParagraphInCell');
+      this.parseOk(wasm.splitParagraphInCellLogical(sec, anchor.paraIdx, anchor.controlIdx, cellIdx, para, off), 'splitParagraphInCellLogical');
       para += 1;
       off = 0;
       if (lines[i].length > 0) {
@@ -1777,32 +1777,16 @@ export class PendingEditManager {
         : this.parseOk(wasm.insertText(sec, p, o, line), 'insertText');
       return typeof res.charOffset === 'number' ? res.charOffset : o + scalarLen(line);
     };
+    // 에이전트의 `\n`은 한 논리 삽입 안의 줄 경계다. 논리 분할은 Enter 상속에서
+    // 강제 쪽/단 나눔만 빼고 엔진이 처리하므로, 분할 뒤 교정 서식 호출이 없다.
     const splitPara = (p: number, o: number) => {
       if (cell) {
         this.parseOk(
-          wasm.splitParagraphInCell(sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, p, o),
-          'splitParagraphInCell',
+          wasm.splitParagraphInCellLogical(sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, p, o),
+          'splitParagraphInCellLogical',
         );
       } else {
-        this.parseOk(wasm.splitParagraph(sec, p, o), 'splitParagraph');
-      }
-
-      // splitParagraph는 Enter 의미로 문단 모양을 상속한다. 에이전트의 `\n`은 한
-      // 논리 삽입 안의 문단 경계이므로 source의 pageBreakBefore까지 복제하면 새
-      // 문단마다 강제 쪽 나눔이 영구 저장된다. 원래 문단의 break는 유지하고 새로
-      // 생긴 continuation에서만 제거한다(다른 문단/글자 서식은 그대로 상속).
-      const newPara = p + 1;
-      const props = cell
-        ? wasm.getCellParaPropertiesAt(sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, newPara)
-        : wasm.getParaPropertiesAt(sec, newPara);
-      if (props.pageBreakBefore === true) {
-        const raw = cell
-          ? wasm.applyParaFormatInCell(
-            sec, cell.paraIdx, cell.controlIdx, cell.cellIdx, newPara,
-            JSON.stringify({ pageBreakBefore: false }),
-          )
-          : wasm.applyParaFormat(sec, newPara, JSON.stringify({ pageBreakBefore: false }));
-        this.parseOkLenient(raw, 'clear inherited pageBreakBefore');
+        this.parseOk(wasm.splitParagraphLogical(sec, p, o), 'splitParagraphLogical');
       }
     };
     try {

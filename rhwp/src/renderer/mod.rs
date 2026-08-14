@@ -931,6 +931,12 @@ pub fn px_to_hwpunit(px: f64, dpi: f64) -> i32 {
     (px * HWPUNIT_PER_INCH / dpi) as i32
 }
 
+/// px → HWPUNIT, 반올림 변형. 임포트 값 변환·오차 표시처럼 절단이 아니라
+/// 가장 가까운 정수가 맞는 자리에서 쓴다.
+pub fn px_to_hwpunit_round(px: f64, dpi: f64) -> i32 {
+    (px * HWPUNIT_PER_INCH / dpi).round() as i32
+}
+
 /// [Task #1745] 텍스트 혼합 anchor 문단의 Square wrap 표 우측 wrap 띠 (cs, sw) HU 도출.
 ///
 /// Square wrap(어울림) 표가 텍스트 문단(예: 별표 제목)에 anchor 되면 anchor 문단의

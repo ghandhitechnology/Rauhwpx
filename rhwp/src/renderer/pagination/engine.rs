@@ -412,7 +412,9 @@ impl Paginator {
             if is_hwp3_variant && body_height_hu_for_variant > 0 && !para.text.is_empty() {
                 let para_sb_hu = para_styles
                     .get(para.para_shape_id as usize)
-                    .map(|ps| (ps.spacing_before * 7200.0 / 96.0) as i32)
+                    .map(|ps| {
+                        (ps.spacing_before * crate::renderer::HWPUNIT_PER_INCH / self.dpi) as i32
+                    })
                     .unwrap_or(0);
                 let prev_real_idx_and_ls = prev_pagination_para.and_then(|prev_pi| {
                     (0..=prev_pi).rev().find_map(|i| {
@@ -447,7 +449,10 @@ impl Paginator {
                     let prev_top_content_reset = paragraphs.get(prev_real_idx).is_some_and(|p| {
                         let prev_sb_hu = para_styles
                             .get(p.para_shape_id as usize)
-                            .map(|ps| (ps.spacing_before * 7200.0 / 96.0) as i32)
+                            .map(|ps| {
+                                (ps.spacing_before * crate::renderer::HWPUNIT_PER_INCH / self.dpi)
+                                    as i32
+                            })
                             .unwrap_or(0);
                         p.line_segs.len() == 1
                             && p.line_segs.first().is_some_and(|ls| {
