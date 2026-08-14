@@ -16,6 +16,7 @@ import { PendingEditManager } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
 import { PendingRequestRegistry } from './pending-requests.ts';
 import { AgentTypewriterReveal } from './typewriter-reveal.ts';
+import { setPiModels as setPiModelRegistry } from './models.ts';
 import {
   AGENT_PROTOCOL_VERSION,
   AgentToolError,
@@ -30,7 +31,11 @@ import type {
   AgentPhase,
   AgentWorkflow,
   AgentWorkflowState,
+  OpenRouterCredits,
   PermissionProfile,
+  PiCatalogModel,
+  PiModelConfig,
+  PiStatus,
   ProductSkillFile,
   ProviderHealth,
   ProviderStatusMap,
@@ -73,6 +78,18 @@ export interface AgentBridge {
   connectCliproxy(url: string, key: string): Promise<UsageSummary | null>;
   /** 저장된 CLIProxyAPI 연결을 끊는다. */
   disconnectCliproxy(): Promise<UsageSummary | null>;
+  /** pi 하네스(설치 · 키 · 모델) 설정 상태. */
+  requestPiStatus(): Promise<PiStatus | null>;
+  /** pi coding agent 설치. 진행 상황은 pi-setup-progress 이벤트로 온다. */
+  installPi(): Promise<PiStatus | null>;
+  /** OpenRouter API 키를 검증하고 저장한다. */
+  setPiKey(key: string): Promise<PiStatus | null>;
+  /** 라이브 OpenRouter 모델 카탈로그. */
+  requestPiCatalog(refresh?: boolean): Promise<PiCatalogModel[] | null>;
+  /** 사용자가 고른 최대 3개 pi 모델(표시 이름 포함)을 저장한다. */
+  setPiModels(
+    models: Array<{ id: string; name: string; defaultEffort?: string }>,
+  ): Promise<PiStatus | null>;
   startChat(agent: AgentName, model?: string, effort?: string, force?: boolean, permissionProfile?: PermissionProfile, workflow?: AgentWorkflow, threadId?: string, documentId?: string | null, documentName?: string | null): void;
   /** 허브 세션을 폐기하고 새 채팅을 시작할 수 있게 한다. */
   stopChat(): void;
@@ -116,7 +133,7 @@ const CONNECT_TIMEOUT_MS = 4000;
 const REQUEST_TIMEOUT_MS = 10_000;
 
 function isAgentName(v: unknown): v is AgentName {
-  return v === 'claude' || v === 'codex';
+  return v === 'claude' || v === 'codex' || v === 'pi';
 }
 
 function isReferenceScope(value: unknown): value is ReferenceScope {
@@ -214,12 +231,13 @@ function readProviderHealth(value: unknown): ProviderHealth {
   };
 }
 
-/** 허브가 보낸 provider-status 를 항상 두 프로바이더가 있는 형태로 정규화한다. */
+/** 허브가 보낸 provider-status 를 항상 세 프로바이더가 있는 형태로 정규화한다. */
 function readProviderStatus(value: unknown): ProviderStatusMap {
   const src = (value ?? {}) as Record<string, unknown>;
   return {
     claude: readProviderHealth(src['claude']),
     codex: readProviderHealth(src['codex']),
+    pi: readProviderHealth(src['pi']),
   };
 }
 
@@ -287,11 +305,13 @@ function readUsageByModel(value: unknown): Record<string, UsageModelBreakdown> {
   if (!value || typeof value !== 'object') return out;
   for (const [model, raw] of Object.entries(value as Record<string, unknown>)) {
     const src = (raw ?? {}) as Record<string, unknown>;
+    const costUsd = nullableNum(src['costUsd']);
     out[model] = {
       turns: num(src['turns']),
       inputTokens: num(src['inputTokens']),
       outputTokens: num(src['outputTokens']),
       weightedTokens: num(src['weightedTokens']),
+      ...(costUsd !== null ? { costUsd } : {}),
     };
   }
   return out;
@@ -314,22 +334,121 @@ function readProviderUsage(value: unknown): ProviderUsage {
   };
 }
 
+function readOpenRouterCredits(value: unknown): OpenRouterCredits | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const src = value as Record<string, unknown>;
+  return {
+    balanceUsd: num(src['balanceUsd']),
+    totalCreditsUsd: num(src['totalCreditsUsd']),
+    totalUsageUsd: num(src['totalUsageUsd']),
+    checkedAt: nullableNum(src['checkedAt']),
+    error: typeof src['error'] === 'string' ? src['error'] : null,
+  };
+}
+
 function readUsageSummary(value: unknown): UsageSummary | null {
   if (!value || typeof value !== 'object') return null;
   const src = value as Record<string, unknown>;
   const plans = (src['plans'] ?? {}) as Record<string, unknown>;
   const providers = (src['providers'] ?? {}) as Record<string, unknown>;
+  const openrouter = readOpenRouterCredits(src['openrouter']);
   return {
     plans: {
       claude: typeof plans['claude'] === 'string' ? plans['claude'] : 'pro',
       codex: typeof plans['codex'] === 'string' ? plans['codex'] : 'plus',
+      pi: typeof plans['pi'] === 'string' ? plans['pi'] : 'api',
     },
     providers: {
       claude: readProviderUsage(providers['claude']),
       codex: readProviderUsage(providers['codex']),
+      pi: readProviderUsage(providers['pi']),
     },
     cliproxy: readCliproxyStatus(src['cliproxy']),
+    ...(openrouter ? { openrouter } : {}),
   };
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function readPiPricing(value: unknown): { prompt: number; completion: number } {
+  const src = (value ?? {}) as Record<string, unknown>;
+  return { prompt: num(src['prompt']), completion: num(src['completion']) };
+}
+
+function readPiModelConfig(value: unknown): PiModelConfig | null {
+  if (!value || typeof value !== 'object') return null;
+  const src = value as Record<string, unknown>;
+  const id = src['id'];
+  const name = src['name'];
+  if (typeof id !== 'string' || !id || typeof name !== 'string' || !name) return null;
+  return {
+    id,
+    name,
+    reasoning: src['reasoning'] === true,
+    efforts: isStringArray(src['efforts']) ? src['efforts'] : [],
+    defaultEffort: typeof src['defaultEffort'] === 'string' ? src['defaultEffort'] : '',
+    contextLength: num(src['contextLength']),
+    pricing: readPiPricing(src['pricing']),
+  };
+}
+
+function readPiModels(value: unknown): PiModelConfig[] {
+  if (!Array.isArray(value)) return [];
+  const out: PiModelConfig[] = [];
+  for (const raw of value) {
+    const model = readPiModelConfig(raw);
+    if (model) out.push(model);
+  }
+  return out;
+}
+
+function readPiStatus(value: unknown): PiStatus {
+  const src = (value ?? {}) as Record<string, unknown>;
+  return {
+    installed: src['installed'] === true,
+    installing: src['installing'] === true,
+    version: typeof src['version'] === 'string' ? src['version'] : null,
+    keyConfigured: src['keyConfigured'] === true,
+    keyTail: typeof src['keyTail'] === 'string' ? src['keyTail'] : null,
+    models: readPiModels(src['models']),
+    defaultModelId: typeof src['defaultModelId'] === 'string' ? src['defaultModelId'] : null,
+    setupComplete: src['setupComplete'] === true,
+    error: typeof src['error'] === 'string' ? src['error'] : null,
+  };
+}
+
+function readPiCatalogModel(value: unknown): PiCatalogModel | null {
+  if (!value || typeof value !== 'object') return null;
+  const src = value as Record<string, unknown>;
+  const id = src['id'];
+  const name = src['name'];
+  if (typeof id !== 'string' || !id || typeof name !== 'string' || !name) return null;
+  return {
+    id,
+    name,
+    provider: typeof src['provider'] === 'string' && src['provider']
+      ? src['provider']
+      : (id.split('/')[0] ?? id),
+    contextLength: num(src['contextLength']),
+    pricing: readPiPricing(src['pricing']),
+    reasoning: src['reasoning'] === true,
+  };
+}
+
+function readPiCatalog(value: unknown): PiCatalogModel[] {
+  if (!Array.isArray(value)) return [];
+  const out: PiCatalogModel[] = [];
+  for (const raw of value) {
+    const model = readPiCatalogModel(raw);
+    if (model) out.push(model);
+  }
+  return out;
+}
+
+function isPiSetupState(value: unknown): value is 'downloading' | 'installing' | 'configuring' | 'done' {
+  return value === 'downloading' || value === 'installing' || value === 'configuring' || value === 'done';
 }
 
 class AgentBridgeImpl implements AgentBridge {
@@ -898,6 +1017,52 @@ class AgentBridgeImpl implements AgentBridge {
         console.warn('[AgentBridge]', msg.type + ':', msg.code, msg.message);
         break;
       }
+      case 'pi-status': {
+        const status = readPiStatus(msg.status);
+        // 모델 레지스트리를 이벤트 발행 전에 갱신해, 리스너가 modelsForAgent('pi')
+        // 를 즉시 최신 상태로 읽을 수 있게 한다.
+        setPiModelRegistry(status.models);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, status);
+        this.emit({ type: 'pi-status', status });
+        break;
+      }
+      case 'pi-setup-progress': {
+        if (!isPiSetupState(msg.state)) break;
+        this.emit({
+          type: 'pi-setup-progress',
+          requestId: typeof msg.requestId === 'string' ? msg.requestId : '',
+          state: msg.state,
+          ...(typeof msg.detail === 'string' ? { detail: msg.detail } : {}),
+          ...(typeof msg.receivedBytes === 'number' && Number.isFinite(msg.receivedBytes)
+            ? { receivedBytes: msg.receivedBytes }
+            : {}),
+          ...(typeof msg.totalBytes === 'number' && Number.isFinite(msg.totalBytes)
+            ? { totalBytes: msg.totalBytes }
+            : {}),
+          ...(msg.activity === true ? { activity: true } : {}),
+        });
+        break;
+      }
+      case 'pi-catalog': {
+        const models = readPiCatalog(msg.models);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, models);
+        this.emit({
+          type: 'pi-catalog',
+          requestId: typeof msg.requestId === 'string' ? msg.requestId : '',
+          models,
+        });
+        break;
+      }
+      case 'pi-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        this.emit({
+          type: 'pi-error',
+          requestId: typeof msg.requestId === 'string' ? msg.requestId : '',
+          code: typeof msg.code === 'string' ? msg.code : 'PI_ERROR',
+          message: typeof msg.message === 'string' ? msg.message : 'Pi request failed',
+        });
+        break;
+      }
       case 'chat-error': {
         this.emit({
           type: 'hub-error',
@@ -1405,6 +1570,43 @@ class AgentBridgeImpl implements AgentBridge {
 
   disconnectCliproxy(): Promise<UsageSummary | null> {
     return this.request<UsageSummary>({ type: 'cliproxy-disconnect' }, 'cliproxy-disconnect');
+  }
+
+  requestPiStatus(): Promise<PiStatus | null> {
+    return this.request<PiStatus>({ type: 'pi-status-request' }, 'pi-status');
+  }
+
+  installPi(): Promise<PiStatus | null> {
+    return this.request<PiStatus>({ type: 'pi-install' }, 'pi-install', 180_000);
+  }
+
+  setPiKey(key: string): Promise<PiStatus | null> {
+    return this.request<PiStatus>({ type: 'pi-set-key', key }, 'pi-set-key', 30_000);
+  }
+
+  requestPiCatalog(refresh = false): Promise<PiCatalogModel[] | null> {
+    return this.request<PiCatalogModel[]>(
+      { type: 'pi-catalog-request', ...(refresh ? { refresh: true } : {}) },
+      'pi-catalog',
+      30_000,
+    );
+  }
+
+  setPiModels(
+    models: Array<{ id: string; name: string; defaultEffort?: string }>,
+  ): Promise<PiStatus | null> {
+    return this.request<PiStatus>(
+      {
+        type: 'pi-set-models',
+        models: models.map((m) => ({
+          id: m.id,
+          name: m.name,
+          ...(m.defaultEffort ? { effortDefault: m.defaultEffort } : {}),
+        })),
+      },
+      'pi-set-models',
+      30_000,
+    );
   }
 
   onEvent(cb: (e: SidebarEvent) => void): () => void {

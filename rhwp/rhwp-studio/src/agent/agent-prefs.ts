@@ -31,7 +31,7 @@ export interface AgentPrefsStorage {
 }
 
 function isAgentName(value: unknown): value is AgentName {
-  return value === 'claude' || value === 'codex';
+  return value === 'claude' || value === 'codex' || value === 'pi';
 }
 
 function isPermissionProfile(value: unknown): value is PermissionProfile {
