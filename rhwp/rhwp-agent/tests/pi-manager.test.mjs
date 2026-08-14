@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -97,6 +98,50 @@ async function tmpRoot() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-pi-'));
 }
 
+/** 레지스트리가 없는 환경 — 결정적 내려받기를 건너뛰고 npm 폴백을 태운다. */
+async function offlineFetch() {
+  throw new Error('offline');
+}
+
+/** 레지스트리 메타 + 타르볼 스트림을 흉내 내는 fetch. */
+function fakeRegistryFetch({ chunks, integrity = null, contentLength = null }) {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    if (String(url).endsWith('/latest')) {
+      return {
+        ok: true,
+        json: async () => ({
+          version: '0.84.3',
+          dist: { tarball: 'https://registry.npmjs.org/pi/-/pi-0.84.3.tgz', integrity },
+        }),
+      };
+    }
+    return {
+      ok: true,
+      headers: {
+        get: (name) => (name === 'content-length' && contentLength !== null ? String(contentLength) : null),
+      },
+      body: (async function* () {
+        for (const chunk of chunks) yield chunk;
+      })(),
+    };
+  };
+  return { calls, fetchImpl };
+}
+
+function sha512Integrity(chunks) {
+  const hash = createHash('sha512');
+  for (const chunk of chunks) hash.update(chunk);
+  return `sha512-${hash.digest('base64')}`;
+}
+
+/** 청크마다 시간이 성큼 가는 시계 — 진행 이벤트 스로틀을 항상 통과시킨다. */
+function fastClock() {
+  let tick = 0;
+  return () => (tick += 1_000);
+}
+
 async function readJson(file) {
   return JSON.parse(await fs.readFile(file, 'utf8'));
 }
@@ -140,19 +185,23 @@ test('install runs npm with a prefix, reports progress and syncs assets', async 
   const rootDir = await tmpRoot();
   const prefixDir = path.join(rootDir, 'prefix');
   const { spawns, spawnProcess } = fakeSpawner(installer(prefixDir));
-  const manager = createPiManager({ rootDir, spawnProcess, openRouter: fakeOpenRouter() });
+  const manager = createPiManager({
+    rootDir, spawnProcess, openRouter: fakeOpenRouter(), fetchImpl: offlineFetch,
+  });
 
   const progress = [];
   const status = await manager.install((event) => progress.push(event));
 
   assert.equal(spawns.length, 1);
   assert.equal(spawns[0].command, 'npm');
+  // 레지스트리에 못 닿으면 npm 이 직접 받고, http 로그가 활동 신호가 된다.
   assert.deepEqual(spawns[0].argv, [
-    'install', '--prefix', prefixDir, '--no-fund', '--no-audit', '--loglevel=error', PI_PACKAGE,
+    'install', '--prefix', prefixDir, '--no-fund', '--no-audit', '--loglevel=http', PI_PACKAGE,
   ]);
   assert.deepEqual(progress.map((event) => event.state), [
-    'downloading', 'installing', 'configuring', 'done',
+    'downloading', 'installing', 'installing', 'configuring', 'done',
   ]);
+  assert.equal(progress[2].activity, true, 'npm 출력이 활동 신호로 흘러나온다');
   assert.equal(progress.at(-1).detail, '0.84.3');
 
   assert.equal(status.installed, true);
@@ -182,7 +231,9 @@ test('concurrent installs share a single npm run', async () => {
   const rootDir = await tmpRoot();
   const prefixDir = path.join(rootDir, 'prefix');
   const { spawns, spawnProcess } = fakeSpawner(installer(prefixDir));
-  const manager = createPiManager({ rootDir, spawnProcess, openRouter: fakeOpenRouter() });
+  const manager = createPiManager({
+    rootDir, spawnProcess, openRouter: fakeOpenRouter(), fetchImpl: offlineFetch,
+  });
 
   const first = [];
   const second = [];
@@ -205,7 +256,9 @@ test('a failing npm install raises PI_INSTALL_FAILED with the stderr tail', asyn
     proc.stderr.emit('data', 'npm ERR! code E404\nnpm ERR! 404 Not Found\n');
     proc.emit('close', 1, null);
   });
-  const manager = createPiManager({ rootDir, spawnProcess, openRouter: fakeOpenRouter() });
+  const manager = createPiManager({
+    rootDir, spawnProcess, openRouter: fakeOpenRouter(), fetchImpl: offlineFetch,
+  });
 
   await assert.rejects(() => manager.install(), (error) => {
     assert.equal(error.code, 'PI_INSTALL_FAILED');
@@ -218,6 +271,80 @@ test('a failing npm install raises PI_INSTALL_FAILED with the stderr tail', asyn
   assert.equal(status.installed, false);
   assert.equal(status.installing, false);
   assert.match(status.error, /404 Not Found/);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('deterministic install downloads the tarball itself and reports byte progress', async () => {
+  const rootDir = await tmpRoot();
+  const prefixDir = path.join(rootDir, 'prefix');
+  const chunks = [Buffer.alloc(10, 1), Buffer.alloc(10, 2), Buffer.alloc(10, 3)];
+  const { fetchImpl } = fakeRegistryFetch({
+    chunks, integrity: sha512Integrity(chunks), contentLength: 30,
+  });
+  const { spawns, spawnProcess } = fakeSpawner(installer(prefixDir));
+  const manager = createPiManager({
+    rootDir, spawnProcess, openRouter: fakeOpenRouter(), fetchImpl, now: fastClock(),
+  });
+
+  const progress = [];
+  const status = await manager.install((event) => progress.push(event));
+
+  const tarballPath = path.join(rootDir, 'cache', 'pi-package.tgz');
+  assert.equal(spawns.length, 1);
+  // 로컬 타르볼 설치라 npm 은 조용해도 된다.
+  assert.deepEqual(spawns[0].argv, [
+    'install', '--prefix', prefixDir, '--no-fund', '--no-audit', '--loglevel=error', tarballPath,
+  ]);
+
+  const bytes = progress.filter((event) => typeof event.receivedBytes === 'number');
+  assert.deepEqual(bytes.map((event) => event.receivedBytes), [10, 20, 30, 30]);
+  assert.ok(bytes.every((event) => event.totalBytes === 30));
+  assert.equal(status.installed, true);
+  await assert.rejects(() => fs.stat(tarballPath), '설치 후 캐시 타르볼은 지워진다');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a tarball without content-length reports unknown total until the end', async () => {
+  const rootDir = await tmpRoot();
+  const prefixDir = path.join(rootDir, 'prefix');
+  const chunks = [Buffer.alloc(8, 7), Buffer.alloc(8, 8)];
+  const { fetchImpl } = fakeRegistryFetch({ chunks, integrity: sha512Integrity(chunks) });
+  const { spawnProcess } = fakeSpawner(installer(prefixDir));
+  const manager = createPiManager({
+    rootDir, spawnProcess, openRouter: fakeOpenRouter(), fetchImpl, now: fastClock(),
+  });
+
+  const progress = [];
+  await manager.install((event) => progress.push(event));
+
+  const bytes = progress.filter((event) => typeof event.receivedBytes === 'number');
+  assert.deepEqual(bytes.map((event) => [event.receivedBytes, event.totalBytes]), [
+    [8, null], [16, null], [16, 16],
+  ]);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('an integrity mismatch fails the install instead of falling back to npm', async () => {
+  const rootDir = await tmpRoot();
+  const chunks = [Buffer.alloc(16, 5)];
+  const { fetchImpl } = fakeRegistryFetch({
+    chunks, integrity: sha512Integrity([Buffer.alloc(16, 6)]), contentLength: 16,
+  });
+  const { spawns, spawnProcess } = fakeSpawner();
+  const manager = createPiManager({
+    rootDir, spawnProcess, openRouter: fakeOpenRouter(), fetchImpl, now: fastClock(),
+  });
+
+  await assert.rejects(() => manager.install(), (error) => {
+    assert.equal(error.code, 'PI_INSTALL_FAILED');
+    assert.match(error.message, /무결성/);
+    return true;
+  });
+  assert.equal(spawns.length, 0, 'npm 은 아예 돌지 않는다');
+  await assert.rejects(() => fs.stat(path.join(rootDir, 'cache', 'pi-package.tgz')));
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });
