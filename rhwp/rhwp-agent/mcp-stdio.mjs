@@ -3,7 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import WebSocket from 'ws';
-import { filterToolDefinitions, toToolContent } from './tools.mjs';
+import { filterToolDefinitions, toToolContent, toolAnnotations } from './tools.mjs';
 
 const WS_URL = process.env.RHWP_WS_URL ?? 'ws://127.0.0.1:5175/mcp';
 const TOKEN = process.env.RHWP_AGENT_TOKEN ?? 'dev';
@@ -137,11 +137,7 @@ function registerTool(def) {
   server.registerTool(def.name, {
     description: def.description,
     inputSchema: def.shape,
-    annotations: {
-      readOnlyHint: def.category === 'document-read' || def.category === 'reference-read',
-      destructiveHint: def.category === 'document-write' || def.category === 'download-write',
-      openWorldHint: def.category === 'browser' || def.category === 'download-write',
-    },
+    annotations: toolAnnotations(def.category),
     _meta: { 'rhwp/toolCategory': def.category },
   }, async (args) => {
     try {
@@ -210,7 +206,7 @@ function registerInsertImageTool(def) {
     {
       description: def.description,
       inputSchema: def.shape,
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      annotations: toolAnnotations(def.category),
       _meta: { 'rhwp/toolCategory': def.category },
     },
     async (args) => {
