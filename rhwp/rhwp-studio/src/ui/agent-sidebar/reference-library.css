@@ -316,6 +316,11 @@
 .ag-reference-upload-chip.ag-ready { border-color: color-mix(in srgb, var(--ag-ok) 40%, var(--ag-border)); }
 .ag-reference-upload-chip.ag-error { border-color: color-mix(in srgb, var(--ag-err) 55%, var(--ag-border)); }
 
+.ag-reference-file-focused {
+  outline: 2px solid var(--ag-focus);
+  outline-offset: 2px;
+}
+
 .ag-reference-upload-retry {
   min-height: 24px;
   border: 1px solid var(--ag-border);
@@ -327,8 +332,24 @@
   font: inherit;
 }
 
-.ag-reference-upload-retry:hover { background: var(--ag-hover); }
-.ag-reference-upload-retry:focus-visible {
+.ag-reference-upload-remove {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ag-r-chip);
+  background: transparent;
+  color: var(--ag-text-muted);
+  cursor: pointer;
+}
+
+.ag-reference-upload-retry:hover,
+.ag-reference-upload-remove:hover { background: var(--ag-hover); }
+.ag-reference-upload-retry:focus-visible,
+.ag-reference-upload-remove:focus-visible {
   outline: 2px solid var(--ag-focus);
   outline-offset: 1px;
 }

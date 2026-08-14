@@ -5,6 +5,7 @@ import type {
   ReferenceFile,
   ReferenceScope,
   ReferenceSearchHit,
+  StagedReference,
 } from '../../agent/types.ts';
 import { createIcon } from './icons.ts';
 
@@ -62,6 +63,8 @@ export interface ReferenceLibraryOptions {
   bridge: AgentBridge;
   getContext(): ReferenceLibraryContext;
   onOpenChange?(open: boolean): void;
+  onDraftStateChange?(): void;
+  onFileDeleted?(fileId: string): void;
 }
 
 export interface ReferenceLibraryUi {
@@ -73,6 +76,11 @@ export interface ReferenceLibraryUi {
   setOpen(open: boolean, scope?: ReferenceScope): void;
   setConnectionState(state: ReturnType<AgentBridge['getConnectionState']>): void;
   contextChanged(): void;
+  hasDrafts(): boolean;
+  hasBlockingDrafts(): boolean;
+  takeReadyDrafts(): StagedReference[];
+  discardDrafts(): void;
+  openFile(fileId: string): Promise<void>;
   refresh(): Promise<void>;
   dispose(): void;
 }
@@ -93,12 +101,15 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
   let activeScope: ReferenceScope = 'chat';
   let connectionState = bridge.getConnectionState();
   let disposed = false;
+  let contextRevision = 0;
   let requestRevision = 0;
   let countRevision = 0;
   let searchTimer: number | null = null;
   let pickerTarget: ScopeTarget | null = null;
+  let pickerDraft = false;
   let lastFocus: HTMLElement | null = null;
   const filesByScope = new Map<ReferenceScope, ReferenceFile[]>();
+  const draftUploads: UploadChip[] = [];
 
   const trigger = el('button', 'ag-references-btn');
   trigger.type = 'button';
@@ -113,8 +124,8 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
 
   const quickAddButton = el('button', 'ag-reference-quick-add');
   quickAddButton.type = 'button';
-  quickAddButton.setAttribute('aria-label', '이 채팅에 참고자료 추가');
-  quickAddButton.title = '이 채팅에 참고자료 추가';
+  quickAddButton.setAttribute('aria-label', '메시지에 참고자료 첨부');
+  quickAddButton.title = '메시지에 참고자료 첨부';
   quickAddButton.appendChild(createIcon('paperclip'));
 
   const quickUploads = el('div', 'ag-reference-quick-uploads');
@@ -257,6 +268,8 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     const list = el('ul', 'ag-reference-file-list');
     for (const file of files) {
       const item = el('li', 'ag-reference-file');
+      item.dataset.referenceId = file.id;
+      item.tabIndex = -1;
       const icon = createIcon('document');
       const copy = el('span', 'ag-reference-file-copy');
       const name = el('strong', 'ag-reference-file-name', file.name);
@@ -280,6 +293,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
         showError();
         try {
           await bridge.deleteReference(file);
+          options.onFileDeleted?.(file.id);
           status.textContent = `${file.name} 참고자료를 제거했습니다.`;
           await Promise.all([refreshActiveScope(), refreshCounts()]);
         } catch (caught) {
@@ -413,29 +427,50 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
   }
 
   type UploadChip = {
+    file: File;
     root: HTMLElement;
     state: HTMLElement;
     retry: HTMLButtonElement;
+    remove: HTMLButtonElement;
+    target: ScopeTarget | null;
+    staged: StagedReference | null;
+    uploadState: 'uploading' | 'ready' | 'error';
+    cancelled: boolean;
   };
 
-  function pendingChip(file: File, target: ScopeTarget): UploadChip {
-    // Keep the scope snapshot with this specific upload. A retry after the user
-    // changes chat or document must never silently attach to the new context.
-    const retryTarget = { ...target };
+  function pendingChip(file: File): UploadChip {
     const root = el('span', 'ag-reference-upload-chip');
-    const state = el('span', 'ag-reference-upload-chip-state', '업로드 중');
+    const state = el('span', 'ag-reference-upload-chip-state', '전송 대기');
     const retry = el('button', 'ag-reference-upload-retry', '다시 시도');
     retry.type = 'button';
     retry.hidden = true;
     retry.setAttribute('aria-label', `${file.name} 참고자료 업로드 다시 시도`);
+    const remove = el('button', 'ag-reference-upload-remove');
+    remove.type = 'button';
+    remove.setAttribute('aria-label', `${file.name} 첨부 취소`);
+    remove.title = '첨부 취소';
+    remove.appendChild(createIcon('close'));
+    const chip: UploadChip = {
+      file, root, state, retry, remove, target: null, staged: null, uploadState: 'uploading', cancelled: false,
+    };
+    remove.addEventListener('click', () => {
+      chip.cancelled = true;
+      const index = draftUploads.indexOf(chip);
+      if (index >= 0) draftUploads.splice(index, 1);
+      root.remove();
+      if (chip.staged && chip.target) {
+        void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
+      }
+      options.onDraftStateChange?.();
+    });
     retry.addEventListener('click', async () => {
+      if (!chip.target) return;
       retry.disabled = true;
       showError();
       status.textContent = `${file.name} 다시 업로드 중…`;
       try {
-        await uploadOne(file, retryTarget, { root, state, retry });
-        status.textContent = `${file.name} 참고자료를 추가했습니다.`;
-        await Promise.all([refreshCounts(), open ? refreshActiveScope() : Promise.resolve()]);
+        await stageOne(chip);
+        status.textContent = `${file.name} 첨부 준비가 끝났습니다.`;
       } catch (caught) {
         showError(`${file.name} 파일을 추가하지 못했습니다. 다시 시도하거나 파일을 다시 추가해 주세요. ${errorMessage(caught)}`);
         status.textContent = `${file.name} 업로드 실패`;
@@ -446,17 +481,58 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       el('span', 'ag-reference-upload-chip-name', file.name),
       state,
       retry,
+      remove,
     );
     quickUploads.appendChild(root);
-    return { root, state, retry };
+    draftUploads.push(chip);
+    options.onDraftStateChange?.();
+    return chip;
+  }
+
+  async function stageOne(chip: UploadChip): Promise<void> {
+    if (!chip.target) throw new Error('현재 채팅에 파일을 첨부할 수 없습니다.');
+    chip.uploadState = 'uploading';
+    chip.cancelled = false;
+    chip.staged = null;
+    chip.root.classList.remove('ag-ready', 'ag-error');
+    chip.root.removeAttribute('title');
+    chip.state.textContent = '업로드 중';
+    chip.retry.hidden = true;
+    chip.remove.hidden = true;
+    options.onDraftStateChange?.();
+    try {
+      const staged = await bridge.stageReference(chip.target.scopeId, chip.file);
+      if (chip.cancelled) {
+        await bridge.discardStagedReference(chip.target.scopeId, staged.id).catch(() => undefined);
+        return;
+      }
+      chip.staged = staged;
+      chip.uploadState = 'ready';
+      chip.root.classList.add('ag-ready');
+      chip.state.textContent = '준비됨';
+      chip.remove.hidden = false;
+    } catch (caught) {
+      chip.uploadState = 'error';
+      chip.root.classList.add('ag-error');
+      chip.state.textContent = '실패';
+      chip.root.title = errorMessage(caught);
+      chip.retry.hidden = false;
+      chip.retry.disabled = false;
+      chip.remove.hidden = false;
+      throw caught;
+    } finally {
+      options.onDraftStateChange?.();
+    }
   }
 
   async function uploadOne(file: File, target: ScopeTarget, chip: UploadChip | null): Promise<ReferenceFile> {
     if (chip) {
+      chip.target = { ...target };
       chip.root.classList.remove('ag-ready', 'ag-error');
       chip.root.removeAttribute('title');
       chip.state.textContent = '업로드 중';
       chip.retry.hidden = true;
+      chip.remove.hidden = true;
     }
     try {
       const uploaded = await bridge.uploadReference(target.scope, target.scopeId, file);
@@ -473,20 +549,30 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
         chip.root.title = errorMessage(caught);
         chip.retry.hidden = false;
         chip.retry.disabled = false;
+        chip.remove.hidden = false;
       }
       throw caught;
     }
   }
 
-  async function uploadFiles(files: File[], target: ScopeTarget, quick: boolean): Promise<void> {
+  function stageFiles(files: File[]): void {
+    const target = targetFor('chat', options.getContext());
+    if (!target) return;
+    for (const file of validateFiles(files)) {
+      const chip = pendingChip(file);
+      chip.target = target;
+      void stageOne(chip).catch((caught) => {
+        showError(`${file.name} 파일을 업로드하지 못했습니다. ${errorMessage(caught)}`);
+        status.textContent = `${file.name} 업로드 실패`;
+      });
+    }
+  }
+
+  async function uploadFiles(files: File[], target: ScopeTarget): Promise<void> {
     const accepted = validateFiles(files);
     if (accepted.length === 0) return;
     status.textContent = `${accepted.length}개 파일 업로드 중…`;
-    const work = accepted.map(async (file) => {
-      const targetSnapshot = { ...target };
-      const chip = quick ? pendingChip(file, targetSnapshot) : null;
-      return uploadOne(file, targetSnapshot, chip);
-    });
+    const work = accepted.map((file) => uploadOne(file, { ...target }, null));
     const settled = await Promise.allSettled(work);
     const failed = settled.filter((entry) => entry.status === 'rejected');
     if (failed.length > 0) {
@@ -499,10 +585,40 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     await Promise.all([refreshCounts(), open ? refreshActiveScope() : Promise.resolve()]);
   }
 
-  function openPicker(target: ScopeTarget | null): void {
+  function openPicker(target: ScopeTarget | null, draft = false): void {
     if (!target || connectionState !== 'connected') return;
     pickerTarget = target;
+    pickerDraft = draft;
     fileInput.click();
+  }
+
+  function discardDrafts(): void {
+    for (const chip of draftUploads.splice(0)) {
+      chip.cancelled = true;
+      chip.root.remove();
+      if (chip.staged && chip.target) {
+        void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
+      }
+    }
+    options.onDraftStateChange?.();
+  }
+
+  function takeReadyDrafts(): StagedReference[] {
+    if (draftUploads.some((chip) => chip.uploadState !== 'ready' || !chip.staged)) return [];
+    const batch = draftUploads.splice(0);
+    for (const chip of batch) chip.root.remove();
+    options.onDraftStateChange?.();
+    return batch.map((chip) => chip.staged!);
+  }
+
+  async function openFile(fileId: string): Promise<void> {
+    setOpen(true, 'chat');
+    await refreshActiveScope();
+    const item = results.querySelector<HTMLElement>(`[data-reference-id="${CSS.escape(fileId)}"]`);
+    item?.scrollIntoView({ block: 'nearest' });
+    item?.focus();
+    item?.classList.add('ag-reference-file-focused');
+    window.setTimeout(() => item?.classList.remove('ag-reference-file-focused'), 1400);
   }
 
   function setOpen(next: boolean, scope: ReferenceScope = activeScope): void {
@@ -531,16 +647,18 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     (lastFocus?.isConnected ? lastFocus : trigger)?.focus();
   });
   quickAddButton.addEventListener('click', () => {
-    openPicker(targetFor('chat', options.getContext()));
+    openPicker(targetFor('chat', options.getContext()), true);
   });
   add.addEventListener('click', () => openPicker(scopeTarget()));
   fileInput.addEventListener('change', () => {
     const selected = [...(fileInput.files ?? [])];
     const target = pickerTarget;
-    const quick = target?.scope === 'chat' && !open;
+    const draft = pickerDraft;
     pickerTarget = null;
+    pickerDraft = false;
     fileInput.value = '';
-    if (target) void uploadFiles(selected, target, quick);
+    if (draft) stageFiles(selected);
+    else if (target) void uploadFiles(selected, target);
   });
   search.addEventListener('input', () => {
     if (searchTimer !== null) window.clearTimeout(searchTimer);
@@ -586,7 +704,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
   page.addEventListener('drop', (event) => {
     const target = scopeTarget();
     if (target && connectionState === 'connected') {
-      void uploadFiles([...(event.dataTransfer?.files ?? [])], target, false);
+      void uploadFiles([...(event.dataTransfer?.files ?? [])], target);
     }
   });
 
@@ -607,14 +725,21 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       else if (open) status.textContent = '에이전트 서버 연결을 기다리는 중입니다.';
     },
     contextChanged(): void {
+      contextRevision++;
       requestRevision++;
       countRevision++;
+      discardDrafts();
       filesByScope.clear();
       if (activeScope === 'document' && !options.getContext().documentId) activeScope = 'chat';
       updateTabs();
       void refreshCounts();
       if (open) void refreshActiveScope();
     },
+    hasDrafts: () => draftUploads.length > 0,
+    hasBlockingDrafts: () => draftUploads.some((chip) => chip.uploadState !== 'ready'),
+    takeReadyDrafts,
+    discardDrafts,
+    openFile,
     async refresh(): Promise<void> {
       await Promise.all([refreshCounts(), open ? refreshActiveScope() : Promise.resolve()]);
     },
@@ -623,6 +748,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       requestRevision++;
       countRevision++;
       if (searchTimer !== null) window.clearTimeout(searchTimer);
+      discardDrafts();
       page.remove();
       fileInput.remove();
     },

@@ -78,6 +78,10 @@ const usageStore = await createUsageStore().init();
 const cliproxy = await createCliproxyClient({ rootDir: usageStore.rootDir }).init();
 const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
 const handleReferenceHttp = createReferenceHttpHandler({ store: referenceStore, token: TOKEN });
+const stagedReferenceCleanupTimer = setInterval(() => {
+  void referenceStore.cleanupStaged().catch((error) => log(`staged reference cleanup failed: ${error?.message ?? error}`));
+}, 15 * 60 * 1000);
+stagedReferenceCleanupTimer.unref?.();
 /** The calibration process outlives a Studio WebSocket. Keeping its request
  * identity and phase lets a reconnecting tab resume the same progress UI. */
 let styleCalibration = null;
@@ -87,6 +91,8 @@ let studioSocket = null;
 const mcpSockets = new Set();
 /** @type {{ agent: 'claude'|'codex'|'pi', model: string|null, effort: string|null, permissionProfile: 'safe'|'unrestricted', backend: any, status: 'idle'|'running', sessionId: string|null, threadId: string, documentId: string|null, documentName: string|null, chatId: string, planning: PlanningState } | null} */
 let session = null;
+/** @type {{ messageId: string, message: any, owner: any } | null} */
+let pendingReferenceMessage = null;
 let nextCapabilityEpoch = 1;
 
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
@@ -274,6 +280,7 @@ function makeBackendEventHandler(generation) {
 }
 
 function disposeSession() {
+  pendingReferenceMessage = null;
   if (!session) return;
   const wasRunning = session.status === 'running';
   const agent = session.agent;
@@ -313,6 +320,63 @@ function addReferenceContext(activeSession, query, prompt) {
     log(`reference retrieval failed: ${error?.message ?? error}`);
     return prompt;
   }
+}
+
+function dispatchUserMessage(sock, msg, activeSession) {
+  if (activeSession.planning.phase === 'awaiting-approval') {
+    const planId = activeSession.planning.latestPlan?.planId;
+    if (!planId) {
+      sendJson(sock, { v: 1, type: 'chat-error', code: 'PLAN_NOT_FOUND', message: 'The latest plan is unavailable; return to planning and present it again.' });
+      return;
+    }
+    void requestImplementationPlanChanges(sock, { planId, feedback: msg.text })
+      .catch((error) => sendChatError(sock, error));
+    return;
+  }
+  if (activeSession.planning.phase === 'switching') {
+    sendJson(sock, { v: 1, type: 'chat-error', code: 'WORKFLOW_SWITCHING', message: 'The provider is switching into implementation mode.' });
+    return;
+  }
+  activeSession.status = 'running';
+  void skillRegistry.promptContext(msg.text, typeof msg.skillName === 'string' ? msg.skillName : undefined, {
+    phase: activeSession.planning.snapshot().phase,
+  })
+    .then((prompt) => {
+      if (session !== activeSession) throw new Error('Agent session changed before the message was dispatched');
+      activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.text, prompt));
+    })
+    .catch((e) => {
+      if (session === activeSession) activeSession.status = 'idle';
+      sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
+    });
+}
+
+async function dispatchStagedUserMessage(sock, msg, activeSession) {
+  const rawIds = Array.isArray(msg.stagedReferenceIds) ? msg.stagedReferenceIds : [];
+  const stageIds = [...new Set(rawIds.filter((id) => typeof id === 'string' && id))];
+  if (stageIds.length === 0 || stageIds.length !== rawIds.length || stageIds.length > 10) {
+    throw Object.assign(new Error('Message attachments require 1-10 unique staged reference ids'), { code: 'INVALID_REFERENCE_MESSAGE' });
+  }
+  pendingReferenceMessage = { messageId: msg.messageId, message: msg, owner: activeSession };
+  sendJson(sock, {
+    v: 1,
+    type: 'chat-reference-status',
+    messageId: msg.messageId,
+    attachments: stageIds.map((stageId) => ({ stageId, status: 'processing' })),
+  });
+  const settled = await Promise.allSettled(
+    stageIds.map(async (stageId) => ({ stageId, file: await referenceStore.promoteStaged({ stageId, scopeId: activeSession.threadId }) })),
+  );
+  const attachments = settled.map((entry, index) => entry.status === 'fulfilled'
+    ? { stageId: entry.value.stageId, status: 'ready', file: entry.value.file }
+    : {
+      stageId: stageIds[index],
+      status: 'error',
+      error: String(entry.reason?.message ?? entry.reason ?? 'Attachment processing failed'),
+    });
+  sendJson(sock, { v: 1, type: 'chat-reference-status', messageId: msg.messageId, attachments });
+  if (pendingReferenceMessage?.messageId === msg.messageId) pendingReferenceMessage = null;
+  if (session === activeSession) dispatchUserMessage(sock, msg, activeSession);
 }
 
 function emitWorkflowState(extra = {}) {
@@ -658,45 +722,45 @@ function handleStudioMessage(sock, msg) {
         sendChatError(sock, error, 'INVALID_REQUEST');
         return;
       }
-      if (session.status === 'running') {
+      if (session.status === 'running' || pendingReferenceMessage) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_BUSY', message: 'A turn is already in progress.' });
-        return;
-      }
-      if (session.planning.phase === 'awaiting-approval') {
-        const planId = session.planning.latestPlan?.planId;
-        if (!planId) {
-          sendJson(sock, { v: 1, type: 'chat-error', code: 'PLAN_NOT_FOUND', message: 'The latest plan is unavailable; return to planning and present it again.' });
-          return;
-        }
-        if (typeof msg.text !== 'string' || msg.text.length === 0) {
-          sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'chat-user-message requires text' });
-          return;
-        }
-        void requestImplementationPlanChanges(sock, { planId, feedback: msg.text })
-          .catch((error) => sendChatError(sock, error));
-        return;
-      }
-      if (session.planning.phase === 'switching') {
-        sendJson(sock, { v: 1, type: 'chat-error', code: 'WORKFLOW_SWITCHING', message: 'The provider is switching into implementation mode.' });
         return;
       }
       if (typeof msg.text !== 'string' || msg.text.length === 0) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'chat-user-message requires text' });
         return;
       }
-      const activeSession = session;
-      activeSession.status = 'running';
-      void skillRegistry.promptContext(msg.text, typeof msg.skillName === 'string' ? msg.skillName : undefined, {
-        phase: activeSession.planning.snapshot().phase,
-      })
-        .then((prompt) => {
-          if (session !== activeSession) throw new Error('Agent session changed before the message was dispatched');
-          activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.text, prompt));
-        })
-        .catch((e) => {
-          if (session === activeSession) activeSession.status = 'idle';
-          sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
-        });
+      if (Array.isArray(msg.stagedReferenceIds) && msg.stagedReferenceIds.length > 0) {
+        if (typeof msg.messageId !== 'string' || !msg.messageId) {
+          sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REFERENCE_MESSAGE', message: 'Attachment messages require messageId' });
+          return;
+        }
+        void dispatchStagedUserMessage(sock, msg, session)
+          .catch((error) => {
+            if (pendingReferenceMessage?.messageId === msg.messageId) pendingReferenceMessage = null;
+            sendChatError(sock, error, 'REFERENCE_COMMIT_FAILED');
+          });
+        return;
+      }
+      if (msg.referencesPending === true) {
+        if (typeof msg.messageId !== 'string' || !msg.messageId) {
+          sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'Reference-bearing messages require messageId' });
+          return;
+        }
+        pendingReferenceMessage = { messageId: msg.messageId, message: msg, owner: session };
+        return;
+      }
+      dispatchUserMessage(sock, msg, session);
+      return;
+    }
+    case 'chat-reference-uploads-complete': {
+      const pending = pendingReferenceMessage;
+      if (!pending || pending.owner !== session || msg.messageId !== pending.messageId) {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REFERENCE_MESSAGE', message: 'No matching message is waiting for reference uploads.' });
+        return;
+      }
+      pendingReferenceMessage = null;
+      dispatchUserMessage(sock, pending.message, pending.owner);
       return;
     }
     case 'chat-permission-set': {
@@ -1251,6 +1315,7 @@ httpServer.on('upgrade', (req, socket, head) => {
       ws.on('close', () => {
         if (studioSocket === ws) {
           studioSocket = null;
+          pendingReferenceMessage = null;
           failAllPendingCalls('Studio disconnected while tool calls were in flight; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
         }
       });
@@ -1336,6 +1401,7 @@ let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  clearInterval(stagedReferenceCleanupTimer);
   log(`shutting down (${signal})`);
   disposeSession();
   await browserbaseSession.cleanup('hub shutdown');
