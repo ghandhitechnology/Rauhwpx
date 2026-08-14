@@ -469,12 +469,14 @@ test('get_char_format: 글자 속성을 pt 환산과 함께 반환한다 (본문
 
 // ─── verify_changes ─────────────────────────────────────────
 
-test('verify_changes: change-set 요약 + postEditText + 삭제 마크 경고', async () => {
+test('verify_changes: change-set 요약 + postEditText + 즉시 적용 삭제', async () => {
   const { call, body } = makeEnv();
   await call('insert_text', { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X' });
   const d = (await call('delete_range', {
     sectionIdx: 0, startParaIdx: 1, startCharOffset: 0, endParaIdx: 1, endCharOffset: 6,
-  })) as { changeSetId: string };
+  })) as { changeSetId: string; deletedText: string; collapsedAt: { paraIdx: number; charOffset: number } };
+  assert.equal(d.deletedText, 'Second');
+  assert.deepEqual(d.collapsedAt, { paraIdx: 1, charOffset: 0 });
   const r = (await call('verify_changes', {})) as {
     changeSetId: string; status: string;
     ops: Array<{ kind: string; applied: boolean }>;
@@ -484,15 +486,15 @@ test('verify_changes: change-set 요약 + postEditText + 삭제 마크 경고', 
   assert.equal(r.changeSetId, d.changeSetId);
   assert.equal(r.ops.length, 2);
   assert.deepEqual(r.ops.map((o) => o.kind), ['insert', 'delete']);
-  assert.equal(r.ops[0].applied, true);   // insert — 즉시 적용
-  assert.equal(r.ops[1].applied, false);  // delete — 마크 전용
-  // 편집 후 실제 문서 텍스트가 그대로 보인다 (삭제 마크는 아직 가시적)
+  assert.equal(r.ops[0].applied, true);  // insert — 즉시 적용
+  assert.equal(r.ops[1].applied, true);  // delete — 빈 교체로 즉시 적용 (미리보기 = 승인 후 상태)
+  // 삭제가 라이브 미리보기에 이미 반영되어 있다
   const p0 = r.postEditText.find((p) => p.paraIdx === 0)!;
   const p1 = r.postEditText.find((p) => p.paraIdx === 1)!;
   assert.equal(p0.text, 'XFirst item');
-  assert.equal(p1.text, 'Second item');
-  assert.equal(body[1], 'Second item'); // mark-only — 아직 삭제되지 않았다
-  assert.ok(r.warnings.some((w) => w.includes('struck-through')));
+  assert.equal(p1.text, ' item');
+  assert.equal(body[1], ' item');
+  assert.ok(!r.warnings.some((w) => w.includes('struck-through')));
   assert.equal(typeof r.revision, 'number');
 });
 
@@ -530,7 +532,7 @@ test('verify_changes includeImage: 캔버스가 없으면 이미지 없이 경�
 
 test('verify_changes includeImage: withMarkedOpsApplied 로 승인 후 상태를 렌더한다', async () => {
   const { call, pending, body, calls } = makeEnv();
-  // 삭제 마크(mark-only) — 승인 전에는 'First item' 이 그대로 보인다
+  // 삭제는 즉시 적용된다 — 미리보기가 곧 승인 후 상태
   await call('delete_range', {
     sectionIdx: 0, startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 5,
   });
@@ -555,10 +557,10 @@ test('verify_changes includeImage: withMarkedOpsApplied 로 승인 후 상태를
     assert.equal(r.image.mimeType, 'image/png');
     assert.equal(r.image.data, 'AQIDBA=='); // [1,2,3,4] base64
     assert.equal(r.imagePageIndex, 0);
-    // 렌더 시점의 본문은 삭제 마크가 적용된('First' 제거) 상태였다
+    // 렌더 시점의 본문은 삭제가 적용된('First' 제거) 상태 — 라이브 미리보기와 동일
     const render = calls.find((c) => c.m === 'renderPageToCanvas')!;
     assert.equal(render.a[1], ' item');
-    assert.equal(body[0], 'First item'); // 렌더 후에는 반드시 원복
+    assert.equal(body[0], ' item'); // 삭제는 즉시 적용 — 렌더 전후 동일
   } finally {
     delete (globalThis as Record<string, unknown>)['OffscreenCanvas'];
   }

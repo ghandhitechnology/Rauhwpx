@@ -53,6 +53,56 @@ fn test_create_empty_document_is_editable() {
     );
 }
 
+#[test]
+fn test_refresh_layout_rebuilds_derived_state_without_changing_document_breaks() {
+    let mut doc = HwpDocument::create_empty();
+    doc.insert_text_native(0, 0, 0, "alpha beta")
+        .expect("seed text");
+    doc.split_paragraph_native(0, 0, 5, None)
+        .expect("seed paragraphs");
+    doc.apply_para_format_native(0, 1, r#"{"pageBreakBefore":true}"#)
+        .expect("intentional page break");
+
+    let before_ir: Vec<(String, u16)> = doc.document().sections[0]
+        .paragraphs
+        .iter()
+        .map(|para| (para.text.clone(), para.para_shape_id))
+        .collect();
+    let before_pages = doc.page_count();
+    assert!(
+        before_pages >= 2,
+        "the intentional break should create another page"
+    );
+
+    // 증분 경로가 어긋난 상태를 흉내 내고, IR 기반 refresh가 파생 상태만 복구하는지 본다.
+    doc.composed.clear();
+    doc.measured_tables.clear();
+    doc.measured_sections.clear();
+    doc.dirty_sections.fill(false);
+    doc.dirty_paragraphs.clear();
+    doc.para_column_map.clear();
+    doc.pagination.clear();
+
+    doc.refresh_layout_native();
+
+    let after_ir: Vec<(String, u16)> = doc.document().sections[0]
+        .paragraphs
+        .iter()
+        .map(|para| (para.text.clone(), para.para_shape_id))
+        .collect();
+    assert_eq!(after_ir, before_ir, "refresh must not mutate document IR");
+    assert_eq!(doc.page_count(), before_pages);
+    assert_eq!(doc.composed.len(), 1);
+    assert_eq!(doc.composed[0].len(), 2);
+    assert_eq!(doc.measured_sections.len(), 1);
+    let props: Value = serde_json::from_str(
+        &doc.get_para_properties_at_native(0, 1)
+            .expect("paragraph properties"),
+    )
+    .expect("paragraph properties json");
+    assert_eq!(props["pageBreakBefore"], true);
+}
+
 fn issue_1481_json_usize(json: &str, key: &str) -> usize {
     let parsed: Value = serde_json::from_str(json).expect("JSON 파싱");
     parsed[key].as_u64().expect("usize 값") as usize

@@ -2,7 +2,7 @@
  * E2E: 에이전트 편집 루프 종단간 검증 — hub → bridge → executor → pending → wasm 렌더.
  *
  * 실제 rhwp-agent 허브(server.mjs)를 테스트 포트로 띄우고, mcp-stdio.mjs 와 동일한
- * `{v:1,type:'tool-call',id,tool,args}` 프레임을 보는 가짜 MCP WS 클라이언트로
+ * `{v:2,type:'tool-call',id,tool,args}` 프레임을 보는 가짜 MCP WS 클라이언트로
  * 스튜디오의 에이전트 도구 표면을 프로덕션 경로 그대로 구동한다. 검증 순서:
  *   a. get_structure revision 반환 + write 툴 expectedRevision 게이트(REVISION_MISMATCH)
  *   b. replace_range 원자성(단일 'replace' op) + 삽입 텍스트의 교체 구간 글자 서식 상속
@@ -11,7 +11,8 @@
  *   d. preview_equation 깨진 스크립트 warnings+metrics / insert_equation fontSizePt 상속
  *   e. verify_changes per-op 요약 + postEditText 다이제스트 + includeImage PNG 블록
  *   f. 인라인 수식 줄바꿈 — 수식 bbox/텍스트 런이 열 오른쪽 가장자리를 넘지 않음
- *   g. pending 승인(approve) 후 문서 상태 영속
+ *   g. pageBreakBefore 문단의 멀티라인 삽입이 continuation마다 쪽 나눔을 복제하지 않음
+ *   h. pending/approve/권위 refresh의 page map 동일 + 문서 상태 영속
  *
  * 실행: npm run e2e:agent-edit-loop   (headless Chrome + 자체 vite/허브 프로세스 기동)
  */
@@ -120,7 +121,7 @@ function connectMcpClient(hubPort, token) {
         reject(new Error(`tool-call 응답 시간 초과: ${tool}`));
       }, 45000);
       inflight.set(id, { resolve, timer });
-      ws.send(JSON.stringify({ v: 1, type: 'tool-call', id, tool, args }));
+      ws.send(JSON.stringify({ v: 2, type: 'tool-call', id, tool, args }));
     });
   };
   return { ws, opened, call };
@@ -218,6 +219,17 @@ try {
 
     await loadHwpFile(page, SAMPLE);
 
+    // MCP 도구는 실제 채팅 세션의 workflow/권한 아래에서만 허용된다. 메시지를
+    // 보내지 않으므로 CLI 프로세스는 시작하지 않고, 허브 권한 상태만 direct로 연다.
+    await page.evaluate(() => window.__agentBridge.startChat(
+      'claude', 'sonnet', 'high', false, 'safe', 'direct',
+      'agent-edit-loop-e2e', null, 'footnote-01.hwp',
+    ));
+    await page.waitForFunction(
+      () => window.__agentBridge?.getActiveAgent?.() === 'claude',
+      { timeout: 10000 },
+    );
+
     const mcp = connectMcpClient(hubPort, HUB_TOKEN);
     await mcp.opened;
     const call = mcp.call;
@@ -278,6 +290,10 @@ try {
       const seedBase = s1.sections[0].paragraphCount;
       const seedBaseLen = s1.sections[0].paragraphs[seedBase - 1]?.length ?? 0;
 
+      // 영구 회귀 재현 조건: pageBreakBefore가 켜진 문단에서 agent multiline insert.
+      // splitParagraph의 일반 Enter 상속을 그대로 쓰면 모든 continuation이 이 속성을
+      // 받아 각 문단이 별도 페이지가 되고, IR에 저장되어 approve 후에도 남는다.
+      await callWrite(call, 'insert_page_break', { sectionIdx: 0, paraIdx: seedBase - 1 });
       const ins = await callWrite(call, 'insert_text', {
         sectionIdx: 0, paraIdx: seedBase - 1, charOffset: seedBaseLen,
         text: `\n${FILLER}\n${L1}\n${L2}\n${L3}`,
@@ -295,6 +311,15 @@ try {
         'get_text_range(시드 확인)',
       );
       assert(seed.text === L2, `시드 문단 텍스트 일치: "${seed.text}"`);
+      const inheritedBreaks = [];
+      for (const p of [seedBase - 1, fillerP, l1P, l2P, l3P]) {
+        const pf = must(await call('get_para_format', { sectionIdx: 0, paraIdx: p }), `get_para_format(${p}, break)`);
+        inheritedBreaks.push(pf.pageBreakBefore === true);
+      }
+      assert(
+        JSON.stringify(inheritedBreaks) === JSON.stringify([true, false, false, false, false]),
+        `원본의 의도된 쪽나눔만 유지하고 continuation은 해제: ${JSON.stringify(inheritedBreaks)}`,
+      );
 
       // ── b. replace_range 원자성 + 서식 상속 ─────────────────
       setTestCase('b. replace_range 원자성/서식 상속');
@@ -372,7 +397,8 @@ try {
         kindsB.filter((k) => k === 'replace').length === 1
           && kindsB.filter((k) => k === 'insert').length === 1
           && kindsB.filter((k) => k === 'delete').length === 0
-          && vB.ops.length === 3,
+          && kindsB.filter((k) => k === 'object:paraFormat').length === 1
+          && vB.ops.length === 4,
         `replace_range 가 정확히 하나의 'replace' op (ops=${JSON.stringify(kindsB)})`,
       );
       const fmtIn = must(
@@ -540,9 +566,9 @@ try {
       assert(
         v1.changeSetId && v1.status === 'open'
           && kindCount('insert') === 1 && kindCount('format') === 2 && kindCount('replace') === 1
-          && kindCount('object:paraFormat') === 7 && kindCount('object:insertEquation') === 1
-          && v1.ops.length === 12,
-        `per-op 요약 12건 (insert 1 / format 2 / replace 1 / paraFormat 7 / insertEquation 1): ${JSON.stringify(v1.ops.map((o) => o.kind))}`,
+          && kindCount('object:paraFormat') === 8 && kindCount('object:insertEquation') === 1
+          && v1.ops.length === 13,
+        `per-op 요약 13건 (insert 1 / format 2 / replace 1 / paraFormat 8 / insertEquation 1): ${JSON.stringify(v1.ops.map((o) => o.kind))}`,
       );
       assert(
         v1.ops.every((o) => o.id && typeof o.applied === 'boolean' && typeof o.summary === 'string'),
@@ -630,18 +656,49 @@ try {
         `수식 문단 어떤 런도 열 오른쪽을 넘지 않음 (maxX=${maxProbeX.toFixed(1)} <= rightEdge=${overflow.rightEdge.toFixed(1)})`,
       );
 
-      // ── g. 승인 후 영속 ─────────────────────────────────────
-      setTestCase('g. approve 후 문서 상태 영속');
+      // ── g/h. 승인 전후 page map 동일 + 승인 후 영속 ──────────
+      setTestCase('g/h. preview/approve/refresh page map + 영속');
+      const affectedParas = [seedBase - 1, fillerP, l1P, l2P, l3P];
+      const previewLayout = await page.evaluate((paras) => {
+        const w = window.__wasm;
+        return {
+          pageCount: w.pageCount,
+          pages: paras.map((p) => w.getCursorRect(0, p, 0)?.pageIndex ?? -1),
+        };
+      }, affectedParas);
       const beforeApprove = await page.evaluate(() => window.__agentBridge.pendingEdits.hasPending());
       await page.evaluate((id) => window.__agentBridge.pendingEdits.approve(id), v2.changeSetId);
       await page.evaluate(() => new Promise((r) => setTimeout(r, 500)));
-      const after = await page.evaluate((p) => ({
-        hasPending: window.__agentBridge.pendingEdits.hasPending(),
-        setCount: window.__agentBridge.pendingEdits.getChangeSets().length,
-        text: window.__wasm.getTextRange(0, p, 0, 100),
-      }), l2P);
+      const after = await page.evaluate(({ p, paras }) => {
+        const w = window.__wasm;
+        return {
+          hasPending: window.__agentBridge.pendingEdits.hasPending(),
+          setCount: window.__agentBridge.pendingEdits.getChangeSets().length,
+          text: w.getTextRange(0, p, 0, 100),
+          layout: {
+            pageCount: w.pageCount,
+            pages: paras.map((para) => w.getCursorRect(0, para, 0)?.pageIndex ?? -1),
+          },
+        };
+      }, { p: l2P, paras: affectedParas });
       assert(beforeApprove === true && after.hasPending === false && after.setCount === 0,
         `approve 후 change set 정리 (전 pending=${beforeApprove}, 후 sets=${after.setCount})`);
+      assert(
+        JSON.stringify(after.layout) === JSON.stringify(previewLayout),
+        `approve 전후 page map 동일 (preview=${JSON.stringify(previewLayout)}, approved=${JSON.stringify(after.layout)})`,
+      );
+      const refreshedLayout = await page.evaluate((paras) => {
+        const w = window.__wasm;
+        w.refreshLayout();
+        return {
+          pageCount: w.pageCount,
+          pages: paras.map((p) => w.getCursorRect(0, p, 0)?.pageIndex ?? -1),
+        };
+      }, affectedParas);
+      assert(
+        JSON.stringify(refreshedLayout) === JSON.stringify(after.layout),
+        `승인 후 권위 refresh에도 page map 유지 (${JSON.stringify(refreshedLayout)})`,
+      );
       assert(
         after.text.includes(REPLACE_TEXT) && !after.text.includes('원본'),
         `approve 후 교체 텍스트 영속: "${after.text}"`,
