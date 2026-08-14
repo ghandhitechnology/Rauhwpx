@@ -259,6 +259,8 @@ export function applyCliproxyToSummary(summary, status) {
   const next = {
     plans: { ...(summary?.plans ?? { claude: 'pro', codex: 'plus' }) },
     providers: {
+      // CLIProxyAPI 는 claude/codex 만 안다 — pi 등 나머지 프로바이더는 그대로 통과시킨다.
+      ...(summary?.providers ?? {}),
       claude: { ...(summary?.providers?.claude ?? {}) },
       codex: { ...(summary?.providers?.codex ?? {}) },
     },

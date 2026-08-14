@@ -155,7 +155,8 @@
 .ag-settings-btn:focus-visible,
 .ag-settings-primary:focus-visible,
 .ag-settings-input:focus-visible,
-.ag-settings-select:focus-visible {
+.ag-settings-select:focus-visible,
+.ag-pi-chip:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
@@ -210,7 +211,171 @@
   color: var(--ag-text);
 }
 
+/* ── Pi 연결 마법사 ─────────────────────────────────── */
+
+.ag-pi-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-panel);
+  background: var(--ag-bg-2);
+}
+
+.ag-pi-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.ag-pi-step {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ag-pi-step[hidden] {
+  display: none;
+}
+
+/* 채움 버튼 위의 π 는 버튼 글자색을 그대로 탄다. */
+.ag-pi-logo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.ag-pi-logo-btn .ag-provider-icon-mask {
+  color: inherit;
+}
+
+.ag-pi-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.ag-pi-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--ag-accent);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg);
+  color: var(--ag-text);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  cursor: pointer;
+}
+
+.ag-pi-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-pi-chip-x {
+  color: var(--ag-text-muted);
+}
+
+.ag-pi-catalog {
+  display: flex;
+  max-height: 260px;
+  flex-direction: column;
+  gap: 3px;
+  overflow-y: auto;
+  padding: 3px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-bg);
+}
+
+.ag-pi-model-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--ag-r-chip);
+  background: none;
+  color: var(--ag-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-pi-model-row:hover,
+.ag-pi-model-row:focus-visible {
+  background: var(--ag-hover);
+  outline: none;
+}
+
+.ag-pi-model-row.ag-active {
+  border-color: var(--ag-accent);
+  background: var(--ag-selected);
+}
+
+.ag-pi-model-main {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ag-pi-model-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-pi-model-id,
+.ag-pi-model-meta {
+  overflow: hidden;
+  font-family: var(--ag-mono);
+  font-size: var(--ag-micro);
+  color: var(--ag-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-pi-naming {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ag-pi-naming-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-bg);
+}
+
+.ag-pi-summary-models {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ag-pi-summary-models .ag-pi-model-id {
+  flex: 0 1 auto;
+}
+
 /* ── 사용량 ─────────────────────────────────────────── */
+
+.ag-settings-usage-block[hidden] {
+  /* display: flex 가 hidden 속성의 UA display:none 을 이기지 않도록. */
+  display: none;
+}
 
 .ag-settings-usage-block {
   display: flex;
@@ -321,7 +486,8 @@
 }
 
 .ag-settings-model-turns,
-.ag-settings-model-tokens {
+.ag-settings-model-tokens,
+.ag-settings-model-cost {
   flex: 0 0 auto;
   font-family: var(--ag-mono);
   color: var(--ag-text-secondary);
