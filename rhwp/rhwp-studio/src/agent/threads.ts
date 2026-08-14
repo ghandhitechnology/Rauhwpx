@@ -9,6 +9,8 @@ export interface ThreadMessage {
   role: 'user' | 'assistant' | 'system';
   text: string;
   agent?: AgentName;
+  /** Concise in-turn milestone, rendered separately from the final answer. */
+  kind?: 'progress';
 }
 
 export interface ChatThread {

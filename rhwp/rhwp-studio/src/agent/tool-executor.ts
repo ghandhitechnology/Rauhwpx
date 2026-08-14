@@ -309,6 +309,13 @@ export class AgentToolExecutor {
       case 'edit_header_footer': return this.editHeaderFooter(args, agent);
       case 'insert_page_break': return this.insertPageBreak(args, agent);
       case 'insert_chart': return this.insertChart(args, agent);
+      case 'replace_all': return this.replaceAll(args, agent);
+      case 'get_outline': return this.getOutline(args);
+      case 'list_footnotes': return this.listFootnotes();
+      case 'insert_footnote': return this.insertFootnote(args, agent);
+      case 'edit_footnote': return this.editFootnote(args, agent);
+      case 'list_bookmarks': return this.listBookmarks();
+      case 'set_bookmark': return this.setBookmark(args, agent);
       default:
         throw new AgentToolError('UNKNOWN_TOOL', `Unknown tool: ${tool}`);
     }
@@ -736,6 +743,18 @@ export class AgentToolExecutor {
     }
     const caseSensitive = args['caseSensitive'] === true;
     const maxResults = Math.min(Math.max(optInt(args, 'maxResults', 50), 1), 200);
+    const { matches, truncated } = this.collectTextMatches(query, caseSensitive, maxResults);
+    return { revision: this.revision, matches, truncated };
+  }
+
+  /** 본문+셀 전수 텍스트 검색 — find_text / replace_all 공용 스캐너 */
+  private collectTextMatches(query: string, caseSensitive: boolean, maxResults: number): {
+    matches: Array<{
+      sectionIdx: number; paraIdx: number; charOffset: number; length: number;
+      context: string; cell?: CellAddr;
+    }>;
+    truncated: boolean;
+  } {
     const { wasm } = this.deps;
     // 정규식 기반 검색 — toLowerCase 경로는 길이가 바뀔 수 있어(İ 등) 오프셋이 깨진다.
     // 'giu' 플래그로 원본 문자열에서 직접 찾고, charOffset/length 는 wasm 과 같은
@@ -799,7 +818,267 @@ export class AgentToolExecutor {
         }
       }
     }
-    return { revision: this.revision, matches, truncated };
+    return { matches, truncated };
+  }
+
+  /**
+   * 문서 전체 찾아 바꾸기 — 매치를 한 번 수집한 뒤 문서 좌표 역순으로
+   * pending replace 를 등록한다 (역순이라 앞선 교체가 뒤 매치 좌표를 밀지 않는다).
+   * 각 매치는 개별 replace op 으로 리뷰에 표시되고 승인/거절이 한 번에 이뤄진다.
+   */
+  private replaceAll(args: Record<string, unknown>, agent: AgentName): unknown {
+    this.requireRevision(args);
+    const query = reqString(args, 'query');
+    if (query.length < 1) {
+      throw new AgentToolError('INVALID_ARGS', 'query must be at least 1 character');
+    }
+    const replacement = reqString(args, 'replacement');
+    if (replacement.length > 1000) {
+      throw new AgentToolError('INVALID_ARGS', 'replacement must be at most 1000 chars');
+    }
+    const caseSensitive = args['caseSensitive'] === true;
+    const maxMatches = Math.min(Math.max(optInt(args, 'maxMatches', 100), 1), 200);
+    const { matches, truncated } = this.collectTextMatches(query, caseSensitive, maxMatches);
+    if (matches.length === 0) {
+      return { revision: this.revision, replacedCount: 0, skippedPendingDelete: 0, truncated: false };
+    }
+    // 컨테이너(본문/셀)별 문서 좌표 내림차순 — 같은 컨테이너 안에서 뒤부터 교체한다
+    const cellKey = (c?: CellAddr): string => (c ? `${c.paraIdx}/${c.controlIdx}/${c.cellIdx}` : 'body');
+    const ordered = [...matches].sort((a, b) =>
+      a.sectionIdx - b.sectionIdx
+      || cellKey(a.cell).localeCompare(cellKey(b.cell))
+      || b.paraIdx - a.paraIdx
+      || b.charOffset - a.charOffset);
+    let skippedPendingDelete = 0;
+    const items: Array<{ range: DocRange; text: string }> = [];
+    for (const m of ordered) {
+      const range: DocRange = {
+        sectionIdx: m.sectionIdx,
+        startParaIdx: m.paraIdx, startCharOffset: m.charOffset,
+        endParaIdx: m.paraIdx, endCharOffset: m.charOffset + m.length,
+      };
+      if (m.cell) range.cell = m.cell;
+      // 삭제 마크와 겹치는 매치는 건너뛴다 — 일부만 겹쳐도 마크가 드리프트하거나
+      // 승인 시 교체 텍스트가 함께 지워진다 (시작점만 보면 부분 겹침을 놓친다)
+      if (this.deps.pending.findDeleteMarkOverlapping?.(range)) {
+        skippedPendingDelete++;
+        continue;
+      }
+      items.push({ range, text: replacement });
+    }
+    // 전부-또는-전무: 중간 실패 시 pending/문서가 배치 이전으로 복원되고 에러가 난다 —
+    // 부분 적용된 배치가 리뷰 카드에 남지 않는다.
+    let replacedCount = 0;
+    let changeSetId: string | null = null;
+    if (items.length > 0) {
+      changeSetId = this.deps.pending.replaceTextBatch(items, agent).changeSetId;
+      replacedCount = items.length;
+    }
+    return {
+      revision: this.revision,
+      ...(changeSetId !== null ? { changeSetId } : {}),
+      replacedCount,
+      skippedPendingDelete,
+      truncated,
+      ...(truncated ? { note: `only the first ${maxMatches} matches were replaced — call replace_all again with the returned revision to continue. ${PENDING_NOTE}` } : { note: PENDING_NOTE }),
+    };
+  }
+
+  /** 문서 구조(개요/조문) 트리 — 긴 문서 내비게이션용. 본문은 생략하고 제목만 싣는다. */
+  private getOutline(args: Record<string, unknown>): unknown {
+    this.requireDocLoaded();
+    const rawMode = args['mode'];
+    const mode = rawMode === undefined || rawMode === null ? 'auto' : reqString(args, 'mode');
+    if (mode !== 'auto' && mode !== 'outline' && mode !== 'clause') {
+      throw new AgentToolError('INVALID_ARGS', `mode must be "auto" | "outline" | "clause" (got ${JSON.stringify(mode)})`);
+    }
+    const doc = this.deps.wasm.getOutlineStructure(mode);
+    if (!doc) {
+      throw new AgentToolError('RPC_ERROR', 'outline query is unavailable in this engine build');
+    }
+    const MAX_NODES = 500;
+    let total = 0;
+    let truncated = false;
+    interface OutlineNode {
+      level: number; kind: string; marker?: string; heading: string;
+      sectionIdx: number; paraIdx: number; children?: OutlineNode[];
+    }
+    const mapNode = (n: Record<string, unknown>): OutlineNode | null => {
+      if (total >= MAX_NODES) { truncated = true; return null; }
+      total++;
+      const out: OutlineNode = {
+        level: Number(n['level'] ?? 0),
+        kind: String(n['kind'] ?? ''),
+        heading: String(n['heading'] ?? '').slice(0, 200),
+        sectionIdx: Number(n['section'] ?? 0),
+        paraIdx: Number(n['paragraph'] ?? 0),
+      };
+      const marker = n['marker'];
+      if (typeof marker === 'string' && marker.length > 0) out.marker = marker;
+      const children = Array.isArray(n['children'])
+        ? (n['children'] as Array<Record<string, unknown>>).map(mapNode).filter((c): c is OutlineNode => c !== null)
+        : [];
+      if (children.length > 0) out.children = children;
+      return out;
+    };
+    const roots = (doc.roots ?? []).map(mapNode).filter((n): n is OutlineNode => n !== null);
+    return {
+      revision: this.revision,
+      mode: doc.mode,
+      nodeCount: doc.node_count,
+      roots,
+      truncated,
+    };
+  }
+
+  /** 렌더된 페이지들에서 각주/미주 앵커를 수집한다 (본문 소스만 내용 조회 가능) */
+  private listFootnotes(): unknown {
+    this.requireDocLoaded();
+    const { wasm } = this.deps;
+    const seen = new Set<string>();
+    const notes: Array<{
+      sectionIdx: number; paraIdx: number; controlIdx: number;
+      sourceType: string; number?: number; text?: string; paraCount?: number;
+    }> = [];
+    const pageCount = wasm.pageCount;
+    for (let page = 0; page < pageCount; page++) {
+      for (let i = 0; i < 200; i++) {
+        const info = wasm.getPageFootnoteInfo(page, i);
+        if (!info || info.ok !== true) break;
+        const key = `${info.sectionIdx}:${info.paraIdx}:${info.controlIdx}:${info.sourceType}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const entry: (typeof notes)[number] = {
+          sectionIdx: info.sectionIdx, paraIdx: info.paraIdx, controlIdx: info.controlIdx,
+          sourceType: info.sourceType,
+        };
+        if (info.sourceType === 'body') {
+          try {
+            const d = wasm.getFootnoteInfo(info.sectionIdx, info.paraIdx, info.controlIdx);
+            if (d?.ok === true) {
+              entry.number = d.number;
+              entry.paraCount = d.paraCount;
+              entry.text = d.texts.join('\n').slice(0, 300);
+            }
+          } catch { /* 내용 조회는 best-effort */ }
+        }
+        notes.push(entry);
+      }
+    }
+    notes.sort((a, b) => a.sectionIdx - b.sectionIdx || a.paraIdx - b.paraIdx || a.controlIdx - b.controlIdx);
+    return { revision: this.revision, notes };
+  }
+
+  private insertFootnote(args: Record<string, unknown>, agent: AgentName): unknown {
+    this.requireRevision(args);
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    const paraIdx = reqInt(args, 'paraIdx');
+    const charOffset = reqInt(args, 'charOffset');
+    const rawKind = args['kind'];
+    const kind = rawKind === undefined || rawKind === null ? 'footnote' : reqString(args, 'kind');
+    if (kind !== 'footnote' && kind !== 'endnote') {
+      throw new AgentToolError('INVALID_ARGS', `kind must be "footnote" or "endnote" (got ${JSON.stringify(kind)})`);
+    }
+    const text = reqString(args, 'text').replace(/\r\n?/g, '\n');
+    if (text.length < 1 || text.length > 2000) {
+      throw new AgentToolError('INVALID_ARGS', `text must be 1..2000 chars (got ${text.length})`);
+    }
+    if (text.includes('\n')) {
+      throw new AgentToolError('INVALID_ARGS', 'footnote text must be a single paragraph (no newlines)');
+    }
+    this.validateAddress(sectionIdx, paraIdx, charOffset);
+    const mark = this.deps.pending.findDeleteMarkContaining?.(sectionIdx, paraIdx, charOffset);
+    if (mark) {
+      throw new AgentToolError('PENDING_DELETE_OVERLAP',
+        'insertion point is inside a range already marked for deletion — the marker would be deleted on approval');
+    }
+    const obj: ObjectOp = { type: 'insertNote', noteKind: kind, sectionIdx, paraIdx, charOffset, text };
+    const r = this.deps.pending.addObjectOp(agent, obj);
+    const applied = r.obj as Extract<ObjectOp, { type: 'insertNote' }>;
+    return {
+      revision: this.revision,
+      changeSetId: r.changeSetId,
+      note: PENDING_NOTE,
+      ...(applied.anchor
+        ? { anchor: { paraIdx: applied.anchor.paraIdx, controlIdx: applied.anchor.controlIdx } }
+        : {}),
+      ...(applied.number !== undefined ? { number: applied.number } : {}),
+    };
+  }
+
+  private editFootnote(args: Record<string, unknown>, agent: AgentName): unknown {
+    this.requireRevision(args);
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    const paraIdx = reqInt(args, 'paraIdx');
+    const controlIdx = reqInt(args, 'controlIdx');
+    const text = reqString(args, 'text').replace(/\r\n?/g, '\n');
+    if (text.length > 2000) {
+      throw new AgentToolError('INVALID_ARGS', `text must be at most 2000 chars (got ${text.length})`);
+    }
+    if (text.includes('\n')) {
+      throw new AgentToolError('INVALID_ARGS', 'footnote text must be a single paragraph (no newlines)');
+    }
+    const obj: ObjectOp = { type: 'setNoteText', sectionIdx, paraIdx, controlIdx, text };
+    const r = this.deps.pending.addObjectOp(agent, obj);
+    return { revision: this.revision, changeSetId: r.changeSetId, note: PENDING_NOTE };
+  }
+
+  private listBookmarks(): unknown {
+    this.requireDocLoaded();
+    const bookmarks = this.deps.wasm.getBookmarks().map((b) => ({
+      name: b.name, sectionIdx: b.sec, paraIdx: b.para, charOffset: b.charPos, ctrlIdx: b.ctrlIdx,
+    }));
+    return { revision: this.revision, bookmarks };
+  }
+
+  private setBookmark(args: Record<string, unknown>, agent: AgentName): unknown {
+    this.requireRevision(args);
+    const op = reqString(args, 'op');
+    if (op !== 'add' && op !== 'delete' && op !== 'rename') {
+      throw new AgentToolError('INVALID_ARGS', `op must be "add" | "delete" | "rename" (got ${JSON.stringify(op)})`);
+    }
+    const name = reqString(args, 'name');
+    if (name.length < 1 || name.length > 80) {
+      throw new AgentToolError('INVALID_ARGS', 'name must be 1..80 chars');
+    }
+    if (op === 'add') {
+      const sectionIdx = reqInt(args, 'sectionIdx');
+      const paraIdx = reqInt(args, 'paraIdx');
+      const charOffset = reqInt(args, 'charOffset');
+      this.validateAddress(sectionIdx, paraIdx, charOffset);
+      if (this.deps.wasm.getBookmarks().some((b) => b.name === name)) {
+        throw new AgentToolError('BOOKMARK_FAILED', `a bookmark named "${name}" already exists — bookmark names must be unique`);
+      }
+      const obj: ObjectOp = { type: 'bookmark', op: 'add', sectionIdx, paraIdx, charOffset, name };
+      const r = this.deps.pending.addObjectOp(agent, obj);
+      return { revision: this.revision, changeSetId: r.changeSetId, note: PENDING_NOTE };
+    }
+    // delete / rename — 이름으로 대상 해석
+    const target = this.deps.wasm.getBookmarks().find((b) => b.name === name);
+    if (!target) {
+      throw new AgentToolError('BOOKMARK_NOT_FOUND', `no bookmark named "${name}" — call list_bookmarks for current names`);
+    }
+    if (op === 'rename') {
+      const newName = reqString(args, 'newName');
+      if (newName.length < 1 || newName.length > 80) {
+        throw new AgentToolError('INVALID_ARGS', 'newName must be 1..80 chars');
+      }
+      if (this.deps.wasm.getBookmarks().some((b) => b.name === newName)) {
+        throw new AgentToolError('BOOKMARK_FAILED', `a bookmark named "${newName}" already exists`);
+      }
+      const obj: ObjectOp = {
+        type: 'bookmark', op: 'rename',
+        sectionIdx: target.sec, paraIdx: target.para, ctrlIdx: target.ctrlIdx, name: newName,
+      };
+      const r = this.deps.pending.addObjectOp(agent, obj);
+      return { revision: this.revision, changeSetId: r.changeSetId, note: PENDING_NOTE };
+    }
+    const obj: ObjectOp = {
+      type: 'bookmark', op: 'delete',
+      sectionIdx: target.sec, paraIdx: target.para, ctrlIdx: target.ctrlIdx,
+    };
+    const r = this.deps.pending.addObjectOp(agent, obj);
+    return { revision: this.revision, changeSetId: r.changeSetId, note: PENDING_NOTE };
   }
 
   private async renderPage(args: Record<string, unknown>): Promise<unknown> {
@@ -1160,6 +1439,14 @@ export class AgentToolExecutor {
     const text = reqString(args, 'text');
     if (text.length < 1 || text.length > 10_000) {
       throw new AgentToolError('INVALID_ARGS', `text must be 1..10000 chars (got ${text.length})`);
+    }
+    const mark = this.deps.pending.findDeleteMarkOverlapping?.(range);
+    if (mark) {
+      throw new AgentToolError('PENDING_DELETE_OVERLAP',
+        `range overlaps a range already marked for deletion `
+        + `(p${mark.range.startParaIdx}:${mark.range.startCharOffset}-p${mark.range.endParaIdx}:${mark.range.endCharOffset}) — `
+        + 'replacing marked text corrupts the pending delete. Either replace outside the mark, '
+        + 'or skip the delete_range and use replace_range alone for that region.');
     }
     // 원자적 교체 (삭제 마크 + 끝 삽입 2-op 조합 폐기) — 서식 보존 + 스냅샷 기반 되돌림
     const r = this.deps.pending.replaceText(range, text, agent);
