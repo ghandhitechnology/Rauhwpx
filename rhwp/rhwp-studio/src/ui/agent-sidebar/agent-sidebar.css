@@ -2072,12 +2072,26 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 /* Review cards use the same neutral elevation as other contextual surfaces. */
 .ag-review-card {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
   overflow: hidden;
   padding: 0;
   border: 1px solid var(--ag-border);
   border-radius: var(--ag-r-panel);
   background: var(--ag-bg);
   box-shadow: none;
+}
+
+/* Keep review decisions reachable when a diff contains a long text payload.
+   The card header and diff scroll together while the action row stays outside
+   the scrollport at the bottom of the card. */
+.ag-review-summary {
+  min-height: 0;
+  max-height: 26dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .ag-review-card.ag-claude {
@@ -2268,6 +2282,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-review-actions {
   display: flex;
+  flex: 0 0 auto;
   gap: 8px;
   margin: 0;
   padding: 10px 12px;
@@ -3037,6 +3052,10 @@ body.ag-col-resizing {
   padding: 14px 16px 18px;
   border-top: 0;
   background: transparent;
+}
+
+.ag-fullscreen .ag-review-column .ag-review-summary {
+  max-height: calc(100dvh - 166px);
 }
 
 .ag-review-empty {
