@@ -23,13 +23,14 @@ export const MUTATING_METHODS: readonly string[] = [
   'setPageDef', 'setSectionDef', 'setSectionDefAll', 'setPageBorderFill', 'setColumnDef',
   // 본문 텍스트/문단
   'insertText', 'replaceBodyTextLocal', 'deleteText', 'deleteRange', 'deleteRangeAcrossSections',
-  'splitParagraph', 'mergeParagraph',
+  'splitParagraph', 'splitParagraphLogical', 'mergeParagraph',
   'insertPageBreak', 'insertColumnBreak', 'insertNewNumber', 'setNumberingRestart',
   // 셀 텍스트/문단
   'insertTextInCell', 'insertTextInCellDeferredPagination', 'deleteTextInCell',
   'deleteTextInCellDeferredPagination', 'replaceTextInCellDeferredPagination',
   'deleteRangeInCell', 'insertTextInCellByPath', 'deleteTextInCellByPath', 'deleteRangeInCellByPath',
-  'splitParagraphInCell', 'mergeParagraphInCell', 'splitParagraphInCellByPath',
+  'splitParagraphInCell', 'splitParagraphInCellLogical', 'mergeParagraphInCell',
+  'splitParagraphInCellByPath',
   'mergeParagraphInCellByPath',
   // 표 구조/속성
   'createTable', 'createTableEx', 'deleteTableControl', 'insertTableRow',

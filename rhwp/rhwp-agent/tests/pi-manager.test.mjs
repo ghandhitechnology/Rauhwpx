@@ -54,6 +54,7 @@ const CATALOG = [
     contextLength: 163840,
     pricing: { prompt: 0.0000002, completion: 0.0000008 },
     reasoning: true,
+    supportsImages: false,
   },
   {
     id: 'anthropic/claude-haiku-4.5',
@@ -62,6 +63,7 @@ const CATALOG = [
     contextLength: 200000,
     pricing: { prompt: 0.000001, completion: 0.000005 },
     reasoning: false,
+    supportsImages: true,
   },
   {
     id: 'openai/gpt-5-mini',
@@ -70,6 +72,7 @@ const CATALOG = [
     contextLength: 400000,
     pricing: { prompt: 0.00000025, completion: 0.000002 },
     reasoning: true,
+    supportsImages: true,
   },
 ];
 
@@ -416,6 +419,7 @@ test('setModels writes the pi provider block and survives a reopen', async () =>
     id: 'deepseek/deepseek-chat-v3.1',
     name: '빠른 딥식',
     reasoning: true,
+    supportsImages: false,
     efforts: ['low', 'medium', 'high'],
     defaultEffort: 'high',
     contextLength: 163840,
@@ -438,6 +442,7 @@ test('setModels writes the pi provider block and survives a reopen', async () =>
   // 100만 토큰당 USD 로 환산해서 넣는다.
   assert.deepEqual(deepseek.cost, { input: 0.2, output: 0.8, cacheRead: 0, cacheWrite: 0 });
   assert.equal(haiku.thinkingLevelMap, undefined, '비추론 모델에는 thinkingLevelMap 이 없다');
+  assert.deepEqual(haiku.input, ['text', 'image']);
   assert.deepEqual(haiku.cost, { input: 1, output: 5, cacheRead: 0, cacheWrite: 0 });
 
   // 싼 쪽은 출력 단가가 낮은 딥식이다.

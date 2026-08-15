@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import { constants as fsConstants, promises as fs } from 'node:fs';
 import path from 'node:path';
 
+import { IMAGE_REFERENCE_EXTENSIONS } from './reference-image.mjs';
+
 const MAX_EXTRACTED_CHARS = 5_000_000;
 const HWP_EXTENSIONS = new Set(['.hwp', '.hwpx', '.hml']);
 const TEXT_EXTENSIONS = new Set([
@@ -9,7 +11,7 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 
 export const SUPPORTED_REFERENCE_EXTENSIONS = Object.freeze([
-  ...TEXT_EXTENSIONS, '.pdf', '.docx', ...HWP_EXTENSIONS,
+  ...TEXT_EXTENSIONS, '.pdf', '.docx', ...HWP_EXTENSIONS, ...IMAGE_REFERENCE_EXTENSIONS,
 ]);
 
 export class ReferenceExtractionError extends Error {
