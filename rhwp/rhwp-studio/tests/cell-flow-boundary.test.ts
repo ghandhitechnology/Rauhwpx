@@ -11,7 +11,12 @@ import { fileURLToPath } from 'node:url';
 // 실제 production 모듈을 임시 CommonJS로 변환해 source 복제 없이 동작을 검증한다.
 const studioRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runtimeRoot = mkdtempSync(path.join(tmpdir(), 'rhwp-cell-flow-boundary-'));
-const compiler = path.join(studioRoot, 'node_modules', '.bin', 'tsc');
+const compiler = path.join(
+  studioRoot,
+  'node_modules',
+  '.bin',
+  process.platform === 'win32' ? 'tsc.cmd' : 'tsc',
+);
 const compilation = spawnSync(compiler, [
   '--ignoreConfig',
   'src/engine/command.ts',

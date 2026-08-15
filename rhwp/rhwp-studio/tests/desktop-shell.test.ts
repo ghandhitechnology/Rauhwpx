@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
 
 import { documentPathsFromArgv, launchRequest } from '../../../desktop/launch-routing.mjs';
 import { SessionManager } from '../../../desktop/session-manager.mjs';
@@ -65,13 +66,17 @@ test('SessionManager removal remains safe after webContents destruction', () => 
 });
 
 test('launch routing accepts only supported document paths', () => {
+  const workDir = path.resolve('/work');
   assert.deepEqual(documentPathsFromArgv([
     '/Applications/Rauhwpx',
     '--flag',
     'draft.HWPX',
     'notes.txt',
     'legacy.hml',
-  ], { cwd: '/work' }), ['/work/draft.HWPX', '/work/legacy.hml']);
+  ], { cwd: workDir }), [
+    path.join(workDir, 'draft.HWPX'),
+    path.join(workDir, 'legacy.hml'),
+  ]);
   assert.deepEqual(launchRequest({ openFiles: ['/tmp/a.hwp'], source: 'open-file' }), {
     source: 'open-file',
     openFiles: ['/tmp/a.hwp'],
@@ -85,7 +90,10 @@ test('launch routing accepts only supported document paths', () => {
 
 test('packaged Studio uses a secure path-safe standard scheme', () => {
   assert.equal(STUDIO_URL, 'rauhwpx://app/index.html');
-  assert.equal(resolveStudioAsset('/app/dist', '/assets/app.js'), '/app/dist/assets/app.js');
+  assert.equal(
+    resolveStudioAsset('/app/dist', '/assets/app.js'),
+    path.resolve('/app/dist/assets/app.js'),
+  );
   assert.equal(resolveStudioAsset('/app/dist', '/../secrets.txt'), null);
   assert.equal(resolveStudioAsset('/app/dist', '/%E0%A4%A'), null);
   assert.match(desktopMain, /if \(!devUrl\) installStudioProtocol/);
