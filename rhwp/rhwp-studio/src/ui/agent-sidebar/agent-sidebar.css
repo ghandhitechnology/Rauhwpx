@@ -3551,6 +3551,29 @@ body.ag-col-resizing {
   user-select: none;
 }
 
+/* The focus workspace replaces the normal menu bar at y=0. Keep its leading
+   controls clear of the native traffic lights and expose only the centered
+   title as a window-drag surface. All controls remain ordinary hit targets. */
+html.desktop-mac .ag-fullscreen .ag-workspace-bar {
+  -webkit-app-region: no-drag;
+}
+
+html.desktop-mac .ag-fullscreen .ag-workspace-leading {
+  padding-left: calc(10px + var(--desktop-traffic-light-inset, 78px));
+}
+
+html.desktop-mac .ag-fullscreen .ag-workspace-title {
+  height: 100%;
+  -webkit-app-region: drag;
+}
+
+html.desktop-mac .ag-fullscreen .ag-workspace-leading,
+html.desktop-mac .ag-fullscreen .ag-workspace-trailing,
+html.desktop-mac .ag-fullscreen .ag-workspace-bar button,
+html.desktop-mac .ag-fullscreen .ag-environment-panel {
+  -webkit-app-region: no-drag;
+}
+
 .ag-workspace-leading,
 .ag-workspace-trailing {
   display: flex;

@@ -15,20 +15,48 @@
 }
 
 /* macOS Electron 셸: 타이틀바가 숨겨져 메뉴바가 창 최상단에 온다.
-   왼쪽에 신호등 버튼 자리를 비우고, 빈 영역은 창 드래그로 쓴다. */
-html.desktop-mac #menu-bar {
-  padding-left: 78px;
-  -webkit-app-region: drag;
+   신호등과 컨트롤의 hit area를 분리하고 오른쪽 빈 면만 창 드래그로 쓴다. */
+html.desktop-mac {
+  --desktop-titlebar-height: 38px;
+  --desktop-traffic-light-inset: 78px;
 }
 
-html.desktop-mac #menu-bar .menu-item,
-html.desktop-mac #menu-bar .menu-dropdown {
+html.desktop-mac.desktop-fullscreen {
+  --desktop-traffic-light-inset: 0px;
+}
+
+html.desktop-mac #menu-bar {
+  height: var(--desktop-titlebar-height);
+  padding-left: var(--desktop-traffic-light-inset);
   -webkit-app-region: no-drag;
 }
 
-/* 전체 화면에서는 신호등이 사라지므로 여백을 되돌린다 */
-html.desktop-mac.desktop-fullscreen #menu-bar {
-  padding-left: 8px;
+html.desktop-mac #menu-bar::after {
+  content: '';
+  align-self: stretch;
+  min-width: 36px;
+  flex: 1 1 auto;
+  -webkit-app-region: drag;
+}
+
+/* Focus mode paints its own bar over this row. Electron still includes
+   covered drag regions in native hit testing, so retire this one completely
+   while the focus workspace is open. */
+html.desktop-mac body.ag-fullscreen-open #menu-bar::after {
+  -webkit-app-region: no-drag;
+}
+
+html.desktop-mac #menu-bar .menu-item {
+  height: 100%;
+  flex: 0 0 auto;
+  -webkit-app-region: no-drag;
+}
+
+html.desktop-mac #menu-bar .menu-title {
+  display: inline-flex;
+  height: 100%;
+  align-items: center;
+  padding-block: 0;
 }
 
 .menu-item {
