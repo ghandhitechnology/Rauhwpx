@@ -1770,7 +1770,7 @@ impl DocumentCore {
             let stored_width_px = hwpunit_to_px(stored_hwpunit, self.dpi);
 
             let error_px = our_width_px - stored_width_px;
-            let error_hwpunit = (error_px * 7200.0 / self.dpi).round() as i32;
+            let error_hwpunit = crate::renderer::px_to_hwpunit_round(error_px, self.dpi);
 
             // run별 상세
             let mut runs_json = Vec::new();

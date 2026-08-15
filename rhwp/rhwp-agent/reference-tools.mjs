@@ -4,6 +4,7 @@ const REFERENCE_TOOLS = new Set([
   'list_reference_files',
   'search_reference_files',
   'read_reference_chunk',
+  'read_reference_image',
 ]);
 
 /** Execute a hub-local reference MCP call without relaying it to Studio. */
@@ -20,6 +21,12 @@ export async function executeReferenceTool({ tool, args, store, session }) {
         query: args.query,
         results: store.search({ query: args.query, scopes, maxResults: args.maxResults ?? 8 }),
       },
+    };
+  }
+  if (tool === 'read_reference_image') {
+    return {
+      handled: true,
+      result: await store.readImage({ fileId: args.fileId, scopes }),
     };
   }
   return {

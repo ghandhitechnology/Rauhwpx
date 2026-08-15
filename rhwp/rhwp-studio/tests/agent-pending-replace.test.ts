@@ -79,6 +79,21 @@ function makeFakeWasm(initial: FakePara[]) {
       body.splice(p, 1, head, tail);
       return okJson();
     },
+    splitParagraphLogical: (_s: number, p: number, off: number) => {
+      record('splitParagraphLogical', p, off);
+      const cur = body[p];
+      const head: FakePara = {
+        chars: cur.chars.slice(0, off), shapes: cur.shapes.slice(0, off),
+        paraShapeId: cur.paraShapeId, pageBreakBefore: cur.pageBreakBefore,
+      };
+      // 논리 continuation — 엔진이 강제 쪽 나눔을 상속하지 않는다
+      const tail: FakePara = {
+        chars: cur.chars.slice(off), shapes: cur.shapes.slice(off),
+        paraShapeId: cur.paraShapeId, pageBreakBefore: false,
+      };
+      body.splice(p, 1, head, tail);
+      return okJson();
+    },
     deleteRange: (_s: number, sp: number, so: number, ep: number, eo: number) => {
       record('deleteRange', sp, so, ep, eo);
       const first = body[sp];
@@ -303,10 +318,14 @@ test('멀티라인 preview/approve/undo/redo: source 쪽나눔은 유지하고 c
   assert.deepEqual(fake.pageBreaks(), [true, false, false]);
   assert.deepEqual(pendingMap, [0, 0, 0], 'pending 문단이 한 페이지 흐름을 유지한다');
   assert.equal(
-    calls.filter((c) => c.m === 'applyParaFormat'
-      && JSON.parse(c.args[1] as string).pageBreakBefore === false).length,
-    1,
-    '첫 continuation에서 상속된 pageBreakBefore만 한 번 제거한다',
+    calls.filter((c) => c.m === 'splitParagraphLogical').length,
+    2,
+    '에이전트 줄 경계는 논리 분할을 쓴다',
+  );
+  assert.equal(
+    calls.filter((c) => c.m === 'applyParaFormat').length,
+    0,
+    '논리 분할이 쪽 나눔 상속을 엔진에서 막으므로 교정 서식 호출이 없다',
   );
   assert.ok(calls.some((c) => c.m === 'refreshLayout'), '논리 삽입 뒤 권위 조판을 수행한다');
 

@@ -32,6 +32,7 @@ import {
   effortsForAgent,
   labelForEffort,
   labelForModel,
+  modelSupportsImages,
   modelsForAgent,
   resolveEffortForAgent,
   resolveModelForAgent,
@@ -115,6 +116,41 @@ const FS_MOTION_SETTLE_MS = SIDEBAR_MOTION_DURATION_MS + 60;
 /* The sidebar handoff briefly staggers its chrome after the fullscreen shell
    has folded away. Keep the class alive through the last control's entrance. */
 const FS_RETURN_SETTLE_MS = 300;
+
+const CLIPBOARD_IMAGE_EXTENSION: Readonly<Record<string, string>> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
+
+function clipboardImageFiles(data: DataTransfer | null): File[] {
+  if (!data) return [];
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const files: File[] = [];
+  for (const item of Array.from(data.items)) {
+    if (item.kind !== 'file') continue;
+    const source = item.getAsFile();
+    if (!source) continue;
+    const type = (item.type || source.type).toLowerCase();
+    const extension = CLIPBOARD_IMAGE_EXTENSION[type];
+    if (!extension) continue;
+    const suppliedName = source.name.trim();
+    const suppliedExtension = suppliedName.split('.').pop()?.toLowerCase();
+    const hasMatchingExtension = extension === 'jpg'
+      ? suppliedExtension === 'jpg' || suppliedExtension === 'jpeg'
+      : suppliedExtension === extension;
+    const name = hasMatchingExtension
+      ? suppliedName
+      : `붙여넣은 이미지 ${stamp}${files.length ? `-${files.length + 1}` : ''}.${extension}`;
+    files.push(new File([source], name, { type, lastModified: Date.now() }));
+  }
+  return files;
+}
+
+function transferHasFiles(data: DataTransfer | null): boolean {
+  return Boolean(data && Array.from(data.types).includes('Files'));
+}
 
 function maxSidebarWidth(minWidth: number, viewportWidth = window.innerWidth): number {
   return Math.max(minWidth, Math.floor(viewportWidth * 0.5));
@@ -1636,6 +1672,58 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   composerField.insertBefore(referenceLibrary.quickAddButton, sendHint);
   composer.insertBefore(referenceLibrary.quickUploads, composerField);
 
+  let attachmentDragDepth = 0;
+  const canStageComposerAttachments = (): boolean =>
+    connState === 'connected'
+    && readOnlyDocLabel === null
+    && !attachmentsSending
+    && !referenceLibrary.isOpen();
+  const clearAttachmentDrag = (): void => {
+    attachmentDragDepth = 0;
+    root.classList.remove('ag-attachment-dragging');
+  };
+  const onAttachmentDragEnter = (event: DragEvent): void => {
+    if (!transferHasFiles(event.dataTransfer) || !canStageComposerAttachments()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    attachmentDragDepth += 1;
+    root.classList.add('ag-attachment-dragging');
+  };
+  const onAttachmentDragOver = (event: DragEvent): void => {
+    if (!transferHasFiles(event.dataTransfer) || !canStageComposerAttachments()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    root.classList.add('ag-attachment-dragging');
+  };
+  const onAttachmentDragLeave = (event: DragEvent): void => {
+    if (!root.classList.contains('ag-attachment-dragging')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    attachmentDragDepth = Math.max(0, attachmentDragDepth - 1);
+    if (attachmentDragDepth === 0) root.classList.remove('ag-attachment-dragging');
+  };
+  const onAttachmentDrop = (event: DragEvent): void => {
+    if (!transferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const files = [...(event.dataTransfer?.files ?? [])];
+    clearAttachmentDrag();
+    if (canStageComposerAttachments() && files.length > 0) referenceLibrary.stageDraftFiles(files);
+  };
+  const onAttachmentPaste = (event: ClipboardEvent): void => {
+    if (!canStageComposerAttachments()) return;
+    const images = clipboardImageFiles(event.clipboardData);
+    if (images.length === 0) return;
+    event.preventDefault();
+    referenceLibrary.stageDraftFiles(images);
+  };
+  root.addEventListener('dragenter', onAttachmentDragEnter);
+  root.addEventListener('dragover', onAttachmentDragOver);
+  root.addEventListener('dragleave', onAttachmentDragLeave);
+  root.addEventListener('drop', onAttachmentDrop);
+  input.addEventListener('paste', onAttachmentPaste);
+
   /* 집중 모드의 변경 사항 drawer. 대화 위의 오른쪽 가장자리에서 열리고,
      사이드바로 돌아가면 .ag-review 노드는 기존 inline 자리로 되돌아간다. */
   const reviewColumn = el('aside', 'ag-review-column');
@@ -2462,7 +2550,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   input.addEventListener('input', () => {
     input.style.height = 'auto';
     input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
-    if (!input.value) referenceLibrary.discardDrafts();
     rebuildSlashMenu();
   });
   composer.addEventListener('submit', (e) => {
@@ -2474,7 +2561,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
     if (planningPhase === 'switching' || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
     let text = input.value.trim();
-    if (!text || connState !== 'connected') return;
+    if ((!text && !referenceLibrary.hasDrafts()) || connState !== 'connected') return;
+    if (referenceLibrary.hasImageDrafts() && !modelSupportsImages(selectedAgent, selectedModel)) {
+      systemMessage('현재 Pi 모델은 이미지 입력을 지원하지 않습니다. 이미지 지원 모델로 바꾼 뒤 다시 보내 주세요.');
+      return;
+    }
+    if (!text) {
+      text = referenceLibrary.allDraftsAreImages()
+        ? '첨부한 이미지를 확인해 주세요.'
+        : '첨부한 파일을 확인해 주세요.';
+    }
     if (text.startsWith('//')) text = text.slice(1);
     if (text === '/plan' || text === '/build') {
       input.value = '';
@@ -2627,7 +2723,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         pill.type = 'button';
         pill.disabled = attachment.status !== 'ready' || !attachment.fileId;
         pill.append(
-          createIcon('document'),
+          createIcon(attachment.mimeType.startsWith('image/') ? 'image' : 'document'),
           el('span', 'ag-msg-attachment-name', attachment.name),
           el('span', 'ag-msg-attachment-meta', attachment.status === 'processing'
             ? '처리 중'
@@ -4278,6 +4374,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       clearConnCountdown();
       writingStyleCalibration.dispose();
       settingsPanel.dispose();
+      clearAttachmentDrag();
+      root.removeEventListener('dragenter', onAttachmentDragEnter);
+      root.removeEventListener('dragover', onAttachmentDragOver);
+      root.removeEventListener('dragleave', onAttachmentDragLeave);
+      root.removeEventListener('drop', onAttachmentDrop);
+      input.removeEventListener('paste', onAttachmentPaste);
       referenceLibrary.dispose();
       document.body.classList.remove(
         'ag-sidebar-open',
