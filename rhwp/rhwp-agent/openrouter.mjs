@@ -115,38 +115,46 @@ export function createOpenRouter({
 
   async function request(pathname, { method = 'GET', key = null, body, timeout = timeoutMs } = {}) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-    if (timer.unref) timer.unref();
-    let response;
-    try {
-      /** @type {Record<string, string>} */
-      const headers = { Accept: 'application/json', 'X-Title': 'rhwp' };
-      if (key) headers.Authorization = `Bearer ${key}`;
-      if (body !== undefined) headers['Content-Type'] = 'application/json';
-      response = await fetchImpl(`${baseUrl}${pathname}`, {
-        method,
-        headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: controller.signal,
-      });
-    } catch (error) {
-      if (error?.name === 'AbortError') {
-        throw openRouterError('OPENROUTER_TIMEOUT', 'OpenRouter 응답이 너무 느려요');
+    let rejectTimeout;
+    const timeoutPromise = new Promise((_, reject) => { rejectTimeout = reject; });
+    const timer = setTimeout(() => {
+      controller.abort();
+      rejectTimeout(openRouterError('OPENROUTER_TIMEOUT', 'OpenRouter 응답이 너무 느려요'));
+    }, timeout);
+    const operation = (async () => {
+      let response;
+      try {
+        /** @type {Record<string, string>} */
+        const headers = { Accept: 'application/json', 'X-Title': 'rhwp' };
+        if (key) headers.Authorization = `Bearer ${key}`;
+        if (body !== undefined) headers['Content-Type'] = 'application/json';
+        response = await fetchImpl(`${baseUrl}${pathname}`, {
+          method,
+          headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: controller.signal,
+        });
+        // Keep the same deadline while consuming the body. A server can send
+        // headers promptly and then stall forever mid-response.
+        const text = await response.text();
+        let parsed = null;
+        if (text.trim()) {
+          try { parsed = JSON.parse(text); }
+          catch { parsed = null; }
+        }
+        return { ok: response.ok, status: response.status, parsed, text };
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          throw openRouterError('OPENROUTER_TIMEOUT', 'OpenRouter 응답이 너무 느려요');
+        }
+        throw openRouterError('OPENROUTER_UNREACHABLE', 'OpenRouter에 닿지 못했어요. 네트워크를 확인하세요');
       }
-      throw openRouterError('OPENROUTER_UNREACHABLE', 'OpenRouter에 닿지 못했어요. 네트워크를 확인하세요');
+    })();
+    try {
+      return await Promise.race([operation, timeoutPromise]);
     } finally {
       clearTimeout(timer);
     }
-    const text = await response.text().catch(() => '');
-    let parsed = null;
-    if (text.trim()) {
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        parsed = null;
-      }
-    }
-    return { ok: response.ok, status: response.status, parsed, text };
   }
 
   function httpError(result, what) {

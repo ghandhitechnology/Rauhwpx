@@ -3765,6 +3765,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       case 'writing-style-progress':
       case 'writing-style-result':
       case 'writing-style-error':
+      case 'writing-style-catalog':
       // 프로바이더 상태·사용량·pi 설정 진행은 설정 탭이 이미 받아 그렸다.
       case 'provider-status':
       case 'usage-report':

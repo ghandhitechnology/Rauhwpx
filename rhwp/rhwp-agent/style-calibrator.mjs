@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { openRouterReady } from './agents/title.mjs';
+import { extractReferenceText, SUPPORTED_REFERENCE_EXTENSIONS } from './reference-extractor.mjs';
 import {
   analyzeText, baselineLines, confidenceFor, deriveBands, splitHalfStability,
 } from './style-metrics.mjs';
@@ -11,16 +12,16 @@ import {
 const MAX_FILES = 20;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
-const ANALYSIS_TIMEOUT_MS = 120_000;
-const EXTRACT_TIMEOUT_MS = 180_000;
+const ANALYSIS_TIMEOUT_MS = 8 * 60_000;
+const MAX_TASK_TIMEOUT_MS = 20 * 60_000;
+const MAX_CLI_OUTPUT_BYTES = 8 * 1024 * 1024;
 const REQUIRED_PAGES = 10;
-const CALIBRATION_MODEL = 'gpt-5.6-sol';
-const CALIBRATION_EFFORT = 'medium';
 const ALLOWED_EXTENSIONS = new Set([
   '.txt', '.md', '.markdown', '.pdf', '.docx', '.rtf', '.html', '.htm', '.csv', '.hwp', '.hwpx',
 ]);
 /** 노드가 직접 읽을 수 있는 형식. 여기 없는 형식만 추출 패스를 태운다. */
 const NATIVE_TEXT_EXTENSIONS = new Set(['.txt', '.md', '.markdown', '.csv', '.html', '.htm']);
+const LOCAL_EXTRACTION_EXTENSIONS = new Set(SUPPORTED_REFERENCE_EXTENSIONS);
 
 /**
  * 문체 축. personal-humanizer-maker 의 축 분류를 그대로 쓰되, 판별이 아니라
@@ -37,28 +38,6 @@ export const STYLE_AXES = [
 ];
 
 const AXIS_IDS = STYLE_AXES.map((axis) => axis.id);
-
-const EXTRACT_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['files'],
-  properties: {
-    files: {
-      type: 'array',
-      maxItems: MAX_FILES,
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['source', 'extracted', 'reason'],
-        properties: {
-          source: { type: 'string' },
-          extracted: { type: 'boolean' },
-          reason: { type: 'string', maxLength: 200 },
-        },
-      },
-    },
-  },
-};
 
 const ANALYSIS_SCHEMA = {
   type: 'object',
@@ -186,7 +165,7 @@ Report one entry per source file. Set reason to an empty string when extraction 
  * 분석 패스 프롬프트. 계산 가능한 값은 이미 코드가 냈으므로 해석만 요구한다.
  * inline 은 도구 없이 도는 OpenRouter 경로용이다 — 원고가 프롬프트에 같이 실린다.
  */
-export function buildCalibrationPrompt({ language, files, metrics, inline = false }) {
+export function buildCalibrationPrompt({ language, files, metrics, inline = false, preparedCorpus = false }) {
   const targetLanguage = language === 'ko' ? 'Korean' : 'English';
   const manifest = files.map((file) => `- ${file.safeName} (original name: ${file.name})`).join('\n');
   const axisList = STYLE_AXES
@@ -204,7 +183,9 @@ Explain what the numbers cannot: why the author writes this way, what job each h
 
   const access = inline
     ? 'The sample text is included at the end of this message.'
-    : 'Use the Read tool on every readable file in the current directory.';
+    : (preparedCorpus
+      ? 'Use the Read tool on calibration-corpus.txt. It contains the locally extracted sample prose with a heading between source files.'
+      : 'Use the Read tool on every readable file in the current directory.');
 
   return `Profile the writing style of the attached samples, which the user confirms they wrote themselves. ${access} The profile language is ${targetLanguage}.
 
@@ -248,37 +229,113 @@ Give up to four entries covering formal report, email, explanatory prose, and pe
 - \`summary\` is one or two sentences in ${targetLanguage} describing the voice, for the user to read in the UI.`;
 }
 
-function runCodex(args, stdin, cwd, timeoutMs = ANALYSIS_TIMEOUT_MS) {
+function adaptiveTimeout(baseMs, totalBytes = 0) {
+  const sizeAllowance = Math.ceil(Math.max(0, Number(totalBytes) || 0) / (10 * 1024 * 1024)) * 2 * 60_000;
+  return Math.min(MAX_TASK_TIMEOUT_MS, baseMs + sizeAllowance);
+}
+
+/** Race-safe CLI runner. It settles on close so stderr is fully drained and escalates termination. */
+function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode) {
   return new Promise((resolve, reject) => {
-    const child = spawn('codex', args, { cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let child;
+    try {
+      child = spawn(command, args, { cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (error) {
+      reject(new StyleCalibrationError(unavailableCode, String(error?.message ?? error)));
+      return;
+    }
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let settled = false;
+    let timedOut = false;
+    let outputExceeded = false;
+    let inputError = null;
+    let processError = null;
+    let stopping = false;
+    let killTimer = null;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const stop = () => {
+      if (stopping) return;
+      stopping = true;
+      try { child.kill('SIGTERM'); } catch {}
+      killTimer = setTimeout(() => {
+        try {
+          if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        } catch {}
+      }, 5_000);
+      killTimer.unref?.();
+    };
     const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      reject(new StyleCalibrationError('TIMEOUT', 'GPT-5.6 Sol took too long to analyze the samples. Try fewer or smaller files.'));
+      timedOut = true;
+      stop();
     }, timeoutMs);
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-8000); });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(new StyleCalibrationError('CODEX_UNAVAILABLE', String(error?.message ?? error)));
+    timer.unref?.();
+    child.stdout.on('data', (chunk) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > MAX_CLI_OUTPUT_BYTES) {
+        outputExceeded = true;
+        stop();
+        return;
+      }
+      stdout += chunk;
     });
-    child.on('exit', (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve(stdout);
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-8000); });
+    child.stdout.on('error', () => {});
+    child.stderr.on('error', () => {});
+    child.once('error', (error) => {
+      processError = String(error?.message ?? error);
+      if (child.pid) stop();
+      else finish(new StyleCalibrationError(unavailableCode, processError));
+    });
+    child.once('close', (code, signal) => {
+      if (timedOut) {
+        finish(new StyleCalibrationError(
+          'TIMEOUT',
+          `The selected model did not finish within ${Math.round(timeoutMs / 60_000)} minutes. The calibration was stopped safely; you can retry with fewer or smaller files.`,
+        ));
+      } else if (outputExceeded) {
+        finish(new StyleCalibrationError('OUTPUT_TOO_LARGE', 'The selected model produced too much output to use safely. Please retry.'));
+      } else if (inputError) {
+        finish(new StyleCalibrationError('ANALYSIS_FAILED', `Could not send samples to ${command}: ${inputError}`));
+      } else if (processError) {
+        finish(new StyleCalibrationError(unavailableCode, processError));
+      } else if (code === 0) finish(null, stdout);
       else {
-        const message = stderr.trim() || `Codex exited with code ${code}`;
+        const message = stderr.trim() || `${command} exited with ${signal ? `signal ${signal}` : `code ${code}`}`;
         const errorCode = /authenticate|oauth|login|not logged in/i.test(message)
-          ? 'CODEX_UNAVAILABLE'
+          ? unavailableCode
           : 'ANALYSIS_FAILED';
-        reject(new StyleCalibrationError(errorCode, message));
+        finish(new StyleCalibrationError(errorCode, message));
       }
     });
-    child.stdin.end(stdin);
+    child.stdin.on('error', (error) => {
+      if (!timedOut) {
+        inputError = String(error?.message ?? error);
+        stop();
+      }
+    });
+    try { child.stdin.end(stdin); }
+    catch (error) { finish(new StyleCalibrationError('ANALYSIS_FAILED', String(error?.message ?? error))); }
   });
 }
 
-function extractStructuredResult(output) {
+function runCodex(args, stdin, cwd, timeoutMs = ANALYSIS_TIMEOUT_MS) {
+  return runCli('codex', args, stdin, cwd, timeoutMs, 'CODEX_UNAVAILABLE');
+}
+
+function runClaude(args, stdin, cwd, timeoutMs = ANALYSIS_TIMEOUT_MS) {
+  return runCli('claude', args, stdin, cwd, timeoutMs, 'CLAUDE_UNAVAILABLE');
+}
+
+function extractStructuredResult(output, unavailableCode = 'CODEX_UNAVAILABLE') {
   try {
     // Tests and older callers may return a single structured object. Codex
     // itself emits JSONL and places the schema-constrained JSON in its final
@@ -286,11 +343,12 @@ function extractStructuredResult(output) {
     try {
       const parsed = JSON.parse(output);
       if (parsed?.is_error) {
-        const message = String(parsed.result || parsed.error || 'GPT-5.6 Sol failed to analyze the samples.');
-        const code = /authenticate|oauth|login/i.test(message) ? 'CODEX_UNAVAILABLE' : 'ANALYSIS_FAILED';
+        const message = String(parsed.result || parsed.error || 'The selected model failed to analyze the samples.');
+        const code = /authenticate|oauth|login/i.test(message) ? unavailableCode : 'ANALYSIS_FAILED';
         throw new StyleCalibrationError(code, message);
       }
       if (parsed?.structured_output) return parsed.structured_output;
+      if (parsed?.result && typeof parsed.result === 'object') return parsed.result;
       if (!parsed?.type) return parsed;
     } catch (error) {
       if (error instanceof StyleCalibrationError) throw error;
@@ -303,80 +361,158 @@ function extractStructuredResult(output) {
       if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
         finalText = String(event.item.text ?? '');
       } else if (event.type === 'turn.failed') {
-        failure = String(event.error?.message ?? event.message ?? 'Codex calibration failed.');
+        failure = String(event.error?.message ?? event.message ?? 'Calibration failed.');
       }
     }
     if (failure) {
-      const code = /authenticate|oauth|login/i.test(failure) ? 'CODEX_UNAVAILABLE' : 'ANALYSIS_FAILED';
+      const code = /authenticate|oauth|login/i.test(failure) ? unavailableCode : 'ANALYSIS_FAILED';
       throw new StyleCalibrationError(code, failure);
     }
     return JSON.parse(finalText);
   } catch (error) {
     if (error instanceof StyleCalibrationError) throw error;
-    throw new StyleCalibrationError('INVALID_RESULT', 'GPT-5.6 Sol returned an unreadable style analysis. Please try again.');
+    throw new StyleCalibrationError('INVALID_RESULT', 'The selected model returned an unreadable style analysis. Please try again.');
   }
 }
 
-function codexArgs(schemaPath, sandbox) {
+function codexArgs(schemaPath, sandbox, { model, effort } = {}) {
   return [
-    'exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules',
+    'exec', '--json', '--ephemeral', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules',
     '--disable', 'apps', '--disable', 'browser_use', '--disable', 'computer_use',
     '--disable', 'image_generation', '--disable', 'multi_agent', '--disable', 'plugins',
     '--disable', 'skill_search', '--sandbox', sandbox, '--output-schema', schemaPath,
-    '--model', CALIBRATION_MODEL,
-    '-c', `model_reasoning_effort=${JSON.stringify(CALIBRATION_EFFORT)}`,
+    ...(model ? ['--model', model] : []),
+    ...(effort ? ['-c', `model_reasoning_effort=${JSON.stringify(effort)}`] : []),
     '-',
   ];
 }
 
-async function gatherCorpus(checked, temp, run, extractionSchemaPath, canExtract = true) {
+function claudeArgs(schema, sandbox, cwd, { model, effort } = {}) {
+  const normalized = cwd.replace(/\\/g, '/').replace(/^\/+/, '');
+  const tools = sandbox === 'workspace-write' ? 'Read,Write' : 'Read';
+  const allow = [`Read(//${normalized}/**)`, ...(sandbox === 'workspace-write' ? [`Write(//${normalized}/**)`] : [])];
+  return [
+    '-p', '--output-format', 'json', '--json-schema', JSON.stringify(schema),
+    '--setting-sources', '', '--disable-slash-commands', '--tools', tools,
+    '--permission-mode', 'dontAsk', '--settings', JSON.stringify({ permissions: { allow } }),
+    ...(model ? ['--model', model] : []),
+    ...(effort ? ['--effort', effort] : []),
+  ];
+}
+
+async function gatherCorpus(checked, temp, {
+  projectRoot = null, onProgress = () => {}, extractText = extractReferenceText,
+} = {}) {
   const chunks = [];
+  const sources = [];
   const failed = [];
-  for (const file of checked.files) {
-    if (file.native) chunks.push(plainTextFromNative(file.bytes, file.extension));
-  }
-  const binaries = checked.files.filter((file) => !file.native);
-  if (binaries.length > 0 && !canExtract) {
-    // OpenRouter 경로에는 파일을 열 도구가 없다 — 평문 원고만 읽는다.
-    for (const file of binaries) failed.push(file.safeName);
-  } else if (binaries.length > 0) {
-    await fs.mkdir(path.join(temp, 'extracted'), { recursive: true });
+  for (const [index, file] of checked.files.entries()) {
+    const progressState = file.native ? 'reading' : 'extracting';
+    onProgress({
+      state: progressState, phase: progressState, activity: file.native ? 'reading-sample' : 'extracting-text',
+      detail: `${file.native ? 'Reading' : 'Extracting text from'} ${file.name}`,
+      completed: index, total: checked.files.length,
+    });
     try {
-      const output = await run(
-        codexArgs(extractionSchemaPath, 'workspace-write'),
-        buildExtractionPrompt(binaries),
-        temp,
-        EXTRACT_TIMEOUT_MS,
-      );
-      const report = extractStructuredResult(output);
-      for (const entry of Array.isArray(report?.files) ? report.files : []) {
-        if (!entry?.extracted) failed.push(String(entry?.source ?? ''));
+      let text = '';
+      if (file.native) {
+        text = plainTextFromNative(file.bytes, file.extension);
+      } else if (LOCAL_EXTRACTION_EXTENSIONS.has(file.extension)) {
+        const extracted = await extractText({
+          bytes: file.bytes,
+          filePath: path.join(temp, file.safeName),
+          name: file.name,
+          projectRoot,
+        });
+        text = extracted.text;
+      } else if (file.extension === '.rtf') {
+        // RTF control words are removed locally. Unicode escapes keep their text value.
+        text = file.bytes.toString('utf8')
+          .replace(/\\u(-?\d+)\??/g, (_, value) => String.fromCharCode((Number(value) + 65536) % 65536))
+          .replace(/\\'[0-9a-f]{2}/gi, ' ')
+          .replace(/\\(?:par|line)\b\s?/g, '\n')
+          .replace(/\\[a-z]+-?\d*\s?/gi, '')
+          .replace(/[{}]/g, ' ');
       }
-      for (const file of binaries) {
-        try {
-          chunks.push(await fs.readFile(path.join(temp, 'extracted', `${file.safeName}.txt`), 'utf8'));
-        } catch {
-          if (!failed.includes(file.safeName)) failed.push(file.safeName);
-        }
-      }
+      if (!text.trim()) throw new Error('no readable authored prose');
+      const source = { name: file.name, text: text.trim() };
+      sources.push(source);
+      chunks.push(`--- ${source.name} ---\n${source.text}`);
     } catch (error) {
-      // 추출이 통째로 실패해도 분석 패스는 파일을 직접 읽을 수 있다. 정량 계층만
-      // 포기하고, 그 사실이 프로필에 신뢰도로 남는다.
-      if (error instanceof StyleCalibrationError && error.code === 'CODEX_UNAVAILABLE') throw error;
-      for (const file of binaries) failed.push(file.safeName);
+      failed.push(file.safeName);
     }
+    onProgress({
+      state: progressState, phase: progressState, activity: file.native ? 'reading-sample' : 'extracting-text',
+      detail: `Prepared ${index + 1} of ${checked.files.length} samples`, completed: index + 1, total: checked.files.length,
+    });
   }
-  return { text: chunks.join('\n\n').trim(), unextractable: failed };
+  const text = chunks.join('\n\n').trim();
+  if (text) await fs.writeFile(path.join(temp, 'calibration-corpus.txt'), text, { encoding: 'utf8', mode: 0o600 });
+  return { text, sources, unextractable: failed };
 }
 
 /** 프롬프트에 실을 원고 상한. 컨텍스트를 넘기지 않으면서 문체는 충분히 보인다. */
 const OPENROUTER_CORPUS_LIMIT = 120_000;
 
+function representativeSlice(text, budget) {
+  const value = String(text ?? '');
+  if (value.length <= budget) return value;
+  if (budget <= 32) return value.slice(0, budget);
+  const separator = '\n[…sample continues…]\n';
+  const available = Math.max(1, budget - separator.length * 2);
+  const firstLength = Math.ceil(available / 3);
+  const middleLength = Math.floor(available / 3);
+  const lastLength = available - firstLength - middleLength;
+  const middleStart = Math.max(firstLength, Math.floor((value.length - middleLength) / 2));
+  return [
+    value.slice(0, firstLength),
+    value.slice(middleStart, middleStart + middleLength),
+    value.slice(-lastLength),
+  ].join(separator).slice(0, budget);
+}
+
+/** Balanced prompt sampling: every source receives a share before long files consume spare room. */
+export function sampleCorpusForPrompt(sources, limit = OPENROUTER_CORPUS_LIMIT) {
+  const normalized = (Array.isArray(sources) ? sources : []).flatMap((source, index) => {
+    const text = String(source?.text ?? '').trim();
+    if (!text) return [];
+    return [{ name: String(source?.name || `sample-${index + 1}`).slice(0, 160), text }];
+  });
+  if (normalized.length === 0 || limit <= 0) return '';
+  const headers = normalized.map((source) => `--- ${source.name} ---\n`);
+  const headerCost = headers.reduce((sum, header) => sum + header.length + 2, 0);
+  let remaining = Math.max(0, limit - headerCost);
+  const allocations = new Array(normalized.length).fill(0);
+  const pending = new Set(normalized.map((_, index) => index));
+  while (remaining > 0 && pending.size > 0) {
+    const share = Math.max(1, Math.floor(remaining / pending.size));
+    let spent = 0;
+    for (const index of [...pending]) {
+      const needed = normalized[index].text.length - allocations[index];
+      const grant = Math.min(needed, share);
+      allocations[index] += grant;
+      remaining -= grant;
+      spent += grant;
+      if (allocations[index] >= normalized[index].text.length) pending.delete(index);
+      if (remaining <= 0) break;
+    }
+    if (spent === 0) break;
+  }
+  return normalized.map((source, index) => (
+    `${headers[index]}${representativeSlice(source.text, allocations[index])}`
+  )).join('\n\n').slice(0, limit);
+}
+
 /** OpenRouter 는 스키마 강제 모드가 없다 — 지시문으로 요구하고 여기서 파싱한다. */
-async function analyzeViaOpenRouter({ prompt, corpusText, piManager, openRouter }) {
-  const model = piManager.defaultModel();
-  if (!model) throw new StyleCalibrationError('PI_NOT_CONFIGURED', 'Pi 모델이 설정되지 않았어요.');
-  const sample = String(corpusText ?? '').slice(0, OPENROUTER_CORPUS_LIMIT);
+async function analyzeViaOpenRouter({ prompt, corpusText, corpusSources, model: modelId, piManager, openRouter, timeoutMs }) {
+  const status = await piManager.status();
+  const model = status.models.find((entry) => entry.id === modelId);
+  if (!model) throw new StyleCalibrationError('MODEL_UNAVAILABLE', `The selected Pi model is not configured: ${modelId || '(none)'}.`);
+  const sample = sampleCorpusForPrompt(
+    Array.isArray(corpusSources) && corpusSources.length > 0
+      ? corpusSources
+      : [{ name: 'writing-samples', text: String(corpusText ?? '') }],
+  );
   if (!sample.trim()) {
     throw new StyleCalibrationError('INSUFFICIENT_SAMPLE', 'No readable text was found in the samples.');
   }
@@ -399,10 +535,11 @@ async function analyzeViaOpenRouter({ prompt, corpusText, piManager, openRouter 
         ].join('\n'),
       }],
       maxTokens: 8_000,
-      timeout: ANALYSIS_TIMEOUT_MS,
+      timeout: timeoutMs,
     });
   } catch (error) {
-    throw new StyleCalibrationError('ANALYSIS_FAILED', String(error?.message ?? error));
+    const code = error?.code === 'OPENROUTER_TIMEOUT' ? 'TIMEOUT' : (error?.code ?? 'ANALYSIS_FAILED');
+    throw new StyleCalibrationError(code, String(error?.message ?? error));
   }
   const raw = String(text ?? '').trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
   const start = raw.indexOf('{');
@@ -413,6 +550,33 @@ async function analyzeViaOpenRouter({ prompt, corpusText, piManager, openRouter 
   } catch {
     throw new StyleCalibrationError('INVALID_RESULT', 'The model returned an unreadable style analysis. Please try again.');
   }
+}
+
+export function validateAnalysisStructure(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)
+    || typeof result.enoughSample !== 'boolean'
+    || !Number.isFinite(Number(result.pageEquivalent))
+    || typeof result.summary !== 'string'
+    || !Array.isArray(result.unsupportedFiles)
+    || !Array.isArray(result.axes)
+    || !Array.isArray(result.adaptation)) {
+    throw new StyleCalibrationError('INVALID_RESULT', 'The selected model returned an incomplete style analysis. Please try again.');
+  }
+  const axes = new Map();
+  for (const axis of result.axes) {
+    if (!axis || !AXIS_IDS.includes(axis.axis) || axes.has(axis.axis)
+      || typeof axis.observation !== 'string'
+      || !Number.isFinite(Number(axis.evidenceCount))
+      || !Array.isArray(axis.directives)
+      || !Array.isArray(axis.patterns)) {
+      throw new StyleCalibrationError('INVALID_RESULT', 'The selected model returned malformed writing-style axes. Please try again.');
+    }
+    axes.set(axis.axis, axis);
+  }
+  if (axes.size !== AXIS_IDS.length || AXIS_IDS.some((id) => !axes.has(id))) {
+    throw new StyleCalibrationError('INVALID_RESULT', 'The selected model did not return all seven writing-style axes. Please try again.');
+  }
+  return result;
 }
 
 function orderedAxes(axes) {
@@ -512,29 +676,51 @@ export function renderStyleMarkdown({ language, axes, adaptation, bands, metrics
 
 /**
  * @param {object} input
- * @param {{ run?: typeof runCodex, useOpenRouter?: boolean, piManager?: any, openRouter?: any }} [deps]
+ * @param {{ run?: typeof runCodex, runClaude?: typeof runClaude, useOpenRouter?: boolean,
+ *   piManager?: any, openRouter?: any, projectRoot?: string, onProgress?: (event: object) => void }} [deps]
  */
 export async function calibrateWritingStyle(input, { run = runCodex, ...deps } = {}) {
-  const viaOpenRouter = openRouterReady(deps);
+  const requestedAgent = input?.agent ?? input?.provider;
+  const agent = ['codex', 'claude', 'pi'].includes(requestedAgent)
+    ? requestedAgent
+    : (openRouterReady(deps) ? 'pi' : 'codex');
+  const viaOpenRouter = agent === 'pi';
+  const model = typeof input?.model === 'string' && input.model.trim() ? input.model.trim() : null;
+  const effort = typeof input?.effort === 'string' && input.effort.trim() ? input.effort.trim() : null;
+  if (viaOpenRouter && !openRouterReady({ ...deps, useOpenRouter: true })) {
+    throw new StyleCalibrationError('PI_NOT_CONFIGURED', 'Pi and its OpenRouter key must be configured before calibration.');
+  }
+  if (viaOpenRouter && !model) throw new StyleCalibrationError('MODEL_UNAVAILABLE', 'Choose one of your configured Pi models.');
+  const emit = (event) => {
+    try { deps.onProgress?.(event); } catch {}
+  };
   const checked = validateCalibrationInput(input);
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-style-calibration-'));
   try {
+    emit({
+      state: 'preparing', phase: 'preparing', activity: 'validating-samples',
+      detail: `Preparing ${checked.files.length} writing samples`, completed: 0, total: checked.files.length,
+    });
     for (const file of checked.files) {
       await fs.writeFile(path.join(temp, file.safeName), file.bytes, { mode: 0o600 });
     }
 
-    const extractionSchemaPath = path.join(temp, 'extraction-schema.json');
     const analysisSchemaPath = path.join(temp, 'analysis-schema.json');
-    await Promise.all([
-      fs.writeFile(extractionSchemaPath, JSON.stringify(EXTRACT_SCHEMA), 'utf8'),
-      fs.writeFile(analysisSchemaPath, JSON.stringify(ANALYSIS_SCHEMA), 'utf8'),
-    ]);
-    const corpus = await gatherCorpus(checked, temp, run, extractionSchemaPath, !viaOpenRouter);
+    await fs.writeFile(analysisSchemaPath, JSON.stringify(ANALYSIS_SCHEMA), 'utf8');
+    const corpus = await gatherCorpus(checked, temp, {
+      projectRoot: deps.projectRoot,
+      onProgress: emit,
+      extractText: deps.extractText,
+    });
     let metrics = null;
     let stability = 0;
     let confidence = 'low';
     let bands = null;
     if (corpus.text.length > 0) {
+      emit({
+        state: 'analyzing', phase: 'measuring', activity: 'measuring-patterns',
+        detail: 'Measuring sentence, paragraph, and formatting patterns', completed: 0, total: 1,
+      });
       metrics = analyzeText(corpus.text, checked.language);
       // 표본 충분성은 모델의 자기 신고가 아니라 측정값으로 정한다.
       if (metrics.pageEquivalent < REQUIRED_PAGES) {
@@ -549,12 +735,60 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
       stability = splitHalfStability(corpus.text, checked.language);
       confidence = confidenceFor(metrics, stability);
       bands = deriveBands(metrics, confidence);
+      emit({
+        state: 'analyzing', phase: 'measuring', activity: 'measuring-patterns',
+        detail: 'Finished deterministic pattern measurements', completed: 1, total: 1,
+      });
     }
 
-    const prompt = buildCalibrationPrompt({ ...checked, metrics, inline: viaOpenRouter });
-    const result = viaOpenRouter
-      ? await analyzeViaOpenRouter({ prompt, corpusText: corpus.text, ...deps })
-      : extractStructuredResult(await run(codexArgs(analysisSchemaPath, 'read-only'), prompt, temp));
+    const prompt = buildCalibrationPrompt({
+      ...checked, metrics, inline: viaOpenRouter, preparedCorpus: Boolean(corpus.text),
+    });
+    const timeoutMs = adaptiveTimeout(ANALYSIS_TIMEOUT_MS, checked.totalBytes);
+    const analysisStartedAt = Date.now();
+    const safeActivities = [
+      'Comparing recurring sentence structures',
+      'Mapping tone and word-choice patterns',
+      'Forming reusable writing directives',
+    ];
+    let activityIndex = 0;
+    emit({
+      state: 'analyzing', phase: 'analyzing', activity: 'model-analysis',
+      detail: safeActivities[0], completed: 0, total: 1, agent, model,
+    });
+    const activityTimer = setInterval(() => {
+      activityIndex = (activityIndex + 1) % safeActivities.length;
+      emit({
+        state: 'analyzing', phase: 'analyzing', activity: 'model-analysis',
+        detail: safeActivities[activityIndex], completed: 0, total: 1,
+        elapsedMs: Date.now() - analysisStartedAt, agent, model,
+      });
+    }, 8_000);
+    activityTimer.unref?.();
+    let result;
+    try {
+      if (viaOpenRouter) {
+        result = await analyzeViaOpenRouter({
+          prompt, corpusText: corpus.text, corpusSources: corpus.sources, model, timeoutMs, ...deps,
+        });
+      } else if (agent === 'claude') {
+        const claudeRunner = deps.runClaude ?? runClaude;
+        result = extractStructuredResult(await claudeRunner(
+          claudeArgs(ANALYSIS_SCHEMA, 'read-only', temp, { model, effort }), prompt, temp, timeoutMs,
+        ), 'CLAUDE_UNAVAILABLE');
+      } else {
+        result = extractStructuredResult(await run(
+          codexArgs(analysisSchemaPath, 'read-only', { model, effort }), prompt, temp, timeoutMs,
+        ));
+      }
+    } finally {
+      clearInterval(activityTimer);
+    }
+    emit({
+      state: 'analyzing', phase: 'analyzing', activity: 'model-analysis',
+      detail: 'Finished model analysis', completed: 1, total: 1, agent, model,
+    });
+    validateAnalysisStructure(result);
 
     // 정량 계층이 없을 때만 모델의 표본 판단에 기댄다.
     if (!metrics && !result?.enoughSample) {
@@ -569,13 +803,17 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
 
     const axes = orderedAxes(result?.axes);
     if (!axes.some((axis) => axis.directives.length > 0)) {
-      throw new StyleCalibrationError('INVALID_RESULT', 'GPT-5.6 Sol did not produce usable writing directives. Please try again.');
+      throw new StyleCalibrationError('INVALID_RESULT', 'The selected model did not produce usable writing directives. Please try again.');
     }
     const adaptation = (Array.isArray(result?.adaptation) ? result.adaptation : [])
       .filter((entry) => entry?.genre && entry?.guidance)
       .map((entry) => ({ genre: String(entry.genre).trim(), guidance: String(entry.guidance).trim() }));
     const summary = String(result?.summary || '').slice(0, 500);
 
+    emit({
+      state: 'synthesizing', phase: 'composing', activity: 'building-profile',
+      detail: 'Building the calibrated writing profile', completed: 0, total: 1, agent, model,
+    });
     const markdown = renderStyleMarkdown({
       language: checked.language, axes, adaptation, bands, metrics, confidence, stability, summary,
     });
@@ -583,6 +821,10 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
       ...(Array.isArray(result?.unsupportedFiles) ? result.unsupportedFiles.map(String) : []),
       ...corpus.unextractable.filter(Boolean),
     ])];
+    emit({
+      state: 'synthesizing', phase: 'composing', activity: 'building-profile',
+      detail: 'Finished the calibrated writing profile', completed: 1, total: 1, agent, model,
+    });
 
     return {
       markdown,
@@ -593,6 +835,8 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
         Math.round(metrics ? metrics.pageEquivalent : Number(result?.pageEquivalent) || 0),
       ),
       summary,
+      agent,
+      model,
       profile: {
         version: 2,
         language: checked.language,
@@ -606,6 +850,7 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
       },
     };
   } finally {
-    await fs.rm(temp, { recursive: true, force: true });
+    // Cleanup failures must not replace a useful provider/validation error.
+    await fs.rm(temp, { recursive: true, force: true }).catch(() => {});
   }
 }
