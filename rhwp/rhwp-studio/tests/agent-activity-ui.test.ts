@@ -10,12 +10,16 @@ const css = readFileSync(
   new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url),
   'utf8',
 );
+const chatMarkdown = readFileSync(
+  new URL('../src/ui/agent-sidebar/chat-markdown.ts', import.meta.url),
+  'utf8',
+);
 const backend = readFileSync(
   new URL('../../rhwp-agent/agents/backend.mjs', import.meta.url),
   'utf8',
 );
 
-test('assistant responses render as flat transcript text', () => {
+test('assistant responses render as flat Markdown transcripts', () => {
   assert.match(
     css,
     /\.ag-msg-assistant\s*\{[^}]*padding:\s*0 2px;[^}]*line-height:\s*1\.7;/s,
@@ -28,6 +32,13 @@ test('assistant responses render as flat transcript text', () => {
     css,
     /\.ag-msg-assistant\s*\{[^}]*border:/s,
   );
+  assert.match(source, /renderChatMarkdown\(bubble, text\)/);
+  assert.match(source, /scheduleAssistantRender\(bubble, assistantBuffer\)/);
+  assert.match(source, /window\.requestAnimationFrame/);
+  assert.match(chatMarkdown, /katexModule\.render/);
+  assert.match(chatMarkdown, /import\('katex'\)/);
+  assert.match(chatMarkdown, /trust:\s*false/);
+  assert.match(chatMarkdown, /normalizeKoreanLatex/);
 });
 
 test('meaningful progress stays visible as a milestone timeline with nested tool calls', () => {
