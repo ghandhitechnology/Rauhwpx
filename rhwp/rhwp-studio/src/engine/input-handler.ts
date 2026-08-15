@@ -457,6 +457,8 @@ export class InputHandler {
 
   // IME 조합 상태
   private readonly imeSession = new ImeSession();
+  /** 템플릿 구조 미리보기는 전체 문서 스냅샷으로 reject 하므로 리뷰 중 사용자 편집을 막는다. */
+  private agentTemplateLocked = false;
   private get isComposing() { return this.imeSession.isComposing; }
   private compositionAnchor: DocumentPosition | null = null;
   /** 조합 시작 시점의 exact 좌표. 조합 갱신마다 같은 anchor를 다시 탐색하지 않는다. */
@@ -653,6 +655,11 @@ export class InputHandler {
           this.renderTableObjectSelection();
         }
       });
+    });
+    eventBus.on('agent-template-lock-changed', (locked) => {
+      this.agentTemplateLocked = locked === true;
+      if (this.agentTemplateLocked) this.textarea.blur();
+      else if (this.active) this.textarea.focus();
     });
     eventBus.on('create-new-document', () => {
       this.clearTableResizeRuntimeCache();
@@ -2539,6 +2546,7 @@ export class InputHandler {
    * 라우터가 적절한 Undo 전략을 자동 선택한다.
    */
   executeOperation(desc: OperationDescriptor): void {
+    if (this.agentTemplateLocked && desc.kind !== 'record') return;
     if (!this.isOperationAllowedInEditMode(desc)) return;
     switch (desc.kind) {
       case 'command': {

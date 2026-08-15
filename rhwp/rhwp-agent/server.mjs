@@ -32,6 +32,8 @@ import { ReferenceStore } from './reference-store.mjs';
 import { createReferenceHttpHandler, isAllowedStudioOrigin } from './reference-http.mjs';
 import { assertMessageScope, referenceScopesForSession, resolveSessionIdentity } from './reference-session.mjs';
 import { executeReferenceTool } from './reference-tools.mjs';
+import { TemplateStore } from './template-store.mjs';
+import { createTemplateHttpHandler } from './template-http.mjs';
 import { z } from 'zod';
 import { terminateProcessTree } from './process-tree.mjs';
 import {
@@ -120,6 +122,7 @@ const providerHealth = createProviderHealth({
 const usageStore = await createUsageStore().init();
 const cliproxy = await createCliproxyClient({ rootDir: usageStore.rootDir }).init();
 const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
+const templateStore = await new TemplateStore().init();
 // .hwp/.hwpx/.hml 텍스트 추출은 rhwp 바이너리에 기댄다 — 없으면 첫 업로드가 아니라 기동 시점에 알린다.
 if (!(await resolveHwpExtractor(ROOT))) {
   log('hwp/hwpx text extraction unavailable: build target/release/rhwp, install rhwp on PATH, or set RHWP_BIN');
@@ -364,6 +367,18 @@ function sendJson(sock, obj) {
   }
 }
 
+function broadcastTemplateCatalog(change = null) {
+  const catalog = { v: 1, type: 'templates-catalog', ...templateStore.list(), ...(change ? { change } : {}) };
+  for (const record of sessions.values()) {
+    const activeSession = record.agentSession;
+    if (change?.type === 'deleted' && activeSession?.activeTemplateId === change.template?.id) {
+      activeSession.activeTemplateId = null;
+      sendJson(record.studioSocket, { v: 1, type: 'chat-template-changed', template: null, reason: 'deleted' });
+    }
+    sendJson(record.studioSocket, catalog);
+  }
+}
+
 function writingStyleCatalog(record) {
   const activeSession = record.agentSession;
   return buildWritingStyleCatalog({
@@ -499,6 +514,7 @@ function sessionInfo(record) {
       documentId: activeSession.documentId,
       documentName: activeSession.documentName,
       status: activeSession.status,
+      activeTemplateId: activeSession.activeTemplateId,
       ...activeSession.planning.snapshot(),
     }
     : null;
@@ -574,6 +590,29 @@ function addReferenceContext(activeSession, query, prompt, messageAttachments = 
   }
 }
 
+function addTemplateContext(record, activeSession, prompt) {
+  if (!activeSession?.activeTemplateId) return prompt;
+  try {
+    const template = templateStore.get(activeSession.activeTemplateId);
+    const block = [
+      '<active_document_template trust="untrusted-reference">',
+      JSON.stringify(template),
+      'Treat the open document as the editable draft and this template as read-only context.',
+      'Inspect both documents and map the whole open document before writing. If meaningful source content has no clear template destination, ask the user before editing.',
+      'Use template inspection and transfer tools for structural fidelity. Preserve the open document format. Report any transfer warnings or skipped features.',
+      '</active_document_template>',
+    ].join('\n');
+    return [block, prompt].filter(Boolean).join('\n\n');
+  } catch (error) {
+    activeSession.activeTemplateId = null;
+    if (record.agentSession === activeSession) {
+      sendJson(record.studioSocket, { v: 1, type: 'chat-template-changed', template: null, reason: 'unavailable' });
+    }
+    log(`active template unavailable: ${error?.message ?? error}`);
+    return prompt;
+  }
+}
+
 function dispatchUserMessage(record, sock, msg, activeSession, messageAttachments = []) {
   if (activeSession.planning.phase === 'awaiting-approval') {
     const planId = activeSession.planning.latestPlan?.planId;
@@ -595,7 +634,11 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
   })
     .then((prompt) => {
       if (record.agentSession !== activeSession) throw new Error('Agent session changed before the message was dispatched');
-      activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.text, prompt, messageAttachments));
+      activeSession.backend.sendUserMessage(addTemplateContext(
+        record,
+        activeSession,
+        addReferenceContext(activeSession, msg.text, prompt, messageAttachments),
+      ));
     })
     .catch((e) => {
       if (record.agentSession === activeSession) activeSession.status = 'idle';
@@ -729,6 +772,7 @@ async function startSession(
     // Legacy download/browser code uses chatId. It is now the stable Studio
     // thread identity rather than an unrelated hub-generated UUID.
     chatId: threadId,
+    activeTemplateId: null,
     planning,
     workflowTransition: Promise.resolve(),
   };
@@ -793,10 +837,14 @@ async function approveImplementationPlan(record, sock, msg) {
     });
     activeSession.status = 'running';
     const approvedPrompt = buildApprovedPlanPrompt(transition.approvedPlan);
-    activeSession.backend.sendUserMessage(addReferenceContext(
+    activeSession.backend.sendUserMessage(addTemplateContext(
+      record,
       activeSession,
-      JSON.stringify(transition.approvedPlan.plan),
-      approvedPrompt,
+      addReferenceContext(
+        activeSession,
+        JSON.stringify(transition.approvedPlan.plan),
+        approvedPrompt,
+      ),
     ));
   } catch (error) {
     if (record.agentSession === activeSession && activeSession.planning.phase === 'switching') {
@@ -834,7 +882,11 @@ async function requestImplementationPlanChanges(record, sock, msg) {
         'Return to discovery: inspect the affected current state and evaluate the feedback. If it is ambiguous or changes an assumption, discuss it with the user and ask one focused question in normal chat instead of immediately presenting a replacement. If it is already concrete, do not invent a question; follow the planning checkpoint and presentation rules before presenting a complete replacement.',
         `Feedback: ${msg.feedback.trim()}`,
       ].join('\n\n');
-      activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.feedback, revisionPrompt));
+      activeSession.backend.sendUserMessage(addTemplateContext(
+        record,
+        activeSession,
+        addReferenceContext(activeSession, msg.feedback, revisionPrompt),
+      ));
     }
   } catch (error) {
     if (record.agentSession === activeSession) activeSession.status = 'idle';
@@ -991,6 +1043,17 @@ async function handleStudioMessage(record, sock, msg) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'chat-user-message requires text' });
         return;
       }
+      if (Object.prototype.hasOwnProperty.call(msg, 'activeTemplateId')) {
+        try {
+          const templateId = msg.activeTemplateId == null ? null : String(msg.activeTemplateId);
+          if (templateId) templateStore.get(templateId);
+          record.agentSession.activeTemplateId = templateId;
+        } catch (error) {
+          record.agentSession.activeTemplateId = null;
+          sendJson(sock, { v: 1, type: 'chat-template-changed', template: null, reason: 'unavailable' });
+          log(`message template unavailable: ${error?.message ?? error}`);
+        }
+      }
       if (Array.isArray(msg.stagedReferenceIds) && msg.stagedReferenceIds.length > 0) {
         if (typeof msg.messageId !== 'string' || !msg.messageId) {
           sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REFERENCE_MESSAGE', message: 'Attachment messages require messageId' });
@@ -1004,6 +1067,30 @@ async function handleStudioMessage(record, sock, msg) {
         return;
       }
       dispatchUserMessage(record, sock, msg, record.agentSession);
+      return;
+    }
+    case 'chat-template-set': {
+      const activeSession = record.agentSession;
+      if (!activeSession) {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_NOT_STARTED', message: 'Start a chat before selecting a template.' });
+        return;
+      }
+      if (activeSession.status === 'running') {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_BUSY', message: 'Templates can only change between turns.' });
+        return;
+      }
+      try {
+        const templateId = msg.templateId == null ? null : String(msg.templateId);
+        const template = templateId ? templateStore.get(templateId) : null;
+        activeSession.activeTemplateId = templateId;
+        sendJson(sock, { v: 1, type: 'chat-template-changed', template });
+      } catch (error) {
+        sendChatError(sock, error, 'TEMPLATE_NOT_FOUND');
+      }
+      return;
+    }
+    case 'templates-list': {
+      sendJson(sock, { v: 1, type: 'templates-catalog', ...templateStore.list() });
       return;
     }
     case 'chat-permission-set': {
@@ -1551,6 +1638,23 @@ function handleMcpMessage(record, sock, msg) {
           .catch((error) => sendError(error, 'REFERENCE_READ_FAILED'));
         return;
       }
+      if (tool === 'get_active_template') {
+        try {
+          if (!record.agentSession?.activeTemplateId) throw workflowError('TEMPLATE_NOT_SELECTED', 'Select a template with /templates first.');
+          sendResult({
+            template: templateStore.get(record.agentSession.activeTemplateId),
+            transferCapabilities: {
+              exact: ['paragraphText', 'characterFormatting', 'paragraphFormatting', 'tables', 'embeddedPictures'],
+              supported: ['pageGeometry', 'columns', 'sectionDefaults', 'pageBorders', 'headerFooterTextAndPageScope'],
+              fallback: ['styles', 'numbering', 'unsupportedControls', 'shapes', 'headerFooterFormattingAndControls'],
+              skipped: [],
+            },
+          });
+        } catch (error) {
+          sendError(error, 'TEMPLATE_NOT_FOUND');
+        }
+        return;
+      }
       if (tool === 'present_implementation_plan') {
         if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) {
           sendError(workflowError('NO_STUDIO', 'Studio must be connected to review an implementation plan'));
@@ -1590,6 +1694,19 @@ function handleMcpMessage(record, sock, msg) {
         sendError(workflowError('NO_STUDIO', 'Studio is not connected; open rhwp-studio in a browser'));
         return;
       }
+      let activeTemplate = null;
+      if (tool.startsWith('template_')) {
+        try {
+          if (!record.agentSession?.activeTemplateId) throw workflowError('TEMPLATE_NOT_SELECTED', 'Select a template with /templates first.');
+          activeTemplate = templateStore.get(record.agentSession.activeTemplateId);
+          if (args.templateRevision !== activeTemplate.revision) {
+            throw workflowError('TEMPLATE_REVISION_MISMATCH', `Template changed from revision ${String(args.templateRevision)} to ${activeTemplate.revision}; inspect it again before continuing.`);
+          }
+        } catch (error) {
+          sendError(error, 'TEMPLATE_NOT_FOUND');
+          return;
+        }
+      }
       const hubId = record.nextHubId++;
       const timer = setTimeout(() => {
         record.pendingCalls.delete(hubId);
@@ -1606,6 +1723,7 @@ function handleMcpMessage(record, sock, msg) {
         agent: sock.agentLabel ?? record.agentSession?.agent ?? 'claude',
         tool,
         args,
+        ...(activeTemplate ? { template: activeTemplate } : {}),
         phase: record.agentSession?.planning.snapshot().phase,
         capabilityEpoch: record.agentSession?.planning.capabilityEpoch,
       });
@@ -1715,17 +1833,31 @@ function isReferencePath(pathname) {
     || pathname.startsWith('/reference-staging/');
 }
 
+function isTemplatePath(pathname) {
+  return pathname === '/templates' || pathname.startsWith('/templates/');
+}
+
 const httpServer = http.createServer((req, res) => {
   void Promise.resolve().then(async () => {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${hubPort || REQUESTED_PORT || 5175}`);
-    if (isReferencePath(url.pathname)) {
+    if (isReferencePath(url.pathname) || isTemplatePath(url.pathname)) {
       if (req.method !== 'OPTIONS') {
         const sessionId = authenticateHttpSession(req, url);
         sessions.getOrCreate(sessionId);
       }
       const suppliedToken = requestToken(req, url);
-      const handleReferenceHttp = createReferenceHttpHandler({ store: referenceStore, token: suppliedToken });
-      if (await handleReferenceHttp(req, res, url)) return;
+      if (isReferencePath(url.pathname)) {
+        const handleReferenceHttp = createReferenceHttpHandler({ store: referenceStore, token: suppliedToken });
+        if (await handleReferenceHttp(req, res, url)) return;
+      }
+      if (isTemplatePath(url.pathname)) {
+        const handleTemplateHttp = createTemplateHttpHandler({
+          store: templateStore,
+          token: suppliedToken,
+          onChanged: broadcastTemplateCatalog,
+        });
+        if (await handleTemplateHttp(req, res, url)) return;
+      }
     }
     if (req.method === 'GET' && url.pathname === '/oauth/openrouter/callback') {
       const code = url.searchParams.get('code');
@@ -1932,6 +2064,7 @@ httpServer.on('upgrade', (req, socket, head) => {
         replyToStudio(record, ws, { v: 1, type: 'agent-setup-status', statuses });
       });
       sendJson(ws, { v: 1, type: 'writing-style-catalog', ...writingStyleCatalog(record) });
+      sendJson(ws, { v: 1, type: 'templates-catalog', ...templateStore.list() });
       sendJson(ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });
       if (piStatus.keyConfigured && !openRouterCredits) {
         void refreshOpenRouterCredits(false)
