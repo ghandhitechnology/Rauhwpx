@@ -1,12 +1,11 @@
 /**
  * 설정 탭 — 사이드바의 한 페이지(스킬 페이지와 같은 무대 전환을 탄다).
  *
- * 다섯 묶음을 한 스크롤에 세운다:
- *  1. 연결 — 허브 소켓과 로컬 CLI(claude/codex/pi) 상태, 재연결·세션 재시작
- *  2. Pi 연결 — 설치 → 키 → 모델 고르기 → 요약으로 이어지는 한 장짜리 마법사
- *  3. 기본 설정 — 다음 대화부터 쓸 프로바이더·모델·강도·권한
- *  4. 글쓰기 보정 — 문체 보정 상태와 재보정 진입
- *  5. 사용량 — CLIProxyAPI 연결, 요금제별 5시간·주간 한도, 오늘 누적, 모델별 내역
+ * 네 묶음을 한 스크롤에 세운다:
+ *  1. 연결 — 허브와 세 CLI 상태, 모달 설치/로그인, 재연결·세션 재시작
+ *  2. 기본 설정 — 다음 대화부터 쓸 프로바이더·모델·강도·권한
+ *  3. 글쓰기 보정 — 문체 보정 상태와 재보정 진입
+ *  4. 사용량 — CLIProxyAPI 연결, 요금제별 5시간·주간 한도, 오늘 누적, 모델별 내역
  *
  * 페이지 전환(열기/닫기)은 index.ts 가 클래스로 관리하고, 이 모듈은
  * 자기 DOM 과 데이터 갱신만 맡는다.
@@ -26,6 +25,8 @@ import { formatRelativeTime, formatResetAt, formatShortDate, formatTokens } from
 import type { AgentBridge } from '../../agent/bridge.ts';
 import type {
   AgentName,
+  AgentAuthMethod,
+  AgentSetupStatusMap,
   PermissionProfile,
   PiCatalogModel,
   PiStatus,
@@ -100,10 +101,32 @@ const PI_MODEL_MAX = 3;
 const PI_CATALOG_VISIBLE_MAX = 50;
 
 const PI_PROGRESS_LABEL: Record<string, string> = {
+  preparing: '준비하는 중…',
   downloading: '내려받는 중…',
   installing: '설치하는 중…',
   configuring: '설정하는 중…',
+  verifying: '설치 확인 중…',
   done: '',
+};
+
+const INSTALL_PROGRESS_LABEL: Record<string, string> = {
+  preparing: '준비하는 중…',
+  resolving: '패키지 확인 중…',
+  downloading: '내려받는 중…',
+  installing: '설치하는 중…',
+  configuring: '설정하는 중…',
+  verifying: '설치 확인 중…',
+  done: '설치 완료',
+};
+
+const INSTALL_PROGRESS_CEILING: Record<string, number> = {
+  preparing: 18,
+  resolving: 27,
+  downloading: 58,
+  installing: 86,
+  configuring: 95,
+  verifying: 99,
+  done: 100,
 };
 
 const UNRESTRICTED_DEFAULT_WARNING =
@@ -247,6 +270,17 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let providers: ProviderStatusMap | null = null;
   let usage: UsageSummary | null = null;
   let writingStyle: WritingStyleStatus | null = null;
+  let setupStatuses: AgentSetupStatusMap | null = null;
+  let setupAgent: AgentName | null = null;
+  let setupBusy = false;
+  let setupMessage = '';
+  let setupReauth = false;
+  let setupProgressPercent = 0;
+  let setupProgressLabel = '';
+  let setupProgressPhase = '';
+  let setupProgressCreepTimer: ReturnType<typeof setInterval> | null = null;
+  let setupProgressResetTimer: ReturnType<typeof setTimeout> | null = null;
+  const openedAuthUrls = new Set<string>();
 
   // pi 마법사 상태 — 한 장의 카드가 단계를 갈아 끼운다.
   let piStatus: PiStatus | null = null;
@@ -259,6 +293,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let piBusy = false;
   let piMessage = '';
   let piProgress = '';
+  let piProgressPercent = 0;
+  let piProgressPhase = '';
+  let piProgressCreepTimer: ReturnType<typeof setInterval> | null = null;
   /** 활동 신호가 끊기면 움직이는 막대를 멈추는 타이머. */
   let piActivityPause: ReturnType<typeof setTimeout> | null = null;
   let piDraft: PiDraftModel[] = [];
@@ -306,7 +343,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   const providerRows = new Map<
     AgentName,
-    { dot: HTMLElement; detail: HTMLElement }
+    { dot: HTMLElement; detail: HTMLElement; setup: HTMLButtonElement }
   >();
   const providerList = el('div', 'ag-settings-provider-list');
   for (const agent of AGENTS) {
@@ -319,9 +356,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     name.append(providerIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
     const detail = el('span', 'ag-settings-row-detail', '확인 중…');
     text.append(name, detail);
-    row.append(dot, text);
+    const setup = el('button', 'ag-settings-btn ag-provider-setup-btn', '설정');
+    setup.type = 'button';
+    setup.addEventListener('click', () => openAgentSetup(agent));
+    row.append(dot, text, setup);
     providerList.appendChild(row);
-    providerRows.set(agent, { dot, detail });
+    providerRows.set(agent, { dot, detail, setup });
   }
 
   const connectionActions = el('div', 'ag-settings-actions');
@@ -338,9 +378,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   connectionActions.append(refreshBtn, restartBtn);
   connection.body.append(hubRow, providerList, connectionActions);
 
-  // ── 2. Pi 연결 ────────────────────────────────────────
-  // 한 장의 카드가 설치 → 키 → 모델 → 요약으로 모습을 바꾼다.
-  const piSection = createSection('Pi 연결');
+  // ── Pi 모달 흐름 ──────────────────────────────────────
+  // 설치 → 로그인 → 모델 → 요약으로 모습을 바꾸며, 설정 페이지에는 직접 붙지 않는다.
   const piCard = el('div', 'ag-pi-card');
   const piHead = el('div', 'ag-pi-head');
   const piHeadName = el('span', 'ag-settings-row-name');
@@ -367,7 +406,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // 2단계 — OpenRouter 키
   const piKeyStep = el('div', 'ag-pi-step');
-  const piKeyNote = el('p', 'ag-settings-note', 'openrouter.ai/keys 에서 만든 키를 넣어 주세요.');
+  const piKeyNote = el('p', 'ag-settings-note', 'OpenRouter 계정으로 로그인하거나 API 키를 직접 연결하세요.');
+  const piOauth = el('button', 'ag-settings-primary ag-agent-auth-choice');
+  piOauth.type = 'button';
+  piOauth.append(el('strong', '', '브라우저로 로그인'), el('span', '', 'OpenRouter OAuth'));
+  const piAuthDivider = el('div', 'ag-agent-auth-divider', '또는 API 키');
   const piKeyInput = createTextField('OpenRouter 키', {
     type: 'password',
     placeholder: 'sk-or-v1-…',
@@ -379,7 +422,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const piKeyCancel = el('button', 'ag-settings-btn', '취소');
   piKeyCancel.type = 'button';
   piKeyActions.append(piKeySubmit, piKeyCancel);
-  piKeyStep.append(piKeyNote, piKeyInput.field, piKeyActions);
+  piKeyStep.append(piKeyNote, piOauth, piAuthDivider, piKeyInput.field, piKeyActions);
 
   // 3단계 — 카탈로그에서 모델 고르기
   const piCatalogStep = el('div', 'ag-pi-step');
@@ -416,7 +459,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const piSummaryActions = el('div', 'ag-settings-actions');
   const piRepick = el('button', 'ag-settings-btn', '모델 다시 고르기');
   piRepick.type = 'button';
-  const piRekey = el('button', 'ag-settings-btn', '키 교체');
+  const piRekey = el('button', 'ag-settings-btn', '로그인 방식 변경');
   piRekey.type = 'button';
   piSummaryActions.append(piRepick, piRekey);
   piSummaryStep.append(piSummaryModels, piSummaryKey, piSummaryActions);
@@ -430,7 +473,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     piNamingStep,
     piSummaryStep,
   );
-  piSection.body.appendChild(piCard);
 
   const piSteps: ReadonlyArray<[PiStep, HTMLElement]> = [
     ['install', piInstallStep],
@@ -440,7 +482,118 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     ['summary', piSummaryStep],
   ];
 
+  // 에이전트 설치/로그인은 설정 페이지를 떠나지 않는 모달 한 장에서 끝낸다.
+  const setupOverlay = el('div', 'ag-agent-setup-overlay');
+  setupOverlay.setAttribute('aria-hidden', 'true');
+  const setupDialog = el('section', 'ag-agent-setup-dialog');
+  setupDialog.setAttribute('role', 'dialog');
+  setupDialog.setAttribute('aria-modal', 'true');
+  setupDialog.setAttribute('aria-labelledby', 'ag-agent-setup-title');
+  setupDialog.tabIndex = -1;
+  const setupChrome = el('header', 'ag-agent-setup-chrome');
+  const setupTitleWrap = el('div', 'ag-agent-setup-title-wrap');
+  const setupEyebrow = el('span', 'ag-agent-setup-eyebrow', '에이전트 연결');
+  const setupTitle = el('h2', 'ag-agent-setup-title');
+  setupTitle.id = 'ag-agent-setup-title';
+  setupTitleWrap.append(setupEyebrow, setupTitle);
+  const setupClose = el('button', 'ag-agent-setup-close');
+  setupClose.type = 'button';
+  setupClose.setAttribute('aria-label', '설정 닫기');
+  setupClose.appendChild(createIcon('close'));
+  setupChrome.append(setupTitleWrap, setupClose);
+  const setupBody = el('div', 'ag-agent-setup-body');
+  const setupGeneric = el('div', 'ag-agent-setup-generic');
+  const setupHero = el('div', 'ag-agent-setup-hero');
+  const setupHeroIcon = el('div', 'ag-agent-setup-hero-icon');
+  const setupHeroCopy = el('div', 'ag-agent-setup-hero-copy');
+  const setupHeroTitle = el('strong', 'ag-agent-setup-hero-title');
+  setupHeroCopy.append(setupHeroTitle);
+  setupHero.append(setupHeroIcon, setupHeroCopy);
+  const setupProgress = el('div', 'ag-agent-setup-progress');
+  setupProgress.setAttribute('role', 'progressbar');
+  setupProgress.setAttribute('aria-valuemin', '0');
+  setupProgress.setAttribute('aria-valuemax', '100');
+  const setupProgressFill = el('span', '');
+  setupProgress.appendChild(setupProgressFill);
+  setupProgress.hidden = true;
+  const setupProgressLine = el('p', 'ag-agent-setup-progress-label');
+  setupProgressLine.hidden = true;
+  const setupError = el('p', 'ag-agent-setup-error');
+  setupError.hidden = true;
+
+  const setupInstallPane = el('div', 'ag-agent-setup-pane');
+  const setupInstallNote = el('p', 'ag-agent-setup-copy');
+  const setupInstall = el('button', 'ag-agent-setup-primary', '설치하고 계속');
+  setupInstall.type = 'button';
+  setupInstallPane.append(setupInstallNote, setupInstall);
+
+  const setupAuthPane = el('div', 'ag-agent-setup-pane');
+  const setupAuthHeading = el('h3', 'ag-agent-setup-section-title', '로그인 방법');
+  const setupOauth = el('button', 'ag-agent-auth-card');
+  setupOauth.type = 'button';
+  setupOauth.append(el('strong', '', '브라우저로 로그인'), el('span', '', '구독 계정 또는 웹 계정 연결'));
+  const setupApiToggle = el('button', 'ag-agent-auth-card');
+  setupApiToggle.type = 'button';
+  setupApiToggle.append(el('strong', '', 'API 키 입력'), el('span', '', '사용량 기반 API 결제'));
+  const setupKeyBox = el('div', 'ag-agent-key-box');
+  setupKeyBox.hidden = true;
+  const setupKey = createTextField('API 키', { type: 'password', autocomplete: 'new-password' });
+  const setupKeySubmit = el('button', 'ag-agent-setup-primary', '키 연결');
+  setupKeySubmit.type = 'button';
+  setupKeyBox.append(setupKey.field, setupKeySubmit);
+  setupAuthPane.append(setupAuthHeading, setupOauth, setupApiToggle, setupKeyBox);
+
+  const setupDonePane = el('div', 'ag-agent-setup-pane ag-agent-setup-done');
+  const setupDoneMark = el('span', 'ag-agent-setup-done-mark', '✓');
+  const setupDoneTitle = el('strong', '', '연결되었습니다');
+  const setupDoneDetail = el('p', 'ag-agent-setup-copy');
+  const setupDoneClose = el('button', 'ag-agent-setup-primary', '완료');
+  setupDoneClose.type = 'button';
+  const setupDoneChange = el('button', 'ag-settings-btn', '로그인 방식 변경');
+  setupDoneChange.type = 'button';
+  setupDonePane.append(setupDoneMark, setupDoneTitle, setupDoneDetail, setupDoneChange, setupDoneClose);
+
+  setupGeneric.append(
+    setupHero,
+    setupProgress,
+    setupProgressLine,
+    setupError,
+    setupInstallPane,
+    setupAuthPane,
+    setupDonePane,
+  );
+  setupDialog.append(setupChrome, setupBody);
+  setupOverlay.appendChild(setupDialog);
+
+  setupInstall.addEventListener('click', () => void installSelectedAgent());
+  setupOauth.addEventListener('click', () => void startSetupAuth('oauth'));
+  setupApiToggle.addEventListener('click', () => {
+    setupKeyBox.hidden = false;
+    setupKey.input.focus();
+  });
+  setupKeySubmit.addEventListener('click', () => void startSetupAuth('api-key'));
+  setupKey.input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void startSetupAuth('api-key');
+    }
+  });
+  setupClose.addEventListener('click', closeAgentSetup);
+  setupDoneClose.addEventListener('click', closeAgentSetup);
+  setupDoneChange.addEventListener('click', () => {
+    setupReauth = true;
+    setupMessage = '';
+    renderAgentSetup();
+  });
+  setupOverlay.addEventListener('pointerdown', (event) => {
+    if (event.target === setupOverlay) closeAgentSetup();
+  });
+  setupOverlay.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeAgentSetup();
+  });
+
   piInstallBtn.addEventListener('click', () => void runPiInstall());
+  piOauth.addEventListener('click', () => void startSetupAuth('oauth'));
   piKeySubmit.addEventListener('click', () => void submitPiKey());
   piKeyInput.input.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
@@ -493,7 +646,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     piKeyInput.input.focus();
   });
 
-  // ── 3. 기본 설정 ──────────────────────────────────────
+  // ── 2. 기본 설정 ──────────────────────────────────────
   const defaults = createSection('기본 설정');
   const agentField = createSelect('기본 제공자', selectableAgents().map(
     (agent) => ({ id: agent, label: AGENT_LABEL[agent] }),
@@ -534,7 +687,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     commitPrefs({ defaultPermissionProfile: next });
   });
 
-  // ── 4. 글쓰기 보정 ────────────────────────────────────
+  // ── 3. 글쓰기 보정 ────────────────────────────────────
   const calibration = createSection('글쓰기 보정');
   const calibrationStatus = el('p', 'ag-settings-status', '아직 보정되지 않았어요');
   const calibrationSummary = el('p', 'ag-settings-note');
@@ -544,7 +697,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   calibrationBtn.addEventListener('click', () => openCalibration());
   calibration.body.append(calibrationStatus, calibrationSummary, calibrationBtn);
 
-  // ── 5. 사용량 ─────────────────────────────────────────
+  // ── 4. 사용량 ─────────────────────────────────────────
   const usageSection = createSection('사용량');
   const cliproxyCard = el('div', 'ag-settings-usage-block ag-settings-cliproxy');
   const cliproxyHead = el('div', 'ag-settings-usage-head');
@@ -663,11 +816,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   body.append(
     connection.root,
-    piSection.root,
     defaults.root,
     calibration.root,
     usageSection.root,
   );
+
+  setupKey.input.addEventListener('input', renderAgentSetup);
 
   // ── 상태 → DOM ────────────────────────────────────────
 
@@ -712,7 +866,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const current = getSelection();
     const permission = current.permission === 'unrestricted' ? '전체 접근' : '안전';
     currentLine.textContent =
-      `현재 대화: ${AGENT_LABEL[current.agent]} · ${labelForModel(current.agent, current.model)} · ${permission}`;
+      `현재 대화: ${AGENT_LABEL[current.agent]} / ${labelForModel(current.agent, current.model)} / ${permission}`;
   }
 
   function renderConnection(): void {
@@ -728,7 +882,15 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     for (const agent of AGENTS) {
       const row = providerRows.get(agent);
       if (!row) continue;
+      const setup = setupStatuses?.[agent];
       const health = providers?.[agent] ?? null;
+      const detected = health?.available === true || setup?.available === true;
+      row.setup.textContent = detected || setup?.connected || setup?.setupComplete ? '재설정' : '설정';
+      row.detail.classList.toggle('ag-update-required', setup?.updateRequired === true);
+      if (setup?.updateRequired) {
+        row.detail.textContent = '업데이트 필요';
+        continue;
+      }
       if (!health) {
         row.dot.dataset.state = 'unknown';
         row.detail.textContent = connectionState === 'connected' ? '확인 중…' : '허브에 연결되면 확인해요';
@@ -741,13 +903,201 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }
   }
 
+  function maybeOpenAuthUrl(url: string | null | undefined): void {
+    if (!url || openedAuthUrls.has(url)) return;
+    openedAuthUrls.add(url);
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
+  function openAgentSetup(agent: AgentName): void {
+    setupAgent = agent;
+    setupMessage = '';
+    setupBusy = false;
+    setupReauth = false;
+    resetSetupInstallProgress();
+    setupKey.input.value = '';
+    setupKeyBox.hidden = true;
+    document.body.appendChild(setupOverlay);
+    setupOverlay.setAttribute('aria-hidden', 'false');
+    renderAgentSetup();
+    requestAnimationFrame(() => {
+      setupOverlay.classList.add('ag-open');
+      setupDialog.focus();
+    });
+    void refreshSetupStatuses();
+    if (agent === 'pi') void refreshPiStatus();
+  }
+
+  function closeAgentSetup(): void {
+    if (!setupOverlay.isConnected) return;
+    setupOverlay.classList.remove('ag-open');
+    setupOverlay.setAttribute('aria-hidden', 'true');
+    resetSetupInstallProgress();
+    window.setTimeout(() => setupOverlay.remove(), 180);
+  }
+
+  function resetSetupInstallProgress(): void {
+    if (setupProgressResetTimer) {
+      clearTimeout(setupProgressResetTimer);
+      setupProgressResetTimer = null;
+    }
+    if (setupProgressCreepTimer) {
+      clearInterval(setupProgressCreepTimer);
+      setupProgressCreepTimer = null;
+    }
+    setupProgressPercent = 0;
+    setupProgressLabel = '';
+    setupProgressPhase = '';
+    setupProgressFill.style.width = '0%';
+    setupProgress.removeAttribute('aria-valuenow');
+    setupProgress.removeAttribute('aria-valuetext');
+  }
+
+  function paintSetupInstallProgress(): void {
+    setupProgressFill.style.width = `${setupProgressPercent.toFixed(2)}%`;
+    setupProgress.setAttribute('aria-valuenow', String(Math.round(setupProgressPercent)));
+    setupProgress.setAttribute('aria-valuetext', `${setupProgressLabel} ${Math.floor(setupProgressPercent)}%`);
+    setupProgressLine.textContent = `${setupProgressLabel} · ${Math.floor(setupProgressPercent)}%`;
+  }
+
+  function ensureSetupProgressCreep(): void {
+    if (setupProgressCreepTimer) return;
+    setupProgressCreepTimer = setInterval(() => {
+      const ceiling = INSTALL_PROGRESS_CEILING[setupProgressPhase] ?? setupProgressPercent;
+      if (setupProgressPercent >= ceiling || setupProgressPercent >= 100) return;
+      setupProgressPercent = Math.min(
+        ceiling,
+        setupProgressPercent + Math.max(0.08, (ceiling - setupProgressPercent) * 0.018),
+      );
+      paintSetupInstallProgress();
+    }, 100);
+  }
+
+  function setSetupInstallProgress(percent: number, phase = 'installing'): void {
+    if (setupProgressResetTimer) {
+      clearTimeout(setupProgressResetTimer);
+      setupProgressResetTimer = null;
+    }
+    setupProgressPercent = Math.max(setupProgressPercent, Math.min(100, Math.max(0, percent)));
+    setupProgressPhase = phase;
+    setupProgressLabel = INSTALL_PROGRESS_LABEL[phase] ?? INSTALL_PROGRESS_LABEL.installing;
+    paintSetupInstallProgress();
+    if (setupProgressPercent >= 100) {
+      if (setupProgressCreepTimer) {
+        clearInterval(setupProgressCreepTimer);
+        setupProgressCreepTimer = null;
+      }
+      setupProgressResetTimer = setTimeout(() => {
+        setupProgressResetTimer = null;
+        setupProgressPercent = 0;
+        setupProgressLabel = '';
+        setupProgressFill.style.width = '0%';
+        renderAgentSetup();
+      }, 650);
+    } else {
+      ensureSetupProgressCreep();
+    }
+  }
+
+  function renderAgentSetup(): void {
+    if (!setupAgent) return;
+    const agent = setupAgent;
+    setupTitle.textContent = `${AGENT_LABEL[agent]} 설정`;
+    setupBody.replaceChildren(agent === 'pi' ? piCard : setupGeneric);
+    if (agent === 'pi') {
+      piBusy = setupBusy;
+      if (setupMessage) piMessage = setupMessage;
+      renderPi();
+      return;
+    }
+    const status = setupStatuses?.[agent] ?? null;
+    const detected = providers?.[agent]?.available === true;
+    const available = detected || status?.available === true || status?.installed === true;
+    const connected = detected || status?.connected === true || status?.setupComplete === true;
+    setupHeroIcon.replaceChildren(providerIcon(agent));
+    setupHeroTitle.textContent = AGENT_LABEL[agent];
+    setupInstallNote.textContent = `${AGENT_LABEL[agent]} CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.`;
+    setupKey.input.placeholder = agent === 'codex' ? 'sk-proj-…' : 'sk-ant-…';
+    setupInstallPane.hidden = available;
+    setupAuthPane.hidden = !available || (connected && !setupReauth);
+    setupDonePane.hidden = !connected || setupReauth;
+    setupDoneDetail.textContent = status?.authMethod === 'api-key' && status.keyTail
+      ? `API 키 ****${status.keyTail}`
+      : status?.authenticated
+        ? `${AGENT_LABEL[agent]} 웹 계정으로 로그인했습니다.`
+        : `${AGENT_LABEL[agent]} CLI 연결이 확인되었습니다.`;
+    setupError.textContent = setupMessage;
+    setupError.hidden = !setupMessage;
+    setupProgress.hidden = setupProgressPercent <= 0;
+    setupProgressLine.hidden = setupProgressPercent <= 0;
+    setupProgressLine.textContent = setupProgressPercent > 0
+      ? `${setupProgressLabel} · ${Math.floor(setupProgressPercent)}%`
+      : '';
+    setupInstall.disabled = setupBusy || connectionState !== 'connected';
+    setupOauth.disabled = setupBusy || connectionState !== 'connected';
+    setupApiToggle.disabled = setupBusy || connectionState !== 'connected';
+    setupKeySubmit.disabled = setupBusy || !setupKey.input.value.trim();
+  }
+
+  async function refreshSetupStatuses(): Promise<void> {
+    const statuses = await bridge.requestAgentSetupStatus();
+    if (disposed || !statuses) return;
+    setupStatuses = statuses;
+    renderProviders();
+    renderAgentSetup();
+  }
+
+  async function installSelectedAgent(): Promise<void> {
+    if (!setupAgent || setupBusy) return;
+    if (setupAgent === 'pi') {
+      await runPiInstall();
+      return;
+    }
+    setupBusy = true;
+    setupMessage = '';
+    resetSetupInstallProgress();
+    setSetupInstallProgress(8, 'preparing');
+    renderAgentSetup();
+    const statuses = await bridge.installAgent(setupAgent);
+    if (disposed) return;
+    setupBusy = false;
+    if (statuses) setupStatuses = statuses;
+    else if (!setupMessage) setupMessage = '설치를 완료하지 못했어요.';
+    renderAgentSetup();
+    renderProviders();
+  }
+
+  async function startSetupAuth(method: AgentAuthMethod): Promise<void> {
+    if (!setupAgent || setupBusy) return;
+    const keyInput = setupAgent === 'pi' ? piKeyInput.input : setupKey.input;
+    const key = method === 'api-key' ? keyInput.value.trim() : '';
+    if (method === 'api-key' && !key) return;
+    setupBusy = true;
+    setupMessage = '';
+    resetSetupInstallProgress();
+    if (setupAgent === 'pi') piMessage = '';
+    renderAgentSetup();
+    const started = await bridge.authenticateAgent(setupAgent, method, key || undefined);
+    if (disposed) return;
+    if (!started) {
+      setupBusy = false;
+      setupMessage = '로그인을 시작하지 못했어요.';
+      renderAgentSetup();
+      return;
+    }
+    keyInput.value = '';
+    maybeOpenAuthUrl(started.authUrl);
+    // 완료 상태는 agent-setup-status 이벤트로 온다. OAuth 동안 모달은 진행 상태를 유지한다.
+    renderAgentSetup();
+  }
+
   function renderWritingStyle(): void {
     if (writingStyle?.active) {
       const language = writingStyle.language === 'en' ? 'English' : '한국어';
       const date = formatShortDate(writingStyle.updatedAt);
-      const parts = [`보정됨 · ${language}`, `문서 ${writingStyle.sourceCount}개`];
+      const parts = ['보정됨', language, `문서 ${writingStyle.sourceCount}개`];
       if (date) parts.push(date);
-      calibrationStatus.textContent = parts.join(' · ');
+      calibrationStatus.textContent = parts.join(' / ');
       calibrationSummary.textContent = writingStyle.summary ?? '';
       calibrationSummary.hidden = !writingStyle.summary;
       calibrationBtn.textContent = '다시 보정';
@@ -1022,7 +1372,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     } else if (matches.length === 0) {
       piCatalogNote.textContent = '검색 결과가 없어요.';
     } else if (matches.length > visible.length) {
-      piCatalogNote.textContent = `${matches.length}개 중 ${visible.length}개 · 검색으로 좁혀 보세요`;
+      piCatalogNote.textContent = `${matches.length}개 중 ${visible.length}개`;
     } else {
       piCatalogNote.textContent = `${matches.length}개 · 최대 ${PI_MODEL_MAX}개`;
     }
@@ -1120,9 +1470,39 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       clearTimeout(piActivityPause);
       piActivityPause = null;
     }
+    piProgressPercent = Math.max(piProgressPercent, Math.min(100, Math.max(0, percent)));
     piProgressTrack.hidden = false;
     piProgressTrack.classList.remove('ag-pi-progress-indeterminate', 'ag-pi-progress-paused');
-    piProgressFill.style.width = `${Math.min(100, Math.max(0, percent)).toFixed(1)}%`;
+    piProgressFill.style.width = `${piProgressPercent.toFixed(2)}%`;
+    piProgressTrack.setAttribute('role', 'progressbar');
+    piProgressTrack.setAttribute('aria-valuemin', '0');
+    piProgressTrack.setAttribute('aria-valuemax', '100');
+    piProgressTrack.setAttribute('aria-valuenow', String(Math.round(piProgressPercent)));
+  }
+
+  function setPiInstallProgress(percent: number, phase: string, creep = true): void {
+    piProgressPhase = phase;
+    piBarDeterminate(percent);
+    if (!creep || percent >= 100) {
+      if (piProgressCreepTimer) {
+        clearInterval(piProgressCreepTimer);
+        piProgressCreepTimer = null;
+      }
+      return;
+    }
+    if (piProgressCreepTimer) return;
+    piProgressCreepTimer = setInterval(() => {
+      const ceiling = INSTALL_PROGRESS_CEILING[piProgressPhase] ?? piProgressPercent;
+      if (piProgressPercent >= ceiling || piProgressPercent >= 100) return;
+      piProgressPercent = Math.min(
+        ceiling,
+        piProgressPercent + Math.max(0.08, (ceiling - piProgressPercent) * 0.018),
+      );
+      piBarDeterminate(piProgressPercent);
+      const label = PI_PROGRESS_LABEL[piProgressPhase] ?? '';
+      piProgress = `${label} · ${Math.floor(piProgressPercent)}%`;
+      piProgressLine.textContent = piProgress;
+    }, 100);
   }
 
   /** 크기를 모를 때 — 새 신호가 올 때만 흐르고, 잠잠해지면 멈추는 막대. */
@@ -1131,6 +1511,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     piProgressTrack.classList.add('ag-pi-progress-indeterminate');
     piProgressTrack.classList.remove('ag-pi-progress-paused');
     piProgressFill.style.width = '';
+    piProgressTrack.removeAttribute('aria-valuenow');
     if (piActivityPause) clearTimeout(piActivityPause);
     piActivityPause = setTimeout(() => {
       piProgressTrack.classList.add('ag-pi-progress-paused');
@@ -1142,17 +1523,24 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       clearTimeout(piActivityPause);
       piActivityPause = null;
     }
+    if (piProgressCreepTimer) {
+      clearInterval(piProgressCreepTimer);
+      piProgressCreepTimer = null;
+    }
+    piProgressPercent = 0;
+    piProgressPhase = '';
     piProgressTrack.hidden = true;
     piProgressTrack.classList.remove('ag-pi-progress-indeterminate', 'ag-pi-progress-paused');
     piProgressFill.style.width = '0%';
+    piProgressTrack.removeAttribute('aria-valuenow');
   }
 
   async function runPiInstall(): Promise<void> {
     if (piBusy) return;
     piBusy = true;
     piMessage = '';
-    piProgress = PI_PROGRESS_LABEL['downloading'] ?? '';
-    piBarNudge();
+    piProgress = `${PI_PROGRESS_LABEL.preparing} · 8%`;
+    setPiInstallProgress(8, 'preparing');
     renderPi();
     const status = await bridge.installPi();
     if (disposed) return;
@@ -1303,9 +1691,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       void refreshProviders(false);
       void refreshUsage();
       void refreshPiStatus();
+      void refreshSetupStatuses();
     },
     close(): void {
-      /* 닫을 때 정리할 타이머가 없다 — 상태는 이벤트로만 갱신된다. */
+      closeAgentSetup();
     },
     handleEvent(ev: SidebarEvent): void {
       switch (ev.type) {
@@ -1319,6 +1708,32 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         case 'provider-status':
           providers = ev.providers;
           renderProviders();
+          break;
+        case 'agent-setup-status':
+          setupStatuses = ev.statuses;
+          setupBusy = false;
+          setupReauth = false;
+          renderProviders();
+          renderAgentSetup();
+          break;
+        case 'agent-setup-progress':
+          if (setupAgent === ev.agent) {
+            setupBusy = ev.state !== 'done';
+            maybeOpenAuthUrl(ev.authUrl);
+            if (typeof ev.percent === 'number') {
+              setSetupInstallProgress(ev.percent, ev.phase ?? ev.state);
+            }
+            renderAgentSetup();
+          }
+          break;
+        case 'agent-setup-error':
+          if (!ev.agent || setupAgent === ev.agent) {
+            setupBusy = false;
+            setupMessage = ev.message;
+            resetSetupInstallProgress();
+            if (setupAgent === 'pi') piMessage = ev.message;
+            renderAgentSetup();
+          }
           break;
         case 'usage-report':
           usage = ev.usage;
@@ -1338,7 +1753,16 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         case 'pi-setup-progress':
           piProgress = PI_PROGRESS_LABEL[ev.state] ?? '';
           if (ev.state === 'done') {
-            piBarHide();
+            setPiInstallProgress(100, 'done', false);
+          } else if (typeof ev.percent === 'number') {
+            setPiInstallProgress(ev.percent, ev.state, typeof ev.receivedBytes !== 'number');
+            piProgress = `${piProgress} · ${Math.floor(ev.percent)}%`;
+            if (typeof ev.receivedBytes === 'number') {
+              const total = typeof ev.totalBytes === 'number' && ev.totalBytes > 0 ? ev.totalBytes : null;
+              piProgress = total
+                ? `${PI_PROGRESS_LABEL.downloading} · ${formatMb(ev.receivedBytes)} / ${formatMb(total)} · ${Math.floor(ev.percent)}%`
+                : `${PI_PROGRESS_LABEL.downloading} · ${formatMb(ev.receivedBytes)} · ${Math.floor(ev.percent)}%`;
+            }
           } else if (typeof ev.receivedBytes === 'number') {
             const total = typeof ev.totalBytes === 'number' && ev.totalBytes > 0 ? ev.totalBytes : null;
             if (total) {
@@ -1361,6 +1785,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           break;
         case 'pi-error':
           piMessage = ev.message;
+          if (setupAgent === 'pi') setupBusy = false;
           renderPi();
           break;
         default:
@@ -1373,7 +1798,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         clearTimeout(piActivityPause);
         piActivityPause = null;
       }
+      if (setupProgressResetTimer) {
+        clearTimeout(setupProgressResetTimer);
+        setupProgressResetTimer = null;
+      }
+      if (setupProgressCreepTimer) clearInterval(setupProgressCreepTimer);
+      if (piProgressCreepTimer) clearInterval(piProgressCreepTimer);
       element.remove();
+      setupOverlay.remove();
     },
   };
 }

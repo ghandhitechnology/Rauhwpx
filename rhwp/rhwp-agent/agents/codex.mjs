@@ -337,12 +337,13 @@ export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
       let proc;
       try {
         prepareCodexHome(codexHome, opts.codexAuthPath);
-        proc = spawnProcess('codex', argv, {
+        proc = spawnProcess(opts.codexBin ?? 'codex', argv, {
           cwd: opts.rootDir,
           env: {
             ...process.env,
             ...(opts.isolatedHome ? { HOME: opts.isolatedHome } : {}),
             CODEX_HOME: codexHome,
+            ...(opts.providerEnv ?? {}),
           },
           stdio: ['pipe', 'pipe', 'pipe'],
           windowsHide: true,
