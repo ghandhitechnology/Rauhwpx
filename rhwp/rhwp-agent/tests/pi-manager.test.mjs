@@ -7,6 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { createPiManager, defaultPiRoot } from '../pi-manager.mjs';
+import { createMemorySecretStore } from '../secret-store.mjs';
 
 const PI_PACKAGE = '@earendil-works/pi-coding-agent';
 
@@ -196,7 +197,9 @@ test('OpenRouter OAuth uses PKCE and stores only the exchanged API key', async (
     return { ok: true, json: async () => ({ key: 'sk-or-v1-oauth-result' }) };
   };
   const openRouter = fakeOpenRouter();
-  const manager = await createPiManager({ rootDir, fetchImpl, openRouter }).init();
+  const manager = await createPiManager({
+    rootDir, fetchImpl, openRouter, secretStore: createMemorySecretStore(),
+  }).init();
   const started = manager.beginOAuth('http://127.0.0.1:5175/oauth/openrouter/callback');
   const authUrl = new URL(started.authUrl);
 
@@ -230,9 +233,10 @@ test('install runs npm with a prefix, reports progress and syncs assets', async 
   const status = await manager.install((event) => progress.push(event));
 
   assert.equal(spawns.length, 1);
-  assert.equal(spawns[0].command, 'npm');
+  assert.equal(spawns[0].command, process.execPath);
   // 레지스트리에 못 닿으면 npm 이 직접 받고, http 로그가 활동 신호가 된다.
-  assert.deepEqual(spawns[0].argv, [
+  assert.match(spawns[0].argv[0], /npm[/\\]bin[/\\]npm-cli\.js$/);
+  assert.deepEqual(spawns[0].argv.slice(1), [
     'install', '--prefix', prefixDir, '--no-fund', '--no-audit', '--loglevel=http', PI_PACKAGE,
   ]);
   assert.deepEqual(progress.map((event) => event.state), [
@@ -366,7 +370,8 @@ test('deterministic install downloads the tarball itself and reports byte progre
   const tarballPath = path.join(rootDir, 'cache', 'pi-package.tgz');
   assert.equal(spawns.length, 1);
   // 로컬 타르볼 설치라 npm 은 조용해도 된다.
-  assert.deepEqual(spawns[0].argv, [
+  assert.match(spawns[0].argv[0], /npm[/\\]bin[/\\]npm-cli\.js$/);
+  assert.deepEqual(spawns[0].argv.slice(1), [
     'install', '--prefix', prefixDir, '--no-fund', '--no-audit', '--loglevel=error', tarballPath,
   ]);
 
@@ -422,11 +427,12 @@ test('an integrity mismatch fails the install instead of falling back to npm', a
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
-test('setApiKey validates first, stores the key only in models.json and keeps the tail', async () => {
+test('setApiKey validates first, stores the key only in the secure vault and keeps the tail', async () => {
   const rootDir = await tmpRoot();
   const { spawnProcess } = fakeSpawner();
   const openRouter = fakeOpenRouter();
-  const manager = createPiManager({ rootDir, spawnProcess, openRouter });
+  const secretStore = createMemorySecretStore();
+  const manager = createPiManager({ rootDir, spawnProcess, openRouter, secretStore });
 
   const status = await manager.setApiKey('  sk-or-v1-secret-abcd  ');
   assert.deepEqual(openRouter.calls.validate, ['sk-or-v1-secret-abcd']);
@@ -436,7 +442,8 @@ test('setApiKey validates first, stores the key only in models.json and keeps th
   assert.equal(manager.apiKey(), 'sk-or-v1-secret-abcd');
 
   const models = await readJson(path.join(rootDir, 'agent', 'models.json'));
-  assert.equal(models.providers.openrouter.apiKey, 'sk-or-v1-secret-abcd');
+  assert.equal(models.providers.openrouter.apiKey, undefined);
+  assert.equal(await secretStore.get('rhwp.pi.openrouter-api-key'), 'sk-or-v1-secret-abcd');
   assert.equal(models.providers.openrouter.baseUrl, 'https://openrouter.ai/api/v1');
   assert.equal(models.providers.openrouter.api, 'openai-completions');
   const modelsStat = await fs.stat(path.join(rootDir, 'agent', 'models.json'));
@@ -471,10 +478,12 @@ test('a rejected key throws OPENROUTER_KEY_INVALID and writes nothing', async ()
 
 test('setModels writes the pi provider block and survives a reopen', async () => {
   const rootDir = await tmpRoot();
+  const secretStore = createMemorySecretStore();
   const manager = createPiManager({
     rootDir,
     spawnProcess: fakeSpawner().spawnProcess,
     openRouter: fakeOpenRouter(),
+    secretStore,
   });
 
   await manager.setApiKey('sk-or-v1-secret-abcd');
@@ -523,6 +532,7 @@ test('setModels writes the pi provider block and survives a reopen', async () =>
     rootDir,
     spawnProcess: fakeSpawner().spawnProcess,
     openRouter: fakeOpenRouter(),
+    secretStore,
   }).init();
   const reloaded = await reopened.status();
   assert.equal(reloaded.setupComplete, true);
@@ -530,6 +540,25 @@ test('setModels writes the pi provider block and survives a reopen', async () =>
   assert.equal(reloaded.models.length, 2);
   assert.equal(reloaded.models[0].name, '빠른 딥식');
   assert.equal(reopened.apiKey(), 'sk-or-v1-secret-abcd');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a legacy models.json key migrates to the secure vault and is scrubbed', async () => {
+  const rootDir = await tmpRoot();
+  const modelsPath = path.join(rootDir, 'agent', 'models.json');
+  await fs.mkdir(path.dirname(modelsPath), { recursive: true });
+  await fs.writeFile(modelsPath, JSON.stringify({
+    providers: { openrouter: { apiKey: 'sk-or-v1-legacy', models: [] } },
+  }));
+  const secretStore = createMemorySecretStore();
+  const manager = await createPiManager({
+    rootDir, openRouter: fakeOpenRouter(), secretStore,
+  }).init();
+
+  assert.equal(manager.apiKey(), 'sk-or-v1-legacy');
+  assert.equal(await secretStore.get('rhwp.pi.openrouter-api-key'), 'sk-or-v1-legacy');
+  assert.equal((await readJson(modelsPath)).providers.openrouter.apiKey, undefined);
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });

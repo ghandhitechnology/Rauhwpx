@@ -3,7 +3,10 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
-import { fetchLatestPackage, updatePrefixAtomically } from './harness-update.mjs';
+import { fetchLatestPackage, replaceFileAtomically, updatePrefixAtomically } from './harness-update.mjs';
+import { bundledNpmLaunch } from './npm-runtime.mjs';
+import { terminateProcessTree } from './process-tree.mjs';
+import { setupFailureMessage } from './setup-errors.mjs';
 
 const require = createRequire(import.meta.url);
 let crossSpawn = null;
@@ -22,6 +25,8 @@ const AUTH_TIMEOUT_MS = 10 * 60 * 1000;
 const STATUS_TIMEOUT_MS = 10_000;
 const REGISTRY_TIMEOUT_MS = 10_000;
 const PROGRESS_INTERVAL_MS = 160;
+const CLAUDE_SECRET_ID = 'rhwp.claude.api-key';
+const CODEX_SECRET_ID = 'rhwp.codex.api-key';
 
 function setupError(code, message) {
   const error = new Error(message);
@@ -56,24 +61,30 @@ export function defaultCliSetupRoot(env = process.env, platform = process.platfo
 export function createCliSetupManager({
   rootDir = defaultCliSetupRoot(),
   spawnProcess = spawn,
-  npmCommand = 'npm',
+  npmCommand = null,
+  nodeCommand = process.execPath,
   platform = process.platform,
   baseEnv = process.env,
   fetchImpl = globalThis.fetch,
+  secretStore = null,
 } = {}) {
   const prefixDir = path.join(rootDir, 'prefix');
   const configPath = path.join(rootDir, 'config.json');
   const binDir = path.join(prefixDir, 'node_modules', '.bin');
   const installs = new Map();
   const authRuns = new Map();
+  const activeProcesses = new Map();
   const updateInfo = new Map([
-    ['claude', { latestVersion: null, updateRequired: false }],
-    ['codex', { latestVersion: null, updateRequired: false }],
+    ['claude', { latestVersion: null, updateRequired: false, error: null }],
+    ['codex', { latestVersion: null, updateRequired: false, error: null }],
   ]);
+  const npmLaunch = bundledNpmLaunch({ nodeCommand, npmCommand });
   let updateChain = Promise.resolve();
   let loaded = false;
+  let claudeApiKey = null;
+  let codexApiKey = null;
+  let secretStoreError = null;
   let config = {
-    claudeApiKey: null,
     claudeAuthMethod: null,
     codexAuthMethod: null,
     codexKeyTail: null,
@@ -99,26 +110,45 @@ export function createCliSetupManager({
   async function load() {
     if (loaded) return;
     loaded = true;
+    let raw = {};
     try {
-      const raw = JSON.parse(await fs.readFile(configPath, 'utf8'));
-      config.claudeApiKey = typeof raw?.claudeApiKey === 'string' && raw.claudeApiKey.trim()
-        ? raw.claudeApiKey.trim()
-        : null;
-      config.claudeAuthMethod = raw?.claudeAuthMethod === 'api-key' || raw?.claudeAuthMethod === 'oauth'
-        ? raw.claudeAuthMethod
-        : null;
-      config.codexAuthMethod = raw?.codexAuthMethod === 'api-key' || raw?.codexAuthMethod === 'oauth'
-        ? raw.codexAuthMethod
-        : null;
-      config.codexKeyTail = typeof raw?.codexKeyTail === 'string' ? raw.codexKeyTail : null;
+      raw = JSON.parse(await fs.readFile(configPath, 'utf8'));
     } catch {}
+    const legacyClaudeKey = typeof raw?.claudeApiKey === 'string' && raw.claudeApiKey.trim()
+      ? raw.claudeApiKey.trim() : null;
+    config.claudeAuthMethod = raw?.claudeAuthMethod === 'api-key' || raw?.claudeAuthMethod === 'oauth'
+      ? raw.claudeAuthMethod
+      : null;
+    config.codexAuthMethod = raw?.codexAuthMethod === 'api-key' || raw?.codexAuthMethod === 'oauth'
+      ? raw.codexAuthMethod
+      : null;
+    config.codexKeyTail = typeof raw?.codexKeyTail === 'string' ? raw.codexKeyTail : null;
+    try {
+      if (secretStore?.available) {
+        [claudeApiKey, codexApiKey] = await Promise.all([
+          secretStore.get(CLAUDE_SECRET_ID),
+          secretStore.get(CODEX_SECRET_ID),
+        ]);
+        if (!claudeApiKey && legacyClaudeKey) {
+          await secretStore.set(CLAUDE_SECRET_ID, legacyClaudeKey);
+          claudeApiKey = await secretStore.get(CLAUDE_SECRET_ID);
+          if (claudeApiKey === legacyClaudeKey) await persist();
+        }
+      } else {
+        // Keep a legacy key usable until the desktop vault is available; never write it back.
+        claudeApiKey = legacyClaudeKey;
+      }
+    } catch (error) {
+      claudeApiKey = legacyClaudeKey;
+      secretStoreError = error?.message ?? 'OS 보안 저장소를 열지 못했어요.';
+    }
   }
 
   async function persist() {
     await fs.mkdir(rootDir, { recursive: true });
     const temp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
     await fs.writeFile(temp, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    await fs.rename(temp, configPath);
+    await replaceFileAtomically(temp, configPath, { platform });
   }
 
   async function installedVersion(agent, basePrefix = prefixDir) {
@@ -132,11 +162,14 @@ export function createCliSetupManager({
 
   function envFor(agent) {
     const env = { ...baseEnv, PATH: `${binDir}${path.delimiter}${baseEnv.PATH ?? ''}` };
-    if (agent === 'claude' && config.claudeApiKey) env.ANTHROPIC_API_KEY = config.claudeApiKey;
+    if (agent === 'claude' && claudeApiKey) env.ANTHROPIC_API_KEY = claudeApiKey;
+    if (agent === 'codex' && codexApiKey) env.OPENAI_API_KEY = codexApiKey;
     return env;
   }
 
-  function run(command, argv, { input = null, timeoutMs = STATUS_TIMEOUT_MS, env = baseEnv, onOutput } = {}) {
+  function run(command, argv, {
+    input = null, timeoutMs = STATUS_TIMEOUT_MS, env = baseEnv, onOutput, operationKey = null,
+  } = {}) {
     return new Promise((resolve, reject) => {
       let stdout = '';
       let stderr = '';
@@ -146,6 +179,7 @@ export function createCliSetupManager({
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
+        if (operationKey && activeProcesses.get(operationKey) === proc) activeProcesses.delete(operationKey);
         if (error) reject(error);
         else resolve(result);
       };
@@ -160,9 +194,11 @@ export function createCliSetupManager({
         finish(error);
         return;
       }
+      if (operationKey) activeProcesses.set(operationKey, proc);
       timer = setTimeout(() => {
-        try { proc.kill('SIGKILL'); } catch {}
-        finish(setupError('AGENT_SETUP_TIMEOUT', '설정 작업이 제한 시간 안에 끝나지 않았어요.'));
+        void terminateProcessTree(proc, { platform, spawnProcess }).finally(() => {
+          finish(setupError('AGENT_SETUP_TIMEOUT', '설정 작업이 제한 시간 안에 끝나지 않았어요.'));
+        });
       }, timeoutMs);
       timer.unref?.();
       const collect = (target, chunk) => {
@@ -182,8 +218,11 @@ export function createCliSetupManager({
 
   async function authState(agent) {
     await load();
-    if (agent === 'claude' && config.claudeApiKey) {
-      return { authenticated: true, authMethod: 'api-key', keyTail: keyTail(config.claudeApiKey) };
+    if (agent === 'claude' && claudeApiKey) {
+      return { authenticated: true, authMethod: 'api-key', keyTail: keyTail(claudeApiKey) };
+    }
+    if (agent === 'codex' && codexApiKey) {
+      return { authenticated: true, authMethod: 'api-key', keyTail: keyTail(codexApiKey) };
     }
     const version = await installedVersion(agent);
     const command = version ? binPath(agent) : assertAgent(agent).bin;
@@ -220,7 +259,7 @@ export function createCliSetupManager({
       setupComplete: Boolean(version) && auth.authenticated,
       latestVersion: update?.latestVersion ?? null,
       updateRequired: update?.updateRequired === true,
-      error: null,
+      error: update?.error ?? secretStoreError,
     };
   }
 
@@ -246,10 +285,11 @@ export function createCliSetupManager({
       emit('resolving', 20, `${item.bin} 패키지 확인 중`);
       emit('installing', 28, `${item.bin} CLI 설치 중`);
       const result = await run(
-        npmCommand,
-        ['install', '--prefix', prefixDir, '--no-fund', '--no-audit', item.package],
+        npmLaunch.command,
+        [...npmLaunch.leadingArgs, 'install', '--prefix', prefixDir, '--no-fund', '--no-audit', item.package],
         {
           timeoutMs: INSTALL_TIMEOUT_MS,
+          operationKey: `install:${agent}`,
           onOutput: () => {
             const now = Date.now();
             if (now - lastActivity < PROGRESS_INTERVAL_MS) return;
@@ -262,7 +302,7 @@ export function createCliSetupManager({
         const detail = cleanTail(result.stderr || result.stdout);
         throw setupError(
           'AGENT_INSTALL_FAILED',
-          detail ? `${item.bin} 설치가 실패했어요: ${detail}` : `${item.bin} 설치가 실패했어요.`,
+          setupFailureMessage(null, detail, `${item.bin} 설치가 실패했어요.`),
         );
       }
       emit('verifying', 92, `${item.bin} CLI 확인 중`);
@@ -290,7 +330,8 @@ export function createCliSetupManager({
     let latest;
     try {
       latest = await fetchLatestPackage(fetchImpl, item.package, REGISTRY_TIMEOUT_MS);
-    } catch {
+    } catch (error) {
+      update.error = setupFailureMessage(error, '', '최신 버전을 확인하지 못했어요.');
       return status(agent);
     }
     update.latestVersion = latest.version;
@@ -301,11 +342,12 @@ export function createCliSetupManager({
       await updatePrefixAtomically({
         prefixDir,
         label: agent,
+        platform,
         canActivate,
         install: async (stagingDir) => {
           const result = await run(
-            npmCommand,
-            ['install', '--prefix', stagingDir, '--no-fund', '--no-audit', `${item.package}@${latest.version}`],
+            npmLaunch.command,
+            [...npmLaunch.leadingArgs, 'install', '--prefix', stagingDir, '--no-fund', '--no-audit', `${item.package}@${latest.version}`],
             { timeoutMs: INSTALL_TIMEOUT_MS },
           );
           if (result.code !== 0) throw setupError('AGENT_UPDATE_FAILED', 'harness update failed');
@@ -317,9 +359,11 @@ export function createCliSetupManager({
         },
       });
       update.updateRequired = false;
-    } catch {
+      update.error = null;
+    } catch (error) {
       // 자동 갱신 실패는 작업을 끊지 않는다. 기존 prefix 를 유지하고 상태 카드로만 알린다.
       update.updateRequired = true;
+      update.error = setupFailureMessage(error, '', '자동 업데이트를 완료하지 못했어요.');
     }
     return status(agent);
   }
@@ -336,21 +380,23 @@ export function createCliSetupManager({
         const value = String(key ?? '').trim();
         if (!value) throw setupError('AGENT_KEY_INVALID', 'API 키를 입력해 주세요.');
         if (agent === 'claude') {
-          config.claudeApiKey = value;
+          if (!secretStore?.available) {
+            throw setupError('SECRET_STORE_UNAVAILABLE', 'OS 보안 저장소를 사용할 수 없어 API 키를 저장하지 못했어요. 앱을 다시 시작해 주세요.');
+          }
+          await secretStore.set(CLAUDE_SECRET_ID, value);
+          claudeApiKey = value;
+          secretStoreError = null;
           config.claudeAuthMethod = 'api-key';
-          baseEnv.ANTHROPIC_API_KEY = value;
           await persist();
           onProgress?.({ state: 'done' });
           return status(agent);
         }
-        const result = await run(command, ['login', '--with-api-key'], {
-          input: `${value}\n`,
-          timeoutMs: 30_000,
-          env: envFor(agent),
-        });
-        if (result.code !== 0) {
-          throw setupError('AGENT_KEY_INVALID', cleanTail(result.stderr || result.stdout) || 'Codex API 키가 거절됐어요.');
+        if (!secretStore?.available) {
+          throw setupError('SECRET_STORE_UNAVAILABLE', 'OS 보안 저장소를 사용할 수 없어 API 키를 저장하지 못했어요. 앱을 다시 시작해 주세요.');
         }
+        await secretStore.set(CODEX_SECRET_ID, value);
+        codexApiKey = value;
+        secretStoreError = null;
         config.codexAuthMethod = 'api-key';
         config.codexKeyTail = keyTail(value);
         await persist();
@@ -359,16 +405,22 @@ export function createCliSetupManager({
       }
       if (method !== 'oauth') throw setupError('AGENT_AUTH_INVALID', '지원하지 않는 로그인 방식이에요.');
       if (agent === 'claude') {
-        config.claudeApiKey = null;
-        delete baseEnv.ANTHROPIC_API_KEY;
+        if (secretStore?.available) await secretStore.delete(CLAUDE_SECRET_ID);
+        claudeApiKey = null;
         await persist();
+      } else {
+        if (secretStore?.available) await secretStore.delete(CODEX_SECRET_ID);
+        codexApiKey = null;
       }
       let buffered = '';
       const result = await run(
         command,
-        agent === 'codex' ? ['login'] : ['auth', 'login'],
+        agent === 'codex'
+          ? (platform === 'win32' ? ['login', '--device-auth'] : ['login'])
+          : ['auth', 'login'],
         {
           timeoutMs: AUTH_TIMEOUT_MS,
+          operationKey: `auth:${agent}`,
           env: envFor(agent),
           onOutput: (text) => {
             buffered = (buffered + text).slice(-4000);
@@ -378,7 +430,8 @@ export function createCliSetupManager({
         },
       );
       if (result.code !== 0) {
-        throw setupError('AGENT_AUTH_FAILED', cleanTail(result.stderr || result.stdout) || '로그인을 완료하지 못했어요.');
+        const detail = cleanTail(result.stderr || result.stdout);
+        throw setupError('AGENT_AUTH_FAILED', setupFailureMessage(null, detail, '로그인을 완료하지 못했어요.'));
       }
       if (agent === 'claude') config.claudeAuthMethod = 'oauth';
       else {
@@ -411,6 +464,14 @@ export function createCliSetupManager({
     status,
     install,
     authenticate,
+    async cancel(agent) {
+      assertAgent(agent);
+      const processes = [`install:${agent}`, `auth:${agent}`]
+        .map((key) => activeProcesses.get(key))
+        .filter(Boolean);
+      await Promise.all(processes.map((proc) => terminateProcessTree(proc, { platform, spawnProcess })));
+      return processes.length > 0;
+    },
     automaticUpdate(agent, { canActivate = () => true } = {}) {
       const runUpdate = updateChain.then(
         () => runAutomaticUpdate(agent, canActivate),
