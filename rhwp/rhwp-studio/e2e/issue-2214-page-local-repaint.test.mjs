@@ -1455,17 +1455,14 @@ async function runMultiUpdateImeSmoke(page, format, bytes) {
 
   const trace = await collectTrace(page);
   const deletes = trace.events.filter((event) => event.type === 'wasm.deleteTextInCellDeferredPagination');
-  assert.equal(trace.counts.deferredInsert, 3, `${format} IME deferred insert count`);
-  assert.equal(trace.counts.deferredDelete, 2, `${format} IME replacement delete count`);
+  assert.equal(trace.counts.deferredInsert, 1, `${format} IME commit insert count`);
+  assert.equal(trace.counts.deferredDelete, 0, `${format} transient preedit delete count`);
   assert.equal(trace.counts.immediateDelete, 0, `${format} IME synchronous flat delete count`);
   assert.equal(trace.counts.pathDelete, 0, `${format} IME path delete count`);
   assert.equal(trace.counts.cursorRectInCell, 0, `${format} IME anchor cursor lookup count`);
-  assert.equal(trace.counts.prepareTextMutation, 3, `${format} IME effect consumption count`);
+  assert.equal(trace.counts.prepareTextMutation, 1, `${format} IME commit effect consumption count`);
   assert.equal(trace.counts.wasmFlush, 0, `${format} IME synchronous flush count`);
-  assert.deepEqual(deletes.map((event) => event.charOffset), [
-    TARGET.charOffset,
-    TARGET.charOffset,
-  ]);
+  assert.deepEqual(deletes.map((event) => event.charOffset), []);
   for (const [index, durationMs] of durationsMs.entries()) {
     assert.ok(durationMs < 250, `${format} IME update ${index + 1} blocked ${durationMs.toFixed(2)}ms`);
   }
@@ -1508,8 +1505,8 @@ async function runImeAcrossPaginationCommitSmoke(page, format, bytes) {
   const afterCommit = await collectTrace(page);
   assert.equal(
     afterCommit.counts.cursorRectInCell,
-    1,
-    `${format} IME commit must refresh the invalidated anchor exactly once`,
+    0,
+    `${format} transient preedit must not query the document cursor during pagination`,
   );
 
   const secondDurationMs = await page.evaluate(() => {
@@ -1547,7 +1544,7 @@ async function runImeAcrossPaginationCommitSmoke(page, format, bytes) {
     `${format} IME update after commit must reuse the refreshed anchor`,
   );
   assert.equal(trace.counts.immediateDelete, 0, `${format} IME commit synchronous delete count`);
-  assert.equal(trace.counts.wasmFlush, 0, `${format} IME commit synchronous flush count`);
+  assert.equal(trace.counts.wasmFlush, 1, `${format} IME session commit flush count`);
   await restoreTrace(page);
   console.log(
     `  IME pagination-commit smoke: GREEN, updates=${firstDurationMs.toFixed(1)}/${secondDurationMs.toFixed(1)}ms`,

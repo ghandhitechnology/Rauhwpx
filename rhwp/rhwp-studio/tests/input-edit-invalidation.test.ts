@@ -38,29 +38,13 @@ test('텍스트 command는 page-local 판정용 payload hint를 노출한다', (
   assert.match(source, /getPageLocalTextEditOptions\(\): \{ deleteCount: number \} \{\s*return \{ deleteCount: this\.count \};\s*\}/);
 });
 
-test('raw IME/iOS 입력은 flow effect를 cursor lookup 전에 소비하고 refresh에 전달한다', () => {
+test('IME preedit은 transient로 유지하고 커밋만 문서에 한 번 반영한다', () => {
   const inputHandlerSource = readFileSync(new URL('../src/engine/input-handler.ts', import.meta.url), 'utf8');
   const textSource = readFileSync(new URL('../src/engine/input-handler-text.ts', import.meta.url), 'utf8');
 
   assert.match(
     inputHandlerSource,
     /private afterTextInputEdit\(\s*beforePos: DocumentPosition,\s*afterPos: DocumentPosition,\s*pageLocalOptions: PageLocalTextEditOptions = \{\},\s*boundaryHandled = false,\s*\): void \{\s*if \(boundaryHandled\) \{\s*this\.afterEdit\(false\);\s*return;\s*\}/,
-  );
-  assert.match(
-    textSource,
-    /this\.afterTextInputEdit\(anchor, afterPos, \{\s*insertedText: text,\s*beforePageIndex,\s*afterPageIndex,\s*\}, boundaryHandled\);/,
-  );
-  assert.match(
-    textSource,
-    /this\._iosBeforePageIndex = this\.cursor\.getRect\(\)\?\.pageIndex;/,
-  );
-  assert.match(
-    textSource,
-    /const beforePageIndex = this\._iosBeforePageIndex;/,
-  );
-  assert.match(
-    textSource,
-    /this\.afterTextInputEdit\(iosAnchor, iosAfterPos, \{\s*insertedText: text,\s*beforePageIndex,\s*afterPageIndex,\s*\}, requiresFullRefresh\);/,
   );
 
   const imeStart = textSource.indexOf('if (this.isComposing && this.compositionAnchor)');
@@ -70,40 +54,32 @@ test('raw IME/iOS 입력은 flow effect를 cursor lookup 전에 소비하고 ref
 
   const imeSource = textSource.slice(imeStart, iosStart);
   const iosSource = textSource.slice(iosStart, generalStart);
-  assert.ok(
-    imeSource.indexOf('this.consumeRawTextMutationBeforeCursor()') < imeSource.indexOf('this.cursor.moveTo('),
-    'IME effect는 cursor.moveTo 전에 소비해야 한다',
-  );
+  assert.match(imeSource, /const preedit = this\.imeSession\.update\(text\);/);
+  assert.match(imeSource, /this\.compositionLength = charCount\(preedit\);/);
+  assert.match(imeSource, /this\.updateCompositionOverlay\(\);/);
+  assert.match(inputHandlerSource, /private updateCompositionOverlay\(\): void \{/);
+  assert.doesNotMatch(imeSource, /replaceTextAtRaw|afterTextInputEdit|cursor\.moveTo/,
+    '조합 갱신은 문서·커서·페이지네이션을 변경하면 안 된다');
+
+  const compositionEndStart = textSource.indexOf('export function onCompositionEnd');
+  const inputStart = textSource.indexOf('export function onInput', compositionEndStart);
+  const compositionEndSource = textSource.slice(compositionEndStart, inputStart);
+  assert.match(compositionEndSource, /this\.imeSession\.finish\(event\?\.data, textareaText\)/);
+  assert.match(compositionEndSource, /new InsertTextCommand\(anchor, composed\)/);
+  assert.match(compositionEndSource, /this\.insertTextAtRaw\(anchor, composed\);\s*this\.consumeRawTextMutationBeforeCursor\(\);/,
+    'HF/FN 커밋도 typed raw helper의 effect를 커서 이동 전에 소비해야 한다');
+
+  assert.match(iosSource, /this\.replaceTextAtRaw\(this\._iosAnchor, this\._iosLength, text\);/);
   assert.ok(
     iosSource.indexOf('this.consumeRawTextMutationBeforeCursor()') < iosSource.indexOf('this.cursor.moveTo('),
     'iOS effect는 cursor.moveTo 전에 소비해야 한다',
   );
   assert.match(iosSource, /this\._iosRequiresFullRefresh = this\._iosRequiresFullRefresh \|\| boundaryHandled;/);
   assert.match(
-    textSource,
-    /this\.caret\.hideComposition\(\);\s*this\.updateCaret\(\);\s*this\.resetRawTextMutationEffects\(\);/,
-    'compositionend는 일반 DOM caret를 exact cursor에서 다시 표시해야 한다',
-  );
-
-  assert.match(
-    imeSource,
-    /this\.replaceTextAtRaw\(anchor, this\.compositionLength, text\);/,
-    'IME update는 이전 조합 삭제와 새 조합 삽입을 한 local replace로 보내야 한다',
-  );
-  assert.doesNotMatch(imeSource, /this\.deleteTextAt\(anchor/);
-  assert.doesNotMatch(imeSource, /this\.insertTextAtRaw\(anchor/);
-  assert.match(
     iosSource,
-    /this\.replaceTextAtRaw\(this\._iosAnchor, this\._iosLength, text\);/,
-    'iOS fallback도 조합 교체를 한 local replace로 보내야 한다',
+    /this\.afterTextInputEdit\(iosAnchor, iosAfterPos, \{\s*insertedText: text,\s*beforePageIndex,\s*afterPageIndex,\s*\}, requiresFullRefresh\);/,
   );
-  assert.doesNotMatch(iosSource, /this\.deleteTextAt\(this\._iosAnchor/);
-  assert.doesNotMatch(iosSource, /this\.insertTextAtRaw\(this\._iosAnchor/);
-  assert.doesNotMatch(
-    iosSource,
-    /this\._iosInputTimer = setTimeout/,
-    'iOS 현재 페이지 paint도 100ms debounce를 기다리면 안 된다',
-  );
+  assert.doesNotMatch(iosSource, /this\._iosInputTimer = setTimeout/);
 });
 
 test('IME 조합 caret은 시작 시 보존한 anchor 좌표를 재사용한다', () => {
@@ -116,7 +92,7 @@ test('IME 조합 caret은 시작 시 보존한 anchor 좌표를 재사용한다'
     /private captureCompositionAnchorRect\(anchor: DocumentPosition\): void \{[\s\S]*?CursorState\.comparePositions\(current, anchor\) === 0[\s\S]*?cellBounds: rect\.cellBounds \? \{ \.\.\.rect\.cellBounds \} : undefined,[\s\S]*?\}/,
     '조합 시작 좌표는 현재 logical cursor와 anchor가 정확히 같을 때만 캐시해야 한다',
   );
-  assert.match(textSource, /this\.captureCompositionAnchorRect\(basePos\);\s*this\.isComposing = true;/);
+  assert.match(textSource, /this\.captureCompositionAnchorRect\(basePos\);\s*this\.compositionFontFamily = null;\s*this\.imeSession\.start\(\);/);
   assert.match(
     inputHandlerSource,
     /let startRect = this\.compositionAnchorRect;\s*if \(!startRect\) \{[\s\S]*?this\.wasm\.getCursorRectInCell\(/,
@@ -248,7 +224,7 @@ test('document pagination은 120ms idle과 명시 boundary에서 flush된다', (
   assert.match(inputHandlerSource, /private onInputBlurBound: \(\) => void;/);
   assert.match(
     inputHandlerSource,
-    /this\.onInputBlurBound = \(\) => \{\s*this\.flushDeferredPaginationIfNeeded\('input-blur', false\);\s*\};/,
+    /this\.onInputBlurBound = \(\) => \{\s*if \(this\.isComposing\) _text\.onCompositionEnd\.call\(this\);\s*this\.resetIosInputSession\(\);\s*this\.flushDeferredPaginationIfNeeded\('input-blur', false\);\s*\};/,
   );
   assert.match(inputHandlerSource, /this\.textarea\.addEventListener\('blur', this\.onInputBlurBound\);/);
   assert.match(inputHandlerSource, /this\.textarea\.removeEventListener\('blur', this\.onInputBlurBound\);/);
@@ -262,6 +238,8 @@ test('문서 전환은 deferred·IME·iOS 입력 세션 상태를 격리한다',
   assert.ok(deactivateStart >= 0 && disposeStart > deactivateStart);
   const deactivateSource = inputHandlerSource.slice(deactivateStart, disposeStart);
 
+  assert.doesNotMatch(deactivateSource, /onCompositionEnd/,
+    '이미 교체된 문서에 이전 문서의 preedit을 확정하면 안 된다');
   assert.ok(
     deactivateSource.indexOf("this.flushDeferredPaginationIfNeeded('before-deactivate', false)") <
       deactivateSource.indexOf('this.active = false'),
@@ -271,7 +249,7 @@ test('문서 전환은 deferred·IME·iOS 입력 세션 상태를 격리한다',
   assert.match(deactivateSource, /this\.deferredPaginationPending = false;/);
   assert.match(deactivateSource, /this\.resetRawTextMutationEffects\(\);/);
   assert.match(deactivateSource, /this\.compositionAnchorRect = null;/);
-  assert.match(deactivateSource, /this\._lastComposedText = '';/);
+  assert.match(deactivateSource, /this\.imeSession\.reset\(\);/);
   assert.match(deactivateSource, /this\._iosAnchor = null;/);
   assert.match(deactivateSource, /this\._iosRequiresFullRefresh = false;/);
   assert.match(deactivateSource, /this\.textarea\.value = '';/);

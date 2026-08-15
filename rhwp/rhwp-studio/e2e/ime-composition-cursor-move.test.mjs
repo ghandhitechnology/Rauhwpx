@@ -35,6 +35,34 @@ async function commit(client, text) {
   await new Promise((r) => setTimeout(r, 200));
 }
 
+async function dispatchImeSession(page, updates, finalText, trailingInputType = 'insertFromComposition') {
+  await page.evaluate(({ values, finalValue, trailingType }) => {
+    const textarea = window.__inputHandler.textarea;
+    textarea.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }));
+    for (const value of values) {
+      textarea.value = value;
+      textarea.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: value }));
+      textarea.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        data: value,
+        inputType: 'insertCompositionText',
+        isComposing: true,
+      }));
+    }
+    textarea.dispatchEvent(new CompositionEvent('compositionend', {
+      bubbles: true,
+      data: finalValue,
+    }));
+    textarea.value = finalValue;
+    textarea.dispatchEvent(new InputEvent('input', {
+      bubbles: true,
+      data: finalValue,
+      inputType: trailingType,
+      isComposing: false,
+    }));
+  }, { values: updates, finalValue: finalText, trailingType: trailingInputType });
+}
+
 await runTest('IME 조합 중 커서 이동', async ({ page }) => {
   const client = await page.createCDPSession();
 
@@ -84,4 +112,28 @@ await runTest('IME 조합 중 커서 이동', async ({ page }) => {
     !paraText.includes('\n') && !paraText.includes('\r'),
     `문단 텍스트에 리터럴 개행이 들어가지 않는다 (실제 ${JSON.stringify(paraText)})`,
   );
+
+  // ── 4) 빠른 전체 문구 + trailing input도 세션당 한 번만 커밋한다
+  await createNewDocument(page);
+  await clickEditArea(page);
+  await dispatchImeSession(
+    page,
+    ['ㅇ', '아', '안', '안ㄴ', '안녀', '안녕', '안녕하', '안녕하세', '안녕하세요'],
+    '안녕하세요',
+  );
+  const greeting = await getParaText(page, 0, 0, 100);
+  assert(greeting === '안녕하세요', `빠른 문구가 정확히 한 번 들어간다 (실제 ${JSON.stringify(greeting)})`);
+
+  await page.keyboard.down('Control');
+  await page.keyboard.press('z');
+  await page.keyboard.up('Control');
+  const afterUndo = await getParaText(page, 0, 0, 100);
+  assert(afterUndo === '', `한 조합 세션은 한 번의 undo로 제거된다 (실제 ${JSON.stringify(afterUndo)})`);
+
+  // ── 5) 같은 음절의 인접 세션과 최종 후보 변환을 시간 간격 없이 보존한다
+  await dispatchImeSession(page, ['ㄱ', '가'], '가', 'insertText');
+  await dispatchImeSession(page, ['ㄱ', '가'], '가', 'insertText');
+  await dispatchImeSession(page, ['서'], '書');
+  const repeated = await getParaText(page, 0, 0, 100);
+  assert(repeated === '가가書', `같은 글자와 후보 확정이 씹히거나 중복되지 않는다 (실제 ${JSON.stringify(repeated)})`);
 });
