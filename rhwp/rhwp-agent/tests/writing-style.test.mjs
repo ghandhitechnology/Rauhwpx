@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
-  buildCalibrationPrompt, buildExtractionPrompt, calibrateWritingStyle, renderStyleMarkdown,
+  buildCalibrationPrompt, calibrateWritingStyle, renderStyleMarkdown,
   sampleCorpusForPrompt, STYLE_AXES, validateAnalysisStructure, validateCalibrationInput,
 } from '../style-calibrator.mjs';
 import { analyzeText, deriveBands } from '../style-metrics.mjs';
@@ -53,6 +53,9 @@ test('calibration prompt asks for writing directives, not a style critique', () 
   assert.match(prompt, /not a checklist for grading/);
   assert.match(prompt, /before\*\* the sentence exists/);
   assert.match(prompt, /never quote more than four consecutive words/);
+  // 프롬프트는 통계 재현이 아니라 글의 결을 우선하도록 요구한다.
+  assert.match(prompt, /## Read for feel first/);
+  assert.match(prompt, /profile the one that carries the voice/);
   for (const axis of STYLE_AXES) assert.ok(prompt.includes(axis.id), `${axis.id} 축이 프롬프트에 있어야 한다`);
 });
 
@@ -62,13 +65,6 @@ test('measured numbers are handed to the model as settled context', () => {
   const prompt = buildCalibrationPrompt({ ...checked, metrics });
   assert.match(prompt, /These numbers are settled; do not restate, recompute, or contradict them/);
   assert.ok(prompt.includes('"sentenceLength"'));
-});
-
-test('extraction prompt asks for verbatim transcription only', () => {
-  const checked = validateCalibrationInput({ language: 'ko', files: [upload('report.pdf', 'x')] });
-  const prompt = buildExtractionPrompt(checked.files);
-  assert.match(prompt, /Do not summarize, translate, reorder, correct, or reformat/);
-  assert.match(prompt, /extracted\//);
 });
 
 test('style.md is rendered by code with covenant, baselines, and rule strength', () => {
@@ -213,7 +209,7 @@ test('a failed extraction degrades to an advisory profile instead of failing', a
   assert.equal(result.profile.bands, null);
   assert.equal(result.profile.confidence, 'low');
   assert.equal(result.pageEstimate, 14);
-  assert.ok(result.profile.unsupportedFiles.includes('01-report.hwp'));
+  assert.ok(result.profile.unsupportedFiles.includes('report.hwp'));
 });
 
 test('calibration surfaces an expired Codex login instead of treating it as a result', async () => {
