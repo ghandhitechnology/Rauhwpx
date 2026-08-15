@@ -38,7 +38,7 @@ export function waitForProcessTreeExit(child, {
   setTimer = setTimeout,
   clearTimer = clearTimeout,
 } = {}) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  if (!child || child.exitCode != null || child.signalCode != null) return Promise.resolve(true);
   return new Promise((resolve) => {
     let settled = false;
     const finish = (exited) => {
@@ -70,13 +70,13 @@ export function terminateProcessTree(child, {
   setTimer = setTimeout,
   clearTimer = clearTimeout,
 } = {}) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return null;
+  if (!child || child.exitCode != null || child.signalCode != null) return null;
   const active = activeTerminations.get(child);
   if (active) return active;
 
   const pid = validPid(child);
   const signal = (name) => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (child.exitCode != null || child.signalCode != null) return;
     if (pid === null) {
       try { child.kill?.(name); } catch {}
       return;
