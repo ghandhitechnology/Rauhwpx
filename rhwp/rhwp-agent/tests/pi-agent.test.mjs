@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
 import test from 'node:test';
 
 import { buildPiArgv, buildPiEnv, createPiSession, formatPiExitError } from '../agents/pi.mjs';
@@ -287,7 +288,7 @@ test('argv carries the model, thinking level, session and system brief', () => {
   assert.deepEqual(argv.slice(0, 6), [
     '--mode', 'json', '--model', 'openrouter/deepseek/deepseek-chat-v3.1', '--thinking', 'high',
   ]);
-  assert.equal(argv[argv.indexOf('--session-dir') + 1], '/pi/sessions');
+  assert.equal(argv[argv.indexOf('--session-dir') + 1], path.join('/pi', 'sessions'));
   assert.equal(argv[argv.indexOf('--session-id') + 1], 'sess-1');
   assert.match(argv[argv.indexOf('--append-system-prompt') + 1], /rhwp MCP tools/);
   assert.ok(argv.includes('--no-context-files'));
@@ -327,7 +328,7 @@ test('the child env is built from scratch without ambient provider keys', () => 
 
   assert.equal(Object.keys(env).some((name) => /API_KEY|SECRET/.test(name)), false);
   assert.deepEqual(env.PATH, '/usr/bin');
-  assert.equal(env.PI_CODING_AGENT_DIR, '/pi/agent');
+  assert.equal(env.PI_CODING_AGENT_DIR, path.join('/pi', 'agent'));
   assert.equal(env.PI_OFFLINE, '1');
   assert.equal(env.HOME, '/tmp/rhwp isolated home');
   assert.equal(env.USERPROFILE, '/tmp/rhwp isolated home');
