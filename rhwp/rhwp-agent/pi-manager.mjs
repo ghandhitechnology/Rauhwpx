@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -6,6 +6,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createOpenRouter } from './openrouter.mjs';
+import { fetchLatestPackage, replaceFileAtomically, updatePrefixAtomically } from './harness-update.mjs';
+import { bundledNpmLaunch } from './npm-runtime.mjs';
+import {
+  processTreeSpawnOptions,
+  terminateProcessTree,
+  waitForProcessTreeExit,
+} from './process-tree.mjs';
+import { setupFailureMessage, shouldUseNpmNetworkPath } from './setup-errors.mjs';
 
 const require = createRequire(import.meta.url);
 let crossSpawn = null;
@@ -30,10 +38,20 @@ const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 8_192;
 const STDERR_TAIL_LIMIT = 1_200;
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
-const REGISTRY_BASE = 'https://registry.npmjs.org';
 const REGISTRY_TIMEOUT_MS = 10_000;
 /** 진행 이벤트는 이 간격으로만 내보낸다 — 청크마다 WS 를 두드리지 않는다. */
 const PROGRESS_INTERVAL_MS = 150;
+const OPENROUTER_SECRET_ID = 'rhwp.pi.openrouter-api-key';
+const INSTALL_PROGRESS = Object.freeze({
+  preparing: 8,
+  downloadStart: 12,
+  downloadEnd: 58,
+  installStart: 64,
+  installEnd: 86,
+  configuring: 92,
+  verifying: 97,
+  done: 100,
+});
 
 /** 이 파일 기준 경로 — 확장/스킬은 저장소 안에 있고, pi 홈은 그것을 가리키기만 한다. */
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -62,6 +80,8 @@ const SKILLS_SOURCE_DIR = path.join(MODULE_DIR, 'pi', 'skills');
  * @property {PiModelConfig[]} models
  * @property {string|null} defaultModelId
  * @property {boolean} setupComplete
+ * @property {string|null} latestVersion
+ * @property {boolean} updateRequired
  * @property {string|null} error
  */
 
@@ -118,7 +138,8 @@ export function defaultPiRoot(env = process.env, platform = process.platform, ho
  *
  * @param {{ rootDir?: string, spawnProcess?: typeof spawn, fetchImpl?: typeof fetch,
  *           now?: () => number, openRouter?: ReturnType<typeof createOpenRouter>,
- *           npmCommand?: string, packageSpec?: string, platform?: string }} [deps]
+ *           npmCommand?: string, nodeCommand?: string, packageSpec?: string, platform?: string,
+ *           baseEnv?: NodeJS.ProcessEnv, secretStore?: object }} [deps]
  */
 export function createPiManager({
   rootDir = defaultPiRoot(),
@@ -126,9 +147,12 @@ export function createPiManager({
   fetchImpl = globalThis.fetch,
   now = Date.now,
   openRouter = null,
-  npmCommand = 'npm',
+  npmCommand = null,
+  nodeCommand = process.execPath,
   packageSpec = PI_PACKAGE,
   platform = process.platform,
+  baseEnv = process.env,
+  secretStore = null,
 } = {}) {
   const prefixDir = path.join(rootDir, 'prefix');
   const agentDir = path.join(rootDir, 'agent');
@@ -138,8 +162,11 @@ export function createPiManager({
   const settingsPath = path.join(agentDir, 'settings.json');
   const skillsDir = path.join(agentDir, 'skills');
   const piBin = path.join(prefixDir, 'node_modules', '.bin', platform === 'win32' ? 'pi.cmd' : 'pi');
-  const packageJsonPath = path.join(prefixDir, 'node_modules', ...packageSpec.split('/'), 'package.json');
+  const packageJsonPath = (basePrefix = prefixDir) => path.join(
+    basePrefix, 'node_modules', ...packageSpec.split('/'), 'package.json',
+  );
   const client = openRouter ?? createOpenRouter({ fetchImpl, now, cacheDir: rootDir });
+  const npmLaunch = bundledNpmLaunch({ nodeCommand, npmCommand });
 
   let config = {
     version: CONFIG_VERSION,
@@ -149,26 +176,32 @@ export function createPiManager({
     defaultModelId: null,
     setupComplete: false,
   };
-  /** 실제 키는 config.json 이 아니라 agent/models.json 안에만 산다. */
+  /** 실제 키는 Electron의 OS-backed vault 안에만 산다. */
   let apiKey = null;
   /** @type {Promise<void> | null} 첫 로드는 한 번만 돈다 — 동시에 들어와도 공유한다. */
   let loadPromise = null;
   let installedVersion = null;
   let installing = false;
   let lastError = null;
+  let latestVersion = null;
+  let updateRequired = false;
+  let secretStoreError = null;
   /** @type {Promise<PiStatus> | null} */
   let installInFlight = null;
+  let installProcess = null;
   /** @type {Set<(progress: { state: string, detail?: string }) => void>} */
   const installListeners = new Set();
   /** 설정 파일 쓰기는 직렬화한다 — 키/모델 갱신이 겹쳐도 순서가 흐트러지지 않도록. */
   let writeChain = Promise.resolve();
   let tempSeq = 0;
+  /** 진행 중인 OpenRouter PKCE 로그인. 브라우저 콜백이 오면 한 번만 소비한다. */
+  let oauthFlow = null;
 
   async function writeAtomic(file, text, mode = 0o600) {
     await fs.mkdir(path.dirname(file), { recursive: true });
     const temp = `${file}.tmp-${process.pid}-${now()}-${(tempSeq += 1)}`;
     await fs.writeFile(temp, text, { encoding: 'utf8', mode });
-    await fs.rename(temp, file);
+    await replaceFileAtomically(temp, file, { platform });
   }
 
   function serialized(task) {
@@ -202,16 +235,16 @@ export function createPiManager({
     };
   }
 
-  async function readInstalledVersion() {
+  async function readInstalledVersion(basePrefix = prefixDir) {
     try {
-      const raw = JSON.parse(await fs.readFile(packageJsonPath, 'utf8'));
+      const raw = JSON.parse(await fs.readFile(packageJsonPath(basePrefix), 'utf8'));
       return typeof raw?.version === 'string' && raw.version ? raw.version : null;
     } catch {
       return null;
     }
   }
 
-  async function readStoredKey() {
+  async function readLegacyStoredKey() {
     try {
       const raw = JSON.parse(await fs.readFile(modelsPath, 'utf8'));
       const key = raw?.providers?.openrouter?.apiKey;
@@ -242,7 +275,23 @@ export function createPiManager({
     } catch {
       // 설정 파일이 없거나 깨졌으면 빈 상태로 시작한다.
     }
-    apiKey = await readStoredKey();
+    const legacyKey = await readLegacyStoredKey();
+    if (secretStore?.available) {
+      try {
+        apiKey = await secretStore.get(OPENROUTER_SECRET_ID);
+        if (!apiKey && legacyKey) {
+          await secretStore.set(OPENROUTER_SECRET_ID, legacyKey);
+          apiKey = await secretStore.get(OPENROUTER_SECRET_ID);
+          if (apiKey === legacyKey) await writeModelsJson();
+        }
+      } catch (error) {
+        apiKey = legacyKey;
+        secretStoreError = error?.message ?? 'OS 보안 저장소를 열지 못했어요.';
+      }
+    } else {
+      // Preserve access until the desktop vault can migrate it; new keys are never stored here.
+      apiKey = legacyKey;
+    }
     installedVersion = await readInstalledVersion();
     config.setupComplete = Boolean(apiKey) && config.models.length > 0;
   }
@@ -264,7 +313,7 @@ export function createPiManager({
     return writeAtomic(configPath, `${JSON.stringify(payload, null, 2)}\n`);
   }
 
-  /** agent/models.json 을 통째로 다시 쓴다 — 키와 모델이 한 파일에 같이 산다. */
+  /** agent/models.json에는 비밀이 아닌 모델 설정만 쓴다. */
   async function writeModelsJson() {
     const provider = {
       baseUrl: 'https://openrouter.ai/api/v1',
@@ -286,7 +335,6 @@ export function createPiManager({
         },
       })),
     };
-    if (apiKey) provider.apiKey = apiKey;
     const payload = { providers: { openrouter: provider } };
     await writeAtomic(modelsPath, `${JSON.stringify(payload, null, 2)}\n`);
   }
@@ -297,16 +345,9 @@ export function createPiManager({
    */
   async function resolveDist() {
     if (packageSpec.lastIndexOf('@') > 0) return null;
-    const url = `${REGISTRY_BASE}/${packageSpec.replace('/', '%2F')}/latest`;
-    const response = await fetchImpl(url, { signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS) });
-    if (!response.ok) throw new Error(`registry HTTP ${response.status}`);
-    const meta = await response.json();
-    const tarball = meta?.dist?.tarball;
-    if (typeof tarball !== 'string' || !tarball) throw new Error('registry: tarball 주소가 없어요');
-    return {
-      tarball,
-      integrity: typeof meta?.dist?.integrity === 'string' ? meta.dist.integrity : null,
-    };
+    const dist = await fetchLatestPackage(fetchImpl, packageSpec, REGISTRY_TIMEOUT_MS);
+    if (!dist.tarball) throw new Error('registry: tarball 주소가 없어요');
+    return dist;
   }
 
   /**
@@ -335,7 +376,17 @@ export function createPiManager({
         const ts = now();
         if (ts - lastEmit >= PROGRESS_INTERVAL_MS) {
           lastEmit = ts;
-          emit({ state: 'downloading', receivedBytes, totalBytes });
+          const percent = totalBytes
+            ? INSTALL_PROGRESS.downloadStart
+              + Math.min(1, receivedBytes / totalBytes)
+                * (INSTALL_PROGRESS.downloadEnd - INSTALL_PROGRESS.downloadStart)
+            : undefined;
+          emit({
+            state: 'downloading',
+            receivedBytes,
+            totalBytes,
+            ...(Number.isFinite(percent) ? { percent } : {}),
+          });
         }
       }
     } finally {
@@ -347,14 +398,19 @@ export function createPiManager({
         throw piError('PI_INSTALL_FAILED', '내려받은 pi 패키지가 무결성 검증에 실패했어요');
       }
     }
-    emit({ state: 'downloading', receivedBytes, totalBytes: totalBytes ?? receivedBytes });
+    emit({
+      state: 'downloading',
+      receivedBytes,
+      totalBytes: totalBytes ?? receivedBytes,
+      percent: INSTALL_PROGRESS.downloadEnd,
+    });
     return filePath;
   }
 
-  function runNpmInstall(emit, localTarball = null) {
+  function runNpmInstall(emit, localTarball = null, targetPrefix = prefixDir) {
     return new Promise((resolve, reject) => {
       const argv = [
-        'install', '--prefix', prefixDir, '--no-fund', '--no-audit',
+        'install', '--prefix', targetPrefix, '--no-fund', '--no-audit',
         // 폴백(npm 이 직접 내려받는) 경로에서는 http 로그가 활동 신호가 된다.
         localTarball ? '--loglevel=error' : '--loglevel=http',
         localTarball ?? packageSpec,
@@ -362,6 +418,7 @@ export function createPiManager({
       let settled = false;
       let stderrText = '';
       let lastActivity = 0;
+      let activityPercent = INSTALL_PROGRESS.installStart;
       /** @type {NodeJS.Timeout | null} */
       let timer = null;
 
@@ -369,21 +426,28 @@ export function createPiManager({
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
+        if (installProcess === proc) installProcess = null;
         if (error) reject(error);
         else resolve();
       };
 
       let proc;
       try {
-        proc = spawnProcess(npmCommand, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+        proc = spawnProcess(npmLaunch.command, [...npmLaunch.leadingArgs, ...argv], {
+          ...processTreeSpawnOptions(platform),
+          stdio: ['ignore', 'pipe', 'pipe'], env: baseEnv,
+        });
       } catch (error) {
-        done(piError('PI_INSTALL_FAILED', `npm 실행에 실패했어요: ${error?.message ?? error}`));
+        done(piError('PI_INSTALL_FAILED', setupFailureMessage(error, '', 'npm 실행에 실패했어요.')));
         return;
       }
+      installProcess = proc;
 
       timer = setTimeout(() => {
-        try { proc.kill('SIGKILL'); } catch {}
-        done(piError('PI_INSTALL_FAILED', 'npm install 이 10분 안에 끝나지 않았어요'));
+        terminateProcessTree(proc, { platform, spawnProcess });
+        void waitForProcessTreeExit(proc).finally(() => {
+          done(piError('PI_INSTALL_FAILED', 'npm install 이 10분 안에 끝나지 않았어요'));
+        });
       }, INSTALL_TIMEOUT_MS);
       if (timer?.unref) timer.unref();
 
@@ -392,7 +456,8 @@ export function createPiManager({
         const ts = now();
         if (ts - lastActivity < PROGRESS_INTERVAL_MS) return;
         lastActivity = ts;
-        emit({ state: 'installing', activity: true });
+        activityPercent = Math.min(INSTALL_PROGRESS.installEnd, activityPercent + 1.5);
+        emit({ state: 'installing', percent: activityPercent, activity: true });
       };
       proc.stdout?.on?.('data', noteActivity);
       proc.stdout?.on?.('error', () => {});
@@ -402,9 +467,7 @@ export function createPiManager({
       });
       proc.stderr?.on?.('error', () => {});
       proc.on('error', (error) => {
-        const hint = error?.code === 'ENOENT'
-          ? 'npm 명령을 찾을 수 없어요 — Node.js 설치를 확인하세요'
-          : `npm 실행에 실패했어요: ${error?.message ?? error}`;
+        const hint = setupFailureMessage(error, '', '번들된 npm 런타임을 시작하지 못했어요.');
         done(piError('PI_INSTALL_FAILED', hint));
       });
       const finish = (code, signal) => {
@@ -416,9 +479,7 @@ export function createPiManager({
         const detail = stderrTail(stderrText);
         done(piError(
           'PI_INSTALL_FAILED',
-          detail
-            ? `pi 설치가 실패했어요 (${exit}): ${detail}`
-            : `pi 설치가 실패했어요 (${exit})`,
+          setupFailureMessage(null, detail, `pi 설치가 실패했어요 (${exit})`),
         ));
       };
       proc.on('close', finish);
@@ -437,7 +498,9 @@ export function createPiManager({
       models: config.models.map((model) => ({ ...model, pricing: { ...model.pricing } })),
       defaultModelId: config.defaultModelId,
       setupComplete: config.setupComplete,
-      error: lastError,
+      latestVersion,
+      updateRequired,
+      error: lastError ?? secretStoreError,
     };
   }
 
@@ -485,8 +548,8 @@ export function createPiManager({
     /**
      * pi CLI 를 설치하고 확장/스킬/설정을 동기화한다. 동시에 부르면 하나만 돈다.
      *
-     * @param {(progress: { state: string, detail?: string, receivedBytes?: number,
-     *   totalBytes?: number|null, activity?: boolean }) => void} [onProgress]
+     * @param {(progress: { state: string, detail?: string, percent?: number,
+     *   receivedBytes?: number, totalBytes?: number|null, activity?: boolean }) => void} [onProgress]
      * @returns {Promise<PiStatus>}
      */
     async install(onProgress) {
@@ -509,29 +572,32 @@ export function createPiManager({
       const running = (async () => {
         try {
           await load();
-          emit({ state: 'downloading' });
+          emit({ state: 'preparing', percent: INSTALL_PROGRESS.preparing });
           await fs.mkdir(prefixDir, { recursive: true });
           // 결정적 진행률: 타르볼을 직접 받아 바이트를 센다. 레지스트리/네트워크가
           // 협조하지 않으면 npm 폴백으로 넘어가 활동 신호만 흘린다.
           let tarballPath = null;
           try {
-            const dist = await resolveDist();
+            emit({ state: 'downloading', percent: INSTALL_PROGRESS.downloadStart });
+            const dist = shouldUseNpmNetworkPath(baseEnv) ? null : await resolveDist();
             if (dist) tarballPath = await downloadTarball(dist, emit);
           } catch (error) {
             if (error?.code === 'PI_INSTALL_FAILED') throw error; // 무결성 실패는 폴백 금지
             tarballPath = null;
           }
-          emit({ state: 'installing' });
+          emit({ state: 'installing', percent: INSTALL_PROGRESS.installStart });
           await runNpmInstall(emit, tarballPath);
           if (tarballPath) await fs.unlink(tarballPath).catch(() => {});
-          emit({ state: 'configuring' });
+          emit({ state: 'configuring', percent: INSTALL_PROGRESS.configuring });
           await syncAssets();
+          emit({ state: 'verifying', percent: INSTALL_PROGRESS.verifying });
           installedVersion = await readInstalledVersion();
+          if (latestVersion === installedVersion) updateRequired = false;
           config.installedVersion = installedVersion;
           config.setupComplete = Boolean(apiKey) && config.models.length > 0;
           await serialized(() => persistConfig());
           installing = false;
-          emit({ state: 'done', detail: installedVersion ?? undefined });
+          emit({ state: 'done', detail: installedVersion ?? undefined, percent: INSTALL_PROGRESS.done });
           return currentStatus();
         } catch (error) {
           lastError = error?.message ?? String(error);
@@ -549,6 +615,50 @@ export function createPiManager({
       }
     },
 
+    /** 앱 관리 Pi CLI 를 확인하고, 실패해도 현재 prefix 는 그대로 둔다. */
+    async automaticUpdate({ canActivate = () => true } = {}) {
+      await load();
+      if (!installedVersion) return currentStatus();
+
+      let dist;
+      try {
+        dist = await resolveDist();
+      } catch {
+        return currentStatus();
+      }
+      if (!dist) return currentStatus();
+      latestVersion = dist.version;
+      updateRequired = latestVersion !== installedVersion;
+      if (!updateRequired) return currentStatus();
+
+      let tarballPath = null;
+      try {
+        tarballPath = await downloadTarball(dist, () => {});
+        await updatePrefixAtomically({
+          prefixDir,
+          label: 'pi',
+          platform,
+          canActivate,
+          install: (stagingDir) => runNpmInstall(() => {}, tarballPath, stagingDir),
+          verify: async (stagingDir) => {
+            if (await readInstalledVersion(stagingDir) !== latestVersion) {
+              throw piError('PI_UPDATE_FAILED', 'updated harness version did not verify');
+            }
+          },
+        });
+        installedVersion = await readInstalledVersion();
+        config.installedVersion = installedVersion;
+        updateRequired = installedVersion !== latestVersion;
+        await serialized(() => persistConfig());
+      } catch {
+        installedVersion = await readInstalledVersion();
+        updateRequired = installedVersion !== latestVersion;
+      } finally {
+        if (tarballPath) await fs.unlink(tarballPath).catch(() => {});
+      }
+      return currentStatus();
+    },
+
     /** 확장 경로가 담긴 settings.json 을 쓰고 저장소 스킬을 pi 홈으로 복사한다. */
     async syncAssets() {
       await load();
@@ -556,18 +666,19 @@ export function createPiManager({
       return currentStatus();
     },
 
-    /**
-     * OpenRouter 키를 확인하고 agent/models.json 에만 저장한다(0600).
-     *
-     * @param {string} key
-     */
+    /** OpenRouter 키를 확인하고 OS-backed vault에 저장한다. */
     async setApiKey(key) {
       await load();
       const trimmed = String(key ?? '').trim();
       if (!trimmed) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키를 입력하세요');
       const check = await client.validateKey(trimmed);
       if (!check.valid) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키가 거절됐어요');
+      if (!secretStore?.available) {
+        throw piError('SECRET_STORE_UNAVAILABLE', 'OS 보안 저장소를 사용할 수 없어 API 키를 저장하지 못했어요. 앱을 다시 시작해 주세요.');
+      }
+      await secretStore.set(OPENROUTER_SECRET_ID, trimmed);
       apiKey = trimmed;
+      secretStoreError = null;
       config.keyTail = keyTailOf(trimmed);
       config.setupComplete = config.models.length > 0;
       await serialized(async () => {
@@ -576,6 +687,57 @@ export function createPiManager({
       });
       client.clearCache();
       return currentStatus();
+    },
+
+    /** OpenRouter PKCE 로그인 URL을 만든다. 키 교환은 completeOAuth가 맡는다. */
+    beginOAuth(callbackUrl) {
+      const verifier = randomBytes(48).toString('base64url');
+      const challenge = createHash('sha256').update(verifier).digest('base64url');
+      const state = randomBytes(18).toString('base64url');
+      oauthFlow = { verifier, state, createdAt: now() };
+      const url = new URL('https://openrouter.ai/auth');
+      const callback = new URL(callbackUrl);
+      callback.searchParams.set('state', state);
+      url.searchParams.set('callback_url', callback.toString());
+      url.searchParams.set('code_challenge', challenge);
+      url.searchParams.set('code_challenge_method', 'S256');
+      url.searchParams.set('state', state);
+      return { authUrl: url.toString(), state };
+    },
+
+    /** 브라우저 콜백의 일회용 코드를 OpenRouter API 키로 바꾸고 기존 키 저장 경로를 탄다. */
+    async completeOAuth(code, state) {
+      const flow = oauthFlow;
+      oauthFlow = null;
+      if (!flow || now() - flow.createdAt > 10 * 60 * 1000) {
+        throw piError('OPENROUTER_OAUTH_EXPIRED', 'OpenRouter 로그인 요청이 만료됐어요');
+      }
+      if (state !== flow.state) {
+        throw piError('OPENROUTER_OAUTH_INVALID', 'OpenRouter 로그인 응답을 확인하지 못했어요');
+      }
+      const response = await fetchImpl('https://openrouter.ai/api/v1/auth/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: String(code ?? ''),
+          code_verifier: flow.verifier,
+          code_challenge_method: 'S256',
+        }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || typeof body?.key !== 'string' || !body.key) {
+        throw piError('OPENROUTER_OAUTH_FAILED', 'OpenRouter 로그인을 완료하지 못했어요');
+      }
+      return this.setApiKey(body.key);
+    },
+
+    async cancelSetup() {
+      oauthFlow = null;
+      const proc = installProcess;
+      if (!proc) return false;
+      terminateProcessTree(proc, { platform, spawnProcess });
+      await waitForProcessTreeExit(proc);
+      return true;
     },
 
     /**
