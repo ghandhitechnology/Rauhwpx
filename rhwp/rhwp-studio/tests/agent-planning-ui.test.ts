@@ -5,8 +5,9 @@ import { readFileSync } from 'node:fs';
 const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
 const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
 const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
+const markdown = readFileSync(new URL('../src/ui/agent-sidebar/plan-markdown.ts', import.meta.url), 'utf8');
 
-test('workflow switches use local slash commands and stay separate from the permission profile', () => {
+test('workflow switches use local slash commands and plan mode defaults to full access', () => {
   assert.match(source, /value: '\/plan',[^\n]*workflow: 'plan'/);
   assert.match(source, /value: '\/build',[^\n]*workflow: 'direct'/);
   assert.match(source, /if \(option\.workflow\) \{\s*input\.value = '';\s*requestWorkflow\(option\.workflow\);\s*return;/);
@@ -20,11 +21,16 @@ test('workflow switches use local slash commands and stay separate from the perm
   assert.match(source, /composerUtilities\.append\(composerUtilityActions\)/);
   assert.doesNotMatch(css, /\.ag-composer-utilities\s*\{[^}]*flex-direction:\s*column;/s);
   assert.match(source, /permissionBtn\.textContent = unrestricted \? '전체' : '안전'/);
+  assert.match(source, /planPermissionDefaultPending = permissionProfile === 'safe'/);
+  assert.match(
+    source,
+    /e\.workflow === 'plan' && planPermissionDefaultPending[\s\S]*bridge\.setPermissionProfile\('unrestricted'\)/,
+  );
 });
 
 test('planning phase shows a persistent compact Korean label and skips a badge in direct mode', () => {
   assert.match(source, /PLANNING_PHASE_LABEL: Record<AgentPhase, string>/);
-  assert.match(source, /planning: '계획 중'/);
+  assert.match(source, /planning: '구상 중'/);
   assert.match(source, /'awaiting-approval': '승인 대기'/);
   assert.match(source, /switching: '전환 중'/);
   assert.match(source, /implementing: '실행 중'/);
@@ -34,34 +40,32 @@ test('planning phase shows a persistent compact Korean label and skips a badge i
   assert.match(css, /\.ag-phase-badge \{/);
 });
 
-test('plan renders as a review-area operator card, not a chat bubble', () => {
+test('plan renders as a Markdown document in the review area, not a chat bubble', () => {
   assert.match(source, /function buildPlanCard\(plan: StructuredPlan\)/);
-  assert.match(source, /el\('section', `ag-plan-card ag-\$\{selectedAgent\}`\)/);
+  assert.match(source, /el\('section', `ag-plan-card ag-plan-doc ag-\$\{selectedAgent\}`\)/);
+  assert.match(source, /card\.setAttribute\('role', 'article'\)/);
   assert.match(source, /card\.setAttribute\('aria-labelledby', titleId\)/);
   assert.match(source, /review\.appendChild\(buildPlanCard\(activePlan\)\)/);
   assert.doesNotMatch(source, /ag-msg-plan|messages\.appendChild\(buildPlanCard/);
-  // 제목·요약·단계·예상 파일·검증·위험이 모두 카드 안에 있다.
+  // 제목·목표는 머리말이 맡고 본문은 계획 Markdown 렌더러가 그린다.
   assert.match(source, /el\('h3', 'ag-plan-title'/);
-  assert.match(source, /el\('p', 'ag-plan-summary'/);
-  assert.match(source, /'단계'/);
-  assert.match(source, /\['예상 파일', plan\.files\]/);
-  assert.match(source, /\['검증', plan\.validation\]/);
-  assert.match(source, /\['위험', plan\.risks\]/);
+  assert.match(source, /el\('p', 'ag-plan-goal', goalText\)/);
+  assert.match(source, /appendMarkdown\(body, planToMarkdown\(plan\)\)/);
+  assert.match(source, /import \{ appendMarkdown, planToMarkdown \} from '\.\/plan-markdown\.ts'/);
   assert.match(css, /\.ag-plan-card \{/);
+  assert.match(css, /\.ag-plan-body \{/);
 });
 
-test('long plans stay compact behind an accessible disclosure', () => {
-  assert.match(source, /const MAX_PLAN_STEP_LINES = 4/);
-  assert.match(source, /const MAX_PLAN_LIST_LINES = 3/);
-  assert.match(source, /disclosure\.setAttribute\('aria-expanded', planDetailOpen \? 'true' : 'false'\)/);
-  assert.match(source, /disclosure\.setAttribute\('aria-controls', overflow\.id\)/);
-  assert.match(source, /overflow\.hidden = !planDetailOpen/);
-  assert.match(source, /'자세한 내용 보기'/);
-  assert.match(css, /\.ag-plan-disclosure/);
+test('plan sections are never truncated — the panel scrolls instead', () => {
+  assert.doesNotMatch(source, /MAX_PLAN_STEP_LINES|MAX_PLAN_LIST_LINES|planDetailOpen|ag-plan-disclosure/);
+  assert.doesNotMatch(css, /\.ag-plan-disclosure/);
+  // 본문은 늘어나고 동작 영역은 바닥에 고정된다.
+  assert.match(css, /\.ag-plan-body \{[^}]*flex: 1 1 auto;/s);
+  assert.match(css, /\.ag-plan-footer \{[^}]*position: sticky;/s);
 });
 
 test('approval uses the exact plan id and revision routes feedback through the composer', () => {
-  assert.match(source, /el\('button', 'ag-approve ag-plan-approve', '승인하고 실행'\)/);
+  assert.match(source, /el\('button', 'ag-approve ag-plan-approve', '편집 모드로 전환'\)/);
   assert.match(source, /approve\.addEventListener\('click', \(\) => approveActivePlan\(plan\.planId\)\)/);
   assert.match(source, /bridge\.approvePlan\(planId\)/);
   assert.match(source, /el\('button', 'ag-reject ag-plan-revise', '수정 요청'\)/);
@@ -76,11 +80,12 @@ test('approval uses the exact plan id and revision routes feedback through the c
 });
 
 test('approval immediately switches to implementation with a disabled, announced switching state', () => {
-  assert.match(source, /setPlanningPhase\('switching'\);\s*\n\s*systemMessage\('계획을 승인했습니다\. 실행 단계로 전환 중입니다\.'\)/);
+  assert.match(source, /setPlanningPhase\('switching'\);\s*\n\s*systemMessage\('계획을 승인했습니다\. 편집 모드로 전환합니다\.'\)/);
   assert.match(source, /case 'implementation-started':\s*\n\s*planApprovable = false;\s*\n\s*setPlanningPhase\(e\.phase\)/);
   assert.match(source, /approve\.disabled = !approvableNow/);
   assert.match(source, /if \(planningPhase === 'switching' \|\| attachmentsSending \|\| referenceLibrary\.hasBlockingDrafts\(\)\) return;/);
   assert.match(source, /if \(planningPhase === 'switching'\)[\s\S]*else if \(!planApprovable\)/);
+  assert.match(source, /승인한 계획으로 편집 모드로 전환하고 있습니다…/);
 });
 
 test('plan mode warns once about full remote-browser control and scoped downloads', () => {
@@ -168,11 +173,15 @@ test('pending HWP review stays unchanged for plan-driven implementations', () =>
   assert.match(source, /bridge\.pendingEdits\.reject\(set\.id\)/);
   assert.match(source, /const changeSets = bridge\.pendingEdits\.getChangeSets\(\);/);
   assert.match(source, /for \(const set of changeSets\) \{/);
-  assert.match(source, /실행 중입니다\. 문서 편집은 기존처럼 검토 후 승인합니다\./);
+  assert.match(source, /승인한 계획을 편집 모드에서 실행 중입니다\. 문서 편집은 기존처럼 검토 후 승인합니다\./);
+  // 구상·승인 대기 턴은 문서를 편집하지 않았으므로 일반 작업 완료 문구를 붙이지 않는다.
+  assert.match(source, /const editingPhase = chatWorkflow === 'direct' \|\| planningPhase === 'implementing'/);
+  assert.match(source, /turnToolCount > 0 && !finalBubble && completed && editingPhase/);
 });
 
 test('planning UI honors icon and motion conventions', () => {
-  assert.match(source, /createChevron\('ag-plan-chevron'\)/);
+  // 계획 문서에는 글자 아이콘을 쓰지 않는다 — 체크 표시도 CSS 가 그린다.
   assert.doesNotMatch(source, /ag-plan[\s\S]{0,400}[▶▼✓✕→]/);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\n\s*\.ag-plan-chevron/);
+  assert.doesNotMatch(markdown, /[▶▼✓✕→]/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\n\s*\.ag-plan-card \{\s*\n\s*animation: none;/);
 });

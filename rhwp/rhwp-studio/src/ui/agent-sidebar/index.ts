@@ -23,7 +23,6 @@ import type {
   PendingOp,
   SidebarEvent,
   StructuredPlan,
-  StructuredPlanStep,
   SkillCatalog,
   ProductSkill,
 } from '../../agent/types.ts';
@@ -38,6 +37,7 @@ import {
   resolveModelForAgent,
 } from '../../agent/models.ts';
 import { loadAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
+import { appendMarkdown, planToMarkdown } from './plan-markdown.ts';
 import {
   createEmptyThread,
   fallbackTitle,
@@ -330,7 +330,7 @@ const MAX_REVIEW_OP_LINES = 6;
 /** 지속 표시용 단계 라벨. direct 는 배지를 띄우지 않는다(소음). */
 const PLANNING_PHASE_LABEL: Record<AgentPhase, string> = {
   direct: '바로 실행',
-  planning: '계획 중',
+  planning: '구상 중',
   'awaiting-approval': '승인 대기',
   switching: '전환 중',
   implementing: '실행 중',
@@ -350,12 +350,6 @@ const BROWSERBASE_FULL_CONTROL_WARNING =
 const BROWSERBASE_ENABLED_NOTICE =
   '계획 모드를 켰습니다. 원격 브라우저는 동작마다 확인을 묻지 않고 전체 제어로 실행되며, '
   + '양식 제출·계정 설정 변경까지 할 수 있습니다. 내려받는 파일은 이 채팅 전용 다운로드 폴더에만 저장됩니다.';
-
-/** 계획 카드가 접힌 상태에서 보여 주는 최대 줄 수. */
-const MAX_PLAN_STEP_LINES = 4;
-const MAX_PLAN_LIST_LINES = 3;
-
-
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -499,6 +493,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let connCountdownTimer: number | null = null;
   let turnRunning = bridge.isTurnRunning();
   let workflowTransitionPending = false;
+  /** 계획 모드로 들어갈 때 안전 권한이면 전환 완료 후 전체 접근을 기본 적용한다. */
+  let planPermissionDefaultPending = false;
   /** 현재 스트리밍 중인 assistant 텍스트 (tool-call 이후에는 새로 연다). */
   let streamBubble: HTMLElement | null = null;
   const toolRows = new Map<string, ToolRowState>();
@@ -564,7 +560,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let activePlan: StructuredPlan | null = initialWorkflowState.latestPlan;
   /** 서버가 현재 살아 있다고 말한 계획만 승인할 수 있다(기록 복원본은 읽기 전용). */
   let planApprovable = planningPhase === 'awaiting-approval';
-  let planDetailOpen = false;
   /** 이 채팅에서 원격 브라우저 전체 제어 경고를 이미 받았는가. */
   let browserbaseAcknowledged = chatWorkflow === 'plan';
   /** 계획 모드 전환이 서버에서 확인된 뒤에만 활성화 안내를 표시한다. */
@@ -1969,13 +1964,25 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     applyReviewColState();
   }
 
+  /** 계획 모드에서 아직 정리된 계획이 없는 구상 단계인가. */
+  function isPlanningWithoutPlan(): boolean {
+    return chatWorkflow === 'plan' && activePlan === null;
+  }
+
   function updateReviewControl(changeSets: readonly PendingChangeSet[]): void {
     const diff = summarizePendingDiffs(changeSets);
     pendingReviewOpCount = diff.opCount;
     const hasPending = pendingReviewOpCount > 0;
-    reviewColumnMeta.textContent = hasPending
-      ? `${pendingReviewOpCount}개 변경 검토 대기`
-      : '대기 중인 변경 없음';
+    // 계획 모드에서는 같은 자리가 '계획' 문서 패널로 읽힌다.
+    const planShown = chatWorkflow === 'plan' && activePlan !== null;
+    reviewColumnTitle.textContent = planShown || isPlanningWithoutPlan() ? '계획' : '변경 사항';
+    reviewColumnMeta.textContent = planShown
+      ? PLANNING_PHASE_LABEL[planningPhase]
+      : isPlanningWithoutPlan()
+        ? '구상 중'
+        : hasPending
+          ? `${pendingReviewOpCount}개 변경 검토 대기`
+          : '대기 중인 변경 없음';
     const hasTextDiff = diff.additions > 0 || diff.deletions > 0;
     environmentAdditions.hidden = diff.additions === 0;
     environmentAdditions.textContent = `+${diff.additions.toLocaleString('ko-KR')}`;
@@ -3589,7 +3596,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
           && event.stopReason !== 'exited'
           && !event.errorMessage
           && turnFailedToolCount === 0;
-        if (turnToolCount > 0 && !finalBubble && completed) {
+        const editingPhase = chatWorkflow === 'direct' || planningPhase === 'implementing';
+        if (turnToolCount > 0 && !finalBubble && completed && editingPhase) {
           appendCheckDocumentMessage(event.agent);
         }
         completeTurnActivity();
@@ -3820,6 +3828,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         systemMessage(`오류 (${e.code}): ${e.message}`);
         if (e.code === 'AGENT_SPAWN_FAILED') appendSpawnRetryAction();
         workflowTransitionPending = false;
+        planPermissionDefaultPending = false;
         syncPlanningFromBridge();
         setTurnRunning(bridge.isTurnRunning());
         break;
@@ -3949,6 +3958,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         browserbaseAcknowledged = true;
         browserbaseNoticePending = true;
       }
+      planPermissionDefaultPending = permissionProfile === 'safe';
+    } else {
+      planPermissionDefaultPending = false;
     }
     workflowTransitionPending = true;
     applyWorkflow(next);
@@ -3963,129 +3975,47 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (currentThread.messages.length > 0) persistCurrentThread();
   }
 
-  function planListSection(
-    label: string,
-    items: string[] | undefined,
-    limit: number,
-    overflow: HTMLElement,
-  ): HTMLElement | null {
-    if (!items || items.length === 0) return null;
-    const section = el('section', 'ag-plan-section');
-    section.append(el('h4', 'ag-plan-section-title', label));
-    const list = el('ul', 'ag-plan-list');
-    for (const item of items.slice(0, limit)) {
-      list.appendChild(el('li', 'ag-plan-list-item', item));
-    }
-    section.appendChild(list);
-    if (items.length > limit) {
-      const rest = el('section', 'ag-plan-section');
-      rest.append(el('h4', 'ag-plan-section-title', `${label} (나머지)`));
-      const restList = el('ul', 'ag-plan-list');
-      for (const item of items.slice(limit)) {
-        restList.appendChild(el('li', 'ag-plan-list-item', item));
-      }
-      rest.appendChild(restList);
-      overflow.appendChild(rest);
-    }
-    return section;
-  }
-
   /**
-   * 계획 카드. 말풍선이 아니라 고정 리뷰 영역의 운영 콘솔 카드다 —
-   * 대화가 흘러가도 같은 자리에 남아 승인/수정 요청을 받는다.
+   * 계획 문서 뷰어. 말풍선이 아니라 고정 리뷰 영역에 놓이는 문서다 —
+   * 대화가 흘러가도 같은 자리에 남아 편집 모드 전환과 수정 요청을 받는다.
+   * 표시는 Markdown 이지만 승인 대상은 언제나 구조화된 계획(planId)이다.
    */
   function buildPlanCard(plan: StructuredPlan): HTMLElement {
-    const card = el('section', `ag-plan-card ag-${selectedAgent}`);
-    card.setAttribute('role', 'group');
+    const card = el('section', `ag-plan-card ag-plan-doc ag-${selectedAgent}`);
+    card.setAttribute('role', 'article');
     const titleId = `ag-plan-title-${plan.planId}`;
     card.setAttribute('aria-labelledby', titleId);
     card.dataset.planId = plan.planId;
 
-    const head = el('div', 'ag-plan-head');
-    head.append(el('span', 'ag-plan-kicker', '실행 계획'));
-    head.append(el('span', 'ag-plan-phase', PLANNING_PHASE_LABEL[planningPhase]));
+    const head = el('header', 'ag-plan-head');
+    const kickerRow = el('div', 'ag-plan-kicker-row');
+    kickerRow.append(el('span', 'ag-plan-kicker', '실행 계획'));
+    kickerRow.append(el('span', 'ag-plan-phase', PLANNING_PHASE_LABEL[planningPhase]));
     const planIdReadout = el('span', 'ag-plan-id', plan.planId);
     planIdReadout.title = plan.planId;
-    head.append(planIdReadout);
-    card.appendChild(head);
+    kickerRow.append(planIdReadout);
+    head.appendChild(kickerRow);
 
     const title = el('h3', 'ag-plan-title', plan.title || '제목 없는 계획');
     title.id = titleId;
-    card.appendChild(title);
+    head.appendChild(title);
 
-    const summaryText = plan.summary || plan.goal;
-    if (summaryText) card.appendChild(el('p', 'ag-plan-summary', summaryText));
+    const goalText = (plan.goal || plan.summary || '').trim();
+    if (goalText) head.appendChild(el('p', 'ag-plan-goal', goalText));
+    card.appendChild(head);
 
-    const overflow = el('div', 'ag-plan-detail');
-    overflow.id = `ag-plan-detail-${plan.planId}`;
-    overflow.hidden = !planDetailOpen;
-
-    const steps: StructuredPlanStep[] = plan.steps ?? [];
-    if (steps.length > 0) {
-      const stepSection = el('section', 'ag-plan-section');
-      stepSection.append(el('h4', 'ag-plan-section-title', '단계'));
-      const list = el('ol', 'ag-plan-steps');
-      steps.slice(0, MAX_PLAN_STEP_LINES).forEach((step) => {
-        list.appendChild(buildPlanStep(step));
-      });
-      stepSection.appendChild(list);
-      card.appendChild(stepSection);
-      if (steps.length > MAX_PLAN_STEP_LINES) {
-        const rest = el('section', 'ag-plan-section');
-        rest.append(el('h4', 'ag-plan-section-title', '남은 단계'));
-        const restList = el('ol', 'ag-plan-steps');
-        restList.start = MAX_PLAN_STEP_LINES + 1;
-        steps.slice(MAX_PLAN_STEP_LINES).forEach((step) => {
-          restList.appendChild(buildPlanStep(step));
-        });
-        rest.appendChild(restList);
-        overflow.appendChild(rest);
-      }
-    }
-
-    for (const [label, items] of [
-      ['예상 파일', plan.files],
-      ['검증', plan.validation],
-      ['위험', plan.risks],
-    ] as const) {
-      const section = planListSection(label, items, MAX_PLAN_LIST_LINES, overflow);
-      if (section) card.appendChild(section);
-    }
-    for (const [label, items] of [
-      ['가정', plan.assumptions],
-      ['결정', plan.decisions],
-      ['제외', plan.exclusions],
-    ] as const) {
-      const section = planListSection(label, items, Number.MAX_SAFE_INTEGER, overflow);
-      if (section) overflow.appendChild(section);
-    }
-
-    if (overflow.childElementCount > 0) {
-      const disclosure = el(
-        'button',
-        'ag-plan-disclosure',
-        planDetailOpen ? '자세한 내용 접기' : '자세한 내용 보기',
-      );
-      disclosure.type = 'button';
-      disclosure.setAttribute('aria-expanded', planDetailOpen ? 'true' : 'false');
-      disclosure.setAttribute('aria-controls', overflow.id);
-      disclosure.appendChild(createChevron('ag-plan-chevron'));
-      disclosure.addEventListener('click', () => {
-        planDetailOpen = !planDetailOpen;
-        overflow.hidden = !planDetailOpen;
-        disclosure.setAttribute('aria-expanded', planDetailOpen ? 'true' : 'false');
-        disclosure.childNodes[0]!.textContent = planDetailOpen
-          ? '자세한 내용 접기'
-          : '자세한 내용 보기';
-      });
-      card.append(disclosure, overflow);
-    }
+    // 본문은 전부 펼친다 — 접기 없이 패널이 스크롤한다.
+    const body = el('div', 'ag-plan-body');
+    body.id = `ag-plan-body-${plan.planId}`;
+    appendMarkdown(body, planToMarkdown(plan));
+    card.appendChild(body);
 
     const approvableNow = planApprovable
       && planningPhase === 'awaiting-approval'
       && !turnRunning;
+    const footer = el('footer', 'ag-plan-footer');
     const actions = el('div', 'ag-review-actions ag-plan-actions');
-    const approve = el('button', 'ag-approve ag-plan-approve', '승인하고 실행');
+    const approve = el('button', 'ag-approve ag-plan-approve', '편집 모드로 전환');
     approve.type = 'button';
     approve.disabled = !approvableNow;
     approve.addEventListener('click', () => approveActivePlan(plan.planId));
@@ -4094,37 +4024,28 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     revise.disabled = !planApprovable || planningPhase === 'switching' || turnRunning;
     revise.addEventListener('click', () => requestPlanRevision(plan.planId));
     actions.append(approve, revise);
-    card.appendChild(actions);
+    footer.appendChild(actions);
 
     const note = el('p', 'ag-plan-note');
     if (planningPhase === 'switching') {
-      note.textContent = '승인했습니다. 실행 단계로 전환 중입니다…';
+      note.textContent = '승인한 계획으로 편집 모드로 전환하고 있습니다…';
     } else if (planningPhase === 'implementing') {
-      note.textContent = '실행 중입니다. 문서 편집은 기존처럼 검토 후 승인합니다.';
+      note.textContent = '승인한 계획을 편집 모드에서 실행 중입니다. 문서 편집은 기존처럼 검토 후 승인합니다.';
     } else if (!planApprovable) {
       note.textContent = '이전 계획입니다. 표시만 되고 승인할 수 없습니다.';
     } else {
-      note.textContent = '승인은 이 버튼으로만 됩니다. 입력창에 쓴 답은 계획 수정 의견으로 전달됩니다.';
+      note.textContent = '편집 모드 전환은 이 버튼으로만 됩니다. 입력창에 쓴 답은 계획 수정 의견으로 전달됩니다.';
     }
-    card.appendChild(note);
+    footer.appendChild(note);
+    card.appendChild(footer);
     return card;
-  }
-
-  function buildPlanStep(step: StructuredPlanStep): HTMLElement {
-    const item = el('li', 'ag-plan-step');
-    item.append(el('span', 'ag-plan-step-title', step.title));
-    if (step.details) item.append(el('span', 'ag-plan-step-detail', step.details));
-    if (step.files?.length) {
-      item.append(el('span', 'ag-plan-step-files', step.files.join(' · ')));
-    }
-    return item;
   }
 
   function approveActivePlan(planId: string): void {
     if (!planApprovable || planningPhase !== 'awaiting-approval' || turnRunning) return;
     // 정확히 이 계획 id 로만 승인한다 — 오래된 카드가 다른 계획을 통과시키지 않는다.
     setPlanningPhase('switching');
-    systemMessage('계획을 승인했습니다. 실행 단계로 전환 중입니다.');
+    systemMessage('계획을 승인했습니다. 편집 모드로 전환합니다.');
     try {
       bridge.approvePlan(planId);
     } catch (err) {
@@ -4154,6 +4075,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         workflowTransitionPending = false;
         applyWorkflow(e.workflow);
         setPlanningPhase(e.phase);
+        if (e.workflow === 'plan' && planPermissionDefaultPending) {
+          planPermissionDefaultPending = false;
+          bridge.setPermissionProfile('unrestricted');
+        } else if (e.workflow === 'direct') {
+          planPermissionDefaultPending = false;
+        }
         if (e.workflow === 'plan' && browserbaseNoticePending) {
           browserbaseNoticePending = false;
           systemMessage(BROWSERBASE_ENABLED_NOTICE);
@@ -4164,11 +4091,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       case 'plan-ready':
         activePlan = e.plan;
         planApprovable = true;
-        planDetailOpen = false;
         recordPlan(e.plan);
         applyWorkflow(e.workflow);
         setPlanningPhase(e.phase);
         rebuildReview();
+        // 전체 화면에서는 정리된 계획이 곧바로 옆 문서 패널로 열린다.
+        if (fullscreen && reviewColCollapsed) setReviewColCollapsed(false);
         return true;
       case 'plan-approved':
         // 서버가 승인했다고 말한 계획이 지금 카드와 다르면 표시를 건드리지 않는다.
@@ -4218,7 +4146,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     planHistory = planArchives.get(threadId) ?? [];
     activePlan = planHistory[planHistory.length - 1] ?? null;
     planApprovable = false;
-    planDetailOpen = false;
     chatWorkflow = threadWorkflows.get(threadId) ?? 'direct';
     planningPhase = chatWorkflow === 'plan' ? 'planning' : 'direct';
     browserbaseAcknowledged = chatWorkflow === 'plan';
@@ -4310,13 +4237,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       review.appendChild(buildReviewCard(set));
     }
     if (changeSets.length === 0 && !planShown) {
-      const empty = el('div', 'ag-review-empty');
+      const planning = isPlanningWithoutPlan();
+      const empty = el('div', `ag-review-empty${planning ? ' ag-review-empty-planning' : ''}`);
       const emptyIcon = el('div', 'ag-review-empty-icon');
       emptyIcon.appendChild(createIcon('changes'));
       empty.append(
         emptyIcon,
-        el('div', 'ag-review-empty-title', '변경 사항 없음'),
-        el('div', 'ag-review-empty-copy', '에이전트가 문서를 수정하면 여기에서 원문과 변경 내용을 비교할 수 있습니다.'),
+        el('div', 'ag-review-empty-title', planning ? '계획을 구상하는 중' : '변경 사항 없음'),
+        el(
+          'div',
+          'ag-review-empty-copy',
+          planning
+            ? '대화에서 자료를 찾고 방향을 맞추는 단계입니다. 계획이 정리되면 여기에 문서로 올라옵니다.'
+            : '에이전트가 문서를 수정하면 여기에서 원문과 변경 내용을 비교할 수 있습니다.',
+        ),
       );
       review.appendChild(empty);
     }
