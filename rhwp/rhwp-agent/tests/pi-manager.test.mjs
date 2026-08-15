@@ -151,14 +151,14 @@ async function readJson(file) {
 }
 
 test('RHWP_PI_DIR overrides the per-platform app data root', () => {
-  assert.equal(defaultPiRoot({ RHWP_PI_DIR: '/tmp/pi-here' }), '/tmp/pi-here');
+  assert.equal(defaultPiRoot({ RHWP_PI_DIR: '/tmp/pi-here' }), path.resolve('/tmp/pi-here'));
   assert.equal(
     defaultPiRoot({}, 'darwin', '/Users/tester'),
     '/Users/tester/Library/Application Support/rhwp/pi',
   );
   assert.equal(
     defaultPiRoot({ APPDATA: 'C:\\data' }, 'win32', 'C:\\Users\\t'),
-    path.join('C:\\data', 'rhwp', 'pi'),
+    path.win32.join('C:\\data', 'rhwp', 'pi'),
   );
   assert.equal(defaultPiRoot({}, 'linux', '/home/t'), '/home/t/.local/share/rhwp/pi');
 });
@@ -250,7 +250,10 @@ test('install runs npm with a prefix, reports progress and syncs assets', async 
   assert.equal(status.version, '0.84.3');
   assert.equal(status.installing, false);
   assert.equal(status.setupComplete, false, '키와 모델이 아직 없다');
-  assert.equal(manager.piBin, path.join(prefixDir, 'node_modules', '.bin', 'pi'));
+  assert.equal(
+    manager.piBin,
+    path.join(prefixDir, 'node_modules', '.bin', process.platform === 'win32' ? 'pi.cmd' : 'pi'),
+  );
 
   const settings = await readJson(path.join(rootDir, 'agent', 'settings.json'));
   assert.equal(settings.defaultProjectTrust, 'never');
@@ -447,13 +450,13 @@ test('setApiKey validates first, stores the key only in the secure vault and kee
   assert.equal(models.providers.openrouter.baseUrl, 'https://openrouter.ai/api/v1');
   assert.equal(models.providers.openrouter.api, 'openai-completions');
   const modelsStat = await fs.stat(path.join(rootDir, 'agent', 'models.json'));
-  assert.equal(modelsStat.mode & 0o777, 0o600);
+  assert.equal(modelsStat.mode & 0o777, process.platform === 'win32' ? 0o666 : 0o600);
 
   const config = await readJson(path.join(rootDir, 'config.json'));
   assert.equal(config.keyTail, 'abcd');
   assert.equal(JSON.stringify(config).includes('sk-or-v1-secret'), false, '키는 config 에 남지 않는다');
   const configStat = await fs.stat(path.join(rootDir, 'config.json'));
-  assert.equal(configStat.mode & 0o777, 0o600);
+  assert.equal(configStat.mode & 0o777, process.platform === 'win32' ? 0o666 : 0o600);
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });

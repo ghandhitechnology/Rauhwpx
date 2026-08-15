@@ -6,20 +6,29 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  closeHubSession,
+  createHubToken,
   ensureAgentHub,
+  HUB_READY_PREFIX,
   hubHealthUrl,
   hubPidFromHealth,
   hubRunPaths,
   isHubHealthy,
   isProcessAlive,
+  issueHubSessionToken,
   nextHubRestartDelay,
+  parseHubReadyLine,
   readPidFile,
   removePidFile,
+  requestHubShutdown,
   resolveHubLaunch,
   stopHubChild,
   waitForHub,
+  waitForHubChildExit,
+  waitForHubReadyLine,
   writePidFile,
 } from '../../../desktop/agent-hub.mjs';
+import { issueScopedHubToken } from '../../rhwp-agent/hub-session-registry.mjs';
 
 const desktopMain = readFileSync(new URL('../../../desktop/main.mjs', import.meta.url), 'utf8');
 const preload = readFileSync(new URL('../../../desktop/preload.cjs', import.meta.url), 'utf8');
@@ -33,6 +42,13 @@ function jsonResponse(body: unknown, ok = true) {
     json: async () => body,
   };
 }
+
+test('desktop renderer credentials exactly match the hub session scope', () => {
+  assert.equal(
+    issueHubSessionToken('master-secret', 'window-a'),
+    issueScopedHubToken('master-secret', 'window-a'),
+  );
+});
 
 test('healthz URL is loopback-only', () => {
   assert.equal(hubHealthUrl(5175), 'http://127.0.0.1:5175/healthz');
@@ -233,21 +249,67 @@ test('launch falls back to Electron-as-Node when npm and node are missing', () =
   assert.equal(launch?.env.ELECTRON_RUN_AS_NODE, '1');
 });
 
-test('desktop shell ensures the hub before showing the window and exposes IPC', () => {
-  assert.match(desktopMain, /await ensureAgent\(\);\s*await createWindow\(\);/s);
-  assert.match(desktopMain, /ipcMain.handle\('agent-hub:ensure'/);
-  assert.match(desktopMain, /preload: PRELOAD_PATH/);
-  assert.match(desktopMain, /function scheduleAgentRestart\(\)/);
-  assert.match(desktopMain, /resolveHubLaunch\(/);
-  assert.match(desktopMain, /spawnHubProcess\(/);
-  assert.match(desktopMain, /onExit: \(code, signal\) => \{/);
-  assert.doesNotMatch(desktopMain, /utilityProcess/);
+test('desktop shell owns one ephemeral authenticated hub and exposes session IPC', () => {
+  assert.match(desktopMain, /app\.requestSingleInstanceLock\(\)/);
+  assert.match(desktopMain, /app\.on\('second-instance'/);
+  assert.match(desktopMain, /await hubOwner\.ensure\(\);[\s\S]*await createWindow\(request\)/);
+  assert.match(desktopMain, /ipcMain\.handle\('desktop:get-session-context'/);
+  assert.match(desktopMain, /sessions\.sessionForSender\(event\.sender\)/);
+  assert.match(desktopMain, /RHWP_AGENT_PORT: '0'/);
+  assert.match(desktopMain, /RHWP_AGENT_TOKEN: hubToken/);
+  assert.match(desktopMain, /RHWP_LAUNCH_ID: launchId/);
+  assert.match(desktopMain, /RHWP_OWNER_PID: String\(process\.pid\)/);
+  assert.match(desktopMain, /RHWP_RUNTIME_DIR: this\.runtimeDir/);
+  assert.match(desktopMain, /RHWP_WORK_DIR: this\.workDir/);
+  assert.match(desktopMain, /expectedPid: child\.pid/);
+  assert.match(desktopMain, /expectedLaunchId: launchId/);
+  assert.match(desktopMain, /waitForHubReadyLine\(child, \{ launchId \}\)/);
+  assert.doesNotMatch(desktopMain, /DEFAULT_HUB_PORT/);
+  assert.doesNotMatch(desktopMain, /startStudioServer/);
   assert.match(desktopMain, /sandbox: false/);
-  assert.match(desktopMain, /function stopAgent\(\)/);
   assert.match(desktopMain, /stopHubChild\(/);
-  assert.match(desktopMain, /restartUnhealthy:\s*true/);
-  assert.match(desktopMain, /if \(agentProcess !== child\) return;/);
+  assert.match(preload, /getSessionContext: \(\) => ipcRenderer\.invoke\('desktop:get-session-context'\)/);
   assert.match(preload, /ensureAgentHub: \(\) => ipcRenderer\.invoke\('agent-hub:ensure'\)/);
+});
+
+test('ready-line parser binds readiness to the Electron launch', async () => {
+  const line = `${HUB_READY_PREFIX}${JSON.stringify({ launchId: 'launch-a', pid: 44, port: 32123 })}`;
+  assert.deepEqual(parseHubReadyLine(line, 'launch-a'), { launchId: 'launch-a', pid: 44, port: 32123 });
+  assert.equal(parseHubReadyLine(line, 'launch-b'), null);
+  assert.equal(parseHubReadyLine(`${HUB_READY_PREFIX}{bad`, 'launch-a'), null);
+  assert.ok(createHubToken().length >= 32);
+
+  const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter };
+  child.stdout = new EventEmitter();
+  const pending = waitForHubReadyLine(child, { launchId: 'launch-a' });
+  child.stdout.emit('data', line.slice(0, 12));
+  child.stdout.emit('data', `${line.slice(12)}\n`);
+  assert.deepEqual(await pending, { launchId: 'launch-a', pid: 44, port: 32123 });
+});
+
+test('owned health checks send launch authentication and verify the child pid', async () => {
+  let headers: Record<string, string> = {};
+  const healthy = await isHubHealthy(32123, {
+    token: 'hub-secret',
+    launchId: 'launch-a',
+    expectedPid: 44,
+    expectedLaunchId: 'launch-a',
+    fetchImpl: async (_url, init) => {
+      headers = init?.headers as Record<string, string>;
+      return jsonResponse({ ok: true, pid: 44, launchId: 'launch-a' });
+    },
+  });
+  assert.equal(healthy, true);
+  assert.equal(headers.authorization, 'Bearer hub-secret');
+  assert.equal(headers['x-rhwp-launch-id'], 'launch-a');
+  assert.equal(await isHubHealthy(32123, {
+    expectedPid: 45,
+    fetchImpl: async () => jsonResponse({ ok: true, pid: 44 }),
+  }), false);
+  assert.equal(await isHubHealthy(32123, {
+    expectedLaunchId: 'launch-b',
+    fetchImpl: async () => jsonResponse({ ok: true, pid: 44, launchId: 'launch-a' }),
+  }), false);
 });
 
 test('studio dev server and repo npm start both boot the hub', () => {
@@ -256,7 +318,10 @@ test('studio dev server and repo npm start both boot the hub', () => {
   assert.match(viteHubPlugin, /process\.execPath/);
   assert.match(viteHubPlugin, /RHWP_SKIP_AGENT_HUB/);
   assert.match(viteHubPlugin, /\/__rhwp\/ensure-agent-hub/);
-  assert.match(viteHubPlugin, /restartUnhealthy:\s*true/);
+  assert.match(viteHubPlugin, /RHWP_AGENT_PORT: String\(requestedPort\)/);
+  assert.match(viteHubPlugin, /RHWP_AGENT_TOKEN: token/);
+  assert.match(viteHubPlugin, /RHWP_WORK_DIR:/);
+  assert.match(viteHubPlugin, /waitForHubReadyLine\(spawned, \{ launchId \}\)/);
   assert.match(viteHubPlugin, /stopHubChild\(/);
   assert.match(rootPackage, /"start": "node rhwp\/rhwp-agent\/ctl.mjs start"/);
   assert.match(rootPackage, /"start:fg": "node rhwp\/rhwp-agent\/server.mjs"/);
@@ -291,15 +356,61 @@ test('isProcessAlive reports this process and rejects nonsense', () => {
   assert.equal(isProcessAlive(-1), false);
 });
 
-test('stopHubChild SIGTERM then resolves on exit', async () => {
-  const signals = [];
-  const child = new EventEmitter();
-  child.kill = (signal) => {
-    signals.push(signal);
-    if (signal === 'SIGTERM') queueMicrotask(() => child.emit('exit', 0, null));
+test('master lifecycle helpers bind method, launch, and session identity', async () => {
+  const calls: Array<{ url: string; init: any }> = [];
+  const fetchImpl = async (url: string, init: any) => {
+    calls.push({ url, init });
+    return jsonResponse({ status: 'ok' });
   };
-  await stopHubChild(child);
-  assert.deepEqual(signals, ['SIGTERM']);
+  await closeHubSession({
+    port: 32123, token: 'secret', launchId: 'launch-a', sessionId: 'window/a', fetchImpl,
+  });
+  await requestHubShutdown({ port: 32123, token: 'secret', launchId: 'launch-a', fetchImpl });
+
+  assert.equal(calls[0].url, 'http://127.0.0.1:32123/sessions/window%2Fa');
+  assert.equal(calls[0].init.method, 'DELETE');
+  assert.equal(calls[1].url, 'http://127.0.0.1:32123/shutdown');
+  assert.equal(calls[1].init.method, 'POST');
+  assert.deepEqual(calls[0].init.headers, {
+    authorization: 'Bearer secret',
+    'x-rhwp-launch-id': 'launch-a',
+  });
+});
+
+test('graceful hub shutdown wait observes the owned child exit', async () => {
+  const child = Object.assign(new EventEmitter(), {
+    exitCode: null,
+    signalCode: null,
+  });
+  const exited = waitForHubChildExit(child, { timeoutMs: 50 });
+  child.exitCode = 0;
+  child.emit('exit', 0, null);
+  assert.equal(await exited, true);
+});
+
+test('stopHubChild terminates the owned POSIX group and clears escalation on exit', async () => {
+  const signals: Array<[number, string]> = [];
+  const child = Object.assign(new EventEmitter(), {
+    pid: 4321,
+    exitCode: null,
+    signalCode: null,
+    rhwpProcessGroup: true,
+  });
+  const stopped = stopHubChild(child, {
+    timeoutMs: 50,
+    platform: 'linux',
+    killProcess: (pid, signal) => {
+      signals.push([pid, signal]);
+      queueMicrotask(() => {
+        child.exitCode = 0;
+        child.emit('exit', 0, null);
+      });
+      return true;
+    },
+  });
+  await stopped;
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.deepEqual(signals, [[-4321, 'SIGTERM']]);
 });
 
 test('stopHubChild is a no-op without a child', async () => {

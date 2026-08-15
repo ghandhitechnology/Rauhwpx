@@ -30,14 +30,14 @@ function clock(start = Date.UTC(2026, 0, 15, 12, 0, 0)) {
 }
 
 test('RHWP_USAGE_DIR overrides the per-platform app data root', () => {
-  assert.equal(defaultUsageRoot({ RHWP_USAGE_DIR: '/tmp/usage-here' }), '/tmp/usage-here');
+  assert.equal(defaultUsageRoot({ RHWP_USAGE_DIR: '/tmp/usage-here' }), path.resolve('/tmp/usage-here'));
   assert.equal(
     defaultUsageRoot({}, 'darwin', '/Users/tester'),
     '/Users/tester/Library/Application Support/rhwp/usage',
   );
   assert.equal(
     defaultUsageRoot({ APPDATA: 'C:\\data' }, 'win32', 'C:\\Users\\t'),
-    path.join('C:\\data', 'rhwp', 'usage'),
+    path.win32.join('C:\\data', 'rhwp', 'usage'),
   );
   assert.equal(
     defaultUsageRoot({}, 'linux', '/home/t'),
@@ -150,7 +150,7 @@ test('plans are validated, persisted and reloaded', async () => {
   const saved = JSON.parse(await fs.readFile(path.join(rootDir, 'plans.json'), 'utf8'));
   assert.deepEqual(saved, { claude: 'max20x', codex: 'pro', pi: 'api' });
   const stat = await fs.stat(path.join(rootDir, 'plans.json'));
-  assert.equal(stat.mode & 0o777, 0o600);
+  assert.equal(stat.mode & 0o777, process.platform === 'win32' ? 0o666 : 0o600);
 
   const reloaded = await createUsageStore({ rootDir, now: time.now }).init();
   assert.deepEqual(reloaded.plans(), { claude: 'max20x', codex: 'pro', pi: 'api' });

@@ -5,7 +5,11 @@ import path from 'node:path';
 
 import { fetchLatestPackage, replaceFileAtomically, updatePrefixAtomically } from './harness-update.mjs';
 import { bundledNpmLaunch } from './npm-runtime.mjs';
-import { terminateProcessTree } from './process-tree.mjs';
+import {
+  processTreeSpawnOptions,
+  terminateProcessTree,
+  waitForProcessTreeExit,
+} from './process-tree.mjs';
 import { setupFailureMessage } from './setup-errors.mjs';
 
 const require = createRequire(import.meta.url);
@@ -51,10 +55,13 @@ function keyTail(key) {
 }
 
 export function defaultCliSetupRoot(env = process.env, platform = process.platform, home = os.homedir()) {
-  if (env.RHWP_CLI_DIR) return path.resolve(env.RHWP_CLI_DIR);
-  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'rhwp', 'cli');
-  if (platform === 'win32') return path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'rhwp', 'cli');
-  return path.join(env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'rhwp', 'cli');
+  const platformPath = platform === 'win32' ? path.win32 : path.posix;
+  if (env.RHWP_CLI_DIR) return platformPath.resolve(env.RHWP_CLI_DIR);
+  if (platform === 'darwin') return platformPath.join(home, 'Library', 'Application Support', 'rhwp', 'cli');
+  if (platform === 'win32') {
+    return platformPath.join(env.APPDATA || platformPath.join(home, 'AppData', 'Roaming'), 'rhwp', 'cli');
+  }
+  return platformPath.join(env.XDG_DATA_HOME || platformPath.join(home, '.local', 'share'), 'rhwp', 'cli');
 }
 
 /** App-managed Codex and Claude installers plus their local authentication state. */
@@ -186,6 +193,7 @@ export function createCliSetupManager({
       let proc;
       try {
         proc = spawnProcess(command, argv, {
+          ...processTreeSpawnOptions(platform),
           env,
           stdio: ['pipe', 'pipe', 'pipe'],
           windowsHide: true,
@@ -196,7 +204,8 @@ export function createCliSetupManager({
       }
       if (operationKey) activeProcesses.set(operationKey, proc);
       timer = setTimeout(() => {
-        void terminateProcessTree(proc, { platform, spawnProcess }).finally(() => {
+        terminateProcessTree(proc, { platform, spawnProcess });
+        void waitForProcessTreeExit(proc).finally(() => {
           finish(setupError('AGENT_SETUP_TIMEOUT', '설정 작업이 제한 시간 안에 끝나지 않았어요.'));
         });
       }, timeoutMs);
@@ -469,7 +478,8 @@ export function createCliSetupManager({
       const processes = [`install:${agent}`, `auth:${agent}`]
         .map((key) => activeProcesses.get(key))
         .filter(Boolean);
-      await Promise.all(processes.map((proc) => terminateProcessTree(proc, { platform, spawnProcess })));
+      for (const proc of processes) terminateProcessTree(proc, { platform, spawnProcess });
+      await Promise.all(processes.map((proc) => waitForProcessTreeExit(proc)));
       return processes.length > 0;
     },
     automaticUpdate(agent, { canActivate = () => true } = {}) {

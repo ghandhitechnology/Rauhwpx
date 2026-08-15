@@ -55,6 +55,33 @@ test('AutosaveManager는 dirty 이벤트 후 현재 문서를 draft로 저장한
   assert.deepEqual([...saved[0].data], [1, 2, 3, 4]);
 });
 
+test('AutosaveManager scopes draft ownership and heartbeat to the renderer session', async () => {
+  const { store, saved } = createStore();
+  const heartbeats: Array<{ launchId: string; sessionId: string; at: number }> = [];
+  store.touchSession = async (owner, at) => {
+    heartbeats.push({ ...owner, at });
+  };
+  const manager = new AutosaveManager({
+    exportBytes: () => new Uint8Array([4]),
+    schedule: { recoveryEnabled: false, idleEnabled: false },
+    now: () => 5_000,
+    idFactory: () => 'draft-owned',
+    owner: { launchId: 'launch-a', sessionId: 'window-a' },
+    heartbeatIntervalMs: 0,
+    store,
+    logger: { debug() {}, warn() {} },
+  });
+
+  await manager.beginDocument({ fileName: 'owned.hwp', sourceFormat: 'hwp' });
+  await manager.flushNow('manual');
+
+  assert.deepEqual(heartbeats.at(-1), { launchId: 'launch-a', sessionId: 'window-a', at: 5_000 });
+  assert.equal(saved[0]?.ownerLaunchId, 'launch-a');
+  assert.equal(saved[0]?.ownerSessionId, 'window-a');
+  assert.equal(saved[0]?.ownerHeartbeatAt, 5_000);
+  manager.dispose();
+});
+
 test('AutosaveManager는 clean 전환 시 현재 draft를 삭제한다', async () => {
   const { store, saved, deleted } = createStore();
   const eventBus = new EventBus();
