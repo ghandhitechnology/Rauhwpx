@@ -39,3 +39,17 @@ test('hub-local MCP list/search/read tools enforce active session scopes', async
   );
   assert.deepEqual(await executeReferenceTool({ tool: 'not_reference', args: {}, store, session }), { handled: false, result: null });
 });
+
+test('hub-local image reads return native vision payloads', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-image-tool-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const store = await new ReferenceStore({ root: path.join(parent, 'refs') }).init();
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  const image = await store.addBuffer({ scope: 'chat', scopeId: 'chat-a', name: 'shot.png', mimeType: 'image/png', bytes });
+  const result = await executeReferenceTool({
+    tool: 'read_reference_image', args: { fileId: image.id }, store, session: { threadId: 'chat-a', documentId: null },
+  });
+  assert.equal(result.handled, true);
+  assert.equal(result.result.image.mimeType, 'image/png');
+  assert.deepEqual(Buffer.from(result.result.image.data, 'base64'), bytes);
+});

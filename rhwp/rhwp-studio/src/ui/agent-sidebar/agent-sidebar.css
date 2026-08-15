@@ -1815,12 +1815,12 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   position: relative;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 7px;
   width: 100%;
   min-height: 34px;
   margin: 0;
-  padding: 6px 32px;
+  padding: 6px 32px 6px 12px;
   border: none;
   background: transparent;
   color: var(--ag-text-muted);
@@ -1828,7 +1828,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font-size: var(--font-size-base, 12px);
   font-variant-numeric: tabular-nums;
   line-height: 1;
-  text-align: center;
+  text-align: left;
   cursor: pointer;
 }
 
@@ -1929,6 +1929,9 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-activity-collapsed .ag-activity-content {
   overflow: hidden;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-top-color: transparent;
 }
 
 .ag-tool-row {
