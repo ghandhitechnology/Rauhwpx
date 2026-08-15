@@ -257,16 +257,11 @@ impl EqParser {
                 self.try_parse_scripts(group)
             }
             TokenType::LParen => {
-                // #1305: `(...)` 뒤에 첨자가 오면 Paren 그룹으로 묶어 첨자를 결합한다
-                // (그렇지 않으면 `)` 뒤 `^2` 가 base 없는 orphan Superscript 가 됨).
-                // 첨자가 없으면 기존대로 느슨한 Symbol 흐름 유지 → 일반 괄호 렌더 무변경.
-                if self.paren_then_script() {
-                    let group = self.parse_paren_group();
-                    self.try_parse_scripts(group)
-                } else {
-                    self.pos += 1;
-                    EqNode::Symbol(val)
-                }
+                // 괄호 primary를 먼저 균형 있게 소비한 뒤 postfix 첨자를 결합한다.
+                // 내부 괄호에 첨자가 없어도 재귀적으로 소비해야 `(f(x))^5`의 안쪽 `)`가
+                // 바깥 그룹을 조기에 닫지 않는다. 첨자가 없는 괄호는 기존 Symbol 흐름으로
+                // 평탄화해 렌더링 호환성을 유지한다.
+                self.parse_parenthesized_primary()
             }
             TokenType::RParen | TokenType::LBracket | TokenType::RBracket => {
                 self.pos += 1;
@@ -681,35 +676,13 @@ impl EqParser {
         self.tokens.len()
     }
 
-    /// 현재 LParen 의 매칭 RParen 다음 토큰이 첨자(`^`/`_`)인지 (#1305).
-    /// 참이면 `(...)` 를 Paren 그룹으로 묶어 첨자를 결합해야 한다.
-    /// 현재 토큰이 LParen 이라는 전제.
-    fn paren_then_script(&self) -> bool {
-        let mut depth = 0i32;
-        let mut p = self.pos;
-        while p < self.tokens.len() {
-            match self.tokens[p].ty {
-                TokenType::LParen => depth += 1,
-                TokenType::RParen => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return matches!(
-                            self.tokens.get(p + 1).map(|t| t.ty),
-                            Some(TokenType::Subscript) | Some(TokenType::Superscript)
-                        );
-                    }
-                }
-                TokenType::Eof => return false,
-                _ => {}
-            }
-            p += 1;
-        }
-        false
-    }
-
-    /// `(...)` 를 자동크기 괄호 그룹으로 파싱 (#1305). 현재 LParen 전제.
-    fn parse_paren_group(&mut self) -> EqNode {
-        self.pos += 1; // '(' 소비
+    /// 소괄호 primary를 재귀적으로 파싱하고 뒤따르는 첨자를 결합한다.
+    ///
+    /// 첨자가 없는 소괄호는 종전처럼 일반 Symbol 행으로 돌려 렌더링을 보존한다.
+    /// 첨자가 있으면 균형 있게 소비한 전체 괄호를 하나의 Paren base로 사용한다.
+    fn parse_parenthesized_primary(&mut self) -> EqNode {
+        debug_assert_eq!(self.current_type(), TokenType::LParen);
+        self.pos += 1;
         let mut items = Vec::new();
         while !self.at_end() && self.current_type() != TokenType::RParen {
             if self.try_consume_infix_over_atop(&mut items) {
@@ -717,12 +690,47 @@ impl EqParser {
             }
             items.push(self.parse_element());
         }
-        self.expect(TokenType::RParen); // ')' 소비
-        EqNode::Paren {
-            left: "(".to_string(),
-            right: ")".to_string(),
-            body: Box::new(EqNode::Row(items).simplify()),
+
+        let closed = self.expect(TokenType::RParen);
+        if !closed {
+            self.warnings
+                .push("닫는 소괄호 ')' 가 없습니다".to_string());
         }
+
+        let has_postfix = self.script_postfix_follows();
+        if has_postfix {
+            let group = EqNode::Paren {
+                left: "(".to_string(),
+                right: ")".to_string(),
+                body: Box::new(EqNode::Row(items).simplify()),
+            };
+            self.try_parse_scripts(group)
+        } else {
+            let mut plain = Vec::with_capacity(items.len() + 2);
+            plain.push(EqNode::Symbol("(".to_string()));
+            plain.extend(items);
+            if closed {
+                plain.push(EqNode::Symbol(")".to_string()));
+            }
+            EqNode::Row(plain).simplify()
+        }
+    }
+
+    /// 현재 위치에서 `^`/`_` postfix가 시작되는지 확인한다.
+    /// 한컴의 thin-space 표기(`) 뒤 첨자도 try_parse_scripts와 같은 규칙으로 본다.
+    fn script_postfix_follows(&self) -> bool {
+        if matches!(
+            self.current_type(),
+            TokenType::Subscript | TokenType::Superscript
+        ) {
+            return true;
+        }
+        self.current_type() == TokenType::Whitespace
+            && self.current_value() == "`"
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|token| token.ty),
+                Some(TokenType::Subscript) | Some(TokenType::Superscript)
+            )
     }
 
     /// 단일 토큰 또는 그룹 파싱 (첨자/인자용) — 재귀 깊이 가드 포함
@@ -2955,6 +2963,36 @@ mod latex_compat_tests {
         }
     }
 
+    /// 중첩된 일반 괄호도 바깥 scripted primary 안에서 균형 있게 소비해야 한다.
+    #[test]
+    fn nested_paren_superscript_binds_to_complete_outer_group() {
+        for (script, exponent) in [
+            ("(f(x))^{5}", "5"),
+            ("(g(f(x)))^3", "3"),
+            ("(f(x))`^7", "7"),
+        ] {
+            let ast = parse(script);
+            let sup = find_superscript(&ast).expect("Superscript 가 있어야 함");
+            match sup {
+                EqNode::Superscript { base, sup } => {
+                    assert!(
+                        matches!(base.as_ref(), EqNode::Paren { .. }),
+                        "중첩 괄호 전체가 위첨자 base 여야 함: {ast:?}"
+                    );
+                    assert!(
+                        matches!(sup.as_ref(), EqNode::Number(n) if n == exponent),
+                        "지수가 보존되어야 함: {ast:?}"
+                    );
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                !format!("{ast:?}").contains("base: Empty"),
+                "중첩 괄호 첨자가 orphan 이면 안 됨: {ast:?}"
+            );
+        }
+    }
+
     /// `(k+1)_i` → 아래첨자도 Paren 그룹에 결합.
     #[test]
     fn task1305_paren_subscript_binds_to_group() {
@@ -2966,6 +3004,22 @@ mod latex_compat_tests {
                 "아래첨자 base 가 Paren 그룹이어야 함: {:?}",
                 base
             );
+        }
+    }
+
+    #[test]
+    fn nested_paren_subscript_binds_to_complete_outer_group() {
+        let ast = parse("(g(f(x)))_i");
+        let sub = find_subscript(&ast).expect("Subscript 가 있어야 함");
+        match sub {
+            EqNode::Subscript { base, sub } => {
+                assert!(
+                    matches!(base.as_ref(), EqNode::Paren { .. }),
+                    "중첩 괄호 전체가 아래첨자 base 여야 함: {ast:?}"
+                );
+                assert!(matches!(sub.as_ref(), EqNode::Text(value) if value == "i"));
+            }
+            _ => unreachable!(),
         }
     }
 

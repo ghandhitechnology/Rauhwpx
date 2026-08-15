@@ -1355,6 +1355,26 @@ mod tests {
     }
 
     #[test]
+    fn nested_paren_exponent_is_above_its_complete_base() {
+        fn find_sup(lb: &LayoutBox) -> Option<(&LayoutBox, &LayoutBox)> {
+            match &lb.kind {
+                LayoutKind::Superscript { base, sup } => Some((base, sup)),
+                LayoutKind::Row(children) => children.iter().find_map(find_sup),
+                _ => None,
+            }
+        }
+
+        let lb = parse_and_layout("(f(x))^{5}", 20.0);
+        let (base, sup) = find_sup(&lb).expect("nested parenthesis superscript");
+        let base_baseline = base.y + base.baseline;
+        let sup_baseline = sup.y + sup.baseline;
+        assert!(
+            sup_baseline < base_baseline,
+            "exponent baseline ({sup_baseline}) must be above the grouped base baseline ({base_baseline})"
+        );
+    }
+
+    #[test]
     fn test_superscript_tall_base_no_overshoot() {
         // [#1300] 키 큰 base(괄호 분수 등)의 위첨자가 baseline 위로 과하게 치솟아
         // 윗줄을 침범하던 문제. base 밀어내기(base_y)는 sup 높이를 넘지 않아야 한다.
