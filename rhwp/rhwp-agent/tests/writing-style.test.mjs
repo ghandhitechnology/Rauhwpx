@@ -6,10 +6,10 @@ import test from 'node:test';
 
 import {
   buildCalibrationPrompt, buildExtractionPrompt, calibrateWritingStyle, renderStyleMarkdown,
-  STYLE_AXES, validateCalibrationInput,
+  sampleCorpusForPrompt, STYLE_AXES, validateAnalysisStructure, validateCalibrationInput,
 } from '../style-calibrator.mjs';
 import { analyzeText, deriveBands } from '../style-metrics.mjs';
-import { WritingStyleStore } from '../writing-style.mjs';
+import { WritingStyleStore, assertWritingStyleAppendCompatible } from '../writing-style.mjs';
 
 function upload(name, text) {
   return { name, type: 'text/plain', size: Buffer.byteLength(text), content: Buffer.from(text).toString('base64') };
@@ -113,9 +113,11 @@ test('style.md is rendered by code with covenant, baselines, and rule strength',
 
 test('calibration measures the corpus itself and returns a structured profile', async () => {
   const argsByCall = [];
+  const progress = [];
   const result = await calibrateWritingStyle(
-    { language: 'ko', files: [upload('essay.txt', longKoreanSample())] },
+    { language: 'ko', files: [upload('essay.txt', longKoreanSample())], agent: 'codex', model: 'gpt-5.6-sol', effort: 'medium' },
     {
+      onProgress: (event) => progress.push(event),
       run: async (args, prompt, cwd) => {
         argsByCall.push(args);
         assert.match(prompt, /Korean/);
@@ -136,6 +138,7 @@ test('calibration measures the corpus itself and returns a structured profile', 
   // 원고가 전부 평문이므로 추출 패스는 돌지 않는다.
   assert.equal(argsByCall.length, 1);
   const args = argsByCall[0];
+  assert.ok(args.includes('--skip-git-repo-check'));
   assert.deepEqual(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2), ['--model', 'gpt-5.6-sol']);
   assert.ok(args.includes('model_reasoning_effort="medium"'));
   // 쪽수는 모델의 자기 신고(0)가 아니라 측정값에서 나온다.
@@ -146,6 +149,9 @@ test('calibration measures the corpus itself and returns a structured profile', 
   assert.equal(result.profile.axes[0].strength, 'strict');
   assert.equal(result.profile.axes[1].strength, 'advisory');
   assert.match(result.markdown, /## 작성 지시/);
+  assert.ok(progress.some((event) => event.phase === 'measuring' && event.completed === 1));
+  assert.ok(progress.some((event) => event.phase === 'analyzing' && event.activity === 'model-analysis'));
+  assert.ok(progress.every((event) => !('reasoning' in event) && !('thinking' in event)));
 });
 
 test('a measured corpus below ten pages is rejected without trusting the model', async () => {
@@ -165,19 +171,14 @@ test('a measured corpus below ten pages is rejected without trusting the model',
   );
 });
 
-test('binary samples go through an extraction pass before measurement', async () => {
+test('binary samples are extracted locally before the single model analysis pass', async () => {
   const prompts = [];
   const result = await calibrateWritingStyle(
     { language: 'ko', files: [upload('report.pdf', 'binary-ish')] },
     {
-      run: async (args, prompt, cwd) => {
+      extractText: async () => ({ text: longKoreanSample() }),
+      run: async (args, prompt) => {
         prompts.push(prompt);
-        if (prompts.length === 1) {
-          await fs.mkdir(path.join(cwd, 'extracted'), { recursive: true });
-          const [name] = (await fs.readdir(cwd)).filter((entry) => entry.endsWith('.pdf'));
-          await fs.writeFile(path.join(cwd, 'extracted', `${name}.txt`), longKoreanSample(), 'utf8');
-          return JSON.stringify({ structured_output: { files: [{ source: name, extracted: true }] } });
-        }
         return JSON.stringify({
           structured_output: {
             enoughSample: true, pageEquivalent: 0, summary: '요약.',
@@ -187,8 +188,9 @@ test('binary samples go through an extraction pass before measurement', async ()
       },
     },
   );
-  assert.equal(prompts.length, 2);
-  assert.match(prompts[0], /mechanical transcription job/);
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /calibration-corpus\.txt/);
+  assert.doesNotMatch(prompts[0], /mechanical transcription job/);
   assert.ok(result.profile.metrics.sentences > 100);
 });
 
@@ -221,6 +223,89 @@ test('calibration surfaces an expired Codex login instead of treating it as a re
       { run: async () => JSON.stringify({ is_error: true, result: 'Failed to authenticate: OAuth session expired' }) },
     ),
     (error) => error?.code === 'CODEX_UNAVAILABLE' && /authenticate/i.test(error.message),
+  );
+});
+
+test('Claude calibration uses the selected model and schema-constrained CLI output', async () => {
+  let argv = null;
+  const result = await calibrateWritingStyle(
+    {
+      language: 'ko', files: [upload('essay.txt', longKoreanSample())],
+      agent: 'claude', model: 'sonnet', effort: 'high',
+    },
+    {
+      run: async () => { throw new Error('Codex must not run'); },
+      runClaude: async (args) => {
+        argv = args;
+        return JSON.stringify({
+          structured_output: {
+            enoughSample: true, pageEquivalent: 10, summary: '요약.',
+            unsupportedFiles: [], axes: axisPayload(), adaptation: [],
+          },
+        });
+      },
+    },
+  );
+  assert.equal(argv[argv.indexOf('--model') + 1], 'sonnet');
+  assert.equal(argv[argv.indexOf('--effort') + 1], 'high');
+  assert.ok(argv.includes('--json-schema'));
+  assert.equal(result.agent, 'claude');
+  assert.equal(result.model, 'sonnet');
+});
+
+test('Pi calibration sends the explicitly selected configured model to OpenRouter', async () => {
+  let requestedModel = null;
+  const selected = 'anthropic/claude-sonnet-4.5';
+  const result = await calibrateWritingStyle(
+    {
+      language: 'ko', files: [upload('essay.txt', longKoreanSample())],
+      agent: 'pi', model: selected,
+    },
+    {
+      useOpenRouter: true,
+      piManager: {
+        apiKey: () => 'secret',
+        status: async () => ({ models: [{ id: selected }, { id: 'google/gemini-2.5-flash' }] }),
+      },
+      openRouter: {
+        chat: async ({ model }) => {
+          requestedModel = model;
+          return JSON.stringify({
+            enoughSample: true, pageEquivalent: 10, summary: '요약.',
+            unsupportedFiles: [], axes: axisPayload(), adaptation: [],
+          });
+        },
+      },
+    },
+  );
+  assert.equal(requestedModel, selected);
+  assert.equal(result.agent, 'pi');
+  assert.equal(result.model, selected);
+});
+
+test('Pi prompt sampling represents every source and the newest appended document within the cap', () => {
+  const sources = Array.from({ length: 19 }, (_, index) => ({
+    name: `old-${index + 1}.txt`,
+    text: `OLD_${index + 1}\n${'가나다라마바사'.repeat(6_000)}`,
+  }));
+  sources.push({
+    name: 'newly-appended.txt',
+    text: `${'앞'.repeat(20_000)}NEW_APPEND_MARKER${'뒤'.repeat(20_000)}`,
+  });
+  const sample = sampleCorpusForPrompt(sources);
+  assert.ok(sample.length <= 120_000);
+  for (const source of sources) assert.match(sample, new RegExp(`--- ${source.name.replace('.', '\\.')} ---`));
+  assert.match(sample, /OLD_1/);
+  assert.match(sample, /NEW_APPEND_MARKER/);
+});
+
+test('analysis structure validation rejects a partial seven-axis result', () => {
+  assert.throws(
+    () => validateAnalysisStructure({
+      enoughSample: true, pageEquivalent: 10, summary: '요약', unsupportedFiles: [],
+      axes: axisPayload().slice(0, 6), adaptation: [],
+    }),
+    (error) => error?.code === 'INVALID_RESULT' && /seven/i.test(error.message),
   );
 });
 
@@ -267,4 +352,95 @@ test('re-calibrating without measurements clears the stale quantitative layer', 
   assert.ok(await store.profile());
   await store.save(payload);
   assert.equal(await store.profile(), null);
+});
+
+test('saved source documents support additive recalibration without re-uploading', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-sources-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = await new WritingStyleStore({ root }).init();
+  const payload = {
+    markdown: `# Style\n\n${'Prefer concrete openings and explicit decisions. '.repeat(12)}`,
+    language: 'en', sourceCount: 1, pageEstimate: 12, summary: '', agent: 'claude', model: 'sonnet',
+  };
+  const first = upload('old.txt', 'saved original');
+  await store.save(payload, { sources: [first] });
+  const combined = await store.calibrationSources([
+    upload('old-copy.txt', 'saved original'),
+    upload('new.txt', 'new original'),
+  ], { append: true });
+  assert.deepEqual(combined.map((file) => file.name), ['old.txt', 'new.txt']);
+  const status = await store.save({ ...payload, sourceCount: 2 }, { sources: combined });
+  assert.equal(status.savedSourceCount, 2);
+  assert.deepEqual(status.sources.map((source) => source.name), ['old.txt', 'new.txt']);
+  assert.equal(status.agent, 'claude');
+  assert.equal(status.model, 'sonnet');
+});
+
+test('a corrupt saved-source manifest is surfaced instead of silently discarding the corpus', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-corrupt-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = await new WritingStyleStore({ root }).init();
+  await fs.writeFile(path.join(root, 'sources.json'), '{broken', 'utf8');
+  await assert.rejects(store.sourceDocuments(), (error) => error?.code === 'STYLE_SOURCES_CORRUPT');
+});
+
+test('a missing saved-source blob is corruption instead of an omitted document', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-missing-source-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = await new WritingStyleStore({ root }).init();
+  const payload = {
+    markdown: `# Style\n\n${'Prefer explicit decisions and concrete openings. '.repeat(12)}`,
+    language: 'en', sourceCount: 1, pageEstimate: 12, summary: '',
+  };
+  await store.save(payload, { sources: [upload('source.txt', 'original text')] });
+  const manifest = JSON.parse(await fs.readFile(path.join(root, 'sources.json'), 'utf8'));
+  await fs.rm(path.join(root, 'sources', manifest.files[0].storedName));
+  await assert.rejects(store.status(), (error) => error?.code === 'STYLE_SOURCES_CORRUPT');
+  await assert.rejects(store.sources(), (error) => error?.code === 'STYLE_SOURCES_CORRUPT');
+});
+
+test('startup rolls an interrupted multi-artifact transaction back to the previous profile', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-recovery-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = await new WritingStyleStore({ root }).init();
+  const oldMarkdown = `# Old style\n\n${'Keep the old stable profile. '.repeat(20)}`;
+  await store.save({ language: 'en', markdown: oldMarkdown, sourceCount: 1, pageEstimate: 12, summary: 'old' });
+  const oldMetadata = await fs.readFile(path.join(root, 'metadata.json'), 'utf8');
+  const id = 'interrupted-test';
+  const styleTemp = `style.md.tmp-${id}`;
+  const metadataTemp = `metadata.json.tmp-${id}`;
+  await fs.writeFile(path.join(root, styleTemp), `# New style\n\n${'partial write '.repeat(30)}`);
+  await fs.writeFile(path.join(root, metadataTemp), JSON.stringify({ language: 'ko', summary: 'new' }));
+  await fs.rename(path.join(root, 'style.md'), path.join(root, `style.md.old-${id}`));
+  await fs.rename(path.join(root, styleTemp), path.join(root, 'style.md'));
+  await fs.rename(path.join(root, 'metadata.json'), path.join(root, `metadata.json.old-${id}`));
+  await fs.writeFile(path.join(root, 'commit-journal.json'), JSON.stringify({
+    version: 1,
+    id,
+    artifacts: [
+      { target: 'style.md', staged: styleTemp, hadOriginal: true },
+      { target: 'metadata.json', staged: metadataTemp, hadOriginal: true },
+    ],
+  }));
+
+  const recovered = await new WritingStyleStore({ root }).init();
+  assert.equal(await fs.readFile(path.join(root, 'style.md'), 'utf8'), `${oldMarkdown.trim()}\n`);
+  assert.equal(await fs.readFile(path.join(root, 'metadata.json'), 'utf8'), oldMetadata);
+  assert.equal((await recovered.status()).summary, 'old');
+  assert.equal((await fs.readdir(root)).some((name) => name.includes('.old-') || name.includes('.tmp-') || name === 'commit-journal.json'), false);
+});
+
+test('append compatibility protects the calibrated language and optional revision', () => {
+  const status = { active: true, language: 'ko', updatedAt: '2026-08-15T00:00:00.000Z' };
+  assert.doesNotThrow(() => assertWritingStyleAppendCompatible(status, {
+    language: 'ko', baseRevision: status.updatedAt,
+  }));
+  assert.throws(
+    () => assertWritingStyleAppendCompatible(status, { language: 'en' }),
+    (error) => error?.code === 'CALIBRATION_LANGUAGE_MISMATCH',
+  );
+  assert.throws(
+    () => assertWritingStyleAppendCompatible(status, { language: 'ko', baseRevision: 'stale' }),
+    (error) => error?.code === 'STYLE_REVISION_CONFLICT',
+  );
 });

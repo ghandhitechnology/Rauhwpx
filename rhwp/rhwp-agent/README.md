@@ -139,6 +139,22 @@ answer the same `usage-report`; the key is stored next to the usage log as
 `<app data>/rhwp/usage/` as append-only `events.jsonl` (pruned to 8 days) plus
 `plans.json`, overridable with `RHWP_USAGE_DIR`.
 
+## Writing-style calibration (v2)
+
+`writing-style-catalog-request` returns `writing-style-catalog` with the
+available Codex and Claude models plus only the OpenRouter models configured
+for Pi. Start a run with
+`writing-style-calibrate { requestId, language, files, agent, model, append }`.
+When `append` is true, the hub layers new uploads over the private source
+documents saved by the last successful calibration and de-duplicates identical
+files.
+
+Long runs emit resumable `writing-style-progress` snapshots with `jobId`,
+`state`, `phase`, safe `activity`/`detail`, `completed`/`total`, and the selected
+`agent`/`model`. These are high-level activity labels, not model reasoning.
+`writing-style-status` includes source descriptors under `sources`; original
+contents remain local in the writing-style app-data directory.
+
 ## Planning protocol (v2)
 
 Studio starts a chat with `workflow: "direct" | "plan"`. It can send

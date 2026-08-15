@@ -101,6 +101,21 @@ test('validateKey turns a network failure into OPENROUTER_UNREACHABLE', async ()
   });
 });
 
+test('request timeout remains active while the response body is being consumed', async () => {
+  const client = createOpenRouter({
+    timeoutMs: 15,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => new Promise(() => {}),
+    }),
+  });
+  await assert.rejects(
+    () => client.validateKey('sk-stalled-body'),
+    (error) => error?.code === 'OPENROUTER_TIMEOUT',
+  );
+});
+
 test('catalog keeps tool-capable text models and maps pricing and reasoning', async () => {
   const client = createOpenRouter({ fetchImpl: async () => jsonResponse(200, CATALOG_FIXTURE) });
   const models = await client.catalog();

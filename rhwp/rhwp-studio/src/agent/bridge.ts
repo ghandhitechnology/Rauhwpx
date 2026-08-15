@@ -54,6 +54,12 @@ import type {
   CliproxyAccount,
   CliproxyStatus,
   WritingStyleLanguage,
+  WritingStyleCatalog,
+  WritingStyleCatalogModel,
+  WritingStyleCatalogProvider,
+  WritingStyleProgress,
+  WritingStyleProgressState,
+  WritingStyleStatus,
   WritingStyleUpload,
   AgentStreamEvent,
   SidebarEvent,
@@ -118,7 +124,14 @@ export interface AgentBridge {
   deleteSkill(name: string): string;
   generateSkillDraft(input: { goal: string; triggerExamples?: string; nonTriggerExamples?: string; resourceNotes?: string; existingSkill?: string }): string;
   requestWritingStyleStatus(): string;
-  calibrateWritingStyle(input: { language: WritingStyleLanguage; files: WritingStyleUpload[] }): string;
+  requestWritingStyleCatalog(refresh?: boolean): Promise<WritingStyleCatalog | null>;
+  calibrateWritingStyle(input: {
+    language: WritingStyleLanguage;
+    files: WritingStyleUpload[];
+    agent: AgentName;
+    model: string;
+    append: boolean;
+  }): string;
   setWritingStyleInstruction(instruction: string): string;
   interrupt(): void;
   onEvent(cb: (e: SidebarEvent) => void): () => void;
@@ -139,6 +152,131 @@ const REQUEST_TIMEOUT_MS = 10_000;
 
 function isAgentName(v: unknown): v is AgentName {
   return v === 'claude' || v === 'codex' || v === 'pi';
+}
+
+function isWritingStyleProgressState(value: unknown): value is WritingStyleProgressState {
+  return value === 'queued'
+    || value === 'reading'
+    || value === 'extracting'
+    || value === 'preparing'
+    || value === 'analyzing'
+    || value === 'synthesizing'
+    || value === 'saving';
+}
+
+function readWritingStyleStatus(value: unknown): WritingStyleStatus {
+  const src = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const rawSources = Array.isArray(src['sources'])
+    ? src['sources']
+    : Array.isArray(src['sourceDocuments']) ? src['sourceDocuments'] : null;
+  const sources = rawSources
+    ? rawSources.flatMap((raw) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+      const source = raw as Record<string, unknown>;
+      if (typeof source['name'] !== 'string' || !source['name']) return [];
+      const size = Number(source['size']);
+      return [{
+        ...(typeof source['id'] === 'string' ? { id: source['id'] } : {}),
+        name: source['name'],
+        ...(typeof source['type'] === 'string' ? { type: source['type'] } : {}),
+        ...(Number.isFinite(size) && size >= 0 ? { size } : {}),
+        ...(typeof source['addedAt'] === 'string' ? { addedAt: source['addedAt'] } : {}),
+      }];
+    })
+    : undefined;
+  const sourceCount = Number(src['sourceCount']);
+  const pageEstimate = Number(src['pageEstimate']);
+  return {
+    active: src['active'] === true,
+    language: src['language'] === 'en' ? 'en' : 'ko',
+    updatedAt: typeof src['updatedAt'] === 'string' ? src['updatedAt'] : null,
+    sourceCount: Number.isFinite(sourceCount) && sourceCount >= 0 ? sourceCount : 0,
+    pageEstimate: Number.isFinite(pageEstimate) && pageEstimate >= 0 ? pageEstimate : 0,
+    summary: typeof src['summary'] === 'string' ? src['summary'] : '',
+    additionalInstruction: typeof src['additionalInstruction'] === 'string'
+      ? src['additionalInstruction']
+      : '',
+    ...(isAgentName(src['agent']) ? { agent: src['agent'] } : {}),
+    ...(typeof src['model'] === 'string' ? { model: src['model'] } : {}),
+    ...(sources ? { sources } : {}),
+    ...(sources ? { sourceDocuments: sources } : {}),
+    ...(Number.isFinite(Number(src['savedSourceCount'])) && Number(src['savedSourceCount']) >= 0
+      ? { savedSourceCount: Number(src['savedSourceCount']) }
+      : {}),
+  };
+}
+
+function readWritingStyleProgress(value: Record<string, unknown>): WritingStyleProgress | null {
+  if (!isWritingStyleProgressState(value['state'])) return null;
+  const completed = Number(value['completed']);
+  const total = Number(value['total']);
+  return {
+    state: value['state'],
+    ...(typeof value['phase'] === 'string' ? { phase: value['phase'] } : {}),
+    ...(typeof value['activity'] === 'string' ? { activity: value['activity'] } : {}),
+    ...(typeof value['detail'] === 'string' ? { detail: value['detail'] } : {}),
+    ...(Number.isFinite(completed) && completed >= 0 ? { completed } : {}),
+    ...(Number.isFinite(total) && total > 0 ? { total } : {}),
+    ...(isAgentName(value['agent']) ? { agent: value['agent'] } : {}),
+    ...(typeof value['model'] === 'string' ? { model: value['model'] } : {}),
+    ...(typeof value['startedAt'] === 'string' ? { startedAt: value['startedAt'] } : {}),
+    ...(Number.isFinite(Number(value['elapsedMs'])) && Number(value['elapsedMs']) >= 0
+      ? { elapsedMs: Number(value['elapsedMs']) }
+      : {}),
+  };
+}
+
+function readWritingStyleCatalogModel(value: unknown): WritingStyleCatalogModel | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const src = value as Record<string, unknown>;
+  if (typeof src['id'] !== 'string' || !src['id']) return null;
+  return {
+    id: src['id'],
+    name: typeof src['name'] === 'string' && src['name'] ? src['name'] : src['id'],
+    efforts: Array.isArray(src['efforts']) ? src['efforts'].filter((item): item is string => typeof item === 'string') : [],
+    defaultEffort: typeof src['defaultEffort'] === 'string' ? src['defaultEffort'] : null,
+  };
+}
+
+function readWritingStyleCatalogProvider(value: unknown): WritingStyleCatalogProvider | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const src = value as Record<string, unknown>;
+  if (!isAgentName(src['id'])) return null;
+  return {
+    id: src['id'],
+    name: typeof src['name'] === 'string' && src['name'] ? src['name'] : src['id'],
+    available: src['available'] === true,
+    error: typeof src['error'] === 'string' ? src['error'] : null,
+    models: Array.isArray(src['models'])
+      ? src['models'].map(readWritingStyleCatalogModel).filter((item): item is WritingStyleCatalogModel => item !== null)
+      : [],
+  };
+}
+
+function readWritingStyleCatalog(value: unknown): WritingStyleCatalog {
+  const src = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const selection = src['defaultSelection'];
+  const defaultSelection = selection && typeof selection === 'object' && !Array.isArray(selection)
+    ? selection as Record<string, unknown>
+    : null;
+  return {
+    providers: Array.isArray(src['providers'])
+      ? src['providers'].map(readWritingStyleCatalogProvider).filter((item): item is WritingStyleCatalogProvider => item !== null)
+      : [],
+    defaultSelection: defaultSelection
+      && isAgentName(defaultSelection['agent'])
+      && typeof defaultSelection['model'] === 'string'
+      ? {
+        agent: defaultSelection['agent'],
+        model: defaultSelection['model'],
+        ...(typeof defaultSelection['effort'] === 'string' ? { effort: defaultSelection['effort'] } : {}),
+      }
+      : null,
+  };
 }
 
 function isReferenceScope(value: unknown): value is ReferenceScope {
@@ -1013,19 +1151,25 @@ class AgentBridgeImpl implements AgentBridge {
         this.emit({ type: 'skills-error', requestId: String(msg.requestId ?? ''), code: String(msg.code ?? 'SKILLS_ERROR'), message: String(msg.message ?? 'Skill request failed') });
         break;
       case 'writing-style-status':
-        this.emit({ type: 'writing-style-status', requestId: String(msg.requestId ?? ''), status: msg.status });
+        this.emit({ type: 'writing-style-status', requestId: String(msg.requestId ?? ''), status: readWritingStyleStatus(msg.status) });
         break;
-      case 'writing-style-progress':
-        if (msg.state === 'reading' || msg.state === 'analyzing' || msg.state === 'saving') {
-          this.emit({ type: 'writing-style-progress', requestId: String(msg.requestId ?? ''), state: msg.state });
-        }
+      case 'writing-style-progress': {
+        const progress = readWritingStyleProgress(msg);
+        if (progress) this.emit({ type: 'writing-style-progress', requestId: String(msg.requestId ?? ''), ...progress });
         break;
+      }
       case 'writing-style-result':
-        this.emit({ type: 'writing-style-result', requestId: String(msg.requestId ?? ''), status: msg.status });
+        this.emit({ type: 'writing-style-result', requestId: String(msg.requestId ?? ''), status: readWritingStyleStatus(msg.status) });
         break;
       case 'writing-style-error':
         this.emit({ type: 'writing-style-error', requestId: String(msg.requestId ?? ''), code: String(msg.code ?? 'CALIBRATION_FAILED'), message: String(msg.message ?? 'Writing-style calibration failed') });
         break;
+      case 'writing-style-catalog': {
+        const catalog = readWritingStyleCatalog(msg);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, catalog);
+        this.emit({ type: 'writing-style-catalog', requestId: String(msg.requestId ?? ''), catalog });
+        break;
+      }
       case 'provider-status': {
         const providers = readProviderStatus(msg.providers);
         if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, providers);
@@ -1582,7 +1726,20 @@ class AgentBridgeImpl implements AgentBridge {
     return requestId;
   }
 
-  calibrateWritingStyle(input: { language: WritingStyleLanguage; files: WritingStyleUpload[] }): string {
+  requestWritingStyleCatalog(refresh = false): Promise<WritingStyleCatalog | null> {
+    return this.request<WritingStyleCatalog>(
+      { type: 'writing-style-catalog-request', ...(refresh ? { refresh: true } : {}) },
+      'writing-style-catalog',
+    );
+  }
+
+  calibrateWritingStyle(input: {
+    language: WritingStyleLanguage;
+    files: WritingStyleUpload[];
+    agent: AgentName;
+    model: string;
+    append: boolean;
+  }): string {
     const requestId = `writing-style-calibration-${++this.requestSeq}`;
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'writing-style-calibrate', requestId, ...input });
     return requestId;
