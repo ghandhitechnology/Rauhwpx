@@ -17,8 +17,10 @@ mcp-stdio.mjs ──────┴── ws://127.0.0.1:5175/mcp┘        ├�
 ## Requirements
 
 - Node ≥ 20
-- `claude` and/or `codex` CLI on `PATH`
 - rhwp-studio dev server (step 2 below)
+
+Codex, Claude, and Pi can be installed from Studio **Settings → Connection**.
+Each provider setup opens as a modal and supports browser login or an API key.
 
 ## Run
 
@@ -114,6 +116,12 @@ derives the profile from workflow and phase. Visibility is advisory; the hub
 always rechecks the authoritative state and epoch.
 
 ## Provider health and usage (v2)
+
+`agent-setup-status-request`, `agent-setup-install`, and `agent-setup-auth`
+drive the Settings modal. Codex and Claude are installed under
+`<app data>/rhwp/cli/`; Pi keeps its provider-specific runtime under
+`<app data>/rhwp/pi/`. OpenRouter browser login uses a localhost PKCE callback,
+while entered keys are stored only in the provider's mode-0600 configuration.
 
 Studio can send `provider-status-request` (`{ requestId, refresh? }`) and the hub
 answers `provider-status` with `{ claude, codex }` entries of
