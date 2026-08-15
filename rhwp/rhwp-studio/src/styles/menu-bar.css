@@ -14,6 +14,23 @@
   font-size: var(--font-size-md);
 }
 
+/* macOS Electron 셸: 타이틀바가 숨겨져 메뉴바가 창 최상단에 온다.
+   왼쪽에 신호등 버튼 자리를 비우고, 빈 영역은 창 드래그로 쓴다. */
+html.desktop-mac #menu-bar {
+  padding-left: 78px;
+  -webkit-app-region: drag;
+}
+
+html.desktop-mac #menu-bar .menu-item,
+html.desktop-mac #menu-bar .menu-dropdown {
+  -webkit-app-region: no-drag;
+}
+
+/* 전체 화면에서는 신호등이 사라지므로 여백을 되돌린다 */
+html.desktop-mac.desktop-fullscreen #menu-bar {
+  padding-left: 8px;
+}
+
 .menu-item {
   position: relative;
   user-select: none;
