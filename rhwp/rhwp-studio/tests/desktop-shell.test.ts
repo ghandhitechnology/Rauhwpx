@@ -121,6 +121,20 @@ test('desktop close and native-file IPC contracts stay sender-owned', () => {
   assert.doesNotMatch(preload, /\b(?:file)?path\s*:/i);
 });
 
+test('window close never deadlocks on a dead renderer', () => {
+  // The close prompt is skipped (not blocked on) when the renderer cannot answer.
+  assert.match(
+    desktopMain,
+    /window\.on\('close',[\s\S]*?isDestroyed\(\) \|\| window\.webContents\.isCrashed\(\)\) return;[\s\S]*?event\.preventDefault\(\)/,
+  );
+  assert.match(desktopMain, /render-process-gone[\s\S]*?pendingCloseRequestId = null/);
+});
+
+test('one failed startup launch does not abort the remaining launches', () => {
+  assert.match(desktopMain, /await openLaunch\(request\)\.catch\(/);
+  assert.match(desktopMain, /failedLaunches > 0 && sessions\.windows\(\)\.length === 0/);
+});
+
 test('desktop package registers supported document associations without bundling runtime data', () => {
   assert.deepEqual(rootPackage.build.fileAssociations[0].ext, ['hwp', 'hwpx', 'hml']);
   assert.ok(rootPackage.build.asarUnpack.includes('rhwp/rhwp-agent/**'));
