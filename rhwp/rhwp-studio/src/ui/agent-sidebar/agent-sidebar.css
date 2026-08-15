@@ -3443,6 +3443,53 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   border-color: var(--ag-border-strong);
 }
 
+.ag-template-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  margin: 3px 2px 0;
+  padding: 4px 5px 4px 7px;
+  border: 1px solid color-mix(in srgb, var(--ag-accent) 42%, var(--ag-border));
+  border-radius: var(--ag-r-chip);
+  background: color-mix(in srgb, var(--ag-accent) 9%, var(--ag-input-bg));
+  color: var(--ag-text);
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-template-chip[hidden] {
+  display: none;
+}
+
+.ag-template-chip-label {
+  color: var(--ag-text-muted);
+}
+
+.ag-template-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-template-chip-clear {
+  display: grid;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ag-text-muted);
+  cursor: pointer;
+}
+
+.ag-template-chip-clear:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
 .ag-composer-field {
   display: flex;
   align-items: flex-end;

@@ -421,6 +421,45 @@ export class PendingEditManager {
     return { changeSetId: set.id, obj };
   }
 
+  /** 템플릿 구조 전송을 전체 문서 스냅샷 기반 pending 연산으로 등록한다. */
+  addTemplateMutation(
+    agent: AgentName,
+    label: string,
+    templateRevision: number,
+    operation: () => { warnings?: string[]; skippedFeatures?: string[]; affectedSections?: number[] } | void,
+  ): { changeSetId: string; report: { warnings: string[]; skippedFeatures: string[]; affectedSections: number[] } } {
+    const wasm = this.deps.wasm;
+    this.deps.inputHandler.prepareSnapshotCapacity?.(1);
+    const snapshotId = wasm.saveSnapshot();
+    this.deps.inputHandler.retainExternalSnapshot?.();
+    let rawReport: { warnings?: string[]; skippedFeatures?: string[]; affectedSections?: number[] } | void;
+    try {
+      rawReport = operation();
+    } catch (error) {
+      try { wasm.restoreSnapshot(snapshotId); } catch { /* best effort */ }
+      wasm.discardSnapshot(snapshotId);
+      this.deps.inputHandler.releaseExternalSnapshot?.();
+      throw error;
+    }
+    const report = {
+      warnings: rawReport?.warnings?.filter((value): value is string => typeof value === 'string') ?? [],
+      skippedFeatures: rawReport?.skippedFeatures?.filter((value): value is string => typeof value === 'string') ?? [],
+      affectedSections: rawReport?.affectedSections?.filter((value): value is number => Number.isSafeInteger(value) && value >= 0) ?? [],
+    };
+    const set = this.ensureOpenSet(agent);
+    const op: PendingOp = {
+      kind: 'template', id: this.nextId('op'), agent: set.agent, label,
+      templateRevision, snapshotId, userEditSeqAtSnapshot: this.userEditSeq, report,
+    };
+    this.pushOp(set, op);
+    this.reconcilePreviewLayout();
+    this.emitDocEvents('agent-pending-template');
+    this.syncTemplateLock();
+    this.syncOverlay();
+    this.emitChange({ type: 'ops-changed' });
+    return { changeSetId: set.id, report };
+  }
+
   /**
    * executor 가드: 삽입 지점이 pending 삭제 마크 범위의 **내부**(경계 제외)에
    * 있으면 그 마크의 요약을 반환한다. 마크 내부에 삽입된 텍스트는 승인 시 마크와
@@ -839,6 +878,7 @@ export class PendingEditManager {
   private removeSet(set: PendingChangeSet): void {
     this.sets = this.sets.filter((s) => s !== set);
     if (this.open === set) this.open = null;
+    this.syncTemplateLock();
   }
 
   private capturePendingState(): Array<{ id: string; ops: PendingOp[] }> {
@@ -856,6 +896,7 @@ export class PendingEditManager {
     for (const set of this.sets) this.discardReplaceSnapshots(set.ops);
     this.sets = [];
     this.open = null;
+    this.syncTemplateLock();
     this.deps.overlay.clear();
     this.emitChange({ type: 'invalidated', reason });
   }
@@ -879,6 +920,7 @@ export class PendingEditManager {
     if (reverted) this.reconcilePreviewLayout();
     this.sets = [];
     this.open = null;
+    this.syncTemplateLock();
     this.deps.overlay.clear();
     if (reverted) this.emitDocEvents('agent-invalidate');
     this.emitChange({ type: 'invalidated', reason });
@@ -893,11 +935,16 @@ export class PendingEditManager {
   /** set 제거/폐기 시점에 replace op 들이 잡고 있는 wasm 스냅샷을 해제한다 */
   private discardReplaceSnapshots(ops: PendingOp[]): void {
     for (const op of ops) {
-      if (op.kind !== 'replace' || op.snapshotId === null) continue;
+      if ((op.kind !== 'replace' && op.kind !== 'template') || op.snapshotId === null) continue;
       try { this.deps.wasm.discardSnapshot(op.snapshotId); } catch { /* best effort */ }
       op.snapshotId = null;
       this.deps.inputHandler.releaseExternalSnapshot?.();
     }
+  }
+
+  private syncTemplateLock(): void {
+    const locked = this.sets.some((set) => set.ops.some((op) => op.kind === 'template'));
+    this.deps.eventBus.emit('agent-template-lock-changed', locked);
   }
 
   private emitChange(e: PendingEditsChangeEvent): void {
@@ -938,7 +985,7 @@ export class PendingEditManager {
     const ops: OverlayOp[] = [];
     for (const set of this.sets) {
       for (const op of set.ops) {
-        if (op.kind === 'field') continue;
+        if (op.kind === 'field' || op.kind === 'template') continue;
         if (op.kind === 'object') {
           const ref = this.objectOverlayRef(op.obj);
           if (ref) {
@@ -1036,6 +1083,8 @@ export class PendingEditManager {
         return `format ${JSON.stringify(op.format)} @${coord(op.range)}`;
       case 'field':
         return `field ${op.name}: "${digest(op.oldValue)}" → "${digest(op.newValue)}"`;
+      case 'template':
+        return `${op.label} (template revision ${op.templateRevision})`;
       case 'object': {
         const o = op.obj;
         const at = 'tableParaIdx' in o ? `s${o.sectionIdx} p${o.tableParaIdx}` : `s${o.sectionIdx}`;
@@ -1756,6 +1805,7 @@ export class PendingEditManager {
           }
           continue;
         }
+        if (op.kind === 'template') continue;
         const c = op.range.cell;
         if (c && op.range.sectionIdx === sectionIdx && c.paraIdx === paraIdx && hit(c.controlIdx)) {
           op.range.cell = { ...c, controlIdx: c.controlIdx + delta };
@@ -2013,6 +2063,10 @@ export class PendingEditManager {
         dropped.push(op);
         continue;
       }
+      if (op.kind === 'template' && op.userEditSeqAtSnapshot !== this.userEditSeq) {
+        dropped.push(op);
+        continue;
+      }
       kept.push(op);
     }
     return { kept, dropped };
@@ -2045,6 +2099,9 @@ export class PendingEditManager {
           this.applyFormatRaw(op.range, op.inverse);
         } else if (op.kind === 'field') {
           wasm.setFieldValueByName(op.name, op.oldValue);
+        } else if (op.kind === 'template') {
+          if (op.snapshotId === null) throw new Error('template snapshot is unavailable');
+          wasm.restoreSnapshot(op.snapshotId);
         } else if (op.kind === 'object' && isObjectOpApplied(op.obj)) {
           if (!this.revertObjectOp(op.obj)) failed.add(op.id);
         }
@@ -2140,7 +2197,7 @@ export class PendingEditManager {
       if (cand === op || (cand.seq ?? 0) <= (op.seq ?? 0)) return false;
       if (revertSet.includes(cand)) return false;
       switch (cand.kind) {
-        case 'insert': case 'replace': case 'format': case 'field': return true;
+        case 'insert': case 'replace': case 'format': case 'field': case 'template': return true;
         case 'object': return isObjectOpApplied(cand.obj);
         default: return false; // delete/mark-only 는 문서를 바꾸지 않는다
       }
@@ -2314,7 +2371,7 @@ export class PendingEditManager {
   private shiftAllAfterInsert(sectionIdx: number, ins: InsertShift, exclude?: PendingOp, cell?: CellAddr): void {
     for (const set of this.sets) {
       for (const op of set.ops) {
-        if (op === exclude || op.kind === 'field') continue;
+        if (op === exclude || op.kind === 'field' || op.kind === 'template') continue;
         if (op.kind === 'object') {
           this.shiftObjectOp(op.obj, sectionIdx, (p) => shiftPointAfterInsert(p, ins), cell);
           continue;
@@ -2334,7 +2391,7 @@ export class PendingEditManager {
     const removedParas = del.cell ? 0 : del.endParaIdx - del.startParaIdx;
     for (const set of this.sets) {
       for (const op of set.ops) {
-        if (op === exclude || op.kind === 'field') continue;
+        if (op === exclude || op.kind === 'field' || op.kind === 'template') continue;
         if (op.kind === 'object') {
           this.shiftObjectOp(op.obj, del.sectionIdx, (p) => shiftPointAfterDelete(p, del), del.cell);
           continue;
