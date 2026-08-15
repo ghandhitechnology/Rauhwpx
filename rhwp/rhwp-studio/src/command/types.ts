@@ -3,6 +3,10 @@ import type { WasmBridge } from '@/core/wasm-bridge';
 import type { DocumentDirtyState } from '@/core/document-dirty-state';
 import type { InputHandler } from '@/engine/input-handler';
 import type { ViewportManager } from '@/view/viewport-manager';
+import type {
+  FileSystemFileHandleLike,
+  SaveFilePickerOptionsLike,
+} from './file-system-access.ts';
 
 export type EditorEditMode = 'normal' | 'form';
 
@@ -83,6 +87,16 @@ export interface CommandServices {
   getInputHandler: () => InputHandler | null;
   /** ViewportManager 접근 (문서 미로드 시 null) */
   getViewportManager: () => ViewportManager | null;
+  /** Electron native Open picker; browsers return undefined and use their own picker. */
+  pickOpenHandle?: () => Promise<FileSystemFileHandleLike | null | undefined>;
+  /** Electron native Save As picker; browsers return undefined and use their own picker. */
+  pickSaveHandle?: (
+    options: SaveFilePickerOptionsLike,
+  ) => Promise<FileSystemFileHandleLike | null | undefined>;
+  /** Save target ownership check; cleanup commits only after a successful native write. */
+  validateSaveHandle?: (
+    handle: FileSystemFileHandleLike,
+  ) => Promise<((saved: boolean) => Promise<void>) | void>;
   /** 에디터 편집 모드 변경 */
   setEditMode: (mode: EditorEditMode) => void;
 }

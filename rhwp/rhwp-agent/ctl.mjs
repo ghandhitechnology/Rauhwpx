@@ -15,7 +15,6 @@ import {
   hubRunPaths,
   isHubHealthy,
   readHubHealth,
-  resolveHubPid,
   startDetachedHub,
   stopHubByPort,
 } from '../../desktop/agent-hub.mjs';
@@ -69,6 +68,7 @@ export async function runCtl(command, {
   home = env.HOME || env.USERPROFILE,
 } = {}) {
   const paths = hubRunPaths(runDir);
+  const token = env.RHWP_AGENT_TOKEN ?? env.RHWP_AGENT_DEV_TOKEN ?? 'dev';
   const print = (result, lines, code) => {
     if (json) writeLine(stdout, JSON.stringify({ command, ...result }));
     else for (const line of lines) writeLine(stdout, line);
@@ -81,9 +81,9 @@ export async function runCtl(command, {
   }
 
   if (command === 'status') {
-    const body = await readHubHealth(port);
+    const body = await readHubHealth(port, { token });
     const ready = body?.ok === true;
-    const pid = await resolveHubPid(port, { pidPath: paths.pid });
+    const pid = ready ? Number(body.pid) || null : null;
     return print(
       { ready, pid, url: hubHealthUrl(port), log: paths.log },
       ready
@@ -94,7 +94,7 @@ export async function runCtl(command, {
   }
 
   if (command === 'stop') {
-    const result = await stopHubByPort(port, { pidPath: paths.pid });
+    const result = await stopHubByPort(port, { pidPath: paths.pid, token });
     return print(
       result,
       result.pid
@@ -105,7 +105,7 @@ export async function runCtl(command, {
   }
 
   if (command === 'restart') {
-    await stopHubByPort(port, { pidPath: paths.pid });
+    await stopHubByPort(port, { pidPath: paths.pid, token });
   }
 
   if (!existsSync(scriptPath)) {

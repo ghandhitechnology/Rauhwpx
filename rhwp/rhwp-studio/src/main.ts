@@ -29,6 +29,7 @@ import { installPwaFileHandling, type FileHandlingWindowLike } from '@/command/p
 import {
   captureDroppedFileHandle,
   isSupportedDocumentFileName,
+  readFileFromHandle,
   type FileSystemFileHandleLike,
 } from '@/command/file-system-access';
 import { forgetConvertedHmlSaveHandle } from '@/command/save-target';
@@ -37,6 +38,7 @@ import { CommandPalette } from '@/ui/command-palette';
 import { showHmlImportWarning } from '@/ui/hml-import-warning';
 import { showLocalFontsModalIfNeeded } from '@/ui/local-fonts-modal';
 import { showToast } from '@/ui/toast';
+import { resolveDocumentPreflight, type DocumentPreflightIdentity } from '@/recent/document-preflight';
 import { addRecentDoc, listRecentDocs } from '@/recent/recent-store';
 import { showDropConfirmDialog } from '@/ui/drop-confirm-dialog';
 import { initRhwpDev } from '@/core/rhwp-dev';
@@ -46,7 +48,12 @@ import { analyzeDocumentFonts } from '@/core/document-font-status';
 import { detectLocalFonts, getLocalFontState, loadStoredLocalFonts } from '@/core/local-fonts';
 import { userSettings } from '@/core/user-settings';
 import { AutosaveManager, type AutosaveScheduleSettings, type AutosaveStatus } from '@/recovery/autosave-manager';
-import { clearAutosaveDrafts, deleteAutosaveDraft, listAutosaveDrafts, type AutosaveDraft } from '@/recovery/autosave-store';
+import {
+  clearRecoverableAutosaveDrafts,
+  deleteAutosaveDraft,
+  listRecoverableAutosaveDrafts,
+  type AutosaveDraft,
+} from '@/recovery/autosave-store';
 import { recoveryFileName } from '@/recovery/recovery-format';
 import { showAutosaveRecoveryDialog } from '@/recovery/recovery-ui';
 import { CellSelectionRenderer } from '@/engine/cell-selection-renderer';
@@ -63,7 +70,22 @@ import {
 } from '@/view/render-backend';
 import { calculateFitPageZoom, calculateFitWidthZoom } from '@/view/zoom-fit';
 import { installEmbedRuntime } from '@/embed/runtime';
-import { installDesktopWindowChrome, installWebAppShell } from '@/desktop-integration';
+import {
+  bindNativeFileHandleIdentity,
+  cancelDesktopDocument,
+  captureDesktopNativeDroppedFile,
+  commitDesktopDocument,
+  getRendererSessionContext,
+  installDesktopCloseHandling,
+  installDesktopFileHandling,
+  installDesktopWindowChrome,
+  installWebAppShell,
+  pickDesktopNativeOpenFile,
+  pickDesktopNativeSaveFile,
+  releaseDesktopDocument,
+  releaseReplacedNativeFileHandle,
+  reserveDesktopDocument,
+} from '@/desktop-integration';
 import { initAgentBridge } from './agent/bridge.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
@@ -72,12 +94,21 @@ const wasm = new WasmBridge();
 const eventBus = new EventBus();
 const documentState = new DocumentDirtyState(eventBus);
 documentState.installBeforeUnload(window);
+const rendererSessionContextPromise = getRendererSessionContext();
 const autosaveManager = new AutosaveManager({
   exportBytes: () => wasm.exportHwp(),
   schedule: autosaveScheduleFromUserSettings(),
   onStatus: handleAutosaveStatus,
 });
+void rendererSessionContextPromise.then((context) => {
+  if (context) {
+    autosaveManager.setOwner({ launchId: context.launchId, sessionId: context.sessionId });
+  }
+});
 autosaveManager.connect(eventBus);
+window.addEventListener('pagehide', (event) => {
+  if (!event.persisted) autosaveManager.dispose();
+});
 initThemeSync((effective, mode) => {
   eventBus.emit('theme-changed', { mode, effective });
   eventBus.emit('command-state-changed');
@@ -128,6 +159,14 @@ let rendererInitialized = false;
  * 동안 유지되고, 재열기 시 recent-store가 handle/digest로 이전 ID를 복원한다.
  */
 let activeDocumentId: string | null = null;
+
+class DocumentOwnedElsewhereError extends Error {
+  constructor() {
+    super('다른 창에서 이미 열려 있는 문서입니다.');
+    this.name = 'DocumentOwnedElsewhereError';
+  }
+}
+
 let extensionViewerSettings: ExtensionViewerSettings = {
   disableExternalWebFonts: false,
 };
@@ -189,8 +228,17 @@ const commandServices: CommandServices = {
   getContext,
   getInputHandler: () => inputHandler,
   getViewportManager: () => canvasView?.getViewportManager() ?? null,
+  pickOpenHandle: pickDesktopNativeOpenFile,
+  pickSaveHandle: pickDesktopNativeSaveFile,
+  validateSaveHandle: reserveSaveHandleForWrite,
   setEditMode,
 };
+
+installDesktopCloseHandling(async () => {
+  const allowClose = await canReplaceCurrentDocument();
+  if (allowClose) documentState.permitNextUnload();
+  return allowClose;
+});
 
 const dispatcher = new CommandDispatcher(registry, commandServices, eventBus);
 
@@ -500,6 +548,20 @@ async function initialize(): Promise<void> {
     setupZoomControls();
     setupEventListeners();
     setupGlobalShortcuts();
+    installDesktopFileHandling((handles) => {
+      const handle = handles[0];
+      if (!handle) return;
+      void readFileFromHandle(handle)
+        .then(({ bytes, name }) => openDocumentBytes({
+          bytes,
+          fileName: name,
+          fileHandle: handle,
+        }))
+        .catch(async (error) => {
+          await handle.releaseUnusedSaveTarget?.().catch(() => {});
+          if (!(error instanceof DocumentOwnedElsewhereError)) showLoadError(error);
+        });
+    });
     void loadFromUrlParam();
     void offerAutosaveRecoveryIfIdle();
     installPwaFileHandling(window as FileHandlingWindowLike, {
@@ -646,14 +708,24 @@ function setupFileInput(): void {
 
     // #3259: Chromium은 getAsFileSystemHandle을 drop event와 같은 tick에 호출해야 한다.
     // 아직 bytes를 읽거나 handle을 저장하지 않으며, 아래 사용자 확인이 승인된 뒤에만 사용한다.
-    const droppedFileHandle = isDoc
+    const browserDroppedFileHandle = isDoc
       ? captureDroppedFileHandle(e.dataTransfer?.items, file)
       : Promise.resolve<FileSystemFileHandleLike | null>(null);
+    const desktopDroppedFileHandle = isDoc
+      ? captureDesktopNativeDroppedFile(file)
+      : Promise.resolve<FileSystemFileHandleLike | null | undefined>(undefined);
+    const droppedFileHandle = desktopDroppedFileHandle.then(async (nativeHandle) => (
+      nativeHandle === undefined ? browserDroppedFileHandle : nativeHandle
+    ));
 
     // [#1439] 보안: 드롭으로 로컬 파일을 읽는 동작은 기본에서 제외하고, 사용자가
     // 명시적으로 [열기]를 눌러 동의한 경우에만 진행한다 (확장/웹 공통).
     const confirmed = await showDropConfirmDialog(file.name);
-    if (!confirmed) return;
+    if (!confirmed) {
+      const unusedHandle = await droppedFileHandle.catch(() => null);
+      await unusedHandle?.releaseUnusedSaveTarget?.().catch(() => {});
+      return;
+    }
 
     if (isImage) {
       if (!inputHandler || wasm.pageCount === 0) return;
@@ -692,7 +764,13 @@ function setupFileInput(): void {
     }
 
     // HWP/HWPX/HML — loadFile 내부 unsaved 가드는 드롭 확인 이후에 동작한다.
-    await loadFile(file, { fileHandle: await droppedFileHandle });
+    let fileHandle: FileSystemFileHandleLike | null;
+    try {
+      fileHandle = await droppedFileHandle;
+    } catch {
+      return;
+    }
+    await loadFile(file, { fileHandle });
   });
 }
 
@@ -811,9 +889,12 @@ function setupEventListeners(): void {
   eventBus.on('document-file-handle-saved', (payload) => {
     const saved = payload as {
       fileHandle: FileSystemFileHandleLike;
+      previousFileHandle: FileSystemFileHandleLike | null;
       fileName: string;
       sourceFormat: string;
     };
+    void releaseReplacedNativeFileHandle(saved.previousFileHandle, saved.fileHandle)
+      .catch((error) => console.warn('[desktop] 이전 네이티브 파일 핸들 해제 실패:', error));
     const documentId = activeDocumentId;
     const sourceDigest = wasm.documentDigest;
     if (!documentId || !sourceDigest) return;
@@ -1054,13 +1135,73 @@ async function loadFile(
     await loadBytes(data, file.name, options.fileHandle ?? null, startTime, { dataReadProgressShown: true });
     return true;
   } catch (error) {
-    showLoadError(error);
+    await options.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
+    if (!(error instanceof DocumentOwnedElsewhereError)) showLoadError(error);
     return false;
   }
 }
 
 function prepareCanvasRendererDocument(): void {
   canvasView?.prepareDocumentLoad();
+}
+
+async function reserveDocumentOpen(
+  data: Uint8Array,
+  fileHandle: typeof wasm.currentFileHandle,
+  skipRecent = false,
+): Promise<{ identity: DocumentPreflightIdentity; reservationId: string | null | undefined }> {
+  const resolved = await resolveDocumentPreflight(data, fileHandle, await listRecentDocs());
+  const identity = skipRecent
+    ? { ...resolved, documentId: createActiveDocumentId(), useSourceDigest: false }
+    : resolved;
+  const reservationId = await reserveDesktopDocument(identity, fileHandle);
+  if (reservationId === null) throw new DocumentOwnedElsewhereError();
+  return { identity, reservationId };
+}
+
+async function reserveSaveHandleForWrite(
+  handle: FileSystemFileHandleLike,
+): Promise<((saved: boolean) => Promise<void>) | void> {
+  const currentHandle = wasm.currentFileHandle;
+  const currentIdentity = activeDocumentId
+    ? { documentId: activeDocumentId, sourceDigest: wasm.documentDigest, useSourceDigest: false }
+    : null;
+  if (handle === currentHandle) {
+    if (currentIdentity) bindNativeFileHandleIdentity(handle, currentIdentity);
+    return;
+  }
+  if (currentHandle && typeof handle.isSameEntry === 'function') {
+    try {
+      if (await handle.isSameEntry(currentHandle)) {
+        if (currentIdentity) bindNativeFileHandleIdentity(handle, currentIdentity);
+        return;
+      }
+    } catch {
+      // Continue with recent/digest identity when the browser cannot compare handles.
+    }
+  }
+
+  if (handle.identityKind === 'native-path') {
+    if (!currentIdentity) throw new Error('Active document identity is unavailable');
+    bindNativeFileHandleIdentity(handle, currentIdentity);
+    const reservationId = await reserveDesktopDocument(currentIdentity, handle);
+    if (reservationId === null) throw new DocumentOwnedElsewhereError();
+    if (!reservationId) return;
+    return async (saved) => {
+      if (saved) await commitDesktopDocument(reservationId);
+      else await cancelDesktopDocument(reservationId);
+    };
+  }
+
+  const target = await handle.getFile();
+  const targetBytes = new Uint8Array(await target.arrayBuffer());
+  const identity = await resolveDocumentPreflight(targetBytes, handle, await listRecentDocs());
+  if (identity.documentId === activeDocumentId) return;
+
+  const reservationId = await reserveDesktopDocument(identity, handle);
+  if (reservationId === null) throw new DocumentOwnedElsewhereError();
+  if (!reservationId) return;
+  return () => cancelDesktopDocument(reservationId);
 }
 
 async function loadBytes(
@@ -1070,12 +1211,30 @@ async function loadBytes(
   startTime = performance.now(),
   options: { dataReadProgressShown?: boolean; skipRecent?: boolean; suppressDialogs?: boolean } = {},
 ): Promise<void> {
+  const ownership = await reserveDocumentOpen(data, fileHandle, options.skipRecent);
+  const previousFileHandle = wasm.currentFileHandle;
   if (!options.dataReadProgressShown) {
     await updateLoadProgress(0, '문서 데이터 준비 중...');
   }
   await updateLoadProgress(25, '문서 파싱 및 쪽 계산 중...');
-  activeDocumentId = null;
-  const docInfo = wasm.loadDocument(data, fileName);
+  let docInfo: DocumentInfo;
+  try {
+    docInfo = wasm.loadDocument(data, fileName);
+    await commitDesktopDocument(ownership.reservationId);
+    fileHandle?.adoptSaveTarget?.();
+  } catch (error) {
+    await cancelDesktopDocument(ownership.reservationId).catch(() => {});
+    activeDocumentId = null;
+    await releaseDesktopDocument().catch(() => {});
+    await releaseReplacedNativeFileHandle(previousFileHandle, null).catch(() => {});
+    await autosaveManager.endDocument({ discardDraft: true, reason: 'failed-document-replacement' })
+      .catch(() => {});
+    throw error;
+  }
+  activeDocumentId = ownership.identity.documentId;
+  bindNativeFileHandleIdentity(fileHandle, ownership.identity);
+  await releaseReplacedNativeFileHandle(previousFileHandle, fileHandle)
+    .catch((error) => console.warn('[desktop] 교체된 네이티브 파일 핸들 해제 실패:', error));
   prepareCanvasRendererDocument();
   await updateLoadProgress(45, '자동 저장 준비 중...');
   forgetConvertedHmlSaveHandle(fileHandle);
@@ -1088,25 +1247,20 @@ async function loadBytes(
   if (!options.skipRecent) {
     const sourceDigest = wasm.documentDigest;
     if (!sourceDigest) {
-      activeDocumentId = createActiveDocumentId();
       console.warn('[recent] 원본 digest가 없어 세션 전용 문서 ID를 사용합니다.');
     } else {
       try {
-        const recent = await addRecentDoc({
+        await addRecentDoc({
+          documentId: ownership.identity.documentId,
           sourceDigest,
           fileName: wasm.fileName,
           sourceFormat: wasm.getSourceFormat(),
           handle: fileHandle,
         });
-        activeDocumentId = recent.documentId;
       } catch (err) {
-        activeDocumentId = createActiveDocumentId();
-        console.warn('[recent] 최근 문서 기록 실패, 세션 전용 문서 ID를 사용합니다:', err);
+        console.warn('[recent] 최근 문서 기록 실패, 세션 identity를 유지합니다:', err);
       }
     }
-  } else {
-    // 복구본은 원본 최근 항목을 가장하지 않는 독립 문서 세션이다.
-    activeDocumentId = createActiveDocumentId();
   }
 
   await autosaveManager.beginDocument(
@@ -1197,14 +1351,16 @@ async function offerAutosaveRecoveryIfIdle(): Promise<void> {
   if (shouldSkipInitialAutosaveRecovery()) return;
 
   try {
-    const drafts = (await listAutosaveDrafts()).filter((draft) => draft.data.byteLength > 0);
+    await rendererSessionContextPromise;
+    const drafts = (await listRecoverableAutosaveDrafts())
+      .filter((draft) => draft.data.byteLength > 0);
     if (drafts.length === 0) return;
     if (wasm.pageCount > 0 || documentState.isDirty()) return;
 
     const choice = await showAutosaveRecoveryDialog(drafts);
     if (choice.action === 'later') return;
     if (choice.action === 'delete-all') {
-      await clearAutosaveDrafts();
+      await clearRecoverableAutosaveDrafts();
       showToast({ message: '복구 후보를 삭제했습니다.', durationMs: 2200 });
       return;
     }
@@ -1235,11 +1391,17 @@ async function restoreAutosaveDraft(draft: AutosaveDraft): Promise<void> {
 
 async function createNewDocument(): Promise<void> {
   const msg = sbMessage();
+  const previousFileHandle = wasm.currentFileHandle;
+  const identity = { documentId: createActiveDocumentId(), sourceDigest: null };
+  const reservationId = await reserveDesktopDocument(identity, null);
+  if (reservationId === null) throw new DocumentOwnedElsewhereError();
   try {
     msg.textContent = '새 문서 생성 중...';
-    activeDocumentId = null;
     const docInfo = wasm.createNewDocument();
-    activeDocumentId = createActiveDocumentId();
+    await commitDesktopDocument(reservationId);
+    activeDocumentId = identity.documentId;
+    await releaseReplacedNativeFileHandle(previousFileHandle, wasm.currentFileHandle)
+      .catch((error) => console.warn('[desktop] 새 문서 전환 핸들 해제 실패:', error));
     prepareCanvasRendererDocument();
     await autosaveManager.beginDocument(
       { fileName: wasm.fileName, sourceFormat: wasm.getSourceFormat() },
@@ -1247,6 +1409,12 @@ async function createNewDocument(): Promise<void> {
     );
     await initializeDocument(docInfo, `새 문서.hwp — ${docInfo.pageCount}페이지`);
   } catch (error) {
+    await cancelDesktopDocument(reservationId).catch(() => {});
+    activeDocumentId = null;
+    await releaseDesktopDocument().catch(() => {});
+    await releaseReplacedNativeFileHandle(previousFileHandle, null).catch(() => {});
+    await autosaveManager.endDocument({ discardDraft: true, reason: 'failed-new-document' })
+      .catch(() => {});
     msg.textContent = `새 문서 생성 실패: ${error}`;
     console.error('[main] 새 문서 생성 실패:', error);
   }
@@ -1254,6 +1422,25 @@ async function createNewDocument(): Promise<void> {
 
 async function canReplaceCurrentDocument(skipUnsavedGuard?: boolean): Promise<boolean> {
   return skipUnsavedGuard === true || await confirmSaveBeforeReplacingDocument(commandServices);
+}
+
+async function openDocumentBytes(data: {
+  bytes: Uint8Array;
+  fileName: string;
+  fileHandle: typeof wasm.currentFileHandle;
+  skipUnsavedGuard?: boolean;
+}) {
+  if (!await canReplaceCurrentDocument(data.skipUnsavedGuard)) {
+    await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
+    return false;
+  }
+  try {
+    await loadBytes(data.bytes, data.fileName, data.fileHandle);
+    return true;
+  } catch (error) {
+    await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
+    throw error;
+  }
 }
 
 // 커맨드에서 새 문서 생성 호출
@@ -1278,15 +1465,14 @@ eventBus.on('open-document-bytes', async (payload) => {
     eventBus.emit('open-document-bytes:done', { requestId: data.requestId, ok, error });
   };
   try {
-    if (!await canReplaceCurrentDocument(data.skipUnsavedGuard)) {
+    if (!await openDocumentBytes(data)) {
       notifyDone(false, '문서 열기가 취소되었습니다.');
       return;
     }
-    await loadBytes(data.bytes, data.fileName, data.fileHandle);
     notifyDone(true);
   } catch (error) {
     // #265: WASM 파서 에러 (예: HWP 3.0 미지원) 를 사용자에게 전파
-    showLoadError(error);
+    if (!(error instanceof DocumentOwnedElsewhereError)) showLoadError(error);
     const msg = error instanceof Error ? error.message : String(error);
     notifyDone(false, msg);
   }
@@ -1339,6 +1525,7 @@ async function loadFromUrlParam(): Promise<void> {
     assertRemoteDocumentBytes(data, contentType);
     await loadBytes(data, fileName, null);
   } catch (error) {
+    if (error instanceof DocumentOwnedElsewhereError) return;
     // 로컬 file:// 로드 실패 + "파일 URL 액세스 허용" 미허용 → 전용 안내 (#1131)
     if (fileUrl.startsWith('file:') && typeof chrome !== 'undefined') {
       const allowed = await isFileSchemeAccessAllowed();

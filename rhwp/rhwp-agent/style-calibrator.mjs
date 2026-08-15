@@ -1,9 +1,14 @@
-import { spawn } from 'node:child_process';
+import spawn from 'cross-spawn';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import { openRouterReady } from './agents/title.mjs';
+import {
+  isolatedProcessEnv,
+  processTreeSpawnOptions,
+  terminateProcessTree,
+} from './process-tree.mjs';
 import { extractReferenceText, markupToText, SUPPORTED_REFERENCE_EXTENSIONS } from './reference-extractor.mjs';
 import {
   analyzeText, baselineLines, confidenceFor, deriveBands, splitHalfStability,
@@ -212,11 +217,18 @@ function adaptiveTimeout(baseMs, totalBytes = 0) {
 }
 
 /** Race-safe CLI runner. It settles on close so stderr is fully drained and escalates termination. */
-function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode) {
+function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode, deps = {}) {
   return new Promise((resolve, reject) => {
+    const spawnProcess = deps.spawnProcess ?? spawn;
+    const terminateProcess = deps.terminateProcess ?? terminateProcessTree;
     let child;
     try {
-      child = spawn(command, args, { cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawnProcess(command, args, {
+        ...processTreeSpawnOptions(),
+        cwd,
+        env: isolatedProcessEnv(deps),
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
     } catch (error) {
       reject(new StyleCalibrationError(unavailableCode, String(error?.message ?? error)));
       return;
@@ -230,25 +242,17 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode) {
     let inputError = null;
     let processError = null;
     let stopping = false;
-    let killTimer = null;
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (killTimer) clearTimeout(killTimer);
       if (error) reject(error);
       else resolve(value);
     };
     const stop = () => {
       if (stopping) return;
       stopping = true;
-      try { child.kill('SIGTERM'); } catch {}
-      killTimer = setTimeout(() => {
-        try {
-          if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-        } catch {}
-      }, 5_000);
-      killTimer.unref?.();
+      terminateProcess(child, { graceMs: 5_000 });
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -304,12 +308,12 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode) {
   });
 }
 
-function runCodex(args, stdin, cwd, timeoutMs = ANALYSIS_TIMEOUT_MS) {
-  return runCli('codex', args, stdin, cwd, timeoutMs, 'CODEX_UNAVAILABLE');
+function runCodex(args, stdin, cwd, timeoutMs = ANALYSIS_TIMEOUT_MS, deps = {}) {
+  return runCli('codex', args, stdin, cwd, timeoutMs, 'CODEX_UNAVAILABLE', deps);
 }
 
-function runClaude(args, stdin, cwd, timeoutMs = ANALYSIS_TIMEOUT_MS) {
-  return runCli('claude', args, stdin, cwd, timeoutMs, 'CLAUDE_UNAVAILABLE');
+function runClaude(args, stdin, cwd, timeoutMs = ANALYSIS_TIMEOUT_MS, deps = {}) {
+  return runCli('claude', args, stdin, cwd, timeoutMs, 'CLAUDE_UNAVAILABLE', deps);
 }
 
 function extractStructuredResult(output, unavailableCode = 'CODEX_UNAVAILABLE') {
@@ -655,7 +659,9 @@ export function renderStyleMarkdown({ language, axes, adaptation, bands, metrics
 /**
  * @param {object} input
  * @param {{ run?: typeof runCodex, runClaude?: typeof runClaude, useOpenRouter?: boolean,
- *   piManager?: any, openRouter?: any, projectRoot?: string, onProgress?: (event: object) => void }} [deps]
+ *   piManager?: any, openRouter?: any, projectRoot?: string, isolatedHome?: string,
+ *   sessionId?: string, spawnProcess?: typeof spawn, terminateProcess?: typeof terminateProcessTree,
+ *   onProgress?: (event: object) => void }} [deps]
  */
 export async function calibrateWritingStyle(input, { run = runCodex, ...deps } = {}) {
   const requestedAgent = input?.agent ?? input?.provider;
@@ -752,11 +758,11 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
       } else if (agent === 'claude') {
         const claudeRunner = deps.runClaude ?? runClaude;
         result = extractStructuredResult(await claudeRunner(
-          claudeArgs(ANALYSIS_SCHEMA, 'read-only', temp, { model, effort }), prompt, temp, timeoutMs,
+          claudeArgs(ANALYSIS_SCHEMA, 'read-only', temp, { model, effort }), prompt, temp, timeoutMs, deps,
         ), 'CLAUDE_UNAVAILABLE');
       } else {
         result = extractStructuredResult(await run(
-          codexArgs(analysisSchemaPath, 'read-only', { model, effort }), prompt, temp, timeoutMs,
+          codexArgs(analysisSchemaPath, 'read-only', { model, effort }), prompt, temp, timeoutMs, deps,
         ));
       }
     } finally {

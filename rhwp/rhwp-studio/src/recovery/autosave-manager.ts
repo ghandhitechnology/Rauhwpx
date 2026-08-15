@@ -3,8 +3,11 @@ import type { EventBus } from '@/core/event-bus';
 import {
   createAutosaveDraftId,
   deleteAutosaveDraft,
+  releaseAutosaveSession,
   saveAutosaveDraft,
+  touchAutosaveSession,
   type AutosaveDraft,
+  type AutosaveOwner,
 } from './autosave-store.ts';
 
 export interface AutosaveDocumentMeta {
@@ -16,6 +19,8 @@ export interface AutosaveDocumentMeta {
 export interface AutosaveStoreLike {
   saveDraft(draft: AutosaveDraft): Promise<void>;
   deleteDraft(id: string): Promise<void>;
+  touchSession?(owner: AutosaveOwner, heartbeatAt: number): Promise<void>;
+  releaseSession?(sessionId: string): Promise<void>;
 }
 
 export interface AutosaveScheduleSettings {
@@ -38,6 +43,8 @@ export interface AutosaveManagerOptions {
   now?: () => number;
   idFactory?: () => string;
   store?: AutosaveStoreLike;
+  owner?: AutosaveOwner;
+  heartbeatIntervalMs?: number;
   logger?: Pick<Console, 'debug' | 'warn'>;
   onStatus?: (status: AutosaveStatus) => void;
 }
@@ -50,6 +57,7 @@ interface CurrentDocument {
 
 const DEFAULT_IDLE_DELAY_MS = 10_000;
 const DEFAULT_RECOVERY_INTERVAL_MS = 10 * 60_000;
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
 
 function reasonText(reason: unknown, fallback: string): string {
   return typeof reason === 'string' && reason.length > 0 ? reason : fallback;
@@ -69,6 +77,11 @@ export class AutosaveManager {
   private lastSavedAt = 0;
   private saving = false;
   private pendingReason: string | null = null;
+  private owner: AutosaveOwner | null = null;
+  private ownerHeartbeatAt = 0;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly heartbeatIntervalMs: number;
+  private disposed = false;
   /** discard 세대 — 진행 중이던 saveDraft가 discard 이후 완료되며 draft를 부활시키는 경합 감지용 */
   private discardGeneration = 0;
   private scheduleSettings: AutosaveScheduleSettings;
@@ -87,9 +100,32 @@ export class AutosaveManager {
     this.store = options.store ?? {
       saveDraft: saveAutosaveDraft,
       deleteDraft: deleteAutosaveDraft,
+      touchSession: touchAutosaveSession,
+      releaseSession: releaseAutosaveSession,
     };
+    this.heartbeatIntervalMs = normalizeMs(
+      options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+      DEFAULT_HEARTBEAT_INTERVAL_MS,
+      0,
+    );
     this.logger = options.logger ?? console;
     this.onStatus = options.onStatus;
+    if (options.owner) this.setOwner(options.owner);
+  }
+
+  setOwner(owner: AutosaveOwner): void {
+    if (this.disposed) return;
+    if (this.owner?.sessionId === owner.sessionId && this.owner.launchId === owner.launchId) return;
+    const previousSessionId = this.owner?.sessionId;
+    this.stopHeartbeat();
+    this.owner = { launchId: owner.launchId, sessionId: owner.sessionId };
+    if (previousSessionId) void this.releaseOwner(previousSessionId);
+    void this.heartbeat();
+    if (this.heartbeatIntervalMs > 0) {
+      this.heartbeatTimer = setInterval(() => {
+        void this.heartbeat();
+      }, this.heartbeatIntervalMs);
+    }
   }
 
   connect(eventBus: EventBus): () => void {
@@ -189,6 +225,7 @@ export class AutosaveManager {
       const bytes = this.exportBytes();
       const savedAt = this.now();
       const generationAtStart = this.discardGeneration;
+      if (this.owner) await this.heartbeat(savedAt);
       await this.store.saveDraft({
         id: current.draftId,
         fileName: current.fileName,
@@ -197,6 +234,11 @@ export class AutosaveManager {
         byteLength: bytes.byteLength,
         data: new Uint8Array(bytes),
         dirtyReason: reason,
+        ...(this.owner ? {
+          ownerLaunchId: this.owner.launchId,
+          ownerSessionId: this.owner.sessionId,
+          ownerHeartbeatAt: this.ownerHeartbeatAt,
+        } : {}),
       });
       if (this.discardGeneration !== generationAtStart) {
         // 저장 진행 중 discard가 끼어듦 — 방금 저장으로 부활한 draft를 재삭제한다
@@ -229,9 +271,48 @@ export class AutosaveManager {
     await this.deleteDraft(draftId, reason);
   }
 
-  dispose(): void {
+  async endDocument({ discardDraft = false, reason = 'document-ended' } = {}) {
+    if (discardDraft) await this.discardCurrentDraft(reason);
     this.cancelTimers();
     this.pendingReason = null;
+    this.lastSavedAt = 0;
+    this.current = null;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.cancelTimers();
+    this.stopHeartbeat();
+    this.pendingReason = null;
+    const sessionId = this.owner?.sessionId;
+    this.owner = null;
+    if (sessionId) void this.releaseOwner(sessionId);
+  }
+
+  private async heartbeat(at = this.now()) {
+    if (!this.owner) return;
+    this.ownerHeartbeatAt = at;
+    if (!this.store.touchSession) return;
+    try {
+      await this.store.touchSession(this.owner, at);
+    } catch (error) {
+      this.logger.warn('[autosave] session heartbeat failed:', error);
+    }
+  }
+
+  private stopHeartbeat() {
+    if (!this.heartbeatTimer) return;
+    clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+
+  private async releaseOwner(sessionId: string) {
+    try {
+      await this.store.releaseSession?.(sessionId);
+    } catch (error) {
+      this.logger.warn('[autosave] session release failed:', error);
+    }
   }
 
   private cancelIdleTimer(): void {

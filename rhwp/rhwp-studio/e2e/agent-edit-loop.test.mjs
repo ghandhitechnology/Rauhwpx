@@ -2,7 +2,7 @@
  * E2E: 에이전트 편집 루프 종단간 검증 — hub → bridge → executor → pending → wasm 렌더.
  *
  * 실제 rhwp-agent 허브(server.mjs)를 테스트 포트로 띄우고, mcp-stdio.mjs 와 동일한
- * `{v:2,type:'tool-call',id,tool,args}` 프레임을 보는 가짜 MCP WS 클라이언트로
+ * `{v:3,type:'tool-call',id,tool,args}` 프레임을 보는 가짜 MCP WS 클라이언트로
  * 스튜디오의 에이전트 도구 표면을 프로덕션 경로 그대로 구동한다. 검증 순서:
  *   a. get_structure revision 반환 + write 툴 expectedRevision 게이트(REVISION_MISMATCH)
  *   b. replace_range 원자성(단일 'replace' op) + 삽입 텍스트의 교체 구간 글자 서식 상속
@@ -23,6 +23,8 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
+
+import { issueScopedHubToken } from '../../rhwp-agent/hub-session-registry.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const studioRoot = path.resolve(__dirname, '..');
@@ -94,8 +96,10 @@ async function stopServer(child) {
 
 // ─── 가짜 MCP WS 클라이언트 (mcp-stdio.mjs 와 동일 프레임) ─────
 
-function connectMcpClient(hubPort, token) {
-  const ws = new WebSocket(`ws://127.0.0.1:${hubPort}/mcp?token=${encodeURIComponent(token)}&agent=claude`);
+function connectMcpClient(hubPort, token, sessionId) {
+  const ws = new WebSocket(
+    `ws://127.0.0.1:${hubPort}/mcp?token=${encodeURIComponent(token)}&sessionId=${encodeURIComponent(sessionId)}&agent=claude`,
+  );
   let nextId = 1;
   const inflight = new Map();
   ws.addEventListener('message', (ev) => {
@@ -121,7 +125,7 @@ function connectMcpClient(hubPort, token) {
         reject(new Error(`tool-call 응답 시간 초과: ${tool}`));
       }, 45000);
       inflight.set(id, { resolve, timer });
-      ws.send(JSON.stringify({ v: 2, type: 'tool-call', id, tool, args }));
+      ws.send(JSON.stringify({ v: 3, type: 'tool-call', id, tool, args }));
     });
   };
   return { ws, opened, call };
@@ -159,7 +163,7 @@ const hub = spawnLogged(
   { RHWP_AGENT_PORT: String(hubPort), RHWP_AGENT_TOKEN: HUB_TOKEN },
   path.join(repoRoot, 'target', 'rhwp-agent-e2e-hub.log'),
 );
-await waitForHttp(`http://127.0.0.1:${hubPort}/healthz`, 'rhwp-agent 허브', hub);
+await waitForHttp(`http://127.0.0.1:${hubPort}/healthz?token=${encodeURIComponent(HUB_TOKEN)}`, 'rhwp-agent 허브', hub);
 
 const vite = spawnLogged(
   npmCmd,
@@ -230,7 +234,11 @@ try {
       { timeout: 10000 },
     );
 
-    const mcp = connectMcpClient(hubPort, HUB_TOKEN);
+    const healthResponse = await fetch(`http://127.0.0.1:${hubPort}/healthz?token=${encodeURIComponent(HUB_TOKEN)}`);
+    const health = await healthResponse.json();
+    const sessionId = health.sessions?.[0]?.sessionId;
+    if (!sessionId) throw new Error('Studio hub session was not registered');
+    const mcp = connectMcpClient(hubPort, issueScopedHubToken(HUB_TOKEN, sessionId), sessionId);
     await mcp.opened;
     const call = mcp.call;
     try {

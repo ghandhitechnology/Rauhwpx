@@ -184,7 +184,10 @@ test('connect persists the key, queries official usage, and never returns the se
 
   const saved = JSON.parse(await fs.readFile(path.join(rootDir, 'cliproxy.json'), 'utf8'));
   assert.equal(saved.key, 'secret-key');
-  assert.equal((await fs.stat(path.join(rootDir, 'cliproxy.json'))).mode & 0o777, 0o600);
+  assert.equal(
+    (await fs.stat(path.join(rootDir, 'cliproxy.json'))).mode & 0o777,
+    process.platform === 'win32' ? 0o666 : 0o600,
+  );
 
   const reloaded = await createCliproxyClient({
     rootDir,
