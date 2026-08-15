@@ -7,6 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { createCliSetupManager, defaultCliSetupRoot } from '../cli-setup-manager.mjs';
+import { createMemorySecretStore } from '../secret-store.mjs';
 
 class FakeProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -51,7 +52,10 @@ test('Codex installs into the app prefix and API login never persists the full k
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-'));
   const prefixDir = path.join(rootDir, 'prefix');
   const { calls, spawnProcess } = fakeSpawner(prefixDir);
-  const manager = await createCliSetupManager({ rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' } }).init();
+  const secretStore = createMemorySecretStore();
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, npmCommand: 'npm', secretStore, baseEnv: { PATH: '/usr/bin' },
+  }).init();
 
   const progress = [];
   const installed = await manager.install('codex', (event) => progress.push(event));
@@ -70,8 +74,9 @@ test('Codex installs into the app prefix and API login never persists the full k
   assert.equal(status.authenticated, true);
   assert.equal(status.authMethod, 'api-key');
   assert.equal(status.keyTail, 'alue');
-  const login = calls.find((call) => call.argv.includes('--with-api-key'));
-  assert.equal(login.proc.input, 'sk-proj-secret-value\n');
+  assert.equal(manager.envFor('codex').OPENAI_API_KEY, 'sk-proj-secret-value');
+  assert.equal(await secretStore.get('rhwp.codex.api-key'), 'sk-proj-secret-value');
+  assert.equal(calls.some((call) => call.argv.includes('--with-api-key')), false);
   const configText = await fs.readFile(path.join(rootDir, 'config.json'), 'utf8');
   assert.doesNotMatch(configText, /sk-proj-secret-value/);
   assert.match(configText, /"codexKeyTail": "alue"/);
@@ -83,14 +88,34 @@ test('Claude API setup is restored through the provider environment', async () =
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-'));
   const prefixDir = path.join(rootDir, 'prefix');
   const { spawnProcess } = fakeSpawner(prefixDir);
-  const manager = await createCliSetupManager({ rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' } }).init();
+  const secretStore = createMemorySecretStore();
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, npmCommand: 'npm', secretStore, baseEnv: { PATH: '/usr/bin' },
+  }).init();
 
   await manager.install('claude');
   const status = await manager.authenticate('claude', 'api-key', 'sk-ant-secret-value');
   assert.equal(status.setupComplete, true);
   assert.equal(status.authMethod, 'api-key');
   assert.equal(manager.envFor('claude').ANTHROPIC_API_KEY, 'sk-ant-secret-value');
+  assert.doesNotMatch(await fs.readFile(path.join(rootDir, 'config.json'), 'utf8'), /sk-ant-secret-value/);
   assert.equal((await fs.stat(path.join(rootDir, 'config.json'))).mode & 0o777, 0o600);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a legacy plaintext Claude key migrates to the secure vault before being removed', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-migrate-'));
+  await fs.writeFile(path.join(rootDir, 'config.json'), JSON.stringify({
+    claudeApiKey: 'sk-ant-legacy-secret',
+    claudeAuthMethod: 'api-key',
+  }));
+  const secretStore = createMemorySecretStore();
+  const manager = await createCliSetupManager({ rootDir, secretStore }).init();
+
+  assert.equal(manager.envFor('claude').ANTHROPIC_API_KEY, 'sk-ant-legacy-secret');
+  assert.equal(await secretStore.get('rhwp.claude.api-key'), 'sk-ant-legacy-secret');
+  assert.doesNotMatch(await fs.readFile(path.join(rootDir, 'config.json'), 'utf8'), /legacy-secret/);
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });
@@ -99,15 +124,29 @@ test('an existing global harness can be reauthenticated without an app-managed i
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-'));
   const prefixDir = path.join(rootDir, 'prefix');
   const { calls, spawnProcess } = fakeSpawner(prefixDir);
-  const manager = await createCliSetupManager({ rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' } }).init();
+  const secretStore = createMemorySecretStore();
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, secretStore, baseEnv: { PATH: '/usr/bin' },
+  }).init();
 
   const status = await manager.authenticate('codex', 'api-key', 'sk-proj-global-harness');
 
   assert.equal(status.installed, false);
   assert.equal(status.authenticated, true);
-  const login = calls.find((call) => call.command === 'codex' && call.argv.includes('--with-api-key'));
-  assert.ok(login, 'PATH 의 codex 명령으로 재인증한다');
-  assert.equal(login.proc.input, 'sk-proj-global-harness\n');
+  assert.equal(manager.envFor('codex').OPENAI_API_KEY, 'sk-proj-global-harness');
+  assert.equal(calls.some((call) => call.argv.includes('--with-api-key')), false);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Windows Codex OAuth uses device auth instead of a localhost callback', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-auth-'));
+  const { calls, spawnProcess } = fakeSpawner(path.join(rootDir, 'prefix'));
+  const manager = await createCliSetupManager({ rootDir, spawnProcess, platform: 'win32' }).init();
+
+  await manager.authenticate('codex', 'oauth');
+  assert.ok(calls.some((call) => call.command === 'codex'
+    && call.argv[0] === 'login' && call.argv[1] === '--device-auth'));
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });
@@ -135,14 +174,14 @@ test('automatic CLI update failure keeps the working version and marks it as req
     json: async () => ({ version: '1.1.0', dist: {} }),
   });
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, fetchImpl, baseEnv: { PATH: '/usr/bin' },
+    rootDir, spawnProcess, npmCommand: 'npm', fetchImpl, baseEnv: { PATH: '/usr/bin' },
   }).init();
 
   const status = await manager.automaticUpdate('codex');
   assert.equal(status.version, '1.0.0');
   assert.equal(status.latestVersion, '1.1.0');
   assert.equal(status.updateRequired, true);
-  assert.equal(status.error, null);
+  assert.match(status.error, /자동 업데이트/);
   assert.equal(JSON.parse(await fs.readFile(path.join(packageDir, 'package.json'), 'utf8')).version, '1.0.0');
   assert.deepEqual((await fs.readdir(rootDir)).filter((name) => name.includes('.update-')), []);
 
@@ -175,7 +214,7 @@ test('automatic CLI update activates a verified prefix and retains one rollback 
     json: async () => ({ version: '1.1.0', dist: {} }),
   });
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, fetchImpl, baseEnv: { PATH: '/usr/bin' },
+    rootDir, spawnProcess, npmCommand: 'npm', fetchImpl, baseEnv: { PATH: '/usr/bin' },
   }).init();
 
   const status = await manager.automaticUpdate('codex');

@@ -346,6 +346,11 @@ test('the child env is built from scratch without ambient provider keys', () => 
   );
 });
 
+test('the selected vault key is passed only when the Pi session explicitly provides it', () => {
+  const env = buildPiEnv({ ...baseOpts, openRouterApiKey: 'sk-or-v1-vault' }, { PATH: '/usr/bin' });
+  assert.equal(env.OPENROUTER_API_KEY, 'sk-or-v1-vault');
+});
+
 test('the prompt is the last argv entry and stdin stays closed', () => {
   const { session, spawns } = startSession();
   session.sendUserMessage('문서를 정리해 줘');
