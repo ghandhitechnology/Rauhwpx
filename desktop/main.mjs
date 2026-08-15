@@ -9,18 +9,23 @@ import {
   dialog,
   ipcMain,
   nativeTheme,
+  safeStorage,
   shell,
 } from 'electron';
 import electronUpdater from 'electron-updater';
 import {
   DEFAULT_HUB_PORT,
   ensureAgentHub,
+  hubPidFromHealth,
+  killPid,
   isHubHealthy,
   nextHubRestartDelay,
+  readHubHealth,
   resolveHubLaunch,
   spawnHubProcess,
   stopHubChild,
 } from './agent-hub.mjs';
+import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 
 const { autoUpdater } = electronUpdater;
 const mime = {
@@ -57,6 +62,7 @@ let agentChain = Promise.resolve();
 let agentRestartTimer = null;
 let agentRestartAttempt = 0;
 let quitting = false;
+let secretVault = null;
 
 function studioDist() {
   return join(__dirname, '..', 'rhwp', 'rhwp-studio', 'dist');
@@ -132,6 +138,7 @@ function startAgent() {
     env: {
       ...process.env,
       RHWP_AGENT_PORT: String(AGENT_PORT),
+      RHWP_SECRET_BROKER: 'ipc',
     },
   });
   if (!launch) {
@@ -140,6 +147,13 @@ function startAgent() {
   }
   console.log(`[rauhwpx] starting agent hub via ${launch.via}: ${launch.command} ${launch.args.join(' ')}`);
   const child = spawnHubProcess(launch, {
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    onMessage: (message, source) => {
+      if (!secretVault) return;
+      void handleSecretRequest(secretVault, message).then((response) => {
+        if (response && source.connected) source.send(response);
+      });
+    },
     onError: (error) => {
       console.warn('[rauhwpx] agent hub spawn error:', error);
       if (agentProcess !== child) return;
@@ -165,6 +179,11 @@ function stopAgent() {
 }
 
 async function runEnsure({ restartUnhealthy = false } = {}) {
+  const health = await readHubHealth(AGENT_PORT);
+  if (health?.ok === true && health.name === 'rhwp-agent' && health.secretBroker !== true) {
+    const pid = hubPidFromHealth(health);
+    if (pid) await killPid(pid);
+  }
   const result = await ensureAgentHub({
     port: AGENT_PORT,
     processAlive: Boolean(agentProcess),
@@ -308,6 +327,10 @@ ipcMain.handle('agent-hub:ensure', async () => {
 });
 
 app.whenReady().then(async () => {
+  secretVault = createSecretVault({
+    filePath: join(app.getPath('userData'), 'secrets.json'),
+    safeStorage,
+  });
   installMenu();
   if (!devUrl) await startStudioServer();
   // Bring the hub up before the window so the first WebSocket is not refused.

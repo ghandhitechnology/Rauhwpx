@@ -23,6 +23,7 @@ import { createCliproxyClient } from './cliproxy.mjs';
 import { createPiManager, defaultPiRoot } from './pi-manager.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
 import { createOpenRouter } from './openrouter.mjs';
+import { createIpcSecretStore } from './secret-store.mjs';
 import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
 import { resolveHwpExtractor } from './reference-extractor.mjs';
 import { ReferenceStore } from './reference-store.mjs';
@@ -69,8 +70,9 @@ const writingStyleStore = await new WritingStyleStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
 const PI_ROOT = defaultPiRoot();
 const openRouter = createOpenRouter({ cacheDir: PI_ROOT });
-const piManager = await createPiManager({ rootDir: PI_ROOT, openRouter }).init();
-const cliSetup = await createCliSetupManager().init();
+const secretStore = createIpcSecretStore();
+const piManager = await createPiManager({ rootDir: PI_ROOT, openRouter, secretStore }).init();
+const cliSetup = await createCliSetupManager({ secretStore }).init();
 // App-managed bins are available to auxiliary CLI calls as soon as installation completes.
 process.env.PATH = `${cliSetup.binDir}${path.delimiter}${process.env.PATH ?? ''}`;
 Object.assign(process.env, cliSetup.envFor('claude'));
@@ -601,7 +603,7 @@ function startSession(
     codexAuthPath: sourceCodexAuthPath,
     codexBin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
     claudeBin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
-    providerEnv: agent === 'claude' ? cliSetup.envFor('claude') : {},
+    providerEnv: agent === 'claude' || agent === 'codex' ? cliSetup.envFor(agent) : {},
     onEvent: makeBackendEventHandler(generation),
     workflow,
     phase: workflow === 'direct' ? 'implementing' : planning.phase,
@@ -611,6 +613,7 @@ function startSession(
     // pi 전용 — 설치 경로와 영속 루트, 그리고 선택한 모델의 추론 지원 여부.
     piBin: piManager.piBin,
     piRoot: piManager.rootDir,
+    openRouterApiKey: agent === 'pi' ? piManager.apiKey() : undefined,
     reasoning: agent === 'pi' ? Boolean(piModelConfig(model)?.reasoning) : false,
   };
   const backend = agent === 'claude'
@@ -1123,6 +1126,12 @@ function handleStudioMessage(sock, msg) {
         .catch((e) => sendAgentSetupError(sock, null, agent, e, 'AGENT_AUTH_FAILED'));
       return;
     }
+    case 'agent-setup-cancel': {
+      const agent = msg.agent;
+      if (agent === 'pi') void piManager.cancelSetup();
+      else if (agent === 'claude' || agent === 'codex') void cliSetup.cancel(agent);
+      return;
+    }
     case 'usage-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void usageSnapshotRefreshing(msg.refresh === true)
@@ -1560,6 +1569,7 @@ function healthzBody() {
     pid: process.pid,
     uptimeMs: Date.now() - STARTED_AT,
     protocol: PROTOCOL_VERSION,
+    secretBroker: secretStore.available,
     studioConnected: !!studioSocket && studioSocket.readyState === studioSocket.OPEN,
     mcpClients: mcpSockets.size,
     session: sessionInfo(),
