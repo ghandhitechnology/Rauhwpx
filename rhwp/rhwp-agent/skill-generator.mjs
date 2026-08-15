@@ -155,7 +155,7 @@ export async function generateSkillDraft(input, deps = {}) {
   try {
     await fs.writeFile(schemaPath, JSON.stringify(SCHEMA), 'utf8');
     const output = await run('codex', [
-      'exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules',
+      'exec', '--json', '--ephemeral', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules',
       '--disable', 'apps', '--disable', 'browser_use', '--disable', 'computer_use',
       '--disable', 'image_generation', '--disable', 'multi_agent', '--disable', 'plugins',
       '--disable', 'skill_search',
