@@ -126,10 +126,13 @@ function thinkingLevelMap() {
 }
 
 export function defaultPiRoot(env = process.env, platform = process.platform, home = os.homedir()) {
-  if (env.RHWP_PI_DIR) return path.resolve(env.RHWP_PI_DIR);
-  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'rhwp', 'pi');
-  if (platform === 'win32') return path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'rhwp', 'pi');
-  return path.join(env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'rhwp', 'pi');
+  const platformPath = platform === 'win32' ? path.win32 : path.posix;
+  if (env.RHWP_PI_DIR) return platformPath.resolve(env.RHWP_PI_DIR);
+  if (platform === 'darwin') return platformPath.join(home, 'Library', 'Application Support', 'rhwp', 'pi');
+  if (platform === 'win32') {
+    return platformPath.join(env.APPDATA || platformPath.join(home, 'AppData', 'Roaming'), 'rhwp', 'pi');
+  }
+  return platformPath.join(env.XDG_DATA_HOME || platformPath.join(home, '.local', 'share'), 'rhwp', 'pi');
 }
 
 /**

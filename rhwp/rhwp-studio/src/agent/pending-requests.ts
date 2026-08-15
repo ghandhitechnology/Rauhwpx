@@ -35,8 +35,6 @@ export class PendingRequestRegistry {
           this.entries.delete(requestId);
           resolve(null);
         }, timeoutMs);
-        // 노드에서 타이머가 프로세스를 붙잡지 않게 한다(브라우저에는 없는 API).
-        (entry.timer as unknown as { unref?: () => void }).unref?.();
       }
       this.entries.set(requestId, entry);
     });
