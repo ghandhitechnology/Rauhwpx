@@ -394,12 +394,53 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function terminateProcessTree(child, { platform = process.platform, spawnProcess = spawn } = {}) {
+  if (!child?.pid) return;
+  if (platform !== 'win32') {
+    try { child.kill('SIGKILL'); } catch {}
+    return;
+  }
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    try {
+      const killer = spawnProcess('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], {
+        detached: false,
+        shell: false,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      killer.once?.('error', () => {
+        try { child.kill('SIGKILL'); } catch {}
+        finish();
+      });
+      killer.once?.('close', finish);
+      killer.once?.('exit', finish);
+    } catch {
+      try { child.kill('SIGKILL'); } catch {}
+      finish();
+    }
+  });
+}
+
 export async function killPid(pid, {
   timeoutMs = DEFAULT_STOP_TIMEOUT_MS,
   wait = sleep,
   now = Date.now,
+  platform = process.platform,
+  spawnProcess = spawn,
 } = {}) {
   if (!isProcessAlive(pid)) return { killed: false, alive: false };
+  if (platform === 'win32') {
+    await terminateProcessTree({ pid, kill: (signal) => process.kill(pid, signal) }, { platform, spawnProcess });
+    const deadline = now() + timeoutMs;
+    while (now() < deadline && isProcessAlive(pid)) await wait(50);
+    return { killed: true, alive: isProcessAlive(pid) };
+  }
   try {
     process.kill(pid, 'SIGTERM');
   } catch {
@@ -427,6 +468,7 @@ export function spawnHubProcess(launch, {
   unref = detached && !forwardStdio,
   onError,
   onExit,
+  onMessage,
   log = console,
 } = {}) {
   // Windows에서 .cmd/.bat 셸 스크립트는 셸 없이 spawn하면 EINVAL이 난다
@@ -455,6 +497,7 @@ export function spawnHubProcess(launch, {
   if (typeof onExit === 'function') {
     child.on('exit', (code, signal) => onExit(code, signal, child));
   }
+  if (typeof onMessage === 'function') child.on('message', (message) => onMessage(message, child));
   child.rhwpProcessGroup = detached && platform !== 'win32';
   if (unref) child.unref();
   return child;

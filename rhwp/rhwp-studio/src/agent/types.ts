@@ -244,6 +244,34 @@ export interface ProviderHealth {
 
 export type ProviderStatusMap = Record<AgentName, ProviderHealth>;
 
+export type AgentAuthMethod = 'oauth' | 'api-key';
+
+export interface AgentSetupStatus {
+  agent: AgentName;
+  /** App-managed or already present on PATH. */
+  available: boolean;
+  /** Available and authenticated/configured for use. */
+  connected: boolean;
+  installed: boolean;
+  installing: boolean;
+  version: string | null;
+  authenticated: boolean;
+  authMethod: AgentAuthMethod | null;
+  keyTail: string | null;
+  authenticating: boolean;
+  setupComplete: boolean;
+  latestVersion: string | null;
+  updateRequired: boolean;
+  error: string | null;
+}
+
+export type AgentSetupStatusMap = Record<AgentName, AgentSetupStatus>;
+
+export interface AgentSetupAuthStart {
+  agent: AgentName;
+  authUrl: string | null;
+}
+
 /** 요금제 — 한도 계산의 기준이 되므로 프로바이더별로 값이 다르다. */
 export type ClaudeUsagePlan = 'pro' | 'max5x' | 'max20x' | 'api';
 export type CodexUsagePlan = 'plus' | 'pro' | 'api';
@@ -351,6 +379,8 @@ export interface PiStatus {
   models: PiModelConfig[];
   defaultModelId: string | null;
   setupComplete: boolean;
+  latestVersion: string | null;
+  updateRequired: boolean;
   error: string | null;
 }
 
@@ -467,12 +497,28 @@ export type SidebarEvent =
   | { type: 'writing-style-error'; requestId: string; code: string; message: string }
   | { type: 'writing-style-catalog'; requestId: string; catalog: WritingStyleCatalog }
   | { type: 'provider-status'; providers: ProviderStatusMap }
+  | { type: 'agent-setup-status'; statuses: AgentSetupStatusMap }
+  | {
+      type: 'agent-setup-progress';
+      agent: AgentName;
+      state: 'installing' | 'authorizing' | 'done';
+      phase?: 'preparing' | 'resolving' | 'downloading' | 'installing' | 'configuring' | 'verifying' | 'done';
+      percent?: number;
+      detail?: string;
+      authUrl?: string;
+      activity?: boolean;
+      receivedBytes?: number;
+      totalBytes?: number;
+    }
+  | { type: 'agent-setup-error'; agent: AgentName | null; code: string; message: string }
   | { type: 'usage-report'; usage: UsageSummary }
   | { type: 'pi-status'; status: PiStatus }
   | {
       type: 'pi-setup-progress';
       requestId: string;
-      state: 'downloading' | 'installing' | 'configuring' | 'done';
+      state: 'preparing' | 'downloading' | 'installing' | 'configuring' | 'verifying' | 'done';
+      /** 전체 설치 흐름의 0–100 단계 가중 진행률. */
+      percent?: number;
       detail?: string;
       /** 내려받은 바이트 — 있으면 결정적 진행률을 그릴 수 있다. */
       receivedBytes?: number;

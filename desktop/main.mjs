@@ -12,6 +12,7 @@ import {
   nativeTheme,
   net,
   protocol,
+  safeStorage,
   shell,
 } from 'electron';
 import electronUpdater from 'electron-updater';
@@ -38,6 +39,7 @@ import {
   installStudioProtocol,
   registerStudioScheme,
 } from './studio-protocol.mjs';
+import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 
 const { autoUpdater } = electronUpdater;
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -184,6 +186,7 @@ class AgentHubOwner {
         RHWP_WORK_DIR: this.workDir,
         RHWP_OWN_RUNTIME_DIR: '1',
         RHWP_OWN_WORK_DIR: '1',
+        RHWP_SECRET_BROKER: 'ipc',
       },
     });
     if (!launch) throw new Error(`Agent hub launch command not found: ${server}`);
@@ -191,6 +194,13 @@ class AgentHubOwner {
 
     console.log(`[rauhwpx] starting owned agent hub via ${launch.via}`);
     const child = spawnHubProcess(launch, {
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      onMessage: (message, source) => {
+        if (!secretVault) return;
+        void handleSecretRequest(secretVault, message).then((response) => {
+          if (response && source.connected) source.send(response);
+        });
+      },
       onError: (error) => {
         console.warn('[rauhwpx] agent hub spawn error:', error);
       },
@@ -253,6 +263,7 @@ class AgentHubOwner {
 let quitting = false;
 let quitRequested = false;
 let desktopReady = false;
+let secretVault = null;
 const pendingLaunches = [launchRequest({ argv: process.argv, source: 'initial' })];
 const runtimeDir = join(app.getPath('temp'), 'rauhwpx', 'runtime', launchId);
 const workDir = join(app.getPath('userData'), 'launch-work', launchId);
@@ -600,6 +611,10 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    secretVault = createSecretVault({
+      filePath: join(app.getPath('userData'), 'secrets.json'),
+      safeStorage,
+    });
     installMenu();
     if (!devUrl) installStudioProtocol({ protocol, net, root: studioDist() });
     await hubOwner.ensure();

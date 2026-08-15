@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+// cross-spawn is required for app-managed .cmd shims on Windows.
+import spawn from 'cross-spawn';
 
 /** CLI 가 살아 있는지 확인하는 프로브 — `<cli> --version` 한 줄이면 충분하다. */
 const PROBE_COMMANDS = /** @type {const} */ ({ claude: 'claude', codex: 'codex' });
@@ -43,7 +44,8 @@ function firstLine(text) {
  * piBin 은 게터로 받는다 — pi 는 설치 도중에 생기므로 부팅 시점 값에 묶으면 안 된다.
  *
  * @param {{ spawnProcess?: typeof spawn, timeoutMs?: number, cacheTtlMs?: number,
- *           now?: () => number, piBin?: () => string|null }} [deps]
+ *           now?: () => number, piBin?: () => string|null,
+ *           cliBin?: (agent: 'claude'|'codex') => string|null }} [deps]
  */
 export function createProviderHealth({
   spawnProcess = spawn,
@@ -51,6 +53,7 @@ export function createProviderHealth({
   cacheTtlMs = CACHE_TTL_MS,
   now = Date.now,
   piBin = () => null,
+  cliBin = (agent) => PROBE_COMMANDS[agent],
 } = {}) {
   /** @type {{ result: { claude: ProviderHealth, codex: ProviderHealth, pi: ProviderHealth }, checkedAt: number } | null} */
   let cache = null;
@@ -171,7 +174,9 @@ export function createProviderHealth({
         return Promise.resolve(cache.result);
       }
       if (inFlight) return inFlight;
-      const probing = Promise.all([probe(PROBE_COMMANDS.claude), probe(PROBE_COMMANDS.codex), probePi()])
+      const claudeBin = cliBin('claude') || PROBE_COMMANDS.claude;
+      const codexBin = cliBin('codex') || PROBE_COMMANDS.codex;
+      const probing = Promise.all([probe(claudeBin), probe(codexBin), probePi()])
         .then(([claude, codex, pi]) => {
           const result = { claude, codex, pi };
           cache = { result, checkedAt: now() };
