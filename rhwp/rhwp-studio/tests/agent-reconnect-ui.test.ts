@@ -6,10 +6,14 @@ import { readFileSync } from 'node:fs';
    Node 테스트에서 인스턴스화할 수 없다. 기존 브리지 테스트와 같은 방식으로
    계약을 소스 텍스트로 못박고, 짝 맞추기 동작은 pending-requests 테스트가
    실제 모듈로 검증한다. */
-const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
-const types = readFileSync(new URL('../src/agent/types.ts', import.meta.url), 'utf8');
-const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
-const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
+const readSource = (relativePath: string) => readFileSync(
+  new URL(relativePath, import.meta.url),
+  'utf8',
+).replace(/\r\n/g, '\n');
+const bridge = readSource('../src/agent/bridge.ts');
+const types = readSource('../src/agent/types.ts');
+const source = readSource('../src/ui/agent-sidebar/index.ts');
+const css = readSource('../src/ui/agent-sidebar/agent-sidebar.css');
 
 test('connection 이벤트는 시도 횟수와 다음 재시도 시각을 함께 싣는다', () => {
   assert.match(types, /type: 'connection';[\s\S]*attempt\?: number;[\s\S]*retryInMs\?: number;/);
@@ -97,7 +101,7 @@ test('CLI 스폰 실패는 대화 안에서 다시 시도할 수 있다', () => 
 });
 
 test('끊기면 허브 기동을 요청하고 포커스·온라인·가시성에서 다시 붙는다', () => {
-  assert.match(bridge, /import \{ ensureDesktopAgentHub \} from '\.\.\/desktop-integration\.ts'/);
+  assert.match(bridge, /import \{[\s\S]*ensureDesktopAgentHub,[\s\S]*\} from '\.\.\/desktop-integration\.ts'/);
   assert.match(
     bridge,
     /private requestHubLaunch\(\): Promise<boolean> \{\s*if \(!this\.hubLaunch\) \{\s*this\.hubLaunch = ensureDesktopAgentHub\(\)/,

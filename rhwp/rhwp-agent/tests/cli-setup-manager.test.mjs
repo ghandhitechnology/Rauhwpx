@@ -40,10 +40,14 @@ function fakeSpawner(prefixDir) {
 }
 
 test('CLI setup root follows the app data directory on each platform', () => {
-  assert.equal(defaultCliSetupRoot({ RHWP_CLI_DIR: '/tmp/rhwp-cli' }), '/tmp/rhwp-cli');
+  assert.equal(defaultCliSetupRoot({ RHWP_CLI_DIR: '/tmp/rhwp-cli' }), path.resolve('/tmp/rhwp-cli'));
   assert.equal(
     defaultCliSetupRoot({}, 'darwin', '/Users/tester'),
     '/Users/tester/Library/Application Support/rhwp/cli',
+  );
+  assert.equal(
+    defaultCliSetupRoot({ APPDATA: 'C:\\data' }, 'win32', 'C:\\Users\\tester'),
+    path.win32.join('C:\\data', 'rhwp', 'cli'),
   );
   assert.equal(defaultCliSetupRoot({}, 'linux', '/home/tester'), '/home/tester/.local/share/rhwp/cli');
 });
@@ -99,7 +103,10 @@ test('Claude API setup is restored through the provider environment', async () =
   assert.equal(status.authMethod, 'api-key');
   assert.equal(manager.envFor('claude').ANTHROPIC_API_KEY, 'sk-ant-secret-value');
   assert.doesNotMatch(await fs.readFile(path.join(rootDir, 'config.json'), 'utf8'), /sk-ant-secret-value/);
-  assert.equal((await fs.stat(path.join(rootDir, 'config.json'))).mode & 0o777, 0o600);
+  assert.equal(
+    (await fs.stat(path.join(rootDir, 'config.json'))).mode & 0o777,
+    process.platform === 'win32' ? 0o666 : 0o600,
+  );
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });

@@ -1,8 +1,9 @@
-import { spawn } from 'node:child_process';
+import spawn from 'cross-spawn';
 import { constants as fsConstants, promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { IMAGE_REFERENCE_EXTENSIONS } from './reference-image.mjs';
+import { processTreeSpawnOptions, terminateProcessTree } from './process-tree.mjs';
 
 const MAX_EXTRACTED_CHARS = 5_000_000;
 const HWP_EXTENSIONS = new Set(['.hwp', '.hwpx', '.hml']);
@@ -177,9 +178,9 @@ export function resolveHwpExtractor(projectRoot, env = process.env) {
 function runRhwpExport(binary, filePath, timeoutMs = 30_000) {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, ['export-text', filePath, '--json'], {
+      ...processTreeSpawnOptions(),
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
-      windowsHide: true,
     });
     let stdout = '';
     let stderr = '';
@@ -191,13 +192,7 @@ function runRhwpExport(binary, filePath, timeoutMs = 30_000) {
       callback();
     };
     const stop = () => {
-      try { child.kill('SIGTERM'); } catch {}
-      const killTimer = setTimeout(() => {
-        try {
-          if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-        } catch {}
-      }, 5_000);
-      killTimer.unref?.();
+      terminateProcessTree(child, { graceMs: 5_000 });
     };
     const timer = setTimeout(() => {
       stop();

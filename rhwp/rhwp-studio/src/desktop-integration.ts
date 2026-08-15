@@ -6,13 +6,79 @@
  * 패키지된 PWA/브라우저는 Node 를 띄울 수 없어 no-op 이다.
  */
 
+import type {
+  FileSystemFileHandleLike,
+  FileSystemWritableFileStreamLike,
+  SaveFilePickerOptionsLike,
+} from './command/file-system-access.ts';
+
 export const DEV_AGENT_HUB_ENSURE_PATH = '/__rhwp/ensure-agent-hub';
 
+export interface RendererSessionContext {
+  launchId: string;
+  sessionId: string;
+  hubUrl: string;
+  hubToken: string;
+}
+
+export interface NativeFileHandleDescriptor {
+  kind: 'file';
+  handleId: string;
+  name: string;
+  saveTargetCreated?: boolean;
+}
+
+export interface DocumentOwnershipIdentity {
+  documentId: string;
+  sourceDigest: string | null;
+  useSourceDigest?: boolean;
+}
+
+interface NativeFileReadResult {
+  name: string;
+  bytes: Uint8Array;
+}
+
 export interface RhwpDesktopApi {
-  ensureAgentHub: () => Promise<{ started?: boolean; ready?: boolean } | boolean>;
+  ensureAgentHub?: () => Promise<{ started?: boolean; ready?: boolean } | boolean>;
+  getSessionContext?: () => Promise<RendererSessionContext>;
+  getLaunchFiles?: () => Promise<NativeFileHandleDescriptor[]>;
+  pickNativeOpenFile?: () => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
+  claimNativeDroppedFile?: (
+    file: File,
+  ) => Promise<NativeFileHandleDescriptor | { owned: true } | null> | null;
+  pickNativeSaveFile?: (options: {
+    suggestedName: string;
+    extension: 'hwp' | 'hwpx' | 'hml';
+  }) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
+  releaseNativeFile?: (handleId: string) => Promise<void>;
+  readNativeFile?: (handleId: string) => Promise<NativeFileReadResult>;
+  validateNativeSave?: (
+    handleId: string,
+    identity: DocumentOwnershipIdentity,
+  ) => Promise<void>;
+  writeNativeFile?: (
+    handleId: string,
+    bytes: Uint8Array,
+    identity: DocumentOwnershipIdentity,
+  ) => Promise<{ name: string; byteLength: number }>;
+  isSameNativeFile?: (firstHandleId: string, secondHandleId: string) => Promise<boolean>;
+  reserveDocument?: (
+    identity: DocumentOwnershipIdentity,
+    nativeHandleId?: string,
+  ) => Promise<{ ok: true; reservationId: string } | { ok: false; reason: 'owned' }>;
+  commitDocument?: (reservationId: string) => Promise<void>;
+  cancelDocument?: (reservationId: string) => Promise<void>;
+  releaseDocument?: () => Promise<void>;
+  respondToCloseRequest?: (requestId: string, allowClose: boolean) => Promise<boolean>;
+  onCloseRequested?: (callback: (request: {
+    requestId: string;
+    reason: 'close' | 'quit';
+  }) => void) => void;
   platform?: string;
   isFullScreen?: () => Promise<boolean>;
   onFullScreenChange?: (callback: (fullscreen: boolean) => void) => void;
+  onOpenFiles?: (callback: (files: NativeFileHandleDescriptor[]) => void) => void;
 }
 
 export interface DesktopHost {
@@ -26,6 +92,26 @@ export interface DesktopHost {
 }
 
 let inflight: Promise<boolean> | null = null;
+let sessionContextInflight: Promise<RendererSessionContext | null> | null = null;
+let devHubContext: Pick<RendererSessionContext, 'launchId' | 'hubUrl' | 'hubToken'> | null = null;
+const nativeHandleMetadata = new WeakMap<FileSystemFileHandleLike, {
+  api: RhwpDesktopApi;
+  handleId: string;
+  identity: DocumentOwnershipIdentity | null;
+}>();
+const browserLaunchId = createSessionId('launch');
+const browserSessionId = createSessionId('session');
+
+function createSessionId(prefix: string): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function validSessionContext(value: unknown): value is RendererSessionContext {
+  if (!value || typeof value !== 'object') return false;
+  const context = value as Record<string, unknown>;
+  return ['launchId', 'sessionId', 'hubUrl', 'hubToken']
+    .every((key) => typeof context[key] === 'string' && context[key].length > 0);
+}
 
 function desktopHost(win?: DesktopHost): DesktopHost | undefined {
   return win ?? (typeof globalThis !== 'undefined' ? (globalThis as DesktopHost) : undefined);
@@ -36,7 +122,8 @@ function isDevBuild(): boolean {
 }
 
 export function isDesktopApp(win?: DesktopHost): boolean {
-  if (typeof desktopHost(win)?.rhwpDesktop?.ensureAgentHub === 'function') return true;
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (typeof api?.ensureAgentHub === 'function' || typeof api?.getSessionContext === 'function') return true;
   const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
   return /Electron/i.test(ua);
 }
@@ -46,9 +133,22 @@ export async function requestDevAgentHub(
 ): Promise<boolean> {
   if (typeof fetchImpl !== 'function') return false;
   try {
-    const response = await fetchImpl(DEV_AGENT_HUB_ENSURE_PATH, { method: 'POST' });
+    const path = `${DEV_AGENT_HUB_ENSURE_PATH}?sessionId=${encodeURIComponent(browserSessionId)}`;
+    const response = await fetchImpl(path, { method: 'POST' });
     if (!response.ok) return false;
     const body = await response.json();
+    if (
+      body?.ready === true
+      && typeof body.launchId === 'string'
+      && typeof body.hubUrl === 'string'
+      && typeof body.hubToken === 'string'
+    ) {
+      devHubContext = {
+        launchId: body.launchId,
+        hubUrl: body.hubUrl,
+        hubToken: body.hubToken,
+      };
+    }
     return body?.ready === true;
   } catch (error) {
     console.warn('[rhwp-desktop] 개발 서버 허브 기동 실패:', error);
@@ -59,6 +159,94 @@ export async function requestDevAgentHub(
 function readEnsureResult(result: { ready?: boolean } | boolean | undefined): boolean {
   if (result && typeof result === 'object') return result.ready !== false;
   return Boolean(result);
+}
+
+export function websocketHubUrl(hubUrl: string) {
+  const url = new URL(hubUrl);
+  if (url.protocol === 'http:') url.protocol = 'ws:';
+  else if (url.protocol === 'https:') url.protocol = 'wss:';
+  if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+    throw new Error(`Unsupported agent hub protocol: ${url.protocol}`);
+  }
+  url.pathname = url.pathname.replace(/\/$/, '');
+  url.search = '';
+  url.hash = '';
+  return url.toString().replace(/\/$/, '');
+}
+
+export function httpHubUrl(hubUrl: string) {
+  const url = new URL(hubUrl);
+  if (url.protocol === 'ws:') url.protocol = 'http:';
+  else if (url.protocol === 'wss:') url.protocol = 'https:';
+  return url.toString().replace(/\/$/, '');
+}
+
+export interface BrowserSessionContextOptions {
+  hubUrl?: string;
+  hubToken?: string;
+  launchId?: string;
+  sessionId?: string;
+}
+
+/**
+ * Electron configuration is authoritative and must come from preload. Browser and
+ * Vite runs keep their explicit environment/dev fallback.
+ */
+export async function resolveRendererSessionContext(
+  win?: DesktopHost,
+  browser: BrowserSessionContextOptions = {},
+): Promise<RendererSessionContext | null> {
+  const host = desktopHost(win);
+  if (isDesktopApp(host)) {
+    const getSessionContext = host?.rhwpDesktop?.getSessionContext;
+    if (typeof getSessionContext !== 'function') {
+      console.warn('[rhwp-desktop] preload 세션 구성이 없습니다.');
+      return null;
+    }
+    try {
+      const context = await getSessionContext();
+      if (!validSessionContext(context)) {
+        console.warn('[rhwp-desktop] preload 세션 구성이 올바르지 않습니다.');
+        return null;
+      }
+      return context;
+    } catch (error) {
+      console.warn('[rhwp-desktop] preload 세션 구성 조회 실패:', error);
+      return null;
+    }
+  }
+
+  const env = (import.meta as ImportMeta & { env?: ImportMetaEnv }).env;
+  if (isDevBuild() && !browser.hubUrl) await requestDevAgentHub();
+  return {
+    launchId: browser.launchId ?? devHubContext?.launchId ?? browserLaunchId,
+    sessionId: browser.sessionId ?? browserSessionId,
+    hubUrl: browser.hubUrl ?? devHubContext?.hubUrl ?? env?.VITE_RHWP_AGENT_URL ?? 'ws://127.0.0.1:5175',
+    hubToken: browser.hubToken ?? devHubContext?.hubToken ?? env?.VITE_RHWP_AGENT_TOKEN ?? 'dev',
+  };
+}
+
+/** 같은 renderer 안의 autosave와 AgentBridge가 동일한 window session을 공유한다. */
+export function getRendererSessionContext(): Promise<RendererSessionContext | null> {
+  if (!sessionContextInflight) {
+    sessionContextInflight = resolveRendererSessionContext();
+  }
+  return sessionContextInflight;
+}
+
+export function installDesktopCloseHandling(
+  onCloseRequest: (reason: 'close' | 'quit') => Promise<boolean>,
+  win?: DesktopHost,
+) {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.onCloseRequested || !api.respondToCloseRequest) return false;
+  api.onCloseRequested((request) => {
+    void onCloseRequest(request.reason).then(
+      (allowClose) => api.respondToCloseRequest!(request.requestId, allowClose),
+      () => api.respondToCloseRequest!(request.requestId, false),
+    );
+  });
+  return true;
 }
 
 export async function ensureDesktopAgentHub(win?: DesktopHost): Promise<boolean> {
@@ -79,6 +267,208 @@ export async function ensureDesktopAgentHub(win?: DesktopHost): Promise<boolean>
     if (inflight === run) inflight = null;
   });
   return run;
+}
+
+function validNativeDescriptor(value: unknown): value is NativeFileHandleDescriptor {
+  if (!value || typeof value !== 'object') return false;
+  const descriptor = value as Record<string, unknown>;
+  return descriptor.kind === 'file'
+    && typeof descriptor.handleId === 'string'
+    && descriptor.handleId.length > 0
+    && typeof descriptor.name === 'string'
+    && descriptor.name.length > 0;
+}
+
+export function createNativeFileHandle(
+  descriptor: NativeFileHandleDescriptor,
+  api: RhwpDesktopApi,
+  { saveTarget = false } = {},
+): FileSystemFileHandleLike {
+  if (!validNativeDescriptor(descriptor) || !api.readNativeFile || !api.writeNativeFile) {
+    throw new Error('Invalid native file handle descriptor');
+  }
+
+  let unusedSaveTarget = saveTarget;
+  const handle: FileSystemFileHandleLike = {
+    kind: 'file',
+    name: descriptor.name,
+    identityKind: 'native-path',
+    async getFile() {
+      const result = await api.readNativeFile!(descriptor.handleId);
+      return new File([result.bytes as BlobPart], result.name);
+    },
+    async releaseUnusedSaveTarget() {
+      if (!unusedSaveTarget || !api.releaseNativeFile) return;
+      unusedSaveTarget = false;
+      await api.releaseNativeFile(descriptor.handleId);
+    },
+    adoptSaveTarget() {
+      unusedSaveTarget = false;
+    },
+    async validateSaveTarget() {
+      const metadata = nativeHandleMetadata.get(handle);
+      if (!metadata?.identity) throw new Error('Native save target has no active document ownership');
+      if (!api.validateNativeSave) throw new Error('Native save ownership validation is unavailable');
+      await api.validateNativeSave(descriptor.handleId, metadata.identity);
+    },
+    async createWritable(): Promise<FileSystemWritableFileStreamLike> {
+      const chunks: Blob[] = [];
+      let closed = false;
+      return {
+        async write(data) {
+          if (closed) throw new Error('Native file stream is closed');
+          chunks.push(data);
+        },
+        async close() {
+          if (closed) return;
+          const metadata = nativeHandleMetadata.get(handle);
+          if (!metadata?.identity) throw new Error('Native save target has no active document ownership');
+          const bytes = new Uint8Array(await new Blob(chunks).arrayBuffer());
+          await api.writeNativeFile!(descriptor.handleId, bytes, metadata.identity);
+          closed = true;
+        },
+      };
+    },
+    async isSameEntry(other) {
+      if (other === handle) return true;
+      const otherMetadata = nativeHandleMetadata.get(other);
+      if (!otherMetadata || otherMetadata.api !== api || !api.isSameNativeFile) {
+        throw new DOMException('Handle kinds cannot be compared', 'NotSupportedError');
+      }
+      return api.isSameNativeFile(descriptor.handleId, otherMetadata.handleId);
+    },
+    async queryPermission() {
+      return 'granted';
+    },
+    async requestPermission() {
+      return 'granted';
+    },
+  };
+  nativeHandleMetadata.set(handle, { api, handleId: descriptor.handleId, identity: null });
+  return handle;
+}
+
+export function bindNativeFileHandleIdentity(
+  handle: FileSystemFileHandleLike | null,
+  identity: DocumentOwnershipIdentity,
+) {
+  const metadata = handle ? nativeHandleMetadata.get(handle) : null;
+  if (metadata) metadata.identity = { ...identity };
+}
+
+export function captureDesktopNativeDroppedFile(
+  file: File,
+  win?: DesktopHost,
+): Promise<FileSystemFileHandleLike | null | undefined> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.claimNativeDroppedFile) return Promise.resolve(undefined);
+  // The preload call reaches webUtils synchronously while Chromium still owns the drop File.
+  const pending = api.claimNativeDroppedFile(file);
+  return Promise.resolve(pending).then((result) => {
+    if (!result) return undefined;
+    if ('owned' in result) throw new Error('다른 창에서 이미 열려 있는 문서입니다.');
+    if (!validNativeDescriptor(result)) throw new Error('Desktop drop returned an invalid handle');
+    return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
+  });
+}
+
+export async function pickDesktopNativeOpenFile(
+  win?: DesktopHost,
+): Promise<FileSystemFileHandleLike | null | undefined> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.pickNativeOpenFile) return undefined;
+  const result = await api.pickNativeOpenFile();
+  if (!result || 'owned' in result) return null;
+  if (!validNativeDescriptor(result)) throw new Error('Desktop open picker returned an invalid handle');
+  return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
+}
+
+export async function pickDesktopNativeSaveFile(
+  options: SaveFilePickerOptionsLike,
+  win?: DesktopHost,
+): Promise<FileSystemFileHandleLike | null | undefined> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.pickNativeSaveFile) return undefined;
+  const suggestedName = options.suggestedName ?? 'document.hwp';
+  const match = suggestedName.match(/\.(hwp|hwpx|hml)$/i);
+  if (!match) throw new Error('Save target format is unavailable');
+  const result = await api.pickNativeSaveFile({
+    suggestedName,
+    extension: match[1]!.toLowerCase() as 'hwp' | 'hwpx' | 'hml',
+  });
+  if (!result) return null;
+  if ('owned' in result) throw new Error('다른 창에서 이미 열려 있는 문서입니다.');
+  if (!validNativeDescriptor(result)) throw new Error('Desktop save picker returned an invalid handle');
+  return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
+}
+
+export async function releaseReplacedNativeFileHandle(
+  previous: FileSystemFileHandleLike | null,
+  next: FileSystemFileHandleLike | null,
+) {
+  const previousMetadata = previous ? nativeHandleMetadata.get(previous) : null;
+  const nextMetadata = next ? nativeHandleMetadata.get(next) : null;
+  if (!previousMetadata?.api.releaseNativeFile) return;
+  if (
+    nextMetadata
+    && nextMetadata.api === previousMetadata.api
+    && nextMetadata.handleId === previousMetadata.handleId
+  ) return;
+  await previousMetadata.api.releaseNativeFile(previousMetadata.handleId);
+}
+
+export async function reserveDesktopDocument(
+  identity: DocumentOwnershipIdentity,
+  handle: FileSystemFileHandleLike | null,
+  win?: DesktopHost,
+): Promise<string | null | undefined> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.reserveDocument) return undefined;
+  const nativeHandleId = handle ? nativeHandleMetadata.get(handle)?.handleId : undefined;
+  const result = await api.reserveDocument(identity, nativeHandleId);
+  return result.ok ? result.reservationId : null;
+}
+
+export async function commitDesktopDocument(
+  reservationId: string | null | undefined,
+  win?: DesktopHost,
+) {
+  if (reservationId) await desktopHost(win)?.rhwpDesktop?.commitDocument?.(reservationId);
+}
+
+export async function cancelDesktopDocument(
+  reservationId: string | null | undefined,
+  win?: DesktopHost,
+) {
+  if (reservationId) await desktopHost(win)?.rhwpDesktop?.cancelDocument?.(reservationId);
+}
+
+export async function releaseDesktopDocument(win?: DesktopHost) {
+  await desktopHost(win)?.rhwpDesktop?.releaseDocument?.();
+}
+
+export function installDesktopFileHandling(
+  openHandles: (handles: FileSystemFileHandleLike[]) => void,
+  win?: DesktopHost,
+) {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.readNativeFile || !api.writeNativeFile) return;
+  const seen = new Set<string>();
+  const receive = (descriptors: NativeFileHandleDescriptor[]) => {
+    const handles = descriptors
+      .filter(validNativeDescriptor)
+      .filter((descriptor) => {
+        if (seen.has(descriptor.handleId)) return false;
+        seen.add(descriptor.handleId);
+        return true;
+      })
+      .map((descriptor) => createNativeFileHandle(descriptor, api, { saveTarget: true }));
+    if (handles.length > 0) openHandles(handles);
+  };
+  api.onOpenFiles?.(receive);
+  void api.getLaunchFiles?.().then(receive).catch((error) => {
+    console.warn('[rhwp-desktop] 시작 파일 조회 실패:', error);
+  });
 }
 
 /**

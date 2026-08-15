@@ -6,11 +6,11 @@ const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
 
 test('reference-bearing messages wait for post-send uploads before agent dispatch', () => {
   assert.match(server, /if \(msg\.referencesPending === true\)/);
-  assert.match(server, /pendingReferenceMessage = \{ messageId: msg\.messageId, message: msg, owner: session \}/);
+  assert.match(server, /record\.pendingReferenceMessage = \{ messageId: msg\.messageId, message: msg, owner: record\.agentSession \}/);
   assert.match(server, /case 'chat-reference-uploads-complete'/);
   assert.match(
     server,
-    /pendingReferenceMessage = null;\s*dispatchUserMessage\(sock, pending\.message, pending\.owner\)/,
+    /record\.pendingReferenceMessage = null;\s*dispatchUserMessage\(record, sock, pending\.message, pending\.owner\)/,
   );
   assert.match(
     server,
@@ -22,11 +22,11 @@ test('pre-uploaded message attachments promote before agent dispatch and report 
   assert.match(server, /async function dispatchStagedUserMessage/);
   assert.match(server, /referenceStore\.promoteStaged\(\{ stageId, scopeId: activeSession\.threadId \}\)/);
   assert.match(server, /type: 'chat-reference-status'/);
-  assert.match(server, /dispatchUserMessage\(sock, msg, activeSession, readyFiles\)/);
+  assert.match(server, /dispatchUserMessage\(record, sock, msg, activeSession, readyFiles\)/);
   assert.match(server, /<message_attachments trust="untrusted-data">/);
 });
 
 test('staged messages cannot leak across stopped or disconnected studio sessions', () => {
-  assert.match(server, /function disposeSession\(\) \{\s*pendingReferenceMessage = null/);
-  assert.match(server, /studioSocket = null;\s*pendingReferenceMessage = null;/);
+  assert.match(server, /function disposeSession\(record\) \{\s*record\.pendingReferenceMessage = null/);
+  assert.match(server, /record\.studioSocket = null;\s*record\.pendingReferenceMessage = null;/);
 });

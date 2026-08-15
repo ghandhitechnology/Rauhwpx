@@ -2,20 +2,86 @@
 import spawn from 'cross-spawn';
 import crypto from 'node:crypto';
 import {
+  copyFileSync,
+  lstatSync,
+  mkdirSync,
+  readlinkSync,
+  symlinkSync,
+  unlinkSync,
+} from 'node:fs';
+import path from 'node:path';
+import {
   createLineReader,
   isPlanningRestricted,
   mcpCapabilityEnv,
+  mcpRuntimeFor,
   normalizeExecutionMode,
   normalizeUsageTokens,
   systemBriefFor,
   truncate,
   validateExecutionMode,
 } from './backend.mjs';
+import {
+  isolatedProcessEnv,
+  processTreeSpawnOptions,
+  terminateProcessTree,
+  waitForProcessTreeExit,
+} from '../process-tree.mjs';
 
 const DIRECT_TOOLS = 'Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch';
 const PLAN_IMPLEMENTATION_TOOLS = `${DIRECT_TOOLS},Agent`;
 const PLANNING_TOOLS = 'Read,Glob,Grep,Bash,WebSearch,WebFetch,Agent';
 const STDERR_TAIL_LIMIT = 16_000;
+
+function seedClaudeCredential(source, target, {
+  copyFile = copyFileSync,
+  platform = process.platform,
+  symlink = symlinkSync,
+} = {}) {
+  if (!source) return;
+  let sourceStat;
+  try {
+    sourceStat = lstatSync(source);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+  if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) return;
+
+  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  try {
+    const targetStat = lstatSync(target);
+    if (!targetStat.isSymbolicLink()) return;
+    const linkedTarget = path.resolve(path.dirname(target), readlinkSync(target));
+    if (linkedTarget === path.resolve(source)) return;
+    unlinkSync(target);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+
+  try {
+    symlink(source, target);
+  } catch (error) {
+    const copyFallback = platform === 'win32'
+      && (error?.code === 'EPERM' || error?.code === 'EACCES' || error?.code === 'ENOTSUP');
+    if (!copyFallback) throw error;
+    copyFile(source, target);
+  }
+}
+
+/** Seed only Claude's shared login files into an otherwise isolated home. */
+export function prepareClaudeHome(isolatedHome, {
+  credentialsPath,
+  configPath,
+} = {}, deps = {}) {
+  mkdirSync(isolatedHome, { recursive: true, mode: 0o700 });
+  seedClaudeCredential(
+    credentialsPath,
+    path.join(isolatedHome, '.claude', '.credentials.json'),
+    deps,
+  );
+  seedClaudeCredential(configPath, path.join(isolatedHome, '.claude.json'), deps);
+}
 
 export function formatClaudeExitError(stderrText, code, signal, token) {
   let clean = String(stderrText ?? '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
@@ -40,12 +106,14 @@ export function buildClaudeArgv(opts, sessionId, resume) {
     ? (planningRestricted ? PLANNING_TOOLS : PLAN_IMPLEMENTATION_TOOLS)
     : DIRECT_TOOLS;
   const capabilityEnv = mcpCapabilityEnv(opts);
+  const runtime = mcpRuntimeFor(opts);
   const mcpConfig = {
     mcpServers: {
       rhwp: {
-        command: 'node',
-        args: [opts.mcpScriptPath],
+        command: runtime.command,
+        args: runtime.args,
         env: {
+          ...runtime.env,
           RHWP_WS_URL: `ws://127.0.0.1:${opts.hubPort}/mcp`,
           RHWP_AGENT_TOKEN: opts.token,
           RHWP_AGENT_NAME: 'claude',
@@ -103,7 +171,10 @@ export function buildClaudeArgv(opts, sessionId, resume) {
  * @param {import('./backend.mjs').BackendOptions} opts
  * @returns {import('./backend.mjs').AgentSession}
  */
-export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
+export function createClaudeSession(opts, {
+  spawnProcess = spawn,
+  terminateProcess = terminateProcessTree,
+} = {}) {
   let sessionId = crypto.randomUUID();
   const onEvent = opts.onEvent;
 
@@ -119,7 +190,6 @@ export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
   let sawRootTextDelta = false;
   const streamedSubagents = new Set();
   let disposed = false;
-  let killTimer = null;
   let restartReady = Promise.resolve();
   let stderrTail = '';
   // usage 집계에 붙일 모델 — CLI 가 보고한 실제 모델을 우선한다.
@@ -246,10 +316,10 @@ export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
     }
     sessionIdConsumed = true;
     const proc = spawnProcess(opts.claudeBin ?? 'claude', buildArgv(resume), {
+      ...processTreeSpawnOptions(),
       cwd: opts.rootDir,
-      env: { ...process.env, ...(opts.providerEnv ?? {}) },
+      env: isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
     });
     child = proc;
     childAlive = true;
@@ -273,7 +343,6 @@ export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
     proc.on('exit', (code, signal) => {
       if (proc !== child) return;
       childAlive = false;
-      if (killTimer) { clearTimeout(killTimer); killTimer = null; }
       if (turnOpen && !disposed) {
         onEvent({
           type: 'error',
@@ -289,13 +358,7 @@ export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
   function killChild() {
     const proc = child;
     if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
-    proc.kill('SIGTERM');
-    killTimer = setTimeout(() => {
-      try {
-        if (proc.exitCode === null && proc.signalCode === null) proc.kill('SIGKILL');
-      } catch {}
-    }, 3000);
-    if (killTimer.unref) killTimer.unref();
+    terminateProcess(proc);
   }
 
   function restartForConfigChange() {
@@ -386,8 +449,10 @@ export function createClaudeSession(opts, { spawnProcess = spawn } = {}) {
       turnOpen = false;
       // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
       try { child?.stdout?.removeAllListeners('data'); } catch {}
+      const exited = waitForProcessTreeExit(child);
       killChild();
       childAlive = false;
+      return exited;
     },
   };
 }

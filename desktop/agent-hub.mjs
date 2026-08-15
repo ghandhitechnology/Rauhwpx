@@ -8,6 +8,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { createHmac, randomBytes } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -17,16 +18,88 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix, win32 } from 'node:path';
 
 export const DEFAULT_HUB_PORT = 5175;
 export const DEFAULT_HEALTH_TIMEOUT_MS = 500;
+export const DEFAULT_STOP_TIMEOUT_MS = 5000;
 export const DEFAULT_READY_TIMEOUT_MS = 15000;
 export const DEFAULT_POLL_INTERVAL_MS = 150;
 export const HUB_RESTART_DELAYS_MS = [500, 1000, 2000, 5000];
+export const HUB_READY_PREFIX = 'RHWP_HUB_READY ';
+
+export function createHubToken(bytes = 32) {
+  return randomBytes(bytes).toString('base64url');
+}
+
+export function issueHubSessionToken(masterToken, sessionId) {
+  const normalizedSessionId = String(sessionId);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(normalizedSessionId)) {
+    throw new Error('Invalid hub session ID');
+  }
+  const encodedSessionId = Buffer.from(normalizedSessionId, 'utf8').toString('base64url');
+  const signature = createHmac('sha256', String(masterToken))
+    .update(`rhwp1.${encodedSessionId}`)
+    .digest('base64url');
+  return `rhwp1.${encodedSessionId}.${signature}`;
+}
 
 export function hubHealthUrl(port) {
   return `http://127.0.0.1:${port}/healthz`;
+}
+
+function hubOwnerHeaders(token, launchId) {
+  return {
+    authorization: `Bearer ${token}`,
+    'x-rhwp-launch-id': launchId,
+  };
+}
+
+async function requestHubOwnerRoute(url, {
+  method,
+  token,
+  launchId,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = DEFAULT_STOP_TIMEOUT_MS,
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(url, {
+      method,
+      headers: hubOwnerHeaders(token, launchId),
+      signal: ac.signal,
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      const error = new Error(body?.error?.message || `Agent hub request failed (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
+    return body;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function closeHubSession({ port, token, launchId, sessionId, ...options }) {
+  const encodedSessionId = encodeURIComponent(String(sessionId));
+  return requestHubOwnerRoute(`http://127.0.0.1:${port}/sessions/${encodedSessionId}`, {
+    ...options,
+    method: 'DELETE',
+    token,
+    launchId,
+  });
+}
+
+export function requestHubShutdown({ port, token, launchId, ...options }) {
+  return requestHubOwnerRoute(`http://127.0.0.1:${port}/shutdown`, {
+    ...options,
+    method: 'POST',
+    token,
+    launchId,
+  });
 }
 
 export function nextHubRestartDelay(attempt, delays = HUB_RESTART_DELAYS_MS) {
@@ -37,12 +110,18 @@ export function nextHubRestartDelay(attempt, delays = HUB_RESTART_DELAYS_MS) {
 export async function readHubHealth(port, {
   fetchImpl = globalThis.fetch,
   timeoutMs = DEFAULT_HEALTH_TIMEOUT_MS,
+  token,
+  launchId,
 } = {}) {
   if (typeof fetchImpl !== 'function') return null;
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
+  const headers = {
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...(launchId ? { 'x-rhwp-launch-id': launchId } : {}),
+  };
   try {
-    const response = await fetchImpl(hubHealthUrl(port), { signal: ac.signal });
+    const response = await fetchImpl(hubHealthUrl(port), { signal: ac.signal, headers });
     if (!response.ok) return null;
     const body = await response.json();
     return body && typeof body === 'object' ? body : null;
@@ -53,9 +132,11 @@ export async function readHubHealth(port, {
   }
 }
 
-export async function isHubHealthy(port, options = {}) {
+export async function isHubHealthy(port, { expectedPid, expectedLaunchId, ...options } = {}) {
   const body = await readHubHealth(port, options);
-  return body?.ok === true;
+  if (body?.ok !== true) return false;
+  if (expectedPid !== undefined && hubPidFromHealth(body) !== expectedPid) return false;
+  return expectedLaunchId === undefined || body.launchId === expectedLaunchId;
 }
 
 export function hubPidFromHealth(body) {
@@ -136,21 +217,26 @@ export function pathDelimiter(platform = process.platform) {
   return platform === 'win32' ? ';' : ':';
 }
 
-export function extraBinDirs(home, { exists = existsSync, readFile = readFileSync } = {}) {
+export function extraBinDirs(home, {
+  exists = existsSync,
+  readFile = readFileSync,
+  platform = process.platform,
+} = {}) {
+  const platformPath = platform === 'win32' ? win32 : posix;
   const dirs = [
-    join(home, '.local', 'bin'),
-    join(home, '.fnm', 'aliases', 'default', 'bin'),
-    join(home, '.volta', 'bin'),
-    join(home, '.asdf', 'shims'),
-    join(home, '.nvm', 'current', 'bin'),
+    platformPath.join(home, '.local', 'bin'),
+    platformPath.join(home, '.fnm', 'aliases', 'default', 'bin'),
+    platformPath.join(home, '.volta', 'bin'),
+    platformPath.join(home, '.asdf', 'shims'),
+    platformPath.join(home, '.nvm', 'current', 'bin'),
     '/opt/homebrew/bin',
     '/usr/local/bin',
   ];
   try {
-    const alias = String(readFile(join(home, '.nvm', 'alias', 'default'), 'utf8')).trim();
+    const alias = String(readFile(platformPath.join(home, '.nvm', 'alias', 'default'), 'utf8')).trim();
     if (alias && !alias.includes('/')) {
-      dirs.unshift(join(home, '.nvm', 'versions', 'node', alias, 'bin'));
-      dirs.unshift(join(home, '.nvm', 'versions', 'node', `v${alias}`, 'bin'));
+      dirs.unshift(platformPath.join(home, '.nvm', 'versions', 'node', alias, 'bin'));
+      dirs.unshift(platformPath.join(home, '.nvm', 'versions', 'node', `v${alias}`, 'bin'));
     }
   } catch {
     /* no nvm default alias */
@@ -160,9 +246,10 @@ export function extraBinDirs(home, { exists = existsSync, readFile = readFileSyn
 
 export function findOnPath(name, pathEnv, exists = existsSync, platform = process.platform) {
   const delim = pathDelimiter(platform);
+  const platformPath = platform === 'win32' ? win32 : posix;
   for (const dir of String(pathEnv).split(delim)) {
     if (!dir) continue;
-    const candidate = join(dir, name);
+    const candidate = platformPath.join(dir, name);
     if (exists(candidate)) return candidate;
   }
   return null;
@@ -178,10 +265,11 @@ export function buildHubPath({
   platform = process.platform,
 } = {}) {
   const delim = pathDelimiter(platform);
+  const platformPath = platform === 'win32' ? win32 : posix;
   const bins = [
-    agentDir ? join(agentDir, 'node_modules', '.bin') : null,
+    agentDir ? platformPath.join(agentDir, 'node_modules', '.bin') : null,
     ...extraDirs,
-    ...extraBinDirs(home ?? '', { exists, readFile }),
+    ...extraBinDirs(home ?? '', { exists, readFile, platform }),
   ].filter(Boolean);
   const parts = [...bins.filter((dir) => exists(dir)), envPath];
   return [...new Set(parts.join(delim).split(delim).filter(Boolean))].join(delim);
@@ -211,10 +299,12 @@ export function resolveHubLaunch({
   home,
   env = process.env,
   extraDirs = [],
+  allowNpm = true,
   exists = existsSync,
   platform = process.platform,
 } = {}) {
-  const cwd = agentDir || (scriptPath ? dirname(scriptPath) : '');
+  const platformPath = platform === 'win32' ? win32 : posix;
+  const cwd = agentDir || (scriptPath ? platformPath.dirname(scriptPath) : '');
   if (!scriptPath || !exists(scriptPath)) return null;
 
   const pathEnv = buildHubPath({
@@ -239,12 +329,12 @@ export function resolveHubLaunch({
     return { command: node, args: [scriptPath], cwd, env: baseEnv, via: 'node' };
   }
 
-  if (npm && !packaged) {
+  if (allowNpm && npm && !packaged) {
     return { command: npm, args: ['start'], cwd, env: baseEnv, via: 'npm-start' };
   }
 
   if (!execPath) {
-    if (npm) return { command: npm, args: ['start'], cwd, env: baseEnv, via: 'npm-start' };
+    if (allowNpm && npm) return { command: npm, args: ['start'], cwd, env: baseEnv, via: 'npm-start' };
     return null;
   }
   return {
@@ -258,7 +348,6 @@ export function resolveHubLaunch({
 
 export const PID_FILE_NAME = 'rhwp-agent.pid';
 export const LOG_FILE_NAME = 'rhwp-agent.log';
-export const DEFAULT_STOP_TIMEOUT_MS = 5000;
 
 export function hubRunDir(repoRoot) {
   return join(repoRoot, '.run');
@@ -313,6 +402,39 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function terminateProcessTree(child, { platform = process.platform, spawnProcess = spawn } = {}) {
+  if (!child?.pid) return;
+  if (platform !== 'win32') {
+    try { child.kill('SIGKILL'); } catch {}
+    return;
+  }
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    try {
+      const killer = spawnProcess('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], {
+        detached: false,
+        shell: false,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      killer.once?.('error', () => {
+        try { child.kill('SIGKILL'); } catch {}
+        finish();
+      });
+      killer.once?.('close', finish);
+      killer.once?.('exit', finish);
+    } catch {
+      try { child.kill('SIGKILL'); } catch {}
+      finish();
+    }
+  });
+}
+
 export async function killPid(pid, {
   timeoutMs = DEFAULT_STOP_TIMEOUT_MS,
   wait = sleep,
@@ -336,13 +458,8 @@ export async function killPid(pid, {
   while (now() < deadline && isProcessAlive(pid)) {
     await wait(50);
   }
-  if (isProcessAlive(pid)) {
-    try {
-      process.kill(pid, 'SIGKILL');
-    } catch {
-      /* already gone */
-    }
-  }
+  // A bare PID has no stable process identity. Escalating after the original
+  // process exits could kill an unrelated process that reused the number.
   return { killed: true, alive: isProcessAlive(pid) };
 }
 
@@ -351,15 +468,16 @@ export async function killPid(pid, {
  * attached so they can restart or tear it down with the parent.
  */
 export function spawnHubProcess(launch, {
-  detached = false,
+  platform = process.platform,
+  detached = platform !== 'win32',
   stdio,
   windowsHide = true,
-  forwardStdio = !detached,
+  forwardStdio = true,
+  unref = detached && !forwardStdio,
   onError,
   onExit,
   onMessage,
   log = console,
-  platform = process.platform,
 } = {}) {
   // Windows에서 .cmd/.bat 셸 스크립트는 셸 없이 spawn하면 EINVAL이 난다
   // (CVE-2024-27980 이후 Node 정책). 이 경로는 npm.cmd start뿐이라 인자
@@ -388,50 +506,122 @@ export function spawnHubProcess(launch, {
     child.on('exit', (code, signal) => onExit(code, signal, child));
   }
   if (typeof onMessage === 'function') child.on('message', (message) => onMessage(message, child));
-  if (detached) child.unref();
+  child.rhwpProcessGroup = detached && platform !== 'win32';
+  if (unref) child.unref();
   return child;
 }
 
-export function terminateProcessTree(child, { platform = process.platform, spawnProcess = spawn } = {}) {
-  if (!child?.pid) return Promise.resolve();
-  if (platform !== 'win32') {
-    try { child.kill('SIGKILL'); } catch {}
-    return Promise.resolve();
+export function parseHubReadyLine(line, expectedLaunchId) {
+  if (!line.startsWith(HUB_READY_PREFIX)) return null;
+  try {
+    const ready = JSON.parse(line.slice(HUB_READY_PREFIX.length));
+    if (ready?.launchId !== expectedLaunchId) return null;
+    if (!Number.isInteger(ready.port) || ready.port < 1 || ready.port > 65535) return null;
+    if (!Number.isInteger(ready.pid) || ready.pid < 1) return null;
+    return ready;
+  } catch {
+    return null;
   }
-  return new Promise((resolve) => {
-    let killer;
-    try {
-      killer = spawnProcess('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], {
-        stdio: 'ignore', windowsHide: true,
-      });
-    } catch {
-      try { child.kill('SIGKILL'); } catch {}
-      resolve();
-      return;
-    }
-    killer.once?.('error', () => {
-      try { child.kill('SIGKILL'); } catch {}
-      resolve();
-    });
-    killer.once?.('exit', () => resolve());
+}
+
+export function waitForHubReadyLine(child, {
+  launchId,
+  timeoutMs = DEFAULT_READY_TIMEOUT_MS,
+} = {}) {
+  return new Promise((resolve, reject) => {
+    let buffer = '';
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.stdout?.off('data', onData);
+      child.off('error', onError);
+      child.off('exit', onExit);
+    };
+    const fail = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onData = (chunk) => {
+      buffer += String(chunk);
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        const ready = parseHubReadyLine(line, launchId);
+        if (!ready) continue;
+        cleanup();
+        resolve(ready);
+        return;
+      }
+    };
+    const onError = (error) => fail(error);
+    const onExit = (code, signal) => fail(new Error(`Agent hub exited before ready (${code ?? signal ?? 'unknown'})`));
+    const timer = setTimeout(() => fail(new Error('Agent hub ready line timed out')), timeoutMs);
+    child.stdout?.on('data', onData);
+    child.once('error', onError);
+    child.once('exit', onExit);
   });
 }
 
-export function stopHubChild(child, { timeoutMs = 2000, platform = process.platform } = {}) {
-  if (!child) return Promise.resolve();
+export function waitForHubChildExit(child, { timeoutMs = 5000 } = {}) {
+  if (!child || child.exitCode != null || child.signalCode != null) return Promise.resolve(true);
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off('exit', onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref?.();
+    child.once('exit', onExit);
+  });
+}
+
+export function stopHubChild(child, {
+  timeoutMs = 2000,
+  platform = process.platform,
+  killProcess = process.kill,
+  spawnProcess = spawn,
+} = {}) {
+  if (!child || child.exitCode != null || child.signalCode != null) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const pid = Number.isSafeInteger(child.pid) && child.pid > 0 ? child.pid : null;
     const finish = () => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       resolve();
     };
+    const signalTree = (force) => {
+      if (settled || child.exitCode != null || child.signalCode != null) return;
+      if (platform === 'win32' && pid !== null) {
+        try {
+          const killer = spawnProcess('taskkill', ['/PID', String(pid), '/T', ...(force ? ['/F'] : [])], {
+            detached: false,
+            shell: false,
+            stdio: 'ignore',
+            windowsHide: true,
+          });
+          killer.once?.('error', () => {});
+        } catch {}
+        return;
+      }
+      if (pid !== null && child.rhwpProcessGroup) {
+        try { killProcess(-pid, force ? 'SIGKILL' : 'SIGTERM'); } catch {}
+        return;
+      }
+      try { child.kill(force ? 'SIGKILL' : 'SIGTERM'); } catch {}
+    };
     const timer = setTimeout(() => {
-      void terminateProcessTree(child, { platform }).finally(resolve);
+      signalTree(true);
+      finish();
     }, timeoutMs);
+    timer.unref?.();
     child.once('exit', finish);
-    if (platform === 'win32') void terminateProcessTree(child, { platform }).finally(finish);
-    else {
-      try { child.kill('SIGTERM'); } catch { finish(); }
-    }
+    signalTree(false);
   });
 }
 
@@ -447,15 +637,39 @@ export async function stopHubByPort(port, {
   pidPath,
   fetchImpl = globalThis.fetch,
   timeoutMs = DEFAULT_STOP_TIMEOUT_MS,
+  token = process.env.RHWP_AGENT_TOKEN ?? process.env.RHWP_AGENT_DEV_TOKEN ?? 'dev',
+  wait = sleep,
+  now = Date.now,
 } = {}) {
-  const pid = await resolveHubPid(port, { pidPath, fetchImpl });
-  if (!pid) {
+  const body = await readHubHealth(port, { fetchImpl, token });
+  const pid = hubPidFromHealth(body);
+  if (!body?.ok || !pid || typeof body.launchId !== 'string') {
     if (pidPath) removePidFile(pidPath);
-    return { stopped: false, ready: await isHubHealthy(port, { fetchImpl }), pid: null };
+    return { stopped: false, ready: false, pid: null };
   }
-  await killPid(pid, { timeoutMs });
+
+  try {
+    await requestHubShutdown({
+      port,
+      token,
+      launchId: body.launchId,
+      fetchImpl,
+      timeoutMs: Math.min(timeoutMs, 1500),
+    });
+  } catch {
+    // Compatibility with an older development hub. The PID came from the
+    // authenticated live listener, so one non-escalating TERM is safe.
+    await killPid(pid, { timeoutMs, wait, now });
+  }
+
+  const deadline = now() + timeoutMs;
+  let ready = true;
+  while (now() < deadline) {
+    ready = await isHubHealthy(port, { fetchImpl, token, expectedPid: pid, expectedLaunchId: body.launchId });
+    if (!ready) break;
+    await wait(50);
+  }
   if (pidPath) removePidFile(pidPath);
-  const ready = await isHubHealthy(port, { fetchImpl });
   return { stopped: !ready, ready, pid };
 }
 
@@ -475,29 +689,37 @@ export async function startDetachedHub({
   readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS,
 } = {}) {
   const paths = hubRunPaths(runDir);
-  if (await isHubHealthy(port, { fetchImpl })) {
+  const token = env.RHWP_AGENT_TOKEN ?? env.RHWP_AGENT_DEV_TOKEN ?? 'dev';
+  const health = await readHubHealth(port, { fetchImpl, token });
+  if (health?.ok) {
     return {
       started: false,
       ready: true,
       alreadyRunning: true,
-      pid: await resolveHubPid(port, { pidPath: paths.pid, fetchImpl }),
+      pid: hubPidFromHealth(health),
       log: paths.log,
     };
   }
 
-  const stalePid = readPidFile(paths.pid);
-  if (stalePid && isProcessAlive(stalePid)) {
-    await killPid(stalePid);
-  }
+  // A stale PID file cannot prove process identity. Never kill it implicitly.
   if (paths.pid) removePidFile(paths.pid);
 
+  const ownsWorkDir = !env.RHWP_WORK_DIR;
+  const ownsRuntimeDir = !env.RHWP_RUNTIME_DIR;
   const launch = resolveHubLaunch({
     packaged: false,
     execPath,
     scriptPath,
     agentDir,
     home,
-    env: { ...env, RHWP_AGENT_PORT: String(port) },
+    env: {
+      ...env,
+      RHWP_AGENT_PORT: String(port),
+      RHWP_WORK_DIR: env.RHWP_WORK_DIR ?? join(paths.dir, 'hub-work'),
+      RHWP_RUNTIME_DIR: env.RHWP_RUNTIME_DIR ?? join(paths.dir, 'hub-runtime'),
+      ...(ownsWorkDir ? { RHWP_OWN_WORK_DIR: '1' } : {}),
+      ...(ownsRuntimeDir ? { RHWP_OWN_RUNTIME_DIR: '1' } : {}),
+    },
     extraDirs,
     exists,
     platform,
@@ -531,9 +753,17 @@ export async function startDetachedHub({
   }
 
   writePidFile(paths.pid, child.pid);
-  const ready = await waitForHub(port, { fetchImpl, timeoutMs: readyTimeoutMs });
+  const ready = await waitForHub(port, {
+    fetchImpl,
+    timeoutMs: readyTimeoutMs,
+    isHealthy: (candidatePort, options) => isHubHealthy(candidatePort, {
+      ...options,
+      token,
+      expectedPid: child.pid,
+    }),
+  });
   if (!ready) {
-    await killPid(child.pid);
+    await stopHubChild(child, { platform, timeoutMs: DEFAULT_STOP_TIMEOUT_MS });
     removePidFile(paths.pid);
     log.warn?.('[rauhwpx] detached agent hub did not become ready');
     return { started: true, ready: false, pid: child.pid, log: paths.log };

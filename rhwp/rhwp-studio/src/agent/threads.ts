@@ -1,7 +1,17 @@
+import {
+  IDB_OPERATION_TIMEOUT_MS,
+  openIndexedDatabase,
+  withTimeout,
+} from '../core/idb-open.ts';
 import { isAgentWorkflow, isStructuredPlan } from './types.ts';
 import type { AgentName, AgentWorkflow, StructuredPlan } from './types.ts';
 
 const STORAGE_KEY = 'rhwp-agent-threads';
+const NOTIFY_KEY = 'rhwp-agent-threads-notify';
+const DB_NAME = 'rhwpAgentThreads';
+const DB_VERSION = 1;
+const THREADS_STORE = 'threads';
+const CHANNEL_NAME = 'rhwp-agent-threads';
 const MAX_THREADS = 40;
 const MAX_MESSAGES_PER_THREAD = 200;
 
@@ -63,7 +73,30 @@ type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan' | 'docKey' | 
   documentId?: unknown;
 };
 
-function canUseStorage(): boolean {
+type ThreadPersistenceChange =
+  | { type: 'upsert'; thread: ChatThread }
+  | { type: 'remove'; id: string }
+  | { type: 'reload' };
+
+type ThreadPersistenceMessage = ThreadPersistenceChange & {
+  source: string;
+  nonce: string;
+};
+
+const cache = new Map<string, ChatThread>();
+const deletedBeforeHydration = new Set<string>();
+const listeners = new Set<() => void>();
+const sourceId = createPersistenceId();
+let hydrated = false;
+let hydrationPromise: Promise<void> | null = null;
+let mutationQueue = Promise.resolve();
+let channel: BroadcastChannel | null = null;
+
+function createPersistenceId() {
+  return globalThis.crypto?.randomUUID?.() ?? `threads-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function canUseStorage() {
   try {
     return typeof localStorage !== 'undefined';
   } catch {
@@ -71,7 +104,11 @@ function canUseStorage(): boolean {
   }
 }
 
-function loadAll(): ChatThread[] {
+function idbAvailable() {
+  return typeof indexedDB !== 'undefined';
+}
+
+function readLegacyThreads() {
   if (!canUseStorage()) return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -84,7 +121,7 @@ function loadAll(): ChatThread[] {
   }
 }
 
-function saveAll(threads: ChatThread[]): void {
+function saveLegacyThreads(threads: ChatThread[]) {
   if (!canUseStorage()) return;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(threads.slice(0, MAX_THREADS)));
@@ -159,6 +196,241 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
     documentId: typeof storedDocumentId === 'string' && storedDocumentId ? storedDocumentId : null,
     ...(latestPlan ? { latestPlan } : {}),
   };
+}
+
+function cloneThread(thread: ChatThread) {
+  return structuredClone(thread);
+}
+
+function openDb() {
+  return openIndexedDatabase(DB_NAME, DB_VERSION, (db) => {
+    if (!db.objectStoreNames.contains(THREADS_STORE)) {
+      db.createObjectStore(THREADS_STORE, { keyPath: 'id' });
+    }
+  });
+}
+
+async function runWithDb<T>(operation: (db: IDBDatabase) => Promise<T>) {
+  const db = await openDb();
+  if (!db) throw new Error(`${DB_NAME} unavailable`);
+  try {
+    return await withTimeout(operation(db), IDB_OPERATION_TIMEOUT_MS, DB_NAME);
+  } finally {
+    db.close();
+  }
+}
+
+function transactionDone(tx: IDBTransaction) {
+  return new Promise<void>((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+function requestResult<T>(request: IDBRequest<T>) {
+  return new Promise<T>((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function emitChanged() {
+  for (const listener of listeners) listener();
+}
+
+function applyRemoteMessage(message: ThreadPersistenceMessage) {
+  if (message.source === sourceId) return;
+  if (message.type === 'upsert') {
+    const current = cache.get(message.thread.id);
+    if (!current || current.updatedAt <= message.thread.updatedAt) {
+      cache.set(message.thread.id, cloneThread(message.thread));
+      deletedBeforeHydration.delete(message.thread.id);
+    }
+  } else if (message.type === 'remove') {
+    cache.delete(message.id);
+    deletedBeforeHydration.add(message.id);
+  } else {
+    void hydrateFromIndexedDb(true);
+  }
+  emitChanged();
+}
+
+function parsePersistenceMessage(value: unknown): ThreadPersistenceMessage | null {
+  if (!value || typeof value !== 'object') return null;
+  const message = value as Partial<ThreadPersistenceMessage>;
+  if (typeof message.source !== 'string' || typeof message.nonce !== 'string') return null;
+  if (message.type === 'upsert' && message.thread && isStoredChatThread(message.thread)) {
+    return { ...message, thread: normalizeStoredThread(message.thread) } as ThreadPersistenceMessage;
+  }
+  if (message.type === 'remove' && typeof message.id === 'string') return message as ThreadPersistenceMessage;
+  if (message.type === 'reload') return message as ThreadPersistenceMessage;
+  return null;
+}
+
+function publish(message: ThreadPersistenceChange) {
+  const payload = {
+    ...message,
+    source: sourceId,
+    nonce: createPersistenceId(),
+  } as ThreadPersistenceMessage;
+  channel?.postMessage(payload);
+  if (!channel && canUseStorage()) {
+    try {
+      localStorage.setItem(NOTIFY_KEY, JSON.stringify(payload));
+    } catch {
+      /* storage notification is best-effort */
+    }
+  }
+  emitChanged();
+}
+
+async function hydrateFromIndexedDb(force = false) {
+  if (!idbAvailable()) return;
+  if (hydrationPromise && !force) return hydrationPromise;
+  const run = (async () => {
+    const legacy = readLegacyThreads();
+    for (const thread of legacy) {
+      const current = cache.get(thread.id);
+      if (!current || current.updatedAt <= thread.updatedAt) cache.set(thread.id, thread);
+    }
+
+    try {
+      const rows = await runWithDb(async (db) => {
+        const tx = db.transaction(THREADS_STORE, legacy.length ? 'readwrite' : 'readonly');
+        const store = tx.objectStore(THREADS_STORE);
+        const existing = await requestResult(store.getAll() as IDBRequest<StoredChatThread[]>);
+        const merged = new Map(
+          existing.filter(isStoredChatThread).map((thread) => [thread.id, thread]),
+        );
+        for (const thread of legacy) {
+          const current = merged.get(thread.id);
+          if (!current || current.updatedAt < thread.updatedAt) {
+            store.put(cloneThread(thread));
+            merged.set(thread.id, thread);
+          }
+        }
+        await transactionDone(tx);
+        return [...merged.values()];
+      });
+      for (const row of rows) {
+        if (!isStoredChatThread(row) || deletedBeforeHydration.has(row.id)) continue;
+        const thread = normalizeStoredThread(row);
+        const current = cache.get(thread.id);
+        if (!current || current.updatedAt <= thread.updatedAt) cache.set(thread.id, thread);
+      }
+      if (legacy.length && canUseStorage()) localStorage.removeItem(STORAGE_KEY);
+      hydrated = true;
+      emitChanged();
+    } catch (error) {
+      console.warn('[threads] IndexedDB 초기화 실패, localStorage 폴백 유지:', error);
+    }
+  })();
+  const pending = run.finally(() => {
+    if (hydrationPromise === pending) hydrationPromise = null;
+  });
+  hydrationPromise = pending;
+  return hydrationPromise;
+}
+
+function queueMutation(operation: () => Promise<string[]>, fallback: () => void) {
+  mutationQueue = mutationQueue.then(async () => {
+    try {
+      await hydrateFromIndexedDb();
+      const removed = await operation();
+      for (const id of removed) {
+        cache.delete(id);
+        publish({ type: 'remove', id });
+      }
+    } catch (error) {
+      fallback();
+      console.warn('[threads] IndexedDB 저장 실패, localStorage 폴백:', error);
+    }
+  });
+}
+
+function trimCache() {
+  const sorted = [...cache.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  for (const thread of sorted.slice(MAX_THREADS)) cache.delete(thread.id);
+}
+
+function persistUpsert(thread: ChatThread) {
+  queueMutation(() => runWithDb(async (db) => {
+    const tx = db.transaction(THREADS_STORE, 'readwrite');
+    const store = tx.objectStore(THREADS_STORE);
+    const existing = await requestResult(store.get(thread.id) as IDBRequest<StoredChatThread | undefined>);
+    if (!existing || !isStoredChatThread(existing) || existing.updatedAt <= thread.updatedAt) {
+      store.put(cloneThread(thread));
+    }
+    const rows = await requestResult(store.getAll() as IDBRequest<StoredChatThread[]>);
+    const removed = rows
+      .filter(isStoredChatThread)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(MAX_THREADS)
+      .map((row) => row.id);
+    for (const id of removed) store.delete(id);
+    await transactionDone(tx);
+    return removed;
+  }), () => {
+    const all = readLegacyThreads().filter((item) => item.id !== thread.id);
+    all.unshift(thread);
+    saveLegacyThreads(all);
+  });
+}
+
+function persistRemove(id: string) {
+  queueMutation(() => runWithDb(async (db) => {
+    const tx = db.transaction(THREADS_STORE, 'readwrite');
+    tx.objectStore(THREADS_STORE).delete(id);
+    await transactionDone(tx);
+    return [];
+  }), () => {
+    saveLegacyThreads(readLegacyThreads().filter((thread) => thread.id !== id));
+  });
+}
+
+function loadAll() {
+  if (!idbAvailable()) return readLegacyThreads();
+  if (!hydrated) void hydrateFromIndexedDb();
+  return [...cache.values()].map(cloneThread);
+}
+
+function saveFallbackMutation(threads: ChatThread[]) {
+  saveLegacyThreads(threads);
+  emitChanged();
+}
+
+if (idbAvailable()) {
+  for (const thread of readLegacyThreads()) cache.set(thread.id, thread);
+  if (typeof window !== 'undefined' && typeof BroadcastChannel !== 'undefined') {
+    channel = new BroadcastChannel(CHANNEL_NAME);
+    channel.addEventListener('message', (event: MessageEvent<unknown>) => {
+      const message = parsePersistenceMessage(event.data);
+      if (message) applyRemoteMessage(message);
+    });
+  } else if (typeof window !== 'undefined') {
+    window.addEventListener('storage', (event) => {
+      if (event.key !== NOTIFY_KEY || !event.newValue) return;
+      try {
+        const message = parsePersistenceMessage(JSON.parse(event.newValue));
+        if (message) applyRemoteMessage(message);
+      } catch {
+        /* malformed cross-window notification */
+      }
+    });
+  }
+  void hydrateFromIndexedDb();
+}
+
+export function subscribeThreadChanges(listener: () => void) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** IndexedDB hydration completion for startup coordination and focused tests. */
+export async function waitForThreadsPersistence() {
+  await hydrateFromIndexedDb();
+  await mutationQueue;
 }
 
 export function createThreadId(): string {
@@ -239,26 +511,40 @@ export function upsertThread(thread: ChatThread): void {
     workflow: isAgentWorkflow(thread.workflow) ? thread.workflow : 'direct',
     ...(isStructuredPlan(thread.latestPlan) ? { latestPlan: thread.latestPlan } : { latestPlan: undefined }),
   };
-  const all = loadAll().filter((t) => t.id !== capped.id);
-  all.unshift(capped);
-  saveAll(all);
+
+  if (!idbAvailable()) {
+    const all = readLegacyThreads().filter((item) => item.id !== capped.id);
+    all.unshift(capped);
+    saveFallbackMutation(all);
+    return;
+  }
+
+  cache.set(capped.id, cloneThread(capped));
+  deletedBeforeHydration.delete(capped.id);
+  trimCache();
+  publish({ type: 'upsert', thread: cloneThread(capped) });
+  persistUpsert(capped);
 }
 
 export function removeThread(id: string): void {
-  saveAll(loadAll().filter((t) => t.id !== id));
+  if (!idbAvailable()) {
+    saveFallbackMutation(readLegacyThreads().filter((thread) => thread.id !== id));
+    return;
+  }
+  cache.delete(id);
+  deletedBeforeHydration.add(id);
+  publish({ type: 'remove', id });
+  persistRemove(id);
 }
 
 /** 자동 제목(에이전트/폴백) — 사용자가 고정한 이름은 건드리지 않는다. */
 export function setThreadTitle(id: string, title: string): ChatThread | null {
-  const all = loadAll();
-  const idx = all.findIndex((t) => t.id === id);
-  if (idx < 0) return null;
-  if (all[idx]!.titlePinned) return all[idx]!;
+  const current = getThread(id);
+  if (!current || current.titlePinned) return current;
   const cleaned = title.trim().replace(/^["'「『]|["'」』]$/g, '').trim();
-  if (!cleaned) return all[idx]!;
-  const next = { ...all[idx]!, title: cleaned.slice(0, 48), updatedAt: Date.now() };
-  all[idx] = next;
-  saveAll(all);
+  if (!cleaned) return current;
+  const next = { ...current, title: cleaned.slice(0, 48), updatedAt: Date.now() };
+  upsertThread(next);
   return next;
 }
 
@@ -269,13 +555,22 @@ export function setThreadTitle(id: string, title: string): ChatThread | null {
  * 목록 순서가 튀면 안 된다.
  */
 export function renameThread(id: string, title: string): ChatThread | null {
-  const all = loadAll();
-  const idx = all.findIndex((t) => t.id === id);
-  if (idx < 0) return null;
+  const current = getThread(id);
+  if (!current) return null;
   const cleaned = title.trim().replace(/\s+/g, ' ');
-  if (!cleaned) return all[idx]!;
-  const next = { ...all[idx]!, title: cleaned.slice(0, 48), titlePinned: true };
-  all[idx] = next;
-  saveAll(all);
+  if (!cleaned) return current;
+  const next = { ...current, title: cleaned.slice(0, 48), titlePinned: true };
+  if (idbAvailable()) {
+    cache.set(id, cloneThread(next));
+    publish({ type: 'upsert', thread: cloneThread(next) });
+    persistUpsert(next);
+  } else {
+    const all = readLegacyThreads();
+    const index = all.findIndex((thread) => thread.id === id);
+    if (index >= 0) {
+      all[index] = next;
+      saveFallbackMutation(all);
+    }
+  }
   return next;
 }
