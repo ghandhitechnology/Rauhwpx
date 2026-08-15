@@ -118,6 +118,8 @@ test('catalog keeps tool-capable text models and maps pricing and reasoning', as
   assert.deepEqual(deepseek.pricing, { prompt: 0.0000002, completion: 0.0000008 });
   assert.equal(deepseek.reasoning, true);
   assert.equal(models[1].reasoning, true, 'include_reasoning 도 reasoning 으로 본다');
+  assert.equal(models[1].supportsImages, true);
+  assert.equal(deepseek.supportsImages, false);
   assert.equal(models[0].reasoning, false);
 });
 
