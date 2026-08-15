@@ -10,6 +10,9 @@ export const DEV_AGENT_HUB_ENSURE_PATH = '/__rhwp/ensure-agent-hub';
 
 export interface RhwpDesktopApi {
   ensureAgentHub: () => Promise<{ started?: boolean; ready?: boolean } | boolean>;
+  platform?: string;
+  isFullScreen?: () => Promise<boolean>;
+  onFullScreenChange?: (callback: (fullscreen: boolean) => void) => void;
 }
 
 export interface DesktopHost {
@@ -76,6 +79,32 @@ export async function ensureDesktopAgentHub(win?: DesktopHost): Promise<boolean>
     if (inflight === run) inflight = null;
   });
   return run;
+}
+
+/**
+ * macOS Electron 창 크롬 연동.
+ *
+ * 셸이 titleBarStyle: 'hidden' 으로 뜨므로 메뉴바가 창 최상단을 차지한다.
+ * `desktop-mac` 클래스로 신호등 버튼 자리(왼쪽 여백)와 드래그 영역을 켜고,
+ * 전체 화면에서는 신호등이 사라지므로 `desktop-fullscreen` 으로 여백을 되돌린다.
+ */
+export function installDesktopWindowChrome(win?: DesktopHost): void {
+  if (!isDesktopApp(win) || typeof document === 'undefined') return;
+  const api = desktopHost(win)?.rhwpDesktop;
+  const platform = api?.platform
+    ?? (typeof navigator !== 'undefined' && /Macintosh|Mac OS X/i.test(navigator.userAgent)
+      ? 'darwin'
+      : '');
+  if (platform !== 'darwin') return;
+  const root = document.documentElement;
+  root.classList.add('desktop-mac');
+  const setFullscreen = (fullscreen: boolean) => {
+    root.classList.toggle('desktop-fullscreen', fullscreen);
+  };
+  api?.onFullScreenChange?.(setFullscreen);
+  void api?.isFullScreen?.().then(setFullscreen).catch(() => {
+    /* IPC 미지원 셸에서는 기본(비전체화면) 상태 유지 */
+  });
 }
 
 type ServiceWorkerLike = NonNullable<NonNullable<DesktopHost['navigator']>['serviceWorker']>;
