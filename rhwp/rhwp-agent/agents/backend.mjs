@@ -32,6 +32,9 @@
  * @property {string} [isolatedHome]
  * @property {string} [codexHome]
  * @property {string} [codexAuthPath]
+ * @property {string} [codexBin]
+ * @property {string} [claudeBin]
+ * @property {Record<string, string>} [providerEnv]
  * @property {string} [model]
  * @property {string} [effort]
  * @property {(evt: UnifiedAgentEvent) => void} onEvent
