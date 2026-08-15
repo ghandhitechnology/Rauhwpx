@@ -10,7 +10,12 @@ import { fileURLToPath } from 'node:url';
 const studioRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runtimeRoot = mkdtempSync(path.join(tmpdir(), 'rhwp-deferred-pagination-runner-'));
 const compiler = process.env.RHWP_STUDIO_TSC
-  ?? path.join(studioRoot, 'node_modules', '.bin', 'tsc');
+  ?? path.join(
+    studioRoot,
+    'node_modules',
+    '.bin',
+    process.platform === 'win32' ? 'tsc.cmd' : 'tsc',
+  );
 const compilation = spawnSync(compiler, [
   '--ignoreConfig',
   'src/engine/deferred-pagination-runner.ts',
