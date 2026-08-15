@@ -12,9 +12,16 @@ import {
 } from '../core/idb-open.ts';
 
 const DB_NAME = 'rhwpStudioAutosave';
-const DB_VER = 1;
+const DB_VER = 2;
 const DRAFTS = 'drafts';
+const SESSIONS = 'sessions';
 const MAX_DRAFTS = 12;
+export const AUTOSAVE_SESSION_STALE_MS = 20_000;
+
+export interface AutosaveOwner {
+  launchId: string;
+  sessionId: string;
+}
 
 export interface AutosaveDraft {
   id: string;
@@ -24,21 +31,34 @@ export interface AutosaveDraft {
   byteLength: number;
   data: Uint8Array;
   dirtyReason?: string;
+  ownerLaunchId?: string;
+  ownerSessionId?: string;
+  ownerHeartbeatAt?: number;
+}
+
+export interface AutosaveSessionHeartbeat extends AutosaveOwner {
+  heartbeatAt: number;
+}
+
+export interface RecoverableAutosaveOptions {
+  now?: number;
+  staleAfterMs?: number;
 }
 
 type DraftRow = Omit<AutosaveDraft, 'data'> & { data?: ArrayBuffer };
 
 const memory = new Map<string, AutosaveDraft>();
+const memorySessions = new Map<string, AutosaveSessionHeartbeat>();
 
-function idbAvailable(): boolean {
+function idbAvailable() {
   return typeof indexedDB !== 'undefined';
 }
 
-function cloneBytes(bytes: Uint8Array): Uint8Array {
+function cloneBytes(bytes: Uint8Array) {
   return new Uint8Array(bytes);
 }
 
-function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+function bytesToArrayBuffer(bytes: Uint8Array) {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer as ArrayBuffer;
@@ -64,11 +84,14 @@ function draftToRow(draft: AutosaveDraft): DraftRow {
   };
 }
 
-function openDb(): Promise<IDBDatabase | null> {
+function openDb() {
   if (!idbAvailable()) return Promise.resolve(null);
   return openIndexedDatabase(DB_NAME, DB_VER, (db) => {
     if (!db.objectStoreNames.contains(DRAFTS)) {
       db.createObjectStore(DRAFTS, { keyPath: 'id' });
+    }
+    if (!db.objectStoreNames.contains(SESSIONS)) {
+      db.createObjectStore(SESSIONS, { keyPath: 'sessionId' });
     }
   });
 }
@@ -79,43 +102,75 @@ async function withDb<T>(fn: (db: IDBDatabase) => Promise<T>, fallback: () => Pr
   try {
     return await withTimeout(fn(db), IDB_OPERATION_TIMEOUT_MS, DB_NAME);
   } catch (error) {
-    console.warn(`[autosave] IndexedDB 지연, 메모리 폴백:`, error);
+    console.warn('[autosave] IndexedDB 지연, 메모리 폴백:', error);
     return fallback();
   } finally {
     db.close();
   }
 }
 
-async function trimMemoryDrafts(): Promise<void> {
-  if (memory.size <= MAX_DRAFTS) return;
-  const remove = [...memory.values()]
-    .sort((a, b) => a.savedAt - b.savedAt)
-    .slice(0, memory.size - MAX_DRAFTS);
-  for (const draft of remove) {
-    memory.delete(draft.id);
-  }
+function transactionDone(tx: IDBTransaction) {
+  return new Promise<void>((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
 }
 
-async function trimDbDrafts(db: IDBDatabase): Promise<void> {
-  const rows: DraftRow[] = await new Promise((resolve, reject) => {
-    const tx = db.transaction(DRAFTS, 'readonly');
-    const req = tx.objectStore(DRAFTS).getAll();
-    req.onsuccess = () => resolve((req.result as DraftRow[]) ?? []);
-    req.onerror = () => reject(req.error);
+function requestResult<T>(request: IDBRequest<T>) {
+  return new Promise<T>((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
   });
-  if (rows.length <= MAX_DRAFTS) return;
+}
 
-  const remove = rows
+function activeSessionIds(
+  sessions: AutosaveSessionHeartbeat[],
+  now: number,
+  staleAfterMs = AUTOSAVE_SESSION_STALE_MS,
+) {
+  const cutoff = now - staleAfterMs;
+  return new Set(
+    sessions
+      .filter((session) => Number.isFinite(session.heartbeatAt) && session.heartbeatAt >= cutoff)
+      .map((session) => session.sessionId),
+  );
+}
+
+function draftIsActive(
+  draft: Pick<AutosaveDraft, 'ownerSessionId' | 'ownerHeartbeatAt'>,
+  active: ReadonlySet<string>,
+  now: number,
+  staleAfterMs = AUTOSAVE_SESSION_STALE_MS,
+) {
+  if (!draft.ownerSessionId) return false;
+  if (active.has(draft.ownerSessionId)) return true;
+  return typeof draft.ownerHeartbeatAt === 'number'
+    && draft.ownerHeartbeatAt >= now - staleAfterMs;
+}
+
+function trimDraftRows(
+  drafts: Array<Pick<AutosaveDraft, 'id' | 'savedAt' | 'ownerSessionId' | 'ownerHeartbeatAt'>>,
+  sessions: AutosaveSessionHeartbeat[],
+  now: number,
+) {
+  const excess = drafts.length - MAX_DRAFTS;
+  if (excess <= 0) return [];
+  const active = activeSessionIds(sessions, now);
+  return drafts
+    .filter((draft) => !draftIsActive(draft, active, now))
     .sort((a, b) => a.savedAt - b.savedAt)
-    .slice(0, rows.length - MAX_DRAFTS);
-  for (const draft of remove) {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(DRAFTS, 'readwrite');
-      tx.objectStore(DRAFTS).delete(draft.id);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-  }
+    .slice(0, excess)
+    .map((draft) => draft.id);
+}
+
+function trimMemoryDrafts(now: number) {
+  const remove = trimDraftRows(
+    [...memory.values()],
+    [...memorySessions.values()],
+    now,
+  );
+  for (const id of remove) memory.delete(id);
 }
 
 export function createAutosaveDraftId(): string {
@@ -127,20 +182,23 @@ export async function saveAutosaveDraft(draft: AutosaveDraft): Promise<void> {
     ...draft,
     byteLength: draft.data.byteLength,
   });
+  const now = Date.now();
 
   await withDb(
     async (db) => {
-      await trimDbDrafts(db);
-      await new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(DRAFTS, 'readwrite');
-        tx.objectStore(DRAFTS).put(draftToRow(normalized));
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
+      const tx = db.transaction([DRAFTS, SESSIONS], 'readwrite');
+      const draftsStore = tx.objectStore(DRAFTS);
+      draftsStore.put(draftToRow(normalized));
+      const [drafts, sessions] = await Promise.all([
+        requestResult(draftsStore.getAll() as IDBRequest<DraftRow[]>),
+        requestResult(tx.objectStore(SESSIONS).getAll() as IDBRequest<AutosaveSessionHeartbeat[]>),
+      ]);
+      for (const id of trimDraftRows(drafts, sessions, now)) draftsStore.delete(id);
+      await transactionDone(tx);
     },
     async () => {
       memory.set(normalized.id, normalized);
-      await trimMemoryDrafts();
+      trimMemoryDrafts(now);
     },
   );
 }
@@ -150,60 +208,107 @@ export async function getAutosaveDraft(id: string): Promise<AutosaveDraft | null
   if (mem) return cloneDraft(mem);
 
   return withDb(
-    async (db) =>
-      new Promise<AutosaveDraft | null>((resolve, reject) => {
-        const tx = db.transaction(DRAFTS, 'readonly');
-        const req = tx.objectStore(DRAFTS).get(id);
-        req.onsuccess = () => {
-          const row = req.result as DraftRow | undefined;
-          resolve(row ? rowToDraft(row) : null);
-        };
-        req.onerror = () => reject(req.error);
-      }),
+    async (db) => {
+      const tx = db.transaction(DRAFTS, 'readonly');
+      const row = await requestResult(tx.objectStore(DRAFTS).get(id) as IDBRequest<DraftRow | undefined>);
+      await transactionDone(tx);
+      return row ? rowToDraft(row) : null;
+    },
     async () => null,
   );
 }
 
 export async function listAutosaveDrafts(): Promise<AutosaveDraft[]> {
   return withDb(
-    async (db) =>
-      new Promise<AutosaveDraft[]>((resolve, reject) => {
-        const tx = db.transaction(DRAFTS, 'readonly');
-        const req = tx.objectStore(DRAFTS).getAll();
-        req.onsuccess = () => {
-          const rows = ((req.result as DraftRow[]) ?? []).map(rowToDraft);
-          resolve(rows.sort((a, b) => b.savedAt - a.savedAt));
-        };
-        req.onerror = () => reject(req.error);
-      }),
+    async (db) => {
+      const tx = db.transaction(DRAFTS, 'readonly');
+      const rows = await requestResult(tx.objectStore(DRAFTS).getAll() as IDBRequest<DraftRow[]>);
+      await transactionDone(tx);
+      return rows.map(rowToDraft).sort((a, b) => b.savedAt - a.savedAt);
+    },
     async () => [...memory.values()].map(cloneDraft).sort((a, b) => b.savedAt - a.savedAt),
+  );
+}
+
+async function listAutosaveSessions() {
+  return withDb(
+    async (db) => {
+      const tx = db.transaction(SESSIONS, 'readonly');
+      const rows = await requestResult(
+        tx.objectStore(SESSIONS).getAll() as IDBRequest<AutosaveSessionHeartbeat[]>,
+      );
+      await transactionDone(tx);
+      return rows;
+    },
+    async () => [...memorySessions.values()].map((session) => ({ ...session })),
+  );
+}
+
+/** 현재 살아 있는 다른 window의 draft를 복구 후보에서 제외한다. */
+export async function listRecoverableAutosaveDrafts(options: RecoverableAutosaveOptions = {}) {
+  const now = options.now ?? Date.now();
+  const staleAfterMs = options.staleAfterMs ?? AUTOSAVE_SESSION_STALE_MS;
+  const [drafts, sessions] = await Promise.all([listAutosaveDrafts(), listAutosaveSessions()]);
+  const active = activeSessionIds(sessions, now, staleAfterMs);
+  return drafts.filter((draft) => !draftIsActive(draft, active, now, staleAfterMs));
+}
+
+export async function touchAutosaveSession(owner: AutosaveOwner, heartbeatAt = Date.now()) {
+  const heartbeat: AutosaveSessionHeartbeat = {
+    launchId: owner.launchId,
+    sessionId: owner.sessionId,
+    heartbeatAt,
+  };
+  memorySessions.set(owner.sessionId, heartbeat);
+  await withDb(
+    async (db) => {
+      const tx = db.transaction(SESSIONS, 'readwrite');
+      tx.objectStore(SESSIONS).put(heartbeat);
+      await transactionDone(tx);
+    },
+    async () => {},
+  );
+}
+
+export async function releaseAutosaveSession(sessionId: string) {
+  memorySessions.delete(sessionId);
+  await withDb(
+    async (db) => {
+      const tx = db.transaction(SESSIONS, 'readwrite');
+      tx.objectStore(SESSIONS).delete(sessionId);
+      await transactionDone(tx);
+    },
+    async () => {},
   );
 }
 
 export async function deleteAutosaveDraft(id: string): Promise<void> {
   memory.delete(id);
   await withDb(
-    async (db) =>
-      new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(DRAFTS, 'readwrite');
-        tx.objectStore(DRAFTS).delete(id);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      }),
+    async (db) => {
+      const tx = db.transaction(DRAFTS, 'readwrite');
+      tx.objectStore(DRAFTS).delete(id);
+      await transactionDone(tx);
+    },
     async () => {},
   );
 }
 
+/** 복구 가능한(죽은 이전 세션 소유) draft만 지운다. */
+export async function clearRecoverableAutosaveDrafts(options: RecoverableAutosaveOptions = {}) {
+  const drafts = await listRecoverableAutosaveDrafts(options);
+  await Promise.all(drafts.map((draft) => deleteAutosaveDraft(draft.id)));
+}
+
+/** 명시적인 전체 초기화 API. 일반 복구 UI는 clearRecoverableAutosaveDrafts를 사용한다. */
 export async function clearAutosaveDrafts(): Promise<void> {
   memory.clear();
   await withDb(
-    async (db) =>
-      new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(DRAFTS, 'readwrite');
-        tx.objectStore(DRAFTS).clear();
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      }),
+    async (db) => {
+      const tx = db.transaction(DRAFTS, 'readwrite');
+      tx.objectStore(DRAFTS).clear();
+      await transactionDone(tx);
+    },
     async () => {},
   );
 }

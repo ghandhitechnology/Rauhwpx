@@ -3,10 +3,14 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import WebSocket from 'ws';
+import { resolveHubIdentity, sessionIdFromScopedHubToken } from './hub-session-registry.mjs';
 import { filterToolDefinitions, toToolContent, toolAnnotations } from './tools.mjs';
 
 const WS_URL = process.env.RHWP_WS_URL ?? 'ws://127.0.0.1:5175/mcp';
-const TOKEN = process.env.RHWP_AGENT_TOKEN ?? 'dev';
+const { token: TOKEN, development: DEVELOPMENT_AUTH } = resolveHubIdentity();
+const SESSION_ID = process.env.RHWP_SESSION_ID
+  ?? sessionIdFromScopedHubToken(TOKEN)
+  ?? (DEVELOPMENT_AUTH ? 'dev' : null);
 const AGENT_NAME = process.env.RHWP_AGENT_NAME ?? 'unknown';
 const WORKFLOW = process.env.RHWP_AGENT_WORKFLOW ?? process.env.RHWP_WORKFLOW ?? 'direct';
 const PHASE = process.env.RHWP_AGENT_PHASE ?? process.env.RHWP_PLAN_PHASE ?? (WORKFLOW === 'plan' ? 'planning' : 'implementing');
@@ -45,13 +49,19 @@ function ensureConnected() {
   if (ws && ws.readyState === WebSocket.OPEN) return Promise.resolve(ws);
   if (connecting) return connecting;
   connecting = new Promise((resolve, reject) => {
-    const url = `${WS_URL}?token=${encodeURIComponent(TOKEN)}&agent=${encodeURIComponent(AGENT_NAME)}&workflow=${encodeURIComponent(WORKFLOW)}${CAPABILITY_EPOCH ? `&capabilityEpoch=${encodeURIComponent(CAPABILITY_EPOCH)}` : ''}`;
     let sock;
     try {
+      if (!SESSION_ID) throw hubError('SESSION_REQUIRED', 'RHWP_SESSION_ID or a session-scoped hub token is required');
+      const url = new URL(WS_URL);
+      url.searchParams.set('token', TOKEN);
+      url.searchParams.set('sessionId', SESSION_ID);
+      url.searchParams.set('agent', AGENT_NAME);
+      url.searchParams.set('workflow', WORKFLOW);
+      if (CAPABILITY_EPOCH) url.searchParams.set('capabilityEpoch', CAPABILITY_EPOCH);
       sock = new WebSocket(url);
     } catch (e) {
       connecting = null;
-      reject(hubError('HUB_UNAVAILABLE', 'rhwp-agent hub is not running (node server.mjs)'));
+      reject(e?.code ? e : hubError('HUB_UNAVAILABLE', 'rhwp-agent hub is not running (node server.mjs)'));
       return;
     }
     const openTimer = setTimeout(() => {
@@ -115,7 +125,7 @@ async function callHub(tool, args) {
     inflight.set(id, { resolve, reject, timer });
     try {
       sock.send(JSON.stringify({
-        v: 2,
+        v: 3,
         type: 'tool-call',
         id,
         tool,
@@ -269,7 +279,7 @@ await server.connect(transport);
 server.server.onclose = () => shutdown('stdio transport closed');
 process.stdin.on('end', () => shutdown('stdin EOF'));
 process.stdin.on('close', () => shutdown('stdin closed'));
-log(`rhwp MCP stdio server started (agent=${AGENT_NAME}, hub=${WS_URL}, workflow=${WORKFLOW}, profile=${TOOL_PROFILE}, epoch=${CAPABILITY_EPOCH ?? 'legacy'})`);
+log(`rhwp MCP stdio server started (agent=${AGENT_NAME}, session=${SESSION_ID ?? 'missing'}, hub=${WS_URL}, workflow=${WORKFLOW}, profile=${TOOL_PROFILE}, epoch=${CAPABILITY_EPOCH ?? 'legacy'})`);
 
 ensureConnected().then(
   () => log('eager hub connection established'),

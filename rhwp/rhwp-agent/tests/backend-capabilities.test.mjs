@@ -1,24 +1,37 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createClaudeSession, buildClaudeArgv } from '../agents/claude.mjs';
-import { createCodexSession, buildCodexArgv } from '../agents/codex.mjs';
-import { systemBriefFor } from '../agents/backend.mjs';
+import { createClaudeSession, buildClaudeArgv, prepareClaudeHome } from '../agents/claude.mjs';
+import { createCodexSession, buildCodexArgv, prepareCodexHome } from '../agents/codex.mjs';
+import { mcpRuntimeFor, systemBriefFor } from '../agents/backend.mjs';
 
 const testHome = mkdtempSync(path.join(os.tmpdir(), 'rhwp-backend-test-'));
 test.after(() => rmSync(testHome, { recursive: true, force: true }));
 
 const baseOpts = {
-  rootDir: '/tmp/rhwp',
+  rootDir: '/tmp/Rau workspace',
   isolatedHome: testHome,
   codexHome: path.join(testHome, '.codex'),
-  mcpScriptPath: '/tmp/mcp-stdio.mjs',
-  hubPort: 5175,
+  mcpScriptPath: '/tmp/Rau runtime/mcp stdio.mjs',
+  mcpRuntimeCommand: '/Applications/Rau App/Rau',
+  mcpRuntimeArgs: ['--no-warnings'],
+  mcpRuntimeEnv: { ELECTRON_RUN_AS_NODE: '1' },
+  hubPort: 6199,
   token: 'secret-token',
+  sessionId: 'studio-thread-42',
   model: 'test-model',
   effort: 'high',
   onEvent() {},
@@ -77,6 +90,17 @@ function nextTask() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+test('MCP runtime defaults to the current executable for development', () => {
+  assert.deepEqual(
+    mcpRuntimeFor({ mcpScriptPath: '/tmp/dev project/mcp-stdio.mjs' }, {}),
+    { command: process.execPath, args: ['/tmp/dev project/mcp-stdio.mjs'], env: {} },
+  );
+  assert.deepEqual(
+    mcpRuntimeFor({ mcpScriptPath: 'C:\\Rau App\\mcp-stdio.mjs' }, { ELECTRON_RUN_AS_NODE: '1' }).env,
+    { ELECTRON_RUN_AS_NODE: '1' },
+  );
+});
+
 const matrix = [
   { name: 'direct safe', workflow: 'direct', phase: 'implementing', permissionProfile: 'safe', claudeWrite: true, claudeBypass: false, codexSandbox: 'workspace-write', planCapabilities: false },
   { name: 'direct full', workflow: 'direct', phase: 'implementing', permissionProfile: 'unrestricted', claudeWrite: true, claudeBypass: true, codexSandbox: 'danger-full-access', planCapabilities: false },
@@ -112,6 +136,11 @@ for (const entry of matrix) {
     assert.equal(claudeMcp.env.RHWP_AGENT_WORKFLOW, entry.workflow);
     assert.equal(claudeMcp.env.RHWP_AGENT_PHASE, entry.phase);
     assert.equal(claudeMcp.env.RHWP_CAPABILITY_EPOCH, `epoch-${entry.name}`);
+    assert.equal(claudeMcp.env.RHWP_SESSION_ID, 'studio-thread-42');
+    assert.equal(claudeMcp.command, '/Applications/Rau App/Rau');
+    assert.deepEqual(claudeMcp.args, ['--no-warnings', '/tmp/Rau runtime/mcp stdio.mjs']);
+    assert.equal(claudeMcp.env.ELECTRON_RUN_AS_NODE, '1');
+    assert.equal(claudeMcp.env.RHWP_WS_URL, 'ws://127.0.0.1:6199/mcp');
 
     const codex = buildCodexArgv(opts, null);
     assert.ok(codex.includes(`sandbox_mode="${entry.codexSandbox}"`));
@@ -120,10 +149,18 @@ for (const entry of matrix) {
     assert.notEqual(multiAgentIndex, -1);
     assert.equal(codex[multiAgentIndex - 1], entry.planCapabilities ? '--enable' : '--disable');
     assert.equal(codex.includes('web_search="live"'), entry.planCapabilities);
+    assert.equal(JSON.parse(codexConfig(codex, 'mcp_servers.rhwp.command=').split('=', 2)[1]), '/Applications/Rau App/Rau');
+    assert.deepEqual(
+      JSON.parse(codexConfig(codex, 'mcp_servers.rhwp.args=').slice('mcp_servers.rhwp.args='.length)),
+      ['--no-warnings', '/tmp/Rau runtime/mcp stdio.mjs'],
+    );
     const codexEnv = codexConfig(codex, 'mcp_servers.rhwp.env=');
     assert.match(codexEnv, new RegExp(`RHWP_AGENT_WORKFLOW = "${entry.workflow}"`));
     assert.match(codexEnv, new RegExp(`RHWP_AGENT_PHASE = "${entry.phase}"`));
     assert.match(codexEnv, new RegExp(`RHWP_CAPABILITY_EPOCH = "epoch-${entry.name}"`));
+    assert.match(codexEnv, /RHWP_SESSION_ID = "studio-thread-42"/);
+    assert.match(codexEnv, /ELECTRON_RUN_AS_NODE = "1"/);
+    assert.match(codexEnv, /RHWP_WS_URL = "ws:\/\/127\.0\.0\.1:6199\/mcp"/);
   });
 }
 
@@ -215,10 +252,56 @@ test('Codex recreates a purged isolated home before spawning', (t) => {
 
   session.sendUserMessage('inspect');
   assert.equal(spawnEnv.HOME, isolatedHome);
+  assert.equal(spawnEnv.USERPROFILE, isolatedHome);
+  assert.equal(spawnEnv.RHWP_SESSION_ID, 'studio-thread-42');
   assert.equal(spawnEnv.CODEX_HOME, codexHome);
   child.exitCode = 0;
   child.emit('exit', 0, null);
   session.dispose();
+});
+
+test('Claude isolation seeds only the shared login files with a Windows copy fallback', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-claude-copy-test-'));
+  const sourceHome = path.join(root, 'source');
+  const isolatedHome = path.join(root, 'isolated');
+  const credentialsPath = path.join(sourceHome, '.claude', '.credentials.json');
+  const configPath = path.join(sourceHome, '.claude.json');
+  mkdirSync(path.dirname(credentialsPath), { recursive: true });
+  writeFileSync(credentialsPath, '{"oauth":"shared"}');
+  writeFileSync(configPath, '{"account":"shared"}');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  prepareClaudeHome(isolatedHome, { credentialsPath, configPath }, {
+    platform: 'win32',
+    symlink() {
+      const error = new Error('symlinks require elevation');
+      error.code = 'EPERM';
+      throw error;
+    },
+  });
+
+  assert.equal(readFileSync(path.join(isolatedHome, '.claude', '.credentials.json'), 'utf8'), '{"oauth":"shared"}');
+  assert.equal(readFileSync(path.join(isolatedHome, '.claude.json'), 'utf8'), '{"account":"shared"}');
+  assert.deepEqual(readdirSync(path.join(isolatedHome, '.claude')), ['.credentials.json']);
+});
+
+test('Codex auth falls back to a copy when Windows rejects symlink creation', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-codex-copy-test-'));
+  const codexHome = path.join(root, 'isolated', '.codex');
+  const authPath = path.join(root, 'auth.json');
+  writeFileSync(authPath, '{"token":"copied"}');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  prepareCodexHome(codexHome, authPath, {
+    platform: 'win32',
+    symlink() {
+      const error = new Error('symlinks require elevation');
+      error.code = 'EPERM';
+      throw error;
+    },
+  });
+
+  assert.equal(readFileSync(path.join(codexHome, 'auth.json'), 'utf8'), '{"token":"copied"}');
 });
 
 test('Codex keeps a completed turn open until its process exits', async () => {
@@ -255,9 +338,9 @@ test('Claude waits for an idle restart and resumes with the new phase', async ()
   const events = [];
   const opts = { ...baseOpts, permissionProfile: 'safe', onEvent: (event) => events.push(event) };
   const session = createClaudeSession(opts, {
-    spawnProcess(command, argv) {
+    spawnProcess(command, argv, options) {
       const process = new FakeProcess();
-      spawns.push({ command, argv, process });
+      spawns.push({ command, argv, options, process });
       return process;
     },
   });
@@ -265,6 +348,12 @@ test('Claude waits for an idle restart and resumes with the new phase', async ()
   session.sendUserMessage('inspect');
   await nextTask();
   assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].options.cwd, '/tmp/Rau workspace');
+  assert.equal(spawns[0].options.env.HOME, testHome);
+  assert.equal(spawns[0].options.env.USERPROFILE, testHome);
+  assert.equal(spawns[0].options.env.RHWP_SESSION_ID, 'studio-thread-42');
+  assert.equal(spawns[0].options.detached, process.platform !== 'win32');
+  assert.equal(spawns[0].options.windowsHide, true);
   await assert.rejects(
     session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 1 }),
     /only change between turns/,

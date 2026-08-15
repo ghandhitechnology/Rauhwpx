@@ -1,4 +1,10 @@
-import { spawn } from 'node:child_process';
+import spawn from 'cross-spawn';
+
+import {
+  isolatedProcessEnv,
+  processTreeSpawnOptions,
+  terminateProcessTree,
+} from '../process-tree.mjs';
 
 /** 제목 자체는 짧지만 추론 모델은 생각에도 토큰을 쓴다 — 잘리지 않을 만큼만 준다. */
 const TITLE_MAX_TOKENS = 256;
@@ -13,7 +19,9 @@ export function openRouterReady({ useOpenRouter, piManager, openRouter } = {}) {
  * 기본은 gpt-5.6-luna CLI, pi 사용자는 OpenRouter 의 가장 싼 모델을 쓴다.
  *
  * @param {string} preview
- * @param {{ useOpenRouter?: boolean, piManager?: any, openRouter?: any }} [deps]
+ * @param {{ useOpenRouter?: boolean, piManager?: any, openRouter?: any, isolatedHome?: string,
+ *   sessionId?: string, cwd?: string, spawnProcess?: typeof spawn,
+ *   terminateProcess?: typeof terminateProcessTree }} [deps]
  * @returns {Promise<string | null>}
  */
 export function generateChatTitle(preview, deps = {}) {
@@ -30,6 +38,8 @@ export function generateChatTitle(preview, deps = {}) {
   if (openRouterReady(deps)) return titleViaOpenRouter(prompt, deps);
 
   return new Promise((resolve) => {
+    const spawnProcess = deps.spawnProcess ?? spawn;
+    const terminateProcess = deps.terminateProcess ?? terminateProcessTree;
     let settled = false;
     let buf = '';
     let lastAssistant = '';
@@ -42,7 +52,7 @@ export function generateChatTitle(preview, deps = {}) {
 
     let proc;
     try {
-      proc = spawn(
+      proc = spawnProcess(
         'codex',
         [
           'exec',
@@ -59,7 +69,12 @@ export function generateChatTitle(preview, deps = {}) {
           '-c', 'model_reasoning_effort="low"',
           '-',
         ],
-        { env: process.env, stdio: ['pipe', 'pipe', 'pipe'] },
+        {
+          ...processTreeSpawnOptions(),
+          ...(deps.cwd ? { cwd: deps.cwd } : {}),
+          env: isolatedProcessEnv(deps),
+          stdio: ['pipe', 'pipe', 'pipe'],
+        },
       );
     } catch {
       finish(null);
@@ -67,10 +82,7 @@ export function generateChatTitle(preview, deps = {}) {
     }
 
     const timer = setTimeout(() => {
-      try { proc.kill('SIGTERM'); } catch {}
-      // SIGTERM 을 무시하는 자식이 남지 않도록 강제 종료로 승격한다.
-      const killTimer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 3_000);
-      if (killTimer.unref) killTimer.unref();
+      terminateProcess(proc);
       finish(cleanTitle(lastAssistant) || null);
     }, 45_000);
     if (timer.unref) timer.unref();

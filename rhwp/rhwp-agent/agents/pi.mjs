@@ -13,6 +13,11 @@ import {
   truncate,
   validateExecutionMode,
 } from './backend.mjs';
+import {
+  processTreeSpawnOptions,
+  terminateProcessTree,
+  waitForProcessTreeExit,
+} from '../process-tree.mjs';
 
 const STDERR_TAIL_LIMIT = 16_000;
 /** macOS ARG_MAX(1MB) 여유분. 프롬프트는 positional 인자로 넘어간다. */
@@ -107,6 +112,10 @@ export function buildPiEnv(opts, sourceEnv = process.env) {
     if (typeof value !== 'string' || CREDENTIAL_NAME.test(name)) continue;
     env[name] = value;
   }
+  if (opts.isolatedHome) {
+    env.HOME = String(opts.isolatedHome);
+    env.USERPROFILE = String(opts.isolatedHome);
+  }
   const piRoot = opts.piRoot ?? '';
   return {
     ...env,
@@ -180,7 +189,10 @@ function normalizePiUsage(raw) {
  * @param {PiBackendOptions} opts
  * @returns {import('./backend.mjs').AgentSession}
  */
-export function createPiSession(opts, { spawnProcess = spawn } = {}) {
+export function createPiSession(opts, {
+  spawnProcess = spawn,
+  terminateProcess = terminateProcessTree,
+} = {}) {
   const onEvent = opts.onEvent;
 
   // pi 세션 id 는 우리가 발급한다. 첫 스폰은 세션 파일을 만들고(“creating a new
@@ -192,7 +204,6 @@ export function createPiSession(opts, { spawnProcess = spawn } = {}) {
   let turnCompleted = false;
   let turnFailureMessage = null;
   let disposed = false;
-  let killTimer = null;
   let stderrTail = '';
   let childExitPromise = Promise.resolve();
   let resolveChildExit = null;
@@ -283,13 +294,7 @@ export function createPiSession(opts, { spawnProcess = spawn } = {}) {
   function killChild() {
     const proc = child;
     if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
-    proc.kill('SIGTERM');
-    killTimer = setTimeout(() => {
-      try {
-        if (proc.exitCode === null && proc.signalCode === null) proc.kill('SIGKILL');
-      } catch {}
-    }, 3000);
-    if (killTimer.unref) killTimer.unref();
+    terminateProcess(proc);
   }
 
   return {
@@ -321,11 +326,11 @@ export function createPiSession(opts, { spawnProcess = spawn } = {}) {
       let proc;
       try {
         proc = spawnProcess(opts.piBin ?? 'pi', argv, {
+          ...processTreeSpawnOptions(),
           cwd: opts.rootDir,
           env: buildPiEnv(opts),
           // stdin 은 반드시 닫아야 한다: json 모드는 열린 stdin 을 계속 기다린다.
           stdio: ['ignore', 'pipe', 'pipe'],
-          windowsHide: true,
         });
       } catch (e) {
         onEvent({ type: 'error', agent: 'pi', message: `failed to start pi: ${e?.message ?? e}` });
@@ -352,7 +357,6 @@ export function createPiSession(opts, { spawnProcess = spawn } = {}) {
       });
       proc.on('exit', (code, signal) => {
         if (proc !== child) return;
-        if (killTimer) { clearTimeout(killTimer); killTimer = null; }
         if (turnOpen && !disposed) {
           if (turnFailureMessage) {
             endTurn({ type: 'turn-end', agent: 'pi', stopReason: 'failed', errorMessage: turnFailureMessage });
@@ -401,7 +405,9 @@ export function createPiSession(opts, { spawnProcess = spawn } = {}) {
       turnOpen = false;
       // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
       try { child?.stdout?.removeAllListeners('data'); } catch {}
+      const exited = waitForProcessTreeExit(child);
       killChild();
+      return exited;
     },
   };
 }

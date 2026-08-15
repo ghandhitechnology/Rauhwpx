@@ -1,6 +1,11 @@
 import crypto from 'node:crypto';
 
+export const PACKAGED_STUDIO_ORIGIN = 'rauhwpx://app';
 const LOCAL_STUDIO_ORIGIN = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/i;
+
+export function isAllowedStudioOrigin(origin) {
+  return origin === PACKAGED_STUDIO_ORIGIN || LOCAL_STUDIO_ORIGIN.test(String(origin ?? ''));
+}
 
 function sendJson(res, status, body, origin = null) {
   const payload = Buffer.from(JSON.stringify(body));
@@ -64,7 +69,7 @@ export function createReferenceHttpHandler({ store, token }) {
   return async function handleReferenceHttp(req, res, url) {
     if (!isReferencePath(url.pathname)) return false;
     const origin = typeof req.headers.origin === 'string' ? req.headers.origin : null;
-    if (origin && !LOCAL_STUDIO_ORIGIN.test(origin)) {
+    if (origin && !isAllowedStudioOrigin(origin)) {
       req.resume?.();
       const message = 'Reference API accepts only local Studio origins';
       sendJson(res, 403, { status: 'error', message, error: { code: 'REFERENCE_ORIGIN_DENIED', message } });
