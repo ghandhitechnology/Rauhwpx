@@ -37,6 +37,7 @@ import {
   resolveModelForAgent,
 } from '../../agent/models.ts';
 import { loadAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
+import { renderChatMarkdown } from './chat-markdown.ts';
 import { appendMarkdown, planToMarkdown } from './plan-markdown.ts';
 import {
   createEmptyThread,
@@ -523,6 +524,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     documentId: currentDocumentId,
   });
   let assistantBuffer = '';
+  let assistantRenderFrame: number | null = null;
+  let pendingAssistantBubble: HTMLElement | null = null;
+  const assistantBubbleSources = new WeakMap<HTMLElement, string>();
   let attachmentsSending = false;
   let threadsPanelOpen = false;
   let skillsPanelOpen = false;
@@ -2752,10 +2756,44 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     return bubble;
   }
 
+  function renderAssistantMessage(bubble: HTMLElement, text: string): void {
+    assistantBubbleSources.set(bubble, text);
+    renderChatMarkdown(bubble, text);
+  }
+
+  function flushPendingAssistantRender(): void {
+    if (assistantRenderFrame !== null) {
+      window.cancelAnimationFrame(assistantRenderFrame);
+      assistantRenderFrame = null;
+    }
+    const bubble = pendingAssistantBubble;
+    pendingAssistantBubble = null;
+    if (!bubble) return;
+    renderAssistantMessage(bubble, assistantBubbleSources.get(bubble) ?? '');
+  }
+
+  function scheduleAssistantRender(bubble: HTMLElement, text: string): void {
+    assistantBubbleSources.set(bubble, text);
+    pendingAssistantBubble = bubble;
+    if (assistantRenderFrame !== null) return;
+    assistantRenderFrame = window.requestAnimationFrame(() => {
+      assistantRenderFrame = null;
+      const pending = pendingAssistantBubble;
+      pendingAssistantBubble = null;
+      if (pending) renderAssistantMessage(pending, assistantBubbleSources.get(pending) ?? '');
+    });
+  }
+
+  function cancelPendingAssistantRender(): void {
+    if (assistantRenderFrame !== null) window.cancelAnimationFrame(assistantRenderFrame);
+    assistantRenderFrame = null;
+    pendingAssistantBubble = null;
+  }
+
   function flushAssistantBuffer(opts?: { persist?: boolean; kind?: 'progress' }): void {
-    const text = assistantBuffer.trim();
+    const text = assistantBuffer;
     assistantBuffer = '';
-    if (!text) return;
+    if (!text.trim()) return;
     if (opts?.persist === false) return;
     currentThread.messages.push({
       role: 'assistant',
@@ -2781,6 +2819,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   function renderMessagesFromThread(thread: ChatThread): void {
+    cancelPendingAssistantRender();
     messages.replaceChildren();
     streamBubble = null;
     turnActivity = null;
@@ -2794,10 +2833,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         const agent = msg.agent ?? thread.agent;
         if (msg.kind === 'progress') {
           const step = el('div', 'ag-progress-step ag-progress-step-restored');
-          step.appendChild(el('div', `ag-msg ag-progress-milestone ag-${agent}`, msg.text));
+          const milestone = el('div', `ag-msg ag-progress-milestone ag-${agent}`);
+          renderAssistantMessage(milestone, msg.text);
+          step.appendChild(milestone);
           messages.appendChild(step);
         } else {
-          messages.appendChild(el('div', `ag-msg ag-msg-assistant ag-${agent}`, msg.text));
+          const bubble = el('div', `ag-msg ag-msg-assistant ag-${agent}`);
+          renderAssistantMessage(bubble, msg.text);
+          messages.appendChild(bubble);
         }
       } else {
         messages.appendChild(el('div', 'ag-msg ag-msg-system', msg.text));
@@ -2807,6 +2850,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   function clearChatUi(): void {
+    cancelPendingAssistantRender();
     messages.replaceChildren();
     streamBubble = null;
     turnActivity = null;
@@ -3415,9 +3459,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   /** 도구 호출 앞의 진행 설명을 타임라인 이정표로 확정한다. */
   function compactStreamIntoActivity(agent: AgentName) {
+    flushPendingAssistantRender();
     const bubble = streamBubble;
     if (!bubble) return null;
-    if (!(bubble.textContent ?? '').trim()) {
+    if (!(assistantBubbleSources.get(bubble) ?? bubble.textContent ?? '').trim()) {
       bubble.remove();
       streamBubble = null;
       return null;
@@ -3439,7 +3484,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function appendCheckDocumentMessage(agent: AgentName): void {
     const text = '작업을 마쳤습니다. 문서를 확인해 보세요.';
     const message = openAssistantBubble(agent);
-    message.textContent = text;
+    renderAssistantMessage(message, text);
     message.classList.add('ag-msg-enter');
     assistantBuffer = text;
     flushAssistantBuffer();
@@ -3550,6 +3595,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         followConversation = true;
         scrollConversationToEnd();
         assistantBuffer = '';
+        cancelPendingAssistantRender();
         streamBubble = null;
         turnActivity = null;
         turnToolCount = 0;
@@ -3563,7 +3609,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
           if (!bubble.classList.contains('ag-msg-enter')) {
             bubble.classList.add('ag-msg-enter');
           }
-          bubble.textContent = (bubble.textContent ?? '') + event.text;
+          scheduleAssistantRender(bubble, assistantBuffer);
         });
         break;
       }
@@ -3583,9 +3629,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         }
         break;
       case 'turn-end': {
+        flushPendingAssistantRender();
         const finalBubble =
           streamBubble?.parentElement === messages
-          && Boolean((streamBubble.textContent ?? '').trim());
+          && Boolean((assistantBubbleSources.get(streamBubble) ?? streamBubble.textContent ?? '').trim());
         setTurnRunning(false);
         flushAssistantBuffer();
         sweepUnresolvedToolRows();
@@ -3784,6 +3831,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         break;
       case 'chat-stopped':
         setTurnRunning(false);
+        flushPendingAssistantRender();
         flushAssistantBuffer();
         sweepUnresolvedToolRows();
         completeTurnActivity();
