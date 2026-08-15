@@ -233,6 +233,7 @@ function installMenu() {
 
 async function createWindow() {
   const backgroundColor = nativeTheme.shouldUseDarkColors ? '#141416' : '#f5f5f7';
+  const isMac = process.platform === 'darwin';
   const window = new BrowserWindow({
     title: 'Rauhwpx',
     width: 1440,
@@ -241,6 +242,12 @@ async function createWindow() {
     minHeight: 640,
     show: false,
     backgroundColor,
+    // macOS: hide the native title bar so the studio menu bar sits at the very
+    // top; traffic lights are repositioned to center inside that 28px row.
+    ...(isMac ? {
+      titleBarStyle: 'hidden',
+      trafficLightPosition: { x: 14, y: 8 },
+    } : {}),
     webPreferences: {
       preload: PRELOAD_PATH,
       contextIsolation: true,
@@ -249,6 +256,13 @@ async function createWindow() {
     },
   });
   mainWindow = window;
+  // Let the renderer drop the traffic-light inset while in native fullscreen.
+  window.on('enter-full-screen', () => {
+    if (!window.isDestroyed()) window.webContents.send('window:fullscreen-changed', true);
+  });
+  window.on('leave-full-screen', () => {
+    if (!window.isDestroyed()) window.webContents.send('window:fullscreen-changed', false);
+  });
   window.webContents.on('preload-error', (_event, preloadPath, error) => {
     console.warn('[rauhwpx] preload error', preloadPath, error);
   });
@@ -280,6 +294,8 @@ function stopChildren() {
   studioServer?.close();
   studioServer = null;
 }
+
+ipcMain.handle('window:is-fullscreen', () => Boolean(mainWindow?.isFullScreen()));
 
 ipcMain.handle('agent-hub:ensure', async () => {
   if (quitting) return { started: false, ready: false };
