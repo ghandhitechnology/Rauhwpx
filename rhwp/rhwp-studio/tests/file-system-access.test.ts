@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   HWP_DOCUMENT_ACCEPT,
@@ -198,6 +199,60 @@ test('saveDocumentToFileSystem은 current handle이 있으면 picker 없이 같�
   assert.equal(currentHandle.writable.closed, true);
 });
 
+test('save target ownership validation runs before creating the writable stream', async () => {
+  const calls: string[] = [];
+  const handle = {
+    ...createHandle('owned.hwp'),
+    async validateSaveTarget() {
+      calls.push('validate');
+    },
+    async createWritable() {
+      calls.push('create-writable');
+      return createWritable();
+    },
+  };
+
+  await saveDocumentToFileSystem({
+    blob: new Blob(['saved']),
+    suggestedName: 'owned.hwp',
+    currentHandle: handle,
+    forceSaveAs: false,
+    saveFormat: 'hwp',
+    windowLike: {},
+  });
+  assert.deepEqual(calls, ['validate', 'create-writable']);
+});
+
+test('cross-window save reservation wraps the entire write and releases afterward', async () => {
+  const calls: string[] = [];
+  const handle = {
+    ...createHandle('reserved.hwp'),
+    async validateSaveTarget() {
+      calls.push('native-validate');
+    },
+    async createWritable() {
+      calls.push('create-writable');
+      return createWritable();
+    },
+  };
+
+  await saveDocumentToFileSystem({
+    blob: new Blob(['saved']),
+    suggestedName: 'reserved.hwp',
+    currentHandle: handle,
+    forceSaveAs: false,
+    saveFormat: 'hwp',
+    windowLike: {},
+    async validateTarget(candidate) {
+      assert.equal(candidate, handle);
+      calls.push('reserve');
+      return async () => { calls.push('release'); };
+    },
+  });
+
+  assert.deepEqual(calls, ['reserve', 'native-validate', 'create-writable', 'release']);
+});
+
 test('current handle 확장자가 출력 포맷과 다르면 쓰기 전에 거부한다', async () => {
   const mismatchedHandle = createHandle('opened.hwp');
   const blob = new Blob(['saved'], { type: 'application/hwp+zip' });
@@ -246,6 +301,54 @@ test('saveDocumentToFileSystem은 current handle이 없으면 save picker를 사
   assert.equal(result.fileName, 'picked.hwp');
   assert.equal(pickerHandle.writable.writes.length, 1);
   assert.equal(pickerHandle.writable.closed, true);
+});
+
+test('desktop Save As picker takes precedence and adopts its opaque target after success', async () => {
+  const target = createHandle('desktop.hwp');
+  const calls: string[] = [];
+  const nativeTarget = {
+    ...target,
+    adoptSaveTarget() { calls.push('adopt'); },
+    async releaseUnusedSaveTarget() { calls.push('release'); },
+  };
+  const result = await saveDocumentToFileSystem({
+    blob: new Blob(['saved']),
+    suggestedName: 'desktop.hwp',
+    currentHandle: null,
+    forceSaveAs: true,
+    saveFormat: 'hwp',
+    windowLike: {
+      showSaveFilePicker: async () => { throw new Error('browser picker should not run'); },
+    },
+    pickSaveHandle: async () => nativeTarget,
+    validateTarget: async () => async (saved) => { calls.push(`ownership:${saved}`); },
+  });
+
+  assert.equal(result.handle, nativeTarget);
+  assert.deepEqual(calls, ['adopt', 'ownership:true']);
+});
+
+test('HML Save As fails closed when browser and native handles cannot be compared', async () => {
+  const original = createHandle('original.hml');
+  const target = {
+    ...createHandle('converted.hml'),
+    async isSameEntry() {
+      throw new DOMException('cross-kind', 'NotSupportedError');
+    },
+  };
+  await assert.rejects(
+    saveDocumentToFileSystem({
+      blob: new Blob(['saved']),
+      suggestedName: 'converted.hml',
+      currentHandle: original,
+      forceSaveAs: true,
+      saveFormat: 'hml',
+      windowLike: {},
+      pickSaveHandle: async () => target,
+    }),
+    /확인할 수 없습니다/,
+  );
+  assert.equal(target.writable.writes.length, 0);
 });
 
 test('forceSaveAs는 HML 원본 handle을 건드리지 않고 save picker를 사용한다', async () => {
@@ -391,6 +494,15 @@ test('save picker가 출력 포맷과 다른 확장자를 반환하면 쓰기 �
 
   assert.equal(invalidHandle.writable.writes.length, 0);
   assert.equal(invalidHandle.writable.closed, false);
+});
+
+test('save ownership/write errors do not silently become downloads', () => {
+  const commands = readFileSync(new URL('../src/command/commands/file.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(commands, /File System Access API 실패, 폴백/);
+  assert.match(
+    commands,
+    /if \(isUserCancelError\(error\)\) return 'cancelled';\s+throw error;/,
+  );
 });
 
 test('HML로 저장을 선택하면 HML 저장 picker 형식(.hml)을 사용한다', async () => {

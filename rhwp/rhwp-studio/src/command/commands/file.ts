@@ -55,13 +55,17 @@ import { openRecentEntry } from '@/recent/recent-open';
  * 문서를 로드한다. `file:open` 커맨드와 "최근 문서" 메타-only 항목 재열기가 공유한다.
  */
 async function openFileViaPicker(services: CommandServices): Promise<void> {
+  let handle: FileSystemFileHandleLike | null | undefined;
   try {
     const canReplace = await confirmSaveBeforeReplacingDocument(services);
     if (!canReplace) return;
 
     const windowLike = window as FileSystemWindowLike;
-    const nativeOpenPickerAvailable = canUseOpenFilePicker(windowLike);
-    const handle = await pickOpenFileHandle(windowLike);
+    const desktopHandle = await services.pickOpenHandle?.();
+    const nativeOpenPickerAvailable = desktopHandle !== undefined || canUseOpenFilePicker(windowLike);
+    handle = desktopHandle === undefined
+      ? await pickOpenFileHandle(windowLike)
+      : desktopHandle;
     if (!handle) {
       // File System Access API picker가 있었다면 null은 사용자 취소(예: Esc)다.
       // 이때 숨김 input fallback을 다시 열면 파일 선택창이 곧바로 재오픈된다.
@@ -82,6 +86,7 @@ async function openFileViaPicker(services: CommandServices): Promise<void> {
       skipUnsavedGuard: true,
     });
   } catch (err) {
+    await handle?.releaseUnusedSaveTarget?.().catch(() => {});
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[file:open] 열기 실패:', msg);
     alert(`파일 열기에 실패했습니다:\n${msg}`);
@@ -179,11 +184,12 @@ async function tryFileSystemSave(
       windowLike: window as FileSystemWindowLike,
       forceSaveAs,
       saveFormat: format,
+      pickSaveHandle: services.pickSaveHandle,
+      validateTarget: services.validateSaveHandle,
     });
   } catch (error) {
     if (isUserCancelError(error)) return 'cancelled';
-    console.warn('[file:save] File System Access API 실패, 폴백:', error);
-    return { method: 'fallback', handle: null, fileName: suggestedName };
+    throw error;
   }
 }
 
@@ -195,6 +201,7 @@ function completeHandleSave(
   reason: 'save' | 'save-as',
 ): void {
   if (sourceFormat === 'hml') markConvertedHmlSaveHandle(result.handle);
+  const previousFileHandle = services.wasm.currentFileHandle;
   services.wasm.currentFileHandle = result.handle;
   services.wasm.fileName = result.fileName;
   services.documentState.markClean(reason);
@@ -204,6 +211,7 @@ function completeHandleSave(
     // have no handle and remain session-only.
     services.eventBus.emit('document-file-handle-saved', {
       fileHandle: result.handle,
+      previousFileHandle,
       fileName: result.fileName,
       sourceFormat: savedFormat,
     });

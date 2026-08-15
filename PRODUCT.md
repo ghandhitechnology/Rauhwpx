@@ -20,8 +20,9 @@ An HWP editor with agentic features as a first-class part of the product—not a
 
 ## Operating Context
 
-- Users open HWP/HWPX (and related formats) in `rhwp-studio` in the browser (PWA).
-- A local Node hub (`rhwp-agent`) bridges Claude or Codex CLI to the studio tab via MCP tools.
+- Users open HWP/HWPX (and related formats) in `rhwp-studio` in the browser (PWA) or the Rauhwpx desktop app.
+- The desktop app runs as one Electron process with multiple document windows. Every window owns an isolated agent session while settings, recent documents, skills, references, and provider credentials remain user-wide.
+- A local Node hub (`rhwp-agent`) bridges Claude, Codex, or Pi CLI to Studio through session-scoped WebSocket and MCP routing.
 - AI writes appear as pending, reviewable edits (tint / strikethrough) until the user Approves or Rejects; Approve commits as one undo step.
 - A separate planning workflow can research with web, subagents, Browserbase, and chat-scoped downloads while local files and the live document remain read-only. The agent presents a structured plan; only an explicit `Approve & execute` action unlocks implementation.
 - Everything document-related runs locally in the browser WASM engine; the agent hub is a thin localhost router with no document logic.

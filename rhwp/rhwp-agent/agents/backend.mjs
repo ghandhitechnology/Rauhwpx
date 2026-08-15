@@ -22,9 +22,14 @@
  *
  * @typedef {Object} BackendOptions
  * @property {string} rootDir
+ * @property {string} [workDir]
  * @property {string} mcpScriptPath
+ * @property {string} [mcpRuntimeCommand]
+ * @property {string[]} [mcpRuntimeArgs]
+ * @property {Record<string, string>} [mcpRuntimeEnv]
  * @property {number} hubPort
  * @property {string} token
+ * @property {string} [sessionId]
  * @property {'safe'|'unrestricted'} [permissionProfile]
  * @property {'direct'|'plan'} [workflow]
  * @property {'planning'|'awaiting-approval'|'switching'|'implementing'} [phase]
@@ -183,5 +188,22 @@ export function mcpCapabilityEnv(opts = {}) {
     RHWP_AGENT_WORKFLOW: workflow,
     RHWP_AGENT_PHASE: phase,
     RHWP_CAPABILITY_EPOCH: String(capabilityEpoch),
+    ...(opts.sessionId === undefined || opts.sessionId === null || !String(opts.sessionId)
+      ? {}
+      : { RHWP_SESSION_ID: String(opts.sessionId) }),
   };
+}
+
+/** Runtime used for the MCP stdio child. Prefix args support packaged Electron runtimes. */
+export function mcpRuntimeFor(opts = {}, sourceEnv = process.env) {
+  const command = String(opts.mcpRuntimeCommand || process.execPath);
+  const args = [
+    ...(Array.isArray(opts.mcpRuntimeArgs) ? opts.mcpRuntimeArgs.map(String) : []),
+    String(opts.mcpScriptPath),
+  ];
+  const env = { ...(opts.mcpRuntimeEnv ?? {}) };
+  if (sourceEnv.ELECTRON_RUN_AS_NODE === '1' && env.ELECTRON_RUN_AS_NODE === undefined) {
+    env.ELECTRON_RUN_AS_NODE = '1';
+  }
+  return { command, args, env };
 }

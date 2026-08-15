@@ -1,9 +1,14 @@
-import { spawn } from 'node:child_process';
+import spawn from 'cross-spawn';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import { openRouterReady } from './agents/title.mjs';
+import {
+  isolatedProcessEnv,
+  processTreeSpawnOptions,
+  terminateProcessTree,
+} from './process-tree.mjs';
 
 const SCHEMA = {
   type: 'object',
@@ -25,12 +30,22 @@ function promptFor(input) {
   return `Create a concise, portable agent skill for rhwp. Return JSON matching the supplied schema. The files array must include SKILL.md. SKILL.md frontmatter must contain only name and description. Use lowercase hyphen-case. Write imperative instructions. Put detailed reusable material in references/, and deterministic code only when scripts are genuinely needed. Do not create README or changelog files.\n\nGoal: ${input.goal}\nShould trigger: ${input.triggerExamples || '(infer from goal)'}\nShould not trigger: ${input.nonTriggerExamples || '(none supplied)'}\nResource guidance: ${input.resourceNotes || 'instruction-only unless a resource is clearly necessary'}${input.existingSkill ? `\n\nImprove this existing skill:\n${input.existingSkill}` : ''}`;
 }
 
-function run(command, args, stdin, timeoutMs = 90_000, spawnOptions = {}) {
+function run(command, args, stdin, timeoutMs = 90_000, spawnOptions = {}, deps = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { ...spawnOptions, stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+    const spawnProcess = deps.spawnProcess ?? spawn;
+    const terminateProcess = deps.terminateProcess ?? terminateProcessTree;
+    const child = spawnProcess(command, args, {
+      ...spawnOptions,
+      ...processTreeSpawnOptions(),
+      env: isolatedProcessEnv(deps, { ...process.env, ...(spawnOptions.env ?? {}) }),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
     let stdout = '';
     let stderr = '';
-    const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error('Skill generation timed out')); }, timeoutMs);
+    const timer = setTimeout(() => {
+      terminateProcess(child);
+      reject(new Error('Skill generation timed out'));
+    }, timeoutMs);
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-8000); });
     child.on('error', (error) => { clearTimeout(timer); reject(error); });
@@ -138,7 +153,8 @@ async function draftViaOpenRouter(input, { piManager, openRouter }) {
 
 /**
  * @param {object} input
- * @param {{ useOpenRouter?: boolean, piManager?: any, openRouter?: any }} [deps]
+ * @param {{ useOpenRouter?: boolean, piManager?: any, openRouter?: any, isolatedHome?: string,
+ *   sessionId?: string, spawnProcess?: typeof spawn, terminateProcess?: typeof terminateProcessTree }} [deps]
  */
 export async function generateSkillDraft(input, deps = {}) {
   if (openRouterReady(deps)) return draftViaOpenRouter(input, deps);
@@ -147,7 +163,7 @@ export async function generateSkillDraft(input, deps = {}) {
     const output = await run('claude', [
       '-p', '--safe-mode', '--output-format', 'json', '--tools', '', '--disable-slash-commands',
       '--json-schema', JSON.stringify(SCHEMA), ...(input.model ? ['--model', input.model] : []),
-    ], prompt);
+    ], prompt, 90_000, {}, deps);
     return extractClaude(output);
   }
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-schema-'));
@@ -161,7 +177,7 @@ export async function generateSkillDraft(input, deps = {}) {
       '--disable', 'skill_search',
       '--sandbox', 'read-only', '--output-schema', schemaPath,
       ...(input.model ? ['--model', input.model] : []), '-'
-    ], prompt, 90_000, { cwd: temp });
+    ], prompt, 90_000, { cwd: temp }, deps);
     return extractCodex(output);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });

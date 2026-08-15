@@ -20,10 +20,9 @@ macOS signing uses the `macos-release` environment: `MACOS_CERTIFICATE`, `MACOS_
 ## Web development
 
 ```sh
-npm start                            # hub in the background — terminal can close
 cd rhwp/rhwp-studio && npm run dev   # http://127.0.0.1:7700
 ```
 
-`npm start` waits until `http://127.0.0.1:5175/healthz` is ready, then returns. Logs go to `.run/rhwp-agent.log`. Use `npm stop` / `npm run status`. For a foreground hub that stays in the terminal: `npm run start:fg`.
+The Studio dev server owns an authenticated hub on an ephemeral port and stops it on exit. Separate worktrees therefore use separate hubs without port or process conflicts.
 
-Studio `npm run dev` will also start the hub if it is not already running.
+For standalone hub development, `npm start` uses `http://127.0.0.1:5175`, writes logs to `.run/rhwp-agent.log`, and returns after readiness. Use `npm stop` / `npm run status`; `npm run start:fg` keeps it in the foreground.

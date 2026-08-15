@@ -86,6 +86,22 @@ test('DocumentDirtyState beforeunload는 dirty 상태에서만 페이지 이탈�
   assert.equal(savedEvent.returnValue, undefined);
 });
 
+test('desktop close approval bypasses exactly one dirty beforeunload', () => {
+  const state = new DocumentDirtyState(new EventBus());
+  const fakeWindow = new FakeWindow();
+  state.installBeforeUnload(fakeWindow as unknown as Window);
+  state.markDirty('typing');
+  state.permitNextUnload();
+
+  const approved = createBeforeUnloadEvent();
+  fakeWindow.dispatch('beforeunload', approved);
+  assert.equal(approved.defaultPrevented, false);
+
+  const later = createBeforeUnloadEvent();
+  fakeWindow.dispatch('beforeunload', later);
+  assert.equal(later.defaultPrevented, true);
+});
+
 test('DocumentDirtyState beforeunload 해제 함수는 설치한 핸들러만 제거한다', () => {
   const state = new DocumentDirtyState(new EventBus());
   const fakeWindow = new FakeWindow();

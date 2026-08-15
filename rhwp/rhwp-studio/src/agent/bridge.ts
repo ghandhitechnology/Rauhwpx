@@ -1,7 +1,7 @@
 /**
  * 스튜디오 ↔ rhwp-agent 허브 WebSocket 브리지.
  *
- * role=studio로 허브(ws://127.0.0.1:5175/studio)에 접속해:
+ * renderer session에 배정된 허브의 /studio 엔드포인트에 role=studio로 접속해:
  *  - 허브의 tool-request를 AgentToolExecutor로 실행하고 tool-response로 응답
  *  - agent-event 스트림을 사이드바용 SidebarEvent로 중계
  *  - turn-start/turn-end로 PendingEditManager의 change-set 수명주기를 구동
@@ -9,7 +9,13 @@
  * 연결 시도가 멈추면 제한 시간 후 소켓을 접고, 데스크톱에서는 허브 프로세스도
  * 다시 띄운다. 포커스·온라인 복구 시에도 즉시 붙는다.
  */
-import { ensureDesktopAgentHub } from '../desktop-integration.ts';
+import {
+  ensureDesktopAgentHub,
+  httpHubUrl,
+  resolveRendererSessionContext,
+  websocketHubUrl,
+  type RendererSessionContext,
+} from '../desktop-integration.ts';
 import { RevisionTracker } from './revision.ts';
 import { AgentToolExecutor } from './tool-executor.ts';
 import { PendingEditManager } from './pending-edits.ts';
@@ -606,9 +612,11 @@ class AgentBridgeImpl implements AgentBridge {
   private revealUnsub: (() => void) | null = null;
   private executor: AgentToolExecutor;
 
-  private url: string;
-  private token: string;
-  private httpBaseUrl: string;
+  private url = '';
+  private token = '';
+  private sessionId = '';
+  private httpBaseUrl = '';
+  private readonly options?: AgentBridgeOptions;
   private ws: WebSocket | null = null;
   private state: ConnectionState = 'disconnected';
   /** 지금까지 실패한 연결 시도 수. 연결이 열리면 0 으로 돌아간다. */
@@ -691,14 +699,47 @@ class AgentBridgeImpl implements AgentBridge {
       pending: this.pendingEdits,
     });
 
-    this.url = opts?.url ?? (import.meta as any).env?.VITE_RHWP_AGENT_URL ?? 'ws://127.0.0.1:5175';
-    this.token = opts?.token ?? (import.meta as any).env?.VITE_RHWP_AGENT_TOKEN ?? 'dev';
-    this.httpBaseUrl = this.url.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:').replace(/\/$/, '');
+    this.options = opts;
     window.addEventListener('focus', this.onResume);
     window.addEventListener('online', this.onResume);
     document.addEventListener('visibilitychange', this.onVisibility);
-    this.requestHubLaunch();
+    this.setState('connecting');
+    void this.initializeConnection();
+  }
+
+  private async initializeConnection() {
+    await this.requestHubLaunch();
+    if (this.disposed || !(await this.refreshSessionContext())) return;
     this.connect();
+  }
+
+  private async refreshSessionContext() {
+    const context = await resolveRendererSessionContext(undefined, {
+      hubUrl: this.options?.url,
+      hubToken: this.options?.token,
+      launchId: this.options?.launchId,
+      sessionId: this.options?.sessionId,
+    });
+    if (this.disposed) return false;
+    if (!context) {
+      this.setState('disconnected');
+      return false;
+    }
+    try {
+      this.applySessionContext(context);
+      return true;
+    } catch (error) {
+      console.warn('[AgentBridge] 세션 구성 적용 실패:', error);
+      this.setState('disconnected');
+      return false;
+    }
+  }
+
+  private applySessionContext(context: RendererSessionContext) {
+    this.url = websocketHubUrl(context.hubUrl);
+    this.httpBaseUrl = httpHubUrl(context.hubUrl);
+    this.token = context.hubToken;
+    this.sessionId = context.sessionId;
   }
 
   /** 끊겼거나 다른 탭에 밀려난 뒤 창이 다시 살아나면 즉시 붙는다. */
@@ -754,6 +795,10 @@ class AgentBridgeImpl implements AgentBridge {
   /** 백오프와 멈춘 핸드셰이크를 접고 지금 붙는다. */
   private forceReconnect(): void {
     if (this.disposed) return;
+    if (!this.url || !this.token || !this.sessionId) {
+      void this.initializeConnection();
+      return;
+    }
     this.clearReconnectTimer();
     this.abortSocket();
     this.reconnectAttempt = 0;
@@ -772,6 +817,7 @@ class AgentBridgeImpl implements AgentBridge {
     this.setState('connecting');
     await this.requestHubLaunch();
     if (this.disposed || seq !== this.reconnectSeq || this.getConnectionState() === 'connected') return;
+    if (!await this.refreshSessionContext()) return;
     this.forceReconnect();
   }
 
@@ -781,7 +827,7 @@ class AgentBridgeImpl implements AgentBridge {
     if (this.disposed) return;
     this.abortSocket();
     const base = this.url.replace(/\/$/, '');
-    const wsUrl = `${base}/studio?token=${encodeURIComponent(this.token)}`;
+    const wsUrl = `${base}/studio?token=${encodeURIComponent(this.token)}&sessionId=${encodeURIComponent(this.sessionId)}`;
     this.setState('connecting');
     let ws: WebSocket;
     try {
@@ -873,6 +919,7 @@ class AgentBridgeImpl implements AgentBridge {
   private async connectAfterHub(seq: number): Promise<void> {
     await this.requestHubLaunch();
     if (this.disposed || seq !== this.reconnectSeq || this.state === 'connected') return;
+    if (!await this.refreshSessionContext()) return;
     this.connect();
   }
 
@@ -1510,6 +1557,7 @@ class AgentBridgeImpl implements AgentBridge {
 
   private referenceUrl(pathname: string, params?: Record<string, string | number | undefined>): string {
     const url = new URL(pathname, `${this.httpBaseUrl}/`);
+    url.searchParams.set('sessionId', this.sessionId);
     for (const [key, value] of Object.entries(params ?? {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
