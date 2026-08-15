@@ -930,6 +930,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   function closeAgentSetup(): void {
     if (!setupOverlay.isConnected) return;
+    if (setupBusy && setupAgent) bridge.cancelAgentSetup(setupAgent);
+    setupBusy = false;
     setupOverlay.classList.remove('ag-open');
     setupOverlay.setAttribute('aria-hidden', 'true');
     resetSetupInstallProgress();

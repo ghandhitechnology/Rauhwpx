@@ -317,8 +317,16 @@ export async function killPid(pid, {
   timeoutMs = DEFAULT_STOP_TIMEOUT_MS,
   wait = sleep,
   now = Date.now,
+  platform = process.platform,
+  spawnProcess = spawn,
 } = {}) {
   if (!isProcessAlive(pid)) return { killed: false, alive: false };
+  if (platform === 'win32') {
+    await terminateProcessTree({ pid, kill: (signal) => process.kill(pid, signal) }, { platform, spawnProcess });
+    const deadline = now() + timeoutMs;
+    while (now() < deadline && isProcessAlive(pid)) await wait(50);
+    return { killed: true, alive: isProcessAlive(pid) };
+  }
   try {
     process.kill(pid, 'SIGTERM');
   } catch {
@@ -349,6 +357,7 @@ export function spawnHubProcess(launch, {
   forwardStdio = !detached,
   onError,
   onExit,
+  onMessage,
   log = console,
   platform = process.platform,
 } = {}) {
@@ -378,11 +387,37 @@ export function spawnHubProcess(launch, {
   if (typeof onExit === 'function') {
     child.on('exit', (code, signal) => onExit(code, signal, child));
   }
+  if (typeof onMessage === 'function') child.on('message', (message) => onMessage(message, child));
   if (detached) child.unref();
   return child;
 }
 
-export function stopHubChild(child, { timeoutMs = 2000 } = {}) {
+export function terminateProcessTree(child, { platform = process.platform, spawnProcess = spawn } = {}) {
+  if (!child?.pid) return Promise.resolve();
+  if (platform !== 'win32') {
+    try { child.kill('SIGKILL'); } catch {}
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let killer;
+    try {
+      killer = spawnProcess('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore', windowsHide: true,
+      });
+    } catch {
+      try { child.kill('SIGKILL'); } catch {}
+      resolve();
+      return;
+    }
+    killer.once?.('error', () => {
+      try { child.kill('SIGKILL'); } catch {}
+      resolve();
+    });
+    killer.once?.('exit', () => resolve());
+  });
+}
+
+export function stopHubChild(child, { timeoutMs = 2000, platform = process.platform } = {}) {
   if (!child) return Promise.resolve();
   return new Promise((resolve) => {
     const finish = () => {
@@ -390,18 +425,12 @@ export function stopHubChild(child, { timeoutMs = 2000 } = {}) {
       resolve();
     };
     const timer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        /* already gone */
-      }
-      resolve();
+      void terminateProcessTree(child, { platform }).finally(resolve);
     }, timeoutMs);
     child.once('exit', finish);
-    try {
-      child.kill('SIGTERM');
-    } catch {
-      finish();
+    if (platform === 'win32') void terminateProcessTree(child, { platform }).finally(finish);
+    else {
+      try { child.kill('SIGTERM'); } catch { finish(); }
     }
   });
 }
