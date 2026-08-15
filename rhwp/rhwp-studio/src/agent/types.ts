@@ -17,6 +17,14 @@ export const AGENT_PROTOCOL_VERSION = 2;
 export type AgentName = 'claude' | 'codex' | 'pi';
 export type PermissionProfile = 'safe' | 'unrestricted';
 export type WritingStyleLanguage = 'ko' | 'en';
+export type WritingStyleProgressState =
+  | 'queued'
+  | 'reading'
+  | 'extracting'
+  | 'preparing'
+  | 'analyzing'
+  | 'synthesizing'
+  | 'saving';
 export type AgentWorkflow = 'direct' | 'plan';
 export type AgentPhase = 'direct' | 'planning' | 'awaiting-approval' | 'switching' | 'implementing';
 
@@ -158,6 +166,58 @@ export interface WritingStyleStatus {
   pageEstimate: number;
   summary: string;
   additionalInstruction: string;
+  /** 최근 캘리브레이션 프로바이더. 구형 허브에서는 빠질 수 있다. */
+  agent?: AgentName;
+  /** 최근 캘리브레이션 모델. 구형 허브에서는 빠질 수 있다. */
+  model?: string;
+  /** 누적 원고 메타데이터. 구형 허브는 개수만 제공한다. */
+  sources?: WritingStyleSource[];
+  sourceDocuments?: WritingStyleSource[];
+  savedSourceCount?: number;
+}
+
+export interface WritingStyleSource {
+  id?: string;
+  name: string;
+  type?: string;
+  size?: number;
+  addedAt?: string;
+}
+
+export interface WritingStyleProgress {
+  state: WritingStyleProgressState;
+  phase?: string;
+  /** 사용자에게 보여도 되는 짧은 작업 이름. 내부 추론문은 포함하지 않는다. */
+  activity?: string;
+  /** 파일명·묶음 수 같은 안전한 작업 세부 정보. */
+  detail?: string;
+  /** 전체량을 서버가 실제로 아는 작업에서만 제공한다. */
+  completed?: number;
+  total?: number;
+  agent?: AgentName;
+  model?: string;
+  startedAt?: string;
+  elapsedMs?: number;
+}
+
+export interface WritingStyleCatalogModel {
+  id: string;
+  name: string;
+  efforts: string[];
+  defaultEffort: string | null;
+}
+
+export interface WritingStyleCatalogProvider {
+  id: AgentName;
+  name: string;
+  available: boolean;
+  error: string | null;
+  models: WritingStyleCatalogModel[];
+}
+
+export interface WritingStyleCatalog {
+  providers: WritingStyleCatalogProvider[];
+  defaultSelection: { agent: AgentName; model: string; effort?: string | null } | null;
 }
 
 export interface WritingStyleUpload {
@@ -402,9 +462,10 @@ export type SidebarEvent =
   | { type: 'skill-draft-result'; requestId: string; draft: { name: string; files: Array<{ path: string; content: string }> } }
   | { type: 'skills-error'; requestId: string; code: string; message: string }
   | { type: 'writing-style-status'; requestId: string; status: WritingStyleStatus }
-  | { type: 'writing-style-progress'; requestId: string; state: 'reading' | 'analyzing' | 'saving' }
+  | ({ type: 'writing-style-progress'; requestId: string } & WritingStyleProgress)
   | { type: 'writing-style-result'; requestId: string; status: WritingStyleStatus }
   | { type: 'writing-style-error'; requestId: string; code: string; message: string }
+  | { type: 'writing-style-catalog'; requestId: string; catalog: WritingStyleCatalog }
   | { type: 'provider-status'; providers: ProviderStatusMap }
   | { type: 'usage-report'; usage: UsageSummary }
   | { type: 'pi-status'; status: PiStatus }
