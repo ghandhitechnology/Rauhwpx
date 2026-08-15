@@ -10,8 +10,9 @@ import { createPiSession } from './agents/pi.mjs';
 import { generateChatTitle } from './agents/title.mjs';
 import { SkillRegistry } from './skills.mjs';
 import { generateSkillDraft } from './skill-generator.mjs';
-import { WritingStyleStore } from './writing-style.mjs';
+import { WritingStyleStore, assertWritingStyleAppendCompatible } from './writing-style.mjs';
 import { calibrateWritingStyle } from './style-calibrator.mjs';
+import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { TOOL_DEFINITIONS } from './tools.mjs';
 import { PlanningState, authorizeToolCall, buildApprovedPlanPrompt, workflowError } from './planning-state.mjs';
 import { DownloadManager } from './download-manager.mjs';
@@ -174,6 +175,30 @@ function sendJson(sock, obj) {
       log(`send failed: ${e?.message ?? e}`);
     }
   }
+}
+
+function writingStyleCatalog() {
+  return buildWritingStyleCatalog({
+    health: providerHealth.cached(),
+    piStatus,
+    currentSelection: session ? { agent: session.agent, model: session.model, effort: session.effort } : null,
+  });
+}
+
+function sendStyleProgress(event) {
+  if (!styleCalibration) return;
+  const snapshot = {
+    v: 1,
+    type: 'writing-style-progress',
+    requestId: styleCalibration.requestId,
+    jobId: styleCalibration.jobId,
+    startedAt: styleCalibration.startedAt,
+    agent: styleCalibration.agent,
+    model: styleCalibration.model,
+    ...event,
+  };
+  styleCalibration.progress = snapshot;
+  sendJson(studioSocket, snapshot);
 }
 
 // 비동기 응답이 도착할 때쯤 스튜디오 탭이 교체되었을 수 있다 — 현재 소켓에만 보낸다.
@@ -995,39 +1020,108 @@ function handleStudioMessage(sock, msg) {
         .catch((e) => sendJson(sock, { v: 1, type: 'writing-style-error', requestId: msg.requestId ?? null, code: 'STYLE_STATUS_FAILED', message: String(e?.message ?? e) }));
       return;
     }
+    case 'writing-style-catalog-request': {
+      const requestId = msg.requestId ?? null;
+      const refresh = msg.refresh === true;
+      void Promise.all([
+        providerHealth.check(refresh),
+        refresh ? refreshPiStatus() : Promise.resolve(piStatus),
+      ])
+        .then(() => sendJson(sock, {
+          v: 1, type: 'writing-style-catalog', requestId, ...writingStyleCatalog(),
+        }))
+        .catch((e) => sendJson(sock, {
+          v: 1, type: 'writing-style-error', requestId,
+          code: e?.code ?? 'STYLE_CATALOG_FAILED', message: String(e?.message ?? e),
+        }));
+      return;
+    }
     case 'writing-style-calibrate': {
       const requestId = msg.requestId ?? null;
       if (styleCalibration) {
         sendJson(sock, { v: 1, type: 'writing-style-error', requestId, code: 'CALIBRATION_BUSY', message: 'A writing-style calibration is already running.' });
         return;
       }
-      styleCalibration = { requestId, state: 'reading' };
-      sendJson(sock, { v: 1, type: 'writing-style-progress', requestId, state: 'reading' });
+      let selection;
+      try {
+        selection = resolveWritingStyleSelection(
+          { agent: msg.agent, model: msg.model, effort: msg.effort },
+          {
+            health: providerHealth.cached(),
+            piStatus,
+            currentSelection: session ? { agent: session.agent, model: session.model, effort: session.effort } : null,
+          },
+        );
+      } catch (e) {
+        sendJson(sock, {
+          v: 1, type: 'writing-style-error', requestId,
+          code: e?.code ?? 'INVALID_CALIBRATION_SELECTION', message: String(e?.message ?? e),
+        });
+        return;
+      }
+      const jobId = crypto.randomUUID();
+      styleCalibration = {
+        requestId, jobId, startedAt: new Date().toISOString(),
+        agent: selection.agent, model: selection.model, progress: null,
+      };
+      sendStyleProgress({
+        state: 'preparing', phase: 'preparing', activity: 'collecting-samples',
+        detail: msg.append === true ? 'Combining saved and new writing samples' : 'Preparing writing samples',
+        completed: 0, total: 1,
+      });
+      let calibrationSources = null;
       void Promise.resolve()
-        .then(() => {
-          if (styleCalibration?.requestId === requestId) styleCalibration.state = 'analyzing';
-          sendJson(studioSocket, { v: 1, type: 'writing-style-progress', requestId, state: 'analyzing' });
+        .then(async () => {
+          if (msg.append === true) {
+            const current = await writingStyleStore.status();
+            assertWritingStyleAppendCompatible(current, {
+              language: msg.language,
+              baseRevision: typeof msg.baseRevision === 'string' ? msg.baseRevision : null,
+            });
+          }
+          calibrationSources = await writingStyleStore.calibrationSources(msg.files, { append: msg.append === true });
           return calibrateWritingStyle(
-            { language: msg.language, files: msg.files },
-            auxDeps(msg.agent, 'codex'),
+            {
+              language: msg.language,
+              files: calibrationSources,
+              agent: selection.agent,
+              model: selection.model,
+              effort: selection.effort,
+            },
+            {
+              useOpenRouter: selection.agent === 'pi',
+              piManager,
+              openRouter,
+              projectRoot: ROOT,
+              onProgress: (event) => {
+                if (styleCalibration?.jobId === jobId) sendStyleProgress(event);
+              },
+            },
           );
         })
         .then(async (profile) => {
-          if (styleCalibration?.requestId === requestId) styleCalibration.state = 'saving';
-          sendJson(studioSocket, { v: 1, type: 'writing-style-progress', requestId, state: 'saving' });
-          const status = await writingStyleStore.save(profile);
-          sendJson(studioSocket, { v: 1, type: 'writing-style-result', requestId, status });
+          if (styleCalibration?.jobId === jobId) sendStyleProgress({
+            state: 'saving', phase: 'saving', activity: 'saving-profile',
+            detail: 'Saving the profile and its source samples', completed: 0, total: 1,
+          });
+          const status = await writingStyleStore.save(profile, { sources: calibrationSources });
+          if (styleCalibration?.jobId === jobId) sendStyleProgress({
+            state: 'saving', phase: 'saving', activity: 'saving-profile',
+            detail: 'Saved the calibrated writing profile', completed: 1, total: 1,
+          });
+          sendJson(studioSocket, { v: 1, type: 'writing-style-result', requestId, jobId, status });
           sendJson(studioSocket, { v: 1, type: 'writing-style-status', requestId, status });
         })
         .catch((e) => sendJson(studioSocket, {
           v: 1,
           type: 'writing-style-error',
           requestId,
+          jobId,
           code: e?.code ?? 'CALIBRATION_FAILED',
           message: String(e?.message ?? e),
         }))
         .finally(() => {
-          if (styleCalibration?.requestId === requestId) styleCalibration = null;
+          if (styleCalibration?.jobId === jobId) styleCalibration = null;
         });
       return;
     }
@@ -1340,13 +1434,18 @@ httpServer.on('upgrade', (req, socket, head) => {
         sendJson(ws, { v: 1, type: 'agent-event', event: evt });
       }
       void skillRegistry.list().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', ...catalog }));
-      void writingStyleStore.status().then((status) => sendJson(ws, { v: 1, type: 'writing-style-status', status }));
+      void writingStyleStore.status()
+        .then((status) => sendJson(ws, { v: 1, type: 'writing-style-status', status }))
+        .catch((e) => sendJson(ws, {
+          v: 1, type: 'writing-style-error', code: e?.code ?? 'STYLE_STATUS_FAILED', message: String(e?.message ?? e),
+        }));
       if (styleCalibration) {
-        sendJson(ws, {
-          v: 1,
-          type: 'writing-style-progress',
-          requestId: styleCalibration.requestId,
-          state: styleCalibration.state,
+        sendJson(ws, styleCalibration.progress ?? {
+          v: 1, type: 'writing-style-progress',
+          requestId: styleCalibration.requestId, jobId: styleCalibration.jobId,
+          startedAt: styleCalibration.startedAt, agent: styleCalibration.agent, model: styleCalibration.model,
+          state: 'preparing', phase: 'preparing', activity: 'collecting-samples',
+          detail: 'Preparing writing samples', completed: 0, total: 1,
         });
       }
       // 프로바이더 프로브로 접속을 붙잡아 두지 않는다 — 캐시를 먼저 주고 결과가 오면 갱신한다.
@@ -1356,6 +1455,7 @@ httpServer.on('upgrade', (req, socket, head) => {
         if (providers !== cachedProviders) replyToStudio(ws, { v: 1, type: 'provider-status', providers });
       });
       sendJson(ws, { v: 1, type: 'pi-status', status: piStatus });
+      sendJson(ws, { v: 1, type: 'writing-style-catalog', ...writingStyleCatalog() });
       sendJson(ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });
       if (piStatus.keyConfigured && !openRouterCredits) {
         // 잔액도 접속을 붙잡지 않는다 — 도착하면 사용량 리포트를 한 번 더 보낸다.
