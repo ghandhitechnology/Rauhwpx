@@ -23,6 +23,7 @@ import { createCliproxyClient } from './cliproxy.mjs';
 import { createPiManager, defaultPiRoot } from './pi-manager.mjs';
 import { createOpenRouter } from './openrouter.mjs';
 import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
+import { resolveHwpExtractor } from './reference-extractor.mjs';
 import { ReferenceStore } from './reference-store.mjs';
 import { createReferenceHttpHandler } from './reference-http.mjs';
 import { assertMessageScope, referenceScopesForSession, resolveSessionIdentity } from './reference-session.mjs';
@@ -78,6 +79,10 @@ const providerHealth = createProviderHealth({
 const usageStore = await createUsageStore().init();
 const cliproxy = await createCliproxyClient({ rootDir: usageStore.rootDir }).init();
 const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
+// .hwp/.hwpx/.hml 텍스트 추출은 rhwp 바이너리에 기댄다 — 없으면 첫 업로드가 아니라 기동 시점에 알린다.
+if (!(await resolveHwpExtractor(ROOT))) {
+  log('hwp/hwpx text extraction unavailable: build target/release/rhwp, install rhwp on PATH, or set RHWP_BIN');
+}
 const handleReferenceHttp = createReferenceHttpHandler({ store: referenceStore, token: TOKEN });
 const stagedReferenceCleanupTimer = setInterval(() => {
   void referenceStore.cleanupStaged().catch((error) => log(`staged reference cleanup failed: ${error?.message ?? error}`));

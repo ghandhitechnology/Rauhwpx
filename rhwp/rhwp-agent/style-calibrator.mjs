@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { openRouterReady } from './agents/title.mjs';
-import { extractReferenceText, SUPPORTED_REFERENCE_EXTENSIONS } from './reference-extractor.mjs';
+import { extractReferenceText, markupToText, SUPPORTED_REFERENCE_EXTENSIONS } from './reference-extractor.mjs';
 import {
   analyzeText, baselineLines, confidenceFor, deriveBands, splitHalfStability,
 } from './style-metrics.mjs';
@@ -130,35 +130,8 @@ export function validateCalibrationInput(input) {
 /** 마크업만 걷어 낸다. 본문을 다시 쓰지 않는다. */
 function plainTextFromNative(bytes, extension) {
   const text = bytes.toString('utf8');
-  if (extension === '.html' || extension === '.htm') {
-    return text
-      .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
-      .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, '\n')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>');
-  }
+  if (extension === '.html' || extension === '.htm') return markupToText(text);
   return text;
-}
-
-/** 추출 패스 프롬프트. 요약·정리 없이 원문 그대로 옮기는 것만 시킨다. */
-export function buildExtractionPrompt(files) {
-  const manifest = files.map((file) => `- ${file.safeName} (extracted/${file.safeName}.txt)`).join('\n');
-  return `Extract the author's prose from each document below so it can be measured. This is a mechanical transcription job, not an analysis.
-
-Files in the current directory:
-${manifest}
-
-For every file: read it, then use Write to save its body text verbatim to extracted/<same name>.txt as plain UTF-8.
-
-- Copy the words exactly. Do not summarize, translate, reorder, correct, or reformat sentences.
-- Keep paragraph breaks as blank lines. Drop page numbers, running headers and footers, watermarks, and image placeholders.
-- Keep headings, list items, and table cell text on their own lines.
-- If a file is unreadable or contains no authored prose, skip it, write no file for it, and report extracted=false with a short reason.
-
-Report one entry per source file. Set reason to an empty string when extraction succeeds. Do not comment on writing quality.`;
 }
 
 /**
@@ -198,7 +171,11 @@ ${measured}
 
 The output is a **writing** specification. Agents will consult it while drafting new Korean office documents — reports, proposals, official letters, emails, explanatory prose — so that what they produce reads as if this author wrote it. It is not a checklist for grading finished text, and it is not a rewrite guide. Every line you emit must be something a writer can act on **before** the sentence exists.
 
-Write directives in the imperative, aimed at the moment of composition: "open a section with the decision, then the number that forces it" — not "the author tends to be direct" and not "avoid vagueness."
+## Read for feel first
+
+Before you fill any axis, read the corpus the way a reader would: where the prose speeds up and where it slows down, how long the author stays with one thought, how a paragraph opens and how it lets go, whether the voice sits close to the reader or keeps its distance, what a sentence sounds like when it lands. The measured numbers describe the skeleton; your job is the gait. A directive earns its place when following it makes new text **feel** like this author on the page, not merely match their statistics — so when you must choose between a habit that is easy to count and a habit that carries the voice, profile the one that carries the voice.
+
+Write directives in the imperative, aimed at the moment of composition: "open a section with the decision, then the number that forces it" — not "the author tends to be direct" and not "avoid vagueness." When a habit exists to create a feeling — pace, warmth, bluntness, restraint — name the feeling the directive is protecting, so a drafting agent knows what to preserve when the rule and the sentence collide.
 
 ## Axes
 
@@ -207,7 +184,7 @@ Fill this frame. One entry per axis, all seven, in this order:
 ${axisList}
 
 For each axis give:
-- \`observation\` — what this author actually does on this axis, in one or two sentences, in ${targetLanguage}.
+- \`observation\` — what this author actually does on this axis and how it reads, in one or two sentences, in ${targetLanguage}.
 - \`directives\` — 2 to 5 imperative instructions a drafting agent can follow. Concrete over abstract. Name the author's actual constructions, positions, and choices.
 - \`patterns\` — up to 3 short shapes the author reuses, written as reusable templates with the content blanked (for example "<수치> 기준으로 <판단>. <조건>이면 <대안>." ), never as a sentence copied from the sample.
 - \`evidenceCount\` — how many distinct places in the sample support this axis. Count honestly; 0 is a valid answer.
@@ -226,7 +203,7 @@ Give up to four entries covering formal report, email, explanatory prose, and pe
 - Do not invent a quirk from a single occurrence. A habit needs repetition.
 - Where the evidence is mixed, say it is mixed rather than picking a side.
 - Put files you could not read in \`unsupportedFiles\`. Do not infer anything from filenames or metadata.
-- \`summary\` is one or two sentences in ${targetLanguage} describing the voice, for the user to read in the UI.`;
+- \`summary\` is one or two sentences in ${targetLanguage} describing how the voice feels to read, for the user to read in the UI.`;
 }
 
 function adaptiveTimeout(baseMs, totalBytes = 0) {
@@ -439,7 +416,8 @@ async function gatherCorpus(checked, temp, {
       sources.push(source);
       chunks.push(`--- ${source.name} ---\n${source.text}`);
     } catch (error) {
-      failed.push(file.safeName);
+      // 사용자가 올린 이름으로 보고한다. 내부 스테이징 이름은 UI에 보이지 않는다.
+      failed.push(file.name);
     }
     onProgress({
       state: progressState, phase: progressState, activity: file.native ? 'reading-sample' : 'extracting-text',
@@ -817,8 +795,11 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
     const markdown = renderStyleMarkdown({
       language: checked.language, axes, adaptation, bands, metrics, confidence, stability, summary,
     });
+    // 모델은 스테이징 이름(safeName)으로 보고하므로 업로드 원본 이름으로 되돌린다.
+    const originalNames = new Map(checked.files.map((file) => [file.safeName, file.name]));
     const unsupportedFiles = [...new Set([
-      ...(Array.isArray(result?.unsupportedFiles) ? result.unsupportedFiles.map(String) : []),
+      ...(Array.isArray(result?.unsupportedFiles) ? result.unsupportedFiles : [])
+        .map((name) => originalNames.get(String(name)) ?? String(name)),
       ...corpus.unextractable.filter(Boolean),
     ])];
     emit({
