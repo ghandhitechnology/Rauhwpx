@@ -99,7 +99,6 @@ export function createProviderHealth({
           error: `${command} --version 이 ${Math.round(timeoutMs / 100) / 10}초 안에 응답하지 않았습니다.`,
         });
       }, timeoutMs);
-      if (timer.unref) timer.unref();
 
       proc.stdout?.on?.('data', (chunk) => { stdoutText += chunk.toString(); });
       proc.stderr?.on?.('data', (chunk) => { stderrText += chunk.toString(); });
