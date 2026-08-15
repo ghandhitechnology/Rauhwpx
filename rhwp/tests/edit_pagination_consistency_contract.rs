@@ -60,6 +60,35 @@ fn page_break_insert_grows_pages_and_matches_reparse() {
     );
 }
 
+/// 흐름 영향 문단 서식(줄 간격) 편집 후 쪽수가 저장/재열기와 일치한다.
+/// 수정 전: apply_para_format 이 대상 문단만 리플로우하고 아래 문단들의
+/// vpos 사다리를 재계산하지 않아, 편집본과 저장·재열기 쪽 경계가 달랐다.
+#[test]
+fn para_format_flow_edit_keeps_saved_page_count() {
+    let mut doc = load("복학원서.hwpx");
+    doc.apply_para_format_native(0, 6, r#"{"lineSpacing":300}"#)
+        .expect("줄 간격 적용");
+    assert_eq!(
+        doc.page_count(),
+        reparse_pages(&doc),
+        "문단 서식 편집 후 편집본 쪽수와 저장·재열기 쪽수가 달라지면 안 된다"
+    );
+}
+
+/// 여러 문단 범위 서식(문단 앞 간격)도 저장/재열기 쪽수와 일치한다 —
+/// 범위 적용은 구역당 한 번만 재조판하는 배치 경로를 지난다.
+#[test]
+fn para_format_range_edit_keeps_saved_page_count() {
+    let mut doc = load("복학원서.hwpx");
+    doc.apply_para_format_across_sections_native(0, 2, 0, 8, r#"{"spacingBefore":1200}"#)
+        .expect("범위 문단 간격 적용");
+    assert_eq!(
+        doc.page_count(),
+        reparse_pages(&doc),
+        "범위 문단 서식 후 편집본 쪽수와 저장·재열기 쪽수가 달라지면 안 된다"
+    );
+}
+
 /// 표 행 삽입/삭제 후 쪽수가 저장/재열기와 일치한다 (표류 3).
 #[test]
 fn table_row_insert_delete_keeps_saved_page_count() {

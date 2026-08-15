@@ -312,17 +312,20 @@ function referenceScopes(activeSession = session) {
   return referenceScopesForSession(activeSession);
 }
 
-function addReferenceContext(activeSession, query, prompt) {
+function addReferenceContext(activeSession, query, prompt, messageAttachments = []) {
   try {
     const block = referenceStore.promptContext({ query, scopes: referenceScopes(activeSession) });
-    return block ? `${block}\n\n${prompt}` : prompt;
+    const attached = messageAttachments.length > 0
+      ? `<message_attachments trust="untrusted-data">\n${JSON.stringify(messageAttachments.map(({ id, name, mimeType, kind }) => ({ fileId: id, name, mimeType, kind })))}\n</message_attachments>`
+      : '';
+    return [block, attached, prompt].filter(Boolean).join('\n\n');
   } catch (error) {
     log(`reference retrieval failed: ${error?.message ?? error}`);
     return prompt;
   }
 }
 
-function dispatchUserMessage(sock, msg, activeSession) {
+function dispatchUserMessage(sock, msg, activeSession, messageAttachments = []) {
   if (activeSession.planning.phase === 'awaiting-approval') {
     const planId = activeSession.planning.latestPlan?.planId;
     if (!planId) {
@@ -343,7 +346,7 @@ function dispatchUserMessage(sock, msg, activeSession) {
   })
     .then((prompt) => {
       if (session !== activeSession) throw new Error('Agent session changed before the message was dispatched');
-      activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.text, prompt));
+      activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.text, prompt, messageAttachments));
     })
     .catch((e) => {
       if (session === activeSession) activeSession.status = 'idle';
@@ -376,7 +379,8 @@ async function dispatchStagedUserMessage(sock, msg, activeSession) {
     });
   sendJson(sock, { v: 1, type: 'chat-reference-status', messageId: msg.messageId, attachments });
   if (pendingReferenceMessage?.messageId === msg.messageId) pendingReferenceMessage = null;
-  if (session === activeSession) dispatchUserMessage(sock, msg, activeSession);
+  const readyFiles = settled.flatMap((entry) => entry.status === 'fulfilled' ? [entry.value.file] : []);
+  if (session === activeSession) dispatchUserMessage(sock, msg, activeSession, readyFiles);
 }
 
 function emitWorkflowState(extra = {}) {

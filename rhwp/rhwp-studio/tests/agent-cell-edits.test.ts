@@ -35,6 +35,12 @@ function makeCellWasm() {
       body.splice(p, 1, cur.slice(0, off), cur.slice(off));
       return okJson();
     },
+    splitParagraphLogical: (_s: number, p: number, off: number) => {
+      calls.push('splitParagraphLogical');
+      const cur = body[p];
+      body.splice(p, 1, cur.slice(0, off), cur.slice(off));
+      return okJson();
+    },
     deleteRange: (_s: number, sp: number, so: number, ep: number, eo: number) => {
       const first = body[sp].slice(0, so);
       const tail = body[ep].slice(eo);
@@ -63,6 +69,12 @@ function makeCellWasm() {
     },
     splitParagraphInCell: (_s: number, _p: number, _c: number, cell: number, cp: number, off: number) => {
       calls.push('splitParagraphInCell');
+      const cur = cells[cell][cp];
+      cells[cell].splice(cp, 1, cur.slice(0, off), cur.slice(off));
+      return okJson({ cellParaIndex: cp + 1, charOffset: 0 });
+    },
+    splitParagraphInCellLogical: (_s: number, _p: number, _c: number, cell: number, cp: number, off: number) => {
+      calls.push('splitParagraphInCellLogical');
       const cur = cells[cell][cp];
       cells[cell].splice(cp, 1, cur.slice(0, off), cur.slice(off));
       return okJson({ cellParaIndex: cp + 1, charOffset: 0 });
@@ -342,10 +354,11 @@ test('pending: 셀 삽입은 insertTextInCell 로 적용되고 reject 시 되돌
   assert.equal(cells[2][0], 'foo');
 });
 
-test('pending: 셀 멀티라인 삽입은 splitParagraphInCell 을 쓰고 reject 시 복원된다', () => {
+test('pending: 셀 멀티라인 삽입은 splitParagraphInCellLogical 을 쓰고 reject 시 복원된다', () => {
   const { mgr, cells, calls } = makeManager();
   const r = mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 3, cell: CELL_BARBAZ }, 'A\nB');
-  assert.ok(calls.includes('splitParagraphInCell'));
+  assert.ok(calls.includes('splitParagraphInCellLogical'));
+  assert.ok(!calls.includes('splitParagraphInCell'), '에이전트 다줄 삽입은 Enter 분할을 쓰지 않는다');
   assert.deepEqual(cells[3], ['barA', 'B', 'baz']);
   assert.equal(r.insertedRange.endParaIdx, 1);
   assert.equal(r.insertedRange.endCharOffset, 1);

@@ -2935,9 +2935,33 @@ impl WebCanvasRenderer {
             } else {
                 ("#808080", "#ffffff")
             };
-            render_pass(&self.ctx, -offset, -offset, first_color, bold_stroke, first_color, bold_w);
-            render_pass(&self.ctx, offset, offset, second_color, bold_stroke, second_color, bold_w);
-            render_pass(&self.ctx, 0.0, 0.0, &text_color_css, bold_stroke, &text_color_css, bold_w);
+            render_pass(
+                &self.ctx,
+                -offset,
+                -offset,
+                first_color,
+                bold_stroke,
+                first_color,
+                bold_w,
+            );
+            render_pass(
+                &self.ctx,
+                offset,
+                offset,
+                second_color,
+                bold_stroke,
+                second_color,
+                bold_w,
+            );
+            render_pass(
+                &self.ctx,
+                0.0,
+                0.0,
+                &text_color_css,
+                bold_stroke,
+                &text_color_css,
+                bold_w,
+            );
             if bold_stroke {
                 self.ctx.set_line_join("miter");
             }
@@ -2949,7 +2973,15 @@ impl WebCanvasRenderer {
             let shadow_css = color_to_css(style.shadow_color);
             let dx = style.shadow_offset_x;
             let dy = style.shadow_offset_y;
-            render_pass(&self.ctx, dx, dy, &shadow_css, bold_stroke, &shadow_css, bold_w);
+            render_pass(
+                &self.ctx,
+                dx,
+                dy,
+                &shadow_css,
+                bold_stroke,
+                &shadow_css,
+                bold_w,
+            );
         }
 
         // 외곽선 (fillText(흰색) + strokeText(글자색))
@@ -2967,7 +2999,15 @@ impl WebCanvasRenderer {
             );
         } else {
             // 일반 텍스트 (그림자 위에 원본)
-            render_pass(&self.ctx, 0.0, 0.0, &text_color_css, bold_stroke, &text_color_css, bold_w);
+            render_pass(
+                &self.ctx,
+                0.0,
+                0.0,
+                &text_color_css,
+                bold_stroke,
+                &text_color_css,
+                bold_w,
+            );
         }
         if bold_stroke {
             self.ctx.set_line_join("miter");
