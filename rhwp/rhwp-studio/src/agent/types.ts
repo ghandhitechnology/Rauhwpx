@@ -4,7 +4,7 @@
  * Normative shapes shared by the studio bridge (bridge.ts / tool-executor.ts /
  * revision.ts), the pending-edit manager (pending-edits.ts / pending-overlay.ts)
  * and the sidebar UI (ui/agent-sidebar/). Wire shapes mirror the rhwp-agent hub
- * protocol v2.
+ * protocol v3.
  */
 import type { WasmBridge } from '../core/wasm-bridge.ts';
 import type { EventBus } from '../core/event-bus.ts';
@@ -12,7 +12,7 @@ import type { InputHandler } from '../engine/input-handler.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 
-export const AGENT_PROTOCOL_VERSION = 2;
+export const AGENT_PROTOCOL_VERSION = 3;
 
 export type AgentName = 'claude' | 'codex' | 'pi';
 export type PermissionProfile = 'safe' | 'unrestricted';
@@ -547,8 +547,11 @@ export interface AgentBridgeDeps {
 }
 
 export interface AgentBridgeOptions {
+  /** Browser/dev override. Electron always uses the preload session context. */
   url?: string;
   token?: string;
+  launchId?: string;
+  sessionId?: string;
 }
 
 export interface DocPoint {

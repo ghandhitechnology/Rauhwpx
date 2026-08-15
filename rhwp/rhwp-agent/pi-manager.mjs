@@ -8,7 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { createOpenRouter } from './openrouter.mjs';
 import { fetchLatestPackage, replaceFileAtomically, updatePrefixAtomically } from './harness-update.mjs';
 import { bundledNpmLaunch } from './npm-runtime.mjs';
-import { terminateProcessTree } from './process-tree.mjs';
+import {
+  processTreeSpawnOptions,
+  terminateProcessTree,
+  waitForProcessTreeExit,
+} from './process-tree.mjs';
 import { setupFailureMessage, shouldUseNpmNetworkPath } from './setup-errors.mjs';
 
 const require = createRequire(import.meta.url);
@@ -122,10 +126,13 @@ function thinkingLevelMap() {
 }
 
 export function defaultPiRoot(env = process.env, platform = process.platform, home = os.homedir()) {
-  if (env.RHWP_PI_DIR) return path.resolve(env.RHWP_PI_DIR);
-  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'rhwp', 'pi');
-  if (platform === 'win32') return path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'rhwp', 'pi');
-  return path.join(env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'rhwp', 'pi');
+  const platformPath = platform === 'win32' ? path.win32 : path.posix;
+  if (env.RHWP_PI_DIR) return platformPath.resolve(env.RHWP_PI_DIR);
+  if (platform === 'darwin') return platformPath.join(home, 'Library', 'Application Support', 'rhwp', 'pi');
+  if (platform === 'win32') {
+    return platformPath.join(env.APPDATA || platformPath.join(home, 'AppData', 'Roaming'), 'rhwp', 'pi');
+  }
+  return platformPath.join(env.XDG_DATA_HOME || platformPath.join(home, '.local', 'share'), 'rhwp', 'pi');
 }
 
 /**
@@ -430,7 +437,8 @@ export function createPiManager({
       let proc;
       try {
         proc = spawnProcess(npmLaunch.command, [...npmLaunch.leadingArgs, ...argv], {
-          stdio: ['ignore', 'pipe', 'pipe'], env: baseEnv, windowsHide: true,
+          ...processTreeSpawnOptions(platform),
+          stdio: ['ignore', 'pipe', 'pipe'], env: baseEnv,
         });
       } catch (error) {
         done(piError('PI_INSTALL_FAILED', setupFailureMessage(error, '', 'npm 실행에 실패했어요.')));
@@ -439,7 +447,8 @@ export function createPiManager({
       installProcess = proc;
 
       timer = setTimeout(() => {
-        void terminateProcessTree(proc, { platform, spawnProcess }).finally(() => {
+        terminateProcessTree(proc, { platform, spawnProcess });
+        void waitForProcessTreeExit(proc).finally(() => {
           done(piError('PI_INSTALL_FAILED', 'npm install 이 10분 안에 끝나지 않았어요'));
         });
       }, INSTALL_TIMEOUT_MS);
@@ -729,7 +738,8 @@ export function createPiManager({
       oauthFlow = null;
       const proc = installProcess;
       if (!proc) return false;
-      await terminateProcessTree(proc, { platform, spawnProcess });
+      terminateProcessTree(proc, { platform, spawnProcess });
+      await waitForProcessTreeExit(proc);
       return true;
     },
 

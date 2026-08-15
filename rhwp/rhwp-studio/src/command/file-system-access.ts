@@ -15,8 +15,14 @@ export type FileSystemPermissionState = 'granted' | 'denied' | 'prompt';
 export interface FileSystemFileHandleLike {
   kind?: 'file';
   name: string;
+  /** Desktop opaque handles have canonical native-path identity in Electron main. */
+  identityKind?: 'native-path';
   getFile(): Promise<File>;
   createWritable(): Promise<FileSystemWritableFileStreamLike>;
+  validateSaveTarget?(): Promise<void>;
+  /** Desktop Save As handles release their canonical path claim if writing fails. */
+  releaseUnusedSaveTarget?(): Promise<void>;
+  adoptSaveTarget?(): void;
   isSameEntry?(other: FileSystemFileHandleLike): Promise<boolean>;
   queryPermission?(descriptor?: { mode?: 'read' | 'readwrite' }): Promise<FileSystemPermissionState>;
   requestPermission?(descriptor?: { mode?: 'read' | 'readwrite' }): Promise<FileSystemPermissionState>;
@@ -35,17 +41,19 @@ export interface DroppedDataTransferItemLike {
   getAsFileSystemHandle?(): Promise<DroppedFileSystemHandleLike | null>;
 }
 
+export interface SaveFilePickerOptionsLike {
+  excludeAcceptAllOption?: boolean;
+  suggestedName?: string;
+  types?: FilePickerType[];
+}
+
 export interface FileSystemWindowLike {
   showOpenFilePicker?: (options?: {
     excludeAcceptAllOption?: boolean;
     multiple?: boolean;
     types?: FilePickerType[];
   }) => Promise<FileSystemFileHandleLike[]>;
-  showSaveFilePicker?: (options?: {
-    excludeAcceptAllOption?: boolean;
-    suggestedName?: string;
-    types?: FilePickerType[];
-  }) => Promise<FileSystemFileHandleLike>;
+  showSaveFilePicker?: (options?: SaveFilePickerOptionsLike) => Promise<FileSystemFileHandleLike>;
 }
 
 export interface FileHandleReadResult {
@@ -62,6 +70,14 @@ export interface SaveDocumentOptions {
   forceSaveAs: boolean;
   /** 저장 picker와 확장자 검증을 결정하는 단일 출력 포맷. */
   saveFormat: SaveFormat;
+  /** Desktop native Save As picker; undefined falls back to the browser picker. */
+  pickSaveHandle?: (
+    options: SaveFilePickerOptionsLike,
+  ) => Promise<FileSystemFileHandleLike | null | undefined>;
+  /** Cross-window ownership reservation acquired immediately before writing. */
+  validateTarget?: (
+    handle: FileSystemFileHandleLike,
+  ) => Promise<((saved: boolean) => Promise<void>) | void>;
 }
 
 export interface SaveDocumentResult {
@@ -164,10 +180,25 @@ export function captureDroppedFileHandle(
   );
 }
 
-async function writeBlobToHandle(handle: FileSystemFileHandleLike, blob: Blob): Promise<void> {
-  const writable = await handle.createWritable();
-  await writable.write(blob);
-  await writable.close();
+async function writeBlobToHandle(
+  handle: FileSystemFileHandleLike,
+  blob: Blob,
+  validateTarget?: SaveDocumentOptions['validateTarget'],
+): Promise<void> {
+  let release: ((saved: boolean) => Promise<void>) | void = undefined;
+  let saved = false;
+  try {
+    release = await validateTarget?.(handle);
+    await handle.validateSaveTarget?.();
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    saved = true;
+    handle.adoptSaveTarget?.();
+  } finally {
+    await release?.(saved);
+    if (!saved) await handle.releaseUnusedSaveTarget?.();
+  }
 }
 
 function expectedSaveExtension(saveFormat: SaveFormat): '.hml' | '.hwp' | '.hwpx' {
@@ -180,8 +211,14 @@ async function assertValidSaveHandle(
   originalHandle: FileSystemFileHandleLike | null,
 ): Promise<void> {
   if (originalHandle) {
-    const isOriginal = handle === originalHandle
-      || await handle.isSameEntry?.(originalHandle) === true;
+    let isOriginal = handle === originalHandle;
+    if (!isOriginal && handle.isSameEntry) {
+      try {
+        isOriginal = await handle.isSameEntry(originalHandle);
+      } catch {
+        throw new Error('HML 원본과 저장 대상이 다른 파일인지 확인할 수 없습니다. 네이티브 파일 열기로 원본을 다시 여세요.');
+      }
+    }
     if (isOriginal) {
       throw new Error('HML 원본 파일은 저장 대상으로 선택할 수 없습니다.');
     }
@@ -217,7 +254,16 @@ export async function readFileFromHandle(handle: FileSystemFileHandleLike): Prom
 }
 
 export async function saveDocumentToFileSystem(options: SaveDocumentOptions): Promise<SaveDocumentResult> {
-  const { blob, suggestedName, currentHandle, windowLike, forceSaveAs, saveFormat } = options;
+  const {
+    blob,
+    suggestedName,
+    currentHandle,
+    windowLike,
+    forceSaveAs,
+    saveFormat,
+    pickSaveHandle,
+    validateTarget,
+  } = options;
 
   // 저장 picker 형식을 출력 포맷에 맞춘다 (HML/HWP/HWPX).
   const pickerTypes = pickerTypesForFormat(saveFormat);
@@ -229,7 +275,7 @@ export async function saveDocumentToFileSystem(options: SaveDocumentOptions): Pr
       expectedSaveExtension(saveFormat),
       null,
     );
-    await writeBlobToHandle(currentHandle, blob);
+    await writeBlobToHandle(currentHandle, blob, validateTarget);
     return {
       method: 'current-handle',
       handle: currentHandle,
@@ -237,23 +283,33 @@ export async function saveDocumentToFileSystem(options: SaveDocumentOptions): Pr
     };
   }
 
-  if (windowLike.showSaveFilePicker) {
-    const handle = await windowLike.showSaveFilePicker({
-      excludeAcceptAllOption: true,
-      suggestedName,
-      types: pickerTypes,
-    });
-    await assertValidSaveHandle(
-      handle,
-      expectedSaveExtension(saveFormat),
-      forceSaveAs ? currentHandle : null,
-    );
-    await writeBlobToHandle(handle, blob);
-    return {
-      method: 'save-picker',
-      handle,
-      fileName: handle.name,
-    };
+  const pickerOptions = {
+    excludeAcceptAllOption: true,
+    suggestedName,
+    types: pickerTypes,
+  };
+  let handle = await pickSaveHandle?.(pickerOptions);
+  if (handle === null) throw new DOMException('Save cancelled', 'AbortError');
+  if (!handle && windowLike.showSaveFilePicker) {
+    handle = await windowLike.showSaveFilePicker(pickerOptions);
+  }
+  if (handle) {
+    try {
+      await assertValidSaveHandle(
+        handle,
+        expectedSaveExtension(saveFormat),
+        forceSaveAs ? currentHandle : null,
+      );
+      await writeBlobToHandle(handle, blob, validateTarget);
+      return {
+        method: 'save-picker',
+        handle,
+        fileName: handle.name,
+      };
+    } catch (error) {
+      await handle.releaseUnusedSaveTarget?.();
+      throw error;
+    }
   }
 
   return {

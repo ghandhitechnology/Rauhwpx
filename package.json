@@ -48,6 +48,18 @@
     "asarUnpack": [
       "rhwp/rhwp-agent/**"
     ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "hwp",
+          "hwpx",
+          "hml"
+        ],
+        "name": "Hangul document",
+        "description": "Hangul word-processing document",
+        "role": "Editor"
+      }
+    ],
     "directories": {
       "output": "release",
       "buildResources": "build"

@@ -38,10 +38,13 @@ export const DEFAULT_PLANS = { claude: 'pro', codex: 'plus', pi: 'api' };
 export const PLAN_TABLES = { claude: CLAUDE_PLANS, codex: CODEX_PLANS, pi: PI_PLANS };
 
 export function defaultUsageRoot(env = process.env, platform = process.platform, home = os.homedir()) {
-  if (env.RHWP_USAGE_DIR) return path.resolve(env.RHWP_USAGE_DIR);
-  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'rhwp', 'usage');
-  if (platform === 'win32') return path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'rhwp', 'usage');
-  return path.join(env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'rhwp', 'usage');
+  const platformPath = platform === 'win32' ? path.win32 : path.posix;
+  if (env.RHWP_USAGE_DIR) return platformPath.resolve(env.RHWP_USAGE_DIR);
+  if (platform === 'darwin') return platformPath.join(home, 'Library', 'Application Support', 'rhwp', 'usage');
+  if (platform === 'win32') {
+    return platformPath.join(env.APPDATA || platformPath.join(home, 'AppData', 'Roaming'), 'rhwp', 'usage');
+  }
+  return platformPath.join(env.XDG_DATA_HOME || platformPath.join(home, '.local', 'share'), 'rhwp', 'usage');
 }
 
 function toCount(value) {

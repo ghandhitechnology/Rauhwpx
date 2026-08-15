@@ -11,4 +11,3 @@ export function bundledNpmLaunch({ nodeCommand = process.execPath, npmCommand = 
     leadingArgs: [path.join(path.dirname(packageJson), 'bin', 'npm-cli.js')],
   };
 }
-

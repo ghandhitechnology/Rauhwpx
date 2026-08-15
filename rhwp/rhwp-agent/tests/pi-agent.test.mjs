@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
 import test from 'node:test';
 
 import { buildPiArgv, buildPiEnv, createPiSession, formatPiExitError } from '../agents/pi.mjs';
@@ -7,8 +8,10 @@ import { buildPiArgv, buildPiEnv, createPiSession, formatPiExitError } from '../
 const baseOpts = {
   rootDir: '/tmp/rhwp',
   mcpScriptPath: '/tmp/mcp-stdio.mjs',
-  hubPort: 5175,
+  hubPort: 6201,
   token: 'secret-token',
+  isolatedHome: '/tmp/rhwp isolated home',
+  sessionId: 'studio-thread-pi',
   piBin: '/pi/prefix/node_modules/.bin/pi',
   piRoot: '/pi',
   model: 'deepseek/deepseek-chat-v3.1',
@@ -285,7 +288,7 @@ test('argv carries the model, thinking level, session and system brief', () => {
   assert.deepEqual(argv.slice(0, 6), [
     '--mode', 'json', '--model', 'openrouter/deepseek/deepseek-chat-v3.1', '--thinking', 'high',
   ]);
-  assert.equal(argv[argv.indexOf('--session-dir') + 1], '/pi/sessions');
+  assert.equal(argv[argv.indexOf('--session-dir') + 1], path.join('/pi', 'sessions'));
   assert.equal(argv[argv.indexOf('--session-id') + 1], 'sess-1');
   assert.match(argv[argv.indexOf('--append-system-prompt') + 1], /rhwp MCP tools/);
   assert.ok(argv.includes('--no-context-files'));
@@ -325,11 +328,13 @@ test('the child env is built from scratch without ambient provider keys', () => 
 
   assert.equal(Object.keys(env).some((name) => /API_KEY|SECRET/.test(name)), false);
   assert.deepEqual(env.PATH, '/usr/bin');
-  assert.deepEqual(env.HOME, '/Users/tester');
-  assert.equal(env.PI_CODING_AGENT_DIR, '/pi/agent');
+  assert.equal(env.PI_CODING_AGENT_DIR, path.join('/pi', 'agent'));
   assert.equal(env.PI_OFFLINE, '1');
-  assert.equal(env.RHWP_WS_URL, 'ws://127.0.0.1:5175/mcp');
-  assert.equal(env.RHWP_HUB_HTTP, 'http://127.0.0.1:5175');
+  assert.equal(env.HOME, '/tmp/rhwp isolated home');
+  assert.equal(env.USERPROFILE, '/tmp/rhwp isolated home');
+  assert.equal(env.RHWP_SESSION_ID, 'studio-thread-pi');
+  assert.equal(env.RHWP_WS_URL, 'ws://127.0.0.1:6201/mcp');
+  assert.equal(env.RHWP_HUB_HTTP, 'http://127.0.0.1:6201');
   assert.equal(env.RHWP_AGENT_NAME, 'pi');
   assert.equal(env.RHWP_AGENT_TOKEN, 'secret-token');
   assert.equal(env.RHWP_ROOT_DIR, '/tmp/rhwp');
@@ -360,6 +365,11 @@ test('the prompt is the last argv entry and stdin stays closed', () => {
   assert.equal(argv.at(-1), '문서를 정리해 줘');
   assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
   assert.equal(options.cwd, baseOpts.rootDir);
+  assert.equal(options.detached, process.platform !== 'win32');
+  assert.equal(options.windowsHide, true);
+  assert.equal(options.env.HOME, baseOpts.isolatedHome);
+  assert.equal(options.env.USERPROFILE, baseOpts.isolatedHome);
+  assert.equal(options.env.RHWP_SESSION_ID, baseOpts.sessionId);
   session.dispose();
 });
 

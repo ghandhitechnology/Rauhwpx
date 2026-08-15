@@ -34,6 +34,7 @@ test('환경 기본값은 mcp-stdio 와 같은 계약을 따른다', () => {
   assert.equal(config.hubHttp, 'http://127.0.0.1:5175');
   assert.equal(config.wsUrl, 'ws://127.0.0.1:5175/mcp');
   assert.equal(config.token, 'dev');
+  assert.equal(config.sessionId, 'dev');
   assert.equal(config.agentName, 'pi');
   assert.equal(config.workflow, 'direct');
   assert.equal(config.phase, 'implementing');
@@ -65,27 +66,28 @@ test('허브 URL 은 토큰/프로필/에폭을 인코딩한다', () => {
   const config = configFor({
     RHWP_HUB_HTTP: 'http://127.0.0.1:5175/',
     RHWP_AGENT_TOKEN: 'a b&c',
+    RHWP_SESSION_ID: 'window a',
     RHWP_TOOL_PROFILE: 'planning',
   });
   assert.equal(
     hubToolDefinitionsUrl(config),
-    'http://127.0.0.1:5175/pi/tool-definitions?token=a%20b%26c&profile=planning',
+    'http://127.0.0.1:5175/pi/tool-definitions?token=a%20b%26c&sessionId=window%20a&profile=planning',
   );
   assert.equal(
     hubSocketUrl(config),
-    'ws://127.0.0.1:5175/mcp?token=a%20b%26c&agent=pi&workflow=direct',
+    'ws://127.0.0.1:5175/mcp?token=a%20b%26c&sessionId=window%20a&agent=pi&workflow=direct',
   );
-  const withEpoch = configFor({ RHWP_CAPABILITY_EPOCH: '7', RHWP_AGENT_WORKFLOW: 'plan' });
+  const withEpoch = configFor({ RHWP_CAPABILITY_EPOCH: '7', RHWP_AGENT_WORKFLOW: 'plan', RHWP_SESSION_ID: 'window-b' });
   assert.equal(
     hubSocketUrl(withEpoch),
-    'ws://127.0.0.1:5175/mcp?token=dev&agent=pi&workflow=plan&capabilityEpoch=7',
+    'ws://127.0.0.1:5175/mcp?token=dev&sessionId=window-b&agent=pi&workflow=plan&capabilityEpoch=7',
   );
 });
 
-test('tool-call 프레임은 v2 계약을 그대로 쓴다', () => {
+test('tool-call 프레임은 v3 계약을 쓴다', () => {
   const plain = encodeToolCallFrame(3, 'get_structure', { sectionIdx: 0 }, configFor());
   assert.deepEqual(plain, {
-    v: 2,
+    v: 3,
     type: 'tool-call',
     id: 3,
     tool: 'get_structure',

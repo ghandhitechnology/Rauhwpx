@@ -18,20 +18,30 @@ test('the bundled npm launcher uses the current Node-compatible executable', () 
   assert.match(launch.leadingArgs[0], /npm[/\\]bin[/\\]npm-cli\.js$/);
 });
 
-test('Windows process cleanup kills the entire descendant tree', async () => {
+test('Windows process cleanup gracefully terminates then force-kills the descendant tree', async () => {
   const calls = [];
-  const killer = new EventEmitter();
-  const child = { pid: 4312, kill: () => assert.fail('taskkill should handle Windows cleanup') };
-  const done = terminateProcessTree(child, {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 4312,
+    exitCode: null,
+    signalCode: null,
+    kill: () => assert.fail('taskkill should handle Windows cleanup'),
+  });
+  let escalate;
+  terminateProcessTree(child, {
     platform: 'win32',
     spawnProcess(command, argv, options) {
       calls.push({ command, argv, options });
-      queueMicrotask(() => killer.emit('close', 0));
-      return killer;
+      return new EventEmitter();
+    },
+    setTimer(callback) {
+      escalate = callback;
+      return { unref() {} };
     },
   });
-  await done;
-  assert.deepEqual(calls[0].argv, ['/pid', '4312', '/T', '/F']);
+  assert.deepEqual(calls[0].argv, ['/PID', '4312', '/T']);
+  escalate();
+  assert.deepEqual(calls[1].argv, ['/PID', '4312', '/T', '/F']);
+  assert.ok(calls.every(({ options }) => options.shell === false && options.windowsHide === true));
 });
 
 test('Windows file locks are retried and then reported with a stable error code', async () => {
