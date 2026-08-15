@@ -23,7 +23,9 @@ import { createProviderHealth } from './provider-health.mjs';
 import { createUsageStore } from './usage-store.mjs';
 import { createCliproxyClient } from './cliproxy.mjs';
 import { createPiManager, defaultPiRoot } from './pi-manager.mjs';
+import { createCliSetupManager } from './cli-setup-manager.mjs';
 import { createOpenRouter } from './openrouter.mjs';
+import { createIpcSecretStore } from './secret-store.mjs';
 import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
 import { resolveHwpExtractor } from './reference-extractor.mjs';
 import { ReferenceStore } from './reference-store.mjs';
@@ -62,8 +64,11 @@ const RECORDS_ROOT = path.join(WORK_ROOT, 'sessions');
 await fs.mkdir(RECORDS_ROOT, { recursive: true, mode: 0o700 });
 let hubPort = REQUESTED_PORT;
 const STUDIO_TOOL_TIMEOUT_MS = 30_000;
+const HARNESS_UPDATE_INITIAL_DELAY_MS = 8_000;
+const HARNESS_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const HARNESS_UPDATE_BUSY_RETRY_MS = 5 * 60 * 1000;
+const HARNESS_UPDATE_FAILURE_RETRY_MS = 60 * 60 * 1000;
 const toolDefinitionsByName = new Map(TOOL_DEFINITIONS.map((definition) => [definition.name, definition]));
-let sourceCodexAuthPath;
 const sourceClaudeAuth = {
   credentialsPath: path.join(os.homedir(), '.claude', '.credentials.json'),
   configPath: path.join(os.homedir(), '.claude.json'),
@@ -72,23 +77,34 @@ const sourceCodexHomes = [...new Set([
   process.env.CODEX_HOME,
   path.join(os.homedir(), '.codex'),
 ].filter(Boolean))];
-for (const sourceCodexHome of sourceCodexHomes) {
-  const authPath = path.join(sourceCodexHome, 'auth.json');
-  try {
-    const authStat = await fs.lstat(authPath);
-    if (authStat.isFile() && !authStat.isSymbolicLink()) {
-      sourceCodexAuthPath = authPath;
-      break;
+async function findSourceCodexAuthPath() {
+  for (const sourceCodexHome of sourceCodexHomes) {
+    const authPath = path.join(sourceCodexHome, 'auth.json');
+    try {
+      const authStat = await fs.lstat(authPath);
+      if (authStat.isFile() && !authStat.isSymbolicLink()) return authPath;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
     }
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
   }
+  return undefined;
 }
+let sourceCodexAuthPath = await findSourceCodexAuthPath();
 const writingStyleStore = await new WritingStyleStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
 const PI_ROOT = defaultPiRoot();
 const openRouter = createOpenRouter({ cacheDir: PI_ROOT });
-const piManager = await createPiManager({ rootDir: PI_ROOT, openRouter }).init();
+const secretStore = createIpcSecretStore();
+const piManager = await createPiManager({ rootDir: PI_ROOT, openRouter, secretStore }).init();
+const cliSetup = await createCliSetupManager({ secretStore }).init();
+// App-managed bins are available to auxiliary CLI calls as soon as installation completes.
+process.env.PATH = `${cliSetup.binDir}${path.delimiter}${process.env.PATH ?? ''}`;
+Object.assign(process.env, cliSetup.envFor('claude'));
+const [initialClaudeSetup, initialCodexSetup] = await Promise.all([
+  cliSetup.status('claude'),
+  cliSetup.status('codex'),
+]);
+let cliSetupStatus = { claude: initialClaudeSetup, codex: initialCodexSetup };
 /** pi 상태는 동기 경로(resolveModel/startSession)에서도 필요해 캐시해 둔다. */
 let piStatus = await piManager.status();
 /** OpenRouter 잔액. 키가 있을 때만 채워지고 사용량 리포트에 얹힌다. */
@@ -99,6 +115,7 @@ if (piStatus.installed) {
 }
 const providerHealth = createProviderHealth({
   piBin: () => (piStatus.installed ? piManager.piBin : null),
+  cliBin: (agent) => (cliSetupStatus[agent]?.installed ? cliSetup.binPath(agent) : null),
 });
 const usageStore = await createUsageStore().init();
 const cliproxy = await createCliproxyClient({ rootDir: usageStore.rootDir }).init();
@@ -148,6 +165,21 @@ const sessions = new HubSessionRegistry({
   },
 });
 
+function hasAgentSessions() {
+  return [...sessions.values()].some((record) => record.agentSession !== null);
+}
+
+function broadcastToStudios(message) {
+  for (const record of sessions.values()) sendJson(record.studioSocket, message);
+}
+
+function refreshSessionCredentials(agent) {
+  for (const record of sessions.values()) {
+    if (agent === 'codex') prepareCodexHome(record.codexHome, sourceCodexAuthPath);
+    if (agent === 'claude') prepareClaudeHome(record.isolatedHome, sourceClaudeAuth);
+  }
+}
+
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
 const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
 const DEFAULT_MODEL = { claude: 'sonnet', codex: 'gpt-5.6-sol' };
@@ -164,6 +196,116 @@ function piModelConfig(id) {
 async function refreshPiStatus() {
   piStatus = await piManager.status();
   return piStatus;
+}
+
+function piAgentSetupStatus() {
+  return {
+    agent: 'pi',
+    installed: piStatus.installed,
+    available: piStatus.installed,
+    installing: piStatus.installing,
+    version: piStatus.version,
+    authenticated: piStatus.keyConfigured,
+    authMethod: piStatus.keyConfigured ? 'api-key' : null,
+    keyTail: piStatus.keyTail,
+    authenticating: false,
+    setupComplete: piStatus.setupComplete,
+    connected: piStatus.setupComplete,
+    latestVersion: piStatus.latestVersion ?? null,
+    updateRequired: piStatus.updateRequired === true,
+    error: piStatus.error,
+  };
+}
+
+async function agentSetupStatuses() {
+  const [claudeSetup, codexSetup, health] = await Promise.all([
+    cliSetup.status('claude'),
+    cliSetup.status('codex'),
+    providerHealth.check(),
+  ]);
+  const withDetectedHarness = (status, provider) => {
+    const available = provider?.available === true;
+    const connected = available && status.authenticated;
+    return {
+      ...status,
+      available,
+      connected,
+      version: status.version ?? provider?.version ?? null,
+      setupComplete: status.setupComplete || connected,
+    };
+  };
+  const claude = withDetectedHarness(claudeSetup, health.claude);
+  const codex = withDetectedHarness(codexSetup, health.codex);
+  cliSetupStatus = { claude, codex };
+  return { claude, codex, pi: piAgentSetupStatus() };
+}
+
+let harnessUpdateTimer = null;
+let harnessUpdateRunning = false;
+
+function scheduleHarnessUpdates(delayMs) {
+  if (harnessUpdateTimer) clearTimeout(harnessUpdateTimer);
+  harnessUpdateTimer = setTimeout(() => {
+    harnessUpdateTimer = null;
+    void runAutomaticHarnessUpdates();
+  }, delayMs);
+  harnessUpdateTimer.unref?.();
+}
+
+async function runAutomaticHarnessUpdates() {
+  if (harnessUpdateRunning) return;
+  // idle 세션도 CLI 프로세스를 물고 있으므로 완전히 닫힌 뒤 디스크의 하네스를 교체한다.
+  if (hasAgentSessions()) {
+    scheduleHarnessUpdates(HARNESS_UPDATE_BUSY_RETRY_MS);
+    return;
+  }
+  harnessUpdateRunning = true;
+  let nextDelay = HARNESS_UPDATE_INTERVAL_MS;
+  const canActivate = () => !hasAgentSessions();
+  const before = {
+    claude: cliSetupStatus.claude?.version ?? null,
+    codex: cliSetupStatus.codex?.version ?? null,
+    pi: piStatus.version ?? null,
+  };
+  try {
+    cliSetupStatus.claude = await cliSetup.automaticUpdate('claude', { canActivate });
+    cliSetupStatus.codex = await cliSetup.automaticUpdate('codex', { canActivate });
+    piStatus = await piManager.automaticUpdate({ canActivate });
+    const statuses = await agentSetupStatuses();
+    if (Object.values(statuses).some((status) => status.updateRequired)) {
+      nextDelay = HARNESS_UPDATE_FAILURE_RETRY_MS;
+    }
+    broadcastToStudios({ v: 1, type: 'agent-setup-status', statuses });
+    const changed = before.claude !== statuses.claude.version
+      || before.codex !== statuses.codex.version
+      || before.pi !== statuses.pi.version;
+    if (changed) {
+      const providers = await providerHealth.check(true);
+      broadcastToStudios({ v: 1, type: 'provider-status', providers });
+    }
+  } catch {
+    const statuses = await agentSetupStatuses().catch(() => null);
+    if (statuses) {
+      if (Object.values(statuses).some((status) => status.updateRequired)) {
+        nextDelay = HARNESS_UPDATE_FAILURE_RETRY_MS;
+      }
+      broadcastToStudios({ v: 1, type: 'agent-setup-status', statuses });
+    }
+  } finally {
+    harnessUpdateRunning = false;
+    scheduleHarnessUpdates(nextDelay);
+  }
+}
+
+function sendAgentSetupError(record, sock, requestId, agent, error, fallback = 'AGENT_SETUP_FAILED') {
+  replyToStudio(record, sock, {
+    v: 1,
+    type: 'agent-setup-error',
+    requestId,
+    agent,
+    code: error?.code ?? fallback,
+    message: String(error?.message ?? error),
+  });
 }
 
 function resolveModel(agent, requested) {
@@ -554,6 +696,9 @@ async function startSession(
     isolatedHome: record.isolatedHome,
     codexHome: record.codexHome,
     codexAuthPath: sourceCodexAuthPath,
+    codexBin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
+    claudeBin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
+    providerEnv: agent === 'claude' || agent === 'codex' ? cliSetup.envFor(agent) : {},
     onEvent: makeBackendEventHandler(record, generation),
     workflow,
     phase: workflow === 'direct' ? 'implementing' : planning.phase,
@@ -563,6 +708,7 @@ async function startSession(
     // pi 전용 — 설치 경로와 영속 루트, 그리고 선택한 모델의 추론 지원 여부.
     piBin: piManager.piBin,
     piRoot: piManager.rootDir,
+    openRouterApiKey: agent === 'pi' ? piManager.apiKey() : undefined,
     reasoning: agent === 'pi' ? Boolean(piModelConfig(model)?.reasoning) : false,
   };
   const backend = agent === 'claude'
@@ -991,6 +1137,97 @@ async function handleStudioMessage(record, sock, msg) {
         }));
       return;
     }
+    case 'agent-setup-status-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void agentSetupStatuses()
+        .then((statuses) => replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses }))
+        .catch((e) => sendAgentSetupError(record, sock, requestId, null, e));
+      return;
+    }
+    case 'agent-setup-install': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      const agent = msg.agent;
+      if (agent !== 'claude' && agent !== 'codex' && agent !== 'pi') {
+        sendAgentSetupError(record, sock, requestId, null, new Error('지원하지 않는 에이전트예요.'));
+        return;
+      }
+      const progress = (entry) => replyToStudio(record, sock, {
+        v: 1,
+        type: 'agent-setup-progress',
+        requestId,
+        agent,
+        state: entry.state,
+        ...(entry.phase ? { phase: entry.phase } : {}),
+        ...(Number.isFinite(entry.percent) ? { percent: entry.percent } : {}),
+        ...(entry.detail ? { detail: entry.detail } : {}),
+        ...(entry.activity === true ? { activity: true } : {}),
+        ...(Number.isFinite(entry.receivedBytes) ? { receivedBytes: entry.receivedBytes } : {}),
+        ...(Number.isFinite(entry.totalBytes) ? { totalBytes: entry.totalBytes } : {}),
+      });
+      const installing = agent === 'pi'
+        ? piManager.install(progress).then((status) => { piStatus = status; })
+        : cliSetup.install(agent, progress).then((status) => { cliSetupStatus[agent] = status; });
+      void installing
+        .then(agentSetupStatuses)
+        .then((statuses) => {
+          replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses });
+          void providerHealth.check(true).then((providers) => replyToStudio(record, sock, { v: 1, type: 'provider-status', providers }));
+        })
+        .catch((e) => sendAgentSetupError(record, sock, requestId, agent, e, 'AGENT_INSTALL_FAILED'));
+      return;
+    }
+    case 'agent-setup-auth': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      const agent = msg.agent;
+      const method = msg.method;
+      if ((agent !== 'claude' && agent !== 'codex' && agent !== 'pi') || (method !== 'oauth' && method !== 'api-key')) {
+        sendAgentSetupError(record, sock, requestId, null, new Error('로그인 요청을 확인하지 못했어요.'));
+        return;
+      }
+      let authUrl = null;
+      let run;
+      if (agent === 'pi' && method === 'oauth') {
+        const callbackUrl = `http://127.0.0.1:${hubPort}/oauth/openrouter/callback`;
+        authUrl = piManager.beginOAuth(callbackUrl).authUrl;
+        run = Promise.resolve(null);
+      } else if (agent === 'pi') {
+        run = piManager.setApiKey(String(msg.key ?? '')).then((status) => { piStatus = status; });
+      } else {
+        run = cliSetup.authenticate(agent, method, msg.key, (entry) => replyToStudio(record, sock, {
+          v: 1,
+          type: 'agent-setup-progress',
+          agent,
+          state: entry.state,
+          ...(entry.authUrl ? { authUrl: entry.authUrl } : {}),
+        })).then(async (status) => {
+          cliSetupStatus[agent] = status;
+          if (agent === 'codex') {
+            sourceCodexAuthPath = await findSourceCodexAuthPath();
+          }
+          refreshSessionCredentials(agent);
+        });
+      }
+      replyToStudio(record, sock, { v: 1, type: 'agent-setup-auth-started', requestId, agent, ...(authUrl ? { authUrl } : {}) });
+      if (authUrl) {
+        replyToStudio(record, sock, { v: 1, type: 'agent-setup-progress', agent, state: 'authorizing', authUrl });
+        return;
+      }
+      void run
+        .then(agentSetupStatuses)
+        .then((statuses) => {
+          replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses });
+          if (agent === 'pi') replyToStudio(record, sock, { v: 1, type: 'pi-status', status: piStatus });
+          void providerHealth.check(true).then((providers) => replyToStudio(record, sock, { v: 1, type: 'provider-status', providers }));
+        })
+        .catch((e) => sendAgentSetupError(record, sock, null, agent, e, 'AGENT_AUTH_FAILED'));
+      return;
+    }
+    case 'agent-setup-cancel': {
+      const agent = msg.agent;
+      if (agent === 'pi') void piManager.cancelSetup();
+      else if (agent === 'claude' || agent === 'codex') void cliSetup.cancel(agent);
+      return;
+    }
     case 'usage-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void usageSnapshotRefreshing(msg.refresh === true)
@@ -1027,6 +1264,7 @@ async function handleStudioMessage(record, sock, msg) {
         type: 'pi-setup-progress',
         requestId,
         state: progress.state,
+        ...(Number.isFinite(progress.percent) ? { percent: progress.percent } : {}),
         ...(progress.detail ? { detail: progress.detail } : {}),
         ...(Number.isFinite(progress.receivedBytes) ? { receivedBytes: progress.receivedBytes } : {}),
         ...(Number.isFinite(progress.totalBytes) ? { totalBytes: progress.totalBytes } : {}),
@@ -1452,6 +1690,7 @@ function healthzBody() {
     port: hubPort,
     uptimeMs: Date.now() - STARTED_AT,
     protocol: PROTOCOL_VERSION,
+    secretBroker: secretStore.available,
     sessions: sessions.summaries(recordHealth),
     providers: providerHealth.cached(),
   };
@@ -1505,6 +1744,38 @@ const httpServer = http.createServer((req, res) => {
       const suppliedToken = requestToken(req, url);
       const handleReferenceHttp = createReferenceHttpHandler({ store: referenceStore, token: suppliedToken });
       if (await handleReferenceHttp(req, res, url)) return;
+    }
+    if (req.method === 'GET' && url.pathname === '/oauth/openrouter/callback') {
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      if (!code) {
+        res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+        res.end('<!doctype html><meta charset="utf-8"><title>Rauhwpx</title><p>OpenRouter login did not return a code.</p>');
+        return;
+      }
+      try {
+        piStatus = await piManager.completeOAuth(code, state);
+        const statuses = await agentSetupStatuses();
+        broadcastToStudios({ v: 1, type: 'agent-setup-status', statuses });
+        broadcastToStudios({ v: 1, type: 'pi-status', status: piStatus });
+        void refreshOpenRouterCredits(true).then(() => {
+          broadcastToStudios({ v: 1, type: 'usage-report', usage: usageSnapshot() });
+        });
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end('<!doctype html><meta charset="utf-8"><title>Rauhwpx</title><style>body{font:16px system-ui;margin:48px;color:#202124}</style><h1>OpenRouter connected</h1><p>You can return to Rauhwpx and close this tab.</p>');
+      } catch (error) {
+        broadcastToStudios({
+          v: 1,
+          type: 'agent-setup-error',
+          requestId: null,
+          agent: 'pi',
+          code: error?.code ?? 'OPENROUTER_OAUTH_FAILED',
+          message: String(error?.message ?? error),
+        });
+        res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+        res.end('<!doctype html><meta charset="utf-8"><title>Rauhwpx</title><p>OpenRouter login could not be completed. Return to Rauhwpx and try again.</p>');
+      }
+      return;
     }
     if (req.method === 'DELETE' && url.pathname.startsWith('/sessions/')) {
       authenticateOwnerRequest(req, url);
@@ -1675,6 +1946,9 @@ httpServer.on('upgrade', (req, socket, head) => {
         if (providers !== cachedProviders) replyToStudio(record, ws, { v: 1, type: 'provider-status', providers });
       });
       sendJson(ws, { v: 1, type: 'pi-status', status: piStatus });
+      void agentSetupStatuses().then((statuses) => {
+        replyToStudio(record, ws, { v: 1, type: 'agent-setup-status', statuses });
+      });
       sendJson(ws, { v: 1, type: 'writing-style-catalog', ...writingStyleCatalog(record) });
       sendJson(ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });
       if (piStatus.keyConfigured && !openRouterCredits) {
@@ -1716,7 +1990,8 @@ httpServer.listen(REQUESTED_PORT, '127.0.0.1', () => {
   hubPort = address.port;
   process.stdout.write(`RHWP_HUB_READY ${JSON.stringify({ port: hubPort, pid: process.pid, launchId: LAUNCH_ID })}\n`);
   log(`rhwp-agent hub listening on ws://127.0.0.1:${hubPort} (protocol v${PROTOCOL_VERSION})`);
-  log('claude/codex CLIs must be on PATH (e.g. ~/.local/bin)');
+  log('claude/codex/pi can be installed and authenticated from Studio settings');
+  scheduleHarnessUpdates(HARNESS_UPDATE_INITIAL_DELAY_MS);
 });
 
 httpServer.on('error', (err) => {
@@ -1746,6 +2021,7 @@ function shutdown(signal) {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async () => {
     clearInterval(stagedReferenceCleanupTimer);
+    if (harnessUpdateTimer) clearTimeout(harnessUpdateTimer);
     if (ownerWatchdog) clearInterval(ownerWatchdog);
     log(`shutting down (${signal})`);
     await sessions.disposeAll((record) => disposeRecord(record, 'hub shutdown'));

@@ -45,6 +45,7 @@ const SECRET_LIKE = /\b(?:sk|pk)-[A-Za-z0-9_-]{12,}/g;
  * @typedef {import('./backend.mjs').BackendOptions & {
  *   piBin?: string,
  *   piRoot?: string,
+ *   openRouterApiKey?: string,
  *   reasoning?: boolean,
  * }} PiBackendOptions
  *
@@ -120,6 +121,7 @@ export function buildPiEnv(opts, sourceEnv = process.env) {
   return {
     ...env,
     PI_CODING_AGENT_DIR: path.join(piRoot, 'agent'),
+    ...(opts.openRouterApiKey ? { OPENROUTER_API_KEY: String(opts.openRouterApiKey) } : {}),
     // 버전 확인/카탈로그 갱신 같은 기동 시 네트워크 동작을 끈다.
     PI_OFFLINE: '1',
     RHWP_WS_URL: `ws://127.0.0.1:${opts.hubPort}/mcp`,

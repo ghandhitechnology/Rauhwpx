@@ -315,10 +315,10 @@ export function createClaudeSession(opts, {
       sessionId = crypto.randomUUID();
     }
     sessionIdConsumed = true;
-    const proc = spawnProcess('claude', buildArgv(resume), {
+    const proc = spawnProcess(opts.claudeBin ?? 'claude', buildArgv(resume), {
       ...processTreeSpawnOptions(),
       cwd: opts.rootDir,
-      env: isolatedProcessEnv(opts),
+      env: isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child = proc;
