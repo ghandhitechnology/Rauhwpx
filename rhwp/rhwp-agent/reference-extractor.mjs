@@ -73,7 +73,7 @@ function decodeHtmlEntities(value) {
   });
 }
 
-function markupToText(markup) {
+export function markupToText(markup) {
   return decodeHtmlEntities(markup
     .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, ' ')
@@ -158,10 +158,20 @@ async function resolveRhwpBinary(projectRoot, env = process.env) {
       candidates.push(path.resolve(projectRoot, rel));
     }
   }
+  const names = process.platform === 'win32' ? ['rhwp.exe', 'rhwp'] : ['rhwp'];
+  for (const dir of String(env.PATH ?? '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const name of names) candidates.push(path.join(dir, name));
+  }
   for (const candidate of candidates) {
     if (await isExecutable(candidate)) return candidate;
   }
   return null;
+}
+
+/** Deployment probe: the rhwp binary used for .hwp/.hwpx/.hml text extraction, or null. */
+export function resolveHwpExtractor(projectRoot, env = process.env) {
+  return resolveRhwpBinary(projectRoot, env);
 }
 
 function runRhwpExport(binary, filePath, timeoutMs = 30_000) {
@@ -180,20 +190,30 @@ function runRhwpExport(binary, filePath, timeoutMs = 30_000) {
       clearTimeout(timer);
       callback();
     };
-    const timer = setTimeout(() => {
+    const stop = () => {
       try { child.kill('SIGTERM'); } catch {}
+      const killTimer = setTimeout(() => {
+        try {
+          if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        } catch {}
+      }, 5_000);
+      killTimer.unref?.();
+    };
+    const timer = setTimeout(() => {
+      stop();
       finish(() => reject(new ReferenceExtractionError('REFERENCE_EXTRACTION_TIMEOUT', 'HWP text extraction timed out')));
     }, timeoutMs);
     child.stdout.on('data', (chunk) => {
       stdout += chunk;
       if (Buffer.byteLength(stdout) > 8 * 1024 * 1024) {
-        try { child.kill('SIGTERM'); } catch {}
+        stop();
         finish(() => reject(new ReferenceExtractionError('REFERENCE_TEXT_TOO_LARGE', 'HWP text extraction output is too large')));
       }
     });
     child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-8000); });
     child.once('error', (error) => finish(() => reject(new ReferenceExtractionError('REFERENCE_EXTRACTOR_UNAVAILABLE', String(error?.message ?? error)))));
-    child.once('exit', (code) => finish(() => {
+    // 'close' waits for stderr to drain, so a failure message is never cut off.
+    child.once('close', (code) => finish(() => {
       if (code !== 0) {
         reject(new ReferenceExtractionError('REFERENCE_EXTRACTION_FAILED', stderr.trim() || `rhwp exited with code ${code}`));
         return;
