@@ -55,10 +55,13 @@ function keyTail(key) {
 }
 
 export function defaultCliSetupRoot(env = process.env, platform = process.platform, home = os.homedir()) {
-  if (env.RHWP_CLI_DIR) return path.resolve(env.RHWP_CLI_DIR);
-  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'rhwp', 'cli');
-  if (platform === 'win32') return path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'rhwp', 'cli');
-  return path.join(env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'rhwp', 'cli');
+  const platformPath = platform === 'win32' ? path.win32 : path.posix;
+  if (env.RHWP_CLI_DIR) return platformPath.resolve(env.RHWP_CLI_DIR);
+  if (platform === 'darwin') return platformPath.join(home, 'Library', 'Application Support', 'rhwp', 'cli');
+  if (platform === 'win32') {
+    return platformPath.join(env.APPDATA || platformPath.join(home, 'AppData', 'Roaming'), 'rhwp', 'cli');
+  }
+  return platformPath.join(env.XDG_DATA_HOME || platformPath.join(home, '.local', 'share'), 'rhwp', 'cli');
 }
 
 /** App-managed Codex and Claude installers plus their local authentication state. */

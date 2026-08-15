@@ -45,6 +45,10 @@ test('CLI setup root follows the app data directory on each platform', () => {
     defaultCliSetupRoot({}, 'darwin', '/Users/tester'),
     '/Users/tester/Library/Application Support/rhwp/cli',
   );
+  assert.equal(
+    defaultCliSetupRoot({ APPDATA: 'C:\\data' }, 'win32', 'C:\\Users\\tester'),
+    path.win32.join('C:\\data', 'rhwp', 'cli'),
+  );
   assert.equal(defaultCliSetupRoot({}, 'linux', '/home/tester'), '/home/tester/.local/share/rhwp/cli');
 });
 
