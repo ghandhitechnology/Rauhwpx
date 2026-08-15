@@ -1,10 +1,12 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { mkdirSync, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import spawn from 'cross-spawn';
 import { WebSocketServer } from 'ws';
-import { createClaudeSession } from './agents/claude.mjs';
+import { createClaudeSession, prepareClaudeHome } from './agents/claude.mjs';
 import { createCodexSession, prepareCodexHome } from './agents/codex.mjs';
 import { createPiSession } from './agents/pi.mjs';
 import { generateChatTitle } from './agents/title.mjs';
@@ -25,24 +27,47 @@ import { createOpenRouter } from './openrouter.mjs';
 import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
 import { resolveHwpExtractor } from './reference-extractor.mjs';
 import { ReferenceStore } from './reference-store.mjs';
-import { createReferenceHttpHandler } from './reference-http.mjs';
+import { createReferenceHttpHandler, isAllowedStudioOrigin } from './reference-http.mjs';
 import { assertMessageScope, referenceScopesForSession, resolveSessionIdentity } from './reference-session.mjs';
 import { executeReferenceTool } from './reference-tools.mjs';
 import { z } from 'zod';
+import { terminateProcessTree } from './process-tree.mjs';
+import {
+  authenticateHubSession,
+  authenticateMasterToken,
+  HubSessionRegistry,
+  issueScopedHubToken,
+  resolveHubIdentity,
+} from './hub-session-registry.mjs';
 
-const PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
-const TOKEN = process.env.RHWP_AGENT_TOKEN ?? 'dev';
-const PROTOCOL_VERSION = 2;
+const REQUESTED_PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
+const PRODUCTION = process.env.NODE_ENV === 'production' || process.env.RHWP_AGENT_MODE === 'production';
+const { token: TOKEN, development: DEVELOPMENT_AUTH, launchId: LAUNCH_ID } = resolveHubIdentity();
+const PROTOCOL_VERSION = 3;
 const HUB_NAME = 'rhwp-agent';
 const STARTED_AT = Date.now();
-const ROOT = new URL('..', import.meta.url).pathname;
-const MCP_SCRIPT = new URL('./mcp-stdio.mjs', import.meta.url).pathname;
-const BUNDLED_SKILLS = new URL('./skills', import.meta.url).pathname;
-const ISOLATED_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-agent-home-'));
-const ISOLATED_CODEX_HOME = path.join(ISOLATED_HOME, '.codex');
+// The bundle is discovery-only. Every per-window cwd, home, download, and
+// temporary work path lives below RHWP_WORK_DIR.
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const MCP_SCRIPT = fileURLToPath(new URL('./mcp-stdio.mjs', import.meta.url));
+const BUNDLED_SKILLS = fileURLToPath(new URL('./skills', import.meta.url));
+if (PRODUCTION && !process.env.RHWP_WORK_DIR) {
+  throw Object.assign(new Error('RHWP_WORK_DIR is required in production'), { code: 'HUB_WORK_DIR_REQUIRED' });
+}
+const WORK_ROOT = path.resolve(process.env.RHWP_WORK_DIR || path.join(os.tmpdir(), `rhwp-agent-work-${process.pid}`));
+const RUNTIME_ROOT = process.env.RHWP_RUNTIME_DIR
+  ? path.resolve(process.env.RHWP_RUNTIME_DIR)
+  : null;
+const RECORDS_ROOT = path.join(WORK_ROOT, 'sessions');
+await fs.mkdir(RECORDS_ROOT, { recursive: true, mode: 0o700 });
+let hubPort = REQUESTED_PORT;
 const STUDIO_TOOL_TIMEOUT_MS = 30_000;
 const toolDefinitionsByName = new Map(TOOL_DEFINITIONS.map((definition) => [definition.name, definition]));
 let sourceCodexAuthPath;
+const sourceClaudeAuth = {
+  credentialsPath: path.join(os.homedir(), '.claude', '.credentials.json'),
+  configPath: path.join(os.homedir(), '.claude.json'),
+};
 const sourceCodexHomes = [...new Set([
   process.env.CODEX_HOME,
   path.join(os.homedir(), '.codex'),
@@ -59,7 +84,6 @@ for (const sourceCodexHome of sourceCodexHomes) {
     if (error?.code !== 'ENOENT') throw error;
   }
 }
-prepareCodexHome(ISOLATED_CODEX_HOME, sourceCodexAuthPath);
 const writingStyleStore = await new WritingStyleStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
 const PI_ROOT = defaultPiRoot();
@@ -83,23 +107,46 @@ const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
 if (!(await resolveHwpExtractor(ROOT))) {
   log('hwp/hwpx text extraction unavailable: build target/release/rhwp, install rhwp on PATH, or set RHWP_BIN');
 }
-const handleReferenceHttp = createReferenceHttpHandler({ store: referenceStore, token: TOKEN });
 const stagedReferenceCleanupTimer = setInterval(() => {
   void referenceStore.cleanupStaged().catch((error) => log(`staged reference cleanup failed: ${error?.message ?? error}`));
 }, 15 * 60 * 1000);
 stagedReferenceCleanupTimer.unref?.();
-/** The calibration process outlives a Studio WebSocket. Keeping its request
- * identity and phase lets a reconnecting tab resume the same progress UI. */
-let styleCalibration = null;
-
-/** @type {import('ws').WebSocket | null} */
-let studioSocket = null;
-const mcpSockets = new Set();
-/** @type {{ agent: 'claude'|'codex'|'pi', model: string|null, effort: string|null, permissionProfile: 'safe'|'unrestricted', backend: any, status: 'idle'|'running', sessionId: string|null, threadId: string, documentId: string|null, documentName: string|null, chatId: string, planning: PlanningState } | null} */
-let session = null;
-/** @type {{ messageId: string, message: any, owner: any } | null} */
-let pendingReferenceMessage = null;
-let nextCapabilityEpoch = 1;
+let writingStyleCalibrationOwner = null;
+const sessions = new HubSessionRegistry({
+  createRecord(sessionId) {
+    const recordKey = `${crypto.createHash('sha256').update(sessionId).digest('hex')}-${crypto.randomUUID()}`;
+    const recordRoot = path.join(RECORDS_ROOT, recordKey);
+    const workDir = path.join(recordRoot, 'work');
+    const isolatedHome = path.join(recordRoot, 'home');
+    const codexHome = path.join(isolatedHome, '.codex');
+    mkdirSync(workDir, { recursive: true, mode: 0o700 });
+    prepareCodexHome(codexHome, sourceCodexAuthPath);
+    prepareClaudeHome(isolatedHome, sourceClaudeAuth);
+    return {
+      sessionId,
+      disposed: false,
+      createdAt: Date.now(),
+      lastConnectedAt: Date.now(),
+      studioSocket: null,
+      mcpSockets: new Set(),
+      agentSession: null,
+      pendingReferenceMessage: null,
+      nextCapabilityEpoch: 1,
+      pendingCalls: new Map(),
+      nextHubId: 1,
+      sessionGeneration: 0,
+      missedTurnEnd: null,
+      styleCalibration: null,
+      auxiliaryProcesses: new Set(),
+      browserbaseSession: new BrowserbaseSession({ log }),
+      downloadManager: new DownloadManager({ rootDir: workDir }),
+      recordRoot,
+      workDir,
+      isolatedHome,
+      codexHome,
+    };
+  },
+});
 
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
 const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
@@ -148,16 +195,12 @@ function resolveEffort(agent, model, requested) {
   const preferred = DEFAULT_EFFORT[agent];
   return allowed.has(preferred) ? preferred : [...allowed][0];
 }
-/** @type {Map<number, { mcpSocket: any, clientId: number, timer: NodeJS.Timeout }>} */
-const pendingCalls = new Map();
-let nextHubId = 1;
-
 // 스튜디오 소켓이 닫히거나 새 탭 연결에 밀려나면 인플라이트 호출은 영원히 응답받지 못한다 —
 // 30초 타임아웃까지 기다리지 말고 즉시 NO_STUDIO 로 실패시킨다.
-function failAllPendingCalls(message) {
-  for (const [hubId, entry] of pendingCalls) {
+function failAllPendingCalls(record, message) {
+  for (const [hubId, entry] of record.pendingCalls) {
     clearTimeout(entry.timer);
-    pendingCalls.delete(hubId);
+    record.pendingCalls.delete(hubId);
     sendJson(entry.mcpSocket, {
       v: 1, type: 'tool-result', id: entry.clientId, ok: false,
       error: { code: 'NO_STUDIO', message },
@@ -169,9 +212,6 @@ function log(msg) {
   process.stderr.write(`[rhwp-agent] ${msg}\n`);
 }
 
-const downloadManager = new DownloadManager({ rootDir: ROOT });
-const browserbaseSession = new BrowserbaseSession({ log });
-
 function sendJson(sock, obj) {
   if (sock && sock.readyState === sock.OPEN) {
     try {
@@ -182,33 +222,35 @@ function sendJson(sock, obj) {
   }
 }
 
-function writingStyleCatalog() {
+function writingStyleCatalog(record) {
+  const activeSession = record.agentSession;
   return buildWritingStyleCatalog({
     health: providerHealth.cached(),
     piStatus,
-    currentSelection: session ? { agent: session.agent, model: session.model, effort: session.effort } : null,
+    currentSelection: activeSession ? { agent: activeSession.agent, model: activeSession.model, effort: activeSession.effort } : null,
   });
 }
 
-function sendStyleProgress(event) {
-  if (!styleCalibration) return;
+function sendStyleProgress(record, event) {
+  const calibration = record.styleCalibration;
+  if (!calibration) return;
   const snapshot = {
     v: 1,
     type: 'writing-style-progress',
-    requestId: styleCalibration.requestId,
-    jobId: styleCalibration.jobId,
-    startedAt: styleCalibration.startedAt,
-    agent: styleCalibration.agent,
-    model: styleCalibration.model,
+    requestId: calibration.requestId,
+    jobId: calibration.jobId,
+    startedAt: calibration.startedAt,
+    agent: calibration.agent,
+    model: calibration.model,
     ...event,
   };
-  styleCalibration.progress = snapshot;
-  sendJson(studioSocket, snapshot);
+  calibration.progress = snapshot;
+  sendJson(record.studioSocket, snapshot);
 }
 
 // 비동기 응답이 도착할 때쯤 스튜디오 탭이 교체되었을 수 있다 — 현재 소켓에만 보낸다.
-function replyToStudio(sock, obj) {
-  if (sock !== studioSocket) return;
+function replyToStudio(record, sock, obj) {
+  if (sock !== record.studioSocket) return;
   sendJson(sock, obj);
 }
 
@@ -250,10 +292,42 @@ async function usageSnapshotRefreshing(refresh = false) {
  * @param {string|null|undefined} requestedAgent
  * @param {'claude'|'codex'} cliAgent 이 작업이 원래 쓰는 CLI
  */
-function auxDeps(requestedAgent, cliAgent) {
+function spawnAuxiliaryProcess(record, command, args, options = {}) {
+  if (record.disposed) throw new Error('Hub session was disposed');
+  const child = spawn(command, args, { ...options, cwd: options.cwd ?? record.workDir });
+  record.auxiliaryProcesses.add(child);
+  const forget = () => record.auxiliaryProcesses.delete(child);
+  child.once('exit', forget);
+  child.once('close', forget);
+  return child;
+}
+
+async function stopAuxiliaryProcesses(record) {
+  const children = [...record.auxiliaryProcesses];
+  record.auxiliaryProcesses.clear();
+  await Promise.all(children.map((child) => new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
+    }
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, 3_500);
+    timer.unref?.();
+    child.once('exit', finish);
+    terminateProcessTree(child);
+  })));
+}
+
+function auxDeps(record, requestedAgent, cliAgent) {
   const agent = requestedAgent === 'pi' || requestedAgent === 'claude' || requestedAgent === 'codex'
     ? requestedAgent
-    : (session?.agent ?? null);
+    : (record.agentSession?.agent ?? null);
   const health = providerHealth.cached();
   // 프로브 전이면 CLI 가 있다고 보고 기존 경로를 먼저 태운다.
   const cliAvailable = health ? health[cliAgent]?.available !== false : true;
@@ -261,73 +335,76 @@ function auxDeps(requestedAgent, cliAgent) {
     useOpenRouter: piStatus.setupComplete && (agent === 'pi' || !cliAvailable),
     piManager,
     openRouter,
+    workDir: record.workDir,
+    cwd: record.workDir,
+    isolatedHome: record.isolatedHome,
+    sessionId: record.sessionId,
+    spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
+    terminateProcess: terminateProcessTree,
   };
 }
 
-function sessionInfo() {
-  return session
+function sessionInfo(record) {
+  const activeSession = record.agentSession;
+  return activeSession
     ? {
-      agent: session.agent,
-      model: session.model,
-      effort: session.effort,
-      permissionProfile: session.permissionProfile,
-      sessionId: session.sessionId,
-      threadId: session.threadId,
-      documentId: session.documentId,
-      documentName: session.documentName,
-      status: session.status,
-      ...session.planning.snapshot(),
+      agent: activeSession.agent,
+      model: activeSession.model,
+      effort: activeSession.effort,
+      permissionProfile: activeSession.permissionProfile,
+      sessionId: activeSession.sessionId,
+      threadId: activeSession.threadId,
+      documentId: activeSession.documentId,
+      documentName: activeSession.documentName,
+      status: activeSession.status,
+      ...activeSession.planning.snapshot(),
     }
     : null;
 }
 
-// 폐기된 백엔드가 죽는 동안 흘리는 이벤트가 새 세션 상태를 덮어쓰지 않도록
-// 세션마다 generation 을 발급해 이벤트 핸들러에 묶는다.
-let sessionGeneration = 0;
-/** 스튜디오 소켓이 끊긴 사이에 끝난 턴 — 다음 접속 때 한 번 재생한다. */
-let missedTurnEnd = null;
-
-function makeBackendEventHandler(generation) {
+function makeBackendEventHandler(record, generation) {
   return (evt) => {
-    if (!session || session.generation !== generation) return; // 폐기된 백엔드 → 폐기
-    if (evt.type === 'session-info' && evt.sessionId) session.sessionId = evt.sessionId;
+    const activeSession = record.agentSession;
+    if (!activeSession || activeSession.generation !== generation) return;
+    if (evt.type === 'session-info' && evt.sessionId) activeSession.sessionId = evt.sessionId;
     if (evt.type === 'usage') {
-      // 사용량은 원본 이벤트가 아니라 집계 리포트로만 스튜디오에 전달한다.
-      // pi 는 OpenRouter 청구액(costUsd)을 이벤트 바깥에 달고 온다.
       usageStore.record({
-        agent: session.agent, model: evt.model, costUsd: evt.costUsd, ...(evt.usage ?? {}),
+        agent: activeSession.agent, model: evt.model, costUsd: evt.costUsd, ...(evt.usage ?? {}),
       });
-      sendJson(studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
+      sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
       return;
     }
-    if (evt.type === 'turn-start') missedTurnEnd = null;
+    if (evt.type === 'turn-start') record.missedTurnEnd = null;
     if (evt.type === 'turn-end') {
-      session.status = 'idle';
-      if (!studioSocket || studioSocket.readyState !== studioSocket.OPEN) missedTurnEnd = evt;
+      activeSession.status = 'idle';
+      if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) record.missedTurnEnd = evt;
     }
-    sendJson(studioSocket, { v: 1, type: 'agent-event', event: evt });
+    sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt });
   };
 }
 
-function disposeSession() {
-  pendingReferenceMessage = null;
-  if (!session) return;
-  const wasRunning = session.status === 'running';
-  const agent = session.agent;
+function disposeSession(record) {
+  record.pendingReferenceMessage = null;
+  const activeSession = record.agentSession;
+  if (!activeSession) return Promise.resolve();
+  const wasRunning = activeSession.status === 'running';
+  const agent = activeSession.agent;
+  let backendExit = Promise.resolve();
   try {
-    session.backend.dispose();
+    backendExit = Promise.resolve(activeSession.backend.dispose());
   } catch (e) {
     log(`session dispose error: ${e?.message ?? e}`);
   }
-  session = null;
-  void browserbaseSession.cleanup('session disposed');
+  record.agentSession = null;
+  void record.browserbaseSession.cleanup('session disposed');
   if (wasRunning) {
-    // backend.dispose() 는 turnOpen 을 먼저 닫아 turn-end 를 내보내지 않는다 —
-    // 스튜디오의 turnRunning/pending change-set 이 열린 채 남지 않도록 합성해 보낸다.
     const evt = { type: 'turn-end', agent, stopReason: 'interrupted' };
-    if (!studioSocket || studioSocket.readyState !== studioSocket.OPEN) missedTurnEnd = evt;
-    sendJson(studioSocket, { v: 1, type: 'agent-event', event: evt });
+    if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) record.missedTurnEnd = evt;
+    sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt });
   }
+  return backendExit.catch((error) => {
+    log(`session process exit wait failed: ${error?.message ?? error}`);
+  });
 }
 
 function resolvePermissionProfile(value) {
@@ -338,7 +415,7 @@ function resolveWorkflow(value) {
   return value === 'plan' ? 'plan' : 'direct';
 }
 
-function referenceScopes(activeSession = session) {
+function referenceScopes(activeSession) {
   return referenceScopesForSession(activeSession);
 }
 
@@ -355,14 +432,14 @@ function addReferenceContext(activeSession, query, prompt, messageAttachments = 
   }
 }
 
-function dispatchUserMessage(sock, msg, activeSession, messageAttachments = []) {
+function dispatchUserMessage(record, sock, msg, activeSession, messageAttachments = []) {
   if (activeSession.planning.phase === 'awaiting-approval') {
     const planId = activeSession.planning.latestPlan?.planId;
     if (!planId) {
       sendJson(sock, { v: 1, type: 'chat-error', code: 'PLAN_NOT_FOUND', message: 'The latest plan is unavailable; return to planning and present it again.' });
       return;
     }
-    void requestImplementationPlanChanges(sock, { planId, feedback: msg.text })
+    void requestImplementationPlanChanges(record, sock, { planId, feedback: msg.text })
       .catch((error) => sendChatError(sock, error));
     return;
   }
@@ -375,22 +452,22 @@ function dispatchUserMessage(sock, msg, activeSession, messageAttachments = []) 
     phase: activeSession.planning.snapshot().phase,
   })
     .then((prompt) => {
-      if (session !== activeSession) throw new Error('Agent session changed before the message was dispatched');
+      if (record.agentSession !== activeSession) throw new Error('Agent session changed before the message was dispatched');
       activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.text, prompt, messageAttachments));
     })
     .catch((e) => {
-      if (session === activeSession) activeSession.status = 'idle';
+      if (record.agentSession === activeSession) activeSession.status = 'idle';
       sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
     });
 }
 
-async function dispatchStagedUserMessage(sock, msg, activeSession) {
+async function dispatchStagedUserMessage(record, sock, msg, activeSession) {
   const rawIds = Array.isArray(msg.stagedReferenceIds) ? msg.stagedReferenceIds : [];
   const stageIds = [...new Set(rawIds.filter((id) => typeof id === 'string' && id))];
   if (stageIds.length === 0 || stageIds.length !== rawIds.length || stageIds.length > 10) {
     throw Object.assign(new Error('Message attachments require 1-10 unique staged reference ids'), { code: 'INVALID_REFERENCE_MESSAGE' });
   }
-  pendingReferenceMessage = { messageId: msg.messageId, message: msg, owner: activeSession };
+  record.pendingReferenceMessage = { messageId: msg.messageId, message: msg, owner: activeSession };
   sendJson(sock, {
     v: 1,
     type: 'chat-reference-status',
@@ -408,17 +485,19 @@ async function dispatchStagedUserMessage(sock, msg, activeSession) {
       error: String(entry.reason?.message ?? entry.reason ?? 'Attachment processing failed'),
     });
   sendJson(sock, { v: 1, type: 'chat-reference-status', messageId: msg.messageId, attachments });
-  if (pendingReferenceMessage?.messageId === msg.messageId) pendingReferenceMessage = null;
+  if (record.pendingReferenceMessage?.messageId === msg.messageId) record.pendingReferenceMessage = null;
   const readyFiles = settled.flatMap((entry) => entry.status === 'fulfilled' ? [entry.value.file] : []);
-  if (session === activeSession) dispatchUserMessage(sock, msg, activeSession, readyFiles);
+  if (record.agentSession === activeSession) dispatchUserMessage(record, sock, msg, activeSession, readyFiles);
 }
 
-function emitWorkflowState(extra = {}) {
-  if (!session) return;
-  sendJson(studioSocket, { v: 1, type: 'workflow-changed', ...session.planning.snapshot(), ...extra });
+function emitWorkflowState(record, extra = {}) {
+  const activeSession = record.agentSession;
+  if (!activeSession) return;
+  sendJson(record.studioSocket, { v: 1, type: 'workflow-changed', ...activeSession.planning.snapshot(), ...extra });
 }
 
-function startSession(
+async function startSession(
+  record,
   agent,
   requestedModel,
   requestedEffort,
@@ -437,44 +516,45 @@ function startSession(
     threadId: requestedThreadId,
     documentId: requestedDocumentId,
     documentName: requestedDocumentName,
-    existing: session,
+    existing: record.agentSession,
     force,
   });
+  const currentSession = record.agentSession;
   if (
     !force
-    && session
-    && session.agent === agent
-    && session.model === model
-    && session.effort === effort
-    && session.permissionProfile === permissionProfile
-    && session.planning.workflow === workflow
-    && session.threadId === threadId
-    && session.documentId === documentId
+    && currentSession
+    && currentSession.agent === agent
+    && currentSession.model === model
+    && currentSession.effort === effort
+    && currentSession.permissionProfile === permissionProfile
+    && currentSession.planning.workflow === workflow
+    && currentSession.threadId === threadId
+    && currentSession.documentId === documentId
   ) {
-    session.documentName = documentName;
-    return session;
+    currentSession.documentName = documentName;
+    return currentSession;
   }
-  disposeSession();
+  await disposeSession(record);
   const planning = new PlanningState({
     workflow,
-    initialCapabilityEpoch: nextCapabilityEpoch++,
-    allocateEpoch: () => nextCapabilityEpoch++,
+    initialCapabilityEpoch: record.nextCapabilityEpoch++,
+    allocateEpoch: () => record.nextCapabilityEpoch++,
   });
-  // onEvent 는 createXSession 이 반환하기 전에 필요하므로 backend 비교 대신
-  // generation 을 먼저 발급해 핸들러에 캡처시킨다.
-  const generation = ++sessionGeneration;
+  const generation = ++record.sessionGeneration;
   const opts = {
-    rootDir: ROOT,
+    rootDir: record.workDir,
+    workDir: record.workDir,
     mcpScriptPath: MCP_SCRIPT,
-    hubPort: PORT,
-    token: TOKEN,
+    hubPort,
+    token: issueScopedHubToken(TOKEN, record.sessionId),
+    sessionId: record.sessionId,
     model,
     effort,
     permissionProfile,
-    isolatedHome: ISOLATED_HOME,
-    codexHome: ISOLATED_CODEX_HOME,
+    isolatedHome: record.isolatedHome,
+    codexHome: record.codexHome,
     codexAuthPath: sourceCodexAuthPath,
-    onEvent: makeBackendEventHandler(generation),
+    onEvent: makeBackendEventHandler(record, generation),
     workflow,
     phase: workflow === 'direct' ? 'implementing' : planning.phase,
     capabilityEpoch: planning.capabilityEpoch,
@@ -488,7 +568,7 @@ function startSession(
   const backend = agent === 'claude'
     ? createClaudeSession(opts)
     : (agent === 'pi' ? createPiSession(opts) : createCodexSession(opts));
-  session = {
+  record.agentSession = {
     agent,
     model,
     effort,
@@ -506,7 +586,7 @@ function startSession(
     planning,
     workflowTransition: Promise.resolve(),
   };
-  return session;
+  return record.agentSession;
 }
 
 function sendChatError(sock, error, fallbackCode = 'WORKFLOW_ERROR') {
@@ -519,8 +599,8 @@ function sendChatError(sock, error, fallbackCode = 'WORKFLOW_ERROR') {
 }
 
 /** pi 요청 실패는 채팅 오류가 아니라 설정 카드에 붙는다. 키는 절대 되돌려 보내지 않는다. */
-function sendPiError(sock, requestId, error, fallbackCode) {
-  replyToStudio(sock, {
+function sendPiError(record, sock, requestId, error, fallbackCode) {
+  replyToStudio(record, sock, {
     v: 1,
     type: 'pi-error',
     requestId,
@@ -546,8 +626,8 @@ function requireWorkflowSwitchBackend(activeSession) {
   }
 }
 
-async function approveImplementationPlan(sock, msg) {
-  const activeSession = session;
+async function approveImplementationPlan(record, sock, msg) {
+  const activeSession = record.agentSession;
   if (!activeSession) throw workflowError('AGENT_NOT_STARTED', 'Start a chat before approving a plan');
   requireWorkflowSwitchBackend(activeSession);
   const transition = activeSession.planning.beginApproval({
@@ -557,7 +637,7 @@ async function approveImplementationPlan(sock, msg) {
   sendJson(sock, { v: 1, type: 'plan-approved', ...activeSession.planning.snapshot() });
   try {
     await activeSession.backend.setExecutionMode(providerModeRequest(activeSession, 'implementing'));
-    if (session !== activeSession || activeSession.planning.phase !== 'switching') return;
+    if (record.agentSession !== activeSession || activeSession.planning.phase !== 'switching') return;
     activeSession.planning.completeSwitch(transition.approvedPlan.planId);
     sendJson(sock, {
       v: 1,
@@ -573,17 +653,17 @@ async function approveImplementationPlan(sock, msg) {
       approvedPrompt,
     ));
   } catch (error) {
-    if (session === activeSession && activeSession.planning.phase === 'switching') {
+    if (record.agentSession === activeSession && activeSession.planning.phase === 'switching') {
       activeSession.planning.failSwitch(transition.approvedPlan.planId);
       activeSession.status = 'idle';
-      emitWorkflowState({ reason: 'provider-switch-failed' });
+      emitWorkflowState(record, { reason: 'provider-switch-failed' });
     }
     sendChatError(sock, error, 'BACKEND_SWITCH_FAILED');
   }
 }
 
-async function requestImplementationPlanChanges(sock, msg) {
-  const activeSession = session;
+async function requestImplementationPlanChanges(record, sock, msg) {
+  const activeSession = record.agentSession;
   if (!activeSession) throw workflowError('AGENT_NOT_STARTED', 'Start a chat before requesting plan changes');
   requireWorkflowSwitchBackend(activeSession);
   activeSession.planning.requestChanges({
@@ -600,7 +680,7 @@ async function requestImplementationPlanChanges(sock, msg) {
   });
   try {
     await activeSession.backend.setExecutionMode(providerModeRequest(activeSession, 'planning'));
-    if (session !== activeSession) return;
+    if (record.agentSession !== activeSession) return;
     if (typeof msg.feedback === 'string' && msg.feedback.trim()) {
       activeSession.status = 'running';
       const revisionPrompt = [
@@ -611,16 +691,16 @@ async function requestImplementationPlanChanges(sock, msg) {
       activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.feedback, revisionPrompt));
     }
   } catch (error) {
-    if (session === activeSession) activeSession.status = 'idle';
+    if (record.agentSession === activeSession) activeSession.status = 'idle';
     sendChatError(sock, error, 'BACKEND_SWITCH_FAILED');
   }
 }
 
-async function setChatWorkflow(sock, msg) {
+async function setChatWorkflow(record, sock, msg) {
   if (msg.workflow !== 'direct' && msg.workflow !== 'plan') {
     throw workflowError('INVALID_WORKFLOW', `Unknown workflow: ${String(msg.workflow)}`);
   }
-  const activeSession = session;
+  const activeSession = record.agentSession;
   if (!activeSession) {
     sendJson(sock, {
       v: 1,
@@ -634,15 +714,15 @@ async function setChatWorkflow(sock, msg) {
   }
   if (activeSession.status !== 'idle') throw workflowError('AGENT_BUSY', 'Workflow can only change while the agent is idle');
   if (activeSession.planning.workflow === msg.workflow) {
-    emitWorkflowState();
+    emitWorkflowState(record);
     return;
   }
   requireWorkflowSwitchBackend(activeSession);
   const previousPlanId = activeSession.planning.latestPlan?.planId ?? null;
   const nextPlanning = new PlanningState({
     workflow: msg.workflow,
-    initialCapabilityEpoch: nextCapabilityEpoch++,
-    allocateEpoch: () => nextCapabilityEpoch++,
+    initialCapabilityEpoch: record.nextCapabilityEpoch++,
+    allocateEpoch: () => record.nextCapabilityEpoch++,
   });
   const phase = msg.workflow === 'plan' ? 'planning' : 'implementing';
   await activeSession.backend.setExecutionMode({
@@ -650,9 +730,9 @@ async function setChatWorkflow(sock, msg) {
     phase,
     capabilityEpoch: nextPlanning.capabilityEpoch,
   });
-  if (session !== activeSession) return;
+  if (record.agentSession !== activeSession) return;
   activeSession.planning = nextPlanning;
-  if (msg.workflow === 'direct') void browserbaseSession.cleanup('workflow changed to direct');
+  if (msg.workflow === 'direct') void record.browserbaseSession.cleanup('workflow changed to direct');
   if (previousPlanId) {
     sendJson(sock, {
       v: 1,
@@ -662,10 +742,10 @@ async function setChatWorkflow(sock, msg) {
       ...nextPlanning.snapshot(),
     });
   }
-  emitWorkflowState();
+  emitWorkflowState(record);
 }
 
-function handleStudioMessage(sock, msg) {
+async function handleStudioMessage(record, sock, msg) {
   switch (msg.type) {
     case 'chat-start': {
       const agent = msg.agent;
@@ -682,7 +762,8 @@ function handleStudioMessage(sock, msg) {
         return;
       }
       try {
-        const s = startSession(
+        const s = await startSession(
+          record,
           agent,
           msg.model,
           msg.effort,
@@ -707,7 +788,7 @@ function handleStudioMessage(sock, msg) {
           ...s.planning.snapshot(),
         });
       } catch (e) {
-        disposeSession();
+        await disposeSession(record);
         sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
       }
       return;
@@ -723,7 +804,7 @@ function handleStudioMessage(sock, msg) {
         return;
       }
       const preview = typeof msg.preview === 'string' ? msg.preview : '';
-      generateChatTitle(preview, auxDeps(msg.agent, 'codex'))
+      generateChatTitle(preview, auxDeps(record, msg.agent, 'codex'))
         .then((title) => {
           sendJson(sock, {
             v: 1,
@@ -746,17 +827,17 @@ function handleStudioMessage(sock, msg) {
       return;
     }
     case 'chat-user-message': {
-      if (!session) {
+      if (!record.agentSession) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_NOT_STARTED', message: 'No agent session; send chat-start first.' });
         return;
       }
       try {
-        assertMessageScope(session, msg);
+        assertMessageScope(record.agentSession, msg);
       } catch (error) {
         sendChatError(sock, error, 'INVALID_REQUEST');
         return;
       }
-      if (session.status === 'running' || pendingReferenceMessage) {
+      if (record.agentSession.status === 'running' || record.pendingReferenceMessage) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_BUSY', message: 'A turn is already in progress.' });
         return;
       }
@@ -769,9 +850,9 @@ function handleStudioMessage(sock, msg) {
           sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REFERENCE_MESSAGE', message: 'Attachment messages require messageId' });
           return;
         }
-        void dispatchStagedUserMessage(sock, msg, session)
+        void dispatchStagedUserMessage(record, sock, msg, record.agentSession)
           .catch((error) => {
-            if (pendingReferenceMessage?.messageId === msg.messageId) pendingReferenceMessage = null;
+            if (record.pendingReferenceMessage?.messageId === msg.messageId) record.pendingReferenceMessage = null;
             sendChatError(sock, error, 'REFERENCE_COMMIT_FAILED');
           });
         return;
@@ -781,35 +862,35 @@ function handleStudioMessage(sock, msg) {
           sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'Reference-bearing messages require messageId' });
           return;
         }
-        pendingReferenceMessage = { messageId: msg.messageId, message: msg, owner: session };
+        record.pendingReferenceMessage = { messageId: msg.messageId, message: msg, owner: record.agentSession };
         return;
       }
-      dispatchUserMessage(sock, msg, session);
+      dispatchUserMessage(record, sock, msg, record.agentSession);
       return;
     }
     case 'chat-reference-uploads-complete': {
-      const pending = pendingReferenceMessage;
-      if (!pending || pending.owner !== session || msg.messageId !== pending.messageId) {
+      const pending = record.pendingReferenceMessage;
+      if (!pending || pending.owner !== record.agentSession || msg.messageId !== pending.messageId) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REFERENCE_MESSAGE', message: 'No matching message is waiting for reference uploads.' });
         return;
       }
-      pendingReferenceMessage = null;
-      dispatchUserMessage(sock, pending.message, pending.owner);
+      record.pendingReferenceMessage = null;
+      dispatchUserMessage(record, sock, pending.message, pending.owner);
       return;
     }
     case 'chat-permission-set': {
-      if (!session) {
+      if (!record.agentSession) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_NOT_STARTED', message: 'Start a chat before changing permissions.' });
         return;
       }
-      if (session.status === 'running') {
+      if (record.agentSession.status === 'running') {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_BUSY', message: 'Permissions can only change between turns.' });
         return;
       }
       const profile = resolvePermissionProfile(msg.permissionProfile);
       try {
-        session.backend.setPermissionProfile(profile);
-        session.permissionProfile = profile;
+        record.agentSession.backend.setPermissionProfile(profile);
+        record.agentSession.permissionProfile = profile;
         sendJson(sock, { v: 1, type: 'chat-permission-changed', permissionProfile: profile });
       } catch (e) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'PERMISSION_CHANGE_FAILED', message: String(e?.message ?? e) });
@@ -817,14 +898,14 @@ function handleStudioMessage(sock, msg) {
       return;
     }
     case 'chat-workflow-set': {
-      const transitionOwner = session;
+      const transitionOwner = record.agentSession;
       if (!transitionOwner) {
-        void setChatWorkflow(sock, msg).catch((error) => sendChatError(sock, error));
+        void setChatWorkflow(record, sock, msg).catch((error) => sendChatError(sock, error));
         return;
       }
       const transition = transitionOwner.workflowTransition.then(() => {
-        if (session !== transitionOwner) return undefined;
-        return setChatWorkflow(sock, msg);
+        if (record.agentSession !== transitionOwner) return undefined;
+        return setChatWorkflow(record, sock, msg);
       });
       transitionOwner.workflowTransition = transition.catch(() => undefined);
       void transition.catch((error) => sendChatError(sock, error));
@@ -833,13 +914,13 @@ function handleStudioMessage(sock, msg) {
     case 'chat-plan-approve':
     case 'implementation-plan-approve':
     case 'plan-approve': {
-      void approveImplementationPlan(sock, msg).catch((error) => sendChatError(sock, error));
+      void approveImplementationPlan(record, sock, msg).catch((error) => sendChatError(sock, error));
       return;
     }
     case 'chat-plan-request-changes':
     case 'implementation-plan-request-changes':
     case 'plan-request-changes': {
-      void requestImplementationPlanChanges(sock, msg).catch((error) => sendChatError(sock, error));
+      void requestImplementationPlanChanges(record, sock, msg).catch((error) => sendChatError(sock, error));
       return;
     }
     case 'skills-list': {
@@ -894,7 +975,7 @@ function handleStudioMessage(sock, msg) {
       sendJson(sock, { v: 1, type: 'skill-draft-progress', requestId: msg.requestId ?? null, state: 'generating' });
       void generateSkillDraft(
         { agent, model, goal: String(msg.goal ?? ''), triggerExamples: String(msg.triggerExamples ?? ''), nonTriggerExamples: String(msg.nonTriggerExamples ?? ''), resourceNotes: String(msg.resourceNotes ?? ''), existingSkill: typeof msg.existingSkill === 'string' ? msg.existingSkill : undefined },
-        auxDeps(agent, agent === 'claude' ? 'claude' : 'codex'),
+        auxDeps(record, agent, agent === 'claude' ? 'claude' : 'codex'),
       )
         .then((draft) => sendJson(sock, { v: 1, type: 'skill-draft-result', requestId: msg.requestId ?? null, draft }))
         .catch((e) => sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'SKILL_GENERATION_FAILED', message: String(e?.message ?? e) }));
@@ -903,8 +984,8 @@ function handleStudioMessage(sock, msg) {
     case 'provider-status-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void providerHealth.check(msg.refresh === true)
-        .then((providers) => replyToStudio(sock, { v: 1, type: 'provider-status', requestId, providers }))
-        .catch((e) => replyToStudio(sock, {
+        .then((providers) => replyToStudio(record, sock, { v: 1, type: 'provider-status', requestId, providers }))
+        .catch((e) => replyToStudio(record, sock, {
           v: 1, type: 'provider-error', requestId,
           code: 'PROVIDER_PROBE_FAILED', message: String(e?.message ?? e),
         }));
@@ -913,8 +994,8 @@ function handleStudioMessage(sock, msg) {
     case 'usage-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void usageSnapshotRefreshing(msg.refresh === true)
-        .then((usage) => replyToStudio(sock, { v: 1, type: 'usage-report', requestId, usage }))
-        .catch((e) => replyToStudio(sock, {
+        .then((usage) => replyToStudio(record, sock, { v: 1, type: 'usage-report', requestId, usage }))
+        .catch((e) => replyToStudio(record, sock, {
           v: 1, type: 'usage-error', requestId,
           code: e?.code ?? 'CLIPROXY_FAILED', message: String(e?.message ?? e),
         }));
@@ -925,8 +1006,8 @@ function handleStudioMessage(sock, msg) {
       void Promise.resolve()
         .then(() => usageStore.setPlan(msg.agent, msg.plan))
         .then(() => usageSnapshotRefreshing(false))
-        .then((usage) => replyToStudio(sock, { v: 1, type: 'usage-report', requestId, usage }))
-        .catch((e) => replyToStudio(sock, {
+        .then((usage) => replyToStudio(record, sock, { v: 1, type: 'usage-report', requestId, usage }))
+        .catch((e) => replyToStudio(record, sock, {
           v: 1, type: 'usage-error', requestId,
           code: e?.code ?? 'INVALID_PLAN', message: String(e?.message ?? e),
         }));
@@ -935,13 +1016,13 @@ function handleStudioMessage(sock, msg) {
     case 'pi-status-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void refreshPiStatus()
-        .then((status) => replyToStudio(sock, { v: 1, type: 'pi-status', requestId, status }))
-        .catch((e) => sendPiError(sock, requestId, e, 'PI_STATUS_FAILED'));
+        .then((status) => replyToStudio(record, sock, { v: 1, type: 'pi-status', requestId, status }))
+        .catch((e) => sendPiError(record, sock, requestId, e, 'PI_STATUS_FAILED'));
       return;
     }
     case 'pi-install': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      void piManager.install((progress) => replyToStudio(sock, {
+      void piManager.install((progress) => replyToStudio(record, sock, {
         v: 1,
         type: 'pi-setup-progress',
         requestId,
@@ -953,13 +1034,13 @@ function handleStudioMessage(sock, msg) {
       }))
         .then((status) => {
           piStatus = status;
-          replyToStudio(sock, { v: 1, type: 'pi-status', requestId, status });
+          replyToStudio(record, sock, { v: 1, type: 'pi-status', requestId, status });
           // 설치 직후 프로바이더 목록에 pi 가 나타나야 한다.
           void providerHealth.check(true)
-            .then((providers) => replyToStudio(sock, { v: 1, type: 'provider-status', providers }))
+            .then((providers) => replyToStudio(record, sock, { v: 1, type: 'provider-status', providers }))
             .catch(() => {});
         })
-        .catch((e) => sendPiError(sock, requestId, e, 'PI_INSTALL_FAILED'));
+        .catch((e) => sendPiError(record, sock, requestId, e, 'PI_INSTALL_FAILED'));
       return;
     }
     case 'pi-set-key': {
@@ -967,18 +1048,18 @@ function handleStudioMessage(sock, msg) {
       void piManager.setApiKey(String(msg.key ?? ''))
         .then(async (status) => {
           piStatus = status;
-          replyToStudio(sock, { v: 1, type: 'pi-status', requestId, status });
+          replyToStudio(record, sock, { v: 1, type: 'pi-status', requestId, status });
           await refreshOpenRouterCredits(true);
-          replyToStudio(sock, { v: 1, type: 'usage-report', usage: usageSnapshot() });
+          replyToStudio(record, sock, { v: 1, type: 'usage-report', usage: usageSnapshot() });
         })
-        .catch((e) => sendPiError(sock, requestId, e, 'OPENROUTER_KEY_INVALID'));
+        .catch((e) => sendPiError(record, sock, requestId, e, 'OPENROUTER_KEY_INVALID'));
       return;
     }
     case 'pi-catalog-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void piManager.catalog(msg.refresh === true)
-        .then((models) => replyToStudio(sock, { v: 1, type: 'pi-catalog', requestId, models }))
-        .catch((e) => sendPiError(sock, requestId, e, 'OPENROUTER_UNREACHABLE'));
+        .then((models) => replyToStudio(record, sock, { v: 1, type: 'pi-catalog', requestId, models }))
+        .catch((e) => sendPiError(record, sock, requestId, e, 'OPENROUTER_UNREACHABLE'));
       return;
     }
     case 'pi-set-models': {
@@ -986,15 +1067,15 @@ function handleStudioMessage(sock, msg) {
       void piManager.setModels(Array.isArray(msg.models) ? msg.models : [])
         .then((status) => {
           piStatus = status;
-          replyToStudio(sock, { v: 1, type: 'pi-status', requestId, status });
+          replyToStudio(record, sock, { v: 1, type: 'pi-status', requestId, status });
         })
-        .catch((e) => sendPiError(sock, requestId, e, 'PI_MODELS_INVALID'));
+        .catch((e) => sendPiError(record, sock, requestId, e, 'PI_MODELS_INVALID'));
       return;
     }
     case 'cliproxy-connect': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void cliproxy.connect({ url: msg.url, key: msg.key })
-        .then((status) => replyToStudio(sock, {
+        .then((status) => replyToStudio(record, sock, {
           v: 1, type: 'usage-report', requestId, usage: cliproxy.applyToSummary(usageStore.summary()),
         }))
         .catch((e) => {
@@ -1005,15 +1086,15 @@ function handleStudioMessage(sock, msg) {
             connected: false,
             error: String(e?.message ?? e),
           };
-          replyToStudio(sock, { v: 1, type: 'usage-report', requestId, usage });
+          replyToStudio(record, sock, { v: 1, type: 'usage-report', requestId, usage });
         });
       return;
     }
     case 'cliproxy-disconnect': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void cliproxy.disconnect()
-        .then(() => replyToStudio(sock, { v: 1, type: 'usage-report', requestId, usage: usageSnapshot() }))
-        .catch((e) => replyToStudio(sock, {
+        .then(() => replyToStudio(record, sock, { v: 1, type: 'usage-report', requestId, usage: usageSnapshot() }))
+        .catch((e) => replyToStudio(record, sock, {
           v: 1, type: 'usage-error', requestId,
           code: e?.code ?? 'CLIPROXY_DISCONNECT_FAILED', message: String(e?.message ?? e),
         }));
@@ -1033,7 +1114,7 @@ function handleStudioMessage(sock, msg) {
         refresh ? refreshPiStatus() : Promise.resolve(piStatus),
       ])
         .then(() => sendJson(sock, {
-          v: 1, type: 'writing-style-catalog', requestId, ...writingStyleCatalog(),
+          v: 1, type: 'writing-style-catalog', requestId, ...writingStyleCatalog(record),
         }))
         .catch((e) => sendJson(sock, {
           v: 1, type: 'writing-style-error', requestId,
@@ -1043,7 +1124,7 @@ function handleStudioMessage(sock, msg) {
     }
     case 'writing-style-calibrate': {
       const requestId = msg.requestId ?? null;
-      if (styleCalibration) {
+      if (record.styleCalibration || writingStyleCalibrationOwner !== null) {
         sendJson(sock, { v: 1, type: 'writing-style-error', requestId, code: 'CALIBRATION_BUSY', message: 'A writing-style calibration is already running.' });
         return;
       }
@@ -1054,7 +1135,7 @@ function handleStudioMessage(sock, msg) {
           {
             health: providerHealth.cached(),
             piStatus,
-            currentSelection: session ? { agent: session.agent, model: session.model, effort: session.effort } : null,
+            currentSelection: record.agentSession ? { agent: record.agentSession.agent, model: record.agentSession.model, effort: record.agentSession.effort } : null,
           },
         );
       } catch (e) {
@@ -1065,11 +1146,12 @@ function handleStudioMessage(sock, msg) {
         return;
       }
       const jobId = crypto.randomUUID();
-      styleCalibration = {
+      writingStyleCalibrationOwner = record;
+      record.styleCalibration = {
         requestId, jobId, startedAt: new Date().toISOString(),
         agent: selection.agent, model: selection.model, progress: null,
       };
-      sendStyleProgress({
+      sendStyleProgress(record, {
         state: 'preparing', phase: 'preparing', activity: 'collecting-samples',
         detail: msg.append === true ? 'Combining saved and new writing samples' : 'Preparing writing samples',
         completed: 0, total: 1,
@@ -1098,26 +1180,31 @@ function handleStudioMessage(sock, msg) {
               piManager,
               openRouter,
               projectRoot: ROOT,
+              workDir: record.workDir,
+              isolatedHome: record.isolatedHome,
+              sessionId: record.sessionId,
+              spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
+              terminateProcess: terminateProcessTree,
               onProgress: (event) => {
-                if (styleCalibration?.jobId === jobId) sendStyleProgress(event);
+                if (record.styleCalibration?.jobId === jobId) sendStyleProgress(record, event);
               },
             },
           );
         })
         .then(async (profile) => {
-          if (styleCalibration?.jobId === jobId) sendStyleProgress({
+          if (record.styleCalibration?.jobId === jobId) sendStyleProgress(record, {
             state: 'saving', phase: 'saving', activity: 'saving-profile',
             detail: 'Saving the profile and its source samples', completed: 0, total: 1,
           });
           const status = await writingStyleStore.save(profile, { sources: calibrationSources });
-          if (styleCalibration?.jobId === jobId) sendStyleProgress({
+          if (record.styleCalibration?.jobId === jobId) sendStyleProgress(record, {
             state: 'saving', phase: 'saving', activity: 'saving-profile',
             detail: 'Saved the calibrated writing profile', completed: 1, total: 1,
           });
-          sendJson(studioSocket, { v: 1, type: 'writing-style-result', requestId, jobId, status });
-          sendJson(studioSocket, { v: 1, type: 'writing-style-status', requestId, status });
+          sendJson(record.studioSocket, { v: 1, type: 'writing-style-result', requestId, jobId, status });
+          sendJson(record.studioSocket, { v: 1, type: 'writing-style-status', requestId, status });
         })
-        .catch((e) => sendJson(studioSocket, {
+        .catch((e) => sendJson(record.studioSocket, {
           v: 1,
           type: 'writing-style-error',
           requestId,
@@ -1126,17 +1213,18 @@ function handleStudioMessage(sock, msg) {
           message: String(e?.message ?? e),
         }))
         .finally(() => {
-          if (styleCalibration?.jobId === jobId) styleCalibration = null;
+          if (record.styleCalibration?.jobId === jobId) record.styleCalibration = null;
+          if (writingStyleCalibrationOwner === record) writingStyleCalibrationOwner = null;
         });
       return;
     }
     case 'writing-style-instruction-set': {
       const requestId = msg.requestId ?? null;
       void writingStyleStore.setAdditionalInstruction(msg.instruction)
-        .then((status) => sendJson(studioSocket, {
+        .then((status) => sendJson(record.studioSocket, {
           v: 1, type: 'writing-style-status', requestId, status,
         }))
-        .catch((e) => sendJson(studioSocket, {
+        .catch((e) => sendJson(record.studioSocket, {
           v: 1,
           type: 'writing-style-error',
           requestId,
@@ -1146,27 +1234,27 @@ function handleStudioMessage(sock, msg) {
       return;
     }
     case 'chat-interrupt': {
-      if (session) {
+      if (record.agentSession) {
         try {
-          session.backend.interrupt();
+          record.agentSession.backend.interrupt();
         } catch (e) {
           log(`interrupt error: ${e?.message ?? e}`);
         }
-        session.status = 'idle';
+        record.agentSession.status = 'idle';
       }
       return;
     }
     case 'chat-stop': {
-      disposeSession();
+      await disposeSession(record);
       return;
     }
     case 'tool-response': {
-      const entry = pendingCalls.get(msg.id);
+      const entry = record.pendingCalls.get(msg.id);
       if (!entry) {
         log(`tool-response for unknown id ${msg.id}`);
         return;
       }
-      pendingCalls.delete(msg.id);
+      record.pendingCalls.delete(msg.id);
       clearTimeout(entry.timer);
       if (entry.mcpSocket.readyState !== entry.mcpSocket.OPEN) return;
       if (msg.ok) {
@@ -1184,7 +1272,7 @@ function handleStudioMessage(sock, msg) {
   }
 }
 
-function handleMcpMessage(sock, msg) {
+function handleMcpMessage(record, sock, msg) {
   switch (msg.type) {
     case 'tool-call': {
       const clientId = msg.id;
@@ -1207,19 +1295,19 @@ function handleMcpMessage(sock, msg) {
         const schema = z.object(definition.shape);
         args = (tool === 'insert_image' ? schema.passthrough() : schema.strict()).parse(msg.args ?? {});
         definition.validate?.(args);
-        if (!session && tool !== 'read_product_skill') {
+        if (!record.agentSession && tool !== 'read_product_skill') {
           throw workflowError('AGENT_NOT_STARTED', 'No active chat session');
         }
-        if (session) {
-          if (msg.workflow && msg.workflow !== session.planning.workflow) {
-            throw workflowError('WORKFLOW_MISMATCH', `MCP call declared ${msg.workflow} but the active workflow is ${session.planning.workflow}`);
+        if (record.agentSession) {
+          if (msg.workflow && msg.workflow !== record.agentSession.planning.workflow) {
+            throw workflowError('WORKFLOW_MISMATCH', `MCP call declared ${msg.workflow} but the active workflow is ${record.agentSession.planning.workflow}`);
           }
           authorizeToolCall({
             category: definition.category,
             tool,
-            workflow: session.planning.workflow,
-            phase: session.planning.phase,
-            expectedEpoch: session.planning.capabilityEpoch,
+            workflow: record.agentSession.planning.workflow,
+            phase: record.agentSession.planning.phase,
+            expectedEpoch: record.agentSession.planning.capabilityEpoch,
             receivedEpoch: msg.capabilityEpoch,
           });
         }
@@ -1235,7 +1323,7 @@ function handleMcpMessage(sock, msg) {
         return;
       }
       if (definition.category === 'reference-read') {
-        void executeReferenceTool({ tool, args, store: referenceStore, session })
+        void executeReferenceTool({ tool, args, store: referenceStore, session: record.agentSession })
           .then(({ handled, result }) => {
             if (!handled) throw workflowError('UNKNOWN_TOOL', `Unknown reference tool: ${tool}`);
             sendResult(result);
@@ -1244,62 +1332,62 @@ function handleMcpMessage(sock, msg) {
         return;
       }
       if (tool === 'present_implementation_plan') {
-        if (!studioSocket || studioSocket.readyState !== studioSocket.OPEN) {
+        if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) {
           sendError(workflowError('NO_STUDIO', 'Studio must be connected to review an implementation plan'));
           return;
         }
         try {
-          const record = session.planning.present(args);
-          sendJson(studioSocket, {
+          const planRecord = record.agentSession.planning.present(args);
+          sendJson(record.studioSocket, {
             v: 1,
             type: 'plan-ready',
-            planId: record.planId,
-            plan: record.plan,
-            ...session.planning.snapshot(),
+            planId: planRecord.planId,
+            plan: planRecord.plan,
+            ...record.agentSession.planning.snapshot(),
           });
-          emitWorkflowState({ reason: 'plan-presented' });
-          const { workflow, phase, capabilityEpoch } = session.planning.snapshot();
-          sendResult({ planId: record.planId, workflow, phase, capabilityEpoch });
+          emitWorkflowState(record, { reason: 'plan-presented' });
+          const { workflow, phase, capabilityEpoch } = record.agentSession.planning.snapshot();
+          sendResult({ planId: planRecord.planId, workflow, phase, capabilityEpoch });
         } catch (error) {
           sendError(error);
         }
         return;
       }
       if (tool === 'download_file') {
-        void downloadManager.download({ sessionId: session.chatId, ...args })
+        void record.downloadManager.download({ sessionId: record.agentSession.chatId, ...args })
           .then(sendResult)
           .catch((error) => sendError(error, 'DOWNLOAD_FAILED'));
         return;
       }
       if (definition.category === 'browser') {
         const sidecarTool = tool.replace(/^browserbase_/, '');
-        void browserbaseSession.call(session.chatId, sidecarTool, args)
+        void record.browserbaseSession.call(record.agentSession.chatId, sidecarTool, args)
           .then(sendResult)
           .catch((error) => sendError(error, 'BROWSERBASE_TOOL_FAILED'));
         return;
       }
-      if (!studioSocket || studioSocket.readyState !== studioSocket.OPEN) {
+      if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) {
         sendError(workflowError('NO_STUDIO', 'Studio is not connected; open rhwp-studio in a browser'));
         return;
       }
-      const hubId = nextHubId++;
+      const hubId = record.nextHubId++;
       const timer = setTimeout(() => {
-        pendingCalls.delete(hubId);
+        record.pendingCalls.delete(hubId);
         sendJson(sock, {
           v: 1, type: 'tool-result', id: clientId, ok: false,
           error: { code: 'STUDIO_TIMEOUT', message: `Studio did not answer within ${STUDIO_TOOL_TIMEOUT_MS / 1000}s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates` },
         });
       }, STUDIO_TOOL_TIMEOUT_MS);
-      pendingCalls.set(hubId, { mcpSocket: sock, clientId, timer });
-      sendJson(studioSocket, {
+      record.pendingCalls.set(hubId, { mcpSocket: sock, clientId, timer });
+      sendJson(record.studioSocket, {
         v: 1, type: 'tool-request', id: hubId,
         // 호출을 보낸 MCP 소켓의 에이전트 라벨을 단다 — 현재 세션 기준으로 찍으면
         // 세션 교체 직후 남은 호출이 엉뚱한 에이전트로 기록될 수 있다.
-        agent: sock.agentLabel ?? session?.agent ?? 'claude',
+        agent: sock.agentLabel ?? record.agentSession?.agent ?? 'claude',
         tool,
         args,
-        phase: session?.planning.snapshot().phase,
-        capabilityEpoch: session?.planning.capabilityEpoch,
+        phase: record.agentSession?.planning.snapshot().phase,
+        capabilityEpoch: record.agentSession?.planning.capabilityEpoch,
       });
       return;
     }
@@ -1308,8 +1396,12 @@ function handleMcpMessage(sock, msg) {
   }
 }
 
-function attachSocket(sock, role) {
-  sock.on('message', (data, isBinary) => {
+function attachSocket(record, sock, role) {
+  sock.on('message', async (data, isBinary) => {
+    if (record.disposed) {
+      try { sock.close(1001, 'hub session closed'); } catch {}
+      return;
+    }
     if (isBinary) {
       sock.close(4400, 'binary frames not supported');
       return;
@@ -1330,13 +1422,25 @@ function attachSocket(sock, role) {
       return;
     }
     try {
-      if (role === 'studio') handleStudioMessage(sock, msg);
-      else handleMcpMessage(sock, msg);
+      if (role === 'studio') await handleStudioMessage(record, sock, msg);
+      else handleMcpMessage(record, sock, msg);
     } catch (e) {
-      log(`message handler error (${role}): ${e?.stack ?? e}`);
+      log(`message handler error (${role}, session=${record.sessionId}): ${e?.stack ?? e}`);
     }
   });
-  sock.on('error', (err) => log(`${role} socket error: ${err?.message ?? err}`));
+  sock.on('error', (err) => log(`${role} socket error (session=${record.sessionId}): ${err?.message ?? err}`));
+}
+
+function recordHealth(record) {
+  return {
+    sessionId: record.sessionId,
+    createdAt: record.createdAt,
+    lastConnectedAt: record.lastConnectedAt,
+    studioConnected: !!record.studioSocket && record.studioSocket.readyState === record.studioSocket.OPEN,
+    mcpClients: record.mcpSockets.size,
+    session: sessionInfo(record),
+    browserbase: record.browserbaseSession.status(),
+  };
 }
 
 function healthzBody() {
@@ -1344,42 +1448,121 @@ function healthzBody() {
     ok: true,
     name: HUB_NAME,
     pid: process.pid,
+    launchId: LAUNCH_ID,
+    port: hubPort,
     uptimeMs: Date.now() - STARTED_AT,
     protocol: PROTOCOL_VERSION,
-    studioConnected: !!studioSocket && studioSocket.readyState === studioSocket.OPEN,
-    mcpClients: mcpSockets.size,
-    session: sessionInfo(),
+    sessions: sessions.summaries(recordHealth),
     providers: providerHealth.cached(),
-    browserbase: browserbaseSession.status(),
   };
+}
+
+function requestToken(req, url) {
+  const authorization = String(req.headers.authorization ?? '');
+  if (authorization.startsWith('Bearer ')) return authorization.slice(7);
+  return url.searchParams.get('token') ?? '';
+}
+
+function sendHttpJson(res, status, body) {
+  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
+
+function authenticateHttpSession(req, url) {
+  return authenticateHubSession({
+    masterToken: TOKEN,
+    token: requestToken(req, url),
+    sessionId: url.searchParams.get('sessionId'),
+    allowMaster: !PRODUCTION,
+  });
+}
+
+function authenticateOwnerRequest(req, url) {
+  authenticateMasterToken(TOKEN, requestToken(req, url));
+  if (String(req.headers['x-rhwp-launch-id'] ?? '') !== LAUNCH_ID) {
+    const error = new Error('invalid hub launch id');
+    error.code = 'UNAUTHORIZED';
+    throw error;
+  }
+}
+
+function isReferencePath(pathname) {
+  return pathname === '/reference-files'
+    || pathname === '/reference-staging'
+    || pathname === '/reference-search'
+    || pathname.startsWith('/reference-files/')
+    || pathname.startsWith('/reference-staging/');
 }
 
 const httpServer = http.createServer((req, res) => {
   void Promise.resolve().then(async () => {
-    const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`);
-    if (await handleReferenceHttp(req, res, url)) return;
+    const url = new URL(req.url ?? '/', `http://127.0.0.1:${hubPort || REQUESTED_PORT || 5175}`);
+    if (isReferencePath(url.pathname)) {
+      if (req.method !== 'OPTIONS') {
+        const sessionId = authenticateHttpSession(req, url);
+        sessions.getOrCreate(sessionId);
+      }
+      const suppliedToken = requestToken(req, url);
+      const handleReferenceHttp = createReferenceHttpHandler({ store: referenceStore, token: suppliedToken });
+      if (await handleReferenceHttp(req, res, url)) return;
+    }
+    if (req.method === 'DELETE' && url.pathname.startsWith('/sessions/')) {
+      authenticateOwnerRequest(req, url);
+      const sessionId = decodeURIComponent(url.pathname.slice('/sessions/'.length));
+      const record = sessions.get(sessionId);
+      if (!record) {
+        sendHttpJson(res, 404, { status: 'not-found', sessionId });
+        return;
+      }
+      sessions.delete(sessionId);
+      await disposeRecord(record, 'hub session closed');
+      sendHttpJson(res, 200, { status: 'deleted', sessionId });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/shutdown') {
+      authenticateOwnerRequest(req, url);
+      sendHttpJson(res, 202, { status: 'shutting-down', launchId: LAUNCH_ID });
+      setImmediate(() => {
+        void shutdown('owner request').finally(() => process.exit(0));
+      });
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/healthz') {
+      const token = requestToken(req, url);
+      if (!(DEVELOPMENT_AUTH && !token)) authenticateMasterToken(TOKEN, token);
       const origin = typeof req.headers.origin === 'string' ? req.headers.origin : null;
       const allowOrigin = origin && /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/i.test(origin)
         ? origin
         : null;
       res.writeHead(200, {
         'content-type': 'application/json',
+        'cache-control': 'no-store',
         ...(allowOrigin ? { 'access-control-allow-origin': allowOrigin, vary: 'Origin' } : {}),
       });
       res.end(JSON.stringify(healthzBody()));
       return;
     }
-    // pi 확장은 MCP 대신 이 엔드포인트로 도구 정의를 받아 간다.
+    // pi extension requests a shared catalog with its signed session credential.
     if (req.method === 'GET' && url.pathname === '/pi/tool-definitions') {
-      const { status, body } = handlePiToolDefinitions({ url, token: TOKEN });
-      res.writeHead(status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(body));
+      authenticateHttpSession(req, url);
+      const authenticatedUrl = new URL(url);
+      authenticatedUrl.searchParams.set('token', TOKEN);
+      const { status, body } = handlePiToolDefinitions({ url: authenticatedUrl, token: TOKEN });
+      sendHttpJson(res, status, body);
       return;
     }
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
   }).catch((error) => {
+    const unauthorized = error?.code === 'UNAUTHORIZED' || error?.code === 'UNAUTHORIZED_SESSION';
+    const invalidSession = error?.code === 'INVALID_SESSION_ID' || error instanceof URIError;
+    if (unauthorized || invalidSession) {
+      if (!res.headersSent) sendHttpJson(res, unauthorized ? 401 : 400, {
+        status: 'error',
+        error: { code: error?.code ?? 'INVALID_SESSION_ID', message: String(error.message) },
+      });
+      return;
+    }
     log(`http request failed: ${error?.stack ?? error}`);
     if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
     if (!res.writableEnded) res.end(JSON.stringify({ status: 'error', message: 'Internal server error' }));
@@ -1388,54 +1571,86 @@ const httpServer = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ noServer: true });
 
+function rejectUpgrade(socket, status, message) {
+  socket.write(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\n\r\n`);
+  socket.destroy();
+}
+
 httpServer.on('upgrade', (req, socket, head) => {
   let url;
   try {
-    url = new URL(req.url, `http://127.0.0.1:${PORT}`);
+    url = new URL(req.url, `http://127.0.0.1:${hubPort || REQUESTED_PORT || 5175}`);
   } catch {
-    socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
-    socket.destroy();
+    rejectUpgrade(socket, 400, 'Bad Request');
     return;
   }
-  const path = url.pathname;
-  const token = url.searchParams.get('token');
-  if ((path !== '/studio' && path !== '/mcp') || token !== TOKEN) {
-    socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
-    socket.destroy();
+  const pathname = url.pathname;
+  if (pathname !== '/studio' && pathname !== '/mcp') {
+    rejectUpgrade(socket, 404, 'Not Found');
+    return;
+  }
+  if (PRODUCTION) {
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+    if (pathname === '/studio' && !isAllowedStudioOrigin(origin)) {
+      rejectUpgrade(socket, 403, 'Forbidden');
+      return;
+    }
+    if (pathname === '/mcp' && origin) {
+      rejectUpgrade(socket, 403, 'Forbidden');
+      return;
+    }
+  }
+  const token = url.searchParams.get('token') ?? '';
+  const sessionId = url.searchParams.get('sessionId');
+  let record;
+  try {
+    const authenticatedSessionId = authenticateHubSession({
+      masterToken: TOKEN,
+      token,
+      sessionId,
+      allowMaster: !PRODUCTION,
+    });
+    record = sessions.getOrCreate(authenticatedSessionId);
+  } catch {
+    rejectUpgrade(socket, 401, 'Unauthorized');
     return;
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
-    if (path === '/studio') {
-      if (studioSocket) {
-        // 새 탭에 밀려나면 구 소켓의 인플라이트 호출은 응답이 오지 않으므로 즉시 실패시킨다.
-        failAllPendingCalls('Studio connection was replaced by a new tab; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
-        try {
-          studioSocket.close(4000, 'replaced');
-        } catch {}
+    if (pathname === '/studio') {
+      if (record.studioSocket) {
+        failAllPendingCalls(record, 'Studio connection was replaced by a new tab; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
+        try { record.studioSocket.close(4000, 'replaced'); } catch {}
       }
-      studioSocket = ws;
-      attachSocket(ws, 'studio');
+      record.studioSocket = ws;
+      attachSocket(record, ws, 'studio');
       ws.on('close', () => {
-        if (studioSocket === ws) {
-          studioSocket = null;
-          pendingReferenceMessage = null;
-          failAllPendingCalls('Studio disconnected while tool calls were in flight; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
+        if (record.studioSocket === ws) {
+          record.studioSocket = null;
+          record.pendingReferenceMessage = null;
+          failAllPendingCalls(record, 'Studio disconnected while tool calls were in flight; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
         }
       });
-      sendJson(ws, { v: 1, type: 'welcome', protocol: PROTOCOL_VERSION, session: sessionInfo() });
-      if (session?.planning.latestPlan && session.planning.phase === 'awaiting-approval') {
+      sendJson(ws, {
+        v: 1,
+        type: 'welcome',
+        protocol: PROTOCOL_VERSION,
+        launchId: LAUNCH_ID,
+        hubSessionId: record.sessionId,
+        session: sessionInfo(record),
+      });
+      const activeSession = record.agentSession;
+      if (activeSession?.planning.latestPlan && activeSession.planning.phase === 'awaiting-approval') {
         sendJson(ws, {
           v: 1,
           type: 'plan-ready',
-          planId: session.planning.latestPlan.planId,
-          plan: structuredClone(session.planning.latestPlan.plan),
-          ...session.planning.snapshot(),
+          planId: activeSession.planning.latestPlan.planId,
+          plan: structuredClone(activeSession.planning.latestPlan.plan),
+          ...activeSession.planning.snapshot(),
         });
       }
-      if (missedTurnEnd) {
-        // 소켓이 끊긴 사이에 끝난 턴 — welcome 직후 한 번 재생해 UI 를 닫아준다.
-        const evt = missedTurnEnd;
-        missedTurnEnd = null;
+      if (record.missedTurnEnd) {
+        const evt = record.missedTurnEnd;
+        record.missedTurnEnd = null;
         sendJson(ws, { v: 1, type: 'agent-event', event: evt });
       }
       void skillRegistry.list().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', ...catalog }));
@@ -1444,82 +1659,122 @@ httpServer.on('upgrade', (req, socket, head) => {
         .catch((e) => sendJson(ws, {
           v: 1, type: 'writing-style-error', code: e?.code ?? 'STYLE_STATUS_FAILED', message: String(e?.message ?? e),
         }));
-      if (styleCalibration) {
-        sendJson(ws, styleCalibration.progress ?? {
+      const calibration = record.styleCalibration;
+      if (calibration) {
+        sendJson(ws, calibration.progress ?? {
           v: 1, type: 'writing-style-progress',
-          requestId: styleCalibration.requestId, jobId: styleCalibration.jobId,
-          startedAt: styleCalibration.startedAt, agent: styleCalibration.agent, model: styleCalibration.model,
+          requestId: calibration.requestId, jobId: calibration.jobId,
+          startedAt: calibration.startedAt, agent: calibration.agent, model: calibration.model,
           state: 'preparing', phase: 'preparing', activity: 'collecting-samples',
           detail: 'Preparing writing samples', completed: 0, total: 1,
         });
       }
-      // 프로바이더 프로브로 접속을 붙잡아 두지 않는다 — 캐시를 먼저 주고 결과가 오면 갱신한다.
       const cachedProviders = providerHealth.cached();
       if (cachedProviders) sendJson(ws, { v: 1, type: 'provider-status', providers: cachedProviders });
       void providerHealth.check().then((providers) => {
-        if (providers !== cachedProviders) replyToStudio(ws, { v: 1, type: 'provider-status', providers });
+        if (providers !== cachedProviders) replyToStudio(record, ws, { v: 1, type: 'provider-status', providers });
       });
       sendJson(ws, { v: 1, type: 'pi-status', status: piStatus });
-      sendJson(ws, { v: 1, type: 'writing-style-catalog', ...writingStyleCatalog() });
+      sendJson(ws, { v: 1, type: 'writing-style-catalog', ...writingStyleCatalog(record) });
       sendJson(ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });
       if (piStatus.keyConfigured && !openRouterCredits) {
-        // 잔액도 접속을 붙잡지 않는다 — 도착하면 사용량 리포트를 한 번 더 보낸다.
         void refreshOpenRouterCredits(false)
-          .then(() => replyToStudio(ws, { v: 1, type: 'usage-report', usage: usageSnapshot() }));
+          .then(() => replyToStudio(record, ws, { v: 1, type: 'usage-report', usage: usageSnapshot() }));
       }
       if (cliproxy.configured()) {
         void cliproxy.refresh(false).then((status) => {
-          if (status.connected || status.error) replyToStudio(ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });
+          if (status.connected || status.error) replyToStudio(record, ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });
         });
       }
-      log('studio connected');
-    } else {
-      const agentLabel = url.searchParams.get('agent') ?? 'unknown';
-      // 도구 호출에 찍을 에이전트 라벨 — 접속 시점 값을 소켓에 붙여 둔다 (없으면 null, 세션 값이 대신 쓰인다).
-      ws.agentLabel = url.searchParams.get('agent');
-      ws.workflow = url.searchParams.get('workflow');
-      ws.capabilityEpoch = url.searchParams.get('capabilityEpoch');
-      mcpSockets.add(ws);
-      attachSocket(ws, 'mcp');
-      ws.on('close', () => {
-        mcpSockets.delete(ws);
-        for (const [hubId, entry] of pendingCalls) {
-          if (entry.mcpSocket === ws) {
-            clearTimeout(entry.timer);
-            pendingCalls.delete(hubId);
-          }
-        }
-        log(`mcp client disconnected (agent=${agentLabel})`);
-      });
-      log(`mcp client connected (agent=${agentLabel})`);
+      log(`studio connected (session=${record.sessionId})`);
+      return;
     }
+
+    const agentLabel = url.searchParams.get('agent') ?? 'unknown';
+    ws.agentLabel = url.searchParams.get('agent');
+    ws.workflow = url.searchParams.get('workflow');
+    ws.capabilityEpoch = url.searchParams.get('capabilityEpoch');
+    record.mcpSockets.add(ws);
+    attachSocket(record, ws, 'mcp');
+    ws.on('close', () => {
+      record.mcpSockets.delete(ws);
+      for (const [hubId, entry] of record.pendingCalls) {
+        if (entry.mcpSocket === ws) {
+          clearTimeout(entry.timer);
+          record.pendingCalls.delete(hubId);
+        }
+      }
+      log(`mcp client disconnected (agent=${agentLabel}, session=${record.sessionId})`);
+    });
+    log(`mcp client connected (agent=${agentLabel}, session=${record.sessionId})`);
   });
 });
 
-httpServer.listen(PORT, '127.0.0.1', () => {
-  log(`rhwp-agent hub listening on ws://127.0.0.1:${PORT} (bearer token configured)`);
-  log(`claude/codex CLIs must be on PATH (e.g. ~/.local/bin)`);
+httpServer.listen(REQUESTED_PORT, '127.0.0.1', () => {
+  const address = httpServer.address();
+  if (!address || typeof address === 'string') throw new Error('Hub did not receive a TCP port');
+  hubPort = address.port;
+  process.stdout.write(`RHWP_HUB_READY ${JSON.stringify({ port: hubPort, pid: process.pid, launchId: LAUNCH_ID })}\n`);
+  log(`rhwp-agent hub listening on ws://127.0.0.1:${hubPort} (protocol v${PROTOCOL_VERSION})`);
+  log('claude/codex CLIs must be on PATH (e.g. ~/.local/bin)');
 });
 
 httpServer.on('error', (err) => {
   log(`server error: ${err?.message ?? err}`);
-  void fs.rm(ISOLATED_HOME, { recursive: true, force: true }).finally(() => process.exit(1));
+  process.exitCode = 1;
 });
 
-let shuttingDown = false;
-async function shutdown(signal) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  clearInterval(stagedReferenceCleanupTimer);
-  log(`shutting down (${signal})`);
-  disposeSession();
-  await browserbaseSession.cleanup('hub shutdown');
-  for (const sock of wss.clients) {
-    try { sock.close(1001, 'server shutting down'); } catch {}
+let shutdownPromise = null;
+async function disposeRecord(record, reason) {
+  record.disposed = true;
+  failAllPendingCalls(record, 'Hub session is shutting down');
+  const backendExit = disposeSession(record);
+  for (const sock of [record.studioSocket, ...record.mcpSockets]) {
+    try { sock?.close(1001, reason); } catch {}
   }
-  await new Promise((resolve) => httpServer.close(resolve));
-  await fs.rm(ISOLATED_HOME, { recursive: true, force: true });
+  record.mcpSockets.clear();
+  record.studioSocket = null;
+  await Promise.all([
+    backendExit,
+    stopAuxiliaryProcesses(record),
+    record.browserbaseSession.cleanup(reason),
+  ]);
+  await fs.rm(record.recordRoot, { recursive: true, force: true });
 }
+
+function shutdown(signal) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    clearInterval(stagedReferenceCleanupTimer);
+    if (ownerWatchdog) clearInterval(ownerWatchdog);
+    log(`shutting down (${signal})`);
+    await sessions.disposeAll((record) => disposeRecord(record, 'hub shutdown'));
+    for (const sock of wss.clients) {
+      try { sock.close(1001, 'server shutting down'); } catch {}
+    }
+    if (httpServer.listening) await new Promise((resolve) => httpServer.close(resolve));
+    const ownedRoots = [
+      process.env.RHWP_OWN_WORK_DIR === '1' ? WORK_ROOT : null,
+      process.env.RHWP_OWN_RUNTIME_DIR === '1' ? RUNTIME_ROOT : null,
+    ].filter(Boolean);
+    await Promise.all(ownedRoots.map((root) => fs.rm(root, { recursive: true, force: true })));
+  })();
+  return shutdownPromise;
+}
+
+const ownerPid = Number(process.env.RHWP_OWNER_PID);
+const ownerWatchdog = Number.isSafeInteger(ownerPid) && ownerPid > 0
+  ? setInterval(() => {
+    try {
+      process.kill(ownerPid, 0);
+    } catch (error) {
+      if (error?.code !== 'EPERM') {
+        void shutdown('owner exited').finally(() => process.exit(0));
+      }
+    }
+  }, 1_000)
+  : null;
+ownerWatchdog?.unref?.();
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.once(signal, () => { void shutdown(signal).finally(() => process.exit(0)); });

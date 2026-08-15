@@ -97,6 +97,16 @@ test('message attachment staging is invisible until promotion and can be discard
   assert.equal(discarded.status, 200);
 });
 
+test('the exact packaged origin is CORS-echoed', async (t) => {
+  const { base } = await fixture(t);
+  const origin = 'rauhwpx://app';
+  const response = await fetch(`${base}/reference-files?scope=global`, {
+    headers: { Authorization: 'Bearer test-secret', Origin: origin },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('access-control-allow-origin'), origin);
+});
+
 test('non-loopback browser origins are denied with a top-level error message', async (t) => {
   const { base } = await fixture(t);
   const response = await fetch(`${base}/reference-files?scope=global`, {
@@ -106,6 +116,11 @@ test('non-loopback browser origins are denied with a top-level error message', a
   const body = await response.json();
   assert.equal(body.error.code, 'REFERENCE_ORIGIN_DENIED');
   assert.equal(body.message, body.error.message);
+
+  const lookalike = await fetch(`${base}/reference-files?scope=global`, {
+    headers: { Authorization: 'Bearer test-secret', Origin: 'rauhwpx://app.evil' },
+  });
+  assert.equal(lookalike.status, 403);
 });
 
 function chunkedRequest(url, { chunks, abort = false }) {

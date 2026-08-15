@@ -97,7 +97,7 @@ test('CLI 스폰 실패는 대화 안에서 다시 시도할 수 있다', () => 
 });
 
 test('끊기면 허브 기동을 요청하고 포커스·온라인·가시성에서 다시 붙는다', () => {
-  assert.match(bridge, /import \{ ensureDesktopAgentHub \} from '\.\.\/desktop-integration\.ts'/);
+  assert.match(bridge, /import \{[\s\S]*ensureDesktopAgentHub,[\s\S]*\} from '\.\.\/desktop-integration\.ts'/);
   assert.match(
     bridge,
     /private requestHubLaunch\(\): Promise<boolean> \{\s*if \(!this\.hubLaunch\) \{\s*this\.hubLaunch = ensureDesktopAgentHub\(\)/,

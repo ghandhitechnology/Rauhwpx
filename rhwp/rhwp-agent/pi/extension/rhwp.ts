@@ -26,6 +26,7 @@ export interface PiExtensionConfig {
   /** 허브 /mcp WS 엔드포인트. */
   wsUrl: string;
   token: string;
+  sessionId: string;
   agentName: string;
   workflow: string;
   phase: string;
@@ -97,6 +98,7 @@ export function readExtensionConfig(
     hubHttp: env.RHWP_HUB_HTTP ?? 'http://127.0.0.1:5175',
     wsUrl: env.RHWP_WS_URL ?? 'ws://127.0.0.1:5175/mcp',
     token: env.RHWP_AGENT_TOKEN ?? 'dev',
+    sessionId: env.RHWP_SESSION_ID ?? 'dev',
     agentName: env.RHWP_AGENT_NAME ?? 'pi',
     workflow,
     phase,
@@ -112,13 +114,15 @@ export function hubToolDefinitionsUrl(config: PiExtensionConfig): string {
   const base = config.hubHttp.replace(/\/+$/, '');
   const token = encodeURIComponent(config.token);
   const profile = encodeURIComponent(config.toolProfile);
-  return `${base}/pi/tool-definitions?token=${token}&profile=${profile}`;
+  const sessionId = encodeURIComponent(config.sessionId);
+  return `${base}/pi/tool-definitions?token=${token}&sessionId=${sessionId}&profile=${profile}`;
 }
 
 /** 허브 /mcp WS URL — mcp-stdio.mjs 와 같은 쿼리 계약. */
 export function hubSocketUrl(config: PiExtensionConfig): string {
   const parts = [
     `token=${encodeURIComponent(config.token)}`,
+    `sessionId=${encodeURIComponent(config.sessionId)}`,
     `agent=${encodeURIComponent(config.agentName)}`,
     `workflow=${encodeURIComponent(config.workflow)}`,
   ];
@@ -128,7 +132,7 @@ export function hubSocketUrl(config: PiExtensionConfig): string {
   return `${config.wsUrl}?${parts.join('&')}`;
 }
 
-/** 허브로 보낼 v2 tool-call 프레임. */
+/** 허브로 보낼 v3 tool-call 프레임. */
 export function encodeToolCallFrame(
   id: number,
   tool: string,
@@ -136,7 +140,7 @@ export function encodeToolCallFrame(
   config: PiExtensionConfig,
 ): Record<string, unknown> {
   return {
-    v: 2,
+    v: 3,
     type: 'tool-call',
     id,
     tool,

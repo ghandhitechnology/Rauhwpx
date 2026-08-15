@@ -1,12 +1,57 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('rhwpDesktop', {
+  getSessionContext: () => ipcRenderer.invoke('desktop:get-session-context'),
+  getLaunchFiles: () => ipcRenderer.invoke('desktop:get-launch-files'),
+  pickNativeOpenFile: () => ipcRenderer.invoke('desktop:pick-native-open-file'),
+  claimNativeDroppedFile: (file) => {
+    const path = webUtils.getPathForFile(file);
+    return path ? ipcRenderer.invoke('desktop:claim-native-dropped-file', path) : null;
+  },
+  pickNativeSaveFile: (options) => ipcRenderer.invoke('desktop:pick-native-save-file', options),
+  releaseNativeFile: (handleId) => ipcRenderer.invoke('desktop:release-native-file', handleId),
+  readNativeFile: (handleId) => ipcRenderer.invoke('desktop:native-file-read', handleId),
+  validateNativeSave: (handleId, identity) => ipcRenderer.invoke(
+    'desktop:native-file-validate-save',
+    handleId,
+    identity,
+  ),
+  writeNativeFile: (handleId, bytes, identity) => ipcRenderer.invoke(
+    'desktop:native-file-write',
+    handleId,
+    bytes,
+    identity,
+  ),
+  isSameNativeFile: (firstHandleId, secondHandleId) => ipcRenderer.invoke(
+    'desktop:native-file-is-same',
+    firstHandleId,
+    secondHandleId,
+  ),
+  reserveDocument: (identity, nativeHandleId) => ipcRenderer.invoke(
+    'desktop:document-reserve',
+    identity,
+    nativeHandleId,
+  ),
+  commitDocument: (reservationId) => ipcRenderer.invoke('desktop:document-commit', reservationId),
+  cancelDocument: (reservationId) => ipcRenderer.invoke('desktop:document-cancel', reservationId),
+  releaseDocument: () => ipcRenderer.invoke('desktop:document-release'),
   ensureAgentHub: () => ipcRenderer.invoke('agent-hub:ensure'),
+  respondToCloseRequest: (requestId, allowClose) => (
+    ipcRenderer.invoke('desktop:close-response', requestId, allowClose)
+  ),
+  onCloseRequested: (callback) => {
+    ipcRenderer.on('desktop:close-requested', (_event, request) => callback(request));
+  },
   platform: process.platform,
   isFullScreen: () => ipcRenderer.invoke('window:is-fullscreen'),
   onFullScreenChange: (callback) => {
     ipcRenderer.on('window:fullscreen-changed', (_event, fullscreen) => {
       callback(Boolean(fullscreen));
+    });
+  },
+  onOpenFiles: (callback) => {
+    ipcRenderer.on('desktop:open-files', (_event, files) => {
+      callback(Array.isArray(files) ? files.map((file) => ({ ...file })) : []);
     });
   },
 });

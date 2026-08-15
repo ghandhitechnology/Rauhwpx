@@ -1,69 +1,166 @@
-/**
- * Vite dev middleware that starts rhwp-agent next to the studio.
- *
- * Studio in the browser cannot spawn Node. Without this, `npm run dev` shows a
- * permanent hub-disconnected banner unless the hub is already running
- * (`npm start` at the repo root starts it in the background).
- * `/__rhwp/ensure-agent-hub` lets the "지금 다시 연결" button restart a dead hub.
- */
-import { resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
-  ensureAgentHub,
+  createHubToken,
   isHubHealthy,
+  issueHubSessionToken,
+  requestHubShutdown,
   spawnHubProcess,
   stopHubChild,
+  waitForHub,
+  waitForHubChildExit,
+  waitForHubReadyLine,
 } from '../../desktop/agent-hub.mjs';
 
-const DEFAULT_PORT = 5175;
 export const AGENT_HUB_ENSURE_PATH = '/__rhwp/ensure-agent-hub';
 
-function skipAutoStart() {
-  if (process.env.RHWP_SKIP_AGENT_HUB === '1') return true;
-  const custom = process.env.VITE_RHWP_AGENT_URL ?? '';
-  if (!custom) return false;
-  return !/127\.0\.0\.1:5175|localhost:5175/.test(custom);
+function explicitHubConfig() {
+  const hubUrl = process.env.VITE_RHWP_AGENT_URL;
+  if (!hubUrl) return null;
+  const url = new URL(hubUrl);
+  const port = Number(url.port || (url.protocol === 'wss:' ? 443 : 80));
+  return {
+    hubUrl: hubUrl.replace(/\/$/, ''),
+    hubToken: process.env.VITE_RHWP_AGENT_TOKEN ?? process.env.RHWP_AGENT_TOKEN ?? 'dev',
+    launchId: process.env.RHWP_LAUNCH_ID ?? 'external-dev-hub',
+    port,
+  };
 }
 
 export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
-  let child = null;
-  let ensuring = null;
-  const port = Number(process.env.RHWP_AGENT_PORT ?? DEFAULT_PORT);
+  const requestedPort = Number(process.env.RHWP_AGENT_PORT ?? 0);
+  const external = explicitHubConfig() ?? (process.env.RHWP_SKIP_AGENT_HUB === '1' ? {
+    hubUrl: `ws://127.0.0.1:${requestedPort || 5175}`,
+    hubToken: process.env.RHWP_AGENT_TOKEN ?? 'dev',
+    launchId: process.env.RHWP_LAUNCH_ID ?? 'external-dev-hub',
+    port: requestedPort || 5175,
+  } : null);
+  const skipOwnedHub = external !== null;
+  const token = external?.hubToken ?? process.env.RHWP_AGENT_TOKEN ?? createHubToken();
+  const launchId = external?.launchId ?? randomUUID();
   const script = resolve(studioRoot, '..', 'rhwp-agent', 'server.mjs');
-  const cwd = resolve(studioRoot, '..', 'rhwp-agent');
 
-  function startHub() {
-    if (child) return true;
+  let child = null;
+  let context = external;
+  let ensuring = null;
+  let workRoot = null;
+
+  function publicContext(started, ready) {
+    return {
+      started,
+      ready,
+      ...(context ? {
+        hubUrl: context.hubUrl,
+        hubToken: context.hubToken,
+        launchId: context.launchId,
+      } : {}),
+    };
+  }
+
+  async function stopOwnedHub({ removeWork = false } = {}) {
+    const current = child;
+    const currentContext = context;
+    child = null;
+    context = null;
+    let gracefulShutdownAccepted = false;
+    if (currentContext && current) {
+      try {
+        await requestHubShutdown({
+          port: currentContext.port,
+          token,
+          launchId,
+          timeoutMs: 1000,
+        });
+        gracefulShutdownAccepted = true;
+      } catch {}
+    }
+    const exited = gracefulShutdownAccepted
+      ? await waitForHubChildExit(current, { timeoutMs: 3000 })
+      : false;
+    if (!exited) await stopHubChild(current, { timeoutMs: 3000 });
+    if (removeWork && workRoot) {
+      rmSync(workRoot, { recursive: true, force: true });
+      workRoot = null;
+    }
+  }
+
+  async function startOwnedHub() {
+    if (child && context && await isHubHealthy(context.port, {
+      token,
+      expectedPid: child.pid,
+      expectedLaunchId: launchId,
+    })) {
+      return publicContext(false, true);
+    }
+    if (child) await stopOwnedHub({ removeWork: true });
+
+    workRoot = mkdtempSync(join(tmpdir(), 'rauhwpx-vite-hub-'));
+    const spawnedWorkRoot = workRoot;
     const spawned = spawnHubProcess({
       command: process.execPath,
       args: [script],
-      cwd,
-      env: { ...process.env, RHWP_AGENT_PORT: String(port) },
+      cwd: workRoot,
+      env: {
+        ...process.env,
+        RHWP_AGENT_PORT: String(requestedPort),
+        RHWP_AGENT_TOKEN: token,
+        RHWP_AGENT_MODE: 'production',
+        RHWP_LAUNCH_ID: launchId,
+        RHWP_OWNER_PID: String(process.pid),
+        RHWP_RUNTIME_DIR: join(workRoot, 'runtime'),
+        RHWP_WORK_DIR: join(workRoot, 'work'),
+        RHWP_OWN_RUNTIME_DIR: '1',
+        RHWP_OWN_WORK_DIR: '1',
+      },
     }, {
-      onExit: (code, signal) => {
-        console.warn(`[rhwp-agent] hub exited (${code ?? signal ?? 'unknown'})`);
-        if (child === spawned) child = null;
+      onExit(code, signal) {
+        console.warn(`[rhwp-agent] owned dev hub exited (${code ?? signal ?? 'unknown'})`);
+        if (child === spawned) {
+          child = null;
+          context = null;
+          rmSync(spawnedWorkRoot, { recursive: true, force: true });
+          if (workRoot === spawnedWorkRoot) workRoot = null;
+        }
       },
     });
     child = spawned;
-    return true;
+
+    try {
+      const readyLine = await waitForHubReadyLine(spawned, { launchId });
+      const ready = await waitForHub(readyLine.port, {
+        isHealthy: (port, options) => isHubHealthy(port, {
+          ...options,
+          token,
+          expectedPid: spawned.pid,
+          expectedLaunchId: launchId,
+        }),
+      });
+      if (!ready) throw new Error('Owned dev hub failed its authenticated health check');
+      context = {
+        port: readyLine.port,
+        hubUrl: `ws://127.0.0.1:${readyLine.port}`,
+        hubToken: token,
+        launchId,
+      };
+      return publicContext(true, true);
+    } catch (error) {
+      await stopOwnedHub({ removeWork: true });
+      throw error;
+    }
   }
 
-  function stopHub() {
-    const current = child;
-    child = null;
-    return stopHubChild(current);
-  }
-
-  function ensureHub({ restartUnhealthy = false } = {}) {
+  async function ensureHub() {
     if (ensuring) return ensuring;
-    ensuring = ensureAgentHub({
-      port,
-      processAlive: Boolean(child),
-      restartUnhealthy,
-      stop: stopHub,
-      start: startHub,
-      log: console,
-    }).finally(() => {
+    ensuring = (async () => {
+      if (skipOwnedHub) {
+        if (!external) return publicContext(false, false);
+        const ready = await isHubHealthy(external.port, { token: external.hubToken });
+        return publicContext(false, ready);
+      }
+      return startOwnedHub();
+    })().finally(() => {
       ensuring = null;
     });
     return ensuring;
@@ -72,37 +169,48 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
   return {
     name: 'rhwp-agent-hub',
     apply: 'serve',
-    async configureServer(server) {
+    config() {
+      if (!external) return undefined;
+      return {
+        define: {
+          'import.meta.env.VITE_RHWP_AGENT_URL': JSON.stringify(external.hubUrl),
+          'import.meta.env.VITE_RHWP_AGENT_TOKEN': JSON.stringify(external.hubToken),
+        },
+      };
+    },
+    configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
-        const url = req.url?.split('?')[0];
-        if (url !== AGENT_HUB_ENSURE_PATH) {
+        const requestUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (requestUrl.pathname !== AGENT_HUB_ENSURE_PATH) {
           next();
           return;
         }
         res.setHeader('Content-Type', 'application/json');
         res.setHeader('Cache-Control', 'no-store');
         try {
-          const result = skipAutoStart()
-            ? { started: false, ready: await isHubHealthy(port) }
-            : await ensureHub({ restartUnhealthy: true });
+          const result = await ensureHub();
+          const sessionId = requestUrl.searchParams.get('sessionId');
+          if (result.ready && !sessionId) throw new Error('sessionId is required');
           res.statusCode = 200;
-          res.end(JSON.stringify(result));
+          res.end(JSON.stringify({
+            ...result,
+            ...(result.ready ? { hubToken: issueHubSessionToken(token, sessionId) } : {}),
+          }));
         } catch (error) {
           res.statusCode = 500;
           res.end(JSON.stringify({ started: false, ready: false, error: String(error) }));
         }
       });
 
-      if (skipAutoStart()) return;
-      const already = await isHubHealthy(port);
-      if (already) {
-        console.log(`[rhwp-agent] hub already running on 127.0.0.1:${port}`);
-        return;
+      if (!skipOwnedHub) {
+        void ensureHub().then((result) => {
+          if (result.ready) console.log(`[rhwp-agent] owned dev hub ready at ${result.hubUrl}`);
+        }).catch((error) => {
+          console.warn('[rhwp-agent] failed to start owned dev hub:', error);
+        });
       }
-      startHub();
-      console.log(`[rhwp-agent] starting hub with node ${script}`);
       server.httpServer?.once('close', () => {
-        void stopHub();
+        void stopOwnedHub({ removeWork: true });
       });
     },
   };

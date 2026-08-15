@@ -14,8 +14,13 @@ export interface DirtyStateChange {
 export class DocumentDirtyState {
   private dirty = false;
   private beforeUnloadWindow: Window | null = null;
+  private allowNextUnload = false;
   private readonly eventBus: EventBus;
   private readonly beforeUnloadHandler = (event: BeforeUnloadEvent): string | void => {
+    if (this.allowNextUnload) {
+      this.allowNextUnload = false;
+      return;
+    }
     if (!this.dirty) return;
     event.preventDefault();
     event.returnValue = '';
@@ -36,6 +41,10 @@ export class DocumentDirtyState {
 
   markClean(reason?: string): void {
     this.setDirty(false, reason);
+  }
+
+  permitNextUnload(): void {
+    this.allowNextUnload = true;
   }
 
   installBeforeUnload(windowLike: Window): () => void {

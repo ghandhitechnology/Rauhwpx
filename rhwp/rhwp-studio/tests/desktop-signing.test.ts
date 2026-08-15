@@ -51,13 +51,13 @@ test('macOS releases select and verify the Xcode Developer ID identity', () => {
 
 test('desktop window shows even if ready-to-show already fired during load', () => {
   const readyIdx = desktopMain.indexOf("once('ready-to-show'");
-  const loadIdx = desktopMain.indexOf('loadURL(url)');
+  const loadIdx = desktopMain.indexOf('loadURL(devUrl || STUDIO_URL)');
   const fallbackIdx = desktopMain.indexOf('!window.isVisible()) window.show()');
   assert.ok(readyIdx >= 0 && loadIdx >= 0 && readyIdx < loadIdx);
   assert.ok(fallbackIdx > loadIdx);
-  assert.match(desktopMain, /await ensureAgent\(\);\s*await createWindow\(\);/s);
+  assert.match(desktopMain, /await hubOwner\.ensure\(\);[\s\S]*await createWindow\(request\)/);
   assert.match(desktopMain, /preload: PRELOAD_PATH/);
-  assert.match(desktopMain, /ipcMain.handle\('agent-hub:ensure'/);
+  assert.match(desktopMain, /ipcMain\.handle\('agent-hub:ensure'/);
 });
 
 test('macOS title-bar drag regions never cover interactive controls', () => {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -8,10 +9,12 @@ import {
   listThreads,
   listThreadsByDocument,
   setThreadTitle,
+  subscribeThreadChanges,
   upsertThread,
 } from '../src/agent/threads.ts';
 import type { StructuredPlan } from '../src/agent/types.ts';
 
+const source = readFileSync(new URL('../src/agent/threads.ts', import.meta.url), 'utf8');
 const mem = new Map<string, string>();
 const storage = {
   getItem: (k: string) => mem.get(k) ?? null,
@@ -37,6 +40,29 @@ test('empty threads are not listed until they have messages', () => {
   upsertThread(t);
   assert.equal(listThreads().length, 1);
   assert.equal(listThreads()[0]!.id, t.id);
+});
+
+test('thread persistence notifies the current window without changing the synchronous API', () => {
+  mem.clear();
+  let changes = 0;
+  const unsubscribe = subscribeThreadChanges(() => {
+    changes += 1;
+  });
+  const thread = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high' });
+  thread.messages.push({ role: 'user', text: 'notify' });
+  upsertThread(thread);
+  unsubscribe();
+
+  assert.equal(changes, 1);
+  assert.equal(listThreads()[0]?.id, thread.id);
+});
+
+test('browser persistence uses per-thread IndexedDB records and one-time legacy migration', () => {
+  assert.match(source, /createObjectStore\(THREADS_STORE, \{ keyPath: 'id' \}\)/);
+  assert.match(source, /store\.put\(cloneThread\(thread\)\)/);
+  assert.match(source, /localStorage\.removeItem\(STORAGE_KEY\)/);
+  assert.match(source, /new BroadcastChannel\(CHANNEL_NAME\)/);
+  assert.match(source, /db\.transaction\(THREADS_STORE, 'readwrite'\)/);
 });
 
 test('fallbackTitle uses the first user message', () => {
