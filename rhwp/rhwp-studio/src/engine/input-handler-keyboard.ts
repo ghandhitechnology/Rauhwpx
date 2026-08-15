@@ -535,6 +535,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
                       'Home', 'End', 'Escape', 'Enter', 'Tab',
                       'PageUp', 'PageDown'];
     if (navCodes.includes(e.code)) {
+      if (e.code === 'Escape') this.imeSession.cancel();
       // 브라우저가 조합을 자연스럽게 종료하도록 두고,
       // compositionEnd 후 탐색 키를 처리하도록 예약
       this._pendingNavAfterIME = {
@@ -546,6 +547,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
   }
 
   if (PAGINATION_BOUNDARY_KEYS.has(e.key)) {
+    this.resetIosInputSession();
     this.flushDeferredPaginationIfNeeded('before-navigation', false);
   }
 

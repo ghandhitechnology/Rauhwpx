@@ -181,7 +181,7 @@ function isNestedCell(pos: DocumentPosition): boolean {
 
 export function canUseDeferredCellTextInsert(pos: DocumentPosition, text: string): boolean {
   if (!isCell(pos) || isNestedCell(pos)) return false;
-  if (text.length === 0 || text.length > MAX_PAGE_LOCAL_TEXT_EDIT_CHARS) return false;
+  if (text.length === 0 || charCount(text) > MAX_PAGE_LOCAL_TEXT_EDIT_CHARS) return false;
   if (/[\r\n\t]/.test(text)) return false;
   return true;
 }
@@ -433,7 +433,7 @@ export class InsertTextCommand implements EditCommand {
   execute(wasm: WasmBridge): DocumentPosition {
     this.lastMutationEffects = NO_TEXT_MUTATION_EFFECTS;
     this.lastMutationEffects = insertTextWithMutationEffects(wasm, this.position, this.text);
-    return { ...this.position, charOffset: this.position.charOffset + this.text.length };
+    return { ...this.position, charOffset: this.position.charOffset + charCount(this.text) };
   }
 
   consumeTextMutationEffects(): TextMutationEffects {
@@ -467,7 +467,7 @@ export class InsertTextCommand implements EditCommand {
       if (other.position.cellParaIndex !== this.position.cellParaIndex) return null;
     }
     // 연속 위치 확인
-    const expectedOffset = this.position.charOffset + this.text.length;
+    const expectedOffset = this.position.charOffset + charCount(this.text);
     if (other.position.charOffset !== expectedOffset) return null;
     // 300ms 이내
     if (other.timestamp - this.timestamp > 300) return null;
@@ -1324,10 +1324,8 @@ function hfFnStubPosition(sectionIdx: number): DocumentPosition {
 }
 
 /**
- * [Task #2337-review] WASM 삭제 count 는 Rust `Paragraph::delete_text_at` 의 char(Unicode
- * scalar) 단위다. JS `String.length`(UTF-16 code unit)를 넘기면 astral 문자(😀 등)에서
- * 실제보다 많이 삭제해 undo/redo 가 인접 문자를 잃는다 → 코드포인트 수로 계산한다.
- * (커서 오프셋은 studio 의 UTF-16 관례를 유지하므로 여기서만 char 단위를 쓴다.)
+ * WASM 텍스트 API의 offset/count는 Rust `char`(Unicode scalar) 단위다.
+ * DOM의 UTF-16 문자열은 명령 경계에서 scalar 길이로 변환한다.
  */
 function charCount(s: string): number {
   return [...s].length;
@@ -1346,12 +1344,12 @@ export class InsertTextInHeaderFooterCommand implements EditCommand {
     private charOffset: number,
     private text: string,
   ) {
-    this.lastContext = hfEditContext(target, paraIdx, charOffset + text.length);
+    this.lastContext = hfEditContext(target, paraIdx, charOffset + charCount(text));
   }
 
   execute(wasm: WasmBridge): DocumentPosition {
     wasm.insertTextInHeaderFooter(this.target.sectionIdx, this.target.isHeader, this.target.applyTo, this.paraIdx, this.charOffset, this.text);
-    this.lastContext = hfEditContext(this.target, this.paraIdx, this.charOffset + this.text.length);
+    this.lastContext = hfEditContext(this.target, this.paraIdx, this.charOffset + charCount(this.text));
     return hfFnStubPosition(this.target.sectionIdx);
   }
 
@@ -1531,12 +1529,12 @@ export class InsertTextInFootnoteCommand implements EditCommand {
     private charOffset: number,
     private text: string,
   ) {
-    this.lastContext = fnEditContext(target, innerParaIdx, charOffset + text.length);
+    this.lastContext = fnEditContext(target, innerParaIdx, charOffset + charCount(text));
   }
 
   execute(wasm: WasmBridge): DocumentPosition {
     wasm.insertTextInFootnote(this.target.sectionIdx, this.target.paraIdx, this.target.controlIdx, this.innerParaIdx, this.charOffset, this.text);
-    this.lastContext = fnEditContext(this.target, this.innerParaIdx, this.charOffset + this.text.length);
+    this.lastContext = fnEditContext(this.target, this.innerParaIdx, this.charOffset + charCount(this.text));
     return hfFnStubPosition(this.target.sectionIdx);
   }
 
