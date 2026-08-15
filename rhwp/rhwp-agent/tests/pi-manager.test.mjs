@@ -158,7 +158,7 @@ test('RHWP_PI_DIR overrides the per-platform app data root', () => {
   );
   assert.equal(
     defaultPiRoot({ APPDATA: 'C:\\data' }, 'win32', 'C:\\Users\\t'),
-    path.join('C:\\data', 'rhwp', 'pi'),
+    path.win32.join('C:\\data', 'rhwp', 'pi'),
   );
   assert.equal(defaultPiRoot({}, 'linux', '/home/t'), '/home/t/.local/share/rhwp/pi');
 });

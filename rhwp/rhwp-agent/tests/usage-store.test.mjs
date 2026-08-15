@@ -37,7 +37,7 @@ test('RHWP_USAGE_DIR overrides the per-platform app data root', () => {
   );
   assert.equal(
     defaultUsageRoot({ APPDATA: 'C:\\data' }, 'win32', 'C:\\Users\\t'),
-    path.join('C:\\data', 'rhwp', 'usage'),
+    path.win32.join('C:\\data', 'rhwp', 'usage'),
   );
   assert.equal(
     defaultUsageRoot({}, 'linux', '/home/t'),
