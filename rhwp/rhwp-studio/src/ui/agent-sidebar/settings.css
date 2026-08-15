@@ -78,6 +78,11 @@
   white-space: nowrap;
 }
 
+.ag-settings-row-detail.ag-update-required {
+  color: var(--ag-warning, #d99532);
+  font-weight: 600;
+}
+
 .ag-settings-dot {
   flex: 0 0 auto;
   width: 7px;
@@ -209,6 +214,291 @@
 .ag-settings-status {
   margin: 0;
   color: var(--ag-text);
+}
+
+/* ── 에이전트 원클릭 설정 모달 ───────────────────────── */
+
+.ag-agent-setup-overlay {
+  position: fixed;
+  z-index: 1200;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, #101114 54%, transparent);
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.ag-agent-setup-overlay.ag-open {
+  opacity: 1;
+}
+
+.ag-agent-setup-dialog {
+  --ag-bg: var(--n-surface);
+  --ag-bg-2: var(--n-surface-raised);
+  --ag-input-bg: var(--n-surface-sunken);
+  --ag-border: var(--n-hairline);
+  --ag-border-strong: var(--n-hairline-strong);
+  --ag-text: var(--n-text);
+  --ag-text-secondary: var(--n-text-secondary);
+  --ag-text-muted: var(--n-text-muted);
+  --ag-hover: var(--n-fill-hover);
+  --ag-ok: #5cbb7f;
+  --ag-err: var(--ui-danger);
+  --ag-r-chip: var(--n-radius-chip);
+  --ag-r-field: var(--n-radius-field);
+  --ag-r-panel: var(--n-radius-panel);
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: hidden;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: 18px;
+  background: var(--n-surface);
+  color: var(--n-text);
+  box-shadow: var(--n-elev-3);
+  transform: translateY(10px) scale(0.985);
+  transition: transform 180ms ease;
+}
+
+.ag-agent-setup-overlay.ag-open .ag-agent-setup-dialog {
+  transform: translateY(0) scale(1);
+}
+
+.ag-agent-setup-chrome {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 72px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--ag-border);
+}
+
+.ag-agent-setup-title-wrap,
+.ag-agent-setup-hero-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ag-agent-setup-eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ag-text-muted);
+}
+
+.ag-agent-setup-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.ag-agent-setup-close {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ag-text-secondary);
+  cursor: pointer;
+}
+
+.ag-agent-setup-close:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-agent-setup-body {
+  max-height: calc(min(720px, 100vh - 48px) - 72px);
+  overflow-y: auto;
+  padding: 18px;
+}
+
+.ag-agent-setup-generic,
+.ag-agent-setup-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ag-agent-setup-pane[hidden],
+.ag-agent-key-box[hidden],
+.ag-agent-setup-progress[hidden] {
+  display: none;
+}
+
+.ag-agent-setup-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--ag-border);
+  border-radius: 12px;
+  background: var(--ag-bg-2);
+}
+
+.ag-agent-setup-hero-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--ag-bg);
+}
+
+.ag-agent-setup-hero-icon .ag-provider-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.ag-agent-setup-hero-title {
+  font-size: 22px;
+  line-height: 1.15;
+}
+
+.ag-agent-setup-progress {
+  height: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--ag-border);
+}
+
+.ag-agent-setup-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent-primary);
+  transition: width 480ms cubic-bezier(.22, .75, .2, 1);
+}
+
+.ag-agent-setup-progress-label {
+  margin: -5px 0 0;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-agent-setup-copy,
+.ag-agent-setup-error {
+  margin: 0;
+  color: var(--ag-text-secondary);
+  line-height: 1.55;
+}
+
+.ag-agent-setup-error {
+  color: var(--ag-err);
+}
+
+.ag-agent-setup-primary {
+  align-self: stretch;
+  min-height: 40px;
+  border: 1px solid var(--accent-primary);
+  border-radius: 10px;
+  background: var(--accent-primary);
+  color: var(--n-on-accent);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ag-agent-setup-section-title {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--ag-text-secondary);
+}
+
+.ag-agent-auth-card,
+.ag-agent-auth-choice {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 58px;
+  padding: 11px 13px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: 11px;
+  background: var(--ag-bg-2);
+  color: var(--ag-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-agent-auth-card:hover:not(:disabled) {
+  border-color: var(--accent-primary);
+  background: var(--ag-hover);
+}
+
+.ag-agent-auth-card span,
+.ag-agent-auth-choice span {
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 400;
+}
+
+.ag-agent-key-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.ag-agent-auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ag-text-muted);
+  font-size: 10px;
+}
+
+.ag-agent-auth-divider::before,
+.ag-agent-auth-divider::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: var(--ag-border);
+}
+
+.ag-agent-setup-done {
+  align-items: center;
+  padding: 14px 0 2px;
+  text-align: center;
+}
+
+.ag-agent-setup-done-mark {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--ag-ok) 16%, transparent);
+  color: var(--ag-ok);
+  font-size: 22px;
+}
+
+.ag-provider-setup-btn {
+  flex: 0 0 auto;
+}
+
+.ag-agent-setup-body > .ag-pi-card {
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-agent-setup-overlay,
+  .ag-agent-setup-dialog,
+  .ag-agent-setup-progress span,
+  .ag-pi-progress .ag-settings-meter-fill {
+    transition: none;
+  }
 }
 
 /* ── Pi 연결 마법사 ─────────────────────────────────── */
@@ -440,7 +730,7 @@
 
 .ag-pi-progress .ag-settings-meter-fill {
   background: var(--ag-pi);
-  transition: width 0.15s ease;
+  transition: width 480ms cubic-bezier(.22, .75, .2, 1);
 }
 
 /* 크기를 모를 때: 흐르는 줄무늬. 활동 신호가 끊기면 paused 로 멈춘다. */
