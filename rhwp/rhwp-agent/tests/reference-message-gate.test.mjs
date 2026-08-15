@@ -14,7 +14,7 @@ test('reference-bearing messages wait for post-send uploads before agent dispatc
   );
   assert.match(
     server,
-    /function dispatchUserMessage[\s\S]*addReferenceContext\(activeSession, msg\.text, prompt\)/,
+    /function dispatchUserMessage[\s\S]*addReferenceContext\(activeSession, msg\.text, prompt, messageAttachments\)/,
   );
 });
 
@@ -22,7 +22,8 @@ test('pre-uploaded message attachments promote before agent dispatch and report 
   assert.match(server, /async function dispatchStagedUserMessage/);
   assert.match(server, /referenceStore\.promoteStaged\(\{ stageId, scopeId: activeSession\.threadId \}\)/);
   assert.match(server, /type: 'chat-reference-status'/);
-  assert.match(server, /if \(session === activeSession\) dispatchUserMessage\(sock, msg, activeSession\)/);
+  assert.match(server, /dispatchUserMessage\(sock, msg, activeSession, readyFiles\)/);
+  assert.match(server, /<message_attachments trust="untrusted-data">/);
 });
 
 test('staged messages cannot leak across stopped or disconnected studio sessions', () => {

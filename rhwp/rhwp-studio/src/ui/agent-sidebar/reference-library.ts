@@ -11,8 +11,9 @@ import { createIcon } from './icons.ts';
 
 const ACCEPTED_EXTENSIONS = [
   '.txt', '.md', '.markdown', '.csv', '.tsv', '.json', '.xml', '.html', '.htm',
-  '.pdf', '.docx', '.hwp', '.hwpx', '.hml',
+  '.pdf', '.docx', '.hwp', '.hwpx', '.hml', '.png', '.jpg', '.jpeg', '.webp', '.gif',
 ] as const;
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'] as const;
 const ACCEPTED_FILES = ACCEPTED_EXTENSIONS.join(',');
 const MAX_FILES_PER_PICK = 10;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
@@ -80,6 +81,9 @@ export interface ReferenceLibraryUi {
   hasBlockingDrafts(): boolean;
   takeReadyDrafts(): StagedReference[];
   discardDrafts(): void;
+  stageDraftFiles(files: File[]): void;
+  hasImageDrafts(): boolean;
+  allDraftsAreImages(): boolean;
   openFile(fileId: string): Promise<void>;
   refresh(): Promise<void>;
   dispose(): void;
@@ -93,6 +97,16 @@ function targetFor(scope: ReferenceScope, context: ReferenceLibraryContext): Sco
     return context.documentId ? { scope, scopeId: context.documentId } : null;
   }
   return { scope, scopeId: 'global' };
+}
+
+function extensionOf(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot).toLowerCase() : '';
+}
+
+function isImageFile(file: Pick<File, 'name' | 'type'>): boolean {
+  return (IMAGE_EXTENSIONS as readonly string[]).includes(extensionOf(file.name))
+    || ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type.toLowerCase());
 }
 
 export function createReferenceLibrary(options: ReferenceLibraryOptions): ReferenceLibraryUi {
@@ -270,7 +284,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       const item = el('li', 'ag-reference-file');
       item.dataset.referenceId = file.id;
       item.tabIndex = -1;
-      const icon = createIcon('document');
+      const icon = createIcon(file.kind === 'image' ? 'image' : 'document');
       const copy = el('span', 'ag-reference-file-copy');
       const name = el('strong', 'ag-reference-file-name', file.name);
       name.title = file.name;
@@ -411,8 +425,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     }
     const accepted: File[] = [];
     for (const file of files.slice(0, MAX_FILES_PER_PICK)) {
-      const dot = file.name.lastIndexOf('.');
-      const extension = dot >= 0 ? file.name.slice(dot).toLowerCase() : '';
+      const extension = extensionOf(file.name);
       if (!(ACCEPTED_EXTENSIONS as readonly string[]).includes(extension)) {
         showError(`${file.name}: 지원하지 않는 파일 형식입니다.`);
       } else if (file.size === 0) {
@@ -436,7 +449,16 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     staged: StagedReference | null;
     uploadState: 'uploading' | 'ready' | 'error';
     cancelled: boolean;
+    previewUrl: string | null;
   };
+
+  function releaseChip(chip: UploadChip): void {
+    chip.root.remove();
+    if (chip.previewUrl) {
+      URL.revokeObjectURL(chip.previewUrl);
+      chip.previewUrl = null;
+    }
+  }
 
   function pendingChip(file: File): UploadChip {
     const root = el('span', 'ag-reference-upload-chip');
@@ -450,14 +472,22 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     remove.setAttribute('aria-label', `${file.name} 첨부 취소`);
     remove.title = '첨부 취소';
     remove.appendChild(createIcon('close'));
+    const previewUrl = isImageFile(file) ? URL.createObjectURL(file) : null;
+    const visual = previewUrl
+      ? el('img', 'ag-reference-upload-preview') as HTMLImageElement
+      : createIcon('document');
+    if (visual instanceof HTMLImageElement) {
+      visual.src = previewUrl!;
+      visual.alt = '';
+    }
     const chip: UploadChip = {
-      file, root, state, retry, remove, target: null, staged: null, uploadState: 'uploading', cancelled: false,
+      file, root, state, retry, remove, target: null, staged: null, uploadState: 'uploading', cancelled: false, previewUrl,
     };
     remove.addEventListener('click', () => {
       chip.cancelled = true;
       const index = draftUploads.indexOf(chip);
       if (index >= 0) draftUploads.splice(index, 1);
-      root.remove();
+      releaseChip(chip);
       if (chip.staged && chip.target) {
         void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
       }
@@ -477,7 +507,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       }
     });
     root.append(
-      createIcon('document'),
+      visual,
       el('span', 'ag-reference-upload-chip-name', file.name),
       state,
       retry,
@@ -539,7 +569,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       if (chip) {
         chip.root.classList.add('ag-ready');
         chip.state.textContent = STATUS_LABEL[uploaded.status];
-        window.setTimeout(() => chip.root.remove(), 4000);
+        window.setTimeout(() => releaseChip(chip), 4000);
       }
       return uploaded;
     } catch (caught) {
@@ -557,7 +587,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
 
   function stageFiles(files: File[]): void {
     const target = targetFor('chat', options.getContext());
-    if (!target) return;
+    if (!target || connectionState !== 'connected') return;
     for (const file of validateFiles(files)) {
       const chip = pendingChip(file);
       chip.target = target;
@@ -595,7 +625,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
   function discardDrafts(): void {
     for (const chip of draftUploads.splice(0)) {
       chip.cancelled = true;
-      chip.root.remove();
+      releaseChip(chip);
       if (chip.staged && chip.target) {
         void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
       }
@@ -606,7 +636,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
   function takeReadyDrafts(): StagedReference[] {
     if (draftUploads.some((chip) => chip.uploadState !== 'ready' || !chip.staged)) return [];
     const batch = draftUploads.splice(0);
-    for (const chip of batch) chip.root.remove();
+    for (const chip of batch) releaseChip(chip);
     options.onDraftStateChange?.();
     return batch.map((chip) => chip.staged!);
   }
@@ -692,12 +722,14 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     page.addEventListener(type, (event) => {
       if (!open || !scopeTarget()) return;
       event.preventDefault();
+      event.stopPropagation();
       page.classList.add('ag-dragging');
     });
   }
   for (const type of ['dragleave', 'drop']) {
     page.addEventListener(type, (event) => {
       event.preventDefault();
+      event.stopPropagation();
       page.classList.remove('ag-dragging');
     });
   }
@@ -739,6 +771,9 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     hasBlockingDrafts: () => draftUploads.some((chip) => chip.uploadState !== 'ready'),
     takeReadyDrafts,
     discardDrafts,
+    stageDraftFiles: stageFiles,
+    hasImageDrafts: () => draftUploads.some((chip) => isImageFile(chip.file)),
+    allDraftsAreImages: () => draftUploads.length > 0 && draftUploads.every((chip) => isImageFile(chip.file)),
     openFile,
     async refresh(): Promise<void> {
       await Promise.all([refreshCounts(), open ? refreshActiveScope() : Promise.resolve()]);

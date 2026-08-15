@@ -17,6 +17,7 @@ const CATALOG_CACHE_FILE = 'models-cache.json';
  * @property {number|null} contextLength
  * @property {{ prompt: number, completion: number }} pricing 토큰 1개당 USD (OpenRouter 원본 단위)
  * @property {boolean} reasoning
+ * @property {boolean} supportsImages
  */
 
 function openRouterError(code, message) {
@@ -50,6 +51,14 @@ function isTextModel(entry) {
   return inputOk && outputOk;
 }
 
+function supportsImages(entry) {
+  const arch = entry?.architecture ?? {};
+  const inputs = arch.input_modalities;
+  if (Array.isArray(inputs)) return inputs.includes('image');
+  const modality = typeof arch.modality === 'string' ? arch.modality : '';
+  return modality ? modality.split('->')[0].includes('image') : false;
+}
+
 /** @returns {CatalogModel} */
 function mapModel(entry) {
   const id = String(entry.id);
@@ -66,6 +75,7 @@ function mapModel(entry) {
       completion: toPrice(entry?.pricing?.completion),
     },
     reasoning: params.includes('reasoning') || params.includes('include_reasoning'),
+    supportsImages: supportsImages(entry),
   };
 }
 

@@ -312,6 +312,15 @@
   white-space: nowrap;
 }
 
+.ag-reference-upload-preview {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--ag-bg);
+}
+
 .ag-reference-upload-chip-state { color: var(--ag-text-muted); }
 .ag-reference-upload-chip.ag-ready { border-color: color-mix(in srgb, var(--ag-ok) 40%, var(--ag-border)); }
 .ag-reference-upload-chip.ag-error { border-color: color-mix(in srgb, var(--ag-err) 55%, var(--ag-border)); }
@@ -366,6 +375,22 @@
   background: color-mix(in srgb, var(--ag-bg) 90%, transparent);
   color: var(--ag-text);
   font-size: var(--font-size-md, 13px);
+  pointer-events: none;
+}
+
+.ag-root.ag-attachment-dragging::after {
+  content: '놓아서 메시지에 첨부';
+  position: absolute;
+  inset: 10px;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--ag-accent);
+  border-radius: var(--ag-r-panel);
+  background: color-mix(in srgb, var(--ag-bg) 92%, transparent);
+  color: var(--ag-text);
+  font-size: var(--font-size-md, 13px);
+  font-weight: 650;
   pointer-events: none;
 }
 

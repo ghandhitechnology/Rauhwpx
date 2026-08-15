@@ -184,6 +184,7 @@ export function normalizeReferenceFile(
     ...(typeof item.sha256 === 'string' ? { sha256: item.sha256 } : {}),
     ...(Number.isSafeInteger(chunkCount) && chunkCount >= 0 ? { chunkCount } : {}),
     ...(typeof item.error === 'string' && item.error ? { error: item.error } : {}),
+    kind: item.kind === 'image' ? 'image' : 'document',
   };
 }
 
@@ -392,6 +393,7 @@ function readPiModelConfig(value: unknown): PiModelConfig | null {
     id,
     name,
     reasoning: src['reasoning'] === true,
+    supportsImages: src['supportsImages'] === true,
     efforts: isStringArray(src['efforts']) ? src['efforts'] : [],
     defaultEffort: typeof src['defaultEffort'] === 'string' ? src['defaultEffort'] : '',
     contextLength: num(src['contextLength']),
@@ -439,6 +441,7 @@ function readPiCatalogModel(value: unknown): PiCatalogModel | null {
     contextLength: num(src['contextLength']),
     pricing: readPiPricing(src['pricing']),
     reasoning: src['reasoning'] === true,
+    supportsImages: src['supportsImages'] === true,
   };
 }
 
