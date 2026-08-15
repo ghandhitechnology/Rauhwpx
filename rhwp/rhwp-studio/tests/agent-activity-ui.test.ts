@@ -75,11 +75,15 @@ test('tool calls stay collapsed while the header names active tools', () => {
   assert.match(css, /\.ag-tool-row\s*\{[^}]*flex:\s*0 0 auto;/s);
   assert.match(css, /\.ag-activity-collapsed \.ag-activity-content\s*\{[^}]*overflow:\s*hidden;/s);
   assert.match(css, /\.ag-activity-toggle\s*\{[^}]*align-items:\s*center;/s);
-  assert.match(css, /\.ag-activity-toggle\s*\{[^}]*justify-content:\s*center;/s);
-  assert.match(css, /\.ag-activity-toggle\s*\{[^}]*text-align:\s*center;/s);
+  assert.match(css, /\.ag-activity-toggle\s*\{[^}]*justify-content:\s*flex-start;/s);
+  assert.match(css, /\.ag-activity-toggle\s*\{[^}]*text-align:\s*left;/s);
   assert.match(css, /\.ag-activity-toggle\s*\{[^}]*line-height:\s*1;/s);
   assert.match(css, /\.ag-activity-label\s*\{[^}]*flex:\s*0 1 auto;[^}]*line-height:\s*1;/s);
   assert.match(css, /\.ag-activity-chevron\s*\{[^}]*position:\s*absolute;[^}]*right:\s*10px;/s);
+  assert.match(
+    css,
+    /\.ag-activity-collapsed \.ag-activity-content\s*\{[^}]*padding-top:\s*0;[^}]*padding-bottom:\s*0;[^}]*border-top-color:\s*transparent;/s,
+  );
 });
 
 test('long tasks request meaningful updates without artificial heartbeats', () => {

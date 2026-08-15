@@ -45,6 +45,7 @@ const SKILLS_SOURCE_DIR = path.join(MODULE_DIR, 'pi', 'skills');
  * @property {string} id OpenRouter 모델 id
  * @property {string} name 사용자가 붙인 표시 이름
  * @property {boolean} reasoning
+ * @property {boolean} supportsImages
  * @property {string[]} efforts
  * @property {string|null} defaultEffort
  * @property {number|null} contextLength
@@ -190,6 +191,7 @@ export function createPiManager({
       id: raw.id,
       name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : raw.id,
       reasoning,
+      supportsImages: raw.supportsImages === true,
       efforts,
       defaultEffort,
       contextLength: Number.isFinite(contextLength) && contextLength > 0 ? Math.round(contextLength) : null,
@@ -271,7 +273,7 @@ export function createPiManager({
         id: model.id,
         name: model.name,
         reasoning: model.reasoning,
-        input: ['text'],
+        input: model.supportsImages ? ['text', 'image'] : ['text'],
         contextWindow: model.contextLength ?? DEFAULT_CONTEXT_WINDOW,
         maxTokens: DEFAULT_MAX_TOKENS,
         ...(model.reasoning ? { thinkingLevelMap: thinkingLevelMap() } : {}),
@@ -608,6 +610,7 @@ export function createPiManager({
           id,
           name,
           reasoning: entry.reasoning,
+          supportsImages: entry.supportsImages,
           efforts,
           defaultEffort,
           contextLength: entry.contextLength,

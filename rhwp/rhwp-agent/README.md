@@ -188,7 +188,9 @@ bearer token as the WebSocket connection:
 
 Uploads are streamed through bounded staging files, SHA-256 deduplicated, and
 persisted with atomic metadata updates. Supported formats are plain text,
-Markdown, CSV/TSV, JSON, HTML/XML, PDF, DOCX, HWP, HWPX, and HML. HWP-family
+Markdown, CSV/TSV, JSON, HTML/XML, PDF, DOCX, HWP, HWPX, HML, PNG, JPEG, WebP,
+and GIF. Images are available as native vision references without OCR or text
+indexing. HWP-family
 extraction uses this project's `rhwp export-text` binary when available and
 fails explicitly when it is not. Search uses a Korean-aware lexical/BM25 index.
 The hub adds a bounded set of relevant global, document, and chat excerpts to
@@ -204,14 +206,15 @@ enter scope counts and expire after 12 hours.
 Studio should repeat the IDs on `chat-user-message`; the hub rejects stale IDs
 before retrieval while continuing to accept legacy messages that omit them.
 
-## MCP tools (server name `rhwp`, 41 tools)
+## MCP tools (server name `rhwp`, 49 tools)
 
 Visible to Claude as `mcp__rhwp__<name>`.
 
 - Product skill support: `read_product_skill` (enabled skills and their text
   resources only; no arbitrary local paths)
 - Reference read: `list_reference_files`, `search_reference_files`,
-  `read_reference_chunk` (restricted to global + active document + active chat)
+  `read_reference_chunk`, `read_reference_image` (restricted to global + active
+  document + active chat)
 - Read: `get_structure` (entry point; includes tables), `get_text_range`,
   `get_selection`, `get_fields`, `get_document_info` (includes `fontsUsed`),
   `find_text` (searches cells too), `render_page` (SVG markup or PNG image),

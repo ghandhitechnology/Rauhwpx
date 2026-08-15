@@ -106,6 +106,7 @@ const PI_MODEL: PiModelConfig = {
   id: 'deepseek/deepseek-chat-v3.1',
   name: '내 모델',
   reasoning: true,
+  supportsImages: false,
   efforts: ['low', 'medium', 'high'],
   defaultEffort: 'medium',
   contextLength: 128000,

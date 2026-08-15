@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 48개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 48);
+test('도구는 정확히 49개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 49);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -47,7 +47,7 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 40);
+  assert.equal(direct.size, 41);
   assert.ok(direct.has('insert_text'));
   assert.ok(direct.has('replace_all'));
   assert.ok(direct.has('insert_footnote'));
@@ -63,6 +63,7 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(planning.has('browserbase_act'));
   assert.ok(planning.has('present_implementation_plan'));
   assert.ok(planning.has('read_reference_chunk'));
+  assert.ok(planning.has('read_reference_image'));
   assert.ok(!planning.has('insert_text'));
 
   const implementing = new Set(filterToolDefinitions('implementing').map((definition) => definition.name));
@@ -105,7 +106,7 @@ test('신규 도구 5개가 모두 있다', () => {
 });
 
 test('reference tools are read-only and carry bounded schemas', () => {
-  for (const name of ['list_reference_files', 'search_reference_files', 'read_reference_chunk']) {
+  for (const name of ['list_reference_files', 'search_reference_files', 'read_reference_chunk', 'read_reference_image']) {
     assert.equal(byName.get(name)?.category, 'reference-read');
   }
   assert.ok(byName.get('search_reference_files').shape.maxResults.safeParse(20).success);

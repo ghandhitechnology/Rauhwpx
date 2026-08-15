@@ -9,6 +9,7 @@ import {
   labelForEffort,
   labelForModel,
   modelsForAgent,
+  modelSupportsImages,
   resolveEffortForAgent,
   resolveModelForAgent,
   setPiModels,
@@ -62,6 +63,7 @@ const PI_MODEL_A: PiModelConfig = {
   id: 'deepseek/deepseek-chat-v3.1',
   name: '내 모델 A',
   reasoning: true,
+  supportsImages: false,
   efforts: ['low', 'medium', 'high'],
   defaultEffort: 'medium',
   contextLength: 128000,
@@ -72,6 +74,7 @@ const PI_MODEL_B: PiModelConfig = {
   id: 'openai/gpt-oss-20b',
   name: '내 모델 B',
   reasoning: false,
+  supportsImages: true,
   efforts: [],
   defaultEffort: '',
   contextLength: 32000,
@@ -105,6 +108,9 @@ test('pi 모델 레지스트리가 채워지면 표시 이름 · effort · 기�
     assert.equal(labelForModel('pi', 'unknown/model'), 'unknown/model');
     assert.equal(isModelForAgent('pi', 'openai/gpt-oss-20b'), true);
     assert.equal(isModelForAgent('pi', 'unknown/model'), false);
+    assert.equal(modelSupportsImages('pi', 'deepseek/deepseek-chat-v3.1'), false);
+    assert.equal(modelSupportsImages('pi', 'openai/gpt-oss-20b'), true);
+    assert.equal(modelSupportsImages('codex', 'gpt-5.6-sol'), true);
 
     // 등록되지 않은 모델은(레지스트리가 비어 있지 않으므로) 첫 모델로 접힌다.
     assert.equal(resolveModelForAgent('pi', 'unknown/model'), 'deepseek/deepseek-chat-v3.1');
