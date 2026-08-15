@@ -26,6 +26,16 @@ const desktopMain = readFileSync(
   'utf8',
 );
 
+const menuBarCss = readFileSync(
+  new URL('../src/styles/menu-bar.css', import.meta.url),
+  'utf8',
+);
+
+const agentSidebarCss = readFileSync(
+  new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url),
+  'utf8',
+);
+
 test('macOS releases select and verify the Xcode Developer ID identity', () => {
   assert.equal(rootPackage.build?.mac?.identity, CERTIFICATE_SELECTOR);
   assert.equal(rootPackage.build?.mac?.notarize, true);
@@ -48,4 +58,38 @@ test('desktop window shows even if ready-to-show already fired during load', () 
   assert.match(desktopMain, /await ensureAgent\(\);\s*await createWindow\(\);/s);
   assert.match(desktopMain, /preload: PRELOAD_PATH/);
   assert.match(desktopMain, /ipcMain.handle\('agent-hub:ensure'/);
+});
+
+test('macOS title-bar drag regions never cover interactive controls', () => {
+  assert.match(desktopMain, /trafficLightPosition:\s*\{ x: 14, y: 12 \}/);
+  assert.match(menuBarCss, /--desktop-titlebar-height:\s*38px/);
+  assert.match(menuBarCss, /--desktop-traffic-light-inset:\s*78px/);
+  assert.match(
+    menuBarCss,
+    /html\.desktop-mac #menu-bar\s*\{[^}]*-webkit-app-region:\s*no-drag/s,
+  );
+  assert.match(
+    menuBarCss,
+    /html\.desktop-mac #menu-bar::after\s*\{[^}]*-webkit-app-region:\s*drag/s,
+  );
+  assert.match(
+    menuBarCss,
+    /html\.desktop-mac body\.ag-fullscreen-open #menu-bar::after\s*\{[^}]*-webkit-app-region:\s*no-drag/s,
+  );
+  assert.match(
+    menuBarCss,
+    /html\.desktop-mac #menu-bar \.menu-item\s*\{[^}]*-webkit-app-region:\s*no-drag/s,
+  );
+  assert.match(
+    agentSidebarCss,
+    /html\.desktop-mac \.ag-fullscreen \.ag-workspace-bar\s*\{[^}]*-webkit-app-region:\s*no-drag/s,
+  );
+  assert.match(
+    agentSidebarCss,
+    /html\.desktop-mac \.ag-fullscreen \.ag-workspace-leading\s*\{[^}]*padding-left:\s*calc\(10px \+ var\(--desktop-traffic-light-inset/s,
+  );
+  assert.match(
+    agentSidebarCss,
+    /html\.desktop-mac \.ag-fullscreen \.ag-workspace-bar button,[\s\S]*?-webkit-app-region:\s*no-drag/,
+  );
 });

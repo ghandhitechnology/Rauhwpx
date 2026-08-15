@@ -242,11 +242,12 @@ async function createWindow() {
     minHeight: 640,
     show: false,
     backgroundColor,
-    // macOS: hide the native title bar so the studio menu bar sits at the very
-    // top; traffic lights are repositioned to center inside that 28px row.
+    // macOS: hide the native title bar so the studio owns the top row. The
+    // renderer reserves a matching 38px title-bar row and keeps every control
+    // outside the traffic-light hit area.
     ...(isMac ? {
       titleBarStyle: 'hidden',
-      trafficLightPosition: { x: 14, y: 8 },
+      trafficLightPosition: { x: 14, y: 12 },
     } : {}),
     webPreferences: {
       preload: PRELOAD_PATH,
