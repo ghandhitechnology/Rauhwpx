@@ -1702,6 +1702,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: var(--ag-text);
   font-size: var(--font-size-md, 13px);
   line-height: 1.7;
+  white-space: normal;
+  word-break: keep-all;
+  line-break: strict;
+  overflow-wrap: anywhere;
 }
 
 .ag-msg-assistant.ag-msg-enter {
@@ -2725,6 +2729,23 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-md-em { font-style: italic; }
 
+.ag-md-del { color: var(--ag-text-muted); }
+
+.ag-md-link {
+  color: var(--ag-accent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+  text-underline-offset: 2px;
+}
+
+.ag-md-link:hover { text-decoration-color: currentColor; }
+
+.ag-md-link:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid var(--ag-focus);
+  outline-offset: 2px;
+}
+
 /* 인라인 코드는 파일 경로 표기이기도 하다 — 통일한 한 가지 형태만 쓴다. */
 .ag-md-code {
   padding: 0 3px;
@@ -2757,6 +2778,87 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   border: 0;
   border-top: 1px solid var(--ag-border);
 }
+
+.ag-md-table-wrap {
+  max-width: 100%;
+  margin: 2px 0 10px;
+  overflow-x: auto;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-panel);
+}
+
+.ag-md-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--ag-bg);
+  font-size: 0.94em;
+}
+
+.ag-md-table th,
+.ag-md-table td {
+  min-width: 72px;
+  padding: 6px 8px;
+  border-right: 1px solid var(--ag-border);
+  border-bottom: 1px solid var(--ag-border);
+  color: var(--ag-text);
+  text-align: left;
+  vertical-align: top;
+}
+
+.ag-md-table th {
+  background: var(--ag-bg-2);
+  font-weight: 700;
+}
+
+.ag-md-table tr:last-child td { border-bottom: 0; }
+.ag-md-table th:last-child,
+.ag-md-table td:last-child { border-right: 0; }
+.ag-md-table .ag-md-align-center { text-align: center; }
+.ag-md-table .ag-md-align-right { text-align: right; }
+
+.ag-md-math {
+  max-width: 100%;
+  color: var(--ag-text);
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.ag-md-math-inline {
+  display: inline-block;
+  overflow-x: auto;
+  vertical-align: -0.2em;
+}
+
+.ag-md-math-display {
+  margin: 4px 0 10px;
+  padding: 4px 0;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.ag-md-math math {
+  font-family: math, var(--ag-font);
+  font-size: 1.04em;
+}
+
+.ag-md-math-display math { display: block; }
+
+.ag-msg-assistant > :first-child { margin-top: 0; }
+.ag-msg-assistant > :last-child { margin-bottom: 0; }
+.ag-msg-assistant .ag-md-p { color: inherit; }
+.ag-msg-assistant .ag-md-h {
+  font-size: 1em;
+  letter-spacing: 0;
+}
+
+.ag-progress-milestone {
+  white-space: normal;
+  word-break: keep-all;
+  line-break: strict;
+  overflow-wrap: anywhere;
+}
+
+.ag-progress-milestone > :last-child { margin-bottom: 0; }
 
 /* 사이드바 폭에서는 여백을 줄여 읽기 폭을 지킨다. */
 .ag-root:not(.ag-fullscreen) .ag-plan-head,

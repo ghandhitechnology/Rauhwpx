@@ -5,9 +5,12 @@ import {
   appendMarkdown,
   escapeMarkdown,
   planToMarkdown,
+  safeMarkdownHref,
   tokenizeInline,
   tokenizeMarkdown,
+  type MarkdownRenderOptions,
 } from '../src/ui/agent-sidebar/plan-markdown.ts';
+import { normalizeKoreanLatex } from '../src/ui/agent-sidebar/chat-markdown.ts';
 import type { StructuredPlan } from '../src/agent/types.ts';
 
 /* DOM 없이 렌더러를 검증하는 최소 노드. 실제 Document 와 같은 형태만 흉내낸다. */
@@ -64,9 +67,9 @@ const host = {
   createDocumentFragment: () => new FakeNode('#fragment'),
 };
 
-function render(src: string): FakeNode {
+function render(src: string, options: MarkdownRenderOptions = {}): FakeNode {
   const root = new FakeNode('div');
-  appendMarkdown(root as never, src, host as never);
+  appendMarkdown(root as never, src, host as never, options);
   return root;
 }
 
@@ -122,12 +125,94 @@ test('인라인 토크나이저가 코드·강조를 나누고 링크는 표시 
     { kind: 'em', text: 'd' },
   ]);
   assert.deepEqual(tokenizeInline('[문서](https://example.com)를 보세요'), [
-    { kind: 'text', text: '문서를 보세요' },
+    { kind: 'link', text: '문서', href: 'https://example.com' },
+    { kind: 'text', text: '를 보세요' },
   ]);
 });
 
-test('렌더러는 HTML 을 글자로만 남기고 링크 요소를 만들지 않는다', () => {
-  const root = render('<img src=x onerror=alert(1)> [클릭](javascript:alert(1))\n\n<script>bad()</script>');
+test('한국어 조사·식별자와 맞닿은 강조 문법을 과하게 해석하지 않는다', () => {
+  assert.deepEqual(tokenizeInline('**중요**합니다. *강조*는 유지하고 변수_이름_값은 그대로 둡니다.'), [
+    { kind: 'strong', text: '중요' },
+    { kind: 'text', text: '합니다. ' },
+    { kind: 'em', text: '강조' },
+    { kind: 'text', text: '는 유지하고 변수_이름_값은 그대로 둡니다.' },
+  ]);
+});
+
+test('한국어 키보드의 원화 기호는 수식 안에서만 LaTeX 백슬래시로 복구한다', () => {
+  assert.equal(normalizeKoreanLatex('₩frac{1}{2} + ￦alpha'), '\\frac{1}{2} + \\alpha');
+  assert.equal(render('가격은 ₩10,000이고 ₩frac는 일반 텍스트입니다.').textContent,
+    '가격은 ₩10,000이고 ₩frac는 일반 텍스트입니다.');
+});
+
+test('인라인·블록 수식과 한국어 원화 기호 구분자를 토큰화한다', () => {
+  assert.deepEqual(tokenizeInline('공식 $E=mc^2$는 같고 ₩(x+1₩)도 같습니다.'), [
+    { kind: 'text', text: '공식 ' },
+    { kind: 'math', source: 'E=mc^2', raw: '$E=mc^2$' },
+    { kind: 'text', text: '는 같고 ' },
+    { kind: 'math', source: 'x+1', raw: '₩(x+1₩)' },
+    { kind: 'text', text: '도 같습니다.' },
+  ]);
+  const blocks = tokenizeMarkdown('$$\n\\frac{가}{나}\n$$');
+  assert.deepEqual(blocks, [{
+    kind: 'math',
+    source: '\\frac{가}{나}',
+    raw: '$$\n\\frac{가}{나}\n$$',
+  }]);
+});
+
+test('닫히지 않은 수식과 이스케이프된 달러는 원문으로 남는다', () => {
+  assert.deepEqual(tokenizeMarkdown('$$\n아직 작성 중'), [
+    { kind: 'paragraph', text: '$$ 아직 작성 중' },
+  ]);
+  assert.equal(render('가격은 \\$5입니다.').textContent, '가격은 $5입니다.');
+  assert.equal(render(String.raw`경로 C:\Users\andy와 \frac는 그대로`).textContent,
+    String.raw`경로 C:\Users\andy와 \frac는 그대로`);
+});
+
+test('한국어 NFC·NFD와 입력 한계의 마지막 Unicode 문자를 훼손하지 않는다', () => {
+  const korean = '한글 한글 e\u0301';
+  assert.equal(render(korean).textContent, korean);
+  const clipped = tokenizeMarkdown(`${'a'.repeat(119_999)}😀뒤`)[0];
+  assert.ok(clipped?.kind === 'paragraph');
+  assert.equal(clipped.text.endsWith('\uD83D'), false);
+  assert.equal(clipped.text.includes('�'), false);
+});
+
+test('표와 명시적 줄바꿈을 네이티브 문서 구조로 렌더링한다', () => {
+  const root = render('항목 | 값\n--- | ---:\n한글 | **좋음**\n\n첫 줄  \n둘째 줄');
+  assert.equal(root.find('ag-md-table').length, 1);
+  assert.equal(root.find('ag-md-align-right').length, 2);
+  assert.equal(root.find('ag-md-break').length, 1);
+  assert.equal(root.textContent, '항목값한글좋음첫 줄둘째 줄');
+});
+
+test('채팅 링크는 안전한 외부 프로토콜만 활성화한다', () => {
+  assert.equal(safeMarkdownHref('https://한글.example/문서'), 'https://한글.example/문서');
+  assert.equal(safeMarkdownHref('mailto:test@example.com'), 'mailto:test@example.com');
+  assert.equal(safeMarkdownHref('javascript:alert(1)'), null);
+  assert.equal(safeMarkdownHref('/local/path'), null);
+  const root = render('[문서](https://example.com)', { links: true });
+  assert.equal(root.find('ag-md-link')[0]?.attrs.rel, 'noopener noreferrer');
+});
+
+test('수식 렌더러 실패 시 원문을 보존하고 성공 시 결과를 사용한다', () => {
+  const failed = render('$x$', { renderMath: () => false });
+  assert.equal(failed.textContent, '$x$');
+  const rendered = render('$x$', {
+    renderMath: (node) => {
+      node.textContent = '수식';
+      return true;
+    },
+  });
+  assert.equal(rendered.textContent, '수식');
+});
+
+test('렌더러는 HTML 과 위험한 링크를 실행 가능한 요소로 만들지 않는다', () => {
+  const root = render(
+    '<img src=x onerror=alert(1)> [클릭](javascript:alert(1))\n\n<script>bad()</script>',
+    { links: true },
+  );
   const tags = new Set<string>();
   const walk = (node: FakeNode): void => {
     tags.add(node.tag);
