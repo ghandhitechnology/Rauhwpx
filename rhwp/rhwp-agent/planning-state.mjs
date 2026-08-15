@@ -177,7 +177,7 @@ export function buildApprovedPlanPrompt(approved) {
   return [
     'The user approved the following hub-authoritative implementation plan.',
     `Plan ID: ${approved.planId}`,
-    'Implement this canonical plan now. Do not re-plan or substitute a different plan. Respect the current permission profile and report any blocker.',
+    'Implement this canonical plan now. Do not re-plan, omit steps, or substitute a different plan. First re-read the relevant current state, then execute every canonical step thoroughly and run every listed validation. Respect the current permission profile. In the final report, distinguish completed, blocked, and deferred items and validation results; never claim partial work is complete.',
     // 승인 메시지는 promptContext 를 거치지 않는다 — 구현 단계 첫 턴이 규율 없이 시작하지 않도록 여기서 얹는다.
     humanizerPromptBlock('implementing'),
     JSON.stringify(approved.plan, null, 2),
