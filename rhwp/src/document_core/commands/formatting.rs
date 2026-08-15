@@ -1000,6 +1000,35 @@ impl DocumentCore {
             )));
         }
 
+        self.apply_char_format_mutate_and_reflow(
+            sec_idx,
+            para_idx,
+            start_offset,
+            end_offset,
+            props_json,
+        );
+
+        self.rebuild_section(sec_idx);
+        self.event_log.push(DocumentEvent::CharFormatChanged {
+            section: sec_idx,
+            para: para_idx,
+            start: start_offset,
+            end: end_offset,
+        });
+        Ok("{\"ok\":true}".to_string())
+    }
+
+    /// 본문 문단 한 범위에 글자 서식 변형·(흐름 영향 시) 리플로우·vpos 재계산까지
+    /// 적용한다. 페이지네이션(`rebuild_section`)은 호출측 몫이다. 인덱스는
+    /// 호출측이 검증한다.
+    fn apply_char_format_mutate_and_reflow(
+        &mut self,
+        sec_idx: usize,
+        para_idx: usize,
+        start_offset: usize,
+        end_offset: usize,
+        props_json: &str,
+    ) {
         let mut mods = parse_char_shape_mods(props_json);
         // border/fill JSON이 있으면 BorderFill 생성/재사용하여 border_fill_id 설정
         if json_has_border_keys(props_json) {
@@ -1017,33 +1046,11 @@ impl DocumentCore {
         // 읽혀 가짜 페이지가 생겼다 — 저장 후 다시 열면 사라지는 쪽수 표류의 원인.
         // 또 항상 첫 단(column 0) 폭으로 리플로우해 다단 문서에서 폭이 틀렸다.
         if char_shape_mods_affect_text_flow(&mods) {
-            // 방금 만든 char shape 가 캐시에 없을 수 있으므로 스타일부터 갱신한다.
-            self.styles = resolve_styles(&self.document.doc_info, self.dpi);
-            let stored_end_for_reset = crate::renderer::composer::paragraph_flow_end(
-                &self.document.sections[sec_idx].paragraphs[para_idx],
-            );
-            self.reflow_paragraph(sec_idx, para_idx);
-            let doc_hwp3_layout = self.document.layout_profile().hwp3_layout();
-            crate::renderer::composer::recalculate_section_vpos(
-                &mut self.document.sections[sec_idx].paragraphs,
-                para_idx,
-                None,
-                stored_end_for_reset,
-                &self.styles,
-                self.dpi,
-                doc_hwp3_layout,
-            );
+            // 스타일 재해소·흐름 끝 캡처·리플로우·vpos 재계산의 공통 수명주기.
+            self.reflow_body_para_and_recalc_flow(sec_idx, para_idx);
         }
 
         self.document.sections[sec_idx].raw_stream = None;
-        self.rebuild_section(sec_idx);
-        self.event_log.push(DocumentEvent::CharFormatChanged {
-            section: sec_idx,
-            para: para_idx,
-            start: start_offset,
-            end: end_offset,
-        });
-        Ok("{\"ok\":true}".to_string())
     }
 
     /// 여러 구역에 걸친 본문 선택에 글자 서식을 적용한다.
@@ -1106,14 +1113,28 @@ impl DocumentCore {
             }
         }
 
-        for (section_idx, para_idx, start_offset, end_offset) in ranges {
-            self.apply_char_format_native(
+        // 문단별로 변형·리플로우만 수행하고, 재조판(페이지네이션)은 구역당 한 번.
+        let mut touched_sections = std::collections::BTreeSet::new();
+        for &(section_idx, para_idx, start_offset, end_offset) in &ranges {
+            self.apply_char_format_mutate_and_reflow(
                 section_idx,
                 para_idx,
                 start_offset,
                 end_offset,
                 props_json,
-            )?;
+            );
+            touched_sections.insert(section_idx);
+        }
+        for section_idx in touched_sections {
+            self.rebuild_section(section_idx);
+        }
+        for (section_idx, para_idx, start_offset, end_offset) in ranges {
+            self.event_log.push(DocumentEvent::CharFormatChanged {
+                section: section_idx,
+                para: para_idx,
+                start: start_offset,
+                end: end_offset,
+            });
         }
         Ok("{\"ok\":true}".to_string())
     }
@@ -1474,6 +1495,25 @@ impl DocumentCore {
             )));
         }
 
+        self.apply_para_format_mutate_and_reflow(sec_idx, para_idx, props_json);
+
+        self.rebuild_section(sec_idx);
+        self.event_log.push(DocumentEvent::ParaFormatChanged {
+            section: sec_idx,
+            para: para_idx,
+        });
+        Ok("{\"ok\":true}".to_string())
+    }
+
+    /// 본문 문단 하나에 문단 서식 변형·리플로우·vpos 재계산까지 적용한다.
+    /// 페이지네이션(`rebuild_section`)은 호출측 몫이다 — 범위 서식은 구역당
+    /// 한 번만 재조판하기 위해서다. 인덱스는 호출측이 검증한다.
+    fn apply_para_format_mutate_and_reflow(
+        &mut self,
+        sec_idx: usize,
+        para_idx: usize,
+        props_json: &str,
+    ) {
         let mut mods = parse_para_shape_mods(props_json);
 
         // 탭 설정 변경 처리: TabDef 생성 → tab_def_id 세팅
@@ -1509,36 +1549,44 @@ impl DocumentCore {
         self.document.sections[sec_idx].paragraphs[para_idx].para_shape_id = new_id;
 
         // 여백/들여쓰기/머리 모양도 줄 폭과 높이를 바꾸므로 항상 재계산한다.
-        {
-            let styles = resolve_styles(&self.document.doc_info, self.dpi);
-            let section = &self.document.sections[sec_idx];
-            let page_def = &section.section_def.page_def;
-            let column_def = DocumentCore::find_initial_column_def(&section.paragraphs);
-            let layout = PageLayoutInfo::from_page_def(page_def, &column_def, self.dpi);
-            let col_width = layout
-                .column_areas
-                .first()
-                .map(|a| a.width)
-                .unwrap_or(layout.body_area.width);
-            let para_style = styles.para_styles.get(new_id as usize);
-            let margin_left = para_style.map(|s| s.margin_left).unwrap_or(0.0);
-            let margin_right = para_style.map(|s| s.margin_right).unwrap_or(0.0);
-            let available_width = (col_width - margin_left - margin_right).max(1.0);
-            reflow_line_segs(
-                &mut self.document.sections[sec_idx].paragraphs[para_idx],
-                available_width,
-                &styles,
-                self.dpi,
-            );
-        }
+        // 글자 서식 편집과 같은 수명주기를 쓴다: 리플로우 전에 흐름 끝을 캡처하고,
+        // 대상 문단만 다단 정합 폭으로 리플로우한 뒤, 아래 문단들의 vpos 사다리를
+        // 페이지네이션 전에 이어 붙인다. 종전에는 이 전파가 없어 편집본과
+        // 저장·재열기 쪽수가 달랐다.
+        self.reflow_body_para_and_recalc_flow(sec_idx, para_idx);
 
         self.document.sections[sec_idx].raw_stream = None;
-        self.rebuild_section(sec_idx);
-        self.event_log.push(DocumentEvent::ParaFormatChanged {
-            section: sec_idx,
-            para: para_idx,
-        });
-        Ok("{\"ok\":true}".to_string())
+    }
+
+    /// 흐름 영향 문단 편집의 공통 수명주기: 스타일 재해소 → 흐름 끝 캡처 →
+    /// 대상 문단 리플로우 → 구역 vpos 재계산. 페이지네이션(`rebuild_section`)은
+    /// 호출측이 수행한다. 본문 스코프 전용 — 셀/각주/머리말 문단은 각자의
+    /// 지역 리플로우 경로를 유지한다.
+    pub(crate) fn reflow_body_para_and_recalc_flow(&mut self, sec_idx: usize, para_idx: usize) {
+        if self
+            .document
+            .sections
+            .get(sec_idx)
+            .and_then(|s| s.paragraphs.get(para_idx))
+            .is_none()
+        {
+            return;
+        }
+        self.styles = resolve_styles(&self.document.doc_info, self.dpi);
+        let stored_end_for_reset = crate::renderer::composer::paragraph_flow_end(
+            &self.document.sections[sec_idx].paragraphs[para_idx],
+        );
+        self.reflow_paragraph(sec_idx, para_idx);
+        let doc_hwp3_layout = self.document.layout_profile().hwp3_layout();
+        crate::renderer::composer::recalculate_section_vpos(
+            &mut self.document.sections[sec_idx].paragraphs,
+            para_idx,
+            None,
+            stored_end_for_reset,
+            &self.styles,
+            self.dpi,
+            doc_hwp3_layout,
+        );
     }
 
     /// 여러 구역에 걸친 본문 선택의 모든 문단에 문단 서식을 적용한다.
@@ -1586,8 +1634,20 @@ impl DocumentCore {
             }
         }
 
+        // 문단별로 변형·리플로우만 수행하고, 재조판(페이지네이션)은 구역당 한 번.
+        let mut touched_sections = std::collections::BTreeSet::new();
+        for &(section_idx, para_idx) in &targets {
+            self.apply_para_format_mutate_and_reflow(section_idx, para_idx, props_json);
+            touched_sections.insert(section_idx);
+        }
+        for section_idx in touched_sections {
+            self.rebuild_section(section_idx);
+        }
         for (section_idx, para_idx) in targets {
-            self.apply_para_format_native(section_idx, para_idx, props_json)?;
+            self.event_log.push(DocumentEvent::ParaFormatChanged {
+                section: section_idx,
+                para: para_idx,
+            });
         }
         Ok("{\"ok\":true}".to_string())
     }
@@ -1620,28 +1680,9 @@ impl DocumentCore {
             )));
         }
 
-        let styles = resolve_styles(&self.document.doc_info, self.dpi);
-        let available_width = {
-            let section = &self.document.sections[sec_idx];
-            let page_def = &section.section_def.page_def;
-            let column_def = DocumentCore::find_initial_column_def(&section.paragraphs);
-            let layout = PageLayoutInfo::from_page_def(page_def, &column_def, self.dpi);
-            let col_width = layout
-                .column_areas
-                .first()
-                .map(|a| a.width)
-                .unwrap_or(layout.body_area.width);
-            let para_style = styles.para_styles.get(para_shape_id as usize);
-            let margin_left = para_style.map(|s| s.margin_left).unwrap_or(0.0);
-            let margin_right = para_style.map(|s| s.margin_right).unwrap_or(0.0);
-            (col_width - margin_left - margin_right).max(1.0)
-        };
-
-        {
-            let para = &mut self.document.sections[sec_idx].paragraphs[para_idx];
-            para.para_shape_id = para_shape_id;
-            reflow_line_segs(para, available_width, &styles, self.dpi);
-        }
+        self.document.sections[sec_idx].paragraphs[para_idx].para_shape_id = para_shape_id;
+        // 문단 모양 ID 복원(undo)도 흐름 영향 서식 편집과 같은 수명주기를 쓴다.
+        self.reflow_body_para_and_recalc_flow(sec_idx, para_idx);
 
         self.document.sections[sec_idx].raw_stream = None;
         self.rebuild_section(sec_idx);
@@ -2030,34 +2071,6 @@ impl DocumentCore {
         base_psid
     }
 
-    /// 본문 문단의 LineSeg를 현재 CharShape/ParaShape 기준으로 다시 계산한다.
-    pub(crate) fn reflow_body_paragraph(&mut self, sec_idx: usize, para_idx: usize) {
-        let para_shape_id = match self
-            .document
-            .sections
-            .get(sec_idx)
-            .and_then(|s| s.paragraphs.get(para_idx))
-        {
-            Some(para) => para.para_shape_id,
-            None => return,
-        };
-        let styles = resolve_styles(&self.document.doc_info, self.dpi);
-        let available_width =
-            body_available_width_for_para_shape(self, sec_idx, para_shape_id, &styles);
-        if let Some(para) = self
-            .document
-            .sections
-            .get_mut(sec_idx)
-            .and_then(|s| s.paragraphs.get_mut(para_idx))
-        {
-            // line_segs 를 비우지 않는다 — reflow_line_segs 는 첫 LineSeg 의
-            // vertical_pos 를 흐름 앵커로 보존하며, 줄 높이는 항상 현재 글자
-            // 모양에서 새로 계산한다. 비우면 앵커가 0 이 되어 문서 중간에서
-            // 저장흐름 리셋으로 오인된다 (가짜 페이지 → 저장 후 쪽수 표류).
-            reflow_line_segs(para, available_width, &styles, self.dpi);
-        }
-    }
-
     /// 스타일 적용 (네이티브) — 본문 문단
     pub fn apply_style_native(
         &mut self,
@@ -2105,7 +2118,7 @@ impl DocumentCore {
                 para.text.chars().count()
             };
 
-            self.reflow_body_paragraph(sec_idx, para_idx);
+            self.reflow_body_para_and_recalc_flow(sec_idx, para_idx);
             self.document.sections[sec_idx].raw_stream = None;
             self.rebuild_section(sec_idx);
             self.event_log.push(DocumentEvent::CharFormatChanged {
@@ -2142,7 +2155,7 @@ impl DocumentCore {
             para.set_single_char_shape(new_char_shape_id);
         }
 
-        self.reflow_body_paragraph(sec_idx, para_idx);
+        self.reflow_body_para_and_recalc_flow(sec_idx, para_idx);
         self.document.sections[sec_idx].raw_stream = None;
         self.rebuild_section(sec_idx);
         self.event_log.push(DocumentEvent::ParaFormatChanged {

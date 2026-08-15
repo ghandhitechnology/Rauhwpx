@@ -107,6 +107,11 @@ export function isModelForAgent(agent: AgentName, model: string): boolean {
   return AGENT_MODELS[agent].some((m) => m.id === model);
 }
 
+export function modelSupportsImages(agent: AgentName, model?: string | null): boolean {
+  if (agent !== 'pi') return true;
+  return findPiModel(resolveModelForAgent('pi', model))?.supportsImages === true;
+}
+
 export function resolveModelForAgent(agent: AgentName, model?: string | null): string {
   if (agent === 'pi') {
     // 레지스트리가 비어 있으면(pi-status 도착 전) 저장된 값을 그대로 지켜

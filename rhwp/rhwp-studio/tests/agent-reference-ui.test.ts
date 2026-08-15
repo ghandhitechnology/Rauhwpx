@@ -47,6 +47,8 @@ test('library searches backend content and exposes loading/error/keyboard semant
   assert.match(library, /fileInput\.accept = ACCEPTED_FILES/);
   assert.match(library, /ACCEPTED_EXTENSIONS as readonly string\[\][^\n]*\.includes\(extension\)/);
   assert.doesNotMatch(library, /'\.rtf'/);
+  assert.match(library, /'\.png', '\.jpg', '\.jpeg', '\.webp', '\.gif'/);
+  assert.doesNotMatch(library, /'\.svg'/);
   assert.match(library, /page\.addEventListener\('drop'/);
   assert.match(library, /\['ArrowLeft', 'ArrowRight', 'Home', 'End'\]/);
   assert.match(library, /event\.key !== 'Escape'/);
@@ -67,11 +69,34 @@ test('composer attachments upload into removable staging drafts before their mes
   assert.match(library, /bridge\.stageReference\(chip\.target\.scopeId, chip\.file\)/);
   assert.match(library, /hasBlockingDrafts: \(\) => draftUploads\.some/);
   assert.match(library, /function takeReadyDrafts\(\): StagedReference\[\]/);
-  assert.match(sidebar, /if \(!input\.value\) referenceLibrary\.discardDrafts\(\)/);
+  assert.doesNotMatch(sidebar, /if \(!input\.value\) referenceLibrary\.discardDrafts\(\)/);
   assert.match(sidebar, /referenceLibrary\.takeReadyDrafts\(\)/);
   assert.match(sidebar, /bridge\.sendUserMessage\(text, skillNameForMessage, staged\.map/);
   assert.match(sidebar, /send\.disabled = connState !== 'connected' \|\| attachmentsSending \|\| referenceLibrary\.hasBlockingDrafts\(\)/);
   assert.match(css, /\.ag-reference-upload-remove:focus-visible/);
+});
+
+test('sidebar and fullscreen share seamless drop and pasted-image staging', () => {
+  assert.match(library, /stageDraftFiles: stageFiles/);
+  assert.match(sidebar, /root\.addEventListener\('dragenter', onAttachmentDragEnter\)/);
+  assert.match(sidebar, /root\.addEventListener\('drop', onAttachmentDrop\)/);
+  assert.match(sidebar, /input\.addEventListener\('paste', onAttachmentPaste\)/);
+  assert.match(sidebar, /clipboardImageFiles\(event\.clipboardData\)/);
+  assert.match(sidebar, /referenceLibrary\.stageDraftFiles\(images\)/);
+  assert.match(sidebar, /붙여넣은 이미지/);
+  assert.match(sidebar, /ag-attachment-dragging/);
+  assert.match(css, /\.ag-reference-upload-preview/);
+  assert.match(css, /\.ag-root\.ag-attachment-dragging::after/);
+  assert.match(library, /URL\.createObjectURL\(file\)/);
+  assert.match(library, /URL\.revokeObjectURL\(chip\.previewUrl\)/);
+});
+
+test('ready attachments can send without typed text and image models are gated', () => {
+  assert.match(sidebar, /referenceLibrary\.allDraftsAreImages\(\)/);
+  assert.match(sidebar, /첨부한 이미지를 확인해 주세요\./);
+  assert.match(sidebar, /첨부한 파일을 확인해 주세요\./);
+  assert.match(sidebar, /modelSupportsImages\(selectedAgent, selectedModel\)/);
+  assert.match(sidebar, /현재 Pi 모델은 이미지 입력을 지원하지 않습니다/);
 });
 
 test('failed staged uploads retain an accessible retry bound to the selected chat scope', () => {

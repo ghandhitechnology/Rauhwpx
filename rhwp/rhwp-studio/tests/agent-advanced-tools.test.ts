@@ -55,6 +55,9 @@ function makeHarness(initial: string[]) {
       body.splice(p, 1, { chars: cur.chars.slice(0, off) }, { chars: cur.chars.slice(off) });
       return okJson();
     },
+    splitParagraphLogical(this: any, s: number, p: number, off: number) {
+      return this.splitParagraph(s, p, off);
+    },
     deleteRange: (_s: number, sp: number, so: number, ep: number, eo: number) => {
       const merged = { chars: [...body[sp].chars.slice(0, so), ...body[ep].chars.slice(eo)] };
       body.splice(sp, ep - sp + 1, merged);

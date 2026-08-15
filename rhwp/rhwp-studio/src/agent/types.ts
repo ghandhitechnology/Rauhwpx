@@ -36,6 +36,7 @@ export interface ReferenceFile {
   sha256?: string;
   chunkCount?: number;
   error?: string;
+  kind: 'document' | 'image';
 }
 
 export interface StagedReference {
@@ -262,6 +263,7 @@ export interface PiModelConfig {
   id: string;
   name: string;
   reasoning: boolean;
+  supportsImages: boolean;
   efforts: string[];
   defaultEffort: string;
   contextLength: number;
@@ -276,6 +278,7 @@ export interface PiCatalogModel {
   contextLength: number;
   pricing: { prompt: number; completion: number };
   reasoning: boolean;
+  supportsImages: boolean;
 }
 
 /** pi 하네스(설치 · 키 · 모델) 설정 상태. */

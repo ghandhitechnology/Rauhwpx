@@ -24,6 +24,42 @@ async function stageText(store, { scopeId = 'chat-a', name = 'draft.txt', text =
   return store.stageStream({ scopeId, name, mimeType: 'text/plain', contentLength: bytes.length, stream: stream() });
 }
 
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+
+test('image references persist with zero chunks and are read only through vision', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-image-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const root = path.join(parent, 'references');
+  const first = await new ReferenceStore({ root }).init();
+  const image = await first.addBuffer({
+    scope: 'chat', scopeId: 'image-chat', name: 'capture.png', mimeType: 'image/png', bytes: PNG,
+  });
+  const text = await first.addBuffer({
+    scope: 'chat', scopeId: 'image-chat', name: 'notes.txt', mimeType: 'text/plain', bytes: Buffer.from('검색할 문서'),
+  });
+  assert.equal(image.kind, 'image');
+  assert.equal(image.chunkCount, 0);
+  assert.equal(first.search({ query: 'capture', scopes: [{ scope: 'chat', scopeId: 'image-chat' }] }).length, 0);
+  const read = await first.readImage({ fileId: image.id, scopes: [{ scope: 'chat', scopeId: 'image-chat' }] });
+  assert.equal(read.image.mimeType, 'image/png');
+  assert.deepEqual(Buffer.from(read.image.data, 'base64'), PNG);
+  await assert.rejects(
+    first.readChunk({ fileId: image.id, chunkId: 'c0', scopes: [{ scope: 'chat', scopeId: 'image-chat' }] }),
+    (error) => error.code === 'REFERENCE_NOT_TEXT',
+  );
+  await assert.rejects(
+    first.readImage({ fileId: text.id, scopes: [{ scope: 'chat', scopeId: 'image-chat' }] }),
+    (error) => error.code === 'REFERENCE_NOT_IMAGE',
+  );
+  await assert.rejects(
+    first.readImage({ fileId: image.id, scopes: [{ scope: 'chat', scopeId: 'other-chat' }] }),
+    (error) => error.code === 'REFERENCE_NOT_FOUND',
+  );
+
+  const restarted = await new ReferenceStore({ root }).init();
+  assert.ok(restarted.list({ scope: 'chat', scopeId: 'image-chat' }).some((file) => file.id === image.id && file.kind === 'image'));
+});
+
 test('staged message files stay out of counts, survive restart, and promote into their chat', async (t) => {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-stage-'));
   t.after(() => fs.rm(parent, { recursive: true, force: true }));
@@ -44,6 +80,24 @@ test('staged message files stay out of counts, survive restart, and promote into
   await assert.rejects(
     restarted.getStaged({ stageId: staged.id, scopeId: 'chat-a' }),
     (error) => error.code === 'REFERENCE_STAGE_NOT_FOUND',
+  );
+});
+
+test('staged images validate before send and promote as vision references', async (t) => {
+  const store = await storeFor(t);
+  async function* validStream() { yield PNG; }
+  const staged = await store.stageStream({
+    scopeId: 'image-chat', name: 'pasted.png', mimeType: 'image/png', contentLength: PNG.length, stream: validStream(),
+  });
+  assert.equal(staged.mimeType, 'image/png');
+  const promoted = await store.promoteStaged({ stageId: staged.id, scopeId: 'image-chat' });
+  assert.equal(promoted.kind, 'image');
+  assert.equal(promoted.chunkCount, 0);
+
+  async function* fakeStream() { yield Buffer.from('not an image'); }
+  await assert.rejects(
+    store.stageStream({ scopeId: 'image-chat', name: 'fake.png', mimeType: 'image/png', stream: fakeStream() }),
+    (error) => error.code === 'REFERENCE_TYPE_MISMATCH',
   );
 });
 
@@ -145,6 +199,9 @@ test('names, unsupported types, prompt boundaries, and Korean tokenizer are safe
   const store = await storeFor(t);
   assert.equal(sanitizeReferenceName('../../보고서.txt'), '보고서.txt');
   assert.throws(() => sanitizeReferenceName('payload.exe'), (error) => error instanceof ReferenceStoreError && error.code === 'REFERENCE_TYPE_UNSUPPORTED');
+  for (const name of ['vector.svg', 'photo.heic', 'scan.tiff']) {
+    assert.throws(() => sanitizeReferenceName(name), (error) => error instanceof ReferenceStoreError && error.code === 'REFERENCE_TYPE_UNSUPPORTED');
+  }
   assert.ok(tokenizeReferenceText('프로젝트일정').includes('g:프로'));
   await store.addBuffer({
     scope: 'global', name: 'instructions.txt',
