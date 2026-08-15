@@ -289,3 +289,36 @@ test('native paths validate extensions while Windows I/O preserves resolved case
     'c:\\docs\\report.hwp',
   );
 });
+
+test('re-acquiring a handle cancels a release pending behind an in-flight write', async () => {
+  let finishWrite: (() => void) | undefined;
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async () => '/canonical/report.hwp',
+    createId: () => 'writer',
+    writeFileImpl: async () => new Promise<void>((resolve) => { finishWrite = resolve; }),
+  });
+  const opened = await registry.create('session-a', '/report.hwp');
+  assert.equal(opened.ok, true);
+  if (!opened.ok) return;
+  const leases = new DocumentLeaseManager({ createId: () => 'open' });
+  const active = identity('document-a', 'blake3:a');
+  const reservation = leases.reserve(
+    'session-a', active, registry.pathForSender('session-a', opened.descriptor.handleId),
+  );
+  assert.equal(reservation.ok, true);
+  if (!reservation.ok) return;
+  leases.commit('session-a', reservation.reservationId);
+
+  const writing = registry.write(
+    'session-a', opened.descriptor.handleId, new Uint8Array([1]), active, leases,
+  );
+  registry.releaseHandle('session-a', opened.descriptor.handleId);
+  const reacquired = await registry.create('session-a', '/report.hwp');
+  assert.equal(reacquired.ok, true);
+  if (!reacquired.ok) return;
+  assert.equal(reacquired.descriptor.handleId, opened.descriptor.handleId);
+  finishWrite?.();
+  await writing;
+  // The write finishing must not delete the handle the session just re-acquired.
+  assert.deepEqual(registry.descriptorsForSession('session-a'), [reacquired.descriptor]);
+});

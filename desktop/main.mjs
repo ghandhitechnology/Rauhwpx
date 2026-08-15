@@ -351,8 +351,12 @@ async function createWindow(launch = launchRequest()) {
   session.pendingCloseRequestId = null;
   window.on('close', (event) => {
     if (session.allowCloseOnce) return;
+    // A dead renderer can never answer the Save–Discard–Cancel prompt.
+    // Blocking the close here would leave an unclosable window that also
+    // stalls quit, so let the close proceed instead.
+    if (window.webContents.isDestroyed() || window.webContents.isCrashed()) return;
     event.preventDefault();
-    if (session.pendingCloseRequestId || window.webContents.isDestroyed()) return;
+    if (session.pendingCloseRequestId) return;
     session.pendingCloseRequestId = randomUUID();
     window.webContents.send('desktop:close-requested', {
       requestId: session.pendingCloseRequestId,
@@ -400,6 +404,12 @@ async function createWindow(launch = launchRequest()) {
   });
   window.webContents.on('preload-error', (_event, preloadPath, error) => {
     console.warn('[rauhwpx] preload error', preloadPath, error);
+  });
+  window.webContents.on('render-process-gone', (_event, details) => {
+    console.warn('[rauhwpx] renderer process gone:', details?.reason);
+    // An unanswered close prompt died with the renderer; clear it so the
+    // window can close (the close handler skips the prompt for dead renderers).
+    session.pendingCloseRequestId = null;
   });
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/i.test(url)) void shell.openExternal(url);
@@ -605,7 +615,18 @@ if (!hasSingleInstanceLock) {
     await hubOwner.ensure();
     desktopReady = true;
     const launches = pendingLaunches.splice(0);
-    for (const request of launches) await openLaunch(request);
+    let failedLaunches = 0;
+    for (const request of launches) {
+      // One unreadable file must not abort the other startup launches.
+      await openLaunch(request).catch((error) => {
+        failedLaunches += 1;
+        showLaunchError(error);
+      });
+    }
+    if (failedLaunches > 0 && sessions.windows().length === 0) {
+      app.quit();
+      return;
+    }
     if (app.isPackaged) {
       setTimeout(() => {
         void autoUpdater.checkForUpdatesAndNotify().catch(() => {});

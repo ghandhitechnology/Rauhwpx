@@ -85,7 +85,12 @@ export class NativeFileHandleRegistry {
     if (existing && existing.sessionId !== sessionId) {
       return { ok: false, ownerSessionId: existing.sessionId };
     }
-    if (existing) return { ok: true, descriptor: this.#descriptor(existing), created: false };
+    if (existing) {
+      // Re-acquiring a handle cancels a pending release; otherwise the handle
+      // would silently vanish once the in-flight write that pinned it finishes.
+      existing.releaseRequested = false;
+      return { ok: true, descriptor: this.#descriptor(existing), created: false };
+    }
 
     const entry = {
       handleId: this.#createId(),
