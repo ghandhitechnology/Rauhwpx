@@ -28,6 +28,10 @@ import type {
   AgentBridgeDeps,
   AgentBridgeOptions,
   AgentName,
+  AgentAuthMethod,
+  AgentSetupAuthStart,
+  AgentSetupStatus,
+  AgentSetupStatusMap,
   AgentPhase,
   AgentWorkflow,
   AgentWorkflowState,
@@ -78,6 +82,10 @@ export interface AgentBridge {
   reconnectNow(): Promise<void>;
   /** 로컬 CLI 설치 상태. refresh=true 면 허브가 새로 프로브한다. */
   requestProviderStatus(refresh?: boolean): Promise<ProviderStatusMap | null>;
+  requestAgentSetupStatus(): Promise<AgentSetupStatusMap | null>;
+  installAgent(agent: AgentName): Promise<AgentSetupStatusMap | null>;
+  authenticateAgent(agent: AgentName, method: AgentAuthMethod, key?: string): Promise<AgentSetupAuthStart | null>;
+  cancelAgentSetup(agent: AgentName): void;
   /** 누적 사용량 요약. 응답이 없으면 null. */
   requestUsage(refresh?: boolean): Promise<UsageSummary | null>;
   /** 요금제를 바꾸고 갱신된 요약을 돌려받는다. */
@@ -385,6 +393,38 @@ function readProviderStatus(value: unknown): ProviderStatusMap {
   };
 }
 
+function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatus {
+  const src = (value ?? {}) as Record<string, unknown>;
+  const authMethod = src['authMethod'] === 'oauth' || src['authMethod'] === 'api-key'
+    ? src['authMethod']
+    : null;
+  return {
+    agent,
+    available: src['available'] === true,
+    connected: src['connected'] === true,
+    installed: src['installed'] === true,
+    installing: src['installing'] === true,
+    version: typeof src['version'] === 'string' ? src['version'] : null,
+    authenticated: src['authenticated'] === true,
+    authMethod,
+    keyTail: typeof src['keyTail'] === 'string' ? src['keyTail'] : null,
+    authenticating: src['authenticating'] === true,
+    setupComplete: src['setupComplete'] === true,
+    latestVersion: typeof src['latestVersion'] === 'string' ? src['latestVersion'] : null,
+    updateRequired: src['updateRequired'] === true,
+    error: typeof src['error'] === 'string' ? src['error'] : null,
+  };
+}
+
+function readAgentSetupStatuses(value: unknown): AgentSetupStatusMap {
+  const src = (value ?? {}) as Record<string, unknown>;
+  return {
+    claude: readAgentSetupStatus(src['claude'], 'claude'),
+    codex: readAgentSetupStatus(src['codex'], 'codex'),
+    pi: readAgentSetupStatus(src['pi'], 'pi'),
+  };
+}
+
 function readUsageWindow(value: unknown): UsageWindow {
   const src = (value ?? {}) as Record<string, unknown>;
   return {
@@ -560,6 +600,8 @@ function readPiStatus(value: unknown): PiStatus {
     models: readPiModels(src['models']),
     defaultModelId: typeof src['defaultModelId'] === 'string' ? src['defaultModelId'] : null,
     setupComplete: src['setupComplete'] === true,
+    latestVersion: typeof src['latestVersion'] === 'string' ? src['latestVersion'] : null,
+    updateRequired: src['updateRequired'] === true,
     error: typeof src['error'] === 'string' ? src['error'] : null,
   };
 }
@@ -593,8 +635,9 @@ function readPiCatalog(value: unknown): PiCatalogModel[] {
   return out;
 }
 
-function isPiSetupState(value: unknown): value is 'downloading' | 'installing' | 'configuring' | 'done' {
-  return value === 'downloading' || value === 'installing' || value === 'configuring' || value === 'done';
+function isPiSetupState(value: unknown): value is 'preparing' | 'downloading' | 'installing' | 'configuring' | 'verifying' | 'done' {
+  return value === 'preparing' || value === 'downloading' || value === 'installing'
+    || value === 'configuring' || value === 'verifying' || value === 'done';
 }
 
 class AgentBridgeImpl implements AgentBridge {
@@ -1176,6 +1219,54 @@ class AgentBridgeImpl implements AgentBridge {
         this.emit({ type: 'provider-status', providers });
         break;
       }
+      case 'agent-setup-status': {
+        const statuses = readAgentSetupStatuses(msg.statuses);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, statuses);
+        this.emit({ type: 'agent-setup-status', statuses });
+        break;
+      }
+      case 'agent-setup-auth-started': {
+        const agent = isAgentName(msg.agent) ? msg.agent : null;
+        if (typeof msg.requestId === 'string') {
+          this.requests.settle(msg.requestId, agent ? {
+            agent,
+            authUrl: typeof msg.authUrl === 'string' ? msg.authUrl : null,
+          } satisfies AgentSetupAuthStart : null);
+        }
+        break;
+      }
+      case 'agent-setup-progress': {
+        if (!isAgentName(msg.agent)) break;
+        const state = msg.state === 'installing' || msg.state === 'authorizing' || msg.state === 'done'
+          ? msg.state
+          : null;
+        if (!state) break;
+        this.emit({
+          type: 'agent-setup-progress',
+          agent: msg.agent,
+          state,
+          ...(typeof msg.phase === 'string' ? { phase: msg.phase } : {}),
+          ...(typeof msg.percent === 'number' && Number.isFinite(msg.percent)
+            ? { percent: Math.min(100, Math.max(0, msg.percent)) }
+            : {}),
+          ...(typeof msg.detail === 'string' ? { detail: msg.detail } : {}),
+          ...(typeof msg.authUrl === 'string' ? { authUrl: msg.authUrl } : {}),
+          ...(msg.activity === true ? { activity: true } : {}),
+          ...(typeof msg.receivedBytes === 'number' ? { receivedBytes: msg.receivedBytes } : {}),
+          ...(typeof msg.totalBytes === 'number' ? { totalBytes: msg.totalBytes } : {}),
+        });
+        break;
+      }
+      case 'agent-setup-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        this.emit({
+          type: 'agent-setup-error',
+          agent: isAgentName(msg.agent) ? msg.agent : null,
+          code: typeof msg.code === 'string' ? msg.code : 'AGENT_SETUP_FAILED',
+          message: typeof msg.message === 'string' ? msg.message : 'Agent setup failed',
+        });
+        break;
+      }
       case 'usage-report': {
         const usage = readUsageSummary(msg.usage);
         if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, usage);
@@ -1204,6 +1295,9 @@ class AgentBridgeImpl implements AgentBridge {
           type: 'pi-setup-progress',
           requestId: typeof msg.requestId === 'string' ? msg.requestId : '',
           state: msg.state,
+          ...(typeof msg.percent === 'number' && Number.isFinite(msg.percent)
+            ? { percent: Math.min(100, Math.max(0, msg.percent)) }
+            : {}),
           ...(typeof msg.detail === 'string' ? { detail: msg.detail } : {}),
           ...(typeof msg.receivedBytes === 'number' && Number.isFinite(msg.receivedBytes)
             ? { receivedBytes: msg.receivedBytes }
@@ -1782,6 +1876,26 @@ class AgentBridgeImpl implements AgentBridge {
       { type: 'provider-status-request', ...(refresh ? { refresh: true } : {}) },
       'provider-status',
     );
+  }
+
+  requestAgentSetupStatus(): Promise<AgentSetupStatusMap | null> {
+    return this.request<AgentSetupStatusMap>({ type: 'agent-setup-status-request' }, 'agent-setup-status', 30_000);
+  }
+
+  installAgent(agent: AgentName): Promise<AgentSetupStatusMap | null> {
+    return this.request<AgentSetupStatusMap>({ type: 'agent-setup-install', agent }, 'agent-setup-install', 10 * 60_000);
+  }
+
+  authenticateAgent(agent: AgentName, method: AgentAuthMethod, key?: string): Promise<AgentSetupAuthStart | null> {
+    return this.request<AgentSetupAuthStart>(
+      { type: 'agent-setup-auth', agent, method, ...(key ? { key } : {}) },
+      'agent-setup-auth',
+      30_000,
+    );
+  }
+
+  cancelAgentSetup(agent: AgentName): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-cancel', agent });
   }
 
   requestUsage(refresh = false): Promise<UsageSummary | null> {
