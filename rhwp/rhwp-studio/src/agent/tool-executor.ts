@@ -11,7 +11,7 @@ import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 import type { CellPathEntry, DocumentPosition } from '../core/types.ts';
 import type { RevisionTracker } from './revision.ts';
 import type { PendingEditManager } from './pending-edits.ts';
-import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, ObjectOp } from './types.ts';
+import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, DocumentTemplate, ObjectOp } from './types.ts';
 import { AgentToolError } from './types.ts';
 import { renderChartPng, validateChartSpec } from './chart-render.ts';
 import type { ChartSpec } from './chart-render.ts';
@@ -22,6 +22,7 @@ export interface AgentToolExecutorDeps {
   documentState: DocumentDirtyState;
   revision: RevisionTracker;
   pending: PendingEditManager;
+  loadTemplateBytes?: (template: DocumentTemplate) => Promise<Uint8Array>;
 }
 
 const DOC_NOT_LOADED_MESSAGE = '문서가 로드되지 않았습니다';
@@ -51,6 +52,9 @@ export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'insert_footnote',
   'edit_footnote',
   'set_bookmark',
+  'template_apply_section_layout',
+  'template_apply_paragraph_format',
+  'template_insert_block',
 ]);
 
 export function isDocumentWriteTool(tool: string) {
@@ -65,6 +69,7 @@ export interface ToolCapabilityContext {
   /** Server state last synchronized by the Studio bridge. */
   activePhase?: AgentPhase;
   activeCapabilityEpoch?: number | null;
+  template?: DocumentTemplate;
 }
 
 /** Enforce plan-mode write authority before dispatch can touch document state. */
@@ -257,6 +262,10 @@ function optCell(args: Record<string, unknown>): CellAddr | undefined {
 
 export class AgentToolExecutor {
   private deps: AgentToolExecutorDeps;
+  private templateWasm: WasmBridge | null = null;
+  private templateKey: string | null = null;
+  private templateInspectionKey: string | null = null;
+  private documentInspectionRevision: number | null = null;
 
   constructor(deps: AgentToolExecutorDeps) {
     this.deps = deps;
@@ -271,7 +280,9 @@ export class AgentToolExecutor {
     try {
       assertToolCapability(tool, capability);
       // await 필수 — 비동기 툴(insert_chart)의 rejection 도 여기서 에러 코드로 매핑된다
-      return await this.dispatch(tool, args, agent);
+      const result = await this.dispatch(tool, args, agent, capability);
+      if (tool === 'get_structure') this.documentInspectionRevision = this.revision;
+      return result;
     } catch (e) {
       if (e instanceof AgentToolError) throw e;
       const message = e instanceof Error ? e.message : String(e);
@@ -282,7 +293,7 @@ export class AgentToolExecutor {
     }
   }
 
-  private dispatch(tool: string, rawArgs: unknown, agent: AgentName): unknown {
+  private dispatch(tool: string, rawArgs: unknown, agent: AgentName, capability?: ToolCapabilityContext): unknown {
     const args = rawArgs === undefined ? {} : asRecord(rawArgs);
     switch (tool) {
       case 'get_structure': return this.getStructure(args);
@@ -296,6 +307,16 @@ export class AgentToolExecutor {
       case 'get_char_format': return this.getCharFormat(args);
       case 'list_numberings': return this.listNumberings();
       case 'verify_changes': return this.verifyChanges(args);
+      case 'template_get_structure': return this.templateRead('get_structure', args, capability, true);
+      case 'template_get_text_range': return this.templateRead('get_text_range', args, capability);
+      case 'template_get_para_format': return this.templateRead('get_para_format', args, capability);
+      case 'template_get_char_format': return this.templateRead('get_char_format', args, capability);
+      case 'template_list_styles': return this.templateRead('list_styles', args, capability);
+      case 'template_get_page_layout': return this.templateGetPageLayout(args, capability);
+      case 'template_render_page': return this.templateRead('render_page', args, capability);
+      case 'template_apply_section_layout': return this.templateApplySectionLayout(args, agent, capability);
+      case 'template_apply_paragraph_format': return this.templateApplyParagraphFormat(args, agent, capability);
+      case 'template_insert_block': return this.templateInsertBlock(args, agent, capability);
       case 'insert_text': return this.insertText(args, agent);
       case 'delete_range': return this.deleteRange(args, agent);
       case 'replace_range': return this.replaceRange(args, agent);
@@ -1269,6 +1290,7 @@ export class AgentToolExecutor {
     const seenPara = new Set<string>();
     let hasDeleteMark = false;
     let hasTableStructure = false;
+    const templateTransfers: Array<{ label: string; templateRevision: number; affectedSections: number[]; skippedFeatures: string[] }> = [];
     const pushPara = (sectionIdx: number, paraIdx: number, cell?: CellAddr): void => {
       const key = cell
         ? `${sectionIdx}:c${cell.paraIdx}/${cell.controlIdx}/${cell.cellIdx}:${paraIdx}`
@@ -1281,6 +1303,15 @@ export class AgentToolExecutor {
       if (op.kind === 'delete') hasDeleteMark = true;
       if (op.kind === 'object' && (op.obj.type === 'tableStructure' || op.obj.type === 'tableStructureMarked' || op.obj.type === 'deleteTable')) {
         hasTableStructure = true;
+      }
+      if (op.kind === 'template') {
+        warnings.push(...op.report.warnings);
+        templateTransfers.push({
+          label: op.label,
+          templateRevision: op.templateRevision,
+          affectedSections: op.report.affectedSections,
+          skippedFeatures: op.report.skippedFeatures,
+        });
       }
       if (op.kind === 'insert' || op.kind === 'delete' || op.kind === 'replace' || op.kind === 'format') {
         const r = op.range;
@@ -1345,6 +1376,9 @@ export class AgentToolExecutor {
       postEditText,
       affectedPages,
       warnings,
+      templateTransfers,
+      skippedFeatures: [...new Set(templateTransfers.flatMap((transfer) => transfer.skippedFeatures))],
+      templateRevision: templateTransfers.at(-1)?.templateRevision,
     };
 
     if (includeImage) {
@@ -1366,6 +1400,246 @@ export class AgentToolExecutor {
     }
     // withMarkedOpsApplied 가 미리보기 이벤트로 revision 을 올리므로 마지막에 읽는다
     return { revision: this.revision, ...result };
+  }
+
+  // ─── template context + structural transfer ─────────────────
+
+  private requireTemplate(capability?: ToolCapabilityContext): DocumentTemplate {
+    const template = capability?.template;
+    if (!template) throw new AgentToolError('TEMPLATE_UNAVAILABLE', 'No active template is available for this chat.');
+    if (!this.deps.loadTemplateBytes) throw new AgentToolError('TEMPLATE_UNAVAILABLE', 'Template loading is unavailable in this Studio.');
+    return template;
+  }
+
+  private async ensureTemplate(capability?: ToolCapabilityContext): Promise<{ template: DocumentTemplate; wasm: WasmBridge }> {
+    const template = this.requireTemplate(capability);
+    const key = `${template.id}:${template.revision}`;
+    if (this.templateWasm && this.templateKey === key) return { template, wasm: this.templateWasm };
+    this.templateWasm?.releaseDocument();
+    const { WasmBridge } = await import('../core/wasm-bridge.ts');
+    const wasm = new WasmBridge();
+    await wasm.initialize();
+    const bytes = await this.deps.loadTemplateBytes!(template);
+    wasm.loadDocument(bytes, template.originalName);
+    this.templateWasm = wasm;
+    this.templateKey = key;
+    return { template, wasm };
+  }
+
+  private templateArgs(args: Record<string, unknown>, template: DocumentTemplate): Record<string, unknown> {
+    const requested = reqInt(args, 'templateRevision');
+    if (requested !== template.revision) {
+      throw new AgentToolError('TEMPLATE_REVISION_MISMATCH', `Template revision ${requested} does not match ${template.revision}; inspect it again.`);
+    }
+    const { templateRevision: _revision, ...rest } = args;
+    return rest;
+  }
+
+  private async templateRead(
+    tool: string,
+    args: Record<string, unknown>,
+    capability?: ToolCapabilityContext,
+    marksInspection = false,
+  ): Promise<unknown> {
+    const { template, wasm } = await this.ensureTemplate(capability);
+    const nested = new AgentToolExecutor({ ...this.deps, wasm, loadTemplateBytes: undefined });
+    const result = await nested.execute(tool, this.templateArgs(args, template));
+    if (marksInspection) this.templateInspectionKey = `${template.id}:${template.revision}`;
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      const { revision: _documentRevision, ...rest } = result as Record<string, unknown>;
+      return { templateId: template.id, templateRevision: template.revision, ...rest };
+    }
+    return { templateId: template.id, templateRevision: template.revision, result };
+  }
+
+  private async templateGetPageLayout(args: Record<string, unknown>, capability?: ToolCapabilityContext): Promise<unknown> {
+    const { template, wasm } = await this.ensureTemplate(capability);
+    this.templateArgs(args, template);
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    if (sectionIdx >= wasm.getSectionCount()) throw new AgentToolError('INVALID_ARGS', `Template section ${sectionIdx} does not exist.`);
+    return {
+      templateId: template.id,
+      templateRevision: template.revision,
+      sectionIdx,
+      page: wasm.getPageDef(sectionIdx),
+      section: wasm.getSectionDef(sectionIdx),
+      columns: wasm.getColumnDef(sectionIdx),
+      border: wasm.getPageBorderFill(sectionIdx),
+    };
+  }
+
+  private requireTemplateMapping(template: DocumentTemplate): void {
+    if (this.documentInspectionRevision !== this.revision
+      || this.templateInspectionKey !== `${template.id}:${template.revision}`) {
+      throw new AgentToolError(
+        'TEMPLATE_MAPPING_REQUIRED',
+        'Inspect both the current document and the active template structure before transferring template content.',
+      );
+    }
+  }
+
+  private async templateApplySectionLayout(
+    args: Record<string, unknown>,
+    agent: AgentName,
+    capability?: ToolCapabilityContext,
+  ): Promise<unknown> {
+    this.requireRevision(args);
+    const { template, wasm: source } = await this.ensureTemplate(capability);
+    this.templateArgs(args, template);
+    this.requireTemplateMapping(template);
+    const mappings = Array.isArray(args['mappings']) ? args['mappings'].map(asRecord) : [];
+    if (mappings.length === 0) throw new AgentToolError('INVALID_ARGS', 'mappings must contain at least one section mapping.');
+    const requested = Array.isArray(args['components'])
+      ? new Set(args['components'].filter((item): item is string => typeof item === 'string'))
+      : new Set(['page', 'columns', 'headersFooters', 'borders', 'sectionDefaults']);
+    const target = this.deps.wasm;
+    for (const mapping of mappings) {
+      const sourceSection = reqInt(mapping, 'templateSectionIdx');
+      const targetSection = reqInt(mapping, 'targetSectionIdx');
+      if (sourceSection >= source.getSectionCount() || targetSection >= target.getSectionCount()) {
+        throw new AgentToolError('INVALID_ARGS', `Invalid section mapping ${sourceSection} -> ${targetSection}.`);
+      }
+    }
+    const pending = this.deps.pending.addTemplateMutation(
+      agent,
+      `Apply ${template.name} section layout`,
+      template.revision,
+      () => {
+        const warnings: string[] = [];
+        const skippedFeatures: string[] = [];
+        const affectedSections: number[] = [];
+        let transferredHeaderFooters = 0;
+        for (const mapping of mappings) {
+          const sourceSection = reqInt(mapping, 'templateSectionIdx');
+          const targetSection = reqInt(mapping, 'targetSectionIdx');
+          if (requested.has('page')) target.setPageDef(targetSection, source.getPageDef(sourceSection));
+          if (requested.has('columns')) {
+            const column = source.getColumnDef(sourceSection);
+            target.setColumnDef(targetSection, column.columnCount, column.columnType, column.sameWidth ? 1 : 0, column.spacing);
+          }
+          if (requested.has('sectionDefaults')) target.setSectionDef(targetSection, source.getSectionDef(sourceSection));
+          if (requested.has('borders')) target.setPageBorderFill(targetSection, source.getPageBorderFill(sourceSection));
+          if (requested.has('headersFooters')) {
+            for (const isHeader of [true, false]) {
+              for (const applyTo of [0, 1, 2]) {
+                const sourceBlock = JSON.parse(source.getHeaderFooter(sourceSection, isHeader, applyTo)) as {
+                  exists?: boolean; text?: string;
+                };
+                if (sourceBlock.exists !== true) continue;
+                const targetBlock = JSON.parse(target.getHeaderFooter(targetSection, isHeader, applyTo)) as { exists?: boolean };
+                if (targetBlock.exists === true) target.deleteHeaderFooter(targetSection, isHeader, applyTo);
+                target.createHeaderFooter(targetSection, isHeader, applyTo);
+                const lines = String(sourceBlock.text ?? '').split('\n');
+                if (lines[0]) target.insertTextInHeaderFooter(targetSection, isHeader, applyTo, 0, 0, lines[0]);
+                for (let lineIndex = 1; lineIndex < lines.length; lineIndex++) {
+                  const previousLength = target.getHeaderFooterParaInfo(targetSection, isHeader, applyTo, lineIndex - 1);
+                  const parsed = JSON.parse(previousLength) as { charCount?: number };
+                  target.splitParagraphInHeaderFooter(
+                    targetSection, isHeader, applyTo, lineIndex - 1,
+                    Number(parsed.charCount ?? [...(lines[lineIndex - 1] ?? '')].length),
+                  );
+                  if (lines[lineIndex]) target.insertTextInHeaderFooter(targetSection, isHeader, applyTo, lineIndex, 0, lines[lineIndex]);
+                }
+                transferredHeaderFooters++;
+              }
+            }
+          }
+          if (!affectedSections.includes(targetSection)) affectedSections.push(targetSection);
+        }
+        if (transferredHeaderFooters > 0) {
+          skippedFeatures.push('headerFooterFormattingAndControls');
+          warnings.push('Header/footer text and page scope were transferred; rich formatting, fields, and unsupported controls use the target defaults or require a follow-up edit.');
+        }
+        return { warnings, skippedFeatures, affectedSections };
+      },
+    );
+    return { revision: this.revision, pending: true, ...pending, templateRevision: template.revision, transferredComponents: [...requested] };
+  }
+
+  private async templateApplyParagraphFormat(
+    args: Record<string, unknown>,
+    agent: AgentName,
+    capability?: ToolCapabilityContext,
+  ): Promise<unknown> {
+    this.requireRevision(args);
+    const { template, wasm: sourceWasm } = await this.ensureTemplate(capability);
+    this.templateArgs(args, template);
+    this.requireTemplateMapping(template);
+    const source = asRecord(args['source']);
+    const sourceSection = reqInt(source, 'sectionIdx');
+    const sourcePara = reqInt(source, 'paraIdx');
+    const targets = Array.isArray(args['targets']) ? args['targets'].map(asRecord) : [];
+    if (targets.length === 0) throw new AgentToolError('INVALID_ARGS', 'targets must contain at least one paragraph.');
+    const paraProps = sourceWasm.getParaPropertiesAt(sourceSection, sourcePara);
+    const charProps = sourceWasm.getCharPropertiesAt(sourceSection, sourcePara, 0);
+    for (const item of targets) this.validateAddress(reqInt(item, 'sectionIdx'), reqInt(item, 'paraIdx'), 0);
+    const pending = this.deps.pending.addTemplateMutation(
+      agent,
+      `Apply ${template.name} paragraph formatting`,
+      template.revision,
+      () => {
+        const affectedSections: number[] = [];
+        for (const item of targets) {
+          const sectionIdx = reqInt(item, 'sectionIdx');
+          const paraIdx = reqInt(item, 'paraIdx');
+          this.deps.wasm.applyParaFormat(sectionIdx, paraIdx, JSON.stringify(paraProps));
+          const length = this.deps.wasm.getParagraphLength(sectionIdx, paraIdx);
+          if (length > 0) this.deps.wasm.applyCharFormat(sectionIdx, paraIdx, 0, length, JSON.stringify(charProps));
+          if (!affectedSections.includes(sectionIdx)) affectedSections.push(sectionIdx);
+        }
+        return {
+          warnings: ['Style and numbering identifiers are resolved through the target document formatting APIs; unsupported attributes use the closest supported value.'],
+          skippedFeatures: [],
+          affectedSections,
+        };
+      },
+    );
+    return { revision: this.revision, pending: true, ...pending, templateRevision: template.revision, targetCount: targets.length };
+  }
+
+  private async templateInsertBlock(
+    args: Record<string, unknown>,
+    agent: AgentName,
+    capability?: ToolCapabilityContext,
+  ): Promise<unknown> {
+    this.requireRevision(args);
+    const { template, wasm: sourceWasm } = await this.ensureTemplate(capability);
+    this.templateArgs(args, template);
+    this.requireTemplateMapping(template);
+    const source = asRecord(args['source']);
+    const target = asRecord(args['target']);
+    const sourceSection = reqInt(source, 'sectionIdx');
+    const startPara = reqInt(source, 'startParaIdx');
+    const endPara = reqInt(source, 'endParaIdx');
+    if (endPara < startPara) throw new AgentToolError('INVALID_ARGS', 'Template block range is reversed.');
+    const targetSection = reqInt(target, 'sectionIdx');
+    const targetPara = reqInt(target, 'paraIdx');
+    const targetOffset = reqInt(target, 'charOffset');
+    this.validateAddress(targetSection, targetPara, targetOffset);
+    const endOffset = sourceWasm.getParagraphLength(sourceSection, endPara);
+    const html = sourceWasm.exportSelectionHtml(sourceSection, startPara, 0, endPara, endOffset);
+    const pending = this.deps.pending.addTemplateMutation(
+      agent,
+      `Insert block from ${template.name}`,
+      template.revision,
+      () => {
+        this.deps.wasm.pasteHtml(targetSection, targetPara, targetOffset, html);
+        return {
+          warnings: ['The block was remapped through the cross-document HTML transfer path; unsupported controls use their closest supported representation.'],
+          skippedFeatures: [],
+          affectedSections: [targetSection],
+        };
+      },
+    );
+    return { revision: this.revision, pending: true, ...pending, templateRevision: template.revision, source: { sectionIdx: sourceSection, startParaIdx: startPara, endParaIdx: endPara } };
+  }
+
+  dispose(): void {
+    this.templateWasm?.releaseDocument();
+    this.templateWasm = null;
+    this.templateKey = null;
+    this.templateInspectionKey = null;
+    this.documentInspectionRevision = null;
   }
 
   // ─── write tools (PendingEditManager 위임) ─────────────────

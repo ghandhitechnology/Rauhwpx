@@ -216,6 +216,120 @@
   color: var(--ag-text);
 }
 
+/* ── 문서 템플릿 ───────────────────────────────────── */
+
+.ag-template-list {
+  display: grid;
+  gap: 7px;
+}
+
+.ag-template-row {
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-card);
+  background: var(--ag-surface-subtle);
+}
+
+.ag-template-row-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ag-template-row-text > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-template-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.ag-template-delete {
+  color: var(--ag-err);
+}
+
+.ag-template-name-overlay {
+  position: fixed;
+  z-index: 1300;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, #101114 54%, transparent);
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+
+.ag-template-name-overlay.ag-open {
+  opacity: 1;
+}
+
+.ag-template-name-dialog {
+  --ag-bg: var(--n-surface);
+  --ag-input-bg: var(--n-surface-sunken);
+  --ag-border: var(--n-hairline);
+  --ag-border-strong: var(--n-hairline-strong);
+  --ag-text: var(--n-text);
+  --ag-text-muted: var(--n-text-muted);
+  --ag-hover: var(--n-fill-hover);
+  --ag-r-field: var(--n-radius-field);
+  width: min(380px, calc(100vw - 32px));
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: 16px;
+  background: var(--ag-bg);
+  color: var(--ag-text);
+  box-shadow: var(--n-elev-3);
+  transform: translateY(8px) scale(0.985);
+  transition: transform 160ms ease;
+}
+
+.ag-template-name-overlay.ag-open .ag-template-name-dialog {
+  transform: translateY(0) scale(1);
+}
+
+.ag-template-name-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.ag-template-name-input {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  box-sizing: border-box;
+  padding: 0 9px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-input-bg);
+  color: var(--ag-text);
+  font: inherit;
+}
+
+.ag-template-name-input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-template-name-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.ag-template-name-actions .ag-settings-primary {
+  align-self: auto;
+}
+
 /* ── 에이전트 원클릭 설정 모달 ───────────────────────── */
 
 .ag-agent-setup-overlay {

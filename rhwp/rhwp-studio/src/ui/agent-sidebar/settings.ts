@@ -37,6 +37,7 @@ import type {
   UsageSummary,
   UsageWindow,
   WritingStyleStatus,
+  DocumentTemplate,
 } from '../../agent/types.ts';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
@@ -270,6 +271,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let providers: ProviderStatusMap | null = null;
   let usage: UsageSummary | null = null;
   let writingStyle: WritingStyleStatus | null = null;
+  let templates: DocumentTemplate[] = [];
+  let templatesBusy = false;
+  let templatesMessage = '';
   let setupStatuses: AgentSetupStatusMap | null = null;
   let setupAgent: AgentName | null = null;
   let setupBusy = false;
@@ -697,7 +701,87 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   calibrationBtn.addEventListener('click', () => openCalibration());
   calibration.body.append(calibrationStatus, calibrationSummary, calibrationBtn);
 
-  // ── 4. 사용량 ─────────────────────────────────────────
+  // ── 4. 템플릿 ─────────────────────────────────────────
+  const templatesSection = createSection('템플릿');
+  const templatesNote = el('p', 'ag-settings-note', 'HWP/HWPX 파일을 기기 전체 템플릿으로 보관합니다. 채팅에서는 /templates로 선택하세요.');
+  const templatesList = el('div', 'ag-template-list');
+  const templatesStatus = el('p', 'ag-settings-cliproxy-error');
+  templatesStatus.hidden = true;
+  const addTemplateInput = document.createElement('input');
+  addTemplateInput.type = 'file';
+  addTemplateInput.accept = '.hwp,.hwpx';
+  addTemplateInput.hidden = true;
+  const replaceTemplateInput = document.createElement('input');
+  replaceTemplateInput.type = 'file';
+  replaceTemplateInput.accept = '.hwp,.hwpx';
+  replaceTemplateInput.hidden = true;
+  let replacingTemplateId: string | null = null;
+  const addTemplateBtn = el('button', 'ag-settings-primary', '템플릿 추가');
+  addTemplateBtn.type = 'button';
+  addTemplateBtn.addEventListener('click', () => addTemplateInput.click());
+  addTemplateInput.addEventListener('change', () => {
+    const file = addTemplateInput.files?.[0];
+    addTemplateInput.value = '';
+    if (file) void promptToAddTemplate(file);
+  });
+  replaceTemplateInput.addEventListener('change', () => {
+    const file = replaceTemplateInput.files?.[0];
+    const id = replacingTemplateId;
+    replaceTemplateInput.value = '';
+    replacingTemplateId = null;
+    if (file && id) void replaceTemplate(id, file);
+  });
+  templatesSection.body.append(templatesNote, templatesList, templatesStatus, addTemplateBtn, addTemplateInput, replaceTemplateInput);
+
+  // Electron's native browser prompt is unreliable, so add and rename share
+  // a small in-app naming dialog.
+  const templateNameOverlay = el('div', 'ag-template-name-overlay');
+  templateNameOverlay.setAttribute('aria-hidden', 'true');
+  const templateNameDialog = document.createElement('form');
+  templateNameDialog.className = 'ag-template-name-dialog';
+  templateNameDialog.setAttribute('role', 'dialog');
+  templateNameDialog.setAttribute('aria-modal', 'true');
+  templateNameDialog.setAttribute('aria-labelledby', 'ag-template-name-title');
+  const templateNameTitle = el('h2', 'ag-template-name-title');
+  templateNameTitle.id = 'ag-template-name-title';
+  const templateNameDescription = el('p', 'ag-settings-note');
+  const templateNameInput = document.createElement('input');
+  templateNameInput.className = 'ag-template-name-input';
+  templateNameInput.type = 'text';
+  templateNameInput.maxLength = 80;
+  templateNameInput.required = true;
+  templateNameInput.autocomplete = 'off';
+  templateNameInput.setAttribute('aria-label', '템플릿 이름');
+  const templateNameActions = el('div', 'ag-template-name-actions');
+  const templateNameCancel = el('button', 'ag-settings-btn', '취소');
+  templateNameCancel.type = 'button';
+  const templateNameSave = el('button', 'ag-settings-primary', '저장');
+  templateNameSave.type = 'submit';
+  templateNameActions.append(templateNameCancel, templateNameSave);
+  templateNameDialog.append(templateNameTitle, templateNameDescription, templateNameInput, templateNameActions);
+  templateNameOverlay.appendChild(templateNameDialog);
+  let resolveTemplateName: ((name: string | null) => void) | null = null;
+
+  templateNameDialog.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const name = templateNameInput.value.trim();
+    if (!name) {
+      templateNameInput.setCustomValidity('템플릿 이름을 입력하세요.');
+      templateNameInput.reportValidity();
+      return;
+    }
+    finishTemplateName(name);
+  });
+  templateNameInput.addEventListener('input', () => templateNameInput.setCustomValidity(''));
+  templateNameCancel.addEventListener('click', () => finishTemplateName(null));
+  templateNameOverlay.addEventListener('pointerdown', (event) => {
+    if (event.target === templateNameOverlay) finishTemplateName(null);
+  });
+  templateNameOverlay.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') finishTemplateName(null);
+  });
+
+  // ── 5. 사용량 ─────────────────────────────────────────
   const usageSection = createSection('사용량');
   const cliproxyCard = el('div', 'ag-settings-usage-block ag-settings-cliproxy');
   const cliproxyHead = el('div', 'ag-settings-usage-head');
@@ -818,12 +902,134 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     connection.root,
     defaults.root,
     calibration.root,
+    templatesSection.root,
     usageSection.root,
   );
 
   setupKey.input.addEventListener('input', renderAgentSetup);
 
   // ── 상태 → DOM ────────────────────────────────────────
+
+  function templateSize(bytes: number): string {
+    return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function renderTemplates(): void {
+    templatesList.replaceChildren();
+    if (templates.length === 0) {
+      templatesList.appendChild(el('p', 'ag-settings-note', '추가된 템플릿이 없습니다.'));
+    }
+    for (const template of templates) {
+      const row = el('div', 'ag-template-row');
+      const text = el('div', 'ag-template-row-text');
+      text.append(
+        el('span', 'ag-settings-row-name', template.name),
+        el('span', 'ag-settings-row-detail', `${template.format.toUpperCase()} · ${templateSize(template.size)} · ${template.pageCount}쪽 · r${template.revision}`),
+      );
+      const actions = el('div', 'ag-template-actions');
+      const rename = el('button', 'ag-settings-btn', '이름 변경');
+      rename.type = 'button';
+      rename.addEventListener('click', () => {
+        void requestTemplateName('템플릿 이름 변경', template.name, `현재 이름: ${template.name}`).then((name) => {
+          if (name && name !== template.name) void renameTemplate(template.id, name);
+        });
+      });
+      const replace = el('button', 'ag-settings-btn', '교체');
+      replace.type = 'button';
+      replace.addEventListener('click', () => {
+        replacingTemplateId = template.id;
+        replaceTemplateInput.click();
+      });
+      const remove = el('button', 'ag-settings-btn ag-template-delete', '삭제');
+      remove.type = 'button';
+      remove.addEventListener('click', () => {
+        if (window.confirm(`“${template.name}” 템플릿을 삭제할까요?`)) void deleteTemplate(template.id);
+      });
+      actions.append(rename, replace, remove);
+      row.append(text, actions);
+      templatesList.appendChild(row);
+    }
+    templatesStatus.textContent = templatesMessage;
+    templatesStatus.hidden = !templatesMessage;
+    addTemplateBtn.disabled = templatesBusy || connectionState !== 'connected';
+    for (const button of templatesList.querySelectorAll('button')) (button as HTMLButtonElement).disabled = templatesBusy;
+  }
+
+  async function refreshTemplates(): Promise<void> {
+    try {
+      const catalog = await bridge.listTemplates();
+      if (disposed) return;
+      templates = catalog.templates;
+      templatesMessage = '';
+    } catch (error) {
+      if (!disposed) templatesMessage = error instanceof Error ? error.message : String(error);
+    }
+    renderTemplates();
+  }
+
+  async function withTemplateMutation(operation: () => Promise<unknown>): Promise<void> {
+    templatesBusy = true;
+    templatesMessage = '';
+    renderTemplates();
+    try {
+      await operation();
+      await refreshTemplates();
+    } catch (error) {
+      templatesMessage = error instanceof Error ? error.message : String(error);
+    } finally {
+      templatesBusy = false;
+      renderTemplates();
+    }
+  }
+
+  function requestTemplateName(title: string, initialName: string, description: string): Promise<string | null> {
+    finishTemplateName(null);
+    templateNameTitle.textContent = title;
+    templateNameDescription.textContent = description;
+    templateNameInput.value = initialName;
+    templateNameInput.setCustomValidity('');
+    document.body.appendChild(templateNameOverlay);
+    templateNameOverlay.setAttribute('aria-hidden', 'false');
+    requestAnimationFrame(() => {
+      templateNameOverlay.classList.add('ag-open');
+      templateNameInput.focus();
+      templateNameInput.select();
+    });
+    return new Promise((resolve) => {
+      resolveTemplateName = resolve;
+    });
+  }
+
+  function finishTemplateName(name: string | null): void {
+    const resolve = resolveTemplateName;
+    resolveTemplateName = null;
+    templateNameOverlay.classList.remove('ag-open');
+    templateNameOverlay.setAttribute('aria-hidden', 'true');
+    templateNameOverlay.remove();
+    resolve?.(name);
+  }
+
+  async function promptToAddTemplate(file: File): Promise<void> {
+    const defaultName = file.name.replace(/\.(?:hwp|hwpx)$/i, '');
+    const name = await requestTemplateName('템플릿 추가', defaultName, `선택한 파일: ${file.name}`);
+    if (name) await addTemplate(file, name);
+  }
+
+  function addTemplate(file: File, name: string): Promise<void> {
+    return withTemplateMutation(() => bridge.addTemplate(file, name));
+  }
+
+  function renameTemplate(id: string, name: string): Promise<void> {
+    return withTemplateMutation(() => bridge.renameTemplate(id, name));
+  }
+
+  function replaceTemplate(id: string, file: File): Promise<void> {
+    return withTemplateMutation(() => bridge.replaceTemplate(id, file));
+  }
+
+  function deleteTemplate(id: string): Promise<void> {
+    return withTemplateMutation(() => bridge.deleteTemplate(id));
+  }
 
   function commitPrefs(partial: Partial<AgentPrefs>): void {
     prefs = saveAgentPrefs(partial);
@@ -1676,6 +1882,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   renderConnection();
   renderProviders();
   renderWritingStyle();
+  renderTemplates();
   renderUsage();
   renderPi();
 
@@ -1689,14 +1896,17 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       renderConnection();
       renderProviders();
       renderWritingStyle();
+      renderTemplates();
       renderPi();
       void refreshProviders(false);
       void refreshUsage();
       void refreshPiStatus();
       void refreshSetupStatuses();
+      void refreshTemplates();
     },
     close(): void {
       closeAgentSetup();
+      finishTemplateName(null);
     },
     handleEvent(ev: SidebarEvent): void {
       switch (ev.type) {
@@ -1706,6 +1916,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           renderProviders();
           renderCliproxy();
           renderPi();
+          renderTemplates();
           break;
         case 'provider-status':
           providers = ev.providers;
@@ -1745,6 +1956,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         case 'writing-style-result':
           writingStyle = ev.status;
           renderWritingStyle();
+          break;
+        case 'templates-catalog':
+          templates = ev.catalog.templates;
+          templatesMessage = '';
+          renderTemplates();
           break;
         case 'pi-status':
           piStatus = ev.status;
@@ -1808,6 +2024,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       if (piProgressCreepTimer) clearInterval(piProgressCreepTimer);
       element.remove();
       setupOverlay.remove();
+      finishTemplateName(null);
     },
   };
 }

@@ -163,6 +163,9 @@ test('executor: document-write helper covers every mutating tool', () => {
     'set_bookmark',
     'set_field_value',
     'set_page_layout',
+    'template_apply_paragraph_format',
+    'template_apply_section_layout',
+    'template_insert_block',
   ]);
   assert.equal(isDocumentWriteTool('insert_text'), true);
   assert.equal(isDocumentWriteTool('get_structure'), false);
