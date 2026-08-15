@@ -41,9 +41,15 @@ test('InsertTextCommand.undo 는 삭제 count 를 charCount 로 계산한다', (
     'UTF-16 length 를 삭제 count 로 넘기면 😀 입력 후 undo 가 인접 문자까지 지운다');
 });
 
+test('InsertTextCommand의 커서와 merge 연속성도 scalar 축을 사용한다', () => {
+  const insert = classBlock(commandSrc, 'InsertTextCommand');
+  assert.match(insert, /charOffset: this\.position\.charOffset \+ charCount\(this\.text\)/);
+  assert.match(insert, /const expectedOffset = this\.position\.charOffset \+ charCount\(this\.text\);/);
+  assert.doesNotMatch(insert, /charOffset \+ this\.text\.length/);
+});
+
 test('command.ts 의 삭제 count 에 UTF-16 length 를 넘기는 호출이 없다', () => {
-  // 커서 오프셋(charOffset + text.length)은 studio 의 UTF-16 관례를 유지하므로 제외하고,
-  // 삭제 count 인자만 본다.
+  // 삭제 count 인자도 같은 scalar 계약을 지켜야 한다.
   const deleteCalls = /(doDeleteTextImmediate|deleteTextWithMutationEffects|deleteTextInHeaderFooter|deleteTextInFootnote|deleteTextInCell)\(([^;]{0,400}?)\)/g;
   const offenders: string[] = [];
   for (const m of commandSrc.matchAll(deleteCalls)) {

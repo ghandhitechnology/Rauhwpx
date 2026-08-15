@@ -34,23 +34,7 @@ import {
   type NavigationKeyInput,
 } from './navigation-keymap';
 
-/**
- * compositionend 직후의 '유령 input' 을 억제하는 유효 시간(ms).
- *
- * 유령 input 은 같은 이벤트 루프 턴에 즉시 뒤따르므로 한 프레임이면 충분하다.
- * 이 창을 넘긴 입력은 사용자가 실제로 다시 친 것이므로 삼키면 안 된다.
- */
-const GHOST_INPUT_WINDOW_MS = 50;
-
-/**
- * [#2548] WASM 삭제/조회 count 는 Rust `Paragraph::delete_text_at` 의 char(Unicode
- * scalar) 단위다. JS `String.length`(UTF-16 code unit)를 넘기면 astral 문자(😀 등)에서
- * 실제보다 많이 지워 인접 문자를 잃는다 — [#2337-review] 가 undo/HF/FN 경로에 적용한
- * 계약을 IME 조합 경로에도 맞춘다.
- *
- * 주의: *커서 오프셋* 은 studio 의 UTF-16 관례를 유지한다(command.ts `charCount` 주석,
- * tests/undo-delete-char-count.test.ts 참조). 여기서는 삭제/조회 count 에만 쓴다.
- */
+/** WASM의 offset/count 계약인 Unicode scalar 길이로 DOM 문자열을 변환한다. */
 function charCount(s: string): number {
   return [...s].length;
 }
@@ -371,6 +355,7 @@ export function handleDelete(this: any, pos: DocumentPosition, inCell: boolean):
 }
 
 export function onCompositionStart(this: any): void {
+  if (this.isComposing) onCompositionEnd.call(this);
   this.resetRawTextMutationEffects();
   // 선택 영역이 있으면 삭제 후 조합 시작
   if (this.cursor.hasSelection()) {
@@ -390,7 +375,7 @@ export function onCompositionStart(this: any): void {
   }
   if (!this.canInsertTextInFormMode?.(basePos)) {
     this.textarea.value = '';
-    this.isComposing = false;
+    this.imeSession.reset();
     this.compositionAnchor = null;
     this.clearCompositionAnchorRect();
     this.compositionLength = 0;
@@ -398,67 +383,78 @@ export function onCompositionStart(this: any): void {
   }
 
   this.captureCompositionAnchorRect(basePos);
-  this.isComposing = true;
-  if (this.cursor.isInHeaderFooter()) {
-    // 머리말/꼬리말 모드에서는 hfCharOffset을 anchor의 charOffset으로 사용
-    this.compositionAnchor = basePos;
-  } else if (this.cursor.isInFootnote()) {
-    // 각주 모드에서는 fnCharOffset을 anchor의 charOffset으로 사용
-    this.compositionAnchor = basePos;
-  } else {
-    this.compositionAnchor = basePos;
-  }
+  this.compositionFontFamily = null;
+  this.imeSession.start();
+  this.compositionAnchor = basePos;
   this.compositionLength = 0;
 }
 
-export function onCompositionEnd(this: any): void {
-  const anchor = this.compositionAnchor;
-  const finalLength = this.compositionLength;
+export function onCompositionUpdate(this: any, event: CompositionEvent): void {
+  if (!this.active || !this.isComposing || !this.compositionAnchor) return;
+  const previous = this.imeSession.preedit;
+  const preedit = this.imeSession.update(event.data.replace(/[\r\n]+/g, ''));
+  this.compositionLength = charCount(preedit);
+  if (preedit !== previous) this.updateCompositionOverlay();
+}
 
-  this.isComposing = false;
+export function onCompositionEnd(this: any, event?: CompositionEvent): void {
+  const anchor = this.compositionAnchor;
+  const textareaText = this.textarea.value.replace(/[\r\n]+/g, '');
+  const commit = this.imeSession.finish(event?.data, textareaText);
+  if (!commit) return;
+
+  const composed = commit.text;
   this.compositionAnchor = null;
   this.clearCompositionAnchorRect();
   this.compositionLength = 0;
+  this.compositionFontFamily = null;
   this.textarea.value = '';
   this.caret.hideComposition();
-  this.updateCaret();
   this.resetRawTextMutationEffects();
 
-  // 더블 자음 분리 방지: compositionEnd 시점에 조합 완료된 텍스트 기억
-  // 직후 유령 input 이벤트에서 동일 텍스트가 오면 무시
-  this._lastComposedText = (finalLength > 0 && this._lastCompositionText) ? this._lastCompositionText : '';
-  this._lastComposedAt = performance.now();
-
-  // 조합 중 WASM 직접 호출로 이미 문서에 삽입된 텍스트를
-  // Command로 기록하여 Undo 가능하게 한다.
-  // [Task #2337] 머리말/꼬리말·각주 모드도 이제 기록한다(본문 스냅샷 undo 의 무언 파괴 차단).
-  if (anchor && finalLength > 0) {
+  let committed = false;
+  if (anchor && composed && this.canInsertTextInFormMode?.(anchor)) {
+    const scalarLength = charCount(composed);
     if (this.cursor.isInHeaderFooter()) {
-      // HF 는 신뢰할 텍스트 read 가 없어 getTextAt(본문 리더)을 쓸 수 없으므로 조합 텍스트
-      // (_lastCompositionText)를 그대로 기록한다. anchor.charOffset = 조합 시작 오프셋,
-      // hfParaIdx 는 조합 중 불변.
-      const composed = this._lastCompositionText || '';
-      if (composed) {
-        const target = { sectionIdx: this.cursor.hfSectionIdx, isHeader: this.cursor.headerFooterMode === 'header', applyTo: this.cursor.hfApplyTo };
-        this.executeOperation({ kind: 'record', command: new InsertTextInHeaderFooterCommand(target, this.cursor.hfParaIdx, anchor.charOffset, composed) });
-      }
+      const target = {
+        sectionIdx: this.cursor.hfSectionIdx,
+        isHeader: this.cursor.headerFooterMode === 'header',
+        applyTo: this.cursor.hfApplyTo,
+      };
+      const paraIdx = this.cursor.hfParaIdx;
+      this.insertTextAtRaw(anchor, composed);
+      this.consumeRawTextMutationBeforeCursor();
+      this.executeOperation({
+        kind: 'record',
+        command: new InsertTextInHeaderFooterCommand(target, paraIdx, anchor.charOffset, composed),
+      });
+      this.cursor.setHfCursorPosition(paraIdx, anchor.charOffset + scalarLength);
+      this.afterEdit();
+      committed = true;
     } else if (this.cursor.isInFootnote()) {
-      const composed = this._lastCompositionText || '';
-      if (composed) {
-        const target = {
-          sectionIdx: this.cursor.fnSectionIdx, paraIdx: this.cursor.fnParaIdx, controlIdx: this.cursor.fnControlIdx,
-          footnoteIndex: this.cursor.fnFootnoteIndex, pageNum: this.cursor.fnPageNum,
-        };
-        this.executeOperation({ kind: 'record', command: new InsertTextInFootnoteCommand(target, this.cursor.fnInnerParaIdx, anchor.charOffset, composed) });
-      }
+      const target = {
+        sectionIdx: this.cursor.fnSectionIdx, paraIdx: this.cursor.fnParaIdx, controlIdx: this.cursor.fnControlIdx,
+        footnoteIndex: this.cursor.fnFootnoteIndex, pageNum: this.cursor.fnPageNum,
+      };
+      const innerParaIdx = this.cursor.fnInnerParaIdx;
+      this.insertTextAtRaw(anchor, composed);
+      this.consumeRawTextMutationBeforeCursor();
+      this.executeOperation({
+        kind: 'record',
+        command: new InsertTextInFootnoteCommand(target, innerParaIdx, anchor.charOffset, composed),
+      });
+      this.cursor.setFnCursorPosition(innerParaIdx, anchor.charOffset + scalarLength);
+      this.afterEdit();
+      committed = true;
     } else {
-      const insertedText = this.getTextAt(anchor, finalLength);
-      if (insertedText) {
-        // execute() 없이 히스토리에만 기록 (텍스트는 이미 문서에 있음)
-        this.executeOperation({ kind: 'record', command: new InsertTextCommand(anchor, insertedText) });
-      }
+      const refreshClickHereGuide = this.isClickHereGuidePosition?.(anchor) === true;
+      this.executeOperation({ kind: 'command', command: new InsertTextCommand(anchor, composed) });
+      if (refreshClickHereGuide) this.refreshClickHereAfterFirstInput?.();
+      committed = true;
     }
   }
+
+  if (!committed) this.updateCaret();
 
   // 조합 종료 후 대기 중인 탐색 키 처리 (IME 조합 중 방향키 등)
   if (this._pendingNavAfterIME) {
@@ -468,67 +464,38 @@ export function onCompositionEnd(this: any): void {
   }
 }
 
-export function getTextAt(this: any, pos: DocumentPosition, count: number): string {
-  try {
-    if ((pos.cellPath?.length ?? 0) > 0 && pos.parentParaIndex !== undefined) {
-      return this.wasm.getTextInCellByPath(pos.sectionIndex, pos.parentParaIndex, JSON.stringify(pos.cellPath), pos.charOffset, count);
-    } else if (pos.parentParaIndex !== undefined) {
-      return this.wasm.getTextInCell(pos.sectionIndex, pos.parentParaIndex, pos.controlIndex!, pos.cellIndex!, pos.cellParaIndex!, pos.charOffset, count);
-    } else {
-      return this.wasm.getTextRange(pos.sectionIndex, pos.paragraphIndex, pos.charOffset, count);
-    }
-  } catch {
-    return '';
-  }
-}
-
 export function onInput(this: any, e?: InputEvent): void {
   if (!this.active) return;
 
+  if (e && this.imeSession.consumeTrailingInput({
+    inputType: e.inputType,
+    data: e.data,
+    isComposing: e.isComposing,
+    value: this.textarea.value,
+  })) {
+    this.textarea.value = '';
+    return;
+  }
+
   // 줄바꿈은 문단 분할 Command 로만 들어온다. textarea 의 기본 동작으로 값에 섞여 들어온
   // \r\n 을 그대로 삽입하면 문단 안에 리터럴 개행 문자가 박힌다.
-  // (조합 중 Enter 는 preventDefault 하지 않고 브라우저에 조합 종료를 맡기므로
-  //  textarea.value 에 개행이 남고, 조합 분기·일반 분기 양쪽으로 흘러든다.)
-  const text = this.textarea.value.replace(/[\r\n]+/g, '');
-  // const inputType = e?.inputType ?? 'unknown';
-  // const inputData = e?.data ?? '';
-  // const isComp = e?.isComposing ?? false;
+  const text = (this.textarea.value || e?.data || '').replace(/[\r\n]+/g, '');
 
-  // IME 조합 중: 이전 조합 텍스트 삭제 → 현재 조합 텍스트 삽입 (실시간 렌더링)
-  // Undo 스택에는 기록하지 않음 (compositionend에서 한 번에 기록)
+  // 조합 중에는 문서를 변경하지 않고 transient preedit만 갱신한다.
   if (this.isComposing && this.compositionAnchor) {
-    const anchor = this.compositionAnchor;
-    const beforePageIndex = this.cursor.getRect()?.pageIndex;
-    if (!this.canInsertTextInFormMode?.(anchor)) {
+    if (!this.canInsertTextInFormMode?.(this.compositionAnchor)) {
       this.textarea.value = '';
+      this.imeSession.reset();
+      this.compositionAnchor = null;
+      this.clearCompositionAnchorRect();
+      this.compositionLength = 0;
+      this.updateCaret();
       return;
     }
-    this.resetRawTextMutationEffects();
-
-    this.replaceTextAtRaw(anchor, this.compositionLength, text);
-    // 다음 조합 업데이트의 삭제 count는 scalar 단위다.
-    this.compositionLength = charCount(text);
-    if (text) this._lastCompositionText = text;
-
-    // cursor.moveTo() 내부의 exact lookup 전에 deferred mutation을 등록하고,
-    // 실제 cell-flow 경계에서만 동기 flush한다.
-    const boundaryHandled = this.consumeRawTextMutationBeforeCursor();
-    const newOffset = anchor.charOffset + text.length;
-    if (this.cursor.isInHeaderFooter()) {
-      this.cursor.setHfCursorPosition(this.cursor.hfParaIdx, newOffset);
-    } else if (this.cursor.isInFootnote()) {
-      this.cursor.setFnCursorPosition(this.cursor.fnInnerParaIdx, newOffset);
-    } else {
-      this.cursor.moveTo({ ...anchor, charOffset: newOffset });
-    }
-
-    const afterPos = this.cursor.getPosition();
-    const afterPageIndex = this.cursor.getRect()?.pageIndex;
-    this.afterTextInputEdit(anchor, afterPos, {
-      insertedText: text,
-      beforePageIndex,
-      afterPageIndex,
-    }, boundaryHandled);
+    const previous = this.imeSession.preedit;
+    const preedit = this.imeSession.update(text);
+    this.compositionLength = charCount(preedit);
+    if (preedit !== previous) this.updateCompositionOverlay();
     return;
   }
 
@@ -568,7 +535,7 @@ export function onInput(this: any, e?: InputEvent): void {
     this._iosRequiresFullRefresh = this._iosRequiresFullRefresh || boundaryHandled;
 
     // 커서 이동 (렌더링 없이 문서만 갱신)
-    const newOffset = this._iosAnchor.charOffset + (text?.length || 0);
+    const newOffset = this._iosAnchor.charOffset + charCount(text);
     if (this.cursor.isInHeaderFooter()) {
       this.cursor.setHfCursorPosition(this.cursor.hfParaIdx, newOffset);
     } else if (this.cursor.isInFootnote()) {
@@ -600,20 +567,7 @@ export function onInput(this: any, e?: InputEvent): void {
     return;
   }
 
-  // 더블 자음 분리 방지: compositionEnd 직후 유령 input 이벤트 감지
-  // 각주/머리말꼬리말 모드에서 조합 완료 직후 동일 텍스트가 오면 무시
-  //
-  // 유령 input 은 compositionend 와 같은 이벤트 루프 턴에 바로 뒤따른다.
-  // 만료 시간을 두지 않으면 이 억제 상태가 무기한 살아남아, 한참 뒤에 같은
-  // 글자를 다시 친 '진짜' 입력 한 번을 통째로 삼킨다(사용자에겐 씹힘으로 보인다).
-  const ghostAge = performance.now() - (this._lastComposedAt ?? 0);
-  if (this._lastComposedText && text === this._lastComposedText
-      && ghostAge <= GHOST_INPUT_WINDOW_MS) {
-    this._lastComposedText = '';
-    this.textarea.value = '';
-    return;
-  }
-  this._lastComposedText = '';
+  this.imeSession.clearPendingCommit();
   this.textarea.value = '';
 
   // 머리말/꼬리말 편집 모드
@@ -626,7 +580,7 @@ export function onInput(this: any, e?: InputEvent): void {
       this.wasm.insertTextInHeaderFooter(target.sectionIdx, isHeader, target.applyTo, paraIdx, charOffset, text);
       // [Task #2337] 히스토리 기록 → 본문 스냅샷 undo 가 이 편집을 무언 파괴하지 않게 한다.
       this.executeOperation({ kind: 'record', command: new InsertTextInHeaderFooterCommand(target, paraIdx, charOffset, text) });
-      this.cursor.setHfCursorPosition(paraIdx, charOffset + text.length);
+      this.cursor.setHfCursorPosition(paraIdx, charOffset + charCount(text));
       this.afterEdit();
     } catch (err) {
       console.error('[HF-input] insertTextInHeaderFooter 실패:', err);
@@ -645,7 +599,7 @@ export function onInput(this: any, e?: InputEvent): void {
       const charOffset = this.cursor.fnCharOffset;
       this.wasm.insertTextInFootnote(target.sectionIdx, target.paraIdx, target.controlIdx, innerParaIdx, charOffset, text);
       this.executeOperation({ kind: 'record', command: new InsertTextInFootnoteCommand(target, innerParaIdx, charOffset, text) });
-      this.cursor.setFnCursorPosition(innerParaIdx, charOffset + text.length);
+      this.cursor.setFnCursorPosition(innerParaIdx, charOffset + charCount(text));
       this.afterEdit();
     } catch (err) {
       console.error('[FN-input] insertTextInFootnote 실패:', err);

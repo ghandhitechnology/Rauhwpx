@@ -41,6 +41,7 @@ import { isPageLocalTextEditCommand, type PageLocalTextEditOptions } from './inp
 import type { NavigationKeyInput } from './navigation-keymap';
 import { isPointNearBoxBorder } from './table-border-hit';
 import { DeferredPaginationRunner } from './deferred-pagination-runner';
+import { ImeSession } from './ime-session';
 import {
   editableTargetFromPosition,
   positionsShareEditableContainer,
@@ -455,15 +456,14 @@ export class InputHandler {
   // private autoTransparentBorders = false;
 
   // IME 조합 상태
-  private isComposing = false;
+  private readonly imeSession = new ImeSession();
+  private get isComposing() { return this.imeSession.isComposing; }
   private compositionAnchor: DocumentPosition | null = null;
   /** 조합 시작 시점의 exact 좌표. 조합 갱신마다 같은 anchor를 다시 탐색하지 않는다. */
   private compositionAnchorRect: CursorRect | null = null;
-  private compositionLength = 0; // 문서에 삽입된 조합 텍스트 길이
-  private _lastCompositionText = '';
-  private _lastComposedText = '';
-  /** `_lastComposedText` 가 기록된 시각 — 유령 input 억제 창의 기준점. */
-  private _lastComposedAt = 0;
+  /** transient preedit의 Unicode scalar 길이 */
+  private compositionLength = 0;
+  private compositionFontFamily: string | null = null;
   private _pendingNavAfterIME: NavigationKeyInput | null = null;
   // iOS 폴백: composition 이벤트 없이 input만으로 한글 조합 처리
   private _iosComposing = false;
@@ -481,7 +481,8 @@ export class InputHandler {
   private onKeyDownBound: (e: KeyboardEvent) => void;
   private onInputBound: (e?: Event) => void;
   private onCompositionStartBound: () => void;
-  private onCompositionEndBound: () => void;
+  private onCompositionUpdateBound: (e: CompositionEvent) => void;
+  private onCompositionEndBound: (e: CompositionEvent) => void;
   private onInputBlurBound: () => void;
   private onCopyBound: (e: ClipboardEvent) => void;
   private onCutBound: (e: ClipboardEvent) => void;
@@ -540,7 +541,7 @@ export class InputHandler {
     } else {
       this.textarea = document.createElement('textarea');
       this.textarea.style.cssText =
-        'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;';
+        'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
       this.textarea.setAttribute('autocomplete', 'off');
       this.textarea.setAttribute('autocorrect', 'off');
       this.textarea.setAttribute('autocapitalize', 'off');
@@ -554,8 +555,11 @@ export class InputHandler {
     this.onKeyDownBound = this.onKeyDown.bind(this);
     this.onInputBound = this.onInput.bind(this);
     this.onCompositionStartBound = this.onCompositionStart.bind(this);
+    this.onCompositionUpdateBound = this.onCompositionUpdate.bind(this);
     this.onCompositionEndBound = this.onCompositionEnd.bind(this);
     this.onInputBlurBound = () => {
+      if (this.isComposing) _text.onCompositionEnd.call(this);
+      this.resetIosInputSession();
       this.flushDeferredPaginationIfNeeded('input-blur', false);
     };
     this.onCopyBound = this.onCopy.bind(this);
@@ -586,6 +590,7 @@ export class InputHandler {
     this.textarea.addEventListener('keydown', this.onKeyDownBound);
     this.textarea.addEventListener('input', this.onInputBound);
     this.textarea.addEventListener('compositionstart', this.onCompositionStartBound);
+    this.textarea.addEventListener('compositionupdate', this.onCompositionUpdateBound);
     this.textarea.addEventListener('compositionend', this.onCompositionEndBound);
     this.textarea.addEventListener('blur', this.onInputBlurBound);
     this.textarea.addEventListener('copy', this.onCopyBound);
@@ -2639,9 +2644,14 @@ export class InputHandler {
     this.compositionAnchorRect = null;
   }
 
-  /** IME 조합 완료 — 조합 텍스트를 Command로 기록 */
-  private onCompositionEnd(): void {
-    _text.onCompositionEnd.call(this);
+  /** compositionupdate.data를 transient preedit에 반영한다. */
+  private onCompositionUpdate(e: CompositionEvent): void {
+    _text.onCompositionUpdate.call(this, e);
+  }
+
+  /** IME 조합 완료 — 세션의 최종 텍스트를 한 번만 커밋 */
+  private onCompositionEnd(e: CompositionEvent): void {
+    _text.onCompositionEnd.call(this, e);
   }
 
   /**
@@ -2656,7 +2666,10 @@ export class InputHandler {
    * 브라우저 쪽 조합 상태(InputMethodController)도 함께 리셋한다.
    */
   finalizeCompositionBeforeCursorMove(): void {
-    if (!this.isComposing) return;
+    if (!this.isComposing) {
+      this.resetIosInputSession();
+      return;
+    }
     _text.onCompositionEnd.call(this);
     // blur→focus 로 IME 조합 버퍼를 비운다. 조합 중 값이 남아 있으면
     // 다음 input 이 옛 preedit 를 다시 흘려보낸다.
@@ -2667,9 +2680,16 @@ export class InputHandler {
     } catch { /* 포커스 이동 실패는 무시 — 상태는 이미 확정됨 */ }
   }
 
-  /** 위치에서 텍스트를 읽는다 (본문/셀 자동 분기) */
-  private getTextAt(pos: DocumentPosition, count: number): string {
-    return _text.getTextAt.call(this, pos, count);
+  /** composition 이벤트가 없는 iOS 입력의 anchor를 포커스/커서 경계에서 닫는다. */
+  private resetIosInputSession(): void {
+    if (!this._iosAnchor) return;
+    this._iosAnchor = null;
+    this._iosBeforePageIndex = undefined;
+    this._iosComposing = false;
+    this._iosLength = 0;
+    this._iosPrevText = '';
+    this._iosRequiresFullRefresh = false;
+    this.textarea.value = '';
   }
 
   /** 텍스트 입력 처리 (textarea input 이벤트) */
@@ -2931,11 +2951,40 @@ export class InputHandler {
    *                   onMouseUp (예: drag-during-scroll 영역, scrollbar release 영역) 의 자동 scroll back
    *                   결함 차단 영역. (Task #779)
    */
+  /** 문서/선택/서식 상태를 다시 조회하지 않고 preedit 오버레이만 갱신한다. */
+  private updateCompositionOverlay(): void {
+    const startRect = this.compositionAnchorRect;
+    if (!this.isComposing || !this.compositionAnchor || !startRect) {
+      this.updateCaret();
+      return;
+    }
+
+    const zoom = this.viewportManager.getZoom();
+    const text = this.imeSession.preedit;
+    this.positionImeInput(startRect, zoom);
+    if (!text) {
+      this.caret.hideComposition();
+      this.caret.update(startRect, zoom);
+      return;
+    }
+
+    if (!this.compositionFontFamily) {
+      try {
+        this.compositionFontFamily = this.getCharPropertiesAtCursor().fontFamily || 'sans-serif';
+      } catch {
+        this.compositionFontFamily = 'sans-serif';
+      }
+    }
+    const charWidth = Math.max(startRect.height * this.compositionLength, 1);
+    this.caret.showComposition(startRect, charWidth, zoom, text, this.compositionFontFamily);
+  }
+
   private updateCaret(skipScroll: boolean = false): void {
     const rect = this.cursor.getRect();
     if (rect) {
       const zoom = this.viewportManager.getZoom();
       const caretRect = this.adjustExitedFieldEndCaretRect(rect);
+      this.positionImeInput(caretRect, zoom);
 
       // IME 조합 중: 블랙박스 캐럿 표시
       if (this.isComposing && this.compositionAnchor && this.compositionLength > 0) {
@@ -2975,8 +3024,9 @@ export class InputHandler {
               cellBounds: startRect.cellBounds ? { ...startRect.cellBounds } : undefined,
             };
           }
-          const charWidth = rect.x - startRect.x;
-          const text = this.textarea.value || '';
+          const text = this.imeSession.preedit;
+          // preedit는 아직 문서에 없으므로 현재 글자 높이로 CJK advance를 근사한다.
+          const charWidth = Math.max(startRect.height * this.compositionLength, 1);
           // 현재 커서 위치의 글꼴 정보
           let fontFamily = 'sans-serif';
           try {
@@ -3010,6 +3060,19 @@ export class InputHandler {
       const adjustedCursorRect = this.adjustExitedFieldEndCaretRect(cursorRect);
       this.eventBus.emit('cursor-rect-updated', { x: adjustedCursorRect.x, y: adjustedCursorRect.y });
     }
+  }
+
+  /** 네이티브 IME 후보창이 실제 캐럿 근처에 열리도록 숨은 입력을 배치한다. */
+  private positionImeInput(rect: CursorRect, zoom: number): void {
+    if (this._isIOS) return;
+    const scrollContent = this.container.querySelector<HTMLElement>('#scroll-content');
+    const contentRect = scrollContent?.getBoundingClientRect() ?? this.container.getBoundingClientRect();
+    const contentWidth = scrollContent?.clientWidth ?? this.container.clientWidth;
+    const pageLeft = this.virtualScroll.getPageLeftResolved(rect.pageIndex, contentWidth);
+    const pageOffset = this.virtualScroll.getPageOffset(rect.pageIndex);
+    this.textarea.style.left = `${contentRect.left + pageLeft + rect.x * zoom}px`;
+    this.textarea.style.top = `${contentRect.top + pageOffset + rect.y * zoom}px`;
+    this.textarea.style.height = `${Math.max(1, rect.height * zoom)}px`;
   }
 
   /** 빈 누름틀 끝 바깥 상태에서는 caret을 안내문 오른쪽에 둔다. */
@@ -3498,12 +3561,10 @@ export class InputHandler {
     this.deferredPaginationRunner.cancel();
     this.deferredPaginationPending = false;
     this.resetRawTextMutationEffects();
-    this.isComposing = false;
+    this.imeSession.reset();
     this.compositionAnchor = null;
     this.compositionAnchorRect = null;
     this.compositionLength = 0;
-    this._lastCompositionText = '';
-    this._lastComposedText = '';
     this._pendingNavAfterIME = null;
     if (this._iosInputTimer) {
       clearTimeout(this._iosInputTimer);
@@ -3543,12 +3604,10 @@ export class InputHandler {
     this.deferredPaginationRunner.cancel();
     this.deferredPaginationPending = false;
     this.resetRawTextMutationEffects();
-    this.isComposing = false;
+    this.imeSession.reset();
     this.compositionAnchor = null;
     this.compositionAnchorRect = null;
     this.compositionLength = 0;
-    this._lastCompositionText = '';
-    this._lastComposedText = '';
     this._pendingNavAfterIME = null;
     if (this._iosInputTimer) {
       clearTimeout(this._iosInputTimer);
@@ -3570,6 +3629,7 @@ export class InputHandler {
     this.textarea.removeEventListener('keydown', this.onKeyDownBound);
     this.textarea.removeEventListener('input', this.onInputBound);
     this.textarea.removeEventListener('compositionstart', this.onCompositionStartBound);
+    this.textarea.removeEventListener('compositionupdate', this.onCompositionUpdateBound);
     this.textarea.removeEventListener('compositionend', this.onCompositionEndBound);
     this.textarea.removeEventListener('blur', this.onInputBlurBound);
     this.textarea.removeEventListener('copy', this.onCopyBound);
