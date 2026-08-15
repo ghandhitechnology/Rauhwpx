@@ -110,8 +110,8 @@ export default defineConfig({
       injectRegister: false,
       includeAssets: ['favicon.ico', 'icons/*.png'],
       manifest: {
-        name: 'rhwp-studio',
-        short_name: 'rhwp',
+        name: 'Rauhwpx',
+        short_name: 'Rauhwpx',
         description: 'HWP/HWPX/HML 뷰어·에디터 — 알(R), 모두의 한글',
         lang: 'ko',
         theme_color: '#2b6cb0',

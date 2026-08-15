@@ -57,6 +57,7 @@ let agentChain = Promise.resolve();
 let agentRestartTimer = null;
 let agentRestartAttempt = 0;
 let quitting = false;
+let cleanupDone = false;
 
 function studioDist() {
   return join(__dirname, '..', 'rhwp', 'rhwp-studio', 'dist');
@@ -188,16 +189,67 @@ function ensureAgent(opts = {}) {
   return job;
 }
 
+const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+let updatePromptOpen = false;
+
+function setupAutoUpdater() {
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('error', (error) => {
+    console.warn('[rauhwpx] auto-update error:', error?.message ?? error);
+  });
+  autoUpdater.on('update-downloaded', (info) => {
+    if (updatePromptOpen || quitting) return;
+    updatePromptOpen = true;
+    const version = info?.version ? ` ${info.version}` : '';
+    void dialog.showMessageBox(mainWindow ?? undefined, {
+      type: 'info',
+      message: `Rauhwpx${version} is ready to install`,
+      detail: 'The update was downloaded in the background. Restart now to apply it.',
+      buttons: ['Restart Now', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      updatePromptOpen = false;
+      if (response === 0) autoUpdater.quitAndInstall();
+    }).catch(() => {
+      updatePromptOpen = false;
+    });
+  });
+  const check = () => {
+    if (quitting) return;
+    void autoUpdater.checkForUpdates().catch(() => {});
+  };
+  setTimeout(check, 4000);
+  setInterval(check, UPDATE_CHECK_INTERVAL_MS);
+}
+
 function installMenu() {
   const isMac = process.platform === 'darwin';
   const checkForUpdates = {
     label: 'Check for Updates…',
-    click: () => {
+    click: async () => {
       if (!app.isPackaged) {
         void shell.openExternal(RELEASES_URL);
         return;
       }
-      void autoUpdater.checkForUpdatesAndNotify();
+      try {
+        const result = await autoUpdater.checkForUpdates();
+        if (!result?.isUpdateAvailable) {
+          void dialog.showMessageBox(mainWindow ?? undefined, {
+            type: 'info',
+            message: 'You’re up to date',
+            detail: `Rauhwpx ${app.getVersion()} is the latest version.`,
+          });
+        }
+        // A newer version downloads in the background and prompts when ready.
+      } catch (error) {
+        void dialog.showMessageBox(mainWindow ?? undefined, {
+          type: 'warning',
+          message: 'Could not check for updates',
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
     },
   };
   Menu.setApplicationMenu(Menu.buildFromTemplate([
@@ -269,16 +321,15 @@ async function createWindow() {
   if (!window.isDestroyed() && !window.isVisible()) window.show();
 }
 
-function stopChildren() {
+async function shutdownChildren() {
   clearAgentRestart();
-  try {
-    agentProcess?.kill();
-  } catch {
-    /* already gone */
-  }
-  agentProcess = null;
   studioServer?.close();
   studioServer = null;
+  const child = agentProcess;
+  agentProcess = null;
+  // SIGTERM lets the hub close its WebSocket clients and CLI children;
+  // stopHubChild escalates to SIGKILL after its timeout so quit never hangs.
+  await stopHubChild(child);
 }
 
 ipcMain.handle('agent-hub:ensure', async () => {
@@ -296,11 +347,7 @@ app.whenReady().then(async () => {
   // Bring the hub up before the window so the first WebSocket is not refused.
   await ensureAgent();
   await createWindow();
-  if (app.isPackaged) {
-    setTimeout(() => {
-      void autoUpdater.checkForUpdatesAndNotify().catch(() => {});
-    }, 4000);
-  }
+  if (app.isPackaged) setupAutoUpdater();
   app.on('activate', () => {
     if (!mainWindow) {
       void ensureAgent().then(() => createWindow());
@@ -317,7 +364,22 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   quitting = true;
-  stopChildren();
+  if (cleanupDone) return;
+  event.preventDefault();
+  // Hide windows right away so quitting feels instant while children wind down.
+  for (const win of BrowserWindow.getAllWindows()) {
+    try {
+      win.hide();
+    } catch {
+      /* window already destroyed */
+    }
+  }
+  void shutdownChildren()
+    .catch(() => {})
+    .finally(() => {
+      cleanupDone = true;
+      app.quit();
+    });
 });

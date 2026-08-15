@@ -44,7 +44,7 @@ export class AboutDialog extends ModalDialog {
     // 제품 영문명
     const titleEn = document.createElement('div');
     titleEn.className = 'about-product-name';
-    titleEn.textContent = 'HWP/HWPX Compatible Module for Rust';
+    titleEn.textContent = 'Rauhwpx';
     body.appendChild(titleEn);
 
     // 제품 한글명

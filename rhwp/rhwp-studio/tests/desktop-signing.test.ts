@@ -49,3 +49,19 @@ test('desktop window shows even if ready-to-show already fired during load', () 
   assert.match(desktopMain, /preload: PRELOAD_PATH/);
   assert.match(desktopMain, /ipcMain.handle\('agent-hub:ensure'/);
 });
+
+test('desktop quit hides windows and waits for the hub before exiting', () => {
+  const beforeQuit = desktopMain.slice(desktopMain.indexOf("app.on('before-quit'"));
+  assert.match(beforeQuit, /event\.preventDefault\(\)/);
+  assert.match(beforeQuit, /win\.hide\(\)/);
+  assert.match(beforeQuit, /shutdownChildren\(\)/);
+  assert.match(beforeQuit, /app\.quit\(\)/);
+  assert.match(desktopMain, /await stopHubChild\(child\)/);
+});
+
+test('packaged app checks for updates on launch and prompts to restart when downloaded', () => {
+  assert.match(desktopMain, /if \(app\.isPackaged\) setupAutoUpdater\(\)/);
+  assert.match(desktopMain, /autoUpdater\.on\('update-downloaded'/);
+  assert.match(desktopMain, /autoUpdater\.quitAndInstall\(\)/);
+  assert.match(desktopMain, /setInterval\(check, UPDATE_CHECK_INTERVAL_MS\)/);
+});
