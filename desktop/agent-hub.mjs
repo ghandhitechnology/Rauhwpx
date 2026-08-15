@@ -18,7 +18,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix, win32 } from 'node:path';
 
 export const DEFAULT_HUB_PORT = 5175;
 export const DEFAULT_HEALTH_TIMEOUT_MS = 500;
@@ -217,21 +217,26 @@ export function pathDelimiter(platform = process.platform) {
   return platform === 'win32' ? ';' : ':';
 }
 
-export function extraBinDirs(home, { exists = existsSync, readFile = readFileSync } = {}) {
+export function extraBinDirs(home, {
+  exists = existsSync,
+  readFile = readFileSync,
+  platform = process.platform,
+} = {}) {
+  const platformPath = platform === 'win32' ? win32 : posix;
   const dirs = [
-    join(home, '.local', 'bin'),
-    join(home, '.fnm', 'aliases', 'default', 'bin'),
-    join(home, '.volta', 'bin'),
-    join(home, '.asdf', 'shims'),
-    join(home, '.nvm', 'current', 'bin'),
+    platformPath.join(home, '.local', 'bin'),
+    platformPath.join(home, '.fnm', 'aliases', 'default', 'bin'),
+    platformPath.join(home, '.volta', 'bin'),
+    platformPath.join(home, '.asdf', 'shims'),
+    platformPath.join(home, '.nvm', 'current', 'bin'),
     '/opt/homebrew/bin',
     '/usr/local/bin',
   ];
   try {
-    const alias = String(readFile(join(home, '.nvm', 'alias', 'default'), 'utf8')).trim();
+    const alias = String(readFile(platformPath.join(home, '.nvm', 'alias', 'default'), 'utf8')).trim();
     if (alias && !alias.includes('/')) {
-      dirs.unshift(join(home, '.nvm', 'versions', 'node', alias, 'bin'));
-      dirs.unshift(join(home, '.nvm', 'versions', 'node', `v${alias}`, 'bin'));
+      dirs.unshift(platformPath.join(home, '.nvm', 'versions', 'node', alias, 'bin'));
+      dirs.unshift(platformPath.join(home, '.nvm', 'versions', 'node', `v${alias}`, 'bin'));
     }
   } catch {
     /* no nvm default alias */
@@ -241,9 +246,10 @@ export function extraBinDirs(home, { exists = existsSync, readFile = readFileSyn
 
 export function findOnPath(name, pathEnv, exists = existsSync, platform = process.platform) {
   const delim = pathDelimiter(platform);
+  const platformPath = platform === 'win32' ? win32 : posix;
   for (const dir of String(pathEnv).split(delim)) {
     if (!dir) continue;
-    const candidate = join(dir, name);
+    const candidate = platformPath.join(dir, name);
     if (exists(candidate)) return candidate;
   }
   return null;
@@ -259,10 +265,11 @@ export function buildHubPath({
   platform = process.platform,
 } = {}) {
   const delim = pathDelimiter(platform);
+  const platformPath = platform === 'win32' ? win32 : posix;
   const bins = [
-    agentDir ? join(agentDir, 'node_modules', '.bin') : null,
+    agentDir ? platformPath.join(agentDir, 'node_modules', '.bin') : null,
     ...extraDirs,
-    ...extraBinDirs(home ?? '', { exists, readFile }),
+    ...extraBinDirs(home ?? '', { exists, readFile, platform }),
   ].filter(Boolean);
   const parts = [...bins.filter((dir) => exists(dir)), envPath];
   return [...new Set(parts.join(delim).split(delim).filter(Boolean))].join(delim);
@@ -296,7 +303,8 @@ export function resolveHubLaunch({
   exists = existsSync,
   platform = process.platform,
 } = {}) {
-  const cwd = agentDir || (scriptPath ? dirname(scriptPath) : '');
+  const platformPath = platform === 'win32' ? win32 : posix;
+  const cwd = agentDir || (scriptPath ? platformPath.dirname(scriptPath) : '');
   if (!scriptPath || !exists(scriptPath)) return null;
 
   const pathEnv = buildHubPath({

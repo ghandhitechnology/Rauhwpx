@@ -5,11 +5,15 @@ import { readFileSync } from 'node:fs';
 // 규칙만 css 없는 모듈에서 실제로 검증하고, DOM 계약은 소스 텍스트로 본다.
 import { formatRelativeTime, formatResetAt, formatTokens } from '../src/ui/agent-sidebar/usage-format.ts';
 
-const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
-const settings = readFileSync(new URL('../src/ui/agent-sidebar/settings.ts', import.meta.url), 'utf8');
-const settingsCss = readFileSync(new URL('../src/ui/agent-sidebar/settings.css', import.meta.url), 'utf8');
-const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
-const icons = readFileSync(new URL('../src/ui/agent-sidebar/icons.ts', import.meta.url), 'utf8');
+const readSource = (relativePath: string) => readFileSync(
+  new URL(relativePath, import.meta.url),
+  'utf8',
+).replace(/\r\n/g, '\n');
+const source = readSource('../src/ui/agent-sidebar/index.ts');
+const settings = readSource('../src/ui/agent-sidebar/settings.ts');
+const settingsCss = readSource('../src/ui/agent-sidebar/settings.css');
+const css = readSource('../src/ui/agent-sidebar/agent-sidebar.css');
+const icons = readSource('../src/ui/agent-sidebar/icons.ts');
 
 test('설정 페이지는 무대에 다른 페이지와 나란히 선다', () => {
   assert.match(
