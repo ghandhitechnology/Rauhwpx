@@ -87,6 +87,38 @@ test('연결 묶음은 허브 상태와 프로바이더 상태, 세 동작을 �
   assert.match(settingsCss, /\.ag-settings-dot\[data-state='connected'\]/);
 });
 
+test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에서 끝난다', () => {
+  assert.match(settings, /setup\.addEventListener\('click', \(\) => openAgentSetup\(agent\)\)/);
+  assert.match(settings, /setupDialog\.setAttribute\('role', 'dialog'\)/);
+  assert.match(settings, /setupDialog\.setAttribute\('aria-modal', 'true'\)/);
+  assert.match(settings, /bridge\.installAgent\(setupAgent\)/);
+  assert.match(settings, /bridge\.authenticateAgent\(setupAgent, method/);
+  assert.match(settings, /'브라우저로 로그인'/);
+  assert.match(settings, /'API 키 입력'/);
+  assert.match(settings, /const detected = health\?\.available === true \|\| setup\?\.available === true/);
+  assert.match(settings, /detected \|\| setup\?\.connected \|\| setup\?\.setupComplete \? '재설정' : '설정'/);
+  assert.match(settings, /const detected = providers\?\.\[agent\]\?\.available === true/);
+  assert.match(settings, /const available = detected \|\| status\?\.available === true \|\| status\?\.installed === true/);
+  assert.match(settings, /const connected = detected \|\| status\?\.connected === true \|\| status\?\.setupComplete === true/);
+  assert.match(settings, /CLI 연결이 확인되었습니다/);
+  assert.doesNotMatch(settings, /필요한 CLI와 인증을 한 번에 설정합니다/);
+  assert.match(settings, /piOauth\.addEventListener\('click', \(\) => void startSetupAuth\('oauth'\)\)/);
+  assert.doesNotMatch(settings, /body\.append\([\s\S]*piSection\.root/);
+  assert.match(settingsCss, /\.ag-agent-setup-overlay/);
+  assert.match(settingsCss, /\.ag-agent-setup-dialog/);
+  assert.match(settingsCss, /\.ag-agent-setup-hero-title \{[\s\S]*font-size: 22px/);
+  assert.match(settings, /setSetupInstallProgress\(ev\.percent, ev\.phase \?\? ev\.state\)/);
+  assert.match(settings, /setPiInstallProgress\(ev\.percent, ev\.state/);
+  assert.match(settings, /INSTALL_PROGRESS_CEILING/);
+  assert.match(settingsCss, /transition: width 480ms cubic-bezier/);
+});
+
+test('자동 하네스 업데이트 실패는 프로바이더 카드에 조용히 표시한다', () => {
+  assert.match(settings, /if \(setup\?\.updateRequired\) \{[\s\S]*'업데이트 필요'/);
+  assert.match(settings, /classList\.toggle\('ag-update-required'/);
+  assert.match(settingsCss, /\.ag-settings-row-detail\.ag-update-required/);
+});
+
 test('기본 설정은 네 개의 native select 이고 저장 후 사이드바에 알린다', () => {
   assert.match(settings, /createSelect\(\s*'기본 제공자'/);
   assert.match(settings, /createSelect\('기본 모델', \[\]\)/);
@@ -112,12 +144,18 @@ test('사이드바는 저장된 기본값으로 시작하고 새 대화에 적�
 
 test('글쓰기 보정 상태와 진입 버튼', () => {
   assert.match(settings, /'아직 보정되지 않았어요'/);
-  assert.match(settings, /보정됨 · \$\{language\}/);
+  assert.match(settings, /const parts = \['보정됨', language, `문서 \$\{writingStyle\.sourceCount\}개`\]/);
+  assert.match(settings, /calibrationStatus\.textContent = parts\.join\(' \/ '\)/);
   assert.match(settings, /문서 \$\{writingStyle\.sourceCount\}개/);
   assert.match(settings, /el\('button', 'ag-settings-primary', '보정 시작'\)/);
   assert.match(settings, /calibrationBtn\.textContent = '다시 보정'/);
   assert.match(settings, /openCalibration\(\)/);
   assert.match(source, /openCalibration: \(\) => writingStyleCalibration\.open\(\)/);
+});
+
+test('현재 대화는 슬래시로 구분하고 Pi 목록 안내는 숫자만 남긴다', () => {
+  assert.match(settings, /현재 대화: \$\{AGENT_LABEL\[current\.agent\]\} \/ \$\{labelForModel\(current\.agent, current\.model\)\} \/ \$\{permission\}/);
+  assert.doesNotMatch(settings, /검색으로 좁혀 보세요/);
 });
 
 test('요금제 선택값은 프로바이더별로 다르고 허브에 저장된다', () => {
