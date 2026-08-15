@@ -1,18 +1,25 @@
 // cross-spawn: Windows에서 npm .cmd 심을 인자 이스케이프 손상 없이 실행한다.
 import spawn from 'cross-spawn';
-import { lstatSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs';
+import { copyFileSync, lstatSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
   createLineReader,
   isPlanningRestricted,
   mcpCapabilityEnv,
+  mcpRuntimeFor,
   normalizeExecutionMode,
   normalizeUsageTokens,
   systemBriefFor,
   truncate,
   validateExecutionMode,
 } from './backend.mjs';
+import {
+  isolatedProcessEnv,
+  processTreeSpawnOptions,
+  terminateProcessTree,
+  waitForProcessTreeExit,
+} from '../process-tree.mjs';
 
 const STDERR_TAIL_LIMIT = 16_000;
 const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
@@ -24,7 +31,11 @@ const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
  * @param {string} codexHome
  * @param {string} [authPath]
  */
-export function prepareCodexHome(codexHome, authPath) {
+export function prepareCodexHome(codexHome, authPath, {
+  copyFile = copyFileSync,
+  platform = process.platform,
+  symlink = symlinkSync,
+} = {}) {
   mkdirSync(codexHome, { recursive: true });
   if (!authPath) return;
 
@@ -47,7 +58,12 @@ export function prepareCodexHome(codexHome, authPath) {
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
-  symlinkSync(authPath, target);
+  try {
+    symlink(authPath, target);
+  } catch (error) {
+    if (platform !== 'win32' || error?.code !== 'EPERM') throw error;
+    copyFile(authPath, target);
+  }
 }
 
 /**
@@ -61,7 +77,9 @@ export function prepareCodexHome(codexHome, authPath) {
 export function buildCodexArgv(opts, threadId) {
   const unrestricted = opts.permissionProfile === 'unrestricted';
   const planningRestricted = isPlanningRestricted(opts);
+  const runtime = mcpRuntimeFor(opts);
   const capabilityEnv = {
+    ...runtime.env,
     RHWP_WS_URL: `ws://127.0.0.1:${opts.hubPort}/mcp`,
     RHWP_AGENT_TOKEN: opts.token,
     RHWP_AGENT_NAME: 'codex',
@@ -71,8 +89,8 @@ export function buildCodexArgv(opts, threadId) {
     .map(([key, value]) => `${key} = ${JSON.stringify(String(value))}`)
     .join(', ');
   const cfg = [
-    '-c', 'mcp_servers.rhwp.command="node"',
-    '-c', `mcp_servers.rhwp.args=["${opts.mcpScriptPath}"]`,
+    '-c', `mcp_servers.rhwp.command=${JSON.stringify(runtime.command)}`,
+    '-c', `mcp_servers.rhwp.args=${JSON.stringify(runtime.args)}`,
     '-c', `mcp_servers.rhwp.env={${mcpEnv}}`,
     '-c', 'mcp_servers.rhwp.startup_timeout_sec=20',
     // Headless MCP calls cannot display an approval prompt. Auto-approve rhwp
@@ -128,7 +146,10 @@ export function formatCodexExitError(stderrText, code, signal, token) {
  * @param {import('./backend.mjs').BackendOptions} opts
  * @returns {import('./backend.mjs').AgentSession}
  */
-export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
+export function createCodexSession(opts, {
+  spawnProcess = spawn,
+  terminateProcess = terminateProcessTree,
+} = {}) {
   const onEvent = opts.onEvent;
 
   /** @type {string | null} */
@@ -140,7 +161,6 @@ export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
   let turnFailureMessage = null;
   let disposed = false;
   let loggedToolCallSample = false;
-  let killTimer = null;
   let stderrTail = '';
   let childExitPromise = Promise.resolve();
   let resolveChildExit = null;
@@ -303,13 +323,7 @@ export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
   function killChild() {
     const proc = child;
     if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
-    proc.kill('SIGTERM');
-    killTimer = setTimeout(() => {
-      try {
-        if (proc.exitCode === null && proc.signalCode === null) proc.kill('SIGKILL');
-      } catch {}
-    }, 3000);
-    if (killTimer.unref) killTimer.unref();
+    terminateProcess(proc);
   }
 
   return {
@@ -338,14 +352,13 @@ export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
       try {
         prepareCodexHome(codexHome, opts.codexAuthPath);
         proc = spawnProcess('codex', argv, {
+          ...processTreeSpawnOptions(),
           cwd: opts.rootDir,
           env: {
-            ...process.env,
-            ...(opts.isolatedHome ? { HOME: opts.isolatedHome } : {}),
+            ...isolatedProcessEnv(opts),
             CODEX_HOME: codexHome,
           },
           stdio: ['pipe', 'pipe', 'pipe'],
-          windowsHide: true,
         });
       } catch (e) {
         onEvent({ type: 'error', agent: 'codex', message: `failed to start codex: ${e?.message ?? e}` });
@@ -376,7 +389,6 @@ export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
       });
       proc.on('exit', (code, signal) => {
         if (proc !== child) return;
-        if (killTimer) { clearTimeout(killTimer); killTimer = null; }
         if (turnOpen && !disposed) {
           if (turnFailureMessage) {
             endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: turnFailureMessage });
@@ -425,7 +437,9 @@ export function createCodexSession(opts, { spawnProcess = spawn } = {}) {
       turnOpen = false;
       // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
       try { child?.stdout?.removeAllListeners('data'); } catch {}
+      const exited = waitForProcessTreeExit(child);
       killChild();
+      return exited;
     },
   };
 }

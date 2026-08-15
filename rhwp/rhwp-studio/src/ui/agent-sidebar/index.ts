@@ -45,6 +45,7 @@ import {
   listThreadsByDocument,
   renameThread,
   setThreadTitle,
+  subscribeThreadChanges,
   upsertThread,
   type ChatThread,
   type ThreadMessage,
@@ -4324,6 +4325,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   // ── 구독 ──────────────────────────────────────────────
   const unsubBridge = bridge.onEvent(handleSidebarEvent);
+  const unsubThreads = subscribeThreadChanges(() => {
+    if (threadsListVisible()) rebuildThreadsList();
+  });
   const unsubPending = bridge.pendingEdits.onChange((e: PendingEditsChangeEvent) => {
     if (e.type === 'invalidated') {
       systemMessage(`대기 중인 에이전트 편집이 해제되었습니다 (${e.reason})`);
@@ -4351,6 +4355,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     root,
     dispose(): void {
       unsubBridge();
+      unsubThreads();
       unsubPending();
       contextUnsubs.forEach((unsub) => unsub());
       messagesMutationObserver?.disconnect();
