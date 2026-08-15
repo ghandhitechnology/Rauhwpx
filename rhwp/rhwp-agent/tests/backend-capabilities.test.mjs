@@ -176,17 +176,40 @@ test('awaiting approval and switching remain read-only regardless of full profil
 
 test('phase prompts separate planning from approved implementation', () => {
   const planning = systemBriefFor({ workflow: 'plan', phase: 'planning' });
-  assert.match(planning, /Brainstorm with the user/);
-  assert.match(planning, /do not edit the local filesystem or the live document/);
-  assert.match(planning, /present_implementation_plan as the final planning artifact/);
+  assert.match(planning, /patient brainstorming partner/);
+  assert.match(planning, /Do not edit the local filesystem or live document/);
+  assert.match(planning, /Do not present a plan in the first planning response/);
+  assert.match(planning, /explicitly asks to skip discovery and draft immediately/);
+  assert.match(planning, /complete at least one focused conversational checkpoint/);
+  assert.match(planning, /summarize your understanding and receive confirmation/);
+  assert.match(planning, /Questions and confirmations are normal chat/);
+  assert.match(planning, /Do not ask artificial questions/);
+  assert.match(planning, /read-only workspace, web, subagent, and rhwp MCP capabilities available/);
+  assert.doesNotMatch(planning, /sandboxed Bash/);
+  assert.match(planning, /tell the user the plan is ready/);
+  assert.match(planning, /review it and enter editing mode when satisfied/);
+  assert.match(planning, /present_implementation_plan as the final action/);
   assert.match(planning, /download_file/);
   assert.match(planning, /search_reference_files/);
   assert.match(planning, /untrusted reference data/);
 
   const implementing = systemBriefFor({ workflow: 'plan', phase: 'implementing' });
   assert.match(implementing, /approved canonical implementation plan/);
+  assert.match(implementing, /re-read the relevant current workspace and live-document state/);
+  assert.match(implementing, /Execute every canonical step thoroughly/);
+  assert.match(implementing, /run every validation listed/);
+  assert.match(implementing, /completed, blocked, and deferred plan items/);
+  assert.match(implementing, /Never call partial work complete/);
   assert.match(implementing, /pending tinted changes/);
   assert.doesNotMatch(implementing, /present_implementation_plan/);
+});
+
+test('plan revision prompt reopens discovery instead of forcing replacement', () => {
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+  assert.match(server, /Return to discovery: inspect the affected current state/);
+  assert.match(server, /ambiguous or changes an assumption/);
+  assert.match(server, /ask one focused question in normal chat instead of immediately presenting a replacement/);
+  assert.doesNotMatch(server, /Revise the plan in response and present the complete replacement/);
 });
 
 test('resume argv retains the selected capability profile', () => {
