@@ -25,6 +25,8 @@ import type {
   StructuredPlan,
   SkillCatalog,
   ProductSkill,
+  DocumentTemplate,
+  TemplateCatalog,
 } from '../../agent/types.ts';
 import {
   defaultModelForAgent,
@@ -60,6 +62,7 @@ import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
 import { createReferenceLibrary } from './reference-library.ts';
 import { isDesktopApp } from '../../desktop-integration.ts';
+import { fuzzyTemplateScore } from './template-fuzzy.ts';
 
 export interface AgentSidebarDeps {
   bridge: AgentBridge;
@@ -412,6 +415,8 @@ function opPreview(op: PendingOp): string {
       return JSON.stringify(op.format);
     case 'field':
       return `${op.name} → ${op.newValue}`;
+    case 'template':
+      return `${op.label} · template r${op.templateRevision}`;
     case 'object': {
       const label = OBJECT_OP_LABELS[op.obj.type] ?? op.obj.type;
       if (op.obj.type === 'createTable') return `${label} ${op.obj.rows}×${op.obj.cols}`;
@@ -559,6 +564,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     ? bridge.getPermissionProfile()
     : agentPrefs.defaultPermissionProfile;
   let skillCatalog: SkillCatalog = { revision: 0, skills: [] };
+  let templateCatalog: TemplateCatalog = { revision: 0, templates: [] };
+  let activeTemplate: DocumentTemplate | null = null;
   let skillDraftFiles: Array<{ path: string; content: string; encoding: 'utf8' | 'base64' }> = [];
   let selectedSkillFile = 'SKILL.md';
   let editingSkill: ProductSkill | null = null;
@@ -1575,7 +1582,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   const composerField = el('div', 'ag-composer-field');
   composerField.append(caret, input, sendHint, send);
-  composer.append(composerOverlay, slashMenu, composerField, composerMeta, configPanel);
+  const templateChip = el('div', 'ag-template-chip');
+  templateChip.hidden = true;
+  const templateChipName = el('span', 'ag-template-chip-name');
+  const templateChipClear = el('button', 'ag-template-chip-clear');
+  templateChipClear.type = 'button';
+  templateChipClear.setAttribute('aria-label', '활성 템플릿 해제');
+  templateChipClear.appendChild(createIcon('close'));
+  templateChip.append(el('span', 'ag-template-chip-label', '템플릿'), templateChipName, templateChipClear);
+  composer.append(composerOverlay, slashMenu, templateChip, composerField, composerMeta, configPanel);
   // 사이드바에서는 변경 검토와 계획을 분리한다. 계획은 입력기 바로 위에
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
   chatPage.append(header, connBanner, messages, review, planSurface, composer);
@@ -2644,8 +2659,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     value: string;
     label: string;
     detail: string;
-    local?: 'skills' | 'create' | 'calibration' | 'settings';
+    local?: 'skills' | 'create' | 'calibration' | 'settings' | 'templates';
     workflow?: AgentWorkflow;
+    templateId?: string;
   };
   let slashOptions: SlashOption[] = [];
   let slashIndex = 0;
@@ -2656,7 +2672,51 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (!open) input.removeAttribute('aria-activedescendant');
   }
 
+  function renderActiveTemplate(): void {
+    templateChip.hidden = activeTemplate === null;
+    templateChipName.textContent = activeTemplate?.name ?? '';
+    templateChip.title = activeTemplate ? `${activeTemplate.originalName} · r${activeTemplate.revision}` : '';
+  }
+
+  function selectTemplate(template: DocumentTemplate | null, sync = true): void {
+    activeTemplate = template;
+    currentThread.activeTemplateId = template?.id ?? null;
+    renderActiveTemplate();
+    if (sync) bridge.setActiveTemplate(template?.id ?? null);
+    persistCurrentThread();
+  }
+
+  templateChipClear.addEventListener('click', () => {
+    selectTemplate(null);
+    input.focus();
+  });
+
   function rebuildSlashMenu(): void {
+    const templateMatch = input.value.match(/^\s*\/templates(?:\s+([\s\S]*))?$/i);
+    if (templateMatch && !input.value.trimStart().startsWith('//')) {
+      const query = templateMatch[1] ?? '';
+      const normalizedQuery = query.normalize('NFKC').toLocaleLowerCase().trim();
+      const completeName = [...templateCatalog.templates]
+        .sort((a, b) => b.name.length - a.name.length)
+        .find((template) => normalizedQuery.startsWith(`${template.name.normalize('NFKC').toLocaleLowerCase()} `));
+      if (completeName) {
+        setSlashMenuOpen(false);
+        return;
+      }
+      slashOptions = templateCatalog.templates
+        .map((template) => ({ template, score: fuzzyTemplateScore(template.name, query) }))
+        .filter((item): item is { template: DocumentTemplate; score: number } => item.score !== null)
+        .sort((a, b) => b.score - a.score || a.template.name.localeCompare(b.template.name, 'ko'))
+        .map(({ template }) => ({
+          value: `/templates ${template.name}`,
+          label: template.name,
+          detail: `${template.format.toUpperCase()} · ${template.pageCount}쪽 · r${template.revision}`,
+          templateId: template.id,
+        }));
+      slashIndex = Math.min(slashIndex, Math.max(0, slashOptions.length - 1));
+      renderSlashRows();
+      return;
+    }
     const match = input.value.match(/^\s*\/([^\s/]*)$/);
     if (!match || input.value.trimStart().startsWith('//')) { setSlashMenuOpen(false); return; }
     const query = match[1].toLowerCase();
@@ -2665,6 +2725,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       { value: '/build', label: '/build', detail: '바로 실행 모드로 전환', workflow: 'direct' },
       { value: '/calibration', label: '/calibration', detail: '말투 모방 캘리브레이션 열기', local: 'calibration' },
       { value: '/settings', label: '/settings', detail: '설정 열기 (연결·기본값·사용량)', local: 'settings' },
+      { value: '/templates', label: '/templates', detail: '문서 템플릿 선택', local: 'templates' },
       { value: '/skills', label: '/skills', detail: '스킬 라이브러리 열기', local: 'skills' },
       { value: '/skill-create', label: '/skill-create', detail: '새 스킬 만들기', local: 'create' },
       { value: '/skill-edit', label: '/skill-edit', detail: '사용자 스킬 편집' },
@@ -2675,6 +2736,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       .map((skill) => ({ value: `/${skill.name}`, label: `/${skill.name}`, detail: skill.description }));
     slashOptions = [...base, ...product].filter((option) => option.label.slice(1).toLowerCase().includes(query));
     slashIndex = Math.min(slashIndex, Math.max(0, slashOptions.length - 1));
+    renderSlashRows();
+  }
+
+  function renderSlashRows(): void {
     slashMenu.replaceChildren();
     slashOptions.forEach((option, index) => {
       const row = el('button', 'ag-slash-option');
@@ -2694,6 +2759,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function chooseSlashOption(option: SlashOption): void {
     setSlashMenuOpen(false);
+    if (option.templateId) {
+      const template = templateCatalog.templates.find((item) => item.id === option.templateId) ?? null;
+      if (template) selectTemplate(template);
+      input.value = '';
+      input.focus();
+      return;
+    }
     if (option.workflow) {
       input.value = '';
       requestWorkflow(option.workflow);
@@ -2701,6 +2773,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     }
     if (option.local === 'calibration') { input.value = ''; writingStyleCalibration.open(); return; }
     if (option.local === 'settings') { input.value = ''; setSettingsPanelOpen(true); return; }
+    if (option.local === 'templates') {
+      input.value = '/templates ';
+      input.focus();
+      rebuildSlashMenu();
+      return;
+    }
     if (option.local === 'skills') { input.value = ''; setSkillsPanelOpen(true); return; }
     if (option.local === 'create') { input.value = ''; beginSkillCreate(); return; }
     input.value = `${option.value} `;
@@ -2756,6 +2834,30 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         : '첨부한 파일을 확인해 주세요.';
     }
     if (text.startsWith('//')) text = text.slice(1);
+    const templateInvocation = text.match(/^\/templates(?:\s+([\s\S]*))?$/i);
+    if (templateInvocation) {
+      const tail = (templateInvocation[1] ?? '').trim();
+      const match = [...templateCatalog.templates]
+        .sort((a, b) => b.name.length - a.name.length)
+        .find((template) => {
+          const name = template.name.normalize('NFKC').toLocaleLowerCase();
+          const value = tail.normalize('NFKC').toLocaleLowerCase();
+          return value === name || value.startsWith(`${name} `);
+        });
+      if (!match) {
+        input.value = tail ? `/templates ${tail}` : '/templates ';
+        rebuildSlashMenu();
+        return;
+      }
+      selectTemplate(match);
+      text = tail.slice(match.name.length).trim();
+      if (!text) {
+        input.value = '';
+        setSlashMenuOpen(false);
+        input.focus();
+        return;
+      }
+    }
     if (text === '/plan' || text === '/build') {
       input.value = '';
       setSlashMenuOpen(false);
@@ -2790,7 +2892,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (threadsPanelOpen) setThreadsPanelOpen(false);
     if (skillsPanelOpen) setSkillsPanelOpen(false);
     if (settingsPanelOpen) setSettingsPanelOpen(false);
-    const visibleText = skillNameForMessage ? `/${skillNameForMessage}${text ? ` ${text}` : ''}` : text;
+    const visibleText = skillNameForMessage
+      ? `/${skillNameForMessage}${text ? ` ${text}` : ''}`
+      : activeTemplate
+        ? `/templates ${activeTemplate.name}${text ? ` ${text}` : ''}`
+        : text;
     // 승인 대기 중 입력은 언제나 계획 수정 의견이다. '네'/'승인' 같은
     // 텍스트로는 절대 승인되지 않는다 — 승인은 계획 카드의 버튼뿐.
     if (chatWorkflow === 'plan' && planningPhase === 'awaiting-approval') {
@@ -3068,6 +3174,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     rebuildLlmMenu();
     rebuildEffortMenu();
     updateWorkspaceAgentContext();
+    activeTemplate = templateCatalog.templates.find((template) => template.id === thread.activeTemplateId) ?? null;
+    if (thread.activeTemplateId && templateCatalog.revision > 0 && !activeTemplate) {
+      thread.activeTemplateId = null;
+      upsertThread(thread);
+    }
+    renderActiveTemplate();
+    bridge.setActiveTemplate(activeTemplate?.id ?? thread.activeTemplateId);
   }
 
   /** 목록 행의 계기 표시 — 에이전트 · 날짜 시각 · 메시지 수. 자릿수를 맞춘다. */
@@ -3317,6 +3430,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     // 새 채팅은 언제나 '바로 실행'에서 시작하고, 원격 브라우저 경고도 다시 받는다.
     restorePlanningForThread(nextThread.id, nextThread);
     currentThread = nextThread;
+    selectTemplate(null);
     referenceLibrary.contextChanged();
     bridge.stopChat();
     startCurrentBridgeChat(true);
@@ -3346,9 +3460,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       titleRequested: Boolean(loaded.titleRequested),
     };
     referenceLibrary.contextChanged();
+    bridge.stopChat();
     applyThreadMeta(currentThread);
     renderMessagesFromThread(currentThread);
-    bridge.stopChat();
     const matchesCurrentDocument = loaded.documentId
       ? loaded.documentId === currentDocumentId
       : loaded.docKey === currentDocKey;
@@ -4055,6 +4169,33 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         renderSkillsList();
         rebuildSlashMenu();
         break;
+      case 'templates-catalog': {
+        templateCatalog = e.catalog;
+        const selected = currentThread.activeTemplateId
+          ? templateCatalog.templates.find((template) => template.id === currentThread.activeTemplateId) ?? null
+          : null;
+        if (currentThread.activeTemplateId && !selected) {
+          currentThread.activeTemplateId = null;
+          activeTemplate = null;
+          bridge.setActiveTemplate(null);
+          if (e.change?.type === 'deleted') {
+            systemMessage(`“${e.change.template.name}” 템플릿을 사용할 수 없어 이 채팅에서 해제했습니다.`);
+          }
+        } else {
+          activeTemplate = selected;
+        }
+        renderActiveTemplate();
+        rebuildSlashMenu();
+        persistCurrentThread();
+        break;
+      }
+      case 'chat-template-changed':
+        activeTemplate = e.template;
+        currentThread.activeTemplateId = e.template?.id ?? null;
+        renderActiveTemplate();
+        persistCurrentThread();
+        if (e.reason === 'deleted') systemMessage('이 채팅에서 사용하던 템플릿이 삭제되어 해제했습니다.');
+        break;
       case 'skill-detail': {
         const action = skillRequestActions.get(e.requestId) ?? 'edit';
         skillRequestActions.delete(e.requestId);
@@ -4225,6 +4366,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     // 좌표가 있는 op 만 주소를 말한다. 필드/개체는 대상 이름이 곧 주소다.
     const addr = op.kind === 'field'
       ? op.name
+      : op.kind === 'template'
+        ? op.label
       : op.kind === 'object'
         ? (OBJECT_OP_LABELS[op.obj.type] ?? op.obj.type)
         : opAddress(op.range);
@@ -4726,6 +4869,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const unsubThreads = subscribeThreadChanges(() => {
     if (threadsListVisible()) rebuildThreadsList();
   });
+  void bridge.listTemplates().then((catalog) => {
+    templateCatalog = catalog;
+    activeTemplate = currentThread.activeTemplateId
+      ? catalog.templates.find((template) => template.id === currentThread.activeTemplateId) ?? null
+      : null;
+    if (currentThread.activeTemplateId && !activeTemplate) {
+      currentThread.activeTemplateId = null;
+      bridge.setActiveTemplate(null);
+      upsertThread(currentThread);
+    }
+    renderActiveTemplate();
+    rebuildSlashMenu();
+  }).catch(() => { /* WebSocket catalog event retries after reconnect. */ });
   const unsubPending = bridge.pendingEdits.onChange((e: PendingEditsChangeEvent) => {
     if (e.type === 'invalidated') {
       systemMessage(`대기 중인 에이전트 편집이 해제되었습니다 (${e.reason})`);

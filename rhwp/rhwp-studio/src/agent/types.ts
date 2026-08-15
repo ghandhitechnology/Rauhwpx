@@ -84,6 +84,25 @@ export interface ReferenceScopeContext {
   documentName?: string | null;
 }
 
+export interface DocumentTemplate {
+  id: string;
+  name: string;
+  originalName: string;
+  format: 'hwp' | 'hwpx';
+  size: number;
+  pageCount: number;
+  sectionCount: number;
+  contentHash: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TemplateCatalog {
+  revision: number;
+  templates: DocumentTemplate[];
+}
+
 export interface StructuredPlanStep {
   title: string;
   details: string;
@@ -478,6 +497,8 @@ export type SidebarEvent =
     }
   | { type: 'chat-stopped' }
   | { type: 'reference-status'; messageId: string; attachments: MessageReferenceStatus[] }
+  | { type: 'templates-catalog'; catalog: TemplateCatalog; change?: { type: 'added' | 'renamed' | 'replaced' | 'deleted'; template: DocumentTemplate } }
+  | { type: 'chat-template-changed'; template: DocumentTemplate | null; reason?: string }
   | { type: 'permission-changed'; permissionProfile: PermissionProfile }
   | ({ type: 'workflow-changed' } & AgentWorkflowState)
   | ({ type: 'plan-ready'; plan: StructuredPlan } & AgentWorkflowState)
@@ -790,6 +811,18 @@ export function isDestructiveTableMark(
 }
 
 export type PendingOp =
+  | {
+      /** 템플릿 구조 전송 — 전체 문서 스냅샷으로 정확히 되돌리는 applied-now 연산 */
+      kind: 'template';
+      id: string;
+      agent: AgentName;
+      label: string;
+      templateRevision: number;
+      snapshotId: number | null;
+      userEditSeqAtSnapshot: number;
+      report: { warnings: string[]; skippedFeatures: string[]; affectedSections: number[] };
+      seq?: number;
+    }
   | {
       kind: 'insert'; id: string; agent: AgentName; range: DocRange; text: string;
       /** 전역 등록 순번 — 중첩 검증·스냅샷 되돌림 안전 판별용 (pending-edits 가 부여) */

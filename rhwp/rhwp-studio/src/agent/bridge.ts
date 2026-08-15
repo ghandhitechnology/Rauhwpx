@@ -71,6 +71,8 @@ import type {
   WritingStyleProgressState,
   WritingStyleStatus,
   WritingStyleUpload,
+  DocumentTemplate,
+  TemplateCatalog,
   AgentStreamEvent,
   SidebarEvent,
 } from './types.ts';
@@ -118,6 +120,13 @@ export interface AgentBridge {
   /** gpt-5.6-luna 로 스레드 제목 생성 요청. */
   requestTitle(threadId: string, preview: string): string;
   sendUserMessage(text: string, skillName?: string, stagedReferenceIds?: string[]): Promise<string | null>;
+  listTemplates(): Promise<TemplateCatalog>;
+  addTemplate(file: File, name?: string): Promise<DocumentTemplate>;
+  renameTemplate(id: string, name: string): Promise<DocumentTemplate>;
+  replaceTemplate(id: string, file: File): Promise<DocumentTemplate>;
+  deleteTemplate(id: string): Promise<void>;
+  setActiveTemplate(id: string | null): void;
+  getActiveTemplate(): DocumentTemplate | null;
   stageReference(scopeId: string, file: File): Promise<StagedReference>;
   discardStagedReference(scopeId: string, stageId: string): Promise<void>;
   /** 참고자료 원본은 HTTP로 스트리밍하고, 브라우저에는 메타데이터만 돌려준다. */
@@ -165,6 +174,48 @@ const REQUEST_TIMEOUT_MS = 10_000;
 
 function isAgentName(v: unknown): v is AgentName {
   return v === 'claude' || v === 'codex' || v === 'pi';
+}
+
+function readDocumentTemplate(value: unknown): DocumentTemplate | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  if (typeof item['id'] !== 'string' || typeof item['name'] !== 'string'
+    || typeof item['originalName'] !== 'string'
+    || (item['format'] !== 'hwp' && item['format'] !== 'hwpx')
+    || !Number.isFinite(Number(item['size'])) || !Number.isFinite(Number(item['revision']))) return null;
+  return {
+    id: item['id'],
+    name: item['name'],
+    originalName: item['originalName'],
+    format: item['format'],
+    size: Number(item['size']),
+    pageCount: Math.max(0, Number(item['pageCount']) || 0),
+    sectionCount: Math.max(0, Number(item['sectionCount']) || 0),
+    contentHash: String(item['contentHash'] ?? ''),
+    revision: Number(item['revision']),
+    createdAt: String(item['createdAt'] ?? ''),
+    updatedAt: String(item['updatedAt'] ?? ''),
+  };
+}
+
+function readTemplateCatalog(value: unknown): TemplateCatalog {
+  const source = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  return {
+    revision: Math.max(0, Number(source['revision']) || 0),
+    templates: Array.isArray(source['templates'])
+      ? source['templates'].flatMap((item) => {
+        const template = readDocumentTemplate(item);
+        return template ? [template] : [];
+      })
+      : [],
+  };
+}
+
+function readTemplateResponse(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return readDocumentTemplate((value as Record<string, unknown>)['template']);
 }
 
 function isWritingStyleProgressState(value: unknown): value is WritingStyleProgressState {
@@ -706,6 +757,9 @@ class AgentBridgeImpl implements AgentBridge {
   private documentName: string | null = null;
   private titleRequestSeq = 0;
   private requestSeq = 0;
+  private templateCatalog: TemplateCatalog = { revision: 0, templates: [] };
+  private activeTemplate: DocumentTemplate | null = null;
+  private activeTemplateId: string | null = null;
 
   constructor(deps: AgentBridgeDeps, opts?: AgentBridgeOptions) {
     this.revision = new RevisionTracker(deps.eventBus);
@@ -739,6 +793,7 @@ class AgentBridgeImpl implements AgentBridge {
       documentState: deps.documentState,
       revision: this.revision,
       pending: this.pendingEdits,
+      loadTemplateBytes: (template) => this.downloadTemplateBytes(template),
     });
 
     this.options = opts;
@@ -1087,6 +1142,10 @@ class AgentBridgeImpl implements AgentBridge {
           this.activeAgent = session.agent;
           this.turnRunning = session.status === 'running';
           this.permissionProfile = session.permissionProfile === 'unrestricted' ? 'unrestricted' : 'safe';
+          this.activeTemplateId = typeof session.activeTemplateId === 'string' ? session.activeTemplateId : null;
+          this.activeTemplate = this.activeTemplateId
+            ? this.templateCatalog.templates.find((template) => template.id === this.activeTemplateId) ?? null
+            : null;
           this.syncWorkflowState(session, 'direct', 'direct');
           if (this.turnRunning) {
             try {
@@ -1103,6 +1162,8 @@ class AgentBridgeImpl implements AgentBridge {
           }
         } else {
           this.activeAgent = null;
+          this.activeTemplateId = null;
+          this.activeTemplate = null;
           this.turnRunning = false;
           if (this.pendingTurnOpen) {
             try {
@@ -1216,6 +1277,29 @@ class AgentBridgeImpl implements AgentBridge {
       }
       case 'skills-catalog': {
         this.emit({ type: 'skills-catalog', catalog: { revision: Number(msg.revision ?? 0), skills: Array.isArray(msg.skills) ? msg.skills : [] } });
+        break;
+      }
+      case 'templates-catalog': {
+        this.templateCatalog = readTemplateCatalog(msg);
+        if (this.activeTemplateId) this.activeTemplate = this.templateCatalog.templates.find((item) => item.id === this.activeTemplateId) ?? null;
+        const changedTemplate = readDocumentTemplate(msg.change?.template);
+        this.emit({
+          type: 'templates-catalog',
+          catalog: this.templateCatalog,
+          ...(changedTemplate && ['added', 'renamed', 'replaced', 'deleted'].includes(msg.change?.type)
+            ? { change: { type: msg.change.type, template: changedTemplate } }
+            : {}),
+        });
+        break;
+      }
+      case 'chat-template-changed': {
+        this.activeTemplate = readDocumentTemplate(msg.template);
+        this.activeTemplateId = this.activeTemplate?.id ?? null;
+        this.emit({
+          type: 'chat-template-changed',
+          template: this.activeTemplate,
+          ...(typeof msg.reason === 'string' ? { reason: msg.reason } : {}),
+        });
         break;
       }
       case 'skill-detail':
@@ -1455,6 +1539,7 @@ class AgentBridgeImpl implements AgentBridge {
         capabilityEpoch: msg.capabilityEpoch,
         activePhase: this.phase,
         activeCapabilityEpoch: this.capabilityEpoch,
+        template: readDocumentTemplate(msg.template) ?? undefined,
       })
       .then((result) => {
         this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: true, result });
@@ -1624,6 +1709,7 @@ class AgentBridgeImpl implements AgentBridge {
       text: message.text,
       threadId: message.context.threadId,
       documentId: message.context.documentId,
+      activeTemplateId: this.activeTemplateId,
       ...(message.skillName ? { skillName: message.skillName } : {}),
       ...(message.messageId ? { messageId: message.messageId, stagedReferenceIds: message.stagedReferenceIds } : {}),
     });
@@ -1689,6 +1775,101 @@ class AgentBridgeImpl implements AgentBridge {
       throw new Error(message);
     }
     return payload;
+  }
+
+  private async inspectTemplateFile(file: File): Promise<{ format: 'hwp' | 'hwpx'; pageCount: number; sectionCount: number }> {
+    if (file.size > 20 * 1024 * 1024) throw new Error('템플릿은 20 MB까지 추가할 수 있습니다.');
+    const extension = file.name.toLowerCase().match(/\.([^.]+)$/)?.[1];
+    if (extension !== 'hwp' && extension !== 'hwpx') throw new Error('HWP 또는 HWPX 파일만 템플릿으로 추가할 수 있습니다.');
+    const { WasmBridge } = await import('../core/wasm-bridge.ts');
+    const wasm = new WasmBridge();
+    try {
+      await wasm.initialize();
+      const info = wasm.loadDocument(new Uint8Array(await file.arrayBuffer()), file.name);
+      return { format: extension, pageCount: info.pageCount, sectionCount: info.sectionCount };
+    } catch (error) {
+      throw new Error(`템플릿 파일을 열 수 없습니다: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      wasm.releaseDocument();
+    }
+  }
+
+  private async uploadTemplate(pathname: string, method: 'POST' | 'PUT', file: File, name?: string): Promise<DocumentTemplate> {
+    const info = await this.inspectTemplateFile(file);
+    const defaultName = file.name.replace(/\.(?:hwp|hwpx)$/i, '');
+    const payload = await this.referenceFetch(this.referenceUrl(pathname), {
+      method,
+      headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+        'X-File-Name': encodeURIComponent(file.name),
+        'X-Template-Name': encodeURIComponent(name?.trim() || defaultName),
+        'X-Template-Format': info.format,
+        'X-Template-Page-Count': String(info.pageCount),
+        'X-Template-Section-Count': String(info.sectionCount),
+      },
+      body: file,
+    });
+    const template = readTemplateResponse(payload);
+    if (!template) throw new Error('템플릿 서버가 올바른 메타데이터를 반환하지 않았습니다.');
+    return template;
+  }
+
+  async listTemplates(): Promise<TemplateCatalog> {
+    const payload = await this.referenceFetch(this.referenceUrl('/templates'));
+    this.templateCatalog = readTemplateCatalog(payload);
+    return this.templateCatalog;
+  }
+
+  addTemplate(file: File, name?: string): Promise<DocumentTemplate> {
+    return this.uploadTemplate('/templates', 'POST', file, name);
+  }
+
+  async renameTemplate(id: string, name: string): Promise<DocumentTemplate> {
+    const payload = await this.referenceFetch(this.referenceUrl(`/templates/${encodeURIComponent(id)}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const template = readTemplateResponse(payload);
+    if (!template) throw new Error('템플릿 이름을 바꾸지 못했습니다.');
+    return template;
+  }
+
+  replaceTemplate(id: string, file: File): Promise<DocumentTemplate> {
+    const current = this.templateCatalog.templates.find((item) => item.id === id);
+    return this.uploadTemplate(`/templates/${encodeURIComponent(id)}`, 'PUT', file, current?.name);
+  }
+
+  async deleteTemplate(id: string): Promise<void> {
+    await this.referenceFetch(this.referenceUrl(`/templates/${encodeURIComponent(id)}`), { method: 'DELETE' });
+  }
+
+  setActiveTemplate(id: string | null): void {
+    this.activeTemplateId = id;
+    this.activeTemplate = id ? (this.templateCatalog.templates.find((item) => item.id === id) ?? null) : null;
+    if (this.activeAgent !== null) {
+      this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-template-set', templateId: id });
+    }
+  }
+
+  getActiveTemplate(): DocumentTemplate | null {
+    return this.activeTemplate;
+  }
+
+  private async downloadTemplateBytes(template: DocumentTemplate): Promise<Uint8Array> {
+    const response = await fetch(this.referenceUrl(`/templates/${encodeURIComponent(template.id)}/content`), {
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
+    if (!response.ok) throw new AgentToolError('TEMPLATE_UNAVAILABLE', `Template ${template.name} is unavailable.`);
+    const revisionHeader = response.headers.get('x-template-revision');
+    const revision = revisionHeader === null ? Number.NaN : Number(revisionHeader);
+    if (!Number.isSafeInteger(revision)) {
+      throw new AgentToolError('TEMPLATE_UNAVAILABLE', `Template ${template.name} did not return a readable revision.`);
+    }
+    if (revision !== template.revision) {
+      throw new AgentToolError('TEMPLATE_REVISION_MISMATCH', `Template revision ${revision} does not match ${template.revision}; inspect it again.`);
+    }
+    return new Uint8Array(await response.arrayBuffer());
   }
 
   async uploadReference(scope: ReferenceScope, scopeId: string, file: File): Promise<ReferenceFile> {
@@ -2032,6 +2213,7 @@ class AgentBridgeImpl implements AgentBridge {
     this.pendingEdits.dispose();
     this.overlay.dispose();
     this.revision.dispose();
+    this.executor.dispose();
   }
 }
 
