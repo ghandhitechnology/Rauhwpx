@@ -830,8 +830,8 @@ async function requestImplementationPlanChanges(record, sock, msg) {
     if (typeof msg.feedback === 'string' && msg.feedback.trim()) {
       activeSession.status = 'running';
       const revisionPrompt = [
-        'The user requested changes to the latest implementation plan.',
-        'Revise the plan in response and present the complete replacement with present_implementation_plan.',
+        'The user requested changes, so the previous implementation plan is no longer authoritative.',
+        'Return to discovery: inspect the affected current state and evaluate the feedback. If it is ambiguous or changes an assumption, discuss it with the user and ask one focused question in normal chat instead of immediately presenting a replacement. If it is already concrete, do not invent a question; follow the planning checkpoint and presentation rules before presenting a complete replacement.',
         `Feedback: ${msg.feedback.trim()}`,
       ].join('\n\n');
       activeSession.backend.sendUserMessage(addReferenceContext(activeSession, msg.feedback, revisionPrompt));

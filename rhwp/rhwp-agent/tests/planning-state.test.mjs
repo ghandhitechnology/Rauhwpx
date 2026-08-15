@@ -123,6 +123,11 @@ test('browser/download/control are rejected for direct-origin chats', () => {
 test('approved execution prompt contains only the authoritative plan record', () => {
   const prompt = buildApprovedPlanPrompt({ planId: 'plan-1', plan: plan() });
   assert.match(prompt, /Plan ID: plan-1/);
-  assert.match(prompt, /Do not re-plan/);
+  assert.match(prompt, /Do not re-plan, omit steps, or substitute a different plan/);
+  assert.match(prompt, /First re-read the relevant current state/);
+  assert.match(prompt, /execute every canonical step thoroughly/);
+  assert.match(prompt, /run every listed validation/);
+  assert.match(prompt, /distinguish completed, blocked, and deferred items/);
+  assert.match(prompt, /never claim partial work is complete/);
   assert.match(prompt, /"goal": "Implement feature"/);
 });
