@@ -38,12 +38,12 @@ test('plan keeps its review card and adds a clickable presentation in chat', () 
   assert.match(source, /function buildPlanCard\(plan: StructuredPlan\)/);
   assert.match(source, /el\('section', `ag-plan-card ag-\$\{selectedAgent\}`\)/);
   assert.match(source, /card\.setAttribute\('aria-labelledby', titleId\)/);
-  assert.match(source, /review\.appendChild\(buildPlanCard\(activePlan\)\)/);
+  assert.match(source, /planCardSlot\.appendChild\(buildPlanCard\(activePlan\)\)/);
   assert.match(source, /function renderPlanMessage\(message: Extract<ThreadMessage, \{ kind: 'plan' \}>\)/);
   assert.match(source, /el\('button', 'ag-msg-plan-action'\)/);
   assert.match(source, /openPresentedPlan\(message\.planId\)/);
   assert.match(source, /presentPlanInChat\(e\.plan\)/);
-  assert.match(source, /setReviewColCollapsed\(false\)/);
+  assert.match(source, /setPlanColCollapsed\(false\)/);
   assert.match(css, /\.ag-msg-plan-action \{/);
   // 제목·요약·단계·예상 파일·검증·위험이 모두 카드 안에 있다.
   assert.match(source, /el\('h3', 'ag-plan-title'/);
@@ -78,11 +78,13 @@ test('approval uses the exact plan id and revision routes feedback through the c
     source,
     /if \(chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'\) \{\s*\n\s*setPlanningPhase\('planning'\);/,
   );
+  assert.doesNotMatch(source, /승인은 이 버튼으로만 됩니다/);
 });
 
 test('approval immediately switches to implementation with a disabled, announced switching state', () => {
   assert.match(source, /setPlanningPhase\('switching'\);\s*\n\s*systemMessage\('계획을 승인했습니다\. 실행 단계로 전환 중입니다\.'\)/);
-  assert.match(source, /case 'implementation-started':\s*\n\s*planApprovable = false;\s*\n\s*setPlanningPhase\(e\.phase\)/);
+  assert.match(source, /case 'implementation-started':[\s\S]*closePlanForExecution\(e\.planId \|\| activePlan\?\.planId \|\| ''\);[\s\S]*setPlanningPhase\(e\.phase\)/);
+  assert.match(source, /function closePlanForExecution\(planId: string\): void \{[\s\S]*activePlan = null;[\s\S]*planMinimized = false;[\s\S]*persistCurrentThread\(\);/);
   assert.match(source, /approve\.disabled = !approvableNow/);
   assert.match(source, /if \(planningPhase === 'switching' \|\| attachmentsSending \|\| referenceLibrary\.hasBlockingDrafts\(\)\) return;/);
   assert.match(source, /if \(planningPhase === 'switching'\)[\s\S]*else if \(!planApprovable\)/);
@@ -138,7 +140,10 @@ test('plan history and chat presentations restore while only the active server p
   assert.match(source, /threadWorkflows\.set\(id, loaded\.workflow\)/);
   assert.match(source, /const planArchives = new Map<string, StructuredPlan\[\]>\(\)/);
   assert.match(source, /const threadWorkflows = new Map<string, AgentWorkflow>\(\)/);
-  assert.match(source, /function restorePlanningForThread\(threadId: string\)/);
+  assert.match(source, /function restorePlanningForThread\(threadId: string, thread\?: ChatThread\)/);
+  assert.match(source, /message\.planState === 'executed'/);
+  assert.match(source, /el\('span', 'ag-msg-plan-kicker', executed \? '실행 됨' : '계획'\)/);
+  assert.match(source, /latestPlanExecuted \? null : latestPlan/);
   assert.match(source, /planApprovable = false;/);
   assert.match(source, /이전 계획입니다\. 표시만 되고 승인할 수 없습니다\./);
   assert.match(source, /const approvableNow = planApprovable[\s\S]*planningPhase === 'awaiting-approval'[\s\S]*!turnRunning/);
@@ -177,7 +182,8 @@ test('pending HWP review stays unchanged for plan-driven implementations', () =>
   assert.match(source, /bridge\.pendingEdits\.approve\(set\.id\)/);
   assert.match(source, /bridge\.pendingEdits\.reject\(set\.id\)/);
   assert.match(source, /const changeSets = bridge\.pendingEdits\.getChangeSets\(\);/);
-  assert.match(source, /for \(const set of changeSets\) \{/);
+  assert.match(source, /const reviewSets = changeSets\.filter\(\(set\) => set\.status !== 'open'\)/);
+  assert.match(source, /for \(const set of reviewSets\) \{/);
   assert.match(source, /실행 중입니다\. 문서 편집은 기존처럼 검토 후 승인합니다\./);
 });
 

@@ -247,7 +247,7 @@ test('workflow and every presented plan persist as history without approval auth
   t.messages.push(
     { role: 'user', text: '계획을 세워줘' },
     { role: 'assistant', text: previousPlan.title, kind: 'plan', planId: previousPlan.planId },
-    { role: 'assistant', text: plan.title, kind: 'plan', planId: plan.planId },
+    { role: 'assistant', text: plan.title, kind: 'plan', planId: plan.planId, planState: 'executed' },
   );
   upsertThread(t);
 
@@ -255,6 +255,8 @@ test('workflow and every presented plan persist as history without approval auth
   assert.equal(restored?.workflow, 'plan');
   assert.deepEqual(restored?.latestPlan, plan);
   assert.deepEqual(restored?.plans, [previousPlan, plan]);
+  assert.equal(restored?.messages[2]?.kind, 'plan');
+  assert.equal(restored?.messages[2]?.kind === 'plan' ? restored.messages[2].planState : undefined, 'executed');
   const stored = JSON.parse(mem.get('rhwp-agent-threads') ?? '[]') as Array<Record<string, unknown>>;
   assert.equal('phase' in stored[0]!, false);
   assert.equal('capabilityEpoch' in stored[0]!, false);

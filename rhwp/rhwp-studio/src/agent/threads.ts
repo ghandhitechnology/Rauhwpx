@@ -28,6 +28,8 @@ export type ThreadMessage =
       kind: 'plan';
       /** Structured plan opened by this presentation message. */
       planId: string;
+      /** The plan has left the approval surface and started execution. */
+      planState?: 'executed';
     })
   | (ThreadMessageBase & {
       role: 'user' | 'assistant' | 'system';
@@ -206,7 +208,14 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
       };
       if (message.kind === 'plan') {
         if (message.role !== 'assistant' || typeof message.planId !== 'string' || !message.planId) return [];
-        return [{ role: 'assistant', text: message.text, kind: 'plan', planId: message.planId, ...metadata }];
+        return [{
+          role: 'assistant',
+          text: message.text,
+          kind: 'plan',
+          planId: message.planId,
+          ...(message.planState === 'executed' ? { planState: 'executed' as const } : {}),
+          ...metadata,
+        }];
       }
       return [{
         role: message.role,
