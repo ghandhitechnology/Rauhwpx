@@ -64,8 +64,11 @@ test('문서가 없을 때 파일 열기와 드롭 위치를 명확히 표시한
   assert.match(html, /id="document-empty-state"/);
   assert.match(html, /HWP, HWPX, HML 파일을 선택하거나 여기에 놓으세요\./);
   assert.match(html, /id="document-open-action">HWP\/HWPX 열기<\/button>/);
+  assert.match(html, /id="document-new-action">새 파일<\/button>/);
   assert.match(main, /document-open-action/);
+  assert.match(main, /document-new-action/);
   assert.match(main, /dispatcher\.dispatch\('file:open'\)/);
+  assert.match(main, /dispatcher\.dispatch\('file:new-doc'\)/);
   assert.match(main, /emptyState\.hidden = true/);
 });
 
