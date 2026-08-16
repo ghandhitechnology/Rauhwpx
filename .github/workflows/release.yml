@@ -126,6 +126,7 @@ jobs:
           path: |
             release/*.dmg
             release/*.zip
+            release/*.zip.blockmap
             release/latest-mac.yml
 
   windows:
@@ -211,6 +212,9 @@ jobs:
           extras=()
           if [ -f release/latest-mac.yml ]; then extras+=(release/latest-mac.yml); fi
           if [ -f release/latest.yml ]; then extras+=(release/latest.yml); fi
+          for blockmap in release/*.zip.blockmap; do
+            if [ -f "${blockmap}" ]; then extras+=("${blockmap}"); fi
+          done
           gh release create "${GITHUB_REF_NAME}" \
             release/*.dmg \
             release/*.zip \
