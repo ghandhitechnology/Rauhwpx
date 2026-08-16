@@ -3,13 +3,17 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
+  bindNativeFileHandleIdentity,
   captureDesktopNativeDroppedFile,
   ensureDesktopAgentHub,
   installWebAppShell,
   isDesktopApp,
   pickDesktopNativeOpenFile,
   pickDesktopNativeSaveFile,
+  rememberNativeDocument,
   requestDevAgentHub,
+  restoreNativeDocument,
+  releaseReplacedNativeFileHandle,
   suppressDesktopServiceWorker,
 } from '../src/desktop-integration.ts';
 
@@ -95,6 +99,59 @@ test('Electron Save As returns a temporary opaque handle and releases failed tar
   await handle?.releaseUnusedSaveTarget?.();
   await handle?.releaseUnusedSaveTarget?.();
   assert.deepEqual(released, ['drop-target', 'save-target']);
+});
+
+test('native document bookmarks restore opaque handles without exposing a path', async () => {
+  const remembered: Array<[string, string]> = [];
+  const win = {
+    rhwpDesktop: {
+      rememberNativeDocument: async (documentId: string, handleId: string) => {
+        remembered.push([documentId, handleId]);
+      },
+      reopenNativeDocument: async (documentId: string) => {
+        assert.equal(documentId, 'document-a');
+        return { kind: 'file' as const, handleId: 'restored', name: 'report.hwp' };
+      },
+      readNativeFile: async () => ({ name: 'report.hwp', bytes: new Uint8Array() }),
+      writeNativeFile: async () => ({ name: 'report.hwp', byteLength: 0 }),
+      releaseNativeFile: async () => {},
+    },
+  };
+  const opened = await pickDesktopNativeOpenFile({
+    rhwpDesktop: {
+      ...win.rhwpDesktop,
+      pickNativeOpenFile: async () => ({ kind: 'file' as const, handleId: 'live', name: 'report.hwp' }),
+    },
+  });
+  assert.ok(opened);
+  await rememberNativeDocument('document-a', opened);
+  assert.deepEqual(remembered, [['document-a', 'live']]);
+
+  const restored = await restoreNativeDocument('document-a', win);
+  assert.equal(restored === 'owned' ? null : restored?.identityKind, 'native-path');
+  assert.equal(restored === 'owned' ? null : restored?.name, 'report.hwp');
+});
+
+test('releasing a replaced native handle bookmarks it first', async () => {
+  const remembered: Array<[string, string]> = [];
+  const released: string[] = [];
+  const win = {
+    rhwpDesktop: {
+      pickNativeOpenFile: async () => ({ kind: 'file' as const, handleId: 'old', name: 'old.hwp' }),
+      rememberNativeDocument: async (documentId: string, handleId: string) => {
+        remembered.push([documentId, handleId]);
+      },
+      releaseNativeFile: async (handleId: string) => { released.push(handleId); },
+      readNativeFile: async () => ({ name: 'old.hwp', bytes: new Uint8Array() }),
+      writeNativeFile: async () => ({ name: 'old.hwp', byteLength: 0 }),
+    },
+  };
+  const previous = await pickDesktopNativeOpenFile(win);
+  assert.ok(previous);
+  bindNativeFileHandleIdentity(previous, { documentId: 'document-a', sourceDigest: 'blake3:a' });
+  await releaseReplacedNativeFileHandle(previous, null);
+  assert.deepEqual(remembered, [['document-a', 'old']]);
+  assert.deepEqual(released, ['old']);
 });
 
 test('브리지와 설정 재연결이 데스크톱 허브 기동을 탄다', () => {

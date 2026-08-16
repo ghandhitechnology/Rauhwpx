@@ -6,6 +6,9 @@
  * - 파일 이동/삭제(read 실패) → 항목 **제거** + 안내 (재열기 영구 불가)
  * - 성공                → open-document-bytes 이벤트 (핸들 연속성 유지)
  *
+ * Electron native-path 핸들은 IndexedDB에 못 넣으므로, 세션 오버레이·메인 프로세스
+ * 북마크(`restoreNativeDocument`)로 복구한 뒤에만 파일 선택을 유도한다.
+ *
  * DOM/전역 의존을 주입(deps)으로 분리해 node 테스트에서 규칙을 고정한다.
  */
 
@@ -27,25 +30,70 @@ export interface OpenRecentDeps {
    * 미주입 시 안내 토스트만 띄운다.
    */
   requestReopen?: () => void;
+  /**
+   * Electron: documentId → 메인 프로세스 북마크로 native handle을 다시 만든다.
+   * 다른 창이 소유 중이면 `'owned'`. 북마크가 없으면 `null`.
+   */
+  restoreNativeDocument?: (
+    documentId: string,
+  ) => Promise<FileSystemFileHandleLike | 'owned' | null>;
 }
 
 export type OpenRecentResult = 'opened' | 'permission-denied' | 'removed' | 'needs-pick';
+
+async function restoreNativeHandle(
+  entry: RecentDoc,
+  deps: OpenRecentDeps,
+): Promise<FileSystemFileHandleLike | 'owned' | null> {
+  if (!entry.documentId || !deps.restoreNativeDocument) return null;
+  try {
+    return await deps.restoreNativeDocument(entry.documentId);
+  } catch (err) {
+    console.warn('[file:open-recent] native restore failed:', err);
+    return null;
+  }
+}
+
+function ownedElsewhere(deps: OpenRecentDeps): OpenRecentResult {
+  deps.toast('다른 창에서 이미 열려 있는 문서입니다.', 3000);
+  return 'permission-denied';
+}
+
+function requestPick(entry: RecentDoc, deps: OpenRecentDeps): OpenRecentResult {
+  deps.toast(`"${entry.fileName}" 파일을 선택하세요.`, 4000);
+  deps.requestReopen?.();
+  return 'needs-pick';
+}
+
+async function emitLiveFile(
+  handle: FileSystemFileHandleLike,
+  deps: OpenRecentDeps,
+): Promise<void> {
+  const { bytes, name } = await deps.readFile(handle);
+  deps.emitOpen({ bytes, fileName: name, fileHandle: handle });
+}
+
+async function removeMissing(entry: RecentDoc, deps: OpenRecentDeps, err: unknown): Promise<OpenRecentResult> {
+  console.warn('[file:open-recent] 파일 접근 실패(이동/삭제 추정):', err);
+  await deps.remove(entry.id);
+  deps.toast(`"${entry.fileName}" 파일을 찾을 수 없어 목록에서 제거했습니다.`, 3500);
+  return 'removed';
+}
 
 export async function openRecentEntry(
   entry: RecentDoc,
   deps: OpenRecentDeps,
 ): Promise<OpenRecentResult> {
-  // 메타-only 항목: 라이브 핸들이 없어 자동 재열기 불가 → 파일 다시 선택 유도.
-  if (!entry.handle) {
-    deps.toast(
-      `"${entry.fileName}"은(는) 핸들 없이 열려 자동 재열기가 불가합니다. 파일을 다시 선택하세요.`,
-      4000,
-    );
-    deps.requestReopen?.();
-    return 'needs-pick';
+  let handle = entry.handle ?? null;
+
+  if (!handle) {
+    const restored = await restoreNativeHandle(entry, deps);
+    if (restored === 'owned') return ownedElsewhere(deps);
+    handle = restored;
   }
 
-  const handle = entry.handle;
+  if (!handle) return requestPick(entry, deps);
+
   let granted = false;
   try {
     granted = await deps.ensurePermission(handle);
@@ -58,14 +106,23 @@ export async function openRecentEntry(
   }
 
   try {
-    const { bytes, name } = await deps.readFile(handle);
-    deps.emitOpen({ bytes, fileName: name, fileHandle: handle });
+    await emitLiveFile(handle, deps);
     return 'opened';
   } catch (err) {
-    // 파일 이동/삭제 — 재열기 영구 불가 항목은 목록에서 제거한다.
-    console.warn('[file:open-recent] 파일 접근 실패(이동/삭제 추정):', err);
-    await deps.remove(entry.id);
-    deps.toast(`"${entry.fileName}" 파일을 찾을 수 없어 목록에서 제거했습니다.`, 3500);
-    return 'removed';
+    if (handle.identityKind === 'native-path') {
+      const restored = await restoreNativeHandle(entry, deps);
+      if (restored === 'owned') return ownedElsewhere(deps);
+      if (restored) {
+        try {
+          await emitLiveFile(restored, deps);
+          return 'opened';
+        } catch (restoreErr) {
+          return removeMissing(entry, deps, restoreErr);
+        }
+      }
+      console.warn('[file:open-recent] native handle stale without bookmark:', err);
+      return requestPick(entry, deps);
+    }
+    return removeMissing(entry, deps, err);
   }
 }
