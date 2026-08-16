@@ -1430,6 +1430,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     characterData: true,
   });
   const review = el('div', 'ag-review');
+  review.tabIndex = 0;
+  review.setAttribute('aria-label', '계획 및 변경 검토');
   const writingStyleCalibration = createWritingStyleCalibration(bridge);
   const composerUtilities = el('div', 'ag-composer-utilities');
   composerUtilities.setAttribute('aria-label', '채팅 도구');

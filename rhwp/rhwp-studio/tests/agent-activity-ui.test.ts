@@ -41,6 +41,14 @@ test('assistant responses render as flat Markdown transcripts', () => {
   assert.match(chatMarkdown, /normalizeKoreanLatex/);
 });
 
+test('chat Markdown uses a flat typographic reading surface', () => {
+  assert.match(css, /\.ag-md-code\s*\{[^}]*border-radius:\s*0;[^}]*background:\s*transparent;/s);
+  assert.match(css, /\.ag-md-pre\s*\{[^}]*border:\s*0;[^}]*border-left:\s*2px solid/s);
+  assert.match(css, /\.ag-md-table-wrap\s*\{[^}]*border:\s*0;[^}]*border-radius:\s*0;/s);
+  assert.match(css, /\.ag-msg-assistant \.ag-md-h\s*\{[^}]*border:\s*0;/s);
+  assert.doesNotMatch(css, /\.ag-send,\s*\.ag-approve,/s);
+});
+
 test('meaningful progress stays visible as a milestone timeline with nested tool calls', () => {
   assert.match(source, /compactStreamIntoActivity/);
   assert.match(source, /ensureTurnActivity/);
