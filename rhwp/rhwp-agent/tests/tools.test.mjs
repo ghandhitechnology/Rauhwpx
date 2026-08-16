@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 49개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 49);
+test('도구는 정확히 50개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 50);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -47,7 +47,7 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 41);
+  assert.equal(direct.size, 42);
   assert.ok(direct.has('insert_text'));
   assert.ok(direct.has('replace_all'));
   assert.ok(direct.has('insert_footnote'));
@@ -232,6 +232,21 @@ test('create_table: rows+cols 나 cells 둘 중 하나는 필수', () => {
   assert.throws(() => validate({ rows: 3 }), (e) => e.code === 'INVALID_ARGS');
   validate({ rows: 3, cols: 2 }); // 통과
   validate({ cells: [['a', 'b'], ['c', 'd']] }); // 통과
+});
+
+test('delete_table: 스키마는 주소 네 값이 필수이고 document-write 다', () => {
+  const def = byName.get('delete_table');
+  assert.ok(def, 'missing tool: delete_table');
+  assert.equal(def.category, 'document-write');
+  assert.match(def.description, /get_structure tables\[\]/);
+  assert.match(def.description, /PENDING_DESTRUCTIVE_OP/);
+  assert.match(def.description, /mark-only/i);
+  for (const key of ['expectedRevision', 'sectionIdx', 'paraIdx', 'controlIdx']) {
+    assert.ok(key in def.shape, `delete_table missing ${key}`);
+  }
+  assert.ok(def.shape.sectionIdx.safeParse(0).success);
+  assert.ok(!def.shape.sectionIdx.safeParse(-1).success);
+  assert.ok(!def.shape.controlIdx.safeParse(undefined).success);
 });
 
 test('edit_table: op 별 필수 파라미터를 이름 붙여 즉시 실패', () => {

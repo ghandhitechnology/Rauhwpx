@@ -148,6 +148,7 @@ test('executor: document-write helper covers every mutating tool', () => {
     'apply_style',
     'create_table',
     'delete_range',
+    'delete_table',
     'edit_footnote',
     'edit_header_footer',
     'edit_table',
