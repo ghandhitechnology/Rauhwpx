@@ -418,6 +418,7 @@ export interface ProductSkill {
   description: string;
   origin: 'bundled' | 'user';
   enabled: boolean;
+  required?: boolean;
   invalid?: boolean;
   hasScripts: boolean;
   hasAssets: boolean;
