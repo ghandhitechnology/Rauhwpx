@@ -221,6 +221,25 @@ test('listThreadsByDocument groups by document, groups ordered by recent activit
   );
 });
 
+test('listThreadsByDocument splits same filenames when documentId differs', () => {
+  mem.clear();
+  const left = createEmptyThread({
+    agent: 'claude', model: 'sonnet', effort: 'high', docKey: '보고서.hwp', documentId: 'doc-a',
+  });
+  left.messages.push({ role: 'user', text: '왼쪽' });
+  upsertThread(left);
+  const right = createEmptyThread({
+    agent: 'claude', model: 'sonnet', effort: 'high', docKey: '보고서.hwp', documentId: 'doc-b',
+  });
+  right.messages.push({ role: 'user', text: '오른쪽' });
+  upsertThread(right);
+
+  const groups = listThreadsByDocument();
+  assert.equal(groups.length, 2);
+  assert.deepEqual(new Set(groups.map((g) => g.documentId)), new Set(['doc-a', 'doc-b']));
+  assert.ok(groups.every((g) => g.docKey === '보고서.hwp'));
+});
+
 test('workflow and every presented plan persist as history without approval authority', () => {
   mem.clear();
   const plan: StructuredPlan = {

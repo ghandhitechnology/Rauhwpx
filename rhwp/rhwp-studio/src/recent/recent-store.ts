@@ -3,8 +3,10 @@
  *
  * 파일 메뉴 "최근 문서" 목록의 영속 저장을 담당한다. 문서 바이트는 보관하지
  * 않는다. `FileSystemFileHandle`이 있는 열기는 핸들과 메타(파일명/형식/시각)를
- * 저장해 라이브 파일을 재연다. 드롭/`input[type=file]`/URL 로드처럼 핸들이 없는
- * 열기도 메타-only로 기록하며, 이 항목은 선택 시 파일을 다시 고르게 한다.
+ * 저장해 라이브 파일을 재연다. Electron native-path 핸들은 IndexedDB에 넣을 수
+ * 없어 세션 오버레이로 유지하고, 재시작 후 재열기는 메인 프로세스 북마크가 맡는다.
+ * 드롭/`input[type=file]`/URL 로드처럼 핸들이 없는 브라우저 열기도 메타-only로
+ * 기록하며, 이 항목은 선택 시 파일을 다시 고르게 한다.
  *
  * 동일 문서 판정은 `isSameEntry`가 권위다. 양쪽 핸들을 비교할 수 없는 열기
  * (드롭/`input[type=file]`/URL 등)만 원본 바이트 digest로 폴백한다. 파일명은
@@ -65,6 +67,34 @@ export interface RecentDocInput {
 }
 
 const memory = new Map<string, RecentDoc>();
+/** IndexedDB cannot clone Electron native-path handles; keep them for this session. */
+const liveHandles = new Map<string, FileSystemFileHandleLike>();
+
+function isNativePathHandle(handle?: FileSystemFileHandleLike | null): boolean {
+  return handle?.identityKind === 'native-path';
+}
+
+function persistableRow(row: RecentDoc): RecentDoc {
+  if (!isNativePathHandle(row.handle)) return row;
+  const { handle: _native, ...meta } = row;
+  return meta;
+}
+
+function rememberLiveHandle(id: string, handle?: FileSystemFileHandleLike | null): void {
+  if (handle) liveHandles.set(id, handle);
+  else liveHandles.delete(id);
+}
+
+function withLiveHandle(row: RecentDoc): RecentDoc {
+  const live = liveHandles.get(row.id);
+  return live ? { ...row, handle: live } : row;
+}
+
+function pruneLiveHandles(keep: Set<string>): void {
+  for (const id of [...liveHandles.keys()]) {
+    if (!keep.has(id)) liveHandles.delete(id);
+  }
+}
 
 function idbAvailable(): boolean {
   return typeof indexedDB !== 'undefined';
@@ -137,7 +167,7 @@ async function isSameFile(a: RecentDocInput, existing: RecentDoc): Promise<boole
   if (a.documentId && a.documentId === existing.documentId) return true;
 
   const ha = a.handle;
-  const hb = existing.handle;
+  const hb = withLiveHandle(existing).handle;
   if (ha && hb && typeof ha.isSameEntry === 'function') {
     try {
       return await withTimeout(
@@ -178,7 +208,7 @@ export async function addRecentDoc(input: RecentDocInput): Promise<RecentDoc> {
         if (await isSameFile(input, row)) matches.push(row);
       }
 
-      const previous = matches[0];
+      const previous = matches[0] ? withLiveHandle(matches[0]) : undefined;
       const entry: RecentDoc = {
         id: previous?.id ?? createRecentId(),
         documentId: input.documentId ?? previous?.documentId ?? createDocumentId(),
@@ -189,9 +219,10 @@ export async function addRecentDoc(input: RecentDocInput): Promise<RecentDoc> {
         ...(input.handle || previous?.handle ? { handle: input.handle ?? previous?.handle } : {}),
       };
 
+      rememberLiveHandle(entry.id, entry.handle);
       let stored = entry;
       try {
-        await putRow(db, entry);
+        await putRow(db, persistableRow(entry));
       } catch {
         // 핸들 직렬화 불가 환경 — 핸들을 떼고 메타-only 로 재시도(기록은 유지).
         const { handle: _drop, ...metaOnly } = entry;
@@ -199,14 +230,18 @@ export async function addRecentDoc(input: RecentDocInput): Promise<RecentDoc> {
         stored = metaOnly;
       }
       for (const duplicate of matches.slice(1)) {
-        if (duplicate.id !== stored.id) await deleteRow(db, duplicate.id);
+        if (duplicate.id !== stored.id) {
+          liveHandles.delete(duplicate.id);
+          await deleteRow(db, duplicate.id);
+        }
       }
       const after = sortAndTrim(await getAllRows(db));
       const keep = new Set(after.map((r) => r.id));
+      pruneLiveHandles(keep);
       for (const row of await getAllRows(db)) {
         if (!keep.has(row.id)) await deleteRow(db, row.id);
       }
-      return stored;
+      return withLiveHandle({ ...stored, ...(entry.handle ? { handle: entry.handle } : {}) });
     },
     async () => {
       const rows = [...memory.values()].sort((a, b) => b.openedAt - a.openedAt);
@@ -214,7 +249,7 @@ export async function addRecentDoc(input: RecentDocInput): Promise<RecentDoc> {
       for (const row of rows) {
         if (await isSameFile(input, row)) matches.push(row);
       }
-      const previous = matches[0];
+      const previous = matches[0] ? withLiveHandle(matches[0]) : undefined;
       const entry: RecentDoc = {
         id: previous?.id ?? createRecentId(),
         documentId: input.documentId ?? previous?.documentId ?? createDocumentId(),
@@ -227,12 +262,14 @@ export async function addRecentDoc(input: RecentDocInput): Promise<RecentDoc> {
       for (const [id, row] of memory) {
         if (id !== entry.id && await isSameFile(input, row)) memory.delete(id);
       }
-      memory.set(entry.id, entry);
+      rememberLiveHandle(entry.id, entry.handle);
+      memory.set(entry.id, persistableRow(entry));
       const keep = new Set(sortAndTrim([...memory.values()]).map((r) => r.id));
+      pruneLiveHandles(keep);
       for (const id of [...memory.keys()]) {
         if (!keep.has(id)) memory.delete(id);
       }
-      return entry;
+      return withLiveHandle(entry);
     },
   );
 }
@@ -240,14 +277,15 @@ export async function addRecentDoc(input: RecentDocInput): Promise<RecentDoc> {
 /** 최근 문서 목록(최신순). */
 export async function listRecentDocs(): Promise<RecentDoc[]> {
   return withDb(
-    async (db) => sortAndTrim(await getAllRows(db)),
-    async () => sortAndTrim([...memory.values()]),
+    async (db) => sortAndTrim(await getAllRows(db)).map(withLiveHandle),
+    async () => sortAndTrim([...memory.values()]).map(withLiveHandle),
   );
 }
 
 /** 특정 최근 문서를 제거한다. */
 export async function removeRecentDoc(id: string): Promise<void> {
   memory.delete(id);
+  liveHandles.delete(id);
   await withDb(
     async (db) => deleteRow(db, id),
     async () => {},
@@ -257,6 +295,7 @@ export async function removeRecentDoc(id: string): Promise<void> {
 /** 최근 문서 목록 전체 삭제. */
 export async function clearRecentDocs(): Promise<void> {
   memory.clear();
+  liveHandles.clear();
   await withDb(
     async (db) =>
       new Promise<void>((resolve, reject) => {
