@@ -53,7 +53,7 @@ import {
   type ThreadAttachment,
 } from '../../agent/threads.ts';
 import { createChevron, createColumnIcon } from '../chevron.ts';
-import { createIcon, createStopIcon, OP_ICON } from './icons.ts';
+import { createHieumGlyph, createIcon, createStopIcon, OP_ICON } from './icons.ts';
 import { createSettingsPanel } from './settings.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
@@ -1450,8 +1450,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const messages = el('div', 'ag-messages');
   messages.setAttribute('role', 'log');
   messages.setAttribute('aria-live', 'polite');
+  const messagesEnd = el('div', 'ag-messages-end');
+  messagesEnd.setAttribute('aria-hidden', 'true');
+  messages.appendChild(messagesEnd);
   const onMessagesScroll = (): void => {
-    followConversation = isConversationNearBottom();
+    followConversation = isConversationFollowingTurn();
   };
   messages.addEventListener('scroll', onMessagesScroll, { passive: true });
   const messagesMutationObserver = typeof MutationObserver === 'function'
@@ -1464,6 +1467,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     subtree: true,
     characterData: true,
   });
+  const messagesResizeObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(() => {
+        syncConversationSpacer();
+        if (followConversation) scrollConversationToEnd();
+      })
+    : null;
+  messagesResizeObserver?.observe(messages);
   const review = el('div', 'ag-review');
   review.tabIndex = 0;
   review.setAttribute('aria-label', '변경 사항 검토');
@@ -1504,6 +1514,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   composerActivity.hidden = true;
   composerActivity.setAttribute('role', 'status');
   composerActivity.setAttribute('aria-live', 'polite');
+  const composerActivityLabel = el('span', 'ag-composer-activity-label');
+  composerActivity.append(createHieumGlyph(), composerActivityLabel);
   composerOverlay.append(composerActivity, planRestore);
   const composerMeta = el('div', 'ag-composer-meta');
   composerMeta.setAttribute('aria-label', '에이전트 및 채팅 설정');
@@ -2771,8 +2783,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       status: 'processing',
     }));
     const userMessage = recordUserMessage(visibleText, messageAttachments);
+    const userBubble = renderUserMessage(userMessage);
     followConversation = true;
-    withAutoScroll(() => messages.appendChild(renderUserMessage(userMessage)));
+    appendConversation(userBubble);
+    scrollConversationToMessage(userBubble);
     const messageSent = bridge.sendUserMessage(text, skillNameForMessage, staged.map((file) => file.id));
     if (staged.length > 0) {
       attachmentsSending = true;
@@ -2982,7 +2996,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function renderMessagesFromThread(thread: ChatThread): void {
     cancelPendingAssistantRender();
-    messages.replaceChildren();
+    resetConversation();
     streamBubble = null;
     turnActivity = null;
     followConversation = true;
@@ -2990,7 +3004,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     toolRows.clear();
     for (const msg of thread.messages) {
       if (msg.role === 'user') {
-        messages.appendChild(renderUserMessage(msg));
+        appendConversation(renderUserMessage(msg));
       } else if (msg.role === 'assistant') {
         const agent = msg.agent ?? thread.agent;
         if (msg.kind === 'progress') {
@@ -2998,24 +3012,24 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
           const milestone = el('div', `ag-msg ag-progress-milestone ag-${agent}`);
           renderAssistantMessage(milestone, msg.text);
           step.appendChild(milestone);
-          messages.appendChild(step);
+          appendConversation(step);
         } else if (msg.kind === 'plan') {
-          messages.appendChild(renderPlanMessage(msg));
+          appendConversation(renderPlanMessage(msg));
         } else {
           const bubble = el('div', `ag-msg ag-msg-assistant ag-${agent}`);
           renderAssistantMessage(bubble, msg.text);
-          messages.appendChild(bubble);
+          appendConversation(bubble);
         }
       } else {
-        messages.appendChild(el('div', 'ag-msg ag-msg-system', msg.text));
+        appendConversation(el('div', 'ag-msg ag-msg-system', msg.text));
       }
     }
-    messages.scrollTop = messages.scrollHeight;
+    scrollConversationToEnd();
   }
 
   function clearChatUi(): void {
     cancelPendingAssistantRender();
-    messages.replaceChildren();
+    resetConversation();
     streamBubble = null;
     turnActivity = null;
     followConversation = true;
@@ -3220,8 +3234,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     composer.classList.add('ag-readonly');
     const note = el('div', 'ag-msg ag-msg-system ag-readonly-note',
       `"${docLabel}" 문서의 채팅입니다. 그 문서를 열면 이어서 대화할 수 있습니다.`);
-    messages.appendChild(note);
-    messages.scrollTop = messages.scrollHeight;
+    appendConversation(note);
+    scrollConversationToEnd();
     updateComposer();
   }
 
@@ -3444,22 +3458,68 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     updateWorkflowControl();
   }
 
-  function isConversationNearBottom(): boolean {
-    return messages.scrollHeight - messages.scrollTop - messages.clientHeight <= 56;
+  function appendConversation(node: HTMLElement): void {
+    messages.insertBefore(node, messagesEnd);
+  }
+
+  function resetConversation(): void {
+    messages.replaceChildren(messagesEnd);
+  }
+
+  function latestTurnAnchor(): HTMLElement | null {
+    const users = messages.querySelectorAll(':scope > .ag-msg-user');
+    if (users.length > 0) return users[users.length - 1] as HTMLElement;
+    const last = messagesEnd.previousElementSibling;
+    return last instanceof HTMLElement ? last : null;
+  }
+
+  function conversationAnchorTop(node: HTMLElement): number {
+    return node.getBoundingClientRect().top - messages.getBoundingClientRect().top + messages.scrollTop;
+  }
+
+  /** 새 턴이 뷰포트 위쪽에 머물고, 아래는 답변이 내려올 자리로 비운다. */
+  function conversationFocusOffset(): number {
+    return Math.round(messages.clientHeight * 0.14);
+  }
+
+  function syncConversationSpacer(): void {
+    const viewport = messages.clientHeight;
+    messagesEnd.style.minHeight = `${Math.max(0, Math.round(viewport * 0.58))}px`;
+  }
+
+  function isConversationFollowingTurn(): boolean {
+    const anchor = latestTurnAnchor();
+    if (!anchor) {
+      return messages.scrollHeight - messages.scrollTop - messages.clientHeight <= 56;
+    }
+    const expected = conversationAnchorTop(anchor) - conversationFocusOffset();
+    return Math.abs(messages.scrollTop - Math.max(0, expected)) <= 64;
+  }
+
+  function scrollConversationToMessage(node: HTMLElement): void {
+    followConversation = true;
+    syncConversationSpacer();
+    if (conversationScrollRaf !== null) window.cancelAnimationFrame(conversationScrollRaf);
+    conversationScrollRaf = window.requestAnimationFrame(() => {
+      conversationScrollRaf = null;
+      const target = conversationAnchorTop(node) - conversationFocusOffset();
+      messages.scrollTop = Math.max(0, target);
+    });
   }
 
   function scrollConversationToEnd(): void {
+    const anchor = latestTurnAnchor();
+    if (anchor) {
+      scrollConversationToMessage(anchor);
+      return;
+    }
     followConversation = true;
-    if (conversationScrollRaf !== null) return;
-    conversationScrollRaf = window.requestAnimationFrame(() => {
-      conversationScrollRaf = null;
-      messages.scrollTop = messages.scrollHeight;
-    });
+    syncConversationSpacer();
   }
 
   /** 새 출력은 따라가되, 사용자가 위로 스크롤하면 현재 위치를 존중한다. */
   function withAutoScroll(mutate: () => void): void {
-    const shouldFollow = followConversation || isConversationNearBottom();
+    const shouldFollow = followConversation || isConversationFollowingTurn();
     mutate();
     if (shouldFollow) scrollConversationToEnd();
   }
@@ -3472,7 +3532,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   function systemMessage(text: string): void {
-    withAutoScroll(() => messages.appendChild(el('div', 'ag-msg ag-msg-system', text)));
+    withAutoScroll(() => appendConversation(el('div', 'ag-msg ag-msg-system', text)));
   }
 
   /** 현재 대화의 CLI 세션을 강제로 다시 띄운다 (설정 탭·스폰 실패 재시도 공용). */
@@ -3492,7 +3552,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       row.remove();
     });
     row.append(label, retry);
-    withAutoScroll(() => messages.appendChild(row));
+    withAutoScroll(() => appendConversation(row));
   }
 
   /** 설정 탭에서 저장된 기본값 — 새 대화부터 적용된다. */
@@ -3502,7 +3562,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function openAssistantBubble(agent: AgentName): HTMLElement {
     const bubble = el('div', `ag-msg ag-msg-assistant ag-${agent}`);
-    withAutoScroll(() => messages.appendChild(bubble));
+    withAutoScroll(() => appendConversation(bubble));
     streamBubble = bubble;
     return bubble;
   }
@@ -3606,7 +3666,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     } else {
       const toolsOnly = el('div', 'ag-progress-step ag-progress-step-tools-only');
       toolsOnly.appendChild(activity);
-      withAutoScroll(() => messages.appendChild(toolsOnly));
+      withAutoScroll(() => appendConversation(toolsOnly));
     }
 
     turnActivity = {
@@ -4203,7 +4263,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     currentThread.messages.push(message);
     currentThread.updatedAt = Date.now();
     persistCurrentThread();
-    withAutoScroll(() => messages.appendChild(renderPlanMessage(message)));
+    withAutoScroll(() => appendConversation(renderPlanMessage(message)));
   }
 
   function markPlanExecuted(planId: string): void {
@@ -4523,7 +4583,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function updateComposerActivity(changeSets: readonly PendingChangeSet[]): void {
     const activeEdit = changeSets.find((set) => set.status === 'open');
     composerActivity.hidden = !activeEdit;
-    composerActivity.textContent = activeEdit
+    composerActivityLabel.textContent = activeEdit
       ? `${AGENT_LABEL[activeEdit.agent]} 편집 중…`
       : '';
     syncComposerOverlay();
@@ -4600,6 +4660,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       unsubPending();
       contextUnsubs.forEach((unsub) => unsub());
       messagesMutationObserver?.disconnect();
+      messagesResizeObserver?.disconnect();
       messages.removeEventListener('scroll', onMessagesScroll);
       if (configHideTimer !== null) window.clearTimeout(configHideTimer);
       if (conversationScrollRaf !== null) {
