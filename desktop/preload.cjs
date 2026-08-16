@@ -27,6 +27,15 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
     firstHandleId,
     secondHandleId,
   ),
+  rememberNativeDocument: (documentId, handleId) => ipcRenderer.invoke(
+    'desktop:remember-native-document',
+    documentId,
+    handleId,
+  ),
+  reopenNativeDocument: (documentId) => ipcRenderer.invoke(
+    'desktop:reopen-native-document',
+    documentId,
+  ),
   reserveDocument: (identity, nativeHandleId) => ipcRenderer.invoke(
     'desktop:document-reserve',
     identity,

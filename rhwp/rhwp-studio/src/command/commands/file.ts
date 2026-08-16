@@ -48,7 +48,13 @@ import { PdfPrintDialog } from '@/ui/pdf-print-dialog';
 import { userSettings } from '@/core/user-settings';
 import { showToast } from '@/ui/toast';
 import { clearRecentDocs, listRecentDocs, removeRecentDoc } from '@/recent/recent-store';
-import { openRecentEntry } from '@/recent/recent-open';
+import { openRecentEntry, type OpenRecentDeps } from '@/recent/recent-open';
+import { restoreNativeDocument } from '@/desktop-integration';
+import {
+  moveToLibraryDocument,
+  type LibraryDocumentTarget,
+  type LibraryMoveResult,
+} from '@/library/move-to-document';
 
 /**
  * 파일 열기 대화상자(File System Access picker, 미지원 시 숨김 input 폴백)를 열어
@@ -205,6 +211,7 @@ function completeHandleSave(
   services.wasm.currentFileHandle = result.handle;
   services.wasm.fileName = result.fileName;
   services.documentState.markClean(reason);
+  services.eventBus.emit('document-context-changed');
   if (result.handle) {
     // Handle-backed saves can be reopened across browser sessions. Keep this event
     // deliberately limited to the durable handle/name association; fallback downloads
@@ -260,6 +267,7 @@ async function saveAsFormat(services: CommandServices, format: SaveFormat): Prom
     services.wasm.fileName = downloadName;
     downloadBlob(blob, downloadName);
     services.documentState.markClean('save-as');
+    services.eventBus.emit('document-context-changed');
   } catch (error) {
     reportSaveError('file:save-as', error);
   }
@@ -311,6 +319,7 @@ export async function saveCurrentDocument(services: CommandServices): Promise<Sa
     if (!downloadName) return 'cancelled';
     downloadBlob(blob, downloadName);
     services.documentState.markClean('save');
+    services.eventBus.emit('document-context-changed');
     return 'saved';
   } catch (error) {
     reportSaveError('file:save', error);
@@ -346,6 +355,43 @@ export async function confirmSaveBeforeReplacingDocument(
 
   const result = await saveCurrentDocument(services);
   return result === 'saved';
+}
+
+function openRecentDeps(
+  services: CommandServices,
+  { skipUnsavedGuard = false } = {},
+): OpenRecentDeps {
+  return {
+    ensurePermission: ensureReadPermission,
+    readFile: readFileFromHandle,
+    remove: removeRecentDoc,
+    toast: (message, durationMs) => showToast({ message, durationMs }),
+    emitOpen: (payload) => services.eventBus.emit('open-document-bytes', {
+      ...payload,
+      ...(skipUnsavedGuard ? { skipUnsavedGuard: true } : {}),
+    }),
+    requestReopen: () => { void openFileViaPicker(services); },
+    restoreNativeDocument: (documentId) => restoreNativeDocument(documentId),
+  };
+}
+
+export async function runLibraryMove(
+  services: CommandServices,
+  target: LibraryDocumentTarget,
+  getActiveDocumentId: () => string | null,
+): Promise<LibraryMoveResult> {
+  return moveToLibraryDocument(target, {
+    getCurrent: () => ({
+      documentId: getActiveDocumentId(),
+      fileName: services.getContext().hasDocument ? services.wasm.fileName : null,
+      hasDocument: services.getContext().hasDocument,
+    }),
+    saveCurrent: () => saveCurrentDocument(services),
+    listRecent: listRecentDocs,
+    openRecent: (entry) => openRecentEntry(entry, openRecentDeps(services, { skipUnsavedGuard: true })),
+    openViaPicker: () => openFileViaPicker(services),
+    toast: (message) => showToast({ message, durationMs: 3500 }),
+  });
 }
 
 function setupPrintDocument(
@@ -625,15 +671,7 @@ export const fileCommands: CommandDef[] = [
         return;
       }
 
-      await openRecentEntry(entry, {
-        ensurePermission: ensureReadPermission,
-        readFile: readFileFromHandle,
-        remove: removeRecentDoc,
-        toast: (message, durationMs) => showToast({ message, durationMs }),
-        emitOpen: (payload) => services.eventBus.emit('open-document-bytes', payload),
-        // 메타-only 항목: 핸들이 없어 자동 재열기 불가 → 열기 대화상자를 다시 연다.
-        requestReopen: () => { void openFileViaPicker(services); },
-      });
+      await openRecentEntry(entry, openRecentDeps(services));
     },
   },
   {
