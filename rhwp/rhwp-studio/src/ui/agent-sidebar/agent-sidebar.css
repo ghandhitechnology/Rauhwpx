@@ -1623,6 +1623,12 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   contain: layout paint;
 }
 
+/* 새 턴을 위쪽에 두기 위한 아래 여백. 높이는 JS 가 뷰포트에 맞춰 넣는다. */
+.ag-messages-end {
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+
 .ag-msg {
   white-space: pre-wrap;
   word-break: break-word;
@@ -3189,16 +3195,133 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-composer-activity {
+  display: flex;
   min-width: 0;
   flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
   overflow: hidden;
   padding-inline-start: 4px;
   color: var(--ag-text-muted);
   font-size: var(--font-size-sm, 11px);
   font-weight: 600;
   line-height: 1.2;
+  white-space: nowrap;
+}
+
+.ag-composer-activity-label {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ag-hieum {
+  display: block;
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.ag-hieum-top,
+.ag-hieum-mid,
+.ag-hieum-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.ag-composer-activity:not([hidden]) .ag-hieum-top {
+  animation: ag-hieum-top 5.8s linear infinite;
+}
+
+.ag-composer-activity:not([hidden]) .ag-hieum-mid {
+  animation: ag-hieum-mid 5.8s linear infinite;
+}
+
+.ag-composer-activity:not([hidden]) .ag-hieum-ring {
+  animation: ag-hieum-ring 5.8s linear infinite;
+}
+
+@keyframes ag-hieum-top {
+  0%, 100% { transform: translate(0, 0) scaleX(1) rotate(0deg); stroke-width: 1; }
+  6% { transform: translate(-0.12px, 0.08px) scaleX(1.04) rotate(-1.4deg); }
+  12% { transform: translate(-0.16px, 0.55px) scaleX(1.2) rotate(-2deg); }
+  18% { transform: translate(-0.1px, 2.4px) scaleX(1.65) rotate(-1.6deg); stroke-width: 0.94; }
+  22% { transform: translate(0.08px, 4.2px) scaleX(2.15) rotate(0.6deg); }
+  26% { transform: translate(0.06px, 4.62px) scaleX(2.34) rotate(1.1deg); stroke-width: 0.82; }
+  30% { transform: translate(-0.04px, 4.22px) scaleX(2.18) rotate(-0.5deg); stroke-width: 0.95; }
+  34% { transform: translate(0, 4.4px) scaleX(2.26) rotate(0deg); stroke-width: 1; }
+  40% { transform: translate(0.16px, 5.15px) scaleX(1.85) rotate(1.8deg); }
+  46% { transform: translate(0.14px, 6.7px) scaleX(1.2) rotate(2.2deg); }
+  51% { transform: translate(0.06px, 7.48px) scaleX(0.92) rotate(1.1deg); stroke-width: 1.06; }
+  55% { transform: translate(0, 7.25px) scaleX(1) rotate(0.3deg); stroke-width: 1; }
+  60% { transform: translate(0, 7.25px) scaleX(1) rotate(0deg); }
+  66% { transform: translate(-0.14px, 6.05px) scaleX(1.45) rotate(-1.6deg); }
+  72% { transform: translate(0.08px, 4.62px) scaleX(2.34) rotate(0.9deg); stroke-width: 0.82; }
+  76% { transform: translate(-0.04px, 4.22px) scaleX(2.18) rotate(-0.4deg); }
+  80% { transform: translate(0, 4.4px) scaleX(2.26) rotate(0deg); stroke-width: 1; }
+  86% { transform: translate(0.14px, 2.1px) scaleX(1.45) rotate(1.9deg); }
+  92% { transform: translate(-0.08px, -0.16px) scaleX(0.94) rotate(-0.8deg); stroke-width: 1.05; }
+  96% { transform: translate(0.04px, 0.06px) scaleX(1.02) rotate(0.45deg); }
+}
+
+@keyframes ag-hieum-mid {
+  0%, 100% { transform: translate(0, 0) scaleX(1) rotate(0deg); stroke-width: 1; }
+  8% { transform: translate(0.06px, 0.1px) scaleX(1.01) rotate(0.7deg); }
+  16% { transform: translate(0.1px, 0.85px) scaleX(1.03) rotate(1.3deg); }
+  24% { transform: translate(0.08px, 2.15px) scaleX(1.08) rotate(1.6deg); stroke-width: 1.1; }
+  28% { transform: translate(-0.08px, 2.55px) scaleX(1.14) rotate(-0.8deg); stroke-width: 1.18; }
+  34% { transform: translate(0.04px, 2.3px) scaleX(1.06) rotate(0.4deg); stroke-width: 1.12; }
+  38% { transform: translate(0, 2.35px) scaleX(1.08) rotate(0deg); stroke-width: 1.14; }
+  46% { transform: translate(-0.12px, 2.62px) scaleX(1.05) rotate(-1.4deg); }
+  52% { transform: translate(0.08px, 2.92px) scaleX(0.97) rotate(0.9deg); stroke-width: 1.04; }
+  56% { transform: translate(-0.03px, 2.72px) scaleX(1.01) rotate(-0.25deg); }
+  60% { transform: translate(0, 2.75px) scaleX(1) rotate(0deg); stroke-width: 1; }
+  68% { transform: translate(0.12px, 2.6px) scaleX(1.04) rotate(1.2deg); }
+  74% { transform: translate(-0.08px, 2.55px) scaleX(1.14) rotate(-0.7deg); stroke-width: 1.18; }
+  80% { transform: translate(0, 2.35px) scaleX(1.08) rotate(0deg); stroke-width: 1.14; }
+  88% { transform: translate(-0.1px, 0.7px) scaleX(1.03) rotate(-1.1deg); }
+  94% { transform: translate(0.05px, -0.08px) scaleX(0.99) rotate(0.5deg); }
+  98% { transform: translate(-0.02px, 0.03px) scaleX(1.005) rotate(-0.15deg); }
+}
+
+@keyframes ag-hieum-ring {
+  0%, 100% { transform: translate(0, 0) scale(1, 1) rotate(0deg); stroke-width: 1; }
+  6% { transform: translate(0.1px, -0.08px) scale(1.02, 0.96) rotate(1.2deg); }
+  12% { transform: translate(0.16px, -0.35px) scale(1.06, 0.86) rotate(2.4deg); }
+  18% { transform: translate(0.12px, -1.15px) scale(1.14, 0.55) rotate(3.2deg); stroke-width: 0.94; }
+  24% { transform: translate(-0.06px, -2.15px) scale(1.2, 0.22) rotate(1.1deg); }
+  28% { transform: translate(-0.08px, -2.36px) scale(1.26, 0.14) rotate(-0.8deg); stroke-width: 0.82; }
+  32% { transform: translate(0.04px, -2.08px) scale(1.14, 0.22) rotate(0.5deg); }
+  36% { transform: translate(0, -2.2px) scale(1.2, 0.17) rotate(0deg); stroke-width: 1; }
+  42% { transform: translate(-0.16px, -3.25px) scale(1.06, 0.48) rotate(-2.4deg); }
+  48% { transform: translate(-0.14px, -4.7px) scale(0.92, 0.7) rotate(-3.1deg); }
+  53% { transform: translate(-0.06px, -5.36px) scale(0.84, 0.92) rotate(-1.2deg); stroke-width: 1.06; }
+  57% { transform: translate(0.03px, -5.16px) scale(0.89, 0.86) rotate(0.4deg); }
+  60% { transform: translate(0, -5.2px) scale(0.88, 0.88) rotate(0deg); stroke-width: 1; }
+  66% { transform: translate(0.14px, -4.05px) scale(0.98, 0.5) rotate(2.2deg); }
+  72% { transform: translate(-0.08px, -2.36px) scale(1.26, 0.14) rotate(-0.7deg); stroke-width: 0.82; }
+  76% { transform: translate(0.04px, -2.08px) scale(1.14, 0.22) rotate(0.4deg); }
+  80% { transform: translate(0, -2.2px) scale(1.2, 0.17) rotate(0deg); stroke-width: 1; }
+  86% { transform: translate(-0.14px, -0.7px) scale(1.08, 0.7) rotate(-2.6deg); }
+  92% { transform: translate(0.08px, 0.16px) scale(0.96, 1.08) rotate(1.1deg); stroke-width: 1.05; }
+  96% { transform: translate(-0.04px, -0.05px) scale(1.02, 0.98) rotate(-0.4deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-composer-activity:not([hidden]) .ag-hieum-top,
+  .ag-composer-activity:not([hidden]) .ag-hieum-mid,
+  .ag-composer-activity:not([hidden]) .ag-hieum-ring {
+    animation: none;
+  }
+
+  .ag-composer-activity:not([hidden]) .ag-hieum {
+    animation: ag-hieum-quiet 2.6s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+  }
+}
+
+@keyframes ag-hieum-quiet {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 1; }
 }
 
 .ag-composer-overlay:not(.ag-has-activity) {
