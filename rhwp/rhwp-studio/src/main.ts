@@ -661,8 +661,10 @@ function setupGlobalShortcuts(): void {
 function setupFileInput(): void {
   const fileInput = document.getElementById('file-input') as HTMLInputElement;
   const openAction = document.getElementById('document-open-action') as HTMLButtonElement | null;
+  const newAction = document.getElementById('document-new-action') as HTMLButtonElement | null;
 
   openAction?.addEventListener('click', () => dispatcher.dispatch('file:open'));
+  newAction?.addEventListener('click', () => dispatcher.dispatch('file:new-doc'));
 
   fileInput.addEventListener('change', async (e) => {
     const input = e.target as HTMLInputElement;
