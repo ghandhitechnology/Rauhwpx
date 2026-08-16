@@ -75,18 +75,27 @@ test('meaningful progress stays visible as a milestone timeline with nested tool
 test('conversation follows streamed output until the user scrolls away', () => {
   assert.match(source, /followConversation/);
   assert.match(source, /new MutationObserver/);
+  assert.match(source, /scrollConversationToMessage/);
   assert.match(source, /scrollConversationToEnd/);
-  assert.match(source, /messages\.scrollTop = messages\.scrollHeight/);
-  assert.match(source, /followConversation = isConversationNearBottom\(\)/);
+  assert.match(source, /followConversation = isConversationFollowingTurn\(\)/);
+  assert.match(source, /appendConversation\(userBubble\)/);
+  assert.match(source, /scrollConversationToMessage\(userBubble\)/);
+  assert.match(source, /ag-messages-end/);
+  assert.doesNotMatch(source, /messages\.scrollTop = messages\.scrollHeight/);
 });
 
 test('active editing and a minimized plan share a compact composer overlay', () => {
   assert.match(source, /const composerOverlay = el\('div', 'ag-composer-overlay'\)/);
   assert.match(source, /const composerActivity = el\('span', 'ag-composer-activity'\)/);
+  assert.match(source, /createHieumGlyph/);
   assert.match(source, /composerOverlay\.append\(composerActivity, planRestore\)/);
   assert.match(source, /composer\.append\(composerOverlay, slashMenu, composerField, composerMeta, configPanel\)/);
   assert.match(source, /const activeEdit = changeSets\.find\(\(set\) => set\.status === 'open'\)/);
+  assert.match(source, /composerActivityLabel\.textContent = activeEdit/);
   assert.match(source, /`\$\{AGENT_LABEL\[activeEdit\.agent\]\} 편집 중…`/);
+  assert.match(css, /@keyframes ag-hieum-top/);
+  assert.match(css, /@keyframes ag-hieum-mid/);
+  assert.match(css, /@keyframes ag-hieum-ring/);
   assert.match(source, /const reviewSets = changeSets\.filter\(\(set\) => set\.status !== 'open'\)/);
   assert.doesNotMatch(source, /ag-review-open/);
 });
