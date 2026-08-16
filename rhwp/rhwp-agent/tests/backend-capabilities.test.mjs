@@ -189,6 +189,8 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(planning, /tell the user the plan is ready/);
   assert.match(planning, /review it and enter editing mode when satisfied/);
   assert.match(planning, /present_implementation_plan as the final action/);
+  assert.match(planning, /present-plan product skill/);
+  assert.match(planning, /clickable chat presentation and review sidebar/);
   assert.match(planning, /download_file/);
   assert.match(planning, /search_reference_files/);
   assert.match(planning, /untrusted reference data/);

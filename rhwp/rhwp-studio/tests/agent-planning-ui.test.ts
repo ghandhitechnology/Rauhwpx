@@ -40,13 +40,18 @@ test('planning phase shows a persistent compact Korean label and skips a badge i
   assert.match(css, /\.ag-phase-badge \{/);
 });
 
-test('plan renders as a Markdown document in the review area, not a chat bubble', () => {
+test('plan renders as a Markdown review document with a clickable chat presentation', () => {
   assert.match(source, /function buildPlanCard\(plan: StructuredPlan\)/);
   assert.match(source, /el\('section', `ag-plan-card ag-plan-doc ag-\$\{selectedAgent\}`\)/);
   assert.match(source, /card\.setAttribute\('role', 'article'\)/);
   assert.match(source, /card\.setAttribute\('aria-labelledby', titleId\)/);
-  assert.match(source, /review\.appendChild\(buildPlanCard\(activePlan\)\)/);
-  assert.doesNotMatch(source, /ag-msg-plan|messages\.appendChild\(buildPlanCard/);
+  assert.match(source, /planCardSlot\.appendChild\(buildPlanCard\(activePlan\)\)/);
+  assert.match(source, /function renderPlanMessage\(message: Extract<ThreadMessage, \{ kind: 'plan' \}>\)/);
+  assert.match(source, /el\('button', 'ag-msg-plan-action'\)/);
+  assert.match(source, /openPresentedPlan\(message\.planId\)/);
+  assert.match(source, /presentPlanInChat\(e\.plan\)/);
+  assert.match(source, /setPlanColCollapsed\(false\)/);
+  assert.match(css, /\.ag-msg-plan-action \{/);
   // 제목·목표는 머리말이 맡고 본문은 계획 Markdown 렌더러가 그린다.
   assert.match(source, /el\('h3', 'ag-plan-title'/);
   assert.match(source, /el\('p', 'ag-plan-goal', goalText\)/);
@@ -56,12 +61,13 @@ test('plan renders as a Markdown document in the review area, not a chat bubble'
   assert.match(css, /\.ag-plan-body \{/);
 });
 
-test('plan sections and actions share normal flow inside one review scrollport', () => {
+test('plan sections and actions share normal flow inside the separate plan scrollport', () => {
   assert.doesNotMatch(source, /MAX_PLAN_STEP_LINES|MAX_PLAN_LIST_LINES|planDetailOpen|ag-plan-disclosure/);
   assert.doesNotMatch(css, /\.ag-plan-disclosure/);
-  assert.match(css, /\.ag-review \{[^}]*overflow-y: auto;/s);
+  assert.match(css, /\.ag-plan-card-slot \{[^}]*overflow-y: auto;/s);
   assert.match(source, /review\.tabIndex = 0/);
-  assert.match(source, /review\.setAttribute\('aria-label', '계획 및 변경 검토'\)/);
+  assert.match(source, /review\.setAttribute\('aria-label', '변경 사항 검토'\)/);
+  assert.match(source, /planSurface\.setAttribute\('aria-label', '실행 계획'\)/);
   assert.match(css, /\.ag-plan-card \{[^}]*flex: 0 0 auto;/s);
   assert.match(css, /\.ag-plan-body \{[^}]*flex: 0 0 auto;[^}]*overflow: visible;/s);
   assert.match(css, /\.ag-plan-footer \{[^}]*position: static;/s);
@@ -74,6 +80,7 @@ test('approval uses the exact plan id and revision routes feedback through the c
   assert.match(source, /bridge\.approvePlan\(planId\)/);
   assert.match(source, /el\('button', 'ag-reject ag-plan-revise', '수정 요청'\)/);
   assert.match(source, /bridge\.requestPlanChanges\(planId\)/);
+  assert.match(source, /footer\.appendChild\(actions\);[\s\S]*card\.appendChild\(footer\)/);
   assert.match(source, /setPlanningPhase\('planning'\);\s*\n\s*systemMessage\('수정 요청을 보냈습니다/);
   assert.match(source, /input\.focus\(\);/);
   // 텍스트 '네/승인'으로는 절대 승인되지 않는다 — 승인 대기 중 입력은 피드백.
@@ -81,15 +88,17 @@ test('approval uses the exact plan id and revision routes feedback through the c
     source,
     /if \(chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'\) \{\s*\n\s*setPlanningPhase\('planning'\);/,
   );
+  assert.doesNotMatch(source, /승인은 이 버튼으로만 됩니다/);
 });
 
 test('approval immediately switches to implementation with a disabled, announced switching state', () => {
-  assert.match(source, /setPlanningPhase\('switching'\);\s*\n\s*systemMessage\('계획을 승인했습니다\. 편집 모드로 전환합니다\.'\)/);
-  assert.match(source, /case 'implementation-started':\s*\n\s*planApprovable = false;\s*\n\s*setPlanningPhase\(e\.phase\)/);
+  assert.match(source, /setPlanningPhase\('switching'\);\s*\n\s*systemMessage\('계획을 승인했습니다\. 실행 단계로 전환 중입니다\.'\)/);
+  assert.match(source, /case 'implementation-started':[\s\S]*closePlanForExecution\(e\.planId \|\| activePlan\?\.planId \|\| ''\);[\s\S]*setPlanningPhase\(e\.phase\)/);
+  assert.match(source, /function closePlanForExecution\(planId: string\): void \{[\s\S]*activePlan = null;[\s\S]*planMinimized = false;[\s\S]*persistCurrentThread\(\);/);
   assert.match(source, /approve\.disabled = !approvableNow/);
   assert.match(source, /if \(planningPhase === 'switching' \|\| attachmentsSending \|\| referenceLibrary\.hasBlockingDrafts\(\)\) return;/);
   assert.match(source, /if \(planningPhase === 'switching'\)[\s\S]*else if \(!planApprovable\)/);
-  assert.match(source, /승인한 계획으로 편집 모드로 전환하고 있습니다…/);
+  assert.match(source, /승인했습니다\. 실행 단계로 전환 중입니다…/);
 });
 
 test('plan mode warns once about full remote-browser control and scoped downloads', () => {
@@ -131,13 +140,21 @@ test('entering plan mode is blocked while document edits await review', () => {
   assert.match(source, /검토 대기 중인 문서 편집이 있습니다/);
 });
 
-test('plan history restores for display while only the active server plan is approvable', () => {
+test('plan history and chat presentations restore while only the active server plan is approvable', () => {
   assert.match(source, /currentThread\.workflow = chatWorkflow/);
+  assert.match(source, /message\.kind === 'plan'/);
+  assert.match(source, /message\.planId === plan\.planId/);
+  assert.match(source, /messages\.appendChild\(renderPlanMessage\(msg\)\)/);
   assert.match(source, /currentThread\.latestPlan = activePlan/);
+  assert.match(source, /currentThread\.plans = \[\.\.\.planHistory\]/);
+  assert.match(source, /loaded\.plans\?\.length/);
   assert.match(source, /threadWorkflows\.set\(id, loaded\.workflow\)/);
   assert.match(source, /const planArchives = new Map<string, StructuredPlan\[\]>\(\)/);
   assert.match(source, /const threadWorkflows = new Map<string, AgentWorkflow>\(\)/);
-  assert.match(source, /function restorePlanningForThread\(threadId: string\)/);
+  assert.match(source, /function restorePlanningForThread\(threadId: string, thread\?: ChatThread\)/);
+  assert.match(source, /message\.planState === 'executed'/);
+  assert.match(source, /el\('span', 'ag-msg-plan-kicker', executed \? '실행 됨' : '계획'\)/);
+  assert.match(source, /latestPlanExecuted \? null : latestPlan/);
   assert.match(source, /planApprovable = false;/);
   assert.match(source, /이전 계획입니다\. 표시만 되고 승인할 수 없습니다\./);
   assert.match(source, /const approvableNow = planApprovable[\s\S]*planningPhase === 'awaiting-approval'[\s\S]*!turnRunning/);
@@ -176,11 +193,12 @@ test('pending HWP review stays unchanged for plan-driven implementations', () =>
   assert.match(source, /bridge\.pendingEdits\.approve\(set\.id\)/);
   assert.match(source, /bridge\.pendingEdits\.reject\(set\.id\)/);
   assert.match(source, /const changeSets = bridge\.pendingEdits\.getChangeSets\(\);/);
-  assert.match(source, /for \(const set of changeSets\) \{/);
-  assert.match(source, /승인한 계획을 편집 모드에서 실행 중입니다\. 문서 편집은 기존처럼 검토 후 승인합니다\./);
+  assert.match(source, /const reviewSets = changeSets\.filter\(\(set\) => set\.status !== 'open'\)/);
+  assert.match(source, /for \(const set of reviewSets\) \{/);
+  assert.match(source, /실행 중입니다\. 문서 편집은 기존처럼 검토 후 승인합니다\./);
   // 구상·승인 대기 턴은 문서를 편집하지 않았으므로 일반 작업 완료 문구를 붙이지 않는다.
   assert.match(source, /const editingPhase = chatWorkflow === 'direct' \|\| planningPhase === 'implementing'/);
-  assert.match(source, /turnToolCount > 0 && !finalBubble && completed && editingPhase/);
+  assert.match(source, /turnToolCount > 0 && !turnPresentedPlan && !finalBubble && completed && editingPhase/);
 });
 
 test('planning UI honors icon and motion conventions', () => {

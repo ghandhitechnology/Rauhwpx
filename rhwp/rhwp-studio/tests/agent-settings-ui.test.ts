@@ -18,7 +18,7 @@ const icons = readSource('../src/ui/agent-sidebar/icons.ts');
 test('설정 페이지는 무대에 다른 페이지와 나란히 선다', () => {
   assert.match(
     source,
-    /stage\.append\(\s*workspaceBar,\s*chatPage,\s*threadsPage,\s*skillsPage,\s*referenceLibrary\.page,\s*settingsPage,\s*reviewColumn,\s*railResize,\s*reviewResize,?\s*\)/,
+    /stage\.append\(\s*workspaceBar,\s*chatPage,\s*threadsPage,\s*skillsPage,\s*referenceLibrary\.page,\s*settingsPage,\s*reviewColumn,\s*planColumn,\s*railResize,\s*reviewResize,?\s*\)/,
   );
   assert.match(settings, /element\.id = 'ag-settings-panel'/);
   assert.match(settings, /element\.setAttribute\('role', 'region'\)/);

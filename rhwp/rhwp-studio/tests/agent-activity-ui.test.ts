@@ -80,6 +80,17 @@ test('conversation follows streamed output until the user scrolls away', () => {
   assert.match(source, /followConversation = isConversationNearBottom\(\)/);
 });
 
+test('active editing and a minimized plan share a compact composer overlay', () => {
+  assert.match(source, /const composerOverlay = el\('div', 'ag-composer-overlay'\)/);
+  assert.match(source, /const composerActivity = el\('span', 'ag-composer-activity'\)/);
+  assert.match(source, /composerOverlay\.append\(composerActivity, planRestore\)/);
+  assert.match(source, /composer\.append\(composerOverlay, slashMenu, composerField, composerMeta, configPanel\)/);
+  assert.match(source, /const activeEdit = changeSets\.find\(\(set\) => set\.status === 'open'\)/);
+  assert.match(source, /`\$\{AGENT_LABEL\[activeEdit\.agent\]\} 편집 중…`/);
+  assert.match(source, /const reviewSets = changeSets\.filter\(\(set\) => set\.status !== 'open'\)/);
+  assert.doesNotMatch(source, /ag-review-open/);
+});
+
 test('tool calls stay collapsed while the header names active tools', () => {
   assert.match(source, /scrollActivityToLatest/);
   assert.match(source, /content\.scrollTop = content\.scrollHeight/);
@@ -111,11 +122,11 @@ test('long tasks request meaningful updates without artificial heartbeats', () =
   assert.match(backend, /nests related tool calls beneath them/);
 });
 
-test('editing tool turns produce a final document-check handoff', () => {
+test('editing tool turns hand off document checks unless a plan card is presented', () => {
   assert.match(source, /appendCheckDocumentMessage/);
   assert.match(source, /작업을 마쳤습니다\. 문서를 확인해 보세요\./);
   assert.match(source, /const editingPhase = chatWorkflow === 'direct' \|\| planningPhase === 'implementing'/);
-  assert.match(source, /turnToolCount > 0 && !finalBubble && completed && editingPhase/);
+  assert.match(source, /turnToolCount > 0 && !turnPresentedPlan && !finalBubble && completed && editingPhase/);
   assert.match(backend, /After every tool-using turn, always send a separate final/);
   assert.match(backend, /asks the user to check the document or pending changes/);
 });
