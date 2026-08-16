@@ -137,7 +137,7 @@ test('sidebar plan minimizes into a restorable animated orbit above the composer
   assert.match(source, /minimize\.addEventListener\('click', \(\) => setPlanMinimized\(true\)\)/);
   assert.match(source, /planRestore\.addEventListener\('click', \(\) => setPlanMinimized\(false\)\)/);
   assert.match(source, /planSurface\.classList\.toggle\('ag-plan-minimized', compact\)/);
-  assert.match(source, /composerOverlay\.append\(composerActivity, planRestore\)/);
+  assert.match(source, /composerOverlay\.append\(planRestore\)/);
   assert.match(css, /\.ag-plan-surface\.ag-plan-minimized\s*\{[^}]*grid-template-rows:\s*0fr;[^}]*max-height:\s*0;[^}]*border-top-width:\s*0;/s);
   assert.match(css, /\.ag-composer-overlay\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*calc\(100% \+ 5px\);/s);
   assert.match(css, /@keyframes ag-plan-orbit/);

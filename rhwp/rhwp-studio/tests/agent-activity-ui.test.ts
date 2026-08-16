@@ -79,20 +79,23 @@ test('conversation follows streamed output until the user scrolls away', () => {
   assert.match(source, /scrollConversationToEnd/);
   assert.match(source, /followConversation = isConversationFollowingTurn\(\)/);
   assert.match(source, /appendConversation\(userBubble\)/);
-  assert.match(source, /scrollConversationToMessage\(userBubble\)/);
+  assert.match(source, /scrollConversationToMessage\(userBubble, \{ smooth: true \}\)/);
+  assert.match(source, /opts\?\.smooth !== false/);
+  assert.match(source, /behavior: smooth \? 'smooth' : 'auto'/);
+  assert.match(css, /\.ag-messages\s*\{[^}]*scroll-behavior:\s*smooth;/s);
   assert.match(source, /ag-messages-end/);
   assert.doesNotMatch(source, /messages\.scrollTop = messages\.scrollHeight/);
 });
 
 test('active editing and a minimized plan share a compact composer overlay', () => {
   assert.match(source, /const composerOverlay = el\('div', 'ag-composer-overlay'\)/);
-  assert.match(source, /const composerActivity = el\('span', 'ag-composer-activity'\)/);
+  assert.match(source, /const turnPending = el\('div', 'ag-turn-pending'\)/);
   assert.match(source, /createHieumGlyph/);
-  assert.match(source, /composerOverlay\.append\(composerActivity, planRestore\)/);
+  assert.match(source, /composerOverlay\.append\(planRestore\)/);
   assert.match(source, /composer\.append\(composerOverlay, slashMenu, composerField, composerMeta, configPanel\)/);
   assert.match(source, /const activeEdit = changeSets\.find\(\(set\) => set\.status === 'open'\)/);
-  assert.match(source, /composerActivityLabel\.textContent = activeEdit/);
-  assert.match(source, /`\$\{AGENT_LABEL\[activeEdit\.agent\]\} 편집 중…`/);
+  assert.match(source, /updateTurnPending/);
+  assert.match(source, /`\$\{AGENT_LABEL\[who\]\} 편집 중…`/);
   assert.match(css, /@keyframes ag-hieum-top/);
   assert.match(css, /@keyframes ag-hieum-mid/);
   assert.match(css, /@keyframes ag-hieum-ring/);
@@ -102,7 +105,8 @@ test('active editing and a minimized plan share a compact composer overlay', () 
 
 test('tool calls stay collapsed while the header names active tools', () => {
   assert.match(source, /scrollActivityToLatest/);
-  assert.match(source, /content\.scrollTop = content\.scrollHeight/);
+  assert.match(source, /content\.scrollTo\(\{/);
+  assert.match(source, /top: content\.scrollHeight/);
   assert.match(source, /ag-activity-running ag-activity-collapsed/);
   assert.match(source, /toggle\.setAttribute\('aria-expanded', 'false'\)/);
   assert.match(source, /`도구 호출 · \$\{active\[0\]\} 실행 중`/);
