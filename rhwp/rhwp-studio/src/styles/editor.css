@@ -91,7 +91,8 @@
   font-size: var(--font-size-base);
 }
 
-#document-open-action {
+#document-open-action,
+#document-new-action {
   min-width: 132px;
   height: 30px;
   padding: 0 14px;
@@ -106,16 +107,19 @@
   box-shadow: var(--shadow-light);
 }
 
-#document-open-action:hover {
+#document-open-action:hover,
+#document-new-action:hover {
   background: var(--accent-strong);
   border-color: var(--accent-strong);
 }
 
-#document-open-action:active {
+#document-open-action:active,
+#document-new-action:active {
   box-shadow: var(--ui-pressed-inset);
 }
 
-#document-open-action:focus-visible {
+#document-open-action:focus-visible,
+#document-new-action:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
