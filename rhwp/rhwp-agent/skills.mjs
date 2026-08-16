@@ -28,12 +28,22 @@ export function defaultSkillDataRoot(env = process.env, platform = process.platf
 }
 
 export function parseSkillMarkdown(markdown, expectedName) {
-  if (typeof markdown !== 'string' || !markdown.startsWith('---\n')) {
+  if (typeof markdown !== 'string') {
     throw new SkillError('INVALID_SKILL', 'SKILL.md must start with YAML frontmatter');
   }
-  const end = markdown.indexOf('\n---\n', 4);
-  if (end < 0) throw new SkillError('INVALID_SKILL', 'SKILL.md frontmatter is not closed');
-  const frontmatter = markdown.slice(4, end).split(/\r?\n/);
+  const source = markdown.startsWith('\uFEFF') ? markdown.slice(1) : markdown;
+  const opening = source.match(/^---\r?\n/);
+  if (!opening) {
+    throw new SkillError('INVALID_SKILL', 'SKILL.md must start with YAML frontmatter');
+  }
+  const frontmatterStart = opening[0].length;
+  const closing = source.slice(frontmatterStart).match(/\r?\n---\r?\n/);
+  if (!closing || closing.index == null) {
+    throw new SkillError('INVALID_SKILL', 'SKILL.md frontmatter is not closed');
+  }
+  const frontmatterEnd = frontmatterStart + closing.index;
+  const bodyStart = frontmatterEnd + closing[0].length;
+  const frontmatter = source.slice(frontmatterStart, frontmatterEnd).split(/\r?\n/);
   const metadata = {};
   for (const line of frontmatter) {
     if (!line.trim()) continue;
@@ -61,7 +71,7 @@ export function parseSkillMarkdown(markdown, expectedName) {
   if (!description || description.length > 1000) {
     throw new SkillError('INVALID_SKILL', 'Skill description is required and must be at most 1000 characters');
   }
-  const body = markdown.slice(end + 5).trim();
+  const body = source.slice(bodyStart).trim();
   if (!body) throw new SkillError('INVALID_SKILL', 'SKILL.md instructions cannot be empty');
   return { name, description, body };
 }
