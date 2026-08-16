@@ -381,6 +381,7 @@ const OBJECT_OP_LABELS: Record<string, string> = {
   insertEquation: '수식 삽입',
   tableStructure: '표 구조 변경',
   tableStructureMarked: '표 구조 변경(승인 시 적용)',
+  deleteTable: '표 삭제(승인 시 적용)',
   setCellProps: '셀 속성(승인 시 적용)',
   setTableProps: '표 속성(승인 시 적용)',
   paraFormat: '문단 서식',

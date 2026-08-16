@@ -554,6 +554,12 @@ test('hasPendingStructureOp: 적용된 구조 op 과 마크된 구조 op 모두 
     op: 'delete_row', rowIdx: 1, dims: { rowCount: 3, colCount: 3 },
   });
   assert.equal(mgr.hasPendingStructureOp(0, 2, 0), true); // 마크된 delete_row
+  fake.wasm.addFakeTable(3, 0, 2, 2);
+  mgr.addObjectOp('claude', {
+    type: 'deleteTable', sectionIdx: 0, tableParaIdx: 3, controlIdx: 0,
+    dims: { rowCount: 2, colCount: 2 },
+  });
+  assert.equal(mgr.hasPendingStructureOp(0, 3, 0), true); // 마크된 delete_table
   assert.equal(mgr.hasPendingStructureOp(0, 9, 9), false);
 });
 

@@ -497,7 +497,7 @@ export class PendingEditManager {
     }
   }
 
-  /** executor 가드: 해당 표에 파괴적 마크(delete_row/col, merge)가 걸려 있는가 */
+  /** executor 가드: 해당 표에 파괴적 마크(delete_row/col, merge, delete_table)가 걸려 있는가 */
   hasDestructiveTableMark(sectionIdx: number, tableParaIdx: number, controlIdx: number): boolean {
     for (const set of this.sets) {
       for (const op of set.ops) {
@@ -511,15 +511,15 @@ export class PendingEditManager {
 
   /**
    * executor 가드: 해당 표에 pending 구조 op(insert_row/col 적용됨 또는
-   * delete/merge 마크)이 하나라도 있으면 true — 구조 op 이 있으면 cellIdx 가
-   * 재번호 매겨지므로 승인 전 추가 표 편집을 막는 데 쓴다.
+   * delete/merge/delete_table 마크)이 하나라도 있으면 true — 구조 op 이 있으면
+   * cellIdx 가 재번호 매겨지므로 승인 전 추가 표 편집을 막는 데 쓴다.
    */
   hasPendingStructureOp(sectionIdx: number, tableParaIdx: number, controlIdx: number): boolean {
     for (const set of this.sets) {
       for (const op of set.ops) {
         if (op.kind !== 'object') continue;
         const o = op.obj;
-        if ((o.type === 'tableStructure' || o.type === 'tableStructureMarked')
+        if ((o.type === 'tableStructure' || o.type === 'tableStructureMarked' || o.type === 'deleteTable')
           && o.sectionIdx === sectionIdx
           && o.tableParaIdx === tableParaIdx && o.controlIdx === controlIdx) {
           return true;
@@ -938,6 +938,7 @@ export class PendingEditManager {
           : null;
       case 'tableStructure':
       case 'setTableProps':
+      case 'deleteTable':
         return { sort: 'table', sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx };
       case 'tableStructureMarked': {
         const base = { sort: 'cells' as const, sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx };
@@ -1399,6 +1400,11 @@ export class PendingEditManager {
         }
         return;
       }
+      case 'deleteTable': {
+        const ok = wasm.deleteTableControl(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx)?.ok === true;
+        if (ok) this.shiftControlIdxRefs(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, -1, obj);
+        return;
+      }
       case 'setCellProps':
         wasm.setCellProperties(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.cellIdx, obj.props);
         return;
@@ -1440,13 +1446,13 @@ export class PendingEditManager {
     }
   }
 
-  /** 같은 표에 pending 구조 op(행/열 삽입·삭제·병합)이 있는가 */
+  /** 같은 표에 pending 구조 op(행/열 삽입·삭제·병합·표 삭제)이 있는가 */
   private hasStructuralSibling(sectionIdx: number, anchor: ObjectAnchor): boolean {
     for (const set of this.sets) {
       for (const op of set.ops) {
         if (op.kind !== 'object') continue;
         const o = op.obj;
-        if ((o.type === 'tableStructure' || o.type === 'tableStructureMarked')
+        if ((o.type === 'tableStructure' || o.type === 'tableStructureMarked' || o.type === 'deleteTable')
           && o.sectionIdx === sectionIdx
           && o.tableParaIdx === anchor.paraIdx && o.controlIdx === anchor.controlIdx) {
           return true;
@@ -1554,6 +1560,7 @@ export class PendingEditManager {
           return d.rowCount === obj.dims.rowCount && d.colCount === obj.dims.colCount;
         }
         case 'tableStructureMarked':
+        case 'deleteTable':
         case 'setCellProps':
         case 'setTableProps': {
           const d = wasm.getTableDimensions(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx);
@@ -1643,7 +1650,7 @@ export class PendingEditManager {
             o.expectedCols = (o.expectedCols ?? o.cols) + dCols;
           }
         } else if (o.type === 'tableStructure' || o.type === 'tableStructureMarked'
-          || o.type === 'setCellProps' || o.type === 'setTableProps') {
+          || o.type === 'deleteTable' || o.type === 'setCellProps' || o.type === 'setTableProps') {
           if (o.sectionIdx === sectionIdx && o.tableParaIdx === tableParaIdx
             && o.controlIdx === controlIdx && o.dims) {
             o.dims = { rowCount: o.dims.rowCount + dRows, colCount: o.dims.colCount + dCols };
@@ -1678,7 +1685,7 @@ export class PendingEditManager {
             && o.anchor.paraIdx === paraIdx && hit(o.anchor.controlIdx)) {
             o.anchor = { ...o.anchor, controlIdx: o.anchor.controlIdx + delta };
           } else if ((o.type === 'tableStructure' || o.type === 'tableStructureMarked'
-            || o.type === 'setCellProps' || o.type === 'setTableProps')
+            || o.type === 'deleteTable' || o.type === 'setCellProps' || o.type === 'setTableProps')
             && o.sectionIdx === sectionIdx && o.tableParaIdx === paraIdx && hit(o.controlIdx)) {
             o.controlIdx += delta;
           } else if ((o.type === 'paraFormat' || o.type === 'applyStyle' || o.type === 'insertEquation')
@@ -2168,7 +2175,8 @@ export class PendingEditManager {
     switch (obj.type) {
       case 'createTable': case 'insertImage': case 'insertEquation':
         return ('anchor' in obj && obj.anchor) ? obj.anchor.paraIdx : obj.paraIdx;
-      case 'tableStructure': case 'tableStructureMarked': case 'setCellProps': case 'setTableProps':
+      case 'tableStructure': case 'tableStructureMarked': case 'deleteTable':
+      case 'setCellProps': case 'setTableProps':
         return obj.tableParaIdx;
       case 'paraFormat': case 'applyStyle':
         return obj.cell ? obj.cell.paraIdx : obj.paraIdx;
@@ -2206,7 +2214,8 @@ export class PendingEditManager {
         }
         return;
       }
-      case 'tableStructure': case 'tableStructureMarked': case 'setCellProps': case 'setTableProps': {
+      case 'tableStructure': case 'tableStructureMarked': case 'deleteTable':
+      case 'setCellProps': case 'setTableProps': {
         if (obj.sectionIdx !== sectionIdx || insCell) return;
         obj.tableParaIdx = shiftBody(obj.tableParaIdx, 0).paraIdx;
         return;

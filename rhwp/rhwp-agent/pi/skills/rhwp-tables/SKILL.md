@@ -1,6 +1,6 @@
 ---
 name: rhwp-tables
-description: Address table cells and change table structure in the live HWP/HWPX document. Use when reading or editing text inside a table cell, when calling create_table or edit_table, or when a cell address is rejected.
+description: Address table cells and change table structure in the live HWP/HWPX document. Use when reading or editing text inside a table cell, when calling create_table, edit_table, or delete_table, or when a cell address is rejected.
 ---
 
 # rhwp 표 다루기
@@ -31,9 +31,15 @@ description: Address table cells and change table structure in the live HWP/HWPX
 
 빠뜨리면 `INVALID_ARGS` 로 즉시 실패한다. 길이는 mm, 글자 크기는 pt, 색은 `"#RRGGBB"` 다.
 
+## delete_table
+
+- 표 전체를 지운다. 주소는 `get_structure` 의 `tables[]` 에서 온 `sectionIdx`/`paraIdx`/`controlIdx` 다.
+- mark-only: 승인 전까지 표는 그대로 있고 하이라이트만 된다. 거절하면 아무 것도 지우지 않는다.
+- 같은 표에 대한 후속 편집은 승인/거절 전까지 `PENDING_DESTRUCTIVE_OP` 로 거절된다.
+
 ## 순서
 
-- 셀 텍스트를 먼저 채우고 구조 변경을 뒤로 미룬다. `insert_row`/`insert_col`/`merge_cells` 를
+- 셀 텍스트를 먼저 채우고 구조 변경을 뒤로 미룬다. `insert_row`/`insert_col`/`merge_cells`/`delete_table` 를
   부르면 그 표는 사용자가 승인할 때까지 잠겨 추가 편집을 받지 않는다.
 - 모든 호출은 `expectedRevision` 이 필요하고 한 번에 하나씩 보낸다 (`rhwp-editing` 참고).
 - 표 작업이 끝나면 `verify_changes` 를 `includeImage: true` 로 불러 레이아웃을 확인한다.
