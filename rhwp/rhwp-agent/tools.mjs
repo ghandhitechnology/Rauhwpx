@@ -344,6 +344,16 @@ const BASE_TOOL_DEFINITIONS = [
     validate: validateEditTable,
   },
   {
+    name: 'delete_table',
+    description: `Delete an entire existing table at (sectionIdx, paraIdx, controlIdx) — the address comes verbatim from get_structure tables[]. This is mark-only: the whole table is highlighted as pending deletion and is NOT removed until the user approves. Until then further edits to the same table fail with PENDING_DESTRUCTIVE_OP. On reject the table is left untouched. ${WRITE_NOTE}`,
+    shape: {
+      expectedRevision: z.number().int(),
+      sectionIdx: z.number().int().min(0),
+      paraIdx: z.number().int().min(0).describe('Body paragraph containing the table control'),
+      controlIdx: z.number().int().min(0),
+    },
+  },
+  {
     name: 'apply_para_format',
     description: `Format one paragraph: alignment, line spacing, spacing before/after, indent, margins, page-break-before, and list properties (headType/numberingId/paraLevel/bulletChar — for creating lists prefer the higher-level apply_list tool). Works in table cells via the cell parameter. pageBreakBefore:true makes the page break before this paragraph (this is also how you insert a page break). ${CELL_NOTE} ${WRITE_NOTE}`,
     shape: {
@@ -671,6 +681,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   apply_char_format: 'document-write',
   create_table: 'document-write',
   edit_table: 'document-write',
+  delete_table: 'document-write',
   apply_para_format: 'document-write',
   apply_list: 'document-write',
   list_styles: 'document-read',
