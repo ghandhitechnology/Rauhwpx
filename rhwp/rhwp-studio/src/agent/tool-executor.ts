@@ -37,6 +37,7 @@ export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'apply_list',
   'set_field_value',
   'create_table',
+  'delete_table',
   'edit_table',
   'apply_para_format',
   'apply_style',
@@ -302,6 +303,7 @@ export class AgentToolExecutor {
       case 'apply_list': return this.applyList(args, agent);
       case 'set_field_value': return this.setFieldValue(args, agent);
       case 'create_table': return this.createTable(args, agent);
+      case 'delete_table': return this.deleteTable(args, agent);
       case 'edit_table': return this.editTable(args, agent);
       case 'apply_para_format': return this.applyParaFormat(args, agent);
       case 'list_styles': return this.listStyles();
@@ -1277,7 +1279,7 @@ export class AgentToolExecutor {
     };
     for (const op of set?.ops ?? []) {
       if (op.kind === 'delete') hasDeleteMark = true;
-      if (op.kind === 'object' && (op.obj.type === 'tableStructure' || op.obj.type === 'tableStructureMarked')) {
+      if (op.kind === 'object' && (op.obj.type === 'tableStructure' || op.obj.type === 'tableStructureMarked' || op.obj.type === 'deleteTable')) {
         hasTableStructure = true;
       }
       if (op.kind === 'insert' || op.kind === 'delete' || op.kind === 'replace' || op.kind === 'format') {
@@ -1302,6 +1304,7 @@ export class AgentToolExecutor {
             break;
           case 'tableStructure':
           case 'tableStructureMarked':
+          case 'deleteTable':
           case 'setCellProps':
           case 'setTableProps':
             pushPara(o.sectionIdx, o.tableParaIdx);
@@ -1747,6 +1750,39 @@ export class AgentToolExecutor {
       default:
         throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|set_cell_props|set_table_props (got ${JSON.stringify(op)})`);
     }
+  }
+
+  private deleteTable(args: Record<string, unknown>, agent: AgentName): unknown {
+    this.requireRevision(args);
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    const paraIdx = reqInt(args, 'paraIdx');
+    const controlIdx = reqInt(args, 'controlIdx');
+    const { wasm } = this.deps;
+    let dims: { rowCount: number; colCount: number; cellCount: number };
+    try {
+      dims = wasm.getTableDimensions(sectionIdx, paraIdx, controlIdx);
+    } catch {
+      throw new AgentToolError('INVALID_ARGS', `No table control at section ${sectionIdx}, paragraph ${paraIdx}, controlIdx ${controlIdx} — use get_structure to list tables`);
+    }
+    this.guardDestructiveMark(sectionIdx, paraIdx, controlIdx);
+    const obj: ObjectOp = {
+      type: 'deleteTable',
+      sectionIdx,
+      tableParaIdx: paraIdx,
+      controlIdx,
+      dims: { rowCount: dims.rowCount, colCount: dims.colCount },
+    };
+    const r = this.deps.pending.addObjectOp(agent, obj);
+    return {
+      ok: true,
+      marked: true,
+      sectionIdx,
+      paraIdx,
+      controlIdx,
+      revision: this.revision,
+      changeSetId: r.changeSetId,
+      note: `table is NOT removed yet — highlighted until the user approves. Further edits to this table fail with PENDING_DESTRUCTIVE_OP. ${PENDING_NOTE}`,
+    };
   }
 
   /** set_cell_props 허용 키 → wasm setCellProperties JSON */

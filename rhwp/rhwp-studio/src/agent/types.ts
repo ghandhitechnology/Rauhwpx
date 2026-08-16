@@ -615,7 +615,8 @@ export interface ObjectAnchor {
  *   insertImage, insertEquation, tableStructure(insert_row/col), paraFormat, pageLayout,
  *   headerFooter(신규 생성일 때)
  * - mark-only(approve 시 적용): tableStructure(delete_row/col/merge_cells),
- *   setCellProps, setTableProps, applyStyle, headerFooter(기존 HF 수정)
+ *   deleteTable(표 전체 삭제), setCellProps, setTableProps, applyStyle,
+ *   headerFooter(기존 HF 수정)
  */
 export type ObjectOp =
   | {
@@ -664,6 +665,14 @@ export type ObjectOp =
       rowIdx?: number; colIdx?: number;
       startRow?: number; startCol?: number; endRow?: number; endCol?: number;
       /** 마크 시점 크기 — 드리프트 프로브 */
+      dims: { rowCount: number; colCount: number };
+    }
+  | {
+      /** 표 전체 삭제 — mark-only, 승인 시 wasm.deleteTableControl */
+      type: 'deleteTable';
+      sectionIdx: number;
+      tableParaIdx: number;
+      controlIdx: number;
       dims: { rowCount: number; colCount: number };
     }
   | {
@@ -774,7 +783,7 @@ export function isObjectOpApplied(obj: ObjectOp): boolean {
 export function isDestructiveTableMark(
   obj: ObjectOp, sectionIdx: number, tableParaIdx: number, controlIdx: number,
 ): boolean {
-  return obj.type === 'tableStructureMarked'
+  return (obj.type === 'tableStructureMarked' || obj.type === 'deleteTable')
     && obj.sectionIdx === sectionIdx
     && obj.tableParaIdx === tableParaIdx
     && obj.controlIdx === controlIdx;

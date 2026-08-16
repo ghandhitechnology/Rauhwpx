@@ -410,6 +410,57 @@ test('edit_table delete_row 는 mark-only + 같은 표 후속 편집은 PENDING_
   assert.ok(calls.some((x) => x.m === 'deleteTableRow'));
 });
 
+test('delete_table 는 mark-only + 같은 표 후속 편집은 PENDING_DESTRUCTIVE_OP', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
+  })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
+  pending.approve(c.changeSetId);
+  calls.length = 0;
+  const t = tables[0];
+  const del = (await call('delete_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
+  })) as { changeSetId: string; marked: boolean; ok: boolean };
+  assert.equal(del.ok, true);
+  assert.equal(del.marked, true);
+  assert.equal(tables.length, 1); // 아직 적용 안 됨
+  assert.ok(!calls.some((x) => x.m === 'deleteTableControl'));
+  await expectErr(call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 0,
+  }), 'PENDING_DESTRUCTIVE_OP');
+  calls.length = 0;
+  pending.approve(del.changeSetId);
+  assert.equal(tables.length, 0);
+  assert.ok(calls.some((x) => x.m === 'deleteTableControl'));
+});
+
+test('delete_table → reject: 표가 남고 deleteTableControl 을 부르지 않는다', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a']],
+  })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
+  pending.approve(c.changeSetId);
+  calls.length = 0;
+  const t = tables[0];
+  const del = (await call('delete_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
+  })) as { changeSetId: string };
+  assert.equal(tables.length, 1);
+  pending.reject(del.changeSetId);
+  assert.equal(tables.length, 1);
+  assert.ok(!calls.some((x) => x.m === 'deleteTableControl'));
+});
+
+test('delete_table: 없는 표 주소·누락 인자는 INVALID_ARGS', async () => {
+  const { call } = makeEnv();
+  await expectErr(call('delete_table', {
+    sectionIdx: 0, paraIdx: 0, controlIdx: 0,
+  }), 'INVALID_ARGS');
+  await expectErr(call('delete_table', {
+    sectionIdx: 0, paraIdx: 2,
+  }), 'INVALID_ARGS');
+});
+
 test('edit_table merge_cells: 인자 검증과 mark-only 실행', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const c = (await call('create_table', {
