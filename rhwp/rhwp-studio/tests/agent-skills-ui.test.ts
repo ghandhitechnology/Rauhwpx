@@ -21,6 +21,8 @@ test('skill library includes catalog, guided draft, review, and recoverable mana
   assert.match(source, /bridge\.validateSkill/);
   assert.match(source, /복구 가능한 휴지통/);
   assert.match(source, /skillResources\.type = 'file'/);
+  assert.match(source, /skill\.required \? '필수'/);
+  assert.match(source, /toggle\.disabled = Boolean\(skill\.required\)/);
   assert.match(source, /\['references', '참고자료'\]/);
   assert.match(source, /\['scripts', '스크립트'\]/);
 });
