@@ -42,6 +42,9 @@ import {
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 
 const { autoUpdater } = electronUpdater;
+autoUpdater.on('error', (error) => {
+  console.warn('[rauhwpx] update check failed:', error?.message ?? error);
+});
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const RELEASES_URL = 'https://github.com/ghandhitechnology/Rauhwpx/releases/latest';
 const PRELOAD_PATH = join(__dirname, 'preload.cjs');
@@ -285,7 +288,9 @@ function installMenu() {
         void shell.openExternal(RELEASES_URL);
         return;
       }
-      void autoUpdater.checkForUpdatesAndNotify();
+      autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+        dialog.showErrorBox('Update check failed', error?.message ?? String(error));
+      });
     },
   };
   const newWindow = {
