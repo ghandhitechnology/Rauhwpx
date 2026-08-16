@@ -92,6 +92,14 @@ body.ag-sidebar-animating .ag-root {
   --ag-codex-wash: rgba(91, 143, 212, 0.10);
   --ag-pi-wash: rgba(74, 154, 134, 0.10);
   --ag-accent: var(--ag-claude);
+  --ag-accent-strong: color-mix(in srgb, var(--ag-accent) 86%, var(--ag-text));
+  --ag-on-accent: #111214;
+
+  /* Agent controls reuse the app's primary-button contract, but their color
+     follows the active provider in both sidebar and fullscreen layouts. */
+  --accent-primary: var(--ag-accent);
+  --accent-strong: var(--ag-accent-strong);
+  --n-on-accent: var(--ag-on-accent);
   --ag-ok: #2f7d4f;
   --ag-err: #c8372d;
 
@@ -211,6 +219,16 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 :root[data-theme-effective='dark'] .ag-root {
+  /* Keep the agent workspace visually heavier than the editor chrome while
+     lifting the composer one clear step above the conversation surface. */
+  --ag-bg: #111214;
+  --ag-bg-2: #0d0e10;
+  --ag-raised: #191a1d;
+  --ag-input-bg: #202124;
+  --ag-border: rgba(255, 255, 255, 0.075);
+  --ag-border-strong: rgba(255, 255, 255, 0.14);
+  --ag-hover: rgba(255, 255, 255, 0.075);
+  --ag-active: rgba(255, 255, 255, 0.12);
   --ag-claude: #d49174;
   --ag-codex: #7aa8e0;
   --ag-pi: #6cc0aa;
@@ -2532,9 +2550,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   }
 }
 
-/* 어느 에이전트든 승인 버튼은 같은 모습이다. 카드 왼쪽 1px 선이
-   이미 출처를 말하므로, 버튼 안쪽에 에이전트 색 링을 덧대면
-   렌더 오류처럼 보인다. */
+/* 승인 버튼은 현재 provider의 주 행동색을 따른다. 카드 왼쪽 선도
+   같은 색을 쓰므로 별도의 안쪽 링 없이 한 계층으로 읽힌다. */
 .ag-approve {
   border: 1px solid var(--accent-primary);
   background: var(--accent-primary);
