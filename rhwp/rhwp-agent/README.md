@@ -230,7 +230,7 @@ enter scope counts and expire after 12 hours.
 Studio should repeat the IDs on `chat-user-message`; the hub rejects stale IDs
 before retrieval while continuing to accept legacy messages that omit them.
 
-## MCP tools (server name `rhwp`, 49 tools)
+## MCP tools (server name `rhwp`, 50 tools)
 
 Visible to Claude as `mcp__rhwp__<name>`.
 
@@ -249,7 +249,8 @@ Visible to Claude as `mcp__rhwp__<name>`.
 - Write (all pending approval): `insert_text`, `delete_range`,
   `replace_range`, `apply_char_format` (incl. `fontFamily`),
   `set_field_value`, `create_table` (bulk cell fill + header row),
-  `edit_table` (rows/cols/merge/props), `apply_para_format`, `apply_style`,
+  `edit_table` (rows/cols/merge/props), `delete_table` (mark-only whole-table delete),
+  `apply_para_format`, `apply_style`,
   `apply_list` (real auto-renumbered HWP lists — never literal `1.` text),
   `insert_image` (local `imagePath`; this process reads/measures the file),
   `insert_equation` (HWP 수식 스크립트; render-validated before insert),
