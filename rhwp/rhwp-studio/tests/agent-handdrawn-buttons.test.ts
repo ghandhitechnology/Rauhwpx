@@ -67,12 +67,18 @@ test('ghost and icon buttons in sidebar and fullscreen are hand-drawn', () => {
     '.ag-workspace-icon-btn',
     '.ag-permission-btn',
     '.ag-skills-btn',
-    '.ag-model-trigger',
     '.ag-thread-rename',
     '.ag-environment-changes',
   ]) {
     assert.ok(selectors.includes(sel), `${sel} should use the sketch filter`);
   }
+});
+
+test('model selector labels keep uneven corners without distorting their small text', () => {
+  assert.match(
+    css,
+    /\.ag-model-trigger\s*\{[^}]*border-radius:\s*[^;]*\/[^;]*;[^}]*filter:\s*none;/s,
+  );
 });
 
 test('hand-drawn buttons use uneven per-corner radii instead of the even tokens', () => {
