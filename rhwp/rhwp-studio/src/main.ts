@@ -12,7 +12,7 @@ import { loadExtensionViewerSettings, type ExtensionViewerSettings } from '@/cor
 import { CommandRegistry } from '@/command/registry';
 import { CommandDispatcher } from '@/command/dispatcher';
 import type { EditorContext, CommandServices, EditorEditMode } from '@/command/types';
-import { confirmSaveBeforeReplacingDocument, fileCommands } from '@/command/commands/file';
+import { confirmSaveBeforeReplacingDocument, fileCommands, runLibraryMove } from '@/command/commands/file';
 import { editCommands } from '@/command/commands/edit';
 import {
   setBasicToolboxExpanded,
@@ -84,6 +84,7 @@ import {
   pickDesktopNativeSaveFile,
   releaseDesktopDocument,
   releaseReplacedNativeFileHandle,
+  rememberNativeDocument,
   reserveDesktopDocument,
 } from '@/desktop-integration';
 import { initAgentBridge } from './agent/bridge.ts';
@@ -609,6 +610,9 @@ async function initialize(): Promise<void> {
           }
           return { documentId: activeDocumentId, documentName, selectionLabel };
         },
+        moveToLibraryDocument: (target) => {
+          void runLibraryMove(commandServices, target, () => activeDocumentId);
+        },
       });
       if (import.meta.env.DEV) {
         (window as any).__agentBridge = agentBridge;
@@ -675,7 +679,15 @@ function setupFileInput(): void {
       fileInput.value = '';
       return;
     }
-    await loadFile(file, { skipUnsavedGuard });
+    let fileHandle: FileSystemFileHandleLike | null | undefined;
+    try {
+      fileHandle = await captureDesktopNativeDroppedFile(file);
+    } catch (error) {
+      fileInput.value = '';
+      showLoadError(error);
+      return;
+    }
+    await loadFile(file, { skipUnsavedGuard, fileHandle: fileHandle ?? undefined });
     fileInput.value = '';
   });
 
@@ -891,22 +903,28 @@ function setupEventListeners(): void {
       fileName: string;
       sourceFormat: string;
     };
-    void releaseReplacedNativeFileHandle(saved.previousFileHandle, saved.fileHandle)
-      .catch((error) => console.warn('[desktop] 이전 네이티브 파일 핸들 해제 실패:', error));
     const documentId = activeDocumentId;
     const sourceDigest = wasm.documentDigest;
-    if (!documentId || !sourceDigest) return;
+    if (!documentId || !sourceDigest) {
+      void releaseReplacedNativeFileHandle(saved.previousFileHandle, saved.fileHandle)
+        .catch((error) => console.warn('[desktop] 이전 네이티브 파일 핸들 해제 실패:', error));
+      return;
+    }
 
     // Save/Save As changes storage metadata, not logical document identity. Explicitly
     // bind the new handle to the active ID so reopening it in a later session restores
     // the same document-scoped references. Download fallbacks emit no such event.
-    void addRecentDoc({
-      documentId,
-      sourceDigest,
-      fileName: saved.fileName,
-      sourceFormat: saved.sourceFormat,
-      handle: saved.fileHandle,
-    }).catch((err) => console.warn('[recent] 저장 핸들 identity 갱신 실패:', err));
+    void (async () => {
+      await rememberNativeDocument(documentId, saved.fileHandle);
+      await releaseReplacedNativeFileHandle(saved.previousFileHandle, saved.fileHandle);
+      await addRecentDoc({
+        documentId,
+        sourceDigest,
+        fileName: saved.fileName,
+        sourceFormat: saved.sourceFormat,
+        handle: saved.fileHandle,
+      });
+    })().catch((err) => console.warn('[recent] 저장 핸들 identity 갱신 실패:', err));
   });
 
   eventBus.on('autosave-settings-changed', () => {
@@ -1222,6 +1240,8 @@ async function loadBytes(
   }
   activeDocumentId = ownership.identity.documentId;
   bindNativeFileHandleIdentity(fileHandle, ownership.identity);
+  await rememberNativeDocument(ownership.identity.documentId, fileHandle)
+    .catch((error) => console.warn('[desktop] native document bookmark failed:', error));
   await releaseReplacedNativeFileHandle(previousFileHandle, fileHandle)
     .catch((error) => console.warn('[desktop] 교체된 네이티브 파일 핸들 해제 실패:', error));
   prepareCanvasRendererDocument();

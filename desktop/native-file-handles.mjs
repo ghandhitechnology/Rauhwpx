@@ -58,6 +58,7 @@ export async function canonicalNativePath(
 export class NativeFileHandleRegistry {
   #byId = new Map();
   #byPath = new Map();
+  #bookmarks = new Map();
   #canonicalize;
   #ownershipKey;
   #createId;
@@ -150,6 +151,40 @@ export class NativeFileHandleRegistry {
     const first = this.#entryForSender(senderSessionId, firstHandleId);
     const second = this.#entryForSender(senderSessionId, secondHandleId);
     return first.ownershipPath === second.ownershipPath;
+  }
+
+  rememberDocument(documentId, senderSessionId, handleId) {
+    const entry = this.#entryForSender(senderSessionId, handleId);
+    if (this.#bookmarks.has(documentId)) this.#bookmarks.delete(documentId);
+    this.#bookmarks.set(documentId, entry.canonicalPath);
+    while (this.#bookmarks.size > 200) {
+      const oldest = this.#bookmarks.keys().next().value;
+      this.#bookmarks.delete(oldest);
+    }
+    return entry.canonicalPath;
+  }
+
+  async reopenDocument(sessionId, documentId) {
+    const filePath = this.#bookmarks.get(documentId);
+    if (!filePath) return null;
+    return this.create(sessionId, filePath);
+  }
+
+  bookmarkPathFor(documentId) {
+    return this.#bookmarks.get(documentId) ?? null;
+  }
+
+  loadBookmarks(entries) {
+    this.#bookmarks.clear();
+    for (const [documentId, filePath] of entries ?? []) {
+      if (typeof documentId === 'string' && documentId && typeof filePath === 'string' && filePath) {
+        this.#bookmarks.set(documentId, filePath);
+      }
+    }
+  }
+
+  dumpBookmarks() {
+    return [...this.#bookmarks.entries()];
   }
 
   descriptorsForSession(sessionId) {

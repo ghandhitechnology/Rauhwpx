@@ -179,9 +179,23 @@ test('handle-backed Save/Save As만 active document identity를 recent-store에 
     /eventBus\.emit\('document-file-handle-saved', \{[\s\S]*?fileHandle: result\.handle,[\s\S]*?fileName: result\.fileName,[\s\S]*?sourceFormat: savedFormat/,
   );
   assert.match(
-    main,
-    /eventBus\.on\('document-file-handle-saved',[\s\S]*?documentId = activeDocumentId;[\s\S]*?sourceDigest = wasm\.documentDigest;[\s\S]*?addRecentDoc\(\{[\s\S]*?documentId,[\s\S]*?sourceDigest,[\s\S]*?handle: saved\.fileHandle/,
+    commands,
+    /services\.wasm\.fileName = result\.fileName;[\s\S]*?markClean\(reason\);[\s\S]*?emit\('document-context-changed'\)/,
   );
+  assert.match(
+    commands,
+    /emit\('open-document-bytes', \{[\s\S]*?\.\.\.payload,[\s\S]*?skipUnsavedGuard: true/,
+  );
+  assert.match(
+    main,
+    /moveToLibraryDocument: \(target\) => \{[\s\S]*runLibraryMove\(commandServices, target, \(\) => activeDocumentId\)/s,
+  );
+  assert.match(
+    main,
+    /eventBus\.on\('document-file-handle-saved',[\s\S]*?documentId = activeDocumentId;[\s\S]*?rememberNativeDocument\(documentId, saved\.fileHandle\)[\s\S]*?addRecentDoc\(\{[\s\S]*?handle: saved\.fileHandle/,
+  );
+  assert.match(main, /captureDesktopNativeDroppedFile\(file\)/);
+  assert.match(main, /rememberNativeDocument\(ownership\.identity\.documentId, fileHandle\)/);
 });
 
 test('최대 8개 상한 — 가장 오래된 항목부터 밀려난다', async () => {
@@ -218,6 +232,23 @@ test('isSameEntry가 멈추면 digest로 같은 문서를 병합한다', async (
   assert.equal(reopened.documentId, first.documentId);
 });
 
+test('native-path 핸들은 세션 오버레이로 목록에 남는다', async () => {
+  await clearRecentDocs();
+  const handle = {
+    ...makeHandle('native'),
+    identityKind: 'native-path' as const,
+  };
+  const stored = await addRecentDoc({
+    sourceDigest: 'blake3:native',
+    fileName: 'n.hwp',
+    sourceFormat: 'hwp',
+    handle,
+  });
+  const docs = await listRecentDocs();
+  assert.equal(docs[0]?.handle, handle, 'native-path 핸들은 IDB에 못 넣어도 세션에서 복원한다');
+  assert.equal(stored.handle, handle);
+});
+
 test('removeRecentDoc / clearRecentDocs', async () => {
   await clearRecentDocs();
   await addRecentDoc({ sourceDigest: 'blake3:x', fileName: 'x.hwp', sourceFormat: 'hwp', handle: makeHandle('x') });
@@ -234,4 +265,6 @@ test('최근 문서 저장소는 IndexedDB 무응답에 타임아웃한다', () 
   assert.match(store, /openIndexedDatabase/);
   assert.match(store, /withTimeout/);
   assert.match(store, /SAME_ENTRY_TIMEOUT_MS/);
+  assert.match(store, /identityKind === 'native-path'/);
+  assert.match(store, /liveHandles/);
 });

@@ -322,3 +322,44 @@ test('re-acquiring a handle cancels a release pending behind an in-flight write'
   // The write finishing must not delete the handle the session just re-acquired.
   assert.deepEqual(registry.descriptorsForSession('session-a'), [reacquired.descriptor]);
 });
+
+test('native bookmarks reopen a released handle without leaking the path', async () => {
+  const ids = ['first', 'restored'];
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async () => '/canonical/report.hwp',
+    createId: () => ids.shift()!,
+    readFileImpl: async () => new Uint8Array([1, 2, 3]),
+  });
+  const created = await registry.create('session-a', '/report.hwp');
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  assert.equal(registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId), '/canonical/report.hwp');
+  registry.releaseHandle('session-a', created.descriptor.handleId);
+
+  const reopened = await registry.reopenDocument('session-a', 'document-a');
+  assert.equal(reopened?.ok, true);
+  if (!reopened?.ok) return;
+  assert.equal(reopened.descriptor.handleId, 'restored');
+  assert.equal('path' in reopened.descriptor, false);
+  assert.deepEqual(await registry.read('session-a', reopened.descriptor.handleId), {
+    name: 'report.hwp',
+    bytes: new Uint8Array([1, 2, 3]),
+  });
+});
+
+test('native bookmarks persist independently of live handles', async () => {
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async () => '/canonical/report.hwp',
+    createId: () => 'bookmarked',
+  });
+  registry.loadBookmarks([['document-a', '/canonical/report.hwp']]);
+  const reopened = await registry.reopenDocument('session-b', 'document-a');
+  assert.equal(reopened?.ok, true);
+  if (!reopened?.ok) return;
+  assert.deepEqual(reopened.descriptor, {
+    kind: 'file',
+    handleId: 'bookmarked',
+    name: 'report.hwp',
+  });
+  assert.deepEqual(registry.dumpBookmarks(), [['document-a', '/canonical/report.hwp']]);
+});

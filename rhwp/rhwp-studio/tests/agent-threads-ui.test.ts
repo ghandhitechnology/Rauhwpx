@@ -67,3 +67,22 @@ test('replaced connection state exposes an explicit takeover action', () => {
   assert.match(source, /takeoverBtn\.hidden = state !== 'replaced'/);
   assert.match(css, /\.ag-takeover-btn/);
 });
+
+test('library move is a context menu on document group names', () => {
+  assert.match(source, /showActionMenu/);
+  assert.match(source, /groupBtn\.addEventListener\('contextmenu'/);
+  assert.match(source, /label: '이동'/);
+  assert.match(source, /moveToLibraryDocument\?\.\(\{[\s\S]*documentId: group\.documentId[\s\S]*fileName: group\.docKey/s);
+  assert.match(source, /disabled: isCurrentDoc/);
+  assert.match(source, /dataset\.libraryDoc = 'true'/);
+  assert.match(source, /aria-haspopup', 'menu'/);
+});
+
+test('saving a document rebinds the current chat instead of starting a new one', () => {
+  assert.match(
+    source,
+    /const sameIdentity = Boolean\(\s*nextDocumentId && currentDocumentId && nextDocumentId === currentDocumentId/s,
+  );
+  assert.match(source, /currentThread\.docKey = nextKey;/);
+  assert.match(source, /currentThread\.documentId = nextDocumentId;/);
+});
