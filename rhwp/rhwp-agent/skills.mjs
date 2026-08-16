@@ -10,6 +10,7 @@ const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_SKILL_BYTES = 50 * 1024 * 1024;
 const MAX_AGENT_RESOURCE_BYTES = 1024 * 1024;
 const RESERVED_NAMES = new Set(['skills', 'skill-create', 'skill-edit', 'skill-delete']);
+const REQUIRED_BUNDLED_SKILLS = new Set(['present-plan']);
 
 export class SkillError extends Error {
   constructor(code, message) {
@@ -159,11 +160,13 @@ export class SkillRegistry {
         const markdown = await fs.readFile(path.join(skillRoot, 'SKILL.md'), 'utf8');
         const parsed = parseSkillMarkdown(markdown, entry.name);
         const files = await collectFiles(skillRoot);
+        const required = origin === 'bundled' && REQUIRED_BUNDLED_SKILLS.has(parsed.name);
         skills.push({
           name: parsed.name,
           description: parsed.description,
           origin,
-          enabled: !disabled.has(parsed.name),
+          enabled: required || !disabled.has(parsed.name),
+          ...(required ? { required: true } : {}),
           hasScripts: files.some((file) => file.path.startsWith('scripts/')),
           hasAssets: files.some((file) => file.path.startsWith('assets/')),
           fileCount: files.length,
@@ -287,7 +290,10 @@ export class SkillRegistry {
   }
 
   async setEnabled(name, enabled) {
-    await this._find(name);
+    const skill = await this._find(name);
+    if (skill.required && !enabled) {
+      throw new SkillError('REQUIRED_SKILL', `${name} is required by the planning workflow`);
+    }
     const state = await this._state();
     const disabled = new Set(state.disabled);
     if (enabled) disabled.delete(name); else disabled.add(name);

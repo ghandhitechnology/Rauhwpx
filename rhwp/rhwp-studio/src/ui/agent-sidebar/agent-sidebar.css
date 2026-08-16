@@ -1708,6 +1708,93 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   overflow-wrap: anywhere;
 }
 
+.ag-msg-plan-action {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-panel);
+  background: var(--ag-raised);
+  box-shadow: inset 1px 0 0 var(--ag-accent), var(--n-elev-1);
+  color: var(--ag-text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.ag-msg-plan-action:hover {
+  border-color: color-mix(in srgb, var(--ag-accent) 48%, var(--ag-border));
+  background: var(--ag-hover);
+}
+
+.ag-msg-plan-action:focus-visible {
+  outline: 2px solid var(--ag-focus);
+  outline-offset: 2px;
+}
+
+.ag-msg-plan-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--ag-accent) 34%, var(--ag-border));
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg-2);
+  color: var(--ag-accent);
+}
+
+.ag-msg-plan-icon .ag-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ag-msg-plan-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ag-msg-plan-kicker {
+  color: var(--ag-text-muted);
+  font-size: var(--ag-micro);
+  font-weight: 650;
+  letter-spacing: var(--ag-track);
+}
+
+.ag-msg-plan-title {
+  overflow: hidden;
+  color: var(--ag-text);
+  font-size: var(--font-size-md, 13px);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-msg-plan-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+  white-space: nowrap;
+}
+
+.ag-msg-plan-chevron {
+  width: 10px;
+  height: 10px;
+  transform: rotate(-90deg);
+  transition: transform 160ms var(--ag-motion-out);
+}
+
+.ag-msg-plan-action:hover .ag-msg-plan-chevron {
+  transform: translateX(2px) rotate(-90deg);
+}
+
 .ag-msg-assistant.ag-msg-enter {
   animation: ag-message-arrive 320ms var(--ag-motion-out) both;
 }
@@ -2210,10 +2297,6 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   box-shadow: var(--n-elev-1);
 }
 
-.ag-review-open {
-  opacity: 0.75;
-}
-
 /* 카드 머리: 좌측 라벨 + 우측 건수 readout. 둘 사이는 헤어라인으로 끊는다. */
 .ag-review-title {
   display: flex;
@@ -2529,8 +2612,128 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 /* ─── 계획 문서 ───────────────────────────────────────
-   리뷰 영역과 같은 바탕 위에 놓이는 한 겹짜리 읽기 문서다. 카드 면·그림자 없이
-   여백과 구분선만으로 제목, 본문, 동작을 나눈다. */
+   계획은 변경 검토와 분리된 채 입력기 바로 위에 머문다. */
+.ag-plan-surface {
+  position: relative;
+  flex: 0 1 auto;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  max-height: 46%;
+  min-height: 0;
+  padding: 12px;
+  border-top: 1px solid var(--ag-border);
+  background: var(--ag-bg-2);
+  transition:
+    grid-template-rows 320ms var(--ag-motion-out),
+    min-height 320ms var(--ag-motion-out),
+    max-height 320ms var(--ag-motion-out),
+    padding 320ms var(--ag-motion-out),
+    background-color 240ms ease;
+}
+
+.ag-plan-surface[hidden] {
+  display: none;
+}
+
+.ag-plan-card-slot {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: bottom right;
+  transition:
+    opacity 180ms ease-out,
+    transform 320ms var(--ag-motion-out);
+}
+
+.ag-plan-surface.ag-plan-minimized {
+  grid-template-rows: 0fr;
+  max-height: 0;
+  min-height: 0;
+  padding: 0;
+  border-top-width: 0;
+  background: transparent;
+}
+
+.ag-plan-minimized .ag-plan-card-slot {
+  opacity: 0;
+  transform: translateY(8px) scale(0.965);
+}
+
+.ag-plan-restore {
+  position: relative;
+  flex: 0 0 38px;
+  display: grid;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ag-text-secondary);
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.78);
+  cursor: pointer;
+  transition:
+    opacity 160ms ease-out,
+    transform 320ms var(--ag-motion-out),
+    background-color 120ms ease;
+}
+
+.ag-composer-overlay.ag-has-plan-restore .ag-plan-restore {
+  opacity: 1;
+  pointer-events: auto;
+  transform: scale(1);
+}
+
+.ag-plan-restore:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-plan-restore:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.ag-plan-orbit {
+  position: relative;
+  width: 23px;
+  height: 23px;
+  border: 1.5px solid color-mix(in srgb, var(--ag-text-muted) 28%, transparent);
+  border-top-color: var(--accent-primary);
+  border-radius: 50%;
+  animation: ag-plan-orbit 1.65s linear infinite;
+}
+
+.ag-plan-orbit::before {
+  content: '';
+  position: absolute;
+  inset: 4px;
+  border: 1px solid color-mix(in srgb, var(--accent-primary) 22%, transparent);
+  border-right-color: var(--ag-text-secondary);
+  border-radius: 50%;
+  animation: ag-plan-orbit 1.1s linear infinite reverse;
+}
+
+.ag-plan-orbit::after {
+  content: '';
+  position: absolute;
+  top: 1px;
+  right: 3px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+}
+
+@keyframes ag-plan-orbit {
+  to { transform: rotate(360deg); }
+}
 .ag-plan-card {
   display: flex;
   flex: 0 0 auto;
@@ -2562,7 +2765,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-plan-kicker-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
 }
 
@@ -2583,6 +2786,32 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-plan-id {
   display: none;
+}
+
+.ag-plan-minimize {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ag-text-muted);
+  margin-left: auto;
+  cursor: pointer;
+}
+
+.ag-plan-minimize:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-plan-minimize:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
 }
 
 .ag-plan-title {
@@ -2894,6 +3123,19 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   .ag-plan-card {
     animation: none;
   }
+
+  .ag-plan-chevron,
+  .ag-msg-plan-chevron,
+  .ag-plan-surface,
+  .ag-plan-card-slot,
+  .ag-plan-restore {
+    transition: none;
+  }
+
+  .ag-plan-orbit,
+  .ag-plan-orbit::before {
+    animation: none;
+  }
 }
 
 .ag-composer {
@@ -2906,6 +3148,44 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   background: var(--ag-input-bg);
   box-shadow: var(--n-elev-2);
   transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+/* 입력기 위의 진행 정보는 계획/변경 surface의 높이를 만들지 않는다.
+   텍스트와 계획 복원 버튼은 한 overlay 행에서 서로의 폭을 예약한다. */
+.ag-composer-overlay {
+  position: absolute;
+  z-index: 3;
+  right: 2px;
+  bottom: calc(100% + 5px);
+  left: 2px;
+  display: flex;
+  min-width: 0;
+  height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.ag-composer-overlay[hidden] {
+  display: none;
+}
+
+.ag-composer-activity {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  padding-inline-start: 4px;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 600;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-composer-overlay:not(.ag-has-activity) {
+  justify-content: flex-end;
 }
 
 .ag-composer:focus-within {
@@ -3269,8 +3549,7 @@ body.ag-fullscreen-open .ag-collapse-tab,
 }
 
 .ag-fullscreen.ag-rail-collapsed .ag-rail-resize,
-.ag-fullscreen.ag-review-collapsed .ag-review-resize,
-.ag-fullscreen:not(.ag-review-drawer-open) .ag-review-resize {
+.ag-fullscreen:not(.ag-detail-drawer-open) .ag-review-resize {
   display: none;
 }
 
@@ -3364,6 +3643,10 @@ body.ag-col-resizing {
   display: none;
 }
 
+.ag-plan-column {
+  display: none;
+}
+
 .ag-review-column-head {
   display: flex;
   align-items: center;
@@ -3395,6 +3678,39 @@ body.ag-col-resizing {
 }
 
 .ag-review-column-close {
+  margin-left: auto;
+}
+
+.ag-plan-column-head {
+  display: flex;
+  min-height: 56px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--ag-border);
+}
+
+.ag-plan-column-heading {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ag-plan-column-title {
+  color: var(--ag-text);
+  font-size: var(--font-size-md, 13px);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.ag-plan-column-meta {
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-plan-column-close {
   margin-left: auto;
 }
 
@@ -3735,6 +4051,14 @@ body.ag-col-resizing {
   grid-template-columns: 0 minmax(0, 1fr) var(--ag-review-w, 480px);
 }
 
+.ag-fullscreen.ag-plan-drawer-open:not(.ag-plan-collapsed) .ag-stage {
+  grid-template-columns: var(--ag-rail-w, 264px) minmax(0, 1fr) var(--ag-review-w, 480px);
+}
+
+.ag-fullscreen.ag-rail-collapsed.ag-plan-drawer-open:not(.ag-plan-collapsed) .ag-stage {
+  grid-template-columns: 0 minmax(0, 1fr) var(--ag-review-w, 480px);
+}
+
 /* A class mirrors the compact breakpoint so an in-flight grid transition
    cannot retain the desktop rail track after the viewport changes. */
 .ag-fullscreen.ag-workspace-compact .ag-stage,
@@ -3746,7 +4070,8 @@ body.ag-col-resizing {
 }
 
 .ag-fullscreen.ag-workspace-compact .ag-chat-page,
-.ag-fullscreen.ag-workspace-compact .ag-review-column {
+.ag-fullscreen.ag-workspace-compact .ag-review-column,
+.ag-fullscreen.ag-workspace-compact .ag-plan-column {
   grid-column: 1;
 }
 
@@ -3872,6 +4197,11 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 /* Focus-mode environment: persistent context, not an auto-dismissing menu. */
+.ag-fullscreen {
+  --ag-environment-panel-width: clamp(260px, 36vw, 360px);
+  --ag-environment-lane-width: calc(var(--ag-environment-panel-width) + 24px);
+}
+
 .ag-environment-panel {
   position: absolute;
   top: calc(100% + 14px);
@@ -3907,6 +4237,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 .ag-fullscreen .ag-environment-panel {
   right: 8px;
+  width: min(var(--ag-environment-panel-width, 360px), calc(100vw - 16px));
 }
 
 .ag-environment-title {
@@ -3918,6 +4249,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-environment-file-row,
+.ag-environment-plan,
 .ag-environment-changes {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
@@ -3934,12 +4266,19 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   cursor: default;
 }
 
+.ag-environment-section {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ag-border);
+}
+
 .ag-environment-file-row:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
 
 .ag-environment-file-row .ag-icon,
+.ag-environment-plan .ag-icon,
 .ag-environment-changes .ag-icon {
   width: 16px;
   height: 16px;
@@ -3977,6 +4316,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   88%, 100% { transform: translateX(calc(0px - var(--ag-filename-distance, 0px))); }
 }
 
+.ag-environment-plan,
 .ag-environment-changes {
   grid-template-columns: 18px minmax(0, 1fr) auto 12px;
   width: 100%;
@@ -3988,17 +4328,57 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   transition: background 120ms ease, color 120ms ease;
 }
 
+.ag-environment-plan {
+  min-height: 48px;
+}
+
+.ag-environment-plan:hover:not(:disabled),
 .ag-environment-changes:hover {
   background: var(--ag-hover);
 }
 
+.ag-environment-plan.ag-active,
 .ag-environment-changes.ag-active {
   background: var(--ag-active);
 }
 
+.ag-environment-plan:focus-visible,
 .ag-environment-changes:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
+}
+
+.ag-environment-plan:disabled {
+  color: var(--ag-text-muted);
+  cursor: default;
+  opacity: 0.72;
+}
+
+.ag-environment-plan-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ag-environment-plan-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ag-environment-plan-title {
+  overflow: hidden;
+  color: var(--ag-text-muted);
+  font-size: 11px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-environment-plan-status {
+  color: var(--ag-text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .ag-environment-changes-label {
@@ -4029,6 +4409,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   color: var(--ag-text-muted);
 }
 
+.ag-environment-plan-chevron,
 .ag-environment-changes-chevron {
   color: var(--ag-text-muted);
   transform: rotate(-90deg);
@@ -4164,36 +4545,44 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-fullscreen .ag-chat-page {
-  --ag-chat-content-left: max(24px, calc((100vw - var(--ag-rail-w, 264px) - 860px) / 2));
-
   grid-column: 2;
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
+  box-sizing: border-box;
+  padding-inline-end: 0;
   background: var(--ag-bg);
+  transition: padding-inline-end 320ms var(--ag-motion-out);
+}
+
+.ag-fullscreen.ag-environment-open:not(.ag-detail-drawer-open) .ag-chat-page {
+  padding-inline-end: var(--ag-environment-lane-width);
 }
 
 .ag-fullscreen .ag-messages {
   max-width: 860px;
-  width: min(860px, calc(100% - var(--ag-chat-content-left) - 24px));
-  margin-right: 0;
-  margin-left: var(--ag-chat-content-left);
+  width: min(860px, calc(100% - 48px));
+  margin-inline: auto;
   padding: 34px 38px 40px;
 }
 
 .ag-fullscreen .ag-composer {
   max-width: 860px;
-  width: min(860px, calc(100% - var(--ag-chat-content-left) - 24px));
-  margin-right: 0;
-  margin-left: var(--ag-chat-content-left);
+  width: min(860px, calc(100% - 48px));
+  margin-inline: auto;
   margin-bottom: 20px;
   border-radius: 9px;
   box-shadow: var(--n-elev-2);
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
 }
 
 /* 변경 사항은 대화를 유지한 채 오른쪽 열을 차지하는 docked drawer다. */
 .ag-fullscreen .ag-review-column,
-.ag-fullscreen.ag-review-collapsed .ag-review-column {
+.ag-fullscreen.ag-review-collapsed .ag-review-column,
+.ag-fullscreen .ag-plan-column,
+.ag-fullscreen.ag-plan-collapsed .ag-plan-column {
   position: relative;
   z-index: 4;
   grid-column: 3;
@@ -4226,7 +4615,23 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
     visibility 0s linear 0s;
 }
 
+.ag-fullscreen.ag-plan-drawer-open:not(.ag-plan-collapsed) .ag-plan-column {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity 160ms ease-out,
+    visibility 0s linear 0s;
+}
+
 .ag-fullscreen .ag-review-column-head {
+  min-height: 58px;
+  padding: 0 16px 0 18px;
+  border-bottom: 1px solid var(--ag-border);
+  background: color-mix(in srgb, var(--ag-raised) 72%, var(--ag-bg-2));
+}
+
+.ag-fullscreen .ag-plan-column-head {
   min-height: 58px;
   padding: 0 16px 0 18px;
   border-bottom: 1px solid var(--ag-border);
@@ -4241,12 +4646,46 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   display: inline-flex;
 }
 
+.ag-fullscreen .ag-plan-column-close {
+  display: inline-flex;
+}
+
 .ag-fullscreen .ag-review-column .ag-review {
   width: 100%;
   box-sizing: border-box;
   margin: 0;
   padding: 14px 14px 24px;
   background: transparent;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.ag-fullscreen .ag-review-column .ag-review-summary {
+  max-height: none;
+  overflow: visible;
+  scrollbar-gutter: auto;
+}
+
+.ag-fullscreen .ag-plan-column .ag-plan-surface {
+  flex: 1 1 auto;
+  grid-template-rows: minmax(0, 1fr);
+  width: 100%;
+  max-height: none;
+  min-height: 0;
+  box-sizing: border-box;
+  padding: 14px 14px 24px;
+  border-top: 0;
+  background: transparent;
+}
+
+.ag-fullscreen .ag-plan-column .ag-plan-card-slot {
+  opacity: 1;
+  transform: none;
+}
+
+.ag-fullscreen .ag-plan-restore,
+.ag-fullscreen .ag-plan-minimize {
+  display: none;
 }
 
 .ag-fullscreen .ag-review-card {
@@ -4287,7 +4726,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   }
 
   .ag-fullscreen .ag-chat-page,
-  .ag-fullscreen .ag-review-column {
+  .ag-fullscreen .ag-review-column,
+  .ag-fullscreen .ag-plan-column {
     grid-column: 1;
   }
 
@@ -4338,11 +4778,18 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   .ag-fullscreen .ag-review-column .ag-review {
     padding: 14px 10px 22px;
   }
+
+  .ag-fullscreen .ag-plan-column .ag-plan-surface {
+    padding: 14px 10px 22px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .ag-environment-panel,
-  .ag-environment-changes {
+  .ag-environment-plan,
+  .ag-environment-changes,
+  .ag-fullscreen .ag-messages,
+  .ag-fullscreen .ag-composer {
     transition: none;
   }
 
@@ -4357,14 +4804,17 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 @media (prefers-reduced-motion: reduce) {
   .ag-fullscreen .ag-chat-page,
-  .ag-fullscreen .ag-review-column {
+  .ag-fullscreen .ag-review-column,
+  .ag-fullscreen .ag-plan-column {
     transition: none;
   }
 }
 
 /* Keep the hidden drawer out of compact workspace grid calculations. */
 .ag-fullscreen.ag-workspace-compact .ag-review-column,
-.ag-fullscreen.ag-workspace-compact.ag-review-collapsed .ag-review-column {
+.ag-fullscreen.ag-workspace-compact.ag-review-collapsed .ag-review-column,
+.ag-fullscreen.ag-workspace-compact .ag-plan-column,
+.ag-fullscreen.ag-workspace-compact.ag-plan-collapsed .ag-plan-column {
   grid-column: 1;
 }
 
@@ -4412,11 +4862,18 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-workspace-icon-btn,
 .ag-permission-btn,
 .ag-skills-btn,
-.ag-model-trigger,
 .ag-thread-rename,
+.ag-environment-plan,
 .ag-environment-changes {
   border-radius: 7px 9px 6px 10px / 9px 6px 10px 7px;
   filter: var(--ag-sketch-line);
+}
+
+/* 모델 선택기의 작은 글자는 displacement가 획을 지나치게 흔든다.
+   비대칭 모서리는 유지하고 텍스트와 프로바이더 마크는 또렷하게 둔다. */
+.ag-model-trigger {
+  border-radius: 7px 9px 6px 10px / 9px 6px 10px 7px;
+  filter: none;
 }
 
 /* 전체 화면 레일의 새 채팅 버튼은 5px 언어를 쓰므로 그 크기대로 흔든다. */
