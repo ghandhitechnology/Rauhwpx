@@ -507,23 +507,41 @@ export function listThreads(): ChatThread[] {
 }
 
 export interface DocumentThreadGroup {
+  /** 논리 문서 ID. 레거시 채팅은 파일명만 있어 null 일 수 있다. */
+  documentId: string | null;
   docKey: string | null;
   threads: ChatThread[];
+}
+
+function documentGroupKey(thread: ChatThread): string {
+  return thread.documentId ? `id:${thread.documentId}` : `name:${thread.docKey ?? ''}`;
 }
 
 /**
  * 문서별 채팅 묶음 — 그룹 순서는 가장 최근에 움직인 채팅 기준이고,
  * 그룹 안도 최신순이다(listThreads 정렬을 그대로 물려받는다).
+ * 같은 파일명이라도 documentId 가 다르면 다른 문서로 나눈다.
  */
 export function listThreadsByDocument(): DocumentThreadGroup[] {
-  const groups = new Map<string | null, ChatThread[]>();
+  const groups = new Map<string, ChatThread[]>();
+  const meta = new Map<string, { documentId: string | null; docKey: string | null }>();
   for (const thread of listThreads()) {
-    const key = thread.docKey ?? null;
+    const key = documentGroupKey(thread);
     const bucket = groups.get(key);
-    if (bucket) bucket.push(thread);
-    else groups.set(key, [thread]);
+    if (bucket) {
+      bucket.push(thread);
+    } else {
+      groups.set(key, [thread]);
+      meta.set(key, { documentId: thread.documentId, docKey: thread.docKey });
+    }
+    const info = meta.get(key);
+    if (info && !info.docKey && thread.docKey) info.docKey = thread.docKey;
   }
-  return [...groups.entries()].map(([docKey, threads]) => ({ docKey, threads }));
+  return [...groups.entries()].map(([key, threads]) => ({
+    documentId: meta.get(key)?.documentId ?? null,
+    docKey: meta.get(key)?.docKey ?? null,
+    threads,
+  }));
 }
 
 export function getThread(id: string): ChatThread | null {

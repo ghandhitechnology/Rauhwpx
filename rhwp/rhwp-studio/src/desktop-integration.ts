@@ -63,6 +63,10 @@ export interface RhwpDesktopApi {
     identity: DocumentOwnershipIdentity,
   ) => Promise<{ name: string; byteLength: number }>;
   isSameNativeFile?: (firstHandleId: string, secondHandleId: string) => Promise<boolean>;
+  rememberNativeDocument?: (documentId: string, handleId: string) => Promise<void>;
+  reopenNativeDocument?: (
+    documentId: string,
+  ) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
   reserveDocument?: (
     identity: DocumentOwnershipIdentity,
     nativeHandleId?: string,
@@ -402,6 +406,33 @@ export async function pickDesktopNativeSaveFile(
   return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
 }
 
+export async function rememberNativeDocument(
+  documentId: string | null | undefined,
+  handle: FileSystemFileHandleLike | null | undefined,
+): Promise<void> {
+  const metadata = handle ? nativeHandleMetadata.get(handle) : null;
+  if (!documentId || !metadata?.api.rememberNativeDocument) return;
+  await metadata.api.rememberNativeDocument(documentId, metadata.handleId);
+}
+
+export async function restoreNativeDocument(
+  documentId: string | null | undefined,
+  win?: DesktopHost,
+): Promise<FileSystemFileHandleLike | 'owned' | null> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.reopenNativeDocument || !documentId) return null;
+  try {
+    const result = await api.reopenNativeDocument(documentId);
+    if (!result) return null;
+    if ('owned' in result) return 'owned';
+    if (!validNativeDescriptor(result)) return null;
+    return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
+  } catch (error) {
+    console.warn('[desktop] native document reopen failed:', error);
+    return null;
+  }
+}
+
 export async function releaseReplacedNativeFileHandle(
   previous: FileSystemFileHandleLike | null,
   next: FileSystemFileHandleLike | null,
@@ -414,6 +445,13 @@ export async function releaseReplacedNativeFileHandle(
     && nextMetadata.api === previousMetadata.api
     && nextMetadata.handleId === previousMetadata.handleId
   ) return;
+  const previousDocumentId = previousMetadata.identity?.documentId;
+  if (previousDocumentId && previousMetadata.api.rememberNativeDocument) {
+    await previousMetadata.api.rememberNativeDocument(
+      previousDocumentId,
+      previousMetadata.handleId,
+    ).catch((error) => console.warn('[desktop] native document bookmark failed:', error));
+  }
   await previousMetadata.api.releaseNativeFile(previousMetadata.handleId);
 }
 
