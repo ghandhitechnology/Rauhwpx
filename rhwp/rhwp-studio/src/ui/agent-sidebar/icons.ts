@@ -97,6 +97,48 @@ export function createStopIcon(className = ''): SVGSVGElement {
   return svg;
 }
 
+/** 편집 중 상태용 ㅎ. 세 획이 삐딱 루프로 자리를 바꾼다. */
+export function createHieumGlyph(className = ''): SVGSVGElement {
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', className ? `ag-hieum ${className}` : 'ag-hieum');
+  svg.setAttribute('viewBox', '0 0 12 12');
+  svg.setAttribute('width', '14');
+  svg.setAttribute('height', '14');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+
+  const top = document.createElementNS(NS, 'line');
+  top.setAttribute('class', 'ag-hieum-top');
+  top.setAttribute('x1', '4.5');
+  top.setAttribute('y1', '1.45');
+  top.setAttribute('x2', '7.5');
+  top.setAttribute('y2', '1.45');
+
+  const mid = document.createElementNS(NS, 'line');
+  mid.setAttribute('class', 'ag-hieum-mid');
+  mid.setAttribute('x1', '2.55');
+  mid.setAttribute('y1', '3.5');
+  mid.setAttribute('x2', '9.45');
+  mid.setAttribute('y2', '3.5');
+
+  const ring = document.createElementNS(NS, 'circle');
+  ring.setAttribute('class', 'ag-hieum-ring');
+  ring.setAttribute('cx', '6');
+  ring.setAttribute('cy', '8.05');
+  ring.setAttribute('r', '2.6');
+
+  for (const part of [top, mid, ring]) {
+    part.setAttribute('fill', 'none');
+    part.setAttribute('stroke', 'currentColor');
+    part.setAttribute('stroke-width', '1');
+    part.setAttribute('stroke-linecap', 'round');
+    part.setAttribute('stroke-linejoin', 'round');
+  }
+
+  svg.append(top, mid, ring);
+  return svg;
+}
+
 /** 편집 종류 → 아이콘 이름. opGlyph 의 유니코드 대응을 대체한다. */
 export const OP_ICON: Record<string, SidebarIconName> = {
   insert: 'insert',
