@@ -331,8 +331,8 @@ const chordMapK: Record<string, string> = {
 
 /** 코드 단축키 → 커맨드 ID 매핑 (Ctrl+M,? 형태)
  *
- * 한컴 표준 영역 영역 Ctrl+N 영역 영역 chord 시작 영역 영역 Chrome 영역 영역 reserved shortcut
- * (새 창) 영역 영역 JS 차단 불가 영역 영역 Ctrl+M 영역 영역 변경 (PR #786 후속 정정).
+ * 한컴 표준은 Ctrl+N으로 chord를 시작하지만 Chrome에서 reserved shortcut
+ * (새 창)이라 JS로 차단 불가하여 Ctrl+M으로 변경 (PR #786 후속 정정).
  */
 const chordMapM: Record<string, string | [string, Record<string, unknown>]> = {
   n: 'insert:footnote',
@@ -506,14 +506,14 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
 
   // IME 조합 중 처리 (한국어 IME에서 e.key는 항상 'Process'이므로 e.code로 판별)
   if (e.isComposing || e.keyCode === 229) {
-    // [PR #786 후속] Ctrl+M chord 1번째/2번째 키 영역 영역 IME 합성 중 영역 영역도 활성화.
-    // 한글 IME 영역 영역 e.key === 'Process' 영역 영역, e.code (KeyM/KeyN/KeyS/KeyF/KeyK 등) 영역 영역 판별.
+    // [PR #786 후속] Ctrl+M chord 1번째/2번째 키는 IME 합성 중에도 활성화.
+    // 한글 IME에서는 e.key === 'Process'이므로 e.code (KeyM/KeyN/KeyS/KeyF/KeyK 등)로 판별.
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === 'KeyM') {
       e.preventDefault();
       this._pendingChordM = true;
       return;
     }
-    // chord 2번째 키 — _pendingChordM 활성화 시 e.code 영역 영역 chordMapM lookup
+    // chord 2번째 키 — _pendingChordM 활성화 시 e.code로 chordMapM lookup
     if (this._pendingChordM) {
       this._pendingChordM = false;
       const codeToKey: Record<string, string> = {
@@ -1136,7 +1136,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
   // Alt 조합 단축키 처리
   // - Alt+Backspace → 이전 단어 삭제 (아래 Backspace/Delete case)
   // - Alt+Delete → 표 안 영역은 'table:delete-row-col' 대화상자,
-  //                표 외 영역 영역 다음 단어 삭제 (아래 Backspace/Delete case)
+  //                표 밖에서는 다음 단어 삭제 (아래 Backspace/Delete case)
   const isAltWordKey = e.altKey && (
     e.key === 'Backspace' ||
     (e.key === 'Delete' && !this.cursor.isInCell())
@@ -1408,8 +1408,8 @@ export function handleCtrlKey(this: any, e: KeyboardEvent): void {
     this._pendingChordK = true;
     return;
   }
-  // [PR #786 후속] Ctrl+N 영역 영역 Chrome reserved shortcut (새 창) 영역 영역 JS 차단 불가
-  // 영역 영역 Ctrl+M 영역 영역 chord 1번째 키 영역 영역 변경.
+  // [PR #786 후속] Ctrl+N은 Chrome reserved shortcut (새 창)이라 JS로 차단 불가
+  // → Ctrl+M을 chord 1번째 키로 변경.
   if ((e.key === 'm' || e.key === 'M' || e.key === 'ㅡ') && !e.shiftKey && !e.altKey) {
     e.preventDefault();
     this._pendingChordM = true;

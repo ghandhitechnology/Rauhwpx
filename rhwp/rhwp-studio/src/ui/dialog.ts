@@ -87,11 +87,13 @@ export abstract class ModalDialog {
     document.body.appendChild(this.overlay);
 
     // document capture 단계에서 키 이벤트를 가로채 편집 영역 도달 차단
-    // input/textarea 내부의 일반 타이핑은 허용한다.
+    // input/textarea/select 내부 조작과 Tab 포커스 이동은 허용한다.
     this.captureHandler = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const isEditable = target instanceof HTMLInputElement
-        || target instanceof HTMLTextAreaElement;
+        || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+        || Boolean(target?.isContentEditable);
 
       if (e.key === 'Escape') {
         e.stopPropagation();
@@ -108,7 +110,7 @@ export abstract class ModalDialog {
       }
       // 편집 가능한 요소 내부 → 키 입력 허용, 외부 전파만 차단
       e.stopPropagation();
-      if (!isEditable) {
+      if (!isEditable && e.key !== 'Tab') {
         e.preventDefault();
       }
     };

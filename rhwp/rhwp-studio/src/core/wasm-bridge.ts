@@ -295,9 +295,9 @@ export class WasmBridge {
       const info: DocumentInfo = JSON.parse(this.doc.getDocumentInfo());
       console.log(`[WasmBridge] 문서 로드: ${info.pageCount}페이지`);
 
-      // [Task #741 후속] 외부 file path 그림 영역 영역 dev 환경 영역 영역 fetch (basename 영역
-      // 영역 영역 same dir 영역 image 영역 영역 영역 — 본 환경 dev 영역 영역 samples/ 영역
-      // Vite asset). 영역 영역 영역 영역 영역 부재 영역 영역 placeholder 표시.
+      // [Task #741 후속] 외부 file path 그림은 dev 환경에서 fetch로 채운다 (basename 기준,
+      // HWP 파일과 같은 dir의 image를 찾는 방식 — dev 환경에서는 samples/ 아래
+      // Vite asset). fetch하지 못한 그림은 placeholder로 표시.
       void this.populateExternalImagesFromDevServer();
 
       return info;
@@ -319,7 +319,7 @@ export class WasmBridge {
     }
   }
 
-  /** [Task #741 후속] 외부 file path 그림 영역 영역 dev 서버 영역 영역 fetch + inject. */
+  /** [Task #741 후속] 외부 file path 그림을 dev 서버에서 fetch + inject. */
   private async populateExternalImagesFromDevServer(): Promise<void> {
     if (!this.doc) return;
     // [#3348] /samples/ fetch는 vite dev 서버 전용(server.fs.allow). 프로덕션 빌드
@@ -330,26 +330,26 @@ export class WasmBridge {
       const basenamesJson = this.doc.getExternalImageBasenames();
       const basenames: string[] = JSON.parse(basenamesJson);
       if (basenames.length === 0) return;
-      console.log(`[WasmBridge] 외부 image 영역 영역 ${basenames.length}개 영역 영역 fetch 시도`);
+      console.log(`[WasmBridge] 외부 image ${basenames.length}개 fetch 시도`);
       let totalInjected = 0;
       for (const name of basenames) {
         try {
           const url = `/samples/${name}`;
           const res = await fetch(url);
           if (!res.ok) {
-            console.warn(`[WasmBridge] 외부 image 영역 영역 영역 fetch 실패: ${url} (status=${res.status})`);
+            console.warn(`[WasmBridge] 외부 image fetch 실패: ${url} (status=${res.status})`);
             continue;
           }
           const buf = await res.arrayBuffer();
-          // [Task #741 후속] OS 절대 경로 영역 영역 X-File-Path header 영역 영역 영역 → dialog
-          // 영역 영역 한컴 viewer 정합 (resolved local path 영역 영역).
+          // [Task #741 후속] OS 절대 경로는 X-File-Path header로 전달받아 dialog에
+          // 표시해 한컴 viewer와 정합 (resolved local path 기준).
           const filePathHeader = res.headers.get('X-File-Path');
           const displayPath = filePathHeader ? decodeURI(filePathHeader) : '';
           const injected = this.doc.injectExternalImage(name, new Uint8Array(buf), displayPath);
           totalInjected += injected;
-          console.log(`[WasmBridge] 외부 image inject: ${name} → ${displayPath || url} (${buf.byteLength} bytes, ${injected} 영역)`);
+          console.log(`[WasmBridge] 외부 image inject: ${name} → ${displayPath || url} (${buf.byteLength} bytes, ${injected}개)`);
         } catch (e) {
-          console.warn(`[WasmBridge] 외부 image 영역 영역 영역: ${name}`, e);
+          console.warn(`[WasmBridge] 외부 image inject 실패: ${name}`, e);
         }
       }
       // [#3313] 주입은 첫 렌더 이후에 끝나므로, 주입이 있었으면 뷰 갱신 훅을 호출한다.

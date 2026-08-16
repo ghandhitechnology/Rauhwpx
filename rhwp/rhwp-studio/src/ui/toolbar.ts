@@ -468,8 +468,18 @@ export class Toolbar {
     ];
 
     let popup: HTMLDivElement | null = null;
+    const close = (e: MouseEvent) => {
+      if (popup && !popup.contains(e.target as Node) && e.target !== btn) {
+        closePopup();
+      }
+    };
+    const closePopup = () => {
+      popup?.remove();
+      popup = null;
+      document.removeEventListener('mousedown', close);
+    };
     const showPopup = () => {
-      if (popup) { popup.remove(); popup = null; return; }
+      if (popup) { closePopup(); return; }
       popup = document.createElement('div');
       popup.className = 'bullet-popup';
       popup.style.cssText = 'position:absolute;z-index:1000;background:var(--color-surface);border:1px solid var(--color-border);border-radius:3px;box-shadow:var(--shadow-dropdown);padding:4px;display:grid;grid-template-columns:repeat(6,1fr);gap:2px;color:var(--color-text);';
@@ -485,8 +495,7 @@ export class Toolbar {
         cell.addEventListener('mousedown', (e) => {
           e.preventDefault();
           e.stopPropagation();
-          popup?.remove();
-          popup = null;
+          closePopup();
           this.dispatcher.dispatch('format:apply-bullet', { bulletChar: ch });
         });
         cell.addEventListener('mouseenter', () => { cell.style.background = 'var(--color-accent-bg)'; });
@@ -494,12 +503,6 @@ export class Toolbar {
         popup.appendChild(cell);
       }
       document.body.appendChild(popup);
-      const close = (e: MouseEvent) => {
-        if (popup && !popup.contains(e.target as Node) && e.target !== btn) {
-          popup.remove(); popup = null;
-          document.removeEventListener('mousedown', close);
-        }
-      };
       setTimeout(() => document.addEventListener('mousedown', close), 0);
     };
 
