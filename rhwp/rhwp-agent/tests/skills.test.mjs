@@ -11,6 +11,12 @@ const MARKDOWN = (name, description = 'Use this skill for representative testing
 
 test('parseSkillMarkdown accepts portable frontmatter and rejects extra keys', () => {
   assert.equal(parseSkillMarkdown(MARKDOWN('good-skill')).name, 'good-skill');
+  const windowsMarkdown = `\uFEFF${MARKDOWN('windows-skill').replace(/\n/g, '\r\n')}`;
+  assert.deepEqual(parseSkillMarkdown(windowsMarkdown), {
+    name: 'windows-skill',
+    description: 'Use this skill for representative testing.',
+    body: 'Follow the requested workflow.',
+  });
   assert.throws(() => parseSkillMarkdown('---\nname: bad\ndescription: x\nfoo: bar\n---\n\nDo it.\n'), /only name and description/);
   assert.throws(() => parseSkillMarkdown(MARKDOWN('skill-create')), /reserved/);
 });
