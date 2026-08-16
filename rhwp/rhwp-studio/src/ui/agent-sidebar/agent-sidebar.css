@@ -1619,6 +1619,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   scrollbar-width: thin;
   overscroll-behavior: contain;
   overflow-anchor: none;
+  scroll-behavior: smooth;
   background: var(--ag-bg);
   contain: layout paint;
 }
@@ -1627,6 +1628,12 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-messages-end {
   flex: 0 0 auto;
   pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-messages {
+    scroll-behavior: auto;
+  }
 }
 
 .ag-msg {
@@ -3194,14 +3201,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   display: none;
 }
 
-.ag-composer-activity {
+.ag-turn-pending {
   display: flex;
   min-width: 0;
-  flex: 1 1 auto;
   align-items: center;
   gap: 6px;
-  overflow: hidden;
-  padding-inline-start: 4px;
   color: var(--ag-text-muted);
   font-size: var(--font-size-sm, 11px);
   font-weight: 600;
@@ -3209,7 +3213,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   white-space: nowrap;
 }
 
-.ag-composer-activity-label {
+.ag-turn-pending[hidden] {
+  display: none;
+}
+
+.ag-turn-pending-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3229,15 +3237,15 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   transform-origin: center;
 }
 
-.ag-composer-activity:not([hidden]) .ag-hieum-top {
+.ag-turn-pending:not([hidden]) .ag-hieum-top {
   animation: ag-hieum-top 5.8s linear infinite;
 }
 
-.ag-composer-activity:not([hidden]) .ag-hieum-mid {
+.ag-turn-pending:not([hidden]) .ag-hieum-mid {
   animation: ag-hieum-mid 5.8s linear infinite;
 }
 
-.ag-composer-activity:not([hidden]) .ag-hieum-ring {
+.ag-turn-pending:not([hidden]) .ag-hieum-ring {
   animation: ag-hieum-ring 5.8s linear infinite;
 }
 
@@ -3308,13 +3316,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ag-composer-activity:not([hidden]) .ag-hieum-top,
-  .ag-composer-activity:not([hidden]) .ag-hieum-mid,
-  .ag-composer-activity:not([hidden]) .ag-hieum-ring {
+  .ag-turn-pending:not([hidden]) .ag-hieum-top,
+  .ag-turn-pending:not([hidden]) .ag-hieum-mid,
+  .ag-turn-pending:not([hidden]) .ag-hieum-ring {
     animation: none;
   }
 
-  .ag-composer-activity:not([hidden]) .ag-hieum {
+  .ag-turn-pending:not([hidden]) .ag-hieum {
     animation: ag-hieum-quiet 2.6s cubic-bezier(0.65, 0, 0.35, 1) infinite;
   }
 }

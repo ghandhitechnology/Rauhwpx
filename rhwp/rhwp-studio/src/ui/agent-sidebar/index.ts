@@ -505,6 +505,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let turnPresentedPlan = false;
   let followConversation = true;
   let conversationScrollRaf: number | null = null;
+  let conversationScrollLock = false;
+  let conversationScrollUnlock: number | null = null;
+  let replyPending = false;
   let insetRecenterRaf: number | null = null;
   let resizeMoveRaf: number | null = null;
   let resizeMoveX = 0;
@@ -1452,8 +1455,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   messages.setAttribute('aria-live', 'polite');
   const messagesEnd = el('div', 'ag-messages-end');
   messagesEnd.setAttribute('aria-hidden', 'true');
-  messages.appendChild(messagesEnd);
+  const turnPending = el('div', 'ag-turn-pending');
+  turnPending.hidden = true;
+  turnPending.setAttribute('role', 'status');
+  turnPending.setAttribute('aria-live', 'polite');
+  const turnPendingLabel = el('span', 'ag-turn-pending-label');
+  turnPending.append(createHieumGlyph(), turnPendingLabel);
+  messages.append(turnPending, messagesEnd);
   const onMessagesScroll = (): void => {
+    if (conversationScrollLock) return;
     followConversation = isConversationFollowingTurn();
   };
   messages.addEventListener('scroll', onMessagesScroll, { passive: true });
@@ -1510,13 +1520,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const composerOverlay = el('div', 'ag-composer-overlay');
   composerOverlay.hidden = true;
   composerOverlay.setAttribute('aria-label', '현재 작업 상태');
-  const composerActivity = el('span', 'ag-composer-activity');
-  composerActivity.hidden = true;
-  composerActivity.setAttribute('role', 'status');
-  composerActivity.setAttribute('aria-live', 'polite');
-  const composerActivityLabel = el('span', 'ag-composer-activity-label');
-  composerActivity.append(createHieumGlyph(), composerActivityLabel);
-  composerOverlay.append(composerActivity, planRestore);
+  composerOverlay.append(planRestore);
   const composerMeta = el('div', 'ag-composer-meta');
   composerMeta.setAttribute('aria-label', '에이전트 및 채팅 설정');
   composerMeta.append(selectors, composerUtilities);
@@ -2081,10 +2085,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   function syncComposerOverlay(): void {
-    const hasActivity = !composerActivity.hidden;
     const hasPlanRestore = !planRestore.hidden;
-    composerOverlay.hidden = !hasActivity && !hasPlanRestore;
-    composerOverlay.classList.toggle('ag-has-activity', hasActivity);
+    composerOverlay.hidden = !hasPlanRestore;
+    composerOverlay.classList.remove('ag-has-activity');
     composerOverlay.classList.toggle('ag-has-plan-restore', hasPlanRestore);
   }
 
@@ -2785,8 +2788,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     const userMessage = recordUserMessage(visibleText, messageAttachments);
     const userBubble = renderUserMessage(userMessage);
     followConversation = true;
+    replyPending = true;
     appendConversation(userBubble);
-    scrollConversationToMessage(userBubble);
+    updateTurnPending(selectedAgent);
+    scrollConversationToMessage(userBubble, { smooth: true });
     const messageSent = bridge.sendUserMessage(text, skillNameForMessage, staged.map((file) => file.id));
     if (staged.length > 0) {
       attachmentsSending = true;
@@ -3420,6 +3425,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function setTurnRunning(running: boolean): void {
     turnRunning = running;
+    if (!running) replyPending = false;
+    updateTurnPending();
     updateComposer();
     if (chatWorkflow === 'plan' && activePlan) rebuildReview();
   }
@@ -3458,18 +3465,30 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     updateWorkflowControl();
   }
 
+  function conversationTail(): HTMLElement {
+    return !turnPending.hidden && turnPending.parentElement === messages
+      ? turnPending
+      : messagesEnd;
+  }
+
   function appendConversation(node: HTMLElement): void {
-    messages.insertBefore(node, messagesEnd);
+    messages.insertBefore(node, conversationTail());
   }
 
   function resetConversation(): void {
-    messages.replaceChildren(messagesEnd);
+    replyPending = false;
+    turnPending.hidden = true;
+    messages.replaceChildren(turnPending, messagesEnd);
   }
 
   function latestTurnAnchor(): HTMLElement | null {
     const users = messages.querySelectorAll(':scope > .ag-msg-user');
     if (users.length > 0) return users[users.length - 1] as HTMLElement;
     const last = messagesEnd.previousElementSibling;
+    if (last === turnPending) {
+      const before = turnPending.previousElementSibling;
+      return before instanceof HTMLElement ? before : null;
+    }
     return last instanceof HTMLElement ? last : null;
   }
 
@@ -3496,15 +3515,40 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     return Math.abs(messages.scrollTop - Math.max(0, expected)) <= 64;
   }
 
-  function scrollConversationToMessage(node: HTMLElement): void {
+  function lockConversationScroll(ms: number): void {
+    conversationScrollLock = true;
+    if (conversationScrollUnlock !== null) window.clearTimeout(conversationScrollUnlock);
+    conversationScrollUnlock = window.setTimeout(() => {
+      conversationScrollUnlock = null;
+      conversationScrollLock = false;
+    }, ms);
+  }
+
+  function scrollConversationToMessage(node: HTMLElement, opts?: { smooth?: boolean }): void {
     followConversation = true;
     syncConversationSpacer();
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const smooth = opts?.smooth !== false && !reduce;
     if (conversationScrollRaf !== null) window.cancelAnimationFrame(conversationScrollRaf);
     conversationScrollRaf = window.requestAnimationFrame(() => {
       conversationScrollRaf = null;
-      const target = conversationAnchorTop(node) - conversationFocusOffset();
-      messages.scrollTop = Math.max(0, target);
+      const target = Math.max(0, conversationAnchorTop(node) - conversationFocusOffset());
+      if (Math.abs(messages.scrollTop - target) <= 2) return;
+      lockConversationScroll(smooth ? 480 : 80);
+      messages.scrollTo({ top: target, behavior: smooth ? 'smooth' : 'auto' });
     });
+  }
+
+  function updateTurnPending(agent?: AgentName): void {
+    const editAgent = bridge.pendingEdits.getChangeSets()
+      .find((set) => set.status === 'open')?.agent ?? null;
+    const waiting = (replyPending || turnRunning) && !streamBubble;
+    const show = waiting || editAgent !== null;
+    turnPending.hidden = !show;
+    if (!show) return;
+    const who = agent ?? editAgent ?? selectedAgent;
+    turnPendingLabel.textContent = `${AGENT_LABEL[who]} 편집 중…`;
+    messages.insertBefore(turnPending, messagesEnd);
   }
 
   function scrollConversationToEnd(): void {
@@ -3527,7 +3571,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   /** 실행 중인 도구 내역은 높이를 늘리지 않고 항상 최신 단계를 보여준다. */
   function scrollActivityToLatest(content: HTMLElement): void {
     window.requestAnimationFrame(() => {
-      content.scrollTop = content.scrollHeight;
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      content.scrollTo({
+        top: content.scrollHeight,
+        behavior: reduce ? 'auto' : 'smooth',
+      });
     });
   }
 
@@ -3562,8 +3610,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function openAssistantBubble(agent: AgentName): HTMLElement {
     const bubble = el('div', `ag-msg ag-msg-assistant ag-${agent}`);
-    withAutoScroll(() => appendConversation(bubble));
     streamBubble = bubble;
+    updateTurnPending(agent);
+    withAutoScroll(() => appendConversation(bubble));
     return bubble;
   }
 
@@ -3691,6 +3740,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (!(assistantBubbleSources.get(bubble) ?? bubble.textContent ?? '').trim()) {
       bubble.remove();
       streamBubble = null;
+      updateTurnPending(agent);
       return null;
     }
     const milestone = el('div', 'ag-progress-step');
@@ -3700,6 +3750,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       milestone.appendChild(bubble);
     });
     streamBubble = null;
+    updateTurnPending(agent);
     return milestone;
   }
 
@@ -3818,7 +3869,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         sweepUnresolvedToolRows();
         completeTurnActivity();
         setTurnRunning(true);
+        replyPending = true;
         followConversation = true;
+        updateTurnPending(event.agent);
         scrollConversationToEnd();
         assistantBuffer = '';
         cancelPendingAssistantRender();
@@ -3845,6 +3898,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         flushAssistantBuffer({ kind: 'progress' });
         const milestone = compactStreamIntoActivity(event.agent);
         addToolRow(event, milestone);
+        updateTurnPending(event.agent);
         break;
       }
       case 'tool-result':
@@ -4582,11 +4636,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function updateComposerActivity(changeSets: readonly PendingChangeSet[]): void {
     const activeEdit = changeSets.find((set) => set.status === 'open');
-    composerActivity.hidden = !activeEdit;
-    composerActivityLabel.textContent = activeEdit
-      ? `${AGENT_LABEL[activeEdit.agent]} 편집 중…`
-      : '';
-    syncComposerOverlay();
+    updateTurnPending(activeEdit?.agent);
   }
 
   function rebuildReview(): void {
@@ -4666,6 +4716,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       if (conversationScrollRaf !== null) {
         window.cancelAnimationFrame(conversationScrollRaf);
         conversationScrollRaf = null;
+      }
+      if (conversationScrollUnlock !== null) {
+        window.clearTimeout(conversationScrollUnlock);
+        conversationScrollUnlock = null;
       }
       window.removeEventListener('resize', measure);
       document.removeEventListener('pointerdown', onDocPointerDown);
