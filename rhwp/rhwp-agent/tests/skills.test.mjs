@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { promises as fs } from 'node:fs';
+import { promises as fs, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { SkillRegistry, parseSkillMarkdown } from '../skills.mjs';
@@ -13,6 +13,24 @@ test('parseSkillMarkdown accepts portable frontmatter and rejects extra keys', (
   assert.equal(parseSkillMarkdown(MARKDOWN('good-skill')).name, 'good-skill');
   assert.throws(() => parseSkillMarkdown('---\nname: bad\ndescription: x\nfoo: bar\n---\n\nDo it.\n'), /only name and description/);
   assert.throws(() => parseSkillMarkdown(MARKDOWN('skill-create')), /reserved/);
+});
+
+test('bundled present-plan skill ends planning through the structured presentation tool', async (t) => {
+  const markdown = readFileSync(new URL('../skills/present-plan/SKILL.md', import.meta.url), 'utf8');
+  assert.equal(parseSkillMarkdown(markdown, 'present-plan').name, 'present-plan');
+  assert.match(markdown, /present_implementation_plan/);
+  assert.match(markdown, /chat action that opens the plan review sidebar/);
+
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-required-skill-test-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const bundledRoot = path.join(temp, 'bundled');
+  await fs.mkdir(path.join(bundledRoot, 'present-plan'), { recursive: true });
+  await fs.writeFile(path.join(bundledRoot, 'present-plan', 'SKILL.md'), markdown);
+  const registry = await new SkillRegistry({ bundledRoot, userRoot: path.join(temp, 'user') }).init();
+  const skill = (await registry.list()).skills.find((item) => item.name === 'present-plan');
+  assert.equal(skill.required, true);
+  assert.equal(skill.enabled, true);
+  await assert.rejects(() => registry.setEnabled('present-plan', false), /required by the planning workflow/);
 });
 
 test('SkillRegistry saves, disables, reads, and recoverably deletes user skills', async (t) => {
