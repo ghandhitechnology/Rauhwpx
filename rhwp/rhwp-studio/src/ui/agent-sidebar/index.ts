@@ -1493,9 +1493,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const planCardSlot = el('div', 'ag-plan-card-slot');
   const planRestore = el('button', 'ag-plan-restore');
   planRestore.type = 'button';
-  planRestore.hidden = true;
   planRestore.setAttribute('aria-label', '계획 펼치기');
   planRestore.title = '계획 펼치기';
+  planRestore.setAttribute('aria-hidden', 'true');
+  planRestore.inert = true;
   const planOrbit = el('span', 'ag-plan-orbit');
   planOrbit.setAttribute('aria-hidden', 'true');
   planRestore.appendChild(planOrbit);
@@ -1519,7 +1520,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   // 흐름의 높이를 차지하지 않으며, 왼쪽 작업 상태와 오른쪽 계획 복원 버튼이
   // 서로의 자리를 침범하지 않도록 하나의 semantic cluster로 묶는다.
   const composerOverlay = el('div', 'ag-composer-overlay');
-  composerOverlay.hidden = true;
   composerOverlay.setAttribute('aria-label', '현재 작업 상태');
   composerOverlay.append(planRestore);
   const composerMeta = el('div', 'ag-composer-meta');
@@ -2086,8 +2086,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   function syncComposerOverlay(): void {
-    const hasPlanRestore = !planRestore.hidden;
-    composerOverlay.hidden = !hasPlanRestore;
+    const hasPlanRestore = !fullscreen && planMinimized && activePlan !== null;
     composerOverlay.classList.remove('ag-has-activity');
     composerOverlay.classList.toggle('ag-has-plan-restore', hasPlanRestore);
   }
@@ -2097,7 +2096,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     planSurface.classList.toggle('ag-plan-minimized', compact);
     planCardSlot.setAttribute('aria-hidden', compact ? 'true' : 'false');
     planCardSlot.inert = compact;
-    planRestore.hidden = !compact;
     planRestore.setAttribute('aria-hidden', compact ? 'false' : 'true');
     planRestore.inert = !compact;
     syncComposerOverlay();
