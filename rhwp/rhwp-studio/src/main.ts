@@ -792,7 +792,6 @@ function setupZoomControls(): void {
     const pageInfo = wasm.getPageInfo(0);
     // pageInfo.width는 이미 px 단위 (96dpi 기준)
     const zoom = calculateFitWidthZoom(container.clientWidth, pageInfo.width);
-    console.log(`[zoom-fit-width] container=${container.clientWidth} page=${pageInfo.width} zoom=${zoom.toFixed(3)}`);
     vm.setZoom(zoom);
   });
 
@@ -808,7 +807,6 @@ function setupZoomControls(): void {
       pageInfo.width,
       pageInfo.height,
     );
-    console.log(`[zoom-fit-page] containerW=${container.clientWidth} containerH=${container.clientHeight} pageW=${pageInfo.width} pageH=${pageInfo.height} zoom=${zoom.toFixed(3)}`);
     vm.setZoom(zoom);
   });
 
@@ -1007,7 +1005,6 @@ async function initializeDocument(
 ): Promise<void> {
   const msg = sbMessage();
   try {
-    console.log('[initDoc] 1. 폰트 로딩 시작');
     await updateLoadProgress(55, '폰트 준비 중...');
     if (docInfo.fontsUsed?.length) {
       await loadWebFonts(docInfo.fontsUsed, (loaded, total) => {
@@ -1015,24 +1012,18 @@ async function initializeDocument(
         msg.textContent = `파일 로딩 ${fontPercent}% - 폰트 로딩 중... (${loaded}/${total})`;
       }, extensionViewerSettings);
     }
-    console.log('[initDoc] 2. 폰트 로딩 완료');
     await updateLoadProgress(75, '문서 상태 적용 중...');
     totalSections = docInfo.sectionCount ?? 1;
     sbSection().textContent = `구역: 1 / ${totalSections}`;
     applySavedTextMarkSettings();
-    console.log('[initDoc] 3. inputHandler deactivate');
     inputHandler?.deactivate();
-    console.log('[initDoc] 4. canvasView loadDocument');
     await updateLoadProgress(82, '페이지 렌더 준비 중...');
     await canvasView?.loadDocument();
     prepareCanvasKitLocalFonts(docInfo.fontsUsed);
-    console.log('[initDoc] 5. toolbar setEnabled');
     await updateLoadProgress(90, '도구 모음 준비 중...');
     toolbar?.setEnabled(true);
-    console.log('[initDoc] 6. toolbar initFontDropdown + initStyleDropdown');
     toolbar?.initFontDropdown(docInfo.fontsUsed);
     toolbar?.initStyleDropdown();
-    console.log('[initDoc] 7. 사전 검증 및 로컬 글꼴 확인');
     await updateLoadProgress(94, '문서 검증 및 글꼴 확인 중...');
 
     // #177: HWPX 비표준 lineseg 감지 (진단 로그).
@@ -1058,7 +1049,6 @@ async function initializeDocument(
     }
 
     // 로컬 글꼴 감지 결과가 뷰를 갱신한 뒤에 캐럿을 연결해야 입력 포커스가 재설정과 경합하지 않는다.
-    console.log('[initDoc] 8. inputHandler activateWithCaretPosition');
     await updateLoadProgress(96, '편집 상태 초기화 중...');
     inputHandler?.activateWithCaretPosition();
     const emptyState = document.getElementById('document-empty-state');
@@ -1069,7 +1059,6 @@ async function initializeDocument(
     eventBus.emit('document-context-changed');
     // 최종 단계 뒤에는 비동기 작업이 없으므로 100% progress paint를 기다리지 않는다.
     msg.textContent = displayName;
-    console.log('[initDoc] 9. 완료');
 
     // #2527: 자동 보정을 하지 않으므로 로드 직후 문서는 항상 clean.
     documentState.markClean('document-initialized');

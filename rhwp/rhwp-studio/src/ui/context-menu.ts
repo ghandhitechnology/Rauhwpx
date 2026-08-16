@@ -102,6 +102,7 @@ export class ContextMenu {
 
     // 외부 클릭 닫기 (다음 이벤트 루프에서 등록)
     requestAnimationFrame(() => {
+      if (this.el !== menu) return; // rAF 대기 중 메뉴가 교체/닫힘
       this.outsideHandler = (e: MouseEvent) => {
         if (this.el && !this.el.contains(e.target as Node)) {
           this.hide();

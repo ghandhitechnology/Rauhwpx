@@ -127,23 +127,12 @@ export class CommandPalette {
 
   // ─── private ────────────────────────────────────────────────
 
-  /** 팔레트에 노출할 커맨드 목록 구성 (disabled 제외) */
+  /** 팔레트에 노출할 커맨드 목록 구성 */
   private buildItems(): CommandDef[] {
     const all: CommandDef[] = [];
     for (const id of this.registry.getAllIds()) {
       const def = this.registry.get(id)!;
-      // canExecute가 항상 false인 stub는 제외
-      if (def.canExecute) {
-        const ctx = {
-          hasDocument: false, hasSelection: false, hasCopiedFormat: false, inTable: false,
-          inCellSelectionMode: false, hasMultiCellSelection: false, hasTableTransposeClipboard: false, inTableObjectSelection: false,
-          inPictureObjectSelection: false, inField: false, isEditable: true,
-          editMode: 'normal' as const, isFormMode: false, canEditFormField: false,
-          canUndo: false, canRedo: false, zoom: 1.0, showControlCodes: false, showParagraphMarks: false,
-        };
-        // canExecute(ctx=hasDocument:false) → false 인 경우도 목록에는 포함
-        // (실행 시점에 dispatcher가 다시 판단)
-      }
+      // canExecute는 실행 시점에 dispatcher가 판단하므로 목록에는 전부 포함
       all.push(def);
     }
     return all;

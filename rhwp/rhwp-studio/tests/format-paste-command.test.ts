@@ -46,7 +46,6 @@ test('모양 붙여넣기 UI와 컨텍스트 상태 경로가 유지되어야 �
   const types = source('src/command/types.ts');
   const main = source('src/main.ts');
   const inputHandler = source('src/engine/input-handler.ts');
-  const commandPalette = source('src/ui/command-palette.ts');
 
   assert.match(html, /data-cmd="edit:format-paste"/);
   assert.match(types, /hasCopiedFormat:\s*boolean/);
@@ -54,5 +53,4 @@ test('모양 붙여넣기 UI와 컨텍스트 상태 경로가 유지되어야 �
   assert.match(inputHandler, /hasCopiedFormat\(\):\s*boolean/);
   assert.match(inputHandler, /performFormatPaste\(\):\s*void/);
   assert.equal((inputHandler.match(/commandId:\s*'edit:format-paste'/g) ?? []).length, 2);
-  assert.match(commandPalette, /hasCopiedFormat:\s*false/);
 });

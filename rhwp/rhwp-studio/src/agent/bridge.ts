@@ -118,7 +118,6 @@ export interface AgentBridge {
   /** gpt-5.6-luna 로 스레드 제목 생성 요청. */
   requestTitle(threadId: string, preview: string): string;
   sendUserMessage(text: string, skillName?: string, stagedReferenceIds?: string[]): Promise<string | null>;
-  completeReferenceUploads(messageId: string): void;
   stageReference(scopeId: string, file: File): Promise<StagedReference>;
   discardStagedReference(scopeId: string, stageId: string): Promise<void>;
   /** 참고자료 원본은 HTTP로 스트리밍하고, 브라우저에는 메타데이터만 돌려준다. */
@@ -1377,6 +1376,11 @@ class AgentBridgeImpl implements AgentBridge {
         break;
       }
       case 'chat-error': {
+        // 시작 실패 시 대기 중이던 메시지를 정리하지 않으면 sendUserMessage promise가
+        // 영원히 미해결로 남아 컴포저가 잠기고, 다음 chat-started에 스테일 메시지가 흘러간다.
+        for (const message of this.queuedMessages) message.resolve(null);
+        this.queuedMessages = [];
+        this.pendingChatStart = null;
         this.emit({
           type: 'hub-error',
           code: typeof msg.code === 'string' ? msg.code : 'RPC_ERROR',
@@ -1610,14 +1614,6 @@ class AgentBridgeImpl implements AgentBridge {
         return;
       }
       this.dispatchUserMessage(message);
-    });
-  }
-
-  completeReferenceUploads(messageId: string): void {
-    this.sendJson({
-      v: AGENT_PROTOCOL_VERSION,
-      type: 'chat-reference-uploads-complete',
-      messageId,
     });
   }
 

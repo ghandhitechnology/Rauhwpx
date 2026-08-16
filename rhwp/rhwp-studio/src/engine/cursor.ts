@@ -727,7 +727,7 @@ export class CursorState {
   // ─── 문단 단위 이동 (Ctrl+↑/↓) ────────────────────────
 
   /** 이전/다음 문단 시작으로 이동 (direction: -1=이전, +1=다음).
-   *  한컴 표준 정합 — 본문은 현재 구역 내 문단 이동 (구역 경계 영역 영역 인접 구역 이동).
+   *  한컴 표준 정합 — 본문은 현재 구역 내 문단 이동 (구역 경계에서는 인접 구역으로 이동).
    *  표 셀 내부는 cellParaIndex 이동 (셀 내부 문단 경계). */
   moveToParagraphBoundary(direction: -1 | 1): void {
     this.preferredX = null;
