@@ -53,6 +53,7 @@ import {
   type ThreadAttachment,
 } from '../../agent/threads.ts';
 import { createChevron, createColumnIcon } from '../chevron.ts';
+import { showActionMenu } from '../action-menu.ts';
 import { createHieumGlyph, createIcon, createStopIcon, OP_ICON } from './icons.ts';
 import { createSettingsPanel } from './settings.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
@@ -70,6 +71,11 @@ export interface AgentSidebarDeps {
     documentName: string | null;
     selectionLabel: string | null;
   };
+  /** 라이브러리 문서 그룹에서 "이동"을 골랐을 때. */
+  moveToLibraryDocument?: (target: {
+    documentId: string | null;
+    fileName: string | null;
+  }) => void;
 }
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
@@ -481,7 +487,7 @@ function createSketchFilterDefs(): SVGSVGElement {
 }
 
 export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; dispose(): void } {
-  const { bridge, eventBus, getDocumentContext } = deps;
+  const { bridge, eventBus, getDocumentContext, moveToLibraryDocument } = deps;
 
   // 개인 기본값(설정 탭에서 저장) — 새 대화가 이 조합으로 열린다.
   let agentPrefs: AgentPrefs = loadAgentPrefs();
@@ -519,7 +525,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let currentDocumentId: string | null = getDocumentContext?.().documentId ?? null;
   /** 읽기 전용으로 열람 중인 다른 문서 채팅의 문서 라벨 (null = 정상 모드). */
   let readOnlyDocLabel: string | null = null;
-  /** 문서 그룹 접힘/펼침 — 사용자가 손댄 그룹만 기억한다(키: docKey ?? ''). */
+  /** 문서 그룹 접힘/펼침 — 사용자가 손댄 그룹만 기억한다(키: documentId ?? docKey ?? ''). */
   const docGroupToggles = new Map<string, boolean>();
   let currentThread = createEmptyThread({
     agent: selectedAgent,
@@ -1177,6 +1183,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
    * 그룹 아래에 저장되고, 새 문서용 빈 채팅이 열린다.
    */
   function handleDocumentSwitch(nextKey: string | null, nextDocumentId: string | null): void {
+    const sameIdentity = Boolean(
+      nextDocumentId && currentDocumentId && nextDocumentId === currentDocumentId,
+    );
+    if (sameIdentity) {
+      // 첫 저장으로 파일명만 바뀐 경우 — 채팅을 새 문서로 갈아타지 않는다.
+      currentDocKey = nextKey;
+      currentDocumentId = nextDocumentId;
+      currentThread.docKey = nextKey;
+      currentThread.documentId = nextDocumentId;
+      persistCurrentThread();
+      referenceLibrary.contextChanged();
+      if (threadsListVisible()) rebuildThreadsList();
+      return;
+    }
     currentDocKey = nextKey;
     currentDocumentId = nextDocumentId;
     // 읽기 전용으로 보던 채팅의 문서가 실제로 열렸다면 그 자리에서 이어간다.
@@ -3149,6 +3169,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   /**
    * 문서별 그룹 목록 — 현재 문서 그룹이 맨 위에 펼쳐져 있고,
    * 다른 문서 그룹은 접힌 채로 최근 활동순으로 이어진다.
+   * 그룹 이름 우클릭 → 라이브러리 "이동"(현재 문서 저장 후 그 문서로 연다).
    */
   function rebuildThreadsList(): void {
     threadsList.replaceChildren();
@@ -3157,19 +3178,28 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       threadsList.appendChild(el('li', 'ag-threads-empty', '이전 채팅이 없습니다'));
       return;
     }
-    const currentIdx = groups.findIndex((g) => g.docKey === currentDocKey);
+    const currentIdx = groups.findIndex((g) => (
+      g.documentId && currentDocumentId
+        ? g.documentId === currentDocumentId
+        : g.docKey === currentDocKey
+    ));
     if (currentIdx > 0) groups.unshift(groups.splice(currentIdx, 1)[0]!);
 
     for (const group of groups) {
-      const toggleKey = group.docKey ?? '';
-      const isCurrentDoc = group.docKey === currentDocKey;
+      const toggleKey = group.documentId ?? group.docKey ?? '';
+      const isCurrentDoc = group.documentId && currentDocumentId
+        ? group.documentId === currentDocumentId
+        : group.docKey === currentDocKey;
       const expanded = docGroupToggles.get(toggleKey) ?? isCurrentDoc;
+      const canMove = Boolean(group.documentId || group.docKey);
 
       const groupLi = el('li', 'ag-threads-group');
       if (isCurrentDoc) groupLi.classList.add('ag-current-doc');
       const groupBtn = el('button', 'ag-threads-group-btn');
       groupBtn.type = 'button';
       groupBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      if (canMove) groupBtn.dataset.libraryDoc = 'true';
+      if (canMove) groupBtn.setAttribute('aria-haspopup', 'menu');
       const chevron = createChevron('ag-threads-group-chevron');
       const name = el('span', 'ag-threads-group-name', docGroupLabel(group.docKey));
       name.title = docGroupLabel(group.docKey);
@@ -3180,6 +3210,24 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         docGroupToggles.set(toggleKey, !expanded);
         rebuildThreadsList();
       });
+      if (canMove) {
+        groupBtn.addEventListener('contextmenu', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          showActionMenu(event.clientX, event.clientY, [{
+            label: '이동',
+            disabled: isCurrentDoc,
+            title: isCurrentDoc ? '이미 이 문서를 보고 있습니다' : '현재 문서를 저장하고 이 문서로 이동합니다',
+            onSelect: () => {
+              persistCurrentThread();
+              moveToLibraryDocument?.({
+                documentId: group.documentId,
+                fileName: group.docKey,
+              });
+            },
+          }]);
+        });
+      }
       groupLi.appendChild(groupBtn);
       threadsList.appendChild(groupLi);
 
