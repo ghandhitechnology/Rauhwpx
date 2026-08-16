@@ -92,8 +92,9 @@ test('long tasks request meaningful updates without artificial heartbeats', () =
   assert.match(backend, /nests related tool calls beneath them/);
 });
 
-test('tool turns always produce a final document-check handoff', () => {
+test('tool turns produce a final document-check handoff unless a plan card is the artifact', () => {
   assert.match(source, /appendCheckDocumentMessage/);
+  assert.match(source, /turnToolCount > 0 && !turnPresentedPlan && !finalBubble && completed/);
   assert.match(source, /작업을 마쳤습니다\. 문서를 확인해 보세요\./);
   assert.match(backend, /After every tool-using turn, always send a separate final/);
   assert.match(backend, /asks the user to check the document or pending changes/);

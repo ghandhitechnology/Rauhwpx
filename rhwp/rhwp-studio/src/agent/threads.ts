@@ -15,15 +15,26 @@ const CHANNEL_NAME = 'rhwp-agent-threads';
 const MAX_THREADS = 40;
 const MAX_MESSAGES_PER_THREAD = 200;
 
-export interface ThreadMessage {
-  role: 'user' | 'assistant' | 'system';
+interface ThreadMessageBase {
   text: string;
   agent?: AgentName;
-  /** Concise in-turn milestone, rendered separately from the final answer. */
-  kind?: 'progress';
   messageId?: string;
   attachments?: ThreadAttachment[];
 }
+
+export type ThreadMessage =
+  | (ThreadMessageBase & {
+      role: 'assistant';
+      kind: 'plan';
+      /** Structured plan opened by this presentation message. */
+      planId: string;
+    })
+  | (ThreadMessageBase & {
+      role: 'user' | 'assistant' | 'system';
+      /** Concise in-turn milestone, rendered separately from the final answer. */
+      kind?: 'progress';
+      planId?: never;
+    });
 
 export interface ThreadAttachment {
   stageId: string;
@@ -54,6 +65,8 @@ export interface ChatThread {
   documentId: string | null;
   /** Historical display data only. Phase/approval/capability authority is never persisted. */
   latestPlan?: StructuredPlan;
+  /** Plan snapshots referenced by clickable chat presentations. */
+  plans?: StructuredPlan[];
   messages: ThreadMessage[];
 }
 
@@ -66,9 +79,10 @@ export interface ThreadDraft {
   documentId?: string | null;
 }
 
-type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan' | 'docKey' | 'documentId'> & {
+type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan' | 'plans' | 'docKey' | 'documentId'> & {
   workflow?: unknown;
   latestPlan?: unknown;
+  plans?: unknown;
   docKey?: unknown;
   documentId?: unknown;
 };
@@ -147,9 +161,11 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
 
 function normalizeStoredThread(thread: StoredChatThread): ChatThread {
   const latestPlan = isStructuredPlan(thread.latestPlan) ? thread.latestPlan : undefined;
+  const plans = Array.isArray(thread.plans) ? thread.plans.filter(isStructuredPlan) : [];
   const {
     workflow: _storedWorkflow,
     latestPlan: _storedPlan,
+    plans: _storedPlans,
     docKey: storedDocKey,
     documentId: storedDocumentId,
     ...rest
@@ -180,21 +196,30 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
           }];
         })
         : undefined;
+      const agent: AgentName | undefined = message.agent === 'claude' || message.agent === 'codex' || message.agent === 'pi'
+        ? message.agent
+        : undefined;
+      const metadata = {
+        ...(agent ? { agent } : {}),
+        ...(typeof message.messageId === 'string' ? { messageId: message.messageId } : {}),
+        ...(attachments?.length ? { attachments } : {}),
+      };
+      if (message.kind === 'plan') {
+        if (message.role !== 'assistant' || typeof message.planId !== 'string' || !message.planId) return [];
+        return [{ role: 'assistant', text: message.text, kind: 'plan', planId: message.planId, ...metadata }];
+      }
       return [{
         role: message.role,
         text: message.text,
-        ...(message.agent === 'claude' || message.agent === 'codex' || message.agent === 'pi'
-          ? { agent: message.agent }
-          : {}),
-        ...(message.kind === 'progress' ? { kind: message.kind } : {}),
-        ...(typeof message.messageId === 'string' ? { messageId: message.messageId } : {}),
-        ...(attachments?.length ? { attachments } : {}),
+        ...(message.kind === 'progress' ? { kind: 'progress' as const } : {}),
+        ...metadata,
       }];
     }),
     workflow: isAgentWorkflow(thread.workflow) ? thread.workflow : 'direct',
     docKey: typeof storedDocKey === 'string' && storedDocKey ? storedDocKey : null,
     documentId: typeof storedDocumentId === 'string' && storedDocumentId ? storedDocumentId : null,
     ...(latestPlan ? { latestPlan } : {}),
+    ...(plans.length ? { plans } : {}),
   };
 }
 

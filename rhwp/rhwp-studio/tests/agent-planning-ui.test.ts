@@ -34,12 +34,17 @@ test('planning phase shows a persistent compact Korean label and skips a badge i
   assert.match(css, /\.ag-phase-badge \{/);
 });
 
-test('plan renders as a review-area operator card, not a chat bubble', () => {
+test('plan keeps its review card and adds a clickable presentation in chat', () => {
   assert.match(source, /function buildPlanCard\(plan: StructuredPlan\)/);
   assert.match(source, /el\('section', `ag-plan-card ag-\$\{selectedAgent\}`\)/);
   assert.match(source, /card\.setAttribute\('aria-labelledby', titleId\)/);
   assert.match(source, /review\.appendChild\(buildPlanCard\(activePlan\)\)/);
-  assert.doesNotMatch(source, /ag-msg-plan|messages\.appendChild\(buildPlanCard/);
+  assert.match(source, /function renderPlanMessage\(message: Extract<ThreadMessage, \{ kind: 'plan' \}>\)/);
+  assert.match(source, /el\('button', 'ag-msg-plan-action'\)/);
+  assert.match(source, /openPresentedPlan\(message\.planId\)/);
+  assert.match(source, /presentPlanInChat\(e\.plan\)/);
+  assert.match(source, /setReviewColCollapsed\(false\)/);
+  assert.match(css, /\.ag-msg-plan-action \{/);
   // 제목·요약·단계·예상 파일·검증·위험이 모두 카드 안에 있다.
   assert.match(source, /el\('h3', 'ag-plan-title'/);
   assert.match(source, /el\('p', 'ag-plan-summary'/);
@@ -122,9 +127,14 @@ test('entering plan mode is blocked while document edits await review', () => {
   assert.match(source, /검토 대기 중인 문서 편집이 있습니다/);
 });
 
-test('plan history restores for display while only the active server plan is approvable', () => {
+test('plan history and chat presentations restore while only the active server plan is approvable', () => {
   assert.match(source, /currentThread\.workflow = chatWorkflow/);
+  assert.match(source, /message\.kind === 'plan'/);
+  assert.match(source, /message\.planId === plan\.planId/);
+  assert.match(source, /messages\.appendChild\(renderPlanMessage\(msg\)\)/);
   assert.match(source, /currentThread\.latestPlan = activePlan/);
+  assert.match(source, /currentThread\.plans = \[\.\.\.planHistory\]/);
+  assert.match(source, /loaded\.plans\?\.length/);
   assert.match(source, /threadWorkflows\.set\(id, loaded\.workflow\)/);
   assert.match(source, /const planArchives = new Map<string, StructuredPlan\[\]>\(\)/);
   assert.match(source, /const threadWorkflows = new Map<string, AgentWorkflow>\(\)/);

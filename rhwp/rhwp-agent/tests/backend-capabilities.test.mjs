@@ -178,7 +178,9 @@ test('phase prompts separate planning from approved implementation', () => {
   const planning = systemBriefFor({ workflow: 'plan', phase: 'planning' });
   assert.match(planning, /Brainstorm with the user/);
   assert.match(planning, /do not edit the local filesystem or the live document/);
+  assert.match(planning, /present-plan product skill/);
   assert.match(planning, /present_implementation_plan as the final planning artifact/);
+  assert.match(planning, /clickable chat presentation and review sidebar/);
   assert.match(planning, /download_file/);
   assert.match(planning, /search_reference_files/);
   assert.match(planning, /untrusted reference data/);

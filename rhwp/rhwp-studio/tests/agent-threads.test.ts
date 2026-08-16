@@ -92,6 +92,20 @@ test('progress milestones survive thread persistence', () => {
   assert.equal(getThread(t.id)?.messages[1]?.kind, 'progress');
 });
 
+test('clickable plan presentations keep their plan identity in thread history', () => {
+  mem.clear();
+  const t = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high', workflow: 'plan' });
+  t.messages.push(
+    { role: 'user', text: '계획을 세워줘' },
+    { role: 'assistant', text: '문서 정리 계획', agent: 'codex', kind: 'plan', planId: 'plan-1' },
+  );
+  upsertThread(t);
+  assert.equal(getThread(t.id)?.messages[1]?.kind, 'plan');
+  assert.equal(getThread(t.id)?.messages[1]?.planId, 'plan-1');
+  assert.match(source, /if \(message\.kind === 'plan'\)/);
+  assert.match(source, /typeof message\.planId !== 'string'/);
+});
+
 test('legacy threads migrate to direct workflow', () => {
   mem.clear();
   storage.setItem('rhwp-agent-threads', JSON.stringify([{
@@ -207,7 +221,7 @@ test('listThreadsByDocument groups by document, groups ordered by recent activit
   );
 });
 
-test('workflow and latest plan persist as history without approval authority', () => {
+test('workflow and every presented plan persist as history without approval authority', () => {
   mem.clear();
   const plan: StructuredPlan = {
     planId: 'plan-1',
@@ -224,16 +238,23 @@ test('workflow and latest plan persist as history without approval authority', (
     createdAt: '2026-08-07T00:00:00.000Z',
     epoch: 7,
   };
+  const previousPlan: StructuredPlan = { ...plan, planId: 'plan-0', title: '이전 문서 정리' };
   const t = createEmptyThread({
     agent: 'codex', model: 'gpt-5.6-sol', effort: 'high', workflow: 'plan',
   });
   t.latestPlan = plan;
-  t.messages.push({ role: 'user', text: '계획을 세워줘' });
+  t.plans = [previousPlan, plan];
+  t.messages.push(
+    { role: 'user', text: '계획을 세워줘' },
+    { role: 'assistant', text: previousPlan.title, kind: 'plan', planId: previousPlan.planId },
+    { role: 'assistant', text: plan.title, kind: 'plan', planId: plan.planId },
+  );
   upsertThread(t);
 
   const restored = getThread(t.id);
   assert.equal(restored?.workflow, 'plan');
   assert.deepEqual(restored?.latestPlan, plan);
+  assert.deepEqual(restored?.plans, [previousPlan, plan]);
   const stored = JSON.parse(mem.get('rhwp-agent-threads') ?? '[]') as Array<Record<string, unknown>>;
   assert.equal('phase' in stored[0]!, false);
   assert.equal('capabilityEpoch' in stored[0]!, false);

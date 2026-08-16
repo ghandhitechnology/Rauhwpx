@@ -505,6 +505,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let turnActivity: TurnActivityState | null = null;
   let turnToolCount = 0;
   let turnFailedToolCount = 0;
+  let turnPresentedPlan = false;
   let followConversation = true;
   let conversationScrollRaf: number | null = null;
   let insetRecenterRaf: number | null = null;
@@ -2363,15 +2364,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         copy.type = 'button';
         copy.append(el('strong', 'ag-skill-item-name', `/${skill.name}`), el('span', 'ag-skill-item-description', skill.description));
         const badges = el('span', 'ag-skill-badges');
+        if (skill.required) badges.appendChild(el('span', 'ag-skill-badge', '필수'));
         if (skill.hasScripts) badges.appendChild(el('span', 'ag-skill-badge ag-skill-badge-warn', '스크립트'));
         if (skill.hasAssets) badges.appendChild(el('span', 'ag-skill-badge', '자산'));
         copy.appendChild(badges);
         copy.addEventListener('click', () => openSkill(skill));
         const actions = el('div', 'ag-skill-item-actions');
-        const toggle = el('button', 'ag-skill-toggle', skill.enabled ? '사용 중' : '꺼짐');
+        const toggle = el('button', 'ag-skill-toggle', skill.required ? '필수' : (skill.enabled ? '사용 중' : '꺼짐'));
         toggle.type = 'button';
+        toggle.disabled = Boolean(skill.required);
         toggle.setAttribute('aria-pressed', skill.enabled ? 'true' : 'false');
-        toggle.addEventListener('click', () => bridge.setSkillEnabled(skill.name, !skill.enabled));
+        if (!skill.required) {
+          toggle.addEventListener('click', () => bridge.setSkillEnabled(skill.name, !skill.enabled));
+        }
         actions.appendChild(toggle);
         if (skill.origin === 'bundled') {
           const duplicate = el('button', 'ag-skill-secondary', '복제');
@@ -2688,6 +2693,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     currentThread.workflow = chatWorkflow;
     if (activePlan) currentThread.latestPlan = activePlan;
     else delete currentThread.latestPlan;
+    if (planHistory.length > 0) currentThread.plans = [...planHistory];
+    else delete currentThread.plans;
     if (currentThread.messages.length === 0) return;
     if (!currentThread.title || currentThread.title === '새 채팅') {
       currentThread.title = fallbackTitle(currentThread.messages);
@@ -2712,6 +2719,26 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function renderPlanMessage(message: Extract<ThreadMessage, { kind: 'plan' }>): HTMLElement {
+    const button = el('button', 'ag-msg-plan-action');
+    button.type = 'button';
+    button.dataset.planId = message.planId ?? '';
+    button.setAttribute('aria-label', `${message.text || '실행 계획'} 열기`);
+
+    const icon = el('span', 'ag-msg-plan-icon');
+    icon.appendChild(createIcon('changes'));
+    const copy = el('span', 'ag-msg-plan-copy');
+    copy.append(
+      el('span', 'ag-msg-plan-kicker', '실행 계획'),
+      el('span', 'ag-msg-plan-title', message.text || '제목 없는 계획'),
+    );
+    const action = el('span', 'ag-msg-plan-open', '계획 열기');
+    action.appendChild(createChevron('ag-msg-plan-chevron'));
+    button.append(icon, copy, action);
+    button.addEventListener('click', () => openPresentedPlan(message.planId));
+    return button;
   }
 
   function renderUserMessage(message: ThreadMessage): HTMLElement {
@@ -2789,6 +2816,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
           const step = el('div', 'ag-progress-step ag-progress-step-restored');
           step.appendChild(el('div', `ag-msg ag-progress-milestone ag-${agent}`, msg.text));
           messages.appendChild(step);
+        } else if (msg.kind === 'plan') {
+          messages.appendChild(renderPlanMessage(msg));
         } else {
           messages.appendChild(el('div', `ag-msg ag-msg-assistant ag-${agent}`, msg.text));
         }
@@ -3055,7 +3084,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     const loaded = getThread(id);
     if (!loaded) return;
     threadWorkflows.set(id, loaded.workflow);
-    planArchives.set(id, loaded.latestPlan ? [loaded.latestPlan] : []);
+    planArchives.set(id, loaded.plans?.length
+      ? loaded.plans
+      : (loaded.latestPlan ? [loaded.latestPlan] : []));
     restorePlanningForThread(id);
     currentThread = {
       ...loaded,
@@ -3547,6 +3578,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         turnActivity = null;
         turnToolCount = 0;
         turnFailedToolCount = 0;
+        turnPresentedPlan = false;
         break;
       case 'text-delta': {
         if (!streamBubble && turnActivity) closeCurrentActivityGroup();
@@ -3589,7 +3621,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
           && event.stopReason !== 'exited'
           && !event.errorMessage
           && turnFailedToolCount === 0;
-        if (turnToolCount > 0 && !finalBubble && completed) {
+        if (turnToolCount > 0 && !turnPresentedPlan && !finalBubble && completed) {
           appendCheckDocumentMessage(event.agent);
         }
         completeTurnActivity();
@@ -3959,8 +3991,46 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function recordPlan(plan: StructuredPlan): void {
     planHistory = [...planHistory.filter((p) => p.planId !== plan.planId), plan];
     currentThread.latestPlan = plan;
+    currentThread.plans = [...planHistory];
     planArchives.set(currentThread.id, planHistory);
     if (currentThread.messages.length > 0) persistCurrentThread();
+  }
+
+  function presentPlanInChat(plan: StructuredPlan): void {
+    if (currentThread.messages.some((message) => message.kind === 'plan' && message.planId === plan.planId)) return;
+    const message: Extract<ThreadMessage, { kind: 'plan' }> = {
+      role: 'assistant',
+      kind: 'plan',
+      planId: plan.planId,
+      text: plan.title || '제목 없는 계획',
+      agent: selectedAgent,
+    };
+    currentThread.messages.push(message);
+    currentThread.updatedAt = Date.now();
+    persistCurrentThread();
+    withAutoScroll(() => messages.appendChild(renderPlanMessage(message)));
+  }
+
+  function openPresentedPlan(planId: string): void {
+    const plan = planHistory.find((candidate) => candidate.planId === planId)
+      ?? (currentThread.latestPlan?.planId === planId ? currentThread.latestPlan : null);
+    if (!plan) return;
+
+    const workflowState = bridge.getWorkflowState();
+    activePlan = plan;
+    planDetailOpen = false;
+    planApprovable = workflowState.latestPlan?.planId === planId
+      && workflowState.phase === 'awaiting-approval';
+    rebuildReview();
+    if (fullscreen) {
+      setReviewColCollapsed(false);
+      setEnvironmentPanelOpen(false);
+    }
+    window.requestAnimationFrame(() => {
+      const card = review.querySelector<HTMLElement>(`.ag-plan-card[data-plan-id="${CSS.escape(planId)}"]`);
+      card?.scrollIntoView({ block: 'nearest' });
+      card?.focus({ preventScroll: true });
+    });
   }
 
   function planListSection(
@@ -3999,6 +4069,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     card.setAttribute('role', 'group');
     const titleId = `ag-plan-title-${plan.planId}`;
     card.setAttribute('aria-labelledby', titleId);
+    card.tabIndex = -1;
     card.dataset.planId = plan.planId;
 
     const head = el('div', 'ag-plan-head');
@@ -4162,10 +4233,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         }
         return true;
       case 'plan-ready':
+        turnPresentedPlan = true;
         activePlan = e.plan;
         planApprovable = true;
         planDetailOpen = false;
         recordPlan(e.plan);
+        presentPlanInChat(e.plan);
         applyWorkflow(e.workflow);
         setPlanningPhase(e.phase);
         rebuildReview();

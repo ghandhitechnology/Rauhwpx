@@ -1704,6 +1704,93 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   line-height: 1.7;
 }
 
+.ag-msg-plan-action {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-panel);
+  background: var(--ag-raised);
+  box-shadow: inset 1px 0 0 var(--ag-accent), var(--n-elev-1);
+  color: var(--ag-text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.ag-msg-plan-action:hover {
+  border-color: color-mix(in srgb, var(--ag-accent) 48%, var(--ag-border));
+  background: var(--ag-hover);
+}
+
+.ag-msg-plan-action:focus-visible {
+  outline: 2px solid var(--ag-focus);
+  outline-offset: 2px;
+}
+
+.ag-msg-plan-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--ag-accent) 34%, var(--ag-border));
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg-2);
+  color: var(--ag-accent);
+}
+
+.ag-msg-plan-icon .ag-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ag-msg-plan-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ag-msg-plan-kicker {
+  color: var(--ag-text-muted);
+  font-size: var(--ag-micro);
+  font-weight: 650;
+  letter-spacing: var(--ag-track);
+}
+
+.ag-msg-plan-title {
+  overflow: hidden;
+  color: var(--ag-text);
+  font-size: var(--font-size-md, 13px);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-msg-plan-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+  white-space: nowrap;
+}
+
+.ag-msg-plan-chevron {
+  width: 10px;
+  height: 10px;
+  transform: rotate(-90deg);
+  transition: transform 160ms var(--ag-motion-out);
+}
+
+.ag-msg-plan-action:hover .ag-msg-plan-chevron {
+  transform: translateX(2px) rotate(-90deg);
+}
+
 .ag-msg-assistant.ag-msg-enter {
   animation: ag-message-arrive 320ms var(--ag-motion-out) both;
 }
@@ -2666,7 +2753,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ag-plan-chevron {
+  .ag-plan-chevron,
+  .ag-msg-plan-chevron {
     transition: none;
   }
 }
