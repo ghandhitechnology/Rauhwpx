@@ -72,7 +72,7 @@ test('focus mode environment panel is persistent, informative, and opens changes
   assert.match(css, /@keyframes ag-filename-marquee/);
   assert.match(css, /\.ag-fullscreen\s*\{[^}]*--ag-environment-panel-width:\s*clamp\(260px, 36vw, 360px\);[^}]*--ag-environment-lane-width:/s);
   assert.match(css, /\.ag-fullscreen \.ag-chat-page\s*\{[^}]*padding-inline-end:\s*0;[^}]*transition:\s*padding-inline-end 320ms/s);
-  assert.match(css, /\.ag-fullscreen\.ag-environment-open \.ag-chat-page\s*\{[^}]*padding-inline-end:\s*var\(--ag-environment-lane-width\);/s);
+  assert.match(css, /\.ag-fullscreen\.ag-environment-open:not\(\.ag-detail-drawer-open\) \.ag-chat-page\s*\{[^}]*padding-inline-end:\s*var\(--ag-environment-lane-width\);/s);
   assert.match(css, /\.ag-fullscreen \.ag-environment-panel\s*\{[^}]*width:\s*min\(var\(--ag-environment-panel-width, 360px\), calc\(100vw - 16px\)\);/s);
   assert.doesNotMatch(css, /\.ag-fullscreen\.ag-environment-open \.ag-messages,[\s\S]*?transform:\s*translateX/);
   assert.match(css, /prefers-reduced-motion:[^)]*reduce[\s\S]*\.ag-environment-panel/s);

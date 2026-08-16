@@ -4326,7 +4326,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   transition: padding-inline-end 320ms var(--ag-motion-out);
 }
 
-.ag-fullscreen.ag-environment-open .ag-chat-page {
+.ag-fullscreen.ag-environment-open:not(.ag-detail-drawer-open) .ag-chat-page {
   padding-inline-end: var(--ag-environment-lane-width);
 }
 
