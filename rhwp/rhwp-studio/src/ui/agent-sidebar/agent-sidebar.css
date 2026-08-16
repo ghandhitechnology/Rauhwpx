@@ -2650,14 +2650,15 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   grid-template-rows: minmax(0, 1fr);
   max-height: 46%;
   min-height: 0;
+  overflow: hidden;
   padding: 12px;
   border-top: 1px solid var(--ag-border);
   background: var(--ag-bg-2);
   transition:
-    grid-template-rows 320ms var(--ag-motion-out),
-    min-height 320ms var(--ag-motion-out),
-    max-height 320ms var(--ag-motion-out),
-    padding 320ms var(--ag-motion-out),
+    grid-template-rows 320ms var(--ag-spring-soft),
+    max-height 320ms var(--ag-spring-soft),
+    padding 320ms var(--ag-spring-soft),
+    border-top-width 240ms var(--ag-motion-out),
     background-color 240ms ease;
 }
 
@@ -2671,15 +2672,15 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   opacity: 1;
-  transform: translateY(0) scale(1);
-  transform-origin: bottom right;
+  transform: scale(1);
+  transform-origin: calc(100% - 19px) 100%;
   transition:
-    opacity 180ms ease-out,
-    transform 320ms var(--ag-motion-out);
+    opacity 180ms var(--ag-motion-out),
+    transform 320ms var(--ag-spring-soft);
 }
 
 .ag-plan-surface.ag-plan-minimized {
-  grid-template-rows: 0fr;
+  grid-template-rows: minmax(0, 0fr);
   max-height: 0;
   min-height: 0;
   padding: 0;
@@ -2688,8 +2689,9 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-plan-minimized .ag-plan-card-slot {
+  overflow: hidden;
   opacity: 0;
-  transform: translateY(8px) scale(0.965);
+  transform: scale(0.08);
 }
 
 .ag-plan-restore {
@@ -2706,11 +2708,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: var(--ag-text-secondary);
   opacity: 0;
   pointer-events: none;
-  transform: scale(0.78);
+  transform: scale(0.35);
   cursor: pointer;
   transition:
-    opacity 160ms ease-out,
-    transform 320ms var(--ag-motion-out),
+    opacity 120ms var(--ag-motion-out),
+    transform 220ms var(--ag-spring-soft),
     background-color 120ms ease;
 }
 
@@ -2718,6 +2720,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   opacity: 1;
   pointer-events: auto;
   transform: scale(1);
+  transition-delay: 140ms, 90ms, 0ms;
 }
 
 .ag-plan-restore:hover {
@@ -3160,6 +3163,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   .ag-plan-card-slot,
   .ag-plan-restore {
     transition: none;
+  }
+
+  .ag-plan-minimized .ag-plan-card-slot,
+  .ag-plan-restore {
+    transform: none;
   }
 
   .ag-plan-orbit,
