@@ -202,7 +202,7 @@ export class PicturePropsDialog {
   private tbFormModeCheck!: HTMLInputElement;
 
   // ── 그림 탭 컨트롤 ──
-  // [Task #741 후속] 외부 file path 그림 영역 영역 dialog 표시 영역
+  // [Task #741 후속] 외부 file path 그림도 dialog에 표시
   private picFileNameInput!: HTMLInputElement;
   private picEmbedCheck!: HTMLInputElement;
   private picScaleXInput!: HTMLInputElement;
@@ -2129,11 +2129,11 @@ export class PicturePropsDialog {
 
   private populateFromProps(): void {
     if (!this.props) return;
-    // [Task #741 후속 — 한컴 viewer 정합] 외부 file path 그림 영역 dialog 표시 영역.
-    // props.externalPath 영역 영역 그대로 표시 (resolved path 영역, 한컴 viewer 영역 영역
-    // 원본 절대 경로 영역 영역 access 부재 시 HWP file 영역 영역 같은 dir 영역 image 영역
-    // 영역 영역 path 영역 영역 갱신 — populate_external_images_from_dir / inject_external_image
-    // 영역 영역 변경 영역 ~~basename~~ → resolved local path 영역 영역).
+    // [Task #741 후속 — 한컴 viewer 정합] 외부 file path 그림도 dialog에 표시한다.
+    // props.externalPath는 그대로 표시 (resolved path 기준. 한컴 viewer는
+    // 원본 절대 경로에 access할 수 없으면 HWP file과 같은 dir의 image를 찾아
+    // 그 path로 갱신 — populate_external_images_from_dir / inject_external_image가
+    // 같은 방식으로 ~~basename~~ → resolved local path 로 갱신한다).
     if (this.picFileNameInput && this.picEmbedCheck) {
       if (this.props.externalPath) {
         this.picFileNameInput.value = this.props.externalPath;

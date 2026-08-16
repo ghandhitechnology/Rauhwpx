@@ -6562,7 +6562,7 @@ impl HwpDocument {
             items.push(format!(
                 "{{\"id\":{},\"char\":\"{}\",\"rawCode\":{}}}",
                 i + 1,
-                mapped,
+                crate::document_core::helpers::json_escape(&mapped.to_string()),
                 raw_code
             ));
         }

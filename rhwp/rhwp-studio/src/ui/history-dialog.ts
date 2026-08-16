@@ -251,7 +251,6 @@ export class HistoryDialog {
         }
         session = await compareDocuments(payload.bytes, leftName, cur, rightName, HISTORY_COMPARE_OPTS);
       }
-      console.log('[rhwp:history] 최종 Diff 배열', session.diffItems);
       this.compareSessionStore.set(session);
       const mode =
         session.textCompareStrategyUsed === 'identity' ? '본문=id(Map)' : '본문=정렬(alignment)';

@@ -225,10 +225,8 @@ export const editCommands: CommandDef[] = [
       const ih = services.getInputHandler();
       if (!ih) return;
       const fi = (ih as any).getFieldInfo?.();
-      console.log('[field:edit] fieldInfo:', fi);
       if (!fi || fi.fieldId == null) return;
       const props = services.wasm.getClickHereProps(fi.fieldId);
-      console.log('[field:edit] props:', props);
       if (!props.ok) return;
 
       const dialog = new FieldEditDialog();
@@ -239,7 +237,6 @@ export const editCommands: CommandDef[] = [
         });
       };
       dialog.onApply = (newProps) => {
-        console.log('[field:edit] apply:', newProps);
         try {
           // [Task #2377] 누름틀 속성 갱신은 안내문 텍스트를 바꿀 수 있다(문자 수 변경) —
           // snapshot 으로 라우팅(일반 모드 전용 커맨드). 실패 시 throw 로 엔트리 생성을 막는다.
