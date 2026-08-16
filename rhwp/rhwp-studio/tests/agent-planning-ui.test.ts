@@ -56,12 +56,16 @@ test('plan renders as a Markdown document in the review area, not a chat bubble'
   assert.match(css, /\.ag-plan-body \{/);
 });
 
-test('plan sections are never truncated — the panel scrolls instead', () => {
+test('plan sections and actions share normal flow inside one review scrollport', () => {
   assert.doesNotMatch(source, /MAX_PLAN_STEP_LINES|MAX_PLAN_LIST_LINES|planDetailOpen|ag-plan-disclosure/);
   assert.doesNotMatch(css, /\.ag-plan-disclosure/);
-  // 본문은 늘어나고 동작 영역은 바닥에 고정된다.
-  assert.match(css, /\.ag-plan-body \{[^}]*flex: 1 1 auto;/s);
-  assert.match(css, /\.ag-plan-footer \{[^}]*position: sticky;/s);
+  assert.match(css, /\.ag-review \{[^}]*overflow-y: auto;/s);
+  assert.match(source, /review\.tabIndex = 0/);
+  assert.match(source, /review\.setAttribute\('aria-label', '계획 및 변경 검토'\)/);
+  assert.match(css, /\.ag-plan-card \{[^}]*flex: 0 0 auto;/s);
+  assert.match(css, /\.ag-plan-body \{[^}]*flex: 0 0 auto;[^}]*overflow: visible;/s);
+  assert.match(css, /\.ag-plan-footer \{[^}]*position: static;/s);
+  assert.doesNotMatch(css, /\.ag-plan-footer \{[^}]*position: sticky;/s);
 });
 
 test('approval uses the exact plan id and revision routes feedback through the composer', () => {

@@ -35,12 +35,10 @@ test('sketch filter lives behind a token on .ag-root', () => {
   assert.match(css, /--ag-sketch-line:\s*url\(#ag-sketch-line\);/);
 });
 
-test('filled sidebar action buttons are hand-drawn', () => {
+test('non-review filled sidebar action buttons are hand-drawn', () => {
   const selectors = sketchSelectors();
   for (const sel of [
     '.ag-send',
-    '.ag-approve',
-    '.ag-reject',
     '.ag-takeover-btn',
     '.ag-threads-new',
     '.ag-skills-new',
@@ -58,6 +56,13 @@ test('filled sidebar action buttons are hand-drawn', () => {
   ]) {
     assert.ok(selectors.includes(sel), `${sel} should use the sketch filter`);
   }
+});
+
+test('review decisions stay flat and undistorted beside document content', () => {
+  const selectors = sketchSelectors();
+  assert.equal(selectors.includes('.ag-approve'), false);
+  assert.equal(selectors.includes('.ag-reject'), false);
+  assert.match(css, /\.ag-approve,\s*\.ag-reject\s*\{[^}]*border-radius:\s*var\(--ag-r-field\)/s);
 });
 
 test('ghost and icon buttons in sidebar and fullscreen are hand-drawn', () => {

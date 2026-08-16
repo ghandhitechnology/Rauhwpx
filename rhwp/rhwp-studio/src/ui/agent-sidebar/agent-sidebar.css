@@ -2529,16 +2529,19 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 /* ─── 계획 문서 ───────────────────────────────────────
-   말풍선이 아니다. 고정 리뷰 영역에 놓이는 읽기용 문서로,
-   편집 검토 카드와 같은 면·같은 1px 식별선 규약을 쓴다. */
+   리뷰 영역과 같은 바탕 위에 놓이는 한 겹짜리 읽기 문서다. 카드 면·그림자 없이
+   여백과 구분선만으로 제목, 본문, 동작을 나눈다. */
 .ag-plan-card {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
-  min-height: 0;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-panel);
-  background: var(--ag-bg);
-  box-shadow: inset 1px 0 0 var(--ag-accent), var(--n-elev-1);
+  min-width: 0;
+  min-height: auto;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   animation: ag-plan-enter 160ms var(--ag-motion-out) both;
 }
 
@@ -2547,12 +2550,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   to { opacity: 1; transform: none; }
 }
 
-.ag-plan-card.ag-claude { box-shadow: inset 1px 0 0 var(--ag-claude), var(--n-elev-1); }
-.ag-plan-card.ag-codex { box-shadow: inset 1px 0 0 var(--ag-codex), var(--n-elev-1); }
-.ag-plan-card.ag-pi { box-shadow: inset 1px 0 0 var(--ag-pi), var(--n-elev-1); }
+.ag-plan-card.ag-claude,
+.ag-plan-card.ag-codex,
+.ag-plan-card.ag-pi { box-shadow: none; }
 
 .ag-plan-head {
-  padding: 10px 14px 9px;
+  flex: 0 0 auto;
+  padding: 2px 2px 14px;
   border-bottom: 1px solid var(--ag-border);
 }
 
@@ -2578,16 +2582,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-plan-id {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
-  letter-spacing: var(--ag-track);
+  display: none;
 }
 
 .ag-plan-title {
@@ -2604,29 +2599,33 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   line-height: 1.55;
 }
 
-/* 본문은 접지 않는다 — 길면 패널이 스크롤한다. */
+/* 본문과 동작은 정상 문서 흐름을 따른다. 스크롤은 바깥 .ag-review 하나가 맡아
+   버튼이 본문을 덮거나 이중 스크롤이 생기지 않는다. */
 .ag-plan-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  padding: 10px 14px 12px;
+  flex: 0 0 auto;
+  min-height: auto;
+  padding: 14px 2px 16px;
   color: var(--ag-text);
-  font-size: var(--font-size-sm, 11px);
-  line-height: 1.65;
+  font-size: var(--font-size-base, 12px);
+  line-height: 1.68;
+  overflow: visible;
   overflow-wrap: anywhere;
 }
 
 .ag-plan-footer {
-  position: sticky;
-  bottom: 0;
-  z-index: 1;
-  padding: 8px 14px 9px;
+  position: static;
+  flex: 0 0 auto;
+  padding: 14px 2px 2px;
   border-top: 1px solid var(--ag-border);
-  background: var(--ag-bg);
+  background: transparent;
 }
 
 .ag-plan-actions {
   display: flex;
-  gap: 6px;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .ag-plan-note {
@@ -2746,23 +2745,25 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   outline-offset: 2px;
 }
 
-/* 인라인 코드는 파일 경로 표기이기도 하다 — 통일한 한 가지 형태만 쓴다. */
+/* 코드도 별도 캡슐을 만들지 않는다. 글꼴과 한 줄의 레일만으로 구분한다. */
 .ag-md-code {
-  padding: 0 3px;
-  border-radius: var(--ag-r-chip, 3px);
-  background: var(--ag-bg-2);
-  color: var(--ag-text);
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ag-text-secondary);
   font-family: var(--ag-mono);
   font-size: 0.94em;
+  font-weight: 600;
 }
 
 .ag-md-pre {
-  margin: 0 0 8px;
-  padding: 7px 9px;
+  margin: 2px 0 12px;
+  padding: 5px 0 5px 12px;
   overflow-x: auto;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-panel);
-  background: var(--ag-bg-2);
+  border: 0;
+  border-left: 2px solid var(--ag-border-strong);
+  border-radius: 0;
+  background: transparent;
 }
 
 .ag-md-block-code {
@@ -2781,24 +2782,26 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-md-table-wrap {
   max-width: 100%;
-  margin: 2px 0 10px;
+  margin: 4px 0 14px;
   overflow-x: auto;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-panel);
+  border: 0;
+  border-radius: 0;
 }
 
 .ag-md-table {
   width: 100%;
   border-collapse: collapse;
-  background: var(--ag-bg);
+  border-top: 1px solid var(--ag-border-strong);
+  border-bottom: 1px solid var(--ag-border-strong);
+  background: transparent;
   font-size: 0.94em;
 }
 
 .ag-md-table th,
 .ag-md-table td {
   min-width: 72px;
-  padding: 6px 8px;
-  border-right: 1px solid var(--ag-border);
+  padding: 7px 8px;
+  border: 0;
   border-bottom: 1px solid var(--ag-border);
   color: var(--ag-text);
   text-align: left;
@@ -2806,13 +2809,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-md-table th {
-  background: var(--ag-bg-2);
+  background: transparent;
   font-weight: 700;
 }
 
 .ag-md-table tr:last-child td { border-bottom: 0; }
-.ag-md-table th:last-child,
-.ag-md-table td:last-child { border-right: 0; }
 .ag-md-table .ag-md-align-center { text-align: center; }
 .ag-md-table .ag-md-align-right { text-align: right; }
 
@@ -2841,15 +2842,28 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font-size: 1.04em;
 }
 
-.ag-md-math-display math { display: block; }
+.ag-md-math-display math {
+  display: inline-block;
+  margin-inline: auto;
+}
 
 .ag-msg-assistant > :first-child { margin-top: 0; }
 .ag-msg-assistant > :last-child { margin-bottom: 0; }
-.ag-msg-assistant .ag-md-p { color: inherit; }
+.ag-msg-assistant .ag-md-p,
+.ag-msg-assistant .ag-md-li { color: inherit; }
+.ag-msg-assistant .ag-md-p { margin-bottom: 10px; }
 .ag-msg-assistant .ag-md-h {
-  font-size: 1em;
-  letter-spacing: 0;
+  margin: 18px 0 6px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  font-size: 1.06em;
+  font-weight: 650;
+  letter-spacing: -0.01em;
 }
+.ag-msg-assistant .ag-md-h1 { font-size: 1.16em; }
+.ag-msg-assistant .ag-md-h2 { font-size: 1.1em; }
+.ag-msg-assistant > .ag-md-h:first-child { margin-top: 0; }
 
 .ag-progress-milestone {
   white-space: normal;
@@ -2860,12 +2874,12 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-progress-milestone > :last-child { margin-bottom: 0; }
 
-/* 사이드바 폭에서는 여백을 줄여 읽기 폭을 지킨다. */
+/* 사이드바·전체 화면 모두 같은 한 겹 문서 리듬을 유지한다. */
 .ag-root:not(.ag-fullscreen) .ag-plan-head,
 .ag-root:not(.ag-fullscreen) .ag-plan-body,
 .ag-root:not(.ag-fullscreen) .ag-plan-footer {
-  padding-left: 10px;
-  padding-right: 10px;
+  padding-left: 2px;
+  padding-right: 2px;
 }
 
 .ag-fullscreen .ag-plan-body {
@@ -4375,8 +4389,6 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 /* 채움·테두리가 있는 동작 버튼 */
 .ag-send,
-.ag-approve,
-.ag-reject,
 .ag-takeover-btn,
 .ag-threads-new,
 .ag-skills-new,
