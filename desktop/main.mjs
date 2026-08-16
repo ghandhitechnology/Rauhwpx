@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -278,6 +278,24 @@ const sessions = new SessionManager({
 });
 const documentLeases = new DocumentLeaseManager();
 const nativeFiles = new NativeFileHandleRegistry();
+const nativeBookmarkFile = join(app.getPath('userData'), 'native-document-bookmarks.json');
+
+async function loadNativeBookmarks() {
+  try {
+    const raw = JSON.parse(await readFile(nativeBookmarkFile, 'utf8'));
+    if (Array.isArray(raw)) nativeFiles.loadBookmarks(raw);
+  } catch {
+    // first run or corrupt file — start with an empty bookmark map
+  }
+}
+
+async function persistNativeBookmarks() {
+  try {
+    await writeFile(nativeBookmarkFile, JSON.stringify(nativeFiles.dumpBookmarks()), 'utf8');
+  } catch (error) {
+    console.warn('[rauhwpx] native bookmark persist failed:', error);
+  }
+}
 
 function installMenu() {
   const isMac = process.platform === 'darwin';
@@ -554,6 +572,24 @@ ipcMain.handle('desktop:native-file-is-same', (event, firstHandleId, secondHandl
   const session = sessionForEvent(event);
   return nativeFiles.isSameEntry(session.sessionId, firstHandleId, secondHandleId);
 });
+ipcMain.handle('desktop:remember-native-document', (event, documentId, handleId) => {
+  const session = sessionForEvent(event);
+  if (typeof documentId !== 'string' || !documentId) throw new Error('documentId required');
+  if (typeof handleId !== 'string' || !handleId) throw new Error('handleId required');
+  nativeFiles.rememberDocument(documentId, session.sessionId, handleId);
+  void persistNativeBookmarks();
+});
+ipcMain.handle('desktop:reopen-native-document', async (event, documentId) => {
+  const session = sessionForEvent(event);
+  if (typeof documentId !== 'string' || !documentId) return null;
+  const result = await nativeFiles.reopenDocument(session.sessionId, documentId);
+  if (!result) return null;
+  if (!result.ok) {
+    sessions.focusSession(result.ownerSessionId);
+    return { owned: true };
+  }
+  return { ...result.descriptor, saveTargetCreated: result.created };
+});
 ipcMain.handle('desktop:document-reserve', (event, identity, nativeHandleId) => {
   const session = sessionForEvent(event);
   const canonicalPath = nativeHandleId
@@ -630,6 +666,7 @@ if (!hasSingleInstanceLock) {
       filePath: join(app.getPath('userData'), 'secrets.json'),
       safeStorage,
     });
+    await loadNativeBookmarks();
     installMenu();
     if (!devUrl) installStudioProtocol({ protocol, net, root: studioDist() });
     await hubOwner.ensure();
