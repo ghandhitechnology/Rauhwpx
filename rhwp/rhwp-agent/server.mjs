@@ -1003,25 +1003,7 @@ async function handleStudioMessage(record, sock, msg) {
           });
         return;
       }
-      if (msg.referencesPending === true) {
-        if (typeof msg.messageId !== 'string' || !msg.messageId) {
-          sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'Reference-bearing messages require messageId' });
-          return;
-        }
-        record.pendingReferenceMessage = { messageId: msg.messageId, message: msg, owner: record.agentSession };
-        return;
-      }
       dispatchUserMessage(record, sock, msg, record.agentSession);
-      return;
-    }
-    case 'chat-reference-uploads-complete': {
-      const pending = record.pendingReferenceMessage;
-      if (!pending || pending.owner !== record.agentSession || msg.messageId !== pending.messageId) {
-        sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REFERENCE_MESSAGE', message: 'No matching message is waiting for reference uploads.' });
-        return;
-      }
-      record.pendingReferenceMessage = null;
-      dispatchUserMessage(record, sock, pending.message, pending.owner);
       return;
     }
     case 'chat-permission-set': {

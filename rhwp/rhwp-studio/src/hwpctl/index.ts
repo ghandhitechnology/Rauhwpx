@@ -120,7 +120,8 @@ export class HwpCtrl {
       a.href = url;
       a.download = filename;
       a.click();
-      URL.revokeObjectURL(url);
+      // 즉시 revoke하면 브라우저가 blob fetch를 시작하기 전에 다운로드가 끊길 수 있다
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
       this.onSave?.();
       return true;
     } catch (e) {

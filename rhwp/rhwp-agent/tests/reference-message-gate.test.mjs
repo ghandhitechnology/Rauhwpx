@@ -4,14 +4,11 @@ import test from 'node:test';
 
 const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
 
-test('reference-bearing messages wait for post-send uploads before agent dispatch', () => {
-  assert.match(server, /if \(msg\.referencesPending === true\)/);
-  assert.match(server, /record\.pendingReferenceMessage = \{ messageId: msg\.messageId, message: msg, owner: record\.agentSession \}/);
-  assert.match(server, /case 'chat-reference-uploads-complete'/);
-  assert.match(
-    server,
-    /record\.pendingReferenceMessage = null;\s*dispatchUserMessage\(record, sock, pending\.message, pending\.owner\)/,
-  );
+test('reference-bearing messages route through the staged-attachment gate only', () => {
+  // referencesPending / chat-reference-uploads-complete 경로는 폐기됨 —
+  // 부활하면 발신자 없는 대기 상태로 세션이 잠길 수 있다.
+  assert.doesNotMatch(server, /referencesPending/);
+  assert.doesNotMatch(server, /chat-reference-uploads-complete/);
   assert.match(
     server,
     /function dispatchUserMessage[\s\S]*addReferenceContext\(activeSession, msg\.text, prompt, messageAttachments\)/,

@@ -915,14 +915,12 @@ fn coherent_saved_empty_ladder_before_explicit_break(
     while paragraphs.get(end).is_some_and(is_saved_empty) {
         end += 1;
     }
-    let Some(explicit_break) = paragraphs.get(end).filter(|p| {
+    let explicit_break = paragraphs.get(end).filter(|p| {
         matches!(
             p.column_type,
             ColumnBreakType::Page | ColumnBreakType::Section
         )
-    }) else {
-        return None;
-    };
+    })?;
     if end - start < 2 {
         return None;
     }
@@ -12765,7 +12763,7 @@ impl TypesetEngine {
                         .iter()
                         .filter(|seg| !is_synthetic_line_seg(seg));
                     let first = saved.next()?;
-                    let last = saved.last().unwrap_or(first);
+                    let last = saved.next_back().unwrap_or(first);
                     let top = first.vertical_pos.saturating_sub(base);
                     let bottom = last
                         .vertical_pos

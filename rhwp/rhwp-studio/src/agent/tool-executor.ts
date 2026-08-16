@@ -46,6 +46,10 @@ export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'edit_header_footer',
   'insert_page_break',
   'insert_chart',
+  'replace_all',
+  'insert_footnote',
+  'edit_footnote',
+  'set_bookmark',
 ]);
 
 export function isDocumentWriteTool(tool: string) {
