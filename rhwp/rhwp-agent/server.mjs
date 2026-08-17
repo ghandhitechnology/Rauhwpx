@@ -1801,8 +1801,8 @@ function attachSocket(record, sock, role) {
     }
     try {
       if (role === 'studio') {
-        // WebSocket invokes async message listeners concurrently. Serialize Studio
-        // commands so rapid stop/start/open actions cannot resurrect an older chat.
+        // WebSocket 은 async 메시지 리스너를 동시에 실행한다. Studio 명령을 직렬화해
+        // 빠른 중지/시작/열기 조작이 옛 채팅을 되살리지 못하게 한다.
         record.studioMessageQueue = record.studioMessageQueue
           .then(() => {
             if (record.studioSocket !== sock) return;

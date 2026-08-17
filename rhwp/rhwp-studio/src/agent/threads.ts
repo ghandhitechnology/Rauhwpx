@@ -89,7 +89,7 @@ function normalizedDocumentName(value: string | null): string | null {
   return normalized || null;
 }
 
-/** Stable IDs are authoritative; filenames bridge legacy threads created before IDs existed. */
+/** 안정 ID가 기준이다. 파일명은 ID 도입 전에 만들어진 레거시 채팅을 잇는 다리다. */
 export function threadMatchesDocument(
   thread: Pick<ChatThread, 'documentId' | 'docKey'>,
   documentId: string | null,
@@ -103,8 +103,8 @@ export function threadMatchesDocument(
 }
 
 /**
- * Explorer "현재" marker. IDs win when any group matches them. If a reopen minted a
- * new ID (Electron native-path without a live handle), fall back to a unique filename.
+ * 탐색기 "현재" 표시. ID가 맞는 그룹이 있으면 ID가 이긴다. 다시 열기로 새 ID가
+ * 생겼다면(살아 있는 핸들 없는 Electron 네이티브 경로) 유일한 파일명으로 물러선다.
  */
 export function explorerGroupIsCurrent(
   group: Pick<ChatThread, 'documentId' | 'docKey'>,
