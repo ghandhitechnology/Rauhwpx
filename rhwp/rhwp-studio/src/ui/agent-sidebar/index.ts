@@ -3435,7 +3435,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         jump.type = 'button';
         jump.setAttribute('aria-label', `${docGroupLabel(group.docKey)} 문서로 이동`);
         jump.title = '현재 문서를 저장하고 이 문서로 이동합니다';
-        jump.appendChild(createIcon('expand'));
+        jump.appendChild(createIcon('external'));
         jump.addEventListener('click', (e) => {
           e.stopPropagation();
           persistCurrentThread();
