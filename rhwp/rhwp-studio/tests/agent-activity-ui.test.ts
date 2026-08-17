@@ -77,6 +77,9 @@ test('conversation follows streamed output until the user scrolls away', () => {
   assert.match(source, /new MutationObserver/);
   assert.match(source, /scrollConversationToMessage/);
   assert.match(source, /scrollConversationToEnd/);
+  assert.match(source, /return content\.classList\.contains\('ag-msg-user'\) \? content : messagesEnd/);
+  assert.match(source, /function conversationScrollTarget\(node: HTMLElement\)/);
+  assert.match(source, /Math\.min\(target, Math\.max\(0, messages\.scrollHeight - messages\.clientHeight\)\)/);
   assert.match(source, /followConversation = isConversationFollowingTurn\(\)/);
   assert.match(source, /appendConversation\(userBubble\)/);
   assert.match(source, /scrollConversationToMessage\(userBubble, \{ smooth: true \}\)/);
