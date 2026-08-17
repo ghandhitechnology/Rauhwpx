@@ -30,7 +30,8 @@ export class ViewportManager {
   private zoomAnchor: ZoomAnchor = CENTER_ZOOM_ANCHOR;
   /** 현재 휠 제스처의 잠긴 축 ('v' 세로 / 'h' 가로) */
   private wheelAxis: 'v' | 'h' = 'v';
-  private lastWheelTime = 0;
+  /** null = 아직 휠 이벤트 없음 — 첫 이벤트는 timeStamp 와 무관하게 새 제스처다. */
+  private lastWheelTime: number | null = null;
   private onScrollBound: () => void;
   private onWheelBound: (e: WheelEvent) => void;
   private onZoomAnimationFrameBound: (timestamp: number) => void;
@@ -97,7 +98,7 @@ export class ViewportManager {
         // 트랙패드 스크롤은 세로 의도여도 가로 성분이 섞인다. 제스처가 시작될 때
         // 우세한 축을 잠가, 세로 스크롤 중 문서가 옆으로 미끄러지지 않게 한다.
         const now = e.timeStamp || performance.now();
-        if (now - this.lastWheelTime > WHEEL_GESTURE_GAP_MS) {
+        if (this.lastWheelTime === null || now - this.lastWheelTime >= WHEEL_GESTURE_GAP_MS) {
           this.wheelAxis = Math.abs(deltaY) >= Math.abs(deltaX) ? 'v' : 'h';
         }
         this.lastWheelTime = now;

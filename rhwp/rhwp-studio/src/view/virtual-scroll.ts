@@ -107,7 +107,12 @@ export class VirtualScroll {
     // 판정 기준은 실제 페이지 폭이다. base 에 붙는 여백(+40) 때문에 '페이지는
     // 다 보이는데 몇십 px 슬쩍 밀리는' 상태로 넉넉한 팬 공간이 생기면 안 된다.
     const slack = this.maxPageWidth > viewportWidth ? viewportWidth : 0;
-    const total = Math.max(baseWidth, viewportWidth) + slack * 2;
+    // slack 이 없으면 최종 폭을 뷰포트에 정확히 맞춰 가로 스크롤을 봉인한다.
+    // base 의 +40 여백이 뷰포트를 살짝 넘겨 수십 px 이 슬쩍 밀리는 상태를 막는다
+    // (페이지 자체는 뷰포트보다 좁으므로 잘리는 건 장식 여백뿐이다).
+    const total = slack > 0
+      ? Math.max(baseWidth, viewportWidth) + slack * 2
+      : viewportWidth;
     const shift = (total - baseWidth) / 2;
     this.pageLefts = this.pageLefts.map((left, pageIdx) => {
       const resolved = left >= 0
