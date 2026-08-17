@@ -115,6 +115,8 @@ test('rapid past-chat switches cannot activate a stale provider session', () => 
 
 test('changing files ends the open chat and starts a fresh chat for the next file', () => {
   assert.match(documentSwitchSource, /startNewChat\(\{ silent: true \}\)/);
+  assert.match(documentSwitchSource, /rebuildThreadsList\(\);/);
+  assert.doesNotMatch(documentSwitchSource, /if \(threadsListVisible\(\)\) rebuildThreadsList/);
   assert.doesNotMatch(documentSwitchSource, /currentThreadMatches/);
   assert.doesNotMatch(documentSwitchSource, /currentThread\.messages\.length/);
   assert.match(source, /if \(currentThread\.messages\.length === 0\) \{\s*removeThread\(currentThread\.id\);/);
@@ -123,4 +125,9 @@ test('changing files ends the open chat and starts a fresh chat for the next fil
     source,
     /function startNewChat[\s\S]*persistCurrentThread\(\);[\s\S]*createEmptyThread\(\{[\s\S]*documentId: currentDocumentId[\s\S]*bridge\.stopChat\(\);[\s\S]*startCurrentBridgeChat\(true\)/,
   );
+});
+
+test('explorer current badge uses unique filename fallback after document switch', () => {
+  assert.match(source, /explorerGroupIsCurrent\(group, currentDocumentId, currentDocKey, groups\)/);
+  assert.match(source, /if \(isCurrentDoc\) groupBtn\.append\(el\('span', 'ag-threads-group-badge', '현재'\)\)/);
 });

@@ -24,6 +24,7 @@ export interface OpenRecentDeps {
     bytes: Uint8Array;
     fileName: string;
     fileHandle: FileSystemFileHandleLike;
+    documentId?: string;
   }) => void;
   /**
    * 메타-only 항목(핸들 없음) 재열기 요청 — 파일 선택 대화상자를 다시 연다.
@@ -68,9 +69,15 @@ function requestPick(entry: RecentDoc, deps: OpenRecentDeps): OpenRecentResult {
 async function emitLiveFile(
   handle: FileSystemFileHandleLike,
   deps: OpenRecentDeps,
+  documentId?: string,
 ): Promise<void> {
   const { bytes, name } = await deps.readFile(handle);
-  deps.emitOpen({ bytes, fileName: name, fileHandle: handle });
+  deps.emitOpen({
+    bytes,
+    fileName: name,
+    fileHandle: handle,
+    ...(documentId ? { documentId } : {}),
+  });
 }
 
 async function removeMissing(entry: RecentDoc, deps: OpenRecentDeps, err: unknown): Promise<OpenRecentResult> {
@@ -106,7 +113,7 @@ export async function openRecentEntry(
   }
 
   try {
-    await emitLiveFile(handle, deps);
+    await emitLiveFile(handle, deps, entry.documentId);
     return 'opened';
   } catch (err) {
     if (handle.identityKind === 'native-path') {
@@ -114,7 +121,7 @@ export async function openRecentEntry(
       if (restored === 'owned') return ownedElsewhere(deps);
       if (restored) {
         try {
-          await emitLiveFile(restored, deps);
+          await emitLiveFile(restored, deps, entry.documentId);
           return 'opened';
         } catch (restoreErr) {
           return removeMissing(entry, deps, restoreErr);
