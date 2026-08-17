@@ -876,3 +876,56 @@ test('빈 교체(삭제) 멀티 문단: 문단 병합이 즉시 반영되고 app
   assert.deepEqual([fake.text(0), fake.text(1), fake.text(2), fake.text(3)],
     ['head', 'old1', 'old2', 'tail']);
 });
+
+// ─── 벌크 교체 이벤트 합치기 ─────────────────────────────
+
+test('replaceTextBatch: 항목 수와 무관하게 문서 이벤트/오버레이 동기화는 한 번씩만 수행된다', () => {
+  const { mgr, fake, overlayOps, eventBus } = makeManager([paraOf('foo bar foo baz foo')]);
+  let docChanged = 0;
+  let docMutated = 0;
+  eventBus.on('document-changed', () => { docChanged++; });
+  eventBus.on('document-mutated', () => { docMutated++; });
+
+  const mk = (s: number, e: number): DocRange => ({
+    sectionIdx: 0, startParaIdx: 0, startCharOffset: s, endParaIdx: 0, endCharOffset: e,
+  });
+  // 호출자 계약: 문서 좌표 역순 정렬
+  mgr.replaceTextBatch([
+    { range: mk(16, 19), text: 'X' },
+    { range: mk(8, 11), text: 'X' },
+    { range: mk(0, 3), text: 'X' },
+  ], 'claude');
+
+  assert.equal(fake.text(0), 'X bar X baz X');
+  assert.equal(docChanged, 1, '배치 전체가 document-changed 한 번으로 합쳐져야 한다');
+  assert.equal(docMutated, 1);
+  assert.equal(overlayOps.length, 1, '오버레이 동기화도 배치 끝에 한 번만 수행된다');
+  assert.equal(overlayOps[0].length, 3, '마지막 동기화에는 세 op 이 모두 담긴다');
+
+  // 벌크 구간이 닫힌 뒤의 단일 편집은 다시 즉시 이벤트를 발행한다 (플래그 누수 없음)
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'y');
+  assert.equal(docChanged, 2);
+  assert.equal(overlayOps.length, 2);
+});
+
+test('replaceTextBatch 실패: 롤백 후에도 이벤트는 한 번만 발행되고 이후 편집은 정상 동작한다', () => {
+  const { mgr, fake, eventBus } = makeManager([paraOf('foo bar')]);
+  let docChanged = 0;
+  eventBus.on('document-changed', () => { docChanged++; });
+
+  const mk = (s: number, e: number): DocRange => ({
+    sectionIdx: 0, startParaIdx: 0, startCharOffset: s, endParaIdx: 0, endCharOffset: e,
+  });
+  assert.throws(() => mgr.replaceTextBatch([
+    { range: mk(4, 7), text: 'X' },
+    { range: mk(3, 2), text: 'X' }, // 역전된 범위 — 두 번째 항목에서 실패
+  ], 'claude'));
+
+  assert.equal(fake.text(0), 'foo bar', '스냅샷 복원으로 원문이 돌아온다');
+  assert.equal(mgr.hasPending(), false, '배치가 만든 set 은 통째로 제거된다');
+  assert.equal(docChanged, 1, '롤백 경로도 이벤트는 한 번만 발행한다');
+
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'y');
+  assert.equal(fake.text(0), 'yfoo bar');
+  assert.equal(docChanged, 2);
+});
