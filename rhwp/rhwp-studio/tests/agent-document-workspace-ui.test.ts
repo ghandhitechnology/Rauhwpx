@@ -16,7 +16,7 @@ test('workspace keeps document context in the header and execution settings with
   assert.match(source, /header\.append\(modelSummary, connectionRow\)/);
   assert.match(source, /composerMeta\.setAttribute\('aria-label', '에이전트 및 채팅 설정'\)/);
   assert.match(source, /composerMeta\.append\(selectors, composerUtilities\)/);
-  assert.match(source, /composer\.append\(composerOverlay, slashMenu, composerField, composerMeta, configPanel\)/);
+  assert.match(source, /composer\.append\(composerOverlay, slashMenu, templateChip, composerField, composerMeta, configPanel\)/);
   assert.doesNotMatch(source, /modelSummary\.append\([^;]*selectors/);
 });
 

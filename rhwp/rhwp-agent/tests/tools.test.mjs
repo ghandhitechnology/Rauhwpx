@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 54개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 54);
+test('도구는 정확히 65개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 65);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -47,7 +47,7 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 46);
+  assert.equal(direct.size, 57);
   assert.ok(direct.has('insert_text'));
   assert.ok(direct.has('get_engine_edit_capabilities'));
   assert.ok(direct.has('apply_engine_edits'));
@@ -58,6 +58,8 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(direct.has('get_outline'));
   assert.ok(direct.has('get_table_properties'));
   assert.ok(direct.has('search_reference_files'));
+  assert.ok(direct.has('template_get_structure'));
+  assert.ok(direct.has('template_insert_block'));
   assert.ok(!direct.has('download_file'));
   assert.ok(!direct.has('present_implementation_plan'));
 
@@ -76,6 +78,16 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(implementing.has('download_file'));
   assert.ok(implementing.has('browserbase_act'));
   assert.ok(!implementing.has('present_implementation_plan'));
+});
+
+test('template tools separate read-only inspection from pending document writes', () => {
+  for (const name of [
+    'template_get_structure', 'template_get_text_range', 'template_get_para_format',
+    'template_get_char_format', 'template_list_styles', 'template_get_page_layout', 'template_render_page',
+  ]) assert.equal(byName.get(name)?.category, 'template-read');
+  for (const name of ['template_apply_section_layout', 'template_apply_paragraph_format', 'template_insert_block']) {
+    assert.equal(byName.get(name)?.category, 'document-write');
+  }
 });
 
 test('present_implementation_plan 스키마가 완전한 구조를 강제한다', () => {
