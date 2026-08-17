@@ -3427,6 +3427,25 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         });
       }
       groupLi.appendChild(groupBtn);
+      // 문서로 건너뛰기 — 연필과 같은 문법으로 오른쪽에 겹쳐 hover 에서 드러난다.
+      // 지금 보고 있는 문서에는 필요 없으니 아예 만들지 않는다.
+      if (canMove && !isCurrentDoc) {
+        groupLi.classList.add('ag-has-jump');
+        const jump = el('button', 'ag-doc-jump');
+        jump.type = 'button';
+        jump.setAttribute('aria-label', `${docGroupLabel(group.docKey)} 문서로 이동`);
+        jump.title = '현재 문서를 저장하고 이 문서로 이동합니다';
+        jump.appendChild(createIcon('expand'));
+        jump.addEventListener('click', (e) => {
+          e.stopPropagation();
+          persistCurrentThread();
+          moveToLibraryDocument?.({
+            documentId: group.documentId,
+            fileName: group.docKey,
+          });
+        });
+        groupLi.appendChild(jump);
+      }
       threadsList.appendChild(groupLi);
 
       if (!expanded) continue;
