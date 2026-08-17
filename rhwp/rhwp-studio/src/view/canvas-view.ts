@@ -516,6 +516,7 @@ export class CanvasView {
     renderedCanvas.style.height = `${renderedCanvas.height / dpr}px`;
     renderedCanvas.style.transformOrigin = '';
     renderedCanvas.dataset.rhwpRenderedZoom = String(zoom);
+    renderedCanvas.dataset.rhwpPageIndex = String(pageIdx);
     this.renderGridOverlay(pageIdx, renderedCanvas);
     if (renderResult.needsTextEditStaticLayerVerification) {
       this.scheduleTextEditStaticLayerVerification(pageIdx);

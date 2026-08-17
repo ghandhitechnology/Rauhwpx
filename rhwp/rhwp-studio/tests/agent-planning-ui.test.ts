@@ -140,6 +140,18 @@ test('entering plan mode is blocked while document edits await review', () => {
   assert.match(source, /검토 대기 중인 문서 편집이 있습니다/);
 });
 
+test('completed plans open as history without reactivating live plan UI', () => {
+  assert.match(source, /const restartCompletedPlan = next === 'plan'[\s\S]*planningPhase === 'implementing'/);
+  assert.match(source, /if \(next === chatWorkflow && !restartCompletedPlan\)/);
+  assert.match(source, /button\.addEventListener\('click', \(\) => openPresentedPlan\(message\.planId\)\)/);
+  assert.match(source, /activePlanHistorical = !planApprovable[\s\S]*workflowState\.phase === 'implementing'/);
+  assert.match(source, /activePlanHistorical \? '계획 기록' : PLANNING_PHASE_LABEL\[planningPhase\]/);
+  assert.match(source, /if \(!activePlanHistorical\) \{[\s\S]*const approvableNow = planApprovable/);
+  assert.match(source, /planRestore\.replaceChildren\(activePlanHistorical \? planHistoryIcon : planOrbit\)/);
+  assert.match(source, /activePlanHistorical \? '계획 기록 펼치기' : '계획 펼치기'/);
+  assert.match(css, /\.ag-plan-history-icon \{[^}]*width:\s*20px;[^}]*height:\s*20px;/s);
+});
+
 test('plan history and chat presentations restore while only the active server plan is approvable', () => {
   assert.match(source, /currentThread\.workflow = chatWorkflow/);
   assert.match(source, /message\.kind === 'plan'/);
