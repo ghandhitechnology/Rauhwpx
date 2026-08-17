@@ -2804,7 +2804,10 @@ export class InputHandler {
       // 한다 — 지연 상태로 두면 다음 페이지로 넘어간 줄이 그려지지 않은 채
       // 타이핑 내내 보이지 않는다.
       if (this.paragraphTailNearPageBoundary()) {
-        this.flushDeferredPaginationIfNeeded('page-boundary', false);
+        // flush 실패 시 타이머가 취소된 채 pending 만 남는다 — idle 재시도를 예약한다.
+        if (!this.flushDeferredPaginationIfNeeded('page-boundary', false)) {
+          this.scheduleDeferredPaginationFlush();
+        }
       } else {
         // 경계 pre-flush 후 추가된 stable raw 입력은 즉시 재-flush하지 않고
         // 기존 작은 문서 idle 정책으로만 마무리한다.
