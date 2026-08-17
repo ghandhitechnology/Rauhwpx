@@ -9,6 +9,7 @@ import {
   explorerGroupIsCurrent,
   listThreads,
   listThreadsByDocument,
+  recordDocumentOpened,
   setThreadTitle,
   subscribeThreadChanges,
   threadMatchesDocument,
@@ -299,6 +300,34 @@ test('listThreadsByDocument groups by document, groups ordered by recent activit
     groups[1]!.threads.map((t) => t.messages[0]!.text),
     ['a 최근 채팅', 'a 첫 채팅'],
   );
+});
+
+test('document groups hold last-opened order; only reopening a document moves it up', () => {
+  mem.clear();
+  const mk = (docKey: string, documentId: string, text: string) => {
+    const t = createEmptyThread({ agent: 'claude', model: 'sonnet', effort: 'high', docKey, documentId });
+    t.messages.push({ role: 'user', text });
+    upsertThread(t);
+    return t;
+  };
+  // a → b 순서로 문서를 열었다: b 가 위.
+  recordDocumentOpened('doc-a', 'a.hwpx');
+  recordDocumentOpened('doc-b', 'b.hwpx');
+  const staleA = mk('a.hwpx', 'doc-a', 'a 채팅');
+  mk('b.hwpx', 'doc-b', 'b 채팅');
+  assert.deepEqual(listThreadsByDocument().map((g) => g.docKey), ['b.hwpx', 'a.hwpx']);
+
+  // a 의 옛 채팅이 다시 움직여도(updatedAt 갱신) 그룹 순서는 그대로다.
+  upsertThread(staleA);
+  assert.deepEqual(listThreadsByDocument().map((g) => g.docKey), ['b.hwpx', 'a.hwpx']);
+
+  // a 문서를 다시 열어야만 맨 위로 올라온다.
+  recordDocumentOpened('doc-a', 'a.hwpx');
+  assert.deepEqual(listThreadsByDocument().map((g) => g.docKey), ['a.hwpx', 'b.hwpx']);
+
+  // 기록이 없는 문서(레거시)는 기록된 그룹 뒤에 최근 활동 순서로 남는다.
+  mk('c.hwpx', 'doc-c', 'c 채팅');
+  assert.deepEqual(listThreadsByDocument().map((g) => g.docKey), ['a.hwpx', 'b.hwpx', 'c.hwpx']);
 });
 
 test('listThreadsByDocument splits same filenames when documentId differs', () => {
