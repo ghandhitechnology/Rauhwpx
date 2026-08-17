@@ -167,6 +167,7 @@ export class PendingOverlayRenderer {
   private interactionRoot: HTMLElement | null = null;
   private hoverKey: string | null = null;
   private pinnedKey: string | null = null;
+  private renderRafId: number | null = null;
   // 파라미터 프로퍼티 대신 명시적 할당 (node --test strip-only 모드 호환).
   private deps: { canvasView: CanvasView; wasm: WasmBridge; eventBus: EventBus };
 
@@ -197,7 +198,7 @@ export class PendingOverlayRenderer {
     for (const name of geometryEvents) {
       this.unsubs.push(deps.eventBus.on(name, () => {
         this.geometryDirty = true;
-        this.render();
+        this.scheduleRender();
       }));
     }
     // 화면 사영만 바뀌는 이벤트 — 캐시된 기하를 다시 배치만 한다.
@@ -206,7 +207,7 @@ export class PendingOverlayRenderer {
     // 가상 스크롤 배치가 확정되면 캐시된 페이지 기하를 다시 사영한다.
     const projectionEvents = ['zoom-changed', 'viewport-resize', 'viewport-inset-changed', 'page-layout-changed'];
     for (const name of projectionEvents) {
-      this.unsubs.push(deps.eventBus.on(name, () => this.render()));
+      this.unsubs.push(deps.eventBus.on(name, () => this.scheduleRender()));
     }
     this.unsubs.push(deps.eventBus.on('cursor-rect-updated', () => this.inspectCaret()));
     document.addEventListener('keydown', this.onKeyDown, true);
@@ -224,7 +225,7 @@ export class PendingOverlayRenderer {
       this.pinnedKey = null;
     }
     this.geometryDirty = true;
-    this.render();
+    this.scheduleRender();
   }
 
   clear(): void {
@@ -236,9 +237,29 @@ export class PendingOverlayRenderer {
     this.render();
   }
 
+  /**
+   * 렌더를 프레임당 한 번으로 합친다 — 문서 변이 버스트(에이전트 편집)에서
+   * 이벤트마다 wasm rect 프로브·DOM 재조정을 반복하지 않는다.
+   */
+  private scheduleRender(): void {
+    if (this.renderRafId !== null) return;
+    if (typeof requestAnimationFrame !== 'function') {
+      this.render();
+      return;
+    }
+    this.renderRafId = requestAnimationFrame(() => {
+      this.renderRafId = null;
+      this.render();
+    });
+  }
+
   dispose(): void {
     for (const un of this.unsubs) un();
     this.unsubs = [];
+    if (this.renderRafId !== null) {
+      cancelAnimationFrame(this.renderRafId);
+      this.renderRafId = null;
+    }
     document.removeEventListener('keydown', this.onKeyDown, true);
     this.detachInteractionRoot();
     this.ops = [];
