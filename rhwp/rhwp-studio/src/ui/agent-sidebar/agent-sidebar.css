@@ -1125,14 +1125,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   width: 24px;
   height: 24px;
   padding: 0;
-  border: 1px solid transparent;
-  border-radius: var(--ag-r-chip);
+  border: none;
   background: transparent;
   color: var(--ag-text-muted);
   cursor: pointer;
   opacity: 0;
   transform: translateY(-50%);
-  transition: opacity 120ms ease;
+  transition: opacity 120ms ease, color 120ms ease;
 }
 
 .ag-threads-group:hover .ag-doc-jump,
@@ -1140,9 +1139,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   opacity: 1;
 }
 
+/* 칩 상자 없이 아이콘만 밝아진다. */
 .ag-doc-jump:hover {
-  border-color: var(--ag-border-strong);
-  background: var(--ag-bg);
   color: var(--ag-text);
 }
 
@@ -1234,14 +1232,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   width: 24px;
   height: 24px;
   padding: 0;
-  border: 1px solid transparent;
-  border-radius: var(--ag-r-chip);
+  border: none;
   background: transparent;
   color: var(--ag-text-muted);
   cursor: pointer;
   opacity: 0;
   transform: translateY(-50%);
-  transition: opacity 120ms ease;
+  transition: opacity 120ms ease, color 120ms ease;
 }
 
 .ag-threads-row:hover .ag-thread-rename,
@@ -1249,9 +1246,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   opacity: 1;
 }
 
+/* 칩 상자 없이 아이콘만 밝아진다. */
 .ag-thread-rename:hover {
-  border-color: var(--ag-border-strong);
-  background: var(--ag-bg);
   color: var(--ag-text);
 }
 
@@ -5182,6 +5178,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-permission-btn,
 .ag-skills-btn,
 .ag-thread-rename,
+.ag-doc-jump,
 .ag-environment-plan,
 .ag-environment-changes {
   border-radius: 7px 9px 6px 10px / 9px 6px 10px 7px;
