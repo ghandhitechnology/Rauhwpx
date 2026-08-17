@@ -91,8 +91,7 @@
   font-size: var(--font-size-base);
 }
 
-#document-open-action,
-#document-new-action {
+#document-open-action {
   min-width: 132px;
   height: 30px;
   padding: 0 14px;
@@ -107,15 +106,33 @@
   box-shadow: var(--shadow-light);
 }
 
-#document-open-action:hover,
-#document-new-action:hover {
+#document-open-action:hover {
   background: var(--accent-strong);
   border-color: var(--accent-strong);
 }
 
-#document-open-action:active,
-#document-new-action:active {
+#document-open-action:active {
   box-shadow: var(--ui-pressed-inset);
+}
+
+#document-new-action {
+  margin-top: 2px;
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--ui-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+#document-new-action:hover {
+  color: var(--ui-text);
+  text-decoration: underline;
+}
+
+#document-new-action:active {
+  opacity: 0.7;
 }
 
 #document-open-action:focus-visible,
