@@ -1113,6 +1113,54 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: var(--ag-accent);
 }
 
+/* 문서로 건너뛰기 — 연필과 같은 문법: 오른쪽에 겹쳐 두고 hover/focus 에서만
+   드러난다. 그룹 li 가 sticky(=positioned)라 그대로 기준이 된다. */
+.ag-doc-jump {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--ag-r-chip);
+  background: transparent;
+  color: var(--ag-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 120ms ease;
+}
+
+.ag-threads-group:hover .ag-doc-jump,
+.ag-doc-jump:focus-visible {
+  opacity: 1;
+}
+
+.ag-doc-jump:hover {
+  border-color: var(--ag-border-strong);
+  background: var(--ag-bg);
+  color: var(--ag-text);
+}
+
+.ag-doc-jump:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-doc-jump .ag-icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* 아이콘이 겹칠 자리만큼 이름을 비켜 준다. */
+.ag-threads-group.ag-has-jump .ag-threads-group-btn {
+  padding-right: 34px;
+}
+
 /* 다른 문서의 채팅 행 — 열람만 가능하다는 걸 살짝 가라앉혀 보여준다. */
 .ag-threads-row.ag-foreign .ag-threads-item {
   opacity: 0.72;
@@ -1218,7 +1266,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ag-thread-rename { transition: none; }
+  .ag-thread-rename,
+  .ag-doc-jump { transition: none; }
 }
 
 /* 편집 중인 행은 행 전체를 입력 필드로 바꾼다 — 자리가 튀지 않게
