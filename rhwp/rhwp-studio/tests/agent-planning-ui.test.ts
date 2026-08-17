@@ -96,7 +96,7 @@ test('approval immediately switches to implementation with a disabled, announced
   assert.match(source, /case 'implementation-started':[\s\S]*closePlanForExecution\(e\.planId \|\| activePlan\?\.planId \|\| ''\);[\s\S]*setPlanningPhase\(e\.phase\)/);
   assert.match(source, /function closePlanForExecution\(planId: string\): void \{[\s\S]*activePlan = null;[\s\S]*planMinimized = false;[\s\S]*persistCurrentThread\(\);/);
   assert.match(source, /approve\.disabled = !approvableNow/);
-  assert.match(source, /if \(planningPhase === 'switching' \|\| attachmentsSending \|\| referenceLibrary\.hasBlockingDrafts\(\)\) return;/);
+  assert.match(source, /if \(planningPhase === 'switching' \|\| chatStartPendingThreadId !== null \|\| attachmentsSending \|\| referenceLibrary\.hasBlockingDrafts\(\)\) return;/);
   assert.match(source, /if \(planningPhase === 'switching'\)[\s\S]*else if \(!planApprovable\)/);
   assert.match(source, /승인했습니다\. 실행 단계로 전환 중입니다…/);
 });
@@ -123,7 +123,7 @@ test('plan mode warns once about full remote-browser control and scoped download
 });
 
 test('mode, model and permission switches are locked while a turn runs or the chat is switching', () => {
-  assert.match(source, /function isControlLocked\(\): boolean \{\s*\n\s*return turnRunning \|\| attachmentsSending \|\| workflowTransitionPending \|\| planningPhase === 'switching';/);
+  assert.match(source, /function isControlLocked\(\): boolean \{[\s\S]*return turnRunning \|\| attachmentsSending \|\| chatStartPendingThreadId !== null[\s\S]*workflowTransitionPending \|\| planningPhase === 'switching';/);
   assert.match(source, /workflowTransitionPending = true;[\s\S]*bridge\.setWorkflow\(next\)/);
   assert.match(source, /case 'workflow-changed':[\s\S]*workflowTransitionPending = false/);
   assert.match(source, /const controlsLocked = isControlLocked\(\)/);
