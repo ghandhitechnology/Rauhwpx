@@ -108,6 +108,7 @@ function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']])
       return { changeSetId: 'cs-1', fieldId: 7, oldValue: 'old', newValue: value };
     },
     hasPendingStructureOp: () => false,
+    hasTemplateMutation: () => false,
   };
   const inputHandler = {
     getCursorPosition: () => ({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 }),
@@ -121,7 +122,7 @@ function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']])
     revision,
     pending: pending as any,
   });
-  return { executor, calls, bus, revision };
+  return { executor, calls, bus, revision, pending };
 }
 
 async function expectToolError(p: Promise<unknown>, code: string): Promise<AgentToolError> {
@@ -233,6 +234,15 @@ test('executor: planning reads and authorized implementation writes remain avail
     activeCapabilityEpoch: 8,
   });
   assert.equal(calls[0]?.method, 'insertText');
+});
+
+test('executor: structural template previews block ordinary document writes', async () => {
+  const { executor, pending, calls } = makeExecutor();
+  pending.hasTemplateMutation = () => true;
+  await expectToolError(executor.execute('insert_text', {
+    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
+  }, 'claude'), 'TEMPLATE_PENDING_CONFLICT');
+  assert.deepEqual(calls, []);
 });
 
 test('executor: get_structure가 revision/미리보기를 반환', async () => {

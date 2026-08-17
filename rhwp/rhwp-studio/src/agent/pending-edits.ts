@@ -117,6 +117,7 @@ export class PendingEditManager {
   private bulkDocEventsReason: string | null = null;
   private bulkOverlayDirty = false;
   private bulkOpsChanged = false;
+  private templateLocked = false;
   // 파라미터 프로퍼티 대신 명시적 할당 (node --test strip-only 모드 호환).
   private deps: PendingEditDeps;
 
@@ -428,6 +429,12 @@ export class PendingEditManager {
     templateRevision: number,
     operation: () => { warnings?: string[]; skippedFeatures?: string[]; affectedSections?: number[] } | void,
   ): { changeSetId: string; report: { warnings: string[]; skippedFeatures: string[]; affectedSections: number[] } } {
+    if (this.sets.some((set) => set.ops.some((op) => op.kind !== 'template'))) {
+      throw new AgentToolError(
+        'TEMPLATE_PENDING_CONFLICT',
+        'Review the existing document edits before applying a structural template transfer.',
+      );
+    }
     const wasm = this.deps.wasm;
     this.deps.inputHandler.prepareSnapshotCapacity?.(1);
     const snapshotId = wasm.saveSnapshot();
@@ -676,6 +683,10 @@ export class PendingEditManager {
     return this.sets.some((s) => s.ops.length > 0);
   }
 
+  hasTemplateMutation(): boolean {
+    return this.sets.some((set) => set.ops.some((op) => op.kind === 'template'));
+  }
+
   /** approve — 적용된 미리보기는 재생성하지 않고 그대로 단일 undo 항목으로 채택한다. */
   approve(changeSetId: string): void {
     const set = this.sets.find((s) => s.id === changeSetId);
@@ -838,6 +849,7 @@ export class PendingEditManager {
     this.listeners.clear();
     this.sets = [];
     this.open = null;
+    this.syncTemplateLock();
   }
 
   // ─── 내부 ────────────────────────────────────────────
@@ -943,7 +955,9 @@ export class PendingEditManager {
   }
 
   private syncTemplateLock(): void {
-    const locked = this.sets.some((set) => set.ops.some((op) => op.kind === 'template'));
+    const locked = this.hasTemplateMutation();
+    if (locked === this.templateLocked) return;
+    this.templateLocked = locked;
     this.deps.eventBus.emit('agent-template-lock-changed', locked);
   }
 
@@ -2063,10 +2077,9 @@ export class PendingEditManager {
         dropped.push(op);
         continue;
       }
-      if (op.kind === 'template' && op.userEditSeqAtSnapshot !== this.userEditSeq) {
-        dropped.push(op);
-        continue;
-      }
+      // Template previews hold a full-document baseline while direct user and agent
+      // writes are locked. Always keep them revertible; dropping one would strand
+      // the structural preview in the document without approval or undo history.
       kept.push(op);
     }
     return { kept, dropped };
