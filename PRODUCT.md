@@ -16,7 +16,7 @@ rhwp is an independent open-source HWP/HWPX viewer/editor with agentic features 
 
 ## Positioning
 
-An HWP editor with agentic features as a first-class part of the product—not an external AI tool that cannot touch Hangul documents, and not a generic chat overlay on a viewer. Documents are edited through a real HWP engine (Rust → WASM); the AI proposes changes against the live open document and the user stays in control.
+An HWP editor with agentic features as a first-class part of the product—not an external AI tool that cannot touch Hangul documents, and not a generic chat overlay on a viewer. Documents are edited through a real HWP engine (Rust → WASM); the AI makes visible, undoable changes against the live open document, while planning approval and editor undo keep the user in control.
 
 ## Operating Context
 
