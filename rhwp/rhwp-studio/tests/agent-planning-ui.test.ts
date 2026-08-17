@@ -144,7 +144,7 @@ test('plan history and chat presentations restore while only the active server p
   assert.match(source, /currentThread\.workflow = chatWorkflow/);
   assert.match(source, /message\.kind === 'plan'/);
   assert.match(source, /message\.planId === plan\.planId/);
-  assert.match(source, /messages\.appendChild\(renderPlanMessage\(msg\)\)/);
+  assert.match(source, /appendConversation\(renderPlanMessage\(msg\)\)/);
   assert.match(source, /currentThread\.latestPlan = activePlan/);
   assert.match(source, /currentThread\.plans = \[\.\.\.planHistory\]/);
   assert.match(source, /loaded\.plans\?\.length/);

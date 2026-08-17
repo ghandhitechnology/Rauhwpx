@@ -9,7 +9,7 @@ the browser (studio).
 claude CLI ──spawn──┐                          ┌── ws://127.0.0.1:5175/studio ── rhwp-studio page
 codex CLI ──spawn───┤   rhwp-agent server.mjs  │      src/agent/bridge.ts (WS client)
                     │   (WS hub, 127.0.0.1)    │        ├─ tool-executor.ts (document tools)
-mcp-stdio.mjs ──────┴── ws://127.0.0.1:5175/mcp┘        ├─ pending-edits.ts (approval queue)
+mcp-stdio.mjs ──────┴── ws://127.0.0.1:5175/mcp┘        ├─ pending-edits.ts (verified auto-commit staging)
  (each CLI spawns it as its MCP server;                 └─ src/ui/agent-sidebar/ (chat UI)
   tool calls are forwarded to the hub)
 ```
@@ -60,16 +60,15 @@ Paths are relative to the repository root.
    changes, and web operations appear as expandable rows: spinner while
    running, then ✓/✕, with the tool name, arguments, and result preview.
 
-5. **Approve / reject (pending edits)** — agent edits are not committed
-   immediately: insertions show tinted, deletions struck through, formatting
-   with a dotted outline. When the turn ends, a review card appears at the
-   bottom of the sidebar. **Approve** applies everything as a single undo step
-   (Ctrl+Z reverts the whole turn); **Reject** rolls it back.
+5. **Autonomous document edits** — semantic edits remain visible as tinted live
+   changes while the agent verifies its work, then commit automatically when the
+   turn succeeds as one undo step. Failed turns roll staged edits back. Raw engine
+   batches commit atomically as one undo step and restore the exact snapshot on failure.
 
 6. **Core tools and permissions** — Claude and Codex can both use project files,
    shell commands, and web search/fetch in addition to the rhwp document tools.
    New chats start in **Safe** mode. Live-document MCP writes still work
-   (pending sidebar approval); file and shell tools stay inside the project.
+   autonomously with editor undo history; file and shell tools stay inside the project.
    The permission button can switch an idle chat to **Full access** after a
    warning; the provider session resumes with the new boundary. Full access
    can reach files anywhere on the laptop.
@@ -230,7 +229,7 @@ enter scope counts and expire after 12 hours.
 Studio should repeat the IDs on `chat-user-message`; the hub rejects stale IDs
 before retrieval while continuing to accept legacy messages that omit them.
 
-## MCP tools (server name `rhwp`, 51 tools)
+## MCP tools (server name `rhwp`, 54 tools)
 
 Visible to Claude as `mcp__rhwp__<name>`.
 
@@ -246,8 +245,11 @@ Visible to Claude as `mcp__rhwp__<name>`.
   `get_para_format` (sees real lists — HWP list numbers are not text),
   `get_char_format` (char format at a point; documents the inheritance rule),
   `get_table_properties` (table/object placement plus optional cell state),
+  `get_engine_edit_capabilities` (all classified engine edits, structured-copy prerequisites, and signatures),
   `preview_equation` (metrics + warnings), `verify_changes`
-- Write (all pending approval): `insert_text`, `delete_range`,
+- Write (autonomous and undoable): `apply_engine_edits` (atomic access to every
+  classified document mutation), `prepare_engine_edit_session` (structured-copy
+  and non-document setup), `insert_text`, `delete_range`,
   `replace_range`, `apply_char_format` (incl. `fontFamily`),
   `set_field_value`, `create_table` (bulk cell fill + header row),
   `edit_table` (rows/cols/merge/split plus table placement, wrapping, pagination,
@@ -291,20 +293,19 @@ do not require per-action confirmation.
 
 Verify workflow: the system brief and tool descriptions instruct the model to
 call `verify_changes` after a batch of edits and before ending its turn — it
-returns per-op status (applied-now vs awaiting-approval), post-edit text
+returns per-op status (applied-now vs staged-for-turn-commit), post-edit text
 digests, affected pages and warnings, and with `includeImage:true` a PNG
-render of the first affected page showing the post-approval state.
+render of the first affected page.
 `render_page` can likewise return a PNG (`format:"png"`). Any tool result
 carrying an `image` field (`{ data: base64, mimeType }`) is forwarded to the
 model as an image content block it can visually inspect.
 
-Write-tool approval model: non-destructive object ops (create table, insert
-image/equation/chart, para format, page layout, new header/footer) apply
-immediately as tinted pending changes and are reverted by inverse ops on
-reject; destructive ops (delete row/col, merge/split cells, cell/table props,
-apply style, editing an existing header/footer) are mark-only and execute
-when the user approves. A table with a pending destructive mark rejects
-further edits with `PENDING_DESTRUCTIVE_OP` until reviewed.
+Write-tool commit model: semantic object ops use the live staged preview and
+commit automatically on successful turn completion; failed turns roll them
+back. Destructive table operations remain mark-only during verification and
+execute at commit. `apply_engine_edits` runs 1–32 registry-backed document mutations
+as one immediate atomic snapshot transaction and one editor undo entry. Clipboard
+and view-session setup is explicit through `prepare_engine_edit_session`.
 
 Revision contract: every read response carries a `revision`; every write
 requires `expectedRevision`. A mismatch returns `REVISION_MISMATCH`, telling

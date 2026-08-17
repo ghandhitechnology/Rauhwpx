@@ -12,9 +12,9 @@
 
 `rhwp-studio`, the web editor in this repo, includes a chat sidebar that puts a local Claude or Codex CLI agent to work on the document you have open:
 
-- **Reads the document** through 36 MCP tools — structure, outline, text ranges, selection, fields, search, footnotes, bookmarks, list/format inspection, page rendering (SVG/PNG).
-- **Proposes edits** — insert, delete, replace, character formatting, field values. Nothing is applied silently: insertions are tinted, deletions struck through, formatting outlined.
-- **Waits for your call** — each turn ends with a review card in the sidebar. **Approve** commits the whole turn as a single undo step (one Ctrl+Z reverts it); **Reject** rolls it back.
+- **Reads the document** through MCP tools — structure, outline, text ranges, selection, fields, search, footnotes, bookmarks, list/format inspection, page rendering, and the live engine edit catalog.
+- **Edits the full engine surface** — semantic tools cover common work, while atomic engine batches expose every classified mutation, including shapes, objects, styles, layout, notes, fields/forms, and advanced tables.
+- **Commits autonomously with undo** — verified semantic edits commit when the turn succeeds; raw engine batches commit atomically. Failed batches restore the exact prior snapshot.
 
 Everything runs locally: a small Node WebSocket hub (`rhwp-agent/`) bridges the agent CLIs and the browser tab.
 
@@ -43,7 +43,7 @@ Requirements: Node ≥ 20, and the `claude` and/or `codex` CLI on your `PATH`.
    npm run dev     # http://127.0.0.1:7700
    ```
 
-3. **Open a document and chat** — open http://127.0.0.1:7700, load an HWP or HWPX file, pick **Claude** or **Codex** in the right-hand sidebar, and type an instruction (Enter sends, Shift+Enter adds a line). Tool calls appear inline in the chat log; edits wait for your approval.
+3. **Open a document and chat** — open http://127.0.0.1:7700, load an HWP or HWPX file, pick **Claude** or **Codex** in the right-hand sidebar, and type an instruction (Enter sends, Shift+Enter adds a line). Tool calls appear inline; successful edits commit automatically and remain undoable.
 
 Configuration, the full tool list, and troubleshooting: [rhwp-agent/README.md](rhwp-agent/README.md).
 

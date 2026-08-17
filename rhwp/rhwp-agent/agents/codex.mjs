@@ -94,7 +94,7 @@ export function buildCodexArgv(opts, threadId) {
     '-c', `mcp_servers.rhwp.env={${mcpEnv}}`,
     '-c', 'mcp_servers.rhwp.startup_timeout_sec=20',
     // Headless MCP calls cannot display an approval prompt. Auto-approve rhwp
-    // tools (document edits still wait for sidebar approval) and use config
+    // tools; Studio commits successful document edits autonomously and keeps undo history. Use config
     // keys understood by both the initial and resume subcommands.
     '-c', 'mcp_servers.rhwp.default_tools_approval_mode="auto"',
     '-c', 'approval_policy="never"',
