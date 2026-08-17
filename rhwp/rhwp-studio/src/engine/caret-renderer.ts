@@ -78,9 +78,13 @@ export class CaretRenderer {
     // IME 조합 오버레이 (블랙박스 + 흰색 글자)
     this.compEl = document.createElement('div');
     this.compEl.className = 'caret-composition';
+    // 조합 중 글자는 문서 글자와 같은 모습(흰 종이 위 검은 글자)으로 보여주고,
+    // 조합 중임은 밑줄로만 표시한다. 반전된 검은 상자는 시선을 끌어 타자를 방해한다.
+    // 배경은 불투명해야 한다 — 뒤에는 밀리기 전의 원본 픽셀이 남아 있다.
     this.compEl.style.cssText =
-      'position:absolute;background:#000;color:#fff;pointer-events:none;z-index:10;display:none;' +
-      'line-height:1;overflow:hidden;white-space:pre;text-align:center;box-sizing:border-box;';
+      'position:absolute;background:#fff;color:#000;pointer-events:none;z-index:10;display:none;' +
+      'line-height:1;overflow:hidden;white-space:pre;text-align:center;box-sizing:border-box;' +
+      'border-bottom:1.5px solid #000;';
     this.compFlowEl = document.createElement('canvas');
     this.compFlowEl.className = 'caret-composition-flow';
     this.compFlowEl.style.cssText =
@@ -223,7 +227,9 @@ export class CaretRenderer {
     this.compEl.textContent = text;
     this.compEl.style.display = 'block';
     this.visible = true;
-    this.startBlink();
+    // 조합 상자는 입력을 그대로 비추는 거울이다 — 깜박이면 타자 리듬을 흩뜨린다.
+    this.stopBlink();
+    this.compEl.style.opacity = '';
   }
 
   /** IME 조합 오버레이를 숨기고 일반 캐럿으로 복귀한다 */
@@ -455,9 +461,10 @@ export class CaretRenderer {
   private startBlink(): void {
     this.stopBlink();
     this.visible = true;
-    const target = this.isCompMode ? this.compEl : this.caretEl;
-    target.style.opacity = '';
-    target.classList.add('is-blinking');
+    // 조합 상자는 깜박이지 않는다 — 깜박임은 일반 캐럿 전용.
+    if (this.isCompMode) return;
+    this.caretEl.style.opacity = '';
+    this.caretEl.classList.add('is-blinking');
   }
 
   private stopBlink(): void {
