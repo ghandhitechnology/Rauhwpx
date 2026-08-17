@@ -108,6 +108,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
       RHWP_AGENT_TOKEN: TOKEN,
       RHWP_LAUNCH_ID: LAUNCH_ID,
       RHWP_WORK_DIR: workRoot,
+      RHWP_TEMPLATES_DIR: path.join(workRoot, 'templates'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -153,6 +154,34 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   assert.equal((await alphaWelcome).hubSessionId, 'alpha');
   assert.equal((await betaWelcome).hubSessionId, 'beta');
 
+  const alphaCatalogAdded = waitForMessage(alpha, (msg) => msg.type === 'templates-catalog' && msg.change?.type === 'added');
+  const betaCatalogAdded = waitForMessage(beta, (msg) => msg.type === 'templates-catalog' && msg.change?.type === 'added');
+  const templateUpload = await fetch(`${httpBase}/templates?sessionId=alpha`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${alphaToken}`,
+      Origin: studioOrigin,
+      'Content-Type': 'application/x-hwp',
+      'X-File-Name': 'shared.hwp',
+      'X-Template-Name': encodeURIComponent('Shared template'),
+      'X-Template-Format': 'hwp',
+      'X-Template-Page-Count': '1',
+      'X-Template-Section-Count': '1',
+    },
+    body: Buffer.concat([
+      Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+      Buffer.from('hub-template'),
+    ]),
+  });
+  assert.equal(templateUpload.status, 201, stderr);
+  const uploadedTemplate = (await templateUpload.json()).template;
+  assert.equal((await alphaCatalogAdded).change.template.id, uploadedTemplate.id);
+  assert.equal((await betaCatalogAdded).change.template.id, uploadedTemplate.id);
+  const crossSessionTemplateRequest = await fetch(`${httpBase}/templates?sessionId=alpha`, {
+    headers: { Authorization: `Bearer ${betaToken}`, Origin: studioOrigin },
+  });
+  assert.equal(crossSessionTemplateRequest.status, 401);
+
   const alphaStarted = waitForMessage(alpha, (msg) => msg.type === 'chat-started');
   const betaStarted = waitForMessage(beta, (msg) => msg.type === 'chat-started');
   sendFrame(alpha, { type: 'chat-start', agent: 'claude', threadId: 'thread-alpha', documentId: 'doc-alpha' });
@@ -161,8 +190,23 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   assert.equal(alphaSession.status, undefined);
   assert.equal(betaSession.status, undefined);
 
+  const alphaTemplateChanged = waitForMessage(alpha, (msg) => msg.type === 'chat-template-changed');
+  sendFrame(alpha, { type: 'chat-template-set', templateId: uploadedTemplate.id });
+  assert.equal((await alphaTemplateChanged).template.id, uploadedTemplate.id);
+
   const { socket: alphaMcp } = await openSocket(`${wsBase}/mcp?token=${alphaToken}&sessionId=alpha&agent=claude`);
   const { socket: betaMcp } = await openSocket(`${wsBase}/mcp?token=${betaToken}&sessionId=beta&agent=claude`);
+  const alphaTemplateResult = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 6);
+  const betaTemplateResult = waitForMessage(betaMcp, (msg) => msg.type === 'tool-result' && msg.id === 6);
+  sendFrame(alphaMcp, { type: 'tool-call', id: 6, tool: 'get_active_template', args: {}, workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch });
+  sendFrame(betaMcp, { type: 'tool-call', id: 6, tool: 'get_active_template', args: {}, workflow: 'direct', capabilityEpoch: betaSession.capabilityEpoch });
+  assert.equal((await alphaTemplateResult).result.template.id, uploadedTemplate.id);
+  assert.equal((await betaTemplateResult).error.code, 'TEMPLATE_NOT_SELECTED');
+
+  const betaTemplateChanged = waitForMessage(beta, (msg) => msg.type === 'chat-template-changed');
+  sendFrame(beta, { type: 'chat-template-set', templateId: uploadedTemplate.id });
+  assert.equal((await betaTemplateChanged).template.id, uploadedTemplate.id);
+
   const alphaRequest = waitForMessage(alpha, (msg) => msg.type === 'tool-request');
   const betaRequest = waitForMessage(beta, (msg) => msg.type === 'tool-request');
   const alphaResult = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result');
@@ -176,6 +220,17 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   sendFrame(beta, { type: 'tool-response', id: toBeta.id, ok: true, result: { owner: 'beta' } });
   assert.deepEqual((await alphaResult).result, { owner: 'alpha' });
   assert.deepEqual((await betaResult).result, { owner: 'beta' });
+
+  const alphaTemplateCleared = waitForMessage(alpha, (msg) => msg.type === 'chat-template-changed' && msg.reason === 'deleted');
+  const betaTemplateCleared = waitForMessage(beta, (msg) => msg.type === 'chat-template-changed' && msg.reason === 'deleted');
+  const alphaCatalogDeleted = waitForMessage(alpha, (msg) => msg.type === 'templates-catalog' && msg.change?.type === 'deleted');
+  const betaCatalogDeleted = waitForMessage(beta, (msg) => msg.type === 'templates-catalog' && msg.change?.type === 'deleted');
+  const templateDelete = await fetch(`${httpBase}/templates/${uploadedTemplate.id}?sessionId=alpha`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${alphaToken}`, Origin: studioOrigin },
+  });
+  assert.equal(templateDelete.status, 200);
+  await Promise.all([alphaTemplateCleared, betaTemplateCleared, alphaCatalogDeleted, betaCatalogDeleted]);
 
   const recordDirectories = readdirSync(path.join(workRoot, 'sessions'));
   assert.equal(recordDirectories.length, 2);
