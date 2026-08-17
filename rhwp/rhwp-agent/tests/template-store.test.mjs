@@ -24,10 +24,13 @@ async function fixture(t) {
 }
 
 test('template data root follows each platform and supports an override', () => {
-  assert.equal(defaultTemplateDataRoot({ RHWP_TEMPLATES_DIR: '/tmp/custom' }, 'linux', '/home/andy'), '/tmp/custom');
-  assert.equal(defaultTemplateDataRoot({}, 'darwin', '/Users/andy'), '/Users/andy/Library/Application Support/rhwp/templates');
-  assert.equal(defaultTemplateDataRoot({ APPDATA: 'C:\\Data' }, 'win32', 'C:\\Users\\andy'), 'C:\\Data/rhwp/templates');
-  assert.equal(defaultTemplateDataRoot({ XDG_DATA_HOME: '/data' }, 'linux', '/home/andy'), '/data/rhwp/templates');
+  assert.equal(defaultTemplateDataRoot({ RHWP_TEMPLATES_DIR: '/tmp/custom' }, 'linux', '/home/andy'), path.resolve('/tmp/custom'));
+  assert.equal(
+    defaultTemplateDataRoot({}, 'darwin', '/Users/andy'),
+    path.join('/Users/andy', 'Library', 'Application Support', 'rhwp', 'templates'),
+  );
+  assert.equal(defaultTemplateDataRoot({ APPDATA: 'C:\\Data' }, 'win32', 'C:\\Users\\andy'), path.join('C:\\Data', 'rhwp', 'templates'));
+  assert.equal(defaultTemplateDataRoot({ XDG_DATA_HOME: '/data' }, 'linux', '/home/andy'), path.join('/data', 'rhwp', 'templates'));
 });
 
 test('names are normalized and unique without restricting Korean or spaces', async (t) => {

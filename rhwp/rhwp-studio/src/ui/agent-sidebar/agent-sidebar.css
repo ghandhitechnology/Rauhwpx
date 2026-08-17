@@ -1046,7 +1046,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   list-style: none;
 }
 
-/* 문서 그룹 헤더 — 채팅은 문서 아래에 산다. 접힘/펼침은 쉐브론이 말한다. */
+/* 문서 그룹 헤더 — 채팅은 문서 아래에 산다. 종이 아이콘이 문서를 말하고,
+   클릭으로 접고 펼친다. */
 .ag-threads-group {
   position: sticky;
   top: 0;
@@ -1072,6 +1073,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font-weight: 600;
   text-align: left;
   cursor: pointer;
+  transition: background-color 100ms ease;
 }
 
 .ag-threads-group-btn:hover,
@@ -1080,15 +1082,9 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   outline: none;
 }
 
-.ag-threads-group-chevron {
+.ag-threads-group-icon {
   flex: 0 0 auto;
   color: var(--ag-text-muted);
-  transform: rotate(-90deg);
-  transition: transform 120ms ease;
-}
-
-.ag-threads-group-btn[aria-expanded='true'] .ag-threads-group-chevron {
-  transform: none;
 }
 
 .ag-threads-group-name {
@@ -1099,20 +1095,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   white-space: nowrap;
 }
 
-.ag-threads-group-count {
-  flex: 0 0 auto;
-  color: var(--ag-text-muted);
-  font-family: var(--ag-mono);
-  font-size: var(--ag-micro);
-  font-variant-numeric: tabular-nums;
-}
-
+/* 현재 문서 표시는 조용히 — 테두리 없는 옅은 워시 칩과 살짝 물든 종이. */
 .ag-threads-group-badge {
   flex: 0 0 auto;
   margin-left: auto;
   padding: 1px 6px;
-  border: 1px solid var(--ag-border-strong);
   border-radius: var(--ag-r-chip);
+  background: color-mix(in srgb, var(--ag-accent) 10%, transparent);
   color: var(--ag-accent);
   font-family: var(--ag-mono);
   font-size: var(--ag-micro);
@@ -1120,8 +1109,54 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   letter-spacing: var(--ag-track);
 }
 
-.ag-threads-group.ag-current-doc .ag-threads-group-name {
+.ag-threads-group.ag-current-doc .ag-threads-group-icon {
   color: var(--ag-accent);
+}
+
+/* 문서로 건너뛰기 — 연필과 같은 문법: 오른쪽에 겹쳐 두고 hover/focus 에서만
+   드러난다. 그룹 li 가 sticky(=positioned)라 그대로 기준이 된다. */
+.ag-doc-jump {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--ag-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 120ms ease, color 120ms ease;
+}
+
+.ag-threads-group:hover .ag-doc-jump,
+.ag-doc-jump:focus-visible {
+  opacity: 1;
+}
+
+/* 칩 상자 없이 아이콘만 밝아진다. */
+.ag-doc-jump:hover {
+  color: var(--ag-text);
+}
+
+.ag-doc-jump:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-doc-jump .ag-icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* 아이콘이 겹칠 자리만큼 이름을 비켜 준다. */
+.ag-threads-group.ag-has-jump .ag-threads-group-btn {
+  padding-right: 34px;
 }
 
 /* 다른 문서의 채팅 행 — 열람만 가능하다는 걸 살짝 가라앉혀 보여준다. */
@@ -1136,15 +1171,17 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   min-width: 0;
 }
 
+/* 행은 제목 한 줄뿐이다 — 그룹 이름 텍스트와 같은 26px 들여쓰기로
+   문서 아래 계층임을 보여준다. */
 .ag-threads-item {
   display: flex;
   flex: 1 1 auto;
-  align-items: flex-start;
+  align-items: center;
   gap: 0;
   width: 100%;
   min-width: 0;
   margin: 0;
-  padding: 8px 34px 8px 10px;
+  padding: 7px 34px 7px 26px;
   border: none;
   border-radius: var(--ag-r-field);
   background: transparent;
@@ -1152,6 +1189,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font: inherit;
   text-align: left;
   cursor: pointer;
+  transition: background-color 100ms ease;
 }
 
 .ag-threads-item:hover {
@@ -1168,44 +1206,18 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   background: var(--ag-selected);
 }
 
-/* Sequence numbers stay in the DOM for compatibility but not in the visual UI. */
-.ag-thread-idx {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-.ag-thread-body {
-  display: flex;
+.ag-threads-item-title {
   flex: 1 1 auto;
   min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-  padding-left: 0;
-}
-
-.ag-threads-item-title {
-  width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--font-size-md, 13px);
-  font-weight: 600;
+  font-weight: 500;
 }
 
-.ag-threads-item-meta {
-  width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--ag-text-muted);
-  font-size: var(--font-size-sm, 11px);
-  font-variant-numeric: tabular-nums;
+.ag-threads-item.ag-active .ag-threads-item-title {
+  font-weight: 600;
 }
 
 /* 이름 바꾸기는 행 오른쪽에 겹쳐 두고 hover/focus 에서만 드러낸다.
@@ -1220,14 +1232,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   width: 24px;
   height: 24px;
   padding: 0;
-  border: 1px solid transparent;
-  border-radius: var(--ag-r-chip);
+  border: none;
   background: transparent;
   color: var(--ag-text-muted);
   cursor: pointer;
   opacity: 0;
   transform: translateY(-50%);
-  transition: opacity 120ms ease;
+  transition: opacity 120ms ease, color 120ms ease;
 }
 
 .ag-threads-row:hover .ag-thread-rename,
@@ -1235,9 +1246,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   opacity: 1;
 }
 
+/* 칩 상자 없이 아이콘만 밝아진다. */
 .ag-thread-rename:hover {
-  border-color: var(--ag-border-strong);
-  background: var(--ag-bg);
   color: var(--ag-text);
 }
 
@@ -1252,7 +1262,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ag-thread-rename { transition: none; }
+  .ag-thread-rename,
+  .ag-doc-jump { transition: none; }
 }
 
 /* 편집 중인 행은 행 전체를 입력 필드로 바꾼다 — 자리가 튀지 않게
@@ -2731,6 +2742,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-plan-restore:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
+}
+
+.ag-plan-history-icon {
+  width: 20px;
+  height: 20px;
 }
 
 .ag-plan-orbit {
@@ -4725,8 +4741,109 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-fullscreen .ag-threads-item {
-  min-height: 42px;
+  min-height: 34px;
   border-radius: 5px;
+}
+
+/* 전체 화면 레일의 hover 카드 — 행이 제목만 남긴 대신 상세를 여기서 보여준다.
+   포인터 전용이라 pointer-events 를 끊어 깜빡임을 막는다. */
+.ag-thread-popover {
+  position: fixed;
+  z-index: 80;
+  min-width: 208px;
+  max-width: 280px;
+  padding: 10px 12px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: 9px;
+  /* 대화면 바탕(--ag-bg)과 같은 색이면 카드가 사라진다 — 한 단 띄운 면을 쓴다. */
+  background: var(--ag-raised);
+  box-shadow: var(--shadow-dropdown, 2px 2px 8px rgba(0, 0, 0, 0.15)), var(--n-elev-2);
+  pointer-events: none;
+  transform-origin: left center;
+  animation: ag-thread-popover-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  /* 행 사이를 옮겨 갈 때는 새로 만들지 않고 이 transition 으로 미끄러진다. */
+  transition:
+    top 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    left 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 에이전트 줄의 로고는 스트로크 아이콘과 같은 12px 급간을 지킨다. */
+.ag-thread-popover-row .ag-provider-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.ag-thread-popover-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 7px;
+}
+
+.ag-thread-popover-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ag-text);
+  font-size: var(--font-size-md, 13px);
+  font-weight: 600;
+}
+
+.ag-thread-popover-age {
+  flex: 0 0 auto;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-thread-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 0;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-base, 12px);
+}
+
+.ag-thread-popover-row .ag-icon {
+  flex: 0 0 auto;
+}
+
+.ag-thread-popover-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes ag-thread-popover-in {
+  from {
+    opacity: 0;
+    transform: translateX(-5px) scale(0.97);
+  }
+}
+
+/* 그룹을 펼칠 때 행이 차례로 들어온다 — delay 는 행이 인라인으로 계단을 준다. */
+.ag-threads-row.ag-row-enter {
+  animation: ag-thread-row-in 200ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+@keyframes ag-thread-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-thread-popover {
+    animation: none;
+    transition: none;
+  }
+
+  .ag-threads-row.ag-row-enter { animation: none; }
 }
 
 /* 전체 화면 레일의 문서 그룹 — sticky 머리가 레일 표면색을 그대로 이어
@@ -5066,6 +5183,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-permission-btn,
 .ag-skills-btn,
 .ag-thread-rename,
+.ag-doc-jump,
 .ag-environment-plan,
 .ag-environment-changes {
   border-radius: 7px 9px 6px 10px / 9px 6px 10px 7px;

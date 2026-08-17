@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   PlanningState,
   authorizeToolCall,
   buildApprovedPlanPrompt,
 } from '../planning-state.mjs';
+
+const serverSource = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
 
 function plan() {
   return {
@@ -49,6 +52,19 @@ test('plan transition: planning -> awaiting -> switching -> implementing', () =>
     createdAt: '2026-08-07T00:00:00.000Z',
     epoch: 11,
   });
+});
+
+test('requesting plan workflow again after implementation starts a fresh planning cycle', () => {
+  assert.match(
+    serverSource,
+    /const restartCompletedPlan = msg\.workflow === 'plan'[\s\S]*activeSession\.planning\.phase === 'implementing'/,
+  );
+  assert.match(
+    serverSource,
+    /activeSession\.planning\.workflow === msg\.workflow && !restartCompletedPlan/,
+  );
+  assert.match(serverSource, /const nextPlanning = new PlanningState\(\{/);
+  assert.match(serverSource, /const phase = msg\.workflow === 'plan' \? 'planning' : 'implementing'/);
 });
 
 test('approval requires idle and the latest authoritative plan id', () => {

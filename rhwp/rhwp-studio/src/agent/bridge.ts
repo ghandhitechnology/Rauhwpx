@@ -77,6 +77,11 @@ import type {
   SidebarEvent,
 } from './types.ts';
 
+export interface ChatHistoryEntry {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
 export interface AgentBridge {
   readonly pendingEdits: PendingEditManager;
   getConnectionState(): 'connecting' | 'connected' | 'disconnected' | 'replaced';
@@ -114,7 +119,7 @@ export interface AgentBridge {
   setPiModels(
     models: Array<{ id: string; name: string; defaultEffort?: string }>,
   ): Promise<PiStatus | null>;
-  startChat(agent: AgentName, model?: string, effort?: string, force?: boolean, permissionProfile?: PermissionProfile, workflow?: AgentWorkflow, threadId?: string, documentId?: string | null, documentName?: string | null): void;
+  startChat(agent: AgentName, model?: string, effort?: string, force?: boolean, permissionProfile?: PermissionProfile, workflow?: AgentWorkflow, threadId?: string, documentId?: string | null, documentName?: string | null, history?: ChatHistoryEntry[]): void;
   /** 허브 세션을 폐기하고 새 채팅을 시작할 수 있게 한다. */
   stopChat(): void;
   /** gpt-5.6-luna 로 스레드 제목 생성 요청. */
@@ -743,6 +748,7 @@ class AgentBridgeImpl implements AgentBridge {
     threadId: string;
     documentId: string | null;
     documentName: string | null;
+    history: ChatHistoryEntry[];
     force?: boolean;
   } | null = null;
   private queuedMessages: Array<{
@@ -756,6 +762,7 @@ class AgentBridgeImpl implements AgentBridge {
   private threadId = '';
   private documentId: string | null = null;
   private documentName: string | null = null;
+  private chatHistory: ChatHistoryEntry[] = [];
   private titleRequestSeq = 0;
   private requestSeq = 0;
   private templateCatalog: TemplateCatalog = { revision: 0, templates: [] };
@@ -954,7 +961,6 @@ class AgentBridgeImpl implements AgentBridge {
       this.setState('connected');
       if (this.pendingChatStart !== null) {
         const pending = this.pendingChatStart;
-        this.pendingChatStart = null;
         this.sendJson({
           v: AGENT_PROTOCOL_VERSION,
           type: 'chat-start',
@@ -963,6 +969,7 @@ class AgentBridgeImpl implements AgentBridge {
           threadId: pending.threadId,
           documentId: pending.documentId,
           documentName: pending.documentName,
+          history: pending.history,
           ...(pending.model ? { model: pending.model } : {}),
           ...(pending.effort ? { effort: pending.effort } : {}),
           ...(pending.permissionProfile ? { permissionProfile: pending.permissionProfile } : {}),
@@ -1097,7 +1104,22 @@ class AgentBridgeImpl implements AgentBridge {
     this.pendingTurnOpen = true;
   }
 
-  private endPendingTurn(outcome: 'commit' | 'reject' = 'reject') {
+  /**
+   * 성공한 턴의 편집 처리는 권한 프로필이 가른다:
+   * 안전(safe) → 'review' (사용자 승인 대기), 전체(unrestricted) → 'commit' (자동 반영).
+   */
+  private successfulTurnOutcome(): 'review' | 'commit' {
+    return this.permissionProfile === 'safe' ? 'review' : 'commit';
+  }
+
+  /**
+   * 결과를 모르는 턴 종료(재연결 등)의 기본값: 안전 모드는 편집을 검토 대기로
+   * 남겨 사용자가 결정하고, 전체 모드는 기존대로 롤백한다.
+   */
+  private endPendingTurn(
+    outcome: 'commit' | 'reject' | 'review' =
+      this.permissionProfile === 'safe' ? 'review' : 'reject',
+  ) {
     if (!this.pendingTurnOpen) return;
     try {
       this.pendingEdits.endTurn(outcome);
@@ -1140,9 +1162,20 @@ class AgentBridgeImpl implements AgentBridge {
     switch (msg.type) {
       case 'welcome': {
         const session = msg.session;
+        const sessionThreadId = typeof session?.threadId === 'string' ? session.threadId : '';
+        if (this.threadId && sessionThreadId !== this.threadId) {
+          // pendingChatStart 는 자기 응답이 올 때까지 살아 있으므로,
+          // 재연결 소켓은 이미 마지막으로 선택한 스레드를 다시 보낸 상태다.
+          return;
+        }
         const wasRunning = this.turnRunning;
         if (session && isAgentName(session.agent)) {
           this.activeAgent = session.agent;
+          if (typeof session.model === 'string') this.selectedModel = session.model;
+          if (typeof session.effort === 'string') this.selectedEffort = session.effort;
+          if (sessionThreadId) this.threadId = sessionThreadId;
+          if (typeof session.documentId === 'string' || session.documentId === null) this.documentId = session.documentId;
+          if (typeof session.documentName === 'string' || session.documentName === null) this.documentName = session.documentName;
           this.turnRunning = session.status === 'running';
           this.permissionProfile = session.permissionProfile === 'unrestricted' ? 'unrestricted' : 'safe';
           this.activeTemplateId = typeof session.activeTemplateId === 'string' ? session.activeTemplateId : null;
@@ -1150,6 +1183,19 @@ class AgentBridgeImpl implements AgentBridge {
             ? this.templateCatalog.templates.find((template) => template.id === this.activeTemplateId) ?? null
             : null;
           this.syncWorkflowState(session, 'direct', 'direct');
+          this.pendingChatStart = null;
+          this.emit({
+            type: 'chat-started',
+            agent: session.agent,
+            sessionId: typeof session.sessionId === 'string' ? session.sessionId : null,
+            ...(typeof session.model === 'string' ? { model: session.model } : {}),
+            ...(typeof session.effort === 'string' ? { effort: session.effort } : {}),
+            ...(sessionThreadId ? { threadId: sessionThreadId } : {}),
+            ...(typeof session.documentId === 'string' || session.documentId === null ? { documentId: session.documentId } : {}),
+            ...(typeof session.documentName === 'string' || session.documentName === null ? { documentName: session.documentName } : {}),
+            permissionProfile: this.permissionProfile,
+            ...this.workflowState(),
+          });
           if (this.turnRunning) {
             try {
               this.beginPendingTurn(session.agent);
@@ -1194,6 +1240,10 @@ class AgentBridgeImpl implements AgentBridge {
         break;
       }
       case 'chat-started': {
+        // 스레드를 빠르게 오가면 이전 chat-start 응답이 뒤늦게 도착할 수 있다.
+        // 마지막 startChat 이 고른 정체성을 절대 덮어쓰지 않는다.
+        if (typeof msg.threadId === 'string' && this.threadId && msg.threadId !== this.threadId) break;
+        this.pendingChatStart = null;
         if (isAgentName(msg.agent)) this.activeAgent = msg.agent;
         if (typeof msg.model === 'string') this.selectedModel = msg.model;
         if (typeof msg.effort === 'string') this.selectedEffort = msg.effort;
@@ -1521,7 +1571,7 @@ class AgentBridgeImpl implements AgentBridge {
         this.turnHadError = false;
         if (this.pendingTurnOpen) {
           try {
-            this.endPendingTurn(succeeded ? 'commit' : 'reject');
+            this.endPendingTurn(succeeded ? this.successfulTurnOutcome() : 'reject');
           } catch (e) {
             console.warn('[AgentBridge] endTurn 실패:', e);
           }
@@ -1553,6 +1603,7 @@ class AgentBridgeImpl implements AgentBridge {
         capabilityEpoch: msg.capabilityEpoch,
         activePhase: this.phase,
         activeCapabilityEpoch: this.capabilityEpoch,
+        permissionProfile: this.permissionProfile,
         template: readDocumentTemplate(msg.template) ?? undefined,
       })
       .then((result) => {
@@ -1599,6 +1650,7 @@ class AgentBridgeImpl implements AgentBridge {
     threadId = this.threadId,
     documentId: string | null = this.documentId,
     documentName: string | null = this.documentName,
+    history: ChatHistoryEntry[] = this.chatHistory,
   ): void {
     this.selectedAgent = agent;
     if (model) this.selectedModel = model;
@@ -1607,6 +1659,7 @@ class AgentBridgeImpl implements AgentBridge {
     this.threadId = threadId;
     this.documentId = documentId;
     this.documentName = documentName;
+    this.chatHistory = history.map((entry) => ({ ...entry }));
     this.resetWorkflowState(workflow);
     const payload = {
       v: AGENT_PROTOCOL_VERSION,
@@ -1616,32 +1669,32 @@ class AgentBridgeImpl implements AgentBridge {
       threadId,
       documentId,
       documentName,
+      history: this.chatHistory,
       ...(this.selectedModel ? { model: this.selectedModel } : {}),
       ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
       permissionProfile: this.permissionProfile,
       ...(force ? { force: true } : {}),
     };
-    if (this.state === 'connected') {
-      this.sendJson(payload);
-    } else {
-      this.pendingChatStart = {
-        agent,
-        model: this.selectedModel ?? undefined,
-        effort: this.selectedEffort ?? undefined,
-        permissionProfile: this.permissionProfile,
-        workflow,
-        threadId,
-        documentId,
-        documentName,
-        force,
-      };
-    }
+    this.pendingChatStart = {
+      agent,
+      model: this.selectedModel ?? undefined,
+      effort: this.selectedEffort ?? undefined,
+      permissionProfile: this.permissionProfile,
+      workflow,
+      threadId,
+      documentId,
+      documentName,
+      history: this.chatHistory,
+      force,
+    };
+    if (this.state === 'connected') this.sendJson(payload);
   }
 
   stopChat(): void {
     for (const message of this.queuedMessages) message.resolve(null);
     this.queuedMessages = [];
     this.pendingChatStart = null;
+    this.chatHistory = [];
     this.activeAgent = null;
     this.turnRunning = false;
     // Full access is deliberately scoped to one live chat and never becomes
@@ -1689,6 +1742,7 @@ class AgentBridgeImpl implements AgentBridge {
             threadId: context.threadId,
             documentId: context.documentId,
             documentName: context.documentName ?? null,
+            history: this.chatHistory,
             ...(this.selectedModel ? { model: this.selectedModel } : {}),
             ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
             permissionProfile: this.permissionProfile,
@@ -1703,6 +1757,7 @@ class AgentBridgeImpl implements AgentBridge {
             threadId: context.threadId,
             documentId: context.documentId,
             documentName: context.documentName ?? null,
+            history: this.chatHistory,
           };
         }
         return;
