@@ -2744,6 +2744,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   outline-offset: -2px;
 }
 
+.ag-plan-history-icon {
+  width: 20px;
+  height: 20px;
+}
+
 .ag-plan-orbit {
   position: relative;
   width: 23px;

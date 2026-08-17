@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 
 const caretRenderer = readFileSync(new URL('../src/engine/caret-renderer.ts', import.meta.url), 'utf8');
 const inputHandler = readFileSync(new URL('../src/engine/input-handler.ts', import.meta.url), 'utf8');
+const canvasView = readFileSync(new URL('../src/view/canvas-view.ts', import.meta.url), 'utf8');
 
 test('표 셀 IME 조합창은 Canvas clip과 별도로 cellBounds 안에 제한한다', () => {
   assert.match(caretRenderer, /private clampCompositionBox\(/);
@@ -11,6 +12,15 @@ test('표 셀 IME 조합창은 Canvas clip과 별도로 cellBounds 안에 제한
   assert.match(caretRenderer, /w = Math\.min\(w, Math\.max\(0, bounds\.w\)\);/);
   assert.match(caretRenderer, /x = Math\.min\(Math\.max\(x, bounds\.x\), maxX\);/);
   assert.match(caretRenderer, /y = Math\.min\(Math\.max\(y, bounds\.y\), maxY\);/);
+});
+
+test('IME 조합창은 다음 글자를 가리지 않도록 현재 줄 꼬리를 임시로 민다', () => {
+  assert.match(canvasView, /renderedCanvas\.dataset\.rhwpPageIndex = String\(pageIdx\)/);
+  assert.match(caretRenderer, /private compFlowEl: HTMLCanvasElement/);
+  assert.match(caretRenderer, /private renderCompositionFlow\(/);
+  assert.match(caretRenderer, /flowWidth - gapWidth/);
+  assert.match(caretRenderer, /context\.drawImage\([\s\S]*gapWidth \* scaleX/);
+  assert.match(caretRenderer, /this\.compFlowEl\.style\.display = 'none'/);
 });
 
 test('지연 셀 입력이 가시 높이를 넘으면 즉시 전체 페이지네이션을 수행한다', () => {
