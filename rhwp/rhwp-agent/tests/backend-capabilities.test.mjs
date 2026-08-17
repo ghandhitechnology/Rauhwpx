@@ -195,7 +195,7 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(planning, /search_reference_files/);
   assert.match(planning, /untrusted reference data/);
 
-  const implementing = systemBriefFor({ workflow: 'plan', phase: 'implementing' });
+  const implementing = systemBriefFor({ workflow: 'plan', phase: 'implementing', permissionProfile: 'unrestricted' });
   assert.match(implementing, /approved canonical implementation plan/);
   assert.match(implementing, /re-read the relevant current workspace and live-document state/);
   assert.match(implementing, /Execute every canonical step thoroughly/);
@@ -206,6 +206,26 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(implementing, /failed, interrupted, and unknown outcomes roll back staged changes/);
   assert.match(implementing, /apply_engine_edits commits one atomic undoable batch/);
   assert.doesNotMatch(implementing, /present_implementation_plan/);
+});
+
+test('permission profiles split approval-gated staging from free editing', () => {
+  // 프로필 미지정은 안전으로 fail-safe — 승인 게이트 문구가 기본이어야 한다.
+  for (const safeBrief of [
+    systemBriefFor({ workflow: 'direct' }),
+    systemBriefFor({ workflow: 'direct', permissionProfile: 'safe' }),
+    systemBriefFor({ workflow: 'plan', phase: 'implementing', permissionProfile: 'safe' }),
+  ]) {
+    assert.match(safeBrief, /review and approve the staged changes/);
+    assert.match(safeBrief, /unavailable in this perm/);
+    assert.doesNotMatch(safeBrief, /commit only after an explicitly successful turn/);
+  }
+  for (const freeBrief of [
+    systemBriefFor({ workflow: 'direct', permissionProfile: 'unrestricted' }),
+    systemBriefFor({ workflow: 'plan', phase: 'implementing', permissionProfile: 'unrestricted' }),
+  ]) {
+    assert.doesNotMatch(freeBrief, /review and approve the staged changes/);
+    assert.match(freeBrief, /apply_engine_edits commits/);
+  }
 });
 
 test('all workflow system prompts default document design to black and white', () => {

@@ -87,7 +87,7 @@ import {
   rememberNativeDocument,
   reserveDesktopDocument,
 } from '@/desktop-integration';
-import { initAgentBridge } from './agent/bridge.ts';
+import { initAgentBridge, type AgentBridge } from './agent/bridge.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
 
@@ -222,6 +222,9 @@ function setEditMode(mode: EditorEditMode): void {
   eventBus.emit('command-state-changed');
 }
 
+/** 렌더러 초기화 후에 생성되는 에이전트 브리지 — 저장 가드가 대기 편집을 조회한다. */
+let agentBridgeRef: AgentBridge | null = null;
+
 const commandServices: CommandServices = {
   eventBus,
   wasm,
@@ -233,6 +236,16 @@ const commandServices: CommandServices = {
   pickSaveHandle: pickDesktopNativeSaveFile,
   validateSaveHandle: reserveSaveHandleForWrite,
   setEditMode,
+  getPendingAgentEdits: () => {
+    const pending = agentBridgeRef?.pendingEdits;
+    if (!pending || !pending.hasPending()) return null;
+    const sets = () => pending.getChangeSets().filter((set) => set.ops.length > 0);
+    return {
+      opCount: sets().reduce((sum, set) => sum + set.ops.length, 0),
+      approveAll: () => sets().every((set) => pending.approve(set.id)),
+      rejectAll: () => { for (const set of sets()) pending.reject(set.id); },
+    };
+  },
 };
 
 installDesktopCloseHandling(async () => {
@@ -597,6 +610,7 @@ async function initialize(): Promise<void> {
     // 선택(opt-in) 기능이므로 여기서 실패해도 렌더러 초기화를 실패로 만들지 않는다.
     try {
       const agentBridge = initAgentBridge({ wasm, eventBus, inputHandler, canvasView, documentState });
+      agentBridgeRef = agentBridge;
       initAgentSidebar({
         bridge: agentBridge,
         eventBus,

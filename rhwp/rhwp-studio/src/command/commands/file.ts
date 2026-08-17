@@ -3,6 +3,7 @@ import { PageSetupDialog } from '@/ui/page-setup-dialog';
 import { AboutDialog } from '@/ui/about-dialog';
 import { showSaveAs } from '@/ui/save-as-dialog';
 import { showUnsavedChangesDialog } from '@/ui/unsaved-changes-dialog';
+import { showPendingAgentEditsDialog } from '@/ui/pending-agent-edits-dialog';
 import { showHmlSaveFormatDialog } from '@/ui/hml-save-format-dialog';
 import {
   fileNameForFormat,
@@ -242,8 +243,30 @@ async function promptFallbackName(
   return result ? fileNameForFormat(result, format) : null;
 }
 
+/**
+ * 검토 대기 중인 에이전트 편집이 있으면 저장 전에 수락/거절을 결정하게 한다.
+ * 대기 편집은 라이브 미리보기로 이미 문서에 반영돼 있어, 그냥 저장하면 승인하지
+ * 않은 변경이 파일에 담기기 때문이다. true = 저장 계속, false = 저장 취소.
+ */
+async function resolvePendingAgentEditsBeforeSave(services: CommandServices): Promise<boolean> {
+  const pending = services.getPendingAgentEdits?.();
+  if (!pending || pending.opCount === 0) return true;
+  const choice = await showPendingAgentEditsDialog(pending.opCount);
+  if (choice === 'cancel') return false;
+  if (choice === 'approve') {
+    if (!pending.approveAll()) {
+      alert('일부 변경을 수락하지 못했습니다. 검토 패널에서 남은 변경을 처리한 뒤 다시 저장하세요.');
+      return false;
+    }
+    return true;
+  }
+  pending.rejectAll();
+  return true;
+}
+
 async function saveAsFormat(services: CommandServices, format: SaveFormat): Promise<void> {
   try {
+    if (!await resolvePendingAgentEditsBeforeSave(services)) return;
     flushDeferredPaginationBeforeExplicitOutput(services, 'save-as');
     const sourceFormat = services.wasm.getSourceFormat();
     const saveName = fileNameForFormat(services.wasm.fileName, format);
@@ -283,6 +306,7 @@ export type SaveCurrentDocumentResult = 'saved' | 'cancelled' | 'failed' | 'unsu
 
 export async function saveCurrentDocument(services: CommandServices): Promise<SaveCurrentDocumentResult> {
   try {
+    if (!await resolvePendingAgentEditsBeforeSave(services)) return 'cancelled';
     flushDeferredPaginationBeforeExplicitOutput(services, 'save');
     const sourceFormat = services.wasm.getSourceFormat();
     let target = resolveSaveTarget(
