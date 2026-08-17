@@ -1,8 +1,8 @@
 /**
  * MCP 툴 실행기 — 허브가 전달한 tool-request를 실제 문서 호출로 매핑한다.
  *
- * read 툴은 WasmBridge를 직접 호출하고(원시 doc 접근 금지), write 툴은 전부
- * PendingEditManager로 위임한다(승인 전까지 pending 상태). 모든 read 응답에
+ * read 툴은 WasmBridge를 직접 호출한다. 고수준 write 툴은 PendingEditManager에
+ * staging한 뒤 턴 성공 시 자동 커밋하고, 전체 엔진 표면은 원자적 스냅샷 배치로 실행한다. 모든 read 응답에
  * revision을 포함하고, 모든 write는 expectedRevision을 먼저 검사한다.
  */
 import type { WasmBridge } from '../core/wasm-bridge.ts';
@@ -15,6 +15,14 @@ import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, D
 import { AgentToolError } from './types.ts';
 import { renderChartPng, validateChartSpec } from './chart-render.ts';
 import type { ChartSpec } from './chart-render.ts';
+import {
+  applyEngineEdits,
+  applyEngineEditSession,
+  getEngineEditCapabilities,
+  getEngineEditCapabilityCount,
+  getEngineEditTypeDefinitions,
+  type EngineEditOperation,
+} from './engine-edit.ts';
 
 export interface AgentToolExecutorDeps {
   wasm: WasmBridge;
@@ -26,7 +34,7 @@ export interface AgentToolExecutorDeps {
 
 const DOC_NOT_LOADED_MESSAGE = '문서가 로드되지 않았습니다';
 const MAX_SVG_BYTES = 800_000;
-const PENDING_NOTE = 'pending until user approves in the sidebar';
+const PENDING_NOTE = 'staged now and committed automatically when the turn succeeds; a failed turn rolls it back';
 
 /** Every Studio tool that can create or stage a document mutation. */
 export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
@@ -51,11 +59,16 @@ export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'insert_footnote',
   'edit_footnote',
   'set_bookmark',
+  'apply_engine_edits',
+  'prepare_engine_edit_session',
 ]);
 
 export function isDocumentWriteTool(tool: string) {
   return DOCUMENT_WRITE_TOOLS.has(tool);
 }
+
+const RAW_ENGINE_WRITE_TOOLS = new Set(['apply_engine_edits', 'prepare_engine_edit_session']);
+type TurnWriteMode = 'none' | 'semantic' | 'raw';
 
 export interface ToolCapabilityContext {
   workflow: AgentWorkflow;
@@ -93,6 +106,7 @@ export function assertToolCapability(tool: string, capability?: ToolCapabilityCo
 /** HWPUNIT 변환: 1/7200 inch. 1pt = 100 HU, 1mm ≈ 283.465 HU */
 const HU_PER_MM = 7200 / 25.4;
 export function mmToHu(mm: number): number { return Math.round(mm * HU_PER_MM); }
+export function huToMm(hu: number): number { return Math.round((hu / HU_PER_MM) * 100) / 100; }
 export function ptToHu(pt: number): number { return Math.round(pt * 100); }
 
 function hexColorRef(hex: string): number {
@@ -257,9 +271,18 @@ function optCell(args: Record<string, unknown>): CellAddr | undefined {
 
 export class AgentToolExecutor {
   private deps: AgentToolExecutorDeps;
+  private turnWriteMode: TurnWriteMode = 'none';
 
   constructor(deps: AgentToolExecutorDeps) {
     this.deps = deps;
+  }
+
+  beginTurn(): void {
+    this.turnWriteMode = 'none';
+  }
+
+  endTurn(): void {
+    this.turnWriteMode = 'none';
   }
 
   async execute(
@@ -268,11 +291,28 @@ export class AgentToolExecutor {
     agent: AgentName = 'claude',
     capability?: ToolCapabilityContext,
   ): Promise<unknown> {
+    let claimedMode = false;
     try {
       assertToolCapability(tool, capability);
+      const requestedMode: TurnWriteMode = !isDocumentWriteTool(tool)
+        ? 'none'
+        : RAW_ENGINE_WRITE_TOOLS.has(tool) ? 'raw' : 'semantic';
+      if (requestedMode !== 'none'
+        && this.turnWriteMode !== 'none'
+        && this.turnWriteMode !== requestedMode) {
+        throw new AgentToolError(
+          'MIXED_ENGINE_WRITE_MODE',
+          'Raw engine batches and staged semantic writes cannot run in the same turn. Use one mode for the whole mutation batch.',
+        );
+      }
+      if (requestedMode !== 'none' && this.turnWriteMode === 'none') {
+        this.turnWriteMode = requestedMode;
+        claimedMode = true;
+      }
       // await 필수 — 비동기 툴(insert_chart)의 rejection 도 여기서 에러 코드로 매핑된다
       return await this.dispatch(tool, args, agent);
     } catch (e) {
+      if (claimedMode) this.turnWriteMode = 'none';
       if (e instanceof AgentToolError) throw e;
       const message = e instanceof Error ? e.message : String(e);
       if (message.includes(DOC_NOT_LOADED_MESSAGE)) {
@@ -294,6 +334,8 @@ export class AgentToolExecutor {
       case 'render_page': return this.renderPage(args);
       case 'get_para_format': return this.getParaFormat(args);
       case 'get_char_format': return this.getCharFormat(args);
+      case 'get_table_properties': return this.getTableProperties(args);
+      case 'get_engine_edit_capabilities': return this.getEngineEditCapabilities(args);
       case 'list_numberings': return this.listNumberings();
       case 'verify_changes': return this.verifyChanges(args);
       case 'insert_text': return this.insertText(args, agent);
@@ -322,6 +364,8 @@ export class AgentToolExecutor {
       case 'edit_footnote': return this.editFootnote(args, agent);
       case 'list_bookmarks': return this.listBookmarks();
       case 'set_bookmark': return this.setBookmark(args, agent);
+      case 'apply_engine_edits': return this.applyEngineEdits(args);
+      case 'prepare_engine_edit_session': return this.prepareEngineEditSession(args);
       default:
         throw new AgentToolError('UNKNOWN_TOOL', `Unknown tool: ${tool}`);
     }
@@ -329,6 +373,68 @@ export class AgentToolExecutor {
 
   private get revision(): number {
     return this.deps.revision.revision;
+  }
+
+  private getEngineEditCapabilities(args: Record<string, unknown>) {
+    this.requireDocLoaded();
+    const query = args['query'];
+    if (query !== undefined && typeof query !== 'string') {
+      throw new AgentToolError('INVALID_ARGS', 'query must be a string');
+    }
+    return {
+      revision: this.revision,
+      capabilityCount: getEngineEditCapabilityCount(),
+      capabilities: getEngineEditCapabilities(query ?? ''),
+      typeDefinitions: getEngineEditTypeDefinitions(),
+      binaryArgument: { $base64: 'base64-encoded bytes' },
+    };
+  }
+
+  private applyEngineEdits(args: Record<string, unknown>) {
+    this.requireDocLoaded();
+    this.requireRevision(args);
+    const rawOperations = args['operations'];
+    if (!Array.isArray(rawOperations)) {
+      throw new AgentToolError('INVALID_ARGS', 'operations must be an array');
+    }
+    const operations: EngineEditOperation[] = rawOperations.map((raw, index) => {
+      const operation = asRecord(raw);
+      const method = operation['method'];
+      const methodArgs = operation['args'];
+      if (typeof method !== 'string' || !Array.isArray(methodArgs)) {
+        throw new AgentToolError('INVALID_ARGS', `operations[${index}] requires method and args[]`);
+      }
+      return { method, args: methodArgs };
+    });
+
+    if (this.deps.pending.hasPending()) {
+      throw new AgentToolError(
+        'PENDING_SEMANTIC_EDITS',
+        'apply_engine_edits cannot mix with staged semantic writes in one turn. Use apply_engine_edits for the whole task, or finish the current turn first.',
+      );
+    }
+    const previousRevision = this.revision;
+    const results = applyEngineEdits(this.deps.inputHandler, operations);
+    return {
+      previousRevision,
+      revision: this.revision,
+      applied: operations.length,
+      results,
+      undo: 'one editor undo entry',
+      status: 'committed',
+    };
+  }
+
+  private prepareEngineEditSession(args: Record<string, unknown>) {
+    this.requireDocLoaded();
+    this.requireRevision(args);
+    const method = args['method'];
+    const methodArgs = args['args'];
+    if (typeof method !== 'string' || !Array.isArray(methodArgs)) {
+      throw new AgentToolError('INVALID_ARGS', 'method and args[] are required');
+    }
+    const result = applyEngineEditSession(this.deps.wasm, { method, args: methodArgs });
+    return { revision: this.revision, method, result, status: 'session prepared' };
   }
 
   private requireDocLoaded(): void {
@@ -996,7 +1102,7 @@ export class AgentToolExecutor {
     const mark = this.deps.pending.findDeleteMarkContaining?.(sectionIdx, paraIdx, charOffset);
     if (mark) {
       throw new AgentToolError('PENDING_DELETE_OVERLAP',
-        'insertion point is inside a range already marked for deletion — the marker would be deleted on approval');
+        'insertion point is inside a range already marked for deletion — the marker would be deleted at turn commit');
     }
     const obj: ObjectOp = { type: 'insertNote', noteKind: kind, sectionIdx, paraIdx, charOffset, text };
     const r = this.deps.pending.addObjectOp(agent, obj);
@@ -1213,6 +1319,77 @@ export class AgentToolExecutor {
     };
   }
 
+  /** 표/셀 속성을 MCP 친화적인 enum/mm 단위로 조회한다. */
+  private getTableProperties(args: Record<string, unknown>): unknown {
+    this.requireDocLoaded();
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    const paraIdx = reqInt(args, 'paraIdx');
+    const controlIdx = reqInt(args, 'controlIdx');
+    const { wasm } = this.deps;
+    let dims: { rowCount: number; colCount: number; cellCount: number };
+    let props: Record<string, unknown>;
+    try {
+      dims = wasm.getTableDimensions(sectionIdx, paraIdx, controlIdx);
+      props = wasm.getTableProperties(sectionIdx, paraIdx, controlIdx) as unknown as Record<string, unknown>;
+    } catch {
+      throw new AgentToolError('INVALID_ARGS', `No table control at section ${sectionIdx}, paragraph ${paraIdx}, controlIdx ${controlIdx} — use get_structure to list tables`);
+    }
+    const mm = (key: string): number | undefined =>
+      typeof props[key] === 'number' ? huToMm(props[key] as number) : undefined;
+    const lower = (key: string): string | undefined =>
+      typeof props[key] === 'string' ? (props[key] as string).replace(/^Para$/, 'Paragraph').replace(/^[A-Z]/, (c) => c.toLowerCase()) : undefined;
+    const pageBreak = props['pageBreak'] === 1 ? 'cell' : props['pageBreak'] === 2 ? 'row' : 'none';
+    const table = {
+      repeatHeader: props['repeatHeader'] === true,
+      pageBreak,
+      cellSpacingMm: mm('cellSpacing'),
+      cellPaddingMm: { left: mm('paddingLeft'), right: mm('paddingRight'), top: mm('paddingTop'), bottom: mm('paddingBottom') },
+      sizeMm: { width: mm('tableWidth'), height: mm('tableHeight') },
+      outerMarginMm: { left: mm('outerLeft'), right: mm('outerRight'), top: mm('outerTop'), bottom: mm('outerBottom') },
+      positionMode: props['treatAsChar'] === true ? 'inline' : 'floating',
+      textWrap: lower('textWrap'),
+      horizontal: { relativeTo: lower('horzRelTo'), align: lower('horzAlign'), offsetMm: mm('horzOffset') },
+      vertical: { relativeTo: lower('vertRelTo'), align: lower('vertAlign'), offsetMm: mm('vertOffset') },
+      restrictInPage: props['restrictInPage'] === true,
+      allowOverlap: props['allowOverlap'] === true,
+      keepWithAnchor: props['keepWithAnchor'] === true,
+      caption: {
+        enabled: props['hasCaption'] === true,
+        direction: ['left', 'right', 'top', 'bottom'][Number(props['captionDirection'] ?? 3)] ?? 'bottom',
+        verticalAlign: ['top', 'center', 'bottom'][Number(props['captionVertAlign'] ?? 0)] ?? 'top',
+        widthMm: mm('captionWidth'),
+        spacingMm: mm('captionSpacing'),
+      },
+      fillColor: props['fillColor'],
+    };
+
+    const rawCellIdx = args['cellIdx'];
+    if (rawCellIdx === undefined || rawCellIdx === null) {
+      return { revision: this.revision, sectionIdx, paraIdx, controlIdx, dimensions: dims, table };
+    }
+    const cellIdx = reqInt(args, 'cellIdx');
+    if (cellIdx < 0 || cellIdx >= dims.cellCount) {
+      throw new AgentToolError('INVALID_ARGS', `cellIdx ${cellIdx} out of range (0..${dims.cellCount - 1})`);
+    }
+    const cellProps = wasm.getCellProperties(sectionIdx, paraIdx, controlIdx, cellIdx) as unknown as Record<string, unknown>;
+    const cellMm = (key: string): number | undefined =>
+      typeof cellProps[key] === 'number' ? huToMm(cellProps[key] as number) : undefined;
+    const cell = {
+      cellIdx,
+      sizeMm: { width: cellMm('width'), height: cellMm('height') },
+      paddingMm: { left: cellMm('paddingLeft'), right: cellMm('paddingRight'), top: cellMm('paddingTop'), bottom: cellMm('paddingBottom') },
+      applyInnerMargin: cellProps['applyInnerMargin'] === true,
+      verticalAlign: ['top', 'center', 'bottom'][Number(cellProps['verticalAlign'] ?? 0)] ?? 'top',
+      textDirection: Number(cellProps['textDirection'] ?? 0) === 1 ? 'vertical' : 'horizontal',
+      isHeader: cellProps['isHeader'] === true,
+      protected: cellProps['cellProtect'] === true,
+      editableInForm: cellProps['editableInForm'] === true,
+      fieldName: typeof cellProps['fieldName'] === 'string' ? cellProps['fieldName'] : '',
+      fillColor: cellProps['fillColor'],
+    };
+    return { revision: this.revision, sectionIdx, paraIdx, controlIdx, dimensions: dims, table, cell };
+  }
+
   /** 편집 직후 영향 문단 다이제스트 (~200자, best-effort — 실패 시 빈 문자열) */
   private readPostEditDigest(sectionIdx: number, paraIdx: number, charOffset: number, cell?: CellAddr): string {
     try {
@@ -1260,7 +1437,7 @@ export class AgentToolExecutor {
 
     const warnings: string[] = [];
     if (!set) {
-      warnings.push('no pending change set found — edits may have been approved/rejected already, or none were made');
+      warnings.push('no pending change set found — edits may have been committed/rolled back already, or none were made');
     }
 
     // op 좌표 → 영향 문단 수집 (dedupe, 상한 8)
@@ -1315,11 +1492,11 @@ export class AgentToolExecutor {
       }
     }
     if (hasDeleteMark) {
-      warnings.push('deleted text remains visible struck-through until approval — expected, do not fix');
+      warnings.push('deleted text remains visible struck-through until the turn commits — expected, do not fix');
     }
     if (hasTableStructure) {
       warnings.push(
-        'a table structure op is pending: cellIdx values of that table renumber only after the user approves — '
+        'a table structure op is staged: cellIdx values of that table renumber when the turn commits — '
         + 'further edits to it are rejected (PENDING_DESTRUCTIVE_OP) until then; re-read get_structure on your next turn',
       );
     }
@@ -1392,7 +1569,7 @@ export class AgentToolExecutor {
         'PENDING_DELETE_OVERLAP',
         `insertion point p${paraIdx}:${charOffset} is inside a range already marked for deletion `
         + `(p${mark.range.startParaIdx}:${mark.range.startCharOffset}-p${mark.range.endParaIdx}:${mark.range.endCharOffset}) — `
-        + 'text inserted there would be deleted together on approval. Insert at the mark start '
+        + 'text inserted there would be deleted together at turn commit. Insert at the mark start '
         + `(p${mark.range.startParaIdx}:${mark.range.startCharOffset}) or after its end instead, `
         + 'or use replace_range for delete+insert in one atomic op.',
       );
@@ -1432,7 +1609,7 @@ export class AgentToolExecutor {
       deletedText: r.deletedText.slice(0, 300),
       collapsedAt: { paraIdx: range.startParaIdx, charOffset: range.startCharOffset },
       postEdit: this.readPostEditDigest(range.sectionIdx, range.startParaIdx, range.startCharOffset, range.cell),
-      note: `text removed from the live preview now; finalized on approval, restored on reject. Coordinates after the range have shifted — use collapsedAt to insert replacement text. ${PENDING_NOTE}`,
+      note: `text removed from the live preview now; auto-committed on turn success and restored on turn failure. Coordinates after the range have shifted — use collapsedAt to insert replacement text. ${PENDING_NOTE}`,
     };
   }
 
@@ -1588,7 +1765,7 @@ export class AgentToolExecutor {
     if (this.deps.pending.hasPendingStructureOp(sectionIdx, tableParaIdx, controlIdx)) {
       throw new AgentToolError(
         'PENDING_DESTRUCTIVE_OP',
-        'This table has a pending structure edit (insert/delete row/col or merge_cells) whose cellIdx renumbering is not final until the user approves it. Approval can only happen between turns: finish your turn now, the user approves in the sidebar, then re-read get_structure and retry with fresh coordinates on your next turn.',
+        'This table has a staged structure edit whose cellIdx renumbering becomes final at the successful turn commit. Finish the turn; it commits automatically, then re-read get_structure with fresh coordinates on the next turn.',
       );
     }
   }
@@ -1713,14 +1890,14 @@ export class AgentToolExecutor {
         if (dims.rowCount <= 1) throw new AgentToolError('INVALID_ARGS', 'cannot delete the only row');
         const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'delete_row', rowIdx, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `row is NOT removed yet — struck through until the user approves. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `row is staged for removal at the successful turn commit. ${PENDING_NOTE}` };
       }
       case 'delete_col': {
         const colIdx = reqIdx('colIdx', dims.colCount);
         if (dims.colCount <= 1) throw new AgentToolError('INVALID_ARGS', 'cannot delete the only column');
         const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'delete_col', colIdx, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `column is NOT removed yet — struck through until the user approves. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `column is staged for removal at the successful turn commit. ${PENDING_NOTE}` };
       }
       case 'merge_cells': {
         const startRow = reqIdx('startRow', dims.rowCount);
@@ -1732,23 +1909,51 @@ export class AgentToolExecutor {
         }
         const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'merge_cells', startRow, startCol, endRow, endCol, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `cells are NOT merged yet — highlighted until the user approves. Merging renumbers cellIdx only on approval, so re-read get_structure on your next turn before editing this table again. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `cells are staged for merging at the successful turn commit. Merging then renumbers cellIdx, so re-read get_structure on your next turn before editing this table again. ${PENDING_NOTE}` };
+      }
+      case 'split_cell': {
+        const rowIdx = reqIdx('rowIdx', dims.rowCount);
+        const colIdx = reqIdx('colIdx', dims.colCount);
+        const splitRows = reqInt(args, 'splitRows');
+        const splitCols = reqInt(args, 'splitCols');
+        if (splitRows < 1 || splitRows > 64 || splitCols < 1 || splitCols > 64 || (splitRows === 1 && splitCols === 1)) {
+          throw new AgentToolError('INVALID_ARGS', 'splitRows/splitCols must be 1..64 and at least one must be greater than 1');
+        }
+        // getTableDimensions 범위만으로는 병합 셀의 덮인 좌표도 통과한다. 엔진은
+        // 실제 앵커(row/col)만 나눌 수 있으므로 get_structure cells[]와 같은 원점을 강제한다.
+        let isCellOrigin = false;
+        for (let cellIdx = 0; cellIdx < dims.cellCount; cellIdx++) {
+          const info = wasm.getCellInfo(sectionIdx, paraIdx, controlIdx, cellIdx);
+          if (info.row === rowIdx && info.col === colIdx) {
+            isCellOrigin = true;
+            break;
+          }
+        }
+        if (!isCellOrigin) {
+          throw new AgentToolError('INVALID_ARGS', `No cell starts at row ${rowIdx}, col ${colIdx} — use row/col from get_structure cells[] (covered coordinates inside merged cells are not valid split targets)`);
+        }
+        const obj: ObjectOp = {
+          type: 'tableStructureMarked', ...base, op: 'split_cell', rowIdx, colIdx,
+          splitRows, splitCols, dims: dimsNow,
+        };
+        const r = this.deps.pending.addObjectOp(agent, obj);
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `cell is staged for splitting at the successful turn commit. Splitting renumbers cellIdx, so re-read get_structure on the next turn. ${PENDING_NOTE}` };
       }
       case 'set_cell_props': {
         const cellIdx = reqIdx('cellIdx', dims.cellCount);
         const props = this.parseCellProps(asRecord(args['props'] ?? {}));
         const obj: ObjectOp = { type: 'setCellProps', ...base, cellIdx, props, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied on approval. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
       }
       case 'set_table_props': {
         const props = this.parseTableProps(asRecord(args['props'] ?? {}));
         const obj: ObjectOp = { type: 'setTableProps', ...base, props, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied on approval. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
       }
       default:
-        throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|set_cell_props|set_table_props (got ${JSON.stringify(op)})`);
+        throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|split_cell|set_cell_props|set_table_props (got ${JSON.stringify(op)})`);
     }
   }
 
@@ -1781,12 +1986,19 @@ export class AgentToolExecutor {
       controlIdx,
       revision: this.revision,
       changeSetId: r.changeSetId,
-      note: `table is NOT removed yet — highlighted until the user approves. Further edits to this table fail with PENDING_DESTRUCTIVE_OP. ${PENDING_NOTE}`,
+      note: `table is staged for removal at the successful turn commit. Further edits to this table fail with PENDING_DESTRUCTIVE_OP. ${PENDING_NOTE}`,
     };
   }
 
   /** set_cell_props 허용 키 → wasm setCellProperties JSON */
   private parseCellProps(raw: Record<string, unknown>): Record<string, unknown> {
+    const allowed = new Set([
+      'fillColor', 'verticalAlign', 'isHeader', 'widthMm', 'heightMm', 'paddingMm',
+      'applyInnerMargin', 'textDirection', 'protected', 'editableInForm', 'fieldName',
+    ]);
+    const unknown = Object.keys(raw).filter((key) => !allowed.has(key));
+    if (unknown.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported cell props: ${unknown.join(', ')}`);
+
     const out: Record<string, unknown> = {};
     const fill = raw['fillColor'];
     if (fill !== undefined && fill !== null) {
@@ -1804,32 +2016,168 @@ export class AgentToolExecutor {
       }
       out['verticalAlign'] = map[va];
     }
-    if (raw['isHeader'] !== undefined && raw['isHeader'] !== null) {
-      if (typeof raw['isHeader'] !== 'boolean') throw new AgentToolError('INVALID_ARGS', 'props.isHeader must be a boolean');
-      out['isHeader'] = raw['isHeader'];
-    }
-    for (const [mmKey, huKey] of [['widthMm', 'width'], ['heightMm', 'height']] as const) {
-      const v = raw[mmKey];
-      if (v !== undefined && v !== null) {
-        if (typeof v !== 'number' || !(v > 0)) throw new AgentToolError('INVALID_ARGS', `props.${mmKey} must be a positive number`);
-        out[huKey] = mmToHu(v);
+    for (const [publicKey, internalKey] of [
+      ['isHeader', 'isHeader'], ['applyInnerMargin', 'applyInnerMargin'],
+      ['protected', 'cellProtect'], ['editableInForm', 'editableInForm'],
+    ] as const) {
+      const value = raw[publicKey];
+      if (value !== undefined && value !== null) {
+        if (typeof value !== 'boolean') throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be a boolean`);
+        out[internalKey] = value;
       }
     }
+    const direction = raw['textDirection'];
+    if (direction !== undefined && direction !== null) {
+      if (direction !== 'horizontal' && direction !== 'vertical') {
+        throw new AgentToolError('INVALID_ARGS', 'props.textDirection must be "horizontal"|"vertical"');
+      }
+      out['textDirection'] = direction === 'vertical' ? 1 : 0;
+    }
+    const fieldName = raw['fieldName'];
+    if (fieldName !== undefined && fieldName !== null) {
+      if (typeof fieldName !== 'string' || fieldName.length > 255) {
+        throw new AgentToolError('INVALID_ARGS', 'props.fieldName must be a string up to 255 chars (empty clears it)');
+      }
+      out['fieldName'] = fieldName;
+    }
+    for (const [mmKey, huKey] of [['widthMm', 'width'], ['heightMm', 'height']] as const) {
+      const value = raw[mmKey];
+      if (value !== undefined && value !== null) {
+        if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 500) {
+          throw new AgentToolError('INVALID_ARGS', `props.${mmKey} must be a positive number up to 500mm`);
+        }
+        out[huKey] = mmToHu(value);
+      }
+    }
+    const padding = raw['paddingMm'];
+    if (padding !== undefined && padding !== null) {
+      if (typeof padding !== 'object' || Array.isArray(padding)) {
+        throw new AgentToolError('INVALID_ARGS', 'props.paddingMm must be an object with left/right/top/bottom');
+      }
+      const sides = padding as Record<string, unknown>;
+      const badSides = Object.keys(sides).filter((key) => !['left', 'right', 'top', 'bottom'].includes(key));
+      if (badSides.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported paddingMm keys: ${badSides.join(', ')}`);
+      for (const side of ['left', 'right', 'top', 'bottom'] as const) {
+        const value = sides[side];
+        if (value === undefined || value === null) continue;
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) {
+          throw new AgentToolError('INVALID_ARGS', `props.paddingMm.${side} must be 0..100mm`);
+        }
+        out[`padding${side[0].toUpperCase()}${side.slice(1)}`] = mmToHu(value);
+      }
+      if (out['applyInnerMargin'] === undefined) out['applyInnerMargin'] = true;
+    }
     if (Object.keys(out).length === 0) {
-      throw new AgentToolError('INVALID_ARGS', 'props requires at least one of fillColor/verticalAlign/isHeader/widthMm/heightMm');
+      throw new AgentToolError('INVALID_ARGS', `props requires at least one of: ${[...allowed].join('/')}`);
     }
     return out;
   }
 
-  /** set_table_props 허용 키 */
+  /** set_table_props 허용 키 → wasm setTableProperties JSON */
   private parseTableProps(raw: Record<string, unknown>): Record<string, unknown> {
+    const allowed = new Set([
+      'repeatHeader', 'pageBreak', 'cellSpacingMm', 'cellPaddingMm', 'outerMarginMm',
+      'positionMode', 'textWrap', 'horizontalRelativeTo', 'horizontalAlign',
+      'horizontalOffsetMm', 'verticalRelativeTo', 'verticalAlign', 'verticalOffsetMm',
+      'restrictInPage', 'allowOverlap', 'keepWithAnchor', 'captionEnabled',
+      'captionDirection', 'captionWidthMm', 'captionSpacingMm', 'captionVerticalAlign',
+    ]);
+    const unknown = Object.keys(raw).filter((key) => !allowed.has(key));
+    if (unknown.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported table props: ${unknown.join(', ')}`);
+
     const out: Record<string, unknown> = {};
-    if (raw['repeatHeader'] !== undefined && raw['repeatHeader'] !== null) {
-      if (typeof raw['repeatHeader'] !== 'boolean') throw new AgentToolError('INVALID_ARGS', 'props.repeatHeader must be a boolean');
-      out['repeatHeader'] = raw['repeatHeader'];
+    for (const [publicKey, internalKey] of [
+      ['repeatHeader', 'repeatHeader'], ['restrictInPage', 'restrictInPage'],
+      ['allowOverlap', 'allowOverlap'], ['keepWithAnchor', 'keepWithAnchor'],
+      ['captionEnabled', 'hasCaption'],
+    ] as const) {
+      const value = raw[publicKey];
+      if (value !== undefined && value !== null) {
+        if (typeof value !== 'boolean') throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be a boolean`);
+        out[internalKey] = value;
+      }
+    }
+    const enumProp = (
+      publicKey: string, internalKey: string, map: Record<string, string | number>,
+    ): void => {
+      const value = raw[publicKey];
+      if (value === undefined || value === null) return;
+      if (typeof value !== 'string' || !(value in map)) {
+        throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be one of ${Object.keys(map).join('|')}`);
+      }
+      out[internalKey] = map[value];
+    };
+    enumProp('pageBreak', 'pageBreak', { none: 0, cell: 1, row: 2 });
+    enumProp('textWrap', 'textWrap', {
+      square: 'Square', topAndBottom: 'TopAndBottom', behindText: 'BehindText', inFrontOfText: 'InFrontOfText',
+    });
+    enumProp('horizontalRelativeTo', 'horzRelTo', { paper: 'Paper', page: 'Page', column: 'Column', paragraph: 'Para' });
+    enumProp('horizontalAlign', 'horzAlign', { left: 'Left', center: 'Center', right: 'Right', inside: 'Inside', outside: 'Outside' });
+    enumProp('verticalRelativeTo', 'vertRelTo', { paper: 'Paper', page: 'Page', paragraph: 'Para' });
+    enumProp('verticalAlign', 'vertAlign', { top: 'Top', center: 'Center', bottom: 'Bottom', inside: 'Inside', outside: 'Outside' });
+    enumProp('captionDirection', 'captionDirection', { left: 0, right: 1, top: 2, bottom: 3 });
+    enumProp('captionVerticalAlign', 'captionVertAlign', { top: 0, center: 1, bottom: 2 });
+
+    const mode = raw['positionMode'];
+    if (mode !== undefined && mode !== null) {
+      if (mode !== 'inline' && mode !== 'floating') {
+        throw new AgentToolError('INVALID_ARGS', 'props.positionMode must be "inline"|"floating"');
+      }
+      out['treatAsChar'] = mode === 'inline';
+    }
+    const floatingKeys = [
+      'textWrap', 'horizontalRelativeTo', 'horizontalAlign', 'horizontalOffsetMm',
+      'verticalRelativeTo', 'verticalAlign', 'verticalOffsetMm', 'restrictInPage',
+      'allowOverlap', 'keepWithAnchor', 'outerMarginMm',
+    ];
+    if (mode === undefined && floatingKeys.some((key) => raw[key] !== undefined && raw[key] !== null)) {
+      out['treatAsChar'] = false;
+    }
+    // 에이전트 편의 정렬 — 한컴의 통상 동작("단 기준 + offset 0")에 맞춘다.
+    const horizontalAlign = raw['horizontalAlign'];
+    if (horizontalAlign !== undefined && horizontalAlign !== null) {
+      if (raw['horizontalRelativeTo'] === undefined || raw['horizontalRelativeTo'] === null) {
+        out['horzRelTo'] = ['inside', 'outside'].includes(String(horizontalAlign)) ? 'Page' : 'Column';
+      }
+      if (raw['horizontalOffsetMm'] === undefined || raw['horizontalOffsetMm'] === null) {
+        out['horzOffset'] = 0;
+      }
+    }
+
+    const boundedMm = (publicKey: string, internalKey: string, min: number, max: number): void => {
+      const value = raw[publicKey];
+      if (value === undefined || value === null) return;
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
+        throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be ${min}..${max}mm`);
+      }
+      out[internalKey] = mmToHu(value);
+    };
+    boundedMm('cellSpacingMm', 'cellSpacing', 0, 100);
+    boundedMm('horizontalOffsetMm', 'horzOffset', -1000, 1000);
+    boundedMm('verticalOffsetMm', 'vertOffset', -1000, 1000);
+    boundedMm('captionWidthMm', 'captionWidth', 0, 500);
+    boundedMm('captionSpacingMm', 'captionSpacing', 0, 100);
+
+    for (const [groupKey, prefix] of [['cellPaddingMm', 'padding'], ['outerMarginMm', 'outer']] as const) {
+      const group = raw[groupKey];
+      if (group === undefined || group === null) continue;
+      if (typeof group !== 'object' || Array.isArray(group)) {
+        throw new AgentToolError('INVALID_ARGS', `props.${groupKey} must be an object with left/right/top/bottom`);
+      }
+      const sides = group as Record<string, unknown>;
+      const badSides = Object.keys(sides).filter((key) => !['left', 'right', 'top', 'bottom'].includes(key));
+      if (badSides.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported ${groupKey} keys: ${badSides.join(', ')}`);
+      for (const side of ['left', 'right', 'top', 'bottom'] as const) {
+        const value = sides[side];
+        if (value === undefined || value === null) continue;
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) {
+          throw new AgentToolError('INVALID_ARGS', `props.${groupKey}.${side} must be 0..100mm`);
+        }
+        out[`${prefix}${side[0].toUpperCase()}${side.slice(1)}`] = mmToHu(value);
+      }
     }
     if (Object.keys(out).length === 0) {
-      throw new AgentToolError('INVALID_ARGS', 'props requires at least one of: repeatHeader');
+      throw new AgentToolError('INVALID_ARGS', `props requires at least one of: ${[...allowed].join('/')}`);
     }
     return out;
   }
@@ -2422,7 +2770,7 @@ export class AgentToolExecutor {
       note: (oddEvenExists
         ? `this section also has an odd/even-page-only ${which} which this tool does NOT replace — the new both-pages ${which} may render alongside it. `
         : '') + (existedBefore
-        ? `existing ${which} will be replaced on approval. ${PENDING_NOTE}`
+        ? `existing ${which} will be replaced at the successful turn commit. ${PENDING_NOTE}`
         : PENDING_NOTE),
     };
   }
@@ -2475,6 +2823,6 @@ export class AgentToolExecutor {
       textSample: this.paraTextSample(sectionIdx, paraIdx, cell),
     };
     const r = this.deps.pending.addObjectOp(agent, obj);
-    return { revision: this.revision, changeSetId: r.changeSetId, note: `applied on approval. ${PENDING_NOTE}` };
+    return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
   }
 }

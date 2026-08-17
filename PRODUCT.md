@@ -16,14 +16,14 @@ rhwp is an independent open-source HWP/HWPX viewer/editor with agentic features 
 
 ## Positioning
 
-An HWP editor with agentic features as a first-class part of the product—not an external AI tool that cannot touch Hangul documents, and not a generic chat overlay on a viewer. Documents are edited through a real HWP engine (Rust → WASM); the AI proposes changes against the live open document and the user stays in control.
+An HWP editor with agentic features as a first-class part of the product—not an external AI tool that cannot touch Hangul documents, and not a generic chat overlay on a viewer. Documents are edited through a real HWP engine (Rust → WASM); the AI makes visible, undoable changes against the live open document, while planning approval and editor undo keep the user in control.
 
 ## Operating Context
 
 - Users open HWP/HWPX (and related formats) in `rhwp-studio` in the browser (PWA) or the Rauhwpx desktop app.
 - The desktop app runs as one Electron process with multiple document windows. Every window owns an isolated agent session while settings, recent documents, skills, references, and provider credentials remain user-wide.
 - A local Node hub (`rhwp-agent`) bridges Claude, Codex, or Pi CLI to Studio through session-scoped WebSocket and MCP routing.
-- AI writes appear as pending, reviewable edits (tint / strikethrough) until the user Approves or Rejects; Approve commits as one undo step.
+- AI writes run autonomously with editor undo history: semantic edits use a live staged preview and commit on successful turn completion; raw engine batches are atomic and restore the prior snapshot on failure.
 - A separate planning workflow can research with web, subagents, Browserbase, and chat-scoped downloads while local files and the live document remain read-only. The agent presents a structured plan; only an explicit `Approve & execute` action unlocks implementation.
 - Everything document-related runs locally in the browser WASM engine; the agent hub is a thin localhost router with no document logic.
 - Adjacent surfaces exist (browser extensions, VS Code viewer, embeddable npm editor, CLI) but the primary product experience for this record is the studio editor + AI sidebar.
@@ -32,7 +32,7 @@ An HWP editor with agentic features as a first-class part of the product—not a
 
 - Parse/edit/render Korean HWP ecosystem formats (HWP 5.0, HWPX, HML; HWP3 read); serialize with roundtrip fidelity as a core concern.
 - MCP tools use body-text addresses (`sectionIdx` / `paraIdx` / `charOffset`, 0-based) and a revision contract (`expectedRevision` / `REVISION_MISMATCH`).
-- AI must not apply document mutations silently; human approval is part of the product. Planning approval does not replace the existing review of pending HWP changes.
+- Planning remains user-approved before implementation. Once implementation starts, document mutations execute autonomously, preserve revision checks, and remain undoable.
 - Independent of Hancom; “한글,” “한컴,” “HWP,” and “HWPX” are Hancom trademarks—do not imply affiliation, sponsorship, or approval.
 - UI and product language are Korean-first where the studio already is (`lang="ko"`).
 - Open: exact collaboration model beyond single-user AI review (multi-user co-editing, sharing) is desired as success direction but not fully specified yet.
@@ -54,7 +54,7 @@ An HWP editor with agentic features as a first-class part of the product—not a
 ## Product Principles
 
 1. **Editor-native AI** — Agentic features must feel like part of the program, not a sidecar chat product.
-2. **User remains the author** — AI proposes; the user approves. Trust and undoability beat silent automation.
+2. **User remains the author** — planning stays explicit, autonomous edits stay visible and undoable, and failed atomic work restores the previous document state.
 3. **Real HWP work** — Success is finishing full documents in the formats Korean office work actually uses.
 4. **Local by default** — Document processing stays with the user (browser WASM + localhost agent); do not invent cloud document pipelines.
 5. **Smooth collaboration** — System handoffs (agent ↔ document ↔ approval) and UI continuity are both first-class; friction in either breaks the product.

@@ -3,7 +3,7 @@
 import { z } from 'zod';
 
 export const REVISION_NOTE = 'Returns the current document revision. Always use the revision from your most recent tool call as expectedRevision in write tools.';
-export const WRITE_NOTE = 'Requires expectedRevision (the revision returned by your most recent tool call). Fails with REVISION_MISMATCH if the document changed — then re-read (get_structure / get_text_range) and retry with fresh coordinates. The edit appears to the user as a pending tinted change and only becomes final when the user approves it in the sidebar.';
+export const WRITE_NOTE = 'Requires expectedRevision (the revision returned by your most recent tool call). Fails with REVISION_MISMATCH if the document changed — then re-read (get_structure / get_text_range) and retry with fresh coordinates. Successful edits are committed automatically and remain undoable in the editor.';
 export const OFFSET_CAVEAT = 'charOffset counts text characters only; paragraphs containing inline controls (tables/pictures) may have offsets that do not map 1:1 to what you see — prefer find_text to locate exact offsets.';
 export const CELL_NOTE = "To target text INSIDE a table cell, pass the optional cell parameter (assemble it from the table entry's paraIdx/controlIdx in get_structure tables[] plus the cell's cellIdx, or copy a find_text match verbatim); paragraph indexes and offsets are then relative to that cell.";
 
@@ -58,6 +58,7 @@ const EDIT_TABLE_REQUIRED_PARAMS = {
   delete_row: ['rowIdx'],
   delete_col: ['colIdx'],
   merge_cells: ['startRow', 'startCol', 'endRow', 'endCol'],
+  split_cell: ['rowIdx', 'colIdx', 'splitRows', 'splitCols'],
   set_cell_props: ['cellIdx', 'props'],
   set_table_props: ['props'],
 };
@@ -93,11 +94,11 @@ export const TOOL_CATEGORIES = Object.freeze([
 ]);
 
 /**
- * Codex/Claude 가 headless 승인에 쓰는 MCP 주석.
+ * Codex/Claude 가 headless 실행에 쓰는 MCP 주석.
  *
- * 문서 쓰기는 사이드바 승인 전까지 pending 이므로 destructive 로 표시하지 않는다.
- * 그렇게 표시하면 Codex 안전 모드(`workspace-write` + `approval_policy=never`)가
- * 문서 편집 도구를 거절한다.
+ * 문서 쓰기는 에디터 undo 이력으로 보호되며 사용자 입력 없이 실행돼야 하므로
+ * destructive 로 표시하지 않는다. 그렇게 표시하면 Codex 안전 모드
+ * (`workspace-write` + `approval_policy=never`)가 문서 편집 도구를 거절한다.
  *
  * @param {'document-read'|'document-write'|'reference-read'|'download-write'|'planning-control'|'browser'} category
  */
@@ -244,6 +245,43 @@ const BASE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'get_table_properties',
+    description: `Inspect one table's agent-editable state: dimensions, default cell spacing/padding, page splitting, object placement (inline/floating, wrapping, horizontal/vertical reference, alignment and offsets), overlap constraints, outer margins and caption settings. Optionally pass cellIdx to also inspect that cell's size, padding, direction, protection, field and fill properties. Addresses come from get_structure tables[]. Values are returned in agent-friendly mm/enums. Use this before edit_table set_table_props/set_cell_props instead of guessing. ${REVISION_NOTE}`,
+    shape: {
+      sectionIdx: z.number().int().min(0),
+      paraIdx: z.number().int().min(0).describe('Body paragraph containing the table control'),
+      controlIdx: z.number().int().min(0),
+      cellIdx: z.number().int().min(0).optional().describe('Optional flat cell index to include cell properties'),
+    },
+  },
+  {
+    name: 'get_engine_edit_capabilities',
+    description: `List every agent-editable method exposed by the active editor engine: all document mutations plus the structured-copy/session setup operations required by paste workflows. Each entry includes its kind, positional parameter names, and TypeScript signature; typeDefinitions supplies the JSON shapes for referenced engine types, and argumentGuide documents opaque property/JSON parameters. This catalog is generated from the same registries that guard editor undo coverage, so newly added engine edits appear here automatically. Pass query to filter by method or signature. Call this before apply_engine_edits. ${REVISION_NOTE}`,
+    shape: {
+      query: z.string().max(200).optional(),
+    },
+  },
+  {
+    name: 'apply_engine_edits',
+    description: `Apply 1-32 engine mutations sequentially as one atomic, immediately committed editor transaction and one undo entry. This is the complete headless escape hatch for editing capabilities not covered by the higher-level tools: shapes/text boxes, object properties and transforms, complete character/paragraph formatting, styles and numbering definitions, page borders/sections/columns, rich header/footer and note edits, fields/forms, table formulas/borders/resizing/transpose, nested cell paths, structured paste, and every other method returned by get_engine_edit_capabilities. Each operation uses a method name and positional args matching that catalog. String engine results are returned as {value,parsedJson} so document text keeps a stable type while JSON remains directly inspectable. If any operation fails, the exact pre-batch snapshot is restored. Encode Uint8Array parameters as {$base64:"..."}. Use higher-level tools when they express the same edit more clearly. ${WRITE_NOTE}`,
+    shape: {
+      expectedRevision: z.number().int(),
+      operations: z.array(z.object({
+        method: z.string().min(1).max(100),
+        args: z.array(z.unknown()).max(32),
+      }).strict()).min(1).max(32),
+    },
+  },
+  {
+    name: 'prepare_engine_edit_session',
+    description: `Run one non-document engine setup operation required by an edit workflow, such as structured copy, control copy, transposed-table copy, or the page-local header/footer visibility toggle. Choose an entry whose capability kind is "session" from get_engine_edit_capabilities. Session state does not change document revision and is intentionally outside document undo; follow copy setup with apply_engine_edits for the actual atomic paste. ${REVISION_NOTE}`,
+    shape: {
+      expectedRevision: z.number().int(),
+      method: z.string().min(1).max(100),
+      args: z.array(z.unknown()).max(32),
+    },
+  },
+  {
     name: 'insert_text',
     description: `Insert text at (sectionIdx, paraIdx, charOffset). Only "\\n" is handled (it splits paragraphs) — carriage returns ("\\r\\n" / "\\r") are normalized to "\\n" newlines. Text beyond the 10000-char limit must be split into multiple insert_text calls, chaining each response's revision into the next call's expectedRevision. ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
@@ -257,7 +295,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'delete_range',
-    description: `Delete a text range. The text is removed from the live preview immediately (pending user approval; reject restores it), so re-reads no longer show it and coordinates after the range shift — the response's collapsedAt gives the collapse point for inserting replacement text. To rewrite a section, prefer replace_range (one atomic op). ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    description: `Delete a text range. The text is removed immediately, so re-reads no longer show it and coordinates after the range shift — the response's collapsedAt gives the collapse point for inserting replacement text. To rewrite a section, prefer replace_range (one atomic op). ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -270,7 +308,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'replace_range',
-    description: `Replace a text range: the old text is swapped for the new text in the live preview immediately (pending user approval; reject restores the original). Prefer this over delete_range + insert_text — it is one atomic op and preserves formatting. ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    description: `Replace a text range: the old text is swapped for the new text immediately. Prefer this over delete_range + insert_text — it is one atomic op and preserves formatting. ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -304,7 +342,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'create_table',
-    description: `Create a table at (sectionIdx, paraIdx, charOffset) and optionally fill every cell in the same call — one atomic pending change. cells is a full row-major grid (rows/cols are inferred from it; short rows leave trailing cells empty; "\\n" inside a cell makes multiple paragraphs). headerRow:true marks row 0 as a repeating header (bold by default, optional headerFill shading). To merge cells afterwards call edit_table op:merge_cells — merging renumbers cellIdx only AFTER the user approves it, so re-read get_structure on your next turn before editing that table again. Returns the table address {paraIdx, controlIdx} for follow-up calls. Example: 4 equal columns on A4: colWidthsMm [37.5, 37.5, 37.5, 37.5]. ${UNIT_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    description: `Create a table at (sectionIdx, paraIdx, charOffset) and optionally fill every cell in the same call — one atomic pending change. cells is a full row-major grid (rows/cols are inferred from it; short rows leave trailing cells empty; "\\n" inside a cell makes multiple paragraphs). headerRow:true marks row 0 as a repeating header (bold by default, optional headerFill shading). To merge cells afterwards call edit_table op:merge_cells — merging renumbers cellIdx when the successful turn auto-commits, so re-read get_structure on your next turn before editing that table again. Returns the table address {paraIdx, controlIdx} for follow-up calls. Example: 4 equal columns on A4: colWidthsMm [37.5, 37.5, 37.5, 37.5]. ${UNIT_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -323,29 +361,31 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'edit_table',
-    description: `Restructure an existing table at (sectionIdx, paraIdx, controlIdx) — the address comes verbatim from get_structure tables[]. op determines which extra params are required: insert_row(rowIdx, below?=true) · insert_col(colIdx, right?=true) · delete_row(rowIdx) · delete_col(colIdx) · merge_cells(startRow, startCol, endRow, endCol — row/col come from get_structure cells[].row/col, NOT cellIdx) · set_cell_props(cellIdx, props{fillColor?, verticalAlign?("top"|"center"|"bottom"), isHeader?, widthMm?, heightMm?}) · set_table_props(props{repeatHeader?}). Calls missing the required params fail fast with INVALID_ARGS naming them. To APPEND a row/col, pass the last rowIdx/colIdx with below/right:true. delete_row/delete_col/merge_cells and props ops are NOT applied yet — they are highlighted and executed only when the user approves; until then further edits to the same table are rejected with PENDING_DESTRUCTIVE_OP. After insert_row/insert_col the cellIdx renumbering likewise makes further edits to that table fail until the user approves — do content edits (cell text, cell props) BEFORE structure edits, and re-read get_structure next turn for fresh cellIdx values. ${UNIT_NOTE} ${WRITE_NOTE}`,
+    description: `Restructure or format an existing table at (sectionIdx, paraIdx, controlIdx) — copy the address from get_structure tables[] and call get_table_properties first when changing layout. Operations: insert_row(rowIdx, below?=true) · insert_col(colIdx, right?=true) · delete_row(rowIdx) · delete_col(colIdx) · merge_cells(startRow,startCol,endRow,endCol) · split_cell(rowIdx,colIdx,splitRows,splitCols) · set_cell_props(cellIdx,props) · set_table_props(props). set_cell_props supports fillColor, verticalAlign, isHeader, widthMm/heightMm, paddingMm{left/right/top/bottom}, applyInnerMargin, textDirection("horizontal"|"vertical"), protected, editableInForm and fieldName. set_table_props supports repeatHeader; pageBreak("none"|"cell"|"row"); cellSpacingMm; cellPaddingMm; outerMarginMm; positionMode("inline"|"floating"); textWrap("square"|"topAndBottom"|"behindText"|"inFrontOfText"); horizontalRelativeTo("paper"|"page"|"column"|"paragraph"), horizontalAlign and horizontalOffsetMm; verticalRelativeTo("paper"|"page"|"paragraph"), verticalAlign and verticalOffsetMm; restrictInPage; allowOverlap; keepWithAnchor; and captionEnabled, captionDirection, captionWidthMm, captionSpacingMm, captionVerticalAlign. EASY CENTERING: set_table_props with {horizontalAlign:"center"}; it automatically makes the table floating, column-relative and zero-offset unless overridden. Calls missing required params fail fast. To append a row/col, target the last index with below/right:true. delete/merge/split and props operations execute when the successful turn auto-commits; structural operations renumber cellIdx, so edit content/props first and re-read get_structure on the next turn. ${UNIT_NOTE} ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
       paraIdx: z.number().int().min(0).describe('Body paragraph containing the table control'),
       controlIdx: z.number().int().min(0),
-      op: z.enum(['insert_row', 'insert_col', 'delete_row', 'delete_col', 'merge_cells', 'set_cell_props', 'set_table_props']),
-      rowIdx: z.number().int().min(0).optional(),
-      colIdx: z.number().int().min(0).optional(),
+      op: z.enum(['insert_row', 'insert_col', 'delete_row', 'delete_col', 'merge_cells', 'split_cell', 'set_cell_props', 'set_table_props']),
+      rowIdx: z.number().int().min(0).optional().describe('Row index for row operations or split_cell'),
+      colIdx: z.number().int().min(0).optional().describe('Column index for column operations or split_cell'),
       below: z.boolean().optional().describe('insert_row: insert below rowIdx (default true)'),
       right: z.boolean().optional().describe('insert_col: insert right of colIdx (default true)'),
       startRow: z.number().int().min(0).optional(),
       startCol: z.number().int().min(0).optional(),
       endRow: z.number().int().min(0).optional(),
       endCol: z.number().int().min(0).optional(),
+      splitRows: z.number().int().min(1).max(64).optional().describe('split_cell: number of resulting rows'),
+      splitCols: z.number().int().min(1).max(64).optional().describe('split_cell: number of resulting columns'),
       cellIdx: z.number().int().min(0).optional().describe('set_cell_props: flat cell index'),
-      props: z.record(z.string(), z.unknown()).optional().describe('set_cell_props / set_table_props payload'),
+      props: z.record(z.string(), z.unknown()).optional().describe('set_cell_props / set_table_props payload; see operation description for supported keys'),
     },
     validate: validateEditTable,
   },
   {
     name: 'delete_table',
-    description: `Delete an entire existing table at (sectionIdx, paraIdx, controlIdx) — the address comes verbatim from get_structure tables[]. This is mark-only: the whole table is highlighted as pending deletion and is NOT removed until the user approves. Until then further edits to the same table fail with PENDING_DESTRUCTIVE_OP. On reject the table is left untouched. ${WRITE_NOTE}`,
+    description: `Delete an entire existing table at (sectionIdx, paraIdx, controlIdx) — the address comes verbatim from get_structure tables[]. This remains mark-only while staged and executes when the successful turn auto-commits. Until then further edits to the same table fail with PENDING_DESTRUCTIVE_OP. A failed turn leaves the table untouched. ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -405,7 +445,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'apply_style',
-    description: `Apply a named document style (from list_styles) to one paragraph. Applied when the user approves. ${CELL_NOTE} ${WRITE_NOTE}`,
+    description: `Apply a named document style (from list_styles) to one paragraph. It auto-commits at the end of a successful turn. ${CELL_NOTE} ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -479,7 +519,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'set_page_layout',
-    description: `Set the section's page geometry: paper size (named or custom mm), orientation, margins, and/or column count. Applied immediately as a pending change (whole document re-paginates); reverted if the user rejects. ${UNIT_NOTE} ${WRITE_NOTE}`,
+    description: `Set the section's page geometry: paper size (named or custom mm), orientation, margins, and/or column count. Applied immediately (the whole document re-paginates) and auto-committed at the end of a successful turn. ${UNIT_NOTE} ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -504,7 +544,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'edit_header_footer',
-    description: `Create or replace the section's header or footer (applies to all pages). text is one line; pageNumber adds an automatic page-number field aligned left/center/right. A brand-new header/footer shows immediately as a pending change; replacing an existing one is applied only on approval. WARNING: there is NO tool to read the current header/footer content — replacing discards whatever is already there and you cannot see it beforehand, so check with the user before replacing an existing header/footer. ${WRITE_NOTE}`,
+    description: `Create or replace the section's header or footer (applies to all pages). text is one line; pageNumber adds an automatic page-number field aligned left/center/right. A brand-new header/footer shows immediately; replacing an existing one is applied when the successful turn auto-commits. Replacing discards the current header/footer content; inspect the affected pages with render_page before changing it. ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -524,7 +564,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'replace_all',
-    description: `Find-and-replace every occurrence of a string across the document body and table cells in ONE call — far better than looping find_text + replace_range yourself (each write shifts coordinates; this tool handles that internally by replacing back-to-front). Each occurrence becomes one pending replace shown to the user; they approve or reject the whole batch. Matches inside ranges already marked for deletion are skipped (reported as skippedPendingDelete). Up to maxMatches (default 100, max 200) per call; if truncated, call again with the returned revision. ${WRITE_NOTE}`,
+    description: `Find-and-replace every occurrence of a string across the document body and table cells in ONE call — far better than looping find_text + replace_range yourself (each write shifts coordinates; this tool handles that internally by replacing back-to-front). Each occurrence is staged in one batch that auto-commits at the end of a successful turn. Matches inside ranges already marked for deletion are skipped (reported as skippedPendingDelete). Up to maxMatches (default 100, max 200) per call; if truncated, call again with the returned revision. ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       query: z.string().min(1),
@@ -607,7 +647,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'verify_changes',
-    description: `Self-check your work after a batch of edits: returns the current/open change set — per-op kind and an applied flag (true = already visible in the document, false = applies on approval), post-edit text digests, affected pages and warnings. With includeImage:true the response also carries a PNG render (image block) of the first affected page showing the post-approval state. ALWAYS call this after completing a batch of edits, fix any problems you find, and only then end your turn. Note: delete_range/replace_range already show their result in the live preview; the removed text is gone from re-reads until the user rejects — do NOT re-insert it. ${REVISION_NOTE}`,
+    description: `Self-check your work after a batch of edits: returns the current/open change set — per-op kind and an applied flag (true = already visible in the document, false = applies at successful turn commit), post-edit text digests, affected pages and warnings. With includeImage:true the response also carries a PNG render (image block) of the first affected page showing the committed state. ALWAYS call this after completing a batch of edits, fix any problems you find, and only then end your turn. Note: delete_range/replace_range already show their result in the live preview; the removed text is gone from re-reads after the write — do NOT re-insert it. ${REVISION_NOTE}`,
     shape: {
       changeSetId: z.string().min(1).optional().describe('Specific change set id (default: the current open change set)'),
       includeImage: z.boolean().default(false).optional()
@@ -675,6 +715,10 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   render_page: 'document-read',
   get_para_format: 'document-read',
   get_char_format: 'document-read',
+  get_table_properties: 'document-read',
+  get_engine_edit_capabilities: 'document-read',
+  apply_engine_edits: 'document-write',
+  prepare_engine_edit_session: 'document-write',
   insert_text: 'document-write',
   delete_range: 'document-write',
   replace_range: 'document-write',

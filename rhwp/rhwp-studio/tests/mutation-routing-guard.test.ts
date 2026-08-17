@@ -135,7 +135,7 @@ const BASELINE: Readonly<Record<string, number>> = {
   'src/command/commands/edit.ts': 1,
   'src/command/commands/format.ts': 1,
   'src/command/commands/insert.ts': 19,
-  'src/command/commands/page.ts': 13,
+  'src/command/commands/page.ts': 14, // +1: page:hide now uses the classified WasmBridge.setPageHide wrapper
   'src/command/commands/table.ts': 34, // +1: 블록계산 이관 시 evaluateTableFormula dry-run(write=false, 검증) 추가
   'src/ui/bookmark-dialog.ts': 3,
   'src/ui/cell-border-bg-dialog.ts': 5,
