@@ -1104,7 +1104,22 @@ class AgentBridgeImpl implements AgentBridge {
     this.pendingTurnOpen = true;
   }
 
-  private endPendingTurn(outcome: 'commit' | 'reject' = 'reject') {
+  /**
+   * 성공한 턴의 편집 처리는 권한 프로필이 가른다:
+   * 안전(safe) → 'review' (사용자 승인 대기), 전체(unrestricted) → 'commit' (자동 반영).
+   */
+  private successfulTurnOutcome(): 'review' | 'commit' {
+    return this.permissionProfile === 'safe' ? 'review' : 'commit';
+  }
+
+  /**
+   * 결과를 모르는 턴 종료(재연결 등)의 기본값: 안전 모드는 편집을 검토 대기로
+   * 남겨 사용자가 결정하고, 전체 모드는 기존대로 롤백한다.
+   */
+  private endPendingTurn(
+    outcome: 'commit' | 'reject' | 'review' =
+      this.permissionProfile === 'safe' ? 'review' : 'reject',
+  ) {
     if (!this.pendingTurnOpen) return;
     try {
       this.pendingEdits.endTurn(outcome);
@@ -1556,7 +1571,7 @@ class AgentBridgeImpl implements AgentBridge {
         this.turnHadError = false;
         if (this.pendingTurnOpen) {
           try {
-            this.endPendingTurn(succeeded ? 'commit' : 'reject');
+            this.endPendingTurn(succeeded ? this.successfulTurnOutcome() : 'reject');
           } catch (e) {
             console.warn('[AgentBridge] endTurn 실패:', e);
           }
@@ -1588,6 +1603,7 @@ class AgentBridgeImpl implements AgentBridge {
         capabilityEpoch: msg.capabilityEpoch,
         activePhase: this.phase,
         activeCapabilityEpoch: this.capabilityEpoch,
+        permissionProfile: this.permissionProfile,
         template: readDocumentTemplate(msg.template) ?? undefined,
       })
       .then((result) => {

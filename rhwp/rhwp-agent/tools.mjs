@@ -3,7 +3,7 @@
 import { z } from 'zod';
 
 export const REVISION_NOTE = 'Returns the current document revision. Always use the revision from your most recent tool call as expectedRevision in write tools.';
-export const WRITE_NOTE = 'Requires expectedRevision (the revision returned by your most recent tool call). Fails with REVISION_MISMATCH if the document changed — then re-read (get_structure / get_text_range) and retry with fresh coordinates. Successful edits are committed automatically and remain undoable in the editor.';
+export const WRITE_NOTE = 'Requires expectedRevision (the revision returned by your most recent tool call). Fails with REVISION_MISMATCH if the document changed — then re-read (get_structure / get_text_range) and retry with fresh coordinates. Successful edits are staged as live preview; at turn end they are auto-committed (전체 접근 profile) or held for the user’s review and approval (안전 profile), and committed edits remain undoable in the editor.';
 export const OFFSET_CAVEAT = 'charOffset counts text characters only; paragraphs containing inline controls (tables/pictures) may have offsets that do not map 1:1 to what you see — prefer find_text to locate exact offsets.';
 export const CELL_NOTE = "To target text INSIDE a table cell, pass the optional cell parameter (assemble it from the table entry's paraIdx/controlIdx in get_structure tables[] plus the cell's cellIdx, or copy a find_text match verbatim); paragraph indexes and offsets are then relative to that cell.";
 
@@ -764,7 +764,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'verify_changes',
-    description: `Self-check your work after a batch of edits: returns the current/open change set — per-op kind and an applied flag (true = already visible in the document, false = applies at successful turn commit), post-edit text digests, affected pages and warnings. With includeImage:true the response also carries a PNG render (image block) of the first affected page showing the committed state. ALWAYS call this after completing a batch of edits, fix any problems you find, and only then end your turn. Note: delete_range/replace_range already show their result in the live preview; the removed text is gone from re-reads after the write — do NOT re-insert it. ${REVISION_NOTE}`,
+    description: `Self-check your work after a batch of edits: returns the current/open change set — per-op kind and an applied flag (true = already visible in the document, false = applies at commit: automatic on turn success in 전체 접근, after the user approves in 안전), post-edit text digests, affected pages and warnings. With includeImage:true the response also carries a PNG render (image block) of the first affected page showing the committed state. ALWAYS call this after completing a batch of edits, fix any problems you find, and only then end your turn. Note: delete_range/replace_range already show their result in the live preview; the removed text is gone from re-reads after the write — do NOT re-insert it. ${REVISION_NOTE}`,
     shape: {
       changeSetId: z.string().min(1).optional().describe('Specific change set id (default: the current open change set)'),
       includeImage: z.boolean().default(false).optional()

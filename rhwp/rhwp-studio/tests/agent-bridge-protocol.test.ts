@@ -360,7 +360,7 @@ test('executor: insert_text는 pending에 위임하고 새 revision을 반환', 
   assert.deepEqual(r.insertedRange, {
     startParaIdx: 0, startCharOffset: 5, endParaIdx: 0, endCharOffset: 11,
   });
-  assert.equal(r.note, 'staged now and committed automatically when the turn succeeds; a failed turn rolls it back');
+  assert.equal(r.note, 'staged now as live preview; when the turn ends it is auto-committed (전체 접근) or held for the user’s review and approval (안전). A failed turn rolls it back');
 });
 
 test('executor: delete_range 빈 범위 → INVALID_ARGS', async () => {
