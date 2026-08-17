@@ -96,7 +96,7 @@ test('approval immediately switches to implementation with a disabled, announced
   assert.match(source, /case 'implementation-started':[\s\S]*closePlanForExecution\(e\.planId \|\| activePlan\?\.planId \|\| ''\);[\s\S]*setPlanningPhase\(e\.phase\)/);
   assert.match(source, /function closePlanForExecution\(planId: string\): void \{[\s\S]*activePlan = null;[\s\S]*planMinimized = false;[\s\S]*persistCurrentThread\(\);/);
   assert.match(source, /approve\.disabled = !approvableNow/);
-  assert.match(source, /if \(planningPhase === 'switching' \|\| attachmentsSending \|\| referenceLibrary\.hasBlockingDrafts\(\)\) return;/);
+  assert.match(source, /if \(planningPhase === 'switching' \|\| chatStartPendingThreadId !== null \|\| attachmentsSending \|\| referenceLibrary\.hasBlockingDrafts\(\)\) return;/);
   assert.match(source, /if \(planningPhase === 'switching'\)[\s\S]*else if \(!planApprovable\)/);
   assert.match(source, /승인했습니다\. 실행 단계로 전환 중입니다…/);
 });
@@ -123,7 +123,7 @@ test('plan mode warns once about full remote-browser control and scoped download
 });
 
 test('mode, model and permission switches are locked while a turn runs or the chat is switching', () => {
-  assert.match(source, /function isControlLocked\(\): boolean \{\s*\n\s*return turnRunning \|\| attachmentsSending \|\| workflowTransitionPending \|\| planningPhase === 'switching';/);
+  assert.match(source, /function isControlLocked\(\): boolean \{[\s\S]*return turnRunning \|\| attachmentsSending \|\| chatStartPendingThreadId !== null[\s\S]*workflowTransitionPending \|\| planningPhase === 'switching';/);
   assert.match(source, /workflowTransitionPending = true;[\s\S]*bridge\.setWorkflow\(next\)/);
   assert.match(source, /case 'workflow-changed':[\s\S]*workflowTransitionPending = false/);
   assert.match(source, /const controlsLocked = isControlLocked\(\)/);
@@ -138,6 +138,18 @@ test('entering plan mode is blocked while document edits await review', () => {
   assert.match(source, /function hasPendingDocumentEdits\(\)/);
   assert.match(source, /bridge\.pendingEdits\.getChangeSets\(\)\.length > 0/);
   assert.match(source, /검토 대기 중인 문서 편집이 있습니다/);
+});
+
+test('completed plans open as history without reactivating live plan UI', () => {
+  assert.match(source, /const restartCompletedPlan = next === 'plan'[\s\S]*planningPhase === 'implementing'/);
+  assert.match(source, /if \(next === chatWorkflow && !restartCompletedPlan\)/);
+  assert.match(source, /button\.addEventListener\('click', \(\) => openPresentedPlan\(message\.planId\)\)/);
+  assert.match(source, /activePlanHistorical = !planApprovable[\s\S]*workflowState\.phase === 'implementing'/);
+  assert.match(source, /activePlanHistorical \? '계획 기록' : PLANNING_PHASE_LABEL\[planningPhase\]/);
+  assert.match(source, /if \(!activePlanHistorical\) \{[\s\S]*const approvableNow = planApprovable/);
+  assert.match(source, /planRestore\.replaceChildren\(activePlanHistorical \? planHistoryIcon : planOrbit\)/);
+  assert.match(source, /activePlanHistorical \? '계획 기록 펼치기' : '계획 펼치기'/);
+  assert.match(css, /\.ag-plan-history-icon \{[^}]*width:\s*20px;[^}]*height:\s*20px;/s);
 });
 
 test('plan history and chat presentations restore while only the active server plan is approvable', () => {

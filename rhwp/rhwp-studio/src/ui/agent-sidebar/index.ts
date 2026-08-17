@@ -45,10 +45,14 @@ import {
   createEmptyThread,
   fallbackTitle,
   getThread,
+  explorerGroupIsCurrent,
   listThreadsByDocument,
+  recordDocumentOpened,
+  removeThread,
   renameThread,
   setThreadTitle,
   subscribeThreadChanges,
+  threadMatchesDocument,
   upsertThread,
   type ChatThread,
   type ThreadMessage,
@@ -506,6 +510,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let connCountdownTimer: number | null = null;
   let turnRunning = bridge.isTurnRunning();
   let workflowTransitionPending = false;
+  /** chat-started 후 입력기를 여는 건 마지막으로 요청한 스레드뿐이다. */
+  let chatStartPendingThreadId: string | null = null;
   /** 계획 모드로 들어갈 때 안전 권한이면 전환 완료 후 전체 접근을 기본 적용한다. */
   let planPermissionDefaultPending = false;
   /** 현재 스트리밍 중인 assistant 텍스트 (tool-call 이후에는 새로 연다). */
@@ -556,6 +562,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let reviewColCollapsed = true;
   let planColCollapsed = true;
   let planMinimized = false;
+  /** 기록에서 연 계획은 표시 전용이며 현재 계획 workflow 상태를 절대 나타내지 않는다. */
+  let activePlanHistorical = false;
   let pendingReviewOpCount = 0;
   let railWidth = readStoredRailWidth();
   let reviewWidth = readStoredReviewWidth();
@@ -596,8 +604,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const threadWorkflows = new Map<string, AgentWorkflow>();
 
   function startCurrentBridgeChat(force = false): void {
+    chatStartPendingThreadId = currentThread.id;
+    const history = currentThread.messages.flatMap((message) => (
+      (message.role === 'user' || message.role === 'assistant')
+        && message.kind !== 'progress'
+        && message.text.trim()
+        ? [{ role: message.role, text: message.text }]
+        : []
+    ));
     bridge.startChat(selectedAgent, selectedModel, selectedEffort, force, permissionProfile, chatWorkflow,
-      currentThread.id, currentThread.documentId, currentThread.docKey);
+      currentThread.id, currentThread.documentId, currentThread.docKey, history);
+    updateComposer();
   }
 
   // ── DOM 구성 ──────────────────────────────────────────
@@ -1185,54 +1202,34 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   /**
-   * 문서가 바뀌면 채팅도 갈아탄다 — 이전 문서의 대화가 새 문서로
-   * 넘어오지 못하게 하는 격리 지점. 진행 중이던 채팅은 자기 문서
-   * 그룹 아래에 저장되고, 새 문서용 빈 채팅이 열린다.
+   * 문서가 바뀌면 현재 채팅을 끝내고 새 문서용 채팅을 연다. 메시지가
+   * 있는 채팅은 원래 문서 그룹에 남고, 빈 채팅은 저장되지 않은 채 사라진다.
    */
   function handleDocumentSwitch(nextKey: string | null, nextDocumentId: string | null): void {
+    // 문서를 연 순간만 그룹 순서가 움직인다 — 옛 채팅 열람은 순서를 건드리지 않는다.
+    recordDocumentOpened(nextDocumentId, nextKey);
     const sameIdentity = Boolean(
       nextDocumentId && currentDocumentId && nextDocumentId === currentDocumentId,
     );
     if (sameIdentity) {
-      // 첫 저장으로 파일명만 바뀐 경우 — 채팅을 새 문서로 갈아타지 않는다.
+      // 첫 저장으로 파일명만 바뀐 경우 — 현재 문서의 채팅만 새 이름을 따른다.
+      const activeThreadMatchesDocument = readOnlyDocLabel === null
+        && threadMatchesDocument(currentThread, currentDocumentId, currentDocKey);
       currentDocKey = nextKey;
       currentDocumentId = nextDocumentId;
-      currentThread.docKey = nextKey;
-      currentThread.documentId = nextDocumentId;
-      persistCurrentThread();
+      if (activeThreadMatchesDocument) {
+        currentThread.docKey = nextKey;
+        currentThread.documentId = nextDocumentId;
+        persistCurrentThread();
+      }
       referenceLibrary.contextChanged();
-      if (threadsListVisible()) rebuildThreadsList();
+      rebuildThreadsList();
       return;
     }
     currentDocKey = nextKey;
     currentDocumentId = nextDocumentId;
-    // 읽기 전용으로 보던 채팅의 문서가 실제로 열렸다면 그 자리에서 이어간다.
-    const currentThreadMatches = currentThread.documentId
-      ? currentThread.documentId === nextDocumentId
-      : currentThread.docKey === nextKey;
-    if (readOnlyDocLabel !== null && currentThreadMatches) {
-      // Promote legacy filename-only threads to the editor's stable document identity
-      // before restarting, so document-scoped references join the resumed session.
-      currentThread.docKey = nextKey;
-      currentThread.documentId = nextDocumentId;
-      exitReadOnlyMode();
-      referenceLibrary.contextChanged();
-      bridge.stopChat();
-      startCurrentBridgeChat(true);
-      return;
-    }
-    if (readOnlyDocLabel === null && currentThread.messages.length === 0) {
-      // 빈 채팅은 새 문서에 다시 묶기만 하면 된다.
-      currentThread.docKey = nextKey;
-      currentThread.documentId = nextDocumentId;
-      referenceLibrary.contextChanged();
-      bridge.stopChat();
-      startCurrentBridgeChat(true);
-      if (threadsListVisible()) rebuildThreadsList();
-      return;
-    }
     startNewChat({ silent: true });
-    if (threadsListVisible()) rebuildThreadsList();
+    rebuildThreadsList();
   }
 
   function setConfigPanelOpen(open: boolean): void {
@@ -1526,6 +1523,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   planRestore.inert = true;
   const planOrbit = el('span', 'ag-plan-orbit');
   planOrbit.setAttribute('aria-hidden', 'true');
+  const planHistoryIcon = createIcon('changes', 'ag-plan-history-icon');
+  planHistoryIcon.setAttribute('aria-hidden', 'true');
   planRestore.appendChild(planOrbit);
   planRestore.addEventListener('click', () => setPlanMinimized(false));
   planSurface.append(planCardSlot);
@@ -1653,6 +1652,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const threadsNew = el('button', 'ag-threads-new', '새 채팅');
   threadsNew.type = 'button';
   const threadsList = el('ul', 'ag-threads-list');
+  // 스크롤하면 hover 카드가 행에서 떨어져 남는다 — 바로 걷어낸다.
+  threadsList.addEventListener('scroll', () => hideThreadPopover(), { passive: true });
   threadsPage.append(threadsHeader, threadsNew, threadsList);
 
   const skillsPage = el('div', 'ag-skills-page');
@@ -1789,6 +1790,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const canStageComposerAttachments = (): boolean =>
     connState === 'connected'
     && readOnlyDocLabel === null
+    && chatStartPendingThreadId === null
     && !attachmentsSending
     && !referenceLibrary.isOpen();
   const clearAttachmentDrag = (): void => {
@@ -2131,6 +2133,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     planSurface.classList.toggle('ag-plan-minimized', compact);
     planCardSlot.setAttribute('aria-hidden', compact ? 'true' : 'false');
     planCardSlot.inert = compact;
+    planRestore.replaceChildren(activePlanHistorical ? planHistoryIcon : planOrbit);
+    const restoreLabel = activePlanHistorical ? '계획 기록 펼치기' : '계획 펼치기';
+    planRestore.setAttribute('aria-label', restoreLabel);
+    planRestore.title = restoreLabel;
     planRestore.setAttribute('aria-hidden', compact ? 'false' : 'true');
     planRestore.inert = !compact;
     syncComposerOverlay();
@@ -2241,6 +2247,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function setFullscreen(on: boolean): void {
     if (fullscreen === on) return;
     fullscreen = on;
+    hideThreadPopover();
     cancelFsMotionTimers();
 
     const animate = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -2360,15 +2367,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     permissionBtn.setAttribute('aria-pressed', unrestricted ? 'true' : 'false');
     permissionBtn.classList.toggle('ag-permission-unrestricted', unrestricted);
     permissionBtn.title = unrestricted
-      ? '파일·명령이 노트북 전체에 접근할 수 있습니다. 클릭하여 안전 모드로 전환'
-      : '문서는 편집할 수 있습니다. 파일과 명령은 프로젝트 안에서만 사용합니다';
+      ? '에이전트가 승인 없이 문서를 편집하고, 파일·명령이 노트북 전체에 접근할 수 있습니다. 클릭하여 안전 모드로 전환'
+      : '문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영됩니다. 파일과 명령은 프로젝트 안에서만 사용합니다';
     refreshSidebarWidthMin();
   }
 
   permissionBtn.addEventListener('click', () => {
     if (isControlLocked()) return;
     if (permissionProfile === 'safe') {
-      const confirmed = window.confirm('전체 접근을 켜면 에이전트의 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이 채팅에서 계속 허용할까요?');
+      const confirmed = window.confirm('전체 접근을 켜면 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이 채팅에서 계속 허용할까요?');
       if (!confirmed) return;
       bridge.setPermissionProfile('unrestricted');
     } else {
@@ -2821,7 +2828,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       bridge.interrupt();
       return;
     }
-    if (planningPhase === 'switching' || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
+    if (planningPhase === 'switching' || chatStartPendingThreadId !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
     let text = input.value.trim();
     if ((!text && !referenceLibrary.hasDrafts()) || connState !== 'connected') return;
     if (referenceLibrary.hasImageDrafts() && !modelSupportsImages(selectedAgent, selectedModel)) {
@@ -2983,7 +2990,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     else delete currentThread.latestPlan;
     if (planHistory.length > 0) currentThread.plans = [...planHistory];
     else delete currentThread.plans;
-    if (currentThread.messages.length === 0) return;
+    if (currentThread.messages.length === 0) {
+      removeThread(currentThread.id);
+      return;
+    }
     if (!currentThread.title || currentThread.title === '새 채팅') {
       currentThread.title = fallbackTitle(currentThread.messages);
     }
@@ -3015,7 +3025,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     button.dataset.planId = message.planId ?? '';
     const executed = message.planState === 'executed';
     button.classList.toggle('ag-executed', executed);
-    button.setAttribute('aria-label', `${message.text || '계획'} ${executed ? '실행된 계획' : '계획'} 열기`);
+    button.setAttribute(
+      'aria-label',
+      `${message.text || '계획'} ${executed ? '완료된 계획' : '계획'} 열기`,
+    );
 
     const icon = el('span', 'ag-msg-plan-icon');
     icon.appendChild(createIcon('changes'));
@@ -3184,13 +3197,103 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   /** 목록 행의 계기 표시 — 에이전트 · 날짜 시각 · 메시지 수. 자릿수를 맞춘다. */
-  function formatThreadMeta(thread: ChatThread): string {
-    const when = new Date(thread.updatedAt);
-    const hh = String(when.getHours()).padStart(2, '0');
-    const mm = String(when.getMinutes()).padStart(2, '0');
-    const month = String(when.getMonth() + 1).padStart(2, '0');
-    const day = String(when.getDate()).padStart(2, '0');
-    return `${AGENT_LABEL[thread.agent]} · ${month}/${day} ${hh}:${mm} · ${thread.messages.length}줄`;
+  function formatRelativeAge(ts: number): string {
+    const diff = Date.now() - ts;
+    const minute = 60_000;
+    const hour = 3_600_000;
+    const day = 86_400_000;
+    if (diff < minute) return '방금';
+    if (diff < hour) return `${Math.floor(diff / minute)}분 전`;
+    if (diff < day) return `${Math.floor(diff / hour)}시간 전`;
+    if (diff < day * 7) return `${Math.floor(diff / day)}일 전`;
+    if (diff < day * 30) return `${Math.floor(diff / (day * 7))}주 전`;
+    return `${Math.floor(diff / (day * 30))}개월 전`;
+  }
+
+  /* 전체 화면 레일 전용 hover 카드 — 행은 제목만 남기고 문서·에이전트·시각은
+     여기서 보여준다. 사이드바 패널에서는 뜨지 않는다(fullscreen 게이트).
+     행 사이를 훑을 때는 카드를 없앴다 다시 만들지 않고 내용만 갈아끼운 채
+     위치를 CSS transition 으로 미끄러뜨린다. */
+  let threadPopover: HTMLElement | null = null;
+  let threadPopoverTimer: number | null = null;
+  let threadPopoverHideTimer: number | null = null;
+  /** 방금 펼친 그룹 — 이 그룹의 행만 한 번 계단식으로 들어온다. */
+  let threadsCascadeKey: string | null = null;
+
+  function clearThreadPopoverTimers(): void {
+    if (threadPopoverTimer !== null) {
+      window.clearTimeout(threadPopoverTimer);
+      threadPopoverTimer = null;
+    }
+    if (threadPopoverHideTimer !== null) {
+      window.clearTimeout(threadPopoverHideTimer);
+      threadPopoverHideTimer = null;
+    }
+  }
+
+  function hideThreadPopover(): void {
+    clearThreadPopoverTimers();
+    threadPopover?.remove();
+    threadPopover = null;
+  }
+
+  /** 행을 떠날 때는 잠깐 기다린다 — 옆 행으로 옮겨 가는 중이면 카드가 살아남는다. */
+  function scheduleHideThreadPopover(): void {
+    clearThreadPopoverTimers();
+    threadPopoverHideTimer = window.setTimeout(() => {
+      threadPopoverHideTimer = null;
+      hideThreadPopover();
+    }, 120);
+  }
+
+  function scheduleThreadPopover(thread: ChatThread, row: HTMLElement): void {
+    if (!fullscreen) return;
+    clearThreadPopoverTimers();
+    // 이미 떠 있으면 거의 즉시 옮겨 가고, 처음엔 잠깐 뜸을 들인다.
+    const delay = threadPopover ? 60 : 320;
+    threadPopoverTimer = window.setTimeout(() => {
+      threadPopoverTimer = null;
+      showThreadPopover(thread, row);
+    }, delay);
+  }
+
+  function showThreadPopover(thread: ChatThread, row: HTMLElement): void {
+    if (!fullscreen || !row.isConnected) return;
+    const head = el('div', 'ag-thread-popover-head');
+    head.append(
+      el('span', 'ag-thread-popover-title', thread.title || '새 채팅'),
+      el('span', 'ag-thread-popover-age', formatRelativeAge(thread.updatedAt)),
+    );
+    const docRow = el('div', 'ag-thread-popover-row');
+    docRow.append(
+      createIcon('document'),
+      el('span', 'ag-thread-popover-text', docGroupLabel(thread.docKey)),
+    );
+    const agentRow = el('div', 'ag-thread-popover-row');
+    agentRow.append(
+      createProviderIcon(thread.agent),
+      el(
+        'span',
+        'ag-thread-popover-text',
+        `${AGENT_LABEL[thread.agent]} · ${labelForModel(thread.agent, thread.model)}`,
+      ),
+    );
+
+    const fresh = threadPopover === null;
+    const card = threadPopover ?? el('div', 'ag-thread-popover');
+    card.replaceChildren(head, docRow, agentRow);
+    if (fresh) {
+      card.setAttribute('aria-hidden', 'true');
+      root.appendChild(card);
+      threadPopover = card;
+    }
+
+    const rect = row.getBoundingClientRect();
+    const size = card.getBoundingClientRect();
+    const left = Math.min(rect.right + 10, window.innerWidth - size.width - 8);
+    const top = Math.max(8, Math.min(rect.top - 4, window.innerHeight - size.height - 8));
+    card.style.left = `${left}px`;
+    card.style.top = `${top}px`;
   }
 
   /**
@@ -3246,24 +3349,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     return docKey ?? '문서 없음';
   }
 
-  function buildThreadRow(thread: ChatThread, indexInGroup: number): HTMLElement {
+  function buildThreadRow(thread: ChatThread): HTMLElement {
     const li = el('li', 'ag-threads-row');
     if (thread.id === currentThread.id) li.classList.add('ag-current');
 
     const btn = el('button', 'ag-threads-item');
     btn.type = 'button';
     if (thread.id === currentThread.id) btn.classList.add('ag-active');
-    const index = el('span', 'ag-thread-idx', String(indexInGroup + 1).padStart(2, '0'));
-    index.setAttribute('aria-hidden', 'true');
-    const body = el('span', 'ag-thread-body');
-    body.append(
-      el('span', 'ag-threads-item-title', thread.title || '새 채팅'),
-      el('span', 'ag-threads-item-meta', formatThreadMeta(thread)),
-    );
-    btn.append(index, body);
+    btn.appendChild(el('span', 'ag-threads-item-title', thread.title || '새 채팅'));
     // 두 번 누르기로는 열지 않는다 — 첫 클릭이 이미 대화를 열어버리므로
     // 이름 바꾸기는 연필 버튼 하나로만 들어간다.
     btn.addEventListener('click', () => openThread(thread.id));
+    btn.addEventListener('mouseenter', () => scheduleThreadPopover(thread, li));
+    btn.addEventListener('mouseleave', scheduleHideThreadPopover);
 
     const rename = el('button', 'ag-thread-rename');
     rename.type = 'button';
@@ -3285,24 +3383,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
    * 그룹 이름 우클릭 → 라이브러리 "이동"(현재 문서 저장 후 그 문서로 연다).
    */
   function rebuildThreadsList(): void {
+    hideThreadPopover();
     threadsList.replaceChildren();
     const groups = listThreadsByDocument();
     if (groups.length === 0) {
       threadsList.appendChild(el('li', 'ag-threads-empty', '이전 채팅이 없습니다'));
       return;
     }
-    const currentIdx = groups.findIndex((g) => (
-      g.documentId && currentDocumentId
-        ? g.documentId === currentDocumentId
-        : g.docKey === currentDocKey
+    const currentIdx = groups.findIndex((group) => (
+      explorerGroupIsCurrent(group, currentDocumentId, currentDocKey, groups)
     ));
     if (currentIdx > 0) groups.unshift(groups.splice(currentIdx, 1)[0]!);
 
     for (const group of groups) {
       const toggleKey = group.documentId ?? group.docKey ?? '';
-      const isCurrentDoc = group.documentId && currentDocumentId
-        ? group.documentId === currentDocumentId
-        : group.docKey === currentDocKey;
+      const isCurrentDoc = explorerGroupIsCurrent(group, currentDocumentId, currentDocKey, groups);
       const expanded = docGroupToggles.get(toggleKey) ?? isCurrentDoc;
       const canMove = Boolean(group.documentId || group.docKey);
 
@@ -3313,14 +3408,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       groupBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
       if (canMove) groupBtn.dataset.libraryDoc = 'true';
       if (canMove) groupBtn.setAttribute('aria-haspopup', 'menu');
-      const chevron = createChevron('ag-threads-group-chevron');
+      const paper = createIcon('document', 'ag-threads-group-icon');
       const name = el('span', 'ag-threads-group-name', docGroupLabel(group.docKey));
       name.title = docGroupLabel(group.docKey);
-      const count = el('span', 'ag-threads-group-count', String(group.threads.length));
-      groupBtn.append(chevron, name, count);
+      groupBtn.append(paper, name);
       if (isCurrentDoc) groupBtn.append(el('span', 'ag-threads-group-badge', '현재'));
       groupBtn.addEventListener('click', () => {
         docGroupToggles.set(toggleKey, !expanded);
+        // 펼칠 때만 행이 차례로 미끄러져 들어온다 — 접을 때는 즉시.
+        threadsCascadeKey = expanded ? null : toggleKey;
         rebuildThreadsList();
       });
       if (canMove) {
@@ -3342,15 +3438,40 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         });
       }
       groupLi.appendChild(groupBtn);
+      // 문서로 건너뛰기 — 연필과 같은 문법으로 오른쪽에 겹쳐 hover 에서 드러난다.
+      // 지금 보고 있는 문서에는 필요 없으니 아예 만들지 않는다.
+      if (canMove && !isCurrentDoc) {
+        groupLi.classList.add('ag-has-jump');
+        const jump = el('button', 'ag-doc-jump');
+        jump.type = 'button';
+        jump.setAttribute('aria-label', `${docGroupLabel(group.docKey)} 문서로 이동`);
+        jump.title = '현재 문서를 저장하고 이 문서로 이동합니다';
+        jump.appendChild(createIcon('external'));
+        jump.addEventListener('click', (e) => {
+          e.stopPropagation();
+          persistCurrentThread();
+          moveToLibraryDocument?.({
+            documentId: group.documentId,
+            fileName: group.docKey,
+          });
+        });
+        groupLi.appendChild(jump);
+      }
       threadsList.appendChild(groupLi);
 
       if (!expanded) continue;
+      const cascade = threadsCascadeKey === toggleKey;
       group.threads.forEach((thread, i) => {
-        const row = buildThreadRow(thread, i);
+        const row = buildThreadRow(thread);
         if (!isCurrentDoc) row.classList.add('ag-foreign');
+        if (cascade) {
+          row.classList.add('ag-row-enter');
+          row.style.animationDelay = `${Math.min(i, 8) * 22}ms`;
+        }
         threadsList.appendChild(row);
       });
     }
+    threadsCascadeKey = null;
   }
 
   function setThreadsPanelOpen(open: boolean): void {
@@ -3398,7 +3519,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     input.value = '';
     composer.classList.add('ag-readonly');
     const note = el('div', 'ag-msg ag-msg-system ag-readonly-note',
-      `"${docLabel}" 문서의 채팅입니다. 그 문서를 열면 이어서 대화할 수 있습니다.`);
+      `"${docLabel}" 문서의 채팅입니다. 그 문서를 연 뒤 이 채팅을 다시 선택하면 이어서 대화할 수 있습니다.`);
     appendConversation(note);
     scrollConversationToEnd();
     updateComposer();
@@ -3415,6 +3536,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function startNewChat(opts?: { silent?: boolean }): void {
     if (turnRunning) bridge.interrupt();
     flushAssistantBuffer();
+    const previousThreadId = currentThread.id;
+    const previousThreadWasEmpty = currentThread.messages.length === 0;
     persistCurrentThread();
     clearChatUi();
     exitReadOnlyMode();
@@ -3429,6 +3552,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     });
     // 새 채팅은 언제나 '바로 실행'에서 시작하고, 원격 브라우저 경고도 다시 받는다.
     restorePlanningForThread(nextThread.id, nextThread);
+    if (previousThreadWasEmpty) {
+      planArchives.delete(previousThreadId);
+      threadWorkflows.delete(previousThreadId);
+    }
     currentThread = nextThread;
     selectTemplate(null);
     referenceLibrary.contextChanged();
@@ -3463,15 +3590,22 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     bridge.stopChat();
     applyThreadMeta(currentThread);
     renderMessagesFromThread(currentThread);
-    const matchesCurrentDocument = loaded.documentId
-      ? loaded.documentId === currentDocumentId
-      : loaded.docKey === currentDocKey;
+    const matchesCurrentDocument = threadMatchesDocument(
+      loaded,
+      currentDocumentId,
+      currentDocKey,
+    );
     if (!matchesCurrentDocument) {
       // 다른 문서의 채팅 — 열람은 되지만 이어가지는 못한다.
       enterReadOnlyMode(docGroupLabel(loaded.docKey));
       setThreadsPanelOpen(false);
       return;
     }
+    // 파일명만 있던 레거시 채팅은 여기서 안정 ID를 얻는다. ID로 맞은 채팅도
+    // 그룹이 갈라지지 않게 "다른 이름으로 저장" 개명을 따라간다.
+    currentThread.documentId = currentDocumentId ?? currentThread.documentId;
+    currentThread.docKey = currentDocKey ?? currentThread.docKey;
+    persistCurrentThread();
     exitReadOnlyMode();
     startCurrentBridgeChat(true);
     setThreadsPanelOpen(false);
@@ -3599,10 +3733,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       send.disabled = true;
       input.placeholder = `"${readOnlyDocLabel}" 문서의 채팅 — 읽기 전용`;
     } else {
-      input.disabled = connState !== 'connected' || attachmentsSending;
-      send.disabled = connState !== 'connected' || attachmentsSending || referenceLibrary.hasBlockingDrafts();
-      input.placeholder =
-        chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'
+      const chatStarting = chatStartPendingThreadId !== null;
+      input.disabled = connState !== 'connected' || attachmentsSending || chatStarting;
+      send.disabled = connState !== 'connected' || attachmentsSending || chatStarting || referenceLibrary.hasBlockingDrafts();
+      input.placeholder = chatStarting
+        ? '채팅을 여는 중…'
+        : chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'
           ? '계획에서 바꿀 부분을 알려주세요'
           : chatWorkflow === 'plan' && planningPhase === 'planning'
             ? '무엇을 계획할지 입력하세요'
@@ -3614,8 +3750,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     send.title = sendLabel;
     send.classList.toggle('ag-stop', turnRunning);
     // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
-    sendHint.hidden = turnRunning || attachmentsSending || referenceLibrary.hasBlockingDrafts()
-      || connState !== 'connected' || readOnlyDocLabel !== null;
+    sendHint.hidden = turnRunning || attachmentsSending || chatStartPendingThreadId !== null
+      || referenceLibrary.hasBlockingDrafts() || connState !== 'connected' || readOnlyDocLabel !== null;
     // 실행 중이거나 작업 방식/계획→실행 전환 중에는 모드·모델·권한을 잠근다.
     const controlsLocked = isControlLocked();
     providerTrigger.disabled = controlsLocked;
@@ -3643,18 +3779,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   function latestTurnAnchor(): HTMLElement | null {
-    const users = messages.querySelectorAll(':scope > .ag-msg-user');
-    if (users.length > 0) return users[users.length - 1] as HTMLElement;
     const last = messagesEnd.previousElementSibling;
-    if (last === turnPending) {
-      const before = turnPending.previousElementSibling;
-      return before instanceof HTMLElement ? before : null;
-    }
-    return last instanceof HTMLElement ? last : null;
+    const content = last === turnPending ? turnPending.previousElementSibling : last;
+    if (!(content instanceof HTMLElement)) return null;
+    // Keep a newly sent prompt near the top, then follow the moving end of the
+    // current agent output instead of remaining pinned to that prompt.
+    return content.classList.contains('ag-msg-user') ? content : messagesEnd;
   }
 
   function conversationAnchorTop(node: HTMLElement): number {
     return node.getBoundingClientRect().top - messages.getBoundingClientRect().top + messages.scrollTop;
+  }
+
+  function conversationScrollTarget(node: HTMLElement): number {
+    const target = Math.max(0, conversationAnchorTop(node) - conversationFocusOffset());
+    return Math.min(target, Math.max(0, messages.scrollHeight - messages.clientHeight));
   }
 
   /** 새 턴이 뷰포트 위쪽에 머물고, 아래는 답변이 내려올 자리로 비운다. */
@@ -3672,8 +3811,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (!anchor) {
       return messages.scrollHeight - messages.scrollTop - messages.clientHeight <= 56;
     }
-    const expected = conversationAnchorTop(anchor) - conversationFocusOffset();
-    return Math.abs(messages.scrollTop - Math.max(0, expected)) <= 64;
+    return Math.abs(messages.scrollTop - conversationScrollTarget(anchor)) <= 64;
   }
 
   function lockConversationScroll(ms: number): void {
@@ -3693,7 +3831,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (conversationScrollRaf !== null) window.cancelAnimationFrame(conversationScrollRaf);
     conversationScrollRaf = window.requestAnimationFrame(() => {
       conversationScrollRaf = null;
-      const target = Math.max(0, conversationAnchorTop(node) - conversationFocusOffset());
+      const target = conversationScrollTarget(node);
       if (Math.abs(messages.scrollTop - target) <= 2) return;
       lockConversationScroll(smooth ? 480 : 80);
       messages.scrollTo({ top: target, behavior: smooth ? 'smooth' : 'auto' });
@@ -4111,6 +4249,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         setTurnRunning(bridge.isTurnRunning());
         break;
       case 'chat-started':
+        if (e.threadId && e.threadId !== currentThread.id) break;
+        chatStartPendingThreadId = null;
         if (e.agent !== selectedAgent) {
           selectedModel = defaultModelForAgent(e.agent);
           selectedEffort = resolveEffortForAgent(e.agent, null, selectedModel);
@@ -4138,7 +4278,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       case 'permission-changed':
         permissionProfile = e.permissionProfile;
         updatePermissionButton();
-        systemMessage(permissionProfile === 'unrestricted' ? '전체 접근을 켰습니다. 이 채팅의 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다.' : '안전 모드로 돌아왔습니다. 문서는 편집할 수 있고, 파일과 명령은 프로젝트 범위로 제한됩니다.');
+        systemMessage(permissionProfile === 'unrestricted' ? '전체 접근을 켰습니다. 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이미 검토 대기 중인 변경은 그대로 남습니다.' : '안전 모드로 돌아왔습니다. 문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영되고, 파일과 명령은 프로젝트 범위로 제한됩니다.');
         break;
       case 'reference-status': {
         const message = currentThread.messages.find((item) => item.messageId === e.messageId);
@@ -4328,6 +4468,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         handleAgentEvent(e.event);
         break;
       case 'hub-error':
+        chatStartPendingThreadId = null;
         if (e.code === 'REFERENCE_COMMIT_FAILED' || e.code === 'INVALID_REFERENCE_MESSAGE') {
           attachmentsSending = false;
           for (const message of currentThread.messages) {
@@ -4402,7 +4543,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   /** 실행 중이거나 첨부를 커밋하거나 전환 중에는 모드·모델·권한을 바꿀 수 없다. */
   function isControlLocked(): boolean {
-    return turnRunning || attachmentsSending || workflowTransitionPending || planningPhase === 'switching';
+    return turnRunning || attachmentsSending || chatStartPendingThreadId !== null
+      || workflowTransitionPending || planningPhase === 'switching';
   }
 
   function hasPendingDocumentEdits(): boolean {
@@ -4447,7 +4589,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
    * 한 번 경고하고, 검토 대기 중인 문서 편집이 있으면 막는다.
    */
   function requestWorkflow(next: AgentWorkflow): void {
-    if (next === chatWorkflow) {
+    const restartCompletedPlan = next === 'plan'
+      && chatWorkflow === 'plan'
+      && planningPhase === 'implementing';
+    if (next === chatWorkflow && !restartCompletedPlan) {
       input.focus();
       return;
     }
@@ -4523,7 +4668,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       `.ag-msg-plan-action[data-plan-id="${CSS.escape(planId)}"]`,
     );
     button?.classList.add('ag-executed');
-    button?.setAttribute('aria-label', `${presentation.text || '계획'} 실행된 계획 열기`);
+    button?.setAttribute('aria-label', `${presentation.text || '계획'} 완료된 계획 열기`);
     const kicker = button?.querySelector<HTMLElement>('.ag-msg-plan-kicker');
     if (kicker) kicker.textContent = '실행 됨';
   }
@@ -4532,6 +4677,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     markPlanExecuted(planId);
     if (activePlan?.planId === planId) {
       activePlan = null;
+      activePlanHistorical = false;
       planMinimized = false;
       planColCollapsed = true;
     }
@@ -4547,6 +4693,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     activePlan = plan;
     planApprovable = workflowState.latestPlan?.planId === planId
       && workflowState.phase === 'awaiting-approval';
+    activePlanHistorical = !planApprovable
+      && (workflowState.latestPlan?.planId !== planId || workflowState.phase === 'implementing');
     rebuildReview();
     if (fullscreen) {
       setPlanColCollapsed(false);
@@ -4576,7 +4724,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     const head = el('header', 'ag-plan-head');
     const kickerRow = el('div', 'ag-plan-kicker-row');
     kickerRow.append(el('span', 'ag-plan-kicker', '실행 계획'));
-    kickerRow.append(el('span', 'ag-plan-phase', PLANNING_PHASE_LABEL[planningPhase]));
+    kickerRow.append(el(
+      'span',
+      'ag-plan-phase',
+      activePlanHistorical ? '계획 기록' : PLANNING_PHASE_LABEL[planningPhase],
+    ));
     const planIdReadout = el('span', 'ag-plan-id', plan.planId);
     planIdReadout.title = plan.planId;
     kickerRow.append(planIdReadout);
@@ -4603,32 +4755,34 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     appendMarkdown(body, planToMarkdown(plan));
     card.appendChild(body);
 
-    const approvableNow = planApprovable
-      && planningPhase === 'awaiting-approval'
-      && !turnRunning;
-    const footer = el('footer', 'ag-plan-footer');
-    const actions = el('div', 'ag-review-actions ag-plan-actions');
-    const approve = el('button', 'ag-approve ag-plan-approve', '편집 모드로 전환');
-    approve.type = 'button';
-    approve.disabled = !approvableNow;
-    approve.addEventListener('click', () => approveActivePlan(plan.planId));
-    const revise = el('button', 'ag-reject ag-plan-revise', '수정 요청');
-    revise.type = 'button';
-    revise.disabled = !planApprovable || planningPhase === 'switching' || turnRunning;
-    revise.addEventListener('click', () => requestPlanRevision(plan.planId));
-    actions.append(approve, revise);
-    footer.appendChild(actions);
+    if (!activePlanHistorical) {
+      const approvableNow = planApprovable
+        && planningPhase === 'awaiting-approval'
+        && !turnRunning;
+      const footer = el('footer', 'ag-plan-footer');
+      const actions = el('div', 'ag-review-actions ag-plan-actions');
+      const approve = el('button', 'ag-approve ag-plan-approve', '편집 모드로 전환');
+      approve.type = 'button';
+      approve.disabled = !approvableNow;
+      approve.addEventListener('click', () => approveActivePlan(plan.planId));
+      const revise = el('button', 'ag-reject ag-plan-revise', '수정 요청');
+      revise.type = 'button';
+      revise.disabled = !planApprovable || planningPhase === 'switching' || turnRunning;
+      revise.addEventListener('click', () => requestPlanRevision(plan.planId));
+      actions.append(approve, revise);
+      footer.appendChild(actions);
 
-    let noteText = '';
-    if (planningPhase === 'switching') {
-      noteText = '승인했습니다. 실행 단계로 전환 중입니다…';
-    } else if (planningPhase === 'implementing') {
-      noteText = '실행 중입니다. 문서 편집은 기존처럼 검토 후 승인합니다.';
-    } else if (!planApprovable) {
-      noteText = '이전 계획입니다. 표시만 되고 승인할 수 없습니다.';
+      let noteText = '';
+      if (planningPhase === 'switching') {
+        noteText = '승인했습니다. 실행 단계로 전환 중입니다…';
+      } else if (planningPhase === 'implementing') {
+        noteText = '실행 중입니다. 문서 편집은 기존처럼 검토 후 승인합니다.';
+      } else if (!planApprovable) {
+        noteText = '이전 계획입니다. 표시만 되고 승인할 수 없습니다.';
+      }
+      if (noteText) footer.appendChild(el('p', 'ag-plan-note', noteText));
+      card.appendChild(footer);
     }
-    if (noteText) footer.appendChild(el('p', 'ag-plan-note', noteText));
-    card.appendChild(footer);
     return card;
   }
 
@@ -4682,6 +4836,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       case 'plan-ready':
         turnPresentedPlan = true;
         activePlan = e.plan;
+        activePlanHistorical = false;
         planMinimized = false;
         planApprovable = true;
         recordPlan(e.plan);
@@ -4706,6 +4861,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         return true;
       case 'plan-invalidated':
         planApprovable = false;
+        activePlanHistorical = activePlan !== null;
         setPlanningPhase(e.phase);
         systemMessage(
           e.reason
@@ -4725,6 +4881,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     chatWorkflow = state.workflow;
     planningPhase = state.phase;
     planApprovable = false;
+    activePlanHistorical = false;
     if (state.latestPlan) {
       recordPlan(state.latestPlan);
       if (state.phase === 'implementing') {
@@ -4753,6 +4910,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         && message.planState === 'executed'
       ));
     activePlan = latestPlanExecuted ? null : latestPlan;
+    activePlanHistorical = false;
     planMinimized = false;
     planApprovable = false;
     chatWorkflow = threadWorkflows.get(threadId) ?? 'direct';

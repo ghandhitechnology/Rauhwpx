@@ -99,4 +99,14 @@ export interface CommandServices {
   ) => Promise<((saved: boolean) => Promise<void>) | void>;
   /** 에디터 편집 모드 변경 */
   setEditMode: (mode: EditorEditMode) => void;
+  /**
+   * 검토 대기 중인 에이전트 편집(pending change-set) 접근자. 대기 편집은 라이브
+   * 미리보기로 문서에 이미 반영돼 있으므로, 저장 전에 수락/거절을 결정해야 한다.
+   * 에이전트 브리지가 없거나 대기 편집이 없으면 null.
+   */
+  getPendingAgentEdits?: () => {
+    opCount: number;
+    approveAll: () => boolean;
+    rejectAll: () => void;
+  } | null;
 }
