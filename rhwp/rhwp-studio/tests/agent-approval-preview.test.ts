@@ -18,7 +18,7 @@ function between(source: string, start: string, end: string): string {
 }
 
 test('agent approval records the rendered preview instead of replaying applied edits', () => {
-  const approve = between(pendingSrc, '  approve(changeSetId: string): void {', '\n  /** reject');
+  const approve = between(pendingSrc, '  approve(changeSetId: string): boolean {', '\n  /** reject');
 
   assert.match(approve, /previewId = wasm\.saveSnapshot\(\)/, 'capture the exact rendered preview');
   assert.match(approve, /this\.revertAppliedOps\(kept, keepPreviewsOf, userEditSeqNow\)[\s\S]*beforeId = wasm\.saveSnapshot\(\)/,

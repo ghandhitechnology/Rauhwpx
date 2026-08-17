@@ -164,9 +164,14 @@ export class PendingEditManager {
     this.emitChange({ type: 'ops-changed' });
   }
 
-  endTurn(): void {
+  endTurn(outcome: 'review' | 'commit' | 'reject' = 'review'): void {
     if (!this.open) return;
+    const set = this.open;
     this.finalizeOpenSet();
+    if (set.ops.length === 0) return;
+    if (outcome === 'commit') {
+      if (!this.approve(set.id)) this.reject(set.id);
+    } else if (outcome === 'reject') this.reject(set.id);
   }
 
   insertText(
@@ -638,21 +643,21 @@ export class PendingEditManager {
   }
 
   /** approve — 적용된 미리보기는 재생성하지 않고 그대로 단일 undo 항목으로 채택한다. */
-  approve(changeSetId: string): void {
+  approve(changeSetId: string): boolean {
     const set = this.sets.find((s) => s.id === changeSetId);
-    if (!set) return;
+    if (!set) return false;
     // 되돌림이 시작되기 전에 사용자 편집 카운터를 한 번만 샘플링한다 —
     // revertAppliedOps 자체가 문서를 바꾸므로 중간에 읽으면 판정이 오염된다.
     const userEditSeqNow = this.userEditSeq;
     this.selfMutating++;
     try {
-      this.approveInner(set, changeSetId, userEditSeqNow);
+      return this.approveInner(set, changeSetId, userEditSeqNow);
     } finally {
       this.selfMutating--;
     }
   }
 
-  private approveInner(set: PendingChangeSet, changeSetId: string, userEditSeqNow: number): void {
+  private approveInner(set: PendingChangeSet, changeSetId: string, userEditSeqNow: number): boolean {
     if (set === this.open) this.open = null;
     // 승인 직전에도 현재 IR에서 권위 조판을 다시 만든다. 미리보기 캐시가 어긋난
     // 상태를 after snapshot으로 굳히거나, 승인 뒤에만 우연히 고쳐지는 일을 막는다.
@@ -664,7 +669,7 @@ export class PendingEditManager {
       this.removeSet(set);
       this.syncOverlay();
       this.emitChange({ type: 'approved', changeSetId });
-      return;
+      return true;
     }
 
     // kept 가 남았으면 kept 만 되돌려 before 를 캡처한다 (드리프트 미리보기는
@@ -753,7 +758,7 @@ export class PendingEditManager {
       this.syncOverlay();
       console.warn('[pending-edits] approve snapshot capture failed', err);
       this.emitChange({ type: 'invalidated', reason: 'approval failed' });
-      return;
+      return false;
     }
 
     this.discardReplaceSnapshots([...kept, ...dropped]);
@@ -761,6 +766,7 @@ export class PendingEditManager {
     this.syncOverlay();
     if (skipped > 0) this.emitChange({ type: 'invalidated', reason: `text drift (${skipped} ops skipped)` });
     this.emitChange({ type: 'approved', changeSetId });
+    return true;
   }
 
   /** reject — 적용된 op 을 되돌리고 삭제 마크를 해제한다. 히스토리 항목 없음. */
@@ -994,6 +1000,7 @@ export class PendingEditManager {
         const base = { sort: 'cells' as const, sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx };
         if (obj.op === 'delete_row') return { ...base, rowIdx: obj.rowIdx };
         if (obj.op === 'delete_col') return { ...base, colIdx: obj.colIdx };
+        if (obj.op === 'split_cell') return { ...base, rect: { startRow: obj.rowIdx!, startCol: obj.colIdx!, endRow: obj.rowIdx!, endCol: obj.colIdx! } };
         return { ...base, rect: { startRow: obj.startRow!, startCol: obj.startCol!, endRow: obj.endRow!, endCol: obj.endCol! } };
       }
       case 'setCellProps':
@@ -1442,6 +1449,12 @@ export class PendingEditManager {
           wasm.deleteTableRow(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.rowIdx!);
         } else if (obj.op === 'delete_col') {
           wasm.deleteTableColumn(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.colIdx!);
+        } else if (obj.op === 'split_cell') {
+          const result = wasm.splitTableCellInto(
+            obj.sectionIdx, obj.tableParaIdx, obj.controlIdx,
+            obj.rowIdx!, obj.colIdx!, obj.splitRows!, obj.splitCols!, true, false,
+          );
+          if (!result.ok) throw new AgentToolError('RPC_ERROR', 'split_cell failed');
         } else {
           wasm.mergeTableCells(
             obj.sectionIdx, obj.tableParaIdx, obj.controlIdx,
@@ -2210,6 +2223,7 @@ export class PendingEditManager {
         }
       } catch (err) {
         console.warn('[pending-edits] approval-only op failed', op.id, err);
+        throw err;
       }
     }
 

@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventBus } from '../src/core/event-bus.ts';
 import { RevisionTracker } from '../src/agent/revision.ts';
-import { AgentToolExecutor } from '../src/agent/tool-executor.ts';
+import { AgentToolExecutor, mmToHu } from '../src/agent/tool-executor.ts';
 import { PendingEditManager } from '../src/agent/pending-edits.ts';
 import { AgentToolError } from '../src/agent/types.ts';
 
@@ -97,6 +97,21 @@ function makeEnv() {
       const t = findTable(para, ctrl);
       return { rowCount: t.rows, colCount: t.cols, cellCount: t.cells.length };
     },
+    getTableProperties: (_s: number, para: number, ctrl: number) => ({
+      cellSpacing: 0, paddingLeft: 0, paddingRight: 0, paddingTop: 0, paddingBottom: 0,
+      pageBreak: 0, repeatHeader: false, tableWidth: 42520, tableHeight: 5000,
+      outerLeft: 0, outerRight: 0, outerTop: 0, outerBottom: 0,
+      treatAsChar: true, textWrap: 'TopAndBottom', vertRelTo: 'Para', vertAlign: 'Top',
+      horzRelTo: 'Column', horzAlign: 'Left', vertOffset: 0, horzOffset: 0,
+      restrictInPage: true, allowOverlap: false, keepWithAnchor: true, hasCaption: false,
+      ...findTable(para, ctrl).tableProps,
+    }),
+    getCellProperties: (_s: number, para: number, ctrl: number, cell: number) => ({
+      width: 21260, height: 2500, paddingLeft: 0, paddingRight: 0, paddingTop: 0, paddingBottom: 0,
+      applyInnerMargin: false, verticalAlign: 0, textDirection: 0, isHeader: false,
+      cellProtect: false, editableInForm: false, fieldName: '',
+      ...findTable(para, ctrl).cellProps[cell],
+    }),
     getCellInfo: (_s: number, para: number, ctrl: number, idx: number) => {
       const t = findTable(para, ctrl);
       return { row: Math.floor(idx / t.cols), col: idx % t.cols, rowSpan: 1, colSpan: 1 };
@@ -181,6 +196,10 @@ function makeEnv() {
     mergeTableCells: (_s: number, para: number, ctrl: number, sr: number, sc: number, er: number, ec: number) => {
       record('mergeTableCells', sr, sc, er, ec);
       return { ok: true, cellCount: findTable(para, ctrl).cells.length };
+    },
+    splitTableCellInto: (_s: number, para: number, ctrl: number, row: number, col: number, nRows: number, nCols: number, equal: boolean, mergeFirst: boolean) => {
+      record('splitTableCellInto', row, col, nRows, nCols, equal, mergeFirst);
+      return { ok: true, cellCount: findTable(para, ctrl).cells.length + nRows * nCols - 1 };
     },
     // ─ 문단 서식/스타일 ─
     getParaPropertiesAt: (_s: number, p: number) => ({ paraShapeId: bodyParaShapes[p], alignment: 'left' }),
@@ -303,7 +322,7 @@ function makeEnv() {
   });
   const call = (tool: string, args: Record<string, unknown> = {}) =>
     executor.execute(tool, { expectedRevision: revision.revision, ...args }, 'claude');
-  return { executor, pending, revision, call, body, tables, calls, bus };
+  return { executor, pending, revision, call, body, tables, calls, bus, wasm };
 }
 
 async function expectErr(p: Promise<unknown>, code: string): Promise<AgentToolError> {
@@ -479,6 +498,186 @@ test('edit_table merge_cells: 인자 검증과 mark-only 실행', async () => {
   assert.ok(!calls.some((x) => x.m === 'mergeTableCells'));
   pending.approve(m.changeSetId);
   assert.ok(calls.some((x) => x.m === 'mergeTableCells'));
+});
+
+test('get_table_properties + set_table_props: 표 개체를 가로 가운데로 배치한다', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const created = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b']],
+  })) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const t = tables[0];
+
+  const before = (await call('get_table_properties', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
+  })) as { table: { positionMode: string; horizontal: { align: string }; sizeMm: { width: number } } };
+  assert.equal(before.table.positionMode, 'inline');
+  assert.equal(before.table.horizontal.align, 'left');
+  assert.ok(Math.abs(before.table.sizeMm.width - 150) < 0.1);
+
+  const edit = (await call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
+    op: 'set_table_props', props: { horizontalAlign: 'center' },
+  })) as { changeSetId: string };
+  assert.ok(!calls.some((entry) => entry.m === 'setTableProperties'));
+  pending.approve(edit.changeSetId);
+  const apply = calls.find((entry) => entry.m === 'setTableProperties')!;
+  assert.deepEqual(apply.a[2], {
+    horzAlign: 'Center', treatAsChar: false, horzRelTo: 'Column', horzOffset: 0,
+  });
+
+  const after = (await call('get_table_properties', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
+  })) as { table: { positionMode: string; horizontal: { align: string; relativeTo: string; offsetMm: number } } };
+  assert.equal(after.table.positionMode, 'floating');
+  assert.deepEqual(after.table.horizontal, { align: 'center', relativeTo: 'column', offsetMm: 0 });
+});
+
+test('set_table_props ignores a null horizontal alignment without repositioning the table', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const created = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a']],
+  })) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const table = tables[0];
+  const edit = (await call('edit_table', {
+    sectionIdx: 0, paraIdx: table.paraIdx, controlIdx: table.controlIdx,
+    op: 'set_table_props', props: { horizontalAlign: null, repeatHeader: true },
+  })) as { changeSetId: string };
+  pending.approve(edit.changeSetId);
+  const props = calls.find((entry) => entry.m === 'setTableProperties')!.a[2] as Record<string, unknown>;
+
+  assert.deepEqual(props, { repeatHeader: true });
+});
+
+test('set_table_props exposes pagination, wrapping, margins, overlap and captions', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const created = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a']],
+  })) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const t = tables[0];
+  const edit = (await call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'set_table_props',
+    props: {
+      pageBreak: 'row', repeatHeader: true, cellSpacingMm: 1.5,
+      cellPaddingMm: { left: 2, right: 2, top: 1, bottom: 1 },
+      outerMarginMm: { left: 3, right: 3 }, textWrap: 'topAndBottom',
+      verticalRelativeTo: 'paragraph', verticalAlign: 'top', verticalOffsetMm: 4,
+      restrictInPage: true, allowOverlap: false, keepWithAnchor: true,
+      captionEnabled: true, captionDirection: 'bottom', captionSpacingMm: 2,
+    },
+  })) as { changeSetId: string };
+  pending.approve(edit.changeSetId);
+  const props = calls.find((entry) => entry.m === 'setTableProperties')!.a[2] as Record<string, unknown>;
+  assert.equal(props['pageBreak'], 2);
+  assert.equal(props['repeatHeader'], true);
+  assert.equal(props['cellSpacing'], mmToHu(1.5));
+  assert.equal(props['paddingLeft'], mmToHu(2));
+  assert.equal(props['paddingTop'], mmToHu(1));
+  assert.equal(props['outerLeft'], mmToHu(3));
+  assert.equal(props['textWrap'], 'TopAndBottom');
+  assert.equal(props['vertRelTo'], 'Para');
+  assert.equal(props['vertAlign'], 'Top');
+  assert.equal(props['vertOffset'], mmToHu(4));
+  assert.equal(props['treatAsChar'], false);
+  assert.equal(props['restrictInPage'], true);
+  assert.equal(props['allowOverlap'], false);
+  assert.equal(props['keepWithAnchor'], true);
+  assert.equal(props['hasCaption'], true);
+  assert.equal(props['captionDirection'], 3);
+  assert.equal(props['captionSpacing'], mmToHu(2));
+});
+
+test('set_cell_props exposes padding, direction, protection, form field and readback', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const created = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['value']],
+  })) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const t = tables[0];
+  const edit = (await call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'set_cell_props', cellIdx: 0,
+    props: {
+      paddingMm: { left: 2, top: 1 }, textDirection: 'vertical', protected: true,
+      editableInForm: true, fieldName: 'amount', verticalAlign: 'center',
+    },
+  })) as { changeSetId: string };
+  pending.approve(edit.changeSetId);
+  const apply = calls.find((entry) => entry.m === 'setCellProperties')!;
+  const props = apply.a[3] as Record<string, unknown>;
+  assert.equal(props['paddingLeft'], mmToHu(2));
+  assert.equal(props['paddingTop'], mmToHu(1));
+  assert.equal(props['applyInnerMargin'], true);
+  assert.equal(props['textDirection'], 1);
+  assert.equal(props['cellProtect'], true);
+  assert.equal(props['editableInForm'], true);
+  assert.equal(props['fieldName'], 'amount');
+  assert.equal(props['verticalAlign'], 1);
+
+  const read = (await call('get_table_properties', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0,
+  })) as { cell: { paddingMm: { left: number; top: number }; textDirection: string; protected: boolean; fieldName: string } };
+  assert.equal(read.cell.paddingMm.left, 2);
+  assert.equal(read.cell.paddingMm.top, 1);
+  assert.equal(read.cell.textDirection, 'vertical');
+  assert.equal(read.cell.protected, true);
+  assert.equal(read.cell.fieldName, 'amount');
+});
+
+test('edit_table split_cell rejects covered coordinates inside a merged cell', async () => {
+  const { call, pending, tables, wasm } = makeEnv();
+  const created = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['merged', '']],
+  })) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const t = tables[0];
+  wasm.getCellInfo = () => ({ row: 0, col: 0, rowSpan: 1, colSpan: 2 });
+  const error = await expectErr(call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
+    op: 'split_cell', rowIdx: 0, colIdx: 1, splitRows: 1, splitCols: 2,
+  }), 'INVALID_ARGS');
+  assert.match(error.message, /covered coordinates/);
+});
+
+test('edit_table split_cell is mark-only and executes on approval', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const created = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['wide']],
+  })) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const t = tables[0];
+  const split = (await call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
+    op: 'split_cell', rowIdx: 0, colIdx: 0, splitRows: 2, splitCols: 3,
+  })) as { changeSetId: string };
+  assert.ok(!calls.some((entry) => entry.m === 'splitTableCellInto'));
+  pending.approve(split.changeSetId);
+  const apply = calls.find((entry) => entry.m === 'splitTableCellInto')!;
+  assert.deepEqual(apply.a, [0, 0, 2, 3, true, false]);
+});
+
+test('edit_table split_cell approval fails when the engine rejects the split', async () => {
+  const { call, pending, tables, wasm } = makeEnv();
+  const created = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['wide']],
+  })) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const table = tables[0];
+  const split = (await call('edit_table', {
+    sectionIdx: 0, paraIdx: table.paraIdx, controlIdx: table.controlIdx,
+    op: 'split_cell', rowIdx: 0, colIdx: 0, splitRows: 2, splitCols: 2,
+  })) as { changeSetId: string };
+  wasm.splitTableCellInto = () => ({ ok: false, cellCount: 1 });
+
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal(pending.approve(split.changeSetId), false);
+    assert.equal(pending.hasPending(), true);
+  } finally {
+    console.warn = originalWarn;
+  }
 });
 
 // ─── apply_para_format / apply_style ────────────────────────
