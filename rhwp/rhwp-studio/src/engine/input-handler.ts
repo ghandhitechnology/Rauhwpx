@@ -2800,9 +2800,16 @@ export class InputHandler {
     if (flushDeferredPagination) {
       this.flushDeferredPaginationIfNeeded('before-full-edit', false);
     } else if (this.deferredPaginationPending) {
-      // 경계 pre-flush 후 추가된 stable raw 입력은 즉시 재-flush하지 않고
-      // 기존 작은 문서 idle 정책으로만 마무리한다.
-      this.scheduleDeferredPaginationFlush();
+      // 문단 꼬리가 페이지 경계에 걸려 있으면 idle 을 기다리지 않고 바로 flush
+      // 한다 — 지연 상태로 두면 다음 페이지로 넘어간 줄이 그려지지 않은 채
+      // 타이핑 내내 보이지 않는다.
+      if (this.paragraphTailNearPageBoundary()) {
+        this.flushDeferredPaginationIfNeeded('page-boundary', false);
+      } else {
+        // 경계 pre-flush 후 추가된 stable raw 입력은 즉시 재-flush하지 않고
+        // 기존 작은 문서 idle 정책으로만 마무리한다.
+        this.scheduleDeferredPaginationFlush();
+      }
     }
     this.lastCellKey = null; // 편집 후 셀 bbox 캐시 무효화
     this.protectedCellHitCache = null;
@@ -2820,6 +2827,7 @@ export class InputHandler {
   /** 셀 내부 단일 텍스트 편집 후 처리: 현재 페이지 canvas만 갱신한다. */
   private afterPageLocalEdit(): void {
     if (this.flushDeferredPaginationForCellOverflow()) return;
+    if (this.flushDeferredPaginationForPageBoundary()) return;
 
     // 텍스트 입력은 셀 폭을 바꾸지 않으므로 눈금자 셀 bbox 캐시를 무효화하지 않는다.
     this.protectedCellHitCache = null;
@@ -2834,6 +2842,57 @@ export class InputHandler {
       this.scheduleDeferredPaginationFlush();
     }
     this.updateCaret();
+  }
+
+  /**
+   * 현재 문단의 꼬리(마지막 줄)가 페이지 본문 바닥에 닿았거나 이미 다음
+   * 페이지로 넘어갔는지 검사한다. 이 상태에서 pagination 을 지연하면 넘어간
+   * 줄이 다음 페이지에 그려지지 않아, 타이핑하는 동안 글이 사라진 것처럼
+   * 보인다 (사용자에겐 "다음 페이지에 가려진다"로 보이는 증상).
+   */
+  private paragraphTailNearPageBoundary(): boolean {
+    if (this.cursor.isInHeaderFooter() || this.cursor.isInFootnote()) return false;
+    const pos = this.cursor.getPosition();
+    if (pos.parentParaIndex !== undefined) return false; // 셀은 cellOverflow 경로가 담당
+    const caretRect = this.cursor.getRect();
+    if (!caretRect) return false;
+    try {
+      const len = this.wasm.getParagraphLength(pos.sectionIndex, pos.paragraphIndex);
+      const tail = this.wasm.getCursorRect(pos.sectionIndex, pos.paragraphIndex, len);
+      if (tail.pageIndex !== caretRect.pageIndex) return true;
+      const info = this.wasm.getPageInfo(tail.pageIndex);
+      const contentBottom = info.height - info.marginBottom;
+      // 꼬리 줄이 본문 바닥의 두 줄 안쪽까지 내려오면 경계로 판정한다.
+      return tail.y + tail.height * 2 >= contentBottom;
+    } catch {
+      return false;
+    }
+  }
+
+  /** 경계 판정 시 지연 pagination 을 즉시 확정하고 전체를 다시 그린다. */
+  private flushDeferredPaginationForPageBoundary(): boolean {
+    if (!this.deferredPaginationPending && !this.deferredPaginationRunner.isActive()) return false;
+    if (!this.paragraphTailNearPageBoundary()) return false;
+
+    this.cancelDeferredPaginationFlush();
+    this.deferredPaginationRunner.cancel();
+    try {
+      this.wasm.flushDeferredPagination();
+      this.deferredPaginationPending = false;
+      this.lastCellKey = null;
+      this.protectedCellHitCache = null;
+      if (this.isComposing) {
+        this.compositionAnchorRect = null;
+      }
+      this.eventBus.emit('document-mutated', 'input-handler-page-boundary');
+      this.eventBus.emit('document-changed', 'page-boundary-pagination');
+      this.cursor.moveTo(this.cursor.getPosition());
+      this.updateCaret();
+      return true;
+    } catch (err) {
+      console.warn('[InputHandler] 페이지 경계 페이지네이션 flush 실패:', err);
+      return false;
+    }
   }
 
   /** 셀 안 새 줄이 기존 가시 높이를 넘으면 즉시 전체 표 레이아웃을 다시 계산한다. */
