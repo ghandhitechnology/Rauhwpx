@@ -6,6 +6,12 @@ const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.m
 const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
 const calibration = readFileSync(new URL('../src/ui/agent-sidebar/writing-style-calibration.ts', import.meta.url), 'utf8');
 const calibrationCss = readFileSync(new URL('../src/ui/agent-sidebar/writing-style-calibration.css', import.meta.url), 'utf8');
+const bridgeSource = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
+const serverSource = readFileSync(new URL('../../rhwp-agent/server.mjs', import.meta.url), 'utf8');
+const documentSwitchSource = source.slice(
+  source.indexOf('function handleDocumentSwitch'),
+  source.indexOf('\n  function setConfigPanelOpen', source.indexOf('function handleDocumentSwitch')),
+);
 
 test('threads column control sits on the selector bar and opens a page', () => {
   assert.match(source, /ag-threads-btn/);
@@ -80,9 +86,41 @@ test('library move is a context menu on document group names', () => {
 
 test('saving a document rebinds the current chat instead of starting a new one', () => {
   assert.match(
-    source,
+    documentSwitchSource,
     /const sameIdentity = Boolean\(\s*nextDocumentId && currentDocumentId && nextDocumentId === currentDocumentId/s,
   );
-  assert.match(source, /currentThread\.docKey = nextKey;/);
-  assert.match(source, /currentThread\.documentId = nextDocumentId;/);
+  assert.match(documentSwitchSource, /const activeThreadMatchesDocument = readOnlyDocLabel === null[\s\S]*threadMatchesDocument\(currentThread, currentDocumentId, currentDocKey\)/);
+  assert.match(documentSwitchSource, /if \(activeThreadMatchesDocument\) \{\s*currentThread\.docKey = nextKey;\s*currentThread\.documentId = nextDocumentId;/);
+});
+
+test('past chats on the active file reopen as writable and adopt stable document identity', () => {
+  assert.match(source, /threadMatchesDocument\(\s*loaded,\s*currentDocumentId,\s*currentDocKey/);
+  assert.match(source, /currentThread\.documentId = currentDocumentId \?\? currentThread\.documentId/);
+  assert.match(source, /currentThread\.docKey = currentDocKey \?\? currentThread\.docKey/);
+  assert.match(source, /persistCurrentThread\(\);\s*exitReadOnlyMode\(\);\s*startCurrentBridgeChat\(true\)/);
+  assert.match(source, /const history = currentThread\.messages\.flatMap/);
+  assert.match(source, /currentThread\.id, currentThread\.documentId, currentThread\.docKey, history/);
+  assert.match(serverSource, /bootstrapHistory: normalizeChatHistory\(requestedHistory\)/);
+  assert.match(serverSource, /addReopenedChatHistory\(\s*activeSession,/);
+});
+
+test('rapid past-chat switches cannot activate a stale provider session', () => {
+  assert.match(source, /chatStartPendingThreadId = currentThread\.id/);
+  assert.match(source, /if \(e\.threadId && e\.threadId !== currentThread\.id\) break/);
+  assert.match(source, /input\.disabled = connState !== 'connected' \|\| attachmentsSending \|\| chatStarting/);
+  assert.match(bridgeSource, /msg\.threadId !== this\.threadId\) break/);
+  assert.match(serverSource, /studioMessageQueue: Promise\.resolve\(\)/);
+  assert.match(serverSource, /record\.studioMessageQueue = record\.studioMessageQueue[\s\S]*if \(record\.studioSocket !== sock\) return;[\s\S]*handleStudioMessage\(record, sock, msg\)/);
+});
+
+test('changing files ends the open chat and starts a fresh chat for the next file', () => {
+  assert.match(documentSwitchSource, /startNewChat\(\{ silent: true \}\)/);
+  assert.doesNotMatch(documentSwitchSource, /currentThreadMatches/);
+  assert.doesNotMatch(documentSwitchSource, /currentThread\.messages\.length/);
+  assert.match(source, /if \(currentThread\.messages\.length === 0\) \{\s*removeThread\(currentThread\.id\);/);
+  assert.match(source, /if \(previousThreadWasEmpty\) \{\s*planArchives\.delete\(previousThreadId\);\s*threadWorkflows\.delete\(previousThreadId\);/);
+  assert.match(
+    source,
+    /function startNewChat[\s\S]*persistCurrentThread\(\);[\s\S]*createEmptyThread\(\{[\s\S]*documentId: currentDocumentId[\s\S]*bridge\.stopChat\(\);[\s\S]*startCurrentBridgeChat\(true\)/,
+  );
 });
