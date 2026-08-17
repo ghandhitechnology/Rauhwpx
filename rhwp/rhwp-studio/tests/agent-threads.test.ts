@@ -6,10 +6,13 @@ import {
   createEmptyThread,
   fallbackTitle,
   getThread,
+  explorerGroupIsCurrent,
   listThreads,
   listThreadsByDocument,
+  recordDocumentOpened,
   setThreadTitle,
   subscribeThreadChanges,
+  threadMatchesDocument,
   upsertThread,
 } from '../src/agent/threads.ts';
 import type { StructuredPlan } from '../src/agent/types.ts';
@@ -106,6 +109,22 @@ test('clickable plan presentations keep their plan identity in thread history', 
   assert.match(source, /typeof message\.planId !== 'string'/);
 });
 
+test('persisted Pi chats remain available after reload', () => {
+  mem.clear();
+  storage.setItem('rhwp-agent-threads', JSON.stringify([{
+    id: 'pi-thread',
+    title: 'Pi 대화',
+    titleRequested: false,
+    createdAt: 1,
+    updatedAt: 2,
+    agent: 'pi',
+    model: 'openrouter/test-model',
+    effort: 'medium',
+    messages: [{ role: 'user', text: '기존 Pi 메시지' }],
+  }]));
+  assert.equal(getThread('pi-thread')?.agent, 'pi');
+});
+
 test('legacy threads migrate to direct workflow', () => {
   mem.clear();
   storage.setItem('rhwp-agent-threads', JSON.stringify([{
@@ -120,6 +139,56 @@ test('legacy threads migrate to direct workflow', () => {
     messages: [{ role: 'user', text: '기존 메시지' }],
   }]));
   assert.equal(getThread('legacy')?.workflow, 'direct');
+});
+
+test('past chats match their active document by stable ID with a legacy filename fallback', () => {
+  assert.equal(threadMatchesDocument(
+    { documentId: 'doc-a', docKey: 'old-name.hwpx' },
+    'doc-a',
+    'new-name.hwpx',
+  ), true);
+  assert.equal(threadMatchesDocument(
+    { documentId: 'doc-a', docKey: 'report.hwpx' },
+    'doc-b',
+    'report.hwpx',
+  ), false);
+  assert.equal(threadMatchesDocument(
+    { documentId: null, docKey: '보고서.HWPX' },
+    'doc-a',
+    '보고서.hwpx',
+  ), true);
+  assert.equal(threadMatchesDocument(
+    { documentId: 'doc-a', docKey: 'report.hwpx' },
+    null,
+    'report.hwpx',
+  ), false);
+});
+
+test('explorer current badge follows a unique filename when reopen mints a new document ID', () => {
+  const groups = [
+    { documentId: 'doc-a', docKey: 'report.hwpx' },
+    { documentId: 'doc-b', docKey: 'other.hwpx' },
+  ];
+  assert.equal(
+    explorerGroupIsCurrent(groups[0]!, 'fresh-id', 'report.hwpx', groups),
+    true,
+  );
+  assert.equal(
+    explorerGroupIsCurrent(groups[1]!, 'fresh-id', 'report.hwpx', groups),
+    false,
+  );
+  const sameName = [
+    { documentId: 'doc-a', docKey: 'report.hwpx' },
+    { documentId: 'doc-b', docKey: 'report.hwpx' },
+  ];
+  assert.equal(
+    explorerGroupIsCurrent(sameName[0]!, 'fresh-id', 'report.hwpx', sameName),
+    false,
+  );
+  assert.equal(
+    explorerGroupIsCurrent(groups[0]!, 'doc-a', 'renamed.hwpx', groups),
+    true,
+  );
 });
 
 test('threads keep their document key and legacy threads fall back to null', () => {
@@ -231,6 +300,34 @@ test('listThreadsByDocument groups by document, groups ordered by recent activit
     groups[1]!.threads.map((t) => t.messages[0]!.text),
     ['a 최근 채팅', 'a 첫 채팅'],
   );
+});
+
+test('document groups hold last-opened order; only reopening a document moves it up', () => {
+  mem.clear();
+  const mk = (docKey: string, documentId: string, text: string) => {
+    const t = createEmptyThread({ agent: 'claude', model: 'sonnet', effort: 'high', docKey, documentId });
+    t.messages.push({ role: 'user', text });
+    upsertThread(t);
+    return t;
+  };
+  // a → b 순서로 문서를 열었다: b 가 위.
+  recordDocumentOpened('doc-a', 'a.hwpx');
+  recordDocumentOpened('doc-b', 'b.hwpx');
+  const staleA = mk('a.hwpx', 'doc-a', 'a 채팅');
+  mk('b.hwpx', 'doc-b', 'b 채팅');
+  assert.deepEqual(listThreadsByDocument().map((g) => g.docKey), ['b.hwpx', 'a.hwpx']);
+
+  // a 의 옛 채팅이 다시 움직여도(updatedAt 갱신) 그룹 순서는 그대로다.
+  upsertThread(staleA);
+  assert.deepEqual(listThreadsByDocument().map((g) => g.docKey), ['b.hwpx', 'a.hwpx']);
+
+  // a 문서를 다시 열어야만 맨 위로 올라온다.
+  recordDocumentOpened('doc-a', 'a.hwpx');
+  assert.deepEqual(listThreadsByDocument().map((g) => g.docKey), ['a.hwpx', 'b.hwpx']);
+
+  // 기록이 없는 문서(레거시)는 기록된 그룹 뒤에 최근 활동 순서로 남는다.
+  mk('c.hwpx', 'doc-c', 'c 채팅');
+  assert.deepEqual(listThreadsByDocument().map((g) => g.docKey), ['a.hwpx', 'b.hwpx', 'c.hwpx']);
 });
 
 test('listThreadsByDocument splits same filenames when documentId differs', () => {

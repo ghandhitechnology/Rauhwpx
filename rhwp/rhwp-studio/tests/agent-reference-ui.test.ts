@@ -72,7 +72,7 @@ test('composer attachments upload into removable staging drafts before their mes
   assert.doesNotMatch(sidebar, /if \(!input\.value\) referenceLibrary\.discardDrafts\(\)/);
   assert.match(sidebar, /referenceLibrary\.takeReadyDrafts\(\)/);
   assert.match(sidebar, /bridge\.sendUserMessage\(text, skillNameForMessage, staged\.map/);
-  assert.match(sidebar, /send\.disabled = connState !== 'connected' \|\| attachmentsSending \|\| referenceLibrary\.hasBlockingDrafts\(\)/);
+  assert.match(sidebar, /send\.disabled = connState !== 'connected' \|\| attachmentsSending \|\| chatStarting \|\| referenceLibrary\.hasBlockingDrafts\(\)/);
   assert.match(css, /\.ag-reference-upload-remove:focus-visible/);
 });
 
@@ -121,13 +121,7 @@ test('sidebar always starts provider sessions with stable thread and document id
   assert.equal((sidebar.match(/bridge\.startChat\(/g) ?? []).length, 1);
   assert.match(sidebar, /startCurrentBridgeChat\(true\)/);
   assert.match(sidebar, /documentId: currentDocumentId/);
-  assert.match(sidebar, /loaded\.documentId[\s\S]*loaded\.documentId === currentDocumentId[\s\S]*loaded\.docKey === currentDocKey/);
-  assert.match(
-    sidebar,
-    /currentThread\.docKey = nextKey;\s*\n\s*currentThread\.documentId = nextDocumentId;\s*\n\s*referenceLibrary\.contextChanged\(\);\s*\n\s*bridge\.stopChat\(\);\s*\n\s*startCurrentBridgeChat\(true\)/,
-  );
-  assert.match(
-    sidebar,
-    /if \(readOnlyDocLabel !== null && currentThreadMatches\) \{[\s\S]*currentThread\.documentId = nextDocumentId;[\s\S]*startCurrentBridgeChat\(true\)/,
-  );
+  assert.match(sidebar, /threadMatchesDocument\(\s*loaded,\s*currentDocumentId,\s*currentDocKey/);
+  assert.match(sidebar, /currentThread\.documentId = currentDocumentId \?\? currentThread\.documentId/);
+  assert.match(sidebar, /function handleDocumentSwitch[\s\S]*startNewChat\(\{ silent: true \}\)/);
 });
