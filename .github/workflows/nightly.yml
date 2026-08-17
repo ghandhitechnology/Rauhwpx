@@ -1,0 +1,82 @@
+name: Nightly verification
+
+on:
+  schedule:
+    # 03:00 Asia/Seoul (GitHub Actions cron uses UTC).
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: Rust engine and WASM build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Test Rust workspace
+        working-directory: rhwp
+        run: cargo test --locked --workspace
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build WASM engine
+        working-directory: rhwp
+        run: wasm-pack build --target web
+
+  app:
+    name: Desktop, agent, and Studio checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            rhwp/rhwp-studio/package-lock.json
+            rhwp/rhwp-agent/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm --prefix rhwp/rhwp-agent ci
+          npm --prefix rhwp/rhwp-studio ci
+
+      - name: Check desktop and hub syntax
+        run: |
+          node --check desktop/main.mjs
+          node --check desktop/agent-hub.mjs
+          node --check desktop/session-manager.mjs
+          node --check rhwp/rhwp-agent/server.mjs
+
+      - name: Test agent hub and process lifecycle
+        run: npm --prefix rhwp/rhwp-agent test
+
+      - name: Test Studio session persistence and desktop contracts
+        run: npm --prefix rhwp/rhwp-studio test
+
+      - name: Build Studio
+        run: npm --prefix rhwp/rhwp-studio run build
