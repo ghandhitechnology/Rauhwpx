@@ -93,6 +93,7 @@ export function assertToolCapability(tool: string, capability?: ToolCapabilityCo
 /** HWPUNIT 변환: 1/7200 inch. 1pt = 100 HU, 1mm ≈ 283.465 HU */
 const HU_PER_MM = 7200 / 25.4;
 export function mmToHu(mm: number): number { return Math.round(mm * HU_PER_MM); }
+export function huToMm(hu: number): number { return Math.round((hu / HU_PER_MM) * 100) / 100; }
 export function ptToHu(pt: number): number { return Math.round(pt * 100); }
 
 function hexColorRef(hex: string): number {
@@ -294,6 +295,7 @@ export class AgentToolExecutor {
       case 'render_page': return this.renderPage(args);
       case 'get_para_format': return this.getParaFormat(args);
       case 'get_char_format': return this.getCharFormat(args);
+      case 'get_table_properties': return this.getTableProperties(args);
       case 'list_numberings': return this.listNumberings();
       case 'verify_changes': return this.verifyChanges(args);
       case 'insert_text': return this.insertText(args, agent);
@@ -1213,6 +1215,76 @@ export class AgentToolExecutor {
     };
   }
 
+  /** 표/셀 속성을 MCP 친화적인 enum/mm 단위로 조회한다. */
+  private getTableProperties(args: Record<string, unknown>): unknown {
+    const sectionIdx = reqInt(args, 'sectionIdx');
+    const paraIdx = reqInt(args, 'paraIdx');
+    const controlIdx = reqInt(args, 'controlIdx');
+    const { wasm } = this.deps;
+    let dims: { rowCount: number; colCount: number; cellCount: number };
+    let props: Record<string, unknown>;
+    try {
+      dims = wasm.getTableDimensions(sectionIdx, paraIdx, controlIdx);
+      props = wasm.getTableProperties(sectionIdx, paraIdx, controlIdx) as unknown as Record<string, unknown>;
+    } catch {
+      throw new AgentToolError('INVALID_ARGS', `No table control at section ${sectionIdx}, paragraph ${paraIdx}, controlIdx ${controlIdx} — use get_structure to list tables`);
+    }
+    const mm = (key: string): number | undefined =>
+      typeof props[key] === 'number' ? huToMm(props[key] as number) : undefined;
+    const lower = (key: string): string | undefined =>
+      typeof props[key] === 'string' ? (props[key] as string).replace(/^Para$/, 'Paragraph').replace(/^[A-Z]/, (c) => c.toLowerCase()) : undefined;
+    const pageBreak = props['pageBreak'] === 1 ? 'cell' : props['pageBreak'] === 2 ? 'row' : 'none';
+    const table = {
+      repeatHeader: props['repeatHeader'] === true,
+      pageBreak,
+      cellSpacingMm: mm('cellSpacing'),
+      cellPaddingMm: { left: mm('paddingLeft'), right: mm('paddingRight'), top: mm('paddingTop'), bottom: mm('paddingBottom') },
+      sizeMm: { width: mm('tableWidth'), height: mm('tableHeight') },
+      outerMarginMm: { left: mm('outerLeft'), right: mm('outerRight'), top: mm('outerTop'), bottom: mm('outerBottom') },
+      positionMode: props['treatAsChar'] === true ? 'inline' : 'floating',
+      textWrap: lower('textWrap'),
+      horizontal: { relativeTo: lower('horzRelTo'), align: lower('horzAlign'), offsetMm: mm('horzOffset') },
+      vertical: { relativeTo: lower('vertRelTo'), align: lower('vertAlign'), offsetMm: mm('vertOffset') },
+      restrictInPage: props['restrictInPage'] === true,
+      allowOverlap: props['allowOverlap'] === true,
+      keepWithAnchor: props['keepWithAnchor'] === true,
+      caption: {
+        enabled: props['hasCaption'] === true,
+        direction: ['left', 'right', 'top', 'bottom'][Number(props['captionDirection'] ?? 3)] ?? 'bottom',
+        verticalAlign: ['top', 'center', 'bottom'][Number(props['captionVertAlign'] ?? 0)] ?? 'top',
+        widthMm: mm('captionWidth'),
+        spacingMm: mm('captionSpacing'),
+      },
+      fillColor: props['fillColor'],
+    };
+
+    const rawCellIdx = args['cellIdx'];
+    if (rawCellIdx === undefined || rawCellIdx === null) {
+      return { revision: this.revision, sectionIdx, paraIdx, controlIdx, dimensions: dims, table };
+    }
+    const cellIdx = reqInt(args, 'cellIdx');
+    if (cellIdx < 0 || cellIdx >= dims.cellCount) {
+      throw new AgentToolError('INVALID_ARGS', `cellIdx ${cellIdx} out of range (0..${dims.cellCount - 1})`);
+    }
+    const cellProps = wasm.getCellProperties(sectionIdx, paraIdx, controlIdx, cellIdx) as unknown as Record<string, unknown>;
+    const cellMm = (key: string): number | undefined =>
+      typeof cellProps[key] === 'number' ? huToMm(cellProps[key] as number) : undefined;
+    const cell = {
+      cellIdx,
+      sizeMm: { width: cellMm('width'), height: cellMm('height') },
+      paddingMm: { left: cellMm('paddingLeft'), right: cellMm('paddingRight'), top: cellMm('paddingTop'), bottom: cellMm('paddingBottom') },
+      applyInnerMargin: cellProps['applyInnerMargin'] === true,
+      verticalAlign: ['top', 'center', 'bottom'][Number(cellProps['verticalAlign'] ?? 0)] ?? 'top',
+      textDirection: Number(cellProps['textDirection'] ?? 0) === 1 ? 'vertical' : 'horizontal',
+      isHeader: cellProps['isHeader'] === true,
+      protected: cellProps['cellProtect'] === true,
+      editableInForm: cellProps['editableInForm'] === true,
+      fieldName: typeof cellProps['fieldName'] === 'string' ? cellProps['fieldName'] : '',
+      fillColor: cellProps['fillColor'],
+    };
+    return { revision: this.revision, sectionIdx, paraIdx, controlIdx, dimensions: dims, table, cell };
+  }
+
   /** 편집 직후 영향 문단 다이제스트 (~200자, best-effort — 실패 시 빈 문자열) */
   private readPostEditDigest(sectionIdx: number, paraIdx: number, charOffset: number, cell?: CellAddr): string {
     try {
@@ -1734,6 +1806,34 @@ export class AgentToolExecutor {
         const r = this.deps.pending.addObjectOp(agent, obj);
         return { revision: this.revision, changeSetId: r.changeSetId, note: `cells are NOT merged yet — highlighted until the user approves. Merging renumbers cellIdx only on approval, so re-read get_structure on your next turn before editing this table again. ${PENDING_NOTE}` };
       }
+      case 'split_cell': {
+        const rowIdx = reqIdx('rowIdx', dims.rowCount);
+        const colIdx = reqIdx('colIdx', dims.colCount);
+        const splitRows = reqInt(args, 'splitRows');
+        const splitCols = reqInt(args, 'splitCols');
+        if (splitRows < 1 || splitRows > 64 || splitCols < 1 || splitCols > 64 || (splitRows === 1 && splitCols === 1)) {
+          throw new AgentToolError('INVALID_ARGS', 'splitRows/splitCols must be 1..64 and at least one must be greater than 1');
+        }
+        // getTableDimensions 범위만으로는 병합 셀의 덮인 좌표도 통과한다. 엔진은
+        // 실제 앵커(row/col)만 나눌 수 있으므로 get_structure cells[]와 같은 원점을 강제한다.
+        let isCellOrigin = false;
+        for (let cellIdx = 0; cellIdx < dims.cellCount; cellIdx++) {
+          const info = wasm.getCellInfo(sectionIdx, paraIdx, controlIdx, cellIdx);
+          if (info.row === rowIdx && info.col === colIdx) {
+            isCellOrigin = true;
+            break;
+          }
+        }
+        if (!isCellOrigin) {
+          throw new AgentToolError('INVALID_ARGS', `No cell starts at row ${rowIdx}, col ${colIdx} — use row/col from get_structure cells[] (covered coordinates inside merged cells are not valid split targets)`);
+        }
+        const obj: ObjectOp = {
+          type: 'tableStructureMarked', ...base, op: 'split_cell', rowIdx, colIdx,
+          splitRows, splitCols, dims: dimsNow,
+        };
+        const r = this.deps.pending.addObjectOp(agent, obj);
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `cell is NOT split yet — highlighted until the user approves. Splitting renumbers cellIdx, so re-read get_structure after approval. ${PENDING_NOTE}` };
+      }
       case 'set_cell_props': {
         const cellIdx = reqIdx('cellIdx', dims.cellCount);
         const props = this.parseCellProps(asRecord(args['props'] ?? {}));
@@ -1748,7 +1848,7 @@ export class AgentToolExecutor {
         return { revision: this.revision, changeSetId: r.changeSetId, note: `applied on approval. ${PENDING_NOTE}` };
       }
       default:
-        throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|set_cell_props|set_table_props (got ${JSON.stringify(op)})`);
+        throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|split_cell|set_cell_props|set_table_props (got ${JSON.stringify(op)})`);
     }
   }
 
@@ -1787,6 +1887,13 @@ export class AgentToolExecutor {
 
   /** set_cell_props 허용 키 → wasm setCellProperties JSON */
   private parseCellProps(raw: Record<string, unknown>): Record<string, unknown> {
+    const allowed = new Set([
+      'fillColor', 'verticalAlign', 'isHeader', 'widthMm', 'heightMm', 'paddingMm',
+      'applyInnerMargin', 'textDirection', 'protected', 'editableInForm', 'fieldName',
+    ]);
+    const unknown = Object.keys(raw).filter((key) => !allowed.has(key));
+    if (unknown.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported cell props: ${unknown.join(', ')}`);
+
     const out: Record<string, unknown> = {};
     const fill = raw['fillColor'];
     if (fill !== undefined && fill !== null) {
@@ -1804,32 +1911,163 @@ export class AgentToolExecutor {
       }
       out['verticalAlign'] = map[va];
     }
-    if (raw['isHeader'] !== undefined && raw['isHeader'] !== null) {
-      if (typeof raw['isHeader'] !== 'boolean') throw new AgentToolError('INVALID_ARGS', 'props.isHeader must be a boolean');
-      out['isHeader'] = raw['isHeader'];
-    }
-    for (const [mmKey, huKey] of [['widthMm', 'width'], ['heightMm', 'height']] as const) {
-      const v = raw[mmKey];
-      if (v !== undefined && v !== null) {
-        if (typeof v !== 'number' || !(v > 0)) throw new AgentToolError('INVALID_ARGS', `props.${mmKey} must be a positive number`);
-        out[huKey] = mmToHu(v);
+    for (const [publicKey, internalKey] of [
+      ['isHeader', 'isHeader'], ['applyInnerMargin', 'applyInnerMargin'],
+      ['protected', 'cellProtect'], ['editableInForm', 'editableInForm'],
+    ] as const) {
+      const value = raw[publicKey];
+      if (value !== undefined && value !== null) {
+        if (typeof value !== 'boolean') throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be a boolean`);
+        out[internalKey] = value;
       }
     }
+    const direction = raw['textDirection'];
+    if (direction !== undefined && direction !== null) {
+      if (direction !== 'horizontal' && direction !== 'vertical') {
+        throw new AgentToolError('INVALID_ARGS', 'props.textDirection must be "horizontal"|"vertical"');
+      }
+      out['textDirection'] = direction === 'vertical' ? 1 : 0;
+    }
+    const fieldName = raw['fieldName'];
+    if (fieldName !== undefined && fieldName !== null) {
+      if (typeof fieldName !== 'string' || fieldName.length > 255) {
+        throw new AgentToolError('INVALID_ARGS', 'props.fieldName must be a string up to 255 chars (empty clears it)');
+      }
+      out['fieldName'] = fieldName;
+    }
+    for (const [mmKey, huKey] of [['widthMm', 'width'], ['heightMm', 'height']] as const) {
+      const value = raw[mmKey];
+      if (value !== undefined && value !== null) {
+        if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 500) {
+          throw new AgentToolError('INVALID_ARGS', `props.${mmKey} must be a positive number up to 500mm`);
+        }
+        out[huKey] = mmToHu(value);
+      }
+    }
+    const padding = raw['paddingMm'];
+    if (padding !== undefined && padding !== null) {
+      if (typeof padding !== 'object' || Array.isArray(padding)) {
+        throw new AgentToolError('INVALID_ARGS', 'props.paddingMm must be an object with left/right/top/bottom');
+      }
+      const sides = padding as Record<string, unknown>;
+      const badSides = Object.keys(sides).filter((key) => !['left', 'right', 'top', 'bottom'].includes(key));
+      if (badSides.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported paddingMm keys: ${badSides.join(', ')}`);
+      for (const side of ['left', 'right', 'top', 'bottom'] as const) {
+        const value = sides[side];
+        if (value === undefined || value === null) continue;
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) {
+          throw new AgentToolError('INVALID_ARGS', `props.paddingMm.${side} must be 0..100mm`);
+        }
+        out[`padding${side[0].toUpperCase()}${side.slice(1)}`] = mmToHu(value);
+      }
+      if (out['applyInnerMargin'] === undefined) out['applyInnerMargin'] = true;
+    }
     if (Object.keys(out).length === 0) {
-      throw new AgentToolError('INVALID_ARGS', 'props requires at least one of fillColor/verticalAlign/isHeader/widthMm/heightMm');
+      throw new AgentToolError('INVALID_ARGS', `props requires at least one of: ${[...allowed].join('/')}`);
     }
     return out;
   }
 
-  /** set_table_props 허용 키 */
+  /** set_table_props 허용 키 → wasm setTableProperties JSON */
   private parseTableProps(raw: Record<string, unknown>): Record<string, unknown> {
+    const allowed = new Set([
+      'repeatHeader', 'pageBreak', 'cellSpacingMm', 'cellPaddingMm', 'outerMarginMm',
+      'positionMode', 'textWrap', 'horizontalRelativeTo', 'horizontalAlign',
+      'horizontalOffsetMm', 'verticalRelativeTo', 'verticalAlign', 'verticalOffsetMm',
+      'restrictInPage', 'allowOverlap', 'keepWithAnchor', 'captionEnabled',
+      'captionDirection', 'captionWidthMm', 'captionSpacingMm', 'captionVerticalAlign',
+    ]);
+    const unknown = Object.keys(raw).filter((key) => !allowed.has(key));
+    if (unknown.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported table props: ${unknown.join(', ')}`);
+
     const out: Record<string, unknown> = {};
-    if (raw['repeatHeader'] !== undefined && raw['repeatHeader'] !== null) {
-      if (typeof raw['repeatHeader'] !== 'boolean') throw new AgentToolError('INVALID_ARGS', 'props.repeatHeader must be a boolean');
-      out['repeatHeader'] = raw['repeatHeader'];
+    for (const [publicKey, internalKey] of [
+      ['repeatHeader', 'repeatHeader'], ['restrictInPage', 'restrictInPage'],
+      ['allowOverlap', 'allowOverlap'], ['keepWithAnchor', 'keepWithAnchor'],
+      ['captionEnabled', 'hasCaption'],
+    ] as const) {
+      const value = raw[publicKey];
+      if (value !== undefined && value !== null) {
+        if (typeof value !== 'boolean') throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be a boolean`);
+        out[internalKey] = value;
+      }
+    }
+    const enumProp = (
+      publicKey: string, internalKey: string, map: Record<string, string | number>,
+    ): void => {
+      const value = raw[publicKey];
+      if (value === undefined || value === null) return;
+      if (typeof value !== 'string' || !(value in map)) {
+        throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be one of ${Object.keys(map).join('|')}`);
+      }
+      out[internalKey] = map[value];
+    };
+    enumProp('pageBreak', 'pageBreak', { none: 0, cell: 1, row: 2 });
+    enumProp('textWrap', 'textWrap', {
+      square: 'Square', topAndBottom: 'TopAndBottom', behindText: 'BehindText', inFrontOfText: 'InFrontOfText',
+    });
+    enumProp('horizontalRelativeTo', 'horzRelTo', { paper: 'Paper', page: 'Page', column: 'Column', paragraph: 'Para' });
+    enumProp('horizontalAlign', 'horzAlign', { left: 'Left', center: 'Center', right: 'Right', inside: 'Inside', outside: 'Outside' });
+    enumProp('verticalRelativeTo', 'vertRelTo', { paper: 'Paper', page: 'Page', paragraph: 'Para' });
+    enumProp('verticalAlign', 'vertAlign', { top: 'Top', center: 'Center', bottom: 'Bottom', inside: 'Inside', outside: 'Outside' });
+    enumProp('captionDirection', 'captionDirection', { left: 0, right: 1, top: 2, bottom: 3 });
+    enumProp('captionVerticalAlign', 'captionVertAlign', { top: 0, center: 1, bottom: 2 });
+
+    const mode = raw['positionMode'];
+    if (mode !== undefined && mode !== null) {
+      if (mode !== 'inline' && mode !== 'floating') {
+        throw new AgentToolError('INVALID_ARGS', 'props.positionMode must be "inline"|"floating"');
+      }
+      out['treatAsChar'] = mode === 'inline';
+    }
+    const floatingKeys = [
+      'textWrap', 'horizontalRelativeTo', 'horizontalAlign', 'horizontalOffsetMm',
+      'verticalRelativeTo', 'verticalAlign', 'verticalOffsetMm', 'restrictInPage',
+      'allowOverlap', 'keepWithAnchor', 'outerMarginMm',
+    ];
+    if (mode === undefined && floatingKeys.some((key) => raw[key] !== undefined && raw[key] !== null)) {
+      out['treatAsChar'] = false;
+    }
+    // Agent-friendly horizontal alignment: match Hancom's common "column-relative + zero offset" behavior.
+    if (raw['horizontalAlign'] !== undefined) {
+      if (raw['horizontalRelativeTo'] === undefined) out['horzRelTo'] = ['inside', 'outside'].includes(String(raw['horizontalAlign'])) ? 'Page' : 'Column';
+      if (raw['horizontalOffsetMm'] === undefined) out['horzOffset'] = 0;
+    }
+
+    const boundedMm = (publicKey: string, internalKey: string, min: number, max: number): void => {
+      const value = raw[publicKey];
+      if (value === undefined || value === null) return;
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
+        throw new AgentToolError('INVALID_ARGS', `props.${publicKey} must be ${min}..${max}mm`);
+      }
+      out[internalKey] = mmToHu(value);
+    };
+    boundedMm('cellSpacingMm', 'cellSpacing', 0, 100);
+    boundedMm('horizontalOffsetMm', 'horzOffset', -1000, 1000);
+    boundedMm('verticalOffsetMm', 'vertOffset', -1000, 1000);
+    boundedMm('captionWidthMm', 'captionWidth', 0, 500);
+    boundedMm('captionSpacingMm', 'captionSpacing', 0, 100);
+
+    for (const [groupKey, prefix] of [['cellPaddingMm', 'padding'], ['outerMarginMm', 'outer']] as const) {
+      const group = raw[groupKey];
+      if (group === undefined || group === null) continue;
+      if (typeof group !== 'object' || Array.isArray(group)) {
+        throw new AgentToolError('INVALID_ARGS', `props.${groupKey} must be an object with left/right/top/bottom`);
+      }
+      const sides = group as Record<string, unknown>;
+      const badSides = Object.keys(sides).filter((key) => !['left', 'right', 'top', 'bottom'].includes(key));
+      if (badSides.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported ${groupKey} keys: ${badSides.join(', ')}`);
+      for (const side of ['left', 'right', 'top', 'bottom'] as const) {
+        const value = sides[side];
+        if (value === undefined || value === null) continue;
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) {
+          throw new AgentToolError('INVALID_ARGS', `props.${groupKey}.${side} must be 0..100mm`);
+        }
+        out[`${prefix}${side[0].toUpperCase()}${side.slice(1)}`] = mmToHu(value);
+      }
     }
     if (Object.keys(out).length === 0) {
-      throw new AgentToolError('INVALID_ARGS', 'props requires at least one of: repeatHeader');
+      throw new AgentToolError('INVALID_ARGS', `props requires at least one of: ${[...allowed].join('/')}`);
     }
     return out;
   }

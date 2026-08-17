@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 50개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 50);
+test('도구는 정확히 51개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 51);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -47,12 +47,13 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 42);
+  assert.equal(direct.size, 43);
   assert.ok(direct.has('insert_text'));
   assert.ok(direct.has('replace_all'));
   assert.ok(direct.has('insert_footnote'));
   assert.ok(direct.has('set_bookmark'));
   assert.ok(direct.has('get_outline'));
+  assert.ok(direct.has('get_table_properties'));
   assert.ok(direct.has('search_reference_files'));
   assert.ok(!direct.has('download_file'));
   assert.ok(!direct.has('present_implementation_plan'));
@@ -260,6 +261,28 @@ test('edit_table: op 별 필수 파라미터를 이름 붙여 즉시 실패', ()
   );
   assert.throws(() => validate({ op: 'set_cell_props', cellIdx: 0 }), (e) => e.code === 'INVALID_ARGS' && /props/.test(e.message));
   validate({ op: 'insert_row', rowIdx: 0 }); // 통과
+  assert.throws(
+    () => validate({ op: 'split_cell', rowIdx: 0, colIdx: 0, splitRows: 2 }),
+    (e) => e.code === 'INVALID_ARGS' && /splitCols/.test(e.message),
+  );
   validate({ op: 'merge_cells', startRow: 0, startCol: 0, endRow: 1, endCol: 1 }); // 통과
-  validate({ op: 'set_table_props', props: { repeatHeader: true } }); // 통과
+  validate({ op: 'split_cell', rowIdx: 0, colIdx: 0, splitRows: 1, splitCols: 2 }); // 통과
+  validate({ op: 'set_table_props', props: { horizontalAlign: 'center' } }); // 통과
+});
+
+test('get_table_properties reads optional cell state and edit_table documents object placement', () => {
+  const read = byName.get('get_table_properties');
+  assert.ok(read, 'missing tool: get_table_properties');
+  assert.equal(read.category, 'document-read');
+  for (const key of ['sectionIdx', 'paraIdx', 'controlIdx', 'cellIdx']) {
+    assert.ok(key in read.shape, `get_table_properties missing ${key}`);
+  }
+  assert.match(read.description, /object placement/i);
+
+  const edit = byName.get('edit_table');
+  assert.match(edit.description, /EASY CENTERING/);
+  assert.match(edit.description, /horizontalAlign/);
+  assert.match(edit.description, /split_cell/);
+  const values = edit.shape.op._def.values;
+  assert.ok(values.includes('split_cell'));
 });
