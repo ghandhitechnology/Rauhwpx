@@ -1450,10 +1450,11 @@ export class PendingEditManager {
         } else if (obj.op === 'delete_col') {
           wasm.deleteTableColumn(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.colIdx!);
         } else if (obj.op === 'split_cell') {
-          wasm.splitTableCellInto(
+          const result = wasm.splitTableCellInto(
             obj.sectionIdx, obj.tableParaIdx, obj.controlIdx,
             obj.rowIdx!, obj.colIdx!, obj.splitRows!, obj.splitCols!, true, false,
           );
+          if (!result.ok) throw new AgentToolError('RPC_ERROR', 'split_cell failed');
         } else {
           wasm.mergeTableCells(
             obj.sectionIdx, obj.tableParaIdx, obj.controlIdx,
@@ -2222,6 +2223,7 @@ export class PendingEditManager {
         }
       } catch (err) {
         console.warn('[pending-edits] approval-only op failed', op.id, err);
+        throw err;
       }
     }
 

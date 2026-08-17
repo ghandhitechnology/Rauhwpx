@@ -57,13 +57,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 function jsonSafe(value: unknown): unknown {
   if (value === undefined) return null;
   if (typeof value === 'bigint') return value.toString();
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-      try { return jsonSafe(JSON.parse(trimmed)); } catch { /* preserve non-JSON text */ }
-    }
-    return value;
-  }
+  if (typeof value === 'string') return value;
   if (value instanceof Uint8Array) {
     return { $base64: bytesToBase64(value), byteLength: value.byteLength };
   }
@@ -73,6 +67,16 @@ function jsonSafe(value: unknown): unknown {
     return Object.fromEntries(Object.entries(record).map(([key, child]) => [key, jsonSafe(child)]));
   }
   return value;
+}
+
+function serializeEngineResult(value: unknown) {
+  if (typeof value !== 'string') return jsonSafe(value);
+  let parsedJson: unknown = null;
+  const trimmed = value.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try { parsedJson = jsonSafe(JSON.parse(trimmed)); } catch { /* preserve non-JSON text */ }
+  }
+  return { value, parsedJson };
 }
 
 function failureMessage(result: unknown): string | null {
@@ -111,7 +115,7 @@ function invokeEngineMethod(
   const result = Reflect.apply(method, wasm, operation.args.map(decodeArgument));
   const failure = failureMessage(result);
   if (failure) throw new AgentToolError('ENGINE_EDIT_FAILED', `${operation.method}: ${failure}`);
-  return jsonSafe(result);
+  return serializeEngineResult(result);
 }
 
 const PROPERTY_ARGUMENT_TYPES: Readonly<Record<string, string>> = {
@@ -176,6 +180,10 @@ export function getEngineEditCapabilities(query = '') {
     }));
 }
 
+export function getEngineEditCapabilityCount() {
+  return ENGINE_EDIT_CAPABILITIES.length;
+}
+
 export function getEngineEditTypeDefinitions() {
   return ENGINE_EDIT_TYPE_DEFINITIONS;
 }
@@ -190,6 +198,11 @@ export function applyEngineEdits(
       `operations must contain 1..${MAX_ENGINE_EDIT_OPERATIONS} edits`,
     );
   }
+  operations.forEach((operation, index) => {
+    if (!operation || typeof operation.method !== 'string' || !Array.isArray(operation.args)) {
+      throw new AgentToolError('INVALID_ARGS', `operations[${index}] requires method and args[]`);
+    }
+  });
   const argumentBytes = new TextEncoder().encode(JSON.stringify(operations)).byteLength;
   if (argumentBytes > MAX_ENGINE_EDIT_ARGUMENT_BYTES) {
     throw new AgentToolError(
@@ -197,11 +210,6 @@ export function applyEngineEdits(
       `serialized operations exceed ${MAX_ENGINE_EDIT_ARGUMENT_BYTES} bytes; split the batch`,
     );
   }
-  operations.forEach((operation, index) => {
-    if (!operation || typeof operation.method !== 'string' || !Array.isArray(operation.args)) {
-      throw new AgentToolError('INVALID_ARGS', `operations[${index}] requires method and args[]`);
-    }
-  });
 
   return inputHandler.executeAppliedSnapshot('agent:apply_engine_edits', (wasm) =>
     operations.map((operation) => invokeEngineMethod(wasm, operation, DOCUMENT_EDIT_METHODS)));

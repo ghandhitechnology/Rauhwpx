@@ -22,7 +22,10 @@ test('agent engine-edit catalog covers every mutator and required editor-session
     [...MUTATING_METHODS, ...AGENT_EDIT_SESSION_METHODS].sort(),
   );
   for (const capability of ENGINE_EDIT_CAPABILITIES) {
-    assert.match(capability.signature, new RegExp(`^${capability.method}\\(`));
+    assert.ok(
+      capability.signature.startsWith(`${capability.method}(`),
+      `${capability.method} signature does not start with the method name`,
+    );
     assert.ok(capability.kind === 'document' || capability.kind === 'session');
     assert.ok(Array.isArray(capability.parameters));
   }
@@ -77,7 +80,7 @@ test('session setup methods remain separate from atomic document batches', () =>
       wasm as unknown as Parameters<typeof applyEngineEditSession>[0],
       { method: 'copySelection', args: [0, 0, 0, 0, 1] },
     ),
-    { ok: true },
+    { value: '{"ok":true}', parsedJson: { ok: true } },
   );
   const inputHandler = {
     executeAppliedSnapshot(_operationType: string, apply: (target: unknown) => unknown) {
