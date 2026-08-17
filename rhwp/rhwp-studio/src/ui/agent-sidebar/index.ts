@@ -2367,15 +2367,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     permissionBtn.setAttribute('aria-pressed', unrestricted ? 'true' : 'false');
     permissionBtn.classList.toggle('ag-permission-unrestricted', unrestricted);
     permissionBtn.title = unrestricted
-      ? '파일·명령이 노트북 전체에 접근할 수 있습니다. 클릭하여 안전 모드로 전환'
-      : '문서는 편집할 수 있습니다. 파일과 명령은 프로젝트 안에서만 사용합니다';
+      ? '에이전트가 승인 없이 문서를 편집하고, 파일·명령이 노트북 전체에 접근할 수 있습니다. 클릭하여 안전 모드로 전환'
+      : '문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영됩니다. 파일과 명령은 프로젝트 안에서만 사용합니다';
     refreshSidebarWidthMin();
   }
 
   permissionBtn.addEventListener('click', () => {
     if (isControlLocked()) return;
     if (permissionProfile === 'safe') {
-      const confirmed = window.confirm('전체 접근을 켜면 에이전트의 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이 채팅에서 계속 허용할까요?');
+      const confirmed = window.confirm('전체 접근을 켜면 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이 채팅에서 계속 허용할까요?');
       if (!confirmed) return;
       bridge.setPermissionProfile('unrestricted');
     } else {
@@ -4278,7 +4278,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       case 'permission-changed':
         permissionProfile = e.permissionProfile;
         updatePermissionButton();
-        systemMessage(permissionProfile === 'unrestricted' ? '전체 접근을 켰습니다. 이 채팅의 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다.' : '안전 모드로 돌아왔습니다. 문서는 편집할 수 있고, 파일과 명령은 프로젝트 범위로 제한됩니다.');
+        systemMessage(permissionProfile === 'unrestricted' ? '전체 접근을 켰습니다. 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이미 검토 대기 중인 변경은 그대로 남습니다.' : '안전 모드로 돌아왔습니다. 문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영되고, 파일과 명령은 프로젝트 범위로 제한됩니다.');
         break;
       case 'reference-status': {
         const message = currentThread.messages.find((item) => item.messageId === e.messageId);
