@@ -40,6 +40,11 @@ interface RevealItem {
   enqueuedAt: number;
   revealStart: number | null;
   durationMs: number;
+  /**
+   * 페이지 좌표 rect 캐시. 페이지 좌표는 줌/스크롤과 무관하므로 문서 변이
+   * 이벤트에서만 무효화한다 — 큐가 길어도 프레임마다 wasm 프로브를 반복하지 않는다.
+   */
+  cachedRects: SelectionRect[] | null;
 }
 
 function scalarLen(s: string): number {
@@ -84,6 +89,12 @@ export class AgentTypewriterReveal {
     this.unsubs.push(deps.eventBus.on('agent-text-inserted', (payload) => {
       this.enqueue(payload as AgentTextInsertedEvent);
     }));
+    // 문서 변이는 라이브 range 를 shift 시키고 조판도 바꾼다 — rect 캐시를 비운다.
+    for (const name of ['document-changed', 'document-page-invalidated', 'document-view-changed']) {
+      this.unsubs.push(deps.eventBus.on(name, () => {
+        for (const item of this.queue) item.cachedRects = null;
+      }));
+    }
   }
 
   /** 사용자가 직접 스크롤하면 이번 공개 큐가 끝날 때까지 카메라 추적을 멈춘다. */
@@ -129,6 +140,7 @@ export class AgentTypewriterReveal {
       enqueuedAt: now,
       revealStart: null,
       durationMs: Math.max(REVEAL_MIN_MS, Math.min(REVEAL_MAX_MS, len * REVEAL_PER_CHAR_MS)),
+      cachedRects: null,
     });
     // 같은 틱 안에서 커버를 먼저 세워 새 텍스트가 repaint 에 팝으로 나타나지 않게 한다.
     this.renderFrame(now, 0);
@@ -375,10 +387,11 @@ export class AgentTypewriterReveal {
   // ─── wasm 프로브 / 좌표 ─────────────────────────────────
 
   private probeRects(item: RevealItem): SelectionRect[] {
+    if (item.cachedRects) return item.cachedRects;
     const r = item.range;
     const cell = r.cell;
     const wasm = this.deps.wasm;
-    return measureInkRange(r, {
+    item.cachedRects = measureInkRange(r, {
       rects: () => cell
         ? wasm.getSelectionRectsInCell(
           r.sectionIdx, cell.paraIdx, cell.controlIdx, cell.cellIdx,
@@ -410,6 +423,7 @@ export class AgentTypewriterReveal {
         return { pageIndex: rect.pageIndex, x: rect.x, y: rect.y, width: 0, height: rect.height };
       },
     }).rects;
+    return item.cachedRects;
   }
 
   private probeCaret(item: RevealItem, scalarOffset: number): SelectionRect {
