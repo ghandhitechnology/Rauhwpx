@@ -22,9 +22,9 @@ export const MUTATING_METHODS: readonly string[] = [
   // 쪽/구역/다단
   'setPageDef', 'setSectionDef', 'setSectionDefAll', 'setPageBorderFill', 'setColumnDef',
   // 본문 텍스트/문단
-  'insertText', 'replaceBodyTextLocal', 'deleteText', 'deleteRange', 'deleteRangeAcrossSections',
-  'splitParagraph', 'splitParagraphLogical', 'mergeParagraph',
-  'insertPageBreak', 'insertColumnBreak', 'insertNewNumber', 'setNumberingRestart',
+  'insertText', 'insertTextLogical', 'replaceBodyTextLocal', 'deleteText', 'deleteRange', 'deleteRangeAcrossSections',
+  'splitParagraph', 'splitParagraphLogical', 'mergeParagraph', 'insertParagraph', 'deleteParagraph',
+  'insertPageBreak', 'insertColumnBreak', 'insertNewNumber', 'setNumberingRestart', 'setPageHide',
   // 셀 텍스트/문단
   'insertTextInCell', 'insertTextInCellDeferredPagination', 'deleteTextInCell',
   'deleteTextInCellDeferredPagination', 'replaceTextInCellDeferredPagination',
@@ -67,7 +67,7 @@ export const MUTATING_METHODS: readonly string[] = [
   'applyCellStyle', 'createNumbering', 'ensureDefaultNumbering', 'ensureDefaultBullet',
   'findOrCreateFontId', 'findOrCreateFontIdForLang',
   // 머리말/꼬리말
-  'createHeaderFooter', 'deleteHeaderFooter', 'toggleHideHeaderFooter',
+  'createHeaderFooter', 'deleteHeaderFooter',
   'insertTextInHeaderFooter', 'deleteTextInHeaderFooter', 'splitParagraphInHeaderFooter',
   'mergeParagraphInHeaderFooter', 'applyParaFormatInHf', 'insertFieldInHf', 'applyHfTemplate',
   'applyCharFormatInHf', 'setCharShapeIdInHf', 'setParaShapeIdInHf',
@@ -81,6 +81,15 @@ export const MUTATING_METHODS: readonly string[] = [
 ];
 
 /**
+ * Document edits that prepare editor-session state rather than changing serialized IR.
+ * They are agent-visible because structured/transposed paste requires the matching copy step.
+ */
+export const AGENT_EDIT_SESSION_METHODS: readonly string[] = [
+  'copySelection', 'copySelectionAcrossSections', 'copySelectionInCell', 'copyControl',
+  'copyTableCellsTransposed', 'toggleHideHeaderFooter',
+];
+
+/**
  * 변이형 동사로 시작하지만 문서 IR 을 바꾸지 않는 메서드 — 드리프트 검사의
  * 명시 분류. (세션/렌더 상태, 캐럿 탐색, 수명주기)
  */
@@ -91,6 +100,7 @@ export const EXCLUDED_NON_DOCUMENT: readonly string[] = [
   'setClipEnabled', // 렌더 클립 옵션
   'refreshLayout', // 현재 IR에서 파생 조판 캐시만 재구성
   'setActiveField', 'clearActiveField', // 편집 세션 상태 (직렬화 비대상)
+  'toggleHideHeaderFooter', // 페이지별 미리보기 감춤 상태 (직렬화/문서 snapshot 비대상)
   'moveVertical', 'moveVerticalByPath', // 캐럿 세로 탐색 (조회)
   'ensureParagraphStableIds', // 런타임 추적 id 부여
 ];

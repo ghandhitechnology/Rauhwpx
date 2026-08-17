@@ -16,6 +16,7 @@ import { WritingStyleStore, assertWritingStyleAppendCompatible } from './writing
 import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { TOOL_DEFINITIONS } from './tools.mjs';
+import { replayMissedTurnEnd } from './turn-outcome-replay.mjs';
 import { PlanningState, authorizeToolCall, buildApprovedPlanPrompt, workflowError } from './planning-state.mjs';
 import { DownloadManager } from './download-manager.mjs';
 import { BrowserbaseSession } from './browserbase-session.mjs';
@@ -355,12 +356,13 @@ function log(msg) {
 }
 
 function sendJson(sock, obj) {
-  if (sock && sock.readyState === sock.OPEN) {
-    try {
-      sock.send(JSON.stringify(obj?.v === 1 ? { ...obj, v: PROTOCOL_VERSION } : obj));
-    } catch (e) {
-      log(`send failed: ${e?.message ?? e}`);
-    }
+  if (!sock || sock.readyState !== sock.OPEN) return false;
+  try {
+    sock.send(JSON.stringify(obj?.v === 1 ? { ...obj, v: PROTOCOL_VERSION } : obj));
+    return true;
+  } catch (e) {
+    log(`send failed: ${e?.message ?? e}`);
+    return false;
   }
 }
 
@@ -517,11 +519,9 @@ function makeBackendEventHandler(record, generation) {
       return;
     }
     if (evt.type === 'turn-start') record.missedTurnEnd = null;
-    if (evt.type === 'turn-end') {
-      activeSession.status = 'idle';
-      if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) record.missedTurnEnd = evt;
-    }
-    sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt });
+    if (evt.type === 'turn-end') activeSession.status = 'idle';
+    const delivered = sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt });
+    if (evt.type === 'turn-end' && !delivered) record.missedTurnEnd = evt;
   };
 }
 
@@ -541,8 +541,9 @@ function disposeSession(record) {
   void record.browserbaseSession.cleanup('session disposed');
   if (wasRunning) {
     const evt = { type: 'turn-end', agent, stopReason: 'interrupted' };
-    if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) record.missedTurnEnd = evt;
-    sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt });
+    if (!sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt })) {
+      record.missedTurnEnd = evt;
+    }
   }
   return backendExit.catch((error) => {
     log(`session process exit wait failed: ${error?.message ?? error}`);
@@ -1883,6 +1884,9 @@ httpServer.on('upgrade', (req, socket, head) => {
           failAllPendingCalls(record, 'Studio disconnected while tool calls were in flight; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
         }
       });
+      // welcome이 유휴 세션 fallback을 만들기 전에 권위 있는 최종 결과를 먼저 보낸다.
+      // 전송 실패 시 다음 재연결에서 다시 시도할 수 있도록 결과를 보존한다.
+      replayMissedTurnEnd(record, ws, sendJson);
       sendJson(ws, {
         v: 1,
         type: 'welcome',
@@ -1900,11 +1904,6 @@ httpServer.on('upgrade', (req, socket, head) => {
           plan: structuredClone(activeSession.planning.latestPlan.plan),
           ...activeSession.planning.snapshot(),
         });
-      }
-      if (record.missedTurnEnd) {
-        const evt = record.missedTurnEnd;
-        record.missedTurnEnd = null;
-        sendJson(ws, { v: 1, type: 'agent-event', event: evt });
       }
       void skillRegistry.list().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', ...catalog }));
       void writingStyleStore.status()

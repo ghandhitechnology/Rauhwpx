@@ -202,8 +202,24 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(implementing, /run every validation listed/);
   assert.match(implementing, /completed, blocked, and deferred plan items/);
   assert.match(implementing, /Never call partial work complete/);
-  assert.match(implementing, /pending tinted changes/);
+  assert.match(implementing, /Higher-level document writes commit only after an explicitly successful turn/);
+  assert.match(implementing, /failed, interrupted, and unknown outcomes roll back staged changes/);
+  assert.match(implementing, /apply_engine_edits commits one atomic undoable batch/);
   assert.doesNotMatch(implementing, /present_implementation_plan/);
+});
+
+test('all workflow system prompts default document design to black and white', () => {
+  const briefs = [
+    systemBriefFor({ workflow: 'direct', phase: 'implementing' }),
+    systemBriefFor({ workflow: 'plan', phase: 'planning' }),
+    systemBriefFor({ workflow: 'plan', phase: 'implementing' }),
+  ];
+  for (const brief of briefs) {
+    assert.match(brief, /default to black text, white or unfilled backgrounds, and black borders/);
+    assert.match(brief, /obvious, consistent color palette/);
+    assert.match(brief, /user explicitly requests a color/);
+    assert.match(brief, /reuse its established colors/);
+  }
 });
 
 test('plan revision prompt reopens discovery instead of forcing replacement', () => {

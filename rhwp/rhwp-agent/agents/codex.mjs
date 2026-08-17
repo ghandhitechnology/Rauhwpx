@@ -93,9 +93,9 @@ export function buildCodexArgv(opts, threadId) {
     '-c', `mcp_servers.rhwp.args=${JSON.stringify(runtime.args)}`,
     '-c', `mcp_servers.rhwp.env={${mcpEnv}}`,
     '-c', 'mcp_servers.rhwp.startup_timeout_sec=20',
-    // Headless MCP calls cannot display an approval prompt. Auto-approve rhwp
-    // tools (document edits still wait for sidebar approval) and use config
-    // keys understood by both the initial and resume subcommands.
+    // 헤드리스 MCP 호출은 승인 프롬프트를 표시할 수 없다. rhwp 도구를 자동 승인하며,
+    // Studio는 성공한 문서 편집을 자동 커밋하고 undo 이력을 보존한다. 최초 실행과
+    // resume 하위 명령이 모두 이해하는 설정 키만 사용한다.
     '-c', 'mcp_servers.rhwp.default_tools_approval_mode="auto"',
     '-c', 'approval_policy="never"',
     '-c', `sandbox_mode="${planningRestricted ? 'read-only' : (unrestricted ? 'danger-full-access' : 'workspace-write')}"`,
