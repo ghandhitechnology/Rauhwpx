@@ -1645,6 +1645,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const threadsNew = el('button', 'ag-threads-new', '새 채팅');
   threadsNew.type = 'button';
   const threadsList = el('ul', 'ag-threads-list');
+  // 스크롤하면 hover 카드가 행에서 떨어져 남는다 — 바로 걷어낸다.
+  threadsList.addEventListener('scroll', () => hideThreadPopover(), { passive: true });
   threadsPage.append(threadsHeader, threadsNew, threadsList);
 
   const skillsPage = el('div', 'ag-skills-page');
@@ -2234,6 +2236,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function setFullscreen(on: boolean): void {
     if (fullscreen === on) return;
     fullscreen = on;
+    hideThreadPopover();
     cancelFsMotionTimers();
 
     const animate = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -3180,13 +3183,75 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   /** 목록 행의 계기 표시 — 에이전트 · 날짜 시각 · 메시지 수. 자릿수를 맞춘다. */
-  function formatThreadMeta(thread: ChatThread): string {
-    const when = new Date(thread.updatedAt);
-    const hh = String(when.getHours()).padStart(2, '0');
-    const mm = String(when.getMinutes()).padStart(2, '0');
-    const month = String(when.getMonth() + 1).padStart(2, '0');
-    const day = String(when.getDate()).padStart(2, '0');
-    return `${AGENT_LABEL[thread.agent]} · ${month}/${day} ${hh}:${mm} · ${thread.messages.length}줄`;
+  function formatRelativeAge(ts: number): string {
+    const diff = Date.now() - ts;
+    const minute = 60_000;
+    const hour = 3_600_000;
+    const day = 86_400_000;
+    if (diff < minute) return '방금';
+    if (diff < hour) return `${Math.floor(diff / minute)}분 전`;
+    if (diff < day) return `${Math.floor(diff / hour)}시간 전`;
+    if (diff < day * 7) return `${Math.floor(diff / day)}일 전`;
+    if (diff < day * 30) return `${Math.floor(diff / (day * 7))}주 전`;
+    return `${Math.floor(diff / (day * 30))}개월 전`;
+  }
+
+  /* 전체 화면 레일 전용 hover 카드 — 행은 제목만 남기고 문서·에이전트·시각은
+     여기서 보여준다. 사이드바 패널에서는 뜨지 않는다(fullscreen 게이트). */
+  let threadPopover: HTMLElement | null = null;
+  let threadPopoverTimer: number | null = null;
+
+  function hideThreadPopover(): void {
+    if (threadPopoverTimer !== null) {
+      window.clearTimeout(threadPopoverTimer);
+      threadPopoverTimer = null;
+    }
+    threadPopover?.remove();
+    threadPopover = null;
+  }
+
+  function scheduleThreadPopover(thread: ChatThread, row: HTMLElement): void {
+    if (!fullscreen) return;
+    hideThreadPopover();
+    threadPopoverTimer = window.setTimeout(() => {
+      threadPopoverTimer = null;
+      showThreadPopover(thread, row);
+    }, 320);
+  }
+
+  function showThreadPopover(thread: ChatThread, row: HTMLElement): void {
+    if (!fullscreen || !row.isConnected) return;
+    const card = el('div', 'ag-thread-popover');
+    card.setAttribute('aria-hidden', 'true');
+    const head = el('div', 'ag-thread-popover-head');
+    head.append(
+      el('span', 'ag-thread-popover-title', thread.title || '새 채팅'),
+      el('span', 'ag-thread-popover-age', formatRelativeAge(thread.updatedAt)),
+    );
+    const docRow = el('div', 'ag-thread-popover-row');
+    docRow.append(
+      createIcon('document'),
+      el('span', 'ag-thread-popover-text', docGroupLabel(thread.docKey)),
+    );
+    const agentRow = el('div', 'ag-thread-popover-row');
+    agentRow.append(
+      createIcon('spark'),
+      el(
+        'span',
+        'ag-thread-popover-text',
+        `${AGENT_LABEL[thread.agent]} · ${labelForModel(thread.agent, thread.model)}`,
+      ),
+    );
+    card.append(head, docRow, agentRow);
+    root.appendChild(card);
+    threadPopover = card;
+
+    const rect = row.getBoundingClientRect();
+    const size = card.getBoundingClientRect();
+    const left = Math.min(rect.right + 10, window.innerWidth - size.width - 8);
+    const top = Math.max(8, Math.min(rect.top - 4, window.innerHeight - size.height - 8));
+    card.style.left = `${left}px`;
+    card.style.top = `${top}px`;
   }
 
   /**
@@ -3242,24 +3307,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     return docKey ?? '문서 없음';
   }
 
-  function buildThreadRow(thread: ChatThread, indexInGroup: number): HTMLElement {
+  function buildThreadRow(thread: ChatThread): HTMLElement {
     const li = el('li', 'ag-threads-row');
     if (thread.id === currentThread.id) li.classList.add('ag-current');
 
     const btn = el('button', 'ag-threads-item');
     btn.type = 'button';
     if (thread.id === currentThread.id) btn.classList.add('ag-active');
-    const index = el('span', 'ag-thread-idx', String(indexInGroup + 1).padStart(2, '0'));
-    index.setAttribute('aria-hidden', 'true');
-    const body = el('span', 'ag-thread-body');
-    body.append(
-      el('span', 'ag-threads-item-title', thread.title || '새 채팅'),
-      el('span', 'ag-threads-item-meta', formatThreadMeta(thread)),
-    );
-    btn.append(index, body);
+    btn.appendChild(el('span', 'ag-threads-item-title', thread.title || '새 채팅'));
     // 두 번 누르기로는 열지 않는다 — 첫 클릭이 이미 대화를 열어버리므로
     // 이름 바꾸기는 연필 버튼 하나로만 들어간다.
     btn.addEventListener('click', () => openThread(thread.id));
+    btn.addEventListener('mouseenter', () => scheduleThreadPopover(thread, li));
+    btn.addEventListener('mouseleave', hideThreadPopover);
 
     const rename = el('button', 'ag-thread-rename');
     rename.type = 'button';
@@ -3281,6 +3341,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
    * 그룹 이름 우클릭 → 라이브러리 "이동"(현재 문서 저장 후 그 문서로 연다).
    */
   function rebuildThreadsList(): void {
+    hideThreadPopover();
     threadsList.replaceChildren();
     const groups = listThreadsByDocument();
     if (groups.length === 0) {
@@ -3305,11 +3366,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       groupBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
       if (canMove) groupBtn.dataset.libraryDoc = 'true';
       if (canMove) groupBtn.setAttribute('aria-haspopup', 'menu');
-      const chevron = createChevron('ag-threads-group-chevron');
+      const paper = createIcon('document', 'ag-threads-group-icon');
       const name = el('span', 'ag-threads-group-name', docGroupLabel(group.docKey));
       name.title = docGroupLabel(group.docKey);
-      const count = el('span', 'ag-threads-group-count', String(group.threads.length));
-      groupBtn.append(chevron, name, count);
+      groupBtn.append(paper, name);
       if (isCurrentDoc) groupBtn.append(el('span', 'ag-threads-group-badge', '현재'));
       groupBtn.addEventListener('click', () => {
         docGroupToggles.set(toggleKey, !expanded);
@@ -3337,11 +3397,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       threadsList.appendChild(groupLi);
 
       if (!expanded) continue;
-      group.threads.forEach((thread, i) => {
-        const row = buildThreadRow(thread, i);
+      for (const thread of group.threads) {
+        const row = buildThreadRow(thread);
         if (!isCurrentDoc) row.classList.add('ag-foreign');
         threadsList.appendChild(row);
-      });
+      }
     }
   }
 
