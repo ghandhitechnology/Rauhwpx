@@ -230,7 +230,7 @@ enter scope counts and expire after 12 hours.
 Studio should repeat the IDs on `chat-user-message`; the hub rejects stale IDs
 before retrieval while continuing to accept legacy messages that omit them.
 
-## MCP tools (server name `rhwp`, 50 tools)
+## MCP tools (server name `rhwp`, 51 tools)
 
 Visible to Claude as `mcp__rhwp__<name>`.
 
@@ -245,11 +245,13 @@ Visible to Claude as `mcp__rhwp__<name>`.
   `list_styles`, `list_numberings` (numbering/bullet definition ids),
   `get_para_format` (sees real lists — HWP list numbers are not text),
   `get_char_format` (char format at a point; documents the inheritance rule),
+  `get_table_properties` (table/object placement plus optional cell state),
   `preview_equation` (metrics + warnings), `verify_changes`
 - Write (all pending approval): `insert_text`, `delete_range`,
   `replace_range`, `apply_char_format` (incl. `fontFamily`),
   `set_field_value`, `create_table` (bulk cell fill + header row),
-  `edit_table` (rows/cols/merge/props), `delete_table` (mark-only whole-table delete),
+  `edit_table` (rows/cols/merge/split plus table placement, wrapping, pagination,
+  captions, margins, and rich cell props), `delete_table` (mark-only whole-table delete),
   `apply_para_format`, `apply_style`,
   `apply_list` (real auto-renumbered HWP lists — never literal `1.` text),
   `insert_image` (local `imagePath`; this process reads/measures the file),
@@ -299,7 +301,7 @@ model as an image content block it can visually inspect.
 Write-tool approval model: non-destructive object ops (create table, insert
 image/equation/chart, para format, page layout, new header/footer) apply
 immediately as tinted pending changes and are reverted by inverse ops on
-reject; destructive ops (delete row/col, merge cells, cell/table props,
+reject; destructive ops (delete row/col, merge/split cells, cell/table props,
 apply style, editing an existing header/footer) are mark-only and execute
 when the user approves. A table with a pending destructive mark rejects
 further edits with `PENDING_DESTRUCTIVE_OP` until reviewed.
