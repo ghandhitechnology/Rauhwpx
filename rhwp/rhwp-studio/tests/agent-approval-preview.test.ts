@@ -75,6 +75,24 @@ test('prepared snapshot command adopts current preview and round-trips snapshots
   assert.equal(command.snapshotResourceCount(), 2);
 });
 
+test('template transfers capture a lossless baseline, lock direct edits, and join normal approval undo', () => {
+  const addTemplate = between(pendingSrc, '  addTemplateMutation(', '\n  /**\n   * executor 가드');
+  assert.match(addTemplate, /const snapshotId = wasm\.saveSnapshot\(\)[\s\S]*rawReport = operation\(\)/,
+    'the baseline must be captured before structural transfer');
+  assert.match(addTemplate, /kind: 'template'[\s\S]*snapshotId/);
+  assert.match(addTemplate, /TEMPLATE_PENDING_CONFLICT/,
+    'structural snapshots cannot be layered over coordinate-based pending edits');
+  assert.match(addTemplate, /syncTemplateLock\(\)/);
+  assert.match(pendingSrc, /op\.kind === 'template'[\s\S]*restoreSnapshot\(op\.snapshotId\)/,
+    'reject and approval baseline capture restore the exact template snapshot');
+  assert.match(pendingSrc, /if \(locked === this\.templateLocked\) return;[\s\S]*agent-template-lock-changed/,
+    'the editor lock only emits on a real state transition');
+  assert.doesNotMatch(pendingSrc, /op\.kind === 'template' && op\.userEditSeqAtSnapshot !== this\.userEditSeq/,
+    'template previews must stay revertible instead of being dropped as ordinary text drift');
+  assert.match(pendingSrc, /new PreparedSnapshotCommand\(/,
+    'approval continues to create one snapshot-backed undo command for the change set');
+});
+
 test('pending additions and formatting recolor glyphs with model-specific ink', () => {
   assert.match(overlayCss, /\.ag-pending-rect\.ag-claude[\s\S]*--ag-pending-ink:/);
   assert.match(overlayCss, /\.ag-pending-rect\.ag-codex[\s\S]*--ag-pending-ink:/);

@@ -65,6 +65,8 @@ export interface ChatThread {
   docKey: string | null;
   /** 서버의 문서별 참고자료 범위에 쓰는 안정적인 논리 문서 ID. */
   documentId: string | null;
+  /** 이 채팅에 고정된 기기 템플릿. 원본은 채팅에 내장하지 않는다. */
+  activeTemplateId: string | null;
   /** Historical display data only. Phase/approval/capability authority is never persisted. */
   latestPlan?: StructuredPlan;
   /** Plan snapshots referenced by clickable chat presentations. */
@@ -79,14 +81,16 @@ export interface ThreadDraft {
   workflow?: AgentWorkflow;
   docKey?: string | null;
   documentId?: string | null;
+  activeTemplateId?: string | null;
 }
 
-type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan' | 'plans' | 'docKey' | 'documentId'> & {
+type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan' | 'plans' | 'docKey' | 'documentId' | 'activeTemplateId'> & {
   workflow?: unknown;
   latestPlan?: unknown;
   plans?: unknown;
   docKey?: unknown;
   documentId?: unknown;
+  activeTemplateId?: unknown;
 };
 
 type ThreadPersistenceChange =
@@ -170,6 +174,7 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
     plans: _storedPlans,
     docKey: storedDocKey,
     documentId: storedDocumentId,
+    activeTemplateId: storedActiveTemplateId,
     ...rest
   } = thread;
   return {
@@ -227,6 +232,7 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
     workflow: isAgentWorkflow(thread.workflow) ? thread.workflow : 'direct',
     docKey: typeof storedDocKey === 'string' && storedDocKey ? storedDocKey : null,
     documentId: typeof storedDocumentId === 'string' && storedDocumentId ? storedDocumentId : null,
+    activeTemplateId: typeof storedActiveTemplateId === 'string' && storedActiveTemplateId ? storedActiveTemplateId : null,
     ...(latestPlan ? { latestPlan } : {}),
     ...(plans.length ? { plans } : {}),
   };
@@ -495,6 +501,7 @@ export function createEmptyThread(draft: ThreadDraft): ChatThread {
     workflow: draft.workflow ?? 'direct',
     docKey: draft.docKey ?? null,
     documentId: draft.documentId ?? null,
+    activeTemplateId: draft.activeTemplateId ?? null,
     messages: [],
   };
 }

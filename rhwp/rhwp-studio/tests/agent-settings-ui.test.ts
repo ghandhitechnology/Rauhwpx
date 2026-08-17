@@ -65,11 +65,21 @@ test('/settings 슬래시 명령이 설정 페이지를 연다', () => {
   assert.ok(source.indexOf("if (text === '/settings')") < source.indexOf('recordUserMessage(visibleText,'));
 });
 
-test('설정은 연결·기본 설정·글쓰기 보정·사용량 네 묶음이다', () => {
-  for (const title of ['연결', '기본 설정', '글쓰기 보정', '사용량']) {
+test('설정은 연결·기본 설정·글쓰기 보정·템플릿·사용량 묶음이다', () => {
+  for (const title of ['연결', '기본 설정', '글쓰기 보정', '템플릿', '사용량']) {
     assert.match(settings, new RegExp(`createSection\\('${title}'\\)`));
   }
   assert.match(settingsCss, /\.ag-settings-section-title/);
+});
+
+test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {
+  assert.match(settings, /requestTemplateName\('템플릿 추가'/);
+  assert.match(settings, /bridge\.addTemplate\(file, name\)/);
+  assert.match(settings, /bridge\.renameTemplate\(id, name\)/);
+  assert.doesNotMatch(settings, /window\.prompt/);
+  assert.match(settings, /bridge\.replaceTemplate\(id, file\)/);
+  assert.match(settings, /window\.confirm\(`“\$\{template\.name\}” 템플릿을 삭제할까요\?`\)/);
+  assert.match(settings, /bridge\.deleteTemplate\(id\)/);
 });
 
 test('연결 묶음은 허브 상태와 프로바이더 상태, 세 동작을 갖는다', () => {
