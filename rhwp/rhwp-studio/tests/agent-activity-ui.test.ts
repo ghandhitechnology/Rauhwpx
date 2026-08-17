@@ -92,7 +92,7 @@ test('active editing and a minimized plan share a compact composer overlay', () 
   assert.match(source, /const turnPending = el\('div', 'ag-turn-pending'\)/);
   assert.match(source, /createHieumGlyph/);
   assert.match(source, /composerOverlay\.append\(planRestore\)/);
-  assert.match(source, /composer\.append\(composerOverlay, slashMenu, composerField, composerMeta, configPanel\)/);
+  assert.match(source, /composer\.append\(composerOverlay, slashMenu, templateChip, composerField, composerMeta, configPanel\)/);
   assert.match(source, /const activeEdit = changeSets\.find\(\(set\) => set\.status === 'open'\)/);
   assert.match(source, /updateTurnPending/);
   assert.match(source, /`\$\{AGENT_LABEL\[who\]\} 편집 중…`/);

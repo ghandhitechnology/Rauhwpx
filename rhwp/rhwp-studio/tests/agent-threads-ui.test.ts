@@ -42,7 +42,7 @@ test('model, permission, and skill utilities live in the composer accessory row'
   assert.match(source, /composerUtilityActions\.append\(phaseBadge, permissionBtn, skillsBtn\)/);
   assert.match(source, /composerUtilities\.append\(composerUtilityActions\)/);
   assert.match(source, /composerMeta\.append\(selectors, composerUtilities\)/);
-  assert.match(source, /composer\.append\(composerOverlay, slashMenu, composerField, composerMeta, configPanel\)/);
+  assert.match(source, /composer\.append\(composerOverlay, slashMenu, templateChip, composerField, composerMeta, configPanel\)/);
   assert.match(source, /chatPage\.append\(header, connBanner, messages, review, planSurface, composer\)/);
   assert.match(source, /permissionBtn\.textContent = unrestricted \? '전체' : '안전'/);
   assert.match(css, /\.ag-composer-meta\s*\{/);

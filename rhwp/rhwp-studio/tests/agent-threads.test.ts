@@ -196,6 +196,18 @@ test('user message attachment metadata persists without file bytes', () => {
   assert.doesNotMatch(mem.get('rhwp-agent-threads') ?? '', /data:application\/pdf|base64/i);
 });
 
+test('threads persist only the active template stable id', () => {
+  mem.clear();
+  const t = createEmptyThread({
+    agent: 'codex', model: 'gpt-5.6-sol', effort: 'high', activeTemplateId: 'template-stable-id',
+  });
+  t.messages.push({ role: 'user', text: '이 템플릿으로 정리해줘' });
+  upsertThread(t);
+  assert.equal(getThread(t.id)?.activeTemplateId, 'template-stable-id');
+  const raw = mem.get('rhwp-agent-threads') ?? '';
+  assert.doesNotMatch(raw, /contentHash|arrayBuffer|base64|blob:/i);
+});
+
 test('listThreadsByDocument groups by document, groups ordered by recent activity', () => {
   mem.clear();
   const mk = (docKey: string | null, text: string, updatedAt: number) => {
