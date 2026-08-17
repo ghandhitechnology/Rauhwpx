@@ -26,7 +26,7 @@ function makeEntry(overrides: Partial<RecentDoc> = {}): RecentDoc {
 }
 
 function makeDeps(overrides: Partial<OpenRecentDeps> = {}) {
-  const calls = { removed: [] as string[], toasts: [] as string[], opened: [] as string[] };
+  const calls = { removed: [] as string[], toasts: [] as string[], opened: [] as string[], documentIds: [] as string[] };
   const deps: OpenRecentDeps = {
     ensurePermission: async () => true,
     readFile: async () => ({ bytes: new Uint8Array([1]), name: '보고서.hwp' }),
@@ -38,6 +38,7 @@ function makeDeps(overrides: Partial<OpenRecentDeps> = {}) {
     },
     emitOpen: (p) => {
       calls.opened.push(p.fileName);
+      if (p.documentId) calls.documentIds.push(p.documentId);
     },
     ...overrides,
   };
@@ -82,6 +83,7 @@ test('성공 시 라이브 파일 bytes와 핸들로 open 이벤트를 낸다', 
   const result = await openRecentEntry(makeEntry(), deps);
   assert.equal(result, 'opened');
   assert.deepEqual(calls.opened, ['보고서.hwp']);
+  assert.deepEqual(calls.documentIds, ['doc-1']);
   assert.equal(calls.removed.length, 0);
   assert.equal(calls.toasts.length, 0);
 });

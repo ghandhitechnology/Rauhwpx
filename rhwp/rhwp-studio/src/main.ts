@@ -1156,8 +1156,15 @@ async function reserveDocumentOpen(
   data: Uint8Array,
   fileHandle: typeof wasm.currentFileHandle,
   skipRecent = false,
+  preferredDocumentId?: string | null,
 ): Promise<{ identity: DocumentPreflightIdentity; reservationId: string | null | undefined }> {
-  const resolved = await resolveDocumentPreflight(data, fileHandle, await listRecentDocs());
+  const resolved = await resolveDocumentPreflight(
+    data,
+    fileHandle,
+    await listRecentDocs(),
+    undefined,
+    preferredDocumentId,
+  );
   const identity = skipRecent
     ? { ...resolved, documentId: createActiveDocumentId(), useSourceDigest: false }
     : resolved;
@@ -1216,9 +1223,19 @@ async function loadBytes(
   fileName: string,
   fileHandle: typeof wasm.currentFileHandle,
   startTime = performance.now(),
-  options: { dataReadProgressShown?: boolean; skipRecent?: boolean; suppressDialogs?: boolean } = {},
+  options: {
+    dataReadProgressShown?: boolean;
+    skipRecent?: boolean;
+    suppressDialogs?: boolean;
+    preferredDocumentId?: string | null;
+  } = {},
 ): Promise<void> {
-  const ownership = await reserveDocumentOpen(data, fileHandle, options.skipRecent);
+  const ownership = await reserveDocumentOpen(
+    data,
+    fileHandle,
+    options.skipRecent,
+    options.preferredDocumentId,
+  );
   const previousFileHandle = wasm.currentFileHandle;
   if (!options.dataReadProgressShown) {
     await updateLoadProgress(0, '문서 데이터 준비 중...');
@@ -1438,13 +1455,16 @@ async function openDocumentBytes(data: {
   fileName: string;
   fileHandle: typeof wasm.currentFileHandle;
   skipUnsavedGuard?: boolean;
+  documentId?: string;
 }) {
   if (!await canReplaceCurrentDocument(data.skipUnsavedGuard)) {
     await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
     return false;
   }
   try {
-    await loadBytes(data.bytes, data.fileName, data.fileHandle);
+    await loadBytes(data.bytes, data.fileName, data.fileHandle, performance.now(), {
+      preferredDocumentId: data.documentId,
+    });
     return true;
   } catch (error) {
     await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
@@ -1466,6 +1486,7 @@ eventBus.on('open-document-bytes', async (payload) => {
     fileName: string;
     fileHandle: typeof wasm.currentFileHandle;
     skipUnsavedGuard?: boolean;
+    documentId?: string;
     /** 문서 비교 등: 로드 완료를 기다리는 쪽과 짝을 맞출 때만 전달 */
     requestId?: string;
   };

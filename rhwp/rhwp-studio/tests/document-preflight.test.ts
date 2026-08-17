@@ -100,6 +100,30 @@ test('opaque native-path identity does not collapse distinct files with identica
   });
 });
 
+test('preferred documentId survives native-path reopens that cannot compare handles', async () => {
+  const bytes = new Uint8Array([12, 13]);
+  const digest = documentSourceDigest(bytes);
+  const selected = {
+    ...handle('report.hwp', async () => {
+      throw new DOMException('Handle kinds cannot be compared', 'NotSupportedError');
+    }),
+    identityKind: 'native-path' as const,
+  };
+  const result = await resolveDocumentPreflight(
+    bytes,
+    selected,
+    [recent('library-doc', digest)],
+    () => 'new-native-copy',
+    'library-doc',
+  );
+
+  assert.deepEqual(result, {
+    documentId: 'library-doc',
+    sourceDigest: digest,
+    useSourceDigest: false,
+  });
+});
+
 test('successful isSameEntry=false keeps identical copies logically separate', async () => {
   const bytes = new Uint8Array([10, 11]);
   const digest = documentSourceDigest(bytes);
