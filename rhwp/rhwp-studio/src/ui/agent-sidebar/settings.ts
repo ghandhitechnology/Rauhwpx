@@ -67,8 +67,8 @@ const CONN_LABEL: Record<ConnectionState, string> = {
 };
 
 const PERMISSION_OPTIONS: ReadonlyArray<{ id: PermissionProfile; label: string }> = [
-  { id: 'safe', label: '안전 — 문서 편집, 파일은 프로젝트 안에서만' },
-  { id: 'unrestricted', label: '전체 접근 — 노트북 전체' },
+  { id: 'safe', label: '안전 — 편집은 검토 후 승인, 파일은 프로젝트 안에서만' },
+  { id: 'unrestricted', label: '전체 접근 — 자유 편집, 노트북 전체' },
 ];
 
 /** 요금제 목록은 프로바이더마다 다르다 (허브의 한도 계산 기준). */
@@ -131,7 +131,7 @@ const INSTALL_PROGRESS_CEILING: Record<string, number> = {
 };
 
 const UNRESTRICTED_DEFAULT_WARNING =
-  '전체 접근을 기본값으로 두면 새 대화가 열릴 때부터 에이전트의 명령과 파일 도구가 노트북 전체에 닿습니다. 계속할까요?';
+  '전체 접근을 기본값으로 두면 새 대화가 열릴 때부터 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 닿습니다. 계속할까요?';
 
 /** 미터가 경고 색으로 넘어가는 소진율. */
 const METER_WARN_PERCENT = 80;

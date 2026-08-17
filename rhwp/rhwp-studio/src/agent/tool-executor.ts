@@ -2,7 +2,8 @@
  * MCP 툴 실행기 — 허브가 전달한 tool-request를 실제 문서 호출로 매핑한다.
  *
  * read 툴은 WasmBridge를 직접 호출한다. 고수준 write 툴은 PendingEditManager에
- * staging한 뒤 턴 성공 시 자동 커밋하고, 전체 엔진 표면은 원자적 스냅샷 배치로 실행한다. 모든 read 응답에
+ * staging한 뒤 턴 성공 시 권한 프로필에 따라 자동 커밋(전체)하거나 검토 대기(안전)로
+ * 남기고, 전체 엔진 표면은 원자적 스냅샷 배치로 실행한다(전체 프로필 전용). 모든 read 응답에
  * revision을 포함하고, 모든 write는 expectedRevision을 먼저 검사한다.
  */
 import type { WasmBridge } from '../core/wasm-bridge.ts';
@@ -11,7 +12,7 @@ import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 import type { CellPathEntry, DocumentPosition } from '../core/types.ts';
 import type { RevisionTracker } from './revision.ts';
 import type { PendingEditManager } from './pending-edits.ts';
-import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, DocumentTemplate, ObjectOp } from './types.ts';
+import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, DocRange, DocumentTemplate, ObjectOp, PermissionProfile } from './types.ts';
 import { AgentToolError } from './types.ts';
 import { renderChartPng, validateChartSpec } from './chart-render.ts';
 import type { ChartSpec } from './chart-render.ts';
@@ -35,7 +36,7 @@ export interface AgentToolExecutorDeps {
 
 const DOC_NOT_LOADED_MESSAGE = '문서가 로드되지 않았습니다';
 const MAX_SVG_BYTES = 800_000;
-const PENDING_NOTE = 'staged now and committed automatically when the turn succeeds; a failed turn rolls it back';
+const PENDING_NOTE = 'staged now as live preview; when the turn ends it is auto-committed (전체 접근) or held for the user’s review and approval (안전). A failed turn rolls it back';
 
 /** Every Studio tool that can create or stage a document mutation. */
 export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
@@ -82,11 +83,20 @@ export interface ToolCapabilityContext {
   /** Server state last synchronized by the Studio bridge. */
   activePhase?: AgentPhase;
   activeCapabilityEpoch?: number | null;
+  /** 현재 채팅의 권한 프로필 — 안전 모드에서는 즉시 커밋되는 raw 엔진 쓰기를 막는다. */
+  permissionProfile?: PermissionProfile;
   template?: DocumentTemplate;
 }
 
 /** Enforce plan-mode write authority before dispatch can touch document state. */
 export function assertToolCapability(tool: string, capability?: ToolCapabilityContext) {
+  // 안전 프로필: raw 엔진 쓰기는 승인 게이트를 우회해 즉시 커밋되므로 차단한다.
+  if (capability?.permissionProfile === 'safe' && RAW_ENGINE_WRITE_TOOLS.has(tool)) {
+    throw new AgentToolError(
+      'SAFE_MODE_RAW_ENGINE',
+      'Raw engine edits commit immediately and bypass the user’s review gate, so they are unavailable in the 안전 permission profile. Use the staged semantic write tools instead, or ask the user to switch the chat to 전체 접근.',
+    );
+  }
   if (!isDocumentWriteTool(tool) || capability?.workflow !== 'plan') return;
   if (capability.phase !== 'implementing' || capability.activePhase !== 'implementing') {
     throw new AgentToolError(
