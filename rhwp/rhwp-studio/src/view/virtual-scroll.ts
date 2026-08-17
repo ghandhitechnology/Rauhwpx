@@ -92,16 +92,30 @@ export class VirtualScroll {
     this.totalWidth = Math.max(gridWidth + marginLeft * 2, viewportWidth);
   }
 
+  /**
+   * 가로 팬 여유 공간. 페이지가 뷰포트를 넘칠 때(확대 상태)만 좌우로 뷰포트
+   * 너비만큼 여유를 준다 — 줌 앵커가 어떤 지점이든 표현 가능하려면 이만큼
+   * 필요하다. 페이지가 뷰포트에 다 들어오는 보통 상태에서는 여유를 없애
+   * 가로 스크롤 자체를 봉인한다. 여유를 두면 세로 스크롤 중 트랙패드의 가로
+   * 성분에 문서가 옆으로 미끄러진다. 최종 폭은 항상 뷰포트 이상으로 유지해,
+   * 가운데 스크롤 위치에서 페이지가 뷰포트 중앙에 오는 불변식
+   * (pageLeft − centeredScrollLeft = (viewport − pageWidth) / 2)을 지킨다.
+   */
   private applyHorizontalPanSpace(viewportWidth: number): void {
     if (viewportWidth <= 0) return;
     const baseWidth = this.totalWidth;
+    // 판정 기준은 실제 페이지 폭이다. base 에 붙는 여백(+40) 때문에 '페이지는
+    // 다 보이는데 몇십 px 슬쩍 밀리는' 상태로 넉넉한 팬 공간이 생기면 안 된다.
+    const slack = this.maxPageWidth > viewportWidth ? viewportWidth : 0;
+    const total = Math.max(baseWidth, viewportWidth) + slack * 2;
+    const shift = (total - baseWidth) / 2;
     this.pageLefts = this.pageLefts.map((left, pageIdx) => {
       const resolved = left >= 0
         ? left
         : (baseWidth - (this.pageWidths[pageIdx] ?? 0)) / 2;
-      return resolved + viewportWidth;
+      return resolved + shift;
     });
-    this.totalWidth = baseWidth + viewportWidth * 2;
+    this.totalWidth = total;
   }
 
   /** 뷰포트에 보이는 페이지 인덱스 목록을 반환한다 */
