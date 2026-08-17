@@ -47,6 +47,7 @@ import {
   getThread,
   explorerGroupIsCurrent,
   listThreadsByDocument,
+  recordDocumentOpened,
   removeThread,
   renameThread,
   setThreadTitle,
@@ -1203,6 +1204,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
    * 있는 채팅은 원래 문서 그룹에 남고, 빈 채팅은 저장되지 않은 채 사라진다.
    */
   function handleDocumentSwitch(nextKey: string | null, nextDocumentId: string | null): void {
+    // 문서를 연 순간만 그룹 순서가 움직인다 — 옛 채팅 열람은 순서를 건드리지 않는다.
+    recordDocumentOpened(nextDocumentId, nextKey);
     const sameIdentity = Boolean(
       nextDocumentId && currentDocumentId && nextDocumentId === currentDocumentId,
     );
