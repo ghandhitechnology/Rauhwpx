@@ -614,7 +614,7 @@ export interface ObjectAnchor {
  * - applied-now(즉시 적용, reject 시 역연산): createTable(treatAsChar 경로),
  *   insertImage, insertEquation, tableStructure(insert_row/col), paraFormat, pageLayout,
  *   headerFooter(신규 생성일 때)
- * - mark-only(approve 시 적용): tableStructure(delete_row/col/merge_cells),
+ * - mark-only(approve 시 적용): tableStructure(delete_row/col/merge_cells/split_cell),
  *   deleteTable(표 전체 삭제), setCellProps, setTableProps, applyStyle,
  *   headerFooter(기존 HF 수정)
  */
@@ -661,9 +661,10 @@ export type ObjectOp =
   | {
       type: 'tableStructureMarked';
       sectionIdx: number; tableParaIdx: number; controlIdx: number;
-      op: 'delete_row' | 'delete_col' | 'merge_cells';
+      op: 'delete_row' | 'delete_col' | 'merge_cells' | 'split_cell';
       rowIdx?: number; colIdx?: number;
       startRow?: number; startCol?: number; endRow?: number; endCol?: number;
+      splitRows?: number; splitCols?: number;
       /** 마크 시점 크기 — 드리프트 프로브 */
       dims: { rowCount: number; colCount: number };
     }
