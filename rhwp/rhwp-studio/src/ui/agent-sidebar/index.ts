@@ -3197,32 +3197,54 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   /* 전체 화면 레일 전용 hover 카드 — 행은 제목만 남기고 문서·에이전트·시각은
-     여기서 보여준다. 사이드바 패널에서는 뜨지 않는다(fullscreen 게이트). */
+     여기서 보여준다. 사이드바 패널에서는 뜨지 않는다(fullscreen 게이트).
+     행 사이를 훑을 때는 카드를 없앴다 다시 만들지 않고 내용만 갈아끼운 채
+     위치를 CSS transition 으로 미끄러뜨린다. */
   let threadPopover: HTMLElement | null = null;
   let threadPopoverTimer: number | null = null;
+  let threadPopoverHideTimer: number | null = null;
+  /** 방금 펼친 그룹 — 이 그룹의 행만 한 번 계단식으로 들어온다. */
+  let threadsCascadeKey: string | null = null;
 
-  function hideThreadPopover(): void {
+  function clearThreadPopoverTimers(): void {
     if (threadPopoverTimer !== null) {
       window.clearTimeout(threadPopoverTimer);
       threadPopoverTimer = null;
     }
+    if (threadPopoverHideTimer !== null) {
+      window.clearTimeout(threadPopoverHideTimer);
+      threadPopoverHideTimer = null;
+    }
+  }
+
+  function hideThreadPopover(): void {
+    clearThreadPopoverTimers();
     threadPopover?.remove();
     threadPopover = null;
   }
 
+  /** 행을 떠날 때는 잠깐 기다린다 — 옆 행으로 옮겨 가는 중이면 카드가 살아남는다. */
+  function scheduleHideThreadPopover(): void {
+    clearThreadPopoverTimers();
+    threadPopoverHideTimer = window.setTimeout(() => {
+      threadPopoverHideTimer = null;
+      hideThreadPopover();
+    }, 120);
+  }
+
   function scheduleThreadPopover(thread: ChatThread, row: HTMLElement): void {
     if (!fullscreen) return;
-    hideThreadPopover();
+    clearThreadPopoverTimers();
+    // 이미 떠 있으면 거의 즉시 옮겨 가고, 처음엔 잠깐 뜸을 들인다.
+    const delay = threadPopover ? 60 : 320;
     threadPopoverTimer = window.setTimeout(() => {
       threadPopoverTimer = null;
       showThreadPopover(thread, row);
-    }, 320);
+    }, delay);
   }
 
   function showThreadPopover(thread: ChatThread, row: HTMLElement): void {
     if (!fullscreen || !row.isConnected) return;
-    const card = el('div', 'ag-thread-popover');
-    card.setAttribute('aria-hidden', 'true');
     const head = el('div', 'ag-thread-popover-head');
     head.append(
       el('span', 'ag-thread-popover-title', thread.title || '새 채팅'),
@@ -3235,16 +3257,22 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     );
     const agentRow = el('div', 'ag-thread-popover-row');
     agentRow.append(
-      createIcon('spark'),
+      createProviderIcon(thread.agent),
       el(
         'span',
         'ag-thread-popover-text',
         `${AGENT_LABEL[thread.agent]} · ${labelForModel(thread.agent, thread.model)}`,
       ),
     );
-    card.append(head, docRow, agentRow);
-    root.appendChild(card);
-    threadPopover = card;
+
+    const fresh = threadPopover === null;
+    const card = threadPopover ?? el('div', 'ag-thread-popover');
+    card.replaceChildren(head, docRow, agentRow);
+    if (fresh) {
+      card.setAttribute('aria-hidden', 'true');
+      root.appendChild(card);
+      threadPopover = card;
+    }
 
     const rect = row.getBoundingClientRect();
     const size = card.getBoundingClientRect();
@@ -3319,7 +3347,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     // 이름 바꾸기는 연필 버튼 하나로만 들어간다.
     btn.addEventListener('click', () => openThread(thread.id));
     btn.addEventListener('mouseenter', () => scheduleThreadPopover(thread, li));
-    btn.addEventListener('mouseleave', hideThreadPopover);
+    btn.addEventListener('mouseleave', scheduleHideThreadPopover);
 
     const rename = el('button', 'ag-thread-rename');
     rename.type = 'button';
@@ -3373,6 +3401,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       if (isCurrentDoc) groupBtn.append(el('span', 'ag-threads-group-badge', '현재'));
       groupBtn.addEventListener('click', () => {
         docGroupToggles.set(toggleKey, !expanded);
+        // 펼칠 때만 행이 차례로 미끄러져 들어온다 — 접을 때는 즉시.
+        threadsCascadeKey = expanded ? null : toggleKey;
         rebuildThreadsList();
       });
       if (canMove) {
@@ -3397,12 +3427,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       threadsList.appendChild(groupLi);
 
       if (!expanded) continue;
-      for (const thread of group.threads) {
+      const cascade = threadsCascadeKey === toggleKey;
+      group.threads.forEach((thread, i) => {
         const row = buildThreadRow(thread);
         if (!isCurrentDoc) row.classList.add('ag-foreign');
+        if (cascade) {
+          row.classList.add('ag-row-enter');
+          row.style.animationDelay = `${Math.min(i, 8) * 22}ms`;
+        }
         threadsList.appendChild(row);
-      }
+      });
     }
+    threadsCascadeKey = null;
   }
 
   function setThreadsPanelOpen(open: boolean): void {
