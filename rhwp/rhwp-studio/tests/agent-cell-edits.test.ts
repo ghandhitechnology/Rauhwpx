@@ -160,6 +160,7 @@ function makeExecutor(cursor?: Record<string, unknown>) {
     setFieldValue: () => ({ changeSetId: 'cs-1', fieldId: 1, oldValue: '', newValue: '' }),
     hasDestructiveTableMark: () => false,
     hasPendingStructureOp: () => false,
+    hasTemplateMutation: () => false,
     findDeleteMarkContaining: () => null as null | { range: Record<string, number>; text: string },
   };
   const inputHandler = {
