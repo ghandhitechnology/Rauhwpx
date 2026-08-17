@@ -107,6 +107,16 @@ export class PendingEditManager {
   private userEditSeq = 0;
   /** 매니저 자신의 변이(approve/reject/무효화) 중 카운터 증가 억제 — 재진입 가드 */
   private selfMutating = 0;
+  /**
+   * 벌크 구간 깊이. 0 보다 크면 항목마다의 권위 조판·문서 이벤트·오버레이 동기화를
+   * 플래그로만 모아 두고, 구간이 닫힐 때 한 번씩만 수행한다 — replace_all 처럼
+   * op 이 수십 개 쌓이는 경로에서 항목 수만큼 전체 재조판·전체 재렌더가 도는 것을 막는다.
+   */
+  private bulkDepth = 0;
+  private bulkLayoutDirty = false;
+  private bulkDocEventsReason: string | null = null;
+  private bulkOverlayDirty = false;
+  private bulkOpsChanged = false;
   // 파라미터 프로퍼티 대신 명시적 할당 (node --test strip-only 모드 호환).
   private deps: PendingEditDeps;
 
@@ -475,6 +485,7 @@ export class PendingEditManager {
     this.deps.inputHandler.prepareSnapshotCapacity?.(1);
     const snapId = wasm.saveSnapshot();
     this.deps.inputHandler.retainExternalSnapshot?.();
+    this.beginBulk();
     try {
       let changeSetId = '';
       for (const item of items) {
@@ -494,7 +505,30 @@ export class PendingEditManager {
     } finally {
       wasm.discardSnapshot(snapId);
       this.deps.inputHandler.releaseExternalSnapshot?.();
+      this.endBulk();
     }
+  }
+
+  /** 벌크 구간 진입 — 이후의 조판/이벤트/오버레이 요청은 endBulk 까지 모인다. */
+  private beginBulk(): void {
+    this.bulkDepth++;
+  }
+
+  /** 벌크 구간 종료 — 모인 요청을 각 한 번씩, 항목별 호출과 같은 순서로 수행한다. */
+  private endBulk(): void {
+    if (--this.bulkDepth > 0) return;
+    const layoutDirty = this.bulkLayoutDirty;
+    const docEventsReason = this.bulkDocEventsReason;
+    const overlayDirty = this.bulkOverlayDirty;
+    const opsChanged = this.bulkOpsChanged;
+    this.bulkLayoutDirty = false;
+    this.bulkDocEventsReason = null;
+    this.bulkOverlayDirty = false;
+    this.bulkOpsChanged = false;
+    if (layoutDirty) this.reconcilePreviewLayout();
+    if (docEventsReason !== null) this.emitDocEvents(docEventsReason);
+    if (overlayDirty) this.syncOverlay();
+    if (opsChanged) this.emitChange({ type: 'ops-changed' });
   }
 
   /** executor 가드: 해당 표에 파괴적 마크(delete_row/col, merge, delete_table)가 걸려 있는가 */
@@ -867,24 +901,40 @@ export class PendingEditManager {
   }
 
   private emitChange(e: PendingEditsChangeEvent): void {
+    if (this.bulkDepth > 0 && e.type === 'ops-changed') {
+      this.bulkOpsChanged = true;
+      return;
+    }
     for (const cb of this.listeners) {
       try { cb(e); } catch (err) { console.warn('[pending-edits] onChange listener failed', err); }
     }
   }
 
   private emitDocEvents(reason: string): void {
+    if (this.bulkDepth > 0) {
+      this.bulkDocEventsReason = reason;
+      return;
+    }
     this.deps.eventBus.emit('document-mutated', reason);
     this.deps.eventBus.emit('document-changed');
   }
 
   /** 한 논리 에이전트 연산이 끝난 IR에서 증분 조판 상태를 권위 조판으로 교체한다. */
   private reconcilePreviewLayout(): void {
+    if (this.bulkDepth > 0) {
+      this.bulkLayoutDirty = true;
+      return;
+    }
     // 테스트 더블/이전 WASM 번들과도 호환되도록 호출 자체는 feature-detect 한다.
     // 현재 번들의 WasmBridge.refreshLayout은 실패를 로깅하고 안전하게 반환한다.
     this.deps.wasm.refreshLayout?.();
   }
 
   private syncOverlay(): void {
+    if (this.bulkDepth > 0) {
+      this.bulkOverlayDirty = true;
+      return;
+    }
     const ops: OverlayOp[] = [];
     for (const set of this.sets) {
       for (const op of set.ops) {
