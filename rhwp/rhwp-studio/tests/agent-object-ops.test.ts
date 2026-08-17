@@ -533,6 +533,23 @@ test('get_table_properties + set_table_props: 표 개체를 가로 가운데로 
   assert.deepEqual(after.table.horizontal, { align: 'center', relativeTo: 'column', offsetMm: 0 });
 });
 
+test('set_table_props ignores a null horizontal alignment without repositioning the table', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const created = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a']],
+  })) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const table = tables[0];
+  const edit = (await call('edit_table', {
+    sectionIdx: 0, paraIdx: table.paraIdx, controlIdx: table.controlIdx,
+    op: 'set_table_props', props: { horizontalAlign: null, repeatHeader: true },
+  })) as { changeSetId: string };
+  pending.approve(edit.changeSetId);
+  const props = calls.find((entry) => entry.m === 'setTableProperties')!.a[2] as Record<string, unknown>;
+
+  assert.deepEqual(props, { repeatHeader: true });
+});
+
 test('set_table_props exposes pagination, wrapping, margins, overlap and captions', async () => {
   const { call, pending, tables, calls } = makeEnv();
   const created = (await call('create_table', {
@@ -638,6 +655,29 @@ test('edit_table split_cell is mark-only and executes on approval', async () => 
   pending.approve(split.changeSetId);
   const apply = calls.find((entry) => entry.m === 'splitTableCellInto')!;
   assert.deepEqual(apply.a, [0, 0, 2, 3, true, false]);
+});
+
+test('edit_table split_cell approval fails when the engine rejects the split', async () => {
+  const { call, pending, tables, wasm } = makeEnv();
+  const created = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['wide']],
+  })) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const table = tables[0];
+  const split = (await call('edit_table', {
+    sectionIdx: 0, paraIdx: table.paraIdx, controlIdx: table.controlIdx,
+    op: 'split_cell', rowIdx: 0, colIdx: 0, splitRows: 2, splitCols: 2,
+  })) as { changeSetId: string };
+  wasm.splitTableCellInto = () => ({ ok: false, cellCount: 1 });
+
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal(pending.approve(split.changeSetId), false);
+    assert.equal(pending.hasPending(), true);
+  } finally {
+    console.warn = originalWarn;
+  }
 });
 
 // ─── apply_para_format / apply_style ────────────────────────

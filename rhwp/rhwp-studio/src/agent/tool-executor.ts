@@ -19,6 +19,7 @@ import {
   applyEngineEdits,
   applyEngineEditSession,
   getEngineEditCapabilities,
+  getEngineEditCapabilityCount,
   getEngineEditTypeDefinitions,
   type EngineEditOperation,
 } from './engine-edit.ts';
@@ -382,7 +383,7 @@ export class AgentToolExecutor {
     }
     return {
       revision: this.revision,
-      capabilityCount: getEngineEditCapabilities().length,
+      capabilityCount: getEngineEditCapabilityCount(),
       capabilities: getEngineEditCapabilities(query ?? ''),
       typeDefinitions: getEngineEditTypeDefinitions(),
       binaryArgument: { $base64: 'base64-encoded bytes' },
@@ -1320,6 +1321,7 @@ export class AgentToolExecutor {
 
   /** 표/셀 속성을 MCP 친화적인 enum/mm 단위로 조회한다. */
   private getTableProperties(args: Record<string, unknown>): unknown {
+    this.requireDocLoaded();
     const sectionIdx = reqInt(args, 'sectionIdx');
     const paraIdx = reqInt(args, 'paraIdx');
     const controlIdx = reqInt(args, 'controlIdx');
@@ -2131,10 +2133,15 @@ export class AgentToolExecutor {
     if (mode === undefined && floatingKeys.some((key) => raw[key] !== undefined && raw[key] !== null)) {
       out['treatAsChar'] = false;
     }
-    // Agent-friendly horizontal alignment: match Hancom's common "column-relative + zero offset" behavior.
-    if (raw['horizontalAlign'] !== undefined) {
-      if (raw['horizontalRelativeTo'] === undefined) out['horzRelTo'] = ['inside', 'outside'].includes(String(raw['horizontalAlign'])) ? 'Page' : 'Column';
-      if (raw['horizontalOffsetMm'] === undefined) out['horzOffset'] = 0;
+    // 에이전트 편의 정렬 — 한컴의 통상 동작("단 기준 + offset 0")에 맞춘다.
+    const horizontalAlign = raw['horizontalAlign'];
+    if (horizontalAlign !== undefined && horizontalAlign !== null) {
+      if (raw['horizontalRelativeTo'] === undefined || raw['horizontalRelativeTo'] === null) {
+        out['horzRelTo'] = ['inside', 'outside'].includes(String(horizontalAlign)) ? 'Page' : 'Column';
+      }
+      if (raw['horizontalOffsetMm'] === undefined || raw['horizontalOffsetMm'] === null) {
+        out['horzOffset'] = 0;
+      }
     }
 
     const boundedMm = (publicKey: string, internalKey: string, min: number, max: number): void => {
