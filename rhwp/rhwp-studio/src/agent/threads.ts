@@ -84,6 +84,24 @@ export interface ThreadDraft {
   activeTemplateId?: string | null;
 }
 
+function normalizedDocumentName(value: string | null): string | null {
+  const normalized = value?.trim().normalize('NFC').toLocaleLowerCase() ?? '';
+  return normalized || null;
+}
+
+/** Stable IDs are authoritative; filenames bridge legacy threads created before IDs existed. */
+export function threadMatchesDocument(
+  thread: Pick<ChatThread, 'documentId' | 'docKey'>,
+  documentId: string | null,
+  docKey: string | null,
+): boolean {
+  if (thread.documentId) return Boolean(documentId && thread.documentId === documentId);
+  const threadName = normalizedDocumentName(thread.docKey);
+  const activeName = normalizedDocumentName(docKey);
+  if (threadName && activeName) return threadName === activeName;
+  return !thread.documentId && !documentId && threadName === null && activeName === null;
+}
+
 type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan' | 'plans' | 'docKey' | 'documentId' | 'activeTemplateId'> & {
   workflow?: unknown;
   latestPlan?: unknown;
@@ -158,7 +176,7 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
     && typeof t.title === 'string'
     && typeof t.createdAt === 'number'
     && typeof t.updatedAt === 'number'
-    && (t.agent === 'claude' || t.agent === 'codex')
+    && (t.agent === 'claude' || t.agent === 'codex' || t.agent === 'pi')
     && typeof t.model === 'string'
     && typeof t.effort === 'string'
     && Array.isArray(t.messages)

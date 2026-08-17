@@ -150,6 +150,7 @@ const sessions = new HubSessionRegistry({
       lastConnectedAt: Date.now(),
       studioSocket: null,
       mcpSockets: new Set(),
+      studioMessageQueue: Promise.resolve(),
       agentSession: null,
       pendingReferenceMessage: null,
       nextCapabilityEpoch: 1,
@@ -574,6 +575,38 @@ function resolveWorkflow(value) {
   return value === 'plan' ? 'plan' : 'direct';
 }
 
+const CHAT_HISTORY_MAX_MESSAGES = 40;
+const CHAT_HISTORY_MAX_ENTRY_CHARS = 8_000;
+const CHAT_HISTORY_MAX_TOTAL_CHARS = 32_000;
+
+function normalizeChatHistory(value) {
+  if (!Array.isArray(value)) return [];
+  const history = [];
+  let remaining = CHAT_HISTORY_MAX_TOTAL_CHARS;
+  for (const entry of value.slice(-CHAT_HISTORY_MAX_MESSAGES).reverse()) {
+    if (!entry || (entry.role !== 'user' && entry.role !== 'assistant')) continue;
+    const text = typeof entry.text === 'string' ? entry.text.trim().slice(0, CHAT_HISTORY_MAX_ENTRY_CHARS) : '';
+    if (!text || remaining <= 0) continue;
+    const bounded = text.slice(-remaining);
+    history.unshift({ role: entry.role, text: bounded });
+    remaining -= bounded.length;
+  }
+  return history;
+}
+
+function addReopenedChatHistory(activeSession, prompt) {
+  const history = activeSession.bootstrapHistory;
+  activeSession.bootstrapHistory = [];
+  if (!Array.isArray(history) || history.length === 0) return prompt;
+  const block = [
+    '<reopened_chat_history trust="conversation-transcript">',
+    JSON.stringify(history),
+    'Continue this conversation consistently. The final user request follows after this transcript.',
+    '</reopened_chat_history>',
+  ].join('\n');
+  return `${block}\n\n${prompt}`;
+}
+
 function referenceScopes(activeSession) {
   return referenceScopesForSession(activeSession);
 }
@@ -635,10 +668,13 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
   })
     .then((prompt) => {
       if (record.agentSession !== activeSession) throw new Error('Agent session changed before the message was dispatched');
-      activeSession.backend.sendUserMessage(addTemplateContext(
-        record,
+      activeSession.backend.sendUserMessage(addReopenedChatHistory(
         activeSession,
-        addReferenceContext(activeSession, msg.text, prompt, messageAttachments),
+        addTemplateContext(
+          record,
+          activeSession,
+          addReferenceContext(activeSession, msg.text, prompt, messageAttachments),
+        ),
       ));
     })
     .catch((e) => {
@@ -692,6 +728,7 @@ async function startSession(
   requestedThreadId,
   requestedDocumentId,
   requestedDocumentName,
+  requestedHistory,
   force = false,
 ) {
   const model = resolveModel(agent, requestedModel);
@@ -774,6 +811,7 @@ async function startSession(
     // thread identity rather than an unrelated hub-generated UUID.
     chatId: threadId,
     activeTemplateId: null,
+    bootstrapHistory: normalizeChatHistory(requestedHistory),
     planning,
     workflowTransition: Promise.resolve(),
   };
@@ -971,6 +1009,7 @@ async function handleStudioMessage(record, sock, msg) {
           msg.threadId,
           msg.documentId,
           msg.documentName,
+          msg.history,
           Boolean(msg.force),
         );
         sendJson(sock, {
@@ -1761,8 +1800,20 @@ function attachSocket(record, sock, role) {
       return;
     }
     try {
-      if (role === 'studio') await handleStudioMessage(record, sock, msg);
-      else handleMcpMessage(record, sock, msg);
+      if (role === 'studio') {
+        // WebSocket invokes async message listeners concurrently. Serialize Studio
+        // commands so rapid stop/start/open actions cannot resurrect an older chat.
+        record.studioMessageQueue = record.studioMessageQueue
+          .then(() => {
+            if (record.studioSocket !== sock) return;
+            return handleStudioMessage(record, sock, msg);
+          })
+          .catch((error) => {
+            log(`message handler error (${role}, session=${record.sessionId}): ${error?.stack ?? error}`);
+          });
+      } else {
+        handleMcpMessage(record, sock, msg);
+      }
     } catch (e) {
       log(`message handler error (${role}, session=${record.sessionId}): ${e?.stack ?? e}`);
     }

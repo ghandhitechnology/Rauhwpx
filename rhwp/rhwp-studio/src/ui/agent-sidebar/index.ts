@@ -46,9 +46,11 @@ import {
   fallbackTitle,
   getThread,
   listThreadsByDocument,
+  removeThread,
   renameThread,
   setThreadTitle,
   subscribeThreadChanges,
+  threadMatchesDocument,
   upsertThread,
   type ChatThread,
   type ThreadMessage,
@@ -506,6 +508,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let connCountdownTimer: number | null = null;
   let turnRunning = bridge.isTurnRunning();
   let workflowTransitionPending = false;
+  /** Only the latest requested thread may unlock the composer after chat-started. */
+  let chatStartPendingThreadId: string | null = null;
   /** 계획 모드로 들어갈 때 안전 권한이면 전환 완료 후 전체 접근을 기본 적용한다. */
   let planPermissionDefaultPending = false;
   /** 현재 스트리밍 중인 assistant 텍스트 (tool-call 이후에는 새로 연다). */
@@ -596,8 +600,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const threadWorkflows = new Map<string, AgentWorkflow>();
 
   function startCurrentBridgeChat(force = false): void {
+    chatStartPendingThreadId = currentThread.id;
+    const history = currentThread.messages.flatMap((message) => (
+      (message.role === 'user' || message.role === 'assistant')
+        && message.kind !== 'progress'
+        && message.text.trim()
+        ? [{ role: message.role, text: message.text }]
+        : []
+    ));
     bridge.startChat(selectedAgent, selectedModel, selectedEffort, force, permissionProfile, chatWorkflow,
-      currentThread.id, currentThread.documentId, currentThread.docKey);
+      currentThread.id, currentThread.documentId, currentThread.docKey, history);
+    updateComposer();
   }
 
   // ── DOM 구성 ──────────────────────────────────────────
@@ -1185,52 +1198,30 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   /**
-   * 문서가 바뀌면 채팅도 갈아탄다 — 이전 문서의 대화가 새 문서로
-   * 넘어오지 못하게 하는 격리 지점. 진행 중이던 채팅은 자기 문서
-   * 그룹 아래에 저장되고, 새 문서용 빈 채팅이 열린다.
+   * 문서가 바뀌면 현재 채팅을 끝내고 새 문서용 채팅을 연다. 메시지가
+   * 있는 채팅은 원래 문서 그룹에 남고, 빈 채팅은 저장되지 않은 채 사라진다.
    */
   function handleDocumentSwitch(nextKey: string | null, nextDocumentId: string | null): void {
     const sameIdentity = Boolean(
       nextDocumentId && currentDocumentId && nextDocumentId === currentDocumentId,
     );
     if (sameIdentity) {
-      // 첫 저장으로 파일명만 바뀐 경우 — 채팅을 새 문서로 갈아타지 않는다.
+      // 첫 저장으로 파일명만 바뀐 경우 — 현재 문서의 채팅만 새 이름을 따른다.
+      const activeThreadMatchesDocument = readOnlyDocLabel === null
+        && threadMatchesDocument(currentThread, currentDocumentId, currentDocKey);
       currentDocKey = nextKey;
       currentDocumentId = nextDocumentId;
-      currentThread.docKey = nextKey;
-      currentThread.documentId = nextDocumentId;
-      persistCurrentThread();
+      if (activeThreadMatchesDocument) {
+        currentThread.docKey = nextKey;
+        currentThread.documentId = nextDocumentId;
+        persistCurrentThread();
+      }
       referenceLibrary.contextChanged();
       if (threadsListVisible()) rebuildThreadsList();
       return;
     }
     currentDocKey = nextKey;
     currentDocumentId = nextDocumentId;
-    // 읽기 전용으로 보던 채팅의 문서가 실제로 열렸다면 그 자리에서 이어간다.
-    const currentThreadMatches = currentThread.documentId
-      ? currentThread.documentId === nextDocumentId
-      : currentThread.docKey === nextKey;
-    if (readOnlyDocLabel !== null && currentThreadMatches) {
-      // Promote legacy filename-only threads to the editor's stable document identity
-      // before restarting, so document-scoped references join the resumed session.
-      currentThread.docKey = nextKey;
-      currentThread.documentId = nextDocumentId;
-      exitReadOnlyMode();
-      referenceLibrary.contextChanged();
-      bridge.stopChat();
-      startCurrentBridgeChat(true);
-      return;
-    }
-    if (readOnlyDocLabel === null && currentThread.messages.length === 0) {
-      // 빈 채팅은 새 문서에 다시 묶기만 하면 된다.
-      currentThread.docKey = nextKey;
-      currentThread.documentId = nextDocumentId;
-      referenceLibrary.contextChanged();
-      bridge.stopChat();
-      startCurrentBridgeChat(true);
-      if (threadsListVisible()) rebuildThreadsList();
-      return;
-    }
     startNewChat({ silent: true });
     if (threadsListVisible()) rebuildThreadsList();
   }
@@ -1789,6 +1780,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const canStageComposerAttachments = (): boolean =>
     connState === 'connected'
     && readOnlyDocLabel === null
+    && chatStartPendingThreadId === null
     && !attachmentsSending
     && !referenceLibrary.isOpen();
   const clearAttachmentDrag = (): void => {
@@ -2821,7 +2813,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       bridge.interrupt();
       return;
     }
-    if (planningPhase === 'switching' || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
+    if (planningPhase === 'switching' || chatStartPendingThreadId !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
     let text = input.value.trim();
     if ((!text && !referenceLibrary.hasDrafts()) || connState !== 'connected') return;
     if (referenceLibrary.hasImageDrafts() && !modelSupportsImages(selectedAgent, selectedModel)) {
@@ -2983,7 +2975,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     else delete currentThread.latestPlan;
     if (planHistory.length > 0) currentThread.plans = [...planHistory];
     else delete currentThread.plans;
-    if (currentThread.messages.length === 0) return;
+    if (currentThread.messages.length === 0) {
+      removeThread(currentThread.id);
+      return;
+    }
     if (!currentThread.title || currentThread.title === '새 채팅') {
       currentThread.title = fallbackTitle(currentThread.messages);
     }
@@ -3291,18 +3286,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       threadsList.appendChild(el('li', 'ag-threads-empty', '이전 채팅이 없습니다'));
       return;
     }
-    const currentIdx = groups.findIndex((g) => (
-      g.documentId && currentDocumentId
-        ? g.documentId === currentDocumentId
-        : g.docKey === currentDocKey
+    const currentIdx = groups.findIndex((group) => (
+      threadMatchesDocument(group, currentDocumentId, currentDocKey)
     ));
     if (currentIdx > 0) groups.unshift(groups.splice(currentIdx, 1)[0]!);
 
     for (const group of groups) {
       const toggleKey = group.documentId ?? group.docKey ?? '';
-      const isCurrentDoc = group.documentId && currentDocumentId
-        ? group.documentId === currentDocumentId
-        : group.docKey === currentDocKey;
+      const isCurrentDoc = threadMatchesDocument(group, currentDocumentId, currentDocKey);
       const expanded = docGroupToggles.get(toggleKey) ?? isCurrentDoc;
       const canMove = Boolean(group.documentId || group.docKey);
 
@@ -3398,7 +3389,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     input.value = '';
     composer.classList.add('ag-readonly');
     const note = el('div', 'ag-msg ag-msg-system ag-readonly-note',
-      `"${docLabel}" 문서의 채팅입니다. 그 문서를 열면 이어서 대화할 수 있습니다.`);
+      `"${docLabel}" 문서의 채팅입니다. 그 문서를 연 뒤 이 채팅을 다시 선택하면 이어서 대화할 수 있습니다.`);
     appendConversation(note);
     scrollConversationToEnd();
     updateComposer();
@@ -3415,6 +3406,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   function startNewChat(opts?: { silent?: boolean }): void {
     if (turnRunning) bridge.interrupt();
     flushAssistantBuffer();
+    const previousThreadId = currentThread.id;
+    const previousThreadWasEmpty = currentThread.messages.length === 0;
     persistCurrentThread();
     clearChatUi();
     exitReadOnlyMode();
@@ -3429,6 +3422,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     });
     // 새 채팅은 언제나 '바로 실행'에서 시작하고, 원격 브라우저 경고도 다시 받는다.
     restorePlanningForThread(nextThread.id, nextThread);
+    if (previousThreadWasEmpty) {
+      planArchives.delete(previousThreadId);
+      threadWorkflows.delete(previousThreadId);
+    }
     currentThread = nextThread;
     selectTemplate(null);
     referenceLibrary.contextChanged();
@@ -3463,15 +3460,22 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     bridge.stopChat();
     applyThreadMeta(currentThread);
     renderMessagesFromThread(currentThread);
-    const matchesCurrentDocument = loaded.documentId
-      ? loaded.documentId === currentDocumentId
-      : loaded.docKey === currentDocKey;
+    const matchesCurrentDocument = threadMatchesDocument(
+      loaded,
+      currentDocumentId,
+      currentDocKey,
+    );
     if (!matchesCurrentDocument) {
       // 다른 문서의 채팅 — 열람은 되지만 이어가지는 못한다.
       enterReadOnlyMode(docGroupLabel(loaded.docKey));
       setThreadsPanelOpen(false);
       return;
     }
+    // Legacy filename-only chats gain the stable active identity here. Chats
+    // matched by ID also follow Save As renames without splitting their group.
+    currentThread.documentId = currentDocumentId ?? currentThread.documentId;
+    currentThread.docKey = currentDocKey ?? currentThread.docKey;
+    persistCurrentThread();
     exitReadOnlyMode();
     startCurrentBridgeChat(true);
     setThreadsPanelOpen(false);
@@ -3599,10 +3603,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       send.disabled = true;
       input.placeholder = `"${readOnlyDocLabel}" 문서의 채팅 — 읽기 전용`;
     } else {
-      input.disabled = connState !== 'connected' || attachmentsSending;
-      send.disabled = connState !== 'connected' || attachmentsSending || referenceLibrary.hasBlockingDrafts();
-      input.placeholder =
-        chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'
+      const chatStarting = chatStartPendingThreadId !== null;
+      input.disabled = connState !== 'connected' || attachmentsSending || chatStarting;
+      send.disabled = connState !== 'connected' || attachmentsSending || chatStarting || referenceLibrary.hasBlockingDrafts();
+      input.placeholder = chatStarting
+        ? '채팅을 여는 중…'
+        : chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'
           ? '계획에서 바꿀 부분을 알려주세요'
           : chatWorkflow === 'plan' && planningPhase === 'planning'
             ? '무엇을 계획할지 입력하세요'
@@ -3614,8 +3620,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     send.title = sendLabel;
     send.classList.toggle('ag-stop', turnRunning);
     // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
-    sendHint.hidden = turnRunning || attachmentsSending || referenceLibrary.hasBlockingDrafts()
-      || connState !== 'connected' || readOnlyDocLabel !== null;
+    sendHint.hidden = turnRunning || attachmentsSending || chatStartPendingThreadId !== null
+      || referenceLibrary.hasBlockingDrafts() || connState !== 'connected' || readOnlyDocLabel !== null;
     // 실행 중이거나 작업 방식/계획→실행 전환 중에는 모드·모델·권한을 잠근다.
     const controlsLocked = isControlLocked();
     providerTrigger.disabled = controlsLocked;
@@ -4111,6 +4117,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         setTurnRunning(bridge.isTurnRunning());
         break;
       case 'chat-started':
+        if (e.threadId && e.threadId !== currentThread.id) break;
+        chatStartPendingThreadId = null;
         if (e.agent !== selectedAgent) {
           selectedModel = defaultModelForAgent(e.agent);
           selectedEffort = resolveEffortForAgent(e.agent, null, selectedModel);
@@ -4328,6 +4336,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         handleAgentEvent(e.event);
         break;
       case 'hub-error':
+        chatStartPendingThreadId = null;
         if (e.code === 'REFERENCE_COMMIT_FAILED' || e.code === 'INVALID_REFERENCE_MESSAGE') {
           attachmentsSending = false;
           for (const message of currentThread.messages) {
@@ -4402,7 +4411,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   /** 실행 중이거나 첨부를 커밋하거나 전환 중에는 모드·모델·권한을 바꿀 수 없다. */
   function isControlLocked(): boolean {
-    return turnRunning || attachmentsSending || workflowTransitionPending || planningPhase === 'switching';
+    return turnRunning || attachmentsSending || chatStartPendingThreadId !== null
+      || workflowTransitionPending || planningPhase === 'switching';
   }
 
   function hasPendingDocumentEdits(): boolean {
