@@ -7,6 +7,7 @@ import { SelectionRenderer } from './selection-renderer';
 import { CommandHistory } from './history';
 import { DeleteSelectionCommand, ApplyCharFormatCommand, ApplyParaFormatCommand, SnapshotCommand, SetFormValueCommand, TextMutationEffectAccumulator, IMMEDIATE_TEXT_MUTATION_EFFECTS } from './command';
 import type { OperationDescriptor, ParaFormatTarget, RefreshPolicy, TextMutationEffects, EditCommand, EditContext, FormValueTarget } from './command';
+import { CapturedSnapshotCommand } from './captured-snapshot-command.ts';
 import { VirtualScroll } from '@/view/virtual-scroll';
 import { ViewportManager } from '@/view/viewport-manager';
 import type {
@@ -2592,6 +2593,71 @@ export class InputHandler {
         break;
       }
     }
+  }
+
+  /**
+   * Apply an autonomous headless mutation as one atomic, undoable history entry.
+   * The exact before state is restored if the callback or after-snapshot capture fails.
+   */
+  executeAppliedSnapshot<T>(operationType: string, operation: (wasm: WasmBridge) => T): T {
+    const cursorBefore = this.cursor.getPosition();
+    if (!this.history.hasSnapshotCapacity(2)) {
+      throw new Error('The editor snapshot store is full; the autonomous edit was not started');
+    }
+    let beforeId: number | null = this.wasm.saveSnapshot();
+    let afterId: number | null = null;
+    let result: T;
+    let cursorAfter: DocumentPosition;
+
+    try {
+      result = operation(this.wasm);
+      const sectionCount = this.wasm.getSectionCount();
+      if (sectionCount === 0) throw new Error('The edit removed every document section');
+      const sectionIndex = Math.min(Math.max(cursorBefore.sectionIndex, 0), sectionCount - 1);
+      const paragraphCount = this.wasm.getParagraphCount(sectionIndex);
+      if (paragraphCount === 0) throw new Error('The edit removed every paragraph in the active section');
+      const paragraphIndex = Math.min(Math.max(cursorBefore.paragraphIndex, 0), paragraphCount - 1);
+      const charOffset = Math.min(
+        Math.max(cursorBefore.charOffset, 0),
+        this.wasm.getParagraphLength(sectionIndex, paragraphIndex),
+      );
+      cursorAfter = { sectionIndex, paragraphIndex, charOffset };
+      afterId = this.wasm.saveSnapshot();
+      this.cursor.moveTo(cursorAfter);
+    } catch (error) {
+      try { this.wasm.restoreSnapshot(beforeId); } catch { /* preserve the original failure */ }
+      if (afterId !== null) this.wasm.discardSnapshot(afterId);
+      this.wasm.discardSnapshot(beforeId);
+      try { this.cursor.moveTo(cursorBefore); } catch { /* best effort after rollback */ }
+      throw error;
+    }
+
+    const command = new CapturedSnapshotCommand(
+      operationType,
+      cursorBefore,
+      cursorAfter,
+      beforeId,
+      afterId,
+    );
+    beforeId = null;
+    afterId = null;
+    try {
+      // History recording is the commit point. Nothing after this may turn a committed edit
+      // into an RPC failure that an agent could retry and duplicate.
+      this.history.recordWithoutExecute(command, this.wasm);
+    } catch (error) {
+      try { command.undo(this.wasm); } catch { /* preserve the original failure */ }
+      command.discard(this.wasm);
+      try { this.cursor.moveTo(cursorBefore); } catch { /* best effort after rollback */ }
+      throw error;
+    }
+
+    try {
+      this.refreshAfterOperation('full', 'full', operationType, cursorBefore, cursorAfter);
+    } catch (error) {
+      console.warn('[InputHandler] committed autonomous edit refresh failed:', error);
+    }
+    return result;
   }
 
   /** 승인처럼 여러 임시 스냅샷이 필요한 외부 편집기의 저장소 여유를 확보한다. */

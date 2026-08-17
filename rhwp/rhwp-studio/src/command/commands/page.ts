@@ -468,7 +468,7 @@ export const pageCommands: CommandDef[] = [
       const pos = ih.getPosition();
       try {
         // 현재 문단의 감추기 상태 조회(읽기) 후 토글값 결정.
-        const cur = JSON.parse((services.wasm as any).doc.getPageHide(pos.sectionIndex, pos.paragraphIndex));
+        const cur = services.wasm.getPageHide(pos.sectionIndex, pos.paragraphIndex);
         // exists → 제거(false), 없음 → 쪽 번호 감추기 적용(true). 나머지 5플래그는 양쪽 모두 false.
         const applyPageNumHide = !cur.exists;
         // [page-hide 이관] 문단 감추기 변경을 snapshot 으로 라우팅(기존 emit-only → undo 불가였음).
@@ -476,7 +476,7 @@ export const pageCommands: CommandDef[] = [
           kind: 'snapshot',
           operationType: 'pageHide',
           operation: (wasm) => {
-            (wasm as any).doc.setPageHide(
+            wasm.setPageHide(
               pos.sectionIndex, pos.paragraphIndex,
               false, false, false, false, false, applyPageNumHide,
             );

@@ -1883,6 +1883,13 @@ httpServer.on('upgrade', (req, socket, head) => {
           failAllPendingCalls(record, 'Studio disconnected while tool calls were in flight; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
         }
       });
+      // Replay the authoritative terminal outcome before welcome can synthesize an
+      // idle-session fallback. Studio must never auto-commit an interrupted turn first.
+      if (record.missedTurnEnd) {
+        const evt = record.missedTurnEnd;
+        record.missedTurnEnd = null;
+        sendJson(ws, { v: 1, type: 'agent-event', event: evt });
+      }
       sendJson(ws, {
         v: 1,
         type: 'welcome',
@@ -1900,11 +1907,6 @@ httpServer.on('upgrade', (req, socket, head) => {
           plan: structuredClone(activeSession.planning.latestPlan.plan),
           ...activeSession.planning.snapshot(),
         });
-      }
-      if (record.missedTurnEnd) {
-        const evt = record.missedTurnEnd;
-        record.missedTurnEnd = null;
-        sendJson(ws, { v: 1, type: 'agent-event', event: evt });
       }
       void skillRegistry.list().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', ...catalog }));
       void writingStyleStore.status()
