@@ -279,6 +279,14 @@ export class AgentToolExecutor {
   ): Promise<unknown> {
     try {
       assertToolCapability(tool, capability);
+      if (isDocumentWriteTool(tool)
+        && !tool.startsWith('template_')
+        && this.deps.pending.hasTemplateMutation()) {
+        throw new AgentToolError(
+          'TEMPLATE_PENDING_CONFLICT',
+          'Review the pending template transfer before making other document edits.',
+        );
+      }
       // await 필수 — 비동기 툴(insert_chart)의 rejection 도 여기서 에러 코드로 매핑된다
       const result = await this.dispatch(tool, args, agent, capability);
       if (tool === 'get_structure') this.documentInspectionRevision = this.revision;
@@ -1367,6 +1375,10 @@ export class AgentToolExecutor {
       const page = this.pageOfParagraph(a.sectionIdx, a.paraIdx, a.cell);
       if (page !== null && !affectedPages.includes(page)) affectedPages.push(page);
     }
+    for (const sectionIdx of new Set(templateTransfers.flatMap((transfer) => transfer.affectedSections))) {
+      const page = this.pageOfParagraph(sectionIdx, 0);
+      if (page !== null && !affectedPages.includes(page)) affectedPages.push(page);
+    }
 
     const result: Record<string, unknown> = {
       changeSetId: summary.changeSetId,
@@ -1376,9 +1388,11 @@ export class AgentToolExecutor {
       postEditText,
       affectedPages,
       warnings,
-      templateTransfers,
-      skippedFeatures: [...new Set(templateTransfers.flatMap((transfer) => transfer.skippedFeatures))],
-      templateRevision: templateTransfers.at(-1)?.templateRevision,
+      ...(templateTransfers.length > 0 ? {
+        templateTransfers,
+        skippedFeatures: [...new Set(templateTransfers.flatMap((transfer) => transfer.skippedFeatures))],
+        templateRevision: templateTransfers.at(-1)?.templateRevision,
+      } : {}),
     };
 
     if (includeImage) {
@@ -1413,13 +1427,15 @@ export class AgentToolExecutor {
 
   private async ensureTemplate(capability?: ToolCapabilityContext): Promise<{ template: DocumentTemplate; wasm: WasmBridge }> {
     const template = this.requireTemplate(capability);
+    const loadTemplateBytes = this.deps.loadTemplateBytes;
+    if (!loadTemplateBytes) throw new AgentToolError('TEMPLATE_UNAVAILABLE', 'Template loading is unavailable in this Studio.');
     const key = `${template.id}:${template.revision}`;
     if (this.templateWasm && this.templateKey === key) return { template, wasm: this.templateWasm };
     this.templateWasm?.releaseDocument();
     const { WasmBridge } = await import('../core/wasm-bridge.ts');
     const wasm = new WasmBridge();
     await wasm.initialize();
-    const bytes = await this.deps.loadTemplateBytes!(template);
+    const bytes = await loadTemplateBytes(template);
     wasm.loadDocument(bytes, template.originalName);
     this.templateWasm = wasm;
     this.templateKey = key;
