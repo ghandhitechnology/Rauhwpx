@@ -950,7 +950,10 @@ async function setChatWorkflow(record, sock, msg) {
     return;
   }
   if (activeSession.status !== 'idle') throw workflowError('AGENT_BUSY', 'Workflow can only change while the agent is idle');
-  if (activeSession.planning.workflow === msg.workflow) {
+  const restartCompletedPlan = msg.workflow === 'plan'
+    && activeSession.planning.workflow === 'plan'
+    && activeSession.planning.phase === 'implementing';
+  if (activeSession.planning.workflow === msg.workflow && !restartCompletedPlan) {
     emitWorkflowState(record);
     return;
   }

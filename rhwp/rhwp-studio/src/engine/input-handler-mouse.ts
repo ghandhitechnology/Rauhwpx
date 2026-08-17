@@ -5,6 +5,89 @@ import type { ContextMenuItem } from '@/ui/context-menu';
 import * as _connector from './input-handler-connector';
 import { MoveLineEndpointCommand } from './command';
 import { computeLineEndpointRecord } from './object-drag-record';
+import { editableTargetFromPosition } from './edit-target';
+import { findWordSelectionRange } from './word-selection';
+
+function readCurrentParagraphText(self: any) {
+  if (self.cursor.isInHeaderFooter()) {
+    const block = JSON.parse(self.wasm.getHeaderFooter(
+      self.cursor.hfSectionIdx,
+      self.cursor.headerFooterMode === 'header',
+      self.cursor.hfApplyTo,
+    )) as { text?: string };
+    return String(block.text ?? '').split(/\r?\n/)[self.cursor.hfParaIdx] ?? '';
+  }
+
+  if (self.cursor.isInFootnote()) {
+    const info = self.wasm.getFootnoteInfo(
+      self.cursor.fnSectionIdx,
+      self.cursor.fnParaIdx,
+      self.cursor.fnControlIdx,
+    );
+    return info.texts[self.cursor.fnInnerParaIdx] ?? '';
+  }
+
+  const position = self.cursor.getPosition();
+  const target = editableTargetFromPosition(position);
+  const length = self.getEditableParagraphLength(target);
+  if (target.kind === 'body') {
+    return self.wasm.getTextRange(target.sectionIndex, target.paragraphIndex, 0, length);
+  }
+  if (target.kind !== 'container') return '';
+
+  const usePath = target.cellPath.length > 1
+    || (target.cellPath.length > 0 && !target.isTextBox);
+  return usePath
+    ? self.wasm.getTextInCellByPath(
+        target.sectionIndex,
+        target.parentParagraphIndex,
+        JSON.stringify(target.cellPath),
+        0,
+        length,
+      )
+    : self.wasm.getTextInCell(
+        target.sectionIndex,
+        target.parentParagraphIndex,
+        target.controlIndex,
+        target.cellIndex,
+        target.paragraphIndex,
+        0,
+        length,
+      );
+}
+
+function selectCurrentWord(self: any) {
+  const offset = self.cursor.isInHeaderFooter()
+    ? self.cursor.hfCharOffset
+    : self.cursor.isInFootnote()
+      ? self.cursor.fnCharOffset
+      : self.cursor.getPosition().charOffset;
+  const range = findWordSelectionRange(readCurrentParagraphText(self), offset);
+  if (!range) return false;
+
+  self.cursor.clearSelection();
+  if (self.cursor.isInHeaderFooter()) {
+    const paragraphIndex = self.cursor.hfParaIdx;
+    self.cursor.setHfCursorPosition(paragraphIndex, range.start);
+    self.cursor.setHfAnchor();
+    self.cursor.setHfCursorPosition(paragraphIndex, range.end);
+  } else if (self.cursor.isInFootnote()) {
+    const paragraphIndex = self.cursor.fnInnerParaIdx;
+    self.cursor.setFnCursorPosition(paragraphIndex, range.start);
+    self.cursor.setFnAnchor();
+    self.cursor.setFnCursorPosition(paragraphIndex, range.end);
+  } else {
+    const position = self.cursor.getPosition();
+    self.cursor.moveTo({ ...position, charOffset: range.start });
+    self.cursor.setAnchor();
+    self.cursor.moveTo({ ...position, charOffset: range.end });
+  }
+
+  self.cursor.resetPreferredX();
+  self.updateCaret();
+  self.textarea.focus();
+  return true;
+}
 
 function protectedCellKey(hit: any): string | null {
   if (!hit || hit.isTextBox) return null;
@@ -1326,7 +1409,12 @@ export function onDblClick(this: any, e: MouseEvent): void {
             }
             this.cursor.enterHeaderFooterMode(isHeader, sectionIdx, applyTo, pageIdx);
             this.eventBus.emit('headerFooterModeChanged', isHeader ? 'header' : 'footer');
-            this.updateCaret();
+            const textHit = this.wasm.hitTestInHeaderFooter(pageIdx, isHeader, pageX, pageY);
+            if (textHit.hit && textHit.paraIndex !== undefined && textHit.charOffset !== undefined) {
+              this.cursor.setHfCursorPosition(textHit.paraIndex, textHit.charOffset);
+            }
+            if (selectCurrentWord(this)) e.preventDefault();
+            else this.updateCaret();
             this.textarea.focus();
             return;
           }
@@ -1372,7 +1460,11 @@ export function onDblClick(this: any, e: MouseEvent): void {
       this.textarea.focus();
       return;
     }
+    return;
   }
+
+  if (this.cursor.isInTableObjectSelection()) return;
+  if (selectCurrentWord(this)) e.preventDefault();
 }
 
 export function onContextMenu(this: any, e: MouseEvent): void {
