@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 51개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 51);
+test('도구는 정확히 54개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 54);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -47,8 +47,11 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 43);
+  assert.equal(direct.size, 46);
   assert.ok(direct.has('insert_text'));
+  assert.ok(direct.has('get_engine_edit_capabilities'));
+  assert.ok(direct.has('apply_engine_edits'));
+  assert.ok(direct.has('prepare_engine_edit_session'));
   assert.ok(direct.has('replace_all'));
   assert.ok(direct.has('insert_footnote'));
   assert.ok(direct.has('set_bookmark'));
@@ -104,6 +107,21 @@ test('신규 도구 5개가 모두 있다', () => {
   for (const name of ['apply_list', 'list_numberings', 'get_para_format', 'get_char_format', 'verify_changes']) {
     assert.ok(byName.has(name), `missing tool: ${name}`);
   }
+});
+
+test('full engine edit tools expose a bounded autonomous batch contract', () => {
+  const catalog = byName.get('get_engine_edit_capabilities');
+  const apply = byName.get('apply_engine_edits');
+  const prepare = byName.get('prepare_engine_edit_session');
+  assert.equal(catalog.category, 'document-read');
+  assert.equal(apply.category, 'document-write');
+  assert.equal(prepare.category, 'document-write');
+  assert.ok(apply.shape.operations.safeParse([{ method: 'setPageDef', args: [0, {}] }]).success);
+  assert.ok(!apply.shape.operations.safeParse([]).success);
+  assert.ok(!apply.shape.operations.safeParse(Array.from({ length: 33 }, () => ({ method: 'x', args: [] }))).success);
+  assert.match(apply.description, /one atomic/i);
+  assert.match(apply.description, /every other method returned by get_engine_edit_capabilities/i);
+  assert.match(prepare.description, /capability kind is "session"/i);
 });
 
 test('reference tools are read-only and carry bounded schemas', () => {

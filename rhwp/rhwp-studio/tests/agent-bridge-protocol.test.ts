@@ -59,6 +59,7 @@ function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']])
     getSourceFormat: () => 'hwp',
     get documentDigest() { return 'blake3:test'; },
     getFieldList: () => [],
+    copySelection: () => '{"ok":true}',
     renderPageSvg: (_page: number) => '<svg/>',
   };
   const pending = {
@@ -143,6 +144,7 @@ test('executor: 알 수 없는 툴 → UNKNOWN_TOOL', async () => {
 test('executor: document-write helper covers every mutating tool', () => {
   assert.deepEqual([...DOCUMENT_WRITE_TOOLS].sort(), [
     'apply_char_format',
+    'apply_engine_edits',
     'apply_list',
     'apply_para_format',
     'apply_style',
@@ -158,6 +160,7 @@ test('executor: document-write helper covers every mutating tool', () => {
     'insert_image',
     'insert_page_break',
     'insert_text',
+    'prepare_engine_edit_session',
     'replace_all',
     'replace_range',
     'set_bookmark',
@@ -209,6 +212,34 @@ test('executor: implementing requires the current capability epoch', async () =>
     activeCapabilityEpoch: 4,
   }), 'STALE_CAPABILITY_EPOCH');
   assert.deepEqual(calls, []);
+});
+
+test('executor: raw and semantic write modes cannot mix in either order within one turn', async () => {
+  const first = makeExecutor();
+  first.executor.beginTurn();
+  await first.executor.execute('prepare_engine_edit_session', {
+    expectedRevision: 1,
+    method: 'copySelection',
+    args: [0, 0, 0, 0, 1],
+  });
+  await expectToolError(first.executor.execute('insert_text', {
+    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
+  }), 'MIXED_ENGINE_WRITE_MODE');
+  first.executor.endTurn();
+  await first.executor.execute('insert_text', {
+    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
+  });
+
+  const second = makeExecutor();
+  second.executor.beginTurn();
+  await second.executor.execute('insert_text', {
+    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
+  });
+  await expectToolError(second.executor.execute('prepare_engine_edit_session', {
+    expectedRevision: 2,
+    method: 'copySelection',
+    args: [0, 0, 0, 0, 1],
+  }), 'MIXED_ENGINE_WRITE_MODE');
 });
 
 test('executor: planning reads and authorized implementation writes remain available', async () => {
@@ -316,7 +347,7 @@ test('executor: insert_text는 pending에 위임하고 새 revision을 반환', 
   assert.deepEqual(r.insertedRange, {
     startParaIdx: 0, startCharOffset: 5, endParaIdx: 0, endCharOffset: 11,
   });
-  assert.equal(r.note, 'pending until user approves in the sidebar');
+  assert.equal(r.note, 'staged now and committed automatically when the turn succeeds; a failed turn rolls it back');
 });
 
 test('executor: delete_range 빈 범위 → INVALID_ARGS', async () => {

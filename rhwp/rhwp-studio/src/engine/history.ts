@@ -91,6 +91,12 @@ export class CommandHistory {
     return effects;
   }
 
+  /** 임시 스냅샷을 기존 undo/redo 이력 손실 없이 저장할 수 있는지 확인한다. */
+  hasSnapshotCapacity(additionalIds: number): boolean {
+    const reserve = Math.max(0, Math.min(WASM_MAX_SNAPSHOTS, Math.trunc(additionalIds)));
+    return this.liveSnapshotIds() + reserve <= WASM_MAX_SNAPSHOTS;
+  }
+
   /** 복합 편집이 임시로 여러 snapshot id를 잡기 전에 WASM 저장소 여유를 확보한다. */
   prepareSnapshotCapacity(wasm: WasmBridge, additionalIds: number): void {
     const reserve = Math.max(0, Math.min(WASM_MAX_SNAPSHOTS, Math.trunc(additionalIds)));
