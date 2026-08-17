@@ -61,9 +61,10 @@ Paths are relative to the repository root.
    running, then ✓/✕, with the tool name, arguments, and result preview.
 
 5. **Autonomous document edits** — semantic edits remain visible as tinted live
-   changes while the agent verifies its work, then commit automatically when the
-   turn succeeds as one undo step. Failed turns roll staged edits back. Raw engine
-   batches commit atomically as one undo step and restore the exact snapshot on failure.
+   changes while the agent verifies its work, then commit only after an explicitly
+   successful turn as one undo step. Failed, interrupted, and unknown outcomes roll
+   staged edits back. Raw engine batches commit atomically as one undo step and restore
+   the exact snapshot on failure.
 
 6. **Core tools and permissions** — Claude and Codex can both use project files,
    shell commands, and web search/fetch in addition to the rhwp document tools.
@@ -301,8 +302,8 @@ carrying an `image` field (`{ data: base64, mimeType }`) is forwarded to the
 model as an image content block it can visually inspect.
 
 Write-tool commit model: semantic object ops use the live staged preview and
-commit automatically on successful turn completion; failed turns roll them
-back. Destructive table operations remain mark-only during verification and
+commit only after an explicitly successful turn; failed, interrupted, and unknown
+outcomes roll them back. Destructive table operations remain mark-only during verification and
 execute at commit. `apply_engine_edits` runs 1–32 registry-backed document mutations
 as one immediate atomic snapshot transaction and one editor undo entry. Clipboard
 and view-session setup is explicit through `prepare_engine_edit_session`.

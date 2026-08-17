@@ -24,7 +24,7 @@ test('raw engine edits reject mixed staged writes before mutation', () => {
 
 test('raw snapshot failures preserve history and post-commit refresh cannot trigger a retry', () => {
   const input = readFileSync(new URL('../src/engine/input-handler.ts', import.meta.url), 'utf8');
-  assert.match(input, /if \(!this\.history\.hasSnapshotCapacity\(2\)\)/);
+  assert.match(input, /if \(this\.editMode === 'form'\)[\s\S]*if \(!this\.history\.hasSnapshotCapacity\(2\)\)/);
   assert.doesNotMatch(
     input.match(/executeAppliedSnapshot[\s\S]*?\n  \}/)?.[0] ?? '',
     /prepareSnapshotCapacity/,

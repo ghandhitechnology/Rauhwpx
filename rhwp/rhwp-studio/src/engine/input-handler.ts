@@ -2600,6 +2600,9 @@ export class InputHandler {
    * The exact before state is restored if the callback or after-snapshot capture fails.
    */
   executeAppliedSnapshot<T>(operationType: string, operation: (wasm: WasmBridge) => T): T {
+    if (this.editMode === 'form') {
+      throw new Error('Autonomous document edits are unavailable in form mode');
+    }
     const cursorBefore = this.cursor.getPosition();
     if (!this.history.hasSnapshotCapacity(2)) {
       throw new Error('The editor snapshot store is full; the autonomous edit was not started');

@@ -100,6 +100,9 @@ test('[결함1] 스냅샷 예산은 WASM 상한에서 순간 +2 여유를 뺀 �
   assert.match(block, /this\.undoStack\.length\s*>\s*1/, 'front 축출은 최소 1개 보존(length>1) 가드');
   assert.match(block, /this\.undoStack\.shift\(\)/, 'front 축출(shift)');
   assert.match(block, /discard\?\.\(wasm\)/, '축출 시 스냅샷 discard');
+  const capacity = methodBlock(history, 'hasSnapshotCapacity(additionalIds: number): boolean {');
+  assert.match(capacity, /liveSnapshotIds\(\) \+ reserve <= SNAPSHOT_ID_BUDGET/,
+    '무손실 capacity 검사도 실제 축출 예산을 사용해야 함');
   // liveSnapshotIds 는 undo·redo 양 스택을 모두 세야 한다(순간 저장이 redo id 와
   // 합산돼 store 를 넘길 수 있으므로 — 한 스택만 세면 과소집계 → orphan 회귀).
   const live = methodBlock(history, 'liveSnapshotIds(): number {');

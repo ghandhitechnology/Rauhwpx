@@ -202,7 +202,8 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(implementing, /run every validation listed/);
   assert.match(implementing, /completed, blocked, and deferred plan items/);
   assert.match(implementing, /Never call partial work complete/);
-  assert.match(implementing, /Higher-level document writes auto-commit/);
+  assert.match(implementing, /Higher-level document writes commit only after an explicitly successful turn/);
+  assert.match(implementing, /failed, interrupted, and unknown outcomes roll back staged changes/);
   assert.match(implementing, /apply_engine_edits commits one atomic undoable batch/);
   assert.doesNotMatch(implementing, /present_implementation_plan/);
 });
