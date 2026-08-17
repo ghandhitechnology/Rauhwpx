@@ -57,6 +57,7 @@ export class CanvasView {
   private rendererFallbackScheduled = false;
   private activeRendererDecisionKey: string | null = null;
   private autoRendererReselectionTimer: ReturnType<typeof setTimeout> | null = null;
+  private mutationRefreshRafId: number | null = null;
   private documentLoadPrepared = false;
   private layoutViewportSize = { width: 0, height: 0 };
   private disposed = false;
@@ -94,11 +95,11 @@ export class CanvasView {
         );
       }),
       eventBus.on('document-page-invalidated', (payload) => {
+        // 같은 프레임에 전체 재렌더가 이미 예약돼 있으면 단일 페이지 갱신은 그 안에 흡수된다.
+        if (this.mutationRefreshRafId !== null) return;
         void this.refreshInvalidatedPageForMutation(payload);
       }),
-      eventBus.on('document-changed', () => {
-        void this.refreshPagesForMutation();
-      }),
+      eventBus.on('document-changed', () => this.scheduleMutationRefresh()),
       eventBus.on('document-view-changed', (source) => {
         if (source === 'subsecond-renderer') {
           this.refreshPages();
@@ -177,6 +178,29 @@ export class CanvasView {
 
   resetRendererDiagnostics(): void {
     this.pageRenderer.releaseAllPageDiagnostics();
+  }
+
+  /**
+   * 문서 변이 재렌더를 프레임당 한 번으로 합친다. 에이전트 편집처럼 document-changed
+   * 가 짧은 간격으로 몰리면(툴 호출 버스트/벌크 교체) 이벤트마다 전체 재렌더를 돌지
+   * 않고, 다음 rAF 에서 최신 문서 상태로 한 번만 갱신한다.
+   */
+  private scheduleMutationRefresh(): void {
+    if (this.disposed || this.mutationRefreshRafId !== null) return;
+    if (typeof requestAnimationFrame !== 'function') {
+      void this.refreshPagesForMutation();
+      return;
+    }
+    this.mutationRefreshRafId = requestAnimationFrame(() => {
+      this.mutationRefreshRafId = null;
+      void this.refreshPagesForMutation();
+    });
+  }
+
+  private cancelScheduledMutationRefresh(): void {
+    if (this.mutationRefreshRafId === null) return;
+    cancelAnimationFrame(this.mutationRefreshRafId);
+    this.mutationRefreshRafId = null;
   }
 
   private async refreshPagesForRevision(): Promise<void> {
@@ -311,13 +335,7 @@ export class CanvasView {
     const prefetchSet = new Set(prefetchPages);
     for (const pageIdx of this.canvasPool.activePages) {
       if (!prefetchSet.has(pageIdx)) {
-        this.cancelPendingTextEditRefresh(pageIdx);
-        this.cancelTextEditStaticLayerVerification(pageIdx);
-        this.pageRenderer.cancelReRender(pageIdx);
-        this.pageRenderer.removePageLayers(this.scrollContent, pageIdx);
-        this.pageRenderer.releasePageDiagnostics(pageIdx);
-        this.removeGridOverlay(pageIdx);
-        this.canvasPool.release(pageIdx);
+        this.releaseRenderedPage(pageIdx);
       }
     }
 
@@ -390,6 +408,17 @@ export class CanvasView {
     } else {
       clearTimeout(task.id);
     }
+  }
+
+  /** 렌더된 페이지 하나의 canvas/overlay/타이머를 모두 해제한다. */
+  private releaseRenderedPage(pageIdx: number): void {
+    this.cancelPendingTextEditRefresh(pageIdx);
+    this.cancelTextEditStaticLayerVerification(pageIdx);
+    this.pageRenderer.cancelReRender(pageIdx);
+    this.pageRenderer.removePageLayers(this.scrollContent, pageIdx);
+    this.pageRenderer.releasePageDiagnostics(pageIdx);
+    this.removeGridOverlay(pageIdx);
+    this.canvasPool.release(pageIdx);
   }
 
   /** 단일 페이지를 렌더링한다 */
@@ -762,12 +791,45 @@ export class CanvasView {
 
     this.recalcLayout();
 
-    // 보이는 페이지 재렌더링
     this.cancelPendingTextEditRefresh();
     this.cancelTextEditStaticLayerVerification();
-    this.releaseAllRenderedPages();
     this.pageRenderer.cancelAll();
+
+    // 이전 문서 상태로 그려진 페이지들. canvas 를 버리지 않고 제자리에서 다시
+    // 그린다 — DOM 교체로 인한 깜빡임과 이미지 재디코드 재렌더 사이클을 피한다.
+    const stalePages = new Set(this.canvasPool.activePages);
+    for (const pageIdx of stalePages) {
+      if (pageIdx >= this.pages.length) {
+        // 문서가 짧아져 사라진 페이지
+        this.releaseRenderedPage(pageIdx);
+        stalePages.delete(pageIdx);
+      }
+    }
+
+    // 화면에 새로 들어온 페이지를 채우고, 범위를 벗어난 페이지를 해제한다.
     this.updateVisiblePages();
+
+    const visibleSet = new Set(this.currentVisiblePages);
+    for (const pageIdx of stalePages) {
+      if (!this.canvasPool.has(pageIdx)) continue; // updateVisiblePages 가 이미 해제
+      if (visibleSet.has(pageIdx)) {
+        const canvas = this.canvasPool.getCanvas(pageIdx)!;
+        if (!this.renderCanvas(pageIdx, canvas)) {
+          this.canvasPool.release(pageIdx);
+        }
+      } else {
+        // 화면 밖 선렌더 페이지는 지금 다시 그리지 않는다 — idle 프리페치가 다시 채운다.
+        this.releaseRenderedPage(pageIdx);
+      }
+    }
+
+    const scrollY = this.viewportManager.getScrollY();
+    const { height: vpHeight } = this.viewportManager.getViewportSize();
+    this.schedulePrefetchPages(
+      this.virtualScroll
+        .getPrefetchPages(scrollY, vpHeight)
+        .filter((pageIdx) => !visibleSet.has(pageIdx)),
+    );
   }
 
   /** 텍스트 입력처럼 좁은 변경은 page info 재수집 없이 해당 페이지 canvas만 다시 그린다. */
@@ -886,6 +948,7 @@ export class CanvasView {
 
   /** 리소스를 정리한다 */
   private reset(): void {
+    this.cancelScheduledMutationRefresh();
     this.cancelPendingTextEditRefresh();
     this.cancelTextEditStaticLayerVerification();
     this.cancelPendingPrefetch();
