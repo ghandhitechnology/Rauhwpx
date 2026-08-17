@@ -211,10 +211,10 @@ test('vertical-dominant wheel input locks horizontal pan in every delta mode', a
   }
 });
 
-test('horizontal-dominant wheel input retains native horizontal pan', async () => {
+test('horizontal-dominant gesture pans horizontally without vertical wiggle', async () => {
   const { ViewportManager } = await loadViewportManager();
   const viewport = new ViewportManager(new FakeEventBus() as never);
-  const container = { scrollTop: 100 };
+  const container = { scrollTop: 100, scrollLeft: 50 };
   (viewport as unknown as { container: typeof container }).container = container;
   let prevented = false;
   (
@@ -225,6 +225,7 @@ test('horizontal-dominant wheel input retains native horizontal pan', async () =
         deltaX: number;
         deltaY: number;
         deltaMode: number;
+        timeStamp: number;
         preventDefault: () => void;
       }) => void;
     }
@@ -234,13 +235,51 @@ test('horizontal-dominant wheel input retains native horizontal pan', async () =
     deltaX: 20,
     deltaY: 3,
     deltaMode: 0,
+    timeStamp: 1000,
     preventDefault: () => {
       prevented = true;
     },
   });
 
-  assert.equal(prevented, false);
-  assert.equal(container.scrollTop, 100);
+  assert.equal(prevented, true, 'axis-locked pan replaces native scrolling');
+  assert.equal(container.scrollLeft, 70, 'horizontal delta pans horizontally');
+  assert.equal(container.scrollTop, 100, 'vertical wiggle is dropped');
+});
+
+test('wheel gesture keeps its locked axis until a pause resets it', async () => {
+  const { ViewportManager } = await loadViewportManager();
+  const viewport = new ViewportManager(new FakeEventBus() as never);
+  const container = { scrollTop: 100, scrollLeft: 50 };
+  (viewport as unknown as { container: typeof container }).container = container;
+  const onWheel = (
+    viewport as unknown as {
+      onWheel: (event: {
+        ctrlKey: boolean;
+        metaKey: boolean;
+        deltaX: number;
+        deltaY: number;
+        deltaMode: number;
+        timeStamp: number;
+        preventDefault: () => void;
+      }) => void;
+    }
+  ).onWheel.bind(viewport);
+  const wheel = (deltaX: number, deltaY: number, timeStamp: number) =>
+    onWheel({
+      ctrlKey: false, metaKey: false, deltaX, deltaY, deltaMode: 0, timeStamp,
+      preventDefault: () => {},
+    });
+
+  // 세로 우세로 시작한 제스처: 이어지는 가로 우세 이벤트도 세로로만 처리된다.
+  wheel(0, 30, 1000);
+  wheel(25, 10, 1050);
+  assert.equal(container.scrollTop, 140, 'locked-vertical gesture keeps scrolling vertically');
+  assert.equal(container.scrollLeft, 50, 'no horizontal drift inside a vertical gesture');
+
+  // 제스처 간격(250ms) 이후의 가로 우세 이벤트는 새 제스처로 가로 팬이 된다.
+  wheel(25, 5, 1400);
+  assert.equal(container.scrollLeft, 75, 'a new horizontal-dominant gesture pans');
+  assert.equal(container.scrollTop, 140, 'the new horizontal gesture drops vertical wiggle');
 });
 
 test('an eight-pixel trackpad gesture settles within four frames and moves nearly five percent', async (t) => {
