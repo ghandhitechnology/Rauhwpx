@@ -1073,6 +1073,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font-weight: 600;
   text-align: left;
   cursor: pointer;
+  transition: background-color 100ms ease;
 }
 
 .ag-threads-group-btn:hover,
@@ -1142,6 +1143,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font: inherit;
   text-align: left;
   cursor: pointer;
+  transition: background-color 100ms ease;
 }
 
 .ag-threads-item:hover {
@@ -4707,7 +4709,18 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   background: var(--ag-raised);
   box-shadow: var(--shadow-dropdown, 2px 2px 8px rgba(0, 0, 0, 0.15)), var(--n-elev-2);
   pointer-events: none;
-  animation: ag-thread-popover-in 120ms ease;
+  transform-origin: left center;
+  animation: ag-thread-popover-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  /* 행 사이를 옮겨 갈 때는 새로 만들지 않고 이 transition 으로 미끄러진다. */
+  transition:
+    top 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    left 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 에이전트 줄의 로고는 스트로크 아이콘과 같은 12px 급간을 지킨다. */
+.ag-thread-popover-row .ag-provider-icon {
+  width: 12px;
+  height: 12px;
 }
 
 .ag-thread-popover-head {
@@ -4758,12 +4771,29 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 @keyframes ag-thread-popover-in {
   from {
     opacity: 0;
-    transform: translateX(-3px);
+    transform: translateX(-5px) scale(0.97);
+  }
+}
+
+/* 그룹을 펼칠 때 행이 차례로 들어온다 — delay 는 행이 인라인으로 계단을 준다. */
+.ag-threads-row.ag-row-enter {
+  animation: ag-thread-row-in 200ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+@keyframes ag-thread-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ag-thread-popover { animation: none; }
+  .ag-thread-popover {
+    animation: none;
+    transition: none;
+  }
+
+  .ag-threads-row.ag-row-enter { animation: none; }
 }
 
 /* 전체 화면 레일의 문서 그룹 — sticky 머리가 레일 표면색을 그대로 이어
