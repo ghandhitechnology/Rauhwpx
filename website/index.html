@@ -185,7 +185,12 @@ a{color:var(--ink)}
 .tape--tr{top:-13px;right:24px;transform:rotate(1.1deg)}
 
 /* ── 히어로 ────────────────────────────────── */
-.hero{padding:clamp(48px,6vw,74px) 0 clamp(56px,6.4vw,78px)}
+.hero{
+  padding:clamp(48px,6vw,74px) 0 clamp(56px,6.4vw,78px);
+  background-color:var(--paper-2);
+  background-image:var(--grain);
+  background-size:180px 180px;
+}
 .hero-grid{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(0,1fr);gap:clamp(32px,4vw,50px);align-items:center}
 .hero h1{
   font-size:clamp(31px,4.6vw,48px);
@@ -193,15 +198,6 @@ a{color:var(--ink)}
   margin:14px 0 18px;
 }
 .hero .lead{max-width:34ch}
-
-/* ── 스펙 밴드 ─────────────────────────────── */
-.spec{border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);background:rgba(253,251,246,.5)}
-.spec ul{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
-.spec li{padding:20px 22px;border-left:1px solid var(--rule)}
-.spec li:first-child{border-left:0;padding-left:0}
-.spec dl{margin:0}
-.spec dt{font:500 14px/1.5 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);margin-bottom:5px}
-.spec dd{margin:0;font-size:16px;font-weight:600;letter-spacing:-.015em}
 
 /* ── 섹션 헤더 ─────────────────────────────── */
 .sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:clamp(28px,3.4vw,40px);flex-wrap:wrap}
@@ -241,8 +237,47 @@ a{color:var(--ink)}
 .step--wide figure{margin-top:24px}
 
 /* ── 요금 ──────────────────────────────────── */
-.price-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,300px);gap:clamp(28px,4vw,52px);align-items:center}
+#pricing{position:relative;overflow:visible}
+.float-icons{position:absolute;inset:0;pointer-events:none;z-index:1}
+.price-grid{position:relative;z-index:2;display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,300px);gap:clamp(28px,4vw,52px);align-items:center}
 .price-grid .figure{max-width:300px;margin-left:auto}
+.icon-tile{
+  position:absolute;
+  width:clamp(104px,11vw,140px);height:clamp(104px,11vw,140px);
+  border-radius:28px;
+  overflow:hidden;
+  box-shadow:0 14px 34px rgba(20,18,15,.14),0 2px 4px rgba(20,18,15,.08);
+}
+.icon-tile img{width:100%;height:100%;object-fit:cover;display:block}
+.icon-tile--claude{
+  top:6%;left:max(12px,calc(50% - 560px));
+  transform:rotate(-9deg);
+  animation:float-a 7.2s ease-in-out infinite;
+}
+.icon-tile--cursor{
+  top:58%;left:calc(50% + 64px);
+  z-index:3;
+  background:#161C25;
+  transform:rotate(8deg);
+  animation:float-b 8.4s ease-in-out infinite;
+}
+.icon-tile--or{
+  bottom:8%;left:max(48px,calc(50% - 420px));
+  transform:rotate(6deg);
+  animation:float-c 7.8s ease-in-out infinite;
+}
+@keyframes float-a{
+  0%,100%{transform:rotate(-9deg) translateY(0)}
+  50%{transform:rotate(-9deg) translateY(-10px)}
+}
+@keyframes float-b{
+  0%,100%{transform:rotate(8deg) translateY(0)}
+  50%{transform:rotate(8deg) translateY(-12px)}
+}
+@keyframes float-c{
+  0%,100%{transform:rotate(6deg) translateY(0)}
+  50%{transform:rotate(6deg) translateY(-8px)}
+}
 .price-fig{display:flex;align-items:baseline;gap:10px;margin:20px 0 18px;flex-wrap:wrap}
 .price-num{font-size:clamp(40px,6vw,58px);font-weight:700;letter-spacing:-.04em;line-height:1}
 .price-unit{font-size:17px;font-weight:600;color:var(--ink-2)}
@@ -271,21 +306,14 @@ a{color:var(--ink)}
 @media (max-width:960px){
   .hero-grid,.row,.step,.price-grid{grid-template-columns:minmax(0,1fr)}
   .price-grid .figure{margin-left:auto;margin-right:auto}
+  .float-icons{display:none}
   .row--flip .row__media{order:0}
   .hero .lead{max-width:none}
-  .spec ul{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .spec li{padding:16px 18px;border-top:1px solid var(--rule)}
-  .spec li:nth-child(-n+2){border-top:0}
-  .spec li:nth-child(odd){border-left:0;padding-left:0}
 }
 @media (max-width:640px){
   body{font-size:16px}
   .nav a:not(.btn){display:none}
   .lead{font-size:17px}
-  .spec ul{grid-template-columns:minmax(0,1fr)}
-  .spec li{border-left:0;padding-left:0;padding-right:0}
-  .spec li:first-child{border-top:0}
-  .spec li:nth-child(2){border-top:1px solid var(--rule)}
   .frame{padding:7px;box-shadow:5px 6px 0 rgba(20,18,15,.09)}
   .specimen{box-shadow:5px 6px 0 rgba(20,18,15,.09)}
   /* 좁은 화면에서는 더 바짝 잘라서 글자가 보이게 */
@@ -331,7 +359,7 @@ a{color:var(--ink)}
         <p class="cta-meta">
           <span>Apple Silicon · v0.1.6</span>
           <span class="dot">·</span>
-          <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-x64.exe">Windows (x64)</a>
+          <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-x64.exe">Windows(beta)</a>
         </p>
       </div>
 
@@ -347,17 +375,6 @@ a{color:var(--ink)}
           <span>문서랑 에이전트가 같은 창에 있어요</span>
         </figcaption>
       </figure>
-    </div>
-  </section>
-
-  <!-- ─────────── 스펙 밴드 ─────────── -->
-  <section class="spec">
-    <div class="wrap">
-      <ul>
-        <li><dl><dt>Platform</dt><dd>macOS (Apple Silicon)</dd></dl></li>
-        <li><dl><dt>Price</dt><dd>2000원(일회성)</dd></dl></li>
-        <li><dl><dt>Connect</dt><dd>Codex · Claude · Pi</dd></dl></li>
-      </ul>
     </div>
   </section>
 
@@ -384,7 +401,7 @@ a{color:var(--ink)}
                 <img loading="lazy" src="assets/editor-page.png" width="1800" height="1197" alt="완성된 행성의 역행 운동 보고서가 한글 편집기에 열려 있고, 오른쪽에 에이전트 사이드바가 있는 화면.">
               </div>
             </div>
-            <figcaption class="note"><span>에이전트가 알아서 도구를 고쳐요</span></figcaption>
+            <figcaption class="note"><span>아무것도 안해도 혼자서 다 편집해요</span></figcaption>
           </figure>
         </article>
 
@@ -491,19 +508,29 @@ a{color:var(--ink)}
 
   <!-- ─────────── 요금 ─────────── -->
   <section class="sec" id="pricing">
+    <div class="float-icons" aria-hidden="true">
+      <div class="icon-tile icon-tile--claude">
+        <img src="assets/icon-claude.png" width="512" height="512" alt="">
+      </div>
+      <div class="icon-tile icon-tile--cursor">
+        <img src="assets/icon-cursor.png" width="318" height="278" alt="">
+      </div>
+      <div class="icon-tile icon-tile--or">
+        <img src="assets/icon-openrouter.png" width="640" height="640" alt="">
+      </div>
+    </div>
     <div class="wrap price-grid">
       <div>
         <p class="label">요금</p>
         <h2 class="h2" style="margin-top:12px">원래 쓰던 구독권, 그대로</h2>
         <div class="price-fig">
           <span class="price-num">2000원</span>
-          <span class="price-unit">일회성</span>
+          <span class="price-unit">일회성/평생 업데이트 보장</span>
         </div>
         <p>이 프로그램은 2000원만 내시면 평생 사용하실 수 있어요. 원래 업무를 위해 쓰시던 Codex와 Claude 구독권을 직접 연결하거나, OpenRouter의 API Key를 직접 연결해서 사용하세요.</p>
         <ul class="conn">
           <li><b>Codex</b><em>쓰던 구독권 연결</em></li>
           <li><b>Claude</b><em>쓰던 구독권 연결</em></li>
-          <li><b>Pi</b><em>쓰던 구독권 연결</em></li>
           <li><b>OpenRouter</b><em>API Key 직접 연결</em></li>
         </ul>
       </div>
@@ -524,8 +551,7 @@ a{color:var(--ink)}
   <section class="sec rule-top dl" id="download">
     <div class="wrap">
       <p class="label">다운로드</p>
-      <h2 class="h2" style="margin-top:12px">한글 파일을 열어두고, 옆에서 같이 쓰세요</h2>
-      <p>내려받아 실행하면 바로 .hwp 문서를 열 수 있어요.</p>
+      <h2 class="h2" style="margin-top:12px">문서작업은 이제 한곳에서 해결하세요</h2>
       <div class="cta">
         <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">macOS용 다운로드</a>
         <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">GitHub</a>
