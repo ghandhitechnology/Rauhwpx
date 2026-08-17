@@ -42,8 +42,10 @@ export async function resolveDocumentPreflight(
   bytes: Uint8Array,
   handle: FileSystemFileHandleLike | null,
   recents: readonly RecentDoc[],
-  createId = createDocumentId,
+  createId: (() => string) | undefined = createDocumentId,
+  preferredDocumentId?: string | null,
 ): Promise<DocumentPreflightIdentity> {
+  const makeId = createId ?? createDocumentId;
   const sourceDigest = documentSourceDigest(bytes);
   let handleComparisonSucceeded = false;
 
@@ -60,6 +62,11 @@ export async function resolveDocumentPreflight(
     }
   }
 
+  const preferred = preferredDocumentId?.trim() || '';
+  if (preferred) {
+    return { documentId: preferred, sourceDigest, useSourceDigest: false };
+  }
+
   const hasNativePathIdentity = handle?.identityKind === 'native-path';
   if (!handleComparisonSucceeded && !hasNativePathIdentity) {
     const digestMatch = [...recents]
@@ -69,7 +76,7 @@ export async function resolveDocumentPreflight(
   }
 
   return {
-    documentId: createId(),
+    documentId: makeId(),
     sourceDigest,
     useSourceDigest: !handleComparisonSucceeded && !hasNativePathIdentity,
   };

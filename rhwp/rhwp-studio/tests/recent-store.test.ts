@@ -195,6 +195,7 @@ test('handle-backed Save/Save As만 active document identity를 recent-store에 
     /eventBus\.on\('document-file-handle-saved',[\s\S]*?documentId = activeDocumentId;[\s\S]*?rememberNativeDocument\(documentId, saved\.fileHandle\)[\s\S]*?addRecentDoc\(\{[\s\S]*?handle: saved\.fileHandle/,
   );
   assert.match(main, /captureDesktopNativeDroppedFile\(file\)/);
+  assert.match(main, /preferredDocumentId: data.documentId/);
   assert.match(main, /rememberNativeDocument\(ownership\.identity\.documentId, fileHandle\)/);
 });
 

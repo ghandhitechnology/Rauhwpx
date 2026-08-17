@@ -45,6 +45,7 @@ import {
   createEmptyThread,
   fallbackTitle,
   getThread,
+  explorerGroupIsCurrent,
   listThreadsByDocument,
   removeThread,
   renameThread,
@@ -1217,13 +1218,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         persistCurrentThread();
       }
       referenceLibrary.contextChanged();
-      if (threadsListVisible()) rebuildThreadsList();
+      rebuildThreadsList();
       return;
     }
     currentDocKey = nextKey;
     currentDocumentId = nextDocumentId;
     startNewChat({ silent: true });
-    if (threadsListVisible()) rebuildThreadsList();
+    rebuildThreadsList();
   }
 
   function setConfigPanelOpen(open: boolean): void {
@@ -3287,13 +3288,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       return;
     }
     const currentIdx = groups.findIndex((group) => (
-      threadMatchesDocument(group, currentDocumentId, currentDocKey)
+      explorerGroupIsCurrent(group, currentDocumentId, currentDocKey, groups)
     ));
     if (currentIdx > 0) groups.unshift(groups.splice(currentIdx, 1)[0]!);
 
     for (const group of groups) {
       const toggleKey = group.documentId ?? group.docKey ?? '';
-      const isCurrentDoc = threadMatchesDocument(group, currentDocumentId, currentDocKey);
+      const isCurrentDoc = explorerGroupIsCurrent(group, currentDocumentId, currentDocKey, groups);
       const expanded = docGroupToggles.get(toggleKey) ?? isCurrentDoc;
       const canMove = Boolean(group.documentId || group.docKey);
 

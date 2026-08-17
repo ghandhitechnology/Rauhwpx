@@ -102,6 +102,24 @@ export function threadMatchesDocument(
   return !thread.documentId && !documentId && threadName === null && activeName === null;
 }
 
+/**
+ * Explorer "현재" marker. IDs win when any group matches them. If a reopen minted a
+ * new ID (Electron native-path without a live handle), fall back to a unique filename.
+ */
+export function explorerGroupIsCurrent(
+  group: Pick<ChatThread, 'documentId' | 'docKey'>,
+  documentId: string | null,
+  docKey: string | null,
+  groups: readonly Pick<ChatThread, 'documentId' | 'docKey'>[],
+): boolean {
+  if (threadMatchesDocument(group, documentId, docKey)) return true;
+  if (groups.some((item) => threadMatchesDocument(item, documentId, docKey))) return false;
+  const groupName = normalizedDocumentName(group.docKey);
+  const activeName = normalizedDocumentName(docKey);
+  if (!groupName || !activeName || groupName !== activeName) return false;
+  return groups.filter((item) => normalizedDocumentName(item.docKey) === activeName).length === 1;
+}
+
 type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan' | 'plans' | 'docKey' | 'documentId' | 'activeTemplateId'> & {
   workflow?: unknown;
   latestPlan?: unknown;
