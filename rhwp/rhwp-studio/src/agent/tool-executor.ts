@@ -1,8 +1,8 @@
 /**
  * MCP 툴 실행기 — 허브가 전달한 tool-request를 실제 문서 호출로 매핑한다.
  *
- * read 툴은 WasmBridge를 직접 호출하고(원시 doc 접근 금지), write 툴은 전부
- * PendingEditManager로 위임한다(승인 전까지 pending 상태). 모든 read 응답에
+ * read 툴은 WasmBridge를 직접 호출한다. 고수준 write 툴은 PendingEditManager에
+ * staging한 뒤 턴 성공 시 자동 커밋하고, 전체 엔진 표면은 원자적 스냅샷 배치로 실행한다. 모든 read 응답에
  * revision을 포함하고, 모든 write는 expectedRevision을 먼저 검사한다.
  */
 import type { WasmBridge } from '../core/wasm-bridge.ts';
@@ -15,6 +15,13 @@ import type { AgentName, AgentPhase, AgentWorkflow, CellAddr, CharFormatProps, D
 import { AgentToolError } from './types.ts';
 import { renderChartPng, validateChartSpec } from './chart-render.ts';
 import type { ChartSpec } from './chart-render.ts';
+import {
+  applyEngineEdits,
+  applyEngineEditSession,
+  getEngineEditCapabilities,
+  getEngineEditTypeDefinitions,
+  type EngineEditOperation,
+} from './engine-edit.ts';
 
 export interface AgentToolExecutorDeps {
   wasm: WasmBridge;
@@ -26,7 +33,7 @@ export interface AgentToolExecutorDeps {
 
 const DOC_NOT_LOADED_MESSAGE = '문서가 로드되지 않았습니다';
 const MAX_SVG_BYTES = 800_000;
-const PENDING_NOTE = 'pending until user approves in the sidebar';
+const PENDING_NOTE = 'staged now and committed automatically when the turn succeeds; a failed turn rolls it back';
 
 /** Every Studio tool that can create or stage a document mutation. */
 export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
@@ -51,11 +58,16 @@ export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'insert_footnote',
   'edit_footnote',
   'set_bookmark',
+  'apply_engine_edits',
+  'prepare_engine_edit_session',
 ]);
 
 export function isDocumentWriteTool(tool: string) {
   return DOCUMENT_WRITE_TOOLS.has(tool);
 }
+
+const RAW_ENGINE_WRITE_TOOLS = new Set(['apply_engine_edits', 'prepare_engine_edit_session']);
+type TurnWriteMode = 'none' | 'semantic' | 'raw';
 
 export interface ToolCapabilityContext {
   workflow: AgentWorkflow;
@@ -258,9 +270,18 @@ function optCell(args: Record<string, unknown>): CellAddr | undefined {
 
 export class AgentToolExecutor {
   private deps: AgentToolExecutorDeps;
+  private turnWriteMode: TurnWriteMode = 'none';
 
   constructor(deps: AgentToolExecutorDeps) {
     this.deps = deps;
+  }
+
+  beginTurn(): void {
+    this.turnWriteMode = 'none';
+  }
+
+  endTurn(): void {
+    this.turnWriteMode = 'none';
   }
 
   async execute(
@@ -269,11 +290,28 @@ export class AgentToolExecutor {
     agent: AgentName = 'claude',
     capability?: ToolCapabilityContext,
   ): Promise<unknown> {
+    let claimedMode = false;
     try {
       assertToolCapability(tool, capability);
+      const requestedMode: TurnWriteMode = !isDocumentWriteTool(tool)
+        ? 'none'
+        : RAW_ENGINE_WRITE_TOOLS.has(tool) ? 'raw' : 'semantic';
+      if (requestedMode !== 'none'
+        && this.turnWriteMode !== 'none'
+        && this.turnWriteMode !== requestedMode) {
+        throw new AgentToolError(
+          'MIXED_ENGINE_WRITE_MODE',
+          'Raw engine batches and staged semantic writes cannot run in the same turn. Use one mode for the whole mutation batch.',
+        );
+      }
+      if (requestedMode !== 'none' && this.turnWriteMode === 'none') {
+        this.turnWriteMode = requestedMode;
+        claimedMode = true;
+      }
       // await 필수 — 비동기 툴(insert_chart)의 rejection 도 여기서 에러 코드로 매핑된다
       return await this.dispatch(tool, args, agent);
     } catch (e) {
+      if (claimedMode) this.turnWriteMode = 'none';
       if (e instanceof AgentToolError) throw e;
       const message = e instanceof Error ? e.message : String(e);
       if (message.includes(DOC_NOT_LOADED_MESSAGE)) {
@@ -296,6 +334,7 @@ export class AgentToolExecutor {
       case 'get_para_format': return this.getParaFormat(args);
       case 'get_char_format': return this.getCharFormat(args);
       case 'get_table_properties': return this.getTableProperties(args);
+      case 'get_engine_edit_capabilities': return this.getEngineEditCapabilities(args);
       case 'list_numberings': return this.listNumberings();
       case 'verify_changes': return this.verifyChanges(args);
       case 'insert_text': return this.insertText(args, agent);
@@ -324,6 +363,8 @@ export class AgentToolExecutor {
       case 'edit_footnote': return this.editFootnote(args, agent);
       case 'list_bookmarks': return this.listBookmarks();
       case 'set_bookmark': return this.setBookmark(args, agent);
+      case 'apply_engine_edits': return this.applyEngineEdits(args);
+      case 'prepare_engine_edit_session': return this.prepareEngineEditSession(args);
       default:
         throw new AgentToolError('UNKNOWN_TOOL', `Unknown tool: ${tool}`);
     }
@@ -331,6 +372,68 @@ export class AgentToolExecutor {
 
   private get revision(): number {
     return this.deps.revision.revision;
+  }
+
+  private getEngineEditCapabilities(args: Record<string, unknown>) {
+    this.requireDocLoaded();
+    const query = args['query'];
+    if (query !== undefined && typeof query !== 'string') {
+      throw new AgentToolError('INVALID_ARGS', 'query must be a string');
+    }
+    return {
+      revision: this.revision,
+      capabilityCount: getEngineEditCapabilities().length,
+      capabilities: getEngineEditCapabilities(query ?? ''),
+      typeDefinitions: getEngineEditTypeDefinitions(),
+      binaryArgument: { $base64: 'base64-encoded bytes' },
+    };
+  }
+
+  private applyEngineEdits(args: Record<string, unknown>) {
+    this.requireDocLoaded();
+    this.requireRevision(args);
+    const rawOperations = args['operations'];
+    if (!Array.isArray(rawOperations)) {
+      throw new AgentToolError('INVALID_ARGS', 'operations must be an array');
+    }
+    const operations: EngineEditOperation[] = rawOperations.map((raw, index) => {
+      const operation = asRecord(raw);
+      const method = operation['method'];
+      const methodArgs = operation['args'];
+      if (typeof method !== 'string' || !Array.isArray(methodArgs)) {
+        throw new AgentToolError('INVALID_ARGS', `operations[${index}] requires method and args[]`);
+      }
+      return { method, args: methodArgs };
+    });
+
+    if (this.deps.pending.hasPending()) {
+      throw new AgentToolError(
+        'PENDING_SEMANTIC_EDITS',
+        'apply_engine_edits cannot mix with staged semantic writes in one turn. Use apply_engine_edits for the whole task, or finish the current turn first.',
+      );
+    }
+    const previousRevision = this.revision;
+    const results = applyEngineEdits(this.deps.inputHandler, operations);
+    return {
+      previousRevision,
+      revision: this.revision,
+      applied: operations.length,
+      results,
+      undo: 'one editor undo entry',
+      status: 'committed',
+    };
+  }
+
+  private prepareEngineEditSession(args: Record<string, unknown>) {
+    this.requireDocLoaded();
+    this.requireRevision(args);
+    const method = args['method'];
+    const methodArgs = args['args'];
+    if (typeof method !== 'string' || !Array.isArray(methodArgs)) {
+      throw new AgentToolError('INVALID_ARGS', 'method and args[] are required');
+    }
+    const result = applyEngineEditSession(this.deps.wasm, { method, args: methodArgs });
+    return { revision: this.revision, method, result, status: 'session prepared' };
   }
 
   private requireDocLoaded(): void {
@@ -998,7 +1101,7 @@ export class AgentToolExecutor {
     const mark = this.deps.pending.findDeleteMarkContaining?.(sectionIdx, paraIdx, charOffset);
     if (mark) {
       throw new AgentToolError('PENDING_DELETE_OVERLAP',
-        'insertion point is inside a range already marked for deletion — the marker would be deleted on approval');
+        'insertion point is inside a range already marked for deletion — the marker would be deleted at turn commit');
     }
     const obj: ObjectOp = { type: 'insertNote', noteKind: kind, sectionIdx, paraIdx, charOffset, text };
     const r = this.deps.pending.addObjectOp(agent, obj);
@@ -1332,7 +1435,7 @@ export class AgentToolExecutor {
 
     const warnings: string[] = [];
     if (!set) {
-      warnings.push('no pending change set found — edits may have been approved/rejected already, or none were made');
+      warnings.push('no pending change set found — edits may have been committed/rolled back already, or none were made');
     }
 
     // op 좌표 → 영향 문단 수집 (dedupe, 상한 8)
@@ -1387,11 +1490,11 @@ export class AgentToolExecutor {
       }
     }
     if (hasDeleteMark) {
-      warnings.push('deleted text remains visible struck-through until approval — expected, do not fix');
+      warnings.push('deleted text remains visible struck-through until the turn commits — expected, do not fix');
     }
     if (hasTableStructure) {
       warnings.push(
-        'a table structure op is pending: cellIdx values of that table renumber only after the user approves — '
+        'a table structure op is staged: cellIdx values of that table renumber when the turn commits — '
         + 'further edits to it are rejected (PENDING_DESTRUCTIVE_OP) until then; re-read get_structure on your next turn',
       );
     }
@@ -1464,7 +1567,7 @@ export class AgentToolExecutor {
         'PENDING_DELETE_OVERLAP',
         `insertion point p${paraIdx}:${charOffset} is inside a range already marked for deletion `
         + `(p${mark.range.startParaIdx}:${mark.range.startCharOffset}-p${mark.range.endParaIdx}:${mark.range.endCharOffset}) — `
-        + 'text inserted there would be deleted together on approval. Insert at the mark start '
+        + 'text inserted there would be deleted together at turn commit. Insert at the mark start '
         + `(p${mark.range.startParaIdx}:${mark.range.startCharOffset}) or after its end instead, `
         + 'or use replace_range for delete+insert in one atomic op.',
       );
@@ -1504,7 +1607,7 @@ export class AgentToolExecutor {
       deletedText: r.deletedText.slice(0, 300),
       collapsedAt: { paraIdx: range.startParaIdx, charOffset: range.startCharOffset },
       postEdit: this.readPostEditDigest(range.sectionIdx, range.startParaIdx, range.startCharOffset, range.cell),
-      note: `text removed from the live preview now; finalized on approval, restored on reject. Coordinates after the range have shifted — use collapsedAt to insert replacement text. ${PENDING_NOTE}`,
+      note: `text removed from the live preview now; auto-committed on turn success and restored on turn failure. Coordinates after the range have shifted — use collapsedAt to insert replacement text. ${PENDING_NOTE}`,
     };
   }
 
@@ -1660,7 +1763,7 @@ export class AgentToolExecutor {
     if (this.deps.pending.hasPendingStructureOp(sectionIdx, tableParaIdx, controlIdx)) {
       throw new AgentToolError(
         'PENDING_DESTRUCTIVE_OP',
-        'This table has a pending structure edit (insert/delete row/col or merge_cells) whose cellIdx renumbering is not final until the user approves it. Approval can only happen between turns: finish your turn now, the user approves in the sidebar, then re-read get_structure and retry with fresh coordinates on your next turn.',
+        'This table has a staged structure edit whose cellIdx renumbering becomes final at the successful turn commit. Finish the turn; it commits automatically, then re-read get_structure with fresh coordinates on the next turn.',
       );
     }
   }
@@ -1785,14 +1888,14 @@ export class AgentToolExecutor {
         if (dims.rowCount <= 1) throw new AgentToolError('INVALID_ARGS', 'cannot delete the only row');
         const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'delete_row', rowIdx, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `row is NOT removed yet — struck through until the user approves. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `row is staged for removal at the successful turn commit. ${PENDING_NOTE}` };
       }
       case 'delete_col': {
         const colIdx = reqIdx('colIdx', dims.colCount);
         if (dims.colCount <= 1) throw new AgentToolError('INVALID_ARGS', 'cannot delete the only column');
         const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'delete_col', colIdx, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `column is NOT removed yet — struck through until the user approves. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `column is staged for removal at the successful turn commit. ${PENDING_NOTE}` };
       }
       case 'merge_cells': {
         const startRow = reqIdx('startRow', dims.rowCount);
@@ -1804,7 +1907,7 @@ export class AgentToolExecutor {
         }
         const obj: ObjectOp = { type: 'tableStructureMarked', ...base, op: 'merge_cells', startRow, startCol, endRow, endCol, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `cells are NOT merged yet — highlighted until the user approves. Merging renumbers cellIdx only on approval, so re-read get_structure on your next turn before editing this table again. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `cells are staged for merging at the successful turn commit. Merging then renumbers cellIdx, so re-read get_structure on your next turn before editing this table again. ${PENDING_NOTE}` };
       }
       case 'split_cell': {
         const rowIdx = reqIdx('rowIdx', dims.rowCount);
@@ -1832,20 +1935,20 @@ export class AgentToolExecutor {
           splitRows, splitCols, dims: dimsNow,
         };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `cell is NOT split yet — highlighted until the user approves. Splitting renumbers cellIdx, so re-read get_structure after approval. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `cell is staged for splitting at the successful turn commit. Splitting renumbers cellIdx, so re-read get_structure on the next turn. ${PENDING_NOTE}` };
       }
       case 'set_cell_props': {
         const cellIdx = reqIdx('cellIdx', dims.cellCount);
         const props = this.parseCellProps(asRecord(args['props'] ?? {}));
         const obj: ObjectOp = { type: 'setCellProps', ...base, cellIdx, props, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied on approval. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
       }
       case 'set_table_props': {
         const props = this.parseTableProps(asRecord(args['props'] ?? {}));
         const obj: ObjectOp = { type: 'setTableProps', ...base, props, dims: dimsNow };
         const r = this.deps.pending.addObjectOp(agent, obj);
-        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied on approval. ${PENDING_NOTE}` };
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
       }
       default:
         throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|split_cell|set_cell_props|set_table_props (got ${JSON.stringify(op)})`);
@@ -1881,7 +1984,7 @@ export class AgentToolExecutor {
       controlIdx,
       revision: this.revision,
       changeSetId: r.changeSetId,
-      note: `table is NOT removed yet — highlighted until the user approves. Further edits to this table fail with PENDING_DESTRUCTIVE_OP. ${PENDING_NOTE}`,
+      note: `table is staged for removal at the successful turn commit. Further edits to this table fail with PENDING_DESTRUCTIVE_OP. ${PENDING_NOTE}`,
     };
   }
 
@@ -2660,7 +2763,7 @@ export class AgentToolExecutor {
       note: (oddEvenExists
         ? `this section also has an odd/even-page-only ${which} which this tool does NOT replace — the new both-pages ${which} may render alongside it. `
         : '') + (existedBefore
-        ? `existing ${which} will be replaced on approval. ${PENDING_NOTE}`
+        ? `existing ${which} will be replaced at the successful turn commit. ${PENDING_NOTE}`
         : PENDING_NOTE),
     };
   }
@@ -2713,6 +2816,6 @@ export class AgentToolExecutor {
       textSample: this.paraTextSample(sectionIdx, paraIdx, cell),
     };
     const r = this.deps.pending.addObjectOp(agent, obj);
-    return { revision: this.revision, changeSetId: r.changeSetId, note: `applied on approval. ${PENDING_NOTE}` };
+    return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
   }
 }
