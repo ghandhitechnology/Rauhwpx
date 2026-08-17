@@ -10,6 +10,7 @@ import {
   listThreadsByDocument,
   setThreadTitle,
   subscribeThreadChanges,
+  threadMatchesDocument,
   upsertThread,
 } from '../src/agent/threads.ts';
 import type { StructuredPlan } from '../src/agent/types.ts';
@@ -106,6 +107,22 @@ test('clickable plan presentations keep their plan identity in thread history', 
   assert.match(source, /typeof message\.planId !== 'string'/);
 });
 
+test('persisted Pi chats remain available after reload', () => {
+  mem.clear();
+  storage.setItem('rhwp-agent-threads', JSON.stringify([{
+    id: 'pi-thread',
+    title: 'Pi 대화',
+    titleRequested: false,
+    createdAt: 1,
+    updatedAt: 2,
+    agent: 'pi',
+    model: 'openrouter/test-model',
+    effort: 'medium',
+    messages: [{ role: 'user', text: '기존 Pi 메시지' }],
+  }]));
+  assert.equal(getThread('pi-thread')?.agent, 'pi');
+});
+
 test('legacy threads migrate to direct workflow', () => {
   mem.clear();
   storage.setItem('rhwp-agent-threads', JSON.stringify([{
@@ -120,6 +137,29 @@ test('legacy threads migrate to direct workflow', () => {
     messages: [{ role: 'user', text: '기존 메시지' }],
   }]));
   assert.equal(getThread('legacy')?.workflow, 'direct');
+});
+
+test('past chats match their active document by stable ID with a legacy filename fallback', () => {
+  assert.equal(threadMatchesDocument(
+    { documentId: 'doc-a', docKey: 'old-name.hwpx' },
+    'doc-a',
+    'new-name.hwpx',
+  ), true);
+  assert.equal(threadMatchesDocument(
+    { documentId: 'doc-a', docKey: 'report.hwpx' },
+    'doc-b',
+    'report.hwpx',
+  ), false);
+  assert.equal(threadMatchesDocument(
+    { documentId: null, docKey: '보고서.HWPX' },
+    'doc-a',
+    '보고서.hwpx',
+  ), true);
+  assert.equal(threadMatchesDocument(
+    { documentId: 'doc-a', docKey: 'report.hwpx' },
+    null,
+    'report.hwpx',
+  ), false);
 });
 
 test('threads keep their document key and legacy threads fall back to null', () => {
