@@ -881,6 +881,11 @@ export class WasmBridge {
     return this.doc.insertText(sec, para, charOffset, text);
   }
 
+  insertTextLogical(sec: number, para: number, logicalOffset: number, text: string): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.insertTextLogical(sec, para, logicalOffset, text);
+  }
+
   replaceBodyTextLocal(
     sec: number,
     para: number,
@@ -961,6 +966,16 @@ export class WasmBridge {
   mergeParagraph(sec: number, para: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.mergeParagraph(sec, para);
+  }
+
+  deleteParagraph(sec: number, para: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.deleteParagraph(sec, para);
+  }
+
+  insertParagraph(sec: number, para: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.insertParagraph(sec, para);
   }
 
   splitParagraphInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, charOffset: number, removedParaMeta?: RemovedParaMeta): string {
@@ -2329,7 +2344,28 @@ export class WasmBridge {
 
   setNumberingRestart(sec: number, para: number, mode: number, startNum: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    return (this.doc as any).setNumberingRestart(sec, para, mode, startNum);
+    return this.doc.setNumberingRestart(sec, para, mode, startNum);
+  }
+
+  getPageHide(sec: number, para: number): Record<string, unknown> {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(this.doc.getPageHide(sec, para)) as Record<string, unknown>;
+  }
+
+  setPageHide(
+    sec: number,
+    para: number,
+    hideHeader: boolean,
+    hideFooter: boolean,
+    hideMaster: boolean,
+    hideBorder: boolean,
+    hideFill: boolean,
+    hidePageNum: boolean,
+  ): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.setPageHide(
+      sec, para, hideHeader, hideFooter, hideMaster, hideBorder, hideFill, hidePageNum,
+    );
   }
 
   applyParaFormat(sec: number, para: number, propsJson: string): string {

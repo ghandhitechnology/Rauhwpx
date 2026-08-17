@@ -681,6 +681,7 @@ class AgentBridgeImpl implements AgentBridge {
   private latestPlan: StructuredPlan | null = null;
   private activeAgent: AgentName | null = null;
   private turnRunning = false;
+  private turnHadError = false;
   private pendingTurnOpen = false;
   private pendingChatStart: {
     agent: AgentName;
@@ -1036,15 +1037,17 @@ class AgentBridgeImpl implements AgentBridge {
 
   private beginPendingTurn(agent: AgentName) {
     if (this.pendingTurnOpen || !this.canStagePendingEdits()) return;
+    this.executor.beginTurn();
     this.pendingEdits.beginTurn(agent);
     this.pendingTurnOpen = true;
   }
 
-  private endPendingTurn() {
+  private endPendingTurn(outcome: 'commit' | 'reject' = 'reject') {
     if (!this.pendingTurnOpen) return;
     try {
-      this.pendingEdits.endTurn();
+      this.pendingEdits.endTurn(outcome);
     } finally {
+      this.executor.endTurn();
       this.pendingTurnOpen = false;
     }
   }
@@ -1417,21 +1420,32 @@ class AgentBridgeImpl implements AgentBridge {
     switch (event.type) {
       case 'turn-start':
         this.turnRunning = true;
+        this.turnHadError = false;
         try {
           this.beginPendingTurn(event.agent);
         } catch (e) {
           console.warn('[AgentBridge] beginTurn 실패:', e);
         }
         break;
-      case 'turn-end':
+      case 'turn-end': {
         this.turnRunning = false;
+        const succeeded = !this.turnHadError
+          && !event.errorMessage
+          && (event.stopReason === 'end_turn'
+            || event.stopReason === 'completed'
+            || event.stopReason === 'success');
+        this.turnHadError = false;
         if (this.pendingTurnOpen) {
           try {
-            this.endPendingTurn();
+            this.endPendingTurn(succeeded ? 'commit' : 'reject');
           } catch (e) {
             console.warn('[AgentBridge] endTurn 실패:', e);
           }
         }
+        break;
+      }
+      case 'error':
+        if (this.turnRunning) this.turnHadError = true;
         break;
       case 'session-info':
         this.activeAgent = event.agent;

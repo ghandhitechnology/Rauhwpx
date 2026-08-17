@@ -226,13 +226,13 @@ test('edit_header_footer: 신규 꼬리말 + 쪽번호 필드는 즉시 적용, 
   assert.ok(!hfs.has('false:0'));
 });
 
-test('edit_header_footer: 기존 머리말 수정은 mark-only, approve 시 교체', async () => {
+test('edit_header_footer: 기존 머리말 수정은 mark-only, turn commit 시 교체', async () => {
   const { call, pending, hfs, calls } = makeEnv();
   hfs.set('true:0', '기존 머리말');
   const r = (await call('edit_header_footer', {
     sectionIdx: 0, which: 'header', text: '새 머리말',
   })) as { changeSetId: string; note: string };
-  assert.ok(r.note.includes('replaced on approval'));
+  assert.ok(r.note.includes('replaced at the successful turn commit'));
   assert.equal(hfs.get('true:0'), '기존 머리말'); // 아직 그대로
   calls.length = 0;
   pending.approve(r.changeSetId);

@@ -141,5 +141,5 @@ test('editing tool turns hand off document checks unless a plan card is presente
   assert.match(source, /const editingPhase = chatWorkflow === 'direct' \|\| planningPhase === 'implementing'/);
   assert.match(source, /turnToolCount > 0 && !turnPresentedPlan && !finalBubble && completed && editingPhase/);
   assert.match(backend, /After every tool-using turn, always send a separate final/);
-  assert.match(backend, /asks the user to check the document or pending changes/);
+  assert.match(backend, /asks the user to check the document/);
 });
