@@ -1149,8 +1149,8 @@ class AgentBridgeImpl implements AgentBridge {
         const session = msg.session;
         const sessionThreadId = typeof session?.threadId === 'string' ? session.threadId : '';
         if (this.threadId && sessionThreadId !== this.threadId) {
-          // pendingChatStart survives until its matching acknowledgement, so the
-          // reconnecting socket has already replayed the latest selected thread.
+          // pendingChatStart 는 자기 응답이 올 때까지 살아 있으므로,
+          // 재연결 소켓은 이미 마지막으로 선택한 스레드를 다시 보낸 상태다.
           return;
         }
         const wasRunning = this.turnRunning;
@@ -1225,8 +1225,8 @@ class AgentBridgeImpl implements AgentBridge {
         break;
       }
       case 'chat-started': {
-        // Rapid thread switches can leave an older chat-start response in flight.
-        // Never let it replace the identity selected by the latest startChat call.
+        // 스레드를 빠르게 오가면 이전 chat-start 응답이 뒤늦게 도착할 수 있다.
+        // 마지막 startChat 이 고른 정체성을 절대 덮어쓰지 않는다.
         if (typeof msg.threadId === 'string' && this.threadId && msg.threadId !== this.threadId) break;
         this.pendingChatStart = null;
         if (isAgentName(msg.agent)) this.activeAgent = msg.agent;

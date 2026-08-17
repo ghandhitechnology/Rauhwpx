@@ -510,7 +510,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let connCountdownTimer: number | null = null;
   let turnRunning = bridge.isTurnRunning();
   let workflowTransitionPending = false;
-  /** Only the latest requested thread may unlock the composer after chat-started. */
+  /** chat-started 후 입력기를 여는 건 마지막으로 요청한 스레드뿐이다. */
   let chatStartPendingThreadId: string | null = null;
   /** 계획 모드로 들어갈 때 안전 권한이면 전환 완료 후 전체 접근을 기본 적용한다. */
   let planPermissionDefaultPending = false;
@@ -3590,8 +3590,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       setThreadsPanelOpen(false);
       return;
     }
-    // Legacy filename-only chats gain the stable active identity here. Chats
-    // matched by ID also follow Save As renames without splitting their group.
+    // 파일명만 있던 레거시 채팅은 여기서 안정 ID를 얻는다. ID로 맞은 채팅도
+    // 그룹이 갈라지지 않게 "다른 이름으로 저장" 개명을 따라간다.
     currentThread.documentId = currentDocumentId ?? currentThread.documentId;
     currentThread.docKey = currentDocKey ?? currentThread.docKey;
     persistCurrentThread();
