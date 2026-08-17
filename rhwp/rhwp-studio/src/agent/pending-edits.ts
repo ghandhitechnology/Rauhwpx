@@ -994,6 +994,7 @@ export class PendingEditManager {
         const base = { sort: 'cells' as const, sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx };
         if (obj.op === 'delete_row') return { ...base, rowIdx: obj.rowIdx };
         if (obj.op === 'delete_col') return { ...base, colIdx: obj.colIdx };
+        if (obj.op === 'split_cell') return { ...base, rect: { startRow: obj.rowIdx!, startCol: obj.colIdx!, endRow: obj.rowIdx!, endCol: obj.colIdx! } };
         return { ...base, rect: { startRow: obj.startRow!, startCol: obj.startCol!, endRow: obj.endRow!, endCol: obj.endCol! } };
       }
       case 'setCellProps':
@@ -1442,6 +1443,11 @@ export class PendingEditManager {
           wasm.deleteTableRow(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.rowIdx!);
         } else if (obj.op === 'delete_col') {
           wasm.deleteTableColumn(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.colIdx!);
+        } else if (obj.op === 'split_cell') {
+          wasm.splitTableCellInto(
+            obj.sectionIdx, obj.tableParaIdx, obj.controlIdx,
+            obj.rowIdx!, obj.colIdx!, obj.splitRows!, obj.splitCols!, true, false,
+          );
         } else {
           wasm.mergeTableCells(
             obj.sectionIdx, obj.tableParaIdx, obj.controlIdx,
