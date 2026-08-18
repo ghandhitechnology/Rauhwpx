@@ -18,6 +18,7 @@ e2e 스크립트의 **단일 권위 목록**이다. 파일 추가/변경/폐기 
 | `agent-sidebar-center.check.mjs` | 상시 | active | 진단: 사이드바 inset 직후 문서 로드 시 용지 가운데 정렬 (stale viewport 폭 회귀) | — | 수동 | legacy-name |
 | `agent-workspace-shell.test.mjs` | 상시 | active | 전체 화면 워크스페이스 셸 기하: 상단 바/대화·변경 탭 전환/레일·검토 칸 배치 | — | 수동 |  |
 | `ime-composition-cursor-move.test.mjs` | 상시 | active | 한글 IME 세션 정확성: 조합 중 클릭, 빠른 `안녕하세요`·`가가`, 후보 변환, trailing input, undo | — | 수동 |  |
+| `ime-overlay-geometry.test.mjs` | 상시 | active | 한글 IME 조합 오버레이 기하: 복제 띠가 페이지 canvas CSS(중앙 정렬 transform·용지 배경)를 물려받아 거대 흰 막대로 밀리는 회귀 방지 | — | 수동 |  |
 | `inline-prompt.test.mjs` | 상시 | active | 인라인 프롬프트: 선택 → 칩 → 입력 상자 → 사이드바 전송 게이트/선택 인용 기록 | — | npm e2e:inline-prompt |  |
 | `reference-files-flow.test.mjs` | 상시 | active | 참고자료 UI/허브 종단간: 채팅·문서·전역 업로드, 내용 검색, 새 채팅 범위 격리, MCP 검색 상속 | — | npm e2e:reference-files |  |
 | `autosave-recovery.test.mjs` | 상시 | active | Task #1448 — 미저장 문서 자동 백업 복구 E2E | — | 수동 |  |
