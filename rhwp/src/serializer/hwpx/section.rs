@@ -1527,18 +1527,41 @@ fn render_col_pr_ctrl(cd: &ColumnDef) -> String {
         ColumnDirection::RightToLeft => "RIGHT",
         ColumnDirection::LeftToRight => "LEFT",
     };
+    // ColumnDef::default() 같은 미초기화 IR을 colCount="0"으로 내보내지
+    // 않는다. 0단은 한컴 레이아웃에서 유효하지 않으며 후속 표의 가용 너비를
+    // 0으로 만들 수 있다. 명시적 1단의 sameSz 값은 그대로 보존한다.
+    let column_count = cd.column_count.max(1);
+    let same_width = if cd.column_count == 0 {
+        true
+    } else {
+        cd.same_width
+    };
     let mut out = format!(
         r#"<hp:ctrl><hp:colPr id="" type="{}" layout="{}" colCount="{}" sameSz="{}" sameGap="{}""#,
-        col_type, layout, cd.column_count, cd.same_width as u8, cd.spacing,
+        col_type, layout, column_count, same_width as u8, cd.spacing,
     );
-    if cd.separator_type != 0 {
+    let col_size_count = if same_width {
+        0
+    } else {
+        cd.widths.len().min(column_count as usize)
+    };
+    if cd.separator_type != 0 || col_size_count != 0 {
         out.push('>');
-        out.push_str(&format!(
-            r#"<hp:colLine type="{}" width="{} mm" color="{}"/>"#,
-            col_line_type_str(cd.separator_type),
-            line_width_mm(cd.separator_width),
-            super::shape::color_to_hex(cd.separator_color),
-        ));
+        for i in 0..col_size_count {
+            let gap = cd.gaps.get(i).copied().unwrap_or(0);
+            out.push_str(&format!(
+                r#"<hp:colSz width="{}" gap="{}"/>"#,
+                cd.widths[i], gap
+            ));
+        }
+        if cd.separator_type != 0 {
+            out.push_str(&format!(
+                r#"<hp:colLine type="{}" width="{} mm" color="{}"/>"#,
+                col_line_type_str(cd.separator_type),
+                line_width_mm(cd.separator_width),
+                super::shape::color_to_hex(cd.separator_color),
+            ));
+        }
         out.push_str("</hp:colPr></hp:ctrl>");
     } else {
         out.push_str("/></hp:ctrl>");
@@ -2201,7 +2224,10 @@ fn render_equation(eq: &Equation) -> String {
     let width = c.width.to_string();
     let height = c.height.to_string();
     let treat = if c.treat_as_char { "1" } else { "0" };
+    let affect_line_spacing = if c.affect_line_spacing { "1" } else { "0" };
     let flow_with_text = if c.flow_with_text { "1" } else { "0" };
+    let allow_overlap = if c.allow_overlap { "1" } else { "0" };
+    let size_protect = if c.size_protect { "1" } else { "0" };
     let vert_offset = c.vertical_offset.to_string();
     let horz_offset = c.horizontal_offset.to_string();
     let margin_left = c.margin.left.to_string();
@@ -2235,9 +2261,11 @@ fn render_equation(eq: &Equation) -> String {
     let lock = if c.locked { "1" } else { "0" };
 
     format!(
-        r#"<hp:equation id="{id}" zOrder="{z_order}" numberingType="EQUATION" textWrap="{}" textFlow="{}" lock="{lock}" dropcapstyle="None" instid="{id}" version="{version}" baseLine="{baseline}" textColor="{text_color}" baseUnit="{base_unit}" lineMode="{line_mode}" font="{font}"><hp:script>{script}</hp:script><hp:sz width="{width}" widthRelTo="ABSOLUTE" height="{height}" heightRelTo="ABSOLUTE"/><hp:pos treatAsChar="{treat}" affectLSpacing="0" flowWithText="{flow_with_text}" allowOverlap="0" holdAnchorAndSO="{hold}" vertRelTo="{}" horzRelTo="{}" vertAlign="{}" horzAlign="{}" vertOffset="{vert_offset}" horzOffset="{horz_offset}"/><hp:outMargin left="{margin_left}" right="{margin_right}" top="{margin_top}" bottom="{margin_bottom}"/>{shape_comment}</hp:equation>"#,
+        r#"<hp:equation id="{id}" zOrder="{z_order}" numberingType="EQUATION" textWrap="{}" textFlow="{}" lock="{lock}" dropcapstyle="None" instid="{id}" version="{version}" baseLine="{baseline}" textColor="{text_color}" baseUnit="{base_unit}" lineMode="{line_mode}" font="{font}"><hp:script>{script}</hp:script><hp:sz width="{width}" widthRelTo="{}" height="{height}" heightRelTo="{}" protect="{size_protect}"/><hp:pos treatAsChar="{treat}" affectLSpacing="{affect_line_spacing}" flowWithText="{flow_with_text}" allowOverlap="{allow_overlap}" holdAnchorAndSO="{hold}" vertRelTo="{}" horzRelTo="{}" vertAlign="{}" horzAlign="{}" vertOffset="{vert_offset}" horzOffset="{horz_offset}"/><hp:outMargin left="{margin_left}" right="{margin_right}" top="{margin_top}" bottom="{margin_bottom}"/>{shape_comment}</hp:equation>"#,
         text_wrap_to_hwpx(c.text_wrap),
         text_flow_to_hwpx(c.text_flow),
+        size_criterion_str(c.width_criterion),
+        height_criterion_str(c.height_criterion),
         vert_rel_to_hwpx(c.vert_rel_to),
         horz_rel_to_hwpx(c.horz_rel_to),
         vert_align_to_hwpx(c.vert_align),
@@ -2423,9 +2451,34 @@ fn replace_page_pr(xml: &str, page_def: &crate::model::page::PageDef) -> String 
         crate::model::page::BindingMethod::DuplexSided => "LEFT_RIGHT",
         crate::model::page::BindingMethod::TopFlip => "TOP_BOTTOM",
     };
+    // SectionDef/PageDef 는 Default 파생이라 외부 생성 IR이나 pagePr 없는
+    // 입력은 용지 크기가 0일 수 있다. 0×0 pagePr은 한컴에서 본문 영역을
+    // 정상적으로 계산할 수 없어 표가 쪽 밖으로 밀리거나 문서 복구를 유발한다.
+    // 크기만 결실이면 A4 크기를, 전 필드가 0인 미초기화 값이면 A4 여백도
+    // 폴백한다. 유효한 용지의 0 여백(full bleed)은 그대로 보존한다.
+    let a4 = crate::model::page::PageDef::a4_default();
+    let uninitialized = page_def.width == 0
+        && page_def.height == 0
+        && page_def.margin_header == 0
+        && page_def.margin_footer == 0
+        && page_def.margin_gutter == 0
+        && page_def.margin_left == 0
+        && page_def.margin_right == 0
+        && page_def.margin_top == 0
+        && page_def.margin_bottom == 0;
+    let page_width = if page_def.width == 0 {
+        a4.width
+    } else {
+        page_def.width
+    };
+    let page_height = if page_def.height == 0 {
+        a4.height
+    } else {
+        page_def.height
+    };
     let new_page_pr = format!(
         r#"<hp:pagePr landscape="{}" width="{}" height="{}" gutterType="{}">"#,
-        landscape, page_def.width, page_def.height, gutter_type,
+        landscape, page_width, page_height, gutter_type,
     );
     let out = if xml.contains(TEMPLATE_PAGE_PR) {
         xml.replacen(TEMPLATE_PAGE_PR, &new_page_pr, 1)
@@ -2437,15 +2490,50 @@ fn replace_page_pr(xml: &str, page_def: &crate::model::page::PageDef) -> String 
     // 템플릿의 hp:margin(고정 문자열) → IR 여백 7필드로 교체 (#1388).
     // write_section 은 콘텐츠 삽입 전에 호출하므로 템플릿 내 유일 1회 등장이 보장된다.
     const TEMPLATE_PAGE_MARGIN: &str = r#"<hp:margin header="4252" footer="4252" gutter="0" left="8504" right="8504" top="5668" bottom="4252"/>"#;
+    let margin_header = if uninitialized {
+        a4.margin_header
+    } else {
+        page_def.margin_header
+    };
+    let margin_footer = if uninitialized {
+        a4.margin_footer
+    } else {
+        page_def.margin_footer
+    };
+    let margin_gutter = if uninitialized {
+        a4.margin_gutter
+    } else {
+        page_def.margin_gutter
+    };
+    let margin_left = if uninitialized {
+        a4.margin_left
+    } else {
+        page_def.margin_left
+    };
+    let margin_right = if uninitialized {
+        a4.margin_right
+    } else {
+        page_def.margin_right
+    };
+    let margin_top = if uninitialized {
+        a4.margin_top
+    } else {
+        page_def.margin_top
+    };
+    let margin_bottom = if uninitialized {
+        a4.margin_bottom
+    } else {
+        page_def.margin_bottom
+    };
     let new_margin = format!(
         r#"<hp:margin header="{}" footer="{}" gutter="{}" left="{}" right="{}" top="{}" bottom="{}"/>"#,
-        page_def.margin_header,
-        page_def.margin_footer,
-        page_def.margin_gutter,
-        page_def.margin_left,
-        page_def.margin_right,
-        page_def.margin_top,
-        page_def.margin_bottom,
+        margin_header,
+        margin_footer,
+        margin_gutter,
+        margin_left,
+        margin_right,
+        margin_top,
+        margin_bottom,
     );
     if out.contains(TEMPLATE_PAGE_MARGIN) {
         out.replacen(TEMPLATE_PAGE_MARGIN, &new_margin, 1)
@@ -2593,7 +2681,7 @@ mod tests {
         };
         let line_xml = render_equation(&eq);
         assert!(
-            line_xml.contains(r#"baseUnit="1000" lineMode="LINE" font="""#),
+            line_xml.contains(r#"baseUnit="1000" lineMode="LINE" font="HYhwpEQ""#),
             "lineMode 는 IR 값으로, 한컴과 같은 baseUnit·font 사이 자리에 와야 함: {line_xml}"
         );
         assert!(
@@ -2614,6 +2702,44 @@ mod tests {
         assert!(
             xml.contains(r#"lock="1""#),
             "locked=true 면 lock=\"1\" 을 방출해야 함(하드코딩 \"0\" 잔존 금지): {xml}"
+        );
+    }
+
+    #[test]
+    fn equation_layout_properties_are_not_hardcoded_on_export() {
+        use crate::model::control::Equation;
+
+        let mut eq = Equation::default();
+        eq.common.width_criterion = SizeCriterion::Column;
+        eq.common.height_criterion = SizeCriterion::Page;
+        eq.common.size_protect = true;
+        eq.common.affect_line_spacing = true;
+        eq.common.allow_overlap = true;
+
+        let xml = render_equation(&eq);
+        assert!(xml.contains(r#"widthRelTo="COLUMN""#), "{xml}");
+        assert!(xml.contains(r#"heightRelTo="PAGE""#), "{xml}");
+        assert!(xml.contains(r#"protect="1""#), "{xml}");
+        assert!(xml.contains(r#"affectLSpacing="1""#), "{xml}");
+        assert!(xml.contains(r#"allowOverlap="1""#), "{xml}");
+    }
+
+    #[test]
+    fn equation_script_is_xml_safe_without_changing_valid_equation_text() {
+        use crate::model::control::Equation;
+
+        let eq = Equation {
+            script: "a < b & c > d\n\u{000B}x".to_string(),
+            ..Default::default()
+        };
+        let xml = render_equation(&eq);
+        assert!(
+            xml.contains("<hp:script>a &lt; b &amp; c &gt; d\n\u{FFFD}x</hp:script>"),
+            "{xml}"
+        );
+        assert!(
+            !xml.contains('\u{000B}'),
+            "XML 1.0 금지 문자가 남으면 안 됨"
         );
     }
 
@@ -3220,6 +3346,51 @@ mod tests {
     }
 
     #[test]
+    fn unequal_column_sizes_survive_xml_ir_xml_roundtrip() {
+        use crate::model::page::{ColumnDef, ColumnType};
+        use crate::parser::hwpx::section::parse_hwpx_section;
+
+        let src = r#"<hs:sec xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"><hp:p paraPrIDRef="0" styleIDRef="0"><hp:ctrl><hp:colPr type="NORMAL" layout="LEFT" colCount="3" sameSz="0" sameGap="0"><hp:colSz width="5455" gap="120"/><hp:colSz width="1930" gap="240"/><hp:colSz width="11595" gap="0"/></hp:colPr></hp:ctrl></hp:p></hs:sec>"#;
+        let section = parse_hwpx_section(src).expect("다단 XML 파싱");
+        let parsed = section.paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|control| match control {
+                Control::ColumnDef(cd) => Some(cd),
+                _ => None,
+            })
+            .expect("ColumnDef");
+        assert_eq!(parsed.column_type, ColumnType::Normal);
+        assert!(!parsed.same_width);
+        assert_eq!(parsed.widths, vec![5455, 1930, 11595]);
+        assert_eq!(parsed.gaps, vec![120, 240, 0]);
+        assert!(!parsed.proportional_widths);
+
+        let xml = render_col_pr_ctrl(parsed);
+        assert!(
+            xml.contains(r#"<hp:colSz width="5455" gap="120"/>"#)
+                && xml.contains(r#"<hp:colSz width="1930" gap="240"/>"#)
+                && xml.contains(r#"<hp:colSz width="11595" gap="0"/>"#),
+            "명시적 단 너비/간격을 재방출해야 함: {xml}"
+        );
+
+        let wrapped = format!(
+            r#"<hs:sec xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"><hp:p paraPrIDRef="0" styleIDRef="0">{xml}</hp:p></hs:sec>"#
+        );
+        let reparsed = parse_hwpx_section(&wrapped).expect("다단 XML 재파싱");
+        let reparsed = reparsed.paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|control| match control {
+                Control::ColumnDef(cd) => Some(cd),
+                _ => None,
+            })
+            .expect("roundtrip ColumnDef");
+        assert_eq!(reparsed.widths, parsed.widths);
+        assert_eq!(reparsed.gaps, parsed.gaps);
+    }
+
+    #[test]
     fn task1407_single_column_doc_unaffected() {
         // ColumnDef IR 이 없는 문단(단일 단)은 템플릿 colCount=1 유지 — 회귀 없음.
         let mut para = Paragraph::default();
@@ -3231,6 +3402,14 @@ mod tests {
             xml.contains(r#"colCount="1""#),
             "ColumnDef 없으면 템플릿 colCount=1 유지"
         );
+    }
+
+    #[test]
+    fn uninitialized_column_def_emits_valid_single_column() {
+        let xml = render_col_pr_ctrl(&crate::model::page::ColumnDef::default());
+        assert!(xml.contains(r#"colCount="1""#), "{xml}");
+        assert!(xml.contains(r#"sameSz="1""#), "{xml}");
+        assert!(!xml.contains(r#"colCount="0""#), "{xml}");
     }
 
     #[test]
@@ -3358,6 +3537,37 @@ mod tests {
         );
         // #1166 동적화 회귀 없음 — width/height 동반 검증.
         assert!(xml.contains(r#"width="59527" height="84189""#));
+    }
+
+    #[test]
+    fn uninitialized_page_def_uses_valid_a4_geometry() {
+        // PageDef::default() 는 0×0 용지이다. 이를 그대로 내보내면 한컴이
+        // 본문/표 영역을 계산하지 못해 페이지 밖 넘침 또는 복구 경고가 발생한다.
+        let out = replace_page_pr(EMPTY_SECTION_XML, &crate::model::page::PageDef::default());
+        assert!(
+            out.contains(r#"width="59528" height="84188""#),
+            "{out:.800}"
+        );
+        assert!(
+            out.contains(r#"<hp:margin header="4252" footer="4252" gutter="0" left="8504" right="8504" top="5669" bottom="4252"/>"#),
+            "{out:.1200}"
+        );
+        assert!(!out.contains(r#"width="0" height="0""#));
+    }
+
+    #[test]
+    fn valid_full_bleed_page_keeps_zero_margins() {
+        let page_def = crate::model::page::PageDef {
+            width: 10000,
+            height: 20000,
+            ..Default::default()
+        };
+        let out = replace_page_pr(EMPTY_SECTION_XML, &page_def);
+        assert!(out.contains(r#"width="10000" height="20000""#));
+        assert!(
+            out.contains(r#"<hp:margin header="0" footer="0" gutter="0" left="0" right="0" top="0" bottom="0"/>"#),
+            "유효한 용지의 0 여백은 의도된 full-bleed일 수 있음: {out:.1200}"
+        );
     }
 
     #[test]

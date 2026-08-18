@@ -83,3 +83,27 @@ test('기존 HWP/HWPX 문서는 출처 포맷 저장 동작을 유지한다', ()
     suggestedName: 'sample.hwpx',
   });
 });
+
+test('HWPX를 HWP handle로 변환 저장한 뒤 Ctrl+S는 HWP 바이트를 유지한다', () => {
+  assert.deepEqual(resolveSaveTarget('hwpx', 'converted.hwp', { name: 'converted.hwp' }), {
+    format: 'hwp',
+    forceSaveAs: false,
+    suggestedName: 'converted.hwp',
+  });
+});
+
+test('HWP를 HWPX로 변환 저장한 뒤 Ctrl+S는 HWPX 바이트를 유지한다', () => {
+  assert.deepEqual(resolveSaveTarget('hwp', 'converted.hwpx', { name: 'converted.hwpx' }), {
+    format: 'hwpx',
+    forceSaveAs: false,
+    suggestedName: 'converted.hwpx',
+  });
+});
+
+test('fallback 변환 저장도 현재 파일명 확장자를 다음 Ctrl+S 포맷으로 사용한다', () => {
+  assert.deepEqual(resolveSaveTarget('hwpx', 'downloaded.hwp', null), {
+    format: 'hwp',
+    forceSaveAs: false,
+    suggestedName: 'downloaded.hwp',
+  });
+});

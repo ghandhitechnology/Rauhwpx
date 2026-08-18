@@ -7,6 +7,8 @@ import {
 export interface FileSystemWritableFileStreamLike {
   write(data: Blob): Promise<void>;
   close(): Promise<void>;
+  /** Browser File System Access streams can discard an uncommitted swap file. */
+  abort?(reason?: unknown): Promise<void>;
 }
 
 /** File System Access 권한 상태 (queryPermission/requestPermission 반환). */
@@ -186,15 +188,22 @@ async function writeBlobToHandle(
   validateTarget?: SaveDocumentOptions['validateTarget'],
 ): Promise<void> {
   let release: ((saved: boolean) => Promise<void>) | void = undefined;
+  let writable: FileSystemWritableFileStreamLike | undefined;
   let saved = false;
   try {
     release = await validateTarget?.(handle);
     await handle.validateSaveTarget?.();
-    const writable = await handle.createWritable();
+    writable = await handle.createWritable();
     await writable.write(blob);
     await writable.close();
     saved = true;
     handle.adoptSaveTarget?.();
+  } catch (error) {
+    // File System Access writes through a temporary swap file. Explicitly abort it
+    // on write/close failure so a partially staged document cannot be committed by
+    // a lingering stream after the save has already been reported as failed.
+    await writable?.abort?.(error).catch(() => {});
+    throw error;
   } finally {
     await release?.(saved);
     if (!saved) await handle.releaseUnusedSaveTarget?.();

@@ -962,6 +962,11 @@ fn adapt_paragraph_with_context(
             Control::HiddenComment(comment) => {
                 adapt_paragraphs_with_context(&mut comment.paragraphs, report, context)
             }
+            // MEMO 필드의 본문도 독립 paragraph list다. 여기만 재귀에서 빠지면
+            // 내부 수식의 CTRL_HEADER attr/raw 상태가 HWP용으로 물질화되지 않는다.
+            Control::Field(field) => {
+                adapt_paragraphs_with_context(&mut field.memo_paragraphs, report, context)
+            }
             _ => {}
         }
     }
@@ -1304,10 +1309,34 @@ fn adapt_shape_with_context(
         }
     }
 
-    if let ShapeObject::Group(group) = shape {
-        for child in &mut group.children {
-            adapt_shape_with_context(child, report, context);
+    // These variants keep their caption outside DrawingObjAttr. Equations and
+    // nested fields there need the same HWP5 materialization as body/text-box
+    // paragraphs.
+    match shape {
+        ShapeObject::Group(group) => {
+            if let Some(caption) = &mut group.caption {
+                adapt_paragraphs_with_context(&mut caption.paragraphs, report, context);
+            }
+            for child in &mut group.children {
+                adapt_shape_with_context(child, report, context);
+            }
         }
+        ShapeObject::Picture(picture) => {
+            if let Some(caption) = &mut picture.caption {
+                adapt_paragraphs_with_context(&mut caption.paragraphs, report, context);
+            }
+        }
+        ShapeObject::Chart(chart) => {
+            if let Some(caption) = &mut chart.caption {
+                adapt_paragraphs_with_context(&mut caption.paragraphs, report, context);
+            }
+        }
+        ShapeObject::Ole(ole) => {
+            if let Some(caption) = &mut ole.caption {
+                adapt_paragraphs_with_context(&mut caption.paragraphs, report, context);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2846,6 +2875,78 @@ mod tests {
         assert_eq!(report.tables_ctrl_data_synthesized, 2);
         assert_eq!(report.table_record_extra_materialized, 2);
         assert_eq!(report.cells_list_header_contract_materialized, 2);
+    }
+
+    #[test]
+    fn equation_inside_field_memo_is_adapted_for_hwp_storage() {
+        use crate::model::control::{Equation, Field};
+
+        let mut memo_para = Paragraph::default();
+        memo_para
+            .controls
+            .push(Control::Equation(Box::new(Equation {
+                raw_ctrl_data: vec![0xAA; 16],
+                ..Default::default()
+            })));
+        let mut para = Paragraph::default();
+        para.controls.push(Control::Field(Field {
+            memo_paragraphs: vec![memo_para],
+            ..Default::default()
+        }));
+
+        let mut report = AdapterReport::new();
+        adapt_paragraph(&mut para, &mut report);
+
+        let Control::Field(field) = &para.controls[0] else {
+            panic!("expected field");
+        };
+        let Control::Equation(eq) = &field.memo_paragraphs[0].controls[0] else {
+            panic!("expected equation in field memo");
+        };
+        assert_eq!(eq.common.attr & 0x0800_0000, 0x0800_0000);
+        assert!(eq.raw_ctrl_data.is_empty());
+        assert_eq!(report.equation_ctrl_header_attr_materialized, 1);
+    }
+
+    #[test]
+    fn equations_in_shape_specific_captions_are_adapted_for_hwp_storage() {
+        fn equation_caption() -> crate::model::shape::Caption {
+            crate::model::shape::Caption {
+                paragraphs: vec![Paragraph {
+                    controls: vec![Control::Equation(Box::new(
+                        crate::model::control::Equation::default(),
+                    ))],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+
+        let mut shapes = vec![
+            ShapeObject::Group(crate::model::shape::GroupShape {
+                caption: Some(equation_caption()),
+                ..Default::default()
+            }),
+            ShapeObject::Picture(Box::new(crate::model::image::Picture {
+                caption: Some(equation_caption()),
+                ..Default::default()
+            })),
+            ShapeObject::Chart(Box::new(crate::model::shape::ChartShape {
+                caption: Some(equation_caption()),
+                ..Default::default()
+            })),
+            ShapeObject::Ole(Box::new(crate::model::shape::OleShape {
+                caption: Some(equation_caption()),
+                ..Default::default()
+            })),
+        ];
+
+        let mut report = AdapterReport::new();
+        for shape in &mut shapes {
+            adapt_shape(shape, &mut report);
+        }
+
+        assert_eq!(report.equation_ctrl_header_attr_materialized, 4);
     }
 
     #[test]

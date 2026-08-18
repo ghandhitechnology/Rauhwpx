@@ -231,6 +231,23 @@ fn write_hwp_cfb(
 
     // 6. 추가 스트림 (Scripts, DocOptions 등 — 라운드트립 보존)
     for (path, data) in extra_streams {
+        if let Some(existing) = streams
+            .iter_mut()
+            .find(|(emitted_path, _)| emitted_path.to_uppercase() == path.to_uppercase())
+        {
+            // HWPX→HWP contract extraction deliberately carries the source
+            // previews in extra_streams. They take precedence over the fallback
+            // preview synthesized above, but must not enter mini_cfb as duplicate
+            // directory names. No other extra stream may shadow a generated core
+            // stream (FileHeader/DocInfo/BodyText/BinData).
+            if path.eq_ignore_ascii_case("/PrvText") || path.eq_ignore_ascii_case("/PrvImage") {
+                existing.1 = data.clone();
+                continue;
+            }
+            return Err(SerializeError::CfbError(format!(
+                "extra stream conflicts with generated HWP stream: {path}"
+            )));
+        }
         streams.push((path.clone(), data.clone()));
     }
 

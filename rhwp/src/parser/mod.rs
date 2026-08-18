@@ -188,6 +188,16 @@ pub fn parse_hwp(data: &[u8]) -> Result<Document, ParseError> {
     }
 }
 
+/// Parse an HWP through the standards-compliant CFB reader only.
+///
+/// Generated save output uses this stricter entry point as an integrity gate:
+/// accepting our own bytes only through the lenient recovery reader could hide
+/// a malformed FAT/directory tree and let a package rejected by Hancom reach disk.
+pub fn parse_hwp_strict(data: &[u8]) -> Result<Document, ParseError> {
+    let cfb = cfb_reader::CfbReader::open(data).map_err(ParseError::CfbError)?;
+    parse_hwp_with_cfb(cfb, data)
+}
+
 /// 표준 CfbReader로 파싱
 fn parse_hwp_with_cfb(
     mut cfb: cfb_reader::CfbReader,

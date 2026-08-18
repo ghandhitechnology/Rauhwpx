@@ -105,18 +105,98 @@ fn serialize_master_page_tail(section: &Section, records: &mut Vec<Record>) {
 
 fn collect_memo_lists(section: &Section) -> Vec<(u32, Vec<Paragraph>)> {
     let mut memo_lists = Vec::new();
-    for para in &section.paragraphs {
-        for ctrl in &para.controls {
-            if let Control::Field(field) = ctrl {
-                if field.field_type == crate::model::control::FieldType::Memo
-                    && !field.memo_paragraphs.is_empty()
-                {
-                    memo_lists.push((field.memo_index, field.memo_paragraphs.clone()));
-                }
-            }
-        }
+    collect_memo_lists_in_paragraphs(&section.paragraphs, &mut memo_lists);
+    for master_page in &section.section_def.master_pages {
+        collect_memo_lists_in_paragraphs(&master_page.paragraphs, &mut memo_lists);
     }
     memo_lists
+}
+
+fn collect_memo_lists_in_paragraphs(
+    paragraphs: &[Paragraph],
+    memo_lists: &mut Vec<(u32, Vec<Paragraph>)>,
+) {
+    for paragraph in paragraphs {
+        for control in &paragraph.controls {
+            collect_memo_lists_in_control(control, memo_lists);
+        }
+    }
+}
+
+fn collect_memo_lists_in_control(control: &Control, memo_lists: &mut Vec<(u32, Vec<Paragraph>)>) {
+    match control {
+        Control::Field(field) => {
+            if field.field_type == crate::model::control::FieldType::Memo
+                && !field.memo_paragraphs.is_empty()
+            {
+                memo_lists.push((field.memo_index, field.memo_paragraphs.clone()));
+            }
+            // 중첩 필드도 보존한다. 실제 메모 본문에 또 다른 필드가 들어갈 수 있다.
+            collect_memo_lists_in_paragraphs(&field.memo_paragraphs, memo_lists);
+        }
+        Control::Table(table) => {
+            if let Some(caption) = &table.caption {
+                collect_memo_lists_in_paragraphs(&caption.paragraphs, memo_lists);
+            }
+            for cell in &table.cells {
+                collect_memo_lists_in_paragraphs(&cell.paragraphs, memo_lists);
+            }
+        }
+        Control::Picture(picture) => {
+            if let Some(caption) = &picture.caption {
+                collect_memo_lists_in_paragraphs(&caption.paragraphs, memo_lists);
+            }
+        }
+        Control::Shape(shape) => collect_memo_lists_in_shape(shape, memo_lists),
+        Control::Header(header) => collect_memo_lists_in_paragraphs(&header.paragraphs, memo_lists),
+        Control::Footer(footer) => collect_memo_lists_in_paragraphs(&footer.paragraphs, memo_lists),
+        Control::Footnote(note) => collect_memo_lists_in_paragraphs(&note.paragraphs, memo_lists),
+        Control::Endnote(note) => collect_memo_lists_in_paragraphs(&note.paragraphs, memo_lists),
+        Control::HiddenComment(comment) => {
+            collect_memo_lists_in_paragraphs(&comment.paragraphs, memo_lists)
+        }
+        _ => {}
+    }
+}
+
+fn collect_memo_lists_in_shape(
+    shape: &crate::model::shape::ShapeObject,
+    memo_lists: &mut Vec<(u32, Vec<Paragraph>)>,
+) {
+    if let Some(drawing) = shape.drawing() {
+        if let Some(text_box) = &drawing.text_box {
+            collect_memo_lists_in_paragraphs(&text_box.paragraphs, memo_lists);
+        }
+        if let Some(caption) = &drawing.caption {
+            collect_memo_lists_in_paragraphs(&caption.paragraphs, memo_lists);
+        }
+    }
+    match shape {
+        crate::model::shape::ShapeObject::Group(group) => {
+            if let Some(caption) = &group.caption {
+                collect_memo_lists_in_paragraphs(&caption.paragraphs, memo_lists);
+            }
+            for child in &group.children {
+                collect_memo_lists_in_shape(child, memo_lists);
+            }
+        }
+        crate::model::shape::ShapeObject::Picture(picture) => {
+            if let Some(caption) = &picture.caption {
+                collect_memo_lists_in_paragraphs(&caption.paragraphs, memo_lists);
+            }
+        }
+        crate::model::shape::ShapeObject::Chart(chart) => {
+            if let Some(caption) = &chart.caption {
+                collect_memo_lists_in_paragraphs(&caption.paragraphs, memo_lists);
+            }
+        }
+        crate::model::shape::ShapeObject::Ole(ole) => {
+            if let Some(caption) = &ole.caption {
+                collect_memo_lists_in_paragraphs(&caption.paragraphs, memo_lists);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn serialize_memo_tail(
@@ -1403,6 +1483,98 @@ mod tests {
         assert!(bytes
             .windows(expected_field_end.len())
             .any(|window| window == expected_field_end));
+    }
+
+    #[test]
+    fn nested_memo_tail_collection_keeps_equations_inside_table_cells() {
+        let memo_paragraph = Paragraph {
+            controls: vec![Control::Equation(Box::new(
+                crate::model::control::Equation {
+                    script: "x over y".to_string(),
+                    ..Default::default()
+                },
+            ))],
+            ..Default::default()
+        };
+        let field = Control::Field(Field {
+            field_type: FieldType::Memo,
+            memo_index: 7,
+            memo_paragraphs: vec![memo_paragraph],
+            ..Default::default()
+        });
+        let table = crate::model::table::Table {
+            cells: vec![crate::model::table::Cell {
+                paragraphs: vec![Paragraph {
+                    controls: vec![field],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let section = Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Table(Box::new(table))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let memo_lists = collect_memo_lists(&section);
+        assert_eq!(memo_lists.len(), 1);
+        assert_eq!(memo_lists[0].0, 7);
+        let Control::Equation(eq) = &memo_lists[0].1[0].controls[0] else {
+            panic!("equation expected in collected memo tail");
+        };
+        assert_eq!(eq.script, "x over y");
+    }
+
+    #[test]
+    fn memo_tail_collection_visits_chart_and_ole_captions() {
+        fn memo_caption(index: u32) -> crate::model::shape::Caption {
+            crate::model::shape::Caption {
+                paragraphs: vec![Paragraph {
+                    controls: vec![Control::Field(Field {
+                        field_type: FieldType::Memo,
+                        memo_index: index,
+                        memo_paragraphs: vec![Paragraph::default()],
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+
+        let section = Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![
+                    Control::Shape(Box::new(crate::model::shape::ShapeObject::Chart(Box::new(
+                        crate::model::shape::ChartShape {
+                            caption: Some(memo_caption(11)),
+                            ..Default::default()
+                        },
+                    )))),
+                    Control::Shape(Box::new(crate::model::shape::ShapeObject::Ole(Box::new(
+                        crate::model::shape::OleShape {
+                            caption: Some(memo_caption(12)),
+                            ..Default::default()
+                        },
+                    )))),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let memo_lists = collect_memo_lists(&section);
+        assert_eq!(
+            memo_lists
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            vec![11, 12]
+        );
     }
 
     /// [#1795] FIELD_END 전용 갭(8 cu)을 다음 컨트롤(FIELD_BEGIN)이 선점하면

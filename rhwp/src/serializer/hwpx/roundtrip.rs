@@ -196,6 +196,14 @@ pub enum IrDifference {
         path: String,
         detail: String,
     },
+    /// 수식 스크립트/EQEDIT 메타데이터/배치 속성 불일치. 수식은 문단 text에 포함되지
+    /// 않으므로 이 게이트가 없으면 script가 빈 문자열이 되어도 검증이 통과한다.
+    EquationContent {
+        section: usize,
+        paragraph: usize,
+        path: String,
+        detail: String,
+    },
     /// 필드 parameters / MEMO 본문 불일치 — 필드 보존 게이트 (#1391).
     ///
     /// `path` 는 `…field` (parameters) 또는 `…field.memo.p[k]` (본문 재귀).
@@ -358,6 +366,16 @@ impl std::fmt::Display for IrDifference {
                 "section[{}] paragraph[{}]{} comment: {}",
                 section, paragraph, path, detail
             ),
+            EquationContent {
+                section,
+                paragraph,
+                path,
+                detail,
+            } => write!(
+                f,
+                "section[{}] paragraph[{}]{} equation: {}",
+                section, paragraph, path, detail
+            ),
             FieldContent {
                 section,
                 paragraph,
@@ -455,6 +473,83 @@ fn diff_object_comment(a: &str, b: &str) -> Option<String> {
         None
     } else {
         Some(format!("expected={:?} actual={:?}", a, b))
+    }
+}
+
+/// 문단 텍스트 밖에 저장되는 수식의 본문과 표시 계약을 비교한다.
+fn diff_equation(
+    a: &crate::model::control::Equation,
+    b: &crate::model::control::Equation,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    macro_rules! check {
+        ($name:literal, $left:expr, $right:expr) => {
+            if $left != $right {
+                parts.push(format!(
+                    "{}: expected={:?} actual={:?}",
+                    $name, $left, $right
+                ));
+            }
+        };
+    }
+
+    check!("script", &a.script, &b.script);
+    check!("attr", a.attr, b.attr);
+    check!("font_size", a.font_size, b.font_size);
+    check!("color", a.color, b.color);
+    check!("baseline", a.baseline, b.baseline);
+    check!("unknown", a.unknown, b.unknown);
+    check!("version_info", &a.version_info, &b.version_info);
+    check!("font_name", &a.font_name, &b.font_name);
+    check!("width", a.common.width, b.common.width);
+    check!("height", a.common.height, b.common.height);
+    check!(
+        "width_criterion",
+        a.common.width_criterion,
+        b.common.width_criterion
+    );
+    check!(
+        "height_criterion",
+        a.common.height_criterion,
+        b.common.height_criterion
+    );
+    check!("size_protect", a.common.size_protect, b.common.size_protect);
+    check!(
+        "treat_as_char",
+        a.common.treat_as_char,
+        b.common.treat_as_char
+    );
+    check!(
+        "affect_line_spacing",
+        a.common.affect_line_spacing,
+        b.common.affect_line_spacing
+    );
+    check!(
+        "allow_overlap",
+        a.common.allow_overlap,
+        b.common.allow_overlap
+    );
+    check!("text_wrap", a.common.text_wrap, b.common.text_wrap);
+    check!("text_flow", a.common.text_flow, b.common.text_flow);
+    check!("vert_rel_to", a.common.vert_rel_to, b.common.vert_rel_to);
+    check!("horz_rel_to", a.common.horz_rel_to, b.common.horz_rel_to);
+    check!("vert_align", a.common.vert_align, b.common.vert_align);
+    check!("horz_align", a.common.horz_align, b.common.horz_align);
+    check!(
+        "vertical_offset",
+        a.common.vertical_offset,
+        b.common.vertical_offset
+    );
+    check!(
+        "horizontal_offset",
+        a.common.horizontal_offset,
+        b.common.horizontal_offset
+    );
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
     }
 }
 
@@ -937,6 +1032,24 @@ fn diff_paragraph_linesegs(
                     diff_paragraph_linesegs(out, section, paragraph, &p, qa, qb);
                 }
             }
+            (Control::Header(ha), Control::Header(hb)) => {
+                for (k, (qa, qb)) in ha.paragraphs.iter().zip(hb.paragraphs.iter()).enumerate() {
+                    let p = format!("{path}/ctrl[{ci}]header.p[{k}]");
+                    diff_paragraph_linesegs(out, section, paragraph, &p, qa, qb);
+                }
+            }
+            (Control::Footer(fa), Control::Footer(fb)) => {
+                for (k, (qa, qb)) in fa.paragraphs.iter().zip(fb.paragraphs.iter()).enumerate() {
+                    let p = format!("{path}/ctrl[{ci}]footer.p[{k}]");
+                    diff_paragraph_linesegs(out, section, paragraph, &p, qa, qb);
+                }
+            }
+            (Control::HiddenComment(ca), Control::HiddenComment(cb)) => {
+                for (k, (qa, qb)) in ca.paragraphs.iter().zip(cb.paragraphs.iter()).enumerate() {
+                    let p = format!("{path}/ctrl[{ci}]hidden.p[{k}]");
+                    diff_paragraph_linesegs(out, section, paragraph, &p, qa, qb);
+                }
+            }
             // MEMO 본문 문단 lineseg 재귀 (#1391).
             (Control::Field(fa), Control::Field(fb)) => {
                 for (k, (qa, qb)) in fa
@@ -1149,6 +1262,14 @@ fn diff_paragraph_char_shapes(
             // 수식 설명 비교 (#1392) — equation 은 본문 텍스트 비교 대상이 아니므로
             // description 만 동승.
             (Control::Equation(ea), Control::Equation(eb)) => {
+                if let Some(detail) = diff_equation(ea, eb) {
+                    diff.push(IrDifference::EquationContent {
+                        section,
+                        paragraph,
+                        path: format!("{path}/ctrl[{ci}]eq"),
+                        detail,
+                    });
+                }
                 if let Some(detail) =
                     diff_object_comment(&ea.common.description, &eb.common.description)
                 {
@@ -1191,6 +1312,24 @@ fn diff_paragraph_char_shapes(
             (Control::Endnote(na), Control::Endnote(nb)) => {
                 for (k, (qa, qb)) in na.paragraphs.iter().zip(nb.paragraphs.iter()).enumerate() {
                     let p = format!("{path}/ctrl[{ci}]en.p[{k}]");
+                    diff_paragraph_char_shapes(diff, section, paragraph, &p, qa, qb);
+                }
+            }
+            (Control::Header(ha), Control::Header(hb)) => {
+                for (k, (qa, qb)) in ha.paragraphs.iter().zip(hb.paragraphs.iter()).enumerate() {
+                    let p = format!("{path}/ctrl[{ci}]header.p[{k}]");
+                    diff_paragraph_char_shapes(diff, section, paragraph, &p, qa, qb);
+                }
+            }
+            (Control::Footer(fa), Control::Footer(fb)) => {
+                for (k, (qa, qb)) in fa.paragraphs.iter().zip(fb.paragraphs.iter()).enumerate() {
+                    let p = format!("{path}/ctrl[{ci}]footer.p[{k}]");
+                    diff_paragraph_char_shapes(diff, section, paragraph, &p, qa, qb);
+                }
+            }
+            (Control::HiddenComment(ca), Control::HiddenComment(cb)) => {
+                for (k, (qa, qb)) in ca.paragraphs.iter().zip(cb.paragraphs.iter()).enumerate() {
+                    let p = format!("{path}/ctrl[{ci}]hidden.p[{k}]");
                     diff_paragraph_char_shapes(diff, section, paragraph, &p, qa, qb);
                 }
             }
@@ -1580,6 +1719,11 @@ mod tests {
         doc.doc_info.para_shapes = vec![Default::default()];
         doc.doc_info.styles = vec![Default::default()];
         let mut section: crate::model::document::Section = Default::default();
+        // Roundtrip fixtures should start from valid page geometry. Production
+        // export intentionally canonicalizes an uninitialized 0x0 PageDef to A4,
+        // which would otherwise make object-focused tests report that expected
+        // safety normalization as an unrelated page-definition loss.
+        section.section_def.page_def = crate::model::page::PageDef::a4_default();
         section.paragraphs.push(p0);
         section.paragraphs.push(p1);
         doc.sections.push(section);
@@ -1772,6 +1916,94 @@ mod tests {
         let a = doc_with_control(table_control_with_cell_controls(vec![picture_control()]));
         let b = doc_with_control(table_control_with_cell_controls(vec![picture_control()]));
         assert!(diff_documents(&a, &b).is_empty());
+    }
+
+    fn paragraph_with_equation(script: &str) -> Paragraph {
+        let mut para = Paragraph::default();
+        para.controls
+            .push(crate::model::control::Control::Equation(Box::new(
+                crate::model::control::Equation {
+                    script: script.to_string(),
+                    ..Default::default()
+                },
+            )));
+        para
+    }
+
+    #[test]
+    fn equation_script_and_placement_loss_fail_the_roundtrip_gate() {
+        use crate::model::control::{Control, Equation};
+
+        let mut expected = Equation::default();
+        expected.script = "1 over 2".to_string();
+        expected.common.allow_overlap = true;
+        let mut actual = expected.clone();
+        actual.script.clear();
+        actual.common.allow_overlap = false;
+
+        let diff = diff_documents(
+            &doc_with_control(Control::Equation(Box::new(expected))),
+            &doc_with_control(Control::Equation(Box::new(actual))),
+        );
+        assert_eq!(diff.differences.len(), 1, "{:?}", diff.differences);
+        let IrDifference::EquationContent { path, detail, .. } = &diff.differences[0] else {
+            panic!("EquationContent 여야 함: {:?}", diff.differences);
+        };
+        assert_eq!(path, "/ctrl[0]eq");
+        assert!(detail.contains("script:"), "{detail}");
+        assert!(detail.contains("allow_overlap:"), "{detail}");
+    }
+
+    #[test]
+    fn equation_diff_recurses_header_footer_and_hidden_comment() {
+        use crate::model::control::{Control, HiddenComment};
+        use crate::model::header_footer::{Footer, Header};
+
+        let cases = [
+            (
+                Control::Header(Box::new(Header {
+                    paragraphs: vec![paragraph_with_equation("header-a")],
+                    ..Default::default()
+                })),
+                Control::Header(Box::new(Header {
+                    paragraphs: vec![paragraph_with_equation("header-b")],
+                    ..Default::default()
+                })),
+                "header.p[0]",
+            ),
+            (
+                Control::Footer(Box::new(Footer {
+                    paragraphs: vec![paragraph_with_equation("footer-a")],
+                    ..Default::default()
+                })),
+                Control::Footer(Box::new(Footer {
+                    paragraphs: vec![paragraph_with_equation("footer-b")],
+                    ..Default::default()
+                })),
+                "footer.p[0]",
+            ),
+            (
+                Control::HiddenComment(Box::new(HiddenComment {
+                    paragraphs: vec![paragraph_with_equation("hidden-a")],
+                })),
+                Control::HiddenComment(Box::new(HiddenComment {
+                    paragraphs: vec![paragraph_with_equation("hidden-b")],
+                })),
+                "hidden.p[0]",
+            ),
+        ];
+
+        for (expected, actual, path) in cases {
+            let diff = diff_documents(&doc_with_control(expected), &doc_with_control(actual));
+            assert!(
+                diff.differences.iter().any(|d| matches!(
+                    d,
+                    IrDifference::EquationContent { path: p, .. } if p.contains(path)
+                )),
+                "{path}: {:?}",
+                diff.differences
+            );
+        }
     }
 
     #[test]

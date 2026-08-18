@@ -505,6 +505,42 @@ test('save ownership/write errors do not silently become downloads', () => {
   );
 });
 
+test('write failure aborts the browser swap stream', async () => {
+  const calls: string[] = [];
+  const failure = new Error('disk full');
+  const handle = {
+    ...createHandle('opened.hwp'),
+    async createWritable() {
+      return {
+        async write() {
+          calls.push('write');
+          throw failure;
+        },
+        async close() {
+          calls.push('close');
+        },
+        async abort(reason?: unknown) {
+          assert.equal(reason, failure);
+          calls.push('abort');
+        },
+      };
+    },
+  };
+
+  await assert.rejects(
+    saveDocumentToFileSystem({
+      blob: new Blob(['saved']),
+      suggestedName: 'opened.hwp',
+      currentHandle: handle,
+      forceSaveAs: false,
+      saveFormat: 'hwp',
+      windowLike: {},
+    }),
+    /disk full/,
+  );
+  assert.deepEqual(calls, ['write', 'abort']);
+});
+
 test('HML로 저장을 선택하면 HML 저장 picker 형식(.hml)을 사용한다', async () => {
   const pickerHandle = createHandle('converted.hml');
   const blob = new Blob(['saved'], { type: 'application/xml' });

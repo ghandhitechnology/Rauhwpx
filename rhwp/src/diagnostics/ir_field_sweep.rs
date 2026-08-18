@@ -864,6 +864,7 @@ fn sweep_cell(base: &str, a: &Cell, b: &Cell, out: &mut Vec<FieldDivergence>) {
         list_header_width_ref,
         text_direction,
         vertical_align,
+        line_wrap,
         apply_inner_margin,
         is_header,
         raw_list_extra,
@@ -887,6 +888,7 @@ fn sweep_cell(base: &str, a: &Cell, b: &Cell, out: &mut Vec<FieldDivergence>) {
     f!(list_header_width_ref);
     f!(text_direction);
     f!(vertical_align);
+    f!(line_wrap);
     f!(apply_inner_margin);
     f!(is_header);
     f!(raw_list_extra);

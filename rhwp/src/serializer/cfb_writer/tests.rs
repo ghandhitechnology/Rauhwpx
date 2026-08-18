@@ -30,6 +30,34 @@ fn test_serialize_hwp_empty_document() {
 }
 
 #[test]
+fn extra_preview_replaces_fallback_without_duplicate_directory_entry() {
+    let expected = vec![0x41, 0x00, 0x42, 0x00];
+    let doc = Document {
+        preview: Some(Preview {
+            image: None,
+            text: Some("fallback".to_string()),
+        }),
+        extra_streams: vec![("/PrvText".to_string(), expected.clone())],
+        ..Default::default()
+    };
+    let bytes = serialize_hwp(&doc).expect("preview overlay should serialize");
+    let mut cfb = crate::parser::cfb_reader::CfbReader::open(&bytes).expect("strict CFB open");
+    assert_eq!(cfb.read_stream_raw("/PrvText").unwrap(), expected);
+}
+
+#[test]
+fn extra_stream_cannot_shadow_generated_core_stream() {
+    let doc = Document {
+        extra_streams: vec![("/DocInfo".to_string(), b"corrupt".to_vec())],
+        ..Default::default()
+    };
+    let error = serialize_hwp(&doc).expect_err("core stream collision must fail closed");
+    assert!(error
+        .to_string()
+        .contains("conflicts with generated HWP stream"));
+}
+
+#[test]
 fn test_serialize_hwp_cfb_streams() {
     let doc = Document {
         header: FileHeader {

@@ -129,10 +129,15 @@ pub struct Cell {
     pub paragraphs: Vec<Paragraph>,
     /// LIST_HEADER의 텍스트 영역 폭 참조 (라운드트립 보존용)
     pub list_header_width_ref: u16,
-    /// 텍스트 방향 (0: 가로, 1: 세로)
+    /// 텍스트 방향 (0: 가로, 1: 세로·영문 누임, 2: 세로·영문 세움)
     pub text_direction: u8,
     /// 세로 정렬 (0: top, 1: center, 2: bottom)
     pub vertical_align: VerticalAlign,
+    /// HWPX `<hp:subList lineWrap>` 셀 텍스트 넘침 처리.
+    ///
+    /// HWP5 셀 레코드에는 대응 필드가 없어 `Break`가 기본이며,
+    /// HWPX 원본의 `SQUEEZE`를 저장할 때 유실하지 않도록 IR에 보존한다.
+    pub line_wrap: CellLineWrap,
     /// 안 여백 지정 여부 (list_attr bit 16)
     /// true: 셀 고유 padding 사용, false: 표 기본 padding 사용
     pub apply_inner_margin: bool,
@@ -176,6 +181,14 @@ pub enum VerticalAlign {
     Top,
     Center,
     Bottom,
+}
+
+/// HWPX 셀 `subList` 줄 넘침 방식.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum CellLineWrap {
+    #[default]
+    Break,
+    Squeeze,
 }
 
 impl Cell {
@@ -345,6 +358,7 @@ impl Cell {
             list_header_width_ref: template.list_header_width_ref,
             text_direction: template.text_direction,
             vertical_align: template.vertical_align,
+            line_wrap: template.line_wrap,
             apply_inner_margin: template.apply_inner_margin,
             is_header: template.is_header,
             raw_list_extra: template.raw_list_extra.clone(),

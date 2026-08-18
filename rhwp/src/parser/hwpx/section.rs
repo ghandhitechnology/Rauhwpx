@@ -30,7 +30,7 @@ use crate::model::shape::{
     VertRelTo,
 };
 use crate::model::style::{Fill, ShapeBorderLine};
-use crate::model::table::{Cell, Table, TablePageBreak, VerticalAlign};
+use crate::model::table::{Cell, CellLineWrap, Table, TablePageBreak, VerticalAlign};
 use crate::model::HwpUnit16;
 use crate::parser::tags;
 
@@ -593,6 +593,12 @@ fn parse_paragraph(
                     b"lineseg" => {
                         // 단독 lineseg (linesegarray 밖에 나올 경우)
                         para.line_segs.push(parse_lineseg_element(ce));
+                    }
+                    b"equation" => {
+                        // 자기 닫힘 수식도 인라인 슬롯 하나를 차지한다. 종전에는 Empty
+                        // 분기에 arm이 없어 컨트롤과 8-code-unit 위치가 함께 소실됐다.
+                        para.controls.push(parse_empty_equation(ce));
+                        text_parts.push("\u{0002}".to_string());
                     }
                     _ => {}
                 }
@@ -1399,6 +1405,7 @@ fn parse_col_pr_with_children(
                 let cname = ce.name();
                 match local_name(cname.as_ref()) {
                     b"colLine" => parse_col_line(ce, &mut cd),
+                    b"colSz" => parse_col_size(ce, &mut cd),
                     _ => {}
                 }
             }
@@ -1409,6 +1416,10 @@ fn parse_col_pr_with_children(
                     b"colLine" => {
                         parse_col_line(ce, &mut cd);
                         skip_element(reader, b"colLine")?;
+                    }
+                    b"colSz" => {
+                        parse_col_size(ce, &mut cd);
+                        skip_element(reader, b"colSz")?;
                     }
                     _ => {
                         let tag = local.to_vec();
@@ -1428,6 +1439,23 @@ fn parse_col_pr_with_children(
         buf.clear();
     }
     Ok(cd)
+}
+
+/// 각 단의 절대 너비/뒤 간격. `sameSz="0"` 다단 문서에서 이 목록을
+/// 버리면 모든 단이 균등 너비로 재계산되어 표·본문 배치가 다른 쪽으로 밀린다.
+fn parse_col_size(e: &quick_xml::events::BytesStart, cd: &mut ColumnDef) {
+    let mut width = 0;
+    let mut gap = 0;
+    for attr in e.attributes().flatten() {
+        match attr.key.as_ref() {
+            b"width" => width = parse_i16(&attr),
+            b"gap" => gap = parse_i16(&attr),
+            _ => {}
+        }
+    }
+    cd.widths.push(width);
+    cd.gaps.push(gap);
+    cd.proportional_widths = false;
 }
 
 fn parse_col_line(e: &quick_xml::events::BytesStart, cd: &mut ColumnDef) {
@@ -1705,6 +1733,14 @@ fn parse_table(
             // [#2855] 표만 lock arm 이 없어 개체 잠금이 파싱 단계에서 유실됐다. 도형/그림
             // 계열이 공유하는 parse_object_element_attrs(같은 파일 2905행, #2840)와 동형.
             b"lock" => table.common.locked = attr_str(&attr) == "1",
+            b"dropcapstyle" => {
+                table.common.drop_cap_style = match attr_str(&attr).as_str() {
+                    "DoubleLine" => crate::model::shape::DropCapStyle::DoubleLine,
+                    "TripleLine" => crate::model::shape::DropCapStyle::TripleLine,
+                    "Margin" => crate::model::shape::DropCapStyle::Margin,
+                    _ => crate::model::shape::DropCapStyle::None,
+                };
+            }
             _ => {}
         }
     }
@@ -2167,8 +2203,8 @@ fn parse_table_cell(
                             match attr.key.as_ref() {
                                 b"borderFillIDRef" => cell.border_fill_id = parse_u16(&attr),
                                 b"textDirection" => {
-                                    let val = attr_str(&attr);
-                                    cell.text_direction = if val == "VERTICAL" { 1 } else { 0 };
+                                    cell.text_direction =
+                                        parse_cell_text_direction(&attr_str(&attr));
                                 }
                                 b"vAlign" => {
                                     cell.vertical_align = match attr_str(&attr).as_str() {
@@ -2197,7 +2233,14 @@ fn parse_table_cell(
                                 // 유실됐다(cellPr 경로는 serializer 가 방출하지 않음).
                                 b"textDirection" => {
                                     cell.text_direction =
-                                        if attr_str(&attr) == "VERTICAL" { 1 } else { 0 };
+                                        parse_cell_text_direction(&attr_str(&attr));
+                                }
+                                b"lineWrap" => {
+                                    cell.line_wrap = if attr_str(&attr) == "SQUEEZE" {
+                                        CellLineWrap::Squeeze
+                                    } else {
+                                        CellLineWrap::Break
+                                    };
                                 }
                                 _ => {}
                             }
@@ -2208,8 +2251,8 @@ fn parse_table_cell(
                             match attr.key.as_ref() {
                                 b"borderFillIDRef" => cell.border_fill_id = parse_u16(&attr),
                                 b"textDirection" => {
-                                    let val = attr_str(&attr);
-                                    cell.text_direction = if val == "VERTICAL" { 1 } else { 0 };
+                                    cell.text_direction =
+                                        parse_cell_text_direction(&attr_str(&attr));
                                 }
                                 b"vAlign" => {
                                     cell.vertical_align = match attr_str(&attr).as_str() {
@@ -2296,6 +2339,19 @@ fn parse_table_cell(
     }
 
     Ok(cell)
+}
+
+/// HWPX 셀 `textDirection` 역매핑.
+///
+/// HWP5 LIST_HEADER의 3bit 방향 코드와 동일하게 1은 영문 누임,
+/// 2는 영문 세움으로 보존한다. `VERTICALALL`을 가로로 접으면
+/// 저장 후 셀의 축과 배치가 완전히 바뀐다.
+fn parse_cell_text_direction(value: &str) -> u8 {
+    match value {
+        "VERTICAL" => 1,
+        "VERTICALALL" => 2,
+        _ => 0,
+    }
 }
 
 // ─── Picture ───
@@ -5497,7 +5553,7 @@ fn parse_equation(
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref ce)) | Ok(Event::Empty(ref ce)) => {
+            Ok(Event::Start(ref ce)) => {
                 let cname = ce.name();
                 let local = local_name(cname.as_ref());
                 match local {
@@ -5517,6 +5573,26 @@ fn parse_equation(
                     b"shapeComment" => {
                         common.description = read_dutmal_text(reader, b"shapeComment")?;
                     }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(ref ce)) => {
+                let cname = ce.name();
+                let local = local_name(cname.as_ref());
+                match local {
+                    b"sz" | b"curSz" | b"orgSz" | b"pos" | b"offset" | b"outMargin" => {
+                        parse_object_layout_child(
+                            local,
+                            ce,
+                            &mut common,
+                            &mut shape_attr,
+                            &mut has_pos,
+                        );
+                    }
+                    // 빈 script/shapeComment는 reader를 소비하거나 script 캡처 상태를
+                    // 켜면 안 된다. 뒤 형제의 텍스트가 수식으로 섞이는 것을 막는다.
+                    b"script" => {}
+                    b"shapeComment" => common.description.clear(),
                     _ => {}
                 }
             }
@@ -5586,6 +5662,34 @@ fn parse_equation(
         raw_ctrl_data: Vec::new(),
     };
     Ok(Control::Equation(Box::new(equation)))
+}
+
+/// 자식이 없는 `<hp:equation/>`을 속성만으로 복원한다.
+fn parse_empty_equation(e: &quick_xml::events::BytesStart) -> Control {
+    let mut equation = Equation::default();
+    let mut shape_attr = ShapeComponentAttr::default();
+    parse_object_element_attrs(e, &mut equation.common, &mut shape_attr);
+
+    for attr in e.attributes().flatten() {
+        match attr.key.as_ref() {
+            b"version" => equation.version_info = attr_str(&attr),
+            b"baseLine" => equation.baseline = attr_str(&attr).parse().unwrap_or(85),
+            b"textColor" => equation.color = parse_color(&attr),
+            b"baseUnit" => equation.font_size = parse_u32(&attr),
+            b"lineMode" => {
+                if attr_str(&attr).eq_ignore_ascii_case("LINE") {
+                    equation.attr |= EQUATION_LINE_MODE_BIT;
+                } else {
+                    equation.attr &= !EQUATION_LINE_MODE_BIT;
+                }
+                equation.eqedit = equation.attr;
+            }
+            b"font" => equation.font_name = attr_str(&attr),
+            _ => {}
+        }
+    }
+
+    Control::Equation(Box::new(equation))
 }
 
 // ─── 유틸리티 (section 전용) ───
@@ -6027,7 +6131,8 @@ fn parse_hp_chart_element(
     }
 
     let mut extent: Option<(i32, i32)> = None;
-    parse_common_shape_children(reader, &mut common, b"chart", &mut extent)?;
+    let mut caption = None;
+    parse_common_shape_children(reader, &mut common, b"chart", &mut extent, &mut caption)?;
     if numbering_type_picture {
         common.hwp5_gen_shape_attr_bit28 = true;
     }
@@ -6039,6 +6144,7 @@ fn parse_hp_chart_element(
 
     let mut ole = OleShape::default();
     ole.common = common;
+    ole.caption = caption;
     ole.bin_data_id = 60000u32 + chart_num as u32;
     // <hc:extent> 가 있으면 원본 개체 크기를 보존한다(없으면 종전 기본값 7200).
     let (ext_x, ext_y) = extent.unwrap_or((7200, 7200));
@@ -6124,7 +6230,8 @@ fn parse_hp_ole_element(
     }
 
     let mut extent: Option<(i32, i32)> = None;
-    parse_common_shape_children(reader, &mut common, b"ole", &mut extent)?;
+    let mut caption = None;
+    parse_common_shape_children(reader, &mut common, b"ole", &mut extent, &mut caption)?;
     if numbering_type_picture {
         common.hwp5_gen_shape_attr_bit28 = true;
     }
@@ -6132,6 +6239,7 @@ fn parse_hp_ole_element(
 
     let mut ole = OleShape::default();
     ole.common = common;
+    ole.caption = caption;
     ole.bin_data_id = bin_id;
     ole.drawing_aspect = draw_aspect;
     // <hc:extent> 가 있으면 원본 개체 크기를 보존한다(없으면 종전 기본값 7200).
@@ -6183,10 +6291,14 @@ fn parse_common_shape_children(
     // OLE 전용 `<hc:extent>`(원본 개체 크기) 수집용. 호출자(ole/chart)만 사용한다.
     // 종전엔 이 자식을 무시하고 호출자가 7200 을 하드코딩해 개체 크기가 유실됐다.
     extent_out: &mut Option<(i32, i32)>,
+    caption_out: &mut Option<crate::model::shape::Caption>,
 ) -> Result<(), HwpxError> {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref ce)) if local_name(ce.name().as_ref()) == b"caption" => {
+                *caption_out = Some(parse_table_caption(ce, reader)?);
+            }
             Ok(Event::Start(ref ce)) | Ok(Event::Empty(ref ce)) => {
                 let cname = ce.name();
                 let local = local_name(cname.as_ref());
@@ -8261,6 +8373,47 @@ mod tests {
         assert_eq!(
             eq.script, "a < b > c",
             "CDATA 로 감싸진 수식 스크립트가 소실되면 안 된다"
+        );
+    }
+
+    #[test]
+    fn equation_empty_script_does_not_capture_following_comment_text() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<s:sec xmlns:q="urn:paragraph" xmlns:s="urn:section">
+  <q:p paraPrIDRef="0" styleIDRef="0"><q:run charPrIDRef="0">
+    <q:equation version="Equation Version 60" baseLine="85" baseUnit="1000" font="HYhwpEQ">
+      <q:script/><q:shapeComment>설명만</q:shapeComment>
+    </q:equation>
+  </q:run></q:p>
+</s:sec>"#;
+
+        let section = parse_hwpx_section(xml).unwrap();
+        let Control::Equation(eq) = &section.paragraphs[0].controls[0] else {
+            panic!("expected Equation control");
+        };
+        assert!(eq.script.is_empty());
+        assert_eq!(eq.common.description, "설명만");
+    }
+
+    #[test]
+    fn self_closing_equation_is_kept_as_an_inline_control_slot() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<s:sec xmlns:q="urn:paragraph" xmlns:s="urn:section">
+  <q:p paraPrIDRef="0" styleIDRef="0"><q:run charPrIDRef="0">
+    <q:equation lineMode="LINE" baseUnit="1200"/>
+  </q:run></q:p>
+</s:sec>"#;
+
+        let section = parse_hwpx_section(xml).unwrap();
+        let para = &section.paragraphs[0];
+        let Control::Equation(eq) = &para.controls[0] else {
+            panic!("expected Equation control");
+        };
+        assert_eq!(eq.attr & EQUATION_LINE_MODE_BIT, EQUATION_LINE_MODE_BIT);
+        assert_eq!(eq.font_size, 1200);
+        assert_eq!(
+            para.char_count, 9,
+            "수식 슬롯은 HWP와 동일하게 8 UTF-16 유닛"
         );
     }
 

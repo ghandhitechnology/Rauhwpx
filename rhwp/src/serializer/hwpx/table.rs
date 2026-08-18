@@ -31,11 +31,11 @@ use quick_xml::Writer;
 use crate::model::shape::{
     CommonObjAttr, HorzAlign, HorzRelTo, SizeCriterion, TextFlow, TextWrap, VertAlign, VertRelTo,
 };
-use crate::model::table::{Cell, Table, TablePageBreak, VerticalAlign};
+use crate::model::table::{Cell, CellLineWrap, Table, TablePageBreak, VerticalAlign};
 
 use super::context::SerializeContext;
 use super::section::{render_hp_p_open, render_paragraph_parts};
-use super::shape::numbering_type_str;
+use super::shape::{drop_cap_style_str, numbering_type_str};
 use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs};
 use super::SerializeError;
 
@@ -86,7 +86,10 @@ pub fn write_table<W: Write>(
             ("textWrap", text_wrap),
             ("textFlow", text_flow),
             ("lock", lock),
-            ("dropcapstyle", "None"),
+            (
+                "dropcapstyle",
+                drop_cap_style_str(table.common.drop_cap_style),
+            ),
             ("pageBreak", page_break),
             ("repeatHeader", repeat_header),
             ("rowCnt", &row_cnt),
@@ -318,13 +321,9 @@ fn write_sub_list<W: Write>(
             ("id", ""),
             (
                 "textDirection",
-                if cell.text_direction == 1 {
-                    "VERTICAL"
-                } else {
-                    "HORIZONTAL"
-                },
+                cell_text_direction_str(cell.text_direction),
             ),
-            ("lineWrap", "BREAK"),
+            ("lineWrap", cell_line_wrap_str(cell.line_wrap)),
             ("vertAlign", cell_vert_align_str(cell.vertical_align)),
             ("linkListIDRef", "0"),
             ("linkListNextIDRef", "0"),
@@ -566,6 +565,21 @@ fn cell_vert_align_str(v: VerticalAlign) -> &'static str {
     }
 }
 
+fn cell_text_direction_str(direction: u8) -> &'static str {
+    match direction {
+        1 => "VERTICAL",
+        2 => "VERTICALALL",
+        _ => "HORIZONTAL",
+    }
+}
+
+fn cell_line_wrap_str(line_wrap: CellLineWrap) -> &'static str {
+    match line_wrap {
+        CellLineWrap::Break => "BREAK",
+        CellLineWrap::Squeeze => "SQUEEZE",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,6 +654,72 @@ mod tests {
         assert_eq!(
             table2.cells[0].text_direction, 1,
             "세로쓰기 셀 방향(textDirection)이 HWPX 왕복에서 보존돼야 함"
+        );
+    }
+
+    #[test]
+    fn cell_squeeze_and_vertical_all_survive_xml_ir_xml_roundtrip() {
+        use crate::model::control::Control;
+        use crate::parser::hwpx::section::parse_hwpx_section;
+
+        // 실물 말뭉치인 k-water-rfp.hwpx와 동일한 셀 subList 조합.
+        // 종전에는 SQUEEZE→BREAK, VERTICALALL→HORIZONTAL 두 값이 모두 유실됐다.
+        let src = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hs:sec xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"
+        xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section">
+  <hp:p paraPrIDRef="0" styleIDRef="0">
+    <hp:tbl rowCnt="1" colCnt="1" cellSpacing="0" borderFillIDRef="0" dropcapstyle="Margin">
+      <hp:sz width="1000" height="1000" widthRelTo="ABSOLUTE" heightRelTo="ABSOLUTE"/>
+      <hp:pos treatAsChar="1" flowWithText="1" allowOverlap="0"
+              vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT"
+              vertOffset="0" horzOffset="0"/>
+      <hp:outMargin left="0" right="0" top="0" bottom="0"/>
+      <hp:inMargin left="0" right="0" top="0" bottom="0"/>
+      <hp:tr><hp:tc borderFillIDRef="0">
+        <hp:subList id="" textDirection="VERTICALALL" lineWrap="SQUEEZE"
+                    vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0"
+                    textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">
+          <hp:p paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t>x</hp:t></hp:run></hp:p>
+        </hp:subList>
+        <hp:cellAddr colAddr="0" rowAddr="0"/>
+        <hp:cellSpan colSpan="1" rowSpan="1"/>
+        <hp:cellSz width="1000" height="1000"/>
+        <hp:cellMargin left="0" right="0" top="0" bottom="0"/>
+      </hp:tc></hp:tr>
+    </hp:tbl>
+  </hp:p>
+</hs:sec>"#;
+
+        let section = parse_hwpx_section(src).expect("원본 XML 파싱");
+        let table = match &section.paragraphs[0].controls[0] {
+            Control::Table(table) => table,
+            other => panic!("표가 아님: {other:?}"),
+        };
+        assert_eq!(table.cells[0].text_direction, 2);
+        assert_eq!(table.cells[0].line_wrap, CellLineWrap::Squeeze);
+        assert_eq!(
+            table.common.drop_cap_style,
+            crate::model::shape::DropCapStyle::Margin
+        );
+
+        let xml = serialize(table);
+        assert!(xml.contains(r#"textDirection="VERTICALALL""#), "{xml}");
+        assert!(xml.contains(r#"lineWrap="SQUEEZE""#), "{xml}");
+        assert!(xml.contains(r#"dropcapstyle="Margin""#), "{xml}");
+
+        let wrapped = format!(
+            r#"<hs:sec xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"><hp:p paraPrIDRef="0" styleIDRef="0">{xml}</hp:p></hs:sec>"#
+        );
+        let reparsed = parse_hwpx_section(&wrapped).expect("재파싱");
+        let reparsed_table = match &reparsed.paragraphs[0].controls[0] {
+            Control::Table(table) => table,
+            other => panic!("표가 아님: {other:?}"),
+        };
+        assert_eq!(reparsed_table.cells[0].text_direction, 2);
+        assert_eq!(reparsed_table.cells[0].line_wrap, CellLineWrap::Squeeze);
+        assert_eq!(
+            reparsed_table.common.drop_cap_style,
+            crate::model::shape::DropCapStyle::Margin
         );
     }
 

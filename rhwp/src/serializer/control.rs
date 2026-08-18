@@ -1507,11 +1507,9 @@ fn serialize_shape_control(
                 level,
                 &serialize_common_obj_attr(&chart.common),
             ));
-            // 캡션 (SHAPE_COMPONENT 앞, level+1)
-            if let Some(ref caption) = chart.caption {
-                serialize_caption(caption, level + 1, records);
-            }
             let sc_ctrl_id = chart.drawing.shape_attr.ctrl_id;
+            // 캡션은 다른 도형과 동일하게 정확히 한 번만 방출한다. 종전에는
+            // 직접 호출과 emit_caption이 중복되어 캡션 문단/수식이 복제됐다.
             emit_caption(&chart.caption, records);
             records.push(Record {
                 tag_id: tags::HWPTAG_SHAPE_COMPONENT,

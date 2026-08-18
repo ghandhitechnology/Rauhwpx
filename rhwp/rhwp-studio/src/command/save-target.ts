@@ -60,11 +60,15 @@ export function resolveSaveTarget(
     };
   }
 
-  const convertedTarget = currentHandle?.name ?? fileName;
-  const convertedFormat = hasConvertedHmlTarget
-    ? saveFormatForFileName(convertedTarget)
-    : null;
-  const format: SaveFormat = convertedFormat
+  // Once a document has been saved under another format, its current handle/name is
+  // the durable target contract. `sourceFormat` deliberately continues to describe
+  // the parser provenance (the HWP exporter needs that to run its HWPX adapter), so
+  // using it here would make Ctrl+S switch back to the original format. That
+  // previously made HWPX -> Save As HWP fail on the next handle-backed save or
+  // unexpectedly change the extension again in fallback download mode.
+  const currentTarget = currentHandle?.name ?? fileName;
+  const currentFormat = saveFormatForFileName(currentTarget);
+  const format: SaveFormat = currentFormat
     ?? (sourceFormat === 'hwpx' ? 'hwpx' : 'hwp');
 
   return {
