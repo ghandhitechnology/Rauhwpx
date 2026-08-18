@@ -1,0 +1,163 @@
+/* 인라인 프롬프트 — 선택 끝의 칩과 즉석 입력 상자. #scroll-content 안에 산다. */
+
+.ag-inline-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 12;
+}
+
+/* display 지정이 hidden 속성을 이기지 않도록 명시적으로 끈다. */
+.ag-inline-chip[hidden],
+.ag-inline-box[hidden] {
+  display: none;
+}
+
+.ag-inline-chip {
+  position: absolute;
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 999px;
+  background: var(--ui-surface-raised);
+  color: var(--ui-text-secondary);
+  font-family: var(--font-family-ui);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  box-shadow: var(--shadow-light, 0 2px 8px rgba(0, 0, 0, 0.12));
+  animation: ag-inline-in 140ms ease-out;
+}
+
+.ag-inline-chip:hover {
+  color: var(--ui-text);
+  border-color: var(--accent-primary);
+}
+
+.ag-inline-chip:focus-visible,
+.ag-inline-permission:focus-visible,
+.ag-inline-send:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-inline-chip svg {
+  width: 12px;
+  height: 12px;
+  color: var(--accent-primary);
+}
+
+.ag-inline-box {
+  position: absolute;
+  pointer-events: auto;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--radius-lg, 10px);
+  background: var(--ui-surface-raised);
+  box-shadow: var(--shadow-dialog, 0 8px 24px rgba(0, 0, 0, 0.18));
+  animation: ag-inline-in 140ms ease-out;
+}
+
+.ag-inline-input {
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--ui-text);
+  font-family: var(--font-family-ui);
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 96px;
+}
+
+.ag-inline-input::placeholder {
+  color: var(--ui-text-placeholder);
+}
+
+.ag-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ag-inline-permission {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ui-text-secondary);
+  font-family: var(--font-family-ui);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.ag-inline-permission:hover {
+  background: var(--ui-hover);
+  color: var(--ui-text);
+}
+
+.ag-inline-permission.ag-inline-unrestricted {
+  border-color: var(--ui-danger);
+  background: var(--ui-danger-soft);
+  color: var(--ui-danger);
+  font-weight: 700;
+}
+
+.ag-inline-error {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ui-danger);
+  font-family: var(--font-family-ui);
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ag-inline-send {
+  flex: 0 0 auto;
+  padding: 3px 12px;
+  border: none;
+  border-radius: var(--radius-md, 6px);
+  background: var(--accent-primary);
+  color: var(--ui-text-on-accent);
+  font-family: var(--font-family-ui);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ag-inline-send:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+@keyframes ag-inline-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-inline-chip,
+  .ag-inline-box {
+    animation: none;
+  }
+}

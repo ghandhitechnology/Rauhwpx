@@ -76,6 +76,10 @@ import { summarizePendingDiffs } from './pending-diff-summary.ts';
 import { createReferenceLibrary } from './reference-library.ts';
 import { isDesktopApp } from '../../desktop-integration.ts';
 import { fuzzyTemplateScore } from './template-fuzzy.ts';
+import type {
+  InlinePromptSendResult,
+  InlinePromptSubmission,
+} from '../../agent/inline-prompt-context.ts';
 
 export interface AgentSidebarDeps {
   bridge: AgentBridge;
@@ -504,7 +508,11 @@ function createSketchFilterDefs(): SVGSVGElement {
   return svg;
 }
 
-export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; dispose(): void } {
+export function initAgentSidebar(deps: AgentSidebarDeps): {
+  root: HTMLElement;
+  sendInlinePrompt(submission: InlinePromptSubmission): InlinePromptSendResult;
+  dispose(): void;
+} {
   const { bridge, eventBus, getDocumentContext, moveToLibraryDocument } = deps;
 
   // 개인 기본값(설정 탭에서 저장) — 새 대화가 이 조합으로 열린다.
@@ -3011,11 +3019,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     upsertThread(currentThread);
   }
 
-  function recordUserMessage(text: string, attachments: ThreadAttachment[] = []): ThreadMessage {
+  function recordUserMessage(
+    text: string,
+    attachments: ThreadAttachment[] = [],
+    selection?: { label: string; excerpt: string },
+  ): ThreadMessage {
     const message: ThreadMessage = {
       role: 'user',
       text,
       ...(attachments.length ? { attachments } : {}),
+      ...(selection ? { selection } : {}),
     };
     currentThread.messages.push(message);
     currentThread.updatedAt = Date.now();
@@ -3057,6 +3070,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
 
   function renderUserMessage(message: ThreadMessage): HTMLElement {
     const bubble = el('div', 'ag-msg ag-msg-user');
+    if (message.selection) {
+      const quote = el('div', 'ag-msg-selection');
+      quote.title = message.selection.excerpt;
+      quote.append(
+        el('span', 'ag-msg-selection-label', message.selection.label),
+        el('span', 'ag-msg-selection-excerpt', message.selection.excerpt),
+      );
+      bubble.appendChild(quote);
+    }
     bubble.appendChild(el('div', 'ag-msg-user-text', message.text));
     if (message.attachments?.length) {
       const row = el('div', 'ag-msg-attachments');
@@ -5132,8 +5154,44 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   updateDocumentContext();
   rebuildReview();
 
+  /**
+   * 인라인 프롬프트(문서 선택 위 입력 상자)에서 온 지시를 채팅으로 보낸다.
+   * 말풍선에는 지시만 보이고, 에이전트에게는 선택 컨텍스트 블록을 함께 보낸다.
+   */
+  function sendInlinePrompt(submission: InlinePromptSubmission): InlinePromptSendResult {
+    const prompt = submission.prompt.trim();
+    if (!prompt) return { ok: false, reason: '지시를 입력해 주세요' };
+    if (readOnlyDocLabel !== null) return { ok: false, reason: '다른 문서의 채팅을 열람 중입니다' };
+    if (connState !== 'connected') return { ok: false, reason: '에이전트 허브에 연결되어 있지 않습니다' };
+    if (turnRunning) return { ok: false, reason: '에이전트가 응답 중입니다' };
+    if (planningPhase === 'switching' || chatStartPendingThreadId !== null || attachmentsSending) {
+      return { ok: false, reason: '잠시 후 다시 시도해 주세요' };
+    }
+    setCollapsed(false);
+    if (threadsPanelOpen) setThreadsPanelOpen(false);
+    if (skillsPanelOpen) setSkillsPanelOpen(false);
+    if (settingsPanelOpen) setSettingsPanelOpen(false);
+    // 승인 대기 중 입력은 계획 수정 의견으로 취급한다 (입력기와 같은 규칙).
+    if (chatWorkflow === 'plan' && planningPhase === 'awaiting-approval') {
+      setPlanningPhase('planning');
+    }
+    const userMessage = recordUserMessage(prompt, [], {
+      label: submission.selection.label,
+      excerpt: submission.selection.excerpt,
+    });
+    const userBubble = renderUserMessage(userMessage);
+    followConversation = true;
+    replyPending = true;
+    appendConversation(userBubble);
+    updateTurnPending(selectedAgent);
+    scrollConversationToMessage(userBubble, { smooth: true });
+    void bridge.sendUserMessage(`${submission.selection.contextBlock}\n\n${prompt}`);
+    return { ok: true };
+  }
+
   return {
     root,
+    sendInlinePrompt,
     dispose(): void {
       unsubBridge();
       unsubThreads();
