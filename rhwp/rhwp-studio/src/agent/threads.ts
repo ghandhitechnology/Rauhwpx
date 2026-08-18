@@ -20,6 +20,8 @@ interface ThreadMessageBase {
   agent?: AgentName;
   messageId?: string;
   attachments?: ThreadAttachment[];
+  /** 인라인 프롬프트로 보낸 메시지에 붙는 문서 선택 컨텍스트 (표시용). */
+  selection?: { label: string; excerpt: string };
 }
 
 export type ThreadMessage =
