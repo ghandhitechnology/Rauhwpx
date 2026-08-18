@@ -13,8 +13,10 @@ class FakeProcess extends EventEmitter {
   stdout = new EventEmitter();
   stderr = new EventEmitter();
   input = '';
+  stdinEnded = false;
   stdin = {
-    end: (value = '') => { this.input += String(value); },
+    write: (value = '') => { this.input += String(value); return true; },
+    end: (value = '') => { this.input += String(value); this.stdinEnded = true; },
   };
   kill() { return true; }
 }
@@ -154,6 +156,50 @@ test('Windows Codex OAuth uses device auth instead of a localhost callback', asy
   await manager.authenticate('codex', 'oauth');
   assert.ok(calls.some((call) => call.command === 'codex'
     && call.argv[0] === 'login' && call.argv[1] === '--device-auth'));
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Claude OAuth surfaces a clean login URL and finishes with a pasted code', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-auth-'));
+  const cleanUrl = 'https://claude.com/oauth/authorize?code=true&state=abc123';
+  let authProc = null;
+  const spawnProcess = (command, argv) => {
+    const proc = new FakeProcess();
+    if (argv[0] === 'auth' && argv[1] === 'login') {
+      authProc = proc;
+      queueMicrotask(() => {
+        proc.stdout.emit(
+          'data',
+          'Opening browser to sign in…\n'
+            + `If the browser didn't open, visit: \x1B]8;;${cleanUrl}\x1B\\${cleanUrl}\x1B]8;;\x1B\\\n`
+            + 'Paste code here if prompted >',
+        );
+      });
+    } else {
+      queueMicrotask(() => proc.emit('close', 0, null));
+    }
+    return proc;
+  };
+  const manager = await createCliSetupManager({ rootDir, spawnProcess }).init();
+
+  await assert.rejects(manager.submitAuthCode('claude', 'orphan-code'), /진행 중인 로그인이 없어요/);
+
+  const progress = [];
+  const running = manager.authenticate('claude', 'oauth', undefined, (event) => progress.push(event));
+  const deadline = Date.now() + 2000;
+  while (!progress.some((event) => event.authUrl) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(progress.findLast((event) => event.authUrl)?.authUrl, cleanUrl);
+  assert.equal(authProc.stdinEnded, false);
+
+  await manager.submitAuthCode('claude', ' my-oauth-code ');
+  assert.equal(authProc.input, 'my-oauth-code\n');
+  authProc.emit('close', 0, null);
+  const status = await running;
+  assert.equal(status.authenticated, true);
+  assert.equal(status.authMethod, 'oauth');
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });

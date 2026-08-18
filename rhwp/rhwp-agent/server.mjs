@@ -1334,6 +1334,16 @@ async function handleStudioMessage(record, sock, msg) {
         .catch((e) => sendAgentSetupError(record, sock, null, agent, e, 'AGENT_AUTH_FAILED'));
       return;
     }
+    case 'agent-setup-auth-code': {
+      const agent = msg.agent;
+      if (agent !== 'claude' && agent !== 'codex') {
+        sendAgentSetupError(record, sock, null, null, new Error('인증 코드 요청을 확인하지 못했어요.'));
+        return;
+      }
+      void cliSetup.submitAuthCode(agent, msg.code)
+        .catch((e) => sendAgentSetupError(record, sock, null, agent, e, 'AGENT_AUTH_FAILED'));
+      return;
+    }
     case 'agent-setup-cancel': {
       const agent = msg.agent;
       if (agent === 'pi') void piManager.cancelSetup();

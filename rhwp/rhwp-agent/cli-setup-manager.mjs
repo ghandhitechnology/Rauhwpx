@@ -38,9 +38,15 @@ function setupError(code, message) {
   return error;
 }
 
-function cleanTail(text) {
+function stripTerminalEscapes(text) {
   return String(text ?? '')
+    .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)?/g, '')
     .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1B./g, '');
+}
+
+function cleanTail(text) {
+  return stripTerminalEscapes(text)
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
@@ -176,6 +182,7 @@ export function createCliSetupManager({
 
   function run(command, argv, {
     input = null, timeoutMs = STATUS_TIMEOUT_MS, env = baseEnv, onOutput, operationKey = null,
+    keepStdinOpen = false,
   } = {}) {
     return new Promise((resolve, reject) => {
       let stdout = '';
@@ -221,7 +228,7 @@ export function createCliSetupManager({
       proc.on('error', (error) => finish(error));
       proc.on('close', (code, signal) => finish(null, { code, signal, stdout, stderr }));
       if (input !== null) proc.stdin?.end(input);
-      else proc.stdin?.end();
+      else if (!keepStdinOpen) proc.stdin?.end();
     });
   }
 
@@ -431,9 +438,11 @@ export function createCliSetupManager({
           timeoutMs: AUTH_TIMEOUT_MS,
           operationKey: `auth:${agent}`,
           env: envFor(agent),
+          // claude 는 TTY 없이 실행되면 브라우저 로그인 뒤 인증 코드를 stdin 으로 받아야 끝난다.
+          keepStdinOpen: agent === 'claude',
           onOutput: (text) => {
-            buffered = (buffered + text).slice(-4000);
-            const url = buffered.match(/https?:\/\/[^\s<>"']+/)?.[0];
+            buffered = (buffered + text).slice(-8000);
+            const url = stripTerminalEscapes(buffered).match(/https?:\/\/[^\s<>"'\x07\]]+/)?.[0];
             onProgress?.({ state: 'authorizing', ...(url ? { authUrl: url } : {}) });
           },
         },
@@ -459,6 +468,17 @@ export function createCliSetupManager({
     }
   }
 
+  async function submitAuthCode(agent, code) {
+    assertAgent(agent);
+    const value = String(code ?? '').trim();
+    if (!value) throw setupError('AGENT_AUTH_CODE_INVALID', '인증 코드를 입력해 주세요.');
+    const proc = activeProcesses.get(`auth:${agent}`);
+    if (!proc || !authRuns.has(agent)) {
+      throw setupError('AGENT_AUTH_NOT_RUNNING', '진행 중인 로그인이 없어요. 브라우저 로그인부터 다시 시작해 주세요.');
+    }
+    proc.stdin?.write?.(`${value}\n`);
+  }
+
   return {
     rootDir,
     prefixDir,
@@ -473,6 +493,7 @@ export function createCliSetupManager({
     status,
     install,
     authenticate,
+    submitAuthCode,
     async cancel(agent) {
       assertAgent(agent);
       const processes = [`install:${agent}`, `auth:${agent}`]
