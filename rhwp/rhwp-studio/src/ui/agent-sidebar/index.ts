@@ -62,8 +62,10 @@ import {
   clearChatStatus,
   getChatStatus,
   markChatFinished,
+  markChatNeedsInput,
   markChatWorking,
   subscribeChatStatus,
+  type ChatRunStatus,
 } from '../../agent/chat-status.ts';
 import { createChevron, createColumnIcon } from '../chevron.ts';
 import { showActionMenu } from '../action-menu.ts';
@@ -3358,10 +3360,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     return docKey ?? '문서 없음';
   }
 
-  /** 실행 상태 점 — 노란 불(작업 중)·초록 점(완료). 없으면 null. */
-  function buildStatusDot(status: 'working' | 'finished', extraClass?: string): HTMLElement {
+  /** 실행 상태 점 — 노란 불(작업 중)·초록 점(완료)·빨간 점(승인 대기). */
+  function buildStatusDot(status: ChatRunStatus, extraClass?: string): HTMLElement {
     const dot = el('span', `ag-thread-status ag-thread-status-${status}${extraClass ? ` ${extraClass}` : ''}`);
-    dot.title = status === 'working' ? '작업 중' : '완료';
+    dot.title = status === 'working' ? '작업 중' : status === 'needs-input' ? '승인 대기' : '완료';
     return dot;
   }
 
@@ -3433,11 +3435,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       groupBtn.append(paper, name);
       if (isCurrentDoc) groupBtn.append(el('span', 'ag-threads-group-badge', '현재'));
       // 접힌 그룹은 안쪽 행이 안 보이므로 상태를 그룹 줄로 끌어올린다.
+      // 사용자를 기다리는 빨강이 먼저, 그다음 작업 중, 마지막이 완료다.
       if (!expanded) {
         const statuses = group.threads.map((thread) => getChatStatus(thread.id));
-        const rollup = statuses.includes('working')
-          ? 'working' as const
-          : statuses.includes('finished') ? 'finished' as const : null;
+        const rollup = statuses.includes('needs-input')
+          ? 'needs-input' as const
+          : statuses.includes('working')
+            ? 'working' as const
+            : statuses.includes('finished') ? 'finished' as const : null;
         if (rollup) groupBtn.append(buildStatusDot(rollup, 'ag-group-status'));
       }
       groupBtn.addEventListener('click', () => {
@@ -3761,6 +3766,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     if (turnRunning || runStatusThreadId === null) return;
     clearChatStatus(runStatusThreadId);
     runStatusThreadId = null;
+  }
+
+  /** 계획에 응답이 닿았다(승인·수정 요청·무효화) — 빨간 점을 걷는다. */
+  function settlePlanAttention(): void {
+    if (getChatStatus(currentThread.id) === 'needs-input') clearChatStatus(currentThread.id);
   }
 
   function updateComposer(): void {
@@ -4254,9 +4264,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
           && Boolean((assistantBubbleSources.get(streamBubble) ?? streamBubble.textContent ?? '').trim());
         setTurnRunning(false);
         if (runStatusThreadId !== null) {
-          // 사용자가 멈춘 턴은 신호 없이 꺼지고, 그 외에는 완료 점이 남는다.
+          // 사용자가 멈춘 턴은 신호 없이 꺼진다. 계획이 승인을 기다리며 끝난
+          // 턴은 빨간 점, 그 외에는 완료 점이 남는다.
           if (event.stopReason === 'interrupted') clearChatStatus(runStatusThreadId);
-          else markChatFinished(runStatusThreadId);
+          else if (chatWorkflow === 'plan' && planningPhase === 'awaiting-approval' && planApprovable) {
+            markChatNeedsInput(runStatusThreadId);
+          } else markChatFinished(runStatusThreadId);
           runStatusThreadId = null;
         }
         flushAssistantBuffer();
@@ -4855,6 +4868,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       systemMessage(`수정 요청 실패: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
+    settlePlanAttention();
     setPlanningPhase('planning');
     systemMessage('수정 요청을 보냈습니다. 바꾸고 싶은 부분을 입력창에 적어 주세요.');
     updateComposer();
@@ -4899,16 +4913,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         // 서버가 승인했다고 말한 계획이 지금 카드와 다르면 표시를 건드리지 않는다.
         if (activePlan && e.planId && e.planId !== activePlan.planId) return true;
         planApprovable = false;
+        settlePlanAttention();
         setPlanningPhase(e.phase);
         return true;
       case 'implementation-started':
         planApprovable = false;
+        settlePlanAttention();
         closePlanForExecution(e.planId || activePlan?.planId || '');
         setPlanningPhase(e.phase);
         rebuildReview();
         return true;
       case 'plan-invalidated':
         planApprovable = false;
+        settlePlanAttention();
         activePlanHistorical = activePlan !== null;
         setPlanningPhase(e.phase);
         systemMessage(
