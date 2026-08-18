@@ -356,6 +356,26 @@ impl Cell {
 }
 
 impl Table {
+    /// `page_break`/`repeat_header` 변경을 HWPTAG_TABLE 원본 속성(`raw_table_record_attr`)
+    /// bit 0-2 에 동기화한다. HWP5 직렬화기는 raw 속성이 0이 아니면 그대로 기록하므로,
+    /// 여기서 동기화하지 않으면 실제 .hwp 에서 파싱된 표의 쪽나눔/제목반복 편집이
+    /// 저장 시 통째로 유실된다. raw 가 0이면 직렬화기가 모델에서 재구성하므로 무해.
+    pub fn sync_raw_record_attr(&mut self) {
+        if self.raw_table_record_attr == 0 {
+            return;
+        }
+        let mut attr = self.raw_table_record_attr & !0x07;
+        attr |= match self.page_break {
+            TablePageBreak::CellBreak => 0x01,
+            TablePageBreak::RowBreak => 0x02,
+            TablePageBreak::None => 0x00,
+        };
+        if self.repeat_header {
+            attr |= 0x04;
+        }
+        self.raw_table_record_attr = attr;
+    }
+
     /// [Task #1716] 반복 제목행으로 재사용할 **표 상단의 연속 제목행 블록** `0..H` 를 반환한다.
     ///
     /// 행 r 이 제목행 ⟺ header 셀(`is_header`, rowspan 덮개 포함)이 r 을 덮음. 상단(행 0)부터

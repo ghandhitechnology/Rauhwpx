@@ -3019,6 +3019,68 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 표의 열별 폭(HWPUNIT)을 절대값으로 설정한다.
+    ///
+    /// `widths.len()` 은 표의 열 수와 같아야 한다.
+    /// 반환: JSON `{"ok":true,"colCount":N,"tableWidth":W}`
+    #[wasm_bindgen(js_name = setTableColumnWidths)]
+    pub fn set_table_column_widths(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        widths: Vec<u32>,
+    ) -> Result<String, JsValue> {
+        self.set_table_column_widths_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            widths,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 표를 본문(페이지 텍스트) 폭에 맞춰 비례 축소한다 (축소 전용).
+    ///
+    /// 반환: JSON `{"ok":true,...}`
+    #[wasm_bindgen(js_name = fitTableToPage)]
+    pub fn fit_table_to_page(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.fit_table_to_page_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 표 캡션 텍스트를 설정한다. 캡션이 없으면 자동 번호("표 N") 캡션을 만든 뒤 넣는다.
+    ///
+    /// `with_number=false` 면 자동 번호 없이 텍스트만 넣는다.
+    /// 반환: JSON `{"ok":true,"captionText":"표 1 ..."}`
+    #[wasm_bindgen(js_name = setTableCaptionText)]
+    pub fn set_table_caption_text(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        text: &str,
+        with_number: bool,
+    ) -> Result<String, JsValue> {
+        self.set_table_caption_text_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            text,
+            with_number,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 표의 모든 셀 bbox를 반환한다 (F5 셀 선택 모드용).
     ///
     /// 반환: JSON `[{cellIdx, row, col, rowSpan, colSpan, pageIndex, x, y, w, h}, ...]`
@@ -6836,12 +6898,14 @@ impl HwpDocument {
     /// `evaluateTableFormula` 의 options object 변형 (#1413).
     ///
     /// options JSON 키: `{ sectionIdx, parentParaIdx, controlIdx, targetRow, targetCol,
-    /// formula: string, writeResult? }`. positional 과 동일 동작.
+    /// formula: string, writeResult? }`. positional 과 동일 동작. 결과 서식 키
+    /// `decimalPlaces`/`thousandsSeparator`/`prefix`/`suffix` 를 추가로 주면
+    /// 셀에 기록되는 표시 문자열에 반영된다 (반환 JSON `display`).
     #[wasm_bindgen(js_name = evaluateTableFormulaEx)]
     pub fn evaluate_table_formula_ex(&mut self, options_json: &str) -> Result<String, JsValue> {
         use crate::document_core::helpers::{json_bool, json_str, json_u32};
         self.core
-            .evaluate_table_formula(
+            .evaluate_table_formula_formatted(
                 json_u32(options_json, "sectionIdx").unwrap_or(0) as usize,
                 json_u32(options_json, "parentParaIdx").unwrap_or(0) as usize,
                 json_u32(options_json, "controlIdx").unwrap_or(0) as usize,
@@ -6849,6 +6913,7 @@ impl HwpDocument {
                 json_u32(options_json, "targetCol").unwrap_or(0) as usize,
                 &json_str(options_json, "formula").unwrap_or_default(),
                 json_bool(options_json, "writeResult").unwrap_or(false),
+                options_json,
             )
             .map_err(|e| e.into())
     }

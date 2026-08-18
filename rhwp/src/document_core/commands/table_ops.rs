@@ -121,6 +121,9 @@ impl DocumentCore {
             control_idx,
             old_table_height,
         );
+        // 행 삽입으로 본문보다 커진 쪽나눔=None 표는 자동으로 "나눔"으로 승격해
+        // 다음 쪽으로 이어지게 한다 (쪽 하단 잘림/겹침 방지).
+        self.auto_enable_table_page_split(section_idx, parent_para_idx, control_idx);
         self.document.sections[section_idx].raw_stream = None;
         self.recompose_section(section_idx);
         self.paginate_if_needed();
@@ -1091,6 +1094,8 @@ impl DocumentCore {
             );
         }
 
+        // 셀 높이 지정으로 본문보다 커진 쪽나눔=None 표는 자동으로 "나눔"으로 승격한다.
+        self.auto_enable_table_page_split(section_idx, parent_para_idx, control_idx);
         self.document.sections[section_idx].raw_stream = None;
         self.recompose_section(section_idx);
         self.paginate_if_needed();
@@ -1722,6 +1727,8 @@ impl DocumentCore {
             }
         }
 
+        // 리사이즈로 본문보다 커진 쪽나눔=None 표는 자동으로 "나눔"으로 승격한다.
+        self.auto_enable_table_page_split(section_idx, parent_para_idx, control_idx);
         self.document.sections[section_idx].raw_stream = None;
         self.recompose_section(section_idx);
         self.paginate_if_needed();
@@ -2056,8 +2063,17 @@ impl DocumentCore {
                 crate::model::shape::CaptionVertAlign::Center => 1,
                 crate::model::shape::CaptionVertAlign::Bottom => 2,
             };
-            format!(",\"captionDirection\":{},\"captionVertAlign\":{},\"captionWidth\":{},\"captionSpacing\":{},\"hasCaption\":true",
-                dir, va, cap.width, cap.spacing)
+            let cap_number = cap
+                .paragraphs
+                .iter()
+                .flat_map(|p| p.controls.iter())
+                .find_map(|c| match c {
+                    Control::AutoNumber(an) => Some(an.assigned_number),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            format!(",\"captionDirection\":{},\"captionVertAlign\":{},\"captionWidth\":{},\"captionSpacing\":{},\"captionText\":{},\"captionNumber\":{},\"hasCaption\":true",
+                dir, va, cap.width, cap.spacing, json_escape(&caption_display_text(cap)), cap_number)
         } else {
             ",\"hasCaption\":false".to_string()
         };
@@ -2181,9 +2197,13 @@ impl DocumentCore {
                 2 => crate::model::table::TablePageBreak::RowBreak,
                 _ => crate::model::table::TablePageBreak::None,
             };
+            // HWP5 직렬화기는 raw_table_record_attr(파싱 원본)이 있으면 그대로 쓰므로
+            // 동기화하지 않으면 .hwp 저장 시 쪽나눔 편집이 유실된다.
+            table.sync_raw_record_attr();
         }
         if let Some(v) = json_bool(json, "repeatHeader") {
             table.repeat_header = v;
+            table.sync_raw_record_attr();
         }
         if let Some(v) = json_bool(json, "treatAsChar") {
             if v {
@@ -2403,12 +2423,19 @@ impl DocumentCore {
                 // attr bit 29: 캡션 존재 플래그 (한컴 호환성)
                 table.attr |= 1 << 29;
                 table.common.attr = table.attr;
-                table.raw_table_record_attr = table.attr;
+                // raw_table_record_attr(HWPTAG_TABLE)와 ctrl 헤더 attr는 비트 배치가
+                // 다르다. ctrl attr를 그대로 덮으면 쪽나눔 bit 0-1이 오염되므로
+                // 각각 제 위치(FLAGS / record attr bit 0-2)에만 동기화한다.
+                table.raw_ctrl_data[common_obj_offsets::FLAGS]
+                    .copy_from_slice(&table.attr.to_le_bytes());
+                table.sync_raw_record_attr();
             } else if !has_cap && table.caption.is_some() {
                 table.caption = None;
                 table.attr &= !(1 << 29);
                 table.common.attr = table.attr;
-                table.raw_table_record_attr = table.attr;
+                table.raw_ctrl_data[common_obj_offsets::FLAGS]
+                    .copy_from_slice(&table.attr.to_le_bytes());
+                table.sync_raw_record_attr();
                 caption_changed = true;
             }
         }
@@ -2581,6 +2608,123 @@ impl DocumentCore {
             parent_para_idx,
             control_idx,
             page_idx,
+        ))
+    }
+
+    /// 표 캡션 텍스트를 설정한다 (네이티브).
+    ///
+    /// 캡션이 없으면 한컴 기본 캡션("표 N" 자동 번호, 하단)을 먼저 만든 뒤 텍스트를
+    /// 넣는다. `with_number=true` 면 "표 <자동번호> <텍스트>" 구조를 유지하고,
+    /// false 면 자동 번호 없이 텍스트만 넣는다.
+    pub(crate) fn set_table_caption_text_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        text: &str,
+        with_number: bool,
+    ) -> Result<String, HwpError> {
+        let has_caption = self
+            .get_table_mut(section_idx, parent_para_idx, control_idx)?
+            .caption
+            .is_some();
+        if !has_caption {
+            self.set_table_properties_native(
+                section_idx,
+                parent_para_idx,
+                control_idx,
+                "{\"hasCaption\":true}",
+            )?;
+        }
+
+        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        let cap = table
+            .caption
+            .as_mut()
+            .ok_or_else(|| HwpError::RenderError("캡션 생성에 실패했습니다".into()))?;
+
+        let template = cap
+            .paragraphs
+            .first()
+            .cloned()
+            .unwrap_or_else(crate::model::paragraph::Paragraph::new_empty);
+        let mut new_para = crate::model::paragraph::Paragraph::new_empty();
+        new_para.style_id = template.style_id;
+        new_para.para_shape_id = template.para_shape_id;
+        if !template.char_shapes.is_empty() {
+            new_para.char_shapes = vec![crate::model::paragraph::CharShapeRef {
+                start_pos: 0,
+                char_shape_id: template.char_shapes[0].char_shape_id,
+            }];
+        }
+        if !template.line_segs.is_empty() {
+            new_para.line_segs = template.line_segs.clone();
+        }
+
+        let suffix: Vec<char> = text.chars().collect();
+        if with_number {
+            // 기존 캡션의 자동 번호 컨트롤을 재사용한다 (없으면 표 번호로 새로 만든다).
+            let an = template
+                .controls
+                .iter()
+                .find_map(|c| match c {
+                    crate::model::control::Control::AutoNumber(a) => Some(a.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| crate::model::control::AutoNumber {
+                    number_type: crate::model::control::AutoNumberType::Table,
+                    ..Default::default()
+                });
+            // 캡션 생성 코드와 동일한 스트림 배치: "표␣␣"(오프셋 0-2) + 자동번호
+            // 확장 컨트롤(8단위, 오프셋 3-10) + 텍스트(11부터) + 문단끝 센티널.
+            let mut t = String::from("표  ");
+            let mut offsets: Vec<u32> = vec![0, 1, 2];
+            let mut next = 11u32;
+            for ch in &suffix {
+                t.push(*ch);
+                offsets.push(next);
+                next += 1;
+            }
+            offsets.push(next);
+            new_para.text = t;
+            new_para.char_offsets = offsets;
+            new_para.char_count = next + 2;
+            new_para.char_count_msb = true;
+            new_para.control_mask = 1u32 << 0x12;
+            new_para
+                .controls
+                .push(crate::model::control::Control::AutoNumber(an));
+            new_para.ctrl_data_records.push(None);
+        } else if !suffix.is_empty() {
+            let n = suffix.len() as u32;
+            new_para.text = text.to_string();
+            new_para.char_offsets = (0..n).chain(std::iter::once(n)).collect();
+            new_para.char_count = n + 2;
+            new_para.char_count_msb = true;
+            new_para.control_mask = 0;
+        }
+        cap.paragraphs = vec![new_para];
+        table.dirty = true;
+
+        // 번호 재배정(캡션 신설·번호 유무 변경 반영) 후 재조판.
+        crate::parser::assign_auto_numbers(&mut self.document);
+        if let Some(sec) = self.document.sections.get_mut(section_idx) {
+            sec.raw_stream = None;
+        }
+        self.recompose_section(section_idx);
+        self.paginate_if_needed();
+
+        let display = {
+            let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+            table
+                .caption
+                .as_ref()
+                .map(caption_display_text)
+                .unwrap_or_default()
+        };
+        Ok(format!(
+            "{{\"ok\":true,\"captionText\":{}}}",
+            json_escape(&display)
         ))
     }
 
@@ -2856,6 +3000,46 @@ impl DocumentCore {
         Ok("{\"ok\":true}".to_string())
     }
 
+    /// 편집으로 표 높이가 본문 세로 영역을 넘어섰는데 쪽나눔이 "나누지 않음"이면
+    /// 자동으로 "나눔"(행 단위)으로 승격한다. 승격된 표는 쪽 하단에서 잘리거나
+    /// 꼬리말 영역을 덮는 대신 다음 쪽으로 행 단위로 이어진다.
+    ///
+    /// 파일에서 읽기만 한 표의 렌더링 충실도(한컴 동작 재현)를 지키기 위해,
+    /// 표 크기를 직접 키우는 편집 명령(행 삽입·셀 리사이즈·셀 높이 지정)에서만
+    /// 호출한다. 사용자가 쪽나눔을 명시적으로 설정하는 경로에서는 호출하지 않는다.
+    pub(crate) fn auto_enable_table_page_split(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+    ) {
+        let body_height: i64 = {
+            let Some(section) = self.document.sections.get(section_idx) else {
+                return;
+            };
+            let pd = &section.section_def.page_def;
+            pd.height as i64
+                - (pd.margin_top as i64 + pd.margin_header as i64)
+                - (pd.margin_bottom as i64 + pd.margin_footer as i64)
+        };
+        if body_height <= 0 {
+            return;
+        }
+        let Ok(table) = self.get_table_mut(section_idx, parent_para_idx, control_idx) else {
+            return;
+        };
+        if !matches!(table.page_break, crate::model::table::TablePageBreak::None) {
+            return;
+        }
+        let rows_sum: i64 = table.get_row_heights().iter().map(|h| *h as i64).sum();
+        let table_height = rows_sum.max(table.common.height as i64);
+        if table_height > body_height {
+            table.page_break = crate::model::table::TablePageBreak::RowBreak;
+            table.sync_raw_record_attr();
+            table.dirty = true;
+        }
+    }
+
     /// 표 셀에서 계산식을 실행하고 결과를 반환한다.
     ///
     /// # Arguments
@@ -2875,6 +3059,35 @@ impl DocumentCore {
         target_col: usize,
         formula: &str,
         write_result: bool,
+    ) -> Result<String, HwpError> {
+        self.evaluate_table_formula_formatted(
+            section_idx,
+            parent_para_idx,
+            control_idx,
+            target_row,
+            target_col,
+            formula,
+            write_result,
+            "",
+        )
+    }
+
+    /// `evaluate_table_formula` 에 결과 서식(format JSON)을 더한 변형.
+    ///
+    /// format JSON 키 (모두 선택): `decimalPlaces`(소수 자릿수 고정),
+    /// `thousandsSeparator`(천 단위 콤마), `prefix`/`suffix`(통화·단위 문자열).
+    /// 빈 문자열이면 기존 기본 서식(정수는 정수, 그 외 부동소수 표기)을 쓴다.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_table_formula_formatted(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        target_row: usize,
+        target_col: usize,
+        formula: &str,
+        write_result: bool,
+        format_json: &str,
     ) -> Result<String, HwpError> {
         // 표 가져오기
         let section = self
@@ -2914,6 +3127,8 @@ impl DocumentCore {
         let result = crate::document_core::table_calc::evaluate_formula(formula, &ctx, &get_cell)
             .map_err(|e| HwpError::RenderError(format!("계산식 오류: {}", e)))?;
 
+        let display = format_table_calc_result(result, format_json);
+
         // 결과를 셀에 기록
         if write_result {
             let cell_idx = target_row * col_count + target_col;
@@ -2922,13 +3137,7 @@ impl DocumentCore {
             if let Some(Control::Table(ref mut t)) = para_mut.controls.get_mut(control_idx) {
                 if let Some(cell) = t.cells.get_mut(cell_idx) {
                     if let Some(cell_para) = cell.paragraphs.first_mut() {
-                        // 정수이면 정수로, 아니면 소수점 표시
-                        let text = if result == result.trunc() && result.abs() < 1e15 {
-                            format!("{}", result as i64)
-                        } else {
-                            format!("{}", result)
-                        };
-                        cell_para.text = text;
+                        cell_para.text = display.clone();
                         let new_len = cell_para.text.chars().count();
                         cell_para.char_offsets = (0..new_len).map(|i| i as u32).collect();
                     }
@@ -2942,11 +3151,103 @@ impl DocumentCore {
         }
 
         Ok(format!(
-            "{{\"ok\":true,\"result\":{},\"formula\":{}}}",
+            "{{\"ok\":true,\"result\":{},\"display\":{},\"formula\":{}}}",
             result,
+            json_escape(&display),
             json_escape(formula)
         ))
     }
+}
+
+/// 계산식 결과를 서식 JSON에 따라 표시 문자열로 만든다.
+///
+/// 키: `decimalPlaces`(소수 자릿수 고정), `thousandsSeparator`(천 단위 콤마),
+/// `prefix`/`suffix`(앞뒤 문자열). 서식이 비면 정수는 정수, 그 외 기본 부동소수 표기.
+fn format_table_calc_result(result: f64, format_json: &str) -> String {
+    use super::super::helpers::{json_bool, json_str, json_u32};
+
+    let decimals = if format_json.is_empty() {
+        None
+    } else {
+        json_u32(format_json, "decimalPlaces")
+    };
+    let mut text = match decimals {
+        Some(d) => format!("{:.*}", (d.min(10)) as usize, result),
+        None => {
+            if result == result.trunc() && result.abs() < 1e15 {
+                format!("{}", result as i64)
+            } else {
+                format!("{}", result)
+            }
+        }
+    };
+    if !format_json.is_empty() && json_bool(format_json, "thousandsSeparator").unwrap_or(false) {
+        let (int_end, negative) = {
+            let bytes = text.as_bytes();
+            let neg = bytes.first() == Some(&b'-');
+            let end = text.find('.').unwrap_or(text.len());
+            (end, neg)
+        };
+        let digits_start = if negative { 1 } else { 0 };
+        let mut grouped = String::new();
+        let int_digits = &text[digits_start..int_end];
+        for (i, ch) in int_digits.chars().enumerate() {
+            if i > 0 && (int_digits.len() - i) % 3 == 0 {
+                grouped.push(',');
+            }
+            grouped.push(ch);
+        }
+        let mut rebuilt = String::new();
+        if negative {
+            rebuilt.push('-');
+        }
+        rebuilt.push_str(&grouped);
+        rebuilt.push_str(&text[int_end..]);
+        text = rebuilt;
+    }
+    if !format_json.is_empty() {
+        if let Some(p) = json_str(format_json, "prefix") {
+            text = format!("{}{}", p, text);
+        }
+        if let Some(s) = json_str(format_json, "suffix") {
+            text.push_str(&s);
+        }
+    }
+    text
+}
+
+/// 캡션 문단들의 표시 텍스트를 만든다. 자동 번호 컨트롤은 배정된 번호로 치환한다.
+fn caption_display_text(cap: &crate::model::shape::Caption) -> String {
+    use crate::model::control::Control;
+    let mut out = String::new();
+    for (pi, para) in cap.paragraphs.iter().enumerate() {
+        if pi > 0 {
+            out.push('\n');
+        }
+        let chars: Vec<char> = para.text.chars().collect();
+        let positions = para.control_text_positions();
+        let mut by_pos: Vec<Vec<usize>> = vec![Vec::new(); chars.len() + 1];
+        for (ci, pos) in positions.iter().enumerate() {
+            by_pos[(*pos).min(chars.len())].push(ci);
+        }
+        for i in 0..=chars.len() {
+            for &ci in &by_pos[i] {
+                match para.controls.get(ci) {
+                    Some(Control::AutoNumber(an)) => {
+                        out.push_str(&an.assigned_number.to_string());
+                    }
+                    Some(Control::NewNumber(nn)) => {
+                        out.push_str(&nn.number.to_string());
+                    }
+                    _ => {}
+                }
+            }
+            if i < chars.len() {
+                out.push(chars[i]);
+            }
+        }
+    }
+    out
 }
 
 /// 셀 텍스트에서 숫자를 추출한다 (콤마 제거, 공백 무시).
