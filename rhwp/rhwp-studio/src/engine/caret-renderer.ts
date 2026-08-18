@@ -87,8 +87,12 @@ export class CaretRenderer {
       'border-bottom:1.5px solid #000;';
     this.compFlowEl = document.createElement('canvas');
     this.compFlowEl.className = 'caret-composition-flow';
+    // #scroll-content canvas 규칙(페이지 중앙 정렬 translateX(-50%) + 용지 배경/그림자)이
+    // 이 캔버스에도 걸린다. 그대로 두면 조합 띠가 절반 폭만큼 왼쪽으로 밀린 흰 막대로
+    // 보이므로, 인라인으로 전부 무효화한다.
     this.compFlowEl.style.cssText =
-      'position:absolute;pointer-events:none;z-index:9;display:none;';
+      'position:absolute;pointer-events:none;z-index:9;display:none;' +
+      'transform:none;background:transparent;box-shadow:none;';
 
     if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
       this.reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
