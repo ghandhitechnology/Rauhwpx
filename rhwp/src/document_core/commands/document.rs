@@ -81,6 +81,315 @@ fn export_is_recovered(
     page_count_matches && structure_before == structure_after && serialization_losses.is_empty()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EquationFingerprint {
+    path: String,
+    script: String,
+    attr: u32,
+    font_size: u32,
+    color: u32,
+    baseline: i16,
+    unknown: u16,
+    version_info: String,
+    font_name: String,
+    layout: String,
+}
+
+/// 수식은 문단 text가 아니라 별도 EQEDIT/개체 레코드에 저장되므로 일반 텍스트·개체
+/// 개수 검사만으로는 빈 script나 잘못 연결된 EQEDIT를 검출할 수 없다.
+fn equation_fingerprints(document: &Document) -> Vec<EquationFingerprint> {
+    let mut out = Vec::new();
+    for (section_idx, section) in document.sections.iter().enumerate() {
+        collect_equations_in_paragraphs(
+            &section.paragraphs,
+            &format!("section[{section_idx}]"),
+            &mut out,
+        );
+        for (master_idx, master) in section.section_def.master_pages.iter().enumerate() {
+            collect_equations_in_paragraphs(
+                &master.paragraphs,
+                &format!("section[{section_idx}].master[{master_idx}]"),
+                &mut out,
+            );
+        }
+    }
+    out
+}
+
+fn collect_equations_in_paragraphs(
+    paragraphs: &[Paragraph],
+    path: &str,
+    out: &mut Vec<EquationFingerprint>,
+) {
+    for (paragraph_idx, paragraph) in paragraphs.iter().enumerate() {
+        let paragraph_path = format!("{path}.p[{paragraph_idx}]");
+        for (control_idx, control) in paragraph.controls.iter().enumerate() {
+            collect_equations_in_control(
+                control,
+                &format!("{paragraph_path}.ctrl[{control_idx}]"),
+                out,
+            );
+        }
+    }
+}
+
+fn collect_equations_in_control(control: &Control, path: &str, out: &mut Vec<EquationFingerprint>) {
+    match control {
+        Control::Equation(eq) => {
+            let c = &eq.common;
+            out.push(EquationFingerprint {
+                path: path.to_string(),
+                script: eq.script.clone(),
+                attr: eq.attr,
+                font_size: eq.font_size,
+                color: eq.color,
+                baseline: eq.baseline,
+                unknown: eq.unknown,
+                version_info: eq.version_info.clone(),
+                font_name: eq.font_name.clone(),
+                layout: format!(
+                    "{}x{} {:?}/{:?} protect={} tac={} als={} flow={} overlap={} {:?}/{:?}/{:?}/{:?} offset={}/{} wrap={:?}/{:?} margin={:?}",
+                    c.width,
+                    c.height,
+                    c.width_criterion,
+                    c.height_criterion,
+                    c.size_protect,
+                    c.treat_as_char,
+                    c.affect_line_spacing,
+                    c.flow_with_text,
+                    c.allow_overlap,
+                    c.vert_rel_to,
+                    c.horz_rel_to,
+                    c.vert_align,
+                    c.horz_align,
+                    c.vertical_offset,
+                    c.horizontal_offset,
+                    c.text_wrap,
+                    c.text_flow,
+                    c.margin,
+                ),
+            });
+        }
+        Control::Table(table) => {
+            for (cell_idx, cell) in table.cells.iter().enumerate() {
+                collect_equations_in_paragraphs(
+                    &cell.paragraphs,
+                    &format!("{path}.table.cell[{cell_idx}]"),
+                    out,
+                );
+            }
+            if let Some(caption) = &table.caption {
+                collect_equations_in_paragraphs(
+                    &caption.paragraphs,
+                    &format!("{path}.table.caption"),
+                    out,
+                );
+            }
+        }
+        Control::Picture(picture) => {
+            if let Some(caption) = &picture.caption {
+                collect_equations_in_paragraphs(
+                    &caption.paragraphs,
+                    &format!("{path}.picture.caption"),
+                    out,
+                );
+            }
+        }
+        Control::Shape(shape) => collect_equations_in_shape(shape, path, out),
+        Control::Header(header) => {
+            collect_equations_in_paragraphs(&header.paragraphs, &format!("{path}.header"), out)
+        }
+        Control::Footer(footer) => {
+            collect_equations_in_paragraphs(&footer.paragraphs, &format!("{path}.footer"), out)
+        }
+        Control::Footnote(note) => {
+            collect_equations_in_paragraphs(&note.paragraphs, &format!("{path}.footnote"), out)
+        }
+        Control::Endnote(note) => {
+            collect_equations_in_paragraphs(&note.paragraphs, &format!("{path}.endnote"), out)
+        }
+        Control::HiddenComment(comment) => collect_equations_in_paragraphs(
+            &comment.paragraphs,
+            &format!("{path}.hidden_comment"),
+            out,
+        ),
+        Control::Field(field) => collect_equations_in_paragraphs(
+            &field.memo_paragraphs,
+            &format!("{path}.field.memo"),
+            out,
+        ),
+        _ => {}
+    }
+}
+
+fn collect_equations_in_shape(shape: &ShapeObject, path: &str, out: &mut Vec<EquationFingerprint>) {
+    if let Some(drawing) = shape.drawing() {
+        if let Some(text_box) = &drawing.text_box {
+            collect_equations_in_paragraphs(
+                &text_box.paragraphs,
+                &format!("{path}.shape.text_box"),
+                out,
+            );
+        }
+        if let Some(caption) = &drawing.caption {
+            collect_equations_in_paragraphs(
+                &caption.paragraphs,
+                &format!("{path}.shape.caption"),
+                out,
+            );
+        }
+    }
+    match shape {
+        ShapeObject::Group(group) => {
+            if let Some(caption) = &group.caption {
+                collect_equations_in_paragraphs(
+                    &caption.paragraphs,
+                    &format!("{path}.group.caption"),
+                    out,
+                );
+            }
+            for (child_idx, child) in group.children.iter().enumerate() {
+                collect_equations_in_shape(child, &format!("{path}.group[{child_idx}]"), out);
+            }
+        }
+        ShapeObject::Picture(picture) => {
+            if let Some(caption) = &picture.caption {
+                collect_equations_in_paragraphs(
+                    &caption.paragraphs,
+                    &format!("{path}.shape_picture.caption"),
+                    out,
+                );
+            }
+        }
+        ShapeObject::Chart(chart) => {
+            if let Some(caption) = &chart.caption {
+                collect_equations_in_paragraphs(
+                    &caption.paragraphs,
+                    &format!("{path}.chart.caption"),
+                    out,
+                );
+            }
+        }
+        ShapeObject::Ole(ole) => {
+            if let Some(caption) = &ole.caption {
+                collect_equations_in_paragraphs(
+                    &caption.paragraphs,
+                    &format!("{path}.ole.caption"),
+                    out,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_equation_fingerprints(
+    before: &Document,
+    after: &Document,
+    format: &str,
+) -> Result<(), HwpError> {
+    let expected = equation_fingerprints(before);
+    let actual = equation_fingerprints(after);
+    let matches = |a: &EquationFingerprint, b: &EquationFingerprint| {
+        equation_container_path(&a.path) == equation_container_path(&b.path)
+            && a.script == b.script
+            && a.attr == b.attr
+            && a.font_size == b.font_size
+            && a.color == b.color
+            && a.baseline == b.baseline
+            && a.unknown == b.unknown
+            && a.version_info == b.version_info
+            && a.font_name == b.font_name
+            && a.layout == b.layout
+    };
+    if expected.len() == actual.len() && expected.iter().zip(&actual).all(|(a, b)| matches(a, b)) {
+        return Ok(());
+    }
+    if expected.len() != actual.len() {
+        return Err(HwpError::RenderError(format!(
+            "generated {format} equation count changed during validation: {} -> {}",
+            expected.len(),
+            actual.len()
+        )));
+    }
+    let mismatch = expected
+        .iter()
+        .zip(&actual)
+        .find(|(a, b)| !matches(a, b))
+        .map(|(a, b)| format!("{} -> {}", a.path, b.path))
+        .unwrap_or_else(|| "unknown equation".to_string());
+    Err(HwpError::RenderError(format!(
+        "generated {format} equation semantics changed during validation at {mismatch}"
+    )))
+}
+
+/// HWP/HWPX 재파스는 SectionDef/ColumnDef 같은 합성 컨트롤을 문단 controls에 추가할 수
+/// 있으므로 raw control index는 위치 의미가 아니다. 컨테이너 종류/셀·문단 인덱스만 비교한다.
+fn equation_container_path(path: &str) -> String {
+    let mut normalized = String::with_capacity(path.len());
+    let mut rest = path;
+    while let Some(start) = rest.find(".ctrl[") {
+        normalized.push_str(&rest[..start]);
+        let suffix = &rest[start + ".ctrl[".len()..];
+        let Some(end) = suffix.find(']') else {
+            normalized.push_str(&rest[start..]);
+            return normalized;
+        };
+        rest = &suffix[end + 1..];
+    }
+    normalized.push_str(rest);
+    normalized
+}
+
+/// Serialize and strictly reparse generated HWP bytes before they leave the engine.
+///
+/// This is intentionally narrower than the optional semantic verification below:
+/// it blocks malformed CFB/required-stream/record output, while conversions with
+/// known representational losses remain diagnosable through `serialize_hwp_with_verify`.
+fn serialize_validated_hwp(document: &Document) -> Result<Vec<u8>, HwpError> {
+    let bytes = crate::serializer::serialize_document(document)
+        .map_err(|e| HwpError::RenderError(e.to_string()))?;
+    let reparsed = crate::parser::parse_hwp_strict(&bytes).map_err(|error| {
+        HwpError::RenderError(format!(
+            "generated HWP failed strict package validation: {error}"
+        ))
+    })?;
+    if reparsed.sections.len() != document.sections.len() {
+        return Err(HwpError::RenderError(format!(
+            "generated HWP section count changed during validation: {} -> {}",
+            document.sections.len(),
+            reparsed.sections.len(),
+        )));
+    }
+    validate_equation_fingerprints(document, &reparsed, "HWP")?;
+    Ok(bytes)
+}
+
+/// Serialize, validate the OPC-style package graph, and reparse generated HWPX.
+fn serialize_validated_hwpx(document: &Document) -> Result<Vec<u8>, HwpError> {
+    let bytes = crate::serializer::serialize_hwpx(document)
+        .map_err(|e| HwpError::RenderError(e.to_string()))?;
+    let package_report = crate::serializer::hwpx::package_check::check_package(&bytes, document);
+    if !package_report.is_ok() {
+        return Err(HwpError::RenderError(format!(
+            "generated HWPX failed package validation: {}",
+            package_report.summary(),
+        )));
+    }
+    let reparsed = crate::parser::hwpx::parse_hwpx(&bytes).map_err(|error| {
+        HwpError::RenderError(format!("generated HWPX failed reparse validation: {error}"))
+    })?;
+    if reparsed.sections.len() != document.sections.len() {
+        return Err(HwpError::RenderError(format!(
+            "generated HWPX section count changed during validation: {} -> {}",
+            document.sections.len(),
+            reparsed.sections.len(),
+        )));
+    }
+    validate_equation_fingerprints(document, &reparsed, "HWPX")?;
+    Ok(bytes)
+}
+
 fn count_paragraphs(
     paragraphs: &[Paragraph],
     counts: &mut HwpStructureCounts,
@@ -178,6 +487,16 @@ fn count_shape(shape: &ShapeObject, counts: &mut HwpStructureCounts, losses: &mu
         }
         ShapeObject::Picture(picture) => {
             if let Some(caption) = &picture.caption {
+                count_paragraphs(&caption.paragraphs, counts, losses);
+            }
+        }
+        ShapeObject::Chart(chart) => {
+            if let Some(caption) = &chart.caption {
+                count_paragraphs(&caption.paragraphs, counts, losses);
+            }
+        }
+        ShapeObject::Ole(ole) => {
+            if let Some(caption) = &ole.caption {
                 count_paragraphs(&caption.paragraphs, counts, losses);
             }
         }
@@ -1276,8 +1595,7 @@ impl DocumentCore {
 
     /// Document IR을 HWP 5.0 CFB 바이너리로 직렬화 (네이티브 에러 타입)
     pub fn export_hwp_native(&self) -> Result<Vec<u8>, HwpError> {
-        crate::serializer::serialize_document(&self.document)
-            .map_err(|e| HwpError::RenderError(e.to_string()))
+        serialize_validated_hwp(&self.document)
     }
 
     /// HWPX 출처 IR 을 HWP 호환 형태로 변환 후 HWP 5.0 CFB 바이너리로 직렬화한다 (#178).
@@ -1285,17 +1603,21 @@ impl DocumentCore {
     /// HWP 출처는 어댑터가 no-op 이므로 `export_hwp_native` 와 동일 결과.
     /// 사용자 시나리오: HWPX 로 연 문서를 편집 후 HWP 로 저장하는 모든 경로의 단일 진입점.
     ///
-    /// 어댑터 호출은 IR 자체를 변경하므로 `&mut self` 를 요구한다.
-    pub fn export_hwp_with_adapter(&mut self) -> Result<Vec<u8>, HwpError> {
+    /// 어댑터는 저장용 clone에만 적용한다. 라이브 IR을 변경하면 첫 저장 후
+    /// 렌더/편집 시멘틱이 HWPX에서 HWP5로 바뀌고, 다음 저장이 다른 결과를 내는
+    /// 파괴적 부작용이 생긴다.
+    pub fn export_hwp_with_adapter(&self) -> Result<Vec<u8>, HwpError> {
         use crate::document_core::converters::hwpx_to_hwp::convert_if_hwpx_source;
-        let _report = convert_if_hwpx_source(&mut self.document, self.source_format);
-        self.export_hwp_native()
+        let mut export_document = self.document.clone();
+        let _report = convert_if_hwpx_source(&mut export_document, self.source_format);
+        serialize_validated_hwp(&export_document)
     }
 
     /// 어댑터 적용 + 직렬화 + 자기 재로드 검증을 한 번에 수행한다 (#178 Stage 6).
     ///
-    /// 명시 호출 전용. 운영 경로 (`export_hwp_with_adapter`) 는 검증 비용을 부담하지 않으며,
-    /// 진단·테스트·사용자 경고가 필요한 경우에만 본 함수 사용.
+    /// 명시 호출 전용. 운영 경로도 CFB 엄격 재파스와 수식 fingerprint는 항상
+    /// 검증하지만, 페이지/전체 구조 비교까지 수행하는 본 정밀 진단은 진단·테스트·
+    /// 사용자 경고가 필요한 경우에만 사용한다.
     ///
     /// ## 검증 항목
     ///
@@ -1313,9 +1635,10 @@ impl DocumentCore {
     pub fn serialize_hwp_with_verify(&mut self) -> Result<HwpExportVerification, HwpError> {
         let page_count_before = self.page_count();
         use crate::document_core::converters::hwpx_to_hwp::convert_if_hwpx_source;
-        let _report = convert_if_hwpx_source(&mut self.document, self.source_format);
-        let (structure_before, mut serialization_losses) = hwp_structure_counts(&self.document);
-        let bytes = self.export_hwp_native()?;
+        let mut export_document = self.document.clone();
+        let _report = convert_if_hwpx_source(&mut export_document, self.source_format);
+        let (structure_before, mut serialization_losses) = hwp_structure_counts(&export_document);
+        let bytes = serialize_validated_hwp(&export_document)?;
         let bytes_len = bytes.len();
         let reloaded = DocumentCore::from_bytes(&bytes)?;
         let page_count_after = reloaded.page_count();
@@ -1370,7 +1693,7 @@ impl DocumentCore {
 
     /// Document IR을 HWPX(ZIP+XML)로 직렬화 (네이티브 에러 타입)
     pub fn export_hwpx_native(&self) -> Result<Vec<u8>, HwpError> {
-        let serialized = if matches!(self.source_format, crate::parser::FileFormat::Hwp) {
+        if matches!(self.source_format, crate::parser::FileFormat::Hwp) {
             let mut doc = self.document.clone();
             if !doc
                 .hwpx_aux_entries
@@ -1383,11 +1706,10 @@ impl DocumentCore {
                 ));
             }
             Self::materialize_hwp5_missing_linesegs_for_hwpx_export(&mut doc);
-            crate::serializer::serialize_hwpx(&doc)
+            serialize_validated_hwpx(&doc)
         } else {
-            crate::serializer::serialize_hwpx(&self.document)
-        };
-        serialized.map_err(|e| HwpError::RenderError(e.to_string()))
+            serialize_validated_hwpx(&self.document)
+        }
     }
 
     /// HML 원본의 공통 IR을 HWPML 2.91 UTF-8 XML로 직렬화한다.
@@ -2040,6 +2362,201 @@ mod validate_linesegs_tests {
     use super::*;
     use crate::model::document::{Document, Section};
     use crate::model::paragraph::{LineSeg, Paragraph};
+
+    fn document_with_equation(script: &str) -> Document {
+        let mut paragraph = Paragraph::default();
+        paragraph.char_count = 9;
+        paragraph.controls.push(Control::Equation(Box::new(
+            crate::model::control::Equation {
+                script: script.to_string(),
+                ..Default::default()
+            },
+        )));
+        Document {
+            sections: vec![Section {
+                paragraphs: vec![paragraph],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validated_exports_preserve_equation_semantics() {
+        let document = document_with_equation("1 over 2");
+        serialize_validated_hwp(&document).expect("HWP equation semantic gate");
+        serialize_validated_hwpx(&document).expect("HWPX equation semantic gate");
+    }
+
+    #[test]
+    fn equation_semantic_gate_rejects_nested_script_loss() {
+        use crate::model::control::Field;
+
+        let mut before = Document {
+            sections: vec![Section::default()],
+            ..Default::default()
+        };
+        let memo = document_with_equation("nested memo equation").sections[0].paragraphs[0].clone();
+        before.sections[0].paragraphs.push(Paragraph {
+            controls: vec![Control::Field(Field {
+                memo_paragraphs: vec![memo],
+                ..Default::default()
+            })],
+            ..Default::default()
+        });
+        let mut after = before.clone();
+        let Control::Field(field) = &mut after.sections[0].paragraphs[0].controls[0] else {
+            panic!("field expected");
+        };
+        let Control::Equation(eq) = &mut field.memo_paragraphs[0].controls[0] else {
+            panic!("nested equation expected");
+        };
+        eq.script.clear();
+
+        let error = validate_equation_fingerprints(&before, &after, "test").unwrap_err();
+        assert!(error.to_string().contains("equation semantics changed"));
+    }
+
+    #[test]
+    fn equation_fingerprints_visit_chart_and_ole_captions() {
+        fn caption(script: &str) -> crate::model::shape::Caption {
+            crate::model::shape::Caption {
+                paragraphs: vec![document_with_equation(script).sections[0].paragraphs[0].clone()],
+                ..Default::default()
+            }
+        }
+
+        let document = Document {
+            doc_info: crate::model::document::DocInfo {
+                para_shapes: vec![Default::default()],
+                styles: vec![Default::default()],
+                ..Default::default()
+            },
+            sections: vec![Section {
+                paragraphs: vec![Paragraph {
+                    controls: vec![
+                        Control::Shape(Box::new(ShapeObject::Chart(Box::new(
+                            crate::model::shape::ChartShape {
+                                caption: Some(caption("chart equation")),
+                                ..Default::default()
+                            },
+                        )))),
+                        Control::Shape(Box::new(ShapeObject::Ole(Box::new(
+                            crate::model::shape::OleShape {
+                                caption: Some(caption("ole equation")),
+                                ..Default::default()
+                            },
+                        )))),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let fingerprints = equation_fingerprints(&document);
+        assert_eq!(fingerprints.len(), 2);
+        assert!(fingerprints[0].path.contains("chart.caption"));
+        assert!(fingerprints[1].path.contains("ole.caption"));
+    }
+
+    #[test]
+    fn validated_exports_preserve_chart_and_ole_caption_equations() {
+        fn caption(script: &str) -> crate::model::shape::Caption {
+            crate::model::shape::Caption {
+                paragraphs: vec![document_with_equation(script).sections[0].paragraphs[0].clone()],
+                ..Default::default()
+            }
+        }
+
+        let document = Document {
+            doc_info: crate::model::document::DocInfo {
+                para_shapes: vec![Default::default()],
+                styles: vec![Default::default()],
+                ..Default::default()
+            },
+            sections: vec![Section {
+                paragraphs: vec![Paragraph {
+                    char_count: 17,
+                    controls: vec![
+                        Control::Shape(Box::new(ShapeObject::Chart(Box::new(
+                            crate::model::shape::ChartShape {
+                                caption: Some(caption("chart equation")),
+                                ..Default::default()
+                            },
+                        )))),
+                        Control::Shape(Box::new(ShapeObject::Ole(Box::new(
+                            crate::model::shape::OleShape {
+                                caption: Some(caption("ole equation")),
+                                ..Default::default()
+                            },
+                        )))),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        serialize_validated_hwp(&document).expect("HWP nested equation validation");
+
+        // Native ChartShape has no HWPX chart-part reference and therefore
+        // cannot be represented losslessly; the semantic gate must reject the
+        // mixed export instead of silently dropping its caption equation.
+        let error = serialize_validated_hwpx(&document).expect_err("chart loss must fail closed");
+        assert!(error.to_string().contains("equation count changed"));
+
+        // OLE captions are representable and should survive the same HWPX gate.
+        let mut hwpx_document = document.clone();
+        hwpx_document.sections[0].paragraphs[0].controls.remove(0);
+        hwpx_document.sections[0].paragraphs[0].char_count = 9;
+        serialize_validated_hwpx(&hwpx_document).expect("HWPX OLE equation validation");
+    }
+
+    #[test]
+    fn generated_hwp_strict_validation_rejects_truncated_cfb() {
+        let document = Document {
+            sections: vec![Section::default()],
+            ..Default::default()
+        };
+        let bytes = serialize_validated_hwp(&document).expect("minimal generated HWP validates");
+        assert_eq!(
+            crate::parser::parse_hwp_strict(&bytes)
+                .expect("strict reparse")
+                .sections
+                .len(),
+            1,
+        );
+
+        let truncated = &bytes[..bytes.len() - 1];
+        assert!(
+            crate::parser::parse_hwp_strict(truncated).is_err(),
+            "strict save gate must reject a sector-truncated generated package",
+        );
+    }
+
+    #[test]
+    fn generated_hwpx_validation_rejects_truncated_zip() {
+        let document = Document {
+            sections: vec![Section::default()],
+            ..Default::default()
+        };
+        let bytes = serialize_validated_hwpx(&document).expect("minimal generated HWPX validates");
+        assert_eq!(
+            crate::parser::hwpx::parse_hwpx(&bytes)
+                .expect("HWPX reparse")
+                .sections
+                .len(),
+            1,
+        );
+
+        let truncated = &bytes[..bytes.len() - 8];
+        let report = crate::serializer::hwpx::package_check::check_package(truncated, &document);
+        assert!(!report.is_ok(), "package gate must reject a truncated ZIP");
+        assert!(crate::parser::hwpx::parse_hwpx(truncated).is_err());
+    }
 
     #[test]
     fn from_bytes_retains_hml_import_metadata_outside_document_ir() {

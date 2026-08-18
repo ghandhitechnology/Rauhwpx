@@ -747,6 +747,16 @@ fn stage5_export_hwp_with_adapter_idempotent_on_repeated_calls() {
         first, second,
         "동일 DocumentCore 에 어댑터 통합 진입점 2회 호출 시 같은 bytes"
     );
+
+    use rhwp::document_core::converters::hwpx_to_hwp::HWPX_ORIGIN_STREAM_PATH;
+    assert!(
+        !core
+            .document()
+            .extra_streams
+            .iter()
+            .any(|(path, _)| path == HWPX_ORIGIN_STREAM_PATH),
+        "HWP 저장용 origin 마커가 라이브 HWPX IR을 변경하면 안 됨",
+    );
 }
 
 #[test]

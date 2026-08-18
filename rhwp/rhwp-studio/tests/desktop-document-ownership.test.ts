@@ -1,5 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {
+  mkdtemp,
+  open as openFs,
+  readFile as readFs,
+  readdir,
+  rm as rmFs,
+  writeFile as writeFs,
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { DocumentLeaseManager } from '../../../desktop/document-leases.mjs';
 import {
@@ -10,8 +20,27 @@ import {
   canonicalNativePath,
   NativeFileHandleRegistry,
   nativePathOwnershipKey,
+  validateNativeDocumentBytes,
   validateNativeDocumentPath,
+  writeNativeFileAtomically,
 } from '../../../desktop/native-file-handles.mjs';
+
+function minimalCfbBytes(fill = 0): Uint8Array {
+  const bytes = new Uint8Array(1536).fill(fill);
+  bytes.set([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+  bytes.set([0xfe, 0xff], 28);
+  bytes.set([9, 0], 30);
+  return bytes;
+}
+
+async function withTemporaryDirectory(run: (directory: string) => Promise<void>) {
+  const directory = await mkdtemp(join(tmpdir(), 'rauhwpx-native-save-'));
+  try {
+    await run(directory);
+  } finally {
+    await rmFs(directory, { recursive: true, force: true });
+  }
+}
 
 function identity(documentId: string, sourceDigest: string) {
   return { documentId, sourceDigest };
@@ -163,11 +192,13 @@ test('opaque native handles are sender-scoped and validate ownership before writ
   await registry.write(
     'session-a',
     created.descriptor.handleId,
-    new Uint8Array([4, 5]),
+    minimalCfbBytes(4),
     activeIdentity,
     leases,
   );
-  assert.deepEqual(writes, [{ path: '/canonical/report.hwp', bytes: [4, 5] }]);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].path, '/canonical/report.hwp');
+  assert.deepEqual(writes[0].bytes, [...minimalCfbBytes(4)]);
 });
 
 test('an in-flight atomic write pins its path until completion', async () => {
@@ -192,7 +223,7 @@ test('an in-flight atomic write pins its path until completion', async () => {
   leases.commit('session-a', reservation.reservationId);
 
   const writing = registry.write(
-    'session-a', opened.descriptor.handleId, new Uint8Array([1]), active, leases,
+    'session-a', opened.descriptor.handleId, minimalCfbBytes(1), active, leases,
   );
   registry.releaseHandle('session-a', opened.descriptor.handleId);
   assert.deepEqual(
@@ -310,7 +341,7 @@ test('re-acquiring a handle cancels a release pending behind an in-flight write'
   leases.commit('session-a', reservation.reservationId);
 
   const writing = registry.write(
-    'session-a', opened.descriptor.handleId, new Uint8Array([1]), active, leases,
+    'session-a', opened.descriptor.handleId, minimalCfbBytes(1), active, leases,
   );
   registry.releaseHandle('session-a', opened.descriptor.handleId);
   const reacquired = await registry.create('session-a', '/report.hwp');
@@ -362,4 +393,123 @@ test('native bookmarks persist independently of live handles', async () => {
     name: 'report.hwp',
   });
   assert.deepEqual(registry.dumpBookmarks(), [['document-a', '/canonical/report.hwp']]);
+});
+
+test('native package validation accepts real fixtures and rejects truncation or format mismatch', async () => {
+  const realHwp = new Uint8Array(await readFs(new URL('../../saved/blank2010.hwp', import.meta.url)));
+  const realHwpx = new Uint8Array(await readFs(new URL('../../samples/hwpx/footnote-01.hwpx', import.meta.url)));
+  assert.doesNotThrow(() => validateNativeDocumentBytes('/docs/report.hwp', realHwp));
+  assert.doesNotThrow(() => validateNativeDocumentBytes('/docs/report.hwpx', realHwpx));
+
+  assert.throws(
+    () => validateNativeDocumentBytes('/docs/report.hwp', realHwp.subarray(0, 900)),
+    /invalid or truncated CFB/,
+  );
+  assert.throws(
+    () => validateNativeDocumentBytes('/docs/report.hwp', realHwpx),
+    /invalid or truncated CFB/,
+  );
+  assert.throws(
+    () => validateNativeDocumentBytes('/docs/report.hwpx', realHwpx.subarray(0, realHwpx.length - 8)),
+    /invalid or truncated ZIP/,
+  );
+});
+
+test('atomic native replacement preserves the destination on temp write and rename failures', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+
+    const writeFailureOpen = async (path: string, flags: string) => {
+      const file = await openFs(path, flags);
+      return {
+        writeFile: async () => { throw new Error('injected write failure'); },
+        sync: () => file.sync(),
+        close: () => file.close(),
+      };
+    };
+    await assert.rejects(
+      writeNativeFileAtomically(target, new Uint8Array([1]), { openImpl: writeFailureOpen }),
+      /injected write failure/,
+    );
+    assert.equal(await readFs(target, 'utf8'), 'previous');
+    assert.deepEqual(await readdir(directory), ['report.hwp'], 'failed temp write must be cleaned up');
+
+    await assert.rejects(
+      writeNativeFileAtomically(target, new Uint8Array([2]), {
+        renameImpl: async () => { throw new Error('injected rename failure'); },
+      }),
+      /injected rename failure/,
+    );
+    assert.equal(await readFs(target, 'utf8'), 'previous');
+    assert.deepEqual(await readdir(directory), ['report.hwp'], 'failed rename temp must be cleaned up');
+  });
+});
+
+test('atomic native replacement fsyncs and replaces a real destination', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    await writeNativeFileAtomically(target, new Uint8Array([4, 5, 6]));
+    assert.deepEqual(new Uint8Array(await readFs(target)), new Uint8Array([4, 5, 6]));
+    assert.deepEqual(await readdir(directory), ['report.hwp']);
+  });
+});
+
+test('Windows atomic replacement retries transient destination locks without deleting the old file', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    let attempts = 0;
+    await writeNativeFileAtomically(target, new Uint8Array([7, 8]), {
+      platform: 'win32',
+      renameImpl: async (from: string, to: string) => {
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error('temporarily locked'), { code: 'EPERM' });
+        const { rename } = await import('node:fs/promises');
+        await rename(from, to);
+      },
+    });
+    assert.equal(attempts, 2);
+    assert.deepEqual(new Uint8Array(await readFs(target)), new Uint8Array([7, 8]));
+  });
+});
+
+test('concurrent native saves are serialized in invocation order', async () => {
+  const started: number[] = [];
+  const finish: Array<() => void> = [];
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async () => '/canonical/report.hwp',
+    createId: () => 'writer',
+    writeFileImpl: async (_path: string, bytes: Uint8Array) => new Promise<void>((resolve) => {
+      started.push(bytes[34]);
+      finish.push(resolve);
+    }),
+  });
+  const opened = await registry.create('session-a', '/report.hwp');
+  assert.equal(opened.ok, true);
+  if (!opened.ok) return;
+  const leases = new DocumentLeaseManager({ createId: () => 'open' });
+  const active = identity('document-a', 'blake3:a');
+  const reservation = leases.reserve(
+    'session-a', active, registry.pathForSender('session-a', opened.descriptor.handleId),
+  );
+  assert.equal(reservation.ok, true);
+  if (!reservation.ok) return;
+  leases.commit('session-a', reservation.reservationId);
+
+  const older = minimalCfbBytes();
+  older[34] = 1;
+  const newer = minimalCfbBytes();
+  newer[34] = 2;
+  const first = registry.write('session-a', opened.descriptor.handleId, older, active, leases);
+  const second = registry.write('session-a', opened.descriptor.handleId, newer, active, leases);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, [1], 'the newer save must wait for the older save');
+  finish.shift()?.();
+  await first;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, [1, 2]);
+  finish.shift()?.();
+  await second;
 });

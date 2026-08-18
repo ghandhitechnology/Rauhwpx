@@ -69,7 +69,11 @@ pub fn text<W: Write>(w: &mut Writer<W>, content: &str) -> Result<(), SerializeE
     Ok(())
 }
 
-/// XML 속성·텍스트 이스케이프 (&, <, >, ", ')
+/// XML 1.0 속성·텍스트 이스케이프 (&, <, >, ", ').
+///
+/// XML 1.0에서 허용되지 않는 제어문자는 U+FFFD로 치환한다. HWP 문자열은 임의의
+/// UTF-16을 담을 수 있으므로 수식 스크립트 등에 U+000B 같은 값이 들어온 상태로 그대로
+/// 방출하면 section XML 전체가 파싱 불가능해져 HWPX가 손상된다.
 pub fn xml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -79,8 +83,28 @@ pub fn xml_escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            _ => out.push(c),
+            '\u{0009}'
+            | '\u{000A}'
+            | '\u{000D}'
+            | '\u{0020}'..='\u{D7FF}'
+            | '\u{E000}'..='\u{FFFD}'
+            | '\u{10000}'..='\u{10FFFF}' => out.push(c),
+            _ => out.push('\u{FFFD}'),
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::xml_escape;
+
+    #[test]
+    fn xml_escape_preserves_equation_text_and_filters_invalid_xml_controls() {
+        assert_eq!(
+            xml_escape("a < b & c > d; \"q\" 'p'\n\t"),
+            "a &lt; b &amp; c &gt; d; &quot;q&quot; &apos;p&apos;\n\t"
+        );
+        assert_eq!(xml_escape("x\u{000B}y\u{FFFF}z"), "x\u{FFFD}y\u{FFFD}z");
+    }
 }

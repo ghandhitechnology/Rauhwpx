@@ -66,7 +66,7 @@ pub enum Control {
 pub const EQUATION_LINE_MODE_BIT: u32 = 0x0000_0001;
 
 /// 수식 ('eqed' 컨트롤, HWP 스펙 표 105)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Equation {
     /// 개체 공통 속성 (위치, 크기, 배치)
     pub common: CommonObjAttr,
@@ -99,6 +99,27 @@ pub struct Equation {
     pub font_name: String,
     /// 라운드트립용 원본 ctrl_data
     pub raw_ctrl_data: Vec<u8>,
+}
+
+impl Default for Equation {
+    fn default() -> Self {
+        Self {
+            common: CommonObjAttr::default(),
+            attr: 0,
+            script: String::new(),
+            // OWPML EquationType과 한컴 EQEDIT 생성본의 호환 기본값. 0/빈 문자열을
+            // 방출하면 새로 삽입하거나 구형 HWP/HML에서 승격한 수식이 한컴에서
+            // 빈 개체로 취급될 수 있다.
+            font_size: 1000,
+            color: 0,
+            baseline: 85,
+            unknown: 0,
+            eqedit: 0,
+            version_info: "Equation Version 60".to_string(),
+            font_name: "HYhwpEQ".to_string(),
+            raw_ctrl_data: Vec::new(),
+        }
+    }
 }
 
 /// 자동 번호 ('atno' 컨트롤, HWP 스펙 표 144)

@@ -673,6 +673,7 @@ fn validate_cell(cell: &Cell, path: &str, blockers: &mut Vec<HmlSaveBlocker>) {
     let omitted = cell.list_header_width_ref != 0
         || cell.text_direction != 0
         || cell.vertical_align != VerticalAlign::Center
+        || cell.line_wrap != crate::model::table::CellLineWrap::Break
         || !cell.apply_inner_margin
         || cell.is_header
         || !cell.raw_list_extra.is_empty()

@@ -38,6 +38,7 @@ struct DirEntry {
     left: u32,
     right: u32,
     child: u32,
+    color: u8,
     start_sector: u32,
     is_mini: bool,
 }
@@ -53,6 +54,7 @@ impl DirEntry {
             left: NOSTREAM,
             right: NOSTREAM,
             child: NOSTREAM,
+            color: 1,
             // Storage(1)는 start_sector=0 (MS-CFB 스펙: "SHOULD be set to all zeroes")
             // Root(5), Stream(2)은 ENDOFCHAIN → 나중에 실제 값으로 교체
             start_sector: if obj_type == 1 { 0 } else { ENDOFCHAIN },
@@ -70,7 +72,7 @@ impl DirEntry {
 /// CFB v3 바이너리 바이트.
 pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
     // 1. 엔트리 목록 구축
-    let mut entries = build_entries(named_streams);
+    let mut entries = build_entries(named_streams)?;
 
     // 2. 디렉토리 트리 구축
     build_tree(&mut entries, 0);
@@ -320,7 +322,7 @@ pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
 }
 
 /// 경로 목록에서 엔트리 목록을 구축한다.
-fn build_entries(named_streams: &[(&str, &[u8])]) -> Vec<DirEntry> {
+fn build_entries(named_streams: &[(&str, &[u8])]) -> Result<Vec<DirEntry>, String> {
     let mut entries = Vec::new();
 
     // Root Entry
@@ -328,18 +330,29 @@ fn build_entries(named_streams: &[(&str, &[u8])]) -> Vec<DirEntry> {
 
     for &(path, data) in named_streams {
         let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+            return Err(format!("invalid empty CFB path component: {path}"));
+        }
+        if let Some(part) = parts.iter().find(|part| part.encode_utf16().count() > 31) {
+            return Err(format!(
+                "CFB path component exceeds 31 UTF-16 code units: {part}"
+            ));
+        }
         let mut parent_idx = 0;
 
         for (i, part) in parts.iter().enumerate() {
             let is_last = i == parts.len() - 1;
 
-            let existing = entries
-                .iter()
-                .position(|e| e.parent == parent_idx && e.name == *part);
+            let existing = entries.iter().position(|e| {
+                e.parent == parent_idx && cfb_name_key(&e.name) == cfb_name_key(part)
+            });
 
             if let Some(idx) = existing {
                 if is_last {
-                    entries[idx].data = data.to_vec();
+                    return Err(format!("duplicate CFB stream path: {path}"));
+                }
+                if entries[idx].obj_type != 1 {
+                    return Err(format!("CFB stream/storage path conflict: {path}"));
                 }
                 parent_idx = idx;
             } else {
@@ -356,7 +369,11 @@ fn build_entries(named_streams: &[(&str, &[u8])]) -> Vec<DirEntry> {
         }
     }
 
-    entries
+    Ok(entries)
+}
+
+fn cfb_name_key(name: &str) -> Vec<u16> {
+    name.to_uppercase().encode_utf16().collect()
 }
 
 /// 각 스토리지의 자식을 정렬된 균형 이진 트리로 구축한다.
@@ -370,12 +387,13 @@ fn build_tree(entries: &mut Vec<DirEntry>, idx: usize) {
     // CFB 사양에 따라 이름 비교: 길이 우선, 같은 길이면 대소문자 무시
     let mut sorted = children.clone();
     sorted.sort_by(|&a, &b| {
-        let na = entries[a].name.to_uppercase();
-        let nb = entries[b].name.to_uppercase();
+        let na = cfb_name_key(&entries[a].name);
+        let nb = cfb_name_key(&entries[b].name);
         na.len().cmp(&nb.len()).then(na.cmp(&nb))
     });
 
     let root = build_balanced_tree(entries, &sorted);
+    color_balanced_tree(entries, root);
     entries[idx].child = root;
 
     // 하위 스토리지에 대해 재귀
@@ -404,6 +422,42 @@ fn build_balanced_tree(entries: &mut Vec<DirEntry>, sorted: &[usize]) -> u32 {
     entries[root as usize].left = left;
     entries[root as usize].right = right;
     root
+}
+
+/// Color the height-balanced sibling tree as a valid red-black tree.
+///
+/// Median construction yields leaf depths differing by at most one. Coloring
+/// only nodes on the deepest level red equalizes black height, keeps every red
+/// node a leaf with a black parent, and leaves the sibling-tree root black.
+fn color_balanced_tree(entries: &mut [DirEntry], root: u32) {
+    if root == NOSTREAM {
+        return;
+    }
+    let max_depth = tree_max_depth(entries, root, 0);
+    color_tree_depth(entries, root, 0, max_depth);
+    entries[root as usize].color = 1;
+}
+
+fn tree_max_depth(entries: &[DirEntry], node: u32, depth: usize) -> usize {
+    if node == NOSTREAM {
+        return depth.saturating_sub(1);
+    }
+    let entry = &entries[node as usize];
+    tree_max_depth(entries, entry.left, depth + 1)
+        .max(tree_max_depth(entries, entry.right, depth + 1))
+        .max(depth)
+}
+
+fn color_tree_depth(entries: &mut [DirEntry], node: u32, depth: usize, max_depth: usize) {
+    if node == NOSTREAM {
+        return;
+    }
+    let idx = node as usize;
+    entries[idx].color = u8::from(depth != max_depth || depth == 0);
+    let left = entries[idx].left;
+    let right = entries[idx].right;
+    color_tree_depth(entries, left, depth + 1, max_depth);
+    color_tree_depth(entries, right, depth + 1, max_depth);
 }
 
 /// CFB v3 헤더 (512바이트) 작성
@@ -500,8 +554,8 @@ fn write_dir_entry(output: &mut [u8], offset: usize, entry: &DirEntry) {
     // Object type
     buf[66] = entry.obj_type;
 
-    // Color flag: 1 = black (유효한 red-black 트리)
-    buf[67] = 1;
+    // Color flag: 0 = red, 1 = black.
+    buf[67] = entry.color;
 
     // Left sibling
     buf[68..72].copy_from_slice(&entry.left.to_le_bytes());
@@ -650,6 +704,51 @@ mod tests {
         let mut l_read = Vec::new();
         std::io::Read::read_to_end(&mut cfb.open_stream("/Large").unwrap(), &mut l_read).unwrap();
         assert_eq!(l_read, large);
+    }
+
+    #[test]
+    fn rejects_directory_names_that_would_truncate_or_collide() {
+        let long = format!("/{}", "a".repeat(32));
+        assert!(build_cfb(&[(long.as_str(), b"x")])
+            .unwrap_err()
+            .contains("31 UTF-16"));
+        assert!(build_cfb(&[("/DocInfo", b"a"), ("/docinfo", b"b")])
+            .unwrap_err()
+            .contains("duplicate"));
+        assert!(
+            build_cfb(&[("/BodyText", b"a"), ("/BodyText/Section0", b"b")])
+                .unwrap_err()
+                .contains("stream/storage")
+        );
+    }
+
+    #[test]
+    fn sibling_directories_are_valid_red_black_trees() {
+        fn black_height(entries: &[DirEntry], node: u32, parent_red: bool) -> usize {
+            if node == NOSTREAM {
+                return 1;
+            }
+            let entry = &entries[node as usize];
+            let red = entry.color == 0;
+            assert!(!(parent_red && red), "red directory node has a red child");
+            let left = black_height(entries, entry.left, red);
+            let right = black_height(entries, entry.right, red);
+            assert_eq!(left, right, "directory tree black-height mismatch");
+            left + usize::from(!red)
+        }
+
+        for count in 1..=64 {
+            let names: Vec<String> = (0..count).map(|i| format!("/Stream{i:02}")).collect();
+            let streams: Vec<(&str, &[u8])> = names
+                .iter()
+                .map(|name| (name.as_str(), b"x".as_slice()))
+                .collect();
+            let mut entries = build_entries(&streams).expect("valid names");
+            build_tree(&mut entries, 0);
+            let root = entries[0].child;
+            assert_eq!(entries[root as usize].color, 1, "root must be black");
+            black_height(&entries, root, false);
+        }
     }
 
     #[test]

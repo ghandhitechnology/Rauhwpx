@@ -6,6 +6,49 @@ use crate::model::shape::{GroupShape, RectangleShape};
 use crate::parser::body_text::parse_body_text_section;
 use crate::serializer::body_text::serialize_section;
 
+#[test]
+fn equation_emits_one_ctrl_header_and_one_eqedit_record_with_complete_payload() {
+    use crate::model::control::{Equation, EQUATION_LINE_MODE_BIT};
+    use crate::parser::byte_reader::ByteReader;
+
+    let equation = Equation {
+        attr: EQUATION_LINE_MODE_BIT,
+        script: "a < b & c".to_string(),
+        font_size: 1234,
+        color: 0x0011_2233,
+        baseline: 87,
+        unknown: 9,
+        version_info: "Equation Version 60".to_string(),
+        font_name: "HYhwpEQ".to_string(),
+        ..Default::default()
+    };
+    let mut records = Vec::new();
+    serialize_control(
+        &Control::Equation(Box::new(equation)),
+        3,
+        None,
+        &mut records,
+    );
+
+    assert_eq!(records.len(), 2, "Equation은 CTRL_HEADER+EQEDIT 두 레코드");
+    assert_eq!(records[0].tag_id, tags::HWPTAG_CTRL_HEADER);
+    assert_eq!(records[0].level, 3);
+    assert_eq!(&records[0].data[..4], &tags::CTRL_EQUATION.to_le_bytes());
+    assert_eq!(records[1].tag_id, tags::HWPTAG_EQEDIT);
+    assert_eq!(records[1].level, 4);
+
+    let mut reader = ByteReader::new(&records[1].data);
+    assert_eq!(reader.read_u32().unwrap(), EQUATION_LINE_MODE_BIT);
+    assert_eq!(reader.read_hwp_string().unwrap(), "a < b & c");
+    assert_eq!(reader.read_u32().unwrap(), 1234);
+    assert_eq!(reader.read_u32().unwrap(), 0x0011_2233);
+    assert_eq!(reader.read_i16().unwrap(), 87);
+    assert_eq!(reader.read_u16().unwrap(), 9);
+    assert_eq!(reader.read_hwp_string().unwrap(), "Equation Version 60");
+    assert_eq!(reader.read_hwp_string().unwrap(), "HYhwpEQ");
+    assert_eq!(reader.remaining(), 0, "EQEDIT payload 끝까지 정확히 소비");
+}
+
 /// SectionDef 라운드트립
 #[test]
 fn test_roundtrip_section_def() {

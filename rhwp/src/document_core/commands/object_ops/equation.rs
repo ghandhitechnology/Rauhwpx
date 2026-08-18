@@ -930,5 +930,8 @@ mod tests {
             "baseline 은 1~100 백분율이어야 함 (기존 0 방출 회귀 방지): {}",
             eq.baseline
         );
+        assert_eq!(eq.version_info, "Equation Version 60");
+        assert_eq!(eq.font_name, "HYhwpEQ");
+        assert_eq!(eq.font_size, 1000);
     }
 }
