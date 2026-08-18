@@ -102,6 +102,8 @@ body.ag-sidebar-animating .ag-root {
   --n-on-accent: var(--ag-on-accent);
   --ag-ok: #2f7d4f;
   --ag-err: #c8372d;
+  /* 실행 중 표시등 — 켜진 백열전구의 노랑. */
+  --ag-run: #d9a514;
 
   /* A softer but still compact application geometry. */
   --ag-r-chip: 6px;
@@ -237,6 +239,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   --ag-pi-wash: rgba(108, 192, 170, 0.16);
   --ag-ok: #5cbb7f;
   --ag-err: #ff6b60;
+  --ag-run: #f0c24b;
   box-shadow: var(--n-elev-2);
 }
 
@@ -1220,6 +1223,79 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font-weight: 600;
 }
 
+/* ── 채팅 실행 상태 점 ─────────────────────────────────
+   여러 탭에서 도는 채팅을 한 목록에서 알아본다 — 노란 불은 지금
+   일하는 채팅, 초록 점은 끝나서 볼거리가 생긴 채팅. */
+.ag-thread-status {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.ag-thread-status-working {
+  background: var(--ag-run);
+  box-shadow: 0 0 4px 1px color-mix(in srgb, var(--ag-run) 60%, transparent);
+  animation: ag-status-glow 1.5s ease-in-out infinite;
+}
+
+.ag-thread-status-finished {
+  background: var(--ag-ok);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ag-ok) 16%, transparent);
+}
+
+/* 계획 승인을 기다리는 채팅 — 천천히 숨 쉬는 빨간 점. */
+.ag-thread-status-needs-input {
+  background: var(--ag-err);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ag-err) 20%, transparent);
+  animation: ag-status-attention 2.4s ease-in-out infinite;
+}
+
+/* 행에서는 제목 들여쓰기(26px) 여백 가운데에 겹쳐 앉는다. */
+.ag-row-status {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  margin-top: -3.5px;
+}
+
+/* 접힌 그룹 줄에서는 오른쪽 끝에 붙는다('현재' 칩보다 뒤). */
+.ag-group-status {
+  margin-left: auto;
+}
+
+.ag-threads-group-badge + .ag-group-status {
+  margin-left: 0;
+}
+
+@keyframes ag-status-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 3px 1px color-mix(in srgb, var(--ag-run) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 9px 3px color-mix(in srgb, var(--ag-run) 85%, transparent);
+  }
+}
+
+@keyframes ag-status-attention {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--ag-err) 20%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--ag-err) 34%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-thread-status-working,
+  .ag-thread-status-needs-input {
+    animation: none;
+  }
+}
+
 /* 이름 바꾸기는 행 오른쪽에 겹쳐 두고 hover/focus 에서만 드러낸다.
    버튼 안에 버튼을 넣을 수 없어 형제로 두고 절대 배치한다. */
 .ag-thread-rename {
@@ -1671,6 +1747,36 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-msg-user-text {
   white-space: pre-wrap;
+}
+
+/* 인라인 프롬프트로 보낸 메시지에 붙는 문서 선택 인용. */
+.ag-msg-selection {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--accent-primary);
+  border-radius: 0 var(--ag-r-chip) var(--ag-r-chip) 0;
+  background: var(--ag-bg-2);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.45;
+}
+
+.ag-msg-selection-label {
+  flex: 0 0 auto;
+  color: var(--ag-text-secondary);
+  font-weight: 600;
+}
+
+.ag-msg-selection-excerpt {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ag-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ag-msg-attachments {
