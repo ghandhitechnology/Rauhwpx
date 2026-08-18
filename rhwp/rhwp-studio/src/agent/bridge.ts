@@ -98,6 +98,8 @@ export interface AgentBridge {
   requestAgentSetupStatus(): Promise<AgentSetupStatusMap | null>;
   installAgent(agent: AgentName): Promise<AgentSetupStatusMap | null>;
   authenticateAgent(agent: AgentName, method: AgentAuthMethod, key?: string): Promise<AgentSetupAuthStart | null>;
+  /** 브라우저 로그인 뒤 받은 인증 코드를 진행 중인 CLI 로그인에 전달한다. */
+  submitAgentAuthCode(agent: AgentName, code: string): void;
   cancelAgentSetup(agent: AgentName): void;
   /** 누적 사용량 요약. 응답이 없으면 null. */
   requestUsage(refresh?: boolean): Promise<UsageSummary | null>;
@@ -2186,6 +2188,10 @@ class AgentBridgeImpl implements AgentBridge {
       'agent-setup-auth',
       30_000,
     );
+  }
+
+  submitAgentAuthCode(agent: AgentName, code: string): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-auth-code', agent, code });
   }
 
   cancelAgentSetup(agent: AgentName): void {
