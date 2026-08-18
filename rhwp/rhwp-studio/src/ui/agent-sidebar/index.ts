@@ -58,6 +58,15 @@ import {
   type ThreadMessage,
   type ThreadAttachment,
 } from '../../agent/threads.ts';
+import {
+  clearChatStatus,
+  getChatStatus,
+  markChatFinished,
+  markChatNeedsInput,
+  markChatWorking,
+  subscribeChatStatus,
+  type ChatRunStatus,
+} from '../../agent/chat-status.ts';
 import { createChevron, createColumnIcon } from '../chevron.ts';
 import { showActionMenu } from '../action-menu.ts';
 import { createHieumGlyph, createIcon, createStopIcon, OP_ICON } from './icons.ts';
@@ -509,6 +518,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   let connRetryAt: number | null = null;
   let connCountdownTimer: number | null = null;
   let turnRunning = bridge.isTurnRunning();
+  /** 지금 노란 불이 붙어 있는 스레드 — 턴이 끝나면 초록 점으로 넘긴다. */
+  let runStatusThreadId: string | null = null;
   let workflowTransitionPending = false;
   /** chat-started 후 입력기를 여는 건 마지막으로 요청한 스레드뿐이다. */
   let chatStartPendingThreadId: string | null = null;
@@ -3349,6 +3360,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     return docKey ?? '문서 없음';
   }
 
+  /** 실행 상태 점 — 노란 불(작업 중)·초록 점(완료)·빨간 점(승인 대기). */
+  function buildStatusDot(status: ChatRunStatus, extraClass?: string): HTMLElement {
+    const dot = el('span', `ag-thread-status ag-thread-status-${status}${extraClass ? ` ${extraClass}` : ''}`);
+    dot.title = status === 'working' ? '작업 중' : status === 'needs-input' ? '승인 대기' : '완료';
+    return dot;
+  }
+
   function buildThreadRow(thread: ChatThread): HTMLElement {
     const li = el('li', 'ag-threads-row');
     if (thread.id === currentThread.id) li.classList.add('ag-current');
@@ -3356,6 +3374,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     const btn = el('button', 'ag-threads-item');
     btn.type = 'button';
     if (thread.id === currentThread.id) btn.classList.add('ag-active');
+    // 상태 점은 제목 들여쓰기 여백에 겹쳐 앉는다 — 행 배치는 그대로다.
+    const status = getChatStatus(thread.id);
+    if (status) btn.appendChild(buildStatusDot(status, 'ag-row-status'));
     btn.appendChild(el('span', 'ag-threads-item-title', thread.title || '새 채팅'));
     // 두 번 누르기로는 열지 않는다 — 첫 클릭이 이미 대화를 열어버리므로
     // 이름 바꾸기는 연필 버튼 하나로만 들어간다.
@@ -3413,6 +3434,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       name.title = docGroupLabel(group.docKey);
       groupBtn.append(paper, name);
       if (isCurrentDoc) groupBtn.append(el('span', 'ag-threads-group-badge', '현재'));
+      // 접힌 그룹은 안쪽 행이 안 보이므로 상태를 그룹 줄로 끌어올린다.
+      // 사용자를 기다리는 빨강이 먼저, 그다음 작업 중, 마지막이 완료다.
+      if (!expanded) {
+        const statuses = group.threads.map((thread) => getChatStatus(thread.id));
+        const rollup = statuses.includes('needs-input')
+          ? 'needs-input' as const
+          : statuses.includes('working')
+            ? 'working' as const
+            : statuses.includes('finished') ? 'finished' as const : null;
+        if (rollup) groupBtn.append(buildStatusDot(rollup, 'ag-group-status'));
+      }
       groupBtn.addEventListener('click', () => {
         docGroupToggles.set(toggleKey, !expanded);
         // 펼칠 때만 행이 차례로 미끄러져 들어온다 — 접을 때는 즉시.
@@ -3567,6 +3599,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   }
 
   function openThread(id: string): void {
+    // 채팅을 열어 보면 완료 점은 걷힌다. 다른 탭에서 아직 일하는 채팅의
+    // 노란 불은 그 탭의 것이므로 여기서 지우지 않는다.
+    if (getChatStatus(id) === 'finished') clearChatStatus(id);
     if (id === currentThread.id) {
       setThreadsPanelOpen(false);
       return;
@@ -3724,6 +3759,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     updateTurnPending();
     updateComposer();
     if (chatWorkflow === 'plan' && activePlan) rebuildReview();
+  }
+
+  /** 턴이 정상 종료 경로 없이 꺼졌을 때(중단·재연결·오류) 노란 불을 걷는다. */
+  function dropRunStatusIfIdle(): void {
+    if (turnRunning || runStatusThreadId === null) return;
+    clearChatStatus(runStatusThreadId);
+    runStatusThreadId = null;
+  }
+
+  /** 계획에 응답이 닿았다(승인·수정 요청·무효화) — 빨간 점을 걷는다. */
+  function settlePlanAttention(): void {
+    if (getChatStatus(currentThread.id) === 'needs-input') clearChatStatus(currentThread.id);
   }
 
   function updateComposer(): void {
@@ -4168,6 +4215,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         sweepUnresolvedToolRows();
         completeTurnActivity();
         setTurnRunning(true);
+        runStatusThreadId = currentThread.id;
+        markChatWorking(runStatusThreadId);
         replyPending = true;
         followConversation = true;
         updateTurnPending(event.agent);
@@ -4214,6 +4263,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
           streamBubble?.parentElement === messages
           && Boolean((assistantBubbleSources.get(streamBubble) ?? streamBubble.textContent ?? '').trim());
         setTurnRunning(false);
+        if (runStatusThreadId !== null) {
+          // 사용자가 멈춘 턴은 신호 없이 꺼진다. 계획이 승인을 기다리며 끝난
+          // 턴은 빨간 점, 그 외에는 완료 점이 남는다.
+          if (event.stopReason === 'interrupted') clearChatStatus(runStatusThreadId);
+          else if (chatWorkflow === 'plan' && planningPhase === 'awaiting-approval' && planApprovable) {
+            markChatNeedsInput(runStatusThreadId);
+          } else markChatFinished(runStatusThreadId);
+          runStatusThreadId = null;
+        }
         flushAssistantBuffer();
         sweepUnresolvedToolRows();
         if (event.errorMessage) systemMessage(event.errorMessage);
@@ -4247,6 +4305,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         setConnection(e.state, { attempt: e.attempt, retryInMs: e.retryInMs });
         // 재연결 시 진행 상태를 브리지와 다시 동기화한다.
         setTurnRunning(bridge.isTurnRunning());
+        dropRunStatusIfIdle();
         break;
       case 'chat-started':
         if (e.threadId && e.threadId !== currentThread.id) break;
@@ -4440,6 +4499,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         break;
       case 'chat-stopped':
         setTurnRunning(false);
+        dropRunStatusIfIdle();
         flushPendingAssistantRender();
         flushAssistantBuffer();
         sweepUnresolvedToolRows();
@@ -4489,6 +4549,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         planPermissionDefaultPending = false;
         syncPlanningFromBridge();
         setTurnRunning(bridge.isTurnRunning());
+        dropRunStatusIfIdle();
         break;
     }
   }
@@ -4807,6 +4868,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
       systemMessage(`수정 요청 실패: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
+    settlePlanAttention();
     setPlanningPhase('planning');
     systemMessage('수정 요청을 보냈습니다. 바꾸고 싶은 부분을 입력창에 적어 주세요.');
     updateComposer();
@@ -4851,16 +4913,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
         // 서버가 승인했다고 말한 계획이 지금 카드와 다르면 표시를 건드리지 않는다.
         if (activePlan && e.planId && e.planId !== activePlan.planId) return true;
         planApprovable = false;
+        settlePlanAttention();
         setPlanningPhase(e.phase);
         return true;
       case 'implementation-started':
         planApprovable = false;
+        settlePlanAttention();
         closePlanForExecution(e.planId || activePlan?.planId || '');
         setPlanningPhase(e.phase);
         rebuildReview();
         return true;
       case 'plan-invalidated':
         planApprovable = false;
+        settlePlanAttention();
         activePlanHistorical = activePlan !== null;
         setPlanningPhase(e.phase);
         systemMessage(
@@ -5027,6 +5092,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
   const unsubThreads = subscribeThreadChanges(() => {
     if (threadsListVisible()) rebuildThreadsList();
   });
+  // 다른 탭의 채팅이 일을 시작하거나 끝내면 이 탭의 목록에도 불이 옮겨 붙는다.
+  const unsubChatStatus = subscribeChatStatus(() => {
+    if (threadsListVisible()) rebuildThreadsList();
+  });
   void bridge.listTemplates().then((catalog) => {
     templateCatalog = catalog;
     activeTemplate = currentThread.activeTemplateId
@@ -5068,6 +5137,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): { root: HTMLElement; d
     dispose(): void {
       unsubBridge();
       unsubThreads();
+      unsubChatStatus();
       unsubPending();
       contextUnsubs.forEach((unsub) => unsub());
       messagesMutationObserver?.disconnect();
