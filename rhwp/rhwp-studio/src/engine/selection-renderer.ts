@@ -36,8 +36,9 @@ export class SelectionRenderer {
 
     for (const rect of rects) {
       const pageOffset = this.virtualScroll.getPageOffset(rect.pageIndex);
-      const pageDisplayWidth = this.virtualScroll.getPageWidth(rect.pageIndex);
-      const pageLeft = (contentWidth - pageDisplayWidth) / 2;
+      // 그리드 배치·수평 팬에서는 페이지가 중앙에 있지 않다 — 가상 스크롤이
+      // 확정한 pageLeft 를 써야 하이라이트가 엉뚱한 열/좌표에 그려지지 않는다.
+      const pageLeft = this.virtualScroll.getPageLeftResolved(rect.pageIndex, contentWidth);
       layouts.push([
         pageLeft + rect.x * zoom,
         pageOffset + rect.y * zoom,

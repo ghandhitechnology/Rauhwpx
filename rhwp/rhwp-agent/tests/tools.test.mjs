@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 65개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 65);
+test('도구는 정확히 66개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 66);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -47,7 +47,7 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 57);
+  assert.equal(direct.size, 58);
   assert.ok(direct.has('insert_text'));
   assert.ok(direct.has('get_engine_edit_capabilities'));
   assert.ok(direct.has('apply_engine_edits'));
@@ -298,6 +298,44 @@ test('edit_table: op 별 필수 파라미터를 이름 붙여 즉시 실패', ()
   validate({ op: 'merge_cells', startRow: 0, startCol: 0, endRow: 1, endCol: 1 }); // 통과
   validate({ op: 'split_cell', rowIdx: 0, colIdx: 0, splitRows: 1, splitCols: 2 }); // 통과
   validate({ op: 'set_table_props', props: { horizontalAlign: 'center' } }); // 통과
+  assert.throws(
+    () => validate({ op: 'set_column_widths' }),
+    (e) => e.code === 'INVALID_ARGS' && /columnWidthsMm/.test(e.message),
+  );
+  assert.throws(
+    () => validate({ op: 'set_zone_borders', startCell: { row: 0, col: 0 } }),
+    (e) => e.code === 'INVALID_ARGS' && /endCell/.test(e.message),
+  );
+  assert.throws(
+    () => validate({ op: 'apply_formula', row: 3, col: 1 }),
+    (e) => e.code === 'INVALID_ARGS' && /formula/.test(e.message),
+  );
+  assert.throws(() => validate({ op: 'set_caption' }), (e) => e.code === 'INVALID_ARGS' && /text/.test(e.message));
+  validate({ op: 'set_column_widths', columnWidthsMm: [30, 40] }); // 통과
+  validate({ op: 'fit_to_page' }); // 통과 (추가 인자 없음)
+  validate({ op: 'set_zone_borders', startCell: { row: 0, col: 0 }, endCell: { row: 2, col: 3 } }); // 통과
+  validate({ op: 'apply_formula', row: 3, col: 1, formula: '=SUM(A1:A3)' }); // 통과
+  validate({ op: 'set_caption', text: '분기별 매출' }); // 통과
+});
+
+test('get_table_layout: 표의 쪽별 배치와 넘침 여부를 읽는 읽기 전용 도구', () => {
+  const layout = byName.get('get_table_layout');
+  assert.ok(layout, 'missing tool: get_table_layout');
+  assert.equal(layout.category, 'document-read');
+  for (const key of ['sectionIdx', 'paraIdx', 'controlIdx']) {
+    assert.ok(key in layout.shape, `get_table_layout missing ${key}`);
+  }
+  assert.ok(layout.shape.sectionIdx.safeParse(undefined).success, 'sectionIdx must be optional (default 0)');
+  assert.ok(!layout.shape.paraIdx.safeParse(undefined).success);
+  assert.match(layout.description, /overflowsBody/);
+  assert.match(layout.description, /pageBreak/);
+
+  const edit = byName.get('edit_table');
+  const values = edit.shape.op._def.values;
+  for (const op of ['set_column_widths', 'fit_to_page', 'set_zone_borders', 'apply_formula', 'set_caption']) {
+    assert.ok(values.includes(op), `edit_table op enum missing ${op}`);
+    assert.match(edit.description, new RegExp(op));
+  }
 });
 
 test('get_table_properties reads optional cell state and edit_table documents object placement', () => {

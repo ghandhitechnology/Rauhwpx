@@ -254,6 +254,18 @@ export function handleBackspace(this: any, pos: DocumentPosition, inCell: boolea
     }
   } catch { /* 무시 */ }
 
+  // 번호/글머리표 문단 시작에서 Backspace → 병합 대신 번호를 해제해 일반 문단으로
+  // 돌아간다 (한/글·Word 공통 관례). 이미 일반 문단이면 기존 병합/삭제가 실행된다.
+  if (charOffset === 0) {
+    try {
+      const props = this.getParaProperties();
+      if (props.headType && props.headType !== 'None') {
+        this.clearParaNumbering();
+        return;
+      }
+    } catch { /* 문단 속성 조회 실패 시 기존 동작 유지 */ }
+  }
+
   if (inCell) {
     if (charOffset > 0) {
       const deletePos = { ...pos, charOffset: charOffset - 1 };

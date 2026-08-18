@@ -555,7 +555,9 @@ impl DocumentCore {
             zones: Vec::new(),
             cells,
             cell_grid: Vec::new(),
-            page_break: TablePageBreak::None,
+            // 한컴 새 표 기본값 "쪽 경계에서: 나눔" — 쪽 하단을 넘으면 행 단위로
+            // 다음 쪽에 이어진다 (create_table_ex_native와 동일 기본값).
+            page_break: TablePageBreak::RowBreak,
             repeat_header: false,
             caption: None,
             common: crate::model::shape::CommonObjAttr {

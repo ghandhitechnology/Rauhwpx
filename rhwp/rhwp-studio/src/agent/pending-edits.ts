@@ -1056,7 +1056,22 @@ export class PendingEditManager {
       case 'tableStructure':
       case 'setTableProps':
       case 'deleteTable':
+      case 'setColumnWidths':
+      case 'fitToPage':
+      case 'setCaption':
         return { sort: 'table', sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx };
+      case 'setZoneProps':
+        return {
+          sort: 'cells', sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx,
+          rect: obj.range,
+        };
+      case 'applyFormula':
+        return obj.cellIdx !== undefined
+          ? { sort: 'cells', sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx, cellIdx: obj.cellIdx }
+          : {
+            sort: 'cells', sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx,
+            rect: { startRow: obj.row, startCol: obj.col, endRow: obj.row, endCol: obj.col },
+          };
       case 'tableStructureMarked': {
         const base = { sort: 'cells' as const, sectionIdx: obj.sectionIdx, paraIdx: obj.tableParaIdx, controlIdx: obj.controlIdx };
         if (obj.op === 'delete_row') return { ...base, rowIdx: obj.rowIdx };
@@ -1537,6 +1552,43 @@ export class PendingEditManager {
       case 'setTableProps':
         wasm.setTableProperties(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.props);
         return;
+      case 'setColumnWidths': {
+        const result = wasm.setTableColumnWidths(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.widthsHu);
+        if (!result?.ok) throw new AgentToolError('RPC_ERROR', 'set_column_widths failed');
+        return;
+      }
+      case 'fitToPage': {
+        const result = wasm.fitTableToPage(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx);
+        if (!result?.ok) throw new AgentToolError('RPC_ERROR', 'fit_to_page failed');
+        return;
+      }
+      case 'setZoneProps':
+        wasm.setCellZoneProperties(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.range, obj.props);
+        return;
+      case 'applyFormula': {
+        const result = wasm.evaluateTableFormulaEx({
+          sectionIdx: obj.sectionIdx,
+          parentParaIdx: obj.tableParaIdx,
+          controlIdx: obj.controlIdx,
+          targetRow: obj.row,
+          targetCol: obj.col,
+          formula: obj.formula,
+          writeResult: true,
+          ...(obj.format?.decimalPlaces !== undefined ? { decimalPlaces: obj.format.decimalPlaces } : {}),
+          ...(obj.format?.thousandsSeparator !== undefined ? { thousandsSeparator: obj.format.thousandsSeparator } : {}),
+          ...(obj.format?.prefix !== undefined ? { prefix: obj.format.prefix } : {}),
+          ...(obj.format?.suffix !== undefined ? { suffix: obj.format.suffix } : {}),
+        });
+        if (!result?.ok) throw new AgentToolError('RPC_ERROR', `apply_formula failed: ${obj.formula}`);
+        return;
+      }
+      case 'setCaption': {
+        const result = wasm.setTableCaptionText(
+          obj.sectionIdx, obj.tableParaIdx, obj.controlIdx, obj.text, obj.withNumber,
+        );
+        if (!result?.ok) throw new AgentToolError('RPC_ERROR', 'set_caption failed');
+        return;
+      }
       case 'applyStyle':
         if (obj.cell) {
           wasm.applyCellStyle(obj.sectionIdx, obj.cell.paraIdx, obj.cell.controlIdx, obj.cell.cellIdx, obj.paraIdx, obj.styleId);
@@ -1688,7 +1740,12 @@ export class PendingEditManager {
         case 'tableStructureMarked':
         case 'deleteTable':
         case 'setCellProps':
-        case 'setTableProps': {
+        case 'setTableProps':
+        case 'setColumnWidths':
+        case 'fitToPage':
+        case 'setZoneProps':
+        case 'applyFormula':
+        case 'setCaption': {
           const d = wasm.getTableDimensions(obj.sectionIdx, obj.tableParaIdx, obj.controlIdx);
           return d.rowCount === obj.dims.rowCount && d.colCount === obj.dims.colCount;
         }
@@ -1776,7 +1833,9 @@ export class PendingEditManager {
             o.expectedCols = (o.expectedCols ?? o.cols) + dCols;
           }
         } else if (o.type === 'tableStructure' || o.type === 'tableStructureMarked'
-          || o.type === 'deleteTable' || o.type === 'setCellProps' || o.type === 'setTableProps') {
+          || o.type === 'deleteTable' || o.type === 'setCellProps' || o.type === 'setTableProps'
+          || o.type === 'setColumnWidths' || o.type === 'fitToPage' || o.type === 'setZoneProps'
+          || o.type === 'applyFormula' || o.type === 'setCaption') {
           if (o.sectionIdx === sectionIdx && o.tableParaIdx === tableParaIdx
             && o.controlIdx === controlIdx && o.dims) {
             o.dims = { rowCount: o.dims.rowCount + dRows, colCount: o.dims.colCount + dCols };
@@ -1811,7 +1870,9 @@ export class PendingEditManager {
             && o.anchor.paraIdx === paraIdx && hit(o.anchor.controlIdx)) {
             o.anchor = { ...o.anchor, controlIdx: o.anchor.controlIdx + delta };
           } else if ((o.type === 'tableStructure' || o.type === 'tableStructureMarked'
-            || o.type === 'deleteTable' || o.type === 'setCellProps' || o.type === 'setTableProps')
+            || o.type === 'deleteTable' || o.type === 'setCellProps' || o.type === 'setTableProps'
+            || o.type === 'setColumnWidths' || o.type === 'fitToPage' || o.type === 'setZoneProps'
+            || o.type === 'applyFormula' || o.type === 'setCaption')
             && o.sectionIdx === sectionIdx && o.tableParaIdx === paraIdx && hit(o.controlIdx)) {
             o.controlIdx += delta;
           } else if ((o.type === 'paraFormat' || o.type === 'applyStyle' || o.type === 'insertEquation')

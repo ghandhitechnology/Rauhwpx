@@ -1,5 +1,7 @@
 mod bookmark_query;
 mod cursor_nav;
+// wasm_api 의 선택 rect 래퍼가 셀 주소(평면/경로)를 구성할 때 쓴다.
+pub(crate) use cursor_nav::SelCellAddr;
 mod cursor_rect;
 pub(crate) mod doc_tree_nav;
 // [#3281] `fields` CLI 가 필드 위치(NestedEntry)를 읽어야 하므로 공개한다.

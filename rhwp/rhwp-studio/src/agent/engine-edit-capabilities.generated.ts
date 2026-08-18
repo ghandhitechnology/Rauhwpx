@@ -644,6 +644,14 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "evaluateTableFormula(sec: number, parentPara: number, controlIdx: number, targetRow: number, targetCol: number, formula: string, writeResult: boolean)"
   },
   {
+    "method": "evaluateTableFormulaEx",
+    "kind": "document",
+    "parameters": [
+      "options"
+    ],
+    "signature": "evaluateTableFormulaEx(options: { sectionIdx: number; parentParaIdx: number; controlIdx: number; targetRow: number; targetCol: number; formula: string; writeResult: boolean; decimalPlaces?: number; thousandsSeparator?: boolean; prefix?: string; suffix?: string; })"
+  },
+  {
     "method": "findOrCreateFontId",
     "kind": "document",
     "parameters": [
@@ -659,6 +667,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "name"
     ],
     "signature": "findOrCreateFontIdForLang(lang: number, name: string)"
+  },
+  {
+    "method": "fitTableToPage",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "controlIdx"
+    ],
+    "signature": "fitTableToPage(sec: number, parentPara: number, controlIdx: number)"
   },
   {
     "method": "groupShapes",
@@ -1552,6 +1570,29 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "props"
     ],
     "signature": "setShapeProperties(sec: number, para: number, ci: number, props: Record<string, unknown>)"
+  },
+  {
+    "method": "setTableCaptionText",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "controlIdx",
+      "text",
+      "withNumber"
+    ],
+    "signature": "setTableCaptionText(sec: number, parentPara: number, controlIdx: number, text: string, withNumber: boolean)"
+  },
+  {
+    "method": "setTableColumnWidths",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "controlIdx",
+      "widths"
+    ],
+    "signature": "setTableColumnWidths(sec: number, parentPara: number, controlIdx: number, widths: number[])"
   },
   {
     "method": "setTableProperties",

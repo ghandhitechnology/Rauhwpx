@@ -600,34 +600,40 @@ export class InputHandler {
     this.textarea.addEventListener('cut', this.onCutBound);
     this.textarea.addEventListener('paste', this.onPasteBound);
 
-    // 줌 변경 시 캐럿/선택 마커 위치 갱신
-    eventBus.on('zoom-changed', () => {
+    // 캐럿/선택/핸들 오버레이 재배치. 줌뿐 아니라 페이지 좌표(pageLeft/offset)를
+    // 움직이는 모든 이벤트에서 호출해야 한다 — 창 리사이즈, 사이드바 여백 변화,
+    // 가상 스크롤 재배치 후에도 하이라이트가 옛 좌표(엉뚱한 텍스트 위)에 남지 않는다.
+    const repositionOverlays = () => {
       if (this.active) {
         const rect = this.cursor.getRect();
         if (rect) {
           this.caret.updatePosition(this.viewportManager.getZoom());
         }
-        // 필드 마커도 줌에 맞게 갱신
+        // 필드 마커도 새 배치에 맞게 갱신
         if (this.fieldMarker.isVisible) {
           this.updateFieldMarkers();
         }
       }
-      // 텍스트 블럭 선택 줌 동기화
+      // 텍스트 블럭 선택 동기화
       if (this.cursor.hasSelection()) {
         this.updateSelection();
       }
-      // F5 셀 선택 줌 동기화
+      // F5 셀 선택 동기화
       if (this.cursor.isInCellSelectionMode()) {
         this.updateCellSelection();
       }
-      // 도형/표 선택 핸들 줌 동기화
+      // 도형/표 선택 핸들 동기화
       if (this.cursor.isInPictureObjectSelection()) {
         this.renderPictureObjectSelection();
       }
       if (this.cursor.isInTableObjectSelection()) {
         this.renderTableObjectSelection();
       }
-    });
+    };
+    eventBus.on('zoom-changed', repositionOverlays);
+    eventBus.on('page-layout-changed', repositionOverlays);
+    eventBus.on('viewport-resize', repositionOverlays);
+    eventBus.on('viewport-inset-changed', repositionOverlays);
 
     eventBus.on('document-view-changed', () => {
       if (!this.active) return;
@@ -2566,6 +2572,11 @@ export class InputHandler {
         if (desc.command.type !== 'applyCharFormat' && desc.command.type !== 'applyParaFormat') {
           this.cursor.moveTo(newPos);
           this.cursor.resetPreferredX();
+        } else {
+          // 서식 변경은 커서 위치(offset)를 바꾸지 않지만 캐럿 좌표는 바뀔 수 있다
+          // (번호/글머리표 마커 폭, 정렬, 줄 간격 등). 선택은 유지한 채 rect 만
+          // 재계산해 캐럿이 이전 좌표(예: 번호 왼쪽)에 남지 않게 한다.
+          this.cursor.updateRect();
         }
         if (keepFieldStartOutside) {
           this.markCurrentFieldStartOutside();
@@ -3417,8 +3428,35 @@ export class InputHandler {
       let rects;
       const startInCell = start.parentParaIndex !== undefined;
       const endInCell = end.parentParaIndex !== undefined;
+      // 중첩 셀 판정은 평면 필드가 아니라 cellPath 로 한다 — hit-test 의 평면
+      // controlIndex/cellIndex/cellParaIndex 는 최외곽 셀 값이라 depth>=2 에서
+      // 서로 다른 안쪽 셀도 같은 셀로 오판되고, 평면 rect 질의는 바깥 셀의
+      // 문단을 하이라이트한다 (#2651 동형).
+      const startPath = start.cellPath ?? [];
+      const endPath = end.cellPath ?? [];
+      const samePathCell = startPath.length > 1 && startPath.length === endPath.length
+        && start.parentParaIndex === end.parentParaIndex
+        && startPath.every((e, i) => {
+          const o = endPath[i];
+          return e.controlIndex === o.controlIndex && e.cellIndex === o.cellIndex
+            && (i === startPath.length - 1 || e.cellParaIndex === o.cellParaIndex);
+        });
 
-      if (startInCell && endInCell &&
+      if (samePathCell) {
+        // 같은 중첩 셀 내부 선택 — 경로 기반 질의로 안쪽 셀 축을 정확히 지정한다.
+        let sp = startPath[startPath.length - 1].cellParaIndex;
+        let so = start.charOffset;
+        let ep = endPath[endPath.length - 1].cellParaIndex;
+        let eo = end.charOffset;
+        // 평면 비교 기반 endpoint 정렬은 안쪽 축을 모른다 — 여기서 정규화한다.
+        if (sp > ep || (sp === ep && so > eo)) {
+          [sp, so, ep, eo] = [ep, eo, sp, so];
+        }
+        rects = this.wasm.getSelectionRectsByPath(
+          start.sectionIndex, start.parentParaIndex!, startPath, sp, so, ep, eo,
+        );
+      } else if (startInCell && endInCell &&
+          startPath.length <= 1 && endPath.length <= 1 &&
           start.parentParaIndex === end.parentParaIndex &&
           start.controlIndex === end.controlIndex &&
           start.cellIndex === end.cellIndex) {
@@ -5110,6 +5148,18 @@ export class InputHandler {
       this.focusTextarea();
     } catch (err) {
       console.warn('[InputHandler] applyNumbering 실패:', err);
+    }
+  }
+
+  /** 번호/글머리표 해제 → 일반 문단 (문단 시작 Backspace 등에서 사용, undo 가능) */
+  clearParaNumbering(): void {
+    try {
+      this.applyParaFormat({
+        headType: 'None',
+        numberingId: 0,
+      } as Partial<import('@/core/types').ParaProperties>);
+    } catch (err) {
+      console.warn('[InputHandler] clearParaNumbering 실패:', err);
     }
   }
 

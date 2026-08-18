@@ -207,7 +207,7 @@ export class PendingOverlayRenderer {
     // 가상 스크롤 배치가 확정되면 캐시된 페이지 기하를 다시 사영한다.
     const projectionEvents = ['zoom-changed', 'viewport-resize', 'viewport-inset-changed', 'page-layout-changed'];
     for (const name of projectionEvents) {
-      this.unsubs.push(deps.eventBus.on(name, () => this.scheduleRender()));
+      this.unsubs.push(deps.eventBus.on(name, () => this.projectNow()));
     }
     this.unsubs.push(deps.eventBus.on('cursor-rect-updated', () => this.inspectCaret()));
     document.addEventListener('keydown', this.onKeyDown, true);
@@ -251,6 +251,21 @@ export class PendingOverlayRenderer {
       this.renderRafId = null;
       this.render();
     });
+  }
+
+  /**
+   * 화면 사영만 바뀐 경우의 동기 재배치. rAF 로 미루면 줌 애니메이션·사이드바
+   * 이동(프레임마다 pageLeft/zoom 이 바뀜) 동안 오버레이가 항상 한 프레임 뒤의
+   * 좌표에 그려져 하이라이트가 본문에서 분리되어 보인다. wasm rect 프로브가
+   * 필요한 상태(geometryDirty)면 비싼 프로브는 기존 rAF 배치에 남긴다 —
+   * 에이전트 편집 버스트 코얼레싱(문서 변이 이벤트)을 되돌리지 않는다.
+   */
+  private projectNow(): void {
+    if (this.geometryDirty || !this.cachedExact || !this.cachedLegacy) {
+      this.scheduleRender();
+      return;
+    }
+    this.render();
   }
 
   dispose(): void {

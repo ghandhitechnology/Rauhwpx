@@ -15,6 +15,23 @@ export function cellParam() {
   }).optional().describe('Table cell address. When present, paraIdx/startParaIdx/endParaIdx and offsets refer to paragraphs INSIDE this cell. Assemble it from the TABLE entry in get_structure tables[] (its paraIdx/controlIdx) plus the target cell\'s cellIdx — the per-cell entries in get_structure do NOT carry paraIdx/controlIdx; only a find_text match contains a complete cell object you can copy verbatim.');
 }
 
+/** edit_table set_zone_borders 의 테두리 한 변 스펙. */
+function borderSpec(description) {
+  return z.object({
+    type: z.number().int().min(0).max(15).describe('Line type: 0 none, 1 solid, 2 dashed, 3 dotted, 4 dash-dot, 8 double'),
+    width: z.number().int().min(0).max(6).describe('Line width step 0-6 (0 = 0.1mm hairline, 6 = thickest)'),
+    color: z.string().regex(/^#[0-9a-fA-F]{6}$/).describe('Line color "#RRGGBB"'),
+  }).strict().optional().describe(description);
+}
+
+/** edit_table set_zone_borders 의 범위 모서리 좌표. */
+function zoneCorner(description) {
+  return z.object({
+    row: z.number().int().min(0),
+    col: z.number().int().min(0),
+  }).strict().optional().describe(description);
+}
+
 /** INVALID_ARGS 에러를 만든다 (mcp-stdio 의 hubError 와 같은 코드 경로로 처리된다). */
 function invalidArgs(message) {
   const err = new Error(message);
@@ -61,6 +78,11 @@ const EDIT_TABLE_REQUIRED_PARAMS = {
   split_cell: ['rowIdx', 'colIdx', 'splitRows', 'splitCols'],
   set_cell_props: ['cellIdx', 'props'],
   set_table_props: ['props'],
+  set_column_widths: ['columnWidthsMm'],
+  fit_to_page: [],
+  set_zone_borders: ['startCell', 'endCell'],
+  apply_formula: ['row', 'col', 'formula'],
+  set_caption: ['text'],
 };
 
 // apply_list: 번호 목록이면 format 필수, bulletChar 가 있으면 글머리표 목록이라 format 불필요.
@@ -328,6 +350,15 @@ const BASE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'get_table_layout',
+    description: `See where one table actually lands on the page: fragments[] gives {pageIndex, xMm, yMm, widthMm, heightMm} for every page the table occupies (more than one entry means it is already split across pages), plus the page body area (bodyAreaMm) it is measured against. overflowsBody:true means the table runs past the bottom of the body area on some page; overflowsBodyWidth:true means it is wider than the body area. Also returns the current pageBreak (0 나누지 않음 / 1 셀 단위 나눔 / 2 나눔) and repeatHeader. FIX RULE: when overflowsBody is true and pageBreak is 0, call edit_table set_table_props with {pageBreak:"row"} so the table continues on the next page (add {repeatHeader:true} to repeat the header row); when the table is too WIDE, call edit_table fit_to_page or set_column_widths. Addresses come from get_structure tables[]. ${REVISION_NOTE}`,
+    shape: {
+      sectionIdx: z.number().int().min(0).default(0).optional().describe('Section index (default 0)'),
+      paraIdx: z.number().int().min(0).describe('Body paragraph containing the table control'),
+      controlIdx: z.number().int().min(0),
+    },
+  },
+  {
     name: 'get_engine_edit_capabilities',
     description: `List every agent-editable method exposed by the active editor engine: all document mutations plus the structured-copy/session setup operations required by paste workflows. Each entry includes its kind, positional parameter names, and TypeScript signature; typeDefinitions supplies the JSON shapes for referenced engine types, and argumentGuide documents opaque property/JSON parameters. This catalog is generated from the same registries that guard editor undo coverage, so newly added engine edits appear here automatically. Pass query to filter by method or signature. Call this before apply_engine_edits. ${REVISION_NOTE}`,
     shape: {
@@ -478,13 +509,17 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'edit_table',
-    description: `Restructure or format an existing table at (sectionIdx, paraIdx, controlIdx) — copy the address from get_structure tables[] and call get_table_properties first when changing layout. Operations: insert_row(rowIdx, below?=true) · insert_col(colIdx, right?=true) · delete_row(rowIdx) · delete_col(colIdx) · merge_cells(startRow,startCol,endRow,endCol) · split_cell(rowIdx,colIdx,splitRows,splitCols) · set_cell_props(cellIdx,props) · set_table_props(props). set_cell_props supports fillColor, verticalAlign, isHeader, widthMm/heightMm, paddingMm{left/right/top/bottom}, applyInnerMargin, textDirection("horizontal"|"vertical"), protected, editableInForm and fieldName. set_table_props supports repeatHeader; pageBreak("none"|"cell"|"row"); cellSpacingMm; cellPaddingMm; outerMarginMm; positionMode("inline"|"floating"); textWrap("square"|"topAndBottom"|"behindText"|"inFrontOfText"); horizontalRelativeTo("paper"|"page"|"column"|"paragraph"), horizontalAlign and horizontalOffsetMm; verticalRelativeTo("paper"|"page"|"paragraph"), verticalAlign and verticalOffsetMm; restrictInPage; allowOverlap; keepWithAnchor; and captionEnabled, captionDirection, captionWidthMm, captionSpacingMm, captionVerticalAlign. EASY CENTERING: set_table_props with {horizontalAlign:"center"}; it automatically makes the table floating, column-relative and zero-offset unless overridden. Calls missing required params fail fast. To append a row/col, target the last index with below/right:true. delete/merge/split and props operations execute when the successful turn auto-commits; structural operations renumber cellIdx, so edit content/props first and re-read get_structure on the next turn. ${UNIT_NOTE} ${WRITE_NOTE}`,
+    description: `Restructure or format an existing table at (sectionIdx, paraIdx, controlIdx) — copy the address from get_structure tables[] and call get_table_properties first when changing layout. Operations: insert_row(rowIdx, below?=true) · insert_col(colIdx, right?=true) · delete_row(rowIdx) · delete_col(colIdx) · merge_cells(startRow,startCol,endRow,endCol) · split_cell(rowIdx,colIdx,splitRows,splitCols) · set_cell_props(cellIdx,props) · set_table_props(props) · set_column_widths(columnWidthsMm) · fit_to_page() · set_zone_borders(startCell,endCell,+border/fill args) · apply_formula(row,col,formula,format?) · set_caption(text,withNumber?). set_column_widths takes columnWidthsMm, one width per column (length must equal the column count) and resizes the whole table to their sum. fit_to_page shrinks the columns proportionally until the table fits the page body width; it never widens a table that already fits — use it after get_table_layout reports overflowsBody:true. set_zone_borders treats the rectangle startCell{row,col}..endCell{row,col} as one zone and applies borderLeft/borderRight/borderTop/borderBottom (each {type,width,color}: type 0 none/1 solid/2 dashed/3 dotted/8 double, width 0-6, color "#RRGGBB"), fillColor "#RRGGBB", and optionally diagonalLine/diagonalSlash/diagonalBackSlash/diagonalWidth/diagonalColor and centerLine("NONE"|"VERTICAL"|"HORIZONTAL"|"CROSS") — borders land on the zone outline, not on every inner cell edge. apply_formula computes an HWP table formula ("=SUM(A1:B3)", "=AVG(left)", "=A1*1.1") and writes the result into the cell at (row,col); format{decimalPlaces,thousandsSeparator,prefix,suffix} controls how the number is written (e.g. {decimalPlaces:0,thousandsSeparator:true,suffix:"원"} → "1,234원"). set_caption writes the table caption below the table, creating it when the table has none; withNumber (default true) keeps the auto "표 N" numbering prefix. set_cell_props supports fillColor, verticalAlign, isHeader, widthMm/heightMm, paddingMm{left/right/top/bottom}, applyInnerMargin, textDirection("horizontal"|"vertical"), protected, editableInForm and fieldName. set_table_props supports repeatHeader; pageBreak("none"|"cell"|"row"); cellSpacingMm; cellPaddingMm; outerMarginMm; positionMode("inline"|"floating"); textWrap("square"|"topAndBottom"|"behindText"|"inFrontOfText"); horizontalRelativeTo("paper"|"page"|"column"|"paragraph"), horizontalAlign and horizontalOffsetMm; verticalRelativeTo("paper"|"page"|"paragraph"), verticalAlign and verticalOffsetMm; restrictInPage; allowOverlap; keepWithAnchor; and captionEnabled, captionDirection, captionWidthMm, captionSpacingMm, captionVerticalAlign. EASY CENTERING: set_table_props with {horizontalAlign:"center"}; it automatically makes the table floating, column-relative and zero-offset unless overridden. Calls missing required params fail fast. To append a row/col, target the last index with below/right:true. delete/merge/split and props operations execute when the successful turn auto-commits; structural operations renumber cellIdx, so edit content/props first and re-read get_structure on the next turn. ${UNIT_NOTE} ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
       paraIdx: z.number().int().min(0).describe('Body paragraph containing the table control'),
       controlIdx: z.number().int().min(0),
-      op: z.enum(['insert_row', 'insert_col', 'delete_row', 'delete_col', 'merge_cells', 'split_cell', 'set_cell_props', 'set_table_props']),
+      op: z.enum([
+        'insert_row', 'insert_col', 'delete_row', 'delete_col', 'merge_cells', 'split_cell',
+        'set_cell_props', 'set_table_props', 'set_column_widths', 'fit_to_page',
+        'set_zone_borders', 'apply_formula', 'set_caption',
+      ]),
       rowIdx: z.number().int().min(0).optional().describe('Row index for row operations or split_cell'),
       colIdx: z.number().int().min(0).optional().describe('Column index for column operations or split_cell'),
       below: z.boolean().optional().describe('insert_row: insert below rowIdx (default true)'),
@@ -497,6 +532,37 @@ const BASE_TOOL_DEFINITIONS = [
       splitCols: z.number().int().min(1).max(64).optional().describe('split_cell: number of resulting columns'),
       cellIdx: z.number().int().min(0).optional().describe('set_cell_props: flat cell index'),
       props: z.record(z.string(), z.unknown()).optional().describe('set_cell_props / set_table_props payload; see operation description for supported keys'),
+      columnWidthsMm: z.array(z.number().positive()).min(1).max(64).optional()
+        .describe('set_column_widths: one width in mm per column; length must equal the column count'),
+      startCell: zoneCorner('set_zone_borders: top-left corner {row, col} of the zone'),
+      endCell: zoneCorner('set_zone_borders: bottom-right corner {row, col} of the zone'),
+      borderLeft: borderSpec('set_zone_borders: left outline of the zone'),
+      borderRight: borderSpec('set_zone_borders: right outline of the zone'),
+      borderTop: borderSpec('set_zone_borders: top outline of the zone'),
+      borderBottom: borderSpec('set_zone_borders: bottom outline of the zone'),
+      fillColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional()
+        .describe('set_zone_borders: zone background "#RRGGBB"'),
+      diagonalLine: z.number().int().min(0).max(15).optional()
+        .describe('set_zone_borders: diagonal line type (0 = none)'),
+      diagonalSlash: z.number().int().min(0).max(7).optional().describe('set_zone_borders: "/" diagonal direction bits'),
+      diagonalBackSlash: z.number().int().min(0).max(7).optional().describe('set_zone_borders: "\\" diagonal direction bits'),
+      diagonalWidth: z.number().int().min(0).max(6).optional().describe('set_zone_borders: diagonal line width step 0-6'),
+      diagonalColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional().describe('set_zone_borders: diagonal line color'),
+      centerLine: z.enum(['NONE', 'VERTICAL', 'HORIZONTAL', 'CROSS']).optional()
+        .describe('set_zone_borders: center line direction inside the zone'),
+      row: z.number().int().min(0).optional().describe('apply_formula: target row index'),
+      col: z.number().int().min(0).optional().describe('apply_formula: target column index'),
+      formula: z.string().min(1).max(1_000).optional()
+        .describe('apply_formula: HWP table formula, e.g. "=SUM(A1:B3)", "=AVG(left)", "=A1*1.1"'),
+      format: z.object({
+        decimalPlaces: z.number().int().min(0).max(10).optional(),
+        thousandsSeparator: z.boolean().optional(),
+        prefix: z.string().max(16).optional(),
+        suffix: z.string().max(16).optional(),
+      }).strict().optional().describe('apply_formula: how the computed number is written into the cell'),
+      text: z.string().max(5_000).optional().describe('set_caption: caption text'),
+      withNumber: z.boolean().optional()
+        .describe('set_caption: keep the auto "표 N" numbering prefix (default true)'),
     },
     validate: validateEditTable,
   },
@@ -841,6 +907,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   get_para_format: 'document-read',
   get_char_format: 'document-read',
   get_table_properties: 'document-read',
+  get_table_layout: 'document-read',
   get_engine_edit_capabilities: 'document-read',
   apply_engine_edits: 'document-write',
   prepare_engine_edit_session: 'document-write',

@@ -292,6 +292,12 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
         "열 폭 계산만 하고 실제 반영은 열 폭 설정 뮤테이터가 한다.",
     ),
     (
+        "commands/table_ops.rs",
+        "evaluate_table_formula",
+        Exempt::DelegatesTo("evaluate_table_formula_formatted"),
+        "얇은 래퍼 — 실제 기록·무효화는 서식 변형이 수행.",
+    ),
+    (
         "commands/text_editing.rs",
         "insert_text_in_cell_native",
         Exempt::DelegatesTo("replace_text_in_cell_native_impl"),

@@ -38,7 +38,8 @@ export const MUTATING_METHODS: readonly string[] = [
   'splitTableCell', 'splitTableCellInto', 'splitTableCellsInRange', 'resizeTableCells',
   'moveTableOffset', 'setTableProperties', 'setCellProperties', 'setCellZoneProperties',
   'pasteTableCellsTransposed', 'transposeTableCellsInPlace', 'pasteTableCellsTransposedAsTable',
-  'evaluateTableFormula',
+  'evaluateTableFormula', 'evaluateTableFormulaEx',
+  'setTableColumnWidths', 'fitTableToPage', 'setTableCaptionText',
   // 그림/도형/수식 개체
   'insertPicture', 'assignPictureImage', 'setPictureProperties',
   'setHeaderFooterPictureProperties', 'setCellPicturePropertiesByPath',
