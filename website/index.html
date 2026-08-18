@@ -159,10 +159,12 @@ a{color:var(--ink)}
   background:var(--patch);
   border:1.5px solid var(--ink);
   padding:10px;
-  box-shadow:7px 8px 0 rgba(20,18,15,.09);
+  /* 그림자를 변수로 — 등장 연출이 "떠 있다가 내려앉는" 그림자를 이 값으로 조절해요 */
+  --sx:7px;--sy:8px;--sc:rgba(20,18,15,.09);
+  box-shadow:var(--sx) var(--sy) 0 var(--sc);
   position:relative;
 }
-.frame--onink{background:var(--paper);border-color:var(--paper-2);box-shadow:7px 8px 0 rgba(0,0,0,.35)}
+.frame--onink{background:var(--paper);border-color:var(--paper-2);--sc:rgba(0,0,0,.35)}
 .shot{
   position:relative;overflow:hidden;background:#0E0D0B;border-radius:4px;
   aspect-ratio:var(--cw)/var(--ch);
@@ -229,7 +231,7 @@ a{color:var(--ink)}
 .row p{color:var(--ink-2)}
 
 /* 템플릿 명세 목록 */
-.specimen{border:1.5px solid var(--ink);background:var(--patch);box-shadow:7px 8px 0 rgba(20,18,15,.09)}
+.specimen{border:1.5px solid var(--ink);background:var(--patch);--sx:7px;--sy:8px;box-shadow:var(--sx) var(--sy) 0 rgba(20,18,15,.09)}
 .specimen h4{padding:14px 20px;border-bottom:1px solid var(--rule);font-size:15px;font-family:var(--mono);font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
 .specimen li{display:flex;gap:14px;align-items:baseline;padding:12px 20px;border-bottom:1px solid var(--rule);font-size:16px;font-weight:500}
 .specimen li:last-child{border-bottom:0}
@@ -342,13 +344,13 @@ html.js main>.sheet:nth-child(5){z-index:5}
 /* 올라오는 종이의 접힌 가장자리 — 얇은 선 + 위로 떨어지는 그림자 */
 html.js .sheet+.sheet{
   border-top:1px solid var(--rule-2);
-  box-shadow:0 -16px 34px -20px rgba(20,18,15,.42);
+  box-shadow:0 -22px 46px -18px rgba(20,18,15,.5);
 }
 html.js .hero.sheet{background-color:var(--paper-2)}
 html.js .ink.sheet{
   background-color:var(--dark);
   border-top-color:var(--dark-rule);
-  box-shadow:0 -18px 40px -18px rgba(20,18,15,.62);
+  box-shadow:0 -24px 52px -16px rgba(20,18,15,.72);
 }
 
 /* 고정 — --stick-top은 JS가 계산해서 넣어요.
@@ -367,32 +369,60 @@ html.js .foot{
   background-size:180px 180px;
 }
 
-/* 등장 — 글자 묶음 */
+/* ── 눌림/들림 ─────────────────────────────────
+   JS가 스크롤마다 넣는 두 값으로 움직여요.
+   --press(0→1): 다음 장이 덮은 만큼, 덮이는 장이 뒤로 물러나며 어두워져요.
+   --lift(1→0): 올라오는 장이 아직 떠 있는 동안 가장자리 그림자가 짙고,
+   자리를 잡으면서 원래 그림자로 풀려요. */
+@media (prefers-reduced-motion:no-preference){
+  html.js .stack{
+    transform-origin:50% calc(50vh - var(--stick-top,0px));
+    transform:scale(calc(1 - .05*var(--press,0)));
+  }
+  html.js .sheet::after{
+    content:"";position:absolute;inset:0;z-index:8;pointer-events:none;
+    background:#0D0B08;
+    opacity:calc(var(--press,0)*.2);
+  }
+  html.js .sheet+.sheet::before,html.js .foot::before{
+    content:"";position:absolute;left:0;right:0;top:-46px;height:46px;
+    pointer-events:none;
+    background:linear-gradient(to bottom,rgba(20,18,15,0),rgba(20,18,15,.5));
+    opacity:calc(var(--lift,0)*.9);
+  }
+}
+
+/* 등장 — 글자 묶음. 끝에서 살짝 넘쳤다가 자리를 잡아요. */
 html.js .rv{
-  opacity:0;transform:translateY(18px);
-  transition:opacity .62s ease,transform .72s cubic-bezier(.2,.75,.25,1);
+  opacity:0;transform:translateY(24px);
+  transition:opacity .45s ease,transform .6s cubic-bezier(.34,1.55,.55,1);
   transition-delay:calc(var(--i,0)*70ms);
 }
 html.js .rv.is-in{opacity:1;transform:none}
 
-/* 등장 — 스크린샷. 책상에 사진 한 장 툭 놓듯이 기울기로 안착해요. */
-html.js .rv-fig{opacity:0;transition:opacity .55s ease}
+/* 등장 — 스크린샷. 사진 한 장을 책상에 탁 놓듯이,
+   떠 있던 그림자가 좁아지면서 기울기로 안착해요. */
+html.js .rv-fig{opacity:0;transition:opacity .45s ease}
 html.js .rv-fig.is-in{opacity:1}
 html.js .rv-fig .frame{
-  transform:rotate(0deg) translateY(26px) scale(.985);
-  transition:transform .86s cubic-bezier(.22,.82,.26,1);
+  transform:rotate(0deg) translateY(38px) scale(.945);
+  transition:transform .72s cubic-bezier(.3,1.42,.46,1),box-shadow .72s cubic-bezier(.3,1.42,.46,1);
 }
 html.js .rv-fig.is-in .frame{transform:rotate(var(--tilt,0deg)) translateY(0) scale(1)}
+@media (prefers-reduced-motion:no-preference){
+  html.js .rv-fig:not(.is-in) .frame{--sx:18px;--sy:24px;--sc:rgba(20,18,15,.04)}
+  html.js .rv-drop:not(.is-in){--sx:15px;--sy:19px}
+}
 html.js .rv-fig .note{
   opacity:0;transform:translateY(8px);
-  transition:opacity .5s ease .2s,transform .5s ease .2s;
+  transition:opacity .5s ease .24s,transform .5s ease .24s;
 }
 html.js .rv-fig.is-in .note{opacity:1;transform:none}
 
 /* 등장 — 명세 목록처럼 프레임이 아닌 판 */
 html.js .rv-drop{
-  opacity:0;transform:translateY(26px) scale(.985);
-  transition:opacity .6s ease,transform .8s cubic-bezier(.22,.82,.26,1);
+  opacity:0;transform:translateY(30px) scale(.97);
+  transition:opacity .5s ease,transform .68s cubic-bezier(.3,1.42,.46,1),box-shadow .68s cubic-bezier(.3,1.42,.46,1);
 }
 html.js .rv-drop.is-in{opacity:1;transform:none}
 
@@ -408,8 +438,8 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   body{font-size:16px}
   .nav a:not(.btn){display:none}
   .lead{font-size:17px}
-  .frame{padding:7px;box-shadow:5px 6px 0 rgba(20,18,15,.09)}
-  .specimen{box-shadow:5px 6px 0 rgba(20,18,15,.09)}
+  .frame{padding:7px;--sx:5px;--sy:6px}
+  .specimen{--sx:5px;--sy:6px}
   /* 좁은 화면에서는 더 바짝 잘라서 글자가 보이게 */
   .c-cmd{--cx:552;--cy:866;--cw:548;--ch:232}
   .c-msg{--cx:934;--cy:224;--cw:596;--ch:100}
@@ -705,6 +735,40 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
       var ro=new ResizeObserver(schedule);
       stacks.forEach(function(s){ro.observe(s);});
     }
+  }
+
+  /* ── 1b. 눌림/들림 ──────────────────────────
+     다음 장이 화면을 덮은 비율(0~1)을 재서
+     덮이는 장엔 --press, 올라오는 장엔 --lift를 넣어요.
+     CSS 쪽은 전부 prefers-reduced-motion:no-preference 안에 있어서
+     움직임을 줄인 환경에선 값만 들어가고 아무 일도 안 일어나요. */
+  var foot=document.querySelector('.foot');
+  var pairs=[];
+  for(var j=0;j<stacks.length;j++){
+    var nxt=stacks[j+1]||foot;
+    if(nxt)pairs.push({a:stacks[j],b:nxt,v:-1});
+  }
+  if(pairs.length){
+    var praf=0;
+    var pressure=function(){
+      praf=0;
+      var vh=window.innerHeight;
+      for(var k=0;k<pairs.length;k++){
+        var pr=pairs[k];
+        var p=(vh-pr.b.getBoundingClientRect().top)/vh;
+        p=p<0?0:p>1?1:p;
+        p=p*p*(3-2*p); /* 양끝을 부드럽게 */
+        if(Math.abs(p-pr.v)<.001)continue;
+        pr.v=p;
+        pr.a.style.setProperty('--press',p.toFixed(3));
+        pr.b.style.setProperty('--lift',(p>0&&p<1?1-p:0).toFixed(3));
+      }
+    };
+    var onScroll=function(){ if(!praf)praf=requestAnimationFrame(pressure); };
+    pressure();
+    window.addEventListener('scroll',onScroll,{passive:true});
+    window.addEventListener('resize',onScroll,{passive:true});
+    window.addEventListener('load',onScroll);
   }
 
   /* ── 2. 등장 ────────────────────────────────
