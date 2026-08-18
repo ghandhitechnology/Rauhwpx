@@ -48,7 +48,10 @@
 }
 
 html{scroll-behavior:smooth}
-html,body{margin:0;padding:0;overflow-x:hidden}
+html,body{margin:0;padding:0}
+/* 가로 넘침 차단은 html에만. body에 걸면 body가 스크롤 컨테이너가 되면서
+   안쪽 position:sticky가 전부 죽어요(머리글 포함). */
+html{overflow-x:hidden}
 
 body{
   background-color:var(--paper);
@@ -81,6 +84,7 @@ a{color:var(--ink)}
 .lead{font-size:19px;line-height:1.72;color:var(--ink-2)}
 .nb{display:inline-block}
 .h2{font-size:clamp(25px,3.1vw,36px);line-height:1.26}
+.h2--big{font-size:clamp(32px,4.4vw,50px);letter-spacing:-.03em}
 .h3{font-size:clamp(20px,2.2vw,23px);line-height:1.32}
 
 /* 손글씨 — 짧은 여백 메모 전용. 페이지 전체에서 6개. */
@@ -132,6 +136,15 @@ a{color:var(--ink)}
 .btn--sm{min-height:44px;padding:9px 15px;font-size:15px}
 .nav .btn--fill{color:var(--patch)}
 
+/* GitHub 스타 수 — API 응답 전에는 숨김 */
+.gh-stars{display:none}
+.gh-stars.is-on{
+  display:inline-flex;align-items:center;
+  margin-left:9px;padding-left:9px;border-left:1px solid currentColor;
+  font:500 13px/1 var(--mono);letter-spacing:.02em;opacity:.85;
+}
+.gh-stars .star{color:#E0A417;font-size:1.35em;line-height:1;margin-right:5px;transform:translateY(-1px)}
+
 .cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
 .cta-meta{
   margin-top:14px;font:400 15px/1.6 var(--sans);color:var(--ink-3);
@@ -167,10 +180,11 @@ a{color:var(--ink)}
   margin-top:calc(var(--cy) * -100% / var(--cw));
 }
 /* 회전 — 페이지 전체에서 4개, 최대 1.2도 */
-.tilt-a{transform:rotate(-0.8deg)}
-.tilt-b{transform:rotate(0.7deg)}
-.tilt-c{transform:rotate(-0.6deg)}
-.tilt-d{transform:rotate(0.9deg)}
+/* 각도는 --tilt에 담아둬요. 등장 연출이 이 값으로 되돌아가면서 기울어져요. */
+.tilt-a{--tilt:-0.8deg;transform:rotate(var(--tilt))}
+.tilt-b{--tilt:0.7deg;transform:rotate(var(--tilt))}
+.tilt-c{--tilt:-0.6deg;transform:rotate(var(--tilt))}
+.tilt-d{--tilt:0.9deg;transform:rotate(var(--tilt))}
 
 /* 테이프 — 페이지 전체에서 2개 */
 .tape{
@@ -236,7 +250,7 @@ a{color:var(--ink)}
 .step--wide .step__text{max-width:56ch}
 .step--wide figure{margin-top:24px}
 
-/* ── 요금 ──────────────────────────────────── */
+/* ── 연결 ──────────────────────────────────── */
 #pricing{position:relative;overflow:visible}
 .float-icons{position:absolute;inset:0;pointer-events:none;z-index:1}
 .price-grid{position:relative;z-index:2;display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,300px);gap:clamp(28px,4vw,52px);align-items:center}
@@ -278,16 +292,20 @@ a{color:var(--ink)}
   0%,100%{transform:rotate(6deg) translateY(0)}
   50%{transform:rotate(6deg) translateY(-8px)}
 }
-.price-fig{display:flex;align-items:baseline;gap:10px;margin:20px 0 18px;flex-wrap:wrap}
-.price-num{font-size:clamp(40px,6vw,58px);font-weight:700;letter-spacing:-.04em;line-height:1}
-.price-unit{font-size:17px;font-weight:600;color:var(--ink-2)}
+.price-grid>div>p{margin-top:18px}
 .conn{border-top:1px solid var(--rule);margin-top:20px}
 .conn li{display:flex;gap:16px;align-items:baseline;padding:11px 0;border-bottom:1px solid var(--rule);font-size:16px}
 .conn b{font-weight:600;flex:0 0 auto;min-width:92px}
 .conn em{font-style:normal;color:var(--ink-3);font-size:15px}
 
 /* ── 다운로드 ──────────────────────────────── */
-.dl{text-align:center}
+.dl{
+  text-align:center;
+  /* 마지막 장은 화면 한 장을 다 차지해요(머리글 60px 제외) */
+  min-height:calc(100vh - 60px);
+  min-height:calc(100svh - 60px);
+  display:flex;align-items:center;justify-content:center;
+}
 .dl .h2{margin-bottom:14px}
 .dl p{max-width:46ch;margin:0 auto 26px;color:var(--ink-2)}
 .dl .cta{justify-content:center}
@@ -301,6 +319,82 @@ a{color:var(--ink)}
 .foot a{font-size:15px;color:var(--ink-2);text-underline-offset:3px}
 .foot nav a{display:inline-flex;align-items:center;min-height:44px;padding:0 2px}
 .foot small{font:400 14px/1.6 var(--mono);color:var(--ink-3);width:100%}
+
+/* ── 스크롤 연출 ───────────────────────────────
+   종이 겹치기 + 등장. 전부 <html>에 .js가 붙었을 때만 적용돼요.
+   JS가 죽으면 아래 규칙이 통째로 꺼지고 원래 흐름 그대로 보여요.
+   ─────────────────────────────────────────────── */
+
+/* 각 섹션을 한 장의 종이로. 불투명한 바탕을 스스로 들고 있어야
+   아래 섹션 위로 미끄러져 올라올 때 뒤가 안 비쳐요. */
+html.js .sheet{
+  position:relative;
+  background-color:var(--paper);
+  background-image:var(--grain);
+  background-size:180px 180px;
+}
+html.js main>.sheet:nth-child(1){z-index:1}
+html.js main>.sheet:nth-child(2){z-index:2}
+html.js main>.sheet:nth-child(3){z-index:3}
+html.js main>.sheet:nth-child(4){z-index:4}
+html.js main>.sheet:nth-child(5){z-index:5}
+
+/* 올라오는 종이의 접힌 가장자리 — 얇은 선 + 위로 떨어지는 그림자 */
+html.js .sheet+.sheet{
+  border-top:1px solid var(--rule-2);
+  box-shadow:0 -16px 34px -20px rgba(20,18,15,.42);
+}
+html.js .hero.sheet{background-color:var(--paper-2)}
+html.js .ink.sheet{
+  background-color:var(--dark);
+  border-top-color:var(--dark-rule);
+  box-shadow:0 -18px 40px -18px rgba(20,18,15,.62);
+}
+
+/* 고정 — --stick-top은 JS가 계산해서 넣어요.
+   화면보다 긴 섹션은 음수 값이 들어가서 "끝까지 읽은 뒤에" 고정돼요.
+   변수가 없으면 top:auto가 되어 sticky가 아무 일도 안 해요. */
+html.js .stack{position:sticky;top:var(--stick-top)}
+/* #pricing은 위에서 id로 position을 잡아둬서 여기서 다시 눌러줘요 */
+html.js #pricing.stack{position:sticky;top:var(--stick-top)}
+/* 마지막 장은 머리글(60px) 아래에 고정 — 화면을 꽉 채운 뒤에야 푸터가 올라와요 */
+html.js .dl.stack{top:60px}
+
+html.js .foot{
+  position:relative;z-index:6;
+  background-color:var(--paper);
+  background-image:var(--grain);
+  background-size:180px 180px;
+}
+
+/* 등장 — 글자 묶음 */
+html.js .rv{
+  opacity:0;transform:translateY(18px);
+  transition:opacity .62s ease,transform .72s cubic-bezier(.2,.75,.25,1);
+  transition-delay:calc(var(--i,0)*70ms);
+}
+html.js .rv.is-in{opacity:1;transform:none}
+
+/* 등장 — 스크린샷. 책상에 사진 한 장 툭 놓듯이 기울기로 안착해요. */
+html.js .rv-fig{opacity:0;transition:opacity .55s ease}
+html.js .rv-fig.is-in{opacity:1}
+html.js .rv-fig .frame{
+  transform:rotate(0deg) translateY(26px) scale(.985);
+  transition:transform .86s cubic-bezier(.22,.82,.26,1);
+}
+html.js .rv-fig.is-in .frame{transform:rotate(var(--tilt,0deg)) translateY(0) scale(1)}
+html.js .rv-fig .note{
+  opacity:0;transform:translateY(8px);
+  transition:opacity .5s ease .2s,transform .5s ease .2s;
+}
+html.js .rv-fig.is-in .note{opacity:1;transform:none}
+
+/* 등장 — 명세 목록처럼 프레임이 아닌 판 */
+html.js .rv-drop{
+  opacity:0;transform:translateY(26px) scale(.985);
+  transition:opacity .6s ease,transform .8s cubic-bezier(.22,.82,.26,1);
+}
+html.js .rv-drop.is-in{opacity:1;transform:none}
 
 /* ── 반응형 ────────────────────────────────── */
 @media (max-width:960px){
@@ -326,8 +420,13 @@ a{color:var(--ink)}
 @media (prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
   *{transition-duration:.001ms!important;animation-duration:.001ms!important}
+  /* 연출을 끄고 원래 흐름으로 되돌려요 */
+  html.js .stack,html.js #pricing.stack{position:relative;top:auto}
+  html.js .rv,html.js .rv-fig,html.js .rv-drop,html.js .rv-fig .note{opacity:1;transform:none}
+  html.js .rv-fig .frame{transform:rotate(var(--tilt,0deg))}
 }
 </style>
+<script>document.documentElement.classList.add('js');</script>
 </head>
 <body>
 
@@ -337,8 +436,8 @@ a{color:var(--ink)}
     <nav class="nav">
       <a href="#features">기능</a>
       <a href="#flow">작업 흐름</a>
-      <a href="#pricing">요금</a>
-      <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub</a>
+      <a href="#pricing">연결</a>
+      <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub<span class="gh-stars"></span></a>
       <a class="btn btn--fill btn--sm" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">다운로드</a>
     </nav>
   </div>
@@ -347,14 +446,14 @@ a{color:var(--ink)}
 <main id="top">
 
   <!-- ─────────── 히어로 ─────────── -->
-  <section class="hero">
+  <section class="hero sheet stack">
     <div class="wrap hero-grid">
       <div>
         <h1>귀찮은 이를 위한 한글,<br><span class="ul">귀찮이글<svg viewBox="0 0 200 10" preserveAspectRatio="none" aria-hidden="true"><path d="M2 7.2C33 3.4 66 2.3 100 3.6c31 1.2 63 3.4 98 1.1" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span></h1>
         <p class="lead"><span class="nb">한글 파일 편집이랑 지피티와의 대화,</span> <span class="nb">한 화면에서 융합</span></p>
         <div class="cta" style="margin-top:26px">
           <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">macOS용 다운로드</a>
-          <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">GitHub</a>
+          <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">Star on GitHub<span class="gh-stars"></span></a>
         </div>
         <p class="cta-meta">
           <span>Apple Silicon · v0.1.6</span>
@@ -379,7 +478,7 @@ a{color:var(--ink)}
   </section>
 
   <!-- ─────────── 기능 ─────────── -->
-  <section class="sec" id="features">
+  <section class="sec sheet stack" id="features">
     <div class="wrap">
       <div class="sec-head">
         <p class="label">기능</p>
@@ -446,7 +545,7 @@ a{color:var(--ink)}
   </section>
 
   <!-- ─────────── 작업 흐름 (잉크 반전) ─────────── -->
-  <section class="sec ink" id="flow">
+  <section class="sec ink sheet stack" id="flow">
     <div class="wrap">
       <div class="sec-head">
         <p class="label label--dark">작업 흐름</p>
@@ -506,8 +605,8 @@ a{color:var(--ink)}
     </div>
   </section>
 
-  <!-- ─────────── 요금 ─────────── -->
-  <section class="sec" id="pricing">
+  <!-- ─────────── 연결 ─────────── -->
+  <section class="sec sheet stack" id="pricing">
     <div class="float-icons" aria-hidden="true">
       <div class="icon-tile icon-tile--claude">
         <img src="assets/icon-claude.png" width="512" height="512" alt="">
@@ -521,13 +620,9 @@ a{color:var(--ink)}
     </div>
     <div class="wrap price-grid">
       <div>
-        <p class="label">요금</p>
-        <h2 class="h2" style="margin-top:12px">원래 쓰던 구독권, 그대로</h2>
-        <div class="price-fig">
-          <span class="price-num">2000원</span>
-          <span class="price-unit">일회성/평생 업데이트 보장</span>
-        </div>
-        <p>이 프로그램은 2000원만 내시면 평생 사용하실 수 있어요. 원래 업무를 위해 쓰시던 Codex와 Claude 구독권을 직접 연결하거나, OpenRouter의 API Key를 직접 연결해서 사용하세요.</p>
+        <p class="label">연결</p>
+        <h2 class="h2 h2--big" style="margin-top:12px">원래 쓰던 구독권,<br>그대로</h2>
+        <p>원래 업무에 쓰시던 Codex, Claude 구독권이나 OpenRouter API Key를 설정에서 연결하면 준비가 끝나요. 프로그램은 평생 무료예요.</p>
         <ul class="conn">
           <li><b>Codex</b><em>쓰던 구독권 연결</em></li>
           <li><b>Claude</b><em>쓰던 구독권 연결</em></li>
@@ -548,13 +643,14 @@ a{color:var(--ink)}
   </section>
 
   <!-- ─────────── 다운로드 ─────────── -->
-  <section class="sec rule-top dl" id="download">
+  <!-- 마지막 장이라 고정할 여백이 없어요. 종이 취급만 하고 그대로 흘려보내요. -->
+  <section class="sec rule-top dl sheet stack" id="download">
     <div class="wrap">
       <p class="label">다운로드</p>
       <h2 class="h2" style="margin-top:12px">문서작업은 이제 한곳에서 해결하세요</h2>
       <div class="cta">
         <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">macOS용 다운로드</a>
-        <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">GitHub</a>
+        <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">Star on GitHub<span class="gh-stars"></span></a>
       </div>
       <p class="cta-meta">
         <span>Apple Silicon · v0.1.6 · .dmg</span>
@@ -564,21 +660,109 @@ a{color:var(--ink)}
     </div>
   </section>
 
-</main>
-
+<!-- 푸터는 main 안에 있어야 다운로드 장이 고정된 채로 그 위를 덮을 수 있어요 -->
 <footer class="foot">
   <div class="wrap">
     <a class="brand" href="#top">귀찮이글</a>
     <nav>
       <a href="#features">기능</a>
       <a href="#flow">작업 흐름</a>
-      <a href="#pricing">요금</a>
+      <a href="#pricing">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx/releases">릴리스</a>
     </nav>
     <small>v0.1.6 · ghandhitechnology / Rauhwpx</small>
   </div>
 </footer>
+
+</main>
+
+<script>
+/* 스크롤 연출 — 종이 겹치기 고정 위치 계산 + 등장 감지 */
+(function(){
+  var q=function(s,c){return Array.prototype.slice.call((c||document).querySelectorAll(s));};
+
+  /* ── 1. 종이 겹치기 ──────────────────────────
+     화면보다 긴 섹션은 top을 음수로 줘서 아래 끝이 화면 바닥에 닿을 때
+     고정되게 해요. 그래야 긴 섹션 내용이 잘리지 않아요. */
+  var stacks=q('main .stack');
+  if(stacks.length){
+    var raf=0;
+    function measure(){
+      raf=0;
+      var vh=window.innerHeight;
+      for(var i=0;i<stacks.length;i++){
+        var h=stacks[i].offsetHeight;
+        stacks[i].style.setProperty('--stick-top',(h>vh?Math.round(vh-h):0)+'px');
+      }
+    }
+    function schedule(){ if(!raf)raf=requestAnimationFrame(measure); }
+    measure();
+    window.addEventListener('resize',schedule,{passive:true});
+    window.addEventListener('load',schedule);
+    /* 이미지가 늦게 뜨면서 높이가 바뀌면 다시 재요 */
+    if('ResizeObserver' in window){
+      var ro=new ResizeObserver(schedule);
+      stacks.forEach(function(s){ro.observe(s);});
+    }
+  }
+
+  /* ── 2. 등장 ────────────────────────────────
+     IntersectionObserver가 없으면 클래스를 아예 안 붙여요.
+     (CSS의 숨김 상태도 이 클래스에만 걸려 있어서 내용이 사라질 일은 없어요.) */
+  if(!('IntersectionObserver' in window))return;
+
+  var items=[];
+  function mark(el,cls,i){
+    el.classList.add(cls);
+    if(i)el.style.setProperty('--i',i);
+    items.push(el);
+  }
+  /* 묶음 안에서 순서대로 조금씩 늦게 올라와요 */
+  q('.hero-grid>div, .sec-head, .row>div:not(.row__media), .step__text, .price-grid>div, #download .wrap')
+    .forEach(function(scope){
+      Array.prototype.slice.call(scope.children).forEach(function(el,i){mark(el,'rv',i);});
+    });
+  q('main .figure').forEach(function(el){mark(el,'rv-fig',0);});
+  q('main .specimen').forEach(function(el){mark(el,'rv-drop',0);});
+
+  var io=new IntersectionObserver(function(entries){
+    for(var i=0;i<entries.length;i++){
+      var e=entries[i];
+      /* 새로고침이나 #링크로 들어와서 이미 위로 지나간 요소는 그냥 바로 보여줘요 */
+      if(e.isIntersecting||e.boundingClientRect.bottom<=0){
+        e.target.classList.add('is-in');
+        io.unobserve(e.target);
+      }
+    }
+  },{rootMargin:'0px 0px -6% 0px',threshold:0.04});
+  items.forEach(function(el){io.observe(el);});
+})();
+</script>
+
+<script>
+(function(){
+  var slots=document.querySelectorAll('.gh-stars');
+  if(!slots.length)return;
+  function put(n){
+    var t=n>=1000?(n/1000).toFixed(1).replace(/\.0$/,'')+'k':String(n);
+    slots.forEach(function(s){s.innerHTML='<span class="star">★</span>'+t;s.classList.add('is-on');});
+  }
+  var KEY='rauhwpx-gh-stars';
+  try{
+    var c=JSON.parse(sessionStorage.getItem(KEY));
+    if(c&&Date.now()-c.t<36e5){put(c.n);return;}
+  }catch(e){}
+  fetch('https://api.github.com/repos/ghandhitechnology/Rauhwpx')
+    .then(function(r){return r.ok?r.json():null;})
+    .then(function(d){
+      if(!d||typeof d.stargazers_count!=='number')return;
+      put(d.stargazers_count);
+      try{sessionStorage.setItem(KEY,JSON.stringify({n:d.stargazers_count,t:Date.now()}));}catch(e){}
+    })
+    .catch(function(){});
+})();
+</script>
 
 </body>
 </html>
