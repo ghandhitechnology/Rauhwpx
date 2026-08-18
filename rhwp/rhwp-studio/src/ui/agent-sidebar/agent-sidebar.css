@@ -1749,6 +1749,36 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   white-space: pre-wrap;
 }
 
+/* 인라인 프롬프트로 보낸 메시지에 붙는 문서 선택 인용. */
+.ag-msg-selection {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--accent-primary);
+  border-radius: 0 var(--ag-r-chip) var(--ag-r-chip) 0;
+  background: var(--ag-bg-2);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.45;
+}
+
+.ag-msg-selection-label {
+  flex: 0 0 auto;
+  color: var(--ag-text-secondary);
+  font-weight: 600;
+}
+
+.ag-msg-selection-excerpt {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ag-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .ag-msg-attachments {
   display: flex;
   flex-wrap: wrap;
