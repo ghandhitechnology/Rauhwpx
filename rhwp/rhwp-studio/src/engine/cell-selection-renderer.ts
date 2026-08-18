@@ -46,8 +46,8 @@ export class CellSelectionRenderer {
 
       const div = document.createElement('div');
       const pageOffset = this.virtualScroll.getPageOffset(cell.pageIndex);
-      const pageDisplayWidth = this.virtualScroll.getPageWidth(cell.pageIndex);
-      const pageLeft = (contentWidth - pageDisplayWidth) / 2;
+      // 그리드 배치·수평 팬 대응 — 중앙 정렬 가정 대신 확정된 pageLeft 사용.
+      const pageLeft = this.virtualScroll.getPageLeftResolved(cell.pageIndex, contentWidth);
 
       div.className = 'cell-selection-highlight';
       div.style.cssText =

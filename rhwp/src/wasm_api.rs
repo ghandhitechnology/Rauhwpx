@@ -5738,10 +5738,42 @@ impl HwpDocument {
             start_char_offset as usize,
             end_cell_para_idx as usize,
             end_char_offset as usize,
-            Some((
+            Some(crate::document_core::queries::SelCellAddr::Flat(
                 parent_para_idx as usize,
                 control_idx as usize,
                 cell_idx as usize,
+            )),
+            None,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 중첩 셀 경로 기반 선택 사각형. hit-test 의 평면 셀 필드는 최외곽 셀만
+    /// 가리키므로 depth>=2 셀 내부 선택은 이 API 로 정확한 경로를 전달해야 한다.
+    /// path JSON 은 `getCursorRectByPath` 와 동일한 `[{controlIndex, cellIndex,
+    /// cellParaIndex}, ...]` 형식이며, 마지막 entry 의 cellParaIndex 는
+    /// start/end 인자로 대체된다.
+    #[wasm_bindgen(js_name = getSelectionRectsByPath)]
+    pub fn get_selection_rects_by_path(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        cell_path_json: &str,
+        start_cell_para_idx: u32,
+        start_char_offset: u32,
+        end_cell_para_idx: u32,
+        end_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        let path = parse_cell_path_arg(cell_path_json)?;
+        self.get_selection_rects_native(
+            section_idx as usize,
+            start_cell_para_idx as usize,
+            start_char_offset as usize,
+            end_cell_para_idx as usize,
+            end_char_offset as usize,
+            Some(crate::document_core::queries::SelCellAddr::Path(
+                parent_para_idx as usize,
+                path,
             )),
             None,
         )
@@ -5762,7 +5794,7 @@ impl HwpDocument {
             json_u32(options_json, "startCharOffset").unwrap_or(0) as usize,
             json_u32(options_json, "endCellParaIdx").unwrap_or(0) as usize,
             json_u32(options_json, "endCharOffset").unwrap_or(0) as usize,
-            Some((
+            Some(crate::document_core::queries::SelCellAddr::Flat(
                 json_u32(options_json, "parentParaIdx").unwrap_or(0) as usize,
                 json_u32(options_json, "controlIdx").unwrap_or(0) as usize,
                 json_u32(options_json, "cellIdx").unwrap_or(0) as usize,

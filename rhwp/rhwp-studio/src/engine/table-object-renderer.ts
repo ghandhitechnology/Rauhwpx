@@ -112,8 +112,7 @@ export class TableObjectRenderer {
     const scrollContent = this.container.querySelector('#scroll-content');
     const contentWidth = scrollContent?.clientWidth ?? 0;
     const pageOffset = this.virtualScroll.getPageOffset(tableBBox.pageIndex);
-    const pageDisplayWidth = this.virtualScroll.getPageWidth(tableBBox.pageIndex);
-    const pageLeft = (contentWidth - pageDisplayWidth) / 2;
+    const pageLeft = this.virtualScroll.getPageLeftResolved(tableBBox.pageIndex, contentWidth);
 
     const left = pageLeft + tableBBox.x * zoom;
     const top = pageOffset + tableBBox.y * zoom;
@@ -208,8 +207,7 @@ export class TableObjectRenderer {
 
     for (const tableBBox of bboxes) {
       const pageOffset = this.virtualScroll.getPageOffset(tableBBox.pageIndex);
-      const pageDisplayWidth = this.virtualScroll.getPageWidth(tableBBox.pageIndex);
-      const pageLeft = (contentWidth - pageDisplayWidth) / 2;
+      const pageLeft = this.virtualScroll.getPageLeftResolved(tableBBox.pageIndex, contentWidth);
 
       const left = pageLeft + tableBBox.x * zoom;
       const top = pageOffset + tableBBox.y * zoom;
@@ -231,8 +229,7 @@ export class TableObjectRenderer {
     const hs = TableObjectRenderer.HANDLE_SIZE;
     for (const bbox of bboxes) {
       const po = this.virtualScroll.getPageOffset(bbox.pageIndex);
-      const pdw = this.virtualScroll.getPageWidth(bbox.pageIndex);
-      const pl = (contentWidth - pdw) / 2;
+      const pl = this.virtualScroll.getPageLeftResolved(bbox.pageIndex, contentWidth);
       const l = pl + bbox.x * zoom;
       const t = po + bbox.y * zoom;
       const w = bbox.width * zoom;
@@ -303,8 +300,7 @@ export class TableObjectRenderer {
     const scrollContent = this.container.querySelector('#scroll-content');
     const contentWidth = scrollContent?.clientWidth ?? 0;
     const pageOffset = this.virtualScroll.getPageOffset(lineBBox.pageIndex);
-    const pageDisplayWidth = this.virtualScroll.getPageWidth(lineBBox.pageIndex);
-    const pageLeft = (contentWidth - pageDisplayWidth) / 2;
+    const pageLeft = this.virtualScroll.getPageLeftResolved(lineBBox.pageIndex, contentWidth);
 
     const sx = pageLeft + lineBBox.x1 * zoom;
     const sy = pageOffset + lineBBox.y1 * zoom;
@@ -406,8 +402,7 @@ export class TableObjectRenderer {
     const scrollContent = this.container.querySelector('#scroll-content');
     const contentWidth = scrollContent?.clientWidth ?? 0;
     const pageOffset = this.virtualScroll.getPageOffset(bbox.pageIndex);
-    const pageDisplayWidth = this.virtualScroll.getPageWidth(bbox.pageIndex);
-    const pageLeft = (contentWidth - pageDisplayWidth) / 2;
+    const pageLeft = this.virtualScroll.getPageLeftResolved(bbox.pageIndex, contentWidth);
 
     const left = pageLeft + bbox.x * zoom;
     const top = pageOffset + bbox.y * zoom;

@@ -1733,7 +1733,7 @@ impl DocumentCore {
         start_char_offset: usize,
         end_para_idx: usize,
         end_char_offset: usize,
-        cell_ctx: Option<(usize, usize, usize)>,
+        cell_ctx: Option<SelCellAddr>,
         page_hints: Option<(u32, u32)>,
     ) -> Result<String, HwpError> {
         use crate::renderer::layout::compute_char_positions;
@@ -1892,9 +1892,7 @@ impl DocumentCore {
 
         fn find_cell_cursor(
             node: &RenderNode,
-            ppi: usize,
-            ci: usize,
-            cei: usize,
+            addr: &SelCellAddr,
             cpi: usize,
             offset: usize,
             page: u32,
@@ -1902,9 +1900,7 @@ impl DocumentCore {
         ) -> Option<CursorHit> {
             fn visit(
                 node: &RenderNode,
-                ppi: usize,
-                ci: usize,
-                cei: usize,
+                addr: &SelCellAddr,
                 cpi: usize,
                 offset: usize,
                 page: u32,
@@ -1915,7 +1911,7 @@ impl DocumentCore {
                     let matches_cell = tr
                         .cell_context
                         .as_ref()
-                        .is_some_and(|ctx| flat_cell_ctx_matches(ctx, ppi, ci, cei, cpi));
+                        .is_some_and(|ctx| addr.matches(ctx, cpi));
                     if matches_cell {
                         let cs = tr.char_start.unwrap_or(0);
                         let cc = tr.text.chars().count();
@@ -1943,12 +1939,12 @@ impl DocumentCore {
                     }
                 }
                 for child in &node.children {
-                    visit(child, ppi, ci, cei, cpi, offset, page, bias, best);
+                    visit(child, addr, cpi, offset, page, bias, best);
                 }
             }
 
             let mut best = None;
-            visit(node, ppi, ci, cei, cpi, offset, page, bias, &mut best);
+            visit(node, addr, cpi, offset, page, bias, &mut best);
             best.map(|(_, hit)| hit)
         }
 
@@ -1991,8 +1987,8 @@ impl DocumentCore {
         let mut tree_cache: Vec<(u32, crate::renderer::render_tree::PageRenderTree)> = Vec::new();
 
         // 선택 범위에 관련된 페이지 번호 수집 (중복 제거)
-        let lookup_para = if let Some((ppi, _, _)) = cell_ctx {
-            ppi
+        let lookup_para = if let Some(addr) = cell_ctx.as_ref() {
+            addr.parent_para_idx()
         } else {
             start_para_idx
         };
@@ -2044,8 +2040,8 @@ impl DocumentCore {
                                    offset: usize,
                                    bias: CursorBias|
          -> Option<CursorHit> {
-            if let Some((ppi, ci, cei)) = cell_ctx {
-                find_cell_cursor(&tree.root, ppi, ci, cei, para_idx, offset, page, bias)
+            if let Some(addr) = cell_ctx.as_ref() {
+                find_cell_cursor(&tree.root, addr, para_idx, offset, page, bias)
             } else {
                 find_body_cursor(
                     &tree.root,
@@ -2087,16 +2083,23 @@ impl DocumentCore {
         let mut last_segment_page: Option<u32> = None;
 
         for para_idx in start_para_idx..=end_para_idx {
-            let para = if let Some((ppi, ci, cei)) = cell_ctx {
-                self.get_cell_paragraph_ref(section_idx, ppi, ci, cei, para_idx)
+            let para = match cell_ctx.as_ref() {
+                Some(SelCellAddr::Flat(ppi, ci, cei)) => self
+                    .get_cell_paragraph_ref(section_idx, *ppi, *ci, *cei, para_idx)
                     .ok_or_else(|| {
                         HwpError::RenderError(format!(
                             "셀 문단 참조 실패: sec={} ppi={} ci={} cei={} cpi={}",
                             section_idx, ppi, ci, cei, para_idx
                         ))
-                    })?
-            } else {
-                self.get_render_paragraph_ref(section_idx, para_idx)?
+                    })?,
+                Some(SelCellAddr::Path(ppi, path)) => {
+                    let mut resolved = path.clone();
+                    if let Some(last) = resolved.last_mut() {
+                        last.2 = para_idx;
+                    }
+                    self.resolve_paragraph_by_path(section_idx, *ppi, &resolved)?
+                }
+                None => self.get_render_paragraph_ref(section_idx, para_idx)?,
             };
 
             let char_count = navigable_text_len(para);
@@ -2233,12 +2236,52 @@ impl DocumentCore {
                 start_char_offset,
                 end_para_idx,
                 end_char_offset,
-                cell_ctx,
+                cell_ctx.clone(),
                 None,
             );
         }
 
         Ok(format!("[{}]", rects.join(",")))
+    }
+}
+
+/// 선택 rect 질의의 셀 주소. hit-test 의 평면 3-튜플은 최외곽 셀만 가리킬 수
+/// 있으므로(depth>=2 부정확, #2651), 중첩 셀 선택은 `Path` 로 정확한 경로를
+/// 전달한다.
+#[derive(Clone)]
+pub(crate) enum SelCellAddr {
+    /// (parent_para_idx, control_idx, cell_idx) — 1-depth 셀
+    Flat(usize, usize, usize),
+    /// parent_para_idx + (control_idx, cell_idx, cell_para_idx) 경로.
+    /// 선택이 셀 내 여러 문단에 걸치므로, 마지막 entry 의 cell_para_idx 는
+    /// 매칭·해소 시 스캔 중인 셀 문단 인덱스로 대체된다.
+    Path(usize, Vec<(usize, usize, usize)>),
+}
+
+impl SelCellAddr {
+    fn parent_para_idx(&self) -> usize {
+        match self {
+            SelCellAddr::Flat(ppi, _, _) | SelCellAddr::Path(ppi, _) => *ppi,
+        }
+    }
+
+    /// run 의 cell_context 가 이 주소의 셀 문단 `cpi` 에 속하는지 판정한다.
+    fn matches(&self, ctx: &crate::renderer::layout::CellContext, cpi: usize) -> bool {
+        match self {
+            SelCellAddr::Flat(ppi, ci, cei) => flat_cell_ctx_matches(ctx, *ppi, *ci, *cei, cpi),
+            SelCellAddr::Path(ppi, path) => {
+                ctx.parent_para_index == *ppi
+                    && ctx.path.len() == path.len()
+                    && ctx.path.iter().zip(path.iter()).enumerate().all(
+                        |(i, (entry, &(ci, cei, path_cpi)))| {
+                            let want_cpi = if i + 1 == path.len() { cpi } else { path_cpi };
+                            entry.control_index == ci
+                                && entry.cell_index == cei
+                                && entry.cell_para_index == want_cpi
+                        },
+                    )
+            }
+        }
     }
 }
 

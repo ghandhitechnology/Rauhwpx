@@ -2180,6 +2180,18 @@ export class WasmBridge {
     );
   }
 
+  /**
+   * 중첩 셀(depth>=2) 내부 선택의 줄별 사각형. hit-test 의 평면 셀 필드는
+   * 최외곽 셀만 가리키므로 cellPath 전체를 전달한다. path 마지막 entry 의
+   * cellParaIndex 는 start/end 인자로 대체된다.
+   */
+  getSelectionRectsByPath(sec: number, parentPara: number, cellPath: unknown[], startCellPara: number, startOffset: number, endCellPara: number, endOffset: number): SelectionRect[] {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).getSelectionRectsByPath(
+      sec, parentPara, JSON.stringify(cellPath), startCellPara, startOffset, endCellPara, endOffset,
+    ));
+  }
+
   getSelectionRectsInFootnote(pageNum: number, footnoteIndex: number, startFnPara: number, startOffset: number, endFnPara: number, endOffset: number): SelectionRect[] {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse((this.doc as any).getSelectionRectsInFootnote(pageNum, footnoteIndex, startFnPara, startOffset, endFnPara, endOffset));
