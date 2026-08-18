@@ -89,6 +89,7 @@ import {
 } from '@/desktop-integration';
 import { initAgentBridge, type AgentBridge } from './agent/bridge.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
+import { initInlinePrompt } from './agent/inline-prompt.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
 
 const wasm = new WasmBridge();
@@ -611,7 +612,7 @@ async function initialize(): Promise<void> {
     try {
       const agentBridge = initAgentBridge({ wasm, eventBus, inputHandler, canvasView, documentState });
       agentBridgeRef = agentBridge;
-      initAgentSidebar({
+      const agentSidebar = initAgentSidebar({
         bridge: agentBridge,
         eventBus,
         getDocumentContext: () => {
@@ -627,6 +628,14 @@ async function initialize(): Promise<void> {
         moveToLibraryDocument: (target) => {
           void runLibraryMove(commandServices, target, () => activeDocumentId);
         },
+      });
+      initInlinePrompt({
+        wasm,
+        eventBus,
+        inputHandler,
+        canvasView,
+        bridge: agentBridge,
+        submit: agentSidebar.sendInlinePrompt,
       });
       if (import.meta.env.DEV) {
         (window as any).__agentBridge = agentBridge;
