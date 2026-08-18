@@ -1,13 +1,14 @@
 /**
  * 채팅별 실행 상태 공유 — 탭마다 독립적으로 돌아가는 채팅 세션의
  * "작업 중/완료" 신호만 localStorage 로 나눠 갖는다. 어떤 탭의 스레드
- * 목록에서든 지금 일하는 채팅(노란 불)과 끝난 채팅(초록 점)이 보인다.
+ * 목록에서든 지금 일하는 채팅(노란 불), 끝난 채팅(초록 점), 계획 승인을
+ * 기다리는 채팅(빨간 점)이 보인다.
  *
  * 세션 자체에는 손대지 않는다. 여기 담기는 것은 표시용 신호뿐이라
  * 잃어버려도 대화에는 아무 영향이 없다.
  */
 
-export type ChatRunStatus = 'working' | 'finished';
+export type ChatRunStatus = 'working' | 'finished' | 'needs-input';
 
 const STORAGE_KEY = 'rhwp-agent-chat-status';
 const CHANNEL_NAME = 'rhwp-agent-chat-status';
@@ -45,7 +46,7 @@ function canUseStorage(): boolean {
 function isStatusEntry(v: unknown): v is StatusEntry {
   if (!v || typeof v !== 'object') return false;
   const entry = v as Record<string, unknown>;
-  return (entry.status === 'working' || entry.status === 'finished')
+  return (entry.status === 'working' || entry.status === 'finished' || entry.status === 'needs-input')
     && Number.isFinite(Number(entry.updatedAt));
 }
 
@@ -84,7 +85,8 @@ function liveStatus(entry: StatusEntry, now: number): ChatRunStatus | null {
   if (entry.status === 'working') {
     return now - entry.updatedAt <= WORKING_STALE_MS ? 'working' : null;
   }
-  return now - entry.updatedAt <= FINISHED_TTL_MS ? 'finished' : null;
+  // 완료·승인 대기 점은 심장박동 없이 남고, TTL 로만 정리한다.
+  return now - entry.updatedAt <= FINISHED_TTL_MS ? entry.status : null;
 }
 
 function currentSnapshot(): string {
@@ -185,6 +187,13 @@ export function markChatFinished(threadId: string): void {
   ownedWorking.delete(threadId);
   syncHeartbeat();
   mutate((map) => map.set(threadId, { status: 'finished', updatedAt: Date.now() }));
+}
+
+/** 사용자 응답 대기(계획 승인) — 빨간 점. 승인/수정 요청이 있어야 걷힌다. */
+export function markChatNeedsInput(threadId: string): void {
+  ownedWorking.delete(threadId);
+  syncHeartbeat();
+  mutate((map) => map.set(threadId, { status: 'needs-input', updatedAt: Date.now() }));
 }
 
 /** 중단·열람 — 신호를 지운다. */

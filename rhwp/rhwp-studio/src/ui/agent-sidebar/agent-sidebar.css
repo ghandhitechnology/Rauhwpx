@@ -1245,6 +1245,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--ag-ok) 16%, transparent);
 }
 
+/* 계획 승인을 기다리는 채팅 — 천천히 숨 쉬는 빨간 점. */
+.ag-thread-status-needs-input {
+  background: var(--ag-err);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ag-err) 20%, transparent);
+  animation: ag-status-attention 2.4s ease-in-out infinite;
+}
+
 /* 행에서는 제목 들여쓰기(26px) 여백 가운데에 겹쳐 앉는다. */
 .ag-row-status {
   position: absolute;
@@ -1272,8 +1279,19 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   }
 }
 
+@keyframes ag-status-attention {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--ag-err) 20%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--ag-err) 34%, transparent);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .ag-thread-status-working {
+  .ag-thread-status-working,
+  .ag-thread-status-needs-input {
     animation: none;
   }
 }
