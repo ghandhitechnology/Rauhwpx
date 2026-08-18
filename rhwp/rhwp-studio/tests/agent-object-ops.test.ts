@@ -151,6 +151,41 @@ function makeEnv() {
       Object.assign(findTable(para, ctrl).tableProps, props);
       return { ok: true };
     },
+    // 표 bbox / 쪽 정보 — get_table_layout 용 (px, 96dpi 페이지 좌표)
+    getTableBBox: (_s: number, para: number, ctrl: number) => {
+      findTable(para, ctrl);
+      return { pageIndex: 0, x: 96, y: 96, width: 400, height: 1200 };
+    },
+    getTableBBoxAtPage: () => { throw new Error('그 쪽에는 표 조각이 없습니다'); },
+    getPageInfo: (page: number) => ({
+      pageIndex: page, width: 794, height: 1123, sectionIndex: 0,
+      marginLeft: 96, marginRight: 96, marginTop: 76, marginBottom: 60,
+      marginHeader: 20, marginFooter: 20,
+    }),
+    setTableColumnWidths: (_s: number, para: number, ctrl: number, widths: number[]) => {
+      record('setTableColumnWidths', para, ctrl, widths);
+      const t = findTable(para, ctrl);
+      return { ok: true, colCount: t.cols, tableWidth: widths.reduce((sum, w) => sum + w, 0) };
+    },
+    fitTableToPage: (_s: number, para: number, ctrl: number) => {
+      record('fitTableToPage', para, ctrl);
+      return { ok: true, colCount: findTable(para, ctrl).cols, tableWidth: 42520 };
+    },
+    setCellZoneProperties: (
+      _s: number, para: number, ctrl: number,
+      range: Record<string, number>, props: Record<string, unknown>,
+    ) => {
+      record('setCellZoneProperties', para, ctrl, range, props);
+      return { ok: true, borderFillId: 7 };
+    },
+    evaluateTableFormulaEx: (options: Record<string, unknown>) => {
+      record('evaluateTableFormulaEx', options);
+      return { ok: true, value: 300, display: '300' };
+    },
+    setTableCaptionText: (_s: number, para: number, ctrl: number, text: string, withNumber: boolean) => {
+      record('setTableCaptionText', para, ctrl, text, withNumber);
+      return { ok: true, captionText: withNumber ? `표 1 ${text}` : text };
+    },
     applyCharFormatInCell: (_s: number, para: number, ctrl: number, cell: number, cp: number, so: number, eo: number, json: string) => {
       record('applyCharFormatInCell', para, ctrl, cell, cp, so, eo, json);
       return okJson();
@@ -623,6 +658,101 @@ test('set_cell_props exposes padding, direction, protection, form field and read
   assert.equal(read.cell.textDirection, 'vertical');
   assert.equal(read.cell.protected, true);
   assert.equal(read.cell.fieldName, 'amount');
+});
+
+test('신규 표 op 5종은 mark-only 이고 승인 시 각 브리지 메서드로 나간다', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const created = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['1', '2']],
+  })) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const t = tables[0];
+  const at = { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx };
+
+  const widths = (await call('edit_table', { ...at, op: 'set_column_widths', columnWidthsMm: [60, 90] })) as { changeSetId: string };
+  const fit = (await call('edit_table', { ...at, op: 'fit_to_page' })) as { changeSetId: string };
+  const zone = (await call('edit_table', {
+    ...at, op: 'set_zone_borders',
+    startCell: { row: 0, col: 0 }, endCell: { row: 1, col: 1 },
+    borderTop: { type: 1, width: 2, color: '#112233' }, fillColor: '#EEEEEE', centerLine: 'CROSS',
+  })) as { changeSetId: string };
+  const formula = (await call('edit_table', {
+    ...at, op: 'apply_formula', row: 1, col: 1, formula: '=SUM(A1:A2)',
+    format: { decimalPlaces: 0, thousandsSeparator: true, suffix: '원' },
+  })) as { changeSetId: string };
+  const caption = (await call('edit_table', { ...at, op: 'set_caption', text: '분기별 매출' })) as { changeSetId: string };
+
+  // mark-only: 승인 전에는 어떤 브리지 뮤테이터도 불리지 않는다.
+  for (const method of ['setTableColumnWidths', 'fitTableToPage', 'setCellZoneProperties', 'evaluateTableFormulaEx', 'setTableCaptionText']) {
+    assert.ok(!calls.some((entry) => entry.m === method), `${method} 가 승인 전에 실행됐다`);
+  }
+
+  for (const set of [widths, fit, zone, formula, caption]) pending.approve(set.changeSetId);
+
+  assert.deepEqual(calls.find((entry) => entry.m === 'setTableColumnWidths')!.a[2], [mmToHu(60), mmToHu(90)]);
+  assert.ok(calls.some((entry) => entry.m === 'fitTableToPage'));
+  const zoneCall = calls.find((entry) => entry.m === 'setCellZoneProperties')!;
+  assert.deepEqual(zoneCall.a[2], { startRow: 0, startCol: 0, endRow: 1, endCol: 1 });
+  assert.deepEqual(zoneCall.a[3], {
+    borderTop: { type: 1, width: 2, color: '#112233' },
+    fillType: 'solid', fillColor: '#EEEEEE', centerLine: 'CROSS',
+  });
+  assert.deepEqual(calls.find((entry) => entry.m === 'evaluateTableFormulaEx')!.a[0], {
+    sectionIdx: 0, parentParaIdx: t.paraIdx, controlIdx: t.controlIdx,
+    targetRow: 1, targetCol: 1, formula: '=SUM(A1:A2)', writeResult: true,
+    decimalPlaces: 0, thousandsSeparator: true, suffix: '원',
+  });
+  assert.deepEqual(calls.find((entry) => entry.m === 'setTableCaptionText')!.a.slice(2), ['분기별 매출', true]);
+});
+
+test('get_table_layout: 쪽별 조각과 본문 넘침을 읽고 아무것도 바꾸지 않는다', async () => {
+  const { call, pending, tables, calls } = makeEnv();
+  const created = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b']],
+  })) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const t = tables[0];
+  const before = calls.length;
+
+  const layout = (await call('get_table_layout', { paraIdx: t.paraIdx, controlIdx: t.controlIdx })) as {
+    revision: number;
+    fragments: Array<{ pageIndex: number; yMm: number; heightMm: number; overflowsBodyBottom: boolean }>;
+    bodyAreaMm: { heightMm: number };
+    overflowsBody: boolean; overflowsBodyWidth: boolean;
+    pageBreak: number; pageBreakName: string; repeatHeader: boolean;
+  };
+
+  assert.equal(layout.fragments.length, 1);
+  assert.equal(layout.fragments[0].pageIndex, 0);
+  assert.equal(layout.fragments[0].overflowsBodyBottom, true);
+  assert.equal(layout.overflowsBody, true);
+  assert.equal(layout.overflowsBodyWidth, false);
+  assert.equal(layout.pageBreak, 0);
+  assert.equal(layout.pageBreakName, 'none');
+  assert.equal(layout.repeatHeader, false);
+  assert.ok(layout.bodyAreaMm.heightMm > 0);
+  assert.equal(typeof layout.revision, 'number');
+  assert.equal(calls.length, before, '읽기 도구가 문서를 변경했다');
+});
+
+test('신규 표 op 의 인자 검증: 열 수 불일치·범위 역전·빈 zone 속성', async () => {
+  const { call, pending, tables } = makeEnv();
+  const created = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b']],
+  })) as { changeSetId: string };
+  pending.approve(created.changeSetId);
+  const t = tables[0];
+  const at = { sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx };
+
+  await expectErr(call('edit_table', { ...at, op: 'set_column_widths', columnWidthsMm: [60] }), 'INVALID_ARGS');
+  await expectErr(call('edit_table', {
+    ...at, op: 'set_zone_borders', startCell: { row: 0, col: 1 }, endCell: { row: 0, col: 0 },
+    fillColor: '#FFFFFF',
+  }), 'INVALID_ARGS');
+  await expectErr(call('edit_table', {
+    ...at, op: 'set_zone_borders', startCell: { row: 0, col: 0 }, endCell: { row: 0, col: 1 },
+  }), 'INVALID_ARGS');
+  await expectErr(call('edit_table', { ...at, op: 'apply_formula', row: 5, col: 0, formula: '=SUM(A1)' }), 'INVALID_ARGS');
 });
 
 test('edit_table split_cell rejects covered coordinates inside a merged cell', async () => {

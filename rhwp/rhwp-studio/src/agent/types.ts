@@ -636,8 +636,8 @@ export interface ObjectAnchor {
  *   insertImage, insertEquation, tableStructure(insert_row/col), paraFormat, pageLayout,
  *   headerFooter(신규 생성일 때)
  * - mark-only(approve 시 적용): tableStructure(delete_row/col/merge_cells/split_cell),
- *   deleteTable(표 전체 삭제), setCellProps, setTableProps, applyStyle,
- *   headerFooter(기존 HF 수정)
+ *   deleteTable(표 전체 삭제), setCellProps, setTableProps, setColumnWidths, fitToPage,
+ *   setZoneProps, applyFormula, setCaption, applyStyle, headerFooter(기존 HF 수정)
  */
 export type ObjectOp =
   | {
@@ -707,6 +707,47 @@ export type ObjectOp =
       type: 'setTableProps';
       sectionIdx: number; tableParaIdx: number; controlIdx: number;
       props: Record<string, unknown>;
+      dims: { rowCount: number; colCount: number };
+    }
+  | {
+      /** 열 폭 절대 지정 — mark-only, 승인 시 wasm.setTableColumnWidths */
+      type: 'setColumnWidths';
+      sectionIdx: number; tableParaIdx: number; controlIdx: number;
+      /** HWPUNIT 열 폭 — 길이는 마크 시점 열 수와 같다 */
+      widthsHu: number[];
+      dims: { rowCount: number; colCount: number };
+    }
+  | {
+      /** 본문 폭 맞춤(축소 전용) — mark-only, 승인 시 wasm.fitTableToPage */
+      type: 'fitToPage';
+      sectionIdx: number; tableParaIdx: number; controlIdx: number;
+      dims: { rowCount: number; colCount: number };
+    }
+  | {
+      /** 셀 범위 테두리/배경 — mark-only, 승인 시 wasm.setCellZoneProperties */
+      type: 'setZoneProps';
+      sectionIdx: number; tableParaIdx: number; controlIdx: number;
+      range: { startRow: number; startCol: number; endRow: number; endCol: number };
+      props: Record<string, unknown>;
+      dims: { rowCount: number; colCount: number };
+    }
+  | {
+      /** 계산식 결과 입력 — mark-only, 승인 시 wasm.evaluateTableFormulaEx(writeResult) */
+      type: 'applyFormula';
+      sectionIdx: number; tableParaIdx: number; controlIdx: number;
+      row: number; col: number;
+      formula: string;
+      format?: { decimalPlaces?: number; thousandsSeparator?: boolean; prefix?: string; suffix?: string };
+      /** 오버레이 대상 셀 (마크 시점 해석) */
+      cellIdx?: number;
+      dims: { rowCount: number; colCount: number };
+    }
+  | {
+      /** 표 캡션 글 — mark-only, 승인 시 wasm.setTableCaptionText */
+      type: 'setCaption';
+      sectionIdx: number; tableParaIdx: number; controlIdx: number;
+      text: string;
+      withNumber: boolean;
       dims: { rowCount: number; colCount: number };
     }
   | {

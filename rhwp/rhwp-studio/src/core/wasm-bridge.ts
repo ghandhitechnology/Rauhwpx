@@ -1469,6 +1469,39 @@ export class WasmBridge {
     return JSON.parse(this.doc.setTableProperties(sec, parentPara, controlIdx, JSON.stringify(props)));
   }
 
+  /**
+   * 표의 열 폭을 절대값(HWPUNIT)으로 한 번에 지정한다.
+   * `widths` 길이는 표의 열 수와 같아야 하며, 표 전체 폭도 합계에 맞춰 갱신된다.
+   */
+  setTableColumnWidths(sec: number, parentPara: number, controlIdx: number, widths: number[]): { ok: boolean; colCount: number; tableWidth: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const doc = this.doc as unknown as {
+      setTableColumnWidths(sec: number, parentPara: number, controlIdx: number, widths: Uint32Array): string;
+    };
+    return JSON.parse(doc.setTableColumnWidths(sec, parentPara, controlIdx, Uint32Array.from(widths)));
+  }
+
+  /** 표가 본문 폭을 넘으면 열 폭을 비례 축소해 한 쪽 안에 맞춘다 (축소 전용). */
+  fitTableToPage(sec: number, parentPara: number, controlIdx: number): { ok: boolean; colCount: number; tableWidth: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const doc = this.doc as unknown as {
+      fitTableToPage(sec: number, parentPara: number, controlIdx: number): string;
+    };
+    return JSON.parse(doc.fitTableToPage(sec, parentPara, controlIdx));
+  }
+
+  /**
+   * 표 아래쪽 캡션의 글을 지정한다. 캡션이 없으면 한컴 방식(자동 번호 "표 N")으로 만든다.
+   * `withNumber` 가 false 면 자동 번호 없이 글만 넣는다.
+   */
+  setTableCaptionText(sec: number, parentPara: number, controlIdx: number, text: string, withNumber: boolean): { ok: boolean; captionText: string } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const doc = this.doc as unknown as {
+      setTableCaptionText(sec: number, parentPara: number, controlIdx: number, text: string, withNumber: boolean): string;
+    };
+    return JSON.parse(doc.setTableCaptionText(sec, parentPara, controlIdx, text, withNumber));
+  }
+
   mergeTableCells(sec: number, parentPara: number, controlIdx: number, startRow: number, startCol: number, endRow: number, endCol: number): { ok: boolean; cellCount: number } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.mergeTableCells(sec, parentPara, controlIdx, startRow, startCol, endRow, endCol));
@@ -1604,6 +1637,20 @@ export class WasmBridge {
     targetRow: number, targetCol: number, formula: string, writeResult: boolean): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.evaluateTableFormula(sec, parentPara, controlIdx, targetRow, targetCol, formula, writeResult);
+  }
+
+  /**
+   * 표 계산식을 평가한다 (표시 형식 옵션 포함).
+   * `writeResult` 가 true 면 서식이 적용된 문자열(`display`)이 대상 셀에 입력된다.
+   */
+  evaluateTableFormulaEx(options: {
+    sectionIdx: number; parentParaIdx: number; controlIdx: number;
+    targetRow: number; targetCol: number; formula: string; writeResult: boolean;
+    decimalPlaces?: number; thousandsSeparator?: boolean; prefix?: string; suffix?: string;
+  }): { ok: boolean; value?: number; display?: string } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const doc = this.doc as unknown as { evaluateTableFormulaEx(optionsJson: string): string };
+    return JSON.parse(doc.evaluateTableFormulaEx(JSON.stringify(options)));
   }
 
   /**

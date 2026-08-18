@@ -364,6 +364,7 @@ export class AgentToolExecutor {
       case 'get_para_format': return this.getParaFormat(args);
       case 'get_char_format': return this.getCharFormat(args);
       case 'get_table_properties': return this.getTableProperties(args);
+      case 'get_table_layout': return this.getTableLayout(args);
       case 'get_engine_edit_capabilities': return this.getEngineEditCapabilities(args);
       case 'list_numberings': return this.listNumberings();
       case 'verify_changes': return this.verifyChanges(args);
@@ -1429,6 +1430,95 @@ export class AgentToolExecutor {
     return { revision: this.revision, sectionIdx, paraIdx, controlIdx, dimensions: dims, table, cell };
   }
 
+  /**
+   * 표가 실제로 어느 쪽 어디에 놓였는지 조회한다 — 쪽별 조각(fragment)과 본문 영역 넘침 여부.
+   * bbox 는 96dpi px 페이지 좌표라 mm 로 환산해 돌려준다.
+   */
+  private getTableLayout(args: Record<string, unknown>): unknown {
+    this.requireDocLoaded();
+    const sectionIdx = optInt(args, 'sectionIdx', 0);
+    const paraIdx = reqInt(args, 'paraIdx');
+    const controlIdx = reqInt(args, 'controlIdx');
+    const { wasm } = this.deps;
+    let dims: { rowCount: number; colCount: number; cellCount: number };
+    let props: Record<string, unknown>;
+    let first: { pageIndex: number; x: number; y: number; width: number; height: number };
+    try {
+      dims = wasm.getTableDimensions(sectionIdx, paraIdx, controlIdx);
+      props = wasm.getTableProperties(sectionIdx, paraIdx, controlIdx) as unknown as Record<string, unknown>;
+      first = wasm.getTableBBox(sectionIdx, paraIdx, controlIdx);
+    } catch {
+      throw new AgentToolError('INVALID_ARGS', `No table control at section ${sectionIdx}, paragraph ${paraIdx}, controlIdx ${controlIdx} — use get_structure to list tables`);
+    }
+
+    // 첫 조각의 쪽부터 앞으로 훑어 조각이 끊기는 지점까지 모은다 (셀/행 단위 나눔 대응).
+    const raw: { pageIndex: number; x: number; y: number; width: number; height: number }[] = [first];
+    for (let page = first.pageIndex + 1; page < wasm.pageCount; page++) {
+      let box: { pageIndex: number; x: number; y: number; width: number; height: number };
+      try {
+        box = wasm.getTableBBoxAtPage(sectionIdx, paraIdx, controlIdx, page);
+      } catch {
+        break;
+      }
+      raw.push(box);
+    }
+
+    // 본문 영역: 쪽 좌표(px) 기준 상하좌우 여백(머리말/꼬리말 포함)을 뺀 사각형.
+    const TOLERANCE_PX = 0.5;
+    let overflowsBody = false;
+    let overflowsBodyWidth = false;
+    let bodyAreaMm: { xMm: number; yMm: number; widthMm: number; heightMm: number } | undefined;
+    const fragments = raw.map((box) => {
+      let body: { left: number; top: number; right: number; bottom: number } | null = null;
+      try {
+        const info = wasm.getPageInfo(box.pageIndex);
+        body = {
+          left: info.marginLeft,
+          top: info.marginTop + info.marginHeader,
+          right: info.width - info.marginRight,
+          bottom: info.height - info.marginBottom - info.marginFooter,
+        };
+      } catch { /* 쪽 정보 실패 시 넘침 판정을 생략한다 */ }
+      const belowBody = body !== null && box.y + box.height > body.bottom + TOLERANCE_PX;
+      const pastRight = body !== null && box.x + box.width > body.right + TOLERANCE_PX;
+      if (belowBody) overflowsBody = true;
+      if (pastRight) overflowsBodyWidth = true;
+      if (body && !bodyAreaMm) {
+        bodyAreaMm = {
+          xMm: pxToMm(body.left),
+          yMm: pxToMm(body.top),
+          widthMm: pxToMm(body.right - body.left),
+          heightMm: pxToMm(body.bottom - body.top),
+        };
+      }
+      return {
+        pageIndex: box.pageIndex,
+        xMm: pxToMm(box.x),
+        yMm: pxToMm(box.y),
+        widthMm: pxToMm(box.width),
+        heightMm: pxToMm(box.height),
+        overflowsBodyBottom: belowBody,
+        overflowsBodyRight: pastRight,
+      };
+    });
+
+    const pageBreak = Number(props['pageBreak'] ?? 0);
+    return {
+      revision: this.revision,
+      sectionIdx,
+      paraIdx,
+      controlIdx,
+      dimensions: dims,
+      fragments,
+      ...(bodyAreaMm ? { bodyAreaMm } : {}),
+      overflowsBody,
+      overflowsBodyWidth,
+      pageBreak,
+      pageBreakName: pageBreak === 1 ? 'cell' : pageBreak === 2 ? 'row' : 'none',
+      repeatHeader: props['repeatHeader'] === true,
+    };
+  }
+
   /** 편집 직후 영향 문단 다이제스트 (~200자, best-effort — 실패 시 빈 문자열) */
   private readPostEditDigest(sectionIdx: number, paraIdx: number, charOffset: number, cell?: CellAddr): string {
     try {
@@ -1533,6 +1623,11 @@ export class AgentToolExecutor {
           case 'deleteTable':
           case 'setCellProps':
           case 'setTableProps':
+          case 'setColumnWidths':
+          case 'fitToPage':
+          case 'setZoneProps':
+          case 'applyFormula':
+          case 'setCaption':
             pushPara(o.sectionIdx, o.tableParaIdx);
             break;
           default:
@@ -2252,9 +2347,182 @@ export class AgentToolExecutor {
         const r = this.deps.pending.addObjectOp(agent, obj);
         return { revision: this.revision, changeSetId: r.changeSetId, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
       }
+      case 'set_column_widths': {
+        const raw = args['columnWidthsMm'];
+        if (!Array.isArray(raw) || raw.length === 0) {
+          throw new AgentToolError('INVALID_ARGS', 'columnWidthsMm must be a non-empty array of mm widths');
+        }
+        if (raw.length !== dims.colCount) {
+          throw new AgentToolError('INVALID_ARGS', `columnWidthsMm has ${raw.length} entries but the table has ${dims.colCount} columns`);
+        }
+        const widthsHu = raw.map((value, index) => {
+          if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 500) {
+            throw new AgentToolError('INVALID_ARGS', `columnWidthsMm[${index}] must be a positive number up to 500mm`);
+          }
+          return mmToHu(value);
+        });
+        const obj: ObjectOp = { type: 'setColumnWidths', ...base, widthsHu, dims: dimsNow };
+        const r = this.deps.pending.addObjectOp(agent, obj);
+        return { revision: this.revision, changeSetId: r.changeSetId, colCount: dims.colCount, note: `applied at the successful turn commit. ${PENDING_NOTE}` };
+      }
+      case 'fit_to_page': {
+        const obj: ObjectOp = { type: 'fitToPage', ...base, dims: dimsNow };
+        const r = this.deps.pending.addObjectOp(agent, obj);
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `columns shrink proportionally to the body width at the successful turn commit. ${PENDING_NOTE}` };
+      }
+      case 'set_zone_borders': {
+        const corner = (key: string): { row: number; col: number } => {
+          const value = args[key];
+          if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+            throw new AgentToolError('INVALID_ARGS', `${key} must be an object {row, col}`);
+          }
+          const rec = value as Record<string, unknown>;
+          const row = reqInt(rec, 'row');
+          const col = reqInt(rec, 'col');
+          if (row < 0 || row >= dims.rowCount) throw new AgentToolError('INVALID_ARGS', `${key}.row ${row} out of range (0..${dims.rowCount - 1})`);
+          if (col < 0 || col >= dims.colCount) throw new AgentToolError('INVALID_ARGS', `${key}.col ${col} out of range (0..${dims.colCount - 1})`);
+          return { row, col };
+        };
+        const start = corner('startCell');
+        const end = corner('endCell');
+        if (end.row < start.row || end.col < start.col) {
+          throw new AgentToolError('INVALID_ARGS', 'endCell must not precede startCell');
+        }
+        const props = this.parseZoneProps(args);
+        const obj: ObjectOp = {
+          type: 'setZoneProps', ...base,
+          range: { startRow: start.row, startCol: start.col, endRow: end.row, endCol: end.col },
+          props, dims: dimsNow,
+        };
+        const r = this.deps.pending.addObjectOp(agent, obj);
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `borders/fill land on the zone outline at the successful turn commit. ${PENDING_NOTE}` };
+      }
+      case 'apply_formula': {
+        const row = reqIdx('row', dims.rowCount);
+        const col = reqIdx('col', dims.colCount);
+        const formula = reqString(args, 'formula');
+        if (formula.length > 1000) throw new AgentToolError('INVALID_ARGS', 'formula must be at most 1000 chars');
+        const format = this.parseFormulaFormat(args['format']);
+        // 오버레이 대상 셀 — 병합 셀도 포함하도록 앵커가 아닌 덮는 셀을 찾는다.
+        let cellIdx: number | undefined;
+        for (let idx = 0; idx < dims.cellCount; idx++) {
+          const info = wasm.getCellInfo(sectionIdx, paraIdx, controlIdx, idx);
+          if (info.row <= row && row < info.row + info.rowSpan
+            && info.col <= col && col < info.col + info.colSpan) {
+            cellIdx = idx;
+            break;
+          }
+        }
+        const obj: ObjectOp = {
+          type: 'applyFormula', ...base, row, col, formula,
+          ...(format ? { format } : {}),
+          ...(cellIdx !== undefined ? { cellIdx } : {}),
+          dims: dimsNow,
+        };
+        const r = this.deps.pending.addObjectOp(agent, obj);
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `the computed result is written into the cell at the successful turn commit. ${PENDING_NOTE}` };
+      }
+      case 'set_caption': {
+        const text = reqString(args, 'text');
+        if (text.length > 5000) throw new AgentToolError('INVALID_ARGS', 'text must be at most 5000 chars');
+        const withNumber = optBool('withNumber', true);
+        const obj: ObjectOp = { type: 'setCaption', ...base, text, withNumber, dims: dimsNow };
+        const r = this.deps.pending.addObjectOp(agent, obj);
+        return { revision: this.revision, changeSetId: r.changeSetId, note: `the caption is created if missing and written at the successful turn commit. ${PENDING_NOTE}` };
+      }
       default:
-        throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|split_cell|set_cell_props|set_table_props (got ${JSON.stringify(op)})`);
+        throw new AgentToolError('INVALID_ARGS', `op must be one of insert_row|insert_col|delete_row|delete_col|merge_cells|split_cell|set_cell_props|set_table_props|set_column_widths|fit_to_page|set_zone_borders|apply_formula|set_caption (got ${JSON.stringify(op)})`);
     }
+  }
+
+  /** set_zone_borders 인자 → wasm setCellZoneProperties JSON */
+  private parseZoneProps(args: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const side of ['borderLeft', 'borderRight', 'borderTop', 'borderBottom'] as const) {
+      const value = args[side];
+      if (value === undefined || value === null) continue;
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        throw new AgentToolError('INVALID_ARGS', `${side} must be an object {type, width, color}`);
+      }
+      const rec = value as Record<string, unknown>;
+      const type = reqInt(rec, 'type');
+      const width = reqInt(rec, 'width');
+      const color = reqString(rec, 'color');
+      if (type < 0 || type > 15) throw new AgentToolError('INVALID_ARGS', `${side}.type must be 0..15`);
+      if (width < 0 || width > 6) throw new AgentToolError('INVALID_ARGS', `${side}.width must be 0..6`);
+      if (!HEX_COLOR_RE.test(color)) throw new AgentToolError('INVALID_ARGS', `${side}.color must be "#RRGGBB"`);
+      out[side] = { type, width, color };
+    }
+    const fill = args['fillColor'];
+    if (fill !== undefined && fill !== null) {
+      if (typeof fill !== 'string' || !HEX_COLOR_RE.test(fill)) {
+        throw new AgentToolError('INVALID_ARGS', 'fillColor must be "#RRGGBB"');
+      }
+      out['fillType'] = 'solid';
+      out['fillColor'] = fill;
+    }
+    for (const [key, max] of [['diagonalLine', 15], ['diagonalSlash', 7], ['diagonalBackSlash', 7], ['diagonalWidth', 6]] as const) {
+      const value = args[key];
+      if (value === undefined || value === null) continue;
+      const num = reqInt(args, key);
+      if (num < 0 || num > max) throw new AgentToolError('INVALID_ARGS', `${key} must be 0..${max}`);
+      out[key] = num;
+    }
+    const diagonalColor = args['diagonalColor'];
+    if (diagonalColor !== undefined && diagonalColor !== null) {
+      if (typeof diagonalColor !== 'string' || !HEX_COLOR_RE.test(diagonalColor)) {
+        throw new AgentToolError('INVALID_ARGS', 'diagonalColor must be "#RRGGBB"');
+      }
+      out['diagonalColor'] = diagonalColor;
+    }
+    const centerLine = args['centerLine'];
+    if (centerLine !== undefined && centerLine !== null) {
+      const allowed = ['NONE', 'VERTICAL', 'HORIZONTAL', 'CROSS'];
+      if (typeof centerLine !== 'string' || !allowed.includes(centerLine)) {
+        throw new AgentToolError('INVALID_ARGS', `centerLine must be one of ${allowed.join('|')}`);
+      }
+      out['centerLine'] = centerLine;
+    }
+    if (Object.keys(out).length === 0) {
+      throw new AgentToolError('INVALID_ARGS', 'set_zone_borders requires at least one of borderLeft/borderRight/borderTop/borderBottom/fillColor/diagonalLine/centerLine');
+    }
+    return out;
+  }
+
+  /** apply_formula 의 표시 형식 인자 검증 */
+  private parseFormulaFormat(raw: unknown): {
+    decimalPlaces?: number; thousandsSeparator?: boolean; prefix?: string; suffix?: string;
+  } | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new AgentToolError('INVALID_ARGS', 'format must be an object');
+    }
+    const rec = raw as Record<string, unknown>;
+    const allowed = ['decimalPlaces', 'thousandsSeparator', 'prefix', 'suffix'];
+    const unknownKeys = Object.keys(rec).filter((key) => !allowed.includes(key));
+    if (unknownKeys.length > 0) throw new AgentToolError('INVALID_ARGS', `Unsupported format keys: ${unknownKeys.join(', ')}`);
+
+    const out: { decimalPlaces?: number; thousandsSeparator?: boolean; prefix?: string; suffix?: string } = {};
+    if (rec['decimalPlaces'] !== undefined && rec['decimalPlaces'] !== null) {
+      const places = reqInt(rec, 'decimalPlaces');
+      if (places < 0 || places > 10) throw new AgentToolError('INVALID_ARGS', 'format.decimalPlaces must be 0..10');
+      out.decimalPlaces = places;
+    }
+    if (rec['thousandsSeparator'] !== undefined && rec['thousandsSeparator'] !== null) {
+      if (typeof rec['thousandsSeparator'] !== 'boolean') {
+        throw new AgentToolError('INVALID_ARGS', 'format.thousandsSeparator must be a boolean');
+      }
+      out.thousandsSeparator = rec['thousandsSeparator'];
+    }
+    for (const key of ['prefix', 'suffix'] as const) {
+      const value = rec[key];
+      if (value === undefined || value === null) continue;
+      if (typeof value !== 'string' || value.length > 16) {
+        throw new AgentToolError('INVALID_ARGS', `format.${key} must be a string up to 16 chars`);
+      }
+      out[key] = value;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
   }
 
   private deleteTable(args: Record<string, unknown>, agent: AgentName): unknown {
