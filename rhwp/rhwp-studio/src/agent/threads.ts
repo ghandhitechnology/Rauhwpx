@@ -676,6 +676,37 @@ export function removeThread(id: string): void {
   persistRemove(id);
 }
 
+/**
+ * 문서 보관 — 문서 파일은 그대로 두고, 그 문서 그룹에 속한 채팅을 모두
+ * 지운다. 문서 열람 순서 기록도 함께 지워 탐색기가 문서를 더는 기억하지
+ * 않는다. 지운 채팅 ID 목록을 돌려준다.
+ */
+export function forgetDocumentThreads(documentId: string | null, docKey: string | null): string[] {
+  // 그룹 소속 판정은 documentGroupKey 와 같은 규칙이다 — ID가 있으면 ID로,
+  // 없으면 파일명으로만 묶인 레거시 채팅을 지운다.
+  const removed = loadAll()
+    .filter((thread) => (documentId
+      ? thread.documentId === documentId
+      : !thread.documentId && (thread.docKey ?? '') === (docKey ?? '')))
+    .map((thread) => thread.id);
+  for (const id of removed) removeThread(id);
+
+  if (canUseStorage()) {
+    const drop = new Set<string>();
+    if (documentId) drop.add(`id:${documentId}`);
+    // 같은 파일명을 쓰는 다른 그룹이 남아 있으면 이름 키는 그 그룹 몫으로 남긴다.
+    if (docKey && !loadAll().some((thread) => thread.docKey === docKey)) drop.add(`name:${docKey}`);
+    if (drop.size) {
+      try {
+        localStorage.setItem(DOC_ORDER_KEY, JSON.stringify(readDocOrder().filter((key) => !drop.has(key))));
+      } catch {
+        /* ignore quota / private mode */
+      }
+    }
+  }
+  return removed;
+}
+
 /** 자동 제목(에이전트/폴백) — 사용자가 고정한 이름은 건드리지 않는다. */
 export function setThreadTitle(id: string, title: string): ChatThread | null {
   const current = getThread(id);

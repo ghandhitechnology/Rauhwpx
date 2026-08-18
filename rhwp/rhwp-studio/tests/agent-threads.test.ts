@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   createEmptyThread,
   fallbackTitle,
+  forgetDocumentThreads,
   getThread,
   explorerGroupIsCurrent,
   listThreads,
@@ -347,6 +348,40 @@ test('listThreadsByDocument splits same filenames when documentId differs', () =
   assert.equal(groups.length, 2);
   assert.deepEqual(new Set(groups.map((g) => g.documentId)), new Set(['doc-a', 'doc-b']));
   assert.ok(groups.every((g) => g.docKey === '보고서.hwp'));
+});
+
+test('forgetDocumentThreads removes only that document group and its open-order record', () => {
+  mem.clear();
+  const mk = (docKey: string | null, documentId: string | null, text: string) => {
+    const t = createEmptyThread({ agent: 'claude', model: 'sonnet', effort: 'high', docKey, documentId });
+    t.messages.push({ role: 'user', text });
+    upsertThread(t);
+    return t;
+  };
+  recordDocumentOpened('doc-a', 'a.hwpx');
+  recordDocumentOpened('doc-b', 'b.hwpx');
+  const gone = mk('a.hwpx', 'doc-a', 'a 채팅 1');
+  mk('a.hwpx', 'doc-a', 'a 채팅 2');
+  const legacy = mk('a.hwpx', null, '레거시 a 채팅');
+  const kept = mk('b.hwpx', 'doc-b', 'b 채팅');
+
+  // ID 그룹만 지운다 — 같은 파일명의 레거시 그룹과 다른 문서는 남는다.
+  const removed = forgetDocumentThreads('doc-a', 'a.hwpx');
+  assert.equal(removed.length, 2);
+  assert.ok(removed.includes(gone.id));
+  assert.equal(getThread(gone.id), null);
+  assert.deepEqual(new Set(listThreads().map((t) => t.id)), new Set([legacy.id, kept.id]));
+  const orderAfterId = JSON.parse(mem.get('rhwp-agent-doc-order') ?? '[]') as string[];
+  assert.ok(!orderAfterId.includes('id:doc-a'));
+  assert.ok(orderAfterId.includes('name:a.hwpx'));
+
+  // 레거시(파일명뿐인) 그룹을 지우면 이름 기록도 함께 사라진다.
+  forgetDocumentThreads(null, 'a.hwpx');
+  assert.equal(getThread(legacy.id), null);
+  assert.deepEqual(listThreads().map((t) => t.id), [kept.id]);
+  const orderAfterName = JSON.parse(mem.get('rhwp-agent-doc-order') ?? '[]') as string[];
+  assert.ok(!orderAfterName.includes('name:a.hwpx'));
+  assert.ok(orderAfterName.includes('id:doc-b'));
 });
 
 test('workflow and every presented plan persist as history without approval authority', () => {

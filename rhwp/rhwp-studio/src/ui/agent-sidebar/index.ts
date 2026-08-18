@@ -46,6 +46,7 @@ import {
   fallbackTitle,
   getThread,
   explorerGroupIsCurrent,
+  forgetDocumentThreads,
   listThreadsByDocument,
   recordDocumentOpened,
   removeThread,
@@ -55,6 +56,7 @@ import {
   threadMatchesDocument,
   upsertThread,
   type ChatThread,
+  type DocumentThreadGroup,
   type ThreadMessage,
   type ThreadAttachment,
 } from '../../agent/threads.ts';
@@ -3382,6 +3384,27 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     return docKey ?? '문서 없음';
   }
 
+  /**
+   * 문서 보관 — 문서 파일은 남기고 그 문서의 채팅 기록을 모두 지운다.
+   * 지금 열려 있는 채팅이 그 문서 소속이면 먼저 새 채팅으로 빠져나온다.
+   */
+  function archiveDocumentGroup(group: DocumentThreadGroup): void {
+    if (!window.confirm('문서는 보존되지만 채팅 기록은 모두 삭제됩니다. 진행하시겠어요?')) return;
+    const currentInGroup = group.documentId
+      ? currentThread.documentId === group.documentId
+      : !currentThread.documentId && (currentThread.docKey ?? '') === (group.docKey ?? '');
+    // startNewChat 이 현재 채팅을 저장하므로, 삭제는 빠져나온 뒤에 한다.
+    if (currentInGroup) startNewChat({ silent: true });
+    const removed = forgetDocumentThreads(group.documentId, group.docKey);
+    for (const id of removed) {
+      planArchives.delete(id);
+      threadWorkflows.delete(id);
+      clearChatStatus(id);
+    }
+    docGroupToggles.delete(group.documentId ?? group.docKey ?? '');
+    rebuildThreadsList();
+  }
+
   /** 실행 상태 점 — 노란 불(작업 중)·초록 점(완료)·빨간 점(승인 대기). */
   function buildStatusDot(status: ChatRunStatus, extraClass?: string): HTMLElement {
     const dot = el('span', `ag-thread-status ag-thread-status-${status}${extraClass ? ` ${extraClass}` : ''}`);
@@ -3423,7 +3446,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   /**
    * 문서별 그룹 목록 — 현재 문서 그룹이 맨 위에 펼쳐져 있고,
    * 다른 문서 그룹은 접힌 채로 최근 활동순으로 이어진다.
-   * 그룹 이름 우클릭 → 라이브러리 "이동"(현재 문서 저장 후 그 문서로 연다).
+   * 그룹 이름 더블클릭·우클릭 → "이동"·"문서 보관" 메뉴.
    */
   function rebuildThreadsList(): void {
     hideThreadPopover();
@@ -3467,29 +3490,59 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             : statuses.includes('finished') ? 'finished' as const : null;
         if (rollup) groupBtn.append(buildStatusDot(rollup, 'ag-group-status'));
       }
-      groupBtn.addEventListener('click', () => {
+      const toggleGroup = (): void => {
         docGroupToggles.set(toggleKey, !expanded);
         // 펼칠 때만 행이 차례로 미끄러져 들어온다 — 접을 때는 즉시.
         threadsCascadeKey = expanded ? null : toggleKey;
         rebuildThreadsList();
-      });
+      };
+      const openGroupMenu = (x: number, y: number): void => {
+        showActionMenu(x, y, [{
+          label: '이동',
+          disabled: isCurrentDoc,
+          title: isCurrentDoc ? '이미 이 문서를 보고 있습니다' : '현재 문서를 저장하고 이 문서로 이동합니다',
+          onSelect: () => {
+            persistCurrentThread();
+            moveToLibraryDocument?.({
+              documentId: group.documentId,
+              fileName: group.docKey,
+            });
+          },
+        }, {
+          label: '문서 보관',
+          title: '이 문서의 채팅 기록을 모두 삭제합니다',
+          onSelect: () => archiveDocumentGroup(group),
+        }]);
+      };
       if (canMove) {
+        // 더블클릭 → 메뉴. 목록이 클릭마다 다시 그려져 dblclick 이벤트가
+        // 원래 버튼에 닿지 못하므로, 접기/펼치기를 판정 시간만큼 미뤄 두고
+        // 그 안에 두 번째 클릭이 오면 토글 대신 메뉴를 연다.
+        let pendingToggle: number | null = null;
+        groupBtn.addEventListener('click', (event) => {
+          if (event.detail === 0) {
+            // 키보드(Enter/Space) 활성화는 지연 없이 바로 토글한다.
+            toggleGroup();
+            return;
+          }
+          if (pendingToggle !== null) {
+            clearTimeout(pendingToggle);
+            pendingToggle = null;
+            openGroupMenu(event.clientX, event.clientY);
+            return;
+          }
+          pendingToggle = window.setTimeout(() => {
+            pendingToggle = null;
+            toggleGroup();
+          }, 250);
+        });
         groupBtn.addEventListener('contextmenu', (event) => {
           event.preventDefault();
           event.stopPropagation();
-          showActionMenu(event.clientX, event.clientY, [{
-            label: '이동',
-            disabled: isCurrentDoc,
-            title: isCurrentDoc ? '이미 이 문서를 보고 있습니다' : '현재 문서를 저장하고 이 문서로 이동합니다',
-            onSelect: () => {
-              persistCurrentThread();
-              moveToLibraryDocument?.({
-                documentId: group.documentId,
-                fileName: group.docKey,
-              });
-            },
-          }]);
+          openGroupMenu(event.clientX, event.clientY);
         });
+      } else {
+        groupBtn.addEventListener('click', toggleGroup);
       }
       groupLi.appendChild(groupBtn);
       // 문서로 건너뛰기 — 연필과 같은 문법으로 오른쪽에 겹쳐 hover 에서 드러난다.
