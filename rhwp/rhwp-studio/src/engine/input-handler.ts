@@ -2566,6 +2566,11 @@ export class InputHandler {
         if (desc.command.type !== 'applyCharFormat' && desc.command.type !== 'applyParaFormat') {
           this.cursor.moveTo(newPos);
           this.cursor.resetPreferredX();
+        } else {
+          // 서식 변경은 커서 위치(offset)를 바꾸지 않지만 캐럿 좌표는 바뀔 수 있다
+          // (번호/글머리표 마커 폭, 정렬, 줄 간격 등). 선택은 유지한 채 rect 만
+          // 재계산해 캐럿이 이전 좌표(예: 번호 왼쪽)에 남지 않게 한다.
+          this.cursor.updateRect();
         }
         if (keepFieldStartOutside) {
           this.markCurrentFieldStartOutside();
@@ -5110,6 +5115,18 @@ export class InputHandler {
       this.focusTextarea();
     } catch (err) {
       console.warn('[InputHandler] applyNumbering 실패:', err);
+    }
+  }
+
+  /** 번호/글머리표 해제 → 일반 문단 (문단 시작 Backspace 등에서 사용, undo 가능) */
+  clearParaNumbering(): void {
+    try {
+      this.applyParaFormat({
+        headType: 'None',
+        numberingId: 0,
+      } as Partial<import('@/core/types').ParaProperties>);
+    } catch (err) {
+      console.warn('[InputHandler] clearParaNumbering 실패:', err);
     }
   }
 

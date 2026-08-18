@@ -350,6 +350,9 @@ struct EmptyRunsLineVars {
     effective_col_x: f64,
     effective_margin_left: f64,
     x_start: f64,
+    /// 이 줄에 방출된 번호/글머리표 마커 폭. 빈 문단의 커서 anchor TextRun 은
+    /// 마커 오른쪽에서 시작해야 캐럿·히트테스트가 번호 위에 놓이지 않는다.
+    numbering_marker_width: f64,
     /// 이 줄 끝의 문서 char 좌표 (원본: char_offset)
     line_char_end: usize,
     y: f64,
@@ -3677,6 +3680,7 @@ impl LayoutEngine {
             // TextRun 노드 생성
             // 선행 공백은 x좌표 오프셋으로 처리하여 SVG 뷰어의 폰트 메트릭과 무관하게 정렬
             let mut x = x_start;
+            let mut line_numbering_marker_width = 0.0;
 
             // 개요 번호/글머리표: 첫 줄에서 별도 TextRunNode로 렌더링 (char_start: None)
             if line_idx == start_line && start_line == 0 {
@@ -3684,6 +3688,7 @@ impl LayoutEngine {
                     let num_style =
                         numbering_marker_text_style(styles, para, comp_line.runs.first());
                     let num_width = estimate_text_width(num_text, &num_style);
+                    line_numbering_marker_width = num_width;
                     let num_id = tree.next_id();
                     let num_node = RenderNode::new(
                         num_id,
@@ -3889,6 +3894,7 @@ impl LayoutEngine {
                         effective_col_x,
                         effective_margin_left,
                         x_start,
+                        numbering_marker_width: line_numbering_marker_width,
                         line_char_end: char_offset,
                         y,
                         baseline,
@@ -6052,7 +6058,11 @@ impl LayoutEngine {
         vars: EmptyRunsLineVars,
         current_line_reserved_tac_picture_height: &mut Option<f64>,
     ) {
-        let mut empty_line_mark_x = vars.x_start;
+        // 번호/글머리표 문단의 빈 줄 anchor 는 마커 오른쪽에서 시작한다. 여기서
+        // 보정하지 않으면 anchor TextRun 의 bbox 가 문단 좌단(번호 위)에서 시작해
+        // 캐럿·히트테스트가 번호를 덮는 위치로 계산된다.
+        let anchor_x = vars.x_start + vars.numbering_marker_width;
+        let mut empty_line_mark_x = anchor_x;
         let mut empty_line_logical_end = vars.line_char_end;
         // runs가 없는 빈 줄에서 treat_as_char 이미지 렌더링
         // 테이블 셀 내부에서는 table_layout.rs가 layout_picture로 이미 처리하므로 스킵.
@@ -6201,7 +6211,7 @@ impl LayoutEngine {
             BoundingBox::new(
                 empty_line_mark_x,
                 vars.y,
-                if empty_line_mark_x > vars.x_start {
+                if empty_line_mark_x > anchor_x {
                     0.0
                 } else {
                     vars.available_width
