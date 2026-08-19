@@ -20,7 +20,6 @@ import {
   resolveModelForAgent,
 } from '../../agent/models.ts';
 import { loadAgentPrefs, saveAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
-import { createEffortSlider } from './effort-slider.ts';
 import { createIcon } from './icons.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
 import { formatRelativeTime, formatResetAt, formatShortDate, formatTokens } from './usage-format.ts';
@@ -736,20 +735,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     (agent) => ({ id: agent, label: AGENT_LABEL[agent] }),
   ));
   const modelField = createSelect('기본 모델', []);
-  const effortField = el('div', 'ag-settings-field');
-  effortField.append(el('span', 'ag-settings-field-label', '추론 강도'));
-  const effortSlider = createEffortSlider({
-    ariaLabel: '기본 추론 강도',
-    onChange: (effortId) => commitPrefs({ defaultEffort: effortId }),
-  });
-  effortField.append(effortSlider.root);
+  const effortField = createSelect('추론 강도', []);
   const permissionField = createSelect('권한 프로필', PERMISSION_OPTIONS);
   const defaultsNote = el('p', 'ag-settings-note', '새 대화부터 적용돼요.');
   const currentLine = el('p', 'ag-settings-current');
   defaults.body.append(
     agentField.field,
     modelField.field,
-    effortField,
+    effortField.field,
     permissionField.field,
     defaultsNote,
     currentLine,
@@ -762,6 +755,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   });
   modelField.select.addEventListener('change', () => {
     commitPrefs({ defaultModel: modelField.select.value });
+  });
+  effortField.select.addEventListener('change', () => {
+    commitPrefs({ defaultEffort: effortField.select.value });
   });
   permissionField.select.addEventListener('change', () => {
     const next: PermissionProfile =
@@ -1167,11 +1163,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     modelField.select.value = resolveModelForAgent(prefs.defaultAgent, prefs.defaultModel);
     const effortOptions = effortsForAgent(prefs.defaultAgent, prefs.defaultModel);
     // 추론 강도가 없는 프로바이더(cursor 등)에서는 줄 자체를 접는다.
-    effortField.hidden = effortOptions.length === 0;
-    // 카탈로그는 강함 → 약함 — 슬라이더는 왼쪽이 약함이라 뒤집어 깐다.
-    effortSlider.setOptions(
-      [...effortOptions].reverse(),
-      resolveEffortForAgent(prefs.defaultAgent, prefs.defaultEffort, prefs.defaultModel),
+    effortField.field.hidden = effortOptions.length === 0;
+    fillSelect(effortField.select, [...effortOptions].reverse());
+    effortField.select.value = resolveEffortForAgent(
+      prefs.defaultAgent,
+      prefs.defaultEffort,
+      prefs.defaultModel,
     );
     permissionField.select.value = prefs.defaultPermissionProfile;
   }
