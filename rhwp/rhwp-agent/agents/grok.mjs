@@ -13,7 +13,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import {
-  createLineReader,
+  createTurnProcessLifecycle,
   isPlanningRestricted,
   mcpCapabilityEnv,
   mcpRuntimeFor,
@@ -26,16 +26,12 @@ import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
   terminateProcessTree,
-  waitForProcessTreeExit,
 } from '../process-tree.mjs';
 
-const STDERR_TAIL_LIMIT = 16_000;
 /** grok compat 스캐너가 읽는 외부 벤더 아티팩트 종류 — 전부 끈다. */
 const COMPAT_KEYS = ['skills', 'rules', 'agents', 'mcps', 'hooks', 'sessions'];
 /** MCP 결과 인라인 상한. 기본값 20 KB 는 rhwp 도구 결과(export_svg 800 KB)에 턱없이 작다. */
 const MCP_MAX_OUTPUT_BYTES = 1_000_000;
-/** 'exit' 뒤 'close' 가 오지 않을 때(자손이 파이프를 붙든 경우) 턴 판정을 미룰 상한. */
-const EXIT_CLOSE_GRACE_MS = 2_000;
 
 /**
  * 세션 전용 GROK_HOME 을 만들고 공유 로그인 파일(auth.json)을 심볼릭 링크로 심는다.
@@ -222,32 +218,24 @@ export function createGrokSession(opts, {
   terminateProcess = terminateProcessTree,
 } = {}) {
   const onEvent = opts.onEvent;
+  const lifecycle = createTurnProcessLifecycle({
+    agent: 'grok',
+    onEvent,
+    formatExitError: (stderrText, code, signal) => formatGrokExitError(stderrText, code, signal, opts.token),
+    terminateProcess,
+  });
 
+  /** @type {string} */
   let sessionId = crypto.randomUUID();
-  /** @type {import('node:child_process').ChildProcess | null} */
-  let child = null;
   let hasCompletedTurn = false;
   // -s 는 한 번 스폰에 쓰면 소진된다: 그 스폰이 turn 을 완료하지 못한 채 죽으면
   // 같은 UUID 재사용이 "already exists" 로 영구히 실패한다. 재스폰 시 완료된
   // turn 이 없으면 새 UUID 를 발급한다.
   let sessionIdConsumed = false;
-  let turnOpen = false;
-  // 이번 턴의 result 줄을 파싱했는가 — 프로세스 사망 폴백의 판단 근거다.
-  let turnCompleted = false;
   let sawRootTextDelta = false;
   const streamedSubagents = new Set();
-  let disposed = false;
-  let stderrTail = '';
-  let childExitPromise = Promise.resolve();
-  let resolveChildExit = null;
   // usage 집계에 붙일 모델 — CLI 가 보고한 실제 모델을 우선한다.
   let currentModel = opts.model ?? null;
-
-  function endTurn(evt) {
-    if (!turnOpen) return;
-    turnOpen = false;
-    onEvent(evt);
-  }
 
   /**
    * result 메시지의 토큰 사용량을 usage 이벤트로 흘려보낸다. modelUsage 가 있으면
@@ -268,7 +256,7 @@ export function createGrokSession(opts, {
   }
 
   function handleEvent(e) {
-    if (disposed) return; // 폐기 후 죽어가는 CLI 가 흘리는 stdout 은 무시한다.
+    if (lifecycle.isDisposed()) return; // 폐기 후 죽어가는 CLI 가 흘리는 stdout 은 무시한다.
     if (e?.type === 'system' && e.subtype === 'init') {
       // CLI 가 보고하는 실제 세션 ID 를 추적한다 (-r 이 새 ID 로 fork 할 수 있다).
       if (e.session_id) sessionId = String(e.session_id);
@@ -341,13 +329,13 @@ export function createGrokSession(opts, {
     }
     if (e?.type === 'result') {
       hasCompletedTurn = true;
-      turnCompleted = true;
+      lifecycle.markTurnCompleted();
       emitUsage(e);
       // grok 은 permission_denials 를 내지 않는다 — 클로드식 거부 보고는 없다.
       // grok 의 stop_reason(max_tokens/refusal/max_turn_requests …)은 그대로
       // 흘리지 않는다: 스튜디오는 end_turn|completed|success 밖의 값을 실패로 보고
       // 그 턴의 스테이징 편집을 전부 되돌린다. 성공/실패 판정은 is_error 로만 한다.
-      endTurn({
+      lifecycle.endTurn({
         type: 'turn-end',
         agent: 'grok',
         stopReason: e.is_error ? (e.subtype ?? 'failed') : 'completed',
@@ -357,24 +345,16 @@ export function createGrokSession(opts, {
     }
   }
 
-  function killChild() {
-    const proc = child;
-    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
-    terminateProcess(proc);
-  }
-
   return {
     agent: 'grok',
     getSessionId() {
       return sessionId;
     },
     sendUserMessage(text) {
-      if (disposed) return;
-      turnOpen = true;
-      turnCompleted = false;
+      if (lifecycle.isDisposed()) return;
       sawRootTextDelta = false;
       streamedSubagents.clear();
-      onEvent({ type: 'turn-start', agent: 'grok' });
+      lifecycle.beginTurn();
 
       const resume = hasCompletedTurn;
       if (!resume && sessionIdConsumed) {
@@ -386,7 +366,6 @@ export function createGrokSession(opts, {
 
       const grokHome = opts.grokHome ?? process.env.GROK_HOME ?? path.join(os.homedir(), '.grok');
       const promptPath = path.join(grokHome, 'prompt.txt');
-      stderrTail = '';
       let proc;
       try {
         prepareGrokHome(grokHome, opts.grokAuthPath);
@@ -401,97 +380,26 @@ export function createGrokSession(opts, {
           stdio: ['ignore', 'pipe', 'pipe'],
         });
       } catch (e) {
-        onEvent({ type: 'error', agent: 'grok', message: `failed to start grok: ${e?.message ?? e}` });
-        endTurn({ type: 'turn-end', agent: 'grok', stopReason: 'exited' });
+        lifecycle.failStart(e);
         return;
       }
-      child = proc;
-      childExitPromise = new Promise((resolve) => { resolveChildExit = resolve; });
-      proc.stdout.on('data', createLineReader(handleEvent));
-      proc.stderr.on('data', (chunk) => {
-        const chunkText = chunk.toString();
-        stderrTail = (stderrTail + chunkText).slice(-STDERR_TAIL_LIMIT);
-        for (const line of chunkText.split('\n')) {
-          if (line.trim()) process.stderr.write(`[grok] ${line}\n`);
-        }
-      });
-      proc.on('error', (err) => {
-        if (proc !== child) return;
-        process.stderr.write(`[grok] spawn error: ${err?.message ?? err}\n`);
-        if (turnOpen) {
-          onEvent({ type: 'error', agent: 'grok', message: `grok process error: ${err?.message ?? err}` });
-          endTurn({ type: 'turn-end', agent: 'grok', stopReason: 'exited' });
-        }
-      });
-      // 'exit' 은 stdout 꼬리가 아직 파싱되기 전에 온다 — 큰 출력으로 끝난 성공 턴이
-      // 여기서 실패로 처리되면 스테이징 편집이 통째로 되돌아간다. 턴 판정은 stdio 가
-      // 모두 닫힌 'close' 에서만 하고, 'exit' 은 종료 코드 기록만 한다.
-      let exitInfo = null;
-      let closeGraceTimer = null;
-      const settleExit = (code, signal) => {
-        if (proc !== child) return;
-        if (closeGraceTimer) {
-          clearTimeout(closeGraceTimer);
-          closeGraceTimer = null;
-        }
-        if (turnOpen && !disposed) {
-          if (!turnCompleted && code !== 0) {
-            // result 없이 비정상 종료 — 스트림이 잘렸다. stderr 를 사유로 붙인다.
-            onEvent({
-              type: 'error',
-              agent: 'grok',
-              message: formatGrokExitError(stderrTail, code, signal, opts.token),
-            });
-          }
-          endTurn({ type: 'turn-end', agent: 'grok', stopReason: turnCompleted ? 'completed' : 'exited' });
-        }
-        child = null;
-        resolveChildExit?.();
-        resolveChildExit = null;
-      };
-      proc.on('exit', (code, signal) => {
-        if (proc !== child) return;
-        exitInfo = { code, signal };
-        // 프로세스는 이미 죽었으므로 모드 전환 대기는 여기서 풀어 준다.
-        resolveChildExit?.();
-        resolveChildExit = null;
-        // 자손이 파이프를 붙들어 'close' 가 오지 않는 경우를 위한 상한이다.
-        closeGraceTimer = setTimeout(() => {
-          closeGraceTimer = null;
-          settleExit(code ?? null, signal ?? null);
-        }, EXIT_CLOSE_GRACE_MS);
-        closeGraceTimer.unref?.();
-      });
-      proc.on('close', (code, signal) => {
-        settleExit(code ?? exitInfo?.code ?? null, signal ?? exitInfo?.signal ?? null);
-      });
+      lifecycle.attachChild(proc, handleEvent);
     },
     setPermissionProfile(profile) {
-      if (turnOpen) throw new Error('Permission profile can only change between turns');
+      if (lifecycle.isTurnOpen()) throw new Error('Permission profile can only change between turns');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
       opts.permissionProfile = profile;
     },
     async setExecutionMode(mode) {
-      if (turnOpen) throw new Error('Execution mode can only change between turns');
+      if (lifecycle.isTurnOpen()) throw new Error('Execution mode can only change between turns');
       validateExecutionMode(mode);
-      if (child && child.exitCode === null && child.signalCode === null) killChild();
-      await childExitPromise;
+      lifecycle.killChild();
+      await lifecycle.waitForChildExit();
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
     },
-    interrupt() {
-      killChild();
-      endTurn({ type: 'turn-end', agent: 'grok', stopReason: 'interrupted' });
-    },
-    dispose() {
-      disposed = true;
-      turnOpen = false;
-      // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
-      try { child?.stdout?.removeAllListeners('data'); } catch {}
-      const exited = waitForProcessTreeExit(child);
-      killChild();
-      return exited;
-    },
+    interrupt: lifecycle.interrupt,
+    dispose: lifecycle.dispose,
   };
 }

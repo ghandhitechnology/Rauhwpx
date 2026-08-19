@@ -56,15 +56,18 @@ const CLAUDE_EFFORTS_COMPACT: readonly AgentEffortOption[] = [
   { id: 'low', label: 'Low' },
 ];
 
-/** Codex `model_reasoning_effort` (강함 → 약함). */
+/** Codex `model_reasoning_effort` (강함 → 약함). gpt-5.6 는 max 까지 받는다. */
 const CODEX_EFFORTS: readonly AgentEffortOption[] = [
+  { id: 'max', label: 'Max' },
+  { id: 'xhigh', label: 'Extra high' },
   { id: 'high', label: 'High' },
   { id: 'medium', label: 'Medium' },
   { id: 'low', label: 'Low' },
 ];
 
-/** Grok CLI `--reasoning-effort` (강함 → 약함). */
+/** Grok CLI `--reasoning-effort` (강함 → 약함). CLI 가 받는 값: xhigh|high|medium|low. */
 const GROK_EFFORTS: readonly AgentEffortOption[] = [
+  { id: 'xhigh', label: 'Extra high' },
   { id: 'high', label: 'High' },
   { id: 'medium', label: 'Medium' },
   { id: 'low', label: 'Low' },

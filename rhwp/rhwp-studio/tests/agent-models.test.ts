@@ -49,14 +49,15 @@ test('effort catalogs follow provider capabilities', () => {
   );
   assert.deepEqual(
     effortsForAgent('codex').map((e) => e.id),
-    ['high', 'medium', 'low'],
+    ['max', 'xhigh', 'high', 'medium', 'low'],
   );
 });
 
 test('resolveEffortForAgent clamps unsupported levels to provider default', () => {
   assert.equal(resolveEffortForAgent('claude', 'max', 'sonnet'), 'max');
   assert.equal(resolveEffortForAgent('claude', 'max', 'haiku'), defaultEffortForAgent('claude', 'haiku'));
-  assert.equal(resolveEffortForAgent('codex', 'xhigh'), defaultEffortForAgent('codex'));
+  assert.equal(resolveEffortForAgent('codex', 'xhigh'), 'xhigh');
+  assert.equal(resolveEffortForAgent('codex', 'ultra'), defaultEffortForAgent('codex'));
   assert.equal(labelForEffort('claude', 'high', 'sonnet'), 'High');
 });
 
@@ -144,11 +145,11 @@ test('grok 은 정적 카탈로그와 세 단계 추론 강도를 갖는다', ()
   assert.equal(isModelForAgent('grok', 'sonnet'), false);
   // 다른 프로바이더의 모델은 grok 기본값으로 접힌다.
   assert.equal(resolveModelForAgent('grok', 'gpt-5.6-sol'), 'grok-4.6');
-  assert.deepEqual(effortsForAgent('grok').map((e) => e.id), ['high', 'medium', 'low']);
+  assert.deepEqual(effortsForAgent('grok').map((e) => e.id), ['xhigh', 'high', 'medium', 'low']);
   assert.equal(defaultEffortForAgent('grok'), 'high');
   assert.equal(labelForEffort('grok', 'medium'), 'Medium');
-  // Claude 전용 강도는 grok 기본값으로 내려간다.
-  assert.equal(resolveEffortForAgent('grok', 'xhigh'), 'high');
+  // grok CLI 가 모르는 강도는 grok 기본값으로 내려간다.
+  assert.equal(resolveEffortForAgent('grok', 'max'), 'high');
   assert.equal(resolveEffortForAgent('grok', 'low'), 'low');
   assert.equal(modelSupportsImages('grok', 'grok-4.6'), true);
 });

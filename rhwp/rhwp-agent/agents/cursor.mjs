@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import {
-  createLineReader,
+  createTurnProcessLifecycle,
   isPlanningRestricted,
   mcpCapabilityEnv,
   mcpRuntimeFor,
@@ -27,10 +27,8 @@ import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
   terminateProcessTree,
-  waitForProcessTreeExit,
 } from '../process-tree.mjs';
 
-const STDERR_TAIL_LIMIT = 16_000;
 /** 세션 디렉터리에 새로 저작하는 파일 — 영속 홈에서 링크로 끌어오지 않는다. */
 const AUTHORED_FILES = new Set(['mcp.json', 'cli-config.json']);
 /**
@@ -41,8 +39,6 @@ const AUTHORED_FILES = new Set(['mcp.json', 'cli-config.json']);
 const PROMPT_BYTE_LIMIT = 600_000;
 /** 재생으로 판정할 최소 길이 — 이보다 짧은 조각은 정상적으로 반복될 수 있다. */
 const REPLAY_MIN_LENGTH = 24;
-/** 'exit' 뒤 'close' 가 오지 않을 때(자손이 파이프를 붙든 경우) 턴 판정을 미룰 상한. */
-const EXIT_CLOSE_GRACE_MS = 2_000;
 
 /**
  * 세션 전용 ~/.cursor 를 만든다. 영속 허브 소유 cursor 홈(sourceCursorDir)의
@@ -52,7 +48,7 @@ const EXIT_CLOSE_GRACE_MS = 2_000;
  *
  * @param {string} sessionCursorDir `<isolatedHome>/.cursor`
  * @param {string} [sourceCursorDir] 영속 cursor 홈의 `.cursor` 디렉터리
- * @param {{ mcpConfig?: object, cliConfig?: object }} [overlay]
+ * @param {{ mcpConfig?: object|null, cliConfig?: object|null }} [overlay]
  */
 export function prepareCursorHome(sessionCursorDir, sourceCursorDir, {
   mcpConfig = null,
@@ -63,17 +59,19 @@ export function prepareCursorHome(sessionCursorDir, sourceCursorDir, {
   symlink = symlinkSync,
 } = {}) {
   mkdirSync(sessionCursorDir, { recursive: true, mode: 0o700 });
+  // 원본이 없으면 목록이 비어 아래 루프를 돌지 않는다.
+  const sourceDir = sourceCursorDir ? String(sourceCursorDir) : '';
   let entries = [];
-  if (sourceCursorDir) {
+  if (sourceDir) {
     try {
-      entries = readdirSync(sourceCursorDir);
+      entries = readdirSync(sourceDir);
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
     }
   }
   for (const name of entries) {
     if (AUTHORED_FILES.has(name)) continue;
-    const source = path.join(sourceCursorDir, name);
+    const source = path.join(sourceDir, name);
     const target = path.join(sessionCursorDir, name);
     try {
       const targetStat = lstatSync(target);
@@ -248,32 +246,25 @@ export function createCursorSession(opts, {
   terminateProcess = terminateProcessTree,
 } = {}) {
   const onEvent = opts.onEvent;
+  const lifecycle = createTurnProcessLifecycle({
+    agent: 'cursor',
+    onEvent,
+    // 사용자에게 보이는 실행 파일 이름은 CLI 이름 그대로다.
+    processLabel: 'cursor-agent',
+    formatExitError: (stderrText, code, signal) => formatCursorExitError(stderrText, code, signal, opts.token),
+    terminateProcess,
+  });
 
   /** @type {string | null} */
   let chatId = null;
-  /** @type {import('node:child_process').ChildProcess | null} */
-  let child = null;
-  let turnOpen = false;
-  // 이번 턴의 result 줄을 파싱했는가 — 프로세스 사망 폴백의 판단 근거다.
-  let turnCompleted = false;
-  let disposed = false;
-  let stderrTail = '';
-  let childExitPromise = Promise.resolve();
-  let resolveChildExit = null;
   let currentModel = opts.model ?? null;
-
-  function endTurn(evt) {
-    if (!turnOpen) return;
-    turnOpen = false;
-    onEvent(evt);
-  }
 
   function makeHandler() {
     let emittedText = false;
     // 이번 턴에 이미 내보낸 본문 — 재시도 플러시의 재생을 걸러내는 데 쓴다.
     let emittedTurnText = '';
     return (e) => {
-      if (disposed) return; // 폐기 후 죽어가는 CLI 가 흘리는 stdout 은 무시한다.
+      if (lifecycle.isDisposed()) return; // 폐기 후 죽어가는 CLI 가 흘리는 stdout 은 무시한다.
       const type = e?.type;
       if (type === 'system' && e.subtype === 'init') {
         if (e.session_id) chatId = String(e.session_id);
@@ -344,7 +335,7 @@ export function createCursorSession(opts, {
         return;
       }
       if (type === 'result') {
-        turnCompleted = true;
+        lifecycle.markTurnCompleted();
         if (e.session_id) chatId = String(e.session_id);
         // 스키마 드리프트 안전장치: 델타가 하나도 안 왔으면 최종 결과 텍스트를 흘린다.
         if (!emittedText && typeof e.result === 'string' && e.result && !e.is_error) {
@@ -354,7 +345,7 @@ export function createCursorSession(opts, {
         // camelCase 로 온다 — normalizeUsageTokens 가 네 필드를 모두 흡수한다.
         const usage = normalizeUsageTokens(e.usage);
         if (usage) onEvent({ type: 'usage', agent: 'cursor', model: currentModel, usage });
-        endTurn({
+        lifecycle.endTurn({
           type: 'turn-end',
           agent: 'cursor',
           stopReason: e.subtype ?? 'completed',
@@ -365,28 +356,19 @@ export function createCursorSession(opts, {
     };
   }
 
-  function killChild() {
-    const proc = child;
-    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
-    terminateProcess(proc);
-  }
-
   return {
     agent: 'cursor',
     getSessionId() {
       return chatId;
     },
     sendUserMessage(text) {
-      if (disposed) return;
-      turnOpen = true;
-      turnCompleted = false;
-      onEvent({ type: 'turn-start', agent: 'cursor' });
+      if (lifecycle.isDisposed()) return;
+      lifecycle.beginTurn();
 
       const mode = normalizeExecutionMode(opts);
       const prompt = chatId && mode.workflow === 'direct'
         ? text
         : systemBriefFor(opts) + '\n\n' + text;
-      stderrTail = '';
 
       if (Buffer.byteLength(prompt, 'utf8') > PROMPT_BYTE_LIMIT) {
         // 이 크기를 넘기면 CLI 가 아무 출력 없이 죽거나 spawn 이 E2BIG 으로 실패한다.
@@ -395,7 +377,7 @@ export function createCursorSession(opts, {
           agent: 'cursor',
           message: '메시지가 너무 커서 Cursor CLI 인자로 전달할 수 없습니다. 내용을 나눠 보내 주세요.',
         });
-        endTurn({ type: 'turn-end', agent: 'cursor', stopReason: 'failed' });
+        lifecycle.endTurn({ type: 'turn-end', agent: 'cursor', stopReason: 'failed' });
         return;
       }
 
@@ -426,97 +408,27 @@ export function createCursorSession(opts, {
           stdio: ['ignore', 'pipe', 'pipe'],
         });
       } catch (e) {
-        onEvent({ type: 'error', agent: 'cursor', message: `failed to start cursor-agent: ${e?.message ?? e}` });
-        endTurn({ type: 'turn-end', agent: 'cursor', stopReason: 'exited' });
+        lifecycle.failStart(e);
         return;
       }
-      child = proc;
-      childExitPromise = new Promise((resolve) => { resolveChildExit = resolve; });
-      proc.stdout.on('data', createLineReader(makeHandler()));
-      proc.stderr.on('data', (chunk) => {
-        const chunkText = chunk.toString();
-        stderrTail = (stderrTail + chunkText).slice(-STDERR_TAIL_LIMIT);
-        for (const line of chunkText.split('\n')) {
-          if (line.trim()) process.stderr.write(`[cursor] ${line}\n`);
-        }
-      });
-      proc.on('error', (err) => {
-        if (proc !== child) return;
-        process.stderr.write(`[cursor] spawn error: ${err?.message ?? err}\n`);
-        if (turnOpen) {
-          onEvent({ type: 'error', agent: 'cursor', message: `cursor-agent process error: ${err?.message ?? err}` });
-          endTurn({ type: 'turn-end', agent: 'cursor', stopReason: 'exited' });
-        }
-      });
-      // 'exit' 은 stdout 꼬리가 아직 파싱되기 전에 온다 — 큰 도구 결과로 끝난 성공
-      // 턴이 여기서 실패로 처리되면 스테이징 편집이 통째로 되돌아간다. 턴 판정은
-      // stdio 가 모두 닫힌 'close' 에서만 하고, 'exit' 은 종료 코드 기록만 한다.
-      let exitInfo = null;
-      let closeGraceTimer = null;
-      const settleExit = (code, signal) => {
-        if (proc !== child) return;
-        if (closeGraceTimer) {
-          clearTimeout(closeGraceTimer);
-          closeGraceTimer = null;
-        }
-        if (turnOpen && !disposed) {
-          if (!turnCompleted && code !== 0) {
-            // result 없이 비정상 종료 — 인증 오류처럼 stderr 로만 끝난 실행이다.
-            onEvent({
-              type: 'error',
-              agent: 'cursor',
-              message: formatCursorExitError(stderrTail, code, signal, opts.token),
-            });
-          }
-          endTurn({ type: 'turn-end', agent: 'cursor', stopReason: turnCompleted ? 'completed' : 'exited' });
-        }
-        child = null;
-        resolveChildExit?.();
-        resolveChildExit = null;
-      };
-      proc.on('exit', (code, signal) => {
-        if (proc !== child) return;
-        exitInfo = { code, signal };
-        // 프로세스는 이미 죽었으므로 모드 전환 대기는 여기서 풀어 준다.
-        resolveChildExit?.();
-        resolveChildExit = null;
-        // 자손이 파이프를 붙들어 'close' 가 오지 않는 경우를 위한 상한이다.
-        closeGraceTimer = setTimeout(() => {
-          closeGraceTimer = null;
-          settleExit(code ?? null, signal ?? null);
-        }, EXIT_CLOSE_GRACE_MS);
-        closeGraceTimer.unref?.();
-      });
-      proc.on('close', (code, signal) => {
-        settleExit(code ?? exitInfo?.code ?? null, signal ?? exitInfo?.signal ?? null);
-      });
+      // 턴 상태는 스폰마다 새로 만든 핸들러가 들고 있다 — 재생 필터가 턴 경계에서 초기화된다.
+      lifecycle.attachChild(proc, makeHandler());
     },
     setPermissionProfile(profile) {
-      if (turnOpen) throw new Error('Permission profile can only change between turns');
+      if (lifecycle.isTurnOpen()) throw new Error('Permission profile can only change between turns');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
       opts.permissionProfile = profile;
     },
     async setExecutionMode(mode) {
-      if (turnOpen) throw new Error('Execution mode can only change between turns');
+      if (lifecycle.isTurnOpen()) throw new Error('Execution mode can only change between turns');
       validateExecutionMode(mode);
-      if (child && child.exitCode === null && child.signalCode === null) killChild();
-      await childExitPromise;
+      lifecycle.killChild();
+      await lifecycle.waitForChildExit();
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
     },
-    interrupt() {
-      killChild();
-      endTurn({ type: 'turn-end', agent: 'cursor', stopReason: 'interrupted' });
-    },
-    dispose() {
-      disposed = true;
-      turnOpen = false;
-      // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
-      try { child?.stdout?.removeAllListeners('data'); } catch {}
-      const exited = waitForProcessTreeExit(child);
-      killChild();
-      return exited;
-    },
+    interrupt: lifecycle.interrupt,
+    dispose: lifecycle.dispose,
   };
 }

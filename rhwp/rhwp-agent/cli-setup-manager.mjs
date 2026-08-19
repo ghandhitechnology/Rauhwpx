@@ -156,6 +156,20 @@ export function defaultCliSetupRoot(env = process.env, platform = process.platfo
   return platformPath.join(env.XDG_DATA_HOME || platformPath.join(home, '.local', 'share'), 'rhwp', 'cli');
 }
 
+/**
+ * 설정 카드로 그대로 중계되는 진행 이벤트. install 은 phase/percent 계열을,
+ * authenticate 는 로그인 URL 과 기기 코드를 채운다.
+ *
+ * @typedef {Object} SetupProgress
+ * @property {'installing'|'authorizing'|'done'} state
+ * @property {string} [phase]
+ * @property {number} [percent]
+ * @property {string} [detail]
+ * @property {true} [activity] 진행률을 모르는 구간 — 카드가 무한 표시로 바꾼다.
+ * @property {string} [authUrl] 사용자가 열어야 하는 로그인 URL.
+ * @property {string} [userCode] 기기 인증 코드 — URL 과 함께 카드에 붙는다.
+ */
+
 /** App-managed CLI installers (Codex/Claude/Grok/Cursor) plus their local authentication state. */
 export function createCliSetupManager({
   rootDir = defaultCliSetupRoot(),
@@ -619,6 +633,10 @@ export function createCliSetupManager({
     return status(agent);
   }
 
+  /**
+   * @param {string} agent
+   * @param {(progress: SetupProgress) => void} [onProgress]
+   */
   async function install(agent, onProgress) {
     const item = assertAgent(agent);
     if (installs.has(agent)) return installs.get(agent);
@@ -762,6 +780,12 @@ export function createCliSetupManager({
     }
   }
 
+  /**
+   * @param {string} agent
+   * @param {'api-key'|'oauth'} method
+   * @param {string} [key] api-key 방식에서만 쓴다.
+   * @param {(progress: SetupProgress) => void} [onProgress]
+   */
   async function authenticate(agent, method, key, onProgress) {
     const item = assertAgent(agent);
     if (authRuns.has(agent)) throw setupError('AGENT_AUTH_BUSY', '이미 로그인 작업이 진행 중이에요.');

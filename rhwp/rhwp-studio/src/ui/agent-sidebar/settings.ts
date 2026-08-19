@@ -20,7 +20,9 @@ import {
   resolveModelForAgent,
 } from '../../agent/models.ts';
 import { loadAgentPrefs, saveAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
+import { createEffortSlider } from './effort-slider.ts';
 import { createIcon } from './icons.ts';
+import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
 import { formatRelativeTime, formatResetAt, formatShortDate, formatTokens } from './usage-format.ts';
 import type { AgentBridge } from '../../agent/bridge.ts';
 import type {
@@ -48,28 +50,10 @@ type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
  */
 type PlanAgent = 'claude' | 'codex';
 
-const AGENTS: readonly AgentName[] = ['claude', 'codex', 'pi', 'grok', 'cursor'];
-
 const PLAN_AGENTS: readonly PlanAgent[] = ['claude', 'codex'];
 
 /** 요금제도 잔액도 없는 프로바이더 — 기록된 토큰만 보여준다. */
 const API_USAGE_AGENTS: readonly AgentName[] = ['grok', 'cursor'];
-
-const AGENT_LABEL: Record<AgentName, string> = {
-  claude: 'Claude',
-  codex: 'Codex',
-  pi: 'Pi',
-  grok: 'Grok',
-  cursor: 'Cursor',
-};
-
-/** 단색 로고는 마스크로 그린다 — currentColor 를 타고 테마에 맞는다. */
-const MASK_ICON_AGENTS: readonly AgentName[] = ['codex', 'pi', 'grok', 'cursor'];
-
-const PROVIDER_ICON_SRC: Partial<Record<AgentName, string>> = {
-  claude: '/icons/provider-claude.png',
-  codex: '/icons/provider-codex.png',
-};
 
 /** 설치 안내 — cursor 는 npm 이 아니라 공식 설치 스크립트로 받는다. */
 const SETUP_INSTALL_NOTE: Record<AgentName, string> = {
@@ -175,23 +159,6 @@ function el<K extends keyof HTMLElementTagNameMap>(
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
-}
-
-function providerIcon(agent: AgentName): HTMLElement {
-  if (MASK_ICON_AGENTS.includes(agent)) {
-    const mark = el('span', 'ag-provider-icon ag-provider-icon-mask');
-    mark.dataset.agent = agent;
-    mark.setAttribute('aria-hidden', 'true');
-    return mark;
-  }
-  const img = document.createElement('img');
-  img.className = 'ag-provider-icon';
-  img.dataset.agent = agent;
-  img.src = PROVIDER_ICON_SRC[agent] ?? '';
-  img.alt = '';
-  img.draggable = false;
-  img.setAttribute('aria-hidden', 'true');
-  return img;
 }
 
 /** OpenRouter 가격은 토큰당이라 100만 토큰 기준으로 바꿔 읽는다. */
@@ -386,14 +353,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     { dot: HTMLElement; detail: HTMLElement; setup: HTMLButtonElement }
   >();
   const providerList = el('div', 'ag-settings-provider-list');
-  for (const agent of AGENTS) {
+  for (const agent of PROVIDER_ORDER) {
     const row = el('div', 'ag-settings-row ag-settings-provider-row');
     row.dataset.agent = agent;
     const dot = el('span', 'ag-settings-dot');
     dot.setAttribute('aria-hidden', 'true');
     const text = el('div', 'ag-settings-row-text');
     const name = el('span', 'ag-settings-row-name');
-    name.append(providerIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
+    name.append(createProviderIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
     const detail = el('span', 'ag-settings-row-detail', '확인 중…');
     text.append(name, detail);
     const setup = el('button', 'ag-settings-btn ag-provider-setup-btn', '설정');
@@ -423,7 +390,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const piCard = el('div', 'ag-pi-card');
   const piHead = el('div', 'ag-pi-head');
   const piHeadName = el('span', 'ag-settings-row-name');
-  piHeadName.append(providerIcon('pi'), document.createTextNode('Pi'));
+  piHeadName.append(createProviderIcon('pi'), document.createTextNode('Pi'));
   const piHeadDetail = el('span', 'ag-settings-row-detail', '확인 중…');
   piHead.append(piHeadName, piHeadDetail);
   const piMessageLine = el('p', 'ag-settings-cliproxy-error');
@@ -434,7 +401,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const piInstallNote = el('p', 'ag-settings-note', 'OpenRouter 모델로 문서를 고치는 Pi 에이전트예요.');
   const piInstallBtn = el('button', 'ag-settings-primary ag-pi-logo-btn');
   piInstallBtn.type = 'button';
-  piInstallBtn.append(providerIcon('pi'), el('span', '', 'Pi 연결'));
+  piInstallBtn.append(createProviderIcon('pi'), el('span', '', 'Pi 연결'));
   const piProgressLine = el('p', 'ag-settings-note');
   piProgressLine.hidden = true;
   // 내려받기 진행 막대 — 크기를 알면 채움 폭, 모르면 신호가 올 때만 흐르는 줄무늬.
@@ -769,14 +736,20 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     (agent) => ({ id: agent, label: AGENT_LABEL[agent] }),
   ));
   const modelField = createSelect('기본 모델', []);
-  const effortField = createSelect('추론 강도', []);
+  const effortField = el('div', 'ag-settings-field');
+  effortField.append(el('span', 'ag-settings-field-label', '추론 강도'));
+  const effortSlider = createEffortSlider({
+    ariaLabel: '기본 추론 강도',
+    onChange: (effortId) => commitPrefs({ defaultEffort: effortId }),
+  });
+  effortField.append(effortSlider.root);
   const permissionField = createSelect('권한 프로필', PERMISSION_OPTIONS);
   const defaultsNote = el('p', 'ag-settings-note', '새 대화부터 적용돼요.');
   const currentLine = el('p', 'ag-settings-current');
   defaults.body.append(
     agentField.field,
     modelField.field,
-    effortField.field,
+    effortField,
     permissionField.field,
     defaultsNote,
     currentLine,
@@ -784,14 +757,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   agentField.select.addEventListener('change', () => {
     const value = agentField.select.value;
-    const agent = AGENTS.find((name) => name === value) ?? 'claude';
+    const agent = PROVIDER_ORDER.find((name) => name === value) ?? 'claude';
     commitPrefs({ defaultAgent: agent });
   });
   modelField.select.addEventListener('change', () => {
     commitPrefs({ defaultModel: modelField.select.value });
-  });
-  effortField.select.addEventListener('change', () => {
-    commitPrefs({ defaultEffort: effortField.select.value });
   });
   permissionField.select.addEventListener('change', () => {
     const next: PermissionProfile =
@@ -970,7 +940,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     block.dataset.agent = agent;
     const head = el('div', 'ag-settings-usage-head');
     const name = el('span', 'ag-settings-row-name');
-    name.append(providerIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
+    name.append(createProviderIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
     const plan = el('select', 'ag-settings-select ag-settings-plan-select') as HTMLSelectElement;
     plan.setAttribute('aria-label', `${AGENT_LABEL[agent]} 요금제`);
     fillSelect(plan, USAGE_PLANS[agent]);
@@ -1001,7 +971,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   piUsageBlock.dataset.agent = 'pi';
   const piUsageHead = el('div', 'ag-settings-usage-head');
   const piUsageName = el('span', 'ag-settings-row-name');
-  piUsageName.append(providerIcon('pi'), document.createTextNode(AGENT_LABEL.pi));
+  piUsageName.append(createProviderIcon('pi'), document.createTextNode(AGENT_LABEL.pi));
   const piUsageCredits = el('span', 'ag-settings-row-detail');
   piUsageHead.append(piUsageName, piUsageCredits);
   const piUsageDay = el('div', 'ag-settings-usage-day');
@@ -1028,7 +998,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     block.dataset.agent = agent;
     const head = el('div', 'ag-settings-usage-head');
     const name = el('span', 'ag-settings-row-name');
-    name.append(providerIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
+    name.append(createProviderIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
     head.append(name);
     const session = el('div', 'ag-settings-usage-day');
     const day = el('div', 'ag-settings-usage-day');
@@ -1181,7 +1151,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   /** 설정이 끝나기 전의 pi 는 기본 제공자 후보에서 빠진다. */
   function selectableAgents(): readonly AgentName[] {
-    return AGENTS.filter((agent) => agent !== 'pi' || piStatus?.setupComplete === true);
+    return PROVIDER_ORDER.filter((agent) => agent !== 'pi' || piStatus?.setupComplete === true);
   }
 
   function syncPrefsInputs(): void {
@@ -1195,17 +1165,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       modelsForAgent(prefs.defaultAgent).map((model) => ({ id: model.id, label: model.label })),
     );
     modelField.select.value = resolveModelForAgent(prefs.defaultAgent, prefs.defaultModel);
-    fillSelect(
-      effortField.select,
-      effortsForAgent(prefs.defaultAgent, prefs.defaultModel).map((effort) => ({
-        id: effort.id,
-        label: effort.label,
-      })),
-    );
-    effortField.select.value = resolveEffortForAgent(
-      prefs.defaultAgent,
-      prefs.defaultEffort,
-      prefs.defaultModel,
+    const effortOptions = effortsForAgent(prefs.defaultAgent, prefs.defaultModel);
+    // 추론 강도가 없는 프로바이더(cursor 등)에서는 줄 자체를 접는다.
+    effortField.hidden = effortOptions.length === 0;
+    // 카탈로그는 강함 → 약함 — 슬라이더는 왼쪽이 약함이라 뒤집어 깐다.
+    effortSlider.setOptions(
+      [...effortOptions].reverse(),
+      resolveEffortForAgent(prefs.defaultAgent, prefs.defaultEffort, prefs.defaultModel),
     );
     permissionField.select.value = prefs.defaultPermissionProfile;
   }
@@ -1227,7 +1193,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   }
 
   function renderProviders(): void {
-    for (const agent of AGENTS) {
+    for (const agent of PROVIDER_ORDER) {
       const row = providerRows.get(agent);
       if (!row) continue;
       const setup = setupStatuses?.[agent];
@@ -1398,7 +1364,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const detected = providers?.[agent]?.available === true;
     const available = detected || status?.available === true || status?.installed === true;
     const connected = detected || status?.connected === true || status?.setupComplete === true;
-    setupHeroIcon.replaceChildren(providerIcon(agent));
+    setupHeroIcon.replaceChildren(createProviderIcon(agent));
     setupHeroTitle.textContent = AGENT_LABEL[agent];
     setupInstallNote.textContent = SETUP_INSTALL_NOTE[agent];
     setupKey.input.placeholder = API_KEY_PLACEHOLDER[agent];

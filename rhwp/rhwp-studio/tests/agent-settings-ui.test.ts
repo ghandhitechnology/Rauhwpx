@@ -4,6 +4,13 @@ import { readFileSync } from 'node:fs';
 // settings.ts 는 CSS 를 가져오므로 Node 에서 불러올 수 없다 — 계기판 숫자
 // 규칙만 css 없는 모듈에서 실제로 검증하고, DOM 계약은 소스 텍스트로 본다.
 import { formatRelativeTime, formatResetAt, formatTokens } from '../src/ui/agent-sidebar/usage-format.ts';
+// providers.ts 는 CSS 를 안 가져오므로 표를 텍스트가 아니라 값으로 직접 본다.
+import {
+  AGENT_LABEL,
+  MASK_ICON_AGENTS,
+  PROVIDER_ICON_SRC,
+  PROVIDER_ORDER,
+} from '../src/ui/agent-sidebar/providers.ts';
 
 const readSource = (relativePath: string) => readFileSync(
   new URL(relativePath, import.meta.url),
@@ -177,10 +184,13 @@ test('자동 하네스 업데이트 실패는 프로바이더 카드에 조용�
   assert.match(settingsCss, /\.ag-settings-row-detail\.ag-update-required/);
 });
 
-test('기본 설정은 네 개의 native select 이고 저장 후 사이드바에 알린다', () => {
+test('기본 설정은 select 셋 + 추론 슬라이더이고 저장 후 사이드바에 알린다', () => {
   assert.match(settings, /createSelect\(\s*'기본 제공자'/);
   assert.match(settings, /createSelect\('기본 모델', \[\]\)/);
-  assert.match(settings, /createSelect\('추론 강도', \[\]\)/);
+  // 추론 강도는 select 가 아니라 물리 슬라이더 — 카탈로그를 약함 → 강함으로 뒤집어 깐다.
+  assert.match(settings, /createEffortSlider\(/);
+  assert.match(settings, /effortSlider\.setOptions\(\s*\n?\s*\[\.\.\.effortOptions\]\.reverse\(\)/);
+  assert.match(settings, /effortField\.hidden = effortOptions\.length === 0/);
   assert.match(settings, /createSelect\('권한 프로필', PERMISSION_OPTIONS\)/);
   assert.match(settings, /const select = el\('select', 'ag-settings-select'\)/);
   assert.match(settings, /prefs = saveAgentPrefs\(partial\)/);
@@ -291,17 +301,24 @@ test('설정의 채움 버튼도 손그림 윤곽을 쓴다', () => {
 
 test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조색을 모두 갖춘다', () => {
   // 연결 목록과 입력기 피커는 다섯 프로바이더를 같은 순서로 세운다.
-  assert.match(settings, /const AGENTS: readonly AgentName\[\] = \['claude', 'codex', 'pi', 'grok', 'cursor'\]/);
-  assert.match(source, /const agentOrder = \['claude', 'codex', 'pi', 'grok', 'cursor'\] as const/);
-  for (const label of [/grok: 'Grok'/, /cursor: 'Cursor'/]) {
-    assert.match(settings, label);
-    assert.match(source, label);
+  assert.deepEqual([...PROVIDER_ORDER], ['claude', 'codex', 'pi', 'grok', 'cursor']);
+  assert.equal(AGENT_LABEL.grok, 'Grok');
+  assert.equal(AGENT_LABEL.cursor, 'Cursor');
+  // 두 화면 모두 표를 다시 베끼지 않고 공용 모듈에서 가져다 쓴다.
+  for (const consumer of [settings, source]) {
+    assert.match(consumer, /import \{ AGENT_LABEL, createProviderIcon, PROVIDER_ORDER \} from '\.\/providers\.ts'/);
+    assert.doesNotMatch(consumer, /const AGENT_LABEL|const MASK_ICON_AGENTS|const PROVIDER_ICON_SRC/);
   }
+  assert.match(settings, /for \(const agent of PROVIDER_ORDER\)/);
+  assert.match(source, /for \(const agent of PROVIDER_ORDER\)/);
   // cursor 표기는 언제나 "Cursor" 다.
   assert.doesNotMatch(settings, /'Cursor Agent'|'cursor-agent'/);
-  // 단색 로고는 마스크로 그리므로 둘 다 마스크 목록과 CSS 규칙이 있어야 한다.
-  assert.match(settings, /MASK_ICON_AGENTS: readonly AgentName\[\] = \['codex', 'pi', 'grok', 'cursor'\]/);
-  assert.match(source, /MASK_ICON_AGENTS: readonly AgentName\[\] = \['codex', 'pi', 'grok', 'cursor'\]/);
+  // 단색 로고는 마스크로 그리므로 마스크 목록과 CSS 규칙이 함께 있어야 한다.
+  assert.deepEqual([...MASK_ICON_AGENTS], ['codex', 'pi', 'grok', 'cursor']);
+  // 마스크가 아닌 프로바이더만 이미지 경로를 갖는다.
+  assert.equal(PROVIDER_ICON_SRC.claude, '/icons/provider-claude.png');
+  assert.equal(PROVIDER_ICON_SRC.grok, undefined);
+  assert.equal(PROVIDER_ICON_SRC.cursor, undefined);
   assert.match(css, /\.ag-provider-icon-mask\[data-agent='grok'\][\s\S]*?provider-grok\.svg/);
   assert.match(css, /\.ag-provider-icon-mask\[data-agent='cursor'\][\s\S]*?provider-cursor\.svg/);
   // 강조색은 라이트/다크 팔레트에 모두 있고 data-agent 로 갈린다.
@@ -317,7 +334,7 @@ test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조
 
 test('기본 제공자 선택은 다섯 프로바이더를 그대로 저장한다', () => {
   // 예전 코드는 모르는 값을 claude 로 접어 Grok/Cursor 선택을 삼켰다.
-  assert.match(settings, /const agent = AGENTS\.find\(\(name\) => name === value\) \?\? 'claude'/);
+  assert.match(settings, /const agent = PROVIDER_ORDER\.find\(\(name\) => name === value\) \?\? 'claude'/);
   assert.doesNotMatch(settings, /value === 'codex' \|\| value === 'pi' \? value : 'claude'/);
   // 요금제 미터는 구독 한도가 있는 둘만 갖는다.
   assert.match(settings, /type PlanAgent = 'claude' \| 'codex'/);

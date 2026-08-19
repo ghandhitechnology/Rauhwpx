@@ -8,6 +8,7 @@ import {
   modelsForAgent,
   resolveModelForAgent,
 } from '../../agent/models.ts';
+import { AGENT_LABEL } from './providers.ts';
 import type {
   AgentName,
   PiStatus,
@@ -32,13 +33,6 @@ const ACK_TIMEOUT_MS = 10_000;
  * 여기에 세우면 영영 '사용 불가' 인 칸이 둘 생기고 쓸 수 있는 셋만 좁아진다.
  */
 const AGENTS: readonly AgentName[] = ['claude', 'codex', 'pi'];
-const AGENT_LABEL: Record<AgentName, string> = {
-  claude: 'Claude',
-  codex: 'Codex',
-  pi: 'Pi',
-  grok: 'Grok',
-  cursor: 'Cursor',
-};
 
 const PROGRESS_STAGES: ReadonlyArray<{
   state: WritingStyleProgressState;

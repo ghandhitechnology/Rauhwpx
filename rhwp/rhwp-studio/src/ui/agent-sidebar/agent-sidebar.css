@@ -1563,13 +1563,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: var(--ag-text-secondary);
 }
 
-.ag-llm-item::before,
-.ag-effort-item::before {
+.ag-llm-item::before {
   display: none;
 }
 
-.ag-llm-menu,
-.ag-effort-menu {
+.ag-llm-menu {
   min-width: 132px;
 }
 

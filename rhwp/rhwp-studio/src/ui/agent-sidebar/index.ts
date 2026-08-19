@@ -72,6 +72,8 @@ import {
 import { createChevron, createColumnIcon } from '../chevron.ts';
 import { showActionMenu } from '../action-menu.ts';
 import { createHieumGlyph, createIcon, createStopIcon, OP_ICON } from './icons.ts';
+import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
+import { createEffortSlider } from './effort-slider.ts';
 import { createSettingsPanel } from './settings.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
@@ -122,22 +124,6 @@ interface ToolRowState {
   startedAt: number;
   activity: TurnActivityState;
 }
-
-const AGENT_LABEL: Record<AgentName, string> = {
-  claude: 'Claude',
-  codex: 'Codex',
-  pi: 'Pi',
-  grok: 'Grok',
-  cursor: 'Cursor',
-};
-
-/** 단색 로고는 마스크로 그린다 — currentColor 를 타고 테마에 맞는다. */
-const MASK_ICON_AGENTS: readonly AgentName[] = ['codex', 'pi', 'grok', 'cursor'];
-
-const PROVIDER_ICON_SRC: Partial<Record<AgentName, string>> = {
-  claude: '/icons/provider-claude.png',
-  codex: '/icons/provider-codex.png',
-};
 
 const SIDEBAR_WIDTH_KEY = 'rhwp-agent-sidebar-width-v3';
 const SIDEBAR_WIDTH_DEFAULT = 480;
@@ -326,24 +312,6 @@ function persistReviewWidth(width: number): void {
   } catch {
     /* ignore quota / private mode */
   }
-}
-
-function createProviderIcon(agent: AgentName): HTMLElement {
-  if (MASK_ICON_AGENTS.includes(agent)) {
-    // 단색 로고 — currentColor 마스크로 라이트/다크에 맞춤
-    const mark = el('span', 'ag-provider-icon ag-provider-icon-mask');
-    mark.dataset.agent = agent;
-    mark.setAttribute('aria-hidden', 'true');
-    return mark;
-  }
-  const img = document.createElement('img');
-  img.className = 'ag-provider-icon';
-  img.dataset.agent = agent;
-  img.src = PROVIDER_ICON_SRC[agent] ?? '';
-  img.alt = '';
-  img.draggable = false;
-  img.setAttribute('aria-hidden', 'true');
-  return img;
 }
 
 const CONN_LABEL: Record<ConnectionState, string> = {
@@ -832,7 +800,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
   });
 
-  const agentOrder = ['claude', 'codex', 'pi', 'grok', 'cursor'] as const;
   /* pi 는 설치·키·모델이 다 끝나야 입력기 메뉴에 선다 (설정 탭에는 늘 있다). */
   let piSetupComplete = false;
 
@@ -868,7 +835,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     providerTrigger.focus();
   }
 
-  for (const agent of agentOrder) {
+  for (const agent of PROVIDER_ORDER) {
     const item = el('button', 'ag-model-item ag-provider-item');
     item.type = 'button';
     item.dataset.agent = agent;
@@ -882,7 +849,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   /** 메뉴에 실제로 서 있는 항목만 (숨은 pi 는 건너뛴다). */
   function visibleProviderItems(): HTMLButtonElement[] {
-    return agentOrder
+    return PROVIDER_ORDER
       .map((name) => providerItems.get(name))
       .filter((item): item is HTMLButtonElement => !!item && !item.hidden);
   }
@@ -1039,51 +1006,38 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const summaryCaret = createChevron('ag-summary-caret');
   effortTrigger.append(effortName, summaryCaret);
 
-  const effortMenu = el('div', 'ag-model-menu ag-effort-menu');
-  effortMenu.setAttribute('role', 'menu');
-  effortMenu.setAttribute('aria-hidden', 'true');
-  // 설정 패널의 '추론' 묶음 — 메뉴는 이 안에 들어가므로 강도 옵션이 없는
+  // 설정 패널의 '추론' 묶음 — 슬라이더는 이 안에 들어가므로 강도 옵션이 없는
   // 프로바이더(cursor)에서는 트리거뿐 아니라 이 묶음도 함께 접어야 빈 칸이 남지 않는다.
   const effortGroup = el('div', 'ag-config-group');
-  effortGroup.append(el('span', 'ag-config-label', '추론'), effortMenu);
-  let effortItems = new Map<string, HTMLButtonElement>();
+  const effortSlider = createEffortSlider({
+    ariaLabel: '추론 강도',
+    onChange: (effortId) => selectEffort(effortId),
+    // 드래그 중 지나가는 눈금을 요약 라벨에 미리 비춘다.
+    onPreview: (effortId) => {
+      effortName.textContent = labelForEffort(selectedAgent, effortId, selectedModel);
+    },
+  });
+  effortGroup.append(el('span', 'ag-config-label', '추론'), effortSlider.root);
 
   function selectEffort(effortId: string): void {
     if (isControlLocked()) return;
     selectedEffort = resolveEffortForAgent(selectedAgent, effortId, selectedModel);
     effortName.textContent = labelForEffort(selectedAgent, selectedEffort, selectedModel);
-    for (const [id, item] of effortItems) {
-      const active = id === selectedEffort;
-      item.classList.toggle('ag-active', active);
-      item.setAttribute('aria-checked', active ? 'true' : 'false');
-    }
+    effortSlider.setValue(selectedEffort);
     startCurrentBridgeChat();
     updateWorkspaceAgentContext();
     refreshSidebarWidthMin();
-    effortTrigger.focus();
   }
 
   function rebuildEffortMenu(): void {
-    effortMenu.replaceChildren();
-    effortItems = new Map();
     const options = effortsForAgent(selectedAgent, selectedModel);
     // 추론 강도를 받지 않는 모델(pi 의 비추론 모델, cursor 전체)에서는
     // 트리거와 설정 패널의 '추론' 묶음을 함께 접는다.
     const noEfforts = options.length === 0;
     effortWrap.hidden = noEfforts;
     effortGroup.hidden = noEfforts;
-    for (const opt of options) {
-      const item = el('button', 'ag-model-item ag-effort-item', opt.label);
-      item.type = 'button';
-      item.dataset.effort = opt.id;
-      item.setAttribute('role', 'menuitemradio');
-      const active = opt.id === selectedEffort;
-      item.setAttribute('aria-checked', active ? 'true' : 'false');
-      item.classList.toggle('ag-active', active);
-      item.addEventListener('click', () => selectEffort(opt.id));
-      effortItems.set(opt.id, item);
-      effortMenu.appendChild(item);
-    }
+    // 카탈로그는 강함 → 약함 — 슬라이더는 왼쪽이 약함이라 뒤집어 깐다.
+    effortSlider.setOptions([...options].reverse(), selectedEffort);
     effortName.textContent = labelForEffort(selectedAgent, selectedEffort, selectedModel);
   }
 
@@ -1097,31 +1051,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setConfigPanelOpen(true);
-      effortItems.get(selectedEffort)?.focus();
+      effortSlider.root.focus();
     } else if (e.key === 'Escape') {
       setConfigPanelOpen(false);
     }
   });
-  effortMenu.addEventListener('keydown', (e) => {
-    const ids = [...effortItems.keys()];
-    const items = ids.map((id) => effortItems.get(id)!);
-    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+  effortSlider.root.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       e.preventDefault();
       setConfigPanelOpen(false);
       effortTrigger.focus();
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      items[(Math.max(current, 0) + 1) % items.length]?.focus();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      items[(Math.max(current, 0) - 1 + items.length) % items.length]?.focus();
-    } else if (e.key === 'Home') {
-      e.preventDefault();
-      items[0]?.focus();
-    } else if (e.key === 'End') {
-      e.preventDefault();
-      items[items.length - 1]?.focus();
     }
   });
 
@@ -1292,7 +1231,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     for (const trigger of [providerTrigger, llmTrigger, effortTrigger]) {
       trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
     }
-    for (const menu of [providerMenu, llmMenu, effortMenu]) {
+    for (const menu of [providerMenu, llmMenu]) {
       menu.setAttribute('aria-hidden', open ? 'false' : 'true');
     }
   }
@@ -3895,6 +3834,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     providerTrigger.disabled = controlsLocked;
     llmTrigger.disabled = controlsLocked;
     effortTrigger.disabled = controlsLocked;
+    effortSlider.setDisabled(controlsLocked);
     permissionBtn.disabled = controlsLocked || connState !== 'connected';
     if (controlsLocked) setConfigPanelOpen(false);
     updateWorkflowControl();

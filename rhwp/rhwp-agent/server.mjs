@@ -226,8 +226,8 @@ const GROK_MODELS = new Set(['grok-4.6', 'grok-4.5']);
 const DEFAULT_MODEL = { claude: 'sonnet', codex: 'gpt-5.6-sol', grok: 'grok-4.6', cursor: 'auto' };
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const CLAUDE_EFFORTS_HAIKU = new Set(['low', 'medium', 'high']);
-const CODEX_EFFORTS = new Set(['low', 'medium', 'high']);
-const GROK_EFFORTS = new Set(['low', 'medium', 'high']);
+const CODEX_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const GROK_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh']);
 const DEFAULT_EFFORT = { claude: 'high', codex: 'medium', grok: 'high' };
 
 /** 알 수 없는 에이전트가 코덱스/클로드로 조용히 넘어가지 않도록 명시 테이블로 찾는다. */
