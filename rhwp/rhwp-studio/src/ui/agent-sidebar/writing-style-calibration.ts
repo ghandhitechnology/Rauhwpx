@@ -8,6 +8,7 @@ import {
   modelsForAgent,
   resolveModelForAgent,
 } from '../../agent/models.ts';
+import { AGENT_LABEL } from './providers.ts';
 import type {
   AgentName,
   PiStatus,
@@ -26,8 +27,12 @@ const MAX_FILES = 20;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
 const ACK_TIMEOUT_MS = 10_000;
+/*
+ * 보정을 실제로 돌릴 수 있는 프로바이더만 고른다 — 허브의 writing-style-catalog 는
+ * codex/claude/pi 만 만들고 style-calibrator 도 그 셋만 받는다. grok/cursor 를
+ * 여기에 세우면 영영 '사용 불가' 인 칸이 둘 생기고 쓸 수 있는 셋만 좁아진다.
+ */
 const AGENTS: readonly AgentName[] = ['claude', 'codex', 'pi'];
-const AGENT_LABEL: Record<AgentName, string> = { claude: 'Claude', codex: 'Codex', pi: 'Pi' };
 
 const PROGRESS_STAGES: ReadonlyArray<{
   state: WritingStyleProgressState;
@@ -590,6 +595,8 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
       if (catalogProvider.models.length === 0) return { available: false, pending: false, label: '모델 없음', reason: `${catalogProvider.name}에서 사용할 수 있는 모델이 없습니다.` };
       return { available: true, pending: false, label: '연결됨', reason: '' };
     }
+    // 카탈로그가 도착했는데 목록에 없으면 허브가 보정을 돌릴 수 없는 프로바이더다.
+    if (calibrationCatalog) return { available: false, pending: false, label: '사용 불가', reason: '글쓰기 보정에 사용할 수 있는 프로바이더가 아닙니다.' };
     const health = providerStatus?.[agent];
     if (!health) return { available: false, pending: true, label: '확인 중', reason: `${AGENT_LABEL[agent]} 연결을 확인하고 있습니다.` };
     if (!health.available) {
@@ -1063,6 +1070,18 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
           if (provider?.models.some((model) => model.id === selection.model)) {
             selectedAgent = selection.agent;
             selectedModel = selection.model;
+          }
+        }
+        // 기본 프로바이더가 보정 대상이 아니면(예: 문서 편집용으로만 쓰는 CLI)
+        // 아직 손대지 않은 선택은 쓸 수 있는 첫 프로바이더로 옮긴다.
+        if (!selectionTouched && !providerAvailability(selectedAgent).available) {
+          const fallback = AGENTS.find((agent) => providerAvailability(agent).available);
+          if (fallback) {
+            selectedAgent = fallback;
+            selectedModel = resolveModelForAgent(
+              fallback,
+              fallback === prefs.defaultAgent ? prefs.defaultModel : null,
+            );
           }
         }
         renderProviderCatalogue();

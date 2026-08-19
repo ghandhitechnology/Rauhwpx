@@ -338,6 +338,8 @@ export function createPiManager({
         },
       })),
     };
+    // vault 가 없을 때만 키를 파일에 남긴다 — vault 이관이 끝나면 다음 쓰기가 지운다.
+    if (apiKey && !secretStore?.available) provider.apiKey = apiKey;
     const payload = { providers: { openrouter: provider } };
     await writeAtomic(modelsPath, `${JSON.stringify(payload, null, 2)}\n`);
   }
@@ -676,10 +678,9 @@ export function createPiManager({
       if (!trimmed) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키를 입력하세요');
       const check = await client.validateKey(trimmed);
       if (!check.valid) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키가 거절됐어요');
-      if (!secretStore?.available) {
-        throw piError('SECRET_STORE_UNAVAILABLE', 'OS 보안 저장소를 사용할 수 없어 API 키를 저장하지 못했어요. 앱을 다시 시작해 주세요.');
-      }
-      await secretStore.set(OPENROUTER_SECRET_ID, trimmed);
+      // 보안 저장소가 없으면 models.json(0600)에 보관한다 — load() 가 읽고, vault 가
+      // 생기면 기존 이관 경로가 vault 로 옮긴 뒤 파일에서 지운다.
+      if (secretStore?.available) await secretStore.set(OPENROUTER_SECRET_ID, trimmed);
       apiKey = trimmed;
       secretStoreError = null;
       config.keyTail = keyTailOf(trimmed);

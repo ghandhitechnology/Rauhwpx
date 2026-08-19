@@ -175,9 +175,20 @@
   justify-content: space-between;
 }
 
+/* display:flex 가 기본 [hidden] 을 덮어써서, 숨긴 줄은 따로 눌러 줍니다.
+   (추론 강도가 없는 제공자, cliproxy 가 이미 설정된 경우 등) */
+.ag-settings-field[hidden] {
+  display: none;
+}
+
 .ag-settings-field-label {
   flex: 0 0 auto;
   color: var(--ag-text-secondary);
+}
+
+.ag-settings-field .ag-eslider {
+  flex: 1 1 auto;
+  max-width: 260px;
 }
 
 .ag-settings-input,
@@ -561,6 +572,92 @@
   flex-direction: column;
   gap: 10px;
   padding-top: 2px;
+}
+
+/* 브라우저 로그인 상자 — 인증 주소와 기기 코드를 카드 안에서 그대로 보여준다. */
+.ag-agent-login-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 11px 13px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: 11px;
+  background: var(--ag-bg-2);
+}
+
+.ag-agent-login-box[hidden],
+.ag-agent-login-url-row[hidden],
+.ag-agent-login-code[hidden] {
+  display: none;
+}
+
+.ag-agent-login-url-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ag-agent-login-url {
+  display: block;
+  overflow: hidden;
+  padding: 7px 9px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg);
+  color: var(--accent-primary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--font-size-sm, 11px);
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-agent-login-url:hover {
+  border-color: var(--accent-primary);
+  text-decoration: underline;
+}
+
+.ag-agent-login-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.ag-agent-login-code {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.ag-agent-login-code-value {
+  padding: 6px 12px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg);
+  color: var(--ag-text);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  user-select: all;
+}
+
+.ag-agent-login-caption,
+.ag-agent-login-wait {
+  margin: 0;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.5;
+}
+
+/* 코드 줄 아래로 캡션을 떨어뜨린다. */
+.ag-agent-login-caption {
+  flex: 1 0 100%;
+}
+
+.ag-agent-login-cancel {
+  align-self: flex-start;
 }
 
 .ag-agent-auth-divider {

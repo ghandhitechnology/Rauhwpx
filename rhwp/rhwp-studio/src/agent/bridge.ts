@@ -22,7 +22,10 @@ import { PendingEditManager } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
 import { PendingRequestRegistry } from './pending-requests.ts';
 import { AgentTypewriterReveal } from './typewriter-reveal.ts';
-import { setPiModels as setPiModelRegistry } from './models.ts';
+import {
+  setCursorModels as setCursorModelRegistry,
+  setPiModels as setPiModelRegistry,
+} from './models.ts';
 import {
   AGENT_PROTOCOL_VERSION,
   AgentToolError,
@@ -180,7 +183,7 @@ const CONNECT_TIMEOUT_MS = 4000;
 const REQUEST_TIMEOUT_MS = 10_000;
 
 function isAgentName(v: unknown): v is AgentName {
-  return v === 'claude' || v === 'codex' || v === 'pi';
+  return v === 'claude' || v === 'codex' || v === 'pi' || v === 'grok' || v === 'cursor';
 }
 
 function readDocumentTemplate(value: unknown): DocumentTemplate | null {
@@ -446,13 +449,15 @@ function readProviderHealth(value: unknown): ProviderHealth {
   };
 }
 
-/** 허브가 보낸 provider-status 를 항상 세 프로바이더가 있는 형태로 정규화한다. */
+/** 허브가 보낸 provider-status 를 항상 다섯 프로바이더가 있는 형태로 정규화한다. */
 function readProviderStatus(value: unknown): ProviderStatusMap {
   const src = (value ?? {}) as Record<string, unknown>;
   return {
     claude: readProviderHealth(src['claude']),
     codex: readProviderHealth(src['codex']),
     pi: readProviderHealth(src['pi']),
+    grok: readProviderHealth(src['grok']),
+    cursor: readProviderHealth(src['cursor']),
   };
 }
 
@@ -476,6 +481,8 @@ function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatu
     latestVersion: typeof src['latestVersion'] === 'string' ? src['latestVersion'] : null,
     updateRequired: src['updateRequired'] === true,
     error: typeof src['error'] === 'string' ? src['error'] : null,
+    // cursor 만 CLI 가 알려 주는 모델 목록을 함께 싣는다.
+    ...(isStringArray(src['models']) ? { models: src['models'] } : {}),
   };
 }
 
@@ -485,6 +492,8 @@ function readAgentSetupStatuses(value: unknown): AgentSetupStatusMap {
     claude: readAgentSetupStatus(src['claude'], 'claude'),
     codex: readAgentSetupStatus(src['codex'], 'codex'),
     pi: readAgentSetupStatus(src['pi'], 'pi'),
+    grok: readAgentSetupStatus(src['grok'], 'grok'),
+    cursor: readAgentSetupStatus(src['cursor'], 'cursor'),
   };
 }
 
@@ -604,11 +613,15 @@ function readUsageSummary(value: unknown): UsageSummary | null {
       claude: typeof plans['claude'] === 'string' ? plans['claude'] : 'pro',
       codex: typeof plans['codex'] === 'string' ? plans['codex'] : 'plus',
       pi: typeof plans['pi'] === 'string' ? plans['pi'] : 'api',
+      grok: typeof plans['grok'] === 'string' ? plans['grok'] : 'api',
+      cursor: typeof plans['cursor'] === 'string' ? plans['cursor'] : 'api',
     },
     providers: {
       claude: readProviderUsage(providers['claude']),
       codex: readProviderUsage(providers['codex']),
       pi: readProviderUsage(providers['pi']),
+      grok: readProviderUsage(providers['grok']),
+      cursor: readProviderUsage(providers['cursor']),
     },
     cliproxy: readCliproxyStatus(src['cliproxy']),
     ...(openrouter ? { openrouter } : {}),
@@ -1406,6 +1419,9 @@ class AgentBridgeImpl implements AgentBridge {
       }
       case 'agent-setup-status': {
         const statuses = readAgentSetupStatuses(msg.statuses);
+        // cursor 모델 레지스트리를 이벤트 발행 전에 갱신해, 리스너가
+        // modelsForAgent('cursor') 를 즉시 최신 상태로 읽을 수 있게 한다.
+        if (statuses.cursor.models) setCursorModelRegistry(statuses.cursor.models);
         if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, statuses);
         this.emit({ type: 'agent-setup-status', statuses });
         break;
@@ -1436,6 +1452,7 @@ class AgentBridgeImpl implements AgentBridge {
             : {}),
           ...(typeof msg.detail === 'string' ? { detail: msg.detail } : {}),
           ...(typeof msg.authUrl === 'string' ? { authUrl: msg.authUrl } : {}),
+          ...(typeof msg.userCode === 'string' ? { userCode: msg.userCode } : {}),
           ...(msg.activity === true ? { activity: true } : {}),
           ...(typeof msg.receivedBytes === 'number' ? { receivedBytes: msg.receivedBytes } : {}),
           ...(typeof msg.totalBytes === 'number' ? { totalBytes: msg.totalBytes } : {}),

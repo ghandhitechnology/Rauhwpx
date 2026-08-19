@@ -4,6 +4,13 @@ import { readFileSync } from 'node:fs';
 // settings.ts 는 CSS 를 가져오므로 Node 에서 불러올 수 없다 — 계기판 숫자
 // 규칙만 css 없는 모듈에서 실제로 검증하고, DOM 계약은 소스 텍스트로 본다.
 import { formatRelativeTime, formatResetAt, formatTokens } from '../src/ui/agent-sidebar/usage-format.ts';
+// providers.ts 는 CSS 를 안 가져오므로 표를 텍스트가 아니라 값으로 직접 본다.
+import {
+  AGENT_LABEL,
+  MASK_ICON_AGENTS,
+  PROVIDER_ICON_SRC,
+  PROVIDER_ORDER,
+} from '../src/ui/agent-sidebar/providers.ts';
 
 const readSource = (relativePath: string) => readFileSync(
   new URL(relativePath, import.meta.url),
@@ -127,16 +134,78 @@ test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에
   assert.match(settingsCss, /transition: width 480ms cubic-bezier/);
 });
 
+test('브라우저 로그인은 인증 주소와 기기 코드를 카드 안에 직접 그린다', () => {
+  // 팝업이 막혀도 사용자가 주소를 직접 열 수 있어야 한다.
+  assert.match(settings, /const setupLoginBox = el\('div', 'ag-agent-login-box'\)/);
+  assert.match(settings, /const setupAuthLink = el\('a', 'ag-agent-login-url'\)/);
+  assert.match(settings, /setupAuthLink\.target = '_blank'/);
+  assert.match(settings, /setupAuthLink\.rel = 'noopener noreferrer'/);
+  // 긴 주소는 잘라 보여주고 전체는 title 로 남긴다.
+  assert.match(settings, /setupAuthLink\.title = setupAuthUrl/);
+  assert.match(settingsCss, /\.ag-agent-login-url \{[\s\S]*text-overflow: ellipsis/);
+  // 열기 버튼은 클릭 핸들러 안에서 바로 창을 연다(제스처 안이라 차단되지 않는다).
+  assert.match(
+    settings,
+    /setupAuthOpen\.addEventListener\('click', \(\) => \{[\s\S]*window\.open\(setupAuthUrl, '_blank', 'noopener,noreferrer'\)/,
+  );
+  assert.match(settings, /'브라우저에서 열기'/);
+  assert.match(settings, /'주소 복사'/);
+  assert.match(settings, /'코드 복사'/);
+  assert.match(settings, /navigator\.clipboard\.writeText\(text\)/);
+  // 보안 컨텍스트가 아니면 navigator.clipboard 가 없어서 textarea 로 넘어가고,
+  // 그것마저 막히면 '복사됨' 대신 실패를 알린다.
+  assert.match(settings, /if \(navigator\.clipboard\?\.writeText\)/);
+  assert.match(settings, /copied = document\.execCommand\('copy'\)/);
+  assert.match(settings, /button\.textContent = copied \? '복사됨' : '복사 실패'/);
+  assert.match(settings, /const copied = await writeClipboardText\(text\)/);
+  // 기기 코드와 안내 문구.
+  assert.match(settings, /const setupUserCodeValue = el\('strong', 'ag-agent-login-code-value'\)/);
+  assert.match(settings, /if \(setupUserCode\) setupUserCodeValue\.textContent = setupUserCode/);
+  assert.match(settings, /'브라우저에서 이 코드를 확인해 주세요\.'/);
+  assert.match(settings, /'브라우저에서 로그인을 마치면 자동으로 완료돼요\.'/);
+  assert.match(settingsCss, /\.ag-agent-login-code-value \{[\s\S]*user-select: all/);
+  // 로그인이 도는 동안 취소 버튼이 함께 선다.
+  assert.match(settings, /el\('button', 'ag-settings-btn ag-agent-login-cancel', '로그인 취소'\)/);
+  assert.match(
+    settings,
+    /setupLoginCancel\.addEventListener\('click', \(\) => \{\s*if \(setupAgent\) bridge\.cancelAgentSetup\(setupAgent\);/,
+  );
+  // 취소하면 방금 누른 버튼이 사라져 포커스가 <body> 로 떨어지고, Esc 를 받는
+  // 덮개 밖이라 키보드로 카드를 닫을 수 없게 된다 — 다시 그릴 때 되돌린다.
+  assert.match(
+    settings,
+    /function restoreSetupFocus\(\): void \{[\s\S]*if \(active && active !== document\.body\) return;\s*setupDialog\.focus\(\);/,
+  );
+  assert.match(settings, /setupCodeSubmit\.disabled = connectionState !== 'connected' \|\| !setupCode\.input\.value\.trim\(\);\s*restoreSetupFocus\(\);/);
+  assert.match(settings, /renderPi\(\);\s*restoreSetupFocus\(\);/);
+  // 상자는 oauth 로그인이 도는 동안에만 선다.
+  assert.match(settings, /const authorizing = setupOauthPending && setupBusy;\s*setupLoginBox\.hidden = !authorizing/);
+  assert.match(settings, /if \(ev\.authUrl\) setupAuthUrl = ev\.authUrl;\s*if \(ev\.userCode\) setupUserCode = ev\.userCode;/);
+  assert.match(settings, /if \(method === 'oauth' && started\.authUrl\) setupAuthUrl = started\.authUrl/);
+  // 자동 열기 시도는 그대로 남는다.
+  assert.match(settings, /maybeOpenAuthUrl\(ev\.authUrl\)/);
+  // claude 인증 코드 입력칸은 로그인 상자 아래에 붙는다.
+  assert.match(settings, /setupKeyBox,\s*setupLoginBox,\s*setupCodeBox,/);
+  // 로그인이 끝나거나 실패하면 주소·코드를 지운다.
+  assert.match(settings, /function clearSetupAuthPrompt\(\): void \{\s*setupOauthPending = false;\s*setupAuthUrl = null;\s*setupUserCode = null;/);
+  assert.match(settings, /if \(ev\.state === 'done'\) clearSetupAuthPrompt\(\)/);
+});
+
 test('자동 하네스 업데이트 실패는 프로바이더 카드에 조용히 표시한다', () => {
   assert.match(settings, /if \(setup\?\.updateRequired\) \{[\s\S]*'업데이트 필요'/);
   assert.match(settings, /classList\.toggle\('ag-update-required'/);
   assert.match(settingsCss, /\.ag-settings-row-detail\.ag-update-required/);
 });
 
-test('기본 설정은 네 개의 native select 이고 저장 후 사이드바에 알린다', () => {
+test('기본 설정은 select 셋이고 저장 후 사이드바에 알린다', () => {
   assert.match(settings, /createSelect\(\s*'기본 제공자'/);
   assert.match(settings, /createSelect\('기본 모델', \[\]\)/);
   assert.match(settings, /createSelect\('추론 강도', \[\]\)/);
+  assert.match(settings, /effortField\.field\.hidden = effortOptions\.length === 0/);
+  assert.match(settings, /fillSelect\(effortField\.select, \[\.\.\.effortOptions\]\.reverse\(\)\)/);
+  // 줄의 display:flex 가 기본 [hidden] 을 덮으므로 따로 눌러 준다 — 없으면
+  // Cursor 처럼 추론 강도가 없는 프로바이더에서 빈 줄이 남는다.
+  assert.match(settingsCss, /\.ag-settings-field\[hidden\]\s*\{[^}]*display:\s*none;/s);
   assert.match(settings, /createSelect\('권한 프로필', PERMISSION_OPTIONS\)/);
   assert.match(settings, /const select = el\('select', 'ag-settings-select'\)/);
   assert.match(settings, /prefs = saveAgentPrefs\(partial\)/);
@@ -243,4 +312,80 @@ test('설정의 채움 버튼도 손그림 윤곽을 쓴다', () => {
   for (const sel of ['.ag-settings-primary', '.ag-conn-banner-retry', '.ag-hub-retry-btn']) {
     assert.ok(selectors.includes(sel), `${sel} should use the sketch filter`);
   }
+});
+
+test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조색을 모두 갖춘다', () => {
+  // 연결 목록과 입력기 피커는 다섯 프로바이더를 같은 순서로 세운다.
+  assert.deepEqual([...PROVIDER_ORDER], ['claude', 'codex', 'pi', 'grok', 'cursor']);
+  assert.equal(AGENT_LABEL.grok, 'Grok');
+  assert.equal(AGENT_LABEL.cursor, 'Cursor');
+  // 두 화면 모두 표를 다시 베끼지 않고 공용 모듈에서 가져다 쓴다.
+  for (const consumer of [settings, source]) {
+    assert.match(consumer, /import \{ AGENT_LABEL, createProviderIcon, PROVIDER_ORDER \} from '\.\/providers\.ts'/);
+    assert.doesNotMatch(consumer, /const AGENT_LABEL|const MASK_ICON_AGENTS|const PROVIDER_ICON_SRC/);
+  }
+  assert.match(settings, /for \(const agent of PROVIDER_ORDER\)/);
+  assert.match(source, /for \(const agent of PROVIDER_ORDER\)/);
+  // cursor 표기는 언제나 "Cursor" 다.
+  assert.doesNotMatch(settings, /'Cursor Agent'|'cursor-agent'/);
+  // 단색 로고는 마스크로 그리므로 마스크 목록과 CSS 규칙이 함께 있어야 한다.
+  assert.deepEqual([...MASK_ICON_AGENTS], ['codex', 'pi', 'grok', 'cursor']);
+  // 마스크가 아닌 프로바이더만 이미지 경로를 갖는다.
+  assert.equal(PROVIDER_ICON_SRC.claude, '/icons/provider-claude.png');
+  assert.equal(PROVIDER_ICON_SRC.grok, undefined);
+  assert.equal(PROVIDER_ICON_SRC.cursor, undefined);
+  assert.match(css, /\.ag-provider-icon-mask\[data-agent='grok'\][\s\S]*?provider-grok\.svg/);
+  assert.match(css, /\.ag-provider-icon-mask\[data-agent='cursor'\][\s\S]*?provider-cursor\.svg/);
+  // 강조색은 라이트/다크 팔레트에 모두 있고 data-agent 로 갈린다.
+  assert.equal((css.match(/--ag-grok:/g) ?? []).length, 2);
+  assert.equal((css.match(/--ag-cursor:/g) ?? []).length, 2);
+  assert.equal((css.match(/--ag-grok-wash:/g) ?? []).length, 2);
+  assert.equal((css.match(/--ag-cursor-wash:/g) ?? []).length, 2);
+  assert.match(css, /\.ag-root\[data-agent='grok'\] \{\s*--ag-accent: var\(--ag-grok\);/);
+  assert.match(css, /\.ag-root\[data-agent='cursor'\] \{\s*--ag-accent: var\(--ag-cursor\);/);
+  assert.match(css, /\.ag-plan-card\.ag-grok,\n\.ag-plan-card\.ag-cursor/);
+  assert.match(css, /\.ag-review-card\.ag-grok,\n\.ag-review-card\.ag-cursor/);
+});
+
+test('기본 제공자 선택은 다섯 프로바이더를 그대로 저장한다', () => {
+  // 예전 코드는 모르는 값을 claude 로 접어 Grok/Cursor 선택을 삼켰다.
+  assert.match(settings, /const agent = PROVIDER_ORDER\.find\(\(name\) => name === value\) \?\? 'claude'/);
+  assert.doesNotMatch(settings, /value === 'codex' \|\| value === 'pi' \? value : 'claude'/);
+  // 요금제 미터는 구독 한도가 있는 둘만 갖는다.
+  assert.match(settings, /type PlanAgent = 'claude' \| 'codex'/);
+  assert.match(settings, /const PLAN_AGENTS: readonly PlanAgent\[\] = \['claude', 'codex'\]/);
+});
+
+test('grok · cursor 사용량도 세션 · 오늘 · 주간 토큰으로 보인다', () => {
+  assert.match(settings, /const API_USAGE_AGENTS: readonly AgentName\[\] = \['grok', 'cursor'\]/);
+  assert.match(settings, /function renderApiUsage\(\): void/);
+  assert.match(settings, /renderPiUsage\(\);\s*\n\s*renderApiUsage\(\);/);
+  assert.match(settings, /세션 · \$\{formatTokens\(providerUsage\.session\.weightedTokens\)\} 토큰 · \$\{providerUsage\.session\.turns\}턴/);
+  assert.match(settings, /ui\.models\.replaceChildren\(\.\.\.buildModelRows\(providerUsage, agent\)\)/);
+  // 요금제 셀렉트는 붙지 않는다 — API 사용량 한 가지뿐이다.
+  assert.doesNotMatch(settings, /USAGE_PLANS\[agent\]\s*\?\?/);
+  // 설정을 마쳤거나 기록이 있을 때만 자리를 차지한다.
+  assert.match(settings, /ui\.root\.hidden = turns === 0/);
+  assert.match(settingsCss, /\.ag-settings-usage-block\[hidden\]/);
+});
+
+test('cursor 모델 선택은 구독/API 과금 풀로 나뉘어 보인다', () => {
+  // 설정 페이지의 기본 모델 셀렉트는 그룹 라벨을 optgroup 으로 그린다.
+  assert.match(settings, /function fillSelectGrouped\(/);
+  assert.match(settings, /fillSelectGrouped\(modelField\.select, modelGroupsForAgent\(prefs\.defaultAgent\)\)/);
+  // 입력기 모델 메뉴도 같은 그룹 머리글을 쓴다.
+  assert.match(source, /modelGroupsForAgent\(selectedAgent\)/);
+  assert.match(source, /ag-llm-group-label/);
+  assert.match(css, /\.ag-llm-group-label \{[\s\S]*?flex-basis: 100%/);
+});
+
+test('설정 모달은 프로바이더별 설치 안내와 API 키 힌트를 갖는다', () => {
+  assert.match(settings, /const SETUP_INSTALL_NOTE: Record<AgentName, string>/);
+  assert.match(settings, /cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다\.'/);
+  assert.match(settings, /grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다\.'/);
+  assert.match(settings, /const API_KEY_PLACEHOLDER: Record<AgentName, string>/);
+  assert.match(settings, /grok: 'xai-…'/);
+  assert.match(settings, /cursor: 'API 키'/);
+  assert.match(settings, /setupInstallNote\.textContent = SETUP_INSTALL_NOTE\[agent\]/);
+  assert.match(settings, /setupKey\.input\.placeholder = API_KEY_PLACEHOLDER\[agent\]/);
 });

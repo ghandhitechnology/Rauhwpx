@@ -33,9 +33,24 @@ export const PI_PLANS = {
   api: { session5h: null, week: null },
 };
 
-export const AGENTS = /** @type {const} */ (['claude', 'codex', 'pi']);
-export const DEFAULT_PLANS = { claude: 'pro', codex: 'plus', pi: 'api' };
-export const PLAN_TABLES = { claude: CLAUDE_PLANS, codex: CODEX_PLANS, pi: PI_PLANS };
+/** grok/cursor 는 공개된 요금제 예산 정보가 없다 — 종량제 한 칸만 둔다. */
+export const GROK_PLANS = {
+  api: { session5h: null, week: null },
+};
+
+export const CURSOR_PLANS = {
+  api: { session5h: null, week: null },
+};
+
+export const AGENTS = /** @type {const} */ (['claude', 'codex', 'pi', 'grok', 'cursor']);
+export const DEFAULT_PLANS = { claude: 'pro', codex: 'plus', pi: 'api', grok: 'api', cursor: 'api' };
+export const PLAN_TABLES = {
+  claude: CLAUDE_PLANS,
+  codex: CODEX_PLANS,
+  pi: PI_PLANS,
+  grok: GROK_PLANS,
+  cursor: CURSOR_PLANS,
+};
 
 export function defaultUsageRoot(env = process.env, platform = process.platform, home = os.homedir()) {
   const platformPath = platform === 'win32' ? path.win32 : path.posix;
@@ -134,7 +149,7 @@ function parseEventLine(line) {
 export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now } = {}) {
   const eventsPath = path.join(rootDir, EVENTS_FILE);
   const plansPath = path.join(rootDir, PLANS_FILE);
-  /** @type {Array<{ ts: number, agent: 'claude'|'codex'|'pi', model: string, inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheCreationTokens: number, costUsd: number, weightedTokens: number }>} */
+  /** @type {Array<{ ts: number, agent: 'claude'|'codex'|'pi'|'grok'|'cursor', model: string, inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheCreationTokens: number, costUsd: number, weightedTokens: number }>} */
   let events = [];
   let plans = { ...DEFAULT_PLANS };
   /** 파일 쓰기는 직렬화한다 — 같은 줄에 두 이벤트가 섞이지 않도록. */
@@ -276,7 +291,7 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
     },
 
     /**
-     * @param {'claude'|'codex'|'pi'} agent
+     * @param {'claude'|'codex'|'pi'|'grok'|'cursor'} agent
      * @param {string} plan
      */
     async setPlan(agent, plan) {
@@ -294,11 +309,7 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
     summary() {
       return {
         plans: { ...plans },
-        providers: {
-          claude: providerUsage('claude'),
-          codex: providerUsage('codex'),
-          pi: providerUsage('pi'),
-        },
+        providers: Object.fromEntries(AGENTS.map((agent) => [agent, providerUsage(agent)])),
       };
     },
   };

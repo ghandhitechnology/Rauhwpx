@@ -15,12 +15,14 @@ import './settings.css';
 import {
   effortsForAgent,
   labelForModel,
-  modelsForAgent,
+  modelGroupsForAgent,
   resolveEffortForAgent,
   resolveModelForAgent,
+  type AgentModelGroup,
 } from '../../agent/models.ts';
 import { loadAgentPrefs, saveAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
 import { createIcon } from './icons.ts';
+import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
 import { formatRelativeTime, formatResetAt, formatShortDate, formatTokens } from './usage-format.ts';
 import type { AgentBridge } from '../../agent/bridge.ts';
 import type {
@@ -42,21 +44,33 @@ import type {
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
 
-/** 요금제 셀렉트를 갖는 프로바이더 — pi 는 대신 OpenRouter 잔액을 보여준다. */
-type PlanAgent = Exclude<AgentName, 'pi'>;
-
-const AGENTS: readonly AgentName[] = ['claude', 'codex', 'pi'];
+/**
+ * 요금제 셀렉트를 갖는 프로바이더 — 구독 한도가 있는 둘뿐이다.
+ * pi 는 OpenRouter 잔액을, grok · cursor 는 API 사용량만 쓴다.
+ */
+type PlanAgent = 'claude' | 'codex';
 
 const PLAN_AGENTS: readonly PlanAgent[] = ['claude', 'codex'];
 
-const AGENT_LABEL: Record<AgentName, string> = { claude: 'Claude', codex: 'Codex', pi: 'Pi' };
+/** 요금제도 잔액도 없는 프로바이더 — 기록된 토큰만 보여준다. */
+const API_USAGE_AGENTS: readonly AgentName[] = ['grok', 'cursor'];
 
-/** 단색 로고는 마스크로 그린다 — currentColor 를 타고 테마에 맞는다. */
-const MASK_ICON_AGENTS: readonly AgentName[] = ['codex', 'pi'];
+/** 설치 안내 — cursor 는 npm 이 아니라 공식 설치 스크립트로 받는다. */
+const SETUP_INSTALL_NOTE: Record<AgentName, string> = {
+  claude: 'Claude CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
+  codex: 'Codex CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
+  pi: 'Pi 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
+  grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
+  cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다.',
+};
 
-const PROVIDER_ICON_SRC: Partial<Record<AgentName, string>> = {
-  claude: '/icons/provider-claude.png',
-  codex: '/icons/provider-codex.png',
+/** API 키 입력칸 힌트 — 키 접두사가 있는 프로바이더만 형태를 보여준다. */
+const API_KEY_PLACEHOLDER: Record<AgentName, string> = {
+  claude: 'sk-ant-…',
+  codex: 'sk-proj-…',
+  pi: 'sk-or-…',
+  grok: 'xai-…',
+  cursor: 'API 키',
 };
 
 const CONN_LABEL: Record<ConnectionState, string> = {
@@ -147,23 +161,6 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-function providerIcon(agent: AgentName): HTMLElement {
-  if (MASK_ICON_AGENTS.includes(agent)) {
-    const mark = el('span', 'ag-provider-icon ag-provider-icon-mask');
-    mark.dataset.agent = agent;
-    mark.setAttribute('aria-hidden', 'true');
-    return mark;
-  }
-  const img = document.createElement('img');
-  img.className = 'ag-provider-icon';
-  img.dataset.agent = agent;
-  img.src = PROVIDER_ICON_SRC[agent] ?? '';
-  img.alt = '';
-  img.draggable = false;
-  img.setAttribute('aria-hidden', 'true');
-  return img;
-}
-
 /** OpenRouter 가격은 토큰당이라 100만 토큰 기준으로 바꿔 읽는다. */
 function pricePerMillion(perToken: number): number {
   return Number.isFinite(perToken) ? perToken * 1_000_000 : 0;
@@ -227,6 +224,32 @@ function fillSelect(
   if (options.some((option) => option.id === previous)) select.value = previous;
 }
 
+/** 라벨 있는 그룹은 optgroup 으로 묶는다 — cursor 의 구독/API 과금 풀 구분. */
+function fillSelectGrouped(
+  select: HTMLSelectElement,
+  groups: ReadonlyArray<AgentModelGroup>,
+): void {
+  const previous = select.value;
+  select.replaceChildren();
+  for (const group of groups) {
+    let parent: HTMLSelectElement | HTMLOptGroupElement = select;
+    if (group.label) {
+      const optgroup = document.createElement('optgroup');
+      optgroup.label = group.label;
+      select.appendChild(optgroup);
+      parent = optgroup;
+    }
+    for (const option of group.options) {
+      const node = document.createElement('option');
+      node.value = option.id;
+      node.textContent = option.label;
+      parent.appendChild(node);
+    }
+  }
+  const ids = groups.flatMap((group) => group.options.map((option) => option.id));
+  if (ids.includes(previous)) select.value = previous;
+}
+
 /** pi 마법사의 네 단계 (+ 완료 요약). */
 type PiStep = 'install' | 'key' | 'catalog' | 'naming' | 'summary';
 
@@ -280,6 +303,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let setupMessage = '';
   let setupReauth = false;
   let setupCodePending = false;
+  /** 브라우저 로그인이 진행 중인 동안 카드에 직접 그릴 인증 주소와 기기 코드. */
+  let setupOauthPending = false;
+  let setupAuthUrl: string | null = null;
+  let setupUserCode: string | null = null;
+  let setupCopyResetTimer: ReturnType<typeof setTimeout> | null = null;
   let setupProgressPercent = 0;
   let setupProgressLabel = '';
   let setupProgressPhase = '';
@@ -351,14 +379,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     { dot: HTMLElement; detail: HTMLElement; setup: HTMLButtonElement }
   >();
   const providerList = el('div', 'ag-settings-provider-list');
-  for (const agent of AGENTS) {
+  for (const agent of PROVIDER_ORDER) {
     const row = el('div', 'ag-settings-row ag-settings-provider-row');
     row.dataset.agent = agent;
     const dot = el('span', 'ag-settings-dot');
     dot.setAttribute('aria-hidden', 'true');
     const text = el('div', 'ag-settings-row-text');
     const name = el('span', 'ag-settings-row-name');
-    name.append(providerIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
+    name.append(createProviderIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
     const detail = el('span', 'ag-settings-row-detail', '확인 중…');
     text.append(name, detail);
     const setup = el('button', 'ag-settings-btn ag-provider-setup-btn', '설정');
@@ -388,7 +416,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const piCard = el('div', 'ag-pi-card');
   const piHead = el('div', 'ag-pi-head');
   const piHeadName = el('span', 'ag-settings-row-name');
-  piHeadName.append(providerIcon('pi'), document.createTextNode('Pi'));
+  piHeadName.append(createProviderIcon('pi'), document.createTextNode('Pi'));
   const piHeadDetail = el('span', 'ag-settings-row-detail', '확인 중…');
   piHead.append(piHeadName, piHeadDetail);
   const piMessageLine = el('p', 'ag-settings-cliproxy-error');
@@ -399,7 +427,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const piInstallNote = el('p', 'ag-settings-note', 'OpenRouter 모델로 문서를 고치는 Pi 에이전트예요.');
   const piInstallBtn = el('button', 'ag-settings-primary ag-pi-logo-btn');
   piInstallBtn.type = 'button';
-  piInstallBtn.append(providerIcon('pi'), el('span', '', 'Pi 연결'));
+  piInstallBtn.append(createProviderIcon('pi'), el('span', '', 'Pi 연결'));
   const piProgressLine = el('p', 'ag-settings-note');
   piProgressLine.hidden = true;
   // 내려받기 진행 막대 — 크기를 알면 채움 폭, 모르면 신호가 올 때만 흐르는 줄무늬.
@@ -546,6 +574,40 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const setupKeySubmit = el('button', 'ag-agent-setup-primary', '키 연결');
   setupKeySubmit.type = 'button';
   setupKeyBox.append(setupKey.field, setupKeySubmit);
+  // 브라우저 로그인 상자 — 팝업이 막혀도 주소와 기기 코드를 카드 안에서 직접 준다.
+  const setupLoginBox = el('div', 'ag-agent-login-box');
+  setupLoginBox.hidden = true;
+  const setupAuthUrlRow = el('div', 'ag-agent-login-url-row');
+  setupAuthUrlRow.hidden = true;
+  const setupAuthLink = el('a', 'ag-agent-login-url');
+  setupAuthLink.target = '_blank';
+  setupAuthLink.rel = 'noopener noreferrer';
+  const setupAuthActions = el('div', 'ag-agent-login-actions');
+  const setupAuthOpen = el('button', 'ag-settings-btn', '브라우저에서 열기');
+  setupAuthOpen.type = 'button';
+  const setupAuthCopy = el('button', 'ag-settings-btn', '주소 복사');
+  setupAuthCopy.type = 'button';
+  setupAuthActions.append(setupAuthOpen, setupAuthCopy);
+  setupAuthUrlRow.append(setupAuthLink, setupAuthActions);
+  const setupUserCodeRow = el('div', 'ag-agent-login-code');
+  setupUserCodeRow.hidden = true;
+  const setupUserCodeValue = el('strong', 'ag-agent-login-code-value');
+  const setupUserCodeCopy = el('button', 'ag-settings-btn', '코드 복사');
+  setupUserCodeCopy.type = 'button';
+  const setupUserCodeCaption = el(
+    'p',
+    'ag-agent-login-caption',
+    '브라우저에서 이 코드를 확인해 주세요.',
+  );
+  setupUserCodeRow.append(setupUserCodeValue, setupUserCodeCopy, setupUserCodeCaption);
+  const setupLoginWait = el(
+    'p',
+    'ag-agent-login-wait',
+    '브라우저에서 로그인을 마치면 자동으로 완료돼요.',
+  );
+  const setupLoginCancel = el('button', 'ag-settings-btn ag-agent-login-cancel', '로그인 취소');
+  setupLoginCancel.type = 'button';
+  setupLoginBox.append(setupAuthUrlRow, setupUserCodeRow, setupLoginWait, setupLoginCancel);
   const setupCodeBox = el('div', 'ag-agent-key-box');
   setupCodeBox.hidden = true;
   const setupCodeNote = el('p', 'ag-agent-setup-copy', '브라우저에서 로그인하면 인증 코드가 표시됩니다. 코드를 붙여넣어 주세요.');
@@ -553,7 +615,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const setupCodeSubmit = el('button', 'ag-agent-setup-primary', '코드 확인');
   setupCodeSubmit.type = 'button';
   setupCodeBox.append(setupCodeNote, setupCode.field, setupCodeSubmit);
-  setupAuthPane.append(setupAuthHeading, setupOauth, setupApiToggle, setupKeyBox, setupCodeBox);
+  setupAuthPane.append(
+    setupAuthHeading,
+    setupOauth,
+    setupApiToggle,
+    setupKeyBox,
+    setupLoginBox,
+    setupCodeBox,
+  );
 
   const setupDonePane = el('div', 'ag-agent-setup-pane ag-agent-setup-done');
   const setupDoneMark = el('span', 'ag-agent-setup-done-mark', '✓');
@@ -589,6 +658,25 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       event.preventDefault();
       void startSetupAuth('api-key');
     }
+  });
+  // 직접 클릭 안에서 여는 창은 팝업 차단에 걸리지 않는다.
+  setupAuthOpen.addEventListener('click', () => {
+    if (!setupAuthUrl) return;
+    openedAuthUrls.add(setupAuthUrl);
+    window.open(setupAuthUrl, '_blank', 'noopener,noreferrer');
+  });
+  setupAuthCopy.addEventListener('click', () => {
+    if (setupAuthUrl) void copySetupText(setupAuthUrl, setupAuthCopy, '주소 복사');
+  });
+  setupUserCodeCopy.addEventListener('click', () => {
+    if (setupUserCode) void copySetupText(setupUserCode, setupUserCodeCopy, '코드 복사');
+  });
+  setupLoginCancel.addEventListener('click', () => {
+    if (setupAgent) bridge.cancelAgentSetup(setupAgent);
+    setupBusy = false;
+    setupCodePending = false;
+    clearSetupAuthPrompt();
+    renderAgentSetup();
   });
   setupCodeSubmit.addEventListener('click', submitSetupAuthCode);
   setupCode.input.addEventListener('keydown', (event) => {
@@ -689,7 +777,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   agentField.select.addEventListener('change', () => {
     const value = agentField.select.value;
-    const agent: AgentName = value === 'codex' || value === 'pi' ? value : 'claude';
+    const agent = PROVIDER_ORDER.find((name) => name === value) ?? 'claude';
     commitPrefs({ defaultAgent: agent });
   });
   modelField.select.addEventListener('change', () => {
@@ -875,7 +963,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     block.dataset.agent = agent;
     const head = el('div', 'ag-settings-usage-head');
     const name = el('span', 'ag-settings-row-name');
-    name.append(providerIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
+    name.append(createProviderIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
     const plan = el('select', 'ag-settings-select ag-settings-plan-select') as HTMLSelectElement;
     plan.setAttribute('aria-label', `${AGENT_LABEL[agent]} 요금제`);
     fillSelect(plan, USAGE_PLANS[agent]);
@@ -906,7 +994,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   piUsageBlock.dataset.agent = 'pi';
   const piUsageHead = el('div', 'ag-settings-usage-head');
   const piUsageName = el('span', 'ag-settings-row-name');
-  piUsageName.append(providerIcon('pi'), document.createTextNode(AGENT_LABEL.pi));
+  piUsageName.append(createProviderIcon('pi'), document.createTextNode(AGENT_LABEL.pi));
   const piUsageCredits = el('span', 'ag-settings-row-detail');
   piUsageHead.append(piUsageName, piUsageCredits);
   const piUsageDay = el('div', 'ag-settings-usage-day');
@@ -915,6 +1003,35 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const piUsageUpdated = el('div', 'ag-settings-usage-updated');
   piUsageBlock.append(piUsageHead, piUsageDay, piUsageWeek, piUsageModels, piUsageUpdated);
   usageSection.body.appendChild(piUsageBlock);
+
+  // grok · cursor 는 요금제도 잔액도 없다 — 허브가 기록한 세션 · 오늘 · 주간 토큰을 그대로 보여준다.
+  const apiUsageBlocks = new Map<
+    AgentName,
+    {
+      root: HTMLElement;
+      session: HTMLElement;
+      day: HTMLElement;
+      week: HTMLElement;
+      models: HTMLElement;
+      updated: HTMLElement;
+    }
+  >();
+  for (const agent of API_USAGE_AGENTS) {
+    const block = el('div', 'ag-settings-usage-block');
+    block.dataset.agent = agent;
+    const head = el('div', 'ag-settings-usage-head');
+    const name = el('span', 'ag-settings-row-name');
+    name.append(createProviderIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
+    head.append(name);
+    const session = el('div', 'ag-settings-usage-day');
+    const day = el('div', 'ag-settings-usage-day');
+    const week = el('div', 'ag-settings-usage-day');
+    const models = el('div', 'ag-settings-usage-models');
+    const updated = el('div', 'ag-settings-usage-updated');
+    block.append(head, session, day, week, models, updated);
+    usageSection.body.appendChild(block);
+    apiUsageBlocks.set(agent, { root: block, session, day, week, models, updated });
+  }
 
   body.append(
     connection.root,
@@ -1057,7 +1174,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   /** 설정이 끝나기 전의 pi 는 기본 제공자 후보에서 빠진다. */
   function selectableAgents(): readonly AgentName[] {
-    return AGENTS.filter((agent) => agent !== 'pi' || piStatus?.setupComplete === true);
+    return PROVIDER_ORDER.filter((agent) => agent !== 'pi' || piStatus?.setupComplete === true);
   }
 
   function syncPrefsInputs(): void {
@@ -1066,18 +1183,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       selectableAgents().map((agent) => ({ id: agent, label: AGENT_LABEL[agent] })),
     );
     agentField.select.value = prefs.defaultAgent;
-    fillSelect(
-      modelField.select,
-      modelsForAgent(prefs.defaultAgent).map((model) => ({ id: model.id, label: model.label })),
-    );
+    fillSelectGrouped(modelField.select, modelGroupsForAgent(prefs.defaultAgent));
     modelField.select.value = resolveModelForAgent(prefs.defaultAgent, prefs.defaultModel);
-    fillSelect(
-      effortField.select,
-      effortsForAgent(prefs.defaultAgent, prefs.defaultModel).map((effort) => ({
-        id: effort.id,
-        label: effort.label,
-      })),
-    );
+    const effortOptions = effortsForAgent(prefs.defaultAgent, prefs.defaultModel);
+    // 추론 강도가 없는 프로바이더(cursor 등)에서는 줄 자체를 접는다.
+    effortField.field.hidden = effortOptions.length === 0;
+    fillSelect(effortField.select, [...effortOptions].reverse());
     effortField.select.value = resolveEffortForAgent(
       prefs.defaultAgent,
       prefs.defaultEffort,
@@ -1103,7 +1214,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   }
 
   function renderProviders(): void {
-    for (const agent of AGENTS) {
+    for (const agent of PROVIDER_ORDER) {
       const row = providerRows.get(agent);
       if (!row) continue;
       const setup = setupStatuses?.[agent];
@@ -1133,12 +1244,78 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     window.open(url, '_blank', 'noopener,noreferrer');
   }
 
+  /** 진행 중인 로그인의 주소·코드를 지운다. */
+  function clearSetupAuthPrompt(): void {
+    setupOauthPending = false;
+    setupAuthUrl = null;
+    setupUserCode = null;
+    if (setupCopyResetTimer) {
+      clearTimeout(setupCopyResetTimer);
+      setupCopyResetTimer = null;
+    }
+    setupAuthCopy.textContent = '주소 복사';
+    setupUserCodeCopy.textContent = '코드 복사';
+  }
+
+  /**
+   * 보안 컨텍스트(https·localhost)가 아니면 navigator.clipboard 자체가 없습니다.
+   * 원격 http 주소로 스튜디오를 여는 경우가 있어, 임시 textarea 로 한 번 더
+   * 시도하고 그것마저 막히면 실패를 버튼에 알립니다.
+   */
+  async function writeClipboardText(text: string): Promise<boolean> {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // 아래 폴백으로 넘어갑니다.
+    }
+    return copyTextByExecCommand(text);
+  }
+
+  function copyTextByExecCommand(text: string): boolean {
+    const holder = document.createElement('textarea');
+    holder.value = text;
+    holder.setAttribute('readonly', '');
+    holder.style.position = 'fixed';
+    holder.style.top = '0';
+    holder.style.left = '-9999px';
+    holder.style.opacity = '0';
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    document.body.appendChild(holder);
+    let copied = false;
+    try {
+      holder.select();
+      holder.setSelectionRange(0, text.length);
+      copied = document.execCommand('copy');
+    } catch {
+      copied = false;
+    }
+    holder.remove();
+    previous?.focus();
+    return copied;
+  }
+
+  async function copySetupText(text: string, button: HTMLButtonElement, label: string): Promise<void> {
+    const copied = await writeClipboardText(text);
+    if (setupCopyResetTimer) clearTimeout(setupCopyResetTimer);
+    setupAuthCopy.textContent = '주소 복사';
+    setupUserCodeCopy.textContent = '코드 복사';
+    button.textContent = copied ? '복사됨' : '복사 실패';
+    setupCopyResetTimer = setTimeout(() => {
+      setupCopyResetTimer = null;
+      button.textContent = label;
+    }, 1600);
+  }
+
   function openAgentSetup(agent: AgentName): void {
     setupAgent = agent;
     setupMessage = '';
     setupBusy = false;
     setupReauth = false;
     setupCodePending = false;
+    clearSetupAuthPrompt();
     resetSetupInstallProgress();
     setupKey.input.value = '';
     setupKeyBox.hidden = true;
@@ -1159,6 +1336,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (!setupOverlay.isConnected) return;
     if (setupBusy && setupAgent) bridge.cancelAgentSetup(setupAgent);
     setupBusy = false;
+    clearSetupAuthPrompt();
     setupOverlay.classList.remove('ag-open');
     setupOverlay.setAttribute('aria-hidden', 'true');
     resetSetupInstallProgress();
@@ -1228,6 +1406,18 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }
   }
 
+  /**
+   * 다시 그릴 때 방금 누른 버튼이 사라지면(로그인 취소·코드 확인 등) 포커스가
+   * <body> 로 떨어지고, Esc 를 받는 덮개 밖이라 키보드로 카드를 닫을 수 없게
+   * 됩니다. 포커스가 빠져나간 경우에만 카드로 되돌립니다.
+   */
+  function restoreSetupFocus(): void {
+    if (!setupOverlay.isConnected) return;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    setupDialog.focus();
+  }
+
   function renderAgentSetup(): void {
     if (!setupAgent) return;
     const agent = setupAgent;
@@ -1237,16 +1427,17 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       piBusy = setupBusy;
       if (setupMessage) piMessage = setupMessage;
       renderPi();
+      restoreSetupFocus();
       return;
     }
     const status = setupStatuses?.[agent] ?? null;
     const detected = providers?.[agent]?.available === true;
     const available = detected || status?.available === true || status?.installed === true;
     const connected = detected || status?.connected === true || status?.setupComplete === true;
-    setupHeroIcon.replaceChildren(providerIcon(agent));
+    setupHeroIcon.replaceChildren(createProviderIcon(agent));
     setupHeroTitle.textContent = AGENT_LABEL[agent];
-    setupInstallNote.textContent = `${AGENT_LABEL[agent]} CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.`;
-    setupKey.input.placeholder = agent === 'codex' ? 'sk-proj-…' : 'sk-ant-…';
+    setupInstallNote.textContent = SETUP_INSTALL_NOTE[agent];
+    setupKey.input.placeholder = API_KEY_PLACEHOLDER[agent];
     setupInstallPane.hidden = available;
     setupAuthPane.hidden = !available || (connected && !setupReauth);
     setupDonePane.hidden = !connected || setupReauth;
@@ -1266,8 +1457,24 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupOauth.disabled = setupBusy || connectionState !== 'connected';
     setupApiToggle.disabled = setupBusy || connectionState !== 'connected';
     setupKeySubmit.disabled = setupBusy || !setupKey.input.value.trim();
+    renderSetupLoginBox();
     setupCodeBox.hidden = agent !== 'claude' || !setupCodePending || !setupBusy;
     setupCodeSubmit.disabled = connectionState !== 'connected' || !setupCode.input.value.trim();
+    restoreSetupFocus();
+  }
+
+  /** 브라우저 로그인이 도는 동안만 주소·코드 상자를 세운다. */
+  function renderSetupLoginBox(): void {
+    const authorizing = setupOauthPending && setupBusy;
+    setupLoginBox.hidden = !authorizing;
+    setupAuthUrlRow.hidden = !setupAuthUrl;
+    if (setupAuthUrl) {
+      setupAuthLink.href = setupAuthUrl;
+      setupAuthLink.textContent = setupAuthUrl;
+      setupAuthLink.title = setupAuthUrl;
+    }
+    setupUserCodeRow.hidden = !setupUserCode;
+    if (setupUserCode) setupUserCodeValue.textContent = setupUserCode;
   }
 
   async function refreshSetupStatuses(): Promise<void> {
@@ -1276,6 +1483,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupStatuses = statuses;
     renderProviders();
     renderAgentSetup();
+    renderUsage();
   }
 
   async function installSelectedAgent(): Promise<void> {
@@ -1305,6 +1513,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (method === 'api-key' && !key) return;
     setupBusy = true;
     setupMessage = '';
+    clearSetupAuthPrompt();
+    setupOauthPending = method === 'oauth';
     resetSetupInstallProgress();
     if (setupAgent === 'pi') piMessage = '';
     renderAgentSetup();
@@ -1313,10 +1523,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (!started) {
       setupBusy = false;
       setupMessage = '로그인을 시작하지 못했어요.';
+      clearSetupAuthPrompt();
       renderAgentSetup();
       return;
     }
     keyInput.value = '';
+    // pi 는 인증 주소를 시작 응답에만 실어 보낸다.
+    if (method === 'oauth' && started.authUrl) setupAuthUrl = started.authUrl;
     if (method === 'oauth' && setupAgent === 'claude') {
       // claude 는 브라우저 로그인 뒤 표시되는 인증 코드를 CLI 에 넘겨야 로그인이 끝난다.
       setupCodePending = true;
@@ -1471,9 +1684,41 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       : '';
   }
 
+  /** grok · cursor 사용량 — 한도가 없어 미터 대신 세션 · 오늘 · 주간 누적만 쓴다. */
+  function renderApiUsage(): void {
+    for (const agent of API_USAGE_AGENTS) {
+      const ui = apiUsageBlocks.get(agent);
+      if (!ui) continue;
+      const providerUsage = usage?.providers?.[agent] ?? null;
+      const turns = (providerUsage?.session.turns ?? 0)
+        + (providerUsage?.day.turns ?? 0)
+        + (providerUsage?.week.turns ?? 0);
+      const setup = setupStatuses?.[agent] ?? null;
+      // 설정을 마쳤거나 기록이 남아 있을 때만 자리를 차지한다.
+      ui.root.hidden = turns === 0
+        && setup?.setupComplete !== true
+        && setup?.connected !== true;
+      if (ui.root.hidden) continue;
+      ui.session.textContent = providerUsage
+        ? `세션 · ${formatTokens(providerUsage.session.weightedTokens)} 토큰 · ${providerUsage.session.turns}턴`
+        : '세션 · 기록 없음';
+      ui.day.textContent = providerUsage
+        ? `오늘 · ${formatTokens(providerUsage.day.weightedTokens)} 토큰 · ${providerUsage.day.turns}턴`
+        : '오늘 · 기록 없음';
+      ui.week.textContent = providerUsage
+        ? `주간 · ${formatTokens(providerUsage.week.weightedTokens)} 토큰 · ${providerUsage.week.turns}턴`
+        : '주간 · 기록 없음';
+      ui.models.replaceChildren(...buildModelRows(providerUsage, agent));
+      ui.updated.textContent = providerUsage?.updatedAt
+        ? `${formatRelativeTime(providerUsage.updatedAt)} 기록`
+        : '';
+    }
+  }
+
   function renderUsage(): void {
     renderCliproxy();
     renderPiUsage();
+    renderApiUsage();
     for (const agent of PLAN_AGENTS) {
       const ui = usageBlocks.get(agent);
       if (!ui) continue;
@@ -1959,17 +2204,34 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           providers = ev.providers;
           renderProviders();
           break;
-        case 'agent-setup-status':
+        case 'agent-setup-status': {
           setupStatuses = ev.statuses;
-          setupBusy = false;
-          setupReauth = false;
-          setupCodePending = false;
+          // 로그인·설치가 아직 진행 중이면 주기 방송이 카드 상태(주소·코드)를 지우지 않는다.
+          const inFlight = setupAgent !== null && setupBusy
+            && (ev.statuses[setupAgent]?.authenticating === true
+              || ev.statuses[setupAgent]?.installing === true);
+          if (!inFlight) {
+            setupBusy = false;
+            setupReauth = false;
+            setupCodePending = false;
+            clearSetupAuthPrompt();
+          }
           renderProviders();
           renderAgentSetup();
+          // 설정을 마친 grok · cursor 는 기록이 없어도 사용량 칸을 연다.
+          renderUsage();
+          // cursor 동적 모델 목록이 도착하면 기본 모델 선택지도 다시 채운다.
+          syncPrefsInputs();
           break;
+        }
         case 'agent-setup-progress':
           if (setupAgent === ev.agent) {
             setupBusy = ev.state !== 'done';
+            // API 키 검증 중에도 authorizing 이 온다 — 브라우저 로그인 근거가 있을 때만 상자를 연다.
+            if (ev.state === 'authorizing' && (ev.authUrl || ev.userCode)) setupOauthPending = true;
+            if (ev.authUrl) setupAuthUrl = ev.authUrl;
+            if (ev.userCode) setupUserCode = ev.userCode;
+            if (ev.state === 'done') clearSetupAuthPrompt();
             maybeOpenAuthUrl(ev.authUrl);
             if (typeof ev.percent === 'number') {
               setSetupInstallProgress(ev.percent, ev.phase ?? ev.state);
@@ -1982,6 +2244,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
             setupBusy = false;
             setupCodePending = false;
             setupMessage = ev.message;
+            clearSetupAuthPrompt();
             resetSetupInstallProgress();
             if (setupAgent === 'pi') piMessage = ev.message;
             renderAgentSetup();
@@ -2058,6 +2321,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       if (setupProgressResetTimer) {
         clearTimeout(setupProgressResetTimer);
         setupProgressResetTimer = null;
+      }
+      if (setupCopyResetTimer) {
+        clearTimeout(setupCopyResetTimer);
+        setupCopyResetTimer = null;
       }
       if (setupProgressCreepTimer) clearInterval(setupProgressCreepTimer);
       if (piProgressCreepTimer) clearInterval(piProgressCreepTimer);

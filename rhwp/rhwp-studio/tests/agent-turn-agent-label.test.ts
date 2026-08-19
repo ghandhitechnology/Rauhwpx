@@ -60,3 +60,15 @@ test('턴이 없으면 호출 라벨대로 set 을 연다', () => {
   assert.equal(sets.length, 1);
   assert.equal(sets[0].agent, 'codex');
 });
+
+test('grok · cursor 턴도 자기 이름으로 change-set 을 연다', () => {
+  for (const agent of ['grok', 'cursor'] as const) {
+    const mgr = makeManager();
+    mgr.beginTurn(agent);
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 5 }, '!');
+    const sets = mgr.getChangeSets();
+    assert.equal(sets.length, 1);
+    assert.equal(sets[0].agent, agent, '리뷰 카드는 돌고 있는 에이전트를 내건다');
+    assert.equal(sets[0].ops[0].agent, agent);
+  }
+});

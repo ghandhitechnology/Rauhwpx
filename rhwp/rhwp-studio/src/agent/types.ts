@@ -14,7 +14,7 @@ import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 
 export const AGENT_PROTOCOL_VERSION = 3;
 
-export type AgentName = 'claude' | 'codex' | 'pi';
+export type AgentName = 'claude' | 'codex' | 'pi' | 'grok' | 'cursor';
 export type PermissionProfile = 'safe' | 'unrestricted';
 export type WritingStyleLanguage = 'ko' | 'en';
 export type WritingStyleProgressState =
@@ -282,6 +282,11 @@ export interface AgentSetupStatus {
   latestVersion: string | null;
   updateRequired: boolean;
   error: string | null;
+  /**
+   * CLI 가 직접 알려 주는 모델 목록 — 지금은 cursor 만 보낸다
+   * (`cursor-agent --list-models`). 로그인 전이거나 조회에 실패하면 빈 배열.
+   */
+  models?: readonly string[];
 }
 
 export type AgentSetupStatusMap = Record<AgentName, AgentSetupStatus>;
@@ -294,7 +299,9 @@ export interface AgentSetupAuthStart {
 /** 요금제 — 한도 계산의 기준이 되므로 프로바이더별로 값이 다르다. */
 export type ClaudeUsagePlan = 'pro' | 'max5x' | 'max20x' | 'api';
 export type CodexUsagePlan = 'plus' | 'pro' | 'api';
-export type UsagePlan = ClaudeUsagePlan | CodexUsagePlan;
+/** pi · grok · cursor 는 사용량 기반 API 한 가지뿐이다. */
+export type ApiOnlyUsagePlan = 'api';
+export type UsagePlan = ClaudeUsagePlan | CodexUsagePlan | ApiOnlyUsagePlan;
 
 /** 한 창(세션 5시간 / 오늘 / 주간)의 누적치. percent 는 한도가 없으면 null. */
 export interface UsageWindow {
@@ -358,7 +365,7 @@ export interface ProviderUsage {
 }
 
 export interface UsageSummary {
-  plans: { claude: string; codex: string; pi: string };
+  plans: Record<AgentName, string>;
   providers: Record<AgentName, ProviderUsage>;
   cliproxy?: CliproxyStatus;
   /** pi(OpenRouter) 가 설정돼 있을 때만 온다. */
@@ -421,8 +428,21 @@ export function isCodexUsagePlan(value: unknown): value is CodexUsagePlan {
   return value === 'plus' || value === 'pro' || value === 'api';
 }
 
+export function isApiOnlyUsagePlan(value: unknown): value is ApiOnlyUsagePlan {
+  return value === 'api';
+}
+
+/** 프로바이더마다 허용 요금제가 다르다 — 표로 갈라 새 프로바이더가 조용히 섞이지 않게 한다. */
+const USAGE_PLAN_GUARDS: Record<AgentName, (value: unknown) => boolean> = {
+  claude: isClaudeUsagePlan,
+  codex: isCodexUsagePlan,
+  pi: isApiOnlyUsagePlan,
+  grok: isApiOnlyUsagePlan,
+  cursor: isApiOnlyUsagePlan,
+};
+
 export function isUsagePlanForAgent(agent: AgentName, value: unknown): boolean {
-  return agent === 'claude' ? isClaudeUsagePlan(value) : isCodexUsagePlan(value);
+  return USAGE_PLAN_GUARDS[agent](value);
 }
 
 export interface ProductSkillFile {
@@ -528,6 +548,8 @@ export type SidebarEvent =
       percent?: number;
       detail?: string;
       authUrl?: string;
+      /** 기기 인증 코드 — 브라우저에서 확인시켜야 하는 CLI(codex · grok)에만 온다. */
+      userCode?: string;
       activity?: boolean;
       receivedBytes?: number;
       totalBytes?: number;

@@ -1,7 +1,9 @@
+import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mjs';
+
 /**
  * Shared helpers for agent CLI backends.
  *
- * @typedef {'claude' | 'codex'} AgentName
+ * @typedef {'claude' | 'codex' | 'pi' | 'grok' | 'cursor'} AgentName
  *
  * @typedef {(
  *   | { type: 'turn-start';   agent: AgentName }
@@ -39,6 +41,15 @@
  * @property {string} [codexAuthPath]
  * @property {string} [codexBin]
  * @property {string} [claudeBin]
+ * @property {string} [grokBin]
+ * @property {string} [grokHome]
+ * @property {string} [grokAuthPath]
+ * @property {string} [cursorBin]
+ * @property {string} [cursorSourceDir]
+ * @property {string} [piBin]
+ * @property {string} [piRoot]
+ * @property {string} [openRouterApiKey]
+ * @property {boolean} [reasoning]
  * @property {Record<string, string>} [providerEnv]
  * @property {string} [model]
  * @property {string} [effort]
@@ -51,7 +62,7 @@
  * @property {(profile: 'safe'|'unrestricted') => void} setPermissionProfile
  * @property {(mode: {workflow: 'direct'|'plan'; phase: 'planning'|'awaiting-approval'|'switching'|'implementing'; capabilityEpoch: string|number}) => Promise<void>} setExecutionMode
  * @property {() => void} interrupt
- * @property {() => void} dispose
+ * @property {() => Promise<boolean>} dispose 자식 프로세스 트리가 끝날 때까지 기다린 결과를 돌려준다.
  */
 
 /**
@@ -109,7 +120,8 @@ export function normalizeUsageTokens(raw) {
     inputTokens: usageCount(raw.input_tokens, raw.inputTokens),
     outputTokens: usageCount(raw.output_tokens, raw.outputTokens),
     cacheReadTokens: usageCount(raw.cache_read_input_tokens, raw.cacheReadInputTokens, raw.cached_input_tokens, raw.cacheReadTokens),
-    cacheCreationTokens: usageCount(raw.cache_creation_input_tokens, raw.cacheCreationInputTokens, raw.cacheCreationTokens),
+    // cursor 는 캐시 생성분을 cacheWriteTokens 로 보고한다.
+    cacheCreationTokens: usageCount(raw.cache_creation_input_tokens, raw.cacheCreationInputTokens, raw.cacheCreationTokens, raw.cacheWriteTokens),
   };
   const total = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheCreationTokens;
   return total > 0 ? usage : null;
@@ -249,6 +261,178 @@ export function mcpCapabilityEnv(opts = {}) {
     ...(opts.sessionId === undefined || opts.sessionId === null || !String(opts.sessionId)
       ? {}
       : { RHWP_SESSION_ID: String(opts.sessionId) }),
+  };
+}
+
+/** CLI stderr 를 종료 사유로 만들 때 보관하는 꼬리 길이. */
+const STDERR_TAIL_LIMIT = 16_000;
+/** 'exit' 뒤 'close' 가 오지 않을 때(자손이 파이프를 붙든 경우) 턴 판정을 미룰 상한. */
+const EXIT_CLOSE_GRACE_MS = 2_000;
+
+/**
+ * 턴마다 CLI 를 새로 스폰하는 하니스(grok/cursor)의 공통 프로세스 수명주기.
+ * 턴 개폐, stderr 꼬리 수집, 종료 판정, 모드 전환 대기, 인터럽트/폐기를 한곳에서
+ * 관리한다. 와이어 포맷 파싱은 하니스가 그대로 소유한다.
+ *
+ * @param {Object} config
+ * @param {AgentName} config.agent
+ * @param {(evt: UnifiedAgentEvent) => void} config.onEvent
+ * @param {(stderrText: string, code: number|null, signal: NodeJS.Signals|null) => string} config.formatExitError
+ * @param {string} [config.processLabel] 사용자에게 보이는 실행 파일 이름 (기본값: agent)
+ * @param {(child: import('node:child_process').ChildProcess) => unknown} [config.terminateProcess]
+ * @param {(child: import('node:child_process').ChildProcess | null) => Promise<boolean>} [config.waitForExit]
+ * @param {number} [config.graceMs]
+ * @param {number} [config.stderrTailLimit]
+ */
+export function createTurnProcessLifecycle({
+  agent,
+  onEvent,
+  formatExitError,
+  processLabel = agent,
+  terminateProcess = terminateProcessTree,
+  waitForExit = waitForProcessTreeExit,
+  graceMs = EXIT_CLOSE_GRACE_MS,
+  stderrTailLimit = STDERR_TAIL_LIMIT,
+}) {
+  /** @type {import('node:child_process').ChildProcess | null} */
+  let child = null;
+  let turnOpen = false;
+  // 이번 턴의 result 줄을 파싱했는가 — 프로세스 사망 폴백의 판단 근거다.
+  let turnCompleted = false;
+  let disposed = false;
+  let stderrTail = '';
+  /** @type {Promise<void>} */
+  let childExitPromise = Promise.resolve();
+  /** @type {(() => void) | null} */
+  let resolveChildExit = null;
+
+  /** @param {UnifiedAgentEvent} evt */
+  function endTurn(evt) {
+    if (!turnOpen) return;
+    turnOpen = false;
+    onEvent(evt);
+  }
+
+  function killChild() {
+    const proc = child;
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+    terminateProcess(proc);
+  }
+
+  return {
+    isDisposed: () => disposed,
+    isTurnOpen: () => turnOpen,
+    endTurn,
+    /** result 줄을 파싱했음을 기록한다 — 종료 판정이 이 값을 본다. */
+    markTurnCompleted() {
+      turnCompleted = true;
+    },
+    /** 턴을 열고 turn-start 를 낸다. 하니스별 턴 상태는 이 호출 전에 초기화한다. */
+    beginTurn() {
+      turnOpen = true;
+      turnCompleted = false;
+      stderrTail = '';
+      onEvent({ type: 'turn-start', agent });
+    },
+    /** 스폰 전 준비나 spawn 자체가 실패한 턴을 닫는다. */
+    failStart(error) {
+      onEvent({ type: 'error', agent, message: `failed to start ${processLabel}: ${error?.message ?? error}` });
+      endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
+    },
+    /**
+     * 스폰한 자식을 이번 턴의 소유 프로세스로 붙인다. stdout 은 NDJSON 으로 파싱해
+     * onStdoutLine 에 넘기고, stderr 는 꼬리에 모으면서 그대로 중계한다.
+     *
+     * @param {import('node:child_process').ChildProcess & { stdout: NodeJS.ReadableStream, stderr: NodeJS.ReadableStream }} proc stdio 가 파이프로 열린 자식
+     * @param {(obj: any) => void} onStdoutLine
+     */
+    attachChild(proc, onStdoutLine) {
+      child = proc;
+      childExitPromise = new Promise((resolve) => { resolveChildExit = resolve; });
+      // 죽어가는 이전 턴의 자식이 버퍼에 남은 출력을 뒤늦게 흘려도 다음 턴의
+      // 이벤트로 새면 안 된다 — 소유 프로세스가 바뀌면 그 뒤 출력은 전부 버린다.
+      const readStdout = createLineReader(onStdoutLine);
+      proc.stdout.on('data', (chunk) => {
+        if (proc !== child || disposed) return;
+        readStdout(chunk);
+      });
+      proc.stderr.on('data', (chunk) => {
+        if (proc !== child || disposed) return;
+        const chunkText = chunk.toString();
+        stderrTail = (stderrTail + chunkText).slice(-stderrTailLimit);
+        for (const line of chunkText.split('\n')) {
+          if (line.trim()) process.stderr.write(`[${agent}] ${line}\n`);
+        }
+      });
+      proc.on('error', (err) => {
+        if (proc !== child) return;
+        process.stderr.write(`[${agent}] spawn error: ${err?.message ?? err}\n`);
+        if (turnOpen) {
+          onEvent({ type: 'error', agent, message: `${processLabel} process error: ${err?.message ?? err}` });
+          endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
+        }
+      });
+      // 'exit' 은 stdout 꼬리가 아직 파싱되기 전에 온다 — 큰 출력으로 끝난 성공 턴이
+      // 여기서 실패로 처리되면 스테이징 편집이 통째로 되돌아간다. 턴 판정은 stdio 가
+      // 모두 닫힌 'close' 에서만 하고, 'exit' 은 종료 코드 기록만 한다.
+      /** @type {{ code: number|null, signal: NodeJS.Signals|null } | null} */
+      let exitInfo = null;
+      /** @type {ReturnType<typeof setTimeout> | null} */
+      let closeGraceTimer = null;
+      /**
+       * @param {number|null} code
+       * @param {NodeJS.Signals|null} signal
+       */
+      const settleExit = (code, signal) => {
+        if (proc !== child) return;
+        if (closeGraceTimer) {
+          clearTimeout(closeGraceTimer);
+          closeGraceTimer = null;
+        }
+        if (turnOpen && !disposed) {
+          if (!turnCompleted && code !== 0) {
+            // result 없이 비정상 종료 — 스트림이 잘렸거나 stderr 로만 끝난 실행이다.
+            onEvent({ type: 'error', agent, message: formatExitError(stderrTail, code, signal) });
+          }
+          endTurn({ type: 'turn-end', agent, stopReason: turnCompleted ? 'completed' : 'exited' });
+        }
+        child = null;
+        resolveChildExit?.();
+        resolveChildExit = null;
+      };
+      proc.on('exit', (code, signal) => {
+        if (proc !== child) return;
+        exitInfo = { code, signal };
+        // 프로세스는 이미 죽었으므로 모드 전환 대기는 여기서 풀어 준다.
+        resolveChildExit?.();
+        resolveChildExit = null;
+        // 자손이 파이프를 붙들어 'close' 가 오지 않는 경우를 위한 상한이다.
+        closeGraceTimer = setTimeout(() => {
+          closeGraceTimer = null;
+          settleExit(code ?? null, signal ?? null);
+        }, graceMs);
+        closeGraceTimer.unref?.();
+      });
+      proc.on('close', (code, signal) => {
+        settleExit(code ?? exitInfo?.code ?? null, signal ?? exitInfo?.signal ?? null);
+      });
+    },
+    killChild,
+    /** 실행 중인 자식이 끝날 때까지 기다린다 — 모드 전환이 다음 스폰을 늦추는 지점. */
+    waitForChildExit: () => childExitPromise,
+    interrupt() {
+      killChild();
+      endTurn({ type: 'turn-end', agent, stopReason: 'interrupted' });
+    },
+    dispose() {
+      disposed = true;
+      turnOpen = false;
+      // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
+      try { child?.stdout?.removeAllListeners('data'); } catch {}
+      const exited = waitForExit(child);
+      killChild();
+      return exited;
+    },
   };
 }
 
