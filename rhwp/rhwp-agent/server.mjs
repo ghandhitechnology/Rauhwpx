@@ -1430,6 +1430,7 @@ async function handleStudioMessage(record, sock, msg) {
           agent,
           state: entry.state,
           ...(entry.authUrl ? { authUrl: entry.authUrl } : {}),
+          ...(entry.userCode ? { userCode: entry.userCode } : {}),
         })).then(async (status) => {
           cliSetupStatus[agent] = status;
           if (agent === 'codex') {
@@ -1453,7 +1454,14 @@ async function handleStudioMessage(record, sock, msg) {
           if (agent === 'pi') replyToStudio(record, sock, { v: 1, type: 'pi-status', status: piStatus });
           void providerHealth.check(true).then((providers) => replyToStudio(record, sock, { v: 1, type: 'provider-status', providers }));
         })
-        .catch((e) => sendAgentSetupError(record, sock, null, agent, e, 'AGENT_AUTH_FAILED'));
+        .catch((e) => {
+          // 사용자가 스스로 취소한 로그인은 오류 카드 대신 새 상태만 보낸다.
+          if (e?.code === 'AGENT_AUTH_CANCELLED') {
+            void agentSetupStatuses().then((statuses) => replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses }));
+            return;
+          }
+          sendAgentSetupError(record, sock, null, agent, e, 'AGENT_AUTH_FAILED');
+        });
       return;
     }
     case 'agent-setup-auth-code': {

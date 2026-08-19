@@ -127,6 +127,50 @@ test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에
   assert.match(settingsCss, /transition: width 480ms cubic-bezier/);
 });
 
+test('브라우저 로그인은 인증 주소와 기기 코드를 카드 안에 직접 그린다', () => {
+  // 팝업이 막혀도 사용자가 주소를 직접 열 수 있어야 한다.
+  assert.match(settings, /const setupLoginBox = el\('div', 'ag-agent-login-box'\)/);
+  assert.match(settings, /const setupAuthLink = el\('a', 'ag-agent-login-url'\)/);
+  assert.match(settings, /setupAuthLink\.target = '_blank'/);
+  assert.match(settings, /setupAuthLink\.rel = 'noopener noreferrer'/);
+  // 긴 주소는 잘라 보여주고 전체는 title 로 남긴다.
+  assert.match(settings, /setupAuthLink\.title = setupAuthUrl/);
+  assert.match(settingsCss, /\.ag-agent-login-url \{[\s\S]*text-overflow: ellipsis/);
+  // 열기 버튼은 클릭 핸들러 안에서 바로 창을 연다(제스처 안이라 차단되지 않는다).
+  assert.match(
+    settings,
+    /setupAuthOpen\.addEventListener\('click', \(\) => \{[\s\S]*window\.open\(setupAuthUrl, '_blank', 'noopener,noreferrer'\)/,
+  );
+  assert.match(settings, /'브라우저에서 열기'/);
+  assert.match(settings, /'주소 복사'/);
+  assert.match(settings, /'코드 복사'/);
+  assert.match(settings, /navigator\.clipboard\.writeText\(text\)/);
+  assert.match(settings, /button\.textContent = '복사됨'/);
+  // 기기 코드와 안내 문구.
+  assert.match(settings, /const setupUserCodeValue = el\('strong', 'ag-agent-login-code-value'\)/);
+  assert.match(settings, /if \(setupUserCode\) setupUserCodeValue\.textContent = setupUserCode/);
+  assert.match(settings, /'브라우저에서 이 코드를 확인해 주세요\.'/);
+  assert.match(settings, /'브라우저에서 로그인을 마치면 자동으로 완료돼요\.'/);
+  assert.match(settingsCss, /\.ag-agent-login-code-value \{[\s\S]*user-select: all/);
+  // 로그인이 도는 동안 취소 버튼이 함께 선다.
+  assert.match(settings, /el\('button', 'ag-settings-btn ag-agent-login-cancel', '로그인 취소'\)/);
+  assert.match(
+    settings,
+    /setupLoginCancel\.addEventListener\('click', \(\) => \{\s*if \(setupAgent\) bridge\.cancelAgentSetup\(setupAgent\);/,
+  );
+  // 상자는 oauth 로그인이 도는 동안에만 선다.
+  assert.match(settings, /const authorizing = setupOauthPending && setupBusy;\s*setupLoginBox\.hidden = !authorizing/);
+  assert.match(settings, /if \(ev\.authUrl\) setupAuthUrl = ev\.authUrl;\s*if \(ev\.userCode\) setupUserCode = ev\.userCode;/);
+  assert.match(settings, /if \(method === 'oauth' && started\.authUrl\) setupAuthUrl = started\.authUrl/);
+  // 자동 열기 시도는 그대로 남는다.
+  assert.match(settings, /maybeOpenAuthUrl\(ev\.authUrl\)/);
+  // claude 인증 코드 입력칸은 로그인 상자 아래에 붙는다.
+  assert.match(settings, /setupKeyBox,\s*setupLoginBox,\s*setupCodeBox,/);
+  // 로그인이 끝나거나 실패하면 주소·코드를 지운다.
+  assert.match(settings, /function clearSetupAuthPrompt\(\): void \{\s*setupOauthPending = false;\s*setupAuthUrl = null;\s*setupUserCode = null;/);
+  assert.match(settings, /if \(ev\.state === 'done'\) clearSetupAuthPrompt\(\)/);
+});
+
 test('자동 하네스 업데이트 실패는 프로바이더 카드에 조용히 표시한다', () => {
   assert.match(settings, /if \(setup\?\.updateRequired\) \{[\s\S]*'업데이트 필요'/);
   assert.match(settings, /classList\.toggle\('ag-update-required'/);

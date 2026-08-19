@@ -548,6 +548,8 @@ export type SidebarEvent =
       percent?: number;
       detail?: string;
       authUrl?: string;
+      /** 기기 인증 코드 — 브라우저에서 확인시켜야 하는 CLI(codex · grok)에만 온다. */
+      userCode?: string;
       activity?: boolean;
       receivedBytes?: number;
       totalBytes?: number;

@@ -1452,6 +1452,7 @@ class AgentBridgeImpl implements AgentBridge {
             : {}),
           ...(typeof msg.detail === 'string' ? { detail: msg.detail } : {}),
           ...(typeof msg.authUrl === 'string' ? { authUrl: msg.authUrl } : {}),
+          ...(typeof msg.userCode === 'string' ? { userCode: msg.userCode } : {}),
           ...(msg.activity === true ? { activity: true } : {}),
           ...(typeof msg.receivedBytes === 'number' ? { receivedBytes: msg.receivedBytes } : {}),
           ...(typeof msg.totalBytes === 'number' ? { totalBytes: msg.totalBytes } : {}),

@@ -310,6 +310,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let setupMessage = '';
   let setupReauth = false;
   let setupCodePending = false;
+  /** 브라우저 로그인이 진행 중인 동안 카드에 직접 그릴 인증 주소와 기기 코드. */
+  let setupOauthPending = false;
+  let setupAuthUrl: string | null = null;
+  let setupUserCode: string | null = null;
+  let setupCopyResetTimer: ReturnType<typeof setTimeout> | null = null;
   let setupProgressPercent = 0;
   let setupProgressLabel = '';
   let setupProgressPhase = '';
@@ -576,6 +581,40 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const setupKeySubmit = el('button', 'ag-agent-setup-primary', '키 연결');
   setupKeySubmit.type = 'button';
   setupKeyBox.append(setupKey.field, setupKeySubmit);
+  // 브라우저 로그인 상자 — 팝업이 막혀도 주소와 기기 코드를 카드 안에서 직접 준다.
+  const setupLoginBox = el('div', 'ag-agent-login-box');
+  setupLoginBox.hidden = true;
+  const setupAuthUrlRow = el('div', 'ag-agent-login-url-row');
+  setupAuthUrlRow.hidden = true;
+  const setupAuthLink = el('a', 'ag-agent-login-url');
+  setupAuthLink.target = '_blank';
+  setupAuthLink.rel = 'noopener noreferrer';
+  const setupAuthActions = el('div', 'ag-agent-login-actions');
+  const setupAuthOpen = el('button', 'ag-settings-btn', '브라우저에서 열기');
+  setupAuthOpen.type = 'button';
+  const setupAuthCopy = el('button', 'ag-settings-btn', '주소 복사');
+  setupAuthCopy.type = 'button';
+  setupAuthActions.append(setupAuthOpen, setupAuthCopy);
+  setupAuthUrlRow.append(setupAuthLink, setupAuthActions);
+  const setupUserCodeRow = el('div', 'ag-agent-login-code');
+  setupUserCodeRow.hidden = true;
+  const setupUserCodeValue = el('strong', 'ag-agent-login-code-value');
+  const setupUserCodeCopy = el('button', 'ag-settings-btn', '코드 복사');
+  setupUserCodeCopy.type = 'button';
+  const setupUserCodeCaption = el(
+    'p',
+    'ag-agent-login-caption',
+    '브라우저에서 이 코드를 확인해 주세요.',
+  );
+  setupUserCodeRow.append(setupUserCodeValue, setupUserCodeCopy, setupUserCodeCaption);
+  const setupLoginWait = el(
+    'p',
+    'ag-agent-login-wait',
+    '브라우저에서 로그인을 마치면 자동으로 완료돼요.',
+  );
+  const setupLoginCancel = el('button', 'ag-settings-btn ag-agent-login-cancel', '로그인 취소');
+  setupLoginCancel.type = 'button';
+  setupLoginBox.append(setupAuthUrlRow, setupUserCodeRow, setupLoginWait, setupLoginCancel);
   const setupCodeBox = el('div', 'ag-agent-key-box');
   setupCodeBox.hidden = true;
   const setupCodeNote = el('p', 'ag-agent-setup-copy', '브라우저에서 로그인하면 인증 코드가 표시됩니다. 코드를 붙여넣어 주세요.');
@@ -583,7 +622,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const setupCodeSubmit = el('button', 'ag-agent-setup-primary', '코드 확인');
   setupCodeSubmit.type = 'button';
   setupCodeBox.append(setupCodeNote, setupCode.field, setupCodeSubmit);
-  setupAuthPane.append(setupAuthHeading, setupOauth, setupApiToggle, setupKeyBox, setupCodeBox);
+  setupAuthPane.append(
+    setupAuthHeading,
+    setupOauth,
+    setupApiToggle,
+    setupKeyBox,
+    setupLoginBox,
+    setupCodeBox,
+  );
 
   const setupDonePane = el('div', 'ag-agent-setup-pane ag-agent-setup-done');
   const setupDoneMark = el('span', 'ag-agent-setup-done-mark', '✓');
@@ -619,6 +665,25 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       event.preventDefault();
       void startSetupAuth('api-key');
     }
+  });
+  // 직접 클릭 안에서 여는 창은 팝업 차단에 걸리지 않는다.
+  setupAuthOpen.addEventListener('click', () => {
+    if (!setupAuthUrl) return;
+    openedAuthUrls.add(setupAuthUrl);
+    window.open(setupAuthUrl, '_blank', 'noopener,noreferrer');
+  });
+  setupAuthCopy.addEventListener('click', () => {
+    if (setupAuthUrl) void copySetupText(setupAuthUrl, setupAuthCopy, '주소 복사');
+  });
+  setupUserCodeCopy.addEventListener('click', () => {
+    if (setupUserCode) void copySetupText(setupUserCode, setupUserCodeCopy, '코드 복사');
+  });
+  setupLoginCancel.addEventListener('click', () => {
+    if (setupAgent) bridge.cancelAgentSetup(setupAgent);
+    setupBusy = false;
+    setupCodePending = false;
+    clearSetupAuthPrompt();
+    renderAgentSetup();
   });
   setupCodeSubmit.addEventListener('click', submitSetupAuthCode);
   setupCode.input.addEventListener('keydown', (event) => {
@@ -1192,12 +1257,42 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     window.open(url, '_blank', 'noopener,noreferrer');
   }
 
+  /** 진행 중인 로그인의 주소·코드를 지운다. */
+  function clearSetupAuthPrompt(): void {
+    setupOauthPending = false;
+    setupAuthUrl = null;
+    setupUserCode = null;
+    if (setupCopyResetTimer) {
+      clearTimeout(setupCopyResetTimer);
+      setupCopyResetTimer = null;
+    }
+    setupAuthCopy.textContent = '주소 복사';
+    setupUserCodeCopy.textContent = '코드 복사';
+  }
+
+  async function copySetupText(text: string, button: HTMLButtonElement, label: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      return;
+    }
+    if (setupCopyResetTimer) clearTimeout(setupCopyResetTimer);
+    setupAuthCopy.textContent = '주소 복사';
+    setupUserCodeCopy.textContent = '코드 복사';
+    button.textContent = '복사됨';
+    setupCopyResetTimer = setTimeout(() => {
+      setupCopyResetTimer = null;
+      button.textContent = label;
+    }, 1600);
+  }
+
   function openAgentSetup(agent: AgentName): void {
     setupAgent = agent;
     setupMessage = '';
     setupBusy = false;
     setupReauth = false;
     setupCodePending = false;
+    clearSetupAuthPrompt();
     resetSetupInstallProgress();
     setupKey.input.value = '';
     setupKeyBox.hidden = true;
@@ -1218,6 +1313,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (!setupOverlay.isConnected) return;
     if (setupBusy && setupAgent) bridge.cancelAgentSetup(setupAgent);
     setupBusy = false;
+    clearSetupAuthPrompt();
     setupOverlay.classList.remove('ag-open');
     setupOverlay.setAttribute('aria-hidden', 'true');
     resetSetupInstallProgress();
@@ -1325,8 +1421,23 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupOauth.disabled = setupBusy || connectionState !== 'connected';
     setupApiToggle.disabled = setupBusy || connectionState !== 'connected';
     setupKeySubmit.disabled = setupBusy || !setupKey.input.value.trim();
+    renderSetupLoginBox();
     setupCodeBox.hidden = agent !== 'claude' || !setupCodePending || !setupBusy;
     setupCodeSubmit.disabled = connectionState !== 'connected' || !setupCode.input.value.trim();
+  }
+
+  /** 브라우저 로그인이 도는 동안만 주소·코드 상자를 세운다. */
+  function renderSetupLoginBox(): void {
+    const authorizing = setupOauthPending && setupBusy;
+    setupLoginBox.hidden = !authorizing;
+    setupAuthUrlRow.hidden = !setupAuthUrl;
+    if (setupAuthUrl) {
+      setupAuthLink.href = setupAuthUrl;
+      setupAuthLink.textContent = setupAuthUrl;
+      setupAuthLink.title = setupAuthUrl;
+    }
+    setupUserCodeRow.hidden = !setupUserCode;
+    if (setupUserCode) setupUserCodeValue.textContent = setupUserCode;
   }
 
   async function refreshSetupStatuses(): Promise<void> {
@@ -1365,6 +1476,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (method === 'api-key' && !key) return;
     setupBusy = true;
     setupMessage = '';
+    clearSetupAuthPrompt();
+    setupOauthPending = method === 'oauth';
     resetSetupInstallProgress();
     if (setupAgent === 'pi') piMessage = '';
     renderAgentSetup();
@@ -1373,10 +1486,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (!started) {
       setupBusy = false;
       setupMessage = '로그인을 시작하지 못했어요.';
+      clearSetupAuthPrompt();
       renderAgentSetup();
       return;
     }
     keyInput.value = '';
+    // pi 는 인증 주소를 시작 응답에만 실어 보낸다.
+    if (method === 'oauth' && started.authUrl) setupAuthUrl = started.authUrl;
     if (method === 'oauth' && setupAgent === 'claude') {
       // claude 는 브라우저 로그인 뒤 표시되는 인증 코드를 CLI 에 넘겨야 로그인이 끝난다.
       setupCodePending = true;
@@ -2051,11 +2167,18 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           providers = ev.providers;
           renderProviders();
           break;
-        case 'agent-setup-status':
+        case 'agent-setup-status': {
           setupStatuses = ev.statuses;
-          setupBusy = false;
-          setupReauth = false;
-          setupCodePending = false;
+          // 로그인·설치가 아직 진행 중이면 주기 방송이 카드 상태(주소·코드)를 지우지 않는다.
+          const inFlight = setupAgent !== null && setupBusy
+            && (ev.statuses[setupAgent]?.authenticating === true
+              || ev.statuses[setupAgent]?.installing === true);
+          if (!inFlight) {
+            setupBusy = false;
+            setupReauth = false;
+            setupCodePending = false;
+            clearSetupAuthPrompt();
+          }
           renderProviders();
           renderAgentSetup();
           // 설정을 마친 grok · cursor 는 기록이 없어도 사용량 칸을 연다.
@@ -2063,9 +2186,15 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           // cursor 동적 모델 목록이 도착하면 기본 모델 선택지도 다시 채운다.
           syncPrefsInputs();
           break;
+        }
         case 'agent-setup-progress':
           if (setupAgent === ev.agent) {
             setupBusy = ev.state !== 'done';
+            // API 키 검증 중에도 authorizing 이 온다 — 브라우저 로그인 근거가 있을 때만 상자를 연다.
+            if (ev.state === 'authorizing' && (ev.authUrl || ev.userCode)) setupOauthPending = true;
+            if (ev.authUrl) setupAuthUrl = ev.authUrl;
+            if (ev.userCode) setupUserCode = ev.userCode;
+            if (ev.state === 'done') clearSetupAuthPrompt();
             maybeOpenAuthUrl(ev.authUrl);
             if (typeof ev.percent === 'number') {
               setSetupInstallProgress(ev.percent, ev.phase ?? ev.state);
@@ -2078,6 +2207,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
             setupBusy = false;
             setupCodePending = false;
             setupMessage = ev.message;
+            clearSetupAuthPrompt();
             resetSetupInstallProgress();
             if (setupAgent === 'pi') piMessage = ev.message;
             renderAgentSetup();
@@ -2154,6 +2284,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       if (setupProgressResetTimer) {
         clearTimeout(setupProgressResetTimer);
         setupProgressResetTimer = null;
+      }
+      if (setupCopyResetTimer) {
+        clearTimeout(setupCopyResetTimer);
+        setupCopyResetTimer = null;
       }
       if (setupProgressCreepTimer) clearInterval(setupProgressCreepTimer);
       if (piProgressCreepTimer) clearInterval(piProgressCreepTimer);

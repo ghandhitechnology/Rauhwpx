@@ -52,6 +52,30 @@ const PROGRESS_INTERVAL_MS = 160;
 const CURSOR_MODELS_TIMEOUT_MS = 15_000;
 const CURSOR_MODELS_TTL_MS = 10 * 60 * 1000;
 const CURSOR_INSTALL_COMMAND = 'curl -fsS https://cursor.com/install | bash';
+const KEY_CHECK_TIMEOUT_MS = 10_000;
+const KEY_INVALID_MESSAGE = 'API 키가 유효하지 않아요. 키를 확인해 주세요.';
+
+/**
+ * 기기 인증(device auth) 코드 한 줄. URL 줄은 통째로 비교하기 때문에 절대 걸리지 않는다.
+ * 예: `ZRRX-M38IS`, `C879-V6G4`.
+ */
+const DEVICE_CODE_PATTERN = /^[A-Z0-9]{3,10}-[A-Z0-9]{3,10}$/;
+
+/** API 키 검증용 모델 목록 엔드포인트 (cursor 는 CLI 로 확인한다). */
+const KEY_CHECK_ENDPOINTS = {
+  claude: {
+    url: 'https://api.anthropic.com/v1/models?limit=1',
+    headers: (key) => ({ 'x-api-key': key, 'anthropic-version': '2023-06-01' }),
+  },
+  codex: {
+    url: 'https://api.openai.com/v1/models',
+    headers: (key) => ({ Authorization: `Bearer ${key}` }),
+  },
+  grok: {
+    url: 'https://api.x.ai/v1/models',
+    headers: (key) => ({ Authorization: `Bearer ${key}` }),
+  },
+};
 
 function setupError(code, message) {
   const error = new Error(message);
@@ -74,6 +98,18 @@ function cleanTail(text) {
     .slice(-5)
     .join(' / ')
     .slice(-1600);
+}
+
+/** 로그인 출력에서 마지막으로 나온 기기 인증 코드를 찾는다. 없으면 null. */
+function findDeviceCode(text) {
+  const raw = String(text ?? '');
+  const lines = raw.split(/\r?\n/);
+  // 청크 경계에서 잘린 미완성 줄은 다음 청크에서 다시 본다 — 잘린 코드를 내보내지 않는다.
+  if (!/[\r\n]$/.test(raw)) lines.pop();
+  const codes = lines
+    .map((line) => line.trim())
+    .filter((line) => DEVICE_CODE_PATTERN.test(line));
+  return codes.at(-1) ?? null;
 }
 
 function keyTail(key) {
@@ -134,6 +170,8 @@ export function createCliSetupManager({
 } = {}) {
   const prefixDir = path.join(rootDir, 'prefix');
   const configPath = path.join(rootDir, 'config.json');
+  /** OS 보안 저장소가 없을 때 쓰는 대체 보관소 (0600). vault 가 생기면 이관 후 지운다. */
+  const secretsPath = path.join(rootDir, 'secrets.json');
   const binDir = path.join(prefixDir, 'node_modules', '.bin');
   /** grok 관리형 로그인 홈 — `grok login` 이 auth.json 을 여기에 만든다. */
   const grokHomeDir = path.join(rootDir, 'grok');
@@ -144,6 +182,8 @@ export function createCliSetupManager({
   const cursorSourceDir = path.join(cursorHomeDir, '.cursor');
   const installs = new Map();
   const authRuns = new Map();
+  /** 카드에서 취소한 로그인 — 실패 메시지 대신 취소로 보고한다. */
+  const cancelledAuth = new Set();
   const activeProcesses = new Map();
   const updateInfo = new Map([
     ['claude', { latestVersion: null, updateRequired: false, error: null }],
@@ -195,6 +235,58 @@ export function createCliSetupManager({
     return raw?.[key] === 'api-key' || raw?.[key] === 'oauth' ? raw[key] : null;
   }
 
+  /** 파일 보관소를 읽는다. 없거나 깨졌으면 빈 객체. */
+  async function readFileSecrets() {
+    try {
+      const raw = JSON.parse(await fs.readFile(secretsPath, 'utf8'));
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+      return Object.fromEntries(
+        Object.entries(raw).filter(([, value]) => typeof value === 'string' && value.trim()),
+      );
+    } catch {
+      return {};
+    }
+  }
+
+  /** config.json 과 같은 방식으로 원자적으로 바꿔 쓴다. 빈 보관소는 파일째 지운다. */
+  async function writeFileSecrets(secrets) {
+    const entries = Object.entries(secrets).filter(([, value]) => typeof value === 'string' && value.trim());
+    if (entries.length === 0) {
+      await fs.rm(secretsPath, { force: true }).catch(() => {});
+      return;
+    }
+    await fs.mkdir(rootDir, { recursive: true });
+    const temp = `${secretsPath}.tmp-${process.pid}-${Date.now()}`;
+    const body = `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`;
+    await fs.writeFile(temp, body, { encoding: 'utf8', mode: 0o600 });
+    await replaceFileAtomically(temp, secretsPath, { platform });
+  }
+
+  /** vault 가 있으면 vault, 없으면 파일 보관소에 저장한다. */
+  async function storeSecret(secretId, value) {
+    if (secretStore?.available) {
+      await secretStore.set(secretId, value);
+      const secrets = await readFileSecrets();
+      if (secretId in secrets) {
+        delete secrets[secretId];
+        await writeFileSecrets(secrets);
+      }
+      return;
+    }
+    const secrets = await readFileSecrets();
+    secrets[secretId] = value;
+    await writeFileSecrets(secrets);
+  }
+
+  /** 두 저장소 어디에 있든 지운다. */
+  async function deleteSecret(secretId) {
+    if (secretStore?.available) await secretStore.delete(secretId);
+    const secrets = await readFileSecrets();
+    if (!(secretId in secrets)) return;
+    delete secrets[secretId];
+    await writeFileSecrets(secrets);
+  }
+
   async function load() {
     if (loaded) return;
     loaded = true;
@@ -211,22 +303,41 @@ export function createCliSetupManager({
     config.grokKeyTail = typeof raw?.grokKeyTail === 'string' ? raw.grokKeyTail : null;
     config.cursorAuthMethod = readAuthMethod(raw, 'cursorAuthMethod');
     config.cursorKeyTail = typeof raw?.cursorKeyTail === 'string' ? raw.cursorKeyTail : null;
+    const agents = Object.keys(CLI_CONFIG);
+    const fileSecrets = await readFileSecrets();
     try {
       if (secretStore?.available) {
-        const agents = Object.keys(CLI_CONFIG);
         const values = await Promise.all(agents.map((agent) => secretStore.get(CLI_CONFIG[agent].secretId)));
         agents.forEach((agent, index) => { apiKeys[agent] = values[index]; });
+        // 파일에 남은 키는 vault 로 옮기고 파일에서 지운다 (legacy claudeApiKey 이관과 같은 규칙).
+        let migrated = false;
+        for (const agent of agents) {
+          const secretId = CLI_CONFIG[agent].secretId;
+          const stored = fileSecrets[secretId]?.trim();
+          if (!stored) continue;
+          if (!apiKeys[agent]) {
+            await secretStore.set(secretId, stored);
+            apiKeys[agent] = await secretStore.get(secretId);
+            // 이관이 확인되지 않으면 파일 사본을 남겨 둔다.
+            if (apiKeys[agent] !== stored) continue;
+          }
+          delete fileSecrets[secretId];
+          migrated = true;
+        }
+        if (migrated) await writeFileSecrets(fileSecrets);
         if (!apiKeys.claude && legacyClaudeKey) {
           await secretStore.set(CLI_CONFIG.claude.secretId, legacyClaudeKey);
           apiKeys.claude = await secretStore.get(CLI_CONFIG.claude.secretId);
           if (apiKeys.claude === legacyClaudeKey) await persist();
         }
       } else {
+        for (const agent of agents) apiKeys[agent] = fileSecrets[CLI_CONFIG[agent].secretId] ?? null;
         // Keep a legacy key usable until the desktop vault is available; never write it back.
-        apiKeys.claude = legacyClaudeKey;
+        apiKeys.claude ??= legacyClaudeKey;
       }
     } catch (error) {
-      apiKeys.claude = legacyClaudeKey;
+      for (const agent of agents) apiKeys[agent] ??= fileSecrets[CLI_CONFIG[agent].secretId] ?? null;
+      apiKeys.claude ??= legacyClaudeKey;
       secretStoreError = error?.message ?? 'OS 보안 저장소를 열지 못했어요.';
     }
   }
@@ -590,6 +701,67 @@ export function createCliSetupManager({
     return status(agent);
   }
 
+  /**
+   * cursor 는 공개 검증 엔드포인트가 없어 CLI 에 키를 물려 상태를 물어본다.
+   * JSON 을 받지 못하면(미설치·오프라인) 판단을 보류하고 통과시킨다.
+   */
+  async function verifyCursorApiKey(value) {
+    let result;
+    try {
+      // 로그인 세션이 남은 cursorHomeDir 로 물으면 키와 무관하게 인증됨으로 나온다 —
+      // 검증 전용 빈 HOME 에서 키만으로 판정한다.
+      const checkHome = path.join(cursorHomeDir, 'key-check');
+      await fs.mkdir(checkHome, { recursive: true });
+      result = await run(binPath('cursor'), ['status', '--format', 'json'], {
+        timeoutMs: KEY_CHECK_TIMEOUT_MS,
+        env: { ...envFor('cursor'), HOME: checkHome, CURSOR_API_KEY: value },
+      });
+    } catch {
+      return;
+    }
+    const parsed = parseJsonOutput(result.stdout);
+    if (!parsed) return;
+    if (parsed.isAuthenticated !== true) throw setupError('AGENT_KEY_INVALID', KEY_INVALID_MESSAGE);
+  }
+
+  /**
+   * 키를 저장하기 전에 실제로 통하는지 확인한다. 확실한 거절(401)만 오류로 보고,
+   * 그 밖의 응답이나 네트워크 실패는 통과시킨다 — 권한이 좁은 프로젝트 키(403)와
+   * 오프라인 환경을 막지 않는다.
+   */
+  async function verifyApiKey(agent, value) {
+    if (agent === 'cursor') {
+      await verifyCursorApiKey(value);
+      return;
+    }
+    const endpoint = KEY_CHECK_ENDPOINTS[agent];
+    if (!endpoint || typeof fetchImpl !== 'function') return;
+    let response;
+    try {
+      response = await fetchImpl(endpoint.url, {
+        method: 'GET',
+        headers: endpoint.headers(value),
+        signal: AbortSignal.timeout(KEY_CHECK_TIMEOUT_MS),
+      });
+    } catch {
+      return;
+    }
+    if (response?.status === 401) {
+      throw setupError('AGENT_KEY_INVALID', KEY_INVALID_MESSAGE);
+    }
+    // x.ai 는 잘못된 키에 400 을 준다 — 본문이 키 오류를 말할 때만 거절해 권한이
+    // 좁은 프로젝트 키(403)의 다른 사유를 오판하지 않는다.
+    if (response?.status === 400 || response?.status === 403) {
+      let body = '';
+      try {
+        body = String(await response.text());
+      } catch {}
+      if (/api[-_ ]?key|authentication/i.test(body)) {
+        throw setupError('AGENT_KEY_INVALID', KEY_INVALID_MESSAGE);
+      }
+    }
+  }
+
   async function authenticate(agent, method, key, onProgress) {
     const item = assertAgent(agent);
     if (authRuns.has(agent)) throw setupError('AGENT_AUTH_BUSY', '이미 로그인 작업이 진행 중이에요.');
@@ -601,10 +773,8 @@ export function createCliSetupManager({
       if (method === 'api-key') {
         const value = String(key ?? '').trim();
         if (!value) throw setupError('AGENT_KEY_INVALID', 'API 키를 입력해 주세요.');
-        if (!secretStore?.available) {
-          throw setupError('SECRET_STORE_UNAVAILABLE', 'OS 보안 저장소를 사용할 수 없어 API 키를 저장하지 못했어요. 앱을 다시 시작해 주세요.');
-        }
-        await secretStore.set(item.secretId, value);
+        await verifyApiKey(agent, value);
+        await storeSecret(item.secretId, value);
         apiKeys[agent] = value;
         secretStoreError = null;
         config[`${agent}AuthMethod`] = 'api-key';
@@ -615,12 +785,14 @@ export function createCliSetupManager({
         return status(agent);
       }
       if (method !== 'oauth') throw setupError('AGENT_AUTH_INVALID', '지원하지 않는 로그인 방식이에요.');
-      if (secretStore?.available) await secretStore.delete(item.secretId);
+      await deleteSecret(item.secretId);
       apiKeys[agent] = null;
       if (agent === 'claude') await persist();
       const loginSpec = {
+        // 기기 인증만 쓴다 — 기본 로그인은 허브 기기의 localhost 콜백 서버를 띄우기
+        // 때문에 원격에서 스튜디오를 여는 사용자는 로그인을 끝낼 수 없다.
         codex: {
-          argv: platform === 'win32' ? ['login', '--device-auth'] : ['login'],
+          argv: ['login', '--device-auth'],
           env: envFor('codex'),
           keepStdinOpen: false,
         },
@@ -645,11 +817,21 @@ export function createCliSetupManager({
         keepStdinOpen: loginSpec.keepStdinOpen,
         onOutput: (text) => {
           buffered = (buffered + text).slice(-8000);
-          const url = stripTerminalEscapes(buffered).match(/https?:\/\/[^\s<>"'\x07\]]+/)?.[0];
-          onProgress?.({ state: 'authorizing', ...(url ? { authUrl: url } : {}) });
+          const clean = stripTerminalEscapes(buffered);
+          const url = clean.match(/https?:\/\/[^\s<>"'\x07\]]+/)?.[0];
+          const userCode = findDeviceCode(clean);
+          onProgress?.({
+            state: 'authorizing',
+            ...(url ? { authUrl: url } : {}),
+            ...(userCode ? { userCode } : {}),
+          });
         },
       });
       if (result.code !== 0) {
+        // 사용자가 카드에서 취소한 로그인은 실패가 아니다 — CLI 출력 꼬리를 보여주지 않는다.
+        if (cancelledAuth.delete(agent)) {
+          throw setupError('AGENT_AUTH_CANCELLED', '로그인을 취소했어요.');
+        }
         const detail = cleanTail(result.stderr || result.stdout);
         throw setupError('AGENT_AUTH_FAILED', setupFailureMessage(null, detail, '로그인을 완료하지 못했어요.'));
       }
@@ -740,6 +922,7 @@ export function createCliSetupManager({
     submitAuthCode,
     async cancel(agent) {
       assertAgent(agent);
+      if (activeProcesses.has(`auth:${agent}`)) cancelledAuth.add(agent);
       const processes = [`install:${agent}`, `auth:${agent}`]
         .map((key) => activeProcesses.get(key))
         .filter(Boolean);

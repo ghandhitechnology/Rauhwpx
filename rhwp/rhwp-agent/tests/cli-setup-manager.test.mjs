@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,6 +20,11 @@ class FakeProcess extends EventEmitter {
   };
   kill() { return true; }
 }
+
+/** API 키 검증용 기본 응답 — 테스트가 실제 네트워크를 타지 않도록 항상 주입한다. */
+const acceptingFetch = async () => ({ status: 200, ok: true });
+/** 키를 거절하는 응답. */
+const rejectingFetch = async () => ({ status: 401, ok: false });
 
 function fakeSpawner(prefixDir) {
   const calls = [];
@@ -60,7 +65,8 @@ test('Codex installs into the app prefix and API login never persists the full k
   const { calls, spawnProcess } = fakeSpawner(prefixDir);
   const secretStore = createMemorySecretStore();
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, npmCommand: 'npm', secretStore, baseEnv: { PATH: '/usr/bin' },
+    rootDir, spawnProcess, npmCommand: 'npm', secretStore,
+    baseEnv: { PATH: '/usr/bin' }, fetchImpl: acceptingFetch,
   }).init();
 
   const progress = [];
@@ -96,7 +102,8 @@ test('Claude API setup is restored through the provider environment', async () =
   const { spawnProcess } = fakeSpawner(prefixDir);
   const secretStore = createMemorySecretStore();
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, npmCommand: 'npm', secretStore, baseEnv: { PATH: '/usr/bin' },
+    rootDir, spawnProcess, npmCommand: 'npm', secretStore,
+    baseEnv: { PATH: '/usr/bin' }, fetchImpl: acceptingFetch,
   }).init();
 
   await manager.install('claude');
@@ -135,7 +142,7 @@ test('an existing global harness can be reauthenticated without an app-managed i
   const { calls, spawnProcess } = fakeSpawner(prefixDir);
   const secretStore = createMemorySecretStore();
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, secretStore, baseEnv: { PATH: '/usr/bin' },
+    rootDir, spawnProcess, secretStore, baseEnv: { PATH: '/usr/bin' }, fetchImpl: acceptingFetch,
   }).init();
 
   const status = await manager.authenticate('codex', 'api-key', 'sk-proj-global-harness');
@@ -148,14 +155,129 @@ test('an existing global harness can be reauthenticated without an app-managed i
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
-test('Windows Codex OAuth uses device auth instead of a localhost callback', async () => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-auth-'));
-  const { calls, spawnProcess } = fakeSpawner(path.join(rootDir, 'prefix'));
-  const manager = await createCliSetupManager({ rootDir, spawnProcess, platform: 'win32' }).init();
+test('Codex OAuth uses device auth on every platform, never a localhost callback', async () => {
+  for (const platform of ['win32', 'darwin', 'linux']) {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-auth-'));
+    const { calls, spawnProcess } = fakeSpawner(path.join(rootDir, 'prefix'));
+    const manager = await createCliSetupManager({ rootDir, spawnProcess, platform }).init();
 
-  await manager.authenticate('codex', 'oauth');
-  assert.ok(calls.some((call) => call.command === 'codex'
-    && call.argv[0] === 'login' && call.argv[1] === '--device-auth'));
+    await manager.authenticate('codex', 'oauth');
+    const login = calls.find((call) => call.argv[0] === 'login');
+    assert.equal(login.command, 'codex', platform);
+    assert.deepEqual(login.argv, ['login', '--device-auth'], platform);
+
+    await fs.rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('device auth surfaces the one-time code alongside the login URL', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-devicecode-'));
+  const spawnProcess = (command, argv) => {
+    const proc = new FakeProcess();
+    queueMicrotask(() => {
+      if (argv[0] === 'login') {
+        proc.stdout.emit('data', 'Starting device authorization…\n');
+        proc.stdout.emit('data', '  \x1B[1mhttps://auth.openai.com/codex/device\x1B[0m\n');
+        proc.stdout.emit('data', 'Enter this one-time code:\n\n  ZRRX-M38IS  \n\n');
+      }
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, platform: 'darwin', baseEnv: { PATH: '/usr/bin' },
+  }).init();
+
+  const progress = [];
+  await manager.authenticate('codex', 'oauth', undefined, (event) => progress.push(event));
+  const last = progress.findLast((event) => event.userCode);
+  assert.equal(last.userCode, 'ZRRX-M38IS');
+  assert.equal(last.authUrl, 'https://auth.openai.com/codex/device');
+  assert.equal(last.state, 'authorizing');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a device code split across output chunks is never surfaced truncated', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-devicecode-split-'));
+  const spawnProcess = (command, argv) => {
+    const proc = new FakeProcess();
+    queueMicrotask(() => {
+      if (argv[0] === 'login') {
+        // 청크 경계가 코드 한가운데에 떨어지는 경우 — 잘린 `ZRRX-M38` 이 내보내지면 안 된다.
+        proc.stdout.emit('data', 'Enter this one-time code:\n\n  ZRRX-M38');
+        proc.stdout.emit('data', 'IS\n');
+      }
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, platform: 'darwin', baseEnv: { PATH: '/usr/bin' },
+  }).init();
+
+  const progress = [];
+  await manager.authenticate('codex', 'oauth', undefined, (event) => progress.push(event));
+  const codes = progress.filter((event) => event.userCode).map((event) => event.userCode);
+  assert.equal(codes.includes('ZRRX-M38'), false);
+  assert.equal(codes.at(-1), 'ZRRX-M38IS');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Grok device login reports the code printed on stderr and never mistakes a URL for one', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-grok-code-'));
+  const spawnProcess = (command, argv) => {
+    const proc = new FakeProcess();
+    queueMicrotask(() => {
+      if (argv[0] === 'login') {
+        proc.stderr.emit('data', 'To sign in, open this URL in your browser:\n');
+        proc.stderr.emit('data', 'https://accounts.x.ai/oauth2/device?user_code=C879-V6G4\n');
+        proc.stderr.emit('data', 'Confirm this code in your browser:\n');
+        proc.stderr.emit('data', 'C879-V6G4\n');
+        proc.stderr.emit('data', 'Waiting for authorization...\n');
+      }
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  const progress = [];
+  await manager.authenticate('grok', 'oauth', undefined, (event) => progress.push(event));
+  assert.equal(progress.findLast((event) => event.userCode)?.userCode, 'C879-V6G4');
+  assert.equal(
+    progress.findLast((event) => event.authUrl)?.authUrl,
+    'https://accounts.x.ai/oauth2/device?user_code=C879-V6G4',
+  );
+  // URL 만 나온 첫 프레임에는 코드가 붙지 않는다.
+  assert.equal(progress.find((event) => event.authUrl)?.userCode, undefined);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a cursor login URL never registers as a device code', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-code-'));
+  const spawnProcess = (command, argv) => {
+    const proc = new FakeProcess();
+    queueMicrotask(() => {
+      if (argv[0] === 'login') {
+        proc.stdout.emit('data', 'https://cursor.com/loginDeepControl?challenge=AB-CD&uuid=EF-GH\n');
+      }
+      if (argv[0] === 'status') proc.stdout.emit('data', '{"isAuthenticated":true}\n');
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  const progress = [];
+  await manager.authenticate('cursor', 'oauth', undefined, (event) => progress.push(event));
+  assert.equal(progress.some((event) => event.userCode), false);
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });
@@ -210,7 +332,7 @@ test('Grok installs through the shared npm prefix and stores the API key securel
   const { calls, spawnProcess } = fakeSpawner(prefixDir);
   const secretStore = createMemorySecretStore();
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, npmCommand: 'npm', secretStore,
+    rootDir, spawnProcess, npmCommand: 'npm', secretStore, fetchImpl: acceptingFetch,
     baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
   }).init();
 
@@ -486,6 +608,285 @@ test('a failing cursor model list is cached too, so the CLI is not respawned eve
   assert.deepEqual(await manager.cursorModels(), []);
   assert.deepEqual(await manager.cursorModels(), []);
   assert.equal(calls.length, spawnCount, '실패도 TTL 에 기록해 재스폰을 막는다');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('without an OS vault the API key falls back to a 0600 secrets file and survives a restart', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-filekey-'));
+  const secretsPath = path.join(rootDir, 'secrets.json');
+  const options = {
+    rootDir, fetchImpl: acceptingFetch, baseEnv: { PATH: '/usr/bin' },
+    homeDir: path.join(rootDir, 'no-home'),
+    spawnProcess: () => { throw new Error('키 저장은 CLI 를 스폰하지 않는다'); },
+  };
+  const manager = await createCliSetupManager(options).init();
+
+  const status = await manager.authenticate('grok', 'api-key', 'xai-file-secret-value');
+  assert.equal(status.authenticated, true);
+  assert.equal(status.authMethod, 'api-key');
+  assert.equal(status.keyTail, 'alue');
+  assert.equal(status.error, null);
+  assert.deepEqual(JSON.parse(await fs.readFile(secretsPath, 'utf8')), {
+    'rhwp.grok.api-key': 'xai-file-secret-value',
+  });
+  assert.equal(
+    (await fs.stat(secretsPath)).mode & 0o777,
+    process.platform === 'win32' ? 0o666 : 0o600,
+  );
+  assert.doesNotMatch(await fs.readFile(path.join(rootDir, 'config.json'), 'utf8'), /file-secret-value/);
+
+  const restarted = await createCliSetupManager(options).init();
+  assert.equal(restarted.envFor('grok').XAI_API_KEY, 'xai-file-secret-value');
+  assert.equal((await restarted.status('grok')).authMethod, 'api-key');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('an OAuth login clears the file-stored key for that agent', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-filekey-clear-'));
+  const secretsPath = path.join(rootDir, 'secrets.json');
+  await fs.writeFile(secretsPath, JSON.stringify({
+    'rhwp.grok.api-key': 'xai-old',
+    'rhwp.codex.api-key': 'sk-proj-keep',
+  }));
+  const spawnProcess = (command, argv) => {
+    const proc = new FakeProcess();
+    queueMicrotask(() => {
+      if (argv[0] === 'login') proc.stdout.emit('data', 'Visit https://accounts.x.ai/device\n');
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+  assert.equal(manager.envFor('grok').XAI_API_KEY, 'xai-old');
+
+  await manager.authenticate('grok', 'oauth');
+  assert.deepEqual(JSON.parse(await fs.readFile(secretsPath, 'utf8')), {
+    'rhwp.codex.api-key': 'sk-proj-keep',
+  });
+  assert.equal(manager.envFor('grok').XAI_API_KEY, undefined);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('file-stored keys migrate into the OS vault and leave nothing behind', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-filekey-migrate-'));
+  const secretsPath = path.join(rootDir, 'secrets.json');
+  await fs.writeFile(secretsPath, JSON.stringify({
+    'rhwp.grok.api-key': 'xai-migrated',
+    'rhwp.cursor.api-key': 'cur-migrated',
+  }));
+  const secretStore = createMemorySecretStore();
+  const manager = await createCliSetupManager({
+    rootDir, secretStore, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+    spawnProcess: () => { throw new Error('이관은 CLI 를 스폰하지 않는다'); },
+  }).init();
+
+  assert.equal(manager.envFor('grok').XAI_API_KEY, 'xai-migrated');
+  assert.equal(manager.envFor('cursor').CURSOR_API_KEY, 'cur-migrated');
+  assert.equal(await secretStore.get('rhwp.grok.api-key'), 'xai-migrated');
+  assert.equal(await secretStore.get('rhwp.cursor.api-key'), 'cur-migrated');
+  assert.equal(existsSync(secretsPath), false, '이관이 끝나면 파일 보관소는 남지 않는다');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a vault failure is surfaced instead of silently falling back to the file store', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-vault-fail-'));
+  const secretStore = {
+    available: true,
+    async get() { return null; },
+    async set() { throw Object.assign(new Error('vault locked'), { code: 'SECRET_STORE_FAILED' }); },
+    async delete() { return true; },
+  };
+  const manager = await createCliSetupManager({
+    rootDir, secretStore, fetchImpl: acceptingFetch, baseEnv: { PATH: '/usr/bin' },
+    homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  await assert.rejects(manager.authenticate('grok', 'api-key', 'xai-value'), /vault locked/);
+  assert.equal(existsSync(path.join(rootDir, 'secrets.json')), false);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('API keys are checked against the provider before they are stored', async () => {
+  const cases = [
+    { agent: 'claude', key: 'sk-ant-check', url: 'https://api.anthropic.com/v1/models?limit=1' },
+    { agent: 'codex', key: 'sk-proj-check', url: 'https://api.openai.com/v1/models' },
+    { agent: 'grok', key: 'xai-check', url: 'https://api.x.ai/v1/models' },
+  ];
+  for (const item of cases) {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-keycheck-'));
+    const requests = [];
+    const fetchImpl = async (url, init) => {
+      requests.push({ url, init });
+      return { status: 200, ok: true };
+    };
+    const manager = await createCliSetupManager({
+      rootDir, fetchImpl, secretStore: createMemorySecretStore(),
+      baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+      spawnProcess: () => { throw new Error('키 검증은 CLI 를 스폰하지 않는다'); },
+    }).init();
+
+    const status = await manager.authenticate(item.agent, 'api-key', item.key);
+    assert.equal(status.authenticated, true, item.agent);
+    assert.equal(requests.length, 1, item.agent);
+    assert.equal(requests[0].url, item.url);
+    assert.equal(requests[0].init.method, 'GET');
+    if (item.agent === 'claude') {
+      assert.equal(requests[0].init.headers['x-api-key'], item.key);
+      assert.equal(requests[0].init.headers['anthropic-version'], '2023-06-01');
+    } else {
+      assert.equal(requests[0].init.headers.Authorization, `Bearer ${item.key}`);
+    }
+
+    await fs.rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('a rejected API key is reported and never persisted', async () => {
+  for (const agent of ['claude', 'codex', 'grok']) {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-keybad-'));
+    const secretStore = createMemorySecretStore();
+    const manager = await createCliSetupManager({
+      rootDir, secretStore, fetchImpl: rejectingFetch,
+      baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+      spawnProcess: () => { throw new Error('키 검증은 CLI 를 스폰하지 않는다'); },
+    }).init();
+
+    await assert.rejects(manager.authenticate(agent, 'api-key', 'wrong-key'), (error) => {
+      assert.equal(error.code, 'AGENT_KEY_INVALID', agent);
+      assert.equal(error.message, 'API 키가 유효하지 않아요. 키를 확인해 주세요.');
+      return true;
+    });
+    assert.equal(await secretStore.get(`rhwp.${agent}.api-key`), null);
+    assert.equal(existsSync(path.join(rootDir, 'secrets.json')), false);
+    assert.equal(existsSync(path.join(rootDir, 'config.json')), false);
+
+    await fs.rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('an x.ai-style 400 with a key error body rejects, a scoped 403 without one passes', async () => {
+  const cases = [
+    {
+      fetchImpl: async () => ({
+        status: 400, ok: false,
+        text: async () => '{"code":"invalid-argument","error":"Incorrect API key provided."}',
+      }),
+      rejects: true,
+    },
+    {
+      fetchImpl: async () => ({
+        status: 403, ok: false,
+        text: async () => '{"error":{"message":"You have insufficient permissions for this operation."}}',
+      }),
+      rejects: false,
+    },
+  ];
+  for (const item of cases) {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-keybody-'));
+    const secretStore = createMemorySecretStore();
+    const manager = await createCliSetupManager({
+      rootDir, secretStore, fetchImpl: item.fetchImpl,
+      baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+      spawnProcess: () => { throw new Error('키 검증은 CLI 를 스폰하지 않는다'); },
+    }).init();
+
+    if (item.rejects) {
+      await assert.rejects(manager.authenticate('grok', 'api-key', 'xai-wrong'), (error) => {
+        assert.equal(error.code, 'AGENT_KEY_INVALID');
+        return true;
+      });
+      assert.equal(await secretStore.get('rhwp.grok.api-key'), null);
+    } else {
+      const status = await manager.authenticate('grok', 'api-key', 'xai-scoped');
+      assert.equal(status.authenticated, true);
+      assert.equal(await secretStore.get('rhwp.grok.api-key'), 'xai-scoped');
+    }
+
+    await fs.rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('an offline or unusual key check never blocks setup', async () => {
+  for (const fetchImpl of [
+    async () => { throw new Error('network unreachable'); },
+    async () => ({ status: 500, ok: false }),
+  ]) {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-keyoffline-'));
+    const secretStore = createMemorySecretStore();
+    const manager = await createCliSetupManager({
+      rootDir, secretStore, fetchImpl,
+      baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+      spawnProcess: () => { throw new Error('키 검증은 CLI 를 스폰하지 않는다'); },
+    }).init();
+
+    const status = await manager.authenticate('codex', 'api-key', 'sk-proj-offline');
+    assert.equal(status.authenticated, true);
+    assert.equal(await secretStore.get('rhwp.codex.api-key'), 'sk-proj-offline');
+
+    await fs.rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('a Cursor API key is checked through the CLI status command', async () => {
+  for (const authenticated of [true, false]) {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursorkey-'));
+    const calls = [];
+    const spawnProcess = (command, argv, options) => {
+      const proc = new FakeProcess();
+      calls.push({ command, argv, options, proc });
+      queueMicrotask(() => {
+        if (argv[0] === 'status') {
+          proc.stdout.emit('data', `${JSON.stringify({ isAuthenticated: authenticated }, null, 2)}\n`);
+        }
+        proc.emit('close', 0, null);
+      });
+      return proc;
+    };
+    const secretStore = createMemorySecretStore();
+    const manager = await createCliSetupManager({
+      rootDir, spawnProcess, secretStore,
+      baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+    }).init();
+
+    if (authenticated) {
+      const status = await manager.authenticate('cursor', 'api-key', 'cur-good-key');
+      assert.equal(status.authenticated, true);
+      assert.equal(await secretStore.get('rhwp.cursor.api-key'), 'cur-good-key');
+    } else {
+      await assert.rejects(manager.authenticate('cursor', 'api-key', 'cur-bad-key'), (error) => {
+        assert.equal(error.code, 'AGENT_KEY_INVALID');
+        return true;
+      });
+      assert.equal(await secretStore.get('rhwp.cursor.api-key'), null);
+    }
+    const check = calls.find((call) => call.argv[0] === 'status');
+    assert.deepEqual(check.argv, ['status', '--format', 'json']);
+    assert.equal(check.options.env.CURSOR_API_KEY, authenticated ? 'cur-good-key' : 'cur-bad-key');
+    // 로그인 세션이 남은 cursor-home 이 아니라 검증 전용 빈 HOME 에서 키만으로 판정한다.
+    assert.equal(check.options.env.HOME, path.join(rootDir, 'cursor-home', 'key-check'));
+
+    await fs.rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('a Cursor key check that cannot run is not treated as a rejection', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursorkey-offline-'));
+  const secretStore = createMemorySecretStore();
+  const manager = await createCliSetupManager({
+    rootDir, secretStore, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+    spawnProcess: () => { throw Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }); },
+  }).init();
+
+  const status = await manager.authenticate('cursor', 'api-key', 'cur-unverified');
+  assert.equal(status.authenticated, true);
+  assert.equal(await secretStore.get('rhwp.cursor.api-key'), 'cur-unverified');
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });

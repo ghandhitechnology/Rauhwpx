@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { EventBus } from '../src/core/event-bus.ts';
 import { RevisionTracker } from '../src/agent/revision.ts';
 import {
@@ -466,4 +467,17 @@ test('executor: wasm throw("문서가 로드되지 않았습니다") → DOC_NOT
     pending: {} as any,
   });
   await expectToolError(ex.execute('get_text_range', { sectionIdx: 0, paraIdx: 0 }, 'claude'), 'DOC_NOT_LOADED');
+});
+
+// ─── agent-setup-progress 프레임 (소스 계약) ────────────────
+
+test('브리지: agent-setup-progress 의 userCode 를 그대로 사이드바로 넘긴다', () => {
+  const bridgeSource = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
+  const typesSource = readFileSync(new URL('../src/agent/types.ts', import.meta.url), 'utf8');
+  assert.match(
+    bridgeSource,
+    /\.\.\.\(typeof msg\.userCode === 'string' \? \{ userCode: msg\.userCode \} : \{\}\)/,
+  );
+  // 문자열이 아닌 값은 아예 실리지 않는다 — 필드는 선택 사항으로 남는다.
+  assert.match(typesSource, /type: 'agent-setup-progress';[\s\S]*userCode\?: string;/);
 });
