@@ -1394,7 +1394,16 @@ impl Table {
             .map(|r| raw_row_heights.get(r as usize).copied().unwrap_or(0))
             .sum();
 
-        // 비주 셀의 비어있지 않은 문단 수집 (모든 메타데이터 보존)
+        // 비주 셀의 내용 있는 문단 수집.
+        //
+        // 문단을 통째로 복제한다. controls / ctrl_data_records / field_ranges /
+        // char_offsets / tab_extended 는 모두 문단 내부에서 서로를 가리키는(문단 로컬
+        // 인덱스) 값이라, 통째로 옮겨야 정합성이 유지된다. 필드를 골라 재구성하면
+        // 중첩 표 같은 컨트롤이 통째로 사라진다.
+        //
+        // 또한 컨트롤은 text 가 아니라 char_offsets 의 갭에 놓이므로, 중첩 표를 담은
+        // 문단은 text 가 비어 있다. 텍스트뿐 아니라 컨트롤(및 CTRL_DATA)도 내용으로
+        // 취급해야 유실되지 않는다.
         let mut extra_paragraphs: Vec<Paragraph> = Vec::new();
         for cell in &self.cells {
             if cell.col == start_col && cell.row == start_row {
@@ -1406,22 +1415,11 @@ impl Table {
                 && cell.row <= end_row;
             if in_range {
                 for para in &cell.paragraphs {
-                    if !para.text.is_empty() {
-                        extra_paragraphs.push(Paragraph {
-                            text: para.text.clone(),
-                            char_count: para.char_count,
-                            char_count_msb: para.char_count_msb,
-                            control_mask: para.control_mask,
-                            char_offsets: para.char_offsets.clone(),
-                            char_shapes: para.char_shapes.clone(),
-                            line_segs: para.line_segs.clone(),
-                            range_tags: para.range_tags.clone(),
-                            para_shape_id: para.para_shape_id,
-                            style_id: para.style_id,
-                            raw_header_extra: para.raw_header_extra.clone(),
-                            has_para_text: para.has_para_text,
-                            ..Default::default()
-                        });
+                    let has_content = !para.text.is_empty()
+                        || !para.controls.is_empty()
+                        || !para.ctrl_data_records.is_empty();
+                    if has_content {
+                        extra_paragraphs.push(para.clone());
                     }
                 }
             }
