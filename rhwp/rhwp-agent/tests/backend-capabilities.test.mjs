@@ -152,9 +152,11 @@ for (const entry of matrix) {
     const codex = buildCodexArgv(opts, null);
     assert.ok(codex.includes(`sandbox_mode="${entry.codexSandbox}"`));
     assert.ok(codex.includes('mcp_servers.rhwp.default_tools_approval_mode="auto"'));
+    // 네이티브 서브에이전트는 모든 모드에서 켠다 — `--disable multi_agent` 는 codex
+    // 0.147.0 에서 스폰을 막지 못한다(라이브 프로브 확인).
     const multiAgentIndex = codex.indexOf('multi_agent');
     assert.notEqual(multiAgentIndex, -1);
-    assert.equal(codex[multiAgentIndex - 1], entry.planCapabilities ? '--enable' : '--disable');
+    assert.equal(codex[multiAgentIndex - 1], '--enable');
     assert.equal(codex.includes('web_search="live"'), entry.planCapabilities);
     assert.equal(JSON.parse(codexConfig(codex, 'mcp_servers.rhwp.command=').split('=', 2)[1]), '/Applications/Rau App/Rau');
     assert.deepEqual(
@@ -578,7 +580,10 @@ test('Codex emits no usage event when turn.completed carries none', () => {
   }
 });
 
-test('Codex normalizes stable multi-agent lifecycle items', () => {
+// collab_tool_call 은 서브에이전트 카드가 아니다: codex 0.147.0 은 이 항목을
+// wait_agent 호출에만 내보낸다(라이브 캡처 runA2.ndjson). 카드는 롤아웃 워처가
+// 만들고 — 자세한 배선은 tests/codex-subagent-tasks.test.mjs 를 본다.
+test('Codex maps collab wait items to a plain root tool row', () => {
   const emitted = [];
   let process;
   const session = createCodexSession(
@@ -587,17 +592,15 @@ test('Codex normalizes stable multi-agent lifecycle items', () => {
   );
   session.sendUserMessage('delegate');
   process.emitJson(
-    { type: 'item.started', item: { id: 'collab-1', type: 'collab_tool_call', tool: 'spawn_agent', prompt: 'inspect', receiver_thread_ids: ['child-1'], status: 'in_progress' } },
-    { type: 'item.completed', item: { id: 'collab-1', type: 'collab_tool_call', tool: 'spawn_agent', receiver_thread_ids: ['child-1'], agents_states: { 'child-1': { status: 'completed', message: 'done' } }, status: 'completed' } },
+    { type: 'item.started', item: { id: 'item_1', type: 'collab_tool_call', tool: 'wait', receiver_thread_ids: [], prompt: null, agents_states: {}, status: 'in_progress' } },
+    { type: 'item.completed', item: { id: 'item_1', type: 'collab_tool_call', tool: 'wait', receiver_thread_ids: [], prompt: null, agents_states: {}, status: 'completed' } },
   );
-  const start = emitted.find((event) => event.type === 'task-start');
-  const end = emitted.find((event) => event.type === 'task-end');
-  assert.equal(start.taskId, 'collab-1');
-  assert.equal(start.title, 'inspect');
-  assert.equal(start.role, 'spawn_agent');
-  assert.equal(start.taskKind, 'agent');
-  assert.equal(end.taskId, 'collab-1');
-  assert.equal(end.status, 'completed');
-  assert.match(end.summary, /done/);
+  assert.deepEqual(emitted.filter((event) => event.type.startsWith('task-')), []);
+  const call = emitted.find((event) => event.type === 'tool-call');
+  assert.equal(call.tool, 'wait_agents');
+  assert.equal(call.argsJson, '{}');
+  const result = emitted.find((event) => event.type === 'tool-result');
+  assert.equal(result.callId, 'item_1');
+  assert.equal(result.ok, true);
   session.dispose();
 });
