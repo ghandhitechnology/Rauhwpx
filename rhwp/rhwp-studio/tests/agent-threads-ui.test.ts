@@ -41,6 +41,9 @@ test('sidebar header keeps one compact model summary and expands all settings to
   // 추론 강도가 없는 프로바이더에서는 트리거와 '추론' 묶음이 함께 접힌다.
   assert.match(source, /effortWrap\.hidden = noEfforts;\s*\n\s*effortGroup\.hidden = noEfforts;/);
   assert.match(css, /\.ag-config-group\[hidden\]\s*\{[^}]*display:\s*none;/s);
+  // .ag-model 의 display:inline-flex 가 기본 [hidden] 을 덮으므로 따로 눌러 준다
+  // — 없으면 Cursor 처럼 추론 강도가 없는 프로바이더에서 빈 알약이 남는다.
+  assert.match(css, /\.ag-model\[hidden\]\s*\{[^}]*display:\s*none;/s);
   assert.match(css, /\.ag-config-panel\s*\{[^}]*display:\s*grid;/s);
   assert.match(css, /\.ag-config-panel \.ag-model-menu\s*\{[^}]*position:\s*static;/s);
 });

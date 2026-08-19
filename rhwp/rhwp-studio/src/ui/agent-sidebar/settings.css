@@ -175,6 +175,12 @@
   justify-content: space-between;
 }
 
+/* display:flex 가 기본 [hidden] 을 덮어써서, 숨긴 줄은 따로 눌러 줍니다.
+   (추론 강도가 없는 제공자, cliproxy 가 이미 설정된 경우 등) */
+.ag-settings-field[hidden] {
+  display: none;
+}
+
 .ag-settings-field-label {
   flex: 0 0 auto;
   color: var(--ag-text-secondary);

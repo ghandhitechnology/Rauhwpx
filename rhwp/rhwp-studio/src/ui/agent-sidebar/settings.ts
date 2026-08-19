@@ -1236,16 +1236,52 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupUserCodeCopy.textContent = '코드 복사';
   }
 
-  async function copySetupText(text: string, button: HTMLButtonElement, label: string): Promise<void> {
+  /**
+   * 보안 컨텍스트(https·localhost)가 아니면 navigator.clipboard 자체가 없습니다.
+   * 원격 http 주소로 스튜디오를 여는 경우가 있어, 임시 textarea 로 한 번 더
+   * 시도하고 그것마저 막히면 실패를 버튼에 알립니다.
+   */
+  async function writeClipboardText(text: string): Promise<boolean> {
     try {
-      await navigator.clipboard.writeText(text);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
     } catch {
-      return;
+      // 아래 폴백으로 넘어갑니다.
     }
+    return copyTextByExecCommand(text);
+  }
+
+  function copyTextByExecCommand(text: string): boolean {
+    const holder = document.createElement('textarea');
+    holder.value = text;
+    holder.setAttribute('readonly', '');
+    holder.style.position = 'fixed';
+    holder.style.top = '0';
+    holder.style.left = '-9999px';
+    holder.style.opacity = '0';
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    document.body.appendChild(holder);
+    let copied = false;
+    try {
+      holder.select();
+      holder.setSelectionRange(0, text.length);
+      copied = document.execCommand('copy');
+    } catch {
+      copied = false;
+    }
+    holder.remove();
+    previous?.focus();
+    return copied;
+  }
+
+  async function copySetupText(text: string, button: HTMLButtonElement, label: string): Promise<void> {
+    const copied = await writeClipboardText(text);
     if (setupCopyResetTimer) clearTimeout(setupCopyResetTimer);
     setupAuthCopy.textContent = '주소 복사';
     setupUserCodeCopy.textContent = '코드 복사';
-    button.textContent = '복사됨';
+    button.textContent = copied ? '복사됨' : '복사 실패';
     setupCopyResetTimer = setTimeout(() => {
       setupCopyResetTimer = null;
       button.textContent = label;
@@ -1349,6 +1385,18 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }
   }
 
+  /**
+   * 다시 그릴 때 방금 누른 버튼이 사라지면(로그인 취소·코드 확인 등) 포커스가
+   * <body> 로 떨어지고, Esc 를 받는 덮개 밖이라 키보드로 카드를 닫을 수 없게
+   * 됩니다. 포커스가 빠져나간 경우에만 카드로 되돌립니다.
+   */
+  function restoreSetupFocus(): void {
+    if (!setupOverlay.isConnected) return;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    setupDialog.focus();
+  }
+
   function renderAgentSetup(): void {
     if (!setupAgent) return;
     const agent = setupAgent;
@@ -1358,6 +1406,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       piBusy = setupBusy;
       if (setupMessage) piMessage = setupMessage;
       renderPi();
+      restoreSetupFocus();
       return;
     }
     const status = setupStatuses?.[agent] ?? null;
@@ -1390,6 +1439,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     renderSetupLoginBox();
     setupCodeBox.hidden = agent !== 'claude' || !setupCodePending || !setupBusy;
     setupCodeSubmit.disabled = connectionState !== 'connected' || !setupCode.input.value.trim();
+    restoreSetupFocus();
   }
 
   /** 브라우저 로그인이 도는 동안만 주소·코드 상자를 세운다. */

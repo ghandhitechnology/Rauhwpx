@@ -206,7 +206,8 @@ export function createCliSetupManager({
     ['cursor', { latestVersion: null, updateRequired: false, error: null }],
   ]);
   const npmLaunch = bundledNpmLaunch({ nodeCommand, npmCommand });
-  let updateChain = Promise.resolve();
+  /** 공용 prefix 를 건드리는 작업(설치·자동 업데이트)의 직렬화 큐. */
+  let prefixChain = Promise.resolve();
   let loaded = false;
   /** 에이전트별 저장 API 키 (보안 저장소에서 로드). */
   const apiKeys = { claude: null, codex: null, grok: null, cursor: null };
@@ -369,11 +370,7 @@ export function createCliSetupManager({
     try {
       const result = await run(cursorBinFile, ['--version'], {
         timeoutMs: STATUS_TIMEOUT_MS,
-        env: {
-          ...baseEnv,
-          HOME: cursorHomeDir,
-          CURSOR_CONFIG_DIR: path.join(cursorHomeDir, '.cursor-probe'),
-        },
+        env: cursorEnv({ CURSOR_CONFIG_DIR: path.join(cursorHomeDir, '.cursor-probe') }),
       });
       if (result.code !== 0) return null;
       return result.stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null;
@@ -395,8 +392,26 @@ export function createCliSetupManager({
   function envFor(agent) {
     const item = assertAgent(agent);
     const env = { ...baseEnv, PATH: `${binDir}${path.delimiter}${baseEnv.PATH ?? ''}` };
+    // 허브가 관리하는 키는 자기 프로바이더의 자식에게만 간다 — 허브 프로세스 환경에
+    // 올라온 다른 프로바이더의 키는 여기서 지운다.
+    for (const [name, other] of Object.entries(CLI_CONFIG)) {
+      if (name === agent || !other.keyEnv) continue;
+      delete env[other.keyEnv];
+    }
     if (item.keyEnv && apiKeys[agent]) env[item.keyEnv] = apiKeys[agent];
     return env;
+  }
+
+  /**
+   * cursor 스폰 공통 환경. 상속된 CURSOR_CONFIG_DIR 은 HOME 기반 격리보다 우선해
+   * 다른 계정의 설정·인증 상태를 읽게 만든다 — 지우고 나서 호출자 값을 얹는다.
+   *
+   * @param {NodeJS.ProcessEnv} [extra]
+   */
+  function cursorEnv(extra = {}) {
+    const env = { ...envFor('cursor'), HOME: cursorHomeDir };
+    delete env.CURSOR_CONFIG_DIR;
+    return { ...env, ...extra };
   }
 
   function run(command, argv, {
@@ -489,7 +504,7 @@ export function createCliSetupManager({
       try {
         // 종료 코드는 로그아웃 상태에서도 0 이다 — JSON 본문만 믿는다.
         const result = await run(binPath('cursor'), ['status', '--format', 'json'], {
-          env: { ...envFor('cursor'), HOME: cursorHomeDir },
+          env: cursorEnv(),
         });
         const parsed = parseJsonOutput(result.stdout);
         const authenticated = typeof parsed?.isAuthenticated === 'boolean' ? parsed.isAuthenticated : false;
@@ -556,11 +571,10 @@ export function createCliSetupManager({
     return { emit, state };
   }
 
-  async function runNpmInstall(agent, item, onProgress) {
+  async function runNpmInstall(agent, item, progress) {
     let lastActivity = 0;
-    const { emit, state } = makeInstallProgress(onProgress);
+    const { emit, state } = progress;
     await load();
-    emit('preparing', 8, `${item.bin} CLI 설치 준비 중`);
     await fs.mkdir(prefixDir, { recursive: true });
     emit('resolving', 20, `${item.bin} 패키지 확인 중`);
     emit('installing', 28, `${item.bin} CLI 설치 중`);
@@ -640,9 +654,16 @@ export function createCliSetupManager({
   async function install(agent, onProgress) {
     const item = assertAgent(agent);
     if (installs.has(agent)) return installs.get(agent);
-    const running = item.kind === 'script'
-      ? runScriptInstall(agent, item, onProgress)
-      : runNpmInstall(agent, item, onProgress);
+    let running;
+    if (item.kind === 'script') {
+      running = runScriptInstall(agent, item, onProgress);
+    } else {
+      // npm 설치는 자동 업데이트와 같은 prefix 를 쓴다 — 같은 큐에 세워 원자적 교체와
+      // 겹치지 않게 한다. 준비 단계는 큐에 넣기 전에 알려 카드가 바로 반응한다.
+      const progress = makeInstallProgress(onProgress);
+      progress.emit('preparing', 8, `${item.bin} CLI 설치 준비 중`);
+      running = enqueuePrefixOp(() => runNpmInstall(agent, item, progress));
+    }
     installs.set(agent, running);
     try {
       return await running;
@@ -651,15 +672,32 @@ export function createCliSetupManager({
     }
   }
 
+  /**
+   * 공용 prefix 를 건드리는 작업을 한 줄로 세운다 — 사용자 설치와 자동 업데이트가
+   * 같은 디렉터리를 동시에 바꾸지 못하게 한다.
+   *
+   * @template T
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  function enqueuePrefixOp(fn) {
+    const running = prefixChain.then(fn, fn);
+    prefixChain = running.then(() => undefined, () => undefined);
+    return running;
+  }
+
   /** cursor 자기 갱신 — 레지스트리 메타데이터가 없어 latestVersion/updateRequired 는 유지된다. */
-  async function runCursorAutomaticUpdate(agent) {
+  async function runCursorAutomaticUpdate(agent, canActivate) {
     const update = updateInfo.get(agent);
     // 시스템 설치본만 있으면 손대지 않는다.
     if (!existsSync(cursorBinFile)) return status(agent);
+    // `cursor-agent update` 는 실행 중인 바이너리를 그 자리에서 바꾼다 — npm 경로의
+    // 원자적 교체와 같은 기준으로, 스폰 직전에 한가한지 다시 확인한다.
+    if (!canActivate()) return status(agent);
     try {
       const result = await run(cursorBinFile, ['update'], {
         timeoutMs: INSTALL_TIMEOUT_MS,
-        env: { ...baseEnv, HOME: cursorHomeDir },
+        env: cursorEnv(),
       });
       if (result.code !== 0) {
         throw setupError('AGENT_UPDATE_FAILED', cleanTail(result.stderr || result.stdout) || 'cursor update failed');
@@ -673,7 +711,7 @@ export function createCliSetupManager({
 
   async function runAutomaticUpdate(agent, canActivate) {
     const item = assertAgent(agent);
-    if (item.kind === 'script') return runCursorAutomaticUpdate(agent);
+    if (item.kind === 'script') return runCursorAutomaticUpdate(agent, canActivate);
     const installed = await installedVersion(agent);
     if (!installed) return status(agent);
     const update = updateInfo.get(agent);
@@ -732,7 +770,7 @@ export function createCliSetupManager({
       await fs.mkdir(checkHome, { recursive: true });
       result = await run(binPath('cursor'), ['status', '--format', 'json'], {
         timeoutMs: KEY_CHECK_TIMEOUT_MS,
-        env: { ...envFor('cursor'), HOME: checkHome, CURSOR_API_KEY: value },
+        env: cursorEnv({ HOME: checkHome, CURSOR_API_KEY: value }),
       });
     } catch {
       return;
@@ -789,6 +827,9 @@ export function createCliSetupManager({
   async function authenticate(agent, method, key, onProgress) {
     const item = assertAgent(agent);
     if (authRuns.has(agent)) throw setupError('AGENT_AUTH_BUSY', '이미 로그인 작업이 진행 중이에요.');
+    // 지난 로그인에서 남은 취소 표시는 이번 시도와 무관하다 — 진짜 실패를 취소로
+    // 둔갑시키지 않도록 시작할 때 지운다.
+    cancelledAuth.delete(agent);
     const running = (async () => {
       await load();
       const managedVersion = await installedVersion(agent);
@@ -804,6 +845,7 @@ export function createCliSetupManager({
         config[`${agent}AuthMethod`] = 'api-key';
         // claude 는 기존 설정 파일 스키마를 유지한다 — keyTail 을 저장하지 않는다.
         if (agent !== 'claude') config[`${agent}KeyTail`] = keyTail(value);
+        if (agent === 'cursor') resetCursorModelsCache();
         await persist();
         onProgress?.({ state: 'done' });
         return status(agent);
@@ -827,7 +869,7 @@ export function createCliSetupManager({
         // cursor 는 브라우저 왕복이 끝나면 프로세스가 스스로 종료된다.
         cursor: {
           argv: ['login'],
-          env: { ...envFor('cursor'), HOME: cursorHomeDir, NO_OPEN_BROWSER: '1' },
+          env: cursorEnv({ NO_OPEN_BROWSER: '1' }),
           keepStdinOpen: false,
         },
       }[agent];
@@ -859,8 +901,11 @@ export function createCliSetupManager({
         const detail = cleanTail(result.stderr || result.stdout);
         throw setupError('AGENT_AUTH_FAILED', setupFailureMessage(null, detail, '로그인을 완료하지 못했어요.'));
       }
+      // 성공으로 끝난 실행이 취소 표시를 남기면 다음 실패가 취소로 보고된다.
+      cancelledAuth.delete(agent);
       config[`${agent}AuthMethod`] = 'oauth';
       if (agent !== 'claude') config[`${agent}KeyTail`] = null;
+      if (agent === 'cursor') resetCursorModelsCache();
       await persist();
       onProgress?.({ state: 'done' });
       return status(agent);
@@ -882,6 +927,14 @@ export function createCliSetupManager({
       throw setupError('AGENT_AUTH_NOT_RUNNING', '진행 중인 로그인이 없어요. 브라우저 로그인부터 다시 시작해 주세요.');
     }
     proc.stdin?.write?.(`${value}\n`);
+  }
+
+  /**
+   * TTL 을 만료시켜 다음 조회가 곧바로 CLI 를 다시 보게 한다. 로그인 직전의
+   * 미인증 조회가 남긴 빈 목록을 10 분 동안 붙들고 있지 않도록 하는 장치다.
+   */
+  function resetCursorModelsCache() {
+    cursorModelsCache = { models: cursorModelsCache.models, fetchedAt: 0 };
   }
 
   /**
@@ -908,7 +961,7 @@ export function createCliSetupManager({
     try {
       const result = await run(binPath('cursor'), ['--list-models'], {
         timeoutMs: CURSOR_MODELS_TIMEOUT_MS,
-        env: { ...envFor('cursor'), HOME: cursorHomeDir },
+        env: cursorEnv(),
       });
       if (result.code !== 0) return rememberFailure();
       const models = [...new Set(
@@ -955,12 +1008,7 @@ export function createCliSetupManager({
       return processes.length > 0;
     },
     automaticUpdate(agent, { canActivate = () => true } = {}) {
-      const runUpdate = updateChain.then(
-        () => runAutomaticUpdate(agent, canActivate),
-        () => runAutomaticUpdate(agent, canActivate),
-      );
-      updateChain = runUpdate.then(() => undefined, () => undefined);
-      return runUpdate;
+      return enqueuePrefixOp(() => runAutomaticUpdate(agent, canActivate));
     },
   };
 }

@@ -349,8 +349,15 @@ export function createTurnProcessLifecycle({
     attachChild(proc, onStdoutLine) {
       child = proc;
       childExitPromise = new Promise((resolve) => { resolveChildExit = resolve; });
-      proc.stdout.on('data', createLineReader(onStdoutLine));
+      // 죽어가는 이전 턴의 자식이 버퍼에 남은 출력을 뒤늦게 흘려도 다음 턴의
+      // 이벤트로 새면 안 된다 — 소유 프로세스가 바뀌면 그 뒤 출력은 전부 버린다.
+      const readStdout = createLineReader(onStdoutLine);
+      proc.stdout.on('data', (chunk) => {
+        if (proc !== child || disposed) return;
+        readStdout(chunk);
+      });
       proc.stderr.on('data', (chunk) => {
+        if (proc !== child || disposed) return;
         const chunkText = chunk.toString();
         stderrTail = (stderrTail + chunkText).slice(-stderrTailLimit);
         for (const line of chunkText.split('\n')) {

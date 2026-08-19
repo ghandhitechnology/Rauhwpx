@@ -124,10 +124,12 @@ test('argv carries the prompt file, session, model, effort and safe allow rules'
   assert.equal(argValue(argv, '--permission-mode'), 'dontAsk');
   assert.equal(argv.includes('--sandbox'), false, 'grok 1.0.5 의 macOS 샌드박스는 기동 전에 멈춘다 — 플래그를 붙이지 않는다');
   const allows = argv.flatMap((value, index) => (value === '--allow' ? [argv[index + 1]] : []));
+  // 샌드박스가 없는 동안 Bash 를 허용하면 경로 규칙이 무의미해진다 — 안전 프로필은 셸을 뺀다.
   assert.deepEqual(allows, [
     'Read(/tmp/rhwp/**)', 'Edit(/tmp/rhwp/**)',
-    'Grep', 'Bash', 'WebFetch', 'WebSearch', 'MCPTool(rhwp__*)',
+    'Grep', 'WebFetch', 'WebSearch', 'MCPTool(rhwp__*)',
   ]);
+  assert.equal(allows.includes('Bash'), false, '안전 프로필에서는 셸을 허용하지 않는다');
   assert.ok(argv.includes('--no-subagents'), '직접 워크플로에서는 서브에이전트를 끈다');
 });
 
@@ -136,6 +138,7 @@ test('unrestricted argv always-approves without a sandbox flag', () => {
   assert.ok(argv.includes('--always-approve'));
   assert.equal(argv.includes('--sandbox'), false);
   assert.equal(argv.includes('--permission-mode'), false);
+  // 전체 접근에서만 셸이 열린다 — 개별 --allow 없이 always-approve 가 전부 승인한다.
   assert.equal(argv.includes('--allow'), false);
 });
 
@@ -146,6 +149,7 @@ test('planning phases drop Edit, stay on dontAsk and keep subagents', () => {
     assert.equal(argv.includes('--sandbox'), false, phase);
     const allows = argv.flatMap((value, index) => (value === '--allow' ? [argv[index + 1]] : []));
     assert.equal(allows.some((rule) => rule.startsWith('Edit(')), false, phase);
+    assert.equal(allows.includes('Bash'), false, phase);
     assert.equal(argv.includes('--no-subagents'), false, phase);
     assert.match(argValue(argv, '--append-system-prompt'), /planning mode/);
   }

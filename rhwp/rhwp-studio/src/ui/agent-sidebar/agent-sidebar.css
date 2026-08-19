@@ -1438,6 +1438,12 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   max-width: 100%;
 }
 
+/* display:inline-flex 가 기본 [hidden] 을 덮어써서, 숨긴 알약은 따로 눌러
+   줍니다. 추론 강도가 없는 제공자(Cursor 등)에서 빈 껍데기가 남지 않습니다. */
+.ag-model[hidden] {
+  display: none;
+}
+
 .ag-model-trigger {
   display: inline-flex;
   align-items: center;

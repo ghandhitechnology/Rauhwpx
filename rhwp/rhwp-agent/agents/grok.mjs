@@ -140,13 +140,15 @@ export function buildGrokArgv(opts, sessionId, resume, promptFilePath) {
   const allowRules = [
     `Read(${rootGlob})`,
     ...(planningRestricted ? [] : [`Edit(${rootGlob})`]),
-    'Grep', 'Bash', 'WebFetch', 'WebSearch', 'MCPTool(rhwp__*)',
+    'Grep', 'WebFetch', 'WebSearch', 'MCPTool(rhwp__*)',
   ];
   // --sandbox 는 붙이지 않는다: grok 1.0.5 의 macOS seatbelt 샌드박스는 프로필을
   // 적용한 직후 기동 전에 멈춰(무한 대기, 출력 없음) 턴이 영원히 끝나지 않는다.
   // CLI 가 이 문제를 고칠 때까지 이 플래그는 꺼 둔다. 안전/계획 프로필의 강제는
   // --permission-mode dontAsk 와 아래 --allow 규칙(목록 밖은 기본 거부, 계획
   // 단계에서는 Edit 제외)이 담당한다.
+  // 안전 프로필은 셸을 아예 막는다 — 샌드박스 없이 Bash 를 허용하면 경로 규칙이
+  // 무의미해진다. 문서 작업은 MCP 도구로 충분하고, 셸이 필요하면 전체 접근을 쓴다.
   const permission = unrestricted && !planningRestricted
     ? ['--always-approve']
     : ['--permission-mode', 'dontAsk', ...allowRules.flatMap((rule) => ['--allow', rule])];

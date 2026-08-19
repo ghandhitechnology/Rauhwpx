@@ -152,7 +152,12 @@ test('브라우저 로그인은 인증 주소와 기기 코드를 카드 안에 
   assert.match(settings, /'주소 복사'/);
   assert.match(settings, /'코드 복사'/);
   assert.match(settings, /navigator\.clipboard\.writeText\(text\)/);
-  assert.match(settings, /button\.textContent = '복사됨'/);
+  // 보안 컨텍스트가 아니면 navigator.clipboard 가 없어서 textarea 로 넘어가고,
+  // 그것마저 막히면 '복사됨' 대신 실패를 알린다.
+  assert.match(settings, /if \(navigator\.clipboard\?\.writeText\)/);
+  assert.match(settings, /copied = document\.execCommand\('copy'\)/);
+  assert.match(settings, /button\.textContent = copied \? '복사됨' : '복사 실패'/);
+  assert.match(settings, /const copied = await writeClipboardText\(text\)/);
   // 기기 코드와 안내 문구.
   assert.match(settings, /const setupUserCodeValue = el\('strong', 'ag-agent-login-code-value'\)/);
   assert.match(settings, /if \(setupUserCode\) setupUserCodeValue\.textContent = setupUserCode/);
@@ -165,6 +170,14 @@ test('브라우저 로그인은 인증 주소와 기기 코드를 카드 안에 
     settings,
     /setupLoginCancel\.addEventListener\('click', \(\) => \{\s*if \(setupAgent\) bridge\.cancelAgentSetup\(setupAgent\);/,
   );
+  // 취소하면 방금 누른 버튼이 사라져 포커스가 <body> 로 떨어지고, Esc 를 받는
+  // 덮개 밖이라 키보드로 카드를 닫을 수 없게 된다 — 다시 그릴 때 되돌린다.
+  assert.match(
+    settings,
+    /function restoreSetupFocus\(\): void \{[\s\S]*if \(active && active !== document\.body\) return;\s*setupDialog\.focus\(\);/,
+  );
+  assert.match(settings, /setupCodeSubmit\.disabled = connectionState !== 'connected' \|\| !setupCode\.input\.value\.trim\(\);\s*restoreSetupFocus\(\);/);
+  assert.match(settings, /renderPi\(\);\s*restoreSetupFocus\(\);/);
   // 상자는 oauth 로그인이 도는 동안에만 선다.
   assert.match(settings, /const authorizing = setupOauthPending && setupBusy;\s*setupLoginBox\.hidden = !authorizing/);
   assert.match(settings, /if \(ev\.authUrl\) setupAuthUrl = ev\.authUrl;\s*if \(ev\.userCode\) setupUserCode = ev\.userCode;/);
@@ -191,6 +204,9 @@ test('기본 설정은 select 셋 + 추론 슬라이더이고 저장 후 사이�
   assert.match(settings, /createEffortSlider\(/);
   assert.match(settings, /effortSlider\.setOptions\(\s*\n?\s*\[\.\.\.effortOptions\]\.reverse\(\)/);
   assert.match(settings, /effortField\.hidden = effortOptions\.length === 0/);
+  // 줄의 display:flex 가 기본 [hidden] 을 덮으므로 따로 눌러 준다 — 없으면
+  // Cursor 처럼 추론 강도가 없는 프로바이더에서 빈 줄과 죽은 슬라이더가 남는다.
+  assert.match(settingsCss, /\.ag-settings-field\[hidden\]\s*\{[^}]*display:\s*none;/s);
   assert.match(settings, /createSelect\('권한 프로필', PERMISSION_OPTIONS\)/);
   assert.match(settings, /const select = el\('select', 'ag-settings-select'\)/);
   assert.match(settings, /prefs = saveAgentPrefs\(partial\)/);

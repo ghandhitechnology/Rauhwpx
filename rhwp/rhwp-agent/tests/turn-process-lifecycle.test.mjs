@@ -65,3 +65,28 @@ test('a stale child that dies after a respawn cannot close the new turn', async 
   assert.deepEqual(events.map((event) => event.type), ['turn-start', 'turn-start']);
   assert.equal(lifecycle.isTurnOpen(), true);
 });
+
+test('trailing stdout from a killed child never reaches the next turn', async () => {
+  const { lifecycle, events } = makeLifecycle();
+  const lines = [];
+  const stale = new FakeProcess();
+  lifecycle.beginTurn();
+  lifecycle.attachChild(stale, (obj) => lines.push(obj));
+  // 사용자가 중단을 누르고 곧바로 다음 메시지를 보낸다 — 이전 자식은 아직 살아 있다.
+  lifecycle.interrupt();
+  lifecycle.beginTurn();
+  const fresh = new FakeProcess();
+  lifecycle.attachChild(fresh, (obj) => lines.push(obj));
+
+  // 죽어가던 프로세스가 버퍼에 남아 있던 NDJSON 을 뒤늦게 흘린다.
+  stale.stdout.emit('data', '{"type":"assistant"}\n{"type":"result"}\n');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(lines, [], '이전 턴의 출력은 파싱조차 하지 않는다');
+  assert.deepEqual(events.map((event) => event.type), ['turn-start', 'turn-end', 'turn-start']);
+  assert.equal(lifecycle.isTurnOpen(), true);
+
+  // 현재 자식의 출력은 그대로 통과한다.
+  fresh.stdout.emit('data', '{"type":"result"}\n');
+  assert.deepEqual(lines, [{ type: 'result' }]);
+});

@@ -964,3 +964,245 @@ test('automatic CLI update activates a verified prefix and retains one rollback 
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });
+
+/** 조건이 참이 될 때까지 이벤트 루프를 돌린다. 시간이 다 되면 그대로 진행한다. */
+async function waitFor(predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
+
+test('a provider environment carries only its own managed API key', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-envscope-'));
+  const manager = await createCliSetupManager({
+    rootDir,
+    spawnProcess: () => { throw new Error('환경 구성은 CLI 를 스폰하지 않는다'); },
+    homeDir: path.join(rootDir, 'no-home'),
+    baseEnv: {
+      PATH: '/usr/bin',
+      ANTHROPIC_API_KEY: 'sk-ant-hub',
+      OPENAI_API_KEY: 'sk-proj-hub',
+      XAI_API_KEY: 'xai-hub',
+      CURSOR_API_KEY: 'cur-hub',
+    },
+  }).init();
+
+  // 허브 프로세스 환경에 올라온 다른 프로바이더의 키는 자식으로 넘어가지 않는다.
+  const grokEnv = manager.envFor('grok');
+  assert.equal(grokEnv.XAI_API_KEY, 'xai-hub');
+  assert.equal(grokEnv.ANTHROPIC_API_KEY, undefined);
+  assert.equal(grokEnv.OPENAI_API_KEY, undefined);
+  assert.equal(grokEnv.CURSOR_API_KEY, undefined);
+
+  const cursorEnv = manager.envFor('cursor');
+  assert.equal(cursorEnv.CURSOR_API_KEY, 'cur-hub');
+  assert.equal(cursorEnv.ANTHROPIC_API_KEY, undefined);
+  assert.equal(cursorEnv.XAI_API_KEY, undefined);
+
+  const claudeEnv = manager.envFor('claude');
+  assert.equal(claudeEnv.ANTHROPIC_API_KEY, 'sk-ant-hub');
+  assert.equal(claudeEnv.OPENAI_API_KEY, undefined);
+  assert.equal(claudeEnv.XAI_API_KEY, undefined);
+  assert.equal(claudeEnv.CURSOR_API_KEY, undefined);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('cursor probes drop an inherited CURSOR_CONFIG_DIR so the isolated HOME decides', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-configdir-'));
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options, proc });
+    queueMicrotask(() => {
+      if (argv[0] === 'status') proc.stdout.emit('data', '{"isAuthenticated":true}\n');
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const secretStore = createMemorySecretStore();
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, secretStore, homeDir: path.join(rootDir, 'no-home'),
+    baseEnv: { PATH: '/usr/bin', CURSOR_CONFIG_DIR: path.join(rootDir, 'operator-config') },
+  }).init();
+
+  await manager.authenticate('cursor', 'api-key', 'cur-good-key');
+
+  const check = calls.find((call) => call.argv[0] === 'status');
+  assert.equal(check.options.env.HOME, path.join(rootDir, 'cursor-home', 'key-check'));
+  assert.equal(check.options.env.CURSOR_CONFIG_DIR, undefined, '상속된 설정 디렉터리는 HOME 격리를 무너뜨린다');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a successful Cursor login refetches the model list instead of serving the pre-login cache', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-models-login-'));
+  const calls = [];
+  let loggedIn = false;
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options, proc });
+    queueMicrotask(() => {
+      if (argv[0] === 'status') proc.stdout.emit('data', '{"isAuthenticated":true}\n');
+      if (argv[0] === '--list-models') {
+        if (!loggedIn) {
+          proc.stderr.emit('data', "Error: Authentication required. Run 'agent login'\n");
+          proc.emit('close', 1, null);
+          return;
+        }
+        proc.stdout.emit('data', 'gpt-5.2\nsonnet-4.6-thinking\n');
+      }
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const secretStore = createMemorySecretStore();
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, secretStore,
+    baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  // 로그인 전 조회는 빈 목록을 TTL 에 남긴다.
+  assert.deepEqual(await manager.cursorModels(), []);
+  loggedIn = true;
+  assert.deepEqual(await manager.cursorModels(), [], 'TTL 안에서는 캐시가 그대로 쓰인다');
+
+  await manager.authenticate('cursor', 'api-key', 'cur-good-key');
+  assert.deepEqual(await manager.cursorModels(), ['gpt-5.2', 'sonnet-4.6-thinking']);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('cursor self-update is skipped while a session may start', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-update-'));
+  const cursorBin = path.join(rootDir, 'cursor-home', '.local', 'bin', 'cursor-agent');
+  await fs.mkdir(path.dirname(cursorBin), { recursive: true });
+  await fs.writeFile(cursorBin, '#!/bin/bash\n');
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options, proc });
+    queueMicrotask(() => {
+      if (argv[0] === '--version') proc.stdout.emit('data', '2026.08.11-e8db854\n');
+      if (argv[0] === 'status') proc.stdout.emit('data', '{"isAuthenticated":false}\n');
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  const busy = await manager.automaticUpdate('cursor', { canActivate: () => false });
+  assert.equal(busy.version, '2026.08.11-e8db854');
+  assert.equal(calls.some((call) => call.argv[0] === 'update'), false, '세션이 있으면 바이너리를 바꾸지 않는다');
+  assert.equal(busy.error, null);
+
+  await manager.automaticUpdate('cursor', { canActivate: () => true });
+  const updateCall = calls.find((call) => call.argv[0] === 'update');
+  assert.ok(updateCall, '한가할 때는 자기 갱신이 돈다');
+  assert.equal(updateCall.options.env.HOME, path.join(rootDir, 'cursor-home'));
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a user install queues behind an in-flight automatic update of the same prefix', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-prefix-queue-'));
+  const prefixDir = path.join(rootDir, 'prefix');
+  const packagePath = (base, name) => path.join(base, 'node_modules', ...name.split('/'), 'package.json');
+  await fs.mkdir(path.dirname(packagePath(prefixDir, '@openai/codex')), { recursive: true });
+  await fs.writeFile(packagePath(prefixDir, '@openai/codex'), JSON.stringify({ version: '1.0.0' }));
+
+  const spawnOrder = [];
+  let releaseUpdate;
+  const updateGate = new Promise((resolve) => { releaseUpdate = resolve; });
+  const spawnProcess = (command, argv) => {
+    const proc = new FakeProcess();
+    if (argv[0] !== 'install') {
+      // 상태 조회(codex login status 등)는 그대로 통과시킨다.
+      queueMicrotask(() => proc.emit('close', 0, null));
+      return proc;
+    }
+    const targetPrefix = argv[2];
+    const request = String(argv.at(-1));
+    spawnOrder.push(request);
+    void (async () => {
+      if (request.startsWith('@openai/codex')) await updateGate;
+      const [name, version] = request.startsWith('@')
+        ? [request.split('@').slice(0, 2).join('@'), request.split('@')[2] ?? '1.2.3']
+        : [request, '1.2.3'];
+      await fs.mkdir(path.dirname(packagePath(targetPrefix, name)), { recursive: true });
+      await fs.writeFile(packagePath(targetPrefix, name), JSON.stringify({ name, version }));
+      proc.emit('close', 0, null);
+    })();
+    return proc;
+  };
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ version: '1.1.0', dist: {} }) });
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, npmCommand: 'npm', fetchImpl,
+    baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  const progress = [];
+  const updating = manager.automaticUpdate('codex');
+  const installing = manager.install('grok', (event) => progress.push(event));
+
+  await waitFor(() => spawnOrder.length > 0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(spawnOrder, ['@openai/codex@1.1.0'], '설치는 갱신이 끝날 때까지 prefix 를 건드리지 않는다');
+  // 큐에서 기다리는 동안에도 카드는 준비 단계를 먼저 받는다.
+  assert.deepEqual(progress.map((event) => event.phase), ['preparing']);
+
+  releaseUpdate();
+  const [updated, installed] = await Promise.all([updating, installing]);
+
+  assert.deepEqual(spawnOrder, ['@openai/codex@1.1.0', '@xai-official/grok']);
+  assert.equal(updated.version, '1.1.0');
+  assert.equal(installed.installed, true);
+  assert.deepEqual(progress.map((event) => event.phase), [
+    'preparing', 'resolving', 'installing', 'verifying', 'done',
+  ]);
+  // 갱신본 교체가 방금 끝난 설치를 지워 버리지 않는다.
+  assert.equal(JSON.parse(await fs.readFile(packagePath(prefixDir, '@openai/codex'), 'utf8')).version, '1.1.0');
+  assert.equal(JSON.parse(await fs.readFile(packagePath(prefixDir, '@xai-official/grok'), 'utf8')).version, '1.2.3');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a cancel flag left by a successful login does not swallow the next real failure', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-auth-cancel-'));
+  const logins = [];
+  const spawnProcess = (command, argv) => {
+    const proc = new FakeProcess();
+    // 로그인 프로세스는 테스트가 직접 끝낸다 — 취소 창을 재현하기 위해서다.
+    if (argv[0] === 'login') logins.push(proc);
+    else queueMicrotask(() => proc.emit('close', 0, null));
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  // 브라우저 왕복이 끝나 CLI 는 0 으로 죽는데, 카드가 아직 도는 사이에 취소를 누른다.
+  const first = manager.authenticate('grok', 'oauth');
+  await waitFor(() => logins.length === 1);
+  const cancelling = manager.cancel('grok');
+  logins[0].emit('close', 0, null);
+  await cancelling;
+  const success = await first;
+  assert.equal(success.authMethod, null);
+
+  // 다음 로그인이 진짜로 실패하면 취소가 아니라 실패로 보고한다.
+  const second = manager.authenticate('grok', 'oauth');
+  await waitFor(() => logins.length === 2);
+  logins[1].stderr.emit('data', 'device authorization expired\n');
+  logins[1].emit('close', 1, null);
+  await assert.rejects(second, (error) => {
+    assert.equal(error.code, 'AGENT_AUTH_FAILED');
+    assert.match(error.message, /device authorization expired/);
+    return true;
+  });
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
