@@ -126,8 +126,15 @@ for (const entry of matrix) {
     assert.ok(claudeTools.includes('Bash'));
     assert.ok(claudeTools.includes('WebSearch'));
     assert.ok(claudeTools.includes('WebFetch'));
-    assert.equal(claudeTools.includes('Agent'), entry.planCapabilities);
-    assert.equal(claude.includes('--forward-subagent-text'), entry.planCapabilities);
+    // Agent/Workflow 는 모든 모드에서 켜진다 — --tools 제한이 서브에이전트에도
+    // 상속되므로 planning 의 read-only 경계는 그대로 유지된다.
+    assert.ok(claudeTools.includes('Agent'));
+    assert.ok(claudeTools.includes('Workflow'));
+    assert.ok(claude.includes('--forward-subagent-text'));
+    const claudeAgents = JSON.parse(argValue(claude, '--agents'));
+    assert.ok(claudeAgents['doc-editor']);
+    assert.ok(claudeAgents['doc-researcher']);
+    assert.equal(claudeAgents['doc-editor'].tools, undefined);
     assert.equal(claude.includes('--dangerously-skip-permissions'), entry.claudeBypass);
     if (!entry.claudeWrite) {
       assert.deepEqual(claudeSettings.sandbox.filesystem.allowWrite, []);
@@ -583,11 +590,14 @@ test('Codex normalizes stable multi-agent lifecycle items', () => {
     { type: 'item.started', item: { id: 'collab-1', type: 'collab_tool_call', tool: 'spawn_agent', prompt: 'inspect', receiver_thread_ids: ['child-1'], status: 'in_progress' } },
     { type: 'item.completed', item: { id: 'collab-1', type: 'collab_tool_call', tool: 'spawn_agent', receiver_thread_ids: ['child-1'], agents_states: { 'child-1': { status: 'completed', message: 'done' } }, status: 'completed' } },
   );
-  const call = emitted.find((event) => event.type === 'tool-call');
-  const result = emitted.find((event) => event.type === 'tool-result');
-  assert.equal(call.tool, 'subagent:spawn_agent');
-  assert.match(call.argsJson, /child-1/);
-  assert.equal(result.ok, true);
-  assert.match(result.resultPreview, /done/);
+  const start = emitted.find((event) => event.type === 'task-start');
+  const end = emitted.find((event) => event.type === 'task-end');
+  assert.equal(start.taskId, 'collab-1');
+  assert.equal(start.title, 'inspect');
+  assert.equal(start.role, 'spawn_agent');
+  assert.equal(start.taskKind, 'agent');
+  assert.equal(end.taskId, 'collab-1');
+  assert.equal(end.status, 'completed');
+  assert.match(end.summary, /done/);
   session.dispose();
 });

@@ -222,25 +222,31 @@ export function createCodexSession(opts, {
           return;
         }
         if (itemType === 'collab_tool_call') {
+          // Codex 의 네이티브 서브에이전트(collab) 항목 — 통일된 task 이벤트로
+          // 정규화해 studio fleet 카드가 provider 무관하게 그려지도록 한다.
           const tool = String(item.tool ?? 'subagent');
           if (type === 'item.started') {
+            const prompt = typeof item.prompt === 'string' ? item.prompt.trim() : '';
             onEvent({
-              type: 'tool-call',
+              type: 'task-start',
               agent: 'codex',
+              taskId: itemId,
               callId: itemId,
-              tool: `subagent:${tool}`,
-              argsJson: JSON.stringify({
-                prompt: item.prompt ?? undefined,
-                receiverThreadIds: item.receiver_thread_ids ?? [],
-              }),
+              title: prompt ? truncate(prompt, 120) : tool,
+              role: tool,
+              taskKind: 'agent',
             });
+          } else if (type === 'item.updated') {
+            onEvent({ type: 'task-progress', agent: 'codex', taskId: itemId });
           } else if (type === 'item.completed' || type === 'item.failed') {
+            const failed = item.status === 'failed' || type === 'item.failed';
+            const summary = item.agents_states ?? item.result ?? item.error ?? null;
             onEvent({
-              type: 'tool-result',
+              type: 'task-end',
               agent: 'codex',
-              callId: itemId,
-              ok: item.status !== 'failed' && type !== 'item.failed',
-              resultPreview: truncate(JSON.stringify(item.agents_states ?? item.result ?? item.error ?? null)),
+              taskId: itemId,
+              status: failed ? 'failed' : 'completed',
+              ...(summary !== null ? { summary: truncate(typeof summary === 'string' ? summary : JSON.stringify(summary), 500) } : {}),
             });
           }
           return;

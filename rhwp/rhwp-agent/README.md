@@ -86,6 +86,18 @@ Paths are relative to the repository root.
    filesystem permission choice. The hub blocks document writes before an
    approved plan regardless of that permission choice.
 
+9. **Subagents and Claude workflows** — Claude sessions expose the native
+   `Agent` and `Workflow` tools in every mode (tool restrictions inherit into
+   subagents, so planning stays read-only), plus two rhwp agent types:
+   `doc-editor` (owns one paragraph range) and `doc-researcher` (read-only).
+   The harness normalizes the CLI's `task_*` lifecycle into `task-start` /
+   `task-progress` / `task-end` events with `parentTaskId` attribution on
+   child tool calls, holds the turn open while background tasks run (multiple
+   `result` lines per logical turn), and reports cumulative `modelUsage` as
+   per-result deltas. Codex `collab_tool_call` items map onto the same task
+   events. Studio renders these as fleet cards and auto-rebases disjoint
+   parallel document writes (`rebasedParaShift`).
+
 ## Environment variables
 
 | Variable | Default | Description |
