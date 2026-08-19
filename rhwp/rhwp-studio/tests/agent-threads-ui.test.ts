@@ -46,6 +46,35 @@ test('sidebar header keeps one compact model summary and expands all settings to
   assert.match(css, /\.ag-model\[hidden\]\s*\{[^}]*display:\s*none;/s);
   assert.match(css, /\.ag-config-panel\s*\{[^}]*display:\s*grid;/s);
   assert.match(css, /\.ag-config-panel \.ag-model-menu\s*\{[^}]*position:\s*static;/s);
+  // 턴 실행 중에는 설정 패널을 접되, 채팅을 다시 여는 잠금만으로는 접지 않는다.
+  assert.match(
+    source,
+    /if \(controlsLocked && chatStartPendingThreadId === null\) setConfigPanelOpen\(false\)/,
+  );
+});
+
+test('reasoning and model tweaks do not lock or rebuild the composer', () => {
+  // 추론 강도/모델만 바꿀 때는 입력칸을 '채팅을 여는 중'으로 잠그지 않는다.
+  assert.match(source, /if \(force\) chatStartPendingThreadId = currentThread\.id;/);
+  assert.match(source, /if \(force\) updateComposer\(\);/);
+  assert.match(source, /function selectEffort[\s\S]*startCurrentBridgeChat\(\);/);
+  assert.match(source, /function selectModel[\s\S]*startCurrentBridgeChat\(\);/);
+  // 서버가 같은 선택을 메아리치면 열린 피커 메뉴를 다시 그리지 않는다.
+  assert.match(
+    source,
+    /if \(selectedAgent !== prevAgent \|\| selectedModel !== prevModel\) rebuildLlmMenu\(\);/,
+  );
+  assert.match(
+    source,
+    /if \(selectedAgent !== prevAgent \|\| selectedModel !== prevModel \|\| selectedEffort !== prevEffort\)/,
+  );
+  // 보내기 아이콘은 라벨이 바뀔 때만 갈아끼운다 — 매 chat-started 마다 깜빡이지 않게.
+  assert.match(source, /if \(send\.getAttribute\('aria-label'\) !== sendLabel\)/);
+  // 계획 상태가 그대로면 검토 칸을 비웠다 다시 그리지 않는다.
+  assert.match(
+    source,
+    /if \(chatWorkflow === state\.workflow && planningPhase === state\.phase && samePlanId && sameApproval\) \{\s*return;/,
+  );
 });
 
 test('model, permission, and skill utilities live in the composer accessory row', () => {
@@ -111,7 +140,7 @@ test('past chats on the active file reopen as writable and adopt stable document
 });
 
 test('rapid past-chat switches cannot activate a stale provider session', () => {
-  assert.match(source, /chatStartPendingThreadId = currentThread\.id/);
+  assert.match(source, /if \(force\) chatStartPendingThreadId = currentThread\.id/);
   assert.match(source, /if \(e\.threadId && e\.threadId !== currentThread\.id\) break/);
   assert.match(source, /input\.disabled = connState !== 'connected' \|\| attachmentsSending \|\| chatStarting/);
   assert.match(bridgeSource, /msg\.threadId !== this\.threadId\) break/);

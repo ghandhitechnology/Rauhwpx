@@ -118,9 +118,11 @@ test('pi 모델 레지스트리가 채워지면 표시 이름 · effort · 기�
     assert.equal(resolveModelForAgent('pi', 'unknown/model'), 'deepseek/deepseek-chat-v3.1');
     assert.equal(resolveModelForAgent('pi', 'openai/gpt-oss-20b'), 'openai/gpt-oss-20b');
 
+    // 허브는 low→high 로 주지만 카탈로그는 다른 프로바이더와 같이 강함→약함.
+    // 슬라이더가 이걸 뒤집으므로 Low 가 왼쪽, High 가 오른쪽에 선다.
     assert.deepEqual(
       effortsForAgent('pi', 'deepseek/deepseek-chat-v3.1').map((e) => e.id),
-      ['low', 'medium', 'high'],
+      ['high', 'medium', 'low'],
     );
     assert.equal(labelForEffort('pi', 'high', 'deepseek/deepseek-chat-v3.1'), 'High');
     assert.equal(defaultEffortForAgent('pi', 'deepseek/deepseek-chat-v3.1'), 'medium');

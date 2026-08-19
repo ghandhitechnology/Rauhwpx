@@ -80,6 +80,9 @@ const PI_EFFORT_LABELS: Record<string, string> = {
   high: 'High',
 };
 
+/** 허브는 약함→강함으로 주지만, 슬라이더는 카탈로그가 강함→약함이라고 가정하고 뒤집는다. */
+const PI_EFFORTS_STRONG_TO_WEAK = ['high', 'medium', 'low'] as const;
+
 export const DEFAULT_AGENT_MODEL: Record<StaticAgentName, string> = {
   claude: 'sonnet',
   codex: 'gpt-5.6-sol',
@@ -216,7 +219,10 @@ export function effortsForAgent(
     case 'pi': {
       const cfg = findPiModel(resolveModelForAgent('pi', model));
       if (!cfg) return [];
-      return cfg.efforts.map((id) => ({ id, label: PI_EFFORT_LABELS[id] ?? id }));
+      const allowed = new Set(cfg.efforts);
+      return PI_EFFORTS_STRONG_TO_WEAK
+        .filter((id) => allowed.has(id))
+        .map((id) => ({ id, label: PI_EFFORT_LABELS[id] ?? id }));
     }
     // cursor-agent 는 추론 강도 플래그가 없다 — UI 가 선택기를 숨긴다.
     case 'cursor':

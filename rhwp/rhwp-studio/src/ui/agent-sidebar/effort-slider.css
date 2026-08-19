@@ -111,16 +111,6 @@
     0 0 0 3px color-mix(in srgb, var(--ag-accent) 45%, transparent);
 }
 
-.ag-eslider-value {
-  flex: 0 0 auto;
-  min-width: 34px;
-  color: var(--ag-text-secondary);
-  font-size: var(--font-size-sm, 11px);
-  font-weight: 600;
-  text-align: right;
-  white-space: nowrap;
-}
-
 .ag-eslider.ag-disabled {
   opacity: 0.5;
   pointer-events: none;

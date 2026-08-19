@@ -604,7 +604,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const threadWorkflows = new Map<string, AgentWorkflow>();
 
   function startCurrentBridgeChat(force = false): void {
-    chatStartPendingThreadId = currentThread.id;
+    // 새 채팅·스레드 전환(force)만 입력기를 잠근다. 모델/추론 강도만 바꿀 때는
+    // 같은 대화를 다시 열 뿐이라 입력칸·피커가 비활성으로 깜빡이지 않게 둔다.
+    if (force) chatStartPendingThreadId = currentThread.id;
     const history = currentThread.messages.flatMap((message) => (
       (message.role === 'user' || message.role === 'assistant')
         && message.kind !== 'progress'
@@ -614,7 +616,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     ));
     bridge.startChat(selectedAgent, selectedModel, selectedEffort, force, permissionProfile, chatWorkflow,
       currentThread.id, currentThread.documentId, currentThread.docKey, history);
-    updateComposer();
+    if (force) updateComposer();
   }
 
   // ── DOM 구성 ──────────────────────────────────────────
@@ -3702,12 +3704,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   // ── 상태 반영 헬퍼 ────────────────────────────────────
   function setSelectedAgent(agent: AgentName): void {
+    const agentChanged = agent !== selectedAgent;
     selectedAgent = agent;
     root.dataset.agent = agent;
     providerName.textContent = AGENT_LABEL[agent];
-    const nextIcon = createProviderIcon(agent);
-    providerIcon.replaceWith(nextIcon);
-    providerIcon = nextIcon;
+    if (agentChanged) {
+      const nextIcon = createProviderIcon(agent);
+      providerIcon.replaceWith(nextIcon);
+      providerIcon = nextIcon;
+    }
     for (const [name, item] of providerItems) {
       const active = name === agent;
       item.classList.toggle('ag-active', active);
@@ -3822,9 +3827,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             : '문서 작업을 입력하세요';
     }
     const sendLabel = turnRunning ? '중지' : '보내기';
-    send.replaceChildren(turnRunning ? createStopIcon() : createIcon('send'));
-    send.setAttribute('aria-label', sendLabel);
-    send.title = sendLabel;
+    if (send.getAttribute('aria-label') !== sendLabel) {
+      send.replaceChildren(turnRunning ? createStopIcon() : createIcon('send'));
+      send.setAttribute('aria-label', sendLabel);
+      send.title = sendLabel;
+    }
     send.classList.toggle('ag-stop', turnRunning);
     // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
     sendHint.hidden = turnRunning || attachmentsSending || chatStartPendingThreadId !== null
@@ -3836,7 +3843,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     effortTrigger.disabled = controlsLocked;
     effortSlider.setDisabled(controlsLocked);
     permissionBtn.disabled = controlsLocked || connState !== 'connected';
-    if (controlsLocked) setConfigPanelOpen(false);
+    // 턴 실행·첨부·모드 전환 중에는 설정 패널을 접는다. 모델/추론 강도를 바꾸는
+    // 순간 채팅을 다시 여는 잠금(chatStartPending)은 패널을 유지한다 — 바깥을
+    // 누르기 전까지는 그대로 두고 이어서 고를 수 있게.
+    if (controlsLocked && chatStartPendingThreadId === null) setConfigPanelOpen(false);
     updateWorkflowControl();
   }
 
@@ -4341,6 +4351,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       case 'chat-started':
         if (e.threadId && e.threadId !== currentThread.id) break;
         chatStartPendingThreadId = null;
+        const prevAgent = selectedAgent;
+        const prevModel = selectedModel;
+        const prevEffort = selectedEffort;
         if (e.agent !== selectedAgent) {
           selectedModel = defaultModelForAgent(e.agent);
           selectedEffort = resolveEffortForAgent(e.agent, null, selectedModel);
@@ -4359,8 +4372,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           permissionProfile = e.permissionProfile;
           updatePermissionButton();
         }
-        rebuildLlmMenu();
-        rebuildEffortMenu();
+        // 로컬에서 이미 맞춰 둔 선택(추론 강도 등)을 서버가 그대로 메아리치면
+        // 메뉴를 다시 그리지 않는다 — 열린 설정 패널이 깜빡이지 않게.
+        if (selectedAgent !== prevAgent || selectedModel !== prevModel) rebuildLlmMenu();
+        if (selectedAgent !== prevAgent || selectedModel !== prevModel || selectedEffort !== prevEffort) {
+          rebuildEffortMenu();
+        }
         updateComposer();
         // 새 채팅(welcome)·재시작 시 작업 방식과 계획 단계를 서버와 다시 맞춘다.
         syncPlanningFromBridge();
@@ -4984,6 +5001,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   /** 채팅 시작/재연결 시 브리지의 계획 상태와 다시 맞춘다. */
   function syncPlanningFromBridge(): void {
     const state = bridge.getWorkflowState();
+    const samePlanId = (activePlan?.planId ?? null) === (state.latestPlan?.planId ?? null);
+    const sameApproval = planApprovable === (state.latestPlan !== null && state.phase === 'awaiting-approval');
+    if (chatWorkflow === state.workflow && planningPhase === state.phase && samePlanId && sameApproval) {
+      return;
+    }
     chatWorkflow = state.workflow;
     planningPhase = state.phase;
     planApprovable = false;

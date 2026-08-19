@@ -59,10 +59,8 @@ export function createEffortSlider(config: EffortSliderOptions): EffortSlider {
   fill.className = 'ag-eslider-fill';
   const thumb = document.createElement('div');
   thumb.className = 'ag-eslider-thumb';
-  const valueEl = document.createElement('span');
-  valueEl.className = 'ag-eslider-value';
   track.append(fill, thumb);
-  root.append(track, valueEl);
+  root.append(track);
 
   let options: AgentEffortOption[] = [];
   let dots: HTMLElement[] = [];
@@ -143,9 +141,7 @@ export function createEffortSlider(config: EffortSliderOptions): EffortSlider {
 
   function syncAria(i: number): void {
     root.setAttribute('aria-valuenow', String(i));
-    const label = options[i]?.label ?? '';
-    root.setAttribute('aria-valuetext', label);
-    valueEl.textContent = label;
+    root.setAttribute('aria-valuetext', options[i]?.label ?? '');
   }
 
   function setPreview(i: number, pulse: boolean): void {
@@ -215,6 +211,11 @@ export function createEffortSlider(config: EffortSliderOptions): EffortSlider {
   });
 
   function moveTo(i: number): void {
+    if (i === index && i === target && !dragging && Math.abs(pos - i) < 0.01) {
+      previewIndex = i;
+      syncAria(i);
+      return;
+    }
     index = i;
     target = i;
     previewIndex = -1;
