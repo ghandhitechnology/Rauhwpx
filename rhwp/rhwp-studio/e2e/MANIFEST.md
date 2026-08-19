@@ -15,6 +15,7 @@ e2e 스크립트의 **단일 권위 목록**이다. 파일 추가/변경/폐기 
 |------|------|------|------|------|------|------|
 | `agent-edit-loop.test.mjs` | 상시 | active | 에이전트 편집 루프 종단간 (hub→bridge→executor→pending→wasm): revision 게이트 / 원자 replace_range / apply_list 숫자 서식 / 수식 미리보기·삽입 / verify_changes PNG / 수식 줄넘침 / 승인 영속 | footnote-01.hwp | npm e2e:agent-edit-loop |  |
 | `agent-settings-reconnect.test.mjs` | 상시 | active | 허브 재연결 수명주기 + 설정 페이지: 허브 부재 배너 / 기동 후 자동 재연결 / 설정 네 구역·제공자 프로브 / 중단 감지·수동 재시도 / 재기동 복구 | (문서 불필요) | npm e2e:agent-settings-reconnect |  |
+| `agent-tool-bench.mjs` | 유틸 | active | 에이전트 MCP 도구 왕복 시간 벤치마크 (hub→bridge→executor→wasm, 실제 프로덕션 경로): 도구별 p50/p95 ms + apply_edits 배치 대 개별 호출 비교. 마지막에 `BENCH_RESULT:` JSON 한 줄 출력 — 최적화 전후 비교용 | footnote-01.hwp | npm e2e:agent-tool-bench |  |
 | `agent-sidebar-center.check.mjs` | 상시 | active | 진단: 사이드바 inset 직후 문서 로드 시 용지 가운데 정렬 (stale viewport 폭 회귀) | — | 수동 | legacy-name |
 | `agent-workspace-shell.test.mjs` | 상시 | active | 전체 화면 워크스페이스 셸 기하: 상단 바/대화·변경 탭 전환/레일·검토 칸 배치 | — | 수동 |  |
 | `ime-composition-cursor-move.test.mjs` | 상시 | active | 한글 IME 세션 정확성: 조합 중 클릭, 빠른 `안녕하세요`·`가가`, 후보 변환, trailing input, undo | — | 수동 |  |
