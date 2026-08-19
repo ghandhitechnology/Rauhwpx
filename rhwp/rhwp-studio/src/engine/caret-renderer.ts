@@ -193,8 +193,15 @@ export class CaretRenderer {
     }
   }
 
-  /** IME 조합 오버레이를 표시한다 */
-  showComposition(startRect: CursorRect, charWidth: number, zoom: number, text: string, fontFamily: string): void {
+  /** IME 조합 오버레이를 표시한다. fontSizePx 는 문서 글꼴의 실제 px 크기(줌 미적용). */
+  showComposition(
+    startRect: CursorRect,
+    charWidth: number,
+    zoom: number,
+    text: string,
+    fontFamily: string,
+    fontSizePx = 0,
+  ): void {
     this.ensureAttached();
     this.isCompMode = true;
 
@@ -225,7 +232,11 @@ export class CaretRenderer {
     this.compEl.style.top = `${top}px`;
     this.compEl.style.width = `${w}px`;
     this.compEl.style.height = `${h}px`;
-    this.compEl.style.fontSize = `${box.h * 0.85 * zoom}px`;
+    // 커서 rect 높이는 ascent+descent(줄 텍스트 높이)라 글꼴 em 보다 크다. 그 값에
+    // 0.85 를 곱해 쓰면 조합 중 글자가 확정 글자보다 작게 보이므로, 문서 글꼴의
+    // 실제 px 크기를 받으면 그대로 쓴다.
+    const glyphPx = fontSizePx > 0 ? fontSizePx * zoom : box.h * 0.85 * zoom;
+    this.compEl.style.fontSize = `${glyphPx}px`;
     this.compEl.style.fontFamily = fontFamily || 'sans-serif';
     this.compEl.style.lineHeight = `${h}px`;
     this.compEl.textContent = text;
