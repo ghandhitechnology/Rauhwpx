@@ -56,18 +56,15 @@ const CLAUDE_EFFORTS_COMPACT: readonly AgentEffortOption[] = [
   { id: 'low', label: 'Low' },
 ];
 
-/** Codex `model_reasoning_effort` (강함 → 약함). gpt-5.6 는 max 까지 받는다. */
+/** Codex `model_reasoning_effort` (강함 → 약함). */
 const CODEX_EFFORTS: readonly AgentEffortOption[] = [
-  { id: 'max', label: 'Max' },
-  { id: 'xhigh', label: 'Extra high' },
   { id: 'high', label: 'High' },
   { id: 'medium', label: 'Medium' },
   { id: 'low', label: 'Low' },
 ];
 
-/** Grok CLI `--reasoning-effort` (강함 → 약함). CLI 가 받는 값: xhigh|high|medium|low. */
+/** Grok CLI `--reasoning-effort` (강함 → 약함). */
 const GROK_EFFORTS: readonly AgentEffortOption[] = [
-  { id: 'xhigh', label: 'Extra high' },
   { id: 'high', label: 'High' },
   { id: 'medium', label: 'Medium' },
   { id: 'low', label: 'Low' },
@@ -79,9 +76,6 @@ const PI_EFFORT_LABELS: Record<string, string> = {
   medium: 'Medium',
   high: 'High',
 };
-
-/** 허브는 약함→강함으로 주지만, 슬라이더는 카탈로그가 강함→약함이라고 가정하고 뒤집는다. */
-const PI_EFFORTS_STRONG_TO_WEAK = ['high', 'medium', 'low'] as const;
 
 export const DEFAULT_AGENT_MODEL: Record<StaticAgentName, string> = {
   claude: 'sonnet',
@@ -219,10 +213,7 @@ export function effortsForAgent(
     case 'pi': {
       const cfg = findPiModel(resolveModelForAgent('pi', model));
       if (!cfg) return [];
-      const allowed = new Set(cfg.efforts);
-      return PI_EFFORTS_STRONG_TO_WEAK
-        .filter((id) => allowed.has(id))
-        .map((id) => ({ id, label: PI_EFFORT_LABELS[id] ?? id }));
+      return cfg.efforts.map((id) => ({ id, label: PI_EFFORT_LABELS[id] ?? id }));
     }
     // cursor-agent 는 추론 강도 플래그가 없다 — UI 가 선택기를 숨긴다.
     case 'cursor':

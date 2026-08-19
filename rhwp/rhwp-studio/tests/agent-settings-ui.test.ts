@@ -197,14 +197,11 @@ test('자동 하네스 업데이트 실패는 프로바이더 카드에 조용�
   assert.match(settingsCss, /\.ag-settings-row-detail\.ag-update-required/);
 });
 
-test('기본 설정은 select 셋이고 저장 후 사이드바에 알린다', () => {
+test('기본 설정은 네 개의 native select 이고 저장 후 사이드바에 알린다', () => {
   assert.match(settings, /createSelect\(\s*'기본 제공자'/);
   assert.match(settings, /createSelect\('기본 모델', \[\]\)/);
   assert.match(settings, /createSelect\('추론 강도', \[\]\)/);
-  assert.match(settings, /effortField\.field\.hidden = effortOptions\.length === 0/);
-  assert.match(settings, /fillSelect\(effortField\.select, \[\.\.\.effortOptions\]\.reverse\(\)\)/);
-  // 줄의 display:flex 가 기본 [hidden] 을 덮으므로 따로 눌러 준다 — 없으면
-  // Cursor 처럼 추론 강도가 없는 프로바이더에서 빈 줄이 남는다.
+  // 줄의 display:flex 가 기본 [hidden] 을 덮으므로 따로 눌러 준다.
   assert.match(settingsCss, /\.ag-settings-field\[hidden\]\s*\{[^}]*display:\s*none;/s);
   assert.match(settings, /createSelect\('권한 프로필', PERMISSION_OPTIONS\)/);
   assert.match(settings, /const select = el\('select', 'ag-settings-select'\)/);

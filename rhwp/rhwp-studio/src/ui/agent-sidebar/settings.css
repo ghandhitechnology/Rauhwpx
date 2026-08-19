@@ -186,11 +186,6 @@
   color: var(--ag-text-secondary);
 }
 
-.ag-settings-field .ag-eslider {
-  flex: 1 1 auto;
-  max-width: 260px;
-}
-
 .ag-settings-input,
 .ag-settings-select {
   flex: 1 1 auto;

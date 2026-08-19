@@ -131,7 +131,6 @@ test('mode, model and permission switches are locked while a turn runs or the ch
   assert.match(source, /llmTrigger\.disabled = controlsLocked/);
   assert.match(source, /effortTrigger\.disabled = controlsLocked/);
   assert.match(source, /permissionBtn\.disabled = controlsLocked \|\| connState !== 'connected'/);
-  assert.match(source, /if \(controlsLocked && chatStartPendingThreadId === null\) setConfigPanelOpen\(false\)/);
   assert.match(source, /if \(isControlLocked\(\) \|\| connState !== 'connected'\)/);
 });
 

@@ -89,11 +89,10 @@ test('저장은 부분 갱신이고, 저장된 값은 다시 읽힌다', () => {
   assert.equal(saved.defaultEffort, 'max');
   assert.deepEqual(loadAgentPrefs(storage), saved);
 
-  // 프로바이더를 바꾸면 남아 있던 모델은 새 프로바이더 기준으로 접히고,
-  // 강도는 codex 도 max 를 받으니 그대로 살아남는다.
+  // 프로바이더를 바꾸면 남아 있던 모델/강도가 새 프로바이더 기준으로 접힌다.
   const switched = saveAgentPrefs({ defaultAgent: 'codex' }, storage);
   assert.equal(switched.defaultModel, 'gpt-5.6-sol');
-  assert.equal(switched.defaultEffort, 'max');
+  assert.equal(switched.defaultEffort, 'medium');
   assert.equal(JSON.parse(storage.map.get(AGENT_PREFS_STORAGE_KEY)!).defaultAgent, 'codex');
 });
 
@@ -170,7 +169,7 @@ test('grok 기본값은 저장되고 모르는 모델/강도는 grok 기준으�
   const prefs = normalizeAgentPrefs({
     defaultAgent: 'grok',
     defaultModel: 'gpt-5.6-sol',
-    defaultEffort: 'max',
+    defaultEffort: 'xhigh',
   });
   assert.equal(prefs.defaultAgent, 'grok');
   assert.equal(prefs.defaultModel, 'grok-4.6');

@@ -73,7 +73,6 @@ import { createChevron, createColumnIcon } from '../chevron.ts';
 import { showActionMenu } from '../action-menu.ts';
 import { createHieumGlyph, createIcon, createStopIcon, OP_ICON } from './icons.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
-import { createEffortSlider } from './effort-slider.ts';
 import { createSettingsPanel } from './settings.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
@@ -604,9 +603,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const threadWorkflows = new Map<string, AgentWorkflow>();
 
   function startCurrentBridgeChat(force = false): void {
-    // 새 채팅·스레드 전환(force)만 입력기를 잠근다. 모델/추론 강도만 바꿀 때는
-    // 같은 대화를 다시 열 뿐이라 입력칸·피커가 비활성으로 깜빡이지 않게 둔다.
-    if (force) chatStartPendingThreadId = currentThread.id;
+    chatStartPendingThreadId = currentThread.id;
     const history = currentThread.messages.flatMap((message) => (
       (message.role === 'user' || message.role === 'assistant')
         && message.kind !== 'progress'
@@ -616,7 +613,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     ));
     bridge.startChat(selectedAgent, selectedModel, selectedEffort, force, permissionProfile, chatWorkflow,
       currentThread.id, currentThread.documentId, currentThread.docKey, history);
-    if (force) updateComposer();
+    updateComposer();
   }
 
   // ── DOM 구성 ──────────────────────────────────────────
@@ -1008,38 +1005,51 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const summaryCaret = createChevron('ag-summary-caret');
   effortTrigger.append(effortName, summaryCaret);
 
-  // 설정 패널의 '추론' 묶음 — 슬라이더는 이 안에 들어가므로 강도 옵션이 없는
+  const effortMenu = el('div', 'ag-model-menu ag-effort-menu');
+  effortMenu.setAttribute('role', 'menu');
+  effortMenu.setAttribute('aria-hidden', 'true');
+  // 설정 패널의 '추론' 묶음 — 메뉴는 이 안에 들어가므로 강도 옵션이 없는
   // 프로바이더(cursor)에서는 트리거뿐 아니라 이 묶음도 함께 접어야 빈 칸이 남지 않는다.
   const effortGroup = el('div', 'ag-config-group');
-  const effortSlider = createEffortSlider({
-    ariaLabel: '추론 강도',
-    onChange: (effortId) => selectEffort(effortId),
-    // 드래그 중 지나가는 눈금을 요약 라벨에 미리 비춘다.
-    onPreview: (effortId) => {
-      effortName.textContent = labelForEffort(selectedAgent, effortId, selectedModel);
-    },
-  });
-  effortGroup.append(el('span', 'ag-config-label', '추론'), effortSlider.root);
+  effortGroup.append(el('span', 'ag-config-label', '추론'), effortMenu);
+  let effortItems = new Map<string, HTMLButtonElement>();
 
   function selectEffort(effortId: string): void {
     if (isControlLocked()) return;
     selectedEffort = resolveEffortForAgent(selectedAgent, effortId, selectedModel);
     effortName.textContent = labelForEffort(selectedAgent, selectedEffort, selectedModel);
-    effortSlider.setValue(selectedEffort);
+    for (const [id, item] of effortItems) {
+      const active = id === selectedEffort;
+      item.classList.toggle('ag-active', active);
+      item.setAttribute('aria-checked', active ? 'true' : 'false');
+    }
     startCurrentBridgeChat();
     updateWorkspaceAgentContext();
     refreshSidebarWidthMin();
+    effortTrigger.focus();
   }
 
   function rebuildEffortMenu(): void {
+    effortMenu.replaceChildren();
+    effortItems = new Map();
     const options = effortsForAgent(selectedAgent, selectedModel);
     // 추론 강도를 받지 않는 모델(pi 의 비추론 모델, cursor 전체)에서는
     // 트리거와 설정 패널의 '추론' 묶음을 함께 접는다.
     const noEfforts = options.length === 0;
     effortWrap.hidden = noEfforts;
     effortGroup.hidden = noEfforts;
-    // 카탈로그는 강함 → 약함 — 슬라이더는 왼쪽이 약함이라 뒤집어 깐다.
-    effortSlider.setOptions([...options].reverse(), selectedEffort);
+    for (const opt of options) {
+      const item = el('button', 'ag-model-item ag-effort-item', opt.label);
+      item.type = 'button';
+      item.dataset.effort = opt.id;
+      item.setAttribute('role', 'menuitemradio');
+      const active = opt.id === selectedEffort;
+      item.setAttribute('aria-checked', active ? 'true' : 'false');
+      item.classList.toggle('ag-active', active);
+      item.addEventListener('click', () => selectEffort(opt.id));
+      effortItems.set(opt.id, item);
+      effortMenu.appendChild(item);
+    }
     effortName.textContent = labelForEffort(selectedAgent, selectedEffort, selectedModel);
   }
 
@@ -1053,16 +1063,31 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setConfigPanelOpen(true);
-      effortSlider.root.focus();
+      effortItems.get(selectedEffort)?.focus();
     } else if (e.key === 'Escape') {
       setConfigPanelOpen(false);
     }
   });
-  effortSlider.root.addEventListener('keydown', (e) => {
+  effortMenu.addEventListener('keydown', (e) => {
+    const ids = [...effortItems.keys()];
+    const items = ids.map((id) => effortItems.get(id)!);
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
     if (e.key === 'Escape') {
       e.preventDefault();
       setConfigPanelOpen(false);
       effortTrigger.focus();
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      items[(Math.max(current, 0) + 1) % items.length]?.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      items[(Math.max(current, 0) - 1 + items.length) % items.length]?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      items[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      items[items.length - 1]?.focus();
     }
   });
 
@@ -1233,7 +1258,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     for (const trigger of [providerTrigger, llmTrigger, effortTrigger]) {
       trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
     }
-    for (const menu of [providerMenu, llmMenu]) {
+    for (const menu of [providerMenu, llmMenu, effortMenu]) {
       menu.setAttribute('aria-hidden', open ? 'false' : 'true');
     }
   }
@@ -3704,15 +3729,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   // ── 상태 반영 헬퍼 ────────────────────────────────────
   function setSelectedAgent(agent: AgentName): void {
-    const agentChanged = agent !== selectedAgent;
     selectedAgent = agent;
     root.dataset.agent = agent;
     providerName.textContent = AGENT_LABEL[agent];
-    if (agentChanged) {
-      const nextIcon = createProviderIcon(agent);
-      providerIcon.replaceWith(nextIcon);
-      providerIcon = nextIcon;
-    }
+    const nextIcon = createProviderIcon(agent);
+    providerIcon.replaceWith(nextIcon);
+    providerIcon = nextIcon;
     for (const [name, item] of providerItems) {
       const active = name === agent;
       item.classList.toggle('ag-active', active);
@@ -3827,11 +3849,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             : '문서 작업을 입력하세요';
     }
     const sendLabel = turnRunning ? '중지' : '보내기';
-    if (send.getAttribute('aria-label') !== sendLabel) {
-      send.replaceChildren(turnRunning ? createStopIcon() : createIcon('send'));
-      send.setAttribute('aria-label', sendLabel);
-      send.title = sendLabel;
-    }
+    send.replaceChildren(turnRunning ? createStopIcon() : createIcon('send'));
+    send.setAttribute('aria-label', sendLabel);
+    send.title = sendLabel;
     send.classList.toggle('ag-stop', turnRunning);
     // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
     sendHint.hidden = turnRunning || attachmentsSending || chatStartPendingThreadId !== null
@@ -3841,12 +3861,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     providerTrigger.disabled = controlsLocked;
     llmTrigger.disabled = controlsLocked;
     effortTrigger.disabled = controlsLocked;
-    effortSlider.setDisabled(controlsLocked);
     permissionBtn.disabled = controlsLocked || connState !== 'connected';
-    // 턴 실행·첨부·모드 전환 중에는 설정 패널을 접는다. 모델/추론 강도를 바꾸는
-    // 순간 채팅을 다시 여는 잠금(chatStartPending)은 패널을 유지한다 — 바깥을
-    // 누르기 전까지는 그대로 두고 이어서 고를 수 있게.
-    if (controlsLocked && chatStartPendingThreadId === null) setConfigPanelOpen(false);
+    if (controlsLocked) setConfigPanelOpen(false);
     updateWorkflowControl();
   }
 
@@ -4351,9 +4367,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       case 'chat-started':
         if (e.threadId && e.threadId !== currentThread.id) break;
         chatStartPendingThreadId = null;
-        const prevAgent = selectedAgent;
-        const prevModel = selectedModel;
-        const prevEffort = selectedEffort;
         if (e.agent !== selectedAgent) {
           selectedModel = defaultModelForAgent(e.agent);
           selectedEffort = resolveEffortForAgent(e.agent, null, selectedModel);
@@ -4372,12 +4385,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           permissionProfile = e.permissionProfile;
           updatePermissionButton();
         }
-        // 로컬에서 이미 맞춰 둔 선택(추론 강도 등)을 서버가 그대로 메아리치면
-        // 메뉴를 다시 그리지 않는다 — 열린 설정 패널이 깜빡이지 않게.
-        if (selectedAgent !== prevAgent || selectedModel !== prevModel) rebuildLlmMenu();
-        if (selectedAgent !== prevAgent || selectedModel !== prevModel || selectedEffort !== prevEffort) {
-          rebuildEffortMenu();
-        }
+        rebuildLlmMenu();
+        rebuildEffortMenu();
         updateComposer();
         // 새 채팅(welcome)·재시작 시 작업 방식과 계획 단계를 서버와 다시 맞춘다.
         syncPlanningFromBridge();
@@ -5001,11 +5010,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   /** 채팅 시작/재연결 시 브리지의 계획 상태와 다시 맞춘다. */
   function syncPlanningFromBridge(): void {
     const state = bridge.getWorkflowState();
-    const samePlanId = (activePlan?.planId ?? null) === (state.latestPlan?.planId ?? null);
-    const sameApproval = planApprovable === (state.latestPlan !== null && state.phase === 'awaiting-approval');
-    if (chatWorkflow === state.workflow && planningPhase === state.phase && samePlanId && sameApproval) {
-      return;
-    }
     chatWorkflow = state.workflow;
     planningPhase = state.phase;
     planApprovable = false;

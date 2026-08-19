@@ -49,15 +49,14 @@ test('effort catalogs follow provider capabilities', () => {
   );
   assert.deepEqual(
     effortsForAgent('codex').map((e) => e.id),
-    ['max', 'xhigh', 'high', 'medium', 'low'],
+    ['high', 'medium', 'low'],
   );
 });
 
 test('resolveEffortForAgent clamps unsupported levels to provider default', () => {
   assert.equal(resolveEffortForAgent('claude', 'max', 'sonnet'), 'max');
   assert.equal(resolveEffortForAgent('claude', 'max', 'haiku'), defaultEffortForAgent('claude', 'haiku'));
-  assert.equal(resolveEffortForAgent('codex', 'xhigh'), 'xhigh');
-  assert.equal(resolveEffortForAgent('codex', 'ultra'), defaultEffortForAgent('codex'));
+  assert.equal(resolveEffortForAgent('codex', 'xhigh'), defaultEffortForAgent('codex'));
   assert.equal(labelForEffort('claude', 'high', 'sonnet'), 'High');
 });
 
@@ -118,11 +117,9 @@ test('pi 모델 레지스트리가 채워지면 표시 이름 · effort · 기�
     assert.equal(resolveModelForAgent('pi', 'unknown/model'), 'deepseek/deepseek-chat-v3.1');
     assert.equal(resolveModelForAgent('pi', 'openai/gpt-oss-20b'), 'openai/gpt-oss-20b');
 
-    // 허브는 low→high 로 주지만 카탈로그는 다른 프로바이더와 같이 강함→약함.
-    // 슬라이더가 이걸 뒤집으므로 Low 가 왼쪽, High 가 오른쪽에 선다.
     assert.deepEqual(
       effortsForAgent('pi', 'deepseek/deepseek-chat-v3.1').map((e) => e.id),
-      ['high', 'medium', 'low'],
+      ['low', 'medium', 'high'],
     );
     assert.equal(labelForEffort('pi', 'high', 'deepseek/deepseek-chat-v3.1'), 'High');
     assert.equal(defaultEffortForAgent('pi', 'deepseek/deepseek-chat-v3.1'), 'medium');
@@ -147,11 +144,11 @@ test('grok 은 정적 카탈로그와 세 단계 추론 강도를 갖는다', ()
   assert.equal(isModelForAgent('grok', 'sonnet'), false);
   // 다른 프로바이더의 모델은 grok 기본값으로 접힌다.
   assert.equal(resolveModelForAgent('grok', 'gpt-5.6-sol'), 'grok-4.6');
-  assert.deepEqual(effortsForAgent('grok').map((e) => e.id), ['xhigh', 'high', 'medium', 'low']);
+  assert.deepEqual(effortsForAgent('grok').map((e) => e.id), ['high', 'medium', 'low']);
   assert.equal(defaultEffortForAgent('grok'), 'high');
   assert.equal(labelForEffort('grok', 'medium'), 'Medium');
-  // grok CLI 가 모르는 강도는 grok 기본값으로 내려간다.
-  assert.equal(resolveEffortForAgent('grok', 'max'), 'high');
+  // Claude 전용 강도는 grok 기본값으로 내려간다.
+  assert.equal(resolveEffortForAgent('grok', 'xhigh'), 'high');
   assert.equal(resolveEffortForAgent('grok', 'low'), 'low');
   assert.equal(modelSupportsImages('grok', 'grok-4.6'), true);
 });
