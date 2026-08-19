@@ -74,7 +74,7 @@ description: Address table cells and change table structure in the live HWP/HWPX
 
 - 셀 텍스트를 먼저 채우고 구조 변경을 뒤로 미룬다. `insert_row`/`insert_col`/`merge_cells`/`delete_table` 를
   부르면 그 표는 사용자가 승인할 때까지 잠겨 추가 편집을 받지 않는다.
-- 모든 호출은 `expectedRevision` 이 필요하고 한 번에 하나씩 보낸다 (`rhwp-editing` 참고).
+- 모든 호출은 `expectedRevision` 이 필요하다. 편집을 여러 개 알고 있으면 `apply_edits` 로 묶는다 (`rhwp-editing` 참고).
 - 폭·테두리·계산식·캡션 op 도 mark-only 다. 승인(또는 턴 자동 확정) 전까지는 문서가 바뀌지 않는다.
 - 표 작업이 끝나면 `verify_changes` 를 `includeImage: true` 로 불러 레이아웃을 확인하고,
   쪽 넘침이 의심되면 `get_table_layout` 으로 확인한다.

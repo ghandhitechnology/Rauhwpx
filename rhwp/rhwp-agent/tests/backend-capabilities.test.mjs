@@ -228,6 +228,22 @@ test('permission profiles split approval-gated staging from free editing', () =>
   }
 });
 
+test('every write-capable brief directs batched writes through apply_edits', () => {
+  for (const writeBrief of [
+    systemBriefFor({ workflow: 'direct' }),
+    systemBriefFor({ workflow: 'direct', permissionProfile: 'safe' }),
+    systemBriefFor({ workflow: 'direct', permissionProfile: 'unrestricted' }),
+    systemBriefFor({ workflow: 'plan', phase: 'implementing', permissionProfile: 'safe' }),
+    systemBriefFor({ workflow: 'plan', phase: 'implementing', permissionProfile: 'unrestricted' }),
+  ]) {
+    assert.match(writeBrief, /apply_edits/);
+    assert.match(writeBrief, /up to 32 items/);
+    assert.match(writeBrief, /bottom-of-document first/);
+    assert.match(writeBrief, /recovery guidance in the error message/);
+    assert.doesNotMatch(writeBrief, /ONE AT A TIME/);
+  }
+});
+
 test('all workflow system prompts default document design to black and white', () => {
   const briefs = [
     systemBriefFor({ workflow: 'direct', phase: 'implementing' }),
