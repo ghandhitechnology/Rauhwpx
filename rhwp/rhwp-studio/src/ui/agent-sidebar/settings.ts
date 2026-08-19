@@ -15,9 +15,10 @@ import './settings.css';
 import {
   effortsForAgent,
   labelForModel,
-  modelsForAgent,
+  modelGroupsForAgent,
   resolveEffortForAgent,
   resolveModelForAgent,
+  type AgentModelGroup,
 } from '../../agent/models.ts';
 import { loadAgentPrefs, saveAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
 import { createEffortSlider } from './effort-slider.ts';
@@ -222,6 +223,32 @@ function fillSelect(
     select.appendChild(node);
   }
   if (options.some((option) => option.id === previous)) select.value = previous;
+}
+
+/** 라벨 있는 그룹은 optgroup 으로 묶는다 — cursor 의 구독/API 과금 풀 구분. */
+function fillSelectGrouped(
+  select: HTMLSelectElement,
+  groups: ReadonlyArray<AgentModelGroup>,
+): void {
+  const previous = select.value;
+  select.replaceChildren();
+  for (const group of groups) {
+    let parent: HTMLSelectElement | HTMLOptGroupElement = select;
+    if (group.label) {
+      const optgroup = document.createElement('optgroup');
+      optgroup.label = group.label;
+      select.appendChild(optgroup);
+      parent = optgroup;
+    }
+    for (const option of group.options) {
+      const node = document.createElement('option');
+      node.value = option.id;
+      node.textContent = option.label;
+      parent.appendChild(node);
+    }
+  }
+  const ids = groups.flatMap((group) => group.options.map((option) => option.id));
+  if (ids.includes(previous)) select.value = previous;
 }
 
 /** pi 마법사의 네 단계 (+ 완료 요약). */
@@ -1160,10 +1187,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       selectableAgents().map((agent) => ({ id: agent, label: AGENT_LABEL[agent] })),
     );
     agentField.select.value = prefs.defaultAgent;
-    fillSelect(
-      modelField.select,
-      modelsForAgent(prefs.defaultAgent).map((model) => ({ id: model.id, label: model.label })),
-    );
+    fillSelectGrouped(modelField.select, modelGroupsForAgent(prefs.defaultAgent));
     modelField.select.value = resolveModelForAgent(prefs.defaultAgent, prefs.defaultModel);
     const effortOptions = effortsForAgent(prefs.defaultAgent, prefs.defaultModel);
     // 추론 강도가 없는 프로바이더(cursor 등)에서는 줄 자체를 접는다.

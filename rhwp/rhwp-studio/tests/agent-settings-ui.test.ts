@@ -370,6 +370,16 @@ test('grok · cursor 사용량도 세션 · 오늘 · 주간 토큰으로 보인
   assert.match(settingsCss, /\.ag-settings-usage-block\[hidden\]/);
 });
 
+test('cursor 모델 선택은 구독/API 과금 풀로 나뉘어 보인다', () => {
+  // 설정 페이지의 기본 모델 셀렉트는 그룹 라벨을 optgroup 으로 그린다.
+  assert.match(settings, /function fillSelectGrouped\(/);
+  assert.match(settings, /fillSelectGrouped\(modelField\.select, modelGroupsForAgent\(prefs\.defaultAgent\)\)/);
+  // 입력기 모델 메뉴도 같은 그룹 머리글을 쓴다.
+  assert.match(source, /modelGroupsForAgent\(selectedAgent\)/);
+  assert.match(source, /ag-llm-group-label/);
+  assert.match(css, /\.ag-llm-group-label \{[\s\S]*?flex-basis: 100%/);
+});
+
 test('설정 모달은 프로바이더별 설치 안내와 API 키 힌트를 갖는다', () => {
   assert.match(settings, /const SETUP_INSTALL_NOTE: Record<AgentName, string>/);
   assert.match(settings, /cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다\.'/);

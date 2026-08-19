@@ -1577,6 +1577,16 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   min-width: 132px;
 }
 
+/* cursor 과금 풀 머리글 — 칩이 줄바꿈되는 목록에서 한 줄을 통째로 차지한다. */
+.ag-llm-group-label {
+  flex-basis: 100%;
+  padding: 4px 2px 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ag-text-muted);
+}
+
 .ag-effort-trigger {
   font-weight: 500;
   font-size: var(--font-size-base, 12px);

@@ -33,8 +33,8 @@ import {
   effortsForAgent,
   labelForEffort,
   labelForModel,
+  modelGroupsForAgent,
   modelSupportsImages,
-  modelsForAgent,
   resolveEffortForAgent,
   resolveModelForAgent,
 } from '../../agent/models.ts';
@@ -935,17 +935,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function rebuildLlmMenu(): void {
     llmMenu.replaceChildren();
     llmItems = new Map();
-    for (const opt of modelsForAgent(selectedAgent)) {
-      const item = el('button', 'ag-model-item ag-llm-item', opt.label);
-      item.type = 'button';
-      item.dataset.model = opt.id;
-      item.setAttribute('role', 'menuitemradio');
-      const active = opt.id === selectedModel;
-      item.setAttribute('aria-checked', active ? 'true' : 'false');
-      item.classList.toggle('ag-active', active);
-      item.addEventListener('click', () => selectModel(opt.id));
-      llmItems.set(opt.id, item);
-      llmMenu.appendChild(item);
+    for (const group of modelGroupsForAgent(selectedAgent)) {
+      // cursor 의 과금 풀 구분 — 구독 사용량 차감 모델과 API 과금 모델을 가른다.
+      if (group.label) llmMenu.appendChild(el('span', 'ag-llm-group-label', group.label));
+      for (const opt of group.options) {
+        const item = el('button', 'ag-model-item ag-llm-item', opt.label);
+        item.type = 'button';
+        item.dataset.model = opt.id;
+        item.setAttribute('role', 'menuitemradio');
+        const active = opt.id === selectedModel;
+        item.setAttribute('aria-checked', active ? 'true' : 'false');
+        item.classList.toggle('ag-active', active);
+        item.addEventListener('click', () => selectModel(opt.id));
+        llmItems.set(opt.id, item);
+        llmMenu.appendChild(item);
+      }
     }
     llmName.textContent = labelForModel(selectedAgent, selectedModel);
   }
