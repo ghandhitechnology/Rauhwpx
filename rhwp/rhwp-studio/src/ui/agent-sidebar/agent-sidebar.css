@@ -5397,3 +5397,475 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-fullscreen .ag-threads-new {
   border-radius: 5px 7px 4px 8px / 7px 4px 8px 5px;
 }
+
+/* ─── 서브에이전트 편대 카드 (ag-fleet) ──────────────────
+   한 턴에서 태어난 서브에이전트는 한 카드에 모이고, 워크플로는 단계
+   레일과 멤버 행을 가진 자기 카드를 갖는다. 카드는 도구 활동 그룹과
+   같은 자리에 흐름대로 놓인다.
+
+   두 가지 규칙이 이 블록을 지탱한다. 행은 3줄 고정 그리드라 토큰·시간이
+   1초마다 갱신돼도 아래 행이 밀리지 않는다. 진행 표시는 도는 것 없이
+   가만한 점 하나이고, 끝났을 때 색과 시제만 바뀐다. */
+
+.ag-fleet {
+  position: relative;
+  align-self: stretch;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-field);
+  background: color-mix(in srgb, var(--ag-bg-2) 68%, transparent);
+  overflow: hidden;
+  animation: ag-activity-arrive 240ms var(--ag-motion-out) both;
+}
+
+.ag-fleet-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 34px;
+  margin: 0;
+  padding: 6px 30px 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--ag-text-muted);
+  font: inherit;
+  font-size: var(--font-size-base, 12px);
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-fleet-toggle:hover {
+  color: var(--ag-text);
+}
+
+.ag-fleet-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.ag-fleet-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.ag-fleet.ag-done .ag-fleet-label,
+.ag-fleet.ag-stopped .ag-fleet-label {
+  color: var(--ag-text-muted);
+  font-weight: 500;
+}
+
+.ag-fleet.ag-err .ag-fleet-label {
+  color: var(--ag-err);
+  font-weight: 500;
+}
+
+/* Σ 토큰 · 경과 시간 — 폭이 흔들리지 않게 mono + tabular. */
+.ag-fleet-meter {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-xs, 10px);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--ag-track);
+  white-space: nowrap;
+}
+
+.ag-fleet-sum,
+.ag-fleet-clock {
+  min-width: 34px;
+  text-align: right;
+}
+
+.ag-fleet-chevron {
+  position: absolute;
+  right: 10px;
+  width: 12px;
+  height: 12px;
+  color: currentColor;
+  transform: rotate(180deg);
+  transition: transform 240ms var(--ag-motion-out);
+}
+
+.ag-fleet.ag-collapsed .ag-fleet-chevron {
+  transform: rotate(0deg);
+}
+
+.ag-fleet-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    grid-template-rows 340ms var(--ag-spring-soft),
+    opacity 180ms var(--ag-motion-out),
+    transform 300ms var(--ag-motion-out);
+}
+
+.ag-fleet.ag-collapsed .ag-fleet-collapse {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(-5px);
+}
+
+.ag-fleet-body {
+  min-height: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--ag-border);
+}
+
+.ag-fleet.ag-collapsed .ag-fleet-body {
+  border-top-color: transparent;
+}
+
+/* 상태 점 — 카드 머리와 행이 같은 글리프를 쓴다. */
+.ag-fleet-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ag-text-muted);
+}
+
+.ag-fleet-dot.ag-run {
+  background: var(--ag-run);
+}
+
+.ag-fleet-dot.ag-ok {
+  background: var(--ag-ok);
+}
+
+.ag-fleet-dot.ag-err {
+  background: var(--ag-err);
+}
+
+.ag-fleet-dot.ag-idle {
+  background: color-mix(in srgb, var(--ag-text-muted) 55%, transparent);
+}
+
+/* ── 워크플로 단계 레일 ── */
+
+.ag-fleet-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px 0;
+}
+
+.ag-fleet-rail[hidden] {
+  display: none;
+}
+
+.ag-fleet-phase {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-chip);
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-xs, 10px);
+  line-height: 1.2;
+}
+
+.ag-fleet-phase.ag-done {
+  color: var(--ag-text-secondary);
+}
+
+.ag-fleet-phase.ag-live {
+  border-color: color-mix(in srgb, var(--ag-accent) 45%, var(--ag-border));
+  background: color-mix(in srgb, var(--ag-accent) 11%, transparent);
+  color: var(--ag-accent-strong);
+}
+
+.ag-fleet-phase-mark {
+  display: inline-flex;
+  width: 10px;
+  height: 10px;
+  color: var(--ag-ok);
+}
+
+.ag-fleet-phase-mark:empty {
+  display: none;
+}
+
+.ag-fleet-phase-mark .ag-icon {
+  width: 10px;
+  height: 10px;
+}
+
+.ag-fleet-phase-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-fleet-phase-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 1px;
+}
+
+.ag-fleet-mini {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--ag-text-muted);
+}
+
+.ag-fleet-mini.ag-run {
+  background: var(--ag-run);
+}
+
+.ag-fleet-mini.ag-ok {
+  background: var(--ag-ok);
+}
+
+.ag-fleet-mini.ag-err {
+  background: var(--ag-err);
+}
+
+.ag-fleet-mini.ag-idle {
+  background: color-mix(in srgb, var(--ag-text-muted) 55%, transparent);
+}
+
+/* ── 에이전트 행 (고정 3줄 그리드) ── */
+
+.ag-fleet-rows {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 4px;
+}
+
+.ag-fleet-row {
+  min-width: 0;
+  animation: ag-step-arrive 280ms var(--ag-motion-out) both;
+}
+
+.ag-fleet-row + .ag-fleet-row {
+  border-top: 1px solid color-mix(in srgb, var(--ag-border) 70%, transparent);
+}
+
+.ag-fleet-head {
+  position: relative;
+  display: grid;
+  box-sizing: border-box;
+  width: 100%;
+  grid-template-columns: 7px minmax(0, 1fr) auto 11px;
+  grid-template-rows: 16px 14px 13px;
+  align-items: center;
+  column-gap: 7px;
+  row-gap: 1px;
+  margin: 0;
+  padding: 7px 8px;
+  border: none;
+  border-radius: var(--ag-r-chip);
+  background: transparent;
+  color: var(--ag-text);
+  font: inherit;
+  text-align: left;
+}
+
+.ag-fleet-row.ag-has-detail .ag-fleet-head {
+  cursor: pointer;
+}
+
+.ag-fleet-row.ag-has-detail .ag-fleet-head:hover {
+  background: var(--ag-hover);
+}
+
+.ag-fleet-head:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.ag-fleet-head > .ag-fleet-dot {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.ag-fleet-name {
+  display: flex;
+  min-width: 0;
+  grid-column: 2;
+  grid-row: 1;
+  align-items: center;
+  gap: 5px;
+}
+
+.ag-fleet-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-base, 12px);
+  line-height: 1.3;
+}
+
+.ag-fleet-role {
+  flex: 0 0 auto;
+  max-width: 42%;
+  overflow: hidden;
+  padding: 1px 5px;
+  border-radius: var(--ag-r-chip);
+  background: color-mix(in srgb, var(--ag-accent) 12%, transparent);
+  color: var(--ag-accent-strong);
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-xs, 10px);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-fleet-role[hidden] {
+  display: none;
+}
+
+.ag-fleet-aside {
+  grid-column: 3;
+  grid-row: 1;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-xs, 10px);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.ag-fleet-row-chevron {
+  grid-column: 4;
+  grid-row: 1;
+  width: 11px;
+  height: 11px;
+  color: var(--ag-text-muted);
+  opacity: 0;
+  transform: rotate(0deg);
+  transition:
+    transform 200ms var(--ag-motion-out),
+    opacity 200ms var(--ag-motion-out);
+}
+
+.ag-fleet-row.ag-has-detail .ag-fleet-row-chevron {
+  opacity: 1;
+}
+
+.ag-fleet-row.ag-open .ag-fleet-row-chevron {
+  transform: rotate(180deg);
+}
+
+.ag-fleet-activity {
+  grid-column: 2 / -1;
+  grid-row: 2;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-fleet-metrics {
+  grid-column: 2 / -1;
+  grid-row: 3;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-xs, 10px);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--ag-track);
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-fleet-row.ag-stopped .ag-fleet-title,
+.ag-fleet-row.ag-stopped .ag-fleet-activity {
+  color: var(--ag-text-muted);
+}
+
+.ag-fleet-row.ag-err .ag-fleet-title {
+  color: var(--ag-err);
+}
+
+/* 화면 낭독기 전용 상태 — 점은 aria-hidden 이므로 말은 여기 남는다. */
+.ag-fleet-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* 워크플로 멤버는 코디네이터 아래로 한 칸 들어간다. */
+.ag-fleet-member .ag-fleet-head {
+  padding-left: 20px;
+}
+
+.ag-fleet-member .ag-fleet-head::before {
+  content: '';
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 9px;
+  width: 1px;
+  background: color-mix(in srgb, var(--ag-border-strong) 60%, transparent);
+}
+
+.ag-fleet-member .ag-fleet-title {
+  color: var(--ag-text-secondary);
+}
+
+/* 멤버의 오른쪽 자리는 시간이 아니라 단계 이름이다 — 본문 활자로 둔다. */
+.ag-fleet-member .ag-fleet-aside {
+  font-family: var(--ag-font);
+  font-size: var(--font-size-sm, 11px);
+}
+
+/* ── 행 드릴인: 그 서브에이전트가 부른 도구들 ── */
+
+.ag-fleet-detail {
+  max-height: clamp(96px, 20vh, 168px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  padding: 0 6px 6px 20px;
+}
+
+.ag-fleet-detail[hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-fleet,
+  .ag-fleet-row {
+    animation: none;
+  }
+
+  .ag-fleet-collapse,
+  .ag-fleet-chevron,
+  .ag-fleet-row-chevron {
+    transition: none;
+  }
+}

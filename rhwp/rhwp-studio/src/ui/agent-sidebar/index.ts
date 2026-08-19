@@ -74,6 +74,7 @@ import { showActionMenu } from '../action-menu.ts';
 import { createHieumGlyph, createIcon, createStopIcon, OP_ICON } from './icons.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
 import { createEffortSlider } from './effort-slider.ts';
+import { createSubagentFleet, isSpawnToolName } from './subagent-fleet.ts';
 import { createSettingsPanel } from './settings.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
@@ -526,6 +527,27 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let conversationScrollLock = false;
   let conversationScrollUnlock: number | null = null;
   let replyPending = false;
+  /** 편대 카드가 대신 나타내는 스폰 도구 호출 — 결과 행도 함께 접는다. */
+  const suppressedSpawnCalls = new Set<string>();
+  /** 서브에이전트·워크플로 카드. 대화 흐름 안에 도구 활동 그룹과 같은 자리로 들어간다. */
+  const fleetView = createSubagentFleet({
+    doc: document,
+    sessionModel: (agent) => (agent === selectedAgent ? selectedModel : null),
+    mountCard(card) {
+      flushAssistantBuffer({ kind: 'progress' });
+      const milestone = compactStreamIntoActivity(selectedAgent);
+      // 이 카드 아래에서 시작하는 도구 호출은 새 그룹으로 연다 (흐름 순서 유지).
+      closeCurrentActivityGroup();
+      if (milestone) {
+        withAutoScroll(() => milestone.appendChild(card));
+      } else {
+        const step = el('div', 'ag-progress-step ag-progress-step-tools-only');
+        step.appendChild(card);
+        withAutoScroll(() => appendConversation(step));
+      }
+      streamBubble = null;
+    },
+  });
   let insetRecenterRaf: number | null = null;
   let resizeMoveRaf: number | null = null;
   let resizeMoveX = 0;
@@ -3867,6 +3889,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function resetConversation(): void {
     replyPending = false;
     turnPending.hidden = true;
+    // 편대 카드는 도구 행처럼 휘발성이다 — 대화를 갈아 끼우면 타이머까지 버린다.
+    suppressedSpawnCalls.clear();
+    fleetView.reset();
     messages.replaceChildren(turnPending, messagesEnd);
   }
 
@@ -4273,8 +4298,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         turnToolCount = 0;
         turnFailedToolCount = 0;
         turnPresentedPlan = false;
+        // 새 턴의 서브에이전트는 새 카드에 모인다.
+        suppressedSpawnCalls.clear();
+        fleetView.beginTurn();
         break;
       case 'text-delta': {
+        // 서브에이전트가 낸 텍스트는 그 행의 근황일 뿐, 루트 답변 버퍼에 섞이지 않는다.
+        if (event.parentTaskId && fleetView.routeTextDelta(event)) break;
         if (!streamBubble && turnActivity) closeCurrentActivityGroup();
         const bubble = streamBubble ?? openAssistantBubble(event.agent);
         assistantBuffer += event.text;
@@ -4287,6 +4317,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         break;
       }
       case 'tool-call': {
+        // 서브에이전트의 도구는 그 행의 드릴인으로 들어간다. 모르는 task 면 루트로 떨어진다.
+        if (event.parentTaskId && fleetView.routeToolCall(event)) break;
+        // 스폰 자체는 편대 카드가 나타내므로 도구 행을 따로 그리지 않는다.
+        if (!event.parentTaskId && isSpawnToolName(event.tool)) {
+          suppressedSpawnCalls.add(event.callId);
+          turnToolCount += 1;
+          break;
+        }
         // 도구 전 설명은 최종 답변과 구분된 진행 이정표로 보관한다.
         flushAssistantBuffer({ kind: 'progress' });
         const milestone = compactStreamIntoActivity(event.agent);
@@ -4295,7 +4333,22 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         break;
       }
       case 'tool-result':
+        if (suppressedSpawnCalls.delete(event.callId)) {
+          if (!event.ok) turnFailedToolCount += 1;
+          break;
+        }
+        if (event.parentTaskId && fleetView.routeToolResult(event)) break;
         resolveToolRow(event);
+        break;
+      case 'task-start':
+        fleetView.taskStart(event);
+        updateTurnPending(event.agent);
+        break;
+      case 'task-progress':
+        fleetView.taskProgress(event);
+        break;
+      case 'task-end':
+        fleetView.taskEnd(event);
         break;
       case 'session-info':
         if (event.mcpStatus !== undefined && event.mcpStatus !== 'connected') {
@@ -4319,6 +4372,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         }
         flushAssistantBuffer();
         sweepUnresolvedToolRows();
+        // 편대는 턴이 정착한 뒤 도착하지만, 남은 행은 여기서 중단됨으로 확정한다.
+        suppressedSpawnCalls.clear();
+        fleetView.sweep();
         if (event.errorMessage) systemMessage(event.errorMessage);
         const completed =
           event.stopReason !== 'interrupted'
@@ -4565,6 +4621,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         flushPendingAssistantRender();
         flushAssistantBuffer();
         sweepUnresolvedToolRows();
+        suppressedSpawnCalls.clear();
+        fleetView.sweep();
         completeTurnActivity();
         streamBubble = null;
         break;
