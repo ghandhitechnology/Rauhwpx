@@ -441,7 +441,8 @@ test('Cursor installs through the official script into its own home', async () =
     return proc;
   };
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+    rootDir, spawnProcess, platform: 'darwin', baseEnv: { PATH: '/usr/bin' },
+    homeDir: path.join(rootDir, 'no-home'),
   }).init();
 
   const progress = [];
