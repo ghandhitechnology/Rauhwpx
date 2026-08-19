@@ -8,6 +8,7 @@ import {
   isModelForAgent,
   labelForEffort,
   labelForModel,
+  modelGroupsForAgent,
   modelsForAgent,
   modelSupportsImages,
   resolveEffortForAgent,
@@ -187,6 +188,30 @@ test('cursor 동적 목록은 auto 뒤에 붙고 모르는 모델은 auto 로 �
   } finally {
     setCursorModels([]);
   }
+});
+
+test('cursor 모델 그룹은 구독 사용량과 API 사용량으로 갈린다', () => {
+  setCursorModels(['composer-2.5', 'grok-4.6', 'grok-4.5', 'cheetah', 'gpt-5.2', 'sonnet-4.5-thinking']);
+  try {
+    const groups = modelGroupsForAgent('cursor');
+    assert.deepEqual(groups.map((g) => g.label), ['구독 사용량', 'API 사용량']);
+    assert.deepEqual(
+      groups[0]!.options.map((m) => m.id),
+      ['auto', 'composer-2.5', 'grok-4.6', 'grok-4.5', 'cheetah'],
+    );
+    assert.deepEqual(groups[1]!.options.map((m) => m.id), ['gpt-5.2', 'sonnet-4.5-thinking']);
+    // 다른 프로바이더는 머리글 없는 단일 그룹이다.
+    assert.deepEqual(modelGroupsForAgent('claude').map((g) => g.label), [null]);
+    assert.deepEqual(
+      modelGroupsForAgent('claude')[0]!.options.map((m) => m.id),
+      modelsForAgent('claude').map((m) => m.id),
+    );
+  } finally {
+    setCursorModels([]);
+  }
+  // CLI 목록 도착 전(auto 씨앗뿐)에도 머리글 없이 한 그룹이다.
+  assert.deepEqual(modelGroupsForAgent('cursor').map((g) => g.label), [null]);
+  assert.deepEqual(modelGroupsForAgent('cursor')[0]!.options.map((m) => m.id), ['auto']);
 });
 
 test('cursor 목록 대기 중이라도 다른 프로바이더의 모델 id 는 auto 로 접힌다', () => {

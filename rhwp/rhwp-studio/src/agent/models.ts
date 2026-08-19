@@ -13,6 +13,12 @@ export interface AgentEffortOption {
   label: string;
 }
 
+/** 셀렉트/메뉴에 그릴 모델 묶음. label 이 null 이면 머리글 없는 단일 목록이다. */
+export interface AgentModelGroup {
+  label: string | null;
+  options: readonly AgentModelOption[];
+}
+
 /**
  * 정적 카탈로그를 갖는 프로바이더 (pi 는 동적 레지스트리 — 아래 참조).
  * cursor 는 'auto' 한 줄을 씨앗으로 갖고, CLI 가 알려 주는 목록을 그 뒤에 잇는다.
@@ -140,6 +146,29 @@ function cursorModelOptions(): readonly AgentModelOption[] {
     options.push({ id, label: id });
   }
   return options;
+}
+
+/*
+ * Cursor 모델은 과금 풀이 둘이다 — auto·composer(·cheetah)·grok 계열은 Cursor
+ * 구독의 포함 사용량에서 차감되고, 나머지 프런티어 모델은 토큰당 API 사용량으로
+ * 따로 과금된다. CLI 의 --list-models 출력엔 이 구분이 없어서 여기서 나눈다.
+ */
+const CURSOR_PLAN_MODEL_PATTERN = /^(?:auto$|composer|cheetah|grok)/;
+const CURSOR_PLAN_GROUP_LABEL = '구독 사용량';
+const CURSOR_API_GROUP_LABEL = 'API 사용량';
+
+/** 과금 풀 기준 그룹 목록. cursor 외 프로바이더는 머리글 없는 단일 그룹이다. */
+export function modelGroupsForAgent(agent: AgentName): readonly AgentModelGroup[] {
+  if (agent !== 'cursor') return [{ label: null, options: modelsForAgent(agent) }];
+  const options = cursorModelOptions();
+  // CLI 목록 도착 전엔 씨앗(auto)뿐이라 머리글 없이 한 그룹으로 둔다.
+  if (cursorModelRegistry.length === 0) return [{ label: null, options }];
+  const plan = options.filter((m) => CURSOR_PLAN_MODEL_PATTERN.test(m.id));
+  const api = options.filter((m) => !CURSOR_PLAN_MODEL_PATTERN.test(m.id));
+  const groups: AgentModelGroup[] = [];
+  if (plan.length > 0) groups.push({ label: CURSOR_PLAN_GROUP_LABEL, options: plan });
+  if (api.length > 0) groups.push({ label: CURSOR_API_GROUP_LABEL, options: api });
+  return groups;
 }
 
 /** 동적 목록을 쓰는 프로바이더가 아직 목록을 받지 못했는지. */
