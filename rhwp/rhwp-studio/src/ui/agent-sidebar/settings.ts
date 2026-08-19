@@ -1161,13 +1161,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       modelsForAgent(prefs.defaultAgent).map((model) => ({ id: model.id, label: model.label })),
     );
     modelField.select.value = resolveModelForAgent(prefs.defaultAgent, prefs.defaultModel);
-    fillSelect(
-      effortField.select,
-      effortsForAgent(prefs.defaultAgent, prefs.defaultModel).map((effort) => ({
-        id: effort.id,
-        label: effort.label,
-      })),
-    );
+    const effortOptions = effortsForAgent(prefs.defaultAgent, prefs.defaultModel);
+    // 추론 강도가 없는 프로바이더(cursor 등)에서는 줄 자체를 접는다.
+    effortField.field.hidden = effortOptions.length === 0;
+    fillSelect(effortField.select, [...effortOptions].reverse());
     effortField.select.value = resolveEffortForAgent(
       prefs.defaultAgent,
       prefs.defaultEffort,
