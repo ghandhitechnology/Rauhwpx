@@ -123,10 +123,16 @@ interface ToolRowState {
   activity: TurnActivityState;
 }
 
-const AGENT_LABEL: Record<AgentName, string> = { claude: 'Claude', codex: 'Codex', pi: 'Pi' };
+const AGENT_LABEL: Record<AgentName, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  pi: 'Pi',
+  grok: 'Grok',
+  cursor: 'Cursor',
+};
 
 /** 단색 로고는 마스크로 그린다 — currentColor 를 타고 테마에 맞는다. */
-const MASK_ICON_AGENTS: readonly AgentName[] = ['codex', 'pi'];
+const MASK_ICON_AGENTS: readonly AgentName[] = ['codex', 'pi', 'grok', 'cursor'];
 
 const PROVIDER_ICON_SRC: Partial<Record<AgentName, string>> = {
   claude: '/icons/provider-claude.png',
@@ -826,14 +832,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
   });
 
-  const agentOrder = ['claude', 'codex', 'pi'] as const;
+  const agentOrder = ['claude', 'codex', 'pi', 'grok', 'cursor'] as const;
   /* pi 는 설치·키·모델이 다 끝나야 입력기 메뉴에 선다 (설정 탭에는 늘 있다). */
   let piSetupComplete = false;
 
   const header = el('header', 'ag-header');
   const selectors = el('div', 'ag-selectors');
 
-  // ── 프로바이더 피커 (Claude / Codex) ─────────────────
+  // ── 프로바이더 피커 (Claude / Codex / Pi / Grok / Cursor) ──
   const providerWrap = el('div', 'ag-model ag-provider');
   const providerTrigger = el('button', 'ag-model-trigger');
   providerTrigger.type = 'button';
@@ -1036,6 +1042,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const effortMenu = el('div', 'ag-model-menu ag-effort-menu');
   effortMenu.setAttribute('role', 'menu');
   effortMenu.setAttribute('aria-hidden', 'true');
+  // 설정 패널의 '추론' 묶음 — 메뉴는 이 안에 들어가므로 강도 옵션이 없는
+  // 프로바이더(cursor)에서는 트리거뿐 아니라 이 묶음도 함께 접어야 빈 칸이 남지 않는다.
+  const effortGroup = el('div', 'ag-config-group');
+  effortGroup.append(el('span', 'ag-config-label', '추론'), effortMenu);
   let effortItems = new Map<string, HTMLButtonElement>();
 
   function selectEffort(effortId: string): void {
@@ -1057,8 +1067,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     effortMenu.replaceChildren();
     effortItems = new Map();
     const options = effortsForAgent(selectedAgent, selectedModel);
-    // 추론 강도를 받지 않는 모델(pi 의 비추론 모델)에서는 칸 자체를 접는다.
-    effortWrap.hidden = options.length === 0;
+    // 추론 강도를 받지 않는 모델(pi 의 비추론 모델, cursor 전체)에서는
+    // 트리거와 설정 패널의 '추론' 묶음을 함께 접는다.
+    const noEfforts = options.length === 0;
+    effortWrap.hidden = noEfforts;
+    effortGroup.hidden = noEfforts;
     for (const opt of options) {
       const item = el('button', 'ag-model-item ag-effort-item', opt.label);
       item.type = 'button';
@@ -1191,8 +1204,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   providerGroup.append(el('span', 'ag-config-label', '에이전트'), providerMenu);
   const llmGroup = el('div', 'ag-config-group');
   llmGroup.append(el('span', 'ag-config-label', '모델'), llmMenu);
-  const effortGroup = el('div', 'ag-config-group');
-  effortGroup.append(el('span', 'ag-config-label', '추론'), effortMenu);
   configPanelInner.append(providerGroup, llmGroup, effortGroup);
   configPanel.append(configPanelInner);
 
@@ -4564,6 +4575,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         rebuildLlmMenu();
         rebuildEffortMenu();
         refreshSidebarWidthMin();
+        break;
+      case 'agent-setup-status':
+        // 브리지가 cursor 모델 레지스트리를 먼저 갱신했다 — 목록과 선택값을 다시 읽는다.
+        if (selectedAgent === 'cursor') {
+          selectedModel = resolveModelForAgent('cursor', selectedModel);
+          selectedEffort = resolveEffortForAgent('cursor', selectedEffort, selectedModel);
+          rebuildLlmMenu();
+          rebuildEffortMenu();
+          refreshSidebarWidthMin();
+        }
         break;
       case 'writing-style-status':
       case 'writing-style-progress':

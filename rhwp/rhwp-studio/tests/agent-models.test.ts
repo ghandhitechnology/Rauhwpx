@@ -12,6 +12,7 @@ import {
   modelSupportsImages,
   resolveEffortForAgent,
   resolveModelForAgent,
+  setCursorModels,
   setPiModels,
 } from '../src/agent/models.ts';
 import type { PiModelConfig } from '../src/agent/types.ts';
@@ -133,4 +134,86 @@ test('pi 모델 레지스트리가 채워지면 표시 이름 · effort · 기�
   } finally {
     setPiModels([]);
   }
+});
+
+test('grok 은 정적 카탈로그와 세 단계 추론 강도를 갖는다', () => {
+  assert.deepEqual(modelsForAgent('grok').map((m) => m.id), ['grok-4.6', 'grok-4.5']);
+  assert.equal(defaultModelForAgent('grok'), 'grok-4.6');
+  assert.equal(labelForModel('grok', 'grok-4.5'), 'Grok 4.5');
+  assert.equal(isModelForAgent('grok', 'grok-4.6'), true);
+  assert.equal(isModelForAgent('grok', 'sonnet'), false);
+  // 다른 프로바이더의 모델은 grok 기본값으로 접힌다.
+  assert.equal(resolveModelForAgent('grok', 'gpt-5.6-sol'), 'grok-4.6');
+  assert.deepEqual(effortsForAgent('grok').map((e) => e.id), ['high', 'medium', 'low']);
+  assert.equal(defaultEffortForAgent('grok'), 'high');
+  assert.equal(labelForEffort('grok', 'medium'), 'Medium');
+  // Claude 전용 강도는 grok 기본값으로 내려간다.
+  assert.equal(resolveEffortForAgent('grok', 'xhigh'), 'high');
+  assert.equal(resolveEffortForAgent('grok', 'low'), 'low');
+  assert.equal(modelSupportsImages('grok', 'grok-4.6'), true);
+});
+
+test('cursor 는 auto 씨앗으로 시작하고 추론 강도를 노출하지 않는다', () => {
+  setCursorModels([]);
+  try {
+    assert.deepEqual(modelsForAgent('cursor'), [{ id: 'auto', label: 'Auto' }]);
+    assert.equal(defaultModelForAgent('cursor'), 'auto');
+    assert.equal(resolveModelForAgent('cursor', null), 'auto');
+    // CLI 목록이 아직 없으면 cursor 것으로 보이는 저장값은 뭉개지 않는다.
+    assert.equal(resolveModelForAgent('cursor', 'gpt-5.2-codex'), 'gpt-5.2-codex');
+    // 추론 강도는 어떤 모델에서도 없다 — UI 가 선택기를 숨긴다.
+    assert.deepEqual(effortsForAgent('cursor'), []);
+    assert.equal(defaultEffortForAgent('cursor'), '');
+    assert.equal(resolveEffortForAgent('cursor', 'high'), '');
+  } finally {
+    setCursorModels([]);
+  }
+});
+
+test('cursor 동적 목록은 auto 뒤에 붙고 모르는 모델은 auto 로 접힌다', () => {
+  setCursorModels(['auto', 'composer-1', 'claude-4.5-sonnet', 'composer-1']);
+  try {
+    assert.deepEqual(modelsForAgent('cursor'), [
+      { id: 'auto', label: 'Auto' },
+      { id: 'composer-1', label: 'composer-1' },
+      { id: 'claude-4.5-sonnet', label: 'claude-4.5-sonnet' },
+    ]);
+    assert.equal(isModelForAgent('cursor', 'composer-1'), true);
+    assert.equal(isModelForAgent('cursor', 'unknown-model'), false);
+    assert.equal(labelForModel('cursor', 'composer-1'), 'composer-1');
+    assert.equal(resolveModelForAgent('cursor', 'composer-1'), 'composer-1');
+    assert.equal(resolveModelForAgent('cursor', 'unknown-model'), 'auto');
+    assert.deepEqual(effortsForAgent('cursor', 'composer-1'), []);
+  } finally {
+    setCursorModels([]);
+  }
+});
+
+test('cursor 목록 대기 중이라도 다른 프로바이더의 모델 id 는 auto 로 접힌다', () => {
+  setCursorModels([]);
+  setPiModels([PI_MODEL_A]);
+  try {
+    // Claude/sonnet 에서 Cursor 로 갈아타면 'sonnet' 이 따라오지 않는다.
+    assert.equal(resolveModelForAgent('cursor', 'sonnet'), 'auto');
+    assert.equal(resolveModelForAgent('cursor', 'gpt-5.6-sol'), 'auto');
+    assert.equal(resolveModelForAgent('cursor', 'grok-4.6'), 'auto');
+    // pi 레지스트리에 등록된 id 도 마찬가지다.
+    assert.equal(resolveModelForAgent('cursor', PI_MODEL_A.id), 'auto');
+    // cursor 것으로 볼 수 있는(다른 카탈로그에 없는) 저장값은 그대로 지킨다.
+    assert.equal(resolveModelForAgent('cursor', 'composer-1'), 'composer-1');
+  } finally {
+    setPiModels([]);
+    setCursorModels([]);
+  }
+});
+
+test('pi 레지스트리 유예는 다른 프로바이더 id 검사와 무관하게 유지된다', () => {
+  setPiModels([]);
+  // pi-status 도착 전에는 저장된 값을(다른 프로바이더의 id 라도) 그대로 지킨다.
+  assert.equal(resolveModelForAgent('pi', 'sonnet'), 'sonnet');
+  assert.equal(resolveModelForAgent('pi', null), '');
+  // claude/codex/grok 은 정적 카탈로그라 유예 없이 즉시 기본값으로 접힌다.
+  assert.equal(resolveModelForAgent('claude', 'composer-1'), 'sonnet');
+  assert.equal(resolveModelForAgent('codex', 'composer-1'), 'gpt-5.6-sol');
+  assert.equal(resolveModelForAgent('grok', 'composer-1'), 'grok-4.6');
 });

@@ -1,7 +1,7 @@
 /**
  * Shared helpers for agent CLI backends.
  *
- * @typedef {'claude' | 'codex'} AgentName
+ * @typedef {'claude' | 'codex' | 'pi' | 'grok' | 'cursor'} AgentName
  *
  * @typedef {(
  *   | { type: 'turn-start';   agent: AgentName }
@@ -39,6 +39,11 @@
  * @property {string} [codexAuthPath]
  * @property {string} [codexBin]
  * @property {string} [claudeBin]
+ * @property {string} [grokBin]
+ * @property {string} [grokHome]
+ * @property {string} [grokAuthPath]
+ * @property {string} [cursorBin]
+ * @property {string} [cursorSourceDir]
  * @property {Record<string, string>} [providerEnv]
  * @property {string} [model]
  * @property {string} [effort]
@@ -109,7 +114,8 @@ export function normalizeUsageTokens(raw) {
     inputTokens: usageCount(raw.input_tokens, raw.inputTokens),
     outputTokens: usageCount(raw.output_tokens, raw.outputTokens),
     cacheReadTokens: usageCount(raw.cache_read_input_tokens, raw.cacheReadInputTokens, raw.cached_input_tokens, raw.cacheReadTokens),
-    cacheCreationTokens: usageCount(raw.cache_creation_input_tokens, raw.cacheCreationInputTokens, raw.cacheCreationTokens),
+    // cursor 는 캐시 생성분을 cacheWriteTokens 로 보고한다.
+    cacheCreationTokens: usageCount(raw.cache_creation_input_tokens, raw.cacheCreationInputTokens, raw.cacheCreationTokens, raw.cacheWriteTokens),
   };
   const total = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheCreationTokens;
   return total > 0 ? usage : null;

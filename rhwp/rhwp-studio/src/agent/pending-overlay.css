@@ -25,6 +25,14 @@
   --ag-pending-ink: 53, 105, 168;
 }
 
+.ag-pending-rect.ag-grok {
+  --ag-pending-ink: 92, 114, 136;
+}
+
+.ag-pending-rect.ag-cursor {
+  --ag-pending-ink: 127, 124, 164;
+}
+
 /* Direct children of #scroll-content blend against the page canvas. Keeping
    these outside .ag-pending-layer avoids the opaque color bars produced by an
    isolated stacking context. */
@@ -84,6 +92,14 @@
 
 .ag-pending-enter.ag-codex {
   --ag-pending-ink: 53, 105, 168;
+}
+
+.ag-pending-enter.ag-grok {
+  --ag-pending-ink: 92, 114, 136;
+}
+
+.ag-pending-enter.ag-cursor {
+  --ag-pending-ink: 127, 124, 164;
 }
 
 .ag-pending-enter.ag-enter-exact {
@@ -250,6 +266,14 @@
 
 .ag-typewriter-caret.ag-codex {
   --ag-pending-ink: 53, 105, 168;
+}
+
+.ag-typewriter-caret.ag-grok {
+  --ag-pending-ink: 92, 114, 136;
+}
+
+.ag-typewriter-caret.ag-cursor {
+  --ag-pending-ink: 127, 124, 164;
 }
 
 @media (prefers-reduced-motion: reduce) {

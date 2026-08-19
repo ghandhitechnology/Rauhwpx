@@ -38,6 +38,9 @@ test('sidebar header keeps one compact model summary and expands all settings to
   assert.match(source, /effortTrigger\.append\(effortName, summaryCaret\)/);
   assert.doesNotMatch(source, /createChevron\('ag-model-caret'\)/);
   assert.match(source, /configPanelInner\.append\(providerGroup, llmGroup, effortGroup\)/);
+  // 추론 강도가 없는 프로바이더에서는 트리거와 '추론' 묶음이 함께 접힌다.
+  assert.match(source, /effortWrap\.hidden = noEfforts;\s*\n\s*effortGroup\.hidden = noEfforts;/);
+  assert.match(css, /\.ag-config-group\[hidden\]\s*\{[^}]*display:\s*none;/s);
   assert.match(css, /\.ag-config-panel\s*\{[^}]*display:\s*grid;/s);
   assert.match(css, /\.ag-config-panel \.ag-model-menu\s*\{[^}]*position:\s*static;/s);
 });

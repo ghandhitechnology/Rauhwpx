@@ -196,7 +196,8 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
     && typeof t.title === 'string'
     && typeof t.createdAt === 'number'
     && typeof t.updatedAt === 'number'
-    && (t.agent === 'claude' || t.agent === 'codex' || t.agent === 'pi')
+    && (t.agent === 'claude' || t.agent === 'codex' || t.agent === 'pi'
+      || t.agent === 'grok' || t.agent === 'cursor')
     && typeof t.model === 'string'
     && typeof t.effort === 'string'
     && Array.isArray(t.messages)
@@ -241,7 +242,8 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
           }];
         })
         : undefined;
-      const agent: AgentName | undefined = message.agent === 'claude' || message.agent === 'codex' || message.agent === 'pi'
+      const agent: AgentName | undefined = message.agent === 'claude' || message.agent === 'codex'
+        || message.agent === 'pi' || message.agent === 'grok' || message.agent === 'cursor'
         ? message.agent
         : undefined;
       const metadata = {

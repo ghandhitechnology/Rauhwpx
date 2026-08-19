@@ -7,7 +7,7 @@ import {
   normalizeAgentPrefs,
   saveAgentPrefs,
 } from '../src/agent/agent-prefs.ts';
-import { setPiModels } from '../src/agent/models.ts';
+import { setCursorModels, setPiModels } from '../src/agent/models.ts';
 import type { PiModelConfig } from '../src/agent/types.ts';
 
 /** localStorage 대역 — 테스트는 브라우저 없이 돌아간다. */
@@ -163,4 +163,51 @@ test('쓰기가 실패해도 호출자는 값을 받는다', () => {
     },
   );
   assert.equal(prefs.defaultModel, 'opus');
+});
+
+test('grok 기본값은 저장되고 모르는 모델/강도는 grok 기준으로 접힌다', () => {
+  const prefs = normalizeAgentPrefs({
+    defaultAgent: 'grok',
+    defaultModel: 'gpt-5.6-sol',
+    defaultEffort: 'xhigh',
+  });
+  assert.equal(prefs.defaultAgent, 'grok');
+  assert.equal(prefs.defaultModel, 'grok-4.6');
+  assert.equal(prefs.defaultEffort, 'high');
+
+  const kept = normalizeAgentPrefs({
+    defaultAgent: 'grok',
+    defaultModel: 'grok-4.5',
+    defaultEffort: 'low',
+  });
+  assert.equal(kept.defaultModel, 'grok-4.5');
+  assert.equal(kept.defaultEffort, 'low');
+});
+
+test('cursor 기본값은 auto 로 접히고 추론 강도는 비어 있다', () => {
+  setCursorModels([]);
+  try {
+    // CLI 목록이 아직 없으면 저장된 모델을 지킨다.
+    const pending = normalizeAgentPrefs({ defaultAgent: 'cursor', defaultModel: 'composer-1' });
+    assert.equal(pending.defaultAgent, 'cursor');
+    assert.equal(pending.defaultModel, 'composer-1');
+    assert.equal(pending.defaultEffort, '');
+
+    setCursorModels(['composer-1']);
+    const known = normalizeAgentPrefs({ defaultAgent: 'cursor', defaultModel: 'composer-1' });
+    assert.equal(known.defaultModel, 'composer-1');
+    const unknown = normalizeAgentPrefs({ defaultAgent: 'cursor', defaultModel: 'no-such-model' });
+    assert.equal(unknown.defaultModel, 'auto');
+  } finally {
+    setCursorModels([]);
+  }
+});
+
+test('저장된 grok 기본값은 다시 읽어도 살아남는다', () => {
+  const storage = makeStorage();
+  const saved = saveAgentPrefs({ defaultAgent: 'grok', defaultEffort: 'medium' }, storage);
+  assert.equal(saved.defaultAgent, 'grok');
+  assert.equal(saved.defaultModel, 'grok-4.6');
+  assert.equal(saved.defaultEffort, 'medium');
+  assert.deepEqual(loadAgentPrefs(storage), saved);
 });

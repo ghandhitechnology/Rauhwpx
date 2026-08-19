@@ -42,21 +42,51 @@ import type {
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
 
-/** 요금제 셀렉트를 갖는 프로바이더 — pi 는 대신 OpenRouter 잔액을 보여준다. */
-type PlanAgent = Exclude<AgentName, 'pi'>;
+/**
+ * 요금제 셀렉트를 갖는 프로바이더 — 구독 한도가 있는 둘뿐이다.
+ * pi 는 OpenRouter 잔액을, grok · cursor 는 API 사용량만 쓴다.
+ */
+type PlanAgent = 'claude' | 'codex';
 
-const AGENTS: readonly AgentName[] = ['claude', 'codex', 'pi'];
+const AGENTS: readonly AgentName[] = ['claude', 'codex', 'pi', 'grok', 'cursor'];
 
 const PLAN_AGENTS: readonly PlanAgent[] = ['claude', 'codex'];
 
-const AGENT_LABEL: Record<AgentName, string> = { claude: 'Claude', codex: 'Codex', pi: 'Pi' };
+/** 요금제도 잔액도 없는 프로바이더 — 기록된 토큰만 보여준다. */
+const API_USAGE_AGENTS: readonly AgentName[] = ['grok', 'cursor'];
+
+const AGENT_LABEL: Record<AgentName, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  pi: 'Pi',
+  grok: 'Grok',
+  cursor: 'Cursor',
+};
 
 /** 단색 로고는 마스크로 그린다 — currentColor 를 타고 테마에 맞는다. */
-const MASK_ICON_AGENTS: readonly AgentName[] = ['codex', 'pi'];
+const MASK_ICON_AGENTS: readonly AgentName[] = ['codex', 'pi', 'grok', 'cursor'];
 
 const PROVIDER_ICON_SRC: Partial<Record<AgentName, string>> = {
   claude: '/icons/provider-claude.png',
   codex: '/icons/provider-codex.png',
+};
+
+/** 설치 안내 — cursor 는 npm 이 아니라 공식 설치 스크립트로 받는다. */
+const SETUP_INSTALL_NOTE: Record<AgentName, string> = {
+  claude: 'Claude CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
+  codex: 'Codex CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
+  pi: 'Pi 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
+  grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
+  cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다.',
+};
+
+/** API 키 입력칸 힌트 — 키 접두사가 있는 프로바이더만 형태를 보여준다. */
+const API_KEY_PLACEHOLDER: Record<AgentName, string> = {
+  claude: 'sk-ant-…',
+  codex: 'sk-proj-…',
+  pi: 'sk-or-…',
+  grok: 'xai-…',
+  cursor: 'API 키',
 };
 
 const CONN_LABEL: Record<ConnectionState, string> = {
@@ -689,7 +719,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   agentField.select.addEventListener('change', () => {
     const value = agentField.select.value;
-    const agent: AgentName = value === 'codex' || value === 'pi' ? value : 'claude';
+    const agent = AGENTS.find((name) => name === value) ?? 'claude';
     commitPrefs({ defaultAgent: agent });
   });
   modelField.select.addEventListener('change', () => {
@@ -915,6 +945,35 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const piUsageUpdated = el('div', 'ag-settings-usage-updated');
   piUsageBlock.append(piUsageHead, piUsageDay, piUsageWeek, piUsageModels, piUsageUpdated);
   usageSection.body.appendChild(piUsageBlock);
+
+  // grok · cursor 는 요금제도 잔액도 없다 — 허브가 기록한 세션 · 오늘 · 주간 토큰을 그대로 보여준다.
+  const apiUsageBlocks = new Map<
+    AgentName,
+    {
+      root: HTMLElement;
+      session: HTMLElement;
+      day: HTMLElement;
+      week: HTMLElement;
+      models: HTMLElement;
+      updated: HTMLElement;
+    }
+  >();
+  for (const agent of API_USAGE_AGENTS) {
+    const block = el('div', 'ag-settings-usage-block');
+    block.dataset.agent = agent;
+    const head = el('div', 'ag-settings-usage-head');
+    const name = el('span', 'ag-settings-row-name');
+    name.append(providerIcon(agent), document.createTextNode(AGENT_LABEL[agent]));
+    head.append(name);
+    const session = el('div', 'ag-settings-usage-day');
+    const day = el('div', 'ag-settings-usage-day');
+    const week = el('div', 'ag-settings-usage-day');
+    const models = el('div', 'ag-settings-usage-models');
+    const updated = el('div', 'ag-settings-usage-updated');
+    block.append(head, session, day, week, models, updated);
+    usageSection.body.appendChild(block);
+    apiUsageBlocks.set(agent, { root: block, session, day, week, models, updated });
+  }
 
   body.append(
     connection.root,
@@ -1245,8 +1304,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const connected = detected || status?.connected === true || status?.setupComplete === true;
     setupHeroIcon.replaceChildren(providerIcon(agent));
     setupHeroTitle.textContent = AGENT_LABEL[agent];
-    setupInstallNote.textContent = `${AGENT_LABEL[agent]} CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.`;
-    setupKey.input.placeholder = agent === 'codex' ? 'sk-proj-…' : 'sk-ant-…';
+    setupInstallNote.textContent = SETUP_INSTALL_NOTE[agent];
+    setupKey.input.placeholder = API_KEY_PLACEHOLDER[agent];
     setupInstallPane.hidden = available;
     setupAuthPane.hidden = !available || (connected && !setupReauth);
     setupDonePane.hidden = !connected || setupReauth;
@@ -1276,6 +1335,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupStatuses = statuses;
     renderProviders();
     renderAgentSetup();
+    renderUsage();
   }
 
   async function installSelectedAgent(): Promise<void> {
@@ -1471,9 +1531,41 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       : '';
   }
 
+  /** grok · cursor 사용량 — 한도가 없어 미터 대신 세션 · 오늘 · 주간 누적만 쓴다. */
+  function renderApiUsage(): void {
+    for (const agent of API_USAGE_AGENTS) {
+      const ui = apiUsageBlocks.get(agent);
+      if (!ui) continue;
+      const providerUsage = usage?.providers?.[agent] ?? null;
+      const turns = (providerUsage?.session.turns ?? 0)
+        + (providerUsage?.day.turns ?? 0)
+        + (providerUsage?.week.turns ?? 0);
+      const setup = setupStatuses?.[agent] ?? null;
+      // 설정을 마쳤거나 기록이 남아 있을 때만 자리를 차지한다.
+      ui.root.hidden = turns === 0
+        && setup?.setupComplete !== true
+        && setup?.connected !== true;
+      if (ui.root.hidden) continue;
+      ui.session.textContent = providerUsage
+        ? `세션 · ${formatTokens(providerUsage.session.weightedTokens)} 토큰 · ${providerUsage.session.turns}턴`
+        : '세션 · 기록 없음';
+      ui.day.textContent = providerUsage
+        ? `오늘 · ${formatTokens(providerUsage.day.weightedTokens)} 토큰 · ${providerUsage.day.turns}턴`
+        : '오늘 · 기록 없음';
+      ui.week.textContent = providerUsage
+        ? `주간 · ${formatTokens(providerUsage.week.weightedTokens)} 토큰 · ${providerUsage.week.turns}턴`
+        : '주간 · 기록 없음';
+      ui.models.replaceChildren(...buildModelRows(providerUsage, agent));
+      ui.updated.textContent = providerUsage?.updatedAt
+        ? `${formatRelativeTime(providerUsage.updatedAt)} 기록`
+        : '';
+    }
+  }
+
   function renderUsage(): void {
     renderCliproxy();
     renderPiUsage();
+    renderApiUsage();
     for (const agent of PLAN_AGENTS) {
       const ui = usageBlocks.get(agent);
       if (!ui) continue;
@@ -1966,6 +2058,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           setupCodePending = false;
           renderProviders();
           renderAgentSetup();
+          // 설정을 마친 grok · cursor 는 기록이 없어도 사용량 칸을 연다.
+          renderUsage();
+          // cursor 동적 모델 목록이 도착하면 기본 모델 선택지도 다시 채운다.
+          syncPrefsInputs();
           break;
         case 'agent-setup-progress':
           if (setupAgent === ev.agent) {

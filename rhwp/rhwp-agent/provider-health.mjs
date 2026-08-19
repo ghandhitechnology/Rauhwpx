@@ -2,7 +2,13 @@
 import spawn from 'cross-spawn';
 
 /** CLI 가 살아 있는지 확인하는 프로브 — `<cli> --version` 한 줄이면 충분하다. */
-const PROBE_COMMANDS = /** @type {const} */ ({ claude: 'claude', codex: 'codex' });
+const PROBE_COMMANDS = /** @type {const} */ ({
+  claude: 'claude',
+  codex: 'codex',
+  grok: 'grok',
+  cursor: 'cursor-agent',
+});
+const CLI_AGENTS = /** @type {const} */ (Object.keys(PROBE_COMMANDS));
 const PROBE_TIMEOUT_MS = 5_000;
 const CACHE_TTL_MS = 60_000;
 const STDERR_TAIL_LIMIT = 2_000;
@@ -43,9 +49,13 @@ function firstLine(text) {
  *
  * piBin 은 게터로 받는다 — pi 는 설치 도중에 생기므로 부팅 시점 값에 묶으면 안 된다.
  *
+ * probeEnv 는 프로브별 환경을 준다 — cursor-agent 는 CONFIG_DIR 재지정 없이
+ * `--version` 만 실행해도 실제 `~/.cursor/projects/` 에 흔적을 남기기 때문이다.
+ *
  * @param {{ spawnProcess?: typeof spawn, timeoutMs?: number, cacheTtlMs?: number,
  *           now?: () => number, piBin?: () => string|null,
- *           cliBin?: (agent: 'claude'|'codex') => string|null }} [deps]
+ *           cliBin?: (agent: 'claude'|'codex'|'grok'|'cursor') => string|null,
+ *           probeEnv?: (agent: string) => NodeJS.ProcessEnv|undefined }} [deps]
  */
 export function createProviderHealth({
   spawnProcess = spawn,
@@ -54,17 +64,19 @@ export function createProviderHealth({
   now = Date.now,
   piBin = () => null,
   cliBin = (agent) => PROBE_COMMANDS[agent],
+  probeEnv = () => undefined,
 } = {}) {
-  /** @type {{ result: { claude: ProviderHealth, codex: ProviderHealth, pi: ProviderHealth }, checkedAt: number } | null} */
+  /** @type {{ result: { claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, pi: ProviderHealth }, checkedAt: number } | null} */
   let cache = null;
-  /** @type {Promise<{ claude: ProviderHealth, codex: ProviderHealth, pi: ProviderHealth }> | null} */
+  /** @type {Promise<{ claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, pi: ProviderHealth }> | null} */
   let inFlight = null;
 
   /**
    * @param {string} command
+   * @param {NodeJS.ProcessEnv} [env]
    * @returns {Promise<ProviderHealth>}
    */
-  function probe(command) {
+  function probe(command, env) {
     return new Promise((resolve) => {
       let settled = false;
       let stdoutText = '';
@@ -81,7 +93,10 @@ export function createProviderHealth({
 
       let proc;
       try {
-        proc = spawnProcess(command, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        proc = spawnProcess(command, ['--version'], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          ...(env ? { env } : {}),
+        });
       } catch (error) {
         done({
           available: false,
@@ -166,18 +181,21 @@ export function createProviderHealth({
     },
     /**
      * @param {boolean} [refresh] true 면 캐시를 무시하고 다시 프로브한다.
-     * @returns {Promise<{ claude: ProviderHealth, codex: ProviderHealth, pi: ProviderHealth }>}
+     * @returns {Promise<{ claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, pi: ProviderHealth }>}
      */
     check(refresh = false) {
       if (!refresh && cache && now() - cache.checkedAt < cacheTtlMs) {
         return Promise.resolve(cache.result);
       }
       if (inFlight) return inFlight;
-      const claudeBin = cliBin('claude') || PROBE_COMMANDS.claude;
-      const codexBin = cliBin('codex') || PROBE_COMMANDS.codex;
-      const probing = Promise.all([probe(claudeBin), probe(codexBin), probePi()])
-        .then(([claude, codex, pi]) => {
-          const result = { claude, codex, pi };
+      const probing = Promise.all([
+        ...CLI_AGENTS.map((agent) => probe(cliBin(agent) || PROBE_COMMANDS[agent], probeEnv(agent))),
+        probePi(),
+      ])
+        .then((healths) => {
+          const result = {};
+          CLI_AGENTS.forEach((agent, index) => { result[agent] = healths[index]; });
+          result.pi = healths[CLI_AGENTS.length];
           cache = { result, checkedAt: now() };
           return result;
         });

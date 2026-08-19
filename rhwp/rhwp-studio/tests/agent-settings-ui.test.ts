@@ -244,3 +244,62 @@ test('설정의 채움 버튼도 손그림 윤곽을 쓴다', () => {
     assert.ok(selectors.includes(sel), `${sel} should use the sketch filter`);
   }
 });
+
+test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조색을 모두 갖춘다', () => {
+  // 연결 목록과 입력기 피커는 다섯 프로바이더를 같은 순서로 세운다.
+  assert.match(settings, /const AGENTS: readonly AgentName\[\] = \['claude', 'codex', 'pi', 'grok', 'cursor'\]/);
+  assert.match(source, /const agentOrder = \['claude', 'codex', 'pi', 'grok', 'cursor'\] as const/);
+  for (const label of [/grok: 'Grok'/, /cursor: 'Cursor'/]) {
+    assert.match(settings, label);
+    assert.match(source, label);
+  }
+  // cursor 표기는 언제나 "Cursor" 다.
+  assert.doesNotMatch(settings, /'Cursor Agent'|'cursor-agent'/);
+  // 단색 로고는 마스크로 그리므로 둘 다 마스크 목록과 CSS 규칙이 있어야 한다.
+  assert.match(settings, /MASK_ICON_AGENTS: readonly AgentName\[\] = \['codex', 'pi', 'grok', 'cursor'\]/);
+  assert.match(source, /MASK_ICON_AGENTS: readonly AgentName\[\] = \['codex', 'pi', 'grok', 'cursor'\]/);
+  assert.match(css, /\.ag-provider-icon-mask\[data-agent='grok'\][\s\S]*?provider-grok\.svg/);
+  assert.match(css, /\.ag-provider-icon-mask\[data-agent='cursor'\][\s\S]*?provider-cursor\.svg/);
+  // 강조색은 라이트/다크 팔레트에 모두 있고 data-agent 로 갈린다.
+  assert.equal((css.match(/--ag-grok:/g) ?? []).length, 2);
+  assert.equal((css.match(/--ag-cursor:/g) ?? []).length, 2);
+  assert.equal((css.match(/--ag-grok-wash:/g) ?? []).length, 2);
+  assert.equal((css.match(/--ag-cursor-wash:/g) ?? []).length, 2);
+  assert.match(css, /\.ag-root\[data-agent='grok'\] \{\s*--ag-accent: var\(--ag-grok\);/);
+  assert.match(css, /\.ag-root\[data-agent='cursor'\] \{\s*--ag-accent: var\(--ag-cursor\);/);
+  assert.match(css, /\.ag-plan-card\.ag-grok,\n\.ag-plan-card\.ag-cursor/);
+  assert.match(css, /\.ag-review-card\.ag-grok,\n\.ag-review-card\.ag-cursor/);
+});
+
+test('기본 제공자 선택은 다섯 프로바이더를 그대로 저장한다', () => {
+  // 예전 코드는 모르는 값을 claude 로 접어 Grok/Cursor 선택을 삼켰다.
+  assert.match(settings, /const agent = AGENTS\.find\(\(name\) => name === value\) \?\? 'claude'/);
+  assert.doesNotMatch(settings, /value === 'codex' \|\| value === 'pi' \? value : 'claude'/);
+  // 요금제 미터는 구독 한도가 있는 둘만 갖는다.
+  assert.match(settings, /type PlanAgent = 'claude' \| 'codex'/);
+  assert.match(settings, /const PLAN_AGENTS: readonly PlanAgent\[\] = \['claude', 'codex'\]/);
+});
+
+test('grok · cursor 사용량도 세션 · 오늘 · 주간 토큰으로 보인다', () => {
+  assert.match(settings, /const API_USAGE_AGENTS: readonly AgentName\[\] = \['grok', 'cursor'\]/);
+  assert.match(settings, /function renderApiUsage\(\): void/);
+  assert.match(settings, /renderPiUsage\(\);\s*\n\s*renderApiUsage\(\);/);
+  assert.match(settings, /세션 · \$\{formatTokens\(providerUsage\.session\.weightedTokens\)\} 토큰 · \$\{providerUsage\.session\.turns\}턴/);
+  assert.match(settings, /ui\.models\.replaceChildren\(\.\.\.buildModelRows\(providerUsage, agent\)\)/);
+  // 요금제 셀렉트는 붙지 않는다 — API 사용량 한 가지뿐이다.
+  assert.doesNotMatch(settings, /USAGE_PLANS\[agent\]\s*\?\?/);
+  // 설정을 마쳤거나 기록이 있을 때만 자리를 차지한다.
+  assert.match(settings, /ui\.root\.hidden = turns === 0/);
+  assert.match(settingsCss, /\.ag-settings-usage-block\[hidden\]/);
+});
+
+test('설정 모달은 프로바이더별 설치 안내와 API 키 힌트를 갖는다', () => {
+  assert.match(settings, /const SETUP_INSTALL_NOTE: Record<AgentName, string>/);
+  assert.match(settings, /cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다\.'/);
+  assert.match(settings, /grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다\.'/);
+  assert.match(settings, /const API_KEY_PLACEHOLDER: Record<AgentName, string>/);
+  assert.match(settings, /grok: 'xai-…'/);
+  assert.match(settings, /cursor: 'API 키'/);
+  assert.match(settings, /setupInstallNote\.textContent = SETUP_INSTALL_NOTE\[agent\]/);
+  assert.match(settings, /setupKey\.input\.placeholder = API_KEY_PLACEHOLDER\[agent\]/);
+});

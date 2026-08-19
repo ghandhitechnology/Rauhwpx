@@ -204,6 +204,292 @@ test('Claude OAuth surfaces a clean login URL and finishes with a pasted code', 
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
+test('Grok installs through the shared npm prefix and stores the API key securely', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-grok-'));
+  const prefixDir = path.join(rootDir, 'prefix');
+  const { calls, spawnProcess } = fakeSpawner(prefixDir);
+  const secretStore = createMemorySecretStore();
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, npmCommand: 'npm', secretStore,
+    baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  const installed = await manager.install('grok');
+  assert.equal(installed.installed, true);
+  assert.equal(installed.version, '1.2.3');
+  assert.deepEqual(calls[0].argv, [
+    'install', '--prefix', prefixDir, '--no-fund', '--no-audit', '@xai-official/grok',
+  ]);
+
+  const status = await manager.authenticate('grok', 'api-key', 'xai-secret-value');
+  assert.equal(status.authenticated, true);
+  assert.equal(status.authMethod, 'api-key');
+  assert.equal(status.keyTail, 'alue');
+  assert.equal(manager.envFor('grok').XAI_API_KEY, 'xai-secret-value');
+  assert.equal(await secretStore.get('rhwp.grok.api-key'), 'xai-secret-value');
+  const configText = await fs.readFile(path.join(rootDir, 'config.json'), 'utf8');
+  assert.doesNotMatch(configText, /xai-secret-value/);
+  assert.match(configText, /"grokAuthMethod": "api-key"/);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Grok auth state is read from the auth.json file without spawning the CLI', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-grok-auth-'));
+  const homeDir = path.join(rootDir, 'fake-home');
+  const calls = [];
+  const spawnProcess = () => { throw new Error('grok 상태 확인은 CLI 를 스폰하면 안 된다'); };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir,
+  }).init();
+
+  const before = await manager.status('grok');
+  assert.equal(before.authenticated, false);
+  assert.equal(await manager.grokAuthPath(), null);
+
+  await fs.mkdir(path.join(rootDir, 'grok'), { recursive: true });
+  await fs.writeFile(path.join(rootDir, 'grok', 'auth.json'), '{"token":"managed"}');
+  const managed = await manager.status('grok');
+  assert.equal(managed.authenticated, true);
+  assert.equal(managed.authMethod, 'oauth');
+  assert.equal(await manager.grokAuthPath(), path.join(rootDir, 'grok', 'auth.json'));
+
+  // 홈 디렉터리의 auth.json 이 관리형 홈보다 우선한다.
+  await fs.mkdir(path.join(homeDir, '.grok'), { recursive: true });
+  await fs.writeFile(path.join(homeDir, '.grok', 'auth.json'), '{"token":"home"}');
+  assert.equal(await manager.grokAuthPath(), path.join(homeDir, '.grok', 'auth.json'));
+  assert.equal(calls.length, 0);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Grok OAuth logs in against the managed GROK_HOME', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-grok-oauth-'));
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options, proc });
+    queueMicrotask(() => {
+      if (argv[0] === 'login') proc.stdout.emit('data', 'Visit https://accounts.x.ai/device?code=abc\n');
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  const progress = [];
+  await manager.authenticate('grok', 'oauth', undefined, (event) => progress.push(event));
+  const login = calls.find((call) => call.argv[0] === 'login');
+  assert.equal(login.command, 'grok');
+  assert.equal(login.options.env.GROK_HOME, path.join(rootDir, 'grok'));
+  assert.equal(progress.findLast((event) => event.authUrl)?.authUrl, 'https://accounts.x.ai/device?code=abc');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Cursor installs through the official script into its own home', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-'));
+  const cursorBin = path.join(rootDir, 'cursor-home', '.local', 'bin', 'cursor-agent');
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options, proc });
+    queueMicrotask(() => {
+      if (command === '/bin/bash') {
+        mkdirSync(path.dirname(cursorBin), { recursive: true });
+        writeFileSync(cursorBin, '#!/bin/bash\n');
+        proc.stdout.emit('data', 'Cursor Agent installed\n');
+        proc.emit('close', 0, null);
+        return;
+      }
+      if (argv[0] === '--version') {
+        proc.stdout.emit('data', '2026.08.11-e8db854\n');
+        proc.emit('close', 0, null);
+        return;
+      }
+      if (argv[0] === 'status') {
+        proc.stdout.emit('data', '{"status":"unauthenticated","isAuthenticated":false}\n');
+        proc.emit('close', 0, null);
+        return;
+      }
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  const progress = [];
+  const status = await manager.install('cursor', (event) => progress.push(event));
+  const installCall = calls[0];
+  assert.equal(installCall.command, '/bin/bash');
+  assert.deepEqual(installCall.argv, ['-c', 'curl -fsS https://cursor.com/install | bash']);
+  assert.equal(installCall.options.env.HOME, path.join(rootDir, 'cursor-home'));
+  assert.equal(status.installed, true);
+  assert.equal(status.version, '2026.08.11-e8db854');
+  assert.equal(status.authenticated, false);
+  assert.equal(manager.binPath('cursor'), cursorBin);
+  assert.deepEqual(progress.map((event) => event.phase), [
+    'preparing', 'resolving', 'installing', 'installing', 'verifying', 'done',
+  ]);
+  // 버전 프로브는 실제 ~/.cursor 를 오염시키지 않도록 전용 경로를 쓴다.
+  const versionCall = calls.find((call) => call.argv[0] === '--version');
+  assert.equal(versionCall.options.env.HOME, path.join(rootDir, 'cursor-home'));
+  assert.equal(versionCall.options.env.CURSOR_CONFIG_DIR, path.join(rootDir, 'cursor-home', '.cursor-probe'));
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Cursor install on Windows fails with a clear pointer to the official installer', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-win-'));
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess: () => { throw new Error('should not spawn'); },
+    platform: 'win32', baseEnv: { PATH: 'C:\\bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  await assert.rejects(manager.install('cursor'), (error) => {
+    assert.equal(error.code, 'AGENT_INSTALL_FAILED');
+    assert.match(error.message, /Windows/);
+    assert.match(error.message, /cursor\.com\/install/);
+    return true;
+  });
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Cursor auth state trusts the status JSON body, never the exit code', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-auth-'));
+  let authenticated = false;
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options, proc });
+    queueMicrotask(() => {
+      if (argv[0] === 'status') {
+        // 실제 CLI 는 한 줄 JSON 이 아니라 여러 줄로 들여쓴 JSON 을 낸다.
+        proc.stdout.emit('data', `${JSON.stringify({
+          status: authenticated ? 'authenticated' : 'unauthenticated',
+          isAuthenticated: authenticated,
+          message: 'x',
+        }, null, 2)}\n`);
+      }
+      // 로그아웃 상태에서도 종료 코드는 0 이다.
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  assert.equal((await manager.status('cursor')).authenticated, false);
+  authenticated = true;
+  const status = await manager.status('cursor');
+  assert.equal(status.authenticated, true);
+  assert.equal(status.authMethod, 'oauth');
+  const statusCall = calls.find((call) => call.argv[0] === 'status');
+  assert.deepEqual(statusCall.argv, ['status', '--format', 'json']);
+  assert.equal(statusCall.options.env.HOME, path.join(rootDir, 'cursor-home'));
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Cursor OAuth login runs with NO_OPEN_BROWSER against the persistent home', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-oauth-'));
+  const loginUrl = 'https://cursor.com/loginDeepControl?challenge=abc&uuid=def&mode=login&redirectTarget=cli';
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options, proc });
+    queueMicrotask(() => {
+      if (argv[0] === 'login') {
+        proc.stdout.emit('data', `Open a browser and navigate to this link: ${loginUrl}\n`);
+      }
+      if (argv[0] === 'status') {
+        proc.stdout.emit('data', '{"isAuthenticated":true}\n');
+      }
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  const progress = [];
+  const status = await manager.authenticate('cursor', 'oauth', undefined, (event) => progress.push(event));
+  const login = calls.find((call) => call.argv[0] === 'login');
+  assert.equal(login.command, 'cursor-agent');
+  assert.equal(login.options.env.HOME, path.join(rootDir, 'cursor-home'));
+  assert.equal(login.options.env.NO_OPEN_BROWSER, '1');
+  assert.equal(progress.findLast((event) => event.authUrl)?.authUrl, loginUrl);
+  assert.equal(status.authenticated, true);
+  assert.equal(status.authMethod, 'oauth');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Cursor model list parsing drops prose lines and caches with a TTL', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-models-'));
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options, proc });
+    queueMicrotask(() => {
+      if (argv[0] === '--list-models') {
+        proc.stdout.emit('data', 'Available models:\n\ngpt-5.2\nsonnet-4.6-thinking\nopus-4.5\n한글 안내문은 무시\n');
+      }
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  const models = await manager.cursorModels();
+  assert.deepEqual(models, ['gpt-5.2', 'sonnet-4.6-thinking', 'opus-4.5']);
+  const listCall = calls.find((call) => call.argv[0] === '--list-models');
+  assert.equal(listCall.options.env.HOME, path.join(rootDir, 'cursor-home'));
+
+  // TTL 안의 재호출은 캐시를 돌려주고 CLI 를 다시 스폰하지 않는다.
+  const spawnCount = calls.length;
+  assert.deepEqual(await manager.cursorModels(), models);
+  assert.equal(calls.length, spawnCount);
+  await manager.cursorModels({ refresh: true });
+  assert.equal(calls.length, spawnCount + 1);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a failing cursor model list is cached too, so the CLI is not respawned every call', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-models-fail-'));
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options, proc });
+    queueMicrotask(() => {
+      if (argv[0] === '--list-models') proc.stderr.emit('data', 'not logged in\n');
+      proc.emit('close', argv[0] === '--list-models' ? 1 : 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  assert.deepEqual(await manager.cursorModels(), []);
+  const spawnCount = calls.length;
+  assert.deepEqual(await manager.cursorModels(), []);
+  assert.deepEqual(await manager.cursorModels(), []);
+  assert.equal(calls.length, spawnCount, '실패도 TTL 에 기록해 재스폰을 막는다');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
 test('automatic CLI update failure keeps the working version and marks it as required', async () => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-update-'));
   const prefixDir = path.join(rootDir, 'prefix');

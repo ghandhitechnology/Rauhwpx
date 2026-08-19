@@ -175,7 +175,7 @@ export class WritingStyleStore {
         sourceCount: Number.isFinite(metadata.sourceCount) ? metadata.sourceCount : 0,
         pageEstimate: Number.isFinite(metadata.pageEstimate) ? metadata.pageEstimate : 0,
         summary: typeof metadata.summary === 'string' ? metadata.summary : '',
-        agent: ['codex', 'claude', 'pi'].includes(metadata.agent) ? metadata.agent : null,
+        agent: ['codex', 'claude', 'pi', 'grok', 'cursor'].includes(metadata.agent) ? metadata.agent : null,
         model: typeof metadata.model === 'string' ? metadata.model : null,
         additionalInstruction: additionalInstruction.trim(),
         sourceDocuments,
@@ -373,7 +373,7 @@ export class WritingStyleStore {
       sourceCount: Math.max(0, Math.round(Number(sourceCount) || 0)),
       pageEstimate: Math.max(0, Math.round(Number(pageEstimate) || 0)),
       summary: String(summary || '').slice(0, 500),
-      agent: ['codex', 'claude', 'pi'].includes(agent) ? agent : null,
+      agent: ['codex', 'claude', 'pi', 'grok', 'cursor'].includes(agent) ? agent : null,
       model: typeof model === 'string' && model.trim() ? model.trim().slice(0, 200) : null,
     };
     const profileTemp = `${this.profilePath}.tmp-${transactionId}`;

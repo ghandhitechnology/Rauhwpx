@@ -9,6 +9,8 @@ import { WebSocketServer } from 'ws';
 import { createClaudeSession, prepareClaudeHome } from './agents/claude.mjs';
 import { createCodexSession, prepareCodexHome } from './agents/codex.mjs';
 import { createPiSession } from './agents/pi.mjs';
+import { createGrokSession, prepareGrokHome } from './agents/grok.mjs';
+import { createCursorSession, prepareCursorHome } from './agents/cursor.mjs';
 import { generateChatTitle } from './agents/title.mjs';
 import { SkillRegistry } from './skills.mjs';
 import { generateSkillDraft } from './skill-generator.mjs';
@@ -103,11 +105,23 @@ const cliSetup = await createCliSetupManager({ secretStore }).init();
 // App-managed bins are available to auxiliary CLI calls as soon as installation completes.
 process.env.PATH = `${cliSetup.binDir}${path.delimiter}${process.env.PATH ?? ''}`;
 Object.assign(process.env, cliSetup.envFor('claude'));
-const [initialClaudeSetup, initialCodexSetup] = await Promise.all([
+const [initialClaudeSetup, initialCodexSetup, initialGrokSetup, initialCursorSetup] = await Promise.all([
   cliSetup.status('claude'),
   cliSetup.status('codex'),
+  cliSetup.status('grok'),
+  cliSetup.status('cursor'),
 ]);
-let cliSetupStatus = { claude: initialClaudeSetup, codex: initialCodexSetup };
+let cliSetupStatus = {
+  claude: initialClaudeSetup,
+  codex: initialCodexSetup,
+  grok: initialGrokSetup,
+  cursor: initialCursorSetup,
+};
+// grok 세션 시딩용 auth.json 원본 — 발견 순서는 cli-setup-manager 와 같다
+// (env GROK_HOME → ~/.grok → 관리형 홈, 심볼릭 링크 원본은 제외).
+let sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
+/** cursor-agent 가 보고한 모델 id 목록 — 인증된 setup-status 갱신 때 채워진다. */
+let cursorModelIds = [];
 /** pi 상태는 동기 경로(resolveModel/startSession)에서도 필요해 캐시해 둔다. */
 let piStatus = await piManager.status();
 /** OpenRouter 잔액. 키가 있을 때만 채워지고 사용량 리포트에 얹힌다. */
@@ -119,6 +133,15 @@ if (piStatus.installed) {
 const providerHealth = createProviderHealth({
   piBin: () => (piStatus.installed ? piManager.piBin : null),
   cliBin: (agent) => (cliSetupStatus[agent]?.installed ? cliSetup.binPath(agent) : null),
+  // cursor-agent 는 CONFIG_DIR 재지정 없이 --version 만 실행해도 실제
+  // ~/.cursor/projects/ 에 디렉터리를 만든다 — 프로브를 관리형 홈으로 돌린다.
+  probeEnv: (agent) => (agent === 'cursor'
+    ? {
+      ...process.env,
+      HOME: cliSetup.cursorHomeDir,
+      CURSOR_CONFIG_DIR: path.join(cliSetup.cursorHomeDir, '.cursor-probe'),
+    }
+    : undefined),
 });
 const usageStore = await createUsageStore().init();
 const cliproxy = await createCliproxyClient({ rootDir: usageStore.rootDir }).init();
@@ -140,9 +163,13 @@ const sessions = new HubSessionRegistry({
     const workDir = path.join(recordRoot, 'work');
     const isolatedHome = path.join(recordRoot, 'home');
     const codexHome = path.join(isolatedHome, '.codex');
+    const grokHome = path.join(isolatedHome, '.grok');
+    const cursorHome = path.join(isolatedHome, '.cursor');
     mkdirSync(workDir, { recursive: true, mode: 0o700 });
     prepareCodexHome(codexHome, sourceCodexAuthPath);
     prepareClaudeHome(isolatedHome, sourceClaudeAuth);
+    prepareGrokHome(grokHome, sourceGrokAuthPath);
+    prepareCursorHome(cursorHome, cliSetup.cursorSourceDir);
     return {
       sessionId,
       disposed: false,
@@ -166,6 +193,8 @@ const sessions = new HubSessionRegistry({
       workDir,
       isolatedHome,
       codexHome,
+      grokHome,
+      cursorHome,
     };
   },
 });
@@ -182,16 +211,37 @@ function refreshSessionCredentials(agent) {
   for (const record of sessions.values()) {
     if (agent === 'codex') prepareCodexHome(record.codexHome, sourceCodexAuthPath);
     if (agent === 'claude') prepareClaudeHome(record.isolatedHome, sourceClaudeAuth);
+    if (agent === 'grok') prepareGrokHome(record.grokHome, sourceGrokAuthPath);
+    if (agent === 'cursor') prepareCursorHome(record.cursorHome, cliSetup.cursorSourceDir);
   }
 }
 
+/** CLI 설치·인증을 cli-setup-manager 가 관리하는 에이전트들. */
+const CLI_SETUP_AGENTS = ['claude', 'codex', 'grok', 'cursor'];
+const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi']);
+
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
 const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
-const DEFAULT_MODEL = { claude: 'sonnet', codex: 'gpt-5.6-sol' };
+const GROK_MODELS = new Set(['grok-4.6', 'grok-4.5']);
+const DEFAULT_MODEL = { claude: 'sonnet', codex: 'gpt-5.6-sol', grok: 'grok-4.6', cursor: 'auto' };
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const CLAUDE_EFFORTS_HAIKU = new Set(['low', 'medium', 'high']);
 const CODEX_EFFORTS = new Set(['low', 'medium', 'high']);
-const DEFAULT_EFFORT = { claude: 'high', codex: 'medium' };
+const GROK_EFFORTS = new Set(['low', 'medium', 'high']);
+const DEFAULT_EFFORT = { claude: 'high', codex: 'medium', grok: 'high' };
+
+/** 알 수 없는 에이전트가 코덱스/클로드로 조용히 넘어가지 않도록 명시 테이블로 찾는다. */
+const SESSION_FACTORIES = {
+  claude: createClaudeSession,
+  codex: createCodexSession,
+  pi: createPiSession,
+  grok: createGrokSession,
+  cursor: createCursorSession,
+};
+
+function unknownAgentError(agent) {
+  return Object.assign(new Error(`unknown agent: ${String(agent)}`), { code: 'INVALID_REQUEST' });
+}
 
 /** pi 모델은 사용자가 고른 것뿐이다 — 정적 목록이 아니라 캐시된 상태에서 찾는다. */
 function piModelConfig(id) {
@@ -222,11 +272,33 @@ function piAgentSetupStatus() {
   };
 }
 
+/** 모델 목록 조회가 상태 응답을 붙잡아 둘 수 있는 상한. */
+const CURSOR_MODELS_SOFT_DEADLINE_MS = 2_500;
+
+/**
+ * cursor 모델 목록을 짧은 상한 안에서만 기다린다. 늦거나 실패하면 null 을 돌려주고
+ * 이번 응답은 직전 목록으로 넘어간다 — 뒤늦게 도착한 결과는 cursorModels 의 TTL
+ * 캐시에 남아 다음 집계에서 즉시 쓰인다.
+ */
+function cursorModelsSoon() {
+  const probe = cliSetup.cursorModels().catch(() => null);
+  const deadline = new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), CURSOR_MODELS_SOFT_DEADLINE_MS);
+    timer.unref?.();
+  });
+  return Promise.race([probe, deadline]);
+}
+
 async function agentSetupStatuses() {
-  const [claudeSetup, codexSetup, health] = await Promise.all([
+  // cursor 프로브(status + --list-models)는 CLI 를 스폰해 초 단위로 걸린다 —
+  // 클로드/코덱스 설정 UI 가 그만큼 늦지 않도록 전부 병렬로 돌린다.
+  const [claudeSetup, codexSetup, grokSetup, cursorSetup, health, cursorModelProbe] = await Promise.all([
     cliSetup.status('claude'),
     cliSetup.status('codex'),
+    cliSetup.status('grok'),
+    cliSetup.status('cursor'),
     providerHealth.check(),
+    cursorModelsSoon(),
   ]);
   const withDetectedHarness = (status, provider) => {
     const available = provider?.available === true;
@@ -241,8 +313,13 @@ async function agentSetupStatuses() {
   };
   const claude = withDetectedHarness(claudeSetup, health.claude);
   const codex = withDetectedHarness(codexSetup, health.codex);
-  cliSetupStatus = { claude, codex };
-  return { claude, codex, pi: piAgentSetupStatus() };
+  const grok = withDetectedHarness(grokSetup, health.grok);
+  const cursor = withDetectedHarness(cursorSetup, health.cursor);
+  // cursor 모델 목록은 인증된 CLI 에서만 나온다 — 실패해도 상태 응답은 막지 않는다.
+  cursorModelIds = cursor.authenticated ? (cursorModelProbe ?? cursorModelIds) : [];
+  cursor.models = [...cursorModelIds];
+  cliSetupStatus = { claude, codex, grok, cursor };
+  return { claude, codex, grok, cursor, pi: piAgentSetupStatus() };
 }
 
 let harnessUpdateTimer = null;
@@ -270,11 +347,15 @@ async function runAutomaticHarnessUpdates() {
   const before = {
     claude: cliSetupStatus.claude?.version ?? null,
     codex: cliSetupStatus.codex?.version ?? null,
+    grok: cliSetupStatus.grok?.version ?? null,
+    cursor: cliSetupStatus.cursor?.version ?? null,
     pi: piStatus.version ?? null,
   };
   try {
     cliSetupStatus.claude = await cliSetup.automaticUpdate('claude', { canActivate });
     cliSetupStatus.codex = await cliSetup.automaticUpdate('codex', { canActivate });
+    cliSetupStatus.grok = await cliSetup.automaticUpdate('grok', { canActivate });
+    cliSetupStatus.cursor = await cliSetup.automaticUpdate('cursor', { canActivate });
     piStatus = await piManager.automaticUpdate({ canActivate });
     const statuses = await agentSetupStatuses();
     if (Object.values(statuses).some((status) => status.updateRequired)) {
@@ -283,6 +364,8 @@ async function runAutomaticHarnessUpdates() {
     broadcastToStudios({ v: 1, type: 'agent-setup-status', statuses });
     const changed = before.claude !== statuses.claude.version
       || before.codex !== statuses.codex.version
+      || before.grok !== statuses.grok.version
+      || before.cursor !== statuses.cursor.version
       || before.pi !== statuses.pi.version;
     if (changed) {
       const providers = await providerHealth.check(true);
@@ -319,9 +402,28 @@ function resolveModel(agent, requested) {
     if (piStatus.defaultModelId && piModelConfig(piStatus.defaultModelId)) return piStatus.defaultModelId;
     return piStatus.models[0]?.id ?? null;
   }
-  const allowed = agent === 'claude' ? CLAUDE_MODELS : CODEX_MODELS;
+  if (agent === 'cursor') {
+    // auto 는 CLI 기본 모델. 캐시된 목록의 id 는 그대로 받고, 목록이 아직 비어
+    // 있으면(미인증/미조회) 요청값을 신뢰한다 — 단, 다른 프로바이더의 모델 id 는 거른다.
+    if (requested === 'auto') return 'auto';
+    const foreignModel = typeof requested === 'string'
+      && (CLAUDE_MODELS.has(requested) || CODEX_MODELS.has(requested) || GROK_MODELS.has(requested));
+    if (typeof requested === 'string' && requested && !foreignModel
+      && (cursorModelIds.length === 0 || cursorModelIds.includes(requested))) {
+      return requested;
+    }
+    return DEFAULT_MODEL.cursor;
+  }
+  const tables = { claude: CLAUDE_MODELS, codex: CODEX_MODELS, grok: GROK_MODELS };
+  const allowed = tables[agent];
+  if (!allowed) throw unknownAgentError(agent);
   if (typeof requested === 'string' && allowed.has(requested)) return requested;
-  const envDefault = agent === 'claude' ? process.env.RHWP_CLAUDE_MODEL : process.env.RHWP_CODEX_MODEL;
+  const envDefaults = {
+    claude: process.env.RHWP_CLAUDE_MODEL,
+    codex: process.env.RHWP_CODEX_MODEL,
+    grok: process.env.RHWP_GROK_MODEL,
+  };
+  const envDefault = envDefaults[agent];
   if (typeof envDefault === 'string' && allowed.has(envDefault)) return envDefault;
   return DEFAULT_MODEL[agent];
 }
@@ -335,9 +437,15 @@ function resolveEffort(agent, model, requested) {
     const preferred = piModelConfig(model)?.defaultEffort;
     return efforts.includes(preferred) ? preferred : efforts[0];
   }
-  const allowed = agent === 'codex'
-    ? CODEX_EFFORTS
-    : (model === 'haiku' ? CLAUDE_EFFORTS_HAIKU : CLAUDE_EFFORTS);
+  // cursor CLI 에는 reasoning effort 선택이 없다.
+  if (agent === 'cursor') return null;
+  const tables = {
+    codex: CODEX_EFFORTS,
+    grok: GROK_EFFORTS,
+    claude: model === 'haiku' ? CLAUDE_EFFORTS_HAIKU : CLAUDE_EFFORTS,
+  };
+  const allowed = tables[agent];
+  if (!allowed) throw unknownAgentError(agent);
   if (typeof requested === 'string' && allowed.has(requested)) return requested;
   const preferred = DEFAULT_EFFORT[agent];
   return allowed.has(preferred) ? preferred : [...allowed][0];
@@ -777,9 +885,14 @@ async function startSession(
     isolatedHome: record.isolatedHome,
     codexHome: record.codexHome,
     codexAuthPath: sourceCodexAuthPath,
+    grokHome: record.grokHome,
+    grokAuthPath: sourceGrokAuthPath,
+    cursorSourceDir: cliSetup.cursorSourceDir,
     codexBin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
     claudeBin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
-    providerEnv: agent === 'claude' || agent === 'codex' ? cliSetup.envFor(agent) : {},
+    grokBin: cliSetupStatus.grok?.installed ? cliSetup.binPath('grok') : 'grok',
+    cursorBin: cliSetupStatus.cursor?.installed ? cliSetup.binPath('cursor') : 'cursor-agent',
+    providerEnv: CLI_SETUP_AGENTS.includes(agent) ? cliSetup.envFor(agent) : {},
     onEvent: makeBackendEventHandler(record, generation),
     workflow,
     phase: workflow === 'direct' ? 'implementing' : planning.phase,
@@ -792,9 +905,9 @@ async function startSession(
     openRouterApiKey: agent === 'pi' ? piManager.apiKey() : undefined,
     reasoning: agent === 'pi' ? Boolean(piModelConfig(model)?.reasoning) : false,
   };
-  const backend = agent === 'claude'
-    ? createClaudeSession(opts)
-    : (agent === 'pi' ? createPiSession(opts) : createCodexSession(opts));
+  const createBackend = SESSION_FACTORIES[agent];
+  if (!createBackend) throw unknownAgentError(agent);
+  const backend = createBackend(opts);
   record.agentSession = {
     agent,
     model,
@@ -989,7 +1102,7 @@ async function handleStudioMessage(record, sock, msg) {
   switch (msg.type) {
     case 'chat-start': {
       const agent = msg.agent;
-      if (agent !== 'claude' && agent !== 'codex' && agent !== 'pi') {
+      if (!KNOWN_AGENTS.has(agent)) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: `unknown agent: ${String(agent)}` });
         return;
       }
@@ -1228,7 +1341,13 @@ async function handleStudioMessage(record, sock, msg) {
         sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'INVALID_REQUEST', message: 'Skill goal is required.' });
         return;
       }
-      const agent = msg.agent === 'codex' || msg.agent === 'pi' ? msg.agent : 'claude';
+      // grok/cursor 는 스킬 초안 러너가 아니다 — claude 가 없으면 codex 로 내려보낸다.
+      const skillHealth = providerHealth.cached();
+      const agent = msg.agent === 'codex' || msg.agent === 'pi' || msg.agent === 'claude'
+        ? msg.agent
+        : (skillHealth && skillHealth.claude?.available === false && skillHealth.codex?.available !== false
+          ? 'codex'
+          : 'claude');
       const model = resolveModel(agent, msg.model);
       sendJson(sock, { v: 1, type: 'skill-draft-progress', requestId: msg.requestId ?? null, state: 'generating' });
       void generateSkillDraft(
@@ -1259,7 +1378,7 @@ async function handleStudioMessage(record, sock, msg) {
     case 'agent-setup-install': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       const agent = msg.agent;
-      if (agent !== 'claude' && agent !== 'codex' && agent !== 'pi') {
+      if (!KNOWN_AGENTS.has(agent)) {
         sendAgentSetupError(record, sock, requestId, null, new Error('지원하지 않는 에이전트예요.'));
         return;
       }
@@ -1292,7 +1411,7 @@ async function handleStudioMessage(record, sock, msg) {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       const agent = msg.agent;
       const method = msg.method;
-      if ((agent !== 'claude' && agent !== 'codex' && agent !== 'pi') || (method !== 'oauth' && method !== 'api-key')) {
+      if (!KNOWN_AGENTS.has(agent) || (method !== 'oauth' && method !== 'api-key')) {
         sendAgentSetupError(record, sock, requestId, null, new Error('로그인 요청을 확인하지 못했어요.'));
         return;
       }
@@ -1315,6 +1434,9 @@ async function handleStudioMessage(record, sock, msg) {
           cliSetupStatus[agent] = status;
           if (agent === 'codex') {
             sourceCodexAuthPath = await findSourceCodexAuthPath();
+          }
+          if (agent === 'grok') {
+            sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
           }
           refreshSessionCredentials(agent);
         });
@@ -1347,7 +1469,7 @@ async function handleStudioMessage(record, sock, msg) {
     case 'agent-setup-cancel': {
       const agent = msg.agent;
       if (agent === 'pi') void piManager.cancelSetup();
-      else if (agent === 'claude' || agent === 'codex') void cliSetup.cancel(agent);
+      else if (CLI_SETUP_AGENTS.includes(agent)) void cliSetup.cancel(agent);
       return;
     }
     case 'usage-request': {
@@ -2168,7 +2290,7 @@ httpServer.listen(REQUESTED_PORT, '127.0.0.1', () => {
   hubPort = address.port;
   process.stdout.write(`RHWP_HUB_READY ${JSON.stringify({ port: hubPort, pid: process.pid, launchId: LAUNCH_ID })}\n`);
   log(`rhwp-agent hub listening on ws://127.0.0.1:${hubPort} (protocol v${PROTOCOL_VERSION})`);
-  log('claude/codex/pi can be installed and authenticated from Studio settings');
+  log('claude/codex/pi/grok/cursor can be installed and authenticated from Studio settings');
   scheduleHarnessUpdates(HARNESS_UPDATE_INITIAL_DELAY_MS);
 });
 
