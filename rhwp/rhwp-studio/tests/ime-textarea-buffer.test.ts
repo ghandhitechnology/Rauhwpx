@@ -43,6 +43,23 @@ test('IME 조합 오버레이는 문서 글꼴의 실제 px 크기를 사용한�
     'fontSize(1pt=100) → px 변환 (96dpi: pt × 96⁄72 = fontSize ÷ 75)');
   const caretSource = readFileSync(
     new URL('../src/engine/caret-renderer.ts', import.meta.url), 'utf8');
-  assert.match(caretSource, /fontSizePx > 0 \? fontSizePx \* zoom : box\.h \* 0\.85 \* zoom/,
+  assert.match(caretSource,
+    /fontSizePx > 0 \? fontSizePx \* zoom : boxDocHeight \* 0\.85 \* zoom/,
     '실제 글꼴 크기가 있으면 그대로, 없으면 기존 근사(0.85×rect 높이)로 폴백');
+});
+
+test('preedit 는 DOM 텍스트가 아니라 캔버스 래스터로 baseline 에 맞춰 그린다', () => {
+  const caretSource = readFileSync(
+    new URL('../src/engine/caret-renderer.ts', import.meta.url), 'utf8');
+  // DOM 텍스트 + line-height 중앙정렬 + overflow:hidden 조합은 글리프 위아래를
+  // 잘라 조합 중 글자가 확정 글자보다 작아 보였다 — 캔버스 fillText 로 그린다.
+  assert.match(caretSource, /private compEl: HTMLCanvasElement;/);
+  assert.match(caretSource, /private paintComposition\(/);
+  assert.match(caretSource, /ctx\.fillText\(text, Math\.max\(0, \(w - textWidth\) \/ 2\), h \* 0\.85\);/,
+    '엔진 baseline 관례(text_height × 0.85)에 글리프를 얹는다');
+  // #scroll-content canvas 용지 규칙(중앙 transform + 배경/그림자) 누수 방지 —
+  // 이 규칙이 다시 걸리면 조합 글자가 그림자 달린 상자로 보인다.
+  assert.match(caretSource,
+    /caret-composition';[\s\S]*?'position:absolute;pointer-events:none;z-index:10;display:none;' \+\s*'transform:none;background:transparent;box-shadow:none;';/,
+    'compEl 캔버스는 페이지 캔버스 CSS 를 인라인으로 무효화해야 한다');
 });
