@@ -412,7 +412,15 @@ function projectFileDeps(
         documentId: claim.documentId,
       });
       if (desktop !== undefined) return desktop;
-      return pickOpenFileHandle(window as FileSystemWindowLike);
+      const windowLike = window as FileSystemWindowLike;
+      if (!canUseOpenFilePicker(windowLike)) {
+        showToast({
+          message: '이 브라우저에서는 파일을 선택하는 대화상자를 열 수 없습니다.',
+          durationMs: 4000,
+        });
+        return null;
+      }
+      return pickOpenFileHandle(windowLike);
     },
     forgetRecent: removeRecentDoc,
     toast: (message, durationMs) => showToast({ message, durationMs }),

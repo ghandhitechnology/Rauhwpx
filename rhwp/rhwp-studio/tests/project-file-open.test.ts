@@ -292,3 +292,25 @@ test('거절된 선택은 피커를 한 번 더 열고 두 번째도 아니면 �
   assert.equal(calls.loaded.length, 0);
   assert.match(calls.toasts.join('\n'), /이 프로젝트 문서가 아닙니다/);
 });
+
+test('다른 창 소유 선택은 열지 않는다', async () => {
+  const { deps, calls } = makeDeps({
+    pickForProject: async () => 'owned',
+  });
+  const result = await openProjectFile(claim(), deps);
+  assert.equal(result.kind, 'owned-elsewhere');
+  assert.equal(calls.loaded.length, 0);
+  assert.match(calls.toasts.join('\n'), /다른 창/);
+});
+
+test('기억된 위치는 바이트가 달라도 제자리 편집으로 연다', async () => {
+  const picked = handle('보고서.hwp');
+  const { deps, calls } = makeDeps({
+    pickForProject: async () => picked,
+    readHandle: async () => ({ bytes: new Uint8Array([9]), name: picked.name }),
+    locationOf: async () => 'remembered',
+  });
+  const result = await openProjectFile(claim(), deps);
+  assert.equal(result.kind, 'opened');
+  assert.deepEqual(calls.loaded, [{ name: '보고서.hwp', documentId: 'doc-1' }]);
+});
