@@ -1739,7 +1739,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   skillEditorBack.type = 'button';
   skillEditorHeader.append(skillEditorTitle, skillEditorBack);
   const skillIconPicker = el('fieldset', 'ag-skill-icon-picker') as HTMLFieldSetElement;
-  skillIconPicker.setAttribute('aria-label', '스킬 아이콘');
+  const skillIconLabel = el('span', 'ag-skill-icon-label', '아이콘');
+  skillIconLabel.id = 'ag-skill-icon-label';
+  skillIconPicker.setAttribute('aria-labelledby', skillIconLabel.id);
   const skillIconOptions = el('div', 'ag-skill-icon-options');
   const skillIconInputs = new Map<ProductSkillIcon, HTMLInputElement>();
   for (const [value, label] of [
@@ -1760,7 +1762,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     skillIconInputs.set(value, radio);
     skillIconOptions.appendChild(option);
   }
-  skillIconPicker.append(skillIconOptions);
+  skillIconPicker.append(skillIconLabel, skillIconOptions);
   const skillGoal = el('textarea', 'ag-skill-field') as HTMLTextAreaElement;
   skillGoal.rows = 3;
   skillGoal.placeholder = '이 스킬이 반복해서 해결할 일을 설명하세요.';

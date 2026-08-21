@@ -991,16 +991,27 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-skill-editor-header { display: flex; align-items: center; gap: 8px; }
 .ag-skill-editor-title { flex: 1; margin: 0; font-size: var(--font-size-md, 13px); }
 .ag-skill-icon-picker {
+  display: flex;
   min-inline-size: 0;
+  align-items: center;
+  gap: 9px;
+  justify-content: flex-start;
   margin: 0 0 2px;
   padding: 0;
   border: 0;
+}
+.ag-skill-icon-label {
+  flex: 0 0 auto;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-base, 12px);
+  font-weight: 600;
 }
 .ag-skill-icon-options {
   position: relative;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  width: 100%;
+  width: 112px;
+  flex: 0 0 112px;
   overflow: hidden;
   border-radius: 8px 11px 7px 10px / 10px 7px 11px 8px;
   background: var(--ag-input-bg);
@@ -1018,10 +1029,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   position: relative;
   display: flex;
   min-width: 0;
-  min-height: 34px;
+  min-height: 30px;
   align-items: center;
   justify-content: center;
-  padding: 5px 10px;
+  padding: 4px 7px;
   color: var(--ag-text-muted);
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
@@ -1052,12 +1063,12 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 .ag-skill-icon-option-glyph {
   display: grid;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
   place-items: center;
 }
-.ag-skill-icon-option-glyph .ag-icon { width: 16px; height: 16px; }
+.ag-skill-icon-option-glyph .ag-icon { width: 15px; height: 15px; }
 .ag-skill-icon-picker:disabled .ag-skill-icon-option { opacity: 0.55; cursor: default; }
 .ag-skill-icon-picker:disabled .ag-skill-icon-option:hover { background: transparent; color: var(--ag-text-muted); }
 .ag-skill-icon-picker:disabled .ag-skill-icon-option:has(input:checked) {
