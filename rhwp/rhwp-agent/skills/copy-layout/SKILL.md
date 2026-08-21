@@ -33,7 +33,7 @@ Read `scripts/copy_layout.py`, then run it from this skill's absolute root:
 python3 scripts/copy_layout.py "/absolute/path/source.hwp"
 ```
 
-The helper preserves package structure, strips previews, scripts, history, and body payloads, keeps media referenced by master pages or layout definitions, assigns the title, and verifies package and geometry invariants. It first empties HWP body text completely; if that contracts pagination, it retries with width-aware blank spacing that retains flow without retaining source words. For HWP input or output it locates the Rauhwpx `rhwp` binary from `--rhwp-bin`, `RHWP_BIN`, `PATH`, or this repository's build output. Read its JSON report, especially `text_strategy`, `media_usage`, `removed_body_media`, and `conversion.native_verification` or `conversion.fallback_reason`.
+The helper preserves package structure, strips previews, scripts, history, and body payloads, keeps media referenced by master pages or layout definitions, assigns the title, and verifies package and geometry invariants. It first empties HWP body text completely; if that contracts pagination, it retries with width-aware blank spacing that retains flow without retaining source words. An HWP→HWPX intermediate page-count mismatch is diagnostic rather than a deliverable failure: the helper may continue sanitizing it, but the final HWP/HWPX must still match the source page count and all other precision gates. For HWP input or output it locates the Rauhwpx `rhwp` binary from `--rhwp-bin`, `RHWP_BIN`, `PATH`, or this repository's build output. Read its JSON report, especially `text_strategy`, `media_usage`, `removed_body_media`, `conversion.intermediate_export`, and `conversion.native_verification` or `conversion.fallback_reason`.
 
 If a removed body image is demonstrably decorative after inspecting the image and placement, rerun to a fresh output path with `--keep-media <manifest-id>` for each such asset. Never retain a chart, photo, scan, signature, or attachment merely to make the result look fuller.
 
@@ -47,5 +47,7 @@ When the source came from `materialize_document_snapshot`, the generated file is
 2. Confirm it contains no source text or obvious content payloads.
 3. Confirm title, destination, page count, section setup, and layout-object geometry.
 4. Render or preview representative pages when available and inspect small details.
+
+If final precision verification fails, identify it as a conversion or layout-verification failure. Do not ask the user to confirm or resave the current document unless a fresh identity check actually shows that `documentId` or `digest` changed; a stable snapshot plus a reproducible page-count mismatch is not evidence that the wrong document is open.
 
 Report the saved path, removed content, preserved design elements, and any uncertain content-versus-decoration decisions.

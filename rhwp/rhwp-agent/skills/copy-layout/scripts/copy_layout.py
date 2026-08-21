@@ -630,12 +630,20 @@ def resolve_rhwp_binary(requested: Path | None) -> Path:
     )
 
 
+class RhwpCommandError(ValueError):
+    """A failed rhwp subprocess with its stable CLI exit code preserved."""
+
+    def __init__(self, command: str, returncode: int, detail: str):
+        super().__init__(f"rhwp {command} failed: {detail}")
+        self.returncode = returncode
+
+
 def run_rhwp(binary: Path, arguments: list[str], expect_json: bool = False) -> object:
     command = [str(binary), *arguments]
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
-        raise ValueError(f"rhwp {' '.join(arguments[:1])} failed: {detail}")
+        raise RhwpCommandError(" ".join(arguments[:1]), result.returncode, detail)
     if not expect_json:
         return result.stdout.strip()
     try:
@@ -649,6 +657,38 @@ def native_document_info(binary: Path, document: Path) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ValueError("rhwp info returned an unexpected JSON value")
     return payload
+
+
+def export_hwpx_for_sanitization(
+    binary: Path,
+    source: Path,
+    output: Path,
+) -> dict[str, object]:
+    """Export an intermediate HWPX while deferring only the page-count gate.
+
+    The intermediate is never delivered. A page-count mismatch can disappear
+    after source text is removed, so final HWP/HWPX verification remains the
+    authoritative quality gate. All other export failures stay fatal.
+    """
+    try:
+        run_rhwp(
+            binary,
+            ["export-hwpx", str(source), str(output), "--verify-pages"],
+        )
+        return {"page_gate": "passed"}
+    except RhwpCommandError as exc:
+        if exc.returncode != 4:
+            raise
+        output.unlink(missing_ok=True)
+        run_rhwp(binary, ["export-hwpx", str(source), str(output)])
+        source_pages = native_document_info(binary, source).get("pageCount")
+        intermediate_pages = native_document_info(binary, output).get("pageCount")
+        return {
+            "page_gate": "deferred-to-final-output",
+            "source_page_count": source_pages,
+            "intermediate_page_count": intermediate_pages,
+            "reason": str(exc),
+        }
 
 
 def verify_native_output(
@@ -759,11 +799,13 @@ def copy_layout(
     try:
         with tempfile.TemporaryDirectory(prefix="copy-layout-") as temporary_directory:
             temporary = Path(temporary_directory)
+            intermediate_export: dict[str, object] | None = None
             if source_format == ".hwp":
                 source_hwpx = temporary / "source.hwpx"
-                run_rhwp(
+                intermediate_export = export_hwpx_for_sanitization(
                     binary,
-                    ["export-hwpx", str(source), str(source_hwpx), "--verify-pages"],
+                    source,
+                    source_hwpx,
                 )
             else:
                 source_hwpx = source
@@ -774,7 +816,7 @@ def copy_layout(
                 sanitized_hwpx,
                 title,
                 keep_media,
-                preserve_flow=output_format != ".hwp",
+                preserve_flow=False,
             )
             native_verification: dict[str, object] | None = None
             if output_format == ".hwp":
@@ -838,44 +880,99 @@ def copy_layout(
                     if output_was_requested:
                         raise
                     destination.unlink(missing_ok=True)
+                    source_fallback_info = native_document_info(binary, source)
+                    fallback_info = native_document_info(binary, sanitized_hwpx)
+                    if source_fallback_info.get("pageCount") != fallback_info.get("pageCount"):
+                        raise ValueError(
+                            "verified HWPX fallback pageCount changed: "
+                            f"{source_fallback_info.get('pageCount')!r} -> "
+                            f"{fallback_info.get('pageCount')!r}"
+                        ) from exc
                     fallback = available_fallback_path(destination)
                     shutil.copy2(sanitized_hwpx, fallback)
+                    fallback_conversion = {
+                        "engine": str(binary),
+                        "native_hwp_attempted": True,
+                        "fallback_reason": str(exc),
+                        "fallback_verification": report["verification"],
+                    }
+                    if intermediate_export is not None:
+                        fallback_conversion["intermediate_export"] = intermediate_export
                     report.update(
                         {
                             "source": str(source),
                             "output": str(fallback),
                             "input_format": source_format.lstrip("."),
                             "output_format": "hwpx",
-                            "conversion": {
-                                "engine": str(binary),
-                                "native_hwp_attempted": True,
-                                "fallback_reason": str(exc),
-                                "fallback_verification": report["verification"],
-                            },
+                            "conversion": fallback_conversion,
                         }
                     )
                     return report
             else:
                 source_info = native_document_info(binary, source)
                 output_info = native_document_info(binary, destination)
+                source_page_count = source_info.get("pageCount")
+                output_page_count = output_info.get("pageCount")
+                if (
+                    isinstance(source_page_count, int)
+                    and isinstance(output_page_count, int)
+                    and output_page_count < source_page_count
+                ):
+                    flow_preserved_hwpx = temporary / "layout-flow-preserved.hwpx"
+                    report = sanitize_hwpx(
+                        source_hwpx,
+                        flow_preserved_hwpx,
+                        title,
+                        keep_media,
+                        preserve_flow=True,
+                    )
+                    destination.unlink(missing_ok=True)
+                    shutil.copy2(flow_preserved_hwpx, destination)
+                    sanitized_hwpx = destination
+                    output_info = native_document_info(binary, destination)
+                    output_page_count = output_info.get("pageCount")
+                if (
+                    isinstance(source_page_count, int)
+                    and isinstance(output_page_count, int)
+                    and output_page_count < source_page_count
+                ):
+                    page_hints = temporary / "layout-with-page-breaks.hwpx"
+                    added = add_page_break_hints(
+                        sanitized_hwpx,
+                        page_hints,
+                        source_page_count - output_page_count,
+                        title,
+                        report["verification"]["layout"],
+                    )
+                    report["changes"]["inferred_page_breaks"] = added
+                    destination.unlink(missing_ok=True)
+                    shutil.copy2(page_hints, destination)
+                    sanitized_hwpx = destination
+                    output_info = native_document_info(binary, destination)
                 if source_info.get("pageCount") != output_info.get("pageCount"):
-                    raise ValueError("native pageCount changed during HWP to HWPX conversion")
+                    raise ValueError(
+                        "final HWPX pageCount changed: "
+                        f"{source_info.get('pageCount')!r} -> {output_info.get('pageCount')!r}"
+                    )
                 native_verification = {
                     "format": output_info.get("format"),
                     "page_count": output_info.get("pageCount"),
                     "sections": output_info.get("sections"),
                 }
 
+            conversion = {
+                "engine": str(binary),
+                "native_verification": native_verification,
+            }
+            if intermediate_export is not None:
+                conversion["intermediate_export"] = intermediate_export
             report.update(
                 {
                     "source": str(source),
                     "output": str(destination),
                     "input_format": source_format.lstrip("."),
                     "output_format": output_format.lstrip("."),
-                    "conversion": {
-                        "engine": str(binary),
-                        "native_verification": native_verification,
-                    },
+                    "conversion": conversion,
                 }
             )
             return report
