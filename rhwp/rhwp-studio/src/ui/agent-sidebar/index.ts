@@ -84,6 +84,7 @@ import { isDesktopApp } from '../../desktop-integration.ts';
 import { fuzzyTemplateScore } from './template-fuzzy.ts';
 import {
   defaultSkillIconForName,
+  requestTextForSkillInvocation,
   skillGlyphForIcon,
   skillGlyphForSkill,
   withSkillIconFrontmatter,
@@ -3098,13 +3099,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (threadsPanelOpen) setThreadsPanelOpen(false);
     if (skillsPanelOpen) setSkillsPanelOpen(false);
     if (settingsPanelOpen) setSettingsPanelOpen(false);
-    const visibleText = activeTemplate && !skillNameForMessage
+    const messageText = activeTemplate && !skillNameForMessage
         ? `/templates ${activeTemplate.name}${text ? ` ${text}` : ''}`
         : text;
     // 대화 기록은 skill block만 보이도록 빈 본문을 유지한다. 다만 wire
     // protocol은 비어 있지 않은 text를 요구하므로 명시적 slash 호출 자체를
     // 요청 본문으로 보낸다. 자연어 fallback을 UI나 기록에 숨겨 넣지 않는다.
-    if (!text && skillNameForMessage) text = `/${skillNameForMessage}`;
+    const requestText = requestTextForSkillInvocation(text, skillNameForMessage);
     // 승인 대기 중 입력은 언제나 계획 수정 의견이다. '네'/'승인' 같은
     // 텍스트로는 절대 승인되지 않는다 — 승인은 계획 카드의 버튼뿐.
     if (chatWorkflow === 'plan' && planningPhase === 'awaiting-approval') {
@@ -3118,7 +3119,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       size: file.size,
       status: 'processing',
     }));
-    const userMessage = recordUserMessage(visibleText,
+    const userMessage = recordUserMessage(messageText,
       messageAttachments,
       undefined,
       skillNameForMessage,
@@ -3130,7 +3131,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     appendConversation(userBubble);
     updateTurnPending(selectedAgent);
     scrollConversationToMessage(userBubble, { smooth: true });
-    const messageSent = bridge.sendUserMessage(text, skillNameForMessage, staged.map((file) => file.id));
+    const messageSent = bridge.sendUserMessage(requestText, skillNameForMessage, staged.map((file) => file.id));
     if (staged.length > 0) {
       attachmentsSending = true;
       updateComposer();
@@ -3849,6 +3850,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function startNewChat(opts?: { silent?: boolean }): void {
+    setComposerSkill(null);
     if (turnRunning) bridge.interrupt();
     flushAssistantBuffer();
     const previousThreadId = currentThread.id;
@@ -3894,6 +3896,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     persistCurrentThread();
     const loaded = getThread(id);
     if (!loaded) return;
+    setComposerSkill(null);
     threadWorkflows.set(id, loaded.workflow);
     planArchives.set(id, loaded.plans?.length
       ? loaded.plans

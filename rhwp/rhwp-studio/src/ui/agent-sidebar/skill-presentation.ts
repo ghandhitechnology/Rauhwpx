@@ -39,6 +39,11 @@ export function skillGlyphForSkill(skill: { name: string; icon?: ProductSkillIco
   return skillGlyphForIcon(skill.icon ?? defaultSkillIconForName(skill.name));
 }
 
+/** Wire 요청만 비어 있지 않게 만들고, 대화 기록용 후속 문장은 그대로 둔다. */
+export function requestTextForSkillInvocation(text: string, skillName?: string): string {
+  return !text && skillName ? `/${skillName}` : text;
+}
+
 /** Keep the picker authoritative while leaving malformed drafts for validation to explain. */
 export function withSkillIconFrontmatter(markdown: string, icon: ProductSkillIcon): string {
   const opening = markdown.match(/^(\uFEFF?---\r?\n)/);

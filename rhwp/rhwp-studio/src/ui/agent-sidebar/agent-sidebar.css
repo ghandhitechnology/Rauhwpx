@@ -1064,7 +1064,6 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   width: 1px;
   height: 1px;
   overflow: hidden;
-  clip: rect(0 0 0 0);
   clip-path: inset(50%);
   white-space: nowrap;
 }
@@ -3851,10 +3850,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   background: transparent;
 }
 
-/* Provider-aware hand-drawn skill token. The noisy line lives on the border
-   pseudo-element so text and icon remain crisp. */
+/* 프로바이더 색을 따르는 손그림 스킬 토큰. 흔들리는 선은 테두리 가상 요소에
+   분리해 텍스트와 아이콘을 또렷하게 유지한다. */
 .ag-skill-token {
   --ag-skill-color: var(--ag-claude);
+
   position: relative;
   display: inline-flex;
   flex: 0 0 auto;
