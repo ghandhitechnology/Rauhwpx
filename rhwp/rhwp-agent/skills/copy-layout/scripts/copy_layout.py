@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a reusable HWP or HWPX with layout and optional approved guidance."""
+"""Create a reusable HWP or HWPX with reviewed template structure and content."""
 
 from __future__ import annotations
 
@@ -35,6 +35,14 @@ LAYOUT_ANCESTORS = {
 TEXT_ELEMENTS = {"t", "shapeComment"}
 TEXT_MARKUP_REMOVE = {"markpenBegin", "markpenEnd"}
 FIELD_ELEMENTS = {"fieldBegin", "fieldEnd"}
+FORM_CONTROL_ELEMENTS = {
+    "button",
+    "checkBtn",
+    "comboBox",
+    "edit",
+    "listBox",
+    "radioBtn",
+}
 PRIVATE_ATTRS = {"description", "href", "name", "title"}
 PAYLOAD_PREFIXES = (
     "Annotations/",
@@ -203,6 +211,7 @@ GUIDANCE_IDENTIFIER_RE = re.compile(
     r"https?://|www\.\S+|\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|\b0\d{1,2}-\d{3,4}-\d{4}\b",
     re.IGNORECASE,
 )
+ILLEGAL_XML_CONTROL_RE = re.compile(br"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 
 
 def local_name(value: str) -> str:
@@ -259,6 +268,10 @@ def is_guidance_paragraph(value: str) -> bool:
 def parse_xml(data: bytes, part: str) -> etree.ElementTree:
     if re.search(br"<!DOCTYPE|<!ENTITY", data, flags=re.IGNORECASE):
         raise ValueError(f"unsafe XML declaration in {part}")
+    # Some Hangul-generated packages contain stray XML 1.0 control bytes
+    # between elements. They have no visible or structural meaning, and
+    # dropping them lets otherwise valid packages be inspected and sanitized.
+    data = ILLEGAL_XML_CONTROL_RE.sub(b"", data)
     try:
         for _, namespace in etree.iterparse(io.BytesIO(data), events=("start-ns",)):
             prefix, uri = namespace
@@ -303,6 +316,601 @@ def ancestors_of(
         current = parents.get(current)
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def paragraph_text_nodes(
+    paragraph: etree.Element,
+    parents: dict[etree.Element, etree.Element],
+) -> list[etree.Element]:
+    """Return text owned by this paragraph, excluding nested table paragraphs."""
+    return [
+        element
+        for element in paragraph.iter()
+        if local_name(element.tag) == "t"
+        and next(
+            (
+                ancestor
+                for ancestor in ancestors_of(element, parents)
+                if local_name(ancestor.tag) == "p"
+            ),
+            None,
+        )
+        is paragraph
+    ]
+
+
+def nearest_ancestor_named(
+    element: etree.Element,
+    parents: dict[etree.Element, etree.Element],
+    names: set[str],
+) -> etree.Element | None:
+    return next(
+        (
+            ancestor
+            for ancestor in ancestors_of(element, parents)
+            if local_name(ancestor.tag) in names
+        ),
+        None,
+    )
+
+
+def paragraph_record(
+    paragraph: etree.Element,
+    part: str,
+    index: int,
+    parents: dict[etree.Element, etree.Element],
+) -> tuple[dict[str, object], list[etree.Element]] | None:
+    text_nodes = paragraph_text_nodes(paragraph, parents)
+    text = normalize_visible_text(
+        "".join("".join(element.itertext()) for element in text_nodes)
+    )
+    if not text:
+        return None
+
+    paragraph_id = f"{part}#p{index:04d}"
+    cell = nearest_ancestor_named(paragraph, parents, {"tc"})
+    cell_address = None
+    if cell is not None:
+        address = next(
+            (child for child in cell if local_name(child.tag) == "cellAddr"),
+            None,
+        )
+        if address is not None:
+            cell_address = {
+                key: address.get(key)
+                for key in ("colAddr", "rowAddr")
+                if address.get(key) is not None
+            }
+
+    ancestor_names = {local_name(ancestor.tag) for ancestor in ancestors_of(paragraph, parents)}
+    path = PurePosixPath(part)
+    in_header_footer = bool(
+        ancestor_names & {"header", "footer", "masterPage"}
+        or part == "Contents/header.xml"
+        or (path.parent == PurePosixPath("Contents") and path.name.startswith("masterpage"))
+    )
+    field_markers = sum(
+        1 for element in paragraph.iter() if local_name(element.tag) in FIELD_ELEMENTS
+    )
+    record: dict[str, object] = {
+        "id": paragraph_id,
+        "part": part,
+        "paragraph_index": index,
+        "text": text,
+        "context": {
+            "in_table": cell is not None,
+            "cell_address": cell_address,
+            "in_header_footer": in_header_footer,
+            "in_shape": bool(ancestor_names & (OBJECT_ELEMENTS - {"tbl"})),
+            "field_markers": field_markers,
+            "para_pr_id": paragraph.get("paraPrIDRef"),
+            "style_id": paragraph.get("styleIDRef"),
+            "legacy_guidance_match": is_guidance_paragraph(text),
+        },
+    }
+    return record, text_nodes
+
+
+def text_inventory_from_trees(
+    trees: dict[str, etree.ElementTree],
+) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for part in sorted(trees):
+        if not is_document_xml(part):
+            continue
+        root = trees[part].getroot()
+        parents = parent_map(root)
+        paragraphs = [element for element in root.iter() if local_name(element.tag) == "p"]
+        for index, paragraph in enumerate(paragraphs):
+            result = paragraph_record(paragraph, part, index, parents)
+            if result is not None:
+                records.append(result[0])
+    return records
+
+
+def field_inventory_from_trees(
+    trees: dict[str, etree.ElementTree],
+) -> list[dict[str, object]]:
+    fields: list[dict[str, object]] = []
+    for part in sorted(trees):
+        if not is_document_xml(part):
+            continue
+        index = 0
+        for element in trees[part].iter():
+            if local_name(element.tag) != "fieldBegin":
+                continue
+            fields.append(
+                {
+                    "id": f"{part}#field{index:04d}",
+                    "part": part,
+                    "type": element.get("type"),
+                    "name": element.get("name"),
+                    "editable": element.get("editable"),
+                }
+            )
+            index += 1
+    return fields
+
+
+def form_control_inventory_from_trees(
+    trees: dict[str, etree.ElementTree],
+) -> list[dict[str, object]]:
+    controls: list[dict[str, object]] = []
+    for part in sorted(trees):
+        if not is_document_xml(part):
+            continue
+        root = trees[part].getroot()
+        parents = parent_map(root)
+        paragraphs = [element for element in root.iter() if local_name(element.tag) == "p"]
+        paragraph_indexes = {paragraph: index for index, paragraph in enumerate(paragraphs)}
+        index = 0
+        for element in root.iter():
+            tag = local_name(element.tag)
+            if tag not in FORM_CONTROL_ELEMENTS:
+                continue
+            paragraph = nearest_ancestor_named(element, parents, {"p"})
+            paragraph_id = (
+                f"{part}#p{paragraph_indexes[paragraph]:04d}"
+                if paragraph in paragraph_indexes
+                else None
+            )
+            controls.append(
+                {
+                    "id": f"{part}#control{index:04d}",
+                    "part": part,
+                    "kind": tag,
+                    "paragraph_id": paragraph_id,
+                    "name": element.get("name"),
+                    "caption": element.get("caption"),
+                    "value": element.get("value"),
+                    "editable": element.get("editable"),
+                    "enabled": element.get("enabled"),
+                }
+            )
+            index += 1
+    return controls
+
+
+def named_attribute_inventory_from_trees(
+    trees: dict[str, etree.ElementTree],
+) -> list[dict[str, str]]:
+    named: list[dict[str, str]] = []
+    for part in sorted(trees):
+        if not is_document_xml(part):
+            continue
+        for index, element in enumerate(trees[part].iter()):
+            value = next(
+                (
+                    attr_value
+                    for attr_name, attr_value in element.attrib.items()
+                    if local_name(attr_name) == "name" and attr_value
+                ),
+                None,
+            )
+            if value is None:
+                continue
+            named.append(
+                {
+                    "id": f"{part}#element{index:04d}",
+                    "part": part,
+                    "element": local_name(element.tag),
+                    "name": value,
+                }
+            )
+    return named
+
+
+def reset_form_controls(
+    trees: dict[str, etree.ElementTree],
+    selected_ids: set[str],
+) -> list[dict[str, object]]:
+    if not selected_ids:
+        return []
+    available: dict[str, etree.Element] = {}
+    for part in sorted(trees):
+        if not is_document_xml(part):
+            continue
+        index = 0
+        for element in trees[part].iter():
+            if local_name(element.tag) not in FORM_CONTROL_ELEMENTS:
+                continue
+            available[f"{part}#control{index:04d}"] = element
+            index += 1
+    unknown = selected_ids - set(available)
+    if unknown:
+        raise ValueError(
+            "text decision plan contains unknown form-control ids: "
+            + ", ".join(sorted(unknown)[:5])
+        )
+
+    reset: list[dict[str, object]] = []
+    for control_id in sorted(selected_ids):
+        element = available[control_id]
+        tag = local_name(element.tag)
+        before = {
+            "id": control_id,
+            "kind": tag,
+            "name": element.get("name"),
+            "caption": element.get("caption"),
+            "value": element.get("value"),
+        }
+        if tag in {"checkBtn", "radioBtn"}:
+            element.set("value", "UNCHECKED")
+        else:
+            for attr_name in ("text", "value"):
+                if element.get(attr_name) is not None:
+                    element.set(attr_name, "")
+        reset.append(before)
+    return reset
+
+
+def border_fill_mark_inventory(
+    trees: dict[str, etree.ElementTree],
+) -> list[dict[str, object]]:
+    marks: list[dict[str, object]] = []
+    uses: dict[str, list[dict[str, object]]] = {}
+    for part, tree in trees.items():
+        if not is_document_xml(part):
+            continue
+        for element in tree.iter():
+            border_fill_id = element.get("borderFillIDRef")
+            if not border_fill_id:
+                continue
+            use: dict[str, object] = {"part": part, "element": local_name(element.tag)}
+            if local_name(element.tag) == "tc":
+                address = next(
+                    (child for child in element if local_name(child.tag) == "cellAddr"),
+                    None,
+                )
+                if address is not None:
+                    use["cell_address"] = {
+                        key: address.get(key)
+                        for key in ("colAddr", "rowAddr")
+                        if address.get(key) is not None
+                    }
+                use["has_text"] = any(
+                    normalize_visible_text("".join(text.itertext()))
+                    for text in element.iter()
+                    if local_name(text.tag) == "t"
+                )
+            uses.setdefault(border_fill_id, []).append(use)
+
+    for part, tree in trees.items():
+        for border_fill in tree.iter():
+            if local_name(border_fill.tag) != "borderFill":
+                continue
+            border_fill_id = border_fill.get("id")
+            diagonal = next(
+                (child for child in border_fill if local_name(child.tag) == "diagonal"),
+                None,
+            )
+            slash = next(
+                (child for child in border_fill if local_name(child.tag) == "slash"),
+                None,
+            )
+            win_brush = next(
+                (
+                    descendant
+                    for descendant in border_fill.iter()
+                    if local_name(descendant.tag) == "winBrush"
+                ),
+                None,
+            )
+            if not border_fill_id or diagonal is None:
+                continue
+            width_match = re.search(r"[0-9.]+", diagonal.get("width", ""))
+            width = float(width_match.group()) if width_match else 0.0
+            color = diagonal.get("color", "#000000").upper()
+            crooked = slash is not None and slash.get("Crooked") == "1"
+            border_uses = uses.get(border_fill_id, [])
+            if width > 0.5 or color not in {"#000000", "#000", "BLACK", "NONE"} or crooked:
+                marks.append(
+                    {
+                        "id": border_fill_id,
+                        "part": part,
+                        "kind": "diagonal-border-mark",
+                        "width": diagonal.get("width"),
+                        "color": diagonal.get("color"),
+                        "center_line": border_fill.get("centerLine"),
+                        "crooked": crooked,
+                        "uses": border_uses,
+                    }
+                )
+            face_color = (
+                win_brush.get("faceColor", "#FFFFFF").upper()
+                if win_brush is not None
+                else "#FFFFFF"
+            )
+            empty_cell_uses = [
+                use
+                for use in border_uses
+                if use.get("element") == "tc" and not use.get("has_text")
+            ]
+            if (
+                win_brush is not None
+                and face_color not in {"#FFFFFF", "#FFF", "WHITE", "NONE"}
+                and empty_cell_uses
+                and len(empty_cell_uses) == len(border_uses)
+            ):
+                marks.append(
+                    {
+                        "id": border_fill_id,
+                        "part": part,
+                        "kind": "empty-cell-fill-mark",
+                        "face_color": win_brush.get("faceColor"),
+                        "hatch_color": win_brush.get("hatchColor"),
+                        "alpha": win_brush.get("alpha"),
+                        "uses": border_uses,
+                    }
+                )
+    return marks
+
+
+def clear_border_fill_marks(
+    trees: dict[str, etree.ElementTree],
+    selected_ids: set[str],
+) -> list[dict[str, object]]:
+    if not selected_ids:
+        return []
+    available: dict[str, etree.Element] = {}
+    for tree in trees.values():
+        for element in tree.iter():
+            if local_name(element.tag) == "borderFill" and element.get("id"):
+                available[element.get("id", "")] = element
+    unknown = selected_ids - set(available)
+    if unknown:
+        raise ValueError(
+            "text decision plan contains unknown border-fill ids: "
+            + ", ".join(sorted(unknown)[:5])
+        )
+
+    cleared: list[dict[str, object]] = []
+    for border_fill_id in sorted(selected_ids):
+        border_fill = available[border_fill_id]
+        before: dict[str, object] = {"id": border_fill_id}
+        diagonal = next(
+            (child for child in border_fill if local_name(child.tag) == "diagonal"),
+            None,
+        )
+        slash = next(
+            (child for child in border_fill if local_name(child.tag) == "slash"),
+            None,
+        )
+        width_match = (
+            re.search(r"[0-9.]+", diagonal.get("width", ""))
+            if diagonal is not None
+            else None
+        )
+        width = float(width_match.group()) if width_match else 0.0
+        color = diagonal.get("color", "#000000").upper() if diagonal is not None else "#000000"
+        diagonal_is_mark = bool(
+            diagonal is not None
+            and (
+                width > 0.5
+                or color not in {"#000000", "#000", "BLACK", "NONE"}
+                or (slash is not None and slash.get("Crooked") == "1")
+            )
+        )
+        if diagonal_is_mark:
+            border_fill.set("centerLine", "NONE")
+        for child in border_fill:
+            tag = local_name(child.tag)
+            if diagonal_is_mark and tag in {"slash", "backSlash"}:
+                before[tag] = dict(child.attrib)
+                child.set("type", "NONE")
+                child.set("Crooked", "0")
+                child.set("isCounter", "0")
+            elif diagonal_is_mark and tag == "diagonal":
+                before[tag] = dict(child.attrib)
+                child.set("type", "SOLID")
+                child.set("width", "0.1 mm")
+                child.set("color", "#000000")
+            elif tag == "fillBrush":
+                for descendant in child.iter():
+                    if local_name(descendant.tag) != "winBrush":
+                        continue
+                    before["winBrush"] = dict(descendant.attrib)
+                    descendant.set("faceColor", "#FFFFFF")
+                    descendant.set("hatchColor", "#FFFFFF")
+                    descendant.set("alpha", "0")
+        cleared.append(before)
+    return cleared
+
+
+def inspect_hwpx(source: Path, identity_source: Path | None = None) -> dict[str, object]:
+    with zipfile.ZipFile(source) as archive:
+        if archive.testzip():
+            raise ValueError("source HWPX contains a corrupt ZIP entry")
+        trees = {
+            name: parse_xml(archive.read(name), name)
+            for name in archive.namelist()
+            if is_xml_part(name)
+        }
+    records = text_inventory_from_trees(trees)
+    identity = (identity_source or source).resolve()
+    return {
+        "source": str(identity),
+        "source_sha256": file_sha256(identity),
+        "paragraph_count": len(records),
+        "paragraphs": records,
+        "fields": field_inventory_from_trees(trees),
+        "form_controls": form_control_inventory_from_trees(trees),
+        "named_attributes": named_attribute_inventory_from_trees(trees),
+        "visual_marks": border_fill_mark_inventory(trees),
+    }
+
+
+def load_text_plan(path: Path, source: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid text decision JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("text decision plan must be a JSON object")
+    expected_digest = payload.get("source_sha256")
+    actual_digest = file_sha256(source)
+    if not isinstance(expected_digest, str) or expected_digest != actual_digest:
+        raise ValueError("text decision plan source_sha256 does not match the source document")
+    default = payload.get("default")
+    if default not in {"keep", "remove"}:
+        raise ValueError("text decision plan default must be 'keep' or 'remove'")
+
+    normalized: dict[str, object] = {
+        "source_sha256": expected_digest,
+        "default": default,
+    }
+    for action in ("keep", "remove"):
+        values = payload.get(action, [])
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise ValueError(f"text decision plan {action} must be a list of paragraph ids")
+        if len(values) != len(set(values)):
+            raise ValueError(f"text decision plan {action} contains duplicate paragraph ids")
+        normalized[action] = set(values)
+    replacements = payload.get("replace", {})
+    if not isinstance(replacements, dict) or any(
+        not isinstance(paragraph_id, str) or not isinstance(value, str)
+        for paragraph_id, value in replacements.items()
+    ):
+        raise ValueError("text decision plan replace must map paragraph ids to text")
+    if any(not normalize_visible_text(value) for value in replacements.values()):
+        raise ValueError("text decision plan replacements must contain visible text")
+    normalized["replace"] = replacements
+    clear_marks = payload.get("clear_border_fill_marks", [])
+    if not isinstance(clear_marks, list) or any(
+        not isinstance(border_fill_id, str) for border_fill_id in clear_marks
+    ):
+        raise ValueError("text decision plan clear_border_fill_marks must be a list of ids")
+    if len(clear_marks) != len(set(clear_marks)):
+        raise ValueError("text decision plan clear_border_fill_marks contains duplicate ids")
+    normalized["clear_border_fill_marks"] = set(clear_marks)
+    reset_controls = payload.get("reset_form_controls", [])
+    if not isinstance(reset_controls, list) or any(
+        not isinstance(control_id, str) for control_id in reset_controls
+    ):
+        raise ValueError("text decision plan reset_form_controls must be a list of ids")
+    if len(reset_controls) != len(set(reset_controls)):
+        raise ValueError("text decision plan reset_form_controls contains duplicate ids")
+    normalized["reset_form_controls"] = set(reset_controls)
+    overlap = normalized["keep"] & normalized["remove"]
+    if overlap:
+        raise ValueError(
+            "text decision plan assigns both keep and remove: "
+            + ", ".join(sorted(overlap)[:5])
+        )
+    replacement_removals = set(replacements) & normalized["remove"]
+    if replacement_removals:
+        raise ValueError(
+            "text decision plan cannot replace and remove the same paragraph: "
+            + ", ".join(sorted(replacement_removals)[:5])
+        )
+    return normalized
+
+
+def validate_text_plan_ids(
+    text_plan: dict[str, object],
+    records: Sequence[dict[str, object]],
+) -> None:
+    known = {str(record["id"]) for record in records}
+    explicit = (
+        set(text_plan["keep"])
+        | set(text_plan["remove"])
+        | set(text_plan["replace"])
+    )
+    unknown = explicit - known
+    if unknown:
+        raise ValueError(
+            "text decision plan contains unknown paragraph ids: "
+            + ", ".join(sorted(unknown)[:5])
+        )
+
+
+def replace_paragraph_text(text_nodes: Sequence[etree.Element], replacement: str) -> None:
+    first = True
+    for element in text_nodes:
+        element.text = replacement if first else None
+        first = False
+        for child in list(element):
+            if local_name(child.tag) in TEXT_MARKUP_REMOVE:
+                element.remove(child)
+                continue
+            child.tail = None
+            for descendant in child.iter():
+                descendant.text = None
+                if descendant is not child:
+                    descendant.tail = None
+
+
+def select_planned_text_nodes(
+    root: etree.Element,
+    part: str,
+    text_plan: dict[str, object],
+) -> tuple[set[etree.Element], list[dict[str, object]], list[dict[str, object]]]:
+    selected: set[etree.Element] = set()
+    kept: list[dict[str, object]] = []
+    removed: list[dict[str, object]] = []
+    parents = parent_map(root)
+    paragraphs = [element for element in root.iter() if local_name(element.tag) == "p"]
+    for index, paragraph in enumerate(paragraphs):
+        result = paragraph_record(paragraph, part, index, parents)
+        if result is None:
+            continue
+        record, text_nodes = result
+        paragraph_id = str(record["id"])
+        action = (
+            "keep"
+            if paragraph_id in text_plan["keep"] or paragraph_id in text_plan["replace"]
+            else "remove"
+            if paragraph_id in text_plan["remove"]
+            else str(text_plan["default"])
+        )
+        replacement = text_plan["replace"].get(paragraph_id)
+        if replacement is not None:
+            replace_paragraph_text(text_nodes, replacement)
+        compact = {
+            "id": paragraph_id,
+            "part": part,
+            "text": replacement if replacement is not None else record["text"],
+            "explicit": (
+                paragraph_id in text_plan[action]
+                or paragraph_id in text_plan["replace"]
+            ),
+        }
+        if replacement is not None:
+            compact["source_text"] = record["text"]
+        if action == "keep":
+            selected.update(text_nodes)
+            kept.append(compact)
+        else:
+            removed.append(compact)
+    return selected, kept, removed
+
+
 def select_guidance_text_nodes(
     root: etree.Element,
 ) -> tuple[set[etree.Element], list[str]]:
@@ -312,20 +920,7 @@ def select_guidance_text_nodes(
     for paragraph in root.iter():
         if local_name(paragraph.tag) != "p":
             continue
-        text_nodes = [
-            element
-            for element in paragraph.iter()
-            if local_name(element.tag) == "t"
-            and next(
-                (
-                    ancestor
-                    for ancestor in ancestors_of(element, parents)
-                    if local_name(ancestor.tag) == "p"
-                ),
-                None,
-            )
-            is paragraph
-        ]
+        text_nodes = paragraph_text_nodes(paragraph, parents)
         text = normalize_visible_text(
             "".join("".join(element.itertext()) for element in text_nodes)
         )
@@ -468,22 +1063,44 @@ def sanitize_document_tree(
     removable_media: set[str],
     preserve_flow: bool,
     preserve_guidance: bool,
-) -> tuple[dict[str, int], list[str], list[tuple[str, str]]]:
+    text_plan: dict[str, object] | None = None,
+) -> tuple[
+    dict[str, int],
+    list[str],
+    list[tuple[str, str]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+]:
     stats = Counter()
     root = tree.getroot()
-    stats["field_markers_removed"] += remove_field_markers(root)
+    kept_paragraphs: list[dict[str, object]] = []
+    removed_paragraphs: list[dict[str, object]] = []
+    if text_plan is not None:
+        approved_nodes, kept_paragraphs, removed_paragraphs = select_planned_text_nodes(
+            root,
+            part,
+            text_plan,
+        )
+        guidance_paragraphs: list[str] = []
+    else:
+        approved_nodes, guidance_paragraphs = (
+            select_guidance_text_nodes(root) if preserve_guidance else (set(), [])
+        )
+    if text_plan is None:
+        stats["field_markers_removed"] += remove_field_markers(root)
+    else:
+        stats["field_markers_preserved"] += sum(
+            1 for element in root.iter() if local_name(element.tag) in FIELD_ELEMENTS
+        )
     parents = parent_map(root)
-    guidance_nodes, guidance_paragraphs = (
-        select_guidance_text_nodes(root) if preserve_guidance else (set(), [])
-    )
 
     # Snapshot first: clearing inline children while walking a live iterator
     # can skip later sibling runs in long paragraphs.
     for element in list(root.iter()):
         tag = local_name(element.tag)
         if tag in TEXT_ELEMENTS:
-            if tag == "t" and element in guidance_nodes:
-                stats["guidance_text_nodes_preserved"] += 1
+            if tag == "t" and element in approved_nodes:
+                stats["approved_text_nodes_preserved"] += 1
                 for child in list(element):
                     if local_name(child.tag) in TEXT_MARKUP_REMOVE:
                         remove_child_preserving_tail(element, child)
@@ -509,19 +1126,37 @@ def sanitize_document_tree(
             if attr == "binaryItemIDRef" and value in removable_media:
                 element.set(attr_name, "")
                 stats["media_references_cleared"] += 1
-            elif attr in PRIVATE_ATTRS and value:
+            elif (
+                attr in PRIVATE_ATTRS
+                and value
+                and not (
+                    text_plan is not None
+                    and attr == "name"
+                )
+            ):
                 element.set(attr_name, "")
                 stats["private_attributes_cleared"] += 1
-            elif tag in {"formObject", "fieldBegin"} and attr in {"caption", "text", "value"} and value:
+            elif (
+                text_plan is None
+                and tag in {"formObject", "fieldBegin"}
+                and attr in {"caption", "text", "value"}
+                and value
+            ):
                 element.set(attr_name, "")
                 stats["form_values_cleared"] += 1
     approved_fragments = [
         (part, text)
         for element in root.iter()
-        if element in guidance_nodes
+        if element in approved_nodes
         if (text := normalize_visible_text("".join(element.itertext())))
     ]
-    return dict(stats), guidance_paragraphs, approved_fragments
+    return (
+        dict(stats),
+        guidance_paragraphs,
+        approved_fragments,
+        kept_paragraphs,
+        removed_paragraphs,
+    )
 
 
 def sanitize_metadata(tree: etree.ElementTree, title: str) -> dict[str, int]:
@@ -759,6 +1394,7 @@ def sanitize_hwpx(
     keep_media: set[str],
     preserve_flow: bool = True,
     preserve_guidance: bool = False,
+    text_plan: dict[str, object] | None = None,
 ) -> dict[str, object]:
     with zipfile.ZipFile(source) as archive:
         if archive.testzip():
@@ -774,6 +1410,32 @@ def sanitize_hwpx(
     content_tree = trees.get("Contents/content.hpf")
     if content_tree is None:
         raise ValueError("source is missing Contents/content.hpf")
+    source_fields = field_inventory_from_trees(trees)
+    source_controls = form_control_inventory_from_trees(trees)
+    source_named_attributes = named_attribute_inventory_from_trees(trees)
+    inventory = text_inventory_from_trees(trees)
+    if text_plan is not None:
+        validate_text_plan_ids(text_plan, inventory)
+    selected_border_marks = (
+        set(text_plan["clear_border_fill_marks"]) if text_plan is not None else set()
+    )
+    reported_border_marks = {
+        str(mark["id"]) for mark in border_fill_mark_inventory(trees)
+    }
+    unreported_border_marks = selected_border_marks - reported_border_marks
+    if unreported_border_marks:
+        raise ValueError(
+            "text decision plan can clear only ids reported by visual_marks: "
+            + ", ".join(sorted(unreported_border_marks)[:5])
+        )
+    cleared_border_marks = clear_border_fill_marks(
+        trees,
+        selected_border_marks,
+    )
+    reset_controls = reset_form_controls(
+        trees,
+        set(text_plan["reset_form_controls"]) if text_plan is not None else set(),
+    )
 
     source_fingerprint = layout_fingerprint(trees)
     items = manifest_map(content_tree)
@@ -801,15 +1463,24 @@ def sanitize_hwpx(
 
     totals = Counter()
     preserved_guidance: list[dict[str, str]] = []
+    kept_paragraphs: list[dict[str, object]] = []
+    removed_paragraphs: list[dict[str, object]] = []
     approved_visible_text: list[tuple[str, str]] = []
     for part, tree in trees.items():
         if is_document_xml(part):
-            part_stats, guidance, approved_fragments = sanitize_document_tree(
+            (
+                part_stats,
+                guidance,
+                approved_fragments,
+                part_kept,
+                part_removed,
+            ) = sanitize_document_tree(
                 tree,
                 part,
                 removable_media,
                 preserve_flow,
                 preserve_guidance,
+                text_plan,
             )
             totals.update(part_stats)
             preserved_guidance.extend(
@@ -817,8 +1488,30 @@ def sanitize_hwpx(
                 for text in guidance
             )
             approved_visible_text.extend(approved_fragments)
+            kept_paragraphs.extend(part_kept)
+            removed_paragraphs.extend(part_removed)
     totals.update(sanitize_metadata(content_tree, title))
     totals["manifest_items_removed"] += scrub_manifest(content_tree, removed_parts)
+
+    expected_fields = field_inventory_from_trees(trees)
+    expected_controls = form_control_inventory_from_trees(trees)
+    expected_named_attributes = named_attribute_inventory_from_trees(trees)
+    if text_plan is not None and expected_fields != source_fields:
+        raise ValueError("semantic text plan changed editable field structure")
+    if text_plan is not None and expected_named_attributes != source_named_attributes:
+        raise ValueError("semantic text plan changed reusable named structure")
+    if text_plan is not None:
+        structural_keys = ("id", "part", "kind", "paragraph_id", "name", "caption", "editable", "enabled")
+        source_control_structure = [
+            {key: control.get(key) for key in structural_keys}
+            for control in source_controls
+        ]
+        expected_control_structure = [
+            {key: control.get(key) for key in structural_keys}
+            for control in expected_controls
+        ]
+        if expected_control_structure != source_control_structure:
+            raise ValueError("semantic text plan changed form-control structure")
 
     for part, tree in trees.items():
         if part not in removed_parts:
@@ -834,6 +1527,23 @@ def sanitize_hwpx(
             source_fingerprint,
             expected_visible_text=approved_visible_text,
         )
+        output_inspection = inspect_hwpx(destination)
+        if output_inspection["fields"] != expected_fields:
+            raise ValueError("output changed editable field structure")
+        if output_inspection["form_controls"] != expected_controls:
+            raise ValueError("output changed form-control structure or state")
+        if output_inspection["named_attributes"] != expected_named_attributes:
+            raise ValueError("output changed reusable named structure")
+        verification.update(
+            {
+                "editable_field_structure_match": True,
+                "editable_field_count": len(expected_fields),
+                "form_control_structure_match": True,
+                "form_control_count": len(expected_controls),
+                "named_structure_match": True,
+                "named_attribute_count": len(expected_named_attributes),
+            }
+        )
     except Exception:
         destination.unlink(missing_ok=True)
         raise
@@ -847,9 +1557,29 @@ def sanitize_hwpx(
         "removed_unreferenced_media": sorted(removable_media - set(body_uses)),
         "media_usage": {"layout": layout_uses, "body": body_uses},
         "preserved_guidance": preserved_guidance,
+        "cleared_border_fill_marks": cleared_border_marks,
+        "reset_form_controls": reset_controls,
+        "text_decisions": (
+            {
+                "default": text_plan["default"],
+                "explicit_keep_count": len(text_plan["keep"]),
+                "explicit_remove_count": len(text_plan["remove"]),
+                "replacement_count": len(text_plan["replace"]),
+                "cleared_border_fill_mark_count": len(cleared_border_marks),
+                "reset_form_control_count": len(reset_controls),
+                "kept_count": len(kept_paragraphs),
+                "removed_count": len(removed_paragraphs),
+                "kept": kept_paragraphs,
+                "removed": removed_paragraphs,
+            }
+            if text_plan is not None
+            else None
+        ),
         "changes": dict(totals),
         "text_strategy": (
-            "approved structure and instructions"
+            "source-bound semantic text plan"
+            if text_plan is not None
+            else "approved structure and instructions"
             if preserve_guidance
             else "width-aware blank spacing"
             if preserve_flow
@@ -1092,12 +1822,16 @@ def copy_layout(
     keep_media: set[str],
     rhwp_binary: Path | None = None,
     preserve_guidance: bool = False,
+    text_plan_path: Path | None = None,
 ) -> dict[str, object]:
     output_was_requested = output is not None
     source = source.expanduser().resolve()
     source_format = source.suffix.lower()
     if not source.is_file() or source_format not in {".hwp", ".hwpx"}:
         raise ValueError(f"source is not an HWP or HWPX file: {source}")
+    if preserve_guidance and text_plan_path is not None:
+        raise ValueError("use either --preserve-guidance or --text-plan, not both")
+    text_plan = load_text_plan(text_plan_path, source) if text_plan_path is not None else None
     destination, title = output_path_for(source, output)
     output_format = destination.suffix.lower()
 
@@ -1108,6 +1842,7 @@ def copy_layout(
             title,
             keep_media,
             preserve_guidance=preserve_guidance,
+            text_plan=text_plan,
         )
         report.update(
             {
@@ -1144,6 +1879,7 @@ def copy_layout(
                 keep_media,
                 preserve_flow=False,
                 preserve_guidance=preserve_guidance,
+                text_plan=text_plan,
             )
             native_verification: dict[str, object] | None = None
             if output_format == ".hwp":
@@ -1166,6 +1902,7 @@ def copy_layout(
                         keep_media,
                         preserve_flow=True,
                         preserve_guidance=preserve_guidance,
+                        text_plan=text_plan,
                     )
                     sanitized_hwpx = flow_preserved_hwpx
                     destination.unlink(missing_ok=True)
@@ -1256,6 +1993,7 @@ def copy_layout(
                         keep_media,
                         preserve_flow=True,
                         preserve_guidance=preserve_guidance,
+                        text_plan=text_plan,
                     )
                     destination.unlink(missing_ok=True)
                     shutil.copy2(flow_preserved_hwpx, destination)
@@ -1313,10 +2051,44 @@ def copy_layout(
         raise
 
 
+def inspect_document(source: Path, rhwp_binary: Path | None = None) -> dict[str, object]:
+    source = source.expanduser().resolve()
+    source_format = source.suffix.lower()
+    if not source.is_file() or source_format not in {".hwp", ".hwpx"}:
+        raise ValueError(f"source is not an HWP or HWPX file: {source}")
+    if source_format == ".hwpx":
+        report = inspect_hwpx(source)
+        report["input_format"] = "hwpx"
+        report["conversion"] = None
+        return report
+
+    binary = resolve_rhwp_binary(rhwp_binary)
+    with tempfile.TemporaryDirectory(prefix="copy-layout-inspect-") as temporary_directory:
+        intermediate = Path(temporary_directory) / "source.hwpx"
+        conversion = export_hwpx_for_sanitization(binary, source, intermediate)
+        report = inspect_hwpx(intermediate, identity_source=source)
+        report["input_format"] = "hwp"
+        report["conversion"] = {
+            "engine": str(binary),
+            "intermediate_export": conversion,
+        }
+        return report
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path, help="source .hwp or .hwpx document")
     parser.add_argument("-o", "--output", type=Path, help="explicit output .hwp or .hwpx path")
+    parser.add_argument(
+        "--inspect-text",
+        action="store_true",
+        help="emit source-bound paragraph inventory JSON without creating a layout copy",
+    )
+    parser.add_argument(
+        "--text-plan",
+        type=Path,
+        help="JSON keep/remove plan created from --inspect-text output",
+    )
     parser.add_argument(
         "--rhwp-bin",
         type=Path,
@@ -1343,13 +2115,21 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        report = copy_layout(
-            args.source,
-            args.output,
-            set(args.keep_media),
-            args.rhwp_bin,
-            args.preserve_guidance,
-        )
+        if args.inspect_text:
+            if args.output or args.text_plan or args.keep_media or args.preserve_guidance:
+                raise ValueError(
+                    "--inspect-text cannot be combined with output or sanitization options"
+                )
+            report = inspect_document(args.source, args.rhwp_bin)
+        else:
+            report = copy_layout(
+                args.source,
+                args.output,
+                set(args.keep_media),
+                args.rhwp_bin,
+                args.preserve_guidance,
+                args.text_plan,
+            )
     except (FileExistsError, OSError, ValueError, zipfile.BadZipFile) as exc:
         print(f"copy-layout: {exc}", file=sys.stderr)
         return 1

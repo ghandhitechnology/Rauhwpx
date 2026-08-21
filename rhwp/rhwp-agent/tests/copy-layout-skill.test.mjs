@@ -16,8 +16,8 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
 
   assert.equal(parsed.name, 'copy-layout');
   assert.match(parsed.description, /HWP or HWPX/);
-  assert.match(parsed.description, /content-free/);
-  assert.match(parsed.description, /guidance-preserving template/);
+  assert.match(parsed.description, /titles, labels, headers, instructions/);
+  assert.match(parsed.description, /user-added content/);
   assert.match(markdown, /scripts\/copy_layout\.py/);
   assert.match(markdown, /<source stem> - Layout\.hwp/);
   assert.match(markdown, /native HWP→HWPX→HWP pipeline/);
@@ -32,8 +32,11 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(markdown, /intermediate page-count mismatch is diagnostic/);
   assert.match(markdown, /not evidence that the wrong document is open/);
   assert.match(markdown, /--preserve-guidance/);
-  assert.match(markdown, /competition brief, assignment sheet/);
-  assert.match(markdown, /records every retained paragraph in `preserved_guidance`/);
+  assert.match(markdown, /--inspect-text/);
+  assert.match(markdown, /--text-plan/);
+  assert.match(markdown, /"default": "keep"/);
+  assert.match(markdown, /`text_decisions`/);
+  assert.match(markdown, /preserve-by-default rule is intentional/);
 });
 
 test('copy-layout helper retains its privacy and geometry verification gates', () => {
@@ -52,6 +55,9 @@ test('copy-layout helper retains its privacy and geometry verification gates', (
   assert.match(script, /fallback_reason/);
   assert.match(script, /--rhwp-bin/);
   assert.match(script, /--preserve-guidance/);
+  assert.match(script, /--inspect-text/);
+  assert.match(script, /--text-plan/);
+  assert.match(script, /source_sha256/);
   assert.match(script, /visible text differs from approved guidance/);
 });
 
@@ -65,6 +71,6 @@ test('copy-layout helper runs without site packages and defers only an intermedi
   assert.equal(availability.status, 0, availability.stderr || availability.stdout);
   const result = spawnSync(python, ['-S', fileURLToPath(helperTestUrl)], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stderr, /Ran 7 tests/);
+  assert.match(result.stderr, /Ran 12 tests/);
   assert.match(result.stderr, /OK/);
 });

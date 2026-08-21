@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import tempfile
 import unittest
 import zipfile
@@ -41,7 +42,7 @@ class CopyLayoutHelperTests(unittest.TestCase):
             "제가 작성한 완성 답안입니다.",
         )
 
-        stats, guidance, approved = copy_layout.sanitize_document_tree(
+        stats, guidance, approved, _, _ = copy_layout.sanitize_document_tree(
             tree,
             "Contents/section0.xml",
             set(),
@@ -62,7 +63,7 @@ class CopyLayoutHelperTests(unittest.TestCase):
             [text for _, text in approved],
             guidance,
         )
-        self.assertEqual(stats["guidance_text_nodes_preserved"], 4)
+        self.assertEqual(stats["approved_text_nodes_preserved"], 4)
         self.assertEqual(stats["text_nodes_cleared"], 3)
         self.assertEqual(
             [
@@ -76,7 +77,7 @@ class CopyLayoutHelperTests(unittest.TestCase):
     def test_strict_mode_removes_guidance_text_too(self):
         tree = self.document_tree("제출 형식", "PDF 파일로 제출하세요.")
 
-        stats, guidance, approved = copy_layout.sanitize_document_tree(
+        stats, guidance, approved, _, _ = copy_layout.sanitize_document_tree(
             tree,
             "Contents/section0.xml",
             set(),
@@ -133,6 +134,66 @@ class CopyLayoutHelperTests(unittest.TestCase):
             self.assertEqual(report["verification"]["title"], "assignment - Layout")
             self.assertTrue(output.is_file())
 
+    def test_inspection_plan_is_source_bound_and_applied_end_to_end(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "expense.hwpx"
+            output = root / "expense-layout.hwpx"
+            plan_path = root / "decisions.json"
+            content = (
+                '<package xmlns="http://www.idpf.org/2007/opf/">'
+                "<metadata><title>Original</title></metadata><manifest/><spine/>"
+                "</package>"
+            ).encode()
+            section = (
+                "<section>"
+                "<p><run><t>지출결의서</t></run></p>"
+                "<p><run><t>지출금액 100,000원</t></run></p>"
+                "<p><run><t>홍길동</t></run></p>"
+                "</section>"
+            ).encode()
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr(
+                    "mimetype",
+                    b"application/hwp+zip",
+                    compress_type=zipfile.ZIP_STORED,
+                )
+                archive.writestr("Contents/content.hpf", content)
+                archive.writestr("Contents/section0.xml", section)
+
+            inventory = copy_layout.inspect_hwpx(source)
+            self.assertEqual(inventory["paragraph_count"], 3)
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "source_sha256": inventory["source_sha256"],
+                        "default": "keep",
+                        "keep": [],
+                        "remove": ["Contents/section0.xml#p0002"],
+                        "replace": {
+                            "Contents/section0.xml#p0001": "지출금액",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = copy_layout.copy_layout(
+                source,
+                output,
+                set(),
+                text_plan_path=plan_path,
+            )
+
+            self.assertEqual(report["text_decisions"]["kept_count"], 2)
+            self.assertEqual(report["text_decisions"]["removed_count"], 1)
+            self.assertEqual(report["text_decisions"]["replacement_count"], 1)
+            self.assertEqual(
+                [item["text"] for item in report["text_decisions"]["kept"]],
+                ["지출결의서", "지출금액"],
+            )
+            self.assertEqual(report["verification"]["visible_text_nodes"], 2)
+
     def test_parser_accepts_source_prefix_reserved_by_elementtree(self):
         source = b'<ns1:root xmlns:ns1="urn:copy-layout"><ns1:item /></ns1:root>'
 
@@ -152,6 +213,146 @@ class CopyLayoutHelperTests(unittest.TestCase):
                 b'<!DOCTYPE root [<!ENTITY secret "private">]><root>&secret;</root>',
                 "unsafe.xml",
             )
+
+    def test_parser_drops_nonsemantic_xml_control_bytes(self):
+        tree = copy_layout.parse_xml(b"<root><a/>\x01<b/></root>", "control.xml")
+
+        self.assertEqual(
+            [copy_layout.local_name(element.tag) for element in tree.getroot()],
+            ["a", "b"],
+        )
+
+    def test_source_bound_text_plan_keeps_labels_and_removes_entered_values(self):
+        tree = self.document_tree("복학원서", "성명: 홍길동", "완성 답변")
+        second_text = [
+            element for element in tree.iter()
+            if copy_layout.local_name(element.tag) == "t"
+        ][1]
+        line_break = copy_layout.etree.SubElement(second_text, "lineBreak")
+        line_break.tail = " 추가값"
+        plan = {
+            "source_sha256": "unused-by-tree-unit-test",
+            "default": "remove",
+            "keep": {"Contents/section0.xml#p0000"},
+            "remove": {"Contents/section0.xml#p0002"},
+            "replace": {"Contents/section0.xml#p0001": "성명:"},
+        }
+
+        stats, guidance, approved, kept, removed = copy_layout.sanitize_document_tree(
+            tree,
+            "Contents/section0.xml",
+            set(),
+            preserve_flow=False,
+            preserve_guidance=False,
+            text_plan=plan,
+        )
+
+        self.assertEqual(guidance, [])
+        self.assertEqual([text for _, text in approved], ["복학원서", "성명:"])
+        self.assertEqual([item["text"] for item in kept], ["복학원서", "성명:"])
+        self.assertEqual(kept[1]["source_text"], "성명: 홍길동 추가값")
+        self.assertEqual([item["text"] for item in removed], ["완성 답변"])
+        self.assertEqual(stats["approved_text_nodes_preserved"], 2)
+        self.assertEqual(stats["text_nodes_cleared"], 1)
+        self.assertTrue(
+            any(copy_layout.local_name(element.tag) == "lineBreak" for element in tree.iter())
+        )
+
+    def test_colored_diagonal_cell_marks_are_inspected_and_cleared_explicitly(self):
+        header = copy_layout.etree.fromstring(
+            b'<header><borderFill id="9" centerLine="VERTICAL">'
+            b'<slash type="NONE" Crooked="1" isCounter="0"/>'
+            b'<backSlash type="NONE" Crooked="0" isCounter="0"/>'
+            b'<diagonal type="SOLID" width="2.0 mm" color="#FF0000"/>'
+            b'<fillBrush><winBrush faceColor="#0000FF" hatchColor="#999999" alpha="0"/>'
+            b'</fillBrush>'
+            b'</borderFill></header>'
+        )
+        section = copy_layout.etree.fromstring(
+            b'<section><tbl><tr><tc borderFillIDRef="9">'
+            b'<cellAddr colAddr="2" rowAddr="3"/><p/>'
+            b'</tc></tr></tbl></section>'
+        )
+        trees = {
+            "Contents/header.xml": copy_layout.etree.ElementTree(header),
+            "Contents/section0.xml": copy_layout.etree.ElementTree(section),
+        }
+
+        marks = copy_layout.border_fill_mark_inventory(trees)
+        cleared = copy_layout.clear_border_fill_marks(trees, {"9"})
+
+        self.assertEqual([mark["id"] for mark in marks], ["9", "9"])
+        self.assertEqual(
+            [mark["kind"] for mark in marks],
+            ["diagonal-border-mark", "empty-cell-fill-mark"],
+        )
+        self.assertEqual(marks[0]["uses"][0]["cell_address"], {"colAddr": "2", "rowAddr": "3"})
+        self.assertEqual([item["id"] for item in cleared], ["9"])
+        diagonal = next(child for child in header[0] if copy_layout.local_name(child.tag) == "diagonal")
+        slash = next(child for child in header[0] if copy_layout.local_name(child.tag) == "slash")
+        win_brush = next(
+            element for element in header[0].iter()
+            if copy_layout.local_name(element.tag) == "winBrush"
+        )
+        self.assertEqual(diagonal.attrib, {"type": "SOLID", "width": "0.1 mm", "color": "#000000"})
+        self.assertEqual(slash.get("Crooked"), "0")
+        self.assertEqual(header[0].get("centerLine"), "NONE")
+        self.assertEqual(win_brush.get("faceColor"), "#FFFFFF")
+
+    def test_semantic_plan_preserves_fillable_fields_and_control_identity(self):
+        root = copy_layout.etree.fromstring(
+            b'<section><p><run>'
+            b'<fieldBegin id="1" type="CLICK_HERE" name="recipient" editable="1">'
+            b'<parameters><stringParam name="Command">placeholder</stringParam></parameters>'
+            b'</fieldBegin>'
+            b'<t>Recipient</t><fieldEnd id="1"/>'
+            b'<checkBtn name="CheckBox1" caption="Option" value="CHECKED"/>'
+            b'</run></p></section>'
+        )
+        tree = copy_layout.etree.ElementTree(root)
+        plan = {
+            "source_sha256": "unused-by-tree-unit-test",
+            "default": "keep",
+            "keep": set(),
+            "remove": set(),
+            "replace": {},
+        }
+
+        stats, _, _, _, _ = copy_layout.sanitize_document_tree(
+            tree,
+            "Contents/section0.xml",
+            set(),
+            preserve_flow=False,
+            preserve_guidance=False,
+            text_plan=plan,
+        )
+        controls = copy_layout.form_control_inventory_from_trees(
+            {"Contents/section0.xml": tree}
+        )
+        reset = copy_layout.reset_form_controls(
+            {"Contents/section0.xml": tree},
+            {"Contents/section0.xml#control0000"},
+        )
+
+        field_begin = next(
+            element for element in root.iter()
+            if copy_layout.local_name(element.tag) == "fieldBegin"
+        )
+        check_box = next(
+            element for element in root.iter()
+            if copy_layout.local_name(element.tag) == "checkBtn"
+        )
+        command = next(
+            element for element in root.iter()
+            if copy_layout.local_name(element.tag) == "stringParam"
+        )
+        self.assertEqual(stats["field_markers_preserved"], 2)
+        self.assertEqual(field_begin.get("name"), "recipient")
+        self.assertEqual(command.get("name"), "Command")
+        self.assertEqual(controls[0]["name"], "CheckBox1")
+        self.assertEqual(reset[0]["value"], "CHECKED")
+        self.assertEqual(check_box.get("name"), "CheckBox1")
+        self.assertEqual(check_box.get("value"), "UNCHECKED")
 
     def test_page_mismatch_is_deferred_to_final_output_verification(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
