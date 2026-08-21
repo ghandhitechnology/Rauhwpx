@@ -32,7 +32,7 @@ import {
 } from './agent-hub.mjs';
 import { DocumentLeaseManager } from './document-leases.mjs';
 import { launchRequest } from './launch-routing.mjs';
-import { NativeFileHandleRegistry } from './native-file-handles.mjs';
+import { NativeFileHandleRegistry, validateNativeDocumentBytes } from './native-file-handles.mjs';
 import { SessionManager } from './session-manager.mjs';
 import {
   STUDIO_URL,
@@ -354,7 +354,7 @@ function cascadedWindowPosition() {
   return { x: bounds.x + 28, y: bounds.y + 28 };
 }
 
-async function createWindow(launch = launchRequest()) {
+async function createWindow(launch = launchRequest(), { generatedDocument = null } = {}) {
   await hubOwner.ensure();
   const closeHubContext = hubOwner.context();
   if (!closeHubContext) throw new Error('Agent hub context is unavailable');
@@ -381,6 +381,9 @@ async function createWindow(launch = launchRequest()) {
     },
   });
   const session = sessions.addWindow(window, { source: launch.source, openFiles: [] });
+  session.generatedDocument = generatedDocument
+    ? { launchDocumentId: randomUUID(), ...generatedDocument }
+    : null;
   session.allowCloseOnce = false;
   session.pendingCloseRequestId = null;
   window.on('close', (event) => {
@@ -458,6 +461,9 @@ async function createWindow(launch = launchRequest()) {
     if (launchFiles.length > 0 && !window.isDestroyed()) {
       window.webContents.send('desktop:open-files', launchFiles);
     }
+    if (session.generatedDocument && !window.isDestroyed()) {
+      window.webContents.send('desktop:open-generated-document', session.generatedDocument);
+    }
   });
   window.once('ready-to-show', () => {
     if (!window.isDestroyed()) window.show();
@@ -501,6 +507,30 @@ ipcMain.handle('desktop:get-session-context', (event) => {
 ipcMain.handle('desktop:get-launch-files', (event) => {
   const session = sessionForEvent(event);
   return nativeFiles.descriptorsForSession(session.sessionId);
+});
+ipcMain.handle('desktop:get-launch-generated-document', (event) => {
+  const session = sessionForEvent(event);
+  return session.generatedDocument;
+});
+ipcMain.handle('desktop:open-generated-document-window', async (event, payload = {}) => {
+  sessionForEvent(event);
+  const fileName = basename(String(payload?.fileName ?? ''));
+  const extension = extname(fileName).toLowerCase();
+  if (!fileName || !['.hwp', '.hwpx'].includes(extension) || fileName.includes('\0')) {
+    throw new Error('Generated document must have a safe HWP or HWPX filename');
+  }
+  const bytes = payload?.bytes instanceof Uint8Array
+    ? new Uint8Array(payload.bytes)
+    : null;
+  if (!bytes || bytes.byteLength === 0 || bytes.byteLength > 64 * 1024 * 1024) {
+    throw new Error('Generated document bytes are empty or exceed the 64 MiB limit');
+  }
+  validateNativeDocumentBytes(fileName, bytes);
+  const opened = await createWindow(
+    launchRequest({ source: 'chat-artifact' }),
+    { generatedDocument: { fileName, bytes } },
+  );
+  return Boolean(opened);
 });
 ipcMain.handle('desktop:pick-native-open-file', async (event, options = {}) => {
   const session = sessionForEvent(event);

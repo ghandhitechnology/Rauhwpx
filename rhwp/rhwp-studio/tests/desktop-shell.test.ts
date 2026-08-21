@@ -108,6 +108,8 @@ test('desktop close and native-file IPC contracts stay sender-owned', () => {
   assert.match(desktopMain, /closeHubSession\(\{[\s\S]*?port: hub\.port,[\s\S]*?token: hubToken,[\s\S]*?launchId,[\s\S]*?sessionId: session\.sessionId/);
   for (const channel of [
     'desktop:pick-native-open-file',
+    'desktop:open-generated-document-window',
+    'desktop:get-launch-generated-document',
     'desktop:claim-native-dropped-file',
     'desktop:pick-native-save-file',
     'desktop:release-native-file',

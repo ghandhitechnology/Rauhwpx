@@ -78,6 +78,7 @@ import {
   getRendererSessionContext,
   installDesktopCloseHandling,
   installDesktopFileHandling,
+  installDesktopGeneratedDocumentHandling,
   installDesktopWindowChrome,
   installWebAppShell,
   pickDesktopNativeOpenFile,
@@ -576,6 +577,9 @@ async function initialize(): Promise<void> {
           await handle.releaseUnusedSaveTarget?.().catch(() => {});
           if (!(error instanceof DocumentOwnedElsewhereError)) showLoadError(error);
         });
+    });
+    installDesktopGeneratedDocumentHandling(({ bytes, fileName }) => {
+      eventBus.emit('open-document-bytes', { bytes, fileName });
     });
     void loadFromUrlParam();
     void offerAutosaveRecoveryIfIdle();

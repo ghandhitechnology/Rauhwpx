@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -224,10 +224,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   // Browser documents have no native source path. Studio exports the live bytes,
   // the hub materializes them in alpha's isolated workspace, and the generated
   // result can be published as an authenticated download without leaking to beta.
-  const snapshotBytes = Buffer.concat([
-    Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
-    Buffer.from('snapshot-layout'),
-  ]);
+  const snapshotBytes = readFileSync(new URL('../../saved/blank2010.hwp', import.meta.url));
   const snapshotRequest = waitForMessage(alpha, (msg) => (
     msg.type === 'tool-request' && msg.tool === 'materialize_document_snapshot'
   ));
@@ -257,9 +254,12 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   });
   const published = (await publishResult).result;
   assert.equal(published.fileName, '보고서 - Layout.hwp');
-  const artifactDownload = await fetch(published.downloadUrl);
+  const artifactDownload = await fetch(published.downloadUrl, {
+    headers: { Origin: studioOrigin },
+  });
   assert.equal(artifactDownload.status, 200);
   assert.match(artifactDownload.headers.get('content-disposition') ?? '', /attachment/);
+  assert.equal(artifactDownload.headers.get('access-control-allow-origin'), studioOrigin);
   assert.deepEqual(Buffer.from(await artifactDownload.arrayBuffer()), snapshotBytes);
 
   const crossSessionArtifactUrl = new URL(published.downloadUrl);

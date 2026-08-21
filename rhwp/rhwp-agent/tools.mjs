@@ -899,7 +899,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'publish_artifact',
-    description: 'Publish a generated HWP/HWPX file from this chat\'s isolated workspace as a user-downloadable local artifact. Call this after a file-producing workflow succeeds, then give the returned downloadUrl to the user as a Markdown link. Paths outside the chat workspace, links, format-mismatched files, and files over 64 MiB are rejected.',
+    description: 'Publish a generated HWP/HWPX file from this chat\'s isolated workspace as an immutable, user-downloadable local artifact. Call this after a file-producing workflow succeeds, then give the returned downloadUrl to the user as a Markdown link; Studio turns that link into Open-in-new-window and Download actions. Paths outside the chat workspace, links, malformed or non-conforming packages, format-mismatched files, and files over 64 MiB are rejected.',
     shape: {
       filePath: z.string().min(1).max(4_000).describe('Absolute path of the generated HWP/HWPX inside this chat workspace'),
       fileName: z.string().min(1).max(255).optional().describe('Optional user-facing download name; directory components are discarded'),

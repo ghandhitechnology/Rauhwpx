@@ -3209,6 +3209,34 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   outline-offset: 2px;
 }
 
+.ag-md-artifact-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--ag-accent) 36%, var(--ag-border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ag-accent) 8%, transparent);
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.ag-md-artifact-open::before { content: '\2197'; }
+
+.ag-md-artifact-open[aria-busy='true'] { opacity: 0.6; }
+
+.ag-md-artifact-open.ag-failed {
+  border-color: var(--ag-danger, #dc2626);
+}
+
+.ag-md-artifact-download {
+  margin-left: 7px;
+  color: var(--ag-text-muted);
+  font-size: 0.88em;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 /* 코드도 별도 캡슐을 만들지 않는다. 글꼴과 한 줄의 레일만으로 구분한다. */
 .ag-md-code {
   padding: 0;

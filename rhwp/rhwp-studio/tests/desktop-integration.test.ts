@@ -7,8 +7,11 @@ import {
   captureDesktopNativeDroppedFile,
   ensureDesktopAgentHub,
   getNativeFileSourcePath,
+  installDesktopGeneratedDocumentHandling,
   installWebAppShell,
   isDesktopApp,
+  openPublishedDocumentInNewWindow,
+  parsePublishedDocumentLink,
   pickDesktopNativeOpenFile,
   pickDesktopNativeSaveFile,
   rememberNativeDocument,
@@ -71,6 +74,69 @@ test('dev ensure path asks Vite to start a missing hub', async () => {
   });
   assert.equal(ready, true);
   assert.equal(calls, 1);
+});
+
+test('published artifact links open through a fresh editor window on desktop', async () => {
+  const href = 'http://127.0.0.1:5175/artifacts/artifact_token_1234567890/%EB%B3%B4%EA%B3%A0%EC%84%9C.hwp?sessionId=a&token=b';
+  const artifact = parsePublishedDocumentLink(href);
+  assert.deepEqual(artifact, { downloadUrl: href, fileName: '보고서.hwp' });
+  assert.equal(parsePublishedDocumentLink('https://example.com/artifacts/artifact_token_1234567890/a.hwp'), null);
+  assert.equal(parsePublishedDocumentLink('javascript:alert(1)'), null);
+
+  const opened: Array<{ fileName: string; bytes: Uint8Array }> = [];
+  const bytes = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+  await openPublishedDocumentInNewWindow(artifact!, {
+    rhwpDesktop: {
+      openGeneratedDocumentWindow: async (payload) => {
+        opened.push(payload);
+        return true;
+      },
+    },
+  }, async () => new Response(bytes, {
+    status: 200,
+    headers: { 'content-type': 'application/x-hwp', 'content-length': String(bytes.length) },
+  }));
+  assert.equal(opened[0]?.fileName, '보고서.hwp');
+  assert.deepEqual(opened[0]?.bytes, bytes);
+});
+
+test('browser artifact links open another Studio page with an authenticated source URL', async () => {
+  const artifact = parsePublishedDocumentLink(
+    'http://localhost:5175/artifacts/artifact_token_1234567890/report.hwpx?sessionId=a&token=b',
+  );
+  const opened: string[] = [];
+  await openPublishedDocumentInNewWindow(artifact!, {
+    location: { href: 'http://localhost:7700/editor?old=1#page' },
+    open: (url: string) => { opened.push(String(url)); },
+  } as any);
+  const target = new URL(opened[0]!);
+  assert.equal(target.origin + target.pathname, 'http://localhost:7700/editor');
+  assert.equal(target.searchParams.get('url'), artifact?.downloadUrl);
+  assert.equal(target.searchParams.get('filename'), 'report.hwpx');
+});
+
+test('generated-document startup fallback and event delivery open only once', async () => {
+  const payload = {
+    launchDocumentId: 'launch-document-1',
+    fileName: 'report.hwpx',
+    bytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
+  };
+  let listener: ((value: typeof payload) => void) | undefined;
+  const opened: string[] = [];
+  const installed = installDesktopGeneratedDocumentHandling(
+    ({ fileName }) => opened.push(fileName),
+    {
+      rhwpDesktop: {
+        onOpenGeneratedDocument: (callback) => { listener = callback; },
+        getLaunchGeneratedDocument: async () => payload,
+      },
+    },
+  );
+  assert.equal(installed, true);
+  listener?.(payload);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(opened, ['report.hwpx']);
 });
 
 test('Electron Save As returns a temporary opaque handle and releases failed targets', async () => {

@@ -11,6 +11,7 @@ import type {
   FileSystemWritableFileStreamLike,
   SaveFilePickerOptionsLike,
 } from './command/file-system-access.ts';
+import { detectDocumentByteKind } from './core/document-signature.ts';
 
 export const DEV_AGENT_HUB_ENSURE_PATH = '/__rhwp/ensure-agent-hub';
 
@@ -43,6 +44,15 @@ export interface RhwpDesktopApi {
   ensureAgentHub?: () => Promise<{ started?: boolean; ready?: boolean } | boolean>;
   getSessionContext?: () => Promise<RendererSessionContext>;
   getLaunchFiles?: () => Promise<NativeFileHandleDescriptor[]>;
+  getLaunchGeneratedDocument?: () => Promise<{
+    launchDocumentId: string;
+    fileName: string;
+    bytes: Uint8Array;
+  } | null>;
+  openGeneratedDocumentWindow?: (payload: {
+    fileName: string;
+    bytes: Uint8Array;
+  }) => Promise<boolean>;
   pickNativeOpenFile?: (options?: {
     suggestedName?: string;
     documentId?: string;
@@ -100,6 +110,11 @@ export interface RhwpDesktopApi {
   isFullScreen?: () => Promise<boolean>;
   onFullScreenChange?: (callback: (fullscreen: boolean) => void) => void;
   onOpenFiles?: (callback: (files: NativeFileHandleDescriptor[]) => void) => void;
+  onOpenGeneratedDocument?: (callback: (payload: {
+    launchDocumentId: string;
+    fileName: string;
+    bytes: Uint8Array;
+  }) => void) => void;
 }
 
 export interface DesktopHost {
@@ -110,6 +125,78 @@ export interface DesktopHost {
       addEventListener: (type: string, listener: () => void) => void;
     };
   };
+}
+
+const MAX_PUBLISHED_DOCUMENT_BYTES = 64 * 1024 * 1024;
+
+export interface PublishedDocumentLink {
+  readonly downloadUrl: string;
+  readonly fileName: string;
+}
+
+/** Only hub-issued localhost artifact URLs become in-app document actions. */
+export function parsePublishedDocumentLink(raw: string): PublishedDocumentLink | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost' && url.hostname !== '[::1]') return null;
+  const match = url.pathname.match(/^\/artifacts\/[A-Za-z0-9_-]{16,128}\/([^/]+)$/u);
+  if (!match) return null;
+  let fileName;
+  try {
+    fileName = decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+  if (!/\.(?:hwp|hwpx)$/iu.test(fileName) || fileName.includes('\0')) return null;
+  return { downloadUrl: url.href, fileName };
+}
+
+export async function openPublishedDocumentInNewWindow(
+  artifact: PublishedDocumentLink,
+  win?: DesktopHost,
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<void> {
+  const host = desktopHost(win);
+  const openNative = host?.rhwpDesktop?.openGeneratedDocumentWindow;
+  if (openNative) {
+    const response = await fetchImpl(artifact.downloadUrl, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`문서를 가져오지 못했습니다 (HTTP ${response.status}).`);
+    const declaredLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_PUBLISHED_DOCUMENT_BYTES) {
+      throw new Error('문서가 64 MiB 열기 한도를 초과합니다.');
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_PUBLISHED_DOCUMENT_BYTES) {
+      throw new Error('문서가 비어 있거나 64 MiB 열기 한도를 초과합니다.');
+    }
+    const expectedKind = artifact.fileName.toLowerCase().endsWith('.hwpx') ? 'hwpx' : 'hwp';
+    if (detectDocumentByteKind(bytes, response.headers.get('content-type')) !== expectedKind) {
+      throw new Error('다운로드된 문서의 형식과 파일 확장자가 일치하지 않습니다.');
+    }
+    if (!await openNative({ fileName: artifact.fileName, bytes })) {
+      throw new Error('새 문서 창을 열지 못했습니다.');
+    }
+    return;
+  }
+
+  const browserWindow = (win ?? globalThis) as DesktopHost & {
+    location?: { href: string };
+    open?: (url?: string | URL, target?: string, features?: string) => unknown;
+  };
+  if (!browserWindow.location?.href || !browserWindow.open) {
+    throw new Error('새 문서 창을 열 수 없습니다.');
+  }
+  const editorUrl = new URL(browserWindow.location.href);
+  editorUrl.search = '';
+  editorUrl.hash = '';
+  editorUrl.searchParams.set('url', artifact.downloadUrl);
+  editorUrl.searchParams.set('filename', artifact.fileName);
+  browserWindow.open(editorUrl.href, '_blank', 'noopener');
 }
 
 let inflight: Promise<boolean> | null = null;
@@ -618,6 +705,30 @@ export function installDesktopFileHandling(
   void api.getLaunchFiles?.().then(receive).catch((error) => {
     console.warn('[rhwp-desktop] 시작 파일 조회 실패:', error);
   });
+}
+
+export function installDesktopGeneratedDocumentHandling(
+  openDocument: (payload: { bytes: Uint8Array; fileName: string }) => void,
+  win?: DesktopHost,
+) {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.onOpenGeneratedDocument) return false;
+  const seen = new Set<string>();
+  const receive = (payload: { launchDocumentId?: string; bytes?: Uint8Array; fileName?: string } | null) => {
+    const launchDocumentId = typeof payload?.launchDocumentId === 'string'
+      ? payload.launchDocumentId
+      : '';
+    const fileName = typeof payload?.fileName === 'string' ? payload.fileName : '';
+    const bytes = payload?.bytes instanceof Uint8Array ? payload.bytes : null;
+    if (!launchDocumentId || seen.has(launchDocumentId) || !bytes || !/\.(?:hwp|hwpx)$/iu.test(fileName)) return;
+    seen.add(launchDocumentId);
+    openDocument({ bytes, fileName });
+  };
+  api.onOpenGeneratedDocument(receive);
+  void api.getLaunchGeneratedDocument?.().then(receive).catch((error) => {
+    console.warn('[rhwp-desktop] 생성 문서 시작 데이터 조회 실패:', error);
+  });
+  return true;
 }
 
 /**

@@ -320,8 +320,11 @@ requests that reject local/private/reserved targets on every hop, with no
 product-level file-count cap.
 
 `publish_artifact` accepts only regular HWP/HWPX files whose canonical path is
-inside the current chat workspace. It rejects links, format mismatches, and
-files over 64 MiB, then returns a session-authenticated localhost download URL.
+inside the current chat workspace. It rejects links, format mismatches,
+malformed/non-conforming HWPX packages, and files over 64 MiB. Publication
+captures immutable bytes so later workspace edits cannot corrupt a download,
+then returns a session-authenticated localhost URL. Studio renders that URL as
+separate Open-in-new-window and Download actions.
 The copy-layout skill uses this with `materialize_document_snapshot`, so browser
 documents no longer need an OS path and snapshot-backed results remain directly
 downloadable from chat.

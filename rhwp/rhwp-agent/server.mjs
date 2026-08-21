@@ -2134,6 +2134,11 @@ const httpServer = http.createServer((req, res) => {
   void Promise.resolve().then(async () => {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${hubPort || REQUESTED_PORT || 5175}`);
     if (req.method === 'GET' && url.pathname.startsWith('/artifacts/')) {
+      const origin = typeof req.headers.origin === 'string' ? req.headers.origin : null;
+      if (origin && !isAllowedStudioOrigin(origin)) {
+        sendHttpJson(res, 403, { status: 'forbidden' });
+        return;
+      }
       const sessionId = authenticateHttpSession(req, url);
       const record = sessions.get(sessionId);
       if (!record) {
@@ -2150,13 +2155,19 @@ const httpServer = http.createServer((req, res) => {
         sendHttpJson(res, 404, { status: 'not-found' });
         return;
       }
-      const fallbackName = encodeURIComponent(artifact.fileName).replaceAll('%20', ' ');
+      const encodedName = encodeURIComponent(artifact.fileName).replaceAll('%20', ' ');
+      const asciiName = artifact.fileName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
       res.writeHead(200, {
         'content-type': artifact.mime,
         'content-length': artifact.bytes.length,
-        'content-disposition': `attachment; filename*=UTF-8''${fallbackName}`,
+        'content-disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodedName}`,
         'cache-control': 'no-store, private',
         'x-content-type-options': 'nosniff',
+        ...(origin ? {
+          'access-control-allow-origin': origin,
+          'access-control-expose-headers': 'Content-Disposition, Content-Length',
+          vary: 'Origin',
+        } : {}),
       });
       res.end(artifact.bytes);
       return;
