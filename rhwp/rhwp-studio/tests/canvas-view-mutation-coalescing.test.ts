@@ -42,10 +42,12 @@ test('오버레이/pending 편집도 버스트를 합친다', () => {
   // 오버레이 렌더는 rAF 로 합쳐진다 (setOps 포함).
   assert.match(overlaySrc, /private scheduleRender\(\): void/);
   assert.match(overlaySrc, /this\.renderRafId = requestAnimationFrame\(/);
-  // 벌크 교체(replace_all)는 항목마다가 아니라 배치 끝에 한 번만 조판/이벤트/오버레이를 수행한다.
+  // 다중 op 배치(replace_all/apply_edits/apply_list)는 항목마다가 아니라 배치 끝에
+  // 한 번만 조판/이벤트/오버레이를 수행한다. (클론 횟수·복원 충실도 계약은
+  // agent-pending-replace.test.ts 의 runAtomicBatch 동작 테스트가 지킨다.)
   assert.match(pendingSrc, /private beginBulk\(\): void/);
   assert.match(pendingSrc, /private endBulk\(\): void/);
-  assert.match(pendingSrc, /this\.beginBulk\(\);\s*\n\s*try \{\s*\n\s*let changeSetId = ''/);
+  assert.match(pendingSrc, /runAtomicBatch<T>\(fn: \(\) => T\): T/);
   // 타자기 공개는 페이지 좌표 rect 를 캐시하고 문서 변이에서만 무효화한다.
   assert.match(revealSrc, /cachedRects: SelectionRect\[\] \| null/);
   assert.match(revealSrc, /item\.cachedRects = null/);

@@ -929,3 +929,72 @@ test('replaceTextBatch 실패: 롤백 후에도 이벤트는 한 번만 발행�
   assert.equal(fake.text(0), 'yfoo bar');
   assert.equal(docChanged, 2);
 });
+
+test('runAtomicBatch: per-op 스냅샷을 생략해 배치 전체에 문서 클론이 한 번이다', () => {
+  const { mgr, fake } = makeManager([paraOf('foo bar foo baz foo')]);
+  let saves = 0;
+  const wasmAny = fake.wasm as { saveSnapshot: () => number };
+  const origSave = wasmAny.saveSnapshot.bind(wasmAny);
+  wasmAny.saveSnapshot = () => { saves++; return origSave(); };
+
+  const mk = (s: number, e: number): DocRange => ({
+    sectionIdx: 0, startParaIdx: 0, startCharOffset: s, endParaIdx: 0, endCharOffset: e,
+  });
+  mgr.replaceTextBatch([
+    { range: mk(16, 19), text: 'X' },
+    { range: mk(8, 11), text: 'X' },
+    { range: mk(0, 3), text: 'X' },
+  ], 'claude');
+
+  assert.equal(fake.text(0), 'X bar X baz X');
+  assert.equal(saves, 1, '배치 외부 스냅샷 하나만 — 항목별 클론 없음');
+  assert.equal(fake.snapshotCount(), 0, '성공한 배치는 스냅샷을 남기지 않는다 (역연산 폴백 되돌림)');
+});
+
+test('runAtomicBatch: 임의 연산 조합(삽입+교체)의 중간 실패가 통째로 롤백된다', () => {
+  const { mgr, fake } = makeManager([paraOf('foo bar')]);
+  const mk = (s: number, e: number): DocRange => ({
+    sectionIdx: 0, startParaIdx: 0, startCharOffset: s, endParaIdx: 0, endCharOffset: e,
+  });
+  assert.throws(() => mgr.runAtomicBatch(() => {
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'pre ');
+    mgr.replaceText(mk(4, 7), 'BAR', 'claude');
+    throw new Error('세 번째 연산 실패 가정');
+  }));
+  assert.equal(fake.text(0), 'foo bar', '문서가 배치 이전으로 복원된다');
+  assert.equal(mgr.hasPending(), false, '배치가 만든 pending op 도 남지 않는다');
+  assert.equal(fake.snapshotCount(), 0, '스냅샷 누수 없음');
+
+  // 롤백 후 정상 동작
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'y');
+  assert.equal(fake.text(0), 'yfoo bar');
+});
+
+test('runAtomicBatch(apply_edits 경로): 혼합 서식 교체의 reject 복원이 단독 호출과 동일하게 정확하다', () => {
+  // "hello " + "wor"(5) + "ld"(9) — 혼합 서식. 배치 안에서도 per-op 보존 스냅샷이
+  // 유지되어 역연산 폴백(시작 서식 단일 근사)으로 격하되지 않아야 한다.
+  const head = paraOf('hello ');
+  const mid = paraOf('wor', 5);
+  const tail = paraOf('ld', 9);
+  const merged: FakePara = {
+    chars: [...head.chars, ...mid.chars, ...tail.chars],
+    shapes: [...head.shapes, ...mid.shapes, ...tail.shapes],
+    paraShapeId: 1,
+    pageBreakBefore: false,
+  };
+  const { mgr, fake } = makeManager([merged]);
+  let changeSetId = '';
+  mgr.runAtomicBatch(() => {
+    changeSetId = mgr.replaceText(
+      { sectionIdx: 0, startParaIdx: 0, startCharOffset: 6, endParaIdx: 0, endCharOffset: 11 },
+      'XYZ',
+      'claude',
+    ).changeSetId;
+  });
+  assert.equal(fake.text(0), 'hello XYZ');
+  mgr.reject(changeSetId);
+  assert.equal(fake.text(0), 'hello world');
+  assert.deepEqual(fake.shapes(0), [0, 0, 0, 0, 0, 0, 5, 5, 5, 9, 9]); // 스냅샷 복원 — 혼합 서식 그대로
+  assert.equal(mgr.hasPending(), false);
+  assert.equal(fake.snapshotCount(), 0, '거절 후 스냅샷 누수 없음');
+});

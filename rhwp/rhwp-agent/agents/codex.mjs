@@ -14,6 +14,7 @@ import {
   truncate,
   validateExecutionMode,
 } from './backend.mjs';
+import { createCodexRolloutWatcher } from './codex-rollout-watcher.mjs';
 import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
@@ -108,7 +109,10 @@ export function buildCodexArgv(opts, threadId) {
     '--json', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules',
     '--disable', 'apps', '--disable', 'browser_use', '--disable', 'computer_use',
     '--disable', 'image_generation',
-    ...(opts.workflow === 'plan' ? ['--enable', 'multi_agent'] : ['--disable', 'multi_agent']),
+    // 네이티브 서브에이전트는 항상 켠다. `--disable multi_agent` 는 0.147.0 에서
+    // 실제로 스폰을 막지 못하므로(프로브 확인) 토글할 이유가 없고, 명시적으로 켜 두면
+    // exec 와 exec resume 이 같은 능력으로 돈다.
+    '--enable', 'multi_agent',
     '--disable', 'plugins',
     '--disable', 'skill_search',
     '-m', opts.model ?? DEFAULT_CODEX_MODEL, ...cfg,
@@ -149,6 +153,7 @@ export function formatCodexExitError(stderrText, code, signal, token) {
 export function createCodexSession(opts, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
+  createRolloutWatcher = createCodexRolloutWatcher,
 } = {}) {
   const onEvent = opts.onEvent;
 
@@ -164,6 +169,24 @@ export function createCodexSession(opts, {
   let stderrTail = '';
   let childExitPromise = Promise.resolve();
   let resolveChildExit = null;
+  /**
+   * 이번 턴의 롤아웃 워처. codex --json 에는 자식 에이전트 활동이 한 줄도 오지
+   * 않으므로 fleet 카드의 유일한 소스다.
+   * @type {ReturnType<typeof createCodexRolloutWatcher> | null}
+   */
+  let rolloutWatcher = null;
+
+  /** 턴이 닫히기 전에 마지막 롤아웃을 훑고 남은 카드를 정리한다. */
+  function finalizeRolloutWatcher() {
+    const watcher = rolloutWatcher;
+    rolloutWatcher = null;
+    if (!watcher) return;
+    try {
+      watcher.finalize();
+    } catch (error) {
+      process.stderr.write(`[codex] rollout finalize error: ${error?.message ?? error}\n`);
+    }
+  }
 
   function endTurn(evt) {
     if (!turnOpen) return;
@@ -180,6 +203,8 @@ export function createCodexSession(opts, {
         if (e.thread_id) {
           threadId = String(e.thread_id);
           onEvent({ type: 'session-info', agent: 'codex', sessionId: threadId });
+          // 루트 스레드 id 를 알게 된 순간이 롤아웃 추적을 시작할 수 있는 첫 시점이다.
+          rolloutWatcher?.start(threadId);
         }
         return;
       }
@@ -222,17 +247,19 @@ export function createCodexSession(opts, {
           return;
         }
         if (itemType === 'collab_tool_call') {
-          const tool = String(item.tool ?? 'subagent');
+          // collab_tool_call 은 서브에이전트 카드가 아니다: 0.147.0 은 이 항목을
+          // wait_agent 호출에만 내보내며(tool 은 항상 "wait"), receiver_thread_ids 와
+          // agents_states 는 언제나 비어 있다. spawn_agent 는 스트림에 아무것도 남기지
+          // 않는다. 그래서 이건 루트의 평범한 도구 호출 한 줄로 그리고, 실제 fleet
+          // 카드는 롤아웃 워처가 만든다.
+          const tool = String(item.tool ?? 'wait');
           if (type === 'item.started') {
             onEvent({
               type: 'tool-call',
               agent: 'codex',
               callId: itemId,
-              tool: `subagent:${tool}`,
-              argsJson: JSON.stringify({
-                prompt: item.prompt ?? undefined,
-                receiverThreadIds: item.receiver_thread_ids ?? [],
-              }),
+              tool: tool === 'wait' ? 'wait_agents' : tool,
+              argsJson: '{}',
             });
           } else if (type === 'item.completed' || type === 'item.failed') {
             onEvent({
@@ -240,7 +267,7 @@ export function createCodexSession(opts, {
               agent: 'codex',
               callId: itemId,
               ok: item.status !== 'failed' && type !== 'item.failed',
-              resultPreview: truncate(JSON.stringify(item.agents_states ?? item.result ?? item.error ?? null)),
+              resultPreview: '',
             });
           }
           return;
@@ -333,6 +360,10 @@ export function createCodexSession(opts, {
     },
     sendUserMessage(text) {
       if (disposed) return;
+      // 이전 턴의 워처가 남아 있으면 turn-start 보다 먼저 정리한다 — 그래야 남은
+      // 카드를 닫는 task-end 가 지난 턴 안에서 끝난다 (정상 흐름에서는 exit 에서
+      // 이미 정리됐고, 여기 걸리는 건 exit 이 오지 않은 예외 경로다).
+      finalizeRolloutWatcher();
       turnOpen = true;
       turnCompleted = false;
       turnFailureMessage = null;
@@ -343,11 +374,15 @@ export function createCodexSession(opts, {
       const mode = normalizeExecutionMode(opts);
       const prompt = threadId && mode.workflow === 'direct'
         ? text
-        : systemBriefFor(opts) + '\n\n' + text;
+        : systemBriefFor(opts, 'codex') + '\n\n' + text;
       const argv = buildCodexArgv(opts, threadId);
       stderrTail = '';
 
       const codexHome = opts.codexHome ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex');
+      rolloutWatcher = createRolloutWatcher({
+        codexHome,
+        emit: (evt) => { if (!disposed) onEvent(evt); },
+      });
       let proc;
       try {
         prepareCodexHome(codexHome, opts.codexAuthPath);
@@ -361,6 +396,8 @@ export function createCodexSession(opts, {
           stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (e) {
+        rolloutWatcher?.stop();
+        rolloutWatcher = null;
         onEvent({ type: 'error', agent: 'codex', message: `failed to start codex: ${e?.message ?? e}` });
         endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'exited' });
         return;
@@ -382,6 +419,9 @@ export function createCodexSession(opts, {
       proc.on('error', (err) => {
         if (proc !== child) return;
         process.stderr.write(`[codex] spawn error: ${err?.message ?? err}\n`);
+        // exit 경로와 똑같이 워처부터 정리한다 — 여기서 turn-end 가 나가면
+        // 열린 카드가 그대로 매달린 채 턴이 닫힌다.
+        finalizeRolloutWatcher();
         if (turnOpen) {
           onEvent({ type: 'error', agent: 'codex', message: `codex process error: ${err?.message ?? err}` });
           endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'exited' });
@@ -389,6 +429,10 @@ export function createCodexSession(opts, {
       });
       proc.on('exit', (code, signal) => {
         if (proc !== child) return;
+        // 자식 에이전트는 부모 프로세스 안에서 돌기 때문에 여기서 전부 죽는다.
+        // turn-end 보다 먼저 마지막 롤아웃을 훑어 카드를 닫는다 — 턴이 끝날 때
+        // 열린 task 가 남아 있으면 안 된다.
+        finalizeRolloutWatcher();
         if (turnOpen && !disposed) {
           if (turnFailureMessage) {
             endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: turnFailureMessage });
@@ -430,13 +474,16 @@ export function createCodexSession(opts, {
     },
     interrupt() {
       killChild();
+      finalizeRolloutWatcher();
       endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'interrupted' });
     },
     dispose() {
       disposed = true;
       turnOpen = false;
-      // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
+      // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다. 롤아웃 폴링도 같이 멈춘다.
       try { child?.stdout?.removeAllListeners('data'); } catch {}
+      rolloutWatcher?.stop();
+      rolloutWatcher = null;
       const exited = waitForProcessTreeExit(child);
       killChild();
       return exited;

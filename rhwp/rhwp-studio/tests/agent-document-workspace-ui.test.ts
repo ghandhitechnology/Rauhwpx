@@ -146,7 +146,7 @@ test('sidebar plan minimizes into a restorable animated orbit above the composer
     /\.ag-plan-surface\.ag-plan-minimized\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*0fr\);[^}]*max-height:\s*0;[^}]*border-top-width:\s*0;/s,
   );
   assert.match(css, /\.ag-plan-minimized \.ag-plan-card-slot\s*\{[^}]*transform:\s*scale\(0\.08\);/s);
-  assert.match(css, /\.ag-composer-overlay\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*calc\(100% \+ 5px\);/s);
+  assert.match(css, /\.ag-composer-overlay\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*calc\(100% \+ 5px \+ var\(--ag-fleet-dock-h, 0px\)\);/s);
   assert.match(css, /@keyframes ag-plan-orbit/);
 });
 

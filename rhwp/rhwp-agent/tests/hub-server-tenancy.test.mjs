@@ -221,6 +221,52 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   assert.deepEqual((await alphaResult).result, { owner: 'alpha' });
   assert.deepEqual((await betaResult).result, { owner: 'beta' });
 
+  // Browser documents have no native source path. Studio exports the live bytes,
+  // the hub materializes them in alpha's isolated workspace, and the generated
+  // result can be published as an authenticated download without leaking to beta.
+  const snapshotBytes = Buffer.concat([
+    Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+    Buffer.from('snapshot-layout'),
+  ]);
+  const snapshotRequest = waitForMessage(alpha, (msg) => (
+    msg.type === 'tool-request' && msg.tool === 'materialize_document_snapshot'
+  ));
+  const snapshotResult = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 9);
+  sendFrame(alphaMcp, {
+    type: 'tool-call', id: 9, tool: 'materialize_document_snapshot', args: {},
+    workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch,
+  });
+  const toSnapshot = await snapshotRequest;
+  sendFrame(alpha, {
+    type: 'tool-response', id: toSnapshot.id, ok: true,
+    result: {
+      sourceFormat: 'hwp', byteLength: snapshotBytes.length,
+      dataBase64: snapshotBytes.toString('base64'), revision: 3, dirty: true,
+    },
+  });
+  const materialized = (await snapshotResult).result;
+  assert.equal(materialized.documentId, 'doc-alpha');
+  assert.equal(materialized.dirty, true);
+  assert.equal(existsSync(materialized.path), true);
+
+  const publishResult = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 10);
+  sendFrame(alphaMcp, {
+    type: 'tool-call', id: 10, tool: 'publish_artifact',
+    args: { filePath: materialized.path, fileName: '보고서 - Layout.hwp' },
+    workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch,
+  });
+  const published = (await publishResult).result;
+  assert.equal(published.fileName, '보고서 - Layout.hwp');
+  const artifactDownload = await fetch(published.downloadUrl);
+  assert.equal(artifactDownload.status, 200);
+  assert.match(artifactDownload.headers.get('content-disposition') ?? '', /attachment/);
+  assert.deepEqual(Buffer.from(await artifactDownload.arrayBuffer()), snapshotBytes);
+
+  const crossSessionArtifactUrl = new URL(published.downloadUrl);
+  crossSessionArtifactUrl.searchParams.set('sessionId', 'beta');
+  crossSessionArtifactUrl.searchParams.set('token', betaToken);
+  assert.equal((await fetch(crossSessionArtifactUrl)).status, 404);
+
   const alphaTemplateCleared = waitForMessage(alpha, (msg) => msg.type === 'chat-template-changed' && msg.reason === 'deleted');
   const betaTemplateCleared = waitForMessage(beta, (msg) => msg.type === 'chat-template-changed' && msg.reason === 'deleted');
   const alphaCatalogDeleted = waitForMessage(alpha, (msg) => msg.type === 'templates-catalog' && msg.change?.type === 'deleted');

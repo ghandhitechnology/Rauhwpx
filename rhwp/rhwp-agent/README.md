@@ -51,7 +51,10 @@ Paths are relative to the repository root.
    - Open http://127.0.0.1:7700 and load a document.
    - The header of the right-hand "AI agent" sidebar shows the connection state
      (connected once the hub is reachable; the bridge keeps reconnecting with
-     1s→2s→5s→10s backoff while the hub is down).
+     250ms→500ms→1s→2s→5s backoff while the hub is down). A brief socket drop no
+     longer fails in-flight tool calls: the hub holds them for about 5 seconds
+     keyed by the page instance id, and the bridge replays finished results when
+     the same page reattaches. A reload or a different tab fails them immediately.
    - Collapse/expand the sidebar with the slim tab on the right edge.
    - Pick **Claude** or **Codex**, type an instruction, press Enter
      (Shift+Enter for a newline; "Stop" interrupts a running turn).
@@ -85,6 +88,18 @@ Paths are relative to the repository root.
    chat-scoped downloader are enabled. Safe/Full access remains an independent
    filesystem permission choice. The hub blocks document writes before an
    approved plan regardless of that permission choice.
+
+9. **Subagents and Claude workflows** — Claude sessions expose the native
+   `Agent` and `Workflow` tools in every mode (tool restrictions inherit into
+   subagents, so planning stays read-only), plus two rhwp agent types:
+   `doc-editor` (owns one paragraph range) and `doc-researcher` (read-only).
+   The harness normalizes the CLI's `task_*` lifecycle into `task-start` /
+   `task-progress` / `task-end` events with `parentTaskId` attribution on
+   child tool calls, holds the turn open while background tasks run (multiple
+   `result` lines per logical turn), and reports cumulative `modelUsage` as
+   per-result deltas. Codex `collab_tool_call` items map onto the same task
+   events. Studio renders these as fleet cards and auto-rebases disjoint
+   parallel document writes (`rebasedParaShift`).
 
 ## Environment variables
 
@@ -230,9 +245,11 @@ enter scope counts and expire after 12 hours.
 Studio should repeat the IDs on `chat-user-message`; the hub rejects stale IDs
 before retrieval while continuing to accept legacy messages that omit them.
 
-## MCP tools (server name `rhwp`, 54 tools)
+## MCP tools (server name `rhwp`)
 
-Visible to Claude as `mcp__rhwp__<name>`.
+Visible to Claude as `mcp__rhwp__<name>`. `tools.mjs` is the authoritative
+list — `tests/tools.test.mjs` pins the tool count and classifications, so
+check that file rather than this summary when the exact surface matters.
 
 - Product skill support: `read_product_skill` (enabled skills and their text
   resources only; no arbitrary local paths)
@@ -241,17 +258,30 @@ Visible to Claude as `mcp__rhwp__<name>`.
   document + active chat)
 - Read: `get_structure` (entry point; includes tables), `get_text_range`,
   `get_selection`, `get_fields`, `get_document_info` (includes `fontsUsed`),
+  `materialize_document_snapshot` (writes the exact live HWP/HWPX into the
+  isolated chat workspace when no native source path exists or the document is dirty),
   `find_text` (searches cells too), `render_page` (SVG markup or PNG image),
-  `list_styles`, `list_numberings` (numbering/bullet definition ids),
+  `get_outline` (heading tree), `list_styles`,
+  `list_numberings` (numbering/bullet definition ids),
   `get_para_format` (sees real lists — HWP list numbers are not text),
   `get_char_format` (char format at a point; documents the inheritance rule),
   `get_table_properties` (table/object placement plus optional cell state),
+  `get_table_layout` (measured table geometry and page overflow),
+  `list_footnotes`, `list_bookmarks`,
   `get_engine_edit_capabilities` (all classified engine edits, structured-copy prerequisites, and signatures),
   `preview_equation` (metrics + warnings), `verify_changes`
-- Write (autonomous and undoable): `apply_engine_edits` (atomic access to every
+- Template read (the reference document, never mutated): `get_active_template`,
+  `template_get_structure`, `template_get_text_range`, `template_get_para_format`,
+  `template_get_char_format`, `template_list_styles`, `template_get_page_layout`,
+  `template_render_page`
+- Write (autonomous and undoable): `apply_edits` (1–32 staged semantic writes in
+  one call under a single `expectedRevision`; items apply sequentially and the
+  whole batch rolls back if any item fails — prefer it whenever two or more edits
+  are already known), `apply_engine_edits` (atomic access to every
   classified document mutation), `prepare_engine_edit_session` (structured-copy
   and non-document setup), `insert_text`, `delete_range`,
-  `replace_range`, `apply_char_format` (incl. `fontFamily`),
+  `replace_range`, `replace_all` (document-wide find and replace),
+  `apply_char_format` (incl. `fontFamily`),
   `set_field_value`, `create_table` (bulk cell fill + header row),
   `edit_table` (rows/cols/merge/split plus table placement, wrapping, pagination,
   captions, margins, and rich cell props), `delete_table` (mark-only whole-table delete),
@@ -260,15 +290,22 @@ Visible to Claude as `mcp__rhwp__<name>`.
   `insert_image` (local `imagePath`; this process reads/measures the file),
   `insert_equation` (HWP 수식 스크립트; render-validated before insert),
   `insert_chart` (bar/line/pie/scatter → PNG), `set_page_layout`,
-  `edit_header_footer` (page-number fields), `insert_page_break`
+  `edit_header_footer` (page-number fields), `insert_page_break`,
+  `insert_footnote`, `edit_footnote`, `set_bookmark`,
+  `template_apply_section_layout`, `template_apply_paragraph_format`,
+  `template_insert_block` (copy layout, formatting, and blocks out of the
+  template into the live document)
 - Planning control: `present_implementation_plan`
 - Hub download: `download_file`
+- Generated-file delivery: `publish_artifact` (workspace-confined HWP/HWPX →
+  authenticated local download URL)
 - Hub Browserbase proxy: `browserbase_start`, `browserbase_end`,
   `browserbase_navigate`, `browserbase_act`, `browserbase_observe`,
   `browserbase_extract`
 
 Every definition has one explicit category: `document-read`, `document-write`,
-`reference-read`, `download-write`, `planning-control`, or `browser`. Browser, download, and
+`reference-read`, `template-read`, `download-write`, `artifact-write`,
+`planning-control`, or `browser`. Browser, download, and
 planning-control calls are accepted only for plan-origin chats (including the
 implementing phase). Document writes are rejected by the hub during planning
 and awaiting approval.
@@ -281,6 +318,13 @@ source/final URL, and SHA-256 checksum. Downloads use a total timeout, bounded
 redirects, byte and free-space safety checks, and DNS-pinned public-address
 requests that reject local/private/reserved targets on every hop, with no
 product-level file-count cap.
+
+`publish_artifact` accepts only regular HWP/HWPX files whose canonical path is
+inside the current chat workspace. It rejects links, format mismatches, and
+files over 64 MiB, then returns a session-authenticated localhost download URL.
+The copy-layout skill uses this with `materialize_document_snapshot`, so browser
+documents no longer need an OS path and snapshot-backed results remain directly
+downloadable from chat.
 
 Browserbase tools proxy the official pinned `@browserbasehq/mcp` stdio
 sidecar. It starts lazily, verifies that all six upstream tools are ready,
@@ -309,8 +353,13 @@ as one immediate atomic snapshot transaction and one editor undo entry. Clipboar
 and view-session setup is explicit through `prepare_engine_edit_session`.
 
 Revision contract: every read response carries a `revision`; every write
-requires `expectedRevision`. A mismatch returns `REVISION_MISMATCH`, telling
-the model to re-read. Coordinates are body-text based:
+requires `expectedRevision`. A mismatch returns `REVISION_MISMATCH` carrying the
+current revision, and tells the model it may retry directly with that revision
+only when it knows what changed the document and the change cannot have shifted
+this call's coordinates — otherwise re-read the affected range first. Saving
+does not bump the revision (serialization leaves the content identical), and
+`verify_changes` previews do not bump it either because that window ends in a
+snapshot restore. Coordinates are body-text based:
 `sectionIdx` / `paraIdx` / `charOffset` (0-based).
 
 Table cells: `get_structure` lists every top-level table per section

@@ -481,13 +481,45 @@ export class AgentToolError extends Error {
   }
 }
 
-/** 하위 CLI(claude/codex) JSONL을 허브가 정규화한 단일 이벤트 스트림 (§1.5). */
+/** 서브에이전트/워크플로 task 이벤트가 싣는 사용량 요약. */
+export interface AgentTaskUsage {
+  totalTokens?: number;
+  toolUses?: number;
+  durationMs?: number;
+}
+
+/** 워크플로 phase (Workflow 스크립트의 phase() 호출). */
+export interface AgentTaskPhase {
+  index: number;
+  title: string;
+}
+
+/** 워크플로 멤버 에이전트 스냅샷 (task-progress 의 members). */
+export interface AgentTaskMember {
+  index: number;
+  label: string;
+  state: 'pending' | 'running' | 'completed' | 'failed';
+  phaseIndex?: number;
+  model?: string;
+  tokens?: number;
+  toolCalls?: number;
+  activity?: string;
+}
+
+/**
+ * 하위 CLI(claude/codex) JSONL을 허브가 정규화한 단일 이벤트 스트림 (§1.5).
+ * parentTaskId: 서브에이전트/워크플로가 낸 이벤트를 스폰한 task 에 귀속시키는
+ * 선택 필드 — 있으면 그 task 카드로, 모르는 id 면 루트 활동 그룹으로 그린다.
+ */
 export type AgentStreamEvent =
   | { type: 'turn-start'; agent: AgentName }
   | { type: 'session-info'; agent: AgentName; sessionId: string; model?: string; mcpStatus?: string }
-  | { type: 'text-delta'; agent: AgentName; text: string }
-  | { type: 'tool-call'; agent: AgentName; callId: string; tool: string; argsJson: string }
-  | { type: 'tool-result'; agent: AgentName; callId: string; ok: boolean; resultPreview: string }
+  | { type: 'text-delta'; agent: AgentName; text: string; parentTaskId?: string }
+  | { type: 'tool-call'; agent: AgentName; callId: string; tool: string; argsJson: string; parentTaskId?: string }
+  | { type: 'tool-result'; agent: AgentName; callId: string; ok: boolean; resultPreview: string; parentTaskId?: string }
+  | { type: 'task-start'; agent: AgentName; taskId: string; callId?: string; title: string; role?: string; taskKind: 'agent' | 'workflow'; workflowName?: string }
+  | { type: 'task-progress'; agent: AgentName; taskId: string; activity?: string; lastTool?: string; usage?: AgentTaskUsage; phases?: AgentTaskPhase[]; members?: AgentTaskMember[] }
+  | { type: 'task-end'; agent: AgentName; taskId: string; status: 'completed' | 'failed' | 'stopped'; summary?: string; usage?: AgentTaskUsage }
   | { type: 'turn-end'; agent: AgentName; stopReason?: string; errorMessage?: string }
   | { type: 'error'; agent: AgentName; message: string };
 
@@ -639,6 +671,18 @@ export interface CharFormatProps {
   textColor?: string;
   /** findOrCreateFontId 로 해석된 숫자 id (fontFamily 는 executor 에서 변환) */
   fontId?: number;
+}
+
+/**
+ * pending 구조 op 요약 — executor 의 PENDING_DESTRUCTIVE_OP 가드가 쓴다.
+ * flat cellIdx 는 행 우선(row-major)이라, 영향 행보다 앞선 행의 셀은 번호가 그대로다.
+ * 그래서 행 단위 op 만 affectedRow 를 채우고 열/병합/표 삭제는 null 로 둔다.
+ */
+export interface PendingStructureOpInfo {
+  /** 'insert_row' | 'delete_row' | 'insert_col' | ... | 'delete_table' */
+  op: string;
+  /** 행 단위 op 이 건드리는 행 인덱스. 행 단위가 아니면 null (= 표 전체 차단) */
+  affectedRow: number | null;
 }
 
 /** 표 등 컨트롤 앵커 — replay 후 재바인딩된다 */

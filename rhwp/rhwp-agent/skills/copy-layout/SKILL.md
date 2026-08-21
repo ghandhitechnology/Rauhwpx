@@ -9,7 +9,7 @@ Create a new `.hwp` or `.hwpx` that matches the source's page design as closely 
 
 When the user means the document open in Studio, call `get_document_info` first. Its `documentId` is the exact stable identity bound to this chat; `documentName` is display-only. Record the returned `documentId`, `digest`, `sourceFormat`, `dirty`, and `sourcePath`, and never search the filesystem, recent documents, or titles to guess the source—even when only one filename appears to match. All live document tools already target that exact `documentId`.
 
-If `dirty` is true, ask the user to save before copying so the source file reflects the visible revision. When `sourcePath` is non-null, use it directly: Studio resolved it from the sender-owned handle for this exact open document, so do not ask the user to attach or identify the file again. If `sourcePath` is null (for example, a browser-only document), ask the user to save, attach, or select the bound document rather than searching for a same-named file. For an explicitly attached or path-named HWP/HWPX, use that file directly.
+When `sourcePath` is non-null and `dirty` is false, use it directly: Studio resolved it from the sender-owned handle for this exact open document, so do not ask the user to attach or identify the file again. When `sourcePath` is null (including browser-only documents), or `dirty` is true and the visible revision must be captured, call `materialize_document_snapshot` and use its returned `path`. The snapshot is the exact current in-memory document in this chat's isolated workspace; it does not require another save and does not expose or overwrite the native source. Never tell the user to save merely because `sourcePath` is null. For an explicitly attached or path-named HWP/HWPX, use that file directly.
 
 ## Output
 
@@ -38,6 +38,8 @@ The helper preserves package structure, strips previews, scripts, history, and b
 If a removed body image is demonstrably decorative after inspecting the image and placement, rerun to a fresh output path with `--keep-media <manifest-id>` for each such asset. Never retain a chart, photo, scan, signature, or attachment merely to make the result look fuller.
 
 Use `-o /absolute/path/result.hwp` or `.hwpx` only when the user requests a destination or format conversion. The helper refuses to overwrite the source or an explicitly named existing output.
+
+When the source came from `materialize_document_snapshot`, the generated file is inside the isolated chat workspace. After verification, call `publish_artifact` with the output path and give the user its returned `downloadUrl` as a Markdown download link. Do not report only the temporary filesystem path for a snapshot-backed result.
 
 ## Verify before delivery
 

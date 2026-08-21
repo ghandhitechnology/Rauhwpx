@@ -119,6 +119,9 @@ test('argv carries the prompt file, session, model, effort and safe allow rules'
   assert.equal(argValue(argv, '-s'), 'sess-uuid');
   assert.equal(argv.includes('-r'), false);
   assert.match(argValue(argv, '--append-system-prompt'), /rhwp MCP tools/);
+  // dontAsk 는 spawn_subagent 를 자동 취소하므로 안전 브리프에는 병렬 안내가 없다
+  // — 도구도 꺼 놓고 스폰하라고 시키면 턴 전체가 실패한다.
+  assert.doesNotMatch(argValue(argv, '--append-system-prompt'), /spawn_subagent/);
   assert.equal(argValue(argv, '-m'), 'grok-4.6');
   assert.equal(argValue(argv, '--reasoning-effort'), 'high');
   assert.equal(argValue(argv, '--permission-mode'), 'dontAsk');
@@ -130,35 +133,63 @@ test('argv carries the prompt file, session, model, effort and safe allow rules'
     'Grep', 'WebFetch', 'WebSearch', 'MCPTool(rhwp__*)',
   ]);
   assert.equal(allows.includes('Bash'), false, '안전 프로필에서는 셸을 허용하지 않는다');
-  assert.ok(argv.includes('--no-subagents'), '직접 워크플로에서는 서브에이전트를 끈다');
+  // dontAsk 는 allowlist 를 강제하지 않는다 (1.0.5 라이브 확인) — 실제 경계는 deny 다.
+  const denies = argv.flatMap((value, index) => (value === '--deny' ? [argv[index + 1]] : []));
+  assert.deepEqual(denies, ['Bash'], '안전 프로필은 --deny Bash 로 셸을 실제로 막는다');
+  // dontAsk 아래에서 spawn_subagent 는 승인 프롬프트가 자동 취소되고("User
+  // cancelled") 그 오류가 턴 전체를 실패시켜 스테이징 편집이 되돌아간다 —
+  // 안전 프로필은 서브에이전트 도구 자체를 끈다 (1.0.5 라이브 확인).
+  assert.ok(argv.includes('--no-subagents'), '안전 프로필은 서브에이전트를 끈다');
+  assert.equal(argValue(argv, '--agents'), undefined, 'dontAsk 에서는 --agents 를 싣지 않는다');
 });
 
-test('unrestricted argv always-approves without a sandbox flag', () => {
+test('unrestricted argv always-approves without a sandbox flag and enables subagents', () => {
   const argv = buildGrokArgv({ ...baseOpts, permissionProfile: 'unrestricted' }, 's', false, '/g/p');
   assert.ok(argv.includes('--always-approve'));
   assert.equal(argv.includes('--sandbox'), false);
   assert.equal(argv.includes('--permission-mode'), false);
-  // 전체 접근에서만 셸이 열린다 — 개별 --allow 없이 always-approve 가 전부 승인한다.
+  // 전체 접근에서만 셸이 열린다 — 개별 --allow/--deny 없이 always-approve 가 전부 승인한다.
   assert.equal(argv.includes('--allow'), false);
+  assert.equal(argv.includes('--deny'), false);
+  // 편대는 스폰 승인이 실제로 통과하는 always-approve 에서만 켠다.
+  assert.equal(argv.includes('--no-subagents'), false);
+  const agents = JSON.parse(argValue(argv, '--agents'));
+  assert.deepEqual(Object.keys(agents).sort(), ['doc-editor', 'doc-researcher']);
+  assert.match(argValue(argv, '--append-system-prompt'), /spawn_subagent/, '전체 접근 브리프에는 병렬 안내가 실린다');
 });
 
-test('planning phases drop Edit, stay on dontAsk and keep subagents', () => {
-  for (const phase of ['planning', 'awaiting-approval', 'switching']) {
-    const argv = buildGrokArgv({ ...baseOpts, workflow: 'plan', phase }, 's', false, '/g/p');
-    assert.equal(argValue(argv, '--permission-mode'), 'dontAsk', phase);
-    assert.equal(argv.includes('--sandbox'), false, phase);
-    const allows = argv.flatMap((value, index) => (value === '--allow' ? [argv[index + 1]] : []));
-    assert.equal(allows.some((rule) => rule.startsWith('Edit(')), false, phase);
-    assert.equal(allows.includes('Bash'), false, phase);
-    assert.equal(argv.includes('--no-subagents'), false, phase);
-    assert.match(argValue(argv, '--append-system-prompt'), /planning mode/);
+test('planning phases drop Edit, stay on dontAsk and disable subagents', () => {
+  // dontAsk 인 모든 조합(안전 프로필, 그리고 unrestricted 라도 계획 제한 단계)은
+  // spawn_subagent 승인이 자동 취소되므로 서브에이전트를 꺼야 한다.
+  for (const profile of ['safe', 'unrestricted']) {
+    for (const phase of ['planning', 'awaiting-approval', 'switching']) {
+      const argv = buildGrokArgv(
+        { ...baseOpts, permissionProfile: profile, workflow: 'plan', phase },
+        's', false, '/g/p',
+      );
+      const label = `${profile}/${phase}`;
+      assert.equal(argValue(argv, '--permission-mode'), 'dontAsk', label);
+      assert.equal(argv.includes('--sandbox'), false, label);
+      const allows = argv.flatMap((value, index) => (value === '--allow' ? [argv[index + 1]] : []));
+      assert.equal(allows.some((rule) => rule.startsWith('Edit(')), false, label);
+      assert.equal(allows.includes('Bash'), false, label);
+      // 계획 단계의 읽기 전용 경계는 deny 가 강제한다 — Edit 가 search_replace 와
+      // write 를 모두 막고(라이브 확인), Write 는 명시적 이중 안전장치다.
+      const denies = argv.flatMap((value, index) => (value === '--deny' ? [argv[index + 1]] : []));
+      assert.deepEqual(denies, ['Bash', 'Edit', 'Write'], label);
+      assert.ok(argv.includes('--no-subagents'), label);
+      assert.equal(argValue(argv, '--agents'), undefined, label);
+      assert.match(argValue(argv, '--append-system-prompt'), /planning mode/);
+    }
   }
-  // 계획 워크플로라도 unrestricted 구현 단계는 always-approve 로 돌아간다.
+  // 계획 워크플로라도 unrestricted 구현 단계는 always-approve 로 돌아간다 — 편대도 켜진다.
   const implementing = buildGrokArgv(
     { ...baseOpts, permissionProfile: 'unrestricted', workflow: 'plan', phase: 'implementing' },
     's', false, '/g/p',
   );
   assert.ok(implementing.includes('--always-approve'));
+  assert.equal(implementing.includes('--no-subagents'), false);
+  assert.ok(argValue(implementing, '--agents'));
   assert.match(argValue(implementing, '--append-system-prompt'), /implementation mode/);
 });
 

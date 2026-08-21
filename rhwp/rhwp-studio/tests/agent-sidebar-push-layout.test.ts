@@ -9,6 +9,8 @@ const calibrationCss = readFileSync(
   'utf8',
 );
 const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
+const inlinePrompt = readFileSync(new URL('../src/agent/inline-prompt.ts', import.meta.url), 'utf8');
+const inlinePromptCss = readFileSync(new URL('../src/agent/inline-prompt.css', import.meta.url), 'utf8');
 
 test('agent sidebar and fullscreen workspace use bundled NanumSquare typography', () => {
   assert.match(baseCss, /url\('\/fonts\/NanumSquare-Regular\.woff2'\)/);
@@ -78,6 +80,19 @@ test('agent sidebar supports drag resize up to half the viewport', () => {
   assert.match(css, /\.ag-resize-handle/);
   assert.match(css, /body\.ag-sidebar-resizing #editor-area/);
   assert.match(css, /body\.ag-sidebar-resizing \.ag-root,\s*body\.ag-sidebar-animating \.ag-root\s*\{[^}]*--ag-sketch-line:\s*none;/s);
+});
+
+test('hiding the sidebar also disables highlight-to-agent indicators', () => {
+  assert.match(source, /eventBus\?\.emit\('agent-sidebar-visibility-changed', \{ open: !collapsed \}\)/);
+  assert.match(inlinePrompt, /function isAgentSidebarVisible\(/);
+  assert.match(inlinePrompt, /body\.classList\.contains\('ag-sidebar-open'\)/);
+  assert.match(inlinePrompt, /eventBus\.on\('agent-sidebar-visibility-changed'/);
+  assert.match(inlinePrompt, /if \(!isAgentSidebarVisible\(\)\) this\.hideAll\(\)/);
+  assert.match(inlinePrompt, /if \(!isAgentSidebarVisible\(\)\) \{\s*if \(this\.state !== 'hidden'\) this\.hideAll\(\);/s);
+  assert.match(
+    inlinePromptCss,
+    /body:not\(\.ag-sidebar-open\) \.ag-inline-chip,\s*body:not\(\.ag-sidebar-open\) \.ag-inline-box\s*\{[^}]*display:\s*none;/s,
+  );
 });
 
 test('rau icon toggle hides the sidebar completely from the toolbar', () => {

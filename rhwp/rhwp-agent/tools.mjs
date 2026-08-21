@@ -3,7 +3,37 @@
 import { z } from 'zod';
 
 export const REVISION_NOTE = 'Returns the current document revision. Always use the revision from your most recent tool call as expectedRevision in write tools.';
-export const WRITE_NOTE = 'Requires expectedRevision (the revision returned by your most recent tool call). Fails with REVISION_MISMATCH if the document changed — then re-read (get_structure / get_text_range) and retry with fresh coordinates. Successful edits are staged as live preview; at turn end they are auto-committed (전체 접근 profile) or held for the user’s review and approval (안전 profile), and committed edits remain undoable in the editor.';
+const WRITE_NOTE_REVISION = 'Requires expectedRevision (the revision returned by your most recent tool call). Fails with REVISION_MISMATCH if the document changed — the error message carries the current revision and how to recover. Core text writes from sibling agents editing disjoint paragraph ranges are rebased automatically (the response then carries rebasedParaShift), so a mismatch signals a real conflict.';
+const WRITE_NOTE_STAGING = 'Successful edits are staged as live preview; at turn end they are auto-committed (전체 접근 profile) or held for the user’s review and approval (안전 profile), and committed edits remain undoable in the editor.';
+export const WRITE_NOTE = `${WRITE_NOTE_REVISION} When you already know two or more edits to make, batch them into ONE apply_edits call instead of separate calls. ${WRITE_NOTE_STAGING}`;
+// apply_edits 자신에게는 배치 권유 문장이 소음이라 뺀 변형을 쓴다.
+const WRITE_NOTE_FOR_BATCH = `${WRITE_NOTE_REVISION} ${WRITE_NOTE_STAGING}`;
+
+/**
+ * apply_edits 배치에 넣을 수 있는 semantic write — 스튜디오 executor 의
+ * BATCHABLE_EDIT_TOOLS 와 반드시 일치해야 한다 (agent-write-tools-guard 소스 가드).
+ * 전부 동기 실행 도구다; insert_image/insert_chart 는 비동기·전처리 의존이라 제외.
+ */
+export const BATCHABLE_EDIT_TOOL_NAMES = Object.freeze([
+  'insert_text',
+  'delete_range',
+  'replace_range',
+  'apply_char_format',
+  'apply_para_format',
+  'apply_style',
+  'apply_list',
+  'set_field_value',
+  'insert_page_break',
+  'insert_footnote',
+  'edit_footnote',
+  'set_bookmark',
+  'edit_header_footer',
+  'set_page_layout',
+  'create_table',
+  'edit_table',
+  'delete_table',
+  'insert_equation',
+]);
 export const OFFSET_CAVEAT = 'charOffset counts text characters only; paragraphs containing inline controls (tables/pictures) may have offsets that do not map 1:1 to what you see — prefer find_text to locate exact offsets.';
 export const CELL_NOTE = "To target text INSIDE a table cell, pass the optional cell parameter (assemble it from the table entry's paraIdx/controlIdx in get_structure tables[] plus the cell's cellIdx, or copy a find_text match verbatim); paragraph indexes and offsets are then relative to that cell.";
 
@@ -112,6 +142,7 @@ export const TOOL_CATEGORIES = Object.freeze([
   'reference-read',
   'template-read',
   'download-write',
+  'artifact-write',
   'planning-control',
   'browser',
 ]);
@@ -123,7 +154,7 @@ export const TOOL_CATEGORIES = Object.freeze([
  * destructive 로 표시하지 않는다. 그렇게 표시하면 Codex 안전 모드
  * (`workspace-write` + `approval_policy=never`)가 문서 편집 도구를 거절한다.
  *
- * @param {'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'planning-control'|'browser'} category
+ * @param {'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'browser'} category
  */
 export function toolAnnotations(category) {
   return {
@@ -301,6 +332,11 @@ const BASE_TOOL_DEFINITIONS = [
     shape: {},
   },
   {
+    name: 'materialize_document_snapshot',
+    description: `Materialize the exact current in-memory HWP/HWPX document into this chat's isolated local workspace and return its absolute path, format, size, checksum, revision, digest, and dirty state. Use this whenever a file-processing workflow needs a local path but get_document_info.sourcePath is null, or when dirty is true and the visible revision must be captured. This does not modify the open document, does not expose or overwrite its native source file, and does not require the user to save first. ${REVISION_NOTE}`,
+    shape: {},
+  },
+  {
     name: 'find_text',
     description: `Search the document body AND table cell text for a string; returns matches with exact addresses (sectionIdx, paraIdx, charOffset, length) plus surrounding context. Matches inside a table cell carry a cell object — pass it verbatim as the cell parameter of read/write tools (paraIdx of such a match is the paragraph index inside the cell). A match never spans paragraphs: the query only matches text within a single paragraph. Use this to locate precise offsets before editing. ${REVISION_NOTE}`,
     shape: {
@@ -383,6 +419,17 @@ const BASE_TOOL_DEFINITIONS = [
       expectedRevision: z.number().int(),
       method: z.string().min(1).max(100),
       args: z.array(z.unknown()).max(32),
+    },
+  },
+  {
+    name: 'apply_edits',
+    description: `Apply 1-32 staged semantic edits in ONE call under a single expectedRevision — strongly preferred over separate write calls whenever you already know two or more edits to make, since every separate call costs a full round trip. Each item is {tool, args}: tool is one of ${BATCHABLE_EDIT_TOOL_NAMES.join('|')}, and args matches that tool's schema WITHOUT expectedRevision (validated per item by the studio). Items run sequentially: each item's coordinates refer to the document AFTER the previous items applied — for edits at independent locations, order items in reverse document order (bottom of the document first) so earlier items do not shift later coordinates. If any item fails, the whole batch rolls back atomically and the error names the failing index; nothing is applied. Per-item results are returned in results[]; only the top-level revision is meaningful. ${WRITE_NOTE_FOR_BATCH}`,
+    shape: {
+      expectedRevision: z.number().int(),
+      edits: z.array(z.object({
+        tool: z.enum(BATCHABLE_EDIT_TOOL_NAMES).describe('Semantic write tool name from the allowed list'),
+        args: z.record(z.string(), z.unknown()).describe("That tool's arguments, without expectedRevision"),
+      }).strict()).min(1).max(32),
     },
   },
   {
@@ -851,6 +898,14 @@ const BASE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'publish_artifact',
+    description: 'Publish a generated HWP/HWPX file from this chat\'s isolated workspace as a user-downloadable local artifact. Call this after a file-producing workflow succeeds, then give the returned downloadUrl to the user as a Markdown link. Paths outside the chat workspace, links, format-mismatched files, and files over 64 MiB are rejected.',
+    shape: {
+      filePath: z.string().min(1).max(4_000).describe('Absolute path of the generated HWP/HWPX inside this chat workspace'),
+      fileName: z.string().min(1).max(255).optional().describe('Optional user-facing download name; directory components are discarded'),
+    },
+  },
+  {
     name: 'browserbase_start',
     description: 'Create or reuse the hub-owned Browserbase session for this chat.',
     shape: {},
@@ -882,7 +937,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
 ];
 
-/** @type {Readonly<Record<string, 'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'planning-control'|'browser'>>} */
+/** @type {Readonly<Record<string, 'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'browser'>>} */
 export const TOOL_CLASSIFICATIONS = Object.freeze({
   read_product_skill: 'document-read',
   list_reference_files: 'reference-read',
@@ -902,6 +957,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   get_selection: 'document-read',
   get_fields: 'document-read',
   get_document_info: 'document-read',
+  materialize_document_snapshot: 'document-read',
   find_text: 'document-read',
   render_page: 'document-read',
   get_para_format: 'document-read',
@@ -911,6 +967,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   get_engine_edit_capabilities: 'document-read',
   apply_engine_edits: 'document-write',
   prepare_engine_edit_session: 'document-write',
+  apply_edits: 'document-write',
   insert_text: 'document-write',
   template_apply_section_layout: 'document-write',
   template_apply_paragraph_format: 'document-write',
@@ -944,6 +1001,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   verify_changes: 'document-read',
   present_implementation_plan: 'planning-control',
   download_file: 'download-write',
+  publish_artifact: 'artifact-write',
   browserbase_start: 'browser',
   browserbase_end: 'browser',
   browserbase_navigate: 'browser',
@@ -959,10 +1017,10 @@ export const TOOL_DEFINITIONS = Object.freeze(BASE_TOOL_DEFINITIONS.map((definit
 }));
 
 export const TOOL_PROFILES = Object.freeze({
-  direct: Object.freeze(['document-read', 'document-write', 'reference-read', 'template-read']),
+  direct: Object.freeze(['document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write']),
   planning: Object.freeze(['document-read', 'reference-read', 'template-read', 'download-write', 'planning-control', 'browser']),
   'awaiting-approval': Object.freeze(['document-read', 'reference-read', 'template-read', 'download-write', 'browser']),
-  implementing: Object.freeze(['document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'browser']),
+  implementing: Object.freeze(['document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'browser']),
   all: TOOL_CATEGORIES,
 });
 

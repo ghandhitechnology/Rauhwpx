@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 66개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 66);
+test('도구는 정확히 69개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 69);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -40,6 +40,9 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
   assert.deepEqual(toolAnnotations('download-write'), {
     readOnlyHint: false, destructiveHint: true, openWorldHint: true,
   });
+  assert.deepEqual(toolAnnotations('artifact-write'), {
+    readOnlyHint: false, destructiveHint: false, openWorldHint: false,
+  });
   const mcpStdio = readFileSync(fileURLToPath(new URL('../mcp-stdio.mjs', import.meta.url)), 'utf8');
   assert.match(mcpStdio, /annotations: toolAnnotations\(def\.category\)/);
   assert.doesNotMatch(mcpStdio, /destructiveHint:\s*true/);
@@ -47,7 +50,10 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 58);
+  assert.equal(direct.size, 61);
+  assert.ok(direct.has('materialize_document_snapshot'));
+  assert.ok(direct.has('publish_artifact'));
+  assert.ok(direct.has('apply_edits'));
   assert.ok(direct.has('insert_text'));
   assert.ok(direct.has('get_engine_edit_capabilities'));
   assert.ok(direct.has('apply_engine_edits'));
@@ -144,6 +150,20 @@ test('reference tools are read-only and carry bounded schemas', () => {
   assert.ok(!byName.get('search_reference_files').shape.maxResults.safeParse(21).success);
   assert.ok(byName.get('read_reference_chunk').shape.maxChars.safeParse(20_000).success);
   assert.ok(!byName.get('read_reference_chunk').shape.chunkId.safeParse('../secret').success);
+});
+
+test('document snapshots are a read-only, argument-free current-document export', () => {
+  const snapshot = byName.get('materialize_document_snapshot');
+  assert.equal(snapshot?.category, 'document-read');
+  assert.deepEqual(Object.keys(snapshot?.shape ?? {}), []);
+  assert.match(snapshot?.description ?? '', /does not require the user to save/i);
+});
+
+test('generated artifacts are publishable in direct and implementing modes, but not planning', () => {
+  assert.equal(byName.get('publish_artifact')?.category, 'artifact-write');
+  assert.ok(filterToolDefinitions('direct').some((definition) => definition.name === 'publish_artifact'));
+  assert.ok(filterToolDefinitions('implementing').some((definition) => definition.name === 'publish_artifact'));
+  assert.ok(!filterToolDefinitions('planning').some((definition) => definition.name === 'publish_artifact'));
 });
 
 test('cell 파라미터를 받는 모든 도구에 조립 방법 안내가 있다', () => {
