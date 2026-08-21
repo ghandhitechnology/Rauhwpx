@@ -55,7 +55,7 @@ test('slash menu supports local commands and explicit product-skill invocation',
   assert.match(source, /row\.classList\.add\('ag-command-option'\)/);
   assert.match(source, /ag-slash-command-icon/);
   assert.match(source, /icon\.appendChild\(createIcon\('external'\)\)/);
-  assert.match(css, /\.ag-slash-command-icon \{ color: var\(--ag-text-muted\); \}/);
+  assert.match(css, /\.ag-slash-skill-icon,[\s\S]*\.ag-slash-command-icon[\s\S]*color: var\(--ag-accent\)/);
   assert.match(css, /\.ag-slash-menu/);
 });
 

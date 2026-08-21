@@ -927,11 +927,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-skill-kind-icon,
-.ag-slash-skill-icon {
+.ag-slash-skill-icon,
+.ag-slash-command-icon {
   color: var(--ag-accent);
 }
-
-.ag-slash-command-icon { color: var(--ag-text-muted); }
 
 .ag-skill-kind-icon .ag-icon,
 .ag-slash-skill-icon .ag-icon,
