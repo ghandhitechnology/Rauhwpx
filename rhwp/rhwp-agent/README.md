@@ -114,9 +114,9 @@ Paths are relative to the repository root.
 | `RHWP_CLIPROXY_URL` | `http://127.0.0.1:8317` | CLIProxyAPI base URL for official plan usage |
 | `RHWP_CLIPROXY_KEY` | — | CLIProxyAPI management key (`remote-management.secret-key`) |
 | `RHWP_REFERENCES_DIR` | OS application-data directory | Persistent reference metadata, deduplicated blobs, and search index override |
-| `BROWSERBASE_API_KEY` | — | Browserbase API key (required for Browserbase tools) |
-| `BROWSERBASE_PROJECT_ID` | — | Browserbase project id (required for Browserbase tools) |
-| `GEMINI_API_KEY` | — | Gemini key used by the pinned Browserbase MCP sidecar |
+| `BROWSERBASE_API_KEY` | — | Browserbase API key (required for Browserbase tools; the studio settings page can override it for the life of the tab) |
+| `BROWSERBASE_PROJECT_ID` | — | Browserbase project id (auto-detected from the key when entered in the studio) |
+| `GEMINI_API_KEY` | — | Gemini key used by the pinned Browserbase MCP sidecar (studio-overridable too) |
 
 Studio side (build-time, Vite): `VITE_RHWP_AGENT_URL` (default
 `ws://127.0.0.1:5175`), `VITE_RHWP_AGENT_TOKEN` (default `dev`).
@@ -315,14 +315,33 @@ requests that reject local/private/reserved targets on every hop, with no
 product-level file-count cap.
 
 Browserbase tools proxy the official pinned `@browserbasehq/mcp` stdio
-sidecar. It starts lazily, verifies that all six upstream tools are ready,
-serializes actions against the shared session, keeps that session across
-provider process restarts, and closes it on chat stop or hub shutdown. Text
-results are truncated at 50KB to protect the model context. A timed-out action poisons
-and closes the sidecar because the remote effect may already have happened; the model
-must start fresh and observe before retrying. Missing credentials return
-`BROWSERBASE_NOT_CONFIGURED` with the exact variables to set. Browser actions
-do not require per-action confirmation.
+sidecar — one sidecar per browser. Every tool takes an optional `browserId`:
+omitted means the shared `main` browser (the orchestrator's), and subagents pass
+their own id to get an isolated browser (`BrowserbaseFleet`, at most 4 per chat,
+`BROWSERBASE_BROWSER_LIMIT` beyond that). Subagent browsers close when the turn
+ends; the main browser survives provider process restarts and closes on chat
+stop, idle timeout (15 min), or hub shutdown. Each sidecar starts lazily,
+verifies that all six upstream tools are ready, serializes actions against its
+session, relaunches itself if the sidecar process dies
+(`BROWSERBASE_SIDECAR_EXITED` for the call that hit it), and restarts with fresh
+credentials when they change. Text results are truncated at 50KB to protect the
+model context. A timed-out action poisons and closes the sidecar because the
+remote effect may already have happened; the model must start fresh and observe
+before retrying. Missing credentials return `BROWSERBASE_NOT_CONFIGURED` with
+the exact variables to set. Browser actions do not require per-action
+confirmation.
+
+Credentials come from the hub environment, or from the studio settings page
+(`원격 브라우저`): `browserbase-credentials-set {apiKey, projectId?, geminiApiKey?}`
+is validated against the Browserbase API (`BROWSERBASE_KEY_INVALID`,
+`BROWSERBASE_UNREACHABLE`, `BROWSERBASE_PROJECT_NOT_FOUND`, `BROWSERBASE_NO_PROJECT`),
+the project id is auto-selected from the key's account when omitted, and the
+result overrides the environment per field in hub memory only — never on disk.
+`browserbase-credentials-clear` returns to the environment;
+`browserbase-status-request` / `browserbase-status` report sources, the key
+tail, the project id, and open browsers. The studio keeps the override in
+`sessionStorage` and the bridge re-sends it on every reconnect, so a hub
+restart does not lose it while the tab lives.
 
 Verify workflow: the system brief and tool descriptions instruct the model to
 call `verify_changes` after a batch of edits and before ending its turn — it
@@ -391,7 +410,8 @@ literal `/`.
 - `PLAN_WRITE_BLOCKED` — an MCP document write was attempted before the plan
   reached `implementing`.
 - `BROWSERBASE_NOT_CONFIGURED` — set all three Browserbase environment
-  variables listed above and restart the hub.
+  variables listed above and restart the hub, or enter the key in the studio
+  settings (`원격 브라우저`).
 - "MCP server connection failed" in the sidebar — the CLI failed to spawn
   `mcp-stdio.mjs`; check the hub's stderr log.
 - Only one studio connection is kept: a new tab replaces the previous one
@@ -409,7 +429,7 @@ literal `/`.
 - `provider-health.mjs` — cached `claude`/`codex` CLI version probes (single-flight)
 - `usage-store.mjs` — token-usage JSONL log, plan budgets, rolling-window summary
 - `cliproxy.mjs` — CLIProxyAPI management client for official 5h/weekly plan usage
-- `browserbase-session.mjs` — lazy official Browserbase MCP sidecar proxy
+- `browserbase-session.mjs` — lazy official Browserbase MCP sidecar proxy, per-browser fleet, credential override/validation
 - `agents/claude.mjs` — `claude -p` stream-json persistent-process backend
 - `agents/codex.mjs` — `codex exec --json` per-turn spawn backend (`exec resume` continuity)
 - `agents/backend.mjs` — shared helpers + `SYSTEM_BRIEF`

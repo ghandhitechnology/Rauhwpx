@@ -140,6 +140,11 @@
   cursor: default;
 }
 
+/* inline-flex 가 기본 [hidden] 을 덮어써서, 숨긴 버튼은 따로 눌러 줍니다. */
+.ag-settings-btn[hidden] {
+  display: none;
+}
+
 .ag-settings-primary {
   align-self: flex-start;
   height: 30px;
@@ -155,6 +160,11 @@
 
 .ag-settings-primary:hover:not(:disabled) {
   filter: var(--ag-sketch-line) brightness(0.94);
+}
+
+.ag-settings-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .ag-settings-btn:focus-visible,
@@ -225,6 +235,10 @@
 .ag-settings-status {
   margin: 0;
   color: var(--ag-text);
+}
+
+.ag-settings-status.ag-settings-status-warn {
+  color: var(--ag-warning, #d99532);
 }
 
 /* ── 문서 템플릿 ───────────────────────────────────── */

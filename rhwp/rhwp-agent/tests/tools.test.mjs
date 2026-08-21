@@ -81,6 +81,19 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(!implementing.has('present_implementation_plan'));
 });
 
+test('browserbase tools take an optional browserId so subagents get isolated browsers', () => {
+  for (const name of ['browserbase_start', 'browserbase_end', 'browserbase_navigate', 'browserbase_act', 'browserbase_observe', 'browserbase_extract']) {
+    const definition = byName.get(name);
+    assert.equal(definition?.category, 'browser');
+    assert.ok(definition.shape.browserId, `${name} lacks browserId`);
+    assert.equal(definition.shape.browserId.safeParse(undefined).success, true);
+    assert.equal(definition.shape.browserId.safeParse('researcher-1').success, true);
+    assert.equal(definition.shape.browserId.safeParse('bad id!').success, false);
+    assert.equal(definition.shape.browserId.safeParse('x'.repeat(41)).success, false);
+  }
+  assert.match(byName.get('browserbase_start').description, /subagents must pass their own browserId/i);
+});
+
 test('template tools separate read-only inspection from pending document writes', () => {
   for (const name of [
     'template_get_structure', 'template_get_text_range', 'template_get_para_format',

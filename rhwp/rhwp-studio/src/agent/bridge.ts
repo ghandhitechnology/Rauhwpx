@@ -49,6 +49,9 @@ import type {
   PiCatalogModel,
   PiModelConfig,
   PiStatus,
+  BrowserbaseCredentialSource,
+  BrowserbaseOverride,
+  BrowserbaseStatus,
   ProductSkillFile,
   ProviderHealth,
   ProviderStatusMap,
@@ -124,6 +127,15 @@ export interface AgentBridge {
   setPiModels(
     models: Array<{ id: string; name: string; defaultEffort?: string }>,
   ): Promise<PiStatus | null>;
+  /** 허브가 보는 Browserbase 설정 상태. */
+  requestBrowserbaseStatus(): Promise<BrowserbaseStatus | null>;
+  /**
+   * 앱에서 입력한 Browserbase 자격 증명을 허브에 보낸다. 허브가 키를 확인하고
+   * 앱을 쓰는 동안만 환경 변수 대신 쓴다. 재연결 때마다 마지막 값을 다시 보낸다.
+   */
+  setBrowserbaseCredentials(override: BrowserbaseOverride): Promise<BrowserbaseStatus | null>;
+  /** 덮어쓰기를 거두고 허브 환경 변수로 돌아간다. */
+  clearBrowserbaseCredentials(): Promise<BrowserbaseStatus | null>;
   startChat(agent: AgentName, model?: string, effort?: string, force?: boolean, permissionProfile?: PermissionProfile, workflow?: AgentWorkflow, threadId?: string, documentId?: string | null, documentName?: string | null, history?: ChatHistoryEntry[]): void;
   /** 허브 세션을 폐기하고 새 채팅을 시작할 수 있게 한다. */
   stopChat(): void;
@@ -710,6 +722,30 @@ function readPiModels(value: unknown): PiModelConfig[] {
   return out;
 }
 
+function readCredentialSource(value: unknown): BrowserbaseCredentialSource {
+  return value === 'studio' || value === 'env' ? value : null;
+}
+
+function readBrowserbaseStatus(value: unknown): BrowserbaseStatus {
+  const src = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+  const browsers = Array.isArray(src['browsers'])
+    ? (src['browsers'] as unknown[]).flatMap((entry) => {
+      const row = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>;
+      return typeof row['id'] === 'string' ? [{ id: row['id'], connected: row['connected'] === true }] : [];
+    })
+    : [];
+  return {
+    configured: src['configured'] === true,
+    missing: Array.isArray(src['missing']) ? (src['missing'] as unknown[]).filter((v): v is string => typeof v === 'string') : [],
+    keySource: readCredentialSource(src['keySource']),
+    keyTail: typeof src['keyTail'] === 'string' ? src['keyTail'] : null,
+    projectId: typeof src['projectId'] === 'string' ? src['projectId'] : null,
+    projectSource: readCredentialSource(src['projectSource']),
+    geminiSource: readCredentialSource(src['geminiSource']),
+    browsers,
+  };
+}
+
 function readPiStatus(value: unknown): PiStatus {
   const src = (value ?? {}) as Record<string, unknown>;
   return {
@@ -784,6 +820,8 @@ class AgentBridgeImpl implements AgentBridge {
   private hubLaunch: Promise<boolean> | null = null;
   private reconnectSeq = 0;
   private requests = new PendingRequestRegistry();
+  /** 마지막으로 보낸 Browserbase 덮어쓰기 — 허브가 다시 뜨면 기억을 잃으므로 연결마다 재전송한다. */
+  private browserbaseOverride: BrowserbaseOverride | null = null;
   /** 끊긴 사이에 완료된 도구 결과 — 재연결 직후 다시 보낸다. */
   private toolResponses = new ToolResponseBuffer();
   private disposed = false;
@@ -1025,6 +1063,9 @@ class AgentBridgeImpl implements AgentBridge {
       // 끊긴 사이에 끝난 도구 결과를 먼저 흘려보낸다 — 허브의 인플라이트 호출이
       // 30초 타임아웃까지 가지 않고 이 응답으로 마무리된다.
       this.flushToolResponses();
+      if (this.browserbaseOverride !== null) {
+        this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'browserbase-credentials-set', ...this.browserbaseOverride });
+      }
       if (this.pendingChatStart !== null) {
         const pending = this.pendingChatStart;
         this.sendJson({
@@ -1581,6 +1622,22 @@ class AgentBridgeImpl implements AgentBridge {
           requestId: typeof msg.requestId === 'string' ? msg.requestId : '',
           code: typeof msg.code === 'string' ? msg.code : 'PI_ERROR',
           message: typeof msg.message === 'string' ? msg.message : 'Pi request failed',
+        });
+        break;
+      }
+      case 'browserbase-status': {
+        const status = readBrowserbaseStatus(msg.status);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, status);
+        this.emit({ type: 'browserbase-status', status });
+        break;
+      }
+      case 'browserbase-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        this.emit({
+          type: 'browserbase-error',
+          requestId: typeof msg.requestId === 'string' ? msg.requestId : '',
+          code: typeof msg.code === 'string' ? msg.code : 'BROWSERBASE_ERROR',
+          message: typeof msg.message === 'string' ? msg.message : 'Browserbase request failed',
         });
         break;
       }
@@ -2314,6 +2371,28 @@ class AgentBridgeImpl implements AgentBridge {
 
   setPiKey(key: string): Promise<PiStatus | null> {
     return this.request<PiStatus>({ type: 'pi-set-key', key }, 'pi-set-key', 30_000);
+  }
+
+  requestBrowserbaseStatus(): Promise<BrowserbaseStatus | null> {
+    return this.request<BrowserbaseStatus>({ type: 'browserbase-status-request' }, 'browserbase-status');
+  }
+
+  setBrowserbaseCredentials(override: BrowserbaseOverride): Promise<BrowserbaseStatus | null> {
+    this.browserbaseOverride = {
+      apiKey: override.apiKey,
+      ...(override.projectId ? { projectId: override.projectId } : {}),
+      ...(override.geminiApiKey ? { geminiApiKey: override.geminiApiKey } : {}),
+    };
+    return this.request<BrowserbaseStatus>(
+      { type: 'browserbase-credentials-set', ...this.browserbaseOverride },
+      'browserbase-credentials',
+      30_000,
+    );
+  }
+
+  clearBrowserbaseCredentials(): Promise<BrowserbaseStatus | null> {
+    this.browserbaseOverride = null;
+    return this.request<BrowserbaseStatus>({ type: 'browserbase-credentials-clear' }, 'browserbase-credentials');
   }
 
   requestPiCatalog(refresh = false): Promise<PiCatalogModel[] | null> {
