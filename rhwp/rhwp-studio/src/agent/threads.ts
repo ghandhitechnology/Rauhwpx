@@ -104,10 +104,6 @@ export function threadMatchesDocument(
   return !thread.documentId && !documentId && threadName === null && activeName === null;
 }
 
-/**
- * 탐색기 "현재" 표시. documentId가 있는 그룹은 ID만 본다.
- * 레거시(파일명만) 그룹은 예전 이름 다리를 유지한다.
- */
 export function explorerGroupIsCurrent(
   group: Pick<ChatThread, 'documentId' | 'docKey'>,
   documentId: string | null,

@@ -74,10 +74,6 @@ export interface RhwpDesktopApi {
   reopenNativeDocument?: (
     documentId: string,
   ) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
-  discoverNativeDocument?: (
-    documentId: string,
-    options?: { basenameHint?: string; digest?: string | null },
-  ) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
   searchNearbyNativeDocument?: (
     documentId: string,
     options?: { basenameHint?: string },
@@ -464,25 +460,6 @@ export async function restoreNativeDocument(
     return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
   } catch (error) {
     console.warn('[desktop] native document reopen failed:', error);
-    return null;
-  }
-}
-
-export async function discoverNativeDocument(
-  documentId: string,
-  options: { basenameHint?: string; digest?: string | null } = {},
-  win?: DesktopHost,
-): Promise<FileSystemFileHandleLike | 'owned' | null> {
-  const api = desktopHost(win)?.rhwpDesktop;
-  if (!api?.discoverNativeDocument || !documentId) return null;
-  try {
-    const result = await api.discoverNativeDocument(documentId, options);
-    if (!result) return null;
-    if ('owned' in result) return 'owned';
-    if (!validNativeDescriptor(result)) return null;
-    return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
-  } catch (error) {
-    console.warn('[desktop] native document discover failed:', error);
     return null;
   }
 }

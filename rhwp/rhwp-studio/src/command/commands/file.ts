@@ -68,10 +68,6 @@ import {
   type LibraryMoveResult,
 } from '@/library/move-to-document';
 
-/**
- * 파일 열기 대화상자(File System Access picker, 미지원 시 숨김 input 폴백)를 열어
- * 문서를 로드한다. `file:open` 과 레거시 라이브러리 이동이 공유한다.
- */
 async function openFileViaPicker(services: CommandServices): Promise<void> {
   let handle: FileSystemFileHandleLike | null | undefined;
   try {
@@ -719,7 +715,6 @@ export const fileCommands: CommandDef[] = [
     execute: openFileViaPicker,
   },
   {
-    // params.id로 최근 행을 연다. 확인된 뒤에만 documentId를 물려준다.
     id: 'file:open-recent',
     label: '최근 문서 열기',
     async execute(services, params) {

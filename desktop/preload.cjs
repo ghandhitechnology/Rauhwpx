@@ -37,11 +37,6 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
     'desktop:reopen-native-document',
     documentId,
   ),
-  discoverNativeDocument: (documentId, options) => ipcRenderer.invoke(
-    'desktop:discover-native-document',
-    documentId,
-    options,
-  ),
   searchNearbyNativeDocument: (documentId, options) => ipcRenderer.invoke(
     'desktop:search-nearby-native-document',
     documentId,

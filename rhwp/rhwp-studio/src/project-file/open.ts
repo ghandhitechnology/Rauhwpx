@@ -3,6 +3,7 @@ import {
   judgeCandidate,
   type CandidateFacts,
   type DocumentDigest,
+  type IdentityVerdict,
   type ProjectFileClaim,
 } from './identity.ts';
 
@@ -36,7 +37,6 @@ export interface ProjectFileDeps {
   searchNearby?: (query: {
     documentId: string;
     basenameHint: string;
-    digest: DocumentDigest | null;
   }) => Promise<readonly NativeProbe[] | 'owned' | null>;
   readProbe?: (probeId: string) => Promise<{ bytes: Uint8Array; fileName: string }>;
   claimProbe?: (probeId: string) => Promise<FileSystemFileHandleLike | 'owned' | null>;
@@ -137,7 +137,6 @@ async function tryNearby(
     nearby = await deps.searchNearby({
       documentId: claim.documentId,
       basenameHint: claim.displayName,
-      digest: claim.knownDigest,
     });
   } catch (error) {
     console.warn('[project-file] nearby search failed:', error);
@@ -188,6 +187,7 @@ async function pickForProject(
     try {
       ({ bytes, name } = await deps.readHandle(picked));
     } catch {
+      deps.toast?.('선택한 파일을 읽지 못했습니다.', 4000);
       return { kind: 'not-this-file' };
     }
 
@@ -206,9 +206,7 @@ async function pickForProject(
       deps.toast?.('이 파일은 이 프로젝트 문서가 아닙니다. 다시 선택하세요.', 4000);
       continue;
     }
-    if (verdict.kind === 'refuted') {
-      deps.toast?.('이 파일은 이 프로젝트 문서가 아닙니다.', 4000);
-    }
+    toastRejectedPick(verdict, deps);
     return { kind: 'not-this-file' };
   }
 }
@@ -240,6 +238,21 @@ async function entryAgainst(
   } catch {
     return 'uncomparable';
   }
+}
+
+function toastRejectedPick(
+  verdict: IdentityVerdict,
+  deps: ProjectFileDeps,
+): void {
+  if (verdict.kind === 'refuted') {
+    deps.toast?.('이 파일은 이 프로젝트 문서가 아닙니다.', 4000);
+    return;
+  }
+  if (verdict.kind === 'inconclusive' && verdict.why === 'no-known-digest') {
+    deps.toast?.('선택한 파일이 이 프로젝트 문서인지 확인할 수 없어 열지 않았습니다.', 4000);
+    return;
+  }
+  deps.toast?.('선택한 파일의 내용이 이 프로젝트 문서와 달라 열지 않았습니다.', 4000);
 }
 
 function ownedElsewhere(deps: ProjectFileDeps): ProjectOpenOutcome {
