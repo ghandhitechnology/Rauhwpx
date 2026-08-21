@@ -614,3 +614,26 @@ test('verifyPick accepts the bookmarked path and rejects a different file', asyn
     );
   });
 });
+
+test('nearby probes skip files owned by another session', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const owned = join(directory, 'secret.hwp');
+    const searchable = join(directory, 'report.hwp');
+    await writeFs(owned, new Uint8Array([1, 2, 3]));
+    await writeFs(searchable, new Uint8Array([4, 5, 6]));
+    const registry = new NativeFileHandleRegistry();
+    const owner = await registry.create('session-a', owned);
+    const bookmark = await registry.create('session-b', searchable);
+    assert.equal(owner.ok && bookmark.ok, true);
+    if (!owner.ok || !bookmark.ok) return;
+    registry.rememberDocument('document-b', 'session-b', bookmark.descriptor.handleId);
+    registry.releaseHandle('session-b', bookmark.descriptor.handleId);
+
+    const probes = await registry.searchNearby('session-b', 'document-b', {
+      basenameHint: 'report.hwp',
+    });
+    assert.deepEqual(probes.map((probe) => probe.fileName), ['report.hwp']);
+    const read = await registry.readProbe('session-b', probes[0]!.probeId);
+    assert.deepEqual(read.bytes, new Uint8Array([4, 5, 6]));
+  });
+});

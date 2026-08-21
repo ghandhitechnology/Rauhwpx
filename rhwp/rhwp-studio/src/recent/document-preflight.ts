@@ -20,7 +20,7 @@ export type VerifiedDocumentGrant = {
 export type FreshOpenPayload = {
   bytes: Uint8Array;
   fileName: string;
-  fileHandle: FileSystemFileHandleLike;
+  fileHandle: FileSystemFileHandleLike | null;
   skipUnsavedGuard?: boolean;
   requestId?: string;
   grant?: never;
@@ -73,8 +73,12 @@ export async function resolveDocumentPreflight(
 ): Promise<DocumentPreflightIdentity> {
   const makeId = createId ?? createDocumentId;
   const sourceDigest = documentSourceDigest(bytes);
-  let handleComparisonSucceeded = false;
+  const granted = grant?.kind === 'verified' ? grant.documentId.trim() : '';
+  if (granted) {
+    return { documentId: granted, sourceDigest, useSourceDigest: false };
+  }
 
+  let handleComparisonSucceeded = false;
   if (handle && typeof handle.isSameEntry === 'function') {
     for (const recent of [...recents].sort((a, b) => b.openedAt - a.openedAt)) {
       if (!recent.handle) continue;
@@ -86,11 +90,6 @@ export async function resolveDocumentPreflight(
         // If comparison is unavailable, digest remains the identity fallback.
       }
     }
-  }
-
-  const preferred = grant?.kind === 'verified' ? grant.documentId.trim() : '';
-  if (preferred) {
-    return { documentId: preferred, sourceDigest, useSourceDigest: false };
   }
 
   const hasNativePathIdentity = handle?.identityKind === 'native-path';

@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { open, readdir, readFile, realpath, rename, rm } from 'node:fs/promises';
+import { open, opendir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, normalize, win32 } from 'node:path';
 
 const SUPPORTED_EXTENSIONS = new Set(['.hwp', '.hwpx', '.hml']);
 const NEARBY_DIRECTORY_CAP = 12;
 const NEARBY_FILE_CAP = 8;
+const NEARBY_DIR_ENTRY_CAP = 256;
 const CFB_SIGNATURE = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
 const WINDOWS_RENAME_RETRY_CODES = new Set(['EACCES', 'EBUSY', 'EPERM']);
 
@@ -173,7 +174,7 @@ export class NativeFileHandleRegistry {
   #createId;
   #readFile;
   #writeFile;
-  #readDir;
+  #openDir;
   #digest;
 
   constructor({
@@ -182,7 +183,7 @@ export class NativeFileHandleRegistry {
     createId = randomUUID,
     readFileImpl = readFile,
     writeFileImpl = writeNativeFileAtomically,
-    readDirImpl = readdir,
+    openDirImpl = opendir,
     digestImpl = null,
   } = {}) {
     this.#canonicalize = canonicalize;
@@ -190,7 +191,7 @@ export class NativeFileHandleRegistry {
     this.#createId = createId;
     this.#readFile = readFileImpl;
     this.#writeFile = writeFileImpl;
-    this.#readDir = readDirImpl;
+    this.#openDir = openDirImpl;
     this.#digest = digestImpl;
   }
 
@@ -304,7 +305,7 @@ export class NativeFileHandleRegistry {
 
   async searchNearby(sessionId, documentId, { basenameHint = '' } = {}) {
     const probes = [];
-    for (const filePath of await this.#collectNearbyFiles(documentId, basenameHint)) {
+    for (const filePath of await this.#collectNearbyFiles(sessionId, documentId, basenameHint)) {
       const probeId = this.#createId();
       const name = basename(filePath);
       this.#probes.set(probeId, { sessionId, path: filePath, name });
@@ -315,9 +316,14 @@ export class NativeFileHandleRegistry {
 
   async readProbe(sessionId, probeId) {
     const probe = this.#probeForSender(sessionId, probeId);
+    const canonicalPath = await this.#canonicalize(probe.path);
+    const owner = this.#byPath.get(this.#ownershipKey(canonicalPath));
+    if (owner && owner.sessionId !== sessionId) {
+      throw new Error('Native file probe does not belong to this window');
+    }
     return {
       name: probe.name,
-      bytes: new Uint8Array(await this.#readFile(probe.path)),
+      bytes: new Uint8Array(await this.#readFile(canonicalPath)),
     };
   }
 
@@ -386,7 +392,7 @@ export class NativeFileHandleRegistry {
     bookmark.digest = this.#digest(bytes);
   }
 
-  async #collectNearbyFiles(documentId, basenameHint) {
+  async #collectNearbyFiles(sessionId, documentId, basenameHint) {
     const wanted = basename(String(basenameHint || this.#bookmarks.get(documentId)?.path || ''));
     const dirs = [];
     const seenDirs = new Set();
@@ -420,30 +426,47 @@ export class NativeFileHandleRegistry {
     const unique = [];
     const seenFiles = new Set();
     for (const filePath of [...preferred, ...rest]) {
-      const key = this.#ownershipKey(filePath);
+      let canonicalPath;
+      try {
+        canonicalPath = await this.#canonicalize(filePath);
+      } catch {
+        continue;
+      }
+      const key = this.#ownershipKey(canonicalPath);
       if (seenFiles.has(key)) continue;
+      const owner = this.#byPath.get(key);
+      if (owner && owner.sessionId !== sessionId) continue;
       seenFiles.add(key);
-      unique.push(filePath);
+      unique.push(canonicalPath);
       if (unique.length >= NEARBY_FILE_CAP) break;
     }
     return unique;
   }
 
   async #listDocumentFiles(dir) {
-    let entries;
+    let directory;
     try {
-      entries = await this.#readDir(dir, { withFileTypes: true });
+      directory = await this.#openDir(dir);
     } catch {
       return [];
     }
     const files = [];
-    for (const entry of entries) {
-      const name = typeof entry === 'string' ? entry : entry.name;
-      const isDirectory = typeof entry !== 'string'
-        && typeof entry.isDirectory === 'function'
-        && entry.isDirectory();
-      if (isDirectory || !SUPPORTED_EXTENSIONS.has(extname(name).toLowerCase())) continue;
-      files.push(join(dir, name));
+    let seen = 0;
+    try {
+      for await (const entry of directory) {
+        seen += 1;
+        if (seen > NEARBY_DIR_ENTRY_CAP) break;
+        const name = typeof entry === 'string' ? entry : entry.name;
+        const isDirectory = typeof entry !== 'string'
+          && typeof entry.isDirectory === 'function'
+          && entry.isDirectory();
+        if (isDirectory || !SUPPORTED_EXTENSIONS.has(extname(name).toLowerCase())) continue;
+        files.push(join(dir, name));
+      }
+    } catch {
+      return files;
+    } finally {
+      await directory.close?.().catch(() => {});
     }
     return files;
   }

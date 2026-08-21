@@ -473,7 +473,7 @@ export async function searchNearbyNativeDocuments(
   documentId: string,
   options: { basenameHint?: string } = {},
   win?: DesktopHost,
-): Promise<readonly NativeProbeRef[] | 'owned' | null> {
+): Promise<readonly NativeProbeRef[] | null> {
   const api = desktopHost(win)?.rhwpDesktop;
   if (!api?.searchNearbyNativeDocument || !documentId) return null;
   try {

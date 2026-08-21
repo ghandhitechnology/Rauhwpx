@@ -162,3 +162,22 @@ test('picker without a verified grant mints a new id', async () => {
     useSourceDigest: false,
   });
 });
+
+test('verified grant wins over a same-entry recent with a different documentId', async () => {
+  const stored = handle('report.hwp', async () => true);
+  const selected = handle('report.hwp', async () => true);
+  const bytes = new Uint8Array([20, 21]);
+  const result = await resolveDocumentPreflight(
+    bytes,
+    selected,
+    [recent('other-id', documentSourceDigest(bytes), stored)],
+    () => 'new-document',
+    { kind: 'verified', documentId: 'project-id' },
+  );
+
+  assert.deepEqual(result, {
+    documentId: 'project-id',
+    sourceDigest: documentSourceDigest(bytes),
+    useSourceDigest: false,
+  });
+});
