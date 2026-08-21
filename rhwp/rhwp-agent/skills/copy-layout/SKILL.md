@@ -7,7 +7,9 @@ Create a new `.hwp` or `.hwpx` that matches the source's page design as closely 
 
 ## Resolve the source
 
-Use the HWP/HWPX attached to the request, named by path, or matching the open document's title. If the live document has unsaved changes, ask the user to save it first so the layout copy reflects the visible version. If there is no unambiguous source file, find likely recent `.hwp` and `.hwpx` files and ask the user to identify one; never guess between plausible documents.
+When the user means the document open in Studio, call `get_document_info` first. Its `documentId` is the exact stable identity bound to this chat; `documentName` is display-only. Record the returned `documentId`, `digest`, `sourceFormat`, and `dirty` state, and never search the filesystem, recent documents, or titles to guess the source—even when only one filename appears to match. All live document tools already target that exact `documentId`.
+
+If `dirty` is true, ask the user to save before copying so the source file reflects the visible revision. Use a source path only when the application or user provides it for that exact document. If no exact path is available, ask the user to save, attach, or select the bound document rather than searching for a same-named file. For an explicitly attached or path-named HWP/HWPX, use that file directly.
 
 ## Output
 

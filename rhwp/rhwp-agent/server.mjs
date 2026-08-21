@@ -33,7 +33,14 @@ import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
 import { resolveHwpExtractor } from './reference-extractor.mjs';
 import { ReferenceStore } from './reference-store.mjs';
 import { createReferenceHttpHandler, isAllowedStudioOrigin } from './reference-http.mjs';
-import { assertMessageScope, referenceScopesForSession, resolveSessionIdentity } from './reference-session.mjs';
+import {
+  activeDocumentIdentity,
+  addActiveDocumentContext,
+  assertMessageScope,
+  attachActiveDocumentIdentity,
+  referenceScopesForSession,
+  resolveSessionIdentity,
+} from './reference-session.mjs';
 import { executeReferenceTool } from './reference-tools.mjs';
 import { TemplateStore } from './template-store.mjs';
 import { createTemplateHttpHandler } from './template-http.mjs';
@@ -778,10 +785,13 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
       if (record.agentSession !== activeSession) throw new Error('Agent session changed before the message was dispatched');
       activeSession.backend.sendUserMessage(addReopenedChatHistory(
         activeSession,
-        addTemplateContext(
-          record,
+        addActiveDocumentContext(
           activeSession,
-          addReferenceContext(activeSession, msg.text, prompt, messageAttachments),
+          addTemplateContext(
+            record,
+            activeSession,
+            addReferenceContext(activeSession, msg.text, prompt, messageAttachments),
+          ),
         ),
       ));
     })
@@ -1748,7 +1758,10 @@ async function handleStudioMessage(record, sock, msg) {
       clearTimeout(entry.timer);
       if (entry.mcpSocket.readyState !== entry.mcpSocket.OPEN) return;
       if (msg.ok) {
-        sendJson(entry.mcpSocket, { v: 1, type: 'tool-result', id: entry.clientId, ok: true, result: msg.result });
+        const result = entry.tool === 'get_document_info'
+          ? attachActiveDocumentIdentity(msg.result, entry.documentIdentity)
+          : msg.result;
+        sendJson(entry.mcpSocket, { v: 1, type: 'tool-result', id: entry.clientId, ok: true, result });
       } else {
         sendJson(entry.mcpSocket, {
           v: 1, type: 'tool-result', id: entry.clientId, ok: false,
@@ -1898,7 +1911,13 @@ function handleMcpMessage(record, sock, msg) {
           error: { code: 'STUDIO_TIMEOUT', message: `Studio did not answer within ${STUDIO_TOOL_TIMEOUT_MS / 1000}s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates` },
         });
       }, STUDIO_TOOL_TIMEOUT_MS);
-      record.pendingCalls.set(hubId, { mcpSocket: sock, clientId, timer });
+      record.pendingCalls.set(hubId, {
+        mcpSocket: sock,
+        clientId,
+        timer,
+        tool,
+        documentIdentity: activeDocumentIdentity(record.agentSession),
+      });
       sendJson(record.studioSocket, {
         v: 1, type: 'tool-request', id: hubId,
         // 호출을 보낸 MCP 소켓의 에이전트 라벨을 단다 — 현재 세션 기준으로 찍으면

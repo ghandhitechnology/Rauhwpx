@@ -297,7 +297,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_document_info',
-    description: `Get document metadata: sectionCount, pageCount, sourceFormat (hwp/hwpx), content digest, dirty flag, and font info — fontsUsed (fonts referenced by the document), fallbackFont (substituted when a referenced font is unavailable) and registeredFonts (fonts the renderer can actually use; pick fontFamily values from these). ${REVISION_NOTE}`,
+    description: `Get the exact active document identity and metadata: stable documentId, display-only documentName, sectionCount, pageCount, sourceFormat (hwp/hwpx), content digest, dirty flag, and font info — fontsUsed (fonts referenced by the document), fallbackFont (substituted when a referenced font is unavailable) and registeredFonts (fonts the renderer can actually use; pick fontFamily values from these). Use documentId and digest to identify the open document; never resolve it by filename search or title matching. ${REVISION_NOTE}`,
     shape: {},
   },
   {

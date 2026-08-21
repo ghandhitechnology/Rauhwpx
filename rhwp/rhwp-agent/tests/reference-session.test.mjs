@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  activeDocumentIdentity,
+  addActiveDocumentContext,
   assertMessageScope,
+  attachActiveDocumentIdentity,
   referenceScopesForSession,
   resolveSessionIdentity,
 } from '../reference-session.mjs';
@@ -42,4 +45,31 @@ test('MCP reference scope is exactly global + active document + active chat', ()
     { scope: 'document', scopeId: 'doc-a' },
     { scope: 'chat', scopeId: 'chat-a' },
   ]);
+});
+
+test('agents receive exact active-document identity without filename matching', () => {
+  const first = { documentId: 'doc-a', documentName: '보고서.hwp' };
+  const sameNamedSecond = { documentId: 'doc-b', documentName: '보고서.hwp' };
+
+  assert.deepEqual(activeDocumentIdentity(first), first);
+  assert.notEqual(
+    addActiveDocumentContext(first, 'copy it'),
+    addActiveDocumentContext(sameNamedSecond, 'copy it'),
+  );
+  const prompt = addActiveDocumentContext(first, 'copy it');
+  assert.match(prompt, /"documentId":"doc-a"/);
+  assert.match(prompt, /documentId—not documentName/);
+  assert.match(prompt, /filesystem search/);
+  assert.match(prompt, /copy it$/);
+});
+
+test('get_document_info identity is hub-authored and cannot be replaced by Studio data', () => {
+  assert.deepEqual(
+    attachActiveDocumentIdentity(
+      { pageCount: 3, documentId: 'stale', documentName: 'wrong.hwp' },
+      { documentId: 'doc-live', documentName: '보고서.hwp' },
+    ),
+    { pageCount: 3, documentId: 'doc-live', documentName: '보고서.hwp' },
+  );
+  assert.deepEqual(activeDocumentIdentity(null), { documentId: null, documentName: null });
 });

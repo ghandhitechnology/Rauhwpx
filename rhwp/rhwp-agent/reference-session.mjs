@@ -71,3 +71,30 @@ export function referenceScopesForSession(activeSession) {
     documentId: activeSession?.documentId,
   });
 }
+
+/** Exact Studio document identity bound to this chat; names are display-only. */
+export function activeDocumentIdentity(activeSession) {
+  return {
+    documentId: typeof activeSession?.documentId === 'string' ? activeSession.documentId : null,
+    documentName: typeof activeSession?.documentName === 'string' ? activeSession.documentName : null,
+  };
+}
+
+/** Add stable identity to the live document-info result returned by Studio. */
+export function attachActiveDocumentIdentity(result, identity) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+  return { ...result, ...activeDocumentIdentity(identity) };
+}
+
+/** Give every agent turn exact open-document identity without filename search. */
+export function addActiveDocumentContext(activeSession, prompt) {
+  const identity = activeDocumentIdentity(activeSession);
+  const block = [
+    '<active_document_identity trust="application-state">',
+    JSON.stringify(identity),
+    'This is the exact Studio document bound to this chat. All rhwp document tools target this documentId.',
+    'Use documentId—not documentName, title matching, recent-file lists, or filesystem search—to decide which open document the user means. Call get_document_info for its digest, source format, and dirty state.',
+    '</active_document_identity>',
+  ].join('\n');
+  return `${block}\n\n${prompt}`;
+}
