@@ -44,7 +44,9 @@ test('materializes a browser document snapshot under the isolated chat workspace
   assert.match(result.checksum, /^sha256:[0-9a-f]{64}$/);
   assert.ok(path.resolve(result.path).startsWith(path.resolve(root) + path.sep));
   assert.deepEqual(await fs.readFile(result.path), CFB);
-  assert.equal((await fs.stat(result.path)).mode & 0o077, 0);
+  if (process.platform !== 'win32') {
+    assert.equal((await fs.stat(result.path)).mode & 0o077, 0);
+  }
 });
 
 test('preserves HWPX format while correcting a stale display-name extension', async (t) => {
