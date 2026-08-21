@@ -13,6 +13,9 @@ import { join } from 'node:path';
 
 import { DocumentLeaseManager } from '../../../desktop/document-leases.mjs';
 import {
+  documentSourceDigest,
+} from '../src/recent/document-preflight.ts';
+import {
   bindNativeFileHandleIdentity,
   createNativeFileHandle,
 } from '../src/desktop-integration.ts';
@@ -392,7 +395,10 @@ test('native bookmarks persist independently of live handles', async () => {
     handleId: 'bookmarked',
     name: 'report.hwp',
   });
-  assert.deepEqual(registry.dumpBookmarks(), [['document-a', '/canonical/report.hwp']]);
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'document-a',
+    { path: '/canonical/report.hwp', digest: null },
+  ]]);
 });
 
 test('native package validation accepts real fixtures and rejects truncation or format mismatch', async () => {
@@ -512,4 +518,107 @@ test('concurrent native saves are serialized in invocation order', async () => {
   assert.deepEqual(started, [1, 2]);
   finish.shift()?.();
   await second;
+});
+
+test('legacy bookmark pairs still reopen after the digest-aware dump format', async () => {
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async () => '/canonical/report.hwp',
+    createId: () => 'bookmarked',
+  });
+  registry.loadBookmarks([['document-a', '/canonical/report.hwp']]);
+  const reopened = await registry.reopenDocument('session-b', 'document-a');
+  assert.equal(reopened?.ok, true);
+  if (!reopened?.ok) return;
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'document-a',
+    { path: '/canonical/report.hwp', digest: null },
+  ]]);
+});
+
+test('moved file in the same directory is found by digest and the descriptor has no path', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const original = join(directory, 'report.hwp');
+    const moved = join(directory, 'renamed.hwp');
+    const bytes = new Uint8Array([7, 8, 9, 10]);
+    const digest = documentSourceDigest(bytes);
+    await writeFs(original, bytes);
+    const registry = new NativeFileHandleRegistry({ digestImpl: documentSourceDigest });
+    const created = await registry.create('session-a', original);
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId, digest);
+    registry.releaseHandle('session-a', created.descriptor.handleId);
+    await rmFs(original);
+    await writeFs(moved, bytes);
+
+    const found = await registry.discoverDocument('session-a', 'document-a', {
+      basenameHint: 'report.hwp',
+      digest,
+    });
+    assert.equal(found?.ok, true);
+    if (!found?.ok) return;
+    assert.equal('path' in found.descriptor, false);
+    assert.equal(JSON.stringify(found.descriptor).includes(directory), false);
+    assert.equal(found.descriptor.name, 'renamed.hwp');
+    assert.deepEqual(await registry.read('session-a', found.descriptor.handleId), {
+      name: 'renamed.hwp',
+      bytes,
+    });
+  });
+});
+
+test('same basename with a different digest is not promoted', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const original = join(directory, 'original.hwp');
+    const decoy = join(directory, 'report.hwp');
+    const originalBytes = new Uint8Array([1, 2, 3]);
+    const decoyBytes = new Uint8Array([4, 5, 6]);
+    const digest = documentSourceDigest(originalBytes);
+    await writeFs(original, originalBytes);
+    const registry = new NativeFileHandleRegistry({ digestImpl: documentSourceDigest });
+    const created = await registry.create('session-a', original);
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId, digest);
+    registry.releaseHandle('session-a', created.descriptor.handleId);
+    await rmFs(original);
+    await writeFs(decoy, decoyBytes);
+
+    const found = await registry.discoverDocument('session-a', 'document-a', {
+      basenameHint: 'report.hwp',
+      digest,
+    });
+    assert.equal(found, null);
+
+    const probes = await registry.searchNearby('session-a', 'document-a', { basenameHint: 'report.hwp' });
+    assert.equal(probes.length, 1);
+    assert.equal(probes[0]?.fileName, 'report.hwp');
+    assert.equal('path' in (probes[0] ?? {}), false);
+    assert.equal(JSON.stringify(probes).includes(directory), false);
+    const read = await registry.readProbe('session-a', probes[0]!.probeId);
+    assert.deepEqual(read.bytes, decoyBytes);
+  });
+});
+
+test('verifyPick accepts the bookmarked path and rejects a different file', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const original = join(directory, 'report.hwp');
+    const other = join(directory, 'other.hwp');
+    await writeFs(original, new Uint8Array([1]));
+    await writeFs(other, new Uint8Array([2]));
+    const registry = new NativeFileHandleRegistry();
+    const created = await registry.create('session-a', original);
+    const extra = await registry.create('session-a', other);
+    assert.equal(created.ok && extra.ok, true);
+    if (!created.ok || !extra.ok) return;
+    registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId);
+    assert.equal(
+      await registry.verifyPick('session-a', 'document-a', created.descriptor.handleId),
+      true,
+    );
+    assert.equal(
+      await registry.verifyPick('session-a', 'document-a', extra.descriptor.handleId),
+      false,
+    );
+  });
 });
