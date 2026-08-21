@@ -2918,7 +2918,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         icon.appendChild(createIcon(skillGlyphForSkill({ name: option.skillName, icon: option.skillIcon })));
         row.append(icon, el('strong', 'ag-slash-name', option.label), el('span', 'ag-slash-detail', option.detail));
       } else {
-        row.append(el('strong', 'ag-slash-name', option.label), el('span', 'ag-slash-detail', option.detail));
+        row.classList.add('ag-command-option');
+        const icon = el('span', 'ag-slash-command-icon');
+        icon.appendChild(createIcon('external'));
+        row.append(icon, el('strong', 'ag-slash-name', option.label), el('span', 'ag-slash-detail', option.detail));
       }
       row.addEventListener('mousedown', (event) => { event.preventDefault(); chooseSlashOption(option); });
       slashMenu.appendChild(row);

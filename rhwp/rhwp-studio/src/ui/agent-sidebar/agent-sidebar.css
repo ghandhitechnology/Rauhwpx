@@ -918,16 +918,24 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-skill-kind-icon,
-.ag-slash-skill-icon {
+.ag-slash-skill-icon,
+.ag-slash-command-icon {
   display: grid;
   width: 18px;
   height: 18px;
   place-items: center;
+}
+
+.ag-skill-kind-icon,
+.ag-slash-skill-icon {
   color: var(--ag-accent);
 }
 
+.ag-slash-command-icon { color: var(--ag-text-muted); }
+
 .ag-skill-kind-icon .ag-icon,
-.ag-slash-skill-icon .ag-icon {
+.ag-slash-skill-icon .ag-icon,
+.ag-slash-command-icon .ag-icon {
   width: 15px;
   height: 15px;
 }
@@ -3987,7 +3995,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   text-align: left;
 }
 
-.ag-slash-option.ag-skill-option {
+.ag-slash-option.ag-skill-option,
+.ag-slash-option.ag-command-option {
   grid-template-columns: 18px minmax(110px, auto) minmax(0, 1fr);
   align-items: center;
   gap: 8px;
