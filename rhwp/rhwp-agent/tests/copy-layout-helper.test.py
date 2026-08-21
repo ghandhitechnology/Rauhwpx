@@ -19,6 +19,26 @@ SPEC.loader.exec_module(copy_layout)
 
 
 class IntermediateHwpxExportTests(unittest.TestCase):
+    def test_parser_accepts_source_prefix_reserved_by_elementtree(self):
+        source = b'<ns1:root xmlns:ns1="urn:copy-layout"><ns1:item /></ns1:root>'
+
+        tree = copy_layout.parse_xml(source, "reserved-prefix.xml")
+        serialized = copy_layout.serialize_xml(tree, source)
+        reparsed = copy_layout.parse_xml(serialized, "roundtrip.xml")
+
+        self.assertEqual(copy_layout.local_name(reparsed.getroot().tag), "root")
+        self.assertEqual(
+            [copy_layout.local_name(element.tag) for element in reparsed.getroot()],
+            ["item"],
+        )
+
+    def test_parser_rejects_doctype_without_third_party_xml_dependencies(self):
+        with self.assertRaisesRegex(ValueError, "unsafe XML declaration"):
+            copy_layout.parse_xml(
+                b'<!DOCTYPE root [<!ENTITY secret "private">]><root>&secret;</root>',
+                "unsafe.xml",
+            )
+
     def test_page_mismatch_is_deferred_to_final_output_verification(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -35,6 +35,9 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
 test('copy-layout helper retains its privacy and geometry verification gates', () => {
   const script = readFileSync(scriptUrl, 'utf8');
 
+  assert.doesNotMatch(script, /\blxml\b/);
+  assert.match(script, /xml\.etree\.ElementTree/);
+  assert.match(script, /unsafe XML declaration/);
   assert.match(script, /visible text remains/);
   assert.match(script, /layout geometry fingerprint changed/);
   assert.match(script, /refusing to overwrite the source document/);
@@ -46,15 +49,16 @@ test('copy-layout helper retains its privacy and geometry verification gates', (
   assert.match(script, /--rhwp-bin/);
 });
 
-test('copy-layout helper defers only an intermediate page-count mismatch', (t) => {
+test('copy-layout helper runs without site packages and defers only an intermediate page-count mismatch', (t) => {
   const python = process.platform === 'win32' ? 'python' : 'python3';
-  const dependency = spawnSync(python, ['-c', 'import lxml'], { encoding: 'utf8' });
-  if (dependency.error?.code === 'ENOENT' || dependency.status !== 0) {
-    t.skip('Python with lxml is unavailable');
+  const availability = spawnSync(python, ['-S', '-c', 'import sys'], { encoding: 'utf8' });
+  if (availability.error?.code === 'ENOENT') {
+    t.skip('Python is unavailable');
     return;
   }
-  const result = spawnSync(python, [fileURLToPath(helperTestUrl)], { encoding: 'utf8' });
+  assert.equal(availability.status, 0, availability.stderr || availability.stdout);
+  const result = spawnSync(python, ['-S', fileURLToPath(helperTestUrl)], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stderr, /Ran 2 tests/);
+  assert.match(result.stderr, /Ran 4 tests/);
   assert.match(result.stderr, /OK/);
 });

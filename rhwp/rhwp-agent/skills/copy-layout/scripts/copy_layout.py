@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
@@ -14,14 +15,10 @@ import sys
 import tempfile
 import unicodedata
 import zipfile
+import xml.etree.ElementTree as etree
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
-
-try:
-    from lxml import etree
-except ImportError as exc:  # pragma: no cover - dependency check is user-facing
-    raise SystemExit("copy-layout requires Python package 'lxml'") from exc
 
 
 OPF_NS = "http://www.idpf.org/2007/opf/"
@@ -111,29 +108,51 @@ def blank_text(value: str | None) -> str | None:
     )
 
 
-def parse_xml(data: bytes, part: str) -> etree._ElementTree:
-    parser = etree.XMLParser(
-        remove_blank_text=False,
-        resolve_entities=False,
-        no_network=True,
-        strip_cdata=False,
-        huge_tree=True,
-    )
+def parse_xml(data: bytes, part: str) -> etree.ElementTree:
+    if re.search(br"<!DOCTYPE|<!ENTITY", data, flags=re.IGNORECASE):
+        raise ValueError(f"unsafe XML declaration in {part}")
     try:
-        return etree.fromstring(data, parser=parser).getroottree()
-    except etree.XMLSyntaxError as exc:
+        for _, namespace in etree.iterparse(io.BytesIO(data), events=("start-ns",)):
+            prefix, uri = namespace
+            # ElementTree reserves ns0, ns1, ... for prefixes it generates.
+            # Those prefixes are legal in source HWPX packages, so let the
+            # serializer assign an equivalent prefix instead of rejecting XML.
+            if prefix != "xml" and not re.fullmatch(r"ns\d+", prefix or ""):
+                etree.register_namespace(prefix or "", uri)
+        return etree.ElementTree(etree.fromstring(data))
+    except (etree.ParseError, ValueError) as exc:
         raise ValueError(f"invalid XML in {part}: {exc}") from exc
 
 
-def serialize_xml(tree: etree._ElementTree, original: bytes) -> bytes:
-    standalone = True if re.search(br"standalone\s*=\s*['\"]yes['\"]", original[:256]) else None
-    return etree.tostring(
-        tree,
-        encoding="UTF-8",
-        xml_declaration=True,
-        standalone=standalone,
-        pretty_print=False,
-    )
+def serialize_xml(tree: etree.ElementTree, original: bytes) -> bytes:
+    standalone = b' standalone="yes"' if re.search(
+        br"standalone\s*=\s*['\"]yes['\"]",
+        original[:256],
+    ) else b""
+    declaration = b'<?xml version="1.0" encoding="UTF-8"' + standalone + b"?>\n"
+    return declaration + etree.tostring(tree.getroot(), encoding="utf-8")
+
+
+def parent_map(root: etree.Element) -> dict[etree.Element, etree.Element]:
+    return {child: parent for parent in root.iter() for child in parent}
+
+
+def descendants_named(root: etree.Element, name: str) -> list[etree.Element]:
+    return [element for element in root.iter() if local_name(element.tag) == name]
+
+
+def children_named(root: etree.Element, name: str) -> list[etree.Element]:
+    return [element for element in root if local_name(element.tag) == name]
+
+
+def ancestors_of(
+    element: etree.Element,
+    parents: dict[etree.Element, etree.Element],
+):
+    current = parents.get(element)
+    while current is not None:
+        yield current
+        current = parents.get(current)
 
 
 def is_xml_part(name: str) -> bool:
@@ -149,60 +168,67 @@ def is_document_xml(name: str) -> bool:
     )
 
 
-def manifest_map(tree: etree._ElementTree) -> dict[str, str]:
+def manifest_map(tree: etree.ElementTree) -> dict[str, str]:
     result: dict[str, str] = {}
-    for item in tree.xpath("//*[local-name()='manifest']/*[local-name()='item']"):
-        item_id = item.get("id")
-        href = item.get("href")
-        if item_id and href:
-            result[item_id] = href.lstrip("/")
+    for manifest in descendants_named(tree.getroot(), "manifest"):
+        for item in children_named(manifest, "item"):
+            item_id = item.get("id")
+            href = item.get("href")
+            if item_id and href:
+                result[item_id] = href.lstrip("/")
     return result
 
 
-def element_is_layout_media(element: etree._Element, part: str) -> bool:
+def element_is_layout_media(
+    element: etree.Element,
+    part: str,
+    parents: dict[etree.Element, etree.Element],
+) -> bool:
     path = PurePosixPath(part)
     if path.parent == PurePosixPath("Contents") and path.name.startswith("masterpage"):
         return True
     if part == "Contents/header.xml":
         return True
-    current: etree._Element | None = element
+    current: etree.Element | None = element
     while current is not None:
         if local_name(current.tag) in LAYOUT_ANCESTORS:
             return True
-        current = current.getparent()
+        current = parents.get(current)
     return False
 
 
 def collect_media_uses(
-    trees: dict[str, etree._ElementTree],
+    trees: dict[str, etree.ElementTree],
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     layout: dict[str, list[str]] = {}
     body: dict[str, list[str]] = {}
     for part, tree in trees.items():
         if not is_document_xml(part):
             continue
+        parents = parent_map(tree.getroot())
         for element in tree.iter():
             for attr_name, value in element.attrib.items():
                 if local_name(attr_name) != "binaryItemIDRef" or not value:
                     continue
-                bucket = layout if element_is_layout_media(element, part) else body
+                bucket = layout if element_is_layout_media(element, part, parents) else body
                 bucket.setdefault(value, []).append(f"{part}:{local_name(element.tag)}")
     return layout, body
 
 
-def remove_field_markers(root: etree._Element) -> int:
+def remove_field_markers(root: etree.Element) -> int:
     removed = 0
+    parents = parent_map(root)
     for element in list(root.iter()):
         if local_name(element.tag) not in FIELD_ELEMENTS:
             continue
-        parent = element.getparent()
+        parent = parents.get(element)
         if parent is not None:
             parent.remove(element)
             removed += 1
     return removed
 
 
-def infer_rendered_page_breaks(root: etree._Element, limit: int) -> int:
+def infer_rendered_page_breaks(root: etree.Element, limit: int) -> int:
     """Make HWPX line-position page resets explicit before HWP conversion."""
     added = 0
     previous_last_position: int | None = None
@@ -229,7 +255,7 @@ def infer_rendered_page_breaks(root: etree._Element, limit: int) -> int:
 
 
 def sanitize_document_tree(
-    tree: etree._ElementTree,
+    tree: etree.ElementTree,
     part: str,
     removable_media: set[str],
     preserve_flow: bool,
@@ -237,8 +263,9 @@ def sanitize_document_tree(
     stats = Counter()
     root = tree.getroot()
     stats["field_markers_removed"] += remove_field_markers(root)
+    parents = parent_map(root)
 
-    # Snapshot first: clearing inline children while walking a live lxml iterator
+    # Snapshot first: clearing inline children while walking a live iterator
     # can skip later sibling runs in long paragraphs.
     for element in list(root.iter()):
         tag = local_name(element.tag)
@@ -251,7 +278,8 @@ def sanitize_document_tree(
                 if tag == "shapeComment" or local_name(child.tag) in TEXT_MARKUP_REMOVE:
                     element.remove(child)
         elif tag == "script" and any(
-            local_name(parent.tag) == "equation" for parent in element.iterancestors()
+            local_name(ancestor.tag) == "equation"
+            for ancestor in ancestors_of(element, parents)
         ):
             if element.text:
                 stats["equations_cleared"] += 1
@@ -272,11 +300,11 @@ def sanitize_document_tree(
     return dict(stats)
 
 
-def sanitize_metadata(tree: etree._ElementTree, title: str) -> dict[str, int]:
+def sanitize_metadata(tree: etree.ElementTree, title: str) -> dict[str, int]:
     stats = Counter()
-    metadata_nodes = tree.xpath("//*[local-name()='metadata']")
+    metadata_nodes = descendants_named(tree.getroot(), "metadata")
     for metadata in metadata_nodes:
-        title_nodes = metadata.xpath("./*[local-name()='title']")
+        title_nodes = children_named(metadata, "title")
         if title_nodes:
             for node in title_nodes:
                 node.text = title
@@ -298,27 +326,25 @@ def sanitize_metadata(tree: etree._ElementTree, title: str) -> dict[str, int]:
 
 
 def scrub_manifest(
-    tree: etree._ElementTree,
+    tree: etree.ElementTree,
     removed_parts: set[str],
 ) -> int:
     removed_ids: set[str] = set()
     removed = 0
-    for item in list(tree.xpath("//*[local-name()='manifest']/*[local-name()='item']")):
-        href = (item.get("href") or "").lstrip("/")
-        if href not in removed_parts:
-            continue
-        item_id = item.get("id")
-        if item_id:
-            removed_ids.add(item_id)
-        parent = item.getparent()
-        if parent is not None:
-            parent.remove(item)
+    for manifest in descendants_named(tree.getroot(), "manifest"):
+        for item in list(children_named(manifest, "item")):
+            href = (item.get("href") or "").lstrip("/")
+            if href not in removed_parts:
+                continue
+            item_id = item.get("id")
+            if item_id:
+                removed_ids.add(item_id)
+            manifest.remove(item)
             removed += 1
-    for itemref in list(tree.xpath("//*[local-name()='spine']/*[local-name()='itemref']")):
-        if itemref.get("idref") in removed_ids:
-            parent = itemref.getparent()
-            if parent is not None:
-                parent.remove(itemref)
+    for spine in descendants_named(tree.getroot(), "spine"):
+        for itemref in list(children_named(spine, "itemref")):
+            if itemref.get("idref") in removed_ids:
+                spine.remove(itemref)
     return removed
 
 
@@ -351,12 +377,13 @@ def available_fallback_path(destination: Path) -> Path:
     return candidate
 
 
-def cleaned_geometry_xml(element: etree._Element) -> bytes:
+def cleaned_geometry_xml(element: etree.Element) -> bytes:
     clone = deepcopy(element)
+    parents = parent_map(clone)
     for node in list(clone.iter()):
         tag = local_name(node.tag)
         if tag in FIELD_ELEMENTS:
-            parent = node.getparent()
+            parent = parents.get(node)
             if parent is not None:
                 parent.remove(node)
             continue
@@ -369,10 +396,10 @@ def cleaned_geometry_xml(element: etree._Element) -> bytes:
         for attr_name in list(node.attrib):
             if local_name(attr_name) in PRIVATE_ATTRS | {"binaryItemIDRef"}:
                 node.set(attr_name, "")
-    return etree.tostring(clone, method="c14n", with_comments=False)
+    return etree.tostring(clone, encoding="utf-8")
 
 
-def layout_fingerprint(trees: dict[str, etree._ElementTree]) -> dict[str, object]:
+def layout_fingerprint(trees: dict[str, etree.ElementTree]) -> dict[str, object]:
     digest = hashlib.sha256()
     counts: Counter[str] = Counter()
     sections = 0
@@ -439,7 +466,7 @@ def validate_output(
         if archive.read("mimetype").strip() != b"application/hwp+zip":
             raise ValueError("unexpected HWPX mimetype")
 
-        trees: dict[str, etree._ElementTree] = {}
+        trees: dict[str, etree.ElementTree] = {}
         leaked_text: list[str] = []
         for name in names:
             if is_xml_part(name):
@@ -463,7 +490,11 @@ def validate_output(
         content_tree = trees.get("Contents/content.hpf")
         if content_tree is None:
             raise ValueError("Contents/content.hpf is missing")
-        titles = content_tree.xpath("//*[local-name()='metadata']/*[local-name()='title']/text()")
+        titles = [
+            title_node.text or ""
+            for metadata in descendants_named(content_tree.getroot(), "metadata")
+            for title_node in children_named(metadata, "title")
+        ]
         if expected_title is not None and titles != [expected_title]:
             raise ValueError(f"document title mismatch: {titles!r}")
 

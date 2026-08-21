@@ -33,6 +33,8 @@ Read `scripts/copy_layout.py`, then run it from this skill's absolute root:
 python3 scripts/copy_layout.py "/absolute/path/source.hwp"
 ```
 
+The helper uses only the Python 3 standard library. Do not search for or install `lxml`, activate a repository-specific Python environment, or retry through an unrelated interpreter. A missing Python executable is an application packaging failure, not a reason to ask the user to save or identify the document again.
+
 The helper preserves package structure, strips previews, scripts, history, and body payloads, keeps media referenced by master pages or layout definitions, assigns the title, and verifies package and geometry invariants. It first empties HWP body text completely; if that contracts pagination, it retries with width-aware blank spacing that retains flow without retaining source words. An HWP→HWPX intermediate page-count mismatch is diagnostic rather than a deliverable failure: the helper may continue sanitizing it, but the final HWP/HWPX must still match the source page count and all other precision gates. For HWP input or output it locates the Rauhwpx `rhwp` binary from `--rhwp-bin`, `RHWP_BIN`, `PATH`, or this repository's build output. Read its JSON report, especially `text_strategy`, `media_usage`, `removed_body_media`, `conversion.intermediate_export`, and `conversion.native_verification` or `conversion.fallback_reason`.
 
 If a removed body image is demonstrably decorative after inspecting the image and placement, rerun to a fresh output path with `--keep-media <manifest-id>` for each such asset. Never retain a chart, photo, scan, signature, or attachment merely to make the result look fuller.
