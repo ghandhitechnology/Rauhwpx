@@ -304,6 +304,7 @@ export class NativeFileHandleRegistry {
   }
 
   async searchNearby(sessionId, documentId, { basenameHint = '' } = {}) {
+    this.#forgetSessionProbes(sessionId);
     const probes = [];
     for (const filePath of await this.#collectNearbyFiles(sessionId, documentId, basenameHint)) {
       const probeId = this.#createId();
@@ -379,6 +380,10 @@ export class NativeFileHandleRegistry {
       }
       this.#deleteEntry(entry);
     }
+    this.#forgetSessionProbes(sessionId);
+  }
+
+  #forgetSessionProbes(sessionId) {
     for (const [probeId, probe] of this.#probes) {
       if (probe.sessionId === sessionId) this.#probes.delete(probeId);
     }
