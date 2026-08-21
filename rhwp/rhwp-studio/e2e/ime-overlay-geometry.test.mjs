@@ -79,6 +79,16 @@ runTest('IME 조합 오버레이 기하', async ({ page }) => {
     mid.compFlowEl.background === 'rgba(0, 0, 0, 0)',
     `복제 띠 배경이 투명하다 (실제 "${mid.compFlowEl.background}")`,
   );
+  // 조합 상자도 캔버스가 되었으므로 #scroll-content canvas 용지 규칙(중앙 정렬
+  // transform + 배경/그림자)이 새지 않아야 한다 — 새면 그림자 달린 상자로 보인다.
+  assert(
+    mid.compEl.transform === 'none',
+    `조합 상자에 페이지 중앙 정렬 transform이 걸리지 않는다 (실제 "${mid.compEl.transform}")`,
+  );
+  assert(
+    mid.compEl.background === 'rgba(0, 0, 0, 0)',
+    `조합 상자 CSS 배경이 투명하다 — 흰 바탕은 캔버스 안에 그린다 (실제 "${mid.compEl.background}")`,
+  );
   const lineH = mid.cursorRect?.height ?? 0;
   assert(
     lineH > 0 && mid.compEl.bcr.h <= lineH * 1.5 + 2,

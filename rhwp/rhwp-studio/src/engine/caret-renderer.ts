@@ -45,7 +45,7 @@ export class CaretRenderer {
   private currentRect: CursorRect | null = null;
 
   // IME 조합 오버레이
-  private compEl: HTMLDivElement;
+  private compEl: HTMLCanvasElement;
   /** preedit 폭만큼 현재 줄의 뒤쪽 픽셀을 밀어 주는 transient 복제 레이어. */
   private compFlowEl: HTMLCanvasElement;
   private isCompMode = false;
@@ -76,15 +76,17 @@ export class CaretRenderer {
       'pointer-events:none;z-index:10;display:none;transform-origin:0 0;';
 
     // IME 조합 오버레이 (블랙박스 + 흰색 글자)
-    this.compEl = document.createElement('div');
+    this.compEl = document.createElement('canvas');
     this.compEl.className = 'caret-composition';
     // 조합 중 글자는 문서 글자와 같은 모습(흰 종이 위 검은 글자)으로 보여주고,
-    // 조합 중임은 밑줄로만 표시한다. 반전된 검은 상자는 시선을 끌어 타자를 방해한다.
-    // 배경은 불투명해야 한다 — 뒤에는 밀리기 전의 원본 픽셀이 남아 있다.
+    // 조합 중임은 밑줄로만 표시한다. DOM 텍스트로 두면 line-box 수직 중앙정렬이
+    // 글리프 위아래를 잘라(overflow:hidden) 확정 글자보다 작아 보이므로, 페이지와
+    // 같은 캔버스 래스터로 엔진의 baseline 관례에 맞춰 직접 그린다.
+    // #scroll-content canvas 규칙(중앙 정렬 transform + 용지 배경/그림자)이 이
+    // 캔버스에도 걸리므로 compFlowEl 과 동일하게 인라인으로 전부 무효화한다.
     this.compEl.style.cssText =
-      'position:absolute;background:#fff;color:#000;pointer-events:none;z-index:10;display:none;' +
-      'line-height:1;overflow:hidden;white-space:pre;text-align:center;box-sizing:border-box;' +
-      'border-bottom:1.5px solid #000;';
+      'position:absolute;pointer-events:none;z-index:10;display:none;' +
+      'transform:none;background:transparent;box-shadow:none;';
     this.compFlowEl = document.createElement('canvas');
     this.compFlowEl.className = 'caret-composition-flow';
     // #scroll-content canvas 규칙(페이지 중앙 정렬 translateX(-50%) + 용지 배경/그림자)이
@@ -193,8 +195,15 @@ export class CaretRenderer {
     }
   }
 
-  /** IME 조합 오버레이를 표시한다 */
-  showComposition(startRect: CursorRect, charWidth: number, zoom: number, text: string, fontFamily: string): void {
+  /** IME 조합 오버레이를 표시한다. fontSizePx 는 문서 글꼴의 실제 px 크기(줌 미적용). */
+  showComposition(
+    startRect: CursorRect,
+    charWidth: number,
+    zoom: number,
+    text: string,
+    fontFamily: string,
+    fontSizePx = 0,
+  ): void {
     this.ensureAttached();
     this.isCompMode = true;
 
@@ -225,15 +234,48 @@ export class CaretRenderer {
     this.compEl.style.top = `${top}px`;
     this.compEl.style.width = `${w}px`;
     this.compEl.style.height = `${h}px`;
-    this.compEl.style.fontSize = `${box.h * 0.85 * zoom}px`;
-    this.compEl.style.fontFamily = fontFamily || 'sans-serif';
-    this.compEl.style.lineHeight = `${h}px`;
-    this.compEl.textContent = text;
+    this.paintComposition(text, fontFamily, fontSizePx, box.h, zoom, w, h);
     this.compEl.style.display = 'block';
     this.visible = true;
     // 조합 상자는 입력을 그대로 비추는 거울이다 — 깜박이면 타자 리듬을 흩뜨린다.
     this.stopBlink();
     this.compEl.style.opacity = '';
+  }
+
+  /**
+   * preedit 를 페이지와 같은 캔버스 래스터로 그린다.
+   *
+   * 글꼴 크기는 문서 글꼴의 실제 px(fontSizePx, 줌 미적용)를 그대로 쓰고,
+   * baseline 은 엔진의 줄 관례(text_height × 0.85)에 맞춰 얹는다 — 확정 글자와
+   * 같은 크기·같은 기준선으로 보인다. 조회 실패(fontSizePx=0) 시에만 기존
+   * 근사(0.85 × 상자 높이)로 폴백한다.
+   */
+  private paintComposition(
+    text: string,
+    fontFamily: string,
+    fontSizePx: number,
+    boxDocHeight: number,
+    zoom: number,
+    w: number,
+    h: number,
+  ): void {
+    const dpr = window.devicePixelRatio || 1;
+    this.compEl.width = Math.max(1, Math.ceil(w * dpr));
+    this.compEl.height = Math.max(1, Math.ceil(h * dpr));
+    const ctx = this.compEl.getContext('2d');
+    if (!ctx) return;
+    ctx.scale(dpr, dpr);
+    // 배경은 불투명 흰색 — 뒤에는 밀리기 전의 원본 픽셀이 남아 있다.
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#000';
+    const glyphPx = fontSizePx > 0 ? fontSizePx * zoom : boxDocHeight * 0.85 * zoom;
+    ctx.font = `${glyphPx}px ${fontFamily || 'sans-serif'}`;
+    ctx.textBaseline = 'alphabetic';
+    const textWidth = ctx.measureText(text).width;
+    ctx.fillText(text, Math.max(0, (w - textWidth) / 2), h * 0.85);
+    // 조합 중 표시 밑줄
+    ctx.fillRect(0, Math.max(0, h - 1.5), w, 1.5);
   }
 
   /** IME 조합 오버레이를 숨기고 일반 캐럿으로 복귀한다 */

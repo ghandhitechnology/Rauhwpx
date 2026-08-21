@@ -548,6 +548,8 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
 
   if (PAGINATION_BOUNDARY_KEYS.has(e.key)) {
     this.resetIosInputSession();
+    // IME 가 확실히 쉬는 경계 키에서만 누적된 textarea value 를 정리한다.
+    this.trimTextareaBufferIfIdle();
     this.flushDeferredPaginationIfNeeded('before-navigation', false);
   }
 
