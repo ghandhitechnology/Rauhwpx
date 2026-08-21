@@ -1739,7 +1739,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   skillEditorBack.type = 'button';
   skillEditorHeader.append(skillEditorTitle, skillEditorBack);
   const skillIconPicker = el('fieldset', 'ag-skill-icon-picker') as HTMLFieldSetElement;
-  const skillIconLegend = el('legend', 'ag-skill-icon-legend', '아이콘');
+  skillIconPicker.setAttribute('aria-label', '스킬 아이콘');
   const skillIconOptions = el('div', 'ag-skill-icon-options');
   const skillIconInputs = new Map<ProductSkillIcon, HTMLInputElement>();
   for (const [value, label] of [
@@ -1748,6 +1748,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     ['system', '시스템'],
   ] as const) {
     const option = el('label', 'ag-skill-icon-option') as HTMLLabelElement;
+    option.title = label;
     const radio = document.createElement('input');
     radio.type = 'radio';
     radio.name = 'ag-skill-icon';
@@ -1755,11 +1756,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     radio.setAttribute('aria-label', `${label} 아이콘`);
     const glyph = el('span', 'ag-skill-icon-option-glyph');
     glyph.appendChild(createIcon(skillGlyphForIcon(value)));
-    option.append(radio, glyph, el('span', 'ag-skill-icon-option-label', label));
+    option.append(radio, glyph);
     skillIconInputs.set(value, radio);
     skillIconOptions.appendChild(option);
   }
-  skillIconPicker.append(skillIconLegend, skillIconOptions);
+  skillIconPicker.append(skillIconOptions);
   const skillGoal = el('textarea', 'ag-skill-field') as HTMLTextAreaElement;
   skillGoal.rows = 3;
   skillGoal.placeholder = '이 스킬이 반복해서 해결할 일을 설명하세요.';
