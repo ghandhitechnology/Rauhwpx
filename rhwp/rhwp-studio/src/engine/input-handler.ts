@@ -5,7 +5,7 @@ import { CaretRenderer } from './caret-renderer';
 import { FieldMarkerRenderer } from './field-marker-renderer';
 import { SelectionRenderer } from './selection-renderer';
 import { CommandHistory } from './history';
-import { DeleteSelectionCommand, ApplyCharFormatCommand, ApplyParaFormatCommand, SnapshotCommand, SetFormValueCommand, TextMutationEffectAccumulator, IMMEDIATE_TEXT_MUTATION_EFFECTS } from './command';
+import { DeleteSelectionCommand, ApplyCharFormatCommand, ApplyParaFormatCommand, SnapshotCommand, SetFormValueCommand, TextMutationEffectAccumulator, IMMEDIATE_TEXT_MUTATION_EFFECTS, applyCharFormatToTarget } from './command';
 import type { OperationDescriptor, ParaFormatTarget, RefreshPolicy, TextMutationEffects, EditCommand, EditContext, FormValueTarget } from './command';
 import { CapturedSnapshotCommand } from './captured-snapshot-command.ts';
 import { VirtualScroll } from '@/view/virtual-scroll';
@@ -467,6 +467,12 @@ export class InputHandler {
   /** transient preedit의 Unicode scalar 길이 */
   private compositionLength = 0;
   /**
+   * 접힌 캐럿에서 툴바/단축키로 고른 다음 입력 서식.
+   * WASM insert 는 커서 앞 run 을 물려받으므로, 선택이 없을 때 글꼴 변경은 여기에 쌓고
+   * 새로 삽입한 범위에 적용한다. 캐럿이 다른 위치로 움직이면 비운다.
+   */
+  private pendingCharFormat: Partial<CharProperties> | null = null;
+  /**
    * 숨은 textarea 에서 이미 문서에 반영한 value prefix 의 길이 (UTF-16).
    *
    * textarea 는 IME 가 소유한다 — 조합이 살아 있을 수 있는 동안 value 를
@@ -680,9 +686,11 @@ export class InputHandler {
     });
     eventBus.on('create-new-document', () => {
       this.clearTableResizeRuntimeCache();
+      this.clearPendingCharFormat();
     });
     eventBus.on('open-document-bytes', () => {
       this.clearTableResizeRuntimeCache();
+      this.clearPendingCharFormat();
     });
 
     // [Task #394] 셀 진입 자동 ON 로직 비활성화 — manual 추적 불필요.
@@ -696,9 +704,7 @@ export class InputHandler {
     eventBus.on('format-char', (props) => {
       if (!this.active) return;
       if (this.editMode === 'form') return;
-      if (this.cursor.hasSelection()) {
-        this.applyCharFormat(props as Partial<CharProperties>);
-      }
+      this.applyCharFormat(props as Partial<CharProperties>);
       // 서식바 조작으로 빠진 포커스를 항상 복원
       this.focusTextarea();
     });
@@ -1838,8 +1844,14 @@ export class InputHandler {
 
   // ─── 서식 적용 ─────────────────────────────────────────
 
-  /** 선택 범위에 글자 서식을 적용한다 */
+  /** 펼친 선택이 있으면 그 범위에, 접힌 캐럿이면 다음 입력(pending) 서식으로 적용한다 */
   private applyCharFormat(props: Partial<CharProperties>): void {
+    if (!this.hasNonCollapsedTextSelection()) {
+      this.mergePendingCharFormat(props);
+      this.emitCursorFormatState();
+      return;
+    }
+    this.clearPendingCharFormat();
     const ranges = this.getCharFormatRangesAtCursor();
     if (ranges.length === 0) return;
     const cmd = new ApplyCharFormatCommand(
@@ -1849,6 +1861,78 @@ export class InputHandler {
       this.getCurrentEditContext(),
     );
     this.executeOperation({ kind: 'command', command: cmd });
+  }
+
+  /** 클릭 직후처럼 anchor 만 있고 범위가 없는 상태는 선택이 아니다. */
+  private hasNonCollapsedTextSelection(): boolean {
+    if (this.cursor.isInHeaderFooter()) {
+      const sel = this.cursor.getHeaderFooterSelectionOrdered();
+      if (!sel) return false;
+      return sel.start.paraIdx !== sel.end.paraIdx || sel.start.charOffset !== sel.end.charOffset;
+    }
+    if (this.cursor.isInFootnote()) {
+      const sel = this.cursor.getFootnoteSelectionOrdered();
+      if (!sel) return false;
+      return sel.start.fnParaIdx !== sel.end.fnParaIdx || sel.start.charOffset !== sel.end.charOffset;
+    }
+    const sel = this.cursor.getSelectionOrdered();
+    if (!sel) return false;
+    return CursorState.comparePositions(sel.start, sel.end) !== 0;
+  }
+
+  private mergePendingCharFormat(props: Partial<CharProperties>): void {
+    const next: Partial<CharProperties> = { ...this.pendingCharFormat, ...props };
+    if (props.fontId !== undefined) delete next.fontIds;
+    if (props.fontIds !== undefined) delete next.fontId;
+    this.pendingCharFormat = next;
+  }
+
+  private clearPendingCharFormat(): void {
+    this.pendingCharFormat = null;
+  }
+
+  /** 삽입 커맨드/IME 커밋에 실어 보낼 타이핑 서식 스냅샷 */
+  peekPendingCharFormat(): Partial<CharProperties> | undefined {
+    if (!this.pendingCharFormat) return undefined;
+    return { ...this.pendingCharFormat };
+  }
+
+  /** 문서에 이미 들어간 삽입 범위(IME preedit, HF/FN record 경로)에 pending 서식을 입힌다 */
+  applyPendingCharFormatToInsertedRange(pos: DocumentPosition, length: number): void {
+    const props = this.pendingCharFormat;
+    if (!props || length <= 0) return;
+    const json = JSON.stringify(props);
+    const startOffset = pos.charOffset;
+    const endOffset = startOffset + length;
+    if (this.cursor.isInHeaderFooter()) {
+      this.wasm.applyCharFormatInHf(
+        this.cursor.hfSectionIdx,
+        this.cursor.headerFooterMode === 'header',
+        this.cursor.hfApplyTo,
+        this.cursor.hfParaIdx,
+        startOffset,
+        endOffset,
+        json,
+      );
+      return;
+    }
+    if (this.cursor.isInFootnote()) {
+      this.wasm.applyCharFormatInFootnote(
+        this.cursor.fnSectionIdx,
+        this.cursor.fnParaIdx,
+        this.cursor.fnControlIdx,
+        this.cursor.fnInnerParaIdx,
+        startOffset,
+        endOffset,
+        json,
+      );
+      return;
+    }
+    applyCharFormatToTarget(this.wasm, {
+      target: editableTargetFromPosition(pos),
+      startOffset,
+      endOffset,
+    }, json);
   }
 
   /** 토글 서식 적용 (상호 배타 처리 포함) */
@@ -1890,6 +1974,11 @@ export class InputHandler {
    * 서식으로 토글 방향이 정해져 Ctrl+B/I/U 가 해제되지 않는 결함이 있었다
    * (한컴은 선택 첫 글자 기준).
    */
+  private withPendingCharFormat(props: CharProperties): CharProperties {
+    if (this.hasNonCollapsedTextSelection() || !this.pendingCharFormat) return props;
+    return { ...props, ...this.pendingCharFormat };
+  }
+
   private getCharPropertiesAtCursor(): CharProperties {
     if (this.cursor.isInHeaderFooter()) {
       const sel = this.cursor.getHeaderFooterSelectionOrdered();
@@ -1897,13 +1986,13 @@ export class InputHandler {
       const offset = sel
         ? sel.start.charOffset
         : (this.cursor.hfCharOffset > 0 ? this.cursor.hfCharOffset - 1 : 0);
-      return this.wasm.getCharPropertiesInHf(
+      return this.withPendingCharFormat(this.wasm.getCharPropertiesInHf(
         this.cursor.hfSectionIdx,
         this.cursor.headerFooterMode === 'header',
         this.cursor.hfApplyTo,
         paraIdx,
         offset,
-      );
+      ));
     }
     if (this.cursor.isInFootnote()) {
       const sel = this.cursor.getFootnoteSelectionOrdered();
@@ -1911,13 +2000,13 @@ export class InputHandler {
       const offset = sel
         ? sel.start.charOffset
         : (this.cursor.fnCharOffset > 0 ? this.cursor.fnCharOffset - 1 : 0);
-      return this.wasm.getCharPropertiesInFootnote(
+      return this.withPendingCharFormat(this.wasm.getCharPropertiesInFootnote(
         this.cursor.fnSectionIdx,
         this.cursor.fnParaIdx,
         this.cursor.fnControlIdx,
         innerParaIdx,
         offset,
-      );
+      ));
     }
     const sel = this.cursor.getSelectionOrdered();
     const pos = sel ? sel.start : this.cursor.getPosition();
@@ -1932,16 +2021,18 @@ export class InputHandler {
       // 정하므로(그리고 실제 적용 ApplyCharFormatCommand 는 이미 ...ByPath 로 안쪽 셀에
       // 적용) 방향이 어긋나 Ctrl+B/I 가 거꾸로 동작하고 툴바 표시도 오답이 된다.
       if ((pos.cellPath?.length ?? 0) > 0) {
-        return this.wasm.getCellCharPropertiesAtByPath(
+        return this.withPendingCharFormat(this.wasm.getCellCharPropertiesAtByPath(
           pos.sectionIndex, pos.parentParaIndex, JSON.stringify(pos.cellPath), queryOffset,
-        );
+        ));
       }
-      return this.wasm.getCellCharPropertiesAt(
+      return this.withPendingCharFormat(this.wasm.getCellCharPropertiesAt(
         pos.sectionIndex, pos.parentParaIndex, pos.controlIndex!,
         pos.cellIndex!, pos.cellParaIndex!, queryOffset,
-      );
+      ));
     }
-    return this.wasm.getCharPropertiesAt(pos.sectionIndex, pos.paragraphIndex, queryOffset);
+    return this.withPendingCharFormat(
+      this.wasm.getCharPropertiesAt(pos.sectionIndex, pos.paragraphIndex, queryOffset),
+    );
   }
 
   /** 커서 위치 문단에 문단 서식을 적용한다 */
@@ -2553,6 +2644,7 @@ export class InputHandler {
     // 고스트 오버레이 제거를 위해 렌더러도 함께 clear.
     this.cursor.exitCellSelectionMode();
     this.cellSelectionRenderer?.clear();
+    this.clearPendingCharFormat();
     // [#2339] 외부 위치-기반 파생 상태(find currentHit 등)를 구독으로 정리하는 확장점.
     this.eventBus.emit('history-jumped');
   }
@@ -3765,6 +3857,7 @@ export class InputHandler {
     this._iosPrevText = '';
     this._iosRequiresFullRefresh = false;
     this.resetTextareaBuffer();
+    this.clearPendingCharFormat();
     this.caret.hide();
     this.fieldMarker.hide();
     this.cursor.clearSelection();

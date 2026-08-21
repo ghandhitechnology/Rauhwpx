@@ -68,7 +68,7 @@ test('IME preedit은 조합 중 문서에 반영하고 커밋만 히스토리에
   const inputStart = textSource.indexOf('export function onInput', compositionEndStart);
   const compositionEndSource = textSource.slice(compositionEndStart, inputStart);
   assert.match(compositionEndSource, /this\.imeSession\.finish\(event\?\.data, textareaText\)/);
-  assert.match(compositionEndSource, /kind: 'record',\s*command: new InsertTextCommand\(anchor, composed\)/);
+  assert.match(compositionEndSource, /kind: 'record',\s*command: new InsertTextCommand\(anchor, composed/);
   assert.match(compositionEndSource, /kind: 'record',\s*command: new InsertTextInHeaderFooterCommand/);
   assert.match(compositionEndSource, /kind: 'record',\s*command: new InsertTextInFootnoteCommand/);
   assert.doesNotMatch(compositionEndSource, /kind: 'command'/);
