@@ -402,6 +402,7 @@ function applyCompositionPreview(this: any, preedit: string): void {
   this.resetRawTextMutationEffects();
   this.replaceTextAtRaw(anchor, this.compositionLength, preedit);
   this.compositionLength = charCount(preedit);
+  this.applyPendingCharFormatToInsertedRange?.(anchor, this.compositionLength);
   const boundaryHandled = this.consumeRawTextMutationBeforeCursor();
   moveCompositionCaret.call(this, anchor, this.compositionLength);
   this.afterTextInputEdit(anchor, this.cursor.getPosition(), {
@@ -507,7 +508,9 @@ export function onCompositionEnd(this: any, event?: CompositionEvent): void {
         };
         this.executeOperation({
           kind: 'record',
-          command: new InsertTextInHeaderFooterCommand(target, this.cursor.hfParaIdx, anchor.charOffset, composed),
+          command: new InsertTextInHeaderFooterCommand(
+            target, this.cursor.hfParaIdx, anchor.charOffset, composed, this.peekPendingCharFormat?.(),
+          ),
         });
         committed = true;
       } else if (this.cursor.isInFootnote()) {
@@ -517,12 +520,17 @@ export function onCompositionEnd(this: any, event?: CompositionEvent): void {
         };
         this.executeOperation({
           kind: 'record',
-          command: new InsertTextInFootnoteCommand(target, this.cursor.fnInnerParaIdx, anchor.charOffset, composed),
+          command: new InsertTextInFootnoteCommand(
+            target, this.cursor.fnInnerParaIdx, anchor.charOffset, composed, this.peekPendingCharFormat?.(),
+          ),
         });
         committed = true;
       } else {
         const refreshClickHereGuide = this.isClickHereGuidePosition?.(anchor) === true;
-        this.executeOperation({ kind: 'record', command: new InsertTextCommand(anchor, composed) });
+        this.executeOperation({
+          kind: 'record',
+          command: new InsertTextCommand(anchor, composed, undefined, this.peekPendingCharFormat?.()),
+        });
         if (refreshClickHereGuide) this.refreshClickHereAfterFirstInput?.();
         committed = true;
       }
@@ -600,6 +608,7 @@ export function onInput(this: any, e?: InputEvent): void {
 
     this.replaceTextAtRaw(this._iosAnchor, this._iosLength, text);
     this._iosLength = charCount(text);
+    this.applyPendingCharFormatToInsertedRange?.(this._iosAnchor, this._iosLength);
 
     const boundaryHandled = this.consumeRawTextMutationBeforeCursor();
     this._iosRequiresFullRefresh = this._iosRequiresFullRefresh || boundaryHandled;
@@ -648,8 +657,14 @@ export function onInput(this: any, e?: InputEvent): void {
       const paraIdx = this.cursor.hfParaIdx;
       const charOffset = this.cursor.hfCharOffset;
       this.wasm.insertTextInHeaderFooter(target.sectionIdx, isHeader, target.applyTo, paraIdx, charOffset, text);
+      this.applyPendingCharFormatToInsertedRange?.({ ...this.cursor.getPosition(), charOffset }, charCount(text));
       // [Task #2337] 히스토리 기록 → 본문 스냅샷 undo 가 이 편집을 무언 파괴하지 않게 한다.
-      this.executeOperation({ kind: 'record', command: new InsertTextInHeaderFooterCommand(target, paraIdx, charOffset, text) });
+      this.executeOperation({
+        kind: 'record',
+        command: new InsertTextInHeaderFooterCommand(
+          target, paraIdx, charOffset, text, this.peekPendingCharFormat?.(),
+        ),
+      });
       this.cursor.setHfCursorPosition(paraIdx, charOffset + charCount(text));
       this.afterEdit();
     } catch (err) {
@@ -668,7 +683,13 @@ export function onInput(this: any, e?: InputEvent): void {
       const innerParaIdx = this.cursor.fnInnerParaIdx;
       const charOffset = this.cursor.fnCharOffset;
       this.wasm.insertTextInFootnote(target.sectionIdx, target.paraIdx, target.controlIdx, innerParaIdx, charOffset, text);
-      this.executeOperation({ kind: 'record', command: new InsertTextInFootnoteCommand(target, innerParaIdx, charOffset, text) });
+      this.applyPendingCharFormatToInsertedRange?.({ ...this.cursor.getPosition(), charOffset }, charCount(text));
+      this.executeOperation({
+        kind: 'record',
+        command: new InsertTextInFootnoteCommand(
+          target, innerParaIdx, charOffset, text, this.peekPendingCharFormat?.(),
+        ),
+      });
       this.cursor.setFnCursorPosition(innerParaIdx, charOffset + charCount(text));
       this.afterEdit();
     } catch (err) {
@@ -693,7 +714,10 @@ export function onInput(this: any, e?: InputEvent): void {
     this.consumeTextareaValue();
     return;
   }
-  this.executeOperation({ kind: 'command', command: new InsertTextCommand(insertPos, text) });
+  this.executeOperation({
+    kind: 'command',
+    command: new InsertTextCommand(insertPos, text, undefined, this.peekPendingCharFormat?.()),
+  });
   if (refreshClickHereGuide) {
     this.refreshClickHereAfterFirstInput?.();
   }

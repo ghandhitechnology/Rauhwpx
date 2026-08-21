@@ -170,6 +170,7 @@ function toNavigationKeyInput(e: KeyboardEvent): NavigationKeyInput {
 }
 
 function executeNavigationAction(this: any, action: NavigationAction, shiftKey: boolean): void {
+  this.clearPendingCharFormat?.();
   if (shiftKey) this.cursor.setAnchor();
   else this.cursor.clearSelection();
 
@@ -250,7 +251,15 @@ function pastePlainText(this: any, text: string, hasSelection: boolean): void {
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     if (lines[i]) {
-      this.executeOperation({ kind: 'command', command: new InsertTextCommand(this.cursor.getPosition(), lines[i]) });
+      this.executeOperation({
+        kind: 'command',
+        command: new InsertTextCommand(
+          this.cursor.getPosition(),
+          lines[i],
+          undefined,
+          this.peekPendingCharFormat?.(),
+        ),
+      });
     }
     if (i < lines.length - 1 && !this.cursor.isInCell()) {
       this.executeOperation({ kind: 'command', command: new SplitParagraphCommand(this.cursor.getPosition()) });
@@ -1251,6 +1260,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     case 'ArrowUp':
     case 'ArrowDown': {
       e.preventDefault();
+      this.clearPendingCharFormat?.();
       const vertical = this.cursor.isInVerticalCell();
       // 세로쓰기 셀: ↑↓=글자이동(horizontal), ←→=줄이동(vertical)
       // 가로쓰기:    ←→=글자이동(horizontal), ↑↓=줄이동(vertical)
@@ -1315,6 +1325,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     }
     case 'Home': {
       e.preventDefault();
+      this.clearPendingCharFormat?.();
       if (e.shiftKey) {
         this.cursor.setAnchor();
         this.cursor.moveToLineStart();
@@ -1329,6 +1340,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     }
     case 'End': {
       e.preventDefault();
+      this.clearPendingCharFormat?.();
       if (e.shiftKey) {
         this.cursor.setAnchor();
         this.cursor.moveToLineEnd();
