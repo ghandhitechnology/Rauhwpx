@@ -71,7 +71,7 @@ test('composer attachments upload into removable staging drafts before their mes
   assert.match(library, /function takeReadyDrafts\(\): StagedReference\[\]/);
   assert.doesNotMatch(sidebar, /if \(!input\.value\) referenceLibrary\.discardDrafts\(\)/);
   assert.match(sidebar, /referenceLibrary\.takeReadyDrafts\(\)/);
-  assert.match(sidebar, /bridge\.sendUserMessage\(text, skillNameForMessage, staged\.map/);
+  assert.match(sidebar, /bridge\.sendUserMessage\(requestText, skillNameForMessage, staged\.map/);
   assert.match(sidebar, /send\.disabled = connState !== 'connected' \|\| attachmentsSending \|\| chatStarting \|\| referenceLibrary\.hasBlockingDrafts\(\)/);
   assert.match(css, /\.ag-reference-upload-remove:focus-visible/);
 });

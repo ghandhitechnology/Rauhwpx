@@ -76,6 +76,36 @@ test('fallbackTitle uses the first user message', () => {
   );
 });
 
+test('fallbackTitle preserves a structured skill-only invocation', () => {
+  assert.equal(
+    fallbackTitle([{ role: 'user', text: '', skillName: 'summarize-document' }]),
+    '/summarize-document',
+  );
+  assert.equal(
+    fallbackTitle([{ role: 'user', text: '표만 대상으로', skillName: 'summarize-document' }]),
+    '/summarize-document 표만 대상으로',
+  );
+});
+
+test('skill invocation icon survives thread persistence', () => {
+  mem.clear();
+  const t = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high' });
+  t.messages.push({
+    role: 'user',
+    text: '',
+    skillName: 'my-skill',
+    skillIcon: 'pencil',
+  });
+  upsertThread(t);
+  assert.equal(getThread(t.id)?.messages[0]?.skillIcon, 'pencil');
+
+  const raw = JSON.parse(mem.get('rhwp-agent-threads') ?? '[]') as Array<Record<string, unknown>>;
+  const messages = raw[0]?.messages as Array<Record<string, unknown>>;
+  messages[0]!.skillIcon = 'invalid';
+  mem.set('rhwp-agent-threads', JSON.stringify(raw));
+  assert.equal(getThread(t.id)?.messages[0]?.skillIcon, undefined);
+});
+
 test('setThreadTitle updates a persisted thread', () => {
   mem.clear();
   const t = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high' });

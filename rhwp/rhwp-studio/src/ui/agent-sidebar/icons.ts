@@ -34,6 +34,12 @@ const STROKE_PATHS = {
   paperclip: 'M4.1 6.2 7.3 3a1.7 1.7 0 0 1 2.4 2.4L5.8 9.3A2.5 2.5 0 0 1 2.3 5.8l4-4M4.7 7.5 8 4.2',
   references: 'M3 2.2h4.1L9 4.1v5.7H3zM7.1 2.2v1.9H9M4.4 6h3.2M4.4 7.7h2.3',
   search: 'M5.3 2.5a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6M7.3 7.3l2.2 2.2',
+  /* 문서에 직접 쓰는 skill — 짧고 삐딱한 연필 한 자루. */
+  skillEdit: 'M2.1 9.9l.7-2.5 5-5 1.9 1.9-5 5zM7.1 3.1 9 5M2.8 7.4l1.9 1.9',
+  /* 내부 작업 skill — 안테나·입 없이 사각 몸체와 두 눈만 둔다. */
+  skillBot: 'M2.1 3h7.8v6H2.1zM4 6h.6M7.4 6H8',
+  /* 기타 skill — 가는 방사선 대신 몸통과 넓은 톱니가 이어진 묵직한 gear. */
+  skillSystem: 'M5.05 1h1.9l.34 1.3c.36.1.7.24 1.02.42l1.16-.68 1.49 1.49-.68 1.16c.18.32.32.66.42 1.02L11 5.05v1.9l-1.3.34c-.1.36-.24.7-.42 1.02l.68 1.16-1.49 1.49-1.16-.68c-.32.18-.66.32-1.02.42L6.95 11h-1.9l-.34-1.3c-.36-.1-.7-.24-1.02-.42l-1.16.68-1.49-1.49.68-1.16c-.18-.32-.32-.66-.42-1.02L1 6.95v-1.9l1.3-.34c.1-.36.24-.7.42-1.02l-.68-1.16 1.49-1.49 1.16.68c.32-.18.66-.32 1.02-.42zM6 4.3a1.7 1.7 0 1 0 0 3.4 1.7 1.7 0 0 0 0-3.4',
 } as const;
 
 /** 사각 프레임(개체)만 채우기 없이 rect 로 그린다. */
@@ -72,7 +78,7 @@ export function createIcon(name: SidebarIconName, className = ''): SVGSVGElement
   path.setAttribute('d', STROKE_PATHS[name as keyof typeof STROKE_PATHS]);
   path.setAttribute('fill', 'none');
   path.setAttribute('stroke', 'currentColor');
-  path.setAttribute('stroke-width', '1.25');
+  path.setAttribute('stroke-width', name === 'skillSystem' ? '1.35' : '1.25');
   path.setAttribute('stroke-linecap', 'round');
   path.setAttribute('stroke-linejoin', 'round');
   svg.appendChild(path);

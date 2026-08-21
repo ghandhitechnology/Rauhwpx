@@ -1,6 +1,7 @@
 ---
 name: present-plan
 description: Present a completed implementation plan as the structured review artifact the user can open from chat. Use at the end of planning, once the proposal is concrete and ready for approval.
+icon: system
 ---
 
 Finish planning through the structured plan review flow.
