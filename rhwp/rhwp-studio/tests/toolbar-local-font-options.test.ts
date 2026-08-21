@@ -36,6 +36,25 @@ test('시스템 글꼴 목록은 고정 높이 메뉴 안에서 스크롤된다'
   assert.match(styles, /\.font-picker-list \{[\s\S]*flex: 1 1 auto;[\s\S]*overflow: auto/);
 });
 
+test('글꼴 메뉴는 현재 범주 목록을 검색어로 좁힌다', () => {
+  const filterStart = source.indexOf('private filterFontMenuEntries(');
+  const filterEnd = source.indexOf('private uniqueFontMenuEntries(', filterStart);
+  const filterMethod = source.slice(filterStart, filterEnd);
+  const renderStart = source.indexOf('private renderFontMenu(');
+  const renderEnd = source.indexOf('private getFontMenuEntries(', renderStart);
+  const renderMethod = source.slice(renderStart, renderEnd);
+
+  assert.match(source, /search\.placeholder = '글꼴 검색'/);
+  assert.match(source, /search\.className = 'font-picker-search'/);
+  assert.match(source, /search\.focus\(\)/);
+  assert.match(filterMethod, /entry\.label\.toLowerCase\(\)\.includes\(query\)/);
+  assert.match(filterMethod, /entry\.value\.toLowerCase\(\)\.includes\(query\)/);
+  assert.match(renderMethod, /this\.filterFontMenuEntries\(this\.getFontMenuEntries\(this\.fontMenuCategory\)\)/);
+  assert.match(renderMethod, /검색 결과가 없습니다\./);
+  assert.match(source, /if \(event\.key !== 'Enter' \|\| event\.isComposing\) return;/);
+  assert.match(styles, /\.font-picker-search \{/);
+});
+
 test('로컬 글꼴 재감지는 캐럿 글꼴이 아니라 문서 전체 글꼴 목록을 보존한다', () => {
   const refreshStart = source.indexOf('private refreshFontDropdown(): void');
   const refreshEnd = source.indexOf('/** 문서 로드 시 스타일 목록', refreshStart);
