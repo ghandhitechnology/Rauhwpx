@@ -603,7 +603,7 @@ test('verifyPick accepts the bookmarked path and rejects a different file', asyn
     const extra = await registry.create('session-a', other);
     assert.equal(created.ok && extra.ok, true);
     if (!created.ok || !extra.ok) return;
-    registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId, 'blake3:same');
+    registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId);
     assert.equal(
       await registry.verifyPick('session-a', 'document-a', created.descriptor.handleId),
       true,
@@ -665,5 +665,63 @@ test('a later nearby search expires unclaimed probes from the same session', asy
       name: 'report.hwp',
       bytes: new Uint8Array([1]),
     });
+  });
+});
+
+const VALID_DIGEST = `blake3:${'ab'.repeat(32)}`;
+
+test('bookmark digest must be a 64-character blake3 hex string', async () => {
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async () => '/canonical/report.hwp',
+    createId: () => 'handle',
+  });
+  const created = await registry.create('session-a', '/canonical/report.hwp');
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId, 'blake3:not-hex');
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'document-a',
+    { path: '/canonical/report.hwp', digest: null },
+  ]]);
+
+  registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId, VALID_DIGEST);
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'document-a',
+    { path: '/canonical/report.hwp', digest: VALID_DIGEST },
+  ]]);
+
+  registry.loadBookmarks([['document-a', { path: '/canonical/report.hwp', digest: 'blake3:nope' }]]);
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'document-a',
+    { path: '/canonical/report.hwp', digest: null },
+  ]]);
+
+  registry.loadBookmarks([['document-a', { path: '/canonical/report.hwp', digest: VALID_DIGEST }]]);
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'document-a',
+    { path: '/canonical/report.hwp', digest: VALID_DIGEST },
+  ]]);
+});
+
+test('remembering a replaced handle without a digest does not revert the bookmark', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const original = join(directory, 'old.hwp');
+    const savedAs = join(directory, 'new.hwp');
+    await writeFs(original, new Uint8Array([1]));
+    await writeFs(savedAs, new Uint8Array([2]));
+    const registry = new NativeFileHandleRegistry();
+    const previous = await registry.create('session-a', original);
+    const next = await registry.create('session-a', savedAs);
+    assert.equal(previous.ok && next.ok, true);
+    if (!previous.ok || !next.ok) return;
+
+    registry.rememberDocument('document-a', 'session-a', previous.descriptor.handleId, VALID_DIGEST);
+    registry.rememberDocument('document-a', 'session-a', next.descriptor.handleId, VALID_DIGEST);
+    registry.rememberDocument('document-a', 'session-a', previous.descriptor.handleId);
+
+    const bookmark = registry.dumpBookmarks();
+    assert.equal(bookmark[0]?.[1].path.endsWith('new.hwp'), true);
+    assert.equal(bookmark[0]?.[1].digest, VALID_DIGEST);
   });
 });

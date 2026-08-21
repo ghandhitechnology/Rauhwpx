@@ -282,6 +282,13 @@ export class NativeFileHandleRegistry {
   rememberDocument(documentId, senderSessionId, handleId, digest) {
     const entry = this.#entryForSender(senderSessionId, handleId);
     const previous = this.#bookmarks.get(documentId);
+    if (
+      previous
+      && digest === undefined
+      && this.#ownershipKey(previous.path) !== entry.ownershipPath
+    ) {
+      return previous.path;
+    }
     let nextDigest = previous?.digest ?? null;
     if (digest !== undefined) nextDigest = parseStoredDigest(digest);
     if (this.#bookmarks.has(documentId)) this.#bookmarks.delete(documentId);
@@ -503,7 +510,7 @@ export class NativeFileHandleRegistry {
 }
 
 function parseStoredDigest(value) {
-  return typeof value === 'string' && value.startsWith('blake3:') ? value : null;
+  return typeof value === 'string' && /^blake3:[0-9a-f]{64}$/.test(value) ? value : null;
 }
 
 function parseBookmarkEntry(item) {
