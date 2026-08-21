@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('rhwpDesktop', {
   getSessionContext: () => ipcRenderer.invoke('desktop:get-session-context'),
   getLaunchFiles: () => ipcRenderer.invoke('desktop:get-launch-files'),
-  pickNativeOpenFile: () => ipcRenderer.invoke('desktop:pick-native-open-file'),
+  pickNativeOpenFile: (options) => ipcRenderer.invoke('desktop:pick-native-open-file', options),
   claimNativeDroppedFile: (file) => {
     const path = webUtils.getPathForFile(file);
     return path ? ipcRenderer.invoke('desktop:claim-native-dropped-file', path) : null;
@@ -27,14 +27,32 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
     firstHandleId,
     secondHandleId,
   ),
-  rememberNativeDocument: (documentId, handleId) => ipcRenderer.invoke(
+  rememberNativeDocument: (documentId, handleId, digest) => ipcRenderer.invoke(
     'desktop:remember-native-document',
     documentId,
     handleId,
+    digest,
   ),
   reopenNativeDocument: (documentId) => ipcRenderer.invoke(
     'desktop:reopen-native-document',
     documentId,
+  ),
+  discoverNativeDocument: (documentId, options) => ipcRenderer.invoke(
+    'desktop:discover-native-document',
+    documentId,
+    options,
+  ),
+  searchNearbyNativeDocument: (documentId, options) => ipcRenderer.invoke(
+    'desktop:search-nearby-native-document',
+    documentId,
+    options,
+  ),
+  readNativeProbe: (probeId) => ipcRenderer.invoke('desktop:native-probe-read', probeId),
+  claimNativeProbe: (probeId) => ipcRenderer.invoke('desktop:native-probe-claim', probeId),
+  verifyNativePick: (documentId, handleId) => ipcRenderer.invoke(
+    'desktop:verify-native-pick',
+    documentId,
+    handleId,
   ),
   reserveDocument: (identity, nativeHandleId) => ipcRenderer.invoke(
     'desktop:document-reserve',

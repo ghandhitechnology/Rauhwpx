@@ -502,11 +502,23 @@ ipcMain.handle('desktop:get-launch-files', (event) => {
   const session = sessionForEvent(event);
   return nativeFiles.descriptorsForSession(session.sessionId);
 });
-ipcMain.handle('desktop:pick-native-open-file', async (event) => {
+ipcMain.handle('desktop:pick-native-open-file', async (event, options = {}) => {
   const session = sessionForEvent(event);
   const window = BrowserWindow.fromWebContents(event.sender);
   if (!window) throw new Error('Open picker sender window is unavailable');
+  const suggestedName = typeof options?.suggestedName === 'string'
+    ? basename(options.suggestedName)
+    : '';
+  const documentId = typeof options?.documentId === 'string' ? options.documentId : '';
+  const bookmarked = documentId ? nativeFiles.bookmarkPathFor(documentId) : null;
+  let defaultPath;
+  if (bookmarked) {
+    defaultPath = suggestedName ? join(dirname(bookmarked), suggestedName) : bookmarked;
+  } else if (suggestedName) {
+    defaultPath = suggestedName;
+  }
   const picked = await dialog.showOpenDialog(window, {
+    ...(defaultPath ? { defaultPath } : {}),
     filters: [{ name: 'HWP/HWPX/HML documents', extensions: ['hwp', 'hwpx', 'hml'] }],
     properties: ['openFile'],
   });
@@ -572,11 +584,11 @@ ipcMain.handle('desktop:native-file-is-same', (event, firstHandleId, secondHandl
   const session = sessionForEvent(event);
   return nativeFiles.isSameEntry(session.sessionId, firstHandleId, secondHandleId);
 });
-ipcMain.handle('desktop:remember-native-document', (event, documentId, handleId) => {
+ipcMain.handle('desktop:remember-native-document', (event, documentId, handleId, digest) => {
   const session = sessionForEvent(event);
   if (typeof documentId !== 'string' || !documentId) throw new Error('documentId required');
   if (typeof handleId !== 'string' || !handleId) throw new Error('handleId required');
-  nativeFiles.rememberDocument(documentId, session.sessionId, handleId);
+  nativeFiles.rememberDocument(documentId, session.sessionId, handleId, digest);
   void persistNativeBookmarks();
 });
 ipcMain.handle('desktop:reopen-native-document', async (event, documentId) => {
@@ -589,6 +601,48 @@ ipcMain.handle('desktop:reopen-native-document', async (event, documentId) => {
     return { owned: true };
   }
   return { ...result.descriptor, saveTargetCreated: result.created };
+});
+ipcMain.handle('desktop:discover-native-document', async (event, documentId, options = {}) => {
+  const session = sessionForEvent(event);
+  if (typeof documentId !== 'string' || !documentId) return null;
+  const result = await nativeFiles.discoverDocument(session.sessionId, documentId, {
+    basenameHint: typeof options?.basenameHint === 'string' ? options.basenameHint : '',
+    digest: typeof options?.digest === 'string' ? options.digest : null,
+  });
+  if (!result) return null;
+  if (!result.ok) {
+    sessions.focusSession(result.ownerSessionId);
+    return { owned: true };
+  }
+  return { ...result.descriptor, saveTargetCreated: result.created };
+});
+ipcMain.handle('desktop:search-nearby-native-document', async (event, documentId, options = {}) => {
+  const session = sessionForEvent(event);
+  if (typeof documentId !== 'string' || !documentId) return [];
+  return nativeFiles.searchNearby(session.sessionId, documentId, {
+    basenameHint: typeof options?.basenameHint === 'string' ? options.basenameHint : '',
+  });
+});
+ipcMain.handle('desktop:native-probe-read', (event, probeId) => {
+  const session = sessionForEvent(event);
+  if (typeof probeId !== 'string' || !probeId) throw new Error('probeId required');
+  return nativeFiles.readProbe(session.sessionId, probeId);
+});
+ipcMain.handle('desktop:native-probe-claim', async (event, probeId) => {
+  const session = sessionForEvent(event);
+  if (typeof probeId !== 'string' || !probeId) return null;
+  const result = await nativeFiles.claimProbe(session.sessionId, probeId);
+  if (!result.ok) {
+    sessions.focusSession(result.ownerSessionId);
+    return { owned: true };
+  }
+  return { ...result.descriptor, saveTargetCreated: result.created };
+});
+ipcMain.handle('desktop:verify-native-pick', (event, documentId, handleId) => {
+  const session = sessionForEvent(event);
+  if (typeof documentId !== 'string' || !documentId) return false;
+  if (typeof handleId !== 'string' || !handleId) return false;
+  return nativeFiles.verifyPick(session.sessionId, documentId, handleId);
 });
 ipcMain.handle('desktop:document-reserve', (event, identity, nativeHandleId) => {
   const session = sessionForEvent(event);
