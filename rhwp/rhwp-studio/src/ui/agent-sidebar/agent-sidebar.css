@@ -3391,12 +3391,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 /* 입력기 위의 진행 정보는 계획/변경 surface의 높이를 만들지 않는다.
-   텍스트와 계획 복원 버튼은 한 overlay 행에서 서로의 폭을 예약한다. */
+   텍스트와 계획 복원 버튼은 한 overlay 행에서 서로의 폭을 예약한다.
+   편대 도크가 서 있는 동안에는 --ag-fleet-dock-h 만큼 위로 올라간다. */
 .ag-composer-overlay {
   position: absolute;
   z-index: 3;
   right: 2px;
-  bottom: calc(100% + 5px);
+  bottom: calc(100% + 5px + var(--ag-fleet-dock-h, 0px));
   left: 2px;
   display: flex;
   min-width: 0;
@@ -5447,6 +5448,11 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   outline-offset: 2px;
 }
 
+/* 카드 제목은 텍스트로 상태를 말하므로 앞쪽 상태 표시는 그리지 않는다. */
+.ag-fleet-toggle > .ag-fleet-dot {
+  display: none;
+}
+
 .ag-fleet-label {
   flex: 1 1 auto;
   min-width: 0;
@@ -5665,7 +5671,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   display: grid;
   box-sizing: border-box;
   width: 100%;
-  grid-template-columns: 7px minmax(0, 1fr) auto 11px;
+  grid-template-columns: 12px minmax(0, 1fr) auto 11px;
   grid-template-rows: 16px 14px 13px;
   align-items: center;
   column-gap: 7px;
@@ -5696,6 +5702,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-fleet-head > .ag-fleet-dot {
   grid-column: 1;
   grid-row: 1;
+  justify-self: center;
 }
 
 .ag-fleet-name {
@@ -5857,6 +5864,195 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   display: none;
 }
 
+/* ── 편대 도크 (입력기 위 알약 + 팝업) ───────────────────
+   살아 있는 카드는 입력기 바로 위 팝업에 모이고, 알약은 픽셀 휠과 함께
+   남은 작업 수를 말한다. 도크는 absolute 여서 대화 높이를 건드리지 않고,
+   정착한 카드는 흐름으로 옮겨진다 (.ag-fleet-dock 은 form.ag-composer 의
+   자식이라 붙일 자리를 따로 옮기지 않는다). */
+
+.ag-fleet-dock {
+  position: absolute;
+  right: 10px;
+  bottom: calc(100% + 7px);
+  left: 10px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.ag-fleet-dock[hidden] {
+  display: none;
+}
+
+.ag-fleet-dock-pill {
+  pointer-events: auto;
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-height: 28px;
+  margin: 0;
+  padding: 5px 9px 5px 11px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: 999px;
+  background: var(--ag-raised);
+  box-shadow: var(--n-elev-1);
+  color: var(--ag-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  animation: ag-dock-arrive 220ms var(--ag-motion-out) both;
+}
+
+.ag-fleet-dock-pill:hover {
+  color: var(--ag-text);
+  background: var(--ag-hover);
+}
+
+.ag-fleet-dock-pill:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.ag-fleet-dock-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-fleet-dock-pill .ag-pixel-wheel {
+  color: var(--ag-accent);
+}
+
+.ag-fleet-dock-chevron {
+  width: 12px;
+  height: 12px;
+  color: currentColor;
+  transform: rotate(180deg);
+  transition: transform 200ms var(--ag-motion-out);
+}
+
+/* 닫혀 있을 때는 위쪽을 가리킨다 — 펼치기 방향. */
+.ag-fleet-dock[aria-expanded='false'] .ag-fleet-dock-chevron,
+.ag-fleet-dock-pill[aria-expanded='false'] .ag-fleet-dock-chevron {
+  transform: rotate(0deg);
+}
+
+.ag-fleet-popup {
+  pointer-events: auto;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  max-height: min(320px, 40vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  padding: 6px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-field);
+  background: color-mix(in srgb, var(--ag-bg) 88%, transparent);
+  box-shadow: var(--n-elev-2);
+  animation: ag-dock-arrive 240ms var(--ag-motion-out) both;
+}
+
+.ag-fleet-popup[hidden] {
+  display: none;
+}
+
+/* ── 픽셀 휠 ─────────────────────────────────────────
+   부드러운 회전이 아니라 step 타이밍으로 칸을 건너뛰는 8픽셀 짜리 바퀴다.
+   비트 하나가 12% 씩 이동하고, 나머지는 단계별로 어두워진다. */
+
+.ag-pixel-wheel {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+}
+
+.ag-pixel-bit {
+  position: absolute;
+  inset: 0;
+  animation: ag-pixel-chase 0.96s steps(1, end) infinite;
+}
+
+.ag-pixel-bit::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 5px;
+  width: 2px;
+  height: 2px;
+  background: currentColor;
+}
+
+.ag-pixel-bit:nth-child(1) { transform: rotate(0deg); }
+.ag-pixel-bit:nth-child(2) { transform: rotate(45deg); animation-delay: -0.12s; }
+.ag-pixel-bit:nth-child(3) { transform: rotate(90deg); animation-delay: -0.24s; }
+.ag-pixel-bit:nth-child(4) { transform: rotate(135deg); animation-delay: -0.36s; }
+.ag-pixel-bit:nth-child(5) { transform: rotate(180deg); animation-delay: -0.48s; }
+.ag-pixel-bit:nth-child(6) { transform: rotate(225deg); animation-delay: -0.6s; }
+.ag-pixel-bit:nth-child(7) { transform: rotate(270deg); animation-delay: -0.72s; }
+.ag-pixel-bit:nth-child(8) { transform: rotate(315deg); animation-delay: -0.84s; }
+
+@keyframes ag-pixel-chase {
+  0% { opacity: 1; }
+  25% { opacity: 0.45; }
+  50% { opacity: 0.18; }
+  75% { opacity: 0.08; }
+}
+
+@keyframes ag-dock-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── 살아 있는 행·카드의 점 ↔ 픽셀 휠 교체 ──
+   자리(격자 첫 칸)는 그대로 두고 그림만 바꾼다 — 상태가 바빠도 행이 밀리지 않는다. */
+
+.ag-fleet-spin {
+  display: none;
+  color: var(--ag-accent);
+}
+
+.ag-fleet.ag-claude { --ag-accent: var(--ag-claude); }
+.ag-fleet.ag-codex { --ag-accent: var(--ag-codex); }
+.ag-fleet.ag-pi { --ag-accent: var(--ag-pi); }
+.ag-fleet.ag-grok { --ag-accent: var(--ag-grok); }
+.ag-fleet.ag-cursor { --ag-accent: var(--ag-cursor); }
+
+.ag-fleet-head > .ag-fleet-spin {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: center;
+}
+
+.ag-fleet-row.ag-live .ag-fleet-spin {
+  display: block;
+}
+
+/* 도는 동안에는 점이 아니라 휠이 그 자리를 쓴다. */
+.ag-fleet-row.ag-live .ag-fleet-dot {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ag-fleet,
   .ag-fleet-row {
@@ -5866,6 +6062,25 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   .ag-fleet-collapse,
   .ag-fleet-chevron,
   .ag-fleet-row-chevron {
+    transition: none;
+  }
+
+  .ag-fleet-dock-pill,
+  .ag-fleet-popup {
+    animation: none;
+  }
+
+  /* 도는 대신 켜져 있는 자리만 말한다 — 움직임 없이 상태는 유지된다. */
+  .ag-pixel-bit {
+    animation: none;
+    opacity: 0.85;
+  }
+
+  .ag-pixel-bit:nth-child(n + 4) {
+    opacity: 0.25;
+  }
+
+  .ag-fleet-dock-chevron {
     transition: none;
   }
 }

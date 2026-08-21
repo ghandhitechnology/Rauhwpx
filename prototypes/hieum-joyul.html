@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ㅎ 하강 — 고요 / 결 / 장난 / 삐딱</title>
+<style>
+  :root {
+    --bg: #121316;
+    --ink: #e8e6e1;
+    --muted: #8b8880;
+  }
+
+  * { box-sizing: border-box; }
+
+  html,
+  body {
+    margin: 0;
+    min-height: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+      "Noto Sans KR", "Malgun Gothic", sans-serif;
+  }
+
+  body {
+    display: grid;
+    min-height: 100dvh;
+    place-items: center;
+    padding: 48px 24px;
+  }
+
+  .stage {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    justify-content: center;
+    gap: 72px;
+  }
+
+  .glyph {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 28px;
+    color: var(--ink);
+  }
+
+  .glyph svg {
+    display: block;
+    width: 140px;
+    height: 140px;
+    overflow: visible;
+  }
+
+  .glyph figcaption {
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    line-height: 1;
+  }
+
+  .top,
+  .mid,
+  .ring {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transform-box: fill-box;
+    transform-origin: center;
+    will-change: transform;
+  }
+
+  /* 공통 자리: 충돌 ty mid 2.35 / top 4.4 / ring -2.2
+     바꿈  mid 2.75 / top 7.25 / ring -5.2 scale 0.88 */
+
+  /* 1 고요 — 같은 박에 모였다 갈라진다. 기울기 없음 */
+  .calm .top { animation: calm-top 5.8s linear infinite; }
+  .calm .mid { animation: calm-mid 5.8s linear infinite; }
+  .calm .ring { animation: calm-ring 5.8s linear infinite; }
+
+  @keyframes calm-top {
+    0%, 100% { transform: translateY(0) scaleX(1); stroke-width: 1; }
+    10% { transform: translateY(1.1px) scaleX(1.4); }
+    20% { transform: translateY(4.4px) scaleX(2.26); stroke-width: 0.9; }
+    28% { transform: translateY(4.4px) scaleX(2.28); stroke-width: 1; }
+    38% { transform: translateY(5.8px) scaleX(1.55); }
+    48% { transform: translateY(7.25px) scaleX(1); stroke-width: 1; }
+    56% { transform: translateY(7.25px) scaleX(1); }
+    66% { transform: translateY(5.8px) scaleX(1.55); }
+    74% { transform: translateY(4.4px) scaleX(2.26); stroke-width: 0.9; }
+    82% { transform: translateY(4.4px) scaleX(2.28); stroke-width: 1; }
+    92% { transform: translateY(1.1px) scaleX(1.4); }
+  }
+
+  @keyframes calm-mid {
+    0%, 100% { transform: translateY(0) scaleX(1); stroke-width: 1; }
+    10% { transform: translateY(0.9px) scaleX(1.03); }
+    20% { transform: translateY(2.35px) scaleX(1.08); stroke-width: 1.12; }
+    28% { transform: translateY(2.35px) scaleX(1.1); stroke-width: 1.16; }
+    38% { transform: translateY(2.55px) scaleX(1.03); }
+    48% { transform: translateY(2.75px) scaleX(1); stroke-width: 1; }
+    56% { transform: translateY(2.75px) scaleX(1); }
+    66% { transform: translateY(2.55px) scaleX(1.03); }
+    74% { transform: translateY(2.35px) scaleX(1.08); stroke-width: 1.12; }
+    82% { transform: translateY(2.35px) scaleX(1.1); stroke-width: 1.16; }
+    92% { transform: translateY(0.9px) scaleX(1.03); }
+  }
+
+  @keyframes calm-ring {
+    0%, 100% { transform: translateY(0) scale(1, 1); stroke-width: 1; }
+    10% { transform: translateY(-0.7px) scale(1.08, 0.7); }
+    20% { transform: translateY(-2.2px) scale(1.2, 0.17); stroke-width: 0.9; }
+    28% { transform: translateY(-2.2px) scale(1.22, 0.17); stroke-width: 1; }
+    38% { transform: translateY(-3.7px) scale(1.02, 0.52); }
+    48% { transform: translateY(-5.2px) scale(0.88, 0.88); stroke-width: 1; }
+    56% { transform: translateY(-5.2px) scale(0.88, 0.88); }
+    66% { transform: translateY(-3.7px) scale(1.02, 0.52); }
+    74% { transform: translateY(-2.2px) scale(1.2, 0.17); stroke-width: 0.9; }
+    82% { transform: translateY(-2.2px) scale(1.22, 0.17); stroke-width: 1; }
+    92% { transform: translateY(-0.7px) scale(1.08, 0.7); }
+  }
+
+  /* 2 결 — 가운뎃획이 한 박 늦게 내려온다. 맞닿을 때 아주 작게 기울어진다 */
+  .grain .top { animation: grain-top 5.8s linear infinite; }
+  .grain .mid { animation: grain-mid 5.8s linear infinite; }
+  .grain .ring { animation: grain-ring 5.8s linear infinite; }
+
+  @keyframes grain-top {
+    0%, 100% { transform: translateY(0) scaleX(1) rotate(0deg); stroke-width: 1; }
+    8% { transform: translateY(0.45px) scaleX(1.18) rotate(-0.35deg); }
+    18% { transform: translateY(3.2px) scaleX(1.9) rotate(-0.2deg); stroke-width: 0.94; }
+    24% { transform: translateY(4.48px) scaleX(2.3) rotate(0deg); stroke-width: 0.88; }
+    30% { transform: translateY(4.4px) scaleX(2.26) rotate(0deg); stroke-width: 1; }
+    40% { transform: translateY(5.7px) scaleX(1.6) rotate(0.3deg); }
+    50% { transform: translateY(7.32px) scaleX(0.98) rotate(0.15deg); stroke-width: 1.03; }
+    54% { transform: translateY(7.25px) scaleX(1) rotate(0deg); stroke-width: 1; }
+    60% { transform: translateY(7.25px) scaleX(1) rotate(0deg); }
+    68% { transform: translateY(5.7px) scaleX(1.6) rotate(-0.25deg); }
+    76% { transform: translateY(4.48px) scaleX(2.3) rotate(0deg); stroke-width: 0.88; }
+    82% { transform: translateY(4.4px) scaleX(2.26) rotate(0deg); stroke-width: 1; }
+    90% { transform: translateY(1.2px) scaleX(1.35) rotate(0.4deg); }
+    96% { transform: translateY(-0.05px) scaleX(0.99) rotate(0.1deg); }
+  }
+
+  @keyframes grain-mid {
+    0%, 100% { transform: translateY(0) scaleX(1) rotate(0deg); stroke-width: 1; }
+    12% { transform: translateY(0.25px) scaleX(1.01) rotate(0deg); }
+    22% { transform: translateY(1.7px) scaleX(1.05) rotate(-0.2deg); stroke-width: 1.06; }
+    28% { transform: translateY(2.42px) scaleX(1.1) rotate(0deg); stroke-width: 1.14; }
+    34% { transform: translateY(2.35px) scaleX(1.08) rotate(0deg); stroke-width: 1.16; }
+    44% { transform: translateY(2.58px) scaleX(1.03) rotate(0.15deg); }
+    52% { transform: translateY(2.8px) scaleX(1) rotate(0deg); stroke-width: 1; }
+    60% { transform: translateY(2.75px) scaleX(1) rotate(0deg); }
+    70% { transform: translateY(2.58px) scaleX(1.03) rotate(-0.15deg); }
+    78% { transform: translateY(2.42px) scaleX(1.1) rotate(0deg); stroke-width: 1.14; }
+    84% { transform: translateY(2.35px) scaleX(1.08) rotate(0deg); stroke-width: 1.16; }
+    92% { transform: translateY(0.7px) scaleX(1.02) rotate(0.12deg); }
+    97% { transform: translateY(-0.04px) scaleX(0.995) rotate(0deg); }
+  }
+
+  @keyframes grain-ring {
+    0%, 100% { transform: translateY(0) scale(1, 1) rotate(0deg); stroke-width: 1; }
+    8% { transform: translateY(-0.3px) scale(1.04, 0.9) rotate(0.3deg); }
+    18% { transform: translateY(-1.4px) scale(1.12, 0.5) rotate(0.15deg); stroke-width: 0.94; }
+    24% { transform: translateY(-2.28px) scale(1.22, 0.16) rotate(0deg); stroke-width: 0.88; }
+    30% { transform: translateY(-2.2px) scale(1.2, 0.17) rotate(0deg); stroke-width: 1; }
+    40% { transform: translateY(-3.65px) scale(1.02, 0.52) rotate(-0.25deg); }
+    50% { transform: translateY(-5.28px) scale(0.86, 0.9) rotate(-0.15deg); stroke-width: 1.03; }
+    54% { transform: translateY(-5.2px) scale(0.88, 0.88) rotate(0deg); stroke-width: 1; }
+    60% { transform: translateY(-5.2px) scale(0.88, 0.88) rotate(0deg); }
+    68% { transform: translateY(-3.65px) scale(1.02, 0.52) rotate(0.2deg); }
+    76% { transform: translateY(-2.28px) scale(1.22, 0.16) rotate(0deg); stroke-width: 0.88; }
+    82% { transform: translateY(-2.2px) scale(1.2, 0.17) rotate(0deg); stroke-width: 1; }
+    90% { transform: translateY(-0.65px) scale(1.06, 0.72) rotate(-0.2deg); }
+    96% { transform: translateY(0.06px) scale(0.99, 1.02) rotate(0.08deg); }
+  }
+
+  /* 3 장난 — 획마다 도착이 어긋나고, 선에 붙기 전 한 번 튕긴다 */
+  .play .top { animation: play-top 5.8s linear infinite; }
+  .play .mid { animation: play-mid 5.8s linear infinite; }
+  .play .ring { animation: play-ring 5.8s linear infinite; }
+
+  @keyframes play-top {
+    0%, 100% { transform: translate(0, 0) scaleX(1) rotate(0deg); stroke-width: 1; }
+    7% { transform: translate(-0.08px, 0.35px) scaleX(1.12) rotate(-0.9deg); }
+    16% { transform: translate(-0.12px, 2.6px) scaleX(1.7) rotate(-1.1deg); stroke-width: 0.94; }
+    22% { transform: translate(0.04px, 4.55px) scaleX(2.32) rotate(0.3deg); stroke-width: 0.84; }
+    26% { transform: translate(0, 4.28px) scaleX(2.2) rotate(-0.2deg); stroke-width: 0.96; }
+    30% { transform: translate(0, 4.4px) scaleX(2.26) rotate(0deg); stroke-width: 1; }
+    38% { transform: translate(0.1px, 5.5px) scaleX(1.7) rotate(1.1deg); }
+    46% { transform: translate(0.08px, 7.42px) scaleX(0.94) rotate(0.7deg); stroke-width: 1.05; }
+    51% { transform: translate(0, 7.25px) scaleX(1) rotate(0deg); stroke-width: 1; }
+    57% { transform: translate(0, 7.25px) scaleX(1) rotate(0deg); }
+    64% { transform: translate(-0.1px, 5.9px) scaleX(1.5) rotate(-0.9deg); }
+    72% { transform: translate(0.04px, 4.55px) scaleX(2.32) rotate(0.25deg); stroke-width: 0.84; }
+    76% { transform: translate(0, 4.28px) scaleX(2.2) rotate(-0.15deg); }
+    80% { transform: translate(0, 4.4px) scaleX(2.26) rotate(0deg); stroke-width: 1; }
+    88% { transform: translate(0.1px, 1.5px) scaleX(1.3) rotate(1.2deg); }
+    94% { transform: translate(-0.04px, -0.12px) scaleX(0.96) rotate(0.4deg); stroke-width: 1.04; }
+    98% { transform: translate(0.02px, 0.04px) scaleX(1.01) rotate(-0.15deg); }
+  }
+
+  @keyframes play-mid {
+    0%, 100% { transform: translate(0, 0) scaleX(1) rotate(0deg); stroke-width: 1; }
+    10% { transform: translate(0.04px, 0.2px) scaleX(1.01) rotate(0.4deg); }
+    20% { transform: translate(0.06px, 1.85px) scaleX(1.06) rotate(0.7deg); stroke-width: 1.06; }
+    26% { transform: translate(-0.04px, 2.5px) scaleX(1.12) rotate(-0.3deg); stroke-width: 1.16; }
+    32% { transform: translate(0, 2.35px) scaleX(1.08) rotate(0deg); stroke-width: 1.14; }
+    42% { transform: translate(-0.08px, 2.6px) scaleX(1.04) rotate(-0.6deg); }
+    50% { transform: translate(0.05px, 2.88px) scaleX(0.98) rotate(0.35deg); stroke-width: 1.03; }
+    55% { transform: translate(0, 2.75px) scaleX(1) rotate(0deg); stroke-width: 1; }
+    61% { transform: translate(0, 2.75px) scaleX(1) rotate(0deg); }
+    70% { transform: translate(0.08px, 2.58px) scaleX(1.04) rotate(0.55deg); }
+    78% { transform: translate(-0.04px, 2.5px) scaleX(1.12) rotate(-0.25deg); stroke-width: 1.16; }
+    84% { transform: translate(0, 2.35px) scaleX(1.08) rotate(0deg); stroke-width: 1.14; }
+    92% { transform: translate(-0.05px, 0.55px) scaleX(1.02) rotate(-0.45deg); }
+    97% { transform: translate(0.02px, -0.05px) scaleX(0.995) rotate(0.12deg); }
+  }
+
+  @keyframes play-ring {
+    0%, 100% { transform: translate(0, 0) scale(1, 1) rotate(0deg); stroke-width: 1; }
+    7% { transform: translate(0.08px, -0.2px) scale(1.04, 0.92) rotate(0.8deg); }
+    16% { transform: translate(0.1px, -1.25px) scale(1.14, 0.52) rotate(1.2deg); stroke-width: 0.94; }
+    22% { transform: translate(-0.04px, -2.32px) scale(1.24, 0.15) rotate(-0.3deg); stroke-width: 0.84; }
+    26% { transform: translate(0, -2.1px) scale(1.16, 0.2) rotate(0.2deg); }
+    30% { transform: translate(0, -2.2px) scale(1.2, 0.17) rotate(0deg); stroke-width: 1; }
+    38% { transform: translate(-0.1px, -3.55px) scale(1.04, 0.5) rotate(-1.1deg); }
+    46% { transform: translate(-0.08px, -5.34px) scale(0.84, 0.92) rotate(-0.8deg); stroke-width: 1.05; }
+    51% { transform: translate(0, -5.2px) scale(0.88, 0.88) rotate(0deg); stroke-width: 1; }
+    57% { transform: translate(0, -5.2px) scale(0.88, 0.88) rotate(0deg); }
+    64% { transform: translate(0.1px, -3.8px) scale(1.0, 0.48) rotate(0.9deg); }
+    72% { transform: translate(-0.04px, -2.32px) scale(1.24, 0.15) rotate(-0.25deg); stroke-width: 0.84; }
+    76% { transform: translate(0, -2.1px) scale(1.16, 0.2) rotate(0.15deg); }
+    80% { transform: translate(0, -2.2px) scale(1.2, 0.17) rotate(0deg); stroke-width: 1; }
+    88% { transform: translate(-0.08px, -0.55px) scale(1.06, 0.74) rotate(-1deg); }
+    94% { transform: translate(0.05px, 0.12px) scale(0.97, 1.06) rotate(0.45deg); stroke-width: 1.04; }
+    98% { transform: translate(-0.02px, -0.03px) scale(1.01, 0.99) rotate(-0.12deg); }
+  }
+
+  /* 4 삐딱 — ㅇ 이 구르듯 올라오고, 짧은 획은 한 박 쉬었다 슬롯된다.
+     가운뎃획은 받을 때마다 한쪽으로 기울어진다 */
+  .askew .top { animation: askew-top 5.8s linear infinite; }
+  .askew .mid { animation: askew-mid 5.8s linear infinite; }
+  .askew .ring { animation: askew-ring 5.8s linear infinite; }
+
+  @keyframes askew-top {
+    0%, 100% { transform: translate(0, 0) scaleX(1) rotate(0deg); stroke-width: 1; }
+    6% { transform: translate(-0.12px, 0.08px) scaleX(1.04) rotate(-1.4deg); }
+    12% { transform: translate(-0.16px, 0.55px) scaleX(1.2) rotate(-2deg); }
+    18% { transform: translate(-0.1px, 2.4px) scaleX(1.65) rotate(-1.6deg); stroke-width: 0.94; }
+    22% { transform: translate(0.08px, 4.2px) scaleX(2.15) rotate(0.6deg); }
+    26% { transform: translate(0.06px, 4.62px) scaleX(2.34) rotate(1.1deg); stroke-width: 0.82; }
+    30% { transform: translate(-0.04px, 4.22px) scaleX(2.18) rotate(-0.5deg); stroke-width: 0.95; }
+    34% { transform: translate(0, 4.4px) scaleX(2.26) rotate(0deg); stroke-width: 1; }
+    40% { transform: translate(0.16px, 5.15px) scaleX(1.85) rotate(1.8deg); }
+    46% { transform: translate(0.14px, 6.7px) scaleX(1.2) rotate(2.2deg); }
+    51% { transform: translate(0.06px, 7.48px) scaleX(0.92) rotate(1.1deg); stroke-width: 1.06; }
+    55% { transform: translate(0, 7.25px) scaleX(1) rotate(0.3deg); stroke-width: 1; }
+    60% { transform: translate(0, 7.25px) scaleX(1) rotate(0deg); }
+    66% { transform: translate(-0.14px, 6.05px) scaleX(1.45) rotate(-1.6deg); }
+    72% { transform: translate(0.08px, 4.62px) scaleX(2.34) rotate(0.9deg); stroke-width: 0.82; }
+    76% { transform: translate(-0.04px, 4.22px) scaleX(2.18) rotate(-0.4deg); }
+    80% { transform: translate(0, 4.4px) scaleX(2.26) rotate(0deg); stroke-width: 1; }
+    86% { transform: translate(0.14px, 2.1px) scaleX(1.45) rotate(1.9deg); }
+    92% { transform: translate(-0.08px, -0.16px) scaleX(0.94) rotate(-0.8deg); stroke-width: 1.05; }
+    96% { transform: translate(0.04px, 0.06px) scaleX(1.02) rotate(0.45deg); }
+  }
+
+  @keyframes askew-mid {
+    0%, 100% { transform: translate(0, 0) scaleX(1) rotate(0deg); stroke-width: 1; }
+    8% { transform: translate(0.06px, 0.1px) scaleX(1.01) rotate(0.7deg); }
+    16% { transform: translate(0.1px, 0.85px) scaleX(1.03) rotate(1.3deg); }
+    24% { transform: translate(0.08px, 2.15px) scaleX(1.08) rotate(1.6deg); stroke-width: 1.1; }
+    28% { transform: translate(-0.08px, 2.55px) scaleX(1.14) rotate(-0.8deg); stroke-width: 1.18; }
+    34% { transform: translate(0.04px, 2.3px) scaleX(1.06) rotate(0.4deg); stroke-width: 1.12; }
+    38% { transform: translate(0, 2.35px) scaleX(1.08) rotate(0deg); stroke-width: 1.14; }
+    46% { transform: translate(-0.12px, 2.62px) scaleX(1.05) rotate(-1.4deg); }
+    52% { transform: translate(0.08px, 2.92px) scaleX(0.97) rotate(0.9deg); stroke-width: 1.04; }
+    56% { transform: translate(-0.03px, 2.72px) scaleX(1.01) rotate(-0.25deg); }
+    60% { transform: translate(0, 2.75px) scaleX(1) rotate(0deg); stroke-width: 1; }
+    68% { transform: translate(0.12px, 2.6px) scaleX(1.04) rotate(1.2deg); }
+    74% { transform: translate(-0.08px, 2.55px) scaleX(1.14) rotate(-0.7deg); stroke-width: 1.18; }
+    80% { transform: translate(0, 2.35px) scaleX(1.08) rotate(0deg); stroke-width: 1.14; }
+    88% { transform: translate(-0.1px, 0.7px) scaleX(1.03) rotate(-1.1deg); }
+    94% { transform: translate(0.05px, -0.08px) scaleX(0.99) rotate(0.5deg); }
+    98% { transform: translate(-0.02px, 0.03px) scaleX(1.005) rotate(-0.15deg); }
+  }
+
+  @keyframes askew-ring {
+    0%, 100% { transform: translate(0, 0) scale(1, 1) rotate(0deg); stroke-width: 1; }
+    6% { transform: translate(0.1px, -0.08px) scale(1.02, 0.96) rotate(1.2deg); }
+    12% { transform: translate(0.16px, -0.35px) scale(1.06, 0.86) rotate(2.4deg); }
+    18% { transform: translate(0.12px, -1.15px) scale(1.14, 0.55) rotate(3.2deg); stroke-width: 0.94; }
+    24% { transform: translate(-0.06px, -2.15px) scale(1.2, 0.22) rotate(1.1deg); }
+    28% { transform: translate(-0.08px, -2.36px) scale(1.26, 0.14) rotate(-0.8deg); stroke-width: 0.82; }
+    32% { transform: translate(0.04px, -2.08px) scale(1.14, 0.22) rotate(0.5deg); }
+    36% { transform: translate(0, -2.2px) scale(1.2, 0.17) rotate(0deg); stroke-width: 1; }
+    42% { transform: translate(-0.16px, -3.25px) scale(1.06, 0.48) rotate(-2.4deg); }
+    48% { transform: translate(-0.14px, -4.7px) scale(0.92, 0.7) rotate(-3.1deg); }
+    53% { transform: translate(-0.06px, -5.36px) scale(0.84, 0.92) rotate(-1.2deg); stroke-width: 1.06; }
+    57% { transform: translate(0.03px, -5.16px) scale(0.89, 0.86) rotate(0.4deg); }
+    60% { transform: translate(0, -5.2px) scale(0.88, 0.88) rotate(0deg); stroke-width: 1; }
+    66% { transform: translate(0.14px, -4.05px) scale(0.98, 0.5) rotate(2.2deg); }
+    72% { transform: translate(-0.08px, -2.36px) scale(1.26, 0.14) rotate(-0.7deg); stroke-width: 0.82; }
+    76% { transform: translate(0.04px, -2.08px) scale(1.14, 0.22) rotate(0.4deg); }
+    80% { transform: translate(0, -2.2px) scale(1.2, 0.17) rotate(0deg); stroke-width: 1; }
+    86% { transform: translate(-0.14px, -0.7px) scale(1.08, 0.7) rotate(-2.6deg); }
+    92% { transform: translate(0.08px, 0.16px) scale(0.96, 1.08) rotate(1.1deg); stroke-width: 1.05; }
+    96% { transform: translate(-0.04px, -0.05px) scale(1.02, 0.98) rotate(-0.4deg); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .top,
+    .mid,
+    .ring { animation: none; }
+
+    .glyph svg {
+      animation: quiet 2.6s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+    }
+  }
+
+  @keyframes quiet {
+    0%, 100% { opacity: 0.72; }
+    50% { opacity: 1; }
+  }
+</style>
+</head>
+<body>
+  <main class="stage">
+    <figure class="glyph calm">
+      <svg viewBox="0 0 12 12" aria-hidden="true">
+        <line class="top" x1="4.5" y1="1.45" x2="7.5" y2="1.45"/>
+        <line class="mid" x1="2.55" y1="3.5" x2="9.45" y2="3.5"/>
+        <circle class="ring" cx="6" cy="8.05" r="2.6"/>
+      </svg>
+      <figcaption>고요</figcaption>
+    </figure>
+
+    <figure class="glyph grain">
+      <svg viewBox="0 0 12 12" aria-hidden="true">
+        <line class="top" x1="4.5" y1="1.45" x2="7.5" y2="1.45"/>
+        <line class="mid" x1="2.55" y1="3.5" x2="9.45" y2="3.5"/>
+        <circle class="ring" cx="6" cy="8.05" r="2.6"/>
+      </svg>
+      <figcaption>결</figcaption>
+    </figure>
+
+    <figure class="glyph play">
+      <svg viewBox="0 0 12 12" aria-hidden="true">
+        <line class="top" x1="4.5" y1="1.45" x2="7.5" y2="1.45"/>
+        <line class="mid" x1="2.55" y1="3.5" x2="9.45" y2="3.5"/>
+        <circle class="ring" cx="6" cy="8.05" r="2.6"/>
+      </svg>
+      <figcaption>장난</figcaption>
+    </figure>
+
+    <figure class="glyph askew">
+      <svg viewBox="0 0 12 12" aria-hidden="true">
+        <line class="top" x1="4.5" y1="1.45" x2="7.5" y2="1.45"/>
+        <line class="mid" x1="2.55" y1="3.5" x2="9.45" y2="3.5"/>
+        <circle class="ring" cx="6" cy="8.05" r="2.6"/>
+      </svg>
+      <figcaption>삐딱</figcaption>
+    </figure>
+  </main>
+</body>
+</html>

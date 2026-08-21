@@ -529,22 +529,22 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let replyPending = false;
   /** 편대 카드가 대신 나타내는 스폰 도구 호출 — 결과 행도 함께 접는다. */
   const suppressedSpawnCalls = new Set<string>();
-  /** 서브에이전트·워크플로 카드. 대화 흐름 안에 도구 활동 그룹과 같은 자리로 들어간다. */
+  /** 서브에이전트·워크플로 카드. 살아 있는 동안 입력기 위 도크에 머문다. */
   const fleetView = createSubagentFleet({
     doc: document,
     sessionModel: (agent) => (agent === selectedAgent ? selectedModel : null),
-    mountCard(card) {
+    // 정착한 카드는 대화 흐름으로 옮겨 기록이 된다. 도구 활동 그룹과 같은
+    // 자리로 끼워 넣어 흐름 순서를 유지한다.
+    settleCard(card) {
       flushAssistantBuffer({ kind: 'progress' });
       const milestone = compactStreamIntoActivity(selectedAgent);
-      // 이 카드 아래에서 시작하는 도구 호출은 새 그룹으로 연다 (흐름 순서 유지).
       closeCurrentActivityGroup();
-      if (milestone) {
-        withAutoScroll(() => milestone.appendChild(card));
-      } else {
-        const step = el('div', 'ag-progress-step ag-progress-step-tools-only');
-        step.appendChild(card);
-        withAutoScroll(() => appendConversation(step));
-      }
+      const step = el('div', 'ag-progress-step ag-progress-step-tools-only');
+      step.appendChild(card);
+      withAutoScroll(() => {
+        if (milestone) milestone.appendChild(step);
+        else appendConversation(step);
+      });
       streamBubble = null;
     },
   });
@@ -1594,6 +1594,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   templateChipClear.appendChild(createIcon('close'));
   templateChip.append(el('span', 'ag-template-chip-label', '템플릿'), templateChipName, templateChipClear);
   composer.append(composerOverlay, slashMenu, templateChip, composerField, composerMeta, configPanel);
+  // 편대 도크는 입력기 위에 뜨는 오버레이라서 입력기의 자식으로 붙는다 —
+  // 사이드바·전체 화면 어디로 옮겨져도 입력기를 따라간다.
+  composer.appendChild(fleetView.root);
+  // 도크가 차지하는 높이를 입력기에 알려 계획 복원 버튼(overlay)이 겹치지 않게 한다.
+  const dockResizeObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect.height ?? 0;
+      composer.style.setProperty('--ag-fleet-dock-h', height > 0 ? `${Math.ceil(height) + 6}px` : '0px');
+    })
+    : null;
+  dockResizeObserver?.observe(fleetView.root);
   // 사이드바에서는 변경 검토와 계획을 분리한다. 계획은 입력기 바로 위에
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
   chatPage.append(header, connBanner, messages, review, planSurface, composer);
@@ -5303,6 +5314,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       contextUnsubs.forEach((unsub) => unsub());
       messagesMutationObserver?.disconnect();
       messagesResizeObserver?.disconnect();
+      dockResizeObserver?.disconnect();
       messages.removeEventListener('scroll', onMessagesScroll);
       if (configHideTimer !== null) window.clearTimeout(configHideTimer);
       if (conversationScrollRaf !== null) {

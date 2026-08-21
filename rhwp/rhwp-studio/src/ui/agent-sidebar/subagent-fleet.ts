@@ -1,16 +1,18 @@
 /**
- * 서브에이전트 · 워크플로 편대 카드.
+ * 서브에이전트 · 워크플로 편대 도크.
  *
- * 허브가 정규화한 task-start / task-progress / task-end 를 대화 흐름 안의 카드
- * 하나로 그린다. 한 턴에서 태어난 서브에이전트는 한 카드에 모이고, 워크플로는
- * 단계 레일과 멤버 행을 가진 자기 카드를 갖는다.
+ * 허브가 정규화한 task-start / task-progress / task-end 를 입력기 위에 뜨는
+ * 팝업 한 장으로 그린다. 살아 있는 카드는 입력기 바로 위 편대 도크에 모이고,
+ * 도크 머리의 알약(pill)은 픽셀 휠과 함께 남은 작업 수를 말한다. 카드가
+ * 정착하면 대화 흐름으로 옮겨 기록이 된다.
  *
  * 설계 규칙
  * - 행 높이는 3줄 그리드로 고정한다. 스트리밍 중에 글자가 바뀌어도 다른 행이
  *   밀리지 않아야 열 개짜리 편대도 흔들리지 않는다.
- * - 진행 중 표현은 한 가지다. 점은 돌지 않고, 끝났을 때 시제만 바뀐다.
+ * - 진행 중 표현은 픽셀 휠 하나다. 부드럽게 도는 스피너가 아니라 step 타이밍으로
+ *   칸을 건너뛰는 8픽셀 짜리 바퀴다. 끝나면 시제와 색만 바뀐다.
  * - 값을 모르면 자리를 숨기지 않고 — 로 채워 폭을 지킨다.
- * - 카드는 살아 있는 동안 열려 있고, 끝나도 스스로 접히지 않는다.
+ * - 카드는 살아 있는 동안 도크에 열려 있고, 정착하면 흐름으로 떠난다.
  *
  * DOM 은 전부 주입받은 doc 으로 만든다 (테스트에서 가짜 문서로 갈아 끼운다).
  */
@@ -172,13 +174,18 @@ interface CardEntry {
   startedAt: number;
   endedAt: number | null;
   ticker: number | null;
+  /** 도크 팝업에 머물러 있는 동안 true — 정착하면 흐름으로 옮겨지며 false 가 된다. */
+  hosted: boolean;
 }
 
 export interface SubagentFleetDeps {
   /** 요소를 만들 문서. */
   doc: Document;
-  /** 카드를 대화 흐름(.ag-messages)에 도구 활동 그룹과 같은 방식으로 끼워 넣는다. */
-  mountCard(card: HTMLElement): void;
+  /**
+   * 카드가 정착하면(모든 task 가 끝나면) 대화 흐름(.ag-messages)으로 옮긴다.
+   * 살아 있는 동안 카드는 도크 팝업에 머문다.
+   */
+  settleCard(card: HTMLElement): void;
   /**
    * 모델을 알려주지 않는 서브에이전트의 표기 기본값 — 그 프로바이더가 지금
    * 쓰는 모델. 사이드바 선택이 실행 중인 프로바이더와 다르면 null 을 돌려
@@ -188,6 +195,8 @@ export interface SubagentFleetDeps {
 }
 
 export interface SubagentFleetView {
+  /** 입력기 위에 붙일 편대 도크 (알약 + 팝업 본문). */
+  root: HTMLElement;
   /** 새 턴 — 다음 서브에이전트 묶음은 새 카드에 담는다. */
   beginTurn(): void;
   taskStart(evt: Extract<AgentStreamEvent, { type: 'task-start' }>): void;
@@ -212,6 +221,63 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
   const tasks = new Map<string, TaskEntry>();
   const cards = new Set<CardEntry>();
   let batchCard: CardEntry | null = null;
+
+  /* ── 편대 도크 ────────────────────────────────────────
+     입력기 바로 위에 붙는 알약 + 팝업. 살아 있는 카드는 팝업에 머무르고,
+     정착하면 흐름으로 옮겨진다. 도크 자체는 absolute 여서 대화 높이를
+     건드리지 않는다 — 붙일 자리는 호출부가 정한다. */
+
+  const dock = el('div', 'ag-fleet-dock');
+  dock.hidden = true;
+  const popup = el('div', 'ag-fleet-popup');
+  popup.id = 'ag-fleet-popup';
+  popup.hidden = true;
+  popup.setAttribute('role', 'region');
+  popup.setAttribute('aria-label', '서브에이전트 진행 상황');
+  const pill = el('button', 'ag-fleet-dock-pill');
+  pill.type = 'button';
+  pill.setAttribute('aria-controls', popup.id);
+  pill.setAttribute('aria-expanded', 'false');
+  const pillWheel = createPixelWheel();
+  const pillLabel = el('span', 'ag-fleet-dock-label');
+  const pillChevron = createChevron('ag-fleet-dock-chevron');
+  pill.append(pillWheel, pillLabel, pillChevron);
+  dock.append(popup, pill);
+
+  let popupOpen = false;
+
+  function setPopupOpen(open: boolean): void {
+    popupOpen = open;
+    popup.hidden = !open;
+    pill.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  pill.addEventListener('click', () => setPopupOpen(!popupOpen));
+
+  /** 도크에 머물러 있는 카드의 살아 있는 task 수. */
+  function hostedLiveCount(): number {
+    let count = 0;
+    for (const card of cards) {
+      if (!card.hosted) continue;
+      for (const task of card.tasks) if (task.state === 'running') count += 1;
+    }
+    return count;
+  }
+
+  function updateDock(): void {
+    const live = hostedLiveCount();
+    const hosting = [...cards].some((card) => card.hosted);
+    dock.hidden = !hosting;
+    if (!hosting) return;
+    setText(pillLabel, `서브에이전트 ${live} · 작업 중`);
+  }
+
+  function createPixelWheel(className = ''): HTMLElement {
+    const wheel = el('span', className ? `ag-pixel-wheel ${className}` : 'ag-pixel-wheel');
+    wheel.setAttribute('aria-hidden', 'true');
+    for (let i = 0; i < 8; i += 1) wheel.appendChild(el('i', 'ag-pixel-bit'));
+    return wheel;
+  }
 
   function el<K extends keyof HTMLElementTagNameMap>(
     tag: K,
@@ -267,6 +333,8 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     const root = el('div', `ag-fleet-row ag-fleet-${variant}`);
     const dot = el('span', 'ag-fleet-dot ag-run');
     dot.setAttribute('aria-hidden', 'true');
+    // 도는 동안에는 점 대신 픽셀 휠이 그 자리를 쓴다 (CSS 가 .ag-live 로 고른다).
+    const spin = createPixelWheel('ag-fleet-spin');
     const name = el('span', 'ag-fleet-name');
     const title = el('span', 'ag-fleet-title');
     const role = el('span', 'ag-fleet-role');
@@ -279,7 +347,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
 
     if (variant === 'member') {
       const head = el('div', 'ag-fleet-head');
-      head.append(dot, name, aside, status, activity, metrics);
+      head.append(dot, spin, name, aside, status, activity, metrics);
       root.appendChild(head);
       return {
         root, toggle: null, dot, title, role, aside, activity, metrics, status, detail: null,
@@ -293,7 +361,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     toggle.setAttribute('aria-expanded', 'false');
     const detail = el('div', 'ag-fleet-detail');
     detail.hidden = true;
-    toggle.append(dot, name, aside, createChevron('ag-fleet-row-chevron'), status, activity, metrics);
+    toggle.append(dot, spin, name, aside, createChevron('ag-fleet-row-chevron'), status, activity, metrics);
     root.append(toggle, detail);
     toggle.addEventListener('click', () => {
       if (toggle.disabled) return;
@@ -391,10 +459,14 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       startedAt: nowMs(),
       endedAt: null,
       ticker: null,
+      hosted: true,
     };
     cards.add(card);
-    deps.mountCard(root);
+    // 새 편대가 태어나면 팝업을 다시 연다 — 사용자가 접었어도 새 묶음은 소식을 알린다.
+    setPopupOpen(true);
+    popup.appendChild(root);
     startTicker(card);
+    updateDock();
     return card;
   }
 
@@ -520,6 +592,14 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       setText(card.clock, formatFleetClock(card.endedAt - card.startedAt));
       stopTicker(card);
     }
+
+    // 정착한 카드는 도크를 떠나 대화 흐름의 기록이 된다.
+    if (!live && card.hosted) {
+      card.hosted = false;
+      if (batchCard === card) batchCard = null;
+      deps.settleCard(card.root);
+    }
+    updateDock();
   }
 
   /* ── 단계 레일 · 멤버 ──────────────────────────────── */
@@ -836,6 +916,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
   }
 
   return {
+    root: dock,
     beginTurn(): void {
       batchCard = null;
     },
@@ -857,9 +938,14 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     },
     reset(): void {
       for (const card of cards) stopTicker(card);
+      // 도크에 머물러 있던 카드만 팝업에서 걷어 낸다 — 정착해 흐름으로 간
+      // 카드는 대화 기록이므로 여기서 건드리지 않는다.
+      popup.replaceChildren();
       cards.clear();
       tasks.clear();
       batchCard = null;
+      setPopupOpen(false);
+      updateDock();
     },
   };
 }

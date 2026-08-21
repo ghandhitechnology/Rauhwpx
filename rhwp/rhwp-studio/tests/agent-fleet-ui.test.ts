@@ -8,6 +8,7 @@ class FakeNode {
   className = '';
   attrs: Record<string, string> = {};
   children: FakeNode[] = [];
+  parentNode: FakeNode | null = null;
   listeners: Record<string, Array<() => void>> = {};
   hidden = false;
   disabled = false;
@@ -52,17 +53,28 @@ class FakeNode {
   }
 
   appendChild(child: FakeNode): FakeNode {
+    child.parentNode?.removeChild(child);
+    child.parentNode = this;
     this.children.push(child);
     return child;
   }
 
   append(...nodes: FakeNode[]): void {
-    for (const node of nodes) this.children.push(node);
+    for (const node of nodes) this.appendChild(node);
+  }
+
+  removeChild(child: FakeNode): FakeNode {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+    child.parentNode = null;
+    return child;
   }
 
   replaceChildren(...nodes: FakeNode[]): void {
+    for (const child of this.children) child.parentNode = null;
     this.own = '';
-    this.children = [...nodes];
+    this.children = [];
+    this.append(...nodes);
   }
 
   setAttribute(name: string, value: string): void {
@@ -111,15 +123,27 @@ function one(root: FakeNode, className: string): FakeNode {
 }
 
 function mountFleet() {
-  const mounted: FakeNode[] = [];
+  const settled: FakeNode[] = [];
+  const conversation = new FakeNode('div');
   const view = createSubagentFleet({
     doc: fakeDoc as unknown as Document,
     sessionModel: () => 'claude-opus-4-5-20260514',
-    mountCard: (card) => {
-      mounted.push(card as unknown as FakeNode);
+    settleCard: (card) => {
+      const node = card as unknown as FakeNode;
+      conversation.appendChild(node);
+      settled.push(node);
     },
   });
-  return { view, mounted };
+  return { view, settled };
+}
+
+/** 도크 팝업에 머물러 있는 카드들 — 살아 있는 편대다. */
+function hostedCards(view: { root: FakeNode }): FakeNode[] {
+  return all(view.root, 'ag-fleet');
+}
+
+function pill(view: { root: FakeNode }): FakeNode {
+  return one(view.root, 'ag-fleet-dock-pill');
 }
 
 function taskStart(taskId: string, extra: Record<string, unknown> = {}) {
@@ -133,32 +157,43 @@ function taskStart(taskId: string, extra: Record<string, unknown> = {}) {
   };
 }
 
-test('한 턴의 서브에이전트는 카드 하나에 모이고 시제로 완료를 알린다', () => {
-  const { view, mounted } = mountFleet();
+test('한 턴의 서브에이전트는 도크 팝업에 모이고 정착하면 흐름으로 떠난다', () => {
+  const { view, settled } = mountFleet();
   view.beginTurn();
   view.taskStart(taskStart('t1', { title: '표 구조 조사', role: 'explore' }) as never);
   view.taskStart(taskStart('t2', { title: '문단 서식 정리' }) as never);
 
-  assert.equal(mounted.length, 1, '에이전트 묶음은 카드 하나를 쓴다');
-  const card = mounted[0];
+  // 살아 있는 동안 카드는 입력기 위 팝업에 머무른다.
+  assert.equal(settled.length, 0, '도는 동안 카드는 흐름으로 가지 않는다');
+  const hosted = hostedCards(view);
+  assert.equal(hosted.length, 1, '에이전트 묶음은 카드 하나를 쓴다');
+  const card = hosted[0];
   assert.equal(all(card, 'ag-fleet-row').length, 2);
   assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 2 · 작업 중');
   assert.ok(one(card, 'ag-fleet-dot').className.includes('ag-run'));
+  // 알약은 남은 작업 수를 말하고 픽셀 휠을 싣는다.
+  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(all(pill(view), 'ag-pixel-bit').length, 8);
+  assert.equal((view.root as unknown as FakeNode).hidden, false);
 
   view.taskEnd({ type: 'task-end', agent: 'claude', taskId: 't1', status: 'completed' } as never);
   // 하나가 남아 도는 동안 카드는 계속 작업 중이다.
+  assert.equal(settled.length, 0);
   assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 2 · 작업 중');
-  assert.ok(one(card, 'ag-fleet-dot').className.includes('ag-run'));
 
   view.taskEnd({ type: 'task-end', agent: 'claude', taskId: 't2', status: 'failed' } as never);
   assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 2 · 1 오류');
   assert.ok(one(card, 'ag-fleet-dot').className.includes('ag-err'));
   assert.ok(card.className.includes('ag-live') === false, '정착하면 카드가 live 를 벗는다');
+  // 정착한 카드는 흐름으로 옮겨지고 도크는 비어 숨는다.
+  assert.equal(settled.length, 1, '정착한 카드는 호출부로 넘긴다');
+  assert.equal(hostedCards(view).length, 0, '팝업에서 사라진다');
+  assert.equal((view.root as unknown as FakeNode).hidden, true, '할 일이 없으면 도크도 숨는다');
   view.reset();
 });
 
 test('두 번 오는 task-end 는 빈 자리만 채우고 상태를 되돌리지 않는다', () => {
-  const { view, mounted } = mountFleet();
+  const { view, settled } = mountFleet();
   view.beginTurn();
   view.taskStart(taskStart('t1') as never);
   view.taskProgress({
@@ -170,7 +205,9 @@ test('두 번 오는 task-end 는 빈 자리만 채우고 상태를 되돌리지
     summary: '표 3개를 확인했습니다', usage: { totalTokens: 5100, toolUses: 6 },
   } as never);
 
-  const card = mounted[0];
+  // 첫 task-end 에 카드가 정착하지만 참조는 유효하다 — 늦게 온 요약도 같은 행에 채운다.
+  assert.equal(settled.length, 1);
+  const card = settled[0];
   assert.equal(all(card, 'ag-fleet-row').length, 1, '중복 행이 생기지 않는다');
   assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 1 · 완료');
   assert.equal(one(card, 'ag-fleet-sr').textContent, '완료');
@@ -180,16 +217,28 @@ test('두 번 오는 task-end 는 빈 자리만 채우고 상태를 되돌리지
   view.reset();
 });
 
+test('정착한 카드 뒤에 같은 턴의 새 서브에이전트가 오면 새 카드에 모은다', () => {
+  const { view, settled } = mountFleet();
+  view.beginTurn();
+  view.taskStart(taskStart('t1') as never);
+  view.taskEnd({ type: 'task-end', agent: 'claude', taskId: 't1', status: 'completed' } as never);
+  assert.equal(settled.length, 1);
+  view.taskStart(taskStart('t2') as never);
+  assert.equal(hostedCards(view).length, 1, '정착한 카드에 섞이지 않는다');
+  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 1 · 작업 중');
+  view.reset();
+});
+
 test('워크플로는 자기 카드에 단계 레일과 멤버 행을 그린다', () => {
-  const { view, mounted } = mountFleet();
+  const { view, settled } = mountFleet();
   view.beginTurn();
   view.taskStart(taskStart('w1', {
     taskKind: 'workflow', title: '초안 파이프라인', workflowName: '초안 파이프라인',
   }) as never);
   view.taskStart(taskStart('a1') as never);
-  assert.equal(mounted.length, 2, '워크플로는 서브에이전트 묶음과 카드를 나눠 쓴다');
+  assert.equal(hostedCards(view).length, 2, '워크플로는 서브에이전트 묶음과 카드를 나눠 쓴다');
 
-  const card = mounted[0];
+  const card = hostedCards(view)[0];
   view.taskProgress({
     type: 'task-progress', agent: 'claude', taskId: 'w1',
     usage: { totalTokens: 3100, toolUses: 2 },
@@ -224,10 +273,10 @@ test('워크플로는 자기 카드에 단계 레일과 멤버 행을 그린다'
 });
 
 test('서브에이전트가 부른 도구는 그 행의 드릴인으로 들어간다', () => {
-  const { view, mounted } = mountFleet();
+  const { view } = mountFleet();
   view.beginTurn();
   view.taskStart(taskStart('t1') as never);
-  const card = mounted[0];
+  const card = hostedCards(view)[0];
   const row = one(card, 'ag-fleet-row');
   const head = one(row, 'ag-fleet-head');
   assert.equal(head.disabled, true, '기록이 없으면 열 것이 없다');
@@ -266,7 +315,7 @@ test('서브에이전트가 부른 도구는 그 행의 드릴인으로 들어�
 });
 
 test('서브에이전트 텍스트는 행 근황으로만 남고 루트 답변에 섞이지 않는다', () => {
-  const { view, mounted } = mountFleet();
+  const { view } = mountFleet();
   view.beginTurn();
   view.taskStart(taskStart('t1') as never);
   assert.equal(
@@ -275,7 +324,7 @@ test('서브에이전트 텍스트는 행 근황으로만 남고 루트 답변�
     } as never),
     true,
   );
-  assert.equal(one(mounted[0], 'ag-fleet-activity').textContent, '두 번째 줄');
+  assert.equal(one(hostedCards(view)[0], 'ag-fleet-activity').textContent, '두 번째 줄');
   assert.equal(
     view.routeTextDelta({ type: 'text-delta', agent: 'claude', text: 'x', parentTaskId: 'ghost' } as never),
     false,
@@ -283,8 +332,8 @@ test('서브에이전트 텍스트는 행 근황으로만 남고 루트 답변�
   view.reset();
 });
 
-test('턴이 끝나면 남은 행은 중단됨으로 확정된다', () => {
-  const { view, mounted } = mountFleet();
+test('턴이 끝나면 남은 행은 중단됨으로 확정되고 카드는 흐름으로 떠난다', () => {
+  const { view, settled } = mountFleet();
   view.beginTurn();
   view.taskStart(taskStart('t1') as never);
   view.routeToolCall({
@@ -293,16 +342,42 @@ test('턴이 끝나면 남은 행은 중단됨으로 확정된다', () => {
   } as never);
   view.sweep();
 
-  const card = mounted[0];
+  const card = settled[0];
   assert.equal(one(card, 'ag-fleet-sr').textContent, '중단됨');
   assert.ok(one(card, 'ag-fleet-row').className.includes('ag-stopped'));
   assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 1 · 중단됨');
   assert.equal(one(card, 'ag-tool-result').textContent, '(결과 없이 종료됨)');
+  assert.equal(hostedCards(view).length, 0, '정착한 카드는 팝업을 떠난다');
 
   // 새 턴은 새 카드를 연다.
   view.beginTurn();
   view.taskStart(taskStart('t2') as never);
-  assert.equal(mounted.length, 2);
+  assert.equal(settled.length, 1);
+  assert.equal(hostedCards(view).length, 1);
+  view.reset();
+});
+
+test('알약 클릭은 팝업을 접었다 펼치고 aria-expanded 를 따라간다', () => {
+  const { view } = mountFleet();
+  view.beginTurn();
+  view.taskStart(taskStart('t1') as never);
+  const pill = one(view.root, 'ag-fleet-dock-pill');
+  const popup = one(view.root, 'ag-fleet-popup');
+  // 새 묶음이 태어나면 팝업은 열린 채로 시작한다.
+  assert.equal(popup.hidden, false);
+  assert.equal(pill.getAttribute('aria-expanded'), 'true');
+
+  pill.click();
+  assert.equal(popup.hidden, true);
+  assert.equal(pill.getAttribute('aria-expanded'), 'false');
+  pill.click();
+  assert.equal(popup.hidden, false);
+
+  // 새 카드가 태어나면 다시 연다 — 사용자가 접어 둔 상태와 상관없이.
+  pill.click();
+  view.beginTurn();
+  view.taskStart(taskStart('t2') as never);
+  assert.equal(popup.hidden, false);
   view.reset();
 });
 
@@ -335,13 +410,27 @@ test('사이드바가 편대 이벤트를 카드로 넘기고 스폰 도구 행�
   assert.match(source, /fleetView\.reset\(\);/);
 });
 
-test('행 높이는 고정 그리드로 못 박혀 있고 진행 표시는 돌지 않는다', () => {
+test('행 높이는 고정 그리드로 못 박혀 있고 진행 표시는 픽셀 휠 하나다', () => {
   assert.match(css, /\.ag-fleet-head\s*\{[^}]*grid-template-rows:\s*16px 14px 13px;/s);
-  assert.match(css, /\.ag-fleet-head\s*\{[^}]*grid-template-columns:\s*7px minmax\(0, 1fr\) auto 11px;/s);
+  assert.match(css, /\.ag-fleet-head\s*\{[^}]*grid-template-columns:\s*12px minmax\(0, 1fr\) auto 11px;/s);
   assert.match(css, /\.ag-fleet-dot\.ag-run\s*\{\s*background:\s*var\(--ag-run\);/);
   assert.match(css, /\.ag-fleet-dot\.ag-ok\s*\{\s*background:\s*var\(--ag-ok\);/);
   assert.match(css, /\.ag-fleet-dot\.ag-err\s*\{\s*background:\s*var\(--ag-err\);/);
-  // 편대 카드에는 도는 스피너가 없다.
-  assert.doesNotMatch(css, /\.ag-fleet[^{]*\{[^}]*animation:[^;]*ag-rotate/s);
+  // 진행 표시는 step 타이밍으로 칸을 건너뛰는 픽셀 휠이다 — 부드러운 회전이 아니다.
+  assert.match(css, /\.ag-pixel-bit\s*\{[^}]*animation:\s*ag-pixel-chase [^;]*steps\(1/s);
+  assert.match(css, /\.ag-fleet-row\.ag-live \.ag-fleet-spin \{\s*\n\s*display: block;/);
+  assert.match(css, /\.ag-fleet\.ag-codex \{ --ag-accent: var\(--ag-codex\); \}/);
+  assert.doesNotMatch(css, /ag-fleet-card-spin/);
+  // 도는 동안에는 점이 아니라 휠이 그 자리를 쓴다.
+  assert.match(css, /\.ag-fleet-row\.ag-live \.ag-fleet-dot \{\s*\n\s*display: none;/s);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.ag-fleet,\s*\.ag-fleet-row \{\s*animation: none;/s);
+});
+
+test('편대 도크는 입력기 위 알약과 팝업으로 그려진다', () => {
+  assert.match(css, /\.ag-fleet-dock\s*\{[^}]*position:\s*absolute;/s);
+  assert.match(css, /\.ag-fleet-dock-pill\s*\{[^}]*border-radius:\s*999px;/s);
+  assert.match(css, /\.ag-fleet-popup\s*\{[^}]*max-height:\s*min\(320px, 40vh\);/s);
+  // 도크가 서 있는 동안 계획 복원 overlay 는 도크 위로 올라간다.
+  assert.match(source, /--ag-fleet-dock-h/);
+  assert.match(css, /var\(--ag-fleet-dock-h, 0px\)/);
 });
