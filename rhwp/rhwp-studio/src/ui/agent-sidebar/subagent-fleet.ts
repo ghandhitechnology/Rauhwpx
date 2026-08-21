@@ -1,16 +1,23 @@
 /**
- * 서브에이전트 · 워크플로 편대 카드.
+ * 서브에이전트 · 워크플로 편대 도크.
  *
- * 허브가 정규화한 task-start / task-progress / task-end 를 대화 흐름 안의 카드
- * 하나로 그린다. 한 턴에서 태어난 서브에이전트는 한 카드에 모이고, 워크플로는
- * 단계 레일과 멤버 행을 가진 자기 카드를 갖는다.
+ * 허브가 정규화한 task-start / task-progress / task-end 를 입력기 위에 뜨는
+ * 팝업 한 장으로 그린다. 팝업이 서브에이전트 작업을 보는 자리다: 턴이 도는 동안
+ * 카드는 입력기 바로 위 편대 도크에 머물고(다 끝난 카드도 턴이 끝날 때까지
+ * 여기서 결과를 읽는다), 도크 머리의 알약(pill)은 픽셀 휠과 함께 남은 작업 수를
+ * 말한다. 턴이 끝나면 카드는 태어날 때 예약해 둔 흐름 속 슬롯으로 접힌 채
+ * 들어가 기록이 된다 — 같은 기록이 두 곳에 펼쳐져 있는 순간은 없다.
  *
  * 설계 규칙
  * - 행 높이는 3줄 그리드로 고정한다. 스트리밍 중에 글자가 바뀌어도 다른 행이
  *   밀리지 않아야 열 개짜리 편대도 흔들리지 않는다.
- * - 진행 중 표현은 한 가지다. 점은 돌지 않고, 끝났을 때 시제만 바뀐다.
+ * - 진행 중 표현은 픽셀 휠 하나다. 부드럽게 도는 스피너가 아니라 step 타이밍으로
+ *   칸을 건너뛰는 8픽셀 짜리 바퀴다. 끝나면 시제와 색만 바뀐다.
  * - 값을 모르면 자리를 숨기지 않고 — 로 채워 폭을 지킨다.
- * - 카드는 살아 있는 동안 열려 있고, 끝나도 스스로 접히지 않는다.
+ * - 카드는 턴 내내 도크에 산다. 편대가 다 끝나면 팝업은 접혀 아래에서 이어지는
+ *   답변을 가리지 않고, 알약이 한 번에 다시 연다. 턴이 끝나면 슬롯으로 정착한다.
+ * - 펼친 살아 있는 기록은 한 번에 하나다 — 팝업이 열리면 호출부가 도구 활동
+ *   그룹을 접고, 그룹을 펼치면 팝업이 접힌다 (onPopupToggle / closePopup).
  *
  * DOM 은 전부 주입받은 doc 으로 만든다 (테스트에서 가짜 문서로 갈아 끼운다).
  */
@@ -162,23 +169,37 @@ interface TaskEntry {
 interface CardEntry {
   kind: 'batch' | 'workflow';
   root: HTMLElement;
+  toggle: HTMLButtonElement;
   label: HTMLElement;
   dot: HTMLElement;
   sum: HTMLElement;
   clock: HTMLElement;
   rail: HTMLElement;
   rows: HTMLElement;
+  /** 카드가 태어날 때 대화 흐름에 예약한 자리 — 턴이 끝나면 카드가 여기로 들어간다. */
+  slot: HTMLElement;
   tasks: TaskEntry[];
   startedAt: number;
   endedAt: number | null;
   ticker: number | null;
+  /** 도크 팝업에 머물러 있는 동안 true — 턴이 끝나 슬롯으로 정착하면 false 가 된다. */
+  hosted: boolean;
 }
 
 export interface SubagentFleetDeps {
   /** 요소를 만들 문서. */
   doc: Document;
-  /** 카드를 대화 흐름(.ag-messages)에 도구 활동 그룹과 같은 방식으로 끼워 넣는다. */
-  mountCard(card: HTMLElement): void;
+  /**
+   * 카드가 태어난 자리를 대화 흐름(.ag-messages)에 예약한다. 빈 슬롯을 지금의
+   * 흐름 위치(도구 활동 그룹과 같은 자리)에 끼워 넣는다 — 턴이 끝나면 카드가 이
+   * 슬롯으로 들어가므로, 팝업에 머물던 시간과 상관없이 흐름 순서가 맞는다.
+   */
+  mountSlot(slot: HTMLElement): void;
+  /**
+   * 팝업이 열리거나 닫혔다. 호출부는 열릴 때 같은 모양의 다른 펼침 기록(도구 활동
+   * 그룹)을 접어 살아 있는 기록이 둘 펼쳐지지 않게 한다.
+   */
+  onPopupToggle?(open: boolean): void;
   /**
    * 모델을 알려주지 않는 서브에이전트의 표기 기본값 — 그 프로바이더가 지금
    * 쓰는 모델. 사이드바 선택이 실행 중인 프로바이더와 다르면 null 을 돌려
@@ -188,6 +209,8 @@ export interface SubagentFleetDeps {
 }
 
 export interface SubagentFleetView {
+  /** 입력기 위에 붙일 편대 도크 (알약 + 팝업 본문). */
+  root: HTMLElement;
   /** 새 턴 — 다음 서브에이전트 묶음은 새 카드에 담는다. */
   beginTurn(): void;
   taskStart(evt: Extract<AgentStreamEvent, { type: 'task-start' }>): void;
@@ -197,8 +220,13 @@ export interface SubagentFleetView {
   routeToolCall(evt: Extract<AgentStreamEvent, { type: 'tool-call' }>): boolean;
   routeToolResult(evt: Extract<AgentStreamEvent, { type: 'tool-result' }>): boolean;
   routeTextDelta(evt: Extract<AgentStreamEvent, { type: 'text-delta' }>): boolean;
-  /** 턴이 끝났다 — 아직 안 끝난 행을 중단됨으로 확정하고 타이머를 멈춘다. */
+  /**
+   * 턴이 끝났다 — 아직 안 끝난 행을 중단됨으로 확정하고 타이머를 멈춘 뒤, 도크의
+   * 카드를 모두 예약해 둔 슬롯으로 접어 정착시킨다.
+   */
   sweep(): void;
+  /** 팝업만 접는다 (알약은 남는다) — 도구 활동 그룹을 펼칠 때 호출부가 부른다. */
+  closePopup(): void;
   /** 대화를 갈아 끼웠다 — 카드 참조와 타이머를 모두 버린다. */
   reset(): void;
 }
@@ -212,6 +240,121 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
   const tasks = new Map<string, TaskEntry>();
   const cards = new Set<CardEntry>();
   let batchCard: CardEntry | null = null;
+
+  /* ── 편대 도크 ────────────────────────────────────────
+     입력기 바로 위에 붙는 알약 + 팝업. 살아 있는 카드는 팝업에 머무르고,
+     정착하면 흐름으로 옮겨진다. 도크 자체는 absolute 여서 대화 높이를
+     건드리지 않는다 — 붙일 자리는 호출부가 정한다. */
+
+  const dock = el('div', 'ag-fleet-dock');
+  dock.hidden = true;
+  const popup = el('div', 'ag-fleet-popup');
+  popup.id = 'ag-fleet-popup';
+  popup.hidden = true;
+  popup.setAttribute('role', 'region');
+  popup.setAttribute('aria-label', '서브에이전트 진행 상황');
+  const pill = el('button', 'ag-fleet-dock-pill ag-live');
+  pill.type = 'button';
+  pill.setAttribute('aria-controls', popup.id);
+  pill.setAttribute('aria-expanded', 'false');
+  // 도는 동안은 픽셀 휠, 다 끝나면 상태 점이 같은 자리를 쓴다 (CSS 가 .ag-live 로 고른다).
+  const pillWheel = createPixelWheel();
+  const pillDot = el('span', 'ag-fleet-dot ag-run');
+  pillDot.setAttribute('aria-hidden', 'true');
+  const pillLabel = el('span', 'ag-fleet-dock-label');
+  const pillChevron = createChevron('ag-fleet-dock-chevron');
+  pill.append(pillWheel, pillDot, pillLabel, pillChevron);
+  dock.append(popup, pill);
+
+  let popupOpen = false;
+  /** 직전 갱신 때 도크에 살아 있던 task 수 — 0 으로 떨어지는 순간을 잡는다. */
+  let lastHostedLive = 0;
+  /**
+   * beginTurn 과 sweep 사이. 턴 밖에서 태어난 task(하니스가 turn-end 뒤에 흘린 늦은
+   * 스폰)는 정착시켜 줄 sweep 이 오지 않으므로, 끝나는 즉시 스스로 슬롯으로 간다.
+   */
+  let turnOpen = false;
+
+  /**
+   * 팝업이 바닥 근처일 때만 새 행을 따라 내려간다 — 사용자가 위로 올려 읽는 중이면
+   * 건드리지 않는다. (측정값이 없는 가짜 DOM 에서는 늘 따라간다.)
+   */
+  function followPopupTail(append: () => void): void {
+    const gap = popup.scrollHeight - popup.scrollTop - popup.clientHeight;
+    const nearBottom = !(gap > 40);
+    append();
+    if (nearBottom) popup.scrollTop = popup.scrollHeight;
+  }
+
+  function setPopupOpen(open: boolean): void {
+    if (popupOpen === open) return;
+    popupOpen = open;
+    popup.hidden = !open;
+    pill.setAttribute('aria-expanded', open ? 'true' : 'false');
+    deps.onPopupToggle?.(open);
+  }
+
+  pill.addEventListener('click', () => setPopupOpen(!popupOpen));
+
+  /** 도크 알약의 상태 줄. 살아 있는 동안은 남은 수, 끝나면 전체 수와 결과다. */
+  function dockSummary(hosted: CardEntry[]): { state: TaskState; label: string } {
+    let live = 0;
+    let total = 0;
+    let errors = 0;
+    let stopped = 0;
+    let workflowsOnly = true;
+    for (const card of hosted) {
+      if (card.kind !== 'workflow') workflowsOnly = false;
+      errors += errorCount(card);
+      for (const task of card.tasks) {
+        total += 1;
+        if (task.state === 'running') live += 1;
+        else if (task.state === 'stopped') stopped += 1;
+      }
+    }
+    const state: TaskState = live > 0 ? 'running'
+      : errors > 0 ? 'failed'
+        : stopped > 0 ? 'stopped' : 'completed';
+    const tail = live > 0 ? '작업 중'
+      : errors > 0 ? `${errors} 오류`
+        : stopped > 0 ? '중단됨' : '완료';
+    // 카드 머리와 같은 수를 쓴다 — 알약과 카드가 다른 숫자를 말하면 오류처럼 보인다.
+    // 아직 도는 행은 카드 안에서 휠이 가리킨다.
+    const head = workflowsOnly ? '워크플로' : `서브에이전트 ${total}`;
+    return { state, label: `${head} · ${tail}` };
+  }
+
+  function updateDock(): void {
+    const hosted = [...cards].filter((card) => card.hosted);
+    dock.hidden = hosted.length === 0;
+    if (hosted.length === 0) {
+      lastHostedLive = 0;
+      return;
+    }
+    const summary = dockSummary(hosted);
+    setText(pillLabel, summary.label);
+    pill.classList.remove('ag-live', 'ag-done', 'ag-err', 'ag-stopped');
+    pill.classList.add(
+      summary.state === 'running' ? 'ag-live'
+        : summary.state === 'completed' ? 'ag-done'
+          : summary.state === 'failed' ? 'ag-err' : 'ag-stopped',
+    );
+    setTone(pillDot, STATE_TONE[summary.state]);
+
+    let live = 0;
+    for (const card of hosted) live += liveCount(card);
+    // 편대가 모두 끝나면 팝업을 접는다 — 아래에서 이어지는 답변을 가린 채 두지
+    // 않는다. 결과는 알약 한 번으로 다시 펼쳐 읽는다.
+    if (live === 0 && lastHostedLive > 0) setPopupOpen(false);
+    lastHostedLive = live;
+  }
+
+  function createPixelWheel(className = ''): HTMLElement {
+    const wheel = el('span', className ? `ag-pixel-wheel ${className}` : 'ag-pixel-wheel');
+    wheel.setAttribute('aria-hidden', 'true');
+    for (let i = 0; i < 8; i += 1) wheel.appendChild(el('i', 'ag-pixel-bit'));
+    return wheel;
+  }
 
   function el<K extends keyof HTMLElementTagNameMap>(
     tag: K,
@@ -267,6 +410,8 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     const root = el('div', `ag-fleet-row ag-fleet-${variant}`);
     const dot = el('span', 'ag-fleet-dot ag-run');
     dot.setAttribute('aria-hidden', 'true');
+    // 도는 동안에는 점 대신 픽셀 휠이 그 자리를 쓴다 (CSS 가 .ag-live 로 고른다).
+    const spin = createPixelWheel('ag-fleet-spin');
     const name = el('span', 'ag-fleet-name');
     const title = el('span', 'ag-fleet-title');
     const role = el('span', 'ag-fleet-role');
@@ -279,7 +424,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
 
     if (variant === 'member') {
       const head = el('div', 'ag-fleet-head');
-      head.append(dot, name, aside, status, activity, metrics);
+      head.append(dot, spin, name, aside, status, activity, metrics);
       root.appendChild(head);
       return {
         root, toggle: null, dot, title, role, aside, activity, metrics, status, detail: null,
@@ -293,7 +438,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     toggle.setAttribute('aria-expanded', 'false');
     const detail = el('div', 'ag-fleet-detail');
     detail.hidden = true;
-    toggle.append(dot, name, aside, createChevron('ag-fleet-row-chevron'), status, activity, metrics);
+    toggle.append(dot, spin, name, aside, createChevron('ag-fleet-row-chevron'), status, activity, metrics);
     root.append(toggle, detail);
     toggle.addEventListener('click', () => {
       if (toggle.disabled) return;
@@ -378,24 +523,56 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     });
 
+    // 카드가 태어난 자리를 흐름에 예약한다. 턴이 끝날 때까지 비어 있고 숨겨져
+    // 높이를 만들지 않는다 — 정착하는 순간 카드가 들어오며 드러난다.
+    const slot = el('div', 'ag-progress-step ag-progress-step-tools-only ag-fleet-slot');
+    slot.hidden = true;
+    deps.mountSlot(slot);
+
     const card: CardEntry = {
       kind,
       root,
+      toggle,
       label,
       dot,
       sum,
       clock,
       rail,
       rows,
+      slot,
       tasks: [],
       startedAt: nowMs(),
       endedAt: null,
       ticker: null,
+      hosted: true,
     };
     cards.add(card);
-    deps.mountCard(root);
+    popup.appendChild(root);
+    // 새 편대가 태어나면 팝업을 다시 연다 — 사용자가 접었어도 새 묶음은 소식을 알린다.
+    setPopupOpen(true);
     startTicker(card);
+    updateDock();
     return card;
+  }
+
+  /**
+   * 턴이 끝나 카드를 기록으로 돌린다: 팝업에서 나와 예약해 둔 슬롯으로 들어가되
+   * 접힌 채다 — 도구 활동 그룹과 같은 한 줄 머리만 남기고, 펼치면 행과 드릴인이
+   * 그대로 있다. 슬롯이 사라진 대화(갈아 끼운 스레드)라면 카드도 버린다.
+   */
+  function settleCard(card: CardEntry): void {
+    if (!card.hosted) return;
+    card.hosted = false;
+    if (batchCard === card) batchCard = null;
+    card.root.classList.add('ag-collapsed');
+    card.toggle.setAttribute('aria-expanded', 'false');
+    const slot = card.slot;
+    if (slot.isConnected === false) {
+      card.root.remove();
+      return;
+    }
+    slot.hidden = false;
+    slot.appendChild(card.root);
   }
 
   /** 워크플로 카드에서만 멤버 실패가 카드 요약에 섞인다. */
@@ -520,6 +697,16 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       setText(card.clock, formatFleetClock(card.endedAt - card.startedAt));
       stopTicker(card);
     }
+
+    // 다 끝난 묶음은 더 받지 않는다 — 같은 턴의 다음 스폰은 새 카드로 모인다.
+    // 카드 자체는 턴이 끝날 때까지 도크에 남아 결과를 보여 준다 (sweep 이 정착시킨다).
+    if (!live && batchCard === card) batchCard = null;
+    // 턴 밖에서 끝난 카드는 기다릴 sweep 이 없다 — 바로 기록으로 돌린다.
+    if (!live && !turnOpen && card.hosted) {
+      stopTicker(card);
+      settleCard(card);
+    }
+    updateDock();
   }
 
   /* ── 단계 레일 · 멤버 ──────────────────────────────── */
@@ -577,7 +764,8 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       let entry = task.members.get(incoming.index);
       if (!entry) {
         const row = createRow('member');
-        task.card.rows.appendChild(row.root);
+        // 멤버 행은 단계가 진행될수록 계속 붙는다 — 바닥을 보고 있을 때만 따라 내려간다.
+        followPopupTail(() => task.card.rows.appendChild(row.root));
         entry = {
           index: incoming.index,
           row,
@@ -755,6 +943,9 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     applyRole(row, task.title, evt.taskKind === 'workflow' ? '' : evt.role ?? '');
     renderTaskRow(task);
     refreshCard(card);
+    // 새 카드·행은 팝업 맨 아래에 붙는다. 앞선 묶음이 이미 팝업을 채웠으면 방금
+    // 태어난 편대가 접힌 자리 밖에 남으므로, 소식이 있는 쪽으로 내려 준다.
+    if (card.hosted) popup.scrollTop = popup.scrollHeight;
   }
 
   function taskProgress(evt: Extract<AgentStreamEvent, { type: 'task-progress' }>): void {
@@ -835,9 +1026,25 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     return true;
   }
 
+  /** 도크의 카드를 전부 슬롯으로 정착시키고 도크를 닫는다. */
+  function settleAll(): void {
+    for (const card of cards) {
+      refreshCard(card);
+      stopTicker(card);
+      settleCard(card);
+    }
+    batchCard = null;
+    setPopupOpen(false);
+    updateDock();
+  }
+
   return {
+    root: dock,
     beginTurn(): void {
+      // 지난 턴이 turn-end 없이 끊겼어도 도크에 남은 카드는 새 턴에 섞이지 않는다.
+      if ([...cards].some((card) => card.hosted)) settleAll();
       batchCard = null;
+      turnOpen = true;
     },
     taskStart,
     taskProgress,
@@ -846,20 +1053,25 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     routeToolResult,
     routeTextDelta,
     sweep(): void {
+      turnOpen = false;
       for (const task of tasks.values()) {
         if (task.state === 'running') settleTask(task, 'stopped');
       }
-      for (const card of cards) {
-        refreshCard(card);
-        stopTicker(card);
-      }
-      batchCard = null;
+      settleAll();
+    },
+    closePopup(): void {
+      setPopupOpen(false);
     },
     reset(): void {
       for (const card of cards) stopTicker(card);
+      // 도크에 머물러 있던 카드만 팝업에서 걷어 낸다 — 정착해 흐름으로 간
+      // 카드는 대화 기록이므로 여기서 건드리지 않는다.
+      popup.replaceChildren();
       cards.clear();
       tasks.clear();
       batchCard = null;
+      setPopupOpen(false);
+      updateDock();
     },
   };
 }

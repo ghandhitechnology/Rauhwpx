@@ -16,6 +16,10 @@ e2e 스크립트의 **단일 권위 목록**이다. 파일 추가/변경/폐기 
 | `agent-edit-loop.test.mjs` | 상시 | active | 에이전트 편집 루프 종단간 (hub→bridge→executor→pending→wasm): revision 게이트 / 원자 replace_range / apply_list 숫자 서식 / 수식 미리보기·삽입 / verify_changes PNG / 수식 줄넘침 / 승인 영속 / 병렬 리베이스(편집 저널) | footnote-01.hwp | npm e2e:agent-edit-loop |  |
 | `subagent-fleet.test.mjs` | 상시 | active | 서브에이전트 fleet 종단간 (가짜 claude CLI→하니스 task 파싱→허브→사이드바): fleet 카드/행 렌더, 다중 result 턴 정착, parentTaskId 도구 귀속, 완료 전환 | footnote-01.hwp | npm e2e:subagent-fleet |  |
 | `fake-claude-fleet.mjs` | 유틸 | active | subagent-fleet e2e 의 가짜 claude CLI — 실측 stream-json 캡처 기반 fleet 시나리오 재생기 | — | 수동 | subagent-fleet.test.mjs 가 PATH 로 주입 |
+| `provider-subagent-fleet.test.mjs` | 상시 | active | codex/grok/cursor 네이티브 서브에이전트 fleet 종단간 (가짜 CLI→하니스→허브→사이드바): 롤아웃/updates.jsonl/전사 세 경로의 카드·행 렌더, 자식 도구 귀속, 스폰·수거 도구 억제, 턴 정착 1회, grok 루트 본문 무손상 | footnote-01.hwp | npm e2e:provider-fleets · e2e:codex-fleet · e2e:grok-fleet · e2e:cursor-fleet |  |
+| `fake-codex-fleet.mjs` | 유틸 | active | provider fleet e2e 의 가짜 codex CLI — exec --json 스트림 + $CODEX_HOME 롤아웃 증분 기록 | — | 수동 | provider-subagent-fleet.test.mjs 가 PATH 로 주입 |
+| `fake-grok-fleet.mjs` | 유틸 | active | provider fleet e2e 의 가짜 grok CLI — 다중화된 stdout + $GROK_HOME updates.jsonl 증분 기록 | — | 수동 | provider-subagent-fleet.test.mjs 가 PATH 로 주입 |
+| `fake-cursor-fleet.mjs` | 유틸 | active | provider fleet e2e 의 가짜 cursor-agent CLI — taskToolCall 전사 + 백그라운드 task_notification | — | 수동 | provider-subagent-fleet.test.mjs 가 PATH 로 주입 |
 | `agent-settings-reconnect.test.mjs` | 상시 | active | 허브 재연결 수명주기 + 설정 페이지: 허브 부재 배너 / 기동 후 자동 재연결 / 설정 네 구역·제공자 프로브 / 중단 감지·수동 재시도 / 재기동 복구 | (문서 불필요) | npm e2e:agent-settings-reconnect |  |
 | `agent-sidebar-center.check.mjs` | 상시 | active | 진단: 사이드바 inset 직후 문서 로드 시 용지 가운데 정렬 (stale viewport 폭 회귀) | — | 수동 | legacy-name |
 | `agent-workspace-shell.test.mjs` | 상시 | active | 전체 화면 워크스페이스 셸 기하: 상단 바/대화·변경 탭 전환/레일·검토 칸 배치 | — | 수동 |  |
