@@ -18,6 +18,7 @@ test('a skill token is a valid message without fallback prose', () => {
   assert.match(sidebar, /!text && !activeComposerSkill && !referenceLibrary\.hasDrafts\(\)/);
   assert.match(sidebar, /text = invocation\[2\]\?\.trim\(\) \?\? ''/);
   assert.doesNotMatch(sidebar, /이 스킬을 현재 문서에 적용해 주세요/);
+  assert.match(sidebar, /if \(!text && skillNameForMessage\) text = `\/\$\{skillNameForMessage\}`/);
   assert.match(sidebar, /recordUserMessage\(visibleText, messageAttachments, undefined, skillNameForMessage\)/);
 });
 

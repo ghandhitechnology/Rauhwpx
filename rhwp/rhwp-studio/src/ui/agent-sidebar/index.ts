@@ -3011,6 +3011,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const visibleText = activeTemplate && !skillNameForMessage
         ? `/templates ${activeTemplate.name}${text ? ` ${text}` : ''}`
         : text;
+    // 대화 기록은 skill block만 보이도록 빈 본문을 유지한다. 다만 wire
+    // protocol은 비어 있지 않은 text를 요구하므로 명시적 slash 호출 자체를
+    // 요청 본문으로 보낸다. 자연어 fallback을 UI나 기록에 숨겨 넣지 않는다.
+    if (!text && skillNameForMessage) text = `/${skillNameForMessage}`;
     // 승인 대기 중 입력은 언제나 계획 수정 의견이다. '네'/'승인' 같은
     // 텍스트로는 절대 승인되지 않는다 — 승인은 계획 카드의 버튼뿐.
     if (chatWorkflow === 'plan' && planningPhase === 'awaiting-approval') {
