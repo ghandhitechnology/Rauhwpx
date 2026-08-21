@@ -44,10 +44,8 @@ export class CaretRenderer {
   private visible = false;
   private currentRect: CursorRect | null = null;
 
-  // IME 조합 오버레이
-  private compEl: HTMLCanvasElement;
-  /** preedit 폭만큼 현재 줄의 뒤쪽 픽셀을 밀어 주는 transient 복제 레이어. */
-  private compFlowEl: HTMLCanvasElement;
+  // IME 조합 밑줄 — 글리프는 엔진 캔버스가 그린다. 같은 줄일 때만 1.5px 선을 얹는다.
+  private underlineEl: HTMLDivElement;
   private isCompMode = false;
 
   // 부드러운 이동 상태
@@ -75,26 +73,14 @@ export class CaretRenderer {
       'position:absolute;left:0;top:0;width:2px;background:var(--caret-color,#000);' +
       'pointer-events:none;z-index:10;display:none;transform-origin:0 0;';
 
-    // IME 조합 오버레이 (블랙박스 + 흰색 글자)
-    this.compEl = document.createElement('canvas');
-    this.compEl.className = 'caret-composition';
-    // 조합 중 글자는 문서 글자와 같은 모습(흰 종이 위 검은 글자)으로 보여주고,
-    // 조합 중임은 밑줄로만 표시한다. DOM 텍스트로 두면 line-box 수직 중앙정렬이
-    // 글리프 위아래를 잘라(overflow:hidden) 확정 글자보다 작아 보이므로, 페이지와
-    // 같은 캔버스 래스터로 엔진의 baseline 관례에 맞춰 직접 그린다.
-    // #scroll-content canvas 규칙(중앙 정렬 transform + 용지 배경/그림자)이 이
-    // 캔버스에도 걸리므로 compFlowEl 과 동일하게 인라인으로 전부 무효화한다.
-    this.compEl.style.cssText =
+    // IME 조합 밑줄. 글리프 캔버스가 아니라 div 라 #scroll-content canvas
+    // 용지 규칙(중앙 정렬 transform + 배경/그림자)을 물려받지 않는다.
+    this.underlineEl = document.createElement('div');
+    this.underlineEl.className = 'caret-composition';
+    this.underlineEl.style.cssText =
       'position:absolute;pointer-events:none;z-index:10;display:none;' +
-      'transform:none;background:transparent;box-shadow:none;';
-    this.compFlowEl = document.createElement('canvas');
-    this.compFlowEl.className = 'caret-composition-flow';
-    // #scroll-content canvas 규칙(페이지 중앙 정렬 translateX(-50%) + 용지 배경/그림자)이
-    // 이 캔버스에도 걸린다. 그대로 두면 조합 띠가 절반 폭만큼 왼쪽으로 밀린 흰 막대로
-    // 보이므로, 인라인으로 전부 무효화한다.
-    this.compFlowEl.style.cssText =
-      'position:absolute;pointer-events:none;z-index:9;display:none;' +
-      'transform:none;background:transparent;box-shadow:none;';
+      'height:1.5px;background:currentColor;color:#000;transform:none;' +
+      'box-shadow:none;';
 
     if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
       this.reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -111,12 +97,10 @@ export class CaretRenderer {
     const scrollContent = container.querySelector('#scroll-content');
     if (scrollContent) {
       scrollContent.appendChild(this.caretEl);
-      scrollContent.appendChild(this.compFlowEl);
-      scrollContent.appendChild(this.compEl);
+      scrollContent.appendChild(this.underlineEl);
     } else {
       container.appendChild(this.caretEl);
-      container.appendChild(this.compFlowEl);
-      container.appendChild(this.compEl);
+      container.appendChild(this.underlineEl);
     }
   }
 
@@ -134,8 +118,7 @@ export class CaretRenderer {
     this.stopBlink();
     this.clearTypingIdle();
     this.caretEl.style.display = 'none';
-    this.compEl.style.display = 'none';
-    this.compFlowEl.style.display = 'none';
+    this.underlineEl.style.display = 'none';
     this.isCompMode = false;
     this.currentRect = null;
     this.forgetLastPosition();
@@ -175,12 +158,9 @@ export class CaretRenderer {
     this.ensureAttached();
     this.currentRect = rect;
     this.applyRect(zoom, 'glide');
-    // 조합 모드가 아닐 때만 일반 캐럿 표시
-    if (!this.isCompMode) {
-      this.caretEl.style.display = 'block';
-      this.visible = true;
-      this.holdSolidWhileTyping();
-    }
+    this.caretEl.style.display = 'block';
+    this.visible = true;
+    this.holdSolidWhileTyping();
   }
 
   /** 드래그 중 캐럿 위치를 갱신한다 — 포인터를 정확히 따라가야 하므로 즉시 반영 */
@@ -188,166 +168,53 @@ export class CaretRenderer {
     this.ensureAttached();
     this.currentRect = rect;
     this.applyRect(zoom, 'snap');
-    if (!this.isCompMode) {
-      this.caretEl.style.display = 'block';
-      this.visible = true;
-      this.holdSolidWhileTyping();
-    }
+    this.caretEl.style.display = 'block';
+    this.visible = true;
+    this.holdSolidWhileTyping();
   }
 
-  /** IME 조합 오버레이를 표시한다. fontSizePx 는 문서 글꼴의 실제 px 크기(줌 미적용). */
-  showComposition(
-    startRect: CursorRect,
-    charWidth: number,
-    zoom: number,
-    text: string,
-    fontFamily: string,
-    fontSizePx = 0,
-  ): void {
+  /**
+   * 같은 줄의 조합 범위에만 1.5px 밑줄을 그린다. 줄바꿈이 일어나면 숨긴다 —
+   * 글리프는 이미 엔진 캔버스에 있다.
+   */
+  showCompositionUnderline(startRect: CursorRect, endRect: CursorRect, zoom: number): void {
     this.ensureAttached();
     this.isCompMode = true;
 
-    // 일반 캐럿 숨기기
-    this.caretEl.style.display = 'none';
-    // 조합이 끝나고 캐럿이 돌아올 때 엉뚱한 지점에서 흐르지 않도록 기준점을 버린다.
-    this.forgetLastPosition();
+    const sameLine = startRect.pageIndex === endRect.pageIndex
+      && Math.abs(startRect.y - endRect.y) < Math.max(startRect.height, endRect.height, 1) * 0.5;
+    const rawWidth = endRect.x - startRect.x;
+    if (!sameLine || !(rawWidth > 0)) {
+      this.underlineEl.style.display = 'none';
+      return;
+    }
 
-    const { pageIndex } = startRect;
-    const box = this.clampCompositionBox(startRect, charWidth);
-    const pageOffset = this.virtualScroll.getPageOffset(pageIndex);
-    const pageLeft = this.calcPageLeft(pageIndex);
+    let x = startRect.x;
+    let w = rawWidth;
+    const bounds = startRect.cellBounds ?? endRect.cellBounds;
+    if (bounds) {
+      const maxX = bounds.x + bounds.w;
+      x = Math.min(Math.max(x, bounds.x), maxX);
+      w = Math.min(w, Math.max(0, maxX - x));
+    }
+    if (!(w > 0)) {
+      this.underlineEl.style.display = 'none';
+      return;
+    }
 
-    // 블랙박스 위치/크기
-    const w = box.w * zoom;
-    const h = box.h * zoom;
-    const left = pageLeft + box.x * zoom;
-    const top = pageOffset + box.y * zoom;
-
-    // preedit은 문서에 넣지 않으므로 Canvas 원문은 그대로다. 현재 줄의
-    // 오른쪽 부분만 복제해 preedit 폭만큼 밀어, 다음 글자가 검은 상자에
-    // 가려지지 않게 한다.
-    this.renderCompositionFlow(startRect, box, zoom, pageLeft, pageOffset);
-
-    // 조합 중인 글자는 자모가 합쳐질 때마다 상자가 바뀐다. 이 상자는
-    // 입력을 그대로 비추는 거울이라 절대 애니메이션하지 않는다.
-    this.compEl.style.left = `${left}px`;
-    this.compEl.style.top = `${top}px`;
-    this.compEl.style.width = `${w}px`;
-    this.compEl.style.height = `${h}px`;
-    this.paintComposition(text, fontFamily, fontSizePx, box.h, zoom, w, h);
-    this.compEl.style.display = 'block';
-    this.visible = true;
-    // 조합 상자는 입력을 그대로 비추는 거울이다 — 깜박이면 타자 리듬을 흩뜨린다.
-    this.stopBlink();
-    this.compEl.style.opacity = '';
+    const pageLeft = this.calcPageLeft(startRect.pageIndex);
+    const pageOffset = this.virtualScroll.getPageOffset(startRect.pageIndex);
+    this.underlineEl.style.left = `${pageLeft + x * zoom}px`;
+    this.underlineEl.style.top = `${pageOffset + (startRect.y + startRect.height) * zoom - 1.5}px`;
+    this.underlineEl.style.width = `${w * zoom}px`;
+    this.underlineEl.style.display = 'block';
   }
 
-  /**
-   * preedit 를 페이지와 같은 캔버스 래스터로 그린다.
-   *
-   * 글꼴 크기는 문서 글꼴의 실제 px(fontSizePx, 줌 미적용)를 그대로 쓰고,
-   * baseline 은 엔진의 줄 관례(text_height × 0.85)에 맞춰 얹는다 — 확정 글자와
-   * 같은 크기·같은 기준선으로 보인다. 조회 실패(fontSizePx=0) 시에만 기존
-   * 근사(0.85 × 상자 높이)로 폴백한다.
-   */
-  private paintComposition(
-    text: string,
-    fontFamily: string,
-    fontSizePx: number,
-    boxDocHeight: number,
-    zoom: number,
-    w: number,
-    h: number,
-  ): void {
-    const dpr = window.devicePixelRatio || 1;
-    this.compEl.width = Math.max(1, Math.ceil(w * dpr));
-    this.compEl.height = Math.max(1, Math.ceil(h * dpr));
-    const ctx = this.compEl.getContext('2d');
-    if (!ctx) return;
-    ctx.scale(dpr, dpr);
-    // 배경은 불투명 흰색 — 뒤에는 밀리기 전의 원본 픽셀이 남아 있다.
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(0, 0, w, h);
-    ctx.fillStyle = '#000';
-    const glyphPx = fontSizePx > 0 ? fontSizePx * zoom : boxDocHeight * 0.85 * zoom;
-    ctx.font = `${glyphPx}px ${fontFamily || 'sans-serif'}`;
-    ctx.textBaseline = 'alphabetic';
-    const textWidth = ctx.measureText(text).width;
-    ctx.fillText(text, Math.max(0, (w - textWidth) / 2), h * 0.85);
-    // 조합 중 표시 밑줄
-    ctx.fillRect(0, Math.max(0, h - 1.5), w, 1.5);
-  }
-
-  /** IME 조합 오버레이를 숨기고 일반 캐럿으로 복귀한다 */
+  /** IME 조합 밑줄을 숨긴다 */
   hideComposition(): void {
     if (!this.isCompMode) return;
     this.isCompMode = false;
-    this.compEl.style.display = 'none';
-    this.compFlowEl.style.display = 'none';
-    this.compEl.classList.remove('is-blinking');
-  }
-
-  /**
-   * 원본 페이지의 현재 줄 꼬리를 복제해 조합창 뒤로 민다. 문서/WASM은
-   * 건드리지 않으므로 compositionend 커밋과 Undo 계약은 그대로 유지된다.
-   */
-  private renderCompositionFlow(
-    rect: CursorRect,
-    box: { x: number; y: number; w: number; h: number },
-    zoom: number,
-    pageLeft: number,
-    pageOffset: number,
-  ): void {
-    const scrollContent = this.container.querySelector('#scroll-content');
-    const source = scrollContent?.querySelector<HTMLCanvasElement>(
-      `canvas[data-rhwp-page-index="${rect.pageIndex}"]`,
-    );
-    const sourceDisplayWidth = source ? Number.parseFloat(source.style.width) : 0;
-    const sourceDisplayHeight = source ? Number.parseFloat(source.style.height) : 0;
-    if (!source || !(sourceDisplayWidth > 0) || !(sourceDisplayHeight > 0)) {
-      this.compFlowEl.style.display = 'none';
-      return;
-    }
-
-    const right = rect.cellBounds
-      ? rect.cellBounds.x + rect.cellBounds.w
-      : sourceDisplayWidth / Math.max(zoom, 0.01);
-    const flowWidth = Math.max(0, (right - box.x) * zoom);
-    const gapWidth = box.w * zoom;
-    const copiedWidth = flowWidth - gapWidth;
-    const flowHeight = box.h * zoom;
-    if (!(copiedWidth > 0) || !(flowHeight > 0)) {
-      this.compFlowEl.style.display = 'none';
-      return;
-    }
-
-    const scaleX = source.width / sourceDisplayWidth;
-    const scaleY = source.height / sourceDisplayHeight;
-    this.compFlowEl.width = Math.max(1, Math.ceil(flowWidth * scaleX));
-    this.compFlowEl.height = Math.max(1, Math.ceil(flowHeight * scaleY));
-    this.compFlowEl.style.left = `${pageLeft + box.x * zoom}px`;
-    this.compFlowEl.style.top = `${pageOffset + box.y * zoom}px`;
-    this.compFlowEl.style.width = `${flowWidth}px`;
-    this.compFlowEl.style.height = `${flowHeight}px`;
-
-    const context = this.compFlowEl.getContext('2d');
-    if (!context) {
-      this.compFlowEl.style.display = 'none';
-      return;
-    }
-    context.clearRect(0, 0, this.compFlowEl.width, this.compFlowEl.height);
-    context.drawImage(
-      source,
-      box.x * zoom * scaleX,
-      box.y * zoom * scaleY,
-      copiedWidth * scaleX,
-      flowHeight * scaleY,
-      gapWidth * scaleX,
-      0,
-      copiedWidth * scaleX,
-      flowHeight * scaleY,
-    );
-    this.compFlowEl.style.display = 'block';
+    this.underlineEl.style.display = 'none';
   }
 
   /** 현재 rect 를 화면 좌표로 바꿔 적용한다. */
@@ -457,27 +324,6 @@ export class CaretRenderer {
     };
   }
 
-  /** IME 조합창은 Canvas clip을 받지 않으므로 셀 가시 bbox로 별도 제한한다. */
-  private clampCompositionBox(
-    rect: CursorRect,
-    charWidth: number,
-  ): { x: number; y: number; w: number; h: number } {
-    let x = rect.x;
-    let y = rect.y;
-    let w = Math.max(charWidth, rect.height * 0.6);
-    let h = rect.height;
-    const bounds = rect.cellBounds;
-    if (!bounds) return { x, y, w, h };
-
-    w = Math.min(w, Math.max(0, bounds.w));
-    h = Math.min(h, Math.max(0, bounds.h));
-    const maxX = Math.max(bounds.x, bounds.x + bounds.w - w);
-    const maxY = Math.max(bounds.y, bounds.y + bounds.h - h);
-    x = Math.min(Math.max(x, bounds.x), maxX);
-    y = Math.min(Math.max(y, bounds.y), maxY);
-    return { x, y, w, h };
-  }
-
   /** 페이지의 화면 X 좌표를 계산한다 (그리드/단일 열 공통) */
   private calcPageLeft(pageIndex: number): number {
     const gridLeft = this.virtualScroll.getPageLeft(pageIndex);
@@ -492,11 +338,10 @@ export class CaretRenderer {
   /** 캐럿 엘리먼트가 DOM에 없으면 재부착한다 (loadDocument 후 컨테이너 교체 대응) */
   private ensureAttached(): void {
     const scrollContent = this.container.querySelector('#scroll-content');
-    if (this.caretEl.parentElement && this.compEl.parentElement && this.compFlowEl.parentElement) return;
+    if (this.caretEl.parentElement && this.underlineEl.parentElement) return;
     if (scrollContent) {
       if (!this.caretEl.parentElement) scrollContent.appendChild(this.caretEl);
-      if (!this.compFlowEl.parentElement) scrollContent.appendChild(this.compFlowEl);
-      if (!this.compEl.parentElement) scrollContent.appendChild(this.compEl);
+      if (!this.underlineEl.parentElement) scrollContent.appendChild(this.underlineEl);
     }
   }
 
@@ -507,7 +352,6 @@ export class CaretRenderer {
   private startBlink(): void {
     this.stopBlink();
     this.visible = true;
-    // 조합 상자는 깜박이지 않는다 — 깜박임은 일반 캐럿 전용.
     if (this.isCompMode) return;
     this.caretEl.style.opacity = '';
     this.caretEl.classList.add('is-blinking');
@@ -519,7 +363,7 @@ export class CaretRenderer {
       this.blinkTimer = null;
     }
     this.caretEl.classList.remove('is-blinking');
-    this.compEl.classList.remove('is-blinking');
+    this.underlineEl.classList.remove('is-blinking');
   }
 
   dispose(): void {
@@ -530,7 +374,6 @@ export class CaretRenderer {
       this.onPointerDown = null;
     }
     this.caretEl.remove();
-    this.compFlowEl.remove();
-    this.compEl.remove();
+    this.underlineEl.remove();
   }
 }
