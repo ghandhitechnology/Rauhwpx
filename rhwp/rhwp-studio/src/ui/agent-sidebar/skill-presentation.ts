@@ -1,4 +1,4 @@
-export type SkillGlyph = 'skillEdit' | 'skillBot' | 'gear';
+export type SkillGlyph = 'skillEdit' | 'skillBot' | 'skillSystem';
 
 /**
  * Product skill의 주된 결과를 아이콘으로 구분한다. 요약처럼 요청에 따라
@@ -20,5 +20,5 @@ const INTERNAL_WORK_SKILLS = new Set([
 export function skillGlyphForName(name: string): SkillGlyph {
   if (DOCUMENT_EDITING_SKILLS.has(name)) return 'skillEdit';
   if (INTERNAL_WORK_SKILLS.has(name)) return 'skillBot';
-  return 'gear';
+  return 'skillSystem';
 }

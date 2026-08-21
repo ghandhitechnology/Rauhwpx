@@ -21,14 +21,20 @@ test('internal and primarily read-only skills use the minimal bot glyph', () => 
 
 test('other skills use the familiar system gear', () => {
   for (const name of ['present-plan', 'my-custom-skill']) {
-    assert.equal(skillGlyphForName(name), 'gear');
+    assert.equal(skillGlyphForName(name), 'skillSystem');
   }
 });
 
 test('pencil, bot, and system gear are native stroke icons', () => {
   assert.match(icons, /skillEdit:/);
   assert.match(icons, /skillBot:\s*'M2\.1 3h7\.8v6H2\.1zM4 6h\.6M7\.4 6H8'/);
-  assert.match(icons, /gear:/);
+  assert.match(icons, /skillSystem:/);
+  assert.match(icons, /name === 'skillSystem' \? '1\.35' : '1\.25'/);
+});
+
+test('every uncategorized skill receives the system gear', () => {
+  assert.equal(skillGlyphForName('future-bundled-skill'), 'skillSystem');
+  assert.equal(skillGlyphForName('disabled-custom-skill'), 'skillSystem');
 });
 
 test('the skill glyph appears in every skill surface', () => {
