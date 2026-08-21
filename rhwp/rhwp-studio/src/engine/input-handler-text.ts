@@ -372,7 +372,7 @@ export function onCompositionStart(this: any): void {
   // 선택 영역이 있으면 삭제 후 조합 시작
   if (this.cursor.hasSelection()) {
     if (!this.canDeleteSelectionInFormMode?.()) {
-      this.resetTextareaBuffer();
+      this.textarea.value = '';
       return;
     }
     this.deleteSelection();
@@ -386,7 +386,7 @@ export function onCompositionStart(this: any): void {
     basePos = this.prepareClickHereInputPosition?.() ?? basePos;
   }
   if (!this.canInsertTextInFormMode?.(basePos)) {
-    this.resetTextareaBuffer();
+    this.textarea.value = '';
     this.imeSession.reset();
     this.compositionAnchor = null;
     this.clearCompositionAnchorRect();
@@ -396,7 +396,6 @@ export function onCompositionStart(this: any): void {
 
   this.captureCompositionAnchorRect(basePos);
   this.compositionFontFamily = null;
-  this.compositionFontSizePx = null;
   this.imeSession.start();
   this.compositionAnchor = basePos;
   this.compositionLength = 0;
@@ -412,7 +411,7 @@ export function onCompositionUpdate(this: any, event: CompositionEvent): void {
 
 export function onCompositionEnd(this: any, event?: CompositionEvent): void {
   const anchor = this.compositionAnchor;
-  const textareaText = this.unconsumedTextareaValue().replace(/[\r\n]+/g, '');
+  const textareaText = this.textarea.value.replace(/[\r\n]+/g, '');
   const commit = this.imeSession.finish(event?.data, textareaText);
   if (!commit) return;
 
@@ -421,11 +420,7 @@ export function onCompositionEnd(this: any, event?: CompositionEvent): void {
   this.clearCompositionAnchorRect();
   this.compositionLength = 0;
   this.compositionFontFamily = null;
-  this.compositionFontSizePx = null;
-  // value 를 비우지 않는다 — 다음 음절의 조합이 이미 textarea 에서 진행 중일 수
-  // 있고 (렌더링이 타자 속도보다 느릴 때), 그 순간의 value 변경은 브라우저가
-  // 조합을 파기해 글자를 씹는다. 반영 완료 지점만 전진시킨다.
-  this.consumeTextareaValue();
+  this.textarea.value = '';
   this.caret.hideComposition();
   this.resetRawTextMutationEffects();
 
@@ -488,20 +483,20 @@ export function onInput(this: any, e?: InputEvent): void {
     inputType: e.inputType,
     data: e.data,
     isComposing: e.isComposing,
-    value: this.unconsumedTextareaValue(),
+    value: this.textarea.value,
   })) {
-    this.consumeTextareaValue();
+    this.textarea.value = '';
     return;
   }
 
   // 줄바꿈은 문단 분할 Command 로만 들어온다. textarea 의 기본 동작으로 값에 섞여 들어온
   // \r\n 을 그대로 삽입하면 문단 안에 리터럴 개행 문자가 박힌다.
-  const text = (this.unconsumedTextareaValue() || e?.data || '').replace(/[\r\n]+/g, '');
+  const text = (this.textarea.value || e?.data || '').replace(/[\r\n]+/g, '');
 
   // 조합 중에는 문서를 변경하지 않고 transient preedit만 갱신한다.
   if (this.isComposing && this.compositionAnchor) {
     if (!this.canInsertTextInFormMode?.(this.compositionAnchor)) {
-      this.resetTextareaBuffer();
+      this.textarea.value = '';
       this.imeSession.reset();
       this.compositionAnchor = null;
       this.clearCompositionAnchorRect();
@@ -540,7 +535,7 @@ export function onInput(this: any, e?: InputEvent): void {
       this._iosLength = 0;
     }
     if (!this.canInsertTextInFormMode?.(this._iosAnchor)) {
-      this.resetTextareaBuffer();
+      this.textarea.value = '';
       return;
     }
     this.resetRawTextMutationEffects();
@@ -579,13 +574,13 @@ export function onInput(this: any, e?: InputEvent): void {
 
   // 일반 입력 (비조합) → Command로 실행
   if (!text) {
-    // 개행만 들어온 경우 반영 완료로 표시해 다음 입력에 새지 않게 한다.
-    this.consumeTextareaValue();
+    // 개행만 들어온 경우 textarea 를 비워 다음 입력에 새지 않게 한다.
+    if (this.textarea.value) this.textarea.value = '';
     return;
   }
 
   this.imeSession.clearPendingCommit();
-  this.consumeTextareaValue();
+  this.textarea.value = '';
 
   // 머리말/꼬리말 편집 모드
   if (this.cursor.isInHeaderFooter()) {
@@ -629,7 +624,7 @@ export function onInput(this: any, e?: InputEvent): void {
   let refreshClickHereGuide = this.isClickHereGuidePosition?.(insertPos) === true;
   if (this.cursor.hasSelection()) {
     if (!this.canDeleteSelectionInFormMode?.()) {
-      this.consumeTextareaValue();
+      this.textarea.value = '';
       return;
     }
     this.deleteSelection();
@@ -637,7 +632,7 @@ export function onInput(this: any, e?: InputEvent): void {
     refreshClickHereGuide = this.isClickHereGuidePosition?.(insertPos) === true;
   }
   if (!this.canInsertTextInFormMode?.(insertPos)) {
-    this.consumeTextareaValue();
+    this.textarea.value = '';
     return;
   }
   this.executeOperation({ kind: 'command', command: new InsertTextCommand(insertPos, text) });

@@ -92,7 +92,7 @@ test('IME 조합 caret은 시작 시 보존한 anchor 좌표를 재사용한다'
     /private captureCompositionAnchorRect\(anchor: DocumentPosition\): void \{[\s\S]*?CursorState\.comparePositions\(current, anchor\) === 0[\s\S]*?cellBounds: rect\.cellBounds \? \{ \.\.\.rect\.cellBounds \} : undefined,[\s\S]*?\}/,
     '조합 시작 좌표는 현재 logical cursor와 anchor가 정확히 같을 때만 캐시해야 한다',
   );
-  assert.match(textSource, /this\.captureCompositionAnchorRect\(basePos\);\s*this\.compositionFontFamily = null;\s*this\.compositionFontSizePx = null;\s*this\.imeSession\.start\(\);/);
+  assert.match(textSource, /this\.captureCompositionAnchorRect\(basePos\);\s*this\.compositionFontFamily = null;\s*this\.imeSession\.start\(\);/);
   assert.match(
     inputHandlerSource,
     /let startRect = this\.compositionAnchorRect;\s*if \(!startRect\) \{[\s\S]*?this\.wasm\.getCursorRectInCell\(/,
@@ -224,7 +224,7 @@ test('document pagination은 120ms idle과 명시 boundary에서 flush된다', (
   assert.match(inputHandlerSource, /private onInputBlurBound: \(\) => void;/);
   assert.match(
     inputHandlerSource,
-    /this\.onInputBlurBound = \(\) => \{\s*if \(this\.isComposing\) _text\.onCompositionEnd\.call\(this\);\s*this\.resetIosInputSession\(\);[\s\S]*?this\.resetTextareaBuffer\(\);\s*this\.flushDeferredPaginationIfNeeded\('input-blur', false\);\s*\};/,
+    /this\.onInputBlurBound = \(\) => \{\s*if \(this\.isComposing\) _text\.onCompositionEnd\.call\(this\);\s*this\.resetIosInputSession\(\);\s*this\.flushDeferredPaginationIfNeeded\('input-blur', false\);\s*\};/,
   );
   assert.match(inputHandlerSource, /this\.textarea\.addEventListener\('blur', this\.onInputBlurBound\);/);
   assert.match(inputHandlerSource, /this\.textarea\.removeEventListener\('blur', this\.onInputBlurBound\);/);
@@ -252,8 +252,7 @@ test('문서 전환은 deferred·IME·iOS 입력 세션 상태를 격리한다',
   assert.match(deactivateSource, /this\.imeSession\.reset\(\);/);
   assert.match(deactivateSource, /this\._iosAnchor = null;/);
   assert.match(deactivateSource, /this\._iosRequiresFullRefresh = false;/);
-  assert.match(deactivateSource, /this\.resetTextareaBuffer\(\);/,
-    '문서 전환 시 textarea value와 consumed prefix 카운터를 함께 초기화해야 한다');
+  assert.match(deactivateSource, /this\.textarea\.value = '';/);
 });
 
 test('저장·다른 이름 저장·인쇄는 resumable job을 출력 전에 동기 barrier로 마감한다', () => {

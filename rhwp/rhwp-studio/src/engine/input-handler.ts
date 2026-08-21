@@ -467,17 +467,6 @@ export class InputHandler {
   /** transient preedit의 Unicode scalar 길이 */
   private compositionLength = 0;
   private compositionFontFamily: string | null = null;
-  /** 조합 시작 시점 글꼴의 실제 px 크기 (줌 미적용). null = 미조회, 0 = 조회 실패. */
-  private compositionFontSizePx: number | null = null;
-  /**
-   * 숨은 textarea 에서 이미 문서에 반영한 value prefix 의 길이 (UTF-16).
-   *
-   * textarea 는 IME 가 소유한다 — 조합이 살아 있을 수 있는 동안 value 를
-   * 프로그램적으로 바꾸면 브라우저가 진행 중인 조합을 즉시 파기해, 렌더링이
-   * 타자 속도를 못 따라갈 때 글자가 씹힌다. 그래서 타이핑 경로에서는 value 를
-   * 비우는 대신 이 카운터만 전진시키고, 새 입력은 그 뒤 슬라이스로 읽는다.
-   */
-  private textareaConsumed = 0;
   private _pendingNavAfterIME: NavigationKeyInput | null = null;
   // iOS 폴백: composition 이벤트 없이 input만으로 한글 조합 처리
   private _iosComposing = false;
@@ -574,8 +563,6 @@ export class InputHandler {
     this.onInputBlurBound = () => {
       if (this.isComposing) _text.onCompositionEnd.call(this);
       this.resetIosInputSession();
-      // 블러 시점에는 브라우저가 조합을 스스로 끝내므로 value 정리가 안전하다.
-      this.resetTextareaBuffer();
       this.flushDeferredPaginationIfNeeded('input-blur', false);
     };
     this.onCopyBound = this.onCopy.bind(this);
@@ -2769,46 +2756,16 @@ export class InputHandler {
   finalizeCompositionBeforeCursorMove(): void {
     if (!this.isComposing) {
       this.resetIosInputSession();
-      this.trimTextareaBufferIfIdle();
       return;
     }
     _text.onCompositionEnd.call(this);
     // blur→focus 로 IME 조합 버퍼를 비운다. 조합 중 값이 남아 있으면
     // 다음 input 이 옛 preedit 를 다시 흘려보낸다.
-    this.resetTextareaBuffer();
+    this.textarea.value = '';
     try {
       this.textarea.blur();
       this.textarea.focus();
     } catch { /* 포커스 이동 실패는 무시 — 상태는 이미 확정됨 */ }
-  }
-
-  /** textarea value 중 아직 문서에 반영하지 않은 꼬리 슬라이스를 반환한다. */
-  private unconsumedTextareaValue(): string {
-    const value = this.textarea.value;
-    // 조합 취소 등으로 value 가 prefix 보다 짧아졌으면 카운터를 따라 내린다.
-    if (this.textareaConsumed > value.length) this.textareaConsumed = value.length;
-    return value.slice(this.textareaConsumed);
-  }
-
-  /** 현재 value 전체를 반영 완료로 표시한다 — value 자체는 건드리지 않는다. */
-  private consumeTextareaValue(): void {
-    this.textareaConsumed = this.textarea.value.length;
-  }
-
-  /**
-   * value 를 실제로 비운다. IME 리셋이 의도된 지점(클릭/블러/비활성화/모드 거부)
-   * 에서만 부른다 — 타이핑 도중에 부르면 진행 중인 조합이 파기된다.
-   */
-  private resetTextareaBuffer(): void {
-    this.textarea.value = '';
-    this.textareaConsumed = 0;
-  }
-
-  /** 경계 키 등 IME 가 확실히 쉬는 순간에만 누적된 value 를 정리한다. */
-  private trimTextareaBufferIfIdle(): void {
-    if (this.imeSession.isComposing) return;
-    if (this.textarea.value.length === 0 && this.textareaConsumed === 0) return;
-    this.resetTextareaBuffer();
   }
 
   /** composition 이벤트가 없는 iOS 입력의 anchor를 포커스/커서 경계에서 닫는다. */
@@ -2820,7 +2777,7 @@ export class InputHandler {
     this._iosLength = 0;
     this._iosPrevText = '';
     this._iosRequiresFullRefresh = false;
-    this.resetTextareaBuffer();
+    this.textarea.value = '';
   }
 
   /** 텍스트 입력 처리 (textarea input 이벤트) */
@@ -3161,38 +3118,15 @@ export class InputHandler {
       return;
     }
 
-    const font = this.resolveCompositionFont();
-    const charWidth = this.compositionOverlayWidth(font, startRect);
-    this.caret.showComposition(startRect, charWidth, zoom, text, font.family, font.sizePx);
-  }
-
-  /** preedit는 아직 문서에 없으므로 문서 글꼴 px 크기로 CJK advance를 근사한다. */
-  private compositionOverlayWidth(font: { sizePx: number }, startRect: CursorRect): number {
-    const advance = font.sizePx > 0 ? font.sizePx : startRect.height;
-    return Math.max(advance * this.compositionLength, 1);
-  }
-
-  /** 조합 세션당 한 번만 커서 글꼴(패밀리/px 크기)을 조회해 캐시한다. */
-  private resolveCompositionFont(): { family: string; sizePx: number } {
-    if (this.compositionFontFamily === null || this.compositionFontSizePx === null) {
+    if (!this.compositionFontFamily) {
       try {
-        const props = this.getCharPropertiesAtCursor();
-        this.compositionFontFamily = props.fontFamily || 'sans-serif';
-        // fontSize 는 1pt=100 단위 → px = pt * 96/72 = fontSize / 75 (렌더러 96dpi 기준).
-        // 한글 축(index 0)의 상대크기(%)도 실제 렌더 크기에 반영된다.
-        const relative = (props.relativeSizes?.[0] ?? 100) / 100;
-        this.compositionFontSizePx = props.fontSize && props.fontSize > 0
-          ? (props.fontSize / 75) * relative
-          : 0;
+        this.compositionFontFamily = this.getCharPropertiesAtCursor().fontFamily || 'sans-serif';
       } catch {
         this.compositionFontFamily = 'sans-serif';
-        this.compositionFontSizePx = 0;
       }
     }
-    return {
-      family: this.compositionFontFamily ?? 'sans-serif',
-      sizePx: this.compositionFontSizePx ?? 0,
-    };
+    const charWidth = Math.max(startRect.height * this.compositionLength, 1);
+    this.caret.showComposition(startRect, charWidth, zoom, text, this.compositionFontFamily);
   }
 
   private updateCaret(skipScroll: boolean = false): void {
@@ -3241,9 +3175,15 @@ export class InputHandler {
             };
           }
           const text = this.imeSession.preedit;
-          const font = this.resolveCompositionFont();
-          const charWidth = this.compositionOverlayWidth(font, startRect);
-          this.caret.showComposition(startRect, charWidth, zoom, text, font.family, font.sizePx);
+          // preedit는 아직 문서에 없으므로 현재 글자 높이로 CJK advance를 근사한다.
+          const charWidth = Math.max(startRect.height * this.compositionLength, 1);
+          // 현재 커서 위치의 글꼴 정보
+          let fontFamily = 'sans-serif';
+          try {
+            const props = this.getCharPropertiesAtCursor();
+            if (props.fontFamily) fontFamily = props.fontFamily;
+          } catch { /* fallback */ }
+          this.caret.showComposition(startRect, charWidth, zoom, text, fontFamily);
         } catch {
           // getCursorRect 실패 시 일반 캐럿
           this.caret.hideComposition();
@@ -3813,7 +3753,7 @@ export class InputHandler {
     this._iosLength = 0;
     this._iosPrevText = '';
     this._iosRequiresFullRefresh = false;
-    this.resetTextareaBuffer();
+    this.textarea.value = '';
     this.caret.hide();
     this.fieldMarker.hide();
     this.cursor.clearSelection();
