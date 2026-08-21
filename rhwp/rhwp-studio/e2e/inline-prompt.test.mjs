@@ -50,6 +50,41 @@ runTest('인라인 프롬프트 선택 칩/입력 상자 테스트', async ({ pa
   assert(chipVisible, '드래그 선택이 끝나면 칩이 보여야 함');
   await screenshot(page, 'inline-prompt-chip');
 
+  setTestCase('사이드바를 숨기면 칩이 다시 나타나지 않는다');
+  console.log('\n[2b] 상단 토글로 사이드바 숨긴 뒤 다시 선택...');
+  await page.click('.ag-collapse-tab');
+  await page.evaluate(() => new Promise(r => setTimeout(r, 500)));
+  const sidebarGone = await page.evaluate(() => ({
+    collapsed: document.getElementById('agent-sidebar')?.classList.contains('ag-collapsed') === true,
+    open: document.body.classList.contains('ag-sidebar-open'),
+  }));
+  assert(sidebarGone.collapsed && !sidebarGone.open, '사이드바가 완전히 숨겨져야 함');
+  await page.mouse.move(drag.from.x + 1, drag.from.y);
+  await page.mouse.down();
+  await page.mouse.move(drag.to.x, drag.to.y, { steps: 8 });
+  await page.mouse.up();
+  await page.evaluate(() => new Promise(r => setTimeout(r, 600)));
+  chipVisible = await page.evaluate(() => {
+    const chip = document.querySelector('.ag-inline-chip');
+    const style = chip ? getComputedStyle(chip) : null;
+    return !!chip && !chip.hidden && style?.display !== 'none';
+  });
+  assert(!chipVisible, '사이드바가 숨겨진 동안 칩이 보이면 안 됨');
+  await screenshot(page, 'inline-prompt-chip-sidebar-collapsed');
+
+  await page.click('.ag-collapse-tab');
+  await page.evaluate(() => new Promise(r => setTimeout(r, 500)));
+  await page.mouse.move(drag.from.x + 1, drag.from.y);
+  await page.mouse.down();
+  await page.mouse.move(drag.to.x, drag.to.y, { steps: 8 });
+  await page.mouse.up();
+  await page.evaluate(() => new Promise(r => setTimeout(r, 600)));
+  chipVisible = await page.evaluate(() => {
+    const chip = document.querySelector('.ag-inline-chip');
+    return !!chip && !chip.hidden;
+  });
+  assert(chipVisible, '사이드바를 다시 열면 칩이 보여야 함');
+
   setTestCase('칩 클릭으로 입력 상자가 열리고 선택이 유지된다');
   console.log('\n[3] 칩 클릭 → 입력 상자...');
   await page.click('.ag-inline-chip');

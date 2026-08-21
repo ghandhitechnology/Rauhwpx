@@ -735,6 +735,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     collapseTab.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     collapseTab.setAttribute('aria-label', label);
     collapseTab.title = label;
+    eventBus?.emit('agent-sidebar-visibility-changed', { open: !collapsed });
     if (opts?.recenter !== false) startInsetRecenterLoop();
   }
 

@@ -26,7 +26,7 @@ e2e 스크립트의 **단일 권위 목록**이다. 파일 추가/변경/폐기 
 | `agent-workspace-shell.test.mjs` | 상시 | active | 전체 화면 워크스페이스 셸 기하: 상단 바/대화·변경 탭 전환/레일·검토 칸 배치 | — | 수동 |  |
 | `ime-composition-cursor-move.test.mjs` | 상시 | active | 한글 IME 세션 정확성: 조합 중 클릭, 빠른 `안녕하세요`·`가가`, 후보 변환, trailing input, undo | — | 수동 |  |
 | `ime-overlay-geometry.test.mjs` | 상시 | active | 한글 IME 네이티브 preedit: 조합 중 문단 텍스트에 자모가 들어가고 글리프 오버레이 캔버스/복제 띠가 없다 | — | 수동 |  |
-| `inline-prompt.test.mjs` | 상시 | active | 인라인 프롬프트: 선택 → 칩 → 입력 상자 → 사이드바 전송 게이트/선택 인용 기록 | — | npm e2e:inline-prompt |  |
+| `inline-prompt.test.mjs` | 상시 | active | 인라인 프롬프트: 선택 → 칩 → 사이드바 숨김 시 칩 억제 → 입력 상자 → 사이드바 전송 게이트/선택 인용 기록 | — | npm e2e:inline-prompt |  |
 | `reference-files-flow.test.mjs` | 상시 | active | 참고자료 UI/허브 종단간: 채팅·문서·전역 업로드, 내용 검색, 새 채팅 범위 격리, MCP 검색 상속 | — | npm e2e:reference-files |  |
 | `autosave-recovery.test.mjs` | 상시 | active | Task #1448 — 미저장 문서 자동 백업 복구 E2E | — | 수동 |  |
 | `blogform.test.mjs` | 상시 | active | BlogForm_BookReview.hwp 누름틀 안내문 | BlogForm_BookReview.hwp | 수동 |  |

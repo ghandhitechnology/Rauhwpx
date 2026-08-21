@@ -36,6 +36,13 @@ const EDGE_MARGIN_PX = 8;
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
+/** 사이드바가 완전히 숨겨진 동안은 선택→에이전트 칩을 띄우지 않는다. */
+export function isAgentSidebarVisible(
+  body: { classList: { contains(name: string): boolean } } = document.body,
+): boolean {
+  return body.classList.contains('ag-sidebar-open');
+}
+
 /** 12 그리드, currentColor, 1.25 스트로크 — 프로젝트 아이콘 규약의 스파크. */
 function createSparkGlyph(): SVGSVGElement {
   const svg = document.createElementNS(SVG_NS, 'svg');
@@ -170,6 +177,10 @@ class InlinePromptController {
     for (const name of ['zoom-changed', 'viewport-resize', 'viewport-inset-changed', 'page-layout-changed']) {
       this.unsubs.push(eventBus.on(name, () => this.reposition()));
     }
+    this.unsubs.push(eventBus.on('agent-sidebar-visibility-changed', () => {
+      if (!isAgentSidebarVisible()) this.hideAll();
+      else this.scheduleCheck();
+    }));
     this.unsubs.push(bridge.onEvent((e) => {
       if (e.type === 'connection' || e.type === 'permission-changed') this.refreshControls();
     }));
@@ -203,6 +214,10 @@ class InlinePromptController {
 
   /** 현재 선택을 보고 칩을 보이거나 감춘다. 열린 상자는 건드리지 않는다. */
   private check(): void {
+    if (!isAgentSidebarVisible()) {
+      if (this.state !== 'hidden') this.hideAll();
+      return;
+    }
     if (this.state === 'open' || this.pointerActive) return;
     const sel = this.currentBodySelection();
     if (!sel) {
@@ -287,6 +302,10 @@ class InlinePromptController {
   }
 
   private openBox(): void {
+    if (!isAgentSidebarVisible()) {
+      this.hideAll();
+      return;
+    }
     if (this.state !== 'chip') return;
     const sel = this.currentBodySelection();
     if (!sel) {

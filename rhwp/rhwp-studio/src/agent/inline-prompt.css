@@ -12,7 +12,9 @@
 
 /* display 지정이 hidden 속성을 이기지 않도록 명시적으로 끈다. */
 .ag-inline-chip[hidden],
-.ag-inline-box[hidden] {
+.ag-inline-box[hidden],
+body:not(.ag-sidebar-open) .ag-inline-chip,
+body:not(.ag-sidebar-open) .ag-inline-box {
   display: none;
 }
 
