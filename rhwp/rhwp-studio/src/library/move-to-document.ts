@@ -1,11 +1,3 @@
-/**
- * 라이브러리 "이동": 현재 문서를 저장한 뒤 선택한 문서로 연다.
- *
- * 첫 저장(새 문서)은 기존 저장 경로가 이름을 묻는다. 저장을 취소하면 이동하지 않는다.
- * documentId가 있는 대상은 openProjectFile 로만 연다. 파일명만 있는 레거시 그룹은
- * 겨냥할 identity가 없으므로 기존 열기 대화상자로 넘긴다.
- */
-
 import type { RecentDoc } from '../recent/recent-store.ts';
 import { claimForExplorerGroup } from '../project-file/claim.ts';
 import type { ProjectFileClaim } from '../project-file/identity.ts';

@@ -177,7 +177,7 @@ test('탐색이 피커보다 먼저 돌고 확인되면 피커를 열지 않는�
   const { deps, calls } = makeDeps({
     searchNearby: async () => {
       calls.searches += 1;
-      assert.equal(calls.picks, 0, '피커는 탐색이 끝난 뒤에만 연다');
+      assert.equal(calls.picks, 0);
       return [probe];
     },
     readProbe: async (probeId) => {
@@ -230,6 +230,22 @@ test('잘못 고른 파일은 loadBound 하지 않는다', async () => {
   assert.equal(result.kind, 'not-this-file');
   assert.equal(calls.loaded.length, 0);
   assert.equal(calls.picks, 1);
+  assert.match(calls.toasts.join('\n'), /내용이 이 프로젝트 문서와 달라/);
+});
+
+test('digest를 모르는 선택은 재시도 없이 안내하고 열지 않는다', async () => {
+  const picked = handle('비슷한이름.hwp');
+  const { deps, calls } = makeDeps({
+    pickForProject: async () => {
+      calls.picks += 1;
+      return picked;
+    },
+  });
+  const result = await openProjectFile(claim({ knownDigest: null }), deps);
+  assert.equal(result.kind, 'not-this-file');
+  assert.equal(calls.picks, 1);
+  assert.equal(calls.loaded.length, 0);
+  assert.match(calls.toasts.join('\n'), /확인할 수 없어/);
 });
 
 test('digest가 같은 선택은 원래 documentId로 연다', async () => {

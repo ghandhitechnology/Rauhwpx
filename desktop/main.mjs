@@ -602,20 +602,6 @@ ipcMain.handle('desktop:reopen-native-document', async (event, documentId) => {
   }
   return { ...result.descriptor, saveTargetCreated: result.created };
 });
-ipcMain.handle('desktop:discover-native-document', async (event, documentId, options = {}) => {
-  const session = sessionForEvent(event);
-  if (typeof documentId !== 'string' || !documentId) return null;
-  const result = await nativeFiles.discoverDocument(session.sessionId, documentId, {
-    basenameHint: typeof options?.basenameHint === 'string' ? options.basenameHint : '',
-    digest: typeof options?.digest === 'string' ? options.digest : null,
-  });
-  if (!result) return null;
-  if (!result.ok) {
-    sessions.focusSession(result.ownerSessionId);
-    return { owned: true };
-  }
-  return { ...result.descriptor, saveTargetCreated: result.created };
-});
 ipcMain.handle('desktop:search-nearby-native-document', async (event, documentId, options = {}) => {
   const session = sessionForEvent(event);
   if (typeof documentId !== 'string' || !documentId) return [];

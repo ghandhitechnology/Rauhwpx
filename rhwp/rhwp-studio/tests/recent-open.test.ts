@@ -63,7 +63,7 @@ test('권한 거부 시 항목을 유지하고 안내한다', async () => {
   const { deps, calls } = makeDeps({ ensurePermission: async () => false });
   const result = await openRecent(makeEntry(), deps);
   assert.equal(result.kind, 'permission-denied');
-  assert.equal(calls.forgotten.length, 0, '권한 거부는 일시적일 수 있어 항목을 제거하면 안 된다');
+  assert.equal(calls.forgotten.length, 0);
   assert.equal(calls.loaded.length, 0);
   assert.match(calls.toasts[0] ?? '', /권한/);
 });
@@ -117,9 +117,9 @@ test('메타-only 항목(핸들 없음)은 겨냥한 피커를 연다', async ()
   };
   const result = await openRecent(metaEntry, deps);
   assert.equal(result.kind, 'cancelled');
-  assert.equal(calls.picks, 1, '파일 재선택 대화상자를 연다');
-  assert.equal(calls.loaded.length, 0, '핸들이 없으므로 자동 open은 없다');
-  assert.equal(calls.forgotten.length, 0, '메타-only 항목은 제거하지 않는다');
+  assert.equal(calls.picks, 1);
+  assert.equal(calls.loaded.length, 0);
+  assert.equal(calls.forgotten.length, 0);
 });
 
 test('핸들이 없어도 native 북마크로 복구되면 자동으로 연다', async () => {
@@ -193,7 +193,7 @@ test('stale native 핸들에 북마크가 없으면 목록을 유지하고 다�
   });
   const result = await openRecent(makeEntry({ handle: stale }), deps);
   assert.equal(result.kind, 'cancelled');
-  assert.equal(calls.forgotten.length, 0, '북마크 없는 stale native는 파일이 사라진 게 아닐 수 있다');
+  assert.equal(calls.forgotten.length, 0);
   assert.equal(calls.picks, 1);
   assert.equal(calls.loaded.length, 0);
 });

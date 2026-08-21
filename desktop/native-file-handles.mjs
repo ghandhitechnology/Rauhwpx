@@ -302,33 +302,6 @@ export class NativeFileHandleRegistry {
     return this.#bookmarks.get(documentId)?.path ?? null;
   }
 
-  async discoverDocument(sessionId, documentId, { basenameHint = '', digest = null } = {}) {
-    const bookmark = this.#bookmarks.get(documentId);
-    if (bookmark) {
-      try {
-        return await this.create(sessionId, bookmark.path);
-      } catch (error) {
-        if (error?.code !== 'ENOENT') throw error;
-      }
-    }
-
-    const expected = typeof digest === 'string' && digest.startsWith('blake3:') ? digest : null;
-    if (!expected || !this.#digest) return null;
-
-    const matches = [];
-    for (const filePath of await this.#collectNearbyFiles(documentId, basenameHint)) {
-      try {
-        const bytes = new Uint8Array(await this.#readFile(filePath));
-        if (this.#digest(bytes) === expected) matches.push(filePath);
-      } catch {
-        continue;
-      }
-      if (matches.length > 1) return null;
-    }
-    if (matches.length !== 1) return null;
-    return this.create(sessionId, matches[0]);
-  }
-
   async searchNearby(sessionId, documentId, { basenameHint = '' } = {}) {
     const probes = [];
     for (const filePath of await this.#collectNearbyFiles(documentId, basenameHint)) {
@@ -358,14 +331,7 @@ export class NativeFileHandleRegistry {
     const entry = this.#entryForSender(sessionId, handleId);
     const bookmark = this.#bookmarks.get(documentId);
     if (!bookmark) return false;
-    if (entry.ownershipPath === this.#ownershipKey(bookmark.path)) return true;
-    if (!bookmark.digest || !this.#digest) return false;
-    try {
-      const bytes = new Uint8Array(await this.#readFile(entry.canonicalPath));
-      return this.#digest(bytes) === bookmark.digest;
-    } catch {
-      return false;
-    }
+    return entry.ownershipPath === this.#ownershipKey(bookmark.path);
   }
 
   loadBookmarks(entries) {
