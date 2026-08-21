@@ -184,7 +184,7 @@ test('handle-backed Save/Save As만 active document identity를 recent-store에 
   );
   assert.match(
     commands,
-    /emit\('open-document-bytes', \{[\s\S]*?\.\.\.payload,[\s\S]*?skipUnsavedGuard: true/,
+    /emit\('open-document-bytes', \{[\s\S]*?skipUnsavedGuard: true[\s\S]*?grant: \{ kind: 'verified', documentId \}/,
   );
   assert.match(
     main,
@@ -192,11 +192,11 @@ test('handle-backed Save/Save As만 active document identity를 recent-store에 
   );
   assert.match(
     main,
-    /eventBus\.on\('document-file-handle-saved',[\s\S]*?documentId = activeDocumentId;[\s\S]*?rememberNativeDocument\(documentId, saved\.fileHandle\)[\s\S]*?addRecentDoc\(\{[\s\S]*?handle: saved\.fileHandle/,
+    /eventBus\.on\('document-file-handle-saved',[\s\S]*?documentId = activeDocumentId;[\s\S]*?rememberNativeDocument\(documentId, saved\.fileHandle[\s\S]*?addRecentDoc\(\{[\s\S]*?handle: saved\.fileHandle/,
   );
   assert.match(main, /captureDesktopNativeDroppedFile\(file\)/);
-  assert.match(main, /preferredDocumentId: data.documentId/);
-  assert.match(main, /rememberNativeDocument\(ownership\.identity\.documentId, fileHandle\)/);
+  assert.match(main, /grant: data\.grant/);
+  assert.match(main, /rememberNativeDocument\(\s*ownership\.identity\.documentId,\s*fileHandle/);
 });
 
 test('최대 8개 상한 — 가장 오래된 항목부터 밀려난다', async () => {

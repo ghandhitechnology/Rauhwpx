@@ -11,6 +11,7 @@ import {
 } from '../src/library/move-to-document.ts';
 import type { RecentDoc } from '../src/recent/recent-store.ts';
 import type { FileSystemFileHandleLike } from '../src/command/file-system-access.ts';
+import type { ProjectOpenOutcome } from '../src/project-file/open.ts';
 
 function recent(partial: Partial<RecentDoc> & Pick<RecentDoc, 'id' | 'fileName'>): RecentDoc {
   return {
@@ -48,9 +49,9 @@ function makeDeps(overrides: Partial<MoveToLibraryDocumentDeps> = {}) {
       return 'saved';
     },
     listRecent: async () => recents,
-    openRecent: async (entry) => {
-      calls.opened.push(entry.id);
-      return 'opened';
+    openProjectFile: async (claim) => {
+      calls.opened.push(claim.documentId);
+      return { kind: 'opened' };
     },
     openViaPicker: async () => {
       calls.picker += 1;
@@ -90,7 +91,7 @@ test('파일명만 있는 레거시 그룹은 현재 파일명과 같으면 같�
   );
 });
 
-test('최근 문서는 documentId를 파일명보다 먼저 고른다', () => {
+test('최근 문서는 documentId만으로 identity를 고른다', () => {
   const recents = [
     recent({ id: 'by-name', documentId: 'other', fileName: '대상.hwp' }),
     recent({ id: 'by-id', documentId: 'target-id', fileName: '이름변경.hwp' }),
@@ -99,7 +100,15 @@ test('최근 문서는 documentId를 파일명보다 먼저 고른다', () => {
   assert.equal(found?.id, 'by-id');
 });
 
-test('이동은 현재 문서를 저장한 뒤 대상 최근 문서를 연다', async () => {
+test('documentId가 목록에 없으면 파일명으로 identity를 고르지 않는다', () => {
+  const recents = [
+    recent({ id: 'by-name', documentId: 'other', fileName: '대상.hwp' }),
+  ];
+  const found = findLibraryRecentDoc(recents, { documentId: 'target-id', fileName: '대상.hwp' });
+  assert.equal(found, undefined);
+});
+
+test('이동은 현재 문서를 저장한 뒤 대상 문서를 연다', async () => {
   const { deps, calls } = makeDeps();
   const result = await moveToLibraryDocument(
     { documentId: 'target-id', fileName: '대상.hwp' },
@@ -107,7 +116,7 @@ test('이동은 현재 문서를 저장한 뒤 대상 최근 문서를 연다', 
   );
   assert.equal(result, 'moved');
   assert.equal(calls.saved, 1);
-  assert.deepEqual(calls.opened, ['r-target']);
+  assert.deepEqual(calls.opened, ['target-id']);
   assert.equal(calls.picker, 0);
 });
 
@@ -147,16 +156,12 @@ test('빈 뷰어에서는 저장 없이 대상만 연다', async () => {
   );
   assert.equal(result, 'moved');
   assert.equal(calls.saved, 0);
-  assert.deepEqual(calls.opened, ['r-target']);
+  assert.deepEqual(calls.opened, ['target-id']);
 });
 
 test('최근 목록에 없어도 documentId로 재열기를 시도한다', async () => {
   const { deps, calls } = makeDeps({
     listRecent: async () => [],
-    openRecent: async (entry) => {
-      calls.opened.push(entry.id);
-      return 'opened';
-    },
   });
   const result = await moveToLibraryDocument(
     { documentId: 'missing-id', fileName: '없는파일.hwp' },
@@ -164,11 +169,11 @@ test('최근 목록에 없어도 documentId로 재열기를 시도한다', async
   );
   assert.equal(result, 'moved');
   assert.equal(calls.saved, 1);
-  assert.deepEqual(calls.opened, ['restore:missing-id']);
+  assert.deepEqual(calls.opened, ['missing-id']);
   assert.equal(calls.picker, 0);
 });
 
-test('documentId도 파일명도 복구할 수 없으면 열기 대화상자로 넘긴다', async () => {
+test('레거시 파일명 그룹은 열기 대화상자로 넘긴다', async () => {
   const { deps, calls } = makeDeps({
     listRecent: async () => [],
   });
@@ -182,21 +187,33 @@ test('documentId도 파일명도 복구할 수 없으면 열기 대화상자로 
   assert.match(calls.toasts[0] ?? '', /없는파일/);
 });
 
-test('파일이 사라져 목록에서 빠지면 다시 고르게 한다', async () => {
+test('확인되지 않은 대상은 이동 성공으로 치지 않는다', async () => {
   const { deps, calls } = makeDeps({
-    openRecent: async () => 'removed',
+    openProjectFile: async () => ({ kind: 'not-found' } satisfies ProjectOpenOutcome),
   });
   const result = await moveToLibraryDocument(
     { documentId: 'target-id', fileName: '대상.hwp' },
     deps,
   );
-  assert.equal(result, 'moved');
-  assert.equal(calls.picker, 1);
+  assert.equal(result, 'failed');
+  assert.equal(calls.picker, 0);
+});
+
+test('대상 열기를 취소하면 이동도 취소된다', async () => {
+  const { deps, calls } = makeDeps({
+    openProjectFile: async () => ({ kind: 'cancelled' }),
+  });
+  const result = await moveToLibraryDocument(
+    { documentId: 'target-id', fileName: '대상.hwp' },
+    deps,
+  );
+  assert.equal(result, 'cancelled');
+  assert.equal(calls.picker, 0);
 });
 
 test('권한 거부는 이동 실패로 남기고 피커를 열지 않는다', async () => {
   const { deps, calls } = makeDeps({
-    openRecent: async () => 'permission-denied',
+    openProjectFile: async () => ({ kind: 'permission-denied' }),
   });
   const result = await moveToLibraryDocument(
     { documentId: 'target-id', fileName: '대상.hwp' },

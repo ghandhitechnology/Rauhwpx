@@ -12,6 +12,32 @@ export interface DocumentPreflightIdentity {
   useSourceDigest: boolean;
 }
 
+export type VerifiedDocumentGrant = {
+  readonly kind: 'verified';
+  readonly documentId: string;
+};
+
+export type FreshOpenPayload = {
+  bytes: Uint8Array;
+  fileName: string;
+  fileHandle: FileSystemFileHandleLike;
+  skipUnsavedGuard?: boolean;
+  requestId?: string;
+  grant?: never;
+  documentId?: never;
+};
+
+export type BoundOpenPayload = {
+  bytes: Uint8Array;
+  fileName: string;
+  fileHandle: FileSystemFileHandleLike;
+  skipUnsavedGuard?: boolean;
+  requestId?: string;
+  grant: VerifiedDocumentGrant;
+};
+
+export type OpenDocumentBytesEvent = FreshOpenPayload | BoundOpenPayload;
+
 function createDocumentId() {
   return globalThis.crypto?.randomUUID?.()
     ?? `document_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
@@ -33,7 +59,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
-export function documentSourceDigest(bytes: Uint8Array) {
+export function documentSourceDigest(bytes: Uint8Array): `blake3:${string}` {
   return `blake3:${bytesToHex(blake3(bytes))}`;
 }
 
@@ -43,7 +69,7 @@ export async function resolveDocumentPreflight(
   handle: FileSystemFileHandleLike | null,
   recents: readonly RecentDoc[],
   createId: (() => string) | undefined = createDocumentId,
-  preferredDocumentId?: string | null,
+  grant?: VerifiedDocumentGrant | null,
 ): Promise<DocumentPreflightIdentity> {
   const makeId = createId ?? createDocumentId;
   const sourceDigest = documentSourceDigest(bytes);
@@ -62,7 +88,7 @@ export async function resolveDocumentPreflight(
     }
   }
 
-  const preferred = preferredDocumentId?.trim() || '';
+  const preferred = grant?.kind === 'verified' ? grant.documentId.trim() : '';
   if (preferred) {
     return { documentId: preferred, sourceDigest, useSourceDigest: false };
   }

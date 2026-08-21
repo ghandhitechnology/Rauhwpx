@@ -20,6 +20,7 @@ export interface OpenDocumentBytesPayload {
   fileName: string;
   fileHandle: FileSystemFileHandleLike;
   skipUnsavedGuard?: boolean;
+  grant?: never;
 }
 
 export interface PwaFileHandlingCallbacks {
