@@ -56,6 +56,7 @@ export interface RhwpDesktopApi {
   }) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
   releaseNativeFile?: (handleId: string) => Promise<void>;
   readNativeFile?: (handleId: string) => Promise<NativeFileReadResult>;
+  getNativeFileSourcePath?: (handleId: string) => Promise<string | null>;
   validateNativeSave?: (
     handleId: string,
     identity: DocumentOwnershipIdentity,
@@ -374,6 +375,18 @@ export function bindNativeFileHandleIdentity(
 ) {
   const metadata = handle ? nativeHandleMetadata.get(handle) : null;
   if (metadata) metadata.identity = { ...identity };
+}
+
+/** Resolve only the exact desktop path represented by this opaque, sender-owned handle. */
+export async function getNativeFileSourcePath(
+  handle: FileSystemFileHandleLike | null | undefined,
+): Promise<string | null> {
+  const metadata = handle ? nativeHandleMetadata.get(handle) : null;
+  if (!metadata?.api.getNativeFileSourcePath) return null;
+  const sourcePath = await metadata.api.getNativeFileSourcePath(metadata.handleId);
+  return typeof sourcePath === 'string' && sourcePath.trim() && !sourcePath.includes('\0')
+    ? sourcePath
+    : null;
 }
 
 export function captureDesktopNativeDroppedFile(

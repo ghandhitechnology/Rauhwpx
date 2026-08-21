@@ -23,7 +23,7 @@ interface FakeTable {
   tableProps: Record<string, unknown>;
 }
 
-function makeEnv() {
+function makeEnv(sourcePath: string | null = null) {
   const body = ['Title', 'Second paragraph with text', ''];
   const bodyParaShapes = [10, 11, 12];
   const tables: FakeTable[] = [];
@@ -354,6 +354,7 @@ function makeEnv() {
     documentState: { isDirty: () => false } as never,
     revision,
     pending,
+    getDocumentSourcePath: async () => sourcePath,
   });
   const call = (tool: string, args: Record<string, unknown> = {}) =>
     executor.execute(tool, { expectedRevision: revision.revision, ...args }, 'claude');
@@ -867,6 +868,16 @@ test('get_document_info 에 fontsUsed 가 실린다', async () => {
   const r = (await call('get_document_info')) as { fontsUsed: string[]; fallbackFont: string };
   assert.deepEqual(r.fontsUsed, ['바탕']);
   assert.equal(r.fallbackFont, '바탕');
+});
+
+test('get_document_info returns the exact active desktop source path without searching', async () => {
+  const { call } = makeEnv('/Users/test/A/보고서.hwp');
+  const r = (await call('get_document_info')) as { sourcePath: string | null };
+  assert.equal(r.sourcePath, '/Users/test/A/보고서.hwp');
+
+  const browser = makeEnv();
+  const browserInfo = (await browser.call('get_document_info')) as { sourcePath: string | null };
+  assert.equal(browserInfo.sourcePath, null);
 });
 
 // ─── 좌표 이동 ──────────────────────────────────────────────

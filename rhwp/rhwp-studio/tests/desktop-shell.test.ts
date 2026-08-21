@@ -112,6 +112,7 @@ test('desktop close and native-file IPC contracts stay sender-owned', () => {
     'desktop:pick-native-save-file',
     'desktop:release-native-file',
     'desktop:native-file-read',
+    'desktop:native-file-source-path',
     'desktop:native-file-validate-save',
     'desktop:native-file-write',
     'desktop:native-file-is-same',

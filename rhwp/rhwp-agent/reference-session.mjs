@@ -93,7 +93,7 @@ export function addActiveDocumentContext(activeSession, prompt) {
     '<active_document_identity trust="application-state">',
     JSON.stringify(identity),
     'This is the exact Studio document bound to this chat. All rhwp document tools target this documentId.',
-    'Use documentId—not documentName, title matching, recent-file lists, or filesystem search—to decide which open document the user means. Call get_document_info for its digest, source format, and dirty state.',
+    'Use documentId—not documentName, title matching, recent-file lists, or filesystem search—to decide which open document the user means. Call get_document_info for its digest, source format, dirty state, and exact sourcePath when the desktop app has one.',
     '</active_document_identity>',
   ].join('\n');
   return `${block}\n\n${prompt}`;

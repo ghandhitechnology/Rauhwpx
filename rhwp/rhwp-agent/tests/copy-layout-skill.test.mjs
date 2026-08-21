@@ -19,6 +19,8 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(markdown, /native HWP→HWPX→HWP pipeline/);
   assert.match(markdown, /call `get_document_info` first/);
   assert.match(markdown, /never search the filesystem/);
+  assert.match(markdown, /When `sourcePath` is non-null, use it directly/);
+  assert.match(markdown, /do not ask the user to attach or identify the file again/);
 });
 
 test('copy-layout helper retains its privacy and geometry verification gates', () => {

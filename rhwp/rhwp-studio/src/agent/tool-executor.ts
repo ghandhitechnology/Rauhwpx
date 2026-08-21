@@ -32,6 +32,7 @@ export interface AgentToolExecutorDeps {
   revision: RevisionTracker;
   pending: PendingEditManager;
   loadTemplateBytes?: (template: DocumentTemplate) => Promise<Uint8Array>;
+  getDocumentSourcePath?: () => Promise<string | null>;
 }
 
 const DOC_NOT_LOADED_MESSAGE = '문서가 로드되지 않았습니다';
@@ -859,9 +860,17 @@ export class AgentToolExecutor {
     return { revision: this.revision, fields };
   }
 
-  private getDocumentInfo(): unknown {
+  private async getDocumentInfo(): Promise<unknown> {
     this.requireDocLoaded();
     const { wasm, documentState } = this.deps;
+    // Snapshot every document field before the async desktop-path lookup so a
+    // tab/document switch cannot combine one handle's path with another doc's metadata.
+    const revision = this.revision;
+    const sectionCount = wasm.getSectionCount();
+    const pageCount = wasm.pageCount;
+    const sourceFormat = wasm.getSourceFormat();
+    const digest = wasm.documentDigest;
+    const dirty = documentState.isDirty();
     let fontsUsed: string[] = [];
     let fallbackFont = '';
     let registeredFonts: string[] = [];
@@ -874,13 +883,18 @@ export class AgentToolExecutor {
       // 원본 등록 이름 — apply_char_format fontFamily 에 그대로 쓸 수 있다
       registeredFonts = [...new Set(wasm.getFontList().map((f) => f.name))];
     } catch { /* 구버전 wasm 호환 */ }
+    let sourcePath: string | null = null;
+    try {
+      sourcePath = await this.deps.getDocumentSourcePath?.() ?? null;
+    } catch { /* 브라우저 문서와 해제된 데스크톱 핸들은 실제 경로가 없다 */ }
     return {
-      revision: this.revision,
-      sectionCount: wasm.getSectionCount(),
-      pageCount: wasm.pageCount,
-      sourceFormat: wasm.getSourceFormat(),
-      digest: wasm.documentDigest,
-      dirty: documentState.isDirty(),
+      revision,
+      sectionCount,
+      pageCount,
+      sourceFormat,
+      digest,
+      dirty,
+      sourcePath,
       fontsUsed,
       fallbackFont,
       registeredFonts,

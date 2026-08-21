@@ -11,6 +11,7 @@
  */
 import {
   ensureDesktopAgentHub,
+  getNativeFileSourcePath,
   httpHubUrl,
   resolveRendererSessionContext,
   websocketHubUrl,
@@ -817,6 +818,7 @@ class AgentBridgeImpl implements AgentBridge {
       revision: this.revision,
       pending: this.pendingEdits,
       loadTemplateBytes: (template) => this.downloadTemplateBytes(template),
+      getDocumentSourcePath: () => getNativeFileSourcePath(deps.wasm.currentFileHandle),
     });
 
     this.options = opts;

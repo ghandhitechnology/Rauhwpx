@@ -572,6 +572,10 @@ ipcMain.handle('desktop:native-file-read', (event, handleId) => {
   const session = sessionForEvent(event);
   return nativeFiles.read(session.sessionId, handleId);
 });
+ipcMain.handle('desktop:native-file-source-path', (event, handleId) => {
+  const session = sessionForEvent(event);
+  return nativeFiles.sourcePathForSender(session.sessionId, handleId);
+});
 ipcMain.handle('desktop:native-file-validate-save', (event, handleId, identity) => {
   const session = sessionForEvent(event);
   return nativeFiles.validateSave(session.sessionId, handleId, identity, documentLeases);

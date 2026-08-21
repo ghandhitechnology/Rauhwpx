@@ -60,6 +60,7 @@ test('agents receive exact active-document identity without filename matching', 
   assert.match(prompt, /"documentId":"doc-a"/);
   assert.match(prompt, /documentId—not documentName/);
   assert.match(prompt, /filesystem search/);
+  assert.match(prompt, /exact sourcePath/);
   assert.match(prompt, /copy it$/);
 });
 

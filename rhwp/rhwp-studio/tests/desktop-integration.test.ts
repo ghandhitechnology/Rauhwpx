@@ -6,6 +6,7 @@ import {
   bindNativeFileHandleIdentity,
   captureDesktopNativeDroppedFile,
   ensureDesktopAgentHub,
+  getNativeFileSourcePath,
   installWebAppShell,
   isDesktopApp,
   pickDesktopNativeOpenFile,
@@ -131,6 +132,32 @@ test('native document bookmarks restore opaque handles without exposing a path',
   const restored = await restoreNativeDocument('document-a', win);
   assert.equal(restored === 'owned' ? null : restored?.identityKind, 'native-path');
   assert.equal(restored === 'owned' ? null : restored?.name, 'report.hwp');
+});
+
+test('agents can resolve only the exact path behind the active opaque desktop handle', async () => {
+  const requested: string[] = [];
+  const handleIds = ['same-name-a', 'same-name-b'];
+  const paths: Record<string, string> = {
+    'same-name-a': '/Users/test/A/보고서.hwp',
+    'same-name-b': '/Users/test/B/보고서.hwp',
+  };
+  const win = {
+    rhwpDesktop: {
+      pickNativeOpenFile: async () => ({ kind: 'file' as const, handleId: handleIds.shift()!, name: '보고서.hwp' }),
+      readNativeFile: async () => ({ name: '보고서.hwp', bytes: new Uint8Array() }),
+      writeNativeFile: async () => ({ name: '보고서.hwp', byteLength: 0 }),
+      getNativeFileSourcePath: async (handleId: string) => {
+        requested.push(handleId);
+        return paths[handleId] ?? null;
+      },
+    },
+  };
+  const first = await pickDesktopNativeOpenFile(win);
+  const sameNamedSecond = await pickDesktopNativeOpenFile(win);
+  assert.equal(await getNativeFileSourcePath(first), '/Users/test/A/보고서.hwp');
+  assert.equal(await getNativeFileSourcePath(sameNamedSecond), '/Users/test/B/보고서.hwp');
+  assert.deepEqual(requested, ['same-name-a', 'same-name-b']);
+  assert.equal(await getNativeFileSourcePath(null), null);
 });
 
 test('nearby probes keep only opaque ids and names', async () => {
