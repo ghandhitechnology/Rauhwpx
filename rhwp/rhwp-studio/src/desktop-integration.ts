@@ -396,6 +396,19 @@ export function captureDesktopNativeDroppedFile(
   });
 }
 
+export async function pickDesktopNativeProjectFile(
+  options: { suggestedName: string; documentId: string },
+  win?: DesktopHost,
+): Promise<FileSystemFileHandleLike | 'owned' | null | undefined> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.pickNativeOpenFile) return undefined;
+  const result = await api.pickNativeOpenFile(options);
+  if (!result) return null;
+  if ('owned' in result) return 'owned';
+  if (!validNativeDescriptor(result)) throw new Error('Desktop open picker returned an invalid handle');
+  return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
+}
+
 export async function pickDesktopNativeOpenFile(
   win?: DesktopHost,
   options?: { suggestedName?: string; documentId?: string },

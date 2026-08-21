@@ -114,7 +114,7 @@ test('preferred documentId survives native-path reopens that cannot compare hand
     selected,
     [recent('library-doc', digest)],
     () => 'new-native-copy',
-    'library-doc',
+    { kind: 'verified', documentId: 'library-doc' },
   );
 
   assert.deepEqual(result, {
@@ -137,6 +137,27 @@ test('successful isSameEntry=false keeps identical copies logically separate', a
 
   assert.deepEqual(result, {
     documentId: 'new-copy',
+    sourceDigest: digest,
+    useSourceDigest: false,
+  });
+});
+
+test('picker without a verified grant mints a new id', async () => {
+  const bytes = new Uint8Array([14, 15]);
+  const digest = documentSourceDigest(bytes);
+  const selected = {
+    ...handle('report.hwp', async () => false),
+    identityKind: 'native-path' as const,
+  };
+  const result = await resolveDocumentPreflight(
+    bytes,
+    selected,
+    [recent('library-doc', digest)],
+    () => 'fresh-from-picker',
+  );
+
+  assert.deepEqual(result, {
+    documentId: 'fresh-from-picker',
     sourceDigest: digest,
     useSourceDigest: false,
   });
