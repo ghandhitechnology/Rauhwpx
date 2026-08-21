@@ -203,6 +203,29 @@
   flex-direction: column;
 }
 
+.font-picker-search {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  border: 0;
+  border-bottom: 1px solid var(--ui-border);
+  padding: 7px 10px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  caret-color: var(--caret-color);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  outline: none;
+}
+
+.font-picker-search::placeholder {
+  color: var(--color-text-placeholder);
+}
+
+.font-picker-search:focus {
+  box-shadow: inset 0 0 0 2px var(--ui-focus-soft);
+}
+
 .font-picker-heading {
   min-height: 30px;
   box-sizing: border-box;

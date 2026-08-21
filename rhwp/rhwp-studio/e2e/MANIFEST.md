@@ -21,10 +21,11 @@ e2e 스크립트의 **단일 권위 목록**이다. 파일 추가/변경/폐기 
 | `fake-grok-fleet.mjs` | 유틸 | active | provider fleet e2e 의 가짜 grok CLI — 다중화된 stdout + $GROK_HOME updates.jsonl 증분 기록 | — | 수동 | provider-subagent-fleet.test.mjs 가 PATH 로 주입 |
 | `fake-cursor-fleet.mjs` | 유틸 | active | provider fleet e2e 의 가짜 cursor-agent CLI — taskToolCall 전사 + 백그라운드 task_notification | — | 수동 | provider-subagent-fleet.test.mjs 가 PATH 로 주입 |
 | `agent-settings-reconnect.test.mjs` | 상시 | active | 허브 재연결 수명주기 + 설정 페이지: 허브 부재 배너 / 기동 후 자동 재연결 / 설정 네 구역·제공자 프로브 / 중단 감지·수동 재시도 / 재기동 복구 | (문서 불필요) | npm e2e:agent-settings-reconnect |  |
+| `agent-tool-bench.mjs` | 유틸 | active | 에이전트 MCP 도구 왕복 시간 벤치마크 (hub→bridge→executor→wasm, 실제 프로덕션 경로): 도구별 p50/p95 ms + apply_edits 배치 대 개별 호출 비교. 마지막에 `BENCH_RESULT:` JSON 한 줄 출력 — 최적화 전후 비교용 | footnote-01.hwp | npm e2e:agent-tool-bench |  |
 | `agent-sidebar-center.check.mjs` | 상시 | active | 진단: 사이드바 inset 직후 문서 로드 시 용지 가운데 정렬 (stale viewport 폭 회귀) | — | 수동 | legacy-name |
 | `agent-workspace-shell.test.mjs` | 상시 | active | 전체 화면 워크스페이스 셸 기하: 상단 바/대화·변경 탭 전환/레일·검토 칸 배치 | — | 수동 |  |
 | `ime-composition-cursor-move.test.mjs` | 상시 | active | 한글 IME 세션 정확성: 조합 중 클릭, 빠른 `안녕하세요`·`가가`, 후보 변환, trailing input, undo | — | 수동 |  |
-| `ime-overlay-geometry.test.mjs` | 상시 | active | 한글 IME 조합 오버레이 기하: 복제 띠가 페이지 canvas CSS(중앙 정렬 transform·용지 배경)를 물려받아 거대 흰 막대로 밀리는 회귀 방지 | — | 수동 |  |
+| `ime-overlay-geometry.test.mjs` | 상시 | active | 한글 IME 네이티브 preedit: 조합 중 문단 텍스트에 자모가 들어가고 글리프 오버레이 캔버스/복제 띠가 없다 | — | 수동 |  |
 | `inline-prompt.test.mjs` | 상시 | active | 인라인 프롬프트: 선택 → 칩 → 입력 상자 → 사이드바 전송 게이트/선택 인용 기록 | — | npm e2e:inline-prompt |  |
 | `reference-files-flow.test.mjs` | 상시 | active | 참고자료 UI/허브 종단간: 채팅·문서·전역 업로드, 내용 검색, 새 채팅 범위 격리, MCP 검색 상속 | — | npm e2e:reference-files |  |
 | `autosave-recovery.test.mjs` | 상시 | active | Task #1448 — 미저장 문서 자동 백업 복구 E2E | — | 수동 |  |

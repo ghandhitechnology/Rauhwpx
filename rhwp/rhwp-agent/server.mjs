@@ -69,11 +69,26 @@ const RECORDS_ROOT = path.join(WORK_ROOT, 'sessions');
 await fs.mkdir(RECORDS_ROOT, { recursive: true, mode: 0o700 });
 let hubPort = REQUESTED_PORT;
 const STUDIO_TOOL_TIMEOUT_MS = 30_000;
+// 스튜디오가 끊긴 뒤 다시 붙기를 기다려 주는 시간 — 브리지의 첫 재접속 백오프(250·500ms)보다
+// 넉넉하되, 탭이 아주 닫힌 경우 30초 타임아웃까지 끌지 않을 만큼 짧게 잡는다.
+const STUDIO_REATTACH_GRACE_MS = Number(process.env.RHWP_STUDIO_REATTACH_GRACE_MS ?? 5_000);
 const HARNESS_UPDATE_INITIAL_DELAY_MS = 8_000;
 const HARNESS_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const HARNESS_UPDATE_BUSY_RETRY_MS = 5 * 60 * 1000;
 const HARNESS_UPDATE_FAILURE_RETRY_MS = 60 * 60 * 1000;
 const toolDefinitionsByName = new Map(TOOL_DEFINITIONS.map((definition) => [definition.name, definition]));
+// 인자 스키마는 도구마다 한 번만 만든다 — 호출마다 z.object() 를 다시 세우면
+// 툴 하나당 수십 개 필드를 매번 컴파일하게 된다. insert_image 는 passthrough,
+// 나머지는 strict 이므로 도구 이름으로 캐시하면 변형도 자연히 분리된다.
+const toolArgSchemas = new Map();
+function toolArgSchema(tool, definition) {
+  const cached = toolArgSchemas.get(tool);
+  if (cached) return cached;
+  const base = z.object(definition.shape);
+  const schema = tool === 'insert_image' ? base.passthrough() : base.strict();
+  toolArgSchemas.set(tool, schema);
+  return schema;
+}
 const sourceClaudeAuth = {
   credentialsPath: path.join(os.homedir(), '.claude', '.credentials.json'),
   configPath: path.join(os.homedir(), '.claude.json'),
@@ -176,6 +191,8 @@ const sessions = new HubSessionRegistry({
       createdAt: Date.now(),
       lastConnectedAt: Date.now(),
       studioSocket: null,
+      studioInstanceId: null,
+      studioReattachTimer: null,
       mcpSockets: new Set(),
       studioMessageQueue: Promise.resolve(),
       agentSession: null,
@@ -450,8 +467,9 @@ function resolveEffort(agent, model, requested) {
   const preferred = DEFAULT_EFFORT[agent];
   return allowed.has(preferred) ? preferred : [...allowed][0];
 }
-// 스튜디오 소켓이 닫히거나 새 탭 연결에 밀려나면 인플라이트 호출은 영원히 응답받지 못한다 —
-// 30초 타임아웃까지 기다리지 말고 즉시 NO_STUDIO 로 실패시킨다.
+// 새 탭·새로고침이 스튜디오 자리를 넘겨받으면 이전 페이지의 실행기와 함께 인플라이트 호출도
+// 사라진다 — 30초 타임아웃까지 기다리지 말고 즉시 NO_STUDIO 로 실패시킨다.
+// 단순히 소켓만 잠깐 끊긴 경우(같은 인스턴스가 곧바로 재접속)에는 호출을 살려 둔다.
 function failAllPendingCalls(record, message) {
   for (const [hubId, entry] of record.pendingCalls) {
     clearTimeout(entry.timer);
@@ -461,6 +479,25 @@ function failAllPendingCalls(record, message) {
       error: { code: 'NO_STUDIO', message },
     });
   }
+}
+
+function clearStudioReattachGrace(record) {
+  if (!record.studioReattachTimer) return;
+  clearTimeout(record.studioReattachTimer);
+  record.studioReattachTimer = null;
+}
+
+// 탭이 아주 닫혔는지, 잠깐 끊겼는지는 소켓만 봐서는 알 수 없다 — 유예 시간을 주고
+// 그 안에 스튜디오가 돌아오지 않으면 남은 호출을 NO_STUDIO 로 접는다.
+// 유예 중 흘러 들어온 응답으로 이미 끝난 호출은 pendingCalls 에서 빠져 있어 두 번 답하지 않는다.
+function armStudioReattachGrace(record) {
+  clearStudioReattachGrace(record);
+  if (record.pendingCalls.size === 0) return;
+  record.studioReattachTimer = setTimeout(() => {
+    record.studioReattachTimer = null;
+    if (record.studioSocket) return;
+    failAllPendingCalls(record, 'Studio disconnected while tool calls were in flight; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
+  }, STUDIO_REATTACH_GRACE_MS);
 }
 
 function log(msg) {
@@ -1782,8 +1819,7 @@ function handleMcpMessage(record, sock, msg) {
       }
       let args;
       try {
-        const schema = z.object(definition.shape);
-        args = (tool === 'insert_image' ? schema.passthrough() : schema.strict()).parse(msg.args ?? {});
+        args = toolArgSchema(tool, definition).parse(msg.args ?? {});
         definition.validate?.(args);
         if (!record.agentSession && tool !== 'read_product_skill') {
           throw workflowError('AGENT_NOT_STARTED', 'No active chat session');
@@ -1891,13 +1927,18 @@ function handleMcpMessage(record, sock, msg) {
         }
       }
       const hubId = record.nextHubId++;
+      // apply_edits 는 항목 수만큼 변이+마감 리플로우를 안고 오므로 단일 편집용
+      // 30s 예산을 배치 크기에 비례해 늘린다 (mcp-stdio 의 180s 한도 아래로 유지).
+      const timeoutMs = tool === 'apply_edits'
+        ? Math.min(STUDIO_TOOL_TIMEOUT_MS + 2_000 * (Array.isArray(args.edits) ? args.edits.length : 0), 120_000)
+        : STUDIO_TOOL_TIMEOUT_MS;
       const timer = setTimeout(() => {
         record.pendingCalls.delete(hubId);
         sendJson(sock, {
           v: 1, type: 'tool-result', id: clientId, ok: false,
-          error: { code: 'STUDIO_TIMEOUT', message: `Studio did not answer within ${STUDIO_TOOL_TIMEOUT_MS / 1000}s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates` },
+          error: { code: 'STUDIO_TIMEOUT', message: `Studio did not answer within ${timeoutMs / 1000}s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates` },
         });
-      }, STUDIO_TOOL_TIMEOUT_MS);
+      }, timeoutMs);
       record.pendingCalls.set(hubId, { mcpSocket: sock, clientId, timer });
       sendJson(record.studioSocket, {
         v: 1, type: 'tool-request', id: hubId,
@@ -2197,17 +2238,30 @@ httpServer.on('upgrade', (req, socket, head) => {
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     if (pathname === '/studio') {
-      if (record.studioSocket) {
-        failAllPendingCalls(record, 'Studio connection was replaced by a new tab; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
+      // 페이지 로드마다 새로 발급되는 인스턴스 id — 같으면 같은 페이지의 WS 끊김,
+      // 다르면(또는 없으면) 새로고침·다른 탭이라 이전 호출은 답을 받을 수 없다.
+      const instanceId = url.searchParams.get('instance');
+      const previousInstanceId = record.studioInstanceId;
+      const replacing = record.studioSocket !== null;
+      record.studioInstanceId = instanceId;
+      clearStudioReattachGrace(record);
+      if (replacing) {
         try { record.studioSocket.close(4000, 'replaced'); } catch {}
+      }
+      if (!instanceId || instanceId !== previousInstanceId) {
+        failAllPendingCalls(record, replacing
+          ? 'Studio connection was replaced by a new tab; the edit may still have applied — re-read with get_structure/get_text_range before retrying'
+          : 'Studio reloaded while tool calls were in flight; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
       }
       record.studioSocket = ws;
       attachSocket(record, ws, 'studio');
+      // 소켓이 닫혔다고 곧바로 인플라이트 호출을 접지 않는다 — 스튜디오는 보통 250ms 안에
+      // 같은 세션으로 돌아온다. 대신 유예 타이머를 걸어 돌아오지 않는 경우만 실패시킨다.
       ws.on('close', () => {
         if (record.studioSocket === ws) {
           record.studioSocket = null;
           record.pendingReferenceMessage = null;
-          failAllPendingCalls(record, 'Studio disconnected while tool calls were in flight; the edit may still have applied — re-read with get_structure/get_text_range before retrying');
+          armStudioReattachGrace(record);
         }
       });
       // welcome이 유휴 세션 fallback을 만들기 전에 권위 있는 최종 결과를 먼저 보낸다.
@@ -2310,6 +2364,7 @@ httpServer.on('error', (err) => {
 let shutdownPromise = null;
 async function disposeRecord(record, reason) {
   record.disposed = true;
+  clearStudioReattachGrace(record);
   failAllPendingCalls(record, 'Hub session is shutting down');
   const backendExit = disposeSession(record);
   for (const sock of [record.studioSocket, ...record.mcpSockets]) {

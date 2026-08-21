@@ -5,7 +5,7 @@ import { CaretRenderer } from './caret-renderer';
 import { FieldMarkerRenderer } from './field-marker-renderer';
 import { SelectionRenderer } from './selection-renderer';
 import { CommandHistory } from './history';
-import { DeleteSelectionCommand, ApplyCharFormatCommand, ApplyParaFormatCommand, SnapshotCommand, SetFormValueCommand, TextMutationEffectAccumulator, IMMEDIATE_TEXT_MUTATION_EFFECTS } from './command';
+import { DeleteSelectionCommand, ApplyCharFormatCommand, ApplyParaFormatCommand, SnapshotCommand, SetFormValueCommand, TextMutationEffectAccumulator, IMMEDIATE_TEXT_MUTATION_EFFECTS, applyCharFormatToTarget } from './command';
 import type { OperationDescriptor, ParaFormatTarget, RefreshPolicy, TextMutationEffects, EditCommand, EditContext, FormValueTarget } from './command';
 import { CapturedSnapshotCommand } from './captured-snapshot-command.ts';
 import { VirtualScroll } from '@/view/virtual-scroll';
@@ -466,7 +466,21 @@ export class InputHandler {
   private compositionAnchorRect: CursorRect | null = null;
   /** transient preedit의 Unicode scalar 길이 */
   private compositionLength = 0;
-  private compositionFontFamily: string | null = null;
+  /**
+   * 접힌 캐럿에서 툴바/단축키로 고른 다음 입력 서식.
+   * WASM insert 는 커서 앞 run 을 물려받으므로, 선택이 없을 때 글꼴 변경은 여기에 쌓고
+   * 새로 삽입한 범위에 적용한다. 캐럿이 다른 위치로 움직이면 비운다.
+   */
+  private pendingCharFormat: Partial<CharProperties> | null = null;
+  /**
+   * 숨은 textarea 에서 이미 문서에 반영한 value prefix 의 길이 (UTF-16).
+   *
+   * textarea 는 IME 가 소유한다 — 조합이 살아 있을 수 있는 동안 value 를
+   * 프로그램적으로 바꾸면 브라우저가 진행 중인 조합을 즉시 파기해, 렌더링이
+   * 타자 속도를 못 따라갈 때 글자가 씹힌다. 그래서 타이핑 경로에서는 value 를
+   * 비우는 대신 이 카운터만 전진시키고, 새 입력은 그 뒤 슬라이스로 읽는다.
+   */
+  private textareaConsumed = 0;
   private _pendingNavAfterIME: NavigationKeyInput | null = null;
   // iOS 폴백: composition 이벤트 없이 input만으로 한글 조합 처리
   private _iosComposing = false;
@@ -563,6 +577,8 @@ export class InputHandler {
     this.onInputBlurBound = () => {
       if (this.isComposing) _text.onCompositionEnd.call(this);
       this.resetIosInputSession();
+      // 블러 시점에는 브라우저가 조합을 스스로 끝내므로 value 정리가 안전하다.
+      this.resetTextareaBuffer();
       this.flushDeferredPaginationIfNeeded('input-blur', false);
     };
     this.onCopyBound = this.onCopy.bind(this);
@@ -670,9 +686,11 @@ export class InputHandler {
     });
     eventBus.on('create-new-document', () => {
       this.clearTableResizeRuntimeCache();
+      this.clearPendingCharFormat();
     });
     eventBus.on('open-document-bytes', () => {
       this.clearTableResizeRuntimeCache();
+      this.clearPendingCharFormat();
     });
 
     // [Task #394] 셀 진입 자동 ON 로직 비활성화 — manual 추적 불필요.
@@ -686,9 +704,7 @@ export class InputHandler {
     eventBus.on('format-char', (props) => {
       if (!this.active) return;
       if (this.editMode === 'form') return;
-      if (this.cursor.hasSelection()) {
-        this.applyCharFormat(props as Partial<CharProperties>);
-      }
+      this.applyCharFormat(props as Partial<CharProperties>);
       // 서식바 조작으로 빠진 포커스를 항상 복원
       this.focusTextarea();
     });
@@ -1828,8 +1844,14 @@ export class InputHandler {
 
   // ─── 서식 적용 ─────────────────────────────────────────
 
-  /** 선택 범위에 글자 서식을 적용한다 */
+  /** 펼친 선택이 있으면 그 범위에, 접힌 캐럿이면 다음 입력(pending) 서식으로 적용한다 */
   private applyCharFormat(props: Partial<CharProperties>): void {
+    if (!this.hasNonCollapsedTextSelection()) {
+      this.mergePendingCharFormat(props);
+      this.emitCursorFormatState();
+      return;
+    }
+    this.clearPendingCharFormat();
     const ranges = this.getCharFormatRangesAtCursor();
     if (ranges.length === 0) return;
     const cmd = new ApplyCharFormatCommand(
@@ -1839,6 +1861,78 @@ export class InputHandler {
       this.getCurrentEditContext(),
     );
     this.executeOperation({ kind: 'command', command: cmd });
+  }
+
+  /** 클릭 직후처럼 anchor 만 있고 범위가 없는 상태는 선택이 아니다. */
+  private hasNonCollapsedTextSelection(): boolean {
+    if (this.cursor.isInHeaderFooter()) {
+      const sel = this.cursor.getHeaderFooterSelectionOrdered();
+      if (!sel) return false;
+      return sel.start.paraIdx !== sel.end.paraIdx || sel.start.charOffset !== sel.end.charOffset;
+    }
+    if (this.cursor.isInFootnote()) {
+      const sel = this.cursor.getFootnoteSelectionOrdered();
+      if (!sel) return false;
+      return sel.start.fnParaIdx !== sel.end.fnParaIdx || sel.start.charOffset !== sel.end.charOffset;
+    }
+    const sel = this.cursor.getSelectionOrdered();
+    if (!sel) return false;
+    return CursorState.comparePositions(sel.start, sel.end) !== 0;
+  }
+
+  private mergePendingCharFormat(props: Partial<CharProperties>): void {
+    const next: Partial<CharProperties> = { ...this.pendingCharFormat, ...props };
+    if (props.fontId !== undefined) delete next.fontIds;
+    if (props.fontIds !== undefined) delete next.fontId;
+    this.pendingCharFormat = next;
+  }
+
+  private clearPendingCharFormat(): void {
+    this.pendingCharFormat = null;
+  }
+
+  /** 삽입 커맨드/IME 커밋에 실어 보낼 타이핑 서식 스냅샷 */
+  peekPendingCharFormat(): Partial<CharProperties> | undefined {
+    if (!this.pendingCharFormat) return undefined;
+    return { ...this.pendingCharFormat };
+  }
+
+  /** 문서에 이미 들어간 삽입 범위(IME preedit, HF/FN record 경로)에 pending 서식을 입힌다 */
+  applyPendingCharFormatToInsertedRange(pos: DocumentPosition, length: number): void {
+    const props = this.pendingCharFormat;
+    if (!props || length <= 0) return;
+    const json = JSON.stringify(props);
+    const startOffset = pos.charOffset;
+    const endOffset = startOffset + length;
+    if (this.cursor.isInHeaderFooter()) {
+      this.wasm.applyCharFormatInHf(
+        this.cursor.hfSectionIdx,
+        this.cursor.headerFooterMode === 'header',
+        this.cursor.hfApplyTo,
+        this.cursor.hfParaIdx,
+        startOffset,
+        endOffset,
+        json,
+      );
+      return;
+    }
+    if (this.cursor.isInFootnote()) {
+      this.wasm.applyCharFormatInFootnote(
+        this.cursor.fnSectionIdx,
+        this.cursor.fnParaIdx,
+        this.cursor.fnControlIdx,
+        this.cursor.fnInnerParaIdx,
+        startOffset,
+        endOffset,
+        json,
+      );
+      return;
+    }
+    applyCharFormatToTarget(this.wasm, {
+      target: editableTargetFromPosition(pos),
+      startOffset,
+      endOffset,
+    }, json);
   }
 
   /** 토글 서식 적용 (상호 배타 처리 포함) */
@@ -1880,6 +1974,11 @@ export class InputHandler {
    * 서식으로 토글 방향이 정해져 Ctrl+B/I/U 가 해제되지 않는 결함이 있었다
    * (한컴은 선택 첫 글자 기준).
    */
+  private withPendingCharFormat(props: CharProperties): CharProperties {
+    if (this.hasNonCollapsedTextSelection() || !this.pendingCharFormat) return props;
+    return { ...props, ...this.pendingCharFormat };
+  }
+
   private getCharPropertiesAtCursor(): CharProperties {
     if (this.cursor.isInHeaderFooter()) {
       const sel = this.cursor.getHeaderFooterSelectionOrdered();
@@ -1887,13 +1986,13 @@ export class InputHandler {
       const offset = sel
         ? sel.start.charOffset
         : (this.cursor.hfCharOffset > 0 ? this.cursor.hfCharOffset - 1 : 0);
-      return this.wasm.getCharPropertiesInHf(
+      return this.withPendingCharFormat(this.wasm.getCharPropertiesInHf(
         this.cursor.hfSectionIdx,
         this.cursor.headerFooterMode === 'header',
         this.cursor.hfApplyTo,
         paraIdx,
         offset,
-      );
+      ));
     }
     if (this.cursor.isInFootnote()) {
       const sel = this.cursor.getFootnoteSelectionOrdered();
@@ -1901,13 +2000,13 @@ export class InputHandler {
       const offset = sel
         ? sel.start.charOffset
         : (this.cursor.fnCharOffset > 0 ? this.cursor.fnCharOffset - 1 : 0);
-      return this.wasm.getCharPropertiesInFootnote(
+      return this.withPendingCharFormat(this.wasm.getCharPropertiesInFootnote(
         this.cursor.fnSectionIdx,
         this.cursor.fnParaIdx,
         this.cursor.fnControlIdx,
         innerParaIdx,
         offset,
-      );
+      ));
     }
     const sel = this.cursor.getSelectionOrdered();
     const pos = sel ? sel.start : this.cursor.getPosition();
@@ -1922,16 +2021,18 @@ export class InputHandler {
       // 정하므로(그리고 실제 적용 ApplyCharFormatCommand 는 이미 ...ByPath 로 안쪽 셀에
       // 적용) 방향이 어긋나 Ctrl+B/I 가 거꾸로 동작하고 툴바 표시도 오답이 된다.
       if ((pos.cellPath?.length ?? 0) > 0) {
-        return this.wasm.getCellCharPropertiesAtByPath(
+        return this.withPendingCharFormat(this.wasm.getCellCharPropertiesAtByPath(
           pos.sectionIndex, pos.parentParaIndex, JSON.stringify(pos.cellPath), queryOffset,
-        );
+        ));
       }
-      return this.wasm.getCellCharPropertiesAt(
+      return this.withPendingCharFormat(this.wasm.getCellCharPropertiesAt(
         pos.sectionIndex, pos.parentParaIndex, pos.controlIndex!,
         pos.cellIndex!, pos.cellParaIndex!, queryOffset,
-      );
+      ));
     }
-    return this.wasm.getCharPropertiesAt(pos.sectionIndex, pos.paragraphIndex, queryOffset);
+    return this.withPendingCharFormat(
+      this.wasm.getCharPropertiesAt(pos.sectionIndex, pos.paragraphIndex, queryOffset),
+    );
   }
 
   /** 커서 위치 문단에 문단 서식을 적용한다 */
@@ -2543,6 +2644,7 @@ export class InputHandler {
     // 고스트 오버레이 제거를 위해 렌더러도 함께 clear.
     this.cursor.exitCellSelectionMode();
     this.cellSelectionRenderer?.clear();
+    this.clearPendingCharFormat();
     // [#2339] 외부 위치-기반 파생 상태(find currentHit 등)를 구독으로 정리하는 확장점.
     this.eventBus.emit('history-jumped');
   }
@@ -2756,16 +2858,46 @@ export class InputHandler {
   finalizeCompositionBeforeCursorMove(): void {
     if (!this.isComposing) {
       this.resetIosInputSession();
+      this.trimTextareaBufferIfIdle();
       return;
     }
     _text.onCompositionEnd.call(this);
     // blur→focus 로 IME 조합 버퍼를 비운다. 조합 중 값이 남아 있으면
     // 다음 input 이 옛 preedit 를 다시 흘려보낸다.
-    this.textarea.value = '';
+    this.resetTextareaBuffer();
     try {
       this.textarea.blur();
       this.textarea.focus();
     } catch { /* 포커스 이동 실패는 무시 — 상태는 이미 확정됨 */ }
+  }
+
+  /** textarea value 중 아직 문서에 반영하지 않은 꼬리 슬라이스를 반환한다. */
+  private unconsumedTextareaValue(): string {
+    const value = this.textarea.value;
+    // 조합 취소 등으로 value 가 prefix 보다 짧아졌으면 카운터를 따라 내린다.
+    if (this.textareaConsumed > value.length) this.textareaConsumed = value.length;
+    return value.slice(this.textareaConsumed);
+  }
+
+  /** 현재 value 전체를 반영 완료로 표시한다 — value 자체는 건드리지 않는다. */
+  private consumeTextareaValue(): void {
+    this.textareaConsumed = this.textarea.value.length;
+  }
+
+  /**
+   * value 를 실제로 비운다. IME 리셋이 의도된 지점(클릭/블러/비활성화/모드 거부)
+   * 에서만 부른다 — 타이핑 도중에 부르면 진행 중인 조합이 파기된다.
+   */
+  private resetTextareaBuffer(): void {
+    this.textarea.value = '';
+    this.textareaConsumed = 0;
+  }
+
+  /** 경계 키 등 IME 가 확실히 쉬는 순간에만 누적된 value 를 정리한다. */
+  private trimTextareaBufferIfIdle(): void {
+    if (this.imeSession.isComposing) return;
+    if (this.textarea.value.length === 0 && this.textareaConsumed === 0) return;
+    this.resetTextareaBuffer();
   }
 
   /** composition 이벤트가 없는 iOS 입력의 anchor를 포커스/커서 경계에서 닫는다. */
@@ -2777,7 +2909,7 @@ export class InputHandler {
     this._iosLength = 0;
     this._iosPrevText = '';
     this._iosRequiresFullRefresh = false;
-    this.textarea.value = '';
+    this.resetTextareaBuffer();
   }
 
   /** 텍스트 입력 처리 (textarea input 이벤트) */
@@ -3101,34 +3233,6 @@ export class InputHandler {
    *                   onMouseUp (예: drag-during-scroll 영역, scrollbar release 영역) 의 자동 scroll back
    *                   결함 차단 영역. (Task #779)
    */
-  /** 문서/선택/서식 상태를 다시 조회하지 않고 preedit 오버레이만 갱신한다. */
-  private updateCompositionOverlay(): void {
-    const startRect = this.compositionAnchorRect;
-    if (!this.isComposing || !this.compositionAnchor || !startRect) {
-      this.updateCaret();
-      return;
-    }
-
-    const zoom = this.viewportManager.getZoom();
-    const text = this.imeSession.preedit;
-    this.positionImeInput(startRect, zoom);
-    if (!text) {
-      this.caret.hideComposition();
-      this.caret.update(startRect, zoom);
-      return;
-    }
-
-    if (!this.compositionFontFamily) {
-      try {
-        this.compositionFontFamily = this.getCharPropertiesAtCursor().fontFamily || 'sans-serif';
-      } catch {
-        this.compositionFontFamily = 'sans-serif';
-      }
-    }
-    const charWidth = Math.max(startRect.height * this.compositionLength, 1);
-    this.caret.showComposition(startRect, charWidth, zoom, text, this.compositionFontFamily);
-  }
-
   private updateCaret(skipScroll: boolean = false): void {
     const rect = this.cursor.getRect();
     if (rect) {
@@ -3136,62 +3240,13 @@ export class InputHandler {
       const caretRect = this.adjustExitedFieldEndCaretRect(rect);
       this.positionImeInput(caretRect, zoom);
 
-      // IME 조합 중: 블랙박스 캐럿 표시
+      this.caret.update(caretRect, zoom);
       if (this.isComposing && this.compositionAnchor && this.compositionLength > 0) {
-        try {
-          const anchor = this.compositionAnchor;
-          let startRect = this.compositionAnchorRect;
-          if (!startRect) {
-            if (this.cursor.isInHeaderFooter()) {
-              const isHeader = this.cursor.headerFooterMode === 'header';
-              startRect = this.wasm.getCursorRectInHeaderFooter(
-                this.cursor.hfSectionIdx, isHeader, this.cursor.hfApplyTo,
-                this.cursor.hfParaIdx, anchor.charOffset, this.cursor.getRect()?.pageIndex ?? 0,
-              )!;
-            } else if (this.cursor.isInFootnote()) {
-              startRect = this.wasm.getCursorRectInFootnote(
-                this.cursor.fnPageNum, this.cursor.fnFootnoteIndex,
-                this.cursor.fnInnerParaIdx, anchor.charOffset,
-              )!;
-            } else if ((anchor.cellPath?.length ?? 0) > 1 && anchor.parentParaIndex !== undefined) {
-              startRect = this.wasm.getCursorRectByPath(
-                anchor.sectionIndex, anchor.parentParaIndex,
-                JSON.stringify(anchor.cellPath), anchor.charOffset,
-              );
-            } else if (anchor.parentParaIndex !== undefined) {
-              startRect = this.wasm.getCursorRectInCell(
-                anchor.sectionIndex, anchor.parentParaIndex,
-                anchor.controlIndex!, anchor.cellIndex!,
-                anchor.cellParaIndex!, anchor.charOffset,
-              );
-            } else {
-              startRect = this.wasm.getCursorRect(
-                anchor.sectionIndex, anchor.paragraphIndex, anchor.charOffset,
-              );
-            }
-            this.compositionAnchorRect = {
-              ...startRect,
-              cellBounds: startRect.cellBounds ? { ...startRect.cellBounds } : undefined,
-            };
-          }
-          const text = this.imeSession.preedit;
-          // preedit는 아직 문서에 없으므로 현재 글자 높이로 CJK advance를 근사한다.
-          const charWidth = Math.max(startRect.height * this.compositionLength, 1);
-          // 현재 커서 위치의 글꼴 정보
-          let fontFamily = 'sans-serif';
-          try {
-            const props = this.getCharPropertiesAtCursor();
-            if (props.fontFamily) fontFamily = props.fontFamily;
-          } catch { /* fallback */ }
-          this.caret.showComposition(startRect, charWidth, zoom, text, fontFamily);
-        } catch {
-          // getCursorRect 실패 시 일반 캐럿
-          this.caret.hideComposition();
-          this.caret.update(rect, zoom);
-        }
+        const startRect = this.compositionStartRect();
+        if (startRect) this.caret.showCompositionUnderline(startRect, caretRect, zoom);
+        else this.caret.hideComposition();
       } else {
         this.caret.hideComposition();
-        this.caret.update(caretRect, zoom);
       }
       if (!skipScroll) {
         this.scrollCaretIntoView(caretRect);
@@ -3209,6 +3264,51 @@ export class InputHandler {
     if (cursorRect) {
       const adjustedCursorRect = this.adjustExitedFieldEndCaretRect(cursorRect);
       this.eventBus.emit('cursor-rect-updated', { x: adjustedCursorRect.x, y: adjustedCursorRect.y });
+    }
+  }
+
+  /** 조합 시작 좌표. 캐시가 없거나 pagination 이 버린 뒤에만 exact lookup 한다. */
+  private compositionStartRect(): CursorRect | null {
+    if (this.compositionAnchorRect) return this.compositionAnchorRect;
+    const anchor = this.compositionAnchor;
+    if (!anchor) return null;
+    try {
+      let startRect: CursorRect | null = null;
+      if (this.cursor.isInHeaderFooter()) {
+        const isHeader = this.cursor.headerFooterMode === 'header';
+        startRect = this.wasm.getCursorRectInHeaderFooter(
+          this.cursor.hfSectionIdx, isHeader, this.cursor.hfApplyTo,
+          this.cursor.hfParaIdx, anchor.charOffset, this.cursor.getRect()?.pageIndex ?? 0,
+        );
+      } else if (this.cursor.isInFootnote()) {
+        startRect = this.wasm.getCursorRectInFootnote(
+          this.cursor.fnPageNum, this.cursor.fnFootnoteIndex,
+          this.cursor.fnInnerParaIdx, anchor.charOffset,
+        );
+      } else if ((anchor.cellPath?.length ?? 0) > 1 && anchor.parentParaIndex !== undefined) {
+        startRect = this.wasm.getCursorRectByPath(
+          anchor.sectionIndex, anchor.parentParaIndex,
+          JSON.stringify(anchor.cellPath), anchor.charOffset,
+        );
+      } else if (anchor.parentParaIndex !== undefined) {
+        startRect = this.wasm.getCursorRectInCell(
+          anchor.sectionIndex, anchor.parentParaIndex,
+          anchor.controlIndex!, anchor.cellIndex!,
+          anchor.cellParaIndex!, anchor.charOffset,
+        );
+      } else {
+        startRect = this.wasm.getCursorRect(
+          anchor.sectionIndex, anchor.paragraphIndex, anchor.charOffset,
+        );
+      }
+      if (!startRect) return null;
+      this.compositionAnchorRect = {
+        ...startRect,
+        cellBounds: startRect.cellBounds ? { ...startRect.cellBounds } : undefined,
+      };
+      return this.compositionAnchorRect;
+    } catch {
+      return null;
     }
   }
 
@@ -3737,6 +3837,9 @@ export class InputHandler {
     this.cancelDeferredPaginationFlush();
     this.deferredPaginationRunner.cancel();
     this.deferredPaginationPending = false;
+    // 확정하지 않는다 — 이미 교체 중인 문서에 이전 preedit 을 커밋하면 안 된다.
+    // 네이티브 preedit 은 문서에 들어가 있으므로 히스토리 초기화 전에 되돌린다.
+    _text.revertCompositionPreview.call(this);
     this.resetRawTextMutationEffects();
     this.imeSession.reset();
     this.compositionAnchor = null;
@@ -3753,7 +3856,8 @@ export class InputHandler {
     this._iosLength = 0;
     this._iosPrevText = '';
     this._iosRequiresFullRefresh = false;
-    this.textarea.value = '';
+    this.resetTextareaBuffer();
+    this.clearPendingCharFormat();
     this.caret.hide();
     this.fieldMarker.hide();
     this.cursor.clearSelection();
@@ -3780,6 +3884,7 @@ export class InputHandler {
     this.cancelDeferredPaginationFlush();
     this.deferredPaginationRunner.cancel();
     this.deferredPaginationPending = false;
+    _text.revertCompositionPreview.call(this);
     this.resetRawTextMutationEffects();
     this.imeSession.reset();
     this.compositionAnchor = null;

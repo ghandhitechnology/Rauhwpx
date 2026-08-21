@@ -14,6 +14,7 @@ import {
   requestDevAgentHub,
   restoreNativeDocument,
   releaseReplacedNativeFileHandle,
+  searchNearbyNativeDocuments,
   suppressDesktopServiceWorker,
 } from '../src/desktop-integration.ts';
 
@@ -130,6 +131,21 @@ test('native document bookmarks restore opaque handles without exposing a path',
   const restored = await restoreNativeDocument('document-a', win);
   assert.equal(restored === 'owned' ? null : restored?.identityKind, 'native-path');
   assert.equal(restored === 'owned' ? null : restored?.name, 'report.hwp');
+});
+
+test('nearby probes keep only opaque ids and names', async () => {
+  const win = {
+    rhwpDesktop: {
+      searchNearbyNativeDocument: async () => [{
+        probeId: 'probe-1',
+        fileName: 'report.hwp',
+        path: '/secret/docs/report.hwp',
+      }],
+    },
+  };
+  const probes = await searchNearbyNativeDocuments('document-a', { basenameHint: 'report.hwp' }, win);
+  assert.deepEqual(probes, [{ probeId: 'probe-1', fileName: 'report.hwp' }]);
+  assert.equal(JSON.stringify(probes).includes('/secret'), false);
 });
 
 test('releasing a replaced native handle bookmarks it first', async () => {

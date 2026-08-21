@@ -7,6 +7,7 @@ import { PreparedSnapshotCommand } from '../engine/prepared-snapshot-command.ts'
 import type {
   AgentName, CellAddr, CharFormatProps, DocPoint, DocRange,
   ObjectAnchor, ObjectOp, PendingChangeSet, PendingEditsChangeEvent, PendingOp,
+  PendingStructureOpInfo,
 } from './types.ts';
 import { AgentToolError, isDestructiveTableMark, isObjectOpApplied, sameCell } from './types.ts';
 import type { OverlayOp, PendingOverlayRenderer } from './pending-overlay.ts';
@@ -117,6 +118,12 @@ export class PendingEditManager {
   private bulkDocEventsReason: string | null = null;
   private bulkOverlayDirty = false;
   private bulkOpsChanged = false;
+  /**
+   * runAtomicBatch 구간 표시. 배치의 외부 스냅샷이 롤백을 전담하므로, 구간 안의
+   * replaceText 는 per-op 스냅샷(문서 전체 클론)을 만들지 않는다 — op 이 N 개인
+   * 배치가 문서 클론을 N+1 번 하던 것을 1 번으로 줄인다.
+   */
+  private inAtomicBatch = false;
   private templateLocked = false;
   // 파라미터 프로퍼티 대신 명시적 할당 (node --test strip-only 모드 호환).
   private deps: PendingEditDeps;
@@ -273,9 +280,16 @@ export class PendingEditManager {
     // 리뷰 창 내내 점유되므로 히스토리 예산에 자리를 만들고(prepare) 점유를
     // 등록한다(retain) — 등록하지 않으면 WASM 저장소가 우리가 아직 참조하는
     // 오래된 undo 스냅샷을 무통보 축출한다.
-    this.deps.inputHandler.prepareSnapshotCapacity?.(1);
-    const snapshotId = wasm.saveSnapshot();
-    this.deps.inputHandler.retainExternalSnapshot?.();
+    // retainSnapshot=false(replace_all 벌크)이면서 runAtomicBatch 안이면 배치의
+    // 외부 스냅샷이 에러 롤백을 전담하므로 클론 자체를 생략한다. retainSnapshot 이
+    // true 면 배치 안에서도 클론을 유지한다 — reject/실패 턴 복원과 approve 의
+    // undo 기준(before)이 역연산 폴백으로 서식을 잃지 않게 하기 위해서다.
+    let snapshotId: number | null = null;
+    if (retainSnapshot || !this.inAtomicBatch) {
+      this.deps.inputHandler.prepareSnapshotCapacity?.(1);
+      snapshotId = wasm.saveSnapshot();
+      this.deps.inputHandler.retainExternalSnapshot?.();
+    }
     let deleteShifted = false;
     try {
       const res = this.deleteRangeRaw(range);
@@ -296,7 +310,7 @@ export class PendingEditManager {
       // 캡처한 글자 모양을 삽입 텍스트 전체에 적용 (범위 끝 서식 상속 방지)
       if (charShapeId !== null && text.length > 0) this.applyCharShapeToRange(ins.range, charShapeId);
       const set = this.ensureOpenSet(agent);
-      if (!retainSnapshot) {
+      if (!retainSnapshot && snapshotId !== null) {
         // 벌크 경로: 에러 롤백용 스냅샷은 성공 즉시 반환한다 — 되돌림은 역연산 폴백.
         wasm.discardSnapshot(snapshotId);
         this.deps.inputHandler.releaseExternalSnapshot?.();
@@ -321,17 +335,21 @@ export class PendingEditManager {
       return { changeSetId: set.id, insertedRange: { ...ins.range }, deletedText };
     } catch (err) {
       // 부분 적용 롤백 — 스냅샷으로 변이 전 상태를 그대로 복원한다.
-      try { wasm.restoreSnapshot(snapshotId); } catch { /* best effort */ }
-      wasm.discardSnapshot(snapshotId);
-      this.deps.inputHandler.releaseExternalSnapshot?.();
-      // 삭제 shift 는 이미 다른 op 들에 반영됐을 수 있다 — 원본이 다시 나타났으므로
-      // 재삽입과 동치인 shift 로 되돌린다.
-      if (deleteShifted) {
-        this.shiftAllAfterInsert(
-          range.sectionIdx,
-          this.insertShiftFor({ paraIdx: range.startParaIdx, charOffset: range.startCharOffset }, deletedText),
-          undefined, range.cell,
-        );
+      // (runAtomicBatch 안에서는 스냅샷이 없다 — 배치의 catch 가 문서와 pending
+      // 상태를 통째로 되돌리므로 여기서는 그대로 던지기만 한다.)
+      if (snapshotId !== null) {
+        try { wasm.restoreSnapshot(snapshotId); } catch { /* best effort */ }
+        wasm.discardSnapshot(snapshotId);
+        this.deps.inputHandler.releaseExternalSnapshot?.();
+        // 삭제 shift 는 이미 다른 op 들에 반영됐을 수 있다 — 원본이 다시 나타났으므로
+        // 재삽입과 동치인 shift 로 되돌린다.
+        if (deleteShifted) {
+          this.shiftAllAfterInsert(
+            range.sectionIdx,
+            this.insertShiftFor({ paraIdx: range.startParaIdx, charOffset: range.startCharOffset }, deletedText),
+            undefined, range.cell,
+          );
+        }
       }
       throw err;
     }
@@ -529,6 +547,25 @@ export class PendingEditManager {
     agent: AgentName,
   ): { changeSetId: string } {
     if (items.length === 0) throw new AgentToolError('INVALID_ARGS', 'batch is empty');
+    return this.runAtomicBatch(() => {
+      let changeSetId = '';
+      for (const item of items) {
+        changeSetId = this.replaceText(item.range, item.text, agent, { retainSnapshot: false }).changeSetId;
+      }
+      return { changeSetId };
+    });
+  }
+
+  /**
+   * 원자적 스테이징 배치 — fn 안에서 등록되는 모든 pending 연산이 전부 성공해야
+   * 남는다. 중간 실패 시 문서(스냅샷)와 pending 상태(op 좌표·추가 op·새 set)를
+   * 배치 이전으로 통째로 되돌리고 다시 던진다. 구간 동안 조판·문서 이벤트·
+   * 오버레이 동기화는 bulk 로 모여 종료 시 각 한 번씩만 수행된다. replace 계열의
+   * per-op 보존 스냅샷은 유지된다(reject/undo 복원 충실도) — retainSnapshot:false
+   * 를 명시한 replace_all 벌크만 클론을 생략하고 역연산 폴백으로 되돌린다.
+   * apply_edits / replace_all / apply_list 같은 다중 op 툴 경로 전용.
+   */
+  runAtomicBatch<T>(fn: () => T): T {
     const wasm = this.deps.wasm;
     const pendingState = this.capturePendingState();
     const setIdsBefore = new Set(this.sets.map((s) => s.id));
@@ -536,15 +573,19 @@ export class PendingEditManager {
     this.deps.inputHandler.prepareSnapshotCapacity?.(1);
     const snapId = wasm.saveSnapshot();
     this.deps.inputHandler.retainExternalSnapshot?.();
+    const wasAtomic = this.inAtomicBatch;
+    this.inAtomicBatch = true;
     this.beginBulk();
     try {
-      let changeSetId = '';
-      for (const item of items) {
-        changeSetId = this.replaceText(item.range, item.text, agent, { retainSnapshot: false }).changeSetId;
-      }
-      return { changeSetId };
+      return fn();
     } catch (err) {
       try { wasm.restoreSnapshot(snapId); } catch { /* best effort */ }
+      // 배치 중 추가된 op 이 보존 스냅샷을 점유했을 수 있다 — 롤백으로 op 이
+      // 사라지기 전에 해제한다 (예산 누수 방지).
+      const opIdsBefore = new Set(pendingState.flatMap((s) => s.ops.map((op) => op.id)));
+      for (const set of this.sets) {
+        this.discardReplaceSnapshots(set.ops.filter((op) => !opIdsBefore.has(op.id)));
+      }
       // 배치가 만든 set 은 통째로 제거하고, 기존 set 들의 op 은 배치 이전 좌표로 복원한다.
       this.sets = this.sets.filter((s) => setIdsBefore.has(s.id));
       this.open = openBefore && setIdsBefore.has(openBefore.id) ? openBefore : null;
@@ -556,6 +597,7 @@ export class PendingEditManager {
     } finally {
       wasm.discardSnapshot(snapId);
       this.deps.inputHandler.releaseExternalSnapshot?.();
+      this.inAtomicBatch = wasAtomic;
       this.endBulk();
     }
   }
@@ -600,18 +642,41 @@ export class PendingEditManager {
    * cellIdx 가 재번호 매겨지므로 승인 전 추가 표 편집을 막는 데 쓴다.
    */
   hasPendingStructureOp(sectionIdx: number, tableParaIdx: number, controlIdx: number): boolean {
+    return this.listPendingStructureOps(sectionIdx, tableParaIdx, controlIdx).length > 0;
+  }
+
+  /**
+   * executor 가드용: 해당 표에 걸린 pending 구조 op 목록을 요약해 돌려준다.
+   *
+   * 행 단위 op(insert_row/delete_row)은 affectedRow 를 채운다 — flat cellIdx 가
+   * 행 우선이라 그 행보다 앞선 행의 셀은 번호가 유지되고, executor 는 그런 셀의
+   * 편집만 통과시킨다. 열 단위·병합·나눔·표 삭제는 모든 행의 번호를 흔들므로
+   * affectedRow 를 null 로 두어 표 전체를 잠근다.
+   */
+  listPendingStructureOps(
+    sectionIdx: number, tableParaIdx: number, controlIdx: number,
+  ): PendingStructureOpInfo[] {
+    const out: PendingStructureOpInfo[] = [];
     for (const set of this.sets) {
       for (const op of set.ops) {
         if (op.kind !== 'object') continue;
         const o = op.obj;
-        if ((o.type === 'tableStructure' || o.type === 'tableStructureMarked' || o.type === 'deleteTable')
-          && o.sectionIdx === sectionIdx
-          && o.tableParaIdx === tableParaIdx && o.controlIdx === controlIdx) {
-          return true;
+        if (o.type !== 'tableStructure' && o.type !== 'tableStructureMarked' && o.type !== 'deleteTable') continue;
+        if (o.sectionIdx !== sectionIdx || o.tableParaIdx !== tableParaIdx || o.controlIdx !== controlIdx) continue;
+        if (o.type === 'deleteTable') {
+          out.push({ op: 'delete_table', affectedRow: null });
+        } else if (o.type === 'tableStructure') {
+          const affectedRow = o.op === 'insert_row'
+            ? (o.insertedIndex ?? (o.after ? o.index + 1 : o.index))
+            : null;
+          out.push({ op: o.op, affectedRow });
+        } else {
+          const affectedRow = o.op === 'delete_row' && typeof o.rowIdx === 'number' ? o.rowIdx : null;
+          out.push({ op: o.op, affectedRow });
         }
       }
     }
-    return false;
+    return out;
   }
 
   /**

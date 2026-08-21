@@ -366,6 +366,41 @@ fn test_merge_cells_overlapping_span() {
 }
 
 #[test]
+fn test_merge_cells_preserves_control_only_paragraph() {
+    use crate::model::control::Control;
+
+    let mut table = make_table(2, 2);
+
+    // (0,1) 셀: 텍스트 없이 중첩 표 컨트롤만 담은 문단.
+    // 컨트롤은 text 가 아니라 char_offsets 갭에 놓이므로 text 는 비어 있다.
+    let mut host = Paragraph::new_empty();
+    host.controls = vec![Control::Table(Box::new(make_table(1, 1)))];
+    host.ctrl_data_records = vec![None];
+    let idx = table.cell_index_at(0, 1).expect("cell index");
+    table.cells[idx].paragraphs = vec![host];
+
+    // (1,0) 셀: 기존 텍스트 보존 동작이 유지되는지 함께 확인
+    set_cell_text(&mut table, 1, 0, "본문");
+
+    table.merge_cells(0, 0, 1, 1).unwrap();
+
+    let merged = table.cell_at(0, 0).expect("주 셀");
+
+    // 컨트롤만 있는 문단이 유실되지 않고, 컨트롤도 그대로 남아야 한다
+    let control_paras: Vec<_> = merged
+        .paragraphs
+        .iter()
+        .filter(|p| !p.controls.is_empty())
+        .collect();
+    assert_eq!(control_paras.len(), 1);
+    assert!(matches!(control_paras[0].controls[0], Control::Table(_)));
+    assert_eq!(control_paras[0].ctrl_data_records.len(), 1);
+
+    // 텍스트 문단도 그대로 병합된다
+    assert!(merged.paragraphs.iter().any(|p| p.text == "본문"));
+}
+
+#[test]
 fn test_insert_row_single_row() {
     let mut table = make_table(1, 3);
 

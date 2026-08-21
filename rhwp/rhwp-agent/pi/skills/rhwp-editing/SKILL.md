@@ -15,9 +15,14 @@ description: Pending-edit and revision workflow for changing the live HWP/HWPX d
 ## 리비전 사슬
 
 - 모든 쓰기 도구는 `expectedRevision` 이 필요하다. 가장 최근 도구 응답이 준 `revision` 을 넣는다.
-- 쓰기는 **한 번에 하나씩**. 병렬로 보내지 말고, 응답의 새 `revision` 을 다음 쓰기에 넘긴다.
-- `REVISION_MISMATCH` 가 나면 문서가 바뀐 것이다. 다시 읽어(`get_structure` / `get_text_range` /
-  `find_text`) 좌표를 갱신한 뒤 재시도한다. 같은 좌표로 그냥 다시 보내면 중복 삽입이 된다.
+- 편집을 두 개 이상 미리 알고 있으면 `apply_edits` 한 번에 묶어 보낸다 (최대 32개). 항목은
+  순서대로 적용되므로 서로 떨어진 위치를 고칠 때는 문서 뒤쪽부터 넣어 앞 항목이 뒤 좌표를
+  밀지 않게 한다. 한 항목이라도 실패하면 묶음 전체가 되돌아간다.
+- 낱개로 보낼 때는 **한 번에 하나씩**. 병렬로 보내지 말고, 응답의 새 `revision` 을 다음 쓰기에 넘긴다.
+- `REVISION_MISMATCH` 가 나면 문서가 바뀐 것이다. 오류 메시지가 현재 `revision` 과 대처 방법을
+  함께 주므로 그 안내를 따른다. 좌표가 밀렸을 가능성이 있으면 다시 읽어(`get_structure` /
+  `get_text_range` / `find_text`) 좌표를 갱신한 뒤 재시도한다. 같은 좌표로 그냥 다시 보내면
+  중복 삽입이 된다.
 
 ## 대기 편집
 

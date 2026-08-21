@@ -3,6 +3,7 @@ import type { DocumentPosition, CharProperties, ParaProperties, CellPathLike, Ce
 import { MAX_PAGE_LOCAL_TEXT_EDIT_CHARS } from './input-edit-invalidation';
 import type { LineEndpoints as LineEndpointsLike } from './object-drag-record';
 import {
+  editableTargetFromPosition,
   targetCellPathJson,
   type EditableParagraphTarget,
   type EditableTextRange,
@@ -417,6 +418,30 @@ function doGetTextRange(wasm: WasmBridge, pos: DocumentPosition, count: number):
 
 // ─── 텍스트 삽입 명령 ─────────────────────────────────
 
+export function isNonEmptyCharFormat(
+  props?: Partial<CharProperties> | null,
+): props is Partial<CharProperties> {
+  return !!props && Object.keys(props).length > 0;
+}
+
+/** 방금 삽입한 글자에 타이핑 서식(글꼴 등)을 입힌다. redo 시 insert 가 이전 run 을 물려받아도 복구한다. */
+export function applyCharFormatToInsertedText(
+  wasm: WasmBridge,
+  position: DocumentPosition,
+  text: string,
+  charFormat?: Partial<CharProperties>,
+): void {
+  if (!isNonEmptyCharFormat(charFormat) || !text) return;
+  const startOffset = position.charOffset;
+  const endOffset = startOffset + charCount(text);
+  if (endOffset <= startOffset) return;
+  applyCharFormatToTarget(wasm, {
+    target: editableTargetFromPosition(position),
+    startOffset,
+    endOffset,
+  }, JSON.stringify(charFormat));
+}
+
 export class InsertTextCommand implements EditCommand {
   readonly type = 'insertText';
   readonly timestamp: number;
@@ -426,6 +451,7 @@ export class InsertTextCommand implements EditCommand {
     private position: DocumentPosition,
     private text: string,
     timestamp?: number,
+    private charFormat?: Partial<CharProperties>,
   ) {
     this.timestamp = timestamp ?? Date.now();
   }
@@ -433,6 +459,7 @@ export class InsertTextCommand implements EditCommand {
   execute(wasm: WasmBridge): DocumentPosition {
     this.lastMutationEffects = NO_TEXT_MUTATION_EFFECTS;
     this.lastMutationEffects = insertTextWithMutationEffects(wasm, this.position, this.text);
+    applyCharFormatToInsertedText(wasm, this.position, this.text, this.charFormat);
     return { ...this.position, charOffset: this.position.charOffset + charCount(this.text) };
   }
 
@@ -473,8 +500,9 @@ export class InsertTextCommand implements EditCommand {
     if (other.timestamp - this.timestamp > 300) return null;
     // 줄바꿈/탭 포함 시 병합 불가
     if (other.text.includes('\n') || other.text.includes('\t')) return null;
+    if (JSON.stringify(this.charFormat ?? null) !== JSON.stringify(other.charFormat ?? null)) return null;
 
-    return new InsertTextCommand(this.position, this.text + other.text, this.timestamp);
+    return new InsertTextCommand(this.position, this.text + other.text, this.timestamp, this.charFormat);
   }
 }
 
@@ -843,7 +871,7 @@ function getCharPropertiesAtTarget(
   }
 }
 
-function applyCharFormatToTarget(wasm: WasmBridge, range: EditableTextRange, propsJson: string) {
+export function applyCharFormatToTarget(wasm: WasmBridge, range: EditableTextRange, propsJson: string) {
   const { target, startOffset, endOffset } = range;
   switch (target.kind) {
     case 'body':
@@ -1343,12 +1371,24 @@ export class InsertTextInHeaderFooterCommand implements EditCommand {
     private paraIdx: number,
     private charOffset: number,
     private text: string,
+    private charFormat?: Partial<CharProperties>,
   ) {
     this.lastContext = hfEditContext(target, paraIdx, charOffset + charCount(text));
   }
 
   execute(wasm: WasmBridge): DocumentPosition {
     wasm.insertTextInHeaderFooter(this.target.sectionIdx, this.target.isHeader, this.target.applyTo, this.paraIdx, this.charOffset, this.text);
+    if (isNonEmptyCharFormat(this.charFormat) && this.text) {
+      wasm.applyCharFormatInHf(
+        this.target.sectionIdx,
+        this.target.isHeader,
+        this.target.applyTo,
+        this.paraIdx,
+        this.charOffset,
+        this.charOffset + charCount(this.text),
+        JSON.stringify(this.charFormat),
+      );
+    }
     this.lastContext = hfEditContext(this.target, this.paraIdx, this.charOffset + charCount(this.text));
     return hfFnStubPosition(this.target.sectionIdx);
   }
@@ -1528,12 +1568,24 @@ export class InsertTextInFootnoteCommand implements EditCommand {
     private innerParaIdx: number,
     private charOffset: number,
     private text: string,
+    private charFormat?: Partial<CharProperties>,
   ) {
     this.lastContext = fnEditContext(target, innerParaIdx, charOffset + charCount(text));
   }
 
   execute(wasm: WasmBridge): DocumentPosition {
     wasm.insertTextInFootnote(this.target.sectionIdx, this.target.paraIdx, this.target.controlIdx, this.innerParaIdx, this.charOffset, this.text);
+    if (isNonEmptyCharFormat(this.charFormat) && this.text) {
+      wasm.applyCharFormatInFootnote(
+        this.target.sectionIdx,
+        this.target.paraIdx,
+        this.target.controlIdx,
+        this.innerParaIdx,
+        this.charOffset,
+        this.charOffset + charCount(this.text),
+        JSON.stringify(this.charFormat),
+      );
+    }
     this.lastContext = fnEditContext(this.target, this.innerParaIdx, this.charOffset + charCount(this.text));
     return hfFnStubPosition(this.target.sectionIdx);
   }

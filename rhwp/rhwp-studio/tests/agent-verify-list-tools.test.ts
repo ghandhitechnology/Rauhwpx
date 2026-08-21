@@ -615,12 +615,18 @@ test('PENDING_DESTRUCTIVE_OP: insert_row pending 중 같은 표의 셀 편집도
     sectionIdx: 0, paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, op: 'insert_row', rowIdx: 0,
   });
   assert.equal(tables[0].rows, 3); // insert_row 는 즉시 적용됐다
-  // applied-now 구조 op 도 cellIdx 재번호를 유발하므로 후속 셀 편집은 차단된다
+  // applied-now 구조 op 도 삽입 행부터 아래로 cellIdx 를 밀므로 그 행의 셀 편집은 차단된다
   const err = await expectErr(call('insert_text', {
     sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-    cell: { paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, cellIdx: 0 },
+    cell: { paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, cellIdx: 1 },
   }), 'PENDING_DESTRUCTIVE_OP');
   assert.match(err.message, /next turn/);
+  assert.match(err.message, /insert_row at row 1/);
+  // 삽입 행보다 앞선 행 0 의 셀은 번호가 그대로라 통과한다
+  await call('insert_text', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
+    cell: { paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, cellIdx: 0 },
+  });
   // 구조 op 이 있는 동안은 후속 구조 op 도 차단된다
   await expectErr(call('edit_table', {
     sectionIdx: 0, paraIdx: c.table.paraIdx, controlIdx: c.table.controlIdx, op: 'insert_col', colIdx: 0,

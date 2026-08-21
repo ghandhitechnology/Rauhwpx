@@ -6,21 +6,17 @@ const caretRenderer = readFileSync(new URL('../src/engine/caret-renderer.ts', im
 const inputHandler = readFileSync(new URL('../src/engine/input-handler.ts', import.meta.url), 'utf8');
 const canvasView = readFileSync(new URL('../src/view/canvas-view.ts', import.meta.url), 'utf8');
 
-test('표 셀 IME 조합창은 Canvas clip과 별도로 cellBounds 안에 제한한다', () => {
-  assert.match(caretRenderer, /private clampCompositionBox\(/);
-  assert.match(caretRenderer, /const bounds = rect\.cellBounds;/);
-  assert.match(caretRenderer, /w = Math\.min\(w, Math\.max\(0, bounds\.w\)\);/);
-  assert.match(caretRenderer, /x = Math\.min\(Math\.max\(x, bounds\.x\), maxX\);/);
-  assert.match(caretRenderer, /y = Math\.min\(Math\.max\(y, bounds\.y\), maxY\);/);
+test('표 셀 IME 조합 밑줄은 cellBounds 안에 제한한다', () => {
+  assert.match(caretRenderer, /showCompositionUnderline\(/);
+  assert.match(caretRenderer, /const bounds = startRect\.cellBounds \?\? endRect\.cellBounds;/);
+  assert.match(caretRenderer, /w = Math\.min\(w, Math\.max\(0, maxX - x\)\);/);
 });
 
-test('IME 조합창은 다음 글자를 가리지 않도록 현재 줄 꼬리를 임시로 민다', () => {
+test('IME 조합 글리프는 엔진 문서가 그리고 오버레이 복제 띠를 쓰지 않는다', () => {
   assert.match(canvasView, /renderedCanvas\.dataset\.rhwpPageIndex = String\(pageIdx\)/);
-  assert.match(caretRenderer, /private compFlowEl: HTMLCanvasElement/);
-  assert.match(caretRenderer, /private renderCompositionFlow\(/);
-  assert.match(caretRenderer, /flowWidth - gapWidth/);
-  assert.match(caretRenderer, /context\.drawImage\([\s\S]*gapWidth \* scaleX/);
-  assert.match(caretRenderer, /this\.compFlowEl\.style\.display = 'none'/);
+  assert.doesNotMatch(caretRenderer, /private compFlowEl/);
+  assert.doesNotMatch(caretRenderer, /private renderCompositionFlow\(/);
+  assert.match(caretRenderer, /private underlineEl: HTMLDivElement/);
 });
 
 test('지연 셀 입력이 가시 높이를 넘으면 즉시 전체 페이지네이션을 수행한다', () => {

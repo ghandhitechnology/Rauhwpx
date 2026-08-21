@@ -38,7 +38,7 @@ import { CommandPalette } from '@/ui/command-palette';
 import { showHmlImportWarning } from '@/ui/hml-import-warning';
 import { showLocalFontsModalIfNeeded } from '@/ui/local-fonts-modal';
 import { showToast } from '@/ui/toast';
-import { resolveDocumentPreflight, type DocumentPreflightIdentity } from '@/recent/document-preflight';
+import { resolveDocumentPreflight, type DocumentPreflightIdentity, type OpenDocumentBytesEvent, type VerifiedDocumentGrant } from '@/recent/document-preflight';
 import { addRecentDoc, listRecentDocs } from '@/recent/recent-store';
 import { showDropConfirmDialog } from '@/ui/drop-confirm-dialog';
 import { initRhwpDev } from '@/core/rhwp-dev';
@@ -940,7 +940,7 @@ function setupEventListeners(): void {
     // bind the new handle to the active ID so reopening it in a later session restores
     // the same document-scoped references. Download fallbacks emit no such event.
     void (async () => {
-      await rememberNativeDocument(documentId, saved.fileHandle);
+      await rememberNativeDocument(documentId, saved.fileHandle, sourceDigest);
       await releaseReplacedNativeFileHandle(saved.previousFileHandle, saved.fileHandle);
       await addRecentDoc({
         documentId,
@@ -1181,14 +1181,14 @@ async function reserveDocumentOpen(
   data: Uint8Array,
   fileHandle: typeof wasm.currentFileHandle,
   skipRecent = false,
-  preferredDocumentId?: string | null,
+  grant?: VerifiedDocumentGrant | null,
 ): Promise<{ identity: DocumentPreflightIdentity; reservationId: string | null | undefined }> {
   const resolved = await resolveDocumentPreflight(
     data,
     fileHandle,
     await listRecentDocs(),
     undefined,
-    preferredDocumentId,
+    grant,
   );
   const identity = skipRecent
     ? { ...resolved, documentId: createActiveDocumentId(), useSourceDigest: false }
@@ -1252,14 +1252,14 @@ async function loadBytes(
     dataReadProgressShown?: boolean;
     skipRecent?: boolean;
     suppressDialogs?: boolean;
-    preferredDocumentId?: string | null;
+    grant?: VerifiedDocumentGrant | null;
   } = {},
 ): Promise<void> {
   const ownership = await reserveDocumentOpen(
     data,
     fileHandle,
     options.skipRecent,
-    options.preferredDocumentId,
+    options.grant,
   );
   const previousFileHandle = wasm.currentFileHandle;
   if (!options.dataReadProgressShown) {
@@ -1282,7 +1282,11 @@ async function loadBytes(
   }
   activeDocumentId = ownership.identity.documentId;
   bindNativeFileHandleIdentity(fileHandle, ownership.identity);
-  await rememberNativeDocument(ownership.identity.documentId, fileHandle)
+  await rememberNativeDocument(
+    ownership.identity.documentId,
+    fileHandle,
+    ownership.identity.sourceDigest,
+  )
     .catch((error) => console.warn('[desktop] native document bookmark failed:', error));
   await releaseReplacedNativeFileHandle(previousFileHandle, fileHandle)
     .catch((error) => console.warn('[desktop] 교체된 네이티브 파일 핸들 해제 실패:', error));
@@ -1475,20 +1479,14 @@ async function canReplaceCurrentDocument(skipUnsavedGuard?: boolean): Promise<bo
   return skipUnsavedGuard === true || await confirmSaveBeforeReplacingDocument(commandServices);
 }
 
-async function openDocumentBytes(data: {
-  bytes: Uint8Array;
-  fileName: string;
-  fileHandle: typeof wasm.currentFileHandle;
-  skipUnsavedGuard?: boolean;
-  documentId?: string;
-}) {
+async function openDocumentBytes(data: OpenDocumentBytesEvent) {
   if (!await canReplaceCurrentDocument(data.skipUnsavedGuard)) {
     await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
     return false;
   }
   try {
     await loadBytes(data.bytes, data.fileName, data.fileHandle, performance.now(), {
-      preferredDocumentId: data.documentId,
+      grant: data.grant,
     });
     return true;
   } catch (error) {
@@ -1506,15 +1504,7 @@ eventBus.on('create-new-document', (payload) => {
   })();
 });
 eventBus.on('open-document-bytes', async (payload) => {
-  const data = payload as {
-    bytes: Uint8Array;
-    fileName: string;
-    fileHandle: typeof wasm.currentFileHandle;
-    skipUnsavedGuard?: boolean;
-    documentId?: string;
-    /** 문서 비교 등: 로드 완료를 기다리는 쪽과 짝을 맞출 때만 전달 */
-    requestId?: string;
-  };
+  const data = payload as OpenDocumentBytesEvent;
   const notifyDone = (ok: boolean, error?: string) => {
     if (!data.requestId) return;
     eventBus.emit('open-document-bytes:done', { requestId: data.requestId, ok, error });

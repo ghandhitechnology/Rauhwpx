@@ -9,5 +9,5 @@ Establish the document purpose, audience, required facts, tone, and approximate 
 2. Build a clear heading hierarchy and concise Korean office prose.
 3. Use actual paragraphs and `apply_list`; never type fake list markers.
 4. Reuse existing styles and formatting when available.
-5. Insert the draft as pending edits and call `verify_changes` with an image when layout matters.
+5. Insert the draft as pending edits and call `verify_changes` with an image when layout matters. Send independent insertions as one `apply_edits` batch ordered from the end of the document backwards.
 

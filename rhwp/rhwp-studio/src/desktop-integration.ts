@@ -43,7 +43,10 @@ export interface RhwpDesktopApi {
   ensureAgentHub?: () => Promise<{ started?: boolean; ready?: boolean } | boolean>;
   getSessionContext?: () => Promise<RendererSessionContext>;
   getLaunchFiles?: () => Promise<NativeFileHandleDescriptor[]>;
-  pickNativeOpenFile?: () => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
+  pickNativeOpenFile?: (options?: {
+    suggestedName?: string;
+    documentId?: string;
+  }) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
   claimNativeDroppedFile?: (
     file: File,
   ) => Promise<NativeFileHandleDescriptor | { owned: true } | null> | null;
@@ -63,10 +66,23 @@ export interface RhwpDesktopApi {
     identity: DocumentOwnershipIdentity,
   ) => Promise<{ name: string; byteLength: number }>;
   isSameNativeFile?: (firstHandleId: string, secondHandleId: string) => Promise<boolean>;
-  rememberNativeDocument?: (documentId: string, handleId: string) => Promise<void>;
+  rememberNativeDocument?: (
+    documentId: string,
+    handleId: string,
+    digest?: string | null,
+  ) => Promise<void>;
   reopenNativeDocument?: (
     documentId: string,
   ) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
+  searchNearbyNativeDocument?: (
+    documentId: string,
+    options?: { basenameHint?: string },
+  ) => Promise<ReadonlyArray<{ probeId: string; fileName: string }>>;
+  readNativeProbe?: (probeId: string) => Promise<NativeFileReadResult>;
+  claimNativeProbe?: (
+    probeId: string,
+  ) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
+  verifyNativePick?: (documentId: string, handleId: string) => Promise<boolean>;
   reserveDocument?: (
     identity: DocumentOwnershipIdentity,
     nativeHandleId?: string,
@@ -376,12 +392,26 @@ export function captureDesktopNativeDroppedFile(
   });
 }
 
+export async function pickDesktopNativeProjectFile(
+  options: { suggestedName: string; documentId: string },
+  win?: DesktopHost,
+): Promise<FileSystemFileHandleLike | 'owned' | null | undefined> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.pickNativeOpenFile) return undefined;
+  const result = await api.pickNativeOpenFile(options);
+  if (!result) return null;
+  if ('owned' in result) return 'owned';
+  if (!validNativeDescriptor(result)) throw new Error('Desktop open picker returned an invalid handle');
+  return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
+}
+
 export async function pickDesktopNativeOpenFile(
   win?: DesktopHost,
+  options?: { suggestedName?: string; documentId?: string },
 ): Promise<FileSystemFileHandleLike | null | undefined> {
   const api = desktopHost(win)?.rhwpDesktop;
   if (!api?.pickNativeOpenFile) return undefined;
-  const result = await api.pickNativeOpenFile();
+  const result = await api.pickNativeOpenFile(options);
   if (!result || 'owned' in result) return null;
   if (!validNativeDescriptor(result)) throw new Error('Desktop open picker returned an invalid handle');
   return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
@@ -409,10 +439,11 @@ export async function pickDesktopNativeSaveFile(
 export async function rememberNativeDocument(
   documentId: string | null | undefined,
   handle: FileSystemFileHandleLike | null | undefined,
+  digest?: string | null,
 ): Promise<void> {
   const metadata = handle ? nativeHandleMetadata.get(handle) : null;
   if (!documentId || !metadata?.api.rememberNativeDocument) return;
-  await metadata.api.rememberNativeDocument(documentId, metadata.handleId);
+  await metadata.api.rememberNativeDocument(documentId, metadata.handleId, digest);
 }
 
 export async function restoreNativeDocument(
@@ -430,6 +461,73 @@ export async function restoreNativeDocument(
   } catch (error) {
     console.warn('[desktop] native document reopen failed:', error);
     return null;
+  }
+}
+
+export interface NativeProbeRef {
+  readonly probeId: string;
+  readonly fileName: string;
+}
+
+export async function searchNearbyNativeDocuments(
+  documentId: string,
+  options: { basenameHint?: string } = {},
+  win?: DesktopHost,
+): Promise<readonly NativeProbeRef[] | null> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.searchNearbyNativeDocument || !documentId) return null;
+  try {
+    const result = await api.searchNearbyNativeDocument(documentId, options);
+    if (!Array.isArray(result)) return null;
+    return result.flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const probe = item as Record<string, unknown>;
+      if (typeof probe.probeId !== 'string' || !probe.probeId) return [];
+      if (typeof probe.fileName !== 'string' || !probe.fileName) return [];
+      return [{ probeId: probe.probeId, fileName: probe.fileName }];
+    });
+  } catch (error) {
+    console.warn('[desktop] native nearby search failed:', error);
+    return null;
+  }
+}
+
+export async function readNativeProbe(
+  probeId: string,
+  win?: DesktopHost,
+): Promise<{ bytes: Uint8Array; fileName: string } | null> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.readNativeProbe || !probeId) return null;
+  const result = await api.readNativeProbe(probeId);
+  if (!result || typeof result.name !== 'string') return null;
+  return { bytes: result.bytes, fileName: result.name };
+}
+
+export async function claimNativeProbe(
+  probeId: string,
+  win?: DesktopHost,
+): Promise<FileSystemFileHandleLike | 'owned' | null> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.claimNativeProbe || !probeId) return null;
+  const result = await api.claimNativeProbe(probeId);
+  if (!result) return null;
+  if ('owned' in result) return 'owned';
+  if (!validNativeDescriptor(result)) return null;
+  return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
+}
+
+export async function verifyNativePick(
+  documentId: string,
+  handle: FileSystemFileHandleLike | null | undefined,
+  win?: DesktopHost,
+): Promise<boolean> {
+  const api = desktopHost(win)?.rhwpDesktop ?? (handle ? nativeHandleMetadata.get(handle)?.api : undefined);
+  const handleId = handle ? nativeHandleMetadata.get(handle)?.handleId : undefined;
+  if (!api?.verifyNativePick || !documentId || !handleId) return false;
+  try {
+    return await api.verifyNativePick(documentId, handleId) === true;
+  } catch {
+    return false;
   }
 }
 

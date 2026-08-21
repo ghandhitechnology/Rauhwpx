@@ -104,16 +104,13 @@ export function threadMatchesDocument(
   return !thread.documentId && !documentId && threadName === null && activeName === null;
 }
 
-/**
- * 탐색기 "현재" 표시. ID가 맞는 그룹이 있으면 ID가 이긴다. 다시 열기로 새 ID가
- * 생겼다면(살아 있는 핸들 없는 Electron 네이티브 경로) 유일한 파일명으로 물러선다.
- */
 export function explorerGroupIsCurrent(
   group: Pick<ChatThread, 'documentId' | 'docKey'>,
   documentId: string | null,
   docKey: string | null,
   groups: readonly Pick<ChatThread, 'documentId' | 'docKey'>[],
 ): boolean {
+  if (group.documentId) return Boolean(documentId && group.documentId === documentId);
   if (threadMatchesDocument(group, documentId, docKey)) return true;
   if (groups.some((item) => threadMatchesDocument(item, documentId, docKey))) return false;
   const groupName = normalizedDocumentName(group.docKey);

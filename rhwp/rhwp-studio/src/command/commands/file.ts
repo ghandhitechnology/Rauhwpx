@@ -49,18 +49,25 @@ import { PdfPrintDialog } from '@/ui/pdf-print-dialog';
 import { userSettings } from '@/core/user-settings';
 import { showToast } from '@/ui/toast';
 import { clearRecentDocs, listRecentDocs, removeRecentDoc } from '@/recent/recent-store';
-import { openRecentEntry, type OpenRecentDeps } from '@/recent/recent-open';
-import { restoreNativeDocument } from '@/desktop-integration';
+import { documentSourceDigest } from '@/recent/document-preflight';
+import { claimForRecentDoc } from '@/project-file/claim';
+import { openProjectFile, type ProjectFileDeps } from '@/project-file/open';
+import type { ProjectFileClaim } from '@/project-file/identity';
+import {
+  claimNativeProbe,
+  isDesktopApp,
+  pickDesktopNativeProjectFile,
+  readNativeProbe,
+  restoreNativeDocument,
+  searchNearbyNativeDocuments,
+  verifyNativePick,
+} from '@/desktop-integration';
 import {
   moveToLibraryDocument,
   type LibraryDocumentTarget,
   type LibraryMoveResult,
 } from '@/library/move-to-document';
 
-/**
- * 파일 열기 대화상자(File System Access picker, 미지원 시 숨김 input 폴백)를 열어
- * 문서를 로드한다. `file:open` 커맨드와 "최근 문서" 메타-only 항목 재열기가 공유한다.
- */
 async function openFileViaPicker(services: CommandServices): Promise<void> {
   let handle: FileSystemFileHandleLike | null | undefined;
   try {
@@ -381,21 +388,56 @@ export async function confirmSaveBeforeReplacingDocument(
   return result === 'saved';
 }
 
-function openRecentDeps(
+function projectFileDeps(
   services: CommandServices,
+  claim: ProjectFileClaim,
   { skipUnsavedGuard = false } = {},
-): OpenRecentDeps {
+): ProjectFileDeps {
   return {
     ensurePermission: ensureReadPermission,
-    readFile: readFileFromHandle,
-    remove: removeRecentDoc,
+    readHandle: readFileFromHandle,
+    digestOf: documentSourceDigest,
+    loadBound: async (bytes, name, handle, documentId) => {
+      services.eventBus.emit('open-document-bytes', {
+        bytes,
+        fileName: name,
+        fileHandle: handle,
+        ...(skipUnsavedGuard ? { skipUnsavedGuard: true } : {}),
+        grant: { kind: 'verified', documentId },
+      });
+    },
+    pickForProject: async (displayName) => {
+      const desktop = await pickDesktopNativeProjectFile({
+        suggestedName: displayName,
+        documentId: claim.documentId,
+      });
+      if (desktop !== undefined) return desktop;
+      const windowLike = window as FileSystemWindowLike;
+      if (!canUseOpenFilePicker(windowLike)) {
+        showToast({
+          message: '이 브라우저에서는 파일을 선택하는 대화상자를 열 수 없습니다.',
+          durationMs: 4000,
+        });
+        return null;
+      }
+      return pickOpenFileHandle(windowLike);
+    },
+    forgetRecent: removeRecentDoc,
     toast: (message, durationMs) => showToast({ message, durationMs }),
-    emitOpen: (payload) => services.eventBus.emit('open-document-bytes', {
-      ...payload,
-      ...(skipUnsavedGuard ? { skipUnsavedGuard: true } : {}),
+    reopenRemembered: (documentId) => restoreNativeDocument(documentId),
+    searchNearby: async (query) => searchNearbyNativeDocuments(query.documentId, {
+      basenameHint: query.basenameHint,
     }),
-    requestReopen: () => { void openFileViaPicker(services); },
-    restoreNativeDocument: (documentId) => restoreNativeDocument(documentId),
+    readProbe: async (probeId) => {
+      const read = await readNativeProbe(probeId);
+      if (!read) throw new Error('Native probe expired');
+      return read;
+    },
+    claimProbe: (probeId) => claimNativeProbe(probeId),
+    locationOf: async (handle, documentId) => {
+      if (!isDesktopApp()) return 'unknown';
+      return await verifyNativePick(documentId, handle) ? 'remembered' : 'not-remembered';
+    },
   };
 }
 
@@ -412,7 +454,9 @@ export async function runLibraryMove(
     }),
     saveCurrent: () => saveCurrentDocument(services),
     listRecent: listRecentDocs,
-    openRecent: (entry) => openRecentEntry(entry, openRecentDeps(services, { skipUnsavedGuard: true })),
+    openProjectFile: (claim) => openProjectFile(claim, projectFileDeps(services, claim, {
+      skipUnsavedGuard: true,
+    })),
     openViaPicker: () => openFileViaPicker(services),
     toast: (message) => showToast({ message, durationMs: 3500 }),
   });
@@ -679,10 +723,6 @@ export const fileCommands: CommandDef[] = [
     execute: openFileViaPicker,
   },
   {
-    // 최근 문서 재열기 — 저장된 핸들 권한 재확인 후 라이브 파일 로드. params.id로 레코드 지정.
-    // #2285 범위: 바이트 스냅샷 폴백 없음. 권한 거부는 항목 유지(다음에 다시 시도 가능),
-    // 파일 이동/삭제(getFile 실패)는 항목 제거 + 안내. 결과 규칙은
-    // recent-open.ts(openRecentEntry) — 테스트 가능한 순수 로직으로 분리.
     id: 'file:open-recent',
     label: '최근 문서 열기',
     async execute(services, params) {
@@ -695,7 +735,8 @@ export const fileCommands: CommandDef[] = [
         return;
       }
 
-      await openRecentEntry(entry, openRecentDeps(services));
+      const claim = claimForRecentDoc(entry);
+      await openProjectFile(claim, projectFileDeps(services, claim));
     },
   },
   {

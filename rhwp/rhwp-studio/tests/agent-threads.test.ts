@@ -165,29 +165,29 @@ test('past chats match their active document by stable ID with a legacy filename
   ), false);
 });
 
-test('explorer current badge follows a unique filename when reopen mints a new document ID', () => {
+test('explorer current badge does not follow a unique filename when the group is identified', () => {
   const groups = [
     { documentId: 'doc-a', docKey: 'report.hwpx' },
     { documentId: 'doc-b', docKey: 'other.hwpx' },
   ];
   assert.equal(
     explorerGroupIsCurrent(groups[0]!, 'fresh-id', 'report.hwpx', groups),
-    true,
+    false,
   );
   assert.equal(
     explorerGroupIsCurrent(groups[1]!, 'fresh-id', 'report.hwpx', groups),
     false,
   );
-  const sameName = [
-    { documentId: 'doc-a', docKey: 'report.hwpx' },
-    { documentId: 'doc-b', docKey: 'report.hwpx' },
-  ];
-  assert.equal(
-    explorerGroupIsCurrent(sameName[0]!, 'fresh-id', 'report.hwpx', sameName),
-    false,
-  );
   assert.equal(
     explorerGroupIsCurrent(groups[0]!, 'doc-a', 'renamed.hwpx', groups),
+    true,
+  );
+});
+
+test('legacy explorer groups still use the unique filename bridge', () => {
+  const legacy = [{ documentId: null, docKey: 'report.hwpx' }];
+  assert.equal(
+    explorerGroupIsCurrent(legacy[0]!, 'fresh-id', 'report.hwpx', legacy),
     true,
   );
 });

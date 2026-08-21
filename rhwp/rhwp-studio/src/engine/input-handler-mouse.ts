@@ -7,6 +7,7 @@ import { MoveLineEndpointCommand } from './command';
 import { computeLineEndpointRecord } from './object-drag-record';
 import { editableTargetFromPosition } from './edit-target';
 import { findWordSelectionRange } from './word-selection';
+import { CursorState } from './cursor';
 
 function readCurrentParagraphText(self: any) {
   if (self.cursor.isInHeaderFooter()) {
@@ -1325,10 +1326,14 @@ export function onClick(this: any, e: MouseEvent): void {
     }
 
     // 일반 클릭: 커서 배치 + 드래그 시작
+    const beforePos = this.cursor.getPosition();
     this.cursor.clearSelection();
     this.cursor.moveToHit(hit);
     this.cursor.resetPreferredX();
     this.prepareClickHerePointerEntry?.(pageX);
+    if (CursorState.comparePositions(beforePos, this.cursor.getPosition()) !== 0) {
+      this.clearPendingCharFormat?.();
+    }
     this.cursor.setAnchor(); // 드래그 시작점(anchor) 설정
     this.active = true;
     if (

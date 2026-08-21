@@ -392,7 +392,10 @@ test('native bookmarks persist independently of live handles', async () => {
     handleId: 'bookmarked',
     name: 'report.hwp',
   });
-  assert.deepEqual(registry.dumpBookmarks(), [['document-a', '/canonical/report.hwp']]);
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'document-a',
+    { path: '/canonical/report.hwp', digest: null },
+  ]]);
 });
 
 test('native package validation accepts real fixtures and rejects truncation or format mismatch', async () => {
@@ -512,4 +515,213 @@ test('concurrent native saves are serialized in invocation order', async () => {
   assert.deepEqual(started, [1, 2]);
   finish.shift()?.();
   await second;
+});
+
+test('legacy bookmark pairs still reopen after the digest-aware dump format', async () => {
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async () => '/canonical/report.hwp',
+    createId: () => 'bookmarked',
+  });
+  registry.loadBookmarks([['document-a', '/canonical/report.hwp']]);
+  const reopened = await registry.reopenDocument('session-b', 'document-a');
+  assert.equal(reopened?.ok, true);
+  if (!reopened?.ok) return;
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'document-a',
+    { path: '/canonical/report.hwp', digest: null },
+  ]]);
+});
+
+test('moved file in the same directory is offered as a nearby probe without exposing the path', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const original = join(directory, 'report.hwp');
+    const moved = join(directory, 'renamed.hwp');
+    const bytes = new Uint8Array([7, 8, 9, 10]);
+    await writeFs(original, bytes);
+    const registry = new NativeFileHandleRegistry();
+    const created = await registry.create('session-a', original);
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId);
+    registry.releaseHandle('session-a', created.descriptor.handleId);
+    await rmFs(original);
+    await writeFs(moved, bytes);
+
+    const probes = await registry.searchNearby('session-a', 'document-a', { basenameHint: 'report.hwp' });
+    assert.equal(probes.length, 1);
+    assert.equal(probes[0]?.fileName, 'renamed.hwp');
+    assert.equal('path' in (probes[0] ?? {}), false);
+    assert.equal(JSON.stringify(probes).includes(directory), false);
+    assert.deepEqual(await registry.readProbe('session-a', probes[0]!.probeId), {
+      name: 'renamed.hwp',
+      bytes,
+    });
+    const claimed = await registry.claimProbe('session-a', probes[0]!.probeId);
+    assert.equal(claimed?.ok, true);
+    if (!claimed?.ok) return;
+    assert.equal('path' in claimed.descriptor, false);
+    assert.equal(JSON.stringify(claimed.descriptor).includes(directory), false);
+    assert.equal(claimed.descriptor.name, 'renamed.hwp');
+  });
+});
+
+test('nearby probes include same-basename files without claiming them', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const original = join(directory, 'original.hwp');
+    const decoy = join(directory, 'report.hwp');
+    const originalBytes = new Uint8Array([1, 2, 3]);
+    const decoyBytes = new Uint8Array([4, 5, 6]);
+    await writeFs(original, originalBytes);
+    const registry = new NativeFileHandleRegistry();
+    const created = await registry.create('session-a', original);
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId);
+    registry.releaseHandle('session-a', created.descriptor.handleId);
+    await rmFs(original);
+    await writeFs(decoy, decoyBytes);
+
+    const probes = await registry.searchNearby('session-a', 'document-a', { basenameHint: 'report.hwp' });
+    assert.equal(probes.length, 1);
+    assert.equal(probes[0]?.fileName, 'report.hwp');
+    assert.equal('path' in (probes[0] ?? {}), false);
+    assert.equal(JSON.stringify(probes).includes(directory), false);
+    const read = await registry.readProbe('session-a', probes[0]!.probeId);
+    assert.deepEqual(read.bytes, decoyBytes);
+  });
+});
+
+test('verifyPick accepts the bookmarked path and rejects a different file', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const original = join(directory, 'report.hwp');
+    const other = join(directory, 'other.hwp');
+    const bytes = new Uint8Array([1, 2, 3]);
+    await writeFs(original, bytes);
+    await writeFs(other, bytes);
+    const registry = new NativeFileHandleRegistry();
+    const created = await registry.create('session-a', original);
+    const extra = await registry.create('session-a', other);
+    assert.equal(created.ok && extra.ok, true);
+    if (!created.ok || !extra.ok) return;
+    registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId);
+    assert.equal(
+      await registry.verifyPick('session-a', 'document-a', created.descriptor.handleId),
+      true,
+    );
+    assert.equal(
+      await registry.verifyPick('session-a', 'document-a', extra.descriptor.handleId),
+      false,
+    );
+  });
+});
+
+test('nearby probes skip files owned by another session', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const owned = join(directory, 'secret.hwp');
+    const searchable = join(directory, 'report.hwp');
+    await writeFs(owned, new Uint8Array([1, 2, 3]));
+    await writeFs(searchable, new Uint8Array([4, 5, 6]));
+    const registry = new NativeFileHandleRegistry();
+    const owner = await registry.create('session-a', owned);
+    const bookmark = await registry.create('session-b', searchable);
+    assert.equal(owner.ok && bookmark.ok, true);
+    if (!owner.ok || !bookmark.ok) return;
+    registry.rememberDocument('document-b', 'session-b', bookmark.descriptor.handleId);
+    registry.releaseHandle('session-b', bookmark.descriptor.handleId);
+
+    const probes = await registry.searchNearby('session-b', 'document-b', {
+      basenameHint: 'report.hwp',
+    });
+    assert.deepEqual(probes.map((probe) => probe.fileName), ['report.hwp']);
+    const read = await registry.readProbe('session-b', probes[0]!.probeId);
+    assert.deepEqual(read.bytes, new Uint8Array([4, 5, 6]));
+  });
+});
+
+test('a later nearby search expires unclaimed probes from the same session', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const filePath = join(directory, 'report.hwp');
+    await writeFs(filePath, new Uint8Array([1]));
+    const registry = new NativeFileHandleRegistry();
+    const created = await registry.create('session-a', filePath);
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId);
+    registry.releaseHandle('session-a', created.descriptor.handleId);
+
+    const first = await registry.searchNearby('session-a', 'document-a', {
+      basenameHint: 'report.hwp',
+    });
+    assert.equal(first.length, 1);
+    const second = await registry.searchNearby('session-a', 'document-a', {
+      basenameHint: 'report.hwp',
+    });
+    assert.equal(second.length, 1);
+    await assert.rejects(
+      registry.readProbe('session-a', first[0]!.probeId),
+      /does not belong/,
+    );
+    assert.deepEqual(await registry.readProbe('session-a', second[0]!.probeId), {
+      name: 'report.hwp',
+      bytes: new Uint8Array([1]),
+    });
+  });
+});
+
+const VALID_DIGEST = `blake3:${'ab'.repeat(32)}`;
+
+test('bookmark digest must be a 64-character blake3 hex string', async () => {
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async () => '/canonical/report.hwp',
+    createId: () => 'handle',
+  });
+  const created = await registry.create('session-a', '/canonical/report.hwp');
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId, 'blake3:not-hex');
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'document-a',
+    { path: '/canonical/report.hwp', digest: null },
+  ]]);
+
+  registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId, VALID_DIGEST);
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'document-a',
+    { path: '/canonical/report.hwp', digest: VALID_DIGEST },
+  ]]);
+
+  registry.loadBookmarks([['document-a', { path: '/canonical/report.hwp', digest: 'blake3:nope' }]]);
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'document-a',
+    { path: '/canonical/report.hwp', digest: null },
+  ]]);
+
+  registry.loadBookmarks([['document-a', { path: '/canonical/report.hwp', digest: VALID_DIGEST }]]);
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'document-a',
+    { path: '/canonical/report.hwp', digest: VALID_DIGEST },
+  ]]);
+});
+
+test('remembering a replaced handle without a digest does not revert the bookmark', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const original = join(directory, 'old.hwp');
+    const savedAs = join(directory, 'new.hwp');
+    await writeFs(original, new Uint8Array([1]));
+    await writeFs(savedAs, new Uint8Array([2]));
+    const registry = new NativeFileHandleRegistry();
+    const previous = await registry.create('session-a', original);
+    const next = await registry.create('session-a', savedAs);
+    assert.equal(previous.ok && next.ok, true);
+    if (!previous.ok || !next.ok) return;
+
+    registry.rememberDocument('document-a', 'session-a', previous.descriptor.handleId, VALID_DIGEST);
+    registry.rememberDocument('document-a', 'session-a', next.descriptor.handleId, VALID_DIGEST);
+    registry.rememberDocument('document-a', 'session-a', previous.descriptor.handleId);
+
+    const bookmark = registry.dumpBookmarks();
+    assert.equal(bookmark[0]?.[1].path.endsWith('new.hwp'), true);
+    assert.equal(bookmark[0]?.[1].digest, VALID_DIGEST);
+  });
 });

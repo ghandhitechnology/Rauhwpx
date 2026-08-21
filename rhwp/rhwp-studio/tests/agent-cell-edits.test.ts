@@ -96,6 +96,19 @@ function makeCellWasm() {
       calls.push('applyCharFormatInCell');
       return okJson();
     },
+    // 중첩 표 탐침 — nestedTableParas 에 등록한 (cellIdx, cellParaIdx) 만 표를 품는다.
+    // 경로 키 이름은 Rust parse_cell_path 와 같은 controlIndex/cellIndex/cellParaIndex.
+    nestedTableParas: new Set<string>(),
+    getTableDimensionsByPath(this: any, _s: number, para: number, pathJson: string) {
+      const path = JSON.parse(pathJson) as Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }>;
+      const host = path[path.length - 2];
+      const leaf = path[path.length - 1];
+      if (para !== 1 || !host || leaf.controlIndex !== 0
+        || !this.nestedTableParas.has(`${host.cellIndex}:${host.cellParaIndex}`)) {
+        throw new Error('경로에 표가 없습니다');
+      }
+      return { rowCount: 1, colCount: 1, cellCount: 1 };
+    },
     getCellCharPropertiesAt: () => ({}),
     getCellParaPropertiesAt: () => ({ pageBreakBefore: false }),
     applyParaFormatInCell: () => okJson(),
@@ -146,6 +159,7 @@ function makeExecutor(cursor?: Record<string, unknown>) {
       pendingCalls.push({ method: 'replaceText', args: [range, text, agent] });
       return {
         changeSetId: 'cs-1',
+        deletedText: '',
         insertedRange: {
           sectionIdx: range.sectionIdx, cell: range.cell,
           startParaIdx: range.startParaIdx, startCharOffset: range.startCharOffset,
@@ -174,7 +188,7 @@ function makeExecutor(cursor?: Record<string, unknown>) {
     revision,
     pending: pending as never,
   });
-  return { executor, pending, pendingCalls, body, cells, calls };
+  return { executor, pending, pendingCalls, body, cells, calls, wasm };
 }
 
 async function expectToolError(p: Promise<unknown>, code: string): Promise<void> {
@@ -285,6 +299,78 @@ test('replace_range: 원자적 replaceText op 에 cell 이 그대로 전달된�
   assert.equal(pendingCalls[0].method, 'replaceText');
   const range = pendingCalls[0].args[0] as { cell?: CellAddr };
   assert.deepEqual(range.cell, CELL_FOO);
+});
+
+// ─── 중첩 표 보호 (delete_range / replace_range) ─────────────
+
+test('delete_range: 셀 범위가 중첩 표를 품은 사이 문단을 지우면 NESTED_TABLE_IN_RANGE', async () => {
+  const { executor, pendingCalls, cells, wasm } = makeExecutor();
+  cells[3].push('qux');                     // ['bar','baz','qux']
+  wasm.nestedTableParas.add('3:1');         // 사이 문단 1 이 중첩 표를 품는다
+  await expectToolError(
+    executor.execute('delete_range', {
+      expectedRevision: 1, sectionIdx: 0, cell: CELL_BARBAZ,
+      startParaIdx: 0, startCharOffset: 0, endParaIdx: 2, endCharOffset: 3,
+    }, 'claude'),
+    'NESTED_TABLE_IN_RANGE',
+  );
+  assert.equal(pendingCalls.length, 0, '가드에 걸리면 pending 에 도달하지 않아야 한다');
+});
+
+test('replace_range: 중첩 표를 품은 사이 문단을 지나면 NESTED_TABLE_IN_RANGE', async () => {
+  const { executor, pendingCalls, cells, wasm } = makeExecutor();
+  cells[3].push('qux');
+  wasm.nestedTableParas.add('3:1');
+  await expectToolError(
+    executor.execute('replace_range', {
+      expectedRevision: 1, sectionIdx: 0, cell: CELL_BARBAZ,
+      startParaIdx: 0, startCharOffset: 0, endParaIdx: 2, endCharOffset: 3, text: 'new',
+    }, 'claude'),
+    'NESTED_TABLE_IN_RANGE',
+  );
+  assert.equal(pendingCalls.length, 0);
+});
+
+test('delete_range: 중첩 표가 경계 문단에만 있으면 통과한다 (병합되어 살아남는다)', async () => {
+  const { executor, pendingCalls, cells, wasm } = makeExecutor();
+  cells[3].push('qux');
+  wasm.nestedTableParas.add('3:0');
+  wasm.nestedTableParas.add('3:2');
+  await executor.execute('delete_range', {
+    expectedRevision: 1, sectionIdx: 0, cell: CELL_BARBAZ,
+    startParaIdx: 0, startCharOffset: 1, endParaIdx: 2, endCharOffset: 2,
+  }, 'claude');
+  assert.equal(pendingCalls.length, 1);
+});
+
+test('delete_range: 한 문단 안의 셀 삭제는 중첩 표 탐침과 무관하게 동작한다', async () => {
+  const { executor, pendingCalls, wasm } = makeExecutor();
+  wasm.nestedTableParas.add('2:0');
+  const r = (await executor.execute('delete_range', {
+    expectedRevision: 1, sectionIdx: 0, cell: CELL_FOO,
+    startParaIdx: 0, startCharOffset: 0, endParaIdx: 0, endCharOffset: 3,
+  }, 'claude')) as Record<string, unknown>;
+  assert.equal(pendingCalls.length, 1);
+  assert.equal(r['deletedTables'], undefined);
+});
+
+test('delete_range: 본문 다문단 범위는 삼킨 표 수를 deletedTables 로 알린다', async () => {
+  const { executor } = makeExecutor();
+  const r = (await executor.execute('delete_range', {
+    expectedRevision: 1, sectionIdx: 0,
+    startParaIdx: 0, startCharOffset: 0, endParaIdx: 2, endCharOffset: 0,
+  }, 'claude')) as { deletedTables?: number; note: string };
+  assert.equal(r.deletedTables, 1); // 표는 본문 문단 1 에 있다
+  assert.match(r.note, /1 table sat between the range endpoints/);
+});
+
+test('delete_range: 표를 지나지 않는 본문 범위에는 deletedTables 가 없다', async () => {
+  const { executor } = makeExecutor();
+  const r = (await executor.execute('delete_range', {
+    expectedRevision: 1, sectionIdx: 0,
+    startParaIdx: 0, startCharOffset: 0, endParaIdx: 1, endCharOffset: 0,
+  }, 'claude')) as Record<string, unknown>;
+  assert.equal(r['deletedTables'], undefined);
 });
 
 test('cell 검증: 표가 없는 문단/범위 밖 cellIdx/범위 밖 오프셋 → INVALID_ARGS', async () => {

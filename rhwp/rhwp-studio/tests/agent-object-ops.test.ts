@@ -454,14 +454,69 @@ test('edit_table delete_row 는 mark-only + 같은 표 후속 편집은 PENDING_
   await expectErr(call('edit_table', {
     sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'insert_row', rowIdx: 0,
   }), 'PENDING_DESTRUCTIVE_OP');
-  await expectErr(call('insert_text', {
+  // 삭제될 행(1) 이후의 셀은 승인 시 cellIdx 가 당겨지므로 여전히 막힌다
+  const err = await expectErr(call('insert_text', {
     sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'x',
-    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 },
+    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 2 },
   }), 'PENDING_DESTRUCTIVE_OP');
+  assert.match(err.message, /delete_row at row 1/);
   calls.length = 0;
   pending.approve(del.changeSetId);
   assert.equal(tables[0].rows, 2); // approve 시 실행 (snapshot restore 뒤의 현재 표)
   assert.ok(calls.some((x) => x.m === 'deleteTableRow'));
+});
+
+test('PENDING_DESTRUCTIVE_OP 가드: 뒤쪽 행 delete_row 만 걸려 있으면 앞 행 셀은 편집된다', async () => {
+  const { call, pending, tables } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a'], ['b'], ['c']],
+  })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  await call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'delete_row', rowIdx: 1,
+  });
+  // 행 0 은 삭제 대상 행보다 앞이라 flat cellIdx 가 유지된다 → 통과
+  await call('insert_text', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X',
+    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 },
+  });
+  assert.equal(tables[0].cells[0][0], 'Xa');
+});
+
+test('PENDING_DESTRUCTIVE_OP 가드: 열 단위 op 은 앞 행 셀도 막는다', async () => {
+  const { call, pending, tables } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
+  })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  await call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx, op: 'delete_col', colIdx: 1,
+  });
+  const err = await expectErr(call('insert_text', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X',
+    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 },
+  }), 'PENDING_DESTRUCTIVE_OP');
+  assert.match(err.message, /delete_col/);
+});
+
+test('PENDING_DESTRUCTIVE_OP 가드: merge_cells 는 모든 셀을 막는다', async () => {
+  const { call, pending, tables } = makeEnv();
+  const c = (await call('create_table', {
+    sectionIdx: 0, paraIdx: 2, charOffset: 0, cells: [['a', 'b'], ['c', 'd']],
+  })) as { changeSetId: string; table: { paraIdx: number; controlIdx: number } };
+  pending.approve(c.changeSetId);
+  const t = tables[0];
+  await call('edit_table', {
+    sectionIdx: 0, paraIdx: t.paraIdx, controlIdx: t.controlIdx,
+    op: 'merge_cells', startRow: 1, startCol: 0, endRow: 1, endCol: 1,
+  });
+  const err = await expectErr(call('insert_text', {
+    sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X',
+    cell: { paraIdx: t.paraIdx, controlIdx: t.controlIdx, cellIdx: 0 },
+  }), 'PENDING_DESTRUCTIVE_OP');
+  assert.match(err.message, /merge_cells/);
 });
 
 test('delete_table 는 mark-only + 같은 표 후속 편집은 PENDING_DESTRUCTIVE_OP', async () => {

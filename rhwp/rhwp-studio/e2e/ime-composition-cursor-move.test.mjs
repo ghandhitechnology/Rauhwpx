@@ -71,6 +71,11 @@ await runTest('IME 조합 중 커서 이동', async ({ page }) => {
   await clickEditArea(page);
 
   await compose(client, ['ㄱ', '가']);
+  const midCompose = await getParaText(page, 0, 0, 100);
+  assert(
+    midCompose.includes('가'),
+    `조합 중 문단 텍스트에 네이티브 preedit이 있다 (실제 ${JSON.stringify(midCompose)})`,
+  );
   // 조합이 열린 상태에서 편집 영역을 다시 클릭 (커서 이동)
   await clickEditArea(page);
   await new Promise((r) => setTimeout(r, 300));
@@ -136,4 +141,50 @@ await runTest('IME 조합 중 커서 이동', async ({ page }) => {
   await dispatchImeSession(page, ['서'], '書');
   const repeated = await getParaText(page, 0, 0, 100);
   assert(repeated === '가가書', `같은 글자와 후보 확정이 씹히거나 중복되지 않는다 (실제 ${JSON.stringify(repeated)})`);
+
+  // ── 6) Chrome 실제 IME 처럼 커밋 텍스트가 textarea 에 누적되는 흐름
+  //
+  // 실제 Chrome 한글 IME 는 커밋한 음절을 textarea value 에 남긴 채 다음 음절의
+  // 조합을 이어 붙인다. 핸들러가 커밋 시점에 value 를 비우면 진행 중인 다음
+  // 조합이 파기되어 글자가 씹히므로, 핸들러는 value 를 건드리지 않고 consumed
+  // prefix 만 전진시켜야 한다. 여기서는 그 누적 value 의미론으로 세 음절을
+  // 연속 커밋하고, 문서와 value 양쪽이 온전한지 확인한다.
+  await createNewDocument(page);
+  await clickEditArea(page);
+  const chromeFlow = await page.evaluate(() => {
+    const textarea = window.__inputHandler.textarea;
+    const dispatchSyllable = (prefix, updates, finalText) => {
+      textarea.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }));
+      for (const u of updates) {
+        textarea.value = prefix + u;
+        textarea.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: u }));
+        textarea.dispatchEvent(new InputEvent('input', {
+          bubbles: true, data: u, inputType: 'insertCompositionText', isComposing: true,
+        }));
+      }
+      // Chrome: 커밋 input(insertCompositionText, isComposing:true) → compositionend 순서,
+      // 이후 trailing input 없음. 커밋 텍스트는 value 에 그대로 남는다.
+      textarea.value = prefix + finalText;
+      textarea.dispatchEvent(new InputEvent('input', {
+        bubbles: true, data: finalText, inputType: 'insertCompositionText', isComposing: true,
+      }));
+      textarea.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: finalText }));
+      return prefix + finalText;
+    };
+    let prefix = '';
+    prefix = dispatchSyllable(prefix, ['ㅎ', '하', '한'], '한');
+    prefix = dispatchSyllable(prefix, ['ㄱ', '그', '글'], '글');
+    prefix = dispatchSyllable(prefix, ['ㅁ', '마', '맛'], '맛');
+    return { value: textarea.value };
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  const accumulated = await getParaText(page, 0, 0, 100);
+  assert(
+    accumulated === '한글맛',
+    `누적 value 흐름에서 세 음절이 모두 정확히 한 번씩 커밋된다 (실제 ${JSON.stringify(accumulated)})`,
+  );
+  assert(
+    chromeFlow.value === '한글맛',
+    `커밋 경로가 textarea value 를 파기하지 않는다 (실제 ${JSON.stringify(chromeFlow.value)})`,
+  );
 });
