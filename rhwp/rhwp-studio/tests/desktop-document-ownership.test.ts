@@ -637,3 +637,33 @@ test('nearby probes skip files owned by another session', async () => {
     assert.deepEqual(read.bytes, new Uint8Array([4, 5, 6]));
   });
 });
+
+test('a later nearby search expires unclaimed probes from the same session', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const filePath = join(directory, 'report.hwp');
+    await writeFs(filePath, new Uint8Array([1]));
+    const registry = new NativeFileHandleRegistry();
+    const created = await registry.create('session-a', filePath);
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    registry.rememberDocument('document-a', 'session-a', created.descriptor.handleId);
+    registry.releaseHandle('session-a', created.descriptor.handleId);
+
+    const first = await registry.searchNearby('session-a', 'document-a', {
+      basenameHint: 'report.hwp',
+    });
+    assert.equal(first.length, 1);
+    const second = await registry.searchNearby('session-a', 'document-a', {
+      basenameHint: 'report.hwp',
+    });
+    assert.equal(second.length, 1);
+    await assert.rejects(
+      registry.readProbe('session-a', first[0]!.probeId),
+      /does not belong/,
+    );
+    assert.deepEqual(await registry.readProbe('session-a', second[0]!.probeId), {
+      name: 'report.hwp',
+      bytes: new Uint8Array([1]),
+    });
+  });
+});
