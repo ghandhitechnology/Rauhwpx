@@ -16,7 +16,8 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
 
   assert.equal(parsed.name, 'copy-layout');
   assert.match(parsed.description, /HWP or HWPX/);
-  assert.match(parsed.description, /content-free template/);
+  assert.match(parsed.description, /content-free/);
+  assert.match(parsed.description, /guidance-preserving template/);
   assert.match(markdown, /scripts\/copy_layout\.py/);
   assert.match(markdown, /<source stem> - Layout\.hwp/);
   assert.match(markdown, /native HWP→HWPX→HWP pipeline/);
@@ -30,6 +31,9 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(markdown, /do not ask the user to attach or identify the file again/);
   assert.match(markdown, /intermediate page-count mismatch is diagnostic/);
   assert.match(markdown, /not evidence that the wrong document is open/);
+  assert.match(markdown, /--preserve-guidance/);
+  assert.match(markdown, /competition brief, assignment sheet/);
+  assert.match(markdown, /records every retained paragraph in `preserved_guidance`/);
 });
 
 test('copy-layout helper retains its privacy and geometry verification gates', () => {
@@ -47,6 +51,8 @@ test('copy-layout helper retains its privacy and geometry verification gates', (
   assert.match(script, /render-diff/);
   assert.match(script, /fallback_reason/);
   assert.match(script, /--rhwp-bin/);
+  assert.match(script, /--preserve-guidance/);
+  assert.match(script, /visible text differs from approved guidance/);
 });
 
 test('copy-layout helper runs without site packages and defers only an intermediate page-count mismatch', (t) => {
@@ -59,6 +65,6 @@ test('copy-layout helper runs without site packages and defers only an intermedi
   assert.equal(availability.status, 0, availability.stderr || availability.stdout);
   const result = spawnSync(python, ['-S', fileURLToPath(helperTestUrl)], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stderr, /Ran 4 tests/);
+  assert.match(result.stderr, /Ran 7 tests/);
   assert.match(result.stderr, /OK/);
 });

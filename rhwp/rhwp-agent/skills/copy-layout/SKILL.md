@@ -1,9 +1,9 @@
 ---
 name: copy-layout
-description: Copy the visual layout and design of the current or specified HWP or HWPX document into a reusable, content-free template. Use when the user asks to copy, extract, preserve, or reuse a Hangul document's layout without its content.
+description: Copy the visual layout and design of the current or specified HWP or HWPX document into a reusable, content-free or guidance-preserving template. Use when the user asks to copy, extract, preserve, or reuse a Hangul document's layout without completed content.
 ---
 
-Create a new `.hwp` or `.hwpx` that matches the source's page design as closely as possible while exposing no source content.
+Create a new `.hwp` or `.hwpx` that matches the source's page design as closely as possible while removing completed content. Competition and assignment forms may retain clearly structural headings and instructions under the narrow policy below.
 
 ## Resolve the source
 
@@ -23,6 +23,8 @@ Preserve all structural and visual properties that can affect the empty template
 
 Remove user-authored content: visible text, field values, comments and annotations, tracked-change payloads, equations, charts, and content images or embedded objects. Keep decorative images only when they are clearly part of the page design. When intent is ambiguous, favor privacy and remove the payload while preserving a same-size empty frame.
 
+For a document that is clearly a competition brief, assignment sheet, submission form, or answer template, preserve headings that label reusable structure and sentences that directly instruct the participant or student. Use the helper's `--preserve-guidance` mode; do not retain names, contact details, completed answers, examples, judging notes, feedback, or prose merely because it appears near a heading. The default remains fully empty for other documents and whenever classification is uncertain.
+
 Do not rebuild the document from screenshots or use office-suite or third-party format conversion. The helper edits HWPX packages directly; for HWP it uses Rauhwpx's native HWP→HWPX→HWP pipeline and verifies the round trip.
 
 ## Create the copy
@@ -33,9 +35,15 @@ Read `scripts/copy_layout.py`, then run it from this skill's absolute root:
 python3 scripts/copy_layout.py "/absolute/path/source.hwp"
 ```
 
+For a clearly identified competition or assignment template, run:
+
+```bash
+python3 scripts/copy_layout.py --preserve-guidance "/absolute/path/source.hwp"
+```
+
 The helper uses only the Python 3 standard library. Do not search for or install `lxml`, activate a repository-specific Python environment, or retry through an unrelated interpreter. A missing Python executable is an application packaging failure, not a reason to ask the user to save or identify the document again.
 
-The helper preserves package structure, strips previews, scripts, history, and body payloads, keeps media referenced by master pages or layout definitions, assigns the title, and verifies package and geometry invariants. It first empties HWP body text completely; if that contracts pagination, it retries with width-aware blank spacing that retains flow without retaining source words. An HWP→HWPX intermediate page-count mismatch is diagnostic rather than a deliverable failure: the helper may continue sanitizing it, but the final HWP/HWPX must still match the source page count and all other precision gates. For HWP input or output it locates the Rauhwpx `rhwp` binary from `--rhwp-bin`, `RHWP_BIN`, `PATH`, or this repository's build output. Read its JSON report, especially `text_strategy`, `media_usage`, `removed_body_media`, `conversion.intermediate_export`, and `conversion.native_verification` or `conversion.fallback_reason`.
+The helper preserves package structure, strips previews, scripts, history, and body payloads, keeps media referenced by master pages or layout definitions, assigns the title, and verifies package and geometry invariants. It first empties HWP body text completely; if that contracts pagination, it retries with width-aware blank spacing that retains flow without retaining source words. In `--preserve-guidance` mode it retains only conservative heading and imperative-instruction matches, records every retained paragraph in `preserved_guidance`, and rejects output whose visible text differs from that approved set. Review that list before delivery; if any completed or identifying content appears, discard the output and rerun without the flag. An HWP→HWPX intermediate page-count mismatch is diagnostic rather than a deliverable failure: the helper may continue sanitizing it, but the final HWP/HWPX must still match the source page count and all other precision gates. For HWP input or output it locates the Rauhwpx `rhwp` binary from `--rhwp-bin`, `RHWP_BIN`, `PATH`, or this repository's build output. Read its JSON report, especially `text_strategy`, `preserved_guidance`, `media_usage`, `removed_body_media`, `conversion.intermediate_export`, and `conversion.native_verification` or `conversion.fallback_reason`.
 
 If a removed body image is demonstrably decorative after inspecting the image and placement, rerun to a fresh output path with `--keep-media <manifest-id>` for each such asset. Never retain a chart, photo, scan, signature, or attachment merely to make the result look fuller.
 
@@ -46,7 +54,7 @@ When the source came from `materialize_document_snapshot`, the generated file is
 ## Verify before delivery
 
 1. Confirm the output opens in its reported HWP/HWPX format; for HWP, confirm the native round-trip and render-diff verification passed. Treat an HWPX precision fallback as intentional, not as native HWP success.
-2. Confirm it contains no source text or obvious content payloads.
+2. Confirm it contains no source text or obvious content payloads beyond the reviewed `preserved_guidance` entries; strict mode must contain no visible source text.
 3. Confirm title, destination, page count, section setup, and layout-object geometry.
 4. Render or preview representative pages when available and inspect small details.
 

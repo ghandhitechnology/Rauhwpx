@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a content-free HWP or HWPX while preserving layout-bearing structure."""
+"""Create a reusable HWP or HWPX with layout and optional approved guidance."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import unicodedata
 import zipfile
 import xml.etree.ElementTree as etree
 from collections import Counter
+from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 
@@ -89,6 +90,119 @@ OBJECT_ELEMENTS = {
     "tbl",
     "textart",
 }
+GUIDANCE_HEADINGS = {
+    "개요",
+    "결과",
+    "결론",
+    "기대 효과",
+    "기획 의도",
+    "내용",
+    "답안",
+    "방법",
+    "배경",
+    "역할 분담",
+    "일정",
+    "작품 개요",
+    "작품 설명",
+    "주제",
+    "참고 문헌",
+    "참고 자료",
+    "팀 구성",
+    "목적",
+    "과제 개요",
+    "과제 내용",
+    "과제 목적",
+    "과제 목표",
+    "과제명",
+    "답안 작성",
+    "답안란",
+    "분량",
+    "심사 기준",
+    "안내 사항",
+    "유의 사항",
+    "응모 자격",
+    "응모 부문",
+    "작품 규격",
+    "작성 안내",
+    "작성 요령",
+    "작성란",
+    "제출 기한",
+    "제출 방법",
+    "제출 안내",
+    "제출 요건",
+    "제출물",
+    "제출 형식",
+    "주의 사항",
+    "지시 사항",
+    "참가 자격",
+    "평가 기준",
+    "answer",
+    "assignment",
+    "background",
+    "conclusion",
+    "deadline",
+    "deliverables",
+    "eligibility",
+    "evaluation criteria",
+    "guidelines",
+    "instructions",
+    "judging criteria",
+    "method",
+    "methodology",
+    "notes",
+    "objective",
+    "objectives",
+    "overview",
+    "project description",
+    "purpose",
+    "rationale",
+    "references",
+    "results",
+    "requirements",
+    "response",
+    "rules",
+    "submission format",
+    "submission instructions",
+    "topic",
+}
+GUIDANCE_PREFIXES = {
+    "분량",
+    "심사 기준",
+    "응모 자격",
+    "응모 부문",
+    "작품 규격",
+    "제출 기한",
+    "제출 방법",
+    "제출 요건",
+    "제출 형식",
+    "참가 자격",
+    "평가 기준",
+    "deadline",
+    "deliverables",
+    "eligibility",
+    "evaluation criteria",
+    "judging criteria",
+    "requirements",
+    "submission format",
+}
+KOREAN_INSTRUCTION_RE = re.compile(
+    r"(?:작성|기재|제출|첨부|선택|표시|설명|기술|서술|응답|답변|준수|포함|제외|확인)"
+    r".{0,100}(?:하세요|하십시오|하시오|바랍니다|해야\s*합니다|하여야\s*합니다|할\s*것|해\s*주세요)"
+    r"|(?:고르시오|쓰시오|답하시오|설명하시오|기술하시오|서술하시오)"
+)
+ENGLISH_INSTRUCTION_RE = re.compile(
+    r"^(?:please\s+)?(?:submit|include|attach|select|choose|write|describe|explain|answer|provide|follow)\b"
+    r"|^(?:do\s+not|don't)\b|\b(?:must|required\s+to|should)\b",
+    re.IGNORECASE,
+)
+NUMBERED_STRUCTURE_HEADING_RE = re.compile(
+    r"^(?:문제|문항|과제|question|task)\s*\d+\s*[.)]?\s*$",
+    re.IGNORECASE,
+)
+GUIDANCE_IDENTIFIER_RE = re.compile(
+    r"https?://|www\.\S+|\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|\b0\d{1,2}-\d{3,4}-\d{4}\b",
+    re.IGNORECASE,
+)
 
 
 def local_name(value: str) -> str:
@@ -105,6 +219,40 @@ def blank_text(value: str | None) -> str | None:
         if unicodedata.east_asian_width(character) in {"W", "F"}
         else " "
         for character in value
+    )
+
+
+def normalize_visible_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def guidance_heading_candidate(value: str) -> str:
+    candidate = re.sub(
+        r"^\s*(?:(?:\d+|[A-Za-z]|[가-힣])\s*[.)]|[①-⑳])\s*",
+        "",
+        value,
+    )
+    return candidate.strip(" \t\r\n:：-–—_·.…[]()<>〈〉《》【】")
+
+
+def is_guidance_paragraph(value: str) -> bool:
+    """Recognize only conservative template headings and imperative guidance."""
+    normalized = normalize_visible_text(value)
+    if not normalized or len(normalized) > 600:
+        return False
+    if GUIDANCE_IDENTIFIER_RE.search(normalized):
+        return False
+    candidate = guidance_heading_candidate(normalized).casefold()
+    if candidate in GUIDANCE_HEADINGS:
+        return True
+    if NUMBERED_STRUCTURE_HEADING_RE.fullmatch(candidate):
+        return True
+    for prefix in GUIDANCE_PREFIXES:
+        if candidate.startswith(f"{prefix}: ") or candidate.startswith(f"{prefix}："):
+            return True
+    return bool(
+        KOREAN_INSTRUCTION_RE.search(normalized)
+        or ENGLISH_INSTRUCTION_RE.search(normalized)
     )
 
 
@@ -153,6 +301,66 @@ def ancestors_of(
     while current is not None:
         yield current
         current = parents.get(current)
+
+
+def select_guidance_text_nodes(
+    root: etree.Element,
+) -> tuple[set[etree.Element], list[str]]:
+    selected: set[etree.Element] = set()
+    paragraphs: list[str] = []
+    parents = parent_map(root)
+    for paragraph in root.iter():
+        if local_name(paragraph.tag) != "p":
+            continue
+        text_nodes = [
+            element
+            for element in paragraph.iter()
+            if local_name(element.tag) == "t"
+            and next(
+                (
+                    ancestor
+                    for ancestor in ancestors_of(element, parents)
+                    if local_name(ancestor.tag) == "p"
+                ),
+                None,
+            )
+            is paragraph
+        ]
+        text = normalize_visible_text(
+            "".join("".join(element.itertext()) for element in text_nodes)
+        )
+        if text and is_guidance_paragraph(text):
+            selected.update(text_nodes)
+            paragraphs.append(text)
+    return selected, paragraphs
+
+
+def visible_text_fragments(
+    trees: dict[str, etree.ElementTree],
+) -> list[tuple[str, str]]:
+    fragments: list[tuple[str, str]] = []
+    for part in sorted(trees):
+        if not is_document_xml(part):
+            continue
+        for element in trees[part].iter():
+            if local_name(element.tag) not in TEXT_ELEMENTS:
+                continue
+            text = normalize_visible_text("".join(element.itertext()))
+            if text:
+                fragments.append((part, text))
+    return fragments
+
+
+def remove_child_preserving_tail(parent: etree.Element, child: etree.Element) -> None:
+    siblings = list(parent)
+    index = siblings.index(child)
+    if child.tail:
+        if index == 0:
+            parent.text = (parent.text or "") + child.tail
+        else:
+            previous = siblings[index - 1]
+            previous.tail = (previous.tail or "") + child.tail
+    parent.remove(child)
 
 
 def is_xml_part(name: str) -> bool:
@@ -259,24 +467,34 @@ def sanitize_document_tree(
     part: str,
     removable_media: set[str],
     preserve_flow: bool,
-) -> dict[str, int]:
+    preserve_guidance: bool,
+) -> tuple[dict[str, int], list[str], list[tuple[str, str]]]:
     stats = Counter()
     root = tree.getroot()
     stats["field_markers_removed"] += remove_field_markers(root)
     parents = parent_map(root)
+    guidance_nodes, guidance_paragraphs = (
+        select_guidance_text_nodes(root) if preserve_guidance else (set(), [])
+    )
 
     # Snapshot first: clearing inline children while walking a live iterator
     # can skip later sibling runs in long paragraphs.
     for element in list(root.iter()):
         tag = local_name(element.tag)
         if tag in TEXT_ELEMENTS:
-            if element.text or len(element):
-                stats["text_nodes_cleared"] += 1
-            element.text = blank_text(element.text) if tag == "t" and preserve_flow else None
-            for child in list(element):
-                child.tail = blank_text(child.tail) if tag == "t" and preserve_flow else None
-                if tag == "shapeComment" or local_name(child.tag) in TEXT_MARKUP_REMOVE:
-                    element.remove(child)
+            if tag == "t" and element in guidance_nodes:
+                stats["guidance_text_nodes_preserved"] += 1
+                for child in list(element):
+                    if local_name(child.tag) in TEXT_MARKUP_REMOVE:
+                        remove_child_preserving_tail(element, child)
+            else:
+                if element.text or len(element):
+                    stats["text_nodes_cleared"] += 1
+                element.text = blank_text(element.text) if tag == "t" and preserve_flow else None
+                for child in list(element):
+                    child.tail = blank_text(child.tail) if tag == "t" and preserve_flow else None
+                    if tag == "shapeComment" or local_name(child.tag) in TEXT_MARKUP_REMOVE:
+                        element.remove(child)
         elif tag == "script" and any(
             local_name(ancestor.tag) == "equation"
             for ancestor in ancestors_of(element, parents)
@@ -297,7 +515,13 @@ def sanitize_document_tree(
             elif tag in {"formObject", "fieldBegin"} and attr in {"caption", "text", "value"} and value:
                 element.set(attr_name, "")
                 stats["form_values_cleared"] += 1
-    return dict(stats)
+    approved_fragments = [
+        (part, text)
+        for element in root.iter()
+        if element in guidance_nodes
+        if (text := normalize_visible_text("".join(element.itertext())))
+    ]
+    return dict(stats), guidance_paragraphs, approved_fragments
 
 
 def sanitize_metadata(tree: etree.ElementTree, title: str) -> dict[str, int]:
@@ -453,6 +677,7 @@ def validate_output(
     source_fingerprint: dict[str, object],
     allow_generated_preview: bool = False,
     require_geometry_hash: bool = True,
+    expected_visible_text: Sequence[tuple[str, str]] | None = (),
 ) -> dict[str, object]:
     with zipfile.ZipFile(output) as archive:
         bad = archive.testzip()
@@ -467,18 +692,21 @@ def validate_output(
             raise ValueError("unexpected HWPX mimetype")
 
         trees: dict[str, etree.ElementTree] = {}
-        leaked_text: list[str] = []
         for name in names:
             if is_xml_part(name):
                 trees[name] = parse_xml(archive.read(name), name)
             if is_document_xml(name):
-                tree = trees[name]
-                for element in tree.iter():
-                    if local_name(element.tag) in TEXT_ELEMENTS and "".join(element.itertext()).strip():
-                        leaked_text.append(f"{name}:{local_name(element.tag)}")
+                if name not in trees:
+                    raise ValueError(f"document part is not XML: {name}")
 
-        if leaked_text:
-            raise ValueError(f"visible text remains: {', '.join(leaked_text[:5])}")
+        actual_visible_text = visible_text_fragments(trees)
+        if expected_visible_text is not None and Counter(actual_visible_text) != Counter(
+            expected_visible_text
+        ):
+            locations = ", ".join(part for part, _ in actual_visible_text[:5])
+            if not expected_visible_text:
+                raise ValueError(f"visible text remains: {locations}")
+            raise ValueError("visible text differs from approved guidance")
         forbidden_prefixes = tuple(
             prefix
             for prefix in PAYLOAD_PREFIXES
@@ -510,7 +738,11 @@ def validate_output(
         verification = {
             "zip_valid": True,
             "xml_valid": True,
-            "visible_text_nodes": 0,
+            "visible_text_nodes": len(actual_visible_text),
+            "approved_visible_text": [
+                {"part": part, "text": text}
+                for part, text in actual_visible_text
+            ],
             "title": titles[0] if titles else None,
             "layout_structure_match": True,
             "layout": output_fingerprint,
@@ -526,6 +758,7 @@ def sanitize_hwpx(
     title: str,
     keep_media: set[str],
     preserve_flow: bool = True,
+    preserve_guidance: bool = False,
 ) -> dict[str, object]:
     with zipfile.ZipFile(source) as archive:
         if archive.testzip():
@@ -567,9 +800,23 @@ def sanitize_hwpx(
             removed_parts.add(href)
 
     totals = Counter()
+    preserved_guidance: list[dict[str, str]] = []
+    approved_visible_text: list[tuple[str, str]] = []
     for part, tree in trees.items():
         if is_document_xml(part):
-            totals.update(sanitize_document_tree(tree, part, removable_media, preserve_flow))
+            part_stats, guidance, approved_fragments = sanitize_document_tree(
+                tree,
+                part,
+                removable_media,
+                preserve_flow,
+                preserve_guidance,
+            )
+            totals.update(part_stats)
+            preserved_guidance.extend(
+                {"part": part, "text": text}
+                for text in guidance
+            )
+            approved_visible_text.extend(approved_fragments)
     totals.update(sanitize_metadata(content_tree, title))
     totals["manifest_items_removed"] += scrub_manifest(content_tree, removed_parts)
 
@@ -581,7 +828,12 @@ def sanitize_hwpx(
 
     write_archive(source, destination, infos, entries)
     try:
-        verification = validate_output(destination, title, source_fingerprint)
+        verification = validate_output(
+            destination,
+            title,
+            source_fingerprint,
+            expected_visible_text=approved_visible_text,
+        )
     except Exception:
         destination.unlink(missing_ok=True)
         raise
@@ -594,8 +846,15 @@ def sanitize_hwpx(
         "removed_body_media": sorted(removable_media & set(body_uses)),
         "removed_unreferenced_media": sorted(removable_media - set(body_uses)),
         "media_usage": {"layout": layout_uses, "body": body_uses},
+        "preserved_guidance": preserved_guidance,
         "changes": dict(totals),
-        "text_strategy": "width-aware blank spacing" if preserve_flow else "fully empty",
+        "text_strategy": (
+            "approved structure and instructions"
+            if preserve_guidance
+            else "width-aware blank spacing"
+            if preserve_flow
+            else "fully empty"
+        ),
         "verification": verification,
     }
 
@@ -606,6 +865,7 @@ def add_page_break_hints(
     count: int,
     title: str,
     expected_fingerprint: dict[str, object],
+    expected_visible_text: Sequence[tuple[str, str]] = (),
 ) -> int:
     with zipfile.ZipFile(source) as archive:
         infos = archive.infolist()
@@ -627,7 +887,12 @@ def add_page_break_hints(
         raise ValueError(f"could not infer {remaining} required page break(s)")
     write_archive(source, output, infos, entries)
     try:
-        validate_output(output, title, expected_fingerprint)
+        validate_output(
+            output,
+            title,
+            expected_fingerprint,
+            expected_visible_text=expected_visible_text,
+        )
     except Exception:
         output.unlink(missing_ok=True)
         raise
@@ -728,6 +993,7 @@ def verify_native_output(
     output: Path,
     title: str,
     expected_fingerprint: dict[str, object],
+    expected_visible_text: Sequence[tuple[str, str]],
     sanitized_hwpx: Path,
     roundtrip_hwpx: Path,
 ) -> dict[str, object]:
@@ -775,21 +1041,22 @@ def verify_native_output(
         ["export-hwpx", str(output), str(roundtrip_hwpx), "--verify-pages"],
     )
     # export-hwpx regenerates a preview from the already-sanitized HWP. It is
-    # safe to ignore here because export-text above independently proved the
-    # native document has no visible text, while all other payload classes
-    # remain forbidden.
+    # safe to ignore here because export-text above independently proved that
+    # native visible text exactly matches the sanitized document, while all
+    # other payload classes remain forbidden.
     roundtrip = validate_output(
         roundtrip_hwpx,
         None,
         expected_fingerprint,
         allow_generated_preview=True,
         require_geometry_hash=False,
+        expected_visible_text=None,
     )
     return {
         "format": output_info.get("format"),
         "page_count": output_info.get("pageCount"),
         "sections": output_info.get("sections"),
-        "content_text_nodes": 0,
+        "content_text_nodes": len(expected_visible_text),
         "generated_layout_text_matches": True,
         "title": title,
         "title_verified_by": "output filename",
@@ -798,11 +1065,33 @@ def verify_native_output(
     }
 
 
+def approved_visible_text_from_report(
+    report: dict[str, object],
+) -> list[tuple[str, str]]:
+    verification = report.get("verification")
+    if not isinstance(verification, dict):
+        raise ValueError("copy-layout report is missing verification")
+    approved = verification.get("approved_visible_text")
+    if not isinstance(approved, list):
+        raise ValueError("copy-layout verification is missing approved visible text")
+    fragments: list[tuple[str, str]] = []
+    for item in approved:
+        if not isinstance(item, dict):
+            raise ValueError("invalid approved visible text record")
+        part = item.get("part")
+        text = item.get("text")
+        if not isinstance(part, str) or not isinstance(text, str):
+            raise ValueError("invalid approved visible text value")
+        fragments.append((part, text))
+    return fragments
+
+
 def copy_layout(
     source: Path,
     output: Path | None,
     keep_media: set[str],
     rhwp_binary: Path | None = None,
+    preserve_guidance: bool = False,
 ) -> dict[str, object]:
     output_was_requested = output is not None
     source = source.expanduser().resolve()
@@ -813,7 +1102,13 @@ def copy_layout(
     output_format = destination.suffix.lower()
 
     if source_format == ".hwpx" and output_format == ".hwpx":
-        report = sanitize_hwpx(source, destination, title, keep_media)
+        report = sanitize_hwpx(
+            source,
+            destination,
+            title,
+            keep_media,
+            preserve_guidance=preserve_guidance,
+        )
         report.update(
             {
                 "source": str(source),
@@ -848,6 +1143,7 @@ def copy_layout(
                 title,
                 keep_media,
                 preserve_flow=False,
+                preserve_guidance=preserve_guidance,
             )
             native_verification: dict[str, object] | None = None
             if output_format == ".hwp":
@@ -869,6 +1165,7 @@ def copy_layout(
                         title,
                         keep_media,
                         preserve_flow=True,
+                        preserve_guidance=preserve_guidance,
                     )
                     sanitized_hwpx = flow_preserved_hwpx
                     destination.unlink(missing_ok=True)
@@ -889,6 +1186,7 @@ def copy_layout(
                         source_page_count - output_page_count,
                         title,
                         report["verification"]["layout"],
+                        approved_visible_text_from_report(report),
                     )
                     report["changes"]["inferred_page_breaks"] = added
                     destination.unlink(missing_ok=True)
@@ -904,6 +1202,7 @@ def copy_layout(
                         destination,
                         title,
                         report["verification"]["layout"],
+                        approved_visible_text_from_report(report),
                         sanitized_hwpx,
                         temporary / "roundtrip.hwpx",
                     )
@@ -956,6 +1255,7 @@ def copy_layout(
                         title,
                         keep_media,
                         preserve_flow=True,
+                        preserve_guidance=preserve_guidance,
                     )
                     destination.unlink(missing_ok=True)
                     shutil.copy2(flow_preserved_hwpx, destination)
@@ -974,6 +1274,7 @@ def copy_layout(
                         source_page_count - output_page_count,
                         title,
                         report["verification"]["layout"],
+                        approved_visible_text_from_report(report),
                     )
                     report["changes"]["inferred_page_breaks"] = added
                     destination.unlink(missing_ok=True)
@@ -1028,13 +1329,27 @@ def parse_args() -> argparse.Namespace:
         metavar="ID",
         help="keep a body media payload by manifest id after visual review; repeat as needed",
     )
+    parser.add_argument(
+        "--preserve-guidance",
+        action="store_true",
+        help=(
+            "retain conservative structure headings and imperative instructions "
+            "for competition or assignment templates"
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        report = copy_layout(args.source, args.output, set(args.keep_media), args.rhwp_bin)
+        report = copy_layout(
+            args.source,
+            args.output,
+            set(args.keep_media),
+            args.rhwp_bin,
+            args.preserve_guidance,
+        )
     except (FileExistsError, OSError, ValueError, zipfile.BadZipFile) as exc:
         print(f"copy-layout: {exc}", file=sys.stderr)
         return 1
