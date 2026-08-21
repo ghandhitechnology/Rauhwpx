@@ -14,14 +14,21 @@ test('document-writing skills use the pencil glyph', () => {
 });
 
 test('internal and primarily read-only skills use the minimal bot glyph', () => {
-  for (const name of ['skill-creator', 'summarize-document', 'present-plan', 'my-custom-skill']) {
+  for (const name of ['skill-creator', 'summarize-document']) {
     assert.equal(skillGlyphForName(name), 'skillBot');
   }
 });
 
-test('pencil and bot are minimal native stroke icons', () => {
+test('other skills use the familiar system gear', () => {
+  for (const name of ['present-plan', 'my-custom-skill']) {
+    assert.equal(skillGlyphForName(name), 'gear');
+  }
+});
+
+test('pencil, bot, and system gear are native stroke icons', () => {
   assert.match(icons, /skillEdit:/);
   assert.match(icons, /skillBot:\s*'M2\.1 3h7\.8v6H2\.1zM4 6h\.6M7\.4 6H8'/);
+  assert.match(icons, /gear:/);
 });
 
 test('the skill glyph appears in every skill surface', () => {
