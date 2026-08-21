@@ -38,7 +38,7 @@ test('텍스트 command는 page-local 판정용 payload hint를 노출한다', (
   assert.match(source, /getPageLocalTextEditOptions\(\): \{ deleteCount: number \} \{\s*return \{ deleteCount: this\.count \};\s*\}/);
 });
 
-test('IME preedit은 transient로 유지하고 커밋만 문서에 한 번 반영한다', () => {
+test('IME preedit은 조합 중 문서에 반영하고 커밋만 히스토리에 한 번 기록한다', () => {
   const inputHandlerSource = readFileSync(new URL('../src/engine/input-handler.ts', import.meta.url), 'utf8');
   const textSource = readFileSync(new URL('../src/engine/input-handler-text.ts', import.meta.url), 'utf8');
 
@@ -55,19 +55,27 @@ test('IME preedit은 transient로 유지하고 커밋만 문서에 한 번 반�
   const imeSource = textSource.slice(imeStart, iosStart);
   const iosSource = textSource.slice(iosStart, generalStart);
   assert.match(imeSource, /const preedit = this\.imeSession\.update\(text\);/);
-  assert.match(imeSource, /this\.compositionLength = charCount\(preedit\);/);
-  assert.match(imeSource, /this\.updateCompositionOverlay\(\);/);
-  assert.match(inputHandlerSource, /private updateCompositionOverlay\(\): void \{/);
-  assert.doesNotMatch(imeSource, /replaceTextAtRaw|afterTextInputEdit|cursor\.moveTo/,
-    '조합 갱신은 문서·커서·페이지네이션을 변경하면 안 된다');
+  assert.match(imeSource, /syncCompositionDocument\.call\(this, preedit\)/);
+  assert.match(textSource, /this\.replaceTextAtRaw\(anchor, this\.compositionLength, preedit\)/);
+  assert.match(textSource, /this\.compositionLength = charCount\(preedit\);/);
+  assert.match(textSource, /this\.afterTextInputEdit\(anchor, this\.cursor\.getPosition\(\)/);
+  assert.match(textSource, /moveCompositionCaret\.call\(this, anchor, this\.compositionLength\)/);
+  assert.doesNotMatch(inputHandlerSource, /private updateCompositionOverlay\(\)/);
+  assert.doesNotMatch(textSource, /this\.textarea\.value/,
+    '조합 갱신은 누적된 textarea value 전체가 아니라 imeSession.preedit 을 써야 한다');
 
   const compositionEndStart = textSource.indexOf('export function onCompositionEnd');
   const inputStart = textSource.indexOf('export function onInput', compositionEndStart);
   const compositionEndSource = textSource.slice(compositionEndStart, inputStart);
   assert.match(compositionEndSource, /this\.imeSession\.finish\(event\?\.data, textareaText\)/);
-  assert.match(compositionEndSource, /new InsertTextCommand\(anchor, composed\)/);
-  assert.match(compositionEndSource, /this\.insertTextAtRaw\(anchor, composed\);\s*this\.consumeRawTextMutationBeforeCursor\(\);/,
-    'HF/FN 커밋도 typed raw helper의 effect를 커서 이동 전에 소비해야 한다');
+  assert.match(compositionEndSource, /kind: 'record',\s*command: new InsertTextCommand\(anchor, composed/);
+  assert.match(compositionEndSource, /kind: 'record',\s*command: new InsertTextInHeaderFooterCommand/);
+  assert.match(compositionEndSource, /kind: 'record',\s*command: new InsertTextInFootnoteCommand/);
+  assert.doesNotMatch(compositionEndSource, /kind: 'command'/);
+  assert.doesNotMatch(compositionEndSource, /this\.insertTextAtRaw\(anchor, composed\)/,
+    'HF/FN 커밋은 이미 문서에 있는 preedit 을 다시 삽입하면 안 된다');
+  assert.match(compositionEndSource, /applyCompositionPreview\.call\(this, ''\)/,
+    '빈 커밋·취소는 문서의 preedit 을 되돌려야 한다');
 
   assert.match(iosSource, /this\.replaceTextAtRaw\(this\._iosAnchor, this\._iosLength, text\);/);
   assert.ok(
@@ -92,10 +100,10 @@ test('IME 조합 caret은 시작 시 보존한 anchor 좌표를 재사용한다'
     /private captureCompositionAnchorRect\(anchor: DocumentPosition\): void \{[\s\S]*?CursorState\.comparePositions\(current, anchor\) === 0[\s\S]*?cellBounds: rect\.cellBounds \? \{ \.\.\.rect\.cellBounds \} : undefined,[\s\S]*?\}/,
     '조합 시작 좌표는 현재 logical cursor와 anchor가 정확히 같을 때만 캐시해야 한다',
   );
-  assert.match(textSource, /this\.captureCompositionAnchorRect\(basePos\);\s*this\.compositionFontFamily = null;\s*this\.imeSession\.start\(\);/);
+  assert.match(textSource, /this\.captureCompositionAnchorRect\(basePos\);\s*this\.imeSession\.start\(\);/);
   assert.match(
     inputHandlerSource,
-    /let startRect = this\.compositionAnchorRect;\s*if \(!startRect\) \{[\s\S]*?this\.wasm\.getCursorRectInCell\(/,
+    /private compositionStartRect\(\): CursorRect \| null \{[\s\S]*?this\.wasm\.getCursorRectInCell\(/,
     '캐시가 없을 때만 기존 exact anchor lookup으로 fallback해야 한다',
   );
   assert.match(
@@ -224,7 +232,7 @@ test('document pagination은 120ms idle과 명시 boundary에서 flush된다', (
   assert.match(inputHandlerSource, /private onInputBlurBound: \(\) => void;/);
   assert.match(
     inputHandlerSource,
-    /this\.onInputBlurBound = \(\) => \{\s*if \(this\.isComposing\) _text\.onCompositionEnd\.call\(this\);\s*this\.resetIosInputSession\(\);\s*this\.flushDeferredPaginationIfNeeded\('input-blur', false\);\s*\};/,
+    /this\.onInputBlurBound = \(\) => \{\s*if \(this\.isComposing\) _text\.onCompositionEnd\.call\(this\);\s*this\.resetIosInputSession\(\);[\s\S]*?this\.resetTextareaBuffer\(\);\s*this\.flushDeferredPaginationIfNeeded\('input-blur', false\);\s*\};/,
   );
   assert.match(inputHandlerSource, /this\.textarea\.addEventListener\('blur', this\.onInputBlurBound\);/);
   assert.match(inputHandlerSource, /this\.textarea\.removeEventListener\('blur', this\.onInputBlurBound\);/);
@@ -240,6 +248,8 @@ test('문서 전환은 deferred·IME·iOS 입력 세션 상태를 격리한다',
 
   assert.doesNotMatch(deactivateSource, /onCompositionEnd/,
     '이미 교체된 문서에 이전 문서의 preedit을 확정하면 안 된다');
+  assert.match(deactivateSource, /revertCompositionPreview\.call\(this\)/,
+    '네이티브 preedit 은 문서에 들어가 있으므로 전환 전에 되돌려야 한다');
   assert.ok(
     deactivateSource.indexOf("this.flushDeferredPaginationIfNeeded('before-deactivate', false)") <
       deactivateSource.indexOf('this.active = false'),
@@ -252,7 +262,8 @@ test('문서 전환은 deferred·IME·iOS 입력 세션 상태를 격리한다',
   assert.match(deactivateSource, /this\.imeSession\.reset\(\);/);
   assert.match(deactivateSource, /this\._iosAnchor = null;/);
   assert.match(deactivateSource, /this\._iosRequiresFullRefresh = false;/);
-  assert.match(deactivateSource, /this\.textarea\.value = '';/);
+  assert.match(deactivateSource, /this\.resetTextareaBuffer\(\);/,
+    '문서 전환 시 textarea value와 consumed prefix 카운터를 함께 초기화해야 한다');
 });
 
 test('저장·다른 이름 저장·인쇄는 resumable job을 출력 전에 동기 barrier로 마감한다', () => {

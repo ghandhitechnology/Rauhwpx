@@ -201,8 +201,7 @@
 /* 깜박임: opacity 를 껐다 켜는 대신 부드럽게 사그라들었다 돌아온다.
    양 끝에 머무는 구간을 두어 '흐릿한 맥박'이 아니라 또렷한 깜박임으로
    읽히게 한다. */
-.caret.is-blinking,
-.caret-composition.is-blinking {
+.caret.is-blinking {
   animation: caret-pulse 1.1s ease-in-out infinite;
 }
 
@@ -218,8 +217,7 @@
     transition: none;
   }
 
-  .caret.is-blinking,
-  .caret-composition.is-blinking {
+  .caret.is-blinking {
     animation: none;
     opacity: 1;
   }

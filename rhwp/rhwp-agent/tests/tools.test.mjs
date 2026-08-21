@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 66개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 66);
+test('도구는 정확히 67개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 67);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -47,7 +47,8 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 58);
+  assert.equal(direct.size, 59);
+  assert.ok(direct.has('apply_edits'));
   assert.ok(direct.has('insert_text'));
   assert.ok(direct.has('get_engine_edit_capabilities'));
   assert.ok(direct.has('apply_engine_edits'));

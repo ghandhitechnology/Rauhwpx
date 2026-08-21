@@ -3391,12 +3391,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 /* 입력기 위의 진행 정보는 계획/변경 surface의 높이를 만들지 않는다.
-   텍스트와 계획 복원 버튼은 한 overlay 행에서 서로의 폭을 예약한다. */
+   텍스트와 계획 복원 버튼은 한 overlay 행에서 서로의 폭을 예약한다.
+   편대 도크가 서 있는 동안에는 --ag-fleet-dock-h 만큼 위로 올라간다. */
 .ag-composer-overlay {
   position: absolute;
   z-index: 3;
   right: 2px;
-  bottom: calc(100% + 5px);
+  bottom: calc(100% + 5px + var(--ag-fleet-dock-h, 0px));
   left: 2px;
   display: flex;
   min-width: 0;
@@ -5396,4 +5397,735 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 /* 전체 화면 레일의 새 채팅 버튼은 5px 언어를 쓰므로 그 크기대로 흔든다. */
 .ag-fullscreen .ag-threads-new {
   border-radius: 5px 7px 4px 8px / 7px 4px 8px 5px;
+}
+
+/* ─── 서브에이전트 편대 카드 (ag-fleet) ──────────────────
+   한 턴에서 태어난 서브에이전트는 한 카드에 모이고, 워크플로는 단계
+   레일과 멤버 행을 가진 자기 카드를 갖는다. 카드는 도구 활동 그룹과
+   같은 자리에 흐름대로 놓인다.
+
+   두 가지 규칙이 이 블록을 지탱한다. 행은 3줄 고정 그리드라 토큰·시간이
+   1초마다 갱신돼도 아래 행이 밀리지 않는다. 진행 표시는 도는 것 없이
+   가만한 점 하나이고, 끝났을 때 색과 시제만 바뀐다. */
+
+.ag-fleet {
+  position: relative;
+  align-self: stretch;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-field);
+  background: color-mix(in srgb, var(--ag-bg-2) 68%, transparent);
+  overflow: hidden;
+  animation: ag-activity-arrive 240ms var(--ag-motion-out) both;
+}
+
+.ag-fleet-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 34px;
+  margin: 0;
+  padding: 6px 30px 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--ag-text-muted);
+  font: inherit;
+  font-size: var(--font-size-base, 12px);
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-fleet-toggle:hover {
+  color: var(--ag-text);
+}
+
+.ag-fleet-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* 카드 제목은 텍스트로 상태를 말하므로 앞쪽 상태 표시는 그리지 않는다. */
+.ag-fleet-toggle > .ag-fleet-dot {
+  display: none;
+}
+
+.ag-fleet-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.ag-fleet.ag-done .ag-fleet-label,
+.ag-fleet.ag-stopped .ag-fleet-label {
+  color: var(--ag-text-muted);
+  font-weight: 500;
+}
+
+.ag-fleet.ag-err .ag-fleet-label {
+  color: var(--ag-err);
+  font-weight: 500;
+}
+
+/* Σ 토큰 · 경과 시간 — 폭이 흔들리지 않게 mono + tabular. */
+.ag-fleet-meter {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-xs, 10px);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--ag-track);
+  white-space: nowrap;
+}
+
+.ag-fleet-sum,
+.ag-fleet-clock {
+  min-width: 34px;
+  text-align: right;
+}
+
+.ag-fleet-chevron {
+  position: absolute;
+  right: 10px;
+  width: 12px;
+  height: 12px;
+  color: currentColor;
+  transform: rotate(180deg);
+  transition: transform 240ms var(--ag-motion-out);
+}
+
+.ag-fleet.ag-collapsed .ag-fleet-chevron {
+  transform: rotate(0deg);
+}
+
+.ag-fleet-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    grid-template-rows 340ms var(--ag-spring-soft),
+    opacity 180ms var(--ag-motion-out),
+    transform 300ms var(--ag-motion-out);
+}
+
+.ag-fleet.ag-collapsed .ag-fleet-collapse {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(-5px);
+}
+
+.ag-fleet-body {
+  min-height: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--ag-border);
+}
+
+.ag-fleet.ag-collapsed .ag-fleet-body {
+  border-top-color: transparent;
+}
+
+/* 상태 점 — 카드 머리와 행이 같은 글리프를 쓴다. */
+.ag-fleet-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ag-text-muted);
+}
+
+.ag-fleet-dot.ag-run {
+  background: var(--ag-run);
+}
+
+.ag-fleet-dot.ag-ok {
+  background: var(--ag-ok);
+}
+
+.ag-fleet-dot.ag-err {
+  background: var(--ag-err);
+}
+
+.ag-fleet-dot.ag-idle {
+  background: color-mix(in srgb, var(--ag-text-muted) 55%, transparent);
+}
+
+/* ── 워크플로 단계 레일 ── */
+
+.ag-fleet-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px 0;
+}
+
+.ag-fleet-rail[hidden] {
+  display: none;
+}
+
+.ag-fleet-phase {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-chip);
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-xs, 10px);
+  line-height: 1.2;
+}
+
+.ag-fleet-phase.ag-done {
+  color: var(--ag-text-secondary);
+}
+
+.ag-fleet-phase.ag-live {
+  border-color: color-mix(in srgb, var(--ag-accent) 45%, var(--ag-border));
+  background: color-mix(in srgb, var(--ag-accent) 11%, transparent);
+  color: var(--ag-accent-strong);
+}
+
+.ag-fleet-phase-mark {
+  display: inline-flex;
+  width: 10px;
+  height: 10px;
+  color: var(--ag-ok);
+}
+
+.ag-fleet-phase-mark:empty {
+  display: none;
+}
+
+.ag-fleet-phase-mark .ag-icon {
+  width: 10px;
+  height: 10px;
+}
+
+.ag-fleet-phase-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-fleet-phase-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 1px;
+}
+
+.ag-fleet-mini {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--ag-text-muted);
+}
+
+.ag-fleet-mini.ag-run {
+  background: var(--ag-run);
+}
+
+.ag-fleet-mini.ag-ok {
+  background: var(--ag-ok);
+}
+
+.ag-fleet-mini.ag-err {
+  background: var(--ag-err);
+}
+
+.ag-fleet-mini.ag-idle {
+  background: color-mix(in srgb, var(--ag-text-muted) 55%, transparent);
+}
+
+/* ── 에이전트 행 (고정 3줄 그리드) ── */
+
+.ag-fleet-rows {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 4px;
+}
+
+.ag-fleet-row {
+  min-width: 0;
+  animation: ag-step-arrive 280ms var(--ag-motion-out) both;
+}
+
+.ag-fleet-row + .ag-fleet-row {
+  border-top: 1px solid color-mix(in srgb, var(--ag-border) 70%, transparent);
+}
+
+.ag-fleet-head {
+  position: relative;
+  display: grid;
+  box-sizing: border-box;
+  width: 100%;
+  grid-template-columns: 12px minmax(0, 1fr) auto 11px;
+  grid-template-rows: 16px 14px 13px;
+  align-items: center;
+  column-gap: 7px;
+  row-gap: 1px;
+  margin: 0;
+  padding: 7px 8px;
+  border: none;
+  border-radius: var(--ag-r-chip);
+  background: transparent;
+  color: var(--ag-text);
+  font: inherit;
+  text-align: left;
+}
+
+.ag-fleet-row.ag-has-detail .ag-fleet-head {
+  cursor: pointer;
+}
+
+.ag-fleet-row.ag-has-detail .ag-fleet-head:hover {
+  background: var(--ag-hover);
+}
+
+.ag-fleet-head:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.ag-fleet-head > .ag-fleet-dot {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: center;
+}
+
+.ag-fleet-name {
+  display: flex;
+  min-width: 0;
+  grid-column: 2;
+  grid-row: 1;
+  align-items: center;
+  gap: 5px;
+}
+
+.ag-fleet-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-base, 12px);
+  line-height: 1.3;
+}
+
+.ag-fleet-role {
+  flex: 0 0 auto;
+  max-width: 42%;
+  overflow: hidden;
+  padding: 1px 5px;
+  border-radius: var(--ag-r-chip);
+  background: color-mix(in srgb, var(--ag-accent) 12%, transparent);
+  color: var(--ag-accent-strong);
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-xs, 10px);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-fleet-role[hidden] {
+  display: none;
+}
+
+.ag-fleet-aside {
+  grid-column: 3;
+  grid-row: 1;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-xs, 10px);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.ag-fleet-row-chevron {
+  grid-column: 4;
+  grid-row: 1;
+  width: 11px;
+  height: 11px;
+  color: var(--ag-text-muted);
+  opacity: 0;
+  transform: rotate(0deg);
+  transition:
+    transform 200ms var(--ag-motion-out),
+    opacity 200ms var(--ag-motion-out);
+}
+
+.ag-fleet-row.ag-has-detail .ag-fleet-row-chevron {
+  opacity: 1;
+}
+
+.ag-fleet-row.ag-open .ag-fleet-row-chevron {
+  transform: rotate(180deg);
+}
+
+.ag-fleet-activity {
+  grid-column: 2 / -1;
+  grid-row: 2;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-fleet-metrics {
+  grid-column: 2 / -1;
+  grid-row: 3;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ag-text-muted);
+  font-family: var(--ag-mono);
+  font-size: var(--font-size-xs, 10px);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--ag-track);
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-fleet-row.ag-stopped .ag-fleet-title,
+.ag-fleet-row.ag-stopped .ag-fleet-activity {
+  color: var(--ag-text-muted);
+}
+
+.ag-fleet-row.ag-err .ag-fleet-title {
+  color: var(--ag-err);
+}
+
+/* 화면 낭독기 전용 상태 — 점은 aria-hidden 이므로 말은 여기 남는다. */
+.ag-fleet-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* 워크플로 멤버는 코디네이터 아래로 한 칸 들어간다. */
+.ag-fleet-member .ag-fleet-head {
+  padding-left: 20px;
+}
+
+.ag-fleet-member .ag-fleet-head::before {
+  content: '';
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 9px;
+  width: 1px;
+  background: color-mix(in srgb, var(--ag-border-strong) 60%, transparent);
+}
+
+.ag-fleet-member .ag-fleet-title {
+  color: var(--ag-text-secondary);
+}
+
+/* 멤버의 오른쪽 자리는 시간이 아니라 단계 이름이다 — 본문 활자로 둔다. */
+.ag-fleet-member .ag-fleet-aside {
+  font-family: var(--ag-font);
+  font-size: var(--font-size-sm, 11px);
+}
+
+/* ── 행 드릴인: 그 서브에이전트가 부른 도구들 ── */
+
+.ag-fleet-detail {
+  max-height: clamp(96px, 20vh, 168px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  padding: 0 6px 6px 20px;
+}
+
+.ag-fleet-detail[hidden] {
+  display: none;
+}
+
+/* ── 편대 도크 (입력기 위 알약 + 팝업) ───────────────────
+   살아 있는 카드는 입력기 바로 위 팝업에 모이고, 알약은 픽셀 휠과 함께
+   남은 작업 수를 말한다. 도크는 absolute 여서 대화 높이를 건드리지 않고,
+   정착한 카드는 흐름으로 옮겨진다 (.ag-fleet-dock 은 form.ag-composer 의
+   자식이라 붙일 자리를 따로 옮기지 않는다). */
+
+.ag-fleet-dock {
+  position: absolute;
+  right: 10px;
+  bottom: calc(100% + 7px);
+  left: 10px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.ag-fleet-dock[hidden] {
+  display: none;
+}
+
+.ag-fleet-dock-pill {
+  pointer-events: auto;
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-height: 28px;
+  margin: 0;
+  padding: 5px 9px 5px 11px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: 999px;
+  background: var(--ag-raised);
+  box-shadow: var(--n-elev-1);
+  color: var(--ag-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  animation: ag-dock-arrive 220ms var(--ag-motion-out) both;
+}
+
+.ag-fleet-dock-pill:hover {
+  color: var(--ag-text);
+  background: var(--ag-hover);
+}
+
+.ag-fleet-dock-pill:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.ag-fleet-dock-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-fleet-dock-pill .ag-pixel-wheel {
+  color: var(--ag-accent);
+}
+
+/* 알약의 상태 자리: 도는 동안은 픽셀 휠, 편대가 다 끝나면 상태 점이 같은 12px
+   칸을 쓴다 — 라벨이 밀리지 않는다. */
+.ag-fleet-dock-pill > .ag-fleet-dot {
+  display: none;
+  margin: 0 2.5px;
+}
+
+.ag-fleet-dock-pill:not(.ag-live) > .ag-pixel-wheel {
+  display: none;
+}
+
+.ag-fleet-dock-pill:not(.ag-live) > .ag-fleet-dot {
+  display: block;
+}
+
+.ag-fleet-dock-pill.ag-err {
+  color: var(--ag-err);
+}
+
+/* 편대가 끝난 알약은 카드 머리처럼 가라앉는다 — 결과는 점과 글자가 말한다. */
+.ag-fleet-dock-pill.ag-done,
+.ag-fleet-dock-pill.ag-stopped {
+  color: var(--ag-text-muted);
+  font-weight: 500;
+}
+
+/* 흐름에 정착한 기록은 도구 활동 그룹과 같은 줄을 쓴다 — 앞자리 상태 점까지 맞춘다. */
+.ag-fleet-slot .ag-fleet-toggle > .ag-fleet-dot {
+  display: inline-block;
+}
+
+/* 카드가 태어난 자리(흐름 속 슬롯) — 턴이 끝나 카드가 정착할 때까지 비어 있고
+   높이를 만들지 않는다. */
+.ag-fleet-slot[hidden] {
+  display: none;
+}
+
+/* 쉐브론은 눌렀을 때 팝업이 갈 방향을 가리킨다 (카드·행 쉐브론과 같은 규칙).
+   팝업이 위로 열리므로 펼쳐져 있을 때는 아래쪽 = 접는 방향이다. */
+.ag-fleet-dock-chevron {
+  width: 12px;
+  height: 12px;
+  color: currentColor;
+  transform: rotate(0deg);
+  transition: transform 200ms var(--ag-motion-out);
+}
+
+/* 닫혀 있을 때는 위쪽을 가리킨다 — 펼치기 방향. */
+.ag-fleet-dock-pill[aria-expanded='false'] .ag-fleet-dock-chevron {
+  transform: rotate(180deg);
+}
+
+.ag-fleet-popup {
+  pointer-events: auto;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  max-height: min(320px, 40vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  padding: 6px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-field);
+  background: color-mix(in srgb, var(--ag-bg) 88%, transparent);
+  box-shadow: var(--n-elev-2);
+  animation: ag-dock-arrive 240ms var(--ag-motion-out) both;
+}
+
+.ag-fleet-popup[hidden] {
+  display: none;
+}
+
+/* 카드는 팝업 안에서 줄어들지 않는다. 세로 flex 의 기본 shrink 를 두면 카드가
+   max-height 에 맞춰 찌그러지며 행을 잘라 먹고(카드가 overflow: hidden),
+   팝업은 넘칠 것이 없다고 보아 스크롤조차 내주지 않는다. */
+.ag-fleet-popup > .ag-fleet {
+  flex: 0 0 auto;
+}
+
+/* ── 픽셀 휠 ─────────────────────────────────────────
+   부드러운 회전이 아니라 step 타이밍으로 칸을 건너뛰는 8픽셀 짜리 바퀴다.
+   비트 하나가 12% 씩 이동하고, 나머지는 단계별로 어두워진다. */
+
+.ag-pixel-wheel {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+}
+
+.ag-pixel-bit {
+  position: absolute;
+  inset: 0;
+  animation: ag-pixel-chase 0.96s steps(1, end) infinite;
+}
+
+.ag-pixel-bit::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 5px;
+  width: 2px;
+  height: 2px;
+  background: currentColor;
+}
+
+.ag-pixel-bit:nth-child(1) { transform: rotate(0deg); }
+.ag-pixel-bit:nth-child(2) { transform: rotate(45deg); animation-delay: -0.12s; }
+.ag-pixel-bit:nth-child(3) { transform: rotate(90deg); animation-delay: -0.24s; }
+.ag-pixel-bit:nth-child(4) { transform: rotate(135deg); animation-delay: -0.36s; }
+.ag-pixel-bit:nth-child(5) { transform: rotate(180deg); animation-delay: -0.48s; }
+.ag-pixel-bit:nth-child(6) { transform: rotate(225deg); animation-delay: -0.6s; }
+.ag-pixel-bit:nth-child(7) { transform: rotate(270deg); animation-delay: -0.72s; }
+.ag-pixel-bit:nth-child(8) { transform: rotate(315deg); animation-delay: -0.84s; }
+
+@keyframes ag-pixel-chase {
+  0% { opacity: 1; }
+  25% { opacity: 0.45; }
+  50% { opacity: 0.18; }
+  75% { opacity: 0.08; }
+}
+
+@keyframes ag-dock-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── 살아 있는 행·카드의 점 ↔ 픽셀 휠 교체 ──
+   자리(격자 첫 칸)는 그대로 두고 그림만 바꾼다 — 상태가 바빠도 행이 밀리지 않는다. */
+
+.ag-fleet-spin {
+  display: none;
+  color: var(--ag-accent);
+}
+
+.ag-fleet.ag-claude { --ag-accent: var(--ag-claude); }
+.ag-fleet.ag-codex { --ag-accent: var(--ag-codex); }
+.ag-fleet.ag-pi { --ag-accent: var(--ag-pi); }
+.ag-fleet.ag-grok { --ag-accent: var(--ag-grok); }
+.ag-fleet.ag-cursor { --ag-accent: var(--ag-cursor); }
+
+.ag-fleet-head > .ag-fleet-spin {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: center;
+}
+
+.ag-fleet-row.ag-live .ag-fleet-spin {
+  display: block;
+}
+
+/* 도는 동안에는 점이 아니라 휠이 그 자리를 쓴다. */
+.ag-fleet-row.ag-live .ag-fleet-dot {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-fleet,
+  .ag-fleet-row {
+    animation: none;
+  }
+
+  .ag-fleet-collapse,
+  .ag-fleet-chevron,
+  .ag-fleet-row-chevron {
+    transition: none;
+  }
+
+  .ag-fleet-dock-pill,
+  .ag-fleet-popup {
+    animation: none;
+  }
+
+  /* 도는 대신 켜져 있는 자리만 말한다 — 움직임 없이 상태는 유지된다. */
+  .ag-pixel-bit {
+    animation: none;
+    opacity: 0.85;
+  }
+
+  .ag-pixel-bit:nth-child(n + 4) {
+    opacity: 0.25;
+  }
+
+  .ag-fleet-dock-chevron {
+    transition: none;
+  }
 }

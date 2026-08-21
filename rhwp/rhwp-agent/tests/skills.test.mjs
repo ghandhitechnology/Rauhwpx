@@ -98,7 +98,7 @@ const backendOpts = {
 
 test('Claude safe profile exposes core tools with sandbox and disables native skills', () => {
   const argv = buildClaudeArgv({ ...backendOpts, permissionProfile: 'safe' }, '00000000-0000-4000-8000-000000000000', false);
-  assert.ok(argv.includes('Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch'));
+  assert.ok(argv.includes('Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch,Agent,Workflow'));
   assert.ok(argv.includes('--disable-slash-commands'));
   assert.ok(argv.includes('--setting-sources'));
   assert.ok(argv.includes('dontAsk'));

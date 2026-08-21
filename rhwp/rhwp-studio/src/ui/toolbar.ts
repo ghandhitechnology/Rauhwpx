@@ -5,13 +5,13 @@ import type { CommandDispatcher } from '@/command/dispatcher';
 import { userSettings } from '@/core/user-settings';
 import type { FontSet } from '@/core/user-settings';
 import { getLocalFonts } from '@/core/local-fonts';
+import {
+  filterFontMenuEntries,
+  fontMenuEmptyMessage,
+  type FontMenuEntry,
+} from '@/ui/font-menu-filter';
 
 type FontMenuCategory = 'all' | 'current' | 'document' | 'fontSets' | 'system';
-
-interface FontMenuEntry {
-  value: string;
-  label: string;
-}
 
 const BASE_FONTS = ['함초롬바탕', '함초롬돋움', '맑은 고딕', '나눔고딕', '바탕', '돋움', '궁서'];
 
@@ -56,6 +56,7 @@ export class Toolbar {
   private fontMenu: HTMLElement | null = null;
   private fontMenuCategory: FontMenuCategory = 'document';
   private fontMenuDocumentFonts: string[] = [];
+  private fontMenuQuery = '';
   private fontMenuCleanup: (() => void) | null = null;
   /** 마지막으로 받은 fontFamilies (언어별 7개 배열) */
   private lastFontFamilies?: string[];
@@ -757,6 +758,24 @@ export class Toolbar {
 
     const content = document.createElement('div');
     content.className = 'font-picker-content';
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.className = 'font-picker-search';
+    search.dataset.role = 'search';
+    search.placeholder = '글꼴 검색';
+    search.setAttribute('aria-label', '글꼴 검색');
+    search.autocomplete = 'off';
+    search.spellcheck = false;
+    search.value = this.fontMenuQuery;
+    search.addEventListener('input', () => {
+      this.fontMenuQuery = search.value;
+      this.renderFontMenu(menu);
+    });
+    search.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || event.isComposing) return;
+      event.preventDefault();
+      menu.querySelector<HTMLButtonElement>('.font-picker-option')?.click();
+    });
     const heading = document.createElement('div');
     heading.className = 'font-picker-heading';
     heading.dataset.role = 'heading';
@@ -764,7 +783,7 @@ export class Toolbar {
     list.className = 'font-picker-list';
     list.dataset.role = 'list';
     list.setAttribute('role', 'listbox');
-    content.append(heading, list);
+    content.append(search, heading, list);
     menu.append(categories, content);
 
     const rect = this.fontName.getBoundingClientRect();
@@ -774,6 +793,7 @@ export class Toolbar {
     this.fontMenu = menu;
     this.fontName.setAttribute('aria-expanded', 'true');
     this.renderFontMenu(menu);
+    search.focus();
 
     const closeOnPointerDown = (event: PointerEvent) => {
       const target = event.target;
@@ -798,6 +818,7 @@ export class Toolbar {
     this.fontMenuCleanup = null;
     this.fontMenu?.remove();
     this.fontMenu = null;
+    this.fontMenuQuery = '';
     this.fontName.setAttribute('aria-expanded', 'false');
   };
 
@@ -806,7 +827,10 @@ export class Toolbar {
     const list = menu.querySelector<HTMLElement>('[data-role="list"]');
     if (!heading || !list) return;
     const category = FONT_MENU_CATEGORIES.find(item => item.id === this.fontMenuCategory)!;
-    const entries = this.getFontMenuEntries(this.fontMenuCategory);
+    const entries = filterFontMenuEntries(
+      this.getFontMenuEntries(this.fontMenuCategory),
+      this.fontMenuQuery,
+    );
     heading.textContent = `${category.label} (${entries.length})`;
     for (const button of menu.querySelectorAll<HTMLButtonElement>('.font-picker-category')) {
       const active = button.dataset.category === this.fontMenuCategory;
@@ -818,7 +842,7 @@ export class Toolbar {
     if (entries.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'font-picker-empty';
-      empty.textContent = '표시할 글꼴이 없습니다.';
+      empty.textContent = fontMenuEmptyMessage(this.fontMenuQuery);
       fragment.appendChild(empty);
     } else {
       for (const entry of entries) {

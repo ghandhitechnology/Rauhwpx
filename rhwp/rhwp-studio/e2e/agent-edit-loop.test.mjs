@@ -717,6 +717,52 @@ try {
         `approve 후 목록 서식 영속 (headType=${pfAfter.headType}, numberingId=${pfAfter.numberingId})`,
       );
       await screenshot(page, 'agent-edit-loop-approved');
+
+      // ── i. 병렬 서브에이전트 리베이스 — 실제 엔진 위 편집 저널 검증 ──
+      // 형제 에이전트 둘이 같은 revision 을 읽고 서로소 문단에 쓰는 시나리오.
+      // 실제 wasm 의 이벤트 타이밍(스테이징 → document-mutated bump)이 저널
+      // 기록과 어긋나면 여기서 gap 으로 드러난다.
+      setTestCase('i. 병렬 리베이스 (edit journal)');
+      const sR = must(await call('get_structure', {}), 'get_structure(리베이스 기준)');
+      const sharedRev = sR.revision;
+      const rParaCount = sR.sections[0].paragraphCount;
+      const rLastLen = sR.sections[0].paragraphs[rParaCount - 1]?.length ?? 0;
+
+      const insA = must(await call('insert_text', {
+        expectedRevision: sharedRev, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: '병렬A\n',
+      }), 'insert_text(형제 A, 문단 +1)');
+      assert(insA.rebasedParaShift === undefined, '형제 A 는 정확한 revision — 리베이스 없음');
+
+      const insB = must(await call('insert_text', {
+        expectedRevision: sharedRev, sectionIdx: 0, paraIdx: rParaCount - 1, charOffset: rLastLen, text: '병렬B',
+      }), 'insert_text(형제 B, stale revision)');
+      assert(
+        insB.rebasedParaShift === 1,
+        `형제 B 의 stale 쓰기가 +1 리베이스로 통과 (rebasedParaShift=${insB.rebasedParaShift})`,
+      );
+      const rebasedText = must(
+        await call('get_text_range', { sectionIdx: 0, paraIdx: rParaCount }),
+        'get_text_range(리베이스된 문단)',
+      );
+      assert(
+        String(rebasedText.text ?? '').includes('병렬B'),
+        `리베이스된 좌표(문단 ${rParaCount})에 텍스트가 놓임: "${rebasedText.text}"`,
+      );
+
+      const conflict = await call('insert_text', {
+        expectedRevision: sharedRev, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'X',
+      });
+      assert(
+        !conflict.ok && conflict.error?.code === 'REVISION_MISMATCH'
+          && /concurrent edit touched/.test(conflict.error?.message ?? ''),
+        `같은 문단을 노린 stale 쓰기는 충돌 메시지로 거부 (${conflict.ok ? '성공(버그)' : conflict.error?.code})`,
+      );
+
+      // 정리 — 검증용 스테이징 편집을 되돌려 종료 상태를 깨끗이 한다
+      const rebaseSetIds = await page.evaluate(() => window.__agentBridge.pendingEdits.getChangeSets().map((s) => s.id));
+      for (const id of rebaseSetIds) {
+        await page.evaluate((i) => window.__agentBridge.pendingEdits.reject(i), id);
+      }
     } finally {
       try { mcp.ws.close(); } catch { /* 이미 닫힌 소켓 무시 */ }
     }

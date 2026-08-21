@@ -182,6 +182,51 @@ const CONNECT_TIMEOUT_MS = 4000;
 /** 요청/응답 대기 상한 — 넘기면 null 로 안착한다(던지지 않는다). */
 const REQUEST_TIMEOUT_MS = 10_000;
 
+/** 재연결 사이에 붙잡아 둘 tool-response 개수와 보관 기한(허브의 도구 타임아웃과 맞춘다). */
+const TOOL_RESPONSE_BUFFER_LIMIT = 32;
+const TOOL_RESPONSE_BUFFER_TTL_MS = 30_000;
+
+/**
+ * 소켓이 잠깐 닫힌 사이에 계산이 끝난 tool-response 를 담아 두었다가
+ * 재연결 직후 오래된 것부터 다시 보낸다. 허브는 이미 타임아웃된 id 를 받으면
+ * 로그만 남기고 무시하므로 늦은 응답을 흘려도 안전하다.
+ */
+export class ToolResponseBuffer {
+  private entries: Array<{ frame: unknown; expiresAt: number }> = [];
+  private readonly limit: number;
+  private readonly ttlMs: number;
+
+  constructor(limit = TOOL_RESPONSE_BUFFER_LIMIT, ttlMs = TOOL_RESPONSE_BUFFER_TTL_MS) {
+    this.limit = limit;
+    this.ttlMs = ttlMs;
+  }
+
+  get size(): number {
+    return this.entries.length;
+  }
+
+  push(frame: unknown, now = Date.now()): void {
+    this.entries.push({ frame, expiresAt: now + this.ttlMs });
+    // 한계를 넘으면 가장 오래된 것부터 버린다 — 오래 끊긴 세션이 메모리를 물지 않도록.
+    if (this.entries.length > this.limit) this.entries.splice(0, this.entries.length - this.limit);
+  }
+
+  /** 만료되지 않은 프레임을 오래된 순으로 꺼내고 버퍼를 비운다. */
+  drain(now = Date.now()): unknown[] {
+    const alive = this.entries.filter((entry) => entry.expiresAt > now);
+    this.entries = [];
+    return alive.map((entry) => entry.frame);
+  }
+
+  clear(): void {
+    this.entries = [];
+  }
+}
+
+/** 페이지 로드마다 새로 발급하는 스튜디오 인스턴스 id — 허브가 "잠깐 끊김"과 "새로고침·다른 탭"을 구분한다. */
+const STUDIO_INSTANCE_ID = globalThis.crypto?.randomUUID?.()
+  ?? `studio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
 function isAgentName(v: unknown): v is AgentName {
   return v === 'claude' || v === 'codex' || v === 'pi' || v === 'grok' || v === 'cursor';
 }
@@ -739,6 +784,8 @@ class AgentBridgeImpl implements AgentBridge {
   private hubLaunch: Promise<boolean> | null = null;
   private reconnectSeq = 0;
   private requests = new PendingRequestRegistry();
+  /** 끊긴 사이에 완료된 도구 결과 — 재연결 직후 다시 보낸다. */
+  private toolResponses = new ToolResponseBuffer();
   private disposed = false;
 
   private listeners = new Set<(e: SidebarEvent) => void>();
@@ -947,7 +994,8 @@ class AgentBridgeImpl implements AgentBridge {
     if (this.disposed) return;
     this.abortSocket();
     const base = this.url.replace(/\/$/, '');
-    const wsUrl = `${base}/studio?token=${encodeURIComponent(this.token)}&sessionId=${encodeURIComponent(this.sessionId)}`;
+    const wsUrl = `${base}/studio?token=${encodeURIComponent(this.token)}&sessionId=${encodeURIComponent(this.sessionId)}`
+      + `&instance=${encodeURIComponent(STUDIO_INSTANCE_ID)}`;
     this.setState('connecting');
     let ws: WebSocket;
     try {
@@ -974,6 +1022,9 @@ class AgentBridgeImpl implements AgentBridge {
       this.clearConnectTimer();
       this.reconnectAttempt = 0;
       this.setState('connected');
+      // 끊긴 사이에 끝난 도구 결과를 먼저 흘려보낸다 — 허브의 인플라이트 호출이
+      // 30초 타임아웃까지 가지 않고 이 응답으로 마무리된다.
+      this.flushToolResponses();
       if (this.pendingChatStart !== null) {
         const pending = this.pendingChatStart;
         this.sendJson({
@@ -1006,6 +1057,8 @@ class AgentBridgeImpl implements AgentBridge {
       if (ev.code === CLOSE_CODE_REPLACED) {
         // 다른 탭이 허브를 차지했다. 자동 재접속하면 서로 끝없이 밀어내므로
         // 이 탭이 다시 포커스를 받을 때까지 대기한다(마지막 활성 탭 우선).
+        // 허브는 이미 이 탭의 인플라이트 호출을 실패시켰으니 버퍼도 비운다.
+        this.toolResponses.clear();
         this.setState('replaced');
         return;
       }
@@ -1626,15 +1679,31 @@ class AgentBridgeImpl implements AgentBridge {
         template: readDocumentTemplate(msg.template) ?? undefined,
       })
       .then((result) => {
-        this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: true, result });
+        this.sendToolResponse({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: true, result });
       })
       .catch((e: unknown) => {
         const error =
           e instanceof AgentToolError
             ? { code: e.code, message: e.message }
             : { code: 'RPC_ERROR', message: e instanceof Error ? e.message : String(e) };
-        this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: false, error });
+        this.sendToolResponse({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: false, error });
       });
+  }
+
+  /** 소켓이 닫혀 있으면 결과를 버리지 않고 재연결 때까지 붙잡아 둔다. */
+  private sendToolResponse(frame: unknown): void {
+    if (this.sendJson(frame)) return;
+    this.toolResponses.push(frame);
+  }
+
+  private flushToolResponses(): void {
+    const frames = this.toolResponses.drain();
+    for (let i = 0; i < frames.length; i += 1) {
+      if (this.sendJson(frames[i])) continue;
+      // 다시 끊겼다 — 남은 프레임을 순서대로 되돌려 담고 다음 재연결을 기다린다.
+      for (const rest of frames.slice(i)) this.toolResponses.push(rest);
+      return;
+    }
   }
 
   // ─── outgoing API ─────────────────────────────────────────
@@ -2297,6 +2366,7 @@ class AgentBridgeImpl implements AgentBridge {
     document.removeEventListener('visibilitychange', this.onVisibility);
     this.clearReconnectTimer();
     this.requests.cancelAll();
+    this.toolResponses.clear();
     this.abortSocket();
     this.listeners.clear();
     this.revealUnsub?.();

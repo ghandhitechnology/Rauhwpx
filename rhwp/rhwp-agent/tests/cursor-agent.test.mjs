@@ -411,6 +411,18 @@ test('the system brief is prepended except when resuming a direct-workflow chat'
   session.dispose();
 });
 
+test('the brief carries the cursor parallel-work section, not the claude one', (t) => {
+  const { session, spawns } = startSession(t);
+  session.sendUserMessage('두 곳을 나눠 고쳐 줘');
+  const prompt = spawns[0].argv.at(-1);
+  assert.match(prompt, /PARALLEL WORK:/);
+  assert.match(prompt, /delegate to subagents/);
+  // claude 전용 문구(Workflow 도구, --agents 로 심는 이름)는 붙지 않는다.
+  assert.doesNotMatch(prompt, /Workflow tool/);
+  assert.doesNotMatch(prompt, /spawn_subagent/);
+  session.dispose();
+});
+
 test('the spawn env keeps HOME on the isolated home and authors the session cursor dir', (t) => {
   const { session, spawns, opts, root } = startSession(t, {
     // 운영자 셸이 내보낸 값이 그대로 상속되는 상황을 흉내 낸다.

@@ -126,8 +126,15 @@ for (const entry of matrix) {
     assert.ok(claudeTools.includes('Bash'));
     assert.ok(claudeTools.includes('WebSearch'));
     assert.ok(claudeTools.includes('WebFetch'));
-    assert.equal(claudeTools.includes('Agent'), entry.planCapabilities);
-    assert.equal(claude.includes('--forward-subagent-text'), entry.planCapabilities);
+    // Agent/Workflow 는 모든 모드에서 켜진다 — --tools 제한이 서브에이전트에도
+    // 상속되므로 planning 의 read-only 경계는 그대로 유지된다.
+    assert.ok(claudeTools.includes('Agent'));
+    assert.ok(claudeTools.includes('Workflow'));
+    assert.ok(claude.includes('--forward-subagent-text'));
+    const claudeAgents = JSON.parse(argValue(claude, '--agents'));
+    assert.ok(claudeAgents['doc-editor']);
+    assert.ok(claudeAgents['doc-researcher']);
+    assert.equal(claudeAgents['doc-editor'].tools, undefined);
     assert.equal(claude.includes('--dangerously-skip-permissions'), entry.claudeBypass);
     if (!entry.claudeWrite) {
       assert.deepEqual(claudeSettings.sandbox.filesystem.allowWrite, []);
@@ -145,9 +152,11 @@ for (const entry of matrix) {
     const codex = buildCodexArgv(opts, null);
     assert.ok(codex.includes(`sandbox_mode="${entry.codexSandbox}"`));
     assert.ok(codex.includes('mcp_servers.rhwp.default_tools_approval_mode="auto"'));
+    // 네이티브 서브에이전트는 모든 모드에서 켠다 — `--disable multi_agent` 는 codex
+    // 0.147.0 에서 스폰을 막지 못한다(라이브 프로브 확인).
     const multiAgentIndex = codex.indexOf('multi_agent');
     assert.notEqual(multiAgentIndex, -1);
-    assert.equal(codex[multiAgentIndex - 1], entry.planCapabilities ? '--enable' : '--disable');
+    assert.equal(codex[multiAgentIndex - 1], '--enable');
     assert.equal(codex.includes('web_search="live"'), entry.planCapabilities);
     assert.equal(JSON.parse(codexConfig(codex, 'mcp_servers.rhwp.command=').split('=', 2)[1]), '/Applications/Rau App/Rau');
     assert.deepEqual(
@@ -225,6 +234,22 @@ test('permission profiles split approval-gated staging from free editing', () =>
   ]) {
     assert.doesNotMatch(freeBrief, /review and approve the staged changes/);
     assert.match(freeBrief, /apply_engine_edits commits/);
+  }
+});
+
+test('every write-capable brief directs batched writes through apply_edits', () => {
+  for (const writeBrief of [
+    systemBriefFor({ workflow: 'direct' }),
+    systemBriefFor({ workflow: 'direct', permissionProfile: 'safe' }),
+    systemBriefFor({ workflow: 'direct', permissionProfile: 'unrestricted' }),
+    systemBriefFor({ workflow: 'plan', phase: 'implementing', permissionProfile: 'safe' }),
+    systemBriefFor({ workflow: 'plan', phase: 'implementing', permissionProfile: 'unrestricted' }),
+  ]) {
+    assert.match(writeBrief, /apply_edits/);
+    assert.match(writeBrief, /up to 32 items/);
+    assert.match(writeBrief, /bottom-of-document first/);
+    assert.match(writeBrief, /recovery guidance in the error message/);
+    assert.doesNotMatch(writeBrief, /ONE AT A TIME/);
   }
 });
 
@@ -571,7 +596,10 @@ test('Codex emits no usage event when turn.completed carries none', () => {
   }
 });
 
-test('Codex normalizes stable multi-agent lifecycle items', () => {
+// collab_tool_call 은 서브에이전트 카드가 아니다: codex 0.147.0 은 이 항목을
+// wait_agent 호출에만 내보낸다(라이브 캡처 runA2.ndjson). 카드는 롤아웃 워처가
+// 만들고 — 자세한 배선은 tests/codex-subagent-tasks.test.mjs 를 본다.
+test('Codex maps collab wait items to a plain root tool row', () => {
   const emitted = [];
   let process;
   const session = createCodexSession(
@@ -580,14 +608,15 @@ test('Codex normalizes stable multi-agent lifecycle items', () => {
   );
   session.sendUserMessage('delegate');
   process.emitJson(
-    { type: 'item.started', item: { id: 'collab-1', type: 'collab_tool_call', tool: 'spawn_agent', prompt: 'inspect', receiver_thread_ids: ['child-1'], status: 'in_progress' } },
-    { type: 'item.completed', item: { id: 'collab-1', type: 'collab_tool_call', tool: 'spawn_agent', receiver_thread_ids: ['child-1'], agents_states: { 'child-1': { status: 'completed', message: 'done' } }, status: 'completed' } },
+    { type: 'item.started', item: { id: 'item_1', type: 'collab_tool_call', tool: 'wait', receiver_thread_ids: [], prompt: null, agents_states: {}, status: 'in_progress' } },
+    { type: 'item.completed', item: { id: 'item_1', type: 'collab_tool_call', tool: 'wait', receiver_thread_ids: [], prompt: null, agents_states: {}, status: 'completed' } },
   );
+  assert.deepEqual(emitted.filter((event) => event.type.startsWith('task-')), []);
   const call = emitted.find((event) => event.type === 'tool-call');
+  assert.equal(call.tool, 'wait_agents');
+  assert.equal(call.argsJson, '{}');
   const result = emitted.find((event) => event.type === 'tool-result');
-  assert.equal(call.tool, 'subagent:spawn_agent');
-  assert.match(call.argsJson, /child-1/);
+  assert.equal(result.callId, 'item_1');
   assert.equal(result.ok, true);
-  assert.match(result.resultPreview, /done/);
   session.dispose();
 });

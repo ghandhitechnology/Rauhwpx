@@ -44,6 +44,48 @@ test('RevisionTracker: dispose 후에는 bump하지 않음', () => {
   assert.equal(tracker.revision, 1);
 });
 
+test('RevisionTracker: 저장(dirty→false)은 bump하지 않고, dirty→true는 bump한다', async () => {
+  const bus = new EventBus();
+  const tracker = new RevisionTracker(bus);
+  for (const reason of ['save', 'save-as', 'host-save']) {
+    bus.emit('document-dirty-changed', { dirty: false, reason });
+    assert.equal(tracker.revision, 1, `${reason} 는 bump 하지 않는다`);
+    await microtask();
+  }
+  bus.emit('document-dirty-changed', { dirty: true, reason: 'edit' });
+  assert.equal(tracker.revision, 2);
+  tracker.dispose();
+});
+
+test('RevisionTracker: 문서 로드/교체(dirty→false, 저장 아님)는 반드시 bump한다', async () => {
+  // 로드 경로는 document-mutated/changed 를 발행하지 않는다 — 이 전이가 유일한
+  // 신호이므로 놓치면 이전 문서의 expectedRevision 이 새 문서에 통과한다.
+  const bus = new EventBus();
+  const tracker = new RevisionTracker(bus);
+  bus.emit('document-dirty-changed', { dirty: false, reason: 'document-initialized' });
+  assert.equal(tracker.revision, 2);
+  await microtask();
+  // 이유가 없는 미지의 false 전이도 안전하게 bump 한다
+  bus.emit('document-dirty-changed', { dirty: false });
+  assert.equal(tracker.revision, 3);
+  tracker.dispose();
+});
+
+test('RevisionTracker: holdDuring 창 안의 이벤트는 bump하지 않는다', async () => {
+  const bus = new EventBus();
+  const tracker = new RevisionTracker(bus);
+  tracker.holdDuring(() => {
+    bus.emit('document-mutated', 'agent-preview');
+    bus.emit('document-changed');
+  });
+  assert.equal(tracker.revision, 1);
+  await microtask();
+  // 창 밖에서는 정상 bump — 억제가 누적되지 않는다
+  bus.emit('document-mutated', 'test');
+  assert.equal(tracker.revision, 2);
+  tracker.dispose();
+});
+
 // ─── AgentToolExecutor (stub deps) ──────────────────────────
 
 function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']]) {
@@ -111,6 +153,10 @@ function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']])
     },
     hasPendingStructureOp: () => false,
     hasTemplateMutation: () => false,
+    runAtomicBatch: <T,>(fn: () => T): T => {
+      calls.push({ method: 'runAtomicBatch', args: [] });
+      return fn();
+    },
   };
   const inputHandler = {
     getCursorPosition: () => ({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 }),
@@ -146,6 +192,7 @@ test('executor: 알 수 없는 툴 → UNKNOWN_TOOL', async () => {
 test('executor: document-write helper covers every mutating tool', () => {
   assert.deepEqual([...DOCUMENT_WRITE_TOOLS].sort(), [
     'apply_char_format',
+    'apply_edits',
     'apply_engine_edits',
     'apply_list',
     'apply_para_format',
@@ -344,7 +391,9 @@ test('executor: revision 불일치 → REVISION_MISMATCH (actionable 메시지)'
   );
   assert.match(err.message, /revision 1/);
   assert.match(err.message, /expected 99/);
-  assert.match(err.message, /get_structure/);
+  // 자기 유발 불일치는 재조회 없이 현재 revision 으로 바로 재시도할 수 있어야 한다
+  assert.match(err.message, /expectedRevision=1/);
+  assert.match(err.message, /get_text_range/);
 });
 
 test('executor: insert_text는 pending에 위임하고 새 revision을 반환', async () => {
@@ -394,6 +443,65 @@ test('executor: replace_range = 원자적 pending.replaceText 위임', async () 
   });
   assert.equal(r.revision, 2);
   assert.equal(typeof r.postEdit, 'string');
+});
+
+test('executor: apply_edits 는 revision 검사 한 번으로 항목들을 원자 배치로 순차 적용한다', async () => {
+  const { executor, calls } = makeExecutor([['hello world', 'second para']]);
+  const r = (await executor.execute('apply_edits', {
+    expectedRevision: 1,
+    edits: [
+      { tool: 'insert_text', args: { sectionIdx: 0, paraIdx: 0, charOffset: 5, text: ' brave' } },
+      {
+        tool: 'replace_range',
+        args: { sectionIdx: 0, startParaIdx: 1, startCharOffset: 0, endParaIdx: 1, endCharOffset: 6, text: 'third' },
+      },
+    ],
+  }, 'claude')) as any;
+  assert.deepEqual(calls.map((c) => c.method), ['runAtomicBatch', 'insertText', 'replaceText']);
+  assert.equal(r.applied, 2);
+  assert.equal(r.results.length, 2);
+  assert.equal(r.results[0].tool, 'insert_text');
+  assert.equal(r.results[1].tool, 'replace_range');
+  // 항목별 revision/note 는 제거된다 — 최상위 값만 유효
+  assert.equal(r.results[0].revision, undefined);
+  assert.equal(r.results[0].note, undefined);
+  assert.ok(Number.isInteger(r.revision) && r.revision > 1);
+  assert.ok(r.results[0].insertedRange);
+});
+
+test('executor: apply_edits 허용 목록 밖 tool / 잘못된 edits → INVALID_ARGS', async () => {
+  const { executor } = makeExecutor([['hello world']]);
+  await expectToolError(
+    executor.execute('apply_edits', {
+      expectedRevision: 1,
+      edits: [{ tool: 'apply_engine_edits', args: { operations: [] } }],
+    }, 'claude'),
+    'INVALID_ARGS',
+  );
+  await expectToolError(
+    executor.execute('apply_edits', { expectedRevision: 1, edits: [] }, 'claude'),
+    'INVALID_ARGS',
+  );
+});
+
+test('executor: apply_edits 항목 실패는 실패 인덱스를 담아 배치 전체 에러가 된다', async () => {
+  const { executor } = makeExecutor([['hello world']]);
+  const err = await expectToolError(
+    executor.execute('apply_edits', {
+      expectedRevision: 1,
+      edits: [
+        { tool: 'insert_text', args: { sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'ok ' } },
+        // 빈 범위 → INVALID_ARGS
+        {
+          tool: 'replace_range',
+          args: { sectionIdx: 0, startParaIdx: 0, startCharOffset: 3, endParaIdx: 0, endCharOffset: 3, text: 'x' },
+        },
+      ],
+    }, 'claude'),
+    'INVALID_ARGS',
+  );
+  assert.match(err.message, /edits\[1\] \(replace_range\)/);
+  assert.match(err.message, /rolled back/);
 });
 
 test('executor: apply_char_format은 서식 키 1개 이상 필요, fontSizePt → pt*100', async () => {

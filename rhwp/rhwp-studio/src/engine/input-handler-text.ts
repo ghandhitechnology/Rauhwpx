@@ -366,13 +366,77 @@ export function handleDelete(this: any, pos: DocumentPosition, inCell: boolean):
   }
 }
 
+function moveCompositionCaret(this: any, anchor: DocumentPosition, scalarOffset: number): void {
+  const newOffset = anchor.charOffset + scalarOffset;
+  if (this.cursor.isInHeaderFooter()) {
+    this.cursor.setHfCursorPosition(this.cursor.hfParaIdx, newOffset);
+  } else if (this.cursor.isInFootnote()) {
+    this.cursor.setFnCursorPosition(this.cursor.fnInnerParaIdx, newOffset);
+  } else {
+    this.cursor.moveTo({ ...anchor, charOffset: newOffset });
+  }
+}
+
+/**
+ * 문서에만 올라 있는 미커밋 preedit 을 지운다. 히스토리에는 넣지 않는다 —
+ * 문서 전환·취소처럼 확정하면 안 되는 경로에서 쓴다.
+ */
+export function revertCompositionPreview(this: any): void {
+  const anchor = this.compositionAnchor;
+  const length = this.compositionLength;
+  if (!anchor || length <= 0) return;
+  try {
+    this.resetRawTextMutationEffects();
+    this.replaceTextAtRaw(anchor, length, '');
+    this.compositionLength = 0;
+    this.consumeRawTextMutationBeforeCursor();
+  } catch {
+    this.compositionLength = 0;
+  }
+}
+
+function applyCompositionPreview(this: any, preedit: string): void {
+  const anchor = this.compositionAnchor;
+  if (!anchor) return;
+  const beforePageIndex = this.cursor.getRect()?.pageIndex;
+  this.resetRawTextMutationEffects();
+  this.replaceTextAtRaw(anchor, this.compositionLength, preedit);
+  this.compositionLength = charCount(preedit);
+  this.applyPendingCharFormatToInsertedRange?.(anchor, this.compositionLength);
+  const boundaryHandled = this.consumeRawTextMutationBeforeCursor();
+  moveCompositionCaret.call(this, anchor, this.compositionLength);
+  this.afterTextInputEdit(anchor, this.cursor.getPosition(), {
+    insertedText: preedit,
+    beforePageIndex,
+    afterPageIndex: this.cursor.getRect()?.pageIndex,
+  }, boundaryHandled);
+}
+
+/** 조합 중 자모를 엔진 문서에 반영해 페이지 캔버스가 네이티브 글리프로 그리게 한다. */
+function syncCompositionDocument(this: any, preedit: string): void {
+  const anchor = this.compositionAnchor;
+  if (!anchor) return;
+  if (this.agentTemplateLocked || !this.canInsertTextInFormMode?.(anchor)) {
+    revertCompositionPreview.call(this);
+    this.resetTextareaBuffer();
+    this.imeSession.reset();
+    this.compositionAnchor = null;
+    this.clearCompositionAnchorRect();
+    this.compositionLength = 0;
+    this.caret.hideComposition();
+    this.updateCaret();
+    return;
+  }
+  applyCompositionPreview.call(this, preedit);
+}
+
 export function onCompositionStart(this: any): void {
   if (this.isComposing) onCompositionEnd.call(this);
   this.resetRawTextMutationEffects();
   // 선택 영역이 있으면 삭제 후 조합 시작
   if (this.cursor.hasSelection()) {
     if (!this.canDeleteSelectionInFormMode?.()) {
-      this.textarea.value = '';
+      this.resetTextareaBuffer();
       return;
     }
     this.deleteSelection();
@@ -385,8 +449,8 @@ export function onCompositionStart(this: any): void {
   if (!this.cursor.isInHeaderFooter() && !this.cursor.isInFootnote()) {
     basePos = this.prepareClickHereInputPosition?.() ?? basePos;
   }
-  if (!this.canInsertTextInFormMode?.(basePos)) {
-    this.textarea.value = '';
+  if (this.agentTemplateLocked || !this.canInsertTextInFormMode?.(basePos)) {
+    this.resetTextareaBuffer();
     this.imeSession.reset();
     this.compositionAnchor = null;
     this.clearCompositionAnchorRect();
@@ -395,7 +459,6 @@ export function onCompositionStart(this: any): void {
   }
 
   this.captureCompositionAnchorRect(basePos);
-  this.compositionFontFamily = null;
   this.imeSession.start();
   this.compositionAnchor = basePos;
   this.compositionLength = 0;
@@ -405,66 +468,79 @@ export function onCompositionUpdate(this: any, event: CompositionEvent): void {
   if (!this.active || !this.isComposing || !this.compositionAnchor) return;
   const previous = this.imeSession.preedit;
   const preedit = this.imeSession.update(event.data.replace(/[\r\n]+/g, ''));
-  this.compositionLength = charCount(preedit);
-  if (preedit !== previous) this.updateCompositionOverlay();
+  if (preedit !== previous) syncCompositionDocument.call(this, preedit);
 }
 
 export function onCompositionEnd(this: any, event?: CompositionEvent): void {
   const anchor = this.compositionAnchor;
-  const textareaText = this.textarea.value.replace(/[\r\n]+/g, '');
+  const previousPreedit = this.imeSession.preedit;
+  const previousLength = this.compositionLength;
+  const textareaText = this.unconsumedTextareaValue().replace(/[\r\n]+/g, '');
   const commit = this.imeSession.finish(event?.data, textareaText);
   if (!commit) return;
 
   const composed = commit.text;
+  // value 를 비우지 않는다 — 다음 음절의 조합이 이미 textarea 에서 진행 중일 수
+  // 있고 (렌더링이 타자 속도보다 느릴 때), 그 순간의 value 변경은 브라우저가
+  // 조합을 파기해 글자를 씹는다. 반영 완료 지점만 전진시킨다.
+  this.consumeTextareaValue();
+  this.caret.hideComposition();
+
+  let committed = false;
+  if (anchor) {
+    const mayCommit = Boolean(composed)
+      && !this.agentTemplateLocked
+      && (this.canInsertTextInFormMode?.(anchor) ?? true);
+    if (!mayCommit) {
+      this.compositionLength = previousLength;
+      applyCompositionPreview.call(this, '');
+    } else {
+      const scalarLength = charCount(composed);
+      if (composed !== previousPreedit || scalarLength !== previousLength) {
+        this.compositionLength = previousLength;
+        applyCompositionPreview.call(this, composed);
+      }
+      if (this.cursor.isInHeaderFooter()) {
+        const target = {
+          sectionIdx: this.cursor.hfSectionIdx,
+          isHeader: this.cursor.headerFooterMode === 'header',
+          applyTo: this.cursor.hfApplyTo,
+        };
+        this.executeOperation({
+          kind: 'record',
+          command: new InsertTextInHeaderFooterCommand(
+            target, this.cursor.hfParaIdx, anchor.charOffset, composed, this.peekPendingCharFormat?.(),
+          ),
+        });
+        committed = true;
+      } else if (this.cursor.isInFootnote()) {
+        const target = {
+          sectionIdx: this.cursor.fnSectionIdx, paraIdx: this.cursor.fnParaIdx, controlIdx: this.cursor.fnControlIdx,
+          footnoteIndex: this.cursor.fnFootnoteIndex, pageNum: this.cursor.fnPageNum,
+        };
+        this.executeOperation({
+          kind: 'record',
+          command: new InsertTextInFootnoteCommand(
+            target, this.cursor.fnInnerParaIdx, anchor.charOffset, composed, this.peekPendingCharFormat?.(),
+          ),
+        });
+        committed = true;
+      } else {
+        const refreshClickHereGuide = this.isClickHereGuidePosition?.(anchor) === true;
+        this.executeOperation({
+          kind: 'record',
+          command: new InsertTextCommand(anchor, composed, undefined, this.peekPendingCharFormat?.()),
+        });
+        if (refreshClickHereGuide) this.refreshClickHereAfterFirstInput?.();
+        committed = true;
+      }
+    }
+  }
+
   this.compositionAnchor = null;
   this.clearCompositionAnchorRect();
   this.compositionLength = 0;
-  this.compositionFontFamily = null;
-  this.textarea.value = '';
-  this.caret.hideComposition();
   this.resetRawTextMutationEffects();
-
-  let committed = false;
-  if (anchor && composed && this.canInsertTextInFormMode?.(anchor)) {
-    const scalarLength = charCount(composed);
-    if (this.cursor.isInHeaderFooter()) {
-      const target = {
-        sectionIdx: this.cursor.hfSectionIdx,
-        isHeader: this.cursor.headerFooterMode === 'header',
-        applyTo: this.cursor.hfApplyTo,
-      };
-      const paraIdx = this.cursor.hfParaIdx;
-      this.insertTextAtRaw(anchor, composed);
-      this.consumeRawTextMutationBeforeCursor();
-      this.executeOperation({
-        kind: 'record',
-        command: new InsertTextInHeaderFooterCommand(target, paraIdx, anchor.charOffset, composed),
-      });
-      this.cursor.setHfCursorPosition(paraIdx, anchor.charOffset + scalarLength);
-      this.afterEdit();
-      committed = true;
-    } else if (this.cursor.isInFootnote()) {
-      const target = {
-        sectionIdx: this.cursor.fnSectionIdx, paraIdx: this.cursor.fnParaIdx, controlIdx: this.cursor.fnControlIdx,
-        footnoteIndex: this.cursor.fnFootnoteIndex, pageNum: this.cursor.fnPageNum,
-      };
-      const innerParaIdx = this.cursor.fnInnerParaIdx;
-      this.insertTextAtRaw(anchor, composed);
-      this.consumeRawTextMutationBeforeCursor();
-      this.executeOperation({
-        kind: 'record',
-        command: new InsertTextInFootnoteCommand(target, innerParaIdx, anchor.charOffset, composed),
-      });
-      this.cursor.setFnCursorPosition(innerParaIdx, anchor.charOffset + scalarLength);
-      this.afterEdit();
-      committed = true;
-    } else {
-      const refreshClickHereGuide = this.isClickHereGuidePosition?.(anchor) === true;
-      this.executeOperation({ kind: 'command', command: new InsertTextCommand(anchor, composed) });
-      if (refreshClickHereGuide) this.refreshClickHereAfterFirstInput?.();
-      committed = true;
-    }
-  }
 
   if (!committed) this.updateCaret();
 
@@ -483,31 +559,21 @@ export function onInput(this: any, e?: InputEvent): void {
     inputType: e.inputType,
     data: e.data,
     isComposing: e.isComposing,
-    value: this.textarea.value,
+    value: this.unconsumedTextareaValue(),
   })) {
-    this.textarea.value = '';
+    this.consumeTextareaValue();
     return;
   }
 
   // 줄바꿈은 문단 분할 Command 로만 들어온다. textarea 의 기본 동작으로 값에 섞여 들어온
   // \r\n 을 그대로 삽입하면 문단 안에 리터럴 개행 문자가 박힌다.
-  const text = (this.textarea.value || e?.data || '').replace(/[\r\n]+/g, '');
+  const text = (this.unconsumedTextareaValue() || e?.data || '').replace(/[\r\n]+/g, '');
 
-  // 조합 중에는 문서를 변경하지 않고 transient preedit만 갱신한다.
+  // 조합 중에는 히스토리에 넣지 않고 문서의 네이티브 preedit만 치환한다.
   if (this.isComposing && this.compositionAnchor) {
-    if (!this.canInsertTextInFormMode?.(this.compositionAnchor)) {
-      this.textarea.value = '';
-      this.imeSession.reset();
-      this.compositionAnchor = null;
-      this.clearCompositionAnchorRect();
-      this.compositionLength = 0;
-      this.updateCaret();
-      return;
-    }
     const previous = this.imeSession.preedit;
     const preedit = this.imeSession.update(text);
-    this.compositionLength = charCount(preedit);
-    if (preedit !== previous) this.updateCompositionOverlay();
+    if (preedit !== previous) syncCompositionDocument.call(this, preedit);
     return;
   }
 
@@ -535,13 +601,14 @@ export function onInput(this: any, e?: InputEvent): void {
       this._iosLength = 0;
     }
     if (!this.canInsertTextInFormMode?.(this._iosAnchor)) {
-      this.textarea.value = '';
+      this.resetTextareaBuffer();
       return;
     }
     this.resetRawTextMutationEffects();
 
     this.replaceTextAtRaw(this._iosAnchor, this._iosLength, text);
     this._iosLength = charCount(text);
+    this.applyPendingCharFormatToInsertedRange?.(this._iosAnchor, this._iosLength);
 
     const boundaryHandled = this.consumeRawTextMutationBeforeCursor();
     this._iosRequiresFullRefresh = this._iosRequiresFullRefresh || boundaryHandled;
@@ -574,13 +641,13 @@ export function onInput(this: any, e?: InputEvent): void {
 
   // 일반 입력 (비조합) → Command로 실행
   if (!text) {
-    // 개행만 들어온 경우 textarea 를 비워 다음 입력에 새지 않게 한다.
-    if (this.textarea.value) this.textarea.value = '';
+    // 개행만 들어온 경우 반영 완료로 표시해 다음 입력에 새지 않게 한다.
+    this.consumeTextareaValue();
     return;
   }
 
   this.imeSession.clearPendingCommit();
-  this.textarea.value = '';
+  this.consumeTextareaValue();
 
   // 머리말/꼬리말 편집 모드
   if (this.cursor.isInHeaderFooter()) {
@@ -590,8 +657,14 @@ export function onInput(this: any, e?: InputEvent): void {
       const paraIdx = this.cursor.hfParaIdx;
       const charOffset = this.cursor.hfCharOffset;
       this.wasm.insertTextInHeaderFooter(target.sectionIdx, isHeader, target.applyTo, paraIdx, charOffset, text);
+      this.applyPendingCharFormatToInsertedRange?.({ ...this.cursor.getPosition(), charOffset }, charCount(text));
       // [Task #2337] 히스토리 기록 → 본문 스냅샷 undo 가 이 편집을 무언 파괴하지 않게 한다.
-      this.executeOperation({ kind: 'record', command: new InsertTextInHeaderFooterCommand(target, paraIdx, charOffset, text) });
+      this.executeOperation({
+        kind: 'record',
+        command: new InsertTextInHeaderFooterCommand(
+          target, paraIdx, charOffset, text, this.peekPendingCharFormat?.(),
+        ),
+      });
       this.cursor.setHfCursorPosition(paraIdx, charOffset + charCount(text));
       this.afterEdit();
     } catch (err) {
@@ -610,7 +683,13 @@ export function onInput(this: any, e?: InputEvent): void {
       const innerParaIdx = this.cursor.fnInnerParaIdx;
       const charOffset = this.cursor.fnCharOffset;
       this.wasm.insertTextInFootnote(target.sectionIdx, target.paraIdx, target.controlIdx, innerParaIdx, charOffset, text);
-      this.executeOperation({ kind: 'record', command: new InsertTextInFootnoteCommand(target, innerParaIdx, charOffset, text) });
+      this.applyPendingCharFormatToInsertedRange?.({ ...this.cursor.getPosition(), charOffset }, charCount(text));
+      this.executeOperation({
+        kind: 'record',
+        command: new InsertTextInFootnoteCommand(
+          target, innerParaIdx, charOffset, text, this.peekPendingCharFormat?.(),
+        ),
+      });
       this.cursor.setFnCursorPosition(innerParaIdx, charOffset + charCount(text));
       this.afterEdit();
     } catch (err) {
@@ -624,7 +703,7 @@ export function onInput(this: any, e?: InputEvent): void {
   let refreshClickHereGuide = this.isClickHereGuidePosition?.(insertPos) === true;
   if (this.cursor.hasSelection()) {
     if (!this.canDeleteSelectionInFormMode?.()) {
-      this.textarea.value = '';
+      this.consumeTextareaValue();
       return;
     }
     this.deleteSelection();
@@ -632,10 +711,13 @@ export function onInput(this: any, e?: InputEvent): void {
     refreshClickHereGuide = this.isClickHereGuidePosition?.(insertPos) === true;
   }
   if (!this.canInsertTextInFormMode?.(insertPos)) {
-    this.textarea.value = '';
+    this.consumeTextareaValue();
     return;
   }
-  this.executeOperation({ kind: 'command', command: new InsertTextCommand(insertPos, text) });
+  this.executeOperation({
+    kind: 'command',
+    command: new InsertTextCommand(insertPos, text, undefined, this.peekPendingCharFormat?.()),
+  });
   if (refreshClickHereGuide) {
     this.refreshClickHereAfterFirstInput?.();
   }
