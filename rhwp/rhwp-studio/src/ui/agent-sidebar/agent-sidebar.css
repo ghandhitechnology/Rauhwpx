@@ -899,6 +899,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-skill-item.ag-skill-disabled { opacity: 0.55; }
 
 .ag-skill-copy {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
   min-width: 0;
   padding: 0;
   border: 0;
@@ -906,6 +910,26 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+.ag-skill-copy-text {
+  display: block;
+  min-width: 0;
+}
+
+.ag-skill-kind-icon,
+.ag-slash-skill-icon {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  color: var(--ag-accent);
+}
+
+.ag-skill-kind-icon .ag-icon,
+.ag-slash-skill-icon .ag-icon {
+  width: 15px;
+  height: 15px;
 }
 
 .ag-skill-item-name,
@@ -3876,6 +3900,12 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   color: var(--ag-text);
   font: inherit;
   text-align: left;
+}
+
+.ag-slash-option.ag-skill-option {
+  grid-template-columns: 18px minmax(110px, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
 }
 .ag-slash-option.ag-active { background: var(--ag-selected); }
 .ag-slash-detail { overflow: hidden; color: var(--ag-text-muted); font-size: var(--font-size-sm, 11px); text-overflow: ellipsis; white-space: nowrap; }

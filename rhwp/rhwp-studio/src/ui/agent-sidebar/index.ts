@@ -81,6 +81,7 @@ import { summarizePendingDiffs } from './pending-diff-summary.ts';
 import { createReferenceLibrary } from './reference-library.ts';
 import { isDesktopApp } from '../../desktop-integration.ts';
 import { fuzzyTemplateScore } from './template-fuzzy.ts';
+import { skillGlyphForName } from './skill-presentation.ts';
 import type {
   InlinePromptSendResult,
   InlinePromptSubmission,
@@ -1605,7 +1606,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const composerSkill = el('span', 'ag-skill-token ag-composer-skill');
   composerSkill.hidden = true;
   const composerSkillIcon = el('span', 'ag-skill-token-icon');
-  composerSkillIcon.appendChild(createIcon('skill'));
   const composerSkillName = el('span', 'ag-skill-token-name');
   const composerSkillClear = el('button', 'ag-skill-token-clear');
   composerSkillClear.type = 'button';
@@ -2605,12 +2605,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         if (!skill.enabled) item.classList.add('ag-skill-disabled');
         const copy = el('button', 'ag-skill-copy');
         copy.type = 'button';
-        copy.append(el('strong', 'ag-skill-item-name', `/${skill.name}`), el('span', 'ag-skill-item-description', skill.description));
+        const copyIcon = el('span', 'ag-skill-kind-icon');
+        copyIcon.appendChild(createIcon(skillGlyphForName(skill.name)));
+        const copyText = el('span', 'ag-skill-copy-text');
+        copyText.append(el('strong', 'ag-skill-item-name', `/${skill.name}`), el('span', 'ag-skill-item-description', skill.description));
         const badges = el('span', 'ag-skill-badges');
         if (skill.required) badges.appendChild(el('span', 'ag-skill-badge', '필수'));
         if (skill.hasScripts) badges.appendChild(el('span', 'ag-skill-badge ag-skill-badge-warn', '스크립트'));
         if (skill.hasAssets) badges.appendChild(el('span', 'ag-skill-badge', '자산'));
-        copy.appendChild(badges);
+        copyText.appendChild(badges);
+        copy.append(copyIcon, copyText);
         copy.addEventListener('click', () => openSkill(skill));
         const actions = el('div', 'ag-skill-item-actions');
         const toggle = el('button', 'ag-skill-toggle', skill.required ? '필수' : (skill.enabled ? '사용 중' : '꺼짐'));
@@ -2735,6 +2739,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     activeComposerSkill = skill;
     composerSkill.hidden = skill === null;
     composerSkillName.textContent = skill ? skillDisplayName(skill.name) : '';
+    composerSkillIcon.replaceChildren();
+    if (skill) composerSkillIcon.appendChild(createIcon(skillGlyphForName(skill.name)));
     composerSkill.dataset.agent = skill ? selectedAgent : '';
     composerSkill.title = skill ? `/${skill.name} · ${skill.description}` : '';
     input.setAttribute('aria-label', skill ? `/${skill.name} 스킬 뒤의 메시지 입력` : '에이전트 메시지 입력');
@@ -2839,7 +2845,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       row.setAttribute('role', 'option');
       row.setAttribute('aria-selected', index === slashIndex ? 'true' : 'false');
       row.classList.toggle('ag-active', index === slashIndex);
-      row.append(el('strong', 'ag-slash-name', option.label), el('span', 'ag-slash-detail', option.detail));
+      if (option.skillName) {
+        row.classList.add('ag-skill-option');
+        const icon = el('span', 'ag-slash-skill-icon');
+        icon.appendChild(createIcon(skillGlyphForName(option.skillName)));
+        row.append(icon, el('strong', 'ag-slash-name', option.label), el('span', 'ag-slash-detail', option.detail));
+      } else {
+        row.append(el('strong', 'ag-slash-name', option.label), el('span', 'ag-slash-detail', option.detail));
+      }
       row.addEventListener('mousedown', (event) => { event.preventDefault(); chooseSlashOption(option); });
       slashMenu.appendChild(row);
     });
@@ -3171,7 +3184,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       const skill = el('span', 'ag-skill-token ag-msg-skill');
       skill.dataset.agent = message.agent ?? currentThread.agent;
       const icon = el('span', 'ag-skill-token-icon');
-      icon.appendChild(createIcon('skill'));
+      icon.appendChild(createIcon(skillGlyphForName(message.skillName)));
       skill.append(icon, el('span', 'ag-skill-token-name', skillDisplayName(message.skillName)));
       skill.title = `/${message.skillName}`;
       skill.setAttribute('aria-label', `사용한 스킬: ${skillDisplayName(message.skillName)}`);
