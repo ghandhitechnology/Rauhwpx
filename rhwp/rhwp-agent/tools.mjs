@@ -3,7 +3,7 @@
 import { z } from 'zod';
 
 export const REVISION_NOTE = 'Returns the current document revision. Always use the revision from your most recent tool call as expectedRevision in write tools.';
-const WRITE_NOTE_REVISION = 'Requires expectedRevision (the revision returned by your most recent tool call). Fails with REVISION_MISMATCH if the document changed — the error message carries the current revision and how to recover.';
+const WRITE_NOTE_REVISION = 'Requires expectedRevision (the revision returned by your most recent tool call). Fails with REVISION_MISMATCH if the document changed — the error message carries the current revision and how to recover. Core text writes from sibling agents editing disjoint paragraph ranges are rebased automatically (the response then carries rebasedParaShift), so a mismatch signals a real conflict.';
 const WRITE_NOTE_STAGING = 'Successful edits are staged as live preview; at turn end they are auto-committed (전체 접근 profile) or held for the user’s review and approval (안전 profile), and committed edits remain undoable in the editor.';
 export const WRITE_NOTE = `${WRITE_NOTE_REVISION} When you already know two or more edits to make, batch them into ONE apply_edits call instead of separate calls. ${WRITE_NOTE_STAGING}`;
 // apply_edits 자신에게는 배치 권유 문장이 소음이라 뺀 변형을 쓴다.

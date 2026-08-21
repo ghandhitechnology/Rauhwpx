@@ -18,6 +18,7 @@ import {
   mcpCapabilityEnv,
   mcpRuntimeFor,
   normalizeExecutionMode,
+  normalizeTaskUsage,
   normalizeUsageTokens,
   systemBriefFor,
   truncate,
@@ -39,6 +40,34 @@ const AUTHORED_FILES = new Set(['mcp.json', 'cli-config.json']);
 const PROMPT_BYTE_LIMIT = 600_000;
 /** 재생으로 판정할 최소 길이 — 이보다 짧은 조각은 정상적으로 반복될 수 있다. */
 const REPLAY_MIN_LENGTH = 24;
+/**
+ * 서브에이전트 전사(conversationSteps)를 재생할 상한. cursor 는 자식 활동을
+ * 스트리밍하지 않고 완료 시점에 전사를 통째로 넘기므로, 긴 자식 하나가 사이드바를
+ * 뒤덮지 않도록 앞에서부터 이 개수까지만 이벤트로 푼다.
+ */
+const TASK_STEP_REPLAY_LIMIT = 50;
+/**
+ * task 가 있었던 턴의 정착 유예. 열린 task 가 하나도 없을 때만 돈다 — 열린 task 가
+ * 남아 있으면 유예 없이 무한정 붙든다(claude 하니스와 같은 규약). 마지막 카드가
+ * 닫힌 뒤에도 후속 줄이 이어질 수 있어 이만큼 조용해야 턴을 닫는다.
+ * 프로세스 'exit' 뒤 'close' 를 기다리는 상한으로도 같은 값을 쓴다.
+ */
+const TASK_SETTLE_GRACE_MS = 1_500;
+/** parentTaskId 별칭(agentId → taskId) 맵 상한 — 오래된 것부터 버린다. */
+const TASK_ALIAS_LIMIT = 512;
+/**
+ * agent.v1.ToolCall 은 oneof `tool` 멤버 하나와 비-oneof 형제를 함께 싣는다.
+ * 키 순서에 기대지 않도록 형제를 건너뛰고 oneof 멤버를 고른다.
+ * 근거: /tmp/rhwp-probe3/cursor/evidence.txt 2행(agent.v1.ToolCall 필드 목록 —
+ * hook_additional_contexts(54) / tool_call_id(57) / started_at_ms(59) /
+ * completed_at_ms(60) 만 oneof 밖이다).
+ */
+const TOOL_CALL_SIBLING_KEYS = new Set([
+  'hookAdditionalContexts',
+  'toolCallId',
+  'startedAtMs',
+  'completedAtMs',
+]);
 
 /**
  * 세션 전용 ~/.cursor 를 만든다. 영속 허브 소유 cursor 홈(sourceCursorDir)의
@@ -238,6 +267,73 @@ function toolCallArgs(kind, inner) {
 }
 
 /**
+ * tool_call 페이로드에서 oneof 멤버 키를 고른다 (없으면 빈 문자열).
+ *
+ * @param {any} payload
+ */
+function pickToolCallKey(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  for (const key of Object.keys(payload)) {
+    if (!TOOL_CALL_SIBLING_KEYS.has(key)) return key;
+  }
+  return '';
+}
+
+/** oneof 결과에서 성공 여부 — 실패 변형에는 success 키가 없다. */
+function isSuccessResult(result) {
+  if (result == null) return true;
+  return Object.prototype.hasOwnProperty.call(result, 'success');
+}
+
+/**
+ * 서브에이전트 종류 → 카드 role. subagentType 은 빈 메시지들의 oneof 라
+ * JSON 이 {"explore":{}} 형태이고 custom 만 {name} 을 싣는다. protobuf-es 는
+ * 설정되지 않은 메시지 필드를 빼거나 null 로 낼 수 있어 둘 다 받는다.
+ * 근거: /tmp/rhwp-probe3/cursor/evidence.txt (agent.v1.SubagentType).
+ *
+ * @param {any} subagentType
+ */
+function subagentRole(subagentType) {
+  if (!subagentType || typeof subagentType !== 'object') return '';
+  const key = Object.keys(subagentType)[0];
+  if (!key || key === 'unspecified') return '';
+  if (key === 'custom') {
+    const name = subagentType.custom?.name;
+    return typeof name === 'string' && name ? name : 'custom';
+  }
+  return key;
+}
+
+/**
+ * task 카드 제목. description 은 비-옵셔널 스칼라라 항상 실리지만 빈 문자열일 수
+ * 있다 — 그 경우 프롬프트 첫 줄로 대체한다.
+ *
+ * @param {any} args agent.v1.TaskArgs
+ */
+function taskTitle(args) {
+  const description = typeof args?.description === 'string' ? args.description.trim() : '';
+  if (description) return truncate(description, 120);
+  const prompt = typeof args?.prompt === 'string' ? args.prompt : '';
+  const firstLine = prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  return firstLine ? truncate(firstLine, 120) : '서브에이전트';
+}
+
+/**
+ * system/task_notification 의 status → 통일 task-end 상태.
+ * (BackgroundTaskStatus 가 success/error/aborted 로 실린다.)
+ *
+ * @param {any} status
+ */
+function taskNotificationStatus(status) {
+  const s = String(status ?? '');
+  if (s === 'success') return 'completed';
+  if (s === 'aborted') return 'stopped';
+  // error 를 포함해 모르는 상태는 실패로 본다 — 성공을 지어내면 실패한 턴의
+  // 스테이징 편집이 그대로 커밋된다.
+  return 'failed';
+}
+
+/**
  * @param {import('./backend.mjs').BackendOptions} opts
  * @returns {import('./backend.mjs').AgentSession}
  */
@@ -259,13 +355,296 @@ export function createCursorSession(opts, {
   let chatId = null;
   let currentModel = opts.model ?? null;
 
+  // ── 서브에이전트 task 추적 ────────────────────────────────────────
+  // cursor 의 서브에이전트 표면은 tool_call 의 taskToolCall oneof 하나뿐이고,
+  // 자식 활동은 스트리밍되지 않는다(헤드리스 이미터가 toolCallDelta 를 다루지
+  // 않는다). 그래서 started 에서 카드를 열고 completed 의 conversationSteps 를
+  // 자식 이벤트로 재생한다.
+  // 근거: /tmp/rhwp-probe3/cursor/evidence.txt + emitter-region.txt (빌드
+  // 2026.08.11-e8db854 번들 정적 추출). 이 머신의 cursor-agent 는 미인증이라 실행
+  // 검증이 불가능하므로 아래는 전부 방어적으로 읽는다: started 시점의 agentId 유무,
+  // 백그라운드 완료의 실제 모양(전사가 비어 오는지), 자식 토큰 usage 의 귀속은
+  // 확인되지 않았다.
+  /** 아직 안 닫힌 task 의 taskId 집합. @type {Set<string>} */
+  const openTasks = new Set();
+  /** success.agentId → taskId. 뒤늦은 task_notification 을 카드에 잇는 별칭. */
+  const taskIdByAlias = new Map();
+  /** 이번 턴에 카드를 연 task 수 — 0 이면 result 줄에서 즉시 닫는다(지연 없음). */
+  let tasksSeenThisTurn = 0;
+  /**
+   * result 줄이 담아 온 turn-end 재료 — 열린 task 가 있으면 보류한다.
+   * @type {{ stopReason: string, errorMessage: string | undefined } | null}
+   */
+  let pendingTurnResult = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let settleTimer = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let exitSweepTimer = null;
+  /** 이번 스폰의 세대 — 죽어가는 이전 턴의 exit 이 새 턴을 건드리지 못하게 막는다. */
+  let turnToken = 0;
+
+  function clearSettleTimer() {
+    if (settleTimer) {
+      clearTimeout(settleTimer);
+      settleTimer = null;
+    }
+  }
+
+  function clearExitSweepTimer() {
+    if (exitSweepTimer) {
+      clearTimeout(exitSweepTimer);
+      exitSweepTimer = null;
+    }
+  }
+
+  function resetTurnTaskState() {
+    clearSettleTimer();
+    clearExitSweepTimer();
+    // 이전 턴이 'close' 없이 끝났다면 카드가 남아 있다 — 조용히 지우면 사이드바에
+    // 영원히 도는 행이 되므로, 새 turn-start 앞에서 stopped 로 닫아 준다.
+    sweepOpenTasks();
+    tasksSeenThisTurn = 0;
+    pendingTurnResult = null;
+  }
+
+  /**
+   * 열린 카드 하나를 닫는다. 이미 닫힌(쓸어 담긴) task 는 무시한다 — 뒤늦은
+   * completed/알림이 task-end 를 두 번 내지 않게 한다.
+   *
+   * @param {string} taskId
+   * @param {{ status: 'completed'|'failed'|'stopped', summary?: string, usage?: import('./backend.mjs').TaskUsage }} fields
+   */
+  function closeTask(taskId, fields) {
+    if (!openTasks.delete(taskId)) return;
+    onEvent({ type: 'task-end', agent: 'cursor', taskId, ...fields });
+  }
+
+  /** 남은 task 를 stopped 로 닫는다 — turn-end 앞에 반드시 선행한다. */
+  function sweepOpenTasks() {
+    for (const taskId of [...openTasks]) {
+      closeTask(taskId, { status: 'stopped' });
+    }
+  }
+
+  /** 보류해 둔 result 로 턴을 닫는다 (열린 task 는 stopped 로 쓸어 담는다). */
+  function settleTurn() {
+    clearSettleTimer();
+    const result = pendingTurnResult ?? { stopReason: 'completed', errorMessage: undefined };
+    pendingTurnResult = null;
+    sweepOpenTasks();
+    lifecycle.endTurn({
+      type: 'turn-end',
+      agent: 'cursor',
+      stopReason: result.stopReason ?? 'completed',
+      errorMessage: result.errorMessage,
+    });
+  }
+
+  /**
+   * result 를 이미 받았다면 정착 조건을 본다.
+   * - 열린 task 가 있으면 유예 없이 붙든다: 뒤늦은 task_notification 이 성공한
+   *   백그라운드 카드를 stopped 로 만들지 않도록, 턴은 카드가 다 닫히거나
+   *   프로세스가 죽을 때까지 열려 있다.
+   * - 카드가 다 닫혔고 이번 턴에 task 가 있었으면, 후속 줄이 이어질 수 있으니
+   *   조용해진 뒤에 닫는다. task 가 없던 턴은 곧바로 닫는다.
+   */
+  function settleIfReady() {
+    if (!pendingTurnResult || !lifecycle.isTurnOpen()) return;
+    if (openTasks.size > 0) return;
+    if (tasksSeenThisTurn === 0) {
+      settleTurn();
+      return;
+    }
+    settleTimer = setTimeout(() => {
+      settleTimer = null;
+      if (lifecycle.isDisposed() || !lifecycle.isTurnOpen()) return;
+      settleTurn();
+    }, TASK_SETTLE_GRACE_MS);
+    settleTimer.unref?.();
+  }
+
+  function rememberTaskAlias(alias, taskId) {
+    if (!alias || alias === taskId) return;
+    taskIdByAlias.set(alias, taskId);
+    if (taskIdByAlias.size > TASK_ALIAS_LIMIT) {
+      taskIdByAlias.delete(taskIdByAlias.keys().next().value);
+    }
+  }
+
+  /**
+   * conversationSteps 안의 toolCall 하나를 자식 도구 행 한 쌍으로 편다.
+   * 자식 전사는 완료 후에 오므로 호출과 결과를 즉시 연달아 낸다.
+   *
+   * @param {string} taskId
+   * @param {any} call agent.v1.ToolCall
+   * @param {number} index
+   */
+  function emitChildToolCall(taskId, call, index) {
+    const key = pickToolCallKey(call);
+    const inner = key ? call[key] : null;
+    const kind = key ? key.replace(/ToolCall$/, '') : 'tool';
+    const tool = kind === 'mcp' ? mcpToolLabel(inner) : kind;
+    // 중첩 task(자식이 또 스폰한 경우)는 카드가 아니라 자식 도구 행으로만 남긴다 —
+    // 프롬프트 전문이 사이드바에 실리지 않게 요약만 붙인다.
+    const args = kind === 'task'
+      ? {
+        description: String(inner?.args?.description ?? ''),
+        prompt: truncate(String(inner?.args?.prompt ?? ''), 400),
+      }
+      : toolCallArgs(kind, inner);
+    // toolCallId 는 옵셔널이라 없을 수 있다 — 카드 안에서만 유일하면 충분하다.
+    const callId = String(call?.toolCallId ?? '') || `${taskId}:step-${index}`;
+    onEvent({
+      type: 'tool-call',
+      agent: 'cursor',
+      callId,
+      tool,
+      argsJson: JSON.stringify(args),
+      parentTaskId: taskId,
+    });
+    const result = inner?.result;
+    onEvent({
+      type: 'tool-result',
+      agent: 'cursor',
+      callId,
+      ok: isSuccessResult(result),
+      resultPreview: truncate(JSON.stringify(result ?? null)),
+      parentTaskId: taskId,
+    });
+  }
+
+  /**
+   * taskToolCall.result.success 재생 → 자식 이벤트 + task-end.
+   * ConversationStep 은 assistantMessage | toolCall | thinkingMessage oneof 다
+   * (thinking 은 카드에 싣지 않는다).
+   *
+   * @param {string} taskId
+   * @param {any} success agent.v1.TaskSuccess
+   */
+  function replayTaskTranscript(taskId, success) {
+    const steps = Array.isArray(success?.conversationSteps) ? success.conversationSteps : [];
+    const limit = Math.min(steps.length, TASK_STEP_REPLAY_LIMIT);
+    let lastText = '';
+    let toolUses = 0;
+    let emittedText = false;
+    for (let i = 0; i < limit; i += 1) {
+      const step = steps[i];
+      const assistant = step?.assistantMessage;
+      if (assistant && typeof assistant.text === 'string') {
+        if (!assistant.text) continue;
+        lastText = assistant.text;
+        onEvent({
+          type: 'text-delta',
+          agent: 'cursor',
+          // 전사는 델타가 아니라 메시지 단위다 — 이어 붙지 않게 문단을 띄운다.
+          text: emittedText ? `\n\n${assistant.text}` : assistant.text,
+          parentTaskId: taskId,
+        });
+        emittedText = true;
+        continue;
+      }
+      if (step?.toolCall) {
+        emitChildToolCall(taskId, step.toolCall, i);
+        toolUses += 1;
+      }
+    }
+    return { lastText, toolUses, truncated: steps.length > limit };
+  }
+
+  /**
+   * tool_call 의 taskToolCall 분기. 스폰 도구 자체는 루트 도구 행으로 내지 않는다 —
+   * task 카드가 그 자리를 대신한다.
+   *
+   * @param {string} subtype
+   * @param {string} callId
+   * @param {any} inner agent.v1.TaskToolCall
+   */
+  function handleTaskToolCall(subtype, callId, inner) {
+    if (!callId) return;
+    if (subtype === 'started') {
+      const args = inner?.args;
+      const role = subagentRole(args?.subagentType);
+      if (!openTasks.has(callId)) tasksSeenThisTurn += 1;
+      openTasks.add(callId);
+      // agentId 는 started 시점에 비어 있을 수 있다 — 있으면 미리 별칭으로 잡아 둔다.
+      rememberTaskAlias(String(args?.agentId ?? ''), callId);
+      onEvent({
+        type: 'task-start',
+        agent: 'cursor',
+        taskId: callId,
+        callId,
+        title: taskTitle(args),
+        ...(role ? { role } : {}),
+        taskKind: 'agent',
+      });
+      return;
+    }
+    if (subtype !== 'completed' || !openTasks.has(callId)) return;
+    const result = inner?.result;
+    // 결과 멤버가 아예 없는 완료는 루트 도구 경로와 같은 규약으로 읽는다(null → 성공).
+    if (result == null) {
+      closeTask(callId, { status: 'completed' });
+      return;
+    }
+    if (!isSuccessResult(result)) {
+      const message = String(result?.error?.error ?? '');
+      closeTask(callId, {
+        status: 'failed',
+        ...(message ? { summary: truncate(message, 500) } : {}),
+      });
+      return;
+    }
+    const success = result.success ?? {};
+    const { lastText, toolUses, truncated } = replayTaskTranscript(callId, success);
+    rememberTaskAlias(String(success.agentId ?? ''), callId);
+    // 백그라운드로 넘어간 서브에이전트는 전사가 비어 있고 나중에
+    // system/task_notification 이 닫는다 — 그때까지 카드를 열어 둔다.
+    if (success.isBackground === true && toolUses === 0 && !lastText) return;
+    // durationMs 는 uint64 라 JSON 에 문자열로 실릴 수 있다 — normalizeTaskUsage 가 흡수한다.
+    const usage = normalizeTaskUsage({
+      durationMs: success.durationMs,
+      ...(toolUses > 0 ? { toolUses } : {}),
+    });
+    const summary = String(success.resultSuffix ?? '') || lastText;
+    closeTask(callId, {
+      status: 'completed',
+      ...(summary ? { summary: truncate(summary, 500) } : {}),
+      ...(usage ? { usage } : {}),
+    });
+    if (truncated) {
+      process.stderr.write(`[cursor] task ${callId}: 전사 ${TASK_STEP_REPLAY_LIMIT}단계까지만 재생했습니다\n`);
+    }
+  }
+
+  /**
+   * 백그라운드 작업 완료 알림. 서브에이전트와 백그라운드 셸이 같은 이벤트를
+   * 공유하고 구분용 kind 필드는 방출 전에 떨어져 나가므로, 아는 task 에 걸리지
+   * 않는 task_id(셸의 숫자 id 등)는 조용히 버린다.
+   *
+   * @param {any} e
+   */
+  function handleTaskNotification(e) {
+    const raw = String(e?.task_id ?? '');
+    if (!raw) return;
+    const taskId = openTasks.has(raw) ? raw : taskIdByAlias.get(raw);
+    if (!taskId || !openTasks.has(taskId)) return;
+    const detail = typeof e.detail === 'string' ? e.detail : '';
+    closeTask(taskId, {
+      status: taskNotificationStatus(e.status),
+      ...(detail ? { summary: truncate(detail, 500) } : {}),
+    });
+  }
+
   function makeHandler() {
     let emittedText = false;
     // 이번 턴에 이미 내보낸 본문 — 재시도 플러시의 재생을 걸러내는 데 쓴다.
     let emittedTurnText = '';
-    return (e) => {
-      if (lifecycle.isDisposed()) return; // 폐기 후 죽어가는 CLI 가 흘리는 stdout 은 무시한다.
+    const handleLine = (e) => {
       const type = e?.type;
+      if (type === 'system' && e.subtype === 'task_notification') {
+        handleTaskNotification(e);
+        return;
+      }
       if (type === 'system' && e.subtype === 'init') {
         if (e.session_id) chatId = String(e.session_id);
         if (typeof e.model === 'string' && e.model) currentModel = e.model;
@@ -304,10 +683,15 @@ export function createCursorSession(opts, {
       if (type === 'tool_call') {
         const callId = String(e.call_id ?? '');
         const payload = e.tool_call && typeof e.tool_call === 'object' ? e.tool_call : {};
-        const key = Object.keys(payload)[0];
+        const key = pickToolCallKey(payload);
         const inner = key ? payload[key] : null;
         const kind = key ? key.replace(/ToolCall$/, '') : 'tool';
         const tool = kind === 'mcp' ? mcpToolLabel(inner) : kind;
+        // 서브에이전트 스폰은 도구 행이 아니라 task 카드로 표현한다.
+        if (kind === 'task') {
+          handleTaskToolCall(String(e.subtype ?? ''), callId, inner);
+          return;
+        }
         if (e.subtype === 'started') {
           onEvent({
             type: 'tool-call',
@@ -318,17 +702,14 @@ export function createCursorSession(opts, {
           });
         } else if (e.subtype === 'completed') {
           const result = inner?.result;
-          // 결과는 protobuf oneof 다 — 성공이면 success 멤버 하나만 실린다.
-          // 실패 변형(rejected/permissionDenied/timeout/fileNotFound/noSpace …)에는
-          // success 도 error 도 없으므로 success 키의 유무만으로 판정한다.
-          const ok = result == null
-            ? true
-            : Object.prototype.hasOwnProperty.call(result, 'success');
           onEvent({
             type: 'tool-result',
             agent: 'cursor',
             callId,
-            ok,
+            // 결과는 protobuf oneof 다 — 성공이면 success 멤버 하나만 실린다.
+            // 실패 변형(rejected/permissionDenied/timeout/fileNotFound/noSpace …)에는
+            // success 도 error 도 없으므로 success 키의 유무만으로 판정한다.
+            ok: isSuccessResult(result),
             resultPreview: truncate(JSON.stringify(result ?? null)),
           });
         }
@@ -345,14 +726,21 @@ export function createCursorSession(opts, {
         // camelCase 로 온다 — normalizeUsageTokens 가 네 필드를 모두 흡수한다.
         const usage = normalizeUsageTokens(e.usage);
         if (usage) onEvent({ type: 'usage', agent: 'cursor', model: currentModel, usage });
-        lifecycle.endTurn({
-          type: 'turn-end',
-          agent: 'cursor',
+        // 아래 settleIfReady 가 정착 조건을 본다. 열린 카드가 있으면 턴을 붙들고,
+        // 서브에이전트가 없던 턴은 지연 없이 여기서 닫힌다.
+        pendingTurnResult = {
           stopReason: e.subtype ?? 'completed',
           errorMessage: e.is_error ? String(e.result) : undefined,
-        });
+        };
         return;
       }
+    };
+    return (e) => {
+      if (lifecycle.isDisposed()) return; // 폐기 후 죽어가는 CLI 가 흘리는 stdout 은 무시한다.
+      // 새 stdout 라인 = CLI 가 아직 할 일이 있다 — 예약된 정착을 미룬다.
+      clearSettleTimer();
+      handleLine(e);
+      settleIfReady();
     };
   }
 
@@ -363,12 +751,13 @@ export function createCursorSession(opts, {
     },
     sendUserMessage(text) {
       if (lifecycle.isDisposed()) return;
+      resetTurnTaskState();
       lifecycle.beginTurn();
 
       const mode = normalizeExecutionMode(opts);
       const prompt = chatId && mode.workflow === 'direct'
         ? text
-        : systemBriefFor(opts) + '\n\n' + text;
+        : systemBriefFor(opts, 'cursor') + '\n\n' + text;
 
       if (Buffer.byteLength(prompt, 'utf8') > PROMPT_BYTE_LIMIT) {
         // 이 크기를 넘기면 CLI 가 아무 출력 없이 죽거나 spawn 이 E2BIG 으로 실패한다.
@@ -411,6 +800,31 @@ export function createCursorSession(opts, {
         lifecycle.failStart(e);
         return;
       }
+      // 프로세스가 죽으면 열린 task 를 먼저 정리한다. attachChild 보다 먼저 등록해야
+      // 수명주기의 turn-end 앞에 task-end 가 나간다 — 매달린 카드 없이 턴이 닫힌다.
+      // 보류해 둔 result 가 있으면 그 stopReason/errorMessage 로 직접 닫는다
+      // (수명주기의 폴백은 result 내용을 모른다). 카드가 열린 채 result 를 받아
+      // 붙들고 있던 턴은 이 경로가 유일한 종결점이다.
+      const token = ++turnToken;
+      const finishOnClose = () => {
+        if (token !== turnToken || lifecycle.isDisposed()) return;
+        clearSettleTimer();
+        clearExitSweepTimer();
+        if (pendingTurnResult) {
+          settleTurn();
+          return;
+        }
+        sweepOpenTasks();
+      };
+      proc.on('close', finishOnClose);
+      proc.on('exit', () => {
+        if (token !== turnToken || lifecycle.isDisposed() || exitSweepTimer) return;
+        // 'exit' 은 stdout 꼬리가 파싱되기 전에 오므로 여기서 바로 쓸어 담지 않는다.
+        // 자손이 파이프를 붙들어 'close' 가 끝내 오지 않는 경우를 대비해, 수명주기의
+        // 종료 유예(2s)보다 짧은 타이머로만 정리를 예약한다.
+        exitSweepTimer = setTimeout(finishOnClose, TASK_SETTLE_GRACE_MS);
+        exitSweepTimer.unref?.();
+      });
       // 턴 상태는 스폰마다 새로 만든 핸들러가 들고 있다 — 재생 필터가 턴 경계에서 초기화된다.
       lifecycle.attachChild(proc, makeHandler());
     },
@@ -428,7 +842,18 @@ export function createCursorSession(opts, {
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
     },
-    interrupt: lifecycle.interrupt,
-    dispose: lifecycle.dispose,
+    interrupt() {
+      // 열린 task 를 먼저 stopped 로 닫고 turn-end 를 낸다.
+      clearSettleTimer();
+      clearExitSweepTimer();
+      pendingTurnResult = null;
+      sweepOpenTasks();
+      lifecycle.interrupt();
+    },
+    dispose() {
+      clearSettleTimer();
+      clearExitSweepTimer();
+      return lifecycle.dispose();
+    },
   };
 }
