@@ -18,6 +18,8 @@ const MAX_MESSAGES_PER_THREAD = 200;
 interface ThreadMessageBase {
   text: string;
   agent?: AgentName;
+  /** 사용자가 명시적으로 호출한 product skill. 본문과 분리해 chip으로 표시한다. */
+  skillName?: string;
   messageId?: string;
   attachments?: ThreadAttachment[];
   /** 인라인 프롬프트로 보낸 메시지에 붙는 문서 선택 컨텍스트 (표시용). */
@@ -245,6 +247,9 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
         : undefined;
       const metadata = {
         ...(agent ? { agent } : {}),
+        ...(typeof message.skillName === 'string' && /^[a-z0-9-]+$/.test(message.skillName)
+          ? { skillName: message.skillName }
+          : {}),
         ...(typeof message.messageId === 'string' ? { messageId: message.messageId } : {}),
         ...(attachments?.length ? { attachments } : {}),
       };
@@ -518,9 +523,12 @@ export function createThreadId(): string {
 }
 
 export function fallbackTitle(messages: ThreadMessage[]): string {
-  const first = messages.find((m) => m.role === 'user' && m.text.trim());
+  const first = messages.find((m) => m.role === 'user' && (m.text.trim() || m.skillName));
   if (!first) return '새 채팅';
-  const text = first.text.trim().replace(/\s+/g, ' ');
+  const text = [first.skillName ? `/${first.skillName}` : '', first.text.trim()]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ');
   return text.length > 36 ? `${text.slice(0, 36)}…` : text;
 }
 

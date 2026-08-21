@@ -1828,6 +1828,30 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   white-space: pre-wrap;
 }
 
+/* Skill invocation은 문장 안의 slash text가 아니라 독립된 블록이다. */
+.ag-msg-user.ag-has-skill {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.ag-msg-user.ag-has-skill .ag-msg-user-text {
+  padding: 8px 11px;
+  border: 1px solid color-mix(in srgb, var(--ag-border) 74%, transparent);
+  border-radius: var(--ag-r-panel);
+  background: var(--ag-raised);
+}
+
+.ag-msg-user.ag-has-skill .ag-msg-selection,
+.ag-msg-user.ag-has-skill .ag-msg-attachments {
+  flex-basis: 100%;
+}
+
 /* 인라인 프롬프트로 보낸 메시지에 붙는 문서 선택 인용. */
 .ag-msg-selection {
   display: flex;
@@ -3709,6 +3733,107 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   padding: 3px 2px 5px 4px;
   border: 0;
   background: transparent;
+}
+
+/* Provider-aware hand-drawn skill token. The noisy line lives on the border
+   pseudo-element so text and icon remain crisp. */
+.ag-skill-token {
+  --ag-skill-color: var(--ag-claude);
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  max-width: min(100%, 210px);
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: 8px 10px 7px 9px / 9px 7px 10px 8px;
+  background: color-mix(in srgb, var(--ag-skill-color) 13%, var(--ag-input-bg));
+  color: color-mix(in srgb, var(--ag-skill-color) 88%, var(--ag-text));
+  font-size: var(--font-size-md, 13px);
+  font-weight: 650;
+  line-height: 1.25;
+  transform: rotate(-0.18deg);
+}
+
+.ag-skill-token[hidden] {
+  display: none;
+}
+
+.ag-skill-token::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1.35px solid var(--ag-skill-color);
+  border-radius: 8px 10px 7px 9px / 9px 7px 10px 8px;
+  filter: var(--ag-sketch-line);
+  opacity: 0.82;
+  pointer-events: none;
+}
+
+.ag-skill-token[data-agent='codex'] { --ag-skill-color: var(--ag-codex); }
+.ag-skill-token[data-agent='pi'] { --ag-skill-color: var(--ag-pi); }
+.ag-skill-token[data-agent='grok'] { --ag-skill-color: var(--ag-grok); }
+.ag-skill-token[data-agent='cursor'] { --ag-skill-color: var(--ag-cursor); }
+
+.ag-skill-token-icon {
+  display: grid;
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  place-items: center;
+}
+
+.ag-skill-token-icon .ag-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.ag-skill-token-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-skill-token-clear {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  margin: -2px -5px -2px 0;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.62;
+}
+
+.ag-skill-token-clear:hover {
+  background: color-mix(in srgb, var(--ag-skill-color) 18%, transparent);
+  opacity: 1;
+}
+
+.ag-skill-token-clear:focus-visible {
+  outline: 2px solid var(--ag-skill-color);
+  outline-offset: 1px;
+}
+
+.ag-skill-token-clear:disabled {
+  cursor: default;
+  opacity: 0.28;
+}
+
+.ag-composer-skill {
+  margin: 4px 0 5px;
+}
+
+.ag-msg-skill {
+  max-width: 100%;
 }
 
 .ag-composer-field:focus-within {

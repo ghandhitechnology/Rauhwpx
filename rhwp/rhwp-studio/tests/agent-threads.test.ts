@@ -76,6 +76,17 @@ test('fallbackTitle uses the first user message', () => {
   );
 });
 
+test('fallbackTitle preserves a structured skill-only invocation', () => {
+  assert.equal(
+    fallbackTitle([{ role: 'user', text: '', skillName: 'summarize-document' }]),
+    '/summarize-document',
+  );
+  assert.equal(
+    fallbackTitle([{ role: 'user', text: '표만 대상으로', skillName: 'summarize-document' }]),
+    '/summarize-document 표만 대상으로',
+  );
+});
+
 test('setThreadTitle updates a persisted thread', () => {
   mem.clear();
   const t = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high' });
