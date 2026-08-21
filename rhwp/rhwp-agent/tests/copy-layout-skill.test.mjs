@@ -12,9 +12,11 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   const parsed = parseSkillMarkdown(markdown, 'copy-layout');
 
   assert.equal(parsed.name, 'copy-layout');
-  assert.match(parsed.description, /content-free HWPX/);
+  assert.match(parsed.description, /HWP or HWPX/);
+  assert.match(parsed.description, /content-free template/);
   assert.match(markdown, /scripts\/copy_layout\.py/);
-  assert.match(markdown, /<source stem> - Layout\.hwpx/);
+  assert.match(markdown, /<source stem> - Layout\.hwp/);
+  assert.match(markdown, /native HWP→HWPX→HWP pipeline/);
 });
 
 test('copy-layout helper retains its privacy and geometry verification gates', () => {
@@ -24,4 +26,9 @@ test('copy-layout helper retains its privacy and geometry verification gates', (
   assert.match(script, /layout geometry fingerprint changed/);
   assert.match(script, /refusing to overwrite the source document/);
   assert.match(script, /PAYLOAD_PREFIXES/);
+  assert.match(script, /export-hwpx/);
+  assert.match(script, /native output introduced or changed generated layout text/);
+  assert.match(script, /render-diff/);
+  assert.match(script, /fallback_reason/);
+  assert.match(script, /--rhwp-bin/);
 });
