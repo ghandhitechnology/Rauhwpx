@@ -724,3 +724,23 @@ test('OpenCode 설정은 OAuth 대신 API 키만 받고 터미널 로그인을 �
     /async function startSetupAuth\(method: AgentAuthMethod\): Promise<void> \{\s*if \(!setupAgent \|\| setupBusy\) return;\s*if \(setupAgent === 'opencode' && method === 'oauth'\) return;/,
   );
 });
+
+test('원격 브라우저 구역은 연결 바로 아래 서고, 키는 앱 수명 동안만 허브를 덮는다', () => {
+  const bridge = readSource('../src/agent/bridge.ts');
+  assert.match(settings, /createSection\('원격 브라우저'\)/);
+  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, browserbaseSection\.root, usageSection\.root\)/);
+  // 키 칸은 비밀번호 칸이고 자동완성에 걸리지 않는다.
+  assert.match(settings, /createTextField\('Browserbase 키', \{\s*type: 'password',\s*placeholder: 'bb_live_…',\s*autocomplete: 'new-password',\s*\}\)/);
+  assert.match(settings, /createTextField\('프로젝트 ID', \{ placeholder: '비우면 계정에서 골라요' \}\)/);
+  // 적용은 허브 검증을 거치고, 성공해야만 탭 보관소에 남긴다; 키 칸은 비운다.
+  assert.match(settings, /const status = await bridge\.setBrowserbaseCredentials\(override\);[\s\S]*if \(status\) \{[\s\S]*saveBrowserbaseOverride\(\{ \.\.\.override,[\s\S]*browserbaseKey\.input\.value = '';/);
+  // 되돌리기는 허브와 탭 보관소를 함께 비운다.
+  assert.match(settings, /await bridge\.clearBrowserbaseCredentials\(\);[\s\S]*clearBrowserbaseOverride\(\);/);
+  // 새로고침 뒤에는 보관소의 키를 허브에 다시 심고, 브리지는 연결마다 재전송한다.
+  assert.match(settings, /const storedBrowserbase = loadBrowserbaseOverride\(\);\s*if \(storedBrowserbase\) \{[\s\S]*bridge\.setBrowserbaseCredentials\(storedBrowserbase\)/);
+  assert.match(bridge, /if \(this\.browserbaseOverride !== null\) \{\s*this\.sendJson\(\{ v: AGENT_PROTOCOL_VERSION, type: 'browserbase-credentials-set', \.\.\.this\.browserbaseOverride \}\);/);
+  // 상태 줄은 키 꼬리만 보여 준다 — 키 본문은 허브가 애초에 보내지 않는다.
+  assert.match(settings, /키 ····\$\{status\.keyTail \?\? ''\}/);
+  assert.match(settings, /case 'browserbase-status':\s*browserbaseStatus = ev\.status;\s*renderBrowserbase\(\);/);
+  assert.match(settingsCss, /\.ag-settings-status\.ag-settings-status-warn \{/);
+});

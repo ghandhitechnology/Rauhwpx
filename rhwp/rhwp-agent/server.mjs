@@ -58,7 +58,7 @@ import {
 import { DownloadManager } from './download-manager.mjs';
 import { DocumentSnapshotManager } from './document-snapshot-manager.mjs';
 import { ArtifactStore } from './artifact-store.mjs';
-import { BrowserbaseSession } from './browserbase-session.mjs';
+import { BrowserbaseFleet, normalizeBrowserbaseOverride, validateBrowserbaseCredentials } from './browserbase-session.mjs';
 import { createProviderHealth } from './provider-health.mjs';
 import { createUsageStore } from './usage-store.mjs';
 import { createCliproxyClient } from './cliproxy.mjs';
@@ -459,7 +459,7 @@ const sessions = new HubSessionRegistry({
       copyLayoutStorageUncertain: false,
       pendingTemplateCompletions: [],
       pendingDocumentSaved: null,
-      browserbaseSession: new BrowserbaseSession({ log }),
+      browserbaseSession: new BrowserbaseFleet({ log }),
       downloadManager,
       documentSnapshotManager,
       artifactStore: new ArtifactStore({ rootDir: workDir, trustedReadRoots: hubReadOnlyRoots }),
@@ -2477,7 +2477,11 @@ function makeBackendEventHandler(record, generation) {
       ? { ...evt, turnId: providerTurnId }
       : evt;
     if (evt.type === 'turn-start') record.missedTurnEnd = null;
-    if (evt.type === 'turn-end') settleAgentTurn(record, activeSession, evt);
+    if (evt.type === 'turn-end') {
+      settleAgentTurn(record, activeSession, evt);
+      // 서브에이전트 브라우저는 턴과 함께 끝난다 — 메인 브라우저만 다음 턴까지 산다.
+      record.browserbaseSession.cleanupExtras('turn ended');
+    }
     const delivered = sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: studioEvent });
     if (evt.type === 'turn-end' && !delivered) record.missedTurnEnd = studioEvent;
     if (evt.type === 'turn-end') {
@@ -2935,6 +2939,35 @@ function sendPiError(record, sock, requestId, error, fallbackCode) {
     code: error?.code ?? fallbackCode,
     message: String(error?.message ?? error),
   });
+}
+
+function sendBrowserbaseError(record, sock, requestId, error) {
+  replyToStudio(record, sock, {
+    v: 1,
+    type: 'browserbase-error',
+    requestId,
+    code: error?.code ?? 'BROWSERBASE_CREDENTIALS_REJECTED',
+    message: String(error?.message ?? error),
+  });
+}
+
+/**
+ * 스튜디오가 입력한 Browserbase 자격 증명 — 앱이 도는 동안만 환경 변수를 덮고 디스크에는
+ * 남기지 않는다. 키가 들어오면 Browserbase API 에 먼저 확인하고, 프로젝트 id 가 비어
+ * 있으면 그 계정의 프로젝트를 골라 채운다 (환경 변수의 프로젝트 id 는 다른 계정일 수
+ * 있어 섞지 않는다). 턴이 도는 중이면 떠 있는 브라우저는 두고 다음 호출부터 새 키를 쓴다.
+ */
+async function applyBrowserbaseOverride(record, msg) {
+  const override = normalizeBrowserbaseOverride({
+    apiKey: msg.apiKey,
+    projectId: msg.projectId,
+    geminiApiKey: msg.geminiApiKey,
+  });
+  if (override?.apiKey) {
+    const verified = await validateBrowserbaseCredentials({ apiKey: override.apiKey, projectId: override.projectId ?? null });
+    override.projectId = verified.projectId;
+  }
+  return record.browserbaseSession.setOverride(override, { restart: record.agentSession?.status !== 'running' });
 }
 
 function providerModeRequest(activeSession, phase) {
@@ -4110,6 +4143,25 @@ async function handleStudioMessage(record, sock, msg) {
         }));
       return;
     }
+    case 'browserbase-status-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      replyToStudio(record, sock, { v: 1, type: 'browserbase-status', requestId, status: record.browserbaseSession.status() });
+      return;
+    }
+    case 'browserbase-credentials-set': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void applyBrowserbaseOverride(record, msg)
+        .then((status) => replyToStudio(record, sock, { v: 1, type: 'browserbase-status', requestId, status }))
+        .catch((e) => sendBrowserbaseError(record, sock, requestId, e));
+      return;
+    }
+    case 'browserbase-credentials-clear': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void record.browserbaseSession.setOverride(null, { restart: record.agentSession?.status !== 'running' })
+        .then((status) => replyToStudio(record, sock, { v: 1, type: 'browserbase-status', requestId, status }))
+        .catch((e) => sendBrowserbaseError(record, sock, requestId, e));
+      return;
+    }
     case 'pi-status-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void refreshPiStatus()
@@ -5127,7 +5179,8 @@ function handleMcpMessage(record, sock, msg) {
       }
       if (definition.category === 'browser') {
         const sidecarTool = tool.replace(/^browserbase_/, '');
-        void record.browserbaseSession.call(record.agentSession.chatId, sidecarTool, args)
+        const { browserId, ...sidecarArgs } = args;
+        void record.browserbaseSession.call(record.agentSession.chatId, browserId, sidecarTool, sidecarArgs)
           .then(sendResult)
           .catch((error) => {
             if (error?.processCleanupUncertain) {
