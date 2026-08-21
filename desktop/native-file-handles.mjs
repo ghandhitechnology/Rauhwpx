@@ -401,7 +401,7 @@ export class NativeFileHandleRegistry {
     if (!documentId || !this.#digest) return;
     const bookmark = this.#bookmarks.get(documentId);
     if (!bookmark || this.#ownershipKey(bookmark.path) !== entry.ownershipPath) return;
-    bookmark.digest = this.#digest(bytes);
+    bookmark.digest = parseStoredDigest(this.#digest(bytes));
   }
 
   async #collectNearbyFiles(sessionId, documentId, basenameHint) {
