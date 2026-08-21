@@ -71,6 +71,11 @@ await runTest('IME 조합 중 커서 이동', async ({ page }) => {
   await clickEditArea(page);
 
   await compose(client, ['ㄱ', '가']);
+  const midCompose = await getParaText(page, 0, 0, 100);
+  assert(
+    midCompose.includes('가'),
+    `조합 중 문단 텍스트에 네이티브 preedit이 있다 (실제 ${JSON.stringify(midCompose)})`,
+  );
   // 조합이 열린 상태에서 편집 영역을 다시 클릭 (커서 이동)
   await clickEditArea(page);
   await new Promise((r) => setTimeout(r, 300));

@@ -466,9 +466,6 @@ export class InputHandler {
   private compositionAnchorRect: CursorRect | null = null;
   /** transient preedit의 Unicode scalar 길이 */
   private compositionLength = 0;
-  private compositionFontFamily: string | null = null;
-  /** 조합 시작 시점 글꼴의 실제 px 크기 (줌 미적용). null = 미조회, 0 = 조회 실패. */
-  private compositionFontSizePx: number | null = null;
   /**
    * 숨은 textarea 에서 이미 문서에 반영한 value prefix 의 길이 (UTF-16).
    *
@@ -3144,57 +3141,6 @@ export class InputHandler {
    *                   onMouseUp (예: drag-during-scroll 영역, scrollbar release 영역) 의 자동 scroll back
    *                   결함 차단 영역. (Task #779)
    */
-  /** 문서/선택/서식 상태를 다시 조회하지 않고 preedit 오버레이만 갱신한다. */
-  private updateCompositionOverlay(): void {
-    const startRect = this.compositionAnchorRect;
-    if (!this.isComposing || !this.compositionAnchor || !startRect) {
-      this.updateCaret();
-      return;
-    }
-
-    const zoom = this.viewportManager.getZoom();
-    const text = this.imeSession.preedit;
-    this.positionImeInput(startRect, zoom);
-    if (!text) {
-      this.caret.hideComposition();
-      this.caret.update(startRect, zoom);
-      return;
-    }
-
-    const font = this.resolveCompositionFont();
-    const charWidth = this.compositionOverlayWidth(font, startRect);
-    this.caret.showComposition(startRect, charWidth, zoom, text, font.family, font.sizePx);
-  }
-
-  /** preedit는 아직 문서에 없으므로 문서 글꼴 px 크기로 CJK advance를 근사한다. */
-  private compositionOverlayWidth(font: { sizePx: number }, startRect: CursorRect): number {
-    const advance = font.sizePx > 0 ? font.sizePx : startRect.height;
-    return Math.max(advance * this.compositionLength, 1);
-  }
-
-  /** 조합 세션당 한 번만 커서 글꼴(패밀리/px 크기)을 조회해 캐시한다. */
-  private resolveCompositionFont(): { family: string; sizePx: number } {
-    if (this.compositionFontFamily === null || this.compositionFontSizePx === null) {
-      try {
-        const props = this.getCharPropertiesAtCursor();
-        this.compositionFontFamily = props.fontFamily || 'sans-serif';
-        // fontSize 는 1pt=100 단위 → px = pt * 96/72 = fontSize / 75 (렌더러 96dpi 기준).
-        // 한글 축(index 0)의 상대크기(%)도 실제 렌더 크기에 반영된다.
-        const relative = (props.relativeSizes?.[0] ?? 100) / 100;
-        this.compositionFontSizePx = props.fontSize && props.fontSize > 0
-          ? (props.fontSize / 75) * relative
-          : 0;
-      } catch {
-        this.compositionFontFamily = 'sans-serif';
-        this.compositionFontSizePx = 0;
-      }
-    }
-    return {
-      family: this.compositionFontFamily ?? 'sans-serif',
-      sizePx: this.compositionFontSizePx ?? 0,
-    };
-  }
-
   private updateCaret(skipScroll: boolean = false): void {
     const rect = this.cursor.getRect();
     if (rect) {
@@ -3202,56 +3148,13 @@ export class InputHandler {
       const caretRect = this.adjustExitedFieldEndCaretRect(rect);
       this.positionImeInput(caretRect, zoom);
 
-      // IME 조합 중: 블랙박스 캐럿 표시
+      this.caret.update(caretRect, zoom);
       if (this.isComposing && this.compositionAnchor && this.compositionLength > 0) {
-        try {
-          const anchor = this.compositionAnchor;
-          let startRect = this.compositionAnchorRect;
-          if (!startRect) {
-            if (this.cursor.isInHeaderFooter()) {
-              const isHeader = this.cursor.headerFooterMode === 'header';
-              startRect = this.wasm.getCursorRectInHeaderFooter(
-                this.cursor.hfSectionIdx, isHeader, this.cursor.hfApplyTo,
-                this.cursor.hfParaIdx, anchor.charOffset, this.cursor.getRect()?.pageIndex ?? 0,
-              )!;
-            } else if (this.cursor.isInFootnote()) {
-              startRect = this.wasm.getCursorRectInFootnote(
-                this.cursor.fnPageNum, this.cursor.fnFootnoteIndex,
-                this.cursor.fnInnerParaIdx, anchor.charOffset,
-              )!;
-            } else if ((anchor.cellPath?.length ?? 0) > 1 && anchor.parentParaIndex !== undefined) {
-              startRect = this.wasm.getCursorRectByPath(
-                anchor.sectionIndex, anchor.parentParaIndex,
-                JSON.stringify(anchor.cellPath), anchor.charOffset,
-              );
-            } else if (anchor.parentParaIndex !== undefined) {
-              startRect = this.wasm.getCursorRectInCell(
-                anchor.sectionIndex, anchor.parentParaIndex,
-                anchor.controlIndex!, anchor.cellIndex!,
-                anchor.cellParaIndex!, anchor.charOffset,
-              );
-            } else {
-              startRect = this.wasm.getCursorRect(
-                anchor.sectionIndex, anchor.paragraphIndex, anchor.charOffset,
-              );
-            }
-            this.compositionAnchorRect = {
-              ...startRect,
-              cellBounds: startRect.cellBounds ? { ...startRect.cellBounds } : undefined,
-            };
-          }
-          const text = this.imeSession.preedit;
-          const font = this.resolveCompositionFont();
-          const charWidth = this.compositionOverlayWidth(font, startRect);
-          this.caret.showComposition(startRect, charWidth, zoom, text, font.family, font.sizePx);
-        } catch {
-          // getCursorRect 실패 시 일반 캐럿
-          this.caret.hideComposition();
-          this.caret.update(rect, zoom);
-        }
+        const startRect = this.compositionStartRect();
+        if (startRect) this.caret.showCompositionUnderline(startRect, caretRect, zoom);
+        else this.caret.hideComposition();
       } else {
         this.caret.hideComposition();
-        this.caret.update(caretRect, zoom);
       }
       if (!skipScroll) {
         this.scrollCaretIntoView(caretRect);
@@ -3269,6 +3172,51 @@ export class InputHandler {
     if (cursorRect) {
       const adjustedCursorRect = this.adjustExitedFieldEndCaretRect(cursorRect);
       this.eventBus.emit('cursor-rect-updated', { x: adjustedCursorRect.x, y: adjustedCursorRect.y });
+    }
+  }
+
+  /** 조합 시작 좌표. 캐시가 없거나 pagination 이 버린 뒤에만 exact lookup 한다. */
+  private compositionStartRect(): CursorRect | null {
+    if (this.compositionAnchorRect) return this.compositionAnchorRect;
+    const anchor = this.compositionAnchor;
+    if (!anchor) return null;
+    try {
+      let startRect: CursorRect | null = null;
+      if (this.cursor.isInHeaderFooter()) {
+        const isHeader = this.cursor.headerFooterMode === 'header';
+        startRect = this.wasm.getCursorRectInHeaderFooter(
+          this.cursor.hfSectionIdx, isHeader, this.cursor.hfApplyTo,
+          this.cursor.hfParaIdx, anchor.charOffset, this.cursor.getRect()?.pageIndex ?? 0,
+        );
+      } else if (this.cursor.isInFootnote()) {
+        startRect = this.wasm.getCursorRectInFootnote(
+          this.cursor.fnPageNum, this.cursor.fnFootnoteIndex,
+          this.cursor.fnInnerParaIdx, anchor.charOffset,
+        );
+      } else if ((anchor.cellPath?.length ?? 0) > 1 && anchor.parentParaIndex !== undefined) {
+        startRect = this.wasm.getCursorRectByPath(
+          anchor.sectionIndex, anchor.parentParaIndex,
+          JSON.stringify(anchor.cellPath), anchor.charOffset,
+        );
+      } else if (anchor.parentParaIndex !== undefined) {
+        startRect = this.wasm.getCursorRectInCell(
+          anchor.sectionIndex, anchor.parentParaIndex,
+          anchor.controlIndex!, anchor.cellIndex!,
+          anchor.cellParaIndex!, anchor.charOffset,
+        );
+      } else {
+        startRect = this.wasm.getCursorRect(
+          anchor.sectionIndex, anchor.paragraphIndex, anchor.charOffset,
+        );
+      }
+      if (!startRect) return null;
+      this.compositionAnchorRect = {
+        ...startRect,
+        cellBounds: startRect.cellBounds ? { ...startRect.cellBounds } : undefined,
+      };
+      return this.compositionAnchorRect;
+    } catch {
+      return null;
     }
   }
 
@@ -3797,6 +3745,9 @@ export class InputHandler {
     this.cancelDeferredPaginationFlush();
     this.deferredPaginationRunner.cancel();
     this.deferredPaginationPending = false;
+    // 확정하지 않는다 — 이미 교체 중인 문서에 이전 preedit 을 커밋하면 안 된다.
+    // 네이티브 preedit 은 문서에 들어가 있으므로 히스토리 초기화 전에 되돌린다.
+    _text.revertCompositionPreview.call(this);
     this.resetRawTextMutationEffects();
     this.imeSession.reset();
     this.compositionAnchor = null;
@@ -3840,6 +3791,7 @@ export class InputHandler {
     this.cancelDeferredPaginationFlush();
     this.deferredPaginationRunner.cancel();
     this.deferredPaginationPending = false;
+    _text.revertCompositionPreview.call(this);
     this.resetRawTextMutationEffects();
     this.imeSession.reset();
     this.compositionAnchor = null;
