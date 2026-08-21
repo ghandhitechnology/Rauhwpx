@@ -5931,18 +5931,56 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   color: var(--ag-accent);
 }
 
+/* 알약의 상태 자리: 도는 동안은 픽셀 휠, 편대가 다 끝나면 상태 점이 같은 12px
+   칸을 쓴다 — 라벨이 밀리지 않는다. */
+.ag-fleet-dock-pill > .ag-fleet-dot {
+  display: none;
+  margin: 0 2.5px;
+}
+
+.ag-fleet-dock-pill:not(.ag-live) > .ag-pixel-wheel {
+  display: none;
+}
+
+.ag-fleet-dock-pill:not(.ag-live) > .ag-fleet-dot {
+  display: block;
+}
+
+.ag-fleet-dock-pill.ag-err {
+  color: var(--ag-err);
+}
+
+/* 편대가 끝난 알약은 카드 머리처럼 가라앉는다 — 결과는 점과 글자가 말한다. */
+.ag-fleet-dock-pill.ag-done,
+.ag-fleet-dock-pill.ag-stopped {
+  color: var(--ag-text-muted);
+  font-weight: 500;
+}
+
+/* 흐름에 정착한 기록은 도구 활동 그룹과 같은 줄을 쓴다 — 앞자리 상태 점까지 맞춘다. */
+.ag-fleet-slot .ag-fleet-toggle > .ag-fleet-dot {
+  display: inline-block;
+}
+
+/* 카드가 태어난 자리(흐름 속 슬롯) — 턴이 끝나 카드가 정착할 때까지 비어 있고
+   높이를 만들지 않는다. */
+.ag-fleet-slot[hidden] {
+  display: none;
+}
+
+/* 쉐브론은 눌렀을 때 팝업이 갈 방향을 가리킨다 (카드·행 쉐브론과 같은 규칙).
+   팝업이 위로 열리므로 펼쳐져 있을 때는 아래쪽 = 접는 방향이다. */
 .ag-fleet-dock-chevron {
   width: 12px;
   height: 12px;
   color: currentColor;
-  transform: rotate(180deg);
+  transform: rotate(0deg);
   transition: transform 200ms var(--ag-motion-out);
 }
 
 /* 닫혀 있을 때는 위쪽을 가리킨다 — 펼치기 방향. */
-.ag-fleet-dock[aria-expanded='false'] .ag-fleet-dock-chevron,
 .ag-fleet-dock-pill[aria-expanded='false'] .ag-fleet-dock-chevron {
-  transform: rotate(0deg);
+  transform: rotate(180deg);
 }
 
 .ag-fleet-popup {
@@ -5966,6 +6004,13 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 .ag-fleet-popup[hidden] {
   display: none;
+}
+
+/* 카드는 팝업 안에서 줄어들지 않는다. 세로 flex 의 기본 shrink 를 두면 카드가
+   max-height 에 맞춰 찌그러지며 행을 잘라 먹고(카드가 overflow: hidden),
+   팝업은 넘칠 것이 없다고 보아 스크롤조차 내주지 않는다. */
+.ag-fleet-popup > .ag-fleet {
+  flex: 0 0 auto;
 }
 
 /* ── 픽셀 휠 ─────────────────────────────────────────

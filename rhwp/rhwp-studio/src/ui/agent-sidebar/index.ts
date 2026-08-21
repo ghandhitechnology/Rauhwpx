@@ -529,23 +529,33 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let replyPending = false;
   /** 편대 카드가 대신 나타내는 스폰 도구 호출 — 결과 행도 함께 접는다. */
   const suppressedSpawnCalls = new Set<string>();
-  /** 서브에이전트·워크플로 카드. 살아 있는 동안 입력기 위 도크에 머문다. */
+  /**
+   * 서브에이전트·워크플로 카드. 턴이 도는 동안 입력기 위 도크 팝업이 서브에이전트
+   * 작업을 보는 자리이고, 턴이 끝나면 태어날 때 예약한 슬롯으로 접혀 정착한다.
+   */
   const fleetView = createSubagentFleet({
     doc: document,
     sessionModel: (agent) => (agent === selectedAgent ? selectedModel : null),
-    // 정착한 카드는 대화 흐름으로 옮겨 기록이 된다. 도구 활동 그룹과 같은
-    // 자리로 끼워 넣어 흐름 순서를 유지한다.
-    settleCard(card) {
+    // 카드가 태어난 자리를 흐름에 예약한다. 도구 활동 그룹과 같은 자리로 끼워
+    // 넣어 흐름 순서를 지키고, 이 뒤의 도구 호출은 새 그룹으로 연다.
+    mountSlot(slot) {
       flushAssistantBuffer({ kind: 'progress' });
       const milestone = compactStreamIntoActivity(selectedAgent);
+      // 방금 닫는 도구 활동 그룹이 있으면 그 옆자리에 선다 — 정착한 기록이 바로 위
+      // 도구 기록과 같은 들여쓰기로 줄을 맞춘다 (이정표 안의 그룹은 17px 들여쓴다).
+      const neighbor = turnActivity?.root ?? null;
       closeCurrentActivityGroup();
-      const step = el('div', 'ag-progress-step ag-progress-step-tools-only');
-      step.appendChild(card);
       withAutoScroll(() => {
-        if (milestone) milestone.appendChild(step);
-        else appendConversation(step);
+        if (milestone) milestone.appendChild(slot);
+        else if (neighbor?.parentElement) neighbor.parentElement.appendChild(slot);
+        else appendConversation(slot);
       });
       streamBubble = null;
+    },
+    // 팝업이 열리면 펼쳐 둔 도구 활동 그룹을 접는다 — 같은 모양의 살아 있는
+    // 기록이 둘 펼쳐져 있지 않게 한다 (반대 방향은 그룹 토글이 맡는다).
+    onPopupToggle(open) {
+      if (open) collapseTurnActivity();
     },
   });
   let insetRecenterRaf: number | null = null;
@@ -4108,6 +4118,26 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     settleActivity(activity);
   }
 
+  /**
+   * 펼쳐 둔 도구 활동 그룹을 접는다 — 편대 팝업이 열릴 때 불린다.
+   *
+   * 지금 열려 있는 그룹(turnActivity)만 보면 안 된다: 카드가 슬롯을 잡을 때
+   * closeCurrentActivityGroup 이 참조를 놓아 버리므로, 방금 닫힌 그룹을 사용자가
+   * 펼쳐 두면 팝업과 함께 둘이 펼쳐진 채 남는다. 그룹 토글도 어느 그룹이든
+   * 팝업을 닫으므로 이쪽도 흐름 전체를 훑어 대칭을 맞춘다.
+   */
+  function collapseTurnActivity() {
+    const expanded = messages.querySelectorAll<HTMLElement>(
+      '.ag-activity:not(.ag-activity-collapsed)',
+    );
+    for (const activity of expanded) {
+      activity.classList.add('ag-activity-collapsed');
+      activity.querySelector('.ag-activity-toggle')?.setAttribute('aria-expanded', 'false');
+      const content = activity.querySelector<HTMLElement>('.ag-activity-content');
+      if (content) content.tabIndex = -1;
+    }
+  }
+
   function ensureTurnActivity(agent: AgentName, milestone?: HTMLElement | null) {
     if (turnActivity) return turnActivity;
 
@@ -4132,6 +4162,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
       content.tabIndex = collapsed ? -1 : 0;
       if (!collapsed) {
+        // 도구 기록을 펼치면 편대 팝업은 접는다 — 살아 있는 기록은 한 번에 하나만 펼친다.
+        fleetView.closePopup();
         scrollActivityToLatest(content);
         if (followConversation) scrollConversationToEnd();
       }
