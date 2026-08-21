@@ -1,9 +1,9 @@
 ---
 name: copy-layout
-description: Copy the visual layout and design of the current or specified HWP or HWPX document into a reusable, content-free or guidance-preserving template. Use when the user asks to copy, extract, preserve, or reuse a Hangul document's layout without completed content.
+description: Turn an HWP or HWPX into a reusable template that preserves its layout, titles, labels, headers, instructions, and other structural guidance while removing filled-in or user-added content. Use when the user asks to copy, extract, preserve, or reuse a Hangul document's layout without completed entries.
 ---
 
-Create a new `.hwp` or `.hwpx` that matches the source's page design as closely as possible while removing completed content. Competition and assignment forms may retain clearly structural headings and instructions under the narrow policy below.
+Create a new `.hwp` or `.hwpx` that remains understandable and ready to fill in. Preserve the reusable document, not merely its empty geometry.
 
 ## Resolve the source
 
@@ -17,35 +17,66 @@ When `sourcePath` is non-null and `dirty` is false, use it directly: Studio reso
 - Preserve the source format by default: save as `<source stem> - Layout.hwp` or `<source stem> - Layout.hwpx`. Avoid overwriting an existing file; add ` (2)`, ` (3)`, and so on. If an HWP round trip fails the precision gates, save the verified HWPX as a safe fallback and report the reason rather than delivering degraded HWP.
 - Use `<source stem> - Layout` as the document title: set HWPX package metadata directly and use that exact filename title for HWP.
 
-## Preserve the design
+## Decide what belongs to the template
 
 Preserve all structural and visual properties that can affect the empty template: section and page count; paper size and orientation; margins, gutters, columns, page borders and backgrounds; headers and footers; master-page graphics; paragraph and character styles; tabs and spacing; tables and cell geometry; borders, fills, shading, colors, and line styles; text boxes and shape geometry; and object anchoring, wrapping, stacking, rotation, and transparency.
 
-Remove user-authored content: visible text, field values, comments and annotations, tracked-change payloads, equations, charts, and content images or embedded objects. Keep decorative images only when they are clearly part of the page design. When intent is ambiguous, favor privacy and remove the payload while preserving a same-size empty frame.
+Keep reusable text, including:
 
-For a document that is clearly a competition brief, assignment sheet, submission form, or answer template, preserve headings that label reusable structure and sentences that directly instruct the participant or student. Use the helper's `--preserve-guidance` mode; do not retain names, contact details, completed answers, examples, judging notes, feedback, or prose merely because it appears near a heading. The default remains fully empty for other documents and whenever classification is uncertain.
+- document titles and subtitles;
+- section and subsection headings, numbering, and table descriptions or captions;
+- table column headers, row headers, category names, and fixed option lists;
+- field labels, units, date placeholders, signature labels, approval-role labels, and receipt labels;
+- instructions, warnings, notes, boilerplate declarations, and explanatory guidance;
+- fixed reference values that define how the blank form is organized.
+
+Remove only content that appears filled in or added for a particular submission or use: names, organizations entered into blank fields, contact details, selected answers, dates, amounts, identifiers, free-form responses, results, feedback, signatures, stamps, populated charts, photos, scans, and attachments. A field marker is context, not proof that its text is user input; many official templates place labels inside fields. For mixed paragraphs, retain the fixed label and remove or reset only the entered span. Do not paraphrase source wording.
+
+Judge text in document context rather than with a vocabulary whitelist. Repeated position, matching styles, table coordinates, nearby empty cells, bilingual pairs, numbering, and label/value relationships are stronger evidence than any single word. When a paragraph could reasonably be reusable guidance or user content and the surrounding document does not resolve it, keep it and record the ambiguity for review. This preserve-by-default rule is intentional.
+
+Remove comments, annotations, tracked-change payloads, equations used as answers, charts, and content images or embedded objects. Keep decorative images and brand marks when they are part of the page design. Preserve a removed payload's frame and geometry.
 
 Do not rebuild the document from screenshots or use office-suite or third-party format conversion. The helper edits HWPX packages directly; for HWP it uses Rauhwpx's native HWP→HWPX→HWP pipeline and verifies the round trip.
 
-## Create the copy
+## Inspect, decide, then create
 
-Read `scripts/copy_layout.py`, then run it from this skill's absolute root:
-
-```bash
-python3 scripts/copy_layout.py "/absolute/path/source.hwp"
-```
-
-For a clearly identified competition or assignment template, run:
+Read `scripts/copy_layout.py`. First inventory every visible paragraph:
 
 ```bash
-python3 scripts/copy_layout.py --preserve-guidance "/absolute/path/source.hwp"
+python3 scripts/copy_layout.py --inspect-text "/absolute/path/source.hwp"
 ```
+
+Review the complete inventory, not a small sample. It gives stable paragraph IDs, the exact source SHA-256, table-cell coordinates, header/footer and shape context, field-marker counts, editable fields, form controls, style identifiers, and suspicious visual marks. Create a JSON decision file in a temporary workspace:
+
+```json
+{
+  "source_sha256": "<exact digest from inspection>",
+  "default": "keep",
+  "keep": ["Contents/section0.xml#p0003"],
+  "remove": ["Contents/section0.xml#p0012"],
+  "replace": {
+    "Contents/section0.xml#p0020": "지출금액"
+  },
+  "reset_form_controls": ["Contents/section0.xml#control0004"],
+  "clear_border_fill_marks": ["9", "11"]
+}
+```
+
+`default` should normally be `keep`; use explicit removals for content that has evidence of being filled in. `keep` and `remove` override the default. `replace` is for a paragraph that mixes fixed scaffolding and entered content; its value must reproduce the fixed source text exactly except for deleting the entry or resetting an obvious form mark such as `☑` to `□`. Editable fields and form-control names are reusable structure and remain intact. Use `reset_form_controls` only for control IDs whose checked/selected/value state is user-entered; fixed official classifications can remain selected. `clear_border_fill_marks` accepts only suspicious border-fill IDs reported under `visual_marks`; use it when those marks encode filled schedules or similar user data. Never invent, rewrite, translate, or improve retained wording. The plan is cryptographically bound to the inspected source and unknown or conflicting IDs are rejected.
+
+Apply the reviewed plan:
+
+```bash
+python3 scripts/copy_layout.py --text-plan "/absolute/path/decisions.json" "/absolute/path/source.hwp"
+```
+
+The old `--preserve-guidance` option exists only for compatibility and is not adequate for this task; do not use it for a guidance-preserving template.
 
 The helper uses only the Python 3 standard library. Do not search for or install `lxml`, activate a repository-specific Python environment, or retry through an unrelated interpreter. A missing Python executable is an application packaging failure, not a reason to ask the user to save or identify the document again.
 
-The helper preserves package structure, strips previews, scripts, history, and body payloads, keeps media referenced by master pages or layout definitions, assigns the title, and verifies package and geometry invariants. It first empties HWP body text completely; if that contracts pagination, it retries with width-aware blank spacing that retains flow without retaining source words. In `--preserve-guidance` mode it retains only conservative heading and imperative-instruction matches, records every retained paragraph in `preserved_guidance`, and rejects output whose visible text differs from that approved set. Review that list before delivery; if any completed or identifying content appears, discard the output and rerun without the flag. An HWP→HWPX intermediate page-count mismatch is diagnostic rather than a deliverable failure: the helper may continue sanitizing it, but the final HWP/HWPX must still match the source page count and all other precision gates. For HWP input or output it locates the Rauhwpx `rhwp` binary from `--rhwp-bin`, `RHWP_BIN`, `PATH`, or this repository's build output. Read its JSON report, especially `text_strategy`, `preserved_guidance`, `media_usage`, `removed_body_media`, `conversion.intermediate_export`, and `conversion.native_verification` or `conversion.fallback_reason`.
+The helper preserves package structure, strips previews, scripts, history, and rejected body payloads, assigns the title, and verifies package and geometry invariants. Its report records both kept and removed paragraphs under `text_decisions`; review both lists. An HWP→HWPX intermediate page-count mismatch is diagnostic rather than a deliverable failure: the final HWP/HWPX must still match the source page count and all other precision gates. For HWP input or output it locates the Rauhwpx `rhwp` binary from `--rhwp-bin`, `RHWP_BIN`, `PATH`, or this repository's build output. Read `text_decisions`, `media_usage`, `removed_body_media`, and `conversion.native_verification` or `conversion.fallback_reason`.
 
-If a removed body image is demonstrably decorative after inspecting the image and placement, rerun to a fresh output path with `--keep-media <manifest-id>` for each such asset. Never retain a chart, photo, scan, signature, or attachment merely to make the result look fuller.
+Inspect body media and representative pages. If a removed body image is demonstrably a logo, seal, watermark, ornament, or other fixed design asset, rerun to a fresh output path with `--keep-media <manifest-id>` for each asset. Do not retain a populated chart, photo, scan, signature, or attachment merely to make the result look fuller. Also look for user-added information encoded as highlighting, checked boxes, colored schedule bars, cell fills, borders, or shapes; these are not safe merely because they are not text. If such marks cannot be cleanly reset without harming template styling, report the unresolved item instead of calling the result perfect.
 
 Use `-o /absolute/path/result.hwp` or `.hwpx` only when the user requests a destination or format conversion. The helper refuses to overwrite the source or an explicitly named existing output.
 
@@ -54,7 +85,7 @@ When the source came from `materialize_document_snapshot`, the generated file is
 ## Verify before delivery
 
 1. Confirm the output opens in its reported HWP/HWPX format; for HWP, confirm the native round-trip and render-diff verification passed. Treat an HWPX precision fallback as intentional, not as native HWP success.
-2. Confirm it contains no source text or obvious content payloads beyond the reviewed `preserved_guidance` entries; strict mode must contain no visible source text.
+2. Review every entry in `text_decisions.kept` and `text_decisions.removed`; confirm headings, labels, captions, and guidance remain while filled values are absent.
 3. Confirm title, destination, page count, section setup, and layout-object geometry.
 4. Render or preview representative pages when available and inspect small details.
 
