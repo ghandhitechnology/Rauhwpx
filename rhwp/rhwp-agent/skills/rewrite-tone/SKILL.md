@@ -7,7 +7,7 @@ Read the exact source range and identify the requested audience and tone.
 
 1. Preserve facts, names, dates, numbers, obligations, and logical qualifications.
 2. Change only wording and sentence structure needed for the requested tone.
-3. Use `replace_range` rather than delete plus insert, and preserve surrounding formatting.
+3. Use `replace_range` rather than delete plus insert, and preserve surrounding formatting. Send independent rewrites as one `apply_edits` batch ordered from the end of the document backwards.
 4. Avoid adding claims, urgency, praise, or certainty that the source does not support.
 5. Call `verify_changes` and briefly describe the tone shift.
 

@@ -641,6 +641,18 @@ export interface CharFormatProps {
   fontId?: number;
 }
 
+/**
+ * pending 구조 op 요약 — executor 의 PENDING_DESTRUCTIVE_OP 가드가 쓴다.
+ * flat cellIdx 는 행 우선(row-major)이라, 영향 행보다 앞선 행의 셀은 번호가 그대로다.
+ * 그래서 행 단위 op 만 affectedRow 를 채우고 열/병합/표 삭제는 null 로 둔다.
+ */
+export interface PendingStructureOpInfo {
+  /** 'insert_row' | 'delete_row' | 'insert_col' | ... | 'delete_table' */
+  op: string;
+  /** 행 단위 op 이 건드리는 행 인덱스. 행 단위가 아니면 null (= 표 전체 차단) */
+  affectedRow: number | null;
+}
+
 /** 표 등 컨트롤 앵커 — replay 후 재바인딩된다 */
 export interface ObjectAnchor {
   paraIdx: number;

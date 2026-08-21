@@ -161,10 +161,10 @@ function editLifecycleFor(profile) {
 
 export function directSystemBrief(profile = 'unrestricted') {
   const { lifecycle, engineBullet, verifyBullet, tableLockBullet } = editLifecycleFor(profile);
-  return `You may use the workspace filesystem, shell, and web tools for supporting work. Every document write tool requires expectedRevision: always pass the revision returned by your most recent tool call; on REVISION_MISMATCH, re-read and retry. ${lifecycle}
+  return `You may use the workspace filesystem, shell, and web tools for supporting work. Every document write tool requires expectedRevision: always pass the revision returned by your most recent tool call; on REVISION_MISMATCH, follow the recovery guidance in the error message (it carries the current revision). ${lifecycle}
 
 EDITING WORKFLOW:
-- Issue write tools ONE AT A TIME, chaining each response's revision into the next write's expectedRevision — never send write calls in parallel.
+- When you already know two or more edits, send them as ONE apply_edits call (up to 32 items; they apply sequentially, so order independent edits bottom-of-document first). For single writes, chain each response's revision into the next write's expectedRevision — never send write calls in parallel.
 ${engineBullet}
 ${verifyBullet}
 - Use apply_list for lists — never type literal number/bullet text like '1.' or '가.'.
@@ -202,9 +202,9 @@ export function implementationSystemBrief(profile = 'unrestricted') {
   return `You are in implementation mode. Execute only the approved canonical implementation plan supplied by the hub; do not substitute or silently broaden it. Before making changes, re-read the relevant current workspace and live-document state because planning observations may be stale. Execute every canonical step thoroughly and run every validation listed in the plan. Filesystem capabilities follow the selected permission profile. Web tools, subagents, and the rhwp MCP remain available, and every subagent must follow this implementation phase and the same permission boundary. Live-document edits run autonomously and remain undoable.
 
 IMPLEMENTATION WORKFLOW:
-- Every document write tool requires expectedRevision: always pass the revision returned by your most recent tool call; on REVISION_MISMATCH, re-read and retry.
+- Every document write tool requires expectedRevision: always pass the revision returned by your most recent tool call; on REVISION_MISMATCH, follow the recovery guidance in the error message (it carries the current revision).
 ${commitBullet}
-- Issue write tools ONE AT A TIME, chaining each response's revision into the next write's expectedRevision.
+- When you already know two or more edits, send them as ONE apply_edits call (up to 32 items; they apply sequentially, so order independent edits bottom-of-document first). For single writes, chain each response's revision into the next write's expectedRevision.
 ${engineBullet}
 ${verifyBullet}
 - Use apply_list for lists, replace_range for replacements, and preview_equation before insert_equation. Treat preview warnings as errors.
