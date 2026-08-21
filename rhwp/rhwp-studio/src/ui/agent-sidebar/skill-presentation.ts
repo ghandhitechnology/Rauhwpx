@@ -1,3 +1,5 @@
+import type { ProductSkillIcon } from '../../agent/types.ts';
+
 export type SkillGlyph = 'skillEdit' | 'skillBot' | 'skillSystem';
 
 /**
@@ -18,7 +20,36 @@ const INTERNAL_WORK_SKILLS = new Set([
 ]);
 
 export function skillGlyphForName(name: string): SkillGlyph {
-  if (DOCUMENT_EDITING_SKILLS.has(name)) return 'skillEdit';
-  if (INTERNAL_WORK_SKILLS.has(name)) return 'skillBot';
+  return skillGlyphForIcon(defaultSkillIconForName(name));
+}
+
+export function defaultSkillIconForName(name: string): ProductSkillIcon {
+  if (DOCUMENT_EDITING_SKILLS.has(name)) return 'pencil';
+  if (INTERNAL_WORK_SKILLS.has(name)) return 'bot';
+  return 'system';
+}
+
+export function skillGlyphForIcon(icon: ProductSkillIcon): SkillGlyph {
+  if (icon === 'pencil') return 'skillEdit';
+  if (icon === 'bot') return 'skillBot';
   return 'skillSystem';
+}
+
+export function skillGlyphForSkill(skill: { name: string; icon?: ProductSkillIcon }): SkillGlyph {
+  return skillGlyphForIcon(skill.icon ?? defaultSkillIconForName(skill.name));
+}
+
+/** Keep the picker authoritative while leaving malformed drafts for validation to explain. */
+export function withSkillIconFrontmatter(markdown: string, icon: ProductSkillIcon): string {
+  const opening = markdown.match(/^(\uFEFF?---\r?\n)/);
+  if (!opening) return markdown;
+  const newline = opening[0].endsWith('\r\n') ? '\r\n' : '\n';
+  const body = markdown.slice(opening[0].length);
+  const closing = body.match(/\r?\n---\r?\n/);
+  if (!closing || closing.index == null) return markdown;
+  const frontmatter = body.slice(0, closing.index);
+  const nextFrontmatter = /^icon:\s*.*$/m.test(frontmatter)
+    ? frontmatter.replace(/^icon:\s*.*$/m, `icon: ${icon}`)
+    : `${frontmatter}${newline}icon: ${icon}`;
+  return `${opening[0]}${nextFrontmatter}${body.slice(closing.index)}`;
 }

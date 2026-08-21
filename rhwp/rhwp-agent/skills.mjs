@@ -11,6 +11,7 @@ const MAX_SKILL_BYTES = 50 * 1024 * 1024;
 const MAX_AGENT_RESOURCE_BYTES = 1024 * 1024;
 const RESERVED_NAMES = new Set(['skills', 'skill-create', 'skill-edit', 'skill-delete']);
 const REQUIRED_BUNDLED_SKILLS = new Set(['present-plan']);
+const SKILL_ICONS = new Set(['pencil', 'bot', 'system']);
 
 export class SkillError extends Error {
   constructor(code, message) {
@@ -57,11 +58,12 @@ export function parseSkillMarkdown(markdown, expectedName) {
     metadata[key] = value;
   }
   const keys = Object.keys(metadata);
-  if (keys.some((key) => key !== 'name' && key !== 'description')) {
-    throw new SkillError('INVALID_SKILL', 'SKILL.md frontmatter may contain only name and description');
+  if (keys.some((key) => key !== 'name' && key !== 'description' && key !== 'icon')) {
+    throw new SkillError('INVALID_SKILL', 'SKILL.md frontmatter may contain only name, description, and icon');
   }
   const name = metadata.name;
   const description = metadata.description;
+  const icon = metadata.icon;
   if (!SKILL_NAME_RE.test(name ?? '') || RESERVED_NAMES.has(name)) {
     throw new SkillError('INVALID_SKILL_NAME', 'Skill name must be lowercase hyphen-case, under 64 characters, and not reserved');
   }
@@ -71,9 +73,12 @@ export function parseSkillMarkdown(markdown, expectedName) {
   if (!description || description.length > 1000) {
     throw new SkillError('INVALID_SKILL', 'Skill description is required and must be at most 1000 characters');
   }
+  if (icon !== undefined && !SKILL_ICONS.has(icon)) {
+    throw new SkillError('INVALID_SKILL_ICON', 'Skill icon must be pencil, bot, or system');
+  }
   const body = source.slice(bodyStart).trim();
   if (!body) throw new SkillError('INVALID_SKILL', 'SKILL.md instructions cannot be empty');
-  return { name, description, body };
+  return { name, description, ...(icon ? { icon } : {}), body };
 }
 
 function safeRelativePath(value) {
@@ -174,6 +179,7 @@ export class SkillRegistry {
         skills.push({
           name: parsed.name,
           description: parsed.description,
+          ...(parsed.icon ? { icon: parsed.icon } : {}),
           origin,
           enabled: required || !disabled.has(parsed.name),
           ...(required ? { required: true } : {}),

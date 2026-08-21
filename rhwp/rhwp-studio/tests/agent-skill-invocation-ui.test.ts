@@ -19,11 +19,12 @@ test('a skill token is a valid message without fallback prose', () => {
   assert.match(sidebar, /text = invocation\[2\]\?\.trim\(\) \?\? ''/);
   assert.doesNotMatch(sidebar, /이 스킬을 현재 문서에 적용해 주세요/);
   assert.match(sidebar, /if \(!text && skillNameForMessage\) text = `\/\$\{skillNameForMessage\}`/);
-  assert.match(sidebar, /recordUserMessage\(visibleText, messageAttachments, undefined, skillNameForMessage\)/);
+  assert.match(sidebar, /recordUserMessage\([\s\S]*skillNameForMessage,[\s\S]*skillIconForMessage/);
 });
 
 test('skill invocation structure persists and renders independently from its sentence', () => {
   assert.match(threads, /skillName\?: string/);
+  assert.match(threads, /skillIcon\?: ProductSkillIcon/);
   assert.match(sidebar, /bubble\.classList\.add\('ag-has-skill'\)/);
   assert.match(sidebar, /if \(message\.text\) bubble\.appendChild/);
   assert.match(css, /\.ag-msg-user\.ag-has-skill\s*\{[^}]*background:\s*transparent/s);

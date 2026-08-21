@@ -25,6 +25,7 @@ import type {
   StructuredPlan,
   SkillCatalog,
   ProductSkill,
+  ProductSkillIcon,
   DocumentTemplate,
   TemplateCatalog,
 } from '../../agent/types.ts';
@@ -81,7 +82,12 @@ import { summarizePendingDiffs } from './pending-diff-summary.ts';
 import { createReferenceLibrary } from './reference-library.ts';
 import { isDesktopApp } from '../../desktop-integration.ts';
 import { fuzzyTemplateScore } from './template-fuzzy.ts';
-import { skillGlyphForName } from './skill-presentation.ts';
+import {
+  defaultSkillIconForName,
+  skillGlyphForIcon,
+  skillGlyphForSkill,
+  withSkillIconFrontmatter,
+} from './skill-presentation.ts';
 import type {
   InlinePromptSendResult,
   InlinePromptSubmission,
@@ -610,6 +616,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let templateCatalog: TemplateCatalog = { revision: 0, templates: [] };
   let activeTemplate: DocumentTemplate | null = null;
   let skillDraftFiles: Array<{ path: string; content: string; encoding: 'utf8' | 'base64' }> = [];
+  let selectedSkillIcon: ProductSkillIcon = 'system';
   let selectedSkillFile = 'SKILL.md';
   let editingSkill: ProductSkill | null = null;
   let skillValidationReady = false;
@@ -1731,6 +1738,28 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const skillEditorBack = el('button', 'ag-skill-editor-back', '목록');
   skillEditorBack.type = 'button';
   skillEditorHeader.append(skillEditorTitle, skillEditorBack);
+  const skillIconPicker = el('fieldset', 'ag-skill-icon-picker') as HTMLFieldSetElement;
+  const skillIconLegend = el('legend', 'ag-skill-icon-legend', '아이콘');
+  const skillIconOptions = el('div', 'ag-skill-icon-options');
+  const skillIconInputs = new Map<ProductSkillIcon, HTMLInputElement>();
+  for (const [value, label] of [
+    ['pencil', '연필'],
+    ['bot', '봇'],
+    ['system', '시스템'],
+  ] as const) {
+    const option = el('label', 'ag-skill-icon-option') as HTMLLabelElement;
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'ag-skill-icon';
+    radio.value = value;
+    radio.setAttribute('aria-label', `${label} 아이콘`);
+    const glyph = el('span', 'ag-skill-icon-option-glyph');
+    glyph.appendChild(createIcon(skillGlyphForIcon(value)));
+    option.append(radio, glyph, el('span', 'ag-skill-icon-option-label', label));
+    skillIconInputs.set(value, radio);
+    skillIconOptions.appendChild(option);
+  }
+  skillIconPicker.append(skillIconLegend, skillIconOptions);
   const skillGoal = el('textarea', 'ag-skill-field') as HTMLTextAreaElement;
   skillGoal.rows = 3;
   skillGoal.placeholder = '이 스킬이 반복해서 해결할 일을 설명하세요.';
@@ -1775,7 +1804,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const skillSave = el('button', 'ag-skill-save', '검증하기');
   skillSave.type = 'button';
   skillEditorActions.append(skillGenerate, skillSave);
-  skillEditor.append(skillEditorHeader, skillGoal, skillTriggers, skillNonTriggers, skillResourceRow, skillName, skillFiles, skillFileEditor, skillWarning, skillEditorActions);
+  skillEditor.append(skillEditorHeader, skillIconPicker, skillGoal, skillTriggers, skillNonTriggers, skillResourceRow, skillName, skillFiles, skillFileEditor, skillWarning, skillEditorActions);
   skillsPage.append(skillsHeader, skillsToolbar, skillsStatus, skillsList, skillEditor);
 
   const referenceLibrary = createReferenceLibrary({
@@ -2502,6 +2531,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     renderSkillsList();
   }
 
+  function syncSkillIconPicker(icon: ProductSkillIcon, disabled = false): void {
+    selectedSkillIcon = icon;
+    skillIconPicker.disabled = disabled;
+    for (const [value, input] of skillIconInputs) input.checked = value === icon;
+  }
+
+  function syncSelectedIconToSkillFile(): void {
+    const file = skillDraftFiles.find((entry) => entry.path === 'SKILL.md');
+    if (!file || file.encoding !== 'utf8') return;
+    const next = withSkillIconFrontmatter(file.content, selectedSkillIcon);
+    if (next === file.content) return;
+    file.content = next;
+    if (selectedSkillFile === 'SKILL.md') skillFileEditor.value = next;
+  }
+
   function beginSkillCreate(): void {
     activeSkillDraftRequestId = null;
     setSkillsPanelOpen(true);
@@ -2523,6 +2567,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     skillValidationReady = false;
     skillSave.textContent = '검증하기';
     skillResources.disabled = false;
+    syncSkillIconPicker('system');
     skillResourceStatus.textContent = '선택된 파일 없음';
     selectedSkillFile = 'SKILL.md';
     skillFileEditor.value = '';
@@ -2570,10 +2615,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       : '스킬은 rhwp에서만 보이며 Claude/Codex의 전역 스킬 폴더에는 설치되지 않습니다.';
   }
 
-  function applySkillDraft(name: string, files: Array<{ path: string; content: string; encoding?: 'utf8' | 'base64' }>): void {
+  function applySkillDraft(
+    name: string,
+    files: Array<{ path: string; content: string; encoding?: 'utf8' | 'base64' }>,
+    icon: ProductSkillIcon = selectedSkillIcon,
+  ): void {
     invalidateSkillValidation();
+    syncSkillIconPicker(icon, skillIconPicker.disabled);
     skillName.value = name;
     skillDraftFiles = files.map((file) => ({ path: file.path, content: file.content, encoding: file.encoding ?? 'utf8' }));
+    syncSelectedIconToSkillFile();
     const resourceCount = skillDraftFiles.filter((file) => file.path !== 'SKILL.md').length;
     skillResourceStatus.textContent = resourceCount > 0 ? `${resourceCount}개 파일 추가됨` : '선택된 파일 없음';
     selectedSkillFile = skillDraftFiles.some((file) => file.path === 'SKILL.md') ? 'SKILL.md' : (skillDraftFiles[0]?.path ?? 'SKILL.md');
@@ -2606,7 +2657,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         const copy = el('button', 'ag-skill-copy');
         copy.type = 'button';
         const copyIcon = el('span', 'ag-skill-kind-icon');
-        copyIcon.appendChild(createIcon(skillGlyphForName(skill.name)));
+        copyIcon.appendChild(createIcon(skillGlyphForSkill(skill)));
         const copyText = el('span', 'ag-skill-copy-text');
         copyText.append(el('strong', 'ag-skill-item-name', `/${skill.name}`), el('span', 'ag-skill-item-description', skill.description));
         const badges = el('span', 'ag-skill-badges');
@@ -2651,10 +2702,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   skillsSearch.addEventListener('input', renderSkillsList);
   skillFileEditor.addEventListener('input', () => { commitSkillFileEditor(); invalidateSkillValidation(); });
   skillName.addEventListener('input', invalidateSkillValidation);
+  for (const [icon, radio] of skillIconInputs) {
+    radio.addEventListener('change', () => {
+      if (!radio.checked) return;
+      commitSkillFileEditor();
+      selectedSkillIcon = icon;
+      syncSelectedIconToSkillFile();
+      invalidateSkillValidation();
+    });
+  }
   skillGenerate.addEventListener('click', () => {
     const goal = skillGoal.value.trim();
     if (!goal) { skillsStatus.textContent = '먼저 스킬의 목표를 적어 주세요.'; skillGoal.focus(); return; }
     commitSkillFileEditor();
+    syncSelectedIconToSkillFile();
     const existingSkill = skillDraftFiles.find((file) => file.path === 'SKILL.md')?.content;
     const requestId = bridge.generateSkillDraft({ goal, triggerExamples: skillTriggers.value.trim(), nonTriggerExamples: skillNonTriggers.value.trim(), resourceNotes: skillDraftFiles.length > 1 ? 'Preserve useful attached resources and reference them from SKILL.md.' : '', existingSkill });
     activeSkillDraftRequestId = requestId;
@@ -2663,6 +2724,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   });
   skillSave.addEventListener('click', () => {
     commitSkillFileEditor();
+    syncSelectedIconToSkillFile();
     const name = skillName.value.trim();
     if (!name || !skillDraftFiles.some((file) => file.path === 'SKILL.md')) {
       skillsStatus.textContent = '스킬 이름과 SKILL.md가 필요합니다.';
@@ -2717,6 +2779,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     workflow?: AgentWorkflow;
     templateId?: string;
     skillName?: string;
+    skillIcon?: ProductSkillIcon;
   };
   let slashOptions: SlashOption[] = [];
   let slashIndex = 0;
@@ -2740,7 +2803,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     composerSkill.hidden = skill === null;
     composerSkillName.textContent = skill ? skillDisplayName(skill.name) : '';
     composerSkillIcon.replaceChildren();
-    if (skill) composerSkillIcon.appendChild(createIcon(skillGlyphForName(skill.name)));
+    if (skill) composerSkillIcon.appendChild(createIcon(skillGlyphForSkill(skill)));
     composerSkill.dataset.agent = skill ? selectedAgent : '';
     composerSkill.title = skill ? `/${skill.name} · ${skill.description}` : '';
     input.setAttribute('aria-label', skill ? `/${skill.name} 스킬 뒤의 메시지 입력` : '에이전트 메시지 입력');
@@ -2830,6 +2893,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         label: `/${skill.name}`,
         detail: skill.description,
         skillName: skill.name,
+        skillIcon: skill.icon,
       }));
     slashOptions = [...base, ...product].filter((option) => option.label.slice(1).toLowerCase().includes(query));
     slashIndex = Math.min(slashIndex, Math.max(0, slashOptions.length - 1));
@@ -2848,7 +2912,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       if (option.skillName) {
         row.classList.add('ag-skill-option');
         const icon = el('span', 'ag-slash-skill-icon');
-        icon.appendChild(createIcon(skillGlyphForName(option.skillName)));
+        icon.appendChild(createIcon(skillGlyphForSkill({ name: option.skillName, icon: option.skillIcon })));
         row.append(icon, el('strong', 'ag-slash-name', option.label), el('span', 'ag-slash-detail', option.detail));
       } else {
         row.append(el('strong', 'ag-slash-name', option.label), el('span', 'ag-slash-detail', option.detail));
@@ -3012,12 +3076,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         return;
       }
     }
-    let skillNameForMessage = activeComposerSkill?.name;
+    let invokedSkill = activeComposerSkill;
     const invocation = activeComposerSkill ? null : text.match(/^\/([a-z0-9-]+)(?:\s+([\s\S]*))?$/);
-    if (invocation && skillCatalog.skills.some((skill) => skill.name === invocation[1] && skill.enabled && !skill.invalid)) {
-      skillNameForMessage = invocation[1];
+    const matchedSkill = invocation
+      ? skillCatalog.skills.find((skill) => skill.name === invocation[1] && skill.enabled && !skill.invalid)
+      : undefined;
+    if (invocation && matchedSkill) {
+      invokedSkill = matchedSkill;
       text = invocation[2]?.trim() ?? '';
     }
+    const skillNameForMessage = invokedSkill?.name;
+    const skillIconForMessage = invokedSkill
+      ? invokedSkill.icon ?? defaultSkillIconForName(invokedSkill.name)
+      : undefined;
     if (threadsPanelOpen) setThreadsPanelOpen(false);
     if (skillsPanelOpen) setSkillsPanelOpen(false);
     if (settingsPanelOpen) setSettingsPanelOpen(false);
@@ -3041,7 +3112,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       size: file.size,
       status: 'processing',
     }));
-    const userMessage = recordUserMessage(visibleText, messageAttachments, undefined, skillNameForMessage);
+    const userMessage = recordUserMessage(visibleText,
+      messageAttachments,
+      undefined,
+      skillNameForMessage,
+      skillIconForMessage,
+    );
     const userBubble = renderUserMessage(userMessage);
     followConversation = true;
     replyPending = true;
@@ -3130,12 +3206,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     attachments: ThreadAttachment[] = [],
     selection?: { label: string; excerpt: string },
     skillName?: string,
+    skillIcon?: ProductSkillIcon,
   ): ThreadMessage {
     const message: ThreadMessage = {
       role: 'user',
       text,
       agent: selectedAgent,
       ...(skillName ? { skillName } : {}),
+      ...(skillName && skillIcon ? { skillIcon } : {}),
       ...(attachments.length ? { attachments } : {}),
       ...(selection ? { selection } : {}),
     };
@@ -3184,7 +3262,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       const skill = el('span', 'ag-skill-token ag-msg-skill');
       skill.dataset.agent = message.agent ?? currentThread.agent;
       const icon = el('span', 'ag-skill-token-icon');
-      icon.appendChild(createIcon(skillGlyphForName(message.skillName)));
+      icon.appendChild(createIcon(skillGlyphForSkill({ name: message.skillName, icon: message.skillIcon })));
       skill.append(icon, el('span', 'ag-skill-token-name', skillDisplayName(message.skillName)));
       skill.title = `/${message.skillName}`;
       skill.setAttribute('aria-label', `사용한 스킬: ${skillDisplayName(message.skillName)}`);
@@ -4690,12 +4768,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         skillTriggers.value = '';
         skillNonTriggers.value = '';
         const nextName = action === 'duplicate' ? `${e.skill.name}-custom` : e.skill.name;
-        applySkillDraft(nextName, e.skill.files.map((file) => ({ path: file.path, content: file.content ?? '', encoding: file.encoding })));
-        skillName.disabled = e.skill.origin === 'bundled' && action !== 'duplicate';
-        skillSave.hidden = e.skill.origin === 'bundled' && action !== 'duplicate';
-        skillGenerate.hidden = e.skill.origin === 'bundled' && action !== 'duplicate';
-        skillResources.disabled = e.skill.origin === 'bundled' && action !== 'duplicate';
-        skillsStatus.textContent = e.skill.origin === 'bundled' && action !== 'duplicate' ? '기본 스킬은 읽기 전용입니다. 복제하여 수정할 수 있습니다.' : '파일을 검토한 뒤 저장하세요.';
+        const readOnly = e.skill.origin === 'bundled' && action !== 'duplicate';
+        syncSkillIconPicker(e.skill.icon ?? defaultSkillIconForName(e.skill.name), readOnly);
+        applySkillDraft(
+          nextName,
+          e.skill.files.map((file) => ({ path: file.path, content: file.content ?? '', encoding: file.encoding })),
+          selectedSkillIcon,
+        );
+        skillName.disabled = readOnly;
+        skillSave.hidden = readOnly;
+        skillGenerate.hidden = readOnly;
+        skillResources.disabled = readOnly;
+        skillsStatus.textContent = readOnly ? '기본 스킬은 읽기 전용입니다. 복제하여 수정할 수 있습니다.' : '파일을 검토한 뒤 저장하세요.';
         skillEditorBack.focus();
         break;
       }
@@ -4712,7 +4796,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           const resources = skillDraftFiles.filter((file) => file.path !== 'SKILL.md');
           const generated = e.draft.files.map((file) => ({ ...file, encoding: 'utf8' as const }));
           const generatedPaths = new Set(generated.map((file) => file.path));
-          applySkillDraft(e.draft.name, [...generated, ...resources.filter((file) => !generatedPaths.has(file.path))]);
+          applySkillDraft(
+            e.draft.name,
+            [...generated, ...resources.filter((file) => !generatedPaths.has(file.path))],
+            selectedSkillIcon,
+          );
         }
         skillsStatus.textContent = '초안이 준비되었습니다. 모든 파일을 검토한 뒤 저장하세요.';
         break;

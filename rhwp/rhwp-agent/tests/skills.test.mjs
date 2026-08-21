@@ -7,17 +7,19 @@ import { SkillRegistry, parseSkillMarkdown } from '../skills.mjs';
 import { buildClaudeArgv, formatClaudeExitError } from '../agents/claude.mjs';
 import { buildCodexArgv } from '../agents/codex.mjs';
 
-const MARKDOWN = (name, description = 'Use this skill for representative testing.') => `---\nname: ${name}\ndescription: ${description}\n---\n\nFollow the requested workflow.\n`;
+const MARKDOWN = (name, description = 'Use this skill for representative testing.', icon) => `---\nname: ${name}\ndescription: ${description}${icon ? `\nicon: ${icon}` : ''}\n---\n\nFollow the requested workflow.\n`;
 
-test('parseSkillMarkdown accepts portable frontmatter and rejects extra keys', () => {
+test('parseSkillMarkdown accepts portable icon metadata and rejects unknown values or keys', () => {
   assert.equal(parseSkillMarkdown(MARKDOWN('good-skill')).name, 'good-skill');
+  assert.equal(parseSkillMarkdown(MARKDOWN('pencil-skill', undefined, 'pencil')).icon, 'pencil');
   const windowsMarkdown = `\uFEFF${MARKDOWN('windows-skill').replace(/\n/g, '\r\n')}`;
   assert.deepEqual(parseSkillMarkdown(windowsMarkdown), {
     name: 'windows-skill',
     description: 'Use this skill for representative testing.',
     body: 'Follow the requested workflow.',
   });
-  assert.throws(() => parseSkillMarkdown('---\nname: bad\ndescription: x\nfoo: bar\n---\n\nDo it.\n'), /only name and description/);
+  assert.throws(() => parseSkillMarkdown(MARKDOWN('bad-icon', undefined, 'sparkles')), /pencil, bot, or system/);
+  assert.throws(() => parseSkillMarkdown('---\nname: bad\ndescription: x\nfoo: bar\n---\n\nDo it.\n'), /only name, description, and icon/);
   assert.throws(() => parseSkillMarkdown(MARKDOWN('skill-create')), /reserved/);
 });
 
@@ -49,7 +51,7 @@ test('SkillRegistry saves, disables, reads, and recoverably deletes user skills'
   const registry = await new SkillRegistry({ bundledRoot, userRoot }).init();
 
   const payload = { name: 'my-skill', files: [
-    { path: 'SKILL.md', content: MARKDOWN('my-skill') },
+    { path: 'SKILL.md', content: MARKDOWN('my-skill', undefined, 'bot') },
     { path: 'scripts/check.js', content: 'process.stdout.write("ok")' },
   ] };
   const validation = await registry.validate(payload);
@@ -60,6 +62,7 @@ test('SkillRegistry saves, disables, reads, and recoverably deletes user skills'
   let catalog = await registry.list();
   assert.deepEqual(catalog.skills.map((skill) => skill.name), ['starter', 'my-skill']);
   assert.equal(catalog.skills.find((skill) => skill.name === 'my-skill').hasScripts, true);
+  assert.equal(catalog.skills.find((skill) => skill.name === 'my-skill').icon, 'bot');
 
   await registry.setEnabled('my-skill', false);
   catalog = await registry.list();

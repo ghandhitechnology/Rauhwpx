@@ -4,7 +4,7 @@ import {
   withTimeout,
 } from '../core/idb-open.ts';
 import { isAgentWorkflow, isStructuredPlan } from './types.ts';
-import type { AgentName, AgentWorkflow, StructuredPlan } from './types.ts';
+import type { AgentName, AgentWorkflow, ProductSkillIcon, StructuredPlan } from './types.ts';
 
 const STORAGE_KEY = 'rhwp-agent-threads';
 const NOTIFY_KEY = 'rhwp-agent-threads-notify';
@@ -20,6 +20,8 @@ interface ThreadMessageBase {
   agent?: AgentName;
   /** 사용자가 명시적으로 호출한 product skill. 본문과 분리해 chip으로 표시한다. */
   skillName?: string;
+  /** 호출 당시 선택된 아이콘. 이후 skill 설정이 바뀌어도 기록 모양을 유지한다. */
+  skillIcon?: ProductSkillIcon;
   messageId?: string;
   attachments?: ThreadAttachment[];
   /** 인라인 프롬프트로 보낸 메시지에 붙는 문서 선택 컨텍스트 (표시용). */
@@ -245,11 +247,16 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
         || message.agent === 'pi' || message.agent === 'grok' || message.agent === 'cursor'
         ? message.agent
         : undefined;
+      const skillIcon: ProductSkillIcon | undefined = message.skillIcon === 'pencil'
+        || message.skillIcon === 'bot' || message.skillIcon === 'system'
+        ? message.skillIcon
+        : undefined;
       const metadata = {
         ...(agent ? { agent } : {}),
         ...(typeof message.skillName === 'string' && /^[a-z0-9-]+$/.test(message.skillName)
           ? { skillName: message.skillName }
           : {}),
+        ...(skillIcon ? { skillIcon } : {}),
         ...(typeof message.messageId === 'string' ? { messageId: message.messageId } : {}),
         ...(attachments?.length ? { attachments } : {}),
       };

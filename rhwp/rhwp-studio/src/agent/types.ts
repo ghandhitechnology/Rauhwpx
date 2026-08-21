@@ -452,9 +452,13 @@ export interface ProductSkillFile {
   content?: string;
 }
 
+export type ProductSkillIcon = 'pencil' | 'bot' | 'system';
+
 export interface ProductSkill {
   name: string;
   description: string;
+  /** Optional for compatibility with skills created before icon selection. */
+  icon?: ProductSkillIcon;
   origin: 'bundled' | 'user';
   enabled: boolean;
   required?: boolean;
