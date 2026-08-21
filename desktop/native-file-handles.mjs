@@ -429,8 +429,9 @@ export class NativeFileHandleRegistry {
     const preferred = [];
     const rest = [];
     for (const dir of dirs) {
+      const wantedKey = wanted ? this.#ownershipKey(join(dir, wanted)) : null;
       for (const filePath of await this.#listDocumentFiles(dir)) {
-        if (wanted && basename(filePath) === wanted) preferred.push(filePath);
+        if (wantedKey && this.#ownershipKey(filePath) === wantedKey) preferred.push(filePath);
         else rest.push(filePath);
       }
     }
