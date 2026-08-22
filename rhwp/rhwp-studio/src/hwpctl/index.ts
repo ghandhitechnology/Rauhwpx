@@ -4,6 +4,7 @@
  * 한컴 웹기안기의 HwpCtrl ActiveX/JavaScript 객체와 동일한 인터페이스.
  * 내부적으로 rhwp WASM API를 호출한다.
  */
+import { inferExportFormat } from '@/command/save-target';
 import { Action } from './action';
 import { ParameterSet } from './parameter-set';
 import { getActionDef, getRegisteredCount, getImplementedCount, getAllActions } from './action-registry';
@@ -84,9 +85,9 @@ export class HwpCtrl {
   SaveAs(filename: string, format?: string, arg?: string): boolean {
     try {
       const sourceFormat = this.wasmDoc.getSourceFormat();
-      // format 지정 우선, 없으면 출처 따름. HWPX/HML 직접 저장 활성화.
-      const isHwpx = format === 'hwpx' || (!format && sourceFormat === 'hwpx');
-      const isHml = format === 'hml' || (!format && !isHwpx && sourceFormat === 'hml');
+      const saveFormat = inferExportFormat(sourceFormat, filename, format);
+      const isHwpx = saveFormat === 'hwpx';
+      const isHml = saveFormat === 'hml';
       console.log(`[hwpctl] SaveAs: filename=${filename}, sourceFormat=${sourceFormat}, isHwpx=${isHwpx}, isHml=${isHml}`);
 
       let bytes: Uint8Array;

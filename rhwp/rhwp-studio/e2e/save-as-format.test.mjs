@@ -2,8 +2,8 @@
  * 저장 출력 포맷 선택 (file:save-as-hwp / file:save-as-hwpx) E2E — #1613
  *
  * 검증:
- *   1. HWP 문서 → "HWPX 형식으로 저장" → application/hwp+zip blob(PK 매직) 생성.
- *   2. HWPX 문서 → "HWP 형식으로 저장" → application/x-hwp blob(CFB 매직 D0CF11E0) 생성.
+ *   1. HWP 문서 → "HWPX로 저장" → application/hwp+zip blob(PK 매직) 생성.
+ *   2. HWPX 문서 → "HWP 5.0으로 저장" → application/x-hwp blob(CFB 매직 D0CF11E0) 생성.
  *   3. 산출 blob 을 다시 loadDocument 했을 때 정상 재오픈(페이지 수 1 이상).
  *
  * 실행: node e2e/save-as-format.test.mjs --mode=headless
@@ -59,7 +59,7 @@ async function capturedBlobInfo(page) {
   });
 }
 
-await runTest('HWP 문서 → HWPX 형식으로 저장 (file:save-as-hwpx)', async ({ page }) => {
+await runTest('HWP 문서 → HWPX로 저장 (file:save-as-hwpx)', async ({ page }) => {
   await loadHwpFile(page, 'biz_plan.hwp');
   const fmt = await page.evaluate(() => window.__wasm?.getSourceFormat?.());
   assert(fmt === 'hwp', `HWP 출처여야 함 (current: ${fmt})`);
@@ -67,7 +67,7 @@ await runTest('HWP 문서 → HWPX 형식으로 저장 (file:save-as-hwpx)', asy
   await installSaveHooks(page);
   const t = await clickFileMenuItem(page, 'file:save-as-hwpx');
   assert(t.ok, `메뉴 항목 클릭 (${t.reason || ''})`);
-  assert(!t.disabled, 'HWPX 형식으로 저장 항목이 활성이어야 함');
+  assert(!t.disabled, 'HWPX로 저장 항목이 활성이어야 함');
 
   await page.waitForFunction(() => window.__savedBlob !== null, { timeout: 8000 });
   const r = await capturedBlobInfo(page);
@@ -78,7 +78,7 @@ await runTest('HWP 문서 → HWPX 형식으로 저장 (file:save-as-hwpx)', asy
   assert((r.reopenPages ?? 0) >= 1, `재오픈 페이지 1 이상 (current: ${r.reopenPages})`);
 });
 
-await runTest('HWPX 문서 → HWP 형식으로 저장 (file:save-as-hwp)', async ({ page }) => {
+await runTest('HWPX 문서 → HWP 5.0으로 저장 (file:save-as-hwp)', async ({ page }) => {
   await loadHwpFile(page, 'hwpx/footnote-01.hwpx');
   const fmt = await page.evaluate(() => window.__wasm?.getSourceFormat?.());
   assert(fmt === 'hwpx', `HWPX 출처여야 함 (current: ${fmt})`);
@@ -86,7 +86,7 @@ await runTest('HWPX 문서 → HWP 형식으로 저장 (file:save-as-hwp)', asyn
   await installSaveHooks(page);
   const t = await clickFileMenuItem(page, 'file:save-as-hwp');
   assert(t.ok, `메뉴 항목 클릭 (${t.reason || ''})`);
-  assert(!t.disabled, 'HWP 형식으로 저장 항목이 활성이어야 함');
+  assert(!t.disabled, 'HWP 5.0으로 저장 항목이 활성이어야 함');
 
   await page.waitForFunction(() => window.__savedBlob !== null, { timeout: 8000 });
   const r = await capturedBlobInfo(page);

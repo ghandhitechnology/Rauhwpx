@@ -21,7 +21,7 @@ export function buildHmlSaveFormatMessage(
   }
 
   const lines = [
-    `${capability.diagnostic ?? 'HML 저장을 사용할 수 없습니다.'}\nHWP 또는 HWPX로 저장할 수 있습니다.`,
+    `${capability.diagnostic ?? 'HML 저장을 사용할 수 없습니다.'}\nHWPX(권장) 또는 HWP 5.0으로 저장할 수 있습니다.`,
   ];
   const blockers = normalizeHmlSaveState(metadata)?.saveBlockers ?? [];
   for (const blocker of blockers.slice(0, MAX_BLOCKER_PATHS)) {

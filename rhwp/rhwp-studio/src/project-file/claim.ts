@@ -1,5 +1,6 @@
 import type { RecentDoc } from '../recent/recent-store.ts';
 import type { DocumentDigest, ProjectFileClaim } from './identity.ts';
+import { FALLBACK_DOCUMENT_FILE_NAME } from '../core/document-names.ts';
 
 function knownDigestOf(value: string): DocumentDigest | null {
   return value.startsWith('blake3:') ? value as DocumentDigest : null;
@@ -23,7 +24,7 @@ export function claimForExplorerGroup(
   const row = recents.find((recent) => recent.documentId === group.documentId);
   return {
     documentId: group.documentId,
-    displayName: group.displayName || row?.fileName || 'document.hwp',
+    displayName: group.displayName || row?.fileName || FALLBACK_DOCUMENT_FILE_NAME,
     knownDigest: row ? knownDigestOf(row.sourceDigest) : null,
     liveHandle: row?.handle ?? null,
     recentId: row?.id ?? null,

@@ -954,6 +954,26 @@ test('materialize_document_snapshot exports the live browser document without a 
   assert.equal(r.dirty, false);
 });
 
+test('materialize_document_snapshot exports HWPX for untitled new documents even when source is HWP', async () => {
+  const { call, wasm } = makeEnv();
+  Object.assign(wasm, {
+    fileName: '새 문서.hwpx',
+    getSourceFormat: () => 'hwp',
+  });
+  const r = (await call('materialize_document_snapshot')) as { sourceFormat: string };
+  assert.equal(r.sourceFormat, 'hwpx');
+});
+
+test('materialize_document_snapshot keeps binary HWP for an opened .hwp file', async () => {
+  const { call, wasm } = makeEnv();
+  Object.assign(wasm, {
+    fileName: '보고서.hwp',
+    getSourceFormat: () => 'hwp',
+  });
+  const r = (await call('materialize_document_snapshot')) as { sourceFormat: string };
+  assert.equal(r.sourceFormat, 'hwp');
+});
+
 // ─── 좌표 이동 ──────────────────────────────────────────────
 
 test('본문 멀티라인 삽입이 표 앞이면 객체 앵커 paraIdx 가 이동하고 reject 도 정확하다', async () => {

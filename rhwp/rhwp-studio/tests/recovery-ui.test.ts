@@ -14,6 +14,7 @@ test('recoveryFileName은 원본을 덮어쓰지 않는 복구본 이름을 만�
   assert.equal(recoveryFileName('sample.hwpx'), 'sample 복구본.hwp');
   assert.equal(recoveryFileName('sample.hml'), 'sample 복구본.hwp');
   assert.equal(recoveryFileName('새 문서.hwp'), '새 문서 복구본.hwp');
+  assert.equal(recoveryFileName('새 문서.hwpx'), '새 문서 복구본.hwp');
   assert.equal(recoveryFileName('memo'), 'memo 복구본.hwp');
   assert.equal(recoveryFileName(''), '문서 복구본.hwp');
 });
