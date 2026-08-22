@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>귀찮이글</title>
-<meta name="description" content="한글 파일 편집이랑 지피티와의 대화, 한 화면에서 융합. macOS용 귀찮이글.">
-<meta property="og:title" content="귀찮이글 — 귀찮은 이를 위한 한글">
-<meta property="og:description" content="한글 파일 편집이랑 지피티와의 대화, 한 화면에서 융합. .hwp를 열어놓고 에이전트가 조사하고 계획하고 써요.">
+<meta name="description" content="한글 파일 편집이랑 에이전트와의 대화, 한 화면에서 융합. macOS용 귀찮이글.">
+<meta property="og:title" content="귀찮이글">
+<meta property="og:description" content="한글 파일 편집이랑 에이전트와의 대화, 한 화면에서 융합.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://ghandhitechnology.github.io/Rauhwpx/">
 <meta property="og:image" content="https://ghandhitechnology.github.io/Rauhwpx/assets/editor-agent-running.png">
@@ -145,13 +145,16 @@ a{color:var(--ink)}
 }
 .gh-stars .star{color:#E0A417;font-size:1.35em;line-height:1;margin-right:5px;transform:translateY(-1px)}
 
-.cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
-.cta-meta{
-  margin-top:14px;font:400 15px/1.6 var(--sans);color:var(--ink-3);
-  display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;
+.cta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.cta-tip{
+  margin-top:12px;
+  font:400 14px/1.5 var(--sans);
+  color:var(--ink-3);
 }
-.cta-meta a{color:var(--ink-2);text-underline-offset:3px;display:inline-flex;align-items:center;min-height:44px;padding:0 2px}
-.dot{color:var(--rule-2)}
+.cta-tip a{
+  color:var(--ink-3);text-underline-offset:3px;
+  display:inline-flex;align-items:center;min-height:36px;
+}
 
 /* ── 스크린샷 프레임 + 크롭 ─────────────────── */
 .figure{margin:0}
@@ -202,18 +205,19 @@ a{color:var(--ink)}
 
 /* ── 히어로 ────────────────────────────────── */
 .hero{
-  padding:clamp(48px,6vw,74px) 0 clamp(56px,6.4vw,78px);
+  padding:clamp(68px,8.2vw,104px) 0 clamp(72px,8.6vw,112px);
   background-color:var(--paper-2);
   background-image:var(--grain);
   background-size:180px 180px;
 }
-.hero-grid{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(0,1fr);gap:clamp(32px,4vw,50px);align-items:center}
+.hero-grid{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(0,1fr);gap:clamp(40px,5vw,64px);align-items:center}
 .hero h1{
-  font-size:clamp(31px,4.6vw,48px);
-  line-height:1.2;font-weight:700;letter-spacing:-.032em;
-  margin:14px 0 18px;
+  font-size:clamp(34px,5.1vw,56px);
+  line-height:1.18;font-weight:700;letter-spacing:-.034em;
+  margin:0 0 18px;
 }
-.hero .lead{max-width:34ch}
+.hero .lead{max-width:28ch;margin-bottom:0}
+.hero .cta{margin-top:28px}
 
 /* ── 섹션 헤더 ─────────────────────────────── */
 .sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:clamp(28px,3.4vw,40px);flex-wrap:wrap}
@@ -253,7 +257,7 @@ a{color:var(--ink)}
 .step--wide figure{margin-top:24px}
 
 /* ── 연결 ──────────────────────────────────── */
-#pricing{position:relative;overflow:visible}
+#connect{position:relative;overflow:visible}
 .float-icons{position:absolute;inset:0;pointer-events:none;z-index:1}
 .price-grid{position:relative;z-index:2;display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,300px);gap:clamp(28px,4vw,52px);align-items:center}
 .price-grid .figure{max-width:300px;margin-left:auto}
@@ -308,19 +312,27 @@ a{color:var(--ink)}
   min-height:calc(100svh - 60px);
   display:flex;align-items:center;justify-content:center;
 }
-.dl .h2{margin-bottom:14px}
-.dl p{max-width:46ch;margin:0 auto 26px;color:var(--ink-2)}
+.dl .h2{margin:10px 0 28px;font-size:clamp(28px,3.8vw,42px)}
 .dl .cta{justify-content:center}
-.dl .cta-meta{justify-content:center}
 
 /* ── 푸터 ──────────────────────────────────── */
-.foot{border-top:1px solid var(--rule);padding:34px 0 46px}
-.foot .wrap{display:flex;flex-wrap:wrap;gap:14px 26px;align-items:baseline}
+.foot{border-top:1px solid var(--rule);padding:28px 0 32px}
+.foot .wrap{display:flex;flex-wrap:wrap;gap:10px 26px;align-items:baseline}
 .foot .brand{font-size:16px}
-.foot nav{margin-left:auto;display:flex;flex-wrap:wrap;gap:6px 18px}
+.foot nav{margin-left:auto;display:flex;flex-wrap:wrap;gap:2px 16px}
 .foot a{font-size:15px;color:var(--ink-2);text-underline-offset:3px}
-.foot nav a{display:inline-flex;align-items:center;min-height:44px;padding:0 2px}
-.foot small{font:400 14px/1.6 var(--mono);color:var(--ink-3);width:100%}
+.foot nav a{display:inline-flex;align-items:center;min-height:40px;padding:0 2px}
+.colophon{
+  width:100%;
+  margin-top:14px;
+  padding-top:14px;
+  border-top:1px solid var(--rule);
+  font:400 12px/1.7 var(--mono);
+  letter-spacing:.01em;
+  color:var(--ink-3);
+  max-width:72ch;
+}
+.colophon a{font-size:12px;color:var(--ink-3);text-underline-offset:2px}
 
 /* ── 스크롤 연출 ───────────────────────────────
    종이 겹치기 + 등장. 전부 <html>에 .js가 붙었을 때만 적용돼요.
@@ -357,8 +369,8 @@ html.js .ink.sheet{
    화면보다 긴 섹션은 음수 값이 들어가서 "끝까지 읽은 뒤에" 고정돼요.
    변수가 없으면 top:auto가 되어 sticky가 아무 일도 안 해요. */
 html.js .stack{position:sticky;top:var(--stick-top)}
-/* #pricing은 위에서 id로 position을 잡아둬서 여기서 다시 눌러줘요 */
-html.js #pricing.stack{position:sticky;top:var(--stick-top)}
+/* #connect는 위에서 id로 position을 잡아둬서 여기서 다시 눌러줘요 */
+html.js #connect.stack{position:sticky;top:var(--stick-top)}
 /* 마지막 장은 머리글(60px) 아래에 고정 — 화면을 꽉 채운 뒤에야 푸터가 올라와요 */
 html.js .dl.stack{top:60px}
 
@@ -451,7 +463,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   html{scroll-behavior:auto}
   *{transition-duration:.001ms!important;animation-duration:.001ms!important}
   /* 연출을 끄고 원래 흐름으로 되돌려요 */
-  html.js .stack,html.js #pricing.stack{position:relative;top:auto}
+  html.js .stack,html.js #connect.stack{position:relative;top:auto}
   html.js .rv,html.js .rv-fig,html.js .rv-drop,html.js .rv-fig .note{opacity:1;transform:none}
   html.js .rv-fig .frame{transform:rotate(var(--tilt,0deg))}
 }
@@ -466,9 +478,9 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     <nav class="nav">
       <a href="#features">기능</a>
       <a href="#flow">작업 흐름</a>
-      <a href="#pricing">연결</a>
+      <a href="#connect">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub<span class="gh-stars"></span></a>
-      <a class="btn btn--fill btn--sm" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">다운로드</a>
+      <a class="btn btn--fill btn--sm" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">다운로드</a>
     </nav>
   </div>
 </header>
@@ -480,16 +492,12 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     <div class="wrap hero-grid">
       <div>
         <h1>귀찮은 이를 위한 한글,<br><span class="ul">귀찮이글<svg viewBox="0 0 200 10" preserveAspectRatio="none" aria-hidden="true"><path d="M2 7.2C33 3.4 66 2.3 100 3.6c31 1.2 63 3.4 98 1.1" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span></h1>
-        <p class="lead"><span class="nb">한글 파일 편집이랑 지피티와의 대화,</span> <span class="nb">한 화면에서 융합</span></p>
-        <div class="cta" style="margin-top:26px">
-          <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">macOS용 다운로드</a>
+        <p class="lead"><span class="nb">한글 파일 편집이랑 에이전트와의 대화,</span> <span class="nb">한 화면에서 융합</span></p>
+        <div class="cta">
+          <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">macOS용 다운로드</a>
           <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">Star on GitHub<span class="gh-stars"></span></a>
         </div>
-        <p class="cta-meta">
-          <span>Apple Silicon · v0.1.6</span>
-          <span class="dot">·</span>
-          <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-x64.exe">Windows(beta)</a>
-        </p>
+        <p class="cta-tip"><a href="https://donate.stripe.com/eVqeVf5C5cvR9uiaQKeZ201">토큰 기부하기</a></p>
       </div>
 
       <figure class="figure">
@@ -636,7 +644,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   </section>
 
   <!-- ─────────── 연결 ─────────── -->
-  <section class="sec sheet stack" id="pricing">
+  <section class="sec sheet stack" id="connect">
     <div class="float-icons" aria-hidden="true">
       <div class="icon-tile icon-tile--claude">
         <img src="assets/icon-claude.png" width="512" height="512" alt="">
@@ -651,11 +659,11 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     <div class="wrap price-grid">
       <div>
         <p class="label">연결</p>
-        <h2 class="h2 h2--big" style="margin-top:12px">원래 쓰던 구독권,<br>그대로</h2>
-        <p>원래 업무에 쓰시던 Codex, Claude 구독권이나 OpenRouter API Key를 설정에서 연결하면 준비가 끝나요. 프로그램은 평생 무료예요.</p>
+        <h2 class="h2 h2--big" style="margin-top:12px">쓰던 계정을<br>연결하면 끝</h2>
+        <p>Codex, Claude 계정이나 OpenRouter API Key를 설정에서 연결하면 준비가 끝나요.</p>
         <ul class="conn">
-          <li><b>Codex</b><em>쓰던 구독권 연결</em></li>
-          <li><b>Claude</b><em>쓰던 구독권 연결</em></li>
+          <li><b>Codex</b><em>쓰던 계정 연결</em></li>
+          <li><b>Claude</b><em>쓰던 계정 연결</em></li>
           <li><b>OpenRouter</b><em>API Key 직접 연결</em></li>
         </ul>
       </div>
@@ -677,16 +685,12 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   <section class="sec rule-top dl sheet stack" id="download">
     <div class="wrap">
       <p class="label">다운로드</p>
-      <h2 class="h2" style="margin-top:12px">문서작업은 이제 한곳에서 해결하세요</h2>
+      <h2 class="h2">문서작업은 이제 한곳에서 해결하세요</h2>
       <div class="cta">
-        <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">macOS용 다운로드</a>
+        <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">macOS용 다운로드</a>
         <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">Star on GitHub<span class="gh-stars"></span></a>
       </div>
-      <p class="cta-meta">
-        <span>Apple Silicon · v0.1.6 · .dmg</span>
-        <span class="dot">·</span>
-        <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-x64.exe">Windows (x64)</a>
-      </p>
+      <p class="cta-tip"><a href="https://donate.stripe.com/eVqeVf5C5cvR9uiaQKeZ201">토큰 기부하기</a></p>
     </div>
   </section>
 
@@ -697,11 +701,13 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     <nav>
       <a href="#features">기능</a>
       <a href="#flow">작업 흐름</a>
-      <a href="#pricing">연결</a>
+      <a href="#connect">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub</a>
+      <a href="https://github.com/ghandhitechnology/Rauhwpx/issues/new">이슈</a>
+      <a href="https://donate.stripe.com/eVqeVf5C5cvR9uiaQKeZ201">토큰 기부하기</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx/releases">릴리스</a>
     </nav>
-    <small>v0.1.6 · ghandhitechnology / Rauhwpx</small>
+    <p class="colophon">v0.1.10 개발자 빌드. 출시가 아닙니다. <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a> 포크. MIT. 한컴이 아니며 문서를 호스팅하지 않습니다. macOS 빌드는 서명되어 있습니다. Windows는 미서명이고 제한적입니다. <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-x64.exe">Windows</a> · <a href="https://github.com/ghandhitechnology/Rauhwpx/issues/new">이슈</a></p>
   </div>
 </footer>
 
