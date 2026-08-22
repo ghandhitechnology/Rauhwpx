@@ -36,6 +36,7 @@ ${JSON.stringify(binding, null, 2)}
 Job workspace: ${jobDir}
 Bundled helper copy: ${helperPath}
 Hard iteration ceiling: ${COPY_LAYOUT_MAX_ITERATIONS} collision-free candidates.
+Invoke the helper only as python3 or python followed by this exact helper path. Do not use python -c/-m, another script, or --rhwp-bin.
 
 Required workflow:
 1. Call update_copy_layout_job(phase=binding-source). Read the bundled copy-layout skill completely with read_product_skill. Call get_document_info and require documentId and digest to equal the immutable binding. Always call materialize_document_snapshot, then use only that exact snapshot so the native source can never be modified or overwritten.
@@ -54,7 +55,7 @@ export function buildCopyLayoutCompletionPrompt(result) {
 ${JSON.stringify(result, null, 2)}
 </copy_layout_job_completion>
 
-This is the hub's automatic completion notification for the independent copy-layout worker, not a wait_agent result and not a user message. The worker has settled. Do not open the artifact automatically. Notify the user now: report the quality, precise warnings, counts, and representative preview comparison concisely. When outcome is succeeded, include exactly one Markdown link labeled 템플릿 미리보기 whose href is the exact artifact.downloadUrl from the payload. Studio renders it as a clickable document card; only the user's click opens a new read-only template-preview window. Then ask exactly one final question: whether the user wants to save/register this exact artifact as a reusable template. Do not ask for any other confirmation. If the user accepts in their next reply, call register_copy_layout_template with this jobId; if they decline, do not call it and leave the card available.`;
+This is the hub's automatic completion notification for the independent copy-layout worker — not a collaboration-tool result (never a wait_agent result) and not a user message. The worker has settled. Do not open the artifact automatically. Notify the user now: report the quality, precise warnings, counts, and representative preview comparison concisely. When outcome is succeeded, include exactly one Markdown link labeled 템플릿 미리보기 whose href is the exact artifact.downloadUrl from the payload. Studio renders it as a clickable document card; only the user's click opens a new read-only template-preview window. Then ask exactly one final question: whether the user wants to save/register this exact artifact as a reusable template. Do not ask for any other confirmation. If the user accepts in their next reply, call register_copy_layout_template with this jobId; if they decline, do not call it and leave the card available.`;
 }
 
 export function taskProgressForJob(job, activity, lastTool) {
