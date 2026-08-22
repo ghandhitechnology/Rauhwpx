@@ -13,7 +13,7 @@ When `sourcePath` is non-null and `dirty` is false, use it directly: Studio reso
 
 ## Output
 
-- Create a `layout/` directory beside the source unless the user specifies another destination.
+- After the single confirmation described below, let the helper create `layout/` beside the source and save there automatically. Do not pass `-o` unless the user explicitly requested a different destination or format.
 - Preserve the source format by default: save as `<source stem> - Layout.hwp` or `<source stem> - Layout.hwpx`. Avoid overwriting an existing file; add ` (2)`, ` (3)`, and so on. If an HWP round trip fails a fidelity check, save and deliver the verified HWPX as a safe fallback, including when the user explicitly requested an HWP destination.
 - Use `<source stem> - Layout` as the document title: set HWPX package metadata directly and use that exact filename title for HWP.
 - Do not suppress a safe output solely because its page count, pagination, render diff, or native format differs from the source. Return the best safe copy and state the difference precisely.
@@ -39,7 +39,7 @@ Remove comments, annotations, tracked-change payloads, equations used as answers
 
 Do not rebuild the document from screenshots or use office-suite or third-party format conversion. The helper edits HWPX packages directly; for HWP it uses Rauhwpx's native HWP→HWPX→HWP pipeline and verifies the round trip.
 
-## Inspect, decide, then create
+## Inspect once, confirm once, then create
 
 Read `scripts/copy_layout.py`. First inventory every visible paragraph:
 
@@ -47,7 +47,11 @@ Read `scripts/copy_layout.py`. First inventory every visible paragraph:
 python3 scripts/copy_layout.py --inspect-text "/absolute/path/source.hwp"
 ```
 
-Review the complete inventory, not a small sample. It gives stable paragraph IDs, the exact source SHA-256, table-cell coordinates, header/footer and shape context, field-marker counts, editable fields, form controls, style identifiers, and suspicious visual marks. Create a JSON decision file in a temporary workspace:
+Review the complete inventory internally, not a small sample. Do not paste the raw inventory or every paragraph decision into chat. It gives stable paragraph IDs, the exact source SHA-256, table-cell coordinates, header/footer and shape context, field-marker counts, editable fields, form controls, style identifiers, and suspicious visual marks.
+
+Draft all keep, remove, replace, form-control, and visual-mark decisions before changing the document. Then ask for exactly one confirmation. The confirmation should be concise: show the counts for keep/remove/replace/reset/clear, the automatic destination `<source directory>/layout/<source stem> - Layout.<source format>`, and only genuinely ambiguous decisions that could retain private content or remove reusable guidance. Ask whether to create the layout copy with that plan. Do not ask the user to approve individual paragraphs, media items, page-count differences, fallback format, filename collision suffixes, previews, or publication separately.
+
+Stop here until the user confirms. One confirmation authorizes the planned sanitization, automatic save in `layout/`, safe HWPX fallback when needed, and snapshot artifact publication. It does not authorize changes to the source document. After confirmation, create the JSON decision file in a temporary workspace:
 
 ```json
 {
@@ -71,6 +75,8 @@ Apply the reviewed plan:
 python3 scripts/copy_layout.py --text-plan "/absolute/path/decisions.json" "/absolute/path/source.hwp"
 ```
 
+Use the command exactly in this default form after confirmation so the helper chooses the `layout/` destination and collision-free filename. Continue through verification and delivery without another approval prompt. Ask again only if the source `documentId` or digest changed after confirmation, or a new ambiguity would materially change the approved keep/remove plan.
+
 The old `--preserve-guidance` option exists only for compatibility and is not adequate for this task; do not use it for a guidance-preserving template.
 
 The helper uses only the Python 3 standard library. Do not search for or install `lxml`, activate a repository-specific Python environment, or retry through an unrelated interpreter. A missing Python executable is an application packaging failure, not a reason to ask the user to save or identify the document again.
@@ -81,7 +87,7 @@ The helper preserves package structure, strips previews, scripts, history, and r
 
 Inspect body media and representative pages. If a removed body image is demonstrably a logo, seal, watermark, ornament, or other fixed design asset, rerun to a fresh output path with `--keep-media <manifest-id>` for each asset. Do not retain a populated chart, photo, scan, signature, or attachment merely to make the result look fuller. Also look for user-added information encoded as highlighting, checked boxes, colored schedule bars, cell fills, borders, or shapes; these are not safe merely because they are not text. If such marks cannot be cleanly reset without harming template styling, report the unresolved item instead of calling the result perfect.
 
-Use `-o /absolute/path/result.hwp` or `.hwpx` only when the user requests a destination or format conversion. The helper refuses to overwrite the source or an explicitly named existing output.
+Use `-o /absolute/path/result.hwp` or `.hwpx` only when the user explicitly requested a destination or format conversion before confirmation. Otherwise automatic `layout/` saving is mandatory. The helper refuses to overwrite the source or an explicitly named existing output.
 
 When the source came from `materialize_document_snapshot`, the generated file is inside the isolated chat workspace. After verification, call `publish_artifact` with the output path and give the user its returned `downloadUrl` as a Markdown download link. Do not report only the temporary filesystem path for a snapshot-backed result.
 

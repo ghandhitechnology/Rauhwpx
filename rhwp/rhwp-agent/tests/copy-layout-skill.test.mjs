@@ -19,6 +19,13 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(parsed.description, /titles, labels, headers, instructions/);
   assert.match(parsed.description, /user-added content/);
   assert.match(markdown, /scripts\/copy_layout\.py/);
+  assert.match(markdown, /Inspect once, confirm once, then create/);
+  assert.match(markdown, /ask for exactly one confirmation/);
+  assert.match(markdown, /Do not paste the raw inventory/);
+  assert.match(markdown, /Stop here until the user confirms/);
+  assert.match(markdown, /automatic save in `layout\/`/);
+  assert.match(markdown, /Continue through verification and delivery without another approval prompt/);
+  assert.match(markdown, /Otherwise automatic `layout\/` saving is mandatory/);
   assert.match(markdown, /<source stem> - Layout\.hwp/);
   assert.match(markdown, /native HWP→HWPX→HWP pipeline/);
   assert.match(markdown, /call `get_document_info` first/);
