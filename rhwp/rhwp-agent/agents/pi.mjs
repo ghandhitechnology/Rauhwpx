@@ -90,7 +90,8 @@ export function buildPiArgv(opts, sessionId) {
   argv.push(
     '--session-dir', path.join(piRoot, 'sessions'),
     '--session-id', sessionId,
-    '--append-system-prompt', systemBriefFor(opts),
+    // 'pi' 를 명시한다 — 미지정은 클로드 기본 브리프(스폰 지시 포함)를 낳았다.
+    '--append-system-prompt', systemBriefFor(opts, 'pi'),
     // 워크스페이스의 CLAUDE.md/AGENTS.md 를 끌어오지 않는다.
     '--no-context-files',
   );

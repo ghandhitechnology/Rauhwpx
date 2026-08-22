@@ -11,6 +11,9 @@ test('hub launches the copy-layout worker as a real isolated provider session', 
   assert.match(server, /toolProfile: 'copy-layout-worker'/);
   assert.match(server, /agentRole: job\.workerRole/);
   assert.match(server, /permissionProfile: 'safe'/);
+  // 헬퍼 실행은 모든 워커에 필요하다 — grok 만 잡 헬퍼 경로로 고정한 접두사를 소비한다.
+  assert.match(server, /shellAllowPrefixes: copyLayoutShellAllowPrefixes\(helperPath\)/);
+  assert.doesNotMatch(server, /shellAllowPrefixes: \['python3', 'python'\]/);
   assert.match(server, /copy-layout-providers/);
   assert.match(server, /prepareCodexHome\(codexHome/);
   assert.match(server, /prepareClaudeHome\(isolatedHome/);

@@ -304,6 +304,21 @@ test('argv omits thinking for non-reasoning models and never doubles the provide
   assert.equal(argv.includes('--thinking'), false);
 });
 
+test('pi gets its own sequential brief instead of claude fleet instructions', () => {
+  // 미지정 agentName 은 클로드 기본 브리프를 낳아 없는 doc-editor 스폰을
+  // 지시했다 — pi 는 스폰 도구가 없으므로 단독 실행 규율이 와야 한다.
+  for (const mode of [
+    { workflow: 'direct', phase: 'implementing' },
+    { workflow: 'plan', phase: 'implementing' },
+  ]) {
+    const argv = buildPiArgv({ ...baseOpts, ...mode }, 'sess-1');
+    const brief = argv[argv.indexOf('--append-system-prompt') + 1];
+    assert.doesNotMatch(brief, /doc-editor|doc-researcher|Workflow tool|Sibling agents/, mode.phase);
+    assert.match(brief, /no subagent or delegation tools/, mode.phase);
+    assert.match(brief, /ONE apply_edits call/, mode.phase);
+  }
+});
+
 test('planning phases exclude the built-in write and shell tools', () => {
   for (const phase of ['planning', 'awaiting-approval', 'switching']) {
     const argv = buildPiArgv({ ...baseOpts, workflow: 'plan', phase }, 'sess-1');

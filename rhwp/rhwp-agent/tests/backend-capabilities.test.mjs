@@ -16,7 +16,13 @@ import test from 'node:test';
 
 import { createClaudeSession, buildClaudeArgv, prepareClaudeHome } from '../agents/claude.mjs';
 import { createCodexSession, buildCodexArgv, prepareCodexHome } from '../agents/codex.mjs';
-import { mcpCapabilityEnv, mcpRuntimeFor, systemBriefFor } from '../agents/backend.mjs';
+import {
+  mcpCapabilityEnv,
+  mcpRuntimeFor,
+  parallelWorkBriefFor,
+  providerToolNoteFor,
+  systemBriefFor,
+} from '../agents/backend.mjs';
 
 const testHome = mkdtempSync(path.join(os.tmpdir(), 'rhwp-backend-test-'));
 test.after(() => rmSync(testHome, { recursive: true, force: true }));
@@ -263,6 +269,52 @@ test('permission profiles split approval-gated staging from free editing', () =>
     assert.doesNotMatch(freeBrief, /review and approve the staged changes/);
     assert.match(freeBrief, /apply_engine_edits commits/);
   }
+});
+
+test('parallel-work guidance is tuned to each provider surface', () => {
+  // pi 는 스폰/수거 도구가 아예 없다 — 클로드 기본 브리프가 흘러 나와 없는
+  // doc-editor 스폰을 지시하는 사고를 막은 것이 이 브리프의 존재 이유다.
+  const pi = parallelWorkBriefFor('pi');
+  assert.doesNotMatch(pi, /doc-editor|doc-researcher|Workflow tool|Sibling agents/);
+  assert.match(pi, /no subagent or delegation tools/);
+  assert.match(pi, /sequentially/);
+  assert.match(pi, /ONE apply_edits call/, '배치가 pi 의 대체 병렬성이다');
+
+  const grok = parallelWorkBriefFor('grok');
+  assert.match(grok, /spawn_subagent/);
+  assert.match(grok, /get_command_or_subagent_output/);
+  assert.match(
+    grok,
+    /Never use get_command_or_subagent_output on the hub background job delegate_copy_layout/,
+    '수거 지시가 허브 백그라운드 작업을 집어 오는 사고를 막는다',
+  );
+
+  const cursor = parallelWorkBriefFor('cursor');
+  assert.match(cursor, /transcript arrives only when it finishes/);
+  assert.match(cursor, /tightly bounded objective/, '전사 재생 상한을 고려한 목표 경계');
+
+  const codex = parallelWorkBriefFor('codex');
+  assert.match(codex, /wait_agent until every agent/);
+  assert.match(codex, /Never call wait_agent for an MCP-managed background job such as delegate_copy_layout/);
+
+  // claude 기본 브리프는 그대로 편대 안내를 실는다.
+  assert.match(parallelWorkBriefFor(), /doc-editor for edits/);
+});
+
+test('provider tool notes correct activated skill text per collaboration surface', () => {
+  for (const [agent, fragment] of [
+    ['claude', /never poll or wait for them/],
+    ['codex', /never call wait_agent or list_agents for one/],
+    ['grok', /never collect them with get_command_or_subagent_output/],
+    ['cursor', /there is no polling tool/],
+    ['pi', /no collaboration or polling tools/],
+  ]) {
+    const note = providerToolNoteFor(agent);
+    assert.match(note, fragment, agent);
+    assert.match(note, /delegate_copy_layout/, agent);
+    assert.match(note, /hub will start a new turn carrying/, agent);
+  }
+  assert.equal(providerToolNoteFor('mystery'), '', '알 수 없는 provider 는 주석을 붙이지 않는다');
 });
 
 test('every write-capable brief directs batched writes through apply_edits', () => {

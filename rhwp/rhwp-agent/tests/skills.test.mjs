@@ -94,6 +94,34 @@ test('SkillRegistry rejects traversal and bundled overwrites', async (t) => {
   await assert.rejects(() => registry.save({ name: 'starter', files: [{ path: 'SKILL.md', content: MARKDOWN('starter') }] }), /cannot be overwritten/);
 });
 
+test('promptContext appends provider tool notes only for a known activated agent', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-notes-test-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const bundledRoot = path.join(temp, 'bundled');
+  await fs.mkdir(path.join(bundledRoot, 'starter'), { recursive: true });
+  await fs.writeFile(path.join(bundledRoot, 'starter', 'SKILL.md'), MARKDOWN('starter'));
+  const registry = await new SkillRegistry({ bundledRoot, userRoot: path.join(temp, 'user') }).init();
+
+  // 스킬 본문은 provider 중립 카탈로그 텍스트다 — 활성 시점에 각 provider 의
+  // 실제 협업/수거 수단이 한 문장으로 보정된다.
+  const grok = await registry.promptContext('복사', 'starter', { agent: 'grok' });
+  assert.match(grok, /<provider_tool_notes agent="grok">/);
+  assert.match(grok, /get_command_or_subagent_output/);
+  assert.match(grok, /<activated_product_skill name="starter"/);
+
+  const pi = await registry.promptContext('복사', 'starter', { agent: 'pi' });
+  assert.match(pi, /<provider_tool_notes agent="pi">/);
+  assert.match(pi, /no collaboration or polling tools/);
+
+  // 미활성·미지정·미지 에이전트에는 주석이 붙지 않는다 — 기존 프롬프트 모양 유지.
+  const noSkill = await registry.promptContext('복사', undefined, { agent: 'grok' });
+  assert.doesNotMatch(noSkill, /provider_tool_notes/);
+  const neutral = await registry.promptContext('복사', 'starter');
+  assert.doesNotMatch(neutral, /provider_tool_notes/);
+  const unknown = await registry.promptContext('복사', 'starter', { agent: 'mystery' });
+  assert.doesNotMatch(unknown, /provider_tool_notes/);
+});
+
 const backendOpts = {
   rootDir: '/tmp/rhwp', isolatedHome: '/tmp/rhwp-home',
   mcpScriptPath: '/tmp/mcp-stdio.mjs', hubPort: 5175, token: 'token', model: 'test', effort: 'high', onEvent() {},
