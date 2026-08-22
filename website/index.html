@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>귀찮이글</title>
-<meta name="description" content="한글 파일 편집이랑 지피티와의 대화, 한 화면에서 융합. macOS용 귀찮이글.">
-<meta property="og:title" content="귀찮이글 — 귀찮은 이를 위한 한글">
-<meta property="og:description" content="한글 파일 편집이랑 지피티와의 대화, 한 화면에서 융합. .hwp를 열어놓고 에이전트가 조사하고 계획하고 써요.">
+<meta name="description" content="로컬 HWP/HWPX 편집기. edwardkim/rhwp 포크. MIT. v0.1.10 개발자 빌드. macOS 우선.">
+<meta property="og:title" content="귀찮이글">
+<meta property="og:description" content="로컬 HWP/HWPX 편집기. edwardkim/rhwp 포크. MIT. v0.1.10 개발자 빌드. macOS 우선.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://ghandhitechnology.github.io/Rauhwpx/">
 <meta property="og:image" content="https://ghandhitechnology.github.io/Rauhwpx/assets/editor-agent-running.png">
@@ -82,6 +82,7 @@ a{color:var(--ink)}
 }
 .label--dark{color:var(--dark-mute)}
 .lead{font-size:19px;line-height:1.72;color:var(--ink-2)}
+.lead a{color:var(--ink-2);text-underline-offset:3px}
 .nb{display:inline-block}
 .h2{font-size:clamp(25px,3.1vw,36px);line-height:1.26}
 .h2--big{font-size:clamp(32px,4.4vw,50px);letter-spacing:-.03em}
@@ -213,7 +214,7 @@ a{color:var(--ink)}
   line-height:1.2;font-weight:700;letter-spacing:-.032em;
   margin:14px 0 18px;
 }
-.hero .lead{max-width:34ch}
+.hero .lead{max-width:46ch}
 
 /* ── 섹션 헤더 ─────────────────────────────── */
 .sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:clamp(28px,3.4vw,40px);flex-wrap:wrap}
@@ -468,7 +469,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
       <a href="#flow">작업 흐름</a>
       <a href="#pricing">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub<span class="gh-stars"></span></a>
-      <a class="btn btn--fill btn--sm" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">다운로드</a>
+      <a class="btn btn--fill btn--sm" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">다운로드</a>
     </nav>
   </div>
 </header>
@@ -479,16 +480,17 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   <section class="hero sheet stack">
     <div class="wrap hero-grid">
       <div>
-        <h1>귀찮은 이를 위한 한글,<br><span class="ul">귀찮이글<svg viewBox="0 0 200 10" preserveAspectRatio="none" aria-hidden="true"><path d="M2 7.2C33 3.4 66 2.3 100 3.6c31 1.2 63 3.4 98 1.1" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span></h1>
-        <p class="lead"><span class="nb">한글 파일 편집이랑 지피티와의 대화,</span> <span class="nb">한 화면에서 융합</span></p>
+        <p class="label">v0.1.10 · 개발자 빌드</p>
+        <h1><span class="ul">귀찮이글<svg viewBox="0 0 200 10" preserveAspectRatio="none" aria-hidden="true"><path d="M2 7.2C33 3.4 66 2.3 100 3.6c31 1.2 63 3.4 98 1.1" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span></h1>
+        <p class="lead">로컬 HWP/HWPX 편집기입니다. Edward Kim의 <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a> 포크이고, 코드는 MIT로 남습니다. 한컴이 아니며 문서를 호스팅하지 않습니다.</p>
         <div class="cta" style="margin-top:26px">
-          <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">macOS용 다운로드</a>
+          <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">macOS용 다운로드</a>
           <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">Star on GitHub<span class="gh-stars"></span></a>
         </div>
         <p class="cta-meta">
-          <span>Apple Silicon · v0.1.6</span>
+          <span>출시가 아닙니다. macOS 우선 · 서명됨</span>
           <span class="dot">·</span>
-          <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-x64.exe">Windows(beta)</a>
+          <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-x64.exe">Windows, 미서명 · 제한적</a>
         </p>
       </div>
 
@@ -677,15 +679,18 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   <section class="sec rule-top dl sheet stack" id="download">
     <div class="wrap">
       <p class="label">다운로드</p>
-      <h2 class="h2" style="margin-top:12px">문서작업은 이제 한곳에서 해결하세요</h2>
+      <h2 class="h2" style="margin-top:12px">v0.1.10 개발자 빌드</h2>
+      <p>출시가 아닙니다. macOS가 먼저고, macOS 빌드는 서명되어 있습니다. Windows는 서명되지 않았고 제한적입니다.</p>
       <div class="cta">
-        <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">macOS용 다운로드</a>
-        <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">Star on GitHub<span class="gh-stars"></span></a>
+        <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">macOS용 다운로드</a>
+        <a class="btn btn--line" href="https://buy.stripe.com/4gMbJ39SlanJ49Yf70eZ200">커피 한 잔</a>
       </div>
       <p class="cta-meta">
-        <span>Apple Silicon · v0.1.6 · .dmg</span>
+        <span>Apple Silicon · signed · .dmg</span>
         <span class="dot">·</span>
-        <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-x64.exe">Windows (x64)</a>
+        <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-x64.exe">Windows, 미서명 · 제한적</a>
+        <span class="dot">·</span>
+        <a href="https://github.com/ghandhitechnology/Rauhwpx/issues/new">도움이 필요하면 GitHub 이슈를 남겨 주세요</a>
       </p>
     </div>
   </section>
@@ -699,9 +704,11 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
       <a href="#flow">작업 흐름</a>
       <a href="#pricing">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub</a>
+      <a href="https://github.com/ghandhitechnology/Rauhwpx/issues/new">이슈</a>
+      <a href="https://buy.stripe.com/4gMbJ39SlanJ49Yf70eZ200">커피 한 잔</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx/releases">릴리스</a>
     </nav>
-    <small>v0.1.6 · ghandhitechnology / Rauhwpx</small>
+    <small>v0.1.10 개발자 빌드 · MIT · edwardkim/rhwp 포크 · 한컴 아님 · 오픈 소스</small>
   </div>
 </footer>
 
