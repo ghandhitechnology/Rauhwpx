@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>토큰 기부하기 · 귀찮이글</title>
+<meta name="description" content="귀찮이글 개발자의 편지와 토큰 기부 안내.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Nanum+Pen+Script&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+
+:root{
+  --paper:#f1ece1;
+  --paper-2:#e7e0d2;
+  --patch:#fdfbf6;
+  --ink:#14120f;
+  --ink-2:#3c3831;
+  --ink-3:#6e675c;
+  --rule:#d3cbbb;
+  --sans:'IBM Plex Sans KR',system-ui,-apple-system,'Apple SD Gothic Neo',sans-serif;
+  --pen:'Nanum Pen Script',cursive;
+  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='.05'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+html,body{margin:0;min-height:100%}
+html{background:var(--paper);overflow-x:hidden}
+body{
+  min-height:100vh;
+  background-color:var(--paper);
+  background-image:var(--grain);
+  background-size:180px 180px;
+  color:var(--ink);
+  font:400 17px/1.78 var(--sans);
+  letter-spacing:-.006em;
+  -webkit-font-smoothing:antialiased;
+}
+
+a{color:inherit}
+.wrap{width:min(100% - 48px,1180px);margin:0 auto}
+
+.masthead{
+  border-bottom:1px solid var(--rule);
+  background:rgba(241,236,225,.94);
+  backdrop-filter:saturate(120%) blur(6px);
+}
+.masthead .wrap{
+  min-height:60px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:24px;
+}
+.brand{
+  font-size:19px;
+  font-weight:700;
+  letter-spacing:-.03em;
+  text-decoration:none;
+}
+.back{
+  min-height:44px;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  color:var(--ink-2);
+  font-size:15px;
+  font-weight:500;
+  text-underline-offset:4px;
+}
+.back svg{width:18px;height:18px;transition:transform .18s ease}
+.back:hover svg{transform:translateX(-3px)}
+
+.donate-main{
+  min-height:calc(100vh - 60px);
+  display:grid;
+  place-items:center;
+  padding:clamp(34px,5vw,72px) 0;
+}
+
+.receipt{
+  position:relative;
+  width:min(100%,1120px);
+  background-color:var(--patch);
+  background-image:var(--grain);
+  background-size:180px 180px;
+  padding:clamp(38px,5.6vw,72px) clamp(38px,7vw,92px) clamp(36px,4.8vw,62px);
+  box-shadow:0 18px 42px rgba(20,18,15,.13),0 3px 8px rgba(20,18,15,.08);
+}
+.receipt::before,.receipt::after{
+  content:"";
+  position:absolute;
+  top:24px;
+  bottom:24px;
+  width:18px;
+  background:radial-gradient(circle,var(--paper) 0 5px,rgba(20,18,15,.08) 5.5px 6.5px,transparent 7px) center top/18px 42px repeat-y;
+  pointer-events:none;
+}
+.receipt::before{left:12px}
+.receipt::after{right:12px}
+
+.receipt-head{
+  min-height:224px;
+  display:grid;
+  grid-template-columns:minmax(0,.9fr) minmax(340px,1.1fr);
+  align-items:center;
+  gap:clamp(34px,5vw,72px);
+  padding-bottom:clamp(30px,4vw,48px);
+  border-top:1px solid var(--ink-3);
+  border-bottom:1px solid var(--ink-3);
+}
+.receipt h1{
+  margin:0;
+  font-size:clamp(34px,4.1vw,52px);
+  line-height:1.18;
+  letter-spacing:-.032em;
+}
+
+.token-loop{width:100%;max-height:250px;overflow:visible}
+.token-loop *{vector-effect:non-scaling-stroke}
+.token-loop .line{fill:none;stroke:var(--ink);stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round}
+.token-loop .fine{fill:none;stroke:var(--ink-3);stroke-width:1;stroke-linecap:round}
+.token-loop .paper{fill:var(--patch);stroke:var(--ink);stroke-width:1.4;stroke-linejoin:round}
+.token-loop .token-word{font:600 13px/1 var(--sans);fill:var(--ink);letter-spacing:-.02em}
+.token-loop .clock-number{font:500 11px/1 var(--sans);fill:var(--ink-2)}
+.token-loop .token-a{transform-origin:116px 114px}
+.token-loop .token-b{transform-origin:375px 142px}
+
+.letter{
+  width:min(100%,72ch);
+  margin:clamp(32px,4vw,48px) auto 0;
+  color:var(--ink-2);
+  font-size:clamp(16px,1.55vw,19px);
+  line-height:1.82;
+}
+.letter p{margin:0 0 1.25em;word-break:keep-all;overflow-wrap:break-word}
+.letter .signature{
+  margin:8px 0 0;
+  text-align:right;
+  color:var(--ink-3);
+  font:400 clamp(23px,2.6vw,30px)/1.25 var(--pen);
+}
+
+.receipt-action{
+  margin-top:clamp(26px,3.6vw,42px);
+  padding-top:20px;
+  border-top:1px solid var(--ink-3);
+  display:flex;
+  justify-content:center;
+}
+.donate-button{
+  width:min(100%,430px);
+  min-height:58px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:15px 28px;
+  background:var(--ink);
+  color:var(--patch);
+  font-size:18px;
+  font-weight:600;
+  text-decoration:none;
+  border-radius:3px;
+  transition:background-color .16s ease,transform .16s ease;
+}
+.donate-button:hover{background:#2c2822;transform:translateY(-2px)}
+.donate-button:focus-visible,.brand:focus-visible,.back:focus-visible{
+  outline:3px solid var(--ink);
+  outline-offset:4px;
+}
+
+@media (prefers-reduced-motion:no-preference){
+  .receipt{animation:set-down .72s cubic-bezier(.16,1,.3,1) both}
+  .token-a{animation:token-left 4.8s cubic-bezier(.16,1,.3,1) infinite}
+  .token-b{animation:token-right 4.8s cubic-bezier(.16,1,.3,1) 2.4s infinite}
+}
+@keyframes set-down{
+  from{opacity:.7;transform:translateY(22px) rotate(-.25deg);box-shadow:0 30px 58px rgba(20,18,15,.07),0 6px 14px rgba(20,18,15,.05)}
+  to{opacity:1;transform:none}
+}
+@keyframes token-left{0%,68%,100%{transform:none}76%{transform:translate(10px,-8px) rotate(2deg)}}
+@keyframes token-right{0%,68%,100%{transform:none}76%{transform:translate(-9px,-6px) rotate(-2deg)}}
+
+@media (max-width:760px){
+  .wrap{width:min(100% - 28px,1180px)}
+  .donate-main{padding:24px 0 36px;place-items:start center}
+  .receipt{padding:34px 30px 34px}
+  .receipt::before,.receipt::after{display:none}
+  .receipt-head{grid-template-columns:1fr;gap:20px;min-height:0;padding-top:30px}
+  .receipt h1{text-align:center}
+  .token-loop{max-height:190px}
+  .letter{margin-top:30px;line-height:1.76}
+  .letter .signature{text-align:left}
+  .donate-button{width:100%}
+}
+
+@media (max-width:420px){
+  .masthead .wrap{min-height:56px}
+  .brand{font-size:18px}
+  .receipt{padding:28px 22px 28px}
+  .receipt-head{padding-top:24px}
+  .token-loop{margin-inline:-5px;width:calc(100% + 10px)}
+}
+
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
+}
+</style>
+</head>
+<body>
+<!--
+THESIS: A developer's honest token request arrives as one physical receipt; it refuses donation tiers, proof cards, and campaign copy.
+OWN-WORLD: Warm cream stock, near-black ink, perforated edges, tactile grain, thin office rules, and one authored technical diagram.
+STORY: The visitor reads the developer's exact note, sees tokens circulating through a 24-hour work loop, and chooses whether to donate.
+FIRST VIEWPORT: A minimal masthead sits above one centered receipt; the heading and clock graphic share its top band, followed by the letter and bottom action.
+FORM: Centered token receipt, the assigned fourth grounded structure, seed 0df18c93; approved comp A at .impeccable/mocks/donate-a.png.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+-->
+<header class="masthead">
+  <div class="wrap">
+    <a class="brand" href="index.html">귀찮이글</a>
+    <a class="back" href="index.html">
+      <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M15 9H3m0 0 4.2-4.2M3 9l4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      돌아가기
+    </a>
+  </div>
+</header>
+
+<main class="donate-main">
+  <div class="wrap">
+    <article class="receipt" aria-labelledby="letter-title">
+      <header class="receipt-head">
+        <h1 id="letter-title">개발자의 편지</h1>
+
+        <svg class="token-loop" viewBox="0 0 500 250" role="img" aria-label="토큰이 24시간 작업 순환을 따라 이동하는 그림">
+          <defs>
+            <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="strokeWidth">
+              <path d="M1 1l5 3-5 3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </marker>
+          </defs>
+
+          <g class="token-a">
+            <path class="paper" d="M43 123l11-10-4-13 13-4-2-14 14-2 3-13 59 13-3 13 12 6-6 12 9 9-11 9 4 12-67-14-2-12-14 1z"/>
+            <path class="fine" d="M70 91l55 12M67 100l55 12M64 109l55 12"/>
+            <text class="token-word" x="83" y="89" transform="rotate(12 83 89)">토큰</text>
+          </g>
+
+          <path class="line" d="M151 116c30-36 61-48 92-47" marker-end="url(#arrow)"/>
+
+          <g>
+            <circle class="line" cx="297" cy="119" r="72"/>
+            <circle class="fine" cx="297" cy="119" r="62"/>
+            <path class="fine" d="M297 52v9M297 177v9M230 119h9M355 119h9M250 72l7 7M337 159l7 7M344 72l-7 7M257 159l-7 7"/>
+            <text class="clock-number" x="290" y="43">24</text>
+            <text class="clock-number" x="290" y="203">12</text>
+            <text class="clock-number" x="214" y="123">18</text>
+            <text class="clock-number" x="370" y="123">6</text>
+            <path class="line" d="M297 119V78M297 119l30 24"/>
+            <circle cx="297" cy="119" r="4" fill="var(--ink)"/>
+            <path class="line" d="M244 63c25-26 65-35 99-20 13 6 24 15 33 26" marker-end="url(#arrow)"/>
+            <path class="line" d="M349 172c-24 27-64 36-99 22-14-6-25-15-34-27" marker-end="url(#arrow)"/>
+          </g>
+
+          <path class="line" d="M370 87c30 2 51 15 67 37" marker-end="url(#arrow)"/>
+
+          <g class="token-b">
+            <path class="paper" d="M391 136h70l8 72h-86z"/>
+            <path class="line" d="M383 161l9-25 12 25M469 161l-8-25-12 25M383 161h86"/>
+            <path class="paper" d="M401 127l10-10-4-12 12-5-1-12 13-2 4-12 42 9-4 13 9 6-5 10 7 8-10 7 3 10z"/>
+            <text class="token-word" x="427" y="109" transform="rotate(11 427 109)">토큰</text>
+            <path class="fine" d="M396 179h60M397 188h58"/>
+          </g>
+        </svg>
+      </header>
+
+      <div class="letter">
+        <p>안녕하세요, Rauhwpx 개발자입니다</p>
+        <p>이 프로그램의 대부분은 바이브코딩으로 만든 것입니다 하루종일 24시간 지피티는 지금도 일을 하고 있습니다</p>
+        <p>네. 저는 토큰이 부족합니다. 돈도 없습니다. 거의 생활비 전부를 쏟아부어서 만든 프로그램입니다</p>
+        <p>저를 위해 토큰을 기부해주셔서 프로그램의 발전을 도와주실 천사분이 있을지도 몰라서 올립니다</p>
+        <p class="signature">--개발자 올림 --</p>
+      </div>
+
+      <div class="receipt-action">
+        <a class="donate-button" href="https://donate.stripe.com/eVqeVf5C5cvR9uiaQKeZ201">토큰 기부하기</a>
+      </div>
+    </article>
+  </div>
+</main>
+</body>
+</html>
