@@ -254,7 +254,7 @@ a{color:var(--ink)}
 .step--wide figure{margin-top:24px}
 
 /* ── 연결 ──────────────────────────────────── */
-#pricing{position:relative;overflow:visible}
+#connect{position:relative;overflow:visible}
 .float-icons{position:absolute;inset:0;pointer-events:none;z-index:1}
 .price-grid{position:relative;z-index:2;display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,300px);gap:clamp(28px,4vw,52px);align-items:center}
 .price-grid .figure{max-width:300px;margin-left:auto}
@@ -358,8 +358,8 @@ html.js .ink.sheet{
    화면보다 긴 섹션은 음수 값이 들어가서 "끝까지 읽은 뒤에" 고정돼요.
    변수가 없으면 top:auto가 되어 sticky가 아무 일도 안 해요. */
 html.js .stack{position:sticky;top:var(--stick-top)}
-/* #pricing은 위에서 id로 position을 잡아둬서 여기서 다시 눌러줘요 */
-html.js #pricing.stack{position:sticky;top:var(--stick-top)}
+/* #connect는 위에서 id로 position을 잡아둬서 여기서 다시 눌러줘요 */
+html.js #connect.stack{position:sticky;top:var(--stick-top)}
 /* 마지막 장은 머리글(60px) 아래에 고정 — 화면을 꽉 채운 뒤에야 푸터가 올라와요 */
 html.js .dl.stack{top:60px}
 
@@ -452,7 +452,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   html{scroll-behavior:auto}
   *{transition-duration:.001ms!important;animation-duration:.001ms!important}
   /* 연출을 끄고 원래 흐름으로 되돌려요 */
-  html.js .stack,html.js #pricing.stack{position:relative;top:auto}
+  html.js .stack,html.js #connect.stack{position:relative;top:auto}
   html.js .rv,html.js .rv-fig,html.js .rv-drop,html.js .rv-fig .note{opacity:1;transform:none}
   html.js .rv-fig .frame{transform:rotate(var(--tilt,0deg))}
 }
@@ -467,7 +467,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     <nav class="nav">
       <a href="#features">기능</a>
       <a href="#flow">작업 흐름</a>
-      <a href="#pricing">연결</a>
+      <a href="#connect">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub<span class="gh-stars"></span></a>
       <a class="btn btn--fill btn--sm" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">다운로드</a>
     </nav>
@@ -638,7 +638,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   </section>
 
   <!-- ─────────── 연결 ─────────── -->
-  <section class="sec sheet stack" id="pricing">
+  <section class="sec sheet stack" id="connect">
     <div class="float-icons" aria-hidden="true">
       <div class="icon-tile icon-tile--claude">
         <img src="assets/icon-claude.png" width="512" height="512" alt="">
@@ -653,11 +653,11 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     <div class="wrap price-grid">
       <div>
         <p class="label">연결</p>
-        <h2 class="h2 h2--big" style="margin-top:12px">원래 쓰던 구독권,<br>그대로</h2>
-        <p>원래 업무에 쓰시던 Codex, Claude 구독권이나 OpenRouter API Key를 설정에서 연결하면 준비가 끝나요. 프로그램은 평생 무료예요.</p>
+        <h2 class="h2 h2--big" style="margin-top:12px">쓰던 계정을<br>연결하면 끝</h2>
+        <p>Codex, Claude 계정이나 OpenRouter API Key를 설정에서 연결하면 준비가 끝나요.</p>
         <ul class="conn">
-          <li><b>Codex</b><em>쓰던 구독권 연결</em></li>
-          <li><b>Claude</b><em>쓰던 구독권 연결</em></li>
+          <li><b>Codex</b><em>쓰던 계정 연결</em></li>
+          <li><b>Claude</b><em>쓰던 계정 연결</em></li>
           <li><b>OpenRouter</b><em>API Key 직접 연결</em></li>
         </ul>
       </div>
@@ -683,7 +683,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
       <p>출시가 아닙니다. macOS가 먼저고, macOS 빌드는 서명되어 있습니다. Windows는 서명되지 않았고 제한적입니다.</p>
       <div class="cta">
         <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">macOS용 다운로드</a>
-        <a class="btn btn--line" href="https://buy.stripe.com/4gMbJ39SlanJ49Yf70eZ200">커피 한 잔</a>
+        <a class="btn btn--line" href="https://donate.stripe.com/eVqeVf5C5cvR9uiaQKeZ201">커피 한 잔</a>
       </div>
       <p class="cta-meta">
         <span>Apple Silicon · signed · .dmg</span>
@@ -702,10 +702,10 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     <nav>
       <a href="#features">기능</a>
       <a href="#flow">작업 흐름</a>
-      <a href="#pricing">연결</a>
+      <a href="#connect">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx/issues/new">이슈</a>
-      <a href="https://buy.stripe.com/4gMbJ39SlanJ49Yf70eZ200">커피 한 잔</a>
+      <a href="https://donate.stripe.com/eVqeVf5C5cvR9uiaQKeZ201">커피 한 잔</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx/releases">릴리스</a>
     </nav>
     <small>v0.1.10 개발자 빌드 · MIT · edwardkim/rhwp 포크 · 한컴 아님 · 오픈 소스</small>
