@@ -486,10 +486,19 @@ export class AgentToolExecutor {
     if (query !== undefined && typeof query !== 'string') {
       throw new AgentToolError('INVALID_ARGS', 'query must be a string');
     }
+    const capabilities = getEngineEditCapabilities(query ?? '').map((capability) => ({
+      ...capability,
+      live: this.deps.wasm.hasDocumentMethod(capability.method),
+    }));
+    const unavailableOnLiveDocument = capabilities
+      .filter((capability) => capability.live !== true)
+      .map((capability) => capability.method);
     return {
       revision: this.revision,
       capabilityCount: getEngineEditCapabilityCount(),
-      capabilities: getEngineEditCapabilities(query ?? ''),
+      liveCapabilityCount: capabilities.length - unavailableOnLiveDocument.length,
+      unavailableOnLiveDocument,
+      capabilities,
       typeDefinitions: getEngineEditTypeDefinitions(),
       binaryArgument: { $base64: 'base64-encoded bytes' },
     };
@@ -2082,6 +2091,12 @@ export class AgentToolExecutor {
     this.validateAddress(targetSection, targetPara, targetOffset);
     sourceWasm.getParagraphLength(sourceSection, startPara);
     sourceWasm.getParagraphLength(sourceSection, endPara);
+    if (!this.deps.wasm.hasDocumentMethod('pasteDocumentBlock')) {
+      throw new AgentToolError(
+        'ENGINE_EDIT_UNAVAILABLE',
+        "Engine method 'pasteDocumentBlock' is registered in Studio but missing from the loaded WASM document. Rebuild with wasm-pack build --target web; exact template block insertion cannot run against a stale pkg/.",
+      );
+    }
     // Keep the exact approved source bytes. Re-serializing the inspection document
     // can normalize package parts before the native importer sees them.
     const sourceBytes = templateBytes.slice();

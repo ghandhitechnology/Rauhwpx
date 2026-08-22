@@ -112,6 +112,12 @@ function invokeEngineMethod(
   if (typeof method !== 'function') {
     throw new AgentToolError('ENGINE_EDIT_UNAVAILABLE', `Engine method '${operation.method}' is unavailable in this build.`);
   }
+  if (typeof wasm.hasDocumentMethod === 'function' && !wasm.hasDocumentMethod(operation.method)) {
+    throw new AgentToolError(
+      'ENGINE_EDIT_UNAVAILABLE',
+      `Engine method '${operation.method}' is registered in Studio but missing from the loaded WASM document. Rebuild with wasm-pack build --target web.`,
+    );
+  }
   const result = Reflect.apply(method, wasm, operation.args.map(decodeArgument));
   const failure = failureMessage(result);
   if (failure) throw new AgentToolError('ENGINE_EDIT_FAILED', `${operation.method}: ${failure}`);

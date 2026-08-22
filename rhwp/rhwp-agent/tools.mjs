@@ -398,7 +398,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'get_engine_edit_capabilities',
-    description: `List every agent-editable method exposed by the active editor engine: all document mutations plus the structured-copy/session setup operations required by paste workflows. Each entry includes its kind, positional parameter names, and TypeScript signature; typeDefinitions supplies the JSON shapes for referenced engine types, and argumentGuide documents opaque property/JSON parameters. This catalog is generated from the same registries that guard editor undo coverage, so newly added engine edits appear here automatically. Pass query to filter by method or signature. Call this before apply_engine_edits. ${REVISION_NOTE}`,
+    description: `List every agent-editable method exposed by the active editor engine: all document mutations plus the structured-copy/session setup operations required by paste workflows. Each entry includes its kind, positional parameter names, TypeScript signature, and live (true only when the loaded WASM document actually implements the method). unavailableOnLiveDocument lists registered methods missing from this WASM build — do not call those, and do not approximate them; they require rebuilding pkg with wasm-pack. typeDefinitions supplies the JSON shapes for referenced engine types, and argumentGuide documents opaque property/JSON parameters. This catalog is generated from the same registries that guard editor undo coverage, so newly added engine edits appear here automatically. Pass query to filter by method or signature. Call this before apply_engine_edits. ${REVISION_NOTE}`,
     shape: {
       query: z.string().max(200).optional(),
     },
@@ -471,7 +471,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'template_insert_block',
-    description: `Insert an exact active-template paragraph block, including tables, controls, and embedded assets, at an open-document position. Template text is copied only because this tool explicitly transfers the block; replace placeholders afterward. ${WRITE_NOTE}`,
+    description: `Insert an exact active-template paragraph block, including tables, controls, and embedded assets, at an open-document position via the native pasteDocumentBlock importer (not HTML). If the loaded WASM document is missing pasteDocumentBlock, this fails with ENGINE_EDIT_UNAVAILABLE — do not recreate or approximate the layout. Rebuild pkg with wasm-pack instead. Template text is copied only because this tool explicitly transfers the block; replace placeholders afterward. ${WRITE_NOTE}`,
     shape: {
       expectedRevision: z.number().int(),
       templateRevision: z.number().int().min(1),

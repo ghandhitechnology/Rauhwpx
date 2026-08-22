@@ -51,6 +51,7 @@ test('template block insertion transfers exact source bytes through the native i
   assert.ok(insertBlock, 'templateInsertBlock implementation must be present');
   assert.match(insertBlock, /templateBytes\.slice\(\)/);
   assert.match(insertBlock, /pasteDocumentBlock\(/);
+  assert.match(insertBlock, /hasDocumentMethod\('pasteDocumentBlock'\)/);
   assert.doesNotMatch(insertBlock, /exportSelectionHtml|pasteHtml/);
 });
 

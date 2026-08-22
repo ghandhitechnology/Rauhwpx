@@ -155,6 +155,8 @@ test('full engine edit tools expose a bounded autonomous batch contract', () => 
   assert.ok(!apply.shape.operations.safeParse(Array.from({ length: 33 }, () => ({ method: 'x', args: [] }))).success);
   assert.match(apply.description, /one atomic/i);
   assert.match(apply.description, /every other method returned by get_engine_edit_capabilities/i);
+  assert.match(catalog.description, /unavailableOnLiveDocument/);
+  assert.match(catalog.description, /live \(true only when the loaded WASM document actually implements the method\)/);
   assert.match(prepare.description, /capability kind is "session"/i);
 });
 

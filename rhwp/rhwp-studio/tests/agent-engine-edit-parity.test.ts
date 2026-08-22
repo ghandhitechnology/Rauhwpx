@@ -105,3 +105,22 @@ test('engine-edit batch rejects methods outside the authoritative mutator regist
     (error) => error instanceof AgentToolError && error.code === 'ENGINE_EDIT_NOT_ALLOWED',
   );
 });
+
+test('engine-edit batch rejects registered methods missing from the live WASM document', () => {
+  const inputHandler = {
+    executeAppliedSnapshot(_operationType: string, apply: (target: unknown) => unknown) {
+      return apply({
+        pasteDocumentBlock: () => '{"ok":true}',
+        hasDocumentMethod: () => false,
+      });
+    },
+  } as unknown as InputHandler;
+
+  assert.throws(
+    () => applyEngineEdits(inputHandler, [{
+      method: 'pasteDocumentBlock',
+      args: [{ $base64: 'YQ==' }, 0, 0, 0, 0, 0, 0],
+    }]),
+    (error) => error instanceof AgentToolError && error.code === 'ENGINE_EDIT_UNAVAILABLE',
+  );
+});

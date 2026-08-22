@@ -50,6 +50,29 @@ function serializeParaMeta(meta: RemovedParaMeta | undefined): string | undefine
   return meta && JSON.stringify(meta);
 }
 
+function nativeDocumentHasMethod(doc: HwpDocument | null, name: string): boolean {
+  return !!doc && typeof (doc as unknown as Record<string, unknown>)[name] === 'function';
+}
+
+function missingNativeMethodMessage(name: string): string {
+  return `WASM document is missing ${name}. Rebuild with \`wasm-pack build --target web\` so pkg/ matches wasm_api.rs.`;
+}
+
+function requireNativeDocumentMethod(doc: HwpDocument | null, name: string): asserts doc is HwpDocument {
+  if (!doc) throw new Error('문서가 로드되지 않았습니다');
+  if (!nativeDocumentHasMethod(doc, name)) {
+    throw new Error(missingNativeMethodMessage(name));
+  }
+}
+
+/** wasm-bindgen copies from the ArrayBuffer view; keep only the caller's bytes. */
+function contiguousBytes(sourceBytes: Uint8Array): Uint8Array {
+  if (sourceBytes.byteOffset === 0 && sourceBytes.byteLength === sourceBytes.buffer.byteLength) {
+    return sourceBytes;
+  }
+  return sourceBytes.slice();
+}
+
 /** HWPX 비표준 감지 경고 리포트 (#177). */
 export interface ValidationReport {
   /** 경고 총 개수 */
@@ -365,6 +388,14 @@ export class WasmBridge {
   /** 메인 뷰에 문서가 올라와 있는지(비교 보조 WasmBridge 등과 구분). */
   hasLoadedDocument(): boolean {
     return this.doc != null;
+  }
+
+  /**
+   * True when the live wasm-bindgen `HwpDocument` instance exposes `name`.
+   * Studio registries can advertise methods that a stale `pkg/` build omitted.
+   */
+  hasDocumentMethod(name: string): boolean {
+    return nativeDocumentHasMethod(this.doc, name);
   }
 
   createNewDocument(): DocumentInfo {
@@ -2247,9 +2278,20 @@ export class WasmBridge {
     targetPara: number,
     targetCharOffset: number,
   ): string {
-    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    return (this.doc as any).pasteDocumentBlock(
-      sourceBytes,
+    requireNativeDocumentMethod(this.doc, 'pasteDocumentBlock');
+    const paste = (this.doc as unknown as {
+      pasteDocumentBlock: (
+        sourceBytes: Uint8Array,
+        sourceSection: number,
+        startPara: number,
+        endPara: number,
+        targetSection: number,
+        targetPara: number,
+        targetCharOffset: number,
+      ) => string;
+    }).pasteDocumentBlock.bind(this.doc);
+    return paste(
+      contiguousBytes(sourceBytes),
       sourceSection,
       startPara,
       endPara,
