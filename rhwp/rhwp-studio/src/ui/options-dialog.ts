@@ -1,11 +1,14 @@
 /**
  * 환경 설정 대화상자 (도구 > 환경 설정)
  *
- * 탭 구조: [글꼴] (향후 [편집], [보기] 등 탭 추가 가능)
+ * 탭 구조: [글꼴] [파일] [보안]
  */
 import { ModalDialog } from './dialog';
 import { userSettings } from '@/core/user-settings';
+import { loadAgentPrefs } from '@/agent/agent-prefs';
+import { isDesktopApp } from '@/desktop-integration';
 import { FontSetDialog } from './font-set-dialog';
+import { renderPrivacySnapshot } from './privacy-panel';
 import {
   clearStoredLocalFonts,
   detectLocalFonts,
@@ -16,6 +19,16 @@ import {
 } from '@/core/local-fonts';
 import type { EventBus } from '@/core/event-bus';
 
+/** 보안 탭이 현재 문서 위치와 제공자를 말할 때 쓰는 입력. */
+export interface OptionsPrivacySource {
+  getDocument(): {
+    hasDocument: boolean;
+    fileName: string;
+    isUntitled: boolean;
+  };
+  resolveSourcePath(): Promise<string | null>;
+}
+
 export class OptionsDialog extends ModalDialog {
   private showRecentCheck!: HTMLInputElement;
   private recentCountInput!: HTMLInputElement;
@@ -25,8 +38,11 @@ export class OptionsDialog extends ModalDialog {
   private idleDelayInput!: HTMLInputElement;
   private pdfPrintGuidanceCheck!: HTMLInputElement;
 
-  constructor(private readonly eventBus?: EventBus) {
-    super('환경 설정', 480);
+  constructor(
+    private readonly eventBus?: EventBus,
+    private readonly privacySource?: OptionsPrivacySource,
+  ) {
+    super('환경 설정', 520);
   }
 
   protected createBody(): HTMLElement {
@@ -49,6 +65,12 @@ export class OptionsDialog extends ModalDialog {
     fileTab.dataset.tab = 'file';
     tabs.appendChild(fileTab);
 
+    const securityTab = document.createElement('button');
+    securityTab.className = 'dialog-tab';
+    securityTab.textContent = '보안';
+    securityTab.dataset.tab = 'security';
+    tabs.appendChild(securityTab);
+
     body.appendChild(tabs);
 
     // 글꼴 탭 패널
@@ -61,6 +83,11 @@ export class OptionsDialog extends ModalDialog {
     filePanel.className = 'dialog-tab-panel opt-tab-panel';
     filePanel.dataset.tab = 'file';
     body.appendChild(filePanel);
+
+    const securityPanel = this.createSecurityPanel();
+    securityPanel.className = 'dialog-tab-panel opt-tab-panel';
+    securityPanel.dataset.tab = 'security';
+    body.appendChild(securityPanel);
 
     // 탭 클릭 이벤트 (향후 탭 추가 대비)
     tabs.addEventListener('click', (e) => {
@@ -328,6 +355,40 @@ export class OptionsDialog extends ModalDialog {
     pdfSection.appendChild(pdfRow);
     panel.appendChild(pdfSection);
 
+    return panel;
+  }
+
+  private createSecurityPanel(): HTMLElement {
+    const panel = document.createElement('div');
+    const root = document.createElement('div');
+    root.className = 'privacy-disclosure';
+    panel.appendChild(root);
+
+    const paint = (sourcePath: string | null): void => {
+      const prefs = loadAgentPrefs();
+      const docState = this.privacySource?.getDocument() ?? {
+        hasDocument: false,
+        fileName: '',
+        isUntitled: false,
+      };
+      renderPrivacySnapshot(root, {
+        shell: isDesktopApp() ? 'desktop' : 'browser',
+        location: {
+          hasDocument: docState.hasDocument,
+          fileName: docState.fileName,
+          isUntitled: docState.isUntitled,
+          sourcePath,
+        },
+        defaultAgent: prefs.defaultAgent,
+        defaultModel: prefs.defaultModel,
+      });
+    };
+
+    paint(null);
+    void this.privacySource?.resolveSourcePath().then(
+      (sourcePath) => paint(sourcePath),
+      () => paint(null),
+    );
     return panel;
   }
 
