@@ -3,6 +3,7 @@
  *
  * 네 묶음을 한 스크롤에 세운다:
  *  1. 연결 — 허브와 세 CLI 상태, 모달 설치/로그인, 재연결·세션 재시작
+ *  1-1. 원격 브라우저 — Browserbase 키를 앱 수명 동안만 허브 환경 변수 대신 쓰게 한다
  *  2. 기본 설정 — 다음 대화부터 쓸 프로바이더·모델·강도·권한
  *  3. 글쓰기 보정 — 문체 보정 상태와 재보정 진입
  *  4. 사용량 — CLIProxyAPI 연결, 요금제별 5시간·주간 한도, 오늘 누적, 모델별 내역
@@ -21,6 +22,12 @@ import {
   type AgentModelGroup,
 } from '../../agent/models.ts';
 import { loadAgentPrefs, saveAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
+import {
+  buildBrowserbaseOverride,
+  clearBrowserbaseOverride,
+  loadBrowserbaseOverride,
+  saveBrowserbaseOverride,
+} from '../../agent/browserbase-override.ts';
 import { createIcon } from './icons.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
 import { formatRelativeTime, formatResetAt, formatShortDate, formatTokens } from './usage-format.ts';
@@ -29,6 +36,8 @@ import type {
   AgentName,
   AgentAuthMethod,
   AgentSetupStatusMap,
+  BrowserbaseCredentialSource,
+  BrowserbaseStatus,
   PermissionProfile,
   PiCatalogModel,
   PiStatus,
@@ -315,6 +324,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let setupProgressResetTimer: ReturnType<typeof setTimeout> | null = null;
   const openedAuthUrls = new Set<string>();
 
+  // Browserbase — 앱에서 입력한 키는 이 탭이 사는 동안만 허브 환경 변수를 덮는다.
+  let browserbaseStatus: BrowserbaseStatus | null = null;
+  let browserbaseBusy = false;
+  let browserbaseMessage = '';
+  /** 서버/저장 상태에서 채운 프로젝트는 새 키를 입력할 때 오래된 값으로 간주한다. */
+  let browserbaseProjectAutoFilled = false;
+
   // pi 마법사 상태 — 한 장의 카드가 단계를 갈아 끼운다.
   let piStatus: PiStatus | null = null;
   let piCatalog: PiCatalogModel[] = [];
@@ -410,6 +426,63 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   });
   connectionActions.append(refreshBtn, restartBtn);
   connection.body.append(hubRow, providerList, connectionActions);
+
+  // ── 1-1. 원격 브라우저 (Browserbase) ──────────────────
+  // 여기 넣은 키는 허브 메모리에만 머물고, 이 탭을 쓰는 동안만 환경 변수를 덮는다.
+  const browserbaseSection = createSection('원격 브라우저');
+  const browserbaseStatusLine = el('p', 'ag-settings-status', '허브에 연결되면 확인해요');
+  const browserbaseKey = createTextField('Browserbase 키', {
+    type: 'password',
+    placeholder: 'bb_live_…',
+    autocomplete: 'new-password',
+  });
+  const browserbaseProject = createTextField('프로젝트 ID', { placeholder: '비우면 계정에서 골라요' });
+  const browserbaseGemini = createTextField('Gemini 키', {
+    type: 'password',
+    placeholder: 'AIza…',
+    autocomplete: 'new-password',
+  });
+  const browserbaseNote = el('p', 'ag-settings-note', '이 탭을 쓰는 동안만 허브 환경 변수 대신 써요.');
+  const browserbaseError = el('p', 'ag-settings-cliproxy-error');
+  browserbaseError.hidden = true;
+  const browserbaseActions = el('div', 'ag-settings-actions');
+  const browserbaseApply = el('button', 'ag-settings-primary', '적용');
+  browserbaseApply.type = 'button';
+  const browserbaseReset = el('button', 'ag-settings-btn', '환경 변수로 되돌리기');
+  browserbaseReset.type = 'button';
+  browserbaseReset.hidden = true;
+  browserbaseActions.append(browserbaseApply, browserbaseReset);
+  browserbaseSection.body.append(
+    browserbaseStatusLine,
+    browserbaseKey.field,
+    browserbaseProject.field,
+    browserbaseGemini.field,
+    browserbaseNote,
+    browserbaseError,
+    browserbaseActions,
+  );
+  const browserbaseInputs = [browserbaseKey.input, browserbaseProject.input, browserbaseGemini.input];
+  browserbaseApply.addEventListener('click', () => void submitBrowserbase());
+  browserbaseReset.addEventListener('click', () => void resetBrowserbase());
+  browserbaseKey.input.addEventListener('input', () => {
+    if (browserbaseProjectAutoFilled) {
+      browserbaseProject.input.value = '';
+      browserbaseProjectAutoFilled = false;
+    }
+    renderBrowserbase();
+  });
+  browserbaseProject.input.addEventListener('input', () => {
+    browserbaseProjectAutoFilled = false;
+    renderBrowserbase();
+  });
+  browserbaseGemini.input.addEventListener('input', renderBrowserbase);
+  for (const input of browserbaseInputs) {
+    input.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      void submitBrowserbase();
+    });
+  }
 
   // ── Pi 모달 흐름 ──────────────────────────────────────
   // 설치 → 로그인 → 모델 → 요약으로 모습을 바꾸며, 설정 페이지에는 직접 붙지 않는다.
@@ -1035,6 +1108,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   body.append(
     connection.root,
+    browserbaseSection.root,
     defaults.root,
     calibration.root,
     templatesSection.root,
@@ -1042,6 +1116,20 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   );
 
   setupKey.input.addEventListener('input', renderAgentSetup);
+
+  // 새로고침 전에 넣어 둔 Browserbase 키가 있으면 허브에 다시 심는다 — 허브가 다시 떴어도
+  // 브리지가 연결마다 재전송하므로 여기서는 한 번만 건네면 된다.
+  const storedBrowserbase = loadBrowserbaseOverride();
+  if (storedBrowserbase) {
+    browserbaseProject.input.value = storedBrowserbase.projectId ?? '';
+    browserbaseProjectAutoFilled = browserbaseProject.input.value !== '';
+    void bridge.setBrowserbaseCredentials(storedBrowserbase).then((status) => {
+      if (disposed || !status) return;
+      browserbaseStatus = status;
+      renderBrowserbase();
+    });
+  }
+  renderBrowserbase();
 
   // ── 상태 → DOM ────────────────────────────────────────
 
@@ -1211,6 +1299,102 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const online = connectionState === 'connected';
     refreshBtn.disabled = !online;
     restartBtn.disabled = !online;
+  }
+
+  function browserbaseSourceLabel(source: BrowserbaseCredentialSource): string {
+    return source === 'studio' ? '앱 입력' : '환경 변수';
+  }
+
+  function browserbaseErrorLabel(code: string, message: string): string {
+    switch (code) {
+      case 'BROWSERBASE_KEY_INVALID': return 'Browserbase 가 이 키를 거부했어요.';
+      case 'BROWSERBASE_UNREACHABLE': return 'Browserbase API 에 닿지 못했어요. 허브 네트워크를 확인해 주세요.';
+      case 'BROWSERBASE_PROJECT_NOT_FOUND': return '이 API 키로 해당 프로젝트를 찾을 수 없어요. 프로젝트 ID를 확인하거나 비운 뒤 다시 시도해 주세요.';
+      case 'BROWSERBASE_PROJECT_REQUIRED': return '프로젝트를 자동으로 찾을 수 없어요. Browserbase 프로젝트 ID를 입력해 주세요.';
+      case 'BROWSERBASE_NO_PROJECT': return '이 계정에는 프로젝트가 없어요. Browserbase 에서 먼저 만들어 주세요.';
+      default: return message;
+    }
+  }
+
+  function renderBrowserbase(): void {
+    const online = connectionState === 'connected';
+    const status = browserbaseStatus;
+    if (!online) {
+      browserbaseStatusLine.textContent = '허브에 연결되면 확인해요';
+    } else if (!status) {
+      browserbaseStatusLine.textContent = '확인 중…';
+    } else if (status.keySource === null) {
+      browserbaseStatusLine.textContent = '키가 없어요. 아래에 입력하거나 허브에 BROWSERBASE_API_KEY 를 내보내세요.';
+    } else {
+      const parts = [`${browserbaseSourceLabel(status.keySource)} 키 ····${status.keyTail ?? ''}`];
+      parts.push(status.projectId ? `프로젝트 ${status.projectId}` : '프로젝트 없음');
+      parts.push(status.geminiSource ? `Gemini ${browserbaseSourceLabel(status.geminiSource)}` : 'Gemini 키 없음');
+      if (status.browsers.length > 0) parts.push(`브라우저 ${status.browsers.length}개 열림`);
+      browserbaseStatusLine.textContent = parts.join(' · ');
+    }
+    browserbaseStatusLine.classList.toggle('ag-settings-status-warn', online && status !== null && !status.configured);
+    const hasKey = browserbaseKey.input.value.trim().length > 0;
+    browserbaseApply.disabled = !online || browserbaseBusy || !hasKey;
+    browserbaseApply.textContent = browserbaseBusy ? '확인 중…' : '적용';
+    const overriding = status?.keySource === 'studio' || status?.projectSource === 'studio' || status?.geminiSource === 'studio';
+    browserbaseReset.hidden = !overriding;
+    browserbaseReset.disabled = !online || browserbaseBusy;
+    for (const input of browserbaseInputs) input.disabled = !online || browserbaseBusy;
+    browserbaseError.hidden = browserbaseMessage === '';
+    browserbaseError.textContent = browserbaseMessage;
+  }
+
+  async function refreshBrowserbase(): Promise<void> {
+    const status = await bridge.requestBrowserbaseStatus();
+    if (disposed || !status) return;
+    browserbaseStatus = status;
+    renderBrowserbase();
+  }
+
+  async function submitBrowserbase(): Promise<void> {
+    const override = buildBrowserbaseOverride({
+      apiKey: browserbaseKey.input.value,
+      projectId: browserbaseProject.input.value,
+      geminiApiKey: browserbaseGemini.input.value,
+    });
+    if (!override || browserbaseBusy) return;
+    browserbaseBusy = true;
+    browserbaseMessage = '';
+    renderBrowserbase();
+    const status = await bridge.setBrowserbaseCredentials(override);
+    if (disposed) return;
+    browserbaseBusy = false;
+    if (status) {
+      browserbaseStatus = status;
+      // 허브가 고른 프로젝트 id 를 같이 기억해 다음 재전송이 같은 프로젝트로 간다.
+      saveBrowserbaseOverride({ ...override, ...(status.projectId ? { projectId: status.projectId } : {}) });
+      browserbaseKey.input.value = '';
+      browserbaseGemini.input.value = '';
+      browserbaseProject.input.value = status.projectId ?? '';
+      browserbaseProjectAutoFilled = browserbaseProject.input.value !== '';
+    } else if (!browserbaseMessage) {
+      browserbaseMessage = '키를 확인하지 못했어요.';
+    }
+    renderBrowserbase();
+  }
+
+  async function resetBrowserbase(): Promise<void> {
+    if (browserbaseBusy) return;
+    browserbaseBusy = true;
+    browserbaseMessage = '';
+    renderBrowserbase();
+    const status = await bridge.clearBrowserbaseCredentials();
+    if (disposed) return;
+    browserbaseBusy = false;
+    if (status) {
+      clearBrowserbaseOverride();
+      browserbaseStatus = status;
+      browserbaseProject.input.value = '';
+      browserbaseProjectAutoFilled = false;
+    } else if (!browserbaseMessage) {
+      browserbaseMessage = 'Browserbase 설정을 되돌리지 못했어요.';
+    }
+    renderBrowserbase();
   }
 
   function renderProviders(): void {
@@ -2176,6 +2360,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       syncPrefsInputs();
       renderCurrentSelection();
       renderConnection();
+      renderBrowserbase();
+      if (connectionState === 'connected') void refreshBrowserbase();
       renderProviders();
       renderWritingStyle();
       renderTemplates();
@@ -2199,6 +2385,17 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           renderCliproxy();
           renderPi();
           renderTemplates();
+          renderBrowserbase();
+          if (ev.state === 'connected') void refreshBrowserbase();
+          break;
+        case 'browserbase-status':
+          browserbaseStatus = ev.status;
+          renderBrowserbase();
+          break;
+        case 'browserbase-error':
+          browserbaseMessage = browserbaseErrorLabel(ev.code, ev.message);
+          browserbaseBusy = false;
+          renderBrowserbase();
           break;
         case 'provider-status':
           providers = ev.providers;
