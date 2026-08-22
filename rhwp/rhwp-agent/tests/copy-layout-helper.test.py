@@ -139,6 +139,8 @@ class CopyLayoutHelperTests(unittest.TestCase):
                 )
                 archive.writestr("Contents/content.hpf", content)
                 archive.writestr("Contents/section0.xml", section)
+                archive.writestr("Preview/PrvText.txt", "학생이 작성한 답안")
+                archive.writestr("Preview/PrvImage.png", b"private preview")
 
             report = copy_layout.sanitize_hwpx(
                 source,
@@ -155,6 +157,19 @@ class CopyLayoutHelperTests(unittest.TestCase):
             )
             self.assertEqual(report["verification"]["visible_text_nodes"], 2)
             self.assertEqual(report["verification"]["title"], "assignment - Layout")
+            self.assertEqual(
+                report["generated_preview_entries"],
+                ["Preview/PrvImage.png", "Preview/PrvText.txt"],
+            )
+            with zipfile.ZipFile(output) as archive:
+                self.assertEqual(
+                    archive.read("Preview/PrvText.txt"),
+                    copy_layout.PUBLISHABLE_PREVIEW_TEXT,
+                )
+                self.assertEqual(
+                    archive.read("Preview/PrvImage.png"),
+                    copy_layout.PUBLISHABLE_PREVIEW_IMAGE,
+                )
             self.assertTrue(output.is_file())
 
     def test_inspection_plan_is_source_bound_and_applied_end_to_end(self):
@@ -216,6 +231,8 @@ class CopyLayoutHelperTests(unittest.TestCase):
                 ["지출결의서", "지출금액"],
             )
             self.assertEqual(report["verification"]["visible_text_nodes"], 2)
+            with zipfile.ZipFile(output) as archive:
+                self.assertTrue(set(copy_layout.PUBLISHABLE_PREVIEW_ENTRIES) <= set(archive.namelist()))
 
     def test_parser_accepts_source_prefix_reserved_by_elementtree(self):
         source = b'<ns1:root xmlns:ns1="urn:copy-layout"><ns1:item /></ns1:root>'

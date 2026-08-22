@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import { ArtifactStore } from '../artifact-store.mjs';
 
 const CFB = await fs.readFile(new URL('../../saved/blank2010.hwp', import.meta.url));
+const BLANK_HWPX = fileURLToPath(new URL('../../saved/blank_hwpx.hwpx', import.meta.url));
+const COPY_LAYOUT = fileURLToPath(new URL('../skills/copy-layout/scripts/copy_layout.py', import.meta.url));
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-artifact-store-'));
@@ -67,6 +71,27 @@ test('accepts a conforming HWPX and rejects truncated or non-canonical packages'
     store.publish({ filePath: nonCanonicalPath }),
     (error) => error.code === 'ARTIFACT_HWPX_INVALID',
   );
+});
+
+test('publishes copy-layout HWPX output without agent-side package repair', async (t) => {
+  const { root, store } = await fixture(t);
+  const output = path.join(root, 'layout', 'blank - Layout.hwpx');
+  const python = process.platform === 'win32' ? 'python' : 'python3';
+  const result = spawnSync(python, ['-S', COPY_LAYOUT, BLANK_HWPX, '-o', output], { encoding: 'utf8' });
+  if (result.error?.code === 'ENOENT') {
+    t.skip('Python is unavailable');
+    return;
+  }
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.delivery.ready, true);
+  assert.deepEqual(report.generated_preview_entries, [
+    'Preview/PrvImage.png',
+    'Preview/PrvText.txt',
+  ]);
+
+  const published = await store.publish({ filePath: output });
+  assert.equal(published.fileName, 'blank - Layout.hwpx');
 });
 
 test('rejects paths outside the workspace, symlinks, and mismatched formats', async (t) => {

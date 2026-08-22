@@ -10,11 +10,13 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import unicodedata
 import zipfile
+import zlib
 import xml.etree.ElementTree as etree
 from collections import Counter
 from collections.abc import Sequence
@@ -53,6 +55,28 @@ PAYLOAD_PREFIXES = (
     "Preview/",
     "Scripts/",
 )
+PUBLISHABLE_PREVIEW_TEXT = b""
+
+
+def png_chunk(kind: bytes, data: bytes) -> bytes:
+    payload = kind + data
+    return (
+        struct.pack(">I", len(data))
+        + payload
+        + struct.pack(">I", zlib.crc32(payload) & 0xFFFFFFFF)
+    )
+
+
+PUBLISHABLE_PREVIEW_IMAGE = (
+    b"\x89PNG\r\n\x1a\n"
+    + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
+    + png_chunk(b"IDAT", zlib.compress(b"\x00\xff\xff\xff\xff"))
+    + png_chunk(b"IEND", b"")
+)
+PUBLISHABLE_PREVIEW_ENTRIES = {
+    "Preview/PrvText.txt": PUBLISHABLE_PREVIEW_TEXT,
+    "Preview/PrvImage.png": PUBLISHABLE_PREVIEW_IMAGE,
+}
 GEOMETRY_ELEMENTS = {
     "cellAddr",
     "cellMargin",
@@ -1390,6 +1414,8 @@ def write_archive(
                 if name == "mimetype":
                     info.compress_type = zipfile.ZIP_STORED
                 archive.writestr(info, entries[name])
+            for name in sorted(set(entries) - set(info_by_name)):
+                archive.writestr(name, entries[name], compress_type=zipfile.ZIP_DEFLATED)
     except Exception:
         output.unlink(missing_ok=True)
         raise
@@ -1431,13 +1457,16 @@ def validate_output(
             if not expected_visible_text:
                 raise ValueError(f"visible text remains: {locations}")
             raise ValueError("visible text differs from approved guidance")
-        forbidden_prefixes = tuple(
-            prefix
-            for prefix in PAYLOAD_PREFIXES
-            if not (allow_generated_preview and prefix == "Preview/")
-        )
+        forbidden_prefixes = tuple(prefix for prefix in PAYLOAD_PREFIXES if prefix != "Preview/")
         if any(name.startswith(forbidden_prefixes) for name in names):
-            raise ValueError("preview, script, annotation, history, or chart payload remains")
+            raise ValueError("script, annotation, history, or chart payload remains")
+        if not allow_generated_preview:
+            preview_names = {name for name in names if name.startswith("Preview/")}
+            if preview_names != set(PUBLISHABLE_PREVIEW_ENTRIES):
+                raise ValueError("publishable HWPX preview entries are missing or unexpected")
+            for name, expected in PUBLISHABLE_PREVIEW_ENTRIES.items():
+                if archive.read(name) != expected:
+                    raise ValueError(f"privacy-safe HWPX preview differs: {name}")
 
         content_tree = trees.get("Contents/content.hpf")
         if content_tree is None:
@@ -1580,7 +1609,8 @@ def sanitize_hwpx(
             kept_paragraphs.extend(part_kept)
             removed_paragraphs.extend(part_removed)
     totals.update(sanitize_metadata(content_tree, title))
-    totals["manifest_items_removed"] += scrub_manifest(content_tree, removed_parts)
+    manifest_removed_parts = removed_parts - set(PUBLISHABLE_PREVIEW_ENTRIES)
+    totals["manifest_items_removed"] += scrub_manifest(content_tree, manifest_removed_parts)
 
     expected_fields = field_inventory_from_trees(trees)
     expected_controls = form_control_inventory_from_trees(trees)
@@ -1607,6 +1637,8 @@ def sanitize_hwpx(
             entries[part] = serialize_xml(tree, entries[part])
     for part in removed_parts:
         entries.pop(part, None)
+    entries.update(PUBLISHABLE_PREVIEW_ENTRIES)
+    totals["publishable_preview_entries_generated"] = len(PUBLISHABLE_PREVIEW_ENTRIES)
 
     write_archive(source, destination, infos, entries)
     try:
@@ -1648,6 +1680,7 @@ def sanitize_hwpx(
         "preserved_guidance": preserved_guidance,
         "cleared_border_fill_marks": cleared_border_marks,
         "reset_form_controls": reset_controls,
+        "generated_preview_entries": sorted(PUBLISHABLE_PREVIEW_ENTRIES),
         "text_decisions": (
             {
                 "default": text_plan["default"],

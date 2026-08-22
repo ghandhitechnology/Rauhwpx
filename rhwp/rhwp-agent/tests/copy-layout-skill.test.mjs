@@ -27,6 +27,10 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(markdown, /call `materialize_document_snapshot`/);
   assert.match(markdown, /Never tell the user to save merely because `sourcePath` is null/);
   assert.match(markdown, /call `publish_artifact`/);
+  assert.match(markdown, /call `publish_artifact` once with the exact reported `output`/);
+  assert.match(markdown, /Do not unzip or patch the result/);
+  assert.match(markdown, /Preview\/PrvText\.txt/);
+  assert.match(markdown, /Preview\/PrvImage\.png/);
   assert.match(markdown, /`downloadUrl` as a Markdown download link/);
   assert.match(markdown, /do not ask the user to attach or identify the file again/);
   assert.match(markdown, /Page-count differences in either the intermediate or final output are fidelity diagnostics/);
@@ -64,6 +68,7 @@ test('copy-layout helper retains safety gates and reports fidelity separately', 
   assert.match(script, /visible text differs from approved guidance/);
   assert.match(script, /LAYOUT_ANCHOR = "\\u2060"/);
   assert.match(script, /zero-width layout anchors/);
+  assert.match(script, /PUBLISHABLE_PREVIEW_ENTRIES/);
 });
 
 test('copy-layout helper runs without site packages and defers only an intermediate page-count mismatch', (t) => {
