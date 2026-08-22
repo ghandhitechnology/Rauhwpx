@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { documentPathsFromArgv, launchRequest } from '../../../desktop/launch-routing.mjs';
+import { resolveGeneratedDocumentArtifact } from '../../../desktop/generated-document-artifact.mjs';
 import { SessionManager } from '../../../desktop/session-manager.mjs';
 import { resolveStudioAsset, STUDIO_URL } from '../../../desktop/studio-protocol.mjs';
 
@@ -132,6 +133,29 @@ test('desktop close and native-file IPC contracts stay sender-owned', () => {
   assert.match(desktopMain, /window\.on\('close',[\s\S]*desktop:close-requested/);
   assert.match(desktopMain, /nativeFiles\.createSaveTarget\(session\.sessionId, filePath\)/);
   assert.doesNotMatch(preload, /\b(?:file)?path\s*:/i);
+});
+
+test('generated artifact opening is bound to the sender hub and session', () => {
+  const request = {
+    fileName: '보고서(팀).hwpx',
+    downloadUrl: 'http://127.0.0.1:34567/artifacts/artifact_token_1234567890/'
+      + '%EB%B3%B4%EA%B3%A0%EC%84%9C%28%ED%8C%80%29.hwpx?sessionId=session-a&token=rhwp1.token',
+  };
+  assert.deepEqual(resolveGeneratedDocumentArtifact(request, {
+    hubUrl: 'ws://127.0.0.1:34567',
+    sessionId: 'session-a',
+  }), request);
+  assert.throws(() => resolveGeneratedDocumentArtifact(request, {
+    hubUrl: 'ws://127.0.0.1:34567',
+    sessionId: 'session-b',
+  }), /window session/);
+  assert.throws(() => resolveGeneratedDocumentArtifact({
+    ...request,
+    downloadUrl: request.downloadUrl.replace('127.0.0.1:34567', 'example.com'),
+  }, {
+    hubUrl: 'ws://127.0.0.1:34567',
+    sessionId: 'session-a',
+  }), /does not belong to this app/);
 });
 
 test('window close never deadlocks on a dead renderer', () => {

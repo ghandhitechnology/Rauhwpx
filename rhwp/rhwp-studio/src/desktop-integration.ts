@@ -11,7 +11,6 @@ import type {
   FileSystemWritableFileStreamLike,
   SaveFilePickerOptionsLike,
 } from './command/file-system-access.ts';
-import { detectDocumentByteKind } from './core/document-signature.ts';
 
 export const DEV_AGENT_HUB_ENSURE_PATH = '/__rhwp/ensure-agent-hub';
 
@@ -51,7 +50,7 @@ export interface RhwpDesktopApi {
   } | null>;
   openGeneratedDocumentWindow?: (payload: {
     fileName: string;
-    bytes: Uint8Array;
+    downloadUrl: string;
   }) => Promise<boolean>;
   pickNativeOpenFile?: (options?: {
     suggestedName?: string;
@@ -127,8 +126,6 @@ export interface DesktopHost {
   };
 }
 
-const MAX_PUBLISHED_DOCUMENT_BYTES = 64 * 1024 * 1024;
-
 export interface PublishedDocumentLink {
   readonly downloadUrl: string;
   readonly fileName: string;
@@ -159,26 +156,11 @@ export function parsePublishedDocumentLink(raw: string): PublishedDocumentLink |
 export async function openPublishedDocumentInNewWindow(
   artifact: PublishedDocumentLink,
   win?: DesktopHost,
-  fetchImpl: typeof fetch = globalThis.fetch,
 ): Promise<void> {
   const host = desktopHost(win);
   const openNative = host?.rhwpDesktop?.openGeneratedDocumentWindow;
   if (openNative) {
-    const response = await fetchImpl(artifact.downloadUrl, { cache: 'no-store' });
-    if (!response.ok) throw new Error(`문서를 가져오지 못했습니다 (HTTP ${response.status}).`);
-    const declaredLength = Number(response.headers.get('content-length'));
-    if (Number.isFinite(declaredLength) && declaredLength > MAX_PUBLISHED_DOCUMENT_BYTES) {
-      throw new Error('문서가 64 MiB 열기 한도를 초과합니다.');
-    }
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength === 0 || bytes.byteLength > MAX_PUBLISHED_DOCUMENT_BYTES) {
-      throw new Error('문서가 비어 있거나 64 MiB 열기 한도를 초과합니다.');
-    }
-    const expectedKind = artifact.fileName.toLowerCase().endsWith('.hwpx') ? 'hwpx' : 'hwp';
-    if (detectDocumentByteKind(bytes, response.headers.get('content-type')) !== expectedKind) {
-      throw new Error('다운로드된 문서의 형식과 파일 확장자가 일치하지 않습니다.');
-    }
-    if (!await openNative({ fileName: artifact.fileName, bytes })) {
+    if (!await openNative({ fileName: artifact.fileName, downloadUrl: artifact.downloadUrl })) {
       throw new Error('새 문서 창을 열지 못했습니다.');
     }
     return;

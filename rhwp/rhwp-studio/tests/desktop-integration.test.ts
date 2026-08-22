@@ -83,8 +83,7 @@ test('published artifact links open through a fresh editor window on desktop', a
   assert.equal(parsePublishedDocumentLink('https://example.com/artifacts/artifact_token_1234567890/a.hwp'), null);
   assert.equal(parsePublishedDocumentLink('javascript:alert(1)'), null);
 
-  const opened: Array<{ fileName: string; bytes: Uint8Array }> = [];
-  const bytes = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+  const opened: Array<{ fileName: string; downloadUrl: string }> = [];
   await openPublishedDocumentInNewWindow(artifact!, {
     rhwpDesktop: {
       openGeneratedDocumentWindow: async (payload) => {
@@ -92,12 +91,9 @@ test('published artifact links open through a fresh editor window on desktop', a
         return true;
       },
     },
-  }, async () => new Response(bytes, {
-    status: 200,
-    headers: { 'content-type': 'application/x-hwp', 'content-length': String(bytes.length) },
-  }));
+  });
   assert.equal(opened[0]?.fileName, '보고서(팀).hwp');
-  assert.deepEqual(opened[0]?.bytes, bytes);
+  assert.equal(opened[0]?.downloadUrl, href);
 });
 
 test('browser artifact links open another Studio page with an authenticated source URL', async () => {
