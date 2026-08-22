@@ -55,7 +55,7 @@ test('completion prompt leaves one exact registration decision to the owning cha
   assert.match(prompt, /if they decline, do not call it and leave the preview open/);
 });
 
-test('fleet progress uses the existing task phase/member contract', () => {
+test('fleet progress reports one task row with a direct phase index', () => {
   const progress = taskProgressForJob({
     jobId: 'job-1',
     agent: 'codex',
@@ -68,16 +68,9 @@ test('fleet progress uses the existing task phase/member contract', () => {
   assert.equal(progress.type, 'task-progress');
   assert.equal(progress.taskId, 'job-1');
   assert.equal(progress.phases.length, COPY_LAYOUT_PHASES.length);
-  assert.deepEqual(progress.members[0], {
-    index: 0,
-    label: '템플릿 완성 워커',
-    state: 'running',
-    phaseIndex: 4,
-    model: 'gpt-5.6-sol',
-    tokens: 123,
-    toolCalls: 7,
-    activity: '대표 페이지 비교 중',
-  });
+  assert.equal(progress.phaseIndex, 4);
+  assert.equal(progress.members, undefined, 'a single worker must not render as its own child row');
+  assert.deepEqual(progress.usage, { totalTokens: 123, toolUses: 7 });
 });
 
 test('default registration name strips format and generated collision suffixes', () => {

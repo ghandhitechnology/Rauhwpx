@@ -16,7 +16,7 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  *   | { type: 'tool-call';    agent: AgentName; callId: string; tool: string; argsJson: string; parentTaskId?: string }
  *   | { type: 'tool-result';  agent: AgentName; callId: string; ok: boolean; resultPreview: string; parentTaskId?: string }
  *   | { type: 'task-start';   agent: AgentName; taskId: string; callId?: string; title: string; role?: string; taskKind: 'agent'|'workflow'; workflowName?: string }
- *   | { type: 'task-progress';agent: AgentName; taskId: string; activity?: string; lastTool?: string; usage?: TaskUsage; phases?: TaskPhase[]; members?: TaskMember[] }
+ *   | { type: 'task-progress';agent: AgentName; taskId: string; activity?: string; lastTool?: string; usage?: TaskUsage; phases?: TaskPhase[]; members?: TaskMember[]; phaseIndex?: number }
  *   | { type: 'task-end';     agent: AgentName; taskId: string; status: 'completed'|'failed'|'stopped'; summary?: string; usage?: TaskUsage }
  *   | { type: 'usage';        agent: AgentName; model: string|null; usage: UsageTokens; costUsd?: number }
  *   | { type: 'turn-end';     agent: AgentName; stopReason?: string; errorMessage?: string }

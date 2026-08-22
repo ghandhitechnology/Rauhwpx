@@ -66,20 +66,7 @@ export function taskProgressForJob(job, activity, lastTool) {
     activity: String(activity || job.activity || COPY_LAYOUT_PHASES[phaseIndex].title).slice(0, 500),
     ...(lastTool ? { lastTool: String(lastTool).slice(0, 200) } : {}),
     phases: COPY_LAYOUT_PHASES.map(({ index, title }) => ({ index, title })),
-    members: [{
-      index: 0,
-      label: '템플릿 완성 워커',
-      state: job.status === 'failed'
-        ? 'failed'
-        : job.status === 'completed'
-          ? 'completed'
-          : 'running',
-      phaseIndex,
-      model: job.model,
-      ...(Number.isFinite(job.usage?.totalTokens) ? { tokens: job.usage.totalTokens } : {}),
-      ...(Number.isFinite(job.usage?.toolUses) ? { toolCalls: job.usage.toolUses } : {}),
-      activity: String(activity || job.activity || '').slice(0, 500),
-    }],
+    phaseIndex,
     ...(job.usage ? { usage: job.usage } : {}),
   };
 }

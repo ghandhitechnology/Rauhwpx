@@ -939,7 +939,7 @@ function createTemplateJob(record, activeSession, binding) {
   record.activeTemplateJobId = jobId;
   sendTemplateJobEvent(record, {
     type: 'task-start', agent: job.agent, taskId: job.jobId,
-    title: '레이아웃 템플릿 자동 완성', role: '전용 백그라운드 워커',
+    title: '레이아웃 템플릿 자동 완성',
     taskKind: 'agent', background: true,
   });
   sendTemplateJobEvent(record, taskProgressForJob(job, job.activity));
@@ -2178,7 +2178,7 @@ function handleMcpMessage(record, sock, msg) {
             status: 'running',
             provider: job.agent,
             model: job.model,
-            message: '전용 백그라운드 워커가 전체 copy-layout 작업을 맡았습니다. 이 채팅은 계속 사용할 수 있습니다.',
+            message: '백그라운드 작업이 전체 copy-layout 작업을 맡았습니다. 이 채팅은 계속 사용할 수 있습니다.',
           });
         } catch (error) {
           sendError(error, 'COPY_LAYOUT_DELEGATION_FAILED');
@@ -2812,7 +2812,7 @@ httpServer.on('upgrade', (req, socket, head) => {
         if (job.status === 'running') {
           sendTemplateJobEvent(record, {
             type: 'task-start', agent: job.agent, taskId: job.jobId,
-            title: '레이아웃 템플릿 자동 완성', role: '전용 백그라운드 워커',
+            title: '레이아웃 템플릿 자동 완성',
             taskKind: 'agent', background: true,
           });
           sendTemplateJobEvent(record, taskProgressForJob(job, job.activity));

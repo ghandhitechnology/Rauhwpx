@@ -22,6 +22,7 @@ test('hub launches the copy-layout worker as a real isolated provider session', 
 
 test('hub reuses fleet task events and keeps worker tools source-bound', () => {
   assert.match(server, /type: 'task-start'[\s\S]*taskKind: 'agent', background: true/);
+  assert.doesNotMatch(server, /전용 백그라운드 워커/);
   assert.match(server, /taskProgressForJob\(job/);
   assert.match(server, /type: 'task-end'/);
   assert.match(server, /COPY_LAYOUT_TOOL_DENIED/);

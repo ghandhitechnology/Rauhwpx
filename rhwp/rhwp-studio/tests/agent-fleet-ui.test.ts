@@ -451,20 +451,27 @@ test('독립 백그라운드 provider task 는 owning turn 과 다음 turn 을 �
   view.beginTurn();
   view.taskStart(taskStart('template-job', {
     title: '레이아웃 템플릿 자동 완성',
-    role: '전용 백그라운드 워커',
     background: true,
   }) as never);
   view.sweep();
+  const card = hostedCards(view)[0];
   assert.equal(hostedCards(view).length, 1, 'owning turn 종료 뒤에도 도크에서 실행 중이다');
   assert.equal(settledCards(conversation).length, 0);
-  assert.equal(one(hostedCards(view)[0], 'ag-fleet-label').textContent, '백그라운드 작업 1 · 작업 중');
+  assert.equal(one(card, 'ag-fleet-label').textContent, '백그라운드 작업 1 · 작업 중');
+  assert.equal(all(card, 'ag-fleet-row').length, 1, 'single worker is represented by the task row only');
+  assert.equal(all(card, 'ag-fleet-member').length, 0);
+  assert.equal(one(card, 'ag-fleet-role').hidden, true, 'redundant dedicated-worker badge is omitted');
 
   view.beginTurn();
   view.taskProgress({
     type: 'task-progress', agent: 'claude', taskId: 'template-job', activity: '대표 페이지 비교 중',
+    phases: [{ index: 0, title: '원본 고정' }, { index: 1, title: '대표 페이지 비교' }],
+    phaseIndex: 1,
   } as never);
   assert.equal(hostedCards(view).length, 1, 'main chat의 다음 turn과 섞이거나 중단되지 않는다');
-  assert.equal(one(hostedCards(view)[0], 'ag-fleet-activity').textContent, '대표 페이지 비교 중');
+  assert.equal(one(card, 'ag-fleet-activity').textContent, '대표 페이지 비교 중');
+  assert.equal(all(card, 'ag-fleet-row').length, 1, 'phase updates do not create a duplicate worker row');
+  assert.ok(all(card, 'ag-fleet-phase')[1].className.includes('ag-live'));
   view.sweep();
 
   view.taskEnd({
