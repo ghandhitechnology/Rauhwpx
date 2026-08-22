@@ -11,6 +11,7 @@
 
 <p align="center">
   Rauhwpx is a fork of Edward Kim's <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a>.
+  <a href="SUPPORT.md">Support</a>
 </p>
 
 <p align="center">
