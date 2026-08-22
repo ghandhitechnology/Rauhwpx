@@ -578,6 +578,13 @@ test('행 높이는 고정 그리드로 못 박혀 있고 진행 표시는 픽�
   assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.ag-fleet,\s*\.ag-fleet-row \{\s*animation: none;/s);
 });
 
+test('단계 레일은 겹친 알약 대신 한 줄 연결 타임라인이다', () => {
+  assert.match(css, /\.ag-fleet-rail\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto;/s);
+  assert.match(css, /\.ag-fleet-phase\s*\{[^}]*flex:\s*0 0 auto;[^}]*border:\s*0;[^}]*background:\s*transparent;/s);
+  assert.match(css, /\.ag-fleet-phase:not\(:last-child\)::after\s*\{[^}]*width:\s*12px;[^}]*height:\s*1px;/s);
+  assert.match(css, /\.ag-fleet-phase-mark:empty::before\s*\{[^}]*border-radius:\s*50%;/s);
+});
+
 test('편대 도크는 입력기 위 알약과 팝업으로 그려진다', () => {
   assert.match(css, /\.ag-fleet-dock\s*\{[^}]*position:\s*absolute;/s);
   assert.match(css, /\.ag-fleet-dock-pill\s*\{[^}]*border-radius:\s*999px;/s);

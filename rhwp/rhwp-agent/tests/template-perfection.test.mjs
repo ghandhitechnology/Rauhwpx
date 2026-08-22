@@ -59,6 +59,10 @@ test('completion prompt leaves one exact registration decision to the owning cha
 });
 
 test('fleet progress reports one task row with a direct phase index', () => {
+  assert.deepEqual(
+    COPY_LAYOUT_PHASES.map(({ title }) => title),
+    ['원본', '전체 검사', '정리', '생성', '비교', '검증', '게시'],
+  );
   const progress = taskProgressForJob({
     jobId: 'job-1',
     agent: 'codex',

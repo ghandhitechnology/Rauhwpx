@@ -3,13 +3,13 @@ import path from 'node:path';
 export const COPY_LAYOUT_MAX_ITERATIONS = 3;
 
 export const COPY_LAYOUT_PHASES = Object.freeze([
-  Object.freeze({ index: 0, id: 'binding-source', title: '원본 고정' }),
-  Object.freeze({ index: 1, id: 'inspecting', title: '텍스트·미디어 전수 검사' }),
-  Object.freeze({ index: 2, id: 'planning', title: '보존·제거 결정' }),
-  Object.freeze({ index: 3, id: 'generating', title: '후보 생성' }),
-  Object.freeze({ index: 4, id: 'previewing', title: '대표 페이지 비교' }),
-  Object.freeze({ index: 5, id: 'converging', title: '안전·충실도 수렴' }),
-  Object.freeze({ index: 6, id: 'publishing', title: '검증본 게시' }),
+  Object.freeze({ index: 0, id: 'binding-source', title: '원본' }),
+  Object.freeze({ index: 1, id: 'inspecting', title: '전체 검사' }),
+  Object.freeze({ index: 2, id: 'planning', title: '정리' }),
+  Object.freeze({ index: 3, id: 'generating', title: '생성' }),
+  Object.freeze({ index: 4, id: 'previewing', title: '비교' }),
+  Object.freeze({ index: 5, id: 'converging', title: '검증' }),
+  Object.freeze({ index: 6, id: 'publishing', title: '게시' }),
 ]);
 
 const PHASE_INDEX = new Map(COPY_LAYOUT_PHASES.map((phase) => [phase.id, phase.index]));

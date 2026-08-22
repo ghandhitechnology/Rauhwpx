@@ -5591,9 +5591,16 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 .ag-fleet-rail {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 8px 10px 0;
+  align-items: center;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 8px 10px 2px;
+  scrollbar-width: none;
+}
+
+.ag-fleet-rail::-webkit-scrollbar {
+  display: none;
 }
 
 .ag-fleet-rail[hidden] {
@@ -5601,42 +5608,70 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-fleet-phase {
+  position: relative;
   display: inline-flex;
-  max-width: 100%;
+  flex: 0 0 auto;
   align-items: center;
   gap: 4px;
-  padding: 3px 7px;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-chip);
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
   color: var(--ag-text-muted);
   font-size: var(--font-size-xs, 10px);
   line-height: 1.2;
+}
+
+.ag-fleet-phase:not(:last-child)::after {
+  width: 12px;
+  height: 1px;
+  margin: 0 6px;
+  background: color-mix(in srgb, var(--ag-border-strong) 72%, transparent);
+  content: '';
 }
 
 .ag-fleet-phase.ag-done {
   color: var(--ag-text-secondary);
 }
 
+.ag-fleet-phase.ag-done:not(:last-child)::after {
+  background: color-mix(in srgb, var(--ag-ok) 48%, var(--ag-border));
+}
+
 .ag-fleet-phase.ag-live {
-  border-color: color-mix(in srgb, var(--ag-accent) 45%, var(--ag-border));
-  background: color-mix(in srgb, var(--ag-accent) 11%, transparent);
   color: var(--ag-accent-strong);
+  font-weight: 600;
 }
 
 .ag-fleet-phase-mark {
   display: inline-flex;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
   color: var(--ag-ok);
 }
 
 .ag-fleet-phase-mark:empty {
-  display: none;
+  display: inline-flex;
+}
+
+.ag-fleet-phase-mark:empty::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--ag-text-muted) 62%, transparent);
+  content: '';
+}
+
+.ag-fleet-phase.ag-live .ag-fleet-phase-mark:empty::before {
+  background: var(--ag-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ag-accent) 16%, transparent);
 }
 
 .ag-fleet-phase-mark .ag-icon {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 
 .ag-fleet-phase-title {
