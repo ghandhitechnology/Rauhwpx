@@ -144,7 +144,7 @@ runTest('HML open, semantic HML save, reopen, and HWP regression', async ({ page
 
   assert(saveDialog.text.includes('의미를 보존해 저장'), 'dialog explains semantic HML save');
   assert(saveDialog.buttons.includes('HML로 저장'), 'HML is the primary save option');
-  assert(saveDialog.buttons.includes('HWP로 저장'), 'HWP Save As option is present');
+  assert(saveDialog.buttons.includes('HWP 5.0으로 저장'), 'HWP Save As option is present');
   assert(saveDialog.buttons.includes('HWPX로 저장'), 'HWPX Save As option is present');
   assert(saveDialog.probe.pickerCalls === 0, 'save picker is not opened before format selection');
   assert(saveDialog.probe.writes === 0, 'no file write occurs before format selection');

@@ -1,4 +1,5 @@
 import { WasmBridge } from '@/core/wasm-bridge';
+import { FALLBACK_DOCUMENT_FILE_NAME } from '@/core/document-names';
 import type { DocumentInfo } from '@/core/types';
 import { EventBus } from '@/core/event-bus';
 import { assertRemoteDocumentBytes } from '@/core/document-signature';
@@ -1487,7 +1488,7 @@ async function createNewDocument(): Promise<void> {
       { fileName: wasm.fileName, sourceFormat: wasm.getSourceFormat() },
       { discardPreviousDraft: true },
     );
-    await initializeDocument(docInfo, `새 문서.hwp — ${docInfo.pageCount}페이지`);
+    await initializeDocument(docInfo, `${wasm.fileName} — ${docInfo.pageCount}페이지`);
   } catch (error) {
     await cancelDesktopDocument(reservationId).catch(() => {});
     activeDocumentId = null;
@@ -1562,7 +1563,7 @@ async function loadFromUrlParam(): Promise<void> {
   const fileUrl = params.get('url');
   if (!fileUrl) return;
 
-  const fileName = params.get('filename') || fileUrl.split('/').pop()?.split('?')[0] || 'document.hwp';
+  const fileName = params.get('filename') || fileUrl.split('/').pop()?.split('?')[0] || FALLBACK_DOCUMENT_FILE_NAME;
   const msg = sbMessage();
 
   try {

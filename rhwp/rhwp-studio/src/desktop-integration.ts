@@ -11,6 +11,7 @@ import type {
   FileSystemWritableFileStreamLike,
   SaveFilePickerOptionsLike,
 } from './command/file-system-access.ts';
+import { FALLBACK_DOCUMENT_FILE_NAME } from './core/document-names.ts';
 
 export const DEV_AGENT_HUB_ENSURE_PATH = '/__rhwp/ensure-agent-hub';
 
@@ -519,7 +520,7 @@ export async function pickDesktopNativeSaveFile(
 ): Promise<FileSystemFileHandleLike | null | undefined> {
   const api = desktopHost(win)?.rhwpDesktop;
   if (!api?.pickNativeSaveFile) return undefined;
-  const suggestedName = options.suggestedName ?? 'document.hwp';
+  const suggestedName = options.suggestedName ?? FALLBACK_DOCUMENT_FILE_NAME;
   const match = suggestedName.match(/\.(hwp|hwpx|hml)$/i);
   if (!match) throw new Error('Save target format is unavailable');
   const result = await api.pickNativeSaveFile({

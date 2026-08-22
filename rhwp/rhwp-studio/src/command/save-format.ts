@@ -24,7 +24,7 @@ export const SAVE_FORMAT_DETAILS: Record<SaveFormat, SaveFormatDetails> = {
     extension: '.hwp',
     mimeType: 'application/x-hwp',
     pickerType: {
-      description: 'HWP 문서',
+      description: 'HWP 5.0 문서',
       accept: { 'application/x-hwp': ['.hwp'] },
     },
   },
@@ -32,7 +32,7 @@ export const SAVE_FORMAT_DETAILS: Record<SaveFormat, SaveFormatDetails> = {
     extension: '.hwpx',
     mimeType: 'application/hwp+zip',
     pickerType: {
-      description: 'HWPX 문서',
+      description: 'HWPX 문서 (권장)',
       accept: { 'application/hwp+zip': ['.hwpx'] },
     },
   },

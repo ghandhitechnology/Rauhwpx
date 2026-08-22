@@ -31,7 +31,7 @@ class HmlSaveFormatDialog extends ModalDialog {
   }
 
   protected onConfirm(): void {
-    this.resolve(this.hmlEnabled ? 'hml' : 'hwp');
+    this.resolve(this.hmlEnabled ? 'hml' : 'hwpx');
   }
 
   override hide(): void {
@@ -73,12 +73,13 @@ class HmlSaveFormatDialog extends ModalDialog {
 
       if (this.hmlEnabled) {
         if (primaryButton) primaryButton.textContent = 'HML로 저장';
-        addFormatButton('HWP로 저장', 'hwp');
+        addFormatButton('HWPX로 저장', 'hwpx');
+        addFormatButton('HWP 5.0으로 저장', 'hwp');
       } else {
-        if (primaryButton) primaryButton.textContent = 'HWP로 저장';
+        if (primaryButton) primaryButton.textContent = 'HWPX로 저장';
         addFormatButton('HML로 저장 (저장 불가)', null, true);
+        addFormatButton('HWP 5.0으로 저장', 'hwp');
       }
-      addFormatButton('HWPX로 저장', 'hwpx');
     });
   }
 }

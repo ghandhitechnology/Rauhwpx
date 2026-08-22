@@ -12,11 +12,11 @@ Primary users are Korean office workers who already work in HWP/HWPX and are tir
 
 ## Product Purpose
 
-rhwp is an independent open-source HWP/HWPX viewer/editor with agentic features built into the editing experience. Success means users can create full documents with AI and collaborate smoothly—both in the system (local agent ↔ open document) and in the UI (the AI feels like part of the program, not a bolted-on chat pane).
+Rauhwpx is an independent open-source HWP/HWPX viewer/editor with agentic features built into the editing experience. Success means users can create full documents with AI and collaborate smoothly—both in the system (local agent ↔ open document) and in the UI (the AI feels like part of the program, not a bolted-on chat pane). New documents and exports default to HWPX for Korean office attachments; binary HWP 5.0 remains an explicit save choice.
 
 ## Positioning
 
-An HWP editor with agentic features as a first-class part of the product—not an external AI tool that cannot touch Hangul documents, and not a generic chat overlay on a viewer. Documents are edited through a real HWP engine (Rust → WASM); the AI makes visible, undoable changes against the live open document, while planning approval and editor undo keep the user in control.
+An HWP/HWPX editor with agentic features as a first-class part of the product—not an external AI tool that cannot touch Hangul documents, and not a generic chat overlay on a viewer. Documents are edited through a real document engine (Rust → WASM); the AI makes visible, undoable changes against the live open document, while planning approval and editor undo keep the user in control.
 
 ## Operating Context
 
@@ -39,15 +39,14 @@ An HWP editor with agentic features as a first-class part of the product—not a
 
 ## Brand Commitments
 
-- Product name: **rhwp**; studio: **rhwp-studio**; agent hub: **rhwp-agent**.
-- Korean product framing in public materials includes “알(R), 모두의 한글” for the editor/PWA.
+- Product name: **Rauhwpx**. Engine/studio/hub directories remain under `rhwp/` for historical layout only.
+- Do not present this product as edwardkim/rhwp or as a Hancom product.
 - Voice: practical document-work tool; AI should feel native to the editor, not like a separate SaaS chat product.
 
 ## Evidence on Hand
 
 - Engine, studio, and agent implementations under `rhwp/`.
 - Large real-document fixture set under `rhwp/samples/` (~430 HWP/HWPX files for fidelity/regression).
-- Public demo referenced at https://edwardkim.github.io/rhwp/.
 - Logo assets under `rhwp/assets/logo/`.
 - Do not fabricate testimonials, customer logos, Hancom endorsement, or fidelity benchmarks not in the repo.
 

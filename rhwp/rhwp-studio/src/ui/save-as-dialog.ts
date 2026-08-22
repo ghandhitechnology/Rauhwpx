@@ -79,6 +79,6 @@ class SaveAsDialog extends ModalDialog {
 }
 
 /** 파일 이름 입력 대화상자를 표시하고 사용자가 입력한 파일 이름을 반환한다. 취소 시 null. */
-export function showSaveAs(defaultName: string, format: SaveFormat = 'hwp'): Promise<string | null> {
+export function showSaveAs(defaultName: string, format: SaveFormat = 'hwpx'): Promise<string | null> {
   return new SaveAsDialog(defaultName, format).showAsync();
 }

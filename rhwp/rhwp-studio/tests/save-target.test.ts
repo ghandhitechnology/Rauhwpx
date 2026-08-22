@@ -1,13 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   fileNameForFormat,
   forgetConvertedHmlSaveHandle,
+  inferExportFormat,
   markConvertedHmlSaveHandle,
   requiresSaveFormatChoice,
   resolveSaveTarget,
 } from '../src/command/save-target.ts';
+import {
+  DEFAULT_EXPORT_FORMAT,
+  NEW_DOCUMENT_FILE_NAME,
+  isUntitledNewDocumentName,
+} from '../src/core/document-names.ts';
 
 test('fallback 파일명은 선택한 HML/HWP/HWPX 확장자를 정확히 적용한다', () => {
   assert.equal(fileNameForFormat('document', 'hwp'), 'document.hwp');
@@ -106,4 +113,56 @@ test('fallback 변환 저장도 현재 파일명 확장자를 다음 Ctrl+S 포�
     forceSaveAs: false,
     suggestedName: 'downloaded.hwp',
   });
+});
+
+test('새 문서는 엔진 출처가 HWP여도 HWPX로 저장한다', () => {
+  assert.equal(NEW_DOCUMENT_FILE_NAME, '새 문서.hwpx');
+  assert.equal(DEFAULT_EXPORT_FORMAT, 'hwpx');
+  assert.equal(isUntitledNewDocumentName('새 문서.hwpx'), true);
+  assert.equal(isUntitledNewDocumentName('새 문서.hwp'), true);
+  assert.equal(isUntitledNewDocumentName('보고서.hwp'), false);
+  assert.deepEqual(resolveSaveTarget('hwp', '새 문서.hwpx', null), {
+    format: 'hwpx',
+    forceSaveAs: false,
+    suggestedName: '새 문서.hwpx',
+  });
+  assert.deepEqual(resolveSaveTarget('hwp', '새 문서.hwp', null), {
+    format: 'hwpx',
+    forceSaveAs: false,
+    suggestedName: '새 문서.hwpx',
+  });
+});
+
+test('이름 없는 HWPX·모름은 HWPX, 이름 없는 열린 HWP는 HWP를 유지한다', () => {
+  assert.deepEqual(resolveSaveTarget('hwpx', 'memo', null), {
+    format: 'hwpx',
+    forceSaveAs: false,
+    suggestedName: 'memo.hwpx',
+  });
+  assert.deepEqual(resolveSaveTarget('unknown', 'memo', null), {
+    format: 'hwpx',
+    forceSaveAs: false,
+    suggestedName: 'memo.hwpx',
+  });
+  assert.deepEqual(resolveSaveTarget('hwp', 'opened-from-url', null), {
+    format: 'hwp',
+    forceSaveAs: false,
+    suggestedName: 'opened-from-url.hwp',
+  });
+});
+
+test('Save As 기본과 메뉴 라벨은 HWPX를 기본으로, HWP 5.0을 명시 선택으로 둔다', () => {
+  const src = readFileSync(new URL('../src/command/commands/file.ts', import.meta.url), 'utf8');
+  assert.match(src, /async function chooseSaveAsFormat[\s\S]*return resolveSaveTarget\(/);
+  assert.match(src, /label: 'HWPX로 저장'/);
+  assert.match(src, /label: 'HWP 5.0으로 저장'/);
+});
+
+test('inferExportFormat은 명시 선택·확장자·새 문서 기본을 이 순서로 적용한다', () => {
+  assert.equal(inferExportFormat('hwp', '새 문서.hwpx'), 'hwpx');
+  assert.equal(inferExportFormat('hwp', 'report', null, '새 문서.hwpx'), 'hwpx');
+  assert.equal(inferExportFormat('hwp', 'report.hwp', null, '새 문서.hwpx'), 'hwp');
+  assert.equal(inferExportFormat('hwpx', 'report', 'hwp'), 'hwp');
+  assert.equal(inferExportFormat('hwp', 'sample.hwp'), 'hwp');
+  assert.equal(inferExportFormat('hwp', 'sample.hwpx'), 'hwpx');
 });
