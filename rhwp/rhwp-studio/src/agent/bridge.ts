@@ -3462,22 +3462,29 @@ export class AgentBridgeImpl implements AgentBridge {
     return this.request<BrowserbaseStatus>({ type: 'browserbase-status-request' }, 'browserbase-status');
   }
 
-  setBrowserbaseCredentials(override: BrowserbaseOverride): Promise<BrowserbaseStatus | null> {
-    this.browserbaseOverride = {
+  async setBrowserbaseCredentials(override: BrowserbaseOverride): Promise<BrowserbaseStatus | null> {
+    const candidate = {
       apiKey: override.apiKey,
       ...(override.projectId ? { projectId: override.projectId } : {}),
       ...(override.geminiApiKey ? { geminiApiKey: override.geminiApiKey } : {}),
     };
-    return this.request<BrowserbaseStatus>(
-      { type: 'browserbase-credentials-set', ...this.browserbaseOverride },
+    const status = await this.request<BrowserbaseStatus>(
+      { type: 'browserbase-credentials-set', ...candidate },
       'browserbase-credentials',
       30_000,
     );
+    // Reconnects replay only a candidate the hub has actually accepted.
+    if (status) this.browserbaseOverride = candidate;
+    return status;
   }
 
-  clearBrowserbaseCredentials(): Promise<BrowserbaseStatus | null> {
-    this.browserbaseOverride = null;
-    return this.request<BrowserbaseStatus>({ type: 'browserbase-credentials-clear' }, 'browserbase-credentials');
+  async clearBrowserbaseCredentials(): Promise<BrowserbaseStatus | null> {
+    const status = await this.request<BrowserbaseStatus>(
+      { type: 'browserbase-credentials-clear' },
+      'browserbase-credentials',
+    );
+    if (status) this.browserbaseOverride = null;
+    return status;
   }
 
   requestPiCatalog(refresh = false): Promise<PiCatalogModel[] | null> {

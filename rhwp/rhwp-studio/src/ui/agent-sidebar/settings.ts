@@ -441,6 +441,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let browserbaseStatus: BrowserbaseStatus | null = null;
   let browserbaseBusy = false;
   let browserbaseMessage = '';
+  /** 서버/저장 상태에서 채운 프로젝트는 새 키를 입력할 때 오래된 값으로 간주한다. */
+  let browserbaseProjectAutoFilled = false;
 
   // pi 마법사 상태 — 한 장의 카드가 단계를 갈아 끼운다.
   let piStatus: PiStatus | null = null;
@@ -661,8 +663,19 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const browserbaseInputs = [browserbaseKey.input, browserbaseProject.input, browserbaseGemini.input];
   browserbaseApply.addEventListener('click', () => void submitBrowserbase());
   browserbaseReset.addEventListener('click', () => void resetBrowserbase());
+  browserbaseKey.input.addEventListener('input', () => {
+    if (browserbaseProjectAutoFilled) {
+      browserbaseProject.input.value = '';
+      browserbaseProjectAutoFilled = false;
+    }
+    renderBrowserbase();
+  });
+  browserbaseProject.input.addEventListener('input', () => {
+    browserbaseProjectAutoFilled = false;
+    renderBrowserbase();
+  });
+  browserbaseGemini.input.addEventListener('input', renderBrowserbase);
   for (const input of browserbaseInputs) {
-    input.addEventListener('input', renderBrowserbase);
     input.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter') return;
       event.preventDefault();
@@ -1451,6 +1464,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const storedBrowserbase = loadBrowserbaseOverride();
   if (storedBrowserbase) {
     browserbaseProject.input.value = storedBrowserbase.projectId ?? '';
+    browserbaseProjectAutoFilled = browserbaseProject.input.value !== '';
     void bridge.setBrowserbaseCredentials(storedBrowserbase).then((status) => {
       if (disposed || !status) return;
       browserbaseStatus = status;
@@ -1993,7 +2007,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     switch (code) {
       case 'BROWSERBASE_KEY_INVALID': return 'Browserbase 가 이 키를 거부했어요.';
       case 'BROWSERBASE_UNREACHABLE': return 'Browserbase API 에 닿지 못했어요. 허브 네트워크를 확인해 주세요.';
-      case 'BROWSERBASE_PROJECT_NOT_FOUND': return '이 계정에 없는 프로젝트 ID 예요.';
+      case 'BROWSERBASE_PROJECT_NOT_FOUND': return '이 API 키로 해당 프로젝트를 찾을 수 없어요. 프로젝트 ID를 확인하거나 비운 뒤 다시 시도해 주세요.';
+      case 'BROWSERBASE_PROJECT_REQUIRED': return '프로젝트를 자동으로 찾을 수 없어요. Browserbase 프로젝트 ID를 입력해 주세요.';
       case 'BROWSERBASE_NO_PROJECT': return '이 계정에는 프로젝트가 없어요. Browserbase 에서 먼저 만들어 주세요.';
       default: return message;
     }
@@ -2054,6 +2069,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       browserbaseKey.input.value = '';
       browserbaseGemini.input.value = '';
       browserbaseProject.input.value = status.projectId ?? '';
+      browserbaseProjectAutoFilled = browserbaseProject.input.value !== '';
     } else if (!browserbaseMessage) {
       browserbaseMessage = '키를 확인하지 못했어요.';
     }
@@ -2068,9 +2084,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const status = await bridge.clearBrowserbaseCredentials();
     if (disposed) return;
     browserbaseBusy = false;
-    clearBrowserbaseOverride();
-    if (status) browserbaseStatus = status;
-    browserbaseProject.input.value = '';
+    if (status) {
+      clearBrowserbaseOverride();
+      browserbaseStatus = status;
+      browserbaseProject.input.value = '';
+      browserbaseProjectAutoFilled = false;
+    } else if (!browserbaseMessage) {
+      browserbaseMessage = 'Browserbase 설정을 되돌리지 못했어요.';
+    }
     renderBrowserbase();
   }
 
