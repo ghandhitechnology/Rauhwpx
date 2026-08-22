@@ -152,7 +152,7 @@ test('scoped shell prefixes swap the blanket Bash deny for allowlist closure in 
   // 이 모드에서는 deny 를 빼고 dontAsk 의 allowlist 폐쇄성(허용 접두사와 내장
   // 읽기 전용 목록 밖은 무프롬프트 거부)으로 경계를 유지한다. 접두사는
   // 잡 헬퍼 절대 경로까지 고정한다 — python3* 는 인라인 코드와 임의 스크립트를 연다.
-  const helperPath = '/private/job/copy_layout.py';
+  const helperPath = path.resolve('/private/job/copy_layout.py');
   const prefixes = copyLayoutShellAllowPrefixes(helperPath);
   const argv = buildGrokArgv(
     { ...baseOpts, shellAllowPrefixes: prefixes },
@@ -188,7 +188,7 @@ test('bare interpreter prefixes stay closed instead of opening python3*', () => 
 
 test('scoped shell prefixes stay inert during planning restriction', () => {
   const argv = buildGrokArgv(
-    { ...baseOpts, shellAllowPrefixes: copyLayoutShellAllowPrefixes('/private/job/copy_layout.py'), workflow: 'plan', phase: 'planning' },
+    { ...baseOpts, shellAllowPrefixes: copyLayoutShellAllowPrefixes(path.resolve('/private/job/copy_layout.py')), workflow: 'plan', phase: 'planning' },
     's', false, '/g/p',
   );
   const allows = argv.flatMap((value, index) => (value === '--allow' ? [argv[index + 1]] : []));

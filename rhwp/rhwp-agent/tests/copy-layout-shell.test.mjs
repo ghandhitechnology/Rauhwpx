@@ -11,7 +11,7 @@ import {
 } from '../copy-layout-shell.mjs';
 import { scopedBashAllowRules } from '../agents/grok.mjs';
 
-const helperPath = '/private/job/copy_layout.py';
+const helperPath = path.resolve('/private/job/copy_layout.py');
 const bundledHelper = fileURLToPath(
   new URL('../skills/copy-layout/scripts/copy_layout.py', import.meta.url),
 );
@@ -20,19 +20,19 @@ const blankHwpx = fileURLToPath(new URL('../../saved/blank_hwpx.hwpx', import.me
 test('copy-layout shell prefixes pin the job helper instead of python3*', () => {
   const prefixes = copyLayoutShellAllowPrefixes(helperPath);
   assert.deepEqual(prefixes, [
-    'python3 /private/job/copy_layout.py',
-    'python3 "/private/job/copy_layout.py"',
-    'python /private/job/copy_layout.py',
-    'python "/private/job/copy_layout.py"',
+    `python3 ${helperPath}`,
+    `python3 "${helperPath}"`,
+    `python ${helperPath}`,
+    `python "${helperPath}"`,
   ]);
   assert.equal(path.basename(helperPath), COPY_LAYOUT_HELPER_BASENAME);
   assert.throws(
-    () => copyLayoutShellAllowPrefixes('/private/job/other.py'),
+    () => copyLayoutShellAllowPrefixes(path.join(path.dirname(helperPath), 'other.py')),
     /copy_layout\.py/,
   );
   const rules = scopedBashAllowRules(prefixes);
-  assert.ok(rules.includes('Bash(python3 /private/job/copy_layout.py)'));
-  assert.ok(rules.includes('Bash(python3 /private/job/copy_layout.py *)'));
+  assert.ok(rules.includes(`Bash(python3 ${helperPath})`));
+  assert.ok(rules.includes(`Bash(python3 ${helperPath} *)`));
   assert.equal(rules.includes('Bash(python3*)'), false);
   assert.equal(rules.includes('Bash(python*)'), false);
 });
@@ -64,7 +64,10 @@ test('bundled helper still inspects a real hwpx through the pinned command shape
   const command = `${python} ${bundledHelper} --inspect-text ${blankHwpx}`;
   assert.equal(copyLayoutShellCommandAllowed(command, bundledHelper), true);
   assert.equal(copyLayoutShellCommandAllowed(`${python} -c "print(1)"`, bundledHelper), false);
-  const result = spawnSync(python, ['-S', bundledHelper, '--inspect-text', blankHwpx], { encoding: 'utf8' });
+  const result = spawnSync(python, ['-S', bundledHelper, '--inspect-text', blankHwpx], {
+    encoding: 'utf8',
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+  });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const report = JSON.parse(result.stdout);
   assert.equal(typeof report.source_sha256, 'string');
