@@ -249,11 +249,13 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   const publishResult = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 10);
   sendFrame(alphaMcp, {
     type: 'tool-call', id: 10, tool: 'publish_artifact',
-    args: { filePath: materialized.path, fileName: '보고서 - Layout.hwp' },
+    args: { filePath: materialized.path, fileName: '보고서(팀) - Layout.hwp' },
     workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch,
   });
   const published = (await publishResult).result;
-  assert.equal(published.fileName, '보고서 - Layout.hwp');
+  assert.equal(published.fileName, '보고서(팀) - Layout.hwp');
+  assert.match(published.downloadUrl, /%28%ED%8C%80%29/);
+  assert.doesNotMatch(new URL(published.downloadUrl).pathname, /[()]/);
   const artifactDownload = await fetch(published.downloadUrl, {
     headers: { Origin: studioOrigin },
   });

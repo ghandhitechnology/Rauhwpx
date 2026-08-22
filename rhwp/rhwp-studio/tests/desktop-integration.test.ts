@@ -77,9 +77,9 @@ test('dev ensure path asks Vite to start a missing hub', async () => {
 });
 
 test('published artifact links open through a fresh editor window on desktop', async () => {
-  const href = 'http://127.0.0.1:5175/artifacts/artifact_token_1234567890/%EB%B3%B4%EA%B3%A0%EC%84%9C.hwp?sessionId=a&token=b';
+  const href = 'http://127.0.0.1:5175/artifacts/artifact_token_1234567890/%EB%B3%B4%EA%B3%A0%EC%84%9C%28%ED%8C%80%29.hwp?sessionId=a&token=b';
   const artifact = parsePublishedDocumentLink(href);
-  assert.deepEqual(artifact, { downloadUrl: href, fileName: '보고서.hwp' });
+  assert.deepEqual(artifact, { downloadUrl: href, fileName: '보고서(팀).hwp' });
   assert.equal(parsePublishedDocumentLink('https://example.com/artifacts/artifact_token_1234567890/a.hwp'), null);
   assert.equal(parsePublishedDocumentLink('javascript:alert(1)'), null);
 
@@ -96,7 +96,7 @@ test('published artifact links open through a fresh editor window on desktop', a
     status: 200,
     headers: { 'content-type': 'application/x-hwp', 'content-length': String(bytes.length) },
   }));
-  assert.equal(opened[0]?.fileName, '보고서.hwp');
+  assert.equal(opened[0]?.fileName, '보고서(팀).hwp');
   assert.deepEqual(opened[0]?.bytes, bytes);
 });
 

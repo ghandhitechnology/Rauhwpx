@@ -1938,8 +1938,12 @@ function handleMcpMessage(record, sock, msg) {
       if (tool === 'publish_artifact') {
         void record.artifactStore.publish(args)
           .then(({ artifactId, fileName, mime, size, checksum }) => {
+            const encodePathSegment = (value) => encodeURIComponent(value).replace(
+              /[!'()*]/g,
+              (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+            );
             const downloadUrl = new URL(
-              `/artifacts/${encodeURIComponent(artifactId)}/${encodeURIComponent(fileName)}`,
+              `/artifacts/${encodePathSegment(artifactId)}/${encodePathSegment(fileName)}`,
               `http://127.0.0.1:${hubPort}`,
             );
             downloadUrl.searchParams.set('sessionId', record.sessionId);
