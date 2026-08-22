@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  Rauhwpx is a fork of Edward Kim's <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a>.
+</p>
+
+<p align="center">
   <img src="rhwp/assets/screenshots/studio-agent-sidebar.png" alt="Rauhwpx editing a Korean research report while the agent writes the title fields" width="100%" />
 </p>
 
