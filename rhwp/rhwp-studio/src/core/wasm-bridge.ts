@@ -2238,6 +2238,27 @@ export class WasmBridge {
     return this.doc.pasteInternal(sec, para, charOffset);
   }
 
+  pasteDocumentBlock(
+    sourceBytes: Uint8Array,
+    sourceSection: number,
+    startPara: number,
+    endPara: number,
+    targetSection: number,
+    targetPara: number,
+    targetCharOffset: number,
+  ): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).pasteDocumentBlock(
+      sourceBytes,
+      sourceSection,
+      startPara,
+      endPara,
+      targetSection,
+      targetPara,
+      targetCharOffset,
+    );
+  }
+
   pasteInternalInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, charOffset: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.pasteInternalInCell(sec, parentPara, controlIdx, cellIdx, cellParaIdx, charOffset);

@@ -1037,6 +1037,20 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "pasteControl(sec: number, para: number, charOffset: number)"
   },
   {
+    "method": "pasteDocumentBlock",
+    "kind": "document",
+    "parameters": [
+      "sourceBytes",
+      "sourceSection",
+      "startPara",
+      "endPara",
+      "targetSection",
+      "targetPara",
+      "targetCharOffset"
+    ],
+    "signature": "pasteDocumentBlock(sourceBytes: Uint8Array, sourceSection: number, startPara: number, endPara: number, targetSection: number, targetPara: number, targetCharOffset: number,)"
+  },
+  {
     "method": "pasteHtml",
     "kind": "document",
     "parameters": [

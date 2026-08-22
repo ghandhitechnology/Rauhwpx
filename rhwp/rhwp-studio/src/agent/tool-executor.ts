@@ -341,6 +341,7 @@ export class AgentToolExecutor {
   private deps: AgentToolExecutorDeps;
   private turnWriteMode: TurnWriteMode = 'none';
   private templateWasm: WasmBridge | null = null;
+  private templateBytes: Uint8Array | null = null;
   private templateKey: string | null = null;
   private templateInspectionKey: string | null = null;
   private documentInspectionRevision: number | null = null;
@@ -1867,21 +1868,26 @@ export class AgentToolExecutor {
     return template;
   }
 
-  private async ensureTemplate(capability?: ToolCapabilityContext): Promise<{ template: DocumentTemplate; wasm: WasmBridge }> {
+  private async ensureTemplate(capability?: ToolCapabilityContext): Promise<{ template: DocumentTemplate; wasm: WasmBridge; bytes: Uint8Array }> {
     const template = this.requireTemplate(capability);
     const loadTemplateBytes = this.deps.loadTemplateBytes;
     if (!loadTemplateBytes) throw new AgentToolError('TEMPLATE_UNAVAILABLE', 'Template loading is unavailable in this Studio.');
     const key = `${template.id}:${template.revision}`;
-    if (this.templateWasm && this.templateKey === key) return { template, wasm: this.templateWasm };
+    if (this.templateWasm && this.templateBytes && this.templateKey === key) {
+      return { template, wasm: this.templateWasm, bytes: this.templateBytes };
+    }
     this.templateWasm?.releaseDocument();
+    this.templateBytes = null;
     const { WasmBridge } = await import('../core/wasm-bridge.ts');
     const wasm = new WasmBridge();
     await wasm.initialize();
     const bytes = await loadTemplateBytes(template);
+    const exactSourceBytes = bytes.slice();
     wasm.loadDocument(bytes, template.originalName);
     this.templateWasm = wasm;
+    this.templateBytes = exactSourceBytes;
     this.templateKey = key;
-    return { template, wasm };
+    return { template, wasm, bytes: this.templateBytes };
   }
 
   private templateArgs(args: Record<string, unknown>, template: DocumentTemplate): Record<string, unknown> {
@@ -2061,7 +2067,7 @@ export class AgentToolExecutor {
     capability?: ToolCapabilityContext,
   ): Promise<unknown> {
     this.requireRevision(args);
-    const { template, wasm: sourceWasm } = await this.ensureTemplate(capability);
+    const { template, wasm: sourceWasm, bytes: templateBytes } = await this.ensureTemplate(capability);
     this.templateArgs(args, template);
     this.requireTemplateMapping(template);
     const source = asRecord(args['source']);
@@ -2074,18 +2080,40 @@ export class AgentToolExecutor {
     const targetPara = reqInt(target, 'paraIdx');
     const targetOffset = reqInt(target, 'charOffset');
     this.validateAddress(targetSection, targetPara, targetOffset);
-    const endOffset = sourceWasm.getParagraphLength(sourceSection, endPara);
-    const html = sourceWasm.exportSelectionHtml(sourceSection, startPara, 0, endPara, endOffset);
+    sourceWasm.getParagraphLength(sourceSection, startPara);
+    sourceWasm.getParagraphLength(sourceSection, endPara);
+    // Keep the exact approved source bytes. Re-serializing the inspection document
+    // can normalize package parts before the native importer sees them.
+    const sourceBytes = templateBytes.slice();
     const pending = this.deps.pending.addTemplateMutation(
       agent,
       `Insert block from ${template.name}`,
       template.revision,
       () => {
-        this.deps.wasm.pasteHtml(targetSection, targetPara, targetOffset, html);
+        const transfer = JSON.parse(this.deps.wasm.pasteDocumentBlock(
+          sourceBytes,
+          sourceSection,
+          startPara,
+          endPara,
+          targetSection,
+          targetPara,
+          targetOffset,
+        )) as {
+          ok?: boolean;
+          warnings?: string[];
+          skippedFeatures?: string[];
+          insertedParagraphCount?: number;
+          controlCounts?: Record<string, number>;
+        };
+        if (transfer.ok !== true) {
+          throw new AgentToolError('TEMPLATE_TRANSFER_FAILED', 'The native template block importer did not complete.');
+        }
         return {
-          warnings: ['The block was remapped through the cross-document HTML transfer path; unsupported controls use their closest supported representation.'],
-          skippedFeatures: [],
+          warnings: transfer.warnings ?? [],
+          skippedFeatures: transfer.skippedFeatures ?? [],
           affectedSections: [targetSection],
+          insertedParagraphCount: transfer.insertedParagraphCount ?? 0,
+          controlCounts: transfer.controlCounts ?? {},
         };
       },
     );
@@ -2095,6 +2123,7 @@ export class AgentToolExecutor {
   dispose(): void {
     this.templateWasm?.releaseDocument();
     this.templateWasm = null;
+    this.templateBytes = null;
     this.templateKey = null;
     this.templateInspectionKey = null;
     this.documentInspectionRevision = null;

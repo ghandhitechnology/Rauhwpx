@@ -1,5 +1,6 @@
 mod clipboard;
 mod document;
+mod document_transfer;
 mod footnote_ops;
 mod formatting;
 mod header_footer_ops;

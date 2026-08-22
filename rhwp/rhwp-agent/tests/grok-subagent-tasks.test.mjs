@@ -21,6 +21,12 @@ const CHILD_FIXTURE = readFileSync(path.join(FIXTURES, 'grok-child1-updates.json
 // runA 캡처의 실제 식별자들.
 const FIXTURE_SESSION = 'EDB924E6-907F-4EA6-A1A9-F3934DC99227';
 const FIXTURE_CHILD_1 = '01a01a89-544c-71f1-a661-8af179ec9ab8';
+const FAKE_GROK_HOME = path.resolve('/home');
+const FAKE_WORKSPACE = path.resolve('/ws');
+
+function fakeUpdatePath(sessionId, cwdKey = grokSessionsCwdKey(FAKE_WORKSPACE)) {
+  return path.join(FAKE_GROK_HOME, 'sessions', cwdKey, sessionId, 'updates.jsonl');
+}
 
 // ── grok-session-tail: 픽스처 파일 기반 단위 테스트 ────────────────
 
@@ -73,10 +79,10 @@ test('the tail tolerates batched flushes, partial trailing lines and a late sess
     existsSync: (p) => files.has(p),
     readdirSync: (dir) => {
       if (files.has(dir)) { const e = new Error('ENOTDIR'); e.code = 'ENOTDIR'; throw e; }
-      const prefix = `${dir}/`;
+      const prefix = `${dir}${path.sep}`;
       const names = new Set();
       for (const key of files.keys()) {
-        if (key.startsWith(prefix)) names.add(key.slice(prefix.length).split('/')[0]);
+        if (key.startsWith(prefix)) names.add(key.slice(prefix.length).split(path.sep)[0]);
       }
       if (names.size === 0) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; }
       return [...names];
@@ -91,11 +97,11 @@ test('the tail tolerates batched flushes, partial trailing lines and a late sess
     method: n % 2 ? 'session/update' : '_x.ai/session/update',
     params: { sessionId: 'sess', update: { sessionUpdate: kind, ...extra }, _meta: { eventId: `sess-${n}`, agentTimestampMs: 1787151600000 + n } },
   })}\n`;
-  const parentPath = '/home/sessions/%2Fws/sess/updates.jsonl';
+  const parentPath = fakeUpdatePath('sess');
 
   const seen = [];
   const tail = createGrokSessionTail({
-    grokHome: '/home', cwd: '/ws', sessionId: 'sess',
+    grokHome: FAKE_GROK_HOME, cwd: FAKE_WORKSPACE, sessionId: 'sess',
     onUpdate: (scope, update) => seen.push(`${scope.kind}:${update.sessionUpdate}`),
   }, { fs: fakeFs });
 
@@ -109,7 +115,7 @@ test('the tail tolerates batched flushes, partial trailing lines and a late sess
   assert.deepEqual(seen, ['parent:agent_message_chunk'], '개행 없는 꼬리는 완성될 때까지 보류한다');
 
   files.set(parentPath, first + second); // 잘린 줄이 마저 flush 됐다.
-  files.set('/home/sessions/%2Fws/kid-1/updates.jsonl', line(3, 'agent_message_chunk', { content: { type: 'text', text: 'child' } }));
+  files.set(fakeUpdatePath('kid-1'), line(3, 'agent_message_chunk', { content: { type: 'text', text: 'child' } }));
   tail.drain();
   assert.deepEqual(seen, [
     'parent:agent_message_chunk', 'parent:subagent_spawned', 'child:agent_message_chunk',
@@ -118,10 +124,11 @@ test('the tail tolerates batched flushes, partial trailing lines and a late sess
 });
 
 test('the tail falls back to scanning when the cwd key does not match', () => {
+  const mismatchedCwdKey = 'mismatched-cwd-key';
   const files = new Map([
     // grok 이 다른 정규화로 인코딩한 cwd 키 + 파일 항목(session_search.sqlite) 혼재.
-    ['/home/sessions/session_search.sqlite', 'sqlite'],
-    ['/home/sessions/%2Fother%2Fpath/ABC-DEF/updates.jsonl',
+    [path.join(FAKE_GROK_HOME, 'sessions', 'session_search.sqlite'), 'sqlite'],
+    [fakeUpdatePath('ABC-DEF', mismatchedCwdKey),
       `${JSON.stringify({ timestamp: 1, method: 'session/update', params: { update: { sessionUpdate: 'turn_completed' } } })}\n`],
   ]);
   const fakeFs = {
@@ -129,10 +136,10 @@ test('the tail falls back to scanning when the cwd key does not match', () => {
     existsSync: (p) => files.has(p),
     readdirSync: (dir) => {
       if (files.has(dir)) { const e = new Error('ENOTDIR'); e.code = 'ENOTDIR'; throw e; }
-      const prefix = `${dir}/`;
+      const prefix = `${dir}${path.sep}`;
       const names = new Set();
       for (const key of files.keys()) {
-        if (key.startsWith(prefix)) names.add(key.slice(prefix.length).split('/')[0]);
+        if (key.startsWith(prefix)) names.add(key.slice(prefix.length).split(path.sep)[0]);
       }
       if (names.size === 0) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; }
       return [...names];
@@ -141,7 +148,7 @@ test('the tail falls back to scanning when the cwd key does not match', () => {
   };
   const seen = [];
   const tail = createGrokSessionTail({
-    grokHome: '/home', cwd: '/ws', sessionId: 'abc-def', // 대소문자도 다르다.
+    grokHome: FAKE_GROK_HOME, cwd: FAKE_WORKSPACE, sessionId: 'abc-def', // 대소문자도 다르다.
     onUpdate: (scope, update) => seen.push(update.sessionUpdate),
   }, { fs: fakeFs });
   tail.drain();
@@ -158,10 +165,10 @@ test('the tail drains a child to EOF before delivering its subagent_finished', (
     params: { sessionId: 'sess', update: { sessionUpdate: kind, ...extra }, _meta: { agentTimestampMs: 1787151600000 } },
   })}\n`;
   const files = new Map([
-    ['/home/sessions/%2Fws/sess/updates.jsonl',
+    [fakeUpdatePath('sess'),
       line('subagent_spawned', { subagent_id: 'kid-1' })
       + line('subagent_finished', { subagent_id: 'kid-1', status: 'completed', output: '끝' })],
-    ['/home/sessions/%2Fws/kid-1/updates.jsonl',
+    [fakeUpdatePath('kid-1'),
       line('agent_message_chunk', { content: { type: 'text', text: '자식 결론' } })],
   ]);
   const fakeFs = {
@@ -175,7 +182,7 @@ test('the tail drains a child to EOF before delivering its subagent_finished', (
   };
   const seen = [];
   const tail = createGrokSessionTail({
-    grokHome: '/home', cwd: '/ws', sessionId: 'sess',
+    grokHome: FAKE_GROK_HOME, cwd: FAKE_WORKSPACE, sessionId: 'sess',
     onUpdate: (scope, update) => seen.push(`${scope.kind}:${update.sessionUpdate}`),
   }, { fs: fakeFs });
   tail.drain();
@@ -216,7 +223,7 @@ test('polling reads are positional and never re-read already-consumed bytes', ()
     closeSync: () => {},
     readFileSync: () => { throw new Error('위치 지정 읽기가 있으면 전체 재독은 없어야 한다'); },
   };
-  const parentPath = '/home/sessions/%2Fws/sess/updates.jsonl';
+  const parentPath = fakeUpdatePath('sess');
   const line = (text) => `${JSON.stringify({
     method: 'session/update',
     params: { sessionId: 'sess', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }, _meta: { agentTimestampMs: 1787151600000 } },
@@ -225,7 +232,7 @@ test('polling reads are positional and never re-read already-consumed bytes', ()
 
   const seen = [];
   const tail = createGrokSessionTail({
-    grokHome: '/home', cwd: '/ws', sessionId: 'sess',
+    grokHome: FAKE_GROK_HOME, cwd: FAKE_WORKSPACE, sessionId: 'sess',
     onUpdate: (scope, update) => seen.push(update.content?.text?.length ?? 0),
   }, { fs: fakeFs });
 

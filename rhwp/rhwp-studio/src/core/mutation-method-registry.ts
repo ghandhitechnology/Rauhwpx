@@ -54,7 +54,7 @@ export const MUTATING_METHODS: readonly string[] = [
   'mergeParagraphInFootnote', 'applyParaFormatInFootnote',
   'applyCharFormatInFootnote', 'setCharShapeIdInFootnote', 'setParaShapeIdInFootnote',
   // 붙여넣기
-  'pasteInternal', 'pasteInternalInCell', 'pasteInternalInCellByPath', 'pasteControl',
+  'pasteInternal', 'pasteInternalInCell', 'pasteInternalInCellByPath', 'pasteDocumentBlock', 'pasteControl',
   'pasteHtml', 'pasteHtmlInCell', 'pasteHtmlInCellByPath',
   // 글자/문단 모양
   'applyCharFormat', 'applyCharFormatAcrossSections', 'setCharShapeId',

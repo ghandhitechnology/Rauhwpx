@@ -44,6 +44,16 @@ test('template preview state blocks command, direct input, snapshot, and formatt
   assert.match(toolExecutor, /READ_ONLY_TEMPLATE_PREVIEW/);
 });
 
+test('template block insertion transfers exact source bytes through the native importer', () => {
+  const insertBlock = toolExecutor.match(
+    /private async templateInsertBlock[\s\S]*?\n  dispose\(\): void/,
+  )?.[0];
+  assert.ok(insertBlock, 'templateInsertBlock implementation must be present');
+  assert.match(insertBlock, /templateBytes\.slice\(\)/);
+  assert.match(insertBlock, /pasteDocumentBlock\(/);
+  assert.doesNotMatch(insertBlock, /exportSelectionHtml|pasteHtml/);
+});
+
 test('read-only dispatcher permits view/copy but rejects document and file mutations', () => {
   const executed: string[] = [];
   const definitions = new Map(['edit:copy', 'view:zoom-in', 'insert:table', 'file:save'].map((id) => [
