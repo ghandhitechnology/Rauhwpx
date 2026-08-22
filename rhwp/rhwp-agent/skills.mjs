@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { providerToolNoteFor } from './agents/backend.mjs';
 import { humanizerPromptBlock } from './humanizer.mjs';
 
 const SKILL_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
@@ -341,7 +342,7 @@ export class SkillRegistry {
     return { name: skill.name, resourcePath: rel, content };
   }
 
-  async promptContext(text, explicitName, { phase = 'direct' } = {}) {
+  async promptContext(text, explicitName, { phase = 'direct', agent = null } = {}) {
     const catalog = await this.list();
     const enabled = catalog.skills.filter((skill) => skill.enabled && !skill.invalid);
     const metadata = enabled.map((skill) => `- ${skill.name}: ${skill.description}`).join('\n').slice(0, 8000);
@@ -350,6 +351,11 @@ export class SkillRegistry {
       const skill = await this._find(explicitName, true);
       const markdown = await fs.readFile(path.join(skill.root, 'SKILL.md'), 'utf8');
       activated = `\n\n<activated_product_skill name="${skill.name}" root="${skill.root}">\n${markdown}\n</activated_product_skill>`;
+      // SKILL.md 는 provider 중립 카탈로그 텍스트다. 스킬이 협업 도구 이름을
+      // 언급할 수 있으므로(복사 레이아웃의 wait_agent 등), 활성 시점에 이
+      // provider 의 실제 관찰 수단을 한 문장으로 덧붙인다.
+      const toolNote = typeof agent === 'string' && agent ? providerToolNoteFor(agent) : '';
+      if (toolNote) activated += `\n\n<provider_tool_notes agent="${agent}">\n${toolNote}\n</provider_tool_notes>`;
     }
     const writingStyle = this.writingStyleStore ? await this.writingStyleStore.promptBlock() : '';
     const styleStatus = this.writingStyleStore && writingStyle ? await this.writingStyleStore.status() : null;

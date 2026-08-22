@@ -81,6 +81,10 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * @property {string} [effort]
  * @property {string} [toolProfile]
  * @property {string} [agentRole]
+ * @property {string[]} [shellAllowPrefixes] 백그라운드 작업자 헬퍼 실행용 스코프 셸
+ *   접두사 (grok 만 소비). 각 항목은 `python3 /abs/copy_layout.py` 처럼
+ *   인터프리터+절대 스크립트 경로여야 한다. 맨 인터프리터 이름만 넘기면 무시되고
+ *   전면 Bash deny 가 유지된다.
  * @property {string} [systemPromptOverride]
  * @property {(evt: UnifiedAgentEvent) => void} onEvent
  *
@@ -238,11 +242,20 @@ const PARALLEL_WORK_SHARED = `- Sibling agents editing disjoint paragraph ranges
  * @param {AgentName} [agentName]
  */
 export function parallelWorkBriefFor(agentName = 'claude') {
+  if (agentName === 'pi') {
+    // pi 에는 스폰/수거 도구가 아예 없다. 클로드 기본 브리프를 쓰면 없는
+    // doc-editor 스폰을 지시하게 되므로, 단독 실행 규율과 apply_edits 배치를
+    // 대체 병렬성으로 명시한다.
+    return `PARALLEL WORK:
+- This environment has no subagent or delegation tools: never spawn, delegate, or claim to wait for helpers — do the whole task yourself, sequentially.
+- Your parallelism is batching: when you already know two or more independent edits, send them as ONE apply_edits call instead of a chain of single writes.`;
+  }
   if (agentName === 'grok') {
     return `PARALLEL WORK:
 - For large document tasks, spawn subagents with spawn_subagent: subagent_type doc-editor for edits, doc-researcher for research. Give each editor ONE contiguous paragraph range (for example one page or one section) and state that range plus the goal in its prompt. Each subagent re-reads its own region before writing.
 ${PARALLEL_WORK_SHARED}
-- Collect every subagent's result with get_command_or_subagent_output before you summarize the turn.`;
+- Collect every subagent's result with get_command_or_subagent_output before you summarize the turn.
+- Never use get_command_or_subagent_output on the hub background job delegate_copy_layout. It is not one of your subagents; end the turn and let the hub inject its completion into a new owning-chat turn.`;
   }
   if (agentName === 'codex') {
     return `PARALLEL WORK:
@@ -254,7 +267,8 @@ ${PARALLEL_WORK_SHARED}
   if (agentName === 'cursor') {
     return `PARALLEL WORK:
 - For large document tasks, delegate to subagents. Give each subagent ONE contiguous paragraph range (for example one page or one section) and state that range plus the goal in its prompt. Each subagent re-reads its own region before writing.
-${PARALLEL_WORK_SHARED}`;
+${PARALLEL_WORK_SHARED}
+- Child activity is not streamed: each subagent's transcript arrives only when it finishes, and long transcripts are replayed in a bounded window. Give every subagent a tightly bounded objective so nothing important is cut.`;
   }
   return PARALLEL_WORK_BRIEF;
 }
@@ -272,6 +286,26 @@ ${PARALLEL_WORK_SHARED}
 function parallelWorkSectionFor(agentName, profile) {
   if (agentName === 'grok' && profile !== 'unrestricted') return '';
   return `\n\n${parallelWorkBriefFor(agentName)}`;
+}
+
+/**
+ * 스킬 활성 시점에만 붙는 provider 도구 표면 주석. SKILL.md 본문은 모든 provider 가
+ * 같은 카탈로그 텍스트를 보므로(claude/codex 도구명 고정) 여기서 각 provider 의
+ * 실제 협업/수거 수단과 허브 백그라운드 작업(delegate_copy_layout)의 관계를
+ * 한 문장으로 보정한다. 알 수 없는 agent 에는 빈 문자열 — 호출자가 생략한다.
+ *
+ * @param {AgentName} [agentName]
+ * @returns {string}
+ */
+export function providerToolNoteFor(agentName = 'claude') {
+  const notes = {
+    claude: 'Your collaboration tools are the native Agent and Workflow tools, and their results arrive automatically as task notifications. Background hub jobs such as delegate_copy_layout are not Agent tasks: never poll or wait for them — end your turn and the hub will start a new turn carrying their completion.',
+    codex: 'Your collaboration tools are spawn_agent/wait_agent, and they manage collaboration agents only. Background hub jobs such as delegate_copy_layout are not collaboration agents: never call wait_agent or list_agents for one — end your turn and the hub will start a new turn carrying its completion.',
+    grok: 'Your collaboration tools are spawn_subagent/get_command_or_subagent_output, available only under full access. Background hub jobs such as delegate_copy_layout are not your subagents: never collect them with get_command_or_subagent_output — end your turn and the hub will start a new turn carrying their completion.',
+    cursor: 'Subagents run as native task calls whose transcripts arrive when each finishes; there is no polling tool. Background hub jobs such as delegate_copy_layout are not Task subagents: end your turn and the hub will start a new turn carrying their completion.',
+    pi: 'This environment has no collaboration or polling tools; do the work directly yourself. After starting a background hub job such as delegate_copy_layout, simply end your turn — the hub will start a new turn carrying its completion.',
+  };
+  return notes[agentName] ?? '';
 }
 
 export function directSystemBrief(profile = 'unrestricted', agentName = 'claude') {
