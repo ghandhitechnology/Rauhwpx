@@ -59,3 +59,37 @@
 .opt-autosave-row label {
   min-width: 112px;
 }
+
+.privacy-disclosure {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.privacy-disclosure-lead {
+  margin: 0;
+  font-size: var(--font-size-base);
+  line-height: 1.5;
+  color: var(--color-text);
+}
+
+.privacy-disclosure-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.privacy-disclosure-title {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.privacy-disclosure-body {
+  margin: 0;
+  font-size: var(--font-size-base);
+  line-height: 1.5;
+  color: var(--color-text);
+  white-space: pre-wrap;
+}
