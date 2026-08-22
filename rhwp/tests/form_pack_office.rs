@@ -7,8 +7,8 @@ use std::process::Command;
 
 use rhwp::document_core::DocumentCore;
 use rhwp::form_pack::{
-    default_filled_hwpx_path, document_has_pack_marker, refuse_binary_hwp_export,
-    snapshot_table_geometry, BRAND_PUMUI, REFUSE_BINARY_HWP,
+    default_filled_hwpx_path, document_pack_id, refuse_binary_hwp_export,
+    snapshot_table_geometry, BRAND_PUMUI, PACK_ID, REFUSE_BINARY_HWP,
 };
 
 const PUMUI: &str = "form-pack/품의.hwpx";
@@ -63,7 +63,7 @@ fn nested_table_count(geom: &[rhwp::form_pack::TableGeometry]) -> usize {
 #[test]
 fn pumui_form_is_openable_hwpx_with_nested_tables() {
     let core = load(PUMUI);
-    assert!(document_has_pack_marker(core.document()), "품의에 Rauhwpx 표식이 있어야 합니다");
+    assert_eq!(document_pack_id(core.document()), Some(PACK_ID), "품의에 팩 id 표식이 있어야 합니다");
     let names = field_names(&core);
     for required in PUMUI_FIELDS {
         assert!(names.contains(&required.to_string()), "누름틀 '{required}' 없음: {names:?}");
@@ -78,7 +78,7 @@ fn pumui_form_is_openable_hwpx_with_nested_tables() {
 #[test]
 fn gongmun_form_is_openable_hwpx() {
     let core = load(GONGMUN);
-    assert!(document_has_pack_marker(core.document()));
+    assert_eq!(document_pack_id(core.document()), Some(PACK_ID));
     let names = field_names(&core);
     for required in ["행정기관명", "수신자", "제목", "본문", "발신명의"] {
         assert!(names.contains(&required.to_string()), "{required} 없음: {names:?}");
@@ -138,6 +138,28 @@ fn form_pack_refuses_binary_hwp_output_path() {
     assert_eq!(
         default_filled_hwpx_path(&source).extension().and_then(|e| e.to_str()),
         Some("hwpx")
+    );
+}
+
+#[test]
+fn customer_file_named_gongmun_is_not_this_pack() {
+    let customer = rhwp::model::document::Document::default();
+    assert_eq!(document_pack_id(&customer), None);
+    assert_eq!(
+        refuse_binary_hwp_export(
+            Path::new("/tmp/customer/공문.hwpx"),
+            Path::new("/tmp/customer/공문.hwp"),
+            &customer,
+        ),
+        None
+    );
+    assert_eq!(
+        refuse_binary_hwp_export(
+            Path::new("/tmp/customer/품의.hwpx"),
+            Path::new("/tmp/out.hwp"),
+            &customer,
+        ),
+        None
     );
 }
 

@@ -1,7 +1,7 @@
 import { WasmBridge } from '@/core/wasm-bridge';
 import { FALLBACK_DOCUMENT_FILE_NAME } from '@/core/document-names';
 import {
-  formPackIdFromFileName,
+  formPackIdFromHwpxBytes,
   getActiveFormPack,
   setActiveFormPack,
 } from '@/core/form-pack';
@@ -1523,7 +1523,7 @@ async function openDocumentBytes(data: OpenDocumentBytesEvent) {
     await loadBytes(data.bytes, data.fileName, data.fileHandle, performance.now(), {
       grant: data.grant,
     });
-    setActiveFormPack(data.formPackId ?? formPackIdFromFileName(data.fileName));
+    setActiveFormPack(formPackIdFromHwpxBytes(data.bytes));
     return true;
   } catch (error) {
     await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});

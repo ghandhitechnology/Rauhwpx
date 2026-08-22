@@ -67,7 +67,7 @@ export function inferExportFormat(
     }
     return explicit;
   }
-  if (isFormPackDocument(requestedName || currentDocumentName || '')) {
+  if (isFormPackDocument()) {
     return DEFAULT_EXPORT_FORMAT;
   }
   if (isUntitledNewDocumentName(requestedName)) return DEFAULT_EXPORT_FORMAT;
@@ -122,7 +122,7 @@ export function resolveSaveTarget(
     };
   }
 
-  if (isFormPackDocument(fileName) || isFormPackDocument(currentTarget)) {
+  if (isFormPackDocument()) {
     return {
       format: DEFAULT_EXPORT_FORMAT,
       forceSaveAs: false,

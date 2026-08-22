@@ -1,4 +1,5 @@
 export const FORM_PACK_ID = 'rauhwpx-office';
+export const FORM_PACK_MARKER_PATH = 'META-INF/rauhwpx-form-pack';
 
 export const REFUSE_BINARY_HWP =
   '이 서식은 HWPX로만 저장할 수 있습니다. 바이너리 HWP 경로는 거부합니다.';
@@ -31,33 +32,55 @@ export const FORM_PACK_FORMS: readonly FormPackEntry[] = [
 let activeFormPackId: string | null = null;
 
 export function setActiveFormPack(id: string | null): void {
-  activeFormPackId = id;
+  activeFormPackId = id === FORM_PACK_ID ? FORM_PACK_ID : null;
 }
 
 export function getActiveFormPack(): string | null {
   return activeFormPackId;
 }
 
-export function formPackIdFromFileName(fileName: string): string | null {
-  const name = fileName.trim().split(/[/\\]/).pop()?.toLowerCase() ?? '';
-  if (name === '공문.hwpx' || name.startsWith('공문.') && name.endsWith('.hwpx')) return 'gongmun';
-  if (name === '품의.hwpx' || name.startsWith('품의.') && name.endsWith('.hwpx')) return 'pumui';
+/** ZIP 표식의 팩 id. 파일명 `공문.hwpx`/`품의.hwpx` 로는 식별하지 않는다. */
+export function formPackIdFromHwpxBytes(bytes: Uint8Array): string | null {
+  const wanted = FORM_PACK_MARKER_PATH;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const decoder = new TextDecoder();
+  for (let offset = 0; offset + 30 <= bytes.length; offset += 1) {
+    if (
+      bytes[offset] !== 0x50
+      || bytes[offset + 1] !== 0x4b
+      || bytes[offset + 2] !== 0x03
+      || bytes[offset + 3] !== 0x04
+    ) {
+      continue;
+    }
+    const method = view.getUint16(offset + 8, true);
+    const compSize = view.getUint32(offset + 18, true);
+    const nameLen = view.getUint16(offset + 26, true);
+    const extraLen = view.getUint16(offset + 28, true);
+    const nameStart = offset + 30;
+    const nameEnd = nameStart + nameLen;
+    if (nameEnd > bytes.length) continue;
+    if (decoder.decode(bytes.subarray(nameStart, nameEnd)) !== wanted) continue;
+    if (method !== 0) return null;
+    const dataStart = nameEnd + extraLen;
+    const dataEnd = dataStart + compSize;
+    if (dataEnd > bytes.length) return null;
+    const text = decoder.decode(bytes.subarray(dataStart, dataEnd)).trim();
+    return text === FORM_PACK_ID ? FORM_PACK_ID : null;
+  }
   return null;
 }
 
-export function isFormPackDocument(fileName?: string): boolean {
-  return activeFormPackId != null || formPackIdFromFileName(fileName ?? '') != null;
+export function isFormPackDocument(): boolean {
+  return activeFormPackId === FORM_PACK_ID;
 }
 
 export function formPackAssetUrl(entry: FormPackEntry): string {
   return `/form-pack/${encodeURIComponent(entry.file)}`;
 }
 
-export function refuseBinaryHwpExport(
-  format: string,
-  fileName?: string,
-): string | null {
-  if (!isFormPackDocument(fileName)) return null;
+export function refuseBinaryHwpExport(format: string, fileName?: string): string | null {
+  if (!isFormPackDocument()) return null;
   const requested = format.trim().toLowerCase();
   if (requested === 'hwp' || (fileName ?? '').toLowerCase().endsWith('.hwp')) {
     return REFUSE_BINARY_HWP;

@@ -18,6 +18,8 @@ SEED_PUMUI = os.path.join(BASE, "..", "tools", "forms", "간이기안문_서식.
 OUT_GONGMUN = os.path.join(BASE, "공문.hwpx")
 OUT_PUMUI = os.path.join(BASE, "품의.hwpx")
 
+PACK_ID = "rauhwpx-office"
+PACK_MARKER = "META-INF/rauhwpx-form-pack"
 BRAND_GONGMUN = "Rauhwpx 공문 서식"
 BRAND_PUMUI = "Rauhwpx 품의 서식"
 
@@ -38,7 +40,8 @@ def write_hwpx(src_dir: str, out_path: str) -> None:
                 rel = os.path.relpath(full, src_dir).replace("\\", "/")
                 if rel == "mimetype":
                     continue
-                z.write(full, rel, compress_type=zipfile.ZIP_DEFLATED)
+                compress = zipfile.ZIP_STORED if rel == PACK_MARKER else zipfile.ZIP_DEFLATED
+                z.write(full, rel, compress_type=compress)
 
 
 FID = [2_100_000_000]
@@ -129,6 +132,14 @@ def table(
 
 def tr(cells: list[str]) -> str:
     return "<hp:tr>" + "".join(cells) + "</hp:tr>"
+
+
+def stamp_pack_id(work: str) -> None:
+    dest = os.path.join(work, "META-INF")
+    os.makedirs(dest, exist_ok=True)
+    open(os.path.join(dest, "rauhwpx-form-pack"), "w", encoding="utf-8", newline="\n").write(
+        PACK_ID + "\n"
+    )
 
 
 def build_gongmun(work: str) -> None:
@@ -240,6 +251,8 @@ def main() -> None:
         unzip_seed(SEED_PUMUI, pumui_dir)
         build_gongmun(gongmun_dir)
         build_pumui(pumui_dir)
+        stamp_pack_id(gongmun_dir)
+        stamp_pack_id(pumui_dir)
         write_hwpx(gongmun_dir, OUT_GONGMUN)
         write_hwpx(pumui_dir, OUT_PUMUI)
     print("built:", OUT_GONGMUN, os.path.getsize(OUT_GONGMUN), "bytes")

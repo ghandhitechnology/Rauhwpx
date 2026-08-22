@@ -4,7 +4,9 @@ description: Fill the open Rauhwpx 공문 or 품의 form on the live editor page
 icon: pencil
 ---
 
-Fill the **open** 공문/품의 document. Do not copy it to a sidecar file, do not extract-replace on disk, and do not replace the whole document.
+Fill the **open** 공문/품의 document only when it is this Rauhwpx pack (`rauhwpx-office` in `META-INF/rauhwpx-form-pack`). A user file named `공문.hwpx` or `품의.hwpx` is a normal document unless it has that id. This pack is not 온나라-certified.
+
+Do not copy it to a sidecar file, do not extract-replace on disk, and do not replace the whole document.
 
 1. Call `get_document_info` and `get_fields`. Use the returned `revision` on every write.
 2. Match user-supplied facts to existing field names (`행정기관명`, `수신자`, `제목`, `본문`, `결재직위1` …). Do not invent approvals, dates, people, or amounts.

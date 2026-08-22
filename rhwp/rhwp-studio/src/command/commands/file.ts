@@ -750,7 +750,6 @@ export const fileCommands: CommandDef[] = [
           bytes,
           fileName: entry.file,
           fileHandle: null,
-          formPackId: entry.id,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -816,7 +815,7 @@ export const fileCommands: CommandDef[] = [
     // [#1613] HWP 5.0으로 저장 — 출처 무관 바이너리 HWP 출력.
     id: 'file:save-as-hwp',
     label: 'HWP 5.0으로 저장',
-    canExecute: (ctx) => ctx.hasDocument && !ctx.formPackId && !isFormPackDocument(),
+    canExecute: (ctx) => ctx.hasDocument && !isFormPackDocument(),
     async execute(services) {
       const refused = refuseBinaryHwpExport('hwp', services.wasm.fileName);
       if (refused) {

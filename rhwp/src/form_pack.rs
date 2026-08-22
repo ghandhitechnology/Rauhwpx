@@ -10,21 +10,15 @@ use crate::model::document::Document;
 use crate::model::paragraph::Paragraph;
 use crate::model::table::Table;
 
+/// `form-pack/catalog.json` 의 팩 id. 파일명 `공문.hwpx`/`품의.hwpx` 로는 식별하지 않는다.
 pub const PACK_ID: &str = "rauhwpx-office";
+/// HWPX ZIP 안의 명시 표식. 값이 `PACK_ID` 일 때만 이 팩이다.
+pub const PACK_MARKER_PATH: &str = "META-INF/rauhwpx-form-pack";
 pub const BRAND_GONGMUN: &str = "Rauhwpx 공문 서식";
 pub const BRAND_PUMUI: &str = "Rauhwpx 품의 서식";
 
 pub const REFUSE_BINARY_HWP: &str =
     "이 서식은 HWPX로만 저장할 수 있습니다. 바이너리 HWP 경로는 거부합니다.";
-
-const PACK_FILENAMES: &[&str] = &["공문.hwpx", "품의.hwpx"];
-
-/// 경로가 서식팩 파일이거나 출력 확장자가 바이너리 HWP 인지 본다.
-pub fn is_form_pack_path(path: &Path) -> bool {
-    let in_pack_dir = path.components().any(|c| c.as_os_str() == "form-pack");
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    in_pack_dir || PACK_FILENAMES.iter().any(|known| name.eq_ignore_ascii_case(known))
-}
 
 pub fn output_would_write_binary_hwp(path: &Path) -> bool {
     path.extension()
@@ -32,17 +26,20 @@ pub fn output_would_write_binary_hwp(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("hwp"))
 }
 
-pub fn document_has_pack_marker(doc: &Document) -> bool {
-    document_text_contains(doc, BRAND_GONGMUN) || document_text_contains(doc, BRAND_PUMUI)
+/// 문서 ZIP 표식에 적힌 팩 id. 고객 파일명과는 무관하다.
+pub fn document_pack_id(doc: &Document) -> Option<&'static str> {
+    let raw = doc.hwpx_aux_entry(PACK_MARKER_PATH)?;
+    let text = std::str::from_utf8(raw).ok()?.trim();
+    (text == PACK_ID).then_some(PACK_ID)
 }
 
-pub fn is_form_pack_source(path: &Path, doc: &Document) -> bool {
-    is_form_pack_path(path) || document_has_pack_marker(doc)
+pub fn is_form_pack_document(doc: &Document) -> bool {
+    document_pack_id(doc).is_some()
 }
 
 /// 서식팩 문서를 바이너리 HWP 로 쓰려 하면 거절 메시지를 반환한다.
-pub fn refuse_binary_hwp_export(source: &Path, output: &Path, doc: &Document) -> Option<&'static str> {
-    if is_form_pack_source(source, doc) && output_would_write_binary_hwp(output) {
+pub fn refuse_binary_hwp_export(_source: &Path, output: &Path, doc: &Document) -> Option<&'static str> {
+    if is_form_pack_document(doc) && output_would_write_binary_hwp(output) {
         Some(REFUSE_BINARY_HWP)
     } else {
         None
@@ -127,32 +124,10 @@ fn geometry_of(table: &Table) -> TableGeometry {
     }
 }
 
-fn document_text_contains(doc: &Document, needle: &str) -> bool {
-    doc.sections.iter().any(|section| {
-        section
-            .paragraphs
-            .iter()
-            .any(|para| paragraph_contains(para, needle))
-    })
-}
-
-fn paragraph_contains(para: &Paragraph, needle: &str) -> bool {
-    if para.text.contains(needle) {
-        return true;
-    }
-    para.controls.iter().any(|control| match control {
-        Control::Table(table) => table.cells.iter().any(|cell| {
-            cell.paragraphs
-                .iter()
-                .any(|inner| paragraph_contains(inner, needle))
-        }),
-        _ => false,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::document::Document;
     use std::path::Path;
 
     #[test]
@@ -164,9 +139,25 @@ mod tests {
     }
 
     #[test]
-    fn form_pack_dir_and_filenames_are_detected() {
-        assert!(is_form_pack_path(Path::new("rhwp/form-pack/품의.hwpx")));
-        assert!(is_form_pack_path(Path::new("공문.hwpx")));
-        assert!(!is_form_pack_path(Path::new("samples/field-01.hwp")));
+    fn pack_id_comes_from_zip_marker_not_filename() {
+        let mut pack = Document::default();
+        pack.hwpx_aux_entries
+            .push((PACK_MARKER_PATH.to_string(), format!("{PACK_ID}\n").into_bytes()));
+        assert_eq!(document_pack_id(&pack), Some(PACK_ID));
+        assert_eq!(
+            refuse_binary_hwp_export(Path::new("보고서.hwpx"), Path::new("out.hwp"), &pack),
+            Some(REFUSE_BINARY_HWP)
+        );
+
+        let customer = Document::default();
+        assert_eq!(document_pack_id(&customer), None);
+        assert_eq!(
+            refuse_binary_hwp_export(Path::new("공문.hwpx"), Path::new("out.hwp"), &customer),
+            None
+        );
+        assert_eq!(
+            refuse_binary_hwp_export(Path::new("품의.hwpx"), Path::new("out.hwp"), &customer),
+            None
+        );
     }
 }

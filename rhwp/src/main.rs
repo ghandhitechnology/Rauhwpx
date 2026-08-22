@@ -6059,12 +6059,6 @@ fn convert_hwp(args: &[String]) -> i32 {
 
     let input_path = &positionals[0];
     let output_path = &positionals[1];
-    if rhwp::form_pack::is_form_pack_path(Path::new(input_path))
-        && rhwp::form_pack::output_would_write_binary_hwp(Path::new(output_path))
-    {
-        eprintln!("오류: {}", rhwp::form_pack::REFUSE_BINARY_HWP);
-        return EXIT_USAGE;
-    }
 
     // 입력 파일 읽기
     let data = match fs::read(input_path) {
@@ -6083,6 +6077,15 @@ fn convert_hwp(args: &[String]) -> i32 {
             return EXIT_RUNTIME;
         }
     };
+
+    if let Some(msg) = rhwp::form_pack::refuse_binary_hwp_export(
+        Path::new(input_path),
+        Path::new(output_path),
+        doc.document(),
+    ) {
+        eprintln!("오류: {msg}");
+        return EXIT_USAGE;
+    }
 
     let page_count_before = if verify_options.verify_pages {
         Some(doc.page_count())
@@ -8200,7 +8203,7 @@ fn edit_fill_fields(args: &[String]) -> i32 {
     }
 
     let source_path = Path::new(file_path);
-    let is_pack = rhwp::form_pack::is_form_pack_source(source_path, doc.document());
+    let is_pack = rhwp::form_pack::is_form_pack_document(doc.document());
     let output_path = out_path.unwrap_or_else(|| {
         if is_pack {
             rhwp::form_pack::default_filled_hwpx_path(source_path)

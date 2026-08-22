@@ -14,4 +14,7 @@ test('bundled fill-official-form skill fills the live open document', () => {
   assert.doesNotMatch(markdown, /extract-replace on a sidecar/);
   assert.match(markdown, /HWPX/);
   assert.doesNotMatch(markdown, /Hancom|한글과컴퓨터|edwardkim/i);
+  assert.match(markdown, /rauhwpx-office/);
+  assert.match(markdown, /not 온나라-certified/);
+  assert.doesNotMatch(markdown, /is 온나라-certified|온나라 전자결재 인증 서식이다/);
 });
