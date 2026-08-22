@@ -14,8 +14,9 @@ When `sourcePath` is non-null and `dirty` is false, use it directly: Studio reso
 ## Output
 
 - Create a `layout/` directory beside the source unless the user specifies another destination.
-- Preserve the source format by default: save as `<source stem> - Layout.hwp` or `<source stem> - Layout.hwpx`. Avoid overwriting an existing file; add ` (2)`, ` (3)`, and so on. If an HWP round trip fails the precision gates, save the verified HWPX as a safe fallback and report the reason rather than delivering degraded HWP.
+- Preserve the source format by default: save as `<source stem> - Layout.hwp` or `<source stem> - Layout.hwpx`. Avoid overwriting an existing file; add ` (2)`, ` (3)`, and so on. If an HWP round trip fails a fidelity check, save and deliver the verified HWPX as a safe fallback, including when the user explicitly requested an HWP destination.
 - Use `<source stem> - Layout` as the document title: set HWPX package metadata directly and use that exact filename title for HWP.
+- Do not suppress a safe output solely because its page count, pagination, render diff, or native format differs from the source. Return the best safe copy and state the difference precisely.
 
 ## Decide what belongs to the template
 
@@ -74,7 +75,7 @@ The old `--preserve-guidance` option exists only for compatibility and is not ad
 
 The helper uses only the Python 3 standard library. Do not search for or install `lxml`, activate a repository-specific Python environment, or retry through an unrelated interpreter. A missing Python executable is an application packaging failure, not a reason to ask the user to save or identify the document again.
 
-The helper preserves package structure, strips previews, scripts, history, and rejected body payloads, assigns the title, and verifies package and geometry invariants. Its report records both kept and removed paragraphs under `text_decisions`; review both lists. An HWP→HWPX intermediate page-count mismatch is diagnostic rather than a deliverable failure: the final HWP/HWPX must still match the source page count and all other precision gates. For HWP input or output it locates the Rauhwpx `rhwp` binary from `--rhwp-bin`, `RHWP_BIN`, `PATH`, or this repository's build output. Read `text_decisions`, `media_usage`, `removed_body_media`, and `conversion.native_verification` or `conversion.fallback_reason`.
+The helper preserves package structure, strips previews, scripts, history, and rejected body payloads, assigns the title, and verifies package and geometry invariants. Its report records both kept and removed paragraphs under `text_decisions`; review both lists. Page-count differences in either the intermediate or final output are fidelity diagnostics, not reasons to discard an otherwise safe template. For HWP input or output it locates the Rauhwpx `rhwp` binary from `--rhwp-bin`, `RHWP_BIN`, `PATH`, or this repository's build output. Read `delivery`, `text_decisions`, `media_usage`, `removed_body_media`, and `conversion.native_verification` or `conversion.fallback_reason`. When `delivery.ready` is `true`, return or publish the reported output; `delivery.quality: best_effort` requires a warning, not withholding the file.
 
 Inspect body media and representative pages. If a removed body image is demonstrably a logo, seal, watermark, ornament, or other fixed design asset, rerun to a fresh output path with `--keep-media <manifest-id>` for each asset. Do not retain a populated chart, photo, scan, signature, or attachment merely to make the result look fuller. Also look for user-added information encoded as highlighting, checked boxes, colored schedule bars, cell fills, borders, or shapes; these are not safe merely because they are not text. If such marks cannot be cleanly reset without harming template styling, report the unresolved item instead of calling the result perfect.
 
@@ -82,13 +83,13 @@ Use `-o /absolute/path/result.hwp` or `.hwpx` only when the user requests a dest
 
 When the source came from `materialize_document_snapshot`, the generated file is inside the isolated chat workspace. After verification, call `publish_artifact` with the output path and give the user its returned `downloadUrl` as a Markdown download link. Do not report only the temporary filesystem path for a snapshot-backed result.
 
-## Verify before delivery
+## Verify and deliver
 
-1. Confirm the output opens in its reported HWP/HWPX format; for HWP, confirm the native round-trip and render-diff verification passed. Treat an HWPX precision fallback as intentional, not as native HWP success.
-2. Review every entry in `text_decisions.kept` and `text_decisions.removed`; confirm headings, labels, captions, and guidance remain while filled values are absent.
-3. Confirm title, destination, page count, section setup, and layout-object geometry.
-4. Render or preview representative pages when available and inspect small details.
+Treat verification in two tiers:
 
-If final precision verification fails, identify it as a conversion or layout-verification failure. Do not ask the user to confirm or resave the current document unless a fresh identity check actually shows that `documentId` or `digest` changed; a stable snapshot plus a reproducible page-count mismatch is not evidence that the wrong document is open.
+- Hard safety and semantic gates: the package must be readable, approved reusable text must match the reviewed plan, rejected text and private payloads must be absent, and the layout/template structure must remain valid. Do not deliver a candidate that fails these gates.
+- Fidelity checks: native HWP conversion, final page count, pagination, and render similarity. Try reasonable corrections, then deliver a safe result as `best_effort` with concrete warnings if these still differ.
 
-Report the saved path, removed content, preserved design elements, and any uncertain content-versus-decoration decisions.
+Review every entry in `text_decisions.kept` and `text_decisions.removed`; confirm headings, labels, captions, and guidance remain while filled values are absent. Preview representative pages when available. A one-page source becoming two pages is a fidelity warning, not a reason to return no file, and is not evidence that the wrong document is open. Do not ask the user to confirm or resave the current document unless a fresh identity check actually shows that `documentId` or `digest` changed.
+
+Report the saved path, `verified` or `best_effort` quality, warnings, removed content, preserved design elements, and any uncertain content-versus-decoration decisions. When the source came from a snapshot, publish a safe `best_effort` artifact exactly as you would a verified artifact and include the warning beside its download link.

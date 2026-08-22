@@ -29,7 +29,9 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(markdown, /call `publish_artifact`/);
   assert.match(markdown, /`downloadUrl` as a Markdown download link/);
   assert.match(markdown, /do not ask the user to attach or identify the file again/);
-  assert.match(markdown, /intermediate page-count mismatch is diagnostic/);
+  assert.match(markdown, /Page-count differences in either the intermediate or final output are fidelity diagnostics/);
+  assert.match(markdown, /A one-page source becoming two pages is a fidelity warning/);
+  assert.match(markdown, /delivery\.quality: best_effort/);
   assert.match(markdown, /not evidence that the wrong document is open/);
   assert.match(markdown, /--preserve-guidance/);
   assert.match(markdown, /--inspect-text/);
@@ -39,7 +41,7 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(markdown, /preserve-by-default rule is intentional/);
 });
 
-test('copy-layout helper retains its privacy and geometry verification gates', () => {
+test('copy-layout helper retains safety gates and reports fidelity separately', () => {
   const script = readFileSync(scriptUrl, 'utf8');
 
   assert.doesNotMatch(script, /\blxml\b/);
@@ -53,6 +55,7 @@ test('copy-layout helper retains its privacy and geometry verification gates', (
   assert.match(script, /native output introduced or changed generated layout text/);
   assert.match(script, /render-diff/);
   assert.match(script, /fallback_reason/);
+  assert.match(script, /"quality": "best_effort" if delivery_warnings else "verified"/);
   assert.match(script, /--rhwp-bin/);
   assert.match(script, /--preserve-guidance/);
   assert.match(script, /--inspect-text/);
@@ -71,6 +74,6 @@ test('copy-layout helper runs without site packages and defers only an intermedi
   assert.equal(availability.status, 0, availability.stderr || availability.stdout);
   const result = spawnSync(python, ['-S', fileURLToPath(helperTestUrl)], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stderr, /Ran 12 tests/);
+  assert.match(result.stderr, /Ran 15 tests/);
   assert.match(result.stderr, /OK/);
 });

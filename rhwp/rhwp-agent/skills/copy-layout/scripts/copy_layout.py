@@ -1236,6 +1236,72 @@ def available_fallback_path(destination: Path) -> Path:
     return candidate
 
 
+def set_delivery(
+    report: dict[str, object],
+    warnings: Sequence[str] = (),
+) -> dict[str, object]:
+    """Mark a safety-verified output as deliverable and qualify fidelity separately."""
+    delivery_warnings = list(dict.fromkeys(warning for warning in warnings if warning))
+    report["delivery"] = {
+        "ready": True,
+        "quality": "best_effort" if delivery_warnings else "verified",
+        "warnings": delivery_warnings,
+    }
+    return report
+
+
+def deliver_hwpx_fallback(
+    destination: Path,
+    sanitized_hwpx: Path,
+    report: dict[str, object],
+    source: Path,
+    source_format: str,
+    binary: Path,
+    reason: Exception,
+    intermediate_export: dict[str, object] | None,
+) -> dict[str, object]:
+    """Deliver the validated HWPX when native HWP fidelity checks fail."""
+    destination.unlink(missing_ok=True)
+    warnings = [f"native HWP fidelity verification failed: {reason}"]
+    try:
+        source_pages = native_document_info(binary, source).get("pageCount")
+        fallback_pages = native_document_info(binary, sanitized_hwpx).get("pageCount")
+    except (OSError, ValueError) as exc:
+        source_pages = None
+        fallback_pages = None
+        warnings.append(f"fallback page-count comparison was unavailable: {exc}")
+    else:
+        if source_pages != fallback_pages:
+            warnings.append(
+                f"fallback HWPX pageCount changed: {source_pages!r} -> {fallback_pages!r}"
+            )
+
+    fallback = available_fallback_path(destination)
+    shutil.copy2(sanitized_hwpx, fallback)
+    fallback_conversion: dict[str, object] = {
+        "engine": str(binary),
+        "native_hwp_attempted": True,
+        "fallback_reason": str(reason),
+        "fallback_page_count": {
+            "source": source_pages,
+            "output": fallback_pages,
+        },
+        "fallback_verification": report["verification"],
+    }
+    if intermediate_export is not None:
+        fallback_conversion["intermediate_export"] = intermediate_export
+    report.update(
+        {
+            "source": str(source),
+            "output": str(fallback),
+            "input_format": source_format.lstrip("."),
+            "output_format": "hwpx",
+            "conversion": fallback_conversion,
+        }
+    )
+    return set_delivery(report, warnings)
+
+
 def cleaned_geometry_xml(element: etree.Element) -> bytes:
     clone = deepcopy(element)
     parents = parent_map(clone)
@@ -1824,7 +1890,6 @@ def copy_layout(
     preserve_guidance: bool = False,
     text_plan_path: Path | None = None,
 ) -> dict[str, object]:
-    output_was_requested = output is not None
     source = source.expanduser().resolve()
     source_format = source.suffix.lower()
     if not source.is_file() or source_format not in {".hwp", ".hwpx"}:
@@ -1853,7 +1918,7 @@ def copy_layout(
                 "conversion": None,
             }
         )
-        return report
+        return set_delivery(report)
 
     binary = resolve_rhwp_binary(rhwp_binary)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1882,57 +1947,58 @@ def copy_layout(
                 text_plan=text_plan,
             )
             native_verification: dict[str, object] | None = None
+            fidelity_warnings: list[str] = []
             if output_format == ".hwp":
-                run_rhwp(
-                    binary,
-                    ["convert", str(sanitized_hwpx), str(destination), "--verify-pages"],
-                )
-                source_page_count = native_document_info(binary, source).get("pageCount")
-                output_page_count = native_document_info(binary, destination).get("pageCount")
-                if (
-                    isinstance(source_page_count, int)
-                    and isinstance(output_page_count, int)
-                    and output_page_count < source_page_count
-                ):
-                    flow_preserved_hwpx = temporary / "layout-flow-preserved.hwpx"
-                    report = sanitize_hwpx(
-                        source_hwpx,
-                        flow_preserved_hwpx,
-                        title,
-                        keep_media,
-                        preserve_flow=True,
-                        preserve_guidance=preserve_guidance,
-                        text_plan=text_plan,
-                    )
-                    sanitized_hwpx = flow_preserved_hwpx
-                    destination.unlink(missing_ok=True)
-                    run_rhwp(
-                        binary,
-                        ["convert", str(sanitized_hwpx), str(destination), "--verify-pages"],
-                    )
-                    output_page_count = native_document_info(binary, destination).get("pageCount")
-                if (
-                    isinstance(source_page_count, int)
-                    and isinstance(output_page_count, int)
-                    and output_page_count < source_page_count
-                ):
-                    page_hints = temporary / "layout-with-page-breaks.hwpx"
-                    added = add_page_break_hints(
-                        sanitized_hwpx,
-                        page_hints,
-                        source_page_count - output_page_count,
-                        title,
-                        report["verification"]["layout"],
-                        approved_visible_text_from_report(report),
-                    )
-                    report["changes"]["inferred_page_breaks"] = added
-                    destination.unlink(missing_ok=True)
-                    sanitized_hwpx = page_hints
-                    run_rhwp(
-                        binary,
-                        ["convert", str(sanitized_hwpx), str(destination), "--verify-pages"],
-                    )
                 try:
+                    run_rhwp(
+                        binary,
+                        ["convert", str(sanitized_hwpx), str(destination), "--verify-pages"],
+                    )
+                    source_page_count = native_document_info(binary, source).get("pageCount")
+                    output_page_count = native_document_info(binary, destination).get("pageCount")
+                    if (
+                        isinstance(source_page_count, int)
+                        and isinstance(output_page_count, int)
+                        and output_page_count < source_page_count
+                    ):
+                        flow_preserved_hwpx = temporary / "layout-flow-preserved.hwpx"
+                        report = sanitize_hwpx(
+                            source_hwpx,
+                            flow_preserved_hwpx,
+                            title,
+                            keep_media,
+                            preserve_flow=True,
+                            preserve_guidance=preserve_guidance,
+                            text_plan=text_plan,
+                        )
+                        sanitized_hwpx = flow_preserved_hwpx
+                        destination.unlink(missing_ok=True)
+                        run_rhwp(
+                            binary,
+                            ["convert", str(sanitized_hwpx), str(destination), "--verify-pages"],
+                        )
+                        output_page_count = native_document_info(binary, destination).get("pageCount")
+                    if (
+                        isinstance(source_page_count, int)
+                        and isinstance(output_page_count, int)
+                        and output_page_count < source_page_count
+                    ):
+                        page_hints = temporary / "layout-with-page-breaks.hwpx"
+                        added = add_page_break_hints(
+                            sanitized_hwpx,
+                            page_hints,
+                            source_page_count - output_page_count,
+                            title,
+                            report["verification"]["layout"],
+                            approved_visible_text_from_report(report),
+                        )
+                        report["changes"]["inferred_page_breaks"] = added
+                        destination.unlink(missing_ok=True)
+                        sanitized_hwpx = page_hints
+                        run_rhwp(
+                            binary,
+                            ["convert", str(sanitized_hwpx), str(destination), "--verify-pages"],
+                        )
                     native_verification = verify_native_output(
                         binary,
                         source,
@@ -1943,92 +2009,78 @@ def copy_layout(
                         sanitized_hwpx,
                         temporary / "roundtrip.hwpx",
                     )
-                except ValueError as exc:
-                    if output_was_requested:
-                        raise
-                    destination.unlink(missing_ok=True)
-                    source_fallback_info = native_document_info(binary, source)
-                    fallback_info = native_document_info(binary, sanitized_hwpx)
-                    if source_fallback_info.get("pageCount") != fallback_info.get("pageCount"):
-                        raise ValueError(
-                            "verified HWPX fallback pageCount changed: "
-                            f"{source_fallback_info.get('pageCount')!r} -> "
-                            f"{fallback_info.get('pageCount')!r}"
-                        ) from exc
-                    fallback = available_fallback_path(destination)
-                    shutil.copy2(sanitized_hwpx, fallback)
-                    fallback_conversion = {
-                        "engine": str(binary),
-                        "native_hwp_attempted": True,
-                        "fallback_reason": str(exc),
-                        "fallback_verification": report["verification"],
-                    }
-                    if intermediate_export is not None:
-                        fallback_conversion["intermediate_export"] = intermediate_export
-                    report.update(
-                        {
-                            "source": str(source),
-                            "output": str(fallback),
-                            "input_format": source_format.lstrip("."),
-                            "output_format": "hwpx",
-                            "conversion": fallback_conversion,
-                        }
-                    )
-                    return report
-            else:
-                source_info = native_document_info(binary, source)
-                output_info = native_document_info(binary, destination)
-                source_page_count = source_info.get("pageCount")
-                output_page_count = output_info.get("pageCount")
-                if (
-                    isinstance(source_page_count, int)
-                    and isinstance(output_page_count, int)
-                    and output_page_count < source_page_count
-                ):
-                    flow_preserved_hwpx = temporary / "layout-flow-preserved.hwpx"
-                    report = sanitize_hwpx(
-                        source_hwpx,
-                        flow_preserved_hwpx,
-                        title,
-                        keep_media,
-                        preserve_flow=True,
-                        preserve_guidance=preserve_guidance,
-                        text_plan=text_plan,
-                    )
-                    destination.unlink(missing_ok=True)
-                    shutil.copy2(flow_preserved_hwpx, destination)
-                    sanitized_hwpx = destination
-                    output_info = native_document_info(binary, destination)
-                    output_page_count = output_info.get("pageCount")
-                if (
-                    isinstance(source_page_count, int)
-                    and isinstance(output_page_count, int)
-                    and output_page_count < source_page_count
-                ):
-                    page_hints = temporary / "layout-with-page-breaks.hwpx"
-                    added = add_page_break_hints(
+                except (OSError, ValueError, zipfile.BadZipFile) as exc:
+                    return deliver_hwpx_fallback(
+                        destination,
                         sanitized_hwpx,
-                        page_hints,
-                        source_page_count - output_page_count,
-                        title,
-                        report["verification"]["layout"],
-                        approved_visible_text_from_report(report),
+                        report,
+                        source,
+                        source_format,
+                        binary,
+                        exc,
+                        intermediate_export,
                     )
-                    report["changes"]["inferred_page_breaks"] = added
-                    destination.unlink(missing_ok=True)
-                    shutil.copy2(page_hints, destination)
-                    sanitized_hwpx = destination
+            else:
+                try:
+                    source_info = native_document_info(binary, source)
                     output_info = native_document_info(binary, destination)
-                if source_info.get("pageCount") != output_info.get("pageCount"):
-                    raise ValueError(
-                        "final HWPX pageCount changed: "
-                        f"{source_info.get('pageCount')!r} -> {output_info.get('pageCount')!r}"
-                    )
-                native_verification = {
-                    "format": output_info.get("format"),
-                    "page_count": output_info.get("pageCount"),
-                    "sections": output_info.get("sections"),
-                }
+                    source_page_count = source_info.get("pageCount")
+                    output_page_count = output_info.get("pageCount")
+                    if (
+                        isinstance(source_page_count, int)
+                        and isinstance(output_page_count, int)
+                        and output_page_count < source_page_count
+                    ):
+                        flow_preserved_hwpx = temporary / "layout-flow-preserved.hwpx"
+                        report = sanitize_hwpx(
+                            source_hwpx,
+                            flow_preserved_hwpx,
+                            title,
+                            keep_media,
+                            preserve_flow=True,
+                            preserve_guidance=preserve_guidance,
+                            text_plan=text_plan,
+                        )
+                        destination.unlink(missing_ok=True)
+                        shutil.copy2(flow_preserved_hwpx, destination)
+                        sanitized_hwpx = destination
+                        output_info = native_document_info(binary, destination)
+                        output_page_count = output_info.get("pageCount")
+                    if (
+                        isinstance(source_page_count, int)
+                        and isinstance(output_page_count, int)
+                        and output_page_count < source_page_count
+                    ):
+                        page_hints = temporary / "layout-with-page-breaks.hwpx"
+                        added = add_page_break_hints(
+                            sanitized_hwpx,
+                            page_hints,
+                            source_page_count - output_page_count,
+                            title,
+                            report["verification"]["layout"],
+                            approved_visible_text_from_report(report),
+                        )
+                        report["changes"]["inferred_page_breaks"] = added
+                        destination.unlink(missing_ok=True)
+                        shutil.copy2(page_hints, destination)
+                        sanitized_hwpx = destination
+                        output_info = native_document_info(binary, destination)
+                        output_page_count = output_info.get("pageCount")
+                    if source_info.get("pageCount") != output_info.get("pageCount"):
+                        fidelity_warnings.append(
+                            "final HWPX pageCount changed: "
+                            f"{source_info.get('pageCount')!r} -> {output_info.get('pageCount')!r}"
+                        )
+                    native_verification = {
+                        "format": output_info.get("format"),
+                        "page_count": output_info.get("pageCount"),
+                        "sections": output_info.get("sections"),
+                    }
+                except (OSError, ValueError, zipfile.BadZipFile) as exc:
+                    fidelity_warnings.append(f"final HWPX fidelity comparison failed: {exc}")
+                    if not destination.is_file() and sanitized_hwpx.is_file():
+                        shutil.copy2(sanitized_hwpx, destination)
+                    native_verification = {"unavailable": str(exc)}
 
             conversion = {
                 "engine": str(binary),
@@ -2045,7 +2097,7 @@ def copy_layout(
                     "conversion": conversion,
                 }
             )
-            return report
+            return set_delivery(report, fidelity_warnings)
     except Exception:
         destination.unlink(missing_ok=True)
         raise

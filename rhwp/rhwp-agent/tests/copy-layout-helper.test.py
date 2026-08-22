@@ -416,6 +416,104 @@ class CopyLayoutHelperTests(unittest.TestCase):
             self.assertIs(raised.exception, failure)
             self.assertEqual(run.call_count, 1)
 
+    def test_page_count_mismatch_is_delivered_as_best_effort(self):
+        report = {"verification": {"zip_valid": True}}
+
+        result = copy_layout.set_delivery(
+            report,
+            ["final HWPX pageCount changed: 1 -> 2"],
+        )
+
+        self.assertTrue(result["delivery"]["ready"])
+        self.assertEqual(result["delivery"]["quality"], "best_effort")
+        self.assertEqual(
+            result["delivery"]["warnings"],
+            ["final HWPX pageCount changed: 1 -> 2"],
+        )
+
+    def test_explicit_hwp_failure_delivers_page_mismatched_hwpx_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source.hwp"
+            destination = root / "requested.hwp"
+            sanitized = root / "safe.hwpx"
+            source.write_bytes(b"source")
+            destination.write_bytes(b"partial native output")
+            sanitized.write_bytes(b"safe package")
+            report = {"verification": {"zip_valid": True}}
+
+            def fake_info(_binary, document):
+                return {"pageCount": 1 if document == source else 2}
+
+            with patch.object(copy_layout, "native_document_info", side_effect=fake_info):
+                result = copy_layout.deliver_hwpx_fallback(
+                    destination,
+                    sanitized,
+                    report,
+                    source,
+                    ".hwp",
+                    Path("rhwp"),
+                    ValueError("native pageCount changed: 1 -> 2"),
+                    None,
+                )
+
+            fallback = Path(result["output"])
+            self.assertFalse(destination.exists())
+            self.assertEqual(fallback.suffix, ".hwpx")
+            self.assertEqual(fallback.read_bytes(), b"safe package")
+            self.assertTrue(result["delivery"]["ready"])
+            self.assertEqual(result["delivery"]["quality"], "best_effort")
+            self.assertTrue(
+                any("pageCount changed: 1 -> 2" in warning for warning in result["delivery"]["warnings"])
+            )
+
+    def test_final_hwpx_page_expansion_is_returned_instead_of_deleted(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source.hwp"
+            output = root / "requested.hwpx"
+            source.write_bytes(b"source")
+
+            def fake_export(_binary, _source, intermediate):
+                intermediate.write_bytes(b"intermediate")
+                return {"page_gate": "deferred-to-final-output"}
+
+            def fake_sanitize(_source, destination, *_args, **_kwargs):
+                destination.write_bytes(b"safe package")
+                return {
+                    "verification": {
+                        "layout": {},
+                        "approved_visible_text": [],
+                    },
+                    "changes": {},
+                }
+
+            def fake_info(_binary, document):
+                return {
+                    "format": "HWPX",
+                    "pageCount": 1 if document.suffix == ".hwp" else 2,
+                    "sections": 1,
+                }
+
+            with patch.object(copy_layout, "resolve_rhwp_binary", return_value=Path("rhwp")), patch.object(
+                copy_layout,
+                "export_hwpx_for_sanitization",
+                side_effect=fake_export,
+            ), patch.object(copy_layout, "sanitize_hwpx", side_effect=fake_sanitize), patch.object(
+                copy_layout,
+                "native_document_info",
+                side_effect=fake_info,
+            ):
+                result = copy_layout.copy_layout(source, output, set())
+
+            self.assertEqual(output.read_bytes(), b"safe package")
+            self.assertTrue(result["delivery"]["ready"])
+            self.assertEqual(result["delivery"]["quality"], "best_effort")
+            self.assertEqual(
+                result["delivery"]["warnings"],
+                ["final HWPX pageCount changed: 1 -> 2"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
