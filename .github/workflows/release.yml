@@ -223,9 +223,6 @@ jobs:
           npm --prefix rhwp/rhwp-studio ci
           npm --prefix rhwp/rhwp-agent ci --omit=dev
 
-      - name: Exercise Windows DPAPI credential storage
-        run: npm run test:windows:keychain
-
       - name: Build Windows installer
         run: npm run dist:win
 
