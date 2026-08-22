@@ -233,7 +233,7 @@ export class HistoryDialog {
     }
     const meta = this.entries.find((x) => x.id === this.selectedId);
     const leftName = meta?.label ?? '이력 스냅샷';
-    const rightName = wasm.fileName || '현재 문서.hwp';
+    const rightName = wasm.fileName || '현재 문서.hwpx';
     this.resultMetaEl.textContent = '비교 중...';
     this.resultListEl.replaceChildren();
     try {

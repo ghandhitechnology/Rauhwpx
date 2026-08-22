@@ -21,7 +21,7 @@ The agent reads structure, text ranges, tables, fields and rendered pages, then 
 
 ## Editor
 
-- **Formats** — HWP 5.0, HWPX and HML read/write, HWP3 read. Roundtrip fidelity is a core contract, backed by ~430 real documents in `rhwp/samples/`.
+- **Formats** — HWPX is the default save/export format for new work. HWP 5.0, HWPX and HML read/write, HWP3 read; opened `.hwp` files keep binary HWP on Save. Roundtrip fidelity is a core contract, backed by ~430 real documents in `rhwp/samples/`.
 - **Layout and rendering** — full pagination, 어울림 wrap, tables with page splitting, footnotes/endnotes, equations, shapes, charts and embedded objects, drawn to Canvas2D/CanvasKit in the browser and Skia natively.
 - **Editing** — character/paragraph/style dialogs, tables, list numbering, fields and forms, page setup, find/replace, document compare, revision history, undo throughout.
 - **Export** — SVG, PNG, PDF, text, Markdown, table dumps, plus HWPX/HML conversion from the CLI.

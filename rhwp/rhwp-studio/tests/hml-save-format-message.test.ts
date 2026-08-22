@@ -15,7 +15,7 @@ test('HML 저장 차단 안내는 blocker path와 HWP/HWPX 대안을 표시한�
   }, true);
 
   assert.match(message, /\/HWPML\/BODY\/SECTION\/P\/UNKNOWN/);
-  assert.match(message, /HWP 또는 HWPX/);
+  assert.match(message, /HWPX\(권장\) 또는 HWP 5\.0/);
 });
 
 test('exporter가 없으면 HML 저장을 권하지 않고 capability 진단을 표시한다', () => {

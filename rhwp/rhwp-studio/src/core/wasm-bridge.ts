@@ -19,6 +19,11 @@ import {
   parseLocalBodyTextReplaceResult,
   type LocalBodyTextReplaceResult,
 } from './local-text-replace-result';
+import {
+  FALLBACK_DOCUMENT_FILE_NAME,
+  NEW_DOCUMENT_FILE_NAME,
+  isUntitledNewDocumentName,
+} from './document-names';
 
 /**
  * 문단 병합으로 사라진 문단의 스코프 메타데이터 (Task #2342).
@@ -189,7 +194,7 @@ function installCanvasFontSubstitution(): void {
 export class WasmBridge {
   private doc: HwpDocument | null = null;
   private initialized = false;
-  private _fileName = 'document.hwp';
+  private _fileName = FALLBACK_DOCUMENT_FILE_NAME;
   private _currentFileHandle: FileSystemFileHandleLike | null = null;
   private _documentDigest: string | null = null;
   /** [#3313] 외부 연결 그림 비동기 주입 완료 훅 — 주입 성공(>0)시에만 호출된다.
@@ -280,7 +285,7 @@ export class WasmBridge {
 
   loadDocument(data: Uint8Array, fileName?: string): DocumentInfo {
     this.releaseDocument();
-    const nextFileName = fileName ?? 'document.hwp';
+    const nextFileName = fileName ?? FALLBACK_DOCUMENT_FILE_NAME;
     const nextDocumentDigest = `blake3:${bytesToHex(blake3(data))}`;
     let nextDoc: HwpDocument | null = null;
 
@@ -312,7 +317,7 @@ export class WasmBridge {
           /* noop */
         }
       }
-      this._fileName = 'document.hwp';
+      this._fileName = FALLBACK_DOCUMENT_FILE_NAME;
       this._currentFileHandle = null;
       this._documentDigest = null;
       throw error;
@@ -374,7 +379,7 @@ export class WasmBridge {
     }
     const info: DocumentInfo = JSON.parse(this.doc.createBlankDocument());
     this.ensureParagraphStableIds();
-    this._fileName = '새 문서.hwp';
+    this._fileName = NEW_DOCUMENT_FILE_NAME;
     this._currentFileHandle = null;
     this.doc.setFileName(this._fileName);
     try {
@@ -408,7 +413,7 @@ export class WasmBridge {
   }
 
   get isNewDocument(): boolean {
-    return this._fileName === '새 문서.hwp';
+    return isUntitledNewDocumentName(this._fileName);
   }
 
   exportHwp(): Uint8Array {

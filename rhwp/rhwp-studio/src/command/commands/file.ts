@@ -152,12 +152,18 @@ function flushDeferredPaginationBeforeExplicitOutput(
 
 async function chooseSaveAsFormat(services: CommandServices): Promise<SaveFormat | null> {
   const sourceFormat = services.wasm.getSourceFormat();
-  if (sourceFormat !== 'hml') return sourceFormat === 'hwpx' ? 'hwpx' : 'hwp';
-  const context = getHmlSaveContext(services);
-  return showHmlSaveFormatDialog(
-    context.metadata,
-    context.exporterAvailable,
-  );
+  if (sourceFormat === 'hml') {
+    const context = getHmlSaveContext(services);
+    return showHmlSaveFormatDialog(
+      context.metadata,
+      context.exporterAvailable,
+    );
+  }
+  return resolveSaveTarget(
+    sourceFormat,
+    services.wasm.fileName,
+    services.wasm.currentFileHandle,
+  ).format;
 }
 
 function createSaveBlob(services: CommandServices, format: SaveFormat): Blob {
@@ -761,7 +767,7 @@ export const fileCommands: CommandDef[] = [
   },
   {
     // [Task #833] 다른 이름으로 저장 — currentFileHandle 무시 + 항상 picker.
-    // 출처 포맷 유지(HWPX→HWPX, HWP→HWP).
+    // 열린 .hwp는 HWP, 새 문서·그 외는 HWPX. 명시 메뉴로 HWP 5.0도 선택 가능.
     id: 'file:save-as',
     label: '다른 이름으로 저장',
     shortcutLabel: 'Ctrl+Shift+S',
@@ -772,18 +778,18 @@ export const fileCommands: CommandDef[] = [
     },
   },
   {
-    // [#1613] HWP 형식으로 저장 — 출처 무관 HWP 출력.
+    // [#1613] HWP 5.0으로 저장 — 출처 무관 바이너리 HWP 출력.
     id: 'file:save-as-hwp',
-    label: 'HWP 형식으로 저장',
+    label: 'HWP 5.0으로 저장',
     canExecute: (ctx) => ctx.hasDocument,
     async execute(services) {
       await saveAsFormat(services, 'hwp');
     },
   },
   {
-    // [#1613] HWPX 형식으로 저장 — 출처 무관 HWPX 출력.
+    // [#1613] HWPX로 저장 — 출처 무관 HWPX 출력 (새 문서·내보내기 기본).
     id: 'file:save-as-hwpx',
-    label: 'HWPX 형식으로 저장',
+    label: 'HWPX로 저장',
     canExecute: (ctx) => ctx.hasDocument,
     async execute(services) {
       await saveAsFormat(services, 'hwpx');

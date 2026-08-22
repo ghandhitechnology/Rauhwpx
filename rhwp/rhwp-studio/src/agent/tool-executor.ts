@@ -25,6 +25,7 @@ import {
   getEngineEditTypeDefinitions,
   type EngineEditOperation,
 } from './engine-edit.ts';
+import { inferExportFormat } from '../command/save-target.ts';
 
 export interface AgentToolExecutorDeps {
   wasm: WasmBridge;
@@ -1023,7 +1024,14 @@ export class AgentToolExecutor {
       );
     }
     const revision = this.revision;
-    const bytes = sourceFormat === 'hwpx' ? wasm.exportHwpx() : wasm.exportHwp();
+    const exportFormat = inferExportFormat(
+      sourceFormat,
+      wasm.fileName ?? '',
+      null,
+      wasm.fileName ?? '',
+    );
+    const snapshotFormat = exportFormat === 'hwpx' ? 'hwpx' : 'hwp';
+    const bytes = snapshotFormat === 'hwpx' ? wasm.exportHwpx() : wasm.exportHwp();
     if (bytes.byteLength === 0) {
       throw new AgentToolError('SNAPSHOT_EMPTY', 'The current document exported an empty snapshot.');
     }
@@ -1035,7 +1043,7 @@ export class AgentToolExecutor {
     }
     return {
       revision,
-      sourceFormat,
+      sourceFormat: snapshotFormat,
       digest: wasm.documentDigest,
       dirty: documentState.isDirty(),
       byteLength: bytes.byteLength,
