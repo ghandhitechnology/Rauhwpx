@@ -15,6 +15,12 @@ import {
 import { SAVE_FORMAT_DETAILS } from '@/command/save-format';
 import { exportDocumentForFormat } from '@/command/save-document-format';
 import {
+  FORM_PACK_FORMS,
+  formPackAssetUrl,
+  isFormPackDocument,
+  refuseBinaryHwpExport,
+} from '@/core/form-pack';
+import {
   readHmlSaveContext,
   resolveHmlSaveCapability,
 } from '@/core/hml-save-capability';
@@ -167,6 +173,8 @@ async function chooseSaveAsFormat(services: CommandServices): Promise<SaveFormat
 }
 
 function createSaveBlob(services: CommandServices, format: SaveFormat): Blob {
+  const refused = refuseBinaryHwpExport(format, services.wasm.fileName);
+  if (refused) throw new Error(refused);
   const bytes = exportDocumentForFormat(services.wasm, format);
   return new Blob([bytes as unknown as BlobPart], {
     type: SAVE_FORMAT_DETAILS[format].mimeType,
@@ -724,6 +732,33 @@ export const fileCommands: CommandDef[] = [
     },
   },
   {
+    id: 'file:open-form-pack',
+    label: '공문/품의 서식',
+    canExecute: () => true,
+    async execute(services, params) {
+      const requested = typeof params?.formId === 'string' ? params.formId : '';
+      const entry = FORM_PACK_FORMS.find((form) => form.id === requested);
+      if (!entry) {
+        showToast({ message: '서식을 찾지 못했습니다.', durationMs: 2500 });
+        return;
+      }
+      try {
+        const response = await fetch(formPackAssetUrl(entry));
+        if (!response.ok) throw new Error(`서식을 불러오지 못했습니다 (${response.status})`);
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        services.eventBus.emit('open-document-bytes', {
+          bytes,
+          fileName: entry.file,
+          fileHandle: null,
+          formPackId: entry.id,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        alert(`서식을 열지 못했습니다:\n${message}`);
+      }
+    },
+  },
+  {
     id: 'file:open',
     label: '열기',
     execute: openFileViaPicker,
@@ -781,8 +816,13 @@ export const fileCommands: CommandDef[] = [
     // [#1613] HWP 5.0으로 저장 — 출처 무관 바이너리 HWP 출력.
     id: 'file:save-as-hwp',
     label: 'HWP 5.0으로 저장',
-    canExecute: (ctx) => ctx.hasDocument,
+    canExecute: (ctx) => ctx.hasDocument && !ctx.formPackId && !isFormPackDocument(),
     async execute(services) {
+      const refused = refuseBinaryHwpExport('hwp', services.wasm.fileName);
+      if (refused) {
+        alert(refused);
+        return;
+      }
       await saveAsFormat(services, 'hwp');
     },
   },
