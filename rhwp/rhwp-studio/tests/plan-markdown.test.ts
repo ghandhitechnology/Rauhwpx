@@ -128,6 +128,21 @@ test('인라인 토크나이저가 코드·강조를 나누고 링크는 표시 
     { kind: 'link', text: '문서', href: 'https://example.com' },
     { kind: 'text', text: '를 보세요' },
   ]);
+  assert.deepEqual(tokenizeInline('[문서](https://example.com "새 창에서 열기")'), [
+    { kind: 'link', text: '문서', href: 'https://example.com' },
+  ]);
+});
+
+test('파일명의 괄호가 artifact Markdown 링크를 중간에서 끊지 않는다', () => {
+  const href = 'http://127.0.0.1:5175/artifacts/artifact_token_1234567890/'
+    + '%EA%B3%BC%EC%A0%9C(%ED%8C%80)%EB%B3%84%20%EB%B3%B4%EA%B3%A0%EC%84%9C%20-%20Layout.hwpx'
+    + '?sessionId=session-a&token=rhwp1.token.signature';
+  assert.deepEqual(tokenizeInline(`완료했다. [레이아웃 HWPX 다운로드](${href})`), [
+    { kind: 'text', text: '완료했다. ' },
+    { kind: 'link', text: '레이아웃 HWPX 다운로드', href },
+  ]);
+  assert.equal(render(`완료했다. [레이아웃 HWPX 다운로드](${href})`, { links: true }).textContent,
+    '완료했다. 레이아웃 HWPX 다운로드');
 });
 
 test('한국어 조사·식별자와 맞닿은 강조 문법을 과하게 해석하지 않는다', () => {

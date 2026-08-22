@@ -43,6 +43,17 @@ export interface RhwpDesktopApi {
   ensureAgentHub?: () => Promise<{ started?: boolean; ready?: boolean } | boolean>;
   getSessionContext?: () => Promise<RendererSessionContext>;
   getLaunchFiles?: () => Promise<NativeFileHandleDescriptor[]>;
+  getLaunchGeneratedDocument?: () => Promise<{
+    launchDocumentId: string;
+    fileName: string;
+    bytes: Uint8Array;
+    readOnly?: boolean;
+  } | null>;
+  openGeneratedDocumentWindow?: (payload: {
+    fileName: string;
+    downloadUrl: string;
+    readOnly?: boolean;
+  }) => Promise<boolean>;
   pickNativeOpenFile?: (options?: {
     suggestedName?: string;
     documentId?: string;
@@ -56,6 +67,7 @@ export interface RhwpDesktopApi {
   }) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
   releaseNativeFile?: (handleId: string) => Promise<void>;
   readNativeFile?: (handleId: string) => Promise<NativeFileReadResult>;
+  getNativeFileSourcePath?: (handleId: string) => Promise<string | null>;
   validateNativeSave?: (
     handleId: string,
     identity: DocumentOwnershipIdentity,
@@ -99,6 +111,12 @@ export interface RhwpDesktopApi {
   isFullScreen?: () => Promise<boolean>;
   onFullScreenChange?: (callback: (fullscreen: boolean) => void) => void;
   onOpenFiles?: (callback: (files: NativeFileHandleDescriptor[]) => void) => void;
+  onOpenGeneratedDocument?: (callback: (payload: {
+    launchDocumentId: string;
+    fileName: string;
+    bytes: Uint8Array;
+    readOnly?: boolean;
+  }) => void) => void;
 }
 
 export interface DesktopHost {
@@ -109,6 +127,72 @@ export interface DesktopHost {
       addEventListener: (type: string, listener: () => void) => void;
     };
   };
+}
+
+export interface PublishedDocumentLink {
+  readonly downloadUrl: string;
+  readonly fileName: string;
+  readonly readOnly?: boolean;
+}
+
+/** Only hub-issued localhost artifact URLs become in-app document actions. */
+export function parsePublishedDocumentLink(raw: string): PublishedDocumentLink | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost' && url.hostname !== '[::1]') return null;
+  const match = url.pathname.match(/^\/artifacts\/[A-Za-z0-9_-]{16,128}\/([^/]+)$/u);
+  if (!match) return null;
+  let fileName;
+  try {
+    fileName = decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+  if (!/\.(?:hwp|hwpx)$/iu.test(fileName) || fileName.includes('\0')) return null;
+  return {
+    downloadUrl: url.href,
+    fileName,
+    ...(url.searchParams.get('templatePreview') === '1' ? { readOnly: true } : {}),
+  };
+}
+
+export async function openPublishedDocumentInNewWindow(
+  artifact: PublishedDocumentLink,
+  win?: DesktopHost,
+  options: { readOnly?: boolean } = {},
+): Promise<void> {
+  const host = desktopHost(win);
+  const openNative = host?.rhwpDesktop?.openGeneratedDocumentWindow;
+  if (openNative) {
+    if (!await openNative({
+      fileName: artifact.fileName,
+      downloadUrl: artifact.downloadUrl,
+      ...(options.readOnly ? { readOnly: true } : {}),
+    })) {
+      throw new Error('새 문서 창을 열지 못했습니다.');
+    }
+    return;
+  }
+
+  const browserWindow = (win ?? globalThis) as DesktopHost & {
+    location?: { href: string };
+    open?: (url?: string | URL, target?: string, features?: string) => unknown;
+  };
+  if (!browserWindow.location?.href || !browserWindow.open) {
+    throw new Error('새 문서 창을 열 수 없습니다.');
+  }
+  const editorUrl = new URL(browserWindow.location.href);
+  editorUrl.search = '';
+  editorUrl.hash = '';
+  editorUrl.searchParams.set('url', artifact.downloadUrl);
+  editorUrl.searchParams.set('filename', artifact.fileName);
+  if (options.readOnly) editorUrl.searchParams.set('templatePreview', '1');
+  browserWindow.open(editorUrl.href, '_blank', 'noopener');
 }
 
 let inflight: Promise<boolean> | null = null;
@@ -376,6 +460,18 @@ export function bindNativeFileHandleIdentity(
   if (metadata) metadata.identity = { ...identity };
 }
 
+/** Resolve only the exact desktop path represented by this opaque, sender-owned handle. */
+export async function getNativeFileSourcePath(
+  handle: FileSystemFileHandleLike | null | undefined,
+): Promise<string | null> {
+  const metadata = handle ? nativeHandleMetadata.get(handle) : null;
+  if (!metadata?.api.getNativeFileSourcePath) return null;
+  const sourcePath = await metadata.api.getNativeFileSourcePath(metadata.handleId);
+  return typeof sourcePath === 'string' && sourcePath.trim() && !sourcePath.includes('\0')
+    ? sourcePath
+    : null;
+}
+
 export function captureDesktopNativeDroppedFile(
   file: File,
   win?: DesktopHost,
@@ -605,6 +701,30 @@ export function installDesktopFileHandling(
   void api.getLaunchFiles?.().then(receive).catch((error) => {
     console.warn('[rhwp-desktop] 시작 파일 조회 실패:', error);
   });
+}
+
+export function installDesktopGeneratedDocumentHandling(
+  openDocument: (payload: { bytes: Uint8Array; fileName: string; readOnly: boolean }) => void,
+  win?: DesktopHost,
+) {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.onOpenGeneratedDocument) return false;
+  const seen = new Set<string>();
+  const receive = (payload: { launchDocumentId?: string; bytes?: Uint8Array; fileName?: string; readOnly?: boolean } | null) => {
+    const launchDocumentId = typeof payload?.launchDocumentId === 'string'
+      ? payload.launchDocumentId
+      : '';
+    const fileName = typeof payload?.fileName === 'string' ? payload.fileName : '';
+    const bytes = payload?.bytes instanceof Uint8Array ? payload.bytes : null;
+    if (!launchDocumentId || seen.has(launchDocumentId) || !bytes || !/\.(?:hwp|hwpx)$/iu.test(fileName)) return;
+    seen.add(launchDocumentId);
+    openDocument({ bytes, fileName, readOnly: payload?.readOnly === true });
+  };
+  api.onOpenGeneratedDocument(receive);
+  void api.getLaunchGeneratedDocument?.().then(receive).catch((error) => {
+    console.warn('[rhwp-desktop] 생성 문서 시작 데이터 조회 실패:', error);
+  });
+  return true;
 }
 
 /**

@@ -161,9 +161,13 @@ interface TaskEntry {
   toolCount: number;
   detailToolRows: Map<string, DetailToolRow>;
   phases: AgentTaskPhase[];
+  /** 단일 worker task 가 멤버 행 없이 직접 보고하는 현재 단계. */
+  phaseIndex: number | null;
   phasePills: Map<number, PhaseRefs>;
   members: Map<number, MemberEntry>;
   workflowName: string;
+  /** 독립 provider 프로세스는 owning chat turn 보다 오래 살아남는다. */
+  background: boolean;
 }
 
 interface CardEntry {
@@ -622,6 +626,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
   /** 진행 중인 단계 = 아직 도는 멤버 중 가장 앞선 단계. 없으면 마지막으로 손댄 단계. */
   function currentPhaseIndex(task: TaskEntry): number | null {
     if (task.phases.length === 0) return null;
+    if (task.phaseIndex !== null) return task.phaseIndex;
     let running: number | null = null;
     let touched: number | null = null;
     for (const member of task.members.values()) {
@@ -661,7 +666,8 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       }
       return `워크플로 · ${name} · ${tail}`;
     }
-    return `서브에이전트 ${card.tasks.length} · ${tail}`;
+    const prefix = card.tasks.some((task) => task.background) ? '백그라운드 작업' : '서브에이전트';
+    return `${prefix} ${card.tasks.length} · ${tail}`;
   }
 
   function refreshCard(card: CardEntry): void {
@@ -933,9 +939,11 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       toolCount: 0,
       detailToolRows: new Map(),
       phases: [],
+      phaseIndex: null,
       phasePills: new Map(),
       members: new Map(),
       workflowName: evt.workflowName?.trim() ?? '',
+      background: evt.background === true,
     };
     card.tasks.push(task);
     tasks.set(task.taskId, task);
@@ -958,6 +966,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     }
     if (evt.lastTool) task.activity = `▸ ${evt.lastTool}`;
     else if (evt.activity) task.activity = evt.activity;
+    if (evt.phaseIndex !== undefined) task.phaseIndex = evt.phaseIndex;
     if (evt.phases) syncPhases(task, evt.phases);
     if (evt.members) syncMembers(task, evt.members);
     renderTaskRow(task);
@@ -1026,15 +1035,17 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     return true;
   }
 
-  /** 도크의 카드를 전부 슬롯으로 정착시키고 도크를 닫는다. */
-  function settleAll(): void {
+  /** 턴과 함께 끝나는 카드만 정착시키고 독립 백그라운드 프로세스는 도크에 남긴다. */
+  function settleTurnCards(): void {
     for (const card of cards) {
       refreshCard(card);
+      const hasLiveBackground = card.tasks.some((task) => task.background && task.state === 'running');
+      if (hasLiveBackground) continue;
       stopTicker(card);
       settleCard(card);
     }
     batchCard = null;
-    setPopupOpen(false);
+    if (![...cards].some((card) => card.hosted)) setPopupOpen(false);
     updateDock();
   }
 
@@ -1042,7 +1053,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     root: dock,
     beginTurn(): void {
       // 지난 턴이 turn-end 없이 끊겼어도 도크에 남은 카드는 새 턴에 섞이지 않는다.
-      if ([...cards].some((card) => card.hosted)) settleAll();
+      if ([...cards].some((card) => card.hosted)) settleTurnCards();
       batchCard = null;
       turnOpen = true;
     },
@@ -1055,9 +1066,9 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     sweep(): void {
       turnOpen = false;
       for (const task of tasks.values()) {
-        if (task.state === 'running') settleTask(task, 'stopped');
+        if (task.state === 'running' && !task.background) settleTask(task, 'stopped');
       }
-      settleAll();
+      settleTurnCards();
     },
     closePopup(): void {
       setPopupOpen(false);

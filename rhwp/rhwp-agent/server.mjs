@@ -17,10 +17,12 @@ import { generateSkillDraft } from './skill-generator.mjs';
 import { WritingStyleStore, assertWritingStyleAppendCompatible } from './writing-style.mjs';
 import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
-import { TOOL_DEFINITIONS } from './tools.mjs';
+import { filterToolDefinitions, TOOL_DEFINITIONS } from './tools.mjs';
 import { replayMissedTurnEnd } from './turn-outcome-replay.mjs';
 import { PlanningState, authorizeToolCall, buildApprovedPlanPrompt, workflowError } from './planning-state.mjs';
 import { DownloadManager } from './download-manager.mjs';
+import { DocumentSnapshotManager } from './document-snapshot-manager.mjs';
+import { ArtifactStore } from './artifact-store.mjs';
 import { BrowserbaseSession } from './browserbase-session.mjs';
 import { createProviderHealth } from './provider-health.mjs';
 import { createUsageStore } from './usage-store.mjs';
@@ -33,10 +35,24 @@ import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
 import { resolveHwpExtractor } from './reference-extractor.mjs';
 import { ReferenceStore } from './reference-store.mjs';
 import { createReferenceHttpHandler, isAllowedStudioOrigin } from './reference-http.mjs';
-import { assertMessageScope, referenceScopesForSession, resolveSessionIdentity } from './reference-session.mjs';
+import {
+  activeDocumentIdentity,
+  addActiveDocumentContext,
+  assertMessageScope,
+  attachActiveDocumentIdentity,
+  referenceScopesForSession,
+  resolveSessionIdentity,
+} from './reference-session.mjs';
 import { executeReferenceTool } from './reference-tools.mjs';
 import { TemplateStore } from './template-store.mjs';
 import { createTemplateHttpHandler } from './template-http.mjs';
+import {
+  buildCopyLayoutCompletionPrompt,
+  buildCopyLayoutWorkerPrompt,
+  copyLayoutPhaseIndex,
+  defaultTemplateName,
+  taskProgressForJob,
+} from './template-perfection.mjs';
 import { z } from 'zod';
 import { terminateProcessTree } from './process-tree.mjs';
 import {
@@ -77,6 +93,9 @@ const HARNESS_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const HARNESS_UPDATE_BUSY_RETRY_MS = 5 * 60 * 1000;
 const HARNESS_UPDATE_FAILURE_RETRY_MS = 60 * 60 * 1000;
 const toolDefinitionsByName = new Map(TOOL_DEFINITIONS.map((definition) => [definition.name, definition]));
+const copyLayoutWorkerTools = new Set(
+  filterToolDefinitions('copy-layout-worker').map((definition) => definition.name),
+);
 // 인자 스키마는 도구마다 한 번만 만든다 — 호출마다 z.object() 를 다시 세우면
 // 툴 하나당 수십 개 필드를 매번 컴파일하게 된다. insert_image 는 passthrough,
 // 나머지는 strict 이므로 도구 이름으로 캐시하면 변형도 자연히 분리된다.
@@ -204,8 +223,13 @@ const sessions = new HubSessionRegistry({
       missedTurnEnd: null,
       styleCalibration: null,
       auxiliaryProcesses: new Set(),
+      templateJobs: new Map(),
+      activeTemplateJobId: null,
+      pendingTemplateCompletions: [],
       browserbaseSession: new BrowserbaseSession({ log }),
       downloadManager: new DownloadManager({ rootDir: workDir }),
+      documentSnapshotManager: new DocumentSnapshotManager({ rootDir: workDir }),
+      artifactStore: new ArtifactStore({ rootDir: workDir }),
       recordRoot,
       workDir,
       isolatedHome,
@@ -217,7 +241,10 @@ const sessions = new HubSessionRegistry({
 });
 
 function hasAgentSessions() {
-  return [...sessions.values()].some((record) => record.agentSession !== null);
+  return [...sessions.values()].some((record) => (
+    record.agentSession !== null
+    || [...record.templateJobs.values()].some((job) => job.status === 'running')
+  ));
 }
 
 function broadcastToStudios(message) {
@@ -668,6 +695,242 @@ function sessionInfo(record) {
     : null;
 }
 
+function artifactDownloadDescriptor(record, artifactId, artifact) {
+  const encodePathSegment = (value) => encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  const downloadUrl = new URL(
+    `/artifacts/${encodePathSegment(artifactId)}/${encodePathSegment(artifact.fileName)}`,
+    `http://127.0.0.1:${hubPort}`,
+  );
+  downloadUrl.searchParams.set('sessionId', record.sessionId);
+  downloadUrl.searchParams.set('token', issueScopedHubToken(TOKEN, record.sessionId));
+  downloadUrl.searchParams.set('templatePreview', '1');
+  return {
+    artifactId,
+    fileName: artifact.fileName,
+    mime: artifact.mime,
+    size: artifact.size,
+    checksum: artifact.checksum,
+    downloadUrl: downloadUrl.href,
+  };
+}
+
+function sendTemplateJobEvent(record, event) {
+  sendJson(record.studioSocket, { v: 1, type: 'agent-event', event });
+}
+
+function workerJobForSocket(record, sock) {
+  if (typeof sock.agentRole !== 'string' || !sock.agentRole.startsWith('copy-layout-worker:')) return null;
+  return [...record.templateJobs.values()].find((job) => job.workerRole === sock.agentRole) ?? null;
+}
+
+function templateCompletionResult(job) {
+  return {
+    jobId: job.jobId,
+    outcome: job.status === 'completed' ? 'succeeded' : 'failed',
+    source: job.binding,
+    ...(job.result ?? {}),
+  };
+}
+
+function drainTemplateCompletion(record) {
+  const activeSession = record.agentSession;
+  if (!activeSession || activeSession.status !== 'idle') return;
+  const index = record.pendingTemplateCompletions.findIndex(
+    (entry) => entry.ownerThreadId === activeSession.threadId,
+  );
+  if (index < 0) return;
+  const [entry] = record.pendingTemplateCompletions.splice(index, 1);
+  activeSession.status = 'running';
+  try {
+    activeSession.backend.sendUserMessage(buildCopyLayoutCompletionPrompt(entry.result));
+  } catch (error) {
+    activeSession.status = 'idle';
+    record.pendingTemplateCompletions.splice(index, 0, entry);
+    log(`copy-layout completion dispatch failed: ${error?.message ?? error}`);
+  }
+}
+
+function queueTemplateCompletion(record, job) {
+  if (job.completionQueued) return;
+  job.completionQueued = true;
+  record.pendingTemplateCompletions.push({
+    ownerThreadId: job.ownerThreadId,
+    result: templateCompletionResult(job),
+  });
+  drainTemplateCompletion(record);
+}
+
+function settleTemplateJobFailure(record, job, error) {
+  if (!job || job.status !== 'running') return;
+  const message = String(error?.message ?? error ?? 'Autonomous copy-layout worker stopped without a completion report');
+  job.status = 'failed';
+  job.activity = message;
+  job.result = {
+    summary: message,
+    warnings: [message],
+    counts: {
+      keptText: 0, removedText: 0, replacedText: 0, resetControls: 0,
+      clearedMarks: 0, keptMedia: 0, removedMedia: 0, iterations: 1,
+    },
+    preview: {
+      representativePages: [], sourcePageCount: 1, outputPageCount: 1,
+      outputSectionCount: 1, renderCompared: false, geometryMatch: false,
+      safetyVerified: false, readabilityVerified: false, stoppedReason: 'hard-failure',
+    },
+  };
+  record.activeTemplateJobId = null;
+  sendTemplateJobEvent(record, {
+    type: 'task-end', agent: job.agent, taskId: job.jobId,
+    status: 'failed', summary: message, ...(job.usage ? { usage: job.usage } : {}),
+  });
+  queueTemplateCompletion(record, job);
+}
+
+function makeTemplateWorkerEventHandler(record, job) {
+  return (event) => {
+    if (job.status !== 'running' && event.type !== 'turn-end') return;
+    if (event.type === 'session-info' && event.sessionId) job.providerSessionId = event.sessionId;
+    if (event.type === 'text-delta' && event.text?.trim()) {
+      job.activity = event.text.replace(/\s+/g, ' ').trim().slice(-500);
+      sendTemplateJobEvent(record, taskProgressForJob(job, job.activity));
+      return;
+    }
+    if (event.type === 'tool-call') {
+      job.usage = { ...(job.usage ?? {}), toolUses: (job.usage?.toolUses ?? 0) + 1 };
+      sendTemplateJobEvent(record, taskProgressForJob(job, job.activity, event.tool));
+      return;
+    }
+    if (event.type === 'usage') {
+      usageStore.record({ agent: job.agent, model: event.model, costUsd: event.costUsd, ...(event.usage ?? {}) });
+      const totalTokens = Object.values(event.usage ?? {}).reduce((sum, value) => sum + (Number(value) || 0), 0);
+      job.usage = { ...(job.usage ?? {}), totalTokens };
+      sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
+      sendTemplateJobEvent(record, taskProgressForJob(job, job.activity));
+      return;
+    }
+    if (event.type === 'error') {
+      job.lastError = event.message;
+      job.activity = event.message;
+      sendTemplateJobEvent(record, taskProgressForJob(job, event.message));
+      return;
+    }
+    if (event.type === 'turn-end') {
+      if (job.status === 'running') settleTemplateJobFailure(record, job, job.lastError || event.errorMessage);
+      const backend = job.backend;
+      job.backend = null;
+      void Promise.resolve(backend?.dispose()).catch((error) => {
+        log(`copy-layout worker dispose failed: ${error?.message ?? error}`);
+      });
+    }
+  };
+}
+
+async function launchTemplateJob(record, job) {
+  const jobDir = path.join(record.workDir, 'copy-layout-jobs', job.jobId);
+  const helperPath = path.join(jobDir, 'copy_layout.py');
+  const providerRoot = path.join(record.recordRoot, 'copy-layout-providers', job.jobId);
+  const isolatedHome = path.join(providerRoot, 'home');
+  const codexHome = path.join(isolatedHome, '.codex');
+  const grokHome = path.join(isolatedHome, '.grok');
+  const cursorHome = path.join(isolatedHome, '.cursor');
+  await fs.mkdir(jobDir, { recursive: true, mode: 0o700 });
+  await fs.mkdir(providerRoot, { recursive: true, mode: 0o700 });
+  await fs.copyFile(path.join(BUNDLED_SKILLS, 'copy-layout', 'scripts', 'copy_layout.py'), helperPath);
+  await fs.chmod(helperPath, 0o500);
+  prepareCodexHome(codexHome, sourceCodexAuthPath);
+  prepareClaudeHome(isolatedHome, sourceClaudeAuth);
+  prepareGrokHome(grokHome, sourceGrokAuthPath);
+  prepareCursorHome(cursorHome, cliSetup.cursorSourceDir);
+  job.jobDir = jobDir;
+  job.helperPath = helperPath;
+
+  const opts = {
+    rootDir: record.workDir,
+    workDir: record.workDir,
+    mcpScriptPath: MCP_SCRIPT,
+    hubPort,
+    token: issueScopedHubToken(TOKEN, record.sessionId),
+    sessionId: record.sessionId,
+    model: job.model,
+    effort: job.effort,
+    permissionProfile: 'safe',
+    isolatedHome,
+    codexHome,
+    codexAuthPath: sourceCodexAuthPath,
+    grokHome,
+    grokAuthPath: sourceGrokAuthPath,
+    cursorSourceDir: cliSetup.cursorSourceDir,
+    codexBin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
+    claudeBin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
+    grokBin: cliSetupStatus.grok?.installed ? cliSetup.binPath('grok') : 'grok',
+    cursorBin: cliSetupStatus.cursor?.installed ? cliSetup.binPath('cursor') : 'cursor-agent',
+    providerEnv: CLI_SETUP_AGENTS.includes(job.agent) ? cliSetup.envFor(job.agent) : {},
+    onEvent: makeTemplateWorkerEventHandler(record, job),
+    workflow: 'direct',
+    phase: 'implementing',
+    capabilityEpoch: job.capabilityEpoch,
+    toolProfile: 'copy-layout-worker',
+    agentRole: job.workerRole,
+    systemPromptOverride: buildCopyLayoutWorkerPrompt({
+      jobId: job.jobId,
+      binding: job.binding,
+      helperPath,
+      jobDir,
+    }),
+    piBin: piManager.piBin,
+    piRoot: piManager.rootDir,
+    openRouterApiKey: job.agent === 'pi' ? piManager.apiKey() : undefined,
+    reasoning: job.agent === 'pi' ? Boolean(piModelConfig(job.model)?.reasoning) : false,
+  };
+  const createBackend = SESSION_FACTORIES[job.agent];
+  if (!createBackend) throw unknownAgentError(job.agent);
+  job.backend = createBackend(opts);
+  job.backend.sendUserMessage('Begin the autonomous copy-layout workflow now. Follow the system workflow exactly and do not ask questions.');
+}
+
+function createTemplateJob(record, activeSession, binding) {
+  if (record.activeTemplateJobId) {
+    const active = record.templateJobs.get(record.activeTemplateJobId);
+    if (active?.status === 'running') {
+      throw workflowError('COPY_LAYOUT_JOB_ACTIVE', 'A copy-layout job is already running for this Studio window');
+    }
+  }
+  if (binding.documentId !== activeSession.documentId) {
+    throw workflowError('DOCUMENT_ID_MISMATCH', 'The copy-layout binding does not match this chat\'s exact documentId');
+  }
+  const jobId = crypto.randomUUID();
+  const job = {
+    jobId,
+    ownerThreadId: activeSession.threadId,
+    agent: activeSession.agent,
+    model: activeSession.model,
+    effort: activeSession.effort,
+    binding: structuredClone(binding),
+    status: 'running',
+    phase: 'binding-source',
+    activity: '정확한 원본 문서를 고정하는 중',
+    capabilityEpoch: activeSession.planning.capabilityEpoch,
+    workerRole: `copy-layout-worker:${jobId}:${crypto.randomBytes(18).toString('base64url')}`,
+    backend: null,
+    usage: { toolUses: 0 },
+    completionQueued: false,
+    registeredTemplateId: null,
+  };
+  record.templateJobs.set(jobId, job);
+  record.activeTemplateJobId = jobId;
+  sendTemplateJobEvent(record, {
+    type: 'task-start', agent: job.agent, taskId: job.jobId,
+    title: '레이아웃 템플릿 자동 완성',
+    taskKind: 'agent', background: true,
+  });
+  sendTemplateJobEvent(record, taskProgressForJob(job, job.activity));
+  void launchTemplateJob(record, job).catch((error) => settleTemplateJobFailure(record, job, error));
+  return job;
+}
+
 function makeBackendEventHandler(record, generation) {
   return (evt) => {
     const activeSession = record.agentSession;
@@ -684,6 +947,7 @@ function makeBackendEventHandler(record, generation) {
     if (evt.type === 'turn-end') activeSession.status = 'idle';
     const delivered = sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt });
     if (evt.type === 'turn-end' && !delivered) record.missedTurnEnd = evt;
+    if (evt.type === 'turn-end') drainTemplateCompletion(record);
   };
 }
 
@@ -815,10 +1079,13 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
       if (record.agentSession !== activeSession) throw new Error('Agent session changed before the message was dispatched');
       activeSession.backend.sendUserMessage(addReopenedChatHistory(
         activeSession,
-        addTemplateContext(
-          record,
+        addActiveDocumentContext(
           activeSession,
-          addReferenceContext(activeSession, msg.text, prompt, messageAttachments),
+          addTemplateContext(
+            record,
+            activeSession,
+            addReferenceContext(activeSession, msg.text, prompt, messageAttachments),
+          ),
         ),
       ));
     })
@@ -965,6 +1232,7 @@ async function startSession(
     planning,
     workflowTransition: Promise.resolve(),
   };
+  queueMicrotask(() => drainTemplateCompletion(record));
   return record.agentSession;
 }
 
@@ -1785,7 +2053,26 @@ async function handleStudioMessage(record, sock, msg) {
       clearTimeout(entry.timer);
       if (entry.mcpSocket.readyState !== entry.mcpSocket.OPEN) return;
       if (msg.ok) {
-        sendJson(entry.mcpSocket, { v: 1, type: 'tool-result', id: entry.clientId, ok: true, result: msg.result });
+        try {
+          const result = entry.tool === 'get_document_info'
+            ? attachActiveDocumentIdentity(msg.result, entry.documentIdentity)
+            : entry.tool === 'materialize_document_snapshot'
+              ? await record.documentSnapshotManager.materialize({
+                chatId: entry.chatId,
+                documentIdentity: entry.documentIdentity,
+                snapshot: msg.result,
+              })
+              : msg.result;
+          sendJson(entry.mcpSocket, { v: 1, type: 'tool-result', id: entry.clientId, ok: true, result });
+        } catch (error) {
+          sendJson(entry.mcpSocket, {
+            v: 1, type: 'tool-result', id: entry.clientId, ok: false,
+            error: {
+              code: error?.code ?? 'SNAPSHOT_WRITE_FAILED',
+              message: String(error?.message ?? error),
+            },
+          });
+        }
       } else {
         sendJson(entry.mcpSocket, {
           v: 1, type: 'tool-result', id: entry.clientId, ok: false,
@@ -1818,13 +2105,27 @@ function handleMcpMessage(record, sock, msg) {
         return;
       }
       let args;
+      const workerJob = workerJobForSocket(record, sock);
       try {
         args = toolArgSchema(tool, definition).parse(msg.args ?? {});
         definition.validate?.(args);
-        if (!record.agentSession && tool !== 'read_product_skill') {
+        if (!record.agentSession && !workerJob && tool !== 'read_product_skill') {
           throw workflowError('AGENT_NOT_STARTED', 'No active chat session');
         }
-        if (record.agentSession) {
+        if (sock.agentRole?.startsWith('copy-layout-worker:') && !workerJob) {
+          throw workflowError('COPY_LAYOUT_JOB_UNAUTHORIZED', 'This background worker is not bound to an active copy-layout job');
+        }
+        if (workerJob) {
+          if (workerJob.status !== 'running') {
+            throw workflowError('COPY_LAYOUT_JOB_SETTLED', 'This copy-layout job is already settled');
+          }
+          if (!copyLayoutWorkerTools.has(tool)) {
+            throw workflowError('COPY_LAYOUT_TOOL_DENIED', `The autonomous copy-layout worker cannot call ${tool}`);
+          }
+          if (args.jobId && args.jobId !== workerJob.jobId) {
+            throw workflowError('COPY_LAYOUT_JOB_MISMATCH', 'The tool call does not match this worker\'s bound job');
+          }
+        } else if (record.agentSession) {
           if (msg.workflow && msg.workflow !== record.agentSession.planning.workflow) {
             throw workflowError('WORKFLOW_MISMATCH', `MCP call declared ${msg.workflow} but the active workflow is ${record.agentSession.planning.workflow}`);
           }
@@ -1846,6 +2147,118 @@ function handleMcpMessage(record, sock, msg) {
         void skillRegistry.readResource(String(args.name ?? ''), String(args.resourcePath ?? 'SKILL.md'))
           .then(sendResult)
           .catch((error) => sendError(error, 'SKILLS_ERROR'));
+        return;
+      }
+      if (tool === 'delegate_copy_layout') {
+        try {
+          const job = createTemplateJob(record, record.agentSession, args);
+          sendResult({
+            jobId: job.jobId,
+            status: 'running',
+            provider: job.agent,
+            model: job.model,
+            completionDelivery: 'automatic-owning-chat-turn',
+            waitForCompletion: false,
+            message: '백그라운드 작업을 시작했습니다. wait_agent로 기다리거나 폴링하지 말고 현재 턴을 끝내세요. 완료되면 허브가 이 채팅을 자동으로 다시 시작해 결과를 전달합니다.',
+          });
+        } catch (error) {
+          sendError(error, 'COPY_LAYOUT_DELEGATION_FAILED');
+        }
+        return;
+      }
+      if (tool === 'update_copy_layout_job') {
+        if (!workerJob) {
+          sendError(workflowError('COPY_LAYOUT_JOB_UNAUTHORIZED', 'Only the bound copy-layout worker can report progress'));
+          return;
+        }
+        workerJob.phase = args.phase;
+        workerJob.activity = args.activity;
+        if (args.iteration !== undefined) workerJob.iteration = args.iteration;
+        sendTemplateJobEvent(record, taskProgressForJob(workerJob, args.activity, tool));
+        sendResult({
+          jobId: workerJob.jobId,
+          phase: workerJob.phase,
+          phaseIndex: copyLayoutPhaseIndex(workerJob.phase),
+          iteration: workerJob.iteration ?? 0,
+        });
+        return;
+      }
+      if (tool === 'complete_copy_layout_job') {
+        if (!workerJob) {
+          sendError(workflowError('COPY_LAYOUT_JOB_UNAUTHORIZED', 'Only the bound copy-layout worker can complete this job'));
+          return;
+        }
+        if (args.sourceDocumentId !== workerJob.binding.documentId || args.sourceDigest !== workerJob.binding.digest) {
+          sendError(workflowError('COPY_LAYOUT_SOURCE_MISMATCH', 'Completion does not match the immutable source binding'));
+          return;
+        }
+        void (async () => {
+          let artifact = null;
+          if (args.outcome === 'succeeded') {
+            artifact = await record.artifactStore.read(args.artifactId);
+          }
+          workerJob.status = args.outcome === 'succeeded' ? 'completed' : 'failed';
+          workerJob.activity = args.summary;
+          workerJob.result = {
+            summary: args.summary,
+            warnings: args.warnings,
+            counts: args.counts,
+            preview: args.preview,
+            ...(artifact ? {
+              quality: args.quality,
+              artifact: artifactDownloadDescriptor(record, args.artifactId, artifact),
+            } : {}),
+          };
+          record.activeTemplateJobId = null;
+          sendTemplateJobEvent(record, {
+            type: 'task-end',
+            agent: workerJob.agent,
+            taskId: workerJob.jobId,
+            status: workerJob.status === 'completed' ? 'completed' : 'failed',
+            summary: args.summary,
+            ...(workerJob.usage ? { usage: workerJob.usage } : {}),
+          });
+          queueTemplateCompletion(record, workerJob);
+          sendResult({ jobId: workerJob.jobId, status: workerJob.status });
+        })().catch((error) => {
+          settleTemplateJobFailure(record, workerJob, error);
+          sendError(error, 'COPY_LAYOUT_COMPLETION_FAILED');
+        });
+        return;
+      }
+      if (tool === 'register_copy_layout_template') {
+        const job = record.templateJobs.get(args.jobId);
+        if (!job || job.ownerThreadId !== record.agentSession?.threadId) {
+          sendError(workflowError('COPY_LAYOUT_JOB_NOT_FOUND', 'No completed copy-layout job belongs to this chat'));
+          return;
+        }
+        if (job.status !== 'completed' || !job.result?.artifact) {
+          sendError(workflowError('COPY_LAYOUT_JOB_NOT_READY', 'The copy-layout artifact is not ready for registration'));
+          return;
+        }
+        if (job.registeredTemplateId) {
+          try {
+            sendResult({ template: templateStore.get(job.registeredTemplateId), alreadyRegistered: true });
+          } catch (error) {
+            sendError(error, 'TEMPLATE_NOT_FOUND');
+          }
+          return;
+        }
+        void record.artifactStore.read(job.result.artifact.artifactId)
+          .then((artifact) => templateStore.add({
+            name: args.name ?? defaultTemplateName(artifact.fileName),
+            originalName: artifact.fileName,
+            format: path.extname(artifact.fileName).slice(1).toLowerCase(),
+            pageCount: job.result.preview.outputPageCount,
+            sectionCount: job.result.preview.outputSectionCount,
+            bytes: artifact.bytes,
+          }))
+          .then((template) => {
+            job.registeredTemplateId = template.id;
+            broadcastTemplateCatalog({ type: 'added', template });
+            sendResult({ template, alreadyRegistered: false });
+          })
+          .catch((error) => sendError(error, 'TEMPLATE_REGISTER_FAILED'));
         return;
       }
       if (definition.category === 'reference-read') {
@@ -1902,6 +2315,24 @@ function handleMcpMessage(record, sock, msg) {
           .catch((error) => sendError(error, 'DOWNLOAD_FAILED'));
         return;
       }
+      if (tool === 'publish_artifact') {
+        void record.artifactStore.publish(args)
+          .then(({ artifactId, fileName, mime, size, checksum }) => {
+            const encodePathSegment = (value) => encodeURIComponent(value).replace(
+              /[!'()*]/g,
+              (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+            );
+            const downloadUrl = new URL(
+              `/artifacts/${encodePathSegment(artifactId)}/${encodePathSegment(fileName)}`,
+              `http://127.0.0.1:${hubPort}`,
+            );
+            downloadUrl.searchParams.set('sessionId', record.sessionId);
+            downloadUrl.searchParams.set('token', issueScopedHubToken(TOKEN, record.sessionId));
+            sendResult({ artifactId, fileName, mime, size, checksum, downloadUrl: downloadUrl.href });
+          })
+          .catch((error) => sendError(error, 'ARTIFACT_PUBLISH_FAILED'));
+        return;
+      }
       if (definition.category === 'browser') {
         const sidecarTool = tool.replace(/^browserbase_/, '');
         void record.browserbaseSession.call(record.agentSession.chatId, sidecarTool, args)
@@ -1927,11 +2358,14 @@ function handleMcpMessage(record, sock, msg) {
         }
       }
       const hubId = record.nextHubId++;
-      // apply_edits 는 항목 수만큼 변이+마감 리플로우를 안고 오므로 단일 편집용
-      // 30s 예산을 배치 크기에 비례해 늘린다 (mcp-stdio 의 180s 한도 아래로 유지).
+      // apply_edits 는 항목 수만큼 변이+마감 리플로우를 안고 오므로 배치 크기에
+      // 비례해 늘린다. 전체 문서 직렬화+base64 전송도 큰 파일에서는 길어질 수 있어
+      // 별도 예산을 준다 (둘 다 mcp-stdio 의 180s 한도 아래로 유지).
       const timeoutMs = tool === 'apply_edits'
         ? Math.min(STUDIO_TOOL_TIMEOUT_MS + 2_000 * (Array.isArray(args.edits) ? args.edits.length : 0), 120_000)
-        : STUDIO_TOOL_TIMEOUT_MS;
+        : tool === 'materialize_document_snapshot'
+          ? 120_000
+          : STUDIO_TOOL_TIMEOUT_MS;
       const timer = setTimeout(() => {
         record.pendingCalls.delete(hubId);
         sendJson(sock, {
@@ -1939,7 +2373,19 @@ function handleMcpMessage(record, sock, msg) {
           error: { code: 'STUDIO_TIMEOUT', message: `Studio did not answer within ${timeoutMs / 1000}s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates` },
         });
       }, timeoutMs);
-      record.pendingCalls.set(hubId, { mcpSocket: sock, clientId, timer });
+      record.pendingCalls.set(hubId, {
+        mcpSocket: sock,
+        clientId,
+        timer,
+        tool,
+        documentIdentity: workerJob
+          ? { documentId: workerJob.binding.documentId, documentName: workerJob.binding.documentName }
+          : activeDocumentIdentity(record.agentSession),
+        chatId: workerJob?.jobId
+          ?? record.agentSession?.chatId
+          ?? record.agentSession?.threadId
+          ?? record.sessionId,
+      });
       sendJson(record.studioSocket, {
         v: 1, type: 'tool-request', id: hubId,
         // 호출을 보낸 MCP 소켓의 에이전트 라벨을 단다 — 현재 세션 기준으로 찍으면
@@ -2076,6 +2522,45 @@ function isTemplatePath(pathname) {
 const httpServer = http.createServer((req, res) => {
   void Promise.resolve().then(async () => {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${hubPort || REQUESTED_PORT || 5175}`);
+    if (req.method === 'GET' && url.pathname.startsWith('/artifacts/')) {
+      const origin = typeof req.headers.origin === 'string' ? req.headers.origin : null;
+      if (origin && !isAllowedStudioOrigin(origin)) {
+        sendHttpJson(res, 403, { status: 'forbidden' });
+        return;
+      }
+      const sessionId = authenticateHttpSession(req, url);
+      const record = sessions.get(sessionId);
+      if (!record) {
+        sendHttpJson(res, 404, { status: 'not-found' });
+        return;
+      }
+      const [, , encodedArtifactId] = url.pathname.split('/');
+      const artifactId = decodeURIComponent(encodedArtifactId ?? '');
+      let artifact;
+      try {
+        artifact = await record.artifactStore.read(artifactId);
+      } catch (error) {
+        if (error?.code !== 'ARTIFACT_NOT_FOUND') throw error;
+        sendHttpJson(res, 404, { status: 'not-found' });
+        return;
+      }
+      const encodedName = encodeURIComponent(artifact.fileName).replaceAll('%20', ' ');
+      const asciiName = artifact.fileName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+      res.writeHead(200, {
+        'content-type': artifact.mime,
+        'content-length': artifact.bytes.length,
+        'content-disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodedName}`,
+        'cache-control': 'no-store, private',
+        'x-content-type-options': 'nosniff',
+        ...(origin ? {
+          'access-control-allow-origin': origin,
+          'access-control-expose-headers': 'Content-Disposition, Content-Length',
+          vary: 'Origin',
+        } : {}),
+      });
+      res.end(artifact.bytes);
+      return;
+    }
     if (isReferencePath(url.pathname) || isTemplatePath(url.pathname)) {
       if (req.method !== 'OPTIONS') {
         const sessionId = authenticateHttpSession(req, url);
@@ -2301,6 +2786,16 @@ httpServer.on('upgrade', (req, socket, head) => {
           detail: 'Preparing writing samples', completed: 0, total: 1,
         });
       }
+      for (const job of record.templateJobs.values()) {
+        if (job.status === 'running') {
+          sendTemplateJobEvent(record, {
+            type: 'task-start', agent: job.agent, taskId: job.jobId,
+            title: '레이아웃 템플릿 자동 완성',
+            taskKind: 'agent', background: true,
+          });
+          sendTemplateJobEvent(record, taskProgressForJob(job, job.activity));
+        }
+      }
       const cachedProviders = providerHealth.cached();
       if (cachedProviders) sendJson(ws, { v: 1, type: 'provider-status', providers: cachedProviders });
       void providerHealth.check().then((providers) => {
@@ -2328,6 +2823,7 @@ httpServer.on('upgrade', (req, socket, head) => {
 
     const agentLabel = url.searchParams.get('agent') ?? 'unknown';
     ws.agentLabel = url.searchParams.get('agent');
+    ws.agentRole = url.searchParams.get('role') ?? 'chat';
     ws.workflow = url.searchParams.get('workflow');
     ws.capabilityEpoch = url.searchParams.get('capabilityEpoch');
     record.mcpSockets.add(ws);
@@ -2367,6 +2863,23 @@ async function disposeRecord(record, reason) {
   clearStudioReattachGrace(record);
   failAllPendingCalls(record, 'Hub session is shutting down');
   const backendExit = disposeSession(record);
+  const templateBackendExits = [];
+  for (const job of record.templateJobs.values()) {
+    if (job.status === 'running') {
+      job.status = 'failed';
+      job.activity = reason;
+    }
+    const backend = job.backend;
+    job.backend = null;
+    if (!backend) continue;
+    try {
+      templateBackendExits.push(Promise.resolve(backend.dispose()).catch((error) => {
+        log(`copy-layout worker exit wait failed: ${error?.message ?? error}`);
+      }));
+    } catch (error) {
+      log(`copy-layout worker dispose failed: ${error?.message ?? error}`);
+    }
+  }
   for (const sock of [record.studioSocket, ...record.mcpSockets]) {
     try { sock?.close(1001, reason); } catch {}
   }
@@ -2374,6 +2887,7 @@ async function disposeRecord(record, reason) {
   record.studioSocket = null;
   await Promise.all([
     backendExit,
+    ...templateBackendExits,
     stopAuxiliaryProcesses(record),
     record.browserbaseSession.cleanup(reason),
   ]);

@@ -7558,6 +7558,34 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 다른 HWP/HWPX/HML 문서의 본문 문단 범위를 네이티브 IR로 붙여넣는다.
+    ///
+    /// HTML 변환을 거치지 않으므로 표·그림·도형·수식·필드와 중첩 컨트롤을
+    /// 보존한다. 문서 전역 리소스와 개체/필드 ID는 대상 문서에 맞게 재매핑하며,
+    /// 검증할 수 없는 opaque 컨트롤은 대상 변경 전에 명시적으로 실패한다.
+    #[wasm_bindgen(js_name = pasteDocumentBlock)]
+    pub fn paste_document_block(
+        &mut self,
+        source_bytes: &[u8],
+        source_section_idx: u32,
+        start_para_idx: u32,
+        end_para_idx: u32,
+        target_section_idx: u32,
+        target_para_idx: u32,
+        target_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.paste_document_block_native(
+            source_bytes,
+            source_section_idx as usize,
+            start_para_idx as usize,
+            end_para_idx as usize,
+            target_section_idx as usize,
+            target_para_idx as usize,
+            target_char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 내부 클립보드의 내용을 표 셀 내부에 붙여넣는다.
     ///
     /// 반환값: JSON `{"ok":true,"cellParaIdx":<idx>,"charOffset":<offset>}`

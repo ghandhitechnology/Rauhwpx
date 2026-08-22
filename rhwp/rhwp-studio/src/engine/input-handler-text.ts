@@ -416,7 +416,7 @@ function applyCompositionPreview(this: any, preedit: string): void {
 function syncCompositionDocument(this: any, preedit: string): void {
   const anchor = this.compositionAnchor;
   if (!anchor) return;
-  if (this.agentTemplateLocked || !this.canInsertTextInFormMode?.(anchor)) {
+  if (this.readOnly || this.agentTemplateLocked || !this.canInsertTextInFormMode?.(anchor)) {
     revertCompositionPreview.call(this);
     this.resetTextareaBuffer();
     this.imeSession.reset();
@@ -449,7 +449,7 @@ export function onCompositionStart(this: any): void {
   if (!this.cursor.isInHeaderFooter() && !this.cursor.isInFootnote()) {
     basePos = this.prepareClickHereInputPosition?.() ?? basePos;
   }
-  if (this.agentTemplateLocked || !this.canInsertTextInFormMode?.(basePos)) {
+  if (this.readOnly || this.agentTemplateLocked || !this.canInsertTextInFormMode?.(basePos)) {
     this.resetTextareaBuffer();
     this.imeSession.reset();
     this.compositionAnchor = null;
@@ -490,6 +490,7 @@ export function onCompositionEnd(this: any, event?: CompositionEvent): void {
   if (anchor) {
     const mayCommit = Boolean(composed)
       && !this.agentTemplateLocked
+      && !this.readOnly
       && (this.canInsertTextInFormMode?.(anchor) ?? true);
     if (!mayCommit) {
       this.compositionLength = previousLength;
@@ -554,6 +555,10 @@ export function onCompositionEnd(this: any, event?: CompositionEvent): void {
 
 export function onInput(this: any, e?: InputEvent): void {
   if (!this.active) return;
+  if (this.readOnly) {
+    this.resetTextareaBuffer();
+    return;
+  }
 
   if (e && this.imeSession.consumeTrailingInput({
     inputType: e.inputType,

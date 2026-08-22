@@ -460,6 +460,8 @@ export class InputHandler {
   private readonly imeSession = new ImeSession();
   /** 템플릿 구조 미리보기는 전체 문서 스냅샷으로 reject 하므로 리뷰 중 사용자 편집을 막는다. */
   private agentTemplateLocked = false;
+  /** 게시된 템플릿 미리보기 창은 선택/복사만 허용하고 모든 문서 변이를 차단한다. */
+  private readOnly = false;
   private get isComposing() { return this.imeSession.isComposing; }
   private compositionAnchor: DocumentPosition | null = null;
   /** 조합 시작 시점의 exact 좌표. 조합 갱신마다 같은 anchor를 다시 탐색하지 않는다. */
@@ -702,7 +704,7 @@ export class InputHandler {
 
     // Toolbar에서 서식 적용 요청 수신 (글꼴명, 크기, 색상 — 커맨드 시스템 미경유)
     eventBus.on('format-char', (props) => {
-      if (!this.active) return;
+      if (!this.active || this.readOnly) return;
       if (this.editMode === 'form') return;
       this.applyCharFormat(props as Partial<CharProperties>);
       // 서식바 조작으로 빠진 포커스를 항상 복원
@@ -712,6 +714,7 @@ export class InputHandler {
 
   /** 클릭 이벤트 처리 — hitTest로 커서 배치 */
   private onClick(e: MouseEvent): void {
+    if (this.readOnly) return;
     _mouse.onClick.call(this, e);
   }
 
@@ -722,11 +725,13 @@ export class InputHandler {
 
   /** 더블클릭: 글상자 객체 선택 → 텍스트 편집 진입 */
   private onDblClick(e: MouseEvent): void {
+    if (this.readOnly) return;
     _mouse.onDblClick.call(this, e);
   }
 
   /** 마우스 이동: 드래그 선택 또는 표 객체 선택 중 핸들 위 커서 변경 */
   private onMouseMove(e: MouseEvent): void {
+    if (this.readOnly) return;
     _mouse.onMouseMove.call(this, e);
   }
 
@@ -2655,6 +2660,7 @@ export class InputHandler {
    * 라우터가 적절한 Undo 전략을 자동 선택한다.
    */
   executeOperation(desc: OperationDescriptor): void {
+    if (this.readOnly) return;
     if (this.agentTemplateLocked && desc.kind !== 'record') return;
     if (!this.isOperationAllowedInEditMode(desc)) return;
     switch (desc.kind) {
@@ -2721,6 +2727,9 @@ export class InputHandler {
    * The exact before state is restored if the callback or after-snapshot capture fails.
    */
   executeAppliedSnapshot<T>(operationType: string, operation: (wasm: WasmBridge) => T): T {
+    if (this.readOnly) {
+      throw new Error('This template preview is read-only');
+    }
     if (this.editMode === 'form') {
       throw new Error('Autonomous document edits are unavailable in form mode');
     }
@@ -3947,6 +3956,18 @@ export class InputHandler {
         this.tableObjectRenderer?.clear();
         this.eventBus.emit('table-object-selection-changed', false);
       }
+    }
+    this.eventBus.emit('command-state-changed');
+  }
+
+  /** 게시된 템플릿 후보를 영구 읽기 전용 미리보기로 전환한다. */
+  setReadOnly(readOnly: boolean): void {
+    this.readOnly = readOnly;
+    if (readOnly) {
+      this.textarea.blur();
+      this.clearPendingCharFormat();
+      this.imagePlacementMode = false;
+      this.container.style.cursor = '';
     }
     this.eventBus.emit('command-state-changed');
   }

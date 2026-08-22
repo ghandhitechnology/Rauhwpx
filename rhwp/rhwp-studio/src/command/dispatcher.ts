@@ -27,13 +27,35 @@ function isBlockedInFormMode(commandId: string, ctx: EditorContext): boolean {
   return FORM_MODE_BLOCKED_PREFIXES.some(prefix => commandId.startsWith(prefix));
 }
 
+const READ_ONLY_ALLOWED_IDS = new Set([
+  'edit:copy',
+  'edit:select-all',
+  'edit:find',
+  'file:print',
+]);
+
+function isBlockedInReadOnly(commandId: string, ctx: EditorContext): boolean {
+  if (ctx.readOnly !== true) return false;
+  return !READ_ONLY_ALLOWED_IDS.has(commandId)
+    && !commandId.startsWith('view:')
+    && !commandId.startsWith('help:');
+}
+
 /** 통합 커맨드 디스패처: 메뉴/툴바/키보드 모든 입력의 단일 실행 경로 */
 export class CommandDispatcher {
+  private registry: CommandRegistry;
+  private services: CommandServices;
+  private eventBus: EventBus;
+
   constructor(
-    private registry: CommandRegistry,
-    private services: CommandServices,
-    private eventBus: EventBus,
-  ) {}
+    registry: CommandRegistry,
+    services: CommandServices,
+    eventBus: EventBus,
+  ) {
+    this.registry = registry;
+    this.services = services;
+    this.eventBus = eventBus;
+  }
 
   /**
    * 커맨드 실행.
@@ -47,7 +69,7 @@ export class CommandDispatcher {
     }
 
     const ctx = this.services.getContext();
-    if (isBlockedInFormMode(commandId, ctx)) {
+    if (isBlockedInFormMode(commandId, ctx) || isBlockedInReadOnly(commandId, ctx)) {
       return false;
     }
     if (def.canExecute && !def.canExecute(ctx)) {
@@ -74,7 +96,7 @@ export class CommandDispatcher {
     const def = this.registry.get(commandId);
     if (!def) return false;
     const ctx = this.services.getContext();
-    if (isBlockedInFormMode(commandId, ctx)) return false;
+    if (isBlockedInFormMode(commandId, ctx) || isBlockedInReadOnly(commandId, ctx)) return false;
     if (!def.canExecute) return true;
     return def.canExecute(ctx);
   }

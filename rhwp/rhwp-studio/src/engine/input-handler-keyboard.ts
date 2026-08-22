@@ -421,6 +421,17 @@ const chordMapG: Record<string, string> = {
  */
 export function onKeyDown(this: any, e: KeyboardEvent): void {
   if (!this.active) return;
+  if (this.readOnly) {
+    const key = e.key.toLowerCase();
+    const primaryShortcut = (e.ctrlKey || e.metaKey) && ['a', 'c', 'f', 'p'].includes(key);
+    const navigation = ['arrowleft', 'arrowright', 'arrowup', 'arrowdown', 'home', 'end', 'pageup', 'pagedown', 'escape']
+      .includes(key);
+    if (!primaryShortcut && !navigation) {
+      e.preventDefault();
+      this.resetTextareaBuffer?.();
+      return;
+    }
+  }
 
   // ─── 1. 코드 단축키 2번째 키 처리 (Ctrl+K → ? / Ctrl+M → ?) ───
   if (this._pendingChordK) {
@@ -1644,6 +1655,10 @@ export function onCopy(this: any, e: ClipboardEvent): void {
 
 export function onCut(this: any, e: ClipboardEvent): void {
   if (!this.active) return;
+  if (this.readOnly) {
+    e.preventDefault();
+    return;
+  }
   if (this.isFormMode?.()) {
     e.preventDefault();
     return;
@@ -1675,6 +1690,7 @@ export function onCut(this: any, e: ClipboardEvent): void {
 export function onPaste(this: any, e: ClipboardEvent): void {
   if (!this.active) return;
   e.preventDefault();
+  if (this.readOnly) return;
   if (this.isFormMode?.()) return;
 
   // 개체/표 선택 모드 해제 후 붙여넣기 진행

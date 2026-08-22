@@ -167,6 +167,14 @@ test('opaque native handles are sender-scoped and validate ownership before writ
     name: 'report.hwp',
   });
   assert.equal('path' in created.descriptor, false);
+  assert.equal(
+    registry.sourcePathForSender('session-a', created.descriptor.handleId),
+    '/canonical/report.hwp',
+  );
+  assert.throws(
+    () => registry.sourcePathForSender('session-b', created.descriptor.handleId),
+    /does not belong/,
+  );
 
   await assert.rejects(registry.read('session-b', created.descriptor.handleId), /does not belong/);
 

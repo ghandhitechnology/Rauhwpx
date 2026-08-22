@@ -387,6 +387,84 @@ function readInlineMath(src: string, start: number) {
   return null;
 }
 
+function readInlineLink(src: string, start: number): {
+  text: string;
+  href: string;
+  next: number;
+} | null {
+  const image = src[start] === '!' && src[start + 1] === '[';
+  const labelStart = start + (image ? 2 : 1);
+  if ((!image && src[start] !== '[') || labelStart >= src.length) return null;
+
+  let labelEnd = labelStart;
+  while (labelEnd - labelStart <= 300) {
+    labelEnd = src.indexOf(']', labelEnd);
+    if (labelEnd < 0 || src.slice(labelStart, labelEnd).includes('\n')) return null;
+    if (!isEscaped(src, labelEnd)) break;
+    labelEnd += 1;
+  }
+  if (labelEnd - labelStart > 300 || src[labelEnd + 1] !== '(') return null;
+
+  const destinationStart = labelEnd + 2;
+  let cursor = destinationStart;
+  let depth = 0;
+  while (cursor < src.length && cursor - destinationStart <= 4_000) {
+    const ch = src[cursor]!;
+    if (ch === '\n') return null;
+    if (ch === '\\' && cursor + 1 < src.length) {
+      cursor += 2;
+      continue;
+    }
+    if (ch === '(') {
+      depth += 1;
+      if (depth > 32) return null;
+      cursor += 1;
+      continue;
+    }
+    if (ch === ')') {
+      if (depth === 0) {
+        return {
+          text: src.slice(labelStart, labelEnd),
+          href: src.slice(destinationStart, cursor),
+          next: cursor + 1,
+        };
+      }
+      depth -= 1;
+      cursor += 1;
+      continue;
+    }
+    if (/[ \t]/u.test(ch) && depth === 0) {
+      const hrefEnd = cursor;
+      let titleCursor = cursor;
+      let titleDepth = 0;
+      while (titleCursor < src.length && titleCursor - cursor <= 200) {
+        const titleCh = src[titleCursor]!;
+        if (titleCh === '\n') return null;
+        if (titleCh === '\\' && titleCursor + 1 < src.length) {
+          titleCursor += 2;
+          continue;
+        }
+        if (titleCh === '(') titleDepth += 1;
+        else if (titleCh === ')') {
+          if (titleDepth === 0) {
+            return {
+              text: src.slice(labelStart, labelEnd),
+              href: src.slice(destinationStart, hrefEnd),
+              next: titleCursor + 1,
+            };
+          }
+          titleDepth -= 1;
+        }
+        titleCursor += 1;
+      }
+      return null;
+    }
+    if (/\s/u.test(ch)) return null;
+    cursor += 1;
+  }
+  return null;
+}
+
 export function tokenizeInline(src: string): InlineToken[] {
   const tokens: InlineToken[] = [];
   let buffer = '';
@@ -433,10 +511,10 @@ export function tokenizeInline(src: string): InlineToken[] {
       }
     }
     if (ch === '[' || (ch === '!' && src[i + 1] === '[')) {
-      const link = /^!?\[([^\]\n]{0,300})\]\(([^)\s]{0,500})(?:[ \t][^)\n]{0,200})?\)/.exec(src.slice(i));
+      const link = readInlineLink(src, i);
       if (link) {
-        push({ kind: 'link', text: link[1] ?? '', href: link[2] ?? '' });
-        i += link[0].length;
+        push({ kind: 'link', text: link.text, href: link.href });
+        i = link.next;
         continue;
       }
     }

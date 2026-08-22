@@ -258,6 +258,8 @@ check that file rather than this summary when the exact surface matters.
   document + active chat)
 - Read: `get_structure` (entry point; includes tables), `get_text_range`,
   `get_selection`, `get_fields`, `get_document_info` (includes `fontsUsed`),
+  `materialize_document_snapshot` (writes the exact live HWP/HWPX into the
+  isolated chat workspace when no native source path exists or the document is dirty),
   `find_text` (searches cells too), `render_page` (SVG markup or PNG image),
   `get_outline` (heading tree), `list_styles`,
   `list_numberings` (numbering/bullet definition ids),
@@ -295,12 +297,15 @@ check that file rather than this summary when the exact surface matters.
   template into the live document)
 - Planning control: `present_implementation_plan`
 - Hub download: `download_file`
+- Generated-file delivery: `publish_artifact` (workspace-confined HWP/HWPX →
+  authenticated local download URL)
 - Hub Browserbase proxy: `browserbase_start`, `browserbase_end`,
   `browserbase_navigate`, `browserbase_act`, `browserbase_observe`,
   `browserbase_extract`
 
 Every definition has one explicit category: `document-read`, `document-write`,
-`reference-read`, `download-write`, `planning-control`, or `browser`. Browser, download, and
+`reference-read`, `template-read`, `download-write`, `artifact-write`,
+`planning-control`, or `browser`. Browser, download, and
 planning-control calls are accepted only for plan-origin chats (including the
 implementing phase). Document writes are rejected by the hub during planning
 and awaiting approval.
@@ -313,6 +318,16 @@ source/final URL, and SHA-256 checksum. Downloads use a total timeout, bounded
 redirects, byte and free-space safety checks, and DNS-pinned public-address
 requests that reject local/private/reserved targets on every hop, with no
 product-level file-count cap.
+
+`publish_artifact` accepts only regular HWP/HWPX files whose canonical path is
+inside the current chat workspace. It rejects links, format mismatches,
+malformed/non-conforming HWPX packages, and files over 64 MiB. Publication
+captures immutable bytes so later workspace edits cannot corrupt a download,
+then returns a session-authenticated localhost URL. Studio renders that URL as
+separate Open-in-new-window and Download actions.
+The copy-layout skill uses this with `materialize_document_snapshot`, so browser
+documents no longer need an OS path and snapshot-backed results remain directly
+downloadable from chat.
 
 Browserbase tools proxy the official pinned `@browserbasehq/mcp` stdio
 sidecar. It starts lazily, verifies that all six upstream tools are ready,

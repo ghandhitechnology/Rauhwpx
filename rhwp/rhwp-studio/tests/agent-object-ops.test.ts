@@ -23,7 +23,7 @@ interface FakeTable {
   tableProps: Record<string, unknown>;
 }
 
-function makeEnv() {
+function makeEnv(sourcePath: string | null = null) {
   const body = ['Title', 'Second paragraph with text', ''];
   const bodyParaShapes = [10, 11, 12];
   const tables: FakeTable[] = [];
@@ -295,6 +295,8 @@ function makeEnv() {
     // ─ 기타 ─
     setFieldValueByName: () => ({ ok: true }),
     getSourceFormat: () => 'hwpx',
+    exportHwpx: () => new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]),
+    exportHwp: () => new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
     get documentDigest() { return 'blake3:obj-test'; },
     getFieldList: () => [],
     renderPageSvg: () => '<svg/>',
@@ -354,6 +356,7 @@ function makeEnv() {
     documentState: { isDirty: () => false } as never,
     revision,
     pending,
+    getDocumentSourcePath: async () => sourcePath,
   });
   const call = (tool: string, args: Record<string, unknown> = {}) =>
     executor.execute(tool, { expectedRevision: revision.revision, ...args }, 'claude');
@@ -922,6 +925,33 @@ test('get_document_info 에 fontsUsed 가 실린다', async () => {
   const r = (await call('get_document_info')) as { fontsUsed: string[]; fallbackFont: string };
   assert.deepEqual(r.fontsUsed, ['바탕']);
   assert.equal(r.fallbackFont, '바탕');
+});
+
+test('get_document_info returns the exact active desktop source path without searching', async () => {
+  const { call } = makeEnv('/Users/test/A/보고서.hwp');
+  const r = (await call('get_document_info')) as { sourcePath: string | null };
+  assert.equal(r.sourcePath, '/Users/test/A/보고서.hwp');
+
+  const browser = makeEnv();
+  const browserInfo = (await browser.call('get_document_info')) as { sourcePath: string | null };
+  assert.equal(browserInfo.sourcePath, null);
+});
+
+test('materialize_document_snapshot exports the live browser document without a source path', async () => {
+  const { call } = makeEnv();
+  const r = (await call('materialize_document_snapshot')) as {
+    sourceFormat: string;
+    byteLength: number;
+    dataBase64: string;
+    dirty: boolean;
+  };
+  assert.equal(r.sourceFormat, 'hwpx');
+  assert.equal(r.byteLength, 7);
+  assert.deepEqual(
+    new Uint8Array(Buffer.from(r.dataBase64, 'base64')),
+    new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]),
+  );
+  assert.equal(r.dirty, false);
 });
 
 // ─── 좌표 이동 ──────────────────────────────────────────────

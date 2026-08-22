@@ -31,8 +31,12 @@ import {
   waitForHubReadyLine,
 } from './agent-hub.mjs';
 import { DocumentLeaseManager } from './document-leases.mjs';
+import {
+  MAX_GENERATED_DOCUMENT_BYTES,
+  resolveGeneratedDocumentArtifact,
+} from './generated-document-artifact.mjs';
 import { launchRequest } from './launch-routing.mjs';
-import { NativeFileHandleRegistry } from './native-file-handles.mjs';
+import { NativeFileHandleRegistry, validateNativeDocumentBytes } from './native-file-handles.mjs';
 import { SessionManager } from './session-manager.mjs';
 import {
   STUDIO_URL,
@@ -354,7 +358,7 @@ function cascadedWindowPosition() {
   return { x: bounds.x + 28, y: bounds.y + 28 };
 }
 
-async function createWindow(launch = launchRequest()) {
+async function createWindow(launch = launchRequest(), { generatedDocument = null } = {}) {
   await hubOwner.ensure();
   const closeHubContext = hubOwner.context();
   if (!closeHubContext) throw new Error('Agent hub context is unavailable');
@@ -381,6 +385,9 @@ async function createWindow(launch = launchRequest()) {
     },
   });
   const session = sessions.addWindow(window, { source: launch.source, openFiles: [] });
+  session.generatedDocument = generatedDocument
+    ? { launchDocumentId: randomUUID(), ...generatedDocument }
+    : null;
   session.allowCloseOnce = false;
   session.pendingCloseRequestId = null;
   window.on('close', (event) => {
@@ -458,6 +465,9 @@ async function createWindow(launch = launchRequest()) {
     if (launchFiles.length > 0 && !window.isDestroyed()) {
       window.webContents.send('desktop:open-files', launchFiles);
     }
+    if (session.generatedDocument && !window.isDestroyed()) {
+      window.webContents.send('desktop:open-generated-document', session.generatedDocument);
+    }
   });
   window.once('ready-to-show', () => {
     if (!window.isDestroyed()) window.show();
@@ -501,6 +511,45 @@ ipcMain.handle('desktop:get-session-context', (event) => {
 ipcMain.handle('desktop:get-launch-files', (event) => {
   const session = sessionForEvent(event);
   return nativeFiles.descriptorsForSession(session.sessionId);
+});
+ipcMain.handle('desktop:get-launch-generated-document', (event) => {
+  const session = sessionForEvent(event);
+  return session.generatedDocument;
+});
+ipcMain.handle('desktop:open-generated-document-window', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  const hub = hubOwner.context();
+  if (!hub) throw new Error('Agent hub is unavailable');
+  const artifact = resolveGeneratedDocumentArtifact(payload, {
+    hubUrl: hub.hubUrl,
+    sessionId: session.sessionId,
+  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  let bytes;
+  try {
+    const response = await net.fetch(artifact.downloadUrl, {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`Generated document request failed with HTTP ${response.status}`);
+    const declaredLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_GENERATED_DOCUMENT_BYTES) {
+      throw new Error('Generated document exceeds the 64 MiB limit');
+    }
+    bytes = new Uint8Array(await response.arrayBuffer());
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_GENERATED_DOCUMENT_BYTES) {
+    throw new Error('Generated document bytes are empty or exceed the 64 MiB limit');
+  }
+  validateNativeDocumentBytes(artifact.fileName, bytes);
+  const opened = await createWindow(
+    launchRequest({ source: 'chat-artifact' }),
+    { generatedDocument: { fileName: artifact.fileName, bytes, readOnly: artifact.readOnly } },
+  );
+  return Boolean(opened);
 });
 ipcMain.handle('desktop:pick-native-open-file', async (event, options = {}) => {
   const session = sessionForEvent(event);
@@ -571,6 +620,10 @@ ipcMain.handle('desktop:release-native-file', (event, handleId) => {
 ipcMain.handle('desktop:native-file-read', (event, handleId) => {
   const session = sessionForEvent(event);
   return nativeFiles.read(session.sessionId, handleId);
+});
+ipcMain.handle('desktop:native-file-source-path', (event, handleId) => {
+  const session = sessionForEvent(event);
+  return nativeFiles.sourcePathForSender(session.sessionId, handleId);
 });
 ipcMain.handle('desktop:native-file-validate-save', (event, handleId, identity) => {
   const session = sessionForEvent(event);

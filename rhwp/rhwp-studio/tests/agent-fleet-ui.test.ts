@@ -446,6 +446,42 @@ test('턴 밖에서 태어난 task 는 끝나는 즉시 슬롯으로 정착한�
   view.reset();
 });
 
+test('독립 백그라운드 provider task 는 owning turn 과 다음 turn 을 지나 계속 돈다', () => {
+  const { view, conversation } = mountFleet();
+  view.beginTurn();
+  view.taskStart(taskStart('template-job', {
+    title: '레이아웃 템플릿 자동 완성',
+    background: true,
+  }) as never);
+  view.sweep();
+  const card = hostedCards(view)[0];
+  assert.equal(hostedCards(view).length, 1, 'owning turn 종료 뒤에도 도크에서 실행 중이다');
+  assert.equal(settledCards(conversation).length, 0);
+  assert.equal(one(card, 'ag-fleet-label').textContent, '백그라운드 작업 1 · 작업 중');
+  assert.equal(all(card, 'ag-fleet-row').length, 1, 'single worker is represented by the task row only');
+  assert.equal(all(card, 'ag-fleet-member').length, 0);
+  assert.equal(one(card, 'ag-fleet-role').hidden, true, 'redundant dedicated-worker badge is omitted');
+
+  view.beginTurn();
+  view.taskProgress({
+    type: 'task-progress', agent: 'claude', taskId: 'template-job', activity: '대표 페이지 비교 중',
+    phases: [{ index: 0, title: '원본 고정' }, { index: 1, title: '대표 페이지 비교' }],
+    phaseIndex: 1,
+  } as never);
+  assert.equal(hostedCards(view).length, 1, 'main chat의 다음 turn과 섞이거나 중단되지 않는다');
+  assert.equal(one(card, 'ag-fleet-activity').textContent, '대표 페이지 비교 중');
+  assert.equal(all(card, 'ag-fleet-row').length, 1, 'phase updates do not create a duplicate worker row');
+  assert.ok(all(card, 'ag-fleet-phase')[1].className.includes('ag-live'));
+  view.sweep();
+
+  view.taskEnd({
+    type: 'task-end', agent: 'claude', taskId: 'template-job', status: 'completed', summary: '검증 완료',
+  } as never);
+  assert.equal(hostedCards(view).length, 0, '독립 task 자체가 끝나면 도크를 떠난다');
+  assert.equal(settledCards(conversation).length, 1);
+  view.reset();
+});
+
 test('알약 클릭은 팝업을 접었다 펼치고 aria-expanded 를 따라간다', () => {
   const { view, popupToggles } = mountFleet();
   view.beginTurn();
@@ -540,6 +576,13 @@ test('행 높이는 고정 그리드로 못 박혀 있고 진행 표시는 픽�
   // 도는 동안에는 점이 아니라 휠이 그 자리를 쓴다.
   assert.match(css, /\.ag-fleet-row\.ag-live \.ag-fleet-dot \{\s*\n\s*display: none;/s);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.ag-fleet,\s*\.ag-fleet-row \{\s*animation: none;/s);
+});
+
+test('단계 레일은 겹친 알약 대신 한 줄 연결 타임라인이다', () => {
+  assert.match(css, /\.ag-fleet-rail\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto;/s);
+  assert.match(css, /\.ag-fleet-phase\s*\{[^}]*flex:\s*0 0 auto;[^}]*border:\s*0;[^}]*background:\s*transparent;/s);
+  assert.match(css, /\.ag-fleet-phase:not\(:last-child\)::after\s*\{[^}]*width:\s*12px;[^}]*height:\s*1px;/s);
+  assert.match(css, /\.ag-fleet-phase-mark:empty::before\s*\{[^}]*border-radius:\s*50%;/s);
 });
 
 test('편대 도크는 입력기 위 알약과 팝업으로 그려진다', () => {

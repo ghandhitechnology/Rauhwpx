@@ -3,6 +3,11 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('rhwpDesktop', {
   getSessionContext: () => ipcRenderer.invoke('desktop:get-session-context'),
   getLaunchFiles: () => ipcRenderer.invoke('desktop:get-launch-files'),
+  getLaunchGeneratedDocument: () => ipcRenderer.invoke('desktop:get-launch-generated-document'),
+  openGeneratedDocumentWindow: (payload) => ipcRenderer.invoke(
+    'desktop:open-generated-document-window',
+    payload,
+  ),
   pickNativeOpenFile: (options) => ipcRenderer.invoke('desktop:pick-native-open-file', options),
   claimNativeDroppedFile: (file) => {
     const path = webUtils.getPathForFile(file);
@@ -11,6 +16,10 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
   pickNativeSaveFile: (options) => ipcRenderer.invoke('desktop:pick-native-save-file', options),
   releaseNativeFile: (handleId) => ipcRenderer.invoke('desktop:release-native-file', handleId),
   readNativeFile: (handleId) => ipcRenderer.invoke('desktop:native-file-read', handleId),
+  getNativeFileSourcePath: (handleId) => ipcRenderer.invoke(
+    'desktop:native-file-source-path',
+    handleId,
+  ),
   validateNativeSave: (handleId, identity) => ipcRenderer.invoke(
     'desktop:native-file-validate-save',
     handleId,
@@ -74,6 +83,11 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
   onOpenFiles: (callback) => {
     ipcRenderer.on('desktop:open-files', (_event, files) => {
       callback(Array.isArray(files) ? files.map((file) => ({ ...file })) : []);
+    });
+  },
+  onOpenGeneratedDocument: (callback) => {
+    ipcRenderer.on('desktop:open-generated-document', (_event, payload) => {
+      callback(payload);
     });
   },
 });

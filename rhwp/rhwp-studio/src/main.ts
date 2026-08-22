@@ -78,6 +78,7 @@ import {
   getRendererSessionContext,
   installDesktopCloseHandling,
   installDesktopFileHandling,
+  installDesktopGeneratedDocumentHandling,
   installDesktopWindowChrome,
   installWebAppShell,
   pickDesktopNativeOpenFile,
@@ -152,6 +153,7 @@ let toolbar: Toolbar | null = null;
 let ruler: Ruler | null = null;
 let rendererSession: RendererSession | null = null;
 let editMode: EditorEditMode = 'normal';
+let documentReadOnly = new URLSearchParams(window.location.search).get('templatePreview') === '1';
 let rendererRuntimeRequest: EmbedRendererRuntimeRequestV1 | null = null;
 let renderBackendFallbackReason: RenderBackendFallbackReason | null = null;
 let rendererInitializationError: string | null = null;
@@ -197,7 +199,8 @@ function getContext(): EditorContext {
     inTableObjectSelection: inputHandler?.isInTableObjectSelection() ?? false,
     inPictureObjectSelection: inputHandler?.isInPictureObjectSelection() ?? false,
     inField: inputHandler?.isInField() ?? false,
-    isEditable: !isFormMode || canEditFormField,
+    isEditable: !documentReadOnly && (!isFormMode || canEditFormField),
+    readOnly: documentReadOnly,
     editMode,
     isFormMode,
     canEditFormField,
@@ -220,6 +223,14 @@ function setEditMode(mode: EditorEditMode): void {
   });
   sbMessage().textContent = mode === 'form' ? '양식 모드' : '기본 편집 모드';
   eventBus.emit('edit-mode-changed', mode);
+  eventBus.emit('command-state-changed');
+}
+
+function setDocumentReadOnly(readOnly: boolean): void {
+  documentReadOnly = readOnly;
+  document.documentElement.dataset.documentReadOnly = readOnly ? 'true' : 'false';
+  inputHandler?.setReadOnly(readOnly);
+  if (readOnly) toolbar?.setEnabled(false);
   eventBus.emit('command-state-changed');
 }
 
@@ -483,6 +494,7 @@ async function initialize(): Promise<void> {
       canvasView.getViewportManager(),
     );
     inputHandler.setEditMode(editMode);
+    inputHandler.setReadOnly(documentReadOnly);
 
     toolbar = new Toolbar(document.getElementById('style-bar')!, wasm, eventBus, dispatcher);
     toolbar.setEnabled(false);
@@ -577,6 +589,10 @@ async function initialize(): Promise<void> {
           if (!(error instanceof DocumentOwnedElsewhereError)) showLoadError(error);
         });
     });
+    installDesktopGeneratedDocumentHandling(({ bytes, fileName, readOnly }) => {
+      if (readOnly) setDocumentReadOnly(true);
+      eventBus.emit('open-document-bytes', { bytes, fileName });
+    });
     void loadFromUrlParam();
     void offerAutosaveRecoveryIfIdle();
     installPwaFileHandling(window as FileHandlingWindowLike, {
@@ -610,7 +626,14 @@ async function initialize(): Promise<void> {
     // AI 페어 에디팅: rhwp-agent 허브 브리지 + 사이드바 (Phase 1)
     // 선택(opt-in) 기능이므로 여기서 실패해도 렌더러 초기화를 실패로 만들지 않는다.
     try {
-      const agentBridge = initAgentBridge({ wasm, eventBus, inputHandler, canvasView, documentState });
+      const agentBridge = initAgentBridge({
+        wasm,
+        eventBus,
+        inputHandler,
+        canvasView,
+        documentState,
+        isReadOnly: () => documentReadOnly,
+      });
       agentBridgeRef = agentBridge;
       const agentSidebar = initAgentSidebar({
         bridge: agentBridge,
@@ -1064,7 +1087,7 @@ async function initializeDocument(
     await canvasView?.loadDocument();
     prepareCanvasKitLocalFonts(docInfo.fontsUsed);
     await updateLoadProgress(90, '도구 모음 준비 중...');
-    toolbar?.setEnabled(true);
+    toolbar?.setEnabled(!documentReadOnly);
     toolbar?.initFontDropdown(docInfo.fontsUsed);
     toolbar?.initStyleDropdown();
     await updateLoadProgress(94, '문서 검증 및 글꼴 확인 중...');
@@ -1101,7 +1124,9 @@ async function initializeDocument(
     }
     eventBus.emit('document-context-changed');
     // 최종 단계 뒤에는 비동기 작업이 없으므로 100% progress paint를 기다리지 않는다.
-    msg.textContent = displayName;
+    msg.textContent = documentReadOnly
+      ? `${displayName} · 템플릿 미리보기 (읽기 전용)`
+      : displayName;
 
     // #2527: 자동 보정을 하지 않으므로 로드 직후 문서는 항상 clean.
     documentState.markClean('document-initialized');

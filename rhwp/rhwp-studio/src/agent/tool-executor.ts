@@ -33,6 +33,8 @@ export interface AgentToolExecutorDeps {
   revision: RevisionTracker;
   pending: PendingEditManager;
   loadTemplateBytes?: (template: DocumentTemplate) => Promise<Uint8Array>;
+  getDocumentSourcePath?: () => Promise<string | null>;
+  isReadOnly?: () => boolean;
 }
 
 const DOC_NOT_LOADED_MESSAGE = '문서가 로드되지 않았습니다';
@@ -46,6 +48,9 @@ function tableRangeNote(deletedTables: number): string {
 }
 
 const MAX_SVG_BYTES = 800_000;
+// WebSocket text frames cap at 100 MiB. Base64 expands by 4/3, so 64 MiB
+// leaves room for the protocol envelope while still covering normal HWP/HWPX files.
+const MAX_DOCUMENT_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const PENDING_NOTE = 'staged now as live preview; when the turn ends it is auto-committed (전체 접근) or held for the user’s review and approval (안전). A failed turn rolls it back';
 
 /** Every Studio tool that can create or stage a document mutation. */
@@ -336,6 +341,7 @@ export class AgentToolExecutor {
   private deps: AgentToolExecutorDeps;
   private turnWriteMode: TurnWriteMode = 'none';
   private templateWasm: WasmBridge | null = null;
+  private templateBytes: Uint8Array | null = null;
   private templateKey: string | null = null;
   private templateInspectionKey: string | null = null;
   private documentInspectionRevision: number | null = null;
@@ -364,6 +370,12 @@ export class AgentToolExecutor {
     let claimedMode = false;
     try {
       assertToolCapability(tool, capability);
+      if (isDocumentWriteTool(tool) && this.deps.isReadOnly?.()) {
+        throw new AgentToolError(
+          'READ_ONLY_TEMPLATE_PREVIEW',
+          'This published template preview is read-only and cannot accept document-write tools.',
+        );
+      }
       const requestedMode: TurnWriteMode = !isDocumentWriteTool(tool)
         ? 'none'
         : RAW_ENGINE_WRITE_TOOLS.has(tool) ? 'raw' : 'semantic';
@@ -410,6 +422,7 @@ export class AgentToolExecutor {
       case 'get_selection': return this.getSelection();
       case 'get_fields': return this.getFields();
       case 'get_document_info': return this.getDocumentInfo();
+      case 'materialize_document_snapshot': return this.materializeDocumentSnapshot();
       case 'find_text': return this.findText(args);
       case 'render_page': return this.renderPage(args);
       case 'get_para_format': return this.getParaFormat(args);
@@ -584,7 +597,8 @@ export class AgentToolExecutor {
     throw new AgentToolError(
       'REVISION_MISMATCH',
       `Document is now at revision ${current}; you expected ${expected}. ` +
-        'Re-read with get_structure or get_text_range and retry with fresh coordinates.',
+        `Retry directly with expectedRevision=${current} ONLY if you know what changed the document AND it cannot have shifted this call's coordinates. ` +
+        'Otherwise re-read with get_structure or get_text_range and retry with fresh coordinates.',
     );
   }
 
@@ -957,9 +971,17 @@ export class AgentToolExecutor {
     return { revision: this.revision, fields };
   }
 
-  private getDocumentInfo(): unknown {
+  private async getDocumentInfo(): Promise<unknown> {
     this.requireDocLoaded();
     const { wasm, documentState } = this.deps;
+    // Snapshot every document field before the async desktop-path lookup so a
+    // tab/document switch cannot combine one handle's path with another doc's metadata.
+    const revision = this.revision;
+    const sectionCount = wasm.getSectionCount();
+    const pageCount = wasm.pageCount;
+    const sourceFormat = wasm.getSourceFormat();
+    const digest = wasm.documentDigest;
+    const dirty = documentState.isDirty();
     let fontsUsed: string[] = [];
     let fallbackFont = '';
     let registeredFonts: string[] = [];
@@ -972,16 +994,52 @@ export class AgentToolExecutor {
       // 원본 등록 이름 — apply_char_format fontFamily 에 그대로 쓸 수 있다
       registeredFonts = [...new Set(wasm.getFontList().map((f) => f.name))];
     } catch { /* 구버전 wasm 호환 */ }
+    let sourcePath: string | null = null;
+    try {
+      sourcePath = await this.deps.getDocumentSourcePath?.() ?? null;
+    } catch { /* 브라우저 문서와 해제된 데스크톱 핸들은 실제 경로가 없다 */ }
     return {
-      revision: this.revision,
-      sectionCount: wasm.getSectionCount(),
-      pageCount: wasm.pageCount,
-      sourceFormat: wasm.getSourceFormat(),
-      digest: wasm.documentDigest,
-      dirty: documentState.isDirty(),
+      revision,
+      sectionCount,
+      pageCount,
+      sourceFormat,
+      digest,
+      dirty,
+      sourcePath,
       fontsUsed,
       fallbackFont,
       registeredFonts,
+    };
+  }
+
+  private materializeDocumentSnapshot(): unknown {
+    this.requireDocLoaded();
+    const { wasm, documentState } = this.deps;
+    const sourceFormat = wasm.getSourceFormat().toLowerCase();
+    if (sourceFormat !== 'hwp' && sourceFormat !== 'hwpx') {
+      throw new AgentToolError(
+        'SNAPSHOT_FORMAT_UNSUPPORTED',
+        `Current document format ${sourceFormat || 'unknown'} cannot be materialized as an HWP/HWPX snapshot. Save it as HWP or HWPX first.`,
+      );
+    }
+    const revision = this.revision;
+    const bytes = sourceFormat === 'hwpx' ? wasm.exportHwpx() : wasm.exportHwp();
+    if (bytes.byteLength === 0) {
+      throw new AgentToolError('SNAPSHOT_EMPTY', 'The current document exported an empty snapshot.');
+    }
+    if (bytes.byteLength > MAX_DOCUMENT_SNAPSHOT_BYTES) {
+      throw new AgentToolError(
+        'SNAPSHOT_TOO_LARGE',
+        `The current document is ${(bytes.byteLength / 1048576).toFixed(1)} MiB; the snapshot limit is 64 MiB.`,
+      );
+    }
+    return {
+      revision,
+      sourceFormat,
+      digest: wasm.documentDigest,
+      dirty: documentState.isDirty(),
+      byteLength: bytes.byteLength,
+      dataBase64: bytesToBase64(bytes),
     };
   }
 
@@ -1810,21 +1868,26 @@ export class AgentToolExecutor {
     return template;
   }
 
-  private async ensureTemplate(capability?: ToolCapabilityContext): Promise<{ template: DocumentTemplate; wasm: WasmBridge }> {
+  private async ensureTemplate(capability?: ToolCapabilityContext): Promise<{ template: DocumentTemplate; wasm: WasmBridge; bytes: Uint8Array }> {
     const template = this.requireTemplate(capability);
     const loadTemplateBytes = this.deps.loadTemplateBytes;
     if (!loadTemplateBytes) throw new AgentToolError('TEMPLATE_UNAVAILABLE', 'Template loading is unavailable in this Studio.');
     const key = `${template.id}:${template.revision}`;
-    if (this.templateWasm && this.templateKey === key) return { template, wasm: this.templateWasm };
+    if (this.templateWasm && this.templateBytes && this.templateKey === key) {
+      return { template, wasm: this.templateWasm, bytes: this.templateBytes };
+    }
     this.templateWasm?.releaseDocument();
+    this.templateBytes = null;
     const { WasmBridge } = await import('../core/wasm-bridge.ts');
     const wasm = new WasmBridge();
     await wasm.initialize();
     const bytes = await loadTemplateBytes(template);
+    const exactSourceBytes = bytes.slice();
     wasm.loadDocument(bytes, template.originalName);
     this.templateWasm = wasm;
+    this.templateBytes = exactSourceBytes;
     this.templateKey = key;
-    return { template, wasm };
+    return { template, wasm, bytes: this.templateBytes };
   }
 
   private templateArgs(args: Record<string, unknown>, template: DocumentTemplate): Record<string, unknown> {
@@ -2004,7 +2067,7 @@ export class AgentToolExecutor {
     capability?: ToolCapabilityContext,
   ): Promise<unknown> {
     this.requireRevision(args);
-    const { template, wasm: sourceWasm } = await this.ensureTemplate(capability);
+    const { template, wasm: sourceWasm, bytes: templateBytes } = await this.ensureTemplate(capability);
     this.templateArgs(args, template);
     this.requireTemplateMapping(template);
     const source = asRecord(args['source']);
@@ -2017,18 +2080,40 @@ export class AgentToolExecutor {
     const targetPara = reqInt(target, 'paraIdx');
     const targetOffset = reqInt(target, 'charOffset');
     this.validateAddress(targetSection, targetPara, targetOffset);
-    const endOffset = sourceWasm.getParagraphLength(sourceSection, endPara);
-    const html = sourceWasm.exportSelectionHtml(sourceSection, startPara, 0, endPara, endOffset);
+    sourceWasm.getParagraphLength(sourceSection, startPara);
+    sourceWasm.getParagraphLength(sourceSection, endPara);
+    // Keep the exact approved source bytes. Re-serializing the inspection document
+    // can normalize package parts before the native importer sees them.
+    const sourceBytes = templateBytes.slice();
     const pending = this.deps.pending.addTemplateMutation(
       agent,
       `Insert block from ${template.name}`,
       template.revision,
       () => {
-        this.deps.wasm.pasteHtml(targetSection, targetPara, targetOffset, html);
+        const transfer = JSON.parse(this.deps.wasm.pasteDocumentBlock(
+          sourceBytes,
+          sourceSection,
+          startPara,
+          endPara,
+          targetSection,
+          targetPara,
+          targetOffset,
+        )) as {
+          ok?: boolean;
+          warnings?: string[];
+          skippedFeatures?: string[];
+          insertedParagraphCount?: number;
+          controlCounts?: Record<string, number>;
+        };
+        if (transfer.ok !== true) {
+          throw new AgentToolError('TEMPLATE_TRANSFER_FAILED', 'The native template block importer did not complete.');
+        }
         return {
-          warnings: ['The block was remapped through the cross-document HTML transfer path; unsupported controls use their closest supported representation.'],
-          skippedFeatures: [],
+          warnings: transfer.warnings ?? [],
+          skippedFeatures: transfer.skippedFeatures ?? [],
           affectedSections: [targetSection],
+          insertedParagraphCount: transfer.insertedParagraphCount ?? 0,
+          controlCounts: transfer.controlCounts ?? {},
         };
       },
     );
@@ -2038,6 +2123,7 @@ export class AgentToolExecutor {
   dispose(): void {
     this.templateWasm?.releaseDocument();
     this.templateWasm = null;
+    this.templateBytes = null;
     this.templateKey = null;
     this.templateInspectionKey = null;
     this.documentInspectionRevision = null;

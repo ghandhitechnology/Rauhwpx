@@ -28,7 +28,7 @@ The agent reads structure, text ranges, tables, fields and rendered pages, then 
 
 ## Agent sidebar
 
-- **67 MCP tools** — semantic reads and writes for the common work, a batched write that applies up to 32 edits in one atomic call, plus registry-generated engine batches that cover every classified mutation, so the agent is never blocked on a capability the editor has.
+- **69 MCP tools** — semantic reads and writes for the common work, a batched write that applies up to 32 edits in one atomic call, path-independent live-document snapshots and downloadable generated artifacts, plus registry-generated engine batches that cover every classified mutation, so the agent is never blocked on a capability the editor has.
 - **Live staged edits** — changes render in place as you watch, commit as one undo step when the turn succeeds, and restore the exact prior snapshot when it fails.
 - **Two permission modes** — 안전 keeps edits behind review and files inside the project; 전체 lets the agent work uninterrupted.
 - **Planning before implementation** — the agent can research with web, subagents and Browserbase while the document stays read-only, then presents a plan that only executes on your approval.

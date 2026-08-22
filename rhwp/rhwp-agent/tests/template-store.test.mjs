@@ -89,7 +89,10 @@ test('signature, metadata, and size validation reject invalid uploads', async (t
 });
 
 test('template directories and persisted files use owner-only permissions', async (t) => {
-  if (process.platform === 'win32') t.skip('POSIX mode bits are not meaningful on Windows');
+  if (process.platform === 'win32') {
+    t.skip('POSIX mode bits are not meaningful on Windows');
+    return;
+  }
   const store = await fixture(t);
   await store.add({ name: 'private', originalName: 'private.hwp', bytes: HWP, pageCount: 1, sectionCount: 1 });
   const [root, blobs, metadata] = await Promise.all([

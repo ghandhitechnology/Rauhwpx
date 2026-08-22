@@ -11,6 +11,7 @@
  */
 import {
   ensureDesktopAgentHub,
+  getNativeFileSourcePath,
   httpHubUrl,
   resolveRendererSessionContext,
   websocketHubUrl,
@@ -137,6 +138,7 @@ export interface AgentBridge {
   deleteTemplate(id: string): Promise<void>;
   setActiveTemplate(id: string | null): void;
   getActiveTemplate(): DocumentTemplate | null;
+  /** 읽기 전용 템플릿 미리보기 창이 실제로 열렸음을 허브에 확인한다. */
   stageReference(scopeId: string, file: File): Promise<StagedReference>;
   discardStagedReference(scopeId: string, stageId: string): Promise<void>;
   /** 참고자료 원본은 HTTP로 스트리밍하고, 브라우저에는 메타데이터만 돌려준다. */
@@ -864,6 +866,8 @@ class AgentBridgeImpl implements AgentBridge {
       revision: this.revision,
       pending: this.pendingEdits,
       loadTemplateBytes: (template) => this.downloadTemplateBytes(template),
+      getDocumentSourcePath: () => getNativeFileSourcePath(deps.wasm.currentFileHandle),
+      isReadOnly: deps.isReadOnly,
     });
 
     this.options = opts;

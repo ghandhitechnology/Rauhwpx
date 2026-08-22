@@ -16,7 +16,7 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  *   | { type: 'tool-call';    agent: AgentName; callId: string; tool: string; argsJson: string; parentTaskId?: string }
  *   | { type: 'tool-result';  agent: AgentName; callId: string; ok: boolean; resultPreview: string; parentTaskId?: string }
  *   | { type: 'task-start';   agent: AgentName; taskId: string; callId?: string; title: string; role?: string; taskKind: 'agent'|'workflow'; workflowName?: string }
- *   | { type: 'task-progress';agent: AgentName; taskId: string; activity?: string; lastTool?: string; usage?: TaskUsage; phases?: TaskPhase[]; members?: TaskMember[] }
+ *   | { type: 'task-progress';agent: AgentName; taskId: string; activity?: string; lastTool?: string; usage?: TaskUsage; phases?: TaskPhase[]; members?: TaskMember[]; phaseIndex?: number }
  *   | { type: 'task-end';     agent: AgentName; taskId: string; status: 'completed'|'failed'|'stopped'; summary?: string; usage?: TaskUsage }
  *   | { type: 'usage';        agent: AgentName; model: string|null; usage: UsageTokens; costUsd?: number }
  *   | { type: 'turn-end';     agent: AgentName; stopReason?: string; errorMessage?: string }
@@ -79,6 +79,9 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * @property {Record<string, string>} [providerEnv]
  * @property {string} [model]
  * @property {string} [effort]
+ * @property {string} [toolProfile]
+ * @property {string} [agentRole]
+ * @property {string} [systemPromptOverride]
  * @property {(evt: UnifiedAgentEvent) => void} onEvent
  *
  * @typedef {Object} AgentSession
@@ -245,7 +248,8 @@ ${PARALLEL_WORK_SHARED}
     return `PARALLEL WORK:
 - For large document tasks, spawn agents with your collaboration tools (spawn_agent). Give each agent ONE contiguous paragraph range (for example one page or one section) and state that range plus the goal in its message. Each agent re-reads its own region before writing.
 ${PARALLEL_WORK_SHARED}
-- Call wait_agent until every spawned agent has finished before ending the turn; agents still running when the turn ends are killed.`;
+- Call wait_agent until every agent you explicitly created with spawn_agent has finished before ending the turn; agents still running when the turn ends are killed.
+- Never call wait_agent for an MCP-managed background job such as delegate_copy_layout. It is not a collaboration agent; end the turn and let the hub inject its completion into a new owning-chat turn.`;
   }
   if (agentName === 'cursor') {
     return `PARALLEL WORK:
@@ -356,6 +360,9 @@ export function isPlanningRestricted(opts = {}) {
 }
 
 export function systemBriefFor(opts = {}, agentName = 'claude') {
+  if (typeof opts.systemPromptOverride === 'string' && opts.systemPromptOverride.trim()) {
+    return opts.systemPromptOverride;
+  }
   const { workflow, phase } = normalizeExecutionMode(opts);
   // 프로필 미지정은 안전으로 간주한다 — Studio 기본값과 동일한 fail-safe.
   const profile = opts.permissionProfile === 'unrestricted' ? 'unrestricted' : 'safe';
@@ -369,6 +376,8 @@ export function mcpCapabilityEnv(opts = {}) {
     RHWP_AGENT_WORKFLOW: workflow,
     RHWP_AGENT_PHASE: phase,
     RHWP_CAPABILITY_EPOCH: String(capabilityEpoch),
+    ...(opts.toolProfile ? { RHWP_TOOL_PROFILE: String(opts.toolProfile) } : {}),
+    ...(opts.agentRole ? { RHWP_AGENT_ROLE: String(opts.agentRole) } : {}),
     ...(opts.sessionId === undefined || opts.sessionId === null || !String(opts.sessionId)
       ? {}
       : { RHWP_SESSION_ID: String(opts.sessionId) }),

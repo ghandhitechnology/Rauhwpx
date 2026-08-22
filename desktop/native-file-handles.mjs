@@ -237,6 +237,11 @@ export class NativeFileHandleRegistry {
     return this.#entryForSender(senderSessionId, handleId).ownershipPath;
   }
 
+  /** Exact canonical source path for an explicitly sender-owned live handle. */
+  sourcePathForSender(senderSessionId, handleId) {
+    return this.#entryForSender(senderSessionId, handleId).canonicalPath;
+  }
+
   async read(senderSessionId, handleId) {
     const entry = this.#entryForSender(senderSessionId, handleId);
     return {

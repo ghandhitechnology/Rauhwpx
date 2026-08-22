@@ -521,8 +521,8 @@ export type AgentStreamEvent =
   | { type: 'text-delta'; agent: AgentName; text: string; parentTaskId?: string }
   | { type: 'tool-call'; agent: AgentName; callId: string; tool: string; argsJson: string; parentTaskId?: string }
   | { type: 'tool-result'; agent: AgentName; callId: string; ok: boolean; resultPreview: string; parentTaskId?: string }
-  | { type: 'task-start'; agent: AgentName; taskId: string; callId?: string; title: string; role?: string; taskKind: 'agent' | 'workflow'; workflowName?: string }
-  | { type: 'task-progress'; agent: AgentName; taskId: string; activity?: string; lastTool?: string; usage?: AgentTaskUsage; phases?: AgentTaskPhase[]; members?: AgentTaskMember[] }
+  | { type: 'task-start'; agent: AgentName; taskId: string; callId?: string; title: string; role?: string; taskKind: 'agent' | 'workflow'; workflowName?: string; /** Owning turn may end while this real process keeps running. */ background?: boolean }
+  | { type: 'task-progress'; agent: AgentName; taskId: string; activity?: string; lastTool?: string; usage?: AgentTaskUsage; phases?: AgentTaskPhase[]; members?: AgentTaskMember[]; /** Current task-level phase when there is no child member row. */ phaseIndex?: number }
   | { type: 'task-end'; agent: AgentName; taskId: string; status: 'completed' | 'failed' | 'stopped'; summary?: string; usage?: AgentTaskUsage }
   | { type: 'turn-end'; agent: AgentName; stopReason?: string; errorMessage?: string }
   | { type: 'error'; agent: AgentName; message: string };
@@ -624,6 +624,7 @@ export interface AgentBridgeDeps {
   inputHandler: InputHandler;
   canvasView: CanvasView;
   documentState: DocumentDirtyState;
+  isReadOnly?: () => boolean;
 }
 
 export interface AgentBridgeOptions {

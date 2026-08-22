@@ -80,7 +80,12 @@ import { createSettingsPanel } from './settings.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
 import { createReferenceLibrary } from './reference-library.ts';
-import { isDesktopApp } from '../../desktop-integration.ts';
+import {
+  isDesktopApp,
+  openPublishedDocumentInNewWindow,
+  parsePublishedDocumentLink,
+} from '../../desktop-integration.ts';
+import { showToast } from '../toast.ts';
 import { fuzzyTemplateScore } from './template-fuzzy.ts';
 import {
   defaultSkillIconForName,
@@ -3316,6 +3321,54 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function renderAssistantMessage(bubble: HTMLElement, text: string): void {
     assistantBubbleSources.set(bubble, text);
     renderChatMarkdown(bubble, text);
+    const links = Array.from(bubble.querySelectorAll<HTMLAnchorElement>('a.ag-md-link'));
+    for (const link of links) {
+      const artifact = parsePublishedDocumentLink(link.href);
+      if (!artifact) continue;
+      const originalLabel = link.textContent?.trim() || '문서 열기';
+      link.classList.add('ag-md-artifact-open');
+      link.target = '';
+      link.title = `${artifact.fileName} 새 창에서 열기`;
+      link.setAttribute('aria-label', `${artifact.fileName} 새 창에서 열기`);
+      const icon = el('span', 'ag-md-artifact-icon');
+      icon.appendChild(createIcon('document'));
+      const copy = el('span', 'ag-md-artifact-copy');
+      copy.append(
+        el('span', 'ag-md-artifact-name', artifact.fileName),
+        el('span', 'ag-md-artifact-hint', originalLabel),
+      );
+      link.replaceChildren(icon, copy, el('span', 'ag-md-artifact-action', '열기'));
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
+        if (link.getAttribute('aria-busy') === 'true') return;
+        link.setAttribute('aria-busy', 'true');
+        link.classList.remove('ag-failed');
+        void openPublishedDocumentInNewWindow(artifact, undefined, { readOnly: artifact.readOnly === true })
+          .catch((error) => {
+            link.classList.add('ag-failed');
+            const message = error instanceof Error ? error.message : String(error);
+            showToast({ message: `문서를 열지 못했습니다: ${message}`, durationMs: 5000 });
+          })
+          .finally(() => link.removeAttribute('aria-busy'));
+      });
+
+      const download = document.createElement('a');
+      download.className = 'ag-md-artifact-download';
+      download.href = artifact.downloadUrl;
+      download.target = '_blank';
+      download.rel = 'noopener noreferrer';
+      download.download = artifact.fileName;
+      download.textContent = '다운로드';
+      download.title = `${artifact.fileName} 다운로드`;
+      const card = el('span', 'ag-md-artifact-card');
+      const parent = link.parentElement;
+      if (parent) {
+        parent.insertBefore(card, link);
+        card.append(link, download);
+      } else {
+        link.insertAdjacentElement('afterend', download);
+      }
+    }
   }
 
   function flushPendingAssistantRender(): void {

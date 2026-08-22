@@ -6,8 +6,12 @@ import {
   bindNativeFileHandleIdentity,
   captureDesktopNativeDroppedFile,
   ensureDesktopAgentHub,
+  getNativeFileSourcePath,
+  installDesktopGeneratedDocumentHandling,
   installWebAppShell,
   isDesktopApp,
+  openPublishedDocumentInNewWindow,
+  parsePublishedDocumentLink,
   pickDesktopNativeOpenFile,
   pickDesktopNativeSaveFile,
   rememberNativeDocument,
@@ -72,6 +76,88 @@ test('dev ensure path asks Vite to start a missing hub', async () => {
   assert.equal(calls, 1);
 });
 
+test('published artifact links open through a fresh editor window on desktop', async () => {
+  const href = 'http://127.0.0.1:5175/artifacts/artifact_token_1234567890/%EB%B3%B4%EA%B3%A0%EC%84%9C%28%ED%8C%80%29.hwp?sessionId=a&token=b';
+  const artifact = parsePublishedDocumentLink(href);
+  assert.deepEqual(artifact, { downloadUrl: href, fileName: '보고서(팀).hwp' });
+  const templateHref = `${href}&templatePreview=1`;
+  assert.deepEqual(parsePublishedDocumentLink(templateHref), {
+    downloadUrl: templateHref,
+    fileName: '보고서(팀).hwp',
+    readOnly: true,
+  });
+  assert.equal(parsePublishedDocumentLink('https://example.com/artifacts/artifact_token_1234567890/a.hwp'), null);
+  assert.equal(parsePublishedDocumentLink('javascript:alert(1)'), null);
+
+  const opened: Array<{ fileName: string; downloadUrl: string; readOnly?: boolean }> = [];
+  await openPublishedDocumentInNewWindow(artifact!, {
+    rhwpDesktop: {
+      openGeneratedDocumentWindow: async (payload) => {
+        opened.push(payload);
+        return true;
+      },
+    },
+  });
+  assert.equal(opened[0]?.fileName, '보고서(팀).hwp');
+  assert.equal(opened[0]?.downloadUrl, href);
+
+  await openPublishedDocumentInNewWindow(artifact!, {
+    rhwpDesktop: {
+      openGeneratedDocumentWindow: async (payload) => {
+        opened.push(payload);
+        return true;
+      },
+    },
+  }, { readOnly: true });
+  assert.equal(opened[1]?.readOnly, true);
+});
+
+test('browser artifact links open another Studio page with an authenticated source URL', async () => {
+  const artifact = parsePublishedDocumentLink(
+    'http://localhost:5175/artifacts/artifact_token_1234567890/report.hwpx?sessionId=a&token=b',
+  );
+  const opened: string[] = [];
+  await openPublishedDocumentInNewWindow(artifact!, {
+    location: { href: 'http://localhost:7700/editor?old=1#page' },
+    open: (url: string) => { opened.push(String(url)); },
+  } as any);
+  const target = new URL(opened[0]!);
+  assert.equal(target.origin + target.pathname, 'http://localhost:7700/editor');
+  assert.equal(target.searchParams.get('url'), artifact?.downloadUrl);
+  assert.equal(target.searchParams.get('filename'), 'report.hwpx');
+
+  await openPublishedDocumentInNewWindow(artifact!, {
+    location: { href: 'http://localhost:7700/editor' },
+    open: (url: string) => { opened.push(String(url)); },
+  } as any, { readOnly: true });
+  assert.equal(new URL(opened[1]!).searchParams.get('templatePreview'), '1');
+});
+
+test('generated-document startup fallback and event delivery open only once', async () => {
+  const payload = {
+    launchDocumentId: 'launch-document-1',
+    fileName: 'report.hwpx',
+    bytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
+    readOnly: true,
+  };
+  let listener: ((value: typeof payload) => void) | undefined;
+  const opened: Array<{ fileName: string; readOnly: boolean }> = [];
+  const installed = installDesktopGeneratedDocumentHandling(
+    ({ fileName, readOnly }) => opened.push({ fileName, readOnly }),
+    {
+      rhwpDesktop: {
+        onOpenGeneratedDocument: (callback) => { listener = callback; },
+        getLaunchGeneratedDocument: async () => payload,
+      },
+    },
+  );
+  assert.equal(installed, true);
+  listener?.(payload);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(opened, [{ fileName: 'report.hwpx', readOnly: true }]);
+});
+
 test('Electron Save As returns a temporary opaque handle and releases failed targets', async () => {
   const released: string[] = [];
   const win = {
@@ -131,6 +217,32 @@ test('native document bookmarks restore opaque handles without exposing a path',
   const restored = await restoreNativeDocument('document-a', win);
   assert.equal(restored === 'owned' ? null : restored?.identityKind, 'native-path');
   assert.equal(restored === 'owned' ? null : restored?.name, 'report.hwp');
+});
+
+test('agents can resolve only the exact path behind the active opaque desktop handle', async () => {
+  const requested: string[] = [];
+  const handleIds = ['same-name-a', 'same-name-b'];
+  const paths: Record<string, string> = {
+    'same-name-a': '/Users/test/A/보고서.hwp',
+    'same-name-b': '/Users/test/B/보고서.hwp',
+  };
+  const win = {
+    rhwpDesktop: {
+      pickNativeOpenFile: async () => ({ kind: 'file' as const, handleId: handleIds.shift()!, name: '보고서.hwp' }),
+      readNativeFile: async () => ({ name: '보고서.hwp', bytes: new Uint8Array() }),
+      writeNativeFile: async () => ({ name: '보고서.hwp', byteLength: 0 }),
+      getNativeFileSourcePath: async (handleId: string) => {
+        requested.push(handleId);
+        return paths[handleId] ?? null;
+      },
+    },
+  };
+  const first = await pickDesktopNativeOpenFile(win);
+  const sameNamedSecond = await pickDesktopNativeOpenFile(win);
+  assert.equal(await getNativeFileSourcePath(first), '/Users/test/A/보고서.hwp');
+  assert.equal(await getNativeFileSourcePath(sameNamedSecond), '/Users/test/B/보고서.hwp');
+  assert.deepEqual(requested, ['same-name-a', 'same-name-b']);
+  assert.equal(await getNativeFileSourcePath(null), null);
 });
 
 test('nearby probes keep only opaque ids and names', async () => {
