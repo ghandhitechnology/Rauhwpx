@@ -13,6 +13,7 @@
     "restart": "node rhwp/rhwp-agent/ctl.mjs restart",
     "status": "node rhwp/rhwp-agent/ctl.mjs status",
     "dev:desktop": "wait-on http://127.0.0.1:7700 && cross-env RHWP_DEV_URL=http://127.0.0.1:7700 electron .",
+    "test:windows:keychain": "electron scripts/windows-keychain-smoke.mjs",
     "build:studio": "npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
     "build:agent": "npm --prefix rhwp/rhwp-agent ci --omit=dev",
     "desktop": "npm run build:studio && electron .",
@@ -20,6 +21,7 @@
     "dist:win": "npm run build:studio && npm run build:agent && electron-builder --win --publish never"
   },
   "dependencies": {
+    "cross-spawn": "^7.0.6",
     "electron-updater": "^6.8.9"
   },
   "devDependencies": {

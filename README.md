@@ -55,11 +55,12 @@ Rust: `cargo test`, `cargo clippy`, `cargo fmt`. Studio: `npm test`, `npm run bu
 
 ## Releasing
 
-Push a `v*` tag matching `package.json` and GitHub Actions builds and attaches the installers.
+Push a `v*` tag matching `package.json`. Depot verifies the source, builds on native macOS and Windows runners, smoke-tests the Windows installer, and publishes the GitHub release.
 
 ```bash
-git tag v0.1.9
-git push origin v0.1.9
+version="v$(node -p "require('./package.json').version")"
+git tag "$version"
+git push origin "$version"
 ```
 
 macOS signing uses the `macos-release` environment: `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`. Local Windows build: `npm run dist:win` on Windows.

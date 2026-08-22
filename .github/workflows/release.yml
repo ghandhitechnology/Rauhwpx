@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -15,32 +15,82 @@ concurrency:
 jobs:
   preflight:
     name: Verify release tag
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 10
+
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Require a version tag matching package.json
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          expected="v$(jq -r .version package.json)"
+          expected="v$(node -p "require('./package.json').version")"
           if [ "${RELEASE_TAG}" != "${expected}" ]; then
             echo "Tag ${RELEASE_TAG} does not match package version ${expected#v}." >&2
             exit 1
           fi
 
+  verify:
+    name: Verify release source
+    needs: preflight
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            rhwp/rhwp-studio/package-lock.json
+            rhwp/rhwp-agent/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm --prefix rhwp/rhwp-agent ci
+          npm --prefix rhwp/rhwp-studio ci
+
+      - name: Check desktop syntax
+        run: |
+          node --check desktop/main.mjs
+          node --check desktop/agent-hub.mjs
+          node --check desktop/secret-vault.mjs
+
+      - name: Type-check agent contracts
+        run: npm --prefix rhwp/rhwp-agent run typecheck
+
+      - name: Test agent and Studio contracts
+        run: |
+          npm --prefix rhwp/rhwp-agent test
+          npm --prefix rhwp/rhwp-studio test
+
+      - name: Build Studio
+        run: npm --prefix rhwp/rhwp-studio run build
+
   macos:
     name: Build macOS installers
-    needs: preflight
-    runs-on: macos-15
+    needs: verify
+    runs-on: depot-macos-15
     timeout-minutes: 90
     environment: macos-release
 
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -65,7 +115,7 @@ jobs:
         working-directory: rhwp
         run: wasm-pack build --target web
 
-      - name: Install studio and desktop dependencies
+      - name: Install Studio and desktop dependencies
         run: |
           npm ci
           npm --prefix rhwp/rhwp-studio ci
@@ -103,7 +153,9 @@ jobs:
           EXPECTED_IDENTITY: "Developer ID Application: TAEWOOK HA (C8M34MMT8W)"
         run: |
           set -euo pipefail
+          found=0
           while IFS= read -r -d '' app_path; do
+            found=1
             codesign --verify --deep --strict --verbose=2 "${app_path}"
             signing_info="$(codesign -dv --verbose=4 "${app_path}" 2>&1)"
             printf '%s\n' "${signing_info}"
@@ -117,6 +169,10 @@ jobs:
             fi
             xcrun stapler validate "${app_path}"
           done < <(find release -type d -name 'Rauhwpx.app' -print0)
+          if [[ "${found}" -ne 1 ]]; then
+            echo 'No packaged Rauhwpx.app was found.' >&2
+            exit 1
+          fi
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
@@ -130,14 +186,16 @@ jobs:
             release/latest-mac.yml
 
   windows:
-    name: Build Windows installer
-    needs: preflight
-    runs-on: windows-latest
+    name: Build and smoke-test Windows installer
+    needs: verify
+    runs-on: depot-windows-2025
     timeout-minutes: 90
 
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -160,19 +218,23 @@ jobs:
 
       - name: Build WASM engine
         working-directory: rhwp
-        shell: bash
         run: wasm-pack build --target web
 
-      - name: Install studio and desktop dependencies
-        shell: bash
+      - name: Install Studio and desktop dependencies
         run: |
           npm ci
           npm --prefix rhwp/rhwp-studio ci
           npm --prefix rhwp/rhwp-agent ci --omit=dev
 
+      - name: Exercise Windows DPAPI credential storage
+        run: npm run test:windows:keychain
+
       - name: Build Windows installer
-        shell: bash
         run: npm run dist:win
+
+      - name: Install and boot packaged app
+        shell: pwsh
+        run: ./scripts/windows-package-smoke.ps1
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -187,12 +249,16 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: [macos, windows]
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
 
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4

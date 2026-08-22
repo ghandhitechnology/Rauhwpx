@@ -36,7 +36,7 @@ async function replaceFile(temp, target, platform) {
 
 /** OS-backed encrypted secret storage owned exclusively by Electron main. */
 export function createSecretVault({ filePath, safeStorage, platform = process.platform }) {
-  let loaded = false;
+  let loadPromise = null;
   let entries = {};
   let writeChain = Promise.resolve();
 
@@ -49,15 +49,37 @@ export function createSecretVault({ filePath, safeStorage, platform = process.pl
     }
   }
 
-  async function load() {
-    if (loaded) return;
-    loaded = true;
+  async function readVault(source) {
     try {
-      const raw = JSON.parse(await fs.readFile(filePath, 'utf8'));
-      entries = raw?.version === 1 && raw?.secrets && typeof raw.secrets === 'object'
+      const raw = JSON.parse(await fs.readFile(source, 'utf8'));
+      return raw?.version === 1 && raw?.secrets && typeof raw.secrets === 'object'
+        && !Array.isArray(raw.secrets)
         ? { ...raw.secrets }
-        : {};
-    } catch {}
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function load() {
+    loadPromise ??= (async () => {
+      const current = await readVault(filePath);
+      if (current !== null) {
+        entries = current;
+        if (platform === 'win32') {
+          await retryWindows(() => fs.rm(`${filePath}.previous-write`, { force: true }), platform).catch(() => {});
+        }
+        return;
+      }
+      if (platform !== 'win32') return;
+      const previous = `${filePath}.previous-write`;
+      const recovered = await readVault(previous);
+      if (recovered === null) return;
+      entries = recovered;
+      await retryWindows(() => fs.rm(filePath, { force: true }), platform).catch(() => {});
+      await retryWindows(() => fs.rename(previous, filePath), platform).catch(() => {});
+    })();
+    return loadPromise;
   }
 
   function persist() {

@@ -259,8 +259,8 @@ test('repository exposes a feature-gated dx adapter without changing normal WASM
   assert.match(vite, /RHWP_SUBSECOND/);
   assert.match(vite, /rhwp-subsecond-vite/);
   assert.match(vite, /rhwp-subsecond\.js/);
-  assert.match(studioPackage, /"subsecond:sync"[\s\S]*rhwp-subsecond-vite/);
+  assert.match(studioPackage, /"subsecond:sync"\s*:\s*"node scripts\/subsecond\.mjs sync"/);
   assert.match(studioPackage, /"subsecond:install"[\s\S]*dioxus-cli --version 0\.7\.9 --locked/);
-  assert.match(studioPackage, /"subsecond:serve"[\s\S]*--package rhwp-subsecond[\s\S]*--hot-patch/);
-  assert.match(studioPackage, /"dev:subsecond"\s*:\s*"npm run subsecond:sync && RHWP_SUBSECOND=1 vite"/);
+  assert.match(studioPackage, /"subsecond:serve"\s*:\s*"node scripts\/subsecond\.mjs serve"/);
+  assert.match(studioPackage, /"dev:subsecond"\s*:\s*"node scripts\/subsecond\.mjs dev"/);
 });

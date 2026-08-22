@@ -6,6 +6,10 @@ on:
     branches:
       - main
       - 'feat/**'
+      - 'fix/**'
+      - 'hotfix/**'
+      - 'release/**'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,14 +25,17 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - macos-15
-          - windows-latest
+          - depot-macos-15
+          - depot-windows-2022
+          - depot-windows-2025
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -40,23 +47,89 @@ jobs:
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
 
-      - name: Install dependencies
-        shell: bash
+      - name: Install dependencies with the native shell
         run: |
           npm ci
           npm --prefix rhwp/rhwp-agent ci
           npm --prefix rhwp/rhwp-studio ci
 
       - name: Check desktop and hub syntax
-        shell: bash
         run: |
           node --check desktop/main.mjs
           node --check desktop/agent-hub.mjs
-          node --check desktop/session-manager.mjs
+          node --check desktop/secret-vault.mjs
           node --check rhwp/rhwp-agent/server.mjs
+
+      - name: Type-check agent contracts
+        run: npm --prefix rhwp/rhwp-agent run typecheck
 
       - name: Test agent hub and process lifecycle
         run: npm --prefix rhwp/rhwp-agent test
 
       - name: Test Studio session persistence and desktop contracts
         run: npm --prefix rhwp/rhwp-studio test
+
+      - name: Build Studio
+        run: npm --prefix rhwp/rhwp-studio run build
+
+      - name: Exercise Windows DPAPI credential storage
+        if: runner.os == 'Windows'
+        run: npm run test:windows:keychain
+
+  windows-package:
+    name: Package, install, and boot Windows app
+    needs: session-tests
+    runs-on: depot-windows-2025
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            rhwp/rhwp-studio/package-lock.json
+            rhwp/rhwp-agent/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build WASM engine
+        working-directory: rhwp
+        run: wasm-pack build --target web
+
+      - name: Install packaging dependencies
+        run: |
+          npm ci
+          npm --prefix rhwp/rhwp-studio ci
+          npm --prefix rhwp/rhwp-agent ci --omit=dev
+
+      - name: Build Windows installer
+        run: npm run dist:win
+
+      - name: Install and boot packaged app
+        shell: pwsh
+        run: ./scripts/windows-package-smoke.ps1
+
+      - name: Upload Windows smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-dist
+          if-no-files-found: error
+          path: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml

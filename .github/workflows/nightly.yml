@@ -2,7 +2,7 @@ name: Nightly verification
 
 on:
   schedule:
-    # 03:00 Asia/Seoul (GitHub Actions cron uses UTC).
+    # 03:00 Asia/Seoul (GitHub cron is UTC).
     - cron: '0 18 * * *'
   workflow_dispatch:
 
@@ -16,12 +16,14 @@ concurrency:
 jobs:
   engine:
     name: Rust engine and WASM build
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 90
 
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -42,12 +44,14 @@ jobs:
 
   app:
     name: Desktop, agent, and Studio checks
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 35
 
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -69,8 +73,11 @@ jobs:
         run: |
           node --check desktop/main.mjs
           node --check desktop/agent-hub.mjs
-          node --check desktop/session-manager.mjs
+          node --check desktop/secret-vault.mjs
           node --check rhwp/rhwp-agent/server.mjs
+
+      - name: Type-check agent contracts
+        run: npm --prefix rhwp/rhwp-agent run typecheck
 
       - name: Test agent hub and process lifecycle
         run: npm --prefix rhwp/rhwp-agent test

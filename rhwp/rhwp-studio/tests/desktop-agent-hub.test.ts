@@ -22,6 +22,7 @@ import {
   removePidFile,
   requestHubShutdown,
   resolveHubLaunch,
+  spawnHubProcess,
   stopHubChild,
   waitForHub,
   waitForHubChildExit,
@@ -211,7 +212,7 @@ test('unpackaged launch uses node server.mjs (same as npm start)', () => {
   assert.match(launch?.env.PATH ?? '', /\/opt\/homebrew\/bin/);
 });
 
-test('packaged launch prefers system node over npm', () => {
+test('packaged launch always uses the bundled Electron runtime', () => {
   const files = new Set([
     '/app/rhwp-agent/server.mjs',
     '/opt/homebrew/bin',
@@ -228,9 +229,52 @@ test('packaged launch prefers system node over npm', () => {
     exists: (path) => files.has(path),
     platform: 'darwin',
   });
-  assert.equal(launch?.via, 'node');
-  assert.equal(launch?.command, '/opt/homebrew/bin/node');
+  assert.equal(launch?.via, 'electron-as-node');
+  assert.equal(launch?.command, '/app/Rauhwpx');
   assert.deepEqual(launch?.args, ['/app/rhwp-agent/server.mjs']);
+  assert.equal(launch?.env.ELECTRON_RUN_AS_NODE, '1');
+});
+
+test('Windows development launch normalizes Path and quoted entries', () => {
+  const files = new Set([
+    'C:\\repo\\rhwp-agent\\server.mjs',
+    'C:\\Program Files\\nodejs\\node.exe',
+  ]);
+  const launch = resolveHubLaunch({
+    packaged: false,
+    execPath: 'C:\\app\\electron.exe',
+    scriptPath: 'C:\\repo\\rhwp-agent\\server.mjs',
+    agentDir: 'C:\\repo\\rhwp-agent',
+    home: 'C:\\Users\\dev',
+    env: { Path: '"C:\\Program Files\\nodejs";C:\\Windows' },
+    exists: (path) => files.has(path),
+    platform: 'win32',
+  });
+  assert.equal(launch?.via, 'node');
+  assert.equal(launch?.command, 'C:\\Program Files\\nodejs\\node.exe');
+  assert.equal('Path' in (launch?.env ?? {}), false);
+  assert.match(launch?.env.PATH ?? '', /^"C:\\Program Files\\nodejs";C:\\Windows$/);
+});
+
+test('Windows command shims are spawned as argv without cmd.exe', () => {
+  const calls: Array<{ command: string; args: string[]; options: Record<string, unknown> }> = [];
+  const child = Object.assign(new EventEmitter(), { pid: 42, stdout: null, stderr: null });
+  spawnHubProcess({
+    command: 'C:\\Program Files & Tools\\npm.cmd',
+    args: ['start', '--', 'value&literal'],
+    cwd: 'C:\\repo',
+    env: { PATH: 'C:\\Windows' },
+  }, {
+    platform: 'win32',
+    forwardStdio: false,
+    spawnProcess(command, args, options) {
+      calls.push({ command, args, options });
+      return child;
+    },
+  });
+  assert.equal(calls[0].command, 'C:\\Program Files & Tools\\npm.cmd');
+  assert.deepEqual(calls[0].args, ['start', '--', 'value&literal']);
+  assert.equal(calls[0].options.shell, false);
 });
 
 test('launch falls back to Electron-as-Node when npm and node are missing', () => {

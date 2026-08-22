@@ -7,7 +7,7 @@
  * otherwise miss). Packaged builds fall back to Electron-as-Node.
  */
 
-import { spawn } from 'node:child_process';
+import spawn from 'cross-spawn';
 import { createHmac, randomBytes } from 'node:crypto';
 import {
   closeSync,
@@ -247,12 +247,27 @@ export function extraBinDirs(home, {
 export function findOnPath(name, pathEnv, exists = existsSync, platform = process.platform) {
   const delim = pathDelimiter(platform);
   const platformPath = platform === 'win32' ? win32 : posix;
-  for (const dir of String(pathEnv).split(delim)) {
+  for (const entry of String(pathEnv).split(delim)) {
+    const dir = entry.trim().replace(/^"(.*)"$/, '$1');
     if (!dir) continue;
     const candidate = platformPath.join(dir, name);
     if (exists(candidate)) return candidate;
   }
   return null;
+}
+
+function inheritedPath(env) {
+  const entry = Object.entries(env).find(([key]) => key.toLowerCase() === 'path');
+  return String(entry?.[1] ?? '');
+}
+
+function replacePathEnv(env, value) {
+  const next = { ...env };
+  for (const key of Object.keys(next)) {
+    if (key.toLowerCase() === 'path') delete next[key];
+  }
+  next.PATH = value;
+  return next;
 }
 
 export function buildHubPath({
@@ -309,7 +324,7 @@ export function resolveHubLaunch({
 
   const pathEnv = buildHubPath({
     home,
-    envPath: env.PATH ?? env.Path ?? '',
+    envPath: inheritedPath(env),
     agentDir: cwd,
     extraDirs,
     exists,
@@ -319,11 +334,20 @@ export function resolveHubLaunch({
   const nodeName = platform === 'win32' ? 'node.exe' : 'node';
   const npm = findOnPath(npmName, pathEnv, exists, platform);
   const node = findOnPath(nodeName, pathEnv, exists, platform);
-  const baseEnv = sanitizeHubEnv({
+  const baseEnv = sanitizeHubEnv(replacePathEnv({
     ...env,
-    PATH: pathEnv,
     RHWP_AGENT_PORT: String(env.RHWP_AGENT_PORT ?? DEFAULT_HUB_PORT),
-  });
+  }, pathEnv));
+
+  if (packaged && execPath) {
+    return {
+      command: execPath,
+      args: [scriptPath],
+      cwd,
+      env: sanitizeHubEnv(baseEnv, { electronAsNode: true }),
+      via: 'electron-as-node',
+    };
+  }
 
   if (node) {
     return { command: node, args: [scriptPath], cwd, env: baseEnv, via: 'node' };
@@ -478,18 +502,17 @@ export function spawnHubProcess(launch, {
   onExit,
   onMessage,
   log = console,
+  spawnProcess = spawn,
 } = {}) {
-  // Windows에서 .cmd/.bat 셸 스크립트는 셸 없이 spawn하면 EINVAL이 난다
-  // (CVE-2024-27980 이후 Node 정책). 이 경로는 npm.cmd start뿐이라 인자
-  // 이스케이프 문제는 없다.
-  const needsShell = platform === 'win32' && /\.(cmd|bat)$/i.test(launch.command);
-  const child = spawn(needsShell ? `"${launch.command}"` : launch.command, launch.args, {
+  // cross-spawn resolves Windows .cmd shims and escapes each argv element, so
+  // paths and values never enter a hand-built shell command string.
+  const child = spawnProcess(launch.command, launch.args, {
     cwd: launch.cwd,
     env: launch.env,
     detached,
     stdio: stdio ?? ['ignore', 'pipe', 'pipe'],
     windowsHide,
-    shell: needsShell,
+    shell: false,
   });
   if (forwardStdio) {
     child.stdout?.on('data', (chunk) => process.stdout.write(chunk));

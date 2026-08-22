@@ -93,6 +93,50 @@ test('the desktop vault persists ciphertext and serves IPC requests', async () =
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test('concurrent vault reads wait for the same encrypted file load', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-concurrent-'));
+  const filePath = path.join(root, 'secrets.json');
+  const protect = (value) => Buffer.from(`protected:${value}`).toString('base64');
+  await fs.writeFile(filePath, JSON.stringify({
+    version: 1,
+    secrets: {
+      'rhwp.first': protect('first-secret'),
+      'rhwp.second': protect('second-secret'),
+    },
+  }));
+  const safeStorage = {
+    async isAsyncEncryptionAvailable() { return true; },
+    async decryptStringAsync(value) {
+      return { shouldReEncrypt: false, result: value.toString().replace(/^protected:/, '') };
+    },
+  };
+  const vault = createSecretVault({ filePath, safeStorage, platform: 'win32' });
+  assert.deepEqual(
+    await Promise.all([vault.get('rhwp.first'), vault.get('rhwp.second')]),
+    ['first-secret', 'second-secret'],
+  );
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test('the Windows vault recovers an interrupted previous write', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-recover-'));
+  const filePath = path.join(root, 'secrets.json');
+  await fs.writeFile(`${filePath}.previous-write`, JSON.stringify({
+    version: 1,
+    secrets: { 'rhwp.test': Buffer.from('protected:recovered').toString('base64') },
+  }));
+  const safeStorage = {
+    async isAsyncEncryptionAvailable() { return true; },
+    async decryptStringAsync(value) {
+      return { shouldReEncrypt: false, result: value.toString().replace(/^protected:/, '') };
+    },
+  };
+  const vault = createSecretVault({ filePath, safeStorage, platform: 'win32' });
+  assert.equal(await vault.get('rhwp.test'), 'recovered');
+  assert.equal(await fs.readFile(filePath, 'utf8').then(() => true), true);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
 test('the hub secret client correlates IPC responses without writing locally', async () => {
   const processRef = new EventEmitter();
   processRef.env = { RHWP_SECRET_BROKER: 'ipc' };

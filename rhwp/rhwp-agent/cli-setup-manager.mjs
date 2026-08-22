@@ -391,7 +391,12 @@ export function createCliSetupManager({
 
   function envFor(agent) {
     const item = assertAgent(agent);
-    const env = { ...baseEnv, PATH: `${binDir}${path.delimiter}${baseEnv.PATH ?? ''}` };
+    const env = { ...baseEnv };
+    const inheritedPath = Object.entries(env).find(([key]) => key.toLowerCase() === 'path')?.[1] ?? '';
+    for (const key of Object.keys(env)) {
+      if (key.toLowerCase() === 'path') delete env[key];
+    }
+    env.PATH = `${binDir}${platform === 'win32' ? ';' : path.delimiter}${inheritedPath}`;
     // 허브가 관리하는 키는 자기 프로바이더의 자식에게만 간다 — 허브 프로세스 환경에
     // 올라온 다른 프로바이더의 키는 여기서 지운다.
     for (const [name, other] of Object.entries(CLI_CONFIG)) {
