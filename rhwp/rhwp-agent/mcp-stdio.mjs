@@ -12,6 +12,7 @@ const SESSION_ID = process.env.RHWP_SESSION_ID
   ?? sessionIdFromScopedHubToken(TOKEN)
   ?? (DEVELOPMENT_AUTH ? 'dev' : null);
 const AGENT_NAME = process.env.RHWP_AGENT_NAME ?? 'unknown';
+const AGENT_ROLE = process.env.RHWP_AGENT_ROLE ?? 'chat';
 const WORKFLOW = process.env.RHWP_AGENT_WORKFLOW ?? process.env.RHWP_WORKFLOW ?? 'direct';
 const PHASE = process.env.RHWP_AGENT_PHASE ?? process.env.RHWP_PLAN_PHASE ?? (WORKFLOW === 'plan' ? 'planning' : 'implementing');
 const CAPABILITY_EPOCH = process.env.RHWP_CAPABILITY_EPOCH;
@@ -56,6 +57,7 @@ function ensureConnected() {
       url.searchParams.set('token', TOKEN);
       url.searchParams.set('sessionId', SESSION_ID);
       url.searchParams.set('agent', AGENT_NAME);
+      url.searchParams.set('role', AGENT_ROLE);
       url.searchParams.set('workflow', WORKFLOW);
       if (CAPABILITY_EPOCH) url.searchParams.set('capabilityEpoch', CAPABILITY_EPOCH);
       sock = new WebSocket(url);

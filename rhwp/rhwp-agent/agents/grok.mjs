@@ -378,8 +378,10 @@ export function createGrokSession(opts, {
   const emittedToolResults = new Set(); // 전환 전 stdout 으로 낸 tool-result id.
   const toolNameByCallId = new Map(); // 디스크 tool_call_update 억제 판단용.
   const pendingTasks = new Set(); // 아직 안 끝난 taskId — 남아 있으면 턴을 닫지 않는다.
-  const pendingSpawnByCallId = new Map(); // 스폰 callId → { taskId, title, mapped }.
-  const spawnOrder = []; // 스폰 순서 — subagent_id 매핑의 FIFO 폴백.
+  /** @type {Map<string, {taskId:string, title:string, mapped:boolean}>} */
+  const pendingSpawnByCallId = new Map();
+  /** @type {string[]} 스폰 순서 — subagent_id 매핑의 FIFO 폴백. */
+  const spawnOrder = [];
   let tasksSeenThisTurn = 0;
   let resultSeen = false;
   let lastStopReason;
@@ -509,6 +511,7 @@ export function createGrokSession(opts, {
    */
   function mapSubagent(subagentId, info) {
     if (!subagentId || taskIdBySubagent.has(subagentId)) return;
+    /** @type {{taskId:string, title:string, mapped:boolean}|null} */
     let entry = null;
     const description = typeof info?.description === 'string' ? info.description : '';
     if (description) {

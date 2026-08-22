@@ -47,10 +47,12 @@ export interface RhwpDesktopApi {
     launchDocumentId: string;
     fileName: string;
     bytes: Uint8Array;
+    readOnly?: boolean;
   } | null>;
   openGeneratedDocumentWindow?: (payload: {
     fileName: string;
     downloadUrl: string;
+    readOnly?: boolean;
   }) => Promise<boolean>;
   pickNativeOpenFile?: (options?: {
     suggestedName?: string;
@@ -113,6 +115,7 @@ export interface RhwpDesktopApi {
     launchDocumentId: string;
     fileName: string;
     bytes: Uint8Array;
+    readOnly?: boolean;
   }) => void) => void;
 }
 
@@ -156,11 +159,16 @@ export function parsePublishedDocumentLink(raw: string): PublishedDocumentLink |
 export async function openPublishedDocumentInNewWindow(
   artifact: PublishedDocumentLink,
   win?: DesktopHost,
+  options: { readOnly?: boolean } = {},
 ): Promise<void> {
   const host = desktopHost(win);
   const openNative = host?.rhwpDesktop?.openGeneratedDocumentWindow;
   if (openNative) {
-    if (!await openNative({ fileName: artifact.fileName, downloadUrl: artifact.downloadUrl })) {
+    if (!await openNative({
+      fileName: artifact.fileName,
+      downloadUrl: artifact.downloadUrl,
+      ...(options.readOnly ? { readOnly: true } : {}),
+    })) {
       throw new Error('새 문서 창을 열지 못했습니다.');
     }
     return;
@@ -178,6 +186,7 @@ export async function openPublishedDocumentInNewWindow(
   editorUrl.hash = '';
   editorUrl.searchParams.set('url', artifact.downloadUrl);
   editorUrl.searchParams.set('filename', artifact.fileName);
+  if (options.readOnly) editorUrl.searchParams.set('templatePreview', '1');
   browserWindow.open(editorUrl.href, '_blank', 'noopener');
 }
 
@@ -690,13 +699,13 @@ export function installDesktopFileHandling(
 }
 
 export function installDesktopGeneratedDocumentHandling(
-  openDocument: (payload: { bytes: Uint8Array; fileName: string }) => void,
+  openDocument: (payload: { bytes: Uint8Array; fileName: string; readOnly: boolean }) => void,
   win?: DesktopHost,
 ) {
   const api = desktopHost(win)?.rhwpDesktop;
   if (!api?.onOpenGeneratedDocument) return false;
   const seen = new Set<string>();
-  const receive = (payload: { launchDocumentId?: string; bytes?: Uint8Array; fileName?: string } | null) => {
+  const receive = (payload: { launchDocumentId?: string; bytes?: Uint8Array; fileName?: string; readOnly?: boolean } | null) => {
     const launchDocumentId = typeof payload?.launchDocumentId === 'string'
       ? payload.launchDocumentId
       : '';
@@ -704,7 +713,7 @@ export function installDesktopGeneratedDocumentHandling(
     const bytes = payload?.bytes instanceof Uint8Array ? payload.bytes : null;
     if (!launchDocumentId || seen.has(launchDocumentId) || !bytes || !/\.(?:hwp|hwpx)$/iu.test(fileName)) return;
     seen.add(launchDocumentId);
-    openDocument({ bytes, fileName });
+    openDocument({ bytes, fileName, readOnly: payload?.readOnly === true });
   };
   api.onOpenGeneratedDocument(receive);
   void api.getLaunchGeneratedDocument?.().then(receive).catch((error) => {

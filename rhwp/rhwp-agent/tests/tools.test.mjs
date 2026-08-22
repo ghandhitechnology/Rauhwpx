@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 69개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 69);
+test('도구는 정확히 73개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 73);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -50,7 +50,7 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 61);
+  assert.equal(direct.size, 63);
   assert.ok(direct.has('materialize_document_snapshot'));
   assert.ok(direct.has('publish_artifact'));
   assert.ok(direct.has('apply_edits'));
@@ -68,6 +68,9 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(direct.has('template_insert_block'));
   assert.ok(!direct.has('download_file'));
   assert.ok(!direct.has('present_implementation_plan'));
+  assert.ok(direct.has('delegate_copy_layout'));
+  assert.ok(direct.has('register_copy_layout_template'));
+  assert.ok(!direct.has('complete_copy_layout_job'));
 
   const planning = new Set(filterToolDefinitions('planning').map((definition) => definition.name));
   assert.ok(planning.has('get_structure'));
@@ -79,11 +82,22 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(!planning.has('insert_text'));
 
   const implementing = new Set(filterToolDefinitions('implementing').map((definition) => definition.name));
-  assert.equal(implementing.size, TOOL_DEFINITIONS.length - 1);
+  assert.equal(implementing.size, TOOL_DEFINITIONS.length - 3);
   assert.ok(implementing.has('insert_text'));
   assert.ok(implementing.has('download_file'));
   assert.ok(implementing.has('browserbase_act'));
   assert.ok(!implementing.has('present_implementation_plan'));
+
+  const worker = filterToolDefinitions('copy-layout-worker').map((definition) => definition.name);
+  assert.deepEqual(worker, [
+    'read_product_skill',
+    'get_document_info',
+    'materialize_document_snapshot',
+    'render_page',
+    'publish_artifact',
+    'update_copy_layout_job',
+    'complete_copy_layout_job',
+  ]);
 });
 
 test('template tools separate read-only inspection from pending document writes', () => {
@@ -164,6 +178,54 @@ test('generated artifacts are publishable in direct and implementing modes, but 
   assert.ok(filterToolDefinitions('direct').some((definition) => definition.name === 'publish_artifact'));
   assert.ok(filterToolDefinitions('implementing').some((definition) => definition.name === 'publish_artifact'));
   assert.ok(!filterToolDefinitions('planning').some((definition) => definition.name === 'publish_artifact'));
+});
+
+test('copy-layout completion schema makes privacy and readability hard gates', () => {
+  const definition = byName.get('complete_copy_layout_job');
+  const valid = {
+    jobId: '00000000-0000-4000-8000-000000000000',
+    outcome: 'succeeded',
+    sourceDocumentId: 'document-1',
+    sourceDigest: 'digest-1',
+    artifactId: 'artifact_1234567890',
+    quality: 'best_effort',
+    summary: '안전한 후보가 준비됐지만 페이지 수가 다릅니다.',
+    warnings: ['페이지 수가 2쪽에서 3쪽으로 달라졌습니다.'],
+    counts: {
+      keptText: 10, removedText: 2, replacedText: 1, resetControls: 1,
+      clearedMarks: 1, keptMedia: 1, removedMedia: 2, iterations: 3,
+    },
+    preview: {
+      representativePages: [0, 1, 2], sourcePageCount: 2, outputPageCount: 3,
+      outputSectionCount: 1, renderCompared: true, geometryMatch: false,
+      safetyVerified: true, readabilityVerified: true, stoppedReason: 'bounded-no-improvement',
+    },
+  };
+  assert.doesNotThrow(() => definition.validate(valid));
+  assert.throws(() => definition.validate({
+    ...valid,
+    preview: { ...valid.preview, safetyVerified: false },
+  }), /safety and readability verification/);
+  assert.throws(() => definition.validate({
+    ...valid,
+    preview: { ...valid.preview, stoppedReason: 'hard-failure' },
+  }), /cannot use hard-failure/);
+  assert.throws(() => definition.validate({
+    ...valid,
+    preview: { ...valid.preview, renderCompared: false },
+  }), /representative render comparison/);
+  assert.throws(() => definition.validate({
+    ...valid,
+    warnings: [],
+  }), /fidelity mismatches require/);
+  assert.throws(() => definition.validate({
+    ...valid,
+    quality: 'verified',
+  }), /bounded-no-improvement completion must use best_effort/);
+  assert.throws(() => definition.validate({
+    ...valid,
+    outcome: 'failed',
+  }), /must not publish/);
 });
 
 test('cell 파라미터를 받는 모든 도구에 조립 방법 안내가 있다', () => {

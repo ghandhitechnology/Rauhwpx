@@ -144,6 +144,8 @@ export const TOOL_CATEGORIES = Object.freeze([
   'download-write',
   'artifact-write',
   'planning-control',
+  'background-control',
+  'background-worker',
   'browser',
 ]);
 
@@ -154,7 +156,7 @@ export const TOOL_CATEGORIES = Object.freeze([
  * destructive 로 표시하지 않는다. 그렇게 표시하면 Codex 안전 모드
  * (`workspace-write` + `approval_policy=never`)가 문서 편집 도구를 거절한다.
  *
- * @param {'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'browser'} category
+ * @param {'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'background-control'|'background-worker'|'browser'} category
  */
 export function toolAnnotations(category) {
   return {
@@ -906,6 +908,93 @@ const BASE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'delegate_copy_layout',
+    description: 'Delegate the complete copy-layout workflow to a fresh autonomous provider process. The job runs in the background, never asks the user questions, appears in the existing agent fleet, and returns its verified result to this owning chat automatically. Call get_document_info immediately before this tool and pass its exact identity fields. Do not inspect, sanitize, publish, or open the template in the owning chat.',
+    shape: {
+      documentId: z.string().min(1).max(256),
+      digest: z.string().min(1).max(256),
+      documentName: z.string().min(1).max(512),
+      sourceFormat: z.enum(['hwp', 'hwpx']),
+      dirty: z.boolean(),
+      sourcePath: z.string().max(4_000).nullable(),
+    },
+  },
+  {
+    name: 'update_copy_layout_job',
+    description: 'Report one meaningful phase update for the autonomous copy-layout job. Available only to the dedicated background worker process.',
+    shape: {
+      jobId: z.string().uuid(),
+      phase: z.enum(['binding-source', 'inspecting', 'planning', 'generating', 'previewing', 'converging', 'publishing']),
+      activity: z.string().min(1).max(500),
+      iteration: z.number().int().min(0).max(3).optional(),
+    },
+  },
+  {
+    name: 'complete_copy_layout_job',
+    description: 'Settle the autonomous copy-layout job with its source-bound, safety-verified structured report. Available only to the dedicated background worker process and callable exactly once.',
+    shape: {
+      jobId: z.string().uuid(),
+      outcome: z.enum(['succeeded', 'failed']),
+      sourceDocumentId: z.string().min(1).max(256),
+      sourceDigest: z.string().min(1).max(256),
+      artifactId: z.string().min(16).max(128).optional(),
+      quality: z.enum(['verified', 'best_effort']).optional(),
+      summary: z.string().min(1).max(4_000),
+      warnings: z.array(z.string().min(1).max(1_000)).max(50).default([]),
+      counts: z.object({
+        keptText: z.number().int().min(0),
+        removedText: z.number().int().min(0),
+        replacedText: z.number().int().min(0),
+        resetControls: z.number().int().min(0),
+        clearedMarks: z.number().int().min(0),
+        keptMedia: z.number().int().min(0),
+        removedMedia: z.number().int().min(0),
+        iterations: z.number().int().min(1).max(3),
+      }),
+      preview: z.object({
+        representativePages: z.array(z.number().int().min(0)).max(12),
+        sourcePageCount: z.number().int().min(1),
+        outputPageCount: z.number().int().min(1),
+        outputSectionCount: z.number().int().min(1),
+        renderCompared: z.boolean(),
+        geometryMatch: z.boolean(),
+        safetyVerified: z.boolean(),
+        readabilityVerified: z.boolean(),
+        stoppedReason: z.enum(['verified-convergence', 'bounded-no-improvement', 'hard-failure']),
+      }),
+    },
+    validate(args) {
+      if (args.outcome === 'succeeded') {
+        if (!args.artifactId || !args.quality) throw invalidArgs('successful copy-layout completion requires artifactId and quality');
+        if (!args.preview.safetyVerified || !args.preview.readabilityVerified) {
+          throw invalidArgs('successful copy-layout completion requires safety and readability verification');
+        }
+        if (!args.preview.renderCompared || args.preview.representativePages.length === 0) {
+          throw invalidArgs('successful copy-layout completion requires representative render comparison');
+        }
+        if (args.preview.stoppedReason === 'hard-failure') throw invalidArgs('successful copy-layout completion cannot use hard-failure');
+        if (args.preview.stoppedReason === 'bounded-no-improvement' && args.quality !== 'best_effort') {
+          throw invalidArgs('bounded-no-improvement completion must use best_effort quality');
+        }
+        const hasFidelityMismatch = !args.preview.geometryMatch
+          || args.preview.sourcePageCount !== args.preview.outputPageCount;
+        if (hasFidelityMismatch && args.warnings.length === 0) {
+          throw invalidArgs('fidelity mismatches require at least one precise warning');
+        }
+      } else if (args.artifactId || args.quality) {
+        throw invalidArgs('failed copy-layout completion must not publish an artifact or quality');
+      }
+    },
+  },
+  {
+    name: 'register_copy_layout_template',
+    description: 'Register the exact completed copy-layout artifact as a reusable template after the user explicitly accepts the single final save/register action. Never call this before that user reply. Declining requires no tool call and leaves the read-only preview open.',
+    shape: {
+      jobId: z.string().uuid(),
+      name: z.string().min(1).max(80).optional(),
+    },
+  },
+  {
     name: 'browserbase_start',
     description: 'Create or reuse the hub-owned Browserbase session for this chat.',
     shape: {},
@@ -937,7 +1026,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
 ];
 
-/** @type {Readonly<Record<string, 'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'browser'>>} */
+/** @type {Readonly<Record<string, 'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'background-control'|'background-worker'|'browser'>>} */
 export const TOOL_CLASSIFICATIONS = Object.freeze({
   read_product_skill: 'document-read',
   list_reference_files: 'reference-read',
@@ -1002,6 +1091,10 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   present_implementation_plan: 'planning-control',
   download_file: 'download-write',
   publish_artifact: 'artifact-write',
+  delegate_copy_layout: 'background-control',
+  update_copy_layout_job: 'background-worker',
+  complete_copy_layout_job: 'background-worker',
+  register_copy_layout_template: 'background-control',
   browserbase_start: 'browser',
   browserbase_end: 'browser',
   browserbase_navigate: 'browser',
@@ -1017,10 +1110,19 @@ export const TOOL_DEFINITIONS = Object.freeze(BASE_TOOL_DEFINITIONS.map((definit
 }));
 
 export const TOOL_PROFILES = Object.freeze({
-  direct: Object.freeze(['document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write']),
+  direct: Object.freeze(['document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'background-control']),
   planning: Object.freeze(['document-read', 'reference-read', 'template-read', 'download-write', 'planning-control', 'browser']),
   'awaiting-approval': Object.freeze(['document-read', 'reference-read', 'template-read', 'download-write', 'browser']),
-  implementing: Object.freeze(['document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'browser']),
+  implementing: Object.freeze(['document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'browser', 'background-control']),
+  'copy-layout-worker': Object.freeze([
+    'read_product_skill',
+    'get_document_info',
+    'materialize_document_snapshot',
+    'render_page',
+    'publish_artifact',
+    'update_copy_layout_job',
+    'complete_copy_layout_job',
+  ]),
   all: TOOL_CATEGORIES,
 });
 
@@ -1033,8 +1135,10 @@ export function filterToolDefinitions(profile) {
   const value = String(profile ?? 'direct').trim();
   const named = TOOL_PROFILES[value];
   if (named) {
-    const categories = new Set(named);
-    return TOOL_DEFINITIONS.filter((definition) => categories.has(definition.category));
+    const entries = new Set(named);
+    return TOOL_DEFINITIONS.filter((definition) => (
+      entries.has(definition.category) || entries.has(definition.name)
+    ));
   }
   const entries = new Set(value.split(',').map((entry) => entry.trim()).filter(Boolean));
   return TOOL_DEFINITIONS.filter((definition) => entries.has(definition.name) || entries.has(definition.category));

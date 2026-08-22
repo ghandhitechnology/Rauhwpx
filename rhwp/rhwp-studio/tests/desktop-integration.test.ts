@@ -83,7 +83,7 @@ test('published artifact links open through a fresh editor window on desktop', a
   assert.equal(parsePublishedDocumentLink('https://example.com/artifacts/artifact_token_1234567890/a.hwp'), null);
   assert.equal(parsePublishedDocumentLink('javascript:alert(1)'), null);
 
-  const opened: Array<{ fileName: string; downloadUrl: string }> = [];
+  const opened: Array<{ fileName: string; downloadUrl: string; readOnly?: boolean }> = [];
   await openPublishedDocumentInNewWindow(artifact!, {
     rhwpDesktop: {
       openGeneratedDocumentWindow: async (payload) => {
@@ -94,6 +94,16 @@ test('published artifact links open through a fresh editor window on desktop', a
   });
   assert.equal(opened[0]?.fileName, '보고서(팀).hwp');
   assert.equal(opened[0]?.downloadUrl, href);
+
+  await openPublishedDocumentInNewWindow(artifact!, {
+    rhwpDesktop: {
+      openGeneratedDocumentWindow: async (payload) => {
+        opened.push(payload);
+        return true;
+      },
+    },
+  }, { readOnly: true });
+  assert.equal(opened[1]?.readOnly, true);
 });
 
 test('browser artifact links open another Studio page with an authenticated source URL', async () => {
@@ -109,6 +119,12 @@ test('browser artifact links open another Studio page with an authenticated sour
   assert.equal(target.origin + target.pathname, 'http://localhost:7700/editor');
   assert.equal(target.searchParams.get('url'), artifact?.downloadUrl);
   assert.equal(target.searchParams.get('filename'), 'report.hwpx');
+
+  await openPublishedDocumentInNewWindow(artifact!, {
+    location: { href: 'http://localhost:7700/editor' },
+    open: (url: string) => { opened.push(String(url)); },
+  } as any, { readOnly: true });
+  assert.equal(new URL(opened[1]!).searchParams.get('templatePreview'), '1');
 });
 
 test('generated-document startup fallback and event delivery open only once', async () => {
@@ -116,11 +132,12 @@ test('generated-document startup fallback and event delivery open only once', as
     launchDocumentId: 'launch-document-1',
     fileName: 'report.hwpx',
     bytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
+    readOnly: true,
   };
   let listener: ((value: typeof payload) => void) | undefined;
-  const opened: string[] = [];
+  const opened: Array<{ fileName: string; readOnly: boolean }> = [];
   const installed = installDesktopGeneratedDocumentHandling(
-    ({ fileName }) => opened.push(fileName),
+    ({ fileName, readOnly }) => opened.push({ fileName, readOnly }),
     {
       rhwpDesktop: {
         onOpenGeneratedDocument: (callback) => { listener = callback; },
@@ -132,7 +149,7 @@ test('generated-document startup fallback and event delivery open only once', as
   listener?.(payload);
   await Promise.resolve();
   await Promise.resolve();
-  assert.deepEqual(opened, ['report.hwpx']);
+  assert.deepEqual(opened, [{ fileName: 'report.hwpx', readOnly: true }]);
 });
 
 test('Electron Save As returns a temporary opaque handle and releases failed targets', async () => {

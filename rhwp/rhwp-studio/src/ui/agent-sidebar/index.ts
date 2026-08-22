@@ -534,6 +534,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let replyPending = false;
   /** 편대 카드가 대신 나타내는 스폰 도구 호출 — 결과 행도 함께 접는다. */
   const suppressedSpawnCalls = new Set<string>();
+  const openingTemplatePreviewJobs = new Set<string>();
   /**
    * 서브에이전트·워크플로 카드. 턴이 도는 동안 입력기 위 도크 팝업이 서브에이전트
    * 작업을 보는 자리이고, 턴이 끝나면 태어날 때 예약한 슬롯으로 접혀 정착한다.
@@ -4584,6 +4585,24 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         persistCurrentThread();
         if (e.reason === 'deleted') systemMessage('이 채팅에서 사용하던 템플릿이 삭제되어 해제했습니다.');
         break;
+      case 'template-preview-ready': {
+        if (openingTemplatePreviewJobs.has(e.jobId)) break;
+        const artifact = parsePublishedDocumentLink(e.artifact.downloadUrl);
+        if (!artifact || artifact.fileName !== e.artifact.fileName) {
+          showToast({ message: '템플릿 미리보기 링크를 확인할 수 없습니다.' });
+          break;
+        }
+        openingTemplatePreviewJobs.add(e.jobId);
+        void openPublishedDocumentInNewWindow(artifact, undefined, { readOnly: true })
+          .then(() => bridge.acknowledgeTemplatePreview(e.jobId))
+          .catch((error) => {
+            openingTemplatePreviewJobs.delete(e.jobId);
+            showToast({
+              message: error instanceof Error ? error.message : '템플릿 미리보기를 열지 못했습니다.',
+            });
+          });
+        break;
+      }
       case 'skill-detail': {
         const action = skillRequestActions.get(e.requestId) ?? 'edit';
         skillRequestActions.delete(e.requestId);

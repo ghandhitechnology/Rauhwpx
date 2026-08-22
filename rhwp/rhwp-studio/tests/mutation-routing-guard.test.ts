@@ -135,7 +135,7 @@ const BASELINE: Readonly<Record<string, number>> = {
   'src/command/commands/edit.ts': 1,
   'src/command/commands/format.ts': 1,
   'src/command/commands/insert.ts': 19,
-  'src/command/commands/page.ts': 14, // +1: page:hide now uses the classified WasmBridge.setPageHide wrapper
+  'src/command/commands/page.ts': 10,
   'src/command/commands/table.ts': 34, // +1: 블록계산 이관 시 evaluateTableFormula dry-run(write=false, 검증) 추가
   'src/ui/bookmark-dialog.ts': 3,
   'src/ui/cell-border-bg-dialog.ts': 5,
@@ -156,7 +156,7 @@ const BASELINE: Readonly<Record<string, number>> = {
   'src/ui/table-cell-props-dialog.ts': 2,
   'src/ui/toolbar.ts': 4,
   // engine/input-handler* — 드래그/nudge 등 직접-뮤테이션 최고밀도 영역.
-  'src/engine/input-handler.ts': 27, // +1: 누름틀 제거 이관 시 removeFieldAt 이 양식모드(직접 유지)/일반모드(snapshot) 두 분기로 분리 / +1: Edit 오버레이 커밋이 셀 내부는 setFormValueInCell 로 분기(CheckBox 와 동일 조건 — 기존 flat 호출은 표 컨트롤 슬롯을 가리켜 실패)
+  'src/engine/input-handler.ts': 29, // 누름틀/셀 편집 분기를 포함한 현재 직접 뮤테이션 표면
   'src/engine/input-handler-connector.ts': 1,
   // +1: 각주 문단 끝 Delete의 다음 문단 병합. 즉시 결과를 MergeParagraphInFootnoteCommand
   // record에 넘겨 undo/redo 및 removedParaMeta 복원을 보존한다.

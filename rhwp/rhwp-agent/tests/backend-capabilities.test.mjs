@@ -16,7 +16,7 @@ import test from 'node:test';
 
 import { createClaudeSession, buildClaudeArgv, prepareClaudeHome } from '../agents/claude.mjs';
 import { createCodexSession, buildCodexArgv, prepareCodexHome } from '../agents/codex.mjs';
-import { mcpRuntimeFor, systemBriefFor } from '../agents/backend.mjs';
+import { mcpCapabilityEnv, mcpRuntimeFor, systemBriefFor } from '../agents/backend.mjs';
 
 const testHome = mkdtempSync(path.join(os.tmpdir(), 'rhwp-backend-test-'));
 test.after(() => rmSync(testHome, { recursive: true, force: true }));
@@ -99,6 +99,34 @@ test('MCP runtime defaults to the current executable for development', () => {
     mcpRuntimeFor({ mcpScriptPath: 'C:\\Rau App\\mcp-stdio.mjs' }, { ELECTRON_RUN_AS_NODE: '1' }).env,
     { ELECTRON_RUN_AS_NODE: '1' },
   );
+});
+
+test('dedicated worker identity and exact tool profile reach every provider MCP process', () => {
+  const opts = {
+    ...baseOpts,
+    workflow: 'direct',
+    phase: 'implementing',
+    capabilityEpoch: 17,
+    toolProfile: 'copy-layout-worker',
+    agentRole: 'copy-layout-worker:job:secret',
+    systemPromptOverride: 'AUTONOMOUS TEMPLATE WORKER',
+  };
+  assert.deepEqual(mcpCapabilityEnv(opts), {
+    RHWP_SESSION_ID: 'studio-thread-42',
+    RHWP_AGENT_WORKFLOW: 'direct',
+    RHWP_AGENT_PHASE: 'implementing',
+    RHWP_CAPABILITY_EPOCH: '17',
+    RHWP_TOOL_PROFILE: 'copy-layout-worker',
+    RHWP_AGENT_ROLE: 'copy-layout-worker:job:secret',
+  });
+  assert.equal(systemBriefFor(opts), 'AUTONOMOUS TEMPLATE WORKER');
+
+  const claudeMcp = JSON.parse(argValue(buildClaudeArgv(opts, sessionId, false), '--mcp-config')).mcpServers.rhwp;
+  assert.equal(claudeMcp.env.RHWP_TOOL_PROFILE, 'copy-layout-worker');
+  assert.equal(claudeMcp.env.RHWP_AGENT_ROLE, 'copy-layout-worker:job:secret');
+  const codexEnv = codexConfig(buildCodexArgv(opts, null), 'mcp_servers.rhwp.env=');
+  assert.match(codexEnv, /RHWP_TOOL_PROFILE = "copy-layout-worker"/);
+  assert.match(codexEnv, /RHWP_AGENT_ROLE = "copy-layout-worker:job:secret"/);
 });
 
 const matrix = [

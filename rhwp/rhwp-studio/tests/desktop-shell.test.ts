@@ -144,7 +144,11 @@ test('generated artifact opening is bound to the sender hub and session', () => 
   assert.deepEqual(resolveGeneratedDocumentArtifact(request, {
     hubUrl: 'ws://127.0.0.1:34567',
     sessionId: 'session-a',
-  }), request);
+  }), { ...request, readOnly: false });
+  assert.deepEqual(resolveGeneratedDocumentArtifact({ ...request, readOnly: true }, {
+    hubUrl: 'ws://127.0.0.1:34567',
+    sessionId: 'session-a',
+  }), { ...request, readOnly: true });
   assert.throws(() => resolveGeneratedDocumentArtifact(request, {
     hubUrl: 'ws://127.0.0.1:34567',
     sessionId: 'session-b',

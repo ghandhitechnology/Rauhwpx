@@ -138,6 +138,8 @@ export interface AgentBridge {
   deleteTemplate(id: string): Promise<void>;
   setActiveTemplate(id: string | null): void;
   getActiveTemplate(): DocumentTemplate | null;
+  /** 읽기 전용 템플릿 미리보기 창이 실제로 열렸음을 허브에 확인한다. */
+  acknowledgeTemplatePreview(jobId: string): void;
   stageReference(scopeId: string, file: File): Promise<StagedReference>;
   discardStagedReference(scopeId: string, stageId: string): Promise<void>;
   /** 참고자료 원본은 HTTP로 스트리밍하고, 브라우저에는 메타데이터만 돌려준다. */
@@ -866,6 +868,7 @@ class AgentBridgeImpl implements AgentBridge {
       pending: this.pendingEdits,
       loadTemplateBytes: (template) => this.downloadTemplateBytes(template),
       getDocumentSourcePath: () => getNativeFileSourcePath(deps.wasm.currentFileHandle),
+      isReadOnly: deps.isReadOnly,
     });
 
     this.options = opts;
@@ -1422,6 +1425,44 @@ class AgentBridgeImpl implements AgentBridge {
           type: 'chat-template-changed',
           template: this.activeTemplate,
           ...(typeof msg.reason === 'string' ? { reason: msg.reason } : {}),
+        });
+        break;
+      }
+      case 'template-preview-ready': {
+        const artifact = msg.artifact;
+        const preview = msg.preview;
+        const counts = msg.counts;
+        if (!artifact || typeof artifact.artifactId !== 'string'
+          || typeof artifact.fileName !== 'string'
+          || typeof artifact.mime !== 'string'
+          || typeof artifact.size !== 'number'
+          || typeof artifact.checksum !== 'string'
+          || typeof artifact.downloadUrl !== 'string'
+          || !preview || !counts
+          || typeof msg.jobId !== 'string'
+          || typeof msg.ownerThreadId !== 'string'
+          || (msg.quality !== 'verified' && msg.quality !== 'best_effort')
+          || !Array.isArray(msg.warnings)
+          || !Array.isArray(preview.representativePages)
+          || (preview.stoppedReason !== 'verified-convergence'
+            && preview.stoppedReason !== 'bounded-no-improvement')) break;
+        this.emit({
+          type: 'template-preview-ready',
+          jobId: msg.jobId,
+          ownerThreadId: msg.ownerThreadId,
+          artifact: {
+            artifactId: artifact.artifactId,
+            fileName: artifact.fileName,
+            mime: artifact.mime,
+            size: artifact.size,
+            checksum: artifact.checksum,
+            downloadUrl: artifact.downloadUrl,
+          },
+          quality: msg.quality,
+          warnings: msg.warnings.filter((value: unknown): value is string => typeof value === 'string'),
+          counts,
+          preview,
+          readOnly: true,
         });
         break;
       }
@@ -2013,6 +2054,11 @@ class AgentBridgeImpl implements AgentBridge {
 
   getActiveTemplate(): DocumentTemplate | null {
     return this.activeTemplate;
+  }
+
+  acknowledgeTemplatePreview(jobId: string): void {
+    if (!jobId) return;
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'template-preview-opened', jobId });
   }
 
   private async downloadTemplateBytes(template: DocumentTemplate): Promise<Uint8Array> {

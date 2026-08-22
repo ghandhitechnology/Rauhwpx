@@ -34,6 +34,8 @@ export interface EditorContext {
   inField: boolean;
   /** 편집 가능 모드인가? (vs 읽기 전용) */
   isEditable: boolean;
+  /** 게시된 템플릿 후보처럼 창 전체가 영구 읽기 전용인가. */
+  readOnly?: boolean;
   /** 현재 편집 모드 */
   editMode: EditorEditMode;
   /** 양식 모드인가? */

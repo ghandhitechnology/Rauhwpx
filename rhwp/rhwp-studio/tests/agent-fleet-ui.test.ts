@@ -446,6 +446,35 @@ test('턴 밖에서 태어난 task 는 끝나는 즉시 슬롯으로 정착한�
   view.reset();
 });
 
+test('독립 백그라운드 provider task 는 owning turn 과 다음 turn 을 지나 계속 돈다', () => {
+  const { view, conversation } = mountFleet();
+  view.beginTurn();
+  view.taskStart(taskStart('template-job', {
+    title: '레이아웃 템플릿 자동 완성',
+    role: '전용 백그라운드 워커',
+    background: true,
+  }) as never);
+  view.sweep();
+  assert.equal(hostedCards(view).length, 1, 'owning turn 종료 뒤에도 도크에서 실행 중이다');
+  assert.equal(settledCards(conversation).length, 0);
+  assert.equal(one(hostedCards(view)[0], 'ag-fleet-label').textContent, '백그라운드 작업 1 · 작업 중');
+
+  view.beginTurn();
+  view.taskProgress({
+    type: 'task-progress', agent: 'claude', taskId: 'template-job', activity: '대표 페이지 비교 중',
+  } as never);
+  assert.equal(hostedCards(view).length, 1, 'main chat의 다음 turn과 섞이거나 중단되지 않는다');
+  assert.equal(one(hostedCards(view)[0], 'ag-fleet-activity').textContent, '대표 페이지 비교 중');
+  view.sweep();
+
+  view.taskEnd({
+    type: 'task-end', agent: 'claude', taskId: 'template-job', status: 'completed', summary: '검증 완료',
+  } as never);
+  assert.equal(hostedCards(view).length, 0, '독립 task 자체가 끝나면 도크를 떠난다');
+  assert.equal(settledCards(conversation).length, 1);
+  view.reset();
+});
+
 test('알약 클릭은 팝업을 접었다 펼치고 aria-expanded 를 따라간다', () => {
   const { view, popupToggles } = mountFleet();
   view.beginTurn();

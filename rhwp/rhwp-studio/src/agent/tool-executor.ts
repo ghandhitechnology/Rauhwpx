@@ -34,6 +34,7 @@ export interface AgentToolExecutorDeps {
   pending: PendingEditManager;
   loadTemplateBytes?: (template: DocumentTemplate) => Promise<Uint8Array>;
   getDocumentSourcePath?: () => Promise<string | null>;
+  isReadOnly?: () => boolean;
 }
 
 const DOC_NOT_LOADED_MESSAGE = '문서가 로드되지 않았습니다';
@@ -368,6 +369,12 @@ export class AgentToolExecutor {
     let claimedMode = false;
     try {
       assertToolCapability(tool, capability);
+      if (isDocumentWriteTool(tool) && this.deps.isReadOnly?.()) {
+        throw new AgentToolError(
+          'READ_ONLY_TEMPLATE_PREVIEW',
+          'This published template preview is read-only and cannot accept document-write tools.',
+        );
+      }
       const requestedMode: TurnWriteMode = !isDocumentWriteTool(tool)
         ? 'none'
         : RAW_ENGINE_WRITE_TOOLS.has(tool) ? 'raw' : 'semantic';

@@ -23,7 +23,7 @@ const MAX_READ_BYTES = 4 * 1024 * 1024;
 export function grokSessionsCwdKey(cwd, fs = nodeFs) {
   let resolved = String(cwd ?? '');
   try {
-    resolved = fs.realpathSync(resolved);
+    resolved = fs.realpathSync?.(resolved) ?? resolved;
   } catch {
     // 아직 없는 디렉터리 등 — 원문 그대로 인코딩하고 탐색 폴백에 맡긴다.
   }
@@ -133,7 +133,7 @@ export function createGrokSessionTail({
         return null;
       } finally {
         if (fd !== undefined) {
-          try { fs.closeSync(fd); } catch {}
+          try { fs.closeSync?.(fd); } catch {}
         }
       }
     }
@@ -225,7 +225,9 @@ export function createGrokSessionTail({
     }
     // 부모를 먼저 비운다 — subagent_spawned 가 자식 추적과 taskId 매핑을 만들고
     // 나서야 자식 라인이 귀속될 수 있다.
-    for (const { update, meta } of readNewUpdates(parentFile)) {
+    const currentParentFile = parentFile;
+    if (!currentParentFile) return;
+    for (const { update, meta } of readNewUpdates(currentParentFile)) {
       const subagentId = update.subagent_id ? String(update.subagent_id) : '';
       if (update.sessionUpdate === 'subagent_spawned' && subagentId) {
         watchChild(subagentId);

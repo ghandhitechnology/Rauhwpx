@@ -79,6 +79,9 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * @property {Record<string, string>} [providerEnv]
  * @property {string} [model]
  * @property {string} [effort]
+ * @property {string} [toolProfile]
+ * @property {string} [agentRole]
+ * @property {string} [systemPromptOverride]
  * @property {(evt: UnifiedAgentEvent) => void} onEvent
  *
  * @typedef {Object} AgentSession
@@ -356,6 +359,9 @@ export function isPlanningRestricted(opts = {}) {
 }
 
 export function systemBriefFor(opts = {}, agentName = 'claude') {
+  if (typeof opts.systemPromptOverride === 'string' && opts.systemPromptOverride.trim()) {
+    return opts.systemPromptOverride;
+  }
   const { workflow, phase } = normalizeExecutionMode(opts);
   // 프로필 미지정은 안전으로 간주한다 — Studio 기본값과 동일한 fail-safe.
   const profile = opts.permissionProfile === 'unrestricted' ? 'unrestricted' : 'safe';
@@ -369,6 +375,8 @@ export function mcpCapabilityEnv(opts = {}) {
     RHWP_AGENT_WORKFLOW: workflow,
     RHWP_AGENT_PHASE: phase,
     RHWP_CAPABILITY_EPOCH: String(capabilityEpoch),
+    ...(opts.toolProfile ? { RHWP_TOOL_PROFILE: String(opts.toolProfile) } : {}),
+    ...(opts.agentRole ? { RHWP_AGENT_ROLE: String(opts.agentRole) } : {}),
     ...(opts.sessionId === undefined || opts.sessionId === null || !String(opts.sessionId)
       ? {}
       : { RHWP_SESSION_ID: String(opts.sessionId) }),

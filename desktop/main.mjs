@@ -547,7 +547,7 @@ ipcMain.handle('desktop:open-generated-document-window', async (event, payload =
   validateNativeDocumentBytes(artifact.fileName, bytes);
   const opened = await createWindow(
     launchRequest({ source: 'chat-artifact' }),
-    { generatedDocument: { fileName: artifact.fileName, bytes } },
+    { generatedDocument: { fileName: artifact.fileName, bytes, readOnly: artifact.readOnly } },
   );
   return Boolean(opened);
 });

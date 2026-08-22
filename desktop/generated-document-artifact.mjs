@@ -43,5 +43,9 @@ export function resolveGeneratedDocumentArtifact(payload, { hubUrl, sessionId } 
   if (pathFileName !== fileName) {
     throw new Error('Generated document URL filename does not match the requested document');
   }
-  return Object.freeze({ downloadUrl: url.href, fileName });
+  return Object.freeze({
+    downloadUrl: url.href,
+    fileName,
+    readOnly: payload?.readOnly === true,
+  });
 }

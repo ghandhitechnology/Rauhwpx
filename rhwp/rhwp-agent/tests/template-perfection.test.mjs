@@ -1,0 +1,86 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import {
+  COPY_LAYOUT_MAX_ITERATIONS,
+  COPY_LAYOUT_PHASES,
+  buildCopyLayoutCompletionPrompt,
+  buildCopyLayoutWorkerPrompt,
+  defaultTemplateName,
+  taskProgressForJob,
+} from '../template-perfection.mjs';
+
+const binding = {
+  documentId: 'document-exact',
+  digest: 'sha256-exact',
+  documentName: '신청서.hwp',
+  sourceFormat: 'hwp',
+  dirty: true,
+  sourcePath: null,
+};
+
+test('copy-layout worker prompt defines a fresh bounded no-prompt process', () => {
+  const prompt = buildCopyLayoutWorkerPrompt({
+    jobId: 'job-1',
+    binding,
+    helperPath: '/private/job/copy_layout.py',
+    jobDir: '/private/job',
+  });
+  assert.equal(COPY_LAYOUT_MAX_ITERATIONS, 3);
+  assert.match(prompt, /fresh independent provider process/);
+  assert.match(prompt, /not a provider-native subagent/);
+  assert.match(prompt, /Do not spawn, delegate, ask the user, request confirmation/);
+  assert.match(prompt, /Always call materialize_document_snapshot/);
+  assert.match(prompt, /complete paragraph, field, form-control, named-structure, visual-mark, and media inventory/);
+  assert.match(prompt, /Hard iteration ceiling: 3 collision-free candidates/);
+  assert.match(prompt, /verified convergence/);
+  assert.match(prompt, /bounded-no-improvement/);
+  assert.match(prompt, /any unresolved private payload[\s\S]*hard failure/);
+  assert.match(prompt, /publish_artifact exactly once/);
+  assert.match(prompt, /complete_copy_layout_job/);
+  assert.match(prompt, /"documentId": "document-exact"/);
+  assert.match(prompt, /\/private\/job\/copy_layout\.py/);
+});
+
+test('completion prompt leaves one exact registration decision to the owning chat', () => {
+  const prompt = buildCopyLayoutCompletionPrompt({
+    jobId: 'job-1',
+    outcome: 'succeeded',
+    artifact: { artifactId: 'artifact-1', fileName: '신청서 - Layout.hwp' },
+  });
+  assert.match(prompt, /Studio already opened the exact returned artifact/);
+  assert.match(prompt, /new read-only template-preview window/);
+  assert.match(prompt, /ask exactly one final question/);
+  assert.match(prompt, /register_copy_layout_template/);
+  assert.match(prompt, /if they decline, do not call it and leave the preview open/);
+});
+
+test('fleet progress uses the existing task phase/member contract', () => {
+  const progress = taskProgressForJob({
+    jobId: 'job-1',
+    agent: 'codex',
+    model: 'gpt-5.6-sol',
+    phase: 'previewing',
+    status: 'running',
+    activity: '대표 페이지 비교 중',
+    usage: { totalTokens: 123, toolUses: 7 },
+  });
+  assert.equal(progress.type, 'task-progress');
+  assert.equal(progress.taskId, 'job-1');
+  assert.equal(progress.phases.length, COPY_LAYOUT_PHASES.length);
+  assert.deepEqual(progress.members[0], {
+    index: 0,
+    label: '템플릿 완성 워커',
+    state: 'running',
+    phaseIndex: 4,
+    model: 'gpt-5.6-sol',
+    tokens: 123,
+    toolCalls: 7,
+    activity: '대표 페이지 비교 중',
+  });
+});
+
+test('default registration name strips format and generated collision suffixes', () => {
+  assert.equal(defaultTemplateName('신청서 - Layout (3).hwpx'), '신청서');
+  assert.equal(defaultTemplateName('보고서.hwp'), '보고서');
+});
