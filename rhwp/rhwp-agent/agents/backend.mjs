@@ -81,8 +81,10 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * @property {string} [effort]
  * @property {string} [toolProfile]
  * @property {string} [agentRole]
- * @property {string[]} [shellAllowPrefixes] 백그라운드 작업자가 헬퍼 스크립트 실행에 쓰는
- *   스코프 셸 접두사 허용 (grok 이 소비한다 — 그 외 빌더는 무시한다).
+ * @property {string[]} [shellAllowPrefixes] 백그라운드 작업자 헬퍼 실행용 스코프 셸
+ *   접두사 (grok 만 소비). 각 항목은 `python3 /abs/copy_layout.py` 처럼
+ *   인터프리터+절대 스크립트 경로여야 한다. 맨 인터프리터 이름만 넘기면 무시되고
+ *   전면 Bash deny 가 유지된다.
  * @property {string} [systemPromptOverride]
  * @property {(evt: UnifiedAgentEvent) => void} onEvent
  *

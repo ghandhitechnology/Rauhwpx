@@ -128,6 +128,33 @@ export function buildGrokConfigToml(opts) {
 }
 
 /**
+ * 스코프 셸 접두사는 인터프리터 + 절대 스크립트 경로여야 한다.
+ * `python3` / `python` 같은 맨 이름만 오면 `python3 -c` 가 열려 무시한다.
+ *
+ * @param {unknown} prefixes
+ * @returns {string[]}
+ */
+export function pinnedShellAllowPrefixes(prefixes) {
+  return (Array.isArray(prefixes) ? prefixes : [])
+    .map((prefix) => String(prefix).trim())
+    .filter((prefix) => {
+      if (!prefix) return false;
+      const tokens = prefix.replaceAll('"', '').split(/\s+/).filter(Boolean);
+      return tokens.length >= 2 && path.isAbsolute(tokens[1]);
+    });
+}
+
+/**
+ * grok Bash 규칙. 접두사 자체와 그 뒤 공백+인자만 허용한다.
+ *
+ * @param {string[]} prefixes
+ * @returns {string[]}
+ */
+export function scopedBashAllowRules(prefixes) {
+  return prefixes.flatMap((prefix) => [`Bash(${prefix})`, `Bash(${prefix} *)`]);
+}
+
+/**
  * grok 헤드리스 인자를 만든다. 프롬프트는 --prompt-file 로 전달한다 —
  * '-' 로 시작하는 메시지의 플래그 오파싱과 ARG_MAX 초과를 함께 막는다.
  *
@@ -144,17 +171,18 @@ export function buildGrokArgv(opts, sessionId, resume, promptFilePath) {
   // 스코프 셸 접두사. grok 규칙은 glob 이고 deny 가 allow 보다 우선하므로(~/.grok
   // README "Permission Rules"), 전면 --deny Bash 를 유지한 채로는 스코프 허용이
   // 죽는다 — 이 모드에서는 Bash deny 를 빼고 dontAsk 의 allowlist 폐쇄성(허용
-  // 목록 밖은 무프롬프트 거부)으로 경계를 유지한다. 대화형 안전 채팅에는 이 옵션이
+  // 목록 밖은 무프롬프트 거부)으로 경계를 유지한다. 접두사는 `python3 /abs/helper.py`
+  // 처럼 인터프리터+절대 경로여야 한다. `python3*` 는 `python3 -c` 와 임의 스크립트까지
+  // 열리므로 버린다. 규칙은 `Bash(prefix)` 와 `Bash(prefix *)` 로만 연다 — 끝에 * 를
+  // 붙이면 helper.pyevil 같은 이웃 경로도 맞는다. 대화형 안전 채팅에는 이 옵션이
   // 없으므로 기존 전면 deny 가 그대로 간다.
-  const shellAllowPrefixes = (Array.isArray(opts.shellAllowPrefixes) ? opts.shellAllowPrefixes : [])
-    .map((prefix) => String(prefix).trim())
-    .filter(Boolean);
+  const shellAllowPrefixes = pinnedShellAllowPrefixes(opts.shellAllowPrefixes);
   const scopedShell = shellAllowPrefixes.length > 0 && !planningRestricted;
   const allowRules = [
     `Read(${rootGlob})`,
     ...(planningRestricted ? [] : [`Edit(${rootGlob})`]),
     'Grep', 'WebFetch', 'WebSearch', 'MCPTool(rhwp__*)',
-    ...(scopedShell ? shellAllowPrefixes.map((prefix) => `Bash(${prefix}*)`) : []),
+    ...(scopedShell ? scopedBashAllowRules(shellAllowPrefixes) : []),
   ];
   // --sandbox 는 붙이지 않는다: grok 1.0.5 의 macOS seatbelt 샌드박스는 프로필을
   // 적용한 직후 기동 전에 멈춰(무한 대기, 출력 없음) 턴이 영원히 끝나지 않는다.
@@ -170,7 +198,7 @@ export function buildGrokArgv(opts, sessionId, resume, promptFilePath) {
   // 확인), --deny Write 는 명시적 이중 안전장치로 함께 붙인다.
   const denyRules = [
     // 스코프 셸 모드에서는 Bash deny 가 허용 접두사를 이기므로 빼고, 대신
-    // python3 등 허용 접두사 밖의 모든 셸을 dontAsk 가 거부하게 둔다.
+    // 고정 헬퍼 접두사 밖의 모든 셸을 dontAsk 가 거부하게 둔다.
     ...(scopedShell ? [] : ['Bash']),
     ...(planningRestricted ? ['Edit', 'Write'] : []),
   ];

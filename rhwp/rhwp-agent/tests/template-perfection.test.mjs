@@ -40,6 +40,8 @@ test('copy-layout worker prompt defines a fresh bounded no-prompt process', () =
   assert.match(prompt, /complete_copy_layout_job/);
   assert.match(prompt, /"documentId": "document-exact"/);
   assert.match(prompt, /\/private\/job\/copy_layout\.py/);
+  assert.match(prompt, /Invoke the helper only as python3 or python followed by this exact helper path/);
+  assert.match(prompt, /Do not use python -c\/-m, another script, or --rhwp-bin/);
 });
 
 test('completion prompt leaves one exact registration decision to the owning chat', () => {

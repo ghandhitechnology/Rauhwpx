@@ -36,6 +36,7 @@ ${JSON.stringify(binding, null, 2)}
 Job workspace: ${jobDir}
 Bundled helper copy: ${helperPath}
 Hard iteration ceiling: ${COPY_LAYOUT_MAX_ITERATIONS} collision-free candidates.
+Invoke the helper only as python3 or python followed by this exact helper path. Do not use python -c/-m, another script, or --rhwp-bin.
 
 Required workflow:
 1. Call update_copy_layout_job(phase=binding-source). Read the bundled copy-layout skill completely with read_product_skill. Call get_document_info and require documentId and digest to equal the immutable binding. Always call materialize_document_snapshot, then use only that exact snapshot so the native source can never be modified or overwritten.
