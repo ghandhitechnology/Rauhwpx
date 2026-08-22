@@ -56,6 +56,8 @@ export interface EditorContext {
   isDirty: boolean;
   /** 원본 파일 형식 — 저장 시 출처 포맷 유지(HWPX→HWPX, HWP→HWP). 다른 포맷 저장은 별도 메뉴(#1613). */
   sourceFormat?: 'hwp' | 'hwpx' | 'hml';
+  /** 열린 문서가 Rauhwpx 공문/품의 서식팩이면 그 id. */
+  formPackId?: string | null;
 }
 
 /** 개별 커맨드 정의 */

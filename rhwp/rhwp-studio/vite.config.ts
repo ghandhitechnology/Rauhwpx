@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite';
 import { resolve, extname, join } from 'path';
-import { readFileSync, readFile } from 'fs';
+import { readFileSync, readFile, mkdirSync, copyFileSync, readdirSync } from 'fs';
 import { VitePWA } from 'vite-plugin-pwa';
 import { rhwpAgentHubPlugin } from './vite-plugin-agent-hub.mjs';
 
@@ -57,6 +57,7 @@ export default defineConfig({
         resolve(__dirname, '..', 'pkg'),
         subsecondWasmDir,
         resolve(__dirname, '..', 'samples'),
+        resolve(__dirname, '..', 'form-pack'),
         resolve(__dirname, '..', 'npm', 'editor'),
       ],
     },
@@ -76,6 +77,36 @@ export default defineConfig({
     },
     // [Task #741 후속] dev 서버 영역 영역 /samples/* 경로 영역 영역 parent samples/ dir 영역
     // 영역 정적 serve 영역 — wasm-bridge.ts 영역 영역 외부 image fetch 영역 영역 영역.
+    {
+      name: 'serve-form-pack-dir',
+      configureServer(server) {
+        const packDir = resolve(__dirname, '..', 'form-pack');
+        server.middlewares.use('/form-pack', (req, res, next) => {
+          if (!req.url) return next();
+          const reqPath = decodeURIComponent(req.url.split('?')[0]);
+          const relPath = reqPath.replace(/^\/+/, '');
+          if (relPath.includes('..')) { res.statusCode = 403; return res.end(); }
+          const full = join(packDir, relPath);
+          if (!full.startsWith(packDir)) { res.statusCode = 403; return res.end(); }
+          readFile(full, (err: NodeJS.ErrnoException | null, data: Buffer) => {
+            if (err) { res.statusCode = 404; return res.end(); }
+            const ext = extname(full).toLowerCase();
+            res.setHeader('Content-Type', ext === '.hwpx' ? 'application/hwp+zip' : 'application/octet-stream');
+            res.end(data);
+          });
+        });
+      },
+      writeBundle() {
+        const packDir = resolve(__dirname, '..', 'form-pack');
+        const outDir = resolve(__dirname, 'dist', 'form-pack');
+        mkdirSync(outDir, { recursive: true });
+        for (const name of readdirSync(packDir)) {
+          if (name.endsWith('.hwpx') || name.endsWith('.json')) {
+            copyFileSync(join(packDir, name), join(outDir, name));
+          }
+        }
+      },
+    },
     {
       name: 'serve-samples-dir',
       configureServer(server) {

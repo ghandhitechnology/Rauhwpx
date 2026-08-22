@@ -1,0 +1,27 @@
+{
+  "id": "rauhwpx-office",
+  "marker": "META-INF/rauhwpx-form-pack",
+  "brand": "Rauhwpx",
+  "title": "공문/품의 서식",
+  "description": "사무실에서 바로 열어 채우는 Rauhwpx 공문·품의 HWPX 서식. 저장은 HWPX만 허용한다. 온나라 전자결재 인증 서식이 아니다. 식별은 파일명이 아니라 팩 id(rauhwpx-office)다.",
+  "export": {
+    "allowed": ["hwpx"],
+    "refused": ["hwp"]
+  },
+  "forms": [
+    {
+      "id": "gongmun",
+      "title": "공문",
+      "file": "공문.hwpx",
+      "kind": "official-letter",
+      "description": "온메일형 시행문·공문. 수신·제목·본문·발신명의·결재 누름틀."
+    },
+    {
+      "id": "pumui",
+      "title": "품의",
+      "file": "품의.hwpx",
+      "kind": "approval",
+      "description": "온메일형 품의. 문서정보 표 안에 결재란 중첩 표가 들어 있다."
+    }
+  ]
+}

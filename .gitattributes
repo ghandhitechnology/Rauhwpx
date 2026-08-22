@@ -2,3 +2,4 @@
 # 스튜디오 테스트가 소스를 readFileSync 로 읽어 마커 문자열을 찾기 때문에 CRLF 변환이 있으면 깨진다.
 # 바이트 보존이 필요한 픽스처 예외는 rhwp/.gitattributes 에 있다.
 * text=auto eol=lf
+*.hwpx -text
