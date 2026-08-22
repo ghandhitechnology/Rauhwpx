@@ -48,6 +48,9 @@ test('completion prompt leaves one exact registration decision to the owning cha
     outcome: 'succeeded',
     artifact: { artifactId: 'artifact-1', fileName: '신청서 - Layout.hwp' },
   });
+  assert.match(prompt, /hub's automatic completion notification/);
+  assert.match(prompt, /not a wait_agent result/);
+  assert.match(prompt, /Notify the user now/);
   assert.match(prompt, /Studio already opened the exact returned artifact/);
   assert.match(prompt, /new read-only template-preview window/);
   assert.match(prompt, /ask exactly one final question/);

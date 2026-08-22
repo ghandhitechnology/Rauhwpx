@@ -248,7 +248,8 @@ ${PARALLEL_WORK_SHARED}
     return `PARALLEL WORK:
 - For large document tasks, spawn agents with your collaboration tools (spawn_agent). Give each agent ONE contiguous paragraph range (for example one page or one section) and state that range plus the goal in its message. Each agent re-reads its own region before writing.
 ${PARALLEL_WORK_SHARED}
-- Call wait_agent until every spawned agent has finished before ending the turn; agents still running when the turn ends are killed.`;
+- Call wait_agent until every agent you explicitly created with spawn_agent has finished before ending the turn; agents still running when the turn ends are killed.
+- Never call wait_agent for an MCP-managed background job such as delegate_copy_layout. It is not a collaboration agent; end the turn and let the hub inject its completion into a new owning-chat turn.`;
   }
   if (agentName === 'cursor') {
     return `PARALLEL WORK:

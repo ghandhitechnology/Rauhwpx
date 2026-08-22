@@ -71,6 +71,8 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(direct.has('delegate_copy_layout'));
   assert.ok(direct.has('register_copy_layout_template'));
   assert.ok(!direct.has('complete_copy_layout_job'));
+  assert.match(byName.get('delegate_copy_layout')?.description ?? '', /do not call wait_agent\/list_agents or poll/);
+  assert.match(byName.get('delegate_copy_layout')?.description ?? '', /hub will start a new owning-chat turn/);
 
   const planning = new Set(filterToolDefinitions('planning').map((definition) => definition.name));
   assert.ok(planning.has('get_structure'));

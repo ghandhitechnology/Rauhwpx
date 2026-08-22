@@ -11,6 +11,8 @@ When this skill is selected in the main Studio chat, call `get_document_info` on
 
 Delegate the entire workflow. Do not inspect paragraphs, create decisions, run the helper, publish an artifact, or open a link in the owning chat. `delegate_copy_layout` starts a fresh independent provider session/process in the background and returns immediately, so the main chat stays responsive. It is represented by the normal session/fleet task protocol; it is not a provider-native subagent.
 
+After `delegate_copy_layout` succeeds, do not call `wait_agent`, `list_agents`, poll tools, sleep, or use any other waiting mechanism. Collaboration tools cannot observe this independent process. Briefly tell the user that the background job is running, then end the current turn. The hub will automatically start a new turn in this same owning chat with the structured completion result when the worker settles; that injected turn is the only completion notification to act on.
+
 There is no pre-execution confirmation. Do not ask about paragraph choices, media, privacy ambiguities, destination, format fallback, page-count differences, filename collision suffixes, previews, or publication while the worker runs.
 
 ## Dedicated worker: immutable source and bounded autonomy

@@ -26,6 +26,8 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(markdown, /main chat stays responsive/);
   assert.match(markdown, /normal session\/fleet task protocol/);
   assert.match(markdown, /not a provider-native subagent/);
+  assert.match(markdown, /do not call `wait_agent`, `list_agents`, poll tools/);
+  assert.match(markdown, /hub will automatically start a new turn in this same owning chat/);
   assert.match(markdown, /Dedicated worker: immutable source and bounded autonomy/);
   assert.match(markdown, /Always call `materialize_document_snapshot`/);
   assert.match(markdown, /complete paragraph inventory/);

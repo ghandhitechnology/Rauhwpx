@@ -2178,7 +2178,9 @@ function handleMcpMessage(record, sock, msg) {
             status: 'running',
             provider: job.agent,
             model: job.model,
-            message: '백그라운드 작업이 전체 copy-layout 작업을 맡았습니다. 이 채팅은 계속 사용할 수 있습니다.',
+            completionDelivery: 'automatic-owning-chat-turn',
+            waitForCompletion: false,
+            message: '백그라운드 작업을 시작했습니다. wait_agent로 기다리거나 폴링하지 말고 현재 턴을 끝내세요. 완료되면 허브가 이 채팅을 자동으로 다시 시작해 결과를 전달합니다.',
           });
         } catch (error) {
           sendError(error, 'COPY_LAYOUT_DELEGATION_FAILED');

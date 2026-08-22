@@ -909,7 +909,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'delegate_copy_layout',
-    description: 'Delegate the complete copy-layout workflow to a fresh autonomous provider process. The job runs in the background, never asks the user questions, appears in the existing agent fleet, and returns its verified result to this owning chat automatically. Call get_document_info immediately before this tool and pass its exact identity fields. Do not inspect, sanitize, publish, or open the template in the owning chat.',
+    description: 'Delegate the complete copy-layout workflow to a fresh autonomous provider process. The job runs in the background, never asks the user questions, appears in the existing agent fleet, and returns its verified result to this owning chat automatically. Call get_document_info immediately before this tool and pass its exact identity fields. Do not inspect, sanitize, publish, or open the template in the owning chat. This process is not registered with collaboration tools: after delegation, do not call wait_agent/list_agents or poll; end the current turn and the hub will start a new owning-chat turn with the completion payload.',
     shape: {
       documentId: z.string().min(1).max(256),
       digest: z.string().min(1).max(256),

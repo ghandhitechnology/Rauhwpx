@@ -38,3 +38,12 @@ test('preview delivery is replayed until Studio confirms the read-only window op
   assert.match(server, /case 'template-preview-opened'/);
   assert.match(server, /sendTemplatePreviewReady\(record, job\)/);
 });
+
+test('completion wakes the owning chat without collaboration wait polling', () => {
+  assert.match(server, /completionDelivery: 'automatic-owning-chat-turn'/);
+  assert.match(server, /waitForCompletion: false/);
+  assert.match(server, /wait_agent로 기다리거나 폴링하지 말고 현재 턴을 끝내세요/);
+  assert.match(server, /record\.pendingTemplateCompletions\.push/);
+  assert.match(server, /activeSession\.backend\.sendUserMessage\(buildCopyLayoutCompletionPrompt\(entry\.result\)\)/);
+  assert.match(server, /if \(evt\.type === 'turn-end'\) drainTemplateCompletion\(record\)/);
+});
