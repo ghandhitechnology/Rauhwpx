@@ -51,6 +51,7 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(markdown, /Hard safety\/readability gates/);
   assert.match(markdown, /publish nothing and complete the job as failed/);
   assert.match(markdown, /safe and readable candidate may complete as `best_effort`/);
+  assert.match(markdown, /Never run another script/);
   assert.match(markdown, /--inspect-text/);
   assert.match(markdown, /--text-plan/);
   assert.match(markdown, /"default": "keep"/);
