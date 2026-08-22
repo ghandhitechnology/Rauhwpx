@@ -16,7 +16,7 @@ concurrency:
 jobs:
   engine:
     name: Rust engine and WASM build
-    runs-on: depot-ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
 
     steps:
@@ -44,7 +44,7 @@ jobs:
 
   app:
     name: Desktop, agent, and Studio checks
-    runs-on: depot-ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
 
     steps:

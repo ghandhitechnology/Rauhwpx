@@ -55,7 +55,7 @@ Rust: `cargo test`, `cargo clippy`, `cargo fmt`. Studio: `npm test`, `npm run bu
 
 ## Releasing
 
-Push a `v*` tag matching `package.json`. Depot verifies the source, builds on native macOS and Windows runners, smoke-tests the Windows installer, and publishes the GitHub release.
+Push a `v*` tag matching `package.json`. GitHub Actions verifies the source, builds on native macOS and Windows runners, smoke-tests the Windows installer, and publishes the GitHub release.
 
 ```bash
 version="v$(node -p "require('./package.json').version")"

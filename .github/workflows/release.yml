@@ -15,7 +15,7 @@ concurrency:
 jobs:
   preflight:
     name: Verify release tag
-    runs-on: depot-ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -37,7 +37,7 @@ jobs:
   verify:
     name: Verify release source
     needs: preflight
-    runs-on: depot-ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
 
     steps:
@@ -82,7 +82,7 @@ jobs:
   macos:
     name: Build macOS installers
     needs: verify
-    runs-on: depot-macos-15
+    runs-on: macos-15
     timeout-minutes: 90
     environment: macos-release
 
@@ -188,7 +188,7 @@ jobs:
   windows:
     name: Build and smoke-test Windows installer
     needs: verify
-    runs-on: depot-windows-2025
+    runs-on: windows-2025
     timeout-minutes: 90
 
     steps:
@@ -249,7 +249,7 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: [macos, windows]
-    runs-on: depot-ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
