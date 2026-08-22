@@ -399,8 +399,11 @@ test('원격 브라우저 구역은 연결 바로 아래 서고, 키는 앱 수�
   assert.match(settings, /createTextField\('프로젝트 ID', \{ placeholder: '비우면 계정에서 골라요' \}\)/);
   // 적용은 허브 검증을 거치고, 성공해야만 탭 보관소에 남긴다; 키 칸은 비운다.
   assert.match(settings, /const status = await bridge\.setBrowserbaseCredentials\(override\);[\s\S]*if \(status\) \{[\s\S]*saveBrowserbaseOverride\(\{ \.\.\.override,[\s\S]*browserbaseKey\.input\.value = '';/);
-  // 되돌리기는 허브와 탭 보관소를 함께 비운다.
-  assert.match(settings, /await bridge\.clearBrowserbaseCredentials\(\);[\s\S]*clearBrowserbaseOverride\(\);/);
+  // 자동으로 채워진 옛 프로젝트 ID는 새 키와 섞지 않는다.
+  assert.match(settings, /browserbaseKey\.input\.addEventListener\('input',[\s\S]*if \(browserbaseProjectAutoFilled\) \{[\s\S]*browserbaseProject\.input\.value = '';/);
+  // 되돌리기는 허브가 성공한 뒤에만 브리지와 탭 보관소를 함께 비운다.
+  assert.match(settings, /const status = await bridge\.clearBrowserbaseCredentials\(\);[\s\S]*if \(status\) \{\s*clearBrowserbaseOverride\(\);/);
+  assert.match(bridge, /const status = await this\.request<BrowserbaseStatus>\([\s\S]*browserbase-credentials-set[\s\S]*if \(status\) this\.browserbaseOverride = candidate;/);
   // 새로고침 뒤에는 보관소의 키를 허브에 다시 심고, 브리지는 연결마다 재전송한다.
   assert.match(settings, /const storedBrowserbase = loadBrowserbaseOverride\(\);\s*if \(storedBrowserbase\) \{[\s\S]*bridge\.setBrowserbaseCredentials\(storedBrowserbase\)/);
   assert.match(bridge, /if \(this\.browserbaseOverride !== null\) \{\s*this\.sendJson\(\{ v: AGENT_PROTOCOL_VERSION, type: 'browserbase-credentials-set', \.\.\.this\.browserbaseOverride \}\);/);

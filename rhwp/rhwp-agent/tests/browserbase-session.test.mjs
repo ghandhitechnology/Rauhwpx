@@ -112,30 +112,90 @@ test('fleet status exposes sources and key tail but never the key itself', async
   assert.deepEqual(bare.missing, ['BROWSERBASE_API_KEY', 'BROWSERBASE_PROJECT_ID', 'GEMINI_API_KEY']);
 });
 
-test('validateBrowserbaseCredentials checks the key against the API and picks a project', async () => {
+function apiResponse(status, body) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async text() { return typeof body === 'string' ? body : JSON.stringify(body); },
+  };
+}
+
+test('validateBrowserbaseCredentials discovers a project when only the key is supplied', async () => {
   const seen = [];
   const fetchImpl = async (url, init) => {
     seen.push({ url, key: init.headers['X-BB-API-Key'] });
-    if (init.headers['X-BB-API-Key'] !== 'good') return { ok: false, status: 401, async json() { return {}; } };
-    return { ok: true, status: 200, async json() { return [{ id: 'proj-a', name: 'A' }, { id: 'proj-b', name: 'B' }]; } };
+    if (init.headers['X-BB-API-Key'] !== 'good') return apiResponse(401, { message: 'Unauthorized' });
+    return apiResponse(200, [{ id: 'proj-a', name: 'A' }, { id: 'proj-b', name: 'B' }]);
   };
   const picked = await validateBrowserbaseCredentials({ apiKey: 'good' }, { fetchImpl });
   assert.equal(picked.projectId, 'proj-a');
   assert.equal(picked.projects.length, 2);
   assert.equal(seen[0].url, 'https://api.browserbase.com/v1/projects');
-  const explicit = await validateBrowserbaseCredentials({ apiKey: 'good', projectId: 'proj-b' }, { fetchImpl });
-  assert.equal(explicit.projectName, 'B');
-  await assert.rejects(
-    validateBrowserbaseCredentials({ apiKey: 'good', projectId: 'proj-zzz' }, { fetchImpl }),
-    (error) => error.code === 'BROWSERBASE_PROJECT_NOT_FOUND',
-  );
   await assert.rejects(
     validateBrowserbaseCredentials({ apiKey: 'bad' }, { fetchImpl }),
     (error) => error.code === 'BROWSERBASE_KEY_INVALID',
   );
+});
+
+test('validateBrowserbaseCredentials checks an explicit project directly', async () => {
+  const seen = [];
+  const fetchImpl = async (url) => {
+    seen.push(url);
+    if (url.endsWith('/proj-b')) return apiResponse(200, { id: 'proj-b', name: 'B' });
+    return apiResponse(404, { message: 'Not Found' });
+  };
+  const explicit = await validateBrowserbaseCredentials({ apiKey: 'good', projectId: 'proj-b' }, { fetchImpl });
+  assert.equal(explicit.projectName, 'B');
+  assert.equal(seen[0], 'https://api.browserbase.com/v1/projects/proj-b');
+  await assert.rejects(
+    validateBrowserbaseCredentials({ apiKey: 'good', projectId: 'proj-zzz' }, { fetchImpl }),
+    (error) => error.code === 'BROWSERBASE_PROJECT_NOT_FOUND',
+  );
+});
+
+test('validateBrowserbaseCredentials handles discovery variants and actionable API failures', async () => {
+  const wrapped = await validateBrowserbaseCredentials(
+    { apiKey: 'good' },
+    { fetchImpl: async () => apiResponse(200, { data: [{ id: 'proj-a', name: 'A' }] }) },
+  );
+  assert.equal(wrapped.projectId, 'proj-a');
+  await assert.rejects(
+    validateBrowserbaseCredentials({ apiKey: 'good' }, { fetchImpl: async () => apiResponse(404, 'Not Found') }),
+    (error) => error.code === 'BROWSERBASE_PROJECT_REQUIRED' && /Project ID/.test(error.message),
+  );
+  await assert.rejects(
+    validateBrowserbaseCredentials({ apiKey: 'good' }, { fetchImpl: async () => apiResponse(200, { unexpected: true }) }),
+    (error) => error.code === 'BROWSERBASE_API_ERROR' && /malformed project list/.test(error.message),
+  );
+  await assert.rejects(
+    validateBrowserbaseCredentials(
+      { apiKey: 'super-secret' },
+      { fetchImpl: async () => apiResponse(429, { message: 'limit for super-secret reached' }) },
+    ),
+    (error) => error.code === 'BROWSERBASE_API_ERROR'
+      && /429/.test(error.message)
+      && /\[redacted\]/.test(error.message)
+      && !/super-secret/.test(error.message),
+  );
   await assert.rejects(
     validateBrowserbaseCredentials({ apiKey: 'good' }, { fetchImpl: async () => { throw new Error('ECONNREFUSED'); } }),
     (error) => error.code === 'BROWSERBASE_UNREACHABLE' && /ECONNREFUSED/.test(error.message),
+  );
+  await assert.rejects(
+    validateBrowserbaseCredentials(
+      { apiKey: 'good' },
+      {
+        timeoutMs: 5,
+        fetchImpl: async (_url, init) => ({
+          ok: true,
+          status: 200,
+          text: () => new Promise((_, reject) => {
+            init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+          }),
+        }),
+      },
+    ),
+    (error) => error.code === 'BROWSERBASE_UNREACHABLE' && /timed out after 5ms/.test(error.message),
   );
 });
 
