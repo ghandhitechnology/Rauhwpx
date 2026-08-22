@@ -38,7 +38,7 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(markdown, /Do not unzip or patch the result/);
   assert.match(markdown, /Preview\/PrvText\.txt/);
   assert.match(markdown, /Preview\/PrvImage\.png/);
-  assert.match(markdown, /`downloadUrl` as a Markdown download link/);
+  assert.match(markdown, /exact Markdown link label `\[템플릿 열기\]\(<downloadUrl>\)`/);
   assert.match(markdown, /do not ask the user to attach or identify the file again/);
   assert.match(markdown, /Page-count differences in either the intermediate or final output are fidelity diagnostics/);
   assert.match(markdown, /A one-page source becoming two pages is a fidelity warning/);

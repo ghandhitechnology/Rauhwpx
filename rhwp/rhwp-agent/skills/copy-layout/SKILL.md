@@ -89,7 +89,7 @@ Inspect body media and representative pages. If a removed body image is demonstr
 
 Use `-o /absolute/path/result.hwp` or `.hwpx` only when the user explicitly requested a destination or format conversion before confirmation. Otherwise automatic `layout/` saving is mandatory. The helper refuses to overwrite the source or an explicitly named existing output.
 
-When the source came from `materialize_document_snapshot`, the generated file is inside the isolated chat workspace. After verification, call `publish_artifact` with the output path and give the user its returned `downloadUrl` as a Markdown download link. Do not report only the temporary filesystem path for a snapshot-backed result.
+When the source came from `materialize_document_snapshot`, the generated file is inside the isolated chat workspace. After verification, call `publish_artifact` with the output path and give the user its returned `downloadUrl` using the exact Markdown link label `[템플릿 열기](<downloadUrl>)`. Do not report only the temporary filesystem path for a snapshot-backed result.
 
 The helper already writes the privacy-safe `Preview/PrvText.txt` and `Preview/PrvImage.png` entries required for Studio publication. Use this single completion path: run the helper once, read its JSON report, call `publish_artifact` once with the exact reported `output` when `delivery.ready` is `true`, then return the link with any warnings. Do not unzip or patch the result, synthesize preview files, create a second copy, or retry publication by guessing one missing package entry at a time. A missing-preview rejection from `publish_artifact` means the helper and Studio package contracts are out of sync; report that packaging defect rather than modifying the document ad hoc.
 
