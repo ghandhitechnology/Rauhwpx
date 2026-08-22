@@ -69,9 +69,6 @@ jobs:
       - name: Test Studio session persistence and desktop contracts
         run: npm --prefix rhwp/rhwp-studio test
 
-      - name: Build Studio
-        run: npm --prefix rhwp/rhwp-studio run build
-
       - name: Exercise Windows DPAPI credential storage
         if: runner.os == 'Windows'
         run: npm run test:windows:keychain

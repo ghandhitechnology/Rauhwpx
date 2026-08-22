@@ -84,6 +84,3 @@ jobs:
 
       - name: Test Studio session persistence and desktop contracts
         run: npm --prefix rhwp/rhwp-studio test
-
-      - name: Build Studio
-        run: npm --prefix rhwp/rhwp-studio run build

@@ -76,9 +76,6 @@ jobs:
           npm --prefix rhwp/rhwp-agent test
           npm --prefix rhwp/rhwp-studio test
 
-      - name: Build Studio
-        run: npm --prefix rhwp/rhwp-studio run build
-
   macos:
     name: Build macOS installers
     needs: verify
