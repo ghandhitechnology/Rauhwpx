@@ -51,11 +51,12 @@ test('completion prompt leaves one exact registration decision to the owning cha
   assert.match(prompt, /hub's automatic completion notification/);
   assert.match(prompt, /not a wait_agent result/);
   assert.match(prompt, /Notify the user now/);
-  assert.match(prompt, /Studio already opened the exact returned artifact/);
-  assert.match(prompt, /new read-only template-preview window/);
+  assert.match(prompt, /Do not open the artifact automatically/);
+  assert.match(prompt, /exactly one Markdown link labeled 템플릿 미리보기/);
+  assert.match(prompt, /only the user's click opens a new read-only template-preview window/);
   assert.match(prompt, /ask exactly one final question/);
   assert.match(prompt, /register_copy_layout_template/);
-  assert.match(prompt, /if they decline, do not call it and leave the preview open/);
+  assert.match(prompt, /if they decline, do not call it and leave the card available/);
 });
 
 test('fleet progress reports one task row with a direct phase index', () => {

@@ -8,21 +8,23 @@ import { AgentToolExecutor } from '../src/agent/tool-executor.ts';
 
 const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
 const sidebar = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
+const desktopIntegration = readFileSync(new URL('../src/desktop-integration.ts', import.meta.url), 'utf8');
 const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const input = readFileSync(new URL('../src/engine/input-handler.ts', import.meta.url), 'utf8');
 const textInput = readFileSync(new URL('../src/engine/input-handler-text.ts', import.meta.url), 'utf8');
 const keyboardInput = readFileSync(new URL('../src/engine/input-handler-keyboard.ts', import.meta.url), 'utf8');
 const dispatcher = readFileSync(new URL('../src/command/dispatcher.ts', import.meta.url), 'utf8');
 const toolExecutor = readFileSync(new URL('../src/agent/tool-executor.ts', import.meta.url), 'utf8');
+const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
 
-test('verified artifact event opens a new read-only window and acknowledges actual opening', () => {
-  assert.match(bridge, /case 'template-preview-ready'/);
-  assert.match(bridge, /preview\.stoppedReason !== 'verified-convergence'/);
-  assert.match(sidebar, /case 'template-preview-ready'/);
-  assert.match(sidebar, /parsePublishedDocumentLink\(e\.artifact\.downloadUrl\)/);
-  assert.match(sidebar, /openPublishedDocumentInNewWindow\(artifact, undefined, \{ readOnly: true \}\)/);
-  assert.match(sidebar, /\.then\(\(\) => bridge\.acknowledgeTemplatePreview\(e\.jobId\)\)/);
-  assert.match(bridge, /type: 'template-preview-opened', jobId/);
+test('template artifact opens read-only only after its main-chat card is clicked', () => {
+  assert.doesNotMatch(bridge, /template-preview-ready/);
+  assert.doesNotMatch(bridge, /template-preview-opened/);
+  assert.match(desktopIntegration, /templatePreview'\) === '1' \? \{ readOnly: true \}/);
+  assert.match(sidebar, /const card = el\('span', 'ag-md-artifact-card'\)/);
+  assert.match(sidebar, /openPublishedDocumentInNewWindow\(artifact, undefined, \{ readOnly: artifact\.readOnly === true \}\)/);
+  assert.match(css, /\.ag-md-artifact-card\s*\{[^}]*display:\s*flex;[^}]*border:/s);
+  assert.match(css, /\.ag-md-artifact-open\s*\{[^}]*flex:\s*1 1 auto;/s);
 });
 
 test('template preview state blocks command, direct input, snapshot, and formatting mutations', () => {

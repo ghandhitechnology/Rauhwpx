@@ -506,43 +506,6 @@ export interface AgentTaskMember {
   activity?: string;
 }
 
-export interface TemplatePreviewReady {
-  jobId: string;
-  ownerThreadId: string;
-  artifact: {
-    artifactId: string;
-    fileName: string;
-    mime: string;
-    size: number;
-    checksum: string;
-    downloadUrl: string;
-  };
-  quality: 'verified' | 'best_effort';
-  warnings: string[];
-  counts: {
-    keptText: number;
-    removedText: number;
-    replacedText: number;
-    resetControls: number;
-    clearedMarks: number;
-    keptMedia: number;
-    removedMedia: number;
-    iterations: number;
-  };
-  preview: {
-    representativePages: number[];
-    sourcePageCount: number;
-    outputPageCount: number;
-    outputSectionCount: number;
-    renderCompared: boolean;
-    geometryMatch: boolean;
-    safetyVerified: boolean;
-    readabilityVerified: boolean;
-    stoppedReason: 'verified-convergence' | 'bounded-no-improvement';
-  };
-  readOnly: true;
-}
-
 /**
  * 하위 CLI(claude/codex) JSONL을 허브가 정규화한 단일 이벤트 스트림 (§1.5).
  * parentTaskId: 서브에이전트/워크플로가 낸 이벤트를 스폰한 task 에 귀속시키는
@@ -588,7 +551,6 @@ export type SidebarEvent =
   | { type: 'reference-status'; messageId: string; attachments: MessageReferenceStatus[] }
   | { type: 'templates-catalog'; catalog: TemplateCatalog; change?: { type: 'added' | 'renamed' | 'replaced' | 'deleted'; template: DocumentTemplate } }
   | { type: 'chat-template-changed'; template: DocumentTemplate | null; reason?: string }
-  | ({ type: 'template-preview-ready' } & TemplatePreviewReady)
   | { type: 'permission-changed'; permissionProfile: PermissionProfile }
   | ({ type: 'workflow-changed' } & AgentWorkflowState)
   | ({ type: 'plan-ready'; plan: StructuredPlan } & AgentWorkflowState)

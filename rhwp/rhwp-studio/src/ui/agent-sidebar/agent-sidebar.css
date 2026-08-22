@@ -3209,32 +3209,99 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   outline-offset: 2px;
 }
 
+.ag-md-artifact-card {
+  display: flex;
+  width: min(100%, 430px);
+  min-width: 0;
+  margin: 8px 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--ag-accent) 30%, var(--ag-border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ag-accent) 5%, var(--ag-bg-2));
+}
+
 .ag-md-artifact-open {
-  display: inline-flex;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
   align-items: center;
-  gap: 5px;
-  padding: 3px 8px;
-  border: 1px solid color-mix(in srgb, var(--ag-accent) 36%, var(--ag-border));
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--ag-accent) 8%, transparent);
-  font-weight: 650;
+  gap: 9px;
+  padding: 9px 10px;
+  color: var(--ag-text);
   text-decoration: none;
 }
 
-.ag-md-artifact-open::before { content: '\2197'; }
+.ag-md-artifact-open:hover {
+  background: color-mix(in srgb, var(--ag-accent) 9%, transparent);
+}
+
+.ag-md-artifact-icon {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ag-accent) 13%, transparent);
+  color: var(--ag-accent-strong);
+}
+
+.ag-md-artifact-icon .ag-icon {
+  width: 15px;
+  height: 15px;
+}
+
+.ag-md-artifact-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ag-md-artifact-name,
+.ag-md-artifact-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-md-artifact-name {
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 650;
+}
+
+.ag-md-artifact-hint,
+.ag-md-artifact-action {
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-xs, 10px);
+}
+
+.ag-md-artifact-action {
+  flex: 0 0 auto;
+}
 
 .ag-md-artifact-open[aria-busy='true'] { opacity: 0.6; }
 
 .ag-md-artifact-open.ag-failed {
-  border-color: var(--ag-danger, #dc2626);
+  color: var(--ag-danger, #dc2626);
 }
 
 .ag-md-artifact-download {
-  margin-left: 7px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 0 10px;
+  border-left: 1px solid var(--ag-border);
   color: var(--ag-text-muted);
-  font-size: 0.88em;
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  font-size: var(--font-size-xs, 10px);
+  text-decoration: none;
+}
+
+.ag-md-artifact-download:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
 }
 
 /* 코드도 별도 캡슐을 만들지 않는다. 글꼴과 한 줄의 레일만으로 구분한다. */

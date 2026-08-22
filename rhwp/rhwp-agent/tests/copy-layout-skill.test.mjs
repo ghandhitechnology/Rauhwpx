@@ -42,10 +42,12 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(markdown, /publish exactly one successful final candidate/i);
   assert.match(markdown, /Preview\/PrvText\.txt/);
   assert.match(markdown, /Preview\/PrvImage\.png/);
-  assert.match(markdown, /do not output a `\[템플릿 열기\]` link/);
+  assert.match(markdown, /Do not open it automatically/);
+  assert.match(markdown, /`\[템플릿 미리보기\]\(<artifact\.downloadUrl>\)`/);
+  assert.match(markdown, /only a user click opens the artifact/);
   assert.match(markdown, /ask exactly one final question/);
   assert.match(markdown, /`register_copy_layout_template`/);
-  assert.match(markdown, /Declining leaves the preview open/);
+  assert.match(markdown, /artifact card remains available/);
   assert.match(markdown, /Hard safety\/readability gates/);
   assert.match(markdown, /publish nothing and complete the job as failed/);
   assert.match(markdown, /safe and readable candidate may complete as `best_effort`/);

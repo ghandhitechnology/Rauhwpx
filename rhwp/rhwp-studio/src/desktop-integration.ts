@@ -132,6 +132,7 @@ export interface DesktopHost {
 export interface PublishedDocumentLink {
   readonly downloadUrl: string;
   readonly fileName: string;
+  readonly readOnly?: boolean;
 }
 
 /** Only hub-issued localhost artifact URLs become in-app document actions. */
@@ -153,7 +154,11 @@ export function parsePublishedDocumentLink(raw: string): PublishedDocumentLink |
     return null;
   }
   if (!/\.(?:hwp|hwpx)$/iu.test(fileName) || fileName.includes('\0')) return null;
-  return { downloadUrl: url.href, fileName };
+  return {
+    downloadUrl: url.href,
+    fileName,
+    ...(url.searchParams.get('templatePreview') === '1' ? { readOnly: true } : {}),
+  };
 }
 
 export async function openPublishedDocumentInNewWindow(

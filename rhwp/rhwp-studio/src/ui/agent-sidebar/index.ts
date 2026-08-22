@@ -534,7 +534,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let replyPending = false;
   /** 편대 카드가 대신 나타내는 스폰 도구 호출 — 결과 행도 함께 접는다. */
   const suppressedSpawnCalls = new Set<string>();
-  const openingTemplatePreviewJobs = new Set<string>();
   /**
    * 서브에이전트·워크플로 카드. 턴이 도는 동안 입력기 위 도크 팝업이 서브에이전트
    * 작업을 보는 자리이고, 턴이 끝나면 태어날 때 예약한 슬롯으로 접혀 정착한다.
@@ -3128,16 +3127,25 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     for (const link of links) {
       const artifact = parsePublishedDocumentLink(link.href);
       if (!artifact) continue;
+      const originalLabel = link.textContent?.trim() || '문서 열기';
       link.classList.add('ag-md-artifact-open');
       link.target = '';
       link.title = `${artifact.fileName} 새 창에서 열기`;
       link.setAttribute('aria-label', `${artifact.fileName} 새 창에서 열기`);
+      const icon = el('span', 'ag-md-artifact-icon');
+      icon.appendChild(createIcon('document'));
+      const copy = el('span', 'ag-md-artifact-copy');
+      copy.append(
+        el('span', 'ag-md-artifact-name', artifact.fileName),
+        el('span', 'ag-md-artifact-hint', originalLabel),
+      );
+      link.replaceChildren(icon, copy, el('span', 'ag-md-artifact-action', '열기'));
       link.addEventListener('click', (event) => {
         event.preventDefault();
         if (link.getAttribute('aria-busy') === 'true') return;
         link.setAttribute('aria-busy', 'true');
         link.classList.remove('ag-failed');
-        void openPublishedDocumentInNewWindow(artifact)
+        void openPublishedDocumentInNewWindow(artifact, undefined, { readOnly: artifact.readOnly === true })
           .catch((error) => {
             link.classList.add('ag-failed');
             const message = error instanceof Error ? error.message : String(error);
@@ -3154,7 +3162,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       download.download = artifact.fileName;
       download.textContent = '다운로드';
       download.title = `${artifact.fileName} 다운로드`;
-      link.insertAdjacentElement('afterend', download);
+      const card = el('span', 'ag-md-artifact-card');
+      const parent = link.parentElement;
+      if (parent) {
+        parent.insertBefore(card, link);
+        card.append(link, download);
+      } else {
+        link.insertAdjacentElement('afterend', download);
+      }
     }
   }
 
@@ -4585,24 +4600,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         persistCurrentThread();
         if (e.reason === 'deleted') systemMessage('이 채팅에서 사용하던 템플릿이 삭제되어 해제했습니다.');
         break;
-      case 'template-preview-ready': {
-        if (openingTemplatePreviewJobs.has(e.jobId)) break;
-        const artifact = parsePublishedDocumentLink(e.artifact.downloadUrl);
-        if (!artifact || artifact.fileName !== e.artifact.fileName) {
-          showToast({ message: '템플릿 미리보기 링크를 확인할 수 없습니다.' });
-          break;
-        }
-        openingTemplatePreviewJobs.add(e.jobId);
-        void openPublishedDocumentInNewWindow(artifact, undefined, { readOnly: true })
-          .then(() => bridge.acknowledgeTemplatePreview(e.jobId))
-          .catch((error) => {
-            openingTemplatePreviewJobs.delete(e.jobId);
-            showToast({
-              message: error instanceof Error ? error.message : '템플릿 미리보기를 열지 못했습니다.',
-            });
-          });
-        break;
-      }
       case 'skill-detail': {
         const action = skillRequestActions.get(e.requestId) ?? 'edit';
         skillRequestActions.delete(e.requestId);

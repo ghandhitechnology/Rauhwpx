@@ -31,12 +31,11 @@ test('hub reuses fleet task events and keeps worker tools source-bound', () => {
   assert.match(server, /documentIdentity: workerJob[\s\S]*workerJob\.binding\.documentId/);
 });
 
-test('preview delivery is replayed until Studio confirms the read-only window opened', () => {
-  assert.match(server, /function sendTemplatePreviewReady/);
-  assert.match(server, /readOnly: true/);
-  assert.match(server, /previewAcknowledged/);
-  assert.match(server, /case 'template-preview-opened'/);
-  assert.match(server, /sendTemplatePreviewReady\(record, job\)/);
+test('template artifacts are card-triggered instead of auto-opened', () => {
+  assert.match(server, /downloadUrl\.searchParams\.set\('templatePreview', '1'\)/);
+  assert.doesNotMatch(server, /template-preview-ready/);
+  assert.doesNotMatch(server, /template-preview-opened/);
+  assert.doesNotMatch(server, /sendTemplatePreviewReady/);
 });
 
 test('completion wakes the owning chat without collaboration wait polling', () => {

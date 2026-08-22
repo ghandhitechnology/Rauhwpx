@@ -61,6 +61,6 @@ Page count, pagination, geometry/render similarity, and native-format difference
 
 ## Owning chat: one final action
 
-The successful structured completion contains the exact immutable artifact, quality, warnings, counts, and representative preview data. Studio automatically opens that artifact in a new document window as a read-only template preview; do not output a `[템플릿 열기]` link or ask the user to open it.
+The successful structured completion contains the exact immutable artifact, quality, warnings, counts, and representative preview data. Do not open it automatically. Include exactly one Markdown link using the returned `artifact.downloadUrl` with the label `템플릿 미리보기`: `[템플릿 미리보기](<artifact.downloadUrl>)`. Studio renders that link as a document card; only a user click opens the artifact in a new read-only template-preview window.
 
-Report the result concisely, then ask exactly one final question: whether to save/register this exact previewed artifact as a reusable template. If the user accepts, call `register_copy_layout_template` with the completed `jobId` (and a name only if they supplied one). If the user declines, do not call it. Declining leaves the preview open and does not register a template.
+Report the result concisely, show the card, then ask exactly one final question: whether to save/register this exact artifact as a reusable template. If the user accepts, call `register_copy_layout_template` with the completed `jobId` (and a name only if they supplied one). If the user declines, do not call it; the artifact card remains available without registering a template.

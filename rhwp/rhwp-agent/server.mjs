@@ -706,6 +706,7 @@ function artifactDownloadDescriptor(record, artifactId, artifact) {
   );
   downloadUrl.searchParams.set('sessionId', record.sessionId);
   downloadUrl.searchParams.set('token', issueScopedHubToken(TOKEN, record.sessionId));
+  downloadUrl.searchParams.set('templatePreview', '1');
   return {
     artifactId,
     fileName: artifact.fileName,
@@ -718,22 +719,6 @@ function artifactDownloadDescriptor(record, artifactId, artifact) {
 
 function sendTemplateJobEvent(record, event) {
   sendJson(record.studioSocket, { v: 1, type: 'agent-event', event });
-}
-
-function sendTemplatePreviewReady(record, job) {
-  if (job.status !== 'completed' || !job.result?.artifact || job.previewAcknowledged) return false;
-  return sendJson(record.studioSocket, {
-    v: 1,
-    type: 'template-preview-ready',
-    jobId: job.jobId,
-    ownerThreadId: job.ownerThreadId,
-    artifact: job.result.artifact,
-    quality: job.result.quality,
-    warnings: job.result.warnings,
-    counts: job.result.counts,
-    preview: job.result.preview,
-    readOnly: true,
-  });
 }
 
 function workerJobForSocket(record, sock) {
@@ -933,7 +918,6 @@ function createTemplateJob(record, activeSession, binding) {
     usage: { toolUses: 0 },
     completionQueued: false,
     registeredTemplateId: null,
-    previewAcknowledged: false,
   };
   record.templateJobs.set(jobId, job);
   record.activeTemplateJobId = jobId;
@@ -1564,11 +1548,6 @@ async function handleStudioMessage(record, sock, msg) {
       } catch (error) {
         sendChatError(sock, error, 'TEMPLATE_NOT_FOUND');
       }
-      return;
-    }
-    case 'template-preview-opened': {
-      const job = record.templateJobs.get(String(msg.jobId ?? ''));
-      if (job?.status === 'completed') job.previewAcknowledged = true;
       return;
     }
     case 'templates-list': {
@@ -2239,9 +2218,6 @@ function handleMcpMessage(record, sock, msg) {
             summary: args.summary,
             ...(workerJob.usage ? { usage: workerJob.usage } : {}),
           });
-          if (artifact) {
-            sendTemplatePreviewReady(record, workerJob);
-          }
           queueTemplateCompletion(record, workerJob);
           sendResult({ jobId: workerJob.jobId, status: workerJob.status });
         })().catch((error) => {
@@ -2818,8 +2794,6 @@ httpServer.on('upgrade', (req, socket, head) => {
             taskKind: 'agent', background: true,
           });
           sendTemplateJobEvent(record, taskProgressForJob(job, job.activity));
-        } else {
-          sendTemplatePreviewReady(record, job);
         }
       }
       const cachedProviders = providerHealth.cached();
