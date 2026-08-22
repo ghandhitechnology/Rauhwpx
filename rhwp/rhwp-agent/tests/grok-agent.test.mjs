@@ -143,6 +143,38 @@ test('argv carries the prompt file, session, model, effort and safe allow rules'
   assert.equal(argValue(argv, '--agents'), undefined, 'dontAsk 에서는 --agents 를 싣지 않는다');
 });
 
+test('scoped shell prefixes swap the blanket Bash deny for allowlist closure in workers', () => {
+  // 복사 레이아웃 워커는 python3 헬퍼 실행이 필요하다. grok 규칙은 deny 가
+  // allow 보다 우선하므로 --deny Bash 를 남겨 두면 스코프 허용이 죽는다 —
+  // 이 모드에서는 deny 를 빼고 dontAsk 의 allowlist 폐쇄성(허용 접두사와 내장
+  // 읽기 전용 목록 밖은 무프롬프트 거부)으로 경계를 유지한다.
+  const argv = buildGrokArgv(
+    { ...baseOpts, shellAllowPrefixes: ['python3', 'python'] },
+    's', false, '/g/p',
+  );
+  assert.equal(argValue(argv, '--permission-mode'), 'dontAsk');
+  const allows = argv.flatMap((value, index) => (value === '--allow' ? [argv[index + 1]] : []));
+  assert.deepEqual(allows, [
+    'Read(/tmp/rhwp/**)', 'Edit(/tmp/rhwp/**)',
+    'Grep', 'WebFetch', 'WebSearch', 'MCPTool(rhwp__*)',
+    'Bash(python3*)', 'Bash(python*)',
+  ]);
+  const denies = argv.flatMap((value, index) => (value === '--deny' ? [argv[index + 1]] : []));
+  assert.deepEqual(denies, [], '전면 Bash deny 는 스코프 허용을 이기므로 함께 빠진다');
+  assert.ok(argv.includes('--no-subagents'), '워커도 안전 프로필 — 서브에이전트는 계속 꺼져 있다');
+});
+
+test('scoped shell prefixes stay inert during planning restriction', () => {
+  const argv = buildGrokArgv(
+    { ...baseOpts, shellAllowPrefixes: ['python3'], workflow: 'plan', phase: 'planning' },
+    's', false, '/g/p',
+  );
+  const allows = argv.flatMap((value, index) => (value === '--allow' ? [argv[index + 1]] : []));
+  assert.equal(allows.some((rule) => rule.startsWith('Bash(')), false);
+  const denies = argv.flatMap((value, index) => (value === '--deny' ? [argv[index + 1]] : []));
+  assert.deepEqual(denies, ['Bash', 'Edit', 'Write'], '계획 단계는 기존 전면 deny 를 유지한다');
+});
+
 test('unrestricted argv always-approves without a sandbox flag and enables subagents', () => {
   const argv = buildGrokArgv({ ...baseOpts, permissionProfile: 'unrestricted' }, 's', false, '/g/p');
   assert.ok(argv.includes('--always-approve'));

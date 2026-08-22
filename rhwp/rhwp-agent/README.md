@@ -101,6 +101,18 @@ Paths are relative to the repository root.
    events. Studio renders these as fleet cards and auto-rebases disjoint
    parallel document writes (`rebasedParaShift`).
 
+10. **Per-provider capability tuning** — each backend carries briefs and
+   permissions shaped to its own CLI traits. Grok runs subagent fleets only in
+   Full access (its `dontAsk` mode auto-cancels headless spawns), so Safe-mode
+   grok works sequentially with a blanket shell deny; autonomous background
+   workers (copy-layout) get a scoped exception that allows only the bundled
+   Python helper. Cursor subagents replay their transcripts when each finishes,
+   so its brief asks for tightly bounded child objectives. Pi has no delegation
+   tools at all: its brief mandates sequential solo work with batched
+   `apply_edits` calls instead of fleets. Activated product skills are appended
+   with a one-line `<provider_tool_notes>` correction describing that provider's
+   real collaboration/polling surface, so skill text stays provider-neutral.
+
 ## Environment variables
 
 | Variable | Default | Description |

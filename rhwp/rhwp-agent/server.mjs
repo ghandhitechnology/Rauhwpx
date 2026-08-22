@@ -874,6 +874,10 @@ async function launchTemplateJob(record, job) {
     capabilityEpoch: job.capabilityEpoch,
     toolProfile: 'copy-layout-worker',
     agentRole: job.workerRole,
+    // 헬퍼(copy_layout.py) 실행은 모든 프로바이더 워커에 필요하다. 클로드/코덱스/
+    // 커서는 샌드박스가, pi 는 확장 가드가 경계를 진다 — grok 만 이 접두사 허용을
+    // 소비해 전면 Bash deny 대신 스코프 셸을 연다 (agents/grok.mjs).
+    shellAllowPrefixes: ['python3', 'python'],
     systemPromptOverride: buildCopyLayoutWorkerPrompt({
       jobId: job.jobId,
       binding: job.binding,
@@ -1074,6 +1078,7 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
   activeSession.status = 'running';
   void skillRegistry.promptContext(msg.text, typeof msg.skillName === 'string' ? msg.skillName : undefined, {
     phase: activeSession.planning.snapshot().phase,
+    agent: activeSession.agent,
   })
     .then((prompt) => {
       if (record.agentSession !== activeSession) throw new Error('Agent session changed before the message was dispatched');

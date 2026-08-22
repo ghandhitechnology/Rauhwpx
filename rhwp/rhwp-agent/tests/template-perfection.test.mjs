@@ -49,7 +49,8 @@ test('completion prompt leaves one exact registration decision to the owning cha
     artifact: { artifactId: 'artifact-1', fileName: '신청서 - Layout.hwp' },
   });
   assert.match(prompt, /hub's automatic completion notification/);
-  assert.match(prompt, /not a wait_agent result/);
+  // provider 중립 문구 — wait_agent 은 codex 협업 도구명이라 예시로만 남는다.
+  assert.match(prompt, /not a collaboration-tool result \(never a wait_agent result\)/);
   assert.match(prompt, /Notify the user now/);
   assert.match(prompt, /Do not open the artifact automatically/);
   assert.match(prompt, /exactly one Markdown link labeled 템플릿 미리보기/);
