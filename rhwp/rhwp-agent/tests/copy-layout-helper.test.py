@@ -67,9 +67,10 @@ class CopyLayoutHelperTests(unittest.TestCase):
         self.assertEqual(stats["text_nodes_cleared"], 3)
         self.assertEqual(
             [
-                copy_layout.normalize_visible_text("".join(node.itertext()))
+                text
                 for node in tree.iter()
-                if copy_layout.local_name(node.tag) == "t" and "".join(node.itertext()).strip()
+                if copy_layout.local_name(node.tag) == "t"
+                if (text := copy_layout.normalize_visible_text("".join(node.itertext())))
             ],
             guidance,
         )
@@ -89,6 +90,28 @@ class CopyLayoutHelperTests(unittest.TestCase):
         self.assertEqual(approved, [])
         self.assertEqual(stats["text_nodes_cleared"], 2)
         self.assertEqual(copy_layout.visible_text_fragments({"Contents/section0.xml": tree}), [])
+
+    def test_removed_text_uses_a_zero_width_non_whitespace_layout_anchor(self):
+        tree = self.document_tree("private table value")
+
+        copy_layout.sanitize_document_tree(
+            tree,
+            "Contents/section0.xml",
+            set(),
+            preserve_flow=False,
+            preserve_guidance=False,
+        )
+
+        text_node = next(
+            node for node in tree.iter() if copy_layout.local_name(node.tag) == "t"
+        )
+        self.assertEqual(text_node.text, copy_layout.LAYOUT_ANCHOR)
+        self.assertFalse(copy_layout.LAYOUT_ANCHOR.isspace())
+        self.assertEqual(copy_layout.normalize_visible_text(text_node.text), "")
+        self.assertEqual(
+            copy_layout.visible_text_fragments({"Contents/section0.xml": tree}),
+            [],
+        )
 
     def test_guidance_mode_verifies_an_end_to_end_hwpx_package(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

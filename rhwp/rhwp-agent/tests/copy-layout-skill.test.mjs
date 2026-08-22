@@ -62,6 +62,8 @@ test('copy-layout helper retains safety gates and reports fidelity separately', 
   assert.match(script, /--text-plan/);
   assert.match(script, /source_sha256/);
   assert.match(script, /visible text differs from approved guidance/);
+  assert.match(script, /LAYOUT_ANCHOR = "\\u2060"/);
+  assert.match(script, /zero-width layout anchors/);
 });
 
 test('copy-layout helper runs without site packages and defers only an intermediate page-count mismatch', (t) => {
@@ -74,6 +76,6 @@ test('copy-layout helper runs without site packages and defers only an intermedi
   assert.equal(availability.status, 0, availability.stderr || availability.stdout);
   const result = spawnSync(python, ['-S', fileURLToPath(helperTestUrl)], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stderr, /Ran 15 tests/);
+  assert.match(result.stderr, /Ran 16 tests/);
   assert.match(result.stderr, /OK/);
 });

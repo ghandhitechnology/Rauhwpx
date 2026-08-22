@@ -212,6 +212,11 @@ GUIDANCE_IDENTIFIER_RE = re.compile(
     re.IGNORECASE,
 )
 ILLEGAL_XML_CONTROL_RE = re.compile(br"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+# WORD JOINER has zero visual width but is not Unicode whitespace. Keeping one
+# in a text fragment whose private payload was removed preserves HWPX layout
+# semantics that distinguish a real text host from an intrinsically empty
+# floating-object anchor, without retaining source content or widening cells.
+LAYOUT_ANCHOR = "\u2060"
 
 
 def local_name(value: str) -> str:
@@ -231,8 +236,14 @@ def blank_text(value: str | None) -> str | None:
     )
 
 
+def layout_anchor_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return LAYOUT_ANCHOR if normalize_visible_text(value) else value
+
+
 def normalize_visible_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
+    return re.sub(r"\s+", " ", value.replace(LAYOUT_ANCHOR, "")).strip()
 
 
 def guidance_heading_candidate(value: str) -> str:
@@ -1107,9 +1118,21 @@ def sanitize_document_tree(
             else:
                 if element.text or len(element):
                     stats["text_nodes_cleared"] += 1
-                element.text = blank_text(element.text) if tag == "t" and preserve_flow else None
+                element.text = (
+                    blank_text(element.text)
+                    if tag == "t" and preserve_flow
+                    else layout_anchor_text(element.text)
+                    if tag == "t"
+                    else None
+                )
                 for child in list(element):
-                    child.tail = blank_text(child.tail) if tag == "t" and preserve_flow else None
+                    child.tail = (
+                        blank_text(child.tail)
+                        if tag == "t" and preserve_flow
+                        else layout_anchor_text(child.tail)
+                        if tag == "t"
+                        else None
+                    )
                     if tag == "shapeComment" or local_name(child.tag) in TEXT_MARKUP_REMOVE:
                         element.remove(child)
         elif tag == "script" and any(
@@ -1458,7 +1481,7 @@ def sanitize_hwpx(
     destination: Path,
     title: str,
     keep_media: set[str],
-    preserve_flow: bool = True,
+    preserve_flow: bool = False,
     preserve_guidance: bool = False,
     text_plan: dict[str, object] | None = None,
 ) -> dict[str, object]:
@@ -1649,7 +1672,7 @@ def sanitize_hwpx(
             if preserve_guidance
             else "width-aware blank spacing"
             if preserve_flow
-            else "fully empty"
+            else "zero-width layout anchors"
         ),
         "verification": verification,
     }
