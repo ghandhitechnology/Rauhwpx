@@ -40,16 +40,26 @@ jobs:
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
 
+      - name: Detect short-lived acceleration mirror
+        shell: bash
+        run: |
+          if [[ -n "${DEPOT_CACHE_TOKEN:-}" ]]; then
+            echo "RHWP_SKIP_REAL_WASM_BROWSER=1" >> "$GITHUB_ENV"
+          fi
+
       - name: Install pinned Rust toolchain for browser merge tests
+        if: env.RHWP_SKIP_REAL_WASM_BROWSER != '1'
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-pack for browser merge tests
+        if: env.RHWP_SKIP_REAL_WASM_BROWSER != '1'
         run: cargo install wasm-pack --version 0.15.0 --locked
 
       - name: Build WASM engine for browser merge tests
+        if: env.RHWP_SKIP_REAL_WASM_BROWSER != '1'
         working-directory: rhwp
         run: wasm-pack build --target web
 
