@@ -18,7 +18,7 @@ async function fixture(t) {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-template-http-'));
   const store = await new TemplateStore({ rootDir }).init();
   const changes = [];
-  const handler = createTemplateHttpHandler({ store, token: 'test-token', onChanged: (change) => changes.push(change) });
+  const handler = createTemplateHttpHandler({ store, tokens: ['test-token'], onChanged: (change) => changes.push(change) });
   const server = http.createServer((req, res) => {
     void handler(req, res, new URL(req.url, 'http://127.0.0.1')).then((handled) => {
       if (!handled && !res.headersSent) { res.writeHead(404); res.end(); }

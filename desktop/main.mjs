@@ -459,7 +459,8 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
       preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // 프리로드는 contextBridge/ipcRenderer/webUtils 만 쓰므로 샌드박스 렌더러에서도 동작한다.
+      sandbox: true,
     },
   });
   const session = sessions.addWindow(window, { source: launch.source, openFiles: [] });

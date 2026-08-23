@@ -1,12 +1,15 @@
 import crypto from 'node:crypto';
 import { isAllowedStudioOrigin } from './reference-http.mjs';
 
-function bearerMatches(req, token) {
+function bearerMatchesAny(req, tokens) {
   const header = String(req.headers.authorization ?? '');
   if (!header.startsWith('Bearer ')) return false;
   const received = Buffer.from(header.slice(7), 'utf8');
-  const expected = Buffer.from(String(token), 'utf8');
-  return received.length === expected.length && crypto.timingSafeEqual(received, expected);
+  return (Array.isArray(tokens) ? tokens : [tokens]).some((token) => {
+    if (!token) return false;
+    const expected = Buffer.from(String(token), 'utf8');
+    return received.length === expected.length && crypto.timingSafeEqual(received, expected);
+  });
 }
 
 function cors(origin) {
@@ -64,7 +67,7 @@ function isTemplatePath(pathname) {
   return pathname === '/templates' || pathname.startsWith('/templates/');
 }
 
-export function createTemplateHttpHandler({ store, token, onChanged = () => {} }) {
+export function createTemplateHttpHandler({ store, tokens, onChanged = () => {} }) {
   return async function handleTemplateHttp(req, res, url) {
     if (!isTemplatePath(url.pathname)) return false;
     const origin = typeof req.headers.origin === 'string' ? req.headers.origin : null;
@@ -83,7 +86,7 @@ export function createTemplateHttpHandler({ store, token, onChanged = () => {} }
       res.end();
       return true;
     }
-    if (!bearerMatches(req, token)) {
+    if (!bearerMatchesAny(req, tokens)) {
       req.resume?.();
       sendJson(res, 401, { error: { code: 'TEMPLATE_UNAUTHORIZED', message: 'A valid bearer token is required.' } }, origin);
       return true;

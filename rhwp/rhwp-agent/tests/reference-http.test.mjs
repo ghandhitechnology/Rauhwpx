@@ -8,10 +8,21 @@ import test from 'node:test';
 import { createReferenceHttpHandler } from '../reference-http.mjs';
 import { ReferenceStore } from '../reference-store.mjs';
 
+const SESSION_SCOPES = [
+  { scope: 'global', scopeId: 'global' },
+  { scope: 'document', scopeId: 'doc-a' },
+  { scope: 'chat', scopeId: 'chat-a' },
+  { scope: 'chat', scopeId: 'chat-b' },
+];
+
 async function fixture(t, storeOptions = {}) {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-http-'));
   const store = await new ReferenceStore({ root: path.join(parent, 'refs'), ...storeOptions }).init();
-  const handler = createReferenceHttpHandler({ store, token: 'test-secret' });
+  const handler = createReferenceHttpHandler({
+    store,
+    tokens: ['test-secret'],
+    allowedScopes: SESSION_SCOPES,
+  });
   const server = http.createServer((req, res) => {
     void handler(req, res, new URL(req.url ?? '/', 'http://127.0.0.1')).then((handled) => {
       if (!handled && !res.writableEnded) { res.statusCode = 404; res.end(); }
@@ -97,6 +108,22 @@ test('message attachment staging is invisible until promotion and can be discard
   assert.equal(discarded.status, 200);
 });
 
+test('message attachment staging rejects document and global scopes', async (t) => {
+  const { base } = await fixture(t);
+  const headers = {
+    Authorization: 'Bearer test-secret',
+    'Content-Type': 'text/plain',
+    'X-File-Name': 'draft.txt',
+  };
+  for (const [scope, scopeId] of [['document', 'doc-a'], ['global', 'global']]) {
+    const response = await fetch(`${base}/reference-staging?scope=${scope}&scopeId=${scopeId}`, {
+      method: 'POST', headers, body: 'invalid staging scope',
+    });
+    assert.equal(response.status, 403);
+    assert.equal((await response.json()).error.code, 'REFERENCE_SCOPE_FORBIDDEN');
+  }
+});
+
 test('the exact packaged origin is CORS-echoed', async (t) => {
   const { base } = await fixture(t);
   const origin = 'rauhwpx://app';
@@ -155,14 +182,14 @@ async function waitForEmpty(directory) {
 
 test('chunked oversize and aborted HTTP uploads clean staging files', async (t) => {
   const { base, store } = await fixture(t, { maxFileBytes: 32 });
-  const oversized = await chunkedRequest(`${base}/reference-files?scope=chat&scopeId=a`, {
+  const oversized = await chunkedRequest(`${base}/reference-files?scope=chat&scopeId=chat-a`, {
     chunks: [Buffer.alloc(20, 65), Buffer.alloc(20, 66)],
   });
   assert.equal(oversized.status, 413);
   assert.equal(JSON.parse(oversized.body).error.code, 'REFERENCE_FILE_TOO_LARGE');
   await waitForEmpty(store.stagingDir);
 
-  await chunkedRequest(`${base}/reference-files?scope=chat&scopeId=a`, {
+  await chunkedRequest(`${base}/reference-files?scope=chat&scopeId=chat-a`, {
     chunks: [Buffer.from('partial upload')],
     abort: true,
   });

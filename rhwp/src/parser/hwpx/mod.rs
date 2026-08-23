@@ -275,7 +275,6 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
         "Preview/PrvText.txt",
         "Preview/PrvImage.png",
         crate::model::document::HWP5_ORIGIN_HWPX_MARKER_PATH,
-        crate::form_pack::PACK_MARKER_PATH,
     ];
     let mut hwpx_aux_entries: Vec<(String, Vec<u8>)> = Vec::new();
     for path in HWPX_AUX_PATHS {

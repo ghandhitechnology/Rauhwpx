@@ -26,7 +26,7 @@ cp -R "$CHROME_DIST" "$DIST"
 
 # 3. Safari 전용 소스 문법 검사 + 복사
 echo "[3/6] JS 문법 검사..."
-for jsfile in "$ROOT"/rhwp-shared/security/file-signature.js "$SRC"/background.js "$SRC"/content-script.js "$SRC"/options.js; do
+for jsfile in "$ROOT"/rhwp-shared/security/file-signature.js "$ROOT"/rhwp-shared/sw/private-network.js "$SRC"/background.js "$SRC"/content-script.js "$SRC"/options.js; do
   if ! node --check "$jsfile" 2>&1; then
     echo "오류: $jsfile 문법 오류 발견. 빌드 중단."
     exit 1
@@ -37,6 +37,9 @@ done
 echo "[4/6] Safari 전용 소스 적용..."
 cp "$SRC/background.js" "$DIST/background.js"
 cp "$ROOT/rhwp-shared/security/file-signature.js" "$DIST/file-signature.js"
+# Safari background scripts are classic scripts. Generate a classic-script copy
+# from the shared ESM source instead of maintaining another host-policy fork.
+sed 's/^export //' "$ROOT/rhwp-shared/sw/private-network.js" > "$DIST/private-network.js"
 cp "$SRC/content-script.js" "$DIST/content-script.js"
 cp "$SRC/manifest.json" "$DIST/manifest.json"
 cp "$SRC/options.html" "$DIST/options.html"

@@ -5,19 +5,9 @@
 // privileged fetch.
 
 import { isDocumentPath, resolveDocumentUrl } from './document-url-resolver.js';
+import { DEFAULT_BLOCKED_HOST_SUFFIXES, isBlockedHost } from './private-network.js';
 
 const MAX_REDIRECTS = 5;
-
-const BLOCKED_HOST_SUFFIXES = [
-  '.localhost',
-  '.local',
-  '.localdomain',
-  '.internal',
-  '.intranet',
-  '.lan',
-  '.home',
-  '.corp'
-];
 
 export class FetchSecurityError extends Error {
   constructor(reason, message) {
@@ -82,7 +72,7 @@ export function validateDocumentFetchUrl(url, options = {}) {
     throw new FetchSecurityError('scheme-blocked', '허용되지 않은 URL scheme입니다.');
   }
 
-  if (isBlockedHost(parsed.hostname)) {
+  if (isBlockedHostname(parsed.hostname)) {
     throw new FetchSecurityError('private-host-blocked', '로컬 또는 내부 네트워크 URL은 차단됩니다.');
   }
 
@@ -122,56 +112,6 @@ function isRedirectStatus(status) {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
-function isBlockedHost(hostname) {
-  if (!hostname) return true;
-
-  const host = hostname.toLowerCase().replace(/\.$/, '').replace(/^\[/, '').replace(/\]$/, '');
-
-  if (host === 'localhost' || host === '0' || host === '0.0.0.0') return true;
-  if (BLOCKED_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix))) return true;
-
-  // Single-label hosts are usually intranet names. Public document fetches
-  // should use a fully qualified host.
-  if (!host.includes('.') && !host.includes(':')) return true;
-
-  if (isPrivateIPv4(host)) return true;
-  if (isPrivateIPv6(host)) return true;
-
-  return false;
-}
-
-function isPrivateIPv4(host) {
-  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return false;
-
-  const parts = host.split('.').map(Number);
-  if (parts.some((part) => part < 0 || part > 255)) return true;
-
-  const [a, b] = parts;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    a >= 224
-  );
-}
-
-function isPrivateIPv6(host) {
-  if (!host.includes(':')) return false;
-
-  const normalized = host.toLowerCase();
-  return (
-    normalized === '::1' ||
-    normalized === '::' ||
-    normalized.startsWith('fe80:') ||
-    normalized.startsWith('fc') ||
-    normalized.startsWith('fd') ||
-    normalized.startsWith('::ffff:127.') ||
-    normalized.startsWith('::ffff:10.') ||
-    normalized.startsWith('::ffff:192.168.') ||
-    normalized.startsWith('::ffff:169.254.')
-  );
+function isBlockedHostname(hostname) {
+  return isBlockedHost(hostname, { blockedSuffixes: DEFAULT_BLOCKED_HOST_SUFFIXES });
 }

@@ -266,7 +266,8 @@ test('desktop shell owns one ephemeral authenticated hub and exposes session IPC
   assert.match(desktopMain, /waitForHubReadyLine\(child, \{ launchId \}\)/);
   assert.doesNotMatch(desktopMain, /DEFAULT_HUB_PORT/);
   assert.doesNotMatch(desktopMain, /startStudioServer/);
-  assert.match(desktopMain, /sandbox: false/);
+  assert.match(desktopMain, /sandbox: true/);
+  assert.match(desktopMain, /contextIsolation: true/);
   assert.match(desktopMain, /stopHubChild\(/);
   assert.match(preload, /getSessionContext: \(\) => ipcRenderer\.invoke\('desktop:get-session-context'\)/);
   assert.match(preload, /ensureAgentHub: \(\) => ipcRenderer\.invoke\('agent-hub:ensure'\)/);

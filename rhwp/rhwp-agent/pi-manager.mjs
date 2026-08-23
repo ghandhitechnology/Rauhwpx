@@ -361,6 +361,10 @@ export function createPiManager({
    * 무결성 실패는 PI_INSTALL_FAILED 로 던진다 — npm 폴백으로 넘어가지 않는다.
    */
   async function downloadTarball(dist, emit) {
+    // 무결성 메타데이터가 없으면 검증 없이 설치하는 셈이므로 실패로 처리한다.
+    if (!dist.integrity?.startsWith('sha512-')) {
+      throw piError('PI_INSTALL_FAILED', 'pi 패키지 무결성 정보가 없어 설치할 수 없어요');
+    }
     const response = await fetchImpl(dist.tarball, { signal: AbortSignal.timeout(INSTALL_TIMEOUT_MS) });
     if (!response.ok || !response.body) throw new Error(`tarball HTTP ${response.status}`);
     const declared = Number(response.headers?.get?.('content-length'));
@@ -397,11 +401,9 @@ export function createPiManager({
     } finally {
       await handle.close().catch(() => {});
     }
-    if (dist.integrity?.startsWith('sha512-')) {
-      if (`sha512-${hash.digest('base64')}` !== dist.integrity) {
-        await fs.unlink(filePath).catch(() => {});
-        throw piError('PI_INSTALL_FAILED', '내려받은 pi 패키지가 무결성 검증에 실패했어요');
-      }
+    if (`sha512-${hash.digest('base64')}` !== dist.integrity) {
+      await fs.unlink(filePath).catch(() => {});
+      throw piError('PI_INSTALL_FAILED', '내려받은 pi 패키지가 무결성 검증에 실패했어요');
     }
     emit({
       state: 'downloading',

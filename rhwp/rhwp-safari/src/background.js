@@ -7,14 +7,7 @@
 
 // ─── 보안: URL 검증 ───
 
-const DEFAULT_ALLOWED_DOMAINS = ['.go.kr', '.or.kr', '.ac.kr', '.mil.kr', '.korea.kr', '.sc.kr'];
-const PRIVATE_IP_PATTERNS = [
-  /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./,
-  /^169\.254\./, /^0\./, /^\[::1\]/, /^localhost$/i, /\.local$/i,
-];
-function isPrivateHost(hostname) {
-  return PRIVATE_IP_PATTERNS.some(re => re.test(hostname));
-}
+const DEFAULT_ALLOWED_DOMAINS = ['.go.kr', '.ac.kr', '.mil.kr', '.korea.kr'];
 
 function validateUrl(urlString) {
   if (!urlString || typeof urlString !== 'string') return { valid: false, reason: 'URL 비어있음' };
@@ -27,7 +20,11 @@ function validateUrl(urlString) {
     return { valid: false, reason: 'URL에 userinfo(@) 포함' };
   }
   // 내부 IP는 validateUrl 단계에서 차단하지 않고, 호출부에서 devMode 체크 후 판단
-  return { valid: true, parsed, isPrivate: isPrivateHost(parsed.hostname) };
+  return {
+    valid: true,
+    parsed,
+    isPrivate: isBlockedHost(parsed.hostname, { blockedSuffixes: DEFAULT_BLOCKED_HOST_SUFFIXES }),
+  };
 }
 
 function isAllowedDomain(hostname, domains) {
@@ -53,15 +50,27 @@ async function getAllowedDomains() {
 
 // ─── 보안: 파일명 새니타이즈 ───
 
+const WINDOWS_RESERVED_NAMES = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+
 function sanitizeFilename(filename) {
   if (!filename || typeof filename !== 'string') return '';
   let safe = filename;
   if (typeof safe.normalize === 'function') safe = safe.normalize('NFC');
   try { safe = decodeURIComponent(safe); try { safe = decodeURIComponent(safe); } catch {} } catch {}
   safe = safe.replace(/\0/g, '').replace(/\.\./g, '').replace(/[/\\]/g, '_');
+  safe = safe.replace(/[\u0000-\u001f\u007f]/g, '');
   safe = safe.replace(/[^a-zA-Z0-9가-힣ㄱ-ㅎㅏ-ㅣ.\-_ ]/g, '');
   safe = safe.replace(/^[\s.]+|[\s.]+$/g, '');
-  return safe.slice(0, 255) || 'document';
+  const encoder = new TextEncoder();
+  while (encoder.encode(safe).length > 255 && safe.length > 1) {
+    safe = safe.slice(0, -1);
+  }
+  // Windows 예약 장치명(CON, NUL, COM1...)은 앞에 안전한 접두사를 붙인다.
+  const base = safe.includes('.') ? safe.slice(0, safe.indexOf('.')) : safe;
+  if (WINDOWS_RESERVED_NAMES.test(base)) {
+    safe = `_${safe}`;
+  }
+  return safe || 'document';
 }
 
 // ─── 보안: 발신자 검증 ───
@@ -226,36 +235,12 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return;
           }
 
+          // Safari 는 manual redirect 응답을 opaqueredirect 로 숨겨 Location 을
+          // 노출하지 않는다. 중간 hop 을 검증할 수 없으므로 리다이렉트는 차단한다.
           const res = await fetch(fetchUrl, {
             credentials: 'omit',
-            redirect: 'manual',
+            redirect: 'error',
           });
-
-          // 리다이렉트 처리: 대상 URL 재검증
-          if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
-            const location = res.headers.get('location');
-            if (location) {
-              const redirectResult = validateUrl(new URL(location, fetchUrl).href);
-              if (!redirectResult.valid || isPrivateHost(redirectResult.parsed.hostname)) {
-                logSecurity('fetch-blocked', location, '리다이렉트 대상 차단');
-                sendResponse({ error: '리다이렉트 대상이 안전하지 않음' });
-                return;
-              }
-              // 재검증 통과 시 리다이렉트 따라가기
-              const res2 = await fetch(new URL(location, fetchUrl).href, { credentials: 'omit' });
-              if (!res2.ok) throw new Error(`HTTP ${res2.status}`);
-              const buf = await res2.arrayBuffer();
-              if (buf.byteLength > maxSize) throw new Error('파일 크기 초과');
-              const signature = verifyDocumentSignature(buf);
-              if (!signature.isDocument) {
-                logSecurity('signature-blocked', fetchUrl, '지원하지 않는 한글 문서 형식');
-                sendResponse({ error: '지원하지 않는 한글 문서 형식입니다' });
-                return;
-              }
-              sendResponse({ data: buf });
-              return;
-            }
-          }
 
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -434,8 +419,15 @@ async function extractPrvImageFromZip(data) {
           w.close();
           const r = dec.readable.getReader();
           const chunks = [];
-          while (true) { const { done, value } = await r.read(); if (done) break; chunks.push(value); }
-          const total = chunks.reduce((s, c) => s + c.length, 0);
+          let total = 0;
+          while (true) {
+            const { done, value } = await r.read();
+            if (done) break;
+            total += value.length;
+            // 압축 폭탄 방어: PrvImage 상한(10MB)을 넘는 출력은 중단
+            if (total > 10 * 1024 * 1024) { r.cancel().catch(() => {}); return null; }
+            chunks.push(value);
+          }
           const buf = new Uint8Array(total);
           let o = 0;
           for (const c of chunks) { buf.set(c, o); o += c.length; }

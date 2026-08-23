@@ -2,12 +2,11 @@
  * 설정 탭 — 사이드바의 한 페이지(스킬 페이지와 같은 무대 전환을 탄다).
  *
  * 묶음을 한 스크롤에 세운다:
- *  1. 보안·개인정보 — 파일 위치, 로컬 한글 처리, 고른 CLI, 토큰 행선
- *  2. 연결 — 허브와 CLI 상태, 모달 설치/로그인, 재연결·세션 재시작
- *  3. 기본 설정 — 다음 대화부터 쓸 프로바이더·모델·강도·권한
- *  4. 글쓰기 보정 — 문체 보정 상태와 재보정 진입
- *  5. 템플릿 — 기기 전체 HWP/HWPX 서식
- *  6. 사용량 — CLIProxyAPI 연결, 요금제별 5시간·주간 한도, 오늘 누적, 모델별 내역
+ *  1. 연결 — 허브와 CLI 상태, 모달 설치/로그인, 재연결·세션 재시작
+ *  2. 기본 설정 — 다음 대화부터 쓸 프로바이더·모델·강도·권한
+ *  3. 글쓰기 보정 — 문체 보정 상태와 재보정 진입
+ *  4. 템플릿 — 기기 전체 HWP/HWPX 서식
+ *  5. 사용량 — CLIProxyAPI 연결, 요금제별 5시간·주간 한도, 오늘 누적, 모델별 내역
  *
  * 페이지 전환(열기/닫기)은 index.ts 가 클래스로 관리하고, 이 모듈은
  * 자기 DOM 과 데이터 갱신만 맡는다.
@@ -23,8 +22,6 @@ import {
   type AgentModelGroup,
 } from '../../agent/models.ts';
 import { loadAgentPrefs, saveAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
-import { isDesktopApp } from '../../desktop-integration.ts';
-import { renderPrivacySnapshot } from '../privacy-panel.ts';
 import { createIcon } from './icons.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
 import { formatRelativeTime, formatResetAt, formatShortDate, formatTokens } from './usage-format.ts';
@@ -279,24 +276,25 @@ export interface SettingsPanelDeps {
   openCalibration: () => void;
   /** 현재 대화의 CLI 세션을 다시 시작한다. */
   reconnectSession: () => void;
-  /** 보안 안내의 파일 위치. 없으면 문서 없음으로 그린다. */
-  getDocumentLocation?: () => {
-    hasDocument: boolean;
-    fileName: string;
-    isUntitled: boolean;
-  };
 }
 
 export interface SettingsPanel {
   element: HTMLElement;
   open(): void;
   close(): void;
+  /** 첫 실행 마법사 카드에서도 같은 설치/로그인 모달을 연다. */
+  openAgentSetup(agent: AgentName): void;
+  /**
+   * 모달을 연 뒤 허브 상태에 따라 설치 또는 대표 OAuth 를 바로 시작한다.
+   * 이미 로그인된 프로바이더는 완료 화면만 보여 준다.
+   */
+  beginAgentConnect(agent: AgentName): void;
   handleEvent(ev: SidebarEvent): void;
   dispose(): void;
 }
 
 export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
-  const { bridge, getSelection, applyDefaults, openCalibration, reconnectSession, getDocumentLocation } = deps;
+  const { bridge, getSelection, applyDefaults, openCalibration, reconnectSession } = deps;
 
   let disposed = false;
   let prefs: AgentPrefs = loadAgentPrefs();
@@ -367,12 +365,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const body = el('div', 'ag-settings-body');
   element.append(header, body);
 
-  // ── 1. 보안·개인정보 ──────────────────────────────────
-  const privacy = createSection('보안·개인정보');
-  const privacyRoot = el('div', 'privacy-disclosure ag-privacy-disclosure');
-  privacy.body.appendChild(privacyRoot);
-
-  // ── 2. 연결 ────────────────────────────────────────────
+  // ── 1. 연결 ────────────────────────────────────────────
   const connection = createSection('연결');
   const hubRow = el('div', 'ag-settings-row ag-settings-hub-row');
   const hubDot = el('span', 'ag-settings-dot');
@@ -1049,7 +1042,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   }
 
   body.append(
-    privacy.root,
     connection.root,
     defaults.root,
     calibration.root,
@@ -1218,29 +1210,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const permission = current.permission === 'unrestricted' ? '전체 접근' : '안전';
     currentLine.textContent =
       `현재 대화: ${AGENT_LABEL[current.agent]} / ${labelForModel(current.agent, current.model)} / ${permission}`;
-    renderPrivacy();
-  }
-
-  function renderPrivacy(): void {
-    const current = getSelection();
-    const doc = getDocumentLocation?.() ?? {
-      hasDocument: false,
-      fileName: '',
-      isUntitled: false,
-    };
-    renderPrivacySnapshot(privacyRoot, {
-      shell: isDesktopApp() ? 'desktop' : 'browser',
-      location: {
-        hasDocument: doc.hasDocument,
-        fileName: doc.fileName,
-        isUntitled: doc.isUntitled,
-        sourcePath: null,
-      },
-      defaultAgent: prefs.defaultAgent,
-      defaultModel: prefs.defaultModel,
-      conversationAgent: current.agent,
-      conversationModel: current.model,
-    });
   }
 
   function renderConnection(): void {
@@ -1346,6 +1315,51 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       setupCopyResetTimer = null;
       button.textContent = label;
     }, 1600);
+  }
+
+  function isAgentLoggedIn(agent: AgentName): boolean {
+    if (agent === 'pi' && piStatus?.setupComplete === true) return true;
+    const status = setupStatuses?.[agent];
+    return status?.connected === true || status?.setupComplete === true || status?.authenticated === true;
+  }
+
+  function isAgentInstalled(agent: AgentName): boolean {
+    const status = setupStatuses?.[agent];
+    const health = providers?.[agent];
+    return health?.available === true || status?.available === true || status?.installed === true;
+  }
+
+  async function continueAgentConnect(agent: AgentName): Promise<void> {
+    await refreshSetupStatuses();
+    if (agent === 'pi') {
+      try {
+        const next = await bridge.requestPiStatus();
+        if (next) piStatus = next;
+      } catch {
+        // 설치 여부는 아래 상태로 판단한다.
+      }
+    }
+    if (disposed || setupAgent !== agent) return;
+    renderAgentSetup();
+    if (connectionState !== 'connected') return;
+    if (isAgentLoggedIn(agent)) return;
+    if (isAgentInstalled(agent) || (agent === 'pi' && piStatus?.installed === true)) {
+      setupReauth = true;
+      await startSetupAuth('oauth');
+      return;
+    }
+    await installSelectedAgent();
+    if (disposed || setupAgent !== agent) return;
+    if (isAgentLoggedIn(agent)) return;
+    if (isAgentInstalled(agent) || (agent === 'pi' && piStatus?.installed === true)) {
+      setupReauth = true;
+      await startSetupAuth('oauth');
+    }
+  }
+
+  function beginAgentConnect(agent: AgentName): void {
+    openAgentSetup(agent);
+    void continueAgentConnect(agent);
   }
 
   function openAgentSetup(agent: AgentName): void {
@@ -2229,6 +2243,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       closeAgentSetup();
       finishTemplateName(null);
     },
+    openAgentSetup,
+    beginAgentConnect,
     handleEvent(ev: SidebarEvent): void {
       switch (ev.type) {
         case 'connection':

@@ -25,7 +25,6 @@ export type FreshOpenPayload = {
   requestId?: string;
   grant?: never;
   documentId?: never;
-  formPackId?: string;
 };
 
 export type BoundOpenPayload = {
@@ -35,7 +34,6 @@ export type BoundOpenPayload = {
   skipUnsavedGuard?: boolean;
   requestId?: string;
   grant: VerifiedDocumentGrant;
-  formPackId?: string;
 };
 
 export type OpenDocumentBytesEvent = FreshOpenPayload | BoundOpenPayload;

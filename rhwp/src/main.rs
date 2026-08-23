@@ -6078,15 +6078,6 @@ fn convert_hwp(args: &[String]) -> i32 {
         }
     };
 
-    if let Some(msg) = rhwp::form_pack::refuse_binary_hwp_export(
-        Path::new(input_path),
-        Path::new(output_path),
-        doc.document(),
-    ) {
-        eprintln!("오류: {msg}");
-        return EXIT_USAGE;
-    }
-
     let page_count_before = if verify_options.verify_pages {
         Some(doc.page_count())
     } else {
@@ -8202,45 +8193,20 @@ fn edit_fill_fields(args: &[String]) -> i32 {
         filled.push(serde_json::json!({ "name": name, "value": value_str }));
     }
 
-    let source_path = Path::new(file_path);
-    let is_pack = rhwp::form_pack::is_form_pack_document(doc.document());
     let output_path = out_path.unwrap_or_else(|| {
-        if is_pack {
-            rhwp::form_pack::default_filled_hwpx_path(source_path)
-                .to_string_lossy()
-                .into_owned()
-        } else {
-            let stem = source_path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "output".to_string());
-            format!("{}_filled.hwp", stem)
-        }
+        let stem = Path::new(file_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "output".to_string());
+        format!("{}_filled.hwp", stem)
     });
 
-    if let Some(msg) =
-        rhwp::form_pack::refuse_binary_hwp_export(source_path, Path::new(&output_path), doc.document())
-    {
-        eprintln!("오류: {msg}");
-        return EXIT_USAGE;
-    }
-
     if !dry_run {
-        let out_bytes = if is_pack {
-            match doc.export_hwpx_native() {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("오류: HWPX 직렬화 실패 - {}", e);
-                    return EXIT_RUNTIME;
-                }
-            }
-        } else {
-            match doc.export_hwp_native() {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("오류: HWP 직렬화 실패 - {}", e);
-                    return EXIT_RUNTIME;
-                }
+        let out_bytes = match doc.export_hwp_native() {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("오류: HWP 직렬화 실패 - {}", e);
+                return EXIT_RUNTIME;
             }
         };
         if let Err(e) = fs::write(&output_path, &out_bytes) {

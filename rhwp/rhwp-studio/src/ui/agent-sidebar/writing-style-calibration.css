@@ -29,6 +29,10 @@
   opacity: 1;
 }
 
+.ag-calibration-overlay.ag-elevated {
+  z-index: 1300;
+}
+
 .ag-calibration-dialog {
   width: min(680px, calc(100vw - 24px));
   max-height: min(780px, calc(100vh - 24px));

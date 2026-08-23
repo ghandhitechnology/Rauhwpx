@@ -122,6 +122,7 @@ test('dedicated worker identity and exact tool profile reach every provider MCP 
     RHWP_AGENT_WORKFLOW: 'direct',
     RHWP_AGENT_PHASE: 'implementing',
     RHWP_CAPABILITY_EPOCH: '17',
+    RHWP_IMAGE_ROOTS: '/tmp/Rau workspace',
     RHWP_TOOL_PROFILE: 'copy-layout-worker',
     RHWP_AGENT_ROLE: 'copy-layout-worker:job:secret',
   });
@@ -133,6 +134,19 @@ test('dedicated worker identity and exact tool profile reach every provider MCP 
   const codexEnv = codexConfig(buildCodexArgv(opts, null), 'mcp_servers.rhwp.env=');
   assert.match(codexEnv, /RHWP_TOOL_PROFILE = "copy-layout-worker"/);
   assert.match(codexEnv, /RHWP_AGENT_ROLE = "copy-layout-worker:job:secret"/);
+});
+
+test('image roots cannot smuggle extra allowlisted paths through the platform delimiter', () => {
+  assert.throws(
+    () => mcpCapabilityEnv({
+      ...baseOpts,
+      workflow: 'direct',
+      phase: 'implementing',
+      capabilityEpoch: 1,
+      rootDir: `/tmp/workspace${path.delimiter}/etc`,
+    }),
+    /image root cannot contain the platform path delimiter/,
+  );
 });
 
 const matrix = [
