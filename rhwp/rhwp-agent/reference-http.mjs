@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 
+import { normalizeReferenceScope } from './reference-store.mjs';
+
 export const PACKAGED_STUDIO_ORIGIN = 'rauhwpx://app';
 const LOCAL_STUDIO_ORIGIN = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/i;
 
@@ -22,12 +24,33 @@ function sendJson(res, status, body, origin = null) {
   res.end(payload);
 }
 
-function bearerMatches(req, token) {
+function bearerMatchesAny(req, tokens) {
   const header = String(req.headers.authorization ?? '');
   if (!header.startsWith('Bearer ')) return false;
   const received = Buffer.from(header.slice(7), 'utf8');
-  const expected = Buffer.from(String(token), 'utf8');
-  return received.length === expected.length && crypto.timingSafeEqual(received, expected);
+  return (Array.isArray(tokens) ? tokens : [tokens]).some((token) => {
+    if (!token) return false;
+    const expected = Buffer.from(String(token), 'utf8');
+    return received.length === expected.length && crypto.timingSafeEqual(received, expected);
+  });
+}
+
+/**
+ * 요청한 (scope, scopeId) 가 인증된 세션의 참조 범위 안에 있는지 확인한다.
+ * 세션 스코프 토큰만으로는 다른 채팅/문서 스코프를 넘볼 수 없어야 한다.
+ */
+function assertScopeAllowed(scope, scopeId, allowedScopes) {
+  const normalized = normalizeReferenceScope(scope, scopeId);
+  const key = `${normalized.scope}:${normalized.scope === 'global' ? 'global' : normalized.scopeId}`;
+  const allowed = new Set((allowedScopes ?? []).map((item) => (
+    `${item.scope}:${item.scope === 'global' ? 'global' : item.scopeId}`
+  )));
+  if (!allowed.has(key)) {
+    throw Object.assign(new Error('Requested reference scope is outside this session'), {
+      code: 'REFERENCE_SCOPE_FORBIDDEN',
+    });
+  }
+  return normalized;
 }
 
 function errorStatus(error) {
@@ -39,6 +62,7 @@ function errorStatus(error) {
     case 'REFERENCE_TYPE_MISMATCH': return 415;
     case 'REFERENCE_FILE_TOO_LARGE':
     case 'REFERENCE_SCOPE_SIZE_LIMIT': return 413;
+    case 'REFERENCE_SCOPE_FORBIDDEN': return 403;
     case 'REFERENCE_FILE_COUNT_LIMIT': return 409;
     case 'REFERENCE_EXTRACTION_TIMEOUT': return 504;
     case 'REFERENCE_EXTRACTOR_UNAVAILABLE': return 503;
@@ -64,8 +88,12 @@ function isReferencePath(pathname) {
 /**
  * Build the loopback reference HTTP API. Returns true when a request was owned
  * by this router and false so the hub can continue to its other routes.
+ *
+ * `tokens` holds the credentials acceptable for the authenticated session
+ * (its scoped token, plus the master token outside production). The request's
+ * own bearer value is never trusted by itself.
  */
-export function createReferenceHttpHandler({ store, token }) {
+export function createReferenceHttpHandler({ store, tokens, allowedScopes }) {
   return async function handleReferenceHttp(req, res, url) {
     if (!isReferencePath(url.pathname)) return false;
     const origin = typeof req.headers.origin === 'string' ? req.headers.origin : null;
@@ -85,29 +113,33 @@ export function createReferenceHttpHandler({ store, token }) {
       res.end();
       return true;
     }
-    if (!bearerMatches(req, token)) {
+    if (!bearerMatchesAny(req, tokens)) {
       req.resume?.();
       const message = 'A valid bearer token is required';
       sendJson(res, 401, { status: 'error', message, error: { code: 'REFERENCE_UNAUTHORIZED', message } }, origin);
       return true;
     }
     try {
-      const scope = url.searchParams.get('scope');
+      // /reference-staging 은 store 와 마찬가지로 scope 를 chat 으로 기본한다.
+      const rawScope = url.pathname === '/reference-staging' || url.pathname.startsWith('/reference-staging/')
+        ? (url.searchParams.get('scope') ?? 'chat')
+        : url.searchParams.get('scope');
       const scopeId = url.searchParams.get('scopeId');
+      const resolvedScope = assertScopeAllowed(rawScope, rawScope === 'global' ? 'global' : scopeId, allowedScopes);
       if (req.method === 'POST' && url.pathname === '/reference-staging') {
         const result = await store.stageStream({
           stream: req,
           name: decodeUploadName(req.headers['x-file-name']),
           mimeType: req.headers['content-type'],
           contentLength: req.headers['content-length'],
-          scopeId,
+          scopeId: resolvedScope.scope === 'global' ? 'global' : resolvedScope.scopeId,
         });
         sendJson(res, 201, { staged: result, error: null }, origin);
         return true;
       }
       if (req.method === 'DELETE' && url.pathname.startsWith('/reference-staging/')) {
         const stageId = decodeURIComponent(url.pathname.slice('/reference-staging/'.length));
-        const result = await store.discardStaged({ stageId, scopeId });
+        const result = await store.discardStaged({ stageId, scopeId: resolvedScope.scopeId });
         sendJson(res, 200, { status: 'deleted', staged: result }, origin);
         return true;
       }
@@ -117,15 +149,15 @@ export function createReferenceHttpHandler({ store, token }) {
           name: decodeUploadName(req.headers['x-file-name']),
           mimeType: req.headers['content-type'],
           contentLength: req.headers['content-length'],
-          scope,
-          scopeId,
+          scope: resolvedScope.scope,
+          scopeId: resolvedScope.scopeId,
         });
         sendJson(res, 201, { ...result, error: null }, origin);
         return true;
       }
       if (req.method === 'GET' && url.pathname === '/reference-files') {
-        const files = store.list({ scope, scopeId });
-        sendJson(res, 200, { status: 'ready', scope: scope === 'global' ? 'global' : scope, scopeId: scope === 'global' ? 'global' : scopeId, files }, origin);
+        const files = store.list({ scope: resolvedScope.scope, scopeId: resolvedScope.scopeId });
+        sendJson(res, 200, { status: 'ready', scope: resolvedScope.scope, scopeId: resolvedScope.scope === 'global' ? 'global' : resolvedScope.scopeId, files }, origin);
         return true;
       }
       if (req.method === 'GET' && url.pathname === '/reference-search') {
@@ -137,7 +169,7 @@ export function createReferenceHttpHandler({ store, token }) {
         }
         const rawLimit = Number(url.searchParams.get('maxResults') ?? url.searchParams.get('limit') ?? 8);
         const maxResults = Number.isSafeInteger(rawLimit) ? Math.min(20, Math.max(1, rawLimit)) : 8;
-        const scopes = [{ scope, scopeId }];
+        const scopes = [resolvedScope];
         const results = store.search({ query, scopes, maxResults });
         sendJson(res, 200, { status: 'ready', query, results }, origin);
         return true;
@@ -149,7 +181,7 @@ export function createReferenceHttpHandler({ store, token }) {
           error.code = 'REFERENCE_ID_INVALID';
           throw error;
         }
-        const result = await store.remove({ fileId, scope, scopeId });
+        const result = await store.remove({ fileId, scope: resolvedScope.scope, scopeId: resolvedScope.scopeId });
         sendJson(res, 200, { status: 'deleted', file: result }, origin);
         return true;
       }

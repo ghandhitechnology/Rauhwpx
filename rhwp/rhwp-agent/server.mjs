@@ -62,6 +62,7 @@ import {
   HubSessionRegistry,
   issueScopedHubToken,
   resolveHubIdentity,
+  timingSafeTextEqual,
 } from './hub-session-registry.mjs';
 
 const REQUESTED_PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
@@ -138,8 +139,10 @@ const secretStore = createIpcSecretStore();
 const piManager = await createPiManager({ rootDir: PI_ROOT, openRouter, secretStore }).init();
 const cliSetup = await createCliSetupManager({ secretStore }).init();
 // App-managed bins are available to auxiliary CLI calls as soon as installation completes.
+// 허브가 관리하는 API 키는 process.env 에 올리지 않는다 — npm lifecycle 스크립트,
+// 설치 스크립트 등 무관한 자식 프로세스까지 상속받는 누수 지점이 된다.
+// 키는 auxSpawnProcess 가 해당 CLI 자식에게만 env 로 얹어 준다.
 process.env.PATH = `${cliSetup.binDir}${path.delimiter}${process.env.PATH ?? ''}`;
-Object.assign(process.env, cliSetup.envFor('claude'));
 const [initialClaudeSetup, initialCodexSetup, initialGrokSetup, initialCursorSetup] = await Promise.all([
   cliSetup.status('claude'),
   cliSetup.status('codex'),
@@ -635,6 +638,21 @@ function spawnAuxiliaryProcess(record, command, args, options = {}) {
   return child;
 }
 
+/**
+ * 보조 CLI(claude/codex) 스폰 래퍼 — 해당 프로바이더의 키를 그 자식에게만 얹는다.
+ * process.env 에 키가 없으므로(위 주석 참고), 인증이 필요한 보조 실행은 여기서 채운다.
+ */
+function auxSpawnProcess(record, command, args, options = {}) {
+  const finalOptions = { ...options };
+  if (command === 'claude' || command === 'codex') {
+    finalOptions.env = {
+      ...cliSetup.envFor(command),
+      ...(options.env ?? {}),
+    };
+  }
+  return spawnAuxiliaryProcess(record, command, args, finalOptions);
+}
+
 async function stopAuxiliaryProcesses(record) {
   const children = [...record.auxiliaryProcesses];
   record.auxiliaryProcesses.clear();
@@ -672,7 +690,7 @@ function auxDeps(record, requestedAgent, cliAgent) {
     cwd: record.workDir,
     isolatedHome: record.isolatedHome,
     sessionId: record.sessionId,
-    spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
+    spawnProcess: (command, args, options) => auxSpawnProcess(record, command, args, options),
     terminateProcess: terminateProcessTree,
   };
 }
@@ -1511,6 +1529,10 @@ async function handleStudioMessage(record, sock, msg) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: 'chat-user-message requires text' });
         return;
       }
+      if (msg.text.length > MAX_CHAT_MESSAGE_CHARS) {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: `chat message exceeds ${MAX_CHAT_MESSAGE_CHARS} characters` });
+        return;
+      }
       if (Object.prototype.hasOwnProperty.call(msg, 'activeTemplateId')) {
         try {
           const templateId = msg.activeTemplateId == null ? null : String(msg.activeTemplateId);
@@ -1985,7 +2007,7 @@ async function handleStudioMessage(record, sock, msg) {
               workDir: record.workDir,
               isolatedHome: record.isolatedHome,
               sessionId: record.sessionId,
-              spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
+              spawnProcess: (command, args, options) => auxSpawnProcess(record, command, args, options),
               terminateProcess: terminateProcessTree,
               onProgress: (event) => {
                 if (record.styleCalibration?.jobId === jobId) sendStyleProgress(record, event);
@@ -2506,8 +2528,17 @@ function authenticateHttpSession(req, url) {
 }
 
 function authenticateOwnerRequest(req, url) {
-  authenticateMasterToken(TOKEN, requestToken(req, url));
-  if (String(req.headers['x-rhwp-launch-id'] ?? '') !== LAUNCH_ID) {
+  // 소유자 엔드포인트(/shutdown, DELETE /sessions)는 마스터 토큰을 Authorization
+  // 헤더로만 받는다 — URL 에 실린 토큰은 히스토리·로그·크래시 리포트에 남는다.
+  const authorization = String(req.headers.authorization ?? '');
+  const bearer = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+  if (!bearer || url.searchParams.get('token')) {
+    const error = new Error('owner endpoints require a bearer token');
+    error.code = 'UNAUTHORIZED';
+    throw error;
+  }
+  authenticateMasterToken(TOKEN, bearer);
+  if (!timingSafeTextEqual(String(req.headers['x-rhwp-launch-id'] ?? ''), LAUNCH_ID)) {
     const error = new Error('invalid hub launch id');
     error.code = 'UNAUTHORIZED';
     throw error;
@@ -2526,9 +2557,21 @@ function isTemplatePath(pathname) {
   return pathname === '/templates' || pathname.startsWith('/templates/');
 }
 
+/** Host 헤더가 루프백(127.0.0.1/localhost/[::1])인지 — DNS rebinding 차단용. */
+function isLoopbackHost(hostHeader) {
+  const host = String(hostHeader ?? '').toLowerCase().replace(/:\d+$/, '').replace(/^\[/, '').replace(/\]$/, '');
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+}
+
 const httpServer = http.createServer((req, res) => {
   void Promise.resolve().then(async () => {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${hubPort || REQUESTED_PORT || 5175}`);
+    // DNS rebinding 방어: 프로덕션(데스크톱 소유 허브)에서는 Host 가 루프백이어야 한다.
+    // 브라우저는 요청에 재바인딩된 도메인을 Host 로 실어 보내므로 여기서 걸러진다.
+    if (PRODUCTION && !isLoopbackHost(req.headers.host)) {
+      sendHttpJson(res, 403, { status: 'forbidden' });
+      return;
+    }
     if (req.method === 'GET' && url.pathname.startsWith('/artifacts/')) {
       const origin = typeof req.headers.origin === 'string' ? req.headers.origin : null;
       if (origin && !isAllowedStudioOrigin(origin)) {
@@ -2569,19 +2612,31 @@ const httpServer = http.createServer((req, res) => {
       return;
     }
     if (isReferencePath(url.pathname) || isTemplatePath(url.pathname)) {
+      let authSessionId = null;
       if (req.method !== 'OPTIONS') {
-        const sessionId = authenticateHttpSession(req, url);
-        sessions.getOrCreate(sessionId);
+        authSessionId = authenticateHttpSession(req, url);
+        sessions.getOrCreate(authSessionId);
       }
-      const suppliedToken = requestToken(req, url);
+      // 이후 bearer 검증은 요청이 스스로 제시한 값을 비교하는 게 아니라
+      // 인증된 세션의 스코프 토큰과 비교한다(개발 모드 마스터 토큰도 수용).
+      const presentedToken = requestToken(req, url);
+      const expectedTokens = authSessionId ? [issueScopedHubToken(TOKEN, authSessionId)] : [];
+      if (!PRODUCTION && timingSafeTextEqual(presentedToken, TOKEN)) expectedTokens.push(presentedToken);
+      const allowedScopes = authSessionId
+        ? referenceScopesForSession(sessions.getOrCreate(authSessionId).agentSession)
+        : [];
       if (isReferencePath(url.pathname)) {
-        const handleReferenceHttp = createReferenceHttpHandler({ store: referenceStore, token: suppliedToken });
+        const handleReferenceHttp = createReferenceHttpHandler({
+          store: referenceStore,
+          tokens: expectedTokens,
+          allowedScopes,
+        });
         if (await handleReferenceHttp(req, res, url)) return;
       }
       if (isTemplatePath(url.pathname)) {
         const handleTemplateHttp = createTemplateHttpHandler({
           store: templateStore,
-          token: suppliedToken,
+          tokens: expectedTokens,
           onChanged: broadcastTemplateCatalog,
         });
         if (await handleTemplateHttp(req, res, url)) return;
@@ -2642,17 +2697,28 @@ const httpServer = http.createServer((req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/healthz') {
       const token = requestToken(req, url);
-      if (!(DEVELOPMENT_AUTH && !token)) authenticateMasterToken(TOKEN, token);
+      const authenticated = !(DEVELOPMENT_AUTH && !token);
+      if (authenticated) authenticateMasterToken(TOKEN, token);
       const origin = typeof req.headers.origin === 'string' ? req.headers.origin : null;
       const allowOrigin = origin && /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/i.test(origin)
         ? origin
         : null;
+      // 개발 모드 무인증 liveness 확인에도 상태를 노출하지 않는다 —
+      // launchId·세션 요약·프로바이더 캐시는 인증된 응답에만 실린다.
+      const body = authenticated ? healthzBody() : {
+        ok: true,
+        name: HUB_NAME,
+        pid: process.pid,
+        port: hubPort,
+        uptimeMs: Date.now() - STARTED_AT,
+        protocol: PROTOCOL_VERSION,
+      };
       res.writeHead(200, {
         'content-type': 'application/json',
         'cache-control': 'no-store',
         ...(allowOrigin ? { 'access-control-allow-origin': allowOrigin, vary: 'Origin' } : {}),
       });
-      res.end(JSON.stringify(healthzBody()));
+      res.end(JSON.stringify(body));
       return;
     }
     // pi extension requests a shared catalog with its signed session credential.
@@ -2682,7 +2748,9 @@ const httpServer = http.createServer((req, res) => {
   });
 });
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 1_000_000 });
+/** 채팅 한 메시지 상한 — 과대 프레임이 유료 CLI 호출로 그대로 흘러가지 않게 한다. */
+const MAX_CHAT_MESSAGE_CHARS = 128_000;
 
 function rejectUpgrade(socket, status, message) {
   socket.write(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\n\r\n`);
@@ -2702,9 +2770,13 @@ httpServer.on('upgrade', (req, socket, head) => {
     rejectUpgrade(socket, 404, 'Not Found');
     return;
   }
-  if (PRODUCTION) {
+  // Origin 검증은 개발 모드에서도 한다 — 브라우저는 교차 출처 WS 업그레이드에
+  // 항상 Origin 을 실어 보내므로, 웹페이지발 드라이바이 연결을 여기서 끊는다.
+  // 프로덕션은 허용된 Studio 출처를 요구하고(무-Origin 도 거부), 개발 모드는
+  // 비브라우저 클라이언트(CLI, 테스트)를 위해 Origin 이 없는 연결만 통과시킨다.
+  {
     const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
-    if (pathname === '/studio' && !isAllowedStudioOrigin(origin)) {
+    if (pathname === '/studio' && (PRODUCTION ? !isAllowedStudioOrigin(origin) : (origin && !isAllowedStudioOrigin(origin)))) {
       rejectUpgrade(socket, 403, 'Forbidden');
       return;
     }

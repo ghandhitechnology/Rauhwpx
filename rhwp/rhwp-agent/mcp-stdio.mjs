@@ -5,6 +5,7 @@ import path from 'node:path';
 import WebSocket from 'ws';
 import { resolveHubIdentity, sessionIdFromScopedHubToken } from './hub-session-registry.mjs';
 import { filterToolDefinitions, toToolContent, toolAnnotations } from './tools.mjs';
+import { assertImagePathInsideRoots, imageRootsFromEnv } from './image-path-policy.mjs';
 
 const WS_URL = process.env.RHWP_WS_URL ?? 'ws://127.0.0.1:5175/mcp';
 const { token: TOKEN, development: DEVELOPMENT_AUTH } = resolveHubIdentity();
@@ -19,6 +20,10 @@ const CAPABILITY_EPOCH = process.env.RHWP_CAPABILITY_EPOCH;
 const TOOL_PROFILE = process.env.RHWP_TOOL_PROFILE ?? (WORKFLOW === 'plan' ? PHASE : 'direct');
 const CONNECT_TIMEOUT_MS = 5_000;
 const CALL_TIMEOUT_MS = 180_000;
+
+// insert_image 가 읽을 수 있는 루트 디렉터리(세션 작업 공간·다운로드 등).
+// 어댑터가 루트를 넘겨주면 그 밖의 절대경로 읽기는 전부 거부한다.
+const IMAGE_ALLOWED_ROOTS = imageRootsFromEnv(process.env);
 
 function log(msg) {
   process.stderr.write(`[rhwp-mcp] ${msg}\n`);
@@ -212,6 +217,12 @@ function parseImageDims(buf, ext) {
 }
 
 // insert_image 만 커스텀 등록 — description/shape 는 tools.mjs 정의를 그대로 쓴다.
+
+/** imagePath 가 허용된 루트(실제 경로 기준) 안에 있는지 확인한다. */
+function assertImagePathAllowed(imagePath) {
+  return assertImagePathInsideRoots(imagePath, IMAGE_ALLOWED_ROOTS);
+}
+
 function registerInsertImageTool(def) {
   server.registerTool(
     def.name,
@@ -227,6 +238,7 @@ function registerInsertImageTool(def) {
         let buf;
         let ext;
         if (typeof imagePath === 'string' && imagePath.length > 0) {
+          await assertImagePathAllowed(imagePath);
           buf = await readFile(imagePath);
           ext = path.extname(imagePath).slice(1).toLowerCase().replace('jpeg', 'jpg');
         } else if (typeof imageBase64 === 'string' && imageBase64.length > 0) {

@@ -7,6 +7,8 @@ import { fetchDocumentWithPolicy, validateDocumentFetchUrl } from './fetch-secur
 
 const THUMBNAIL_CACHE = new Map();
 const CACHE_MAX_SIZE = 100;
+// 압축 해제 출력 상한 — PrvImage 이미지(수 MB 수준)를 넘는 출력은 폭탄으로 간주한다.
+const MAX_DECOMPRESSED_BYTES = 10 * 1024 * 1024;
 
 /**
  * URL에서 HWP 파일을 fetch하여 PrvImage 썸네일을 추출한다.
@@ -341,12 +343,18 @@ async function extractPrvImageFromZipAsync(data) {
           writer.close();
           const reader = ds.readable.getReader();
           const chunks = [];
+          let totalLen = 0;
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            totalLen += value.length;
+            // 압축 폭탄 방어: PrvImage 로 쓸 수 있는 크기(10MB)를 넘으면 중단
+            if (totalLen > MAX_DECOMPRESSED_BYTES) {
+              await reader.cancel().catch(() => {});
+              return null;
+            }
             chunks.push(value);
           }
-          const totalLen = chunks.reduce((s, c) => s + c.length, 0);
           const decompressed = new Uint8Array(totalLen);
           let offset = 0;
           for (const chunk of chunks) {

@@ -8,6 +8,7 @@ import {
 import type { DocumentInfo } from '@/core/types';
 import { EventBus } from '@/core/event-bus';
 import { assertRemoteDocumentBytes } from '@/core/document-signature';
+import { RemoteDocumentUrlError, validateRemoteDocumentUrl } from '@/core/remote-document-url';
 import { CanvasView } from '@/view/canvas-view';
 import { InputHandler } from '@/engine/input-handler';
 import { Toolbar } from '@/ui/toolbar';
@@ -1580,6 +1581,10 @@ async function loadFromUrlParam(): Promise<void> {
     msg.textContent = '파일 로딩 중...';
     console.log(`[loadFromUrlParam] ${fileUrl}`);
 
+    // 어떤 fetch 경로를 타든 공개 URL 정책을 먼저 통과해야 한다.
+    // (확장 viewer 의 직접 fetch 는 SW 프록시 검증을 우회하지 않도록)
+    validateRemoteDocumentUrl(fileUrl);
+
     let response: Response;
 
     // Chrome 확장 환경: Service Worker를 통한 CORS 우회 fetch
@@ -1607,12 +1612,18 @@ async function loadFromUrlParam(): Promise<void> {
     await loadBytes(data, fileName, null);
   } catch (error) {
     if (error instanceof DocumentOwnedElsewhereError) return;
-    // 로컬 file:// 로드 실패 + "파일 URL 액세스 허용" 미허용 → 전용 안내 (#1131)
-    if (fileUrl.startsWith('file:') && typeof chrome !== 'undefined') {
-      const allowed = await isFileSchemeAccessAllowed();
-      if (allowed === false) {
-        showFileUrlAccessGuidance();
-        return;
+    if (
+      error instanceof RemoteDocumentUrlError
+      && error.reason === 'scheme-blocked'
+      && fileUrl.startsWith('file:')
+    ) {
+      // file:// 은 별도 안내 흐름(#1131)을 유지한다 — 공개 URL 정책과 무관.
+      if (typeof chrome !== 'undefined') {
+        const allowed = await isFileSchemeAccessAllowed();
+        if (allowed === false) {
+          showFileUrlAccessGuidance();
+          return;
+        }
       }
     }
     showLoadError(error);

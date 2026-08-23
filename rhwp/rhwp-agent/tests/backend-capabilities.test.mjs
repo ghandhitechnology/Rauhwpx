@@ -122,6 +122,7 @@ test('dedicated worker identity and exact tool profile reach every provider MCP 
     RHWP_AGENT_WORKFLOW: 'direct',
     RHWP_AGENT_PHASE: 'implementing',
     RHWP_CAPABILITY_EPOCH: '17',
+    RHWP_IMAGE_ROOTS: '/tmp/Rau workspace',
     RHWP_TOOL_PROFILE: 'copy-layout-worker',
     RHWP_AGENT_ROLE: 'copy-layout-worker:job:secret',
   });

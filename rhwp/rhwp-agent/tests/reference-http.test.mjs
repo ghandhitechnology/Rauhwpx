@@ -8,10 +8,21 @@ import test from 'node:test';
 import { createReferenceHttpHandler } from '../reference-http.mjs';
 import { ReferenceStore } from '../reference-store.mjs';
 
+const SESSION_SCOPES = [
+  { scope: 'global', scopeId: 'global' },
+  { scope: 'document', scopeId: 'doc-a' },
+  { scope: 'chat', scopeId: 'chat-a' },
+  { scope: 'chat', scopeId: 'chat-b' },
+];
+
 async function fixture(t, storeOptions = {}) {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-http-'));
   const store = await new ReferenceStore({ root: path.join(parent, 'refs'), ...storeOptions }).init();
-  const handler = createReferenceHttpHandler({ store, token: 'test-secret' });
+  const handler = createReferenceHttpHandler({
+    store,
+    tokens: ['test-secret'],
+    allowedScopes: SESSION_SCOPES,
+  });
   const server = http.createServer((req, res) => {
     void handler(req, res, new URL(req.url ?? '/', 'http://127.0.0.1')).then((handled) => {
       if (!handled && !res.writableEnded) { res.statusCode = 404; res.end(); }
@@ -155,14 +166,14 @@ async function waitForEmpty(directory) {
 
 test('chunked oversize and aborted HTTP uploads clean staging files', async (t) => {
   const { base, store } = await fixture(t, { maxFileBytes: 32 });
-  const oversized = await chunkedRequest(`${base}/reference-files?scope=chat&scopeId=a`, {
+  const oversized = await chunkedRequest(`${base}/reference-files?scope=chat&scopeId=chat-a`, {
     chunks: [Buffer.alloc(20, 65), Buffer.alloc(20, 66)],
   });
   assert.equal(oversized.status, 413);
   assert.equal(JSON.parse(oversized.body).error.code, 'REFERENCE_FILE_TOO_LARGE');
   await waitForEmpty(store.stagingDir);
 
-  await chunkedRequest(`${base}/reference-files?scope=chat&scopeId=a`, {
+  await chunkedRequest(`${base}/reference-files?scope=chat&scopeId=chat-a`, {
     chunks: [Buffer.from('partial upload')],
     abort: true,
   });

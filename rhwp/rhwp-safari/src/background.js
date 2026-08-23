@@ -7,13 +7,110 @@
 
 // ─── 보안: URL 검증 ───
 
-const DEFAULT_ALLOWED_DOMAINS = ['.go.kr', '.or.kr', '.ac.kr', '.mil.kr', '.korea.kr', '.sc.kr'];
-const PRIVATE_IP_PATTERNS = [
-  /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./,
-  /^169\.254\./, /^0\./, /^\[::1\]/, /^localhost$/i, /\.local$/i,
-];
+const DEFAULT_ALLOWED_DOMAINS = ['.go.kr', '.ac.kr', '.mil.kr', '.korea.kr'];
+const BLOCKED_HOST_SUFFIXES = ['.localhost', '.local', '.localdomain', '.internal', '.intranet', '.lan', '.home', '.corp'];
+
+// 사설·내부망 판정은 문자열 prefix 가 아니라 16바이트 이진값으로 한다.
+// URL 파서는 ::ffff:127.0.0.1 을 [::ffff:7f00:1] 로 축약하므로 prefix 비교로는 못 잡는다.
+function isPrivateIPv4(host) {
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return false;
+  const parts = host.split('.').map(Number);
+  if (parts.some(part => part < 0 || part > 255)) return true;
+  const [a, b] = parts;
+  return (
+    a === 0 || a === 10 || a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a >= 224
+  );
+}
+
+/** IPv6 리터럴을 8개의 16비트 그룹으로 펼친다. 잘못된 리터럴은 null. */
+function expandIPv6(host) {
+  let text = host.toLowerCase();
+  const zone = text.indexOf('%');
+  if (zone >= 0) text = text.slice(0, zone);
+
+  const lastColon = text.lastIndexOf(':');
+  const tail = lastColon >= 0 ? text.slice(lastColon + 1) : '';
+  let tailGroups = [];
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(tail)) {
+    tailGroups = tail.split('.').map(Number);
+    if (tailGroups.some(n => n < 0 || n > 255)) return null;
+    text = text.slice(0, lastColon + 1);
+    if (!text.endsWith('::')) text = text.slice(0, -1);
+  }
+
+  const doubleColon = text.indexOf('::');
+  let groups;
+  if (doubleColon >= 0) {
+    if (text.indexOf('::', doubleColon + 1) >= 0) return null;
+    const left = text.slice(0, doubleColon);
+    const right = text.slice(doubleColon + 2);
+    const leftGroups = left ? left.split(':') : [];
+    const rightGroups = right ? right.split(':') : [];
+    const fill = 8 - leftGroups.length - rightGroups.length - Math.floor(tailGroups.length / 2);
+    if (fill < 0) return null;
+    groups = [...leftGroups, ...Array.from({ length: fill }, () => '0'), ...rightGroups];
+  } else {
+    groups = text.split(':').filter(group => group !== '');
+  }
+
+  const out = [];
+  for (const group of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+    out.push(parseInt(group, 16));
+  }
+  for (let i = 0; i < tailGroups.length; i += 2) {
+    out.push((tailGroups[i] << 8) | tailGroups[i + 1]);
+  }
+  return out.length === 8 ? out : null;
+}
+
+function isPrivateIPv6(host) {
+  if (!host || !host.includes(':')) return false;
+  const groups = expandIPv6(host);
+  if (!groups) return true;
+  const high = i => groups[i] >> 8;
+  const low = i => groups[i] & 0xff;
+
+  if (groups.every(g => g === 0)) return true;
+  if (groups.slice(0, 7).every(g => g === 0) && groups[7] === 1) return true;
+  // ::ffff:x.y.z.w → 임베디드 IPv4 규칙 적용
+  if (groups.slice(0, 5).every(g => g === 0) && groups[5] === 0xffff) {
+    return isPrivateIPv4(`${high(6)}.${low(6)}.${high(7)}.${low(7)}`);
+  }
+  if (groups.slice(0, 3).every(g => g === 0) && groups[3] === 0 && groups[4] === 0 && groups[5] === 0) return true;
+  // 64:ff9b::/96 NAT64 → 임베디드 IPv4 규칙 적용
+  if (groups[0] === 0x0064 && groups[1] === 0xff9b && groups.slice(2, 6).every(g => g === 0)) {
+    return isPrivateIPv4(`${high(6)}.${low(6)}.${high(7)}.${low(7)}`);
+  }
+  if ((groups[0] & 0xffc0) === 0xfe80) return true;
+  if ((groups[0] & 0xfe00) === 0xfc00) return true;
+  if (groups[0] === 0x0100 && groups.slice(1, 4).every(g => g === 0)) return true;
+  if ((groups[0] & 0xff00) === 0xff00) return true;
+  return false;
+}
+
+function normalizeHost(hostname) {
+  return String(hostname || '')
+    .toLowerCase()
+    .replace(/\.$/, '')
+    .replace(/^\[/, '')
+    .replace(/\]$/, '');
+}
+
 function isPrivateHost(hostname) {
-  return PRIVATE_IP_PATTERNS.some(re => re.test(hostname));
+  const host = normalizeHost(hostname);
+  if (!host) return true;
+  if (host === 'localhost') return true;
+  if (BLOCKED_HOST_SUFFIXES.some(suffix => host.endsWith(suffix))) return true;
+  if (host.includes(':')) return isPrivateIPv6(host);
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return isPrivateIPv4(host);
+  if (!host.includes('.')) return true; // 인트라넷 단일 라벨
+  return false;
 }
 
 function validateUrl(urlString) {
@@ -53,15 +150,27 @@ async function getAllowedDomains() {
 
 // ─── 보안: 파일명 새니타이즈 ───
 
+const WINDOWS_RESERVED_NAMES = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+
 function sanitizeFilename(filename) {
   if (!filename || typeof filename !== 'string') return '';
   let safe = filename;
   if (typeof safe.normalize === 'function') safe = safe.normalize('NFC');
   try { safe = decodeURIComponent(safe); try { safe = decodeURIComponent(safe); } catch {} } catch {}
   safe = safe.replace(/\0/g, '').replace(/\.\./g, '').replace(/[/\\]/g, '_');
+  safe = safe.replace(/[\u0000-\u001f\u007f]/g, '');
   safe = safe.replace(/[^a-zA-Z0-9가-힣ㄱ-ㅎㅏ-ㅣ.\-_ ]/g, '');
   safe = safe.replace(/^[\s.]+|[\s.]+$/g, '');
-  return safe.slice(0, 255) || 'document';
+  const encoder = new TextEncoder();
+  while (encoder.encode(safe).length > 255 && safe.length > 1) {
+    safe = safe.slice(0, -1);
+  }
+  // Windows 예약 장치명(CON, NUL, COM1...)은 앞에 안전한 접두사를 붙인다.
+  const base = safe.includes('.') ? safe.slice(0, safe.indexOf('.')) : safe;
+  if (WINDOWS_RESERVED_NAMES.test(base)) {
+    safe = `_${safe}`;
+  }
+  return safe || 'document';
 }
 
 // ─── 보안: 발신자 검증 ───
@@ -226,35 +335,37 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return;
           }
 
-          const res = await fetch(fetchUrl, {
-            credentials: 'omit',
-            redirect: 'manual',
-          });
-
-          // 리다이렉트 처리: 대상 URL 재검증
-          if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+          // 리다이렉트는 매 hop 마다 수동 검증한다. 'follow' 로 넘기면
+          // 이후 hop 의 내부망 전환을 검증 없이 따라가게 된다.
+          const MAX_REDIRECTS = 5;
+          let res;
+          let hop = 0;
+          while (true) {
+            res = await fetch(fetchUrl, {
+              credentials: 'omit',
+              redirect: 'manual',
+            });
+            const isRedirect = res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
+            if (!isRedirect) break;
             const location = res.headers.get('location');
-            if (location) {
-              const redirectResult = validateUrl(new URL(location, fetchUrl).href);
-              if (!redirectResult.valid || isPrivateHost(redirectResult.parsed.hostname)) {
-                logSecurity('fetch-blocked', location, '리다이렉트 대상 차단');
-                sendResponse({ error: '리다이렉트 대상이 안전하지 않음' });
-                return;
-              }
-              // 재검증 통과 시 리다이렉트 따라가기
-              const res2 = await fetch(new URL(location, fetchUrl).href, { credentials: 'omit' });
-              if (!res2.ok) throw new Error(`HTTP ${res2.status}`);
-              const buf = await res2.arrayBuffer();
-              if (buf.byteLength > maxSize) throw new Error('파일 크기 초과');
-              const signature = verifyDocumentSignature(buf);
-              if (!signature.isDocument) {
-                logSecurity('signature-blocked', fetchUrl, '지원하지 않는 한글 문서 형식');
-                sendResponse({ error: '지원하지 않는 한글 문서 형식입니다' });
-                return;
-              }
-              sendResponse({ data: buf });
+            if (!location || hop >= MAX_REDIRECTS) {
+              logSecurity('fetch-blocked', fetchUrl, location ? '리다이렉트 횟수 초과' : '리다이렉트 대상 확인 불가');
+              sendResponse({ error: '리다이렉트 대상이 안전하지 않음' });
               return;
             }
+            const nextUrl = new URL(location, fetchUrl).href;
+            const redirectResult = validateUrl(nextUrl);
+            if (!redirectResult.valid || isPrivateHost(redirectResult.parsed.hostname)) {
+              logSecurity('fetch-blocked', nextUrl, '리다이렉트 대상 차단');
+              sendResponse({ error: '리다이렉트 대상이 안전하지 않음' });
+              return;
+            }
+            if (redirectResult.parsed.protocol === 'http:' && !settings.allowHttp) {
+              sendResponse({ error: 'HTTP 차단 (설정에서 비허용)' });
+              return;
+            }
+            fetchUrl = nextUrl;
+            hop += 1;
           }
 
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -434,8 +545,15 @@ async function extractPrvImageFromZip(data) {
           w.close();
           const r = dec.readable.getReader();
           const chunks = [];
-          while (true) { const { done, value } = await r.read(); if (done) break; chunks.push(value); }
-          const total = chunks.reduce((s, c) => s + c.length, 0);
+          let total = 0;
+          while (true) {
+            const { done, value } = await r.read();
+            if (done) break;
+            total += value.length;
+            // 압축 폭탄 방어: PrvImage 상한(10MB)을 넘는 출력은 중단
+            if (total > 10 * 1024 * 1024) { r.cancel().catch(() => {}); return null; }
+            chunks.push(value);
+          }
           const buf = new Uint8Array(total);
           let o = 0;
           for (const c of chunks) { buf.set(c, o); o += c.length; }
