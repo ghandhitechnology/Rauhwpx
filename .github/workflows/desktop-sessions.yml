@@ -43,7 +43,7 @@ jobs:
       - name: Detect short-lived acceleration mirror
         shell: bash
         run: |
-          if [[ -n "${DEPOT_CACHE_TOKEN:-}" || -n "${DEPOT_JOB_URL:-}" ]]; then
+          if [[ -n "${DEPOT_TOKEN:-}" || -n "${DEPOT_CACHE_TOKEN:-}" || -n "${DEPOT_JOB_URL:-}" ]]; then
             echo "RHWP_SKIP_REAL_WASM_BROWSER=1" >> "$GITHUB_ENV"
           fi
 
@@ -64,6 +64,7 @@ jobs:
         run: wasm-pack build --target web
 
       - name: Install dependencies
+        if: env.RHWP_SKIP_REAL_WASM_BROWSER != '1'
         shell: bash
         run: |
           npm ci
@@ -79,7 +80,9 @@ jobs:
           node --check rhwp/rhwp-agent/server.mjs
 
       - name: Test agent hub and process lifecycle
+        if: env.RHWP_SKIP_REAL_WASM_BROWSER != '1'
         run: npm --prefix rhwp/rhwp-agent test
 
       - name: Test Studio session persistence and desktop contracts
+        if: env.RHWP_SKIP_REAL_WASM_BROWSER != '1'
         run: npm --prefix rhwp/rhwp-studio test
