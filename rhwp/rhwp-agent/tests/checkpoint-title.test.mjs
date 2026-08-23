@@ -12,7 +12,38 @@ import {
   findDeepSeekV4FlashModel,
   generateCheckpointTitle,
   normalizeCheckpointTitleRequest,
+  resolveCheckpointTitleCliRoute,
 } from '../agents/checkpoint-title.mjs';
+
+test('checkpoint titles accept authenticated CLIs from PATH as well as managed installs', () => {
+  assert.deepEqual(
+    resolveCheckpointTitleCliRoute(
+      'codex',
+      { available: true },
+      { installed: false, authenticated: true },
+      '/managed/codex',
+    ),
+    { ready: true, command: 'codex' },
+  );
+  assert.deepEqual(
+    resolveCheckpointTitleCliRoute(
+      'codex',
+      { available: true },
+      { installed: true, authenticated: true },
+      '/managed/codex',
+    ),
+    { ready: true, command: '/managed/codex' },
+  );
+  assert.equal(
+    resolveCheckpointTitleCliRoute(
+      'codex',
+      { available: true },
+      { installed: false, authenticated: false },
+      '/managed/codex',
+    ).ready,
+    false,
+  );
+});
 
 function request(overrides = {}) {
   return {

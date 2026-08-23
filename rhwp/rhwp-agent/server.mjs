@@ -16,6 +16,7 @@ import {
   CHECKPOINT_TITLE_OVERALL_TIMEOUT_MS,
   findDeepSeekV4FlashModel,
   generateCheckpointTitle,
+  resolveCheckpointTitleCliRoute,
 } from './agents/checkpoint-title.mjs';
 import { SkillRegistry } from './skills.mjs';
 import { generateSkillDraft } from './skill-generator.mjs';
@@ -671,10 +672,14 @@ function cancelCheckpointTitleJobs(record) {
 
 function checkpointTitleDeps(record, health, signal) {
   const deepSeek = findDeepSeekV4FlashModel(piStatus.models);
-  const cliReady = (agent) => Boolean(
-    health?.[agent]?.available === true
-    && cliSetupStatus[agent]?.installed === true
-    && cliSetupStatus[agent]?.authenticated === true,
+  const codex = resolveCheckpointTitleCliRoute(
+    'codex', health?.codex, cliSetupStatus.codex, cliSetup.binPath('codex'),
+  );
+  const grok = resolveCheckpointTitleCliRoute(
+    'grok', health?.grok, cliSetupStatus.grok, cliSetup.binPath('grok'),
+  );
+  const claude = resolveCheckpointTitleCliRoute(
+    'claude', health?.claude, cliSetupStatus.claude, cliSetup.binPath('claude'),
   );
   return {
     readiness: {
@@ -687,9 +692,9 @@ function checkpointTitleDeps(record, health, signal) {
         ),
         model: deepSeek?.id ?? '',
       },
-      codex: { ready: cliReady('codex'), model: 'gpt-5.6-luna' },
-      grok: { ready: cliReady('grok'), model: 'grok-4.6' },
-      claude: { ready: cliReady('claude'), model: 'haiku' },
+      codex: { ready: codex.ready, model: 'gpt-5.6-luna' },
+      grok: { ready: grok.ready, model: 'grok-4.6' },
+      claude: { ready: claude.ready, model: 'haiku' },
     },
     piManager,
     openRouter,
@@ -697,9 +702,9 @@ function checkpointTitleDeps(record, health, signal) {
     isolatedHome: record.isolatedHome,
     sessionId: record.sessionId,
     commands: {
-      codex: cliSetup.binPath('codex'),
-      grok: cliSetup.binPath('grok'),
-      claude: cliSetup.binPath('claude'),
+      codex: codex.command,
+      grok: grok.command,
+      claude: claude.command,
     },
     providerEnvs: {
       codex: { ...cliSetup.envFor('codex'), CODEX_HOME: record.codexHome },

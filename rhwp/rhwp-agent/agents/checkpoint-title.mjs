@@ -22,6 +22,15 @@ const MAX_CLI_OUTPUT_BYTES = 64 * 1024;
 const CHANGE_KINDS = ['added', 'removed', 'modified'];
 const PROVIDER_ORDER = ['pi', 'codex', 'grok', 'claude'];
 
+/** Use an authenticated CLI whether it came from the app installer or the user's PATH. */
+export function resolveCheckpointTitleCliRoute(provider, health, setup, managedCommand) {
+  const ready = health?.available === true && setup?.authenticated === true;
+  const command = setup?.installed === true && managedCommand
+    ? managedCommand
+    : provider;
+  return { ready, command };
+}
+
 const summaryItemSchema = z.object({
   change: z.enum(CHANGE_KINDS),
   objectType: z.string().min(1).max(80),

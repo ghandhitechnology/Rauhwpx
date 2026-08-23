@@ -10,11 +10,16 @@ const readSource = (relativePath: string) => readFileSync(
 const source = readSource('../src/ui/agent-sidebar/version-manager.ts');
 const css = readSource('../src/ui/agent-sidebar/versions.css');
 
-test('보관 이름 프롬프트 취소는 보관 작업을 시작하지 않는다', () => {
-  assert.match(
-    source,
-    /const requestedTitle = window\.prompt\('보관 이름 \(선택\)'\);\s*if \(requestedTitle === null\) return;\s*const title = requestedTitle\.trim\(\);\s*void perform\(\(\) => controller\.createShelf\(title \|\| undefined\)\);/,
-  );
+test('버전 이름 입력은 브라우저 프롬프트 대신 앱 내 대화상자를 사용한다', () => {
+  assert.match(source, /function requestVersionText\(/);
+  assert.match(source, /dialog\.setAttribute\('role', 'dialog'\)/);
+  assert.doesNotMatch(source, /window\.prompt\(/);
+  assert.match(source, /if \(title !== null\) await perform\(\(\) => controller\.createShelf\(title \|\| undefined\)\)/);
+});
+
+test('수동 체크포인트는 이미 저장한 내용에도 명시적인 기록을 남긴다', () => {
+  const controller = readSource('../src/versioning/controller.ts');
+  assert.match(controller, /#createCheckpoint\(\{ reason: 'manual', message, allowSameContent: true \}\)/);
 });
 
 test('문서 변경 알림은 완료된 비교를 무효화한다', () => {

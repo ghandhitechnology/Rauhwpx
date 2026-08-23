@@ -104,6 +104,97 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+interface VersionTextPromptOptions {
+  title: string;
+  label: string;
+  initial?: string;
+  maxLength?: number;
+  optional?: boolean;
+  validate?: (value: string) => string | null;
+}
+
+let textPromptSequence = 0;
+
+function requestVersionText(options: VersionTextPromptOptions): Promise<string | null> {
+  return new Promise((resolve) => {
+    const promptId = `ag-version-text-prompt-${++textPromptSequence}`;
+    const overlay = el('div', 'ag-version-prompt-overlay');
+    const dialog = el('form', 'ag-version-prompt');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-labelledby', `${promptId}-title`);
+
+    const title = el('h3', 'ag-version-prompt-title', options.title);
+    title.id = `${promptId}-title`;
+    const label = el('label', 'ag-version-prompt-label', options.label);
+    label.htmlFor = `${promptId}-input`;
+    const input = el('input', 'ag-version-prompt-input');
+    input.id = `${promptId}-input`;
+    input.type = 'text';
+    input.maxLength = options.maxLength ?? 200;
+    input.autocomplete = 'off';
+    input.value = options.initial ?? '';
+    const error = el('p', 'ag-version-prompt-error');
+    error.id = `${promptId}-error`;
+    error.hidden = true;
+    input.setAttribute('aria-describedby', error.id);
+
+    const actions = el('div', 'ag-version-prompt-actions');
+    const cancel = el('button', 'ag-versions-secondary', '취소');
+    cancel.type = 'button';
+    const confirm = el('button', 'ag-versions-primary', '확인');
+    confirm.type = 'submit';
+    actions.append(cancel, confirm);
+    dialog.append(title, label, input, error, actions);
+    overlay.appendChild(dialog);
+
+    let settled = false;
+    const finish = (value: string | null): void => {
+      if (settled) return;
+      settled = true;
+      overlay.remove();
+      resolve(value);
+    };
+    const submit = (): void => {
+      const value = input.value.trim();
+      const validation = !value && !options.optional
+        ? '값을 입력하세요.'
+        : options.validate?.(value) ?? null;
+      if (validation) {
+        error.textContent = validation;
+        error.hidden = false;
+        input.setAttribute('aria-invalid', 'true');
+        input.focus();
+        return;
+      }
+      finish(value);
+    };
+
+    dialog.addEventListener('submit', (event) => {
+      event.preventDefault();
+      submit();
+    });
+    dialog.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      finish(null);
+    });
+    input.addEventListener('input', () => {
+      error.hidden = true;
+      input.removeAttribute('aria-invalid');
+    });
+    cancel.addEventListener('click', () => finish(null));
+    overlay.addEventListener('mousedown', (event) => {
+      if (event.target === overlay) finish(null);
+    });
+
+    document.body.appendChild(overlay);
+    input.focus();
+    input.select();
+  });
+}
+
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
@@ -332,16 +423,16 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     }
   }
 
-  function askName(label: string, initial = ''): string | null {
-    const value = window.prompt(label, initial)?.trim() ?? '';
-    if (!value) return null;
-    if (!validRefName(value)) {
-      notice.textContent = '이름은 글자나 숫자로 시작하고 63자 이하여야 합니다.';
-      notice.hidden = false;
-      notice.dataset.kind = 'error';
-      return null;
-    }
-    return value;
+  function askName(label: string, initial = ''): Promise<string | null> {
+    return requestVersionText({
+      title: label,
+      label: '이름',
+      initial,
+      maxLength: 63,
+      validate: (value) => validRefName(value)
+        ? null
+        : '글자나 숫자로 시작하는 63자 이하 이름을 입력하세요.',
+    });
   }
 
   function renderMutationState(): void {
@@ -441,17 +532,17 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     const branch = el('button', 'ag-versions-secondary', '여기서 브랜치');
     branch.type = 'button';
     branch.dataset.versionMutation = 'true';
-    branch.addEventListener('click', () => {
-      const name = askName('새 브랜치 이름');
-      if (name) void perform(() => controller.createBranch(name, selected.id));
-    });
+    branch.addEventListener('click', () => void (async () => {
+      const name = await askName('새 브랜치 이름');
+      if (name) await perform(() => controller.createBranch(name, selected.id));
+    })());
     const tag = el('button', 'ag-versions-secondary', '태그');
     tag.type = 'button';
     tag.dataset.versionMutation = 'true';
-    tag.addEventListener('click', () => {
-      const name = askName('새 태그 이름');
-      if (name) void perform(() => controller.createTag(name, selected.id));
-    });
+    tag.addEventListener('click', () => void (async () => {
+      const name = await askName('새 태그 이름');
+      if (name) await perform(() => controller.createTag(name, selected.id));
+    })());
     actions.append(compare, restore);
     if (!selected.isHead) {
       const adopt = el('button', 'ag-versions-secondary', '이 버전 채택');
@@ -472,10 +563,14 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       const amend = el('button', 'ag-versions-quiet', '메시지 수정');
       amend.type = 'button';
       amend.dataset.versionMutation = 'true';
-      amend.addEventListener('click', () => {
-        const next = window.prompt('체크포인트 메시지 수정', selected.title)?.trim();
-        if (next) void perform(() => controller.amendTitle(selected.id, next));
-      });
+      amend.addEventListener('click', () => void (async () => {
+        const next = await requestVersionText({
+          title: '체크포인트 메시지 수정',
+          label: '메시지',
+          initial: selected.title,
+        });
+        if (next) await perform(() => controller.amendTitle(selected.id, next));
+      })());
       actions.appendChild(amend);
     }
     inspector.appendChild(actions);
@@ -537,10 +632,10 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     const create = el('button', 'ag-versions-primary', '새 브랜치');
     create.type = 'button';
     create.dataset.versionMutation = 'true';
-    create.addEventListener('click', () => {
-      const name = askName('새 브랜치 이름');
-      if (name) void perform(() => controller.createBranch(name));
-    });
+    create.addEventListener('click', () => void (async () => {
+      const name = await askName('새 브랜치 이름');
+      if (name) await perform(() => controller.createBranch(name));
+    })());
     branchesPanel.appendChild(create);
     const list = el('div', 'ag-versions-card-list');
     for (const branch of current.branches) {
@@ -565,10 +660,10 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       const rename = el('button', 'ag-versions-quiet', '이름 변경');
       rename.type = 'button';
       rename.dataset.versionMutation = 'true';
-      rename.addEventListener('click', () => {
-        const name = askName('브랜치 이름 변경', branch.name);
-        if (name && name !== branch.name) void perform(() => controller.renameBranch(branch.name, name));
-      });
+      rename.addEventListener('click', () => void (async () => {
+        const name = await askName('브랜치 이름 변경', branch.name);
+        if (name && name !== branch.name) await perform(() => controller.renameBranch(branch.name, name));
+      })());
       actions.appendChild(rename);
       if (!branch.isActive && !branch.isDefault) {
         const remove = el('button', 'ag-versions-danger', '삭제');
@@ -594,12 +689,14 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     shelf.dataset.versionPrerequisiteDisabled = String(!current.dirty);
     shelf.dataset.versionPrerequisiteTitle = '보관할 변경 내용이 없습니다.';
     shelf.disabled = !current.dirty;
-    shelf.addEventListener('click', () => {
-      const requestedTitle = window.prompt('보관 이름 (선택)');
-      if (requestedTitle === null) return;
-      const title = requestedTitle.trim();
-      void perform(() => controller.createShelf(title || undefined));
-    });
+    shelf.addEventListener('click', () => void (async () => {
+      const title = await requestVersionText({
+        title: '현재 변경 보관',
+        label: '보관 이름 (선택)',
+        optional: true,
+      });
+      if (title !== null) await perform(() => controller.createShelf(title || undefined));
+    })());
     shelvesPanel.appendChild(shelf);
     const list = el('div', 'ag-versions-card-list');
     if (current.shelves.length === 0) list.appendChild(el('p', 'ag-versions-placeholder', '보관한 변경이 없습니다.'));
@@ -740,11 +837,14 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   });
 
   closeButton.addEventListener('click', () => page.dispatchEvent(new CustomEvent('ag-versions-close')));
-  checkpointButton.addEventListener('click', () => {
-    const message = window.prompt('체크포인트 메시지 (비워 두면 자동 제목)')?.trim();
-    if (message === undefined) return;
-    void perform(() => controller.checkpoint(message));
-  });
+  checkpointButton.addEventListener('click', () => void (async () => {
+    const message = await requestVersionText({
+      title: '체크포인트 저장',
+      label: '메시지 (비워 두면 자동 제목)',
+      optional: true,
+    });
+    if (message !== null) await perform(() => controller.checkpoint(message));
+  })());
   activeBranch.addEventListener('click', () => {
     tab = 'branches';
     renderTabs();

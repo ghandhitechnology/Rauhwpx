@@ -10,6 +10,71 @@
   background: var(--ag-bg, #19191d);
 }
 
+.ag-version-prompt-overlay {
+  position: fixed;
+  z-index: 260;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(8, 8, 12, 0.58);
+}
+
+.ag-version-prompt {
+  width: min(360px, 100%);
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1px solid var(--ag-border-strong, rgba(255, 255, 255, 0.15));
+  border-radius: 12px;
+  color: var(--ag-text, #ececf1);
+  background: var(--ag-raised, #25252b);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+
+.ag-version-prompt-title {
+  margin: 0 0 14px;
+  font-size: 15px;
+}
+
+.ag-version-prompt-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ag-muted, #a5a5af);
+  font-size: 11px;
+}
+
+.ag-version-prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 34px;
+  padding: 0 9px;
+  border: 1px solid var(--ag-border-strong, rgba(255, 255, 255, 0.15));
+  border-radius: 7px;
+  outline: none;
+  color: inherit;
+  background: var(--ag-bg, #19191d);
+  font: inherit;
+  font-size: 12px;
+}
+
+.ag-version-prompt-input:focus {
+  border-color: #8b83ff;
+  box-shadow: 0 0 0 2px rgba(139, 131, 255, 0.18);
+}
+
+.ag-version-prompt-error {
+  margin: 6px 0 0;
+  color: #ff9cac;
+  font-size: 10px;
+}
+
+.ag-version-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 16px;
+}
+
 /* Author display rules below must never override the native hidden contract. */
 .ag-versions-page [hidden] {
   display: none !important;

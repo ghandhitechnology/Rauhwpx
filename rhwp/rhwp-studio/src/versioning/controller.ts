@@ -349,7 +349,7 @@ export class DocumentVersionController implements VersionManagerController {
     await this.#enqueue(async () => {
       await this.#refreshData(false);
       await this.#guardMutation();
-      await this.#createCheckpoint({ reason: 'manual', message });
+      await this.#createCheckpoint({ reason: 'manual', message, allowSameContent: true });
     });
   }
 
