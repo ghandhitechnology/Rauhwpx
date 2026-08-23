@@ -234,10 +234,20 @@ a{color:var(--ink)}
 
 /* ── 히어로 ────────────────────────────────── */
 .hero{
+  position:relative;
   padding:clamp(40px,4.8vw,58px) 0 clamp(44px,5vw,60px);
   background-color:var(--paper-2);
   background-image:var(--grain);
   background-size:180px 180px;
+}
+.hero-contact{
+  position:absolute;
+  right:max(24px,calc((100% - var(--wrap))/2 + 24px));
+  bottom:12px;
+  color:var(--ink-3);
+  font:400 12px/1.5 var(--mono);
+  letter-spacing:.01em;
+  text-underline-offset:3px;
 }
 .hero-grid{display:grid;grid-template-columns:minmax(0,.92fr) minmax(0,1.18fr);gap:clamp(28px,3.4vw,42px);align-items:center}
 .hero h1{
@@ -491,6 +501,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
         </div>
       </figure>
     </div>
+    <a class="hero-contact" href="mailto:heemang12bo@gmail.com">문의 : heemang12bo@gmail.com</a>
   </section>
 
   <!-- ─────────── 기능 ─────────── -->
@@ -630,7 +641,6 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
           <div class="step__text">
             <span class="step__n">STEP 02</span>
             <h3 class="h3">계획을 짜주면</h3>
-            <p>계획 실행으로 에이전트에게 문서 작성을 넘기세요</p>
           </div>
           <figure class="figure">
             <div class="frame frame--onink tilt-c">
@@ -725,7 +735,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
       <a href="donate.html">후원하기</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx/releases">릴리스</a>
     </nav>
-    <p class="colophon"><span data-release-version>v1.0.0</span> 정식 버전. <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a> 포크. MIT. 한컴이 아니며 문서를 호스팅하지 않습니다. macOS 빌드는 서명되어 있습니다. Windows는 미서명입니다. <a data-download="windows" href="https://github.com/ghandhitechnology/Rauhwpx/releases/latest">Windows</a> / <a href="https://github.com/ghandhitechnology/Rauhwpx/issues/new">이슈</a></p>
+    <p class="colophon"><span data-release-version>v1.0.0</span> 정식 버전. <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a> 포크. MIT. macOS 빌드는 서명되어 있습니다. Windows는 미서명입니다. <a data-download="windows" href="https://github.com/ghandhitechnology/Rauhwpx/releases/latest">Windows</a> / <a href="https://github.com/ghandhitechnology/Rauhwpx/issues/new">이슈</a></p>
   </div>
 </footer>
 
