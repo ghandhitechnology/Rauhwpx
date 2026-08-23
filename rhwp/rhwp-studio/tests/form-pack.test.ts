@@ -56,7 +56,7 @@ test('서식팩은 바이너리 HWP 내보내기를 거부한다', () => {
 
 test('거절 안내는 사무실 말로 HWPX 전용·HWP 차단·표 유지를 말하고 업로드를 암시하지 않는다', () => {
   assert.equal(REFUSE_BINARY_HWP, `${REFUSE_BINARY_HWP_KO}\n${REFUSE_BINARY_HWP_EN}`);
-  assert.match(REFUSE_BINARY_HWP_KO, /HWPX로만 저장/);
+  assert.match(REFUSE_BINARY_HWP_KO, /HWPX만 저장/);
   assert.match(REFUSE_BINARY_HWP_KO, /HWP 저장은 막아/);
   assert.match(REFUSE_BINARY_HWP_KO, /표와 배치/);
   assert.match(REFUSE_BINARY_HWP_EN, /HWPX-only/);

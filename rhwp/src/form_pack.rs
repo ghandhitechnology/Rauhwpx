@@ -19,11 +19,11 @@ pub const BRAND_PUMUI: &str = "Rauhwpx 품의 서식";
 
 /// 사무실 거절 안내. 한글이 본문이고, 영문은 같은 뜻의 짝이다.
 pub const REFUSE_BINARY_HWP_KO: &str =
-    "이 서식은 HWPX로만 저장됩니다. HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.";
+    "이 서식은 HWPX만 저장됩니다. HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.";
 pub const REFUSE_BINARY_HWP_EN: &str =
     "This form is HWPX-only. HWP save is blocked. Tables and layout stay.";
 pub const REFUSE_BINARY_HWP: &str =
-    "이 서식은 HWPX로만 저장됩니다. HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.\nThis form is HWPX-only. HWP save is blocked. Tables and layout stay.";
+    "이 서식은 HWPX만 저장됩니다. HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.\nThis form is HWPX-only. HWP save is blocked. Tables and layout stay.";
 
 pub fn output_would_write_binary_hwp(path: &Path) -> bool {
     path.extension()
