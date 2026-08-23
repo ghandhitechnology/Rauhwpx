@@ -22,18 +22,12 @@ const rhwpRoot = resolve(studioRoot, '..');
 const wasmPackageRoot = process.env.RHWP_WASM_PACKAGE_DIR ?? resolve(rhwpRoot, 'pkg');
 const wasmPackageAvailable = existsSync(resolve(wasmPackageRoot, 'rhwp.js'))
   && existsSync(resolve(wasmPackageRoot, 'rhwp_bg.wasm'));
-const mirrorBypassesWasm = process.env.RHWP_SKIP_REAL_WASM_BROWSER === '1';
-const browserSkipReason = !executablePath
-  ? 'Chrome or Chromium is unavailable'
-  : mirrorBypassesWasm && !wasmPackageAvailable
-    ? 'The short-lived acceleration mirror omits the duplicate WASM build; required GitHub jobs run these browser tests against the real package'
-    : null;
 let server: ViteDevServer | null = null;
 let browser: Browser | null = null;
 let baseUrl = '';
 
 test.before(async () => {
-  if (browserSkipReason) return;
+  if (!executablePath) return;
   assert.ok(
     wasmPackageAvailable,
     'Real WASM browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test',
@@ -88,9 +82,9 @@ test.after(async () => {
   await server?.close();
 });
 
-test('dirty merge entry creates a real pre-merge checkpoint before already-integrated exit', { timeout: 30_000, skip: browserSkipReason ?? false }, async (context) => {
+test('dirty merge entry creates a real pre-merge checkpoint before already-integrated exit', { timeout: 30_000 }, async (context) => {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Browser setup is unavailable');
+    context.skip('Chrome or Chromium is unavailable');
     return;
   }
   const page = await browser.newPage();
@@ -183,9 +177,9 @@ test('dirty merge entry creates a real pre-merge checkpoint before already-integ
   }
 });
 
-test('clean fast-forward is reviewed and keeps the source branch by default', { timeout: 30_000, skip: browserSkipReason ?? false }, async (context) => {
+test('clean fast-forward is reviewed and keeps the source branch by default', { timeout: 30_000 }, async (context) => {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Browser setup is unavailable');
+    context.skip('Chrome or Chromium is unavailable');
     return;
   }
   const page = await browser.newPage();
@@ -320,9 +314,9 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
   }
 });
 
-test('diverged clean merge creates ordered parents and Undo/Redo moves bytes with refs', { timeout: 45_000, skip: browserSkipReason ?? false }, async (context) => {
+test('diverged clean merge creates ordered parents and Undo/Redo moves bytes with refs', { timeout: 45_000 }, async (context) => {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Browser setup is unavailable');
+    context.skip('Chrome or Chromium is unavailable');
     return;
   }
   const page = await browser.newPage();
@@ -569,9 +563,9 @@ test('diverged clean merge creates ordered parents and Undo/Redo moves bytes wit
   }
 });
 
-test('HWPX controller durably completes clean and conflicted merges with composite Undo/Redo', { timeout: 120_000, skip: browserSkipReason ?? false }, async (context) => {
+test('HWPX controller durably completes clean and conflicted merges with composite Undo/Redo', { timeout: 120_000 }, async (context) => {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Browser setup is unavailable');
+    context.skip('Chrome or Chromium is unavailable');
     return;
   }
   const page = await browser.newPage();
@@ -862,9 +856,9 @@ test('HWPX controller durably completes clean and conflicted merges with composi
   }
 });
 
-test('real resolver completes clean and conflicted HWP/HWPX worker merges', { timeout: 90_000, skip: browserSkipReason ?? false }, async (context) => {
+test('real resolver completes clean and conflicted HWP/HWPX worker merges', { timeout: 90_000 }, async (context) => {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Browser setup is unavailable');
+    context.skip('Chrome or Chromium is unavailable');
     return;
   }
   const page = await browser.newPage();
