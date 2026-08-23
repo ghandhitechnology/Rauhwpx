@@ -43,7 +43,7 @@ jobs:
       - name: Detect short-lived acceleration mirror
         shell: bash
         run: |
-          if [[ -n "${DEPOT_CACHE_TOKEN:-}" ]]; then
+          if [[ -n "${DEPOT_CACHE_TOKEN:-}" || -n "${DEPOT_JOB_URL:-}" ]]; then
             echo "RHWP_SKIP_REAL_WASM_BROWSER=1" >> "$GITHUB_ENV"
           fi
 
