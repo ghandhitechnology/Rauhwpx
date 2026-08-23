@@ -76,9 +76,10 @@ test('merged bytes must parse, export, reload and retain the canonical fingerpri
 });
 
 test('both merge entry points always show source to current direction', () => {
-  assert.match(manager, /'Merge into current'/);
+  assert.match(manager, /merge\.dataset\.versionAction = 'merge'/);
   assert.match(manager, /controller\.startMerge\(branch\.name\)/);
-  assert.match(manager, /'Merge branch…'/);
+  assert.match(manager, /mergeButton\.setAttribute\('aria-label', mergeDirection\)/);
+  assert.match(manager, /mergeButton\.textContent = `… → \$\{targetBranch\}`/);
   assert.match(manager, /→ \$\{current\.activeBranch/);
-  assert.match(manager, /merge\.title = `\$\{branch\.name\} → \$\{current\.activeBranch/);
+  assert.match(manager, /const mergeDirection = `\$\{branch\.name\} → \$\{current\.activeBranch/);
 });

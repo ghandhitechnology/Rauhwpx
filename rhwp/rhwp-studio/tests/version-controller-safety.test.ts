@@ -123,10 +123,15 @@ test('loadMore always releases loading and saves defer safely across an active a
   assert.match(flush, /#createCheckpoint\(\{ reason: 'save', lastSaved: true \}, deferred\.snapshot\)/);
 });
 
-test('active branch refresh keeps the in-memory ref when storage is unavailable', () => {
+test('active branch refresh keeps memory before falling back to the repository default', () => {
   const refresh = method('async #refreshData(', 'async #buildState(');
   assert.match(refresh, /const memoryBranch = this\.#activeBranches\.get\(id\)/);
-  assert.ok(refresh.indexOf('branch.name === memoryBranch') < refresh.indexOf("branch.name === 'main'"));
+  assert.match(refresh, /branch\.name === repository\.defaultBranch/);
+  assert.doesNotMatch(refresh, /branch\.name === 'main'/);
+  assert.ok(
+    refresh.indexOf('branch.name === memoryBranch')
+      < refresh.indexOf('branch.name === repository.defaultBranch'),
+  );
 });
 
 test('sidebar dirty state is cached against HEAD and full repository usage is reported', () => {

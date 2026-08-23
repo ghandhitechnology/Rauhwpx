@@ -13,10 +13,16 @@ export interface CommitGraphRow {
   startsLane: boolean;
   lanesBefore: readonly CommitId[];
   lanesAfter: readonly CommitId[];
+  activeLanesBefore: readonly CommitId[];
   edges: readonly CommitGraphEdge[];
 }
 
 export type GraphCommit = Pick<VersionCommit, 'id' | 'ordinal' | 'parents'>;
+
+export interface GraphBranchHead {
+  name: string;
+  target: CommitId;
+}
 
 function orderCommits(commits: readonly GraphCommit[]): GraphCommit[] {
   return [...commits].sort((left, right) => (
@@ -24,26 +30,52 @@ function orderCommits(commits: readonly GraphCommit[]): GraphCommit[] {
   ));
 }
 
+export function orderBranchHeadFrontier(
+  branches: readonly GraphBranchHead[],
+  defaultBranch: string | null,
+  activeBranch: string | null,
+): CommitId[] {
+  const byName = new Map(branches.map((branch) => [branch.name, branch]));
+  const ordered = [
+    defaultBranch ? byName.get(defaultBranch) : undefined,
+    activeBranch ? byName.get(activeBranch) : undefined,
+    ...[...branches].sort((left, right) => left.name.localeCompare(right.name)),
+  ];
+  const seen = new Set<CommitId>();
+  const frontier: CommitId[] = [];
+  for (const branch of ordered) {
+    if (!branch || seen.has(branch.target)) continue;
+    seen.add(branch.target);
+    frontier.push(branch.target);
+  }
+  return frontier;
+}
+
 export function layoutCommitGraph(
   commits: readonly GraphCommit[],
   initialLanes: readonly CommitId[] = [],
+  preferredHeads: readonly CommitId[] = [],
 ): CommitGraphRow[] {
-  const lanes: CommitId[] = [...initialLanes];
+  const lanes: CommitId[] = [...new Set([...initialLanes, ...preferredHeads])];
+  const activeLanes = new Set(initialLanes);
   const rows: CommitGraphRow[] = [];
 
   for (const commit of orderCommits(commits)) {
     let lane = lanes.indexOf(commit.id);
-    const startsLane = lane < 0;
+    const startsLane = lane < 0 || !activeLanes.has(commit.id);
     if (lane < 0) {
       lane = lanes.length;
       lanes.push(commit.id);
     }
 
     const lanesBefore = [...lanes];
+    const activeLanesBefore = lanesBefore.filter((id) => activeLanes.has(id));
     const next = lanes.filter((id) => id !== commit.id);
+    activeLanes.delete(commit.id);
     const parentDestinations = new Map<CommitId, number>();
 
     commit.parents.forEach((parentId, parentIndex) => {
+      activeLanes.add(parentId);
       const existingLane = next.indexOf(parentId);
       if (existingLane >= 0) {
         parentDestinations.set(parentId, existingLane);
@@ -68,6 +100,7 @@ export function layoutCommitGraph(
       startsLane,
       lanesBefore,
       lanesAfter: [...next],
+      activeLanesBefore,
       edges: commit.parents.map((parentId) => ({
         parentId,
         fromLane: lane,

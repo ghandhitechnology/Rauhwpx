@@ -18,6 +18,7 @@ export interface VersionCommitView {
   startsLane: boolean;
   lanesBefore: string[];
   lanesAfter: string[];
+  activeLanesBefore: string[];
   parentLanes: number[];
   isHead: boolean;
   byteLength: number;
@@ -230,6 +231,15 @@ function formatTime(value: number): string {
   }).format(new Date(value));
 }
 
+function formatGraphTime(value: number): string {
+  const date = new Date(value);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hour = String(date.getHours()).padStart(2, '0');
+  const minute = String(date.getMinutes()).padStart(2, '0');
+  return `${month}/${day} ${hour}:${minute}`;
+}
+
 function validRefName(value: string): boolean {
   return /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,62}$/u.test(value)
     && !value.includes('..')
@@ -264,14 +274,32 @@ function invalidatesCompletedComparisons(
   return changed.length === 0 || changed.some((key) => !PASSIVE_COMPARISON_FIELDS.has(key));
 }
 
-function laneSvg(commit: VersionCommitView, laneCount: number): SVGSVGElement {
+const VERSION_GRAPH_ROW_HEIGHT = 44;
+const VERSION_LANE_COLORS = ['#d7dae0', '#63d7b0', '#f2b866', '#8e9dff', '#d77ac8', '#63bde8'];
+
+function laneColor(lane: number): string {
+  return VERSION_LANE_COLORS[lane % VERSION_LANE_COLORS.length];
+}
+
+function laneGeometry(laneCount: number): { gap: number; width: number } {
+  const width = 156;
+  const gap = laneCount === 1 ? 0 : Math.min(27, (width - 20) / (laneCount - 1));
+  return { gap, width };
+}
+
+function laneGraph(
+  commit: VersionCommitView,
+  laneCount: number,
+  refs: HTMLElement | null,
+): HTMLElement {
   const ns = 'http://www.w3.org/2000/svg';
-  const height = 52;
+  const height = VERSION_GRAPH_ROW_HEIGHT;
   const centerY = height / 2;
-  const laneGap = 18;
-  const laneX = (lane: number): number => 11 + lane * laneGap;
-  const width = Math.max(30, laneCount * laneGap + 10);
+  const { gap, width } = laneGeometry(laneCount);
+  const laneX = (lane: number): number => 10 + lane * gap;
   const x = laneX(commit.lane);
+  const graph = el('span', 'ag-version-lane-graph');
+  graph.style.setProperty('--ag-version-graph-width', `${width}px`);
   const svg = document.createElementNS(ns, 'svg');
   svg.classList.add('ag-versions-lanes');
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
@@ -289,14 +317,12 @@ function laneSvg(commit: VersionCommitView, laneCount: number): SVGSVGElement {
     path.setAttribute('d', d);
     path.classList.add('ag-version-lane-path', `ag-version-${kind}`);
     path.style.setProperty('--ag-parent-lane', String(lane));
+    path.style.setProperty('--ag-version-lane-color', laneColor(lane));
     svg.appendChild(path);
   };
 
-  // Keep every unresolved branch visible through rows belonging to another
-  // branch. This is the continuous rail that makes the history read like a
-  // terminal git graph instead of a list of decorated checkpoints.
   commit.lanesBefore.forEach((id, fromLane) => {
-    if (id === commit.id) return;
+    if (id === commit.id || !commit.activeLanesBefore.includes(id)) return;
     const toLane = commit.lanesAfter.indexOf(id);
     if (toLane < 0) return;
     const fromX = laneX(fromLane);
@@ -304,7 +330,7 @@ function laneSvg(commit: VersionCommitView, laneCount: number): SVGSVGElement {
     appendPath(
       fromX === toX
         ? `M${fromX} 0V${height}`
-        : `M${fromX} 0C${fromX} ${centerY - 6} ${toX} ${centerY + 6} ${toX} ${height}`,
+        : `M${fromX} 0L${fromX} ${centerY - 5}L${toX} ${centerY + 5}L${toX} ${height}`,
       toLane,
       'rail',
     );
@@ -319,29 +345,32 @@ function laneSvg(commit: VersionCommitView, laneCount: number): SVGSVGElement {
     appendPath(
       parentX === x
         ? `M${x} ${centerY}V${height}`
-        : `M${x} ${centerY}C${x} ${centerY + 12} ${parentX} ${centerY + 8} ${parentX} ${height}`,
+        : `M${x} ${centerY}L${x} ${centerY + 5}L${parentX} ${centerY + 10}L${parentX} ${height}`,
       parentLane,
       'edge',
     );
   }
 
-  if (commit.isHead) {
-    const halo = document.createElementNS(ns, 'circle');
-    halo.setAttribute('cx', String(x));
-    halo.setAttribute('cy', String(centerY));
-    halo.setAttribute('r', '8');
-    halo.classList.add('ag-version-node-halo');
-    svg.appendChild(halo);
-  }
-
   const node = document.createElementNS(ns, 'circle');
   node.setAttribute('cx', String(x));
   node.setAttribute('cy', String(centerY));
-  node.setAttribute('r', commit.isHead ? '5' : '4.25');
+  node.setAttribute('r', commit.isHead ? '4.5' : '3.75');
   node.classList.add('ag-version-node');
+  node.style.setProperty('--ag-version-lane-color', laneColor(commit.lane));
   if (commit.isHead) node.classList.add('ag-head');
   svg.appendChild(node);
-  return svg;
+  graph.appendChild(svg);
+  if (refs && refs.childElementCount > 0) {
+    refs.classList.add('ag-version-graph-refs');
+    refs.style.setProperty('--ag-version-lane-color', laneColor(commit.lane));
+    if (commit.lane < laneCount / 2) {
+      refs.style.left = `calc(${(x / width) * 100}% + 8px)`;
+    } else {
+      refs.style.right = `calc(${((width - x) / width) * 100}% + 8px)`;
+    }
+    graph.appendChild(refs);
+  }
+  return graph;
 }
 
 function reasonLabel(reason: string): string {
@@ -389,7 +418,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   tabs.setAttribute('role', 'tablist');
   tabs.setAttribute('aria-label', '버전 보기');
   const tabDefs: Array<{ id: VersionTab; label: string }> = [
-    { id: 'history', label: '기록' },
+    { id: 'history', label: '그래프' },
     { id: 'branches', label: '브랜치' },
     { id: 'shelves', label: '보관함' },
     { id: 'legacy', label: '이전 기록' },
@@ -409,10 +438,12 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   const toolbar = el('div', 'ag-versions-toolbar');
   const activeBranch = el('button', 'ag-versions-branch-pill');
   activeBranch.type = 'button';
-  activeBranch.append(createIcon('changes'), el('span', 'ag-versions-branch-name', 'main'));
-  const checkpointButton = el('button', 'ag-versions-primary', '체크포인트 저장');
+  activeBranch.setAttribute('aria-label', '현재 브랜치 보기');
+  activeBranch.append(el('span', 'ag-versions-head-marker', 'HEAD>'), el('span', 'ag-versions-branch-name', 'main'));
+  const checkpointButton = el('button', 'ag-versions-primary', '+ 체크포인트');
   checkpointButton.type = 'button';
-  const mergeButton = el('button', 'ag-versions-secondary', 'Merge branch…');
+  checkpointButton.setAttribute('aria-label', '체크포인트 저장');
+  const mergeButton = el('button', 'ag-versions-secondary', '병합');
   mergeButton.type = 'button';
   mergeButton.dataset.versionMutation = 'true';
   toolbar.append(activeBranch, mergeButton, checkpointButton);
@@ -520,7 +551,9 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       const prerequisiteDisabled = button.dataset.versionPrerequisiteDisabled === 'true';
       button.disabled = blocked || prerequisiteDisabled;
       button.title = blockedReason
-        ?? (prerequisiteDisabled ? (button.dataset.versionPrerequisiteTitle ?? '') : '');
+        ?? (prerequisiteDisabled
+          ? (button.dataset.versionPrerequisiteTitle ?? '')
+          : (button.dataset.versionTitle ?? ''));
     }
     for (const button of page.querySelectorAll<HTMLButtonElement>('[data-version-enable]')) {
       const enableBlockedReason = actionPending
@@ -567,7 +600,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       refs.appendChild(el(
         'span',
         `ag-version-ref ag-branch-ref${active ? ' ag-active-ref' : ''}`,
-        active ? `HEAD → ${branch}` : branch,
+        active ? `HEAD> ${branch}` : branch,
       ));
     }
     for (const tag of commit.tagLabels) {
@@ -682,16 +715,29 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       row.type = 'button';
       row.dataset.commitId = commit.id;
       row.setAttribute('role', 'option');
-      row.setAttribute('aria-label', `${commit.title}, ${formatTime(commit.createdAt)}`);
+      const accessibleRefs = [
+        ...commit.branchLabels.map((branch) => (
+          commit.isHead && branch === current.activeBranch ? `HEAD ${branch}` : `브랜치 ${branch}`
+        )),
+        ...commit.tagLabels.map((tag) => `태그 ${tag}`),
+      ];
+      row.setAttribute('aria-label', [
+        commit.title,
+        ...accessibleRefs,
+        formatTime(commit.createdAt),
+      ].join(', '));
       row.tabIndex = commit.id === selectedCommitId ? 0 : -1;
       const copy = el('span', 'ag-version-copy');
       const heading = el('span', 'ag-version-heading');
-      heading.append(el('strong', 'ag-version-title', commit.title), commitRefs(commit));
+      heading.appendChild(el('strong', 'ag-version-title', commit.title));
+      const refs = commitRefs(commit);
+      const inlineRefs = laneCount <= 6 && refs.childElementCount === 1;
+      if (!inlineRefs) heading.appendChild(refs);
       copy.append(
         heading,
-        el('span', 'ag-version-meta', `${formatTime(commit.createdAt)} · ${reasonLabel(commit.reason)} · ${commit.shortId}`),
+        el('span', 'ag-version-meta', `${commit.shortId}  ${formatGraphTime(commit.createdAt)}`),
       );
-      row.append(laneSvg(commit, laneCount), copy);
+      row.append(laneGraph(commit, laneCount, inlineRefs ? refs : null), copy);
       row.addEventListener('click', () => selectCommit(commit.id));
       row.addEventListener('dblclick', () => void perform(async () => {
         await controller.compare(commit.id);
@@ -708,34 +754,43 @@ export function createVersionManagerPage(controller: VersionManagerController): 
 
   function renderBranches(): void {
     branchesPanel.replaceChildren();
-    const create = el('button', 'ag-versions-primary', '새 브랜치');
+    const create = el('button', 'ag-versions-primary ag-versions-create-branch', '+ 브랜치');
     create.type = 'button';
+    create.setAttribute('aria-label', '새 브랜치 만들기');
     create.dataset.versionMutation = 'true';
     create.addEventListener('click', () => void (async () => {
       const name = await askName('새 브랜치 이름');
       if (name) await perform(() => controller.createBranch(name));
     })());
     branchesPanel.appendChild(create);
-    const list = el('div', 'ag-versions-card-list');
+    const list = el('div', 'ag-versions-ref-list');
     for (const branch of current.branches) {
-      const row = el('article', 'ag-versions-card');
-      const copy = el('div', 'ag-versions-card-copy');
+      const row = el('article', 'ag-versions-ref-row');
+      row.dataset.branchName = branch.name;
+      const copy = el('div', 'ag-versions-ref-copy');
       copy.append(
-        el('strong', 'ag-versions-card-title', branch.name),
-        el('span', 'ag-versions-card-meta', `${branch.headId.slice(0, 8)} · ${formatTime(branch.updatedAt)}`),
+        el('strong', 'ag-versions-ref-title', `${branch.isActive ? 'HEAD> ' : ''}${branch.name}`),
+        el(
+          'span',
+          'ag-versions-ref-meta',
+          `${branch.headId.slice(0, 8)}  ${formatTime(branch.updatedAt)}${branch.isDefault ? '  default' : ''}`,
+        ),
       );
-      if (branch.isActive) copy.appendChild(el('span', 'ag-version-badge ag-head-badge', '현재 브랜치'));
-      const actions = el('div', 'ag-versions-card-actions');
+      const actions = el('div', 'ag-versions-ref-actions');
       if (!branch.isActive) {
-        const merge = el('button', 'ag-versions-primary', 'Merge into current');
+        const mergeDirection = `${branch.name} → ${current.activeBranch ?? '현재'}`;
+        const merge = el('button', 'ag-versions-primary', mergeDirection);
         merge.type = 'button';
+        merge.dataset.versionAction = 'merge';
         merge.dataset.versionMutation = 'true';
-        merge.title = `${branch.name} → ${current.activeBranch ?? '현재'}`;
+        merge.dataset.versionTitle = mergeDirection;
         merge.setAttribute('aria-label', `${branch.name}에서 ${current.activeBranch ?? '현재 브랜치'}로 병합`);
         merge.addEventListener('click', () => void perform(() => controller.startMerge(branch.name)));
         actions.appendChild(merge);
         const switchButton = el('button', 'ag-versions-secondary', '전환');
         switchButton.type = 'button';
+        switchButton.dataset.versionAction = 'switch';
+        switchButton.setAttribute('aria-label', `${branch.name} 브랜치로 전환`);
         switchButton.dataset.versionMutation = 'true';
         switchButton.addEventListener('click', () => {
           if (current.dirty && !window.confirm('현재 작업을 체크포인트로 남기고 브랜치를 전환할까요?')) return;
@@ -743,8 +798,10 @@ export function createVersionManagerPage(controller: VersionManagerController): 
         });
         actions.appendChild(switchButton);
       }
-      const rename = el('button', 'ag-versions-quiet', '이름 변경');
+      const rename = el('button', 'ag-versions-quiet', '이름');
       rename.type = 'button';
+      rename.dataset.versionAction = 'rename';
+      rename.setAttribute('aria-label', `${branch.name} 브랜치 이름 변경`);
       rename.dataset.versionMutation = 'true';
       rename.addEventListener('click', () => void (async () => {
         const name = await askName('브랜치 이름 변경', branch.name);
@@ -754,6 +811,8 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       if (!branch.isActive && !branch.isDefault) {
         const remove = el('button', 'ag-versions-danger', '삭제');
         remove.type = 'button';
+        remove.dataset.versionAction = 'delete';
+        remove.setAttribute('aria-label', `${branch.name} 브랜치 삭제`);
         remove.dataset.versionMutation = 'true';
         remove.addEventListener('click', () => {
           if (!window.confirm(`“${branch.name}” 브랜치를 영구 삭제할까요? 태그나 다른 브랜치가 참조하지 않는 체크포인트는 정리 전까지 남습니다.`)) return;
@@ -768,19 +827,21 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       const draftsHeading = el('h3', 'ag-versions-section-title', '저장된 병합 검토');
       list.appendChild(draftsHeading);
       for (const draft of current.mergeDrafts) {
-        const row = el('article', 'ag-versions-card ag-versions-merge-draft');
-        const copy = el('div', 'ag-versions-card-copy');
+        const row = el('article', 'ag-versions-ref-row ag-versions-merge-draft');
+        const copy = el('div', 'ag-versions-ref-copy');
         copy.append(
-          el('strong', 'ag-versions-card-title', `${draft.sourceBranch} → ${draft.targetBranch}`),
-          el('span', 'ag-versions-card-meta', `${draft.resolvedCount}/${draft.conflictCount}개 충돌 해결 · ${formatTime(draft.updatedAt)}`),
+          el('strong', 'ag-versions-ref-title', `${draft.sourceBranch} → ${draft.targetBranch}`),
+          el('span', 'ag-versions-ref-meta', `${draft.resolvedCount}/${draft.conflictCount} 해결  ${formatTime(draft.updatedAt)}`),
         );
-        const actions = el('div', 'ag-versions-card-actions');
-        const resume = el('button', 'ag-versions-primary', '계속 검토');
+        const actions = el('div', 'ag-versions-ref-actions');
+        const resume = el('button', 'ag-versions-primary', '계속');
         resume.type = 'button';
+        resume.setAttribute('aria-label', `${draft.sourceBranch} 병합 초안 계속 검토`);
         resume.dataset.versionMutation = 'true';
         resume.addEventListener('click', () => void perform(() => controller.resumeMerge(draft.id)));
-        const discard = el('button', 'ag-versions-danger', '초안 버리기');
+        const discard = el('button', 'ag-versions-danger', '버리기');
         discard.type = 'button';
+        discard.setAttribute('aria-label', `${draft.sourceBranch} 병합 초안 버리기`);
         discard.dataset.versionMutation = 'true';
         discard.addEventListener('click', () => {
           if (window.confirm(`${draft.sourceBranch} → ${draft.targetBranch} 병합 초안을 버릴까요?`)) {
@@ -906,7 +967,13 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     renderAvailability();
     renderMutationState();
     if (!current.documentId || !current.saved || !current.enabled) return;
-    activeBranch.querySelector('.ag-versions-branch-name')!.textContent = current.activeBranch ?? 'main';
+    const targetBranch = current.activeBranch ?? 'main';
+    activeBranch.querySelector('.ag-versions-branch-name')!.textContent = targetBranch;
+    activeBranch.setAttribute('aria-label', `현재 브랜치 ${targetBranch} 보기`);
+    mergeButton.textContent = `… → ${targetBranch}`;
+    const mergeDirection = `다른 브랜치 → ${targetBranch}`;
+    mergeButton.dataset.versionTitle = mergeDirection;
+    mergeButton.setAttribute('aria-label', mergeDirection);
     storage.textContent = current.storageQuotaBytes
       ? `${formatBytes(current.storageBytes)} / ${formatBytes(current.storageQuotaBytes)}`
       : `${formatBytes(current.storageBytes)} 사용`;

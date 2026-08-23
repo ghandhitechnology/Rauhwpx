@@ -33,6 +33,7 @@ import {
   commitId,
   documentId,
   layoutCommitGraph,
+  orderBranchHeadFrontier,
   shelfId,
   mergeDraftId,
   tagName,
@@ -1803,7 +1804,7 @@ export class DocumentVersionController implements VersionManagerController {
     const memoryBranch = this.#activeBranches.get(id);
     this.#activeBranch = branches.find((branch) => branch.name === storedBranch)?.name
       ?? branches.find((branch) => branch.name === memoryBranch)?.name
-      ?? branches.find((branch) => branch.name === 'main')?.name
+      ?? branches.find((branch) => branch.name === repository.defaultBranch)?.name
       ?? branches[0]?.name
       ?? null;
     if (this.#activeBranch) persistActiveBranch(id, this.#activeBranch);
@@ -1820,7 +1821,13 @@ export class DocumentVersionController implements VersionManagerController {
   ): Promise<void> {
     const branchRefs = this.#refs.filter((ref): ref is BranchRef => ref.kind === 'branch');
     const tagRefs = this.#refs.filter((ref) => ref.kind === 'tag');
-    const graphRows = layoutCommitGraph(this.#commits);
+    const loadedCommitIds = new Set(this.#commits.map((commit) => commit.id));
+    const preferredHeads = orderBranchHeadFrontier(
+      branchRefs,
+      this.#repository?.defaultBranch ?? null,
+      this.#activeBranch,
+    ).filter((id) => loadedCommitIds.has(id));
+    const graphRows = layoutCommitGraph(this.#commits, [], preferredHeads);
     const rowById = new Map(graphRows.map((row) => [row.commitId, row]));
     const blobLengths = new Map<string, number>();
     await Promise.all([...new Set([
@@ -1848,6 +1855,7 @@ export class DocumentVersionController implements VersionManagerController {
         startsLane: graph?.startsLane ?? true,
         lanesBefore: graph ? [...graph.lanesBefore] : [commit.id],
         lanesAfter: graph ? [...graph.lanesAfter] : [...commit.parents],
+        activeLanesBefore: graph ? [...graph.activeLanesBefore] : [],
         parentLanes: graph?.edges.map((edge) => edge.toLane) ?? [],
         isHead: active?.target === commit.id,
         byteLength: blobLengths.get(commit.blobId) ?? 0,
@@ -1858,7 +1866,7 @@ export class DocumentVersionController implements VersionManagerController {
       name: branch.name,
       headId: branch.target,
       isActive: branch.name === this.#activeBranch,
-      isDefault: branch.name === 'main',
+      isDefault: branch.name === this.#repository?.defaultBranch,
       updatedAt: commitById.get(branch.target)?.createdAt ?? this.#repository?.enabledAt ?? Date.now(),
     }));
     const shelves: VersionShelfView[] = this.#shelves.map((shelf) => ({
