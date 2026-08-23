@@ -17,17 +17,18 @@ pub const PACK_MARKER_PATH: &str = "META-INF/rauhwpx-form-pack";
 pub const BRAND_GONGMUN: &str = "Rauhwpx 공문 서식";
 pub const BRAND_PUMUI: &str = "Rauhwpx 품의 서식";
 
-/// 빈 화면·거절 토스트가 같이 쓰는 사무실 한 줄.
+/// 거절 토스트 제목. 본문과 한 문장으로 붙이지 않는다.
 pub const SAVE_LINE_KO: &str = "HWPX만 저장";
 pub const SAVE_LINE_EN: &str = "HWPX only";
+pub const REFUSE_BODY_KO: &str = "HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.";
+pub const REFUSE_BODY_EN: &str = "HWP save is blocked. Tables and layout stay.";
 
-/// 사무실 거절 안내. 한글이 본문이고, 영문은 같은 뜻의 짝이다.
+/// 사무실 거절 안내. 한글 제목+본문이 먼저이고, 영문은 같은 뜻의 짝이다.
 pub const REFUSE_BINARY_HWP_KO: &str =
-    "이 서식은 HWPX만 저장됩니다. HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.";
-pub const REFUSE_BINARY_HWP_EN: &str =
-    "This form is HWPX-only. HWP save is blocked. Tables and layout stay.";
+    "HWPX만 저장\nHWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.";
+pub const REFUSE_BINARY_HWP_EN: &str = "HWPX only\nHWP save is blocked. Tables and layout stay.";
 pub const REFUSE_BINARY_HWP: &str =
-    "이 서식은 HWPX만 저장됩니다. HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.\nThis form is HWPX-only. HWP save is blocked. Tables and layout stay.";
+    "HWPX만 저장\nHWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.\nHWPX only\nHWP save is blocked. Tables and layout stay.";
 
 pub fn output_would_write_binary_hwp(path: &Path) -> bool {
     path.extension()
@@ -154,23 +155,37 @@ mod tests {
     #[test]
     fn refuse_copy_is_office_korean_with_english_pair() {
         assert_eq!(
+            REFUSE_BINARY_HWP_KO,
+            format!("{SAVE_LINE_KO}\n{REFUSE_BODY_KO}")
+        );
+        assert_eq!(
+            REFUSE_BINARY_HWP_EN,
+            format!("{SAVE_LINE_EN}\n{REFUSE_BODY_EN}")
+        );
+        assert_eq!(
             REFUSE_BINARY_HWP,
             format!("{REFUSE_BINARY_HWP_KO}\n{REFUSE_BINARY_HWP_EN}")
         );
-        assert!(REFUSE_BINARY_HWP_KO.contains(SAVE_LINE_KO));
+        assert_eq!(SAVE_LINE_KO, "HWPX만 저장");
         assert_eq!(SAVE_LINE_EN, "HWPX only");
-        assert!(REFUSE_BINARY_HWP_KO.contains("HWP 저장"));
-        assert!(REFUSE_BINARY_HWP_KO.contains("표"));
-        assert!(REFUSE_BINARY_HWP_KO.contains("배치"));
+        assert_eq!(
+            REFUSE_BODY_KO,
+            "HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다."
+        );
+        assert_eq!(
+            REFUSE_BODY_EN,
+            "HWP save is blocked. Tables and layout stay."
+        );
+        assert!(!REFUSE_BINARY_HWP.contains("이 서식은"));
+        assert!(!REFUSE_BINARY_HWP.contains("저장됩니다"));
+        assert!(!REFUSE_BINARY_HWP.contains("This form is"));
+        assert!(!REFUSE_BINARY_HWP.contains("HWPX-only"));
         assert!(!REFUSE_BINARY_HWP.contains("바이너리"));
         assert!(!REFUSE_BINARY_HWP.contains("경로"));
         assert!(!REFUSE_BINARY_HWP.to_ascii_lowercase().contains("upload"));
         assert!(!REFUSE_BINARY_HWP.contains("클라우드"));
         assert!(!REFUSE_BINARY_HWP.contains("한컴"));
         assert!(!REFUSE_BINARY_HWP.to_ascii_lowercase().contains("hancom"));
-        assert!(REFUSE_BINARY_HWP_EN.contains("HWPX-only"));
-        assert!(REFUSE_BINARY_HWP_EN.contains("HWP save is blocked"));
-        assert!(REFUSE_BINARY_HWP_EN.contains("Tables and layout stay"));
     }
 
     #[test]

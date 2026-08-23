@@ -10,6 +10,8 @@ import {
   FORM_PACK_SAVE_LINE_EN,
   FORM_PACK_SAVE_LINE_KO,
   REFUSE_BINARY_HWP,
+  REFUSE_BINARY_HWP_BODY_EN,
+  REFUSE_BINARY_HWP_BODY_KO,
   REFUSE_BINARY_HWP_EN,
   REFUSE_BINARY_HWP_KO,
   formPackAssetUrl,
@@ -56,23 +58,23 @@ test('서식팩은 바이너리 HWP 내보내기를 거부한다', () => {
   assert.equal(inferExportFormat('hwpx', '공문.hwp', 'hwp', '공문.hwpx'), 'hwp');
 });
 
-test('거절 안내는 사무실 말로 HWPX 전용·HWP 차단·표 유지를 말하고 업로드를 암시하지 않는다', () => {
-  assert.equal(REFUSE_BINARY_HWP, `${REFUSE_BINARY_HWP_KO}\n${REFUSE_BINARY_HWP_EN}`);
+test('거절 안내는 제목과 본문을 나누고 업로드를 암시하지 않는다', () => {
   assert.equal(FORM_PACK_SAVE_LINE_KO, 'HWPX만 저장');
   assert.equal(FORM_PACK_SAVE_LINE_EN, 'HWPX only');
-  assert.match(REFUSE_BINARY_HWP_KO, /HWPX만 저장/);
-  assert.match(REFUSE_BINARY_HWP_KO, /HWP 저장은 막아/);
-  assert.match(REFUSE_BINARY_HWP_KO, /표와 배치/);
-  assert.match(REFUSE_BINARY_HWP_EN, /HWPX-only/);
-  assert.match(REFUSE_BINARY_HWP_EN, /HWP save is blocked/);
-  assert.match(REFUSE_BINARY_HWP_EN, /Tables and layout stay/);
+  assert.equal(REFUSE_BINARY_HWP_BODY_KO, 'HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.');
+  assert.equal(REFUSE_BINARY_HWP_BODY_EN, 'HWP save is blocked. Tables and layout stay.');
+  assert.equal(REFUSE_BINARY_HWP_KO, `${FORM_PACK_SAVE_LINE_KO}\n${REFUSE_BINARY_HWP_BODY_KO}`);
+  assert.equal(REFUSE_BINARY_HWP_EN, `${FORM_PACK_SAVE_LINE_EN}\n${REFUSE_BINARY_HWP_BODY_EN}`);
+  assert.equal(REFUSE_BINARY_HWP, `${REFUSE_BINARY_HWP_KO}\n${REFUSE_BINARY_HWP_EN}`);
+  assert.doesNotMatch(REFUSE_BINARY_HWP, /이 서식은|저장됩니다|This form is|HWPX-only/);
   assert.doesNotMatch(REFUSE_BINARY_HWP, /바이너리|경로|업로드|클라우드|한컴|Hancom|certified|launch/i);
 
   const rust = source('../src/form_pack.rs');
   assert.match(rust, /SAVE_LINE_KO: &str = "HWPX만 저장"/);
   assert.match(rust, /SAVE_LINE_EN: &str = "HWPX only"/);
-  assert.match(rust, new RegExp(REFUSE_BINARY_HWP_KO.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.match(rust, new RegExp(REFUSE_BINARY_HWP_EN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(rust, /REFUSE_BODY_KO: &str = "HWP 저장은 막아 두었습니다\. 표와 배치는 그대로입니다\."/);
+  assert.match(rust, /REFUSE_BODY_EN: &str = "HWP save is blocked\. Tables and layout stay\."/);
+  assert.doesNotMatch(rust, /이 서식은 HWPX만 저장됩니다/);
 
   const fileCmd = source('src/command/commands/file.ts');
   assert.match(fileCmd, /showToast\(\{ message: refused \}\)/);
