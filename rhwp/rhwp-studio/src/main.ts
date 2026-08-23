@@ -1581,9 +1581,20 @@ async function loadFromUrlParam(): Promise<void> {
     msg.textContent = '파일 로딩 중...';
     console.log(`[loadFromUrlParam] ${fileUrl}`);
 
-    // 어떤 fetch 경로를 타든 공개 URL 정책을 먼저 통과해야 한다.
-    // (확장 viewer 의 직접 fetch 는 SW 프록시 검증을 우회하지 않도록)
-    validateRemoteDocumentUrl(fileUrl);
+    // file:// 은 확장 권한을 먼저 확인한다. 공개 URL 정책은 HTTP(S) 직접 fetch와
+    // SW 프록시 우회 방지에만 적용한다.
+    if (fileUrl.startsWith('file:')) {
+      if (typeof chrome === 'undefined') {
+        throw new RemoteDocumentUrlError('scheme-blocked', 'file: URL은 확장 프로그램에서만 열 수 있습니다.');
+      }
+      const allowed = await isFileSchemeAccessAllowed();
+      if (allowed === false) {
+        showFileUrlAccessGuidance();
+        return;
+      }
+    } else {
+      validateRemoteDocumentUrl(fileUrl);
+    }
 
     let response: Response;
 
