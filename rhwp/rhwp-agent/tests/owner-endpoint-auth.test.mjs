@@ -52,9 +52,10 @@ test('production hub keeps owner endpoints bearer-only and healthz quiet without
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const exitPromise = once(child, 'exit');
   t.after(async () => {
     if (child.exitCode === null) child.kill('SIGTERM');
-    if (child.exitCode === null) await once(child, 'exit');
+    if (child.exitCode === null) await exitPromise;
     rmSync(workRoot, { recursive: true, force: true });
   });
 
@@ -82,5 +83,5 @@ test('production hub keeps owner endpoints bearer-only and healthz quiet without
   });
   assert.equal(shutdown.status, 202);
 
-  await once(child, 'exit');
+  await exitPromise;
 });
