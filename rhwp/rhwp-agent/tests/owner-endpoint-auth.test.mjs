@@ -62,6 +62,12 @@ test('production hub keeps owner endpoints bearer-only and healthz quiet without
   const ready = JSON.parse(readyLine.slice('RHWP_HUB_READY '.length));
   const base = `http://127.0.0.1:${ready.port}`;
 
+  const unauthenticatedHealth = await fetch(`${base}/healthz`);
+  assert.equal(unauthenticatedHealth.status, 401);
+  const healthBody = await unauthenticatedHealth.json();
+  assert.equal('launchId' in healthBody, false);
+  assert.equal('sessions' in healthBody, false);
+
   // 토큰을 URL 파라미터로 넘기는 소유자 요청은 거부된다(로그·히스토리 유출 방지).
   const queryTokenShutdown = await fetch(`${base}/shutdown?token=${encodeURIComponent(TOKEN)}`, {
     method: 'POST',
