@@ -46,9 +46,6 @@ import {
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 
 const { autoUpdater } = electronUpdater;
-autoUpdater.on('error', (error) => {
-  console.warn('[rauhwpx] update check failed:', error?.message ?? error);
-});
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const RELEASES_URL = 'https://github.com/ghandhitechnology/Rauhwpx/releases/latest';
 const PRELOAD_PATH = join(__dirname, 'preload.cjs');
@@ -301,6 +298,89 @@ async function persistNativeBookmarks() {
   }
 }
 
+let updateDownloadReady = false;
+let manualUpdateCheck = false;
+
+function configureAutoUpdater() {
+  autoUpdater.logger = console;
+  // macOS stages updates automatically and applies them on quit. Windows
+  // installers are unsigned today, so background installs get blocked by
+  // SmartScreen; downloads there only happen after an explicit confirmation.
+  autoUpdater.autoDownload = process.platform === 'darwin';
+  autoUpdater.on('error', (error) => {
+    console.warn('[rauhwpx] update check failed:', error?.message ?? error);
+  });
+  autoUpdater.on('update-not-available', () => {
+    if (!manualUpdateCheck) return;
+    void dialog.showMessageBox({
+      type: 'info',
+      message: 'Rauhwpx is up to date',
+      detail: `Version ${app.getVersion()} is the latest release.`,
+      buttons: ['OK'],
+    });
+  });
+  autoUpdater.on('update-available', (info) => {
+    if (autoUpdater.autoDownload || !manualUpdateCheck) return;
+    void dialog.showMessageBox({
+      type: 'info',
+      message: `Rauhwpx ${info?.version ?? ''} is available`,
+      detail: `You are running version ${app.getVersion()}. Download the installer now?`,
+      buttons: ['Download', 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response === 0) void autoUpdater.downloadUpdate().catch((error) => {
+        console.warn('[rauhwpx] update download failed:', error?.message ?? error);
+      });
+    });
+  });
+  autoUpdater.on('update-downloaded', (info) => {
+    if (updateDownloadReady) return;
+    updateDownloadReady = true;
+    const version = info?.version ?? '';
+    const isMac = process.platform === 'darwin';
+    const buttons = isMac ? ['Quit to install', 'Later'] : ['Install now', 'Later'];
+    void dialog.showMessageBox({
+      type: 'info',
+      message: `Rauhwpx ${version} is ready to install`,
+      detail: isMac
+        ? 'It will be installed when Rauhwpx quits.'
+        : 'The installer opens after Rauhwpx closes; Windows may ask you to confirm it because it is not signed yet.',
+      buttons,
+      defaultId: 1,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response !== 0) return;
+      if (isMac) {
+        app.quit();
+        return;
+      }
+      updateDownloadReady = false;
+      setImmediate(() => autoUpdater.quitAndInstall(false, true));
+    });
+  });
+}
+
+async function checkForAppUpdates() {
+  if (manualUpdateCheck) return;
+  manualUpdateCheck = true;
+  try {
+    await autoUpdater.checkForUpdates();
+  } catch (error) {
+    console.warn('[rauhwpx] update check failed:', error?.message ?? error);
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      message: 'Rauhwpx could not check for updates',
+      detail: error?.message ?? String(error),
+      buttons: ['Open releases page', 'OK'],
+      defaultId: 1,
+    });
+    if (response === 0) void shell.openExternal(RELEASES_URL);
+  } finally {
+    manualUpdateCheck = false;
+  }
+}
+
 function installMenu() {
   const isMac = process.platform === 'darwin';
   const checkForUpdates = {
@@ -310,9 +390,7 @@ function installMenu() {
         void shell.openExternal(RELEASES_URL);
         return;
       }
-      autoUpdater.checkForUpdatesAndNotify().catch((error) => {
-        dialog.showErrorBox('Update check failed', error?.message ?? String(error));
-      });
+      void checkForAppUpdates();
     },
   };
   const newWindow = {
@@ -759,6 +837,7 @@ if (!hasSingleInstanceLock) {
       filePath: join(app.getPath('userData'), 'secrets.json'),
       safeStorage,
     });
+    configureAutoUpdater();
     await loadNativeBookmarks();
     installMenu();
     if (!devUrl) installStudioProtocol({ protocol, net, root: studioDist() });
@@ -777,9 +856,9 @@ if (!hasSingleInstanceLock) {
       app.quit();
       return;
     }
-    if (app.isPackaged) {
+    if (app.isPackaged && process.platform === 'darwin') {
       setTimeout(() => {
-        void autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+        void autoUpdater.checkForUpdates().catch(() => {});
       }, 4000);
     }
   }).catch((error) => {
