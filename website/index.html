@@ -235,6 +235,30 @@ a{color:var(--ink)}
   margin:0 0 18px;
 }
 .hero .lead{max-width:28ch;margin-bottom:0}
+.hero-logo-stage{
+  min-height:clamp(360px,42vw,500px);
+  display:grid;place-items:center;
+  position:relative;isolation:isolate;
+}
+.hero-logo-stage::before{
+  content:"";position:absolute;z-index:-2;
+  width:min(88%,460px);aspect-ratio:1;border-radius:50%;
+  background:radial-gradient(circle,rgba(83,124,246,.27) 0,rgba(83,124,246,.11) 43%,transparent 72%);
+  filter:blur(30px);
+}
+.hero-logo-shell{
+  width:min(78%,390px);padding:10px;border-radius:27%;
+  position:relative;background:rgba(255,255,255,.55);
+  box-shadow:0 32px 64px rgba(43,72,161,.20),0 12px 25px rgba(20,18,15,.12),inset 0 1px 0 rgba(255,255,255,.92);
+}
+.hero-logo-shell::after{
+  content:"";position:absolute;inset:10px;border-radius:25%;pointer-events:none;
+  background:linear-gradient(145deg,rgba(255,255,255,.25),transparent 42%);
+}
+.hero-logo{
+  display:block;width:100%;height:auto;border-radius:25%;
+  box-shadow:0 18px 40px rgba(52,87,205,.27),0 0 42px rgba(78,124,255,.18);
+}
 
 /* ── 섹션 헤더 ─────────────────────────────── */
 .sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:clamp(28px,3.4vw,40px);flex-wrap:wrap}
@@ -477,6 +501,9 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   .hero-actions{grid-template-columns:minmax(0,1fr);width:100%}
   .hero-actions .btn{width:100%}
   .hero-actions__tip--right{justify-self:start}
+  .hero-logo-stage{min-height:320px}
+  .hero-logo-shell{width:min(76%,320px);padding:8px}
+  .hero-logo-shell::after{inset:8px}
   .foot nav{margin-left:0;width:100%}
 }
 @media (prefers-reduced-motion:reduce){
@@ -521,17 +548,10 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
         </div>
       </div>
 
-      <figure class="figure">
-        <div class="frame tilt-a">
-          <span class="tape tape--tr" aria-hidden="true"></span>
-          <div class="shot c-app">
-            <img src="assets/editor-hero.png" width="1800" height="1197" alt="귀찮이글 화면. 왼쪽에 수업표가 있는 한글 문서, 오른쪽에 에이전트가 표 정렬을 고치고 있어요.">
-          </div>
+      <figure class="hero-logo-stage">
+        <div class="hero-logo-shell">
+          <img class="hero-logo" src="assets/rauhwpx-logo.png" width="1024" height="1024" alt="파란색 귀찮이글 앱 로고">
         </div>
-        <figcaption class="note">
-          <svg class="arw" viewBox="0 0 40 26" aria-hidden="true"><path d="M37 23C31 11 22 4.6 7 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M7 3l7.4 1.8M7 3l2 6.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          <span>문서랑 에이전트가 같은 창에 있어요</span>
-        </figcaption>
       </figure>
     </div>
   </section>
