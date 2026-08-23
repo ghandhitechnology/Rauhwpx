@@ -421,7 +421,7 @@ const chordMapG: Record<string, string> = {
  */
 export function onKeyDown(this: any, e: KeyboardEvent): void {
   if (!this.active) return;
-  if (this.readOnly) {
+  if (this.readOnly || this.userEditingLocked) {
     const key = e.key.toLowerCase();
     const primaryShortcut = (e.ctrlKey || e.metaKey) && ['a', 'c', 'f', 'p'].includes(key);
     const navigation = ['arrowleft', 'arrowright', 'arrowup', 'arrowdown', 'home', 'end', 'pageup', 'pagedown', 'escape']
@@ -1655,7 +1655,7 @@ export function onCopy(this: any, e: ClipboardEvent): void {
 
 export function onCut(this: any, e: ClipboardEvent): void {
   if (!this.active) return;
-  if (this.readOnly) {
+  if (this.readOnly || this.userEditingLocked) {
     e.preventDefault();
     return;
   }
@@ -1690,7 +1690,7 @@ export function onCut(this: any, e: ClipboardEvent): void {
 export function onPaste(this: any, e: ClipboardEvent): void {
   if (!this.active) return;
   e.preventDefault();
-  if (this.readOnly) return;
+  if (this.readOnly || this.userEditingLocked) return;
   if (this.isFormMode?.()) return;
 
   // 개체/표 선택 모드 해제 후 붙여넣기 진행

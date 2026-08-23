@@ -854,7 +854,7 @@ export class PendingEditManager {
         command,
         // 승인은 이미 보이는 미리보기를 채택하는 것 — 사용자가 보고 있는
         // 지점(에이전트 편집 위치)에서 caret 위치로 카메라를 되돌리지 않는다.
-        meta: { refresh: 'full', scroll: 'preserve' },
+        meta: { origin: 'agent', refresh: 'full', scroll: 'preserve' },
       });
       // 히스토리가 command(before/after)를 세므로 외부 점유를 전부 반환한다.
       releaseExternal(heldExternal);

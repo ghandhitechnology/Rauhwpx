@@ -23,6 +23,7 @@ import { PendingEditManager } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
 import { PendingRequestRegistry } from './pending-requests.ts';
 import { AgentTypewriterReveal } from './typewriter-reveal.ts';
+import { deriveAgentEditingLease } from './editing-lease.ts';
 import {
   setCursorModels as setCursorModelRegistry,
   setPiModels as setPiModelRegistry,
@@ -37,6 +38,7 @@ import {
 import type {
   AgentBridgeDeps,
   AgentBridgeOptions,
+  AgentEditingLease,
   AgentName,
   AgentAuthMethod,
   AgentSetupAuthStart,
@@ -91,6 +93,8 @@ export interface AgentBridge {
   getConnectionState(): 'connecting' | 'connected' | 'disconnected' | 'replaced';
   getActiveAgent(): AgentName | null;
   isTurnRunning(): boolean;
+  getEditingLease(): AgentEditingLease;
+  onEditingLeaseChange(cb: (lease: AgentEditingLease) => void): () => void;
   getPermissionProfile(): PermissionProfile;
   getWorkflowState(): AgentWorkflowState;
   /** 다른 탭이 연결을 차지한 상태에서 현재 탭이 스튜디오 연결을 다시 가져온다. */
@@ -801,6 +805,10 @@ class AgentBridgeImpl implements AgentBridge {
   private latestPlan: StructuredPlan | null = null;
   private activeAgent: AgentName | null = null;
   private turnRunning = false;
+  private editingAgent: AgentName = 'codex';
+  private activeToolRequests = 0;
+  private editingLease: AgentEditingLease = { active: false, agent: 'codex' };
+  private editingLeaseListeners = new Set<(lease: AgentEditingLease) => void>();
   private turnHadError = false;
   private pendingTurnOpen = false;
   private pendingChatStart: {
@@ -1176,6 +1184,21 @@ class AgentBridgeImpl implements AgentBridge {
     this.pendingTurnOpen = true;
   }
 
+  private syncEditingLease(): void {
+    const next = deriveAgentEditingLease({
+      turnRunning: this.turnRunning,
+      activeToolRequests: this.activeToolRequests,
+      agent: this.editingAgent,
+    });
+    if (next.active === this.editingLease.active && next.agent === this.editingLease.agent) return;
+    this.editingLease = next;
+    for (const listener of this.editingLeaseListeners) {
+      try { listener({ ...next }); } catch (error) {
+        console.warn('[AgentBridge] 편집 잠금 리스너 오류:', error);
+      }
+    }
+  }
+
   /**
    * 성공한 턴의 편집 처리는 권한 프로필이 가른다:
    * 안전(safe) → 'review' (사용자 승인 대기), 전체(unrestricted) → 'commit' (자동 반영).
@@ -1243,6 +1266,7 @@ class AgentBridgeImpl implements AgentBridge {
         const wasRunning = this.turnRunning;
         if (session && isAgentName(session.agent)) {
           this.activeAgent = session.agent;
+          this.editingAgent = session.agent;
           if (typeof session.model === 'string') this.selectedModel = session.model;
           if (typeof session.effort === 'string') this.selectedEffort = session.effort;
           if (sessionThreadId) this.threadId = sessionThreadId;
@@ -1295,6 +1319,7 @@ class AgentBridgeImpl implements AgentBridge {
           }
           this.resetWorkflowState();
         }
+        this.syncEditingLease();
         this.emit({ type: 'workflow-changed', ...this.workflowState() });
         if (wasRunning && !this.turnRunning) {
           // 연결이 끊긴 사이에 끝난 턴 — 잃어버린 turn-end 를 합성해 UI 를 되돌린다.
@@ -1316,7 +1341,10 @@ class AgentBridgeImpl implements AgentBridge {
         // 마지막 startChat 이 고른 정체성을 절대 덮어쓰지 않는다.
         if (typeof msg.threadId === 'string' && this.threadId && msg.threadId !== this.threadId) break;
         this.pendingChatStart = null;
-        if (isAgentName(msg.agent)) this.activeAgent = msg.agent;
+        if (isAgentName(msg.agent)) {
+          this.activeAgent = msg.agent;
+          this.editingAgent = msg.agent;
+        }
         if (typeof msg.model === 'string') this.selectedModel = msg.model;
         if (typeof msg.effort === 'string') this.selectedEffort = msg.effort;
         if (msg.permissionProfile === 'safe' || msg.permissionProfile === 'unrestricted') this.permissionProfile = msg.permissionProfile;
@@ -1630,6 +1658,7 @@ class AgentBridgeImpl implements AgentBridge {
     switch (event.type) {
       case 'turn-start':
         this.turnRunning = true;
+        this.editingAgent = event.agent;
         this.turnHadError = false;
         try {
           this.beginPendingTurn(event.agent);
@@ -1659,10 +1688,12 @@ class AgentBridgeImpl implements AgentBridge {
         break;
       case 'session-info':
         this.activeAgent = event.agent;
+        this.editingAgent = event.agent;
         break;
       default:
         break;
     }
+    this.syncEditingLease();
     this.emit({ type: 'agent', event });
   }
 
@@ -1672,6 +1703,9 @@ class AgentBridgeImpl implements AgentBridge {
     const tool = typeof msg.tool === 'string' ? msg.tool : '';
     const args = msg.args;
     const agent: AgentName = isAgentName(msg.agent) ? msg.agent : (this.activeAgent ?? 'claude');
+    this.editingAgent = agent;
+    this.activeToolRequests += 1;
+    this.syncEditingLease();
     void this.executor
       .execute(tool, args, agent, {
         workflow: this.workflow,
@@ -1691,6 +1725,10 @@ class AgentBridgeImpl implements AgentBridge {
             ? { code: e.code, message: e.message }
             : { code: 'RPC_ERROR', message: e instanceof Error ? e.message : String(e) };
         this.sendToolResponse({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: false, error });
+      })
+      .finally(() => {
+        this.activeToolRequests = Math.max(0, this.activeToolRequests - 1);
+        this.syncEditingLease();
       });
   }
 
@@ -1722,6 +1760,16 @@ class AgentBridgeImpl implements AgentBridge {
 
   isTurnRunning(): boolean {
     return this.turnRunning;
+  }
+
+  getEditingLease(): AgentEditingLease {
+    return { ...this.editingLease };
+  }
+
+  onEditingLeaseChange(cb: (lease: AgentEditingLease) => void): () => void {
+    this.editingLeaseListeners.add(cb);
+    cb(this.getEditingLease());
+    return () => this.editingLeaseListeners.delete(cb);
   }
 
   getPermissionProfile(): PermissionProfile {
@@ -1783,12 +1831,14 @@ class AgentBridgeImpl implements AgentBridge {
   }
 
   stopChat(): void {
+    const waitForAuthoritativeTurnEnd = this.state === 'connected' && this.turnRunning;
     for (const message of this.queuedMessages) message.resolve(null);
     this.queuedMessages = [];
     this.pendingChatStart = null;
     this.chatHistory = [];
     this.activeAgent = null;
-    this.turnRunning = false;
+    if (!waitForAuthoritativeTurnEnd) this.turnRunning = false;
+    this.syncEditingLease();
     // Full access is deliberately scoped to one live chat and never becomes
     // the default for a new or reopened thread.
     this.permissionProfile = 'safe';
@@ -2365,6 +2415,10 @@ class AgentBridgeImpl implements AgentBridge {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.turnRunning = false;
+    this.activeToolRequests = 0;
+    this.syncEditingLease();
+    this.editingLeaseListeners.clear();
     window.removeEventListener('focus', this.onResume);
     window.removeEventListener('online', this.onResume);
     document.removeEventListener('visibilitychange', this.onVisibility);

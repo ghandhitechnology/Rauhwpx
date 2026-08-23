@@ -36,6 +36,8 @@ export interface EditorContext {
   isEditable: boolean;
   /** 게시된 템플릿 후보처럼 창 전체가 영구 읽기 전용인가. */
   readOnly?: boolean;
+  /** 에이전트 활성 턴 동안 사용자 문서 편집만 잠겨 있는가. */
+  userEditingLocked?: boolean;
   /** 현재 편집 모드 */
   editMode: EditorEditMode;
   /** 양식 모드인가? */
