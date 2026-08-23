@@ -246,14 +246,15 @@
 
 .ag-versions-graph {
   min-width: 0;
+  padding-block: 3px 7px;
 }
 
 .ag-version-row {
   width: 100%;
-  min-height: 48px;
+  min-height: 52px;
   display: flex;
   align-items: stretch;
-  padding: 0 12px 0 4px;
+  padding: 0 12px 0 6px;
   border: 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.045);
   color: inherit;
@@ -269,19 +270,39 @@
 
 .ag-versions-lanes {
   flex: 0 0 auto;
+  align-self: stretch;
+  margin-right: 5px;
   overflow: visible;
 }
 
 .ag-version-lane-path {
   fill: none;
   stroke: hsl(calc(238 + var(--ag-parent-lane, var(--ag-version-lane)) * 42) 72% 68%);
-  stroke-width: 2;
+  stroke-width: 2.15;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.ag-version-rail {
+  opacity: 0.62;
+}
+
+.ag-version-edge {
+  opacity: 0.96;
+}
+
+.ag-version-node-halo {
+  fill: rgba(139, 131, 255, 0.16);
+  stroke: rgba(209, 206, 255, 0.24);
+  stroke-width: 1;
 }
 
 .ag-version-node {
   fill: #19191d;
   stroke: hsl(calc(238 + var(--ag-version-lane) * 42) 72% 68%);
-  stroke-width: 2;
+  stroke-width: 2.25;
+  vector-effect: non-scaling-stroke;
 }
 
 .ag-version-node.ag-head {
@@ -300,14 +321,55 @@
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
 }
 
 .ag-version-title {
+  min-width: 34px;
   overflow: hidden;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ag-version-refs {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  overflow: hidden;
+  color: #b8b6c8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.ag-version-refs:not(:empty)::before {
+  content: '(';
+  color: #72717d;
+}
+
+.ag-version-refs:not(:empty)::after {
+  content: ')';
+  color: #72717d;
+}
+
+.ag-version-ref + .ag-version-ref::before {
+  content: ', ';
+  color: #72717d;
+}
+
+.ag-branch-ref {
+  color: #b9b5ff;
+}
+
+.ag-active-ref {
+  color: #8fe0bb;
+  font-weight: 700;
+}
+
+.ag-tag-ref {
+  color: #ecc985;
 }
 
 .ag-version-meta,

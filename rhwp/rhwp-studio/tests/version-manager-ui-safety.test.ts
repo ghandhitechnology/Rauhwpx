@@ -83,3 +83,10 @@ test('기록을 그리기 전에 첫 행을 roving tab stop으로 선택한다',
   assert.ok(normalizeSelection >= 0 && normalizeSelection < renderRows);
   assert.ok(renderRows < assignTabStop);
 });
+
+test('브랜치 기록은 끊기지 않는 레일과 터미널 스타일 참조를 그린다', () => {
+  assert.match(source, /commit\.lanesBefore\.forEach\(\(id, fromLane\) =>/);
+  assert.match(source, /path\.classList\.add\('ag-version-lane-path', `ag-version-\$\{kind\}`\)/);
+  assert.match(source, /active \? `HEAD → \$\{branch\}` : branch/);
+  assert.match(css, /\.ag-version-rail \{\s*opacity: 0\.62;/);
+});

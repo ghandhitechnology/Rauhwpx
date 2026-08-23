@@ -14,6 +14,10 @@ export interface VersionCommitView {
   branchLabels: string[];
   tagLabels: string[];
   lane: number;
+  laneCount: number;
+  startsLane: boolean;
+  lanesBefore: string[];
+  lanesAfter: string[];
   parentLanes: number[];
   isHead: boolean;
   byteLength: number;
@@ -247,38 +251,78 @@ function invalidatesCompletedComparisons(
 
 function laneSvg(commit: VersionCommitView, laneCount: number): SVGSVGElement {
   const ns = 'http://www.w3.org/2000/svg';
-  const width = Math.max(28, laneCount * 18 + 10);
-  const x = 9 + commit.lane * 18;
+  const height = 52;
+  const centerY = height / 2;
+  const laneGap = 18;
+  const laneX = (lane: number): number => 11 + lane * laneGap;
+  const width = Math.max(30, laneCount * laneGap + 10);
+  const x = laneX(commit.lane);
   const svg = document.createElementNS(ns, 'svg');
   svg.classList.add('ag-versions-lanes');
-  svg.setAttribute('viewBox', `0 0 ${width} 48`);
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   svg.setAttribute('width', String(width));
-  svg.setAttribute('height', '48');
+  svg.setAttribute('height', String(height));
   svg.setAttribute('aria-hidden', 'true');
   svg.style.setProperty('--ag-version-lane', String(commit.lane));
 
-  if (commit.parentLanes.length === 0) {
-    const tail = document.createElementNS(ns, 'path');
-    tail.setAttribute('d', `M${x} 24V48`);
-    tail.classList.add('ag-version-lane-path');
-    svg.appendChild(tail);
-  } else {
-    for (const parentLane of commit.parentLanes) {
-      const parentX = 9 + parentLane * 18;
-      const path = document.createElementNS(ns, 'path');
-      path.setAttribute('d', parentX === x
-        ? `M${x} 0V48`
-        : `M${x} 0V16C${x} 30 ${parentX} 18 ${parentX} 48`);
-      path.classList.add('ag-version-lane-path');
-      path.style.setProperty('--ag-parent-lane', String(parentLane));
-      svg.appendChild(path);
-    }
+  const appendPath = (
+    d: string,
+    lane: number,
+    kind: 'rail' | 'edge',
+  ): void => {
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', d);
+    path.classList.add('ag-version-lane-path', `ag-version-${kind}`);
+    path.style.setProperty('--ag-parent-lane', String(lane));
+    svg.appendChild(path);
+  };
+
+  // Keep every unresolved branch visible through rows belonging to another
+  // branch. This is the continuous rail that makes the history read like a
+  // terminal git graph instead of a list of decorated checkpoints.
+  commit.lanesBefore.forEach((id, fromLane) => {
+    if (id === commit.id) return;
+    const toLane = commit.lanesAfter.indexOf(id);
+    if (toLane < 0) return;
+    const fromX = laneX(fromLane);
+    const toX = laneX(toLane);
+    appendPath(
+      fromX === toX
+        ? `M${fromX} 0V${height}`
+        : `M${fromX} 0C${fromX} ${centerY - 6} ${toX} ${centerY + 6} ${toX} ${height}`,
+      toLane,
+      'rail',
+    );
+  });
+
+  if (!commit.startsLane) {
+    appendPath(`M${x} 0V${centerY}`, commit.lane, 'edge');
+  }
+
+  for (const parentLane of commit.parentLanes) {
+    const parentX = laneX(parentLane);
+    appendPath(
+      parentX === x
+        ? `M${x} ${centerY}V${height}`
+        : `M${x} ${centerY}C${x} ${centerY + 12} ${parentX} ${centerY + 8} ${parentX} ${height}`,
+      parentLane,
+      'edge',
+    );
+  }
+
+  if (commit.isHead) {
+    const halo = document.createElementNS(ns, 'circle');
+    halo.setAttribute('cx', String(x));
+    halo.setAttribute('cy', String(centerY));
+    halo.setAttribute('r', '8');
+    halo.classList.add('ag-version-node-halo');
+    svg.appendChild(halo);
   }
 
   const node = document.createElementNS(ns, 'circle');
   node.setAttribute('cx', String(x));
-  node.setAttribute('cy', '24');
-  node.setAttribute('r', commit.isHead ? '5' : '4');
+  node.setAttribute('cy', String(centerY));
+  node.setAttribute('r', commit.isHead ? '5' : '4.25');
   node.classList.add('ag-version-node');
   if (commit.isHead) node.classList.add('ag-head');
   svg.appendChild(node);
@@ -497,6 +541,22 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     return badges;
   }
 
+  function commitRefs(commit: VersionCommitView): HTMLElement {
+    const refs = el('span', 'ag-version-refs');
+    for (const branch of commit.branchLabels) {
+      const active = commit.isHead && branch === current.activeBranch;
+      refs.appendChild(el(
+        'span',
+        `ag-version-ref ag-branch-ref${active ? ' ag-active-ref' : ''}`,
+        active ? `HEAD → ${branch}` : branch,
+      ));
+    }
+    for (const tag of commit.tagLabels) {
+      refs.appendChild(el('span', 'ag-version-ref ag-tag-ref', `tag: ${tag}`));
+    }
+    return refs;
+  }
+
   function renderInspector(): void {
     inspector.replaceChildren();
     const selected = current.commits.find((commit) => commit.id === selectedCommitId) ?? null;
@@ -591,7 +651,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
 
   function renderHistory(): void {
     graph.replaceChildren();
-    const laneCount = Math.max(1, ...current.commits.map((commit) => commit.lane + 1));
+    const laneCount = Math.max(1, ...current.commits.map((commit) => commit.laneCount));
     if (!selectedCommitId || !current.commits.some((commit) => commit.id === selectedCommitId)) {
       selectedCommitId = current.commits[0]?.id ?? null;
     }
@@ -607,7 +667,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       row.tabIndex = commit.id === selectedCommitId ? 0 : -1;
       const copy = el('span', 'ag-version-copy');
       const heading = el('span', 'ag-version-heading');
-      heading.append(el('strong', 'ag-version-title', commit.title), commitBadges(commit));
+      heading.append(el('strong', 'ag-version-title', commit.title), commitRefs(commit));
       copy.append(
         heading,
         el('span', 'ag-version-meta', `${formatTime(commit.createdAt)} · ${reasonLabel(commit.reason)} · ${commit.shortId}`),

@@ -10,6 +10,7 @@ export interface CommitGraphRow {
   commitId: CommitId;
   lane: number;
   laneCount: number;
+  startsLane: boolean;
   lanesBefore: readonly CommitId[];
   lanesAfter: readonly CommitId[];
   edges: readonly CommitGraphEdge[];
@@ -32,6 +33,7 @@ export function layoutCommitGraph(
 
   for (const commit of orderCommits(commits)) {
     let lane = lanes.indexOf(commit.id);
+    const startsLane = lane < 0;
     if (lane < 0) {
       lane = lanes.length;
       lanes.push(commit.id);
@@ -63,6 +65,7 @@ export function layoutCommitGraph(
       commitId: commit.id,
       lane,
       laneCount: Math.max(lanesBefore.length, next.length),
+      startsLane,
       lanesBefore,
       lanesAfter: [...next],
       edges: commit.parents.map((parentId) => ({

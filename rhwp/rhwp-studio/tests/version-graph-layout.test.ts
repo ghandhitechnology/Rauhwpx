@@ -16,6 +16,7 @@ test('linear history stays in one deterministic lane', () => {
     ['c2', 0, 1],
     ['c1', 0, 1],
   ]);
+  assert.deepEqual(rows.map((row) => row.startsLane), [true, false, false]);
 });
 
 test('merge parents receive stable lanes regardless of input order', () => {
@@ -32,6 +33,9 @@ test('merge parents receive stable lanes regardless of input order', () => {
   assert.deepEqual(first, second);
   assert.deepEqual(first[0]?.edges.map((edge) => edge.toLane), [0, 1]);
   assert.equal(first.find((row) => row.commitId === 'branch')?.lane, 1);
+  assert.deepEqual(first.find((row) => row.commitId === 'branch')?.lanesBefore, ['main', 'branch']);
+  assert.deepEqual(first.find((row) => row.commitId === 'branch')?.lanesAfter, ['main', 'root']);
+  assert.equal(first.find((row) => row.commitId === 'branch')?.startsLane, false);
   assert.equal(first.at(-1)?.laneCount, 1);
 });
 
