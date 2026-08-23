@@ -433,10 +433,9 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   const aiToggle = document.createElement('input');
   aiToggle.type = 'checkbox';
   aiLabel.append(aiToggle, document.createTextNode('AI 제목'));
-  const privacy = el('span', 'ag-versions-privacy', '작은 변경 요약만 사용 가능한 제공자에 순서대로 전송할 수 있습니다.');
   const gcButton = el('button', 'ag-versions-gc', '사용하지 않는 데이터 정리');
   gcButton.type = 'button';
-  footer.append(storage, aiLabel, privacy, gcButton);
+  footer.append(storage, aiLabel, gcButton);
   page.append(head, notice, tabs, toolbar, body, footer);
 
   let current = controller.getState();

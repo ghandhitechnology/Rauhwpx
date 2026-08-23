@@ -135,7 +135,7 @@ test('안내는 에어갭·완전 오프라인 AI를 주장하지 않는다', ()
   assert.match(text, /Browserbase/);
 });
 
-test('환경 설정과 사이드바 설정이 같은 안내 모듈을 쓴다', () => {
+test('보안 안내는 환경 설정에서만 제공한다', () => {
   const options = readFileSync(new URL('../src/ui/options-dialog.ts', import.meta.url), 'utf8');
   const settings = readFileSync(new URL('../src/ui/agent-sidebar/settings.ts', import.meta.url), 'utf8');
   const sidebar = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
@@ -145,7 +145,7 @@ test('환경 설정과 사이드바 설정이 같은 안내 모듈을 쓴다', (
   assert.match(options, /createSecurityPanel/);
   assert.match(options, /renderPrivacySnapshot/);
   assert.match(tool, /getNativeFileSourcePath\(services\.wasm\.currentFileHandle\)/);
-  assert.match(settings, /createSection\('보안·개인정보'\)/);
-  assert.match(settings, /renderPrivacySnapshot/);
-  assert.match(sidebar, /getDocumentLocation:/);
+  assert.doesNotMatch(settings, /createSection\('보안·개인정보'\)/);
+  assert.doesNotMatch(settings, /renderPrivacySnapshot/);
+  assert.doesNotMatch(sidebar, /getDocumentLocation:/);
 });
