@@ -458,7 +458,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
       <a href="#flow">예시</a>
       <a href="#connect">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub<span class="gh-stars"></span></a>
-      <a class="btn btn--fill btn--sm" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">다운로드</a>
+      <a class="btn btn--fill btn--sm" data-download="mac" href="https://github.com/ghandhitechnology/Rauhwpx/releases/latest">다운로드</a>
     </nav>
   </div>
 </header>
@@ -472,10 +472,10 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
         <h1>귀찮은 이를 위한 한글,<br><span class="ul">Rauhwpx<svg viewBox="0 0 200 10" preserveAspectRatio="none" aria-hidden="true"><path d="M2 7.2C33 3.4 66 2.3 100 3.6c31 1.2 63 3.4 98 1.1" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span></h1>
         <p class="lead"><span class="nb">한글 파일 편집이랑 에이전트와의 대화,</span> <span class="nb">한 화면에서 융합</span></p>
         <div class="hero-actions">
-          <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">macOS용 다운로드</a>
+          <a class="btn btn--fill" data-download="mac" href="https://github.com/ghandhitechnology/Rauhwpx/releases/latest">macOS용 다운로드</a>
           <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">Star on GitHub<span class="gh-stars"></span></a>
           <a class="hero-actions__tip" href="donate.html">후원하기</a>
-          <a class="hero-actions__tip hero-actions__tip--right" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-x64.exe">Windows용 다운로드</a>
+          <a class="hero-actions__tip hero-actions__tip--right" data-download="windows" href="https://github.com/ghandhitechnology/Rauhwpx/releases/latest">Windows용 다운로드</a>
         </div>
       </div>
 
@@ -705,7 +705,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
       <p class="label">다운로드</p>
       <h2 class="h2">문서작업은 이제 한곳에서 해결하세요</h2>
       <div class="cta">
-        <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">macOS용 다운로드</a>
+        <a class="btn btn--fill" data-download="mac" href="https://github.com/ghandhitechnology/Rauhwpx/releases/latest">macOS용 다운로드</a>
         <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">Star on GitHub<span class="gh-stars"></span></a>
       </div>
       <p class="cta-tip"><a href="donate.html">후원하기</a></p>
@@ -725,7 +725,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
       <a href="donate.html">후원하기</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx/releases">릴리스</a>
     </nav>
-    <p class="colophon">v0.1.10 개발자 빌드. 출시가 아닙니다. <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a> 포크. MIT. 한컴이 아니며 문서를 호스팅하지 않습니다. macOS 빌드는 서명되어 있습니다. Windows는 미서명이고 제한적입니다. <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-x64.exe">Windows</a> / <a href="https://github.com/ghandhitechnology/Rauhwpx/issues/new">이슈</a></p>
+    <p class="colophon"><span data-release-version>v1.0.0</span> 정식 버전. <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a> 포크. MIT. 한컴이 아니며 문서를 호스팅하지 않습니다. macOS 빌드는 서명되어 있습니다. Windows는 미서명입니다. <a data-download="windows" href="https://github.com/ghandhitechnology/Rauhwpx/releases/latest">Windows</a> / <a href="https://github.com/ghandhitechnology/Rauhwpx/issues/new">이슈</a></p>
   </div>
 </footer>
 
@@ -761,6 +761,36 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     }
   },{rootMargin:'0px 0px -6% 0px',threshold:0.04});
   items.forEach(function(el){io.observe(el);});
+})();
+</script>
+
+<script>
+(function(){
+  var releaseUrl='https://github.com/ghandhitechnology/Rauhwpx/releases/latest';
+  var links={
+    mac:document.querySelectorAll('[data-download="mac"]'),
+    windows:document.querySelectorAll('[data-download="windows"]')
+  };
+  function setLinks(kind,url){
+    Array.prototype.forEach.call(links[kind],function(link){link.href=url;});
+  }
+  setLinks('mac',releaseUrl);
+  setLinks('windows',releaseUrl);
+  fetch('https://api.github.com/repos/ghandhitechnology/Rauhwpx/releases/latest')
+    .then(function(r){return r.ok?r.json():null;})
+    .then(function(release){
+      if(!release||!Array.isArray(release.assets))return;
+      var mac=release.assets.find(function(asset){return /arm64\.dmg$/i.test(asset.name);});
+      var windows=release.assets.find(function(asset){return /x64\.exe$/i.test(asset.name);});
+      if(mac)setLinks('mac',mac.browser_download_url);
+      if(windows)setLinks('windows',windows.browser_download_url);
+      if(release.tag_name){
+        Array.prototype.forEach.call(document.querySelectorAll('[data-release-version]'),function(slot){
+          slot.textContent=release.tag_name;
+        });
+      }
+    })
+    .catch(function(){});
 })();
 </script>
 
