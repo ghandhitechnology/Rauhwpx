@@ -282,6 +282,13 @@ export interface SettingsPanel {
   element: HTMLElement;
   open(): void;
   close(): void;
+  /** 첫 실행 마법사 카드에서도 같은 설치/로그인 모달을 연다. */
+  openAgentSetup(agent: AgentName): void;
+  /**
+   * 모달을 연 뒤 허브 상태에 따라 설치 또는 대표 OAuth 를 바로 시작한다.
+   * 이미 로그인된 프로바이더는 완료 화면만 보여 준다.
+   */
+  beginAgentConnect(agent: AgentName): void;
   handleEvent(ev: SidebarEvent): void;
   dispose(): void;
 }
@@ -1310,6 +1317,51 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }, 1600);
   }
 
+  function isAgentLoggedIn(agent: AgentName): boolean {
+    if (agent === 'pi' && piStatus?.setupComplete === true) return true;
+    const status = setupStatuses?.[agent];
+    return status?.connected === true || status?.setupComplete === true || status?.authenticated === true;
+  }
+
+  function isAgentInstalled(agent: AgentName): boolean {
+    const status = setupStatuses?.[agent];
+    const health = providers?.[agent];
+    return health?.available === true || status?.available === true || status?.installed === true;
+  }
+
+  async function continueAgentConnect(agent: AgentName): Promise<void> {
+    await refreshSetupStatuses();
+    if (agent === 'pi') {
+      try {
+        const next = await bridge.requestPiStatus();
+        if (next) piStatus = next;
+      } catch {
+        // 설치 여부는 아래 상태로 판단한다.
+      }
+    }
+    if (disposed || setupAgent !== agent) return;
+    renderAgentSetup();
+    if (connectionState !== 'connected') return;
+    if (isAgentLoggedIn(agent)) return;
+    if (isAgentInstalled(agent) || (agent === 'pi' && piStatus?.installed === true)) {
+      setupReauth = true;
+      await startSetupAuth('oauth');
+      return;
+    }
+    await installSelectedAgent();
+    if (disposed || setupAgent !== agent) return;
+    if (isAgentLoggedIn(agent)) return;
+    if (isAgentInstalled(agent) || (agent === 'pi' && piStatus?.installed === true)) {
+      setupReauth = true;
+      await startSetupAuth('oauth');
+    }
+  }
+
+  function beginAgentConnect(agent: AgentName): void {
+    openAgentSetup(agent);
+    void continueAgentConnect(agent);
+  }
+
   function openAgentSetup(agent: AgentName): void {
     setupAgent = agent;
     setupMessage = '';
@@ -2191,6 +2243,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       closeAgentSetup();
       finishTemplateName(null);
     },
+    openAgentSetup,
+    beginAgentConnect,
     handleEvent(ev: SidebarEvent): void {
       switch (ev.type) {
         case 'connection':

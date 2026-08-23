@@ -260,13 +260,21 @@ function errorCopy(code: string, fallback: string): string {
   }
 }
 
+export interface WritingStyleCalibrationOpenOptions {
+  /** 첫 실행 마법사 위에 올릴 때 쌓임 순서를 높인다. */
+  elevate?: boolean;
+}
+
 export interface WritingStyleCalibrationUi {
-  open(): void;
+  open(options?: WritingStyleCalibrationOpenOptions): void;
   handleEvent(event: SidebarEvent): void;
   dispose(): void;
 }
 
-export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyleCalibrationUi {
+export function createWritingStyleCalibration(
+  bridge: AgentBridge,
+  options?: { onDismiss?: (result: { completed: boolean }) => void },
+): WritingStyleCalibrationUi {
   const prefs = loadAgentPrefs();
   const activeAgent = bridge.getActiveAgent();
   let language: WritingStyleLanguage = 'ko';
@@ -879,9 +887,10 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
     bridge.requestWritingStyleStatus();
   }
 
-  function open(): void {
+  function open(openOptions?: WritingStyleCalibrationOpenOptions): void {
     if (disposed || overlay.isConnected) return;
     lastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    overlay.classList.toggle('ag-elevated', openOptions?.elevate === true);
     document.body.appendChild(overlay);
     overlay.setAttribute('aria-hidden', 'false');
     requestRuntimeStatus();
@@ -900,6 +909,7 @@ export function createWritingStyleCalibration(bridge: AgentBridge): WritingStyle
     lastFocus?.focus();
     overlay.classList.remove('ag-open');
     overlay.setAttribute('aria-hidden', 'true');
+    options?.onDismiss?.({ completed: activeStatus?.active === true });
     window.setTimeout(() => overlay.remove(), 180);
   }
 
