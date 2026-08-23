@@ -4,13 +4,13 @@ import type { PortableCloudTimelineV1 } from '../../cloud/timeline.ts';
 import type { CloudController } from '../../cloud/desktop-cloud.ts';
 import type {
   CloudDownloadResult,
-  CloudProfileDraft,
   CloudResultAction,
   CloudResultResolution,
   CloudSessionScope,
   CloudSnapshot,
   CloudTakeoverPayload,
 } from '../../cloud/types.ts';
+import { createCloudOnboarding } from './cloud-onboarding.ts';
 import { createIcon } from './icons.ts';
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -69,7 +69,7 @@ export interface CloudAgentUiDeps {
   onRequestTransfer(): void;
   onCancelPendingTransfer(): void;
   getScope(): CloudSessionScope;
-  onOpenSettings(): void;
+  onCloseSettings(): void;
   onLeaseChange(cloudOwned: boolean, sessionId: string | null): void;
   onTimeline(timeline: PortableCloudTimelineV1): void;
   onResultResolved(result: CloudDownloadResult, resolution: CloudResultResolution): void;
@@ -103,6 +103,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   let appliedTimelineKey = '';
   let selectedSessionId: string | null = null;
   let panelTrigger: HTMLButtonElement | null = null;
+  let setupActive = false;
 
   const sidebarButton = el('button', 'ag-header-icon-btn ag-cloud-btn') as HTMLButtonElement;
   sidebarButton.type = 'button';
@@ -160,146 +161,20 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   queueStrip.setAttribute('role', 'status');
   queueStrip.setAttribute('aria-live', 'polite');
 
-  const settingsElement = el('section', 'ag-settings-section ag-cloud-settings');
-  const settingsTitle = el('h3', 'ag-settings-section-title', 'Cloud VPS');
-  const settingsBody = el('div', 'ag-settings-section-body');
-  const settingsStatus = el('p', 'ag-cloud-settings-status', '클라우드 상태를 확인하는 중입니다.');
-
-  const profileName = field('프로필 이름', 'My VPS');
-  const host = field('호스트', '100.64.0.1 또는 vps.example.com');
-  const sshUser = field('SSH 사용자', 'ubuntu');
-  const sshPort = field('SSH 포트', '22', 'number');
-  sshPort.input.min = '1';
-  sshPort.input.max = '65535';
-  const auth = select('SSH 인증', [
-    ['ssh-agent', 'SSH agent'],
-    ['key-file', '키 파일'],
-  ]);
-  const keyPath = field('키 파일 경로', '/home/me/.ssh/id_ed25519');
-  const transport = select('연결', [
-    ['tailscale', 'Tailscale'],
-    ['https', '공개 HTTPS'],
-  ]);
-  const tailscaleHttpsPort = field('Tailscale HTTPS 포트', '443', 'number');
-  tailscaleHttpsPort.input.min = '1';
-  tailscaleHttpsPort.input.max = '65535';
-  tailscaleHttpsPort.input.value = '443';
-  const endpoint = field('HTTPS 주소', 'https://vps.example.com/rauhwpx-cloud');
-  const serverPublicKey = field('서버 ID 키', 'ed25519:...');
-  const profileActions = el('div', 'ag-settings-actions');
-  const saveProfile = button('프로필 저장', true);
-  const testProfile = button('연결 테스트');
-  const provision = button('서비스 설치');
-  profileActions.append(saveProfile, testProfile, provision);
-  const pair = field('페어링 코드', 'ABCD-EFGH-JKLM');
-  pair.input.autocomplete = 'one-time-code';
-  const pairButton = button('이 기기 페어링');
-  const pairRow = el('div', 'ag-cloud-pair-row');
-  pairRow.append(pair.field, pairButton);
-  settingsBody.append(
-    settingsStatus,
-    profileName.field,
-    host.field,
-    sshUser.field,
-    sshPort.field,
-    auth.field,
-    keyPath.field,
-    transport.field,
-    tailscaleHttpsPort.field,
-    endpoint.field,
-    serverPublicKey.field,
-    profileActions,
-    pairRow,
-  );
-  settingsElement.append(settingsTitle, settingsBody);
-
-  function field(label: string, placeholder: string, type = 'text') {
-    const root = el('label', 'ag-settings-field');
-    const labelNode = el('span', 'ag-settings-field-label', label);
-    const input = el('input', 'ag-settings-input') as HTMLInputElement;
-    input.type = type;
-    input.placeholder = placeholder;
-    root.append(labelNode, input);
-    return { field: root, input };
-  }
-
-  function select(label: string, options: ReadonlyArray<readonly [string, string]>) {
-    const root = el('label', 'ag-settings-field');
-    const labelNode = el('span', 'ag-settings-field-label', label);
-    const input = el('select', 'ag-settings-select') as HTMLSelectElement;
-    for (const [value, text] of options) {
-      const option = document.createElement('option');
-      option.value = value;
-      option.textContent = text;
-      input.appendChild(option);
-    }
-    root.append(labelNode, input);
-    return { field: root, input };
-  }
-
-  function button(label: string, primary = false): HTMLButtonElement {
-    const element = el('button', primary ? 'ag-settings-primary' : 'ag-settings-btn', label) as HTMLButtonElement;
-    element.type = 'button';
-    return element;
-  }
-
-  function readProfile(): CloudProfileDraft | null {
-    const port = Number(sshPort.input.value);
-    const servePort = Number(tailscaleHttpsPort.input.value);
-    if (!profileName.input.value.trim() || !host.input.value.trim() || !sshUser.input.value.trim()
-      || !Number.isSafeInteger(port) || port < 1 || port > 65535
-      || !Number.isSafeInteger(servePort) || servePort < 1 || servePort > 65535) {
-      deps.onError('클라우드 프로필의 이름, 호스트, SSH 포트와 Tailscale HTTPS 포트를 확인하세요.');
-      return null;
-    }
-    if (auth.input.value === 'key-file' && !keyPath.input.value.trim()) {
-      deps.onError('사용할 SSH 키 파일 경로를 입력하세요.');
-      return null;
-    }
-    if (transport.input.value === 'https' && !endpoint.input.value.trim()) {
-      deps.onError('공개 HTTPS 주소를 입력하세요.');
-      return null;
-    }
-    return {
-      name: profileName.input.value.trim(),
-      host: host.input.value.trim(),
-      sshUser: sshUser.input.value.trim(),
-      sshPort: port,
-      tailscaleHttpsPort: servePort,
-      auth: auth.input.value === 'key-file'
-        ? { kind: 'key-file', keyPath: keyPath.input.value.trim() }
-        : { kind: 'ssh-agent' },
-      transport: transport.input.value === 'https'
-        ? { kind: 'https', endpoint: endpoint.input.value.trim() }
-        : { kind: 'tailscale' },
-      ...(serverPublicKey.input.value.trim() ? { serverPublicKey: serverPublicKey.input.value.trim() } : {}),
-    };
-  }
-
-  function fillProfile(profile: CloudProfileDraft): void {
-    profileName.input.value = profile.name;
-    host.input.value = profile.host;
-    sshUser.input.value = profile.sshUser;
-    sshPort.input.value = String(profile.sshPort);
-    tailscaleHttpsPort.input.value = String(profile.tailscaleHttpsPort ?? 443);
-    auth.input.value = profile.auth.kind;
-    keyPath.input.value = profile.auth.kind === 'key-file' ? profile.auth.keyPath : '';
-    transport.input.value = profile.transport.kind;
-    endpoint.input.value = profile.transport.kind === 'https' ? profile.transport.endpoint : '';
-    serverPublicKey.input.value = profile.serverPublicKey ?? '';
-    syncConditionalFields();
-  }
-
-  function syncConditionalFields(): void {
-    keyPath.field.hidden = auth.input.value !== 'key-file';
-    tailscaleHttpsPort.field.hidden = transport.input.value !== 'tailscale';
-    endpoint.field.hidden = transport.input.value !== 'https';
-  }
+  const onboarding = createCloudOnboarding({
+    controller: deps.controller,
+    onRequestTransfer: deps.onRequestTransfer,
+    onCloseSettings: deps.onCloseSettings,
+    onSetupStateChange: (active) => {
+      setupActive = active;
+      renderButtons();
+    },
+  });
+  const settingsElement = onboarding.settingsElement;
 
   function setBusy(next: boolean): void {
     busy = next;
     statusPanel.setAttribute('aria-busy', String(next));
-    for (const control of [saveProfile, testProfile, provision, pairButton]) control.disabled = next;
     sessionSelect.disabled = next;
   }
 
@@ -322,10 +197,10 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     }
   }
 
-  function action(label: string, run: () => void, tone = ''): HTMLButtonElement {
+  function action(label: string, run: (event: MouseEvent) => void, tone = ''): HTMLButtonElement {
     const item = el('button', `ag-cloud-action ${tone}`.trim(), label) as HTMLButtonElement;
     item.type = 'button';
-    item.addEventListener('click', run);
+    item.addEventListener('click', (event) => run(event));
     return item;
   }
 
@@ -398,14 +273,20 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     }
     switch (session.kind) {
       case 'idle':
-        panelStatus.textContent = snapshot.profile.kind === 'configured' ? 'VPS가 준비되어 있습니다.' : 'VPS 설정이 필요합니다.';
+        const profileReady = snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready';
+        panelStatus.textContent = profileReady
+          ? 'VPS가 준비되어 있습니다.'
+          : snapshot.profile.kind === 'configured'
+            ? 'VPS 연결을 확인해야 합니다.'
+            : 'VPS 설정이 필요합니다.';
         panelDetail.textContent = snapshot.profile.kind === 'configured'
           ? `${snapshot.profile.profile.name} · ${snapshot.profile.profile.host}`
           : 'SSH와 Tailscale 연결을 설정하세요.';
-        panelActions.append(action(snapshot.profile.kind === 'configured' ? '클라우드로 계속' : '설정 열기', () => {
+        panelActions.append(action(profileReady ? '클라우드로 계속' : 'Cloud 설정', () => {
+          const focusTrigger = panelTrigger ?? sidebarButton;
           closePanel();
-          if (snapshot.profile.kind === 'configured') deps.onRequestTransfer();
-          else deps.onOpenSettings();
+          if (profileReady) deps.onRequestTransfer();
+          else onboarding.open('transfer', focusTrigger);
         }, 'ag-primary'));
         break;
       case 'waiting-local-turn':
@@ -489,20 +370,6 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     }
   }
 
-  function renderSettings(): void {
-    if (!snapshot.available) {
-      settingsStatus.textContent = '이 데스크톱 빌드에는 클라우드 연결 기능이 없습니다.';
-      return;
-    }
-    if (snapshot.profile.kind === 'unconfigured') {
-      settingsStatus.textContent = '사용자 VPS 한 대를 SSH로 연결합니다. Tailscale 연결을 권장합니다.';
-      return;
-    }
-    fillProfile(snapshot.profile.profile);
-    const detail = snapshot.profile.message ? ` · ${snapshot.profile.message}` : '';
-    settingsStatus.textContent = `${snapshot.profile.connection === 'ready' ? '연결됨' : snapshot.profile.connection}${detail}`;
-  }
-
   function renderQueue(): void {
     const queued = snapshot.queuedMessages.filter((message) => message.state === 'queued');
     queueStrip.hidden = queued.length === 0;
@@ -521,12 +388,12 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     workspaceButton.hidden = !snapshot.available;
     if (!snapshot.available && panelOpen) closePanel(false);
     const active = sessionIsActive(snapshot) || snapshot.session.kind === 'completed' || localTurnPending;
-    sidebarButton.classList.toggle('ag-active', active);
-    workspaceButton.classList.toggle('ag-active', active);
+    sidebarButton.classList.toggle('ag-active', active || setupActive);
+    workspaceButton.classList.toggle('ag-active', active || setupActive);
     const running = snapshot.session.kind === 'running';
-    sidebarButton.dataset.state = localTurnPending ? 'waiting' : snapshot.session.kind;
-    workspaceButton.dataset.state = localTurnPending ? 'waiting' : snapshot.session.kind;
-    const label = running ? '클라우드에서 작업 중' : active ? '클라우드 상태' : '클라우드로 계속';
+    sidebarButton.dataset.state = setupActive ? 'setup' : localTurnPending ? 'waiting' : snapshot.session.kind;
+    workspaceButton.dataset.state = setupActive ? 'setup' : localTurnPending ? 'waiting' : snapshot.session.kind;
+    const label = setupActive ? 'Cloud 환경 설정 중' : running ? '클라우드에서 작업 중' : active ? '클라우드 상태' : '클라우드로 계속';
     sidebarButton.setAttribute('aria-label', label);
     sidebarButton.title = label;
     workspaceButton.setAttribute('aria-label', label);
@@ -536,7 +403,6 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   function render(): void {
     renderButtons();
     renderPanel();
-    renderSettings();
     renderQueue();
     deps.onLeaseChange(snapshot.lease.owner === 'cloud', snapshot.lease.owner === 'cloud' ? snapshot.lease.sessionId : null);
     if (snapshot.timeline) {
@@ -572,7 +438,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     void deps.controller.refresh(selectedScope()).then(() => {
       if (snapshot.session.kind === 'idle' && !localTurnPending) {
         if (snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready') deps.onRequestTransfer();
-        else deps.onOpenSettings();
+        else onboarding.open('transfer', trigger);
         return;
       }
       if (panelOpen) closePanel(true); else openPanel(trigger);
@@ -588,36 +454,17 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       closePanel(true);
     }
   });
-  auth.input.addEventListener('change', syncConditionalFields);
-  transport.input.addEventListener('change', syncConditionalFields);
   sessionSelect.addEventListener('change', () => {
     selectedSessionId = sessionSelect.value || null;
     downloadedResult = null;
     void operation(() => deps.controller.refresh(selectedScope()));
   });
-  saveProfile.addEventListener('click', () => {
-    const profile = readProfile();
-    if (profile) void operation(() => deps.controller.saveProfile(profile));
-  });
-  testProfile.addEventListener('click', () => {
-    const profile = readProfile();
-    if (profile) void operation(() => deps.controller.testProfile(profile));
-  });
-  provision.addEventListener('click', () => void operation(() => deps.controller.provision('stable')));
-  pairButton.addEventListener('click', () => {
-    const code = pair.input.value.trim();
-    if (!code) return;
-    void operation(async () => {
-      await deps.controller.pair(code);
-      pair.input.value = '';
-    });
-  });
-
-  syncConditionalFields();
   const unsubscribe = deps.controller.subscribe((next) => {
     snapshot = next;
+    onboarding.sync(next);
     render();
   });
+  onboarding.sync(snapshot);
   void deps.controller.refresh(selectedScope()).catch(() => { render(); });
 
   return {
@@ -652,13 +499,13 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       });
     },
     openSettings() {
-      renderSettings();
       void deps.controller.refresh(selectedScope()).catch((error) => {
         deps.onError(error instanceof Error ? error.message : String(error));
       });
     },
     dispose() {
       unsubscribe();
+      onboarding.dispose();
       deps.controller.dispose();
       closePanel();
     },

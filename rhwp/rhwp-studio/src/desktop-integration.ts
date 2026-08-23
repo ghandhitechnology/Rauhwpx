@@ -131,8 +131,11 @@ export interface RhwpDesktopApi {
   cloudGetState?: (payload: CloudSessionScope) => Promise<unknown>;
   cloudSaveProfile?: (payload: { profile: CloudProfileDraft }) => Promise<unknown>;
   cloudTestProfile?: (payload: { profile?: CloudProfileDraft }) => Promise<unknown>;
-  cloudProvision?: (payload: { installChannel: 'stable' | 'prerelease' }) => Promise<unknown>;
-  cloudPair?: (payload: { code: string }) => Promise<unknown>;
+  cloudProvision?: (payload: {
+    installChannel: 'stable' | 'prerelease';
+    profile?: CloudProfileDraft;
+  }) => Promise<unknown>;
+  cloudPair?: (payload: { code: string; profile?: CloudProfileDraft }) => Promise<unknown>;
   cloudTransfer?: (payload: CloudTransferRequest) => Promise<unknown>;
   cloudSetTransferIntent?: (payload: CloudTransferIntentRequest) => Promise<unknown>;
   cloudReadReference?: (payload: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<unknown>;

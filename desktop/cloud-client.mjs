@@ -199,6 +199,8 @@ export class CloudClient {
   #accessToken = '';
   #accessExpiresAt = 0;
   #refreshPromise = null;
+  #profileGeneration = 0;
+  #credentialChain = Promise.resolve();
 
   constructor({ vault, fetchImpl = globalThis.fetch } = {}) {
     if (!vault) throw new Error('CloudClient requires a secret vault');
@@ -218,19 +220,90 @@ export class CloudClient {
   async saveProfile(raw) {
     const profile = normalizeCloudProfile(raw);
     const previous = await this.loadProfile().catch(() => null);
-    if (previous && previous.endpoint !== profile.endpoint) await this.disconnect();
-    await this.#vault.set(PROFILE_SECRET, JSON.stringify(profile));
-    this.#profile = profile;
-    return profile;
+    return this.activateProfile(profile, {
+      preserveCredentials: Boolean(previous && previous.endpoint === profile.endpoint),
+    });
+  }
+
+  async activateProfile(raw, {
+    tokens = null,
+    device,
+    preserveCredentials = false,
+  } = {}) {
+    const profile = normalizeCloudProfile(raw);
+    if (tokens && !validTokenBundle(tokens)) {
+      throw new CloudHttpError('Cloud pairing response is invalid');
+    }
+    return this.#withCredentialLock(async () => {
+      this.#profileGeneration += 1;
+      try {
+        const previous = {
+          profile: await this.#vault.get(PROFILE_SECRET),
+          refresh: await this.#vault.get(REFRESH_SECRET),
+          device: await this.#vault.get(DEVICE_SECRET),
+          cachedProfile: this.#profile,
+          accessToken: this.#accessToken,
+          accessExpiresAt: this.#accessExpiresAt,
+        };
+        const restore = async (key, value) => {
+          if (value === null) await this.#vault.delete(key);
+          else await this.#vault.set(key, value);
+        };
+        try {
+          await this.#vault.set(PROFILE_SECRET, JSON.stringify(profile));
+          if (tokens) await this.#vault.set(REFRESH_SECRET, tokens.refreshToken);
+          else if (!preserveCredentials) await this.#vault.delete(REFRESH_SECRET);
+          if (device !== undefined) {
+            if (device === null) await this.#vault.delete(DEVICE_SECRET);
+            else await this.#vault.set(DEVICE_SECRET, JSON.stringify(device));
+          } else if (!preserveCredentials) {
+            await this.#vault.delete(DEVICE_SECRET);
+          }
+        } catch (error) {
+          this.#profile = previous.cachedProfile;
+          this.#accessToken = previous.accessToken;
+          this.#accessExpiresAt = previous.accessExpiresAt;
+          try {
+            await restore(PROFILE_SECRET, previous.profile);
+            await restore(REFRESH_SECRET, previous.refresh);
+            await restore(DEVICE_SECRET, previous.device);
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              'Cloud profile activation failed and the previous credentials could not be fully restored',
+            );
+          }
+          throw error;
+        }
+        this.#profile = profile;
+        if (tokens) {
+          this.#accessToken = tokens.accessToken;
+          this.#accessExpiresAt = Date.parse(tokens.accessExpiresAt) || Date.now() + 14 * 60_000;
+        } else if (!preserveCredentials) {
+          this.#accessToken = '';
+          this.#accessExpiresAt = 0;
+        }
+        return profile;
+      } finally {
+        this.#profileGeneration += 1;
+      }
+    });
   }
 
   async disconnect() {
-    this.#accessToken = '';
-    this.#accessExpiresAt = 0;
-    await Promise.all([
-      this.#vault.delete(REFRESH_SECRET).catch(() => false),
-      this.#vault.delete(DEVICE_SECRET).catch(() => false),
-    ]);
+    return this.#withCredentialLock(async () => {
+      this.#profileGeneration += 1;
+      try {
+        this.#accessToken = '';
+        this.#accessExpiresAt = 0;
+        await Promise.all([
+          this.#vault.delete(REFRESH_SECRET).catch(() => false),
+          this.#vault.delete(DEVICE_SECRET).catch(() => false),
+        ]);
+      } finally {
+        this.#profileGeneration += 1;
+      }
+    });
   }
 
   async isPaired() {
@@ -248,23 +321,38 @@ export class CloudClient {
     }
   }
 
-  async health() {
-    const profile = await this.#requiredProfile();
-    return this.#request('/v1/health', { auth: false, expectedPin: Boolean(profile.serverPublicKey) });
+  async health(profileOverride = null) {
+    const profile = profileOverride ? normalizeCloudProfile(profileOverride) : await this.#requiredProfile();
+    return this.#request('/v1/health', {
+      auth: false,
+      expectedPin: Boolean(profile.serverPublicKey),
+      profile,
+    });
   }
 
-  async redeemPairingCode(code, deviceName) {
-    const profile = await this.#requiredProfile();
+  async redeemPairingCode(code, deviceName, { profile: profileOverride = null, persist = true } = {}) {
+    const profile = profileOverride ? normalizeCloudProfile(profileOverride) : await this.#requiredProfile();
     const result = await this.#request('/v1/pairing/redeem', {
       method: 'POST',
       auth: false,
       expectedPin: Boolean(profile.serverPublicKey),
       body: { code: String(code ?? '').trim(), deviceName: String(deviceName ?? '').trim() },
+      profile,
     });
     if (!validTokenBundle(result)) throw new CloudHttpError('Cloud pairing response is invalid');
-    await this.#acceptTokens(result);
-    if (result.device) await this.#vault.set(DEVICE_SECRET, JSON.stringify(result.device));
-    return { device: result.device, accessExpiresAt: result.accessExpiresAt };
+    if (persist) {
+      await this.activateProfile(profile, { tokens: result, device: result.device ?? null });
+    }
+    return {
+      device: result.device,
+      accessExpiresAt: result.accessExpiresAt,
+      ...(persist ? {} : { credentials: {
+        accessToken: result.accessToken,
+        accessExpiresAt: result.accessExpiresAt,
+        refreshToken: result.refreshToken,
+        device: result.device ?? null,
+      } }),
+    };
   }
 
   async profile() {
@@ -608,6 +696,12 @@ export class CloudClient {
     return profile;
   }
 
+  #withCredentialLock(operation) {
+    const run = this.#credentialChain.then(operation, operation);
+    this.#credentialChain = run.catch(() => {});
+    return run;
+  }
+
   async #acceptTokens(tokens) {
     this.#accessToken = tokens.accessToken;
     this.#accessExpiresAt = Date.parse(tokens.accessExpiresAt) || Date.now() + 14 * 60_000;
@@ -617,6 +711,7 @@ export class CloudClient {
   async #ensureAccessToken() {
     if (this.#accessToken && this.#accessExpiresAt - Date.now() > 30_000) return this.#accessToken;
     if (!this.#refreshPromise) {
+      const profileGeneration = this.#profileGeneration;
       this.#refreshPromise = (async () => {
         const refreshToken = await this.#vault.get(REFRESH_SECRET);
         if (!refreshToken) throw new CloudHttpError('This device must be paired with the VPS', {
@@ -630,8 +725,15 @@ export class CloudClient {
           retryAuth: false,
         });
         if (!validTokenBundle(tokens)) throw new CloudHttpError('Cloud token response is invalid');
-        await this.#acceptTokens(tokens);
-        return this.#accessToken;
+        return this.#withCredentialLock(async () => {
+          if (profileGeneration !== this.#profileGeneration) {
+            throw new CloudHttpError('Cloud profile changed during token refresh', {
+              code: 'PROFILE_CHANGED',
+            });
+          }
+          await this.#acceptTokens(tokens);
+          return this.#accessToken;
+        });
       })().finally(() => { this.#refreshPromise = null; });
     }
     return this.#refreshPromise;
@@ -640,13 +742,13 @@ export class CloudClient {
   async #request(pathname, options = {}) {
     const response = await this.#rawRequest(pathname, options);
     const body = await responseJson(response);
-    const profile = await this.#requiredProfile();
+    const profile = options.profile ?? await this.#requiredProfile();
     verifyServerPin(profile, response, body);
     return body;
   }
 
   async #rawRequest(pathname, options = {}) {
-    const profile = await this.#requiredProfile();
+    const profile = options.profile ?? await this.#requiredProfile();
     const auth = options.auth !== false;
     const headers = { ...(options.headers ?? {}) };
     const method = String(options.method ?? 'GET').toUpperCase();

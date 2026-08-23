@@ -26,7 +26,8 @@ function uiProfileToStored(input, current = null) {
     endpoint,
     provider: source.provider ?? current?.provider ?? 'codex',
     transport: transport === 'tailscale' ? 'tailscale' : 'public-https',
-    serverPublicKey: source.serverPublicKey ?? current?.serverPublicKey ?? '',
+    serverPublicKey: source.serverPublicKey
+      ?? (current?.endpoint === endpoint ? current.serverPublicKey : ''),
     tailscaleHttpsPort,
     limits: source.limits ?? current?.limits,
     ssh: {
@@ -286,7 +287,7 @@ export class CloudCoordinator extends EventEmitter {
     });
     let health = null;
     if (current && profile.endpoint === current.endpoint) {
-      health = await this.#client.health().catch((error) => ({ ok: false, error: error.message }));
+      health = await this.#client.health(profile).catch((error) => ({ ok: false, error: error.message }));
     }
     return this.snapshot({
       profileConnection: health?.ok === false ? 'error' : 'ready',
@@ -295,9 +296,10 @@ export class CloudCoordinator extends EventEmitter {
     });
   }
 
-  async provision({ installChannel = 'stable' } = {}) {
-    const profile = await this.#client.loadProfile();
-    if (!profile) throw new Error('Save the VPS profile before provisioning');
+  async provision({ installChannel = 'stable', profile: profileDraft } = {}) {
+    const current = await this.#client.loadProfile().catch(() => null);
+    const profile = profileDraft ? uiProfileToStored(profileDraft, current) : current;
+    if (!profile) throw new Error('Provide a VPS profile before provisioning');
     this.#emit({ type: 'provision-started' });
     const receipt = await this.#provisioner.provision(profile.ssh, {
       channel: installChannel,
@@ -312,27 +314,56 @@ export class CloudCoordinator extends EventEmitter {
       serverPublicKey: receipt.serverPublicKey,
       tailscaleHttpsPort: receipt.tailscaleHttpsPort ?? profile.tailscaleHttpsPort,
     });
-    await this.#client.saveProfile(updated);
+    let credentials = null;
+    let preserveCredentials = false;
     if (receipt.pairingCode) {
-      await this.#client.redeemPairingCode(receipt.pairingCode, hostname());
-    } else if (!await this.#client.isPaired()) {
-      throw new Error('VPS installer did not return the initial pairing code');
+      const pairing = await this.#client.redeemPairingCode(receipt.pairingCode, hostname(), {
+        profile: updated,
+        persist: false,
+      });
+      credentials = pairing.credentials;
+    } else {
+      preserveCredentials = Boolean(
+        current
+        && current.endpoint === updated.endpoint
+        && current.serverPublicKey === updated.serverPublicKey
+        && await this.#client.isPaired(),
+      );
+      if (!preserveCredentials) {
+        throw new Error('VPS installer did not return the initial pairing code');
+      }
     }
-    const health = await this.#client.health();
+    const health = await this.#client.health(updated);
     if (health.ok !== true || health.serverPublicKey !== receipt.serverPublicKey) {
       throw new Error('Provisioned cloud service failed identity verification');
     }
+    await this.#client.activateProfile(updated, credentials ? {
+      tokens: credentials,
+      device: credentials.device,
+    } : { preserveCredentials });
     const snapshot = await this.snapshot({ extra: { provision: { ok: true, receipt, health } } });
     this.#emit({ type: 'provision-completed', snapshot });
     return snapshot;
   }
 
-  async pair({ code }) {
-    const profile = await this.#client.loadProfile();
+  async pair({ code, profile: profileDraft } = {}) {
+    const current = await this.#client.loadProfile().catch(() => null);
+    const profile = profileDraft ? uiProfileToStored(profileDraft, current) : current;
     if (!profile?.serverPublicKey) {
       throw new Error('Enter the VPS server identity key before pairing this device');
     }
-    await this.#client.redeemPairingCode(code, hostname());
+    const pairing = await this.#client.redeemPairingCode(code, hostname(), {
+      profile,
+      persist: false,
+    });
+    const health = await this.#client.health(profile);
+    if (health.ok !== true || health.serverPublicKey !== profile.serverPublicKey) {
+      throw new Error('Paired cloud service failed identity verification');
+    }
+    await this.#client.activateProfile(profile, {
+      tokens: pairing.credentials,
+      device: pairing.credentials.device,
+    });
     const snapshot = await this.snapshot();
     this.#emit({ type: 'paired', snapshot });
     return snapshot;

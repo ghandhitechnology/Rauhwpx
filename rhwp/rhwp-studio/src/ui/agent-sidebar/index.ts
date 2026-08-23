@@ -1475,7 +1475,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     onRequestTransfer: () => requestCloudTransfer(),
     onCancelPendingTransfer: () => cancelPendingCloudTransfer(),
     getScope: () => ({ threadId: currentThread.id, documentId: currentThread.documentId }),
-    onOpenSettings: () => setSettingsPanelOpen(true),
+    onCloseSettings: () => setSettingsPanelOpen(false),
     onLeaseChange: (cloudOwned, sessionId) => {
       deps.setCloudDocumentLease?.(cloudOwned, sessionId);
       queueMicrotask(() => updateComposer());

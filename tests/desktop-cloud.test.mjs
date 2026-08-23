@@ -326,6 +326,352 @@ test('client rotates tokens, verifies server pin, and parses SSE frames', async 
   assert.equal(parsed.rest, 'partial');
 });
 
+test('candidate provisioning keeps the working profile and credentials when verification fails', async () => {
+  const candidateIdentity = generateKeyPairSync('ed25519');
+  const candidateKey = `ed25519:${candidateIdentity.publicKey.export({
+    type: 'spki', format: 'der',
+  }).toString('base64url')}`;
+  const oldProfile = normalizeCloudProfile({
+    endpoint: 'https://old.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'old.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const oldDevice = JSON.stringify({ id: 'old-device' });
+  const vault = memoryVault({
+    'cloud.profile': JSON.stringify(oldProfile),
+    'cloud.refresh': 'old-refresh',
+    'cloud.device': oldDevice,
+  });
+  const assertWorkingSecrets = () => {
+    assert.equal(vault.values.get('cloud.profile'), JSON.stringify(oldProfile));
+    assert.equal(vault.values.get('cloud.refresh'), 'old-refresh');
+    assert.equal(vault.values.get('cloud.device'), oldDevice);
+  };
+  const oldFetch = signedFetch(async () => jsonResponse({ ok: true, serverPublicKey: SERVER_KEY }));
+  const candidateFetch = signedFetch(async (url) => {
+    assertWorkingSecrets();
+    if (url.endsWith('/v1/pairing/redeem')) return jsonResponse({
+      accessToken: 'candidate-access',
+      accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      refreshToken: 'candidate-refresh',
+      device: { id: 'candidate-device' },
+    });
+    return jsonResponse({ ok: false, serverPublicKey: candidateKey });
+  }, candidateIdentity);
+  const client = new CloudClient({
+    vault,
+    fetchImpl: (url, options) => (
+      new URL(url).hostname === 'old.example.ts.net'
+        ? oldFetch(url, options)
+        : candidateFetch(url, options)
+    ),
+  });
+  const coordinator = new CloudCoordinator({
+    client,
+    store: { list: async () => [] },
+    provisioner: {
+      provision: async () => {
+        assertWorkingSecrets();
+        return {
+          endpoint: 'https://candidate.example.ts.net/rauhwpx-cloud',
+          serverPublicKey: candidateKey,
+          pairingCode: 'ABCD-EFGH-JKLM',
+          tailscaleHttpsPort: 443,
+        };
+      },
+    },
+    recoveryDir: '/unused',
+  });
+
+  await assert.rejects(coordinator.provision({
+    installChannel: 'stable',
+    profile: {
+      name: 'Candidate VPS',
+      host: 'candidate.example.ts.net',
+      sshUser: 'cloud',
+      sshPort: 22,
+      tailscaleHttpsPort: 443,
+      auth: { kind: 'ssh-agent' },
+      transport: { kind: 'tailscale' },
+    },
+  }), /identity verification/);
+  assertWorkingSecrets();
+  assert.equal((await client.loadProfile()).endpoint, oldProfile.endpoint);
+  assert.equal(await client.deviceId(), 'old-device');
+  assert.equal((await client.health()).ok, true);
+});
+
+test('candidate pairing keeps the working profile and credentials when health verification fails', async () => {
+  const candidateIdentity = generateKeyPairSync('ed25519');
+  const candidateKey = `ed25519:${candidateIdentity.publicKey.export({
+    type: 'spki', format: 'der',
+  }).toString('base64url')}`;
+  const oldProfile = normalizeCloudProfile({
+    endpoint: 'https://old-pair.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'old-pair.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const oldSecrets = {
+    'cloud.profile': JSON.stringify(oldProfile),
+    'cloud.refresh': 'old-pair-refresh',
+    'cloud.device': JSON.stringify({ id: 'old-pair-device' }),
+  };
+  const vault = memoryVault(oldSecrets);
+  const candidateFetch = signedFetch(async (url) => {
+    for (const [key, value] of Object.entries(oldSecrets)) assert.equal(vault.values.get(key), value);
+    if (url.endsWith('/v1/pairing/redeem')) return jsonResponse({
+      accessToken: 'paired-access',
+      accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      refreshToken: 'paired-refresh',
+      device: { id: 'paired-device' },
+    });
+    return jsonResponse({ ok: true, serverPublicKey: SERVER_KEY });
+  }, candidateIdentity);
+  const client = new CloudClient({ vault, fetchImpl: candidateFetch });
+  const coordinator = new CloudCoordinator({
+    client,
+    store: { list: async () => [] },
+    provisioner: {},
+    recoveryDir: '/unused',
+  });
+
+  await assert.rejects(coordinator.pair({
+    code: 'ABCD-EFGH-JKLM',
+    profile: {
+      name: 'Existing Candidate',
+      host: 'paired.example.ts.net',
+      sshUser: 'cloud',
+      sshPort: 22,
+      tailscaleHttpsPort: 443,
+      auth: { kind: 'ssh-agent' },
+      transport: { kind: 'tailscale' },
+      serverPublicKey: candidateKey,
+    },
+  }), /identity verification/);
+  for (const [key, value] of Object.entries(oldSecrets)) assert.equal(vault.values.get(key), value);
+  assert.equal((await client.loadProfile()).endpoint, oldProfile.endpoint);
+  assert.equal(await client.deviceId(), 'old-pair-device');
+});
+
+test('profile activation restores every working secret when persistence fails', async () => {
+  const oldProfile = normalizeCloudProfile({
+    endpoint: 'https://old-activation.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'old-activation.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const oldSecrets = {
+    'cloud.profile': JSON.stringify(oldProfile),
+    'cloud.refresh': 'old-activation-refresh',
+    'cloud.device': JSON.stringify({ id: 'old-activation-device' }),
+  };
+  const baseVault = memoryVault(oldSecrets);
+  let rejectCandidateRefresh = true;
+  const vault = {
+    ...baseVault,
+    set: async (key, value) => {
+      if (key === 'cloud.refresh' && value === 'candidate-refresh' && rejectCandidateRefresh) {
+        rejectCandidateRefresh = false;
+        throw new Error('keychain unavailable');
+      }
+      return baseVault.set(key, value);
+    },
+  };
+  const client = new CloudClient({ vault, fetchImpl: async () => { throw new Error('unused'); } });
+  await client.loadProfile();
+
+  await assert.rejects(client.activateProfile({
+    endpoint: 'https://candidate-activation.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'candidate-activation.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  }, {
+    tokens: {
+      accessToken: 'candidate-access',
+      accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      refreshToken: 'candidate-refresh',
+    },
+    device: { id: 'candidate-device' },
+  }), /keychain unavailable/);
+  for (const [key, value] of Object.entries(oldSecrets)) assert.equal(vault.values.get(key), value);
+  assert.equal((await client.loadProfile()).endpoint, oldProfile.endpoint);
+  assert.equal(await client.deviceId(), 'old-activation-device');
+});
+
+test('a refresh from the old VPS cannot overwrite an activated candidate profile', async () => {
+  const oldProfile = normalizeCloudProfile({
+    endpoint: 'https://old-refresh.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'old-refresh.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const candidateProfile = normalizeCloudProfile({
+    endpoint: 'https://candidate-refresh.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'candidate-refresh.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const vault = memoryVault({
+    'cloud.profile': JSON.stringify(oldProfile),
+    'cloud.refresh': 'old-refresh',
+    'cloud.device': JSON.stringify({ id: 'old-device' }),
+  });
+  let releaseRefresh;
+  let markRefreshStarted;
+  const refreshStarted = new Promise((resolve) => { markRefreshStarted = resolve; });
+  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
+  const client = new CloudClient({
+    vault,
+    fetchImpl: signedFetch(async (url) => {
+      if (url.endsWith('/v1/token/refresh')) {
+        markRefreshStarted();
+        await refreshGate;
+        return jsonResponse({
+          accessToken: 'stale-access',
+          accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+          refreshToken: 'stale-refresh',
+        });
+      }
+      return jsonResponse({ ok: true, serverPublicKey: SERVER_KEY });
+    }),
+  });
+
+  const oldRequest = client.profile();
+  await refreshStarted;
+  await client.activateProfile(candidateProfile, {
+    tokens: {
+      accessToken: 'candidate-access',
+      accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      refreshToken: 'candidate-refresh',
+    },
+    device: { id: 'candidate-device' },
+  });
+  releaseRefresh();
+
+  await assert.rejects(oldRequest, (error) => error.code === 'PROFILE_CHANGED');
+  assert.equal((await client.loadProfile()).endpoint, candidateProfile.endpoint);
+  assert.equal(vault.values.get('cloud.refresh'), 'candidate-refresh');
+  assert.equal(vault.values.get('cloud.device'), JSON.stringify({ id: 'candidate-device' }));
+});
+
+test('a refresh started during candidate vault writes is invalidated before acceptance', async () => {
+  const oldProfile = normalizeCloudProfile({
+    endpoint: 'https://old-overlap.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'old-overlap.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const candidateProfile = normalizeCloudProfile({
+    endpoint: 'https://candidate-overlap.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'candidate-overlap.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const baseVault = memoryVault({
+    'cloud.profile': JSON.stringify(oldProfile),
+    'cloud.refresh': 'old-overlap-refresh',
+    'cloud.device': JSON.stringify({ id: 'old-overlap-device' }),
+  });
+  let releaseActivationWrite;
+  let markActivationWriteStarted;
+  let markRefreshStarted;
+  const activationWriteStarted = new Promise((resolve) => { markActivationWriteStarted = resolve; });
+  const activationWriteGate = new Promise((resolve) => { releaseActivationWrite = resolve; });
+  const refreshStarted = new Promise((resolve) => { markRefreshStarted = resolve; });
+  const vault = {
+    ...baseVault,
+    set: async (key, value) => {
+      if (key === 'cloud.profile' && value === JSON.stringify(candidateProfile)) {
+        markActivationWriteStarted();
+        await activationWriteGate;
+      }
+      return baseVault.set(key, value);
+    },
+  };
+  const client = new CloudClient({
+    vault,
+    fetchImpl: signedFetch(async (url) => {
+      if (url.endsWith('/v1/token/refresh')) {
+        markRefreshStarted();
+        return jsonResponse({
+          accessToken: 'overlap-stale-access',
+          accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+          refreshToken: 'overlap-stale-refresh',
+        });
+      }
+      return jsonResponse({ ok: true, serverPublicKey: SERVER_KEY });
+    }),
+  });
+
+  const activation = client.activateProfile(candidateProfile, {
+    tokens: {
+      accessToken: 'overlap-candidate-access',
+      accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      refreshToken: 'overlap-candidate-refresh',
+    },
+    device: { id: 'overlap-candidate-device' },
+  });
+  await activationWriteStarted;
+  const oldRequest = client.profile();
+  await refreshStarted;
+  releaseActivationWrite();
+  await activation;
+
+  await assert.rejects(oldRequest, (error) => error.code === 'PROFILE_CHANGED');
+  assert.equal((await client.loadProfile()).endpoint, candidateProfile.endpoint);
+  assert.equal(vault.values.get('cloud.refresh'), 'overlap-candidate-refresh');
+  assert.equal(vault.values.get('cloud.device'), JSON.stringify({ id: 'overlap-candidate-device' }));
+});
+
+test('a refresh started during disconnect cannot repopulate deleted credentials', async () => {
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://disconnect-overlap.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'disconnect-overlap.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const baseVault = memoryVault({
+    'cloud.profile': JSON.stringify(profile),
+    'cloud.refresh': 'disconnect-old-refresh',
+    'cloud.device': JSON.stringify({ id: 'disconnect-old-device' }),
+  });
+  let releaseDelete;
+  let markDeleteStarted;
+  let markRefreshStarted;
+  const deleteStarted = new Promise((resolve) => { markDeleteStarted = resolve; });
+  const deleteGate = new Promise((resolve) => { releaseDelete = resolve; });
+  const refreshStarted = new Promise((resolve) => { markRefreshStarted = resolve; });
+  const vault = {
+    ...baseVault,
+    delete: async (key) => {
+      if (key === 'cloud.refresh') {
+        markDeleteStarted();
+        await deleteGate;
+      }
+      return baseVault.delete(key);
+    },
+  };
+  const client = new CloudClient({
+    vault,
+    fetchImpl: signedFetch(async (url) => {
+      if (url.endsWith('/v1/token/refresh')) {
+        markRefreshStarted();
+        return jsonResponse({
+          accessToken: 'disconnect-stale-access',
+          accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+          refreshToken: 'disconnect-stale-refresh',
+        });
+      }
+      return jsonResponse({ ok: true, serverPublicKey: SERVER_KEY });
+    }),
+  });
+  await client.loadProfile();
+
+  const disconnecting = client.disconnect();
+  await deleteStarted;
+  const oldRequest = client.profile();
+  await refreshStarted;
+  releaseDelete();
+  await disconnecting;
+
+  await assert.rejects(oldRequest, (error) => error.code === 'PROFILE_CHANGED');
+  assert.equal(vault.values.has('cloud.refresh'), false);
+  assert.equal(vault.values.has('cloud.device'), false);
+});
+
 test('aborting SSE after headers cancels the blocked body read and releases its reader', async (t) => {
   const streamDigest = sha256Hex(Buffer.from('rauhwpx-sse-v1'));
   let closeStream;

@@ -25,9 +25,16 @@
 
 .ag-cloud-btn[data-state='transferring'] .ag-icon,
 .ag-cloud-btn[data-state='waiting'] .ag-icon,
+.ag-cloud-btn[data-state='setup'] .ag-icon,
 .ag-workspace-cloud-btn[data-state='transferring'] .ag-icon,
-.ag-workspace-cloud-btn[data-state='waiting'] .ag-icon {
+.ag-workspace-cloud-btn[data-state='waiting'] .ag-icon,
+.ag-workspace-cloud-btn[data-state='setup'] .ag-icon {
   color: var(--ui-warning-border, #d9a441);
+}
+
+.ag-cloud-btn[data-state='setup'] .ag-icon,
+.ag-workspace-cloud-btn[data-state='setup'] .ag-icon {
+  animation: ag-cloud-breathe 1.4s ease-in-out infinite;
 }
 
 .ag-workspace-cloud-btn {
@@ -298,21 +305,6 @@
 
 .ag-restored-task.ag-failed .ag-restored-task-title {
   color: var(--ag-err);
-}
-
-.ag-cloud-settings-status {
-  margin: 0;
-  color: var(--ag-text-muted);
-  font-size: var(--font-size-sm, 11px);
-}
-
-.ag-cloud-pair-row {
-  display: grid;
-  gap: 7px;
-}
-
-.ag-cloud-pair-row .ag-settings-field {
-  width: 100%;
 }
 
 @keyframes ag-cloud-breathe {

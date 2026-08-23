@@ -21,8 +21,11 @@ export interface CloudDesktopApi {
   cloudGetState?: (payload: CloudSessionScope) => Promise<unknown>;
   cloudSaveProfile?: (payload: { profile: CloudProfileDraft }) => Promise<unknown>;
   cloudTestProfile?: (payload: { profile?: CloudProfileDraft }) => Promise<unknown>;
-  cloudProvision?: (payload: { installChannel: 'stable' | 'prerelease' }) => Promise<unknown>;
-  cloudPair?: (payload: { code: string }) => Promise<unknown>;
+  cloudProvision?: (payload: {
+    installChannel: 'stable' | 'prerelease';
+    profile?: CloudProfileDraft;
+  }) => Promise<unknown>;
+  cloudPair?: (payload: { code: string; profile?: CloudProfileDraft }) => Promise<unknown>;
   cloudTransfer?: (payload: CloudTransferRequest) => Promise<unknown>;
   cloudSetTransferIntent?: (payload: CloudTransferIntentRequest) => Promise<unknown>;
   cloudReadReference?: (payload: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<unknown>;
@@ -40,8 +43,8 @@ export interface CloudController {
   refresh(scope: CloudSessionScope): Promise<CloudSnapshot>;
   saveProfile(profile: CloudProfileDraft): Promise<CloudSnapshot>;
   testProfile(profile?: CloudProfileDraft): Promise<CloudSnapshot>;
-  provision(installChannel?: 'stable' | 'prerelease'): Promise<CloudSnapshot>;
-  pair(code: string): Promise<CloudSnapshot>;
+  provision(installChannel?: 'stable' | 'prerelease', profile?: CloudProfileDraft): Promise<CloudSnapshot>;
+  pair(code: string, profile?: CloudProfileDraft): Promise<CloudSnapshot>;
   transfer(request: CloudTransferRequest): Promise<CloudSnapshot>;
   setTransferIntent(request: CloudTransferIntentRequest): Promise<CloudSnapshot>;
   readReference(reference: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>): Promise<Uint8Array>;
@@ -453,8 +456,11 @@ export function createCloudController(
     refresh: (scope) => call('cloudGetState', scope),
     saveProfile: (profile) => call('cloudSaveProfile', { profile }),
     testProfile: (profile) => call('cloudTestProfile', profile ? { profile } : {}),
-    provision: (installChannel = 'stable') => call('cloudProvision', { installChannel }),
-    pair: (code) => call('cloudPair', { code }),
+    provision: (installChannel = 'stable', profile) => call('cloudProvision', {
+      installChannel,
+      ...(profile ? { profile } : {}),
+    }),
+    pair: (code, profile) => call('cloudPair', { code, ...(profile ? { profile } : {}) }),
     transfer: (request) => call('cloudTransfer', request),
     setTransferIntent: (request) => call('cloudSetTransferIntent', request),
     async readReference(reference) {
