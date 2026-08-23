@@ -16,6 +16,7 @@ import { SAVE_FORMAT_DETAILS } from '@/command/save-format';
 import { exportDocumentForFormat } from '@/command/save-document-format';
 import {
   FORM_PACK_FORMS,
+  REFUSE_BINARY_HWP,
   formPackAssetUrl,
   isFormPackDocument,
   refuseBinaryHwpExport,
@@ -320,6 +321,10 @@ async function saveAsFormat(services: CommandServices, format: SaveFormat): Prom
 function reportSaveError(scope: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[${scope}] 저장 실패:`, message);
+  if (message === REFUSE_BINARY_HWP) {
+    showToast({ message: REFUSE_BINARY_HWP });
+    return;
+  }
   alert(`파일 저장에 실패했습니다:\n${message}`);
 }
 
@@ -819,7 +824,7 @@ export const fileCommands: CommandDef[] = [
     async execute(services) {
       const refused = refuseBinaryHwpExport('hwp', services.wasm.fileName);
       if (refused) {
-        alert(refused);
+        showToast({ message: refused });
         return;
       }
       await saveAsFormat(services, 'hwp');

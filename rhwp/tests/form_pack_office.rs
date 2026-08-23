@@ -9,6 +9,7 @@ use rhwp::document_core::DocumentCore;
 use rhwp::form_pack::{
     default_filled_hwpx_path, document_pack_id, refuse_binary_hwp_export,
     snapshot_table_geometry, BRAND_PUMUI, PACK_ID, REFUSE_BINARY_HWP,
+    REFUSE_BINARY_HWP_EN, REFUSE_BINARY_HWP_KO,
 };
 
 const PUMUI: &str = "form-pack/품의.hwpx";
@@ -191,8 +192,12 @@ fn fill_fields_cli_refuses_hwp_output_for_form_pack() {
     assert_ne!(output.status.code(), Some(0), "바이너리 HWP 출력은 실패해야 합니다");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("HWPX") || stderr.contains("거부"),
+        stderr.contains(REFUSE_BINARY_HWP_KO) && stderr.contains(REFUSE_BINARY_HWP_EN),
         "거절 안내가 있어야 합니다: {stderr}"
+    );
+    assert!(
+        !stderr.contains("바이너리") && !stderr.contains("경로"),
+        "사무실 안내에 개발 용어가 있으면 안 됩니다: {stderr}"
     );
     assert!(!out.exists(), "거절 시 HWP 파일을 쓰면 안 됩니다");
 }
