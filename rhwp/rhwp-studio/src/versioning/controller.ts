@@ -4,8 +4,17 @@ import { CompareSessionStore } from '../compare/session.ts';
 import { compareDocuments, compareSnapshots } from '../compare/diff-engine.ts';
 import type { EventBus } from '../core/event-bus.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
-import type { WasmBridge } from '../core/wasm-bridge.ts';
+import { WasmBridge } from '../core/wasm-bridge.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
+import {
+  MergeResolverWindow,
+  MergeWorkerClient,
+  type MergeAnalysis,
+  type MergeApplicationRequest,
+  type MergeAppliedReceipt,
+  type MaterializedMergeResult,
+} from '../merge/index.ts';
+import { MERGE_ANALYSIS_VERSION, MERGE_MANIFEST_VERSION } from '../merge/manifest.ts';
 import { getHistoryPayload, listHistoryMeta } from '../history/idb-store.ts';
 import { showPendingAgentEditsDialog } from '../ui/pending-agent-edits-dialog.ts';
 import { CompareResultWindow } from '../ui/compare-result-window.ts';
@@ -15,6 +24,7 @@ import type {
   VersionCommitView,
   VersionManagerController,
   VersionManagerState,
+  VersionMergeDraftView,
   VersionShelfView,
 } from '../ui/agent-sidebar/version-manager.ts';
 import {
@@ -24,6 +34,7 @@ import {
   documentId,
   layoutCommitGraph,
   shelfId,
+  mergeDraftId,
   tagName,
   VersionError,
   type BranchName,
@@ -33,8 +44,19 @@ import {
   type VersionRef,
   type VersionRepository,
   type VersionShelf,
+  type VersionMergeDraft,
+  type VersionMergeManifest,
+  type VersionBlob,
+  type MergeResolution,
 } from './index.ts';
-import { fingerprintBytes } from './hash.ts';
+import { fingerprintBytes, hashBytes } from './hash.ts';
+import {
+  commitCompositeMerge,
+  reconcileCompositeEditor,
+  reconcileCompositeHistoryTransition,
+} from './composite-merge.ts';
+import { mergeResourceDependencyErrors } from './merge-validation.ts';
+import { retainedMergeDraftLocalState } from './merge-draft.ts';
 import {
   VERSION_COMPARE_OPTIONS,
   analyzeVersionDiff,
@@ -46,7 +68,7 @@ const PAGE_SIZE = 100;
 const ACTIVE_BRANCH_PREFIX = 'rhwp-versions-active-branch-v1:';
 const AI_TITLES_KEY = 'rhwp-versions-ai-titles-v1';
 
-type CheckpointReason = 'manual' | 'save' | 'agent' | 'pre-restore' | 'pre-switch' | 'restore' | 'adopt';
+type CheckpointReason = 'manual' | 'save' | 'agent' | 'pre-restore' | 'pre-switch' | 'pre-merge' | 'merge' | 'restore' | 'adopt';
 
 interface VersionControllerDeps {
   store?: VersionGraphStore;
@@ -65,6 +87,7 @@ interface CreateCheckpointOptions {
   parents?: readonly [CommitId] | readonly [CommitId, CommitId];
   lastSaved?: boolean;
   author?: { kind: 'user' | 'system' | 'agent'; label: string };
+  merge?: import('./types.ts').VersionMergeMetadata;
   onPersisted?: () => void;
 }
 
@@ -92,6 +115,7 @@ function emptyState(): VersionManagerState {
     commits: [],
     branches: [],
     shelves: [],
+    mergeDrafts: [],
     legacy: [],
     hasMoreCommits: false,
     loading: false,
@@ -178,6 +202,37 @@ function tagForMessage(message: string, refs: readonly VersionRef[]): string {
   return `${base.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`;
 }
 
+function mergeDocumentFormat(bytes: Uint8Array): 'hwp' | 'hwpx' {
+  const ole = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+  if (bytes.length >= ole.length && ole.every((value, index) => bytes[index] === value)) return 'hwp';
+  if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b) return 'hwpx';
+  throw new VersionError('MERGE_VALIDATION_FAILED', 'Merge supports HWP and HWPX documents only');
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function manualAssetIds(resolutions: Readonly<Record<string, MergeResolution>>): VersionBlob['id'][] {
+  const ids = new Set<VersionBlob['id']>();
+  for (const resolution of Object.values(resolutions)) {
+    if (resolution.kind !== 'manual' || !resolution.payload || typeof resolution.payload !== 'object') continue;
+    const id = (resolution.payload as Record<string, unknown>).assetBlobId;
+    if (typeof id === 'string') ids.add(id as VersionBlob['id']);
+  }
+  return [...ids];
+}
+
+function createMergeDraftId(): ReturnType<typeof mergeDraftId> {
+  return mergeDraftId(globalThis.crypto?.randomUUID?.()
+    ?? `merge_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`);
+}
+
 export class DocumentVersionController implements VersionManagerController {
   readonly #store: VersionGraphStore;
   readonly #wasm: WasmBridge;
@@ -191,11 +246,14 @@ export class DocumentVersionController implements VersionManagerController {
   readonly #unsubscribers: Array<() => void> = [];
   readonly #compareStore: CompareSessionStore;
   readonly #compareWindow = new CompareResultWindow();
+  readonly #mergeWorker = new MergeWorkerClient();
+  readonly #mergeResolver = new MergeResolverWindow();
   #state = emptyState();
   #repository: VersionRepository | null = null;
   #refs: VersionRef[] = [];
   #commits: VersionCommit[] = [];
   #shelves: VersionShelf[] = [];
+  #mergeDrafts: VersionMergeDraft[] = [];
   #activeBranch: BranchName | null = null;
   readonly #activeBranches = new Map<string, BranchName>();
   #editorRevision = 0;
@@ -206,6 +264,13 @@ export class DocumentVersionController implements VersionManagerController {
   #operation = Promise.resolve();
   #pendingApprovalTimer: number | null = null;
   #suppressApprovalCheckpoint = 0;
+  #mergeResolverActive = false;
+  #mergeLockedHandler: InputHandler | null = null;
+  #mergePreviousReadOnly = false;
+  readonly #pendingMergeFinalizers = new WeakMap<
+    MergeAppliedReceipt,
+    (disposition: 'keep' | 'delete') => Promise<void>
+  >();
 
   constructor(deps: VersionControllerDeps) {
     this.#store = deps.store ?? new VersionGraphStore();
@@ -317,6 +382,8 @@ export class DocumentVersionController implements VersionManagerController {
         return;
       }
       const capture = captureVersionSnapshot(this.#wasm);
+      const mergeManifestEntries = await this.#mergeWorker.buildDocumentManifest(capture.bytes);
+      this.#assertWorkspaceToken(workspace);
       const analysis = analyzeVersionDiff(null, capture.compareSnapshot);
       const createdAt = Date.now();
       const result = await this.#store.createRepository({
@@ -333,6 +400,7 @@ export class DocumentVersionController implements VersionManagerController {
           author: { kind: 'user', label: '사용자' },
           stats: analysis.stats,
           createdAt,
+          mergeManifestEntries,
         },
       });
       if (!this.#isWorkspaceTokenCurrent(workspace, { editor: false })) return;
@@ -643,6 +711,48 @@ export class DocumentVersionController implements VersionManagerController {
     });
   }
 
+  async startMerge(sourceBranch: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation(true);
+      await this.#checkpointDirty('pre-merge');
+      await this.#refreshData(false);
+      await this.#openMergeResolver(branchName(sourceBranch));
+    });
+  }
+
+  async resumeMerge(id: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation(true);
+      const repository = this.#requireRepository();
+      const draft = await this.#store.getMergeDraft(mergeDraftId(id));
+      if (!draft || draft.repositoryId !== repository.id) {
+        throw new VersionError('MERGE_DRAFT_NOT_FOUND', 'Merge draft was not found');
+      }
+      if (draft.targetBranch !== this.#requireActiveBranch().name) {
+        throw new VersionError('STALE_WORKSPACE', `Switch to ${draft.targetBranch} before resuming this merge`);
+      }
+      await this.#checkpointDirty('pre-merge');
+      await this.#refreshData(false);
+      await this.#openMergeResolver(draft.sourceBranch, draft);
+    });
+  }
+
+  async discardMergeDraft(id: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation();
+      const repository = this.#requireRepository();
+      const draft = await this.#store.getMergeDraft(mergeDraftId(id));
+      if (!draft || draft.repositoryId !== repository.id) {
+        throw new VersionError('MERGE_DRAFT_NOT_FOUND', 'Merge draft was not found');
+      }
+      await this.#store.deleteMergeDraft(repository.id, draft.id, draft.updatedAt);
+      await this.#refreshData(true);
+    });
+  }
+
   async createTag(name: string, target: string): Promise<void> {
     await this.#enqueue(async () => {
       await this.#refreshData(false);
@@ -809,6 +919,11 @@ export class DocumentVersionController implements VersionManagerController {
     await this.#enqueue(async () => {
       await this.#refreshData(false);
       await this.#guardMutation();
+      // A composite merge Redo may be the only remaining owner of its merge
+      // commit after Undo. Do not collect that commit out from under history.
+      if (this.#getInputHandler()?.canRedo()) {
+        throw new VersionError('VERSION_STORE_FAILED', 'Redo or replace pending editor history before garbage collection');
+      }
       const workspace = this.#captureWorkspaceToken();
       const repository = this.#requireRepository();
       await this.#store.collectGarbage(repository.id, repository.revision);
@@ -821,6 +936,9 @@ export class DocumentVersionController implements VersionManagerController {
     for (const unsubscribe of this.#unsubscribers) unsubscribe();
     this.#listeners.clear();
     this.#compareWindow.hide();
+    this.#mergeWorker.dispose();
+    if (this.#mergeResolver.isOpen()) void this.#mergeResolver.close();
+    this.#setMergeResolverLock(false);
     if (this.#ownsStore) void this.#store.close();
   }
 
@@ -879,6 +997,9 @@ export class DocumentVersionController implements VersionManagerController {
 
   async #guardMutation(resolvePending = false): Promise<void> {
     this.#guardSaved();
+    if (this.#mergeResolverActive) {
+      throw new VersionError('MERGE_IN_PROGRESS', 'Finish or close the open merge review first');
+    }
     const documentAtStart = this.#getDocumentId();
     if (this.#agentBridge.isTurnRunning()) {
       throw new VersionError('ACTIVE_AGENT_TURN', 'An agent turn is still running');
@@ -904,6 +1025,716 @@ export class DocumentVersionController implements VersionManagerController {
       }
     } finally {
       this.#suppressApprovalCheckpoint -= 1;
+    }
+  }
+
+  async #openMergeResolver(
+    sourceName: BranchName,
+    previousDraft?: VersionMergeDraft,
+  ): Promise<void> {
+    const workspace = this.#captureWorkspaceToken();
+    const repository = this.#requireRepository();
+    const targetBranch = this.#requireActiveBranch();
+    const sourceBranch = await this.#store.getBranch(repository.id, sourceName);
+    if (!sourceBranch) throw new VersionError('REF_NOT_FOUND', 'Merge source branch was not found');
+    if (sourceBranch.name === targetBranch.name) {
+      throw new VersionError('CURRENT_BRANCH', 'A branch cannot be merged into itself');
+    }
+    const relation = await this.#store.getMergeRelation(repository.id, targetBranch.target, sourceBranch.target);
+    this.#assertWorkspaceToken(workspace);
+    if (relation.relation === 'already-integrated') throw new Error('Already merged.');
+    const [currentCommit, incomingCommit] = await Promise.all([
+      this.#requireCommit(targetBranch.target),
+      this.#requireCommit(sourceBranch.target),
+    ]);
+    const baseCommits = await Promise.all(relation.baseCommitIds.map((id) => this.#requireCommit(id)));
+    if (baseCommits.length === 0) {
+      throw new VersionError('MERGE_VALIDATION_FAILED', 'No common ancestor was found');
+    }
+    const loadCommit = async (commit: VersionCommit) => {
+      const [snapshot, blob] = await Promise.all([
+        this.#store.getCompareSnapshot(commit.compareSnapshotId),
+        this.#store.getBlob(commit.blobId),
+      ]);
+      if (!snapshot || !blob) throw new VersionError('CORRUPT_BLOB', `Merge data for ${commit.id} is missing`);
+      return { commit, snapshot: snapshot.snapshot, blob };
+    };
+    const [current, incoming, ...bases] = await Promise.all([
+      loadCommit(currentCommit),
+      loadCommit(incomingCommit),
+      ...baseCommits.map(loadCommit),
+    ]);
+    this.#assertWorkspaceToken(workspace);
+    const manifestMemo = new Map<CommitId, Promise<VersionMergeManifest>>();
+    const [currentManifest, incomingManifest, ...baseManifests] = await Promise.all([
+      this.#ensureFullMergeManifest(repository.id, currentCommit.id, manifestMemo),
+      this.#ensureFullMergeManifest(repository.id, incomingCommit.id, manifestMemo),
+      ...baseCommits.map((commit) => this.#ensureFullMergeManifest(repository.id, commit.id, manifestMemo)),
+    ]);
+    const currentFormat = mergeDocumentFormat(current.blob.bytes);
+    const baseBytes = bases.length === 1
+      ? bases[0].blob.bytes
+      : await this.#mergeWorker.synthesizeVirtualBaseDocument(
+        bases.map((base) => base.blob.bytes),
+        currentFormat,
+        {
+          onProgress: (progress) => this.#eventBus.emit('merge-progress', progress),
+        },
+      );
+    const analysis = await this.#mergeWorker.analyzeDocument(
+      baseBytes,
+      current.blob.bytes,
+      incoming.blob.bytes,
+      {
+        manifests: {
+          // A synthesized virtual document has no single source path map. Empty
+          // base hints keep matching conservative while head manifests still
+          // propagate stable identities from legacy histories.
+          base: baseManifests.length === 1 ? baseManifests[0] : { entries: [] },
+          current: currentManifest,
+          incoming: incomingManifest,
+        },
+        onProgress: (progress) => this.#eventBus.emit('merge-progress', progress),
+      },
+    );
+    this.#assertWorkspaceToken(workspace);
+
+    const priorByFingerprint = new Map<string, MergeResolution>();
+    if (previousDraft) {
+      for (const conflict of previousDraft.conflicts) {
+        const resolution = previousDraft.resolutions[conflict.id];
+        if (resolution) priorByFingerprint.set(conflict.fingerprint, resolution);
+      }
+    }
+    const resolutions = Object.fromEntries(analysis.conflicts.flatMap((conflict) => {
+      const resolution = priorByFingerprint.get(conflict.fingerprint);
+      return resolution ? [[conflict.id, resolution] as const] : [];
+    }));
+    const retainedLocalState = retainedMergeDraftLocalState(
+      previousDraft,
+      targetBranch,
+      sourceBranch,
+      resolutions,
+    );
+    const now = Date.now();
+    const draft: VersionMergeDraft = {
+      id: previousDraft?.id ?? createMergeDraftId(),
+      repositoryId: repository.id,
+      targetBranch: targetBranch.name,
+      sourceBranch: sourceBranch.name,
+      baseCommitIds: [...relation.baseCommitIds],
+      currentHead: targetBranch.target,
+      sourceHead: sourceBranch.target,
+      targetBranchRevision: targetBranch.revision,
+      sourceBranchRevision: sourceBranch.revision,
+      targetBranchGeneration: targetBranch.generation,
+      sourceBranchGeneration: sourceBranch.generation,
+      mode: relation.relation === 'fast-forward'
+        ? previousDraft?.mode === 'explicit-checkpoint' ? 'explicit-checkpoint' : 'fast-forward'
+        : 'diverged',
+      analysisVersion: MERGE_ANALYSIS_VERSION,
+      conflicts: analysis.conflicts,
+      resolutions,
+      automaticResult: analysis.result,
+      ...retainedLocalState,
+      createdAt: previousDraft?.createdAt ?? now,
+      updatedAt: now,
+    };
+    const storedDraft = await this.#store.putMergeDraft({
+      draft,
+      expectedUpdatedAt: previousDraft ? previousDraft.updatedAt : null,
+    });
+    const materialize = async (
+      mergeAnalysis: MergeAnalysis,
+      mergeResolutions: Readonly<Record<string, MergeResolution>>,
+      signal: AbortSignal,
+    ): Promise<MaterializedMergeResult> => {
+      const hydratedResolutions = await this.#hydrateMergeAssetResolutions(mergeResolutions);
+      const output = await this.#mergeWorker.materializeDocument(
+        baseBytes,
+        current.blob.bytes,
+        incoming.blob.bytes,
+        hydratedResolutions,
+        {
+          manifests: {
+            base: baseManifests.length === 1 ? baseManifests[0] : { entries: [] },
+            current: currentManifest,
+            incoming: incomingManifest,
+          },
+          signal,
+          onProgress: (progress) => this.#eventBus.emit('merge-progress', progress),
+        },
+      );
+      // Fast-forward adopts the source commit itself, so retain its exact bytes.
+      // The structural engine still materializes and validates above.
+      const bytes = relation.relation === 'fast-forward' ? incoming.blob.bytes : output.bytes;
+      try {
+        await this.#validateMergeDocument(bytes, this.#wasm.fileName);
+        return {
+          tree: mergeAnalysis.result,
+          document: { bytes, fileName: this.#wasm.fileName, label: 'Result' },
+          validation: {
+            valid: true,
+            errors: [],
+            checks: {
+              parsed: true,
+              exported: true,
+              reloaded: true,
+              structurallyValid: true,
+              format: mergeDocumentFormat(bytes),
+            },
+          },
+        };
+      } catch (error) {
+        return {
+          tree: mergeAnalysis.result,
+          document: { bytes, fileName: this.#wasm.fileName, label: 'Result' },
+          validation: {
+            valid: false,
+            errors: [error instanceof Error ? error.message : String(error)],
+            checks: {
+              parsed: false,
+              exported: false,
+              reloaded: false,
+              structurallyValid: false,
+              format: mergeDocumentFormat(bytes),
+            },
+          },
+        };
+      }
+    };
+    this.#setMergeResolverLock(true);
+    try {
+      this.#mergeResolver.open({
+        draft: storedDraft,
+        analysis,
+        sourceBranch: sourceBranch.name,
+        currentBranch: targetBranch.name,
+        mode: storedDraft.mode,
+        title: `Merge ${sourceBranch.name} into ${targetBranch.name}`,
+        documents: {
+          base: { bytes: baseBytes, fileName: this.#wasm.fileName, label: 'Base' },
+          current: { bytes: current.blob.bytes, fileName: this.#wasm.fileName, label: 'Current' },
+          incoming: { bytes: incoming.blob.bytes, fileName: this.#wasm.fileName, label: 'Incoming' },
+        },
+        canDeleteSource: sourceBranch.name !== repository.defaultBranch,
+        materialize: ({ analysis: nextAnalysis, resolutions: nextResolutions, signal }) => (
+          materialize(nextAnalysis, nextResolutions, signal)
+        ),
+        saveDraft: async (nextDraft) => {
+          await this.#enqueue(async () => {
+            const existing = await this.#store.getMergeDraft(nextDraft.id);
+            const assetIds = new Set([
+              ...(existing?.manualAssetBlobIds ?? []),
+              ...manualAssetIds(nextDraft.resolutions),
+            ]);
+            await this.#store.putMergeDraft({
+              draft: { ...nextDraft, manualAssetBlobIds: [...assetIds] },
+              expectedUpdatedAt: existing?.updatedAt ?? null,
+            });
+            await this.#refreshData(true);
+          });
+        },
+        discardDraft: async (draftId) => {
+          await this.#enqueue(async () => {
+            const existing = await this.#store.getMergeDraft(draftId);
+            if (existing) await this.#store.deleteMergeDraft(existing.repositoryId, existing.id, existing.updatedAt);
+            await this.#refreshData(true);
+          });
+        },
+        uploadAsset: async (file, conflict) => {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const asset: VersionBlob = { id: hashBytes(bytes), byteLength: bytes.byteLength, bytes };
+          await this.#enqueue(async () => {
+            const existing = await this.#store.getMergeDraft(storedDraft.id);
+            if (!existing) throw new VersionError('MERGE_DRAFT_NOT_FOUND', 'Merge draft was not found');
+            await this.#store.putMergeDraft({
+              draft: {
+                ...existing,
+                manualAssetBlobIds: [...new Set([...existing.manualAssetBlobIds, asset.id])],
+                updatedAt: Date.now(),
+              },
+              expectedUpdatedAt: existing.updatedAt,
+              assetBlobs: [asset],
+            });
+          });
+          const currentValue = conflict.current && typeof conflict.current === 'object'
+            ? conflict.current as Record<string, unknown>
+            : {};
+          const extension = file.name.includes('.') ? file.name.split('.').pop()! : 'bin';
+          return {
+            kind: 'image-bytes',
+            id: typeof currentValue.id === 'number' ? currentValue.id : undefined,
+            extension,
+            assetBlobId: asset.id,
+          };
+        },
+        complete: (request) => this.#enqueue(() => this.#completeMerge(request)),
+        finalizeSourceDisposition: (receipt, disposition) => this.#enqueue(
+          () => this.#finalizeMergeSource(receipt, disposition),
+        ),
+        onClosed: () => this.#setMergeResolverLock(false),
+      });
+    } catch (error) {
+      this.#setMergeResolverLock(false);
+      throw error;
+    }
+  }
+
+  async #hydrateMergeAssetResolutions(
+    resolutions: Readonly<Record<string, MergeResolution>>,
+  ): Promise<Record<string, MergeResolution>> {
+    const hydrated: Record<string, MergeResolution> = {};
+    for (const [conflictId, resolution] of Object.entries(resolutions)) {
+      if (resolution.kind !== 'manual' || !resolution.payload || typeof resolution.payload !== 'object') {
+        hydrated[conflictId] = resolution;
+        continue;
+      }
+      const payload = resolution.payload as Record<string, unknown>;
+      const assetId = payload.assetBlobId;
+      if (typeof assetId !== 'string') {
+        hydrated[conflictId] = resolution;
+        continue;
+      }
+      const asset = await this.#store.getBlob(assetId as VersionBlob['id']);
+      if (!asset) throw new VersionError('CORRUPT_BLOB', `Merge asset ${assetId} is missing`);
+      const { assetBlobId: _assetBlobId, ...value } = payload;
+      hydrated[conflictId] = {
+        kind: 'manual',
+        payload: { ...value, bytesBase64: bytesToBase64(asset.bytes) },
+      };
+    }
+    return hydrated;
+  }
+
+  #setMergeResolverLock(locked: boolean): void {
+    if (locked === this.#mergeResolverActive) return;
+    this.#mergeResolverActive = locked;
+    if (locked) {
+      this.#mergeLockedHandler = this.#getInputHandler();
+      this.#mergePreviousReadOnly = this.#mergeLockedHandler?.isReadOnly() ?? false;
+      this.#mergeLockedHandler?.setReadOnly(true);
+    } else {
+      this.#mergeLockedHandler?.setReadOnly(this.#mergePreviousReadOnly);
+      this.#mergeLockedHandler = null;
+      this.#mergePreviousReadOnly = false;
+    }
+    this.#eventBus.emit('merge-resolver-lock-changed', locked);
+    this.#syncTransientState();
+  }
+
+  async #completeMerge(request: MergeApplicationRequest): Promise<MergeAppliedReceipt> {
+    if (!request.materialized.validation.valid || !request.materialized.document) {
+      throw new VersionError('MERGE_VALIDATION_FAILED', 'The resolved merge result is not a valid document');
+    }
+    // Resolver edits are intentionally local (and undoable) until completion.
+    // Persist the exact state being completed before the store transaction checks
+    // that every conflict has an explicit resolution. This also leaves a fully
+    // resumable draft behind if a later validation or ref CAS fails.
+    const persistedDraft = await this.#store.getMergeDraft(request.draft.id);
+    if (!persistedDraft || persistedDraft.repositoryId !== request.draft.repositoryId) {
+      throw new VersionError('MERGE_DRAFT_NOT_FOUND', 'Merge draft was not found');
+    }
+    const completionAssetIds = new Set([
+      ...persistedDraft.manualAssetBlobIds,
+      ...request.draft.manualAssetBlobIds,
+      ...manualAssetIds(request.resolutions),
+    ]);
+    const completionDraft = await this.#store.putMergeDraft({
+      draft: { ...request.draft, manualAssetBlobIds: [...completionAssetIds] },
+      expectedUpdatedAt: persistedDraft.updatedAt,
+    });
+    const repository = await this.#store.getRepository(request.draft.repositoryId);
+    if (!repository) throw new VersionError('REPOSITORY_NOT_FOUND', 'Version repository was not found');
+    const [targetBranch, sourceBranch] = await Promise.all([
+      this.#store.getBranch(repository.id, request.draft.targetBranch),
+      this.#store.getBranch(repository.id, request.draft.sourceBranch),
+    ]);
+    if (!targetBranch || !sourceBranch) throw new VersionError('REF_NOT_FOUND', 'A merge branch was not found');
+    if (
+      targetBranch.target !== request.draft.currentHead
+      || sourceBranch.target !== request.draft.sourceHead
+      || targetBranch.revision !== request.draft.targetBranchRevision
+      || sourceBranch.revision !== request.draft.sourceBranchRevision
+      || (
+        request.draft.targetBranchGeneration !== undefined
+        && targetBranch.generation !== request.draft.targetBranchGeneration
+      )
+      || (
+        request.draft.sourceBranchGeneration !== undefined
+        && sourceBranch.generation !== request.draft.sourceBranchGeneration
+      )
+    ) {
+      throw new VersionError('STALE_WORKSPACE', 'A merge branch changed; recompute the merge before completing it');
+    }
+    const captured = await this.#validateMergeDocument(
+      request.materialized.document.bytes,
+      request.materialized.document.fileName,
+    );
+    const mergeManifestEntries = request.mode === 'fast-forward'
+      ? null
+      : await this.#mergeWorker.buildDocumentManifest(captured.bytes);
+    const currentCommit = await this.#requireCommit(targetBranch.target);
+    const currentSnapshot = await this.#store.getCompareSnapshot(currentCommit.compareSnapshotId);
+    if (!currentSnapshot) throw new VersionError('CORRUPT_BLOB', 'Current merge snapshot is missing');
+    const analysis = analyzeVersionDiff(currentSnapshot.snapshot, captured.compareSnapshot);
+    const handler = this.#requireInputHandler();
+    const original = captureVersionSnapshot(this.#wasm);
+    const wasDirty = this.#documentState.isDirty();
+    handler.prepareSnapshotCapacity(4);
+    let mergeCommitted = false;
+    let compensating = false;
+    let transitionRefs: (direction: 'undo' | 'redo') => void = () => undefined;
+
+    const completed = await commitCompositeMerge({
+      applyEditor: () => {
+        handler.replaceContentFromBytes(captured.bytes, {
+          afterUndo: () => {
+            if (mergeCommitted && !compensating) queueMicrotask(() => transitionRefs('undo'));
+          },
+          afterRedo: () => {
+            if (mergeCommitted && !compensating) queueMicrotask(() => transitionRefs('redo'));
+          },
+        });
+      },
+      commitRefs: async () => request.mode === 'fast-forward'
+        ? await this.#store.completeFastForwardMerge({
+          repositoryId: repository.id,
+          branch: targetBranch.name,
+          target: sourceBranch.target,
+          expectedRepositoryRevision: repository.revision,
+          expectedBranchRevision: targetBranch.revision,
+          expectedHead: targetBranch.target,
+          sourceBranch: sourceBranch.name,
+          expectedSourceRevision: sourceBranch.revision,
+          deleteSource: false,
+          draftId: completionDraft.id,
+        })
+        : await this.#store.completeMergeCheckpoint({
+          repositoryId: repository.id,
+          branch: targetBranch.name,
+          expectedRepositoryRevision: repository.revision,
+          expectedBranchRevision: targetBranch.revision,
+          expectedHead: targetBranch.target,
+          sourceBranch: sourceBranch.name,
+          expectedSourceRevision: sourceBranch.revision,
+          deleteSource: false,
+          draftId: completionDraft.id,
+          bytes: captured.bytes,
+          compareSnapshot: captured.compareSnapshot,
+          contentFingerprint: captured.fingerprint,
+          mergeManifestEntries: mergeManifestEntries!,
+          title: request.title.trim() || `Merge ${sourceBranch.name} into ${targetBranch.name}`,
+          titleOrigin: 'manual',
+          titleRevision: 0,
+          author: { kind: 'user', label: '사용자' },
+          stats: analysis.stats,
+          merge: {
+            sourceBranchAtMerge: sourceBranch.name,
+            targetBranchAtMerge: targetBranch.name,
+            baseCommitIds: [...request.draft.baseCommitIds],
+            conflictCount: request.draft.conflicts.length,
+          },
+        }),
+      rollbackEditor: () => {
+        compensating = true;
+        try {
+          try {
+            reconcileCompositeEditor({
+              undoAppliedMerge: () => handler.performUndo(true),
+              discardMergeRedo: () => handler.discardRedoHistory(),
+              matchesExpectedDocument: () => (
+                fingerprintBytes(this.#wasm.exportHwp()) === original.fingerprint
+              ),
+              replaceWithExpectedDocument: () => { handler.replaceContentFromBytes(original.bytes); },
+              discardFallbackUndo: () => handler.discardLatestUndoHistory(),
+            });
+          } catch (rollbackError) {
+            throw new VersionError(
+              'MERGE_VALIDATION_FAILED',
+              'Merge storage failed and the editor snapshot could not be restored',
+              { cause: rollbackError instanceof Error ? rollbackError : undefined },
+            );
+          }
+          this.#recordSemanticDirty(original.fingerprint);
+          if (wasDirty) this.#documentState.markDirty('version-merge-rollback');
+          else this.#documentState.markClean('version-merge-rollback');
+        } finally {
+          compensating = false;
+        }
+      },
+    });
+    const postTarget = completed.branch;
+    let postSource = completed.sourceBranch;
+    let refState = {
+      repository: completed.repository,
+      target: postTarget,
+      source: postSource,
+    };
+    transitionRefs = (direction: 'undo' | 'redo'): void => {
+      if (compensating) return;
+      this.#setMergeResolverLock(true);
+      void this.#enqueue(async () => {
+        let reconciled = true;
+        try {
+          const [latestRepository, latestTarget, latestSource] = await Promise.all([
+            this.#store.getRepository(repository.id),
+            this.#store.getBranch(repository.id, targetBranch.name),
+            this.#store.getBranch(repository.id, sourceBranch.name),
+          ]);
+          if (!latestRepository || !latestTarget) {
+            throw new VersionError('STALE_WORKSPACE', 'A composite merge ref no longer exists');
+          }
+          if (
+            latestTarget.target !== refState.target.target
+            || latestTarget.generation !== refState.target.generation
+          ) {
+            throw new VersionError('STALE_WORKSPACE', 'The composite target head changed');
+          }
+          if (
+            Boolean(latestSource) !== Boolean(refState.source)
+            || (latestSource && refState.source && (
+              latestSource.target !== refState.source.target
+              || latestSource.generation !== refState.source.generation
+            ))
+          ) {
+            throw new VersionError('STALE_WORKSPACE', 'The composite source head changed');
+          }
+          const restore = await this.#store.restoreCompositeRefs({
+            repositoryId: repository.id,
+            expectedRepositoryRevision: latestRepository.revision,
+            allowRepositoryRevisionAdvance: true,
+            targetBranch: targetBranch.name,
+            expectedTarget: {
+              target: latestTarget.target,
+              revision: latestTarget.revision,
+              generation: latestTarget.generation,
+            },
+            restoreTarget: direction === 'undo' ? targetBranch.target : postTarget.target,
+            sourceBranch: sourceBranch.name,
+            expectedSource: latestSource
+              ? {
+                target: latestSource.target,
+                revision: latestSource.revision,
+                generation: latestSource.generation,
+              }
+              : null,
+            restoreSource: direction === 'undo'
+              ? {
+                target: sourceBranch.target,
+                minimumRevision: sourceBranch.revision,
+                generation: sourceBranch.generation,
+              }
+              : postSource
+                ? {
+                  target: postSource.target,
+                  minimumRevision: postSource.revision,
+                  generation: postSource.generation,
+                }
+                : null,
+          });
+          refState = {
+            repository: restore.repository,
+            target: restore.targetBranch,
+            source: restore.sourceBranch,
+          };
+          this.#repository = restore.repository;
+          this.#setDirtyForFingerprint(
+            direction === 'undo' ? original.fingerprint : captured.fingerprint,
+            direction === 'undo' ? 'version-merge-undo' : 'version-merge-redo',
+            direction === 'undo' ? currentCommit.contentFingerprint : captured.fingerprint,
+          );
+          await this.#refreshData(true);
+        } catch (error) {
+          // Restore the document snapshot if its matching ref transition failed.
+          compensating = true;
+          try {
+            const expected = direction === 'undo' ? captured : original;
+            reconcileCompositeHistoryTransition({
+              restoreFromHistory: () => {
+                if (direction === 'undo') handler.performRedo(true);
+                else handler.performUndo(true);
+              },
+              matchesExpectedDocument: () => (
+                fingerprintBytes(this.#wasm.exportHwp()) === expected.fingerprint
+              ),
+              replaceWithExpectedDocument: () => { handler.replaceContentFromBytes(expected.bytes); },
+              discardFallbackUndo: () => handler.discardLatestUndoHistory(),
+            });
+          } catch (compensationError) {
+            reconciled = false;
+            console.error('[Versions] Merge history compensation failed:', compensationError);
+          } finally {
+            compensating = false;
+          }
+          throw error;
+        } finally {
+          // A double failure leaves the editor in an unknown state. Keep every
+          // mutation path locked instead of allowing content and refs to drift
+          // farther apart; successful reconciliation releases the short lock.
+          if (reconciled) this.#setMergeResolverLock(false);
+        }
+      }).catch((error) => console.error('[Versions] Merge history ref transition failed:', error));
+    };
+    mergeCommitted = true;
+    this.#repository = completed.repository;
+    this.#setDirtyForFingerprint(captured.fingerprint, 'version-merge', captured.fingerprint);
+    this.#eventBus.emit('document-context-changed');
+    await this.#refreshData(true);
+    const receipt = {} as MergeAppliedReceipt;
+    this.#pendingMergeFinalizers.set(receipt, async (disposition) => {
+      if (disposition === 'delete') {
+        const source = refState.source;
+        if (!source) return;
+        const [latestRepository, latestTarget, latestSource] = await Promise.all([
+          this.#store.getRepository(repository.id),
+          this.#store.getBranch(repository.id, targetBranch.name),
+          this.#store.getBranch(repository.id, sourceBranch.name),
+        ]);
+        if (
+          !latestRepository
+          || !latestTarget
+          || !latestSource
+          || latestTarget.target !== refState.target.target
+          || latestTarget.generation !== refState.target.generation
+          || latestSource.target !== source.target
+          || latestSource.generation !== source.generation
+        ) {
+          throw new VersionError('STALE_WORKSPACE', 'Merge refs changed before source finalization');
+        }
+        const finalized = await this.#store.restoreCompositeRefs({
+          repositoryId: repository.id,
+          expectedRepositoryRevision: latestRepository.revision,
+          allowRepositoryRevisionAdvance: true,
+          targetBranch: targetBranch.name,
+          expectedTarget: {
+            target: latestTarget.target,
+            revision: latestTarget.revision,
+            generation: latestTarget.generation,
+          },
+          restoreTarget: refState.target.target,
+          sourceBranch: sourceBranch.name,
+          expectedSource: {
+            target: latestSource.target,
+            revision: latestSource.revision,
+            generation: latestSource.generation,
+          },
+          restoreSource: null,
+        });
+        refState = {
+          repository: finalized.repository,
+          target: finalized.targetBranch,
+          source: finalized.sourceBranch,
+        };
+        postSource = null;
+        this.#repository = finalized.repository;
+        await this.#refreshData(true);
+      }
+    });
+    return receipt;
+  }
+
+  async #finalizeMergeSource(
+    receipt: MergeAppliedReceipt,
+    disposition: 'keep' | 'delete',
+  ): Promise<void> {
+    const finalize = this.#pendingMergeFinalizers.get(receipt);
+    if (!finalize) throw new VersionError('STALE_WORKSPACE', 'This merge application was already finalized');
+    await finalize(disposition);
+    this.#pendingMergeFinalizers.delete(receipt);
+  }
+
+  async #validateMergeDocument(bytes: Uint8Array, fileName: string): Promise<CapturedVersionSnapshot> {
+    const first = new WasmBridge();
+    const second = new WasmBridge();
+    try {
+      await Promise.all([first.initialize(), second.initialize()]);
+      first.loadDocument(bytes, fileName);
+      const captured = captureVersionSnapshot(first);
+      second.loadDocument(captured.bytes, fileName);
+      const reloaded = captureVersionSnapshot(second);
+      if (captured.fingerprint !== reloaded.fingerprint) {
+        throw new VersionError('MERGE_VALIDATION_FAILED', 'The merged document changed during export and reload');
+      }
+      const missingResources = [
+        ...mergeResourceDependencyErrors(first.getExternalImageReferences()),
+        ...mergeResourceDependencyErrors(second.getExternalImageReferences()),
+      ];
+      if (missingResources.length > 0) {
+        throw new VersionError(
+          'MERGE_VALIDATION_FAILED',
+          [...new Set(missingResources)].join(' '),
+        );
+      }
+      if (mergeDocumentFormat(captured.bytes) === 'hwp') {
+        const verification = JSON.parse(second.exportHwpVerify()) as {
+          recovered?: boolean;
+          structureMatches?: boolean;
+          serializationLosses?: string[];
+        };
+        if (!verification.recovered || !verification.structureMatches) {
+          throw new VersionError(
+            'MERGE_VALIDATION_FAILED',
+            `Merged HWP failed semantic reload validation: ${(verification.serializationLosses ?? []).join(' ')}`,
+          );
+        }
+      }
+      // Force layout validation after reload. These warnings are non-fatal;
+      // dangling resource dependencies above are always a hard gate.
+      second.getValidationWarnings();
+      return captured;
+    } catch (error) {
+      if (error instanceof VersionError) throw error;
+      throw new VersionError('MERGE_VALIDATION_FAILED', 'The merged document failed parse/export/reload validation', {
+        cause: error instanceof Error ? error : undefined,
+      });
+    } finally {
+      first.releaseDocument();
+      second.releaseDocument();
+    }
+  }
+
+  async #ensureFullMergeManifest(
+    repositoryId: VersionRepository['id'],
+    id: CommitId,
+    memo: Map<CommitId, Promise<VersionMergeManifest>>,
+  ): Promise<VersionMergeManifest> {
+    const pending = memo.get(id);
+    if (pending) return pending;
+    const building = (async () => {
+      const commit = await this.#store.getCommit(id);
+      if (!commit || commit.repositoryId !== repositoryId) {
+        throw new VersionError('COMMIT_NOT_FOUND', `Commit ${id} was not found for manifest generation`);
+      }
+      const parents: VersionMergeManifest[] = [];
+      for (const parent of commit.parents) {
+        parents.push(await this.#ensureFullMergeManifest(repositoryId, parent, memo));
+      }
+      const latest = await this.#store.getCommit(id);
+      if (!latest) throw new VersionError('COMMIT_NOT_FOUND', `Commit ${id} disappeared during manifest generation`);
+      const existing = latest.mergeManifestId
+        ? await this.#store.getMergeManifest(latest.mergeManifestId)
+        : null;
+      if (
+        existing
+        && existing.analysisVersion === MERGE_MANIFEST_VERSION
+        && existing.coverage === 'full-document'
+        && existing.parentManifestIds.length === parents.length
+        && existing.parentManifestIds.every((parentId, index) => parentId === parents[index]?.id)
+      ) return existing;
+      const blob = await this.#store.getBlob(latest.blobId);
+      if (!blob) throw new VersionError('CORRUPT_BLOB', `Document bytes for commit ${id} are missing`);
+      const entries = await this.#mergeWorker.buildDocumentManifest(blob.bytes, {
+        onProgress: (progress) => this.#eventBus.emit('merge-progress', progress),
+      });
+      return this.#store.putFullMergeManifest(repositoryId, id, entries);
+    })();
+    memo.set(id, building);
+    try {
+      return await building;
+    } catch (error) {
+      memo.delete(id);
+      throw error;
     }
   }
 
@@ -934,6 +1765,7 @@ export class DocumentVersionController implements VersionManagerController {
       this.#refs = [];
       this.#commits = [];
       this.#shelves = [];
+      this.#mergeDrafts = [];
       this.#activeBranch = null;
       this.#semanticDirty = false;
       this.#semanticDirtyRevision = this.#editorRevision;
@@ -947,21 +1779,24 @@ export class DocumentVersionController implements VersionManagerController {
       this.#refs = [];
       this.#commits = [];
       this.#shelves = [];
+      this.#mergeDrafts = [];
       this.#activeBranch = null;
       this.#semanticDirty = false;
       this.#semanticDirtyRevision = this.#editorRevision;
       await this.#buildState(false, includeLegacy, id);
       return;
     }
-    const [refs, commits, shelves] = await Promise.all([
+    const [refs, commits, shelves, mergeDrafts] = await Promise.all([
       this.#store.listRefs(repository.id),
       this.#store.listCommits(repository.id, { limit: PAGE_SIZE }),
       this.#store.listShelves(repository.id),
+      this.#store.listMergeDrafts(repository.id),
     ]);
     if (epoch !== this.#refreshEpoch || this.#getDocumentId() !== id) return;
     this.#refs = refs;
     this.#commits = commits;
     this.#shelves = shelves;
+    this.#mergeDrafts = mergeDrafts;
     const branches = refs.filter((ref): ref is BranchRef => ref.kind === 'branch');
     const storedBranch = readActiveBranch(id);
     const memoryBranch = this.#activeBranches.get(id);
@@ -1032,6 +1867,14 @@ export class DocumentVersionController implements VersionManagerController {
       baseCommitId: shelf.baseCommitId,
       byteLength: blobLengths.get(shelf.blobId) ?? 0,
     }));
+    const mergeDrafts: VersionMergeDraftView[] = this.#mergeDrafts.map((draft) => ({
+      id: draft.id,
+      sourceBranch: draft.sourceBranch,
+      targetBranch: draft.targetBranch,
+      conflictCount: draft.conflicts.length,
+      resolvedCount: Object.keys(draft.resolutions).length,
+      updatedAt: draft.updatedAt,
+    }));
     let legacy: LegacyVersionView[] = this.#state.legacy;
     if (includeLegacy) {
       legacy = (await listHistoryMeta()).map((entry) => ({
@@ -1061,6 +1904,7 @@ export class DocumentVersionController implements VersionManagerController {
       commits: commitViews,
       branches,
       shelves,
+      mergeDrafts,
       legacy,
       hasMoreCommits: hasMore,
       loading: false,
@@ -1110,6 +1954,7 @@ export class DocumentVersionController implements VersionManagerController {
   }
 
   #mutationBlockedReason(): string | null {
+    if (this.#mergeResolverActive) return '병합 검토가 열려 있습니다.';
     if (this.#agentBridge.isTurnRunning()) return '에이전트가 응답 중입니다.';
     if (this.#agentBridge.pendingEdits.hasPending()) return '대기 중인 에이전트 편집을 먼저 처리하세요.';
     return null;
@@ -1190,6 +2035,15 @@ export class DocumentVersionController implements VersionManagerController {
     const before = await this.#store.getCompareSnapshot(head.compareSnapshotId);
     this.#assertWorkspaceToken(workspace);
     const analysis = analyzeVersionDiff(before?.snapshot ?? null, capture.compareSnapshot);
+    // Upgrade legacy ancestry before attaching the new full manifest so stable
+    // identities propagate oldest-to-newest instead of starting at this head.
+    const manifestParents = options.parents ?? [head.id];
+    const manifestMemo = new Map<CommitId, Promise<VersionMergeManifest>>();
+    for (const parent of manifestParents) {
+      await this.#ensureFullMergeManifest(repository.id, parent, manifestMemo);
+    }
+    const mergeManifestEntries = await this.#mergeWorker.buildDocumentManifest(capture.bytes);
+    this.#assertWorkspaceToken(workspace);
     const createdAt = Date.now();
     const result = await this.#store.createCheckpoint({
       repositoryId: repository.id,
@@ -1202,6 +2056,7 @@ export class DocumentVersionController implements VersionManagerController {
       bytes: capture.bytes,
       compareSnapshot: capture.compareSnapshot,
       contentFingerprint: capture.fingerprint,
+      mergeManifestEntries,
       title: message || timestampTitle(createdAt),
       titleOrigin: message ? 'manual' : 'timestamp',
       titleRevision: 0,
@@ -1210,6 +2065,7 @@ export class DocumentVersionController implements VersionManagerController {
         : { kind: 'system', label: '버전 관리자' }),
       stats: analysis.stats,
       createdAt,
+      ...(options.merge ? { merge: options.merge } : {}),
       ...(options.lastSaved ? { lastSavedFingerprint: capture.fingerprint } : {}),
     });
     options.onPersisted?.();
@@ -1225,7 +2081,7 @@ export class DocumentVersionController implements VersionManagerController {
     return result.commit;
   }
 
-  async #checkpointDirty(reason: 'pre-restore' | 'pre-switch'): Promise<void> {
+  async #checkpointDirty(reason: 'pre-restore' | 'pre-switch' | 'pre-merge'): Promise<void> {
     const workspace = this.#captureWorkspaceToken();
     const branch = this.#requireActiveBranch();
     const capture = captureVersionSnapshot(this.#wasm);

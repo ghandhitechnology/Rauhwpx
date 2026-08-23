@@ -528,6 +528,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let connRetryAt: number | null = null;
   let connCountdownTimer: number | null = null;
   let turnRunning = bridge.isTurnRunning();
+  let mergeResolverLocked = false;
   /** 지금 노란 불이 붙어 있는 스레드 — 턴이 끝나면 초록 점으로 넘긴다. */
   let runStatusThreadId: string | null = null;
   let workflowTransitionPending = false;
@@ -3106,7 +3107,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   });
   composer.addEventListener('submit', (e) => {
     e.preventDefault();
-    if (readOnlyDocLabel !== null) return;
+    if (readOnlyDocLabel !== null || mergeResolverLocked) return;
     if (turnRunning) {
       bridge.interrupt();
       return;
@@ -4206,7 +4207,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function updateComposer(): void {
     // 다른 문서의 채팅 열람 중에는 연결/작업 상태와 무관하게 잠긴다.
-    if (readOnlyDocLabel !== null) {
+    if (mergeResolverLocked) {
+      input.disabled = true;
+      send.disabled = true;
+      composerSkillClear.disabled = true;
+      input.placeholder = '병합 검토 중에는 에이전트 작업을 시작할 수 없습니다';
+    } else if (readOnlyDocLabel !== null) {
       input.disabled = true;
       send.disabled = true;
       composerSkillClear.disabled = true;
@@ -5135,6 +5141,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   /** 실행 중이거나 첨부를 커밋하거나 전환 중에는 모드·모델·권한을 바꿀 수 없다. */
   function isControlLocked(): boolean {
+    if (mergeResolverLocked) return true;
     return turnRunning || attachmentsSending || chatStartPendingThreadId !== null
       || workflowTransitionPending || planningPhase === 'switching';
   }
@@ -5657,6 +5664,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         eventBus.on('cursor-format-changed', updateDocumentContext),
         eventBus.on('picture-object-selection-changed', updateDocumentContext),
         eventBus.on('table-object-selection-changed', updateDocumentContext),
+        eventBus.on('merge-resolver-lock-changed', (locked) => {
+          mergeResolverLocked = locked === true;
+          root.classList.toggle('ag-merge-resolver-locked', mergeResolverLocked);
+          updateComposer();
+        }),
         eventBus.on('versions:open', () => {
           setCollapsed(false);
           setVersionsPanelOpen(true);
@@ -5679,6 +5691,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function sendInlinePrompt(submission: InlinePromptSubmission): InlinePromptSendResult {
     const prompt = submission.prompt.trim();
     if (!prompt) return { ok: false, reason: '지시를 입력해 주세요' };
+    if (mergeResolverLocked) return { ok: false, reason: '병합 검토를 먼저 완료하거나 닫아 주세요' };
     if (readOnlyDocLabel !== null) return { ok: false, reason: '다른 문서의 채팅을 열람 중입니다' };
     if (connState !== 'connected') return { ok: false, reason: '에이전트 허브에 연결되어 있지 않습니다' };
     if (turnRunning) return { ok: false, reason: '에이전트가 응답 중입니다' };

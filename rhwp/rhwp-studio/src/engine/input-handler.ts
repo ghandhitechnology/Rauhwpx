@@ -3993,6 +3993,9 @@ export class InputHandler {
     this.eventBus.emit('command-state-changed');
   }
 
+  /** Whether document mutations are currently blocked by an owning workflow. */
+  isReadOnly(): boolean { return this.readOnly; }
+
   /** 양식 모드인가? */
   isFormMode(): boolean { return this.editMode === 'form'; }
 
@@ -4836,16 +4839,28 @@ export class InputHandler {
   }
 
   /** Undo 가능한가? */
-  canUndo(): boolean { return this.history.canUndo(); }
+  canUndo(): boolean { return !this.readOnly && this.history.canUndo(); }
 
   /** Redo 가능한가? */
-  canRedo(): boolean { return this.history.canRedo(); }
+  canRedo(): boolean { return !this.readOnly && this.history.canRedo(); }
 
   /** Undo 실행 (커맨드 시스템용) */
-  performUndo(): void { this.handleUndo(); }
+  performUndo(ignoreReadOnly = false): void {
+    if (this.readOnly && !ignoreReadOnly) return;
+    this.handleUndo();
+  }
 
   /** Redo 실행 (커맨드 시스템용) */
-  performRedo(): void { this.handleRedo(); }
+  performRedo(ignoreReadOnly = false): void {
+    if (this.readOnly && !ignoreReadOnly) return;
+    this.handleRedo();
+  }
+
+  /** Permanently drop redo state after rolling back a speculative workflow. */
+  discardRedoHistory(): void { this.history.discardRedo(this.wasm); }
+
+  /** Keep a compensating replacement applied but prevent undoing back into failed state. */
+  discardLatestUndoHistory(): void { this.history.discardUndoTop(this.wasm); }
 
   /** 복사 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */
   performCopy(): void {

@@ -39,6 +39,15 @@ export interface VersionShelfView {
   byteLength: number;
 }
 
+export interface VersionMergeDraftView {
+  id: string;
+  sourceBranch: string;
+  targetBranch: string;
+  conflictCount: number;
+  resolvedCount: number;
+  updatedAt: number;
+}
+
 export interface LegacyVersionView {
   id: string;
   title: string;
@@ -57,6 +66,7 @@ export interface VersionManagerState {
   commits: VersionCommitView[];
   branches: VersionBranchView[];
   shelves: VersionShelfView[];
+  mergeDrafts: VersionMergeDraftView[];
   legacy: LegacyVersionView[];
   hasMoreCommits: boolean;
   loading: boolean;
@@ -80,6 +90,9 @@ export interface VersionManagerController {
   switchBranch(name: string): Promise<void>;
   renameBranch(name: string, nextName: string): Promise<void>;
   deleteBranch(name: string): Promise<void>;
+  startMerge(sourceBranch: string): Promise<void>;
+  resumeMerge(draftId: string): Promise<void>;
+  discardMergeDraft(draftId: string): Promise<void>;
   createTag(name: string, commitId: string): Promise<void>;
   createShelf(title?: string): Promise<void>;
   applyShelf(id: string, remove: boolean): Promise<void>;
@@ -338,9 +351,10 @@ function reasonLabel(reason: string): string {
     approval: '승인',
     'pre-restore': '복원 전 자동 저장',
     'pre-switch': '브랜치 전환 전 자동 저장',
+    'pre-merge': '병합 전 자동 저장',
     restore: '복원',
     adopt: '채택',
-    merge: '채택',
+    merge: '병합',
   };
   return labels[reason] ?? reason;
 }
@@ -396,7 +410,10 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   activeBranch.append(createIcon('changes'), el('span', 'ag-versions-branch-name', 'main'));
   const checkpointButton = el('button', 'ag-versions-primary', '체크포인트 저장');
   checkpointButton.type = 'button';
-  toolbar.append(activeBranch, checkpointButton);
+  const mergeButton = el('button', 'ag-versions-secondary', 'Merge branch…');
+  mergeButton.type = 'button';
+  mergeButton.dataset.versionMutation = 'true';
+  toolbar.append(activeBranch, mergeButton, checkpointButton);
 
   const body = el('div', 'ag-versions-body');
   const historyPanel = el('div', 'ag-versions-panel ag-versions-history');
@@ -708,6 +725,13 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       if (branch.isActive) copy.appendChild(el('span', 'ag-version-badge ag-head-badge', '현재 브랜치'));
       const actions = el('div', 'ag-versions-card-actions');
       if (!branch.isActive) {
+        const merge = el('button', 'ag-versions-primary', 'Merge into current');
+        merge.type = 'button';
+        merge.dataset.versionMutation = 'true';
+        merge.title = `${branch.name} → ${current.activeBranch ?? '현재'}`;
+        merge.setAttribute('aria-label', `${branch.name}에서 ${current.activeBranch ?? '현재 브랜치'}로 병합`);
+        merge.addEventListener('click', () => void perform(() => controller.startMerge(branch.name)));
+        actions.appendChild(merge);
         const switchButton = el('button', 'ag-versions-secondary', '전환');
         switchButton.type = 'button';
         switchButton.dataset.versionMutation = 'true';
@@ -737,6 +761,34 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       }
       row.append(copy, actions);
       list.appendChild(row);
+    }
+    if (current.mergeDrafts.length > 0) {
+      const draftsHeading = el('h3', 'ag-versions-section-title', '저장된 병합 검토');
+      list.appendChild(draftsHeading);
+      for (const draft of current.mergeDrafts) {
+        const row = el('article', 'ag-versions-card ag-versions-merge-draft');
+        const copy = el('div', 'ag-versions-card-copy');
+        copy.append(
+          el('strong', 'ag-versions-card-title', `${draft.sourceBranch} → ${draft.targetBranch}`),
+          el('span', 'ag-versions-card-meta', `${draft.resolvedCount}/${draft.conflictCount}개 충돌 해결 · ${formatTime(draft.updatedAt)}`),
+        );
+        const actions = el('div', 'ag-versions-card-actions');
+        const resume = el('button', 'ag-versions-primary', '계속 검토');
+        resume.type = 'button';
+        resume.dataset.versionMutation = 'true';
+        resume.addEventListener('click', () => void perform(() => controller.resumeMerge(draft.id)));
+        const discard = el('button', 'ag-versions-danger', '초안 버리기');
+        discard.type = 'button';
+        discard.dataset.versionMutation = 'true';
+        discard.addEventListener('click', () => {
+          if (window.confirm(`${draft.sourceBranch} → ${draft.targetBranch} 병합 초안을 버릴까요?`)) {
+            void perform(() => controller.discardMergeDraft(draft.id));
+          }
+        });
+        actions.append(resume, discard);
+        row.append(copy, actions);
+        list.appendChild(row);
+      }
     }
     branchesPanel.appendChild(list);
   }
@@ -904,6 +956,25 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       optional: true,
     });
     if (message !== null) await perform(() => controller.checkpoint(message));
+  })());
+  mergeButton.addEventListener('click', () => void (async () => {
+    const candidates = current.branches.filter((branch) => !branch.isActive);
+    if (candidates.length === 0) {
+      notice.textContent = '병합할 다른 브랜치가 없습니다.';
+      notice.hidden = false;
+      notice.dataset.kind = 'error';
+      return;
+    }
+    const source = candidates.length === 1
+      ? candidates[0].name
+      : await requestVersionText({
+          title: `현재 브랜치로 병합 · → ${current.activeBranch ?? '현재'}`,
+          label: `소스 브랜치 (${candidates.map((branch) => branch.name).join(', ')})`,
+          validate: (value) => candidates.some((branch) => branch.name === value)
+            ? null
+            : '목록에 있는 브랜치 이름을 정확히 입력하세요.',
+        });
+    if (source) await perform(() => controller.startMerge(source));
   })());
   activeBranch.addEventListener('click', () => {
     tab = 'branches';

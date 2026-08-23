@@ -1,7 +1,7 @@
-import { formatDiffLocationCombined, formatParagraphLocationForSide, isComparePreviewAbsent } from '@/compare/diff-location-label';
+import { formatDiffLocationCombined, isComparePreviewAbsent } from '@/compare/diff-location-label';
 import type { CompareSessionStore } from '@/compare/session';
-import type { CompareSession, DiffAnchor, DiffItem } from '@/compare/types';
-import { WasmBridge } from '@/core/wasm-bridge';
+import type { CompareSession, DiffItem } from '@/compare/types';
+import { DocumentPreviewPane } from '@/merge/document-preview-pane.ts';
 
 type CompareSourceDocument = {
   bytes: Uint8Array;
@@ -17,23 +17,10 @@ export class CompareResultWindow {
   private metaEl!: HTMLDivElement;
   private session: CompareSession | null = null;
   private store: CompareSessionStore | null = null;
-  private leftTitleEl!: HTMLHeadingElement;
-  private rightTitleEl!: HTMLHeadingElement;
-  private leftCanvas!: HTMLCanvasElement;
-  private rightCanvas!: HTMLCanvasElement;
-  private leftMarker!: HTMLDivElement;
-  private rightMarker!: HTMLDivElement;
-  private leftCanvasWrap!: HTMLDivElement;
-  private rightCanvasWrap!: HTMLDivElement;
-  private leftStatusEl!: HTMLDivElement;
-  private rightStatusEl!: HTMLDivElement;
-  private leftWasm: WasmBridge | null = null;
-  private rightWasm: WasmBridge | null = null;
-  private leftDocKey = '';
-  private rightDocKey = '';
+  private leftDocumentPreview!: DocumentPreviewPane;
+  private rightDocumentPreview!: DocumentPreviewPane;
   private leftSource: CompareSourceDocument | null = null;
   private rightSource: CompareSourceDocument | null = null;
-  private loadingToken = 0;
 
   isOpen(): boolean {
     return this._open;
@@ -57,24 +44,16 @@ export class CompareResultWindow {
       document.body.appendChild(this.wrap);
     }
     this.titleEl.textContent = `문서 비교 상세 · ${session.left.name} ↔ ${session.right.name}`;
-    this.leftTitleEl.textContent = `왼쪽 문서: ${session.left.name}`;
-    this.rightTitleEl.textContent = `오른쪽 문서: ${session.right.name}`;
+    this.leftDocumentPreview.setTitle(`왼쪽 문서: ${session.left.name}`);
+    this.rightDocumentPreview.setTitle(`오른쪽 문서: ${session.right.name}`);
     void this.focusDiff(initialIndex);
   }
 
   hide(): void {
     this._open = false;
     this.wrap?.remove();
-    try {
-      this.leftWasm?.releaseDocument();
-      this.rightWasm?.releaseDocument();
-    } catch {
-      /* noop */
-    }
-    this.leftWasm = null;
-    this.rightWasm = null;
-    this.leftDocKey = '';
-    this.rightDocKey = '';
+    this.leftDocumentPreview?.dispose();
+    this.rightDocumentPreview?.dispose();
     this.leftSource = null;
     this.rightSource = null;
     this.session = null;
@@ -119,39 +98,25 @@ export class CompareResultWindow {
     panes.className = 'compare-inspector-panes';
     const leftWrap = document.createElement('div');
     leftWrap.className = 'compare-inspector-pane';
-    this.leftTitleEl = document.createElement('h4');
-    this.leftTitleEl.textContent = '왼쪽 문서';
-    this.leftStatusEl = document.createElement('div');
-    this.leftStatusEl.className = 'compare-inspector-page-status';
-    this.leftStatusEl.textContent = '페이지 준비 중...';
-    this.leftCanvasWrap = document.createElement('div');
-    this.leftCanvasWrap.className = 'compare-inspector-canvas-wrap';
-    this.leftCanvas = document.createElement('canvas');
-    this.leftCanvas.className = 'compare-inspector-canvas';
-    this.leftMarker = document.createElement('div');
-    this.leftMarker.className = 'compare-inspector-anchor-marker';
-    this.leftCanvasWrap.append(this.leftCanvas, this.leftMarker);
+    this.leftDocumentPreview = new DocumentPreviewPane({
+      role: 'comparison-left',
+      title: '왼쪽 문서',
+      variant: 'comparison',
+    });
     this.leftPane = document.createElement('div');
     this.leftPane.className = 'compare-inspector-content';
-    leftWrap.append(this.leftTitleEl, this.leftStatusEl, this.leftCanvasWrap, this.leftPane);
+    leftWrap.append(this.leftDocumentPreview.element, this.leftPane);
 
     const rightWrap = document.createElement('div');
     rightWrap.className = 'compare-inspector-pane';
-    this.rightTitleEl = document.createElement('h4');
-    this.rightTitleEl.textContent = '오른쪽 문서';
-    this.rightStatusEl = document.createElement('div');
-    this.rightStatusEl.className = 'compare-inspector-page-status';
-    this.rightStatusEl.textContent = '페이지 준비 중...';
-    this.rightCanvasWrap = document.createElement('div');
-    this.rightCanvasWrap.className = 'compare-inspector-canvas-wrap';
-    this.rightCanvas = document.createElement('canvas');
-    this.rightCanvas.className = 'compare-inspector-canvas';
-    this.rightMarker = document.createElement('div');
-    this.rightMarker.className = 'compare-inspector-anchor-marker';
-    this.rightCanvasWrap.append(this.rightCanvas, this.rightMarker);
+    this.rightDocumentPreview = new DocumentPreviewPane({
+      role: 'comparison-right',
+      title: '오른쪽 문서',
+      variant: 'comparison',
+    });
     this.rightPane = document.createElement('div');
     this.rightPane.className = 'compare-inspector-content';
-    rightWrap.append(this.rightTitleEl, this.rightStatusEl, this.rightCanvasWrap, this.rightPane);
+    rightWrap.append(this.rightDocumentPreview.element, this.rightPane);
     panes.append(leftWrap, rightWrap);
 
     const nav = document.createElement('div');
@@ -370,157 +335,18 @@ export class CompareResultWindow {
 
   private async ensureCompareDocumentsLoaded(): Promise<void> {
     if (!this.leftSource || !this.rightSource) return;
-    const token = ++this.loadingToken;
-    this.leftStatusEl.textContent = '왼쪽 문서 로딩 중...';
-    this.rightStatusEl.textContent = '오른쪽 문서 로딩 중...';
-    try {
-      const leftKey = `${this.leftSource.fileName}:${this.leftSource.bytes.byteLength}`;
-      const rightKey = `${this.rightSource.fileName}:${this.rightSource.bytes.byteLength}`;
-
-      if (!this.leftWasm) {
-        this.leftWasm = new WasmBridge();
-        await this.leftWasm.initialize();
-      }
-      if (!this.rightWasm) {
-        this.rightWasm = new WasmBridge();
-        await this.rightWasm.initialize();
-      }
-      if (this.loadingToken !== token) return;
-
-      if (this.leftDocKey !== leftKey) {
-        this.leftWasm.loadDocument(this.leftSource.bytes, this.leftSource.fileName);
-        this.leftDocKey = leftKey;
-      }
-      if (this.rightDocKey !== rightKey) {
-        this.rightWasm.loadDocument(this.rightSource.bytes, this.rightSource.fileName);
-        this.rightDocKey = rightKey;
-      }
-      if (this.loadingToken !== token) return;
-      try {
-        this.leftWasm.refreshLayout();
-      } catch {
-        /* noop */
-      }
-      try {
-        this.rightWasm.refreshLayout();
-      } catch {
-        /* noop */
-      }
-      if (this.loadingToken !== token) return;
-      this.leftStatusEl.textContent = '왼쪽 문서 페이지 준비 완료';
-      this.rightStatusEl.textContent = '오른쪽 문서 페이지 준비 완료';
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.leftStatusEl.textContent = `페이지 로드 실패: ${msg}`;
-      this.rightStatusEl.textContent = `페이지 로드 실패: ${msg}`;
-    }
+    await Promise.all([
+      this.leftDocumentPreview.load(this.leftSource),
+      this.rightDocumentPreview.load(this.rightSource),
+    ]);
   }
 
   private renderRealDocumentPreview(item: DiffItem): void {
-    this.renderSidePage('left', this.leftWasm, this.leftCanvas, this.leftMarker, this.leftStatusEl, item);
-    this.renderSidePage('right', this.rightWasm, this.rightCanvas, this.rightMarker, this.rightStatusEl, item);
-  }
-
-  /**
-   * 스냅샷 비교 때 기록된 앵커가 한쪽만 있으면(**추가/삭제**) 반대 문서 패널에서는
-   * 상대쪽 pageIndex를 쓰면 안 된다(pagination 불일치). alignment 짝 문단 경로가 있으면
-   * `getCursorRect`로 해당 **문서** 기준 페이지·좌표를 구한다.
-   */
-  private resolveRenderAnchor(
-    wasm: WasmBridge,
-    item: DiffItem,
-    side: 'left' | 'right',
-  ): { anchor: DiffAnchor; fromDiffEngine: boolean } | null {
-    const snapshot = side === 'left' ? item.leftAnchor : item.rightAnchor;
-    if (snapshot && typeof snapshot.pageIndex === 'number') {
-      return { anchor: snapshot, fromDiffEngine: true };
-    }
-    const peerPath = side === 'left' ? item.contextOnLeft : item.contextOnRight;
-    if (!peerPath) return null;
-    try {
-      const rect = wasm.getCursorRect(peerPath.section, peerPath.paragraph, 0);
-      const h = Math.max(14, rect.height);
-      const anchor = {
-        pageIndex: rect.pageIndex,
-        x: rect.x,
-        y: rect.y,
-        width: Math.max(28, Math.min(520, h * 3)),
-        height: h,
-      };
-      return { anchor, fromDiffEngine: false };
-    } catch {
-      return null;
-    }
-  }
-
-  private renderSidePage(
-    side: 'left' | 'right',
-    wasm: WasmBridge | null,
-    canvas: HTMLCanvasElement,
-    marker: HTMLDivElement,
-    statusEl: HTMLDivElement,
-    item: DiffItem,
-  ): void {
-    if (!wasm) {
-      statusEl.textContent = '문서가 아직 로드되지 않았습니다.';
-      marker.style.display = 'none';
-      return;
-    }
-    const resolved = this.resolveRenderAnchor(wasm, item, side);
-    if (!resolved) {
-      const locShort = formatParagraphLocationForSide(item, side);
-      const base =
-        side === 'left'
-          ? '왼쪽: 스냅샷 직후 위치 정보가 없습니다. (텍스트 미리보기만 참고)'
-          : '오른쪽: 스냅샷 직후 위치 정보가 없습니다. (텍스트 미리보기만 참고)';
-      statusEl.textContent = locShort ? `${locShort} · ${base}` : base;
-      const ctx = canvas.getContext('2d');
-      if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
-      marker.style.display = 'none';
-      return;
-    }
-
-    const { anchor: ea, fromDiffEngine } = resolved;
-    try {
-      const info = wasm.getPageInfo(ea.pageIndex);
-      const wrap = side === 'left' ? this.leftCanvasWrap : this.rightCanvasWrap;
-      const maxWidth = Math.max(260, wrap.clientWidth - 10);
-      const scale = Math.max(0.25, Math.min(1.25, maxWidth / Math.max(1, info.width)));
-      const pageIdx = ea.pageIndex;
-      const draw = (): void => {
-        try {
-          canvas.width = Math.max(1, Math.floor(info.width * scale));
-          canvas.height = Math.max(1, Math.floor(info.height * scale));
-          wasm.renderPageToCanvasFiltered(pageIdx, canvas, scale, 'all');
-          const locShort = formatParagraphLocationForSide(item, side);
-          const pageLine = `${ea.pageIndex + 1}쪽`;
-          const contextNote = !fromDiffEngine ? ' · 직전 정렬 짝 문단 기준(마커 없음)' : '';
-          if (fromDiffEngine) {
-            marker.style.display = 'block';
-            marker.style.left = `${Math.max(0, Math.floor(ea.x * scale))}px`;
-            marker.style.top = `${Math.max(0, Math.floor(ea.y * scale))}px`;
-            marker.style.width = `${Math.max(14, Math.floor(ea.width * scale))}px`;
-            marker.style.height = `${Math.max(14, Math.floor(ea.height * scale))}px`;
-          } else {
-            marker.style.display = 'none';
-          }
-          statusEl.textContent = `${locShort ? `${locShort} · ` : ''}${pageLine} 실제 화면${contextNote}`;
-          wrap.scrollTop = Math.max(0, marker.offsetTop - Math.floor(wrap.clientHeight * 0.15));
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          statusEl.textContent = `페이지 렌더 실패: ${msg}`;
-          marker.style.display = 'none';
-        }
-      };
-      requestAnimationFrame(() => {
-        requestAnimationFrame(draw);
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      statusEl.textContent = `페이지 렌더 실패: ${msg}`;
-      marker.style.display = 'none';
-    }
+    // Added/removed items often only carry an anchor on one side. The shared
+    // pane resolves each side's alignment context through that document's own
+    // layout, preserving the comparison window's pagination-safe fallback.
+    this.leftDocumentPreview.focus(item.leftAnchor ?? null, item.contextOnLeft);
+    this.rightDocumentPreview.focus(item.rightAnchor ?? null, item.contextOnRight);
   }
 
 }
-

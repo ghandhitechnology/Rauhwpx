@@ -498,6 +498,35 @@ export class WasmBridge {
     }
   }
 
+  /** External image dependencies retained by the document, including unloaded bytes. */
+  getExternalImageReferences(): Array<{
+    key?: string;
+    binDataId?: number;
+    originalPath?: string;
+    basename?: string;
+    extension?: string;
+    loaded: boolean;
+  }> {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const raw = (this.doc as any).getExternalImageReferences?.();
+    if (typeof raw !== 'string') return [];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error('문서의 외부 이미지 종속성 정보를 읽지 못했습니다');
+    }
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((reference): reference is {
+      key?: string;
+      binDataId?: number;
+      originalPath?: string;
+      basename?: string;
+      extension?: string;
+      loaded: boolean;
+    } => Boolean(reference && typeof reference === 'object' && typeof reference.loaded === 'boolean'));
+  }
+
   /** 사용자 명시 요청에 의한 lineseg reflow (#177). 반환: reflow된 문단 수. */
   reflowLinesegs(): number {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');

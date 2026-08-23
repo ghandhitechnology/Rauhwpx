@@ -230,6 +230,17 @@ export class CommandHistory {
   canUndo(): boolean { return this.undoStack.length > 0; }
   canRedo(): boolean { return this.redoStack.length > 0; }
 
+  /** Discard a failed speculative edit after it has been undone. */
+  discardRedo(wasm: WasmBridge): void {
+    discardAll(this.redoStack, wasm);
+    this.redoStack = [];
+  }
+
+  /** Drop a compensating replacement while keeping its already-applied state. */
+  discardUndoTop(wasm: WasmBridge): void {
+    this.undoStack.pop()?.discard?.(wasm);
+  }
+
   /**
    * [Task #2337] 직전 undo/redo 로 방금 이동한 커맨드를 조회한다.
    * undo() 후 방금 되돌린 커맨드는 redoStack top(peekRedoTop), redo() 후 방금 다시

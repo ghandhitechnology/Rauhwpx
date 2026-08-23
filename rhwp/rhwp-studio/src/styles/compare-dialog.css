@@ -304,6 +304,16 @@
   overflow: hidden;
 }
 
+.compare-document-preview {
+  flex: 1 1 auto;
+  border-bottom: 1px solid var(--ui-border-subtle);
+}
+
+.compare-document-preview .merge-preview-canvas-wrap {
+  min-height: 240px;
+  max-height: 52vh;
+}
+
 .compare-inspector-pane h4 {
   margin: 0;
   padding: 8px 10px;
