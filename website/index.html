@@ -342,9 +342,17 @@ a{color:var(--ink)}
 }
 .price-grid>div>p{margin-top:18px}
 .conn{border-top:1px solid var(--rule);margin-top:20px}
-.conn li{display:flex;gap:16px;align-items:baseline;padding:11px 0;border-bottom:1px solid var(--rule);font-size:16px}
+.conn li{display:flex;gap:16px;align-items:center;padding:11px 0;border-bottom:1px solid var(--rule);font-size:16px}
 .conn b{font-weight:600;flex:0 0 auto;min-width:92px}
-.conn em{font-style:normal;color:var(--ink-3);font-size:15px}
+.conn em{font-style:normal;color:var(--ink-3);font-size:15px;flex:1 1 auto}
+.conn-tutorial{
+  flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
+  min-height:32px;padding:4px 11px;border:1px solid var(--ink);border-radius:2px;
+  color:var(--ink);font:500 13px/1 var(--sans);text-decoration:none;
+  transition:background-color .15s ease,color .15s ease;
+}
+.conn-tutorial:hover{background:var(--ink);color:var(--patch)}
+.conn-tutorial:focus-visible{outline:3px solid var(--ink);outline-offset:3px}
 
 /* ── 다운로드 ──────────────────────────────── */
 .dl{
@@ -673,11 +681,11 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
       <div>
         <p class="label">연결</p>
         <h2 class="h2 h2--big" style="margin-top:12px">쓰던 계정을<br>연결하면 끝</h2>
-        <p>Codex, Claude 계정이나 OpenRouter API Key를 설정에서 연결하면 준비가 끝나요.</p>
+        <p>Codex, Claude 계정이나 OpenRouter 계정을 설정에서 연결하면 준비가 끝나요.</p>
         <ul class="conn">
           <li><b>Codex</b><em>쓰던 계정 연결</em></li>
           <li><b>Claude</b><em>쓰던 계정 연결</em></li>
-          <li><b>OpenRouter</b><em>API Key 직접 연결</em></li>
+          <li><b>OpenRouter</b><em>계정 또는 API Key 연결</em><a class="conn-tutorial" href="tutorial-openrouter.html">튜토리얼</a></li>
         </ul>
       </div>
 

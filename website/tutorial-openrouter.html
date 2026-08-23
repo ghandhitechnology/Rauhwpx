@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenRouter 연결 튜토리얼 | Rauhwpx</title>
+<meta name="description" content="OpenRouter 계정에 크레딧을 충전하고 Rauhwpx의 Pi를 OAuth로 연결하는 8단계 튜토리얼입니다.">
+<meta name="theme-color" content="#f1ece1">
+<link rel="icon" type="image/png" href="assets/rauhwpx-logo.png">
+<link rel="apple-touch-icon" href="assets/rauhwpx-logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+:root{
+  --paper:#f1ece1;--paper-2:#e7e0d2;--patch:#fdfbf6;--ink:#14120f;
+  --ink-2:#3c3831;--ink-3:#6e675c;--rule:#d3cbbb;--rule-2:#bdb4a2;
+  --sans:'IBM Plex Sans KR',system-ui,-apple-system,'Apple SD Gothic Neo',sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='.05'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+html{scroll-behavior:smooth;overflow-x:hidden}
+html,body{margin:0;min-height:100%}
+body{
+  background-color:var(--paper);background-image:var(--grain);background-size:180px 180px;
+  color:var(--ink);font:400 17px/1.72 var(--sans);letter-spacing:-.006em;
+  -webkit-font-smoothing:antialiased;
+}
+body,p,li,h1,h2,h3,figcaption{word-break:keep-all;overflow-wrap:break-word}
+h1,h2,h3,p,figure,ol{margin-top:0}
+h1,h2,h3{letter-spacing:-.03em}
+a{color:inherit}
+img{display:block;max-width:100%}
+.wrap{width:min(100% - 48px,1180px);margin:0 auto}
+.masthead{position:sticky;top:0;z-index:20;border-bottom:1px solid var(--rule);background:rgba(241,236,225,.94);backdrop-filter:saturate(120%) blur(6px)}
+.masthead .wrap{min-height:60px;display:flex;align-items:center;justify-content:space-between;gap:24px}
+.brand{min-height:44px;display:inline-flex;align-items:center;font-size:19px;font-weight:700;letter-spacing:-.03em;text-decoration:none}
+.back{min-height:44px;display:inline-flex;align-items:center;gap:8px;color:var(--ink-2);font-size:15px;font-weight:500;text-underline-offset:4px}
+.back svg{width:18px;height:18px}
+.hero{padding:clamp(58px,8vw,104px) 0 clamp(62px,8vw,96px);border-bottom:1px solid var(--rule)}
+.hero-top{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:clamp(42px,8vw,110px);align-items:end}
+.hero h1{max-width:790px;margin-bottom:24px;font-size:clamp(46px,7.2vw,86px);line-height:1.04;letter-spacing:-.04em}
+.hero-lead{max-width:690px;margin-bottom:28px;color:var(--ink-2);font-size:clamp(18px,2vw,21px);line-height:1.65}
+.actions{display:flex;flex-wrap:wrap;gap:10px}
+.button{min-height:48px;display:inline-flex;align-items:center;justify-content:center;padding:11px 19px;border:1.5px solid var(--ink);border-radius:3px;font-weight:600;text-decoration:none;transition:background-color .16s ease,color .16s ease,transform .16s ease}
+.button--fill{background:var(--ink);color:var(--patch)}
+.button:hover{transform:translateY(-1px)}
+.button--fill:hover{background:#2c2822}
+.route-summary{margin:0;padding:0;list-style:none;border-top:1.5px solid var(--ink)}
+.route-summary li{display:grid;grid-template-columns:48px 1fr;gap:14px;padding:18px 0;border-bottom:1px solid var(--rule);align-items:start}
+.route-summary span{font:500 12px/1.5 var(--mono);letter-spacing:.08em;color:var(--ink-3)}
+.route-summary strong{display:block;margin-bottom:2px;font-size:16px}
+.route-summary em{display:block;color:var(--ink-3);font-size:14px;font-style:normal}
+.phase{padding:clamp(72px,9vw,118px) 0 0}
+.phase-head{display:grid;grid-template-columns:220px minmax(0,1fr);gap:32px;padding-bottom:clamp(36px,5vw,56px);border-bottom:1.5px solid var(--ink)}
+.phase-key{display:flex;align-items:center;gap:12px;font-weight:600}
+.phase-key span{width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;border:1.5px solid var(--ink);border-radius:50%;font:500 13px/1 var(--mono)}
+.phase-head h2{max-width:760px;margin-bottom:16px;font-size:clamp(32px,4.8vw,56px);line-height:1.16}
+.phase-head p{max-width:690px;margin-bottom:0;color:var(--ink-2)}
+.guide{padding:clamp(46px,6vw,72px) 0;border-bottom:1px solid var(--rule)}
+.guide-head{display:grid;grid-template-columns:220px minmax(0,1fr);gap:32px;margin-bottom:30px}
+.step-badges{display:flex;gap:8px;align-items:flex-start}
+.step-badges span{min-width:43px;min-height:31px;display:inline-flex;align-items:center;justify-content:center;padding:5px 8px;border:1px solid var(--rule-2);background:rgba(253,251,246,.55);font:500 12px/1 var(--mono);letter-spacing:.04em}
+.guide h3{max-width:760px;margin-bottom:12px;font-size:clamp(26px,3.3vw,38px);line-height:1.24}
+.guide-copy{max-width:720px;margin-bottom:0;color:var(--ink-2)}
+.shot{margin:0}
+.shot-viewport{overflow:hidden;background:#05090a;border-radius:12px;box-shadow:0 18px 54px rgba(20,18,15,.16),0 2px 7px rgba(20,18,15,.08)}
+.shot-canvas{position:relative;min-width:0}
+.shot img{width:100%;height:auto}
+.shot figcaption{display:flex;justify-content:space-between;gap:24px;margin-top:14px;color:var(--ink-3);font-size:13px;line-height:1.5}
+.shot figcaption a{flex:0 0 auto;font-weight:600;text-underline-offset:4px}
+.marker{position:absolute;left:var(--x);top:var(--y);z-index:2;display:flex;align-items:center;gap:7px;transform:translateY(-50%);white-space:nowrap;pointer-events:none}
+.marker--west{transform:translate(-100%,-50%);flex-direction:row-reverse}
+.marker b{width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;border:2px solid var(--ink);border-radius:50%;background:var(--patch);color:var(--ink);box-shadow:0 5px 14px rgba(0,0,0,.28);font:600 13px/1 var(--mono)}
+.marker em{padding:7px 9px;background:var(--patch);border-radius:4px;box-shadow:0 5px 14px rgba(0,0,0,.25);color:var(--ink);font-size:12px;font-style:normal;font-weight:600;letter-spacing:-.01em}
+.shot-pair{display:grid;grid-template-columns:1.12fr .88fr;gap:18px;align-items:start}
+.shot-pair .shot:nth-child(2){margin-top:72px}
+.handoff{position:relative;margin-top:clamp(72px,9vw,118px);padding:clamp(54px,7vw,82px) 0;background:var(--ink);color:var(--patch);overflow:hidden}
+.handoff::after{content:"";position:absolute;right:-120px;top:50%;width:360px;height:360px;border:1px solid rgba(253,251,246,.19);border-radius:50%;transform:translateY(-50%)}
+.handoff .wrap{position:relative;z-index:1;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:40px;align-items:center}
+.handoff h2{max-width:760px;margin-bottom:12px;font-size:clamp(32px,4.8vw,54px);line-height:1.18}
+.handoff p{max-width:650px;margin-bottom:0;color:#c7c0b4}
+.handoff .button{border-color:var(--patch);color:var(--patch);flex:0 0 auto}
+.finish{padding:clamp(64px,8vw,96px) 0}
+.finish-grid{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:60px;align-items:end}
+.finish h2{max-width:780px;margin-bottom:14px;font-size:clamp(34px,5vw,60px);line-height:1.14}
+.finish p{max-width:650px;margin-bottom:0;color:var(--ink-2)}
+.finish-actions{display:flex;flex-direction:column;gap:10px}
+.foot{padding:24px 0;border-top:1px solid var(--rule)}
+.foot .wrap{display:flex;align-items:center;justify-content:space-between;gap:24px;color:var(--ink-3);font-size:13px}
+.button:focus-visible,.brand:focus-visible,.back:focus-visible,.shot figcaption a:focus-visible{outline:3px solid var(--ink);outline-offset:4px}
+@media(max-width:900px){
+  .hero-top,.finish-grid{grid-template-columns:1fr}.route-summary{max-width:540px;margin-top:14px}
+  .shot-pair{grid-template-columns:1fr}.shot-pair .shot:nth-child(2){margin-top:14px}
+  .handoff .wrap{grid-template-columns:1fr}.handoff .button{justify-self:start}
+  .finish-actions{max-width:320px}
+}
+@media(max-width:680px){
+  body{font-size:16px}.wrap{width:min(100% - 32px,1180px)}
+  .masthead .wrap{min-height:56px}.brand{font-size:18px}.back{font-size:14px}
+  .hero{padding-top:48px}.hero h1{font-size:clamp(40px,13vw,60px)}
+  .phase-head,.guide-head{grid-template-columns:1fr;gap:20px}
+  .shot-viewport{overflow-x:auto;overscroll-behavior-inline:contain;border-radius:8px;scrollbar-width:thin}
+  .shot-canvas{min-width:720px}
+  .shot figcaption{align-items:flex-start;flex-direction:column;gap:5px}
+  .marker b{width:31px;height:31px}.marker em{font-size:11px}
+  .handoff::after{right:-210px}.finish-actions{max-width:none}.finish-actions .button{width:100%}
+  .foot .wrap{align-items:flex-start;flex-direction:column}
+}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<!--
+THESIS: Eight actions read as one annotated setup ledger, refusing generic help-center cards and detached screenshots.
+OWN-WORLD: Cream paper, carbon ink, precise rules, restrained circles, and large browser captures framed like printed proofs.
+STORY: Fund OpenRouter first, return to Rauhwpx second, then finish Pi authentication through the highlighted OAuth control.
+FIRST VIEWPORT: A large Korean title and two clear actions sit beside a compact two-part route summary.
+FORM: Sequential instruction ledger, grounded structure 3; seed 71cb648b.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+-->
+<header class="masthead">
+  <div class="wrap">
+    <a class="brand" href="index.html">Rauhwpx</a>
+    <a class="back" href="index.html#connect">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7M8 12h12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      연결로 돌아가기
+    </a>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="wrap">
+      <div class="hero-top">
+        <div>
+          <h1>OpenRouter를 충전하고 Pi에 연결하세요</h1>
+          <p class="hero-lead">OpenRouter 계정을 만든 뒤 크레딧을 충전하고, Rauhwpx에서 OpenRouter OAuth로 로그인하면 준비가 끝납니다.</p>
+          <div class="actions">
+            <a class="button button--fill" href="#step-1">첫 단계로 이동</a>
+            <a class="button" href="https://openrouter.ai/" target="_blank" rel="noopener">OpenRouter 열기</a>
+          </div>
+        </div>
+        <ol class="route-summary" aria-label="연결 과정 요약">
+          <li><span>1–6</span><div><strong>OpenRouter</strong><em>가입 · 크레딧 충전</em></div></li>
+          <li><span>7–8</span><div><strong>Rauhwpx</strong><em>Pi · OAuth 로그인</em></div></li>
+        </ol>
+      </div>
+
+    </div>
+  </section>
+
+  <section class="phase" aria-labelledby="openrouter-phase">
+    <div class="wrap">
+      <header class="phase-head">
+        <div class="phase-key"><span>1</span>OpenRouter</div>
+        <div>
+          <h2 id="openrouter-phase">계정을 만들고 크레딧을 충전합니다</h2>
+          <p>브라우저에서 OpenRouter 가입부터 결제까지 마친 뒤 Rauhwpx로 돌아오세요.</p>
+        </div>
+      </header>
+
+      <article class="guide" id="step-1">
+        <div class="guide-head">
+          <div class="step-badges" aria-label="1단계와 2단계"><span>01</span><span>02</span></div>
+          <div>
+            <h3>OpenRouter를 열고 Sign Up을 누르세요</h3>
+            <p class="guide-copy"><a href="https://openrouter.ai/" target="_blank" rel="noopener">openrouter.ai</a>로 이동한 뒤 오른쪽 위의 <b>Sign Up</b>을 눌러 계정을 만드세요.</p>
+          </div>
+        </div>
+        <figure class="shot">
+          <div class="shot-viewport" tabindex="0" role="region" aria-label="OpenRouter 홈페이지 스크린샷. 좁은 화면에서는 가로로 스크롤할 수 있습니다.">
+            <div class="shot-canvas">
+              <img src="assets/openrouter-home.webp" width="2200" height="1431" alt="OpenRouter 홈페이지 오른쪽 위에 Sign Up 버튼이 보이는 화면" fetchpriority="high" decoding="async">
+              <span class="marker marker--west" style="--x:96%;--y:8.5%"><b>2</b><em>Sign Up</em></span>
+            </div>
+          </div>
+          <figcaption><span>OpenRouter 홈페이지 · 오른쪽 위에서 가입을 시작합니다.</span><a href="assets/openrouter-home.webp" target="_blank">크게 보기</a></figcaption>
+        </figure>
+      </article>
+
+      <article class="guide" id="step-3">
+        <div class="guide-head">
+          <div class="step-badges" aria-label="3단계와 4단계"><span>03</span><span>04</span></div>
+          <div>
+            <h3>프로필 메뉴에서 Credits를 선택하세요</h3>
+            <p class="guide-copy">가입이 끝나면 오른쪽 위의 프로필을 열고 <b>Credits</b>를 누르세요. 계정 설정 화면에서는 왼쪽 <b>ACCOUNT</b> 목록에서도 Credits를 찾을 수 있습니다.</p>
+          </div>
+        </div>
+        <div class="shot-pair">
+          <figure class="shot">
+            <div class="shot-viewport" tabindex="0" role="region" aria-label="OpenRouter 프로필 메뉴 스크린샷. 좁은 화면에서는 가로로 스크롤할 수 있습니다.">
+              <div class="shot-canvas">
+                <img src="assets/openrouter-profile-menu.webp" width="2200" height="1604" alt="OpenRouter 오른쪽 위 Personal 프로필 메뉴에 Credits 항목이 보이는 화면" loading="lazy" decoding="async">
+                <span class="marker marker--west" style="--x:96%;--y:18%"><b>3</b><em>프로필</em></span>
+                <span class="marker marker--west" style="--x:90%;--y:41%"><b>4</b><em>Credits</em></span>
+              </div>
+            </div>
+            <figcaption><span>프로필을 열면 Credits가 바로 보입니다.</span><a href="assets/openrouter-profile-menu.webp" target="_blank">크게 보기</a></figcaption>
+          </figure>
+          <figure class="shot">
+            <div class="shot-viewport" tabindex="0" role="region" aria-label="OpenRouter 계정 설정 사이드바 스크린샷. 좁은 화면에서는 가로로 스크롤할 수 있습니다.">
+              <div class="shot-canvas">
+                <img src="assets/openrouter-account-sidebar.webp" width="2200" height="1604" alt="OpenRouter 계정 설정 왼쪽 사이드바의 Account 영역에 Credits 항목이 보이는 화면" loading="lazy" decoding="async">
+                <span class="marker" style="--x:4.2%;--y:75%"><b>4</b><em>Credits</em></span>
+              </div>
+            </div>
+            <figcaption><span>설정 화면에서는 왼쪽 ACCOUNT 목록을 확인하세요.</span><a href="assets/openrouter-account-sidebar.webp" target="_blank">크게 보기</a></figcaption>
+          </figure>
+        </div>
+      </article>
+
+      <article class="guide" id="step-5">
+        <div class="guide-head">
+          <div class="step-badges" aria-label="5단계와 6단계"><span>05</span><span>06</span></div>
+          <div>
+            <h3>Add Credits를 누르고 충전 금액을 입력하세요</h3>
+            <p class="guide-copy">Credits 화면의 <b>Add Credits</b>를 누른 뒤 결제 수단과 금액을 확인하세요. 마지막으로 <b>Purchase</b>를 누르면 충전됩니다.</p>
+          </div>
+        </div>
+        <figure class="shot">
+          <div class="shot-viewport" tabindex="0" role="region" aria-label="OpenRouter 크레딧 결제 화면 스크린샷. 좁은 화면에서는 가로로 스크롤할 수 있습니다.">
+            <div class="shot-canvas">
+              <img src="assets/openrouter-purchase-credits.webp" width="2200" height="1431" alt="OpenRouter Purchase Credits 창에 결제 수단, 금액 입력란, Purchase 버튼이 보이는 화면" loading="lazy" decoding="async">
+              <span class="marker" style="--x:25%;--y:52%"><b>5</b><em>Add Credits</em></span>
+              <span class="marker" style="--x:52%;--y:76%"><b>6</b><em>금액 → Purchase</em></span>
+            </div>
+          </div>
+          <figcaption><span>결제 수단과 총액을 확인한 뒤 Purchase를 누릅니다.</span><a href="assets/openrouter-purchase-credits.webp" target="_blank">크게 보기</a></figcaption>
+        </figure>
+      </article>
+    </div>
+  </section>
+
+  <section class="handoff" aria-label="Rauhwpx로 돌아가기">
+    <div class="wrap">
+      <div>
+        <h2>충전이 끝났다면 Rauhwpx로 돌아오세요</h2>
+        <p>이제 앱의 에이전트 연결 설정에서 Pi를 OpenRouter 계정에 연결합니다.</p>
+      </div>
+      <a class="button" href="#step-7">Pi 연결로 이동</a>
+    </div>
+  </section>
+
+  <section class="phase" aria-labelledby="rauhwpx-phase">
+    <div class="wrap">
+      <header class="phase-head">
+        <div class="phase-key"><span>2</span>Rauhwpx</div>
+        <div>
+          <h2 id="rauhwpx-phase">Pi에서 OpenRouter OAuth로 로그인합니다</h2>
+          <p>Rauhwpx 설정의 에이전트 연결 목록에서 Pi를 열면 브라우저 로그인 버튼이 나타납니다.</p>
+        </div>
+      </header>
+
+      <article class="guide" id="step-7">
+        <div class="guide-head">
+          <div class="step-badges" aria-label="7단계와 8단계"><span>07</span><span>08</span></div>
+          <div>
+            <h3>Pi를 선택하고 OpenRouter OAuth를 누르세요</h3>
+            <p class="guide-copy">오른쪽 설정 패널의 에이전트 연결 목록에서 <b>Pi</b>를 누르세요. Pi 설정 창이 열리면 <b>브라우저로 로그인 · OpenRouter OAuth</b>를 눌러 연결을 승인합니다.</p>
+          </div>
+        </div>
+        <figure class="shot">
+          <div class="shot-viewport" tabindex="0" role="region" aria-label="Rauhwpx Pi 설정 화면 스크린샷. 좁은 화면에서는 가로로 스크롤할 수 있습니다.">
+            <div class="shot-canvas">
+              <img src="assets/rauhwpx-pi-openrouter-oauth.webp" width="2200" height="1463" alt="Rauhwpx 설정 패널의 Pi 항목과 Pi 설정 창의 OpenRouter OAuth 브라우저 로그인 버튼이 보이는 화면" loading="lazy" decoding="async">
+              <span class="marker marker--west" style="--x:95%;--y:35%"><b>7</b><em>Pi</em></span>
+              <span class="marker marker--west" style="--x:40%;--y:51%"><b>8</b><em>OpenRouter OAuth</em></span>
+            </div>
+          </div>
+          <figcaption><span>Pi 설정 창의 왼쪽 버튼이 OpenRouter OAuth 로그인입니다.</span><a href="assets/rauhwpx-pi-openrouter-oauth.webp" target="_blank">크게 보기</a></figcaption>
+        </figure>
+      </article>
+    </div>
+  </section>
+
+  <section class="finish">
+    <div class="wrap finish-grid">
+      <div>
+        <h2>연결이 끝났습니다</h2>
+        <p>OAuth 승인을 마치고 Rauhwpx로 돌아오면 Pi에서 OpenRouter 모델을 사용할 수 있습니다.</p>
+      </div>
+      <div class="finish-actions">
+        <a class="button button--fill" href="index.html#download">Rauhwpx 다운로드</a>
+        <a class="button" href="index.html#connect">다른 연결 보기</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <span>Rauhwpx OpenRouter 연결 튜토리얼</span>
+    <a href="https://openrouter.ai/docs/guides/overview/auth/oauth" target="_blank" rel="noopener">OpenRouter OAuth 문서</a>
+  </div>
+</footer>
+</body>
+</html>
