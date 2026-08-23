@@ -200,7 +200,12 @@ test('a timed-out CLI attempt terminates its owned process tree', async () => {
       claude: { ready: false, model: '' },
     }),
     providerTimeoutMs: 15,
-    overallTimeoutMs: 30,
+    overallTimeoutMs: 80,
+    async mkdtemp(prefix) {
+      // Windows CI can spend the whole 15ms budget on temp-dir setup.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return fs.mkdtemp(prefix);
+    },
     spawnProcess(command, argv, options) {
       spawned = { command, argv, options, proc: new HungProcess() };
       return spawned.proc;
@@ -217,6 +222,7 @@ test('a timed-out CLI attempt terminates its owned process tree', async () => {
   });
 
   assert.equal(result, null);
+  assert.ok(spawned, 'CLI spawn must happen even when workspace setup is slower than the provider timeout');
   assert.equal(terminated, 1);
   assert.equal(spawned.options.detached, process.platform !== 'win32');
   assert.equal(spawned.options.shell, false);

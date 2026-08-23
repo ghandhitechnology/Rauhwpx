@@ -255,10 +255,6 @@ function runCli(spec, prompt, timeoutMs, {
   terminateProcess = terminateProcessTree,
 } = {}) {
   return new Promise((resolve) => {
-    if (signal?.aborted) {
-      resolve(null);
-      return;
-    }
     let settled = false;
     let stdout = '';
     let outputExceeded = false;
@@ -295,6 +291,10 @@ function runCli(spec, prompt, timeoutMs, {
 
     timer = setTimeout(abort, timeoutMs);
     signal?.addEventListener?.('abort', abort, { once: true });
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
     child.stdout?.setEncoding?.('utf8');
     child.stdout?.on?.('data', (chunk) => {
       if (outputExceeded) return;
@@ -327,31 +327,45 @@ function runCli(spec, prompt, timeoutMs, {
   });
 }
 
-async function runCliProvider(provider, prompt, timeoutMs, deps) {
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-checkpoint-title-'));
-  let promptFilePath;
-  if (provider === 'grok') {
-    promptFilePath = path.join(tempRoot, 'prompt.txt');
-    await fs.writeFile(promptFilePath, prompt, { encoding: 'utf8', mode: 0o600 });
-  }
+async function prepareCliWorkspace(provider, prompt, deps) {
+  const makeTemp = deps.mkdtemp ?? ((prefix) => fs.mkdtemp(prefix));
+  const tempRoot = await makeTemp(path.join(os.tmpdir(), 'rhwp-checkpoint-title-'));
   try {
-    const spec = buildCheckpointTitleCliSpec(provider, {
-      command: deps.commands?.[provider],
-      promptFilePath,
-    });
-    return await runCli(spec, prompt, timeoutMs, {
-      cwd: tempRoot,
-      signal: deps.signal,
-      spawnProcess: deps.spawnProcess,
-      terminateProcess: deps.terminateProcess,
+    let promptFilePath;
+    if (provider === 'grok') {
+      promptFilePath = path.join(tempRoot, 'prompt.txt');
+      await fs.writeFile(promptFilePath, prompt, { encoding: 'utf8', mode: 0o600 });
+    }
+    return {
+      tempRoot,
+      spec: buildCheckpointTitleCliSpec(provider, {
+        command: deps.commands?.[provider],
+        promptFilePath,
+      }),
       env: isolatedProcessEnv(
         { isolatedHome: deps.isolatedHome, sessionId: deps.sessionId },
         deps.providerEnvs?.[provider],
       ),
-    });
-  } finally {
+    };
+  } catch (error) {
     await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+    throw error;
   }
+}
+
+async function runPreparedCli(workspace, prompt, timeoutMs, deps) {
+  return runCli(workspace.spec, prompt, timeoutMs, {
+    cwd: workspace.tempRoot,
+    signal: deps.signal,
+    spawnProcess: deps.spawnProcess,
+    terminateProcess: deps.terminateProcess,
+    env: workspace.env,
+  });
+}
+
+async function disposeCliWorkspace(workspace) {
+  if (!workspace?.tempRoot) return;
+  await fs.rm(workspace.tempRoot, { recursive: true, force: true }).catch(() => {});
 }
 
 async function runProvider(provider, model, prompt, timeoutMs, deps) {
@@ -373,7 +387,7 @@ async function runProvider(provider, model, prompt, timeoutMs, deps) {
       return null;
     }
   }
-  return runCliProvider(provider, prompt, timeoutMs, deps);
+  return null;
 }
 
 async function boundedAttempt(operation, timeoutMs, externalSignal) {
@@ -417,6 +431,35 @@ async function boundedAttempt(operation, timeoutMs, externalSignal) {
   }
 }
 
+async function runTimedProvider(provider, model, prompt, timeoutMs, deps) {
+  if (deps.runProvider || provider === 'pi') {
+    return boundedAttempt(
+      (signal) => runProvider(provider, model, prompt, timeoutMs, { ...deps, signal }),
+      timeoutMs,
+      deps.signal,
+    );
+  }
+
+  // Temp-dir setup is outside the provider clock so a slow mkdtemp cannot
+  // abort the attempt before spawn/terminateProcess.
+  let workspace;
+  try {
+    workspace = await prepareCliWorkspace(provider, prompt, deps);
+  } catch {
+    return null;
+  }
+  try {
+    if (deps.signal?.aborted) return null;
+    return await boundedAttempt(
+      (signal) => runPreparedCli(workspace, prompt, timeoutMs, { ...deps, signal }),
+      timeoutMs,
+      deps.signal,
+    );
+  } finally {
+    await disposeCliWorkspace(workspace);
+  }
+}
+
 /** Generate opportunistically. Every unavailable, invalid, failed, or timed-out route falls through. */
 export async function generateCheckpointTitle(raw, deps = {}) {
   const input = normalizeCheckpointTitleRequest(raw);
@@ -433,11 +476,7 @@ export async function generateCheckpointTitle(raw, deps = {}) {
     const remaining = overallTimeoutMs - (Date.now() - startedAt);
     if (remaining <= 0) break;
     const timeoutMs = Math.max(1, Math.min(providerTimeoutMs, remaining));
-    const output = await boundedAttempt(
-      (signal) => runProvider(provider, route.model, prompt, timeoutMs, { ...deps, signal }),
-      timeoutMs,
-      deps.signal,
-    );
+    const output = await runTimedProvider(provider, route.model, prompt, timeoutMs, deps);
     const title = cleanCheckpointTitle(output);
     if (!title) continue;
     return {
