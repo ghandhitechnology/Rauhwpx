@@ -7,7 +7,7 @@
 <meta name="description" content="귀찮이글 개발자의 편지와 토큰 기부 안내.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Nanum+Pen+Script&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *,*::before,*::after{box-sizing:border-box}
 
@@ -20,7 +20,6 @@
   --ink-3:#6e675c;
   --rule:#d3cbbb;
   --sans:'IBM Plex Sans KR',system-ui,-apple-system,'Apple SD Gothic Neo',sans-serif;
-  --pen:'Nanum Pen Script',cursive;
   --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='.05'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
@@ -134,13 +133,6 @@ a{color:inherit}
   line-height:1.82;
 }
 .letter p{margin:0 0 1.25em;word-break:keep-all;overflow-wrap:break-word}
-.letter .signature{
-  margin:8px 0 0;
-  text-align:right;
-  color:var(--ink-3);
-  font:400 clamp(23px,2.6vw,30px)/1.25 var(--pen);
-}
-
 .receipt-action{
   margin-top:clamp(26px,3.6vw,42px);
   padding-top:20px;
@@ -190,7 +182,6 @@ a{color:inherit}
   .receipt h1{text-align:center}
   .token-loop{max-height:190px}
   .letter{margin-top:30px;line-height:1.76}
-  .letter .signature{text-align:left}
   .donate-button{width:100%}
 }
 
@@ -276,9 +267,8 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       <div class="letter">
         <p>안녕하세요, Rauhwpx 개발자입니다</p>
         <p>이 프로그램의 대부분은 바이브코딩으로 만든 것입니다 하루종일 24시간 지피티는 지금도 일을 하고 있습니다</p>
-        <p>네. 저는 토큰이 부족합니다. 돈도 없습니다. 거의 생활비 전부를 쏟아부어서 만든 프로그램입니다</p>
-        <p>저를 위해 토큰을 기부해주셔서 프로그램의 발전을 도와주실 천사분이 있을지도 몰라서 올립니다</p>
-        <p class="signature">--개발자 올림 --</p>
+        <p>이 프로그램은 사비로 유지보수됩니다</p>
+        <p>작은 후원은 프로젝트의 유지에 큰 힘이 됩니다!</p>
       </div>
 
       <div class="receipt-action">
