@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>토큰 기부하기 · Rauhwpx</title>
-<meta name="description" content="Rauhwpx 개발자의 편지와 토큰 기부 안내.">
+<title>후원하기 | Rauhwpx</title>
+<meta name="description" content="Rauhwpx 개발자의 편지와 후원 안내.">
 <meta name="theme-color" content="#4f73e8">
 <link rel="icon" type="image/png" href="assets/rauhwpx-logo.png">
 <link rel="apple-touch-icon" href="assets/rauhwpx-logo.png">
@@ -177,16 +177,22 @@ a{color:inherit}
   min-height:58px;
   display:inline-flex;
   align-items:center;
-  justify-content:center;
-  padding:15px 28px;
+  justify-content:space-between;
+  gap:20px;
+  padding:14px 18px 14px 22px;
   background:var(--ink);
   color:var(--patch);
-  font-size:18px;
-  font-weight:600;
-  text-decoration:none;
+  border:0;
   border-radius:3px;
+  font:inherit;
+  text-align:left;
+  cursor:pointer;
   transition:background-color .16s ease,transform .16s ease;
 }
+.account-details{display:flex;flex-direction:column;gap:2px}
+.account-bank{font-size:13px;line-height:1.4;color:#b8b1a5}
+.account-number{font:500 19px/1.4 var(--sans);font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.copy-label{flex:0 0 auto;font-size:14px;font-weight:600;color:var(--patch)}
 .donate-button:hover{background:#2c2822;transform:translateY(-2px)}
 .donate-button:focus-visible,.brand:focus-visible,.back:focus-visible{
   outline:3px solid var(--ink);
@@ -298,13 +304,18 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
       <div class="letter">
         <p>안녕하세요, Rauhwpx 개발자입니다</p>
-        <p>이 프로그램의 대부분은 바이브코딩으로 만든 것입니다 하루종일 24시간 지피티는 지금도 일을 하고 있습니다</p>
-        <p>이 프로그램은 사비로 유지보수됩니다</p>
+        <p>이 프로그램은 귀찮은 현대인들을 위해 무료, 오픈 소스로 배포 중이며 앞으로 유료화 계획은 없습니다.</p>
         <p>작은 후원은 프로젝트의 유지에 큰 힘이 됩니다!</p>
       </div>
 
       <div class="receipt-action">
-        <a class="donate-button" href="https://donate.stripe.com/eVqeVf5C5cvR9uiaQKeZ201">토큰 기부하기</a>
+        <button class="donate-button" id="copy-account" type="button" aria-label="토스뱅크 계좌번호 1002-3151-6378 복사">
+          <span class="account-details">
+            <span class="account-bank">토스뱅크 예금주 하태욱</span>
+            <span class="account-number">1002-3151-6378</span>
+          </span>
+          <span class="copy-label" aria-live="polite">계좌번호 복사</span>
+        </button>
       </div>
     </article>
 
@@ -318,5 +329,14 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     </section>
   </div>
 </main>
+<script>
+const accountButton=document.getElementById('copy-account');
+const copyLabel=accountButton.querySelector('.copy-label');
+accountButton.addEventListener('click',async()=>{
+  await navigator.clipboard.writeText('1002-3151-6378');
+  copyLabel.textContent='복사했어요';
+  window.setTimeout(()=>{copyLabel.textContent='계좌번호 복사'},1800);
+});
+</script>
 </body>
 </html>
