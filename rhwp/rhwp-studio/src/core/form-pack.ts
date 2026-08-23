@@ -1,8 +1,12 @@
 export const FORM_PACK_ID = 'rauhwpx-office';
 export const FORM_PACK_MARKER_PATH = 'META-INF/rauhwpx-form-pack';
 
-export const REFUSE_BINARY_HWP =
-  '이 서식은 HWPX로만 저장할 수 있습니다. 바이너리 HWP 경로는 거부합니다.';
+/** 사무실 거절 안내. 한글이 본문이고, 영문은 같은 뜻의 짝이다. */
+export const REFUSE_BINARY_HWP_KO =
+  '이 서식은 HWPX로만 저장됩니다. HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.';
+export const REFUSE_BINARY_HWP_EN =
+  'This form is HWPX-only. HWP save is blocked. Tables and layout stay.';
+export const REFUSE_BINARY_HWP = `${REFUSE_BINARY_HWP_KO}\n${REFUSE_BINARY_HWP_EN}`;
 
 export interface FormPackEntry {
   id: string;

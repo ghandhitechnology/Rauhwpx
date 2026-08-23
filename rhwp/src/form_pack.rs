@@ -17,8 +17,13 @@ pub const PACK_MARKER_PATH: &str = "META-INF/rauhwpx-form-pack";
 pub const BRAND_GONGMUN: &str = "Rauhwpx 공문 서식";
 pub const BRAND_PUMUI: &str = "Rauhwpx 품의 서식";
 
+/// 사무실 거절 안내. 한글이 본문이고, 영문은 같은 뜻의 짝이다.
+pub const REFUSE_BINARY_HWP_KO: &str =
+    "이 서식은 HWPX로만 저장됩니다. HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.";
+pub const REFUSE_BINARY_HWP_EN: &str =
+    "This form is HWPX-only. HWP save is blocked. Tables and layout stay.";
 pub const REFUSE_BINARY_HWP: &str =
-    "이 서식은 HWPX로만 저장할 수 있습니다. 바이너리 HWP 경로는 거부합니다.";
+    "이 서식은 HWPX로만 저장됩니다. HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.\nThis form is HWPX-only. HWP save is blocked. Tables and layout stay.";
 
 pub fn output_would_write_binary_hwp(path: &Path) -> bool {
     path.extension()
@@ -38,7 +43,11 @@ pub fn is_form_pack_document(doc: &Document) -> bool {
 }
 
 /// 서식팩 문서를 바이너리 HWP 로 쓰려 하면 거절 메시지를 반환한다.
-pub fn refuse_binary_hwp_export(_source: &Path, output: &Path, doc: &Document) -> Option<&'static str> {
+pub fn refuse_binary_hwp_export(
+    _source: &Path,
+    output: &Path,
+    doc: &Document,
+) -> Option<&'static str> {
     if is_form_pack_document(doc) && output_would_write_binary_hwp(output) {
         Some(REFUSE_BINARY_HWP)
     } else {
@@ -139,10 +148,33 @@ mod tests {
     }
 
     #[test]
+    fn refuse_copy_is_office_korean_with_english_pair() {
+        assert_eq!(
+            REFUSE_BINARY_HWP,
+            format!("{REFUSE_BINARY_HWP_KO}\n{REFUSE_BINARY_HWP_EN}")
+        );
+        assert!(REFUSE_BINARY_HWP_KO.contains("HWPX"));
+        assert!(REFUSE_BINARY_HWP_KO.contains("HWP 저장"));
+        assert!(REFUSE_BINARY_HWP_KO.contains("표"));
+        assert!(REFUSE_BINARY_HWP_KO.contains("배치"));
+        assert!(!REFUSE_BINARY_HWP.contains("바이너리"));
+        assert!(!REFUSE_BINARY_HWP.contains("경로"));
+        assert!(!REFUSE_BINARY_HWP.to_ascii_lowercase().contains("upload"));
+        assert!(!REFUSE_BINARY_HWP.contains("클라우드"));
+        assert!(!REFUSE_BINARY_HWP.contains("한컴"));
+        assert!(!REFUSE_BINARY_HWP.to_ascii_lowercase().contains("hancom"));
+        assert!(REFUSE_BINARY_HWP_EN.contains("HWPX-only"));
+        assert!(REFUSE_BINARY_HWP_EN.contains("HWP save is blocked"));
+        assert!(REFUSE_BINARY_HWP_EN.contains("Tables and layout stay"));
+    }
+
+    #[test]
     fn pack_id_comes_from_zip_marker_not_filename() {
         let mut pack = Document::default();
-        pack.hwpx_aux_entries
-            .push((PACK_MARKER_PATH.to_string(), format!("{PACK_ID}\n").into_bytes()));
+        pack.hwpx_aux_entries.push((
+            PACK_MARKER_PATH.to_string(),
+            format!("{PACK_ID}\n").into_bytes(),
+        ));
         assert_eq!(document_pack_id(&pack), Some(PACK_ID));
         assert_eq!(
             refuse_binary_hwp_export(Path::new("보고서.hwpx"), Path::new("out.hwp"), &pack),
