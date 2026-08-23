@@ -266,6 +266,7 @@ export interface WritingStyleCalibrationOpenOptions {
 }
 
 export interface WritingStyleCalibrationUi {
+  open(): void;
   open(options?: WritingStyleCalibrationOpenOptions): void;
   handleEvent(event: SidebarEvent): void;
   dispose(): void;
