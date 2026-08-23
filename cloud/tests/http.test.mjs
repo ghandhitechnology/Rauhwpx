@@ -23,6 +23,8 @@ import {
   canonicalSseEvent,
 } from '../src/response-proof.mjs';
 
+const cloudVersion = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
+
 function testIdentity() {
   const pair = generateKeyPairSync('ed25519');
   const encodedKey = pair.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url');
@@ -121,7 +123,7 @@ test('public API pins every response, supports the Tailscale path, and rejects w
   assert.equal(health.headers.get('x-rauhwpx-server-key'), identity.serverPublicKey);
   assert.deepEqual(await health.json(), {
     ok: true,
-    version: '0.1.11',
+    version: cloudVersion,
     protocolVersion: 1,
     serverPublicKey: identity.serverPublicKey,
     serverId: identity.serverId,
