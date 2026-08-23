@@ -17,6 +17,10 @@ pub const PACK_MARKER_PATH: &str = "META-INF/rauhwpx-form-pack";
 pub const BRAND_GONGMUN: &str = "Rauhwpx 공문 서식";
 pub const BRAND_PUMUI: &str = "Rauhwpx 품의 서식";
 
+/// 빈 화면·거절 토스트가 같이 쓰는 사무실 한 줄.
+pub const SAVE_LINE_KO: &str = "HWPX만 저장";
+pub const SAVE_LINE_EN: &str = "HWPX only";
+
 /// 사무실 거절 안내. 한글이 본문이고, 영문은 같은 뜻의 짝이다.
 pub const REFUSE_BINARY_HWP_KO: &str =
     "이 서식은 HWPX만 저장됩니다. HWP 저장은 막아 두었습니다. 표와 배치는 그대로입니다.";
@@ -153,7 +157,8 @@ mod tests {
             REFUSE_BINARY_HWP,
             format!("{REFUSE_BINARY_HWP_KO}\n{REFUSE_BINARY_HWP_EN}")
         );
-        assert!(REFUSE_BINARY_HWP_KO.contains("HWPX"));
+        assert!(REFUSE_BINARY_HWP_KO.contains(SAVE_LINE_KO));
+        assert_eq!(SAVE_LINE_EN, "HWPX only");
         assert!(REFUSE_BINARY_HWP_KO.contains("HWP 저장"));
         assert!(REFUSE_BINARY_HWP_KO.contains("표"));
         assert!(REFUSE_BINARY_HWP_KO.contains("배치"));
