@@ -78,6 +78,7 @@ import { createEffortSlider } from './effort-slider.ts';
 import { createSubagentFleet, isSpawnToolName } from './subagent-fleet.ts';
 import { createSettingsPanel } from './settings.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
+import { maybeStartInitialSetup, type InitialSetupUi } from '../initial-setup/initial-setup.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
 import { createReferenceLibrary } from './reference-library.ts';
 import {
@@ -1564,7 +1565,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   planRestore.appendChild(planOrbit);
   planRestore.addEventListener('click', () => setPlanMinimized(false));
   planSurface.append(planCardSlot);
-  const writingStyleCalibration = createWritingStyleCalibration(bridge);
+  let initialSetup: InitialSetupUi | null = null;
+  const writingStyleCalibration = createWritingStyleCalibration(bridge, {
+    onDismiss: (result) => initialSetup?.notifyCalibrationClosed(result.completed),
+  });
   const composerUtilities = el('div', 'ag-composer-utilities');
   composerUtilities.setAttribute('aria-label', '채팅 도구');
 
@@ -1987,6 +1991,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     reconnectSession: () => restartAgentSession(),
   });
   const settingsPage = settingsPanel.element;
+  initialSetup = maybeStartInitialSetup({
+    openAgentSetup: (agent) => settingsPanel.openAgentSetup(agent),
+    beginAgentConnect: (agent) => settingsPanel.beginAgentConnect(agent),
+    openCalibration: (options) => writingStyleCalibration.open(options),
+  });
   settingsPage.addEventListener('ag-settings-close', () => {
     setSettingsPanelOpen(false);
     settingsBtn.focus();
@@ -4708,6 +4717,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     writingStyleCalibration.handleEvent(e);
     // 설정 탭은 연결·프로바이더·사용량·문체 상태를 그대로 받아 그린다.
     settingsPanel.handleEvent(e);
+    initialSetup?.handleEvent(e);
     if (handlePlanningSidebarEvent(e)) return;
     switch (e.type) {
       case 'connection':
@@ -5652,6 +5662,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       clearConnCountdown();
       writingStyleCalibration.dispose();
       settingsPanel.dispose();
+      initialSetup?.dispose();
       clearAttachmentDrag();
       root.removeEventListener('dragenter', onAttachmentDragEnter);
       root.removeEventListener('dragover', onAttachmentDragOver);

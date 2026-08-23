@@ -1,0 +1,161 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+
+import { AGENT_MODELS } from '../src/agent/models.ts';
+import type { AgentName, AgentSetupStatus } from '../src/agent/types.ts';
+import { PROVIDER_ORDER } from '../src/ui/agent-sidebar/providers.ts';
+import {
+  isProviderConfigured,
+  previewModelLabels,
+  PROVIDER_VENDOR,
+  SUGGESTED_AGENT,
+} from '../src/ui/initial-setup/catalog.ts';
+import {
+  completeInitialSetup,
+  defaultInitialSetup,
+  isInitialSetupComplete,
+  loadInitialSetup,
+  shouldForceInitialSetup,
+  shouldShowInitialSetup,
+  shouldSuppressInitialSetup,
+} from '../src/ui/initial-setup/state.ts';
+
+const readSource = (relativePath: string) => readFileSync(
+  new URL(relativePath, import.meta.url),
+  'utf8',
+).replace(/\r\n/g, '\n');
+
+function memoryStore(seed: Record<string, string> = {}) {
+  const store = new Map(Object.entries(seed));
+  return {
+    getItem(key: string) {
+      return store.get(key) ?? null;
+    },
+    setItem(key: string, value: string) {
+      store.set(key, value);
+    },
+  };
+}
+
+function status(partial: Partial<AgentSetupStatus> & { agent: AgentName }): AgentSetupStatus {
+  return {
+    available: false,
+    connected: false,
+    installed: false,
+    installing: false,
+    version: null,
+    authenticated: false,
+    authMethod: null,
+    keyTail: null,
+    authenticating: false,
+    setupComplete: false,
+    latestVersion: null,
+    updateRequired: false,
+    error: null,
+    ...partial,
+  };
+}
+
+test('첫 실행 플래그가 없으면 마법사를 보여 준다', () => {
+  const storage = memoryStore();
+  assert.equal(isInitialSetupComplete(storage), false);
+  assert.equal(shouldShowInitialSetup(storage, ''), true);
+  assert.deepEqual(loadInitialSetup(storage), defaultInitialSetup());
+});
+
+test('끝내거나 건너뛰면 다음 실행에서 다시 열리지 않는다', () => {
+  const storage = memoryStore();
+  completeInitialSetup({ providerStep: 'skipped', calibrationStep: 'skipped' }, storage, () => '2026-08-23T00:00:00.000Z');
+  assert.equal(isInitialSetupComplete(storage), true);
+  assert.equal(shouldShowInitialSetup(storage, ''), false);
+  const saved = loadInitialSetup(storage);
+  assert.equal(saved.providerStep, 'skipped');
+  assert.equal(saved.calibrationStep, 'skipped');
+  assert.equal(saved.completedAt, '2026-08-23T00:00:00.000Z');
+});
+
+test('?initial-setup=1 이면 끝난 뒤에도 다시 연다', () => {
+  const storage = memoryStore();
+  completeInitialSetup({ providerStep: 'configured', calibrationStep: 'done' }, storage);
+  assert.equal(shouldForceInitialSetup('?initial-setup=1'), true);
+  assert.equal(shouldForceInitialSetup('initial-setup'), true);
+  assert.equal(shouldForceInitialSetup('?foo=1'), false);
+  assert.equal(shouldShowInitialSetup(storage, '?initial-setup=1'), true);
+  assert.equal(shouldSuppressInitialSetup(), typeof navigator !== 'undefined' && navigator.webdriver === true);
+});
+
+test('카드 모델 목록은 정적 카탈로그를 짧게 보여 준다', () => {
+  assert.deepEqual(previewModelLabels('claude'), AGENT_MODELS.claude.map((model) => model.label));
+  assert.deepEqual(previewModelLabels('codex'), ['Sol', 'Terra', 'Luna']);
+  assert.deepEqual(previewModelLabels('grok'), ['Grok 4.6', 'Grok 4.5']);
+  assert.deepEqual(previewModelLabels('pi'), ['OpenRouter에서 고름', '최대 3개']);
+  assert.deepEqual(previewModelLabels('cursor'), ['Auto', '구독 · API 모델']);
+  assert.equal(SUGGESTED_AGENT, 'codex');
+  for (const agent of PROVIDER_ORDER) {
+    assert.ok(PROVIDER_VENDOR[agent]);
+  }
+});
+
+test('연결됨은 available 만으로 치지 않는다', () => {
+  const statuses = {
+    claude: status({ agent: 'claude', available: true }),
+    codex: status({ agent: 'codex', connected: true }),
+    pi: status({ agent: 'pi', setupComplete: true }),
+    grok: status({ agent: 'grok', authenticated: true }),
+    cursor: status({ agent: 'cursor' }),
+  };
+  assert.equal(isProviderConfigured('claude', statuses), false);
+  assert.equal(isProviderConfigured('codex', statuses), true);
+  assert.equal(isProviderConfigured('pi', statuses), true);
+  assert.equal(isProviderConfigured('grok', statuses), true);
+  assert.equal(isProviderConfigured('cursor', statuses), false);
+});
+
+test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙인다', () => {
+  const source = readSource('../src/ui/agent-sidebar/index.ts');
+  const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
+  const css = readSource('../src/ui/initial-setup/initial-setup.css');
+  const settings = readSource('../src/ui/agent-sidebar/settings.ts');
+  const calibration = readSource('../src/ui/agent-sidebar/writing-style-calibration.ts');
+
+  assert.match(source, /maybeStartInitialSetup/);
+  assert.match(source, /settingsPanel\.openAgentSetup\(agent\)/);
+  assert.match(source, /settingsPanel\.beginAgentConnect\(agent\)/);
+  assert.match(source, /writingStyleCalibration\.open\(options\)/);
+  assert.match(source, /initialSetup\?\.notifyCalibrationClosed\(result\.completed\)/);
+  assert.match(settings, /openAgentSetup,/);
+  assert.match(settings, /beginAgentConnect,/);
+  assert.match(settings, /await startSetupAuth\('oauth'\)/);
+  assert.match(calibration, /elevate\?: boolean/);
+  assert.match(calibration, /onDismiss\?: \(result: \{ completed: boolean \}\) => void/);
+
+  assert.match(setup, /for \(const agent of PROVIDER_ORDER\)/);
+  assert.match(setup, /createProviderIcon\(agent\)/);
+  assert.match(setup, /previewModelLabels\(agent\)/);
+  assert.match(setup, /from '\.\.\/agent-sidebar\/providers\.ts'/);
+  assert.match(setup, /나중에 하기/);
+  assert.match(setup, /모델 연결 단계로 돌아가기/);
+  assert.match(setup, /function goBack\(\)/);
+  assert.match(setup, /보정 시작/);
+  assert.match(setup, /모델을 연결하세요/);
+  assert.match(setup, /말투를 맞출까요\?/);
+  assert.match(setup, /원고 10페이지를 올려서 에이전트가 말투를 따라하게 할 수 있습니다/);
+  assert.doesNotMatch(setup, /rhwp-setup-kicker/);
+  assert.doesNotMatch(setup, /rhwp-setup-lead/);
+  assert.match(setup, /\(beginAgentConnect \?\? openAgentSetup\)\(agent\)/);
+  assert.match(setup, /openCalibration\(\{ elevate: true \}\)/);
+
+  assert.match(css, /grid-template-columns: repeat\(5, minmax\(0, 1fr\)\)/);
+  assert.match(css, /rhwp-setup-cal\[hidden\]/);
+  assert.match(css, /prefers-reduced-motion: reduce/);
+  assert.match(css, /--setup-spring-snappy: linear\(/);
+  assert.match(css, /@media \(min-width: 1440px\) and \(min-height: 820px\)/);
+  assert.match(css, /width: min\(1480px, 100%\)/);
+  assert.match(css, /url\('\/icons\/provider-codex\.png'\)/);
+  assert.match(css, /url\('\/icons\/provider-pi\.svg'\)/);
+  assert.match(css, /url\('\/icons\/provider-grok\.svg'\)/);
+  assert.match(css, /url\('\/icons\/provider-cursor\.svg'\)/);
+  assert.doesNotMatch(css, /transition: all/);
+  assert.doesNotMatch(css, /\d+ms ease(?:;|,)/);
+});
