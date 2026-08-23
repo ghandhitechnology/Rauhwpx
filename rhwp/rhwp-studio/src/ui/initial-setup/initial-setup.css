@@ -498,6 +498,99 @@
   }
 }
 
+@media (min-width: 1440px) and (min-height: 820px) {
+  .rhwp-setup-overlay {
+    padding: clamp(48px, 6vh, 72px) clamp(64px, 5vw, 96px);
+  }
+
+  .rhwp-setup-dialog {
+    width: min(1480px, 100%);
+    max-height: none;
+    gap: clamp(28px, 3vh, 36px);
+  }
+
+  .rhwp-setup-nav {
+    min-height: 40px;
+  }
+
+  .rhwp-setup-brand {
+    font-size: 14px;
+  }
+
+  .rhwp-setup-title {
+    font-size: clamp(46px, 3vw, 56px);
+  }
+
+  .rhwp-setup-step,
+  .rhwp-setup-status {
+    font-size: 13px;
+  }
+
+  .rhwp-setup-grid {
+    gap: clamp(16px, 1.2vw, 22px);
+  }
+
+  .rhwp-setup-card {
+    min-height: clamp(380px, 44vh, 460px);
+    padding: 30px 26px 24px;
+    border-radius: 18px;
+  }
+
+  .rhwp-setup-card-logo {
+    width: 44px;
+    height: 44px;
+    margin-bottom: 24px;
+  }
+
+  .rhwp-setup-card-logo .ag-provider-icon {
+    width: 38px;
+    height: 38px;
+  }
+
+  .rhwp-setup-card-name {
+    font-size: 26px;
+  }
+
+  .rhwp-setup-card-vendor,
+  .rhwp-setup-card-models li {
+    font-size: 13px;
+  }
+
+  .rhwp-setup-card-models {
+    margin: 24px 0 28px;
+  }
+
+  .rhwp-setup-card-action,
+  .rhwp-setup-text-btn,
+  .rhwp-setup-footer-btn {
+    min-height: 48px;
+    font-size: 15px;
+  }
+
+  .rhwp-setup-footer {
+    min-height: 52px;
+  }
+
+  .rhwp-setup-cal {
+    width: min(760px, 100%);
+    padding: 64px;
+  }
+
+  .rhwp-setup-cal-mark {
+    width: 56px;
+    height: 56px;
+    margin-bottom: 32px;
+  }
+
+  .rhwp-setup-cal-title {
+    font-size: 36px;
+  }
+
+  .rhwp-setup-cal-copy {
+    font-size: 16px;
+  }
+}
+
 @media (max-width: 1100px) {
   .rhwp-setup-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));

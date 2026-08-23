@@ -150,6 +150,8 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(css, /rhwp-setup-cal\[hidden\]/);
   assert.match(css, /prefers-reduced-motion: reduce/);
   assert.match(css, /--setup-spring-snappy: linear\(/);
+  assert.match(css, /@media \(min-width: 1440px\) and \(min-height: 820px\)/);
+  assert.match(css, /width: min\(1480px, 100%\)/);
   assert.match(css, /url\('\/icons\/provider-codex\.png'\)/);
   assert.match(css, /url\('\/icons\/provider-pi\.svg'\)/);
   assert.match(css, /url\('\/icons\/provider-grok\.svg'\)/);
