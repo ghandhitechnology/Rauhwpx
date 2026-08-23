@@ -440,9 +440,9 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   activeBranch.type = 'button';
   activeBranch.setAttribute('aria-label', '현재 브랜치 보기');
   activeBranch.append(el('span', 'ag-versions-head-marker', 'HEAD>'), el('span', 'ag-versions-branch-name', 'main'));
-  const checkpointButton = el('button', 'ag-versions-primary', '+ 체크포인트');
+  const checkpointButton = el('button', 'ag-versions-primary', '+ 커밋');
   checkpointButton.type = 'button';
-  checkpointButton.setAttribute('aria-label', '체크포인트 저장');
+  checkpointButton.setAttribute('aria-label', '새 커밋 만들기');
   const mergeButton = el('button', 'ag-versions-secondary', '병합');
   mergeButton.type = 'button';
   mergeButton.dataset.versionMutation = 'true';
@@ -453,7 +453,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   historyPanel.setAttribute('role', 'tabpanel');
   const graph = el('div', 'ag-versions-graph');
   graph.setAttribute('role', 'listbox');
-  graph.setAttribute('aria-label', '체크포인트 기록');
+  graph.setAttribute('aria-label', '커밋 기록');
   const inspector = el('aside', 'ag-versions-inspector');
   const loadMoreButton = el('button', 'ag-versions-load-more', '이전 기록 더 보기');
   loadMoreButton.type = 'button';
@@ -613,7 +613,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     inspector.replaceChildren();
     const selected = current.commits.find((commit) => commit.id === selectedCommitId) ?? null;
     if (!selected) {
-      inspector.appendChild(el('p', 'ag-versions-placeholder', '체크포인트를 선택하면 세부 정보와 복원 작업을 볼 수 있습니다.'));
+      inspector.appendChild(el('p', 'ag-versions-placeholder', '커밋을 선택하면 세부 정보와 복원 작업을 볼 수 있습니다.'));
       return;
     }
     inspector.append(
@@ -638,7 +638,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     restore.disabled = !comparedCommits.has(selected.id);
     restore.title = restore.disabled ? '먼저 현재 문서와 비교하세요.' : '';
     restore.addEventListener('click', () => {
-      if (!window.confirm('현재 작업을 체크포인트로 남기고 이 버전의 내용으로 복원할까요? 파일은 저장할 때까지 바뀌지 않습니다.')) return;
+      if (!window.confirm('현재 작업을 커밋하고 이 버전의 내용으로 복원할까요? 파일은 저장할 때까지 바뀌지 않습니다.')) return;
       void perform(() => controller.restore(selected.id));
     });
     const branch = el('button', 'ag-versions-secondary', '여기서 브랜치');
@@ -665,7 +665,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       adopt.disabled = !comparedCommits.has(selected.id);
       adopt.title = adopt.disabled ? '먼저 현재 문서와 비교하세요.' : '';
       adopt.addEventListener('click', () => {
-        if (!window.confirm('선택한 버전의 내용을 현재 브랜치에 두 부모를 가진 채택 체크포인트로 남길까요?')) return;
+        if (!window.confirm('선택한 버전을 현재 브랜치에 두 부모를 둔 병합 커밋으로 남길까요?')) return;
         void perform(() => controller.adopt(selected.id));
       });
       actions.appendChild(adopt);
@@ -677,7 +677,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       amend.dataset.versionMutation = 'true';
       amend.addEventListener('click', () => void (async () => {
         const next = await requestVersionText({
-          title: '체크포인트 메시지 수정',
+          title: '커밋 메시지 수정',
           label: '메시지',
           initial: selected.title,
         });
@@ -708,7 +708,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       selectedCommitId = current.commits[0]?.id ?? null;
     }
     if (current.commits.length === 0) {
-      graph.appendChild(el('p', 'ag-versions-placeholder', '아직 체크포인트가 없습니다.'));
+      graph.appendChild(el('p', 'ag-versions-placeholder', '아직 커밋이 없습니다.'));
     }
     for (const commit of current.commits) {
       const row = el('button', 'ag-version-row');
@@ -793,7 +793,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
         switchButton.setAttribute('aria-label', `${branch.name} 브랜치로 전환`);
         switchButton.dataset.versionMutation = 'true';
         switchButton.addEventListener('click', () => {
-          if (current.dirty && !window.confirm('현재 작업을 체크포인트로 남기고 브랜치를 전환할까요?')) return;
+          if (current.dirty && !window.confirm('현재 작업을 커밋하고 브랜치를 전환할까요?')) return;
           void perform(() => controller.switchBranch(branch.name));
         });
         actions.appendChild(switchButton);
@@ -815,7 +815,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
         remove.setAttribute('aria-label', `${branch.name} 브랜치 삭제`);
         remove.dataset.versionMutation = 'true';
         remove.addEventListener('click', () => {
-          if (!window.confirm(`“${branch.name}” 브랜치를 영구 삭제할까요? 태그나 다른 브랜치가 참조하지 않는 체크포인트는 정리 전까지 남습니다.`)) return;
+          if (!window.confirm(`“${branch.name}” 브랜치를 영구 삭제할까요? 태그나 다른 브랜치가 참조하지 않는 커밋은 정리 전까지 남습니다.`)) return;
           void perform(() => controller.deleteBranch(branch.name));
         });
         actions.appendChild(remove);
@@ -952,7 +952,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       enable.addEventListener('click', () => void perform(() => controller.enable()));
       notice.replaceChildren(
         el('strong', '', '문서 변경을 안전하게 되돌리세요'),
-        el('span', '', '체크포인트와 브랜치는 이 기기에만 저장됩니다. 원본 파일은 일반 저장 전까지 바뀌지 않습니다.'),
+        el('span', '', '커밋과 브랜치는 이 기기에만 저장됩니다. 원본 파일은 일반 저장 전까지 바뀌지 않습니다.'),
         enable,
       );
     }
@@ -1020,7 +1020,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   closeButton.addEventListener('click', () => page.dispatchEvent(new CustomEvent('ag-versions-close')));
   checkpointButton.addEventListener('click', () => void (async () => {
     const message = await requestVersionText({
-      title: '체크포인트 저장',
+      title: '새 커밋 만들기',
       label: '메시지 (비워 두면 자동 제목)',
       optional: true,
     });

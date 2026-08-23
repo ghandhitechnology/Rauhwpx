@@ -119,7 +119,7 @@ export interface AgentSidebarDeps {
     documentId: string | null;
     fileName: string | null;
   }) => void;
-  /** 현재 문서의 로컬 체크포인트와 브랜치를 관리한다. */
+  /** 현재 문서의 로컬 커밋과 브랜치를 관리한다. */
   versionController?: VersionManagerController;
 }
 

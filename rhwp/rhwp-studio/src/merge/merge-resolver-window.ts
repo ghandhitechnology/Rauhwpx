@@ -181,7 +181,7 @@ export class MergeResolverWindow {
     const direction = element('p', 'merge-direction', `${options.sourceBranch} → ${options.currentBranch}`);
     headingWrap.append(heading, direction);
     const headerActions = element('div', 'merge-resolver-header-actions');
-    const saveClose = element('button', 'merge-secondary-button', '저장 후 닫기');
+    const saveClose = element('button', 'merge-secondary-button', '저장하고 닫기');
     saveClose.type = 'button';
     saveClose.addEventListener('click', () => { void this.close().catch(() => undefined); });
     saveClose.setAttribute('aria-label', '병합 초안을 저장하고 닫기');
@@ -308,7 +308,7 @@ export class MergeResolverWindow {
     historyActions.append(this.undoButton, this.redoButton);
 
     const mergeMeta = element('div', 'merge-completion-meta');
-    const titleLabel = element('label', 'merge-field-label', '체크포인트 제목');
+    const titleLabel = element('label', 'merge-field-label', '커밋 메시지');
     this.titleInput = document.createElement('input');
     this.titleInput.className = 'merge-title-input';
     this.titleInput.maxLength = 200;
@@ -319,7 +319,7 @@ export class MergeResolverWindow {
       const modeLabel = element('label', 'merge-field-label', '완료 방식');
       this.modeSelect = document.createElement('select');
       this.modeSelect.className = 'merge-mode-select';
-      this.modeSelect.append(new Option('빨리 감기', 'fast-forward'), new Option('병합 체크포인트 만들기', 'explicit-checkpoint'));
+      this.modeSelect.append(new Option('Fast-forward 병합', 'fast-forward'), new Option('병합 커밋 만들기', 'explicit-checkpoint'));
       this.modeSelect.value = this.options!.mode === 'explicit-checkpoint' ? 'explicit-checkpoint' : 'fast-forward';
       modeLabel.appendChild(this.modeSelect);
       mergeMeta.appendChild(modeLabel);
@@ -573,8 +573,8 @@ export class MergeResolverWindow {
       const title = this.titleInput?.value.trim() ?? '';
       if (!title) {
         this.titleInput?.focus();
-        this.showActionStatus('병합을 완료하려면 체크포인트 제목을 입력하세요.', 'error');
-        this.announce('병합을 완료하려면 체크포인트 제목을 입력하세요.');
+        this.showActionStatus('병합을 완료하려면 커밋 메시지를 입력하세요.', 'error');
+        this.announce('병합을 완료하려면 커밋 메시지를 입력하세요.');
         return;
       }
       const mode = this.options.mode === 'diverged'
@@ -641,7 +641,7 @@ export class MergeResolverWindow {
       const actions = element('div', 'merge-confirm-actions');
       const cancel = element('button', 'merge-secondary-button', '소스 유지');
       cancel.type = 'button';
-      const confirm = element('button', 'merge-primary-button', '병합 마침');
+      const confirm = element('button', 'merge-primary-button', '병합 완료');
       confirm.type = 'submit';
       actions.append(cancel, confirm);
       dialog.append(title, copy, select, actions);
@@ -730,7 +730,7 @@ export class MergeResolverWindow {
       + '.merge-title-input, .merge-mode-select',
     ).forEach((control) => { control.disabled = this.busy || applied; });
     if (this.completionButton) {
-      this.completionButton.textContent = this.busy ? '처리 중…' : applied ? '병합 마침' : '병합 완료';
+      this.completionButton.textContent = this.busy ? '처리 중…' : '병합 완료';
       this.completionButton.disabled = this.busy || (!applied
         && (this.state.unresolvedCount > 0 || !this.validation?.valid || !this.materialized));
     }

@@ -13,6 +13,13 @@ test('resolver exposes all four mandatory previews and unambiguous merge directi
   assert.match(source, /자동 변경은 모두 결과에 포함됩니다/);
 });
 
+test('resolver uses official Git merge terminology consistently', () => {
+  assert.match(source, /'커밋 메시지'/);
+  assert.match(source, /new Option\('Fast-forward 병합', 'fast-forward'\)/);
+  assert.match(source, /new Option\('병합 커밋 만들기', 'explicit-checkpoint'\)/);
+  assert.doesNotMatch(source, /체크포인트|빨리 감기|병합 마침|저장 후 닫기/);
+});
+
 test('resolver contract includes keyboard, accessibility, validation and explicit discard safeguards', () => {
   assert.match(source, /aria-live/);
   assert.match(source, /event\.key\.toLowerCase\(\) === 'z'/);

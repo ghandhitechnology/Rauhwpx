@@ -132,7 +132,7 @@ export interface AgentBridge {
   stopChat(): void;
   /** gpt-5.6-luna 로 스레드 제목 생성 요청. */
   requestTitle(threadId: string, preview: string): string;
-  /** 체크포인트 제목은 부수 정보다. 오프라인, 실패, 타임아웃이면 null. */
+  /** 커밋 메시지는 부수 정보다. 오프라인, 실패, 타임아웃이면 null. */
   requestCheckpointTitle(input: CheckpointTitleRequest): Promise<CheckpointTitleResult | null>;
   sendUserMessage(text: string, skillName?: string, stagedReferenceIds?: string[]): Promise<string | null>;
   listTemplates(): Promise<TemplateCatalog>;

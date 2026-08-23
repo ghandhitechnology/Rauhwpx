@@ -159,7 +159,7 @@ function errorMessage(error: unknown): string {
     INVALID_REF_NAME: '사용할 수 없는 이름입니다.',
     CURRENT_BRANCH: '현재 브랜치는 삭제할 수 없습니다.',
     LAST_BRANCH: '마지막 브랜치는 삭제할 수 없습니다.',
-    NO_CHANGES: '이미 체크포인트로 저장된 상태입니다.',
+    NO_CHANGES: '이미 커밋한 내용입니다.',
     CORRUPT_BLOB: '저장된 버전 데이터가 손상되어 작업을 중단했습니다.',
     RESTORE_PARSE_FAILED: '이 버전을 안전하게 읽지 못해 현재 문서를 바꾸지 않았습니다.',
     STORAGE_QUOTA: '버전 저장 공간이 부족합니다. 사용하지 않는 데이터를 정리하세요.',
@@ -569,7 +569,7 @@ export class DocumentVersionController implements VersionManagerController {
       const branch = this.#requireActiveBranch();
       const commit = await this.#requireCommit(id);
       this.#assertWorkspaceToken(workspace);
-      if (commit.id !== branch.target) throw new Error('현재 체크포인트의 메시지만 수정할 수 있습니다.');
+      if (commit.id !== branch.target) throw new Error('현재 커밋의 메시지만 수정할 수 있습니다.');
       await this.#store.updateCommitTitle({
         repositoryId: repository.id,
         commitId: commit.id,
@@ -1058,7 +1058,7 @@ export class DocumentVersionController implements VersionManagerController {
         this.#store.getCompareSnapshot(commit.compareSnapshotId),
         this.#store.getBlob(commit.blobId),
       ]);
-      if (!snapshot || !blob) throw new VersionError('CORRUPT_BLOB', `${commit.id} 체크포인트의 병합 데이터가 없습니다.`);
+      if (!snapshot || !blob) throw new VersionError('CORRUPT_BLOB', `${commit.id} 커밋의 병합 데이터가 없습니다.`);
       return { commit, snapshot: snapshot.snapshot, blob };
     };
     const [current, incoming, ...bases] = await Promise.all([
@@ -1491,7 +1491,7 @@ export class DocumentVersionController implements VersionManagerController {
             latestTarget.target !== refState.target.target
             || latestTarget.generation !== refState.target.generation
           ) {
-            throw new VersionError('STALE_WORKSPACE', '병합 대상 브랜치의 최신 체크포인트가 변경되었습니다.');
+            throw new VersionError('STALE_WORKSPACE', '병합 대상 브랜치의 최신 커밋이 변경되었습니다.');
           }
           if (
             Boolean(latestSource) !== Boolean(refState.source)
@@ -1500,7 +1500,7 @@ export class DocumentVersionController implements VersionManagerController {
               || latestSource.generation !== refState.source.generation
             ))
           ) {
-            throw new VersionError('STALE_WORKSPACE', '소스 브랜치의 최신 체크포인트가 변경되었습니다.');
+            throw new VersionError('STALE_WORKSPACE', '소스 브랜치의 최신 커밋이 변경되었습니다.');
           }
           const restore = await this.#store.restoreCompositeRefs({
             repositoryId: repository.id,
@@ -1706,14 +1706,14 @@ export class DocumentVersionController implements VersionManagerController {
     const building = (async () => {
       const commit = await this.#store.getCommit(id);
       if (!commit || commit.repositoryId !== repositoryId) {
-        throw new VersionError('COMMIT_NOT_FOUND', `병합 식별 정보를 만들 체크포인트 ${id}을(를) 찾을 수 없습니다.`);
+        throw new VersionError('COMMIT_NOT_FOUND', `병합 식별 정보를 만들 커밋 ${id}을(를) 찾을 수 없습니다.`);
       }
       const parents: VersionMergeManifest[] = [];
       for (const parent of commit.parents) {
         parents.push(await this.#ensureFullMergeManifest(repositoryId, parent, memo));
       }
       const latest = await this.#store.getCommit(id);
-      if (!latest) throw new VersionError('COMMIT_NOT_FOUND', `병합 식별 정보를 만드는 동안 체크포인트 ${id}이(가) 사라졌습니다.`);
+      if (!latest) throw new VersionError('COMMIT_NOT_FOUND', `병합 식별 정보를 만드는 동안 커밋 ${id}이(가) 사라졌습니다.`);
       const existing = latest.mergeManifestId
         ? await this.#store.getMergeManifest(latest.mergeManifestId)
         : null;
@@ -1725,7 +1725,7 @@ export class DocumentVersionController implements VersionManagerController {
         && existing.parentManifestIds.every((parentId, index) => parentId === parents[index]?.id)
       ) return existing;
       const blob = await this.#store.getBlob(latest.blobId);
-      if (!blob) throw new VersionError('CORRUPT_BLOB', `체크포인트 ${id}의 문서 데이터를 찾을 수 없습니다.`);
+      if (!blob) throw new VersionError('CORRUPT_BLOB', `커밋 ${id}의 문서 데이터를 찾을 수 없습니다.`);
       const entries = await this.#mergeWorker.buildDocumentManifest(blob.bytes, {
         onProgress: (progress) => this.#eventBus.emit('merge-progress', progress),
       });
@@ -2038,7 +2038,7 @@ export class DocumentVersionController implements VersionManagerController {
         await this.#refreshData(true);
         return null;
       }
-      if (options.reason === 'manual') throw new VersionError('NO_CHANGES', 'The content is already checkpointed');
+      if (options.reason === 'manual') throw new VersionError('NO_CHANGES', '이미 커밋한 내용입니다.');
       return null;
     }
     const before = await this.#store.getCompareSnapshot(head.compareSnapshotId);

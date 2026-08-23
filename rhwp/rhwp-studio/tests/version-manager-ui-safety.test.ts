@@ -19,9 +19,18 @@ test('버전 이름 입력은 브라우저 프롬프트 대신 앱 내 대화상
   assert.match(source, /if \(title !== null\) await perform\(\(\) => controller\.createShelf\(title \|\| undefined\)\)/);
 });
 
-test('수동 체크포인트는 이미 저장한 내용에도 명시적인 기록을 남긴다', () => {
+test('수동 커밋은 이미 저장한 내용에도 명시적인 기록을 남긴다', () => {
   const controller = readSource('../src/versioning/controller.ts');
   assert.match(controller, /#createCheckpoint\(\{ reason: 'manual', message, allowSameContent: true \}\)/);
+});
+
+test('사용자 용어는 체크포인트 대신 Git 커밋으로 통일한다', () => {
+  const controller = readSource('../src/versioning/controller.ts');
+  assert.match(source, /const checkpointButton = el\('button', 'ag-versions-primary', '\+ 커밋'\)/);
+  assert.match(source, /checkpointButton\.setAttribute\('aria-label', '새 커밋 만들기'\)/);
+  assert.match(source, /title: '커밋 메시지 수정'/);
+  assert.doesNotMatch(source, /체크포인트/);
+  assert.doesNotMatch(controller, /체크포인트/);
 });
 
 test('문서 변경 알림은 완료된 비교를 무효화한다', () => {
@@ -60,7 +69,7 @@ test('알림과 탭은 보조 기술에 완전한 관계를 제공한다', () =>
   assert.match(source, /panel\.setAttribute\('aria-labelledby', `ag-versions-\$\{id\}-tab`\)/);
 });
 
-test('내부 체크포인트 사유는 한국어로 표시한다', () => {
+test('내부 커밋 사유는 한국어로 표시한다', () => {
   assert.match(source, /'pre-restore': '복원 전 자동 저장'/);
   assert.match(source, /'pre-switch': '브랜치 전환 전 자동 저장'/);
   assert.match(source, /adopt: '채택'/);
