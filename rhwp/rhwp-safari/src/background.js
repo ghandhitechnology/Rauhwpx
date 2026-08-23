@@ -8,110 +8,6 @@
 // ─── 보안: URL 검증 ───
 
 const DEFAULT_ALLOWED_DOMAINS = ['.go.kr', '.ac.kr', '.mil.kr', '.korea.kr'];
-const BLOCKED_HOST_SUFFIXES = ['.localhost', '.local', '.localdomain', '.internal', '.intranet', '.lan', '.home', '.corp'];
-
-// 사설·내부망 판정은 문자열 prefix 가 아니라 16바이트 이진값으로 한다.
-// URL 파서는 ::ffff:127.0.0.1 을 [::ffff:7f00:1] 로 축약하므로 prefix 비교로는 못 잡는다.
-function isPrivateIPv4(host) {
-  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return false;
-  const parts = host.split('.').map(Number);
-  if (parts.some(part => part < 0 || part > 255)) return true;
-  const [a, b] = parts;
-  return (
-    a === 0 || a === 10 || a === 127 ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    a >= 224
-  );
-}
-
-/** IPv6 리터럴을 8개의 16비트 그룹으로 펼친다. 잘못된 리터럴은 null. */
-function expandIPv6(host) {
-  let text = host.toLowerCase();
-  const zone = text.indexOf('%');
-  if (zone >= 0) text = text.slice(0, zone);
-
-  const lastColon = text.lastIndexOf(':');
-  const tail = lastColon >= 0 ? text.slice(lastColon + 1) : '';
-  let tailGroups = [];
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(tail)) {
-    tailGroups = tail.split('.').map(Number);
-    if (tailGroups.some(n => n < 0 || n > 255)) return null;
-    text = text.slice(0, lastColon + 1);
-    if (!text.endsWith('::')) text = text.slice(0, -1);
-  }
-
-  const doubleColon = text.indexOf('::');
-  let groups;
-  if (doubleColon >= 0) {
-    if (text.indexOf('::', doubleColon + 1) >= 0) return null;
-    const left = text.slice(0, doubleColon);
-    const right = text.slice(doubleColon + 2);
-    const leftGroups = left ? left.split(':') : [];
-    const rightGroups = right ? right.split(':') : [];
-    const fill = 8 - leftGroups.length - rightGroups.length - Math.floor(tailGroups.length / 2);
-    if (fill < 0) return null;
-    groups = [...leftGroups, ...Array.from({ length: fill }, () => '0'), ...rightGroups];
-  } else {
-    groups = text.split(':').filter(group => group !== '');
-  }
-
-  const out = [];
-  for (const group of groups) {
-    if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
-    out.push(parseInt(group, 16));
-  }
-  for (let i = 0; i < tailGroups.length; i += 2) {
-    out.push((tailGroups[i] << 8) | tailGroups[i + 1]);
-  }
-  return out.length === 8 ? out : null;
-}
-
-function isPrivateIPv6(host) {
-  if (!host || !host.includes(':')) return false;
-  const groups = expandIPv6(host);
-  if (!groups) return true;
-  const high = i => groups[i] >> 8;
-  const low = i => groups[i] & 0xff;
-
-  if (groups.every(g => g === 0)) return true;
-  if (groups.slice(0, 7).every(g => g === 0) && groups[7] === 1) return true;
-  // ::ffff:x.y.z.w → 임베디드 IPv4 규칙 적용
-  if (groups.slice(0, 5).every(g => g === 0) && groups[5] === 0xffff) {
-    return isPrivateIPv4(`${high(6)}.${low(6)}.${high(7)}.${low(7)}`);
-  }
-  if (groups.slice(0, 3).every(g => g === 0) && groups[3] === 0 && groups[4] === 0 && groups[5] === 0) return true;
-  // 64:ff9b::/96 NAT64 → 임베디드 IPv4 규칙 적용
-  if (groups[0] === 0x0064 && groups[1] === 0xff9b && groups.slice(2, 6).every(g => g === 0)) {
-    return isPrivateIPv4(`${high(6)}.${low(6)}.${high(7)}.${low(7)}`);
-  }
-  if ((groups[0] & 0xffc0) === 0xfe80) return true;
-  if ((groups[0] & 0xfe00) === 0xfc00) return true;
-  if (groups[0] === 0x0100 && groups.slice(1, 4).every(g => g === 0)) return true;
-  if ((groups[0] & 0xff00) === 0xff00) return true;
-  return false;
-}
-
-function normalizeHost(hostname) {
-  return String(hostname || '')
-    .toLowerCase()
-    .replace(/\.$/, '')
-    .replace(/^\[/, '')
-    .replace(/\]$/, '');
-}
-
-function isPrivateHost(hostname) {
-  const host = normalizeHost(hostname);
-  if (!host) return true;
-  if (host === 'localhost') return true;
-  if (BLOCKED_HOST_SUFFIXES.some(suffix => host.endsWith(suffix))) return true;
-  if (host.includes(':')) return isPrivateIPv6(host);
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return isPrivateIPv4(host);
-  if (!host.includes('.')) return true; // 인트라넷 단일 라벨
-  return false;
-}
 
 function validateUrl(urlString) {
   if (!urlString || typeof urlString !== 'string') return { valid: false, reason: 'URL 비어있음' };
@@ -124,7 +20,11 @@ function validateUrl(urlString) {
     return { valid: false, reason: 'URL에 userinfo(@) 포함' };
   }
   // 내부 IP는 validateUrl 단계에서 차단하지 않고, 호출부에서 devMode 체크 후 판단
-  return { valid: true, parsed, isPrivate: isPrivateHost(parsed.hostname) };
+  return {
+    valid: true,
+    parsed,
+    isPrivate: isBlockedHost(parsed.hostname, { blockedSuffixes: DEFAULT_BLOCKED_HOST_SUFFIXES }),
+  };
 }
 
 function isAllowedDomain(hostname, domains) {

@@ -5,20 +5,9 @@
 // privileged fetch.
 
 import { isDocumentPath, resolveDocumentUrl } from './document-url-resolver.js';
-import { isBlockedHost } from './private-network.js';
+import { DEFAULT_BLOCKED_HOST_SUFFIXES, isBlockedHost } from './private-network.js';
 
 const MAX_REDIRECTS = 5;
-
-const BLOCKED_HOST_SUFFIXES = [
-  '.localhost',
-  '.local',
-  '.localdomain',
-  '.internal',
-  '.intranet',
-  '.lan',
-  '.home',
-  '.corp'
-];
 
 export class FetchSecurityError extends Error {
   constructor(reason, message) {
@@ -124,5 +113,5 @@ function isRedirectStatus(status) {
 }
 
 function isBlockedHostname(hostname) {
-  return isBlockedHost(hostname, { blockedSuffixes: BLOCKED_HOST_SUFFIXES });
+  return isBlockedHost(hostname, { blockedSuffixes: DEFAULT_BLOCKED_HOST_SUFFIXES });
 }

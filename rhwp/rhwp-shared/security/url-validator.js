@@ -1,6 +1,11 @@
 // rhwp URL 검증 모듈 — Chrome/Safari 공통
 'use strict';
 
+import {
+  DEFAULT_BLOCKED_HOST_SUFFIXES,
+  isBlockedHost,
+} from '../sw/private-network.js';
+
 /**
  * URL이 안전한 프로토콜인지 검증한다.
  * @param {string} urlString
@@ -35,90 +40,7 @@ function validateProtocol(urlString) {
  * @returns {boolean} 내부 주소이면 true
  */
 function isPrivateHost(hostname) {
-  const host = String(hostname || '')
-    .toLowerCase()
-    .replace(/\.$/, '')
-    .replace(/^\[/, '')
-    .replace(/\]$/, '');
-  if (!host) return true;
-  if (host === 'localhost') return true;
-
-  if (host.includes(':')) {
-    // IPv6 리터럴을 16바이트 관점으로 판정 (rhwp-shared/sw/private-network.js 와 동일 규칙)
-    return isPrivateIPv6Literal(host);
-  }
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) {
-    const parts = host.split('.').map(Number);
-    if (parts.some(part => part < 0 || part > 255)) return true;
-    const [a, b] = parts;
-    return (
-      a === 0 || a === 10 || a === 127 ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      a >= 224
-    );
-  }
-  // 인트라넷 단일 라벨 / 내부용 접미사
-  if (!host.includes('.')) return true;
-  return ['.local', '.localdomain', '.internal', '.intranet', '.lan', '.home', '.corp']
-    .some(suffix => host.endsWith(suffix));
-}
-
-function isPrivateIPv6Literal(host) {
-  let text = host;
-  const lastColon = text.lastIndexOf(':');
-  const tail = lastColon >= 0 ? text.slice(lastColon + 1) : '';
-  const tailGroups = [];
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(tail)) {
-    tailGroups.push(...tail.split('.').map(Number));
-    if (tailGroups.some(n => n < 0 || n > 255)) return true;
-    text = text.slice(0, lastColon + 1);
-    if (!text.endsWith('::')) text = text.slice(0, -1);
-  }
-
-  const doubleColon = text.indexOf('::');
-  let groups;
-  if (doubleColon >= 0) {
-    if (text.indexOf('::', doubleColon + 1) >= 0) return true; // 파스 실패 → 차단
-    const left = text.slice(0, doubleColon);
-    const right = text.slice(doubleColon + 2);
-    const leftGroups = left ? left.split(':') : [];
-    const rightGroups = right ? right.split(':') : [];
-    const fill = 8 - leftGroups.length - rightGroups.length - Math.floor(tailGroups.length / 2);
-    if (fill < 0) return true;
-    groups = [...leftGroups, ...Array.from({ length: fill }, () => '0'), ...rightGroups];
-  } else {
-    groups = text.split(':').filter(group => group !== '');
-  }
-
-  const out = [];
-  for (const group of groups) {
-    if (!/^[0-9a-f]{1,4}$/.test(group)) return true; // 파스 실패 → 차단
-    out.push(parseInt(group, 16));
-  }
-  for (let i = 0; i < tailGroups.length; i += 2) {
-    out.push((tailGroups[i] << 8) | tailGroups[i + 1]);
-  }
-  if (out.length !== 8) return true;
-
-  const high = i => out[i] >> 8;
-  const low = i => out[i] & 0xff;
-  if (out.every(g => g === 0)) return true; // ::
-  if (out.slice(0, 7).every(g => g === 0) && out[7] === 1) return true; // ::1
-  if (out.slice(0, 5).every(g => g === 0) && out[5] === 0xffff) { // IPv4-mapped
-    return isPrivateHost(`${high(6)}.${low(6)}.${high(7)}.${low(7)}`);
-  }
-  if (out.slice(0, 3).every(g => g === 0) && out[3] === 0 && out[4] === 0 && out[5] === 0) return true;
-  if (out[0] === 0x0064 && out[1] === 0xff9b && out.slice(2, 6).every(g => g === 0)) { // NAT64
-    return isPrivateHost(`${high(6)}.${low(6)}.${high(7)}.${low(7)}`);
-  }
-  if ((out[0] & 0xffc0) === 0xfe80) return true; // link-local
-  if ((out[0] & 0xfe00) === 0xfc00) return true; // unique-local
-  if (out[0] === 0x0100 && out.slice(1, 4).every(g => g === 0)) return true; // discard-only
-  if ((out[0] & 0xff00) === 0xff00) return true; // multicast
-  return false;
+  return isBlockedHost(hostname, { blockedSuffixes: DEFAULT_BLOCKED_HOST_SUFFIXES });
 }
 
 /**

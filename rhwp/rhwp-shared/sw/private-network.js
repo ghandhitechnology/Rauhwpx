@@ -6,6 +6,17 @@
 
 'use strict';
 
+export const DEFAULT_BLOCKED_HOST_SUFFIXES = Object.freeze([
+  '.localhost',
+  '.local',
+  '.localdomain',
+  '.internal',
+  '.intranet',
+  '.lan',
+  '.home',
+  '.corp',
+]);
+
 /** @param {string} host */
 function isPrivateIPv4(host) {
   if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return false;
