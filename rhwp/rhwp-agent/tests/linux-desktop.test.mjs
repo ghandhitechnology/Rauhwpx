@@ -138,8 +138,10 @@ test('Linux secret vault accepts secure keyrings and locks down persisted cipher
       await vault.set('rhwp.test', `secret-${backend}`);
       assert.equal(await vault.get('rhwp.test'), `secret-${backend}`);
       assert.doesNotMatch(await fs.readFile(filePath, 'utf8'), new RegExp(`secret-${backend}$`));
-      assert.equal((await fs.stat(directory)).mode & 0o777, 0o700);
-      assert.equal((await fs.stat(filePath)).mode & 0o777, 0o600);
+      if (process.platform !== 'win32') {
+        assert.equal((await fs.stat(directory)).mode & 0o777, 0o700);
+        assert.equal((await fs.stat(filePath)).mode & 0o777, 0o600);
+      }
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
