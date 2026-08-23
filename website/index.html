@@ -151,16 +151,28 @@ a{color:var(--ink)}
   font:400 14px/1.5 var(--sans);
   color:var(--ink-3);
 }
-.cta-tip-row{
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:18px;
-}
 .cta-tip a{
   color:var(--ink-3);text-underline-offset:3px;
   display:inline-flex;align-items:center;min-height:36px;
 }
+.hero-actions{
+  display:grid;
+  grid-template-columns:max-content max-content;
+  column-gap:10px;
+  width:max-content;
+  max-width:100%;
+  margin-top:28px;
+}
+.hero-actions__tip{
+  min-height:36px;
+  margin-top:8px;
+  display:inline-flex;
+  align-items:center;
+  color:var(--ink-3);
+  font:400 14px/1.5 var(--sans);
+  text-underline-offset:3px;
+}
+.hero-actions__tip--right{justify-self:end}
 
 /* ── 스크린샷 프레임 + 크롭 ─────────────────── */
 .figure{margin:0}
@@ -223,7 +235,6 @@ a{color:var(--ink)}
   margin:0 0 18px;
 }
 .hero .lead{max-width:28ch;margin-bottom:0}
-.hero .cta{margin-top:28px}
 
 /* ── 섹션 헤더 ─────────────────────────────── */
 .sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:clamp(28px,3.4vw,40px);flex-wrap:wrap}
@@ -463,6 +474,9 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   .c-msg{--cx:934;--cy:224;--cw:596;--ch:100}
   .tape{width:74px;height:22px;top:-11px}
   .note{font-size:20px}
+  .hero-actions{grid-template-columns:minmax(0,1fr);width:100%}
+  .hero-actions .btn{width:100%}
+  .hero-actions__tip--right{justify-self:start}
   .foot nav{margin-left:0;width:100%}
 }
 @media (prefers-reduced-motion:reduce){
@@ -499,14 +513,12 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
       <div>
         <h1>귀찮은 이를 위한 한글,<br><span class="ul">귀찮이글<svg viewBox="0 0 200 10" preserveAspectRatio="none" aria-hidden="true"><path d="M2 7.2C33 3.4 66 2.3 100 3.6c31 1.2 63 3.4 98 1.1" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span></h1>
         <p class="lead"><span class="nb">한글 파일 편집이랑 에이전트와의 대화,</span> <span class="nb">한 화면에서 융합</span></p>
-        <div class="cta">
+        <div class="hero-actions">
           <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">macOS용 다운로드</a>
           <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">Star on GitHub<span class="gh-stars"></span></a>
+          <a class="hero-actions__tip" href="donate.html">토큰 기부하기</a>
+          <a class="hero-actions__tip hero-actions__tip--right" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-x64.exe">Windows용 다운로드</a>
         </div>
-        <p class="cta-tip cta-tip-row">
-          <a href="donate.html">토큰 기부하기</a>
-          <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-x64.exe">Windows용 다운로드</a>
-        </p>
       </div>
 
       <figure class="figure">
