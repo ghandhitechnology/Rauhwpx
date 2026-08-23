@@ -335,38 +335,12 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return;
           }
 
-          // 리다이렉트는 매 hop 마다 수동 검증한다. 'follow' 로 넘기면
-          // 이후 hop 의 내부망 전환을 검증 없이 따라가게 된다.
-          const MAX_REDIRECTS = 5;
-          let res;
-          let hop = 0;
-          while (true) {
-            res = await fetch(fetchUrl, {
-              credentials: 'omit',
-              redirect: 'manual',
-            });
-            const isRedirect = res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
-            if (!isRedirect) break;
-            const location = res.headers.get('location');
-            if (!location || hop >= MAX_REDIRECTS) {
-              logSecurity('fetch-blocked', fetchUrl, location ? '리다이렉트 횟수 초과' : '리다이렉트 대상 확인 불가');
-              sendResponse({ error: '리다이렉트 대상이 안전하지 않음' });
-              return;
-            }
-            const nextUrl = new URL(location, fetchUrl).href;
-            const redirectResult = validateUrl(nextUrl);
-            if (!redirectResult.valid || isPrivateHost(redirectResult.parsed.hostname)) {
-              logSecurity('fetch-blocked', nextUrl, '리다이렉트 대상 차단');
-              sendResponse({ error: '리다이렉트 대상이 안전하지 않음' });
-              return;
-            }
-            if (redirectResult.parsed.protocol === 'http:' && !settings.allowHttp) {
-              sendResponse({ error: 'HTTP 차단 (설정에서 비허용)' });
-              return;
-            }
-            fetchUrl = nextUrl;
-            hop += 1;
-          }
+          // Safari 는 manual redirect 응답을 opaqueredirect 로 숨겨 Location 을
+          // 노출하지 않는다. 중간 hop 을 검증할 수 없으므로 리다이렉트는 차단한다.
+          const res = await fetch(fetchUrl, {
+            credentials: 'omit',
+            redirect: 'error',
+          });
 
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
