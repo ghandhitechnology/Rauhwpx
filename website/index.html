@@ -345,14 +345,12 @@ a{color:var(--ink)}
 .conn li{display:flex;gap:16px;align-items:center;padding:11px 0;border-bottom:1px solid var(--rule);font-size:16px}
 .conn b{font-weight:600;flex:0 0 auto;min-width:92px}
 .conn em{font-style:normal;color:var(--ink-3);font-size:15px;flex:1 1 auto}
-.conn-tutorial{
-  flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
-  min-height:32px;padding:4px 11px;border:1px solid var(--ink);border-radius:2px;
-  color:var(--ink);font:500 13px/1 var(--sans);text-decoration:none;
-  transition:background-color .15s ease,color .15s ease;
-}
-.conn-tutorial:hover{background:var(--ink);color:var(--patch)}
-.conn-tutorial:focus-visible{outline:3px solid var(--ink);outline-offset:3px}
+.conn .conn-link-item{padding:0}
+.conn-link{display:flex;gap:16px;align-items:center;width:100%;padding:11px 0;color:var(--ink);text-decoration:none;transition:padding .15s ease}
+.conn-link::after{content:'\2197';flex:0 0 auto;font-size:17px;line-height:1;color:var(--ink-3);transition:transform .15s ease,color .15s ease}
+.conn-link:hover{padding-left:6px}
+.conn-link:hover::after{color:var(--ink);transform:translate(2px,-2px)}
+.conn-link:focus-visible{outline:3px solid var(--ink);outline-offset:3px}
 
 /* ── 다운로드 ──────────────────────────────── */
 .dl{
@@ -685,7 +683,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
         <ul class="conn">
           <li><b>Codex</b><em>쓰던 계정 연결</em></li>
           <li><b>Claude</b><em>쓰던 계정 연결</em></li>
-          <li><b>OpenRouter</b><em>계정 또는 API Key 연결</em><a class="conn-tutorial" href="tutorial-openrouter.html">튜토리얼</a></li>
+          <li class="conn-link-item"><a class="conn-link" href="tutorial-openrouter.html"><b>OpenRouter</b><em>구독권이 없으면 사용하시면 됩니다</em></a></li>
         </ul>
       </div>
 
