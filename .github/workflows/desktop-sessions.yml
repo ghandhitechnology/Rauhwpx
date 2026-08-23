@@ -41,18 +41,15 @@ jobs:
             rhwp/rhwp-agent/package-lock.json
 
       - name: Install pinned Rust toolchain for browser merge tests
-        if: runner.os == 'macOS'
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-pack for browser merge tests
-        if: runner.os == 'macOS'
         run: cargo install wasm-pack --version 0.15.0 --locked
 
       - name: Build WASM engine for browser merge tests
-        if: runner.os == 'macOS'
         working-directory: rhwp
         run: wasm-pack build --target web
 
