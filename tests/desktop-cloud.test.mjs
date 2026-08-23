@@ -178,6 +178,8 @@ test('provisioner reuses a compatible installation without downloading a release
   assert.match(tailscale, /PROTOCOL_VERSION/);
   assert.match(tailscale, /127\.0\.0\.1:7740\/v1\/health/);
   assert.match(tailscale, /\$ENDPOINT\/v1\/health/);
+  assert.match(tailscale, /TAILSCALE_JSON=.*\|\| exit 0/);
+  assert.ok(tailscale.indexOf('$ENDPOINT/v1/health') < tailscale.indexOf('pairing create'));
   assert.match(tailscale, /RAUHWpx_TAILSCALE_HTTPS_PORT/);
   assert.match(tailscale, /pairing create/);
   assert.match(tailscale, /RAUHWpx_RECEIPT/);
