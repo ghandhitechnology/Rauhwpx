@@ -408,9 +408,13 @@ export function systemBriefFor(opts = {}, agentName = 'claude') {
 export function mcpCapabilityEnv(opts = {}) {
   const { workflow, phase, capabilityEpoch } = normalizeExecutionMode(opts);
   // insert_image 가 읽을 수 있는 로컬 루트 — 세션 작업 공간(다운로드 포함)으로 제한.
-  const imageRoots = [...new Set([opts.rootDir, opts.workDir]
+  const rootValues = [opts.rootDir, opts.workDir]
     .map((root) => String(root ?? '').trim())
-    .filter(Boolean))].join(path.delimiter);
+    .filter(Boolean);
+  if (rootValues.some((root) => root.includes(path.delimiter))) {
+    throw new Error('image root cannot contain the platform path delimiter');
+  }
+  const imageRoots = [...new Set(rootValues)].join(path.delimiter);
   return {
     RHWP_AGENT_WORKFLOW: workflow,
     RHWP_AGENT_PHASE: phase,
