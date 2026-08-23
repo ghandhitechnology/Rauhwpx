@@ -328,6 +328,7 @@ async function extractPrvImageFromZipAsync(data) {
       const localNameLen = readU16LE(data, localHeaderOffset + 26);
       const localExtraLen = readU16LE(data, localHeaderOffset + 28);
       const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+      if (uncompSize > MAX_DECOMPRESSED_BYTES) return null;
 
       if (compMethod === 0) {
         // 비압축 (stored)
