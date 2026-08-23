@@ -272,6 +272,7 @@ a{color:var(--ink)}
 .row__num{font:500 14px/1 var(--mono);letter-spacing:.14em;color:var(--ink-3);margin-bottom:10px}
 .row h3{margin-bottom:12px}
 .row p{color:var(--ink-2)}
+.row .fact{margin-top:.35em;font-size:15px;line-height:1.65;color:var(--ink-3)}
 
 /* 템플릿 명세 목록 */
 .specimen{border:1.5px solid var(--ink);background:var(--patch);--sx:7px;--sy:8px;box-shadow:var(--sx) var(--sy) 0 rgba(20,18,15,.09)}
@@ -391,6 +392,7 @@ html.js main>.sheet:nth-child(2){z-index:2}
 html.js main>.sheet:nth-child(3){z-index:3}
 html.js main>.sheet:nth-child(4){z-index:4}
 html.js main>.sheet:nth-child(5){z-index:5}
+html.js main>.sheet:nth-child(6){z-index:6}
 
 /* 올라오는 종이의 접힌 가장자리 — 얇은 선 + 위로 떨어지는 그림자 */
 html.js .sheet+.sheet{
@@ -414,7 +416,7 @@ html.js #connect.stack{position:sticky;top:var(--stick-top)}
 html.js .dl.stack{top:60px}
 
 html.js .foot{
-  position:relative;z-index:6;
+  position:relative;z-index:7;
   background-color:var(--paper);
   background-image:var(--grain);
   background-size:180px 180px;
@@ -520,6 +522,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     <a class="brand" href="#top">Rauhwpx</a>
     <nav class="nav">
       <a href="#features">기능</a>
+      <a href="#gongmun">공문</a>
       <a href="#flow">작업 흐름</a>
       <a href="#connect">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub<span class="gh-stars"></span></a>
@@ -645,6 +648,32 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     </div>
   </section>
 
+  <!-- ─────────── 공문 ─────────── -->
+  <section class="sec sheet stack" id="gongmun">
+    <div class="wrap">
+      <div class="sec-head">
+        <p class="label">공문</p>
+        <h2 class="h2">열고, 화면에서 채우고, HWPX로만 저장해요</h2>
+      </div>
+
+      <article class="row">
+        <div>
+          <h3 class="h3">공문/품의 서식</h3>
+          <p>파일에서 공문/품의 서식을 열면 칸이 이미 있어요. 에이전트가 열린 페이지에서 채워요. 저장은 HWPX만 되고, HWP는 안 돼요.</p>
+          <p class="fact">지금 받는 v0.1.10 dmg에는 아직 없습니다. 온나라 인증 서식은 아니에요.</p>
+        </div>
+        <div class="specimen row__media">
+          <h4>공문 작업</h4>
+          <ul>
+            <li><span>01</span>파일에서 공문/품의 서식 열기</li>
+            <li><span>02</span>열린 페이지에서 칸 채우기</li>
+            <li><span>03</span>HWPX로만 저장하기</li>
+          </ul>
+        </div>
+      </article>
+    </div>
+  </section>
+
   <!-- ─────────── 작업 흐름 (잉크 반전) ─────────── -->
   <section class="sec ink sheet stack" id="flow">
     <div class="wrap">
@@ -763,6 +792,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     <a class="brand" href="#top">Rauhwpx</a>
     <nav>
       <a href="#features">기능</a>
+      <a href="#gongmun">공문</a>
       <a href="#flow">작업 흐름</a>
       <a href="#connect">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub</a>
