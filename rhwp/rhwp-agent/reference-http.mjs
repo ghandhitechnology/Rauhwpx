@@ -120,10 +120,17 @@ export function createReferenceHttpHandler({ store, tokens, allowedScopes }) {
       return true;
     }
     try {
-      // /reference-staging 은 store 와 마찬가지로 scope 를 chat 으로 기본한다.
-      const rawScope = url.pathname === '/reference-staging' || url.pathname.startsWith('/reference-staging/')
+      // /reference-staging 은 chat 전용이다. store 가 staging 항목을 chat 으로
+      // 저장하므로 document/global 을 허용하면 성공 응답 뒤 승격할 수 없게 된다.
+      const isStagingPath = url.pathname === '/reference-staging' || url.pathname.startsWith('/reference-staging/');
+      const rawScope = isStagingPath
         ? (url.searchParams.get('scope') ?? 'chat')
         : url.searchParams.get('scope');
+      if (isStagingPath && rawScope !== 'chat') {
+        throw Object.assign(new Error('Reference staging accepts only chat scope'), {
+          code: 'REFERENCE_SCOPE_FORBIDDEN',
+        });
+      }
       const scopeId = url.searchParams.get('scopeId');
       const resolvedScope = assertScopeAllowed(rawScope, rawScope === 'global' ? 'global' : scopeId, allowedScopes);
       if (req.method === 'POST' && url.pathname === '/reference-staging') {

@@ -108,6 +108,22 @@ test('message attachment staging is invisible until promotion and can be discard
   assert.equal(discarded.status, 200);
 });
 
+test('message attachment staging rejects document and global scopes', async (t) => {
+  const { base } = await fixture(t);
+  const headers = {
+    Authorization: 'Bearer test-secret',
+    'Content-Type': 'text/plain',
+    'X-File-Name': 'draft.txt',
+  };
+  for (const [scope, scopeId] of [['document', 'doc-a'], ['global', 'global']]) {
+    const response = await fetch(`${base}/reference-staging?scope=${scope}&scopeId=${scopeId}`, {
+      method: 'POST', headers, body: 'invalid staging scope',
+    });
+    assert.equal(response.status, 403);
+    assert.equal((await response.json()).error.code, 'REFERENCE_SCOPE_FORBIDDEN');
+  }
+});
+
 test('the exact packaged origin is CORS-echoed', async (t) => {
   const { base } = await fixture(t);
   const origin = 'rauhwpx://app';
