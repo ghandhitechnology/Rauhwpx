@@ -77,6 +77,36 @@
       "notarize": true,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "CFBundleDocumentTypes": [
+          {
+            "CFBundleTypeExtensions": [
+              "hwpx"
+            ],
+            "CFBundleTypeName": "HWPX document",
+            "CFBundleTypeRole": "Editor",
+            "LSHandlerRank": "Default",
+            "LSItemContentTypes": [
+              "com.hataewook.rauhwpx.hwpx-document"
+            ]
+          }
+        ],
+        "UTExportedTypeDeclarations": [
+          {
+            "UTTypeConformsTo": [
+              "public.content",
+              "public.data"
+            ],
+            "UTTypeDescription": "HWPX document",
+            "UTTypeIdentifier": "com.hataewook.rauhwpx.hwpx-document",
+            "UTTypeTagSpecification": {
+              "public.filename-extension": [
+                "hwpx"
+              ]
+            }
+          }
+        ]
+      },
       "target": [
         "dmg",
         "zip"
@@ -95,6 +125,7 @@
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": true,
       "allowToChangeInstallationDirectory": true
     },
     "dmg": {

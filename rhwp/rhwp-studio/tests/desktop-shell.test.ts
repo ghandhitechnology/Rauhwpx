@@ -89,6 +89,27 @@ test('launch routing accepts only supported document paths', () => {
   assert.match(desktopMain, /x: bounds\.x \+ 28, y: bounds\.y \+ 28/);
 });
 
+test('desktop packages register as an HWPX editor with the operating system', () => {
+  const associations = rootPackage.build.fileAssociations;
+  assert.ok(associations.some((association: { ext: string | string[] }) =>
+    (Array.isArray(association.ext) ? association.ext : [association.ext]).includes('hwpx')));
+
+  const macInfo = rootPackage.build.mac.extendInfo;
+  const hwpxType = macInfo.CFBundleDocumentTypes.find((type: {
+    LSItemContentTypes?: string[];
+  }) => type.LSItemContentTypes?.includes('com.hataewook.rauhwpx.hwpx-document'));
+  assert.equal(hwpxType?.CFBundleTypeRole, 'Editor');
+  assert.equal(hwpxType?.LSHandlerRank, 'Default');
+
+  const exportedHwpxType = macInfo.UTExportedTypeDeclarations.find((type: {
+    UTTypeIdentifier?: string;
+  }) => type.UTTypeIdentifier === 'com.hataewook.rauhwpx.hwpx-document');
+  assert.deepEqual(exportedHwpxType?.UTTypeTagSpecification['public.filename-extension'], ['hwpx']);
+
+  // electron-builder only installs NSIS file associations for per-machine installs.
+  assert.equal(rootPackage.build.nsis.perMachine, true);
+});
+
 test('packaged Studio uses a secure path-safe standard scheme', () => {
   assert.equal(STUDIO_URL, 'rauhwpx://app/index.html');
   assert.equal(
