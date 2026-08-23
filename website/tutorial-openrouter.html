@@ -38,7 +38,7 @@ img{display:block;max-width:100%}
 .brand{min-height:44px;display:inline-flex;align-items:center;font-size:19px;font-weight:700;letter-spacing:-.03em;text-decoration:none}
 .back{min-height:44px;display:inline-flex;align-items:center;gap:8px;color:var(--ink-2);font-size:15px;font-weight:500;text-underline-offset:4px}
 .back svg{width:18px;height:18px}
-.hero{padding:clamp(58px,8vw,104px) 0 clamp(62px,8vw,96px);border-bottom:1px solid var(--rule)}
+.hero{padding:clamp(58px,8vw,104px) 0 clamp(62px,8vw,96px);background-color:var(--ink);background-image:var(--grain);color:var(--patch);border-bottom:1px solid var(--ink)}
 .hero-top{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:clamp(42px,8vw,110px);align-items:end}
 .hero h1{max-width:790px;margin-bottom:24px;font-size:clamp(46px,7.2vw,86px);line-height:1.04;letter-spacing:-.04em}
 .hero-lead{max-width:690px;margin-bottom:28px;color:var(--ink-2);font-size:clamp(18px,2vw,21px);line-height:1.65}
@@ -47,6 +47,14 @@ img{display:block;max-width:100%}
 .button--fill{background:var(--ink);color:var(--patch)}
 .button:hover{transform:translateY(-1px)}
 .button--fill:hover{background:#2c2822}
+.hero .hero-lead{color:#c7c0b4}
+.hero .button--fill{background:var(--patch);border-color:var(--patch);color:var(--ink)}
+.hero .button--fill:hover{background:var(--paper)}
+.hero .button:not(.button--fill){border-color:#6e675c;color:var(--patch)}
+.hero .button:not(.button--fill):hover{background:rgba(253,251,246,.08)}
+.hero .route-summary{border-top-color:var(--patch)}
+.hero .route-summary li{border-bottom-color:#3a352c}
+.hero .route-summary span,.hero .route-summary em{color:#a69f93}
 .route-summary{margin:0;padding:0;list-style:none;border-top:1.5px solid var(--ink)}
 .route-summary li{display:grid;grid-template-columns:48px 1fr;gap:14px;padding:18px 0;border-bottom:1px solid var(--rule);align-items:start}
 .route-summary span{font:500 12px/1.5 var(--mono);letter-spacing:.08em;color:var(--ink-3)}
@@ -135,8 +143,8 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     <div class="wrap">
       <div class="hero-top">
         <div>
-          <h1>OpenRouter를 충전하고 Pi에 연결하세요</h1>
-          <p class="hero-lead">OpenRouter 계정을 만든 뒤 크레딧을 충전하고, Rauhwpx에서 OpenRouter OAuth로 로그인하면 준비가 끝납니다.</p>
+          <h1>Pi를 OpenRouter에 연결하세요</h1>
+          <p class="hero-lead">구독권이 없어도 프로그램을 이용할 수 있습니다.</p>
           <div class="actions">
             <a class="button button--fill" href="#step-1">첫 단계로 이동</a>
             <a class="button" href="https://openrouter.ai/" target="_blank" rel="noopener">OpenRouter 열기</a>
