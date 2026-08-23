@@ -62,8 +62,8 @@ Rust: `cargo test`, `cargo clippy`, `cargo fmt`. Studio: `npm test`, `npm run bu
 Push a `v*` tag matching `package.json` and GitHub Actions builds and attaches the installers.
 
 ```bash
-git tag v0.1.9
-git push origin v0.1.9
+git tag v0.1.11
+git push origin v0.1.11
 ```
 
 macOS signing uses the `macos-release` environment: `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`. Local Windows build: `npm run dist:win` on Windows.
