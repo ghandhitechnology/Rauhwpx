@@ -38,7 +38,7 @@
     "<all_urls>"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' https: data:; connect-src 'self' https:;"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' https: data:; connect-src 'self' https: http:;"
   },
   "options_ui": {
     "page": "options.html",
