@@ -100,7 +100,11 @@ function safeCatalogPath(formPackRoot, filename) {
 export async function verifyFormPackCatalog(studioRoot) {
   const formPackRoot = path.resolve(studioRoot, 'form-pack');
   const catalogPath = path.join(formPackRoot, 'catalog.json');
-  const catalog = JSON.parse(await fs.readFile(catalogPath, 'utf8'));
+  const catalog = await fs.readFile(catalogPath, 'utf8').then((raw) => JSON.parse(raw), (error) => {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (!catalog) return { files: [] };
   if (!Array.isArray(catalog.forms) || catalog.forms.length === 0) {
     throw new Error('Form-pack catalog must contain at least one form');
   }
@@ -130,5 +134,9 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
   const root = process.argv[2];
   if (!root) throw new Error('Usage: node normalize-runtime-assets.mjs <runtime-assets-root>');
   const result = await normalizeAndVerifyRuntimeAssets(root);
-  process.stdout.write(`Normalized ${result.renamed} runtime asset paths; verified ${result.catalogFiles} form-pack catalog files\n`);
+  process.stdout.write(
+    result.catalogFiles > 0
+      ? `Normalized ${result.renamed} runtime asset paths; verified ${result.catalogFiles} form-pack catalog files\n`
+      : `Normalized ${result.renamed} runtime asset paths\n`,
+  );
 }

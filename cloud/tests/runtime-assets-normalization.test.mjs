@@ -11,15 +11,29 @@ import {
   normalizeRuntimeAssetPaths,
 } from '../install/normalize-runtime-assets.mjs';
 
-const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
-const sourceCatalogPath = path.join(repositoryRoot, 'rhwp', 'form-pack', 'catalog.json');
+const SYNTHETIC_CATALOG = {
+  forms: [
+    { file: '서식-가.hwpx' },
+    { file: '서식-나.hwpx' },
+  ],
+};
 
 test('NFC collision detection rejects canonically equivalent path names', () => {
-  const filename = '공문.hwpx';
+  const filename = '서식.hwpx';
   assert.throws(
     () => assertUniqueNfcNames([filename, filename.normalize('NFD')], 'studio/form-pack'),
     /NFC path collision.*studio\/form-pack/,
   );
+});
+
+test('runtime staging accepts a studio tree with no form-pack catalog', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-runtime-no-pack-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const studioRoot = path.join(root, 'studio');
+  await fs.mkdir(studioRoot, { recursive: true });
+  await fs.writeFile(path.join(studioRoot, 'index.html'), '<!doctype html>');
+  const result = await normalizeAndVerifyRuntimeAssets(root);
+  assert.equal(result.catalogFiles, 0);
 });
 
 test('runtime staging normalizes every path and serves every catalog form by its exact URL', async (t) => {
@@ -27,13 +41,13 @@ test('runtime staging normalizes every path and serves every catalog form by its
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const studioRoot = path.join(root, 'studio');
   const formPackRoot = path.join(studioRoot, 'form-pack');
-  const nestedRoot = path.join(root, 'nested-' + '품의'.normalize('NFD'));
+  const nestedRoot = path.join(root, 'nested-' + '서식'.normalize('NFD'));
   await fs.mkdir(formPackRoot, { recursive: true });
   await fs.mkdir(nestedRoot, { recursive: true });
   await fs.writeFile(path.join(studioRoot, 'index.html'), '<!doctype html>');
-  await fs.writeFile(path.join(nestedRoot, '공문'.normalize('NFD') + '.txt'), 'nested');
+  await fs.writeFile(path.join(nestedRoot, '초안'.normalize('NFD') + '.txt'), 'nested');
 
-  const catalog = JSON.parse(await fs.readFile(sourceCatalogPath, 'utf8'));
+  const catalog = SYNTHETIC_CATALOG;
   await fs.writeFile(path.join(formPackRoot, 'catalog.json'), JSON.stringify(catalog));
   for (const [index, form] of catalog.forms.entries()) {
     await fs.writeFile(path.join(formPackRoot, form.file.normalize('NFD')), `form-${index}`);
@@ -71,8 +85,8 @@ test('runtime staging detects all collisions before renaming any path', {
 }, async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-runtime-collision-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const filename = '공문.hwpx';
-  const unrelated = '품의'.normalize('NFD') + '.txt';
+  const filename = '서식.hwpx';
+  const unrelated = '초안'.normalize('NFD') + '.txt';
   await fs.writeFile(path.join(root, filename), 'nfc');
   await fs.writeFile(path.join(root, filename.normalize('NFD')), 'nfd');
   await fs.mkdir(path.join(root, 'nested'));

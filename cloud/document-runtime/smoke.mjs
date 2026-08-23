@@ -46,7 +46,11 @@ if (!selected) throw new Error(`Unsupported smoke document extension: ${extensio
 
 async function smokeFormPackRoutes() {
   const formPackRoot = path.join(studioRoot, 'form-pack');
-  const catalog = JSON.parse(await fs.readFile(path.join(formPackRoot, 'catalog.json'), 'utf8'));
+  const catalog = await fs.readFile(path.join(formPackRoot, 'catalog.json'), 'utf8').then((raw) => JSON.parse(raw), (error) => {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (!catalog) return 0;
   if (!Array.isArray(catalog.forms) || catalog.forms.length === 0) {
     throw new Error('Studio form-pack catalog is empty');
   }
