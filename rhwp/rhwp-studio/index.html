@@ -637,6 +637,11 @@
 
     <!-- 에디터 영역 (눈금자 포함) -->
     <main id="editor-area" aria-label="문서 편집 영역">
+      <div id="agent-editing-frame" aria-hidden="true" hidden></div>
+      <div id="agent-editing-status" role="status" aria-live="polite" hidden>
+        <span class="agent-editing-status-dot" aria-hidden="true"></span>
+        <span id="agent-editing-status-label"></span>
+      </div>
       <div id="ruler-corner"></div>
       <canvas id="h-ruler"></canvas>
       <canvas id="v-ruler"></canvas>

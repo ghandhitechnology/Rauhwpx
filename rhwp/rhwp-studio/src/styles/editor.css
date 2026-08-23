@@ -4,6 +4,8 @@
 
 /* editor-area: 눈금자 + 스크롤 영역을 2×2 Grid로 배치 */
 #editor-area {
+  --agent-edit-accent: #5b8fd4;
+  --agent-edit-wash: rgba(91, 143, 212, 0.16);
   display: grid;
   /* minmax(0, 1fr): 1fr(=minmax(auto,1fr))은 콘텐츠 기반 최소 크기가 한 방향
      래칫으로 작동해 창을 넓혔다 줄이면 트랙이 줄지 않는다(#1191). 최소를 0으로
@@ -12,6 +14,106 @@
   grid-template-rows: 20px minmax(0, 1fr);
   flex: 1;
   overflow: hidden;
+  position: relative;
+  isolation: isolate;
+}
+
+#editor-area[data-editing-agent='claude'] {
+  --agent-edit-accent: #c4785a;
+  --agent-edit-wash: rgba(196, 120, 90, 0.16);
+}
+
+#editor-area[data-editing-agent='pi'] {
+  --agent-edit-accent: #4a9a86;
+  --agent-edit-wash: rgba(74, 154, 134, 0.16);
+}
+
+#editor-area[data-editing-agent='grok'] {
+  --agent-edit-accent: #758ca3;
+  --agent-edit-wash: rgba(117, 140, 163, 0.16);
+}
+
+#editor-area[data-editing-agent='cursor'] {
+  --agent-edit-accent: #7f7ca4;
+  --agent-edit-wash: rgba(127, 124, 164, 0.16);
+}
+
+@property --agent-editing-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+#agent-editing-frame {
+  --agent-editing-angle: 0deg;
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  box-sizing: border-box;
+  padding: 2px;
+  pointer-events: none;
+  background: conic-gradient(
+    from var(--agent-editing-angle),
+    color-mix(in srgb, var(--agent-edit-accent) 18%, transparent) 0 54%,
+    color-mix(in srgb, var(--agent-edit-accent) 92%, white) 70%,
+    color-mix(in srgb, var(--agent-edit-accent) 32%, transparent) 84% 100%
+  );
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  filter: drop-shadow(0 0 5px var(--agent-edit-wash));
+  animation: agent-editing-sweep 3.2s linear infinite;
+}
+
+#agent-editing-frame[hidden],
+#agent-editing-status[hidden] {
+  display: none;
+}
+
+#agent-editing-status {
+  position: absolute;
+  top: 28px;
+  right: 12px;
+  z-index: 31;
+  display: flex;
+  max-width: calc(100% - 32px);
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, var(--agent-edit-accent) 45%, var(--ui-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ui-surface) 90%, transparent);
+  box-shadow: var(--shadow-light), 0 0 0 2px var(--agent-edit-wash);
+  backdrop-filter: blur(8px);
+  color: var(--ui-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.agent-editing-status-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--agent-edit-accent);
+  box-shadow: 0 0 0 3px var(--agent-edit-wash);
+  animation: agent-editing-dot 1.6s ease-in-out infinite;
+}
+
+@keyframes agent-editing-sweep {
+  to { --agent-editing-angle: 360deg; }
+}
+
+@keyframes agent-editing-dot {
+  50% {
+    opacity: 0.65;
+    transform: scale(0.82);
+  }
 }
 
 /* 눈금자 교차 코너 (좌상단) */
@@ -213,6 +315,15 @@
 
 /* 동작 최소화: 흐름도 깜박임도 멈춘다. 캐럿은 항상 보이는 쪽이 안전하다. */
 @media (prefers-reduced-motion: reduce) {
+  #agent-editing-frame {
+    background: color-mix(in srgb, var(--agent-edit-accent) 58%, transparent);
+    animation: none;
+  }
+
+  .agent-editing-status-dot {
+    animation: none;
+  }
+
   .caret.is-gliding {
     transition: none;
   }
@@ -220,5 +331,22 @@
   .caret.is-blinking {
     animation: none;
     opacity: 1;
+  }
+}
+
+@media (max-width: 1023px) {
+  #agent-editing-status {
+    top: 10px;
+    right: 10px;
+  }
+}
+
+@media (max-width: 767px) {
+  body.ag-sidebar-open #agent-editing-frame {
+    right: min(var(--ag-sidebar-width), 100vw);
+  }
+
+  body.ag-sidebar-open #agent-editing-status {
+    right: calc(min(var(--ag-sidebar-width), 100vw) + 10px);
   }
 }

@@ -643,6 +643,9 @@ export class Toolbar {
     const opacity = enabled ? '1' : '0.5';
     this.container.style.opacity = opacity;
     this.container.style.pointerEvents = enabled ? 'auto' : 'none';
+    this.container
+      .querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement>('button, input, select')
+      .forEach((control) => { control.disabled = !enabled; });
   }
 
   /** 선택된 언어 카테고리에 해당하는 글꼴명을 반환한다 */

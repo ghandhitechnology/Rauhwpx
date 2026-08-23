@@ -34,8 +34,8 @@ const READ_ONLY_ALLOWED_IDS = new Set([
   'file:print',
 ]);
 
-function isBlockedInReadOnly(commandId: string, ctx: EditorContext): boolean {
-  if (ctx.readOnly !== true) return false;
+function isBlockedByDocumentEditLock(commandId: string, ctx: EditorContext): boolean {
+  if (ctx.readOnly !== true && ctx.userEditingLocked !== true) return false;
   return !READ_ONLY_ALLOWED_IDS.has(commandId)
     && !commandId.startsWith('view:')
     && !commandId.startsWith('help:');
@@ -69,7 +69,10 @@ export class CommandDispatcher {
     }
 
     const ctx = this.services.getContext();
-    if (isBlockedInFormMode(commandId, ctx) || isBlockedInReadOnly(commandId, ctx)) {
+    if (
+      isBlockedInFormMode(commandId, ctx)
+      || isBlockedByDocumentEditLock(commandId, ctx)
+    ) {
       return false;
     }
     if (def.canExecute && !def.canExecute(ctx)) {
@@ -96,7 +99,10 @@ export class CommandDispatcher {
     const def = this.registry.get(commandId);
     if (!def) return false;
     const ctx = this.services.getContext();
-    if (isBlockedInFormMode(commandId, ctx) || isBlockedInReadOnly(commandId, ctx)) return false;
+    if (
+      isBlockedInFormMode(commandId, ctx)
+      || isBlockedByDocumentEditLock(commandId, ctx)
+    ) return false;
     if (!def.canExecute) return true;
     return def.canExecute(ctx);
   }

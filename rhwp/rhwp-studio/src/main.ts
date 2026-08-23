@@ -92,8 +92,10 @@ import {
 } from '@/desktop-integration';
 import { initAgentBridge, type AgentBridge } from './agent/bridge.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
+import { AGENT_LABEL } from './ui/agent-sidebar/providers.ts';
 import { initInlinePrompt } from './agent/inline-prompt.ts';
 import { DocumentVersionController } from './versioning/controller.ts';
+import type { AgentEditingLease } from './agent/types.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
 
 const wasm = new WasmBridge();
@@ -163,6 +165,7 @@ let ruler: Ruler | null = null;
 let rendererSession: RendererSession | null = null;
 let editMode: EditorEditMode = 'normal';
 let documentReadOnly = new URLSearchParams(window.location.search).get('templatePreview') === '1';
+let agentEditingLease: AgentEditingLease = { active: false, agent: 'codex' };
 let rendererRuntimeRequest: EmbedRendererRuntimeRequestV1 | null = null;
 let renderBackendFallbackReason: RenderBackendFallbackReason | null = null;
 let rendererInitializationError: string | null = null;
@@ -208,8 +211,9 @@ function getContext(): EditorContext {
     inTableObjectSelection: inputHandler?.isInTableObjectSelection() ?? false,
     inPictureObjectSelection: inputHandler?.isInPictureObjectSelection() ?? false,
     inField: inputHandler?.isInField() ?? false,
-    isEditable: !documentReadOnly && (!isFormMode || canEditFormField),
+    isEditable: !documentReadOnly && !agentEditingLease.active && (!isFormMode || canEditFormField),
     readOnly: documentReadOnly,
+    userEditingLocked: agentEditingLease.active,
     editMode,
     isFormMode,
     canEditFormField,
@@ -239,7 +243,24 @@ function setDocumentReadOnly(readOnly: boolean): void {
   documentReadOnly = readOnly;
   document.documentElement.dataset.documentReadOnly = readOnly ? 'true' : 'false';
   inputHandler?.setReadOnly(readOnly);
-  if (readOnly) toolbar?.setEnabled(false);
+  toolbar?.setEnabled(wasm.pageCount > 0 && !readOnly && !agentEditingLease.active);
+  eventBus.emit('command-state-changed');
+}
+
+function setAgentEditingLease(lease: AgentEditingLease): void {
+  agentEditingLease = lease;
+  document.documentElement.dataset.agentEditing = lease.active ? 'true' : 'false';
+  const editorArea = document.getElementById('editor-area');
+  const frame = document.getElementById('agent-editing-frame');
+  const status = document.getElementById('agent-editing-status');
+  const statusLabel = document.getElementById('agent-editing-status-label');
+  if (editorArea) editorArea.dataset.editingAgent = lease.agent;
+  editorArea?.setAttribute('aria-busy', lease.active ? 'true' : 'false');
+  if (frame) frame.hidden = !lease.active;
+  if (status) status.hidden = !lease.active;
+  if (statusLabel) statusLabel.textContent = `${AGENT_LABEL[lease.agent]}가 문서를 편집 중이에요`;
+  inputHandler?.setUserEditingLocked(lease.active);
+  toolbar?.setEnabled(wasm.pageCount > 0 && !documentReadOnly && !lease.active);
   eventBus.emit('command-state-changed');
 }
 
@@ -504,6 +525,7 @@ async function initialize(): Promise<void> {
     );
     inputHandler.setEditMode(editMode);
     inputHandler.setReadOnly(documentReadOnly);
+    inputHandler.setUserEditingLocked(agentEditingLease.active);
 
     toolbar = new Toolbar(document.getElementById('style-bar')!, wasm, eventBus, dispatcher);
     toolbar.setEnabled(false);
@@ -644,6 +666,7 @@ async function initialize(): Promise<void> {
         isReadOnly: () => documentReadOnly,
       });
       agentBridgeRef = agentBridge;
+      agentBridge.onEditingLeaseChange(setAgentEditingLease);
       const versionController = new DocumentVersionController({
         wasm,
         eventBus,
@@ -776,6 +799,10 @@ function setupFileInput(): void {
     container.classList.remove('drag-over');
     const file = e.dataTransfer?.files[0];
     if (!file) return;
+    if (agentEditingLease.active) {
+      showToast({ message: '에이전트가 편집을 마친 뒤 파일을 놓을 수 있습니다.', durationMs: 2600 });
+      return;
+    }
     const dropName = file.name.toLowerCase();
     const imageExts = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'];
     const isImage = imageExts.some(ext => dropName.endsWith(ext));
@@ -1106,7 +1133,7 @@ async function initializeDocument(
     await canvasView?.loadDocument();
     prepareCanvasKitLocalFonts(docInfo.fontsUsed);
     await updateLoadProgress(90, '도구 모음 준비 중...');
-    toolbar?.setEnabled(!documentReadOnly);
+    toolbar?.setEnabled(!documentReadOnly && !agentEditingLease.active);
     toolbar?.initFontDropdown(docInfo.fontsUsed);
     toolbar?.initStyleDropdown();
     await updateLoadProgress(94, '문서 검증 및 글꼴 확인 중...');
@@ -1200,10 +1227,7 @@ async function loadFile(
   options: { skipUnsavedGuard?: boolean; fileHandle?: FileSystemFileHandleLike | null } = {},
 ): Promise<boolean> {
   try {
-    if (!options.skipUnsavedGuard) {
-      const canReplace = await confirmSaveBeforeReplacingDocument(commandServices);
-      if (!canReplace) return false;
-    }
+    if (!await canReplaceCurrentDocument(options.skipUnsavedGuard)) return false;
     const startTime = performance.now();
     await updateLoadProgress(0, '파일 읽는 중...');
     const data = new Uint8Array(await file.arrayBuffer());
@@ -1520,6 +1544,10 @@ async function createNewDocument(): Promise<void> {
 }
 
 async function canReplaceCurrentDocument(skipUnsavedGuard?: boolean): Promise<boolean> {
+  if (agentEditingLease.active) {
+    showToast({ message: '에이전트가 편집을 마친 뒤 문서를 바꿀 수 있습니다.', durationMs: 2600 });
+    return false;
+  }
   return skipUnsavedGuard === true || await confirmSaveBeforeReplacingDocument(commandServices);
 }
 

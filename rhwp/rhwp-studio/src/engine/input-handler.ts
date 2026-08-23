@@ -39,6 +39,7 @@ import * as _keyboard from './input-handler-keyboard';
 import { getBodySelectionSegments } from './body-selection-range';
 import * as _text from './input-handler-text';
 import * as _picture from './input-handler-picture';
+import * as _connector from './input-handler-connector';
 import { computeHangingIndentPx } from './hanging-indent';
 import { isPageLocalTextEditCommand, type PageLocalTextEditOptions } from './input-edit-invalidation';
 import type { NavigationKeyInput } from './navigation-keymap';
@@ -450,6 +451,7 @@ export class InputHandler {
 
   // 양식 개체 오버레이
   private formOverlay: HTMLElement | null = null;
+  private cancelFormOverlayEdit: (() => void) | null = null;
 
   // [Task #394] 셀 진입 자동 ON 로직 비활성화 — checkTransparentBordersTransition 와 동시 주석 처리.
   // 되돌리려면 아래 3 개 변수 + 호출 지점 + 메서드 본체 + 이벤트 핸들러의 주석을 동시에 해제.
@@ -464,6 +466,8 @@ export class InputHandler {
   private agentTemplateLocked = false;
   /** 게시된 템플릿 미리보기 창은 선택/복사만 허용하고 모든 문서 변이를 차단한다. */
   private readOnly = false;
+  /** 활성 에이전트 턴 동안 사람의 입력만 막고 자율 편집 경로는 열어 둔다. */
+  private userEditingLocked = false;
   private get isComposing() { return this.imeSession.isComposing; }
   private compositionAnchor: DocumentPosition | null = null;
   /** 조합 시작 시점의 exact 좌표. 조합 갱신마다 같은 anchor를 다시 탐색하지 않는다. */
@@ -511,6 +515,8 @@ export class InputHandler {
   private onContextMenuBound: (e: MouseEvent) => void;
   private onMouseMoveBound: (e: MouseEvent) => void;
   private onMouseUpBound: (e: MouseEvent) => void;
+  private lastPointerClientX = 0;
+  private lastPointerClientY = 0;
   private onF11InterceptBound: (e: KeyboardEvent) => void;
 
   constructor(
@@ -597,6 +603,7 @@ export class InputHandler {
       if (e.key === 'F11') {
         e.preventDefault();
         e.stopPropagation();
+        if (this.readOnly || this.userEditingLocked) return;
         if (e.shiftKey) {
           _keyboard.handleShiftF11.call(this);
         } else {
@@ -706,7 +713,7 @@ export class InputHandler {
 
     // Toolbar에서 서식 적용 요청 수신 (글꼴명, 크기, 색상 — 커맨드 시스템 미경유)
     eventBus.on('format-char', (props) => {
-      if (!this.active || this.readOnly) return;
+      if (!this.active || this.readOnly || this.userEditingLocked) return;
       if (this.editMode === 'form') return;
       this.applyCharFormat(props as Partial<CharProperties>);
       // 서식바 조작으로 빠진 포커스를 항상 복원
@@ -716,7 +723,9 @@ export class InputHandler {
 
   /** 클릭 이벤트 처리 — hitTest로 커서 배치 */
   private onClick(e: MouseEvent): void {
-    if (this.readOnly) return;
+    this.lastPointerClientX = e.clientX;
+    this.lastPointerClientY = e.clientY;
+    if (this.readOnly || this.userEditingLocked) return;
     _mouse.onClick.call(this, e);
   }
 
@@ -727,13 +736,17 @@ export class InputHandler {
 
   /** 더블클릭: 글상자 객체 선택 → 텍스트 편집 진입 */
   private onDblClick(e: MouseEvent): void {
-    if (this.readOnly) return;
+    this.lastPointerClientX = e.clientX;
+    this.lastPointerClientY = e.clientY;
+    if (this.readOnly || this.userEditingLocked) return;
     _mouse.onDblClick.call(this, e);
   }
 
   /** 마우스 이동: 드래그 선택 또는 표 객체 선택 중 핸들 위 커서 변경 */
   private onMouseMove(e: MouseEvent): void {
-    if (this.readOnly) return;
+    this.lastPointerClientX = e.clientX;
+    this.lastPointerClientY = e.clientY;
+    if (this.readOnly || this.userEditingLocked) return;
     _mouse.onMouseMove.call(this, e);
   }
 
@@ -804,6 +817,9 @@ export class InputHandler {
     clientX: number,
     clientY: number,
   ): { ok: boolean; error?: string } {
+    if (this.readOnly || this.userEditingLocked) {
+      return { ok: false, error: '지금은 문서를 편집할 수 없습니다.' };
+    }
     const pagePoint = this.pagePointFromClientPoint(clientX, clientY);
     if (!pagePoint) {
       return { ok: false, error: '그림을 넣을 문단을 찾지 못했습니다.' };
@@ -2663,6 +2679,7 @@ export class InputHandler {
    */
   executeOperation(desc: OperationDescriptor): void {
     if (this.readOnly) return;
+    if (this.userEditingLocked && desc.meta?.origin !== 'agent') return;
     if (this.agentTemplateLocked && desc.kind !== 'record') return;
     if (!this.isOperationAllowedInEditMode(desc)) return;
     switch (desc.kind) {
@@ -3995,6 +4012,49 @@ export class InputHandler {
 
   /** Whether document mutations are currently blocked by an owning workflow. */
   isReadOnly(): boolean { return this.readOnly; }
+
+  /** 활성 에이전트 턴에는 사용자 입력만 잠그고 에이전트 snapshot 경로는 유지한다. */
+  setUserEditingLocked(locked: boolean): void {
+    if (this.userEditingLocked === locked) return;
+    if (locked) {
+      this.cancelFormOverlayEdit?.();
+      this.removeFormOverlay();
+      this.cancelImagePlacement();
+      this.cancelTextboxPlacement();
+      this.cancelPolygonDrawing();
+      _connector.exitConnectorDrawingMode.call(this);
+      if (
+        this.isMoveDragging
+        || this.isPictureMoveDragging
+        || this.isPictureRotateDragging
+        || this.isLineEndpointDragging
+        || this.isPictureResizeDragging
+        || this.isResizeDragging
+        || this.cellSelectionDragState
+        || this.isDragging
+      ) {
+        _mouse.onMouseUp.call(this, new MouseEvent('mouseup', {
+          clientX: this.lastPointerClientX,
+          clientY: this.lastPointerClientY,
+        }));
+      }
+      _text.revertCompositionPreview.call(this);
+      this.resetRawTextMutationEffects();
+      this.imeSession.reset();
+      this.compositionAnchor = null;
+      this.compositionAnchorRect = null;
+      this.compositionLength = 0;
+      this._pendingNavAfterIME = null;
+    }
+    this.userEditingLocked = locked;
+    if (locked) {
+      this.textarea.blur();
+      this.resetTextareaBuffer();
+      this.clearPendingCharFormat();
+      this.container.style.cursor = '';
+    }
+    this.eventBus.emit('command-state-changed');
+  }
 
   /** 양식 모드인가? */
   isFormMode(): boolean { return this.editMode === 'form'; }
@@ -5563,6 +5623,7 @@ export class InputHandler {
       try { this.formOverlay.remove(); } catch { /* 이미 제거됨 */ }
       this.formOverlay = null;
     }
+    this.cancelFormOverlayEdit = null;
   }
 
   /** ComboBox 드롭다운 오버레이 */
@@ -5675,6 +5736,12 @@ export class InputHandler {
       this.afterEdit();
     };
 
+    const cancel = () => {
+      committed = true;
+      this.removeFormOverlay();
+    };
+    this.cancelFormOverlayEdit = cancel;
+
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -5682,8 +5749,7 @@ export class InputHandler {
       } else if (e.key === 'Escape') {
         e.preventDefault();
         // 취소는 blur가 뒤따라도 값을 적용하거나 히스토리를 기록하지 않아야 한다.
-        committed = true;
-        this.removeFormOverlay();
+        cancel();
       }
     });
     input.addEventListener('blur', () => {

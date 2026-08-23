@@ -140,6 +140,8 @@ export type SelectionPolicy =
 export interface OperationMetadata {
   /** 메뉴/툴바/단축키 action id. */
   actionId?: string;
+  /** 사용자 입력 잠금을 건너뛸 수 있는 자율 편집 bookkeeping 인가. */
+  origin?: 'user' | 'agent';
   /** 편집 도메인. 직접 wasm mutation을 audit 할 때 분류 기준으로 사용한다. */
   domain?: EditDomain;
   /** mutation 후 렌더링 갱신 정책. 생략하면 kind 별 기존 기본값을 따른다. */

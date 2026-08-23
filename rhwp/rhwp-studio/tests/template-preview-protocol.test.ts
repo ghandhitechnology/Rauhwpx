@@ -34,12 +34,12 @@ test('template preview state blocks command, direct input, snapshot, and formatt
   assert.match(input, /executeOperation\(desc:[\s\S]*if \(this\.readOnly\) return/);
   assert.match(input, /executeAppliedSnapshot[\s\S]*This template preview is read-only/);
   assert.match(input, /format-char'[\s\S]*this\.readOnly/);
-  assert.match(textInput, /this\.readOnly \|\| this\.agentTemplateLocked/);
-  assert.match(textInput, /onInput[\s\S]*if \(this\.readOnly\)/);
-  assert.match(keyboardInput, /onKeyDown[\s\S]*if \(this\.readOnly\)/);
-  assert.match(keyboardInput, /onCut[\s\S]*if \(this\.readOnly\)/);
-  assert.match(keyboardInput, /onPaste[\s\S]*if \(this\.readOnly\)/);
-  assert.match(dispatcher, /isBlockedInReadOnly/);
+  assert.match(textInput, /this\.readOnly \|\| this\.userEditingLocked \|\| this\.agentTemplateLocked/);
+  assert.match(textInput, /onInput[\s\S]*if \(this\.readOnly \|\| this\.userEditingLocked\)/);
+  assert.match(keyboardInput, /onKeyDown[\s\S]*if \(this\.readOnly \|\| this\.userEditingLocked\)/);
+  assert.match(keyboardInput, /onCut[\s\S]*if \(this\.readOnly \|\| this\.userEditingLocked\)/);
+  assert.match(keyboardInput, /onPaste[\s\S]*if \(this\.readOnly \|\| this\.userEditingLocked\)/);
+  assert.match(dispatcher, /isBlockedByDocumentEditLock/);
   assert.match(toolExecutor, /isDocumentWriteTool\(tool\) && this\.deps\.isReadOnly\?\.\(\)/);
   assert.match(toolExecutor, /READ_ONLY_TEMPLATE_PREVIEW/);
 });
