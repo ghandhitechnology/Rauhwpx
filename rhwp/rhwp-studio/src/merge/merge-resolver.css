@@ -2,6 +2,10 @@ body.merge-resolver-open {
   overflow: hidden;
 }
 
+html.desktop-mac body.merge-resolver-open #menu-bar::after {
+  -webkit-app-region: no-drag;
+}
+
 .merge-resolver-window {
   --merge-border: color-mix(in srgb, currentColor 18%, transparent);
   --merge-muted: color-mix(in srgb, currentColor 66%, transparent);
@@ -37,6 +41,25 @@ body.merge-resolver-open {
 .merge-history-actions,
 .merge-bulk-actions,
 .merge-confirm-actions { display: flex; align-items: center; gap: 8px; }
+
+html.desktop-mac .merge-resolver-window {
+  -webkit-app-region: no-drag;
+}
+
+html.desktop-mac .merge-resolver-header {
+  min-height: var(--desktop-titlebar-height, 38px);
+  padding-left: calc(16px + var(--desktop-traffic-light-inset, 78px));
+  -webkit-app-region: drag;
+}
+
+html.desktop-mac.desktop-fullscreen .merge-resolver-header {
+  padding-left: 16px;
+}
+
+html.desktop-mac .merge-resolver-header-actions,
+html.desktop-mac .merge-resolver-header button {
+  -webkit-app-region: no-drag;
+}
 
 .merge-resolver-body {
   min-height: 0;
@@ -166,6 +189,28 @@ body.merge-resolver-open {
 .merge-resolver-window button:disabled,
 .merge-confirm-overlay button:disabled { opacity: .45; cursor: not-allowed; }
 .merge-live-status { position: fixed; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; white-space: nowrap; }
+.merge-action-status {
+  position: fixed;
+  z-index: 10009;
+  top: 68px;
+  left: 50%;
+  max-width: min(620px, calc(100vw - 32px));
+  padding: 7px 11px;
+  border: 1px solid color-mix(in srgb, #2563eb 48%, var(--merge-border));
+  border-radius: 5px;
+  color: var(--text-color, #1f2937);
+  background: color-mix(in srgb, var(--merge-surface) 92%, #2563eb 8%);
+  box-shadow: 0 8px 24px #0002;
+  font-weight: 650;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+.merge-action-status:empty { display: none; }
+.merge-action-status[data-kind="error"] {
+  border-color: color-mix(in srgb, #dc2626 55%, var(--merge-border));
+  color: #991b1b;
+  background: color-mix(in srgb, var(--merge-surface) 92%, #dc2626 8%);
+}
 
 .merge-confirm-overlay { position: fixed; inset: 0; z-index: 10010; display: grid; place-items: center; padding: 24px; background: #0008; }
 .merge-confirm-dialog { width: min(420px, 100%); padding: 20px; border-radius: 10px; color: var(--text-color, #1f2937); background: var(--bg-color, #fff); box-shadow: 0 20px 60px #0005; }

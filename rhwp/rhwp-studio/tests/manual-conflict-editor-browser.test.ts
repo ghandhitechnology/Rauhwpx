@@ -112,10 +112,16 @@ test('rich-text editor changes text and formatting while preserving intervals', 
     set('fontSize', '14');
     set('bold', '', true);
     set('alignment', 'justify');
+    const labels = [...editor.querySelectorAll<HTMLElement>('.merge-structured-field > span:first-child')]
+      .map((label) => label.textContent ?? '');
+    const alignmentOptions = [...editor.querySelectorAll<HTMLOptionElement>('[data-field-path="alignment"] option')]
+      .map((option) => option.textContent ?? '');
     editor.querySelector<HTMLButtonElement>('button:last-child')!.click();
-    return { family: editor.dataset.editorFamily, payload };
+    return { family: editor.dataset.editorFamily, payload, labels, alignmentOptions };
   }));
   assert.equal(result?.family, 'rich-text');
+  assert.doesNotMatch(result?.labels.join(' ') ?? '', /text|font|bold|alignment|interval/i);
+  assert.deepEqual(result?.alignmentOptions, ['왼쪽', '가운데', '오른쪽', '양쪽 맞춤']);
   assert.deepEqual(result?.payload, {
     text: 'Manually merged text', fontSize: 14, bold: true, alignment: 'justify',
     intervals: [{ start: 0, end: 7, color: '#111111' }],
@@ -213,11 +219,11 @@ test('image editor hides byte data and supports side selection, property edits, 
     document.body.appendChild(editor);
     const hiddenBytes = editor.querySelector('[data-field-path="bytesBase64"]') === null;
     [...editor.querySelectorAll<HTMLButtonElement>('button')]
-      .find((button) => button.textContent === 'Select incoming image')!.click();
+      .find((button) => button.textContent === '가져올 이미지 선택')!.click();
     const extension = editor.querySelector<HTMLInputElement>('[data-field-path="extension"] input')!;
     extension.value = 'gif';
     [...editor.querySelectorAll<HTMLButtonElement>('button')]
-      .find((button) => button.textContent?.startsWith('Apply image'))!.click();
+      .find((button) => button.textContent === '직접 편집 적용')!.click();
     const upload = editor.querySelector<HTMLInputElement>('input[type="file"]')!;
     const transfer = new DataTransfer();
     transfer.items.add(new File([new Uint8Array([1, 2, 3])], 'replacement.webp', { type: 'image/webp' }));
@@ -397,7 +403,165 @@ test('default source branch still prompts, disables delete, and dismissal keeps 
   assert.deepEqual(result, {
     disposition: 'keep',
     deleteDisabled: true,
-    copy: 'The merge is applied. “main” is a default branch and must be kept.',
+    copy: '병합을 적용했습니다. “main” 브랜치는 기본 브랜치이므로 유지됩니다.',
     overlayRemoved: true,
   });
+});
+
+test('resolver desktop controls click, report failures, retry, and fit macOS chrome', async (context) => {
+  if (!browser) {
+    context.skip('Chrome or Chromium is unavailable');
+    return;
+  }
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/tests/fixtures/version-store-idb.html`);
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
+    await page.evaluate(async () => {
+      const { MergeResolverWindow } = await import('/src/merge/merge-resolver-window.ts');
+      document.documentElement.classList.add('desktop-mac');
+      const now = Date.now();
+      const events = {
+        saved: 0,
+        discarded: 0,
+        completeAttempts: 0,
+        finalized: [] as string[],
+        closed: [] as string[],
+      };
+      const draft = {
+        id: 'desktop-controls-draft', repositoryId: 'repository', targetBranch: 'main', sourceBranch: 'source',
+        baseCommitIds: ['base'], currentHead: 'current', sourceHead: 'incoming',
+        targetBranchRevision: 1, sourceBranchRevision: 1, mode: 'diverged' as const,
+        analysisVersion: 1, conflicts: [], resolutions: {}, automaticResult: {},
+        manualAssetBlobIds: [], history: [], historyIndex: 0, createdAt: now, updatedAt: now,
+      };
+      const harness = {
+        events,
+        open() {
+          const resolver = new MergeResolverWindow();
+          resolver.open({
+            draft: structuredClone(draft),
+            analysis: { analysisVersion: 1, result: {}, conflicts: [], automaticOperationCount: 3 },
+            sourceBranch: 'source', currentBranch: 'main', mode: 'diverged',
+            documents: {
+              base: { bytes: new Uint8Array(), fileName: 'empty.hwp', label: '기준' },
+              current: { bytes: new Uint8Array(), fileName: 'empty.hwp', label: '현재' },
+              incoming: { bytes: new Uint8Array(), fileName: 'empty.hwp', label: '가져올 변경' },
+            },
+            canDeleteSource: true,
+            materialize: async () => ({
+              tree: {},
+              validation: {
+                valid: true,
+                errors: [],
+                checks: { parsed: true, exported: true, reloaded: true, structurallyValid: true },
+              },
+            }),
+            saveDraft: async () => { events.saved += 1; },
+            discardDraft: async () => { events.discarded += 1; },
+            complete: async () => {
+              events.completeAttempts += 1;
+              await new Promise((resolve) => setTimeout(resolve, 120));
+              if (events.completeAttempts === 1) throw new Error('테스트 저장 실패');
+              return {} as any;
+            },
+            finalizeSourceDisposition: async (_receipt, disposition) => { events.finalized.push(disposition); },
+            onClosed: (reason) => { events.closed.push(reason); },
+          });
+        },
+      };
+      Object.assign(window, { __mergeResolverHarness: harness });
+    });
+
+    for (const viewport of [
+      { width: 900, height: 720 },
+      { width: 1180, height: 800 },
+      { width: 1600, height: 900 },
+    ]) {
+      await page.setViewport({ ...viewport, deviceScaleFactor: 1 });
+      await page.evaluate(() => (window as any).__mergeResolverHarness.open());
+      await page.waitForSelector('.merge-resolver-window');
+      await page.waitForFunction(() => {
+        const button = document.querySelector<HTMLButtonElement>('.merge-resolver-footer .merge-primary-button');
+        return Boolean(button && !button.disabled);
+      });
+      const geometry = await page.evaluate(() => {
+        const root = document.querySelector<HTMLElement>('.merge-resolver-window')!;
+        const heading = document.querySelector<HTMLElement>('.merge-resolver-heading')!;
+        const controls = [
+          ...document.querySelectorAll<HTMLButtonElement>('.merge-resolver-header-actions button'),
+          document.querySelector<HTMLButtonElement>('.merge-resolver-footer .merge-primary-button')!,
+        ];
+        const hitTargets = controls.map((button) => {
+          const rect = button.getBoundingClientRect();
+          return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.closest('button') === button;
+        });
+        return {
+          noHorizontalOverflow: root.scrollWidth <= window.innerWidth,
+          headingClearsTrafficLights: heading.getBoundingClientRect().left >= 94,
+          controlsInside: controls.every((button) => {
+            const rect = button.getBoundingClientRect();
+            return rect.left >= 0 && rect.top >= 0 && rect.right <= window.innerWidth && rect.bottom <= window.innerHeight;
+          }),
+          hitTargets,
+        };
+      });
+      assert.equal(geometry.noHorizontalOverflow, true, `${viewport.width}px resolver overflow`);
+      assert.equal(geometry.headingClearsTrafficLights, true, `${viewport.width}px traffic-light overlap`);
+      assert.equal(geometry.controlsInside, true, `${viewport.width}px control outside viewport`);
+      assert.deepEqual(geometry.hitTargets, [true, true, true]);
+      await page.click('.merge-close-button');
+      await page.waitForSelector('.merge-resolver-window', { hidden: true });
+    }
+
+    await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
+    await page.evaluate(() => (window as any).__mergeResolverHarness.open());
+    await page.waitForFunction(() => !document.querySelector<HTMLButtonElement>('.merge-primary-button')?.disabled);
+    await page.click('.merge-resolver-header-actions .merge-secondary-button');
+    await page.waitForSelector('.merge-resolver-window', { hidden: true });
+
+    await page.evaluate(() => {
+      (window as any).__mergeResolverHarness.open();
+      window.confirm = () => true;
+    });
+    await page.waitForSelector('.merge-resolver-window');
+    await page.click('.merge-resolver-footer .merge-danger-button');
+    await page.waitForSelector('.merge-resolver-window', { hidden: true });
+
+    await page.evaluate(() => (window as any).__mergeResolverHarness.open());
+    await page.waitForFunction(() => {
+      const button = document.querySelector<HTMLButtonElement>('.merge-resolver-footer .merge-primary-button');
+      return Boolean(button && !button.disabled);
+    });
+    await page.click('.merge-resolver-footer .merge-primary-button');
+    await page.waitForFunction(() => (
+      document.querySelector('.merge-resolver-footer .merge-primary-button')?.textContent === '처리 중…'
+    ));
+    await page.waitForSelector('.merge-action-status[data-kind="error"]');
+    assert.match(
+      await page.$eval('.merge-action-status', (node) => node.textContent ?? ''),
+      /병합 작업 실패: 테스트 저장 실패/,
+    );
+    assert.equal(
+      await page.$eval('.merge-resolver-footer .merge-primary-button', (node) => (node as HTMLButtonElement).disabled),
+      false,
+    );
+    await page.click('.merge-resolver-footer .merge-primary-button');
+    await page.waitForSelector('.merge-confirm-overlay');
+    assert.equal(await page.$eval('.merge-confirm-dialog h2', (node) => node.textContent), '소스 브랜치');
+    assert.equal(await page.$('.merge-action-status:not(:empty)'), null);
+    await page.click('.merge-confirm-dialog .merge-secondary-button');
+    await page.waitForSelector('.merge-resolver-window', { hidden: true });
+
+    const events = await page.evaluate(() => (window as any).__mergeResolverHarness.events);
+    assert.deepEqual(events, {
+      saved: 4,
+      discarded: 1,
+      completeAttempts: 2,
+      finalized: ['keep'],
+      closed: ['saved', 'saved', 'saved', 'saved', 'discarded', 'completed'],
+    });
+  } finally {
+    await page.close();
+  }
 });

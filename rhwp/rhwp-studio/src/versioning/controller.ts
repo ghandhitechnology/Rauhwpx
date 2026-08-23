@@ -208,7 +208,7 @@ function mergeDocumentFormat(bytes: Uint8Array): 'hwp' | 'hwpx' {
   const ole = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
   if (bytes.length >= ole.length && ole.every((value, index) => bytes[index] === value)) return 'hwp';
   if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b) return 'hwpx';
-  throw new VersionError('MERGE_VALIDATION_FAILED', 'Merge supports HWP and HWPX documents only');
+  throw new VersionError('MERGE_VALIDATION_FAILED', 'HWP와 HWPX 문서만 병합할 수 있습니다.');
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -730,10 +730,10 @@ export class DocumentVersionController implements VersionManagerController {
       const repository = this.#requireRepository();
       const draft = await this.#store.getMergeDraft(mergeDraftId(id));
       if (!draft || draft.repositoryId !== repository.id) {
-        throw new VersionError('MERGE_DRAFT_NOT_FOUND', 'Merge draft was not found');
+        throw new VersionError('MERGE_DRAFT_NOT_FOUND', '병합 초안을 찾을 수 없습니다.');
       }
       if (draft.targetBranch !== this.#requireActiveBranch().name) {
-        throw new VersionError('STALE_WORKSPACE', `Switch to ${draft.targetBranch} before resuming this merge`);
+        throw new VersionError('STALE_WORKSPACE', `병합을 이어가려면 먼저 ${draft.targetBranch} 브랜치로 전환하세요.`);
       }
       await this.#checkpointDirty('pre-merge');
       await this.#refreshData(false);
@@ -748,7 +748,7 @@ export class DocumentVersionController implements VersionManagerController {
       const repository = this.#requireRepository();
       const draft = await this.#store.getMergeDraft(mergeDraftId(id));
       if (!draft || draft.repositoryId !== repository.id) {
-        throw new VersionError('MERGE_DRAFT_NOT_FOUND', 'Merge draft was not found');
+        throw new VersionError('MERGE_DRAFT_NOT_FOUND', '병합 초안을 찾을 수 없습니다.');
       }
       await this.#store.deleteMergeDraft(repository.id, draft.id, draft.updatedAt);
       await this.#refreshData(true);
@@ -1038,27 +1038,27 @@ export class DocumentVersionController implements VersionManagerController {
     const repository = this.#requireRepository();
     const targetBranch = this.#requireActiveBranch();
     const sourceBranch = await this.#store.getBranch(repository.id, sourceName);
-    if (!sourceBranch) throw new VersionError('REF_NOT_FOUND', 'Merge source branch was not found');
+    if (!sourceBranch) throw new VersionError('REF_NOT_FOUND', '병합할 소스 브랜치를 찾을 수 없습니다.');
     if (sourceBranch.name === targetBranch.name) {
-      throw new VersionError('CURRENT_BRANCH', 'A branch cannot be merged into itself');
+      throw new VersionError('CURRENT_BRANCH', '현재 브랜치는 자기 자신과 병합할 수 없습니다.');
     }
     const relation = await this.#store.getMergeRelation(repository.id, targetBranch.target, sourceBranch.target);
     this.#assertWorkspaceToken(workspace);
-    if (relation.relation === 'already-integrated') throw new Error('Already merged.');
+    if (relation.relation === 'already-integrated') throw new Error('이미 병합된 브랜치입니다.');
     const [currentCommit, incomingCommit] = await Promise.all([
       this.#requireCommit(targetBranch.target),
       this.#requireCommit(sourceBranch.target),
     ]);
     const baseCommits = await Promise.all(relation.baseCommitIds.map((id) => this.#requireCommit(id)));
     if (baseCommits.length === 0) {
-      throw new VersionError('MERGE_VALIDATION_FAILED', 'No common ancestor was found');
+      throw new VersionError('MERGE_VALIDATION_FAILED', '공통 조상을 찾을 수 없습니다.');
     }
     const loadCommit = async (commit: VersionCommit) => {
       const [snapshot, blob] = await Promise.all([
         this.#store.getCompareSnapshot(commit.compareSnapshotId),
         this.#store.getBlob(commit.blobId),
       ]);
-      if (!snapshot || !blob) throw new VersionError('CORRUPT_BLOB', `Merge data for ${commit.id} is missing`);
+      if (!snapshot || !blob) throw new VersionError('CORRUPT_BLOB', `${commit.id} 체크포인트의 병합 데이터가 없습니다.`);
       return { commit, snapshot: snapshot.snapshot, blob };
     };
     const [current, incoming, ...bases] = await Promise.all([
@@ -1174,7 +1174,7 @@ export class DocumentVersionController implements VersionManagerController {
         await this.#validateMergeDocument(bytes, this.#wasm.fileName);
         return {
           tree: mergeAnalysis.result,
-          document: { bytes, fileName: this.#wasm.fileName, label: 'Result' },
+          document: { bytes, fileName: this.#wasm.fileName, label: '병합 결과' },
           validation: {
             valid: true,
             errors: [],
@@ -1190,7 +1190,7 @@ export class DocumentVersionController implements VersionManagerController {
       } catch (error) {
         return {
           tree: mergeAnalysis.result,
-          document: { bytes, fileName: this.#wasm.fileName, label: 'Result' },
+          document: { bytes, fileName: this.#wasm.fileName, label: '병합 결과' },
           validation: {
             valid: false,
             errors: [error instanceof Error ? error.message : String(error)],
@@ -1213,11 +1213,11 @@ export class DocumentVersionController implements VersionManagerController {
         sourceBranch: sourceBranch.name,
         currentBranch: targetBranch.name,
         mode: storedDraft.mode,
-        title: `Merge ${sourceBranch.name} into ${targetBranch.name}`,
+        title: `${sourceBranch.name} → ${targetBranch.name} 병합`,
         documents: {
-          base: { bytes: baseBytes, fileName: this.#wasm.fileName, label: 'Base' },
-          current: { bytes: current.blob.bytes, fileName: this.#wasm.fileName, label: 'Current' },
-          incoming: { bytes: incoming.blob.bytes, fileName: this.#wasm.fileName, label: 'Incoming' },
+          base: { bytes: baseBytes, fileName: this.#wasm.fileName, label: '기준' },
+          current: { bytes: current.blob.bytes, fileName: this.#wasm.fileName, label: '현재' },
+          incoming: { bytes: incoming.blob.bytes, fileName: this.#wasm.fileName, label: '가져올 변경' },
         },
         canDeleteSource: sourceBranch.name !== repository.defaultBranch,
         materialize: ({ analysis: nextAnalysis, resolutions: nextResolutions, signal }) => (
@@ -1249,7 +1249,7 @@ export class DocumentVersionController implements VersionManagerController {
           const asset: VersionBlob = { id: hashBytes(bytes), byteLength: bytes.byteLength, bytes };
           await this.#enqueue(async () => {
             const existing = await this.#store.getMergeDraft(storedDraft.id);
-            if (!existing) throw new VersionError('MERGE_DRAFT_NOT_FOUND', 'Merge draft was not found');
+            if (!existing) throw new VersionError('MERGE_DRAFT_NOT_FOUND', '병합 초안을 찾을 수 없습니다.');
             await this.#store.putMergeDraft({
               draft: {
                 ...existing,
@@ -1299,7 +1299,7 @@ export class DocumentVersionController implements VersionManagerController {
         continue;
       }
       const asset = await this.#store.getBlob(assetId as VersionBlob['id']);
-      if (!asset) throw new VersionError('CORRUPT_BLOB', `Merge asset ${assetId} is missing`);
+      if (!asset) throw new VersionError('CORRUPT_BLOB', `병합에 필요한 자산 ${assetId}을(를) 찾을 수 없습니다.`);
       const { assetBlobId: _assetBlobId, ...value } = payload;
       hydrated[conflictId] = {
         kind: 'manual',
@@ -1327,7 +1327,7 @@ export class DocumentVersionController implements VersionManagerController {
 
   async #completeMerge(request: MergeApplicationRequest): Promise<MergeAppliedReceipt> {
     if (!request.materialized.validation.valid || !request.materialized.document) {
-      throw new VersionError('MERGE_VALIDATION_FAILED', 'The resolved merge result is not a valid document');
+      throw new VersionError('MERGE_VALIDATION_FAILED', '해결한 병합 결과가 올바른 문서가 아닙니다.');
     }
     // Resolver edits are intentionally local (and undoable) until completion.
     // Persist the exact state being completed before the store transaction checks
@@ -1335,7 +1335,7 @@ export class DocumentVersionController implements VersionManagerController {
     // resumable draft behind if a later validation or ref CAS fails.
     const persistedDraft = await this.#store.getMergeDraft(request.draft.id);
     if (!persistedDraft || persistedDraft.repositoryId !== request.draft.repositoryId) {
-      throw new VersionError('MERGE_DRAFT_NOT_FOUND', 'Merge draft was not found');
+      throw new VersionError('MERGE_DRAFT_NOT_FOUND', '병합 초안을 찾을 수 없습니다.');
     }
     const completionAssetIds = new Set([
       ...persistedDraft.manualAssetBlobIds,
@@ -1347,12 +1347,12 @@ export class DocumentVersionController implements VersionManagerController {
       expectedUpdatedAt: persistedDraft.updatedAt,
     });
     const repository = await this.#store.getRepository(request.draft.repositoryId);
-    if (!repository) throw new VersionError('REPOSITORY_NOT_FOUND', 'Version repository was not found');
+    if (!repository) throw new VersionError('REPOSITORY_NOT_FOUND', '버전 저장소를 찾을 수 없습니다.');
     const [targetBranch, sourceBranch] = await Promise.all([
       this.#store.getBranch(repository.id, request.draft.targetBranch),
       this.#store.getBranch(repository.id, request.draft.sourceBranch),
     ]);
-    if (!targetBranch || !sourceBranch) throw new VersionError('REF_NOT_FOUND', 'A merge branch was not found');
+    if (!targetBranch || !sourceBranch) throw new VersionError('REF_NOT_FOUND', '병합할 브랜치를 찾을 수 없습니다.');
     if (
       targetBranch.target !== request.draft.currentHead
       || sourceBranch.target !== request.draft.sourceHead
@@ -1367,7 +1367,7 @@ export class DocumentVersionController implements VersionManagerController {
         && sourceBranch.generation !== request.draft.sourceBranchGeneration
       )
     ) {
-      throw new VersionError('STALE_WORKSPACE', 'A merge branch changed; recompute the merge before completing it');
+      throw new VersionError('STALE_WORKSPACE', '병합하는 동안 브랜치가 변경되었습니다. 결과를 다시 계산하세요.');
     }
     const captured = await this.#validateMergeDocument(
       request.materialized.document.bytes,
@@ -1378,7 +1378,7 @@ export class DocumentVersionController implements VersionManagerController {
       : await this.#mergeWorker.buildDocumentManifest(captured.bytes);
     const currentCommit = await this.#requireCommit(targetBranch.target);
     const currentSnapshot = await this.#store.getCompareSnapshot(currentCommit.compareSnapshotId);
-    if (!currentSnapshot) throw new VersionError('CORRUPT_BLOB', 'Current merge snapshot is missing');
+    if (!currentSnapshot) throw new VersionError('CORRUPT_BLOB', '현재 브랜치의 병합 스냅샷을 찾을 수 없습니다.');
     const analysis = analyzeVersionDiff(currentSnapshot.snapshot, captured.compareSnapshot);
     const handler = this.#requireInputHandler();
     const original = captureVersionSnapshot(this.#wasm);
@@ -1426,7 +1426,7 @@ export class DocumentVersionController implements VersionManagerController {
           compareSnapshot: captured.compareSnapshot,
           contentFingerprint: captured.fingerprint,
           mergeManifestEntries: mergeManifestEntries!,
-          title: request.title.trim() || `Merge ${sourceBranch.name} into ${targetBranch.name}`,
+          title: request.title.trim() || `${sourceBranch.name} → ${targetBranch.name} 병합`,
           titleOrigin: 'manual',
           titleRevision: 0,
           author: { kind: 'user', label: '사용자' },
@@ -1454,7 +1454,7 @@ export class DocumentVersionController implements VersionManagerController {
           } catch (rollbackError) {
             throw new VersionError(
               'MERGE_VALIDATION_FAILED',
-              'Merge storage failed and the editor snapshot could not be restored',
+              '병합 결과 저장에 실패했고 편집기 상태도 복원하지 못했습니다.',
               { cause: rollbackError instanceof Error ? rollbackError : undefined },
             );
           }
@@ -1485,13 +1485,13 @@ export class DocumentVersionController implements VersionManagerController {
             this.#store.getBranch(repository.id, sourceBranch.name),
           ]);
           if (!latestRepository || !latestTarget) {
-            throw new VersionError('STALE_WORKSPACE', 'A composite merge ref no longer exists');
+            throw new VersionError('STALE_WORKSPACE', '병합 기록에 필요한 브랜치 참조가 더 이상 존재하지 않습니다.');
           }
           if (
             latestTarget.target !== refState.target.target
             || latestTarget.generation !== refState.target.generation
           ) {
-            throw new VersionError('STALE_WORKSPACE', 'The composite target head changed');
+            throw new VersionError('STALE_WORKSPACE', '병합 대상 브랜치의 최신 체크포인트가 변경되었습니다.');
           }
           if (
             Boolean(latestSource) !== Boolean(refState.source)
@@ -1500,7 +1500,7 @@ export class DocumentVersionController implements VersionManagerController {
               || latestSource.generation !== refState.source.generation
             ))
           ) {
-            throw new VersionError('STALE_WORKSPACE', 'The composite source head changed');
+            throw new VersionError('STALE_WORKSPACE', '소스 브랜치의 최신 체크포인트가 변경되었습니다.');
           }
           const restore = await this.#store.restoreCompositeRefs({
             repositoryId: repository.id,
@@ -1602,7 +1602,7 @@ export class DocumentVersionController implements VersionManagerController {
           || latestSource.target !== source.target
           || latestSource.generation !== source.generation
         ) {
-          throw new VersionError('STALE_WORKSPACE', 'Merge refs changed before source finalization');
+          throw new VersionError('STALE_WORKSPACE', '소스 브랜치를 정리하기 전에 병합 참조가 변경되었습니다.');
         }
         const finalized = await this.#store.restoreCompositeRefs({
           repositoryId: repository.id,
@@ -1641,7 +1641,7 @@ export class DocumentVersionController implements VersionManagerController {
     disposition: 'keep' | 'delete',
   ): Promise<void> {
     const finalize = this.#pendingMergeFinalizers.get(receipt);
-    if (!finalize) throw new VersionError('STALE_WORKSPACE', 'This merge application was already finalized');
+    if (!finalize) throw new VersionError('STALE_WORKSPACE', '이 병합 작업은 이미 마무리되었습니다.');
     await finalize(disposition);
     this.#pendingMergeFinalizers.delete(receipt);
   }
@@ -1656,7 +1656,7 @@ export class DocumentVersionController implements VersionManagerController {
       second.loadDocument(captured.bytes, fileName);
       const reloaded = captureVersionSnapshot(second);
       if (captured.fingerprint !== reloaded.fingerprint) {
-        throw new VersionError('MERGE_VALIDATION_FAILED', 'The merged document changed during export and reload');
+        throw new VersionError('MERGE_VALIDATION_FAILED', '병합 문서가 내보내기와 다시 열기 과정에서 달라졌습니다.');
       }
       const missingResources = [
         ...mergeResourceDependencyErrors(first.getExternalImageReferences()),
@@ -1677,7 +1677,7 @@ export class DocumentVersionController implements VersionManagerController {
         if (!verification.recovered || !verification.structureMatches) {
           throw new VersionError(
             'MERGE_VALIDATION_FAILED',
-            `Merged HWP failed semantic reload validation: ${(verification.serializationLosses ?? []).join(' ')}`,
+            `병합한 HWP 문서를 다시 열어 검증하지 못했습니다: ${(verification.serializationLosses ?? []).join(' ')}`,
           );
         }
       }
@@ -1687,7 +1687,7 @@ export class DocumentVersionController implements VersionManagerController {
       return captured;
     } catch (error) {
       if (error instanceof VersionError) throw error;
-      throw new VersionError('MERGE_VALIDATION_FAILED', 'The merged document failed parse/export/reload validation', {
+      throw new VersionError('MERGE_VALIDATION_FAILED', '병합 문서의 분석, 내보내기 또는 다시 열기 검증에 실패했습니다.', {
         cause: error instanceof Error ? error : undefined,
       });
     } finally {
@@ -1706,14 +1706,14 @@ export class DocumentVersionController implements VersionManagerController {
     const building = (async () => {
       const commit = await this.#store.getCommit(id);
       if (!commit || commit.repositoryId !== repositoryId) {
-        throw new VersionError('COMMIT_NOT_FOUND', `Commit ${id} was not found for manifest generation`);
+        throw new VersionError('COMMIT_NOT_FOUND', `병합 식별 정보를 만들 체크포인트 ${id}을(를) 찾을 수 없습니다.`);
       }
       const parents: VersionMergeManifest[] = [];
       for (const parent of commit.parents) {
         parents.push(await this.#ensureFullMergeManifest(repositoryId, parent, memo));
       }
       const latest = await this.#store.getCommit(id);
-      if (!latest) throw new VersionError('COMMIT_NOT_FOUND', `Commit ${id} disappeared during manifest generation`);
+      if (!latest) throw new VersionError('COMMIT_NOT_FOUND', `병합 식별 정보를 만드는 동안 체크포인트 ${id}이(가) 사라졌습니다.`);
       const existing = latest.mergeManifestId
         ? await this.#store.getMergeManifest(latest.mergeManifestId)
         : null;
@@ -1725,7 +1725,7 @@ export class DocumentVersionController implements VersionManagerController {
         && existing.parentManifestIds.every((parentId, index) => parentId === parents[index]?.id)
       ) return existing;
       const blob = await this.#store.getBlob(latest.blobId);
-      if (!blob) throw new VersionError('CORRUPT_BLOB', `Document bytes for commit ${id} are missing`);
+      if (!blob) throw new VersionError('CORRUPT_BLOB', `체크포인트 ${id}의 문서 데이터를 찾을 수 없습니다.`);
       const entries = await this.#mergeWorker.buildDocumentManifest(blob.bytes, {
         onProgress: (progress) => this.#eventBus.emit('merge-progress', progress),
       });

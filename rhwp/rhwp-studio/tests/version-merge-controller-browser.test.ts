@@ -169,7 +169,7 @@ test('dirty merge entry creates a real pre-merge checkpoint before already-integ
         wasm.releaseDocument();
       }
     });
-    assert.equal(result.message, 'Already merged.');
+    assert.equal(result.message, '이미 병합된 브랜치입니다.');
     assert.ok(result.reasons.includes('pre-merge'));
     assert.notEqual(result.mainHead, result.sourceHead);
   } finally {
@@ -474,7 +474,7 @@ test('diverged clean merge creates ordered parents and Undo/Redo moves bytes wit
     assert.equal(await page.$('.merge-mode-select'), null, 'diverged merges cannot bypass a merge checkpoint');
     assert.match(
       await page.$eval('.merge-clean-message', (node) => node.textContent ?? ''),
-      /No conflicts/,
+      /충돌이 없습니다/,
       'disjoint current/incoming edits must stay mandatory but conflict-free in review',
     );
     try {
@@ -813,7 +813,7 @@ test('HWPX controller durably completes clean and conflicted merges with composi
         await page.click('.merge-bulk-actions button:nth-child(2)');
       } else {
         assert.equal(conflictCount, 0, 'disjoint HWPX edits must merge cleanly');
-        assert.match(await page.$eval('.merge-clean-message', (node) => node.textContent ?? ''), /No conflicts/);
+        assert.match(await page.$eval('.merge-clean-message', (node) => node.textContent ?? ''), /충돌이 없습니다/);
       }
       await page.waitForFunction(() => {
         const button = document.querySelector<HTMLButtonElement>('.merge-resolver-footer .merge-primary-button');
@@ -1092,13 +1092,13 @@ test('real resolver completes clean and conflicted HWP/HWPX worker merges', { ti
         if (conflicted) {
           assert.ok(setup.conflictCount > 0, `${format} fixture must produce a typed conflict`);
           assert.equal(
-            await page.$$eval('.merge-conflict-state', (nodes) => nodes.every((node) => node.textContent === 'Unresolved')),
+            await page.$$eval('.merge-conflict-state', (nodes) => nodes.every((node) => node.textContent === '미해결')),
             true,
           );
           await page.click('.merge-bulk-actions button:nth-child(2)');
         } else {
           assert.equal(setup.conflictCount, 0, `${format} disjoint edits must merge cleanly`);
-          assert.match(await page.$eval('.merge-clean-message', (node) => node.textContent ?? ''), /No conflicts/);
+          assert.match(await page.$eval('.merge-clean-message', (node) => node.textContent ?? ''), /충돌이 없습니다/);
         }
         await page.waitForFunction(() => {
           const button = document.querySelector<HTMLButtonElement>('.merge-resolver-footer .merge-primary-button');

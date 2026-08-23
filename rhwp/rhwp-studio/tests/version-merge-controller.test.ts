@@ -22,7 +22,7 @@ test('merge entry checkpoints dirty current work before reading graph relation',
   assert.ok(start.indexOf("#checkpointDirty('pre-merge')") < start.indexOf('#openMergeResolver('));
   const open = method('async #openMergeResolver(', '#setMergeResolverLock(');
   assert.match(open, /getMergeRelation\(/);
-  assert.match(open, /Already merged\./);
+  assert.match(open, /이미 병합된 브랜치입니다\./);
   assert.match(open, /synthesizeVirtualBaseDocument\(/);
   assert.match(open, /analyzeDocument\(/);
   assert.match(open, /materializeDocument\(/);

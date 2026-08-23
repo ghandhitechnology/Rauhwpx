@@ -1,6 +1,7 @@
 import type { DiffAnchor } from '../compare/types.ts';
 import { WasmBridge } from '../core/wasm-bridge.ts';
 import type { MergeDocumentSource, MergePreviewRole } from './domain.ts';
+import { mergeErrorMessage } from './merge-labels.ts';
 import './document-preview-pane.css';
 
 export interface DocumentPreviewPaneOptions {
@@ -35,7 +36,7 @@ export class DocumentPreviewPane {
       ? 'compare-document-preview'
       : 'merge-preview-pane'}`;
     this.element.dataset.role = options.role;
-    this.element.setAttribute('aria-label', `${options.title} document preview`);
+    this.element.setAttribute('aria-label', `${options.title} 문서 미리보기`);
 
     const header = document.createElement('header');
     header.className = 'merge-preview-head';
@@ -47,17 +48,17 @@ export class DocumentPreviewPane {
     previous.type = 'button';
     previous.className = 'merge-icon-button';
     previous.textContent = '‹';
-    previous.setAttribute('aria-label', `Previous page in ${options.title}`);
+    previous.setAttribute('aria-label', `${options.title} 이전 쪽`);
     const next = document.createElement('button');
     next.type = 'button';
     next.className = 'merge-icon-button';
     next.textContent = '›';
-    next.setAttribute('aria-label', `Next page in ${options.title}`);
+    next.setAttribute('aria-label', `${options.title} 다음 쪽`);
     this.pageInput = document.createElement('input');
     this.pageInput.type = 'number';
     this.pageInput.min = '1';
     this.pageInput.value = '1';
-    this.pageInput.setAttribute('aria-label', `Page number in ${options.title}`);
+    this.pageInput.setAttribute('aria-label', `${options.title} 쪽 번호`);
     this.pageTotal = document.createElement('span');
     this.pageTotal.textContent = '/ –';
     navigation.append(previous, this.pageInput, this.pageTotal, next);
@@ -66,7 +67,7 @@ export class DocumentPreviewPane {
     this.statusEl = document.createElement('div');
     this.statusEl.className = 'merge-preview-status';
     this.statusEl.setAttribute('role', 'status');
-    this.statusEl.textContent = 'Preview not loaded';
+    this.statusEl.textContent = '미리보기를 불러오지 않았습니다.';
     this.canvasWrap = document.createElement('div');
     this.canvasWrap.className = 'merge-preview-canvas-wrap';
     this.canvas = document.createElement('canvas');
@@ -88,7 +89,7 @@ export class DocumentPreviewPane {
 
   setTitle(title: string): void {
     this.titleEl.textContent = title;
-    this.element.setAttribute('aria-label', `${title} document preview`);
+    this.element.setAttribute('aria-label', `${title} 문서 미리보기`);
   }
 
   configureTabPanel(panelId: string, labelledBy: string): void {
@@ -107,11 +108,11 @@ export class DocumentPreviewPane {
     this.source = source;
     const token = ++this.loadingToken;
     if (!source) {
-      this.statusEl.textContent = 'Result preview will appear after resolution.';
+      this.statusEl.textContent = '충돌을 해결하면 결과 미리보기가 나타납니다.';
       this.clearCanvas();
       return;
     }
-    this.statusEl.textContent = `Loading ${source.label ?? source.fileName}…`;
+    this.statusEl.textContent = `${source.label ?? source.fileName} 미리보기를 불러오는 중입니다…`;
     try {
       this.wasm ??= new WasmBridge();
       await this.wasm.initialize();
@@ -124,7 +125,7 @@ export class DocumentPreviewPane {
       this.render();
     } catch (error) {
       if (token !== this.loadingToken) return;
-      this.statusEl.textContent = `Preview failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.statusEl.textContent = `미리보기 실패: ${mergeErrorMessage(error, '문서를 미리 볼 수 없습니다.')}`;
       this.clearCanvas();
     }
   }
@@ -147,13 +148,13 @@ export class DocumentPreviewPane {
       try {
         const rect = this.wasm.getCursorRect(fallbackPosition.section, fallbackPosition.paragraph, 0);
         this.setPage(rect.pageIndex);
-        this.statusEl.textContent += ' · aligned paragraph context (marker unavailable)';
+        this.statusEl.textContent += ' / 관련 문단으로 이동함 (표시 위치 없음)';
       } catch {
-        this.statusEl.textContent = 'Position information is unavailable; use the text preview.';
+        this.statusEl.textContent = '위치 정보가 없어 문서 미리보기만 표시합니다.';
         this.clearCanvas();
       }
     } else {
-      this.statusEl.textContent = 'Position information is unavailable; use the text preview.';
+      this.statusEl.textContent = '위치 정보가 없어 문서 미리보기만 표시합니다.';
       this.clearCanvas();
     }
   }
@@ -176,7 +177,7 @@ export class DocumentPreviewPane {
       this.canvas.height = Math.max(1, Math.floor(info.height * scale));
       this.wasm.renderPageToCanvasFiltered(this.pageIndex, this.canvas, scale, 'all');
       this.pageInput.value = String(this.pageIndex + 1);
-      this.statusEl.textContent = `${this.source.label ?? this.source.fileName} · page ${this.pageIndex + 1}`;
+      this.statusEl.textContent = `${this.source.label ?? this.source.fileName} / ${this.pageIndex + 1}쪽`;
       if (this.anchor?.pageIndex === this.pageIndex) {
         this.marker.hidden = false;
         this.marker.style.left = `${Math.floor(this.anchor.x * scale)}px`;
@@ -187,7 +188,7 @@ export class DocumentPreviewPane {
         this.marker.hidden = true;
       }
     } catch (error) {
-      this.statusEl.textContent = `Preview failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.statusEl.textContent = `미리보기 실패: ${mergeErrorMessage(error, '문서를 미리 볼 수 없습니다.')}`;
       this.clearCanvas();
     }
   }

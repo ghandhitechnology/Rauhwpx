@@ -1,4 +1,5 @@
 import type { MergeConflict } from '../versioning/types.ts';
+import { mergeChoiceLabel, mergeErrorMessage, mergeTokenLabel } from './merge-labels.ts';
 
 export type ManualEditorFamily =
   | 'rich-text'
@@ -74,9 +75,9 @@ function collectLeaves(value: unknown, path: (string | number)[] = [], output: E
 
 function pathLabel(path: ValuePath, fallback: string): string {
   if (path.length === 0) return fallback;
-  return path.map((part) => typeof part === 'number' ? `[${part + 1}]` : part)
-    .join(' · ')
-    .replace(/([a-z])([A-Z])/g, '$1 $2');
+  return path.map((part) => (
+    typeof part === 'number' ? `${part + 1}번` : mergeTokenLabel(part, '기타 속성')
+  )).join(' / ');
 }
 
 function keyAt(path: ValuePath): string {
@@ -98,12 +99,12 @@ function readControl(control: HTMLInputElement | HTMLTextAreaElement | HTMLSelec
   if (typeof original === 'boolean' && control instanceof HTMLInputElement) return control.checked;
   if (typeof original === 'number') {
     const parsed = Number(control.value);
-    if (!Number.isFinite(parsed)) throw new Error('Enter a valid number.');
+    if (!Number.isFinite(parsed)) throw new Error('올바른 숫자를 입력하세요.');
     return parsed;
   }
   if (original === null) {
     const normalized = control.value.trim();
-    if (normalized === '' || normalized === 'null') return null;
+    if (normalized === '' || normalized === 'null' || normalized === '없음') return null;
     return normalized;
   }
   return control.value;
@@ -143,7 +144,7 @@ function createLeafControl(
     const choices = selectValues(family, key, leaf.value);
     if (choices) {
       const select = document.createElement('select');
-      for (const choice of choices) select.appendChild(new Option(choice || '(empty)', choice));
+      for (const choice of choices) select.appendChild(new Option(choice ? mergeChoiceLabel(choice) : '(비어 있음)', choice));
       select.value = leaf.value;
       select.setAttribute('aria-label', pathLabel(leaf.path, fallbackLabel));
       return select;
@@ -158,30 +159,30 @@ function createLeafControl(
   }
   const input = document.createElement('input');
   input.type = typeof leaf.value === 'number' ? 'number' : 'text';
-  input.value = leaf.value === null ? 'null' : String(leaf.value);
+  input.value = leaf.value === null ? '없음' : String(leaf.value);
   input.setAttribute('aria-label', pathLabel(leaf.path, fallbackLabel));
   return input;
 }
 
 function familyLegend(family: ManualEditorFamily): string {
   switch (family) {
-    case 'rich-text': return 'Rich text and formatting';
-    case 'table': return 'Table cells, structure, and formulas';
-    case 'shape-chart': return 'Shape, chart, and object properties';
-    case 'image': return 'Image source, placement, crop, and properties';
-    case 'document-properties': return 'Document model properties';
-    default: return 'Typed value';
+    case 'rich-text': return '글과 서식';
+    case 'table': return '표 셀, 구조, 수식';
+    case 'shape-chart': return '도형, 차트, 개체 속성';
+    case 'image': return '이미지와 배치 속성';
+    case 'document-properties': return '문서 속성';
+    default: return '직접 값 편집';
   }
 }
 
 function familyHint(family: ManualEditorFamily): string {
   switch (family) {
-    case 'rich-text': return 'Edit text and formatting without changing the surrounding paragraph structure.';
-    case 'table': return 'Edit individual cells, formulas, dimensions, spans, or an existing structural operation.';
-    case 'shape-chart': return 'Edit geometry, placement, styling, axes, series, or embedded object properties.';
-    case 'image': return 'Edit image metadata and placement, select either side, or upload complete replacement bytes.';
-    case 'document-properties': return 'Edit section, style, numbering, field, form, bookmark, or resource properties.';
-    default: return 'Edit this value while preserving its original data type.';
+    case 'rich-text': return '주변 문단 구조를 유지하면서 글과 서식을 편집합니다.';
+    case 'table': return '셀, 수식, 크기, 병합 범위 또는 표 구조 작업을 편집합니다.';
+    case 'shape-chart': return '크기, 위치, 모양, 축, 계열 또는 개체 속성을 편집합니다.';
+    case 'image': return '이미지 속성과 배치를 편집하거나 한쪽 이미지를 선택하거나 새 이미지를 올립니다.';
+    case 'document-properties': return '구역, 스타일, 번호, 필드, 양식, 책갈피 또는 리소스 속성을 편집합니다.';
+    default: return '원래 자료형을 유지하면서 값을 편집합니다.';
   }
 }
 
@@ -236,11 +237,11 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
   if (family === 'image') {
     const source = node('fieldset', 'merge-image-source');
     const legend = document.createElement('legend');
-    legend.textContent = 'Image selection';
+    legend.textContent = '이미지 선택';
     source.appendChild(legend);
     for (const [label, side, payload] of [
-      ['Select current image', 'current', conflict.current],
-      ['Select incoming image', 'incoming', conflict.incoming],
+      ['현재 이미지 선택', 'current', conflict.current],
+      ['가져올 이미지 선택', 'incoming', conflict.incoming],
     ] as const) {
       const button = node('button', 'merge-secondary-button', label);
       button.type = 'button';
@@ -251,11 +252,11 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
       source.appendChild(button);
     }
     const uploadLabel = node('label', 'merge-upload-field');
-    uploadLabel.appendChild(node('span', '', 'Upload replacement image'));
+    uploadLabel.appendChild(node('span', '', '대체 이미지 올리기'));
     const upload = document.createElement('input');
     upload.type = 'file';
     upload.accept = 'image/*';
-    upload.setAttribute('aria-label', 'Upload replacement image');
+    upload.setAttribute('aria-label', '대체 이미지 올리기');
     upload.addEventListener('change', () => {
       const file = upload.files?.[0];
       if (!file) return;
@@ -267,7 +268,7 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
           options.onResolve(payload);
           error.textContent = '';
         } catch (cause) {
-          error.textContent = cause instanceof Error ? cause.message : String(cause);
+          error.textContent = mergeErrorMessage(cause, '값을 적용하지 못했습니다. 입력 내용을 확인하고 다시 시도해 주세요.');
         }
       })();
     });
@@ -285,7 +286,7 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
     : [];
   if (tableLeaves.length > 0) {
     const grid = node('table', 'merge-table-grid');
-    grid.setAttribute('aria-label', 'Editable table cell grid');
+    grid.setAttribute('aria-label', '편집 가능한 표 셀');
     const body = document.createElement('tbody');
     const positions = tableLeaves.map((leaf) => tableCellPosition(leaf)!);
     const rowCount = Math.max(...positions.map(({ row }) => row)) + 1;
@@ -301,8 +302,8 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
         if (leaf) {
           const label = node('label', 'merge-table-cell-field');
           label.dataset.fieldPath = leaf.path.join('.');
-          const caption = node('span', 'merge-visually-hidden', `Row ${row + 1}, column ${column + 1}`);
-          const control = createLeafControl(family, leaf, `Row ${row + 1}, column ${column + 1}`);
+          const caption = node('span', 'merge-visually-hidden', `${row + 1}행 ${column + 1}열`);
+          const control = createLeafControl(family, leaf, `${row + 1}행 ${column + 1}열`);
           label.append(caption, control);
           controls.push({ leaf, control });
           cell.appendChild(label);
@@ -324,10 +325,10 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
     fieldset.appendChild(label);
   }
   if (leaves.length === 0) {
-    fieldset.appendChild(node('p', 'merge-manual-hint', 'This value has no editable scalar properties. Choose Current or Incoming.'));
+    fieldset.appendChild(node('p', 'merge-manual-hint', '직접 편집할 수 있는 속성이 없습니다. 현재 변경이나 가져올 변경을 선택하세요.'));
   }
 
-  const apply = node('button', 'merge-secondary-button', `Apply ${familyLegend(family).toLowerCase()}`);
+  const apply = node('button', 'merge-secondary-button', '직접 편집 적용');
   apply.type = 'button';
   apply.disabled = controls.length === 0;
   apply.addEventListener('click', () => {
@@ -339,7 +340,7 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
       options.onResolve(result);
       error.textContent = '';
     } catch (cause) {
-      error.textContent = cause instanceof Error ? cause.message : String(cause);
+      error.textContent = mergeErrorMessage(cause, '값을 적용하지 못했습니다. 입력 내용을 확인하고 다시 시도해 주세요.');
       controls[0]?.control.focus();
     }
   });
