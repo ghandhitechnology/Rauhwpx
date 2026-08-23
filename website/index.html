@@ -3,22 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>귀찮이글</title>
-<meta name="description" content="한글 파일 편집이랑 지피티와의 대화, 한 화면에서 융합. macOS용 귀찮이글.">
-<meta property="og:title" content="귀찮이글 — 귀찮은 이를 위한 한글">
-<meta property="og:description" content="한글 파일 편집이랑 지피티와의 대화, 한 화면에서 융합. .hwp를 열어놓고 에이전트가 조사하고 계획하고 써요.">
+<title>Rauhwpx</title>
+<meta name="description" content="Rauhwpx는 한글 문서 편집과 AI 에이전트 작업을 한 화면에서 제공하는 macOS·Windows 데스크톱 앱입니다.">
+<meta name="theme-color" content="#4f73e8">
+<meta property="og:title" content="Rauhwpx">
+<meta property="og:description" content="한글 문서 편집과 AI 에이전트 작업을 한 화면에서.">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://ghandhitechnology.github.io/Rauhwpx/">
-<meta property="og:image" content="https://ghandhitechnology.github.io/Rauhwpx/assets/editor-agent-running.png">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="https://ghandhitechnology.github.io/Rauhwpx/assets/editor-agent-running.png">
-<link rel="canonical" href="https://ghandhitechnology.github.io/Rauhwpx/">
+<meta property="og:url" content="https://heemangstudios.com/">
+<meta property="og:site_name" content="Rauhwpx">
+<meta property="og:image" content="https://heemangstudios.com/assets/rauhwpx-logo.png">
+<meta property="og:image:alt" content="Rauhwpx 파란색 앱 아이콘">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Rauhwpx">
+<meta name="twitter:description" content="한글 문서 편집과 AI 에이전트 작업을 한 화면에서.">
+<meta name="twitter:image" content="https://heemangstudios.com/assets/rauhwpx-logo.png">
+<link rel="icon" type="image/png" href="assets/rauhwpx-logo.png">
+<link rel="apple-touch-icon" href="assets/rauhwpx-logo.png">
+<link rel="canonical" href="https://heemangstudios.com/">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Nanum+Pen+Script&display=swap" rel="stylesheet">
 <style>
 /* ───────────────────────────────────────────────
-   귀찮이글 — quiet print studio
+   Rauhwpx — quiet print studio
    크림 종이 / 검정 잉크 / 흰 종이 조각. 그 외 색 없음.
    ─────────────────────────────────────────────── */
 
@@ -145,13 +152,34 @@ a{color:var(--ink)}
 }
 .gh-stars .star{color:#E0A417;font-size:1.35em;line-height:1;margin-right:5px;transform:translateY(-1px)}
 
-.cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
-.cta-meta{
-  margin-top:14px;font:400 15px/1.6 var(--sans);color:var(--ink-3);
-  display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;
+.cta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.cta-tip{
+  margin-top:12px;
+  font:400 14px/1.5 var(--sans);
+  color:var(--ink-3);
 }
-.cta-meta a{color:var(--ink-2);text-underline-offset:3px;display:inline-flex;align-items:center;min-height:44px;padding:0 2px}
-.dot{color:var(--rule-2)}
+.cta-tip a{
+  color:var(--ink-3);text-underline-offset:3px;
+  display:inline-flex;align-items:center;min-height:36px;
+}
+.hero-actions{
+  display:grid;
+  grid-template-columns:max-content max-content;
+  column-gap:10px;
+  width:max-content;
+  max-width:100%;
+  margin-top:28px;
+}
+.hero-actions__tip{
+  min-height:36px;
+  margin-top:8px;
+  display:inline-flex;
+  align-items:center;
+  color:var(--ink-3);
+  font:400 14px/1.5 var(--sans);
+  text-underline-offset:3px;
+}
+.hero-actions__tip--right{justify-self:end}
 
 /* ── 스크린샷 프레임 + 크롭 ─────────────────── */
 .figure{margin:0}
@@ -171,6 +199,8 @@ a{color:var(--ink)}
 }
 /* 크롭 좌표 — 원본 1800×1197 기준 */
 .c-app{--cx:70;--cy:42;--cw:1663;--ch:1066}   /* 앱 창 전체 */
+.c-hero{--cx:0;--cy:0;--cw:3104;--ch:2064} /* Andy native 기안문+에이전트 */
+.c-hero.shot img{width:100%;height:auto;max-width:100%;margin:0}
 .c-cmd{--cx:540;--cy:845;--cw:1035;--ch:262}  /* /plan 자동완성 + 입력줄 */
 .c-msg{--cx:575;--cy:110;--cw:1000;--ch:216}  /* 사용자 메시지 영역 */
 .c-side{--cx:1104;--cy:42;--cw:628;--ch:1066} /* 설정 사이드바만 */
@@ -211,9 +241,22 @@ a{color:var(--ink)}
 .hero h1{
   font-size:clamp(36px,5.2vw,58px);
   line-height:1.16;font-weight:700;letter-spacing:-.032em;
-  margin:12px 0 16px;
+  margin:0 0 16px;
 }
-.hero .lead{max-width:36ch}
+.hero .lead{max-width:36ch;margin-bottom:0}
+.hero-figure{position:relative}
+.hero-logo-badge{
+  position:absolute;z-index:3;
+  width:clamp(72px,8.5vw,108px);aspect-ratio:1;
+  left:5%;bottom:16%;
+  padding:4px;border-radius:27%;
+  background:rgba(255,255,255,.72);
+  box-shadow:0 16px 34px rgba(20,18,15,.19),0 3px 7px rgba(20,18,15,.10);
+  transform:rotate(-6deg);
+}
+.hero-logo-badge img{
+  display:block;width:100%;height:auto;border-radius:25%;
+}
 
 /* ── 섹션 헤더 ─────────────────────────────── */
 .sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:clamp(22px,2.6vw,32px);flex-wrap:wrap}
@@ -229,6 +272,7 @@ a{color:var(--ink)}
 .row__num{font:500 14px/1 var(--mono);letter-spacing:.14em;color:var(--ink-3);margin-bottom:10px}
 .row h3{margin-bottom:12px}
 .row p{color:var(--ink-2)}
+.row .fact{margin-top:.35em;font-size:15px;line-height:1.65;color:var(--ink-3)}
 
 /* 템플릿 명세 목록 */
 .specimen{border:1.5px solid var(--ink);background:var(--patch);--sx:7px;--sy:8px;box-shadow:var(--sx) var(--sy) 0 rgba(20,18,15,.09)}
@@ -253,7 +297,7 @@ a{color:var(--ink)}
 .step--wide figure{margin-top:16px}
 
 /* ── 연결 ──────────────────────────────────── */
-#pricing{position:relative;overflow:visible}
+#connect{position:relative;overflow:visible}
 .float-icons{position:absolute;inset:0;pointer-events:none;z-index:1}
 .price-grid{position:relative;z-index:2;display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,380px);gap:clamp(24px,3.2vw,40px);align-items:center}
 .price-grid .figure{max-width:380px;margin-left:auto}
@@ -307,16 +351,25 @@ a{color:var(--ink)}
 .dl .h2{margin-bottom:14px}
 .dl p{max-width:46ch;margin:0 auto 26px;color:var(--ink-2)}
 .dl .cta{justify-content:center}
-.dl .cta-meta{justify-content:center}
 
 /* ── 푸터 ──────────────────────────────────── */
-.foot{border-top:1px solid var(--rule);padding:34px 0 46px}
-.foot .wrap{display:flex;flex-wrap:wrap;gap:14px 26px;align-items:baseline}
+.foot{border-top:1px solid var(--rule);padding:28px 0 32px}
+.foot .wrap{display:flex;flex-wrap:wrap;gap:10px 26px;align-items:baseline}
 .foot .brand{font-size:16px}
-.foot nav{margin-left:auto;display:flex;flex-wrap:wrap;gap:6px 18px}
+.foot nav{margin-left:auto;display:flex;flex-wrap:wrap;gap:2px 16px}
 .foot a{font-size:15px;color:var(--ink-2);text-underline-offset:3px}
-.foot nav a{display:inline-flex;align-items:center;min-height:44px;padding:0 2px}
-.foot small{font:400 14px/1.6 var(--mono);color:var(--ink-3);width:100%}
+.foot nav a{display:inline-flex;align-items:center;min-height:40px;padding:0 2px}
+.colophon{
+  width:100%;
+  margin-top:14px;
+  padding-top:14px;
+  border-top:1px solid var(--rule);
+  font:400 12px/1.7 var(--mono);
+  letter-spacing:.01em;
+  color:var(--ink-3);
+  max-width:72ch;
+}
+.colophon a{font-size:12px;color:var(--ink-3);text-underline-offset:2px}
 
 /* 등장 — 글자 묶음. JS가 없으면 이 숨김이 안 걸려요. */
 html.js .rv{
@@ -371,6 +424,10 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   .c-msg{--cx:934;--cy:224;--cw:596;--ch:100}
   .tape{width:74px;height:22px;top:-11px}
   .note{font-size:20px}
+  .hero-actions{grid-template-columns:minmax(0,1fr);width:100%}
+  .hero-actions .btn{width:100%}
+  .hero-actions__tip--right{justify-self:start}
+  .hero-logo-badge{width:74px;left:4%;bottom:18%;padding:3px}
   .foot nav{margin-left:0;width:100%}
 }
 @media (prefers-reduced-motion:reduce){
@@ -386,13 +443,14 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
 
 <header class="masthead">
   <div class="wrap">
-    <a class="brand" href="#top">귀찮이글</a>
+    <a class="brand" href="#top">Rauhwpx</a>
     <nav class="nav">
       <a href="#features">기능</a>
+      <a href="#gongmun">공문</a>
       <a href="#flow">작업 흐름</a>
-      <a href="#pricing">연결</a>
+      <a href="#connect">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub<span class="gh-stars"></span></a>
-      <a class="btn btn--fill btn--sm" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">다운로드</a>
+      <a class="btn btn--fill btn--sm" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">다운로드</a>
     </nav>
   </div>
 </header>
@@ -403,29 +461,29 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   <section class="hero">
     <div class="wrap hero-grid">
       <div>
-        <h1>귀찮은 이를 위한 한글,<br><span class="ul">귀찮이글<svg viewBox="0 0 200 10" preserveAspectRatio="none" aria-hidden="true"><path d="M2 7.2C33 3.4 66 2.3 100 3.6c31 1.2 63 3.4 98 1.1" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span></h1>
-        <p class="lead"><span class="nb">한글 파일 편집이랑 지피티와의 대화,</span> <span class="nb">한 화면에서 융합</span></p>
-        <div class="cta" style="margin-top:26px">
-          <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">macOS용 다운로드</a>
+        <h1>귀찮은 이를 위한 한글,<br><span class="ul">Rauhwpx<svg viewBox="0 0 200 10" preserveAspectRatio="none" aria-hidden="true"><path d="M2 7.2C33 3.4 66 2.3 100 3.6c31 1.2 63 3.4 98 1.1" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span></h1>
+        <p class="lead"><span class="nb">한글 파일 편집이랑 에이전트와의 대화,</span> <span class="nb">한 화면에서 융합</span></p>
+        <div class="hero-actions">
+          <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">macOS용 다운로드</a>
           <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">Star on GitHub<span class="gh-stars"></span></a>
+          <a class="hero-actions__tip" href="donate.html">토큰 기부하기</a>
+          <a class="hero-actions__tip hero-actions__tip--right" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-x64.exe">Windows용 다운로드</a>
         </div>
-        <p class="cta-meta">
-          <span>Apple Silicon · v0.1.6</span>
-          <span class="dot">·</span>
-          <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-x64.exe">Windows(beta)</a>
-        </p>
       </div>
 
-      <figure class="figure">
+      <figure class="figure hero-figure">
         <div class="frame tilt-a">
           <span class="tape tape--tr" aria-hidden="true"></span>
-          <div class="shot c-app">
-            <img src="assets/editor-hero.png" width="1800" height="1197" alt="귀찮이글 화면. 왼쪽에 수업표가 있는 한글 문서, 오른쪽에 에이전트가 표 정렬을 고치고 있어요.">
+          <div class="shot c-hero">
+            <img src="assets/editor-pumui.png" width="3104" height="2064" alt="Rauhwpx 한 화면. 왼쪽은 별지 제2호 기안문, 오른쪽은 에이전트 사이드바.">
           </div>
+        </div>
+        <div class="hero-logo-badge" aria-hidden="true">
+          <img src="assets/rauhwpx-logo.png" width="1024" height="1024" alt="">
         </div>
         <figcaption class="note">
           <svg class="arw" viewBox="0 0 40 26" aria-hidden="true"><path d="M37 23C31 11 22 4.6 7 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M7 3l7.4 1.8M7 3l2 6.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          <span>문서랑 에이전트가 같은 창에 있어요</span>
+          <span>기안문이랑 에이전트가 같은 창에 있어요</span>
         </figcaption>
       </figure>
     </div>
@@ -446,7 +504,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
           <div>
             <p class="row__num">01</p>
             <h3 class="h3">바이브라이팅</h3>
-            <p>AI 시대도 벌써 3년, 이제 복붙 말고 조금 더 간단하고 편한 방법을 쓸 때가 되지 않았을까요? 귀찮이글을 통해 구상, 조사, 그리고 편집 후 디자인까지, 다 한곳에서 해결하세요</p>
+            <p>AI 시대도 벌써 3년, 이제 복붙 말고 조금 더 간단하고 편한 방법을 쓸 때가 되지 않았을까요? Rauhwpx를 통해 구상, 조사, 그리고 편집 후 디자인까지, 다 한곳에서 해결하세요</p>
           </div>
           <figure class="figure row__media">
             <div class="frame tilt-b">
@@ -494,7 +552,49 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
           </div>
         </article>
 
+        <!-- 4 -->
+        <article class="row">
+          <div>
+            <p class="row__num">04</p>
+            <h3 class="h3">표가 안 깨져요</h3>
+            <p>쪽 위에서 표를 바로 고치면 돼요. 안에 든 표도 그대로 남고, 품의나 공문처럼 칸이 많은 표도 깨지지 않아요.</p>
+          </div>
+          <figure class="figure row__media">
+            <div class="frame">
+              <div class="shot c-app">
+                <img loading="lazy" src="assets/editor-hero.png" width="1800" height="1197" alt="Rauhwpx 화면. 한글 문서와 에이전트 사이드바가 한 창에 있어요.">
+              </div>
+            </div>
+          </figure>
+        </article>
+
       </div>
+    </div>
+  </section>
+
+  <!-- ─────────── 공문 ─────────── -->
+  <section class="sec" id="gongmun">
+    <div class="wrap">
+      <div class="sec-head">
+        <p class="label">공문</p>
+        <h2 class="h2">열고, 화면에서 채우고, HWPX로만 저장해요</h2>
+      </div>
+
+      <article class="row">
+        <div>
+          <h3 class="h3">공문/품의 서식</h3>
+          <p>파일에서 공문/품의 서식을 열면 칸이 이미 있어요. 에이전트가 열린 페이지에서 채워요. 저장은 HWPX만 되고, HWP는 안 돼요.</p>
+          <p class="fact">지금 받는 v0.1.10 dmg에는 아직 없습니다. 온나라 인증 서식은 아니에요.</p>
+        </div>
+        <div class="specimen row__media">
+          <h4>공문 작업</h4>
+          <ul>
+            <li><span>01</span>파일에서 공문/품의 서식 열기</li>
+            <li><span>02</span>열린 페이지에서 칸 채우기</li>
+            <li><span>03</span>HWPX로만 저장하기</li>
+          </ul>
+        </div>
+      </article>
     </div>
   </section>
 
@@ -560,7 +660,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   </section>
 
   <!-- ─────────── 연결 ─────────── -->
-  <section class="sec" id="pricing">
+  <section class="sec" id="connect">
     <div class="float-icons" aria-hidden="true">
       <div class="icon-tile icon-tile--claude">
         <img src="assets/icon-claude.png" width="512" height="512" alt="">
@@ -575,11 +675,11 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     <div class="wrap price-grid">
       <div>
         <p class="label">연결</p>
-        <h2 class="h2 h2--big" style="margin-top:12px">원래 쓰던 구독권,<br>그대로</h2>
-        <p>원래 업무에 쓰시던 Codex, Claude 구독권이나 OpenRouter API Key를 설정에서 연결하면 준비가 끝나요. 프로그램은 평생 무료예요.</p>
+        <h2 class="h2 h2--big" style="margin-top:12px">쓰던 계정을<br>연결하면 끝</h2>
+        <p>Codex, Claude 계정이나 OpenRouter API Key를 설정에서 연결하면 준비가 끝나요.</p>
         <ul class="conn">
-          <li><b>Codex</b><em>쓰던 구독권 연결</em></li>
-          <li><b>Claude</b><em>쓰던 구독권 연결</em></li>
+          <li><b>Codex</b><em>쓰던 계정 연결</em></li>
+          <li><b>Claude</b><em>쓰던 계정 연결</em></li>
           <li><b>OpenRouter</b><em>API Key 직접 연결</em></li>
         </ul>
       </div>
@@ -600,34 +700,33 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   <section class="sec rule-top dl" id="download">
     <div class="wrap">
       <p class="label">다운로드</p>
-      <h2 class="h2" style="margin-top:12px">문서작업은 이제 한곳에서 해결하세요</h2>
+      <h2 class="h2">문서작업은 이제 한곳에서 해결하세요</h2>
       <div class="cta">
-        <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-arm64.dmg">macOS용 다운로드</a>
+        <a class="btn btn--fill" href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-arm64.dmg">macOS용 다운로드</a>
         <a class="btn btn--line" href="https://github.com/ghandhitechnology/Rauhwpx">Star on GitHub<span class="gh-stars"></span></a>
       </div>
-      <p class="cta-meta">
-        <span>Apple Silicon · v0.1.6 · .dmg</span>
-        <span class="dot">·</span>
-        <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.6/Rauhwpx-0.1.6-x64.exe">Windows (x64)</a>
-      </p>
+      <p class="cta-tip"><a href="donate.html">토큰 기부하기</a></p>
     </div>
   </section>
 
-</main>
-
 <footer class="foot">
   <div class="wrap">
-    <a class="brand" href="#top">귀찮이글</a>
+    <a class="brand" href="#top">Rauhwpx</a>
     <nav>
       <a href="#features">기능</a>
+      <a href="#gongmun">공문</a>
       <a href="#flow">작업 흐름</a>
-      <a href="#pricing">연결</a>
+      <a href="#connect">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub</a>
+      <a href="https://github.com/ghandhitechnology/Rauhwpx/issues/new">이슈</a>
+      <a href="donate.html">토큰 기부하기</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx/releases">릴리스</a>
     </nav>
-    <small>v0.1.6 · ghandhitechnology / Rauhwpx</small>
+    <p class="colophon">v0.1.10 개발자 빌드. 출시가 아닙니다. <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a> 포크. MIT. 한컴이 아니며 문서를 호스팅하지 않습니다. macOS 빌드는 서명되어 있습니다. Windows는 미서명이고 제한적입니다. <a href="https://github.com/ghandhitechnology/Rauhwpx/releases/download/v0.1.10/Rauhwpx-0.1.10-x64.exe">Windows</a> · <a href="https://github.com/ghandhitechnology/Rauhwpx/issues/new">이슈</a></p>
   </div>
 </footer>
+
+</main>
 
 <script>
 (function(){
