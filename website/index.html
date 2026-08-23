@@ -4,16 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Rauhwpx</title>
-<meta name="description" content="한글 파일 편집이랑 에이전트와의 대화, 한 화면에서 융합. macOS용 Rauhwpx.">
+<meta name="description" content="Rauhwpx는 한글 문서 편집과 AI 에이전트 작업을 한 화면에서 제공하는 macOS·Windows 데스크톱 앱입니다.">
+<meta name="theme-color" content="#4f73e8">
 <meta property="og:title" content="Rauhwpx">
-<meta property="og:description" content="한글 파일 편집이랑 에이전트와의 대화, 한 화면에서 융합.">
+<meta property="og:description" content="한글 문서 편집과 AI 에이전트 작업을 한 화면에서.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://heemangstudios.com/">
+<meta property="og:site_name" content="Rauhwpx">
 <meta property="og:image" content="https://heemangstudios.com/assets/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Rauhwpx 한 화면. 왼쪽은 별지 제2호 기안문, 오른쪽은 에이전트 사이드바.">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Rauhwpx">
+<meta name="twitter:description" content="한글 문서 편집과 AI 에이전트 작업을 한 화면에서.">
 <meta name="twitter:image" content="https://heemangstudios.com/assets/og.png">
+<link rel="icon" type="image/png" href="assets/rauhwpx-logo.png">
+<link rel="apple-touch-icon" href="assets/rauhwpx-logo.png">
 <link rel="canonical" href="https://heemangstudios.com/">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -194,6 +201,8 @@ a{color:var(--ink)}
 }
 /* 크롭 좌표 — 원본 1800×1197 기준 */
 .c-app{--cx:70;--cy:42;--cw:1663;--ch:1066}   /* 앱 창 전체 */
+.c-hero{--cx:0;--cy:0;--cw:3104;--ch:2064} /* Andy native 기안문+에이전트 */
+.c-hero.shot img{width:100%;height:auto;max-width:100%;margin:0}
 .c-cmd{--cx:540;--cy:845;--cw:1035;--ch:262}  /* /plan 자동완성 + 입력줄 */
 .c-msg{--cx:575;--cy:110;--cw:1000;--ch:216}  /* 사용자 메시지 영역 */
 .c-side{--cx:1104;--cy:42;--cw:628;--ch:1066} /* 설정 사이드바만 */
@@ -241,11 +250,11 @@ a{color:var(--ink)}
 .hero-logo-badge{
   position:absolute;z-index:3;
   width:clamp(72px,8.5vw,108px);aspect-ratio:1;
-  right:3%;bottom:8%;
+  left:5%;bottom:16%;
   padding:4px;border-radius:27%;
   background:rgba(255,255,255,.72);
   box-shadow:0 16px 34px rgba(20,18,15,.19),0 3px 7px rgba(20,18,15,.10);
-  transform:rotate(7deg);
+  transform:rotate(-6deg);
 }
 .hero-logo-badge img{
   display:block;width:100%;height:auto;border-radius:25%;
@@ -265,6 +274,7 @@ a{color:var(--ink)}
 .row__num{font:500 14px/1 var(--mono);letter-spacing:.14em;color:var(--ink-3);margin-bottom:10px}
 .row h3{margin-bottom:12px}
 .row p{color:var(--ink-2)}
+.row .fact{margin-top:.35em;font-size:15px;line-height:1.65;color:var(--ink-3)}
 
 /* 템플릿 명세 목록 */
 .specimen{border:1.5px solid var(--ink);background:var(--patch);--sx:7px;--sy:8px;box-shadow:var(--sx) var(--sy) 0 rgba(20,18,15,.09)}
@@ -384,6 +394,7 @@ html.js main>.sheet:nth-child(2){z-index:2}
 html.js main>.sheet:nth-child(3){z-index:3}
 html.js main>.sheet:nth-child(4){z-index:4}
 html.js main>.sheet:nth-child(5){z-index:5}
+html.js main>.sheet:nth-child(6){z-index:6}
 
 /* 올라오는 종이의 접힌 가장자리 — 얇은 선 + 위로 떨어지는 그림자 */
 html.js .sheet+.sheet{
@@ -407,7 +418,7 @@ html.js #connect.stack{position:sticky;top:var(--stick-top)}
 html.js .dl.stack{top:60px}
 
 html.js .foot{
-  position:relative;z-index:6;
+  position:relative;z-index:7;
   background-color:var(--paper);
   background-image:var(--grain);
   background-size:180px 180px;
@@ -492,7 +503,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   .hero-actions{grid-template-columns:minmax(0,1fr);width:100%}
   .hero-actions .btn{width:100%}
   .hero-actions__tip--right{justify-self:start}
-  .hero-logo-badge{width:74px;right:3%;bottom:10%;padding:3px}
+  .hero-logo-badge{width:74px;left:4%;bottom:18%;padding:3px}
   .foot nav{margin-left:0;width:100%}
 }
 @media (prefers-reduced-motion:reduce){
@@ -513,6 +524,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     <a class="brand" href="#top">Rauhwpx</a>
     <nav class="nav">
       <a href="#features">기능</a>
+      <a href="#gongmun">공문</a>
       <a href="#flow">작업 흐름</a>
       <a href="#connect">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub<span class="gh-stars"></span></a>
@@ -540,8 +552,8 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
       <figure class="figure hero-figure">
         <div class="frame tilt-a">
           <span class="tape tape--tr" aria-hidden="true"></span>
-          <div class="shot c-app">
-            <img src="assets/editor-hero.png" width="1800" height="1197" alt="Rauhwpx 화면. 왼쪽에 수업표가 있는 한글 문서, 오른쪽에 에이전트가 표 정렬을 고치고 있어요.">
+          <div class="shot c-hero">
+            <img src="assets/editor-pumui.png" width="3104" height="2064" alt="Rauhwpx 한 화면. 왼쪽은 별지 제2호 기안문, 오른쪽은 에이전트 사이드바.">
           </div>
         </div>
         <div class="hero-logo-badge" aria-hidden="true">
@@ -549,7 +561,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
         </div>
         <figcaption class="note">
           <svg class="arw" viewBox="0 0 40 26" aria-hidden="true"><path d="M37 23C31 11 22 4.6 7 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M7 3l7.4 1.8M7 3l2 6.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          <span>문서랑 에이전트가 같은 창에 있어요</span>
+          <span>기안문이랑 에이전트가 같은 창에 있어요</span>
         </figcaption>
       </figure>
     </div>
@@ -618,7 +630,49 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
           </div>
         </article>
 
+        <!-- 4 -->
+        <article class="row">
+          <div>
+            <p class="row__num">04</p>
+            <h3 class="h3">표가 안 깨져요</h3>
+            <p>쪽 위에서 표를 바로 고치면 돼요. 안에 든 표도 그대로 남고, 품의나 공문처럼 칸이 많은 표도 깨지지 않아요.</p>
+          </div>
+          <figure class="figure row__media">
+            <div class="frame">
+              <div class="shot c-app">
+                <img loading="lazy" src="assets/editor-hero.png" width="1800" height="1197" alt="Rauhwpx 화면. 한글 문서와 에이전트 사이드바가 한 창에 있어요.">
+              </div>
+            </div>
+          </figure>
+        </article>
+
       </div>
+    </div>
+  </section>
+
+  <!-- ─────────── 공문 ─────────── -->
+  <section class="sec sheet stack" id="gongmun">
+    <div class="wrap">
+      <div class="sec-head">
+        <p class="label">공문</p>
+        <h2 class="h2">열고, 화면에서 채우고, HWPX로만 저장해요</h2>
+      </div>
+
+      <article class="row">
+        <div>
+          <h3 class="h3">공문/품의 서식</h3>
+          <p>파일에서 공문/품의 서식을 열면 칸이 이미 있어요. 에이전트가 열린 페이지에서 채워요. 저장은 HWPX만 되고, HWP는 안 돼요.</p>
+          <p class="fact">지금 받는 v0.1.10 dmg에는 아직 없습니다. 온나라 인증 서식은 아니에요.</p>
+        </div>
+        <div class="specimen row__media">
+          <h4>공문 작업</h4>
+          <ul>
+            <li><span>01</span>파일에서 공문/품의 서식 열기</li>
+            <li><span>02</span>열린 페이지에서 칸 채우기</li>
+            <li><span>03</span>HWPX로만 저장하기</li>
+          </ul>
+        </div>
+      </article>
     </div>
   </section>
 
@@ -740,6 +794,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     <a class="brand" href="#top">Rauhwpx</a>
     <nav>
       <a href="#features">기능</a>
+      <a href="#gongmun">공문</a>
       <a href="#flow">작업 흐름</a>
       <a href="#connect">연결</a>
       <a href="https://github.com/ghandhitechnology/Rauhwpx">GitHub</a>
