@@ -51,6 +51,13 @@ export async function replaceFileAtomically(tempPath, targetPath, { platform = p
   if (moved) await retryLockedOperation(() => fs.rm(previousPath, { force: true }), { platform });
 }
 
+/** registry 가 준 version 문자열이 npm 인자로 안전한 semver 인지 확인한다. */
+export function isSafeSemverVersion(value) {
+  return typeof value === 'string'
+    && /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(value)
+    && value.length <= 64;
+}
+
 export async function fetchLatestPackage(fetchImpl, packageName, timeoutMs = 10_000) {
   const encoded = packageName.replace('/', '%2F');
   const response = await fetchImpl(`${REGISTRY_BASE}/${encoded}/latest`, {
@@ -58,11 +65,13 @@ export async function fetchLatestPackage(fetchImpl, packageName, timeoutMs = 10_
   });
   if (!response.ok) throw new Error(`registry HTTP ${response.status}`);
   const metadata = await response.json();
-  if (typeof metadata?.version !== 'string' || !metadata.version) {
-    throw new Error('registry version is missing');
+  // 버전은 npm argv 에 보간된다 — semver 형태가 아니면 설치 플래그 주입으로 이어질 수
+  // 있으니 비정형 메타데이터는 업데이트 실패로 간주한다.
+  if (!isSafeSemverVersion(metadata?.version)) {
+    throw new Error('registry version is missing or malformed');
   }
   return {
-    version: metadata.version,
+    version: metadata.version.replace(/^v/, ''),
     tarball: typeof metadata?.dist?.tarball === 'string' ? metadata.dist.tarball : null,
     integrity: typeof metadata?.dist?.integrity === 'string' ? metadata.dist.integrity : null,
   };

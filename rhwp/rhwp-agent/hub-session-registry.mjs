@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SCOPED_TOKEN_PREFIX = 'rhwp1';
 
-function timingSafeTextEqual(left, right) {
+export function timingSafeTextEqual(left, right) {
   const received = Buffer.from(String(left ?? ''), 'utf8');
   const expected = Buffer.from(String(right ?? ''), 'utf8');
   return received.length === expected.length && crypto.timingSafeEqual(received, expected);

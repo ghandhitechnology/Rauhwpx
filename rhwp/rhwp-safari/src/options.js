@@ -13,7 +13,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
 // ─── 설정 ───
 
-const DEFAULT_DOMAINS = ['.go.kr', '.or.kr', '.ac.kr', '.mil.kr', '.korea.kr', '.sc.kr'];
+const DEFAULT_DOMAINS = ['.go.kr', '.ac.kr', '.mil.kr', '.korea.kr'];
 const TOGGLE_KEYS = [
   'allSitesEnabled',
   'autoOpen',

@@ -1,14 +1,12 @@
 // rhwp 보안 상수 — Chrome/Safari 공통
 'use strict';
 
-/** 기본 허용 도메인 (공공/교육/군사) */
+/** 기본 허용 도메인 (공공/교육/군사). 누구나 등록 가능한 .or.kr·.sc.kr 은 제외한다. */
 const DEFAULT_ALLOWED_DOMAINS = [
   '.go.kr',
-  '.or.kr',
   '.ac.kr',
   '.mil.kr',
   '.korea.kr',
-  '.sc.kr',
 ];
 
 /** HWP 파일 확장자 */

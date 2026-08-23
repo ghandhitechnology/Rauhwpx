@@ -8,7 +8,8 @@ import { extractThumbnailFromUrl } from './thumbnail-extractor.js';
 import {
   fetchDocumentWithPolicy,
   isTrustedExtensionPageSender,
-  isWebPageSender
+  isWebPageSender,
+  validateDocumentFetchUrl
 } from './fetch-security.js';
 
 /**
@@ -32,8 +33,17 @@ export function setupMessageRouter() {
 const messageHandlers = {
   /**
    * Content Script → Service Worker: HWP 파일 열기 요청
+   * 웹 페이지발 요청은 fetch 정책과 동일한 URL 검증을 통과해야 한다.
    */
-  'open-hwp': (message) => {
+  'open-hwp': (message, sender) => {
+    if (!isWebPageSender(sender)) {
+      return { error: 'Unauthorized sender' };
+    }
+    try {
+      validateDocumentFetchUrl(message.url);
+    } catch (err) {
+      return { error: err.message };
+    }
     openViewer({ url: message.url, filename: message.filename });
     return { ok: true };
   },

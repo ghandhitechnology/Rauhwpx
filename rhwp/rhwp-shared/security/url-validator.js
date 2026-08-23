@@ -1,6 +1,11 @@
 // rhwp URL 검증 모듈 — Chrome/Safari 공통
 'use strict';
 
+import {
+  DEFAULT_BLOCKED_HOST_SUFFIXES,
+  isBlockedHost,
+} from '../sw/private-network.js';
+
 /**
  * URL이 안전한 프로토콜인지 검증한다.
  * @param {string} urlString
@@ -27,17 +32,15 @@ function validateProtocol(urlString) {
 }
 
 /**
- * 호스트가 내부 네트워크 IP인지 검사한다.
+ * 호스트가 내부 네트워크 주소인지 검사한다.
+ *
+ * 문자열 prefix 가 아니라 이진값으로 판정한다 — URL 파서는
+ * ::ffff:127.0.0.1 을 [::ffff:7f00:1] 로 축약하므로 prefix 비교로는 못 잡는다.
  * @param {string} hostname
- * @returns {boolean} 내부 IP이면 true
+ * @returns {boolean} 내부 주소이면 true
  */
 function isPrivateHost(hostname) {
-  // PRIVATE_IP_PATTERNS 인라인 (constants.js 의존 제거)
-  const patterns = [
-    /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./,
-    /^169\.254\./, /^0\./, /^\[::1\]/, /^localhost$/i, /\.local$/i,
-  ];
-  return patterns.some(re => re.test(hostname));
+  return isBlockedHost(hostname, { blockedSuffixes: DEFAULT_BLOCKED_HOST_SUFFIXES });
 }
 
 /**
@@ -53,7 +56,7 @@ function hasHwpExtension(parsed) {
 /**
  * 호스트가 허용 도메인 목록에 포함되는지 검사한다.
  * @param {string} hostname
- * @param {string[]} allowedDomains — ['.go.kr', '.or.kr', ...]
+ * @param {string[]} allowedDomains — ['.go.kr', '.ac.kr', ...]
  * @returns {boolean}
  */
 function isAllowedDomain(hostname, allowedDomains) {

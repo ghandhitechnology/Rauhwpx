@@ -18,7 +18,7 @@
     "default_title": "__MSG_actionTitle__"
   },
   "background": {
-    "scripts": ["file-signature.js", "background.js"],
+    "scripts": ["file-signature.js", "private-network.js", "background.js"],
     "persistent": false
   },
   "content_scripts": [
@@ -38,7 +38,7 @@
     "<all_urls>"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' https: data:; connect-src 'self' https: http:;"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' https: data:; connect-src 'self' https: http:;"
   },
   "options_ui": {
     "page": "options.html",

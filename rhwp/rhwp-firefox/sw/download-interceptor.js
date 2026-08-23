@@ -8,6 +8,7 @@
 
 import { openViewer } from './viewer-launcher.js';
 import { shouldInterceptDownload } from './download-interceptor-common.js';
+import { validateDocumentFetchUrl } from './fetch-security.js';
 import {
   DEFAULT_STATE_TTL_MS,
   evaluateDownloadChanged,
@@ -94,10 +95,28 @@ function handleHwpDownload(item) {
     console.warn(`[rhwp] 대용량 파일: ${item.filename} (${(item.fileSize / 1024 / 1024).toFixed(1)}MB)`);
   }
 
+  // 원격 URL은 fetch 정책과 동일한 검증을 통과한 뒤에만 뷰어로 넘긴다.
+  const isLocal = typeof item?.url === 'string' && item.url.startsWith('file:');
+  if (!isLocal) {
+    try {
+      validateDocumentFetchUrl(item.url);
+    } catch (err) {
+      console.warn('[rhwp] 다운로드 URL이 정책을 통과하지 못해 뷰어를 열지 않습니다:', err.message);
+      return;
+    }
+  }
+
   openViewer({
     url: item.url,
-    filename: item.filename,
+    filename: sanitizeDownloadDisplayName(item),
   });
+}
+
+/** 뷰어 전달용 표시 이름 — 로컬 절대경로가 URL/세션 저장소에 남지 않게 basename 만 사용. */
+function sanitizeDownloadDisplayName(item) {
+  const raw = typeof item.filename === 'string' ? item.filename : '';
+  const basename = raw.split(/[\\/]/).pop() || '';
+  return basename || undefined;
 }
 
 function stateKey(id) {

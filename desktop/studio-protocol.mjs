@@ -19,6 +19,21 @@ export function resolveStudioAsset(root, pathname) {
   return candidate === base || candidate.startsWith(`${base}${sep}`) ? candidate : null;
 }
 
+// 데스크톱 Studio 문서에 적용하는 CSP. 확장 빌드(viewer.html)는 manifest CSP 를
+// 따라가므로 여기엔 영향이 없다. hub 는 ws://127.0.0.1:<port> 로 접속한다.
+const STUDIO_CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'wasm-unsafe-eval'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'none'",
+].join('; ');
+
 export function registerStudioScheme(protocol) {
   protocol.registerSchemesAsPrivileged([{
     scheme: STUDIO_SCHEME,
@@ -38,7 +53,7 @@ export function installStudioProtocol({ protocol, net, root }) {
     throw new Error(`Studio build is missing (${root}). Run npm run build:studio first.`);
   }
 
-  protocol.handle(STUDIO_SCHEME, (request) => {
+  protocol.handle(STUDIO_SCHEME, async (request) => {
     const url = new URL(request.url);
     if (url.host !== STUDIO_HOST || request.method !== 'GET') {
       return new Response('Not found', { status: 404 });
@@ -49,6 +64,10 @@ export function installStudioProtocol({ protocol, net, root }) {
       ? requested
       : (extname(requested) ? null : indexPath);
     if (!file) return new Response('Not found', { status: 404 });
-    return net.fetch(pathToFileURL(file).toString());
+    const response = await net.fetch(pathToFileURL(file).toString());
+    const headers = new Headers(response.headers);
+    headers.set('content-security-policy', STUDIO_CSP);
+    headers.set('x-content-type-options', 'nosniff');
+    return new Response(response.body, { status: response.status, headers });
   });
 }

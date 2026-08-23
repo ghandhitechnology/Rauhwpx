@@ -8,6 +8,7 @@ import {
 import type { DocumentInfo } from '@/core/types';
 import { EventBus } from '@/core/event-bus';
 import { assertRemoteDocumentBytes } from '@/core/document-signature';
+import { RemoteDocumentUrlError, validateRemoteDocumentUrl } from '@/core/remote-document-url';
 import { CanvasView } from '@/view/canvas-view';
 import { InputHandler } from '@/engine/input-handler';
 import { Toolbar } from '@/ui/toolbar';
@@ -1580,6 +1581,21 @@ async function loadFromUrlParam(): Promise<void> {
     msg.textContent = '파일 로딩 중...';
     console.log(`[loadFromUrlParam] ${fileUrl}`);
 
+    // file:// 은 확장 권한을 먼저 확인한다. 공개 URL 정책은 HTTP(S) 직접 fetch와
+    // SW 프록시 우회 방지에만 적용한다.
+    if (fileUrl.startsWith('file:')) {
+      if (typeof chrome === 'undefined') {
+        throw new RemoteDocumentUrlError('scheme-blocked', 'file: URL은 확장 프로그램에서만 열 수 있습니다.');
+      }
+      const allowed = await isFileSchemeAccessAllowed();
+      if (allowed === false) {
+        showFileUrlAccessGuidance();
+        return;
+      }
+    } else {
+      validateRemoteDocumentUrl(fileUrl);
+    }
+
     let response: Response;
 
     // Chrome 확장 환경: Service Worker를 통한 CORS 우회 fetch
@@ -1607,12 +1623,18 @@ async function loadFromUrlParam(): Promise<void> {
     await loadBytes(data, fileName, null);
   } catch (error) {
     if (error instanceof DocumentOwnedElsewhereError) return;
-    // 로컬 file:// 로드 실패 + "파일 URL 액세스 허용" 미허용 → 전용 안내 (#1131)
-    if (fileUrl.startsWith('file:') && typeof chrome !== 'undefined') {
-      const allowed = await isFileSchemeAccessAllowed();
-      if (allowed === false) {
-        showFileUrlAccessGuidance();
-        return;
+    if (
+      error instanceof RemoteDocumentUrlError
+      && error.reason === 'scheme-blocked'
+      && fileUrl.startsWith('file:')
+    ) {
+      // file:// 은 별도 안내 흐름(#1131)을 유지한다 — 공개 URL 정책과 무관.
+      if (typeof chrome !== 'undefined') {
+        const allowed = await isFileSchemeAccessAllowed();
+        if (allowed === false) {
+          showFileUrlAccessGuidance();
+          return;
+        }
       }
     }
     showLoadError(error);
