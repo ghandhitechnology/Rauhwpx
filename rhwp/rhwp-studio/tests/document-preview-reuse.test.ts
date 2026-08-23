@@ -24,4 +24,3 @@ test('shared pane wires resolver panels to their controlling tabs', () => {
   assert.match(paneSource, /setAttribute\('aria-labelledby', labelledBy\)/);
   assert.match(paneSource, /this\.element\.tabIndex = 0/);
 });
-

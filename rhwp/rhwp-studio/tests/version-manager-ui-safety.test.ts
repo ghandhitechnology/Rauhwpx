@@ -12,6 +12,8 @@ const css = readSource('../src/ui/agent-sidebar/versions.css');
 
 test('버전 이름 입력은 브라우저 프롬프트 대신 앱 내 대화상자를 사용한다', () => {
   assert.match(source, /function requestVersionText\(/);
+  assert.match(source, /const returnFocus = document\.activeElement instanceof HTMLElement/);
+  assert.match(source, /returnFocus\?\.focus\(\)/);
   assert.match(source, /dialog\.setAttribute\('role', 'dialog'\)/);
   assert.doesNotMatch(source, /window\.prompt\(/);
   assert.match(source, /if \(title !== null\) await perform\(\(\) => controller\.createShelf\(title \|\| undefined\)\)/);

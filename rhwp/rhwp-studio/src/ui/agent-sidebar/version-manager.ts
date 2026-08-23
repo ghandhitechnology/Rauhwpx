@@ -134,6 +134,7 @@ let textPromptSequence = 0;
 
 function requestVersionText(options: VersionTextPromptOptions): Promise<string | null> {
   return new Promise((resolve) => {
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const promptId = `ag-version-text-prompt-${++textPromptSequence}`;
     const overlay = el('div', 'ag-version-prompt-overlay');
     const dialog = el('form', 'ag-version-prompt');
@@ -170,6 +171,7 @@ function requestVersionText(options: VersionTextPromptOptions): Promise<string |
       if (settled) return;
       settled = true;
       overlay.remove();
+      returnFocus?.focus();
       resolve(value);
     };
     const submit = (): void => {

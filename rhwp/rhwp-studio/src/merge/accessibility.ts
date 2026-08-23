@@ -41,4 +41,3 @@ export function wrappedFocusIndex(
   if (!backwards && currentIndex === itemCount - 1) return 0;
   return null;
 }
-

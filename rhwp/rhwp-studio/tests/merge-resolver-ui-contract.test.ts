@@ -45,4 +45,6 @@ test('narrow layouts switch from the grid to preview tabs', () => {
   assert.match(css, /@media \(max-width: 1180px\)/);
   assert.match(css, /\.merge-preview-pane\.is-active/);
   assert.match(css, /grid-template: repeat\(2, minmax\(0, 1fr\)\) \/ repeat\(2/);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.merge-resolver-body\s*\{[\s\S]*?overflow:\s*hidden;/);
+  assert.doesNotMatch(css, /(?:^|\n)button:disabled\s*\{/);
 });

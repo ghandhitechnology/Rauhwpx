@@ -42,4 +42,3 @@ export class MergeCompletionCoordinator {
     this._application = null;
   }
 }
-

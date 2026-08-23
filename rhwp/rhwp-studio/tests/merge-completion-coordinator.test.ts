@@ -39,4 +39,3 @@ test('failed source finalization retains receipt and retry never reapplies', asy
   assert.equal(completed.sourceDisposition, 'keep');
   assert.equal(coordinator.hasPending, false);
 });
-

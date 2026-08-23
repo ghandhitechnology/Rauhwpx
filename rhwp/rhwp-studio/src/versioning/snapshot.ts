@@ -35,19 +35,24 @@ function currentSaveFormat(wasm: WasmBridge): 'hml' | 'hwp' | 'hwpx' {
 }
 
 export function captureVersionSnapshot(wasm: WasmBridge): CapturedVersionSnapshot {
-  const canonicalBytes = wasm.exportHwp();
-  const fingerprint = fingerprintBytes(canonicalBytes);
   const compareSnapshot = buildSnapshotFromWasm(wasm, wasm.fileName, VERSION_COMPARE_OPTIONS);
-  const format = currentSaveFormat(wasm);
-  let bytes: Uint8Array;
-  try {
-    // `canonicalBytes` is already the HWP export used for fingerprinting.
-    // Reuse it instead of serializing large HWP documents twice per checkpoint.
-    bytes = format === 'hwp' ? canonicalBytes : exportDocumentForFormat(wasm, format);
-  } catch {
-    bytes = canonicalBytes;
-  }
+  const bytes = exportVersionContent(wasm);
+  const fingerprint = fingerprintBytes(bytes);
   return { bytes, fingerprint, compareSnapshot };
+}
+
+/** Export the same format-preserving payload used by checkpoints and dirty checks. */
+export function exportVersionContent(wasm: WasmBridge): Uint8Array {
+  const format = currentSaveFormat(wasm);
+  try {
+    return exportDocumentForFormat(wasm, format);
+  } catch {
+    return wasm.exportHwp();
+  }
+}
+
+export function fingerprintVersionContent(wasm: WasmBridge): ContentFingerprint {
+  return fingerprintBytes(exportVersionContent(wasm));
 }
 
 export function analyzeVersionDiff(

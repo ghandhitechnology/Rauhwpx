@@ -49,7 +49,7 @@ import {
   type VersionBlob,
   type MergeResolution,
 } from './index.ts';
-import { fingerprintBytes, hashBytes } from './hash.ts';
+import { hashBytes } from './hash.ts';
 import {
   commitCompositeMerge,
   reconcileCompositeEditor,
@@ -61,6 +61,7 @@ import {
   VERSION_COMPARE_OPTIONS,
   analyzeVersionDiff,
   captureVersionSnapshot,
+  fingerprintVersionContent,
   type CapturedVersionSnapshot,
 } from './snapshot.ts';
 
@@ -1444,7 +1445,7 @@ export class DocumentVersionController implements VersionManagerController {
               undoAppliedMerge: () => handler.performUndo(true),
               discardMergeRedo: () => handler.discardRedoHistory(),
               matchesExpectedDocument: () => (
-                fingerprintBytes(this.#wasm.exportHwp()) === original.fingerprint
+                fingerprintVersionContent(this.#wasm) === original.fingerprint
               ),
               replaceWithExpectedDocument: () => { handler.replaceContentFromBytes(original.bytes); },
               discardFallbackUndo: () => handler.discardLatestUndoHistory(),
@@ -1556,7 +1557,7 @@ export class DocumentVersionController implements VersionManagerController {
                 else handler.performUndo(true);
               },
               matchesExpectedDocument: () => (
-                fingerprintBytes(this.#wasm.exportHwp()) === expected.fingerprint
+                fingerprintVersionContent(this.#wasm) === expected.fingerprint
               ),
               replaceWithExpectedDocument: () => { handler.replaceContentFromBytes(expected.bytes); },
               discardFallbackUndo: () => handler.discardLatestUndoHistory(),
@@ -1938,7 +1939,7 @@ export class DocumentVersionController implements VersionManagerController {
       || this.#getDocumentId() !== expectedDocumentId
       || this.#editorRevision !== revision
     ) return;
-    const currentFingerprint = fingerprintBytes(this.#wasm.exportHwp());
+    const currentFingerprint = fingerprintVersionContent(this.#wasm);
     if (
       epoch !== this.#refreshEpoch
       || this.#getDocumentId() !== expectedDocumentId

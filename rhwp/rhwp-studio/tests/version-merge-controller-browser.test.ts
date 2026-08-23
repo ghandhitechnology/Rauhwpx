@@ -563,6 +563,80 @@ test('diverged clean merge creates ordered parents and Undo/Redo moves bytes wit
   }
 });
 
+test('HWPX branch transitions stay clean and do not create phantom checkpoints', { timeout: 45_000 }, async (context) => {
+  if (!browser) {
+    context.skip('Chrome or Chromium is unavailable');
+    return;
+  }
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/tests/fixtures/version-store-idb.html`);
+    const result = await page.evaluate(async () => {
+      const [{ WasmBridge }, { EventBus }, { DocumentDirtyState }, versioning, controllerModule] = await Promise.all([
+        import('/src/core/wasm-bridge.ts'),
+        import('/src/core/event-bus.ts'),
+        import('/src/core/document-dirty-state.ts'),
+        import('/src/versioning/index.ts'),
+        import('/src/versioning/controller.ts'),
+      ]);
+      const response = await fetch('/samples/task1763/cell_trailing_ls_expand.hwpx');
+      const fileName = 'cell_trailing_ls_expand.hwpx';
+      const wasm = new WasmBridge();
+      await wasm.initialize();
+      wasm.loadDocument(new Uint8Array(await response.arrayBuffer()), fileName);
+      const eventBus = new EventBus();
+      const dirty = new DocumentDirtyState(eventBus);
+      const store = new versioning.VersionGraphStore({ indexedDB: null });
+      let readOnly = false;
+      const inputHandler = {
+        prepareSnapshotCapacity: () => undefined,
+        replaceContentFromBytes: (bytes: Uint8Array) => wasm.loadDocument(bytes, fileName),
+        isReadOnly: () => readOnly,
+        setReadOnly: (next: boolean) => { readOnly = next; },
+      };
+      const pendingEdits = { hasPending: () => false, onChange: () => () => undefined };
+      const controller = new controllerModule.DocumentVersionController({
+        store,
+        wasm,
+        eventBus,
+        documentState: dirty,
+        getInputHandler: () => inputHandler,
+        getDocumentId: () => 'browser-hwpx-clean-branches',
+        agentBridge: {
+          pendingEdits,
+          onEvent: () => () => undefined,
+          isTurnRunning: () => false,
+          getPermissionProfile: () => 'safe',
+          getActiveAgent: () => null,
+          requestCheckpointTitle: async () => null,
+        },
+      });
+      await controller.enable();
+      const enabled = controller.getState();
+      await controller.createBranch('experiment');
+      const created = controller.getState();
+      await controller.switchBranch('main');
+      const switched = controller.getState();
+      const repository = await store.findRepositoryByDocumentId(versioning.documentId('browser-hwpx-clean-branches'));
+      const commits = await store.listCommits(repository.id);
+      controller.dispose();
+      wasm.releaseDocument();
+      return {
+        enabled: { dirty: enabled.dirty, commits: enabled.commits.length },
+        created: { dirty: created.dirty, commits: created.commits.length, branch: created.activeBranch },
+        switched: { dirty: switched.dirty, commits: switched.commits.length, branch: switched.activeBranch },
+        reasons: commits.map((commit: { reason: string }) => commit.reason),
+      };
+    });
+    assert.deepEqual(result.enabled, { dirty: false, commits: 1 });
+    assert.deepEqual(result.created, { dirty: false, commits: 1, branch: 'experiment' });
+    assert.deepEqual(result.switched, { dirty: false, commits: 1, branch: 'main' });
+    assert.deepEqual(result.reasons, ['initial']);
+  } finally {
+    await page.close();
+  }
+});
+
 test('HWPX controller durably completes clean and conflicted merges with composite Undo/Redo', { timeout: 120_000 }, async (context) => {
   if (!browser) {
     context.skip('Chrome or Chromium is unavailable');
@@ -980,6 +1054,41 @@ test('real resolver completes clean and conflicted HWP/HWPX worker merges', { ti
         }, { format, conflicted });
 
         await page.waitForSelector('.merge-resolver-window');
+        if (format === 'hwp' && conflicted) {
+          await page.setViewport({ width: 420, height: 720 });
+          const geometry = await page.evaluate(() => {
+            const root = document.querySelector<HTMLElement>('.merge-resolver-window')!;
+            const body = document.querySelector<HTMLElement>('.merge-resolver-body')!;
+            const editor = document.querySelector<HTMLElement>('.merge-conflict-editor')!;
+            const footer = document.querySelector<HTMLElement>('.merge-resolver-footer')!;
+            const bodyRect = body.getBoundingClientRect();
+            const editorRect = editor.getBoundingClientRect();
+            const footerRect = footer.getBoundingClientRect();
+            const actionsFit = [...footer.querySelectorAll<HTMLButtonElement>('button')].every((button) => {
+              const rect = button.getBoundingClientRect();
+              return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
+            });
+            return {
+              rootFits: root.scrollWidth <= root.clientWidth,
+              bodyFits: body.scrollHeight <= body.clientHeight + 1,
+              bodyOverflow: getComputedStyle(body).overflow,
+              editorInsideBody: editorRect.bottom <= bodyRect.bottom + 1,
+              footerAfterBody: bodyRect.bottom <= footerRect.top + 1,
+              footerFits: footer.scrollWidth <= footer.clientWidth,
+              actionsFit,
+            };
+          });
+          assert.deepEqual(geometry, {
+            rootFits: true,
+            bodyFits: true,
+            bodyOverflow: 'hidden',
+            editorInsideBody: true,
+            footerAfterBody: true,
+            footerFits: true,
+            actionsFit: true,
+          });
+          await page.setViewport({ width: 1280, height: 800 });
+        }
         if (conflicted) {
           assert.ok(setup.conflictCount > 0, `${format} fixture must produce a typed conflict`);
           assert.equal(

@@ -131,7 +131,7 @@ test('active branch refresh keeps the in-memory ref when storage is unavailable'
 
 test('sidebar dirty state is cached against HEAD and full repository usage is reported', () => {
   const semantic = method('async #refreshSemanticDirty(', '#isSemanticDirty(');
-  assert.match(semantic, /fingerprintBytes\(this\.#wasm\.exportHwp\(\)\)/);
+  assert.match(semantic, /fingerprintVersionContent\(this\.#wasm\)/);
   assert.match(semantic, /currentFingerprint !== head\.contentFingerprint/);
 
   const build = method('async #buildState(', '#syncTransientState(');

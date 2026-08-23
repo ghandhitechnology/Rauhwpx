@@ -39,4 +39,3 @@ test('focus trap only wraps at the nested dialog boundaries', () => {
   assert.equal(wrappedFocusIndex(1, 3, false), null);
   assert.equal(wrappedFocusIndex(-1, 3, false), null);
 });
-
