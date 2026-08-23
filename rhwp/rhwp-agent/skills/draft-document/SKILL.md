@@ -4,8 +4,6 @@ description: Draft structured Korean office-document content in the open HWP/HWP
 icon: pencil
 ---
 
-If the open document is a Rauhwpx 공문/품의 서식, use `fill-official-form` and write the live fields. Do not rebuild the page.
-
 Establish the document purpose, audience, required facts, tone, and approximate length from the request and existing document.
 
 1. Do not fabricate factual claims, approvals, dates, people, amounts, or institutional policy.

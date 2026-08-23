@@ -1,10 +1,5 @@
 import { WasmBridge } from '@/core/wasm-bridge';
 import { FALLBACK_DOCUMENT_FILE_NAME } from '@/core/document-names';
-import {
-  formPackIdFromHwpxBytes,
-  getActiveFormPack,
-  setActiveFormPack,
-} from '@/core/form-pack';
 import type { DocumentInfo } from '@/core/types';
 import { EventBus } from '@/core/event-bus';
 import { assertRemoteDocumentBytes } from '@/core/document-signature';
@@ -218,7 +213,6 @@ function getContext(): EditorContext {
     showParagraphMarks: wasm.getShowParagraphMarks(),
     isDirty: documentState.isDirty(),
     sourceFormat: hasDoc ? (wasm.getSourceFormat() as 'hwp' | 'hwpx' | 'hml') : undefined,
-    formPackId: hasDoc ? getActiveFormPack() : null,
   };
 }
 
@@ -720,11 +714,9 @@ function setupFileInput(): void {
   const fileInput = document.getElementById('file-input') as HTMLInputElement;
   const openAction = document.getElementById('document-open-action') as HTMLButtonElement | null;
   const newAction = document.getElementById('document-new-action') as HTMLButtonElement | null;
-  const formPackAction = document.getElementById('document-form-pack-action') as HTMLButtonElement | null;
 
   openAction?.addEventListener('click', () => dispatcher.dispatch('file:open'));
   newAction?.addEventListener('click', () => dispatcher.dispatch('file:new-doc'));
-  formPackAction?.addEventListener('click', () => dispatcher.dispatch('file:open-form-pack', { formId: 'pumui' }));
 
   fileInput.addEventListener('change', async (e) => {
     const input = e.target as HTMLInputElement;
@@ -1487,7 +1479,6 @@ async function createNewDocument(): Promise<void> {
   if (reservationId === null) throw new DocumentOwnedElsewhereError();
   try {
     msg.textContent = '새 문서 생성 중...';
-    setActiveFormPack(null);
     const docInfo = wasm.createNewDocument();
     await commitDesktopDocument(reservationId);
     activeDocumentId = identity.documentId;
@@ -1524,7 +1515,6 @@ async function openDocumentBytes(data: OpenDocumentBytesEvent) {
     await loadBytes(data.bytes, data.fileName, data.fileHandle, performance.now(), {
       grant: data.grant,
     });
-    setActiveFormPack(formPackIdFromHwpxBytes(data.bytes));
     return true;
   } catch (error) {
     await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});

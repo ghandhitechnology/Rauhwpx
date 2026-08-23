@@ -9,7 +9,6 @@ pub mod doclang;
 pub mod document_core;
 pub mod emf;
 pub mod error;
-pub mod form_pack;
 pub mod model;
 pub mod ole_chart;
 pub mod ooxml_chart;
