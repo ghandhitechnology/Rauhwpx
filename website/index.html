@@ -52,7 +52,7 @@
   --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
   --pen:'Nanum Pen Script',cursive;
 
-  --wrap:1040px;
+  --wrap:1220px;
   --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='0.05'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
@@ -67,7 +67,7 @@ body{
   background-image:var(--grain);
   background-size:180px 180px;
   color:var(--ink);
-  font:400 17px/1.78 var(--sans);
+  font:400 18px/1.7 var(--sans);
   letter-spacing:-.004em;
   -webkit-font-smoothing:antialiased;
 }
@@ -81,7 +81,7 @@ img{max-width:100%;display:block}
 a{color:var(--ink)}
 
 .wrap{max-width:var(--wrap);margin:0 auto;padding:0 24px}
-.sec{padding:clamp(64px,7.4vw,88px) 0}
+.sec{padding:clamp(52px,5.4vw,68px) 0}
 .rule-top{border-top:1px solid var(--rule)}
 
 /* ── 타입 유틸 ─────────────────────────────── */
@@ -90,11 +90,11 @@ a{color:var(--ink)}
   letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);
 }
 .label--dark{color:var(--dark-mute)}
-.lead{font-size:19px;line-height:1.72;color:var(--ink-2)}
+.lead{font-size:21px;line-height:1.62;color:var(--ink-2)}
 .nb{display:inline-block}
-.h2{font-size:clamp(25px,3.1vw,36px);line-height:1.26}
-.h2--big{font-size:clamp(32px,4.4vw,50px);letter-spacing:-.03em}
-.h3{font-size:clamp(20px,2.2vw,23px);line-height:1.32}
+.h2{font-size:clamp(30px,3.6vw,44px);line-height:1.22}
+.h2--big{font-size:clamp(38px,5vw,58px);letter-spacing:-.03em}
+.h3{font-size:clamp(23px,2.5vw,28px);line-height:1.28}
 
 /* 손글씨 — 짧은 여백 메모 전용. 페이지 전체에서 6개. */
 .note{
@@ -234,18 +234,18 @@ a{color:var(--ink)}
 
 /* ── 히어로 ────────────────────────────────── */
 .hero{
-  padding:clamp(68px,8.2vw,104px) 0 clamp(72px,8.6vw,112px);
+  padding:clamp(40px,4.8vw,58px) 0 clamp(44px,5vw,60px);
   background-color:var(--paper-2);
   background-image:var(--grain);
   background-size:180px 180px;
 }
-.hero-grid{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(0,1fr);gap:clamp(40px,5vw,64px);align-items:center}
+.hero-grid{display:grid;grid-template-columns:minmax(0,.92fr) minmax(0,1.18fr);gap:clamp(28px,3.4vw,42px);align-items:center}
 .hero h1{
-  font-size:clamp(34px,5.1vw,56px);
-  line-height:1.18;font-weight:700;letter-spacing:-.034em;
-  margin:0 0 18px;
+  font-size:clamp(36px,5.2vw,58px);
+  line-height:1.16;font-weight:700;letter-spacing:-.032em;
+  margin:0 0 16px;
 }
-.hero .lead{max-width:28ch;margin-bottom:0}
+.hero .lead{max-width:36ch;margin-bottom:0}
 .hero-figure{position:relative}
 .hero-logo-badge{
   position:absolute;z-index:3;
@@ -261,16 +261,16 @@ a{color:var(--ink)}
 }
 
 /* ── 섹션 헤더 ─────────────────────────────── */
-.sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:clamp(28px,3.4vw,40px);flex-wrap:wrap}
+.sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:clamp(22px,2.6vw,32px);flex-wrap:wrap}
 .sec-head .h2{flex:1 1 auto;min-width:0}
 
 /* ── 기능 행 ───────────────────────────────── */
-.rows{display:flex;flex-direction:column;gap:clamp(44px,5vw,62px)}
-.row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.06fr);gap:clamp(28px,4vw,52px);align-items:center}
+.rows{display:flex;flex-direction:column;gap:clamp(36px,4vw,48px)}
+.row{display:grid;grid-template-columns:minmax(0,.88fr) minmax(0,1.22fr);gap:clamp(24px,3.2vw,40px);align-items:center}
 .row--flip .row__media{order:-1}
 .row--wide{grid-template-columns:minmax(0,1fr);gap:0}
-.row--wide .row__text{max-width:60ch}
-.row--wide .row__media{margin-top:26px}
+.row--wide .row__text{max-width:62ch}
+.row--wide .row__media{margin-top:18px}
 .row__num{font:500 14px/1 var(--mono);letter-spacing:.14em;color:var(--ink-3);margin-bottom:10px}
 .row h3{margin-bottom:12px}
 .row p{color:var(--ink-2)}
@@ -287,22 +287,22 @@ a{color:var(--ink)}
 .ink{background:var(--dark);color:var(--dark-text)}
 .ink h2,.ink h3{color:var(--patch)}
 .ink p{color:var(--dark-mute)}
-.steps{display:flex;flex-direction:column;gap:clamp(40px,4.6vw,56px)}
-.step{display:grid;grid-template-columns:minmax(0,.92fr) minmax(0,1.08fr);gap:clamp(26px,3.8vw,48px);align-items:center}
+.steps{display:flex;flex-direction:column;gap:clamp(32px,3.6vw,44px)}
+.step{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:clamp(22px,3vw,36px);align-items:center}
 .step__n{
   font:700 15px/1 var(--sans);letter-spacing:.16em;
   color:var(--dark-mute);border-top:1px solid var(--dark-rule);
   padding-top:10px;margin-bottom:14px;display:block;
 }
 .step--wide{grid-template-columns:minmax(0,1fr);gap:0}
-.step--wide .step__text{max-width:56ch}
-.step--wide figure{margin-top:24px}
+.step--wide .step__text{max-width:58ch}
+.step--wide figure{margin-top:16px}
 
 /* ── 연결 ──────────────────────────────────── */
 #connect{position:relative;overflow:visible}
 .float-icons{position:absolute;inset:0;pointer-events:none;z-index:1}
-.price-grid{position:relative;z-index:2;display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,300px);gap:clamp(28px,4vw,52px);align-items:center}
-.price-grid .figure{max-width:300px;margin-left:auto}
+.price-grid{position:relative;z-index:2;display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,380px);gap:clamp(24px,3.2vw,40px);align-items:center}
+.price-grid .figure{max-width:380px;margin-left:auto}
 .icon-tile{
   position:absolute;
   width:clamp(104px,11vw,140px);height:clamp(104px,11vw,140px);
@@ -349,12 +349,9 @@ a{color:var(--ink)}
 /* ── 다운로드 ──────────────────────────────── */
 .dl{
   text-align:center;
-  /* 마지막 장은 화면 한 장을 다 차지해요(머리글 60px 제외) */
-  min-height:calc(100vh - 60px);
-  min-height:calc(100svh - 60px);
-  display:flex;align-items:center;justify-content:center;
 }
-.dl .h2{margin:10px 0 28px;font-size:clamp(28px,3.8vw,42px)}
+.dl .h2{margin-bottom:14px}
+.dl p{max-width:46ch;margin:0 auto 26px;color:var(--ink-2)}
 .dl .cta{justify-content:center}
 
 /* ── 푸터 ──────────────────────────────────── */
@@ -376,78 +373,7 @@ a{color:var(--ink)}
 }
 .colophon a{font-size:12px;color:var(--ink-3);text-underline-offset:2px}
 
-/* ── 스크롤 연출 ───────────────────────────────
-   종이 겹치기 + 등장. 전부 <html>에 .js가 붙었을 때만 적용돼요.
-   JS가 죽으면 아래 규칙이 통째로 꺼지고 원래 흐름 그대로 보여요.
-   ─────────────────────────────────────────────── */
-
-/* 각 섹션을 한 장의 종이로. 불투명한 바탕을 스스로 들고 있어야
-   아래 섹션 위로 미끄러져 올라올 때 뒤가 안 비쳐요. */
-html.js .sheet{
-  position:relative;
-  background-color:var(--paper);
-  background-image:var(--grain);
-  background-size:180px 180px;
-}
-html.js main>.sheet:nth-child(1){z-index:1}
-html.js main>.sheet:nth-child(2){z-index:2}
-html.js main>.sheet:nth-child(3){z-index:3}
-html.js main>.sheet:nth-child(4){z-index:4}
-html.js main>.sheet:nth-child(5){z-index:5}
-html.js main>.sheet:nth-child(6){z-index:6}
-
-/* 올라오는 종이의 접힌 가장자리 — 얇은 선 + 위로 떨어지는 그림자 */
-html.js .sheet+.sheet{
-  border-top:1px solid var(--rule-2);
-  box-shadow:0 -22px 46px -18px rgba(20,18,15,.5);
-}
-html.js .hero.sheet{background-color:var(--paper-2)}
-html.js .ink.sheet{
-  background-color:var(--dark);
-  border-top-color:var(--dark-rule);
-  box-shadow:0 -24px 52px -16px rgba(20,18,15,.72);
-}
-
-/* 고정 — --stick-top은 JS가 계산해서 넣어요.
-   화면보다 긴 섹션은 음수 값이 들어가서 "끝까지 읽은 뒤에" 고정돼요.
-   변수가 없으면 top:auto가 되어 sticky가 아무 일도 안 해요. */
-html.js .stack{position:sticky;top:var(--stick-top)}
-/* #connect는 위에서 id로 position을 잡아둬서 여기서 다시 눌러줘요 */
-html.js #connect.stack{position:sticky;top:var(--stick-top)}
-/* 마지막 장은 머리글(60px) 아래에 고정 — 화면을 꽉 채운 뒤에야 푸터가 올라와요 */
-html.js .dl.stack{top:60px}
-
-html.js .foot{
-  position:relative;z-index:7;
-  background-color:var(--paper);
-  background-image:var(--grain);
-  background-size:180px 180px;
-}
-
-/* ── 눌림/들림 ─────────────────────────────────
-   JS가 스크롤마다 넣는 두 값으로 움직여요.
-   --press(0→1): 다음 장이 덮은 만큼, 덮이는 장이 뒤로 물러나며 어두워져요.
-   --lift(1→0): 올라오는 장이 아직 떠 있는 동안 가장자리 그림자가 짙고,
-   자리를 잡으면서 원래 그림자로 풀려요. */
-@media (prefers-reduced-motion:no-preference){
-  html.js .stack{
-    transform-origin:50% calc(50vh - var(--stick-top,0px));
-    transform:scale(calc(1 - .05*var(--press,0)));
-  }
-  html.js .sheet::after{
-    content:"";position:absolute;inset:0;z-index:8;pointer-events:none;
-    background:#0D0B08;
-    opacity:calc(var(--press,0)*.2);
-  }
-  html.js .sheet+.sheet::before,html.js .foot::before{
-    content:"";position:absolute;left:0;right:0;top:-46px;height:46px;
-    pointer-events:none;
-    background:linear-gradient(to bottom,rgba(20,18,15,0),rgba(20,18,15,.5));
-    opacity:calc(var(--lift,0)*.9);
-  }
-}
-
-/* 등장 — 글자 묶음. 끝에서 살짝 넘쳤다가 자리를 잡아요. */
+/* 등장 — 글자 묶음. JS가 없으면 이 숨김이 안 걸려요. */
 html.js .rv{
   opacity:0;transform:translateY(24px);
   transition:opacity .45s ease,transform .6s cubic-bezier(.34,1.55,.55,1);
@@ -509,8 +435,6 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
 @media (prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
   *{transition-duration:.001ms!important;animation-duration:.001ms!important}
-  /* 연출을 끄고 원래 흐름으로 되돌려요 */
-  html.js .stack,html.js #connect.stack{position:relative;top:auto}
   html.js .rv,html.js .rv-fig,html.js .rv-drop,html.js .rv-fig .note{opacity:1;transform:none}
   html.js .rv-fig .frame{transform:rotate(var(--tilt,0deg))}
 }
@@ -536,7 +460,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
 <main id="top">
 
   <!-- ─────────── 히어로 ─────────── -->
-  <section class="hero sheet stack">
+  <section class="hero">
     <div class="wrap hero-grid">
       <div>
         <h1>귀찮은 이를 위한 한글,<br><span class="ul">Rauhwpx<svg viewBox="0 0 200 10" preserveAspectRatio="none" aria-hidden="true"><path d="M2 7.2C33 3.4 66 2.3 100 3.6c31 1.2 63 3.4 98 1.1" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span></h1>
@@ -568,7 +492,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   </section>
 
   <!-- ─────────── 기능 ─────────── -->
-  <section class="sec sheet stack" id="features">
+  <section class="sec" id="features">
     <div class="wrap">
       <div class="sec-head">
         <p class="label">기능</p>
@@ -651,7 +575,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   </section>
 
   <!-- ─────────── 공문 ─────────── -->
-  <section class="sec sheet stack" id="gongmun">
+  <section class="sec" id="gongmun">
     <div class="wrap">
       <div class="sec-head">
         <p class="label">공문</p>
@@ -677,7 +601,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   </section>
 
   <!-- ─────────── 작업 흐름 (잉크 반전) ─────────── -->
-  <section class="sec ink sheet stack" id="flow">
+  <section class="sec ink" id="flow">
     <div class="wrap">
       <div class="sec-head">
         <p class="label label--dark">작업 흐름</p>
@@ -738,7 +662,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   </section>
 
   <!-- ─────────── 연결 ─────────── -->
-  <section class="sec sheet stack" id="connect">
+  <section class="sec" id="connect">
     <div class="float-icons" aria-hidden="true">
       <div class="icon-tile icon-tile--claude">
         <img src="assets/icon-claude.png" width="512" height="512" alt="">
@@ -775,8 +699,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
   </section>
 
   <!-- ─────────── 다운로드 ─────────── -->
-  <!-- 마지막 장이라 고정할 여백이 없어요. 종이 취급만 하고 그대로 흘려보내요. -->
-  <section class="sec rule-top dl sheet stack" id="download">
+  <section class="sec rule-top dl" id="download">
     <div class="wrap">
       <p class="label">다운로드</p>
       <h2 class="h2">문서작업은 이제 한곳에서 해결하세요</h2>
@@ -788,7 +711,6 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
     </div>
   </section>
 
-<!-- 푸터는 main 안에 있어야 다운로드 장이 고정된 채로 그 위를 덮을 수 있어요 -->
 <footer class="foot">
   <div class="wrap">
     <a class="brand" href="#top">Rauhwpx</a>
@@ -809,72 +731,8 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
 </main>
 
 <script>
-/* 스크롤 연출 — 종이 겹치기 고정 위치 계산 + 등장 감지 */
 (function(){
   var q=function(s,c){return Array.prototype.slice.call((c||document).querySelectorAll(s));};
-
-  /* ── 1. 종이 겹치기 ──────────────────────────
-     화면보다 긴 섹션은 top을 음수로 줘서 아래 끝이 화면 바닥에 닿을 때
-     고정되게 해요. 그래야 긴 섹션 내용이 잘리지 않아요. */
-  var stacks=q('main .stack');
-  if(stacks.length){
-    var raf=0;
-    function measure(){
-      raf=0;
-      var vh=window.innerHeight;
-      for(var i=0;i<stacks.length;i++){
-        var h=stacks[i].offsetHeight;
-        stacks[i].style.setProperty('--stick-top',(h>vh?Math.round(vh-h):0)+'px');
-      }
-    }
-    function schedule(){ if(!raf)raf=requestAnimationFrame(measure); }
-    measure();
-    window.addEventListener('resize',schedule,{passive:true});
-    window.addEventListener('load',schedule);
-    /* 이미지가 늦게 뜨면서 높이가 바뀌면 다시 재요 */
-    if('ResizeObserver' in window){
-      var ro=new ResizeObserver(schedule);
-      stacks.forEach(function(s){ro.observe(s);});
-    }
-  }
-
-  /* ── 1b. 눌림/들림 ──────────────────────────
-     다음 장이 화면을 덮은 비율(0~1)을 재서
-     덮이는 장엔 --press, 올라오는 장엔 --lift를 넣어요.
-     CSS 쪽은 전부 prefers-reduced-motion:no-preference 안에 있어서
-     움직임을 줄인 환경에선 값만 들어가고 아무 일도 안 일어나요. */
-  var foot=document.querySelector('.foot');
-  var pairs=[];
-  for(var j=0;j<stacks.length;j++){
-    var nxt=stacks[j+1]||foot;
-    if(nxt)pairs.push({a:stacks[j],b:nxt,v:-1});
-  }
-  if(pairs.length){
-    var praf=0;
-    var pressure=function(){
-      praf=0;
-      var vh=window.innerHeight;
-      for(var k=0;k<pairs.length;k++){
-        var pr=pairs[k];
-        var p=(vh-pr.b.getBoundingClientRect().top)/vh;
-        p=p<0?0:p>1?1:p;
-        p=p*p*(3-2*p); /* 양끝을 부드럽게 */
-        if(Math.abs(p-pr.v)<.001)continue;
-        pr.v=p;
-        pr.a.style.setProperty('--press',p.toFixed(3));
-        pr.b.style.setProperty('--lift',(p>0&&p<1?1-p:0).toFixed(3));
-      }
-    };
-    var onScroll=function(){ if(!praf)praf=requestAnimationFrame(pressure); };
-    pressure();
-    window.addEventListener('scroll',onScroll,{passive:true});
-    window.addEventListener('resize',onScroll,{passive:true});
-    window.addEventListener('load',onScroll);
-  }
-
-  /* ── 2. 등장 ────────────────────────────────
-     IntersectionObserver가 없으면 클래스를 아예 안 붙여요.
-     (CSS의 숨김 상태도 이 클래스에만 걸려 있어서 내용이 사라질 일은 없어요.) */
   if(!('IntersectionObserver' in window))return;
 
   var items=[];
