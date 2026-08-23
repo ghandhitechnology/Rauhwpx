@@ -35,19 +35,6 @@
   gap: 8px;
 }
 
-.ag-privacy-disclosure.privacy-disclosure {
-  gap: 10px;
-}
-
-.ag-privacy-disclosure .privacy-disclosure-lead,
-.ag-privacy-disclosure .privacy-disclosure-body {
-  color: var(--ag-text);
-}
-
-.ag-privacy-disclosure .privacy-disclosure-title {
-  color: var(--ag-text-muted);
-}
-
 /* ── 행 (허브 · 프로바이더) ─────────────────────────── */
 
 .ag-settings-row {

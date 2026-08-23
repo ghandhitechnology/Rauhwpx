@@ -3,7 +3,6 @@ import {
   NEW_DOCUMENT_FILE_NAME,
   isUntitledNewDocumentName,
 } from '../core/document-names.ts';
-import { isFormPackDocument, refuseBinaryHwpExport } from '../core/form-pack.ts';
 import { SAVE_FORMAT_DETAILS, type SaveFormat } from './save-format.ts';
 
 export type { SaveFormat } from './save-format.ts';
@@ -62,13 +61,7 @@ export function inferExportFormat(
 ): SaveFormat {
   const explicit = explicitFormat?.trim().toLowerCase();
   if (explicit === 'hml' || explicit === 'hwp' || explicit === 'hwpx') {
-    if (explicit === 'hwp' && refuseBinaryHwpExport('hwp', requestedName || currentDocumentName || '')) {
-      return DEFAULT_EXPORT_FORMAT;
-    }
     return explicit;
-  }
-  if (isFormPackDocument()) {
-    return DEFAULT_EXPORT_FORMAT;
   }
   if (isUntitledNewDocumentName(requestedName)) return DEFAULT_EXPORT_FORMAT;
   const requestedFormat = saveFormatForFileName(requestedName);
@@ -119,14 +112,6 @@ export function resolveSaveTarget(
       format: DEFAULT_EXPORT_FORMAT,
       forceSaveAs: false,
       suggestedName: fileNameForFormat(fileName || NEW_DOCUMENT_FILE_NAME, DEFAULT_EXPORT_FORMAT),
-    };
-  }
-
-  if (isFormPackDocument()) {
-    return {
-      format: DEFAULT_EXPORT_FORMAT,
-      forceSaveAs: false,
-      suggestedName: fileNameForFormat(fileName, DEFAULT_EXPORT_FORMAT),
     };
   }
 

@@ -31,7 +31,6 @@ An HWP/HWPX editor with agentic features as a first-class part of the product—
 ## Capabilities and Constraints
 
 - Parse/edit/render Korean HWP ecosystem formats (HWP 5.0, HWPX, HML; HWP3 read); serialize with roundtrip fidelity as a core concern.
-- Ship a Rauhwpx 공문/품의 HWPX form pack that opens in the editor; the agent fills live fields, and that pack refuses binary HWP export.
 - MCP tools use body-text addresses (`sectionIdx` / `paraIdx` / `charOffset`, 0-based) and a revision contract (`expectedRevision` / `REVISION_MISMATCH`).
 - Planning remains user-approved before implementation. Once implementation starts, document mutations execute autonomously, preserve revision checks, and remain undoable.
 - Independent of Hancom; “한글,” “한컴,” “HWP,” and “HWPX” are Hancom trademarks—do not imply affiliation, sponsorship, or approval.

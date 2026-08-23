@@ -72,13 +72,11 @@ test('/settings 슬래시 명령이 설정 페이지를 연다', () => {
   assert.ok(source.indexOf("if (text === '/settings')") < source.indexOf('recordUserMessage(messageText,'));
 });
 
-test('설정은 보안·연결·기본 설정·글쓰기 보정·템플릿·사용량 묶음이다', () => {
-  for (const title of ['보안·개인정보', '연결', '기본 설정', '글쓰기 보정', '템플릿', '사용량']) {
+test('설정은 연결·기본 설정·글쓰기 보정·템플릿·사용량 묶음이다', () => {
+  for (const title of ['연결', '기본 설정', '글쓰기 보정', '템플릿', '사용량']) {
     assert.match(settings, new RegExp(`createSection\\('${title}'\\)`));
   }
-  assert.match(settings, /renderPrivacySnapshot\(privacyRoot/);
   assert.match(settingsCss, /\.ag-settings-section-title/);
-  assert.match(settingsCss, /\.ag-privacy-disclosure/);
 });
 
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {

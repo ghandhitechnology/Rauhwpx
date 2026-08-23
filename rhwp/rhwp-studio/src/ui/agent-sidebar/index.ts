@@ -1985,14 +1985,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     applyDefaults: (prefs) => applyAgentPrefs(prefs),
     openCalibration: () => writingStyleCalibration.open(),
     reconnectSession: () => restartAgentSession(),
-    getDocumentLocation: () => {
-      const name = getDocumentContext?.().documentName ?? null;
-      return {
-        hasDocument: Boolean(name),
-        fileName: name ?? '',
-        isUntitled: name === '새 문서.hwp',
-      };
-    },
   });
   const settingsPage = settingsPanel.element;
   settingsPage.addEventListener('ag-settings-close', () => {
