@@ -19,11 +19,11 @@ export function imageRootsFromEnv(env = process.env) {
  * @param {string} imagePath 검사 대상 경로
  * @param {string[]} allowedRoots 허용 루트 목록
  * @param {{ realpath?: typeof realpath }} [deps]
- * @returns {Promise<void>} 허용되면 resolve, 아니면 code 가 붙은 Error 로 reject
+ * @returns {Promise<string>} 허용된 실제 경로. 루트 정책이 없으면 원래 경로.
  */
 export async function assertImagePathInsideRoots(imagePath, allowedRoots, deps = {}) {
   const resolveReal = deps.realpath ?? realpath;
-  if (!allowedRoots || allowedRoots.length === 0) return;
+  if (!allowedRoots || allowedRoots.length === 0) return imagePath;
   if (typeof imagePath !== 'string' || imagePath.length === 0) {
     throw policyError('INVALID_ARGS', 'imagePath is required');
   }
@@ -38,6 +38,7 @@ export async function assertImagePathInsideRoots(imagePath, allowedRoots, deps =
   if (!inside) {
     throw policyError('INVALID_ARGS', 'imagePath must be inside the session workspace or its downloads directory');
   }
+  return real;
 }
 
 function policyError(code, message) {

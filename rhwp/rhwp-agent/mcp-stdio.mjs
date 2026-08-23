@@ -238,9 +238,9 @@ function registerInsertImageTool(def) {
         let buf;
         let ext;
         if (typeof imagePath === 'string' && imagePath.length > 0) {
-          await assertImagePathAllowed(imagePath);
-          buf = await readFile(imagePath);
-          ext = path.extname(imagePath).slice(1).toLowerCase().replace('jpeg', 'jpg');
+          const resolvedImagePath = await assertImagePathAllowed(imagePath);
+          buf = await readFile(resolvedImagePath);
+          ext = path.extname(resolvedImagePath).slice(1).toLowerCase().replace('jpeg', 'jpg');
         } else if (typeof imageBase64 === 'string' && imageBase64.length > 0) {
           if (!extension) throw hubError('INVALID_ARGS', 'extension is required with imageBase64');
           buf = Buffer.from(imageBase64, 'base64');

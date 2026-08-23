@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import path from 'node:path';
 import os from 'node:os';
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, rmSync, writeFileSync } from 'node:fs';
 
 import { imageRootsFromEnv, assertImagePathInsideRoots } from '../image-path-policy.mjs';
 
@@ -28,7 +28,7 @@ test('paths inside an allowed root pass; sibling and parent paths are rejected',
   const outside = path.join(parent, 'outside.png');
   writeFileSync(outside, 'png');
 
-  await assertImagePathInsideRoots(inside, [workspace]);
+  assert.equal(await assertImagePathInsideRoots(inside, [workspace]), realpathSync.native(inside));
 
   await assert.rejects(
     () => assertImagePathInsideRoots(outside, [workspace]),
@@ -59,5 +59,5 @@ test('missing files report FILE_NOT_FOUND instead of policy denial', async (t) =
 });
 
 test('an empty root list keeps the legacy unrestricted behavior', async () => {
-  await assertImagePathInsideRoots('/etc/hosts', []);
+  assert.equal(await assertImagePathInsideRoots('/etc/hosts', []), '/etc/hosts');
 });
