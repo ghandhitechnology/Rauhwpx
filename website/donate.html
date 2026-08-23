@@ -136,6 +136,35 @@ a{color:inherit}
   line-height:1.82;
 }
 .letter p{margin:0 0 1.25em;word-break:keep-all;overflow-wrap:break-word}
+.supporters{
+  width:min(100%,720px);
+  margin:22px auto 0;
+  padding:20px 24px;
+  background:rgba(253,251,246,.72);
+  border:1px solid var(--rule);
+}
+.supporters-head{
+  margin-bottom:12px;
+}
+.supporters h2{
+  margin:0;
+  font-size:15px;
+  font-weight:600;
+  letter-spacing:-.01em;
+}
+.supporter-list{
+  margin:0;
+  padding:0;
+  list-style:none;
+  border-top:1px solid var(--ink-3);
+}
+.supporter-list li{
+  min-height:44px;
+  display:flex;
+  align-items:center;
+  border-bottom:1px solid var(--rule);
+}
+.supporter-name{font-size:16px;font-weight:600}
 .receipt-action{
   margin-top:clamp(26px,3.6vw,42px);
   padding-top:20px;
@@ -278,6 +307,15 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
         <a class="donate-button" href="https://donate.stripe.com/eVqeVf5C5cvR9uiaQKeZ201">토큰 기부하기</a>
       </div>
     </article>
+
+    <section class="supporters" aria-labelledby="supporters-title">
+      <div class="supporters-head">
+        <h2 id="supporters-title">후원자 목록</h2>
+      </div>
+      <ul class="supporter-list">
+        <li><span class="supporter-name">민**</span></li>
+      </ul>
+    </section>
   </div>
 </main>
 </body>
