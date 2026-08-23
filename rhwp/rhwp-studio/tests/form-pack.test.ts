@@ -87,8 +87,7 @@ test('파일 메뉴와 빈 화면에 공문/품의 서식이 있다', () => {
   assert.match(html, /data-form-id="gongmun"/);
   assert.match(html, /data-form-id="pumui"/);
   assert.match(html, /id="document-form-pack-action">공문\/품의 서식/);
-  assert.match(html, /id="document-form-pack-hint"[^>]*>HWPX만 저장<\/p>/);
-  assert.match(html, /id="document-form-pack-hint"[^>]*title="HWPX only"/);
+  assert.doesNotMatch(html, /document-form-pack-hint/);
   assert.match(fileCmd, /id: 'file:open-form-pack'/);
   assert.doesNotMatch(source('src/core/form-pack.ts'), /온나라.*인증|certified/i);
   assert.deepEqual(FORM_PACK_FORMS.map((form) => form.id), ['gongmun', 'pumui']);

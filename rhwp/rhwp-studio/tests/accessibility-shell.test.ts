@@ -66,7 +66,6 @@ test('문서가 없을 때 파일 열기와 드롭 위치를 명확히 표시한
   assert.match(html, /id="document-open-action">HWP\/HWPX 열기<\/button>/);
   assert.match(html, /id="document-new-action">새 파일<\/button>/);
   assert.match(html, /id="document-form-pack-action">공문\/품의 서식<\/button>/);
-  assert.match(html, /id="document-form-pack-hint"[^>]*>HWPX만 저장<\/p>/);
   assert.match(main, /document-open-action/);
   assert.match(main, /document-new-action/);
   assert.match(main, /document-form-pack-action/);
