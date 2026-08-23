@@ -40,8 +40,16 @@ jobs:
         working-directory: rhwp
         run: wasm-pack build --target web
 
+      - name: Upload WASM package
+        uses: actions/upload-artifact@v4
+        with:
+          name: rhwp-wasm-package
+          path: rhwp/pkg
+          if-no-files-found: error
+
   app:
     name: Desktop, agent, and Studio checks
+    needs: engine
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -58,6 +66,12 @@ jobs:
             package-lock.json
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
+
+      - name: Download WASM package
+        uses: actions/download-artifact@v5
+        with:
+          name: rhwp-wasm-package
+          path: rhwp/pkg
 
       - name: Install dependencies
         run: |

@@ -18,12 +18,19 @@ const BROWSER_CANDIDATES = [
 const executablePath = BROWSER_CANDIDATES.find(existsSync);
 const studioRoot = fileURLToPath(new URL('../', import.meta.url));
 const rhwpRoot = resolve(studioRoot, '..');
+const wasmPackageRoot = process.env.RHWP_WASM_PACKAGE_DIR ?? resolve(rhwpRoot, 'pkg');
+const wasmPackageAvailable = existsSync(resolve(wasmPackageRoot, 'rhwp.js'))
+  && existsSync(resolve(wasmPackageRoot, 'rhwp_bg.wasm'));
 let server: ViteDevServer | null = null;
 let browser: Browser | null = null;
 let baseUrl = '';
 
 test.before(async () => {
   if (!executablePath) return;
+  assert.ok(
+    wasmPackageAvailable,
+    'Resolver browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test',
+  );
   server = await createServer({
     root: studioRoot,
     configFile: false,
@@ -32,15 +39,15 @@ test.before(async () => {
     resolve: {
       alias: {
         '@': resolve(studioRoot, 'src'),
-        '@wasm/rhwp.js': resolve(rhwpRoot, 'pkg/rhwp.js'),
-        '@wasm': resolve(rhwpRoot, 'pkg'),
+        '@wasm/rhwp.js': resolve(wasmPackageRoot, 'rhwp.js'),
+        '@wasm': wasmPackageRoot,
       },
     },
     server: {
       host: '127.0.0.1',
       port: 0,
       hmr: false,
-      fs: { allow: [studioRoot, resolve(rhwpRoot, 'pkg')] },
+      fs: { allow: [studioRoot, wasmPackageRoot] },
     },
   });
   await server.listen();
