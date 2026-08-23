@@ -150,10 +150,11 @@ export function normalizeHost(hostname) {
 }
 
 /** URL hostname이 사설·예약·내부망 주소인지 판정한다. */
-export function isBlockedHost(hostname, { blockedSuffixes = [], allowSingleLabel = false } = {}) {
+export function isBlockedHost(hostname, { blockedSuffixes = DEFAULT_BLOCKED_HOST_SUFFIXES, allowSingleLabel = false } = {}) {
   const host = normalizeHost(hostname);
   if (!host) return true;
 
+  if (host === 'localhost') return true;
   if (blockedSuffixes.some((suffix) => host.endsWith(suffix))) return true;
 
   const isIPv6Literal = host.includes(':');

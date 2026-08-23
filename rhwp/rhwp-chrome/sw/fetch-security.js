@@ -72,7 +72,7 @@ export function validateDocumentFetchUrl(url, options = {}) {
     throw new FetchSecurityError('scheme-blocked', '허용되지 않은 URL scheme입니다.');
   }
 
-  if (isBlockedHost(parsed.hostname)) {
+  if (isBlockedHostname(parsed.hostname)) {
     throw new FetchSecurityError('private-host-blocked', '로컬 또는 내부 네트워크 URL은 차단됩니다.');
   }
 

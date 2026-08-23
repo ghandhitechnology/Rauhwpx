@@ -27,6 +27,8 @@ test('userinfo and private hosts are rejected', () => {
   assertBlocked('https://gov.example@evil.example/a.hwp', 'userinfo-blocked');
   assertBlocked('http://127.0.0.1/a.hwp', 'private-host-blocked');
   assertBlocked('http://localhost/a.hwp', 'private-host-blocked');
+  assertBlocked('http://foo.localhost/a.hwp', 'private-host-blocked');
+  assertBlocked('http://nas.local/a.hwp', 'private-host-blocked');
   assertBlocked('http://192.168.0.10/a.hwp', 'private-host-blocked');
   assertBlocked('http://169.254.169.254/latest/meta-data', 'private-host-blocked');
   assertBlocked('http://intranet/a.hwp', 'private-host-blocked');

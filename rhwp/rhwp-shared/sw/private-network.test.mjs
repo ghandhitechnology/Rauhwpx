@@ -47,6 +47,9 @@ test('isBlockedHost covers suffixes, single labels and URL hostnames', () => {
   assert.equal(isBlockedHost('169.254.1.1'), true);
   assert.equal(isBlockedHost('docs.example.com'), false);
   assert.equal(isBlockedHost('intranet'), true);
+  assert.equal(isBlockedHost('localhost'), true);
+  assert.equal(isBlockedHost('foo.localhost'), true);
+  assert.equal(isBlockedHost('nas.local'), true);
   assert.equal(isBlockedHost('foo.corp', { blockedSuffixes: ['.corp'] }), true);
 });
 
