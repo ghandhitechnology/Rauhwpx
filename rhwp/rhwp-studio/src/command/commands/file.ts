@@ -235,6 +235,11 @@ function completeHandleSave(
   services.wasm.fileName = result.fileName;
   services.documentState.markClean(reason);
   services.eventBus.emit('document-context-changed');
+  services.eventBus.emit('document-saved', {
+    reason,
+    fileName: result.fileName,
+    sourceFormat: savedFormat,
+  });
   if (result.handle) {
     // Handle-backed saves can be reopened across browser sessions. Keep this event
     // deliberately limited to the durable handle/name association; fallback downloads
@@ -313,6 +318,11 @@ async function saveAsFormat(services: CommandServices, format: SaveFormat): Prom
     downloadBlob(blob, downloadName);
     services.documentState.markClean('save-as');
     services.eventBus.emit('document-context-changed');
+    services.eventBus.emit('document-saved', {
+      reason: 'save-as',
+      fileName: downloadName,
+      sourceFormat: format,
+    });
   } catch (error) {
     reportSaveError('file:save-as', error);
   }
@@ -370,6 +380,11 @@ export async function saveCurrentDocument(services: CommandServices): Promise<Sa
     downloadBlob(blob, downloadName);
     services.documentState.markClean('save');
     services.eventBus.emit('document-context-changed');
+    services.eventBus.emit('document-saved', {
+      reason: 'save',
+      fileName: downloadName,
+      sourceFormat: target.format,
+    });
     return 'saved';
   } catch (error) {
     reportSaveError('file:save', error);

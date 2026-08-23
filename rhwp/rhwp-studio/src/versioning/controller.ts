@@ -1,0 +1,1359 @@
+import type { AgentBridge } from '../agent/bridge.ts';
+import type { CheckpointTitleSummary, PendingEditsChangeEvent, SidebarEvent } from '../agent/types.ts';
+import { CompareSessionStore } from '../compare/session.ts';
+import { compareDocuments, compareSnapshots } from '../compare/diff-engine.ts';
+import type { EventBus } from '../core/event-bus.ts';
+import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
+import type { WasmBridge } from '../core/wasm-bridge.ts';
+import type { InputHandler } from '../engine/input-handler.ts';
+import { getHistoryPayload, listHistoryMeta } from '../history/idb-store.ts';
+import { showPendingAgentEditsDialog } from '../ui/pending-agent-edits-dialog.ts';
+import { CompareResultWindow } from '../ui/compare-result-window.ts';
+import type {
+  LegacyVersionView,
+  VersionBranchView,
+  VersionCommitView,
+  VersionManagerController,
+  VersionManagerState,
+  VersionShelfView,
+} from '../ui/agent-sidebar/version-manager.ts';
+import {
+  VersionGraphStore,
+  branchName,
+  commitId,
+  documentId,
+  layoutCommitGraph,
+  shelfId,
+  tagName,
+  VersionError,
+  type BranchName,
+  type BranchRef,
+  type CommitId,
+  type VersionCommit,
+  type VersionRef,
+  type VersionRepository,
+  type VersionShelf,
+} from './index.ts';
+import { fingerprintBytes } from './hash.ts';
+import {
+  VERSION_COMPARE_OPTIONS,
+  analyzeVersionDiff,
+  captureVersionSnapshot,
+  type CapturedVersionSnapshot,
+} from './snapshot.ts';
+
+const PAGE_SIZE = 100;
+const ACTIVE_BRANCH_PREFIX = 'rhwp-versions-active-branch-v1:';
+const AI_TITLES_KEY = 'rhwp-versions-ai-titles-v1';
+
+type CheckpointReason = 'manual' | 'save' | 'agent' | 'pre-restore' | 'pre-switch' | 'restore' | 'adopt';
+
+interface VersionControllerDeps {
+  store?: VersionGraphStore;
+  wasm: WasmBridge;
+  eventBus: EventBus;
+  documentState: DocumentDirtyState;
+  getInputHandler: () => InputHandler | null;
+  getDocumentId: () => string | null;
+  agentBridge: AgentBridge;
+}
+
+interface CreateCheckpointOptions {
+  reason: CheckpointReason;
+  message?: string;
+  allowSameContent?: boolean;
+  parents?: readonly [CommitId] | readonly [CommitId, CommitId];
+  lastSaved?: boolean;
+  author?: { kind: 'user' | 'system' | 'agent'; label: string };
+  onPersisted?: () => void;
+}
+
+interface WorkspaceToken {
+  documentId: string;
+  editorRevision: number;
+  repositoryId: string | null;
+  repositoryRevision: number | null;
+}
+
+interface DeferredSavedSnapshot {
+  workspace: WorkspaceToken;
+  snapshot: CapturedVersionSnapshot;
+}
+
+function emptyState(): VersionManagerState {
+  return {
+    documentId: null,
+    documentName: null,
+    saved: false,
+    enabled: false,
+    dirty: false,
+    mutationBlockedReason: null,
+    activeBranch: null,
+    commits: [],
+    branches: [],
+    shelves: [],
+    legacy: [],
+    hasMoreCommits: false,
+    loading: false,
+    storageBytes: 0,
+    storageQuotaBytes: null,
+    aiTitlesEnabled: readAiTitlesEnabled(),
+  };
+}
+
+function readAiTitlesEnabled(): boolean {
+  try {
+    return localStorage.getItem(AI_TITLES_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+function timestampTitle(now = Date.now()): string {
+  return new Intl.DateTimeFormat('ko-KR', {
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(now));
+}
+
+function errorMessage(error: unknown): string {
+  if (!(error instanceof VersionError)) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  const messages: Partial<Record<VersionError['code'], string>> = {
+    SAVE_REQUIRED: '먼저 문서를 저장하세요.',
+    VERSIONING_DISABLED: '이 문서에서 버전 기록을 먼저 켜세요.',
+    ACTIVE_AGENT_TURN: '에이전트가 응답 중일 때는 버전을 바꿀 수 없습니다.',
+    PENDING_AGENT_REVIEW: '대기 중인 에이전트 편집을 먼저 처리하세요.',
+    STALE_WORKSPACE: '다른 작업이 버전 기록을 바꿨습니다. 새로 고친 뒤 다시 시도하세요.',
+    BRANCH_EXISTS: '같은 이름의 브랜치가 이미 있습니다.',
+    TAG_EXISTS: '같은 이름의 태그가 이미 있습니다.',
+    INVALID_REF_NAME: '사용할 수 없는 이름입니다.',
+    CURRENT_BRANCH: '현재 브랜치는 삭제할 수 없습니다.',
+    LAST_BRANCH: '마지막 브랜치는 삭제할 수 없습니다.',
+    NO_CHANGES: '이미 체크포인트로 저장된 상태입니다.',
+    CORRUPT_BLOB: '저장된 버전 데이터가 손상되어 작업을 중단했습니다.',
+    RESTORE_PARSE_FAILED: '이 버전을 안전하게 읽지 못해 현재 문서를 바꾸지 않았습니다.',
+    STORAGE_QUOTA: '버전 저장 공간이 부족합니다. 사용하지 않는 데이터를 정리하세요.',
+  };
+  return messages[error.code] ?? error.message;
+}
+
+function branchStorageKey(id: string): string {
+  return `${ACTIVE_BRANCH_PREFIX}${id}`;
+}
+
+function readActiveBranch(id: string): string | null {
+  try {
+    return localStorage.getItem(branchStorageKey(id));
+  } catch {
+    return null;
+  }
+}
+
+function persistActiveBranch(id: string, branch: string): void {
+  try {
+    localStorage.setItem(branchStorageKey(id), branch);
+  } catch {
+    // The active branch still survives for this session in controller state.
+  }
+}
+
+function successfulTurn(event: SidebarEvent): boolean {
+  if (event.type !== 'agent' || event.event.type !== 'turn-end') return false;
+  if (event.event.errorMessage) return false;
+  return event.event.stopReason === 'end_turn'
+    || event.event.stopReason === 'completed'
+    || event.event.stopReason === 'success';
+}
+
+function tagForMessage(message: string, refs: readonly VersionRef[]): string {
+  const base = message.normalize('NFC').trim().replace(/[\u0000-\u001f\u007f/\\]/g, ' ').slice(0, 64).trim()
+    || timestampTitle();
+  const occupied = new Set(refs.filter((ref) => ref.kind === 'tag').map((ref) => ref.name.toLowerCase()));
+  if (!occupied.has(base.toLowerCase())) return base;
+  const suffix = ` ${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}`;
+  return `${base.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`;
+}
+
+export class DocumentVersionController implements VersionManagerController {
+  readonly #store: VersionGraphStore;
+  readonly #wasm: WasmBridge;
+  readonly #eventBus: EventBus;
+  readonly #documentState: DocumentDirtyState;
+  readonly #getInputHandler: () => InputHandler | null;
+  readonly #getDocumentId: () => string | null;
+  readonly #agentBridge: AgentBridge;
+  readonly #ownsStore: boolean;
+  readonly #listeners = new Set<(state: VersionManagerState) => void>();
+  readonly #unsubscribers: Array<() => void> = [];
+  readonly #compareStore: CompareSessionStore;
+  readonly #compareWindow = new CompareResultWindow();
+  #state = emptyState();
+  #repository: VersionRepository | null = null;
+  #refs: VersionRef[] = [];
+  #commits: VersionCommit[] = [];
+  #shelves: VersionShelf[] = [];
+  #activeBranch: BranchName | null = null;
+  readonly #activeBranches = new Map<string, BranchName>();
+  #editorRevision = 0;
+  #semanticDirty = false;
+  #semanticDirtyRevision = -1;
+  #deferredSavedSnapshot: DeferredSavedSnapshot | null = null;
+  #refreshEpoch = 0;
+  #operation = Promise.resolve();
+  #pendingApprovalTimer: number | null = null;
+  #suppressApprovalCheckpoint = 0;
+
+  constructor(deps: VersionControllerDeps) {
+    this.#store = deps.store ?? new VersionGraphStore();
+    this.#ownsStore = !deps.store;
+    this.#wasm = deps.wasm;
+    this.#eventBus = deps.eventBus;
+    this.#documentState = deps.documentState;
+    this.#getInputHandler = deps.getInputHandler;
+    this.#getDocumentId = deps.getDocumentId;
+    this.#agentBridge = deps.agentBridge;
+    this.#compareStore = new CompareSessionStore(this.#eventBus);
+
+    const documentChanged = () => {
+      this.#editorRevision += 1;
+      this.#syncTransientState();
+    };
+    this.#unsubscribers.push(
+      this.#eventBus.on('document-mutated', documentChanged),
+      this.#eventBus.on('document-changed', documentChanged),
+      this.#eventBus.on('document-dirty-changed', () => this.#syncTransientState()),
+      this.#eventBus.on('document-context-changed', () => {
+        this.#editorRevision += 1;
+        void this.refresh();
+      }),
+      this.#eventBus.on('document-saved', () => {
+        if (this.#agentBridge.isTurnRunning()) {
+          try {
+            const workspace = this.#captureWorkspaceToken();
+            if (!workspace.repositoryId) throw new VersionError('VERSIONING_DISABLED', 'Versioning is not enabled');
+            this.#deferredSavedSnapshot = {
+              workspace,
+              snapshot: captureVersionSnapshot(this.#wasm),
+            };
+          } catch {
+            this.#deferredSavedSnapshot = null;
+          }
+          return;
+        }
+        void this.#enqueue(async () => {
+          await this.#refreshData(false);
+          this.#deferredSavedSnapshot = null;
+          if (!this.#repository) return;
+          await this.#createCheckpoint({ reason: 'save', lastSaved: true });
+        });
+      }),
+      this.#agentBridge.onEvent((event) => {
+        const turnEnded = event.type === 'agent' && event.event.type === 'turn-end';
+        if (turnEnded) {
+          void this.#enqueue(async () => {
+            await this.#refreshData(false);
+            await this.#flushDeferredSave();
+            if (
+              this.#repository
+              && successfulTurn(event)
+              && this.#agentBridge.getPermissionProfile() === 'unrestricted'
+            ) await this.#createCheckpoint({
+              reason: 'agent',
+              author: { kind: 'agent', label: this.#agentBridge.getActiveAgent() ?? '에이전트' },
+            });
+          });
+        }
+        this.#syncTransientState();
+      }),
+      this.#agentBridge.pendingEdits.onChange((event: PendingEditsChangeEvent) => {
+        this.#syncTransientState();
+        if (event.type !== 'approved' || this.#suppressApprovalCheckpoint > 0) return;
+        if (this.#pendingApprovalTimer !== null) window.clearTimeout(this.#pendingApprovalTimer);
+        this.#pendingApprovalTimer = window.setTimeout(() => {
+          this.#pendingApprovalTimer = null;
+          void this.#enqueue(async () => {
+            await this.#refreshData(false);
+            if (this.#repository) await this.#createCheckpoint({
+              reason: 'agent',
+              author: { kind: 'agent', label: this.#agentBridge.getActiveAgent() ?? '에이전트' },
+            });
+          });
+        }, 80);
+      }),
+    );
+  }
+
+  getState(): VersionManagerState {
+    return structuredClone(this.#state);
+  }
+
+  subscribe(listener: (state: VersionManagerState) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  async refresh(): Promise<void> {
+    await this.#enqueue(() => this.#refreshData(true));
+  }
+
+  async enable(): Promise<void> {
+    await this.#enqueue(async () => {
+      this.#guardSaved();
+      await this.#guardMutation();
+      if (this.#documentState.isDirty()) {
+        throw new VersionError('SAVE_REQUIRED', 'Save the document before enabling version history');
+      }
+      const id = this.#getDocumentId();
+      if (!id) throw new VersionError('SAVE_REQUIRED', 'A saved document ID is required');
+      const workspace = this.#captureWorkspaceToken();
+      const existing = await this.#store.findRepositoryByDocumentId(documentId(id));
+      this.#assertWorkspaceToken(workspace);
+      if (existing) {
+        await this.#refreshData(true);
+        return;
+      }
+      const capture = captureVersionSnapshot(this.#wasm);
+      const analysis = analyzeVersionDiff(null, capture.compareSnapshot);
+      const createdAt = Date.now();
+      const result = await this.#store.createRepository({
+        documentId: documentId(id),
+        initialBranch: branchName('main'),
+        lastSavedFingerprint: capture.fingerprint,
+        initial: {
+          bytes: capture.bytes,
+          compareSnapshot: capture.compareSnapshot,
+          contentFingerprint: capture.fingerprint,
+          title: timestampTitle(createdAt),
+          titleOrigin: 'timestamp',
+          titleRevision: 0,
+          author: { kind: 'user', label: '사용자' },
+          stats: analysis.stats,
+          createdAt,
+        },
+      });
+      if (!this.#isWorkspaceTokenCurrent(workspace, { editor: false })) return;
+      this.#repository = result.repository;
+      this.#activeBranch = result.branch.name;
+      this.#activeBranches.set(id, result.branch.name);
+      persistActiveBranch(id, result.branch.name);
+      await this.#refreshData(true);
+      this.#requestGeneratedTitle(result.commit, analysis.titleSummary);
+    });
+  }
+
+  async checkpoint(message?: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation();
+      await this.#createCheckpoint({ reason: 'manual', message });
+    });
+  }
+
+  async loadMore(): Promise<void> {
+    await this.#enqueue(async () => {
+      if (!this.#repository || this.#commits.length === 0) return;
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#repository;
+      this.#state.loading = true;
+      this.#emit();
+      try {
+        const beforeOrdinal = Math.min(...this.#commits.map((commit) => commit.ordinal));
+        const next = await this.#store.listCommits(repository.id, { beforeOrdinal, limit: PAGE_SIZE });
+        this.#assertWorkspaceToken(workspace, { editor: false });
+        const existing = new Set(this.#commits.map((commit) => commit.id));
+        this.#commits.push(...next.filter((commit) => !existing.has(commit.id)));
+        await this.#buildState(next.length === PAGE_SIZE);
+      } finally {
+        if (this.#state.loading) {
+          this.#state.loading = false;
+          this.#emit();
+        }
+      }
+    });
+  }
+
+  async restore(id: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation(true);
+      await this.#checkpointDirty('pre-restore');
+      const workspace = this.#captureWorkspaceToken();
+      const target = await this.#requireCommit(id);
+      const [blob, stored] = await Promise.all([
+        this.#store.getBlob(target.blobId),
+        this.#store.getCompareSnapshot(target.compareSnapshotId),
+      ]);
+      this.#assertWorkspaceToken(workspace);
+      if (!blob || !stored) throw new VersionError('CORRUPT_BLOB', 'Version data is missing');
+      const handler = this.#requireInputHandler();
+      const original = captureVersionSnapshot(this.#wasm);
+      const wasDirty = this.#documentState.isDirty();
+      handler.prepareSnapshotCapacity(4);
+      try {
+        handler.replaceContentFromBytes(blob.bytes);
+      } catch (error) {
+        throw new VersionError('RESTORE_PARSE_FAILED', 'Version bytes could not be restored', {
+          cause: error instanceof Error ? error : undefined,
+        });
+      }
+      this.#setDirtyForFingerprint(target.contentFingerprint, 'version-restore');
+      const replacementWorkspace = this.#captureWorkspaceToken();
+      let persisted = false;
+      try {
+        await this.#createCheckpoint({
+          reason: 'restore',
+          allowSameContent: true,
+          onPersisted: () => { persisted = true; },
+        }, {
+          bytes: blob.bytes,
+          fingerprint: target.contentFingerprint,
+          compareSnapshot: stored.snapshot,
+        });
+      } catch (error) {
+        if (!persisted) this.#rollbackReplacement(handler, original, wasDirty, replacementWorkspace);
+        throw error;
+      }
+      this.#eventBus.emit('document-context-changed');
+    });
+  }
+
+  async adopt(id: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation(true);
+      await this.#checkpointDirty('pre-restore');
+      const workspace = this.#captureWorkspaceToken();
+      const branch = this.#requireActiveBranch();
+      const target = await this.#requireCommit(id);
+      if (target.id === branch.target) return;
+      const [blob, stored] = await Promise.all([
+        this.#store.getBlob(target.blobId),
+        this.#store.getCompareSnapshot(target.compareSnapshotId),
+      ]);
+      this.#assertWorkspaceToken(workspace);
+      if (!blob || !stored) throw new VersionError('CORRUPT_BLOB', 'Version data is missing');
+      const handler = this.#requireInputHandler();
+      const original = captureVersionSnapshot(this.#wasm);
+      const wasDirty = this.#documentState.isDirty();
+      handler.prepareSnapshotCapacity(4);
+      try {
+        handler.replaceContentFromBytes(blob.bytes);
+      } catch (error) {
+        throw new VersionError('RESTORE_PARSE_FAILED', 'Version bytes could not be adopted', {
+          cause: error instanceof Error ? error : undefined,
+        });
+      }
+      this.#setDirtyForFingerprint(target.contentFingerprint, 'version-adopt');
+      const replacementWorkspace = this.#captureWorkspaceToken();
+      let persisted = false;
+      try {
+        await this.#createCheckpoint({
+          reason: 'adopt',
+          allowSameContent: true,
+          parents: [branch.target, target.id],
+          onPersisted: () => { persisted = true; },
+        }, {
+          bytes: blob.bytes,
+          fingerprint: target.contentFingerprint,
+          compareSnapshot: stored.snapshot,
+        });
+      } catch (error) {
+        if (!persisted) this.#rollbackReplacement(handler, original, wasDirty, replacementWorkspace);
+        throw error;
+      }
+      this.#eventBus.emit('document-context-changed');
+    });
+  }
+
+  async compare(id: string): Promise<void> {
+    await this.#enqueue(async () => {
+      const workspace = this.#captureWorkspaceToken();
+      const target = await this.#requireCommit(id);
+      const [stored, blob] = await Promise.all([
+        this.#store.getCompareSnapshot(target.compareSnapshotId),
+        this.#store.getBlob(target.blobId),
+      ]);
+      this.#assertWorkspaceToken(workspace);
+      if (!stored || !blob) throw new VersionError('CORRUPT_BLOB', 'Version comparison data is missing');
+      const current = captureVersionSnapshot(this.#wasm);
+      const session = compareSnapshots(stored.snapshot, current.compareSnapshot, VERSION_COMPARE_OPTIONS);
+      this.#assertWorkspaceToken(workspace);
+      this.#compareStore.set(session);
+      this.#compareWindow.show(session, this.#compareStore, 0, {
+        left: { bytes: blob.bytes, fileName: `${target.title}.hwp` },
+        right: { bytes: current.bytes, fileName: this.#wasm.fileName },
+      });
+    });
+  }
+
+  async amendTitle(id: string, title: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation();
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      const branch = this.#requireActiveBranch();
+      const commit = await this.#requireCommit(id);
+      this.#assertWorkspaceToken(workspace);
+      if (commit.id !== branch.target) throw new Error('현재 체크포인트의 메시지만 수정할 수 있습니다.');
+      await this.#store.updateCommitTitle({
+        repositoryId: repository.id,
+        commitId: commit.id,
+        expectedTitleRevision: commit.titleRevision,
+        title: title.trim(),
+        titleOrigin: 'manual',
+        titleRevision: commit.titleRevision,
+      });
+      await this.#refreshData(true);
+    });
+  }
+
+  async createBranch(name: string, fromCommit?: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation(true);
+      await this.#checkpointDirty('pre-switch');
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      const current = this.#requireActiveBranch();
+      const target = fromCommit ? await this.#requireCommit(fromCommit) : await this.#requireCommit(current.target);
+      const [blob, previousCommit] = await Promise.all([
+        this.#store.getBlob(target.blobId),
+        this.#requireCommit(current.target),
+      ]);
+      this.#assertWorkspaceToken(workspace);
+      if (!blob) throw new VersionError('CORRUPT_BLOB', 'Branch bytes are missing');
+      const handler = this.#requireInputHandler();
+      handler.prepareSnapshotCapacity(2);
+      const created = await this.#store.createBranch({
+        repositoryId: repository.id,
+        name: branchName(name),
+        target: target.id,
+        expectedRepositoryRevision: repository.revision,
+      });
+      try {
+        this.#assertWorkspaceToken(workspace);
+        this.#repository = created.repository;
+        this.#applyBranchContent(handler, blob.bytes, target, created.branch, current, previousCommit);
+      } catch (error) {
+        const compensated = await this.#store.deleteBranch({
+          repositoryId: created.repository.id,
+          branch: created.branch.name,
+          currentBranch: current.name,
+          expectedRepositoryRevision: created.repository.revision,
+          expectedBranchRevision: created.branch.revision,
+        }).catch(() => created.repository);
+        if (this.#isWorkspaceTokenCurrent(workspace, { editor: false, repository: false })) {
+          this.#repository = compensated;
+        }
+        throw error;
+      }
+      await this.#refreshData(true);
+    });
+  }
+
+  async switchBranch(name: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation(true);
+      await this.#checkpointDirty('pre-switch');
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      const previous = this.#requireActiveBranch();
+      const next = await this.#store.getBranch(repository.id, branchName(name));
+      if (!next) throw new VersionError('REF_NOT_FOUND', 'Branch was not found');
+      if (next.name === previous.name) return;
+      const [target, previousCommit] = await Promise.all([
+        this.#requireCommit(next.target),
+        this.#requireCommit(previous.target),
+      ]);
+      const blob = await this.#store.getBlob(target.blobId);
+      this.#assertWorkspaceToken(workspace);
+      if (!blob) throw new VersionError('CORRUPT_BLOB', 'Branch bytes are missing');
+      const [freshRepository, freshNext, freshPrevious] = await Promise.all([
+        this.#store.getRepository(repository.id),
+        this.#store.getBranch(repository.id, next.name),
+        this.#store.getBranch(repository.id, previous.name),
+      ]);
+      this.#assertWorkspaceToken(workspace);
+      if (
+        !freshRepository
+        || freshRepository.revision !== repository.revision
+        || !freshNext
+        || freshNext.revision !== next.revision
+        || freshNext.target !== next.target
+        || !freshPrevious
+        || freshPrevious.revision !== previous.revision
+        || freshPrevious.target !== previous.target
+      ) {
+        throw new VersionError('STALE_WORKSPACE', 'A branch changed before it could be switched');
+      }
+      const handler = this.#requireInputHandler();
+      handler.prepareSnapshotCapacity(2);
+      this.#applyBranchContent(handler, blob.bytes, target, next, previous, previousCommit);
+      await this.#refreshData(true);
+    });
+  }
+
+  async renameBranch(name: string, nextName: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation();
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      const branch = await this.#store.getBranch(repository.id, branchName(name));
+      this.#assertWorkspaceToken(workspace);
+      if (!branch) throw new VersionError('REF_NOT_FOUND', 'Branch was not found');
+      const result = await this.#store.renameBranch({
+        repositoryId: repository.id,
+        branch: branch.name,
+        name: branchName(nextName),
+        expectedRepositoryRevision: repository.revision,
+        expectedBranchRevision: branch.revision,
+      });
+      if (this.#isWorkspaceTokenCurrent(workspace, { editor: false }) && this.#activeBranch === branch.name) {
+        this.#setActiveBranch(result.branch.name);
+      }
+      await this.#refreshData(true);
+    });
+  }
+
+  async deleteBranch(name: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation();
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      const active = this.#requireActiveBranch();
+      const branch = await this.#store.getBranch(repository.id, branchName(name));
+      this.#assertWorkspaceToken(workspace, { editor: false });
+      if (!branch) throw new VersionError('REF_NOT_FOUND', 'Branch was not found');
+      await this.#store.deleteBranch({
+        repositoryId: repository.id,
+        branch: branch.name,
+        currentBranch: active.name,
+        expectedRepositoryRevision: repository.revision,
+        expectedBranchRevision: branch.revision,
+      });
+      await this.#refreshData(true);
+    });
+  }
+
+  async createTag(name: string, target: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation();
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      await this.#store.createTag({
+        repositoryId: repository.id,
+        name: tagName(name),
+        target: commitId(target),
+        expectedRepositoryRevision: repository.revision,
+      });
+      await this.#refreshData(true);
+    });
+  }
+
+  async createShelf(title?: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation(true);
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      const branch = this.#requireActiveBranch();
+      const capture = captureVersionSnapshot(this.#wasm);
+      const head = await this.#requireCommit(branch.target);
+      if (capture.fingerprint === head.contentFingerprint) {
+        throw new VersionError('NO_CHANGES', 'There are no changes to shelf');
+      }
+      const blob = await this.#store.getBlob(head.blobId);
+      this.#assertWorkspaceToken(workspace);
+      if (!blob) throw new VersionError('CORRUPT_BLOB', 'Branch head bytes are missing');
+      const handler = this.#requireInputHandler();
+      handler.prepareSnapshotCapacity(2);
+      const result = await this.#store.createShelf({
+        repositoryId: repository.id,
+        baseCommitId: branch.target,
+        branch: branch.name,
+        bytes: capture.bytes,
+        compareSnapshot: capture.compareSnapshot,
+        contentFingerprint: capture.fingerprint,
+        title: title?.trim() || `보관 · ${timestampTitle()}`,
+        expectedRepositoryRevision: repository.revision,
+      });
+      try {
+        this.#assertWorkspaceToken(workspace);
+        handler.replaceContentFromBytes(blob.bytes);
+      } catch (error) {
+        const compensated = await this.#store.deleteShelf({
+          repositoryId: result.repository.id,
+          shelfId: result.shelf.id,
+          expectedRepositoryRevision: result.repository.revision,
+        }).catch(() => result.repository);
+        if (this.#isWorkspaceTokenCurrent(workspace, { editor: false, repository: false })) {
+          this.#repository = compensated;
+        }
+        throw error;
+      }
+      this.#repository = result.repository;
+      this.#setDirtyForFingerprint(head.contentFingerprint, 'version-shelf', head.contentFingerprint);
+      await this.#refreshData(true);
+    });
+  }
+
+  async applyShelf(id: string, remove: boolean): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation(true);
+      await this.#checkpointDirty('pre-restore');
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      const shelf = await this.#store.getShelf(shelfId(id));
+      if (!shelf || shelf.repositoryId !== repository.id) throw new VersionError('SHELF_NOT_FOUND', 'Shelf was not found');
+      const blob = await this.#store.getBlob(shelf.blobId);
+      this.#assertWorkspaceToken(workspace);
+      if (!blob) throw new VersionError('CORRUPT_BLOB', 'Shelf bytes are missing');
+      const handler = this.#requireInputHandler();
+      const original = captureVersionSnapshot(this.#wasm);
+      const wasDirty = this.#documentState.isDirty();
+      handler.prepareSnapshotCapacity(remove ? 4 : 2);
+      try {
+        handler.replaceContentFromBytes(blob.bytes);
+      } catch (error) {
+        throw new VersionError('RESTORE_PARSE_FAILED', 'Shelf bytes could not be applied', {
+          cause: error instanceof Error ? error : undefined,
+        });
+      }
+      this.#setDirtyForFingerprint(shelf.contentFingerprint, 'version-shelf-apply');
+      if (remove) {
+        const replacementWorkspace = this.#captureWorkspaceToken();
+        let persisted = false;
+        try {
+          const updated = await this.#store.deleteShelf({
+            repositoryId: repository.id,
+            shelfId: shelf.id,
+            expectedRepositoryRevision: repository.revision,
+          });
+          persisted = true;
+          if (this.#isWorkspaceTokenCurrent(replacementWorkspace, { editor: false, repository: false })) {
+            this.#repository = updated;
+          }
+        } catch (error) {
+          if (!persisted) this.#rollbackReplacement(handler, original, wasDirty, replacementWorkspace);
+          throw error;
+        }
+      }
+      await this.#refreshData(true);
+    });
+  }
+
+  async deleteShelf(id: string): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation();
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      await this.#store.deleteShelf({
+        repositoryId: repository.id,
+        shelfId: shelfId(id),
+        expectedRepositoryRevision: repository.revision,
+      });
+      await this.#refreshData(true);
+    });
+  }
+
+  async compareLegacy(id: string): Promise<void> {
+    await this.#enqueue(async () => {
+      const workspace = this.#captureWorkspaceToken();
+      const payload = await getHistoryPayload(id);
+      this.#assertWorkspaceToken(workspace);
+      if (!payload) throw new Error('이전 기록을 읽지 못했습니다.');
+      const current = captureVersionSnapshot(this.#wasm);
+      const legacy = this.#state.legacy.find((item) => item.id === id);
+      const leftName = legacy?.title ?? '이전 기록';
+      const session = payload.kind === 'ir'
+        ? compareSnapshots(payload.snapshot, current.compareSnapshot, VERSION_COMPARE_OPTIONS)
+        : await compareDocuments(payload.bytes, leftName, current.bytes, this.#wasm.fileName, VERSION_COMPARE_OPTIONS);
+      this.#assertWorkspaceToken(workspace);
+      this.#compareStore.set(session);
+      this.#compareWindow.show(
+        session,
+        this.#compareStore,
+        0,
+        payload.kind === 'legacy'
+          ? {
+              left: { bytes: payload.bytes, fileName: leftName },
+              right: { bytes: current.bytes, fileName: this.#wasm.fileName },
+            }
+          : undefined,
+      );
+    });
+  }
+
+  setAiTitlesEnabled(enabled: boolean): void {
+    this.#state.aiTitlesEnabled = enabled;
+    try {
+      localStorage.setItem(AI_TITLES_KEY, enabled ? '1' : '0');
+    } catch {
+      // Keep the session preference when storage is unavailable.
+    }
+    this.#emit();
+  }
+
+  async collectGarbage(): Promise<void> {
+    await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation();
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      await this.#store.collectGarbage(repository.id, repository.revision);
+      await this.#refreshData(true);
+    });
+  }
+
+  dispose(): void {
+    if (this.#pendingApprovalTimer !== null) window.clearTimeout(this.#pendingApprovalTimer);
+    for (const unsubscribe of this.#unsubscribers) unsubscribe();
+    this.#listeners.clear();
+    this.#compareWindow.hide();
+    if (this.#ownsStore) void this.#store.close();
+  }
+
+  async #enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.#operation.catch(() => undefined).then(operation);
+    this.#operation = next.then(() => undefined, () => undefined);
+    try {
+      return await next;
+    } catch (error) {
+      throw new Error(errorMessage(error), { cause: error instanceof Error ? error : undefined });
+    }
+  }
+
+  #captureWorkspaceToken(): WorkspaceToken {
+    const id = this.#getDocumentId();
+    if (!id) throw new VersionError('SAVE_REQUIRED', 'A saved document ID is required');
+    return {
+      documentId: id,
+      editorRevision: this.#editorRevision,
+      repositoryId: this.#repository?.id ?? null,
+      repositoryRevision: this.#repository?.revision ?? null,
+    };
+  }
+
+  #assertWorkspaceToken(
+    token: WorkspaceToken,
+    options: { editor?: boolean; repository?: boolean } = {},
+  ): void {
+    if (!this.#isWorkspaceTokenCurrent(token, options)) {
+      throw new VersionError('STALE_WORKSPACE', 'The active document or workspace changed');
+    }
+  }
+
+  #isWorkspaceTokenCurrent(
+    token: WorkspaceToken,
+    options: { editor?: boolean; repository?: boolean } = {},
+  ): boolean {
+    const editor = options.editor ?? true;
+    const repository = options.repository ?? true;
+    const currentRepository = this.#repository;
+    return !(
+      this.#getDocumentId() !== token.documentId
+      || (editor && this.#editorRevision !== token.editorRevision)
+      || (repository && (
+        (currentRepository?.id ?? null) !== token.repositoryId
+        || (currentRepository?.revision ?? null) !== token.repositoryRevision
+      ))
+    );
+  }
+
+  #guardSaved(): void {
+    if (!this.#getDocumentId() || this.#wasm.pageCount === 0 || this.#wasm.isNewDocument) {
+      throw new VersionError('SAVE_REQUIRED', 'The document must be saved first');
+    }
+  }
+
+  async #guardMutation(resolvePending = false): Promise<void> {
+    this.#guardSaved();
+    const documentAtStart = this.#getDocumentId();
+    if (this.#agentBridge.isTurnRunning()) {
+      throw new VersionError('ACTIVE_AGENT_TURN', 'An agent turn is still running');
+    }
+    if (!this.#agentBridge.pendingEdits.hasPending()) return;
+    if (!resolvePending) throw new VersionError('PENDING_AGENT_REVIEW', 'Agent edits are awaiting review');
+    const sets = () => this.#agentBridge.pendingEdits.getChangeSets().filter((set) => set.ops.length > 0);
+    const opCount = sets().reduce((count, set) => count + set.ops.length, 0);
+    if (opCount === 0) return;
+    const choice = await showPendingAgentEditsDialog(opCount);
+    if (this.#getDocumentId() !== documentAtStart) {
+      throw new VersionError('STALE_WORKSPACE', 'The active document changed during version review');
+    }
+    if (choice === 'cancel') throw new VersionError('PENDING_AGENT_REVIEW', 'The version action was cancelled');
+    this.#suppressApprovalCheckpoint += 1;
+    try {
+      if (choice === 'approve') {
+        if (!sets().every((set) => this.#agentBridge.pendingEdits.approve(set.id))) {
+          throw new VersionError('PENDING_AGENT_REVIEW', 'Some agent edits could not be approved');
+        }
+      } else {
+        for (const set of sets()) this.#agentBridge.pendingEdits.reject(set.id);
+      }
+    } finally {
+      this.#suppressApprovalCheckpoint -= 1;
+    }
+  }
+
+  async #flushDeferredSave(): Promise<void> {
+    const deferred = this.#deferredSavedSnapshot;
+    const repository = this.#repository;
+    if (!deferred) return;
+    if (
+      !repository
+      || this.#getDocumentId() !== deferred.workspace.documentId
+      || repository.id !== deferred.workspace.repositoryId
+    ) {
+      this.#deferredSavedSnapshot = null;
+      return;
+    }
+    await this.#createCheckpoint({ reason: 'save', lastSaved: true }, deferred.snapshot);
+    this.#deferredSavedSnapshot = null;
+  }
+
+  async #refreshData(includeLegacy: boolean): Promise<void> {
+    const epoch = ++this.#refreshEpoch;
+    const id = this.#getDocumentId();
+    this.#state.documentId = id;
+    this.#state.documentName = this.#wasm.pageCount > 0 ? this.#wasm.fileName : null;
+    this.#state.saved = Boolean(id && this.#wasm.pageCount > 0 && !this.#wasm.isNewDocument);
+    if (!id || !this.#state.saved) {
+      this.#repository = null;
+      this.#refs = [];
+      this.#commits = [];
+      this.#shelves = [];
+      this.#activeBranch = null;
+      this.#semanticDirty = false;
+      this.#semanticDirtyRevision = this.#editorRevision;
+      await this.#buildState(false, includeLegacy);
+      return;
+    }
+    const repository = await this.#store.findRepositoryByDocumentId(documentId(id));
+    if (epoch !== this.#refreshEpoch || this.#getDocumentId() !== id) return;
+    this.#repository = repository;
+    if (!repository) {
+      this.#refs = [];
+      this.#commits = [];
+      this.#shelves = [];
+      this.#activeBranch = null;
+      this.#semanticDirty = false;
+      this.#semanticDirtyRevision = this.#editorRevision;
+      await this.#buildState(false, includeLegacy, id);
+      return;
+    }
+    const [refs, commits, shelves] = await Promise.all([
+      this.#store.listRefs(repository.id),
+      this.#store.listCommits(repository.id, { limit: PAGE_SIZE }),
+      this.#store.listShelves(repository.id),
+    ]);
+    if (epoch !== this.#refreshEpoch || this.#getDocumentId() !== id) return;
+    this.#refs = refs;
+    this.#commits = commits;
+    this.#shelves = shelves;
+    const branches = refs.filter((ref): ref is BranchRef => ref.kind === 'branch');
+    const storedBranch = readActiveBranch(id);
+    const memoryBranch = this.#activeBranches.get(id);
+    this.#activeBranch = branches.find((branch) => branch.name === storedBranch)?.name
+      ?? branches.find((branch) => branch.name === memoryBranch)?.name
+      ?? branches.find((branch) => branch.name === 'main')?.name
+      ?? branches[0]?.name
+      ?? null;
+    if (this.#activeBranch) persistActiveBranch(id, this.#activeBranch);
+    if (this.#activeBranch) this.#activeBranches.set(id, this.#activeBranch);
+    await this.#refreshSemanticDirty(id, epoch);
+    if (epoch !== this.#refreshEpoch || this.#getDocumentId() !== id) return;
+    await this.#buildState(commits.length === PAGE_SIZE && commits.at(-1)!.ordinal > 1, includeLegacy, id);
+  }
+
+  async #buildState(
+    hasMore: boolean,
+    includeLegacy = false,
+    expectedDocumentId = this.#getDocumentId(),
+  ): Promise<void> {
+    const branchRefs = this.#refs.filter((ref): ref is BranchRef => ref.kind === 'branch');
+    const tagRefs = this.#refs.filter((ref) => ref.kind === 'tag');
+    const graphRows = layoutCommitGraph(this.#commits);
+    const rowById = new Map(graphRows.map((row) => [row.commitId, row]));
+    const blobLengths = new Map<string, number>();
+    await Promise.all([...new Set([
+      ...this.#commits.map((commit) => commit.blobId),
+      ...this.#shelves.map((shelf) => shelf.blobId),
+    ])].map(async (id) => {
+      const blob = await this.#store.getBlob(id);
+      if (blob) blobLengths.set(id, blob.byteLength);
+    }));
+
+    const active = branchRefs.find((branch) => branch.name === this.#activeBranch) ?? null;
+    const commitViews: VersionCommitView[] = this.#commits.map((commit) => {
+      const graph = rowById.get(commit.id);
+      return {
+        id: commit.id,
+        shortId: commit.id.slice(0, 8),
+        title: commit.title,
+        createdAt: commit.createdAt,
+        reason: commit.reason,
+        parentIds: [...commit.parents],
+        branchLabels: branchRefs.filter((ref) => ref.target === commit.id).map((ref) => ref.name),
+        tagLabels: tagRefs.filter((ref) => ref.target === commit.id).map((ref) => ref.name),
+        lane: graph?.lane ?? 0,
+        parentLanes: graph?.edges.map((edge) => edge.toLane) ?? [],
+        isHead: active?.target === commit.id,
+        byteLength: blobLengths.get(commit.blobId) ?? 0,
+      };
+    });
+    const commitById = new Map(this.#commits.map((commit) => [commit.id, commit]));
+    const branches: VersionBranchView[] = branchRefs.map((branch) => ({
+      name: branch.name,
+      headId: branch.target,
+      isActive: branch.name === this.#activeBranch,
+      isDefault: branch.name === 'main',
+      updatedAt: commitById.get(branch.target)?.createdAt ?? this.#repository?.enabledAt ?? Date.now(),
+    }));
+    const shelves: VersionShelfView[] = this.#shelves.map((shelf) => ({
+      id: shelf.id,
+      title: shelf.title,
+      createdAt: shelf.createdAt,
+      baseCommitId: shelf.baseCommitId,
+      byteLength: blobLengths.get(shelf.blobId) ?? 0,
+    }));
+    let legacy: LegacyVersionView[] = this.#state.legacy;
+    if (includeLegacy) {
+      legacy = (await listHistoryMeta()).map((entry) => ({
+        id: entry.id,
+        title: entry.label,
+        createdAt: entry.createdAt,
+        byteLength: entry.byteLength,
+      }));
+    }
+    const [estimate, repositoryUsage] = await Promise.all([
+      typeof navigator !== 'undefined' && navigator.storage?.estimate
+        ? navigator.storage.estimate().catch(() => ({} as StorageEstimate))
+        : Promise.resolve({} as StorageEstimate),
+      this.#repository
+        ? this.#store.getRepositoryStorageUsage(this.#repository.id).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    if (this.#getDocumentId() !== expectedDocumentId) return;
+    this.#state = {
+      documentId: this.#getDocumentId(),
+      documentName: this.#wasm.pageCount > 0 ? this.#wasm.fileName : null,
+      saved: Boolean(this.#getDocumentId() && this.#wasm.pageCount > 0 && !this.#wasm.isNewDocument),
+      enabled: this.#repository !== null,
+      dirty: this.#isSemanticDirty(),
+      mutationBlockedReason: this.#mutationBlockedReason(),
+      activeBranch: this.#activeBranch,
+      commits: commitViews,
+      branches,
+      shelves,
+      legacy,
+      hasMoreCommits: hasMore,
+      loading: false,
+      storageBytes: repositoryUsage?.totalBytes ?? 0,
+      storageQuotaBytes: typeof estimate.quota === 'number' ? estimate.quota : null,
+      aiTitlesEnabled: readAiTitlesEnabled(),
+    };
+    this.#emit();
+  }
+
+  #syncTransientState(): void {
+    this.#state.dirty = this.#isSemanticDirty();
+    this.#state.mutationBlockedReason = this.#mutationBlockedReason();
+    this.#emit();
+  }
+
+  async #refreshSemanticDirty(expectedDocumentId: string, epoch: number): Promise<void> {
+    const branch = this.#refs.find((ref): ref is BranchRef => (
+      ref.kind === 'branch' && ref.name === this.#activeBranch
+    ));
+    if (!branch) {
+      this.#semanticDirty = false;
+      this.#semanticDirtyRevision = this.#editorRevision;
+      return;
+    }
+    const revision = this.#editorRevision;
+    const head = this.#commits.find((commit) => commit.id === branch.target)
+      ?? await this.#store.getCommit(branch.target);
+    if (
+      epoch !== this.#refreshEpoch
+      || this.#getDocumentId() !== expectedDocumentId
+      || this.#editorRevision !== revision
+    ) return;
+    const currentFingerprint = fingerprintBytes(this.#wasm.exportHwp());
+    if (
+      epoch !== this.#refreshEpoch
+      || this.#getDocumentId() !== expectedDocumentId
+      || this.#editorRevision !== revision
+    ) return;
+    this.#semanticDirty = !head || currentFingerprint !== head.contentFingerprint;
+    this.#semanticDirtyRevision = revision;
+  }
+
+  #isSemanticDirty(): boolean {
+    if (!this.#repository) return this.#documentState.isDirty();
+    return this.#semanticDirtyRevision === this.#editorRevision ? this.#semanticDirty : true;
+  }
+
+  #mutationBlockedReason(): string | null {
+    if (this.#agentBridge.isTurnRunning()) return '에이전트가 응답 중입니다.';
+    if (this.#agentBridge.pendingEdits.hasPending()) return '대기 중인 에이전트 편집을 먼저 처리하세요.';
+    return null;
+  }
+
+  #emit(): void {
+    const state = this.getState();
+    for (const listener of this.#listeners) listener(state);
+  }
+
+  #requireRepository(): VersionRepository {
+    if (!this.#repository) throw new VersionError('VERSIONING_DISABLED', 'Versioning is not enabled');
+    return this.#repository;
+  }
+
+  #requireActiveBranch(): BranchRef {
+    const active = this.#refs.find((ref): ref is BranchRef => (
+      ref.kind === 'branch' && ref.name === this.#activeBranch
+    ));
+    if (!active) throw new VersionError('REF_NOT_FOUND', 'The active branch was not found');
+    return active;
+  }
+
+  #requireInputHandler(): InputHandler {
+    const handler = this.#getInputHandler();
+    if (!handler) throw new VersionError('RESTORE_PARSE_FAILED', 'The editor is not ready');
+    return handler;
+  }
+
+  async #requireCommit(id: string): Promise<VersionCommit> {
+    const commit = await this.#store.getCommit(commitId(id));
+    if (!commit || commit.repositoryId !== this.#repository?.id) {
+      throw new VersionError('COMMIT_NOT_FOUND', 'Commit was not found');
+    }
+    return commit;
+  }
+
+  async #createCheckpoint(
+    options: CreateCheckpointOptions,
+    captured?: CapturedVersionSnapshot,
+  ): Promise<VersionCommit | null> {
+    const workspace = this.#captureWorkspaceToken();
+    const repository = this.#requireRepository();
+    const branch = this.#requireActiveBranch();
+    const capture = captured ?? captureVersionSnapshot(this.#wasm);
+    const head = await this.#requireCommit(branch.target);
+    this.#assertWorkspaceToken(workspace);
+    const message = options.message?.trim() ?? '';
+    if (capture.fingerprint === head.contentFingerprint && !options.allowSameContent) {
+      if (options.lastSaved && repository.lastSavedFingerprint !== capture.fingerprint) {
+        const updated = await this.#store.markSaved(
+          repository.id,
+          capture.fingerprint,
+          repository.revision,
+        );
+        options.onPersisted?.();
+        if (!this.#isWorkspaceTokenCurrent(workspace, { editor: false })) return null;
+        this.#repository = updated;
+        await this.#refreshData(true);
+        return null;
+      }
+      if (options.reason === 'manual' && message) {
+        const name = tagForMessage(message, this.#refs);
+        await this.#store.createTag({
+          repositoryId: repository.id,
+          name: tagName(name),
+          target: head.id,
+          expectedRepositoryRevision: repository.revision,
+        });
+        options.onPersisted?.();
+        if (!this.#isWorkspaceTokenCurrent(workspace, { editor: false })) return null;
+        await this.#refreshData(true);
+        return null;
+      }
+      if (options.reason === 'manual') throw new VersionError('NO_CHANGES', 'The content is already checkpointed');
+      return null;
+    }
+    const before = await this.#store.getCompareSnapshot(head.compareSnapshotId);
+    this.#assertWorkspaceToken(workspace);
+    const analysis = analyzeVersionDiff(before?.snapshot ?? null, capture.compareSnapshot);
+    const createdAt = Date.now();
+    const result = await this.#store.createCheckpoint({
+      repositoryId: repository.id,
+      branch: branch.name,
+      expectedRepositoryRevision: repository.revision,
+      expectedBranchRevision: branch.revision,
+      expectedHead: branch.target,
+      parents: options.parents,
+      reason: options.reason,
+      bytes: capture.bytes,
+      compareSnapshot: capture.compareSnapshot,
+      contentFingerprint: capture.fingerprint,
+      title: message || timestampTitle(createdAt),
+      titleOrigin: message ? 'manual' : 'timestamp',
+      titleRevision: 0,
+      author: options.author ?? (options.reason === 'manual'
+        ? { kind: 'user', label: '사용자' }
+        : { kind: 'system', label: '버전 관리자' }),
+      stats: analysis.stats,
+      createdAt,
+      ...(options.lastSaved ? { lastSavedFingerprint: capture.fingerprint } : {}),
+    });
+    options.onPersisted?.();
+    if (!this.#isWorkspaceTokenCurrent(workspace, { editor: false })) return result.commit;
+    this.#repository = result.repository;
+    await this.#refreshData(true);
+    if (!message) {
+      this.#requestGeneratedTitle(
+        result.commit,
+        analysis.titleSummary,
+      );
+    }
+    return result.commit;
+  }
+
+  async #checkpointDirty(reason: 'pre-restore' | 'pre-switch'): Promise<void> {
+    const workspace = this.#captureWorkspaceToken();
+    const branch = this.#requireActiveBranch();
+    const capture = captureVersionSnapshot(this.#wasm);
+    const head = await this.#requireCommit(branch.target);
+    this.#assertWorkspaceToken(workspace);
+    if (capture.fingerprint === head.contentFingerprint) {
+      this.#setDirtyForFingerprint(capture.fingerprint, 'version-head-match');
+      return;
+    }
+    await this.#createCheckpoint({ reason }, capture);
+  }
+
+  #requestGeneratedTitle(commit: VersionCommit, summary: CheckpointTitleSummary): void {
+    if (!readAiTitlesEnabled()) return;
+    void this.#agentBridge.requestCheckpointTitle({
+      commitId: commit.id,
+      titleRevision: commit.titleRevision,
+      appLanguage: document.documentElement.lang || navigator.language || 'ko-KR',
+      summary,
+    }).then(async (result) => {
+      if (!result || result.commitId !== commit.id || result.titleRevision !== commit.titleRevision) return;
+      try {
+        await this.#store.updateCommitTitle({
+          repositoryId: commit.repositoryId,
+          commitId: commit.id,
+          expectedTitleRevision: commit.titleRevision,
+          title: result.title,
+          titleOrigin: 'generated',
+          titleRevision: commit.titleRevision,
+          generatedBy: { provider: result.provider, model: result.model },
+        });
+        await this.refresh();
+      } catch {
+        // A manual title or another checkpoint won the compare-and-swap.
+      }
+    }).catch(() => undefined);
+  }
+
+  #applyBranchContent(
+    handler: InputHandler,
+    bytes: Uint8Array,
+    target: VersionCommit,
+    next: BranchRef,
+    previous: BranchRef,
+    previousCommit: VersionCommit | null = null,
+  ): void {
+    handler.replaceContentFromBytes(bytes, {
+      afterUndo: () => {
+        queueMicrotask(() => {
+          this.#setActiveBranch(previous.name);
+          if (previousCommit) {
+            this.#setDirtyForFingerprint(
+              previousCommit.contentFingerprint,
+              'version-branch-undo',
+              previousCommit.contentFingerprint,
+            );
+          }
+          void this.refresh();
+        });
+      },
+      afterRedo: () => {
+        queueMicrotask(() => {
+          this.#setActiveBranch(next.name);
+          this.#setDirtyForFingerprint(
+            target.contentFingerprint,
+            'version-branch-redo',
+            target.contentFingerprint,
+          );
+          void this.refresh();
+        });
+      },
+    });
+    this.#setActiveBranch(next.name);
+    this.#setDirtyForFingerprint(
+      target.contentFingerprint,
+      'version-branch-switch',
+      target.contentFingerprint,
+    );
+  }
+
+  #rollbackReplacement(
+    handler: InputHandler,
+    original: CapturedVersionSnapshot,
+    wasDirty: boolean,
+    replacementWorkspace: WorkspaceToken,
+  ): void {
+    try {
+      this.#assertWorkspaceToken(replacementWorkspace, { repository: false });
+    } catch {
+      // Never undo across intervening user input or a document switch.
+      return;
+    }
+    try {
+      handler.performUndo();
+      // Recording the restored state as a no-op clears the failed replacement from redo.
+      handler.replaceContentFromBytes(original.bytes);
+      this.#recordSemanticDirty(original.fingerprint);
+      if (wasDirty) this.#documentState.markDirty('version-operation-rollback');
+      else this.#documentState.markClean('version-operation-rollback');
+      this.#syncTransientState();
+    } catch (error) {
+      console.error('[Versions] Failed to roll back an uncommitted content replacement:', error);
+    }
+  }
+
+  #setActiveBranch(name: BranchName): void {
+    this.#activeBranch = name;
+    const id = this.#getDocumentId();
+    if (id) {
+      this.#activeBranches.set(id, name);
+      persistActiveBranch(id, name);
+    }
+  }
+
+  #setDirtyForFingerprint(
+    fingerprint: string,
+    reason: string,
+    semanticHeadFingerprint?: string,
+  ): void {
+    this.#recordSemanticDirty(fingerprint, semanticHeadFingerprint);
+    if (fingerprint === this.#repository?.lastSavedFingerprint) this.#documentState.markClean(reason);
+    else this.#documentState.markDirty(reason);
+  }
+
+  #recordSemanticDirty(fingerprint: string, headFingerprint?: string): void {
+    const active = this.#refs.find((ref): ref is BranchRef => (
+      ref.kind === 'branch' && ref.name === this.#activeBranch
+    ));
+    const head = headFingerprint
+      ?? this.#commits.find((commit) => commit.id === active?.target)?.contentFingerprint;
+    this.#semanticDirty = head ? fingerprint !== head : true;
+    this.#semanticDirtyRevision = this.#editorRevision;
+    this.#state.dirty = this.#semanticDirty;
+  }
+}

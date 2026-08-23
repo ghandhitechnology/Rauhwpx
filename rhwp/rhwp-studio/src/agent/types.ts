@@ -420,6 +420,40 @@ export interface OpenRouterCredits {
   error: string | null;
 }
 
+export type CheckpointTitleChange = 'added' | 'removed' | 'modified';
+export type CheckpointTitleProvider = 'pi' | 'codex' | 'grok' | 'claude';
+
+export interface CheckpointTitleSummaryItem {
+  change: CheckpointTitleChange;
+  objectType: string;
+  heading?: string;
+  snippet?: string;
+}
+
+export interface CheckpointTitleSummary {
+  totals: {
+    added: number;
+    removed: number;
+    modified: number;
+  };
+  items: CheckpointTitleSummaryItem[];
+}
+
+export interface CheckpointTitleRequest {
+  commitId: string;
+  titleRevision: number;
+  appLanguage: string;
+  summary: CheckpointTitleSummary;
+}
+
+export interface CheckpointTitleResult {
+  commitId: string;
+  titleRevision: number;
+  title: string;
+  provider: CheckpointTitleProvider;
+  model: string;
+}
+
 export function isClaudeUsagePlan(value: unknown): value is ClaudeUsagePlan {
   return value === 'pro' || value === 'max5x' || value === 'max20x' || value === 'api';
 }

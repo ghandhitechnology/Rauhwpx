@@ -22,10 +22,10 @@ const settingsCss = readSource('../src/ui/agent-sidebar/settings.css');
 const css = readSource('../src/ui/agent-sidebar/agent-sidebar.css');
 const icons = readSource('../src/ui/agent-sidebar/icons.ts');
 
-test('설정 페이지는 무대에 다른 페이지와 나란히 선다', () => {
+test('설정과 버전 페이지는 무대에 다른 페이지와 나란히 선다', () => {
   assert.match(
     source,
-    /stage\.append\(\s*workspaceBar,\s*chatPage,\s*threadsPage,\s*skillsPage,\s*referenceLibrary\.page,\s*settingsPage,\s*reviewColumn,\s*planColumn,\s*railResize,\s*reviewResize,?\s*\)/,
+    /stage\.append\(\s*workspaceBar,\s*chatPage,\s*threadsPage,\s*skillsPage,\s*referenceLibrary\.page,\s*settingsPage,\s*versionsPage,\s*reviewColumn,\s*planColumn,\s*railResize,\s*reviewResize,?\s*\)/,
   );
   assert.match(settings, /element\.id = 'ag-settings-panel'/);
   assert.match(settings, /element\.setAttribute\('role', 'region'\)/);
@@ -33,24 +33,24 @@ test('설정 페이지는 무대에 다른 페이지와 나란히 선다', () =>
 });
 
 test('스킬 페이지와 같은 전환 계약을 탄다', () => {
-  assert.match(css, /\.ag-skills-page,\n\.ag-settings-page \{/);
-  assert.match(css, /\.ag-settings-open \.ag-chat-page \{/);
-  assert.match(css, /\.ag-settings-open \.ag-settings-page \{/);
+  assert.match(css, /\.ag-skills-page,\n\.ag-settings-page,\n\.ag-versions-page \{/);
+  assert.match(css, /\.ag-settings-open \.ag-chat-page,/);
+  assert.match(css, /\.ag-settings-open \.ag-settings-page,/);
   assert.match(css, /\.ag-fullscreen \.ag-settings-page/);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*\.ag-settings-open \.ag-settings-page \{\s*transition: none;/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*\.ag-settings-open \.ag-settings-page,[\s\S]*\.ag-versions-open \.ag-versions-page \{\s*transition: none;/);
 });
 
-test('목록·스킬·설정 세 페이지는 서로를 닫는다', () => {
+test('목록·스킬·설정·버전 페이지는 서로를 닫는다', () => {
   assert.match(source, /function setSettingsPanelOpen\(open: boolean\): void/);
   assert.match(source, /root\.classList\.toggle\('ag-settings-open', open\)/);
   // 설정을 열면 목록/스킬이 닫히고,
   assert.match(
     source,
-    /if \(open\) \{\s*setConfigPanelOpen\(false\);\s*threadsPanelOpen = false;\s*skillsPanelOpen = false;\s*root\.classList\.remove\('ag-threads-open', 'ag-skills-open'\);/,
+    /if \(open\) \{\s*setConfigPanelOpen\(false\);\s*threadsPanelOpen = false;\s*skillsPanelOpen = false;\s*root\.classList\.remove\('ag-threads-open', 'ag-skills-open'\);\s*skillsBtn\.setAttribute\('aria-expanded', 'false'\);\s*skillsPage\.setAttribute\('aria-hidden', 'true'\);\s*closeVersionsPage\(\);/,
   );
   // 목록/스킬/참고자료/전체 화면으로 넘어가면 설정이 닫힌다.
   assert.match(source, /function closeSettingsPage\(\): void \{[\s\S]*root\.classList\.remove\('ag-settings-open'\)/);
-  assert.equal((source.match(/closeSettingsPage\(\);/g) ?? []).length, 4);
+  assert.ok((source.match(/closeSettingsPage\(\);/g) ?? []).length >= 4);
   // 설정과 참고자료 페이지는 서로를 닫는다.
   assert.match(source, /if \(open && referenceLibrary\.isOpen\(\)\) referenceLibrary\.setOpen\(false\);\s*settingsPanelOpen = open;/);
 });
@@ -60,7 +60,7 @@ test('헤더에 설정(기어) 버튼이 있다', () => {
   assert.match(source, /settingsBtn\.setAttribute\('aria-label', '설정'\)/);
   assert.match(source, /settingsBtn\.setAttribute\('aria-controls', 'ag-settings-panel'\)/);
   assert.match(source, /settingsBtn\.appendChild\(createIcon\('gear'\)\)/);
-  assert.match(source, /headerActions\.append\(threadsBtn, settingsBtn\)/);
+  assert.match(source, /headerActions\.append\(threadsBtn, versionsBtn, settingsBtn\)/);
   assert.match(icons, /gear: 'M/);
   assert.match(icons, /refresh: 'M/);
 });

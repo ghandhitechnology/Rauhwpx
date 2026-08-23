@@ -429,6 +429,13 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 현재 파일/편집 세션 정체성을 유지한 채 문서 내용만 교체한다.
+    #[wasm_bindgen(js_name = replaceContentFromBytes)]
+    pub fn replace_content_from_bytes(&mut self, data: &[u8]) -> Result<String, JsValue> {
+        self.replace_content_from_bytes_native(data)
+            .map_err(|error| error.into())
+    }
+
     /// 빈 문서 생성 (테스트/미리보기용)
     ///
     /// 기본 A4 구역 1개 + 빈 문단 1개를 포함한다. 구역 0개 문서는 모든

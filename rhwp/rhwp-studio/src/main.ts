@@ -97,6 +97,7 @@ import {
 import { initAgentBridge, type AgentBridge } from './agent/bridge.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
 import { initInlinePrompt } from './agent/inline-prompt.ts';
+import { DocumentVersionController } from './versioning/controller.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
 
 const wasm = new WasmBridge();
@@ -134,6 +135,12 @@ async function completeHostSave(fileName?: string): Promise<{ ok: true; wasDirty
   const wasDirty = documentState.isDirty();
   if (fileName) wasm.fileName = fileName;
   documentState.markClean('host-save');
+  eventBus.emit('document-context-changed');
+  eventBus.emit('document-saved', {
+    reason: 'host-save',
+    fileName: wasm.fileName,
+    sourceFormat: wasm.getSourceFormat(),
+  });
   await autosaveManager.discardCurrentDraft('host-save');
   return { ok: true, wasDirty };
 }
@@ -642,9 +649,18 @@ async function initialize(): Promise<void> {
         isReadOnly: () => documentReadOnly,
       });
       agentBridgeRef = agentBridge;
+      const versionController = new DocumentVersionController({
+        wasm,
+        eventBus,
+        documentState,
+        getInputHandler: () => inputHandler,
+        getDocumentId: () => activeDocumentId,
+        agentBridge,
+      });
       const agentSidebar = initAgentSidebar({
         bridge: agentBridge,
         eventBus,
+        versionController,
         getDocumentContext: () => {
           const documentName = wasm.pageCount > 0 ? wasm.fileName : null;
           let selectionLabel: string | null = null;
@@ -669,6 +685,7 @@ async function initialize(): Promise<void> {
       });
       if (import.meta.env.DEV) {
         (window as any).__agentBridge = agentBridge;
+        (window as any).__versionController = versionController;
       }
     } catch (agentError) {
       console.error('[main] 에이전트 사이드바 초기화 실패 (기능 비활성화):', agentError);

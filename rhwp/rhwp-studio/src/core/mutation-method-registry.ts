@@ -90,6 +90,11 @@ export const AGENT_EDIT_SESSION_METHODS: readonly string[] = [
   'copyTableCellsTransposed', 'toggleHideHeaderFooter',
 ];
 
+/** Undo를 직접 소유하는 편집기 경계에서만 호출하며 에이전트 RPC에는 노출하지 않는 변이. */
+export const EDITOR_ROUTED_MUTATING_METHODS: readonly string[] = [
+  'replaceContentFromBytes',
+];
+
 /**
  * 변이형 동사로 시작하지만 문서 IR 을 바꾸지 않는 메서드 — 드리프트 검사의
  * 명시 분류. (세션/렌더 상태, 캐럿 탐색, 수명주기)

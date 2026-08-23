@@ -10,6 +10,9 @@ export class HwpDocument {
   /** HWP 파일 바이트로부터 문서를 로드한다. */
   constructor(data: Uint8Array);
 
+  /** 현재 파일 정체성을 유지한 채 문서 내용만 교체한다. */
+  replaceContentFromBytes(data: Uint8Array): string;
+
   /** 빈 문서를 생성한다 (테스트/미리보기용). */
   static createEmpty(): HwpDocument;
 

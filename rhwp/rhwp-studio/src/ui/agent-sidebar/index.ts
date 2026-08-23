@@ -81,6 +81,10 @@ import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
 import { createReferenceLibrary } from './reference-library.ts';
 import {
+  createVersionManagerPage,
+  type VersionManagerController,
+} from './version-manager.ts';
+import {
   isDesktopApp,
   openPublishedDocumentInNewWindow,
   parsePublishedDocumentLink,
@@ -114,6 +118,8 @@ export interface AgentSidebarDeps {
     documentId: string | null;
     fileName: string | null;
   }) => void;
+  /** 현재 문서의 로컬 체크포인트와 브랜치를 관리한다. */
+  versionController?: VersionManagerController;
 }
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
@@ -505,10 +511,11 @@ function createSketchFilterDefs(): SVGSVGElement {
 
 export function initAgentSidebar(deps: AgentSidebarDeps): {
   root: HTMLElement;
+  openVersions(): void;
   sendInlinePrompt(submission: InlinePromptSubmission): InlinePromptSendResult;
   dispose(): void;
 } {
-  const { bridge, eventBus, getDocumentContext, moveToLibraryDocument } = deps;
+  const { bridge, eventBus, getDocumentContext, moveToLibraryDocument, versionController } = deps;
 
   // 개인 기본값(설정 탭에서 저장) — 새 대화가 이 조합으로 열린다.
   let agentPrefs: AgentPrefs = loadAgentPrefs();
@@ -598,6 +605,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let threadsPanelOpen = false;
   let skillsPanelOpen = false;
   let settingsPanelOpen = false;
+  let versionsPanelOpen = false;
   /** 에이전트 집중 모드 — 스레드 레일과 대화 무대로 문서를 덮는다. */
   let fullscreen = false;
   let threadsRailCollapsed = readStoredThreadsRailCollapsed();
@@ -1186,8 +1194,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     setSettingsPanelOpen(true);
   });
 
+  const versionsBtn = el('button', 'ag-header-icon-btn ag-versions-btn');
+  versionsBtn.type = 'button';
+  versionsBtn.setAttribute('aria-label', '버전');
+  versionsBtn.setAttribute('aria-expanded', 'false');
+  versionsBtn.setAttribute('aria-controls', 'ag-versions-panel');
+  versionsBtn.title = '버전';
+  versionsBtn.appendChild(createIcon('changes'));
+  versionsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setVersionsPanelOpen(true);
+  });
+
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
-  headerActions.append(threadsBtn, settingsBtn);
+  headerActions.append(threadsBtn, versionsBtn, settingsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
@@ -1830,6 +1850,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         threadsPanelOpen = false;
         skillsPanelOpen = false;
         closeSettingsPage();
+        closeVersionsPage();
         root.classList.remove('ag-threads-open', 'ag-skills-open');
         threadsBtn.setAttribute('aria-expanded', 'false');
         skillsBtn.setAttribute('aria-expanded', 'false');
@@ -2007,6 +2028,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     settingsBtn.focus();
   });
 
+  const versionManagerPage = versionController
+    ? createVersionManagerPage(versionController)
+    : null;
+  const versionsPage = versionManagerPage?.element ?? el('section', 'ag-versions-page');
+  if (!versionManagerPage) {
+    versionsPage.id = 'ag-versions-panel';
+    versionsPage.setAttribute('aria-hidden', 'true');
+    versionsPage.inert = true;
+  }
+  versionsPage.addEventListener('ag-versions-close', () => {
+    setVersionsPanelOpen(false);
+    versionsBtn.focus();
+  });
+
   const reviewResize = el('div', 'ag-review-resize');
   reviewResize.setAttribute('role', 'separator');
   reviewResize.setAttribute('aria-orientation', 'vertical');
@@ -2021,6 +2056,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     skillsPage,
     referenceLibrary.page,
     settingsPage,
+    versionsPage,
     reviewColumn,
     planColumn,
     railResize,
@@ -2381,6 +2417,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       threadsPanelOpen = false;
       skillsPanelOpen = false;
       closeSettingsPage();
+      closeVersionsPage();
       root.classList.remove('ag-threads-open', 'ag-skills-open');
       threadsBtn.setAttribute('aria-expanded', 'false');
       skillsBtn.setAttribute('aria-expanded', 'false');
@@ -2482,12 +2519,23 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     settingsPanel.close();
   }
 
+  function closeVersionsPage(): void {
+    versionsPanelOpen = false;
+    root.classList.remove('ag-versions-open');
+    versionsBtn.setAttribute('aria-expanded', 'false');
+    versionsPage.setAttribute('aria-hidden', 'true');
+    versionsPage.inert = true;
+    chatPage.inert = false;
+    versionManagerPage?.close();
+  }
+
   function setSkillsPanelOpen(open: boolean): void {
     if (open && referenceLibrary.isOpen()) referenceLibrary.setOpen(false);
     skillsPanelOpen = open;
     if (open) setConfigPanelOpen(false);
     threadsPanelOpen = false;
     closeSettingsPage();
+    closeVersionsPage();
     root.classList.toggle('ag-skills-open', open);
     root.classList.remove('ag-threads-open');
     skillsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -2518,6 +2566,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       root.classList.remove('ag-threads-open', 'ag-skills-open');
       skillsBtn.setAttribute('aria-expanded', 'false');
       skillsPage.setAttribute('aria-hidden', 'true');
+      closeVersionsPage();
     }
     root.classList.toggle('ag-settings-open', open);
     settingsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -2536,6 +2585,36 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     } else {
       settingsPanel.close();
     }
+  }
+
+  function setVersionsPanelOpen(open: boolean): void {
+    if (!versionController) return;
+    if (fullscreen) {
+      setFullscreen(false);
+      window.setTimeout(() => setVersionsPanelOpen(open), FS_MOTION_SETTLE_MS);
+      return;
+    }
+    if (open && referenceLibrary.isOpen()) referenceLibrary.setOpen(false);
+    versionsPanelOpen = open;
+    if (open) {
+      setConfigPanelOpen(false);
+      threadsPanelOpen = false;
+      skillsPanelOpen = false;
+      closeSettingsPage();
+      root.classList.remove('ag-threads-open', 'ag-skills-open');
+      threadsBtn.setAttribute('aria-expanded', 'false');
+      skillsBtn.setAttribute('aria-expanded', 'false');
+      threadsPage.setAttribute('aria-hidden', 'true');
+      skillsPage.setAttribute('aria-hidden', 'true');
+    }
+    root.classList.toggle('ag-versions-open', open);
+    versionsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    versionsPage.setAttribute('aria-hidden', open ? 'false' : 'true');
+    versionsPage.inert = !open;
+    chatPage.setAttribute('aria-hidden', open ? 'true' : 'false');
+    chatPage.inert = open;
+    if (open) versionManagerPage?.open();
+    else versionManagerPage?.close();
   }
 
   function showSkillList(): void {
@@ -3862,6 +3941,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (open) setConfigPanelOpen(false);
     if (open) skillsPanelOpen = false;
     closeSettingsPage();
+    closeVersionsPage();
     root.classList.toggle('ag-threads-open', open);
     root.classList.remove('ag-skills-open');
     threadsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -5577,6 +5657,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         eventBus.on('cursor-format-changed', updateDocumentContext),
         eventBus.on('picture-object-selection-changed', updateDocumentContext),
         eventBus.on('table-object-selection-changed', updateDocumentContext),
+        eventBus.on('versions:open', () => {
+          setCollapsed(false);
+          setVersionsPanelOpen(true);
+        }),
       ]
     : [];
 
@@ -5605,6 +5689,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (threadsPanelOpen) setThreadsPanelOpen(false);
     if (skillsPanelOpen) setSkillsPanelOpen(false);
     if (settingsPanelOpen) setSettingsPanelOpen(false);
+    if (versionsPanelOpen) setVersionsPanelOpen(false);
     // 승인 대기 중 입력은 계획 수정 의견으로 취급한다 (입력기와 같은 규칙).
     if (chatWorkflow === 'plan' && planningPhase === 'awaiting-approval') {
       setPlanningPhase('planning');
@@ -5625,6 +5710,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   return {
     root,
+    openVersions(): void {
+      setCollapsed(false);
+      setVersionsPanelOpen(true);
+    },
     sendInlinePrompt,
     dispose(): void {
       unsubBridge();
@@ -5660,6 +5749,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       clearConnCountdown();
       writingStyleCalibration.dispose();
       settingsPanel.dispose();
+      versionManagerPage?.dispose();
+      versionController?.dispose?.();
       clearAttachmentDrag();
       root.removeEventListener('dragenter', onAttachmentDragEnter);
       root.removeEventListener('dragover', onAttachmentDragOver);

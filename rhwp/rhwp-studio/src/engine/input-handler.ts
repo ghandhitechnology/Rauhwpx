@@ -8,6 +8,7 @@ import { CommandHistory } from './history';
 import { DeleteSelectionCommand, ApplyCharFormatCommand, ApplyParaFormatCommand, SnapshotCommand, SetFormValueCommand, TextMutationEffectAccumulator, IMMEDIATE_TEXT_MUTATION_EFFECTS, applyCharFormatToTarget } from './command';
 import type { OperationDescriptor, ParaFormatTarget, RefreshPolicy, TextMutationEffects, EditCommand, EditContext, FormValueTarget } from './command';
 import { CapturedSnapshotCommand } from './captured-snapshot-command.ts';
+import type { CapturedSnapshotCallbacks } from './captured-snapshot-command.ts';
 import { VirtualScroll } from '@/view/virtual-scroll';
 import { ViewportManager } from '@/view/viewport-manager';
 import type {
@@ -20,6 +21,7 @@ import type {
   LayerNode,
   LayerTextRunOp,
   PageInfo,
+  DocumentInfo,
 } from '@/core/types';
 import type { CommandDispatcher } from '@/command/dispatcher';
 import type { EditorEditMode } from '@/command/types';
@@ -2726,7 +2728,11 @@ export class InputHandler {
    * Apply an autonomous headless mutation as one atomic, undoable history entry.
    * The exact before state is restored if the callback or after-snapshot capture fails.
    */
-  executeAppliedSnapshot<T>(operationType: string, operation: (wasm: WasmBridge) => T): T {
+  executeAppliedSnapshot<T>(
+    operationType: string,
+    operation: (wasm: WasmBridge) => T,
+    callbacks: CapturedSnapshotCallbacks = {},
+  ): T {
     if (this.readOnly) {
       throw new Error('This template preview is read-only');
     }
@@ -2771,6 +2777,7 @@ export class InputHandler {
       cursorAfter,
       beforeId,
       afterId,
+      callbacks,
     );
     beforeId = null;
     afterId = null;
@@ -2791,6 +2798,20 @@ export class InputHandler {
       console.warn('[InputHandler] committed autonomous edit refresh failed:', error);
     }
     return result;
+  }
+
+  /** 현재 문서의 파일 정체성을 유지하며 버전 payload를 한 번의 Undo 항목으로 적용한다. */
+  replaceContentFromBytes(
+    data: Uint8Array,
+    callbacks: CapturedSnapshotCallbacks = {},
+  ): DocumentInfo {
+    this.finalizeCompositionBeforeCursorMove();
+    this.flushDeferredPaginationIfNeeded('before-version-content-replace', false);
+    return this.executeAppliedSnapshot(
+      'version:replace_content',
+      (wasm) => wasm.replaceContentFromBytes(data),
+      callbacks,
+    );
   }
 
   /** 승인처럼 여러 임시 스냅샷이 필요한 외부 편집기의 저장소 여유를 확보한다. */

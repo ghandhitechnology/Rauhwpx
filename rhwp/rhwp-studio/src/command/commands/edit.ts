@@ -2,15 +2,12 @@ import type { CommandDef } from '../types';
 import { FieldEditDialog } from '@/ui/field-edit-dialog';
 import { FindDialog } from '@/ui/find-dialog';
 import { GotoDialog } from '@/ui/goto-dialog';
-import { HistoryDialog } from '@/ui/history-dialog';
 import { CompareDialog } from '@/ui/compare-dialog';
 import { CompareSessionStore } from '@/compare/session';
 import { canExecuteFormatPaste } from '../format-paste-availability';
 
 /** 검색 대화상자 싱글톤 — 열려 있으면 재사용 */
 let findDialogInstance: FindDialog | null = null;
-/** 싱글톤: 문서 이력 관리 대화상자 */
-let historyDialogInstance: HistoryDialog | null = null;
 /** 싱글톤: 두 파일 문서 비교 대화상자 */
 let compareDialogInstance: CompareDialog | null = null;
 /** 비교/이력 공용 세션 스토어 */
@@ -183,7 +180,6 @@ export const editCommands: CommandDef[] = [
       if (!compareSessionStore) {
         compareSessionStore = new CompareSessionStore(services.eventBus);
       }
-      if (historyDialogInstance?.isOpen()) historyDialogInstance.hide();
       if (compareDialogInstance && compareDialogInstance.isOpen()) return;
       compareDialogInstance = new CompareDialog(services, compareSessionStore);
       compareDialogInstance.show();
@@ -191,19 +187,12 @@ export const editCommands: CommandDef[] = [
   },
   {
     id: 'edit:document-history',
-    label: '문서 이력 관리',
+    label: '버전',
     shortcutLabel: 'Ctrl+Shift+H',
     canExecute: () => true,
     execute(services) {
-      if (!compareSessionStore) {
-        compareSessionStore = new CompareSessionStore(services.eventBus);
-      }
       if (compareDialogInstance?.isOpen()) compareDialogInstance.hide();
-      if (historyDialogInstance && historyDialogInstance.isOpen()) {
-        return;
-      }
-      historyDialogInstance = new HistoryDialog(services, compareSessionStore);
-      historyDialogInstance.show();
+      services.eventBus.emit('versions:open');
     },
   },
   {

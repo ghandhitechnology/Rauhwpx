@@ -324,6 +324,14 @@ export class WasmBridge {
     }
   }
 
+  /** 현재 파일 바인딩을 유지한 채 완전히 파싱된 문서 내용으로 교체한다. */
+  replaceContentFromBytes(data: Uint8Array): DocumentInfo {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const raw = this.doc.replaceContentFromBytes(data);
+    this.ensureParagraphStableIds();
+    return JSON.parse(raw) as DocumentInfo;
+  }
+
   /** [Task #741 후속] 외부 file path 그림을 dev 서버에서 fetch + inject. */
   private async populateExternalImagesFromDevServer(): Promise<void> {
     if (!this.doc) return;

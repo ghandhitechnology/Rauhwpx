@@ -650,6 +650,24 @@ impl DocumentCore {
         Ok(doc)
     }
 
+    /// 완전히 파싱한 다른 문서의 내용만 현재 문서에 적용한다.
+    ///
+    /// 파일 이름, 원본 형식, HML 저장 메타데이터, 보기 설정, 스냅샷 저장소는 현재
+    /// 편집 세션의 정체성이므로 유지한다. 파싱과 편집 가능 변환을 임시 코어에서
+    /// 끝낸 뒤 `Document`를 교체하므로 잘못된 바이트는 현재 상태를 바꾸지 않는다.
+    pub fn replace_content_from_bytes_native(&mut self, data: &[u8]) -> Result<String, HwpError> {
+        let mut replacement = DocumentCore::from_bytes(data)?;
+        replacement.convert_to_editable_native()?;
+
+        self.document = replacement.document;
+        self.deferred_pagination_revision = self.deferred_pagination_revision.wrapping_add(1);
+        self.deferred_pagination_descriptor = None;
+        self.pending_pagination_job = None;
+        self.refresh_layout_native();
+
+        Ok(self.get_document_info())
+    }
+
     /// 비표준 lineseg 감지 (#177).
     ///
     /// `reflow_zero_height_paragraphs` 호출 **이전** 상태의 IR을 기준으로 검증한다.
@@ -2354,6 +2372,106 @@ impl DocumentCore {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod replace_content_tests {
+    use super::*;
+
+    const HML: &[u8] = include_bytes!("../../../samples/hml/formatting_table.hml");
+    const HWP: &[u8] = include_bytes!("../../../saved/blank2010.hwp");
+    const HWPX: &[u8] = include_bytes!("../../../saved/blank_hwpx.hwpx");
+
+    fn serialized_document(core: &DocumentCore) -> Vec<u8> {
+        core.export_hwp_native().expect("document should serialize")
+    }
+
+    #[test]
+    fn replacement_preserves_live_identity_preferences_and_snapshots() {
+        let mut core = DocumentCore::from_bytes(HML).expect("HML source should open");
+        core.file_name = "kept-name.hml".to_string();
+        core.set_dpi(144.0);
+        core.fallback_font = "/kept/font.ttf".to_string();
+        core.show_paragraph_marks = true;
+        core.show_control_codes = true;
+        core.show_transparent_borders = true;
+        core.clip_enabled = false;
+        core.debug_overlay = true;
+        core.respect_vpos_reset = true;
+        let original = serialized_document(&core);
+        let original_hml_version = core
+            .hml_metadata()
+            .and_then(|metadata| metadata.hwpml_version.clone());
+        let snapshot_id = core.save_snapshot_native();
+
+        core.replace_content_from_bytes_native(HWP)
+            .expect("HWP replacement should succeed");
+
+        let mut expected = DocumentCore::from_bytes(HWP).expect("HWP target should open");
+        expected
+            .convert_to_editable_native()
+            .expect("target should become editable");
+        assert_eq!(serialized_document(&core), serialized_document(&expected));
+        assert_eq!(core.file_name, "kept-name.hml");
+        assert_eq!(core.source_format, crate::parser::FileFormat::Hml);
+        assert_eq!(
+            core.hml_metadata()
+                .and_then(|metadata| metadata.hwpml_version.clone()),
+            original_hml_version,
+        );
+        assert_eq!(core.dpi, 144.0);
+        assert_eq!(core.fallback_font, "/kept/font.ttf");
+        assert!(core.show_paragraph_marks);
+        assert!(core.show_control_codes);
+        assert!(core.show_transparent_borders);
+        assert!(!core.clip_enabled);
+        assert!(core.debug_overlay);
+        assert!(core.respect_vpos_reset);
+        assert_eq!(core.snapshot_store.len(), 1);
+
+        core.restore_snapshot_native(snapshot_id)
+            .expect("pre-replacement snapshot should remain valid");
+        assert_eq!(serialized_document(&core), original);
+    }
+
+    #[test]
+    fn replacement_accepts_each_supported_version_payload_without_changing_save_format() {
+        let mut core = DocumentCore::from_bytes(HWP).expect("HWP source should open");
+        core.file_name = "kept-name.hwp".to_string();
+        let snapshot_id = core.save_snapshot_native();
+
+        for bytes in [HWP, HWPX, HML] {
+            let mut expected = DocumentCore::from_bytes(bytes).expect("target should parse");
+            expected
+                .convert_to_editable_native()
+                .expect("target should become editable");
+            core.replace_content_from_bytes_native(bytes)
+                .expect("replacement should succeed");
+
+            assert_eq!(serialized_document(&core), serialized_document(&expected));
+            assert_eq!(core.source_format, crate::parser::FileFormat::Hwp);
+            assert_eq!(core.file_name, "kept-name.hwp");
+            assert!(core.snapshot_store.iter().any(|(id, _)| *id == snapshot_id));
+        }
+    }
+
+    #[test]
+    fn invalid_replacement_bytes_leave_the_live_core_untouched() {
+        let mut core = DocumentCore::from_bytes(HML).expect("HML source should open");
+        core.file_name = "untouched.hml".to_string();
+        let snapshot_id = core.save_snapshot_native();
+        let before = serialized_document(&core);
+        let before_pages = core.page_count();
+
+        assert!(core
+            .replace_content_from_bytes_native(b"not a document")
+            .is_err());
+        assert_eq!(serialized_document(&core), before);
+        assert_eq!(core.page_count(), before_pages);
+        assert_eq!(core.file_name, "untouched.hml");
+        assert_eq!(core.source_format, crate::parser::FileFormat::Hml);
+        assert!(core.snapshot_store.iter().any(|(id, _)| *id == snapshot_id));
     }
 }
 

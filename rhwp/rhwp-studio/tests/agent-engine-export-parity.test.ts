@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   AGENT_EDIT_SESSION_METHODS,
+  EDITOR_ROUTED_MUTATING_METHODS,
   EXCLUDED_NON_DOCUMENT,
   MUTATING_METHODS,
 } from '../src/core/mutation-method-registry.ts';
@@ -10,6 +11,7 @@ import {
 const rust = readFileSync(new URL('../../src/wasm_api.rs', import.meta.url), 'utf8');
 const agentMethods = new Set([...MUTATING_METHODS, ...AGENT_EDIT_SESSION_METHODS]);
 const excludedBridgeMethods = new Set(EXCLUDED_NON_DOCUMENT);
+const editorRoutedMethods = new Set(EDITOR_ROUTED_MUTATING_METHODS);
 
 const MUTATING_EXPORT_VERB = /^(insert|delete|create|apply|add|remove|move|resize|merge|split|update|toggle|replace|paste|assign|group|ungroup|change|clear|evaluate|transpose|ensure|findOrCreate|reflow|refresh|setPage|setSection|setColumn|setCell|setTable|setPicture|setShape|setEquation|setNote|setChar|setPara|setField|setForm|setNumbering|setHeaderFooter|setActiveField|renameBookmark)/;
 
@@ -39,7 +41,8 @@ test('every mutation-like Rust export has an agent edit path or explicit non-edi
     .filter((name) => MUTATING_EXPORT_VERB.test(name));
 
   const uncovered = exports.filter((name) => {
-    if (agentMethods.has(name) || excludedBridgeMethods.has(name) || NON_EDIT_EXPORTS.has(name)) return false;
+    if (agentMethods.has(name) || editorRoutedMethods.has(name)
+      || excludedBridgeMethods.has(name) || NON_EDIT_EXPORTS.has(name)) return false;
     const alias = SEMANTIC_ALIASES[name];
     if (alias && agentMethods.has(alias)) return false;
     if (name.endsWith('Ex') && agentMethods.has(name.slice(0, -2))) return false;

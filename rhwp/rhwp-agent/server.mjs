@@ -12,6 +12,11 @@ import { createPiSession } from './agents/pi.mjs';
 import { createGrokSession, prepareGrokHome } from './agents/grok.mjs';
 import { createCursorSession, prepareCursorHome } from './agents/cursor.mjs';
 import { generateChatTitle } from './agents/title.mjs';
+import {
+  CHECKPOINT_TITLE_OVERALL_TIMEOUT_MS,
+  findDeepSeekV4FlashModel,
+  generateCheckpointTitle,
+} from './agents/checkpoint-title.mjs';
 import { SkillRegistry } from './skills.mjs';
 import { generateSkillDraft } from './skill-generator.mjs';
 import { WritingStyleStore, assertWritingStyleAppendCompatible } from './writing-style.mjs';
@@ -224,6 +229,7 @@ const sessions = new HubSessionRegistry({
       missedTurnEnd: null,
       styleCalibration: null,
       auxiliaryProcesses: new Set(),
+      checkpointTitleControllers: new Set(),
       templateJobs: new Map(),
       activeTemplateJobId: null,
       pendingTemplateCompletions: [],
@@ -655,6 +661,60 @@ async function stopAuxiliaryProcesses(record) {
     child.once('exit', finish);
     terminateProcessTree(child);
   })));
+}
+
+function cancelCheckpointTitleJobs(record) {
+  const controllers = [...record.checkpointTitleControllers];
+  record.checkpointTitleControllers.clear();
+  for (const controller of controllers) controller.abort();
+}
+
+function checkpointTitleDeps(record, health, signal) {
+  const deepSeek = findDeepSeekV4FlashModel(piStatus.models);
+  const cliReady = (agent) => Boolean(
+    health?.[agent]?.available === true
+    && cliSetupStatus[agent]?.installed === true
+    && cliSetupStatus[agent]?.authenticated === true,
+  );
+  return {
+    readiness: {
+      pi: {
+        ready: Boolean(
+          deepSeek
+          && health?.pi?.available === true
+          && piStatus.installed
+          && piStatus.keyConfigured,
+        ),
+        model: deepSeek?.id ?? '',
+      },
+      codex: { ready: cliReady('codex'), model: 'gpt-5.6-luna' },
+      grok: { ready: cliReady('grok'), model: 'grok-4.6' },
+      claude: { ready: cliReady('claude'), model: 'haiku' },
+    },
+    piManager,
+    openRouter,
+    workDir: record.workDir,
+    isolatedHome: record.isolatedHome,
+    sessionId: record.sessionId,
+    commands: {
+      codex: cliSetup.binPath('codex'),
+      grok: cliSetup.binPath('grok'),
+      claude: cliSetup.binPath('claude'),
+    },
+    providerEnvs: {
+      codex: { ...cliSetup.envFor('codex'), CODEX_HOME: record.codexHome },
+      grok: {
+        ...cliSetup.envFor('grok'),
+        GROK_HOME: record.grokHome,
+        GROK_DISABLE_AUTOUPDATER: '1',
+        GROK_MEMORY: '0',
+      },
+      claude: cliSetup.envFor('claude'),
+    },
+    spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
+    terminateProcess: terminateProcessTree,
+    signal,
+  };
 }
 
 function auxDeps(record, requestedAgent, cliAgent) {
@@ -1492,6 +1552,48 @@ async function handleStudioMessage(record, sock, msg) {
         });
       return;
     }
+    case 'checkpoint-title-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      if (!requestId) return;
+      const startedAt = Date.now();
+      const controller = new AbortController();
+      record.checkpointTitleControllers.add(controller);
+      const input = {
+        commitId: msg.commitId,
+        titleRevision: msg.titleRevision,
+        appLanguage: msg.appLanguage,
+        summary: msg.summary,
+      };
+      const cachedHealth = providerHealth.cached();
+      void (cachedHealth ? Promise.resolve(cachedHealth) : providerHealth.check())
+        .then((health) => {
+          const remainingMs = Math.max(
+            1,
+            CHECKPOINT_TITLE_OVERALL_TIMEOUT_MS - (Date.now() - startedAt),
+          );
+          return generateCheckpointTitle(input, {
+            ...checkpointTitleDeps(record, health, controller.signal),
+            overallTimeoutMs: remainingMs,
+          });
+        })
+        .then((result) => replyToStudio(record, sock, {
+          v: 1,
+          type: 'checkpoint-title-result',
+          requestId,
+          result,
+        }))
+        .catch((error) => {
+          log(`checkpoint-title-request failed: ${error?.message ?? error}`);
+          replyToStudio(record, sock, {
+            v: 1,
+            type: 'checkpoint-title-result',
+            requestId,
+            result: null,
+          });
+        })
+        .finally(() => record.checkpointTitleControllers.delete(controller));
+      return;
+    }
     case 'chat-user-message': {
       if (!record.agentSession) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_NOT_STARTED', message: 'No agent session; send chat-start first.' });
@@ -2047,6 +2149,7 @@ async function handleStudioMessage(record, sock, msg) {
       return;
     }
     case 'chat-stop': {
+      cancelCheckpointTitleJobs(record);
       await disposeSession(record);
       return;
     }
@@ -2867,6 +2970,7 @@ httpServer.on('error', (err) => {
 let shutdownPromise = null;
 async function disposeRecord(record, reason) {
   record.disposed = true;
+  cancelCheckpointTitleJobs(record);
   clearStudioReattachGrace(record);
   failAllPendingCalls(record, 'Hub session is shutting down');
   const backendExit = disposeSession(record);
