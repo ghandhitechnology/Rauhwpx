@@ -45,6 +45,7 @@
     "files": [
       "desktop/**/*",
       "cloud/install/install.sh",
+      "cloud/release/rauhwpx-cloud-bootstrap-linux-*.tar.gz",
       "rhwp/rhwp-studio/dist/**/*",
       "rhwp/rhwp-agent/**/*",
       "rhwp/rhwp-agent/node_modules/**/*",
@@ -53,7 +54,8 @@
     "asarUnpack": [
       "rhwp/rhwp-agent/**",
       "desktop/bin/**",
-      "cloud/install/install.sh"
+      "cloud/install/install.sh",
+      "cloud/release/rauhwpx-cloud-bootstrap-linux-*.tar.gz"
     ],
     "fileAssociations": [
       {

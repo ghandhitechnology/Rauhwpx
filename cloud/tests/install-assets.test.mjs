@@ -14,6 +14,9 @@ test('installer is streamable, channel-aware, preserves Serve routes, and emits 
   assert.match(source, /apt-get install[^\n]*\bpodman\b[^\n]*\bcrun\b/);
   assert.match(source, /releases\?per_page=30/);
   assert.doesNotMatch(source, /releases\/download\/cloud-prerelease/);
+  assert.doesNotMatch(source, /releases\/latest\/download\/\$\{ASSET\}/);
+  assert.match(source, /!item\.prerelease && !item\.draft && item\.assets\?\.some\(\(asset\)=>asset\.name===name\)/);
+  assert.match(source, /no compatible stable cloud asset was found/);
   assert.match(source, /RAUHWpx_RECEIPT=/);
   assert.match(source, /pairingCode/);
   assert.match(source, /RAUHWpx_TAILSCALE_HTTPS_PORT/);
@@ -41,6 +44,10 @@ test('installer is streamable, channel-aware, preserves Serve routes, and emits 
   const syntax = spawnSync('/bin/bash', ['-n', filename], { encoding: 'utf8' });
   assert.equal(syntax.status, 0, syntax.stderr);
   const update = await fs.readFile(path.join(root, 'install/update.sh'), 'utf8');
+  assert.match(update, /releases\?per_page=30/);
+  assert.doesNotMatch(update, /releases\/latest\/download\/\$\{ASSET\}/);
+  assert.match(update, /!item\.prerelease && !item\.draft && item\.assets\?\.some\(\(asset\)=>asset\.name===name\)/);
+  assert.match(update, /no compatible stable cloud asset was found/);
   assert.match(update, /trap rollback ERR/);
   assert.match(update, /environment\.previous/);
   assert.match(update, /No newer Rauhwpx cloud release was found/);
@@ -131,6 +138,8 @@ test('worker image packages the real Studio, agent hub, Chromium, and locked run
   assert.match(release, /chmod -R a\+rX "\$STAGING\/rauhwpx-cloud-\$VERSION"/);
   assert.match(release, /Cloud release assets require a native Linux builder/);
   assert.match(release, /does not match native builder/);
+  assert.match(release, /rauhwpx-cloud-bootstrap-linux-\$\{ASSET_ARCH\}\.tar\.gz/);
+  assert.match(release, /"\$ROOT\/install\/install\.sh"/);
   assert.match(buildAssets, /VITE_RHWP_CLOUD_RUNTIME=1/);
   assert.match(buildAssets, /rauhwpxCloudRuntime/);
   assert.match(buildAssets, /target\/release\/rhwp/);

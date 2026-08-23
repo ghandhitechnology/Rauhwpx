@@ -4,6 +4,9 @@ import path from 'node:path';
 import { normalizeSshConfig, normalizeTailscaleHttpsPort } from './cloud-profile.mjs';
 
 const OUTPUT_LIMIT = 2 * 1024 * 1024;
+const BOOTSTRAP_LIMIT = 1024 * 1024 * 1024;
+const INSTALL_TIMEOUT_MS = 30 * 60_000;
+const EXPECTED_CLOUD_PROTOCOL = 1;
 const CHANNELS = new Set(['stable', 'prerelease']);
 
 function stripControl(value) {
@@ -84,6 +87,79 @@ function installRemoteCommand({ channel, transport, publicHost, tailscaleHttpsPo
   ].join(' ');
 }
 
+function bootstrapArchitecture(machineArchitecture) {
+  if (machineArchitecture === 'x86_64') return 'amd64';
+  if (machineArchitecture === 'aarch64' || machineArchitecture === 'arm64') return 'arm64';
+  throw new Error('VPS architecture must be amd64 or arm64');
+}
+
+function bundledInstallRemoteCommand({ channel, transport, publicHost, tailscaleHttpsPort, assetArchitecture }) {
+  const archive = `rauhwpx-cloud-linux-${assetArchitecture}.tar.gz`;
+  const install = [
+    'sudo -n env',
+    `RAUHWpx_CHANNEL=${channel}`,
+    `RAUHWpx_TRANSPORT=${transport}`,
+    ...(transport === 'tailscale' ? [`RAUHWpx_TAILSCALE_HTTPS_PORT=${tailscaleHttpsPort}`] : []),
+    ...(transport === 'public-https' ? [`RAUHWpx_PUBLIC_HOST=${publicHost}`] : []),
+    `RAUHWpx_RELEASE_URL=file://$TMP/${archive}`,
+    'bash "$TMP/install.sh"',
+  ].join(' ');
+  return [
+    'set -eu',
+    'TMP=$(mktemp -d)',
+    'trap \'rm -rf "$TMP"\' EXIT HUP INT TERM',
+    'tar -xzf - -C "$TMP"',
+    `test -f "$TMP/${archive}"`,
+    `test -f "$TMP/${archive}.sha256"`,
+    `test -f "$TMP/${archive}.sigstore.json"`,
+    'test -f "$TMP/install.sh"',
+    install,
+  ].join('; ');
+}
+
+function existingInstallRemoteCommand({ transport, publicHost, tailscaleHttpsPort, requiredVersion = '' }) {
+  const endpoint = transport === 'tailscale'
+    ? [
+        `EXISTING_PORT=$(sudo -n sed -n 's/^RAUHWpx_TAILSCALE_HTTPS_PORT=//p' /etc/rauhwpx-cloud.env | tail -1) || exit 0`,
+        `[ "$EXISTING_PORT" = "${tailscaleHttpsPort}" ] || exit 0`,
+        'TAILSCALE_JSON=$(sudo -n tailscale status --json) || exit 0',
+        `DNS_NAME=$(sudo -n /opt/rauhwpx-node/bin/node -e 'const s=JSON.parse(process.argv[1]); process.stdout.write(String(s.Self?.DNSName||"").replace(/\\.$/,""))' "$TAILSCALE_JSON") || exit 0`,
+        '[ -n "$DNS_NAME" ] || exit 0',
+        `PORT_SUFFIX=; [ "${tailscaleHttpsPort}" = 443 ] || PORT_SUFFIX=:${tailscaleHttpsPort}`,
+        'ENDPOINT="https://${DNS_NAME}${PORT_SUFFIX}/rauhwpx-cloud"',
+        `RECEIPT_PORT=${tailscaleHttpsPort}`,
+      ]
+    : [
+        `sudo -n grep -Fqx '${publicHost} {' /etc/caddy/Caddyfile.d/rauhwpx-cloud.caddy || exit 0`,
+        `ENDPOINT=https://${publicHost}/rauhwpx-cloud`,
+        'RECEIPT_PORT=',
+      ];
+  return [
+    'set -eu',
+    'sudo -n systemctl is-active --quiet rauhwpx-cloud.service || exit 0',
+    'sudo -n test -x /usr/local/bin/rauhwpx-cloud || exit 0',
+    `EXISTING_BASE=$(sudo -n sed -n 's/^RAUHWpx_BASE_PATH=//p' /etc/rauhwpx-cloud.env | tail -1) || exit 0`,
+    '[ "$EXISTING_BASE" = /rauhwpx-cloud ] || exit 0',
+    `EXISTING_PROTOCOL=$(sudo -n /opt/rauhwpx-node/bin/node -e 'import("/opt/rauhwpx-cloud/current/src/protocol.mjs").then((m)=>process.stdout.write(String(m.PROTOCOL_VERSION)))') || exit 0`,
+    `[ "$EXISTING_PROTOCOL" = ${EXPECTED_CLOUD_PROTOCOL} ] || exit 0`,
+    ...(requiredVersion ? [
+      `EXISTING_VERSION=$(sudo -n /opt/rauhwpx-node/bin/node -p 'require("/opt/rauhwpx-cloud/current/package.json").version') || exit 0`,
+      `[ "$EXISTING_VERSION" = "${requiredVersion}" ] || exit 0`,
+    ] : []),
+    'sudo -n curl --fail --silent http://127.0.0.1:7740/v1/health >/dev/null || exit 0',
+    ...endpoint,
+    'sudo -n curl --fail --silent --connect-timeout 10 "$ENDPOINT/v1/health" >/dev/null || exit 0',
+    'PAIRING_JSON=$(sudo -n /usr/local/bin/rauhwpx-cloud pairing create "Origin device")',
+    `RECEIPT=$(sudo -n /opt/rauhwpx-node/bin/node -e '
+      const pairing=JSON.parse(process.argv[1]);
+      const receipt={endpoint:process.argv[2],serverPublicKey:pairing.serverPublicKey,pairingCode:pairing.code};
+      if(process.argv[3]) receipt.tailscaleHttpsPort=Number(process.argv[3]);
+      process.stdout.write(JSON.stringify(receipt));
+    ' "$PAIRING_JSON" "$ENDPOINT" "$RECEIPT_PORT")`,
+    'printf "RAUHWpx_RECEIPT=%s\\n" "$RECEIPT"',
+  ].join('; ');
+}
+
 export function sshArguments(sshConfig, knownHostsPath, remoteCommand, { acceptNew = false } = {}) {
   const ssh = normalizeSshConfig(sshConfig);
   return [
@@ -136,12 +212,48 @@ function parseProvisionReceipt(stdout) {
 }
 
 export class CloudProvisioner {
-  constructor({ spawnImpl = nodeSpawn, installerPath, knownHostsPath }) {
+  constructor({ spawnImpl = nodeSpawn, installerPath, bootstrapDir = '', appVersion = '', knownHostsPath }) {
     if (!installerPath) throw new Error('CloudProvisioner requires an installer path');
     if (!knownHostsPath) throw new Error('CloudProvisioner requires a known-hosts path');
     this.spawn = spawnImpl;
     this.installerPath = installerPath;
+    this.bootstrapDir = bootstrapDir;
+    this.appVersion = appVersion;
     this.knownHostsPath = knownHostsPath;
+  }
+
+  async #bootstrap(machineArchitecture) {
+    if (!this.bootstrapDir) return null;
+    const assetArchitecture = bootstrapArchitecture(machineArchitecture);
+    const filename = path.join(
+      this.bootstrapDir,
+      `rauhwpx-cloud-bootstrap-linux-${assetArchitecture}.tar.gz`,
+    );
+    const stat = await fs.stat(filename).catch((error) => {
+      if (error?.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (!stat) return null;
+    if (!stat.isFile() || stat.size < 1 || stat.size > BOOTSTRAP_LIMIT) {
+      throw new Error('Bundled Cloud runtime is invalid');
+    }
+    if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(this.appVersion)) {
+      throw new Error('Bundled Cloud runtime requires a valid app version');
+    }
+    return { assetArchitecture, bytes: await fs.readFile(filename) };
+  }
+
+  async #reuseExisting(ssh, options, onLine) {
+    const remote = existingInstallRemoteCommand(options);
+    const result = await runProcess(
+      this.spawn,
+      'ssh',
+      sshArguments(ssh, this.knownHostsPath, remote),
+      { timeoutMs: 30_000, onLine },
+    );
+    if (!result.stdout.split(/\r?\n/).some((line) => line.startsWith('RAUHWpx_RECEIPT='))) return null;
+    onLine('Using the compatible Cloud service already installed on this VPS');
+    return parseProvisionReceipt(result.stdout);
   }
 
   async preflight(sshConfig, { onLine = () => {} } = {}) {
@@ -192,6 +304,31 @@ export class CloudProvisioner {
     }
     const ssh = normalizeSshConfig(sshConfig);
     const preflight = await this.preflight(ssh, { onLine });
+    const bootstrap = await this.#bootstrap(preflight.arch);
+    const existing = await this.#reuseExisting(ssh, {
+      transport,
+      publicHost,
+      tailscaleHttpsPort: servePort,
+      requiredVersion: bootstrap ? this.appVersion : '',
+    }, onLine);
+    if (existing) return { ...existing, preflight, reused: true };
+    if (bootstrap) {
+      onLine('Using the verified Cloud runtime bundled with Rauhwpx');
+      const remote = bundledInstallRemoteCommand({
+        channel,
+        transport,
+        publicHost,
+        tailscaleHttpsPort: servePort,
+        assetArchitecture: bootstrap.assetArchitecture,
+      });
+      const result = await runProcess(
+        this.spawn,
+        'ssh',
+        sshArguments(ssh, this.knownHostsPath, remote),
+        { input: bootstrap.bytes, timeoutMs: INSTALL_TIMEOUT_MS, onLine },
+      );
+      return { ...parseProvisionReceipt(result.stdout), preflight };
+    }
     const installer = await fs.readFile(this.installerPath);
     if (!installer.length || installer.length > 2 * 1024 * 1024) throw new Error('Cloud installer is missing or invalid');
     const remote = installRemoteCommand({
@@ -204,7 +341,7 @@ export class CloudProvisioner {
       this.spawn,
       'ssh',
       sshArguments(ssh, this.knownHostsPath, remote),
-      { input: installer, timeoutMs: 10 * 60_000, onLine },
+      { input: installer, timeoutMs: INSTALL_TIMEOUT_MS, onLine },
     );
     return { ...parseProvisionReceipt(result.stdout), preflight };
   }
@@ -231,4 +368,11 @@ export class CloudProvisioner {
   }
 }
 
-export const __test = { installRemoteCommand, parseProvisionReceipt, runProcess };
+export const __test = {
+  bootstrapArchitecture,
+  bundledInstallRemoteCommand,
+  existingInstallRemoteCommand,
+  installRemoteCommand,
+  parseProvisionReceipt,
+  runProcess,
+};

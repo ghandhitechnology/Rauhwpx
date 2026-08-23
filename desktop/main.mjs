@@ -1193,6 +1193,8 @@ if (!hasSingleInstanceLock) {
       }),
       provisioner: new CloudProvisioner({
         installerPath: unpackedPath(join(__dirname, '..', 'cloud', 'install', 'install.sh')),
+        bootstrapDir: unpackedPath(join(__dirname, '..', 'cloud', 'release')),
+        appVersion: app.getVersion(),
         knownHostsPath: join(app.getPath('userData'), 'cloud', 'ssh-known-hosts'),
       }),
       recoveryDir: join(app.getPath('userData'), 'cloud', 'recovery'),

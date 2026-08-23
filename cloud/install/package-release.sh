@@ -50,4 +50,10 @@ ASSET="$OUTPUT/rauhwpx-cloud-linux-${ASSET_ARCH}.tar.gz"
 tar -czf "$ASSET" -C "$STAGING" "rauhwpx-cloud-$VERSION"
 (cd "$OUTPUT" && sha256sum "$(basename "$ASSET")" >"$(basename "$ASSET").sha256")
 cosign sign-blob --yes "$ASSET" --bundle "$ASSET.sigstore.json"
-printf '%s\n' "$ASSET"
+BOOTSTRAP="$OUTPUT/rauhwpx-cloud-bootstrap-linux-${ASSET_ARCH}.tar.gz"
+mkdir -p "$STAGING/bootstrap"
+cp "$ROOT/install/install.sh" \
+  "$ASSET" "$ASSET.sha256" "$ASSET.sigstore.json" \
+  "$STAGING/bootstrap/"
+tar -czf "$BOOTSTRAP" -C "$STAGING/bootstrap" .
+printf '%s\n' "$ASSET" "$BOOTSTRAP"

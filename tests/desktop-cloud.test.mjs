@@ -151,6 +151,53 @@ test('Tailscale HTTPS port persists through profiles, UI conversion, and provisi
   })}`), /does not match/);
 });
 
+test('provisioner selects and installs an architecture-matched bundled runtime', () => {
+  assert.equal(provisionerTest.bootstrapArchitecture('x86_64'), 'amd64');
+  assert.equal(provisionerTest.bootstrapArchitecture('aarch64'), 'arm64');
+  assert.throws(() => provisionerTest.bootstrapArchitecture('riscv64'), /amd64 or arm64/);
+  const command = provisionerTest.bundledInstallRemoteCommand({
+    channel: 'stable',
+    transport: 'tailscale',
+    publicHost: '',
+    tailscaleHttpsPort: 8443,
+    assetArchitecture: 'arm64',
+  });
+  assert.match(command, /tar -xzf -/);
+  assert.match(command, /rauhwpx-cloud-linux-arm64\.tar\.gz/);
+  assert.match(command, /RAUHWpx_RELEASE_URL=file:\/\/\$TMP\/rauhwpx-cloud-linux-arm64\.tar\.gz/);
+  assert.match(command, /RAUHWpx_TAILSCALE_HTTPS_PORT=8443/);
+  assert.doesNotMatch(command, /github\.com/);
+});
+
+test('provisioner reuses a compatible installation without downloading a release', () => {
+  const tailscale = provisionerTest.existingInstallRemoteCommand({
+    transport: 'tailscale', publicHost: '', tailscaleHttpsPort: 8443,
+  });
+  assert.match(tailscale, /systemctl is-active --quiet rauhwpx-cloud\.service/);
+  assert.match(tailscale, /RAUHWpx_BASE_PATH/);
+  assert.match(tailscale, /PROTOCOL_VERSION/);
+  assert.match(tailscale, /127\.0\.0\.1:7740\/v1\/health/);
+  assert.match(tailscale, /\$ENDPOINT\/v1\/health/);
+  assert.match(tailscale, /RAUHWpx_TAILSCALE_HTTPS_PORT/);
+  assert.match(tailscale, /pairing create/);
+  assert.match(tailscale, /RAUHWpx_RECEIPT/);
+  assert.match(tailscale, /PORT_SUFFIX=:8443/);
+  assert.match(tailscale, /\$\{PORT_SUFFIX\}\/rauhwpx-cloud/);
+  assert.doesNotMatch(tailscale, /github\.com|RAUHWpx_RELEASE_URL/);
+
+  const exactVersion = provisionerTest.existingInstallRemoteCommand({
+    transport: 'tailscale', publicHost: '', tailscaleHttpsPort: 443, requiredVersion: '1.1.0',
+  });
+  assert.match(exactVersion, /package\.json/);
+  assert.match(exactVersion, /EXISTING_VERSION" = "1\.1\.0/);
+
+  const publicHttps = provisionerTest.existingInstallRemoteCommand({
+    transport: 'public-https', publicHost: 'cloud.example.com', tailscaleHttpsPort: 443,
+  });
+  assert.match(publicHttps, /cloud\.example\.com/);
+  assert.match(publicHttps, /Caddyfile\.d\/rauhwpx-cloud\.caddy/);
+});
+
 test('ssh arguments do not invoke a shell and pin known hosts', () => {
   const args = sshArguments({
     host: '100.97.8.94',

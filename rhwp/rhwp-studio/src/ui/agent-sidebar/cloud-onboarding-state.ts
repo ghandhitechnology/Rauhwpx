@@ -162,6 +162,20 @@ export function mapCloudSetupIssue(error: unknown, transport: CloudProfileDraft[
   if (/ubuntu|debian|unsupported.*distribution|operating system/.test(normalized)) {
     return { title: '지원하는 Linux가 필요합니다', guidance: 'Ubuntu 또는 Debian VPS를 사용하세요.', detail };
   }
+  if (/no compatible (?:stable |prerelease )?cloud asset|cloud release asset|curl.*(?:requested url.*404|error:\s*404)/.test(normalized)) {
+    return {
+      title: 'Cloud 설치 파일을 찾을 수 없습니다',
+      guidance: '현재 앱 버전과 맞는 Cloud 설치 파일이 아직 배포되지 않았습니다. 앱을 업데이트하거나 잠시 후 다시 시도하세요.',
+      detail,
+    };
+  }
+  if (transport === 'tailscale' && /enotfound|name_not_resolved|could not resolve|dns|fetch failed|failed to fetch/.test(normalized)) {
+    return {
+      title: 'Tailscale DNS를 켜 주세요',
+      guidance: '이 기기의 Tailscale 설정에서 DNS 사용(Accept DNS)을 켠 뒤 다시 연결하세요.',
+      detail,
+    };
+  }
   if (/tailscale/.test(normalized)) {
     return { title: 'VPS의 Tailscale을 확인하세요', guidance: 'VPS에 Tailscale을 설치하고 이 기기와 같은 네트워크에 연결하세요.', detail };
   }

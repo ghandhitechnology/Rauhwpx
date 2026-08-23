@@ -34,7 +34,7 @@ jobs:
 
   macos:
     name: Build macOS installers
-    needs: preflight
+    needs: [preflight, cloud]
     runs-on: macos-15
     timeout-minutes: 90
     environment: macos-release
@@ -71,6 +71,13 @@ jobs:
           npm ci
           npm --prefix rhwp/rhwp-studio ci
           npm --prefix rhwp/rhwp-agent ci --omit=dev
+
+      - name: Download bundled VPS runtimes
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cloud-dist-*
+          path: cloud/release
+          merge-multiple: true
 
       - name: Verify Developer ID and Apple ID notarization secrets
         env:
@@ -132,7 +139,7 @@ jobs:
 
   windows:
     name: Build Windows installer
-    needs: preflight
+    needs: [preflight, cloud]
     runs-on: windows-latest
     timeout-minutes: 90
 
@@ -171,6 +178,13 @@ jobs:
           npm --prefix rhwp/rhwp-studio ci
           npm --prefix rhwp/rhwp-agent ci --omit=dev
 
+      - name: Download bundled VPS runtimes
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cloud-dist-*
+          path: cloud/release
+          merge-multiple: true
+
       - name: Build Windows installer
         shell: bash
         run: npm run dist:win
@@ -187,7 +201,7 @@ jobs:
 
   linux:
     name: Build Linux installers (${{ matrix.arch }})
-    needs: preflight
+    needs: [preflight, cloud]
     strategy:
       fail-fast: false
       matrix:
@@ -228,6 +242,13 @@ jobs:
 
       - name: Install root dependencies
         run: npm ci
+
+      - name: Download bundled VPS runtimes
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cloud-dist-*
+          path: cloud/release
+          merge-multiple: true
 
       - name: Build AppImage and Debian package
         run: npm run dist:linux:${{ matrix.arch }}
@@ -351,6 +372,7 @@ jobs:
             release/rauhwpx-cloud-linux-${{ matrix.asset_arch }}.tar.gz
             release/rauhwpx-cloud-linux-${{ matrix.asset_arch }}.tar.gz.sha256
             release/rauhwpx-cloud-linux-${{ matrix.asset_arch }}.tar.gz.sigstore.json
+            release/rauhwpx-cloud-bootstrap-linux-${{ matrix.asset_arch }}.tar.gz
 
   publish:
     name: Publish GitHub Release

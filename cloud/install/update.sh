@@ -20,17 +20,22 @@ if [[ -n ${RAUHWpx_RELEASE_URL:-} ]]; then
   ARCHIVE_URL=$RAUHWpx_RELEASE_URL
 else
   ASSET="rauhwpx-cloud-linux-${ASSET_ARCH}.tar.gz"
+  RELEASES_JSON=$(curl --fail --location --silent --show-error \
+    'https://api.github.com/repos/ghandhitechnology/Rauhwpx/releases?per_page=30')
   if [[ "$CHANNEL" == prerelease ]]; then
-    RELEASES_JSON=$(curl --fail --location --silent --show-error \
-      'https://api.github.com/repos/ghandhitechnology/Rauhwpx/releases?per_page=30')
     ARCHIVE_URL=$(/opt/rauhwpx-node/bin/node -e '
       const releases=JSON.parse(process.argv[1]); const name=process.argv[2];
       const release=releases.find((item)=>item.prerelease && !item.draft && item.assets?.some((asset)=>asset.name===name));
       const url=release?.assets.find((asset)=>asset.name===name)?.browser_download_url;
       if (!url) process.exit(1); process.stdout.write(url);
-    ' "$RELEASES_JSON" "$ASSET") || { echo "No compatible prerelease cloud asset was found" >&2; exit 1; }
+    ' "$RELEASES_JSON" "$ASSET") || { echo "no compatible prerelease cloud asset was found" >&2; exit 1; }
   else
-    ARCHIVE_URL="https://github.com/ghandhitechnology/Rauhwpx/releases/latest/download/${ASSET}"
+    ARCHIVE_URL=$(/opt/rauhwpx-node/bin/node -e '
+      const releases=JSON.parse(process.argv[1]); const name=process.argv[2];
+      const release=releases.find((item)=>!item.prerelease && !item.draft && item.assets?.some((asset)=>asset.name===name));
+      const url=release?.assets.find((asset)=>asset.name===name)?.browser_download_url;
+      if (!url) process.exit(1); process.stdout.write(url);
+    ' "$RELEASES_JSON" "$ASSET") || { echo "no compatible stable cloud asset was found" >&2; exit 1; }
   fi
 fi
 
