@@ -192,7 +192,8 @@ a{color:var(--ink)}
 }
 /* 크롭 좌표 — 원본 1800×1197 기준 */
 .c-app{--cx:70;--cy:42;--cw:1663;--ch:1066}   /* 앱 창 전체 */
-.c-hero{--cx:72;--cy:186;--cw:1700;--ch:930} /* 품의+에이전트 한 장 */
+.c-hero{--cx:0;--cy:0;--cw:3104;--ch:2064} /* Andy native 기안문+에이전트 */
+.c-hero.shot img{width:100%;height:auto;max-width:100%;margin:0}
 .c-cmd{--cx:540;--cy:845;--cw:1035;--ch:262}  /* /plan 자동완성 + 입력줄 */
 .c-msg{--cx:575;--cy:110;--cw:1000;--ch:216}  /* 사용자 메시지 영역 */
 .c-side{--cx:1104;--cy:42;--cw:628;--ch:1066} /* 설정 사이드바만 */
@@ -540,7 +541,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
         <div class="frame tilt-a">
           <span class="tape tape--tr" aria-hidden="true"></span>
           <div class="shot c-hero">
-            <img src="assets/editor-pumui.png" width="1800" height="1197" alt="Rauhwpx 한 화면. 왼쪽은 품의서, 오른쪽은 에이전트 사이드바.">
+            <img src="assets/editor-pumui.png" width="3104" height="2064" alt="Rauhwpx 한 화면. 왼쪽은 별지 제2호 기안문, 오른쪽은 에이전트 사이드바.">
           </div>
         </div>
         <div class="hero-logo-badge" aria-hidden="true">
@@ -548,7 +549,7 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
         </div>
         <figcaption class="note">
           <svg class="arw" viewBox="0 0 40 26" aria-hidden="true"><path d="M37 23C31 11 22 4.6 7 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M7 3l7.4 1.8M7 3l2 6.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          <span>품의랑 에이전트가 같은 창에 있어요</span>
+          <span>기안문이랑 에이전트가 같은 창에 있어요</span>
         </figcaption>
       </figure>
     </div>
