@@ -198,7 +198,10 @@ test('one failed startup launch does not abort the remaining launches', () => {
 });
 
 test('desktop package registers supported document associations without bundling runtime data', () => {
-  assert.deepEqual(rootPackage.build.fileAssociations[0].ext, ['hwp', 'hwpx', 'hml']);
+  assert.deepEqual(
+    rootPackage.build.fileAssociations.map((association: { ext: string }) => association.ext).sort(),
+    ['hml', 'hwp', 'hwpx'],
+  );
   assert.ok(rootPackage.build.asarUnpack.includes('rhwp/rhwp-agent/**'));
   assert.ok(rootPackage.build.files.every((entry: string) => !/runtime|launch-work/.test(entry)));
 });

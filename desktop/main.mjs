@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, sep } from 'node:path';
@@ -44,10 +44,17 @@ import {
   registerStudioScheme,
 } from './studio-protocol.mjs';
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
+import { CloudClient } from './cloud-client.mjs';
+import { CloudCoordinator } from './cloud-coordinator.mjs';
+import { CloudHandoffStore } from './cloud-handoff.mjs';
+import { CloudProvisioner } from './cloud-provisioner.mjs';
+import { applyCloudRecovery } from './cloud-result.mjs';
+import { isNewerStableVersion, selectDebAsset } from './update-policy.mjs';
 
 const { autoUpdater } = electronUpdater;
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const RELEASES_URL = 'https://github.com/ghandhitechnology/Rauhwpx/releases/latest';
+const RELEASES_API_URL = 'https://api.github.com/repos/ghandhitechnology/Rauhwpx/releases/latest';
 const PRELOAD_PATH = join(__dirname, 'preload.cjs');
 const devUrl = process.env.RHWP_DEV_URL || '';
 const launchId = randomUUID();
@@ -85,6 +92,17 @@ function unpackedPath(path) {
 
 function agentScript() {
   return unpackedPath(join(__dirname, '..', 'rhwp', 'rhwp-agent', 'server.mjs'));
+}
+
+function nativeRhwpExecutable() {
+  const executable = process.platform === 'win32' ? 'rhwp.exe' : 'rhwp';
+  const bundled = unpackedPath(join(__dirname, 'bin', `${process.platform}-${process.arch}`, executable));
+  if (existsSync(bundled)) return bundled;
+  if (app.isPackaged) throw new Error(`Packaged native document extractor is missing: ${bundled}`);
+  const configured = String(process.env.RHWP_BIN ?? '').trim();
+  if (configured && existsSync(configured)) return configured;
+  const development = join(__dirname, '..', 'rhwp', 'target', 'release', executable);
+  return existsSync(development) ? development : null;
 }
 
 class AgentHubOwner {
@@ -171,6 +189,7 @@ class AgentHubOwner {
     }
 
     const server = agentScript();
+    const rhwpExecutable = nativeRhwpExecutable();
     const launch = resolveHubLaunch({
       packaged: app.isPackaged,
       execPath: process.execPath,
@@ -191,6 +210,7 @@ class AgentHubOwner {
         RHWP_OWN_RUNTIME_DIR: '1',
         RHWP_OWN_WORK_DIR: '1',
         RHWP_SECRET_BROKER: 'ipc',
+        ...(rhwpExecutable ? { RHWP_BIN: rhwpExecutable } : {}),
       },
     });
     if (!launch) throw new Error(`Agent hub launch command not found: ${server}`);
@@ -268,6 +288,8 @@ let quitting = false;
 let quitRequested = false;
 let desktopReady = false;
 let secretVault = null;
+let cloudCoordinator = null;
+let cloudBroadcastChain = Promise.resolve();
 const pendingLaunches = [launchRequest({ argv: process.argv, source: 'initial' })];
 const runtimeDir = join(app.getPath('temp'), 'rauhwpx', 'runtime', launchId);
 const workDir = join(app.getPath('userData'), 'launch-work', launchId);
@@ -280,6 +302,65 @@ const sessions = new SessionManager({
 const documentLeases = new DocumentLeaseManager();
 const nativeFiles = new NativeFileHandleRegistry();
 const nativeBookmarkFile = join(app.getPath('userData'), 'native-document-bookmarks.json');
+
+function normalizeCloudScope(payload = {}) {
+  const threadId = typeof payload.threadId === 'string' && payload.threadId.length <= 256
+    ? payload.threadId
+    : '';
+  const documentId = payload.documentId === null
+    ? null
+    : typeof payload.documentId === 'string' && payload.documentId.length <= 256
+      ? payload.documentId
+      : null;
+  const selectedSessionId = typeof payload.selectedSessionId === 'string'
+    && /^[A-Za-z0-9_-]{1,128}$/.test(payload.selectedSessionId)
+    ? payload.selectedSessionId
+    : null;
+  return { threadId, documentId, selectedSessionId };
+}
+
+function applyCloudSnapshot(session, snapshot) {
+  session.cloudLocked = snapshot?.lease?.owner === 'cloud';
+  session.cloudHandoffId = snapshot?.session?.kind === 'idle' ? null : snapshot?.session?.sessionId ?? null;
+  return snapshot;
+}
+
+async function scopedCloudSnapshot(session, operation = null, { refresh = false } = {}) {
+  const scope = session.cloudScope ?? { threadId: '', documentId: null };
+  const options = {
+    originSessionId: session.sessionId,
+    documentId: scope.documentId,
+    selectedSessionId: scope.selectedSessionId,
+  };
+  const scoped = refresh
+    ? await requireCloudCoordinator().refresh(options)
+    : await requireCloudCoordinator().snapshot(options);
+  const snapshot = operation
+    ? { ...operation, ...scoped, profile: operation.profile ?? scoped.profile }
+    : scoped;
+  return applyCloudSnapshot(session, snapshot);
+}
+
+async function broadcastCloudEvent(payload) {
+  await Promise.all(sessions.windows().map(async (window) => {
+    if (window.isDestroyed()) return;
+    const session = sessions.sessionForSender(window.webContents);
+    const snapshot = await scopedCloudSnapshot(session).catch(() => null);
+    if (!snapshot || window.isDestroyed()) return;
+    window.webContents.send('cloud:event', { ...payload, snapshot });
+  }));
+}
+
+function queueCloudBroadcast(payload) {
+  cloudBroadcastChain = cloudBroadcastChain
+    .then(() => broadcastCloudEvent(payload))
+    .catch((error) => console.warn('[rauhwpx] cloud event broadcast failed:', error));
+}
+
+function requireCloudCoordinator() {
+  if (!cloudCoordinator) throw new Error('Cloud service is not ready');
+  return cloudCoordinator;
+}
 
 async function loadNativeBookmarks() {
   try {
@@ -300,38 +381,82 @@ async function persistNativeBookmarks() {
 
 let updateDownloadReady = false;
 let manualUpdateCheck = false;
+let updateCheckPromise = null;
+
+async function showUpToDate() {
+  await dialog.showMessageBox({
+    type: 'info',
+    message: 'Rauhwpx is up to date',
+    detail: `Version ${app.getVersion()} is the latest release.`,
+    buttons: ['OK'],
+  });
+}
+
+async function checkForDebUpdates({ manual }) {
+  const response = await net.fetch(RELEASES_API_URL, {
+    headers: {
+      accept: 'application/vnd.github+json',
+      'x-github-api-version': '2022-11-28',
+    },
+    cache: 'no-store',
+  });
+  if (!response.ok) throw new Error(`GitHub Releases returned HTTP ${response.status}`);
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > 2 * 1024 * 1024) {
+    throw new Error('GitHub release metadata is too large');
+  }
+  const release = await response.json();
+  if (!isNewerStableVersion(release?.tag_name, app.getVersion())) {
+    if (manual) await showUpToDate();
+    return null;
+  }
+  const asset = selectDebAsset(release?.assets, process.arch);
+  const { response: choice } = await dialog.showMessageBox({
+    type: 'info',
+    message: `Rauhwpx ${String(release.tag_name).replace(/^v/i, '')} is available`,
+    detail: `You are running version ${app.getVersion()}. Download the signed Debian package and install it with your system package manager.`,
+    buttons: ['Open download page', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (choice === 0) void shell.openExternal(asset?.browser_download_url ?? release?.html_url ?? RELEASES_URL);
+  return release;
+}
 
 function configureAutoUpdater() {
   autoUpdater.logger = console;
-  // macOS stages updates automatically and applies them on quit. Windows
-  // installers are unsigned today, so background installs get blocked by
-  // SmartScreen; downloads there only happen after an explicit confirmation.
-  autoUpdater.autoDownload = process.platform === 'darwin';
+  const linuxAppImage = process.platform === 'linux' && Boolean(process.env.APPIMAGE);
+  // macOS and AppImage builds can stage compatible updates. Debian packages
+  // stay under the system package manager and only link to the signed release.
+  autoUpdater.autoDownload = process.platform === 'darwin' || linuxAppImage;
   autoUpdater.on('error', (error) => {
     console.warn('[rauhwpx] update check failed:', error?.message ?? error);
   });
   autoUpdater.on('update-not-available', () => {
     if (!manualUpdateCheck) return;
-    void dialog.showMessageBox({
-      type: 'info',
-      message: 'Rauhwpx is up to date',
-      detail: `Version ${app.getVersion()} is the latest release.`,
-      buttons: ['OK'],
-    });
+    void showUpToDate();
   });
   autoUpdater.on('update-available', (info) => {
-    if (autoUpdater.autoDownload || !manualUpdateCheck) return;
+    const linuxDeb = process.platform === 'linux' && !process.env.APPIMAGE;
+    if (autoUpdater.autoDownload || (!manualUpdateCheck && !linuxDeb)) return;
     void dialog.showMessageBox({
       type: 'info',
       message: `Rauhwpx ${info?.version ?? ''} is available`,
-      detail: `You are running version ${app.getVersion()}. Download the installer now?`,
-      buttons: ['Download', 'Cancel'],
+      detail: linuxDeb
+        ? `You are running version ${app.getVersion()}. Download the signed Debian package from Releases.`
+        : `You are running version ${app.getVersion()}. Download the installer now?`,
+      buttons: linuxDeb ? ['Open download page', 'Cancel'] : ['Download', 'Cancel'],
       defaultId: 0,
       cancelId: 1,
     }).then(({ response }) => {
-      if (response === 0) void autoUpdater.downloadUpdate().catch((error) => {
-        console.warn('[rauhwpx] update download failed:', error?.message ?? error);
-      });
+      if (response !== 0) return;
+      if (linuxDeb) {
+        void shell.openExternal(RELEASES_URL);
+      } else {
+        void autoUpdater.downloadUpdate().catch((error) => {
+          console.warn('[rauhwpx] update download failed:', error?.message ?? error);
+        });
+      }
     });
   });
   autoUpdater.on('update-downloaded', (info) => {
@@ -339,13 +464,18 @@ function configureAutoUpdater() {
     updateDownloadReady = true;
     const version = info?.version ?? '';
     const isMac = process.platform === 'darwin';
-    const buttons = isMac ? ['Quit to install', 'Later'] : ['Install now', 'Later'];
+    const isLinuxAppImage = process.platform === 'linux' && Boolean(process.env.APPIMAGE);
+    const buttons = isMac
+      ? ['Quit to install', 'Later']
+      : isLinuxAppImage ? ['Restart to install', 'Later'] : ['Install now', 'Later'];
     void dialog.showMessageBox({
       type: 'info',
       message: `Rauhwpx ${version} is ready to install`,
       detail: isMac
         ? 'It will be installed when Rauhwpx quits.'
-        : 'The installer opens after Rauhwpx closes; Windows may ask you to confirm it because it is not signed yet.',
+        : isLinuxAppImage
+          ? 'Restart Rauhwpx to replace this AppImage with the verified update.'
+          : 'The installer opens after Rauhwpx closes; Windows may ask you to confirm it because it is not signed yet.',
       buttons,
       defaultId: 1,
       cancelId: 1,
@@ -361,24 +491,33 @@ function configureAutoUpdater() {
   });
 }
 
-async function checkForAppUpdates() {
-  if (manualUpdateCheck) return;
-  manualUpdateCheck = true;
-  try {
-    await autoUpdater.checkForUpdates();
-  } catch (error) {
-    console.warn('[rauhwpx] update check failed:', error?.message ?? error);
-    const { response } = await dialog.showMessageBox({
-      type: 'warning',
-      message: 'Rauhwpx could not check for updates',
-      detail: error?.message ?? String(error),
-      buttons: ['Open releases page', 'OK'],
-      defaultId: 1,
-    });
-    if (response === 0) void shell.openExternal(RELEASES_URL);
-  } finally {
-    manualUpdateCheck = false;
-  }
+async function checkForAppUpdates({ manual = true } = {}) {
+  if (updateCheckPromise) return updateCheckPromise;
+  manualUpdateCheck = manual;
+  updateCheckPromise = (async () => {
+    try {
+      if (process.platform === 'linux' && !process.env.APPIMAGE) {
+        return await checkForDebUpdates({ manual });
+      }
+      return await autoUpdater.checkForUpdates();
+    } catch (error) {
+      console.warn('[rauhwpx] update check failed:', error?.message ?? error);
+      if (!manual) return null;
+      const { response } = await dialog.showMessageBox({
+        type: 'warning',
+        message: 'Rauhwpx could not check for updates',
+        detail: error?.message ?? String(error),
+        buttons: ['Open releases page', 'OK'],
+        defaultId: 1,
+      });
+      if (response === 0) void shell.openExternal(RELEASES_URL);
+      return null;
+    } finally {
+      manualUpdateCheck = false;
+      updateCheckPromise = null;
+    }
+  })();
+  return updateCheckPromise;
 }
 
 function installMenu() {
@@ -469,6 +608,11 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
     : null;
   session.allowCloseOnce = false;
   session.pendingCloseRequestId = null;
+  session.cloudLocked = false;
+  session.cloudHandoffId = null;
+  session.cloudTransferPromise = null;
+  session.cloudScope = { threadId: '', documentId: null };
+  session.cloudTransferIntent = null;
   window.on('close', (event) => {
     if (session.allowCloseOnce) return;
     // A dead renderer can never answer the Save–Discard–Cancel prompt.
@@ -706,10 +850,12 @@ ipcMain.handle('desktop:native-file-source-path', (event, handleId) => {
 });
 ipcMain.handle('desktop:native-file-validate-save', (event, handleId, identity) => {
   const session = sessionForEvent(event);
+  if (session.cloudLocked) throw new Error('The cloud agent currently owns this document');
   return nativeFiles.validateSave(session.sessionId, handleId, identity, documentLeases);
 });
 ipcMain.handle('desktop:native-file-write', (event, handleId, bytes, identity) => {
   const session = sessionForEvent(event);
+  if (session.cloudLocked) throw new Error('The cloud agent currently owns this document');
   return nativeFiles.write(session.sessionId, handleId, bytes, identity, documentLeases);
 });
 ipcMain.handle('desktop:native-file-is-same', (event, firstHandleId, secondHandleId) => {
@@ -791,14 +937,212 @@ ipcMain.handle('desktop:document-release', (event) => {
   const session = sessionForEvent(event);
   documentLeases.releaseSession(session.sessionId);
 });
+ipcMain.handle('cloud:get-state', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  session.cloudScope = normalizeCloudScope(payload);
+  return scopedCloudSnapshot(session, null, { refresh: true });
+});
+ipcMain.handle('cloud:save-profile', async (event, payload) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().saveProfile(payload));
+});
+ipcMain.handle('cloud:test-profile', async (event, payload) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().testProfile(payload));
+});
+ipcMain.handle('cloud:provision', async (event, payload) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().provision(payload));
+});
+ipcMain.handle('cloud:pair', async (event, payload) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().pair(payload));
+});
+ipcMain.handle('cloud:transfer-intent', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  const scope = normalizeCloudScope(payload);
+  session.cloudScope = scope;
+  if (payload.pending === true) {
+    if (!session.cloudTransferIntent) {
+      let settle;
+      const promise = new Promise((resolve) => { settle = resolve; });
+      session.cloudTransferIntent = { ...scope, promise, settle, settled: false };
+    }
+  } else if (session.cloudTransferIntent) {
+    if (!session.cloudTransferIntent.settled) {
+      session.cloudTransferIntent.settled = true;
+      session.cloudTransferIntent.settle(false);
+    }
+    session.cloudTransferIntent = null;
+  }
+  return scopedCloudSnapshot(session);
+});
+ipcMain.handle('cloud:read-reference', async (event, payload = {}) => {
+  sessionForEvent(event);
+  const id = String(payload.id ?? '');
+  const scope = String(payload.scope ?? '');
+  const scopeId = scope === 'global' ? 'global' : String(payload.scopeId ?? '');
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('Reference id is invalid');
+  if (!['chat', 'document', 'global'].includes(scope)) throw new Error('Reference scope is invalid');
+  if (!scopeId || scopeId.length > 256 || /[\u0000-\u001f\u007f]/.test(scopeId)) {
+    throw new Error('Reference scope id is invalid');
+  }
+  const context = await sessions.contextForSender(event.sender);
+  const url = new URL(context.hubUrl);
+  url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+  url.pathname = `/reference-files/${encodeURIComponent(id)}`;
+  url.searchParams.set('scope', scope);
+  url.searchParams.set('scopeId', scopeId);
+  url.searchParams.set('sessionId', context.sessionId);
+  const response = await net.fetch(url.toString(), {
+    headers: { authorization: `Bearer ${context.hubToken}` },
+    cache: 'no-store',
+  });
+  if (!response.ok) throw new Error(`Reference export failed with HTTP ${response.status}`);
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > 128 * 1024 * 1024) {
+    throw new Error('Reference export exceeds 128 MiB');
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > 128 * 1024 * 1024) throw new Error('Reference export size is invalid');
+  const expectedDigest = response.headers.get('x-content-sha256');
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  if (!expectedDigest || expectedDigest !== digest) throw new Error('Reference export failed integrity verification');
+  return { bytes: new Uint8Array(bytes), sha256: digest, size: bytes.length };
+});
+ipcMain.handle('cloud:transfer', async (event, payload) => {
+  const session = sessionForEvent(event);
+  session.cloudScope = normalizeCloudScope(payload);
+  if (payload?.permissionProfile !== 'unrestricted') {
+    throw new Error('Cloud agents require Full access');
+  }
+  if (session.cloudLocked) throw new Error('This document is already owned by a cloud session');
+  if (session.cloudTransferPromise) return session.cloudTransferPromise;
+  const lease = documentLeases.leaseForSession(session.sessionId);
+  const transfer = requireCloudCoordinator().transfer(payload, {
+    originSessionId: session.sessionId,
+    originPath: lease?.canonicalPath ?? null,
+  });
+  session.cloudTransferPromise = transfer;
+  try {
+    const snapshot = await transfer;
+    const scoped = await scopedCloudSnapshot(session, snapshot);
+    if (session.cloudTransferIntent && !session.cloudTransferIntent.settled) {
+      session.cloudTransferIntent.settled = true;
+      session.cloudTransferIntent.settle(true);
+    }
+    return scoped;
+  } catch (error) {
+    if (session.cloudTransferIntent && !session.cloudTransferIntent.settled) {
+      session.cloudTransferIntent.settled = true;
+      session.cloudTransferIntent.settle(false);
+    }
+    throw error;
+  } finally {
+    session.cloudTransferPromise = null;
+  }
+});
+ipcMain.handle('cloud:command', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const operation = await requireCloudCoordinator().command(payload);
+  return scopedCloudSnapshot(session, operation);
+});
+ipcMain.handle('cloud:complete-takeover', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const operation = await requireCloudCoordinator().completeTakeover(payload);
+  return scopedCloudSnapshot(session, operation);
+});
+ipcMain.handle('cloud:download-result', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const result = await requireCloudCoordinator().downloadResult(payload);
+  const handoff = await requireCloudCoordinator().handoffForSession(payload?.sessionId);
+  let conflict = 'none';
+  if (handoff?.originPath && handoff.documentDigest) {
+    try {
+      const current = await readFile(handoff.originPath);
+      if (createHash('sha256').update(current).digest('hex') !== handoff.documentDigest) {
+        conflict = 'external-change';
+      }
+    } catch {
+      conflict = 'external-change';
+    }
+  }
+  const preview = await createWindow(
+    launchRequest({ source: 'cloud-result-preview' }),
+    { generatedDocument: { fileName: result.fileName, bytes: result.bytes, readOnly: true } },
+  );
+  return {
+    ...result,
+    snapshot: await scopedCloudSnapshot(session, result.snapshot),
+    previewOpened: Boolean(preview),
+    conflict,
+  };
+});
+ipcMain.handle('cloud:resolve-result', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  const coordinator = requireCloudCoordinator();
+  const handoff = await coordinator.handoffForSession(payload.sessionId);
+  if (!handoff?.recoveryPath || !handoff.resultDigest) throw new Error('Verified cloud recovery is unavailable');
+  const action = String(payload.action ?? '');
+  if (action === 'replace') {
+    const lease = documentLeases.leaseForSession(session.sessionId);
+    if (
+      !lease
+      || lease.identity.documentId !== handoff.originDocumentId
+      || lease.canonicalPath !== handoff.originPath
+    ) {
+      throw new Error('Open the origin document on its origin device before replacing it');
+    }
+  }
+  const resolution = await applyCloudRecovery({
+    recoveryPath: handoff.recoveryPath,
+    resultDigest: handoff.resultDigest,
+    originalPath: handoff.originPath,
+    originalDigest: handoff.documentDigest,
+    action,
+    resolutionId: handoff.id,
+  });
+  if (resolution.bytes && resolution.path) {
+    validateNativeDocumentBytes(basename(resolution.path), resolution.bytes);
+  }
+  for (const candidate of sessions.windows()) {
+    const candidateSession = sessions.sessionForSender(candidate.webContents);
+    const lease = documentLeases.leaseForSession(candidateSession.sessionId);
+    if (lease?.identity.documentId === handoff.originDocumentId) candidateSession.cloudLocked = false;
+  }
+  const snapshot = await scopedCloudSnapshot(session, await coordinator.recordResolution(handoff.id, resolution));
+  return {
+    ...resolution,
+    conflict: resolution.conflict ? 'external-change' : 'none',
+    preservedCopyName: resolution.action === 'keep-both' && resolution.path
+      ? basename(resolution.path)
+      : null,
+    snapshot,
+  };
+});
 ipcMain.handle('window:is-fullscreen', (event) => sessionForEvent(event).window.isFullScreen());
-ipcMain.handle('desktop:close-response', (event, requestId, allowClose) => {
+ipcMain.handle('desktop:close-response', async (event, requestId, allowClose) => {
   const session = sessionForEvent(event);
   if (session.pendingCloseRequestId !== requestId) return false;
   session.pendingCloseRequestId = null;
   if (!allowClose) {
     quitRequested = false;
     return false;
+  }
+  if (session.cloudTransferPromise) {
+    try {
+      await session.cloudTransferPromise;
+    } catch {
+      quitRequested = false;
+      return false;
+    }
+  }
+  if (session.cloudTransferIntent) {
+    const completed = await session.cloudTransferIntent.promise;
+    if (!completed) {
+      quitRequested = false;
+      return false;
+    }
   }
   session.allowCloseOnce = true;
   session.window.close();
@@ -838,6 +1182,23 @@ if (!hasSingleInstanceLock) {
       filePath: join(app.getPath('userData'), 'secrets.json'),
       safeStorage,
     });
+    const cloudClient = new CloudClient({
+      vault: secretVault,
+      fetchImpl: (...args) => net.fetch(...args),
+    });
+    cloudCoordinator = new CloudCoordinator({
+      client: cloudClient,
+      store: new CloudHandoffStore({
+        filePath: join(app.getPath('userData'), 'cloud', 'handoffs.json'),
+      }),
+      provisioner: new CloudProvisioner({
+        installerPath: unpackedPath(join(__dirname, '..', 'cloud', 'install', 'install.sh')),
+        knownHostsPath: join(app.getPath('userData'), 'cloud', 'ssh-known-hosts'),
+      }),
+      recoveryDir: join(app.getPath('userData'), 'cloud', 'recovery'),
+    });
+    cloudCoordinator.on('event', queueCloudBroadcast);
+    await cloudCoordinator.start();
     configureAutoUpdater();
     await loadNativeBookmarks();
     installMenu();
@@ -857,9 +1218,9 @@ if (!hasSingleInstanceLock) {
       app.quit();
       return;
     }
-    if (app.isPackaged && process.platform === 'darwin') {
+    if (app.isPackaged && ['darwin', 'linux'].includes(process.platform)) {
       setTimeout(() => {
-        void autoUpdater.checkForUpdates().catch(() => {});
+        void checkForAppUpdates({ manual: false });
       }, 4000);
     }
   }).catch((error) => {
@@ -891,6 +1252,7 @@ if (!hasSingleInstanceLock) {
     if (teardownStarted) return;
     teardownStarted = true;
     quitting = true;
+    cloudCoordinator?.stop();
     void hubOwner.teardown().finally(() => {
       teardownFinished = true;
       app.exit(0);

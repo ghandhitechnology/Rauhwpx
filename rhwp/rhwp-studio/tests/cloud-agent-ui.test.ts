@@ -1,0 +1,76 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+
+const sidebar = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
+const cloudUi = readFileSync(new URL('../src/ui/agent-sidebar/cloud-ui.ts', import.meta.url), 'utf8');
+const cloudCss = readFileSync(new URL('../src/ui/agent-sidebar/cloud-ui.css', import.meta.url), 'utf8');
+const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+const desktop = readFileSync(new URL('../src/desktop-integration.ts', import.meta.url), 'utf8');
+const agentTools = readFileSync(new URL('../../rhwp-agent/tools.mjs', import.meta.url), 'utf8');
+const executor = readFileSync(new URL('../src/agent/tool-executor.ts', import.meta.url), 'utf8');
+const pending = readFileSync(new URL('../src/agent/pending-edits.ts', import.meta.url), 'utf8');
+
+test('cloud action is available in sidebar and fullscreen headers', () => {
+  assert.match(sidebar, /headerActions\.insertBefore\(cloudUi\.sidebarButton/);
+  assert.match(sidebar, /workspaceTrailing\.insertBefore\(cloudUi\.workspaceButton/);
+  assert.match(cloudUi, /createIcon\('cloud'\)/);
+  assert.match(cloudUi, /ag-cloud-session-select/);
+  assert.match(cloudUi, /selectedSessionId/);
+  assert.match(cloudUi, /Tailscale HTTPS 포트/);
+  assert.match(cloudUi, /tailscaleHttpsPort\.input\.max = '65535'/);
+  assert.match(cloudUi, /tailscaleHttpsPort: servePort/);
+  assert.match(cloudUi, /sidebarButton\.hidden = !snapshot\.available/);
+  assert.match(cloudUi, /workspaceButton\.hidden = !snapshot\.available/);
+  assert.match(cloudUi, /aria-controls', 'ag-cloud-panel/);
+  assert.match(cloudUi, /closePanel\(true\)/);
+  assert.match(cloudCss, /\.ag-cloud-btn\[hidden\],[\s\S]*\.ag-workspace-cloud-btn\[hidden\][\s\S]*display:\s*none/);
+});
+
+test('cloud transfer includes portable timeline, exact document bytes and reference bytes', () => {
+  assert.match(sidebar, /timeline: exportCloudTimeline\(currentThread\)/);
+  assert.match(sidebar, /const bytes = await cloudController\.readReference\(descriptor\)/);
+  assert.match(sidebar, /references\.push\(\{ \.\.\.descriptor, bytes \}\)/);
+  assert.match(main, /await saveCurrentDocument\(commandServices\)/);
+  assert.match(main, /exportDocumentForFormat\(wasm, format\)/);
+});
+
+test('cloud lease locks local editing and queued messages cross only at a remote boundary', () => {
+  assert.match(sidebar, /isCloudConversation\(\)/);
+  assert.match(cloudUi, /async queueMessage\(text, messageId\)/);
+  assert.match(cloudUi, /command: 'queue-message'/);
+  assert.match(main, /setCloudDocumentLease/);
+  assert.match(main, /syncDocumentReadOnly/);
+  assert.match(cloudUi, /completeTakeover\(session\.sessionId\)/);
+});
+
+test('desktop close waits for a requested handoff through the local turn boundary', () => {
+  assert.match(sidebar, /awaitPendingCloudTransferForClose\(\): Promise<void>/);
+  assert.match(sidebar, /if \(turnRunning\) \{[\s\S]*cloudTransferPending = true;[\s\S]*ensureCloudTransferCloseWaiter\(\)/);
+  assert.match(sidebar, /if \(cloudTransferPending\) requestCloudTransfer\(\)/);
+  assert.match(main, /await awaitPendingCloudTransferForClose\(\)/);
+  assert.match(main, /return false;[\s\S]*const allowClose = await canReplaceCurrentDocument\(\)/);
+  assert.match(sidebar, /setTransferIntent\(\{ \.\.\.intent, pending: true \}\)/);
+  assert.match(sidebar, /await clearCloudTransferIntent\(\)/);
+  assert.match(cloudUi, /refresh\(selectedScope\(\)\)/);
+  assert.match(desktop, /cloudSetTransferIntent/);
+});
+
+test('result preview requires explicit resolution and external conflicts cannot replace', () => {
+  assert.match(cloudUi, /downloadResult\(session\.sessionId\)/);
+  assert.match(cloudUi, /conflict === 'external-change' && actionName === 'replace'/);
+  assert.match(cloudUi, /resolveResult\('keep-both'\)/);
+  assert.match(cloudUi, /resolveResult\('replace'\)/);
+  assert.match(main, /open-document-bytes/);
+  assert.match(main, /resolution\.action === 'replace'/);
+  assert.match(desktop, /cloudResolveResult/);
+  assert.match(desktop, /cloudReadReference/);
+});
+
+test('agents can append a paragraph without moving controls from an empty anchor paragraph', () => {
+  assert.match(agentTools, /name: 'insert_paragraph_after'/);
+  assert.match(agentTools, /inline controls[\s\S]*remain anchored/);
+  assert.match(executor, /case 'insert_paragraph_after'/);
+  assert.match(pending, /wasm\.insertParagraph\(sectionIdx, insertedParaIdx\)/);
+  assert.match(pending, /startParaIdx: afterParaIdx,[\s\S]*endParaIdx: insertedParaIdx/);
+});

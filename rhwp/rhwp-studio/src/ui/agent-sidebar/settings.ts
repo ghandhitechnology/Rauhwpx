@@ -3,10 +3,11 @@
  *
  * 묶음을 한 스크롤에 세운다:
  *  1. 연결 — 허브와 CLI 상태, 모달 설치/로그인, 재연결·세션 재시작
- *  2. 기본 설정 — 다음 대화부터 쓸 프로바이더·모델·강도·권한
- *  3. 글쓰기 보정 — 문체 보정 상태와 재보정 진입
- *  4. 템플릿 — 기기 전체 HWP/HWPX 서식
- *  5. 사용량 — CLIProxyAPI 연결, 요금제별 5시간·주간 한도, 오늘 누적, 모델별 내역
+ *  2. Cloud — 선택 시 VPS 상태 카드(cloud-ui 가 만든 DOM)
+ *  3. 기본 설정 — 다음 대화부터 쓸 프로바이더·모델·강도·권한
+ *  4. 글쓰기 보정 — 문체 보정 상태와 재보정 진입
+ *  5. 템플릿 — 기기 전체 HWP/HWPX 서식
+ *  6. 사용량 — CLIProxyAPI 연결, 요금제별 5시간·주간 한도, 오늘 누적, 모델별 내역
  *
  * 페이지 전환(열기/닫기)은 index.ts 가 클래스로 관리하고, 이 모듈은
  * 자기 DOM 과 데이터 갱신만 맡는다.
@@ -276,6 +277,8 @@ export interface SettingsPanelDeps {
   openCalibration: () => void;
   /** 현재 대화의 CLI 세션을 다시 시작한다. */
   reconnectSession: () => void;
+  cloudSettings?: HTMLElement;
+  refreshCloudSettings?: () => void;
 }
 
 export interface SettingsPanel {
@@ -294,7 +297,15 @@ export interface SettingsPanel {
 }
 
 export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
-  const { bridge, getSelection, applyDefaults, openCalibration, reconnectSession } = deps;
+  const {
+    bridge,
+    getSelection,
+    applyDefaults,
+    openCalibration,
+    reconnectSession,
+    cloudSettings,
+    refreshCloudSettings,
+  } = deps;
 
   let disposed = false;
   let prefs: AgentPrefs = loadAgentPrefs();
@@ -1043,6 +1054,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   body.append(
     connection.root,
+    ...(cloudSettings ? [cloudSettings] : []),
     defaults.root,
     calibration.root,
     templatesSection.root,
@@ -2238,6 +2250,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       void refreshPiStatus();
       void refreshSetupStatuses();
       void refreshTemplates();
+      refreshCloudSettings?.();
     },
     close(): void {
       closeAgentSetup();

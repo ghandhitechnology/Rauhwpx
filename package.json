@@ -4,6 +4,9 @@
   "version": "1.0.0",
   "description": "HWP/HWPX editor with a local Claude/Codex agent sidebar.",
   "author": "Hataewook",
+  "license": "MIT",
+  "homepage": "https://github.com/ghandhitechnology/Rauhwpx",
+  "desktopName": "rauhwpx.desktop",
   "private": true,
   "main": "desktop/main.mjs",
   "scripts": {
@@ -15,9 +18,15 @@
     "dev:desktop": "wait-on http://127.0.0.1:7700 && cross-env RHWP_DEV_URL=http://127.0.0.1:7700 electron .",
     "build:studio": "npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
     "build:agent": "npm --prefix rhwp/rhwp-agent ci --omit=dev",
+    "build:native": "cargo build --manifest-path rhwp/Cargo.toml --release --locked --bin rhwp && node desktop/stage-native-rhwp.mjs",
     "desktop": "npm run build:studio && electron .",
-    "dist:mac": "npm run build:studio && npm run build:agent && electron-builder --mac dmg zip --arm64 --publish never",
-    "dist:win": "npm run build:studio && npm run build:agent && electron-builder --win --publish never"
+    "dist:mac": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --mac dmg zip --arm64 --publish never",
+    "dist:win": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --win --publish never",
+    "dist:linux": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --linux AppImage deb --publish never",
+    "dist:linux:x64": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --linux AppImage deb --x64 --publish never",
+    "dist:linux:arm64": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --linux AppImage deb --arm64 --publish never",
+    "test:cloud": "node --test tests/desktop-cloud.test.mjs && npm --prefix cloud test",
+    "check:cloud": "node --check desktop/cloud-*.mjs && npm --prefix cloud run check"
   },
   "dependencies": {
     "electron-updater": "^6.8.9"
@@ -35,23 +44,37 @@
     "asar": true,
     "files": [
       "desktop/**/*",
+      "cloud/install/install.sh",
       "rhwp/rhwp-studio/dist/**/*",
       "rhwp/rhwp-agent/**/*",
       "rhwp/rhwp-agent/node_modules/**/*",
       "!rhwp/rhwp-agent/tests/**"
     ],
     "asarUnpack": [
-      "rhwp/rhwp-agent/**"
+      "rhwp/rhwp-agent/**",
+      "desktop/bin/**",
+      "cloud/install/install.sh"
     ],
     "fileAssociations": [
       {
-        "ext": [
-          "hwp",
-          "hwpx",
-          "hml"
-        ],
-        "name": "Hangul document",
-        "description": "Hangul word-processing document",
+        "ext": "hwp",
+        "name": "HWP document",
+        "description": "Hangul HWP document",
+        "mimeType": "application/x-hwp",
+        "role": "Editor"
+      },
+      {
+        "ext": "hwpx",
+        "name": "HWPX document",
+        "description": "Hangul HWPX document",
+        "mimeType": "application/vnd.hancom.hwpx",
+        "role": "Editor"
+      },
+      {
+        "ext": "hml",
+        "name": "HML document",
+        "description": "Hangul XML document",
+        "mimeType": "application/x-hml",
         "role": "Editor"
       }
     ],
@@ -121,6 +144,53 @@
             "x64"
           ]
         }
+      ]
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "rhwp/assets/logo/logo-512.png",
+      "category": "Office",
+      "synopsis": "HWP and HWPX document editor",
+      "description": "Open, edit, and save Hangul HWP, HWPX, and HML documents with an integrated agent sidebar.",
+      "executableName": "rauhwpx",
+      "maintainer": "Rauhwpx maintainers <noreply@github.com>",
+      "vendor": "ghandhitechnology",
+      "syncDesktopName": true,
+      "desktop": {
+        "entry": {
+          "StartupWMClass": "Rauhwpx",
+          "X-GNOME-UsesNotifications": "true"
+        }
+      }
+    },
+    "deb": {
+      "packageName": "rauhwpx",
+      "packageCategory": "editors",
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0"
       ]
     },
     "nsis": {

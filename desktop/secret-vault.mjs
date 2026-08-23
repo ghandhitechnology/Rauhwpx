@@ -1,8 +1,15 @@
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 const KEY_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const LOCK_CODES = new Set(['EPERM', 'EBUSY', 'ENOTEMPTY', 'EACCES']);
+const LINUX_SECURE_STORAGE_BACKENDS = new Set([
+  'gnome_libsecret',
+  'kwallet',
+  'kwallet5',
+  'kwallet6',
+]);
 
 async function retryWindows(operation, platform) {
   const delays = [50, 100, 200, 400, 800];
@@ -16,8 +23,7 @@ async function retryWindows(operation, platform) {
 
 async function replaceFile(temp, target, platform) {
   if (platform !== 'win32') return fs.rename(temp, target);
-  const previous = `${target}.previous-write`;
-  await retryWindows(() => fs.rm(previous, { force: true }), platform);
+  const previous = path.join(path.dirname(target), `.${path.basename(target)}.previous-write-${randomUUID()}`);
   let moved = false;
   try {
     await retryWindows(() => fs.rename(target, previous), platform);
@@ -41,11 +47,16 @@ export function createSecretVault({ filePath, safeStorage, platform = process.pl
   let writeChain = Promise.resolve();
 
   async function assertAvailable() {
-    if (!safeStorage || !(await safeStorage.isAsyncEncryptionAvailable())) {
+    if (!safeStorage
+      || typeof safeStorage.isAsyncEncryptionAvailable !== 'function'
+      || !(await safeStorage.isAsyncEncryptionAvailable())) {
       throw new Error('Secure OS credential storage is unavailable.');
     }
-    if (platform === 'linux' && safeStorage.getSelectedStorageBackend?.() === 'basic_text') {
-      throw new Error('A system keyring is required to store API keys securely.');
+    if (platform === 'linux') {
+      const backend = safeStorage.getSelectedStorageBackend?.();
+      if (!LINUX_SECURE_STORAGE_BACKENDS.has(backend)) {
+        throw new Error('A Secret Service or KWallet system keyring is required to store API keys securely.');
+      }
     }
   }
 
@@ -62,10 +73,22 @@ export function createSecretVault({ filePath, safeStorage, platform = process.pl
 
   function persist() {
     const job = writeChain.then(async () => {
-      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      const directory = path.dirname(filePath);
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+      if (platform !== 'win32') await fs.chmod(directory, 0o700);
       const temp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-      await fs.writeFile(temp, `${JSON.stringify({ version: 1, secrets: entries }, null, 2)}\n`, 'utf8');
-      await replaceFile(temp, filePath, platform);
+      try {
+        await fs.writeFile(
+          temp,
+          `${JSON.stringify({ version: 1, secrets: entries }, null, 2)}\n`,
+          { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+        );
+        await replaceFile(temp, filePath, platform);
+        if (platform !== 'win32') await fs.chmod(filePath, 0o600);
+      } catch (error) {
+        await fs.rm(temp, { force: true }).catch(() => {});
+        throw error;
+      }
     });
     writeChain = job.catch(() => {});
     return job;

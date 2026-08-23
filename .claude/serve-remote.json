@@ -23,7 +23,8 @@
       "health": "/healthz",
       "https_port": 8444,
       "env": {
-        "RHWP_AGENT_TOKEN": "dev"
+        "RHWP_AGENT_TOKEN": "dev",
+        "RHWP_STUDIO_ORIGINS": "https://${TS_DNSNAME}:8443"
       }
     }
   ],

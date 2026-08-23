@@ -23,6 +23,8 @@ jobs:
         os:
           - macos-15
           - windows-latest
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
 
@@ -60,3 +62,64 @@ jobs:
 
       - name: Test Studio session persistence and desktop contracts
         run: npm --prefix rhwp/rhwp-studio test
+
+  linux-packaging:
+    name: Linux package (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            rhwp/rhwp-studio/package-lock.json
+            rhwp/rhwp-agent/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build WASM engine
+        working-directory: rhwp
+        run: wasm-pack build --target web
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Build AppImage and Debian package
+        run: npm run dist:linux:${{ matrix.arch }}
+
+      - name: Verify Linux artifacts
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          if [ "${EXPECTED_ARCH}" = arm64 ]; then
+            test -f release/Rauhwpx-*-arm64.AppImage
+            test -f release/Rauhwpx-*-arm64.deb
+            test -f release/latest-linux-arm64.yml
+          else
+            test -f release/Rauhwpx-*-x86_64.AppImage
+            test -f release/Rauhwpx-*-amd64.deb
+            test -f release/latest-linux.yml
+          fi

@@ -19,11 +19,14 @@ interface FakePara {
   shapes: number[];     // 코드포인트별 charShapeId
   paraShapeId: number;
   pageBreakBefore: boolean;
+  controls: string[];
 }
 
-function paraOf(text: string, shapeId = 0, paraShapeId = 1, pageBreakBefore = false): FakePara {
+function paraOf(
+  text: string, shapeId = 0, paraShapeId = 1, pageBreakBefore = false, controls: string[] = [],
+): FakePara {
   const chars = [...text];
-  return { chars, shapes: chars.map(() => shapeId), paraShapeId, pageBreakBefore };
+  return { chars, shapes: chars.map(() => shapeId), paraShapeId, pageBreakBefore, controls: [...controls] };
 }
 
 function paraText(p: FakePara): string {
@@ -48,7 +51,7 @@ function makeFakeWasm(initial: FakePara[]) {
   const cloneBody = (b: FakePara[]): FakePara[] =>
     b.map((p) => ({
       chars: [...p.chars], shapes: [...p.shapes], paraShapeId: p.paraShapeId,
-      pageBreakBefore: p.pageBreakBefore,
+      pageBreakBefore: p.pageBreakBefore, controls: [...p.controls],
     }));
 
   const wasm = {
@@ -65,16 +68,29 @@ function makeFakeWasm(initial: FakePara[]) {
       body[p].shapes.splice(off, 0, ...chars.map(() => inherit));
       return okJson({ charOffset: off + chars.length });
     },
+    insertParagraph: (_s: number, p: number) => {
+      record('insertParagraph', p);
+      if (p < 0 || p > body.length) return JSON.stringify({ ok: false, error: 'out of bounds' });
+      const neighbor = body[Math.max(0, Math.min(p - 1, body.length - 1))];
+      body.splice(p, 0, paraOf('', 0, neighbor?.paraShapeId ?? 1, false));
+      return okJson();
+    },
+    deleteParagraph: (_s: number, p: number) => {
+      record('deleteParagraph', p);
+      if (p < 0 || p >= body.length) return JSON.stringify({ ok: false, error: 'out of bounds' });
+      body.splice(p, 1);
+      return okJson();
+    },
     splitParagraph: (_s: number, p: number, off: number) => {
       record('splitParagraph', p, off);
       const cur = body[p];
       const head: FakePara = {
         chars: cur.chars.slice(0, off), shapes: cur.shapes.slice(0, off),
-        paraShapeId: cur.paraShapeId, pageBreakBefore: cur.pageBreakBefore,
+        paraShapeId: cur.paraShapeId, pageBreakBefore: cur.pageBreakBefore, controls: [...cur.controls],
       };
       const tail: FakePara = {
         chars: cur.chars.slice(off), shapes: cur.shapes.slice(off),
-        paraShapeId: cur.paraShapeId, pageBreakBefore: cur.pageBreakBefore,
+        paraShapeId: cur.paraShapeId, pageBreakBefore: cur.pageBreakBefore, controls: [],
       };
       body.splice(p, 1, head, tail);
       return okJson();
@@ -84,12 +100,12 @@ function makeFakeWasm(initial: FakePara[]) {
       const cur = body[p];
       const head: FakePara = {
         chars: cur.chars.slice(0, off), shapes: cur.shapes.slice(0, off),
-        paraShapeId: cur.paraShapeId, pageBreakBefore: cur.pageBreakBefore,
+        paraShapeId: cur.paraShapeId, pageBreakBefore: cur.pageBreakBefore, controls: [...cur.controls],
       };
       // 논리 continuation — 엔진이 강제 쪽 나눔을 상속하지 않는다
       const tail: FakePara = {
         chars: cur.chars.slice(off), shapes: cur.shapes.slice(off),
-        paraShapeId: cur.paraShapeId, pageBreakBefore: false,
+        paraShapeId: cur.paraShapeId, pageBreakBefore: false, controls: [],
       };
       body.splice(p, 1, head, tail);
       return okJson();
@@ -103,6 +119,7 @@ function makeFakeWasm(initial: FakePara[]) {
         shapes: [...first.shapes.slice(0, so), ...last.shapes.slice(eo)],
         paraShapeId: first.paraShapeId,
         pageBreakBefore: first.pageBreakBefore,
+        controls: [...first.controls, ...last.controls],
       };
       body.splice(sp, ep - sp + 1, merged);
       return { ok: true };
@@ -207,6 +224,7 @@ function makeFakeWasm(initial: FakePara[]) {
     shapes: (p: number) => [...body[p].shapes],
     paraShape: (p: number) => body[p].paraShapeId,
     pageBreaks: () => body.map((p) => p.pageBreakBefore),
+    controls: (p: number) => [...body[p].controls],
     pageMap: () => {
       let page = 0;
       return body.map((p, index) => {
@@ -270,6 +288,7 @@ test('replaceText: 하나의 op 로 기록되고 시작 지점 글자 모양이 
     shapes: [...para.shapes, ...world.shapes],
     paraShapeId: 1,
     pageBreakBefore: false,
+    controls: [],
   };
   const { mgr, fake, overlayOps } = makeManager([merged]);
 
@@ -354,6 +373,54 @@ test('멀티라인 preview reject: 원본 pageBreakBefore와 page map을 정확�
   assert.equal(mgr.hasPending(), false);
 });
 
+test('insertParagraphAfter: 제어만 있는 원본 문단을 건드리지 않고 reject로 정확히 복원한다', () => {
+  const { mgr, fake, calls } = makeManager([
+    paraOf('', 0, 17, true, ['picture:0', 'equation:1']),
+  ]);
+  const result = mgr.insertParagraphAfter('claude', 0, 0, '새 문단 🎉');
+
+  assert.equal(fake.paraCount(), 2);
+  assert.equal(fake.text(0), '');
+  assert.equal(fake.text(1), '새 문단 🎉');
+  assert.deepEqual(fake.controls(0), ['picture:0', 'equation:1']);
+  assert.deepEqual(fake.controls(1), []);
+  assert.deepEqual(result.insertedRange, {
+    sectionIdx: 0,
+    startParaIdx: 0,
+    startCharOffset: 0,
+    endParaIdx: 1,
+    endCharOffset: 6,
+  });
+  assert.deepEqual(
+    calls.filter((call) => call.m === 'insertParagraph' || call.m === 'insertText')
+      .map((call) => call.m),
+    ['insertParagraph', 'insertText'],
+  );
+
+  mgr.reject(result.changeSetId);
+  assert.equal(fake.paraCount(), 1);
+  assert.equal(fake.text(0), '');
+  assert.deepEqual(fake.controls(0), ['picture:0', 'equation:1']);
+  assert.equal(mgr.hasPending(), false);
+});
+
+test('insertParagraphAfter: approve는 한 개의 undo/redo 히스토리로 새 문단을 채택한다', () => {
+  const { mgr, fake, recorded } = makeManager([paraOf('anchor', 0, 23, false, ['table:0'])]);
+  const result = mgr.insertParagraphAfter('claude', 0, 0, 'appended');
+  mgr.approve(result.changeSetId);
+
+  assert.equal(recorded.length, 1);
+  assert.deepEqual([fake.text(0), fake.text(1)], ['anchor', 'appended']);
+  assert.deepEqual(fake.controls(0), ['table:0']);
+  recorded[0].command.undo(fake.wasm);
+  assert.equal(fake.paraCount(), 1);
+  assert.equal(fake.text(0), 'anchor');
+  assert.deepEqual(fake.controls(0), ['table:0']);
+  recorded[0].command.execute(fake.wasm);
+  assert.deepEqual([fake.text(0), fake.text(1)], ['anchor', 'appended']);
+  assert.deepEqual(fake.controls(0), ['table:0']);
+});
+
 test('replaceText reject: 혼합 서식의 원본이 텍스트와 서식 모두 정확히 복원된다', () => {
   // "hello " + "wor"(5) + "ld"(9) — 혼합 서식
   const head = paraOf('hello ');
@@ -364,6 +431,7 @@ test('replaceText reject: 혼합 서식의 원본이 텍스트와 서식 모두 
     shapes: [...head.shapes, ...mid.shapes, ...tail.shapes],
     paraShapeId: 1,
     pageBreakBefore: false,
+    controls: [],
   };
   const { mgr, fake } = makeManager([merged]);
   const r = mgr.replaceText(
@@ -387,6 +455,7 @@ test('replaceText approve: 단일 히스토리 항목으로 채택되고 undo �
     shapes: [...head.shapes, ...mid.shapes, ...tail.shapes],
     paraShapeId: 1,
     pageBreakBefore: false,
+    controls: [],
   };
   const { mgr, fake, recorded } = makeManager([merged]);
   const r = mgr.replaceText(
@@ -842,6 +911,7 @@ test('빈 교체(삭제) reject: 스냅샷 복원으로 원본 텍스트/서식�
     shapes: [...head.shapes, ...tail.shapes],
     paraShapeId: 1,
     pageBreakBefore: false,
+    controls: [],
   };
   const { mgr, fake } = makeManager([merged]);
   const r = mgr.replaceText(
@@ -981,6 +1051,7 @@ test('runAtomicBatch(apply_edits 경로): 혼합 서식 교체의 reject 복원�
     shapes: [...head.shapes, ...mid.shapes, ...tail.shapes],
     paraShapeId: 1,
     pageBreakBefore: false,
+    controls: [],
   };
   const { mgr, fake } = makeManager([merged]);
   let changeSetId = '';

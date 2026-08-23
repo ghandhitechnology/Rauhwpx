@@ -1,0 +1,10 @@
+[Unit]
+Description=Install a compatible Rauhwpx cloud update while idle
+After=network-online.target rauhwpx-cloud.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/rauhwpx-cloud.env
+ExecStart=/opt/rauhwpx-cloud/current/install/update.sh
+Nice=10
+IOSchedulingClass=idle

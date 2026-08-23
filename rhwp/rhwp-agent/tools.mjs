@@ -16,6 +16,7 @@ const WRITE_NOTE_FOR_BATCH = `${WRITE_NOTE_REVISION} ${WRITE_NOTE_STAGING}`;
  */
 export const BATCHABLE_EDIT_TOOL_NAMES = Object.freeze([
   'insert_text',
+  'insert_paragraph_after',
   'delete_range',
   'replace_range',
   'apply_char_format',
@@ -444,6 +445,16 @@ const BASE_TOOL_DEFINITIONS = [
       charOffset: z.number().int().min(0),
       text: z.string().min(1).max(10000),
       cell: cellParam(),
+    },
+  },
+  {
+    name: 'insert_paragraph_after',
+    description: `Insert exactly one brand-new body paragraph immediately after afterParaIdx and fill it with text. Existing text and inline controls (tables, pictures, equations, notes) remain anchored to the source paragraph, so use this instead of a leading "\\n" when the neighboring paragraph is empty or contains controls. text must be a single non-empty line. ${WRITE_NOTE}`,
+    shape: {
+      expectedRevision: z.number().int(),
+      sectionIdx: z.number().int().min(0),
+      afterParaIdx: z.number().int().min(0),
+      text: z.string().min(1).max(10000).regex(/^[^\r\n]+$/, 'text must be one line'),
     },
   },
   {
@@ -1058,6 +1069,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   prepare_engine_edit_session: 'document-write',
   apply_edits: 'document-write',
   insert_text: 'document-write',
+  insert_paragraph_after: 'document-write',
   template_apply_section_layout: 'document-write',
   template_apply_paragraph_format: 'document-write',
   template_insert_block: 'document-write',

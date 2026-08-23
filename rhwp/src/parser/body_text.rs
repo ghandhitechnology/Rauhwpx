@@ -110,7 +110,15 @@ pub fn parse_body_text_section(data: &[u8]) -> Result<Section, BodyTextError> {
                             data: r.data.clone(),
                         })
                         .collect();
-                    let ext_mps = parse_master_pages_from_raw(&tail);
+                    // Location is authoritative here. Some real HWP5 files use
+                    // ext_flags=0x0004 for an optional/last-page master page,
+                    // without the older 0x0002 extension bit. Parsing this tail
+                    // in isolation otherwise classifies it as a second base
+                    // master page and the rebuild serializer silently omits it.
+                    let mut ext_mps = parse_master_pages_from_raw(&tail);
+                    for master_page in &mut ext_mps {
+                        master_page.is_extension = true;
+                    }
                     section.section_def.master_pages.extend(ext_mps);
                     break;
                 }

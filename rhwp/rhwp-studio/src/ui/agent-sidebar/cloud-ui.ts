@@ -1,0 +1,666 @@
+import './cloud-ui.css';
+
+import type { PortableCloudTimelineV1 } from '../../cloud/timeline.ts';
+import type { CloudController } from '../../cloud/desktop-cloud.ts';
+import type {
+  CloudDownloadResult,
+  CloudProfileDraft,
+  CloudResultAction,
+  CloudResultResolution,
+  CloudSessionScope,
+  CloudSnapshot,
+  CloudTakeoverPayload,
+} from '../../cloud/types.ts';
+import { createIcon } from './icons.ts';
+
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className = '',
+  text = '',
+): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text) node.textContent = text;
+  return node;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDuration(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  const hours = Math.floor(minutes / 60);
+  if (hours > 0) return `${hours}시간 ${minutes % 60}분`;
+  return `${Math.max(1, minutes)}분`;
+}
+
+function sessionIsActive(snapshot: CloudSnapshot): boolean {
+  return snapshot.session.kind !== 'idle'
+    && snapshot.session.kind !== 'completed'
+    && snapshot.session.kind !== 'failed'
+    && snapshot.session.kind !== 'cancelled';
+}
+
+function cloudOwnsConversation(snapshot: CloudSnapshot): boolean {
+  return snapshot.lease.owner === 'cloud';
+}
+
+function sessionKindLabel(kind: CloudSnapshot['session']['kind']): string {
+  switch (kind) {
+    case 'waiting-local-turn': return '전송 대기';
+    case 'transferring': return '전송 중';
+    case 'queued': return '실행 대기';
+    case 'running': return '작업 중';
+    case 'pausing': return '중지 요청';
+    case 'suspended': return '중지됨';
+    case 'taking-over': return '이어받는 중';
+    case 'completed': return '완료';
+    case 'failed': return '실패';
+    case 'cancelled': return '취소됨';
+    default: return '대기';
+  }
+}
+
+export interface CloudAgentUiDeps {
+  controller: CloudController;
+  onRequestTransfer(): void;
+  onCancelPendingTransfer(): void;
+  getScope(): CloudSessionScope;
+  onOpenSettings(): void;
+  onLeaseChange(cloudOwned: boolean, sessionId: string | null): void;
+  onTimeline(timeline: PortableCloudTimelineV1): void;
+  onResultResolved(result: CloudDownloadResult, resolution: CloudResultResolution): void;
+  onBeforeTakeover(): Promise<boolean>;
+  onTakeover(takeover: CloudTakeoverPayload): Promise<void>;
+  onError(message: string): void;
+}
+
+export interface CloudAgentUi {
+  sidebarButton: HTMLButtonElement;
+  workspaceButton: HTMLButtonElement;
+  statusPanel: HTMLElement;
+  queueStrip: HTMLElement;
+  settingsElement: HTMLElement;
+  getSnapshot(): CloudSnapshot;
+  isCloudConversation(): boolean;
+  isRunning(): boolean;
+  setWaitingForLocalTurn(waiting: boolean): void;
+  refreshScope(): void;
+  queueMessage(text: string, messageId: string): Promise<void>;
+  openSettings(): void;
+  dispose(): void;
+}
+
+export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
+  let snapshot = deps.controller.getSnapshot();
+  let panelOpen = false;
+  let localTurnPending = false;
+  let busy = false;
+  let downloadedResult: CloudDownloadResult | null = null;
+  let appliedTimelineKey = '';
+  let selectedSessionId: string | null = null;
+  let panelTrigger: HTMLButtonElement | null = null;
+
+  const sidebarButton = el('button', 'ag-header-icon-btn ag-cloud-btn') as HTMLButtonElement;
+  sidebarButton.type = 'button';
+  sidebarButton.setAttribute('aria-label', '클라우드로 계속');
+  sidebarButton.setAttribute('aria-controls', 'ag-cloud-panel');
+  sidebarButton.setAttribute('aria-expanded', 'false');
+  sidebarButton.title = '클라우드로 계속';
+  sidebarButton.append(createIcon('cloud'), el('span', 'ag-cloud-btn-label', 'Cloud'));
+
+  const workspaceButton = el('button', 'ag-workspace-cloud-btn') as HTMLButtonElement;
+  workspaceButton.type = 'button';
+  workspaceButton.setAttribute('aria-label', '클라우드로 계속');
+  workspaceButton.setAttribute('aria-controls', 'ag-cloud-panel');
+  workspaceButton.setAttribute('aria-expanded', 'false');
+  workspaceButton.append(createIcon('cloud'), el('span', 'ag-workspace-cloud-label', 'Cloud'));
+
+  const statusPanel = el('section', 'ag-cloud-panel');
+  statusPanel.id = 'ag-cloud-panel';
+  statusPanel.hidden = true;
+  statusPanel.setAttribute('role', 'dialog');
+  statusPanel.setAttribute('aria-modal', 'false');
+  statusPanel.setAttribute('aria-labelledby', 'ag-cloud-panel-title');
+  const panelHead = el('header', 'ag-cloud-panel-head');
+  const panelTitle = el('h2', 'ag-cloud-panel-title', 'Cloud agent');
+  panelTitle.id = 'ag-cloud-panel-title';
+  const panelClose = el('button', 'ag-cloud-panel-close') as HTMLButtonElement;
+  panelClose.type = 'button';
+  panelClose.setAttribute('aria-label', '클라우드 상태 닫기');
+  panelClose.appendChild(createIcon('close'));
+  panelHead.append(panelTitle, panelClose);
+  const panelBody = el('div', 'ag-cloud-panel-body');
+  const sessionPicker = el('label', 'ag-cloud-session-picker');
+  const sessionPickerLabel = el('span', 'ag-cloud-session-picker-label', 'VPS 작업');
+  const sessionSelect = el('select', 'ag-cloud-session-select') as HTMLSelectElement;
+  sessionPicker.append(sessionPickerLabel, sessionSelect);
+  const panelStatus = el('div', 'ag-cloud-panel-status');
+  panelStatus.setAttribute('role', 'status');
+  panelStatus.setAttribute('aria-live', 'polite');
+  const panelDetail = el('p', 'ag-cloud-panel-detail');
+  const progress = el('div', 'ag-cloud-progress');
+  progress.setAttribute('role', 'progressbar');
+  progress.setAttribute('aria-valuemin', '0');
+  progress.setAttribute('aria-valuemax', '100');
+  progress.setAttribute('aria-valuenow', '0');
+  const progressFill = el('span', 'ag-cloud-progress-fill');
+  progress.appendChild(progressFill);
+  const panelConflict = el('div', 'ag-cloud-conflict');
+  panelConflict.hidden = true;
+  const panelActions = el('div', 'ag-cloud-panel-actions');
+  panelBody.append(sessionPicker, panelStatus, panelDetail, progress, panelConflict, panelActions);
+  statusPanel.append(panelHead, panelBody);
+
+  const queueStrip = el('div', 'ag-cloud-queue-strip');
+  queueStrip.hidden = true;
+  queueStrip.setAttribute('role', 'status');
+  queueStrip.setAttribute('aria-live', 'polite');
+
+  const settingsElement = el('section', 'ag-settings-section ag-cloud-settings');
+  const settingsTitle = el('h3', 'ag-settings-section-title', 'Cloud VPS');
+  const settingsBody = el('div', 'ag-settings-section-body');
+  const settingsStatus = el('p', 'ag-cloud-settings-status', '클라우드 상태를 확인하는 중입니다.');
+
+  const profileName = field('프로필 이름', 'My VPS');
+  const host = field('호스트', '100.64.0.1 또는 vps.example.com');
+  const sshUser = field('SSH 사용자', 'ubuntu');
+  const sshPort = field('SSH 포트', '22', 'number');
+  sshPort.input.min = '1';
+  sshPort.input.max = '65535';
+  const auth = select('SSH 인증', [
+    ['ssh-agent', 'SSH agent'],
+    ['key-file', '키 파일'],
+  ]);
+  const keyPath = field('키 파일 경로', '/home/me/.ssh/id_ed25519');
+  const transport = select('연결', [
+    ['tailscale', 'Tailscale'],
+    ['https', '공개 HTTPS'],
+  ]);
+  const tailscaleHttpsPort = field('Tailscale HTTPS 포트', '443', 'number');
+  tailscaleHttpsPort.input.min = '1';
+  tailscaleHttpsPort.input.max = '65535';
+  tailscaleHttpsPort.input.value = '443';
+  const endpoint = field('HTTPS 주소', 'https://vps.example.com/rauhwpx-cloud');
+  const serverPublicKey = field('서버 ID 키', 'ed25519:...');
+  const profileActions = el('div', 'ag-settings-actions');
+  const saveProfile = button('프로필 저장', true);
+  const testProfile = button('연결 테스트');
+  const provision = button('서비스 설치');
+  profileActions.append(saveProfile, testProfile, provision);
+  const pair = field('페어링 코드', 'ABCD-EFGH-JKLM');
+  pair.input.autocomplete = 'one-time-code';
+  const pairButton = button('이 기기 페어링');
+  const pairRow = el('div', 'ag-cloud-pair-row');
+  pairRow.append(pair.field, pairButton);
+  settingsBody.append(
+    settingsStatus,
+    profileName.field,
+    host.field,
+    sshUser.field,
+    sshPort.field,
+    auth.field,
+    keyPath.field,
+    transport.field,
+    tailscaleHttpsPort.field,
+    endpoint.field,
+    serverPublicKey.field,
+    profileActions,
+    pairRow,
+  );
+  settingsElement.append(settingsTitle, settingsBody);
+
+  function field(label: string, placeholder: string, type = 'text') {
+    const root = el('label', 'ag-settings-field');
+    const labelNode = el('span', 'ag-settings-field-label', label);
+    const input = el('input', 'ag-settings-input') as HTMLInputElement;
+    input.type = type;
+    input.placeholder = placeholder;
+    root.append(labelNode, input);
+    return { field: root, input };
+  }
+
+  function select(label: string, options: ReadonlyArray<readonly [string, string]>) {
+    const root = el('label', 'ag-settings-field');
+    const labelNode = el('span', 'ag-settings-field-label', label);
+    const input = el('select', 'ag-settings-select') as HTMLSelectElement;
+    for (const [value, text] of options) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = text;
+      input.appendChild(option);
+    }
+    root.append(labelNode, input);
+    return { field: root, input };
+  }
+
+  function button(label: string, primary = false): HTMLButtonElement {
+    const element = el('button', primary ? 'ag-settings-primary' : 'ag-settings-btn', label) as HTMLButtonElement;
+    element.type = 'button';
+    return element;
+  }
+
+  function readProfile(): CloudProfileDraft | null {
+    const port = Number(sshPort.input.value);
+    const servePort = Number(tailscaleHttpsPort.input.value);
+    if (!profileName.input.value.trim() || !host.input.value.trim() || !sshUser.input.value.trim()
+      || !Number.isSafeInteger(port) || port < 1 || port > 65535
+      || !Number.isSafeInteger(servePort) || servePort < 1 || servePort > 65535) {
+      deps.onError('클라우드 프로필의 이름, 호스트, SSH 포트와 Tailscale HTTPS 포트를 확인하세요.');
+      return null;
+    }
+    if (auth.input.value === 'key-file' && !keyPath.input.value.trim()) {
+      deps.onError('사용할 SSH 키 파일 경로를 입력하세요.');
+      return null;
+    }
+    if (transport.input.value === 'https' && !endpoint.input.value.trim()) {
+      deps.onError('공개 HTTPS 주소를 입력하세요.');
+      return null;
+    }
+    return {
+      name: profileName.input.value.trim(),
+      host: host.input.value.trim(),
+      sshUser: sshUser.input.value.trim(),
+      sshPort: port,
+      tailscaleHttpsPort: servePort,
+      auth: auth.input.value === 'key-file'
+        ? { kind: 'key-file', keyPath: keyPath.input.value.trim() }
+        : { kind: 'ssh-agent' },
+      transport: transport.input.value === 'https'
+        ? { kind: 'https', endpoint: endpoint.input.value.trim() }
+        : { kind: 'tailscale' },
+      ...(serverPublicKey.input.value.trim() ? { serverPublicKey: serverPublicKey.input.value.trim() } : {}),
+    };
+  }
+
+  function fillProfile(profile: CloudProfileDraft): void {
+    profileName.input.value = profile.name;
+    host.input.value = profile.host;
+    sshUser.input.value = profile.sshUser;
+    sshPort.input.value = String(profile.sshPort);
+    tailscaleHttpsPort.input.value = String(profile.tailscaleHttpsPort ?? 443);
+    auth.input.value = profile.auth.kind;
+    keyPath.input.value = profile.auth.kind === 'key-file' ? profile.auth.keyPath : '';
+    transport.input.value = profile.transport.kind;
+    endpoint.input.value = profile.transport.kind === 'https' ? profile.transport.endpoint : '';
+    serverPublicKey.input.value = profile.serverPublicKey ?? '';
+    syncConditionalFields();
+  }
+
+  function syncConditionalFields(): void {
+    keyPath.field.hidden = auth.input.value !== 'key-file';
+    tailscaleHttpsPort.field.hidden = transport.input.value !== 'tailscale';
+    endpoint.field.hidden = transport.input.value !== 'https';
+  }
+
+  function setBusy(next: boolean): void {
+    busy = next;
+    statusPanel.setAttribute('aria-busy', String(next));
+    for (const control of [saveProfile, testProfile, provision, pairButton]) control.disabled = next;
+    sessionSelect.disabled = next;
+  }
+
+  function selectedScope(): CloudSessionScope {
+    return {
+      ...deps.getScope(),
+      ...(selectedSessionId ? { selectedSessionId } : {}),
+    };
+  }
+
+  async function operation(run: () => Promise<unknown>): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await run();
+    } catch (error) {
+      deps.onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function action(label: string, run: () => void, tone = ''): HTMLButtonElement {
+    const item = el('button', `ag-cloud-action ${tone}`.trim(), label) as HTMLButtonElement;
+    item.type = 'button';
+    item.addEventListener('click', run);
+    return item;
+  }
+
+  function command(command: 'pause' | 'resume' | 'takeover' | 'cancel' | 'retry'): void {
+    const session = snapshot.session;
+    if (session.kind === 'idle') return;
+    void operation(async () => {
+      if (command === 'takeover' && !await deps.onBeforeTakeover()) return;
+      const next = await deps.controller.command({
+        sessionId: session.sessionId,
+        command,
+        expectedVersion: session.version,
+      });
+      if (command === 'takeover' && next.takeover) {
+        await deps.onTakeover(next.takeover);
+        await deps.controller.completeTakeover(session.sessionId);
+      }
+    });
+  }
+
+  async function download(): Promise<void> {
+    const session = snapshot.session;
+    if (session.kind !== 'completed') return;
+    await operation(async () => {
+      downloadedResult = await deps.controller.downloadResult(session.sessionId);
+      if (downloadedResult.timeline) deps.onTimeline(downloadedResult.timeline);
+      render();
+    });
+  }
+
+  function resolveResult(actionName: CloudResultAction): void {
+    if (!downloadedResult) return;
+    if (downloadedResult.conflict === 'external-change' && actionName === 'replace') return;
+    const result = downloadedResult;
+    void operation(async () => {
+      const resolution = await deps.controller.resolveResult(result.sessionId, actionName);
+      downloadedResult = null;
+      deps.onResultResolved({
+        ...result,
+        bytes: resolution.bytes ?? result.bytes,
+        conflict: resolution.conflict,
+        preservedCopyName: resolution.preservedCopyName ?? result.preservedCopyName,
+      }, resolution);
+      render();
+    });
+  }
+
+  function renderPanel(): void {
+    const activeSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
+    if (!selectedSessionId && activeSessionId) selectedSessionId = activeSessionId;
+    sessionPicker.hidden = snapshot.sessions.length <= 1;
+    sessionSelect.replaceChildren(...snapshot.sessions.map((session) => {
+      const option = document.createElement('option');
+      option.value = session.sessionId;
+      option.textContent = `${session.documentName} · ${sessionKindLabel(session.kind)}`;
+      return option;
+    }));
+    if (activeSessionId && snapshot.sessions.some((session) => session.sessionId === activeSessionId)) {
+      sessionSelect.value = activeSessionId;
+    }
+    panelActions.replaceChildren();
+    progress.hidden = true;
+    panelConflict.hidden = true;
+    const session = snapshot.session;
+    if (localTurnPending) {
+      panelStatus.textContent = '현재 응답이 끝나면 클라우드로 옮깁니다.';
+      panelDetail.textContent = '앱을 닫으면 전송 확인이 끝날 때까지 기다립니다.';
+      panelActions.append(action('전송 예약 취소', deps.onCancelPendingTransfer));
+      return;
+    }
+    switch (session.kind) {
+      case 'idle':
+        panelStatus.textContent = snapshot.profile.kind === 'configured' ? 'VPS가 준비되어 있습니다.' : 'VPS 설정이 필요합니다.';
+        panelDetail.textContent = snapshot.profile.kind === 'configured'
+          ? `${snapshot.profile.profile.name} · ${snapshot.profile.profile.host}`
+          : 'SSH와 Tailscale 연결을 설정하세요.';
+        panelActions.append(action(snapshot.profile.kind === 'configured' ? '클라우드로 계속' : '설정 열기', () => {
+          closePanel();
+          if (snapshot.profile.kind === 'configured') deps.onRequestTransfer();
+          else deps.onOpenSettings();
+        }, 'ag-primary'));
+        break;
+      case 'waiting-local-turn':
+        panelStatus.textContent = session.message;
+        panelDetail.textContent = '현재 턴이 끝나는 즉시 저장하고 전송합니다.';
+        panelActions.append(action('취소', () => command('cancel')));
+        break;
+      case 'transferring': {
+        const percent = session.totalBytes > 0
+          ? Math.min(100, Math.round(session.completedBytes / session.totalBytes * 100))
+          : 0;
+        panelStatus.textContent = session.message || '문서와 대화를 전송하는 중입니다.';
+        panelDetail.textContent = `${formatBytes(session.completedBytes)} / ${formatBytes(session.totalBytes)}`;
+        progress.hidden = false;
+        progress.setAttribute('aria-valuenow', String(percent));
+        progressFill.style.width = `${percent}%`;
+        panelActions.append(action('취소', () => command('cancel')));
+        break;
+      }
+      case 'queued':
+        panelStatus.textContent = session.message || '실행 자리를 기다리고 있습니다.';
+        panelDetail.textContent = `대기 순서 ${session.position}`;
+        panelActions.append(action('취소', () => command('cancel')));
+        break;
+      case 'running':
+        panelStatus.textContent = session.currentActivity || 'VPS에서 작업 중입니다.';
+        panelDetail.textContent = `${session.turn}/${session.turnLimit}턴 · ${formatDuration(session.elapsedMs)} / ${formatDuration(session.timeLimitMs)}`;
+        panelActions.append(
+          action('일시 중지', () => command('pause')),
+          action('이 기기에서 이어받기', () => command('takeover')),
+          action('취소', () => command('cancel'), 'ag-danger'),
+        );
+        break;
+      case 'pausing':
+        panelStatus.textContent = session.message;
+        panelDetail.textContent = '도구 호출이 끝나는 안전한 경계에서 멈춥니다.';
+        break;
+      case 'suspended':
+        panelStatus.textContent = '클라우드 작업이 멈췄습니다.';
+        panelDetail.textContent = session.reason;
+        if (session.resumable) panelActions.append(action('다시 시작', () => command('resume'), 'ag-primary'));
+        panelActions.append(action('이 기기에서 이어받기', () => command('takeover')));
+        break;
+      case 'taking-over':
+        panelStatus.textContent = session.message;
+        panelDetail.textContent = '최신 안정 체크포인트를 다운로드한 뒤 편집 잠금이 풀립니다.';
+        panelActions.append(action('안전한 경계에서 이어받기', () => command('takeover'), 'ag-primary'));
+        break;
+      case 'completed':
+        panelStatus.textContent = downloadedResult ? '결과 미리보기가 준비되었습니다.' : '클라우드 작업이 끝났습니다.';
+        panelDetail.textContent = `${session.result.fileName} · ${formatBytes(session.result.byteLength)}`;
+        if (!downloadedResult) {
+          if (!session.result.availableOnThisDevice) {
+            panelDetail.textContent = '결과는 작업을 시작한 기기에서만 다운로드할 수 있습니다.';
+            break;
+          }
+          panelActions.append(action('결과 미리보기', () => { void download(); }, 'ag-primary'));
+          break;
+        }
+        if (downloadedResult.conflict === 'external-change') {
+          panelConflict.hidden = false;
+          panelConflict.textContent = `원본 파일이 바뀌었습니다. 원본과 ${downloadedResult.preservedCopyName ?? '클라우드 결과 사본'}을 모두 보관합니다.`;
+          panelActions.append(action('두 파일 보관', () => resolveResult('keep-both'), 'ag-primary'));
+        } else {
+          panelActions.append(
+            action('원본에 반영', () => resolveResult('replace'), 'ag-primary'),
+            action('별도 사본으로 보관', () => resolveResult('keep-both')),
+          );
+        }
+        panelActions.append(action('결과 버리기', () => resolveResult('discard'), 'ag-danger'));
+        break;
+      case 'failed':
+        panelStatus.textContent = session.message;
+        panelDetail.textContent = session.code;
+        if (session.retryable) panelActions.append(action('새 클라우드 작업으로 다시 전송', deps.onRequestTransfer, 'ag-primary'));
+        break;
+      case 'cancelled':
+        panelStatus.textContent = '클라우드 작업을 취소했습니다.';
+        panelDetail.textContent = '문서 편집 권한이 이 기기로 돌아왔습니다.';
+        break;
+    }
+  }
+
+  function renderSettings(): void {
+    if (!snapshot.available) {
+      settingsStatus.textContent = '이 데스크톱 빌드에는 클라우드 연결 기능이 없습니다.';
+      return;
+    }
+    if (snapshot.profile.kind === 'unconfigured') {
+      settingsStatus.textContent = '사용자 VPS 한 대를 SSH로 연결합니다. Tailscale 연결을 권장합니다.';
+      return;
+    }
+    fillProfile(snapshot.profile.profile);
+    const detail = snapshot.profile.message ? ` · ${snapshot.profile.message}` : '';
+    settingsStatus.textContent = `${snapshot.profile.connection === 'ready' ? '연결됨' : snapshot.profile.connection}${detail}`;
+  }
+
+  function renderQueue(): void {
+    const queued = snapshot.queuedMessages.filter((message) => message.state === 'queued');
+    queueStrip.hidden = queued.length === 0;
+    queueStrip.replaceChildren();
+    if (!queued.length) return;
+    queueStrip.append(el('span', 'ag-cloud-queue-label', `다음 경계에 전달 ${queued.length}`));
+    for (const message of queued) {
+      const item = el('span', 'ag-cloud-queue-message', message.text);
+      item.title = message.text;
+      queueStrip.appendChild(item);
+    }
+  }
+
+  function renderButtons(): void {
+    sidebarButton.hidden = !snapshot.available;
+    workspaceButton.hidden = !snapshot.available;
+    if (!snapshot.available && panelOpen) closePanel(false);
+    const active = sessionIsActive(snapshot) || snapshot.session.kind === 'completed' || localTurnPending;
+    sidebarButton.classList.toggle('ag-active', active);
+    workspaceButton.classList.toggle('ag-active', active);
+    const running = snapshot.session.kind === 'running';
+    sidebarButton.dataset.state = localTurnPending ? 'waiting' : snapshot.session.kind;
+    workspaceButton.dataset.state = localTurnPending ? 'waiting' : snapshot.session.kind;
+    const label = running ? '클라우드에서 작업 중' : active ? '클라우드 상태' : '클라우드로 계속';
+    sidebarButton.setAttribute('aria-label', label);
+    sidebarButton.title = label;
+    workspaceButton.setAttribute('aria-label', label);
+    workspaceButton.title = label;
+  }
+
+  function render(): void {
+    renderButtons();
+    renderPanel();
+    renderSettings();
+    renderQueue();
+    deps.onLeaseChange(snapshot.lease.owner === 'cloud', snapshot.lease.owner === 'cloud' ? snapshot.lease.sessionId : null);
+    if (snapshot.timeline) {
+      const timelineKey = `${snapshot.timeline.exportedAt}:${snapshot.timeline.thread.updatedAt}`;
+      if (timelineKey !== appliedTimelineKey) {
+        appliedTimelineKey = timelineKey;
+        deps.onTimeline(snapshot.timeline);
+      }
+    }
+  }
+
+  function openPanel(trigger: HTMLButtonElement): void {
+    panelOpen = true;
+    panelTrigger = trigger;
+    statusPanel.hidden = false;
+    sidebarButton.setAttribute('aria-expanded', 'true');
+    workspaceButton.setAttribute('aria-expanded', 'true');
+    panelClose.focus();
+  }
+
+  function closePanel(restoreFocus = false): void {
+    panelOpen = false;
+    statusPanel.hidden = true;
+    sidebarButton.setAttribute('aria-expanded', 'false');
+    workspaceButton.setAttribute('aria-expanded', 'false');
+    const trigger = panelTrigger;
+    panelTrigger = null;
+    if (restoreFocus && trigger?.isConnected && !trigger.hidden) trigger.focus();
+  }
+
+  function activate(event: MouseEvent): void {
+    const trigger = event.currentTarget as HTMLButtonElement;
+    void deps.controller.refresh(selectedScope()).then(() => {
+      if (snapshot.session.kind === 'idle' && !localTurnPending) {
+        if (snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready') deps.onRequestTransfer();
+        else deps.onOpenSettings();
+        return;
+      }
+      if (panelOpen) closePanel(true); else openPanel(trigger);
+    }).catch((error) => deps.onError(error instanceof Error ? error.message : String(error)));
+  }
+
+  sidebarButton.addEventListener('click', activate);
+  workspaceButton.addEventListener('click', activate);
+  panelClose.addEventListener('click', () => closePanel(true));
+  statusPanel.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closePanel(true);
+    }
+  });
+  auth.input.addEventListener('change', syncConditionalFields);
+  transport.input.addEventListener('change', syncConditionalFields);
+  sessionSelect.addEventListener('change', () => {
+    selectedSessionId = sessionSelect.value || null;
+    downloadedResult = null;
+    void operation(() => deps.controller.refresh(selectedScope()));
+  });
+  saveProfile.addEventListener('click', () => {
+    const profile = readProfile();
+    if (profile) void operation(() => deps.controller.saveProfile(profile));
+  });
+  testProfile.addEventListener('click', () => {
+    const profile = readProfile();
+    if (profile) void operation(() => deps.controller.testProfile(profile));
+  });
+  provision.addEventListener('click', () => void operation(() => deps.controller.provision('stable')));
+  pairButton.addEventListener('click', () => {
+    const code = pair.input.value.trim();
+    if (!code) return;
+    void operation(async () => {
+      await deps.controller.pair(code);
+      pair.input.value = '';
+    });
+  });
+
+  syncConditionalFields();
+  const unsubscribe = deps.controller.subscribe((next) => {
+    snapshot = next;
+    render();
+  });
+  void deps.controller.refresh(selectedScope()).catch(() => { render(); });
+
+  return {
+    sidebarButton,
+    workspaceButton,
+    statusPanel,
+    queueStrip,
+    settingsElement,
+    getSnapshot: () => snapshot,
+    isCloudConversation: () => cloudOwnsConversation(snapshot),
+    isRunning: () => snapshot.session.kind === 'running',
+    setWaitingForLocalTurn(waiting) {
+      localTurnPending = waiting;
+      render();
+    },
+    refreshScope() {
+      selectedSessionId = null;
+      downloadedResult = null;
+      void deps.controller.refresh(selectedScope()).catch((error) => {
+        deps.onError(error instanceof Error ? error.message : String(error));
+      });
+    },
+    async queueMessage(text, messageId) {
+      const session = snapshot.session;
+      if (session.kind !== 'running') throw new Error('클라우드 에이전트가 실행 중이 아닙니다.');
+      await deps.controller.command({
+        sessionId: session.sessionId,
+        command: 'queue-message',
+        expectedVersion: session.version,
+        message: text,
+        messageId,
+      });
+    },
+    openSettings() {
+      renderSettings();
+      void deps.controller.refresh(selectedScope()).catch((error) => {
+        deps.onError(error instanceof Error ? error.message : String(error));
+      });
+    },
+    dispose() {
+      unsubscribe();
+      deps.controller.dispose();
+      closePanel();
+    },
+  };
+}
