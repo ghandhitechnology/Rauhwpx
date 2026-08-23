@@ -4110,7 +4110,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (!running) replyPending = false;
     updateTurnPending();
     updateComposer();
-    if (chatWorkflow === 'plan' && activePlan) rebuildReview();
+    rebuildReview();
   }
 
   /** 턴이 정상 종료 경로 없이 꺼졌을 때(중단·재연결·오류) 노란 불을 걷는다. */
@@ -5446,6 +5446,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   // ── 리뷰 카드 (change-set 승인/거절) ──────────────────
   function buildReviewCard(set: PendingChangeSet): HTMLElement {
+    const editingLeaseActive = bridge.getEditingLease().active;
     const card = el('div', `ag-review-card ag-${set.agent}`);
     const summary = el('div', 'ag-review-summary');
 
@@ -5472,7 +5473,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       createIcon('check', 'ag-review-action-icon'),
       el('span', 'ag-review-action-label', '변경 수락'),
     );
+    approve.disabled = editingLeaseActive;
     approve.addEventListener('click', () => {
+      if (bridge.getEditingLease().active) return;
       approve.disabled = true;
       reject.disabled = true;
       try {
@@ -5489,7 +5492,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       createIcon('close', 'ag-review-action-icon'),
       el('span', 'ag-review-action-label', '변경 거절'),
     );
+    reject.disabled = editingLeaseActive;
     reject.addEventListener('click', () => {
+      if (bridge.getEditingLease().active) return;
       approve.disabled = true;
       reject.disabled = true;
       try {
@@ -5573,6 +5578,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     rebuildReview();
   });
+  const unsubEditingLease = bridge.onEditingLeaseChange(() => rebuildReview());
   const contextUnsubs = eventBus
     ? [
         eventBus.on('document-context-changed', updateDocumentContext),
@@ -5633,6 +5639,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       unsubThreads();
       unsubChatStatus();
       unsubPending();
+      unsubEditingLease();
       contextUnsubs.forEach((unsub) => unsub());
       messagesMutationObserver?.disconnect();
       messagesResizeObserver?.disconnect();

@@ -62,7 +62,12 @@ test('편집 필드 Escape는 blur가 뒤따라도 취소로 끝난다', () => {
   const edit = ih.slice(ih.indexOf('private showEditOverlay'));
   assert.match(
     edit,
-    /else if \(e\.key === 'Escape'\) \{[\s\S]*?committed = true;[\s\S]*?removeFormOverlay\(\);/,
-    'Escape는 committed를 먼저 설정해 blur commit을 막아야 한다',
+    /const cancel = \(\) => \{[\s\S]*?committed = true;[\s\S]*?removeFormOverlay\(\);/,
+    '취소 경로는 committed를 먼저 설정해 blur commit을 막아야 한다',
+  );
+  assert.match(
+    edit,
+    /else if \(e\.key === 'Escape'\) \{[\s\S]*?cancel\(\);/,
+    'Escape는 공유 취소 경로를 사용해야 한다',
   );
 });

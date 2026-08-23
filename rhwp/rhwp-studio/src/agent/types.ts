@@ -15,6 +15,12 @@ import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 export const AGENT_PROTOCOL_VERSION = 3;
 
 export type AgentName = 'claude' | 'codex' | 'pi' | 'grok' | 'cursor';
+
+/** 활성 턴에서 파생되는 사용자 편집 잠금 상태. */
+export interface AgentEditingLease {
+  active: boolean;
+  agent: AgentName;
+}
 export type PermissionProfile = 'safe' | 'unrestricted';
 export type WritingStyleLanguage = 'ko' | 'en';
 export type WritingStyleProgressState =
