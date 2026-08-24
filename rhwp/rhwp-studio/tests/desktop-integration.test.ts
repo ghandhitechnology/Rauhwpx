@@ -22,6 +22,7 @@ import {
   restoreNativeDocument,
   releaseReplacedNativeFileHandle,
   searchNearbyNativeDocuments,
+  saveDesktopPortableHistoryFile,
   suppressDesktopServiceWorker,
   type NativeFileHandleDescriptor,
 } from '../src/desktop-integration.ts';
@@ -209,6 +210,25 @@ test('Electron Save As returns a temporary opaque handle and releases failed tar
   await handle?.releaseUnusedSaveTarget?.();
   await handle?.releaseUnusedSaveTarget?.();
   assert.deepEqual(released, ['drop-target', 'save-target']);
+});
+
+test('portable history export uses the dedicated desktop save boundary', async () => {
+  const writes: Array<{ suggestedName: string; bytes: number[] }> = [];
+  const result = await saveDesktopPortableHistoryFile(
+    new Uint8Array([1, 2, 3]),
+    'report.rhwpx',
+    {
+      rhwpDesktop: {
+        savePortableHistoryFile: async ({ suggestedName, bytes }) => {
+          writes.push({ suggestedName, bytes: [...bytes] });
+          return { fileName: suggestedName, byteLength: bytes.byteLength };
+        },
+      },
+    },
+  );
+  assert.equal(result, 'saved');
+  assert.deepEqual(writes, [{ suggestedName: 'report.rhwpx', bytes: [1, 2, 3] }]);
+  assert.equal(await saveDesktopPortableHistoryFile(new Uint8Array(), 'x.rhwpx', {}), 'unavailable');
 });
 
 test('native document bookmarks restore opaque handles without exposing a path', async () => {

@@ -101,6 +101,11 @@ export interface CommandServices {
   validateSaveHandle?: (
     handle: FileSystemFileHandleLike,
   ) => Promise<((saved: boolean) => Promise<void>) | void>;
+  /** Build a portable document bundle containing the complete local version graph. */
+  createPortableHistoryBundle?: () => Promise<{
+    bytes: Uint8Array;
+    suggestedName: string;
+  }>;
   /** 에디터 편집 모드 변경 */
   setEditMode: (mode: EditorEditMode) => void;
   /**

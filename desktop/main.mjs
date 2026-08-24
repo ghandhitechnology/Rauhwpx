@@ -37,7 +37,11 @@ import {
   resolveGeneratedDocumentArtifact,
 } from './generated-document-artifact.mjs';
 import { launchRequest } from './launch-routing.mjs';
-import { NativeFileHandleRegistry, validateNativeDocumentBytes } from './native-file-handles.mjs';
+import {
+  NativeFileHandleRegistry,
+  validateNativeDocumentBytes,
+  writeNativeFileAtomically,
+} from './native-file-handles.mjs';
 import { SerializedStateWriter } from './serialized-state-writer.mjs';
 import { SessionManager } from './session-manager.mjs';
 import {
@@ -676,7 +680,7 @@ ipcMain.handle('desktop:pick-native-open-file', async (event, options = {}) => {
   }
   const picked = await dialog.showOpenDialog(window, {
     ...(defaultPath ? { defaultPath } : {}),
-    filters: [{ name: 'HWP/HWPX/HML documents', extensions: ['hwp', 'hwpx', 'hml'] }],
+    filters: [{ name: 'HWP/HWPX/HML documents and RauHWPX history', extensions: ['hwp', 'hwpx', 'hml', 'rhwpx'] }],
     properties: ['openFile'],
   });
   if (picked.canceled || !picked.filePaths[0]) return null;
@@ -720,6 +724,33 @@ ipcMain.handle('desktop:pick-native-save-file', async (event, options = {}) => {
     return { owned: true };
   }
   return { ...result.descriptor, saveTargetCreated: result.created };
+});
+ipcMain.handle('desktop:save-portable-history-file', async (event, payload = {}) => {
+  sessionForEvent(event);
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window) throw new Error('History export sender window is unavailable');
+  const rawName = basename(String(payload.suggestedName ?? 'document.rhwpx'));
+  const suggestedName = rawName.toLowerCase().endsWith('.rhwpx') ? rawName : `${rawName}.rhwpx`;
+  const bytes = payload.bytes instanceof Uint8Array ? payload.bytes : new Uint8Array(payload.bytes ?? []);
+  if (bytes.byteLength < 20 || bytes.byteLength > 512 * 1024 * 1024) {
+    throw new Error('Portable history data is empty or exceeds the 512 MiB limit');
+  }
+  const magic = new TextEncoder().encode('RAUHWPX-HISTORY\0');
+  if (!magic.every((value, index) => bytes[index] === value)) {
+    throw new Error('Portable history data has an invalid signature');
+  }
+  const picked = await dialog.showSaveDialog(window, {
+    defaultPath: suggestedName,
+    filters: [{ name: 'RauHWPX history bundle', extensions: ['rhwpx'] }],
+    properties: ['showOverwriteConfirmation', 'createDirectory'],
+  });
+  if (picked.canceled || !picked.filePath) return null;
+  const filePath = extname(picked.filePath) ? picked.filePath : `${picked.filePath}.rhwpx`;
+  if (extname(filePath).toLowerCase() !== '.rhwpx') {
+    throw new Error('History export target must use the .rhwpx extension');
+  }
+  await writeNativeFileAtomically(filePath, bytes);
+  return { fileName: basename(filePath), byteLength: bytes.byteLength };
 });
 ipcMain.handle('desktop:release-native-file', (event, handleId) => {
   const session = sessionForEvent(event);

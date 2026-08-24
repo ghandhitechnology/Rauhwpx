@@ -67,6 +67,10 @@ export interface RhwpDesktopApi {
     suggestedName: string;
     extension: 'hwp' | 'hwpx' | 'hml';
   }) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
+  savePortableHistoryFile?: (payload: {
+    suggestedName: string;
+    bytes: Uint8Array;
+  }) => Promise<{ fileName: string; byteLength: number } | null>;
   releaseNativeFile?: (handleId: string) => Promise<void>;
   readNativeFile?: (handleId: string) => Promise<NativeFileReadResult>;
   getNativeFileSourcePath?: (handleId: string) => Promise<string | null>;
@@ -555,6 +559,20 @@ export async function pickDesktopNativeSaveFile(
   if ('owned' in result) throw new Error('다른 창에서 이미 열려 있는 문서입니다.');
   if (!validNativeDescriptor(result)) throw new Error('Desktop save picker returned an invalid handle');
   return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
+}
+
+export async function saveDesktopPortableHistoryFile(
+  bytes: Uint8Array,
+  suggestedName: string,
+  win?: DesktopHost,
+): Promise<'saved' | 'cancelled' | 'unavailable'> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.savePortableHistoryFile) return 'unavailable';
+  const result = await api.savePortableHistoryFile({
+    suggestedName,
+    bytes: new Uint8Array(bytes),
+  });
+  return result ? 'saved' : 'cancelled';
 }
 
 export async function rememberNativeDocument(

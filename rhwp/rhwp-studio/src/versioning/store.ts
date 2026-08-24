@@ -94,6 +94,24 @@ export interface VersionGraphStoreOptions {
   indexedDB?: IDBFactory | null;
 }
 
+/** Complete, portable state for one document-scoped version repository. */
+export interface VersionRepositorySnapshot {
+  schemaVersion: 1;
+  repository: VersionRepository;
+  commits: VersionCommit[];
+  refs: VersionRef[];
+  blobs: VersionBlob[];
+  compareSnapshots: VersionCompareSnapshot[];
+  shelves: VersionShelf[];
+  mergeManifests: VersionMergeManifest[];
+  mergeDrafts: VersionMergeDraft[];
+}
+
+export interface ImportRepositorySnapshotResult {
+  repository: VersionRepository;
+  imported: boolean;
+}
+
 export type CheckpointPayload = VersionTitle & {
   id?: CommitId;
   bytes: Uint8Array;
@@ -596,6 +614,225 @@ function assertStoredBlob(blob: VersionBlob): VersionBlob {
   return { id: blob.id, byteLength: bytes.byteLength, bytes };
 }
 
+function sortedRepositorySnapshot(snapshot: VersionRepositorySnapshot): VersionRepositorySnapshot {
+  const byId = <Value extends { id: string }>(left: Value, right: Value) => left.id.localeCompare(right.id);
+  return {
+    schemaVersion: 1,
+    repository: cloneValue(snapshot.repository),
+    commits: snapshot.commits.map(cloneValue).sort((left, right) => left.ordinal - right.ordinal || byId(left, right)),
+    refs: snapshot.refs.map(cloneValue).sort((left, right) => (
+      left.kind.localeCompare(right.kind) || left.name.localeCompare(right.name)
+    )),
+    blobs: snapshot.blobs.map((blob) => ({ ...blob, bytes: new Uint8Array(blob.bytes) })).sort(byId),
+    compareSnapshots: snapshot.compareSnapshots.map(cloneValue).sort(byId),
+    shelves: snapshot.shelves.map(cloneValue).sort(byId),
+    mergeManifests: snapshot.mergeManifests.map(cloneValue).sort(byId),
+    mergeDrafts: snapshot.mergeDrafts.map(cloneValue).sort(byId),
+  };
+}
+
+async function repositorySnapshotFromTransaction(
+  tx: GraphTransaction,
+  id: RepositoryId,
+): Promise<VersionRepositorySnapshot> {
+  const repository = await tx.get('repositories', id);
+  if (!repository) missing('REPOSITORY_NOT_FOUND', 'Version repository was not found');
+  const commits = (await tx.getAll('commits')).filter((row) => row.repositoryId === id);
+  const refs = (await tx.listRefs(id)).map(fromRefRow);
+  const shelves = await tx.listShelves(id);
+  const mergeManifests = (await tx.getAll('mergeManifests')).filter((row) => row.repositoryId === id);
+  const mergeDrafts = await tx.listMergeDrafts(id);
+  const blobIds = new Set<BlobId>([
+    ...commits.map((commit) => commit.blobId),
+    ...shelves.map((shelf) => shelf.blobId),
+    ...mergeDrafts.flatMap((draft) => draft.manualAssetBlobIds),
+  ]);
+  const compareSnapshotIds = new Set<CompareSnapshotId>([
+    ...commits.map((commit) => commit.compareSnapshotId),
+    ...shelves.map((shelf) => shelf.compareSnapshotId),
+  ]);
+  const blobs: VersionBlob[] = [];
+  for (const blobId of blobIds) {
+    const blob = await tx.get('blobs', blobId);
+    if (!blob) throw new VersionError('CORRUPT_BLOB', `Version blob ${blobId} is missing`);
+    blobs.push(assertStoredBlob(blob));
+  }
+  const compareSnapshots: VersionCompareSnapshot[] = [];
+  for (const snapshotId of compareSnapshotIds) {
+    const snapshot = await tx.get('compareSnapshots', snapshotId);
+    if (!snapshot || hashCompareSnapshot(snapshot.snapshot) !== snapshot.id) {
+      throw new VersionError('CORRUPT_BLOB', `Comparison snapshot ${snapshotId} is missing or corrupt`);
+    }
+    compareSnapshots.push(snapshot);
+  }
+  return sortedRepositorySnapshot({
+    schemaVersion: 1,
+    repository,
+    commits,
+    refs,
+    blobs,
+    compareSnapshots,
+    shelves,
+    mergeManifests,
+    mergeDrafts,
+  });
+}
+
+function snapshotMetadata(snapshot: VersionRepositorySnapshot): unknown {
+  const sorted = sortedRepositorySnapshot(snapshot);
+  return {
+    schemaVersion: sorted.schemaVersion,
+    repository: sorted.repository,
+    commits: sorted.commits,
+    refs: sorted.refs,
+    blobs: sorted.blobs.map(({ id, byteLength }) => ({ id, byteLength })),
+    compareSnapshots: sorted.compareSnapshots.map(({ id, byteLength }) => ({ id, byteLength })),
+    shelves: sorted.shelves,
+    mergeManifests: sorted.mergeManifests,
+    mergeDrafts: sorted.mergeDrafts,
+  };
+}
+
+function repositorySnapshotsEqual(
+  left: VersionRepositorySnapshot,
+  right: VersionRepositorySnapshot,
+): boolean {
+  return JSON.stringify(snapshotMetadata(left)) === JSON.stringify(snapshotMetadata(right));
+}
+
+function validateRepositorySnapshot(input: VersionRepositorySnapshot): VersionRepositorySnapshot {
+  if (!input || input.schemaVersion !== 1 || !input.repository) {
+    throw new VersionError('VERSION_STORE_FAILED', 'Portable history repository schema is invalid');
+  }
+  const snapshot = sortedRepositorySnapshot(input);
+  const repository = snapshot.repository;
+  const id = repositoryId(repository.id);
+  documentId(repository.documentId);
+  if (repository.schemaVersion !== 2 || repository.revision < 1 || repository.nextOrdinal < 2) {
+    throw new VersionError('VERSION_STORE_FAILED', 'Portable history repository metadata is invalid');
+  }
+
+  const commits = new Map<CommitId, VersionCommit>();
+  const ordinals = new Set<number>();
+  for (const commit of snapshot.commits) {
+    const commitKey = commitId(commit.id);
+    if (
+      commit.repositoryId !== id
+      || commits.has(commitKey)
+      || !Number.isSafeInteger(commit.ordinal)
+      || commit.ordinal < 1
+      || ordinals.has(commit.ordinal)
+    ) {
+      throw new VersionError('VERSION_STORE_FAILED', 'Portable history contains an invalid commit');
+    }
+    commits.set(commitKey, commit);
+    ordinals.add(commit.ordinal);
+  }
+  if (commits.size === 0) {
+    throw new VersionError('VERSION_STORE_FAILED', 'Portable history contains no commits');
+  }
+  const blobs = new Map(snapshot.blobs.map((blob) => {
+    const verified = assertStoredBlob(blob);
+    return [verified.id, verified] as const;
+  }));
+  if (blobs.size !== snapshot.blobs.length) {
+    throw new VersionError('VERSION_STORE_FAILED', 'Portable history contains duplicate blobs');
+  }
+  const compareSnapshots = new Map(snapshot.compareSnapshots.map((stored) => {
+    if (
+      hashCompareSnapshot(stored.snapshot) !== stored.id
+      || serializeCompareSnapshot(stored.snapshot).byteLength !== stored.byteLength
+    ) {
+      throw new VersionError('CORRUPT_BLOB', `Comparison snapshot ${stored.id} is corrupt`);
+    }
+    return [stored.id, stored] as const;
+  }));
+  if (compareSnapshots.size !== snapshot.compareSnapshots.length) {
+    throw new VersionError('VERSION_STORE_FAILED', 'Portable history contains duplicate comparison snapshots');
+  }
+  const manifests = new Map(snapshot.mergeManifests.map((manifest) => [manifest.id, manifest]));
+  if (manifests.size !== snapshot.mergeManifests.length) {
+    throw new VersionError('VERSION_STORE_FAILED', 'Portable history contains duplicate merge manifests');
+  }
+  for (const commit of commits.values()) {
+    if (!commit.parents.every((parent) => commits.has(parent))) {
+      throw new VersionError('COMMIT_NOT_FOUND', `Portable commit ${commit.id} has a missing parent`);
+    }
+    if (
+      !blobs.has(commit.blobId)
+      || !compareSnapshots.has(commit.compareSnapshotId)
+      || String(commit.contentFingerprint) !== String(commit.blobId)
+    ) {
+      throw new VersionError('CORRUPT_BLOB', `Portable commit ${commit.id} has missing content`);
+    }
+    if (commit.mergeManifestId && !manifests.has(commit.mergeManifestId)) {
+      throw new VersionError('CORRUPT_BLOB', `Portable commit ${commit.id} has a missing merge manifest`);
+    }
+  }
+  if (repository.nextOrdinal <= Math.max(...ordinals)) {
+    throw new VersionError('VERSION_STORE_FAILED', 'Portable history next commit ordinal is invalid');
+  }
+  const refKeys = new Set<string>();
+  let hasDefaultBranch = false;
+  for (const ref of snapshot.refs) {
+    if (ref.repositoryId !== id || !commits.has(ref.target)) {
+      throw new VersionError('REF_NOT_FOUND', 'Portable history contains an invalid reference');
+    }
+    const name = ref.kind === 'branch' ? branchName(ref.name) : tagName(ref.name);
+    const key = refKey(id, ref.kind, name);
+    if (refKeys.has(key)) throw new VersionError('VERSION_STORE_FAILED', 'Portable history contains duplicate references');
+    refKeys.add(key);
+    if (!Number.isSafeInteger(ref.revision) || ref.revision < 1) {
+      throw new VersionError('VERSION_STORE_FAILED', 'Portable history contains an invalid ref revision');
+    }
+    if (ref.kind === 'branch') {
+      branchGeneration(ref.generation);
+      if (normalizedRefKey(ref.name) === normalizedRefKey(repository.defaultBranch ?? branchName('main'))) {
+        hasDefaultBranch = true;
+      }
+    }
+  }
+  if (!hasDefaultBranch) {
+    throw new VersionError('REF_NOT_FOUND', 'Portable history default branch is missing');
+  }
+  const shelfIds = new Set<ShelfId>();
+  for (const shelf of snapshot.shelves) {
+    if (
+      shelf.repositoryId !== id
+      || shelfIds.has(shelf.id)
+      || !commits.has(shelf.baseCommitId)
+      || !blobs.has(shelf.blobId)
+      || !compareSnapshots.has(shelf.compareSnapshotId)
+      || String(shelf.contentFingerprint) !== String(shelf.blobId)
+    ) throw new VersionError('SHELF_NOT_FOUND', `Portable shelf ${shelf.id} is invalid`);
+    shelfIds.add(shelf.id);
+  }
+  for (const manifest of manifests.values()) {
+    if (
+      manifest.repositoryId !== id
+      || !commits.has(manifest.commitId)
+      || !manifest.parentManifestIds.every((parent) => manifests.has(parent))
+    ) {
+      throw new VersionError('VERSION_STORE_FAILED', `Portable merge manifest ${manifest.id} is invalid`);
+    }
+  }
+  const draftIds = new Set<MergeDraftId>();
+  for (const draft of snapshot.mergeDrafts) {
+    if (
+      draft.repositoryId !== id
+      || draftIds.has(draft.id)
+      || !commits.has(draft.currentHead)
+      || !commits.has(draft.sourceHead)
+      || !draft.baseCommitIds.every((base) => commits.has(base))
+      || !draft.manualAssetBlobIds.every((asset) => blobs.has(asset))
+      || !refKeys.has(refKey(id, 'branch', draft.targetBranch))
+      || !refKeys.has(refKey(id, 'branch', draft.sourceBranch))
+    ) throw new VersionError('MERGE_DRAFT_NOT_FOUND', `Portable merge draft ${draft.id} is invalid`);
+    draftIds.add(draft.id);
+  }
+  return snapshot;
+}
+
 function isAncestor(
   ancestor: CommitId,
   descendant: CommitId,
@@ -798,6 +1035,123 @@ export class VersionGraphStore {
     if (!database) return;
     const opened = await database.catch(() => null);
     opened?.close();
+  }
+
+  async exportRepositorySnapshot(id: RepositoryId): Promise<VersionRepositorySnapshot> {
+    return this.#transaction('readonly', (tx) => repositorySnapshotFromTransaction(tx, id));
+  }
+
+  async importRepositorySnapshot(
+    input: VersionRepositorySnapshot,
+  ): Promise<ImportRepositorySnapshotResult> {
+    const snapshot = validateRepositorySnapshot(input);
+    const { repository } = snapshot;
+    return this.#serialize(`document:${repository.documentId}`, () => this.#transaction('readwrite', async (tx) => {
+      const existingById = await tx.get('repositories', repository.id);
+      const existingByDocument = await tx.findRepositoryByDocumentId(repository.documentId);
+      if (existingById || existingByDocument) {
+        if (
+          existingById
+          && existingByDocument
+          && existingById.id === repository.id
+          && existingByDocument.id === repository.id
+        ) {
+          const existing = await repositorySnapshotFromTransaction(tx, repository.id);
+          if (repositorySnapshotsEqual(existing, snapshot)) {
+            return { repository: existing.repository, imported: false };
+          }
+        }
+        throw new VersionError(
+          'REPOSITORY_EXISTS',
+          'A different local history already exists for this document',
+        );
+      }
+
+      for (const commit of snapshot.commits) {
+        if (await tx.get('commits', commit.id)) {
+          throw new VersionError('VERSION_STORE_FAILED', `Commit ID ${commit.id} already exists`);
+        }
+      }
+      for (const shelf of snapshot.shelves) {
+        if (await tx.get('shelves', shelf.id)) {
+          throw new VersionError('VERSION_STORE_FAILED', `Shelf ID ${shelf.id} already exists`);
+        }
+      }
+      for (const manifest of snapshot.mergeManifests) {
+        const existing = await tx.get('mergeManifests', manifest.id);
+        if (existing && JSON.stringify(existing) !== JSON.stringify(manifest)) {
+          throw new VersionError('VERSION_STORE_FAILED', `Merge manifest ID ${manifest.id} already exists`);
+        }
+      }
+      for (const draft of snapshot.mergeDrafts) {
+        if (await tx.get('mergeDrafts', draft.id)) {
+          throw new VersionError('VERSION_STORE_FAILED', `Merge draft ID ${draft.id} already exists`);
+        }
+      }
+      for (const blob of snapshot.blobs) {
+        const existing = await tx.get('blobs', blob.id);
+        if (existing) assertStoredBlob(existing);
+        else await tx.put('blobs', blob);
+      }
+      for (const stored of snapshot.compareSnapshots) {
+        const existing = await tx.get('compareSnapshots', stored.id);
+        if (existing && hashCompareSnapshot(existing.snapshot) !== existing.id) {
+          throw new VersionError('CORRUPT_BLOB', `Existing comparison snapshot ${stored.id} is corrupt`);
+        }
+        if (!existing) await tx.put('compareSnapshots', stored);
+      }
+      for (const manifest of snapshot.mergeManifests) await tx.put('mergeManifests', manifest);
+      for (const commit of snapshot.commits) await tx.put('commits', commit);
+      for (const ref of snapshot.refs) await tx.put('refs', toRefRow(ref));
+      for (const shelf of snapshot.shelves) await tx.put('shelves', shelf);
+      for (const draft of snapshot.mergeDrafts) await tx.put('mergeDrafts', draft);
+      await tx.put('repositories', repository);
+      return { repository, imported: true };
+    }));
+  }
+
+  /** Roll back a freshly imported repository when its bundled current document cannot open. */
+  async removeImportedRepository(
+    id: RepositoryId,
+    expectedDocumentId: DocumentId,
+    expectedRevision: number,
+  ): Promise<void> {
+    await this.#serialize(`document:${expectedDocumentId}`, () => this.#transaction('readwrite', async (tx) => {
+      const repository = await tx.get('repositories', id);
+      if (
+        !repository
+        || repository.documentId !== expectedDocumentId
+        || repository.revision !== expectedRevision
+      ) return;
+      const imported = await repositorySnapshotFromTransaction(tx, id);
+      for (const ref of imported.refs) await tx.delete('refs', refKey(id, ref.kind, ref.name));
+      for (const commit of imported.commits) await tx.delete('commits', commit.id);
+      for (const shelf of imported.shelves) await tx.delete('shelves', shelf.id);
+      for (const manifest of imported.mergeManifests) await tx.delete('mergeManifests', manifest.id);
+      for (const draft of imported.mergeDrafts) await tx.delete('mergeDrafts', draft.id);
+      await tx.delete('repositories', id);
+
+      const remainingCommits = await tx.getAll('commits');
+      const remainingShelves = await tx.getAll('shelves');
+      const remainingDrafts = await tx.getAll('mergeDrafts');
+      const retainedBlobIds = new Set<BlobId>([
+        ...remainingCommits.map((commit) => commit.blobId),
+        ...remainingShelves.map((shelf) => shelf.blobId),
+        ...remainingDrafts.flatMap((draft) => draft.manualAssetBlobIds),
+      ]);
+      const retainedCompareSnapshotIds = new Set<CompareSnapshotId>([
+        ...remainingCommits.map((commit) => commit.compareSnapshotId),
+        ...remainingShelves.map((shelf) => shelf.compareSnapshotId),
+      ]);
+      for (const blob of imported.blobs) {
+        if (!retainedBlobIds.has(blob.id)) await tx.delete('blobs', blob.id);
+      }
+      for (const stored of imported.compareSnapshots) {
+        if (!retainedCompareSnapshotIds.has(stored.id)) {
+          await tx.delete('compareSnapshots', stored.id);
+        }
+      }
+    }));
   }
 
   async #transaction<Result>(mode: IDBTransactionMode, operation: (transaction: GraphTransaction) => Promise<Result>): Promise<Result> {
