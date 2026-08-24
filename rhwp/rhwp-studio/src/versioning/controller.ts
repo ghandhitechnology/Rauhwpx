@@ -268,7 +268,7 @@ export class DocumentVersionController implements VersionManagerController {
   #suppressApprovalCheckpoint = 0;
   #mergeResolverActive = false;
   #mergeLockedHandler: InputHandler | null = null;
-  #mergePreviousReadOnly = false;
+  #mergePreviousUserEditingLocked = false;
   readonly #pendingMergeFinalizers = new WeakMap<
     MergeAppliedReceipt,
     (disposition: 'keep' | 'delete') => Promise<void>
@@ -1314,12 +1314,12 @@ export class DocumentVersionController implements VersionManagerController {
     this.#mergeResolverActive = locked;
     if (locked) {
       this.#mergeLockedHandler = this.#getInputHandler();
-      this.#mergePreviousReadOnly = this.#mergeLockedHandler?.isReadOnly() ?? false;
-      this.#mergeLockedHandler?.setReadOnly(true);
+      this.#mergePreviousUserEditingLocked = this.#mergeLockedHandler?.isUserEditingLocked() ?? false;
+      this.#mergeLockedHandler?.setUserEditingLocked(true);
     } else {
-      this.#mergeLockedHandler?.setReadOnly(this.#mergePreviousReadOnly);
+      this.#mergeLockedHandler?.setUserEditingLocked(this.#mergePreviousUserEditingLocked);
       this.#mergeLockedHandler = null;
-      this.#mergePreviousReadOnly = false;
+      this.#mergePreviousUserEditingLocked = false;
     }
     this.#eventBus.emit('merge-resolver-lock-changed', locked);
     this.#syncTransientState();

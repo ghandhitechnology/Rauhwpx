@@ -109,14 +109,14 @@ test('dirty merge entry creates a real pre-merge checkpoint before already-integ
         hasPending: () => false,
         onChange: () => () => undefined,
       };
-      let readOnly = false;
+      let userEditingLocked = false;
       const inputHandler = {
         prepareSnapshotCapacity: () => undefined,
         replaceContentFromBytes: (bytes: Uint8Array) => {
           wasm.loadDocument(bytes, 'shift-return.hwp');
         },
-        isReadOnly: () => readOnly,
-        setReadOnly: (next: boolean) => { readOnly = next; },
+        isUserEditingLocked: () => userEditingLocked,
+        setUserEditingLocked: (next: boolean) => { userEditingLocked = next; },
       };
       const agentBridge = {
         pendingEdits,
@@ -241,12 +241,12 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
       wasm.loadDocument(rootCapture.bytes, 'shift-return.hwp');
       const eventBus = new eventModule.EventBus();
       const dirty = new dirtyModule.DocumentDirtyState(eventBus);
-      let readOnly = false;
+      let userEditingLocked = false;
       const inputHandler = {
         prepareSnapshotCapacity: () => undefined,
         replaceContentFromBytes: (bytes: Uint8Array) => wasm.loadDocument(bytes, 'shift-return.hwp'),
-        isReadOnly: () => readOnly,
-        setReadOnly: (next: boolean) => { readOnly = next; },
+        isUserEditingLocked: () => userEditingLocked,
+        setUserEditingLocked: (next: boolean) => { userEditingLocked = next; },
       };
       const pendingEdits = { hasPending: () => false, onChange: () => () => undefined };
       const controller = new controllerModule.DocumentVersionController({
@@ -399,7 +399,7 @@ test('diverged clean merge creates ordered parents and Undo/Redo moves bytes wit
 
       const eventBus = new eventModule.EventBus();
       const dirty = new dirtyModule.DocumentDirtyState(eventBus);
-      let readOnly = false;
+      let userEditingLocked = false;
       type HistoryEntry = {
         before: Uint8Array;
         after: Uint8Array;
@@ -435,8 +435,8 @@ test('diverged clean merge creates ordered parents and Undo/Redo moves bytes wit
         },
         discardRedoHistory: () => { redo.length = 0; },
         discardLatestUndoHistory: () => { undo.pop(); },
-        isReadOnly: () => readOnly,
-        setReadOnly: (next: boolean) => { readOnly = next; },
+        isUserEditingLocked: () => userEditingLocked,
+        setUserEditingLocked: (next: boolean) => { userEditingLocked = next; },
       };
       const pendingEdits = { hasPending: () => false, onChange: () => () => undefined };
       const controller = new controllerModule.DocumentVersionController({
@@ -587,12 +587,12 @@ test('HWPX branch transitions stay clean and do not create phantom checkpoints',
       const eventBus = new EventBus();
       const dirty = new DocumentDirtyState(eventBus);
       const store = new versioning.VersionGraphStore({ indexedDB: null });
-      let readOnly = false;
+      let userEditingLocked = false;
       const inputHandler = {
         prepareSnapshotCapacity: () => undefined,
         replaceContentFromBytes: (bytes: Uint8Array) => wasm.loadDocument(bytes, fileName),
-        isReadOnly: () => readOnly,
-        setReadOnly: (next: boolean) => { readOnly = next; },
+        isUserEditingLocked: () => userEditingLocked,
+        setUserEditingLocked: (next: boolean) => { userEditingLocked = next; },
       };
       const pendingEdits = { hasPending: () => false, onChange: () => () => undefined };
       const controller = new controllerModule.DocumentVersionController({
@@ -736,7 +736,7 @@ test('HWPX controller durably completes clean and conflicted merges with composi
 
         const eventBus = new eventModule.EventBus();
         const dirty = new dirtyModule.DocumentDirtyState(eventBus);
-        let readOnly = false;
+        let userEditingLocked = false;
         type HistoryEntry = {
           before: Uint8Array;
           after: Uint8Array;
@@ -769,8 +769,8 @@ test('HWPX controller durably completes clean and conflicted merges with composi
           },
           discardRedoHistory: () => { redo.length = 0; },
           discardLatestUndoHistory: () => { undo.pop(); },
-          isReadOnly: () => readOnly,
-          setReadOnly: (next: boolean) => { readOnly = next; },
+          isUserEditingLocked: () => userEditingLocked,
+          setUserEditingLocked: (next: boolean) => { userEditingLocked = next; },
         };
         const pendingEdits = { hasPending: () => false, onChange: () => () => undefined };
         const controller = new controllerModule.DocumentVersionController({

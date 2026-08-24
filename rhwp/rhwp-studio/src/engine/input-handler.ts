@@ -4013,6 +4013,9 @@ export class InputHandler {
   /** Whether document mutations are currently blocked by an owning workflow. */
   isReadOnly(): boolean { return this.readOnly; }
 
+  /** Whether direct user edits are paused while an owning workflow applies snapshots. */
+  isUserEditingLocked(): boolean { return this.userEditingLocked; }
+
   /** 활성 에이전트 턴에는 사용자 입력만 잠그고 에이전트 snapshot 경로는 유지한다. */
   setUserEditingLocked(locked: boolean): void {
     if (this.userEditingLocked === locked) return;

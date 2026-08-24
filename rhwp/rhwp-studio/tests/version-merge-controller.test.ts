@@ -40,9 +40,10 @@ test('stale draft recomputation carries only fingerprint-identical resolutions',
 
 test('resolver locks editing, agent turns, branch operations, and version mutations', () => {
   const lock = method('#setMergeResolverLock(', 'async #completeMerge(');
-  assert.match(lock, /isReadOnly\(\)/);
-  assert.match(lock, /setReadOnly\(true\)/);
-  assert.match(lock, /setReadOnly\(this\.#mergePreviousReadOnly\)/);
+  assert.match(lock, /isUserEditingLocked\(\)/);
+  assert.match(lock, /setUserEditingLocked\(true\)/);
+  assert.match(lock, /setUserEditingLocked\(this\.#mergePreviousUserEditingLocked\)/);
+  assert.doesNotMatch(lock, /setReadOnly/);
   assert.match(lock, /merge-resolver-lock-changed/);
   const guard = method('async #guardMutation(', 'async #openMergeResolver(');
   assert.match(guard, /#mergeResolverActive/);
