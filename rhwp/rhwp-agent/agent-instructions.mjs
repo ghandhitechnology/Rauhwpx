@@ -153,24 +153,7 @@ export class AgentInstructionsStore {
       });
       this.content = normalizeContent(loaded.text);
       const fileUpdatedAt = new Date(Number(loaded.stat.mtimeMs)).toISOString();
-      let metadata = null;
-      try {
-        const loadedMetadata = await this.#readRegularText(this.metadataPath, {
-          maxBytes: MAX_METADATA_BYTES,
-          invalidCode: 'INSTRUCTIONS_METADATA_INVALID',
-          invalidMessage: 'The app AGENTS.md revision metadata must be a regular file, not a symbolic link.',
-          tooLargeCode: 'INSTRUCTIONS_METADATA_INVALID',
-          tooLargeMessage: 'The app AGENTS.md revision metadata is too large.',
-        });
-        metadata = readMetadata(loadedMetadata.text);
-      } catch (error) {
-        if (error?.code !== 'ENOENT' && error?.code !== 'INSTRUCTIONS_METADATA_INVALID') {
-          throw error;
-        }
-        // 손상되었거나 너무 크거나 심볼릭 링크인 메타데이터 때문에 허브 시작이
-        // 중단되어서는 안 된다. 없는 것으로 처리하고, 아래의 타임스탬프 기반
-        // 시드로 기존의 실질적인 숫자 리비전을 무효화한 뒤 사이드카를 원자적으로 교체한다.
-      }
+      const { metadata } = await this.#readMetadata();
 
       if (!metadata) {
         // A pre-metadata file may have stale revision-1 drafts in Studio. Seed
@@ -191,8 +174,15 @@ export class AgentInstructionsStore {
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
       this.content = normalizeContent(DEFAULT_AGENT_INSTRUCTIONS);
-      this.revision = 1;
       this.updatedAt = this.now();
+      const { metadata, invalid } = await this.#readMetadata();
+      // 본문만 사라진 경우에는 남아 있는 리비전에서 앞으로 이동해 기존 변경안을
+      // 무효화한다. 메타데이터도 손상됐다면 현재 시각으로 실질적인 이전 리비전을 건너뛴다.
+      this.revision = metadata
+        ? metadata.revision + 1
+        : invalid
+          ? Math.max(2, Math.floor(Date.parse(this.updatedAt)))
+          : 1;
       await this.#writeStateAtomic(this.content, this.revision, this.updatedAt);
     }
     await this.fs.chmod(this.filePath, 0o600).catch(() => {});
@@ -254,6 +244,27 @@ export class AgentInstructionsStore {
     ].join('\n');
   }
 
+  async #readMetadata() {
+    try {
+      const loaded = await this.#readRegularText(this.metadataPath, {
+        maxBytes: MAX_METADATA_BYTES,
+        invalidCode: 'INSTRUCTIONS_METADATA_INVALID',
+        invalidMessage: 'The app AGENTS.md revision metadata must be a regular file, not a symbolic link.',
+        tooLargeCode: 'INSTRUCTIONS_METADATA_INVALID',
+        tooLargeMessage: 'The app AGENTS.md revision metadata is too large.',
+      });
+      return { metadata: readMetadata(loaded.text), invalid: false };
+    } catch (error) {
+      if (error?.code === 'ENOENT') return { metadata: null, invalid: false };
+      if (error?.code === 'INSTRUCTIONS_METADATA_INVALID') {
+        // 손상되었거나 너무 크거나 심볼릭 링크인 메타데이터 때문에 허브 시작이
+        // 중단되어서는 안 된다. 호출자가 안전한 새 리비전으로 사이드카를 교체한다.
+        return { metadata: null, invalid: true };
+      }
+      throw error;
+    }
+  }
+
   async #readRegularText(filePath, {
     maxBytes,
     invalidCode,
@@ -292,11 +303,22 @@ export class AgentInstructionsStore {
           throw new AgentInstructionsError(invalidCode, invalidMessage);
         }
       }
-      const bytes = await handle.readFile();
-      if (bytes.length > maxBytes) {
+      const bytes = Buffer.allocUnsafe(maxBytes + 1);
+      let length = 0;
+      while (length < bytes.length) {
+        const { bytesRead } = await handle.read(
+          bytes,
+          length,
+          bytes.length - length,
+          length,
+        );
+        if (bytesRead === 0) break;
+        length += bytesRead;
+      }
+      if (length > maxBytes) {
         throw new AgentInstructionsError(tooLargeCode, tooLargeMessage);
       }
-      return { text: bytes.toString('utf8'), stat };
+      return { text: bytes.subarray(0, length).toString('utf8'), stat };
     } finally {
       await handle.close().catch(() => {});
     }

@@ -72,6 +72,24 @@ test('revision persists across restarts and keeps old drafts stale', async (t) =
   );
 });
 
+test('a missing AGENTS.md advances persisted revision and rejects stale drafts', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-agent-instructions-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const store = await new AgentInstructionsStore({ rootDir }).init();
+  await store.update('revision two', { expectedRevision: 1 });
+  await fs.rm(path.join(rootDir, 'AGENTS.md'));
+
+  const reopened = await new AgentInstructionsStore({ rootDir }).init();
+  assert.equal(reopened.snapshot().revision, 3);
+  assert.equal(reopened.snapshot().content, DEFAULT_AGENT_INSTRUCTIONS);
+  await assert.rejects(
+    reopened.update('stale after content recovery', { expectedRevision: 2 }),
+    (error) => error?.code === 'INSTRUCTIONS_REVISION_CONFLICT',
+  );
+  const repaired = JSON.parse(await fs.readFile(path.join(rootDir, '.AGENTS.md.meta.json'), 'utf8'));
+  assert.equal(repaired.revision, 3);
+});
+
 test('corrupt revision metadata is repaired without reviving stale drafts', async (t) => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-agent-instructions-'));
   t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
@@ -144,6 +162,37 @@ test('instruction size is bounded and platform roots stay outside project worksp
   assert.equal(
     defaultAgentInstructionsRoot({ RHWP_AGENT_INSTRUCTIONS_DIR: 'relative/override' }, 'linux', '/home/example'),
     '/home/example/.local/share/rhwp/agent-instructions',
+  );
+});
+
+test('loading stays bounded when AGENTS.md grows after stat', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-agent-instructions-race-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const filePath = path.join(rootDir, 'AGENTS.md');
+  await fs.writeFile(filePath, 'inside app');
+
+  const racingFs = Object.create(fs);
+  let appended = false;
+  racingFs.open = async (candidate, flags) => {
+    const handle = await fs.open(candidate, flags);
+    if (candidate !== filePath) return handle;
+    return {
+      close: (...args) => handle.close(...args),
+      read: (...args) => handle.read(...args),
+      stat: async (...args) => {
+        const stat = await handle.stat(...args);
+        if (!appended) {
+          appended = true;
+          await fs.appendFile(filePath, 'x'.repeat((MAX_AGENT_INSTRUCTIONS_CHARS * 4) + 1));
+        }
+        return stat;
+      },
+    };
+  };
+
+  await assert.rejects(
+    new AgentInstructionsStore({ rootDir, fsApi: racingFs }).init(),
+    (error) => error?.code === 'INSTRUCTIONS_TOO_LARGE',
   );
 });
 
