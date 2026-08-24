@@ -162,7 +162,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   const initialInstructions = (await instructionsRead).status;
   assert.equal(initialInstructions.fileName, 'AGENTS.md');
   assert.equal(initialInstructions.scope, 'rauhwpx-app');
-  assert.match(initialInstructions.content, /only inside Rauhwpx/);
+  assert.match(initialInstructions.content, /Rauhwpx 안에서만 적용됩니다/);
 
   const instructionsSaved = waitForMessage(alpha, (msg) => (
     msg.type === 'agent-instructions' && msg.requestId === 'instructions-save-1'

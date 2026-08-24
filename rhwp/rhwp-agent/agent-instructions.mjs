@@ -8,16 +8,16 @@ const MAX_AGENT_INSTRUCTIONS_BYTES = MAX_AGENT_INSTRUCTIONS_CHARS * 4;
 const MAX_METADATA_BYTES = 4_096;
 const METADATA_VERSION = 1;
 
-export const DEFAULT_AGENT_INSTRUCTIONS = `# App agent instructions
+export const DEFAULT_AGENT_INSTRUCTIONS = `# 앱 에이전트 지시
 
-These durable instructions apply only inside Rauhwpx. The app keeps this AGENTS.md separate from project and provider instruction files, so other agent harnesses do not load it.
+이 지속 지시는 Rauhwpx 안에서만 적용됩니다. 앱은 이 AGENTS.md를 프로젝트 및 제공자 지시 파일과 분리해 보관하므로 다른 에이전트 실행 환경에서는 불러오지 않습니다.
 
-## Maintaining this file
+## 이 파일 관리
 
-- Read and follow these instructions in every Rauhwpx chat.
-- When the user asks to change these instructions, submit the complete revised file through the app's instruction tools. Rauhwpx shows the proposal to the user and saves it only after confirmation.
-- You may proactively propose a clearly durable preference after the user repeats it or corrects you. Keep the change small, specific, and tell the user what you proposed.
-- Do not save one-off task details, secrets, credentials, or sensitive inferred facts. Ask before making a broad or ambiguous change.
+- 모든 Rauhwpx 채팅에서 이 지시를 읽고 따르세요.
+- 사용자가 이 지시를 바꿔 달라고 요청하면 앱의 지시 도구를 통해 전체 수정본을 제출하세요. Rauhwpx는 사용자에게 변경안을 보여 주고, 사용자가 승인한 뒤에만 저장합니다.
+- 사용자가 같은 선호를 반복해서 말하거나 에이전트의 행동을 바로잡은 경우에는 지속해서 적용할 것이 명확한 선호를 선제적으로 제안할 수 있습니다. 변경은 작고 구체적으로 유지하고, 무엇을 제안했는지 사용자에게 알리세요.
+- 일회성 작업 세부 정보, 비밀, 인증 정보 또는 추론한 민감한 사실은 저장하지 마세요. 범위가 넓거나 모호한 변경을 하기 전에는 사용자에게 확인하세요.
 `;
 
 export class AgentInstructionsError extends Error {
