@@ -198,6 +198,50 @@ export class CursorState {
     this.hfAnchor = null;
   }
 
+  /** Selects every paragraph in the current innermost table cell. */
+  selectAllInCurrentCell(): boolean {
+    if (!this.isInCell() || this.isInTextBox()) return false;
+
+    const pos = this.position;
+    const { sectionIndex: sec, parentParaIndex: ppi, controlIndex: ci, cellIndex: cei } = pos;
+    if (ppi === undefined || ci === undefined || cei === undefined) return false;
+
+    try {
+      const cellPath = pos.cellPath;
+      const useCellPath = (cellPath?.length ?? 0) > 0;
+      const paraCount = useCellPath
+        ? this.wasm.getCellParagraphCountByPath(sec, ppi, JSON.stringify(cellPath))
+        : this.wasm.getCellParagraphCount(sec, ppi, ci, cei);
+      if (paraCount <= 0) return false;
+
+      const lastParaIndex = paraCount - 1;
+      const pathAt = (cellParaIndex: number): CellPathEntry[] | undefined => cellPath?.map((entry, index) =>
+        index === cellPath.length - 1 ? { ...entry, cellParaIndex } : entry,
+      );
+      const lastPath = pathAt(lastParaIndex);
+      const lastParaLength = useCellPath
+        ? this.wasm.getCellParagraphLengthByPath(sec, ppi, JSON.stringify(lastPath))
+        : this.wasm.getCellParagraphLength(sec, ppi, ci, cei, lastParaIndex);
+      const positionAt = (cellParaIndex: number, charOffset: number): DocumentPosition => ({
+        ...pos,
+        paragraphIndex: cellParaIndex,
+        charOffset,
+        cellParaIndex: useCellPath && cellPath!.length > 1 ? pos.cellParaIndex : cellParaIndex,
+        cellPath: pathAt(cellParaIndex),
+      });
+
+      this.anchor = positionAt(0, 0);
+      this.position = positionAt(lastParaIndex, lastParaLength);
+      this.preferredX = null;
+      this.atLineEnd = false;
+      this.updateRect();
+      return true;
+    } catch (e) {
+      console.warn('[CursorState] selectAllInCurrentCell failed:', e);
+      return false;
+    }
+  }
+
   static compareFootnotePositions(
     a: { fnParaIdx: number; charOffset: number },
     b: { fnParaIdx: number; charOffset: number },

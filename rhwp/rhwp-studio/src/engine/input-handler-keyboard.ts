@@ -261,8 +261,12 @@ function pastePlainText(this: any, text: string, hasSelection: boolean): void {
         ),
       });
     }
-    if (i < lines.length - 1 && !this.cursor.isInCell()) {
-      this.executeOperation({ kind: 'command', command: new SplitParagraphCommand(this.cursor.getPosition()) });
+    if (i < lines.length - 1) {
+      if (this.cursor.isInCell() && !this.cursor.isInTextBox()) {
+        this.executeOperation({ kind: 'command', command: new SplitParagraphInCellCommand(this.cursor.getPosition()) });
+      } else if (!this.cursor.isInCell()) {
+        this.executeOperation({ kind: 'command', command: new SplitParagraphCommand(this.cursor.getPosition()) });
+      }
     }
   }
 }
@@ -421,6 +425,25 @@ const chordMapG: Record<string, string> = {
  */
 export function onKeyDown(this: any, e: KeyboardEvent): void {
   if (!this.active) return;
+
+  if (this.pasteWithoutFormattingTimer) {
+    clearTimeout(this.pasteWithoutFormattingTimer);
+    this.pasteWithoutFormattingTimer = null;
+  }
+  this.pasteWithoutFormattingArmed = false;
+  if (
+    (e.ctrlKey || e.metaKey) &&
+    e.shiftKey &&
+    !e.altKey &&
+    (e.code === 'KeyV' || e.key.toLowerCase() === 'v')
+  ) {
+    this.pasteWithoutFormattingArmed = true;
+    this.pasteWithoutFormattingTimer = setTimeout(() => {
+      this.pasteWithoutFormattingArmed = false;
+      this.pasteWithoutFormattingTimer = null;
+    }, 1000);
+  }
+
   if (this.readOnly || this.userEditingLocked) {
     const key = e.key.toLowerCase();
     const primaryShortcut = (e.ctrlKey || e.metaKey) && ['a', 'c', 'f', 'p'].includes(key);
@@ -1553,6 +1576,16 @@ export function handleCtrlKey(this: any, e: KeyboardEvent): void {
 }
 
 export function handleSelectAll(this: any): void {
+  if (this.cursor.isInCell() && !this.cursor.isInTextBox()) {
+    this.cursor.exitCellSelectionMode();
+    this.cellSelectionRenderer?.clear();
+    if (this.cursor.selectAllInCurrentCell()) {
+      this.updateCaret();
+      this.eventBus.emit('command-state-changed');
+    }
+    return;
+  }
+
   // anchor를 문서 시작, focus를 문서 끝으로 설정
   this.cursor.moveTo({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 });
   this.cursor.setAnchor();
@@ -1688,6 +1721,13 @@ export function onCut(this: any, e: ClipboardEvent): void {
 }
 
 export function onPaste(this: any, e: ClipboardEvent): void {
+  const pasteWithoutFormatting = this.pasteWithoutFormattingArmed === true;
+  this.pasteWithoutFormattingArmed = false;
+  if (this.pasteWithoutFormattingTimer) {
+    clearTimeout(this.pasteWithoutFormattingTimer);
+    this.pasteWithoutFormattingTimer = null;
+  }
+
   if (!this.active) return;
   e.preventDefault();
   if (this.readOnly || this.userEditingLocked) return;
@@ -1711,6 +1751,10 @@ export function onPaste(this: any, e: ClipboardEvent): void {
   const clipboardData = e.clipboardData;
   const html = clipboardData?.getData('text/html') || '';
   const text = clipboardData?.getData('text/plain') || '';
+  if (pasteWithoutFormatting) {
+    pastePlainText.call(this, text, hasSelection);
+    return;
+  }
   const hasCurrentInternalMarker = hasCurrentRhwpClipboardMarker(this, html);
   const internalClipboardText = this.wasm.getClipboardText?.() || '';
   const hasMatchingInternalControlText =

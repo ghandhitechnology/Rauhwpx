@@ -30,6 +30,7 @@
     "e2e:undo": "node e2e/undo-contracts.test.mjs",
     "e2e:undo-object-selection": "node e2e/undo-object-selection.test.mjs",
     "e2e:clipboard-priority": "node e2e/task-871-clipboard-priority.test.mjs",
+    "e2e:editor-interactions": "node e2e/editor-table-interactions.test.mjs",
     "e2e:drag-autoscroll": "node e2e/drag-selection-autoscroll.test.mjs",
     "e2e:renderer-contract": "node e2e/renderer-contract.test.mjs",
     "e2e:issue-2214": "node e2e/issue-2214-page-local-repaint.test.mjs --mode=headless",

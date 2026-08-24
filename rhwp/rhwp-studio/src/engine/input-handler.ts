@@ -280,6 +280,8 @@ export class InputHandler {
   private pictureObjectRenderer: TableObjectRenderer | null = null;
   /** 마지막 rhwp-studio 내부 복사의 시스템 클립보드 marker token */
   private rhwpClipboardToken: string | null = null;
+  private pasteWithoutFormattingArmed = false;
+  private pasteWithoutFormattingTimer: ReturnType<typeof setTimeout> | null = null;
   /** 누름틀 시작 경계에서 왼쪽/Home 이동으로 필드 밖에 머문 상태 */
   private fieldStartExitKey: string | null = null;
   /** 누름틀 끝 경계에서 오른쪽 이동으로 필드 밖에 머문 상태 */
@@ -402,6 +404,7 @@ export class InputHandler {
     startClientY: number;
     pageIndex: number;
     bbox: { x: number; y: number; w: number; h: number };
+    rotationAngle: number;
     /** 다중 선택 리사이즈 시 각 개체의 원래 크기/위치 */
     multiRefs?: { sec: number; ppi: number; ci: number; type: string; origWidth: number; origHeight: number; origHorzOffset: number; origVertOffset: number; bboxX: number; bboxY: number }[];
   } | null = null;
@@ -419,8 +422,10 @@ export class InputHandler {
     totalDeltaH: number;
     totalDeltaV: number;
     pageIndex: number;
+    bbox: { x: number; y: number; w: number; h: number };
+    rotationAngle: number;
     /** 다중 선택 이동 시 각 개체의 원래 offset 기록 */
-    multiRefs?: { sec: number; ppi: number; ci: number; type: string; origHorzOffset: number; origVertOffset: number }[];
+    multiRefs?: { sec: number; ppi: number; ci: number; type: string; origHorzOffset: number; origVertOffset: number; cellPath?: CellPathLike; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } }[];
   } | null = null;
 
   // 그림/글상자 회전 드래그 상태
@@ -432,6 +437,8 @@ export class InputHandler {
     centerY: number;
     startAngle: number;     // 드래그 시작 시 마우스→중심 각도 (rad)
     pageIndex: number;
+    bbox: { x: number; y: number; w: number; h: number };
+    finalAngle: number;
   } | null = null;
 
   // 직선 끝점 드래그 상태
@@ -3754,8 +3761,8 @@ export class InputHandler {
   }
 
   /** 마우스 드래그로 그림 이동 — 드래그 종료 */
-  private finishPictureMoveDrag(): void {
-    _picture.finishPictureMoveDrag.call(this);
+  private finishPictureMoveDrag(e: MouseEvent): void {
+    _picture.finishPictureMoveDrag.call(this, e);
   }
 
   /** 마우스 드래그로 그림 회전 — 드래그 업데이트 */
@@ -3876,6 +3883,11 @@ export class InputHandler {
       clearTimeout(this._iosInputTimer);
       this._iosInputTimer = null;
     }
+    if (this.pasteWithoutFormattingTimer) {
+      clearTimeout(this.pasteWithoutFormattingTimer);
+      this.pasteWithoutFormattingTimer = null;
+    }
+    this.pasteWithoutFormattingArmed = false;
     this._iosAnchor = null;
     this._iosBeforePageIndex = undefined;
     this._iosComposing = false;
@@ -3921,6 +3933,11 @@ export class InputHandler {
       clearTimeout(this._iosInputTimer);
       this._iosInputTimer = null;
     }
+    if (this.pasteWithoutFormattingTimer) {
+      clearTimeout(this.pasteWithoutFormattingTimer);
+      this.pasteWithoutFormattingTimer = null;
+    }
+    this.pasteWithoutFormattingArmed = false;
     this._iosAnchor = null;
     this._iosBeforePageIndex = undefined;
     this._iosComposing = false;
