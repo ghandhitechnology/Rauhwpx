@@ -7,6 +7,7 @@ import {
   app,
   BrowserWindow,
   Menu,
+  clipboard,
   dialog,
   ipcMain,
   nativeTheme,
@@ -44,6 +45,7 @@ import {
   registerStudioScheme,
 } from './studio-protocol.mjs';
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
+import { deliverPlainTextPaste } from './plain-text-paste.mjs';
 
 const { autoUpdater } = electronUpdater;
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -398,6 +400,17 @@ function installMenu() {
     accelerator: 'CmdOrCtrl+Shift+N',
     click: () => queueLaunch(launchRequest({ source: 'new-window' })),
   };
+  const pasteWithoutFormatting = {
+    id: 'edit-paste-without-formatting',
+    label: 'Paste Without Formatting',
+    accelerator: 'CmdOrCtrl+Shift+V',
+    click: (_menuItem, browserWindow) => {
+      deliverPlainTextPaste(
+        browserWindow ?? BrowserWindow.getFocusedWindow(),
+        () => clipboard.readText(),
+      );
+    },
+  };
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(isMac ? [{
       label: 'Rauhwpx',
@@ -422,7 +435,21 @@ function installMenu() {
         { role: isMac ? 'close' : 'quit' },
       ],
     },
-    { role: 'editMenu' },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        pasteWithoutFormatting,
+        { role: 'delete' },
+        { type: 'separator' },
+        { role: 'selectAll' },
+      ],
+    },
     { role: 'viewMenu' },
     { role: 'windowMenu' },
     ...(isMac ? [] : [{ role: 'help', submenu: [{ role: 'about' }] }]),

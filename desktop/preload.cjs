@@ -90,4 +90,9 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
       callback(payload);
     });
   },
+  onPastePlainText: (callback) => {
+    ipcRenderer.on('desktop:paste-plain-text', (_event, text) => {
+      callback(typeof text === 'string' ? text : '');
+    });
+  },
 });

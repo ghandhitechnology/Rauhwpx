@@ -4968,6 +4968,29 @@ export class InputHandler {
     return document.execCommand('paste');
   }
 
+  /** Electron 네이티브 Cmd/Ctrl+Shift+V 경로. */
+  performPlainTextPaste(text: string): boolean {
+    if (
+      !this.active
+      || this.readOnly
+      || this.userEditingLocked
+      || this.editMode === 'form'
+      || !text
+    ) return false;
+
+    if (this.cursor.isInPictureObjectSelection()) {
+      this.cursor.moveOutOfSelectedPicture();
+      this.pictureObjectRenderer?.clear();
+      this.eventBus.emit('picture-object-selection-changed', false);
+    }
+    if (this.cursor.isInTableObjectSelection()) {
+      this.cursor.moveOutOfSelectedTable();
+      this.eventBus.emit('table-object-selection-changed', false);
+    }
+    _keyboard.pastePlainText.call(this, text);
+    return true;
+  }
+
   /** 잘라내기 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */
   performCut(): void {
     if (this.editMode === 'form') return;

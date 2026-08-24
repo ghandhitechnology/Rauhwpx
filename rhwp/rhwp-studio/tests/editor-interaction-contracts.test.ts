@@ -55,6 +55,17 @@ test('plain-text paste is one atomic operation that normalizes and preserves cel
   assert.doesNotMatch(plain, /kind: 'command'/);
 });
 
+test('desktop plain-paste command enters the same atomic editor path', () => {
+  const input = source('src/engine/input-handler.ts');
+  const command = block(input, 'performPlainTextPaste(text: string)', '/** 잘라내기');
+
+  assert.match(command, /!this\.active/);
+  assert.match(command, /this\.readOnly/);
+  assert.match(command, /this\.userEditingLocked/);
+  assert.match(command, /this\.editMode === 'form'/);
+  assert.match(command, /_keyboard\.pastePlainText\.call\(this, text\)/);
+});
+
 test('triple mousedown selects editable cell text without starting drag selection', () => {
   const mouse = source('src/engine/input-handler-mouse.ts');
   const triple = block(mouse, 'e.detail >= 3', '// 표 객체 선택 중 클릭 처리');

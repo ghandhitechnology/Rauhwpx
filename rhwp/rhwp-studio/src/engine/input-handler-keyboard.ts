@@ -242,7 +242,7 @@ function positionAfterPasteResult(pos: DocumentPosition, parsed: any): DocumentP
   return newPos;
 }
 
-function pastePlainText(this: any, text: string): void {
+export function pastePlainText(this: any, text: string): void {
   if (!text) return;
 
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
