@@ -20,6 +20,11 @@ function fakeWindow(id: number) {
   };
 }
 
+function associationExts(association: { ext?: string | string[] }): string[] {
+  if (!association.ext) return [];
+  return Array.isArray(association.ext) ? association.ext : [association.ext];
+}
+
 test('SessionManager gives each owned BrowserWindow an isolated UUID context', async () => {
   const ids = ['session-a', 'session-b'];
   const manager = new SessionManager({
@@ -116,7 +121,10 @@ test('desktop owns Cmd/Ctrl+Shift+V in its native Edit menu', () => {
 test('desktop packages register as an HWPX editor with the operating system', () => {
   const associations = rootPackage.build.fileAssociations;
   assert.ok(associations.some((association: { ext: string | string[] }) =>
-    (Array.isArray(association.ext) ? association.ext : [association.ext]).includes('hwpx')));
+    associationExts(association).includes('hwpx')));
+  const hangulAssociation = associations.find((association: { name?: string }) =>
+    association.name === 'Hangul document');
+  assert.equal(associationExts(hangulAssociation ?? {}).includes('rhwpx'), false);
 
   const macInfo = rootPackage.build.mac.extendInfo;
   const hwpxType = macInfo.CFBundleDocumentTypes.find((type: {
@@ -265,7 +273,16 @@ test('one failed startup launch does not abort the remaining launches', () => {
 });
 
 test('desktop package registers supported document associations without bundling runtime data', () => {
-  assert.deepEqual(rootPackage.build.fileAssociations[0].ext, ['hwp', 'hwpx', 'hml', 'rhwpx']);
+  const hangulAssociation = rootPackage.build.fileAssociations.find(
+    (association: { name?: string }) => association.name === 'Hangul document',
+  );
+  const historyAssociation = rootPackage.build.fileAssociations.find(
+    (association: { ext?: string | string[] }) => associationExts(association).includes('rhwpx'),
+  );
+  assert.deepEqual(hangulAssociation?.ext, ['hwp', 'hwpx', 'hml']);
+  assert.deepEqual(historyAssociation?.ext, ['rhwpx']);
+  assert.equal(historyAssociation?.name, 'Rauhwpx history bundle');
+  assert.notEqual(historyAssociation?.name, 'Hangul document');
   assert.match(desktopMain, /desktop:save-portable-history-file/);
   assert.match(desktopMain, /RauHWPX history bundle/);
   assert.ok(rootPackage.build.asarUnpack.includes('rhwp/rhwp-agent/**'));
