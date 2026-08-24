@@ -117,6 +117,8 @@ test('app-only AGENTS.md tools separate reads from bounded revision-checked writ
   assert.ok(update?.shape.expectedRevision.safeParse(1).success);
   assert.ok(!update?.shape.expectedRevision.safeParse(0).success);
   assert.match(update?.description ?? '', /one-off task details/);
+  assert.match(update?.description ?? '', /not persisted until the user explicitly confirms/);
+  assert.match(update?.description ?? '', /Settings > 지시/);
   assert.match(read?.description ?? '', /outside this app/);
 });
 

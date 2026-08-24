@@ -233,9 +233,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   assert.equal((await instructionsToolRead).result.revision, 2);
 
   const instructionsToolUpdated = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 5);
-  const agentInstructionsBroadcast = waitForMessage(beta, (msg) => (
-    msg.type === 'agent-instructions' && msg.changedBy === 'agent:claude' && msg.status?.revision === 3
-  ));
+  const instructionsDraftProposed = waitForMessage(alpha, (msg) => msg.type === 'agent-instructions-draft');
   sendFrame(alphaMcp, {
     type: 'tool-call', id: 5, tool: 'update_agent_instructions',
     args: {
@@ -245,8 +243,67 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
     },
     workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch,
   });
-  assert.equal((await instructionsToolUpdated).result.changed, true);
+  const draftToolResult = (await instructionsToolUpdated).result;
+  assert.equal(draftToolResult.changed, false);
+  assert.equal(draftToolResult.pendingConfirmation, true);
+  assert.equal(draftToolResult.revision, 2);
+  const proposedDraft = (await instructionsDraftProposed).draft;
+  assert.equal(proposedDraft.id, draftToolResult.draftId);
+  assert.equal(proposedDraft.expectedRevision, 2);
+  assert.equal(typeof proposedDraft.confirmationToken, 'string');
+  assert.equal(
+    readFileSync(path.join(workRoot, 'agent-instructions', 'AGENTS.md'), 'utf8'),
+    '# 내 지시\n\n- 핵심부터 답하기\n',
+  );
+
+  const invalidConfirmation = waitForMessage(alpha, (msg) => (
+    msg.type === 'agent-instructions-error' && msg.requestId === 'instructions-confirm-invalid-token'
+  ));
+  sendFrame(alpha, {
+    type: 'agent-instructions-draft-confirm',
+    requestId: 'instructions-confirm-invalid-token',
+    draftId: proposedDraft.id,
+    confirmationToken: 'not-the-issued-capability',
+  });
+  assert.equal((await invalidConfirmation).code, 'INSTRUCTIONS_CONFIRMATION_INVALID');
+
+  const crossSessionConfirmation = waitForMessage(beta, (msg) => (
+    msg.type === 'agent-instructions-error' && msg.requestId === 'instructions-confirm-wrong-session'
+  ));
+  sendFrame(beta, {
+    type: 'agent-instructions-draft-confirm',
+    requestId: 'instructions-confirm-wrong-session',
+    draftId: proposedDraft.id,
+    confirmationToken: proposedDraft.confirmationToken,
+  });
+  assert.equal((await crossSessionConfirmation).code, 'INSTRUCTIONS_CONFIRMATION_INVALID');
+
+  const instructionsConfirmed = waitForMessage(alpha, (msg) => (
+    msg.type === 'agent-instructions' && msg.requestId === 'instructions-confirm-1'
+  ));
+  const instructionsDraftCleared = waitForMessage(alpha, (msg) => (
+    msg.type === 'agent-instructions-draft-cleared'
+      && msg.draftId === proposedDraft.id
+      && msg.outcome === 'confirmed'
+  ));
+  const agentInstructionsBroadcast = waitForMessage(beta, (msg) => (
+    msg.type === 'agent-instructions'
+      && msg.changedBy === 'agent-confirmed:claude'
+      && msg.status?.revision === 3
+  ));
+  sendFrame(alpha, {
+    type: 'agent-instructions-draft-confirm',
+    requestId: 'instructions-confirm-1',
+    draftId: proposedDraft.id,
+    confirmationToken: proposedDraft.confirmationToken,
+  });
+  assert.equal((await instructionsConfirmed).status.revision, 3);
+  assert.equal((await instructionsDraftCleared).outcome, 'confirmed');
   assert.equal((await agentInstructionsBroadcast).status.revision, 3);
+  assert.equal(
+    readFileSync(path.join(workRoot, 'agent-instructions', 'AGENTS.md'), 'utf8'),
+    '# 내 지시\n\n- 핵심부터 답하기\n- 표는 비교에 도움이 될 때만 쓰기\n',
+  );
   const alphaTemplateResult = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 6);
   const betaTemplateResult = waitForMessage(betaMcp, (msg) => msg.type === 'tool-result' && msg.id === 6);
   sendFrame(alphaMcp, { type: 'tool-call', id: 6, tool: 'get_active_template', args: {}, workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch });

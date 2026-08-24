@@ -197,7 +197,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'update_agent_instructions',
-    description: 'Replace the app-scoped AGENTS.md with a revised version. Use this immediately when the user explicitly asks to save or change durable instructions. You may also make a small proactive update when a durable preference is clear from a repeated request or correction; never store one-off task details, secrets, credentials, or sensitive inferred facts, and tell the user what changed. Read first and pass its revision as expectedRevision so concurrent changes are not overwritten.',
+    description: 'Propose a complete replacement for the app-scoped AGENTS.md. The proposal is short-lived and is not persisted until the user explicitly confirms it in Rauhwpx Settings > 지시. Use this when the user asks to save or change durable instructions, or for a small proactive proposal after a repeated preference or correction. Never propose one-off task details, secrets, credentials, or sensitive inferred facts. Read first and pass its revision as expectedRevision so concurrent changes are not overwritten, then tell the user what you proposed and where to confirm it.',
     shape: {
       content: z.string().max(30_000).describe('Complete replacement content for the app-only AGENTS.md'),
       expectedRevision: z.number().int().min(1).describe('Revision returned by read_agent_instructions or the current app_agents_md prompt block'),

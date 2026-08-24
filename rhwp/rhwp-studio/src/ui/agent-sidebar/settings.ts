@@ -29,6 +29,7 @@ import { formatRelativeTime, formatResetAt, formatShortDate, formatTokens } from
 import type { AgentBridge } from '../../agent/bridge.ts';
 import type {
   AgentName,
+  AgentInstructionsDraft,
   AgentInstructionsStatus,
   AgentAuthMethod,
   AgentSetupStatusMap,
@@ -305,9 +306,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let usage: UsageSummary | null = null;
   let writingStyle: WritingStyleStatus | null = null;
   let agentInstructions: AgentInstructionsStatus | null = null;
+  let pendingAgentInstructionsDraft: AgentInstructionsDraft | null = null;
   let instructionsDraftRevision = 0;
   let instructionsDirty = false;
   let instructionsBusy = false;
+  let instructionsProposalBusy = false;
   let instructionsMessage = '';
   let templates: DocumentTemplate[] = [];
   let templatesBusy = false;
@@ -828,6 +831,25 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const instructionsMeta = el('p', 'ag-settings-note');
   const instructionsStatus = el('p', 'ag-settings-instructions-status');
   instructionsStatus.hidden = true;
+  const instructionsProposal = el('div', 'ag-settings-instructions-proposal');
+  instructionsProposal.hidden = true;
+  const instructionsProposalTitle = el('strong', 'ag-settings-instructions-proposal-title', '에이전트 변경안');
+  const instructionsProposalMeta = el('p', 'ag-settings-note');
+  const instructionsProposalReason = el('p', 'ag-settings-instructions-proposal-reason');
+  const instructionsProposalPreview = el('pre', 'ag-settings-instructions-proposal-preview');
+  const instructionsProposalActions = el('div', 'ag-settings-actions');
+  const instructionsProposalConfirm = el('button', 'ag-settings-primary', '변경안 적용');
+  instructionsProposalConfirm.type = 'button';
+  const instructionsProposalReject = el('button', 'ag-settings-btn', '거절');
+  instructionsProposalReject.type = 'button';
+  instructionsProposalActions.append(instructionsProposalConfirm, instructionsProposalReject);
+  instructionsProposal.append(
+    instructionsProposalTitle,
+    instructionsProposalMeta,
+    instructionsProposalReason,
+    instructionsProposalPreview,
+    instructionsProposalActions,
+  );
   const instructionsActions = el('div', 'ag-settings-actions');
   const instructionsSave = el('button', 'ag-settings-primary', '저장');
   instructionsSave.type = 'button';
@@ -836,6 +858,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   instructionsActions.append(instructionsSave, instructionsReload);
   instructionsSection.body.append(
     instructionsNote,
+    instructionsProposal,
     instructionsEditor,
     instructionsMeta,
     instructionsStatus,
@@ -848,6 +871,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     renderAgentInstructions();
   });
   instructionsSave.addEventListener('click', () => void saveAgentInstructions());
+  instructionsProposalConfirm.addEventListener('click', () => void confirmAgentInstructionsDraft());
+  instructionsProposalReject.addEventListener('click', () => void rejectAgentInstructionsDraft());
   instructionsReload.addEventListener('click', () => {
     if (instructionsDirty && !window.confirm('작성 중인 지시 변경을 버리고 다시 불러올까요?')) return;
     instructionsDirty = false;
@@ -2243,19 +2268,21 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     changedBy = 'system',
     force = false,
   ): void {
+    const changedByAgent = changedBy.startsWith('agent:')
+      || changedBy.startsWith('agent-confirmed:');
     const changedElsewhere = instructionsDirty
       && instructionsDraftRevision > 0
       && status.revision !== instructionsDraftRevision;
     agentInstructions = status;
     if (changedElsewhere && !force) {
-      instructionsMessage = changedBy.startsWith('agent:')
+      instructionsMessage = changedByAgent
         ? '에이전트가 지시를 변경했어요. 초안을 보존했으니 다시 불러와 비교하세요.'
         : '다른 창에서 지시가 변경됐어요. 초안을 보존했으니 다시 불러와 비교하세요.';
     } else {
       instructionsEditor.value = status.content;
       instructionsDraftRevision = status.revision;
       instructionsDirty = false;
-      if (changedBy.startsWith('agent:')) instructionsMessage = '에이전트가 AGENTS.md를 업데이트했어요.';
+      if (changedByAgent) instructionsMessage = '승인한 에이전트 변경안을 AGENTS.md에 적용했어요.';
     }
     renderAgentInstructions();
   }
@@ -2274,6 +2301,25 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       : 'AGENTS.md · 연결 후 불러옵니다.';
     instructionsStatus.textContent = instructionsMessage;
     instructionsStatus.hidden = !instructionsMessage;
+    const proposal = pendingAgentInstructionsDraft;
+    instructionsProposal.hidden = !proposal;
+    if (proposal) {
+      const expiresAt = Date.parse(proposal.expiresAt);
+      const expired = !Number.isFinite(expiresAt) || expiresAt <= Date.now();
+      const expiryLabel = Number.isFinite(expiresAt)
+        ? formatResetAt(expiresAt).replace('리셋', '만료')
+        : '만료 시간 오류';
+      instructionsProposalMeta.textContent = `${proposal.requestedBy} 제안 · ${expiryLabel}`;
+      instructionsProposalReason.textContent = proposal.reason
+        ? `이유: ${proposal.reason}`
+        : '승인 전에는 AGENTS.md에 저장되지 않습니다.';
+      instructionsProposalPreview.textContent = proposal.content;
+      instructionsProposalConfirm.disabled = instructionsProposalBusy
+        || expired
+        || connectionState !== 'connected';
+      instructionsProposalReject.disabled = instructionsProposalBusy
+        || connectionState !== 'connected';
+    }
   }
 
   async function refreshAgentInstructions(force = false): Promise<void> {
@@ -2310,6 +2356,45 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       instructionsMessage = '저장했어요. 다음 턴부터 모든 Rauhwpx 채팅에 적용됩니다.';
     } else if (!instructionsMessage) {
       instructionsMessage = '저장하지 못했어요. 최신 지시를 다시 불러온 뒤 시도하세요.';
+    }
+    renderAgentInstructions();
+  }
+
+  async function confirmAgentInstructionsDraft(): Promise<void> {
+    const draft = pendingAgentInstructionsDraft;
+    if (!draft || instructionsProposalBusy || connectionState !== 'connected') return;
+    if (instructionsDirty
+      && !window.confirm('작성 중인 직접 편집 내용을 버리고 에이전트 변경안을 적용할까요?')) return;
+    instructionsProposalBusy = true;
+    instructionsMessage = '';
+    renderAgentInstructions();
+    const status = await bridge.confirmAgentInstructionsDraft(draft);
+    if (disposed) return;
+    instructionsProposalBusy = false;
+    if (status) {
+      pendingAgentInstructionsDraft = null;
+      acceptAgentInstructions(status, `agent-confirmed:${draft.requestedBy}`, true);
+      instructionsMessage = '에이전트 변경안을 적용했어요. 다음 턴부터 모든 Rauhwpx 채팅에 적용됩니다.';
+    } else if (!instructionsMessage) {
+      instructionsMessage = '변경안을 적용하지 못했어요. 최신 지시를 다시 불러오세요.';
+    }
+    renderAgentInstructions();
+  }
+
+  async function rejectAgentInstructionsDraft(): Promise<void> {
+    const draft = pendingAgentInstructionsDraft;
+    if (!draft || instructionsProposalBusy || connectionState !== 'connected') return;
+    instructionsProposalBusy = true;
+    instructionsMessage = '';
+    renderAgentInstructions();
+    const rejected = await bridge.rejectAgentInstructionsDraft(draft);
+    if (disposed) return;
+    instructionsProposalBusy = false;
+    if (rejected) {
+      pendingAgentInstructionsDraft = null;
+      instructionsMessage = '에이전트 변경안을 거절했어요. AGENTS.md는 바뀌지 않았습니다.';
+    } else if (!instructionsMessage) {
+      instructionsMessage = '변경안을 거절하지 못했어요. 이미 만료되었을 수 있습니다.';
     }
     renderAgentInstructions();
   }
@@ -2390,9 +2475,26 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         case 'agent-instructions':
           acceptAgentInstructions(ev.status, ev.changedBy);
           break;
+        case 'agent-instructions-draft':
+          pendingAgentInstructionsDraft = ev.draft;
+          instructionsProposalBusy = false;
+          instructionsMessage = '에이전트가 지시 변경안을 제안했어요. 내용을 확인한 뒤 적용하거나 거절하세요.';
+          renderAgentInstructions();
+          break;
+        case 'agent-instructions-draft-cleared':
+          if (pendingAgentInstructionsDraft?.id === ev.draftId) {
+            pendingAgentInstructionsDraft = null;
+            instructionsProposalBusy = false;
+            if (ev.outcome === 'expired') instructionsMessage = '에이전트 변경안이 만료됐어요.';
+            if (ev.outcome === 'replaced') instructionsMessage = '에이전트가 새 변경안으로 교체했어요.';
+            if (ev.outcome === 'stale') instructionsMessage = '지시가 먼저 변경되어 에이전트 변경안이 만료됐어요.';
+            renderAgentInstructions();
+          }
+          break;
         case 'agent-instructions-error':
           if (ev.status) agentInstructions = ev.status;
           instructionsBusy = false;
+          instructionsProposalBusy = false;
           instructionsMessage = ev.message;
           renderAgentInstructions();
           break;

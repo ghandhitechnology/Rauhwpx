@@ -229,6 +229,44 @@
 
 /* ── 앱 전용 AGENTS.md ──────────────────────────────── */
 
+.ag-settings-instructions-proposal {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--ag-accent) 55%, var(--ag-border));
+  border-radius: var(--radius-sm, 6px);
+  background: color-mix(in srgb, var(--ag-accent) 7%, transparent);
+}
+
+.ag-settings-instructions-proposal[hidden] {
+  display: none;
+}
+
+.ag-settings-instructions-proposal-title,
+.ag-settings-instructions-proposal-reason {
+  margin: 0;
+}
+
+.ag-settings-instructions-proposal-reason {
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.45;
+}
+
+.ag-settings-instructions-proposal-preview {
+  max-height: 180px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--radius-xs, 4px);
+  background: var(--ag-surface);
+  color: var(--ag-text);
+  font: 11px/1.5 var(--font-mono, ui-monospace, monospace);
+}
+
 .ag-settings-instructions-editor {
   width: 100%;
   min-width: 0;

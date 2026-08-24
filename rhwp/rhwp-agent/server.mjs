@@ -228,6 +228,7 @@ const sessions = new HubSessionRegistry({
       sessionGeneration: 0,
       missedTurnEnd: null,
       styleCalibration: null,
+      pendingInstructionDraft: null,
       auxiliaryProcesses: new Set(),
       templateJobs: new Map(),
       activeTemplateJobId: null,
@@ -258,7 +259,82 @@ function broadcastToStudios(message) {
 }
 
 function broadcastAgentInstructions(status, changedBy) {
+  for (const record of sessions.values()) {
+    if (record.pendingInstructionDraft
+      && record.pendingInstructionDraft.expectedRevision !== status.revision) {
+      clearInstructionDraft(record, 'stale');
+    }
+  }
   broadcastToStudios({ v: 1, type: 'agent-instructions', status, changedBy });
+}
+
+function instructionDraftFrame(draft) {
+  return {
+    id: draft.id,
+    content: draft.content,
+    expectedRevision: draft.expectedRevision,
+    reason: draft.reason,
+    requestedBy: draft.requestedBy,
+    createdAt: new Date(draft.createdAt).toISOString(),
+    expiresAt: new Date(draft.expiresAt).toISOString(),
+    confirmationToken: draft.confirmationToken,
+  };
+}
+
+function clearInstructionDraft(record, outcome) {
+  const draft = record.pendingInstructionDraft;
+  if (!draft) return null;
+  record.pendingInstructionDraft = null;
+  if (draft.expiryTimer) clearTimeout(draft.expiryTimer);
+  sendJson(record.studioSocket, {
+    v: 1,
+    type: 'agent-instructions-draft-cleared',
+    draftId: draft.id,
+    outcome,
+  });
+  return draft;
+}
+
+function currentInstructionDraft(record) {
+  const draft = record.pendingInstructionDraft;
+  if (!draft) return null;
+  if (draft.expiresAt <= Date.now()) {
+    clearInstructionDraft(record, 'expired');
+    return null;
+  }
+  return draft;
+}
+
+function sendInstructionDraft(record, sock = record.studioSocket) {
+  const draft = currentInstructionDraft(record);
+  if (!draft) return false;
+  return sendJson(sock, {
+    v: 1,
+    type: 'agent-instructions-draft',
+    draft: instructionDraftFrame(draft),
+  });
+}
+
+function authorizedInstructionDraft(record, msg) {
+  const draft = currentInstructionDraft(record);
+  if (!draft
+    || typeof msg.draftId !== 'string'
+    || msg.draftId !== draft.id
+    || typeof msg.confirmationToken !== 'string'
+    || !timingSafeTextEqual(msg.confirmationToken, draft.confirmationToken)) {
+    throw workflowError(
+      'INSTRUCTIONS_CONFIRMATION_INVALID',
+      'The instruction proposal is missing, expired, or no longer authorized.',
+    );
+  }
+  return draft;
+}
+
+function consumeAuthorizedInstructionDraft(record, msg) {
+  const draft = authorizedInstructionDraft(record, msg);
+  record.pendingInstructionDraft = null;
+  if (draft.expiryTimer) clearTimeout(draft.expiryTimer);
+  return draft;
 }
 
 function refreshSessionCredentials(agent) {
@@ -273,6 +349,7 @@ function refreshSessionCredentials(agent) {
 /** CLI 설치·인증을 cli-setup-manager 가 관리하는 에이전트들. */
 const CLI_SETUP_AGENTS = ['claude', 'codex', 'grok', 'cursor'];
 const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi']);
+const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
 
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
 const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
@@ -1603,6 +1680,7 @@ async function handleStudioMessage(record, sock, msg) {
         status: agentInstructionsStore.snapshot(),
         changedBy: 'system',
       });
+      sendInstructionDraft(record, sock);
       return;
     }
     case 'agent-instructions-save': {
@@ -1625,6 +1703,81 @@ async function handleStudioMessage(record, sock, msg) {
         message: String(error?.message ?? error),
         status: agentInstructionsStore.snapshot(),
       }));
+      return;
+    }
+    case 'agent-instructions-draft-confirm': {
+      let draft;
+      try {
+        draft = consumeAuthorizedInstructionDraft(record, msg);
+        // Consume the one-use capability before the asynchronous write.
+      } catch (error) {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-error',
+          requestId: msg.requestId ?? null,
+          code: error?.code ?? 'INSTRUCTIONS_CONFIRMATION_INVALID',
+          message: String(error?.message ?? error),
+          status: agentInstructionsStore.snapshot(),
+        });
+        return;
+      }
+      void agentInstructionsStore.update(draft.content, {
+        expectedRevision: draft.expectedRevision,
+      }).then((status) => {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions',
+          requestId: msg.requestId ?? null,
+          status,
+          changedBy: `agent-confirmed:${draft.requestedBy}`,
+        });
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-draft-cleared',
+          draftId: draft.id,
+          outcome: 'confirmed',
+        });
+        broadcastAgentInstructions(status, `agent-confirmed:${draft.requestedBy}`);
+      }).catch((error) => {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-draft-cleared',
+          draftId: draft.id,
+          outcome: 'stale',
+        });
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-error',
+          requestId: msg.requestId ?? null,
+          code: error?.code ?? 'INSTRUCTIONS_SAVE_FAILED',
+          message: String(error?.message ?? error),
+          status: agentInstructionsStore.snapshot(),
+        });
+      });
+      return;
+    }
+    case 'agent-instructions-draft-reject': {
+      let draft;
+      try {
+        draft = consumeAuthorizedInstructionDraft(record, msg);
+      } catch (error) {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-error',
+          requestId: msg.requestId ?? null,
+          code: error?.code ?? 'INSTRUCTIONS_CONFIRMATION_INVALID',
+          message: String(error?.message ?? error),
+          status: agentInstructionsStore.snapshot(),
+        });
+        return;
+      }
+      sendJson(sock, {
+        v: 1,
+        type: 'agent-instructions-draft-cleared',
+        requestId: msg.requestId ?? null,
+        draftId: draft.id,
+        outcome: 'rejected',
+      });
       return;
     }
     case 'chat-permission-set': {
@@ -2339,20 +2492,59 @@ function handleMcpMessage(record, sock, msg) {
         return;
       }
       if (tool === 'update_agent_instructions') {
-        const beforeRevision = agentInstructionsStore.snapshot().revision;
-        void agentInstructionsStore.update(args.content, {
-          expectedRevision: args.expectedRevision,
-        }).then((status) => {
-          const changed = status.revision !== beforeRevision;
+        try {
+          const status = agentInstructionsStore.snapshot();
+          const prepared = agentInstructionsStore.prepareUpdate(args.content, {
+            expectedRevision: args.expectedRevision,
+          });
+          if (prepared.content === status.content) {
+            sendResult({ ...status, changed: false, pendingConfirmation: false });
+            return;
+          }
+          if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) {
+            throw workflowError(
+              'INSTRUCTIONS_CONFIRMATION_UNAVAILABLE',
+              'Rauhwpx Studio must be connected so the user can confirm the instruction proposal.',
+            );
+          }
+          if (record.pendingInstructionDraft) clearInstructionDraft(record, 'replaced');
+          const requestedBy = sock.agentLabel ?? record.agentSession?.agent ?? 'unknown';
+          const createdAt = Date.now();
+          const draft = {
+            id: crypto.randomUUID(),
+            confirmationToken: crypto.randomUUID(),
+            content: prepared.content,
+            expectedRevision: prepared.expectedRevision,
+            reason: typeof args.reason === 'string' ? args.reason : null,
+            requestedBy,
+            createdAt,
+            expiresAt: createdAt + AGENT_INSTRUCTION_DRAFT_TTL_MS,
+          };
+          record.pendingInstructionDraft = draft;
+          draft.expiryTimer = setTimeout(() => {
+            if (record.pendingInstructionDraft?.id === draft.id) {
+              clearInstructionDraft(record, 'expired');
+            }
+          }, AGENT_INSTRUCTION_DRAFT_TTL_MS);
+          draft.expiryTimer.unref?.();
+          if (!sendInstructionDraft(record)) {
+            record.pendingInstructionDraft = null;
+            throw workflowError(
+              'INSTRUCTIONS_CONFIRMATION_UNAVAILABLE',
+              'Rauhwpx Studio disconnected before the instruction proposal could be shown.',
+            );
+          }
           sendResult({
             ...status,
-            changed,
-            ...(args.reason ? { reason: args.reason } : {}),
+            changed: false,
+            pendingConfirmation: true,
+            draftId: draft.id,
+            expiresAt: new Date(draft.expiresAt).toISOString(),
+            ...(draft.reason ? { reason: draft.reason } : {}),
           });
-          if (changed) {
-            broadcastAgentInstructions(status, `agent:${sock.agentLabel ?? record.agentSession?.agent ?? 'unknown'}`);
-          }
-        }).catch((error) => sendError(error, 'INSTRUCTIONS_SAVE_FAILED'));
+        } catch (error) {
+          sendError(error, 'INSTRUCTIONS_DRAFT_FAILED');
+        }
         return;
       }
       if (definition.category === 'reference-read') {
@@ -2910,6 +3102,7 @@ httpServer.on('upgrade', (req, socket, head) => {
         status: agentInstructionsStore.snapshot(),
         changedBy: 'system',
       });
+      sendInstructionDraft(record, ws);
       const activeSession = record.agentSession;
       if (activeSession?.planning.latestPlan && activeSession.planning.phase === 'awaiting-approval') {
         sendJson(ws, {
@@ -3010,6 +3203,10 @@ httpServer.on('error', (err) => {
 let shutdownPromise = null;
 async function disposeRecord(record, reason) {
   record.disposed = true;
+  if (record.pendingInstructionDraft?.expiryTimer) {
+    clearTimeout(record.pendingInstructionDraft.expiryTimer);
+  }
+  record.pendingInstructionDraft = null;
   clearStudioReattachGrace(record);
   failAllPendingCalls(record, 'Hub session is shutting down');
   const backendExit = disposeSession(record);

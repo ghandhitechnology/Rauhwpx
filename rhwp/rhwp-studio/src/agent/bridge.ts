@@ -38,6 +38,7 @@ import {
 import type {
   AgentBridgeDeps,
   AgentBridgeOptions,
+  AgentInstructionsDraft,
   AgentInstructionsStatus,
   AgentEditingLease,
   AgentName,
@@ -165,6 +166,8 @@ export interface AgentBridge {
   requestWritingStyleStatus(): string;
   requestAgentInstructions(): Promise<AgentInstructionsStatus | null>;
   saveAgentInstructions(content: string, expectedRevision: number): Promise<AgentInstructionsStatus | null>;
+  confirmAgentInstructionsDraft(draft: AgentInstructionsDraft): Promise<AgentInstructionsStatus | null>;
+  rejectAgentInstructionsDraft(draft: AgentInstructionsDraft): Promise<boolean>;
   requestWritingStyleCatalog(refresh?: boolean): Promise<WritingStyleCatalog | null>;
   calibrateWritingStyle(input: {
     language: WritingStyleLanguage;
@@ -278,6 +281,30 @@ function readAgentInstructionsStatus(value: unknown): AgentInstructionsStatus | 
     revision,
     updatedAt: typeof item['updatedAt'] === 'string' ? item['updatedAt'] : null,
     maxChars,
+  };
+}
+
+function readAgentInstructionsDraft(value: unknown): AgentInstructionsDraft | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  const expectedRevision = Number(item['expectedRevision']);
+  if (typeof item['id'] !== 'string' || !item['id']
+    || typeof item['content'] !== 'string'
+    || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1
+    || (item['reason'] !== null && typeof item['reason'] !== 'string')
+    || typeof item['requestedBy'] !== 'string'
+    || typeof item['createdAt'] !== 'string' || !Number.isFinite(Date.parse(item['createdAt']))
+    || typeof item['expiresAt'] !== 'string' || !Number.isFinite(Date.parse(item['expiresAt']))
+    || typeof item['confirmationToken'] !== 'string' || !item['confirmationToken']) return null;
+  return {
+    id: item['id'],
+    content: item['content'],
+    expectedRevision,
+    reason: item['reason'] as string | null,
+    requestedBy: item['requestedBy'],
+    createdAt: item['createdAt'],
+    expiresAt: item['expiresAt'],
+    confirmationToken: item['confirmationToken'],
   };
 }
 
@@ -1478,6 +1505,25 @@ class AgentBridgeImpl implements AgentBridge {
         });
         break;
       }
+      case 'agent-instructions-draft': {
+        const draft = readAgentInstructionsDraft(msg.draft);
+        if (draft) this.emit({ type: 'agent-instructions-draft', draft });
+        break;
+      }
+      case 'agent-instructions-draft-cleared': {
+        const outcome = msg.outcome === 'confirmed'
+          || msg.outcome === 'rejected'
+          || msg.outcome === 'expired'
+          || msg.outcome === 'replaced'
+          || msg.outcome === 'stale'
+          ? msg.outcome
+          : null;
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, outcome === 'rejected');
+        if (typeof msg.draftId === 'string' && outcome) {
+          this.emit({ type: 'agent-instructions-draft-cleared', draftId: msg.draftId, outcome });
+        }
+        break;
+      }
       case 'agent-instructions-error': {
         if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
         const status = readAgentInstructionsStatus(msg.status);
@@ -2315,6 +2361,30 @@ class AgentBridgeImpl implements AgentBridge {
       { type: 'agent-instructions-save', content, expectedRevision },
       'agent-instructions-save',
     );
+  }
+
+  confirmAgentInstructionsDraft(
+    draft: AgentInstructionsDraft,
+  ): Promise<AgentInstructionsStatus | null> {
+    return this.request<AgentInstructionsStatus>(
+      {
+        type: 'agent-instructions-draft-confirm',
+        draftId: draft.id,
+        confirmationToken: draft.confirmationToken,
+      },
+      'agent-instructions-confirm',
+    );
+  }
+
+  rejectAgentInstructionsDraft(draft: AgentInstructionsDraft): Promise<boolean> {
+    return this.request<boolean>(
+      {
+        type: 'agent-instructions-draft-reject',
+        draftId: draft.id,
+        confirmationToken: draft.confirmationToken,
+      },
+      'agent-instructions-reject',
+    ).then((result) => result === true);
   }
 
   requestWritingStyleCatalog(refresh = false): Promise<WritingStyleCatalog | null> {
