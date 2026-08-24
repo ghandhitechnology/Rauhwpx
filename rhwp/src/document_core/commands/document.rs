@@ -15,7 +15,7 @@ use crate::renderer::page_layout::PageLayoutInfo;
 use crate::renderer::style_resolver::{resolve_styles, ResolvedStyleSet};
 use crate::renderer::{px_to_hwpunit, DEFAULT_DPI};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// HWP 내보내기 + 자기 재로드 검증 결과 (#178 Stage 6).
 ///
@@ -1705,6 +1705,7 @@ impl DocumentCore {
                     b"1".to_vec(),
                 ));
             }
+            Self::canonicalize_hwp5_bin_data_ids_for_hwpx_export(&mut doc);
             Self::materialize_hwp5_missing_linesegs_for_hwpx_export(&mut doc);
             serialize_validated_hwpx(&doc)
         } else {
@@ -1798,6 +1799,62 @@ impl DocumentCore {
             code,
             xml_path: warning.xml_path.clone(),
             message: warning.message.clone(),
+        }
+    }
+
+    /// HWP5의 위치 기반 BinData 참조를 HWPX manifest ID로 정규화한다.
+    fn canonicalize_hwp5_bin_data_ids_for_hwpx_export(document: &mut Document) {
+        // HWP5 그림 참조는 DocInfo BinData의 1-based 위치이고, BinDataContent.id는
+        // BINxxxx 스트림 번호다. HWPX는 manifest ID를 직접 참조하므로 위치 ID로
+        // 재번호화하지 않으면 storage 번호에 구멍이 있는 문서에서 다른 그림을 연다.
+        // Link는 content 배열에 없고 OLE는 storage id를 직접 참조하므로, 이 둘이
+        // 섞인 문서는 별도 typed remap 없이는 안전하게 정규화할 수 없다.
+        if document.doc_info.bin_data_list.is_empty()
+            || document.doc_info.bin_data_list.iter().any(|bin_data| {
+                bin_data.data_type != crate::model::bin_data::BinDataType::Embedding
+            })
+        {
+            return;
+        }
+
+        let reference_id_by_storage: HashMap<u16, u16> = document
+            .doc_info
+            .bin_data_list
+            .iter()
+            .enumerate()
+            .filter(|(_, bin_data)| bin_data.storage_id != 0)
+            .map(|(index, bin_data)| (bin_data.storage_id, (index + 1) as u16))
+            .collect();
+        let regular_content_count = document
+            .bin_data_content
+            .iter()
+            .filter(|content| !(content.extension == "ooxml_chart" && content.id > 60000))
+            .count();
+        let regular_content_ids: HashSet<u16> = document
+            .bin_data_content
+            .iter()
+            .filter(|content| !(content.extension == "ooxml_chart" && content.id > 60000))
+            .map(|content| content.id)
+            .collect();
+        if reference_id_by_storage.len() != document.doc_info.bin_data_list.len()
+            || regular_content_count != document.doc_info.bin_data_list.len()
+            || regular_content_ids.len() != regular_content_count
+            || document.bin_data_content.iter().any(|content| {
+                !(content.extension == "ooxml_chart" && content.id > 60000)
+                    && !reference_id_by_storage.contains_key(&content.id)
+            })
+        {
+            return;
+        }
+
+        for content in &mut document.bin_data_content {
+            if content.extension == "ooxml_chart" && content.id > 60000 {
+                continue;
+            }
+            content.id = reference_id_by_storage[&content.id];
+        }
+        for (index, bin_data) in document.doc_info.bin_data_list.iter_mut().enumerate() {
+            bin_data.storage_id = (index + 1) as u16;
         }
     }
 
@@ -2362,6 +2419,98 @@ mod validate_linesegs_tests {
     use super::*;
     use crate::model::document::{Document, Section};
     use crate::model::paragraph::{LineSeg, Paragraph};
+
+    #[test]
+    fn hwpx_image_id_canonicalization_skips_link_and_ole_documents() {
+        use crate::model::bin_data::{BinData, BinDataContent, BinDataType};
+
+        let mut linked = Document::default();
+        linked.doc_info.bin_data_list = vec![
+            BinData {
+                data_type: BinDataType::Link,
+                storage_id: 0,
+                ..Default::default()
+            },
+            BinData {
+                data_type: BinDataType::Embedding,
+                storage_id: 7,
+                ..Default::default()
+            },
+        ];
+        linked.bin_data_content.push(BinDataContent {
+            id: 7,
+            data: vec![1].into(),
+            extension: "png".to_string(),
+        });
+        DocumentCore::canonicalize_hwp5_bin_data_ids_for_hwpx_export(&mut linked);
+        assert_eq!(linked.bin_data_content[0].id, 7);
+        assert_eq!(linked.doc_info.bin_data_list[1].storage_id, 7);
+
+        let mut ole = Document::default();
+        ole.doc_info.bin_data_list.push(BinData {
+            data_type: BinDataType::Storage,
+            storage_id: 9,
+            ..Default::default()
+        });
+        ole.bin_data_content.push(BinDataContent {
+            id: 9,
+            data: vec![2].into(),
+            extension: "OLE".to_string(),
+        });
+        DocumentCore::canonicalize_hwp5_bin_data_ids_for_hwpx_export(&mut ole);
+        assert_eq!(ole.bin_data_content[0].id, 9);
+        assert_eq!(ole.doc_info.bin_data_list[0].storage_id, 9);
+    }
+
+    #[test]
+    fn hwpx_image_id_canonicalization_skips_duplicate_content_ids() {
+        use crate::model::bin_data::{BinData, BinDataContent, BinDataType};
+
+        let mut document = Document::default();
+        document.doc_info.bin_data_list = vec![
+            BinData {
+                data_type: BinDataType::Embedding,
+                storage_id: 2,
+                ..Default::default()
+            },
+            BinData {
+                data_type: BinDataType::Embedding,
+                storage_id: 3,
+                ..Default::default()
+            },
+        ];
+        document.bin_data_content = vec![
+            BinDataContent {
+                id: 2,
+                data: vec![1].into(),
+                extension: "png".to_string(),
+            },
+            BinDataContent {
+                id: 2,
+                data: vec![2].into(),
+                extension: "png".to_string(),
+            },
+        ];
+
+        DocumentCore::canonicalize_hwp5_bin_data_ids_for_hwpx_export(&mut document);
+        assert_eq!(
+            document
+                .bin_data_content
+                .iter()
+                .map(|content| content.id)
+                .collect::<Vec<_>>(),
+            vec![2, 2]
+        );
+        assert_eq!(
+            document
+                .doc_info
+                .bin_data_list
+                .iter()
+                .map(|bin_data| bin_data.storage_id)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
 
     fn document_with_equation(script: &str) -> Document {
         let mut paragraph = Paragraph::default();
