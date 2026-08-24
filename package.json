@@ -49,7 +49,8 @@
         "ext": [
           "hwp",
           "hwpx",
-          "hml"
+          "hml",
+          "rhwpx"
         ],
         "name": "Hangul document",
         "description": "Hangul word-processing document",
@@ -90,6 +91,17 @@
             "LSItemContentTypes": [
               "com.hataewook.rauhwpx.hwpx-document"
             ]
+          },
+          {
+            "CFBundleTypeExtensions": [
+              "rhwpx"
+            ],
+            "CFBundleTypeName": "RauHWPX history bundle",
+            "CFBundleTypeRole": "Editor",
+            "LSHandlerRank": "Default",
+            "LSItemContentTypes": [
+              "com.hataewook.rauhwpx.history-bundle"
+            ]
           }
         ],
         "UTExportedTypeDeclarations": [
@@ -103,6 +115,19 @@
             "UTTypeTagSpecification": {
               "public.filename-extension": [
                 "hwpx"
+              ]
+            }
+          },
+          {
+            "UTTypeConformsTo": [
+              "public.content",
+              "public.data"
+            ],
+            "UTTypeDescription": "RauHWPX history bundle",
+            "UTTypeIdentifier": "com.hataewook.rauhwpx.history-bundle",
+            "UTTypeTagSpecification": {
+              "public.filename-extension": [
+                "rhwpx"
               ]
             }
           }

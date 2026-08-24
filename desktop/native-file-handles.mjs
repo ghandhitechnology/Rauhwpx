@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { open, opendir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, normalize, win32 } from 'node:path';
 
-const SUPPORTED_EXTENSIONS = new Set(['.hwp', '.hwpx', '.hml']);
+const SUPPORTED_EXTENSIONS = new Set(['.hwp', '.hwpx', '.hml', '.rhwpx']);
 const NEARBY_DIRECTORY_CAP = 12;
 const NEARBY_FILE_CAP = 8;
 const NEARBY_DIR_ENTRY_CAP = 256;
@@ -138,7 +138,7 @@ export function validateNativeDocumentPath(filePath, { platform = process.platfo
     throw new Error('Native document paths must be absolute');
   }
   if (!SUPPORTED_EXTENSIONS.has(extname(filePath).toLowerCase())) {
-    throw new Error('Only HWP, HWPX, and HML files can be opened');
+    throw new Error('Only HWP, HWPX, HML, and RHWPX files can be opened');
   }
   return filePath;
 }

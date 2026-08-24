@@ -23,6 +23,7 @@ export type CommitReason =
   | 'initial'
   | 'manual'
   | 'save'
+  | 'export'
   | 'agent'
   | 'pre-restore'
   | 'pre-switch'

@@ -93,6 +93,7 @@ export const HWP_DOCUMENT_ACCEPT: Record<string, string[]> = {
   'application/hwp+zip': ['.hwpx'],
   'application/xml': ['.hml'],
   'text/xml': ['.hml'],
+  'application/vnd.rauhwpx.history': ['.rhwpx'],
 };
 
 const HWP_OPEN_PICKER_TYPES: FilePickerType[] = [{
@@ -109,7 +110,7 @@ function isAbortError(error: unknown): boolean {
 }
 
 export function isSupportedDocumentFileName(fileName: string): boolean {
-  return /\.(hwp|hwpx|hml)$/i.test(fileName.trim());
+  return /\.(hwp|hwpx|hml|rhwpx)$/i.test(fileName.trim());
 }
 
 export function canUseOpenFilePicker(windowLike: FileSystemWindowLike): boolean {
@@ -182,7 +183,7 @@ export function captureDroppedFileHandle(
   );
 }
 
-async function writeBlobToHandle(
+export async function writeBlobToHandle(
   handle: FileSystemFileHandleLike,
   blob: Blob,
   validateTarget?: SaveDocumentOptions['validateTarget'],

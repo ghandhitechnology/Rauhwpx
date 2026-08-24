@@ -31,9 +31,11 @@ import {
   VersionGraphStore,
   branchName,
   commitId,
+  createPortableHistoryBundle as encodePortableHistoryBundle,
   documentId,
   layoutCommitGraph,
   orderBranchHeadFrontier,
+  portableHistoryFileName,
   shelfId,
   mergeDraftId,
   tagName,
@@ -70,7 +72,7 @@ const PAGE_SIZE = 100;
 const ACTIVE_BRANCH_PREFIX = 'rhwp-versions-active-branch-v1:';
 const AI_TITLES_KEY = 'rhwp-versions-ai-titles-v1';
 
-type CheckpointReason = 'manual' | 'save' | 'agent' | 'pre-restore' | 'pre-switch' | 'pre-merge' | 'merge' | 'restore' | 'adopt';
+type CheckpointReason = 'manual' | 'save' | 'export' | 'agent' | 'pre-restore' | 'pre-switch' | 'pre-merge' | 'merge' | 'restore' | 'adopt';
 
 interface VersionControllerDeps {
   store?: VersionGraphStore;
@@ -179,7 +181,7 @@ function readActiveBranch(id: string): string | null {
   }
 }
 
-function persistActiveBranch(id: string, branch: string): void {
+export function persistActiveBranch(id: string, branch: string): void {
   try {
     localStorage.setItem(branchStorageKey(id), branch);
   } catch {
@@ -942,6 +944,71 @@ export class DocumentVersionController implements VersionManagerController {
       const repository = this.#requireRepository();
       await this.#store.collectGarbage(repository.id, repository.revision);
       await this.#refreshData(true);
+    });
+  }
+
+  async createPortableHistoryBundle(): Promise<{ bytes: Uint8Array; suggestedName: string }> {
+    return this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation();
+      const id = this.#getDocumentId();
+      if (!id) throw new VersionError('SAVE_REQUIRED', 'A saved document ID is required');
+      const capture = captureVersionSnapshot(this.#wasm);
+      if (!this.#repository) {
+        const workspace = this.#captureWorkspaceToken();
+        const mergeManifestEntries = await this.#mergeWorker.buildDocumentManifest(capture.bytes);
+        this.#assertWorkspaceToken(workspace);
+        const analysis = analyzeVersionDiff(null, capture.compareSnapshot);
+        const createdAt = Date.now();
+        const result = await this.#store.createRepository({
+          documentId: documentId(id),
+          initialBranch: branchName('main'),
+          lastSavedFingerprint: capture.fingerprint,
+          initial: {
+            bytes: capture.bytes,
+            compareSnapshot: capture.compareSnapshot,
+            contentFingerprint: capture.fingerprint,
+            title: timestampTitle(createdAt),
+            titleOrigin: 'timestamp',
+            titleRevision: 0,
+            author: { kind: 'user', label: '사용자' },
+            stats: analysis.stats,
+            createdAt,
+            mergeManifestEntries,
+          },
+        });
+        this.#assertWorkspaceToken(workspace, { editor: false, repository: false });
+        this.#repository = result.repository;
+        this.#activeBranch = result.branch.name;
+        this.#activeBranches.set(id, result.branch.name);
+        persistActiveBranch(id, result.branch.name);
+        await this.#refreshData(true);
+      } else {
+        const branch = this.#requireActiveBranch();
+        const head = await this.#requireCommit(branch.target);
+        if (capture.fingerprint !== head.contentFingerprint) {
+          await this.#createCheckpoint({ reason: 'export' }, capture);
+        }
+      }
+
+      const repository = this.#requireRepository();
+      const activeBranch = this.#requireActiveBranch();
+      const head = await this.#requireCommit(activeBranch.target);
+      const snapshot = await this.#store.exportRepositorySnapshot(repository.id);
+      const sourceFormat = this.#wasm.getSourceFormat();
+      if (sourceFormat !== 'hwp' && sourceFormat !== 'hwpx' && sourceFormat !== 'hml') {
+        throw new VersionError('VERSION_STORE_FAILED', 'The document format cannot be bundled');
+      }
+      return {
+        bytes: encodePortableHistoryBundle({
+          documentFileName: this.#wasm.fileName,
+          sourceFormat,
+          activeBranch: activeBranch.name,
+          currentBlobId: head.blobId,
+          snapshot,
+        }),
+        suggestedName: portableHistoryFileName(this.#wasm.fileName),
+      };
     });
   }
 

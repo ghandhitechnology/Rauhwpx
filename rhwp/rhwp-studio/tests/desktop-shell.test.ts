@@ -74,10 +74,12 @@ test('launch routing accepts only supported document paths', () => {
     '/Applications/Rauhwpx',
     '--flag',
     'draft.HWPX',
+    'shared.rhwpx',
     'notes.txt',
     'legacy.hml',
   ], { cwd: workDir }), [
     path.join(workDir, 'draft.HWPX'),
+    path.join(workDir, 'shared.rhwpx'),
     path.join(workDir, 'legacy.hml'),
   ]);
   assert.deepEqual(launchRequest({ openFiles: ['/tmp/a.hwp'], source: 'open-file' }), {
@@ -127,6 +129,10 @@ test('desktop packages register as an HWPX editor with the operating system', ()
     UTTypeIdentifier?: string;
   }) => type.UTTypeIdentifier === 'com.hataewook.rauhwpx.hwpx-document');
   assert.deepEqual(exportedHwpxType?.UTTypeTagSpecification['public.filename-extension'], ['hwpx']);
+  const exportedHistoryType = macInfo.UTExportedTypeDeclarations.find((type: {
+    UTTypeIdentifier?: string;
+  }) => type.UTTypeIdentifier === 'com.hataewook.rauhwpx.history-bundle');
+  assert.deepEqual(exportedHistoryType?.UTTypeTagSpecification['public.filename-extension'], ['rhwpx']);
 
   // electron-builder only installs NSIS file associations for per-machine installs.
   assert.equal(rootPackage.build.nsis.perMachine, true);
@@ -259,7 +265,9 @@ test('one failed startup launch does not abort the remaining launches', () => {
 });
 
 test('desktop package registers supported document associations without bundling runtime data', () => {
-  assert.deepEqual(rootPackage.build.fileAssociations[0].ext, ['hwp', 'hwpx', 'hml']);
+  assert.deepEqual(rootPackage.build.fileAssociations[0].ext, ['hwp', 'hwpx', 'hml', 'rhwpx']);
+  assert.match(desktopMain, /desktop:save-portable-history-file/);
+  assert.match(desktopMain, /RauHWPX history bundle/);
   assert.ok(rootPackage.build.asarUnpack.includes('rhwp/rhwp-agent/**'));
   assert.ok(rootPackage.build.files.every((entry: string) => !/runtime|launch-work/.test(entry)));
 });

@@ -14,6 +14,10 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
     return path ? ipcRenderer.invoke('desktop:claim-native-dropped-file', path) : null;
   },
   pickNativeSaveFile: (options) => ipcRenderer.invoke('desktop:pick-native-save-file', options),
+  savePortableHistoryFile: (payload) => ipcRenderer.invoke(
+    'desktop:save-portable-history-file',
+    payload,
+  ),
   releaseNativeFile: (handleId) => ipcRenderer.invoke('desktop:release-native-file', handleId),
   readNativeFile: (handleId) => ipcRenderer.invoke('desktop:native-file-read', handleId),
   getNativeFileSourcePath: (handleId) => ipcRenderer.invoke(

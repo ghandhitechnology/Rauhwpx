@@ -96,7 +96,13 @@ import { initAgentBridge, type AgentBridge } from './agent/bridge.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
 import { AGENT_LABEL } from './ui/agent-sidebar/providers.ts';
 import { initInlinePrompt } from './agent/inline-prompt.ts';
-import { DocumentVersionController } from './versioning/controller.ts';
+import { DocumentVersionController, persistActiveBranch } from './versioning/controller.ts';
+import {
+  VersionGraphStore,
+  documentId as versionDocumentId,
+  isPortableHistoryFileName,
+  openPortableHistoryBundle,
+} from './versioning/index.ts';
 import type { AgentEditingLease } from './agent/types.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
 
@@ -280,6 +286,10 @@ const commandServices: CommandServices = {
   pickOpenHandle: pickDesktopNativeOpenFile,
   pickSaveHandle: pickDesktopNativeSaveFile,
   validateSaveHandle: reserveSaveHandleForWrite,
+  createPortableHistoryBundle: async () => {
+    if (!versionControllerRef) throw new Error('버전 기록 서비스를 사용할 수 없습니다.');
+    return versionControllerRef.createPortableHistoryBundle();
+  },
   setEditMode,
   getPendingAgentEdits: () => {
     const pending = agentBridgeRef?.pendingEdits;
@@ -646,7 +656,7 @@ async function initialize(): Promise<void> {
         eventBus.emit('open-document-bytes', payload);
       },
       notifyUnsupportedFile(fileName) {
-        showLoadError(new Error(`지원하지 않는 파일 형식입니다: ${fileName}. HWP/HWPX/HML 파일만 지원합니다.`));
+        showLoadError(new Error(`지원하지 않는 파일 형식입니다: ${fileName}. HWP/HWPX/HML/RHWPX 파일만 지원합니다.`));
       },
       notifyError(error) {
         showLoadError(error);
@@ -782,7 +792,7 @@ function setupFileInput(): void {
     const file = input.files?.[0];
     if (!file) return;
     if (!isSupportedDocumentFileName(file.name)) {
-      alert('HWP/HWPX/HML 파일만 지원합니다.');
+      alert('HWP/HWPX/HML/RHWPX 파일만 지원합니다.');
       fileInput.value = '';
       return;
     }
@@ -825,7 +835,7 @@ function setupFileInput(): void {
     const isImage = imageExts.some(ext => dropName.endsWith(ext));
     const isDoc = isSupportedDocumentFileName(dropName);
     if (!isImage && !isDoc) {
-      alert('HWP/HWPX/HML 파일 또는 이미지 파일만 지원합니다.');
+      alert('HWP/HWPX/HML/RHWPX 파일 또는 이미지 파일만 지원합니다.');
       return;
     }
 
@@ -886,7 +896,7 @@ function setupFileInput(): void {
       return;
     }
 
-    // HWP/HWPX/HML — loadFile 내부 unsaved 가드는 드롭 확인 이후에 동작한다.
+    // HWP/HWPX/HML/RHWPX — loadFile 내부 unsaved 가드는 드롭 확인 이후에 동작한다.
     let fileHandle: FileSystemFileHandleLike | null;
     try {
       fileHandle = await droppedFileHandle;
@@ -1584,6 +1594,50 @@ async function openDocumentBytes(data: OpenDocumentBytesEvent) {
     return false;
   }
   try {
+    if (isPortableHistoryFileName(data.fileName)) {
+      const bundle = openPortableHistoryBundle(data.bytes);
+      const probe = new WasmBridge();
+      try {
+        await probe.initialize();
+        probe.loadDocument(bundle.currentDocumentBytes, bundle.documentFileName);
+      } finally {
+        probe.releaseDocument();
+      }
+      const store = new VersionGraphStore();
+      const imported = await store.importRepositorySnapshot(bundle.snapshot);
+      try {
+        await loadBytes(
+          bundle.currentDocumentBytes,
+          bundle.documentFileName,
+          null,
+          performance.now(),
+          {
+            grant: {
+              kind: 'verified',
+              documentId: bundle.snapshot.repository.documentId,
+            },
+          },
+        );
+        persistActiveBranch(bundle.snapshot.repository.documentId, bundle.activeBranch);
+        await versionControllerRef?.refresh().catch((error) => {
+          console.warn('[versioning] 가져온 기록 새로고침 실패:', error);
+        });
+      } catch (error) {
+        if (imported.imported) {
+          await store.removeImportedRepository(
+            bundle.snapshot.repository.id,
+            versionDocumentId(bundle.snapshot.repository.documentId),
+            bundle.snapshot.repository.revision,
+          ).catch(() => undefined);
+        }
+        throw error;
+      } finally {
+        await store.close();
+      }
+      await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
+      showToast({ message: '문서와 전체 버전 기록을 불러왔습니다.', durationMs: 3500 });
+      return true;
+    }
     await loadBytes(data.bytes, data.fileName, data.fileHandle, performance.now(), {
       grant: data.grant,
     });
