@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 73개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 73);
+test('도구는 정확히 75개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 75);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -50,7 +50,9 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 63);
+  assert.equal(direct.size, 65);
+  assert.ok(direct.has('read_agent_instructions'));
+  assert.ok(direct.has('update_agent_instructions'));
   assert.ok(direct.has('materialize_document_snapshot'));
   assert.ok(direct.has('publish_artifact'));
   assert.ok(direct.has('apply_edits'));
@@ -81,6 +83,8 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(planning.has('present_implementation_plan'));
   assert.ok(planning.has('read_reference_chunk'));
   assert.ok(planning.has('read_reference_image'));
+  assert.ok(planning.has('read_agent_instructions'));
+  assert.ok(!planning.has('update_agent_instructions'));
   assert.ok(!planning.has('insert_text'));
 
   const implementing = new Set(filterToolDefinitions('implementing').map((definition) => definition.name));
@@ -100,6 +104,20 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
     'update_copy_layout_job',
     'complete_copy_layout_job',
   ]);
+});
+
+test('app-only AGENTS.md tools separate reads from bounded revision-checked writes', () => {
+  const read = byName.get('read_agent_instructions');
+  const update = byName.get('update_agent_instructions');
+  assert.equal(read?.category, 'instruction-read');
+  assert.equal(update?.category, 'instruction-write');
+  assert.deepEqual(Object.keys(read?.shape ?? {}), []);
+  assert.ok(update?.shape.content.safeParse('keep answers concise').success);
+  assert.ok(!update?.shape.content.safeParse('x'.repeat(30_001)).success);
+  assert.ok(update?.shape.expectedRevision.safeParse(1).success);
+  assert.ok(!update?.shape.expectedRevision.safeParse(0).success);
+  assert.match(update?.description ?? '', /one-off task details/);
+  assert.match(read?.description ?? '', /outside this app/);
 });
 
 test('template tools separate read-only inspection from pending document writes', () => {

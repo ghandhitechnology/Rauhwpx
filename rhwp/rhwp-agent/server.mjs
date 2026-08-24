@@ -15,6 +15,7 @@ import { generateChatTitle } from './agents/title.mjs';
 import { SkillRegistry } from './skills.mjs';
 import { generateSkillDraft } from './skill-generator.mjs';
 import { WritingStyleStore, assertWritingStyleAppendCompatible } from './writing-style.mjs';
+import { AgentInstructionsStore } from './agent-instructions.mjs';
 import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS } from './tools.mjs';
@@ -132,6 +133,7 @@ async function findSourceCodexAuthPath() {
 }
 let sourceCodexAuthPath = await findSourceCodexAuthPath();
 const writingStyleStore = await new WritingStyleStore().init();
+const agentInstructionsStore = await new AgentInstructionsStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
 const PI_ROOT = defaultPiRoot();
 const openRouter = createOpenRouter({ cacheDir: PI_ROOT });
@@ -253,6 +255,10 @@ function hasAgentSessions() {
 
 function broadcastToStudios(message) {
   for (const record of sessions.values()) sendJson(record.studioSocket, message);
+}
+
+function broadcastAgentInstructions(status, changedBy) {
+  broadcastToStudios({ v: 1, type: 'agent-instructions', status, changedBy });
 }
 
 function refreshSessionCredentials(agent) {
@@ -764,7 +770,9 @@ function drainTemplateCompletion(record) {
   const [entry] = record.pendingTemplateCompletions.splice(index, 1);
   activeSession.status = 'running';
   try {
-    activeSession.backend.sendUserMessage(buildCopyLayoutCompletionPrompt(entry.result));
+    activeSession.backend.sendUserMessage(addAgentInstructionsContext(
+      buildCopyLayoutCompletionPrompt(entry.result),
+    ));
   } catch (error) {
     activeSession.status = 'idle';
     record.pendingTemplateCompletions.splice(index, 0, entry);
@@ -1057,6 +1065,10 @@ function addReferenceContext(activeSession, query, prompt, messageAttachments = 
   }
 }
 
+function addAgentInstructionsContext(prompt) {
+  return `${agentInstructionsStore.promptBlock()}\n\n${prompt}`;
+}
+
 function addTemplateContext(record, activeSession, prompt) {
   if (!activeSession?.activeTemplateId) return prompt;
   try {
@@ -1102,7 +1114,7 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
   })
     .then((prompt) => {
       if (record.agentSession !== activeSession) throw new Error('Agent session changed before the message was dispatched');
-      activeSession.backend.sendUserMessage(addReopenedChatHistory(
+      activeSession.backend.sendUserMessage(addAgentInstructionsContext(addReopenedChatHistory(
         activeSession,
         addActiveDocumentContext(
           activeSession,
@@ -1112,7 +1124,7 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
             addReferenceContext(activeSession, msg.text, prompt, messageAttachments),
           ),
         ),
-      ));
+      )));
     })
     .catch((e) => {
       if (record.agentSession === activeSession) activeSession.status = 'idle';
@@ -1319,7 +1331,7 @@ async function approveImplementationPlan(record, sock, msg) {
     });
     activeSession.status = 'running';
     const approvedPrompt = buildApprovedPlanPrompt(transition.approvedPlan);
-    activeSession.backend.sendUserMessage(addTemplateContext(
+    activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
       record,
       activeSession,
       addReferenceContext(
@@ -1327,7 +1339,7 @@ async function approveImplementationPlan(record, sock, msg) {
         JSON.stringify(transition.approvedPlan.plan),
         approvedPrompt,
       ),
-    ));
+    )));
   } catch (error) {
     if (record.agentSession === activeSession && activeSession.planning.phase === 'switching') {
       activeSession.planning.failSwitch(transition.approvedPlan.planId);
@@ -1364,11 +1376,11 @@ async function requestImplementationPlanChanges(record, sock, msg) {
         'Return to discovery: inspect the affected current state and evaluate the feedback. If it is ambiguous or changes an assumption, discuss it with the user and ask one focused question in normal chat instead of immediately presenting a replacement. If it is already concrete, do not invent a question; follow the planning checkpoint and presentation rules before presenting a complete replacement.',
         `Feedback: ${msg.feedback.trim()}`,
       ].join('\n\n');
-      activeSession.backend.sendUserMessage(addTemplateContext(
+      activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
         record,
         activeSession,
         addReferenceContext(activeSession, msg.feedback, revisionPrompt),
-      ));
+      )));
     }
   } catch (error) {
     if (record.agentSession === activeSession) activeSession.status = 'idle';
@@ -1581,6 +1593,38 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'templates-list': {
       sendJson(sock, { v: 1, type: 'templates-catalog', ...templateStore.list() });
+      return;
+    }
+    case 'agent-instructions-request': {
+      sendJson(sock, {
+        v: 1,
+        type: 'agent-instructions',
+        requestId: msg.requestId ?? null,
+        status: agentInstructionsStore.snapshot(),
+        changedBy: 'system',
+      });
+      return;
+    }
+    case 'agent-instructions-save': {
+      void agentInstructionsStore.update(msg.content, {
+        expectedRevision: Number(msg.expectedRevision),
+      }).then((status) => {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions',
+          requestId: msg.requestId ?? null,
+          status,
+          changedBy: 'user',
+        });
+        broadcastAgentInstructions(status, 'user');
+      }).catch((error) => sendJson(sock, {
+        v: 1,
+        type: 'agent-instructions-error',
+        requestId: msg.requestId ?? null,
+        code: error?.code ?? 'INSTRUCTIONS_SAVE_FAILED',
+        message: String(error?.message ?? error),
+        status: agentInstructionsStore.snapshot(),
+      }));
       return;
     }
     case 'chat-permission-set': {
@@ -2290,6 +2334,27 @@ function handleMcpMessage(record, sock, msg) {
           .catch((error) => sendError(error, 'TEMPLATE_REGISTER_FAILED'));
         return;
       }
+      if (tool === 'read_agent_instructions') {
+        sendResult(agentInstructionsStore.snapshot());
+        return;
+      }
+      if (tool === 'update_agent_instructions') {
+        const beforeRevision = agentInstructionsStore.snapshot().revision;
+        void agentInstructionsStore.update(args.content, {
+          expectedRevision: args.expectedRevision,
+        }).then((status) => {
+          const changed = status.revision !== beforeRevision;
+          sendResult({
+            ...status,
+            changed,
+            ...(args.reason ? { reason: args.reason } : {}),
+          });
+          if (changed) {
+            broadcastAgentInstructions(status, `agent:${sock.agentLabel ?? record.agentSession?.agent ?? 'unknown'}`);
+          }
+        }).catch((error) => sendError(error, 'INSTRUCTIONS_SAVE_FAILED'));
+        return;
+      }
       if (definition.category === 'reference-read') {
         void executeReferenceTool({ tool, args, store: referenceStore, session: record.agentSession })
           .then(({ handled, result }) => {
@@ -2838,6 +2903,12 @@ httpServer.on('upgrade', (req, socket, head) => {
         launchId: LAUNCH_ID,
         hubSessionId: record.sessionId,
         session: sessionInfo(record),
+      });
+      sendJson(ws, {
+        v: 1,
+        type: 'agent-instructions',
+        status: agentInstructionsStore.snapshot(),
+        changedBy: 'system',
       });
       const activeSession = record.agentSession;
       if (activeSession?.planning.latestPlan && activeSession.planning.phase === 'awaiting-approval') {

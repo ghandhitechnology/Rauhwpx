@@ -233,6 +233,8 @@ test('awaiting approval and switching remain read-only regardless of full profil
 
 test('phase prompts separate planning from approved implementation', () => {
   const planning = systemBriefFor({ workflow: 'plan', phase: 'planning' });
+  assert.match(planning, /app-only AGENTS\.md/);
+  assert.match(planning, /update_agent_instructions/);
   assert.match(planning, /patient brainstorming partner/);
   assert.match(planning, /Do not edit the local filesystem or live document/);
   assert.match(planning, /Do not present a plan in the first planning response/);

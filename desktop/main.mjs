@@ -188,6 +188,7 @@ class AgentHubOwner {
         RHWP_OWNER_PID: String(process.pid),
         RHWP_RUNTIME_DIR: this.runtimeDir,
         RHWP_WORK_DIR: this.workDir,
+        RHWP_AGENT_INSTRUCTIONS_DIR: join(app.getPath('userData'), 'agent-instructions'),
         RHWP_OWN_RUNTIME_DIR: '1',
         RHWP_OWN_WORK_DIR: '1',
         RHWP_SECRET_BROKER: 'ipc',

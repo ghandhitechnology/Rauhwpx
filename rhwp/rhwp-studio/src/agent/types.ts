@@ -109,6 +109,16 @@ export interface TemplateCatalog {
   templates: DocumentTemplate[];
 }
 
+/** Rauhwpx가 별도 보관하고 이 앱의 채팅에만 주입하는 AGENTS.md. */
+export interface AgentInstructionsStatus {
+  fileName: 'AGENTS.md';
+  content: string;
+  revision: number;
+  updatedAt: string | null;
+  maxChars: number;
+  scope: 'rauhwpx-app';
+}
+
 export interface StructuredPlanStep {
   title: string;
   details: string;
@@ -560,6 +570,8 @@ export type SidebarEvent =
   | { type: 'chat-stopped' }
   | { type: 'reference-status'; messageId: string; attachments: MessageReferenceStatus[] }
   | { type: 'templates-catalog'; catalog: TemplateCatalog; change?: { type: 'added' | 'renamed' | 'replaced' | 'deleted'; template: DocumentTemplate } }
+  | { type: 'agent-instructions'; status: AgentInstructionsStatus; changedBy: string }
+  | { type: 'agent-instructions-error'; code: string; message: string; status?: AgentInstructionsStatus }
   | { type: 'chat-template-changed'; template: DocumentTemplate | null; reason?: string }
   | { type: 'permission-changed'; permissionProfile: PermissionProfile }
   | ({ type: 'workflow-changed' } & AgentWorkflowState)

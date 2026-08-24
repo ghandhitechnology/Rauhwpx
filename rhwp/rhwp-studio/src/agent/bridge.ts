@@ -38,6 +38,7 @@ import {
 import type {
   AgentBridgeDeps,
   AgentBridgeOptions,
+  AgentInstructionsStatus,
   AgentEditingLease,
   AgentName,
   AgentAuthMethod,
@@ -162,6 +163,8 @@ export interface AgentBridge {
   deleteSkill(name: string): string;
   generateSkillDraft(input: { goal: string; triggerExamples?: string; nonTriggerExamples?: string; resourceNotes?: string; existingSkill?: string }): string;
   requestWritingStyleStatus(): string;
+  requestAgentInstructions(): Promise<AgentInstructionsStatus | null>;
+  saveAgentInstructions(content: string, expectedRevision: number): Promise<AgentInstructionsStatus | null>;
   requestWritingStyleCatalog(refresh?: boolean): Promise<WritingStyleCatalog | null>;
   calibrateWritingStyle(input: {
     language: WritingStyleLanguage;
@@ -256,6 +259,25 @@ function readDocumentTemplate(value: unknown): DocumentTemplate | null {
     revision: Number(item['revision']),
     createdAt: String(item['createdAt'] ?? ''),
     updatedAt: String(item['updatedAt'] ?? ''),
+  };
+}
+
+function readAgentInstructionsStatus(value: unknown): AgentInstructionsStatus | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  const revision = Number(item['revision']);
+  const maxChars = Number(item['maxChars']);
+  if (item['fileName'] !== 'AGENTS.md' || item['scope'] !== 'rauhwpx-app'
+    || typeof item['content'] !== 'string'
+    || !Number.isSafeInteger(revision) || revision < 1
+    || !Number.isSafeInteger(maxChars) || maxChars < 1) return null;
+  return {
+    fileName: 'AGENTS.md',
+    scope: 'rauhwpx-app',
+    content: item['content'],
+    revision,
+    updatedAt: typeof item['updatedAt'] === 'string' ? item['updatedAt'] : null,
+    maxChars,
   };
 }
 
@@ -1445,6 +1467,28 @@ class AgentBridgeImpl implements AgentBridge {
         });
         break;
       }
+      case 'agent-instructions': {
+        const status = readAgentInstructionsStatus(msg.status);
+        if (!status) break;
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, status);
+        this.emit({
+          type: 'agent-instructions',
+          status,
+          changedBy: typeof msg.changedBy === 'string' ? msg.changedBy : 'system',
+        });
+        break;
+      }
+      case 'agent-instructions-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        const status = readAgentInstructionsStatus(msg.status);
+        this.emit({
+          type: 'agent-instructions-error',
+          code: typeof msg.code === 'string' ? msg.code : 'INSTRUCTIONS_ERROR',
+          message: typeof msg.message === 'string' ? msg.message : 'AGENTS.md request failed',
+          ...(status ? { status } : {}),
+        });
+        break;
+      }
       case 'chat-template-changed': {
         this.activeTemplate = readDocumentTemplate(msg.template);
         this.activeTemplateId = this.activeTemplate?.id ?? null;
@@ -2254,6 +2298,23 @@ class AgentBridgeImpl implements AgentBridge {
     const requestId = `writing-style-status-${++this.requestSeq}`;
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'writing-style-status-request', requestId });
     return requestId;
+  }
+
+  requestAgentInstructions(): Promise<AgentInstructionsStatus | null> {
+    return this.request<AgentInstructionsStatus>(
+      { type: 'agent-instructions-request' },
+      'agent-instructions',
+    );
+  }
+
+  saveAgentInstructions(
+    content: string,
+    expectedRevision: number,
+  ): Promise<AgentInstructionsStatus | null> {
+    return this.request<AgentInstructionsStatus>(
+      { type: 'agent-instructions-save', content, expectedRevision },
+      'agent-instructions-save',
+    );
   }
 
   requestWritingStyleCatalog(refresh = false): Promise<WritingStyleCatalog | null> {
