@@ -1135,7 +1135,10 @@ export class CursorState {
 
   /** 셀 선택 모드에 진입한다. 현재 셀의 row/col이 anchor/focus가 된다. */
   enterCellSelectionMode(reason: CellSelectionReason = 'manual'): boolean {
-    if (!this.isInCell() || this.isInTextBox()) return false;
+    if (!this.isInCell()) return false;
+    // cellPath depth 1인 글상자 본문은 표 셀이 아니다. 반면 depth 2 이상은
+    // 글상자 안에 중첩된 실제 표 셀이므로 경로 기반 셀 선택을 허용한다.
+    if (this.isInTextBox() && (this.position.cellPath?.length ?? 0) < 2) return false;
     const { sectionIndex: sec, parentParaIndex: ppi, controlIndex: ci, cellIndex: cei, cellPath } = this.position;
     if (ppi === undefined || ci === undefined || cei === undefined) return false;
 
