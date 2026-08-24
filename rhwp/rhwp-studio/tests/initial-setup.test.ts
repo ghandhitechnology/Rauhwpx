@@ -140,7 +140,7 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(setup, /보정 시작/);
   assert.match(setup, /모델을 연결하세요/);
   assert.match(setup, /말투를 맞출까요\?/);
-  assert.match(setup, /원고 10페이지를 올려서 에이전트가 말투를 따라하게 할 수 있습니다/);
+  assert.match(setup, /원고 10페이지를 올리면, 에이전트가 문장 규칙이 아니라 그 목소리로 씁니다/);
   assert.doesNotMatch(setup, /rhwp-setup-kicker/);
   assert.doesNotMatch(setup, /rhwp-setup-lead/);
   assert.match(setup, /\(beginAgentConnect \?\? openAgentSetup\)\(agent\)/);
