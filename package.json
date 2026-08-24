@@ -49,11 +49,18 @@
         "ext": [
           "hwp",
           "hwpx",
-          "hml",
-          "rhwpx"
+          "hml"
         ],
         "name": "Hangul document",
         "description": "Hangul word-processing document",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "rhwpx"
+        ],
+        "name": "Rauhwpx history bundle",
+        "description": "Rauhwpx history bundle",
         "role": "Editor"
       }
     ],
