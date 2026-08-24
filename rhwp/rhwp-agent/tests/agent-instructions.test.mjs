@@ -72,6 +72,46 @@ test('revision persists across restarts and keeps old drafts stale', async (t) =
   );
 });
 
+test('corrupt revision metadata is repaired without reviving stale drafts', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-agent-instructions-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const store = await new AgentInstructionsStore({ rootDir }).init();
+  await store.update('revision two', { expectedRevision: 1 });
+  const staleRevision = store.snapshot().revision;
+  await fs.writeFile(path.join(rootDir, '.AGENTS.md.meta.json'), '{broken-json', 'utf8');
+
+  const reopened = await new AgentInstructionsStore({ rootDir }).init();
+  assert.ok(reopened.snapshot().revision > staleRevision);
+  assert.equal(reopened.snapshot().content, 'revision two\n');
+  await assert.rejects(
+    reopened.update('stale after metadata repair', { expectedRevision: staleRevision }),
+    (error) => error?.code === 'INSTRUCTIONS_REVISION_CONFLICT',
+  );
+  const repaired = JSON.parse(await fs.readFile(path.join(rootDir, '.AGENTS.md.meta.json'), 'utf8'));
+  assert.equal(repaired.revision, reopened.snapshot().revision);
+});
+
+test('a symlinked revision sidecar is replaced without reading its target', async (t) => {
+  if (process.platform === 'win32') return;
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-agent-instructions-'));
+  const foreignDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-foreign-metadata-'));
+  t.after(() => Promise.all([
+    fs.rm(rootDir, { recursive: true, force: true }),
+    fs.rm(foreignDir, { recursive: true, force: true }),
+  ]));
+  await new AgentInstructionsStore({ rootDir }).init();
+  const metadataPath = path.join(rootDir, '.AGENTS.md.meta.json');
+  const foreignPath = path.join(foreignDir, 'metadata.json');
+  await fs.writeFile(foreignPath, '{"foreign":true}\n');
+  await fs.rm(metadataPath);
+  await fs.symlink(foreignPath, metadataPath);
+
+  const reopened = await new AgentInstructionsStore({ rootDir }).init();
+  assert.ok(reopened.snapshot().revision > 1);
+  assert.equal((await fs.lstat(metadataPath)).isSymbolicLink(), false);
+  assert.equal(await fs.readFile(foreignPath, 'utf8'), '{"foreign":true}\n');
+});
+
 test('instruction size is bounded and platform roots stay outside project workspaces', async (t) => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-agent-instructions-'));
   t.after(() => fs.rm(rootDir, { recursive: true, force: true }));

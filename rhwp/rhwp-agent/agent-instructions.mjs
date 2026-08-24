@@ -164,7 +164,12 @@ export class AgentInstructionsStore {
         });
         metadata = readMetadata(loadedMetadata.text);
       } catch (error) {
-        if (error?.code !== 'ENOENT') throw error;
+        if (error?.code !== 'ENOENT' && error?.code !== 'INSTRUCTIONS_METADATA_INVALID') {
+          throw error;
+        }
+        // Corrupt, oversized, or symlinked metadata must not brick hub startup.
+        // Treat it as absent; the timestamp-based seed below invalidates any
+        // practical prior numeric revision and atomically replaces the sidecar.
       }
 
       if (!metadata) {
