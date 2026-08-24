@@ -79,6 +79,7 @@ function startSession(t, extra = {}) {
   const spawns = [];
   const opts = {
     ...baseOpts,
+    agentRole: 'root',
     isolatedHome: path.join(root, 'home'),
     grokHome: path.join(root, 'home', '.grok'),
     ...extra,
@@ -251,6 +252,7 @@ test('config.toml disables updates, telemetry and vendor compat, and wires the r
   const toml = buildGrokConfigToml({ ...baseOpts, capabilityEpoch: 7 });
   assert.match(toml, /\[cli\]\nauto_update = false/);
   assert.match(toml, /\[features\]\ntelemetry = false/);
+  assert.match(toml, /\[toolset\.ask_user_question\]\ntimeout_enabled = false/);
   for (const vendor of ['claude', 'cursor']) {
     const section = toml.slice(toml.indexOf(`[compat.${vendor}]`));
     for (const key of ['skills', 'rules', 'agents', 'mcps', 'hooks', 'sessions']) {
@@ -278,6 +280,139 @@ test('the child env pins GROK_HOME and turns off the auto-updater and memory', (
   assert.equal(env.GROK_DISABLE_AUTOUPDATER, '1');
   assert.equal(env.GROK_MEMORY, '0');
   assert.equal(env.RHWP_SESSION_ID, 'studio-thread-grok');
+});
+
+test('native ACP keeps one Grok process, registers both question methods and routes cancel', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-grok-native-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const events = [];
+  const prompts = [];
+  let config;
+  let creates = 0;
+  let cancels = 0;
+  let started = false;
+  const session = createGrokSession({
+    ...baseOpts,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    grokHome: path.join(root, 'home', '.grok'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+    onEvent: (event) => events.push(event),
+  }, {
+    createAcpSession(input) {
+      creates += 1;
+      config = input;
+      return {
+        isStarted: () => started,
+        async configure() {
+          if (!started) {
+            started = true;
+            input.onSessionStarted({ sessionId: 'grok-acp-1', setupResponse: {} });
+          }
+        },
+        async prompt(text) {
+          prompts.push(text);
+          input.onSessionUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'native' } });
+          return { stopReason: 'end_turn' };
+        },
+        getSessionId: () => 'grok-acp-1',
+        hasSeenPromptUpdate: () => true,
+        restart: async () => {},
+        cancel: async () => { cancels += 1; },
+        dispose: async () => {},
+      };
+    },
+  });
+  t.after(() => session.dispose());
+
+  session.sendUserMessage('one');
+  await new Promise((resolve) => setImmediate(resolve));
+  session.sendUserMessage('two');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(creates, 1);
+  assert.deepEqual(config.args, ['agent', 'stdio']);
+  assert.deepEqual(config.requestHandlers.map((entry) => entry.method), [
+    'x.ai/ask_user_question', '_x.ai/ask_user_question',
+  ]);
+  assert.match(prompts[0], /rhwp MCP tools/);
+  assert.match(prompts[0], /one$/);
+  assert.equal(prompts[1], 'two');
+  assert.deepEqual(events.filter((event) => event.type === 'text-delta').map((event) => event.text), ['native', 'native']);
+
+  session.sendUserMessage('pending interrupt');
+  session.interrupt();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cancels, 1);
+  assert.equal(events.filter((event) => event.type === 'turn-end').at(-1)?.stopReason, 'interrupted');
+});
+
+test('Grok ACP startup failure falls back before emitting a native provider update', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-grok-fallback-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const events = [];
+  const spawns = [];
+  const session = createGrokSession({
+    ...baseOpts,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    grokHome: path.join(root, 'home', '.grok'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+    onEvent: (event) => events.push(event),
+  }, {
+    createAcpSession() {
+      return {
+        isStarted: () => false,
+        configure: async () => { throw new Error('ACP unavailable'); },
+        hasSeenPromptUpdate: () => false,
+        dispose: async () => {},
+      };
+    },
+    spawnProcess(command, argv, options) {
+      const proc = new FakeProcess();
+      spawns.push({ command, argv, options, proc });
+      return proc;
+    },
+  });
+  t.after(() => session.dispose());
+
+  session.sendUserMessage('fallback');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(spawns.length, 1);
+  assert.deepEqual(types(events), ['turn-start']);
+  assert.deepEqual(spawns[0].argv.slice(0, 2), ['--prompt-file', path.join(root, 'home', '.grok', 'prompt.txt')]);
+});
+
+test('Grok never switches transports after the native prompt starts', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-grok-atomic-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const events = [];
+  let legacySpawns = 0;
+  const session = createGrokSession({
+    ...baseOpts,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    grokHome: path.join(root, 'home', '.grok'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+    onEvent: (event) => events.push(event),
+  }, {
+    createAcpSession() {
+      return {
+        isStarted: () => true,
+        configure: async () => {},
+        getSessionId: () => 'grok-native-atomic',
+        prompt: async () => { throw new Error('native question failed'); },
+        dispose: async () => {},
+      };
+    },
+    spawnProcess() { legacySpawns += 1; return new FakeProcess(); },
+  });
+  t.after(() => session.dispose());
+
+  session.sendUserMessage('one transport only');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(legacySpawns, 0);
+  assert.equal(events.filter((event) => event.type === 'turn-end').at(-1)?.stopReason, 'failed');
 });
 
 test('a tool-call turn maps the Anthropic wire stream to the unified sequence', (t) => {

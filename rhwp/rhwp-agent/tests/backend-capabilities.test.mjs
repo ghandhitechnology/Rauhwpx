@@ -238,8 +238,9 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(planning, /Do not present a plan in the first planning response/);
   assert.match(planning, /explicitly asks to skip discovery and draft immediately/);
   assert.match(planning, /complete at least one focused conversational checkpoint/);
-  assert.match(planning, /summarize your understanding and receive confirmation/);
-  assert.match(planning, /Questions and confirmations are normal chat/);
+  assert.match(planning, /summarize your understanding and use the same interaction for a concise confirmation/);
+  assert.match(planning, /native blocking question interaction when available, otherwise use ask_user_question/);
+  assert.doesNotMatch(planning, /Questions and confirmations are normal chat/);
   assert.match(planning, /Do not ask artificial questions/);
   assert.match(planning, /read-only workspace, web, subagent, and rhwp MCP capabilities available/);
   assert.doesNotMatch(planning, /sandboxed Bash/);

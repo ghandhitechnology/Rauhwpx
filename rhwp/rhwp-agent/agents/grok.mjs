@@ -25,6 +25,21 @@ import {
   validateExecutionMode,
 } from './backend.mjs';
 import { createGrokSessionTail } from './grok-session-tail.mjs';
+import { acpMcpServer, createPersistentAcpSession } from './acp-session.mjs';
+import {
+  GROK_ASK_USER_QUESTION_METHODS,
+  decodeGrokAskUserQuestionFrame,
+  encodeGrokAskUserQuestionFrame,
+  handleGrokAskUserQuestionFrame,
+  selectGrokUserInputTransport,
+} from './provider-user-input.mjs';
+export {
+  GROK_ASK_USER_QUESTION_METHODS,
+  decodeGrokAskUserQuestionFrame,
+  encodeGrokAskUserQuestionFrame,
+  handleGrokAskUserQuestionFrame,
+  selectGrokUserInputTransport,
+};
 import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
@@ -106,6 +121,9 @@ export function buildGrokConfigToml(opts) {
     '',
     '[features]',
     'telemetry = false',
+    '',
+    '[toolset.ask_user_question]',
+    'timeout_enabled = false',
     '',
     '[compat.claude]',
     ...compatOff,
@@ -357,6 +375,7 @@ export function createGrokSession(opts, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
   createSessionTail = createGrokSessionTail,
+  createAcpSession = createPersistentAcpSession,
   now = Date.now,
 } = {}) {
   const rawOnEvent = opts.onEvent;
@@ -396,6 +415,16 @@ export function createGrokSession(opts, {
   const streamedSubagents = new Set();
   // usage 집계에 붙일 모델 — CLI 가 보고한 실제 모델을 우선한다.
   let currentModel = opts.model ?? null;
+  let nativeDisabled = selectGrokUserInputTransport(opts, {
+    transport: 'acp',
+    methods: GROK_ASK_USER_QUESTION_METHODS,
+    askUserTimeoutDisabled: true,
+  }).transport !== 'native-acp';
+  /** @type {ReturnType<typeof createPersistentAcpSession>|null} */
+  let nativeSession = null;
+  let nativeRestart = Promise.resolve();
+  let nativeTurnToken = 0;
+  let nativeSessionInfoEmitted = false;
 
   // ── 서브에이전트 fleet 상태 ─────────────────────────────────────
   // subagent_id → 방출한 taskId (스폰 tool_use id). 늦은 디스크 라인 대비
@@ -1108,6 +1137,152 @@ export function createGrokSession(opts, {
     }
   }
 
+  function emitNativeSessionInfo() {
+    if (nativeSessionInfoEmitted || !sessionId) return;
+    nativeSessionInfoEmitted = true;
+    onEvent({
+      type: 'session-info',
+      agent: 'grok',
+      sessionId,
+      model: currentModel,
+      mcpStatus: 'connected',
+    });
+  }
+
+  function handleNativeUpdate(update) {
+    emitNativeSessionInfo();
+    const kind = String(update?.sessionUpdate ?? '');
+    if (kind === 'usage_update') {
+      const usage = normalizeUsageTokens(update.usage ?? update);
+      if (usage) onEvent({ type: 'usage', agent: 'grok', model: currentModel, usage });
+      return;
+    }
+    routeParentDiskUpdate(update);
+  }
+
+  function makeNativeSession() {
+    const runtime = mcpRuntimeFor(opts);
+    const childEnv = {
+      ...buildGrokEnv(opts),
+      GROK_OAUTH2_REFERRER: 't3code',
+    };
+    const handlers = GROK_ASK_USER_QUESTION_METHODS.map((method) => ({
+      method,
+      async handler(ctx) {
+        const response = await handleGrokAskUserQuestionFrame(opts, {
+          jsonrpc: '2.0', id: ctx.requestId, method, params: ctx.params,
+        }, ctx.signal);
+        return response.result;
+      },
+    }));
+    return createAcpSession({
+      clientName: 'rhwp-grok',
+      command: opts.grokBin ?? 'grok',
+      args: ['agent', 'stdio'],
+      cwd: opts.rootDir,
+      env: childEnv,
+      authMethodId: String(childEnv['XAI_API_KEY'] ?? '').trim() ? 'xai.api_key' : 'cached_token',
+      setModelMethod: 'session/set_model',
+      promptCompletionMethods: ['x.ai/session/prompt_complete', '_x.ai/session/prompt_complete'],
+      mcpServers: [acpMcpServer('rhwp', {
+        ...runtime,
+        env: {
+          ...runtime.env,
+          RHWP_WS_URL: `ws://127.0.0.1:${opts.hubPort}/mcp`,
+          RHWP_AGENT_TOKEN: opts.token,
+          RHWP_AGENT_NAME: 'grok',
+          ...mcpCapabilityEnv(opts),
+        },
+      })],
+      resumeSessionId: hasCompletedTurn ? sessionId : null,
+      getUnrestricted: () => opts.permissionProfile === 'unrestricted' && !isPlanningRestricted(opts),
+      requestHandlers: handlers,
+      onSessionStarted(info) {
+        sessionId = String(info.sessionId);
+        sessionIdConsumed = true;
+        nativeSessionInfoEmitted = false;
+      },
+      onSessionUpdate: handleNativeUpdate,
+    }, { spawnProcess, terminateProcess });
+  }
+
+  function prepareNativeHome() {
+    const grokHome = opts.grokHome ?? process.env.GROK_HOME ?? path.join(os.homedir(), '.grok');
+    turnGrokHome = String(grokHome);
+    prepareGrokHome(grokHome, opts.grokAuthPath);
+    writeFileSync(path.join(grokHome, 'config.toml'), buildGrokConfigToml(opts), 'utf8');
+    return grokHome;
+  }
+
+  function startLegacyTurn(text) {
+    const resume = hasCompletedTurn;
+    if (!resume && sessionIdConsumed) sessionId = crypto.randomUUID();
+    sessionIdConsumed = true;
+    const grokHome = opts.grokHome ?? process.env.GROK_HOME ?? path.join(os.homedir(), '.grok');
+    turnGrokHome = String(grokHome);
+    const promptPath = path.join(grokHome, 'prompt.txt');
+    let proc;
+    try {
+      prepareNativeHome();
+      writeFileSync(promptPath, text, 'utf8');
+      proc = spawnProcess(opts.grokBin ?? 'grok', buildGrokArgv(opts, sessionId, resume, promptPath), {
+        ...processTreeSpawnOptions(),
+        cwd: opts.rootDir,
+        env: buildGrokEnv(opts),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      lifecycle.failStart(e);
+      return;
+    }
+    lifecycle.attachChild(proc, handleEvent);
+  }
+
+  async function runNativeTurn(text, token) {
+    let promptStarted = false;
+    try {
+      await nativeRestart;
+      if (!nativeSession) nativeSession = makeNativeSession();
+      prepareNativeHome();
+      const firstPrompt = !nativeSession.isStarted();
+      const mode = isPlanningRestricted(opts)
+        ? ['plan', 'architect']
+        : ['agent', 'code', 'default'];
+      await nativeSession.configure({ modeAliases: mode, model: opts.model, effort: opts.effort });
+      sessionId = nativeSession.getSessionId() ?? sessionId;
+      const prompt = firstPrompt ? `${systemBriefFor(opts, 'grok')}\n\n${text}` : text;
+      // Never replay a message through legacy after ACP has accepted the
+      // prompt. A cancelled or malformed native question belongs to this exact
+      // turn and cannot trigger a mid-turn transport switch.
+      promptStarted = true;
+      const response = await nativeSession.prompt(prompt);
+      if (token !== nativeTurnToken || !lifecycle.isTurnOpen()) return;
+      emitNativeSessionInfo();
+      hasCompletedTurn = true;
+      lifecycle.markTurnCompleted();
+      const usage = normalizeUsageTokens(response?.usage);
+      if (usage) onEvent({ type: 'usage', agent: 'grok', model: currentModel, usage });
+      resultSeen = true;
+      lastStopReason = response?.stopReason === 'end_turn' ? 'completed' : response?.stopReason;
+      if (tasksSeenThisTurn === 0) settleTurn();
+      else if (pendingTasks.size === 0) scheduleSettle();
+    } catch (error) {
+      if (token !== nativeTurnToken || !lifecycle.isTurnOpen()) return;
+      if (!promptStarted) {
+        nativeDisabled = true;
+        const failed = nativeSession;
+        nativeSession = null;
+        try { await failed?.dispose(); } catch {}
+        startLegacyTurn(text);
+        return;
+      }
+      onEvent({ type: 'error', agent: 'grok', message: error?.message ?? String(error) });
+      resultErrorMessage = error?.message ?? String(error);
+      lastStopReason = 'failed';
+      settleTurn();
+    }
+  }
+
   return {
     agent: 'grok',
     getSessionId() {
@@ -1121,41 +1296,18 @@ export function createGrokSession(opts, {
       // 디스크 타임스탬프 필터의 기준 — 스폰 전에 찍어야 첫 라인도 걸리지 않는다.
       turnStartMs = now();
       lifecycle.beginTurn();
-
-      const resume = hasCompletedTurn;
-      if (!resume && sessionIdConsumed) {
-        // 이전 -s 스폰이 turn 완료 전에 죽었다 — 그 UUID 는 소진되었으므로
-        // 새 세션 ID 로 다시 시작한다 (재개할 완료 turn 도 없다).
-        sessionId = crypto.randomUUID();
-      }
-      sessionIdConsumed = true;
-
-      const grokHome = opts.grokHome ?? process.env.GROK_HOME ?? path.join(os.homedir(), '.grok');
-      turnGrokHome = String(grokHome); // 전환 시 updates.jsonl 꼬리 추적이 쓴다.
-      const promptPath = path.join(grokHome, 'prompt.txt');
-      let proc;
-      try {
-        prepareGrokHome(grokHome, opts.grokAuthPath);
-        // 설정과 프롬프트는 스폰마다 다시 쓴다 — 토큰/프로필/에포크가 바뀔 수 있다.
-        writeFileSync(path.join(grokHome, 'config.toml'), buildGrokConfigToml(opts), 'utf8');
-        writeFileSync(promptPath, text, 'utf8');
-        proc = spawnProcess(opts.grokBin ?? 'grok', buildGrokArgv(opts, sessionId, resume, promptPath), {
-          ...processTreeSpawnOptions(),
-          cwd: opts.rootDir,
-          env: buildGrokEnv(opts),
-          // grok 헤드리스는 stdin 을 프롬프트 채널로 쓰지 않는다 — 닫아 둔다.
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-      } catch (e) {
-        lifecycle.failStart(e);
+      if (nativeDisabled) {
+        startLegacyTurn(text);
         return;
       }
-      lifecycle.attachChild(proc, handleEvent);
+      const token = ++nativeTurnToken;
+      void runNativeTurn(text, token);
     },
     setPermissionProfile(profile) {
       if (lifecycle.isTurnOpen()) throw new Error('Permission profile can only change between turns');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
       opts.permissionProfile = profile;
+      if (nativeSession) nativeRestart = nativeSession.restart();
     },
     async setExecutionMode(mode) {
       if (lifecycle.isTurnOpen()) throw new Error('Execution mode can only change between turns');
@@ -1165,13 +1317,23 @@ export function createGrokSession(opts, {
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
+      if (nativeSession) {
+        nativeRestart = nativeSession.restart();
+        await nativeRestart;
+      }
     },
-    interrupt: lifecycle.interrupt, // turn-end 를 onEvent 래퍼가 가로채 task 를 정리한다.
-    dispose() {
+    interrupt() {
+      nativeTurnToken += 1;
+      if (!nativeDisabled) void nativeSession?.cancel().catch(() => {});
+      lifecycle.interrupt();
+    },
+    async dispose() {
       clearSettleTimer();
       clearConfirmTimer();
       stopTail();
-      return lifecycle.dispose();
+      nativeTurnToken += 1;
+      const [, legacy] = await Promise.allSettled([nativeSession?.dispose(), lifecycle.dispose()]);
+      return legacy.status === 'fulfilled' ? legacy.value : false;
     },
   };
 }

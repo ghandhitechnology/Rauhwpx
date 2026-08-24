@@ -205,7 +205,24 @@ const nativeHandleMetadata = new WeakMap<FileSystemFileHandleLike, {
   identity: DocumentOwnershipIdentity | null;
 }>();
 const browserLaunchId = createSessionId('launch');
-const browserSessionId = createSessionId('session');
+const BROWSER_SESSION_ID_KEY = 'rhwp-renderer-session-id-v1';
+
+/** A browser tab must reclaim the same hub session after reload. sessionStorage
+ * is tab-scoped, survives reload, and does not make unrelated tabs contend for
+ * the same root interaction. Electron remains authoritative through preload. */
+export function stableBrowserSessionId(
+  storage: Pick<Storage, 'getItem' | 'setItem'> | undefined = globalThis.sessionStorage,
+): string {
+  try {
+    const existing = storage?.getItem(BROWSER_SESSION_ID_KEY) ?? '';
+    if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(existing)) return existing;
+  } catch {}
+  const created = createSessionId('session');
+  try { storage?.setItem(BROWSER_SESSION_ID_KEY, created); } catch {}
+  return created;
+}
+
+const browserSessionId = stableBrowserSessionId();
 
 function createSessionId(prefix: string): string {
   return globalThis.crypto?.randomUUID?.() ?? `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;

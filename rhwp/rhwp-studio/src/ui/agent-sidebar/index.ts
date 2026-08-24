@@ -44,6 +44,10 @@ import { renderChatMarkdown } from './chat-markdown.ts';
 import { appendMarkdown, planToMarkdown } from './plan-markdown.ts';
 import {
   createEmptyThread,
+  createPendingUserQuestionDraftSnapshot,
+  createUserQuestionHistoryMessage,
+  archivePendingUserQuestion,
+  expirePendingUserQuestion,
   fallbackTitle,
   getThread,
   explorerGroupIsCurrent,
@@ -53,6 +57,8 @@ import {
   removeThread,
   renameThread,
   setThreadTitle,
+  serializeThreadMessagesForProviderHistory,
+  pendingUserQuestionMatchesInteraction,
   subscribeThreadChanges,
   threadMatchesDocument,
   upsertThread,
@@ -99,6 +105,7 @@ import type {
   InlinePromptSendResult,
   InlinePromptSubmission,
 } from '../../agent/inline-prompt-context.ts';
+import { createUserQuestionController } from './user-question-controller.ts';
 
 export interface AgentSidebarDeps {
   bridge: AgentBridge;
@@ -597,6 +604,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const assistantBubbleSources = new WeakMap<HTMLElement, string>();
   let attachmentsSending = false;
   let threadsPanelOpen = false;
+  let restoringLiveQuestion = false;
   let skillsPanelOpen = false;
   let settingsPanelOpen = false;
   /** 에이전트 집중 모드 — 스레드 레일과 대화 무대로 문서를 덮는다. */
@@ -656,18 +664,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     // 새 채팅·스레드 전환(force)만 입력기를 잠근다. 모델/추론 강도만 바꿀 때는
     // 같은 대화를 다시 열 뿐이라 입력칸·피커가 비활성으로 깜빡이지 않게 둔다.
     if (force) chatStartPendingThreadId = currentThread.id;
-    const history = currentThread.messages.flatMap((message) => (
-      (message.role === 'user' || message.role === 'assistant')
-        && message.kind !== 'progress'
-        && (message.text.trim() || (message.role === 'user' && message.skillName))
-        ? [{
-            role: message.role,
-            text: message.role === 'user' && message.skillName
-              ? `/${message.skillName}${message.text.trim() ? ` ${message.text}` : ''}`
-              : message.text,
-          }]
-        : []
-    ));
+    const history = serializeThreadMessagesForProviderHistory(currentThread.messages);
     bridge.startChat(selectedAgent, selectedModel, selectedEffort, force, permissionProfile, chatWorkflow,
       currentThread.id, currentThread.documentId, currentThread.docKey, history);
     if (force) updateComposer();
@@ -1642,6 +1639,36 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   // 편대 도크는 입력기 위에 뜨는 오버레이라서 입력기의 자식으로 붙는다 —
   // 사이드바·전체 화면 어디로 옮겨져도 입력기를 따라간다.
   composer.appendChild(fleetView.root);
+  const questionController = createUserQuestionController({
+    input,
+    submitAnswers: (interactionId, answers) => bridge.answerUserQuestion(interactionId, answers),
+    stop: () => bridge.interrupt(),
+    onDraftChange(interaction, draft) {
+      const target = interaction.threadId === currentThread.id ? currentThread : getThread(interaction.threadId);
+      if (!target) return;
+      target.pendingUserQuestion = {
+        interaction,
+        selectedOptionIdsByQuestionId: draft.selectedOptionIdsByQuestionId,
+        otherTextByQuestionId: draft.otherTextByQuestionId,
+        activeQuestionIndex: draft.activeQuestionIndex,
+        updatedAt: Date.now(),
+      };
+      if (target === currentThread) persistCurrentThread();
+      else upsertThread(target);
+    },
+    onComposerModeChange() {
+      updateComposer();
+    },
+    onResolved(interaction, outcome) {
+      const target = interaction.threadId === currentThread.id ? currentThread : getThread(interaction.threadId);
+      if (!target) return;
+      const historyMessage = archivePendingUserQuestion(target, interaction.interactionId, outcome)
+        ?? createUserQuestionHistoryMessage(interaction, outcome);
+      if (!target.messages.includes(historyMessage)) target.messages.push(historyMessage);
+      upsertThread(target);
+      if (target === currentThread) appendConversation(renderUserQuestionHistory(historyMessage));
+    },
+  });
   // 도크가 차지하는 높이를 입력기에 알려 계획 복원 버튼(overlay)이 겹치지 않게 한다.
   const dockResizeObserver = typeof ResizeObserver === 'function'
     ? new ResizeObserver((entries) => {
@@ -1652,7 +1679,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   dockResizeObserver?.observe(fleetView.root);
   // 사이드바에서는 변경 검토와 계획을 분리한다. 계획은 입력기 바로 위에
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
-  chatPage.append(header, connBanner, messages, review, planSurface, composer);
+  chatPage.append(header, connBanner, messages, review, planSurface, questionController.root, composer);
 
   /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다.
    *  펼쳐진 사이드바의 현재 폭이 아니라 max-content(말줄임 바닥)로 잰다.
@@ -2195,7 +2222,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     reviewResize.inert = !detailActive;
     if (focusLayoutActive) {
       chatPage.setAttribute('aria-hidden', 'false');
-      if (composer.parentElement !== chatPage) chatPage.appendChild(composer);
+      if (composer.parentElement !== chatPage) chatPage.append(questionController.root, composer);
     }
     applyPlanMinimizedState();
   }
@@ -2330,7 +2357,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     threadsPage.setAttribute('aria-hidden', 'true');
     chatPage.setAttribute('aria-hidden', 'false');
     // 변경 검토·계획·입력기는 다시 사이드바의 분리된 inline 흐름으로 돌아간다.
-    chatPage.append(review, planSurface, composer);
+    chatPage.append(review, planSurface, questionController.root, composer);
     applyPlanMinimizedState();
   }
 
@@ -2981,6 +3008,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   input.addEventListener('keydown', (e) => {
+    if (questionController.hasPending()) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && questionController.usesComposerForOther()) {
+        e.preventDefault();
+        composer.requestSubmit();
+      }
+      return;
+    }
     if (!slashMenu.hidden && slashOptions.length > 0) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
@@ -3010,6 +3044,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
   });
   input.addEventListener('input', () => {
+    if (questionController.hasPending()) {
+      questionController.handleComposerInput();
+      resizeComposerInput();
+      return;
+    }
     if (!activeComposerSkill) {
       // 공백이 slash command를 끝내는 순간 skill을 토큰으로 승격하고,
       // 뒤 문장만 textarea에 남긴다. 이름 prefix가 겹치는 스킬도 안전하다.
@@ -3029,6 +3068,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   composer.addEventListener('submit', (e) => {
     e.preventDefault();
     if (readOnlyDocLabel !== null) return;
+    if (questionController.hasPending()) {
+      if (!questionController.handleComposerSubmit()) bridge.interrupt();
+      return;
+    }
     if (turnRunning) {
       bridge.interrupt();
       return;
@@ -3455,7 +3498,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         appendConversation(renderUserMessage(msg));
       } else if (msg.role === 'assistant') {
         const agent = msg.agent ?? thread.agent;
-        if (msg.kind === 'progress') {
+        if (msg.kind === 'user-question') {
+          appendConversation(renderUserQuestionHistory(msg));
+        } else if (msg.kind === 'progress') {
           const step = el('div', 'ag-progress-step ag-progress-step-restored');
           const milestone = el('div', `ag-msg ag-progress-milestone ag-${agent}`);
           renderAssistantMessage(milestone, msg.text);
@@ -3473,6 +3518,33 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       }
     }
     scrollConversationToEnd();
+  }
+
+  function renderUserQuestionHistory(message: Extract<ThreadMessage, { kind: 'user-question' }>): HTMLElement {
+    const card = el('section', 'ag-question-history');
+    card.setAttribute('aria-label', '에이전트 질문 기록');
+    const status = message.outcome.status === 'answered'
+      ? '답변 완료'
+      : message.outcome.status === 'cancelled'
+        ? '중단됨'
+        : '만료됨';
+    card.append(el('div', 'ag-question-history-title', `에이전트 질문 · ${status}`));
+    for (const question of message.interaction.questions) {
+      const item = el('div', 'ag-question-history-item');
+      item.append(
+        el('span', 'ag-question-history-header', question.header),
+        el('p', 'ag-question-history-prompt', question.question),
+      );
+      if (message.outcome.status === 'answered') {
+        const answer = message.outcome.answers[question.id];
+        const selected = new Set(answer?.selectedOptionIds ?? []);
+        const labels = question.options.filter((option) => selected.has(option.id)).map((option) => option.label);
+        if (answer?.otherText) labels.push(answer.otherText);
+        item.append(el('p', 'ag-question-history-answer', labels.join(', ') || '답변 없음'));
+      }
+      card.appendChild(item);
+    }
+    return card;
   }
 
   function clearChatUi(): void {
@@ -3678,7 +3750,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   /** 실행 상태 점 — 노란 불(작업 중)·초록 점(완료)·빨간 점(승인 대기). */
   function buildStatusDot(status: ChatRunStatus, extraClass?: string): HTMLElement {
     const dot = el('span', `ag-thread-status ag-thread-status-${status}${extraClass ? ` ${extraClass}` : ''}`);
-    dot.title = status === 'working' ? '작업 중' : status === 'needs-input' ? '승인 대기' : '완료';
+    dot.title = status === 'working' ? '작업 중' : status === 'needs-input' ? '입력 대기' : '완료';
     return dot;
   }
 
@@ -3937,8 +4009,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     currentThread = nextThread;
     selectTemplate(null);
-    referenceLibrary.contextChanged();
     bridge.stopChat();
+    referenceLibrary.contextChanged();
     startCurrentBridgeChat(true);
     if (opts?.silent) return;
     setThreadsPanelOpen(false);
@@ -3953,7 +4025,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       setThreadsPanelOpen(false);
       return;
     }
-    if (turnRunning) bridge.interrupt();
+    // During a reload the bridge reconstructs the authoritative question
+    // before the drawer can bind it. Treat that snapshot as live too, so
+    // opening its persisted thread never stops the still-blocked provider.
+    const liveQuestion = questionController.interaction() ?? bridge.getPendingUserQuestion();
+    if (!liveQuestion && turnRunning) bridge.interrupt();
     flushAssistantBuffer();
     persistCurrentThread();
     const loaded = getThread(id);
@@ -3970,14 +4046,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       titleRequested: Boolean(loaded.titleRequested),
     };
     referenceLibrary.contextChanged();
-    bridge.stopChat();
     applyThreadMeta(currentThread);
     renderMessagesFromThread(currentThread);
+    if (!liveQuestion) bridge.stopChat();
     const matchesCurrentDocument = threadMatchesDocument(
       loaded,
       currentDocumentId,
       currentDocKey,
     );
+    const showingLiveQuestion = liveQuestion?.threadId === currentThread.id;
+    questionController.setVisible(showingLiveQuestion);
+    if (liveQuestion && !showingLiveQuestion) {
+      enterReadOnlyMode('에이전트가 다른 채팅에서 답변을 기다리는 중');
+      setThreadsPanelOpen(false);
+      return;
+    }
     if (!matchesCurrentDocument) {
       // 다른 문서의 채팅 — 열람은 되지만 이어가지는 못한다.
       enterReadOnlyMode(docGroupLabel(loaded.docKey));
@@ -3990,6 +4073,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     currentThread.docKey = currentDocKey ?? currentThread.docKey;
     persistCurrentThread();
     exitReadOnlyMode();
+    if (liveQuestion) {
+      setThreadsPanelOpen(false);
+      return;
+    }
     startCurrentBridgeChat(true);
     setThreadsPanelOpen(false);
     input.focus();
@@ -4134,10 +4221,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       input.placeholder = `"${readOnlyDocLabel}" 문서의 채팅 — 읽기 전용`;
     } else {
       const chatStarting = chatStartPendingThreadId !== null;
-      input.disabled = connState !== 'connected' || attachmentsSending || chatStarting;
-      send.disabled = connState !== 'connected' || attachmentsSending || chatStarting || referenceLibrary.hasBlockingDrafts();
+      const questionPending = questionController.hasPending();
+      const questionUsesComposer = questionController.usesComposerForOther();
+      input.disabled = connState !== 'connected' || attachmentsSending || chatStarting
+        || (questionPending && !questionUsesComposer);
+      send.disabled = connState !== 'connected' || attachmentsSending || chatStarting
+        || (!questionPending && referenceLibrary.hasBlockingDrafts());
       composerSkillClear.disabled = input.disabled;
-      input.placeholder = chatStarting
+      input.placeholder = questionPending
+        ? questionUsesComposer ? '직접 답변을 입력하세요' : '위 질문에 답해 주세요'
+        : chatStarting
         ? '채팅을 여는 중…'
         : activeComposerSkill
           ? '추가 요청을 입력하세요 (선택)'
@@ -4147,15 +4240,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             ? '무엇을 계획할지 입력하세요'
             : '문서 작업을 입력하세요';
     }
-    const sendLabel = turnRunning ? '중지' : '보내기';
+    const questionPending = questionController.hasPending();
+    const questionUsesComposer = questionController.usesComposerForOther();
+    const sendLabel = questionPending && questionUsesComposer ? '답변 계속' : turnRunning ? '중지' : '보내기';
     if (send.getAttribute('aria-label') !== sendLabel) {
-      send.replaceChildren(turnRunning ? createStopIcon() : createIcon('send'));
+      send.replaceChildren(turnRunning && !(questionPending && questionUsesComposer) ? createStopIcon() : createIcon('send'));
       send.setAttribute('aria-label', sendLabel);
       send.title = sendLabel;
     }
-    send.classList.toggle('ag-stop', turnRunning);
+    send.classList.toggle('ag-stop', turnRunning && !(questionPending && questionUsesComposer));
     // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
-    sendHint.hidden = turnRunning || attachmentsSending || chatStartPendingThreadId !== null
+    sendHint.hidden = (turnRunning && !(questionPending && questionUsesComposer)) || attachmentsSending || chatStartPendingThreadId !== null
       || referenceLibrary.hasBlockingDrafts() || connState !== 'connected' || readOnlyDocLabel !== null;
     // 실행 중이거나 작업 방식/계획→실행 전환 중에는 모드·모델·권한을 잠근다.
     const controlsLocked = isControlLocked();
@@ -4720,6 +4815,55 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     initialSetup?.handleEvent(e);
     if (handlePlanningSidebarEvent(e)) return;
     switch (e.type) {
+      case 'user-question-requested': {
+        flushPendingAssistantRender();
+        flushAssistantBuffer({ kind: 'progress' });
+        let target = e.interaction.threadId === currentThread.id ? currentThread : getThread(e.interaction.threadId);
+        if (!target) break;
+        // A fresh renderer starts on a disposable empty thread. On reconnect,
+        // reclaim the persisted owner thread so the live card is immediately
+        // visible; deliberate switches between real threads remain untouched.
+        if (target !== currentThread && currentThread.messages.length === 0) {
+          const wasRestoring = restoringLiveQuestion;
+          restoringLiveQuestion = true;
+          try { openThread(target.id); } finally { restoringLiveQuestion = wasRestoring; }
+          target = currentThread.id === e.interaction.threadId ? currentThread : target;
+        }
+        const stored = target.pendingUserQuestion
+          && pendingUserQuestionMatchesInteraction(target.pendingUserQuestion, e.interaction)
+          ? target.pendingUserQuestion
+          : undefined;
+        target.pendingUserQuestion = stored ?? createPendingUserQuestionDraftSnapshot(e.interaction);
+        if (target === currentThread) {
+          questionController.setVisible(true);
+          questionController.request(e.interaction, stored);
+          persistCurrentThread();
+        } else {
+          upsertThread(target);
+          questionController.setVisible(false);
+        }
+        runStatusThreadId = target.id;
+        markChatNeedsInput(target.id);
+        updateComposer();
+        break;
+      }
+      case 'user-question-answer-result':
+        questionController.answerResult(e);
+        break;
+      case 'user-question-resolved':
+        {
+        const activeQuestion = questionController.interaction();
+        const targetThreadId = activeQuestion?.interactionId === e.interactionId
+          ? activeQuestion.threadId
+          : null;
+        questionController.resolve(e.interactionId, e.outcome);
+        if (targetThreadId) {
+          if (e.outcome.status === 'answered' && turnRunning) markChatWorking(targetThreadId);
+          else if (e.outcome.status !== 'answered') clearChatStatus(targetThreadId);
+        }
+        updateComposer();
+        break;
+        }
       case 'connection':
         setConnection(e.state, { attempt: e.attempt, retryInMs: e.retryInMs });
         // 재연결 시 진행 상태를 브리지와 다시 동기화한다.
@@ -4757,8 +4901,31 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           rebuildEffortMenu();
         }
         updateComposer();
+        // Socket-open precedes the authoritative welcome/chat-started frame,
+        // so non-global reference scopes are refreshed only after the hub has
+        // bound this exact thread and document identity.
+        void referenceLibrary.refresh();
         // 새 채팅(welcome)·재시작 시 작업 방식과 계획 단계를 서버와 다시 맞춘다.
         syncPlanningFromBridge();
+        const liveQuestion = bridge.getPendingUserQuestion();
+        if (liveQuestion?.threadId === currentThread.id) {
+          const stored = currentThread.pendingUserQuestion
+            && pendingUserQuestionMatchesInteraction(currentThread.pendingUserQuestion, liveQuestion)
+            ? currentThread.pendingUserQuestion
+            : undefined;
+          questionController.request(liveQuestion, stored);
+        }
+        if (currentThread.pendingUserQuestion) {
+          const pendingId = currentThread.pendingUserQuestion.interaction.interactionId;
+          queueMicrotask(() => {
+            if (currentThread.pendingUserQuestion?.interaction.interactionId !== pendingId) return;
+            if (questionController.interaction()?.interactionId === pendingId) return;
+            const expired = expirePendingUserQuestion(currentThread, 'request-invalidated', pendingId);
+            if (!expired) return;
+            persistCurrentThread();
+            appendConversation(renderUserQuestionHistory(expired));
+          });
+        }
         break;
       case 'permission-changed':
         permissionProfile = e.permissionProfile;
@@ -5554,6 +5721,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const unsubBridge = bridge.onEvent(handleSidebarEvent);
   const unsubThreads = subscribeThreadChanges(() => {
     if (threadsListVisible()) rebuildThreadsList();
+    if (restoringLiveQuestion) return;
+    const liveQuestion = bridge.getPendingUserQuestion();
+    if (!liveQuestion || questionController.interaction()?.interactionId === liveQuestion.interactionId) return;
+    const owner = getThread(liveQuestion.threadId);
+    if (!owner) return;
+    // IndexedDB hydration can finish after the v4 welcome snapshot. Replay the
+    // canonical bridge interaction once its persisted owner becomes available.
+    restoringLiveQuestion = true;
+    try {
+      handleSidebarEvent({ type: 'user-question-requested', interaction: liveQuestion });
+    } finally {
+      restoringLiveQuestion = false;
+    }
   });
   // 다른 탭의 채팅이 일을 시작하거나 끝내면 이 탭의 목록에도 불이 옮겨 붙는다.
   const unsubChatStatus = subscribeChatStatus(() => {
@@ -5635,6 +5815,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     root,
     sendInlinePrompt,
     dispose(): void {
+      questionController.dispose();
       unsubBridge();
       unsubThreads();
       unsubChatStatus();

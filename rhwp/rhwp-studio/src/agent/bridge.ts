@@ -81,6 +81,9 @@ import type {
   TemplateCatalog,
   AgentStreamEvent,
   SidebarEvent,
+  UserQuestionAnswer,
+  UserQuestionInteraction,
+  UserQuestionOutcome,
 } from './types.ts';
 
 export interface ChatHistoryEntry {
@@ -93,6 +96,7 @@ export interface AgentBridge {
   getConnectionState(): 'connecting' | 'connected' | 'disconnected' | 'replaced';
   getActiveAgent(): AgentName | null;
   isTurnRunning(): boolean;
+  getPendingUserQuestion(): UserQuestionInteraction | null;
   getEditingLease(): AgentEditingLease;
   onEditingLeaseChange(cb: (lease: AgentEditingLease) => void): () => void;
   getPermissionProfile(): PermissionProfile;
@@ -171,6 +175,8 @@ export interface AgentBridge {
     append: boolean;
   }): string;
   setWritingStyleInstruction(instruction: string): string;
+  /** Answer the currently blocked provider request. The response id is reused across reconnect retries. */
+  answerUserQuestion(interactionId: string, answers: Record<string, UserQuestionAnswer>): string;
   interrupt(): void;
   onEvent(cb: (e: SidebarEvent) => void): () => void;
   dispose(): void;
@@ -235,6 +241,118 @@ const STUDIO_INSTANCE_ID = globalThis.crypto?.randomUUID?.()
 
 function isAgentName(v: unknown): v is AgentName {
   return v === 'claude' || v === 'codex' || v === 'pi' || v === 'grok' || v === 'cursor';
+}
+
+function isBoundedText(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= max;
+}
+
+function readUserQuestionInteraction(value: unknown): UserQuestionInteraction | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  if (!isBoundedText(input['interactionId'], 256)
+    || !isBoundedText(input['providerRequestId'], 256)
+    || !isBoundedText(input['threadId'], 256)
+    || !isBoundedText(input['turnId'], 256)
+    || !isAgentName(input['agent'])
+    || (input['source'] !== 'native' && input['source'] !== 'mcp')
+    || typeof input['createdAt'] !== 'string'
+    || typeof input['updatedAt'] !== 'string'
+    || !Array.isArray(input['questions'])
+    || input['questions'].length < 1
+    || input['questions'].length > 4) return null;
+  const questions = input['questions'].flatMap((raw): UserQuestionInteraction['questions'] => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+    const question = raw as Record<string, unknown>;
+    if (!isBoundedText(question['id'], 128)
+      || !isBoundedText(question['header'], 12)
+      || !isBoundedText(question['question'], 500)
+      || (question['mode'] !== 'single' && question['mode'] !== 'multiple')
+      || typeof question['allowOther'] !== 'boolean'
+      || !Array.isArray(question['options'])
+      || question['options'].length < 2
+      || question['options'].length > 4) return [];
+    const options = question['options'].flatMap((rawOption) => {
+      if (!rawOption || typeof rawOption !== 'object' || Array.isArray(rawOption)) return [];
+      const option = rawOption as Record<string, unknown>;
+      return isBoundedText(option['id'], 128)
+        && isBoundedText(option['label'], 80)
+        && isBoundedText(option['description'], 240)
+        ? [{ id: option['id'], label: option['label'], description: option['description'] }]
+        : [];
+    });
+    if (options.length !== question['options'].length) return [];
+    if (new Set(options.map((option) => option.id)).size !== options.length) return [];
+    if (new Set(options.map((option) => option.label.toLocaleLowerCase())).size !== options.length) return [];
+    return [{
+      id: question['id'],
+      header: question['header'],
+      question: question['question'],
+      mode: question['mode'],
+      options,
+      allowOther: question['allowOther'],
+    }];
+  });
+  if (questions.length !== input['questions'].length) return null;
+  if (new Set(questions.map((question) => question.id)).size !== questions.length) return null;
+  return {
+    interactionId: input['interactionId'],
+    providerRequestId: input['providerRequestId'],
+    threadId: input['threadId'],
+    turnId: input['turnId'],
+    agent: input['agent'],
+    source: input['source'],
+    createdAt: input['createdAt'],
+    updatedAt: input['updatedAt'],
+    questions,
+  };
+}
+
+function readUserQuestionOutcome(
+  value: unknown,
+  interaction: UserQuestionInteraction | null = null,
+): UserQuestionOutcome | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const outcome = value as Record<string, unknown>;
+  if (outcome['status'] === 'cancelled' && outcome['reason'] === 'user-stop') {
+    return { status: 'cancelled', reason: 'user-stop' };
+  }
+  if (outcome['status'] === 'expired'
+    && (outcome['reason'] === 'provider-disconnected'
+      || outcome['reason'] === 'hub-restarted'
+      || outcome['reason'] === 'request-invalidated')) {
+    return { status: 'expired', reason: outcome['reason'] };
+  }
+  if (outcome['status'] !== 'answered' || !outcome['answers'] || typeof outcome['answers'] !== 'object') return null;
+  const answers: Record<string, UserQuestionAnswer> = {};
+  for (const [questionId, raw] of Object.entries(outcome['answers'] as Record<string, unknown>)) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const answer = raw as Record<string, unknown>;
+    if (!Array.isArray(answer['selectedOptionIds']) || answer['selectedOptionIds'].some((id) => typeof id !== 'string')) return null;
+    if (new Set(answer['selectedOptionIds']).size !== answer['selectedOptionIds'].length) return null;
+    if (answer['otherText'] !== undefined
+      && (typeof answer['otherText'] !== 'string' || answer['otherText'].length > 2_000)) return null;
+    answers[questionId] = {
+      selectedOptionIds: [...answer['selectedOptionIds']] as string[],
+      ...(typeof answer['otherText'] === 'string' ? { otherText: answer['otherText'] } : {}),
+    };
+  }
+  if (interaction) {
+    const questionIds = new Set(interaction.questions.map((question) => question.id));
+    if (Object.keys(answers).length !== questionIds.size
+      || Object.keys(answers).some((questionId) => !questionIds.has(questionId))) return null;
+    for (const question of interaction.questions) {
+      const answer = answers[question.id];
+      if (!answer) return null;
+      const optionIds = new Set(question.options.map((option) => option.id));
+      if (answer.selectedOptionIds.some((optionId) => !optionIds.has(optionId))) return null;
+      const otherText = answer.otherText?.trim() ?? '';
+      if (otherText && !question.allowOther) return null;
+      const count = answer.selectedOptionIds.length + (otherText ? 1 : 0);
+      if (count === 0 || (question.mode === 'single' && count !== 1)) return null;
+    }
+  }
+  return { status: 'answered', answers };
 }
 
 function readDocumentTemplate(value: unknown): DocumentTemplate | null {
@@ -792,6 +910,11 @@ class AgentBridgeImpl implements AgentBridge {
   private requests = new PendingRequestRegistry();
   /** 끊긴 사이에 완료된 도구 결과 — 재연결 직후 다시 보낸다. */
   private toolResponses = new ToolResponseBuffer();
+  /** A human answer never expires locally. It is retried with the same response id after reconnect. */
+  private pendingQuestionAnswer: { interactionId: string; responseId: string; frame: unknown } | null = null;
+  private pendingUserQuestionId: string | null = null;
+  private pendingUserQuestion: UserQuestionInteraction | null = null;
+  private pendingInterrupt = false;
   private disposed = false;
 
   private listeners = new Set<(e: SidebarEvent) => void>();
@@ -1037,6 +1160,10 @@ class AgentBridgeImpl implements AgentBridge {
       // 끊긴 사이에 끝난 도구 결과를 먼저 흘려보낸다 — 허브의 인플라이트 호출이
       // 30초 타임아웃까지 가지 않고 이 응답으로 마무리된다.
       this.flushToolResponses();
+      if (this.pendingInterrupt && this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' })) {
+        this.pendingInterrupt = false;
+      }
+      this.flushPendingQuestionAnswer();
       if (this.pendingChatStart !== null) {
         const pending = this.pendingChatStart;
         this.sendJson({
@@ -1189,8 +1316,11 @@ class AgentBridgeImpl implements AgentBridge {
       turnRunning: this.turnRunning,
       activeToolRequests: this.activeToolRequests,
       agent: this.editingAgent,
+      waitingForUser: this.pendingUserQuestionId !== null,
     });
-    if (next.active === this.editingLease.active && next.agent === this.editingLease.agent) return;
+    if (next.active === this.editingLease.active
+      && next.agent === this.editingLease.agent
+      && next.waitingForUser === this.editingLease.waitingForUser) return;
     this.editingLease = next;
     for (const listener of this.editingLeaseListeners) {
       try { listener({ ...next }); } catch (error) {
@@ -1278,6 +1408,20 @@ class AgentBridgeImpl implements AgentBridge {
           this.activeTemplate = this.activeTemplateId
             ? this.templateCatalog.templates.find((template) => template.id === this.activeTemplateId) ?? null
             : null;
+          const previousQuestion = this.pendingUserQuestion;
+          const pendingQuestion = readUserQuestionInteraction(session.pendingUserQuestion);
+          if (previousQuestion && previousQuestion.interactionId !== pendingQuestion?.interactionId) {
+            if (this.pendingQuestionAnswer?.interactionId === previousQuestion.interactionId) {
+              this.pendingQuestionAnswer = null;
+            }
+            this.emit({
+              type: 'user-question-resolved',
+              interactionId: previousQuestion.interactionId,
+              outcome: { status: 'expired', reason: 'request-invalidated' },
+            });
+          }
+          this.pendingUserQuestion = pendingQuestion;
+          this.pendingUserQuestionId = pendingQuestion?.interactionId ?? null;
           this.syncWorkflowState(session, 'direct', 'direct');
           this.pendingChatStart = null;
           this.emit({
@@ -1292,6 +1436,10 @@ class AgentBridgeImpl implements AgentBridge {
             permissionProfile: this.permissionProfile,
             ...this.workflowState(),
           });
+          if (pendingQuestion) {
+            this.syncEditingLease();
+            this.emit({ type: 'user-question-requested', interaction: pendingQuestion, replayed: true });
+          }
           if (this.turnRunning) {
             try {
               this.beginPendingTurn(session.agent);
@@ -1307,6 +1455,8 @@ class AgentBridgeImpl implements AgentBridge {
           }
         } else {
           this.activeAgent = null;
+          this.pendingUserQuestion = null;
+          this.pendingUserQuestionId = null;
           this.activeTemplateId = null;
           this.activeTemplate = null;
           this.turnRunning = false;
@@ -1334,6 +1484,48 @@ class AgentBridgeImpl implements AgentBridge {
           // isTurnRunning() 으로 재동기화하도록 한다.
           this.emitConnection();
         }
+        break;
+      }
+      case 'user-question-requested': {
+        const interaction = readUserQuestionInteraction(msg.interaction);
+        if (!interaction || (this.threadId && interaction.threadId !== this.threadId)) break;
+        this.pendingUserQuestionId = interaction.interactionId;
+        this.pendingUserQuestion = interaction;
+        this.syncEditingLease();
+        this.emit({
+          type: 'user-question-requested',
+          interaction,
+          ...(msg.replayed === true ? { replayed: true } : {}),
+        });
+        break;
+      }
+      case 'user-question-resolved': {
+        const interactionId = typeof msg.interactionId === 'string' ? msg.interactionId : '';
+        const outcome = readUserQuestionOutcome(
+          msg.outcome,
+          this.pendingUserQuestion?.interactionId === interactionId ? this.pendingUserQuestion : null,
+        );
+        if (!interactionId || !outcome) break;
+        if (this.pendingQuestionAnswer?.interactionId === interactionId) this.pendingQuestionAnswer = null;
+        if (this.pendingUserQuestionId === interactionId) this.pendingUserQuestionId = null;
+        if (this.pendingUserQuestion?.interactionId === interactionId) this.pendingUserQuestion = null;
+        this.syncEditingLease();
+        this.emit({ type: 'user-question-resolved', interactionId, outcome });
+        break;
+      }
+      case 'user-question-answer-result': {
+        const interactionId = typeof msg.interactionId === 'string' ? msg.interactionId : '';
+        const responseId = typeof msg.responseId === 'string' ? msg.responseId : '';
+        if (!interactionId || !responseId) break;
+        if (this.pendingQuestionAnswer?.responseId === responseId) this.pendingQuestionAnswer = null;
+        this.emit({
+          type: 'user-question-answer-result',
+          interactionId,
+          responseId,
+          ok: msg.ok === true,
+          ...(typeof msg.code === 'string' ? { code: msg.code } : {}),
+          ...(typeof msg.message === 'string' ? { message: msg.message } : {}),
+        });
         break;
       }
       case 'chat-started': {
@@ -1748,6 +1940,10 @@ class AgentBridgeImpl implements AgentBridge {
     }
   }
 
+  private flushPendingQuestionAnswer(): void {
+    if (this.pendingQuestionAnswer) this.sendJson(this.pendingQuestionAnswer.frame);
+  }
+
   // ─── outgoing API ─────────────────────────────────────────
 
   getConnectionState(): ConnectionState {
@@ -1760,6 +1956,10 @@ class AgentBridgeImpl implements AgentBridge {
 
   isTurnRunning(): boolean {
     return this.turnRunning;
+  }
+
+  getPendingUserQuestion(): UserQuestionInteraction | null {
+    return this.pendingUserQuestion ? structuredClone(this.pendingUserQuestion) : null;
   }
 
   getEditingLease(): AgentEditingLease {
@@ -1837,6 +2037,17 @@ class AgentBridgeImpl implements AgentBridge {
     this.pendingChatStart = null;
     this.chatHistory = [];
     this.activeAgent = null;
+    const pendingQuestion = this.pendingUserQuestion;
+    if (pendingQuestion) {
+      this.pendingQuestionAnswer = null;
+      this.pendingUserQuestion = null;
+      this.pendingUserQuestionId = null;
+      this.emit({
+        type: 'user-question-resolved',
+        interactionId: pendingQuestion.interactionId,
+        outcome: { status: 'cancelled', reason: 'user-stop' },
+      });
+    }
     if (!waitForAuthoritativeTurnEnd) this.turnRunning = false;
     this.syncEditingLease();
     // Full access is deliberately scoped to one live chat and never becomes
@@ -1846,6 +2057,7 @@ class AgentBridgeImpl implements AgentBridge {
     if (this.state === 'connected') {
       this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-stop' });
     }
+    this.pendingInterrupt = false;
     this.emit({ type: 'chat-stopped' });
   }
 
@@ -2286,8 +2498,35 @@ class AgentBridgeImpl implements AgentBridge {
     return requestId;
   }
 
+  answerUserQuestion(interactionId: string, answers: Record<string, UserQuestionAnswer>): string {
+    const responseId = globalThis.crypto?.randomUUID?.()
+      ?? `question-${Date.now().toString(36)}-${++this.requestSeq}`;
+    const frame = {
+      v: AGENT_PROTOCOL_VERSION,
+      type: 'user-question-answer',
+      interactionId,
+      responseId,
+      answers,
+    };
+    this.pendingQuestionAnswer = { interactionId, responseId, frame };
+    this.sendJson(frame);
+    return responseId;
+  }
+
   interrupt(): void {
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' });
+    const pendingQuestion = this.pendingUserQuestion;
+    if (pendingQuestion) {
+      this.pendingQuestionAnswer = null;
+      this.pendingUserQuestion = null;
+      this.pendingUserQuestionId = null;
+      this.syncEditingLease();
+      this.emit({
+        type: 'user-question-resolved',
+        interactionId: pendingQuestion.interactionId,
+        outcome: { status: 'cancelled', reason: 'user-stop' },
+      });
+    }
+    this.pendingInterrupt = !this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' });
   }
 
   /**
@@ -2425,6 +2664,10 @@ class AgentBridgeImpl implements AgentBridge {
     this.clearReconnectTimer();
     this.requests.cancelAll();
     this.toolResponses.clear();
+    this.pendingQuestionAnswer = null;
+    this.pendingUserQuestionId = null;
+    this.pendingUserQuestion = null;
+    this.pendingInterrupt = false;
     this.abortSocket();
     this.listeners.clear();
     this.revealUnsub?.();

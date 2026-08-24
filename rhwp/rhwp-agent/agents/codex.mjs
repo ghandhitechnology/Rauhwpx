@@ -15,6 +15,15 @@ import {
   validateExecutionMode,
 } from './backend.mjs';
 import { createCodexRolloutWatcher } from './codex-rollout-watcher.mjs';
+import { createCodexAppServerSession } from './codex-app-server.mjs';
+export {
+  CODEX_REQUEST_USER_INPUT_METHOD,
+  codexDefaultModeUserInputEnabled,
+  decodeCodexRequestUserInputFrame,
+  encodeCodexRequestUserInputFrame,
+  handleCodexRequestUserInputFrame,
+  selectCodexUserInputTransport,
+} from './provider-user-input.mjs';
 import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
@@ -150,15 +159,16 @@ export function formatCodexExitError(stderrText, code, signal, token) {
  * @param {import('./backend.mjs').BackendOptions} opts
  * @returns {import('./backend.mjs').AgentSession}
  */
-export function createCodexSession(opts, {
+export function createLegacyCodexSession(opts, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
   createRolloutWatcher = createCodexRolloutWatcher,
+  initialThreadId = null,
 } = {}) {
   const onEvent = opts.onEvent;
 
   /** @type {string | null} */
-  let threadId = null;
+  let threadId = initialThreadId;
   /** @type {import('node:child_process').ChildProcess | null} */
   let child = null;
   let turnOpen = false;
@@ -223,7 +233,8 @@ export function createCodexSession(opts, {
           return;
         }
         if (itemType === 'mcp_tool_call') {
-          if (!loggedToolCallSample) {
+          const toolName = String(item.tool ?? item.name ?? 'mcp_tool').replace(/^mcp__rhwp__/, '');
+          if (!loggedToolCallSample && toolName !== 'ask_user_question') {
             loggedToolCallSample = true;
             process.stderr.write(`[codex] first mcp_tool_call item: ${JSON.stringify(item).slice(0, 1000)}\n`);
           }
@@ -232,7 +243,7 @@ export function createCodexSession(opts, {
               type: 'tool-call',
               agent: 'codex',
               callId: itemId,
-              tool: String(item.tool ?? item.name ?? 'mcp_tool').replace(/^mcp__rhwp__/, ''),
+              tool: toolName,
               argsJson: JSON.stringify(item.arguments ?? {}),
             });
           } else if (type === 'item.completed' || type === 'item.failed') {
@@ -489,4 +500,31 @@ export function createCodexSession(opts, {
       return exited;
     },
   };
+}
+
+/**
+ * Prefer Codex app-server for root chat sessions that can surface native
+ * request_user_input cards. The app-server adapter owns its pre-turn feature
+ * negotiation and falls back to the legacy `codex exec` transport only when
+ * that negotiation proves native input unavailable. Worker sessions and hosts
+ * without the provider-neutral callback keep the legacy transport directly.
+ *
+ * @param {import('./backend.mjs').BackendOptions} opts
+ * @param {any} [dependencies]
+ * @returns {import('./backend.mjs').AgentSession}
+ */
+export function createCodexSession(opts, dependencies = {}) {
+  const rootRole = opts.agentRole === 'chat' || opts.agentRole === 'root';
+  if (typeof opts.requestUserInput !== 'function' || !rootRole) {
+    return createLegacyCodexSession(opts, dependencies);
+  }
+  return createCodexAppServerSession(opts, {
+    ...dependencies,
+    prepareHome: dependencies.prepareHome ?? prepareCodexHome,
+    createRolloutWatcher: dependencies.createRolloutWatcher ?? createCodexRolloutWatcher,
+    createLegacySession: (threadId) => createLegacyCodexSession(opts, {
+      ...dependencies,
+      initialThreadId: threadId,
+    }),
+  });
 }

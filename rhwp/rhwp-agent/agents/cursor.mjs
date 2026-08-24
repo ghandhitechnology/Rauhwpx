@@ -29,6 +29,21 @@ import {
   processTreeSpawnOptions,
   terminateProcessTree,
 } from '../process-tree.mjs';
+import { acpMcpServer, createPersistentAcpSession } from './acp-session.mjs';
+import {
+  CURSOR_ASK_QUESTION_METHOD,
+  decodeCursorAskQuestionFrame,
+  encodeCursorAskQuestionFrame,
+  handleCursorAskQuestionFrame,
+  selectCursorUserInputTransport,
+} from './provider-user-input.mjs';
+export {
+  CURSOR_ASK_QUESTION_METHOD,
+  decodeCursorAskQuestionFrame,
+  encodeCursorAskQuestionFrame,
+  handleCursorAskQuestionFrame,
+  selectCursorUserInputTransport,
+};
 
 /** 세션 디렉터리에 새로 저작하는 파일 — 영속 홈에서 링크로 끌어오지 않는다. */
 const AUTHORED_FILES = new Set(['mcp.json', 'cli-config.json']);
@@ -340,6 +355,7 @@ function taskNotificationStatus(status) {
 export function createCursorSession(opts, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
+  createAcpSession = createPersistentAcpSession,
 } = {}) {
   const onEvent = opts.onEvent;
   const lifecycle = createTurnProcessLifecycle({
@@ -354,6 +370,16 @@ export function createCursorSession(opts, {
   /** @type {string | null} */
   let chatId = null;
   let currentModel = opts.model ?? null;
+  let nativeDisabled = selectCursorUserInputTransport(opts, {
+    transport: 'acp',
+    methods: [CURSOR_ASK_QUESTION_METHOD],
+  }) !== 'native-acp';
+  /** @type {ReturnType<typeof createPersistentAcpSession>|null} */
+  let nativeSession = null;
+  let nativeRestart = Promise.resolve();
+  let nativeTurnToken = 0;
+  let nativeSessionInfoEmitted = false;
+  const acpToolState = new Map();
 
   // ── 서브에이전트 task 추적 ────────────────────────────────────────
   // cursor 의 서브에이전트 표면은 tool_call 의 taskToolCall oneof 하나뿐이고,
@@ -744,6 +770,200 @@ export function createCursorSession(opts, {
     };
   }
 
+  function emitNativeSessionInfo() {
+    if (nativeSessionInfoEmitted || !chatId) return;
+    nativeSessionInfoEmitted = true;
+    onEvent({
+      type: 'session-info',
+      agent: 'cursor',
+      sessionId: chatId,
+      ...(currentModel ? { model: currentModel } : {}),
+    });
+  }
+
+  /** ACP updates are projected onto the same compact event vocabulary as stream-json. */
+  function handleNativeUpdate(update) {
+    emitNativeSessionInfo();
+    const kind = String(update?.sessionUpdate ?? '');
+    if (kind === 'agent_message_chunk') {
+      const text = typeof update.content?.text === 'string' ? update.content.text : '';
+      if (text) onEvent({ type: 'text-delta', agent: 'cursor', text });
+      return;
+    }
+    if (kind === 'usage_update') {
+      const usage = normalizeUsageTokens(update.usage ?? update);
+      if (usage) onEvent({ type: 'usage', agent: 'cursor', model: currentModel, usage });
+      return;
+    }
+    if (kind !== 'tool_call' && kind !== 'tool_call_update') return;
+    const callId = String(update.toolCallId ?? '');
+    if (!callId) return;
+    const previous = acpToolState.get(callId) ?? {};
+    const merged = { ...previous, ...update };
+    acpToolState.set(callId, merged);
+    if (!previous.emitted) {
+      merged.emitted = true;
+      onEvent({
+        type: 'tool-call',
+        agent: 'cursor',
+        callId,
+        tool: String(merged.name ?? merged.title ?? merged.kind ?? 'tool'),
+        argsJson: JSON.stringify(merged.rawInput ?? {}),
+      });
+    }
+    const status = String(merged.status ?? '');
+    if ((status === 'completed' || status === 'failed') && !previous.finished) {
+      merged.finished = true;
+      onEvent({
+        type: 'tool-result',
+        agent: 'cursor',
+        callId,
+        ok: status === 'completed',
+        resultPreview: truncate(JSON.stringify(update.rawOutput ?? update.content ?? null)),
+      });
+    }
+  }
+
+  function makeNativeSession() {
+    const runtime = mcpRuntimeFor(opts);
+    return createAcpSession({
+      clientName: 'rhwp-cursor',
+      command: opts.cursorBin ?? 'cursor-agent',
+      args: ['acp'],
+      cwd: opts.rootDir,
+      env: (() => {
+        const childEnv = isolatedProcessEnv(opts, opts.providerEnv ?? process.env);
+        delete childEnv.CURSOR_CONFIG_DIR;
+        return childEnv;
+      })(),
+      authMethodId: 'cursor_login',
+      mcpServers: [acpMcpServer('rhwp', {
+        ...runtime,
+        env: {
+          ...runtime.env,
+          RHWP_WS_URL: `ws://127.0.0.1:${opts.hubPort}/mcp`,
+          RHWP_AGENT_TOKEN: opts.token,
+          RHWP_AGENT_NAME: 'cursor',
+          ...mcpCapabilityEnv(opts),
+        },
+      })],
+      resumeSessionId: chatId,
+      getUnrestricted: () => opts.permissionProfile === 'unrestricted' && !isPlanningRestricted(opts),
+      requestHandlers: [{
+        method: CURSOR_ASK_QUESTION_METHOD,
+        async handler(ctx) {
+          const response = await handleCursorAskQuestionFrame(opts, {
+            jsonrpc: '2.0', id: ctx.requestId,
+            method: CURSOR_ASK_QUESTION_METHOD,
+            params: ctx.params,
+          }, ctx.signal);
+          return response.result;
+        },
+      }],
+      onSessionStarted(info) {
+        chatId = String(info.sessionId);
+        nativeSessionInfoEmitted = false;
+      },
+      onSessionUpdate: handleNativeUpdate,
+    }, { spawnProcess, terminateProcess });
+  }
+
+  function prepareNativeHome() {
+    if (!opts.isolatedHome) throw new Error('Cursor 세션에는 격리 홈이 필요합니다.');
+    const sessionCursorDir = path.join(String(opts.isolatedHome), '.cursor');
+    let sourceCliConfig = null;
+    if (opts.cursorSourceDir) {
+      try {
+        sourceCliConfig = JSON.parse(readFileSync(path.join(String(opts.cursorSourceDir), 'cli-config.json'), 'utf8'));
+      } catch {}
+    }
+    prepareCursorHome(sessionCursorDir, opts.cursorSourceDir, {
+      mcpConfig: buildCursorMcpConfig(opts),
+      cliConfig: buildCursorCliConfig(opts, sourceCliConfig),
+    });
+  }
+
+  function startLegacyTurn(prompt) {
+    let proc;
+    try {
+      prepareNativeHome();
+      const childEnv = isolatedProcessEnv(opts, opts.providerEnv ?? process.env);
+      delete childEnv.CURSOR_CONFIG_DIR;
+      proc = spawnProcess(opts.cursorBin ?? 'cursor-agent', buildCursorArgv(opts, chatId, prompt), {
+        ...processTreeSpawnOptions(),
+        cwd: opts.rootDir,
+        env: childEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      lifecycle.failStart(e);
+      return;
+    }
+    const token = ++turnToken;
+    const finishOnClose = () => {
+      if (token !== turnToken || lifecycle.isDisposed()) return;
+      clearSettleTimer();
+      clearExitSweepTimer();
+      if (pendingTurnResult) {
+        settleTurn();
+        return;
+      }
+      sweepOpenTasks();
+    };
+    proc.on('close', finishOnClose);
+    proc.on('exit', () => {
+      if (token !== turnToken || lifecycle.isDisposed() || exitSweepTimer) return;
+      exitSweepTimer = setTimeout(finishOnClose, TASK_SETTLE_GRACE_MS);
+      exitSweepTimer.unref?.();
+    });
+    lifecycle.attachChild(proc, makeHandler());
+  }
+
+  async function runNativeTurn(prompt, token) {
+    let promptStarted = false;
+    try {
+      await nativeRestart;
+      if (!nativeSession) nativeSession = makeNativeSession();
+      prepareNativeHome();
+      const mode = normalizeExecutionMode(opts);
+      await nativeSession.configure({
+        modeAliases: mode.workflow === 'plan' && mode.phase === 'planning'
+          ? ['plan', 'architect']
+          : ['agent', 'code', 'default'],
+        model: opts.model === 'auto' ? null : opts.model,
+        effort: opts.effort,
+      });
+      chatId = nativeSession.getSessionId() ?? chatId;
+      // Transport selection is atomic at the prompt boundary. Once ACP owns
+      // the turn, a provider/question failure must settle that turn instead of
+      // replaying the same user message through the legacy transport.
+      promptStarted = true;
+      const response = await nativeSession.prompt(prompt);
+      if (token !== nativeTurnToken || !lifecycle.isTurnOpen()) return;
+      emitNativeSessionInfo();
+      lifecycle.markTurnCompleted();
+      const usage = normalizeUsageTokens(response?.usage);
+      if (usage) onEvent({ type: 'usage', agent: 'cursor', model: currentModel, usage });
+      pendingTurnResult = {
+        stopReason: response?.stopReason ?? 'end_turn',
+        errorMessage: response?.stopReason === 'refusal' ? 'Cursor refused the request.' : undefined,
+      };
+      settleIfReady();
+    } catch (error) {
+      if (token !== nativeTurnToken || !lifecycle.isTurnOpen()) return;
+      if (!promptStarted) {
+        nativeDisabled = true;
+        const failed = nativeSession;
+        nativeSession = null;
+        try { await failed?.dispose(); } catch {}
+        startLegacyTurn(prompt);
+        return;
+      }
+      onEvent({ type: 'error', agent: 'cursor', message: error?.message ?? String(error) });
+      lifecycle.endTurn({ type: 'turn-end', agent: 'cursor', stopReason: 'failed' });
+    }
+  }
+
   return {
     agent: 'cursor',
     getSessionId() {
@@ -752,6 +972,7 @@ export function createCursorSession(opts, {
     sendUserMessage(text) {
       if (lifecycle.isDisposed()) return;
       resetTurnTaskState();
+      acpToolState.clear();
       lifecycle.beginTurn();
 
       const mode = normalizeExecutionMode(opts);
@@ -769,69 +990,18 @@ export function createCursorSession(opts, {
         lifecycle.endTurn({ type: 'turn-end', agent: 'cursor', stopReason: 'failed' });
         return;
       }
-
-      let proc;
-      try {
-        if (!opts.isolatedHome) throw new Error('Cursor 세션에는 격리 홈이 필요합니다.');
-        const sessionCursorDir = path.join(String(opts.isolatedHome), '.cursor');
-        let sourceCliConfig = null;
-        if (opts.cursorSourceDir) {
-          try {
-            sourceCliConfig = JSON.parse(readFileSync(path.join(String(opts.cursorSourceDir), 'cli-config.json'), 'utf8'));
-          } catch {}
-        }
-        // 인증/프로필/토큰이 바뀔 수 있으므로 스폰마다 다시 저작한다.
-        prepareCursorHome(sessionCursorDir, opts.cursorSourceDir, {
-          mcpConfig: buildCursorMcpConfig(opts),
-          cliConfig: buildCursorCliConfig(opts, sourceCliConfig),
-        });
-        const childEnv = isolatedProcessEnv(opts, opts.providerEnv ?? process.env);
-        // 상속된 CURSOR_CONFIG_DIR 은 HOME 보다 우선해 cli-config.json 을 다른
-        // 디렉터리에서 읽게 만든다 — 이번 턴의 권한 프로필이 통째로 무시되므로 지운다.
-        delete childEnv.CURSOR_CONFIG_DIR;
-        proc = spawnProcess(opts.cursorBin ?? 'cursor-agent', buildCursorArgv(opts, chatId, prompt), {
-          ...processTreeSpawnOptions(),
-          cwd: opts.rootDir,
-          env: childEnv,
-          // 프롬프트는 positional 인자다 — stdin 은 닫아 둔다.
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-      } catch (e) {
-        lifecycle.failStart(e);
+      if (nativeDisabled) {
+        startLegacyTurn(prompt);
         return;
       }
-      // 프로세스가 죽으면 열린 task 를 먼저 정리한다. attachChild 보다 먼저 등록해야
-      // 수명주기의 turn-end 앞에 task-end 가 나간다 — 매달린 카드 없이 턴이 닫힌다.
-      // 보류해 둔 result 가 있으면 그 stopReason/errorMessage 로 직접 닫는다
-      // (수명주기의 폴백은 result 내용을 모른다). 카드가 열린 채 result 를 받아
-      // 붙들고 있던 턴은 이 경로가 유일한 종결점이다.
-      const token = ++turnToken;
-      const finishOnClose = () => {
-        if (token !== turnToken || lifecycle.isDisposed()) return;
-        clearSettleTimer();
-        clearExitSweepTimer();
-        if (pendingTurnResult) {
-          settleTurn();
-          return;
-        }
-        sweepOpenTasks();
-      };
-      proc.on('close', finishOnClose);
-      proc.on('exit', () => {
-        if (token !== turnToken || lifecycle.isDisposed() || exitSweepTimer) return;
-        // 'exit' 은 stdout 꼬리가 파싱되기 전에 오므로 여기서 바로 쓸어 담지 않는다.
-        // 자손이 파이프를 붙들어 'close' 가 끝내 오지 않는 경우를 대비해, 수명주기의
-        // 종료 유예(2s)보다 짧은 타이머로만 정리를 예약한다.
-        exitSweepTimer = setTimeout(finishOnClose, TASK_SETTLE_GRACE_MS);
-        exitSweepTimer.unref?.();
-      });
-      // 턴 상태는 스폰마다 새로 만든 핸들러가 들고 있다 — 재생 필터가 턴 경계에서 초기화된다.
-      lifecycle.attachChild(proc, makeHandler());
+      const token = ++nativeTurnToken;
+      void runNativeTurn(prompt, token);
     },
     setPermissionProfile(profile) {
       if (lifecycle.isTurnOpen()) throw new Error('Permission profile can only change between turns');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
       opts.permissionProfile = profile;
+      if (nativeSession) nativeRestart = nativeSession.restart();
     },
     async setExecutionMode(mode) {
       if (lifecycle.isTurnOpen()) throw new Error('Execution mode can only change between turns');
@@ -841,6 +1011,10 @@ export function createCursorSession(opts, {
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
+      if (nativeSession) {
+        nativeRestart = nativeSession.restart();
+        await nativeRestart;
+      }
     },
     interrupt() {
       // 열린 task 를 먼저 stopped 로 닫고 turn-end 를 낸다.
@@ -848,12 +1022,16 @@ export function createCursorSession(opts, {
       clearExitSweepTimer();
       pendingTurnResult = null;
       sweepOpenTasks();
+      nativeTurnToken += 1;
+      if (!nativeDisabled) void nativeSession?.cancel().catch(() => {});
       lifecycle.interrupt();
     },
-    dispose() {
+    async dispose() {
       clearSettleTimer();
       clearExitSweepTimer();
-      return lifecycle.dispose();
+      nativeTurnToken += 1;
+      const [, legacy] = await Promise.allSettled([nativeSession?.dispose(), lifecycle.dispose()]);
+      return legacy.status === 'fulfilled' ? legacy.value : false;
     },
   };
 }

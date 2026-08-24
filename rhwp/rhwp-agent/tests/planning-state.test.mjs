@@ -112,6 +112,25 @@ test('plan document writes are blocked until implementing', () => {
   }), true);
 });
 
+test('user interaction is authorized only while planning or implementing', () => {
+  for (const phase of ['planning', 'implementing']) {
+    assert.equal(authorizeToolCall({
+      category: 'user-interaction', tool: 'ask_user_question', workflow: 'plan', phase,
+      expectedEpoch: 7, receivedEpoch: 7,
+    }), true);
+  }
+  for (const phase of ['awaiting-approval', 'switching']) {
+    assert.throws(() => authorizeToolCall({
+      category: 'user-interaction', tool: 'ask_user_question', workflow: 'plan', phase,
+      expectedEpoch: 7, receivedEpoch: 7,
+    }), (error) => error.code === (phase === 'switching' ? 'WORKFLOW_SWITCHING' : 'INVALID_PLAN_PHASE'));
+  }
+  assert.equal(authorizeToolCall({
+    category: 'user-interaction', tool: 'ask_user_question', workflow: 'direct', phase: null,
+    expectedEpoch: 7, receivedEpoch: undefined,
+  }), true);
+});
+
 test('plan calls fail closed on missing/stale epochs; direct calls keep legacy compatibility', () => {
   assert.throws(() => authorizeToolCall({
     category: 'document-read', tool: 'get_structure', workflow: 'plan', phase: 'planning',

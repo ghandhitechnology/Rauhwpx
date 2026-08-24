@@ -166,6 +166,9 @@ export function authorizeToolCall(input) {
   if (input.category === 'document-write' && input.phase !== 'implementing') {
     throw workflowError('PLAN_WRITE_BLOCKED', `Document writes are blocked during the ${input.phase} phase`);
   }
+  if (input.category === 'user-interaction' && input.phase !== 'planning' && input.phase !== 'implementing') {
+    throw workflowError('INVALID_PLAN_PHASE', `${input.tool} is unavailable during the ${input.phase} phase`);
+  }
   if (input.category === 'planning-control' && input.phase !== 'planning') {
     throw workflowError('INVALID_PLAN_PHASE', `${input.tool} is only available during the planning phase`);
   }

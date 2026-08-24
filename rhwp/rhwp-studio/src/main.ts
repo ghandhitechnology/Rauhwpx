@@ -251,7 +251,10 @@ function setAgentEditingLease(lease: AgentEditingLease): void {
   editorArea?.setAttribute('aria-busy', lease.active ? 'true' : 'false');
   if (frame) frame.hidden = !lease.active;
   if (status) status.hidden = !lease.active;
-  if (statusLabel) statusLabel.textContent = `${AGENT_LABEL[lease.agent]}가 문서를 편집 중이에요`;
+  if (statusLabel) {
+    statusLabel.textContent = `${AGENT_LABEL[lease.agent]}가 문서를 편집 중이에요`;
+    if (lease.waitingForUser) statusLabel.textContent = `${AGENT_LABEL[lease.agent]}가 답변을 기다리고 있어요`;
+  }
   inputHandler?.setUserEditingLocked(lease.active);
   toolbar?.setEnabled(wasm.pageCount > 0 && !documentReadOnly && !lease.active);
   eventBus.emit('command-state-changed');

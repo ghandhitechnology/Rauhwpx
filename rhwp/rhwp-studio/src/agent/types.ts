@@ -4,7 +4,7 @@
  * Normative shapes shared by the studio bridge (bridge.ts / tool-executor.ts /
  * revision.ts), the pending-edit manager (pending-edits.ts / pending-overlay.ts)
  * and the sidebar UI (ui/agent-sidebar/). Wire shapes mirror the rhwp-agent hub
- * protocol v3.
+ * protocol v4.
  */
 import type { WasmBridge } from '../core/wasm-bridge.ts';
 import type { EventBus } from '../core/event-bus.ts';
@@ -12,7 +12,7 @@ import type { InputHandler } from '../engine/input-handler.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 
-export const AGENT_PROTOCOL_VERSION = 3;
+export const AGENT_PROTOCOL_VERSION = 4;
 
 export type AgentName = 'claude' | 'codex' | 'pi' | 'grok' | 'cursor';
 
@@ -20,6 +20,7 @@ export type AgentName = 'claude' | 'codex' | 'pi' | 'grok' | 'cursor';
 export interface AgentEditingLease {
   active: boolean;
   agent: AgentName;
+  waitingForUser?: boolean;
 }
 export type PermissionProfile = 'safe' | 'unrestricted';
 export type WritingStyleLanguage = 'ko' | 'en';
@@ -33,6 +34,45 @@ export type WritingStyleProgressState =
   | 'saving';
 export type AgentWorkflow = 'direct' | 'plan';
 export type AgentPhase = 'direct' | 'planning' | 'awaiting-approval' | 'switching' | 'implementing';
+
+export type UserQuestionMode = 'single' | 'multiple';
+
+export interface UserQuestionOption {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface UserQuestion {
+  id: string;
+  header: string;
+  question: string;
+  mode: UserQuestionMode;
+  options: UserQuestionOption[];
+  allowOther: boolean;
+}
+
+export interface UserQuestionAnswer {
+  selectedOptionIds: string[];
+  otherText?: string;
+}
+
+export type UserQuestionOutcome =
+  | { status: 'answered'; answers: Record<string, UserQuestionAnswer> }
+  | { status: 'cancelled'; reason: 'user-stop' }
+  | { status: 'expired'; reason: 'provider-disconnected' | 'hub-restarted' | 'request-invalidated' };
+
+export interface UserQuestionInteraction {
+  interactionId: string;
+  providerRequestId: string;
+  threadId: string;
+  turnId: string;
+  agent: AgentName;
+  source: 'native' | 'mcp';
+  createdAt: string;
+  updatedAt: string;
+  questions: UserQuestion[];
+}
 
 /** 에이전트 참고자료의 수명 범위. 파일 본문은 허브가 보관하며 브라우저에는 메타데이터만 둔다. */
 export type ReferenceScope = 'chat' | 'document' | 'global';
@@ -558,6 +598,9 @@ export type SidebarEvent =
       latestPlan: StructuredPlan | null;
     }
   | { type: 'chat-stopped' }
+  | { type: 'user-question-requested'; interaction: UserQuestionInteraction; replayed?: boolean }
+  | { type: 'user-question-resolved'; interactionId: string; outcome: UserQuestionOutcome }
+  | { type: 'user-question-answer-result'; interactionId: string; responseId: string; ok: boolean; code?: string; message?: string }
   | { type: 'reference-status'; messageId: string; attachments: MessageReferenceStatus[] }
   | { type: 'templates-catalog'; catalog: TemplateCatalog; change?: { type: 'added' | 'renamed' | 'replaced' | 'deleted'; template: DocumentTemplate } }
   | { type: 'chat-template-changed'; template: DocumentTemplate | null; reason?: string }

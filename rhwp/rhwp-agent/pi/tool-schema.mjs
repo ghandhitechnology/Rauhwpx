@@ -1,6 +1,6 @@
 // pi 확장이 읽어 갈 도구 정의를 만든다 — zod 스키마를 그대로 JSON Schema 로 바꾼다.
 // pi 는 MCP 서버가 아니라 확장으로 도구를 등록하므로, 스키마를 HTTP 로 넘겨준다.
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
 import { filterToolDefinitions } from '../tools.mjs';

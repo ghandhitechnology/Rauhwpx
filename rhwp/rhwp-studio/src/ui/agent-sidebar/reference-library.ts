@@ -342,12 +342,30 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     results.appendChild(list);
   }
 
+  function isAuthorizedSessionTarget(target: ScopeTarget): boolean {
+    if (target.scope === 'global') return true;
+    // The socket opens before its welcome snapshot establishes a provider
+    // session. At that instant the hub intentionally authorizes global only.
+    if (bridge.getActiveAgent() === null) return false;
+    if (target.scope !== 'chat') return true;
+    const pendingQuestion = bridge.getPendingUserQuestion();
+    return !pendingQuestion || pendingQuestion.threadId === target.scopeId;
+  }
+
   async function refreshActiveScope(): Promise<void> {
     const target = scopeTarget();
     const revision = ++requestRevision;
     showError();
     if (!target) {
       status.textContent = '현재 범위에 참고자료를 연결할 수 없습니다.';
+      renderFiles([]);
+      return;
+    }
+    // A v4 welcome can reconstruct a live question before IndexedDB restores
+    // its owning thread. Never probe the transient thread's chat references:
+    // the hub correctly scopes them to the still-running provider thread.
+    if (!isAuthorizedSessionTarget(target)) {
+      status.textContent = '답변을 기다리는 채팅의 참고자료만 사용할 수 있습니다.';
       renderFiles([]);
       return;
     }
@@ -377,7 +395,8 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     const context = options.getContext();
     const targets = (['chat', 'document', 'global'] as const)
       .map((scope) => targetFor(scope, context))
-      .filter((target): target is ScopeTarget => target !== null);
+      .filter((target): target is ScopeTarget => target !== null)
+      .filter(isAuthorizedSessionTarget);
     const settled = await Promise.allSettled(
       targets.map(async (target) => ({
         scope: target.scope,

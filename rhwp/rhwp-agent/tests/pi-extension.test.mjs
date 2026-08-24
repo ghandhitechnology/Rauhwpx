@@ -3,6 +3,7 @@
 // node 내장 모듈뿐이라 의존성 설치 없이 로드된다.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   PATH_GUARDED_TOOLS,
@@ -84,10 +85,10 @@ test('허브 URL 은 토큰/프로필/에폭을 인코딩한다', () => {
   );
 });
 
-test('tool-call 프레임은 v3 계약을 쓴다', () => {
+test('tool-call 프레임은 v4 계약을 쓴다', () => {
   const plain = encodeToolCallFrame(3, 'get_structure', { sectionIdx: 0 }, configFor());
   assert.deepEqual(plain, {
-    v: 3,
+    v: 4,
     type: 'tool-call',
     id: 3,
     tool: 'get_structure',
@@ -98,6 +99,11 @@ test('tool-call 프레임은 v3 계약을 쓴다', () => {
     RHWP_CAPABILITY_EPOCH: '4',
   }));
   assert.equal(withEpoch.capabilityEpoch, '4');
+});
+
+test('Pi user questions have no ordinary 180 second timeout', () => {
+  const source = readFileSync(new URL('../pi/extension/rhwp.ts', import.meta.url), 'utf8');
+  assert.match(source, /tool === 'ask_user_question'\s*\? null\s*:\s*setTimeout/);
 });
 
 test('허브 프레임 해석 — 성공/실패/프로토콜 오류/쓰레기', () => {

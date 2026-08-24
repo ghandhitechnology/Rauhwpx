@@ -59,6 +59,14 @@ test('library searches backend content and exposes loading/error/keyboard semant
   assert.match(library, /contextChanged\(\): void \{\s*contextRevision\+\+;\s*requestRevision\+\+;\s*countRevision\+\+;/);
 });
 
+test('a reconstructed question never probes a transient thread reference scope', () => {
+  assert.match(library, /function isAuthorizedSessionTarget\(target: ScopeTarget\)/);
+  assert.match(library, /bridge\.getActiveAgent\(\) === null/);
+  assert.match(library, /bridge\.getPendingUserQuestion\(\)/);
+  assert.match(library, /pendingQuestion\.threadId === target\.scopeId/);
+  assert.match(library, /\.filter\(isAuthorizedSessionTarget\)/);
+});
+
 test('composer attachments upload into removable staging drafts before their message is sent', () => {
   assert.match(library, /const draftUploads: UploadChip\[\] = \[\]/);
   assert.match(library, /openPicker\(targetFor\('chat', options\.getContext\(\)\), true\)/);
@@ -72,7 +80,7 @@ test('composer attachments upload into removable staging drafts before their mes
   assert.doesNotMatch(sidebar, /if \(!input\.value\) referenceLibrary\.discardDrafts\(\)/);
   assert.match(sidebar, /referenceLibrary\.takeReadyDrafts\(\)/);
   assert.match(sidebar, /bridge\.sendUserMessage\(requestText, skillNameForMessage, staged\.map/);
-  assert.match(sidebar, /send\.disabled = connState !== 'connected' \|\| attachmentsSending \|\| chatStarting \|\| referenceLibrary\.hasBlockingDrafts\(\)/);
+  assert.match(sidebar, /send\.disabled = connState !== 'connected' \|\| attachmentsSending \|\| chatStarting[\s\S]*\|\| \(!questionPending && referenceLibrary\.hasBlockingDrafts\(\)\)/);
   assert.match(css, /\.ag-reference-upload-remove:focus-visible/);
 });
 
