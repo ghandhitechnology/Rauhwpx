@@ -115,6 +115,17 @@ await runTest('table selection and paste without formatting', async ({ page }) =
     ih.cursor.moveTo({
       sectionIndex: 0,
       paragraphIndex: 0,
+      charOffset: 0,
+      parentParaIndex,
+      controlIndex,
+      cellIndex: 1,
+      cellParaIndex: 0,
+      cellPath: [{ controlIndex, cellIndex: 1, cellParaIndex: 0 }],
+    });
+    ih.cursor.setAnchor();
+    ih.cursor.moveTo({
+      sectionIndex: 0,
+      paragraphIndex: 0,
       charOffset: 8,
       parentParaIndex,
       controlIndex,
@@ -141,7 +152,7 @@ await runTest('table selection and paste without formatting', async ({ page }) =
       cancelable: true,
     }));
     const data = new DataTransfer();
-    data.setData('text/plain', 'Plain\nNext');
+    data.setData('text/plain', 'Plain\rNext');
     data.setData('text/html', '<p><span style="font-family: serif; font-size: 36pt">Styled</span></p>');
     ih.textarea.dispatchEvent(new ClipboardEvent('paste', {
       clipboardData: data,
@@ -150,19 +161,41 @@ await runTest('table selection and paste without formatting', async ({ page }) =
     }));
     wasm.pasteHtml = originalPasteHtml;
 
-    const paraCount = wasm.getCellParagraphCount(0, parentParaIndex, controlIndex, 1);
+    const readCell = () => ({
+      paraCount: wasm.getCellParagraphCount(0, parentParaIndex, controlIndex, 1),
+      first: wasm.getTextInCell(0, parentParaIndex, controlIndex, 1, 0, 0, 100),
+      second: wasm.getCellParagraphCount(0, parentParaIndex, controlIndex, 1) > 1
+        ? wasm.getTextInCell(0, parentParaIndex, controlIndex, 1, 1, 0, 100)
+        : '',
+    });
+    const pasted = readCell();
+    ih.performUndo();
+    const undone = readCell();
+    ih.performRedo();
+    const redone = readCell();
     return {
       htmlPasteCalls,
-      paraCount,
-      first: wasm.getTextInCell(0, parentParaIndex, controlIndex, 1, 0, 0, 100),
-      second: wasm.getTextInCell(0, parentParaIndex, controlIndex, 1, 1, 0, 100),
+      pasted,
+      undone,
+      redone,
     };
   }, table);
 
   assert(pasteResult.htmlPasteCalls === 0, 'Ctrl+Shift+V bypasses the formatted HTML paste path');
-  assert(pasteResult.paraCount === 2, 'plain multiline paste preserves cell paragraph boundaries');
-  assert(pasteResult.first.includes('NeighborPlain'), 'plain paste keeps destination text and inserts the first line');
-  assert(pasteResult.second.includes('Next'), 'plain paste inserts the second line in a new cell paragraph');
+  assert(pasteResult.pasted.paraCount === 2, 'plain multiline paste preserves cell paragraph boundaries');
+  assert(pasteResult.pasted.first.includes('Plain'), 'plain paste replaces the selected text with the first line');
+  assert(!pasteResult.pasted.first.includes('Neighbor'), 'plain paste removes the selected destination text');
+  assert(pasteResult.pasted.second.includes('Next'), 'plain paste inserts the second line in a new cell paragraph');
+  assert(
+    pasteResult.undone.paraCount === 1 && pasteResult.undone.first.includes('Neighbor'),
+    'one Undo restores the complete selection and all pasted paragraphs',
+  );
+  assert(
+    pasteResult.redone.paraCount === 2
+      && pasteResult.redone.first.includes('Plain')
+      && pasteResult.redone.second.includes('Next'),
+    'one Redo restores the complete plain-text paste',
+  );
 });
 
 await runTest('image move and rotation use cursor-following previews', async ({ page }) => {

@@ -281,7 +281,6 @@ export class InputHandler {
   /** 마지막 rhwp-studio 내부 복사의 시스템 클립보드 marker token */
   private rhwpClipboardToken: string | null = null;
   private pasteWithoutFormattingArmed = false;
-  private pasteWithoutFormattingTimer: ReturnType<typeof setTimeout> | null = null;
   /** 누름틀 시작 경계에서 왼쪽/Home 이동으로 필드 밖에 머문 상태 */
   private fieldStartExitKey: string | null = null;
   /** 누름틀 끝 경계에서 오른쪽 이동으로 필드 밖에 머문 상태 */
@@ -509,6 +508,7 @@ export class InputHandler {
   private onClickBound: (e: MouseEvent) => void;
   private onDblClickBound: (e: MouseEvent) => void;
   private onKeyDownBound: (e: KeyboardEvent) => void;
+  private onKeyUpBound: (e: KeyboardEvent) => void;
   private onInputBound: (e?: Event) => void;
   private onCompositionStartBound: () => void;
   private onCompositionUpdateBound: (e: CompositionEvent) => void;
@@ -585,6 +585,7 @@ export class InputHandler {
     this.onClickBound = this.onClick.bind(this);
     this.onDblClickBound = this.onDblClick.bind(this);
     this.onKeyDownBound = this.onKeyDown.bind(this);
+    this.onKeyUpBound = this.onKeyUp.bind(this);
     this.onInputBound = this.onInput.bind(this);
     this.onCompositionStartBound = this.onCompositionStart.bind(this);
     this.onCompositionUpdateBound = this.onCompositionUpdate.bind(this);
@@ -592,6 +593,7 @@ export class InputHandler {
     this.onInputBlurBound = () => {
       if (this.isComposing) _text.onCompositionEnd.call(this);
       this.resetIosInputSession();
+      this.pasteWithoutFormattingArmed = false;
       // 블러 시점에는 브라우저가 조합을 스스로 끝내므로 value 정리가 안전하다.
       this.resetTextareaBuffer();
       this.flushDeferredPaginationIfNeeded('input-blur', false);
@@ -623,6 +625,7 @@ export class InputHandler {
     container.addEventListener('contextmenu', this.onContextMenuBound);
     container.addEventListener('mousemove', this.onMouseMoveBound);
     this.textarea.addEventListener('keydown', this.onKeyDownBound);
+    this.textarea.addEventListener('keyup', this.onKeyUpBound);
     this.textarea.addEventListener('input', this.onInputBound);
     this.textarea.addEventListener('compositionstart', this.onCompositionStartBound);
     this.textarea.addEventListener('compositionupdate', this.onCompositionUpdateBound);
@@ -1841,6 +1844,10 @@ export class InputHandler {
   /** 특수 키 처리 (Backspace, Enter, 화살표, Ctrl+Z/Y) */
   private onKeyDown(e: KeyboardEvent): void {
     _keyboard.onKeyDown.call(this, e);
+  }
+
+  private onKeyUp(e: KeyboardEvent): void {
+    _keyboard.onKeyUp.call(this, e);
   }
 
   /** Ctrl/Meta 단축키 처리 */
@@ -3753,6 +3760,14 @@ export class InputHandler {
     _picture.cleanupPictureResizeDrag.call(this);
   }
 
+  /** 문서 전환/해제 중에는 개체 프리뷰를 확정하지 않고 취소한다. */
+  private cancelPicturePreviewDrags(): void {
+    if (this.isPictureResizeDragging) _picture.cleanupPictureResizeDrag.call(this);
+    if (this.isPictureMoveDragging) _picture.cleanupPictureMoveDrag.call(this);
+    if (this.isPictureRotateDragging) _picture.cleanupPictureRotateDrag.call(this);
+    document.removeEventListener('mouseup', this.onMouseUpBound);
+  }
+
   // ─── 그림 이동 드래그 ──────────────────────────────
 
   /** 마우스 드래그로 그림 이동 — 드래그 중 갱신 */
@@ -3866,6 +3881,7 @@ export class InputHandler {
 
   deactivate(): void {
     this.flushDeferredPaginationIfNeeded('before-deactivate', false);
+    this.cancelPicturePreviewDrags();
     this.active = false;
     this.cancelDeferredPaginationFlush();
     this.deferredPaginationRunner.cancel();
@@ -3882,10 +3898,6 @@ export class InputHandler {
     if (this._iosInputTimer) {
       clearTimeout(this._iosInputTimer);
       this._iosInputTimer = null;
-    }
-    if (this.pasteWithoutFormattingTimer) {
-      clearTimeout(this.pasteWithoutFormattingTimer);
-      this.pasteWithoutFormattingTimer = null;
     }
     this.pasteWithoutFormattingArmed = false;
     this._iosAnchor = null;
@@ -3905,6 +3917,7 @@ export class InputHandler {
 
   dispose(): void {
     this.flushDeferredPaginationIfNeeded('before-dispose', false);
+    this.cancelPicturePreviewDrags();
     if (this.isResizeDragging) {
       this.cleanupResizeDrag();
     }
@@ -3933,10 +3946,6 @@ export class InputHandler {
       clearTimeout(this._iosInputTimer);
       this._iosInputTimer = null;
     }
-    if (this.pasteWithoutFormattingTimer) {
-      clearTimeout(this.pasteWithoutFormattingTimer);
-      this.pasteWithoutFormattingTimer = null;
-    }
     this.pasteWithoutFormattingArmed = false;
     this._iosAnchor = null;
     this._iosBeforePageIndex = undefined;
@@ -3952,6 +3961,7 @@ export class InputHandler {
     document.removeEventListener('mousemove', this.onMouseMoveBound);
     document.removeEventListener('mouseup', this.onMouseUpBound);
     this.textarea.removeEventListener('keydown', this.onKeyDownBound);
+    this.textarea.removeEventListener('keyup', this.onKeyUpBound);
     this.textarea.removeEventListener('input', this.onInputBound);
     this.textarea.removeEventListener('compositionstart', this.onCompositionStartBound);
     this.textarea.removeEventListener('compositionupdate', this.onCompositionUpdateBound);

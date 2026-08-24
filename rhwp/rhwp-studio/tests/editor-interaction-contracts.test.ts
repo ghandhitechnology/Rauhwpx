@@ -15,7 +15,7 @@ function block(src: string, startText: string, endText: string): string {
   return src.slice(start, end);
 }
 
-test('Ctrl and Meta Shift+V arm plain-text paste without cancelling the native shortcut', () => {
+test('Ctrl and Meta Shift+V scope plain-text paste to the physical key chord', () => {
   const keyboard = source('src/engine/input-handler-keyboard.ts');
   const earlyKeyDown = block(
     keyboard,
@@ -27,12 +27,16 @@ test('Ctrl and Meta Shift+V arm plain-text paste without cancelling the native s
   assert.match(earlyKeyDown, /e\.shiftKey/);
   assert.match(earlyKeyDown, /!e\.altKey/);
   assert.match(earlyKeyDown, /e\.code === 'KeyV'/);
-  assert.match(earlyKeyDown, /pasteWithoutFormattingArmed = true/);
-  assert.match(earlyKeyDown, /setTimeout/);
+  assert.match(earlyKeyDown, /this\.pasteWithoutFormattingArmed = \(/);
+  assert.doesNotMatch(earlyKeyDown, /setTimeout/);
   assert.doesNotMatch(earlyKeyDown, /preventDefault/);
+
+  const keyUp = block(keyboard, 'export function onKeyUp', 'export function handleCtrlKey');
+  assert.match(keyUp, /e\.code === 'KeyV'/);
+  assert.match(keyUp, /pasteWithoutFormattingArmed = false/);
 });
 
-test('plain-text paste consumes the arm before clipboard precedence and preserves cell newlines', () => {
+test('plain-text paste is one atomic operation that normalizes and preserves cell paragraphs', () => {
   const keyboard = source('src/engine/input-handler-keyboard.ts');
   const paste = block(keyboard, 'export function onPaste', '/** 클립보드의 이미지 파일');
   const plain = block(keyboard, 'function pastePlainText', 'export function prepareRhwpInternalClipboardHtml');
@@ -44,7 +48,11 @@ test('plain-text paste consumes the arm before clipboard precedence and preserve
   const htmlPriority = paste.indexOf('if (html)');
   assert.ok(consume < plainBranch && plainBranch < internalMarker);
   assert.ok(plainBranch < imagePriority && plainBranch < htmlPriority);
-  assert.match(plain, /new SplitParagraphInCellCommand\(this\.cursor\.getPosition\(\)\)/);
+  assert.match(plain, /text\.replace\(\/\\r\\n\?\/g, '\\n'\)/);
+  assert.match(plain, /operationType: 'pastePlainText'/);
+  assert.match(plain, /deleteSelectionImmediate\(wasm, selection\.start, selection\.end\)/);
+  assert.match(plain, /new SplitParagraphInCellCommand\(position\)\.execute\(wasm\)/);
+  assert.doesNotMatch(plain, /kind: 'command'/);
 });
 
 test('triple mousedown selects editable cell text without starting drag selection', () => {
@@ -88,4 +96,17 @@ test('picture resize tracks outside the editor and reuses one preview element', 
   assert.match(renderPreview, /if \(!this\.previewEl\)/);
   assert.match(renderPreview, /this\.previewEl\.style\.left/);
   assert.doesNotMatch(renderPreview, /clearDragPreview\(\)/);
+});
+
+test('editor deactivation cancels picture previews without committing stale geometry', () => {
+  const input = source('src/engine/input-handler.ts');
+  const cancel = block(input, 'private cancelPicturePreviewDrags', '// ─── 그림 이동 드래그');
+  const deactivate = block(input, 'deactivate(): void', 'dispose(): void');
+
+  assert.match(cancel, /cleanupPictureResizeDrag\.call\(this\)/);
+  assert.match(cancel, /cleanupPictureMoveDrag\.call\(this\)/);
+  assert.match(cancel, /cleanupPictureRotateDrag\.call\(this\)/);
+  assert.match(cancel, /removeEventListener\('mouseup', this\.onMouseUpBound\)/);
+  assert.doesNotMatch(cancel, /finishPicture|onMouseUp\.call/);
+  assert.match(deactivate, /this\.cancelPicturePreviewDrags\(\)/);
 });

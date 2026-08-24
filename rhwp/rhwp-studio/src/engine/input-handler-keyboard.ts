@@ -1,7 +1,7 @@
 /** input-handler keyboard methods — extracted from InputHandler class */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { InsertTextCommand, InsertLineBreakCommand, InsertTabCommand, SplitParagraphCommand, SplitParagraphInCellCommand, InsertTextInHeaderFooterCommand, SplitParagraphInHeaderFooterCommand, SplitParagraphInFootnoteCommand, DeleteTextInFootnoteCommand, MergeParagraphInFootnoteCommand } from './command';
+import { InsertTextCommand, InsertLineBreakCommand, InsertTabCommand, SplitParagraphCommand, SplitParagraphInCellCommand, InsertTextInHeaderFooterCommand, SplitParagraphInHeaderFooterCommand, SplitParagraphInFootnoteCommand, DeleteTextInFootnoteCommand, MergeParagraphInFootnoteCommand, deleteSelectionImmediate } from './command';
 import { matchShortcut, defaultShortcuts } from '@/command/shortcut-map';
 import * as _connector from './input-handler-connector';
 import {
@@ -242,33 +242,38 @@ function positionAfterPasteResult(pos: DocumentPosition, parsed: any): DocumentP
   return newPos;
 }
 
-function pastePlainText(this: any, text: string, hasSelection: boolean): void {
-  if (hasSelection) {
-    this.deleteSelection();
-  }
+function pastePlainText(this: any, text: string): void {
   if (!text) return;
 
-  const lines = text.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i]) {
-      this.executeOperation({
-        kind: 'command',
-        command: new InsertTextCommand(
-          this.cursor.getPosition(),
-          lines[i],
-          undefined,
-          this.peekPendingCharFormat?.(),
-        ),
-      });
-    }
-    if (i < lines.length - 1) {
-      if (this.cursor.isInCell() && !this.cursor.isInTextBox()) {
-        this.executeOperation({ kind: 'command', command: new SplitParagraphInCellCommand(this.cursor.getPosition()) });
-      } else if (!this.cursor.isInCell()) {
-        this.executeOperation({ kind: 'command', command: new SplitParagraphCommand(this.cursor.getPosition()) });
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const selection = this.cursor.getSelectionOrdered();
+  const insertAt = selection?.start ?? this.cursor.getPosition();
+  const charFormat = this.peekPendingCharFormat?.();
+  this.cursor.clearSelection();
+
+  // 선택 삭제·다중 문단 삽입을 하나의 스냅샷으로 묶어 paste 한 번이 undo 한 번이 되게 한다.
+  this.executeOperation({
+    kind: 'snapshot',
+    operationType: 'pastePlainText',
+    operation: (wasm: WasmBridge) => {
+      let position = insertAt;
+      if (selection) {
+        position = deleteSelectionImmediate(wasm, selection.start, selection.end);
       }
-    }
-  }
+
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i]) {
+          position = new InsertTextCommand(position, lines[i], undefined, charFormat).execute(wasm);
+        }
+        if (i < lines.length - 1) {
+          position = position.parentParaIndex !== undefined || (position.cellPath?.length ?? 0) > 0
+            ? new SplitParagraphInCellCommand(position).execute(wasm)
+            : new SplitParagraphCommand(position).execute(wasm);
+        }
+      }
+      return position;
+    },
+  });
 }
 
 export function prepareRhwpInternalClipboardHtml(self: any, html: string, text = ''): string {
@@ -426,23 +431,14 @@ const chordMapG: Record<string, string> = {
 export function onKeyDown(this: any, e: KeyboardEvent): void {
   if (!this.active) return;
 
-  if (this.pasteWithoutFormattingTimer) {
-    clearTimeout(this.pasteWithoutFormattingTimer);
-    this.pasteWithoutFormattingTimer = null;
-  }
-  this.pasteWithoutFormattingArmed = false;
-  if (
+  // ClipboardEvent에는 modifier 정보가 없다. 키가 눌린 구간에서만 다음 paste를
+  // 일반 텍스트로 처리한다. 시간 기반 타이머는 뒤의 관계없는 paste를 오염시킬 수 있다.
+  this.pasteWithoutFormattingArmed = (
     (e.ctrlKey || e.metaKey) &&
     e.shiftKey &&
     !e.altKey &&
     (e.code === 'KeyV' || e.key.toLowerCase() === 'v')
-  ) {
-    this.pasteWithoutFormattingArmed = true;
-    this.pasteWithoutFormattingTimer = setTimeout(() => {
-      this.pasteWithoutFormattingArmed = false;
-      this.pasteWithoutFormattingTimer = null;
-    }, 1000);
-  }
+  );
 
   if (this.readOnly || this.userEditingLocked) {
     const key = e.key.toLowerCase();
@@ -1432,6 +1428,12 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
   }
 }
 
+export function onKeyUp(this: any, e: KeyboardEvent): void {
+  if (e.code === 'KeyV' || e.key.toLowerCase() === 'v') {
+    this.pasteWithoutFormattingArmed = false;
+  }
+}
+
 export function handleCtrlKey(this: any, e: KeyboardEvent): void {
   // Ctrl+/ → 커맨드 팔레트 열기
   if (e.key === '/' && !e.shiftKey && !e.altKey) {
@@ -1723,10 +1725,6 @@ export function onCut(this: any, e: ClipboardEvent): void {
 export function onPaste(this: any, e: ClipboardEvent): void {
   const pasteWithoutFormatting = this.pasteWithoutFormattingArmed === true;
   this.pasteWithoutFormattingArmed = false;
-  if (this.pasteWithoutFormattingTimer) {
-    clearTimeout(this.pasteWithoutFormattingTimer);
-    this.pasteWithoutFormattingTimer = null;
-  }
 
   if (!this.active) return;
   e.preventDefault();
@@ -1752,7 +1750,7 @@ export function onPaste(this: any, e: ClipboardEvent): void {
   const html = clipboardData?.getData('text/html') || '';
   const text = clipboardData?.getData('text/plain') || '';
   if (pasteWithoutFormatting) {
-    pastePlainText.call(this, text, hasSelection);
+    pastePlainText.call(this, text);
     return;
   }
   const hasCurrentInternalMarker = hasCurrentRhwpClipboardMarker(this, html);
@@ -1861,8 +1859,8 @@ export function onPaste(this: any, e: ClipboardEvent): void {
     return;
   }
 
-  // 플레인 텍스트 붙여넣기 (fallback — 기존 InsertTextCommand 사용, 정밀 undo 유지)
-  pastePlainText.call(this, text, hasSelection);
+  // 플레인 텍스트 붙여넣기 fallback도 동일한 원자적 경로를 쓴다.
+  pastePlainText.call(this, text);
 }
 
 /** 클립보드의 이미지 파일을 커서 위치에 삽입한다. */
