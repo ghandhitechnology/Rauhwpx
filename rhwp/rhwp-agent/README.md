@@ -175,7 +175,11 @@ answer the same `usage-report`; the key is stored next to the usage log as
 `<app data>/rhwp/usage/` as append-only `events.jsonl` (pruned to 8 days) plus
 `plans.json`, overridable with `RHWP_USAGE_DIR`.
 
-## Writing-style calibration (v2)
+## Writing-style calibration (v3)
+
+The calibrated profile is a person to inhabit, not a sentence-recipe.
+`style.md` leads with a voice portrait; measured numbers are a fingerprint
+checked after drafting, never a target to write toward.
 
 `writing-style-catalog-request` returns `writing-style-catalog` with the
 available Codex and Claude models plus only the OpenRouter models configured

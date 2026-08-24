@@ -43,9 +43,9 @@ const PROGRESS_STAGES: ReadonlyArray<{
   { state: 'reading', label: '문서 읽기', detail: '원고를 안전하게 불러오고 있습니다.' },
   { state: 'extracting', label: '텍스트 추출', detail: '문서 형식에서 분석할 문장을 꺼내고 있습니다.' },
   { state: 'preparing', label: '분석 자료 정돈', detail: '문장 단위를 정리하고 언어를 확인하고 있습니다.' },
-  { state: 'analyzing', label: '표현 습관 분석', detail: '어휘, 문장 구조, 리듬의 반복 패턴을 찾고 있습니다.' },
-  { state: 'synthesizing', label: '문체 규칙 구성', detail: '발견한 패턴을 재사용 가능한 문체 규칙으로 묶고 있습니다.' },
-  { state: 'saving', label: '문체 프로필 저장', detail: '다음 글쓰기부터 사용할 style.md를 준비하고 있습니다.' },
+  { state: 'analyzing', label: '목소리 읽기', detail: '습관의 목록이 아니라, 글에서 어떤 사람인지를 듣고 있습니다.' },
+  { state: 'synthesizing', label: '목소리 담기', detail: '규칙 대신, 이 글을 쓴 사람의 결을 남기고 있습니다.' },
+  { state: 'saving', label: '문체 프로필 저장', detail: '다음 글쓰기부터 그 목소리로 쓸 style.md를 준비하고 있습니다.' },
 ];
 
 type CorpusMode = 'append' | 'replace';
@@ -201,8 +201,8 @@ function localizedActivity(value: string | undefined, fallback: string): string 
     'reading-sample': '문서 읽기',
     'extracting-text': '텍스트 추출',
     'measuring-patterns': '문장 패턴 측정',
-    'model-analysis': '문체 특징 분석',
-    'building-profile': '문체 규칙 구성',
+    'model-analysis': '목소리 읽기',
+    'building-profile': '목소리 담기',
     'saving-profile': '문체 프로필 저장',
   };
   return labels[value ?? ''] ?? safeProgressCopy(value, fallback);
@@ -215,11 +215,11 @@ function localizedDetail(value: string | undefined, fallback: string): string {
     'Preparing writing samples': '새 문서를 분석할 수 있도록 준비하고 있습니다.',
     'Measuring sentence, paragraph, and formatting patterns': '문장, 문단, 서식의 반복 패턴을 측정하고 있습니다.',
     'Finished deterministic pattern measurements': '문장 패턴 측정을 마쳤습니다.',
-    'Comparing recurring sentence structures': '반복되는 문장 구조를 비교하고 있습니다.',
-    'Mapping tone and word-choice patterns': '어조와 단어 선택의 관계를 연결하고 있습니다.',
-    'Forming reusable writing directives': '다시 쓸 수 있는 문체 지침을 구성하고 있습니다.',
+    'Listening for how the voice lands': '문장이 떨어지는 방식을 듣고 있습니다.',
+    'Noticing temperament and unevenness': '기온과 태도, 고르지 않은 곳을 짚고 있습니다.',
+    'Writing a portrait of the person on the page': '이 글을 쓴 사람의 초상을 남기고 있습니다.',
     'Finished model analysis': '모델 분석을 마쳤습니다.',
-    'Building the calibrated writing profile': '찾은 특징으로 문체 프로필을 만들고 있습니다.',
+    'Building the calibrated writing profile': '규칙이 아니라 목소리로 프로필을 만들고 있습니다.',
     'Finished the calibrated writing profile': '문체 프로필 구성을 마쳤습니다.',
     'Saving the profile and its source samples': '문체 프로필과 보정 자료를 저장하고 있습니다.',
     'Saved the calibrated writing profile': '문체 프로필 저장을 마쳤습니다.',
@@ -331,15 +331,15 @@ export function createWritingStyleCalibration(
 
   const introTitle = el('h2', 'ag-calibration-title', '말투 모방 캘리브레이션');
   introTitle.id = 'ag-calibration-title';
-  const introStatement = el('p', 'ag-calibration-statement', 'AI가 당신의 문장 습관을 배우고, 다음 글부터 같은 결로 씁니다.');
+  const introStatement = el('p', 'ag-calibration-statement', '당신이 글에서 어떤 사람인지를 배우고, 다음 글부터 그 목소리로 씁니다.');
   const introDetail = el('p', 'ag-calibration-detail', '먼저 분석할 글의 주 언어를 선택하세요.');
   const languageGroup = el('div', 'ag-calibration-language-group');
   languageGroup.setAttribute('role', 'radiogroup');
   languageGroup.setAttribute('aria-label', '캘리브레이션 언어');
   const languageButtons = new Map<WritingStyleLanguage, HTMLButtonElement>();
   for (const [value, label, detail] of [
-    ['ko', '한국어', '한국어 문장과 어휘를 기준으로 분석'],
-    ['en', 'English', 'Analyze English phrasing and vocabulary'],
+    ['ko', '한국어', '한국어로 쓴 글에서 목소리를 읽습니다'],
+    ['en', 'English', 'Read the voice in the English samples'],
   ] as const) {
     const langButton = el('button', 'ag-calibration-language');
     langButton.type = 'button';
@@ -443,7 +443,7 @@ export function createWritingStyleCalibration(
   panels[1]!.append(uploadTitle, uploadStatement, corpusSection, providerFieldset, dropzone, uploadInput, fileSummary, fileList, uploadError, uploadActions);
 
   const progressHead = el('div', 'ag-calibration-progress-head');
-  const progressTitle = el('h2', 'ag-calibration-title', '문체 지도를 만들고 있습니다');
+  const progressTitle = el('h2', 'ag-calibration-title', '목소리를 읽고 있습니다');
   const progressContext = el('p', 'ag-calibration-progress-context');
   progressHead.append(progressTitle, progressContext);
   const network = createKnowledgeNetwork();
@@ -473,7 +473,7 @@ export function createWritingStyleCalibration(
 
   const resultIconWrap = el('div', 'ag-calibration-result-icon-wrap');
   resultIconWrap.appendChild(createCheckIcon());
-  const resultTitle = el('h2', 'ag-calibration-title', 'style.md가 준비되었습니다');
+  const resultTitle = el('h2', 'ag-calibration-title', '목소리를 기억했습니다');
   const resultMeta = el('p', 'ag-calibration-result-meta');
   const resultCorpus = el('section', 'ag-calibration-result-corpus');
   const resultCorpusHead = el('div', 'ag-calibration-corpus-head');
@@ -488,7 +488,7 @@ export function createWritingStyleCalibration(
   instruction.maxLength = 4_000;
   instruction.placeholder = '예: 결론은 단정적으로 쓰되, 독자에게 지시하는 표현은 부드럽게 써 주세요.';
   instructionLabel.appendChild(instruction);
-  const instructionHint = el('p', 'ag-calibration-instruction-hint', '캘리브레이션된 문체 위에 별도로 적용됩니다.');
+  const instructionHint = el('p', 'ag-calibration-instruction-hint', '기억한 목소리 위에 별도로 적용됩니다.');
   const resultError = el('div', 'ag-calibration-error');
   resultError.setAttribute('role', 'alert');
   const resultActions = el('div', 'ag-calibration-actions');
