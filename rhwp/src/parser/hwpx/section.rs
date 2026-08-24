@@ -2689,17 +2689,17 @@ fn parse_picture(
                         for attr in ce.attributes().flatten() {
                             match attr.key.as_ref() {
                                 b"x" => {
-                                    let v = parse_u32(&attr);
-                                    shape_attr.offset_x = v as i32;
+                                    let v = parse_i32_wrapping(&attr);
+                                    shape_attr.offset_x = v;
                                     if !has_pos {
-                                        common.horizontal_offset = v;
+                                        common.horizontal_offset = v as u32;
                                     }
                                 }
                                 b"y" => {
-                                    let v = parse_u32(&attr);
-                                    shape_attr.offset_y = v as i32;
+                                    let v = parse_i32_wrapping(&attr);
+                                    shape_attr.offset_y = v;
                                     if !has_pos {
-                                        common.vertical_offset = v;
+                                        common.vertical_offset = v as u32;
                                     }
                                 }
                                 _ => {}
@@ -3192,17 +3192,17 @@ fn parse_object_layout_child(
             for attr in ce.attributes().flatten() {
                 match attr.key.as_ref() {
                     b"x" => {
-                        let v = parse_u32(&attr);
-                        shape_attr.offset_x = v as i32;
+                        let v = parse_i32_wrapping(&attr);
+                        shape_attr.offset_x = v;
                         if !*has_pos {
-                            common.horizontal_offset = v;
+                            common.horizontal_offset = v as u32;
                         }
                     }
                     b"y" => {
-                        let v = parse_u32(&attr);
-                        shape_attr.offset_y = v as i32;
+                        let v = parse_i32_wrapping(&attr);
+                        shape_attr.offset_y = v;
                         if !*has_pos {
-                            common.vertical_offset = v;
+                            common.vertical_offset = v as u32;
                         }
                     }
                     _ => {}
