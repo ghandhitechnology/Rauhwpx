@@ -135,7 +135,22 @@ async function openPage(context: test.TestContext): Promise<Page | null> {
         return () => undefined;
       },
       enable: noOp,
-      checkpoint: noOp,
+      checkpoint: async (message?: string) => {
+        const priorHead = state.commits[0];
+        priorHead.isHead = false;
+        priorHead.branchLabels = [];
+        state.commits.unshift({
+          ...priorHead,
+          id: 'newest7',
+          shortId: 'newest7',
+          title: message || 'Newest checkpoint',
+          createdAt: Date.now(),
+          parentIds: [priorHead.id],
+          branchLabels: ['feature'],
+          isHead: true,
+        });
+        listener(state);
+      },
       loadMore: noOp,
       restore: noOp,
       adopt: noOp,
@@ -272,6 +287,35 @@ test('branch graph stays operable, directional, locked, and responsive', async (
       assert.equal(branchGeometry.rowsInside, true, `${width}px branch row overflow`);
       await page.click('[data-tab="history"]');
     }
+  } finally {
+    await page.close();
+  }
+});
+
+test('creating a commit selects the new commit and shows its options', async (context) => {
+  const page = await openPage(context);
+  if (!page) return;
+  try {
+    await page.click('[data-commit-id="docs3"]');
+    assert.equal(
+      await page.$eval('.ag-version-row.ag-selected', (node) => node.getAttribute('data-commit-id')),
+      'docs3',
+    );
+
+    await page.click('button[aria-label="새 커밋 만들기"]');
+    await page.type('.ag-version-prompt-input', 'Newest manual commit');
+    await page.click('.ag-version-prompt-actions .ag-versions-primary');
+    await page.waitForSelector('[data-commit-id="newest7"].ag-selected');
+
+    assert.equal(
+      await page.$eval('.ag-version-row.ag-selected', (node) => node.getAttribute('data-commit-id')),
+      'newest7',
+    );
+    assert.equal(
+      await page.$eval('.ag-versions-inspector-title', (node) => node.textContent),
+      'Newest manual commit',
+    );
+    assert.ok(await page.$('.ag-versions-inspector-actions'));
   } finally {
     await page.close();
   }

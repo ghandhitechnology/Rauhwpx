@@ -517,6 +517,17 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     }
   }
 
+  async function createCheckpointAndSelect(message: string): Promise<void> {
+    const previousCommitIds = new Set(current.commits.map((commit) => commit.id));
+    await controller.checkpoint(message);
+    const next = controller.getState();
+    selectedCommitId = next.commits.find((commit) => !previousCommitIds.has(commit.id))?.id
+      ?? next.commits.find((commit) => commit.isHead)?.id
+      ?? next.commits[0]?.id
+      ?? null;
+    render(next);
+  }
+
   function askName(label: string, initial = ''): Promise<string | null> {
     return requestVersionText({
       title: label,
@@ -1024,7 +1035,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       label: '메시지 (비워 두면 자동 제목)',
       optional: true,
     });
-    if (message !== null) await perform(() => controller.checkpoint(message));
+    if (message !== null) await perform(() => createCheckpointAndSelect(message));
   })());
   mergeButton.addEventListener('click', () => void (async () => {
     const candidates = current.branches.filter((branch) => !branch.isActive);
