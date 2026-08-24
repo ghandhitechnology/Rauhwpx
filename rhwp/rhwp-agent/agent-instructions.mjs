@@ -167,9 +167,9 @@ export class AgentInstructionsStore {
         if (error?.code !== 'ENOENT' && error?.code !== 'INSTRUCTIONS_METADATA_INVALID') {
           throw error;
         }
-        // Corrupt, oversized, or symlinked metadata must not brick hub startup.
-        // Treat it as absent; the timestamp-based seed below invalidates any
-        // practical prior numeric revision and atomically replaces the sidecar.
+        // 손상되었거나 너무 크거나 심볼릭 링크인 메타데이터 때문에 허브 시작이
+        // 중단되어서는 안 된다. 없는 것으로 처리하고, 아래의 타임스탬프 기반
+        // 시드로 기존의 실질적인 숫자 리비전을 무효화한 뒤 사이드카를 원자적으로 교체한다.
       }
 
       if (!metadata) {
