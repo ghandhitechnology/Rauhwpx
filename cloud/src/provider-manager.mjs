@@ -22,6 +22,9 @@ export class ProviderManager {
     now = Date.now,
     providerAuthDirectory,
     providerCliDirectory = '/opt/rauhwpx-cloud/provider-cli',
+    podmanConnection,
+    workerImage,
+    useContainerProbe = false,
     vault,
   } = {}) {
     this.sessionStore = sessionStore;
@@ -30,6 +33,9 @@ export class ProviderManager {
     this.now = now;
     this.providerAuthDirectory = providerAuthDirectory;
     this.providerCliDirectory = providerCliDirectory;
+    this.podmanConnection = podmanConnection;
+    this.workerImage = workerImage;
+    this.useContainerProbe = useContainerProbe;
     this.vault = vault;
   }
 
@@ -69,7 +75,18 @@ export class ProviderManager {
         }));
       };
       try {
-        processHandle = this.spawnProcess(command, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        if (this.useContainerProbe) {
+          const authRoot = path.join(this.providerAuthDirectory, provider);
+          const args = [
+            ...(this.podmanConnection ? ['--connection', this.podmanConnection] : []),
+            'run', '--rm', '--read-only', '--network=none',
+            ...(existsSync(authRoot) ? ['--volume', `${authRoot}:/workspace/home:ro`] : []),
+            '--entrypoint', command, this.workerImage, '--version',
+          ];
+          processHandle = this.spawnProcess('podman', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        } else {
+          processHandle = this.spawnProcess(command, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        }
       } catch (error) {
         finish({ available: false, errorCode: 'PROBE_FAILED', errorMessage: error.message });
         return;

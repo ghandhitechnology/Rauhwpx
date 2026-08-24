@@ -229,11 +229,16 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     const form = el('form', 'ag-cloud-setup-form');
     const grid = el('div', 'ag-cloud-setup-grid');
     const host = inputField('VPS 주소', 'host', draft.host, {
-      placeholder: '100.64.0.1 또는 vps-name.tailnet.ts.net',
+      placeholder: draft.transport.kind === 'ssh-tunnel'
+        ? 'mac-mini.local 또는 192.168.1.20'
+        : '100.64.0.1 또는 vps-name.tailnet.ts.net',
       autocomplete: 'off',
       autofocus: true,
     });
-    const user = inputField('SSH 사용자', 'sshUser', draft.sshUser, { placeholder: 'ubuntu', autocomplete: 'username' });
+    const user = inputField('SSH 사용자', 'sshUser', draft.sshUser, {
+      placeholder: draft.transport.kind === 'ssh-tunnel' ? 'macadmin 또는 ubuntu' : 'ubuntu',
+      autocomplete: 'username',
+    });
     const authRoot = el('label', 'ag-cloud-setup-field');
     authRoot.appendChild(el('span', 'ag-cloud-setup-label', 'SSH 인증'));
     const auth = el('select', 'ag-cloud-setup-input') as HTMLSelectElement;
@@ -245,7 +250,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     form.appendChild(grid);
 
     const advanced = el('details', 'ag-cloud-setup-advanced');
-    if (existing || draft.auth.kind === 'key-file' || draft.transport.kind === 'https' || Boolean(state && 'errors' in state && (state.errors.name || state.errors.sshPort || state.errors.tailscaleHttpsPort || state.errors.keyPath || state.errors.endpoint))) advanced.open = true;
+    if (existing || draft.auth.kind === 'key-file' || draft.transport.kind !== 'tailscale' || Boolean(state && 'errors' in state && (state.errors.name || state.errors.sshPort || state.errors.tailscaleHttpsPort || state.errors.keyPath || state.errors.endpoint))) advanced.open = true;
     const advancedSummary = el('summary', '', '고급 설정');
     const advancedGrid = el('div', 'ag-cloud-setup-grid ag-cloud-setup-advanced-grid');
     const name = inputField('환경 이름', 'name', draft.name, { placeholder: 'My VPS' });
@@ -256,7 +261,11 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     transportRoot.appendChild(el('span', 'ag-cloud-setup-label', '연결 방식'));
     const transport = el('select', 'ag-cloud-setup-input') as HTMLSelectElement;
     transport.dataset.cloudField = 'transport';
-    transport.append(new Option('Tailscale (권장)', 'tailscale'), new Option('공개 HTTPS', 'https'));
+    transport.append(
+      new Option('일반 SSH 터널 (Mac 지원)', 'ssh-tunnel'),
+      new Option('Tailscale', 'tailscale'),
+      new Option('공개 HTTPS', 'https'),
+    );
     transport.value = draft.transport.kind;
     transportRoot.appendChild(transport);
     const httpsPort = inputField('Tailscale HTTPS 포트', 'tailscaleHttpsPort', String(draft.tailscaleHttpsPort ?? 443), { type: 'number' });
@@ -295,7 +304,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
           : { kind: 'ssh-agent' },
         transport: transport.value === 'https'
           ? { kind: 'https', endpoint: endpoint?.input.value ?? cachedHttpsEndpoint }
-          : { kind: 'tailscale' },
+          : transport.value === 'ssh-tunnel'
+            ? { kind: 'ssh-tunnel' }
+            : { kind: 'tailscale' },
       }));
     };
     for (const input of [host.input, user.input, auth, name.input, sshPort.input, transport, httpsPort.input, endpoint?.input, keyPath?.input]) {
@@ -402,21 +413,15 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
 
     if (state.kind === 'intro') {
       const { draft, intent } = state;
-      const usesTailscale = draft.transport.kind === 'tailscale';
       title.textContent = '내 VPS에서 Cloud 시작하기';
       body.append(
-        description(usesTailscale
-          ? 'Rauhwpx가 Tailscale로 연결된 VPS에 개인 Cloud 환경을 설치합니다. 앱을 닫아도 에이전트는 계속 작업합니다.'
-          : 'Rauhwpx가 SSH와 공개 HTTPS로 연결된 VPS에 개인 Cloud 환경을 설치합니다. 앱을 닫아도 에이전트는 계속 작업합니다.'),
+        description('Rauhwpx가 원격 Mac mini 또는 Linux VPS에 개인 Cloud 환경을 설치합니다. 일반 SSH, Tailscale, 공개 HTTPS를 지원하며 앱을 닫아도 에이전트는 계속 작업합니다.'),
         callout('cloud', '내 서버에서만 실행', '문서와 작업 상태는 사용자가 선택한 VPS로 전송됩니다.'),
       );
       const requirements = el('div', 'ag-cloud-setup-requirements');
       requirements.append(el('strong', '', '준비할 것'));
       const list = el('ul');
-      const networkRequirement = usesTailscale
-        ? '두 기기에 연결된 Tailscale'
-        : 'VPS를 가리키는 HTTPS 도메인과 방화벽 설정';
-      for (const requirement of ['Ubuntu 또는 Debian VPS', networkRequirement, '비밀번호 없이 sudo를 실행할 수 있는 SSH 사용자']) {
+      for (const requirement of ['Apple silicon macOS 14 이상 또는 Ubuntu/Debian', 'SSH agent 또는 개인 키 파일', '비밀번호 없이 sudo를 실행할 수 있는 SSH 사용자']) {
         list.appendChild(el('li', '', requirement));
       }
       requirements.appendChild(list);
@@ -430,7 +435,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       title.textContent = 'VPS 연결 정보';
       body.append(description(state.draft.transport.kind === 'tailscale'
         ? 'Tailscale에서 보이는 VPS 주소와 SSH 정보를 입력하세요. 공개 인터넷 주소는 필요하지 않습니다.'
-        : 'VPS의 SSH 정보와 Cloud 서비스의 공개 HTTPS 주소를 입력하세요.'));
+        : state.draft.transport.kind === 'ssh-tunnel'
+          ? 'Mac mini 또는 Linux 호스트의 일반 SSH 정보를 입력하세요. Tailscale과 공개 포트는 필요하지 않습니다.'
+          : 'VPS의 SSH 정보와 Cloud 서비스의 공개 HTTPS 주소를 입력하세요.'));
       const form = profileForm(false);
       form.addEventListener('submit', (event) => { event.preventDefault(); void checkConnection(); });
       submitOnEnter(form);
@@ -445,7 +452,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       body.append(
         description(state.draft.transport.kind === 'tailscale'
           ? `${state.draft.host}에 SSH로 연결해 운영체제, sudo, Tailscale을 확인하고 있습니다.`
-          : `${state.draft.host}에 SSH로 연결해 운영체제와 sudo 권한을 확인하고 있습니다.`),
+          : `${state.draft.host}에 일반 SSH로 연결해 운영체제와 sudo 권한을 확인하고 있습니다.`),
         el('div', 'ag-cloud-setup-indeterminate'),
         el('p', 'ag-cloud-setup-wait', '보통 몇 초 안에 끝납니다.'),
       );
@@ -544,7 +551,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       title.textContent = 'Cloud가 준비되었습니다';
       body.append(
         callout('check', state.profile.name, state.profile.host),
-        description(`${state.profile.transport.kind === 'tailscale' ? 'Tailscale로 연결되었습니다.' : '공개 HTTPS 주소로 연결되었습니다.'} 이제 작업을 Cloud로 보내면 앱을 닫아도 VPS에서 에이전트가 계속 작업합니다.`),
+        description(`${state.profile.transport.kind === 'tailscale' ? 'Tailscale로 연결되었습니다.' : state.profile.transport.kind === 'ssh-tunnel' ? '안전한 SSH 터널로 연결되었습니다.' : '공개 HTTPS 주소로 연결되었습니다.'} 이제 작업을 Cloud로 보내면 앱을 닫아도 원격 호스트에서 에이전트가 계속 작업합니다.`),
       );
       const primary = button(state.intent === 'transfer' ? 'Cloud로 계속' : '완료', 'primary');
       if (state.intent === 'manage') {

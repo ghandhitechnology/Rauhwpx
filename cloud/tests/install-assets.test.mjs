@@ -89,7 +89,44 @@ test('service and Podman assets keep the trust boundaries explicit', async () =>
   assert.doesNotMatch(runner, /mode=1777,(?:uid|gid)=/);
   const worker = await fs.readFile(path.join(root, 'worker/main.mjs'), 'utf8');
   assert.match(worker, /process\.umask\(0o077\)/);
-  assert.match(runner, /path\.dirname\(controlSocket\).*\/run\/rauhwpx:ro,Z/);
+  assert.match(runner, /path\.dirname\(endpoint\.socketPath\).*\/run\/rauhwpx:ro,Z/);
+  assert.match(runner, /RAUHWpx_CONTROL_URL/);
+});
+
+test('macOS installer uses launchd, a dedicated Podman machine, and verified releases', async () => {
+  const installer = await fs.readFile(path.join(root, 'install/install-macos.sh'), 'utf8');
+  const wrapper = await fs.readFile(path.join(root, 'install/macos-service-wrapper'), 'utf8');
+  const plist = await fs.readFile(path.join(root, 'install/com.hataewook.rauhwpx-cloud.plist'), 'utf8');
+  const updater = await fs.readFile(path.join(root, 'install/macos-update-wrapper'), 'utf8');
+  const cliWrapper = await fs.readFile(path.join(root, 'install/macos-cli-wrapper'), 'utf8');
+  assert.match(installer, /macOS 14 or newer/);
+  assert.match(installer, /Apple silicon/);
+  assert.match(installer, /\/opt\/homebrew/);
+  assert.match(installer, /MACHINE=rauhwpx-cloud/);
+  assert.match(installer, /OTHER_RUNNING/);
+  assert.match(installer, /--connection "\$\{MACHINE\}"/);
+  assert.match(installer, /cosign.*verify-blob/s);
+  assert.match(installer, /launchctl bootstrap system/);
+  assert.match(installer, /trap rollback ERR/);
+  assert.match(installer, /another Cloud install or update is already running/);
+  assert.match(installer, /chown "\$\{SERVICE_USER\}:\$\{SERVICE_GROUP\}" "\$\{ENV_FILE\}"/);
+  assert.match(installer, /transport:"ssh-tunnel"/);
+  assert.match(wrapper, /podman.*machine start/s);
+  assert.match(wrapper, /exec "\$\{NODE\}".*src\/main\.mjs/);
+  assert.match(plist, /<key>RunAtLoad<\/key>/);
+  assert.match(plist, /<key>KeepAlive<\/key>/);
+  assert.match(updater, /localeCompare\(current/);
+  assert.match(updater, /RAUHWpx_RELEASE_URL/);
+  assert.match(cliWrapper, /RAUHWpx_PODMAN_CONNECTION/);
+  assert.match(cliWrapper, /sudo -u "\$\{RAUHWpx_SERVICE_USER\}"/);
+  for (const filename of ['install-macos.sh', 'macos-service-wrapper', 'macos-update-wrapper', 'macos-cli-wrapper']) {
+    const syntax = spawnSync('/bin/bash', ['-n', path.join(root, 'install', filename)], { encoding: 'utf8' });
+    assert.equal(syntax.status, 0, syntax.stderr);
+  }
+  const lint = spawnSync('/usr/bin/plutil', ['-lint', path.join(root, 'install/com.hataewook.rauhwpx-cloud.plist')], { encoding: 'utf8' });
+  assert.equal(lint.status, 0, lint.stderr);
+  const updateLint = spawnSync('/usr/bin/plutil', ['-lint', path.join(root, 'install/com.hataewook.rauhwpx-cloud-update.plist')], { encoding: 'utf8' });
+  assert.equal(updateLint.status, 0, updateLint.stderr);
 });
 
 test('all provider installers are allowlisted and version-pinned', async () => {

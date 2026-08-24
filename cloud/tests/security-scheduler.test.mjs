@@ -176,6 +176,44 @@ test('Podman list preserves the full detach ID used by scheduler recovery', asyn
   ]);
 });
 
+test('macOS Podman runner selects the dedicated VM and uses HTTP worker control', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-podman-macos-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const calls = [];
+  const spawnProcess = (executable, args) => {
+    calls.push({ executable, args });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin = new PassThrough();
+    child.kill = () => {};
+    queueMicrotask(() => {
+      child.stdout.write('a'.repeat(64));
+      child.stdout.end();
+      child.stderr.end();
+      child.emit('close', 0);
+    });
+    return child;
+  };
+  const runner = new PodmanRunner({
+    platform: 'darwin', podmanConnection: 'rauhwpx-cloud',
+    providerAuthDirectory: path.join(root, 'provider-auth'),
+    workerCpuCount: 2, workerMemoryBytes: 1024, workerPids: 32, workspaceBytes: 2048,
+    workerImage: 'worker:test',
+  }, { spawnProcess });
+  await runner.start({ id: 'session-macos', provider: 'codex' }, {
+    workerToken: 'worker-token',
+    controlEndpoint: { baseUrl: 'http://host.containers.internal:12345' },
+  });
+  const args = calls[0].args;
+  assert.deepEqual(args.slice(0, 4), ['--connection', 'rauhwpx-cloud', 'run', '--detach']);
+  assert.ok(args.includes('--userns=keep-id:uid=1000,gid=1000'));
+  assert.ok(args.includes('RAUHWpx_CONTROL_URL=http://host.containers.internal:12345'));
+  assert.equal(args.some((value) => value.includes('/run/rauhwpx')), false);
+  assert.equal(args.includes('--cgroup-manager=cgroupfs'), false);
+  assert.ok(args.some((value) => value.endsWith('/provider-auth:ro')));
+});
+
 test('Podman list propagates command, JSON, shape, and output-limit failures', async () => {
   const responseCases = [
     { name: 'command failure', code: 125, stderr: 'unsupported format', output: '', expected: 'PODMAN_FAILED' },

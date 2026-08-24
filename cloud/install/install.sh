@@ -15,7 +15,8 @@ fail() {
 
 [[ ${EUID} -eq 0 ]] || fail "run this script through sudo"
 [[ "$CHANNEL" == stable || "$CHANNEL" == prerelease ]] || fail "RAUHWpx_CHANNEL must be stable or prerelease"
-[[ "$TRANSPORT" == tailscale || "$TRANSPORT" == public-https ]] || fail "RAUHWpx_TRANSPORT must be tailscale or public-https"
+[[ "$TRANSPORT" == tailscale || "$TRANSPORT" == public-https || "$TRANSPORT" == ssh-tunnel ]] \
+  || fail "RAUHWpx_TRANSPORT must be tailscale, public-https, or ssh-tunnel"
 if [[ "$TRANSPORT" == tailscale ]]; then
   [[ "$TAILSCALE_HTTPS_PORT" =~ ^[0-9]{1,5}$ ]] \
     || fail "RAUHWpx_TAILSCALE_HTTPS_PORT must be an integer from 1 to 65535"
@@ -199,7 +200,7 @@ if [[ "$TRANSPORT" == tailscale ]]; then
   if [[ "$TAILSCALE_HTTPS_PORT" != 443 ]]; then TAILSCALE_PORT_SUFFIX=":${TAILSCALE_HTTPS_PORT}"; fi
   ENDPOINT="https://${DNS_NAME}${TAILSCALE_PORT_SUFFIX}${BASE_PATH}"
   TAILSCALE_RECEIPT_PORT=$TAILSCALE_HTTPS_PORT
-else
+elif [[ "$TRANSPORT" == public-https ]]; then
   PUBLIC_HOST=${RAUHWpx_PUBLIC_HOST:-}
   [[ "$PUBLIC_HOST" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])$ && "$PUBLIC_HOST" == *.* ]] \
     || fail "RAUHWpx_PUBLIC_HOST must be a DNS hostname without a scheme, port, or path"
@@ -226,14 +227,16 @@ EOF
   done
   curl --fail --silent "${ENDPOINT}/v1/health" >/dev/null \
     || fail "public HTTPS endpoint is not reachable; check DNS, ports 80/443, and reverse proxy configuration"
+else
+  ENDPOINT="http://127.0.0.1:7740${BASE_PATH}"
 fi
 
 PAIRING_JSON=$(/usr/local/bin/rauhwpx-cloud pairing create "Origin device")
 SERVER_KEY=$(/opt/rauhwpx-node/bin/node -e 'process.stdout.write(JSON.parse(process.argv[1]).serverPublicKey)' "$PAIRING_JSON")
 PAIRING_CODE=$(/opt/rauhwpx-node/bin/node -e 'process.stdout.write(JSON.parse(process.argv[1]).code)' "$PAIRING_JSON")
 RECEIPT=$(/opt/rauhwpx-node/bin/node -e '
-  const receipt={endpoint:process.argv[1],serverPublicKey:process.argv[2],pairingCode:process.argv[3]};
+  const receipt={endpoint:process.argv[1],serverPublicKey:process.argv[2],pairingCode:process.argv[3],transport:process.argv[5]};
   if (process.argv[4]) receipt.tailscaleHttpsPort=Number(process.argv[4]);
   process.stdout.write(JSON.stringify(receipt));
-' "$ENDPOINT" "$SERVER_KEY" "$PAIRING_CODE" "$TAILSCALE_RECEIPT_PORT")
+' "$ENDPOINT" "$SERVER_KEY" "$PAIRING_CODE" "$TAILSCALE_RECEIPT_PORT" "$TRANSPORT")
 printf 'RAUHWpx_RECEIPT=%s\n' "$RECEIPT"

@@ -129,7 +129,12 @@ function existingInstallRemoteCommand({ transport, publicHost, tailscaleHttpsPor
         'ENDPOINT="https://${DNS_NAME}${PORT_SUFFIX}/rauhwpx-cloud"',
         `RECEIPT_PORT=${tailscaleHttpsPort}`,
       ]
-    : [
+    : transport === 'ssh-tunnel'
+      ? [
+        'ENDPOINT=http://127.0.0.1:7740/rauhwpx-cloud',
+        'RECEIPT_PORT=',
+      ]
+      : [
         `sudo -n grep -Fqx '${publicHost} {' /etc/caddy/Caddyfile.d/rauhwpx-cloud.caddy || exit 0`,
         `ENDPOINT=https://${publicHost}/rauhwpx-cloud`,
         'RECEIPT_PORT=',
@@ -152,10 +157,10 @@ function existingInstallRemoteCommand({ transport, publicHost, tailscaleHttpsPor
     'PAIRING_JSON=$(sudo -n /usr/local/bin/rauhwpx-cloud pairing create "Origin device")',
     `RECEIPT=$(sudo -n /opt/rauhwpx-node/bin/node -e '
       const pairing=JSON.parse(process.argv[1]);
-      const receipt={endpoint:process.argv[2],serverPublicKey:pairing.serverPublicKey,pairingCode:pairing.code};
+      const receipt={endpoint:process.argv[2],serverPublicKey:pairing.serverPublicKey,pairingCode:pairing.code,transport:process.argv[4]};
       if(process.argv[3]) receipt.tailscaleHttpsPort=Number(process.argv[3]);
       process.stdout.write(JSON.stringify(receipt));
-    ' "$PAIRING_JSON" "$ENDPOINT" "$RECEIPT_PORT")`,
+    ' "$PAIRING_JSON" "$ENDPOINT" "$RECEIPT_PORT" "${transport}")`,
     'printf "RAUHWpx_RECEIPT=%s\\n" "$RECEIPT"',
   ].join('; ');
 }
@@ -190,7 +195,11 @@ function parseProvisionReceipt(stdout) {
   try { endpoint = new URL(receipt.endpoint); } catch {
     throw new Error('VPS installer did not return a secure endpoint');
   }
-  if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password) {
+  const loopbackTunnel = receipt.transport === 'ssh-tunnel'
+    && endpoint.protocol === 'http:'
+    && endpoint.hostname === '127.0.0.1'
+    && Number(endpoint.port) === 7740;
+  if ((!loopbackTunnel && endpoint.protocol !== 'https:') || endpoint.username || endpoint.password) {
     throw new Error('VPS installer did not return a secure endpoint');
   }
   if (receipt.tailscaleHttpsPort !== undefined) {
@@ -262,29 +271,29 @@ export class CloudProvisioner {
     const remote = [
       'set -eu',
       'printf "arch=%s\\n" "$(uname -m)"',
-      '. /etc/os-release',
-      'printf "os=%s version=%s\\n" "$ID" "$VERSION_ID"',
+      'if [ "$(uname -s)" = Darwin ]; then printf "os=macos version=%s\\n" "$(sw_vers -productVersion)"; else . /etc/os-release; printf "os=%s version=%s\\n" "$ID" "$VERSION_ID"; fi',
       'command -v sudo >/dev/null',
       'sudo -n true',
       ...(ssh.useTailscaleSsh ? ['command -v tailscale >/dev/null', 'tailscale status --json >/dev/null'] : []),
       'printf "preflight=ok\\n"',
     ].join('; ');
-    const firstConnect = !await fs.stat(this.knownHostsPath).then((stat) => stat.size > 0, () => false);
     const result = await runProcess(
       this.spawn,
       'ssh',
-      sshArguments(ssh, this.knownHostsPath, remote, { acceptNew: firstConnect }),
+      sshArguments(ssh, this.knownHostsPath, remote, { acceptNew: true }),
       { timeoutMs: 25_000, onLine },
     );
     const output = `${result.stdout}\n${result.stderr}`;
     if (!output.includes('preflight=ok')) throw new Error('VPS preflight did not complete');
     const os = output.match(/os=([^\s]+) version=([^\s]+)/);
     const arch = output.match(/arch=([^\s]+)/);
-    if (!os || !['ubuntu', 'debian'].includes(os[1])) throw new Error('VPS must run Ubuntu or Debian');
+    if (!os || !['ubuntu', 'debian', 'macos'].includes(os[1])) throw new Error('Remote host must run macOS, Ubuntu, or Debian');
     if (!arch || !['x86_64', 'aarch64', 'arm64'].includes(arch[1])) {
       throw new Error('VPS architecture must be amd64 or arm64');
     }
-    return { os: os[1], version: os[2], arch: arch[1] };
+    if (os[1] === 'macos' && arch[1] !== 'arm64') throw new Error('Mac Cloud hosts require Apple silicon');
+    if (os[1] === 'macos' && Number(os[2].split('.')[0]) < 14) throw new Error('Mac Cloud hosts require macOS 14 or newer');
+    return { platform: os[1] === 'macos' ? 'darwin' : 'linux', os: os[1], version: os[2], arch: arch[1] };
   }
 
   async provision(sshConfig, {
@@ -295,7 +304,7 @@ export class CloudProvisioner {
     onLine = () => {},
   } = {}) {
     if (!CHANNELS.has(channel)) throw new Error('Unsupported cloud install channel');
-    if (!['tailscale', 'public-https'].includes(transport)) throw new Error('Unsupported cloud transport');
+    if (!['tailscale', 'public-https', 'ssh-tunnel'].includes(transport)) throw new Error('Unsupported cloud transport');
     const servePort = transport === 'tailscale'
       ? normalizeTailscaleHttpsPort(tailscaleHttpsPort)
       : 443;
@@ -304,7 +313,27 @@ export class CloudProvisioner {
     }
     const ssh = normalizeSshConfig(sshConfig);
     const preflight = await this.preflight(ssh, { onLine });
-    const bootstrap = await this.#bootstrap(preflight.arch);
+    const bootstrap = preflight.platform === 'linux' ? await this.#bootstrap(preflight.arch) : null;
+    if (preflight.platform === 'darwin' && transport !== 'ssh-tunnel') {
+      throw new Error('Mac Cloud hosts require the SSH tunnel transport');
+    }
+    if (preflight.platform === 'darwin') {
+      const installerPath = path.join(path.dirname(this.installerPath), 'install-macos.sh');
+      const installer = await fs.readFile(installerPath);
+      const remote = installRemoteCommand({
+        channel,
+        transport,
+        publicHost,
+        tailscaleHttpsPort: servePort,
+      });
+      const result = await runProcess(
+        this.spawn,
+        'ssh',
+        sshArguments(ssh, this.knownHostsPath, remote),
+        { input: installer, timeoutMs: INSTALL_TIMEOUT_MS, onLine },
+      );
+      return { ...parseProvisionReceipt(result.stdout), preflight };
+    }
     const existing = await this.#reuseExisting(ssh, {
       transport,
       publicHost,

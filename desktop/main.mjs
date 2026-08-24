@@ -48,6 +48,7 @@ import { CloudClient } from './cloud-client.mjs';
 import { CloudCoordinator } from './cloud-coordinator.mjs';
 import { CloudHandoffStore } from './cloud-handoff.mjs';
 import { CloudProvisioner } from './cloud-provisioner.mjs';
+import { CloudApiTransport, SshTunnelManager } from './cloud-ssh-tunnel.mjs';
 import { applyCloudRecovery } from './cloud-result.mjs';
 import { isNewerStableVersion, selectDebAsset } from './update-policy.mjs';
 
@@ -289,6 +290,7 @@ let quitRequested = false;
 let desktopReady = false;
 let secretVault = null;
 let cloudCoordinator = null;
+let cloudTransport = null;
 let cloudBroadcastChain = Promise.resolve();
 const pendingLaunches = [launchRequest({ argv: process.argv, source: 'initial' })];
 const runtimeDir = join(app.getPath('temp'), 'rauhwpx', 'runtime', launchId);
@@ -1182,9 +1184,14 @@ if (!hasSingleInstanceLock) {
       filePath: join(app.getPath('userData'), 'secrets.json'),
       safeStorage,
     });
+    const knownHostsPath = join(app.getPath('userData'), 'cloud', 'ssh-known-hosts');
+    cloudTransport = new CloudApiTransport({
+      tunnelManager: new SshTunnelManager({ knownHostsPath }),
+    });
     const cloudClient = new CloudClient({
       vault: secretVault,
       fetchImpl: (...args) => net.fetch(...args),
+      transport: cloudTransport,
     });
     cloudCoordinator = new CloudCoordinator({
       client: cloudClient,
@@ -1195,7 +1202,7 @@ if (!hasSingleInstanceLock) {
         installerPath: unpackedPath(join(__dirname, '..', 'cloud', 'install', 'install.sh')),
         bootstrapDir: unpackedPath(join(__dirname, '..', 'cloud', 'release')),
         appVersion: app.getVersion(),
-        knownHostsPath: join(app.getPath('userData'), 'cloud', 'ssh-known-hosts'),
+        knownHostsPath,
       }),
       recoveryDir: join(app.getPath('userData'), 'cloud', 'recovery'),
     });
@@ -1255,7 +1262,7 @@ if (!hasSingleInstanceLock) {
     teardownStarted = true;
     quitting = true;
     cloudCoordinator?.stop();
-    void hubOwner.teardown().finally(() => {
+    void Promise.allSettled([cloudTransport?.stop(), hubOwner.teardown()]).finally(() => {
       teardownFinished = true;
       app.exit(0);
     });

@@ -63,7 +63,9 @@ function cloneDraft(draft: CloudProfileDraft): CloudProfileDraft {
       : { kind: 'ssh-agent' },
     transport: draft.transport.kind === 'https'
       ? { kind: 'https', endpoint: draft.transport.endpoint }
-      : { kind: 'tailscale' },
+      : draft.transport.kind === 'ssh-tunnel'
+        ? { kind: 'ssh-tunnel' }
+        : { kind: 'tailscale' },
   };
 }
 
@@ -115,7 +117,9 @@ export function validateCloudProfileDraft(
 ): CloudFieldErrors {
   const errors: CloudFieldErrors = {};
   const host = draft.host.trim();
-  if (!host) errors.host = 'VPS의 Tailscale IP 또는 기기 이름을 입력하세요.';
+  if (!host) errors.host = draft.transport.kind === 'tailscale'
+    ? 'VPS의 Tailscale IP 또는 기기 이름을 입력하세요.'
+    : '원격 Mac 또는 VPS의 SSH 주소를 입력하세요.';
   else if (!validHost(host)) errors.host = '프로토콜이나 경로 없이 올바른 VPS 주소를 입력하세요.';
   else if (draft.transport.kind === 'tailscale' && !isTailscaleHost(host)) errors.host = 'Tailscale IP 또는 MagicDNS 기기 이름을 입력하세요.';
   if (!draft.sshUser.trim()) errors.sshUser = 'SSH 사용자 이름을 입력하세요.';
@@ -149,18 +153,20 @@ export function mapCloudSetupIssue(error: unknown, transport: CloudProfileDraft[
   }
   if (/timed out|timeout|econnrefused|could not resolve|name or service not known|no route to host/.test(normalized)) {
     return {
-      title: 'VPS에 연결할 수 없습니다',
+      title: '원격 호스트에 연결할 수 없습니다',
       guidance: transport === 'tailscale'
         ? '두 기기의 Tailscale 연결과 VPS 주소, SSH 포트를 확인하세요.'
-        : 'VPS 주소, SSH 포트, 방화벽과 HTTPS 주소를 확인하세요.',
+        : transport === 'ssh-tunnel'
+          ? '원격 호스트의 SSH 주소와 포트, 키 인증, 방화벽을 확인하세요.'
+          : 'VPS 주소, SSH 포트, 방화벽과 HTTPS 주소를 확인하세요.',
       detail,
     };
   }
   if (/passwordless sudo|sudo.*password|requires a password/.test(normalized)) {
     return { title: '비밀번호 없는 sudo가 필요합니다', guidance: 'SSH 사용자에게 비밀번호 없이 sudo를 실행할 권한을 설정한 뒤 다시 시도하세요.', detail };
   }
-  if (/ubuntu|debian|unsupported.*distribution|operating system/.test(normalized)) {
-    return { title: '지원하는 Linux가 필요합니다', guidance: 'Ubuntu 또는 Debian VPS를 사용하세요.', detail };
+  if (/macos 14|apple silicon|ubuntu|debian|unsupported.*distribution|operating system/.test(normalized)) {
+    return { title: '지원하는 원격 운영체제가 필요합니다', guidance: 'Apple silicon의 macOS 14 이상 또는 Ubuntu/Debian을 사용하세요.', detail };
   }
   if (/no compatible (?:stable |prerelease )?cloud asset|cloud release asset|curl.*(?:requested url.*404|error:\s*404)/.test(normalized)) {
     return {
@@ -180,7 +186,7 @@ export function mapCloudSetupIssue(error: unknown, transport: CloudProfileDraft[
     return { title: 'VPS의 Tailscale을 확인하세요', guidance: 'VPS에 Tailscale을 설치하고 이 기기와 같은 네트워크에 연결하세요.', detail };
   }
   if (/architecture|amd64|arm64|x86_64|aarch64/.test(normalized)) {
-    return { title: '지원하지 않는 서버 구조입니다', guidance: 'amd64 또는 arm64 VPS를 사용하세요.', detail };
+    return { title: '지원하지 않는 서버 구조입니다', guidance: 'Mac은 Apple silicon, Linux는 amd64 또는 arm64를 사용하세요.', detail };
   }
   if (/identity|server.*key|signature|pinned/.test(normalized)) {
     return { title: '서버 ID를 확인하지 못했습니다', guidance: '서버 ID 키가 바뀌지 않았는지 확인하세요. 예상하지 못한 변경이면 연결을 중단하세요.', detail };

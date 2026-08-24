@@ -17,6 +17,7 @@ import { BlobStore } from '../src/blob-store.mjs';
 import { openDatabase } from '../src/database.mjs';
 import { createCloudHttpHandler } from '../src/http-server.mjs';
 import { SessionStore } from '../src/session-store.mjs';
+import { WorkerClient } from '../worker/client.mjs';
 import {
   SSE_STREAM_DIGEST,
   canonicalResponse,
@@ -452,6 +453,11 @@ test('worker API accepts only the session worker token', async (t) => {
     method: 'POST', headers: { Authorization: 'Bearer ra_wt_test' },
   });
   assert.equal(heartbeat.status, 200);
+  assert.deepEqual(await new WorkerClient({
+    baseUrl: base,
+    token: 'ra_wt_test',
+    sessionId: 'session_worker_01',
+  }).heartbeat(), { ok: true });
   const checkpointBytes = Buffer.from('edit');
   const checkpointDigest = createHash('sha256').update(checkpointBytes).digest('hex');
   const checkpointUpload = await blobStore.initUpload({

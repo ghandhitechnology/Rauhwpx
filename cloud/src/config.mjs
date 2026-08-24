@@ -25,7 +25,13 @@ function basePath(value) {
 
 export function parseConfig(environment = process.env) {
   const dataDirectory = path.resolve(environment.RAUHWpx_DATA_DIR || '/var/lib/rauhwpx-cloud');
+  const platform = environment.RAUHWpx_PLATFORM || process.platform;
+  const workerControlMode = environment.RAUHWpx_WORKER_CONTROL_MODE || (platform === 'darwin' ? 'http' : 'socket');
+  if (!['http', 'socket'].includes(workerControlMode)) {
+    throw new CloudError('CONFIG_INVALID', 'RAUHWpx_WORKER_CONTROL_MODE is invalid');
+  }
   return {
+    platform,
     host: environment.RAUHWpx_HOST || '127.0.0.1',
     port: port(environment.RAUHWpx_PORT || '7740'),
     basePath: basePath(environment.RAUHWpx_BASE_PATH),
@@ -34,9 +40,11 @@ export function parseConfig(environment = process.env) {
     blobDirectory: path.join(dataDirectory, 'objects'),
     workerControlDirectory: path.join(dataDirectory, 'worker-control'),
     workerControlSocket: path.join(dataDirectory, 'worker-control', 'control.sock'),
+    workerControlMode,
     providerAuthDirectory: path.join(dataDirectory, 'provider-auth'),
     providerCliDirectory: environment.RAUHWpx_PROVIDER_CLI_DIR || '/opt/rauhwpx-cloud/provider-cli',
     workerImage: environment.RAUHWpx_WORKER_IMAGE || 'ghcr.io/ghandhitechnology/rauhwpx-cloud-worker:stable',
+    podmanConnection: environment.RAUHWpx_PODMAN_CONNECTION || null,
     releaseChannel: environment.RAUHWpx_CHANNEL === 'prerelease' ? 'prerelease' : 'stable',
     maxRunningSessions: positiveInteger(
       environment.RAUHWpx_MAX_RUNNING,

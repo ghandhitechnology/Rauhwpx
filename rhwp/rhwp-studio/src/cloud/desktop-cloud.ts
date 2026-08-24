@@ -111,6 +111,8 @@ function parseProfileDraft(value: unknown): CloudProfileDraft | null {
       : null;
   const parsedTransport = transport.kind === 'tailscale'
     ? { kind: 'tailscale' as const }
+    : transport.kind === 'ssh-tunnel'
+      ? { kind: 'ssh-tunnel' as const }
     : transport.kind === 'https' && string(transport.endpoint).trim()
       ? { kind: 'https' as const, endpoint: string(transport.endpoint).trim() }
       : null;

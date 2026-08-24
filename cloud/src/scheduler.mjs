@@ -11,6 +11,7 @@ export class Scheduler {
     intervalMs = 2_000,
     maxRunningSessions = 2,
     now = Date.now,
+    controlEndpoint,
     controlSocket,
     dataDirectory,
     maintenance,
@@ -21,7 +22,7 @@ export class Scheduler {
     this.intervalMs = intervalMs;
     this.maxRunningSessions = maxRunningSessions;
     this.now = now;
-    this.controlSocket = controlSocket;
+    this.controlEndpoint = controlEndpoint ?? (controlSocket ? { socketPath: controlSocket } : null);
     this.dataDirectory = dataDirectory;
     this.maintenance = maintenance;
     this.lastMaintenanceAt = 0;
@@ -112,7 +113,7 @@ export class Scheduler {
         const code = provider.available ? 'AUTH_REQUIRED' : 'PROVIDER_UNAVAILABLE';
         this.sessionStore.suspend(session.id, {
           code,
-          message: provider.errorMessage || `${session.provider} is not ready on this VPS`,
+          message: provider.errorMessage || `${session.provider} is not ready on this Cloud host`,
           setupAction: provider.setupAction,
         });
         continue;
@@ -120,7 +121,11 @@ export class Scheduler {
       try {
         const workerToken = `ra_wt_${randomBytes(32).toString('base64url')}`;
         this.sessionStore.prepareWorker(session.id, workerToken);
-        const sandboxId = await this.runner.start(session, { workerToken, controlSocket: this.controlSocket });
+        const sandboxId = await this.runner.start(session, {
+          workerToken,
+          controlEndpoint: this.controlEndpoint,
+          controlSocket: this.controlEndpoint?.socketPath,
+        });
         this.sessionStore.attachSandbox(session.id, sandboxId);
         this.logger?.info('sandbox.started', { sandboxId }, session.id);
       } catch (error) {

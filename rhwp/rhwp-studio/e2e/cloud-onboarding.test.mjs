@@ -379,7 +379,7 @@ try {
   await page.evaluate(() => window.__cloudHarness.setTestFailures(1));
   await clickButton(page, '연결 확인');
   await waitForTitle(page, 'VPS 연결을 확인하세요');
-  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /VPS에 연결할 수 없습니다/);
+  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /원격 호스트에 연결할 수 없습니다/);
   await clickButton(page, '다시 확인');
   await waitForTitle(page, '연결할 수 있습니다');
   console.log('  PASS preflight failure gives a recoverable retry path');
@@ -415,6 +415,26 @@ try {
   await clickButton(page, 'Cloud로 계속');
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
   console.log('  PASS transactional provisioning receives the draft and the connected CTA exits setup');
+
+  await page.evaluate(() => {
+    window.__cloudHarness.setUnconfigured();
+    window.__cloudHarness.clearCalls();
+  });
+  await openCloud(page);
+  await clickButton(page, 'VPS 연결');
+  await page.click('.ag-cloud-setup-advanced > summary');
+  await selectInput(page, '연결 방식', 'ssh-tunnel');
+  assert.equal(await page.$eval('[data-cloud-field="host"]', (node) => node.getAttribute('placeholder')), 'mac-mini.local 또는 192.168.1.20');
+  await fillInput(page, 'VPS 주소', 'mac-mini.local');
+  await fillInput(page, 'SSH 사용자', 'macadmin');
+  await clickButton(page, '연결 확인');
+  await waitForTitle(page, '연결할 수 있습니다');
+  assert.deepEqual(
+    await page.evaluate(() => window.__cloudHarness.calls.find((call) => call.method === 'cloudTestProfile')?.payload.profile.transport),
+    { kind: 'ssh-tunnel' },
+  );
+  await clickButton(page, '취소');
+  console.log('  PASS ordinary SSH accepts a Mac mini host without Tailscale or public HTTPS');
 
   await page.evaluate(() => {
     window.__cloudHarness.setUnconfigured();
