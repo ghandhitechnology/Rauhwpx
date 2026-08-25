@@ -275,6 +275,7 @@
 }
 
 .compare-inspector-body {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -289,6 +290,7 @@
 }
 
 .compare-inspector-panes {
+  flex: 1 1 auto;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
@@ -310,8 +312,8 @@
 }
 
 .compare-document-preview .merge-preview-canvas-wrap {
-  min-height: 240px;
-  max-height: 52vh;
+  min-height: 0;
+  max-height: none;
 }
 
 .compare-inspector-pane h4 {

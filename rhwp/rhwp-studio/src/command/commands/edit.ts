@@ -1,17 +1,28 @@
-import type { CommandDef } from '../types';
+import type { CommandDef, CommandServices } from '../types';
 import { FieldEditDialog } from '@/ui/field-edit-dialog';
 import { FindDialog } from '@/ui/find-dialog';
 import { GotoDialog } from '@/ui/goto-dialog';
 import { CompareDialog } from '@/ui/compare-dialog';
+import { HistoryDialog } from '@/ui/history-dialog';
 import { CompareSessionStore } from '@/compare/session';
+import { userSettings } from '@/core/user-settings';
 import { canExecuteFormatPaste } from '../format-paste-availability';
 
 /** 검색 대화상자 싱글톤 — 열려 있으면 재사용 */
 let findDialogInstance: FindDialog | null = null;
 /** 싱글톤: 두 파일 문서 비교 대화상자 */
 let compareDialogInstance: CompareDialog | null = null;
+/** 싱글톤: 기존 문서 이력 대화상자 */
+let historyDialogInstance: HistoryDialog | null = null;
 /** 비교/이력 공용 세션 스토어 */
 let compareSessionStore: CompareSessionStore | null = null;
+
+export function openClassicDocumentHistory(services: CommandServices): void {
+  compareSessionStore ??= new CompareSessionStore(services.eventBus);
+  if (compareDialogInstance?.isOpen()) compareDialogInstance.hide();
+  historyDialogInstance ??= new HistoryDialog(services, compareSessionStore);
+  historyDialogInstance.show();
+}
 
 export const editCommands: CommandDef[] = [
   {
@@ -191,8 +202,12 @@ export const editCommands: CommandDef[] = [
     shortcutLabel: 'Ctrl+Shift+H',
     canExecute: () => true,
     execute(services) {
-      if (compareDialogInstance?.isOpen()) compareDialogInstance.hide();
-      services.eventBus.emit('versions:open');
+      if (userSettings.getUseHancomGit()) {
+        if (compareDialogInstance?.isOpen()) compareDialogInstance.hide();
+        services.eventBus.emit('versions:open');
+      } else {
+        openClassicDocumentHistory(services);
+      }
     },
   },
   {

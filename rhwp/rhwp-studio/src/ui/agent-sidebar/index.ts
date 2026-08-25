@@ -40,6 +40,7 @@ import {
   resolveModelForAgent,
 } from '../../agent/models.ts';
 import { loadAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
+import { userSettings } from '../../core/user-settings.ts';
 import { renderChatMarkdown } from './chat-markdown.ts';
 import { appendMarkdown, planToMarkdown } from './plan-markdown.ts';
 import {
@@ -121,6 +122,8 @@ export interface AgentSidebarDeps {
   }) => void;
   /** 현재 문서의 로컬 커밋과 브랜치를 관리한다. */
   versionController?: VersionManagerController;
+  /** 기존 RHWP 문서 이력 대화상자를 연다. */
+  openClassicVersionControl?: () => void;
 }
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
@@ -516,7 +519,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   sendInlinePrompt(submission: InlinePromptSubmission): InlinePromptSendResult;
   dispose(): void;
 } {
-  const { bridge, eventBus, getDocumentContext, moveToLibraryDocument, versionController } = deps;
+  const {
+    bridge,
+    eventBus,
+    getDocumentContext,
+    moveToLibraryDocument,
+    versionController,
+    openClassicVersionControl,
+  } = deps;
 
   // 개인 기본값(설정 탭에서 저장) — 새 대화가 이 조합으로 열린다.
   let agentPrefs: AgentPrefs = loadAgentPrefs();
@@ -1203,9 +1213,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   versionsBtn.setAttribute('aria-controls', 'ag-versions-panel');
   versionsBtn.title = '버전';
   versionsBtn.appendChild(createIcon('changes'));
+  const syncVersionsButtonVisibility = (enabled = userSettings.getUseHancomGit()): void => {
+    versionsBtn.hidden = !enabled;
+    if (!enabled && versionsPanelOpen) closeVersionsPage();
+  };
+  syncVersionsButtonVisibility();
+  const unsubscribeHancomGitVisibility = userSettings.subscribeUseHancomGit(syncVersionsButtonVisibility);
   versionsBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    setVersionsPanelOpen(true);
+    openConfiguredVersionControl();
   });
 
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
@@ -2587,6 +2603,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     } else {
       settingsPanel.close();
     }
+  }
+
+  function openConfiguredVersionControl(): void {
+    if (!userSettings.getUseHancomGit() && openClassicVersionControl) {
+      closeVersionsPage();
+      openClassicVersionControl();
+      return;
+    }
+    setVersionsPanelOpen(true);
   }
 
   function setVersionsPanelOpen(open: boolean): void {
@@ -5679,7 +5704,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         }),
         eventBus.on('versions:open', () => {
           setCollapsed(false);
-          setVersionsPanelOpen(true);
+          openConfiguredVersionControl();
         }),
       ]
     : [];
@@ -5733,7 +5758,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     root,
     openVersions(): void {
       setCollapsed(false);
-      setVersionsPanelOpen(true);
+      openConfiguredVersionControl();
     },
     sendInlinePrompt,
     dispose(): void {
@@ -5771,6 +5796,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       clearConnCountdown();
       writingStyleCalibration.dispose();
       settingsPanel.dispose();
+      unsubscribeHancomGitVisibility();
       versionManagerPage?.dispose();
       versionController?.dispose?.();
       initialSetup?.dispose();

@@ -167,8 +167,7 @@
 .ag-versions-secondary,
 .ag-versions-quiet,
 .ag-versions-danger,
-.ag-versions-load-more,
-.ag-versions-gc {
+.ag-versions-load-more {
   min-height: 30px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 1px;
@@ -182,6 +181,7 @@
 .ag-versions-branch-pill {
   min-width: 0;
   max-width: 50%;
+  margin-right: auto;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -582,8 +582,7 @@
   text-transform: uppercase;
 }
 
-.ag-versions-placeholder,
-.ag-versions-legacy-note {
+.ag-versions-placeholder {
   margin: 12px;
   color: var(--ag-muted, #9999a4);
   font-size: 11px;
@@ -632,15 +631,6 @@
   align-items: center;
   gap: 5px;
   cursor: pointer;
-}
-
-.ag-versions-privacy {
-  grid-column: 1 / -1;
-  line-height: 1.35;
-}
-
-.ag-versions-gc {
-  grid-column: 1 / -1;
 }
 
 @media (prefers-reduced-motion: no-preference) {

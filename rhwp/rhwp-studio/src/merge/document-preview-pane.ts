@@ -22,6 +22,7 @@ export class DocumentPreviewPane {
   private readonly pageInput: HTMLInputElement;
   private readonly pageTotal: HTMLSpanElement;
   private readonly onPageChange?: DocumentPreviewPaneOptions['onPageChange'];
+  private readonly maxScale: number;
   private wasm: WasmBridge | null = null;
   private source: MergeDocumentSource | null = null;
   private loadingToken = 0;
@@ -31,6 +32,7 @@ export class DocumentPreviewPane {
 
   constructor(options: DocumentPreviewPaneOptions) {
     this.onPageChange = options.onPageChange;
+    this.maxScale = options.variant === 'comparison' ? 2 : 1;
     this.element = document.createElement('section');
     this.element.className = `document-preview-pane ${options.variant === 'comparison'
       ? 'compare-document-preview'
@@ -172,7 +174,7 @@ export class DocumentPreviewPane {
     if (!this.wasm || !this.source || this.canvasWrap.clientWidth <= 0) return;
     try {
       const info = this.wasm.getPageInfo(this.pageIndex);
-      const scale = Math.max(0.15, Math.min(1, (this.canvasWrap.clientWidth - 16) / Math.max(1, info.width)));
+      const scale = Math.max(0.15, Math.min(this.maxScale, (this.canvasWrap.clientWidth - 16) / Math.max(1, info.width)));
       this.canvas.width = Math.max(1, Math.floor(info.width * scale));
       this.canvas.height = Math.max(1, Math.floor(info.height * scale));
       this.wasm.renderPageToCanvasFiltered(this.pageIndex, this.canvas, scale, 'all');

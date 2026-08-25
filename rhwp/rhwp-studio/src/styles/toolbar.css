@@ -61,6 +61,10 @@
   color: var(--color-text);
 }
 
+.tb-btn[hidden] {
+  display: none;
+}
+
 .tb-btn:hover {
   background: var(--ui-hover-strong);
   border-color: transparent;

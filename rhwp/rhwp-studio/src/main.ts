@@ -15,7 +15,7 @@ import { CommandRegistry } from '@/command/registry';
 import { CommandDispatcher } from '@/command/dispatcher';
 import type { EditorContext, CommandServices, EditorEditMode } from '@/command/types';
 import { confirmSaveBeforeReplacingDocument, fileCommands, runLibraryMove } from '@/command/commands/file';
-import { editCommands } from '@/command/commands/edit';
+import { editCommands, openClassicDocumentHistory } from '@/command/commands/edit';
 import {
   setBasicToolboxExpanded,
   syncClipMenu,
@@ -307,6 +307,15 @@ registry.registerAll(insertCommands);
 registry.registerAll(tableCommands);
 registry.registerAll(pageCommands);
 registry.registerAll(toolCommands);
+
+const gitVersionToolbarButton = document.querySelector<HTMLButtonElement>(
+  '.tb-btn[data-cmd="edit:document-history"]',
+);
+const syncGitVersionToolbar = (enabled = userSettings.getUseHancomGit()): void => {
+  if (gitVersionToolbarButton) gitVersionToolbarButton.hidden = !enabled;
+};
+syncGitVersionToolbar();
+userSettings.subscribeUseHancomGit(syncGitVersionToolbar);
 
 // 상태 바 요소
 const sbMessage = () => document.getElementById('sb-message')!;
@@ -679,6 +688,7 @@ async function initialize(): Promise<void> {
         bridge: agentBridge,
         eventBus,
         versionController,
+        openClassicVersionControl: () => openClassicDocumentHistory(commandServices),
         getDocumentContext: () => {
           const documentName = wasm.pageCount > 0 ? wasm.fileName : null;
           let selectionLabel: string | null = null;

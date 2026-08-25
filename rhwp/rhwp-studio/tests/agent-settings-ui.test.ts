@@ -21,6 +21,9 @@ const settings = readSource('../src/ui/agent-sidebar/settings.ts');
 const settingsCss = readSource('../src/ui/agent-sidebar/settings.css');
 const css = readSource('../src/ui/agent-sidebar/agent-sidebar.css');
 const icons = readSource('../src/ui/agent-sidebar/icons.ts');
+const editCommandsSource = readSource('../src/command/commands/edit.ts');
+const mainSource = readSource('../src/main.ts');
+const toolbarCss = readSource('../src/styles/toolbar.css');
 
 test('설정과 버전 페이지는 무대에 다른 페이지와 나란히 선다', () => {
   assert.match(
@@ -72,11 +75,31 @@ test('/settings 슬래시 명령이 설정 페이지를 연다', () => {
   assert.ok(source.indexOf("if (text === '/settings')") < source.indexOf('recordUserMessage(messageText,'));
 });
 
-test('설정은 연결·기본 설정·글쓰기 보정·템플릿·사용량 묶음이다', () => {
-  for (const title of ['연결', '기본 설정', '글쓰기 보정', '템플릿', '사용량']) {
+test('설정은 연결·기본 설정·버전 관리·글쓰기 보정·템플릿·사용량 묶음이다', () => {
+  for (const title of ['연결', '기본 설정', '버전 관리', '글쓰기 보정', '템플릿', '사용량']) {
     assert.match(settings, new RegExp(`createSection\\('${title}'\\)`));
   }
   assert.match(settingsCss, /\.ag-settings-section-title/);
+});
+
+test('한컴용 Git 토글은 기본 이력과 Git 버전 관리 진입을 전환한다', () => {
+  assert.match(settings, /'한컴용 Git 사용하기'/);
+  assert.match(settings, /hancomGitToggle\.setAttribute\('role', 'switch'\)/);
+  assert.match(settings, /hancomGitToggle\.checked = userSettings\.getUseHancomGit\(\)/);
+  assert.match(settings, /userSettings\.setUseHancomGit\(hancomGitToggle\.checked\)/);
+  assert.match(settingsCss, /\.ag-settings-toggle-input:checked \+ \.ag-settings-toggle-track/);
+  assert.match(source, /function openConfiguredVersionControl\(\): void/);
+  assert.match(source, /!userSettings\.getUseHancomGit\(\) && openClassicVersionControl/);
+  assert.match(editCommandsSource, /new HistoryDialog\(services, compareSessionStore\)/);
+});
+
+test('Git 버전 버튼은 설정이 켜진 동안에만 표시된다', () => {
+  assert.match(source, /versionsBtn\.hidden = !enabled/);
+  assert.match(source, /userSettings\.subscribeUseHancomGit\(syncVersionsButtonVisibility\)/);
+  assert.match(css, /\.ag-header-icon-btn\[hidden\]\s*\{\s*display: none;/);
+  assert.match(mainSource, /gitVersionToolbarButton\.hidden = !enabled/);
+  assert.match(mainSource, /userSettings\.subscribeUseHancomGit\(syncGitVersionToolbar\)/);
+  assert.match(toolbarCss, /\.tb-btn\[hidden\]\s*\{\s*display: none;/);
 });
 
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {

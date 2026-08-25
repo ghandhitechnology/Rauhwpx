@@ -52,11 +52,16 @@ test('저장·활성화·선행 비교·dirty 상태가 작업 버튼을 닫는�
   assert.match(source, /shelf\.dataset\.versionPrerequisiteDisabled = String\(!current\.dirty\)/);
   assert.match(source, /restore\.dataset\.versionPrerequisiteDisabled = String\(!comparedCommits\.has\(selected\.id\)\)/);
   assert.match(source, /adopt\.dataset\.versionPrerequisiteDisabled = String\(!comparedCommits\.has\(selected\.id\)\)/);
-  assert.match(source, /gcButton\.dataset\.versionMutation = 'true'/);
 });
 
 test('숨긴 버전 영역은 구성 요소 display 규칙보다 우선한다', () => {
   assert.match(css, /\.ag-versions-page \[hidden\] \{\s*display: none !important;\s*\}/);
+});
+
+test('Git 버전 관리자에는 기존 이력 탭을 중복 표시하지 않는다', () => {
+  assert.doesNotMatch(source, /\{ id: 'legacy', label: '이전 기록' \}/);
+  assert.doesNotMatch(source, /const legacyPanel =/);
+  assert.doesNotMatch(source, /function renderLegacy\(/);
 });
 
 test('알림과 탭은 보조 기술에 완전한 관계를 제공한다', () => {
@@ -73,13 +78,6 @@ test('내부 커밋 사유는 한국어로 표시한다', () => {
   assert.match(source, /'pre-restore': '복원 전 자동 저장'/);
   assert.match(source, /'pre-switch': '브랜치 전환 전 자동 저장'/);
   assert.match(source, /adopt: '채택'/);
-});
-
-test('데이터 정리는 영구 작업임을 확인하고 나서 실행한다', () => {
-  assert.match(
-    source,
-    /if \(!window\.confirm\('브랜치, 태그, 보관함에서 참조하지 않는 버전 데이터를 영구 정리할까요\? 이 작업은 되돌릴 수 없습니다\.'\)\) return;\s*void perform\(\(\) => controller\.collectGarbage\(\)\);/,
-  );
 });
 
 test('기록을 그리기 전에 첫 행을 roving tab stop으로 선택한다', () => {

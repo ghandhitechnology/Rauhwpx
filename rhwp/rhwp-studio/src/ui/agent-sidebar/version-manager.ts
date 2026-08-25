@@ -2,7 +2,7 @@ import './versions.css';
 
 import { createIcon } from './icons.ts';
 
-export type VersionTab = 'history' | 'branches' | 'shelves' | 'legacy';
+export type VersionTab = 'history' | 'branches' | 'shelves';
 
 export interface VersionCommitView {
   id: string;
@@ -421,7 +421,6 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     { id: 'history', label: '그래프' },
     { id: 'branches', label: '브랜치' },
     { id: 'shelves', label: '보관함' },
-    { id: 'legacy', label: '이전 기록' },
   ];
   const tabButtons = new Map<VersionTab, HTMLButtonElement>();
   for (const tab of tabDefs) {
@@ -450,7 +449,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   const mergeButton = el('button', 'ag-versions-secondary', '병합');
   mergeButton.type = 'button';
   mergeButton.dataset.versionMutation = 'true';
-  toolbar.append(activeBranch, mergeButton, checkpointButton, branchButton);
+  toolbar.append(activeBranch, mergeButton, branchButton, checkpointButton);
 
   const body = el('div', 'ag-versions-body');
   const historyPanel = el('div', 'ag-versions-panel ag-versions-history');
@@ -467,19 +466,16 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   branchesPanel.setAttribute('role', 'tabpanel');
   const shelvesPanel = el('div', 'ag-versions-panel ag-versions-shelves');
   shelvesPanel.setAttribute('role', 'tabpanel');
-  const legacyPanel = el('div', 'ag-versions-panel ag-versions-legacy');
-  legacyPanel.setAttribute('role', 'tabpanel');
   const tabPanels = new Map<VersionTab, HTMLElement>([
     ['history', historyPanel],
     ['branches', branchesPanel],
     ['shelves', shelvesPanel],
-    ['legacy', legacyPanel],
   ]);
   for (const [id, panel] of tabPanels) {
     panel.id = `ag-versions-${id}-tabpanel`;
     panel.setAttribute('aria-labelledby', `ag-versions-${id}-tab`);
   }
-  body.append(historyPanel, branchesPanel, shelvesPanel, legacyPanel);
+  body.append(historyPanel, branchesPanel, shelvesPanel);
 
   const footer = el('footer', 'ag-versions-footer');
   const storage = el('span', 'ag-versions-storage');
@@ -487,10 +483,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   const aiToggle = document.createElement('input');
   aiToggle.type = 'checkbox';
   aiLabel.append(aiToggle, document.createTextNode('AI 제목'));
-  const privacy = el('span', 'ag-versions-privacy', '작은 변경 요약만 사용 가능한 제공자에 순서대로 전송할 수 있습니다.');
-  const gcButton = el('button', 'ag-versions-gc', '사용하지 않는 데이터 정리');
-  gcButton.type = 'button';
-  footer.append(storage, aiLabel, privacy, gcButton);
+  footer.append(storage, aiLabel);
   page.append(head, notice, tabs, toolbar, body, footer);
 
   let current = controller.getState();
@@ -916,28 +909,6 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     shelvesPanel.appendChild(list);
   }
 
-  function renderLegacy(): void {
-    legacyPanel.replaceChildren(
-      el('p', 'ag-versions-legacy-note', '기존 문서 이력은 비교 전용입니다. 새 버전 기록과 합치거나 복원하지 않습니다.'),
-    );
-    const list = el('div', 'ag-versions-card-list');
-    if (current.legacy.length === 0) list.appendChild(el('p', 'ag-versions-placeholder', '이전 기록이 없습니다.'));
-    for (const item of current.legacy) {
-      const row = el('article', 'ag-versions-card');
-      const copy = el('div', 'ag-versions-card-copy');
-      copy.append(
-        el('strong', 'ag-versions-card-title', item.title),
-        el('span', 'ag-versions-card-meta', `${formatTime(item.createdAt)} · ${formatBytes(item.byteLength)}`),
-      );
-      const compare = el('button', 'ag-versions-secondary', '현재와 비교');
-      compare.type = 'button';
-      compare.addEventListener('click', () => void perform(() => controller.compareLegacy(item.id)));
-      row.append(copy, compare);
-      list.appendChild(row);
-    }
-    legacyPanel.appendChild(list);
-  }
-
   function renderAvailability(): void {
     notice.hidden = true;
     notice.dataset.kind = '';
@@ -994,7 +965,6 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     renderHistory();
     renderBranches();
     renderShelves();
-    renderLegacy();
     renderMutationState();
   }
 
@@ -1069,11 +1039,6 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   });
   loadMoreButton.addEventListener('click', () => void perform(() => controller.loadMore()));
   aiToggle.addEventListener('change', () => controller.setAiTitlesEnabled(aiToggle.checked));
-  gcButton.dataset.versionMutation = 'true';
-  gcButton.addEventListener('click', () => {
-    if (!window.confirm('브랜치, 태그, 보관함에서 참조하지 않는 버전 데이터를 영구 정리할까요? 이 작업은 되돌릴 수 없습니다.')) return;
-    void perform(() => controller.collectGarbage());
-  });
   page.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
     event.preventDefault();
