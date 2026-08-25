@@ -4,10 +4,11 @@
  * 묶음을 한 스크롤에 세운다:
  *  1. 연결 — 허브와 CLI 상태, 모달 설치/로그인, 재연결·세션 재시작
  *  2. 기본 설정 — 다음 대화부터 쓸 프로바이더·모델·강도·권한
- *  3. 지시 — 이 앱 전용 AGENTS.md 읽기·편집
- *  4. 글쓰기 보정 — 문체 보정 상태와 재보정 진입
- *  5. 템플릿 — 기기 전체 HWP/HWPX 서식
- *  6. 사용량 — CLIProxyAPI 연결, 요금제별 5시간·주간 한도, 오늘 누적, 모델별 내역
+ *  3. 버전 관리 — 기본 이력 또는 한컴용 Git 전환
+ *  4. 지시 — 이 앱 전용 AGENTS.md 읽기·편집
+ *  5. 글쓰기 보정 — 문체 보정 상태와 재보정 진입
+ *  6. 템플릿 — 기기 전체 HWP/HWPX 서식
+ *  7. 사용량 — CLIProxyAPI 연결, 요금제별 5시간·주간 한도, 오늘 누적, 모델별 내역
  *
  * 페이지 전환(열기/닫기)은 index.ts 가 클래스로 관리하고, 이 모듈은
  * 자기 DOM 과 데이터 갱신만 맡는다.
@@ -23,6 +24,7 @@ import {
   type AgentModelGroup,
 } from '../../agent/models.ts';
 import { loadAgentPrefs, saveAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
+import { userSettings } from '../../core/user-settings.ts';
 import { createIcon } from './icons.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
 import { formatRelativeTime, formatResetAt, formatShortDate, formatTokens } from './usage-format.ts';
@@ -815,7 +817,24 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     commitPrefs({ defaultPermissionProfile: next });
   });
 
-  // ── 3. 지시 ──────────────────────────────────────────
+  // ── 3. 버전 관리 ──────────────────────────────────────
+  const versionControl = createSection('버전 관리');
+  const hancomGitRow = el('label', 'ag-settings-row ag-settings-toggle-row');
+  const hancomGitLabel = el('span', 'ag-settings-row-name', '한컴용 Git 사용하기');
+  const hancomGitToggle = document.createElement('input');
+  hancomGitToggle.type = 'checkbox';
+  hancomGitToggle.className = 'ag-settings-toggle-input';
+  hancomGitToggle.setAttribute('role', 'switch');
+  hancomGitToggle.checked = userSettings.getUseHancomGit();
+  const hancomGitTrack = el('span', 'ag-settings-toggle-track');
+  hancomGitTrack.setAttribute('aria-hidden', 'true');
+  hancomGitRow.append(hancomGitLabel, hancomGitToggle, hancomGitTrack);
+  hancomGitToggle.addEventListener('change', () => {
+    userSettings.setUseHancomGit(hancomGitToggle.checked);
+  });
+  versionControl.body.append(hancomGitRow);
+
+  // ── 4. 지시 ──────────────────────────────────────────
   const instructionsSection = createSection('지시');
   const instructionsNote = el(
     'p',
@@ -880,7 +899,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     void refreshAgentInstructions(true);
   });
 
-  // ── 4. 글쓰기 보정 ────────────────────────────────────
+  // ── 5. 글쓰기 보정 ────────────────────────────────────
   const calibration = createSection('글쓰기 보정');
   const calibrationStatus = el('p', 'ag-settings-status', '아직 보정되지 않았어요');
   const calibrationSummary = el('p', 'ag-settings-note');
@@ -890,7 +909,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   calibrationBtn.addEventListener('click', () => openCalibration());
   calibration.body.append(calibrationStatus, calibrationSummary, calibrationBtn);
 
-  // ── 5. 템플릿 ─────────────────────────────────────────
+  // ── 6. 템플릿 ─────────────────────────────────────────
   const templatesSection = createSection('템플릿');
   const templatesNote = el('p', 'ag-settings-note', 'HWP/HWPX 파일을 기기 전체 템플릿으로 보관합니다. 채팅에서는 /templates로 선택하세요.');
   const templatesList = el('div', 'ag-template-list');
@@ -970,7 +989,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (event.key === 'Escape') finishTemplateName(null);
   });
 
-  // ── 6. 사용량 ─────────────────────────────────────────
+  // ── 7. 사용량 ─────────────────────────────────────────
   const usageSection = createSection('사용량');
   const cliproxyCard = el('div', 'ag-settings-usage-block ag-settings-cliproxy');
   const cliproxyHead = el('div', 'ag-settings-usage-head');
@@ -1119,6 +1138,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   body.append(
     connection.root,
     defaults.root,
+    versionControl.root,
     instructionsSection.root,
     calibration.root,
     templatesSection.root,

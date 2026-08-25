@@ -969,6 +969,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-test",
  "web-sys",
+ "web-time",
  "zip",
 ]
 

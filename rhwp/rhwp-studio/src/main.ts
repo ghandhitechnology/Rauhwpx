@@ -15,7 +15,7 @@ import { CommandRegistry } from '@/command/registry';
 import { CommandDispatcher } from '@/command/dispatcher';
 import type { EditorContext, CommandServices, EditorEditMode } from '@/command/types';
 import { confirmSaveBeforeReplacingDocument, fileCommands, runLibraryMove } from '@/command/commands/file';
-import { editCommands } from '@/command/commands/edit';
+import { editCommands, openClassicDocumentHistory } from '@/command/commands/edit';
 import {
   setBasicToolboxExpanded,
   syncClipMenu,
@@ -77,6 +77,7 @@ import {
   cancelDesktopDocument,
   captureDesktopNativeDroppedFile,
   commitDesktopDocument,
+  getNativeFileHandleVerifiedDocumentId,
   getRendererSessionContext,
   installDesktopCloseHandling,
   installDesktopFileHandling,
@@ -95,6 +96,14 @@ import { initAgentBridge, type AgentBridge } from './agent/bridge.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
 import { AGENT_LABEL } from './ui/agent-sidebar/providers.ts';
 import { initInlinePrompt } from './agent/inline-prompt.ts';
+import { DocumentVersionController, persistActiveBranch } from './versioning/controller.ts';
+import {
+  VersionGraphStore,
+  documentId as versionDocumentId,
+  isPortableHistoryBytes,
+  isPortableHistoryFileName,
+  openPortableHistoryBundle,
+} from './versioning/index.ts';
 import type { AgentEditingLease } from './agent/types.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
 
@@ -133,6 +142,12 @@ async function completeHostSave(fileName?: string): Promise<{ ok: true; wasDirty
   const wasDirty = documentState.isDirty();
   if (fileName) wasm.fileName = fileName;
   documentState.markClean('host-save');
+  eventBus.emit('document-context-changed');
+  eventBus.emit('document-saved', {
+    reason: 'host-save',
+    fileName: wasm.fileName,
+    sourceFormat: wasm.getSourceFormat(),
+  });
   await autosaveManager.discardCurrentDraft('host-save');
   return { ok: true, wasDirty };
 }
@@ -260,6 +275,7 @@ function setAgentEditingLease(lease: AgentEditingLease): void {
 
 /** 렌더러 초기화 후에 생성되는 에이전트 브리지 — 저장 가드가 대기 편집을 조회한다. */
 let agentBridgeRef: AgentBridge | null = null;
+let versionControllerRef: DocumentVersionController | null = null;
 
 const commandServices: CommandServices = {
   eventBus,
@@ -271,6 +287,10 @@ const commandServices: CommandServices = {
   pickOpenHandle: pickDesktopNativeOpenFile,
   pickSaveHandle: pickDesktopNativeSaveFile,
   validateSaveHandle: reserveSaveHandleForWrite,
+  createPortableHistoryBundle: async () => {
+    if (!versionControllerRef) throw new Error('버전 기록 서비스를 사용할 수 없습니다.');
+    return versionControllerRef.createPortableHistoryBundle();
+  },
   setEditMode,
   getPendingAgentEdits: () => {
     const pending = agentBridgeRef?.pendingEdits;
@@ -628,7 +648,7 @@ async function initialize(): Promise<void> {
         eventBus.emit('open-document-bytes', payload);
       },
       notifyUnsupportedFile(fileName) {
-        showLoadError(new Error(`지원하지 않는 파일 형식입니다: ${fileName}. HWP/HWPX/HML 파일만 지원합니다.`));
+        showLoadError(new Error(`지원하지 않는 파일 형식입니다: ${fileName}. HWP/HWPX/HML/RHWPX 파일만 지원합니다.`));
       },
       notifyError(error) {
         showLoadError(error);
@@ -664,9 +684,20 @@ async function initialize(): Promise<void> {
       });
       agentBridgeRef = agentBridge;
       agentBridge.onEditingLeaseChange(setAgentEditingLease);
+      const versionController = new DocumentVersionController({
+        wasm,
+        eventBus,
+        documentState,
+        getInputHandler: () => inputHandler,
+        getDocumentId: () => activeDocumentId,
+        agentBridge,
+      });
+      versionControllerRef = versionController;
       const agentSidebar = initAgentSidebar({
         bridge: agentBridge,
         eventBus,
+        versionController,
+        openClassicVersionControl: () => openClassicDocumentHistory(commandServices),
         getDocumentContext: () => {
           const documentName = wasm.pageCount > 0 ? wasm.fileName : null;
           let selectionLabel: string | null = null;
@@ -691,6 +722,7 @@ async function initialize(): Promise<void> {
       });
       if (import.meta.env.DEV) {
         (window as any).__agentBridge = agentBridge;
+        (window as any).__versionController = versionController;
       }
     } catch (agentError) {
       console.error('[main] 에이전트 사이드바 초기화 실패 (기능 비활성화):', agentError);
@@ -752,7 +784,7 @@ function setupFileInput(): void {
     const file = input.files?.[0];
     if (!file) return;
     if (!isSupportedDocumentFileName(file.name)) {
-      alert('HWP/HWPX/HML 파일만 지원합니다.');
+      alert('HWP/HWPX/HML/RHWPX 파일만 지원합니다.');
       fileInput.value = '';
       return;
     }
@@ -795,7 +827,7 @@ function setupFileInput(): void {
     const isImage = imageExts.some(ext => dropName.endsWith(ext));
     const isDoc = isSupportedDocumentFileName(dropName);
     if (!isImage && !isDoc) {
-      alert('HWP/HWPX/HML 파일 또는 이미지 파일만 지원합니다.');
+      alert('HWP/HWPX/HML/RHWPX 파일 또는 이미지 파일만 지원합니다.');
       return;
     }
 
@@ -856,7 +888,7 @@ function setupFileInput(): void {
       return;
     }
 
-    // HWP/HWPX/HML — loadFile 내부 unsaved 가드는 드롭 확인 이후에 동작한다.
+    // HWP/HWPX/HML/RHWPX — loadFile 내부 unsaved 가드는 드롭 확인 이후에 동작한다.
     let fileHandle: FileSystemFileHandleLike | null;
     try {
       fileHandle = await droppedFileHandle;
@@ -1238,12 +1270,16 @@ async function reserveDocumentOpen(
   skipRecent = false,
   grant?: VerifiedDocumentGrant | null,
 ): Promise<{ identity: DocumentPreflightIdentity; reservationId: string | null | undefined }> {
+  const mainIssuedDocumentId = getNativeFileHandleVerifiedDocumentId(fileHandle);
+  const verifiedGrant = grant ?? (mainIssuedDocumentId
+    ? { kind: 'verified' as const, documentId: mainIssuedDocumentId }
+    : null);
   const resolved = await resolveDocumentPreflight(
     data,
     fileHandle,
     await listRecentDocs(),
     undefined,
-    grant,
+    verifiedGrant,
   );
   const identity = skipRecent
     ? { ...resolved, documentId: createActiveDocumentId(), useSourceDigest: false }
@@ -1329,6 +1365,7 @@ async function loadBytes(
   } catch (error) {
     await cancelDesktopDocument(ownership.reservationId).catch(() => {});
     activeDocumentId = null;
+    eventBus.emit('document-context-changed');
     await releaseDesktopDocument().catch(() => {});
     await releaseReplacedNativeFileHandle(previousFileHandle, null).catch(() => {});
     await autosaveManager.endDocument({ discardDraft: true, reason: 'failed-document-replacement' })
@@ -1521,6 +1558,7 @@ async function createNewDocument(): Promise<void> {
   } catch (error) {
     await cancelDesktopDocument(reservationId).catch(() => {});
     activeDocumentId = null;
+    eventBus.emit('document-context-changed');
     await releaseDesktopDocument().catch(() => {});
     await releaseReplacedNativeFileHandle(previousFileHandle, null).catch(() => {});
     await autosaveManager.endDocument({ discardDraft: true, reason: 'failed-new-document' })
@@ -1535,7 +1573,11 @@ async function canReplaceCurrentDocument(skipUnsavedGuard?: boolean): Promise<bo
     showToast({ message: '에이전트가 편집을 마친 뒤 문서를 바꿀 수 있습니다.', durationMs: 2600 });
     return false;
   }
-  return skipUnsavedGuard === true || await confirmSaveBeforeReplacingDocument(commandServices);
+  const allowed = skipUnsavedGuard === true
+    || await confirmSaveBeforeReplacingDocument(commandServices);
+  if (!allowed) return false;
+  await versionControllerRef?.whenIdle();
+  return true;
 }
 
 async function openDocumentBytes(data: OpenDocumentBytesEvent) {
@@ -1544,6 +1586,50 @@ async function openDocumentBytes(data: OpenDocumentBytesEvent) {
     return false;
   }
   try {
+    if (isPortableHistoryFileName(data.fileName) || isPortableHistoryBytes(data.bytes)) {
+      const bundle = openPortableHistoryBundle(data.bytes);
+      const probe = new WasmBridge();
+      try {
+        await probe.initialize();
+        probe.loadDocument(bundle.currentDocumentBytes, bundle.documentFileName);
+      } finally {
+        probe.releaseDocument();
+      }
+      const store = new VersionGraphStore();
+      const imported = await store.importRepositorySnapshot(bundle.snapshot);
+      try {
+        await loadBytes(
+          bundle.currentDocumentBytes,
+          bundle.documentFileName,
+          null,
+          performance.now(),
+          {
+            grant: {
+              kind: 'verified',
+              documentId: bundle.snapshot.repository.documentId,
+            },
+          },
+        );
+        persistActiveBranch(bundle.snapshot.repository.documentId, bundle.activeBranch);
+        await versionControllerRef?.refresh().catch((error) => {
+          console.warn('[versioning] 가져온 기록 새로고침 실패:', error);
+        });
+      } catch (error) {
+        if (imported.imported) {
+          await store.removeImportedRepository(
+            bundle.snapshot.repository.id,
+            versionDocumentId(bundle.snapshot.repository.documentId),
+            bundle.snapshot.repository.revision,
+          ).catch(() => undefined);
+        }
+        throw error;
+      } finally {
+        await store.close();
+      }
+      await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
+      showToast({ message: '문서와 전체 버전 기록을 불러왔습니다.', durationMs: 3500 });
+      return true;
+    }
     await loadBytes(data.bytes, data.fileName, data.fileHandle, performance.now(), {
       grant: data.grant,
     });

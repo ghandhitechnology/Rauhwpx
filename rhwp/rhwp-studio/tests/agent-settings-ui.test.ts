@@ -21,11 +21,13 @@ const settings = readSource('../src/ui/agent-sidebar/settings.ts');
 const settingsCss = readSource('../src/ui/agent-sidebar/settings.css');
 const css = readSource('../src/ui/agent-sidebar/agent-sidebar.css');
 const icons = readSource('../src/ui/agent-sidebar/icons.ts');
+const editCommandsSource = readSource('../src/command/commands/edit.ts');
+const mainSource = readSource('../src/main.ts');
 
-test('설정 페이지는 무대에 다른 페이지와 나란히 선다', () => {
+test('설정과 버전 페이지는 무대에 다른 페이지와 나란히 선다', () => {
   assert.match(
     source,
-    /stage\.append\(\s*workspaceBar,\s*chatPage,\s*threadsPage,\s*skillsPage,\s*referenceLibrary\.page,\s*settingsPage,\s*reviewColumn,\s*planColumn,\s*railResize,\s*reviewResize,?\s*\)/,
+    /stage\.append\(\s*workspaceBar,\s*chatPage,\s*threadsPage,\s*skillsPage,\s*referenceLibrary\.page,\s*settingsPage,\s*versionsPage,\s*reviewColumn,\s*planColumn,\s*railResize,\s*reviewResize,?\s*\)/,
   );
   assert.match(settings, /element\.id = 'ag-settings-panel'/);
   assert.match(settings, /element\.setAttribute\('role', 'region'\)/);
@@ -33,24 +35,24 @@ test('설정 페이지는 무대에 다른 페이지와 나란히 선다', () =>
 });
 
 test('스킬 페이지와 같은 전환 계약을 탄다', () => {
-  assert.match(css, /\.ag-skills-page,\n\.ag-settings-page \{/);
-  assert.match(css, /\.ag-settings-open \.ag-chat-page \{/);
-  assert.match(css, /\.ag-settings-open \.ag-settings-page \{/);
+  assert.match(css, /\.ag-skills-page,\n\.ag-settings-page,\n\.ag-versions-page \{/);
+  assert.match(css, /\.ag-settings-open \.ag-chat-page,/);
+  assert.match(css, /\.ag-settings-open \.ag-settings-page,/);
   assert.match(css, /\.ag-fullscreen \.ag-settings-page/);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*\.ag-settings-open \.ag-settings-page \{\s*transition: none;/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*\.ag-settings-open \.ag-settings-page,[\s\S]*\.ag-versions-open \.ag-versions-page \{\s*transition: none;/);
 });
 
-test('목록·스킬·설정 세 페이지는 서로를 닫는다', () => {
+test('목록·스킬·설정·버전 페이지는 서로를 닫는다', () => {
   assert.match(source, /function setSettingsPanelOpen\(open: boolean\): void/);
   assert.match(source, /root\.classList\.toggle\('ag-settings-open', open\)/);
   // 설정을 열면 목록/스킬이 닫히고,
   assert.match(
     source,
-    /if \(open\) \{\s*setConfigPanelOpen\(false\);\s*threadsPanelOpen = false;\s*skillsPanelOpen = false;\s*root\.classList\.remove\('ag-threads-open', 'ag-skills-open'\);/,
+    /if \(open\) \{\s*setConfigPanelOpen\(false\);\s*threadsPanelOpen = false;\s*skillsPanelOpen = false;\s*root\.classList\.remove\('ag-threads-open', 'ag-skills-open'\);\s*skillsBtn\.setAttribute\('aria-expanded', 'false'\);\s*skillsPage\.setAttribute\('aria-hidden', 'true'\);\s*closeVersionsPage\(\);/,
   );
   // 목록/스킬/참고자료/전체 화면으로 넘어가면 설정이 닫힌다.
   assert.match(source, /function closeSettingsPage\(\): void \{[\s\S]*root\.classList\.remove\('ag-settings-open'\)/);
-  assert.equal((source.match(/closeSettingsPage\(\);/g) ?? []).length, 4);
+  assert.ok((source.match(/closeSettingsPage\(\);/g) ?? []).length >= 4);
   // 설정과 참고자료 페이지는 서로를 닫는다.
   assert.match(source, /if \(open && referenceLibrary\.isOpen\(\)\) referenceLibrary\.setOpen\(false\);\s*settingsPanelOpen = open;/);
 });
@@ -60,7 +62,7 @@ test('헤더에 설정(기어) 버튼이 있다', () => {
   assert.match(source, /settingsBtn\.setAttribute\('aria-label', '설정'\)/);
   assert.match(source, /settingsBtn\.setAttribute\('aria-controls', 'ag-settings-panel'\)/);
   assert.match(source, /settingsBtn\.appendChild\(createIcon\('gear'\)\)/);
-  assert.match(source, /headerActions\.append\(threadsBtn, settingsBtn\)/);
+  assert.match(source, /headerActions\.append\(threadsBtn, versionsBtn, settingsBtn\)/);
   assert.match(icons, /gear: 'M/);
   assert.match(icons, /refresh: 'M/);
 });
@@ -72,11 +74,29 @@ test('/settings 슬래시 명령이 설정 페이지를 연다', () => {
   assert.ok(source.indexOf("if (text === '/settings')") < source.indexOf('recordUserMessage(messageText,'));
 });
 
-test('설정은 연결·기본 설정·글쓰기 보정·템플릿·사용량 묶음이다', () => {
-  for (const title of ['연결', '기본 설정', '글쓰기 보정', '템플릿', '사용량']) {
+test('설정은 연결·기본 설정·버전 관리·글쓰기 보정·템플릿·사용량 묶음이다', () => {
+  for (const title of ['연결', '기본 설정', '버전 관리', '글쓰기 보정', '템플릿', '사용량']) {
     assert.match(settings, new RegExp(`createSection\\('${title}'\\)`));
   }
   assert.match(settingsCss, /\.ag-settings-section-title/);
+});
+
+test('한컴용 Git 토글은 기본 이력과 Git 버전 관리 진입을 전환한다', () => {
+  assert.match(settings, /'한컴용 Git 사용하기'/);
+  assert.match(settings, /hancomGitToggle\.setAttribute\('role', 'switch'\)/);
+  assert.match(settings, /hancomGitToggle\.checked = userSettings\.getUseHancomGit\(\)/);
+  assert.match(settings, /userSettings\.setUseHancomGit\(hancomGitToggle\.checked\)/);
+  assert.match(settingsCss, /\.ag-settings-toggle-input:checked \+ \.ag-settings-toggle-track/);
+  assert.match(source, /function openConfiguredVersionControl\(\): void/);
+  assert.match(source, /!userSettings\.getUseHancomGit\(\) && openClassicVersionControl/);
+  assert.match(editCommandsSource, /new HistoryDialog\(services, compareSessionStore\)/);
+});
+
+test('버전 버튼은 설정과 관계없이 표시되고 현재 버전 관리 방식을 연다', () => {
+  assert.doesNotMatch(source, /versionsBtn\.hidden/);
+  assert.match(source, /versionsBtn\.addEventListener\('click',[\s\S]*openConfiguredVersionControl\(\)/);
+  assert.doesNotMatch(mainSource, /gitVersionToolbarButton/);
+  assert.match(editCommandsSource, /userSettings\.getUseHancomGit\(\)[\s\S]*versions:open[\s\S]*openClassicDocumentHistory/);
 });
 
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {

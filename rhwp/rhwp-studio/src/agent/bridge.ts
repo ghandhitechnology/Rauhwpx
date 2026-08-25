@@ -46,6 +46,8 @@ import type {
   AgentSetupAuthStart,
   AgentSetupStatus,
   AgentSetupStatusMap,
+  CheckpointTitleRequest,
+  CheckpointTitleResult,
   AgentPhase,
   AgentWorkflow,
   AgentWorkflowState,
@@ -136,6 +138,8 @@ export interface AgentBridge {
   stopChat(): void;
   /** gpt-5.6-luna 로 스레드 제목 생성 요청. */
   requestTitle(threadId: string, preview: string): string;
+  /** 커밋 메시지는 부수 정보다. 오프라인, 실패, 타임아웃이면 null. */
+  requestCheckpointTitle(input: CheckpointTitleRequest): Promise<CheckpointTitleResult | null>;
   sendUserMessage(text: string, skillName?: string, stagedReferenceIds?: string[]): Promise<string | null>;
   listTemplates(): Promise<TemplateCatalog>;
   addTemplate(file: File, name?: string): Promise<DocumentTemplate>;
@@ -809,6 +813,27 @@ function readPiCatalog(value: unknown): PiCatalogModel[] {
     if (model) out.push(model);
   }
   return out;
+}
+
+function readCheckpointTitleResult(value: unknown): CheckpointTitleResult | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const src = value as Record<string, unknown>;
+  const provider = src['provider'];
+  const title = src['title'];
+  const revision = src['titleRevision'];
+  if (provider !== 'pi' && provider !== 'codex' && provider !== 'grok' && provider !== 'claude') return null;
+  if (typeof src['commitId'] !== 'string' || !src['commitId']) return null;
+  if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return null;
+  if (typeof title !== 'string' || !title || title.trim() !== title
+    || /[\r\n\u0000-\u001f\u007f]/.test(title) || [...title].length > 72) return null;
+  if (typeof src['model'] !== 'string' || !src['model']) return null;
+  return {
+    commitId: src['commitId'],
+    titleRevision: revision,
+    title,
+    provider,
+    model: src['model'],
+  };
 }
 
 function isPiSetupState(value: unknown): value is 'preparing' | 'downloading' | 'installing' | 'configuring' | 'verifying' | 'done' {
@@ -1728,6 +1753,12 @@ class AgentBridgeImpl implements AgentBridge {
         });
         break;
       }
+      case 'checkpoint-title-result': {
+        if (typeof msg.requestId === 'string') {
+          this.requests.settle(msg.requestId, readCheckpointTitleResult(msg.result));
+        }
+        break;
+      }
       case 'agent-event': {
         const event = msg.event as AgentStreamEvent | undefined;
         if (!event || typeof event.type !== 'string') break;
@@ -1956,6 +1987,20 @@ class AgentBridgeImpl implements AgentBridge {
       });
     }
     return requestId;
+  }
+
+  requestCheckpointTitle(input: CheckpointTitleRequest): Promise<CheckpointTitleResult | null> {
+    return this.request<CheckpointTitleResult>(
+      {
+        type: 'checkpoint-title-request',
+        commitId: input.commitId,
+        titleRevision: input.titleRevision,
+        appLanguage: input.appLanguage,
+        summary: input.summary,
+      },
+      'checkpoint-title',
+      45_000,
+    );
   }
 
   sendUserMessage(text: string, skillName?: string, stagedReferenceIds: string[] = []): Promise<string | null> {

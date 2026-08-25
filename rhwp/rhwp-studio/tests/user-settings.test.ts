@@ -175,6 +175,35 @@ test('짤림보기(clipView) 설정은 rhwp-settings에 저장되고 기본값�
   }
 });
 
+test('한컴용 Git 설정은 기본으로 꺼져 있고 rhwp-settings에 저장된다', () => {
+  const originalStorage = (globalThis as { localStorage?: Storage }).localStorage;
+  const store = new Map<string, string>();
+  const mockStorage = {
+    get length() { return store.size; },
+    clear() { store.clear(); },
+    getItem(key: string) { return store.get(key) ?? null; },
+    key(index: number) { return Array.from(store.keys())[index] ?? null; },
+    removeItem(key: string) { store.delete(key); },
+    setItem(key: string, value: string) { store.set(key, value); },
+  } as Storage;
+
+  (globalThis as { localStorage?: Storage }).localStorage = mockStorage;
+  const changes: boolean[] = [];
+  const unsubscribe = userSettings.subscribeUseHancomGit((enabled) => changes.push(enabled));
+  try {
+    assert.equal(userSettings.getUseHancomGit(), false);
+    userSettings.setUseHancomGit(true);
+    assert.equal(userSettings.getUseHancomGit(), true);
+    assert.deepEqual(changes, [true]);
+    const stored = JSON.parse(store.get('rhwp-settings') ?? '{}');
+    assert.equal(stored.versionControl.useHancomGit, true);
+  } finally {
+    unsubscribe();
+    userSettings.setUseHancomGit(false);
+    (globalThis as { localStorage?: Storage }).localStorage = originalStorage;
+  }
+});
+
 test('복구용 자동저장 설정은 rhwp-settings에 저장된다', () => {
   const originalStorage = (globalThis as { localStorage?: Storage }).localStorage;
   const store = new Map<string, string>();

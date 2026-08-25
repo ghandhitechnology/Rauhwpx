@@ -54,6 +54,12 @@ export interface ViewSettings {
   clipView: boolean;
 }
 
+/** 버전 관리 설정 */
+export interface VersionControlSettings {
+  /** 한컴 문서용 Git 스타일 버전 관리 사용 여부 */
+  useHancomGit: boolean;
+}
+
 /** 복구용 자동저장 설정 */
 export interface AutosaveSettings {
   /** 복구용 자동저장 사용 여부 */
@@ -73,6 +79,7 @@ export interface AppSettings {
   theme: ThemeSettings;
   dialog: DialogSettings;
   view: ViewSettings;
+  versionControl: VersionControlSettings;
   autosave: AutosaveSettings;
 }
 
@@ -141,6 +148,9 @@ function defaultSettings(): AppSettings {
       showControlCodes: false,
       clipView: true,
     },
+    versionControl: {
+      useHancomGit: false,
+    },
     autosave: {
       recoveryEnabled: true,
       recoveryIntervalMinutes: 10,
@@ -167,6 +177,7 @@ function normalizeNumber(value: unknown, fallback: number, min: number, max: num
 /** 사용자 환경설정 서비스 (싱글턴) */
 class UserSettingsService {
   private data: AppSettings;
+  private readonly hancomGitListeners = new Set<(enabled: boolean) => void>();
 
   constructor() {
     this.data = this.load();
@@ -181,6 +192,7 @@ class UserSettingsService {
       const defaults = defaultSettings();
       const dialog: Partial<DialogSettings> = parsed.dialog ?? {};
       const view: Partial<ViewSettings> = parsed.view ?? {};
+      const versionControl: Partial<VersionControlSettings> = parsed.versionControl ?? {};
       const autosave: Partial<AutosaveSettings> = parsed.autosave ?? {};
       return {
         version: parsed.version ?? defaults.version,
@@ -219,6 +231,14 @@ class UserSettingsService {
           clipView: normalizeBoolean(
             view.clipView,
             defaults.view.clipView,
+          ),
+        },
+        versionControl: {
+          ...defaults.versionControl,
+          ...versionControl,
+          useHancomGit: normalizeBoolean(
+            versionControl.useHancomGit,
+            defaults.versionControl.useHancomGit,
           ),
         },
         autosave: {
@@ -330,6 +350,25 @@ class UserSettingsService {
   setClipView(value: boolean): void {
     this.data.view.clipView = value;
     this.save();
+  }
+
+  /** 한컴 문서용 Git 스타일 버전 관리 사용 여부 */
+  getUseHancomGit(): boolean {
+    return this.data.versionControl.useHancomGit;
+  }
+
+  /** 한컴 문서용 Git 스타일 버전 관리 설정 */
+  setUseHancomGit(value: boolean): void {
+    if (this.data.versionControl.useHancomGit === value) return;
+    this.data.versionControl.useHancomGit = value;
+    this.save();
+    this.hancomGitListeners.forEach((listener) => listener(value));
+  }
+
+  /** 한컴용 Git 설정 변경 구독 */
+  subscribeUseHancomGit(listener: (enabled: boolean) => void): () => void {
+    this.hancomGitListeners.add(listener);
+    return () => this.hancomGitListeners.delete(listener);
   }
 
   /** 복구용 자동저장 설정 반환 */

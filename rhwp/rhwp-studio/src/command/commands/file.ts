@@ -41,6 +41,7 @@ import {
   pickOpenFileHandle,
   readFileFromHandle,
   saveDocumentToFileSystem,
+  type FileSystemDirectoryHandleLike,
   type FileSystemFileHandleLike,
   type SaveDocumentResult,
   type FileSystemWindowLike,
@@ -61,12 +62,18 @@ import {
   restoreNativeDocument,
   searchNearbyNativeDocuments,
   verifyNativePick,
+  saveDesktopPortableHistoryFile,
 } from '@/desktop-integration';
 import {
   moveToLibraryDocument,
   type LibraryDocumentTarget,
   type LibraryMoveResult,
 } from '@/library/move-to-document';
+import {
+  PORTABLE_HISTORY_FOLDER_HISTORY_NAME,
+  PORTABLE_HISTORY_MIME_TYPE,
+  type PortableHistoryFolder,
+} from '@/versioning/portable-bundle';
 
 async function openFileViaPicker(services: CommandServices): Promise<void> {
   let handle: FileSystemFileHandleLike | null | undefined;
@@ -226,6 +233,11 @@ function completeHandleSave(
   services.wasm.fileName = result.fileName;
   services.documentState.markClean(reason);
   services.eventBus.emit('document-context-changed');
+  services.eventBus.emit('document-saved', {
+    reason,
+    fileName: result.fileName,
+    sourceFormat: savedFormat,
+  });
   if (result.handle) {
     // Handle-backed saves can be reopened across browser sessions. Keep this event
     // deliberately limited to the durable handle/name association; fallback downloads
@@ -304,8 +316,72 @@ async function saveAsFormat(services: CommandServices, format: SaveFormat): Prom
     downloadBlob(blob, downloadName);
     services.documentState.markClean('save-as');
     services.eventBus.emit('document-context-changed');
+    services.eventBus.emit('document-saved', {
+      reason: 'save-as',
+      fileName: downloadName,
+      sourceFormat: format,
+    });
   } catch (error) {
     reportSaveError('file:save-as', error);
+  }
+}
+
+async function saveWithHistory(services: CommandServices): Promise<void> {
+  try {
+    if (!await resolvePendingAgentEditsBeforeSave(services)) return;
+    flushDeferredPaginationBeforeExplicitOutput(services, 'save-with-history');
+    if (!services.createPortableHistoryBundle) {
+      throw new Error('버전 기록 서비스를 사용할 수 없습니다.');
+    }
+
+    const bundle = await services.createPortableHistoryBundle();
+    const desktopResult = await saveDesktopPortableHistoryFile(bundle);
+    if (desktopResult === 'cancelled') return;
+    if (desktopResult === 'saved') {
+      showToast({ message: '문서와 전체 버전 기록을 폴더로 저장했습니다.', durationMs: 3000 });
+      return;
+    }
+
+    const windowLike = window as FileSystemWindowLike;
+    if (!isDesktopApp() && windowLike.showDirectoryPicker) {
+      try {
+        const picked = await windowLike.showDirectoryPicker({
+          id: 'rhwpx-history-bundle',
+          mode: 'readwrite',
+        });
+        const folder = picked.name.toLowerCase().endsWith('.rhwpx')
+          ? picked
+          : await picked.getDirectoryHandle(bundle.folderName, { create: true });
+        await writePortableHistoryFolderToDirectory(folder, bundle);
+      } catch (error) {
+        if (isUserCancelError(error)) return;
+        throw error;
+      }
+      showToast({ message: '문서와 전체 버전 기록을 폴더로 저장했습니다.', durationMs: 3000 });
+      return;
+    }
+
+    const history = bundle.files.find((file) => file.name === PORTABLE_HISTORY_FOLDER_HISTORY_NAME);
+    if (!history) throw new Error('버전 기록 묶음을 만들지 못했습니다.');
+    downloadBlob(
+      new Blob([history.bytes as unknown as BlobPart], { type: PORTABLE_HISTORY_MIME_TYPE }),
+      bundle.folderName,
+    );
+    showToast({ message: '문서와 전체 버전 기록을 저장했습니다.', durationMs: 3000 });
+  } catch (error) {
+    reportSaveError('file:save-with-history', error);
+  }
+}
+
+async function writePortableHistoryFolderToDirectory(
+  directory: FileSystemDirectoryHandleLike,
+  bundle: PortableHistoryFolder,
+): Promise<void> {
+  for (const file of bundle.files) {
+    const handle = await directory.getFileHandle(file.name, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(new Blob([file.bytes as unknown as BlobPart]));
+    await writable.close();
   }
 }
 
@@ -357,6 +433,11 @@ export async function saveCurrentDocument(services: CommandServices): Promise<Sa
     downloadBlob(blob, downloadName);
     services.documentState.markClean('save');
     services.eventBus.emit('document-context-changed');
+    services.eventBus.emit('document-saved', {
+      reason: 'save',
+      fileName: downloadName,
+      sourceFormat: target.format,
+    });
     return 'saved';
   } catch (error) {
     reportSaveError('file:save', error);
@@ -775,6 +856,14 @@ export const fileCommands: CommandDef[] = [
     async execute(services) {
       const format = await chooseSaveAsFormat(services);
       if (format !== null) await saveAsFormat(services, format);
+    },
+  },
+  {
+    id: 'file:save-with-history',
+    label: '기록을 포함해 저장',
+    canExecute: (ctx) => ctx.hasDocument,
+    async execute(services) {
+      await saveWithHistory(services);
     },
   },
   {

@@ -230,6 +230,17 @@ export class CommandHistory {
   canUndo(): boolean { return this.undoStack.length > 0; }
   canRedo(): boolean { return this.redoStack.length > 0; }
 
+  /** 실패한 시험적 편집을 되돌린 뒤 해당 이력을 폐기한다. */
+  discardRedo(wasm: WasmBridge): void {
+    discardAll(this.redoStack, wasm);
+    this.redoStack = [];
+  }
+
+  /** 이미 적용된 보상 교체 상태는 유지하면서 해당 이력을 폐기한다. */
+  discardUndoTop(wasm: WasmBridge): void {
+    this.undoStack.pop()?.discard?.(wasm);
+  }
+
   /**
    * [Task #2337] 직전 undo/redo 로 방금 이동한 커맨드를 조회한다.
    * undo() 후 방금 되돌린 커맨드는 redoStack top(peekRedoTop), redo() 후 방금 다시

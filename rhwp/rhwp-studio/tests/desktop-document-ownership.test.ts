@@ -20,9 +20,11 @@ import {
   canonicalNativePath,
   NativeFileHandleRegistry,
   nativePathOwnershipKey,
+  readPortableHistoryBytes,
   validateNativeDocumentBytes,
   validateNativeDocumentPath,
   writeNativeFileAtomically,
+  writePortableHistoryFolder,
 } from '../../../desktop/native-file-handles.mjs';
 
 function minimalCfbBytes(fill = 0): Uint8Array {
@@ -379,6 +381,7 @@ test('native bookmarks reopen a released handle without leaking the path', async
   assert.equal(reopened?.ok, true);
   if (!reopened?.ok) return;
   assert.equal(reopened.descriptor.handleId, 'restored');
+  assert.equal(reopened.descriptor.verifiedDocumentId, 'document-a');
   assert.equal('path' in reopened.descriptor, false);
   assert.deepEqual(await registry.read('session-a', reopened.descriptor.handleId), {
     name: 'report.hwp',
@@ -399,10 +402,55 @@ test('native bookmarks persist independently of live handles', async () => {
     kind: 'file',
     handleId: 'bookmarked',
     name: 'report.hwp',
+    verifiedDocumentId: 'document-a',
   });
   assert.deepEqual(registry.dumpBookmarks(), [[
     'document-a',
     { path: '/canonical/report.hwp', digest: null },
+  ]]);
+});
+
+test('native descriptors omit identity for unbookmarked files and different canonical paths', async () => {
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async (filePath: string) => filePath,
+    createId: () => 'unbookmarked',
+  });
+  registry.loadBookmarks([['document-a', '/canonical/original.hwp']]);
+
+  const opened = await registry.create('session-a', '/canonical/copy.hwp');
+  assert.equal(opened.ok, true);
+  if (!opened.ok) return;
+  assert.deepEqual(opened.descriptor, {
+    kind: 'file',
+    handleId: 'unbookmarked',
+    name: 'copy.hwp',
+  });
+});
+
+test('legacy duplicate bookmark paths prefer the oldest owner and collapse after remember', async () => {
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async () => '/canonical/report.hwp',
+    createId: () => 'restored',
+  });
+  registry.loadBookmarks([
+    ['original-history', '/canonical/report.hwp'],
+    ['broken-reopen', '/canonical/report.hwp'],
+  ]);
+
+  const reopened = await registry.reopenDocument('session-a', 'broken-reopen');
+  assert.equal(reopened?.ok, true);
+  if (!reopened?.ok) return;
+  assert.equal(reopened.descriptor.verifiedDocumentId, 'original-history');
+
+  registry.rememberDocument(
+    'original-history',
+    'session-a',
+    reopened.descriptor.handleId,
+    VALID_DIGEST,
+  );
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'original-history',
+    { path: '/canonical/report.hwp', digest: VALID_DIGEST },
   ]]);
 });
 
@@ -454,6 +502,33 @@ test('atomic native replacement preserves the destination on temp write and rena
     );
     assert.equal(await readFs(target, 'utf8'), 'previous');
     assert.deepEqual(await readdir(directory), ['report.hwp'], 'failed rename temp must be cleaned up');
+  });
+});
+
+test('portable history bundles replace as a folder containing the document and history', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.rhwpx');
+    await writeFs(target, 'old-file');
+    const history = new Uint8Array(24).fill(7);
+    history.set(new TextEncoder().encode('RAUHWPX-HISTORY\0'));
+    const document = new Uint8Array([0x50, 0x4b, 3, 4, 5]);
+    await writePortableHistoryFolder(target, [
+      { name: 'history', bytes: history },
+      { name: 'report.hwpx', bytes: document },
+    ]);
+
+    assert.deepEqual((await readdir(directory)).sort(), ['report.rhwpx']);
+    assert.deepEqual((await readdir(target)).sort(), ['history', 'report.hwpx']);
+    assert.deepEqual(await readPortableHistoryBytes(target), history);
+    assert.deepEqual(new Uint8Array(await readFs(join(target, 'report.hwpx'))), document);
+
+    const files = new NativeFileHandleRegistry();
+    const opened = await files.create('session-a', target);
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    const read = await files.read('session-a', opened.descriptor.handleId);
+    assert.equal(read.name, 'report.rhwpx');
+    assert.deepEqual(read.bytes, history);
   });
 });
 
@@ -724,11 +799,14 @@ test('remembering a replaced handle without a digest does not revert the bookmar
     assert.equal(previous.ok && next.ok, true);
     if (!previous.ok || !next.ok) return;
 
+    registry.rememberDocument('document-b', 'session-a', next.descriptor.handleId, VALID_DIGEST);
     registry.rememberDocument('document-a', 'session-a', previous.descriptor.handleId, VALID_DIGEST);
     registry.rememberDocument('document-a', 'session-a', next.descriptor.handleId, VALID_DIGEST);
     registry.rememberDocument('document-a', 'session-a', previous.descriptor.handleId);
 
     const bookmark = registry.dumpBookmarks();
+    assert.equal(bookmark.length, 1, 'successful Save As transfers the destination path owner');
+    assert.equal(bookmark[0]?.[0], 'document-a');
     assert.equal(bookmark[0]?.[1].path.endsWith('new.hwp'), true);
     assert.equal(bookmark[0]?.[1].digest, VALID_DIGEST);
   });
