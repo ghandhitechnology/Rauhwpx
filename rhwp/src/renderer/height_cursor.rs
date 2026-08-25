@@ -876,6 +876,19 @@ impl HeightCursor {
             && end_y < prev_content_floor_y - 0.25
             && y_offset >= prev_content_floor_y
             && y_offset - end_y <= 24.0;
+        // page-path 에서 제목 stale-forward(>100px)를 순차 y로 접은 뒤, 잔여 점프가
+        // 100px 바로 아래로 줄어든 단 하단 본문이 저장 vpos 로 다시 스냅하면
+        // 뒤 문항 제목이 frame 밖으로 밀린다 (2023-09 p14 pi=748 → 문23 y=1186).
+        // 이 잔여 스냅만 순차 y로 유지하고 page_base 를 옮겨 후속 항목도 따라가게 한다.
+        let compact_endnote_page_residual_stale_snap = self.suppress_large_forward_jump
+            && is_page_path
+            && !vpos_rewind
+            && !stale_forward
+            && applied
+            && end_y > y_offset + 80.0
+            && end_y <= y_offset + 100.0
+            && y_offset > self.col_area_y + self.col_area_height * 0.65
+            && y_offset <= col_bottom;
         if compact_endnote_stale_note_gap
             || compact_endnote_title_body_stale_forward
             || compact_endnote_large_gap_body_stale_forward
@@ -884,6 +897,7 @@ impl HeightCursor {
             || compact_no_separator_large_title_tail_gap
             || hwpx_page_start_stale_forward
             || (applied && (compact_endnote_new_note_jump || compact_endnote_tac_picture_gap))
+            || compact_endnote_page_residual_stale_snap
         {
             // Compact endnote flow encodes visual gaps in absolute vpos.
             // Suppressed gaps must also move the vpos base, otherwise the next
@@ -1132,6 +1146,7 @@ impl HeightCursor {
             && !stale_forward
             && !compact_endnote_new_note_jump
             && !compact_endnote_tac_picture_gap
+            && !compact_endnote_page_residual_stale_snap
         {
             end_y
         } else if compact_endnote_new_note_jump {
@@ -1844,6 +1859,40 @@ mod tests {
             "got={got}, expected={y_offset}"
         );
         assert_eq!(c.vpos_lazy_base, Some(expected_base));
+    }
+
+    /// page-path 단 하단에서 stale-forward 잔여(80~100px)가 저장 vpos로
+    /// 다시 스냅하면 뒤 문항 제목이 frame 밖으로 밀린다.
+    /// (2023-09 p14 pi=748: 99px 스냅 → 문23 y=1186)
+    #[test]
+    fn compact_endnote_page_path_residual_stale_snap_keeps_sequential_y() {
+        let page_base = 527210;
+        let mut c = compact_endnote_cursor(Some(page_base));
+        c.prev_layout_para = Some(0);
+        let y_offset = COL_Y + COL_H * 0.72;
+        let gap_hu = 90 * 75;
+        let prev_vpos = page_base + ((y_offset - COL_Y) * 75.0).round() as i32 - 900 - 452;
+        let curr_vpos = prev_vpos + 900 + 452 + gap_hu;
+        let ps = vec![
+            para(0, prev_vpos, 900, 452, 5000),
+            para(0, curr_vpos, 900, 452, 5000),
+        ];
+
+        let end_y = COL_Y + (curr_vpos - page_base) as f64 / 75.0;
+        let got = c.vpos_adjust(y_offset, 1, &ps, &styles(0.0));
+        let expected_base = page_base + ((end_y - y_offset) / DPI * 7200.0).round() as i32;
+
+        assert!(
+            (got - y_offset).abs() < 1e-6,
+            "got={got}, expected={y_offset}, end_y={end_y}, gap={:.1}",
+            end_y - y_offset
+        );
+        assert_eq!(c.vpos_page_base, Some(expected_base));
+        assert!(
+            end_y - y_offset > 80.0 && end_y - y_offset <= 100.0,
+            "fixture must sit in the 80~100px residual snap band, gap={:.1}",
+            end_y - y_offset
+        );
     }
 
     /// 빈 문단이 새 미주 제목 앞의 시각 간격을 이미 만들었다면 추가 40px 완충은 넣지 않는다.
