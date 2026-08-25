@@ -100,7 +100,10 @@ async function startHub(t, { fakeCursor = false, cursorQuestionDelayMs = 0 } = {
       "if (process.argv.includes('status')) { console.log('Not logged in'); process.exit(1); }",
       "if (process.argv[2] === 'acp') process.exit(1);",
       `process.stdout.write(${JSON.stringify(`${JSON.stringify(init)}\n`)});`,
-      `setTimeout(() => process.stdout.write(${JSON.stringify(`${JSON.stringify(call)}\n`)}), ${cursorQuestionDelayMs});`,
+      ...(cursorQuestionDelayMs > 0
+        ? [`Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${cursorQuestionDelayMs});`]
+        : []),
+      `process.stdout.write(${JSON.stringify(`${JSON.stringify(call)}\n`)});`,
       'setInterval(() => {}, 1000);',
     ].join('\n'), { mode: 0o755 });
     testPath = `${binDir}${path.delimiter}${testPath}`;
