@@ -40,18 +40,10 @@ jobs:
         working-directory: rhwp
         run: wasm-pack build --target web
 
-      - name: Upload WASM package
-        uses: actions/upload-artifact@v4
-        with:
-          name: rhwp-wasm-package
-          path: rhwp/pkg
-          if-no-files-found: error
-
   app:
     name: Desktop, agent, and Studio checks
-    needs: engine
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - name: Check out source
@@ -67,11 +59,18 @@ jobs:
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
 
-      - name: Download WASM package
-        uses: actions/download-artifact@v5
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          name: rhwp-wasm-package
-          path: rhwp/pkg
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build WASM engine
+        working-directory: rhwp
+        run: wasm-pack build --target web
 
       - name: Install dependencies
         run: |

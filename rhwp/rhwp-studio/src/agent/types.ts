@@ -109,6 +109,29 @@ export interface TemplateCatalog {
   templates: DocumentTemplate[];
 }
 
+/** Rauhwpx가 별도 보관하고 이 앱의 채팅에만 주입하는 AGENTS.md. */
+export interface AgentInstructionsStatus {
+  fileName: 'AGENTS.md';
+  content: string;
+  revision: number;
+  updatedAt: string | null;
+  maxChars: number;
+  scope: 'rauhwpx-app';
+}
+
+/** 에이전트가 제안했지만 사용자가 아직 승인하지 않은 앱 지시 변경안. */
+export interface AgentInstructionsDraft {
+  id: string;
+  content: string;
+  expectedRevision: number;
+  reason: string | null;
+  requestedBy: string;
+  createdAt: string;
+  expiresAt: string;
+  /** Studio만 받는 단기·일회용 승인 capability. */
+  confirmationToken: string;
+}
+
 export interface StructuredPlanStep {
   title: string;
   details: string;
@@ -594,6 +617,10 @@ export type SidebarEvent =
   | { type: 'chat-stopped' }
   | { type: 'reference-status'; messageId: string; attachments: MessageReferenceStatus[] }
   | { type: 'templates-catalog'; catalog: TemplateCatalog; change?: { type: 'added' | 'renamed' | 'replaced' | 'deleted'; template: DocumentTemplate } }
+  | { type: 'agent-instructions'; status: AgentInstructionsStatus; changedBy: string }
+  | { type: 'agent-instructions-draft'; draft: AgentInstructionsDraft }
+  | { type: 'agent-instructions-draft-cleared'; draftId: string; outcome: 'confirmed' | 'rejected' | 'expired' | 'replaced' | 'stale' }
+  | { type: 'agent-instructions-error'; code: string; message: string; status?: AgentInstructionsStatus }
   | { type: 'chat-template-changed'; template: DocumentTemplate | null; reason?: string }
   | { type: 'permission-changed'; permissionProfile: PermissionProfile }
   | ({ type: 'workflow-changed' } & AgentWorkflowState)

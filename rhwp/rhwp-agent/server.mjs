@@ -21,6 +21,7 @@ import {
 import { SkillRegistry } from './skills.mjs';
 import { generateSkillDraft } from './skill-generator.mjs';
 import { WritingStyleStore, assertWritingStyleAppendCompatible } from './writing-style.mjs';
+import { AgentInstructionsStore } from './agent-instructions.mjs';
 import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS } from './tools.mjs';
@@ -138,6 +139,7 @@ async function findSourceCodexAuthPath() {
 }
 let sourceCodexAuthPath = await findSourceCodexAuthPath();
 const writingStyleStore = await new WritingStyleStore().init();
+const agentInstructionsStore = await new AgentInstructionsStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
 const PI_ROOT = defaultPiRoot();
 const openRouter = createOpenRouter({ cacheDir: PI_ROOT });
@@ -232,6 +234,7 @@ const sessions = new HubSessionRegistry({
       sessionGeneration: 0,
       missedTurnEnd: null,
       styleCalibration: null,
+      pendingInstructionDraft: null,
       auxiliaryProcesses: new Set(),
       checkpointTitleControllers: new Set(),
       templateJobs: new Map(),
@@ -262,6 +265,85 @@ function broadcastToStudios(message) {
   for (const record of sessions.values()) sendJson(record.studioSocket, message);
 }
 
+function broadcastAgentInstructions(status, changedBy) {
+  for (const record of sessions.values()) {
+    if (record.pendingInstructionDraft
+      && record.pendingInstructionDraft.expectedRevision !== status.revision) {
+      clearInstructionDraft(record, 'stale');
+    }
+  }
+  broadcastToStudios({ v: 1, type: 'agent-instructions', status, changedBy });
+}
+
+function instructionDraftFrame(draft) {
+  return {
+    id: draft.id,
+    content: draft.content,
+    expectedRevision: draft.expectedRevision,
+    reason: draft.reason,
+    requestedBy: draft.requestedBy,
+    createdAt: new Date(draft.createdAt).toISOString(),
+    expiresAt: new Date(draft.expiresAt).toISOString(),
+    confirmationToken: draft.confirmationToken,
+  };
+}
+
+function clearInstructionDraft(record, outcome) {
+  const draft = record.pendingInstructionDraft;
+  if (!draft) return null;
+  record.pendingInstructionDraft = null;
+  if (draft.expiryTimer) clearTimeout(draft.expiryTimer);
+  sendJson(record.studioSocket, {
+    v: 1,
+    type: 'agent-instructions-draft-cleared',
+    draftId: draft.id,
+    outcome,
+  });
+  return draft;
+}
+
+function currentInstructionDraft(record) {
+  const draft = record.pendingInstructionDraft;
+  if (!draft) return null;
+  if (draft.expiresAt <= Date.now()) {
+    clearInstructionDraft(record, 'expired');
+    return null;
+  }
+  return draft;
+}
+
+function sendInstructionDraft(record, sock = record.studioSocket) {
+  const draft = currentInstructionDraft(record);
+  if (!draft) return false;
+  return sendJson(sock, {
+    v: 1,
+    type: 'agent-instructions-draft',
+    draft: instructionDraftFrame(draft),
+  });
+}
+
+function authorizedInstructionDraft(record, msg) {
+  const draft = currentInstructionDraft(record);
+  if (!draft
+    || typeof msg.draftId !== 'string'
+    || msg.draftId !== draft.id
+    || typeof msg.confirmationToken !== 'string'
+    || !timingSafeTextEqual(msg.confirmationToken, draft.confirmationToken)) {
+    throw workflowError(
+      'INSTRUCTIONS_CONFIRMATION_INVALID',
+      'The instruction proposal is missing, expired, or no longer authorized.',
+    );
+  }
+  return draft;
+}
+
+function consumeAuthorizedInstructionDraft(record, msg) {
+  const draft = authorizedInstructionDraft(record, msg);
+  record.pendingInstructionDraft = null;
+  if (draft.expiryTimer) clearTimeout(draft.expiryTimer);
+  return draft;
+}
+
 function refreshSessionCredentials(agent) {
   for (const record of sessions.values()) {
     if (agent === 'codex') prepareCodexHome(record.codexHome, sourceCodexAuthPath);
@@ -274,6 +356,7 @@ function refreshSessionCredentials(agent) {
 /** CLI 설치·인증을 cli-setup-manager 가 관리하는 에이전트들. */
 const CLI_SETUP_AGENTS = ['claude', 'codex', 'grok', 'cursor'];
 const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi']);
+const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
 
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
 const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
@@ -829,7 +912,9 @@ function drainTemplateCompletion(record) {
   const [entry] = record.pendingTemplateCompletions.splice(index, 1);
   activeSession.status = 'running';
   try {
-    activeSession.backend.sendUserMessage(buildCopyLayoutCompletionPrompt(entry.result));
+    activeSession.backend.sendUserMessage(addAgentInstructionsContext(
+      buildCopyLayoutCompletionPrompt(entry.result),
+    ));
   } catch (error) {
     activeSession.status = 'idle';
     record.pendingTemplateCompletions.splice(index, 0, entry);
@@ -1122,6 +1207,10 @@ function addReferenceContext(activeSession, query, prompt, messageAttachments = 
   }
 }
 
+function addAgentInstructionsContext(prompt) {
+  return `${agentInstructionsStore.promptBlock()}\n\n${prompt}`;
+}
+
 function addTemplateContext(record, activeSession, prompt) {
   if (!activeSession?.activeTemplateId) return prompt;
   try {
@@ -1167,7 +1256,7 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
   })
     .then((prompt) => {
       if (record.agentSession !== activeSession) throw new Error('Agent session changed before the message was dispatched');
-      activeSession.backend.sendUserMessage(addReopenedChatHistory(
+      activeSession.backend.sendUserMessage(addAgentInstructionsContext(addReopenedChatHistory(
         activeSession,
         addActiveDocumentContext(
           activeSession,
@@ -1177,7 +1266,7 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
             addReferenceContext(activeSession, msg.text, prompt, messageAttachments),
           ),
         ),
-      ));
+      )));
     })
     .catch((e) => {
       if (record.agentSession === activeSession) activeSession.status = 'idle';
@@ -1384,7 +1473,7 @@ async function approveImplementationPlan(record, sock, msg) {
     });
     activeSession.status = 'running';
     const approvedPrompt = buildApprovedPlanPrompt(transition.approvedPlan);
-    activeSession.backend.sendUserMessage(addTemplateContext(
+    activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
       record,
       activeSession,
       addReferenceContext(
@@ -1392,7 +1481,7 @@ async function approveImplementationPlan(record, sock, msg) {
         JSON.stringify(transition.approvedPlan.plan),
         approvedPrompt,
       ),
-    ));
+    )));
   } catch (error) {
     if (record.agentSession === activeSession && activeSession.planning.phase === 'switching') {
       activeSession.planning.failSwitch(transition.approvedPlan.planId);
@@ -1429,11 +1518,11 @@ async function requestImplementationPlanChanges(record, sock, msg) {
         'Return to discovery: inspect the affected current state and evaluate the feedback. If it is ambiguous or changes an assumption, discuss it with the user and ask one focused question in normal chat instead of immediately presenting a replacement. If it is already concrete, do not invent a question; follow the planning checkpoint and presentation rules before presenting a complete replacement.',
         `Feedback: ${msg.feedback.trim()}`,
       ].join('\n\n');
-      activeSession.backend.sendUserMessage(addTemplateContext(
+      activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
         record,
         activeSession,
         addReferenceContext(activeSession, msg.feedback, revisionPrompt),
-      ));
+      )));
     }
   } catch (error) {
     if (record.agentSession === activeSession) activeSession.status = 'idle';
@@ -1688,6 +1777,114 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'templates-list': {
       sendJson(sock, { v: 1, type: 'templates-catalog', ...templateStore.list() });
+      return;
+    }
+    case 'agent-instructions-request': {
+      sendJson(sock, {
+        v: 1,
+        type: 'agent-instructions',
+        requestId: msg.requestId ?? null,
+        status: agentInstructionsStore.snapshot(),
+        changedBy: 'system',
+      });
+      sendInstructionDraft(record, sock);
+      return;
+    }
+    case 'agent-instructions-save': {
+      void agentInstructionsStore.update(msg.content, {
+        expectedRevision: Number(msg.expectedRevision),
+      }).then((status) => {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions',
+          requestId: msg.requestId ?? null,
+          status,
+          changedBy: 'user',
+        });
+        broadcastAgentInstructions(status, 'user');
+      }).catch((error) => sendJson(sock, {
+        v: 1,
+        type: 'agent-instructions-error',
+        requestId: msg.requestId ?? null,
+        code: error?.code ?? 'INSTRUCTIONS_SAVE_FAILED',
+        message: String(error?.message ?? error),
+        status: agentInstructionsStore.snapshot(),
+      }));
+      return;
+    }
+    case 'agent-instructions-draft-confirm': {
+      let draft;
+      try {
+        draft = consumeAuthorizedInstructionDraft(record, msg);
+        // Consume the one-use capability before the asynchronous write.
+      } catch (error) {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-error',
+          requestId: msg.requestId ?? null,
+          code: error?.code ?? 'INSTRUCTIONS_CONFIRMATION_INVALID',
+          message: String(error?.message ?? error),
+          status: agentInstructionsStore.snapshot(),
+        });
+        return;
+      }
+      void agentInstructionsStore.update(draft.content, {
+        expectedRevision: draft.expectedRevision,
+      }).then((status) => {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions',
+          requestId: msg.requestId ?? null,
+          status,
+          changedBy: `agent-confirmed:${draft.requestedBy}`,
+        });
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-draft-cleared',
+          draftId: draft.id,
+          outcome: 'confirmed',
+        });
+        broadcastAgentInstructions(status, `agent-confirmed:${draft.requestedBy}`);
+      }).catch((error) => {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-draft-cleared',
+          draftId: draft.id,
+          outcome: 'stale',
+        });
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-error',
+          requestId: msg.requestId ?? null,
+          code: error?.code ?? 'INSTRUCTIONS_SAVE_FAILED',
+          message: String(error?.message ?? error),
+          status: agentInstructionsStore.snapshot(),
+        });
+      });
+      return;
+    }
+    case 'agent-instructions-draft-reject': {
+      let draft;
+      try {
+        draft = consumeAuthorizedInstructionDraft(record, msg);
+      } catch (error) {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-error',
+          requestId: msg.requestId ?? null,
+          code: error?.code ?? 'INSTRUCTIONS_CONFIRMATION_INVALID',
+          message: String(error?.message ?? error),
+          status: agentInstructionsStore.snapshot(),
+        });
+        return;
+      }
+      sendJson(sock, {
+        v: 1,
+        type: 'agent-instructions-draft-cleared',
+        requestId: msg.requestId ?? null,
+        draftId: draft.id,
+        outcome: 'rejected',
+      });
       return;
     }
     case 'chat-permission-set': {
@@ -2398,6 +2595,66 @@ function handleMcpMessage(record, sock, msg) {
           .catch((error) => sendError(error, 'TEMPLATE_REGISTER_FAILED'));
         return;
       }
+      if (tool === 'read_agent_instructions') {
+        sendResult(agentInstructionsStore.snapshot());
+        return;
+      }
+      if (tool === 'update_agent_instructions') {
+        try {
+          const status = agentInstructionsStore.snapshot();
+          const prepared = agentInstructionsStore.prepareUpdate(args.content, {
+            expectedRevision: args.expectedRevision,
+          });
+          if (prepared.content === status.content) {
+            sendResult({ ...status, changed: false, pendingConfirmation: false });
+            return;
+          }
+          if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) {
+            throw workflowError(
+              'INSTRUCTIONS_CONFIRMATION_UNAVAILABLE',
+              'Rauhwpx Studio must be connected so the user can confirm the instruction proposal.',
+            );
+          }
+          if (record.pendingInstructionDraft) clearInstructionDraft(record, 'replaced');
+          const requestedBy = sock.agentLabel ?? record.agentSession?.agent ?? 'unknown';
+          const createdAt = Date.now();
+          const draft = {
+            id: crypto.randomUUID(),
+            confirmationToken: crypto.randomUUID(),
+            content: prepared.content,
+            expectedRevision: prepared.expectedRevision,
+            reason: typeof args.reason === 'string' ? args.reason : null,
+            requestedBy,
+            createdAt,
+            expiresAt: createdAt + AGENT_INSTRUCTION_DRAFT_TTL_MS,
+          };
+          record.pendingInstructionDraft = draft;
+          draft.expiryTimer = setTimeout(() => {
+            if (record.pendingInstructionDraft?.id === draft.id) {
+              clearInstructionDraft(record, 'expired');
+            }
+          }, AGENT_INSTRUCTION_DRAFT_TTL_MS);
+          draft.expiryTimer.unref?.();
+          if (!sendInstructionDraft(record)) {
+            record.pendingInstructionDraft = null;
+            throw workflowError(
+              'INSTRUCTIONS_CONFIRMATION_UNAVAILABLE',
+              'Rauhwpx Studio disconnected before the instruction proposal could be shown.',
+            );
+          }
+          sendResult({
+            ...status,
+            changed: false,
+            pendingConfirmation: true,
+            draftId: draft.id,
+            expiresAt: new Date(draft.expiresAt).toISOString(),
+            ...(draft.reason ? { reason: draft.reason } : {}),
+          });
+        } catch (error) {
+          sendError(error, 'INSTRUCTIONS_DRAFT_FAILED');
+        }
+        return;
+      }
       if (definition.category === 'reference-read') {
         void executeReferenceTool({ tool, args, store: referenceStore, session: record.agentSession })
           .then(({ handled, result }) => {
@@ -2947,6 +3204,13 @@ httpServer.on('upgrade', (req, socket, head) => {
         hubSessionId: record.sessionId,
         session: sessionInfo(record),
       });
+      sendJson(ws, {
+        v: 1,
+        type: 'agent-instructions',
+        status: agentInstructionsStore.snapshot(),
+        changedBy: 'system',
+      });
+      sendInstructionDraft(record, ws);
       const activeSession = record.agentSession;
       if (activeSession?.planning.latestPlan && activeSession.planning.phase === 'awaiting-approval') {
         sendJson(ws, {
@@ -3048,6 +3312,10 @@ let shutdownPromise = null;
 async function disposeRecord(record, reason) {
   record.disposed = true;
   cancelCheckpointTitleJobs(record);
+  if (record.pendingInstructionDraft?.expiryTimer) {
+    clearTimeout(record.pendingInstructionDraft.expiryTimer);
+  }
+  record.pendingInstructionDraft = null;
   clearStudioReattachGrace(record);
   failAllPendingCalls(record, 'Hub session is shutting down');
   const backendExit = disposeSession(record);

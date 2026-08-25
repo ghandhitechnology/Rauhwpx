@@ -9,4 +9,5 @@ build = "build.rs"
 subsecond-dev = ["rhwp/subsecond-dev"]
 
 [dependencies]
-rhwp = { path = "../.." }
+# main.rs가 subsecond_dev를 항상 호출하므로 workspace `cargo test`에서도 feature가 켜져야 한다.
+rhwp = { path = "../..", features = ["subsecond-dev"] }

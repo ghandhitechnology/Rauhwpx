@@ -282,6 +282,7 @@ export class InputHandler {
   private pictureObjectRenderer: TableObjectRenderer | null = null;
   /** 마지막 rhwp-studio 내부 복사의 시스템 클립보드 marker token */
   private rhwpClipboardToken: string | null = null;
+  private pasteWithoutFormattingArmed = false;
   /** 누름틀 시작 경계에서 왼쪽/Home 이동으로 필드 밖에 머문 상태 */
   private fieldStartExitKey: string | null = null;
   /** 누름틀 끝 경계에서 오른쪽 이동으로 필드 밖에 머문 상태 */
@@ -404,6 +405,7 @@ export class InputHandler {
     startClientY: number;
     pageIndex: number;
     bbox: { x: number; y: number; w: number; h: number };
+    rotationAngle: number;
     /** 다중 선택 리사이즈 시 각 개체의 원래 크기/위치 */
     multiRefs?: { sec: number; ppi: number; ci: number; type: string; origWidth: number; origHeight: number; origHorzOffset: number; origVertOffset: number; bboxX: number; bboxY: number }[];
   } | null = null;
@@ -421,8 +423,10 @@ export class InputHandler {
     totalDeltaH: number;
     totalDeltaV: number;
     pageIndex: number;
+    bbox: { x: number; y: number; w: number; h: number };
+    rotationAngle: number;
     /** 다중 선택 이동 시 각 개체의 원래 offset 기록 */
-    multiRefs?: { sec: number; ppi: number; ci: number; type: string; origHorzOffset: number; origVertOffset: number }[];
+    multiRefs?: { sec: number; ppi: number; ci: number; type: string; origHorzOffset: number; origVertOffset: number; cellPath?: CellPathLike; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } }[];
   } | null = null;
 
   // 그림/글상자 회전 드래그 상태
@@ -434,6 +438,8 @@ export class InputHandler {
     centerY: number;
     startAngle: number;     // 드래그 시작 시 마우스→중심 각도 (rad)
     pageIndex: number;
+    bbox: { x: number; y: number; w: number; h: number };
+    finalAngle: number;
   } | null = null;
 
   // 직선 끝점 드래그 상태
@@ -504,6 +510,7 @@ export class InputHandler {
   private onClickBound: (e: MouseEvent) => void;
   private onDblClickBound: (e: MouseEvent) => void;
   private onKeyDownBound: (e: KeyboardEvent) => void;
+  private onKeyUpBound: (e: KeyboardEvent) => void;
   private onInputBound: (e?: Event) => void;
   private onCompositionStartBound: () => void;
   private onCompositionUpdateBound: (e: CompositionEvent) => void;
@@ -580,6 +587,7 @@ export class InputHandler {
     this.onClickBound = this.onClick.bind(this);
     this.onDblClickBound = this.onDblClick.bind(this);
     this.onKeyDownBound = this.onKeyDown.bind(this);
+    this.onKeyUpBound = this.onKeyUp.bind(this);
     this.onInputBound = this.onInput.bind(this);
     this.onCompositionStartBound = this.onCompositionStart.bind(this);
     this.onCompositionUpdateBound = this.onCompositionUpdate.bind(this);
@@ -587,6 +595,7 @@ export class InputHandler {
     this.onInputBlurBound = () => {
       if (this.isComposing) _text.onCompositionEnd.call(this);
       this.resetIosInputSession();
+      this.pasteWithoutFormattingArmed = false;
       // 블러 시점에는 브라우저가 조합을 스스로 끝내므로 value 정리가 안전하다.
       this.resetTextareaBuffer();
       this.flushDeferredPaginationIfNeeded('input-blur', false);
@@ -618,6 +627,7 @@ export class InputHandler {
     container.addEventListener('contextmenu', this.onContextMenuBound);
     container.addEventListener('mousemove', this.onMouseMoveBound);
     this.textarea.addEventListener('keydown', this.onKeyDownBound);
+    this.textarea.addEventListener('keyup', this.onKeyUpBound);
     this.textarea.addEventListener('input', this.onInputBound);
     this.textarea.addEventListener('compositionstart', this.onCompositionStartBound);
     this.textarea.addEventListener('compositionupdate', this.onCompositionUpdateBound);
@@ -1836,6 +1846,10 @@ export class InputHandler {
   /** 특수 키 처리 (Backspace, Enter, 화살표, Ctrl+Z/Y) */
   private onKeyDown(e: KeyboardEvent): void {
     _keyboard.onKeyDown.call(this, e);
+  }
+
+  private onKeyUp(e: KeyboardEvent): void {
+    _keyboard.onKeyUp.call(this, e);
   }
 
   /** Ctrl/Meta 단축키 처리 */
@@ -3767,6 +3781,14 @@ export class InputHandler {
     _picture.cleanupPictureResizeDrag.call(this);
   }
 
+  /** 문서 전환/해제 중에는 개체 프리뷰를 확정하지 않고 취소한다. */
+  private cancelPicturePreviewDrags(): void {
+    if (this.isPictureResizeDragging) _picture.cleanupPictureResizeDrag.call(this);
+    if (this.isPictureMoveDragging) _picture.cleanupPictureMoveDrag.call(this);
+    if (this.isPictureRotateDragging) _picture.cleanupPictureRotateDrag.call(this);
+    document.removeEventListener('mouseup', this.onMouseUpBound);
+  }
+
   // ─── 그림 이동 드래그 ──────────────────────────────
 
   /** 마우스 드래그로 그림 이동 — 드래그 중 갱신 */
@@ -3775,8 +3797,8 @@ export class InputHandler {
   }
 
   /** 마우스 드래그로 그림 이동 — 드래그 종료 */
-  private finishPictureMoveDrag(): void {
-    _picture.finishPictureMoveDrag.call(this);
+  private finishPictureMoveDrag(e: MouseEvent): void {
+    _picture.finishPictureMoveDrag.call(this, e);
   }
 
   /** 마우스 드래그로 그림 회전 — 드래그 업데이트 */
@@ -3880,6 +3902,7 @@ export class InputHandler {
 
   deactivate(): void {
     this.flushDeferredPaginationIfNeeded('before-deactivate', false);
+    this.cancelPicturePreviewDrags();
     this.active = false;
     this.cancelDeferredPaginationFlush();
     this.deferredPaginationRunner.cancel();
@@ -3897,6 +3920,7 @@ export class InputHandler {
       clearTimeout(this._iosInputTimer);
       this._iosInputTimer = null;
     }
+    this.pasteWithoutFormattingArmed = false;
     this._iosAnchor = null;
     this._iosBeforePageIndex = undefined;
     this._iosComposing = false;
@@ -3914,6 +3938,7 @@ export class InputHandler {
 
   dispose(): void {
     this.flushDeferredPaginationIfNeeded('before-dispose', false);
+    this.cancelPicturePreviewDrags();
     if (this.isResizeDragging) {
       this.cleanupResizeDrag();
     }
@@ -3942,6 +3967,7 @@ export class InputHandler {
       clearTimeout(this._iosInputTimer);
       this._iosInputTimer = null;
     }
+    this.pasteWithoutFormattingArmed = false;
     this._iosAnchor = null;
     this._iosBeforePageIndex = undefined;
     this._iosComposing = false;
@@ -3956,6 +3982,7 @@ export class InputHandler {
     document.removeEventListener('mousemove', this.onMouseMoveBound);
     document.removeEventListener('mouseup', this.onMouseUpBound);
     this.textarea.removeEventListener('keydown', this.onKeyDownBound);
+    this.textarea.removeEventListener('keyup', this.onKeyUpBound);
     this.textarea.removeEventListener('input', this.onInputBound);
     this.textarea.removeEventListener('compositionstart', this.onCompositionStartBound);
     this.textarea.removeEventListener('compositionupdate', this.onCompositionUpdateBound);
@@ -4978,6 +5005,29 @@ export class InputHandler {
     if (this.editMode === 'form') return false;
     this.focusTextarea();
     return document.execCommand('paste');
+  }
+
+  /** Electron 네이티브 Cmd/Ctrl+Shift+V 경로. */
+  performPlainTextPaste(text: string): boolean {
+    if (
+      !this.active
+      || this.readOnly
+      || this.userEditingLocked
+      || this.editMode === 'form'
+      || !text
+    ) return false;
+
+    if (this.cursor.isInPictureObjectSelection()) {
+      this.cursor.moveOutOfSelectedPicture();
+      this.pictureObjectRenderer?.clear();
+      this.eventBus.emit('picture-object-selection-changed', false);
+    }
+    if (this.cursor.isInTableObjectSelection()) {
+      this.cursor.moveOutOfSelectedTable();
+      this.eventBus.emit('table-object-selection-changed', false);
+    }
+    _keyboard.pastePlainText.call(this, text);
+    return true;
   }
 
   /** 잘라내기 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */

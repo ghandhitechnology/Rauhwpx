@@ -2,6 +2,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import type { ContextMenuItem } from '@/ui/context-menu';
+import type { CellPathLike } from '@/core/types';
 import * as _connector from './input-handler-connector';
 import { MoveLineEndpointCommand } from './command';
 import { computeLineEndpointRecord } from './object-drag-record';
@@ -458,6 +459,50 @@ export function onClick(this: any, e: MouseEvent): void {
     return;
   }
 
+  if (
+    e.button === 0 &&
+    e.detail >= 3 &&
+    !this.readOnly &&
+    !this.userEditingLocked &&
+    !this.isFormMode?.() &&
+    !this.cursor.isInPictureObjectSelection() &&
+    !this.cursor.isInTableObjectSelection()
+  ) {
+    const hit = this.hitTestFromClientPoint?.(e.clientX, e.clientY);
+    const pagePoint = this.pagePointFromClientPoint?.(e.clientX, e.clientY);
+    const inEditableCell = hit &&
+      hit.parentParaIndex !== undefined &&
+      hit.controlIndex !== undefined &&
+      !hit.isTextBox;
+    const onTableBorder = inEditableCell && pagePoint
+      ? this.isTableBorderClick(
+          pagePoint.pageIdx,
+          pagePoint.pageX,
+          pagePoint.pageY,
+          hit.sectionIndex,
+          hit.parentParaIndex,
+          hit.controlIndex,
+        )
+      : false;
+
+    if (inEditableCell && !onTableBorder && !isProtectedCellHit(this, hit)) {
+      e.preventDefault();
+      this.cellSelectionDragCandidate = null;
+      this.cursor.exitCellSelectionMode();
+      this.cellSelectionRenderer?.clear();
+      this.cursor.clearSelection();
+      this.cursor.moveToHit(hit);
+      this.cursor.resetPreferredX();
+      if (this.cursor.selectAllInCurrentCell()) {
+        this.active = true;
+        this.updateCaret();
+        this.eventBus.emit('command-state-changed');
+        this.textarea.focus();
+        return;
+      }
+    }
+  }
+
   // 표 객체 선택 중 클릭 처리
   if (this.cursor.isInTableObjectSelection()) {
     // 우클릭 → 표 객체 선택 유지 (컨텍스트 메뉴에서 처리)
@@ -585,8 +630,10 @@ export function onClick(this: any, e: MouseEvent): void {
                   startClientY: e.clientY,
                   pageIndex: bboxPage,
                   bbox: { x: minX, y: minY, w: combinedW, h: combinedH },
+                  rotationAngle: 0,
                   multiRefs: multiResizeRefs,
                 };
+                document.addEventListener('mousemove', this.onMouseMoveBound);
                 document.addEventListener('mouseup', this.onMouseUpBound, { once: true });
                 return;
               }
@@ -596,7 +643,16 @@ export function onClick(this: any, e: MouseEvent): void {
           // (2) BBOX 내부 클릭 → 이동 드래그
           if (minX < Infinity && pi === bboxPage &&
               px >= minX && px <= maxX && py >= minY && py <= maxY) {
-            const multiMoveRefs: { sec: number; ppi: number; ci: number; type: string; origHorzOffset: number; origVertOffset: number }[] = [];
+            const multiMoveRefs: {
+              sec: number;
+              ppi: number;
+              ci: number;
+              type: string;
+              origHorzOffset: number;
+              origVertOffset: number;
+              cellPath?: CellPathLike;
+              headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
+            }[] = [];
             for (const r of refs) {
               try {
                 const p = this.getObjectProperties(r);
@@ -614,9 +670,12 @@ export function onClick(this: any, e: MouseEvent): void {
                 lastPageX: px, lastPageY: py,
                 totalDeltaH: 0, totalDeltaV: 0,
                 pageIndex: pi,
+                bbox: { x: minX, y: minY, w: maxX - minX, h: maxY - minY },
+                rotationAngle: 0,
                 multiRefs: multiMoveRefs,
               };
               this.container.style.cursor = 'move';
+              document.addEventListener('mousemove', this.onMouseMoveBound);
               document.addEventListener('mouseup', this.onMouseUpBound, { once: true });
               this.textarea.focus();
               return;
@@ -694,8 +753,11 @@ export function onClick(this: any, e: MouseEvent): void {
                   centerY: objCy,
                   startAngle,
                   pageIndex: picBbox.pageIndex,
+                  bbox: { x: picBbox.x, y: picBbox.y, w: picBbox.w, h: picBbox.h },
+                  finalAngle: origAngle,
                 };
                 this.container.style.cursor = 'grabbing';
+                document.addEventListener('mousemove', this.onMouseMoveBound);
                 document.addEventListener('mouseup', this.onMouseUpBound, { once: true });
                 return;
               }
@@ -714,6 +776,7 @@ export function onClick(this: any, e: MouseEvent): void {
                 pageIndex: picBbox.pageIndex,
                 bbox: { x: picBbox.x, y: picBbox.y, w: picBbox.w, h: picBbox.h },
               };
+              document.addEventListener('mousemove', this.onMouseMoveBound);
               document.addEventListener('mouseup', this.onMouseUpBound, { once: true });
               return;
             }
@@ -756,8 +819,11 @@ export function onClick(this: any, e: MouseEvent): void {
                     lastPageX: px, lastPageY: py,
                     totalDeltaH: 0, totalDeltaV: 0,
                     pageIndex: pi,
+                    bbox: { x: picBbox.x, y: picBbox.y, w: picBbox.w, h: picBbox.h },
+                    rotationAngle: (props.rotationAngle ?? 0) as number,
                   };
                   this.container.style.cursor = 'move';
+                  document.addEventListener('mousemove', this.onMouseMoveBound);
                   document.addEventListener('mouseup', this.onMouseUpBound, { once: true });
                   this.textarea.focus();
                   return;
@@ -1987,7 +2053,7 @@ export function onMouseUp(this: any, _e: MouseEvent): void {
 
   // 그림 이동 드래그 종료
   if (this.isPictureMoveDragging) {
-    this.finishPictureMoveDrag();
+    this.finishPictureMoveDrag(_e);
     return;
   }
 

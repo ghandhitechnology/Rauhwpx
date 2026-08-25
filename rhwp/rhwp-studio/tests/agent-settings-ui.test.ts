@@ -304,6 +304,16 @@ test('한도가 없으면 누적치만 말한다', () => {
   assert.match(settings, /\$\{formatTokens\(window_\.weightedTokens\)\} 토큰 · \$\{window_\.turns\}턴/);
 });
 
+test('앱 전용 지시는 에이전트 변경안을 사용자 승인 전까지 분리한다', () => {
+  assert.match(settings, /createSection\('지시'\)/);
+  assert.match(settings, /Rauhwpx 채팅에만 적용됩니다/);
+  assert.match(settings, /agent-instructions-draft/);
+  assert.match(settings, /bridge\.confirmAgentInstructionsDraft\(draft\)/);
+  assert.match(settings, /bridge\.rejectAgentInstructionsDraft\(draft\)/);
+  assert.match(settings, /승인 전에는 AGENTS\.md에 저장되지 않습니다/);
+  assert.match(settingsCss, /\.ag-settings-instructions-proposal/);
+});
+
 test('사이드바가 설정 탭에 이벤트를 흘려준다', () => {
   assert.match(source, /settingsPanel\.handleEvent\(e\)/);
   assert.match(settings, /case 'provider-status':\s*providers = ev\.providers/);
@@ -311,7 +321,7 @@ test('사이드바가 설정 탭에 이벤트를 흘려준다', () => {
   assert.match(settings, /case 'writing-style-status':\s*case 'writing-style-result':/);
   assert.match(settings, /case 'connection':\s*connectionState = ev\.state/);
   // 열 때 최신값을 다시 받는다.
-  assert.match(settings, /void refreshProviders\(false\);\s*void refreshUsage\(\);/);
+  assert.match(settings, /void refreshProviders\(false\);\s*void refreshAgentInstructions\(false\);\s*void refreshUsage\(\);/);
   assert.match(source, /settingsPanel\.dispose\(\)/);
 });
 

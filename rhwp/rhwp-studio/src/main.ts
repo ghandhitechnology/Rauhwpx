@@ -81,6 +81,7 @@ import {
   installDesktopCloseHandling,
   installDesktopFileHandling,
   installDesktopGeneratedDocumentHandling,
+  installDesktopPlainTextPasteHandling,
   installDesktopWindowChrome,
   installWebAppShell,
   pickDesktopNativeOpenFile,
@@ -632,6 +633,9 @@ async function initialize(): Promise<void> {
     installDesktopGeneratedDocumentHandling(({ bytes, fileName, readOnly }) => {
       if (readOnly) setDocumentReadOnly(true);
       eventBus.emit('open-document-bytes', { bytes, fileName });
+    });
+    installDesktopPlainTextPasteHandling((text) => {
+      inputHandler?.performPlainTextPaste(text);
     });
     void loadFromUrlParam();
     void offerAutosaveRecoveryIfIdle();
