@@ -41,7 +41,7 @@ import {
   pickOpenFileHandle,
   readFileFromHandle,
   saveDocumentToFileSystem,
-  writeBlobToHandle,
+  type FileSystemDirectoryHandleLike,
   type FileSystemFileHandleLike,
   type SaveDocumentResult,
   type FileSystemWindowLike,
@@ -70,8 +70,9 @@ import {
   type LibraryMoveResult,
 } from '@/library/move-to-document';
 import {
+  PORTABLE_HISTORY_FOLDER_HISTORY_NAME,
   PORTABLE_HISTORY_MIME_TYPE,
-  portableHistoryFileName,
+  type PortableHistoryFolder,
 } from '@/versioning/portable-bundle';
 
 async function openFileViaPicker(services: CommandServices): Promise<void> {
@@ -326,7 +327,6 @@ async function saveAsFormat(services: CommandServices, format: SaveFormat): Prom
 }
 
 async function saveWithHistory(services: CommandServices): Promise<void> {
-  let pickedHandle: FileSystemFileHandleLike | null = null;
   try {
     if (!await resolvePendingAgentEditsBeforeSave(services)) return;
     flushDeferredPaginationBeforeExplicitOutput(services, 'save-with-history');
@@ -334,49 +334,54 @@ async function saveWithHistory(services: CommandServices): Promise<void> {
       throw new Error('버전 기록 서비스를 사용할 수 없습니다.');
     }
 
-    const suggestedName = portableHistoryFileName(services.wasm.fileName);
+    const bundle = await services.createPortableHistoryBundle();
+    const desktopResult = await saveDesktopPortableHistoryFile(bundle);
+    if (desktopResult === 'cancelled') return;
+    if (desktopResult === 'saved') {
+      showToast({ message: '문서와 전체 버전 기록을 폴더로 저장했습니다.', durationMs: 3000 });
+      return;
+    }
+
     const windowLike = window as FileSystemWindowLike;
-    if (!isDesktopApp() && windowLike.showSaveFilePicker) {
+    if (!isDesktopApp() && windowLike.showDirectoryPicker) {
       try {
-        pickedHandle = await windowLike.showSaveFilePicker({
-          excludeAcceptAllOption: true,
-          suggestedName,
-          types: [{
-            description: 'RauHWPX 기록 묶음',
-            accept: { [PORTABLE_HISTORY_MIME_TYPE]: ['.rhwpx'] },
-          }],
+        const picked = await windowLike.showDirectoryPicker({
+          id: 'rhwpx-history-bundle',
+          mode: 'readwrite',
         });
+        const folder = picked.name.toLowerCase().endsWith('.rhwpx')
+          ? picked
+          : await picked.getDirectoryHandle(bundle.folderName, { create: true });
+        await writePortableHistoryFolderToDirectory(folder, bundle);
       } catch (error) {
         if (isUserCancelError(error)) return;
         throw error;
       }
-    }
-
-    const bundle = await services.createPortableHistoryBundle();
-    const blob = new Blob([bundle.bytes as unknown as BlobPart], {
-      type: PORTABLE_HISTORY_MIME_TYPE,
-    });
-    const desktopResult = await saveDesktopPortableHistoryFile(
-      bundle.bytes,
-      bundle.suggestedName,
-    );
-    if (desktopResult === 'cancelled') return;
-    if (desktopResult === 'saved') {
-      showToast({ message: '문서와 전체 버전 기록을 저장했습니다.', durationMs: 3000 });
+      showToast({ message: '문서와 전체 버전 기록을 폴더로 저장했습니다.', durationMs: 3000 });
       return;
     }
-    if (pickedHandle) {
-      if (!pickedHandle.name.toLowerCase().endsWith('.rhwpx')) {
-        throw new Error('.rhwpx 확장자를 가진 파일을 선택해야 합니다.');
-      }
-      await writeBlobToHandle(pickedHandle, blob);
-    } else {
-      downloadBlob(blob, bundle.suggestedName);
-    }
+
+    const history = bundle.files.find((file) => file.name === PORTABLE_HISTORY_FOLDER_HISTORY_NAME);
+    if (!history) throw new Error('버전 기록 묶음을 만들지 못했습니다.');
+    downloadBlob(
+      new Blob([history.bytes as unknown as BlobPart], { type: PORTABLE_HISTORY_MIME_TYPE }),
+      bundle.folderName,
+    );
     showToast({ message: '문서와 전체 버전 기록을 저장했습니다.', durationMs: 3000 });
   } catch (error) {
-    await pickedHandle?.releaseUnusedSaveTarget?.().catch(() => {});
     reportSaveError('file:save-with-history', error);
+  }
+}
+
+async function writePortableHistoryFolderToDirectory(
+  directory: FileSystemDirectoryHandleLike,
+  bundle: PortableHistoryFolder,
+): Promise<void> {
+  for (const file of bundle.files) {
+    const handle = await directory.getFileHandle(file.name, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(new Blob([file.bytes as unknown as BlobPart]));
+    await writable.close();
   }
 }
 

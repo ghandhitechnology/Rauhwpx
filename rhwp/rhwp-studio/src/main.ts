@@ -100,6 +100,7 @@ import { DocumentVersionController, persistActiveBranch } from './versioning/con
 import {
   VersionGraphStore,
   documentId as versionDocumentId,
+  isPortableHistoryBytes,
   isPortableHistoryFileName,
   openPortableHistoryBundle,
 } from './versioning/index.ts';
@@ -1594,7 +1595,7 @@ async function openDocumentBytes(data: OpenDocumentBytesEvent) {
     return false;
   }
   try {
-    if (isPortableHistoryFileName(data.fileName)) {
+    if (isPortableHistoryFileName(data.fileName) || isPortableHistoryBytes(data.bytes)) {
       const bundle = openPortableHistoryBundle(data.bytes);
       const probe = new WasmBridge();
       try {

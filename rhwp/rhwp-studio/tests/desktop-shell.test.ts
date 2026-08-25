@@ -141,6 +141,11 @@ test('desktop packages register as an HWPX editor with the operating system', ()
     UTTypeIdentifier?: string;
   }) => type.UTTypeIdentifier === 'com.hataewook.rauhwpx.history-bundle');
   assert.deepEqual(exportedHistoryType?.UTTypeTagSpecification['public.filename-extension'], ['rhwpx']);
+  assert.ok(exportedHistoryType?.UTTypeConformsTo?.includes('com.apple.package'));
+  const historyDocumentType = macInfo.CFBundleDocumentTypes.find((type: {
+    LSItemContentTypes?: string[];
+  }) => type.LSItemContentTypes?.includes('com.hataewook.rauhwpx.history-bundle'));
+  assert.equal(historyDocumentType?.LSTypeIsPackage, true);
 
   // electron-builder only installs NSIS file associations for per-machine installs.
   assert.equal(rootPackage.build.nsis.perMachine, true);
@@ -283,7 +288,9 @@ test('desktop package registers supported document associations without bundling
   assert.deepEqual(historyAssociation?.ext, ['rhwpx']);
   assert.equal(historyAssociation?.name, 'Rauhwpx history bundle');
   assert.notEqual(historyAssociation?.name, 'Hangul document');
+  assert.equal(historyAssociation?.isPackage, true);
   assert.match(desktopMain, /desktop:save-portable-history-file/);
+  assert.match(desktopMain, /writePortableHistoryFolder\(/);
   assert.match(desktopMain, /RauHWPX history bundle/);
   assert.ok(rootPackage.build.asarUnpack.includes('rhwp/rhwp-agent/**'));
   assert.ok(rootPackage.build.files.every((entry: string) => !/runtime|launch-work/.test(entry)));

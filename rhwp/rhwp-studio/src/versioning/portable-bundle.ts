@@ -15,6 +15,8 @@ export const PORTABLE_HISTORY_EXTENSION = '.rhwpx';
 export const PORTABLE_HISTORY_MIME_TYPE = 'application/vnd.rauhwpx.history';
 export const PORTABLE_HISTORY_FORMAT = 'rauhwpx-history';
 export const PORTABLE_HISTORY_VERSION = 1;
+/** Filename of the history payload inside a `.rhwpx` folder bundle. */
+export const PORTABLE_HISTORY_FOLDER_HISTORY_NAME = 'history';
 
 const MAGIC = new TextEncoder().encode('RAUHWPX-HISTORY\0');
 const PREFIX_LENGTH = MAGIC.byteLength + 4;
@@ -62,6 +64,16 @@ export interface OpenedPortableHistoryBundle {
   currentDocumentBytes: Uint8Array;
   snapshot: VersionRepositorySnapshot;
   createdAt: number;
+}
+
+export interface PortableHistoryFolderFile {
+  name: string;
+  bytes: Uint8Array;
+}
+
+export interface PortableHistoryFolder {
+  folderName: string;
+  files: PortableHistoryFolderFile[];
 }
 
 export class PortableHistoryError extends Error {
@@ -126,6 +138,25 @@ export function portableHistoryFileName(fileName: string): string {
 
 export function isPortableHistoryFileName(fileName: string): boolean {
   return fileName.trim().toLowerCase().endsWith(PORTABLE_HISTORY_EXTENSION);
+}
+
+export function isPortableHistoryBytes(bytes: Uint8Array): boolean {
+  return bytes.byteLength >= MAGIC.byteLength && bytesEqual(bytes.subarray(0, MAGIC.byteLength), MAGIC);
+}
+
+export function createPortableHistoryFolder(input: CreatePortableHistoryBundleInput): PortableHistoryFolder {
+  const historyBytes = createPortableHistoryBundle(input);
+  const currentBlob = input.snapshot.blobs.find((blob) => blob.id === input.currentBlobId);
+  if (!currentBlob) throw new PortableHistoryError('The current document snapshot is missing or corrupt');
+  const sourceFormat = detectPortableDocumentFormat(currentBlob.bytes);
+  const documentFileName = checkedFileName(input.documentFileName, sourceFormat);
+  return {
+    folderName: portableHistoryFileName(input.documentFileName),
+    files: [
+      { name: PORTABLE_HISTORY_FOLDER_HISTORY_NAME, bytes: historyBytes },
+      { name: documentFileName, bytes: new Uint8Array(currentBlob.bytes) },
+    ],
+  };
 }
 
 export function detectPortableDocumentFormat(bytes: Uint8Array): PortableSourceFormat {

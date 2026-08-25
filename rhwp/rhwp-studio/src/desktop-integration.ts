@@ -69,7 +69,7 @@ export interface RhwpDesktopApi {
   }) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
   savePortableHistoryFile?: (payload: {
     suggestedName: string;
-    bytes: Uint8Array;
+    files: ReadonlyArray<{ name: string; bytes: Uint8Array }>;
   }) => Promise<{ fileName: string; byteLength: number } | null>;
   releaseNativeFile?: (handleId: string) => Promise<void>;
   readNativeFile?: (handleId: string) => Promise<NativeFileReadResult>;
@@ -562,15 +562,17 @@ export async function pickDesktopNativeSaveFile(
 }
 
 export async function saveDesktopPortableHistoryFile(
-  bytes: Uint8Array,
-  suggestedName: string,
+  folder: { folderName: string; files: ReadonlyArray<{ name: string; bytes: Uint8Array }> },
   win?: DesktopHost,
 ): Promise<'saved' | 'cancelled' | 'unavailable'> {
   const api = desktopHost(win)?.rhwpDesktop;
   if (!api?.savePortableHistoryFile) return 'unavailable';
   const result = await api.savePortableHistoryFile({
-    suggestedName,
-    bytes: new Uint8Array(bytes),
+    suggestedName: folder.folderName,
+    files: folder.files.map((file) => ({
+      name: file.name,
+      bytes: new Uint8Array(file.bytes),
+    })),
   });
   return result ? 'saved' : 'cancelled';
 }

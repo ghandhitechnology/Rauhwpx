@@ -31,11 +31,11 @@ import {
   VersionGraphStore,
   branchName,
   commitId,
-  createPortableHistoryBundle as encodePortableHistoryBundle,
+  createPortableHistoryFolder,
   documentId,
   layoutCommitGraph,
   orderBranchHeadFrontier,
-  portableHistoryFileName,
+  type PortableHistoryFolder,
   shelfId,
   mergeDraftId,
   tagName,
@@ -947,7 +947,7 @@ export class DocumentVersionController implements VersionManagerController {
     });
   }
 
-  async createPortableHistoryBundle(): Promise<{ bytes: Uint8Array; suggestedName: string }> {
+  async createPortableHistoryBundle(): Promise<PortableHistoryFolder> {
     return this.#enqueue(async () => {
       await this.#refreshData(false);
       await this.#guardMutation();
@@ -999,16 +999,13 @@ export class DocumentVersionController implements VersionManagerController {
       if (sourceFormat !== 'hwp' && sourceFormat !== 'hwpx' && sourceFormat !== 'hml') {
         throw new VersionError('VERSION_STORE_FAILED', 'The document format cannot be bundled');
       }
-      return {
-        bytes: encodePortableHistoryBundle({
-          documentFileName: this.#wasm.fileName,
-          sourceFormat,
-          activeBranch: activeBranch.name,
-          currentBlobId: head.blobId,
-          snapshot,
-        }),
-        suggestedName: portableHistoryFileName(this.#wasm.fileName),
-      };
+      return createPortableHistoryFolder({
+        documentFileName: this.#wasm.fileName,
+        sourceFormat,
+        activeBranch: activeBranch.name,
+        currentBlobId: head.blobId,
+        snapshot,
+      });
     });
   }
 
