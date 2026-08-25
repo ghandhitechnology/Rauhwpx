@@ -118,6 +118,7 @@ export interface RhwpDesktopApi {
     bytes: Uint8Array;
     readOnly?: boolean;
   }) => void) => void;
+  onPastePlainText?: (callback: (text: string) => void) => void;
 }
 
 export interface DesktopHost {
@@ -741,6 +742,18 @@ export function installDesktopGeneratedDocumentHandling(
   api.onOpenGeneratedDocument(receive);
   void api.getLaunchGeneratedDocument?.().then(receive).catch((error) => {
     console.warn('[rhwp-desktop] 생성 문서 시작 데이터 조회 실패:', error);
+  });
+  return true;
+}
+
+export function installDesktopPlainTextPasteHandling(
+  paste: (text: string) => void,
+  win?: DesktopHost,
+): boolean {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.onPastePlainText) return false;
+  api.onPastePlainText((text) => {
+    if (typeof text === 'string' && text.length > 0) paste(text);
   });
   return true;
 }

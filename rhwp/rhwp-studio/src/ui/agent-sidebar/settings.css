@@ -227,6 +227,78 @@
   color: var(--ag-text);
 }
 
+/* ── 앱 전용 AGENTS.md ──────────────────────────────── */
+
+.ag-settings-instructions-proposal {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--ag-accent) 55%, var(--ag-border));
+  border-radius: var(--radius-sm, 6px);
+  background: color-mix(in srgb, var(--ag-accent) 7%, transparent);
+}
+
+.ag-settings-instructions-proposal[hidden] {
+  display: none;
+}
+
+.ag-settings-instructions-proposal-title,
+.ag-settings-instructions-proposal-reason {
+  margin: 0;
+}
+
+.ag-settings-instructions-proposal-reason {
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.45;
+}
+
+.ag-settings-instructions-proposal-preview {
+  max-height: 180px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--radius-xs, 4px);
+  background: var(--ag-surface);
+  color: var(--ag-text);
+  font: 11px/1.5 var(--font-mono, ui-monospace, monospace);
+}
+
+.ag-settings-instructions-editor {
+  width: 100%;
+  min-width: 0;
+  min-height: 180px;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 10px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-input-bg);
+  color: var(--ag-text);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.ag-settings-instructions-editor:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-settings-instructions-editor:disabled {
+  opacity: 0.62;
+}
+
+.ag-settings-instructions-status {
+  margin: 0;
+  font-size: var(--font-size-sm, 11px);
+  color: var(--ag-text-secondary);
+}
+
 /* ── 문서 템플릿 ───────────────────────────────────── */
 
 .ag-template-list {

@@ -4073,4 +4073,52 @@ mod bindata_storage_id_collision_tests {
             "저장 왕복 후 신규 이미지가 소실됨"
         );
     }
+
+    #[test]
+    fn insert_into_storage_hole_doc_hwpx_ref_points_to_inserted_image() {
+        use std::io::Read;
+
+        let mut core = make_core_with_storage_hole();
+        core.insert_picture_native(
+            0,
+            0,
+            0,
+            &[],
+            &minimal_png(),
+            9000,
+            6000,
+            1,
+            1,
+            "png",
+            "",
+            None,
+            None,
+        )
+        .expect("insert_picture_native");
+
+        let saved = core.export_hwpx_native().expect("export HWPX");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(saved)).expect("HWPX ZIP");
+        let mut section_xml = String::new();
+        archive
+            .by_name("Contents/section0.xml")
+            .expect("section0.xml")
+            .read_to_string(&mut section_xml)
+            .expect("read section0.xml");
+        assert!(
+            section_xml.contains(r#"binaryItemIDRef="image2""#),
+            "두 번째 BinData 위치를 참조해야 함"
+        );
+
+        let mut referenced_data = Vec::new();
+        archive
+            .by_name("BinData/image2.png")
+            .expect("referenced image2.png")
+            .read_to_end(&mut referenced_data)
+            .expect("read image2.png");
+        assert_eq!(
+            referenced_data,
+            minimal_png(),
+            "공식 편집기는 manifest ID를 직접 해석하므로 image2가 신규 그림이어야 함"
+        );
+    }
 }

@@ -8,6 +8,7 @@ import {
   ensureDesktopAgentHub,
   getNativeFileSourcePath,
   installDesktopGeneratedDocumentHandling,
+  installDesktopPlainTextPasteHandling,
   installWebAppShell,
   isDesktopApp,
   openPublishedDocumentInNewWindow,
@@ -171,6 +172,25 @@ test('generated-document startup fallback and event delivery open only once', as
   await Promise.resolve();
   await Promise.resolve();
   assert.deepEqual(opened, [{ fileName: 'report.hwpx', readOnly: true }]);
+});
+
+test('desktop plain-paste events deliver only non-empty clipboard text', () => {
+  let listener: ((text: string) => void) | undefined;
+  const pasted: string[] = [];
+  const installed = installDesktopPlainTextPasteHandling(
+    (text) => pasted.push(text),
+    {
+      rhwpDesktop: {
+        onPastePlainText: (callback) => { listener = callback; },
+      },
+    },
+  );
+
+  assert.equal(installed, true);
+  listener?.('plain text');
+  listener?.('');
+  assert.deepEqual(pasted, ['plain text']);
+  assert.equal(installDesktopPlainTextPasteHandling(() => {}, {}), false);
 });
 
 test('Electron Save As returns a temporary opaque handle and releases failed targets', async () => {

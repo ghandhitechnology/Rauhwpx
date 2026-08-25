@@ -109,6 +109,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
       RHWP_LAUNCH_ID: LAUNCH_ID,
       RHWP_WORK_DIR: workRoot,
       RHWP_TEMPLATES_DIR: path.join(workRoot, 'templates'),
+      RHWP_AGENT_INSTRUCTIONS_DIR: path.join(workRoot, 'agent-instructions'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -154,6 +155,34 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   assert.equal((await alphaWelcome).hubSessionId, 'alpha');
   assert.equal((await betaWelcome).hubSessionId, 'beta');
 
+  const instructionsRead = waitForMessage(alpha, (msg) => (
+    msg.type === 'agent-instructions' && msg.requestId === 'instructions-read-1'
+  ));
+  sendFrame(alpha, { type: 'agent-instructions-request', requestId: 'instructions-read-1' });
+  const initialInstructions = (await instructionsRead).status;
+  assert.equal(initialInstructions.fileName, 'AGENTS.md');
+  assert.equal(initialInstructions.scope, 'rauhwpx-app');
+  assert.match(initialInstructions.content, /Rauhwpx 안에서만 적용됩니다/);
+
+  const instructionsSaved = waitForMessage(alpha, (msg) => (
+    msg.type === 'agent-instructions' && msg.requestId === 'instructions-save-1'
+  ));
+  const instructionsBroadcast = waitForMessage(beta, (msg) => (
+    msg.type === 'agent-instructions' && msg.changedBy === 'user' && msg.status?.revision === 2
+  ));
+  sendFrame(alpha, {
+    type: 'agent-instructions-save',
+    requestId: 'instructions-save-1',
+    expectedRevision: initialInstructions.revision,
+    content: '# 내 지시\n\n- 핵심부터 답하기\n',
+  });
+  assert.equal((await instructionsSaved).status.revision, 2);
+  assert.equal((await instructionsBroadcast).status.content, '# 내 지시\n\n- 핵심부터 답하기\n');
+  assert.equal(
+    readFileSync(path.join(workRoot, 'agent-instructions', 'AGENTS.md'), 'utf8'),
+    '# 내 지시\n\n- 핵심부터 답하기\n',
+  );
+
   const alphaCatalogAdded = waitForMessage(alpha, (msg) => msg.type === 'templates-catalog' && msg.change?.type === 'added');
   const betaCatalogAdded = waitForMessage(beta, (msg) => msg.type === 'templates-catalog' && msg.change?.type === 'added');
   const templateUpload = await fetch(`${httpBase}/templates?sessionId=alpha`, {
@@ -196,6 +225,85 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
 
   const { socket: alphaMcp } = await openSocket(`${wsBase}/mcp?token=${alphaToken}&sessionId=alpha&agent=claude`);
   const { socket: betaMcp } = await openSocket(`${wsBase}/mcp?token=${betaToken}&sessionId=beta&agent=claude`);
+  const instructionsToolRead = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 4);
+  sendFrame(alphaMcp, {
+    type: 'tool-call', id: 4, tool: 'read_agent_instructions', args: {},
+    workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch,
+  });
+  assert.equal((await instructionsToolRead).result.revision, 2);
+
+  const instructionsToolUpdated = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 5);
+  const instructionsDraftProposed = waitForMessage(alpha, (msg) => msg.type === 'agent-instructions-draft');
+  sendFrame(alphaMcp, {
+    type: 'tool-call', id: 5, tool: 'update_agent_instructions',
+    args: {
+      content: '# 내 지시\n\n- 핵심부터 답하기\n- 표는 비교에 도움이 될 때만 쓰기\n',
+      expectedRevision: 2,
+      reason: '반복된 응답 형식 선호를 저장',
+    },
+    workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch,
+  });
+  const draftToolResult = (await instructionsToolUpdated).result;
+  assert.equal(draftToolResult.changed, false);
+  assert.equal(draftToolResult.pendingConfirmation, true);
+  assert.equal(draftToolResult.revision, 2);
+  const proposedDraft = (await instructionsDraftProposed).draft;
+  assert.equal(proposedDraft.id, draftToolResult.draftId);
+  assert.equal(proposedDraft.expectedRevision, 2);
+  assert.equal(typeof proposedDraft.confirmationToken, 'string');
+  assert.equal(
+    readFileSync(path.join(workRoot, 'agent-instructions', 'AGENTS.md'), 'utf8'),
+    '# 내 지시\n\n- 핵심부터 답하기\n',
+  );
+
+  const invalidConfirmation = waitForMessage(alpha, (msg) => (
+    msg.type === 'agent-instructions-error' && msg.requestId === 'instructions-confirm-invalid-token'
+  ));
+  sendFrame(alpha, {
+    type: 'agent-instructions-draft-confirm',
+    requestId: 'instructions-confirm-invalid-token',
+    draftId: proposedDraft.id,
+    confirmationToken: 'not-the-issued-capability',
+  });
+  assert.equal((await invalidConfirmation).code, 'INSTRUCTIONS_CONFIRMATION_INVALID');
+
+  const crossSessionConfirmation = waitForMessage(beta, (msg) => (
+    msg.type === 'agent-instructions-error' && msg.requestId === 'instructions-confirm-wrong-session'
+  ));
+  sendFrame(beta, {
+    type: 'agent-instructions-draft-confirm',
+    requestId: 'instructions-confirm-wrong-session',
+    draftId: proposedDraft.id,
+    confirmationToken: proposedDraft.confirmationToken,
+  });
+  assert.equal((await crossSessionConfirmation).code, 'INSTRUCTIONS_CONFIRMATION_INVALID');
+
+  const instructionsConfirmed = waitForMessage(alpha, (msg) => (
+    msg.type === 'agent-instructions' && msg.requestId === 'instructions-confirm-1'
+  ));
+  const instructionsDraftCleared = waitForMessage(alpha, (msg) => (
+    msg.type === 'agent-instructions-draft-cleared'
+      && msg.draftId === proposedDraft.id
+      && msg.outcome === 'confirmed'
+  ));
+  const agentInstructionsBroadcast = waitForMessage(beta, (msg) => (
+    msg.type === 'agent-instructions'
+      && msg.changedBy === 'agent-confirmed:claude'
+      && msg.status?.revision === 3
+  ));
+  sendFrame(alpha, {
+    type: 'agent-instructions-draft-confirm',
+    requestId: 'instructions-confirm-1',
+    draftId: proposedDraft.id,
+    confirmationToken: proposedDraft.confirmationToken,
+  });
+  assert.equal((await instructionsConfirmed).status.revision, 3);
+  assert.equal((await instructionsDraftCleared).outcome, 'confirmed');
+  assert.equal((await agentInstructionsBroadcast).status.revision, 3);
+  assert.equal(
+    readFileSync(path.join(workRoot, 'agent-instructions', 'AGENTS.md'), 'utf8'),
+    '# 내 지시\n\n- 핵심부터 답하기\n- 표는 비교에 도움이 될 때만 쓰기\n',
+  );
   const alphaTemplateResult = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 6);
   const betaTemplateResult = waitForMessage(betaMcp, (msg) => msg.type === 'tool-result' && msg.id === 6);
   sendFrame(alphaMcp, { type: 'tool-call', id: 6, tool: 'get_active_template', args: {}, workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch });
@@ -332,6 +440,7 @@ test('owner watchdog disposes the hub when its desktop owner exits', { timeout: 
       RHWP_LAUNCH_ID: `${LAUNCH_ID}-owner`,
       RHWP_OWNER_PID: String(owner.pid),
       RHWP_WORK_DIR: workRoot,
+      RHWP_AGENT_INSTRUCTIONS_DIR: path.join(workRoot, 'agent-instructions'),
       RHWP_OWN_WORK_DIR: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],

@@ -59,7 +59,11 @@ test('ctl replaces an authenticated detached hub from an older protocol', { time
       return;
     }
     if (req.url === '/shutdown' && req.method === 'POST') {
-      res.end(JSON.stringify({ status: 'shutting-down' }), () => legacy.close());
+      res.setHeader('connection', 'close');
+      res.end(JSON.stringify({ status: 'shutting-down' }), () => {
+        legacy.closeAllConnections?.();
+        legacy.close();
+      });
       return;
     }
     res.statusCode = 404;
