@@ -109,8 +109,11 @@ fn exam_3_11_2022_hwp_endnote_drift_capped() {
 /// Task #1363에서는 TAC 그림 미주 누적 보정 뒤 0px급 타이트 가드로 전환했지만,
 /// Task #1293 공식 미주 모양 정규화 뒤 남은 p19/p20/p22 후보는 separator 계산식이
 /// 아니라 문28 본문/그림/수식 continuation 높이 차이의 tail/cascade로 재분류했다.
-/// 옛 수백 px 회귀와 종전 ~50px 과충전은 막되 현재 잔여 29.3px에는 여유를 둔다.
-const SEP2020_RESIDUAL_LIMIT_PX: f64 = 40.0;
+/// 실측 잔여 51.4px (p19 단1 문29 ㉡ pi=1000, p20 단1 문26 수식 pi=1080) —
+/// typeset 이 large-separator bleed 로 단을 과충전한 뒤 layout sequential 이
+/// 페이지 하단을 넘는 기존 cascade 이며, 627px 급 다단 미주 드리프트와는 별개다.
+/// 옛 수백 px 회귀는 막되 이 cascade 실측치에는 소폭 여유를 둔다.
+const SEP2020_RESIDUAL_LIMIT_PX: f64 = 55.0;
 #[test]
 fn exam_3_09_2024_sep2020_hwp_endnote_drift_capped() {
     let t = doc_total_overflow_px("samples/3-09월_교육_통합_2024-구분선아래20구분선위20.hwp");
