@@ -29,8 +29,8 @@ const NATIVE_TEXT_EXTENSIONS = new Set(['.txt', '.md', '.markdown', '.csv', '.ht
 const LOCAL_EXTRACTION_EXTENSIONS = new Set(SUPPORTED_REFERENCE_EXTENSIONS);
 
 /**
- * 문체 축. personal-humanizer-maker 의 축 분류를 그대로 쓰되, 판별이 아니라
- * 작성을 위한 지시문을 받는다.
+ * 문체 축. 초상(presence)이 사람 자체이고, 축은 그 사람이 문장에서 하는 일이다.
+ * 레시피를 받지 않는다. 배우에게 인물을 설명하듯 적는다.
  */
 export const STYLE_AXES = [
   { id: 'sentence_architecture', ko: '문장 구조', en: 'Sentence architecture' },
@@ -47,12 +47,24 @@ const AXIS_IDS = STYLE_AXES.map((axis) => axis.id);
 const ANALYSIS_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['enoughSample', 'pageEquivalent', 'summary', 'unsupportedFiles', 'axes', 'adaptation'],
+  required: ['enoughSample', 'pageEquivalent', 'summary', 'unsupportedFiles', 'presence', 'axes', 'adaptation'],
   properties: {
     enoughSample: { type: 'boolean' },
     pageEquivalent: { type: 'number', minimum: 0 },
     summary: { type: 'string', maxLength: 500 },
     unsupportedFiles: { type: 'array', maxItems: MAX_FILES, items: { type: 'string' } },
+    presence: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['portrait', 'temperature', 'unevenness', 'stance', 'refusals'],
+      properties: {
+        portrait: { type: 'string', maxLength: 900 },
+        temperature: { type: 'string', maxLength: 400 },
+        unevenness: { type: 'string', maxLength: 400 },
+        stance: { type: 'string', maxLength: 400 },
+        refusals: { type: 'array', maxItems: 6, items: { type: 'string', maxLength: 200 } },
+      },
+    },
     axes: {
       type: 'array',
       maxItems: 7,
@@ -150,13 +162,13 @@ export function buildCalibrationPrompt({ language, files, metrics, inline = fals
     .map((axis) => `- ${axis.id} — ${language === 'ko' ? axis.ko : axis.en}`)
     .join('\n');
   const measured = metrics
-    ? `A deterministic profiler already measured this corpus. These numbers are settled; do not restate, recompute, or contradict them. Read them as context for what to interpret.
+    ? `A deterministic profiler already measured this corpus. These numbers are a fingerprint, not a recipe. Do not restate, recompute, or contradict them, and do not tell a writer to hit them.
 
 \`\`\`json
 ${JSON.stringify(metrics, null, 2)}
 \`\`\`
 
-Explain what the numbers cannot: why the author writes this way, what job each habit does, and what a writer must decide to produce prose that reads as theirs.`
+Use them only to notice what the ear already heard, then explain what they cannot: temperament, unevenness, what this person sounds like when they mean it.`
     : 'No quantitative profile is available for this corpus, so judge the sample scale yourself and keep every claim conservative.';
 
   const access = inline
@@ -165,7 +177,7 @@ Explain what the numbers cannot: why the author writes this way, what job each h
       ? 'Use the Read tool on calibration-corpus.txt. It contains the locally extracted sample prose with a heading between source files.'
       : 'Use the Read tool on every readable file in the current directory.');
 
-  return `Profile the writing style of the attached samples, which the user confirms they wrote themselves. ${access} The profile language is ${targetLanguage}.
+  return `Profile the writing of the attached samples, which the user confirms they wrote themselves. ${access} The profile language is ${targetLanguage}.
 
 Files:
 ${manifest}
@@ -174,41 +186,51 @@ ${measured}
 
 ## What this profile is for
 
-The output is a **writing** specification. Agents will consult it while drafting new Korean office documents — reports, proposals, official letters, emails, explanatory prose — so that what they produce reads as if this author wrote it. It is not a checklist for grading finished text, and it is not a rewrite guide. Every line you emit must be something a writer can act on **before** the sentence exists.
+The output is a **person** a drafting agent will inhabit — not a style guide, not a checklist, not a set of sentence recipes. Agents will write new Korean office documents (reports, proposals, official letters, emails, explanatory prose) that should sound as if this author is in the room. The failure mode of a writing specification is that language models follow it perfectly, and the result reads as AI. The success condition is the opposite: a stranger hearing the new prose would believe a particular human wrote it, with that human's temperament, unevenness, and way of caring about a sentence.
 
-## Read for feel first
+Do not emit generic good-writing advice. Do not emit anti-AI rules any model already knows ("vary sentence length", "avoid moreover", "prefer concrete nouns"). Those produce a second machine voice. Only habits that are this person's belong here.
 
-Before you fill any axis, read the corpus the way a reader would: where the prose speeds up and where it slows down, how long the author stays with one thought, how a paragraph opens and how it lets go, whether the voice sits close to the reader or keeps its distance, what a sentence sounds like when it lands. The measured numbers describe the skeleton; your job is the gait. A directive earns its place when following it makes new text **feel** like this author on the page, not merely match their statistics — so when you must choose between a habit that is easy to count and a habit that carries the voice, profile the one that carries the voice.
+## Soul first
 
-Write directives in the imperative, aimed at the moment of composition: "open a section with the decision, then the number that forces it" — not "the author tends to be direct" and not "avoid vagueness." When a habit exists to create a feeling — pace, warmth, bluntness, restraint — name the feeling the directive is protecting, so a drafting agent knows what to preserve when the rule and the sentence collide.
+Before you fill any axis, sit with the corpus as a reader, not a linguist.
+
+Ask, and answer in the \`presence\` object:
+- \`portrait\` — who is speaking, in 3–6 sentences. Close or distant, patient or rushed, warm or dry, amused or weary. What they sound like when they mean it.
+- \`temperature\` — the default weather of the prose, with what the ear heard.
+- \`unevenness\` — where they let the seams show. Uneven paragraphs, a repeated word, a thought that ends too soon, a joke that isn't packed for travel.
+- \`stance\` — how they take a position. Blunt, hedged only when it matters, quietly certain, willing to be wrong in public.
+- \`refusals\` — up to 6 things that would immediately not sound like them. A throat-clearing opener, a forced triad, a polished closer, a particular kind of softness or swagger.
+
+Capture on-page temperament. Do not invent off-page biography: no education, job, age, or diagnosis beyond what the prose itself performs.
+
+The measured numbers are a skeleton. Your job is the person wearing it. When a countable habit and a habit that carries the voice disagree, profile the one that carries the voice.
 
 ## Axes
 
-Fill this frame. One entry per axis, all seven, in this order:
+The seven axes are how that person shows up in craft — supporting texture, not a replacement for the portrait. Fill this frame. One entry per axis, all seven, in this order:
 
 ${axisList}
 
 For each axis give:
-- \`observation\` — what this author actually does on this axis and how it reads, in one or two sentences, in ${targetLanguage}.
-- \`directives\` — 2 to 5 imperative instructions a drafting agent can follow. Concrete over abstract. Name the author's actual constructions, positions, and choices.
-- \`patterns\` — up to 3 short shapes the author reuses, written as reusable templates with the content blanked (for example "<수치> 기준으로 <판단>. <조건>이면 <대안>." ), never as a sentence copied from the sample.
+- \`observation\` — how this person occupies the axis, and how that reads, in one or two sentences, in ${targetLanguage}. A character note, not a statistic.
+- \`directives\` — 1 to 3 notes a writer can inhabit. Brief an actor; do not issue a recipe. "When the news is bad, the sentence shrinks until it has nowhere to hide" — not "put the number first, then the verdict," and not "the author tends to be direct." Name the feeling the habit protects (pace, warmth, bluntness, restraint) so a drafting agent knows what to preserve when a rule and a sentence collide.
+- \`patterns\` — up to 3 cadences the ear would recognize, described as a movement ("a figure lands, then a short verdict, then the cost of ignoring it"), never as a fill-in-the-blank template, and never as a sentence copied from the sample.
 - \`evidenceCount\` — how many distinct places in the sample support this axis. Count honestly; 0 is a valid answer.
 
-If the author shows no distinctive habit on an axis, say so and give an empty \`directives\` list. Do not manufacture a rule to fill the frame, and do not repeat generic good-writing advice that any writer would follow.
+If the author shows no distinctive habit on an axis, say so and give an empty \`directives\` list. Do not manufacture a rule to fill the frame.
 
 ## Adaptation
 
-Give up to four entries covering formal report, email, explanatory prose, and persuasive writing: what carries over from this author's habits into that genre, and what the genre overrides. Genre convention wins over personal habit; say which parts bend.
+Give up to four entries covering formal report, email, explanatory prose, and persuasive writing: which parts of this person survive in that genre, and which parts the genre must override. Genre convention wins over personal habit; say which parts bend. Do not use adaptation to sand the voice into generic office prose.
 
 ## Boundaries
 
 - Never reproduce a sentence from the samples, and never quote more than four consecutive words of the author's text.
 - Omit personal names, organizations, and private facts. Style only — subject matter is not the profile.
-- Do not diagnose the author, and do not infer education, background, or personality.
 - Do not invent a quirk from a single occurrence. A habit needs repetition.
 - Where the evidence is mixed, say it is mixed rather than picking a side.
 - Put files you could not read in \`unsupportedFiles\`. Do not infer anything from filenames or metadata.
-- \`summary\` is one or two sentences in ${targetLanguage} describing how the voice feels to read, for the user to read in the UI.`;
+- \`summary\` is one or two sentences in ${targetLanguage} describing how it feels to be in the room with this voice, for the user to read in the UI.`;
 }
 
 function adaptiveTimeout(baseMs, totalBytes = 0) {
@@ -534,6 +556,21 @@ async function analyzeViaOpenRouter({ prompt, corpusText, corpusSources, model: 
   }
 }
 
+function normalizePresence(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const portrait = String(value.portrait ?? '').trim();
+  if (!portrait) return null;
+  const refusals = (Array.isArray(value.refusals) ? value.refusals : [])
+    .map((line) => String(line).trim()).filter(Boolean).slice(0, 6);
+  return {
+    portrait,
+    temperature: String(value.temperature ?? '').trim(),
+    unevenness: String(value.unevenness ?? '').trim(),
+    stance: String(value.stance ?? '').trim(),
+    refusals,
+  };
+}
+
 export function validateAnalysisStructure(result) {
   if (!result || typeof result !== 'object' || Array.isArray(result)
     || typeof result.enoughSample !== 'boolean'
@@ -541,7 +578,8 @@ export function validateAnalysisStructure(result) {
     || typeof result.summary !== 'string'
     || !Array.isArray(result.unsupportedFiles)
     || !Array.isArray(result.axes)
-    || !Array.isArray(result.adaptation)) {
+    || !Array.isArray(result.adaptation)
+    || !normalizePresence(result.presence)) {
     throw new StyleCalibrationError('INVALID_RESULT', 'The selected model returned an incomplete style analysis. Please try again.');
   }
   const axes = new Map();
@@ -577,56 +615,84 @@ function orderedAxes(axes) {
       directives,
       patterns,
       evidenceCount,
-      // 근거 수가 규칙의 강제력을 정한다. 모델이 스스로 강도를 올리지 못한다.
+      // 근거 수가 습관의 선명도를 정한다. 모델이 스스로 강도를 올리지 못한다.
       strength: evidenceCount >= 8 && directives.length > 0 ? 'strict' : 'advisory',
     };
   });
 }
 
 const COVENANT = {
-  ko: `이 프로필은 문장을 어떻게 쓸지만 정한다. 사실·수치·날짜·고유명사·인용·출처·인과 관계·주장의 방향은 문체를 이유로 바뀌지 않는다. 문서에 이미 있는 표기와 용어, 수신자와 장르가 요구하는 격식이 이 프로필보다 앞선다. 문체를 맞추려고 없던 주장이나 근거를 만들지 않는다.`,
-  en: `This profile decides only how sentences are made. Facts, figures, dates, proper nouns, quotations, sources, causality, and the direction of a claim never change for stylistic reasons. The document's existing terminology and the formality the genre and recipient require both outrank this profile. Never invent a claim or a source to fit the voice.`,
+  ko: `이 프로필은 누구의 목소리로 쓸지만 정한다. 사실·수치·날짜·고유명사·인용·출처·인과 관계·주장의 방향은 목소리를 이유로 바뀌지 않는다. 문서에 이미 있는 표기와 용어, 수신자와 장르가 요구하는 격식이 이 프로필보다 앞선다. 목소리를 맞추려고 없던 주장이나 근거를 만들지 않는다.`,
+  en: `This profile decides only whose voice the sentences are in. Facts, figures, dates, proper nouns, quotations, sources, causality, and the direction of a claim never change for stylistic reasons. The document's existing terminology and the formality the genre and recipient require both outrank this profile. Never invent a claim or a source to fit the voice.`,
 };
 
 const SECTION = {
   ko: {
-    title: '개인 문체 프로필',
+    title: '이 사람의 목소리',
+    presence: '이 사람',
+    temperature: '기온',
+    unevenness: '고르지 않은 곳',
+    stance: '태도를 취하는 법',
+    refusals: '이 사람이 안 하는 일',
     covenant: '지키는 선',
-    baselines: '기준선 (원고에서 측정)',
-    axes: '작성 지시',
+    baselines: '지문 (쓴 뒤에만 본다)',
+    fingerprint: '아래 숫자는 초고를 쓴 뒤에만 본다. 맞추려고 문장을 늘리거나 자르지 않는다. 문장이 이 폭을 통째로 비우면 목소리를 잃은 것이다.',
+    axes: '문장에서 하는 일',
     adaptation: '장르별 조정',
-    strict: '기본 규칙',
-    advisory: '참고',
+    strict: '분명한 습관',
+    advisory: '옅은 습관',
     noEvidence: '원고에서 뚜렷한 습관이 보이지 않는다. 문서와 장르 관행을 따른다.',
-    patterns: '자주 쓰는 얼개',
+    patterns: '귀로 들리는 호흡',
     confidence: (level, sentences, stability) =>
-      `표본 신뢰도 ${level} — 문장 ${sentences}개, 반쪽 일치도 ${stability}. 신뢰도가 낮으면 기준선을 넓게 잡고 지시는 참고로만 쓴다.`,
+      `표본 신뢰도 ${level} — 문장 ${sentences}개, 반쪽 일치도 ${stability}. 신뢰도가 낮으면 지문을 넓게 읽고, 축 메모는 참고로만 쓴다.`,
   },
   en: {
-    title: 'Personal writing profile',
+    title: "This person's voice",
+    presence: 'The person',
+    temperature: 'Temperature',
+    unevenness: 'Where the seams show',
+    stance: 'How they take a stance',
+    refusals: 'What they would not do',
     covenant: 'Fixed boundaries',
-    baselines: 'Baselines (measured from the samples)',
-    axes: 'Writing directives',
+    baselines: 'Fingerprint (check after writing)',
+    fingerprint: 'These numbers are a fingerprint you glance at after drafting. Do not pad or trim sentences to hit them. If a paragraph abandoned this spread, you left the voice.',
+    axes: 'How the voice occupies the page',
     adaptation: 'Genre adaptation',
-    strict: 'Rules',
-    advisory: 'Advisory',
+    strict: 'Strong habits',
+    advisory: 'Faint habits',
     noEvidence: 'No distinctive habit in the samples. Follow the document and the genre.',
-    patterns: 'Recurring shapes',
+    patterns: 'Cadence the ear would know',
     confidence: (level, sentences, stability) =>
-      `Sample confidence ${level} — ${sentences} sentences, split-half agreement ${stability}. Lower confidence means wider baselines and advisory-only directives.`,
+      `Sample confidence ${level} — ${sentences} sentences, split-half agreement ${stability}. Lower confidence means a wider fingerprint and axis notes you may drop.`,
   },
 };
 
-/** style.md 는 코드가 만든다. 측정값과 규칙 강도가 모델 문장에 섞이지 않게 한다. */
-export function renderStyleMarkdown({ language, axes, adaptation, bands, metrics, confidence, stability, summary }) {
+function renderPresence(out, presence, t) {
+  if (!presence?.portrait) return;
+  out.push(`## ${t.presence}`, '', presence.portrait, '');
+  if (presence.temperature) out.push(`**${t.temperature}**`, '', presence.temperature, '');
+  if (presence.unevenness) out.push(`**${t.unevenness}**`, '', presence.unevenness, '');
+  if (presence.stance) out.push(`**${t.stance}**`, '', presence.stance, '');
+  if (presence.refusals.length > 0) {
+    out.push(`**${t.refusals}**`, '');
+    for (const line of presence.refusals) out.push(`- ${line}`);
+    out.push('');
+  }
+}
+
+/** style.md 는 코드가 만든다. 측정값과 습관의 강도가 모델 문장에 섞이지 않게 한다. */
+export function renderStyleMarkdown({
+  language, axes, adaptation, bands, metrics, confidence, stability, summary, presence = null,
+}) {
   const lang = language === 'en' ? 'en' : 'ko';
   const t = SECTION[lang];
   const out = [`# ${t.title}`, ''];
   if (summary) out.push(summary.trim(), '');
+  renderPresence(out, presence, t);
   out.push(`## ${t.covenant}`, '', COVENANT[lang], '');
 
   if (bands) {
-    out.push(`## ${t.baselines}`, '');
+    out.push(`## ${t.baselines}`, '', t.fingerprint, '');
     for (const line of baselineLines(bands, lang)) out.push(`- ${line}`);
     out.push('', t.confidence(confidence, metrics.sentences, stability), '');
   }
@@ -731,9 +797,9 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
     const timeoutMs = adaptiveTimeout(ANALYSIS_TIMEOUT_MS, checked.totalBytes);
     const analysisStartedAt = Date.now();
     const safeActivities = [
-      'Comparing recurring sentence structures',
-      'Mapping tone and word-choice patterns',
-      'Forming reusable writing directives',
+      'Listening for how the voice lands',
+      'Noticing temperament and unevenness',
+      'Writing a portrait of the person on the page',
     ];
     let activityIndex = 0;
     emit({
@@ -785,9 +851,10 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
       );
     }
 
+    const presence = normalizePresence(result?.presence);
     const axes = orderedAxes(result?.axes);
-    if (!axes.some((axis) => axis.directives.length > 0)) {
-      throw new StyleCalibrationError('INVALID_RESULT', 'The selected model did not produce usable writing directives. Please try again.');
+    if (!presence || !axes.some((axis) => axis.directives.length > 0)) {
+      throw new StyleCalibrationError('INVALID_RESULT', 'The selected model did not produce a usable voice portrait. Please try again.');
     }
     const adaptation = (Array.isArray(result?.adaptation) ? result.adaptation : [])
       .filter((entry) => entry?.genre && entry?.guidance)
@@ -799,7 +866,7 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
       detail: 'Building the calibrated writing profile', completed: 0, total: 1, agent, model,
     });
     const markdown = renderStyleMarkdown({
-      language: checked.language, axes, adaptation, bands, metrics, confidence, stability, summary,
+      language: checked.language, axes, adaptation, bands, metrics, confidence, stability, summary, presence,
     });
     // 모델은 스테이징 이름(safeName)으로 보고하므로 업로드 원본 이름으로 되돌린다.
     const originalNames = new Map(checked.files.map((file) => [file.safeName, file.name]));
@@ -825,12 +892,13 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
       agent,
       model,
       profile: {
-        version: 2,
+        version: 3,
         language: checked.language,
         confidence,
         stability,
         metrics,
         bands,
+        presence,
         axes: axes.map(({ title, ...rest }) => rest),
         adaptation,
         unsupportedFiles,

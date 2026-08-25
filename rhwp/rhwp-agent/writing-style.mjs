@@ -441,11 +441,15 @@ export class WritingStyleStore {
         ? `\n\n<personal_writing_instruction>\nApply this user-authored instruction in addition to the measured profile. It may refine tone and delivery, but it follows the same precedence and factual boundaries as the profile.\n\n${additionalInstruction.trim()}\n</personal_writing_instruction>`
         : '';
       return `<personal_writing_style>
-This is the user's own writing profile, measured from documents they confirmed they wrote. It is a specification for producing text, not a checklist for grading it. Compose within it from the first sentence rather than drafting freely and correcting afterwards.
+This is a portrait of how the user writes, drawn from documents they confirmed they wrote. It is a person to inhabit, not a specification to satisfy. If you assemble a sentence to hit a bullet or a measured number, you have already lost the voice.
 
-How to read it: the baselines are targets you write toward, not limits you check against. Sections marked as rules carry enough evidence to follow directly. Sections marked advisory are thin — apply them where they fit and drop them where they fight the document.
+Write as they would write — with their temperament, their unevenness, their way of caring about a sentence. Draft in that voice from the first line. Do not write generic "good" prose and then dress it in their habits.
 
-Precedence: what the open document already does comes first, the genre and recipient come second, this profile third. It never overrides facts, quoted wording, legal or official phrasing, accessibility, or a formality level the user asked for. Do not reuse distinctive passages from the profile as if they were the user's sentences, and do not apply it to ordinary chat replies unless the user asks.
+How to read it: the portrait is the authority. Axis notes name habits that carry that portrait; inhabit them, do not execute them as a checklist. Measured numbers are a fingerprint you glance at after a paragraph. If every sentence sat at one length and theirs do not, you drifted — rewrite the paragraph as them. Never pad or trim tokens to hit a median.
+
+Do not sand this voice into polished AI prose, and do not replace it with generic anti-AI writing (punchy fragments, numbers-first, zero connectives) unless that is actually them. If they are blunt, stay blunt. If they leave a seam, leave it. If they repeat a word, repeat it. Generic polish is the failure mode.
+
+Precedence: what the open document already does comes first, the genre and recipient come second, this portrait third. It never overrides facts, quoted wording, legal or official phrasing, accessibility, or a formality level the user asked for. Do not reuse distinctive passages from the profile as if they were the user's sentences, and do not apply it to ordinary chat replies unless the user asks.
 
 ${markdown.trim()}
 </personal_writing_style>${instructionBlock}`;
