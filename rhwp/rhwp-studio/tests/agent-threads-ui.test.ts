@@ -73,7 +73,7 @@ test('reasoning and model tweaks do not lock or rebuild the composer', () => {
   // 계획 상태가 그대로면 검토 칸을 비웠다 다시 그리지 않는다.
   assert.match(
     source,
-    /if \(chatWorkflow === state\.workflow && planningPhase === state\.phase && samePlanId && sameApproval\) \{\s*return;/,
+    /if \(chatWorkflow === state\.workflow && planningPhase === state\.phase && samePlanId && sameApproval\) \{\s*if \(hadPendingAction\) \{[\s\S]*?\}\s*return;/,
   );
 });
 

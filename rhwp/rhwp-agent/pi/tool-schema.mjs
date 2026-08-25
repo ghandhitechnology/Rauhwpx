@@ -19,7 +19,7 @@ import { filterToolDefinitions } from '../tools.mjs';
  *   pi 는 스키마를 프로바이더에 그대로 넘기므로 $ref/definitions 가 남으면 못 쓴다.
  * - `$schema` 키는 떼어낸다 — OpenAI 호환 엔드포인트가 싫어한다.
  *
- * @param {Record<string, import('zod').ZodTypeAny>} shape
+ * @param {Record<string, import('zod/v3').ZodTypeAny>} shape
  */
 export function shapeToJsonSchema(shape) {
   const schema = zodToJsonSchema(z.object(shape ?? {}), {

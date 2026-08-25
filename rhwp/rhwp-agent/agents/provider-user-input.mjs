@@ -189,8 +189,8 @@ export function createClaudeAskUserQuestionPermissionHandler(opts) {
       return { behavior: 'deny', message: 'Subagents cannot ask the user questions.', interrupt: false };
     }
     const decoded = decodeClaudeAskUserQuestion(input, context);
-    const outcome = await requestProviderUserInput(opts, decoded.request, context.signal, {
-      agentID: context.agentID,
+    const outcome = await requestProviderUserInput(opts, decoded.request, context?.signal, {
+      agentID: context?.agentID,
     });
     return encodeClaudeAskUserQuestion(decoded, outcome);
   };

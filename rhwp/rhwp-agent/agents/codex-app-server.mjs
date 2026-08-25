@@ -48,8 +48,6 @@ function capabilityConfig(opts) {
   const mcpEnv = Object.entries(capabilityEnv)
     .map(([key, value]) => `${key} = ${JSON.stringify(String(value))}`)
     .join(', ');
-  const unrestricted = opts.permissionProfile === 'unrestricted';
-  const planningRestricted = isPlanningRestricted(opts);
   return [
     '-c', `mcp_servers.rhwp.command=${JSON.stringify(runtime.command)}`,
     '-c', `mcp_servers.rhwp.args=${JSON.stringify(runtime.args)}`,
@@ -57,7 +55,7 @@ function capabilityConfig(opts) {
     '-c', 'mcp_servers.rhwp.startup_timeout_sec=20',
     '-c', 'mcp_servers.rhwp.default_tools_approval_mode="auto"',
     '-c', 'approval_policy="never"',
-    '-c', `sandbox_mode="${planningRestricted ? 'read-only' : (unrestricted ? 'danger-full-access' : 'workspace-write')}"`,
+    '-c', `sandbox_mode="${sandboxMode(opts)}"`,
     // app-server has no `--ignore-rules` flag. A zero project-doc budget is
     // its config-level equivalent; Rau supplies the complete brief itself.
     '-c', 'project_doc_max_bytes=0',
@@ -209,16 +207,15 @@ function sandboxPolicy(opts) {
 
 function collaborationMode(opts) {
   return {
-    // Codex currently exposes Plan and Default. Rau's Build intent maps to
-    // Default plus the independently selected sandbox policy.
+    // Codex는 현재 Plan과 Default를 노출한다. Rau의 Build 의도는 Default와
+    // 독립적으로 선택한 sandbox 정책의 조합으로 대응한다.
     mode: providerInteractionMode(opts) === 'plan' ? 'plan' : 'default',
     settings: {
       model: opts.model ?? DEFAULT_CODEX_MODEL,
       reasoning_effort: opts.effort ?? null,
-      // Collaboration-mode Settings deliberately uses snake_case even though
-      // the surrounding app-server v2 protocol uses camelCase. `null` selects
-      // Codex's built-in Default/Plan instructions; the Rau-specific brief is
-      // already supplied through thread developerInstructions.
+      // 주변 app-server v2 프로토콜은 camelCase지만 Collaboration-mode Settings는
+      // 의도적으로 snake_case를 쓴다. `null`은 Codex 내장 Default/Plan 지침을
+      // 선택하며, Rau 전용 브리프는 이미 thread developerInstructions로 공급한다.
       developer_instructions: null,
     },
   };

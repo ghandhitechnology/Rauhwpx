@@ -314,7 +314,14 @@ test('native ACP keeps one Grok process, registers both question methods and rou
         async prompt(text) {
           prompts.push(text);
           input.onSessionUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'native' } });
-          return { stopReason: 'end_turn' };
+          return {
+            stopReason: [
+              'end_turn',
+              'max_tokens',
+              'refusal',
+              'max_turn_requests',
+            ][prompts.length - 1] ?? 'end_turn',
+          };
         },
         getSessionId: () => 'grok-acp-1',
         hasSeenPromptUpdate: () => true,
@@ -333,6 +340,9 @@ test('native ACP keeps one Grok process, registers both question methods and rou
   await new Promise((resolve) => setImmediate(resolve));
   session.sendUserMessage('two');
   await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.filter((event) => event.type === 'turn-end').at(-1), {
+    type: 'turn-end', agent: 'grok', stopReason: 'completed', errorMessage: undefined,
+  });
   const permissionChange = session.setPermissionProfile('unrestricted');
   assert.equal(restarts, 0);
   await permissionChange;
@@ -341,9 +351,16 @@ test('native ACP keeps one Grok process, registers both question methods and rou
   assert.deepEqual(configureCalls.at(-1).modeAliases, ['plan', 'architect'], 'Plan ACK waits for ACP mode selection');
   session.sendUserMessage('three');
   await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.filter((event) => event.type === 'turn-end').at(-1), {
+    type: 'turn-end', agent: 'grok', stopReason: 'failed',
+    errorMessage: 'Grok ACP turn ended with refusal',
+  });
   await session.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 3 });
   session.sendUserMessage('four');
   await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.filter((event) => event.type === 'turn-end').at(-1), {
+    type: 'turn-end', agent: 'grok', stopReason: 'completed', errorMessage: undefined,
+  });
 
   assert.equal(creates, 1);
   assert.deepEqual(config.args, ['agent', 'stdio']);

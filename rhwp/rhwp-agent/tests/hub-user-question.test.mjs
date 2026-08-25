@@ -74,7 +74,7 @@ async function closeClient(client) {
   await closed;
 }
 
-async function startHub(t, { fakeCursor = false } = {}) {
+async function startHub(t, { fakeCursor = false, cursorQuestionDelayMs = 0 } = {}) {
   const workRoot = mkdtempSync(path.join(os.tmpdir(), 'rhwp-hub-user-question-'));
   let testPath = process.env.PATH;
   if (fakeCursor) {
@@ -99,7 +99,8 @@ async function startHub(t, { fakeCursor = false } = {}) {
       "if (process.argv.includes('--version')) { console.log('2026.08.11-e2e'); process.exit(0); }",
       "if (process.argv.includes('status')) { console.log('Not logged in'); process.exit(1); }",
       "if (process.argv[2] === 'acp') process.exit(1);",
-      `process.stdout.write(${JSON.stringify(`${JSON.stringify(init)}\n${JSON.stringify(call)}\n`)});`,
+      `process.stdout.write(${JSON.stringify(`${JSON.stringify(init)}\n`)});`,
+      `setTimeout(() => process.stdout.write(${JSON.stringify(`${JSON.stringify(call)}\n`)}), ${cursorQuestionDelayMs});`,
       'setInterval(() => {}, 1000);',
     ].join('\n'), { mode: 0o755 });
     testPath = `${binDir}${path.delimiter}${testPath}`;
@@ -241,14 +242,13 @@ test('a standalone implementation command follows the same Plan approval transit
   assert.equal(implementing.phase, 'implementing');
 });
 
-test('a correlated root provider event authorizes a non-Pi MCP fallback', { timeout: 40_000 }, async (t) => {
-  const { port } = await startHub(t, { fakeCursor: true });
+test('a correlated root provider event authorizes MCP even when its socket call arrives first', { timeout: 40_000 }, async (t) => {
+  const { port } = await startHub(t, { fakeCursor: true, cursorQuestionDelayMs: 200 });
   const sessionId = 'question-correlated-root';
   const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=${sessionId}&instance=page-1`);
   t.after(() => closeClient(studio));
   await studio.next((frame) => frame.type === 'welcome');
   await startRunningChat(studio, 'cursor');
-  await new Promise((resolve) => setTimeout(resolve, 1_000));
 
   const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=cursor&role=chat`);
   t.after(() => closeClient(mcp));
@@ -387,6 +387,16 @@ test('root-scope violations fail and MCP disconnect expires the active question'
       && frame.interactionId === requested.interaction.interactionId
   ));
   assert.deepEqual(resolved.outcome, { status: 'expired', reason: 'provider-disconnected' });
+
+  await closeClient(studio);
+  const disconnected = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=pi&role=chat`);
+  t.after(() => closeClient(disconnected));
+  sendFrame(disconnected, {
+    type: 'tool-call', id: 23, tool: 'ask_user_question', args: questionArgs(), workflow: 'direct',
+  });
+  const unavailable = await disconnected.next((frame) => frame.type === 'tool-result' && frame.id === 23);
+  assert.equal(unavailable.ok, false);
+  assert.equal(unavailable.error.code, 'NO_STUDIO');
 });
 
 for (const stopType of ['chat-interrupt', 'chat-stop']) {

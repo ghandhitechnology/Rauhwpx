@@ -105,6 +105,9 @@ const STUDIO_TOOL_TIMEOUT_MS = 30_000;
 // 스튜디오가 끊긴 뒤 다시 붙기를 기다려 주는 시간 — 브리지의 첫 재접속 백오프(250·500ms)보다
 // 넉넉하되, 탭이 아주 닫힌 경우 30초 타임아웃까지 끌지 않을 만큼 짧게 잡는다.
 const STUDIO_REATTACH_GRACE_MS = Number(process.env.RHWP_STUDIO_REATTACH_GRACE_MS ?? 5_000);
+// 프로바이더 이벤트와 별도 MCP 소켓의 도구 호출 순서가 뒤집힐 수 있어
+// 정확한 루트 범위 티켓이 도착할 짧은 여유를 둔다.
+const USER_QUESTION_SCOPE_WAIT_MS = 400;
 const HARNESS_UPDATE_INITIAL_DELAY_MS = 8_000;
 const HARNESS_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const HARNESS_UPDATE_BUSY_RETRY_MS = 5 * 60 * 1000;
@@ -720,6 +723,9 @@ function requestUserQuestion(record, request, {
   if (signal?.aborted) {
     return Promise.resolve({ status: 'expired', reason: 'provider-disconnected' });
   }
+  if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) {
+    throw workflowError('NO_STUDIO', 'Studio is not connected to present the user question');
+  }
   const interaction = createUserQuestionInteraction({
     request: normalizedRequest,
     agent: activeSession.agent,
@@ -745,12 +751,39 @@ function requestUserQuestion(record, request, {
     resolve: resolveInteraction,
   };
   signal?.addEventListener('abort', onAbort, { once: true });
-  sendJson(record.studioSocket, {
+  const delivered = sendJson(record.studioSocket, {
     v: 1,
     type: 'user-question-requested',
     interaction: structuredClone(interaction),
   });
+  if (!delivered) {
+    settleUserQuestion(record, { status: 'expired', reason: 'provider-disconnected' });
+    throw workflowError('NO_STUDIO', 'Studio disconnected before the user question could be presented');
+  }
   return promise;
+}
+
+function matchingUserQuestionScopes(record, agent, questions) {
+  const expectedQuestions = JSON.stringify(questions);
+  return record.pendingUserQuestionScopes
+    .map((scope, index) => ({ scope, index }))
+    .filter(({ scope }) => (
+      scope.agent === agent
+      && scope.questions
+      && JSON.stringify(scope.questions) === expectedQuestions
+    ));
+}
+
+async function waitForUserQuestionScopes(record, agent, questions, generation) {
+  const deadline = Date.now() + USER_QUESTION_SCOPE_WAIT_MS;
+  let matches = matchingUserQuestionScopes(record, agent, questions);
+  while (matches.length === 0
+    && record.agentSession?.generation === generation
+    && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(20, deadline - Date.now())));
+    matches = matchingUserQuestionScopes(record, agent, questions);
+  }
+  return matches;
 }
 
 function userQuestionAnswerFrame({ interactionId, responseId, ok, code, message }) {
@@ -2711,56 +2744,50 @@ function handleMcpMessage(record, sock, msg) {
           sendError(error, 'INVALID_ARGS');
           return;
         }
-        // Pi has no delegated-agent question path, so its MCP process is the
-        // root caller by construction. Other legacy transports can host
-        // subagents; require the provider stream to have announced the exact
-        // tool call first, then consume that one-shot scope ticket. This makes
-        // inherited environment variables insufficient to impersonate root.
-        if (sock.agentLabel !== 'pi') {
-          const matchingScopes = record.pendingUserQuestionScopes
-            .map((scope, index) => ({ scope, index }))
-            .filter(({ scope }) => (
-              scope.agent === sock.agentLabel
-              && scope.questions
-              && JSON.stringify(scope.questions) === JSON.stringify(request.questions)
-            ));
-          if (matchingScopes.length !== 1) {
-            sendError(workflowError(
-              'CALLER_SCOPE_UNKNOWN',
-              'The provider did not unambiguously establish that this question came from the root conversation',
-            ));
-            return;
-          }
-          const scopeIndex = matchingScopes[0].index;
-          const [scope] = record.pendingUserQuestionScopes.splice(scopeIndex, 1);
-          if (scope.parentTaskId) {
-            sendError(workflowError(
-              'ROOT_INTERACTION_REQUIRED',
-              'Only the root conversation may ask the user questions',
-            ));
-            return;
-          }
-        }
         const generation = record.agentSession.generation;
-        void Promise.resolve()
-          .then(() => requestUserQuestion(record, request, {
+        void (async () => {
+          // Pi에는 위임 에이전트 질문 경로가 없어 MCP 프로세스 자체가 루트다.
+          // 다른 레거시 전송은 별도 프로바이더 스트림의 정확한 일회용 범위 티켓을
+          // 기다린 뒤 소비해, 상속된 환경 변수만으로 루트를 사칭하지 못하게 한다.
+          if (sock.agentLabel !== 'pi') {
+            const matchingScopes = await waitForUserQuestionScopes(
+              record,
+              sock.agentLabel,
+              request.questions,
+              generation,
+            );
+            if (matchingScopes.length !== 1) {
+              throw workflowError(
+                'CALLER_SCOPE_UNKNOWN',
+                'The provider did not unambiguously establish that this question came from the root conversation',
+              );
+            }
+            const scopeIndex = matchingScopes[0].index;
+            const [scope] = record.pendingUserQuestionScopes.splice(scopeIndex, 1);
+            if (scope.parentTaskId) {
+              throw workflowError(
+                'ROOT_INTERACTION_REQUIRED',
+                'Only the root conversation may ask the user questions',
+              );
+            }
+          }
+          const outcome = await requestUserQuestion(record, request, {
             source: 'mcp',
             generation,
             mcpSocket: sock,
-          }))
-          .then((outcome) => {
-            if (outcome.status === 'answered') {
-              sendResult({
-                status: 'answered',
-                answers: userQuestionAnswersForMcp(request, outcome.answers),
-              });
-              return;
-            }
-            const code = outcome.status === 'cancelled'
-              ? 'USER_QUESTION_CANCELLED'
-              : 'USER_QUESTION_EXPIRED';
-            sendError(workflowError(code, `User question ${outcome.status}: ${outcome.reason}`));
-          })
+          });
+          if (outcome.status === 'answered') {
+            sendResult({
+              status: 'answered',
+              answers: userQuestionAnswersForMcp(request, outcome.answers),
+            });
+            return;
+          }
+          const code = outcome.status === 'cancelled'
+            ? 'USER_QUESTION_CANCELLED'
+            : 'USER_QUESTION_EXPIRED';
+          sendError(workflowError(code, `User question ${outcome.status}: ${outcome.reason}`));
+        })()
           .catch((error) => sendError(error, 'USER_QUESTION_FAILED'));
         return;
       }

@@ -1276,7 +1276,13 @@ export function createGrokSession(opts, {
       const usage = normalizeUsageTokens(response?.usage);
       if (usage) onEvent({ type: 'usage', agent: 'grok', model: currentModel, usage });
       resultSeen = true;
-      lastStopReason = response?.stopReason === 'end_turn' ? 'completed' : response?.stopReason;
+      const stopReason = response?.stopReason;
+      if (stopReason === 'end_turn' || stopReason === 'max_tokens' || stopReason === 'max_turn_requests') {
+        lastStopReason = 'completed';
+      } else {
+        lastStopReason = 'failed';
+        resultErrorMessage = `Grok ACP turn ended with ${stopReason ?? 'an unknown stop reason'}`;
+      }
       if (tasksSeenThisTurn === 0) settleTurn();
       else if (pendingTasks.size === 0) scheduleSettle();
     } catch (error) {

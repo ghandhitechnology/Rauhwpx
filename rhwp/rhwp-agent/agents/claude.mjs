@@ -934,6 +934,7 @@ export function createClaudeSession(opts, {
           if (nativeUserInput) dispatchNative(text);
           else dispatchLegacy(text);
         } catch (e) {
+          let failure = e;
           if (nativeUserInput) {
             nativeUserInput = false;
             process.stderr.write(`[claude] native user-input transport unavailable; using MCP fallback: ${e?.message ?? e}\n`);
@@ -941,10 +942,10 @@ export function createClaudeSession(opts, {
               dispatchLegacy(text);
               return;
             } catch (fallbackError) {
-              e = fallbackError;
+              failure = fallbackError;
             }
           }
-          onEvent({ type: 'error', agent: 'claude', message: `failed to dispatch message: ${e?.message ?? e}` });
+          onEvent({ type: 'error', agent: 'claude', message: `failed to dispatch message: ${failure?.message ?? failure}` });
           endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
         }
       });

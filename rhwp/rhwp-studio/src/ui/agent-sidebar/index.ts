@@ -4888,7 +4888,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         setTurnRunning(bridge.isTurnRunning());
         dropRunStatusIfIdle();
         break;
-      case 'chat-started':
+      case 'chat-started': {
         if (e.threadId && e.threadId !== currentThread.id) break;
         chatStartPendingThreadId = null;
         const prevAgent = selectedAgent;
@@ -4945,6 +4945,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           });
         }
         break;
+      }
       case 'permission-changed':
         workflowTransitionPending = false;
         permissionProfile = e.permissionProfile;
@@ -5495,7 +5496,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     planActionPending = true;
     rebuildReview();
     try {
-      bridge.approvePlan(planId);
+      if (!bridge.approvePlan(planId)) {
+        throw new Error('허브 연결이 끊겨 승인 요청을 보내지 못했습니다.');
+      }
     } catch (err) {
       planActionPending = false;
       rebuildReview();
@@ -5508,7 +5511,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     planActionPending = true;
     rebuildReview();
     try {
-      bridge.requestPlanChanges(planId);
+      if (!bridge.requestPlanChanges(planId)) {
+        throw new Error('허브 연결이 끊겨 수정 요청을 보내지 못했습니다.');
+      }
     } catch (err) {
       planActionPending = false;
       rebuildReview();
@@ -5594,10 +5599,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   /** 채팅 시작/재연결 시 브리지의 계획 상태와 다시 맞춘다. */
   function syncPlanningFromBridge(): void {
+    const hadPendingAction = planActionPending;
+    planActionPending = false;
     const state = bridge.getWorkflowState();
     const samePlanId = (activePlan?.planId ?? null) === (state.latestPlan?.planId ?? null);
     const sameApproval = planApprovable === (state.latestPlan !== null && state.phase === 'awaiting-approval');
     if (chatWorkflow === state.workflow && planningPhase === state.phase && samePlanId && sameApproval) {
+      if (hadPendingAction) {
+        updateComposer();
+        rebuildReview();
+      }
       return;
     }
     chatWorkflow = state.workflow;

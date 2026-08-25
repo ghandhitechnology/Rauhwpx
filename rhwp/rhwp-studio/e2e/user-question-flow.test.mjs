@@ -339,7 +339,13 @@ try {
     // Drop the Studio socket at submit time. Enter must still route through
     // the question composer, buffer one response ID, and resume after reconnect.
     await page.click('.ag-input');
-    await page.evaluate(() => window.__agentBridge?.ws?.close(4001, 'question-e2e-retry'));
+    const closed = await page.evaluate(() => {
+      const socket = window.__agentBridge?.ws;
+      if (!socket) return false;
+      socket.close(4001, 'question-e2e-retry');
+      return socket.readyState !== WebSocket.OPEN;
+    });
+    assert(closed, 'Studio socket entered closing state before the reconnect submission');
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => document.querySelector('.ag-question-next')?.textContent === '제출 중…');
 

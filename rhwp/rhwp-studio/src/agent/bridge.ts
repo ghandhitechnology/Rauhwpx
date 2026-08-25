@@ -157,8 +157,8 @@ export interface AgentBridge {
   searchReferences(query: string, scope: ReferenceScope, scopeId: string, limit?: number): Promise<ReferenceSearchHit[]>;
   deleteReference(file: Pick<ReferenceFile, 'id' | 'scope' | 'scopeId'>): Promise<void>;
   setWorkflow(workflow: AgentWorkflow): void;
-  approvePlan(planId: string): void;
-  requestPlanChanges(planId: string, feedback?: string): void;
+  approvePlan(planId: string): boolean;
+  requestPlanChanges(planId: string, feedback?: string): boolean;
   setPermissionProfile(profile: PermissionProfile): void;
   listSkills(): void;
   readSkill(name: string): string;
@@ -2508,12 +2508,12 @@ class AgentBridgeImpl implements AgentBridge {
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-workflow-set', workflow });
   }
 
-  approvePlan(planId: string): void {
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-plan-approve', planId });
+  approvePlan(planId: string): boolean {
+    return this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-plan-approve', planId });
   }
 
-  requestPlanChanges(planId: string, feedback?: string): void {
-    this.sendJson({
+  requestPlanChanges(planId: string, feedback?: string): boolean {
+    return this.sendJson({
       v: AGENT_PROTOCOL_VERSION,
       type: 'chat-plan-request-changes',
       planId,

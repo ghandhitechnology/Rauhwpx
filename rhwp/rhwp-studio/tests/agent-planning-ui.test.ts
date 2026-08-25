@@ -94,7 +94,9 @@ test('approval uses the exact plan id and waits for authoritative hub phase even
 });
 
 test('approval disables duplicate actions and switches only after hub acknowledgement', () => {
-  assert.match(source, /planActionPending = true;\s*rebuildReview\(\);\s*try \{\s*bridge\.approvePlan\(planId\)/);
+  assert.match(source, /planActionPending = true;\s*rebuildReview\(\);\s*try \{\s*if \(!bridge\.approvePlan\(planId\)\)/);
+  assert.match(source, /if \(!bridge\.requestPlanChanges\(planId\)\)/);
+  assert.match(source, /const hadPendingAction = planActionPending;\s*planActionPending = false;\s*const state = bridge\.getWorkflowState\(\)/);
   assert.match(source, /case 'plan-approved':[\s\S]*planActionPending = false;[\s\S]*setPlanningPhase\(e\.phase\)/);
   assert.match(source, /case 'implementation-started':[\s\S]*closePlanForExecution\(e\.planId \|\| activePlan\?\.planId \|\| ''\);[\s\S]*setPlanningPhase\(e\.phase\)/);
   assert.match(source, /function closePlanForExecution\(planId: string\): void \{[\s\S]*activePlan = null;[\s\S]*planMinimized = false;[\s\S]*persistCurrentThread\(\);/);
@@ -185,8 +187,8 @@ test('sidebar consumes the planning bridge contract and its sidebar events', () 
   for (const method of [
     'getWorkflowState\\(\\): AgentWorkflowState',
     'setWorkflow\\(workflow: AgentWorkflow\\): void',
-    'approvePlan\\(planId: string\\): void',
-    'requestPlanChanges\\(planId: string, feedback\\?: string\\): void',
+    'approvePlan\\(planId: string\\): boolean',
+    'requestPlanChanges\\(planId: string, feedback\\?: string\\): boolean',
   ]) {
     assert.match(bridge, new RegExp(method));
   }

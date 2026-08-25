@@ -16,6 +16,7 @@ import {
 } from './backend.mjs';
 import { createCodexRolloutWatcher } from './codex-rollout-watcher.mjs';
 import { createCodexAppServerSession } from './codex-app-server.mjs';
+import { isRootUserInputContext } from './provider-user-input.mjs';
 export {
   CODEX_REQUEST_USER_INPUT_METHOD,
   codexDefaultModeUserInputEnabled,
@@ -514,8 +515,8 @@ export function createLegacyCodexSession(opts, {
  * @returns {import('./backend.mjs').AgentSession}
  */
 export function createCodexSession(opts, dependencies = {}) {
-  const rootRole = opts.agentRole === 'chat' || opts.agentRole === 'root';
-  if (typeof opts.requestUserInput !== 'function' || !rootRole) {
+  if (typeof opts.requestUserInput !== 'function'
+    || !isRootUserInputContext({ agentRole: opts.agentRole })) {
     return createLegacyCodexSession(opts, dependencies);
   }
   return createCodexAppServerSession(opts, {
