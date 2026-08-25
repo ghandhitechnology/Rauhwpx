@@ -6,6 +6,18 @@ export const STUDIO_SCHEME = 'rauhwpx';
 export const STUDIO_HOST = 'app';
 export const STUDIO_URL = `${STUDIO_SCHEME}://${STUDIO_HOST}/index.html`;
 
+export function resolveDevelopmentUrl({ packaged, rawUrl }) {
+  if (packaged || typeof rawUrl !== 'string' || !rawUrl.trim()) return '';
+  const url = new URL(rawUrl.trim());
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('RHWP_DEV_URL must use http or https');
+  }
+  if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
+    throw new Error('RHWP_DEV_URL must use a loopback host');
+  }
+  return url.href;
+}
+
 export function resolveStudioAsset(root, pathname) {
   let decoded;
   try {

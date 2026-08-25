@@ -32,6 +32,18 @@ export function createHubToken(bytes = 32) {
   return randomBytes(bytes).toString('base64url');
 }
 
+export function packagedRhwpBinary({
+  packaged,
+  resourcesPath,
+  platform = process.platform,
+  exists = existsSync,
+}) {
+  if (!packaged) return null;
+  const binary = join(resourcesPath, 'bin', platform === 'win32' ? 'rhwp.exe' : 'rhwp');
+  if (!exists(binary)) throw new Error(`Packaged document extractor is missing: ${binary}`);
+  return binary;
+}
+
 export function issueHubSessionToken(masterToken, sessionId) {
   const normalizedSessionId = String(sessionId);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(normalizedSessionId)) {
