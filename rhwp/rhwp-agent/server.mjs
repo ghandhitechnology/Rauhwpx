@@ -107,7 +107,7 @@ const STUDIO_TOOL_TIMEOUT_MS = 30_000;
 const STUDIO_REATTACH_GRACE_MS = Number(process.env.RHWP_STUDIO_REATTACH_GRACE_MS ?? 5_000);
 // 프로바이더 이벤트와 별도 MCP 소켓의 도구 호출 순서가 뒤집힐 수 있어
 // 정확한 루트 범위 티켓이 도착할 짧은 여유를 둔다.
-const USER_QUESTION_SCOPE_WAIT_MS = 400;
+const USER_QUESTION_SCOPE_WAIT_MS = 2_000;
 const HARNESS_UPDATE_INITIAL_DELAY_MS = 8_000;
 const HARNESS_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const HARNESS_UPDATE_BUSY_RETRY_MS = 5 * 60 * 1000;

@@ -243,7 +243,7 @@ test('a standalone implementation command follows the same Plan approval transit
 });
 
 test('a correlated root provider event authorizes MCP even when its socket call arrives first', { timeout: 40_000 }, async (t) => {
-  const { port } = await startHub(t, { fakeCursor: true, cursorQuestionDelayMs: 200 });
+  const { port } = await startHub(t, { fakeCursor: true, cursorQuestionDelayMs: 500 });
   const sessionId = 'question-correlated-root';
   const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=${sessionId}&instance=page-1`);
   t.after(() => closeClient(studio));
@@ -352,11 +352,11 @@ test('direct MCP questions survive Studio reload and settle atomically', { timeo
 });
 
 test('root-scope violations fail and MCP disconnect expires the active question', { timeout: 40_000 }, async (t) => {
-  const { port } = await startHub(t);
+  const { port } = await startHub(t, { fakeCursor: true });
   const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=question-loss&instance=page-1`);
   t.after(() => closeClient(studio));
   await studio.next((frame) => frame.type === 'welcome');
-  await startRunningChat(studio);
+  await startRunningChat(studio, 'cursor');
 
   const subagent = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=claude&role=subagent`);
   sendFrame(subagent, {
