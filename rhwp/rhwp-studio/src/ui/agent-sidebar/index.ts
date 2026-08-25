@@ -2896,7 +2896,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const base: SlashOption[] = [
       { value: '/plan', label: '/plan', detail: '계획 모드로 전환', workflow: 'plan' },
       { value: '/build', label: '/build', detail: '바로 실행 모드로 전환', workflow: 'direct' },
-      { value: '/calibration', label: '/calibration', detail: '말투 모방 캘리브레이션 열기', local: 'calibration' },
+      { value: '/calibration', label: '/calibration', detail: '말투를 맞출까요? 열기', local: 'calibration' },
       { value: '/settings', label: '/settings', detail: '설정 열기 (연결·기본값·사용량)', local: 'settings' },
       { value: '/templates', label: '/templates', detail: '문서 템플릿 선택', local: 'templates' },
       { value: '/skills', label: '/skills', detail: '스킬 라이브러리 열기', local: 'skills' },

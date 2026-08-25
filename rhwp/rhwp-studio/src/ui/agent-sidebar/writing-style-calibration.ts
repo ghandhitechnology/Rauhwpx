@@ -216,7 +216,7 @@ function localizedDetail(value: string | undefined, fallback: string): string {
     'Measuring sentence, paragraph, and formatting patterns': '문장, 문단, 서식의 반복 패턴을 측정하고 있습니다.',
     'Finished deterministic pattern measurements': '문장 패턴 측정을 마쳤습니다.',
     'Listening for how the voice lands': '문장이 떨어지는 방식을 듣고 있습니다.',
-    'Noticing temperament and unevenness': '기온과 태도, 고르지 않은 곳을 짚고 있습니다.',
+    'Noticing temperament and unevenness': '기질과 고르지 않은 결을 짚고 있습니다.',
     'Writing a portrait of the person on the page': '이 글을 쓴 사람의 초상을 남기고 있습니다.',
     'Finished model analysis': '모델 분석을 마쳤습니다.',
     'Building the calibrated writing profile': '규칙이 아니라 목소리로 프로필을 만들고 있습니다.',
@@ -329,7 +329,7 @@ export function createWritingStyleCalibration(
     return panel;
   });
 
-  const introTitle = el('h2', 'ag-calibration-title', '말투 모방 캘리브레이션');
+  const introTitle = el('h2', 'ag-calibration-title', '말투를 맞출까요?');
   introTitle.id = 'ag-calibration-title';
   const introStatement = el('p', 'ag-calibration-statement', '당신이 글에서 어떤 사람인지를 배우고, 다음 글부터 그 목소리로 씁니다.');
   const introDetail = el('p', 'ag-calibration-detail', '먼저 분석할 글의 주 언어를 선택하세요.');
