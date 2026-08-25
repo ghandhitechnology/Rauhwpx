@@ -5,7 +5,9 @@ import { readFileSync } from 'node:fs';
 import {
   bindNativeFileHandleIdentity,
   captureDesktopNativeDroppedFile,
+  createNativeFileHandle,
   ensureDesktopAgentHub,
+  getNativeFileHandleVerifiedDocumentId,
   getNativeFileSourcePath,
   installDesktopGeneratedDocumentHandling,
   installDesktopPlainTextPasteHandling,
@@ -21,6 +23,7 @@ import {
   releaseReplacedNativeFileHandle,
   searchNearbyNativeDocuments,
   suppressDesktopServiceWorker,
+  type NativeFileHandleDescriptor,
 } from '../src/desktop-integration.ts';
 
 const source = readFileSync(new URL('../src/desktop-integration.ts', import.meta.url), 'utf8');
@@ -237,6 +240,36 @@ test('native document bookmarks restore opaque handles without exposing a path',
   const restored = await restoreNativeDocument('document-a', win);
   assert.equal(restored === 'owned' ? null : restored?.identityKind, 'native-path');
   assert.equal(restored === 'owned' ? null : restored?.name, 'report.hwp');
+});
+
+test('native descriptor identity is validated and remains private immutable metadata', () => {
+  const descriptor: NativeFileHandleDescriptor = {
+    kind: 'file',
+    handleId: 'restored',
+    name: 'report.hwp',
+    verifiedDocumentId: 'document-a',
+  };
+  const api = {
+    readNativeFile: async () => ({ name: 'report.hwp', bytes: new Uint8Array() }),
+    writeNativeFile: async () => ({ name: 'report.hwp', byteLength: 0 }),
+  };
+  const handle = createNativeFileHandle(descriptor, api);
+  assert.equal(getNativeFileHandleVerifiedDocumentId(handle), 'document-a');
+  assert.equal('verifiedDocumentId' in handle, false);
+  descriptor.verifiedDocumentId = 'renderer-hint';
+  assert.equal(getNativeFileHandleVerifiedDocumentId(handle), 'document-a');
+
+  for (const verifiedDocumentId of ['', ' document-a', 'document-a ', 'document\0a', null]) {
+    assert.throws(
+      () => createNativeFileHandle({
+        kind: 'file',
+        handleId: 'invalid',
+        name: 'report.hwp',
+        verifiedDocumentId,
+      } as unknown as NativeFileHandleDescriptor, api),
+      /Invalid native file handle descriptor/,
+    );
+  }
 });
 
 test('agents can resolve only the exact path behind the active opaque desktop handle', async () => {

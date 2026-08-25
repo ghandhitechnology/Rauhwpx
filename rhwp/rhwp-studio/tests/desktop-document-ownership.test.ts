@@ -379,6 +379,7 @@ test('native bookmarks reopen a released handle without leaking the path', async
   assert.equal(reopened?.ok, true);
   if (!reopened?.ok) return;
   assert.equal(reopened.descriptor.handleId, 'restored');
+  assert.equal(reopened.descriptor.verifiedDocumentId, 'document-a');
   assert.equal('path' in reopened.descriptor, false);
   assert.deepEqual(await registry.read('session-a', reopened.descriptor.handleId), {
     name: 'report.hwp',
@@ -404,6 +405,50 @@ test('native bookmarks persist independently of live handles', async () => {
   assert.deepEqual(registry.dumpBookmarks(), [[
     'document-a',
     { path: '/canonical/report.hwp', digest: null },
+  ]]);
+});
+
+test('native descriptors omit identity for unbookmarked files and different canonical paths', async () => {
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async (filePath: string) => filePath,
+    createId: () => 'unbookmarked',
+  });
+  registry.loadBookmarks([['document-a', '/canonical/original.hwp']]);
+
+  const opened = await registry.create('session-a', '/canonical/copy.hwp');
+  assert.equal(opened.ok, true);
+  if (!opened.ok) return;
+  assert.deepEqual(opened.descriptor, {
+    kind: 'file',
+    handleId: 'unbookmarked',
+    name: 'copy.hwp',
+  });
+});
+
+test('legacy duplicate bookmark paths prefer the oldest owner and collapse after remember', async () => {
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async () => '/canonical/report.hwp',
+    createId: () => 'restored',
+  });
+  registry.loadBookmarks([
+    ['original-history', '/canonical/report.hwp'],
+    ['broken-reopen', '/canonical/report.hwp'],
+  ]);
+
+  const reopened = await registry.reopenDocument('session-a', 'broken-reopen');
+  assert.equal(reopened?.ok, true);
+  if (!reopened?.ok) return;
+  assert.equal(reopened.descriptor.verifiedDocumentId, 'original-history');
+
+  registry.rememberDocument(
+    'original-history',
+    'session-a',
+    reopened.descriptor.handleId,
+    VALID_DIGEST,
+  );
+  assert.deepEqual(registry.dumpBookmarks(), [[
+    'original-history',
+    { path: '/canonical/report.hwp', digest: VALID_DIGEST },
   ]]);
 });
 
@@ -725,11 +770,14 @@ test('remembering a replaced handle without a digest does not revert the bookmar
     assert.equal(previous.ok && next.ok, true);
     if (!previous.ok || !next.ok) return;
 
+    registry.rememberDocument('document-b', 'session-a', next.descriptor.handleId, VALID_DIGEST);
     registry.rememberDocument('document-a', 'session-a', previous.descriptor.handleId, VALID_DIGEST);
     registry.rememberDocument('document-a', 'session-a', next.descriptor.handleId, VALID_DIGEST);
     registry.rememberDocument('document-a', 'session-a', previous.descriptor.handleId);
 
     const bookmark = registry.dumpBookmarks();
+    assert.equal(bookmark.length, 1, 'successful Save As transfers the destination path owner');
+    assert.equal(bookmark[0]?.[0], 'document-a');
     assert.equal(bookmark[0]?.[1].path.endsWith('new.hwp'), true);
     assert.equal(bookmark[0]?.[1].digest, VALID_DIGEST);
   });

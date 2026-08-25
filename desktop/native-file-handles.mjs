@@ -296,6 +296,17 @@ export class NativeFileHandleRegistry {
     }
     let nextDigest = previous?.digest ?? null;
     if (digest !== undefined) nextDigest = parseStoredDigest(digest);
+    // A canonical path has one logical owner. Old builds could accumulate
+    // duplicate owners after every broken reopen; the first loaded owner is
+    // used until a successful remember cleans the ambiguity up.
+    for (const [otherDocumentId, bookmark] of this.#bookmarks) {
+      if (
+        otherDocumentId !== documentId
+        && this.#ownershipKey(bookmark.path) === entry.ownershipPath
+      ) {
+        this.#bookmarks.delete(otherDocumentId);
+      }
+    }
     if (this.#bookmarks.has(documentId)) this.#bookmarks.delete(documentId);
     this.#bookmarks.set(documentId, { path: entry.canonicalPath, digest: nextDigest });
     while (this.#bookmarks.size > 200) {
@@ -511,7 +522,20 @@ export class NativeFileHandleRegistry {
   }
 
   #descriptor(entry) {
-    return Object.freeze({ kind: 'file', handleId: entry.handleId, name: entry.name });
+    const verifiedDocumentId = this.#documentIdForOwnershipPath(entry.ownershipPath);
+    return Object.freeze({
+      kind: 'file',
+      handleId: entry.handleId,
+      name: entry.name,
+      ...(verifiedDocumentId ? { verifiedDocumentId } : {}),
+    });
+  }
+
+  #documentIdForOwnershipPath(ownershipPath) {
+    for (const [documentId, bookmark] of this.#bookmarks) {
+      if (this.#ownershipKey(bookmark.path) === ownershipPath) return documentId;
+    }
+    return null;
   }
 }
 

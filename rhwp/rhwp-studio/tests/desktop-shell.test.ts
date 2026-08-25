@@ -7,6 +7,7 @@ import { documentPathsFromArgv, launchRequest } from '../../../desktop/launch-ro
 import { resolveGeneratedDocumentArtifact } from '../../../desktop/generated-document-artifact.mjs';
 import { deliverPlainTextPaste } from '../../../desktop/plain-text-paste.mjs';
 import { SessionManager } from '../../../desktop/session-manager.mjs';
+import { SerializedStateWriter } from '../../../desktop/serialized-state-writer.mjs';
 import { resolveStudioAsset, STUDIO_URL } from '../../../desktop/studio-protocol.mjs';
 
 const desktopMain = readFileSync(new URL('../../../desktop/main.mjs', import.meta.url), 'utf8');
@@ -175,6 +176,45 @@ test('desktop close and native-file IPC contracts stay sender-owned', () => {
   assert.match(desktopMain, /window\.on\('close',[\s\S]*desktop:close-requested/);
   assert.match(desktopMain, /nativeFiles\.createSaveTarget\(session\.sessionId, filePath\)/);
   assert.doesNotMatch(preload, /\b(?:file)?path\s*:/i);
+});
+
+test('bookmark persistence serializes writes and close queues a latest-state flush', async () => {
+  const started: string[] = [];
+  const errors: string[] = [];
+  let releaseFirst: (() => void) | undefined;
+  const writer = new SerializedStateWriter({
+    write: async (snapshot: string) => {
+      started.push(snapshot);
+      if (snapshot === 'first') {
+        await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      }
+      if (snapshot === 'failed') throw new Error('disk unavailable');
+    },
+    onError: (error: unknown) => {
+      errors.push(error instanceof Error ? error.message : String(error));
+    },
+  });
+
+  const first = writer.enqueue('first');
+  const second = writer.enqueue('second');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ['first']);
+  releaseFirst?.();
+  await Promise.all([first, second]);
+  assert.deepEqual(started, ['first', 'second']);
+  await writer.enqueue('failed');
+  await writer.enqueue('latest');
+  assert.deepEqual(errors, ['disk unavailable']);
+  assert.deepEqual(started, ['first', 'second', 'failed', 'latest']);
+
+  assert.match(
+    desktopMain,
+    /desktop:remember-native-document'[\s\S]*?await persistNativeBookmarks\(\)/,
+  );
+  assert.match(
+    desktopMain,
+    /desktop:close-response'[\s\S]*?if \(!allowClose\)[\s\S]*?await persistNativeBookmarks\(\)[\s\S]*?session\.window\.close\(\)/,
+  );
 });
 
 test('generated artifact opening is bound to the sender hub and session', () => {

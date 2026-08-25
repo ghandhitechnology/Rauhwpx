@@ -27,6 +27,7 @@ export interface NativeFileHandleDescriptor {
   handleId: string;
   name: string;
   saveTargetCreated?: boolean;
+  verifiedDocumentId?: string;
 }
 
 export interface DocumentOwnershipIdentity {
@@ -204,6 +205,7 @@ const nativeHandleMetadata = new WeakMap<FileSystemFileHandleLike, {
   api: RhwpDesktopApi;
   handleId: string;
   identity: DocumentOwnershipIdentity | null;
+  readonly verifiedDocumentId: string | null;
 }>();
 const browserLaunchId = createSessionId('launch');
 const browserSessionId = createSessionId('session');
@@ -382,7 +384,16 @@ function validNativeDescriptor(value: unknown): value is NativeFileHandleDescrip
     && typeof descriptor.handleId === 'string'
     && descriptor.handleId.length > 0
     && typeof descriptor.name === 'string'
-    && descriptor.name.length > 0;
+    && descriptor.name.length > 0
+    && (
+      descriptor.verifiedDocumentId === undefined
+      || (
+        typeof descriptor.verifiedDocumentId === 'string'
+        && descriptor.verifiedDocumentId.length > 0
+        && descriptor.verifiedDocumentId === descriptor.verifiedDocumentId.trim()
+        && !descriptor.verifiedDocumentId.includes('\0')
+      )
+    );
 }
 
 export function createNativeFileHandle(
@@ -450,8 +461,20 @@ export function createNativeFileHandle(
       return 'granted';
     },
   };
-  nativeHandleMetadata.set(handle, { api, handleId: descriptor.handleId, identity: null });
+  nativeHandleMetadata.set(handle, {
+    api,
+    handleId: descriptor.handleId,
+    identity: null,
+    verifiedDocumentId: descriptor.verifiedDocumentId ?? null,
+  });
   return handle;
+}
+
+/** Main-issued identity derived from the exact canonical path bookmark. */
+export function getNativeFileHandleVerifiedDocumentId(
+  handle: FileSystemFileHandleLike | null | undefined,
+): string | null {
+  return handle ? nativeHandleMetadata.get(handle)?.verifiedDocumentId ?? null : null;
 }
 
 export function bindNativeFileHandleIdentity(

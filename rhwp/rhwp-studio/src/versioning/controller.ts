@@ -340,16 +340,7 @@ export class DocumentVersionController implements VersionManagerController {
         this.#syncTransientState();
         if (event.type !== 'approved' || this.#suppressApprovalCheckpoint > 0) return;
         if (this.#pendingApprovalTimer !== null) window.clearTimeout(this.#pendingApprovalTimer);
-        this.#pendingApprovalTimer = window.setTimeout(() => {
-          this.#pendingApprovalTimer = null;
-          void this.#enqueue(async () => {
-            await this.#refreshData(false);
-            if (this.#repository) await this.#createCheckpoint({
-              reason: 'agent',
-              author: { kind: 'agent', label: this.#agentBridge.getActiveAgent() ?? '에이전트' },
-            });
-          });
-        }, 80);
+        this.#pendingApprovalTimer = window.setTimeout(() => this.#queueApprovalCheckpoint(), 80);
       }),
     );
   }
@@ -365,6 +356,27 @@ export class DocumentVersionController implements VersionManagerController {
 
   async refresh(): Promise<void> {
     await this.#enqueue(() => this.#refreshData(true));
+  }
+
+  async whenIdle(): Promise<void> {
+    if (this.#pendingApprovalTimer !== null) this.#queueApprovalCheckpoint();
+    let pending: Promise<void>;
+    do {
+      pending = this.#operation;
+      await pending;
+    } while (pending !== this.#operation);
+  }
+
+  #queueApprovalCheckpoint(): void {
+    if (this.#pendingApprovalTimer !== null) window.clearTimeout(this.#pendingApprovalTimer);
+    this.#pendingApprovalTimer = null;
+    void this.#enqueue(async () => {
+      await this.#refreshData(false);
+      if (this.#repository) await this.#createCheckpoint({
+        reason: 'agent',
+        author: { kind: 'agent', label: this.#agentBridge.getActiveAgent() ?? '에이전트' },
+      });
+    });
   }
 
   async enable(): Promise<void> {

@@ -77,6 +77,7 @@ import {
   cancelDesktopDocument,
   captureDesktopNativeDroppedFile,
   commitDesktopDocument,
+  getNativeFileHandleVerifiedDocumentId,
   getRendererSessionContext,
   installDesktopCloseHandling,
   installDesktopFileHandling,
@@ -267,6 +268,7 @@ function setAgentEditingLease(lease: AgentEditingLease): void {
 
 /** 렌더러 초기화 후에 생성되는 에이전트 브리지 — 저장 가드가 대기 편집을 조회한다. */
 let agentBridgeRef: AgentBridge | null = null;
+let versionControllerRef: DocumentVersionController | null = null;
 
 const commandServices: CommandServices = {
   eventBus,
@@ -688,6 +690,7 @@ async function initialize(): Promise<void> {
         getDocumentId: () => activeDocumentId,
         agentBridge,
       });
+      versionControllerRef = versionController;
       const agentSidebar = initAgentSidebar({
         bridge: agentBridge,
         eventBus,
@@ -1265,12 +1268,16 @@ async function reserveDocumentOpen(
   skipRecent = false,
   grant?: VerifiedDocumentGrant | null,
 ): Promise<{ identity: DocumentPreflightIdentity; reservationId: string | null | undefined }> {
+  const mainIssuedDocumentId = getNativeFileHandleVerifiedDocumentId(fileHandle);
+  const verifiedGrant = grant ?? (mainIssuedDocumentId
+    ? { kind: 'verified' as const, documentId: mainIssuedDocumentId }
+    : null);
   const resolved = await resolveDocumentPreflight(
     data,
     fileHandle,
     await listRecentDocs(),
     undefined,
-    grant,
+    verifiedGrant,
   );
   const identity = skipRecent
     ? { ...resolved, documentId: createActiveDocumentId(), useSourceDigest: false }
@@ -1356,6 +1363,7 @@ async function loadBytes(
   } catch (error) {
     await cancelDesktopDocument(ownership.reservationId).catch(() => {});
     activeDocumentId = null;
+    eventBus.emit('document-context-changed');
     await releaseDesktopDocument().catch(() => {});
     await releaseReplacedNativeFileHandle(previousFileHandle, null).catch(() => {});
     await autosaveManager.endDocument({ discardDraft: true, reason: 'failed-document-replacement' })
@@ -1548,6 +1556,7 @@ async function createNewDocument(): Promise<void> {
   } catch (error) {
     await cancelDesktopDocument(reservationId).catch(() => {});
     activeDocumentId = null;
+    eventBus.emit('document-context-changed');
     await releaseDesktopDocument().catch(() => {});
     await releaseReplacedNativeFileHandle(previousFileHandle, null).catch(() => {});
     await autosaveManager.endDocument({ discardDraft: true, reason: 'failed-new-document' })
@@ -1562,7 +1571,11 @@ async function canReplaceCurrentDocument(skipUnsavedGuard?: boolean): Promise<bo
     showToast({ message: '에이전트가 편집을 마친 뒤 문서를 바꿀 수 있습니다.', durationMs: 2600 });
     return false;
   }
-  return skipUnsavedGuard === true || await confirmSaveBeforeReplacingDocument(commandServices);
+  const allowed = skipUnsavedGuard === true
+    || await confirmSaveBeforeReplacingDocument(commandServices);
+  if (!allowed) return false;
+  await versionControllerRef?.whenIdle();
+  return true;
 }
 
 async function openDocumentBytes(data: OpenDocumentBytesEvent) {
