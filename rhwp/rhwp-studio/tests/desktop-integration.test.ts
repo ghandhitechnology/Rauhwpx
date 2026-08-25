@@ -213,22 +213,40 @@ test('Electron Save As returns a temporary opaque handle and releases failed tar
 });
 
 test('portable history export uses the dedicated desktop save boundary', async () => {
-  const writes: Array<{ suggestedName: string; bytes: number[] }> = [];
+  const writes: Array<{
+    suggestedName: string;
+    files: Array<{ name: string; bytes: number[] }>;
+  }> = [];
+  const folder = {
+    folderName: 'report.rhwpx',
+    files: [
+      { name: 'history', bytes: new Uint8Array([1, 2, 3]) },
+      { name: 'report.hwpx', bytes: new Uint8Array([4, 5]) },
+    ],
+  };
   const result = await saveDesktopPortableHistoryFile(
-    new Uint8Array([1, 2, 3]),
-    'report.rhwpx',
+    folder,
     {
       rhwpDesktop: {
-        savePortableHistoryFile: async ({ suggestedName, bytes }) => {
-          writes.push({ suggestedName, bytes: [...bytes] });
-          return { fileName: suggestedName, byteLength: bytes.byteLength };
+        savePortableHistoryFile: async ({ suggestedName, files }) => {
+          writes.push({
+            suggestedName,
+            files: files.map((file) => ({ name: file.name, bytes: [...file.bytes] })),
+          });
+          return { fileName: suggestedName, byteLength: 5 };
         },
       },
     },
   );
   assert.equal(result, 'saved');
-  assert.deepEqual(writes, [{ suggestedName: 'report.rhwpx', bytes: [1, 2, 3] }]);
-  assert.equal(await saveDesktopPortableHistoryFile(new Uint8Array(), 'x.rhwpx', {}), 'unavailable');
+  assert.deepEqual(writes, [{
+    suggestedName: 'report.rhwpx',
+    files: [
+      { name: 'history', bytes: [1, 2, 3] },
+      { name: 'report.hwpx', bytes: [4, 5] },
+    ],
+  }]);
+  assert.equal(await saveDesktopPortableHistoryFile(folder, {}), 'unavailable');
 });
 
 test('native document bookmarks restore opaque handles without exposing a path', async () => {

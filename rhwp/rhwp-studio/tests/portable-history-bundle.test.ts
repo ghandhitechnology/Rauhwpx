@@ -4,7 +4,9 @@ import test from 'node:test';
 import type { CompareDocumentSnapshot } from '../src/compare/types.ts';
 import {
   createPortableHistoryBundle,
+  createPortableHistoryFolder,
   openPortableHistoryBundle,
+  PORTABLE_HISTORY_FOLDER_HISTORY_NAME,
   PortableHistoryError,
 } from '../src/versioning/portable-bundle.ts';
 import { fingerprintBytes, hashBytes } from '../src/versioning/hash.ts';
@@ -150,6 +152,22 @@ test('portable history round trip restores commits, refs, shelves, manifests, dr
   assert.equal(opened.snapshot.mergeManifests.length, 2);
   assert.equal(opened.snapshot.mergeDrafts[0]?.id, fixture.draft.id);
   assert.ok(opened.snapshot.blobs.some((blob) => blob.id === fixture.assetId));
+
+  const folder = createPortableHistoryFolder({
+    documentFileName: 'report.hwpx',
+    sourceFormat: 'hwpx',
+    activeBranch: branchName('review'),
+    currentBlobId: fixture.head.blobId,
+    snapshot: fixture.snapshot,
+    createdAt: 123,
+  });
+  assert.equal(folder.folderName, 'report.rhwpx');
+  assert.deepEqual(folder.files.map((file) => file.name), [
+    PORTABLE_HISTORY_FOLDER_HISTORY_NAME,
+    'report.hwpx',
+  ]);
+  assert.deepEqual(folder.files[0]?.bytes, bytes);
+  assert.deepEqual(folder.files[1]?.bytes, opened.currentDocumentBytes);
 
   const destination = new VersionGraphStore({ indexedDB: null });
   const imported = await destination.importRepositorySnapshot(opened.snapshot);

@@ -20,9 +20,11 @@ import {
   canonicalNativePath,
   NativeFileHandleRegistry,
   nativePathOwnershipKey,
+  readPortableHistoryBytes,
   validateNativeDocumentBytes,
   validateNativeDocumentPath,
   writeNativeFileAtomically,
+  writePortableHistoryFolder,
 } from '../../../desktop/native-file-handles.mjs';
 
 function minimalCfbBytes(fill = 0): Uint8Array {
@@ -500,6 +502,33 @@ test('atomic native replacement preserves the destination on temp write and rena
     );
     assert.equal(await readFs(target, 'utf8'), 'previous');
     assert.deepEqual(await readdir(directory), ['report.hwp'], 'failed rename temp must be cleaned up');
+  });
+});
+
+test('portable history bundles replace as a folder containing the document and history', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.rhwpx');
+    await writeFs(target, 'old-file');
+    const history = new Uint8Array(24).fill(7);
+    history.set(new TextEncoder().encode('RAUHWPX-HISTORY\0'));
+    const document = new Uint8Array([0x50, 0x4b, 3, 4, 5]);
+    await writePortableHistoryFolder(target, [
+      { name: 'history', bytes: history },
+      { name: 'report.hwpx', bytes: document },
+    ]);
+
+    assert.deepEqual((await readdir(directory)).sort(), ['report.rhwpx']);
+    assert.deepEqual((await readdir(target)).sort(), ['history', 'report.hwpx']);
+    assert.deepEqual(await readPortableHistoryBytes(target), history);
+    assert.deepEqual(new Uint8Array(await readFs(join(target, 'report.hwpx'))), document);
+
+    const files = new NativeFileHandleRegistry();
+    const opened = await files.create('session-a', target);
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    const read = await files.read('session-a', opened.descriptor.handleId);
+    assert.equal(read.name, 'report.rhwpx');
+    assert.deepEqual(read.bytes, history);
   });
 });
 

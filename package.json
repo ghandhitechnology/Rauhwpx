@@ -61,7 +61,8 @@
         ],
         "name": "Rauhwpx history bundle",
         "description": "Rauhwpx history bundle",
-        "role": "Editor"
+        "role": "Editor",
+        "isPackage": true
       }
     ],
     "directories": {
@@ -106,6 +107,7 @@
             "CFBundleTypeName": "RauHWPX history bundle",
             "CFBundleTypeRole": "Editor",
             "LSHandlerRank": "Default",
+            "LSTypeIsPackage": true,
             "LSItemContentTypes": [
               "com.hataewook.rauhwpx.history-bundle"
             ]
@@ -127,8 +129,8 @@
           },
           {
             "UTTypeConformsTo": [
-              "public.content",
-              "public.data"
+              "com.apple.package",
+              "public.composite-content"
             ],
             "UTTypeDescription": "RauHWPX history bundle",
             "UTTypeIdentifier": "com.hataewook.rauhwpx.history-bundle",
