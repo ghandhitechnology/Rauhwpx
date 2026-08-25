@@ -6,10 +6,12 @@ const toolbar = readFileSync(new URL('../src/styles/toolbar.css', import.meta.ur
 const styleBar = readFileSync(new URL('../src/styles/style-bar.css', import.meta.url), 'utf8');
 const responsive = readFileSync(new URL('../src/styles/responsive.css', import.meta.url), 'utf8');
 
-test('icon toolbar keeps a single fixed-height row that scrolls horizontally', () => {
-  assert.match(toolbar, /#icon-toolbar\s*\{[^}]*flex-wrap:\s*nowrap;/s);
+test('icon toolbar moves complete groups to a new row instead of overlapping', () => {
+  assert.match(toolbar, /#icon-toolbar\s*\{[^}]*flex-wrap:\s*wrap;/s);
+  assert.match(toolbar, /#icon-toolbar\s*\{[^}]*height:\s*auto;/s);
   assert.match(toolbar, /#icon-toolbar\s*\{[^}]*min-height:\s*60px;/s);
-  assert.match(toolbar, /#icon-toolbar\s*\{[^}]*overflow-x:\s*auto;/s);
+  assert.match(toolbar, /#icon-toolbar\s*\{[^}]*overflow:\s*visible;/s);
+  assert.doesNotMatch(toolbar, /#icon-toolbar\s*\{[^}]*overflow-x:\s*auto;/s);
   assert.match(toolbar, /\.tb-group\s*\{[^}]*flex-shrink:\s*0;/s);
 });
 
