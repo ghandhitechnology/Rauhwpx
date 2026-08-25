@@ -1213,12 +1213,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   versionsBtn.setAttribute('aria-controls', 'ag-versions-panel');
   versionsBtn.title = '버전';
   versionsBtn.appendChild(createIcon('changes'));
-  const syncVersionsButtonVisibility = (enabled = userSettings.getUseHancomGit()): void => {
-    versionsBtn.hidden = !enabled;
-    if (!enabled && versionsPanelOpen) closeVersionsPage();
-  };
-  syncVersionsButtonVisibility();
-  const unsubscribeHancomGitVisibility = userSettings.subscribeUseHancomGit(syncVersionsButtonVisibility);
   versionsBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     openConfiguredVersionControl();
@@ -5796,7 +5790,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       clearConnCountdown();
       writingStyleCalibration.dispose();
       settingsPanel.dispose();
-      unsubscribeHancomGitVisibility();
       versionManagerPage?.dispose();
       versionController?.dispose?.();
       initialSetup?.dispose();
