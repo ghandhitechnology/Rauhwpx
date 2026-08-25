@@ -3280,13 +3280,17 @@ export class InputHandler {
       const caretRect = this.adjustExitedFieldEndCaretRect(rect);
       this.positionImeInput(caretRect, zoom);
 
-      this.caret.update(caretRect, zoom);
-      if (this.isComposing && this.compositionAnchor && this.compositionLength > 0) {
-        const startRect = this.compositionStartRect();
-        if (startRect) this.caret.showCompositionUnderline(startRect, caretRect, zoom);
-        else this.caret.hideComposition();
+      if (this.hasNonCollapsedTextSelection()) {
+        this.caret.hide();
       } else {
-        this.caret.hideComposition();
+        this.caret.update(caretRect, zoom);
+        if (this.isComposing && this.compositionAnchor && this.compositionLength > 0) {
+          const startRect = this.compositionStartRect();
+          if (startRect) this.caret.showCompositionUnderline(startRect, caretRect, zoom);
+          else this.caret.hideComposition();
+        } else {
+          this.caret.hideComposition();
+        }
       }
       if (!skipScroll) {
         this.scrollCaretIntoView(caretRect);
@@ -3440,7 +3444,11 @@ export class InputHandler {
   private updateCaretNoScroll(): void {
     const rect = this.cursor.getRect();
     if (rect) {
-      this.caret.update(rect, this.viewportManager.getZoom());
+      if (this.hasNonCollapsedTextSelection()) {
+        this.caret.hide();
+      } else {
+        this.caret.update(rect, this.viewportManager.getZoom());
+      }
     }
     this.updateSelection();
     this.emitCursorFormatState();
@@ -3459,7 +3467,11 @@ export class InputHandler {
     if (rect) {
       const zoom = this.viewportManager.getZoom();
       this.caret.hideComposition();
-      this.caret.updateLive(rect, zoom);
+      if (this.hasNonCollapsedTextSelection()) {
+        this.caret.hide();
+      } else {
+        this.caret.updateLive(rect, zoom);
+      }
       // [Task #661] 드래그 중 스크롤은 caret rect 가 아니라 포인터 edge 기준 경로에서만 처리한다.
       // 메인테이너 통합 정정: devel 의 updateLive (PR #664 깜박임 타이머 유지 본질) 보존 +
       // PR #718 의 scrollCaretIntoView 부재 본질 적용.
