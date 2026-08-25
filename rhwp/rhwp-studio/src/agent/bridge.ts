@@ -959,8 +959,13 @@ class AgentBridgeImpl implements AgentBridge {
   private requests = new PendingRequestRegistry();
   /** 끊긴 사이에 완료된 도구 결과 — 재연결 직후 다시 보낸다. */
   private toolResponses = new ToolResponseBuffer();
-  /** A human answer never expires locally. It is retried with the same response id after reconnect. */
+  /** 사용자 답변은 로컬에서 만료시키지 않고, 재연결 뒤에도 같은 응답 ID로 다시 보낸다. */
   private pendingQuestionAnswer: { interactionId: string; responseId: string; frame: unknown } | null = null;
+  /** 질문 취소는 허브가 해소를 확인할 때까지 같은 상호작용 ID로 다시 보낸다. */
+  private pendingQuestionCancellation: {
+    interactionId: string;
+    frame: { v: number; type: 'chat-interrupt' | 'chat-stop' };
+  } | null = null;
   private pendingUserQuestionId: string | null = null;
   private pendingUserQuestion: UserQuestionInteraction | null = null;
   private pendingInterrupt = false;
@@ -1209,7 +1214,10 @@ class AgentBridgeImpl implements AgentBridge {
       // 끊긴 사이에 끝난 도구 결과를 먼저 흘려보낸다 — 허브의 인플라이트 호출이
       // 30초 타임아웃까지 가지 않고 이 응답으로 마무리된다.
       this.flushToolResponses();
-      if (this.pendingInterrupt && this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' })) {
+      this.flushPendingQuestionCancellation();
+      if (!this.pendingQuestionCancellation
+        && this.pendingInterrupt
+        && this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' })) {
         this.pendingInterrupt = false;
       }
       this.flushPendingQuestionAnswer();
@@ -1458,7 +1466,17 @@ class AgentBridgeImpl implements AgentBridge {
             ? this.templateCatalog.templates.find((template) => template.id === this.activeTemplateId) ?? null
             : null;
           const previousQuestion = this.pendingUserQuestion;
-          const pendingQuestion = readUserQuestionInteraction(session.pendingUserQuestion);
+          let pendingQuestion = readUserQuestionInteraction(session.pendingUserQuestion);
+          if (this.pendingQuestionCancellation) {
+            if (pendingQuestion?.interactionId === this.pendingQuestionCancellation.interactionId) {
+              // 허브가 아직 취소를 처리하지 않았다. 질문은 다시 표시하지 않고 취소를 재전송한다.
+              this.flushPendingQuestionCancellation();
+              pendingQuestion = null;
+            } else {
+              // 허브 스냅샷에 대상 질문이 없거나 새 질문으로 바뀌었으면 취소가 확정된 것이다.
+              this.pendingQuestionCancellation = null;
+            }
+          }
           if (previousQuestion && previousQuestion.interactionId !== pendingQuestion?.interactionId) {
             if (this.pendingQuestionAnswer?.interactionId === previousQuestion.interactionId) {
               this.pendingQuestionAnswer = null;
@@ -1508,6 +1526,7 @@ class AgentBridgeImpl implements AgentBridge {
           this.pendingUserQuestion = null;
           this.pendingUserQuestionId = null;
           this.pendingQuestionAnswer = null;
+          this.pendingQuestionCancellation = null;
           if (droppedQuestion) {
             this.emit({
               type: 'user-question-resolved',
@@ -1547,6 +1566,12 @@ class AgentBridgeImpl implements AgentBridge {
       case 'user-question-requested': {
         const interaction = readUserQuestionInteraction(msg.interaction);
         if (!interaction || (this.threadId && interaction.threadId !== this.threadId)) break;
+        if (this.pendingQuestionCancellation?.interactionId === interaction.interactionId) {
+          // 취소 프레임과 엇갈려 도착한 재생 요청은 UI에 되살리지 않는다.
+          this.flushPendingQuestionCancellation();
+          break;
+        }
+        if (this.pendingQuestionCancellation) this.pendingQuestionCancellation = null;
         this.pendingUserQuestionId = interaction.interactionId;
         this.pendingUserQuestion = interaction;
         this.syncEditingLease();
@@ -1565,6 +1590,9 @@ class AgentBridgeImpl implements AgentBridge {
         );
         if (!interactionId || !outcome) break;
         if (this.pendingQuestionAnswer?.interactionId === interactionId) this.pendingQuestionAnswer = null;
+        if (this.pendingQuestionCancellation?.interactionId === interactionId) {
+          this.pendingQuestionCancellation = null;
+        }
         if (this.pendingUserQuestionId === interactionId) this.pendingUserQuestionId = null;
         if (this.pendingUserQuestion?.interactionId === interactionId) this.pendingUserQuestion = null;
         this.syncEditingLease();
@@ -1590,7 +1618,9 @@ class AgentBridgeImpl implements AgentBridge {
         // 스레드를 빠르게 오가면 이전 chat-start 응답이 뒤늦게 도착할 수 있다.
         // 마지막 startChat 이 고른 정체성을 절대 덮어쓰지 않는다.
         if (typeof msg.threadId === 'string' && this.threadId && msg.threadId !== this.threadId) break;
+        const replacedSession = this.pendingChatStart !== null;
         this.pendingChatStart = null;
+        if (replacedSession) this.pendingQuestionCancellation = null;
         if (isAgentName(msg.agent)) {
           this.activeAgent = msg.agent;
           this.editingAgent = msg.agent;
@@ -1914,9 +1944,15 @@ class AgentBridgeImpl implements AgentBridge {
         for (const message of this.queuedMessages) message.resolve(null);
         this.queuedMessages = [];
         if (chatStartFailed) {
-          // The hub disposes the previous session before attempting its
-          // replacement. Keep the requested start as retry configuration, but
-          // do not let the next message target the now-nonexistent old agent.
+          // 허브는 교체 프로바이더를 시작하기 전에 이전 세션을 폐기한다. 요청한 시작값은
+          // 재시도 설정으로 남기되 다음 메시지가 사라진 이전 에이전트로 향하지 않게 한다.
+          if (this.pendingTurnOpen) {
+            try {
+              this.endPendingTurn();
+            } catch (e) {
+              console.warn('[AgentBridge] chat-error endTurn 실패:', e);
+            }
+          }
           this.activeAgent = null;
           this.turnRunning = false;
           this.syncEditingLease();
@@ -2053,6 +2089,10 @@ class AgentBridgeImpl implements AgentBridge {
     if (this.pendingQuestionAnswer) this.sendJson(this.pendingQuestionAnswer.frame);
   }
 
+  private flushPendingQuestionCancellation(): void {
+    if (this.pendingQuestionCancellation) this.sendJson(this.pendingQuestionCancellation.frame);
+  }
+
   // ─── outgoing API ─────────────────────────────────────────
 
   getConnectionState(): ConnectionState {
@@ -2108,9 +2148,8 @@ class AgentBridgeImpl implements AgentBridge {
     this.documentId = documentId;
     this.documentName = documentName;
     this.chatHistory = history.map((entry) => ({ ...entry }));
-    // Workflow and permission remain server-authoritative. Keep the requested
-    // values only in the pending start until chat-started confirms them; a
-    // failed provider startup must not leave the bridge in an imaginary mode.
+    // 워크플로와 권한은 서버 상태가 기준이다. 요청값은 chat-started가 확인할 때까지
+    // 시작 대기에만 두어, 프로바이더 시작 실패 뒤 가상의 모드가 남지 않게 한다.
     const payload = {
       v: AGENT_PROTOCOL_VERSION,
       type: 'chat-start' as const,
@@ -2149,6 +2188,10 @@ class AgentBridgeImpl implements AgentBridge {
     this.activeAgent = null;
     const pendingQuestion = this.pendingUserQuestion;
     if (pendingQuestion) {
+      this.pendingQuestionCancellation = {
+        interactionId: pendingQuestion.interactionId,
+        frame: { v: AGENT_PROTOCOL_VERSION, type: 'chat-stop' },
+      };
       this.pendingQuestionAnswer = null;
       this.pendingUserQuestion = null;
       this.pendingUserQuestionId = null;
@@ -2160,8 +2203,7 @@ class AgentBridgeImpl implements AgentBridge {
     }
     if (!waitForAuthoritativeTurnEnd) this.turnRunning = false;
     this.syncEditingLease();
-    // Full access is deliberately scoped to one live chat and never becomes
-    // the default for a new or reopened thread.
+    // 전체 접근은 현재 채팅 하나에만 적용하고 새 스레드나 다시 연 스레드의 기본값으로 삼지 않는다.
     this.permissionProfile = 'safe';
     this.resetWorkflowState();
     if (this.state === 'connected') {
@@ -2669,6 +2711,10 @@ class AgentBridgeImpl implements AgentBridge {
   interrupt(): void {
     const pendingQuestion = this.pendingUserQuestion;
     if (pendingQuestion) {
+      this.pendingQuestionCancellation = {
+        interactionId: pendingQuestion.interactionId,
+        frame: { v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' },
+      };
       this.pendingQuestionAnswer = null;
       this.pendingUserQuestion = null;
       this.pendingUserQuestionId = null;
@@ -2679,7 +2725,12 @@ class AgentBridgeImpl implements AgentBridge {
         outcome: { status: 'cancelled', reason: 'user-stop' },
       });
     }
-    this.pendingInterrupt = !this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' });
+    if (this.pendingQuestionCancellation) {
+      this.pendingInterrupt = false;
+      this.flushPendingQuestionCancellation();
+    } else {
+      this.pendingInterrupt = !this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' });
+    }
   }
 
   /**
@@ -2818,6 +2869,7 @@ class AgentBridgeImpl implements AgentBridge {
     this.requests.cancelAll();
     this.toolResponses.clear();
     this.pendingQuestionAnswer = null;
+    this.pendingQuestionCancellation = null;
     this.pendingUserQuestionId = null;
     this.pendingUserQuestion = null;
     this.pendingInterrupt = false;

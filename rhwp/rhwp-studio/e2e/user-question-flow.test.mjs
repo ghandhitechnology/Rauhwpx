@@ -388,9 +388,31 @@ try {
       }],
     });
     await page.waitForSelector('.ag-user-question[data-inactive="false"] .ag-question-stop');
+    // WebSocket.send 성공은 허브 처리 확인이 아니다. 첫 interrupt를 성공한 것처럼
+    // 돌려주되 실제로는 소켓을 닫아, 재연결 취소 마커가 원래 호출을 끝내는지 검증한다.
+    const cancellationDropArmed = await page.evaluate(() => {
+      const bridge = window.__agentBridge;
+      if (!bridge || typeof bridge.sendJson !== 'function') return false;
+      const sendJson = bridge.sendJson.bind(bridge);
+      window.__questionCancellationDropCount = 0;
+      bridge.sendJson = (frame) => {
+        if (frame?.type === 'chat-interrupt' && window.__questionCancellationDropCount === 0) {
+          window.__questionCancellationDropCount += 1;
+          bridge.ws?.close(4002, 'question-e2e-cancellation-drop');
+          return true;
+        }
+        return sendJson(frame);
+      };
+      return true;
+    });
+    assert(cancellationDropArmed, 'Question cancellation disconnect window armed');
     await page.click('.ag-question-stop');
     const stoppedResponse = await stoppedProviderResult;
     assert(stoppedResponse.ok === false && stoppedResponse.error?.code === 'USER_QUESTION_CANCELLED', 'Drawer Stop cancels the original provider call');
+    assert(
+      await page.evaluate(() => window.__questionCancellationDropCount === 1),
+      'First cancellation was dropped after appearing accepted and then retried',
+    );
     await page.waitForFunction(() => [...document.querySelectorAll('.ag-question-history')]
       .some((node) => node.textContent?.includes('중단됨')));
     await page.waitForFunction(() => window.__agentBridge?.isTurnRunning?.() === false, { timeout: 10_000 });

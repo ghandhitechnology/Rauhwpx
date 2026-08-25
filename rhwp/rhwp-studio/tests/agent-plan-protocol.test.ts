@@ -63,7 +63,7 @@ test('a failed replacement cannot dispatch into the disposed previous session', 
   );
   assert.match(
     bridgeSource,
-    /Keep the requested start as retry configuration/,
+    /if \(this\.pendingTurnOpen\) \{[\s\S]*this\.endPendingTurn\(\);[\s\S]*this\.activeAgent = null;/,
   );
   assert.match(
     bridgeSource,
