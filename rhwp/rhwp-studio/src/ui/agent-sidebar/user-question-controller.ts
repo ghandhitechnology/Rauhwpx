@@ -301,8 +301,7 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
     next.addEventListener('click', () => final ? submit() : navigate(draft.activeQuestionIndex + 1));
     navigation.appendChild(next);
     actions.append(stop, navigation);
-    body.appendChild(actions);
-    root.appendChild(body);
+    root.append(body, actions);
   }
 
   function request(next: UserQuestionInteraction, restored?: Partial<UserQuestionDraftState>): void {

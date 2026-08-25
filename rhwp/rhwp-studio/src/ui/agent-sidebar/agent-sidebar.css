@@ -6510,29 +6510,46 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 /* Blocking provider question drawer, attached immediately above the composer. */
 .ag-user-question,
 .ag-question-history {
-  --ag-question-surface: #050607;
-  --ag-question-raised: #101216;
-  --ag-question-selected: #191c21;
-  --ag-question-border: rgb(255 255 255 / 78%);
-  --ag-question-border-soft: rgb(255 255 255 / 22%);
-  --ag-question-text: #f7f7f8;
-  --ag-question-muted: rgb(255 255 255 / 66%);
+  --ag-question-surface: var(--ag-input-bg);
+  --ag-question-body: color-mix(in srgb, var(--ag-input-bg) 92%, var(--ag-bg-2));
+  --ag-question-raised: color-mix(in srgb, var(--ag-input-bg) 72%, var(--ag-bg-2));
+  --ag-question-selected: color-mix(in srgb, var(--ag-accent) 11%, var(--ag-input-bg));
+  --ag-question-border: var(--ag-border-strong);
+  --ag-question-border-soft: color-mix(in srgb, var(--ag-border-strong) 74%, transparent);
+  --ag-question-text: var(--ag-text);
+  --ag-question-muted: var(--ag-text-muted);
 }
 
 .ag-user-question {
-  flex: 0 1 auto;
+  display: flex;
+  flex: 0 0 clamp(180px, 35dvh, 340px);
+  flex-direction: column;
   min-height: 0;
   max-height: min(58dvh, 580px);
   margin: 0 12px;
   border: 1px solid var(--ag-question-border);
+  border-bottom: 0;
   border-radius: 12px 12px 0 0;
   background: var(--ag-question-surface);
   color: var(--ag-question-text);
-  box-shadow: 0 -8px 28px rgb(0 0 0 / 38%);
+  box-shadow: 0 -10px 24px rgb(0 0 0 / 14%);
   overflow: hidden;
 }
 
+/* The live question and composer form one compound input surface. The composer
+   owns the lower outline and the faint shared seam between both regions. */
+.ag-user-question:not([data-inactive='true']) + .ag-composer {
+  border-top-color: var(--ag-border);
+  border-radius: 0 0 var(--ag-r-panel) var(--ag-r-panel);
+}
+
+.ag-user-question:not([data-inactive='true']):has(+ .ag-composer:focus-within) {
+  border-color: color-mix(in srgb, var(--ag-accent) 72%, var(--ag-border-strong));
+  border-bottom: 0;
+}
+
 .ag-user-question[data-inactive='true'] {
+  flex-basis: auto;
   margin: 0;
   border: 0;
   background: transparent;
@@ -6540,8 +6557,13 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   overflow: visible;
 }
 
+.ag-user-question.ag-collapsed {
+  flex-basis: auto;
+}
+
 .ag-question-disclosure {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -6552,6 +6574,10 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   color: inherit;
   cursor: pointer;
   text-align: left;
+}
+
+.ag-question-disclosure[aria-expanded='true'] {
+  border-bottom: 1px solid var(--ag-question-border-soft);
 }
 
 .ag-question-disclosure-label {
@@ -6573,6 +6599,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 .ag-question-body {
   display: grid;
+  flex: 1 1 auto;
   gap: 10px;
   max-height: min(52dvh, 520px);
   min-height: 0;
@@ -6580,6 +6607,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   overscroll-behavior: contain;
   padding: 0 12px 12px;
   scrollbar-gutter: stable;
+  background: var(--ag-question-body);
 }
 
 .ag-question-heading {
@@ -6591,7 +6619,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 .ag-question-header {
   max-width: 12ch;
-  color: #fff;
+  color: var(--ag-accent);
   font-size: 11px;
   font-weight: 750;
   letter-spacing: .03em;
@@ -6630,8 +6658,15 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-question-option[data-selected='true'] {
-  border-color: var(--ag-question-border);
+  border-color: color-mix(in srgb, var(--ag-accent) 64%, var(--ag-question-border));
   background: var(--ag-question-selected);
+}
+
+@media (hover: hover) {
+  .ag-question-option:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--ag-accent) 42%, var(--ag-question-border));
+    background: color-mix(in srgb, var(--ag-accent) 5%, var(--ag-question-raised));
+  }
 }
 
 .ag-question-option:disabled {
@@ -6651,9 +6686,9 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-question-option[data-selected='true'] .ag-question-option-number {
-  border-color: #fff;
-  background: #fff;
-  color: #050607;
+  border-color: var(--accent-primary);
+  background: var(--accent-primary);
+  color: var(--n-on-accent);
 }
 
 .ag-question-option-copy {
@@ -6676,7 +6711,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-question-error {
-  color: #ff9b91;
+  color: var(--ag-err);
   font-size: 11px;
   line-height: 1.4;
 }
@@ -6689,14 +6724,11 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-question-actions {
+  flex: 0 0 auto;
   justify-content: space-between;
-  position: sticky;
-  bottom: -12px;
-  z-index: 1;
-  margin: 0 -12px -12px;
-  padding: 8px 12px 12px;
+  padding: 8px 12px 10px;
   border-top: 1px solid var(--ag-question-border-soft);
-  background: var(--ag-question-surface);
+  background: var(--ag-question-body);
 }
 
 .ag-question-actions button {
@@ -6711,13 +6743,13 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-question-actions .ag-question-next {
-  border-color: #fff;
-  background: #fff;
-  color: #050607;
+  border-color: var(--accent-primary);
+  background: var(--accent-primary);
+  color: var(--n-on-accent);
 }
 
 .ag-question-actions .ag-question-stop {
-  color: #ff9b91;
+  color: var(--ag-err);
 }
 
 .ag-question-actions button:disabled {
@@ -6727,7 +6759,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 .ag-user-question button:focus-visible,
 .ag-user-question h3:focus-visible {
-  outline: 2px solid #fff;
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -6748,9 +6780,9 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   gap: 9px;
   max-width: min(100%, 440px);
   padding: 11px 12px;
-  border: 1px solid var(--ag-question-border);
+  border: 1px solid var(--ag-border);
   border-radius: 10px;
-  background: var(--ag-question-surface);
+  background: var(--ag-bg-2);
   color: var(--ag-question-text);
 }
 
@@ -6767,7 +6799,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-question-history-header {
-  color: #fff;
+  color: var(--ag-accent);
   font-size: 10px;
   font-weight: 750;
 }
@@ -6783,6 +6815,18 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-question-history-answer {
   grid-column: 2;
   color: var(--ag-question-muted);
+}
+
+.ag-fullscreen .ag-user-question:not([data-inactive='true']) {
+  box-sizing: border-box;
+  width: min(860px, calc(100% - 48px));
+  max-width: 860px;
+  margin-inline: auto;
+  border-radius: 9px 9px 0 0;
+}
+
+.ag-fullscreen .ag-user-question:not([data-inactive='true']) + .ag-composer {
+  border-radius: 0 0 9px 9px;
 }
 
 @media (prefers-reduced-motion: reduce) {

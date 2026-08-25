@@ -24,8 +24,10 @@ test('drawer is composer-attached and blocks ordinary chat without hiding Stop',
   assert.match(controller, /const stop = element\('button', 'ag-question-stop', '중지'\)/);
   assert.match(controller, /stop\.addEventListener\('click', options\.stop\)/);
   assert.match(css, /\.ag-user-question \{/);
-  assert.match(css, /--ag-question-surface: #050607/);
-  assert.match(css, /\.ag-user-question \{[\s\S]*?border: 1px solid var\(--ag-question-border\);[\s\S]*?background: var\(--ag-question-surface\)/);
+  assert.match(css, /--ag-question-surface: var\(--ag-input-bg\)/);
+  assert.match(css, /\.ag-user-question \{[\s\S]*?border: 1px solid var\(--ag-question-border\);[\s\S]*?border-bottom: 0;[\s\S]*?background: var\(--ag-question-surface\)/);
+  assert.match(css, /\.ag-user-question:not\(\[data-inactive='true'\]\) \+ \.ag-composer/);
+  assert.match(css, /border-radius: 0 0 var\(--ag-r-panel\) var\(--ag-r-panel\)/);
 });
 
 test('cards support single, multiple, Other, navigation and atomic submission', () => {
@@ -35,6 +37,7 @@ test('cards support single, multiple, Other, navigation and atomic submission', 
   assert.match(controller, /function allAnswered\(\)/);
   assert.match(controller, /submitAnswers\(interaction\.interactionId, answers\)/);
   assert.match(controller, /draft\.activeQuestionIndex/);
+  assert.match(controller, /root\.append\(body, actions\)/);
   assert.match(controller, /'이전'/);
   assert.match(controller, /final \? '제출' : '다음'/);
 });
