@@ -15,7 +15,7 @@
     "dev:desktop": "wait-on http://127.0.0.1:7700 && cross-env RHWP_DEV_URL=http://127.0.0.1:7700 electron .",
     "build:studio": "npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
     "build:agent": "npm --prefix rhwp/rhwp-agent ci --omit=dev",
-    "desktop": "npm run build:studio && electron .",
+    "desktop": "npm run build:studio && npm run build:agent && electron .",
     "dist:mac": "npm run build:studio && npm run build:agent && electron-builder --mac dmg zip --arm64 --publish never",
     "dist:win": "npm run build:studio && npm run build:agent && electron-builder --win --publish never"
   },

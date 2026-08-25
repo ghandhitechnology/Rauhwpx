@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, extname, join, sep } from 'node:path';
+import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   app,
@@ -71,6 +71,12 @@ function sessionForEvent(event) {
 }
 
 app.setName('Rauhwpx');
+if (!app.isPackaged) {
+  const developmentUserData = process.env.RHWP_DESKTOP_USER_DATA
+    ? resolve(process.env.RHWP_DESKTOP_USER_DATA)
+    : join(__dirname, '..', '.run', 'desktop-user-data');
+  app.setPath('userData', developmentUserData);
+}
 registerStudioScheme(protocol);
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 

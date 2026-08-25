@@ -491,10 +491,12 @@ export function spawnHubProcess(launch, {
     windowsHide,
     shell: needsShell,
   });
-  if (forwardStdio) {
-    child.stdout?.on('data', (chunk) => process.stdout.write(chunk));
-    child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
-  }
+  child.rhwpStdoutHistory = '';
+  child.stdout?.on('data', (chunk) => {
+    child.rhwpStdoutHistory = `${child.rhwpStdoutHistory}${String(chunk)}`.slice(-64 * 1024);
+    if (forwardStdio) process.stdout.write(chunk);
+  });
+  if (forwardStdio) child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
   if (typeof onError === 'function') {
     child.on('error', onError);
   } else {
@@ -529,9 +531,10 @@ export function waitForHubReadyLine(child, {
   timeoutMs = DEFAULT_READY_TIMEOUT_MS,
 } = {}) {
   return new Promise((resolve, reject) => {
-    let buffer = '';
+    let buffer = typeof child.rhwpStdoutHistory === 'string' ? child.rhwpStdoutHistory : '';
+    let timer = null;
     const cleanup = () => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       child.stdout?.off('data', onData);
       child.off('error', onError);
       child.off('exit', onExit);
@@ -540,8 +543,7 @@ export function waitForHubReadyLine(child, {
       cleanup();
       reject(error);
     };
-    const onData = (chunk) => {
-      buffer += String(chunk);
+    const consumeLines = () => {
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? '';
       for (const line of lines) {
@@ -549,15 +551,26 @@ export function waitForHubReadyLine(child, {
         if (!ready) continue;
         cleanup();
         resolve(ready);
-        return;
+        return true;
       }
+      return false;
+    };
+    const onData = (chunk) => {
+      buffer += String(chunk);
+      consumeLines();
     };
     const onError = (error) => fail(error);
     const onExit = (code, signal) => fail(new Error(`Agent hub exited before ready (${code ?? signal ?? 'unknown'})`));
-    const timer = setTimeout(() => fail(new Error('Agent hub ready line timed out')), timeoutMs);
+
+    if (consumeLines()) return;
+    if (child.exitCode != null || child.signalCode != null) {
+      fail(new Error(`Agent hub exited before ready (${child.exitCode ?? child.signalCode ?? 'unknown'})`));
+      return;
+    }
     child.stdout?.on('data', onData);
     child.once('error', onError);
     child.once('exit', onExit);
+    timer = setTimeout(() => fail(new Error('Agent hub ready line timed out')), timeoutMs);
   });
 }
 
