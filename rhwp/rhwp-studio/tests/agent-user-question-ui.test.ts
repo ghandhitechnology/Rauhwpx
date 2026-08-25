@@ -16,6 +16,9 @@ test('question interaction uses strict protocol v4 and a reconnect-idempotent an
   assert.match(bridge, /flushPendingQuestionAnswer\(\)/);
   assert.match(bridge, /pendingQuestionCancellation/);
   assert.match(bridge, /flushPendingQuestionCancellation\(\)/);
+  assert.match(bridge, /QUESTION_CANCELLATION_STORAGE_PREFIX/);
+  assert.match(bridge, /this\.restorePendingQuestionCancellation\(\)/);
+  assert.match(bridge, /this\.persistPendingQuestionCancellation\(\)/);
   assert.match(bridge, /case 'user-question-answer-result'/);
   assert.match(bridge, /case 'user-question-resolved'/);
   assert.match(
@@ -28,7 +31,7 @@ test('question interaction uses strict protocol v4 and a reconnect-idempotent an
   );
   assert.match(
     bridge,
-    /pendingQuestionCancellation\?\.interactionId === interactionId[\s\S]*pendingQuestionCancellation = null/,
+    /pendingQuestionCancellation\?\.interactionId === interactionId[\s\S]*clearPendingQuestionCancellation\(\)/,
   );
 });
 

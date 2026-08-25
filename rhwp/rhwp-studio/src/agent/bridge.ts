@@ -181,7 +181,7 @@ export interface AgentBridge {
     append: boolean;
   }): string;
   setWritingStyleInstruction(instruction: string): string;
-  /** Answer the currently blocked provider request. The response id is reused across reconnect retries. */
+  /** 현재 막힌 프로바이더 요청에 답한다. 재연결 재시도에도 같은 응답 ID를 쓴다. */
   answerUserQuestion(interactionId: string, answers: Record<string, UserQuestionAnswer>): string;
   interrupt(): void;
   onEvent(cb: (e: SidebarEvent) => void): () => void;
@@ -199,6 +199,9 @@ const CONNECT_TIMEOUT_MS = 4000;
 
 /** 요청/응답 대기 상한 — 넘기면 null 로 안착한다(던지지 않는다). */
 const REQUEST_TIMEOUT_MS = 10_000;
+
+/** 페이지 새로고침 뒤에도 같은 허브 세션의 질문 취소를 이어 가는 탭별 저장 키. */
+const QUESTION_CANCELLATION_STORAGE_PREFIX = 'rhwp-agent-question-cancellation:';
 
 /** 재연결 사이에 붙잡아 둘 tool-response 개수와 보관 기한(허브의 도구 타임아웃과 맞춘다). */
 const TOOL_RESPONSE_BUFFER_LIMIT = 32;
@@ -1095,7 +1098,76 @@ class AgentBridgeImpl implements AgentBridge {
     this.url = websocketHubUrl(context.hubUrl);
     this.httpBaseUrl = httpHubUrl(context.hubUrl);
     this.token = context.hubToken;
-    this.sessionId = context.sessionId;
+    if (this.sessionId !== context.sessionId) {
+      this.sessionId = context.sessionId;
+      this.restorePendingQuestionCancellation();
+    }
+  }
+
+  private questionCancellationStorageKey(): string | null {
+    return this.sessionId
+      ? `${QUESTION_CANCELLATION_STORAGE_PREFIX}${encodeURIComponent(this.sessionId)}`
+      : null;
+  }
+
+  private persistPendingQuestionCancellation(): void {
+    const key = this.questionCancellationStorageKey();
+    if (!key || !this.pendingQuestionCancellation) return;
+    try {
+      sessionStorage.setItem(key, JSON.stringify({
+        interactionId: this.pendingQuestionCancellation.interactionId,
+        type: this.pendingQuestionCancellation.frame.type,
+      }));
+    } catch (e) {
+      console.warn('[AgentBridge] 질문 취소 상태 저장 실패:', e);
+    }
+  }
+
+  private restorePendingQuestionCancellation(): void {
+    const key = this.questionCancellationStorageKey();
+    this.pendingQuestionCancellation = null;
+    if (!key) return;
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (!raw) return;
+      const value: unknown = JSON.parse(raw);
+      if (!value || typeof value !== 'object') throw new Error('invalid cancellation state');
+      const interactionId = Reflect.get(value, 'interactionId');
+      const type = Reflect.get(value, 'type');
+      if (typeof interactionId !== 'string' || !interactionId
+        || (type !== 'chat-interrupt' && type !== 'chat-stop')) {
+        throw new Error('invalid cancellation state');
+      }
+      this.pendingQuestionCancellation = {
+        interactionId,
+        frame: { v: AGENT_PROTOCOL_VERSION, type },
+      };
+    } catch (e) {
+      try { sessionStorage.removeItem(key); } catch { /* 저장소 접근 불가 */ }
+      console.warn('[AgentBridge] 질문 취소 상태 복원 실패:', e);
+    }
+  }
+
+  private setPendingQuestionCancellation(
+    interactionId: string,
+    type: 'chat-interrupt' | 'chat-stop',
+  ): void {
+    this.pendingQuestionCancellation = {
+      interactionId,
+      frame: { v: AGENT_PROTOCOL_VERSION, type },
+    };
+    this.persistPendingQuestionCancellation();
+  }
+
+  private clearPendingQuestionCancellation(): void {
+    this.pendingQuestionCancellation = null;
+    const key = this.questionCancellationStorageKey();
+    if (!key) return;
+    try {
+      sessionStorage.removeItem(key);
+    } catch (e) {
+      console.warn('[AgentBridge] 질문 취소 상태 삭제 실패:', e);
+    }
   }
 
   /** 끊겼거나 다른 탭에 밀려난 뒤 창이 다시 살아나면 즉시 붙는다. */
@@ -1474,7 +1546,7 @@ class AgentBridgeImpl implements AgentBridge {
               pendingQuestion = null;
             } else {
               // 허브 스냅샷에 대상 질문이 없거나 새 질문으로 바뀌었으면 취소가 확정된 것이다.
-              this.pendingQuestionCancellation = null;
+              this.clearPendingQuestionCancellation();
             }
           }
           if (previousQuestion && previousQuestion.interactionId !== pendingQuestion?.interactionId) {
@@ -1526,7 +1598,7 @@ class AgentBridgeImpl implements AgentBridge {
           this.pendingUserQuestion = null;
           this.pendingUserQuestionId = null;
           this.pendingQuestionAnswer = null;
-          this.pendingQuestionCancellation = null;
+          this.clearPendingQuestionCancellation();
           if (droppedQuestion) {
             this.emit({
               type: 'user-question-resolved',
@@ -1571,7 +1643,7 @@ class AgentBridgeImpl implements AgentBridge {
           this.flushPendingQuestionCancellation();
           break;
         }
-        if (this.pendingQuestionCancellation) this.pendingQuestionCancellation = null;
+        if (this.pendingQuestionCancellation) this.clearPendingQuestionCancellation();
         this.pendingUserQuestionId = interaction.interactionId;
         this.pendingUserQuestion = interaction;
         this.syncEditingLease();
@@ -1591,7 +1663,7 @@ class AgentBridgeImpl implements AgentBridge {
         if (!interactionId || !outcome) break;
         if (this.pendingQuestionAnswer?.interactionId === interactionId) this.pendingQuestionAnswer = null;
         if (this.pendingQuestionCancellation?.interactionId === interactionId) {
-          this.pendingQuestionCancellation = null;
+          this.clearPendingQuestionCancellation();
         }
         if (this.pendingUserQuestionId === interactionId) this.pendingUserQuestionId = null;
         if (this.pendingUserQuestion?.interactionId === interactionId) this.pendingUserQuestion = null;
@@ -1620,7 +1692,7 @@ class AgentBridgeImpl implements AgentBridge {
         if (typeof msg.threadId === 'string' && this.threadId && msg.threadId !== this.threadId) break;
         const replacedSession = this.pendingChatStart !== null;
         this.pendingChatStart = null;
-        if (replacedSession) this.pendingQuestionCancellation = null;
+        if (replacedSession) this.clearPendingQuestionCancellation();
         if (isAgentName(msg.agent)) {
           this.activeAgent = msg.agent;
           this.editingAgent = msg.agent;
@@ -2188,10 +2260,7 @@ class AgentBridgeImpl implements AgentBridge {
     this.activeAgent = null;
     const pendingQuestion = this.pendingUserQuestion;
     if (pendingQuestion) {
-      this.pendingQuestionCancellation = {
-        interactionId: pendingQuestion.interactionId,
-        frame: { v: AGENT_PROTOCOL_VERSION, type: 'chat-stop' },
-      };
+      this.setPendingQuestionCancellation(pendingQuestion.interactionId, 'chat-stop');
       this.pendingQuestionAnswer = null;
       this.pendingUserQuestion = null;
       this.pendingUserQuestionId = null;
@@ -2711,10 +2780,7 @@ class AgentBridgeImpl implements AgentBridge {
   interrupt(): void {
     const pendingQuestion = this.pendingUserQuestion;
     if (pendingQuestion) {
-      this.pendingQuestionCancellation = {
-        interactionId: pendingQuestion.interactionId,
-        frame: { v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' },
-      };
+      this.setPendingQuestionCancellation(pendingQuestion.interactionId, 'chat-interrupt');
       this.pendingQuestionAnswer = null;
       this.pendingUserQuestion = null;
       this.pendingUserQuestionId = null;
@@ -2869,7 +2935,7 @@ class AgentBridgeImpl implements AgentBridge {
     this.requests.cancelAll();
     this.toolResponses.clear();
     this.pendingQuestionAnswer = null;
-    this.pendingQuestionCancellation = null;
+    this.persistPendingQuestionCancellation();
     this.pendingUserQuestionId = null;
     this.pendingUserQuestion = null;
     this.pendingInterrupt = false;

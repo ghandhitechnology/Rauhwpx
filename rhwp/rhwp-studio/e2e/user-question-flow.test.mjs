@@ -368,6 +368,12 @@ try {
       await page.evaluate((nextWorkflow) => window.__agentBridge.startChat(
         'pi', 'mock-model', undefined, false, 'safe', nextWorkflow,
       ), workflow);
+      await page.waitForFunction(
+        (nextWorkflow) => window.__agentBridge?.getActiveAgent?.() === 'pi'
+          && window.__agentBridge?.getWorkflowState?.().workflow === nextWorkflow,
+        { timeout: 20_000 },
+        workflow,
+      );
       await page.type('.ag-input', text);
       await page.click('.ag-send');
       await page.waitForFunction(() => window.__agentBridge?.isTurnRunning?.() === true, { timeout: 10_000 });
@@ -396,9 +402,13 @@ try {
       const sendJson = bridge.sendJson.bind(bridge);
       window.__questionCancellationDropCount = 0;
       bridge.sendJson = (frame) => {
-        if (frame?.type === 'chat-interrupt' && window.__questionCancellationDropCount === 0) {
-          window.__questionCancellationDropCount += 1;
-          bridge.ws?.close(4002, 'question-e2e-cancellation-drop');
+        if (frame?.type === 'chat-interrupt') {
+          if (window.__questionCancellationDropCount === 0) {
+            window.__questionCancellationDropCount += 1;
+            bridge.ws?.close(4002, 'question-e2e-cancellation-drop');
+          }
+          // 이 페이지의 후속 재시도도 성공한 것처럼 버려, 새로고침 뒤 복원된
+          // 새 브리지만 허브에 취소를 전달할 수 있게 한다.
           return true;
         }
         return sendJson(frame);
@@ -407,16 +417,36 @@ try {
     });
     assert(cancellationDropArmed, 'Question cancellation disconnect window armed');
     await page.click('.ag-question-stop');
+    await page.waitForFunction(
+      () => window.__questionCancellationDropCount === 1
+        && window.__agentBridge?.getConnectionState?.() === 'connected',
+      { timeout: 20_000 },
+    );
+    assert(
+      await page.evaluate(() => Boolean(window.__agentBridge?.pendingQuestionCancellation)),
+      'Cancellation marker remains pending after an apparently accepted drop',
+    );
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(
+      () => window.__agentBridge?.getConnectionState?.() === 'connected',
+      { timeout: 30_000 },
+    );
     const stoppedResponse = await stoppedProviderResult;
     assert(stoppedResponse.ok === false && stoppedResponse.error?.code === 'USER_QUESTION_CANCELLED', 'Drawer Stop cancels the original provider call');
-    assert(
-      await page.evaluate(() => window.__questionCancellationDropCount === 1),
-      'First cancellation was dropped after appearing accepted and then retried',
+    assert(!await page.evaluate(() => Boolean(window.__agentBridge?.pendingQuestionCancellation)), 'Reloaded bridge clears the cancellation marker after hub resolution');
+    await page.waitForFunction(
+      () => window.__agentBridge?.isTurnRunning?.() === false
+        && !document.querySelector('.ag-user-question[data-inactive="false"]'),
+      { timeout: 10_000 },
     );
-    await page.waitForFunction(() => [...document.querySelectorAll('.ag-question-history')]
-      .some((node) => node.textContent?.includes('중단됨')));
-    await page.waitForFunction(() => window.__agentBridge?.isTurnRunning?.() === false, { timeout: 10_000 });
-    await screenshot(page, 'ask-user-question-cancelled-history');
+    assert(
+      !await page.$('.ag-user-question[data-inactive="false"]'),
+      'Reload does not replay the cancelled question',
+    );
+    await screenshot(page, 'ask-user-question-cancelled-reload');
+    // 새로고침된 UI가 고른 스레드와 브리지의 이전 허브 스레드를 다시 맞춘 뒤
+    // 나머지 계획/프로바이더 손실 시나리오를 독립된 채팅에서 계속한다.
+    await page.evaluate(() => document.querySelector('.ag-threads-new')?.click());
 
     // Planning uses the same indefinite Pi fallback but a different capability
     // profile. Supply the hub epoch exactly as the real MCP shim does.
