@@ -16,6 +16,10 @@ test('question interaction uses strict protocol v4 and a reconnect-idempotent an
   assert.match(bridge, /flushPendingQuestionAnswer\(\)/);
   assert.match(bridge, /case 'user-question-answer-result'/);
   assert.match(bridge, /case 'user-question-resolved'/);
+  assert.match(
+    bridge,
+    /const droppedQuestion = this\.pendingUserQuestion;[\s\S]*this\.pendingQuestionAnswer = null;[\s\S]*interactionId: droppedQuestion\.interactionId,[\s\S]*reason: 'hub-restarted'/,
+  );
 });
 
 test('drawer is composer-attached and blocks ordinary chat without hiding Stop', () => {

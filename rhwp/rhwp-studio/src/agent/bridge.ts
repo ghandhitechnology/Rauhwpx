@@ -1504,8 +1504,17 @@ class AgentBridgeImpl implements AgentBridge {
           }
         } else {
           this.activeAgent = null;
+          const droppedQuestion = this.pendingUserQuestion;
           this.pendingUserQuestion = null;
           this.pendingUserQuestionId = null;
+          this.pendingQuestionAnswer = null;
+          if (droppedQuestion) {
+            this.emit({
+              type: 'user-question-resolved',
+              interactionId: droppedQuestion.interactionId,
+              outcome: { status: 'expired', reason: 'hub-restarted' },
+            });
+          }
           this.activeTemplateId = null;
           this.activeTemplate = null;
           this.turnRunning = false;
