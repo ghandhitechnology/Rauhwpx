@@ -399,6 +399,7 @@ test('native bookmarks persist independently of live handles', async () => {
     kind: 'file',
     handleId: 'bookmarked',
     name: 'report.hwp',
+    verifiedDocumentId: 'document-a',
   });
   assert.deepEqual(registry.dumpBookmarks(), [[
     'document-a',
