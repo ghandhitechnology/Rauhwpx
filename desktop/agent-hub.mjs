@@ -39,7 +39,8 @@ export function packagedRhwpBinary({
   exists = existsSync,
 }) {
   if (!packaged) return null;
-  const binary = join(resourcesPath, 'bin', platform === 'win32' ? 'rhwp.exe' : 'rhwp');
+  const platformPath = platform === 'win32' ? win32 : posix;
+  const binary = platformPath.join(resourcesPath, 'bin', platform === 'win32' ? 'rhwp.exe' : 'rhwp');
   if (!exists(binary)) throw new Error(`Packaged document extractor is missing: ${binary}`);
   return binary;
 }
