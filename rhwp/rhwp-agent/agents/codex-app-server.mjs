@@ -214,7 +214,11 @@ function collaborationMode(opts) {
     settings: {
       model: opts.model ?? DEFAULT_CODEX_MODEL,
       reasoning_effort: opts.effort ?? null,
-      developer_instructions: systemBriefFor(opts, 'codex'),
+      // Collaboration-mode Settings deliberately uses snake_case even though
+      // the surrounding app-server v2 protocol uses camelCase. `null` selects
+      // Codex's built-in Default/Plan instructions; the Rau-specific brief is
+      // already supplied through thread developerInstructions.
+      developer_instructions: null,
     },
   };
 }

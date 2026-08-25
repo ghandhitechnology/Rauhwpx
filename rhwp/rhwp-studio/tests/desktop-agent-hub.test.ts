@@ -341,7 +341,7 @@ test('owned health checks send launch authentication and verify the child pid', 
   }), false);
 });
 
-test('studio dev server and repo npm start both boot the hub', () => {
+test('studio development and desktop builds include the agent hub', () => {
   assert.match(viteConfig, /rhwpAgentHubPlugin\(__dirname\)/);
   assert.match(viteHubPlugin, /spawnHubProcess\(\{/);
   assert.match(viteHubPlugin, /process\.execPath/);
@@ -355,7 +355,8 @@ test('studio dev server and repo npm start both boot the hub', () => {
   assert.match(rootPackage, /"start": "node rhwp\/rhwp-agent\/ctl.mjs start"/);
   assert.match(rootPackage, /"start:fg": "node rhwp\/rhwp-agent\/server.mjs"/);
   assert.match(rootPackage, /"stop": "node rhwp\/rhwp-agent\/ctl.mjs stop"/);
-  assert.match(rootPackage, /"desktop": "npm run build:studio && npm run build:agent && electron \."/);
+  assert.match(rootPackage, /"build:desktop": "npm run build:native && npm run build:studio && npm run build:agent"/);
+  assert.match(rootPackage, /"desktop": "npm run build:desktop && electron \."/);
 });
 
 test('healthz JSON exposes pid for process control', () => {

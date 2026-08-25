@@ -209,6 +209,11 @@ test('direct mode negotiates native input and answers the original app-server re
   ]);
   const turn = h.spawns[0].process.frames.find((frame) => frame.method === 'turn/start');
   assert.equal(turn.params.collaborationMode.mode, 'default');
+  assert.deepEqual(turn.params.collaborationMode.settings, {
+    model: 'test-model',
+    reasoning_effort: 'high',
+    developer_instructions: null,
+  });
   assert.equal(turn.params.input[0].text, 'Build it');
   assert.equal(h.session.getSessionId(), 'thread-native');
 
@@ -282,6 +287,11 @@ test('planning mode remains native without the default-mode feature', async (t) 
   assert.equal(h.spawns.length, 1);
   const turn = h.spawns[0].process.frames.find((frame) => frame.method === 'turn/start');
   assert.equal(turn.params.collaborationMode.mode, 'plan');
+  assert.deepEqual(turn.params.collaborationMode.settings, {
+    model: 'test-model',
+    reasoning_effort: 'high',
+    developer_instructions: null,
+  });
   assert.equal(h.spawns[0].process.frames.some((frame) => frame.method === 'experimentalFeature/enablement/set'), false);
   h.session.interrupt();
   await settle();

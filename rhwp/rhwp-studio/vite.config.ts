@@ -4,7 +4,9 @@ import { readFileSync, readFile } from 'fs';
 import { VitePWA } from 'vite-plugin-pwa';
 import { rhwpAgentHubPlugin } from './vite-plugin-agent-hub.mjs';
 
-const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8'));
+const appPackage = JSON.parse(
+  readFileSync(resolve(__dirname, '..', '..', 'package.json'), 'utf-8'),
+);
 const subsecondWasmDir = resolve(
   __dirname,
   '..',
@@ -21,7 +23,7 @@ const publicHttpsPort = Number(process.env.RHWP_PUBLIC_HTTPS_PORT ?? 443);
 
 export default defineConfig({
   define: {
-    __APP_VERSION__: JSON.stringify(pkg.version),
+    __APP_VERSION__: JSON.stringify(appPackage.version),
   },
   resolve: {
     alias: {
