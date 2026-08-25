@@ -5,6 +5,7 @@ import path from 'node:path';
 
 import { documentPathsFromArgv, launchRequest } from '../../../desktop/launch-routing.mjs';
 import { resolveGeneratedDocumentArtifact } from '../../../desktop/generated-document-artifact.mjs';
+import { deliverPlainTextPaste } from '../../../desktop/plain-text-paste.mjs';
 import { SessionManager } from '../../../desktop/session-manager.mjs';
 import { resolveStudioAsset, STUDIO_URL } from '../../../desktop/studio-protocol.mjs';
 
@@ -87,6 +88,26 @@ test('launch routing accepts only supported document paths', () => {
   assert.match(desktopMain, /label: 'New Window'/);
   assert.match(desktopMain, /CmdOrCtrl\+Shift\+N/);
   assert.match(desktopMain, /x: bounds\.x \+ 28, y: bounds\.y \+ 28/);
+});
+
+test('desktop owns Cmd/Ctrl+Shift+V in its native Edit menu', () => {
+  const sent: unknown[][] = [];
+  const window = {
+    isDestroyed: () => false,
+    webContents: {
+      isDestroyed: () => false,
+      send: (...args: unknown[]) => sent.push(args),
+    },
+  };
+  assert.equal(deliverPlainTextPaste(window, () => 'plain text'), true);
+  assert.deepEqual(sent, [['desktop:paste-plain-text', 'plain text']]);
+  assert.equal(deliverPlainTextPaste(window, () => ''), false);
+  assert.equal(deliverPlainTextPaste(null, () => 'ignored'), false);
+
+  assert.match(desktopMain, /id: 'edit-paste-without-formatting'/);
+  assert.match(desktopMain, /accelerator: 'CmdOrCtrl\+Shift\+V'/);
+  assert.match(desktopMain, /deliverPlainTextPaste\(/);
+  assert.match(desktopMain, /clipboard\.readText\(\)/);
 });
 
 test('desktop packages register as an HWPX editor with the operating system', () => {

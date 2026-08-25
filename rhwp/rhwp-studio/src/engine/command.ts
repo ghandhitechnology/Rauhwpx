@@ -694,6 +694,35 @@ export class MergeParagraphCommand implements EditCommand {
 
 // ─── 선택 영역 삭제 명령 ─────────────────────────────
 
+/**
+ * 선택 영역을 히스토리 엔트리 추가 없이 바로 삭제한다.
+ * 자체 스냅샷으로 undo를 소유하는 붙여넣기 같은 복합 편집에서만 쓴다.
+ */
+export function deleteSelectionImmediate(
+  wasm: WasmBridge,
+  start: DocumentPosition,
+  end: DocumentPosition,
+): DocumentPosition {
+  if (isCell(start)) {
+    // 중첩 셀은 flat 좌표가 최외곽 셀을 가리키므로 경로 API를 쓴다.
+    wasm.deleteRangeInCellByPath(
+      start.sectionIndex, start.parentParaIndex!, cellPathJson(start),
+      cellParaIndexOf(start), start.charOffset, cellParaIndexOf(end), end.charOffset,
+    );
+  } else if (start.sectionIndex === end.sectionIndex) {
+    wasm.deleteRange(
+      start.sectionIndex, start.paragraphIndex, start.charOffset,
+      end.paragraphIndex, end.charOffset,
+    );
+  } else {
+    wasm.deleteRangeAcrossSections(
+      start.sectionIndex, start.paragraphIndex, start.charOffset,
+      end.sectionIndex, end.paragraphIndex, end.charOffset,
+    );
+  }
+  return { ...start };
+}
+
 export class DeleteSelectionCommand implements EditCommand {
   readonly type = 'deleteSelection';
   readonly timestamp = Date.now();
@@ -717,30 +746,10 @@ export class DeleteSelectionCommand implements EditCommand {
 
   constructor(start: DocumentPosition, end: DocumentPosition) {
     // 삭제 후 커서는 선택 시작으로 모이고, undo 후에는 선택 끝으로 되돌아간다.
-    this.snapshot = new SnapshotCommand('deleteSelection', end, start, (wasm) => {
-      if (isCell(start)) {
-        // 중첩 셀 좌표 축 정합: flat controlIndex/cellIndex 는 cellPath[0](최외곽)이라
-        // 중첩 셀에서 바깥 셀을 지운다. 최내곽 셀을 대상으로 ...ByPath 로 라우팅하고,
-        // 셀 문단 인덱스는 cellPath[last] 에서 읽는다(cellParaIndexOf).
-        wasm.deleteRangeInCellByPath(
-          start.sectionIndex, start.parentParaIndex!, cellPathJson(start),
-          cellParaIndexOf(start), start.charOffset, cellParaIndexOf(end), end.charOffset,
-        );
-      } else {
-        if (start.sectionIndex === end.sectionIndex) {
-          wasm.deleteRange(
-            start.sectionIndex, start.paragraphIndex, start.charOffset,
-            end.paragraphIndex, end.charOffset,
-          );
-        } else {
-          wasm.deleteRangeAcrossSections(
-            start.sectionIndex, start.paragraphIndex, start.charOffset,
-            end.sectionIndex, end.paragraphIndex, end.charOffset,
-          );
-        }
-      }
-      return { ...start };
-    });
+    this.snapshot = new SnapshotCommand(
+      'deleteSelection', end, start,
+      (wasm) => deleteSelectionImmediate(wasm, start, end),
+    );
   }
 
   execute(wasm: WasmBridge): DocumentPosition {
