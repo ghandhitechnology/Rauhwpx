@@ -99,7 +99,7 @@ pub fn write_picture<W: Write>(
     // --- 자식 순서 (한컴 관찰 샘플 기준) ---
     // offset, orgSz, curSz, flip, rotationInfo, renderingInfo, imgRect, imgClip,
     // inMargin, imgDim, img, effects, sz, pos, outMargin
-    write_offset(w, &pic.common)?;
+    write_offset(w, &pic.shape_attr)?;
     write_org_sz(w, &pic.shape_attr)?;
     write_cur_sz(w, pic)?;
     write_flip(w, &pic.shape_attr)?;
@@ -129,9 +129,14 @@ pub fn write_picture<W: Write>(
 
 // ---------- 자식 요소 ----------
 
-fn write_offset<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), SerializeError> {
-    let x = c.horizontal_offset.to_string();
-    let y = c.vertical_offset.to_string();
+fn write_offset<W: Write>(
+    w: &mut Writer<W>,
+    shape: &ShapeComponentAttr,
+) -> Result<(), SerializeError> {
+    // hp:offset은 개체 내부 좌표이고 hp:pos의 문단 앵커 좌표와 독립적이다.
+    // 한컴은 음수를 unsigned 32-bit decimal로 기록하므로 같은 표기를 유지한다.
+    let x = (shape.offset_x as u32).to_string();
+    let y = (shape.offset_y as u32).to_string();
     empty_tag(w, "hp:offset", &[("x", &x), ("y", &y)])
 }
 
