@@ -443,10 +443,14 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   const checkpointButton = el('button', 'ag-versions-primary', '+ 커밋');
   checkpointButton.type = 'button';
   checkpointButton.setAttribute('aria-label', '새 커밋 만들기');
+  const branchButton = el('button', 'ag-versions-secondary', '여기서 브랜치');
+  branchButton.type = 'button';
+  branchButton.dataset.versionMutation = 'true';
+  branchButton.setAttribute('aria-label', '이 커밋에서 브랜치 만들기');
   const mergeButton = el('button', 'ag-versions-secondary', '병합');
   mergeButton.type = 'button';
   mergeButton.dataset.versionMutation = 'true';
-  toolbar.append(activeBranch, mergeButton, checkpointButton);
+  toolbar.append(activeBranch, mergeButton, checkpointButton, branchButton);
 
   const body = el('div', 'ag-versions-body');
   const historyPanel = el('div', 'ag-versions-panel ag-versions-history');
@@ -554,6 +558,10 @@ export function createVersionManagerPage(controller: VersionManagerController): 
 
     checkpointButton.disabled = blocked;
     checkpointButton.title = blockedReason ?? '';
+    const branchNeedsSelection = current.commits.length === 0 || !selectedCommitId;
+    const branchBlockedReason = blockedReason ?? (branchNeedsSelection ? '선택된 커밋이 없습니다.' : null);
+    branchButton.disabled = branchBlockedReason !== null;
+    branchButton.title = branchBlockedReason ?? '';
     // This control only navigates to the branch browser. It remains available
     // while an agent turn blocks mutations so browsing never gets locked out.
     activeBranch.disabled = !versioningAvailable;
@@ -652,13 +660,6 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       if (!window.confirm('현재 작업을 커밋하고 이 버전의 내용으로 복원할까요? 파일은 저장할 때까지 바뀌지 않습니다.')) return;
       void perform(() => controller.restore(selected.id));
     });
-    const branch = el('button', 'ag-versions-secondary', '여기서 브랜치');
-    branch.type = 'button';
-    branch.dataset.versionMutation = 'true';
-    branch.addEventListener('click', () => void (async () => {
-      const name = await askName('새 브랜치 이름');
-      if (name) await perform(() => controller.createBranch(name, selected.id));
-    })());
     const tag = el('button', 'ag-versions-secondary', '태그');
     tag.type = 'button';
     tag.dataset.versionMutation = 'true';
@@ -681,7 +682,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       });
       actions.appendChild(adopt);
     }
-    actions.append(branch, tag);
+    actions.append(tag);
     if (selected.isHead) {
       const amend = el('button', 'ag-versions-quiet', '메시지 수정');
       amend.type = 'button';
@@ -1036,6 +1037,12 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       optional: true,
     });
     if (message !== null) await perform(() => createCheckpointAndSelect(message));
+  })());
+  branchButton.addEventListener('click', () => void (async () => {
+    const targetId = selectedCommitId ?? current.commits.find((commit) => commit.isHead)?.id ?? current.commits[0]?.id;
+    if (!targetId) return;
+    const name = await askName('새 브랜치 이름');
+    if (name) await perform(() => controller.createBranch(name, targetId));
   })());
   mergeButton.addEventListener('click', () => void (async () => {
     const candidates = current.branches.filter((branch) => !branch.isActive);
