@@ -534,8 +534,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let workflowTransitionPending = false;
   /** chat-started 후 입력기를 여는 건 마지막으로 요청한 스레드뿐이다. */
   let chatStartPendingThreadId: string | null = null;
-  /** 계획 모드로 들어갈 때 안전 권한이면 전환 완료 후 전체 접근을 기본 적용한다. */
-  let planPermissionDefaultPending = false;
   /** 현재 스트리밍 중인 assistant 텍스트 (tool-call 이후에는 새로 연다). */
   let streamBubble: HTMLElement | null = null;
   const toolRows = new Map<string, ToolRowState>();
@@ -651,6 +649,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     : initialWorkflowState.latestPlan;
   /** 서버가 현재 살아 있다고 말한 계획만 승인할 수 있다(기록 복원본은 읽기 전용). */
   let planApprovable = activePlan !== null && planningPhase === 'awaiting-approval';
+  let planActionPending = false;
   /** 이 채팅에서 원격 브라우저 전체 제어 경고를 이미 받았는가. */
   let browserbaseAcknowledged = chatWorkflow === 'plan';
   /** 계획 모드 전환이 서버에서 확인된 뒤에만 활성화 안내를 표시한다. */
@@ -2479,11 +2478,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function updatePermissionButton(): void {
     const unrestricted = permissionProfile === 'unrestricted';
+    const planReadOnly = chatWorkflow === 'plan' && planningPhase !== 'implementing';
     permissionBtn.textContent = unrestricted ? '전체' : '안전';
-    permissionBtn.setAttribute('aria-label', unrestricted ? '에이전트 권한: 전체 접근' : '에이전트 권한: 안전');
+    permissionBtn.setAttribute(
+      'aria-label',
+      unrestricted && planReadOnly
+        ? '실행 단계 권한: 전체 접근, 계획 단계는 읽기 전용'
+        : unrestricted ? '에이전트 권한: 전체 접근' : '에이전트 권한: 안전',
+    );
     permissionBtn.setAttribute('aria-pressed', unrestricted ? 'true' : 'false');
     permissionBtn.classList.toggle('ag-permission-unrestricted', unrestricted);
-    permissionBtn.title = unrestricted
+    permissionBtn.title = unrestricted && planReadOnly
+      ? '계획 단계는 읽기 전용입니다. 승인 후 실행 단계부터 전체 접근을 적용합니다. 클릭하여 안전 모드로 전환'
+      : unrestricted
       ? '에이전트가 승인 없이 문서를 편집하고, 파일·명령이 노트북 전체에 접근할 수 있습니다. 클릭하여 안전 모드로 전환'
       : '문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영됩니다. 파일과 명령은 프로젝트 안에서만 사용합니다';
     refreshSidebarWidthMin();
@@ -2491,12 +2498,22 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   permissionBtn.addEventListener('click', () => {
     if (isControlLocked()) return;
+    let nextProfile: PermissionProfile;
     if (permissionProfile === 'safe') {
       const confirmed = window.confirm('전체 접근을 켜면 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이 채팅에서 계속 허용할까요?');
       if (!confirmed) return;
-      bridge.setPermissionProfile('unrestricted');
+      nextProfile = 'unrestricted';
     } else {
-      bridge.setPermissionProfile('safe');
+      nextProfile = 'safe';
+    }
+    workflowTransitionPending = true;
+    updateComposer();
+    try {
+      bridge.setPermissionProfile(nextProfile);
+    } catch (err) {
+      workflowTransitionPending = false;
+      updateComposer();
+      systemMessage(`권한 전환 실패: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
   updatePermissionButton();
@@ -3076,7 +3093,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       bridge.interrupt();
       return;
     }
-    if (planningPhase === 'switching' || chatStartPendingThreadId !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
+    if (planningPhase === 'switching' || workflowTransitionPending || planActionPending
+      || chatStartPendingThreadId !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
     let text = input.value.trim();
     if ((!text && !activeComposerSkill && !referenceLibrary.hasDrafts()) || connState !== 'connected') return;
     if (referenceLibrary.hasImageDrafts() && !modelSupportsImages(selectedAgent, selectedModel)) {
@@ -3163,11 +3181,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     // protocol은 비어 있지 않은 text를 요구하므로 명시적 slash 호출 자체를
     // 요청 본문으로 보낸다. 자연어 fallback을 UI나 기록에 숨겨 넣지 않는다.
     const requestText = requestTextForSkillInvocation(text, skillNameForMessage);
-    // 승인 대기 중 입력은 언제나 계획 수정 의견이다. '네'/'승인' 같은
-    // 텍스트로는 절대 승인되지 않는다 — 승인은 계획 카드의 버튼뿐.
-    if (chatWorkflow === 'plan' && planningPhase === 'awaiting-approval') {
-      setPlanningPhase('planning');
-    }
     const staged = referenceLibrary.takeReadyDrafts();
     const messageAttachments: ThreadAttachment[] = staged.map((file) => ({
       stageId: file.id,
@@ -4224,12 +4237,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       const questionPending = questionController.hasPending();
       const questionUsesComposer = questionController.usesComposerForOther();
       input.disabled = connState !== 'connected' || attachmentsSending || chatStarting
+        || workflowTransitionPending || planActionPending
         || (questionPending && !questionUsesComposer);
       send.disabled = connState !== 'connected' || attachmentsSending || chatStarting
+        || workflowTransitionPending || planActionPending
         || (!questionPending && referenceLibrary.hasBlockingDrafts());
       composerSkillClear.disabled = input.disabled;
       input.placeholder = questionPending
         ? questionUsesComposer ? '직접 답변을 입력하세요' : '위 질문에 답해 주세요'
+        : workflowTransitionPending || planActionPending
+        ? '전환을 적용하는 중…'
         : chatStarting
         ? '채팅을 여는 중…'
         : activeComposerSkill
@@ -4251,6 +4268,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     send.classList.toggle('ag-stop', turnRunning && !(questionPending && questionUsesComposer));
     // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
     sendHint.hidden = (turnRunning && !(questionPending && questionUsesComposer)) || attachmentsSending || chatStartPendingThreadId !== null
+      || workflowTransitionPending || planActionPending
       || referenceLibrary.hasBlockingDrafts() || connState !== 'connected' || readOnlyDocLabel !== null;
     // 실행 중이거나 작업 방식/계획→실행 전환 중에는 모드·모델·권한을 잠근다.
     const controlsLocked = isControlLocked();
@@ -4928,9 +4946,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         }
         break;
       case 'permission-changed':
+        workflowTransitionPending = false;
         permissionProfile = e.permissionProfile;
         updatePermissionButton();
-        systemMessage(permissionProfile === 'unrestricted' ? '전체 접근을 켰습니다. 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이미 검토 대기 중인 변경은 그대로 남습니다.' : '안전 모드로 돌아왔습니다. 문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영되고, 파일과 명령은 프로젝트 범위로 제한됩니다.');
+        updateComposer();
+        systemMessage(permissionProfile === 'unrestricted'
+          ? chatWorkflow === 'plan' && planningPhase !== 'implementing'
+            ? '전체 접근을 켰습니다. 계획 단계는 계속 읽기 전용이며, 계획을 승인해 실행 단계로 전환하면 전체 접근을 적용합니다.'
+            : '전체 접근을 켰습니다. 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이미 검토 대기 중인 변경은 그대로 남습니다.'
+          : '안전 모드로 돌아왔습니다. 문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영되고, 파일과 명령은 프로젝트 범위로 제한됩니다.');
         break;
       case 'reference-status': {
         const message = currentThread.messages.find((item) => item.messageId === e.messageId);
@@ -5166,7 +5190,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         systemMessage(`오류 (${e.code}): ${e.message}`);
         if (e.code === 'AGENT_SPAWN_FAILED') appendSpawnRetryAction();
         workflowTransitionPending = false;
-        planPermissionDefaultPending = false;
+        planActionPending = false;
         syncPlanningFromBridge();
         setTurnRunning(bridge.isTurnRunning());
         dropRunStatusIfIdle();
@@ -5225,7 +5249,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   /** 실행 중이거나 첨부를 커밋하거나 전환 중에는 모드·모델·권한을 바꿀 수 없다. */
   function isControlLocked(): boolean {
     return turnRunning || attachmentsSending || chatStartPendingThreadId !== null
-      || workflowTransitionPending || planningPhase === 'switching';
+      || workflowTransitionPending || planActionPending || planningPhase === 'switching';
   }
 
   function hasPendingDocumentEdits(): boolean {
@@ -5239,6 +5263,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     phaseBadge.dataset.phase = planningPhase;
     root.dataset.workflow = chatWorkflow;
     root.dataset.planningPhase = planningPhase;
+    updatePermissionButton();
     refreshSidebarWidthMin();
   }
 
@@ -5303,12 +5328,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         browserbaseAcknowledged = true;
         browserbaseNoticePending = true;
       }
-      planPermissionDefaultPending = permissionProfile === 'safe';
-    } else {
-      planPermissionDefaultPending = false;
     }
     workflowTransitionPending = true;
-    applyWorkflow(next);
     bridge.setWorkflow(next);
     input.focus();
   }
@@ -5439,6 +5460,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (!activePlanHistorical) {
       const approvableNow = planApprovable
         && planningPhase === 'awaiting-approval'
+        && !planActionPending
         && !turnRunning;
       const footer = el('footer', 'ag-plan-footer');
       const actions = el('div', 'ag-review-actions ag-plan-actions');
@@ -5448,7 +5470,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       approve.addEventListener('click', () => approveActivePlan(plan.planId));
       const revise = el('button', 'ag-reject ag-plan-revise', '수정 요청');
       revise.type = 'button';
-      revise.disabled = !planApprovable || planningPhase === 'switching' || turnRunning;
+      revise.disabled = !planApprovable || planActionPending || planningPhase === 'switching' || turnRunning;
       revise.addEventListener('click', () => requestPlanRevision(plan.planId));
       actions.append(approve, revise);
       footer.appendChild(actions);
@@ -5468,28 +5490,31 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function approveActivePlan(planId: string): void {
-    if (!planApprovable || planningPhase !== 'awaiting-approval' || turnRunning) return;
+    if (!planApprovable || planActionPending || planningPhase !== 'awaiting-approval' || turnRunning) return;
     // 정확히 이 계획 id 로만 승인한다 — 오래된 카드가 다른 계획을 통과시키지 않는다.
-    setPlanningPhase('switching');
-    systemMessage('계획을 승인했습니다. 실행 단계로 전환 중입니다.');
+    planActionPending = true;
+    rebuildReview();
     try {
       bridge.approvePlan(planId);
     } catch (err) {
-      setPlanningPhase('awaiting-approval');
+      planActionPending = false;
+      rebuildReview();
       systemMessage(`계획 승인 실패: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   function requestPlanRevision(planId: string): void {
-    if (!planApprovable) return;
+    if (!planApprovable || planActionPending) return;
+    planActionPending = true;
+    rebuildReview();
     try {
       bridge.requestPlanChanges(planId);
     } catch (err) {
+      planActionPending = false;
+      rebuildReview();
       systemMessage(`수정 요청 실패: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
-    settlePlanAttention();
-    setPlanningPhase('planning');
     systemMessage('수정 요청을 보냈습니다. 바꾸고 싶은 부분을 입력창에 적어 주세요.');
     updateComposer();
     input.focus();
@@ -5500,13 +5525,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     switch (e.type) {
       case 'workflow-changed':
         workflowTransitionPending = false;
+        planActionPending = false;
         applyWorkflow(e.workflow);
         setPlanningPhase(e.phase);
-        if (e.workflow === 'plan' && planPermissionDefaultPending) {
-          planPermissionDefaultPending = false;
-          bridge.setPermissionProfile('unrestricted');
-        } else if (e.workflow === 'direct') {
-          planPermissionDefaultPending = false;
+        if (e.phase === 'awaiting-approval' && e.latestPlan) {
+          activePlan = e.latestPlan;
+          activePlanHistorical = false;
+          planApprovable = true;
+          recordPlan(e.latestPlan);
+          rebuildReview();
         }
         if (e.workflow === 'plan' && browserbaseNoticePending) {
           browserbaseNoticePending = false;
@@ -5516,6 +5543,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         }
         return true;
       case 'plan-ready':
+        planActionPending = false;
         turnPresentedPlan = true;
         activePlan = e.plan;
         activePlanHistorical = false;
@@ -5532,11 +5560,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       case 'plan-approved':
         // 서버가 승인했다고 말한 계획이 지금 카드와 다르면 표시를 건드리지 않는다.
         if (activePlan && e.planId && e.planId !== activePlan.planId) return true;
+        planActionPending = false;
         planApprovable = false;
         settlePlanAttention();
         setPlanningPhase(e.phase);
+        systemMessage('계획을 승인했습니다. 실행 단계로 전환 중입니다.');
         return true;
       case 'implementation-started':
+        planActionPending = false;
         planApprovable = false;
         settlePlanAttention();
         closePlanForExecution(e.planId || activePlan?.planId || '');
@@ -5544,6 +5575,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         rebuildReview();
         return true;
       case 'plan-invalidated':
+        planActionPending = false;
         planApprovable = false;
         settlePlanAttention();
         activePlanHistorical = activePlan !== null;
@@ -5786,17 +5818,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (readOnlyDocLabel !== null) return { ok: false, reason: '다른 문서의 채팅을 열람 중입니다' };
     if (connState !== 'connected') return { ok: false, reason: '에이전트 허브에 연결되어 있지 않습니다' };
     if (turnRunning) return { ok: false, reason: '에이전트가 응답 중입니다' };
-    if (planningPhase === 'switching' || chatStartPendingThreadId !== null || attachmentsSending) {
+    if (planningPhase === 'switching' || workflowTransitionPending || planActionPending
+      || chatStartPendingThreadId !== null || attachmentsSending) {
       return { ok: false, reason: '잠시 후 다시 시도해 주세요' };
     }
     setCollapsed(false);
     if (threadsPanelOpen) setThreadsPanelOpen(false);
     if (skillsPanelOpen) setSkillsPanelOpen(false);
     if (settingsPanelOpen) setSettingsPanelOpen(false);
-    // 승인 대기 중 입력은 계획 수정 의견으로 취급한다 (입력기와 같은 규칙).
-    if (chatWorkflow === 'plan' && planningPhase === 'awaiting-approval') {
-      setPlanningPhase('planning');
-    }
     const userMessage = recordUserMessage(prompt, [], {
       label: submission.selection.label,
       excerpt: submission.selection.excerpt,

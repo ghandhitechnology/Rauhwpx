@@ -81,11 +81,21 @@ function reply(result) {
   return (frame, process) => process.send({ id: frame.id, result });
 }
 
-function appServerResponder({ features = [feature(true)], enableFails = false } = {}) {
+function appServerResponder({
+  features = [feature(true)],
+  enableFails = false,
+  collaborationModes = [
+    { name: 'Default', mode: 'default', model: null, reasoning_effort: null },
+    { name: 'Plan', mode: 'plan', model: null, reasoning_effort: null },
+  ],
+} = {}) {
   let currentFeatures = structuredClone(features);
   return (frame, process) => {
     if (frame.method === 'initialize') return reply({ userAgent: 'codex/0.149.0' })(frame, process);
     if (frame.method === 'initialized') return;
+    if (frame.method === 'collaborationMode/list') {
+      return reply({ data: collaborationModes })(frame, process);
+    }
     if (frame.method === 'experimentalFeature/list') {
       return reply({ data: currentFeatures, nextCursor: null })(frame, process);
     }
@@ -127,6 +137,7 @@ function fakeWatcher() {
 function harness(t, {
   workflow = 'direct',
   phase = 'implementing',
+  permissionProfile = 'safe',
   responder = appServerResponder(),
   requestUserInput = async () => ({ status: 'cancelled', reason: 'user-stop' }),
 } = {}) {
@@ -134,7 +145,7 @@ function harness(t, {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const events = [];
   const spawns = [];
-  const session = createCodexSession({
+  const opts = {
     rootDir: root,
     codexHome: path.join(root, '.codex'),
     mcpScriptPath: '/tmp/mcp-stdio.mjs',
@@ -142,14 +153,15 @@ function harness(t, {
     token: 'secret',
     model: 'test-model',
     effort: 'high',
-    permissionProfile: 'safe',
+    permissionProfile,
     workflow,
     phase,
     capabilityEpoch: 1,
     agentRole: 'chat',
     requestUserInput,
     onEvent: (event) => events.push(event),
-  }, {
+  };
+  const session = createCodexSession(opts, {
     spawnProcess(command, argv, options) {
       const native = argv[0] === 'app-server';
       const process = new FakeProcess(native ? responder : null);
@@ -160,7 +172,7 @@ function harness(t, {
     terminateProcess(process) { process.kill('SIGTERM'); },
     createRolloutWatcher: fakeWatcher,
   });
-  return { session, events, spawns };
+  return { session, events, spawns, opts };
 }
 
 async function settle(rounds = 12) {
@@ -277,10 +289,18 @@ test('direct mode negotiates native input and answers the original app-server re
 });
 
 test('planning mode remains native without the default-mode feature', async (t) => {
+  let capturedRequest;
   const h = harness(t, {
     workflow: 'plan',
     phase: 'planning',
     responder: appServerResponder({ features: [] }),
+    requestUserInput: async (request) => {
+      capturedRequest = request;
+      return {
+        status: 'answered',
+        answers: { scope: { selectedOptionIds: ['option-1'] } },
+      };
+    },
   });
   h.session.sendUserMessage('Plan it');
   await settle();
@@ -292,9 +312,80 @@ test('planning mode remains native without the default-mode feature', async (t) 
     reasoning_effort: 'high',
     developer_instructions: null,
   });
+  assert.equal(h.spawns[0].process.frames.some((frame) => frame.method === 'collaborationMode/list'), true);
   assert.equal(h.spawns[0].process.frames.some((frame) => frame.method === 'experimentalFeature/enablement/set'), false);
-  h.session.interrupt();
+  assert.equal(h.spawns[0].process.frames.some((frame) => frame.method === 'experimentalFeature/list'), false);
+
+  h.spawns[0].process.send({
+    id: 'plan-question-rpc',
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-native',
+      turnId: 'turn-native',
+      itemId: 'plan-question',
+      questions: [{
+        id: 'scope', header: 'Scope', question: 'Which scope?',
+        isOther: false, isSecret: false,
+        options: [
+          { label: 'Focused', description: 'Only the requested change' },
+          { label: 'Broad', description: 'Include adjacent cleanup' },
+        ],
+      }],
+      isBlocking: true,
+    },
+  });
   await settle();
+  assert.ok(capturedRequest, JSON.stringify(h.spawns[0].process.frames.at(-1)));
+  assert.equal(capturedRequest.providerRequestId, 'plan-question');
+  assert.deepEqual(h.spawns[0].process.frames.at(-1), {
+    id: 'plan-question-rpc',
+    result: { answers: { scope: { answers: ['Focused'] } } },
+  });
+
+  h.spawns[0].process.send({
+    method: 'turn/completed',
+    params: { threadId: 'thread-native', turn: { id: 'turn-native', status: 'completed' } },
+  });
+  await settle();
+  await h.session.dispose();
+});
+
+for (const entry of [
+  { name: 'direct safe', workflow: 'direct', phase: 'implementing', permissionProfile: 'safe', collaboration: 'default', sandbox: 'workspaceWrite' },
+  { name: 'direct full', workflow: 'direct', phase: 'implementing', permissionProfile: 'unrestricted', collaboration: 'default', sandbox: 'dangerFullAccess' },
+  { name: 'awaiting approval full', workflow: 'plan', phase: 'awaiting-approval', permissionProfile: 'unrestricted', collaboration: 'plan', sandbox: 'readOnly' },
+  { name: 'switching safe', workflow: 'plan', phase: 'switching', permissionProfile: 'safe', collaboration: 'plan', sandbox: 'readOnly' },
+  { name: 'build safe', workflow: 'plan', phase: 'implementing', permissionProfile: 'safe', collaboration: 'default', sandbox: 'workspaceWrite' },
+  { name: 'build full', workflow: 'plan', phase: 'implementing', permissionProfile: 'unrestricted', collaboration: 'default', sandbox: 'dangerFullAccess' },
+]) {
+  test(`Codex intent/access matrix: ${entry.name}`, async (t) => {
+    const h = harness(t, entry);
+    h.session.sendUserMessage('mode matrix');
+    await settle();
+    const turn = h.spawns[0].process.frames.find((frame) => frame.method === 'turn/start');
+    assert.equal(turn.params.collaborationMode.mode, entry.collaboration);
+    assert.equal(turn.params.sandboxPolicy.type, entry.sandbox);
+    h.session.interrupt();
+    await settle();
+    await h.session.dispose();
+  });
+}
+
+test('Plan fails closed when Codex does not advertise native Plan mode', async (t) => {
+  const h = harness(t, {
+    workflow: 'plan',
+    phase: 'planning',
+    responder: appServerResponder({
+      collaborationModes: [{ name: 'Default', mode: 'default', model: null, reasoning_effort: null }],
+    }),
+  });
+  h.session.sendUserMessage('Plan natively');
+  await settle(24);
+  assert.equal(h.spawns.length, 1, 'must not spawn legacy exec');
+  assert.equal(h.spawns[0].native, true);
+  assert.equal(h.spawns[0].process.frames.some((frame) => frame.method === 'thread/start'), false);
+  assert.match(h.events.find((event) => event.type === 'error')?.message ?? '', /native Plan mode is unavailable/);
+  assert.equal(h.events.at(-1)?.stopReason, 'failed');
   await h.session.dispose();
 });
 
@@ -385,6 +476,11 @@ test('mode changes restart app-server while idle, resume the thread, and select 
   });
   await settle();
   await h.session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 });
+  assert.equal(h.spawns.length, 2, 'Plan readiness starts eagerly before the mode change resolves');
+  const readyMethods = h.spawns[1].process.frames.map((frame) => frame.method);
+  assert.ok(readyMethods.includes('collaborationMode/list'));
+  assert.ok(readyMethods.includes('thread/resume'));
+  assert.equal(readyMethods.includes('turn/start'), false);
   h.session.sendUserMessage('Plan next');
   await settle(24);
 
@@ -397,6 +493,93 @@ test('mode changes restart app-server while idle, resume the thread, and select 
   assert.equal(secondTurn.params.threadId, 'thread-native');
   h.session.interrupt();
   await settle();
+  await h.session.dispose();
+});
+
+test('setExecutionMode rejects before ACK when native Plan readiness is absent', async (t) => {
+  const h = harness(t, {
+    responder: appServerResponder({
+      collaborationModes: [{ name: 'Default', mode: 'default', model: null, reasoning_effort: null }],
+    }),
+  });
+  h.session.sendUserMessage('First');
+  await settle();
+  h.spawns[0].process.send({
+    method: 'turn/completed',
+    params: { threadId: 'thread-native', turn: { id: 'turn-native', status: 'completed' } },
+  });
+  await settle();
+  await assert.rejects(
+    h.session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 }),
+    /native Plan mode is unavailable/,
+  );
+  assert.deepEqual(
+    [h.opts.workflow, h.opts.phase, h.opts.capabilityEpoch],
+    ['direct', 'implementing', 1],
+    'a rejected Plan transition rolls provider state back',
+  );
+  assert.equal(h.spawns.length, 2);
+  assert.equal(h.spawns[1].process.frames.some((frame) => frame.method === 'turn/start'), false);
+  await h.session.dispose();
+});
+
+test('permission and mode changes share one serialized Codex restart barrier', async (t) => {
+  const h = harness(t);
+  h.session.sendUserMessage('First');
+  await settle();
+  h.spawns[0].process.send({
+    method: 'turn/completed',
+    params: { threadId: 'thread-native', turn: { id: 'turn-native', status: 'completed' } },
+  });
+  await settle();
+
+  const permissionChange = h.session.setPermissionProfile('unrestricted');
+  const modeChange = h.session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 });
+  await Promise.all([permissionChange, modeChange]);
+  assert.equal(h.spawns.length, 2);
+  assert.equal(h.spawns[0].process.signalCode, 'SIGTERM');
+
+  h.session.sendUserMessage('Plan after both changes');
+  await settle();
+  const turn = h.spawns[1].process.frames.find((frame) => frame.method === 'turn/start');
+  assert.equal(turn.params.collaborationMode.mode, 'plan');
+  assert.equal(turn.params.sandboxPolicy.type, 'readOnly', 'full access remains orthogonal to Plan');
+  h.session.interrupt();
+  await settle();
+  await h.session.dispose();
+});
+
+test('a Plan permission change re-proves native Plan before resolving', async (t) => {
+  const h = harness(t, { workflow: 'plan', phase: 'planning' });
+  h.session.sendUserMessage('First plan turn');
+  await settle();
+  h.spawns[0].process.send({
+    method: 'turn/completed',
+    params: { threadId: 'thread-native', turn: { id: 'turn-native', status: 'completed' } },
+  });
+  await settle();
+
+  await h.session.setPermissionProfile('unrestricted');
+  assert.equal(h.spawns.length, 2);
+  const readinessMethods = h.spawns[1].process.frames.map((frame) => frame.method);
+  assert.ok(readinessMethods.includes('collaborationMode/list'));
+  assert.ok(readinessMethods.includes('thread/resume'));
+  assert.equal(readinessMethods.includes('turn/start'), false);
+  await h.session.dispose();
+});
+
+test('an active legacy Codex session cannot accept Plan mode', async (t) => {
+  const h = harness(t, { responder: appServerResponder({ features: [] }) });
+  h.session.sendUserMessage('Use fallback');
+  await settle(24);
+  const legacy = h.spawns.at(-1);
+  assert.equal(legacy.native, false);
+  legacy.process.exit(0);
+  await settle();
+  await assert.rejects(
+    h.session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 }),
+    /native Plan mode is unavailable while using legacy exec/,
+  );
   await h.session.dispose();
 });
 

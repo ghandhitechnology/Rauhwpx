@@ -14,14 +14,21 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createClaudeSession, buildClaudeArgv, prepareClaudeHome } from '../agents/claude.mjs';
+import {
+  buildClaudeArgv,
+  buildClaudeSdkOptions,
+  createClaudeSession,
+  prepareClaudeHome,
+} from '../agents/claude.mjs';
 import { createCodexSession, buildCodexArgv, prepareCodexHome } from '../agents/codex.mjs';
 import {
   mcpCapabilityEnv,
   mcpRuntimeFor,
   parallelWorkBriefFor,
+  providerInteractionMode,
   providerToolNoteFor,
   systemBriefFor,
+  validateExecutionMode,
 } from '../agents/backend.mjs';
 
 const testHome = mkdtempSync(path.join(os.tmpdir(), 'rhwp-backend-test-'));
@@ -149,13 +156,41 @@ test('image roots cannot smuggle extra allowlisted paths through the platform de
   );
 });
 
+test('execution mode validation rejects impossible direct workflow phases', () => {
+  for (const phase of ['planning', 'awaiting-approval', 'switching']) {
+    assert.throws(
+      () => validateExecutionMode({ workflow: 'direct', phase, capabilityEpoch: 1 }),
+      new RegExp(`Invalid execution mode: direct/${phase}`),
+    );
+  }
+  assert.doesNotThrow(() => validateExecutionMode({
+    workflow: 'direct', phase: 'implementing', capabilityEpoch: 1,
+  }));
+});
+
+test('provider interaction modes fail closed on explicit invalid state', () => {
+  assert.equal(providerInteractionMode({}), 'default');
+  assert.throws(
+    () => providerInteractionMode({ workflow: 'unknown', phase: 'planning' }),
+    /Unknown workflow: unknown/,
+  );
+  assert.throws(
+    () => providerInteractionMode({ workflow: 'plan', phase: 'unknown' }),
+    /Unknown execution phase: unknown/,
+  );
+  assert.throws(
+    () => providerInteractionMode({ workflow: 'direct', phase: 'planning' }),
+    /Invalid execution mode: direct\/planning/,
+  );
+});
+
 const matrix = [
-  { name: 'direct safe', workflow: 'direct', phase: 'implementing', permissionProfile: 'safe', claudeWrite: true, claudeBypass: false, codexSandbox: 'workspace-write', planCapabilities: false },
-  { name: 'direct full', workflow: 'direct', phase: 'implementing', permissionProfile: 'unrestricted', claudeWrite: true, claudeBypass: true, codexSandbox: 'danger-full-access', planCapabilities: false },
-  { name: 'planning safe', workflow: 'plan', phase: 'planning', permissionProfile: 'safe', claudeWrite: false, claudeBypass: false, codexSandbox: 'read-only', planCapabilities: true },
-  { name: 'planning full', workflow: 'plan', phase: 'planning', permissionProfile: 'unrestricted', claudeWrite: false, claudeBypass: false, codexSandbox: 'read-only', planCapabilities: true },
-  { name: 'implementing safe', workflow: 'plan', phase: 'implementing', permissionProfile: 'safe', claudeWrite: true, claudeBypass: false, codexSandbox: 'workspace-write', planCapabilities: true },
-  { name: 'implementing full', workflow: 'plan', phase: 'implementing', permissionProfile: 'unrestricted', claudeWrite: true, claudeBypass: true, codexSandbox: 'danger-full-access', planCapabilities: true },
+  { name: 'direct safe', workflow: 'direct', phase: 'implementing', permissionProfile: 'safe', interactionMode: 'default', claudeMode: 'dontAsk', claudeWrite: true, claudeBypass: false, codexSandbox: 'workspace-write', planCapabilities: false },
+  { name: 'direct full', workflow: 'direct', phase: 'implementing', permissionProfile: 'unrestricted', interactionMode: 'default', claudeMode: 'bypassPermissions', claudeWrite: true, claudeBypass: true, codexSandbox: 'danger-full-access', planCapabilities: false },
+  { name: 'planning safe', workflow: 'plan', phase: 'planning', permissionProfile: 'safe', interactionMode: 'plan', claudeMode: 'plan', claudeWrite: false, claudeBypass: false, codexSandbox: 'read-only', planCapabilities: true },
+  { name: 'planning full', workflow: 'plan', phase: 'planning', permissionProfile: 'unrestricted', interactionMode: 'plan', claudeMode: 'plan', claudeWrite: false, claudeBypass: false, codexSandbox: 'read-only', planCapabilities: true },
+  { name: 'implementing safe', workflow: 'plan', phase: 'implementing', permissionProfile: 'safe', interactionMode: 'build', claudeMode: 'dontAsk', claudeWrite: true, claudeBypass: false, codexSandbox: 'workspace-write', planCapabilities: true },
+  { name: 'implementing full', workflow: 'plan', phase: 'implementing', permissionProfile: 'unrestricted', interactionMode: 'build', claudeMode: 'bypassPermissions', claudeWrite: true, claudeBypass: true, codexSandbox: 'danger-full-access', planCapabilities: true },
 ];
 
 for (const entry of matrix) {
@@ -166,6 +201,8 @@ for (const entry of matrix) {
     const claudeSettings = JSON.parse(argValue(claude, '--settings'));
     const claudeMcp = JSON.parse(argValue(claude, '--mcp-config')).mcpServers.rhwp;
 
+    assert.equal(providerInteractionMode(opts), entry.interactionMode);
+    assert.equal(argValue(claude, '--permission-mode'), entry.claudeMode);
     assert.equal(claudeTools.includes('Write'), entry.claudeWrite);
     assert.equal(claudeTools.includes('Edit'), entry.claudeWrite);
     assert.ok(claudeTools.includes('Read'));
@@ -226,9 +263,37 @@ test('awaiting approval and switching remain read-only regardless of full profil
     const opts = { ...baseOpts, workflow: 'plan', phase, capabilityEpoch: 9, permissionProfile: 'unrestricted' };
     const claude = buildClaudeArgv(opts, sessionId, false);
     assert.equal(argValue(claude, '--tools').split(',').includes('Write'), false);
-    assert.ok(claude.includes('dontAsk'));
+    assert.equal(argValue(claude, '--permission-mode'), 'plan');
+    assert.equal(providerInteractionMode(opts), 'plan');
     assert.ok(buildCodexArgv(opts, null).includes('sandbox_mode="read-only"'));
   }
+});
+
+test('Claude SDK projects plan and build intent independently from access', () => {
+  const requestUserInput = async () => ({ status: 'cancelled', reason: 'user-stop' });
+  const plan = buildClaudeSdkOptions({
+    ...baseOpts,
+    workflow: 'plan',
+    phase: 'awaiting-approval',
+    permissionProfile: 'unrestricted',
+    requestUserInput,
+    agentRole: 'chat',
+  }, sessionId, false, new AbortController());
+  assert.equal(plan.permissionMode, 'plan');
+  assert.equal(plan.allowDangerouslySkipPermissions, undefined);
+  assert.equal(plan.tools.includes('Write'), false);
+
+  const build = buildClaudeSdkOptions({
+    ...baseOpts,
+    workflow: 'plan',
+    phase: 'implementing',
+    permissionProfile: 'unrestricted',
+    requestUserInput,
+    agentRole: 'chat',
+  }, sessionId, false, new AbortController());
+  assert.equal(build.permissionMode, 'bypassPermissions');
+  assert.equal(build.allowDangerouslySkipPermissions, true);
+  assert.equal(build.tools.includes('Write'), true);
 });
 
 test('phase prompts separate planning from approved implementation', () => {

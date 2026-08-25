@@ -19,7 +19,13 @@ import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS } from './tools.mjs';
 import { replayMissedTurnEnd } from './turn-outcome-replay.mjs';
-import { PlanningState, authorizeToolCall, buildApprovedPlanPrompt, workflowError } from './planning-state.mjs';
+import {
+  PlanningState,
+  authorizeToolCall,
+  buildApprovedPlanPrompt,
+  isExplicitImplementationApproval,
+  workflowError,
+} from './planning-state.mjs';
 import { DownloadManager } from './download-manager.mjs';
 import { DocumentSnapshotManager } from './document-snapshot-manager.mjs';
 import { ArtifactStore } from './artifact-store.mjs';
@@ -1239,7 +1245,9 @@ function resolvePermissionProfile(value) {
 }
 
 function resolveWorkflow(value) {
-  return value === 'plan' ? 'plan' : 'direct';
+  if (value === undefined || value === null) return 'direct';
+  if (value === 'direct' || value === 'plan') return value;
+  throw workflowError('INVALID_WORKFLOW', `Unknown workflow: ${String(value)}`);
 }
 
 const CHAT_HISTORY_MAX_MESSAGES = 40;
@@ -1321,7 +1329,18 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
       sendJson(sock, { v: 1, type: 'chat-error', code: 'PLAN_NOT_FOUND', message: 'The latest plan is unavailable; return to planning and present it again.' });
       return;
     }
-    void requestImplementationPlanChanges(record, sock, { planId, feedback: msg.text })
+    const hasAttachments = messageAttachments.length > 0
+      || (Array.isArray(msg.stagedReferenceIds) && msg.stagedReferenceIds.length > 0);
+    if (!hasAttachments && isExplicitImplementationApproval(msg.text)) {
+      void enqueueWorkflowTransition(record, activeSession, () => approveImplementationPlan(record, sock, { planId }))
+        .catch((error) => sendChatError(sock, error));
+      return;
+    }
+    void enqueueWorkflowTransition(
+      record,
+      activeSession,
+      () => requestImplementationPlanChanges(record, sock, { planId, feedback: msg.text }),
+    )
       .catch((error) => sendChatError(sock, error));
     return;
   }
@@ -1501,7 +1520,12 @@ async function startSession(
     bootstrapHistory: normalizeChatHistory(requestedHistory),
     planning,
     workflowTransition: Promise.resolve(),
+    pendingTransitions: 0,
   };
+  if (workflow === 'plan') {
+    requireWorkflowSwitchBackend(record.agentSession);
+    await record.agentSession.backend.setExecutionMode(providerModeRequest(record.agentSession, 'planning'));
+  }
   queueMicrotask(() => drainTemplateCompletion(record));
   return record.agentSession;
 }
@@ -1541,6 +1565,32 @@ function requireWorkflowSwitchBackend(activeSession) {
       'This provider backend does not yet implement setExecutionMode(); update the provider integration before approving or revising plans.',
     );
   }
+}
+
+function enqueueWorkflowTransition(record, transitionOwner, transitionFn) {
+  transitionOwner.pendingTransitions += 1;
+  const transition = transitionOwner.workflowTransition.then(() => {
+    if (record.agentSession !== transitionOwner) return undefined;
+    return transitionFn();
+  });
+  const trackedTransition = transition.finally(() => {
+    transitionOwner.pendingTransitions = Math.max(0, transitionOwner.pendingTransitions - 1);
+  });
+  transitionOwner.workflowTransition = trackedTransition.catch(() => undefined);
+  return trackedTransition;
+}
+
+async function setChatPermission(record, sock, msg) {
+  const activeSession = record.agentSession;
+  if (!activeSession) throw workflowError('AGENT_NOT_STARTED', 'Start a chat before changing permissions.');
+  if (activeSession.status === 'running') {
+    throw workflowError('AGENT_BUSY', 'Permissions can only change between turns.');
+  }
+  const profile = resolvePermissionProfile(msg.permissionProfile);
+  await Promise.resolve(activeSession.backend.setPermissionProfile(profile));
+  if (record.agentSession !== activeSession) return;
+  activeSession.permissionProfile = profile;
+  sendJson(sock, { v: 1, type: 'chat-permission-changed', permissionProfile: profile });
 }
 
 async function approveImplementationPlan(record, sock, msg) {
@@ -1589,21 +1639,22 @@ async function requestImplementationPlanChanges(record, sock, msg) {
   const activeSession = record.agentSession;
   if (!activeSession) throw workflowError('AGENT_NOT_STARTED', 'Start a chat before requesting plan changes');
   requireWorkflowSwitchBackend(activeSession);
+  const planId = String(msg.planId ?? '');
   activeSession.planning.requestChanges({
-    planId: String(msg.planId ?? ''),
+    planId,
     sessionStatus: activeSession.status,
-  });
-  sendJson(sock, {
-    v: 1,
-    type: 'plan-invalidated',
-    planId: String(msg.planId ?? ''),
-    reason: typeof msg.feedback === 'string' ? msg.feedback : 'changes-requested',
-    ...activeSession.planning.snapshot(),
-    latestPlan: null,
   });
   try {
     await activeSession.backend.setExecutionMode(providerModeRequest(activeSession, 'planning'));
     if (record.agentSession !== activeSession) return;
+    sendJson(sock, {
+      v: 1,
+      type: 'plan-invalidated',
+      planId,
+      reason: typeof msg.feedback === 'string' ? msg.feedback : 'changes-requested',
+      ...activeSession.planning.snapshot(),
+      latestPlan: null,
+    });
     if (typeof msg.feedback === 'string' && msg.feedback.trim()) {
       beginAgentTurn(record, activeSession);
       const revisionPrompt = [
@@ -1619,9 +1670,11 @@ async function requestImplementationPlanChanges(record, sock, msg) {
     }
   } catch (error) {
     if (record.agentSession === activeSession) {
+      activeSession.planning.failRequestChanges(planId);
       activeSession.status = 'idle';
       activeSession.turnId = null;
       record.userQuestionResponseReceipts.clear();
+      emitWorkflowState(record, { reason: 'provider-switch-failed' });
     }
     sendChatError(sock, error, 'BACKEND_SWITCH_FAILED');
   }
@@ -1766,6 +1819,10 @@ async function handleStudioMessage(record, sock, msg) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_NOT_STARTED', message: 'No agent session; send chat-start first.' });
         return;
       }
+      if (record.agentSession.pendingTransitions > 0) {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'WORKFLOW_SWITCHING', message: 'The provider is applying a workflow or permission change.' });
+        return;
+      }
       try {
         assertMessageScope(record.agentSession, msg);
       } catch (error) {
@@ -1835,22 +1892,18 @@ async function handleStudioMessage(record, sock, msg) {
       return;
     }
     case 'chat-permission-set': {
-      if (!record.agentSession) {
+      const transitionOwner = record.agentSession;
+      if (!transitionOwner) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_NOT_STARTED', message: 'Start a chat before changing permissions.' });
         return;
       }
-      if (record.agentSession.status === 'running') {
-        sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_BUSY', message: 'Permissions can only change between turns.' });
-        return;
-      }
-      const profile = resolvePermissionProfile(msg.permissionProfile);
-      try {
-        record.agentSession.backend.setPermissionProfile(profile);
-        record.agentSession.permissionProfile = profile;
-        sendJson(sock, { v: 1, type: 'chat-permission-changed', permissionProfile: profile });
-      } catch (e) {
-        sendJson(sock, { v: 1, type: 'chat-error', code: 'PERMISSION_CHANGE_FAILED', message: String(e?.message ?? e) });
-      }
+      void enqueueWorkflowTransition(record, transitionOwner, () => setChatPermission(record, sock, msg))
+        .catch((e) => sendJson(sock, {
+          v: 1,
+          type: 'chat-error',
+          code: e?.code === 'AGENT_BUSY' ? 'AGENT_BUSY' : 'PERMISSION_CHANGE_FAILED',
+          message: String(e?.message ?? e),
+        }));
       return;
     }
     case 'chat-workflow-set': {
@@ -1859,24 +1912,32 @@ async function handleStudioMessage(record, sock, msg) {
         void setChatWorkflow(record, sock, msg).catch((error) => sendChatError(sock, error));
         return;
       }
-      const transition = transitionOwner.workflowTransition.then(() => {
-        if (record.agentSession !== transitionOwner) return undefined;
-        return setChatWorkflow(record, sock, msg);
-      });
-      transitionOwner.workflowTransition = transition.catch(() => undefined);
+      const transition = enqueueWorkflowTransition(record, transitionOwner, () => setChatWorkflow(record, sock, msg));
       void transition.catch((error) => sendChatError(sock, error));
       return;
     }
     case 'chat-plan-approve':
     case 'implementation-plan-approve':
     case 'plan-approve': {
-      void approveImplementationPlan(record, sock, msg).catch((error) => sendChatError(sock, error));
+      const transitionOwner = record.agentSession;
+      if (!transitionOwner) {
+        void approveImplementationPlan(record, sock, msg).catch((error) => sendChatError(sock, error));
+        return;
+      }
+      void enqueueWorkflowTransition(record, transitionOwner, () => approveImplementationPlan(record, sock, msg))
+        .catch((error) => sendChatError(sock, error));
       return;
     }
     case 'chat-plan-request-changes':
     case 'implementation-plan-request-changes':
     case 'plan-request-changes': {
-      void requestImplementationPlanChanges(record, sock, msg).catch((error) => sendChatError(sock, error));
+      const transitionOwner = record.agentSession;
+      if (!transitionOwner) {
+        void requestImplementationPlanChanges(record, sock, msg).catch((error) => sendChatError(sock, error));
+        return;
+      }
+      void enqueueWorkflowTransition(record, transitionOwner, () => requestImplementationPlanChanges(record, sock, msg))
+        .catch((error) => sendChatError(sock, error));
       return;
     }
     case 'skills-list': {

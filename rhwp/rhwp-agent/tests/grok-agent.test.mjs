@@ -213,9 +213,7 @@ test('unrestricted argv always-approves without a sandbox flag and enables subag
   assert.match(argValue(argv, '--append-system-prompt'), /spawn_subagent/, '전체 접근 브리프에는 병렬 안내가 실린다');
 });
 
-test('planning phases drop Edit, stay on dontAsk and disable subagents', () => {
-  // dontAsk 인 모든 조합(안전 프로필, 그리고 unrestricted 라도 계획 제한 단계)은
-  // spawn_subagent 승인이 자동 취소되므로 서브에이전트를 꺼야 한다.
+test('planning phases use native Plan, drop Edit and disable subagents', () => {
   for (const profile of ['safe', 'unrestricted']) {
     for (const phase of ['planning', 'awaiting-approval', 'switching']) {
       const argv = buildGrokArgv(
@@ -223,7 +221,7 @@ test('planning phases drop Edit, stay on dontAsk and disable subagents', () => {
         's', false, '/g/p',
       );
       const label = `${profile}/${phase}`;
-      assert.equal(argValue(argv, '--permission-mode'), 'dontAsk', label);
+      assert.equal(argValue(argv, '--permission-mode'), 'plan', label);
       assert.equal(argv.includes('--sandbox'), false, label);
       const allows = argv.flatMap((value, index) => (value === '--allow' ? [argv[index + 1]] : []));
       assert.equal(allows.some((rule) => rule.startsWith('Edit(')), false, label);
@@ -291,6 +289,8 @@ test('native ACP keeps one Grok process, registers both question methods and rou
   let creates = 0;
   let cancels = 0;
   let started = false;
+  const configureCalls = [];
+  let restarts = 0;
   const session = createGrokSession({
     ...baseOpts,
     agentRole: 'root',
@@ -304,7 +304,8 @@ test('native ACP keeps one Grok process, registers both question methods and rou
       config = input;
       return {
         isStarted: () => started,
-        async configure() {
+        async configure(options) {
+          configureCalls.push(options);
           if (!started) {
             started = true;
             input.onSessionStarted({ sessionId: 'grok-acp-1', setupResponse: {} });
@@ -317,7 +318,10 @@ test('native ACP keeps one Grok process, registers both question methods and rou
         },
         getSessionId: () => 'grok-acp-1',
         hasSeenPromptUpdate: () => true,
-        restart: async () => {},
+        restart: async () => {
+          await new Promise((resolve) => setImmediate(resolve));
+          restarts += 1;
+        },
         cancel: async () => { cancels += 1; },
         dispose: async () => {},
       };
@@ -329,6 +333,17 @@ test('native ACP keeps one Grok process, registers both question methods and rou
   await new Promise((resolve) => setImmediate(resolve));
   session.sendUserMessage('two');
   await new Promise((resolve) => setImmediate(resolve));
+  const permissionChange = session.setPermissionProfile('unrestricted');
+  assert.equal(restarts, 0);
+  await permissionChange;
+  assert.equal(restarts, 1, 'permission ACK waits for the native restart');
+  await session.setExecutionMode({ workflow: 'plan', phase: 'awaiting-approval', capabilityEpoch: 2 });
+  assert.deepEqual(configureCalls.at(-1).modeAliases, ['plan', 'architect'], 'Plan ACK waits for ACP mode selection');
+  session.sendUserMessage('three');
+  await new Promise((resolve) => setImmediate(resolve));
+  await session.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 3 });
+  session.sendUserMessage('four');
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(creates, 1);
   assert.deepEqual(config.args, ['agent', 'stdio']);
@@ -338,13 +353,56 @@ test('native ACP keeps one Grok process, registers both question methods and rou
   assert.match(prompts[0], /rhwp MCP tools/);
   assert.match(prompts[0], /one$/);
   assert.equal(prompts[1], 'two');
-  assert.deepEqual(events.filter((event) => event.type === 'text-delta').map((event) => event.text), ['native', 'native']);
+  assert.match(prompts[2], /three$/);
+  assert.match(prompts[3], /four$/);
+  assert.deepEqual(configureCalls.map((call) => call.modeAliases), [
+    ['agent', 'code', 'default'],
+    ['agent', 'code', 'default'],
+    ['plan', 'architect'],
+    ['plan', 'architect'],
+    ['agent', 'code', 'default'],
+  ]);
+  assert.deepEqual(events.filter((event) => event.type === 'text-delta').map((event) => event.text), ['native', 'native', 'native', 'native']);
+  assert.equal(restarts, 3);
 
   session.sendUserMessage('pending interrupt');
   session.interrupt();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(cancels, 1);
   assert.equal(events.filter((event) => event.type === 'turn-end').at(-1)?.stopReason, 'interrupted');
+});
+
+test('Grok rejects Plan before ACK when ACP cannot prove the mode', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-grok-plan-readiness-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const opts = {
+    ...baseOpts,
+    workflow: 'direct',
+    phase: 'implementing',
+    capabilityEpoch: 1,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    grokHome: path.join(root, 'home', '.grok'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+  };
+  let disposed = 0;
+  const session = createGrokSession(opts, {
+    createAcpSession() {
+      return {
+        configure: async () => { throw new Error('Grok ACP does not advertise required mode (plan, architect)'); },
+        getSessionId: () => 'grok-unproved-plan',
+        dispose: async () => { disposed += 1; },
+      };
+    },
+  });
+  t.after(() => session.dispose());
+
+  await assert.rejects(
+    session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 }),
+    /does not advertise required mode/,
+  );
+  assert.deepEqual([opts.workflow, opts.phase, opts.capabilityEpoch], ['direct', 'implementing', 1]);
+  assert.equal(disposed, 1);
 });
 
 test('Grok ACP startup failure falls back before emitting a native provider update', async (t) => {

@@ -8,6 +8,7 @@ import {
   acpPermissionResponse,
   createPersistentAcpSession,
   isRhwpAcpPermissionRequest,
+  selectAcpMode,
 } from '../agents/acp-session.mjs';
 
 test('ACP helpers preserve MCP env names and only select advertised permission IDs', () => {
@@ -32,6 +33,30 @@ test('ACP helpers preserve MCP env names and only select advertised permission I
   assert.equal(isRhwpAcpPermissionRequest({ toolCall: { name: 'rhwp:insert_text' } }), true);
   assert.equal(isRhwpAcpPermissionRequest({ toolCall: { name: 'shell' } }), false);
   assert.equal(isRhwpAcpPermissionRequest({ toolCall: { title: 'mcp__rhwp__get_structure' } }), false);
+});
+
+test('required ACP modes fail closed when absent or unmatched', () => {
+  assert.throws(
+    () => selectAcpMode(undefined, ['plan', 'architect'], { required: true, clientName: 'Cursor' }),
+    /Cursor ACP does not advertise required mode \(plan, architect\)/,
+  );
+  assert.throws(
+    () => selectAcpMode({ availableModes: [{ id: 'agent', name: 'Agent' }] }, ['plan'], {
+      required: true, clientName: 'Grok',
+    }),
+    /Grok ACP does not advertise required mode \(plan\)/,
+  );
+  assert.throws(
+    () => selectAcpMode({ availableModes: [{ name: 'Plan' }] }, ['plan'], {
+      required: true, clientName: 'Cursor',
+    }),
+    /Cursor ACP does not advertise required mode \(plan\)/,
+  );
+  assert.equal(selectAcpMode(undefined, ['agent']), null, 'best-effort default mode stays compatible');
+  assert.equal(
+    selectAcpMode({ availableModes: [{ id: 'architect', name: 'Plan' }] }, ['plan'])?.id,
+    'architect',
+  );
 });
 
 class FakeAcpProcess extends EventEmitter {
@@ -98,7 +123,18 @@ test('persistent ACP initializes once, serves extension requests, streams update
           } else if (frame.method === 'authenticate') {
             send({ jsonrpc: '2.0', id: frame.id, result: {} });
           } else if (frame.method === 'session/new') {
-            send({ jsonrpc: '2.0', id: frame.id, result: { sessionId: 'native-1' } });
+            send({
+              jsonrpc: '2.0', id: frame.id,
+              result: {
+                sessionId: 'native-1',
+                modes: {
+                  currentModeId: 'agent',
+                  availableModes: [{ id: 'agent', name: 'Agent' }, { id: 'plan', name: 'Plan' }],
+                },
+              },
+            });
+          } else if (frame.method === 'session/set_mode') {
+            send({ jsonrpc: '2.0', id: frame.id, result: {} });
           } else if (frame.method === 'session/set_model') {
             send({ jsonrpc: '2.0', id: frame.id, result: {} });
           } else if (frame.method === 'session/prompt') {
@@ -150,6 +186,11 @@ test('persistent ACP initializes once, serves extension requests, streams update
 
   assert.equal((await transport.start()).sessionId, 'native-1');
   await transport.configure({ model: 'grok-4.6' });
+  await transport.configure({ modeAliases: ['plan', 'architect'], requireModeMatch: true });
+  await assert.rejects(
+    transport.configure({ modeAliases: ['review'], requireModeMatch: true }),
+    /rhwp-test ACP does not advertise required mode \(review\)/,
+  );
   assert.equal((await transport.prompt('first')).stopReason, 'end_turn');
   assert.deepEqual(await transport.prompt('second'), { stopReason: 'end_turn' });
   const blocked = transport.prompt('block');
@@ -162,6 +203,7 @@ test('persistent ACP initializes once, serves extension requests, streams update
   assert.equal(calls.filter((frame) => frame.method === 'initialize').length, 1);
   assert.equal(calls.filter((frame) => frame.method === 'session/new').length, 1);
   assert.equal(calls.filter((frame) => frame.method === 'session/set_model').length, 1);
+  assert.equal(calls.filter((frame) => frame.method === 'session/set_mode').length, 1);
   assert.equal(calls.filter((frame) => frame.method === 'session/prompt').length, 3);
   assert.equal(calls.filter((frame) => frame.method === 'session/cancel').length, 1);
   assert.equal(blockedSignalAborted, true);

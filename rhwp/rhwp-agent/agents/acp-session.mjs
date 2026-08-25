@@ -67,6 +67,25 @@ export function acpPermissionResponse(options, unrestricted) {
   return { outcome: { outcome: 'cancelled' } };
 }
 
+/** Select a provider-advertised mode without silently inventing support. */
+export function selectAcpMode(modes, modeAliases = [], {
+  required = false,
+  clientName = 'Provider',
+} = {}) {
+  const aliases = modeAliases.map((value) => String(value).trim().toLowerCase()).filter(Boolean);
+  const available = Array.isArray(modes?.availableModes) ? modes.availableModes : [];
+  const target = available.find((mode) => (
+    aliases.includes(String(mode?.id ?? '').toLowerCase())
+    || aliases.includes(String(mode?.name ?? '').toLowerCase())
+  ));
+  const selectable = target && String(target.id ?? '').trim() ? target : null;
+  if (!selectable && required) {
+    const requested = aliases.length ? aliases.join(', ') : 'unspecified';
+    throw new Error(`${clientName} ACP does not advertise required mode (${requested})`);
+  }
+  return selectable;
+}
+
 /** The hub remains the policy authority for its own MCP tools. In safe/plan
  * modes ACP must still allow those calls to reach phase and revision gates,
  * while unrelated provider tools keep the provider's deny response. */
@@ -326,22 +345,18 @@ export function createPersistentAcpSession({
     if (Array.isArray(response?.configOptions) && setupResponse) setupResponse.configOptions = response.configOptions;
   }
 
-  /** @param {{modeAliases?:string[], model?:string|null, effort?:string|null}} [selection] */
-  async function configure({ modeAliases = [], model = null, effort = null } = {}) {
+  /** @param {{modeAliases?:string[], requireModeMatch?:boolean, model?:string|null, effort?:string|null}} [selection] */
+  async function configure({
+    modeAliases = [], requireModeMatch = false, model = null, effort = null,
+  } = {}) {
     await start();
     const agentContext = context;
     if (!agentContext) throw new Error(`${clientName} ACP session is not started`);
     const modes = setupResponse?.modes;
-    if (Array.isArray(modes?.availableModes) && modeAliases.length > 0) {
-      const aliases = modeAliases.map((value) => String(value).toLowerCase());
-      const target = modes.availableModes.find((mode) => (
-        aliases.includes(String(mode?.id ?? '').toLowerCase())
-        || aliases.includes(String(mode?.name ?? '').toLowerCase())
-      ));
-      if (target?.id && target.id !== modes.currentModeId) {
-        await agentContext.request(methods.agent.session.setMode, { sessionId, modeId: target.id });
-        modes.currentModeId = target.id;
-      }
+    const target = selectAcpMode(modes, modeAliases, { required: requireModeMatch, clientName });
+    if (target?.id && target.id !== modes.currentModeId) {
+      await agentContext.request(methods.agent.session.setMode, { sessionId, modeId: target.id });
+      modes.currentModeId = target.id;
     }
     const configs = setupResponse?.configOptions;
     if (!setModelMethod) {

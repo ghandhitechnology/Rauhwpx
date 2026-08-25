@@ -94,7 +94,7 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * @property {AgentName} agent
  * @property {() => string | null} getSessionId
  * @property {(text: string) => void} sendUserMessage
- * @property {(profile: 'safe'|'unrestricted') => void} setPermissionProfile
+ * @property {(profile: 'safe'|'unrestricted') => void|Promise<void>} setPermissionProfile
  * @property {(mode: {workflow: 'direct'|'plan'; phase: 'planning'|'awaiting-approval'|'switching'|'implementing'; capabilityEpoch: string|number}) => Promise<void>} setExecutionMode
  * @property {() => void} interrupt
  * @property {() => Promise<boolean>} dispose 자식 프로세스 트리가 끝날 때까지 기다린 결과를 돌려준다.
@@ -387,18 +387,29 @@ const WORKFLOWS = new Set(['direct', 'plan']);
 const PHASES = new Set(['planning', 'awaiting-approval', 'switching', 'implementing']);
 
 export function normalizeExecutionMode(opts = {}) {
-  const workflow = WORKFLOWS.has(opts.workflow) ? opts.workflow : 'direct';
-  const phase = PHASES.has(opts.phase) ? opts.phase : (workflow === 'plan' ? 'planning' : 'implementing');
-  return {
+  const hasWorkflow = opts.workflow !== undefined && opts.workflow !== null;
+  if (hasWorkflow && !WORKFLOWS.has(opts.workflow)) {
+    throw new Error(`Unknown workflow: ${opts.workflow}`);
+  }
+  const workflow = hasWorkflow ? opts.workflow : 'direct';
+  const hasPhase = opts.phase !== undefined && opts.phase !== null;
+  if (hasPhase && !PHASES.has(opts.phase)) {
+    throw new Error(`Unknown execution phase: ${opts.phase}`);
+  }
+  const phase = hasPhase ? opts.phase : (workflow === 'plan' ? 'planning' : 'implementing');
+  return validateExecutionMode({
     workflow,
     phase,
     capabilityEpoch: opts.capabilityEpoch ?? 0,
-  };
+  });
 }
 
 export function validateExecutionMode(mode) {
   if (!mode || !WORKFLOWS.has(mode.workflow)) throw new Error(`Unknown workflow: ${mode?.workflow}`);
   if (!PHASES.has(mode.phase)) throw new Error(`Unknown execution phase: ${mode?.phase}`);
+  if (mode.workflow === 'direct' && mode.phase !== 'implementing') {
+    throw new Error(`Invalid execution mode: direct/${mode.phase}`);
+  }
   if (mode.capabilityEpoch === undefined || mode.capabilityEpoch === null) {
     throw new Error('capabilityEpoch is required');
   }
@@ -406,8 +417,21 @@ export function validateExecutionMode(mode) {
 }
 
 export function isPlanningRestricted(opts = {}) {
+  return providerInteractionMode(opts) === 'plan';
+}
+
+/**
+ * Project Rau's workflow state onto the interaction modes exposed by native
+ * coding-agent providers. Permission profiles are intentionally absent from
+ * this projection: Plan/Build/Default describes intent, while safe/full
+ * independently describes access.
+ *
+ * @returns {'default'|'plan'|'build'}
+ */
+export function providerInteractionMode(opts = {}) {
   const { workflow, phase } = normalizeExecutionMode(opts);
-  return workflow === 'plan' && phase !== 'implementing';
+  if (workflow === 'direct') return 'default';
+  return phase === 'implementing' ? 'build' : 'plan';
 }
 
 export function systemBriefFor(opts = {}, agentName = 'claude') {

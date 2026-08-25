@@ -20,6 +20,7 @@ import {
   normalizeExecutionMode,
   normalizeTaskUsage,
   normalizeUsageTokens,
+  providerInteractionMode,
   systemBriefFor,
   truncate,
   validateExecutionMode,
@@ -213,6 +214,7 @@ export function buildCursorCliConfig(opts, sourceCliConfig = null) {
  */
 export function buildCursorArgv(opts, chatId, prompt) {
   const planningRestricted = isPlanningRestricted(opts);
+  const interactionMode = providerInteractionMode(opts);
   const unrestricted = opts.permissionProfile === 'unrestricted' && !planningRestricted;
   const model = String(opts.model ?? '');
   return [
@@ -220,6 +222,7 @@ export function buildCursorArgv(opts, chatId, prompt) {
     '--output-format', 'stream-json',
     '--stream-partial-output',
     '--approve-mcps',
+    ...(interactionMode === 'plan' ? ['--mode', 'plan'] : []),
     // auto 는 CLI 자체 기본 모델을 쓴다 — 플래그를 아예 붙이지 않는다.
     ...(model && model !== 'auto' ? ['--model', model] : []),
     ...(chatId ? ['--resume', chatId] : []),
@@ -883,6 +886,23 @@ export function createCursorSession(opts, {
     });
   }
 
+  async function configureNativeMode() {
+    await nativeRestart;
+    if (!nativeSession) nativeSession = makeNativeSession();
+    prepareNativeHome();
+    const interactionMode = providerInteractionMode(opts);
+    await nativeSession.configure({
+      modeAliases: interactionMode === 'plan'
+        ? ['plan', 'architect']
+        : ['agent', 'code', 'default'],
+      requireModeMatch: interactionMode === 'plan',
+      model: opts.model === 'auto' ? null : opts.model,
+      effort: opts.effort,
+    });
+    chatId = nativeSession.getSessionId() ?? chatId;
+    return nativeSession;
+  }
+
   function startLegacyTurn(prompt) {
     let proc;
     try {
@@ -922,23 +942,12 @@ export function createCursorSession(opts, {
   async function runNativeTurn(prompt, token) {
     let promptStarted = false;
     try {
-      await nativeRestart;
-      if (!nativeSession) nativeSession = makeNativeSession();
-      prepareNativeHome();
-      const mode = normalizeExecutionMode(opts);
-      await nativeSession.configure({
-        modeAliases: mode.workflow === 'plan' && mode.phase === 'planning'
-          ? ['plan', 'architect']
-          : ['agent', 'code', 'default'],
-        model: opts.model === 'auto' ? null : opts.model,
-        effort: opts.effort,
-      });
-      chatId = nativeSession.getSessionId() ?? chatId;
+      const session = await configureNativeMode();
       // Transport selection is atomic at the prompt boundary. Once ACP owns
       // the turn, a provider/question failure must settle that turn instead of
       // replaying the same user message through the legacy transport.
       promptStarted = true;
-      const response = await nativeSession.prompt(prompt);
+      const response = await session.prompt(prompt);
       if (token !== nativeTurnToken || !lifecycle.isTurnOpen()) return;
       emitNativeSessionInfo();
       lifecycle.markTurnCompleted();
@@ -997,23 +1006,69 @@ export function createCursorSession(opts, {
       const token = ++nativeTurnToken;
       void runNativeTurn(prompt, token);
     },
-    setPermissionProfile(profile) {
+    async setPermissionProfile(profile) {
       if (lifecycle.isTurnOpen()) throw new Error('Permission profile can only change between turns');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
+      const previous = opts.permissionProfile;
+      const previousNativeSession = nativeSession;
+      const previousChatId = chatId;
       opts.permissionProfile = profile;
-      if (nativeSession) nativeRestart = nativeSession.restart();
+      try {
+        if (nativeSession) {
+          const session = nativeSession;
+          nativeRestart = nativeRestart.then(() => session.restart());
+          await nativeRestart;
+        }
+        if (!nativeDisabled && providerInteractionMode(opts) === 'plan') {
+          await configureNativeMode();
+        }
+      } catch (error) {
+        opts.permissionProfile = previous;
+        nativeRestart = Promise.resolve();
+        if (!previousNativeSession && nativeSession) {
+          const failed = nativeSession;
+          nativeSession = null;
+          chatId = previousChatId;
+          try { await failed.dispose(); } catch {}
+        }
+        throw error;
+      }
     },
     async setExecutionMode(mode) {
       if (lifecycle.isTurnOpen()) throw new Error('Execution mode can only change between turns');
       validateExecutionMode(mode);
+      const previous = normalizeExecutionMode(opts);
+      const previousNativeSession = nativeSession;
+      const previousChatId = chatId;
       lifecycle.killChild();
       await lifecycle.waitForChildExit();
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
-      if (nativeSession) {
-        nativeRestart = nativeSession.restart();
-        await nativeRestart;
+      try {
+        if (nativeSession) {
+          const session = nativeSession;
+          nativeRestart = nativeRestart.then(() => session.restart());
+          await nativeRestart;
+        }
+        // The UI must not observe Plan until ACP has started and advertised a
+        // selectable Plan/Architect mode. Legacy-only sessions are covered by
+        // the explicit CLI --mode plan contract instead.
+        if (!nativeDisabled && providerInteractionMode(opts) === 'plan') {
+          await configureNativeMode();
+        }
+      } catch (error) {
+        opts.workflow = previous.workflow;
+        opts.phase = previous.phase;
+        opts.capabilityEpoch = previous.capabilityEpoch;
+        nativeRestart = Promise.resolve();
+        if (!previousNativeSession && nativeSession) {
+          const failed = nativeSession;
+          nativeSession = null;
+          chatId = previousChatId;
+          try { await failed.dispose(); } catch {}
+        }
+        throw error;
       }
     },
     interrupt() {

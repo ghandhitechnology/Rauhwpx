@@ -5,6 +5,44 @@ import { humanizerPromptBlock } from './humanizer.mjs';
 export const WORKFLOWS = Object.freeze(['direct', 'plan']);
 export const PLAN_PHASES = Object.freeze(['planning', 'awaiting-approval', 'switching', 'implementing']);
 
+const ENGLISH_IMPLEMENTATION_APPROVALS = new Set([
+  'implement the plan',
+  'implement this plan',
+  'please implement the plan',
+  'please implement this plan',
+  'go ahead and implement the plan',
+  'go ahead and implement this plan',
+]);
+
+const KOREAN_IMPLEMENTATION_APPROVALS = new Set([
+  '계획을 실행해 주세요',
+  '계획을 실행해주세요',
+  '이 계획을 실행해 주세요',
+  '이 계획을 실행해주세요',
+  '계획대로 진행해 주세요',
+  '계획대로 진행해주세요',
+  '이 계획대로 진행해 주세요',
+  '이 계획대로 진행해주세요',
+]);
+
+/**
+ * Recognizes only standalone, unambiguous requests to execute the latest plan.
+ * Everything else remains plan-revision feedback at the hub boundary.
+ * @param {unknown} text
+ */
+export function isExplicitImplementationApproval(text) {
+  if (typeof text !== 'string') return false;
+  const candidate = text.normalize('NFKC').trim();
+  if (!candidate || /[?"'‘’“”「」『』]/u.test(candidate)) return false;
+  const normalized = candidate
+    .toLocaleLowerCase('en-US')
+    .replace(/[.!。！]+$/u, '')
+    .trim()
+    .replace(/\s+/gu, ' ');
+  return ENGLISH_IMPLEMENTATION_APPROVALS.has(normalized)
+    || KOREAN_IMPLEMENTATION_APPROVALS.has(normalized);
+}
+
 export function workflowError(code, message) {
   const error = new Error(message);
   error.code = code;
@@ -109,6 +147,14 @@ export class PlanningState {
     if (sessionStatus !== 'idle') throw workflowError('AGENT_BUSY', 'Plan changes can only be requested while the agent is idle');
     this.assertLatest(planId);
     this.phase = 'planning';
+    this.bumpEpoch();
+    return this.snapshot();
+  }
+
+  failRequestChanges(planId) {
+    if (this.workflow !== 'plan' || this.phase !== 'planning') return this.snapshot();
+    this.assertLatest(planId);
+    this.phase = 'awaiting-approval';
     this.bumpEpoch();
     return this.snapshot();
   }

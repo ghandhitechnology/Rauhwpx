@@ -144,6 +144,21 @@ function questionArgs() {
   };
 }
 
+function implementationPlanArgs() {
+  return {
+    goal: 'Implement the requested mode synchronization',
+    title: 'Mode synchronization plan',
+    summary: 'Keep the provider and UI on the same authoritative phase.',
+    assumptions: [],
+    decisions: ['Use the hub transition as the authority'],
+    steps: [{ title: 'Switch mode', details: 'Apply the confirmed provider mode.' }],
+    files: [],
+    validation: ['Verify the implementation phase event'],
+    risks: [],
+    exclusions: [],
+  };
+}
+
 async function startRunningChat(studio, agent = 'claude') {
   sendFrame(studio, {
     type: 'chat-start',
@@ -161,6 +176,70 @@ async function startRunningChat(studio, agent = 'claude') {
   await new Promise((resolve) => setTimeout(resolve, 50));
   return started;
 }
+
+test('an explicit unknown workflow is rejected instead of opening Direct mode', { timeout: 40_000 }, async (t) => {
+  const { port } = await startHub(t);
+  const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=invalid-workflow&instance=page-1`);
+  t.after(() => closeClient(studio));
+  await studio.next((frame) => frame.type === 'welcome');
+
+  sendFrame(studio, {
+    type: 'chat-start',
+    agent: 'claude',
+    workflow: 'surprise-mode',
+    threadId: 'thread-invalid-workflow',
+    documentId: 'document-invalid-workflow',
+  });
+  const error = await studio.next((frame) => frame.type === 'chat-error');
+  assert.equal(error.code, 'INVALID_WORKFLOW');
+  assert.match(error.message, /Unknown workflow: surprise-mode/);
+});
+
+test('a standalone implementation command follows the same Plan approval transition', { timeout: 40_000 }, async (t) => {
+  const { port } = await startHub(t);
+  const sessionId = 'typed-plan-approval';
+  const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=${sessionId}&instance=page-1`);
+  t.after(() => closeClient(studio));
+  await studio.next((frame) => frame.type === 'welcome');
+  sendFrame(studio, {
+    type: 'chat-start',
+    agent: 'claude',
+    workflow: 'plan',
+    threadId: 'thread-typed-plan-approval',
+    documentId: 'document-typed-plan-approval',
+  });
+  const started = await studio.next((frame) => frame.type === 'chat-started');
+  assert.equal(started.workflow, 'plan');
+  assert.equal(started.phase, 'planning');
+
+  const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=claude&role=chat`);
+  t.after(() => closeClient(mcp));
+  sendFrame(mcp, {
+    type: 'tool-call',
+    id: 31,
+    tool: 'present_implementation_plan',
+    args: implementationPlanArgs(),
+    workflow: 'plan',
+    capabilityEpoch: started.capabilityEpoch,
+  });
+  const ready = await studio.next((frame) => frame.type === 'plan-ready');
+  const planResult = await mcp.next((frame) => frame.type === 'tool-result' && frame.id === 31);
+  assert.equal(planResult.ok, true);
+  assert.equal(ready.phase, 'awaiting-approval');
+
+  sendFrame(studio, {
+    type: 'chat-user-message',
+    threadId: started.threadId,
+    documentId: started.documentId,
+    text: 'implement the plan',
+  });
+  const approved = await studio.next((frame) => frame.type === 'plan-approved');
+  const implementing = await studio.next((frame) => frame.type === 'implementation-started');
+  assert.equal(approved.planId, ready.planId);
+  assert.equal(approved.phase, 'switching');
+  assert.equal(implementing.planId, ready.planId);
+  assert.equal(implementing.phase, 'implementing');
+});
 
 test('a correlated root provider event authorizes a non-Pi MCP fallback', { timeout: 40_000 }, async (t) => {
   const { port } = await startHub(t, { fakeCursor: true });

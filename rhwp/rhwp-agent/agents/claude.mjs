@@ -19,6 +19,7 @@ import {
   normalizeExecutionMode,
   normalizeTaskUsage,
   normalizeUsageTokens,
+  providerInteractionMode,
   RHWP_SUBAGENTS,
   systemBriefFor,
   truncate,
@@ -152,6 +153,7 @@ function permissionPathRule(tool, value) {
 export function buildClaudeArgv(opts, sessionId, resume) {
   const unrestricted = opts.permissionProfile === 'unrestricted';
   const planningRestricted = isPlanningRestricted(opts);
+  const interactionMode = providerInteractionMode(opts);
   const planWorkflow = opts.workflow === 'plan';
   const activeTools = planWorkflow
     ? (planningRestricted ? PLANNING_TOOLS : PLAN_IMPLEMENTATION_TOOLS)
@@ -212,9 +214,11 @@ export function buildClaudeArgv(opts, sessionId, resume) {
     '--disable-slash-commands',
     '--tools', activeTools,
     '--settings', JSON.stringify(settings),
-    ...(unrestricted && !planningRestricted
-      ? ['--permission-mode', 'bypassPermissions', '--dangerously-skip-permissions']
-      : ['--permission-mode', 'dontAsk']),
+    ...(interactionMode === 'plan'
+      ? ['--permission-mode', 'plan']
+      : unrestricted
+        ? ['--permission-mode', 'bypassPermissions', '--dangerously-skip-permissions']
+        : ['--permission-mode', 'dontAsk']),
     '--append-system-prompt', systemBriefFor(opts),
     ...(opts.model ? ['--model', opts.model] : []),
     ...(opts.effort ? ['--effort', opts.effort] : []),
@@ -230,6 +234,7 @@ export function buildClaudeArgv(opts, sessionId, resume) {
 export function buildClaudeSdkOptions(opts, sessionId, resume, abortController) {
   const unrestricted = opts.permissionProfile === 'unrestricted';
   const planningRestricted = isPlanningRestricted(opts);
+  const interactionMode = providerInteractionMode(opts);
   const planWorkflow = opts.workflow === 'plan';
   const activeTools = planWorkflow
     ? (planningRestricted ? PLANNING_TOOLS : PLAN_IMPLEMENTATION_TOOLS)
@@ -289,8 +294,10 @@ export function buildClaudeSdkOptions(opts, sessionId, resume, abortController) 
     ...(opts.claudeBin && path.isAbsolute(opts.claudeBin)
       ? { pathToClaudeCodeExecutable: opts.claudeBin }
       : {}),
-    permissionMode: unrestricted && !planningRestricted ? 'bypassPermissions' : 'default',
-    ...(unrestricted && !planningRestricted ? { allowDangerouslySkipPermissions: true } : {}),
+    permissionMode: interactionMode === 'plan'
+      ? 'plan'
+      : unrestricted ? 'bypassPermissions' : 'default',
+    ...(interactionMode !== 'plan' && unrestricted ? { allowDangerouslySkipPermissions: true } : {}),
     ...(resume ? { resume: sessionId } : { sessionId }),
     settingSources: [],
     settings,
@@ -942,12 +949,22 @@ export function createClaudeSession(opts, {
         }
       });
     },
-    setPermissionProfile(profile) {
+    async setPermissionProfile(profile) {
       if (turnOpen) throw new Error('Permission profile can only change between turns');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
-      if (opts.permissionProfile === profile) return;
+      if (opts.permissionProfile === profile) {
+        await restartReady;
+        return;
+      }
+      const previous = opts.permissionProfile;
       opts.permissionProfile = profile;
-      void restartForConfigChange();
+      try {
+        await restartForConfigChange();
+      } catch (error) {
+        opts.permissionProfile = previous;
+        restartReady = Promise.resolve();
+        throw error;
+      }
     },
     async setExecutionMode(mode) {
       if (turnOpen) throw new Error('Execution mode can only change between turns');
@@ -962,7 +979,15 @@ export function createClaudeSession(opts, {
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
-      await restartForConfigChange();
+      try {
+        await restartForConfigChange();
+      } catch (error) {
+        opts.workflow = current.workflow;
+        opts.phase = current.phase;
+        opts.capabilityEpoch = current.capabilityEpoch;
+        restartReady = Promise.resolve();
+        throw error;
+      }
     },
     interrupt() {
       if (sdkQuery) {

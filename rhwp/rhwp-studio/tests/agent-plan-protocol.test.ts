@@ -56,8 +56,31 @@ test('bridge reconnect keeps explicit workflow and re-synchronizes server author
   assert.match(bridgeSource, /this\.workflow === 'direct' \|\| this\.phase === 'implementing'/);
 });
 
+test('a failed replacement cannot dispatch into the disposed previous session', () => {
+  assert.match(
+    bridgeSource,
+    /case 'chat-error': \{[\s\S]*const chatStartFailed = this\.pendingChatStart !== null;[\s\S]*if \(chatStartFailed\) \{[\s\S]*this\.activeAgent = null;[\s\S]*this\.turnRunning = false;/,
+  );
+  assert.match(
+    bridgeSource,
+    /Keep the requested start as retry configuration/,
+  );
+  assert.match(
+    bridgeSource,
+    /const pending = this\.pendingChatStart;[\s\S]*agent: pending\?\.agent \?\? this\.selectedAgent,[\s\S]*workflow: pending\?\.workflow \?\? this\.workflow/,
+  );
+});
+
 test('new chat defaults direct while an explicit plan start is carried on the wire', () => {
   assert.match(bridgeSource, /workflow: AgentWorkflow = 'direct'/);
   assert.match(bridgeSource, /type: 'chat-start' as const,[\s\S]*?workflow,/);
+  const startChatOffset = bridgeSource.indexOf('\n  startChat(\n');
+  const startChatSource = bridgeSource.slice(
+    startChatOffset,
+    bridgeSource.indexOf('  stopChat(): void', startChatOffset),
+  );
+  assert.doesNotMatch(startChatSource, /this\.resetWorkflowState\(workflow\)/);
+  assert.doesNotMatch(startChatSource, /this\.permissionProfile = permissionProfile/);
+  assert.match(startChatSource, /permissionProfile,\s*\n\s*workflow,/);
   assert.match(bridgeSource, /this\.resetWorkflowState\(\);[\s\S]*?type: 'chat-stop'/);
 });

@@ -6,7 +6,7 @@ import {
   isPlanningRestricted,
   mcpCapabilityEnv,
   mcpRuntimeFor,
-  normalizeExecutionMode,
+  providerInteractionMode,
   systemBriefFor,
   truncate,
   validateExecutionMode,
@@ -208,9 +208,10 @@ function sandboxPolicy(opts) {
 }
 
 function collaborationMode(opts) {
-  const mode = normalizeExecutionMode(opts);
   return {
-    mode: mode.workflow === 'plan' && mode.phase === 'planning' ? 'plan' : 'default',
+    // Codex currently exposes Plan and Default. Rau's Build intent maps to
+    // Default plus the independently selected sandbox policy.
+    mode: providerInteractionMode(opts) === 'plan' ? 'plan' : 'default',
     settings: {
       model: opts.model ?? DEFAULT_CODEX_MODEL,
       reasoning_effort: opts.effort ?? null,
@@ -552,19 +553,29 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
     }), NEGOTIATION_TIMEOUT_MS, 'Codex app-server initialize');
     connection.notify('initialized');
 
-    const mode = normalizeExecutionMode(opts);
-    const planNative = mode.workflow === 'plan' && mode.phase === 'planning';
+    const planNative = providerInteractionMode(opts) === 'plan';
+    if (planNative) {
+      let modes;
+      try {
+        modes = await withTimeout(
+          connection.request('collaborationMode/list', {}),
+          NEGOTIATION_TIMEOUT_MS,
+          'Codex collaboration-mode discovery',
+        );
+      } catch (error) {
+        throw new CodexAppServerUnavailableError('Codex cannot verify native Plan mode', error);
+      }
+      if (!Array.isArray(modes?.data) || !modes.data.some((entry) => entry?.mode === 'plan')) {
+        throw new CodexAppServerUnavailableError('Codex native Plan mode is unavailable');
+      }
+      return { restartWithFeature: false };
+    }
     let features;
     try {
       features = await withTimeout(listFeatures(connection), NEGOTIATION_TIMEOUT_MS, 'Codex feature discovery');
     } catch (error) {
-      if (planNative) {
-        process.stderr.write(`[codex-app-server] feature discovery unavailable in plan mode: ${safeMessage(error)}\n`);
-        return { restartWithFeature: false };
-      }
       throw new CodexAppServerUnavailableError('Codex cannot verify default-mode user input', error);
     }
-    if (planNative) return { restartWithFeature: false };
 
     const feature = features.find((entry) => entry?.name === DEFAULT_MODE_FEATURE);
     if (!feature || feature.stage === 'removed') {
@@ -714,6 +725,17 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
   }
 
   async function switchToLegacy(text, error) {
+    if (providerInteractionMode(opts) === 'plan') {
+      process.stderr.write(`[codex-app-server] native plan mode unavailable: ${safeMessage(error)}\n`);
+      await stopConnection();
+      starting = false;
+      if (disposed) return;
+      const message = `Codex native Plan mode is unavailable: ${safeMessage(error)}`;
+      onEvent({ type: 'turn-start', agent: 'codex' });
+      onEvent({ type: 'error', agent: 'codex', message });
+      onEvent({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: message });
+      return;
+    }
     process.stderr.write(`[codex-app-server] using legacy exec fallback: ${safeMessage(error)}\n`);
     await stopConnection();
     if (disposed) return;
@@ -807,22 +829,62 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
       interruptRequested = false;
       void startTurn(text);
     },
-    setPermissionProfile(profile) {
+    async setPermissionProfile(profile) {
       if (fallback) return fallback.setPermissionProfile(profile);
       if (starting || turnOpen) throw new Error('Permission profile can only change between turns');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
+      const previous = opts.permissionProfile;
       opts.permissionProfile = profile;
-      if (proc) restartPromise = restartPromise.then(() => stopConnection());
+      try {
+        const priorRestart = restartPromise;
+        restartPromise = priorRestart.then(() => stopConnection());
+        await restartPromise;
+        if (providerInteractionMode(opts) === 'plan') {
+          const connection = await ensureConnection();
+          await attachThread(connection);
+        }
+      } catch (error) {
+        opts.permissionProfile = previous;
+        try { await stopConnection(); } catch {}
+        restartPromise = Promise.resolve();
+        throw error;
+      }
     },
     async setExecutionMode(mode) {
-      if (fallback) return fallback.setExecutionMode(mode);
       if (starting || turnOpen) throw new Error('Execution mode can only change between turns');
       validateExecutionMode(mode);
+      if (fallback) {
+        if (providerInteractionMode(mode) === 'plan') {
+          throw new CodexAppServerUnavailableError('Codex native Plan mode is unavailable while using legacy exec');
+        }
+        return fallback.setExecutionMode(mode);
+      }
+      const previous = {
+        workflow: opts.workflow,
+        phase: opts.phase,
+        capabilityEpoch: opts.capabilityEpoch,
+      };
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
-      restartPromise = stopConnection();
-      await restartPromise;
+      // Preserve an earlier permission-change shutdown barrier. Replacing the
+      // promise here lets two stopConnection calls race over the same child.
+      const priorRestart = restartPromise;
+      restartPromise = priorRestart.then(() => stopConnection());
+      try {
+        await restartPromise;
+        if (providerInteractionMode(opts) === 'plan') {
+          const connection = await ensureConnection();
+          await attachThread(connection);
+        }
+      } catch (error) {
+        opts.workflow = previous.workflow;
+        opts.phase = previous.phase;
+        opts.capabilityEpoch = previous.capabilityEpoch;
+        try { await stopConnection(); } catch {}
+        restartPromise = Promise.resolve();
+        throw error;
+      }
     },
     interrupt() {
       if (fallback) return fallback.interrupt();

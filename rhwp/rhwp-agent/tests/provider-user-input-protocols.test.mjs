@@ -110,7 +110,7 @@ test('Claude native options expose AskUserQuestion in direct and plan workflows'
     const sdk = buildClaudeSdkOptions(opts, '00000000-0000-4000-8000-000000000000', false, new AbortController());
     assert.ok(sdk.tools.includes('AskUserQuestion'));
     assert.equal(typeof sdk.canUseTool, 'function');
-    assert.equal(sdk.permissionMode, 'default');
+    assert.equal(sdk.permissionMode, workflow === 'plan' ? 'plan' : 'default');
     if (workflow === 'plan') {
       assert.ok(!sdk.tools.includes('Write'));
       assert.ok(!sdk.tools.includes('Edit'));

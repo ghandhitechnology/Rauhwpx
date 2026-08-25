@@ -17,8 +17,10 @@ import {
   isPlanningRestricted,
   mcpCapabilityEnv,
   mcpRuntimeFor,
+  normalizeExecutionMode,
   normalizeTaskUsage,
   normalizeUsageTokens,
+  providerInteractionMode,
   RHWP_SUBAGENTS,
   systemBriefFor,
   truncate,
@@ -184,6 +186,7 @@ export function scopedBashAllowRules(prefixes) {
 export function buildGrokArgv(opts, sessionId, resume, promptFilePath) {
   const unrestricted = opts.permissionProfile === 'unrestricted';
   const planningRestricted = isPlanningRestricted(opts);
+  const interactionMode = providerInteractionMode(opts);
   const rootGlob = `${String(opts.rootDir ?? '').replace(/\\/g, '/')}/**`;
   // 백그라운드 작업자(복사 레이아웃 등)가 헬퍼 스크립트를 실행할 수 있게 풀어 주는
   // 스코프 셸 접두사. grok 규칙은 glob 이고 deny 가 allow 보다 우선하므로(~/.grok
@@ -224,7 +227,7 @@ export function buildGrokArgv(opts, sessionId, resume, promptFilePath) {
   const permission = alwaysApprove
     ? ['--always-approve']
     : [
-      '--permission-mode', 'dontAsk',
+      '--permission-mode', interactionMode === 'plan' ? 'plan' : 'dontAsk',
       ...allowRules.flatMap((rule) => ['--allow', rule]),
       ...denyRules.flatMap((rule) => ['--deny', rule]),
     ];
@@ -1214,6 +1217,23 @@ export function createGrokSession(opts, {
     return grokHome;
   }
 
+  async function configureNativeMode() {
+    await nativeRestart;
+    if (!nativeSession) nativeSession = makeNativeSession();
+    prepareNativeHome();
+    const interactionMode = providerInteractionMode(opts);
+    await nativeSession.configure({
+      modeAliases: interactionMode === 'plan'
+        ? ['plan', 'architect']
+        : ['agent', 'code', 'default'],
+      requireModeMatch: interactionMode === 'plan',
+      model: opts.model,
+      effort: opts.effort,
+    });
+    sessionId = nativeSession.getSessionId() ?? sessionId;
+    return nativeSession;
+  }
+
   function startLegacyTurn(text) {
     const resume = hasCompletedTurn;
     if (!resume && sessionIdConsumed) sessionId = crypto.randomUUID();
@@ -1241,21 +1261,14 @@ export function createGrokSession(opts, {
   async function runNativeTurn(text, token) {
     let promptStarted = false;
     try {
-      await nativeRestart;
-      if (!nativeSession) nativeSession = makeNativeSession();
-      prepareNativeHome();
-      const firstPrompt = !nativeSession.isStarted();
-      const mode = isPlanningRestricted(opts)
-        ? ['plan', 'architect']
-        : ['agent', 'code', 'default'];
-      await nativeSession.configure({ modeAliases: mode, model: opts.model, effort: opts.effort });
-      sessionId = nativeSession.getSessionId() ?? sessionId;
+      const firstPrompt = !hasCompletedTurn;
+      const session = await configureNativeMode();
       const prompt = firstPrompt ? `${systemBriefFor(opts, 'grok')}\n\n${text}` : text;
       // Never replay a message through legacy after ACP has accepted the
       // prompt. A cancelled or malformed native question belongs to this exact
       // turn and cannot trigger a mid-turn transport switch.
       promptStarted = true;
-      const response = await nativeSession.prompt(prompt);
+      const response = await session.prompt(prompt);
       if (token !== nativeTurnToken || !lifecycle.isTurnOpen()) return;
       emitNativeSessionInfo();
       hasCompletedTurn = true;
@@ -1303,23 +1316,69 @@ export function createGrokSession(opts, {
       const token = ++nativeTurnToken;
       void runNativeTurn(text, token);
     },
-    setPermissionProfile(profile) {
+    async setPermissionProfile(profile) {
       if (lifecycle.isTurnOpen()) throw new Error('Permission profile can only change between turns');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
+      const previous = opts.permissionProfile;
+      const previousNativeSession = nativeSession;
+      const previousSessionId = sessionId;
       opts.permissionProfile = profile;
-      if (nativeSession) nativeRestart = nativeSession.restart();
+      try {
+        if (nativeSession) {
+          const session = nativeSession;
+          nativeRestart = nativeRestart.then(() => session.restart());
+          await nativeRestart;
+        }
+        if (!nativeDisabled && providerInteractionMode(opts) === 'plan') {
+          await configureNativeMode();
+        }
+      } catch (error) {
+        opts.permissionProfile = previous;
+        nativeRestart = Promise.resolve();
+        if (!previousNativeSession && nativeSession) {
+          const failed = nativeSession;
+          nativeSession = null;
+          sessionId = previousSessionId;
+          try { await failed.dispose(); } catch {}
+        }
+        throw error;
+      }
     },
     async setExecutionMode(mode) {
       if (lifecycle.isTurnOpen()) throw new Error('Execution mode can only change between turns');
       validateExecutionMode(mode);
+      const previous = normalizeExecutionMode(opts);
+      const previousNativeSession = nativeSession;
+      const previousSessionId = sessionId;
       lifecycle.killChild();
       await lifecycle.waitForChildExit();
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
-      if (nativeSession) {
-        nativeRestart = nativeSession.restart();
-        await nativeRestart;
+      try {
+        if (nativeSession) {
+          const session = nativeSession;
+          nativeRestart = nativeRestart.then(() => session.restart());
+          await nativeRestart;
+        }
+        // Do not ACK Plan until the native provider has proved a selectable
+        // Plan/Architect mode. Legacy-only sessions use the explicit CLI
+        // --permission-mode plan contract.
+        if (!nativeDisabled && providerInteractionMode(opts) === 'plan') {
+          await configureNativeMode();
+        }
+      } catch (error) {
+        opts.workflow = previous.workflow;
+        opts.phase = previous.phase;
+        opts.capabilityEpoch = previous.capabilityEpoch;
+        nativeRestart = Promise.resolve();
+        if (!previousNativeSession && nativeSession) {
+          const failed = nativeSession;
+          nativeSession = null;
+          sessionId = previousSessionId;
+          try { await failed.dispose(); } catch {}
+        }
+        throw error;
       }
     },
     interrupt() {

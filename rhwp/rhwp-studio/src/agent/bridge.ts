@@ -1809,11 +1809,21 @@ class AgentBridgeImpl implements AgentBridge {
         break;
       }
       case 'chat-error': {
+        const chatStartFailed = this.pendingChatStart !== null;
         // 시작 실패 시 대기 중이던 메시지를 정리하지 않으면 sendUserMessage promise가
         // 영원히 미해결로 남아 컴포저가 잠기고, 다음 chat-started에 스테일 메시지가 흘러간다.
         for (const message of this.queuedMessages) message.resolve(null);
         this.queuedMessages = [];
-        this.pendingChatStart = null;
+        if (chatStartFailed) {
+          // The hub disposes the previous session before attempting its
+          // replacement. Keep the requested start as retry configuration, but
+          // do not let the next message target the now-nonexistent old agent.
+          this.activeAgent = null;
+          this.turnRunning = false;
+          this.syncEditingLease();
+        } else {
+          this.pendingChatStart = null;
+        }
         this.emit({
           type: 'hub-error',
           code: typeof msg.code === 'string' ? msg.code : 'RPC_ERROR',
@@ -1995,12 +2005,13 @@ class AgentBridgeImpl implements AgentBridge {
     this.selectedAgent = agent;
     if (model) this.selectedModel = model;
     if (effort) this.selectedEffort = effort;
-    this.permissionProfile = permissionProfile;
     this.threadId = threadId;
     this.documentId = documentId;
     this.documentName = documentName;
     this.chatHistory = history.map((entry) => ({ ...entry }));
-    this.resetWorkflowState(workflow);
+    // Workflow and permission remain server-authoritative. Keep the requested
+    // values only in the pending start until chat-started confirms them; a
+    // failed provider startup must not leave the bridge in an imaginary mode.
     const payload = {
       v: AGENT_PROTOCOL_VERSION,
       type: 'chat-start' as const,
@@ -2012,14 +2023,14 @@ class AgentBridgeImpl implements AgentBridge {
       history: this.chatHistory,
       ...(this.selectedModel ? { model: this.selectedModel } : {}),
       ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
-      permissionProfile: this.permissionProfile,
+      permissionProfile,
       ...(force ? { force: true } : {}),
     };
     this.pendingChatStart = {
       agent,
       model: this.selectedModel ?? undefined,
       effort: this.selectedEffort ?? undefined,
-      permissionProfile: this.permissionProfile,
+      permissionProfile,
       workflow,
       threadId,
       documentId,
@@ -2088,18 +2099,20 @@ class AgentBridgeImpl implements AgentBridge {
       if (this.activeAgent === null) {
         this.queuedMessages.push(message);
         if (this.state === 'connected') {
+          const pending = this.pendingChatStart;
           this.sendJson({
             v: AGENT_PROTOCOL_VERSION,
             type: 'chat-start',
-            agent: this.selectedAgent,
-            workflow: this.workflow,
-            threadId: context.threadId,
-            documentId: context.documentId,
-            documentName: context.documentName ?? null,
-            history: this.chatHistory,
-            ...(this.selectedModel ? { model: this.selectedModel } : {}),
-            ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
-            permissionProfile: this.permissionProfile,
+            agent: pending?.agent ?? this.selectedAgent,
+            workflow: pending?.workflow ?? this.workflow,
+            threadId: pending?.threadId ?? context.threadId,
+            documentId: pending?.documentId ?? context.documentId,
+            documentName: pending?.documentName ?? context.documentName ?? null,
+            history: pending?.history ?? this.chatHistory,
+            ...((pending?.model ?? this.selectedModel) ? { model: pending?.model ?? this.selectedModel } : {}),
+            ...((pending?.effort ?? this.selectedEffort) ? { effort: pending?.effort ?? this.selectedEffort } : {}),
+            permissionProfile: pending?.permissionProfile ?? this.permissionProfile,
+            ...(pending?.force ? { force: true } : {}),
           });
         } else {
           this.pendingChatStart = {

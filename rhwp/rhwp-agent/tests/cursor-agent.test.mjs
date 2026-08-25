@@ -26,6 +26,11 @@ const baseOpts = {
   onEvent() {},
 };
 
+function argValue(argv, flag) {
+  const index = argv.indexOf(flag);
+  return index === -1 ? undefined : argv[index + 1];
+}
+
 class FakeStream extends EventEmitter {}
 
 class FakeProcess extends EventEmitter {
@@ -137,6 +142,13 @@ test('argv carries an explicit model, the resume chat id and --force only when u
     null, 'p',
   );
   assert.equal(planning.includes('--force'), false);
+  assert.equal(argValue(planning, '--mode'), 'plan');
+
+  const build = buildCursorArgv(
+    { ...baseOpts, permissionProfile: 'safe', workflow: 'plan', phase: 'implementing' },
+    null, 'p',
+  );
+  assert.equal(build.includes('--mode'), false);
 });
 
 test('cli-config merges the source file and overwrites permissions per profile', () => {
@@ -481,6 +493,8 @@ test('native ACP keeps one Cursor session across turns and streams through unifi
   t.after(() => rmSync(root, { recursive: true, force: true }));
   let createCount = 0;
   let config;
+  const configureCalls = [];
+  let restarts = 0;
   const prompts = [];
   const events = [];
   const native = createCursorSession({
@@ -495,7 +509,8 @@ test('native ACP keeps one Cursor session across turns and streams through unifi
       config = input;
       let started = false;
       return {
-        async configure() {
+        async configure(options) {
+          configureCalls.push(options);
           if (!started) {
             started = true;
             input.onSessionStarted({ sessionId: 'cursor-acp-1', setupResponse: {} });
@@ -508,7 +523,11 @@ test('native ACP keeps one Cursor session across turns and streams through unifi
         },
         getSessionId: () => 'cursor-acp-1',
         hasSeenPromptUpdate: () => true,
-        restart: async () => {}, cancel: async () => {}, dispose: async () => {},
+        restart: async () => {
+          await new Promise((resolve) => setImmediate(resolve));
+          restarts += 1;
+        },
+        cancel: async () => {}, dispose: async () => {},
       };
     },
   });
@@ -518,15 +537,68 @@ test('native ACP keeps one Cursor session across turns and streams through unifi
   await new Promise((resolve) => setImmediate(resolve));
   native.sendUserMessage('two');
   await new Promise((resolve) => setImmediate(resolve));
+  const permissionChange = native.setPermissionProfile('unrestricted');
+  assert.equal(restarts, 0);
+  await permissionChange;
+  assert.equal(restarts, 1, 'permission ACK waits for the native restart');
+  await native.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 });
+  assert.deepEqual(configureCalls.at(-1).modeAliases, ['plan', 'architect'], 'Plan ACK waits for ACP mode selection');
+  native.sendUserMessage('three');
+  await new Promise((resolve) => setImmediate(resolve));
+  await native.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 3 });
+  native.sendUserMessage('four');
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(createCount, 1);
   assert.equal(config.args[0], 'acp');
   assert.equal(config.requestHandlers[0].method, 'cursor/ask_question');
   assert.match(prompts[0], /one/);
   assert.equal(prompts[1], 'two');
-  assert.deepEqual(events.filter((event) => event.type === 'text-delta').map((event) => event.text), ['ok', 'ok']);
+  assert.match(prompts[2], /three/);
+  assert.match(prompts[3], /four/);
+  assert.deepEqual(configureCalls.map((call) => call.modeAliases), [
+    ['agent', 'code', 'default'],
+    ['agent', 'code', 'default'],
+    ['plan', 'architect'],
+    ['plan', 'architect'],
+    ['agent', 'code', 'default'],
+  ]);
+  assert.deepEqual(events.filter((event) => event.type === 'text-delta').map((event) => event.text), ['ok', 'ok', 'ok', 'ok']);
   assert.equal(events.filter((event) => event.type === 'session-info').length, 1);
-  assert.equal(events.filter((event) => event.type === 'turn-end').length, 2);
+  assert.equal(events.filter((event) => event.type === 'turn-end').length, 4);
+  assert.equal(restarts, 3);
+});
+
+test('Cursor rejects Plan before ACK when ACP cannot prove the mode', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-plan-readiness-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const opts = {
+    ...baseOpts,
+    workflow: 'direct',
+    phase: 'implementing',
+    capabilityEpoch: 1,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+  };
+  let disposed = 0;
+  const session = createCursorSession(opts, {
+    createAcpSession() {
+      return {
+        configure: async () => { throw new Error('Cursor ACP does not advertise required mode (plan, architect)'); },
+        getSessionId: () => 'cursor-unproved-plan',
+        dispose: async () => { disposed += 1; },
+      };
+    },
+  });
+  t.after(() => session.dispose());
+
+  await assert.rejects(
+    session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 }),
+    /does not advertise required mode/,
+  );
+  assert.deepEqual([opts.workflow, opts.phase, opts.capabilityEpoch], ['direct', 'implementing', 1]);
+  assert.equal(disposed, 1);
 });
 
 test('Cursor ACP startup failure falls back before any native provider event', async (t) => {
@@ -562,6 +634,42 @@ test('Cursor ACP startup failure falls back before any native provider event', a
   assert.deepEqual(types(events), ['turn-start']);
   fallbackSpawns[0].proc.emitJson(INIT_LINE, { type: 'result', subtype: 'success', result: 'ok' });
   assert.equal(events.filter((event) => event.type === 'session-info').length, 1);
+});
+
+test('Cursor rolls provider state back when an acknowledged restart fails', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-restart-rollback-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const opts = {
+    ...baseOpts,
+    workflow: 'direct',
+    phase: 'implementing',
+    capabilityEpoch: 1,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+  };
+  const session = createCursorSession(opts, {
+    createAcpSession() {
+      return {
+        configure: async () => {},
+        prompt: async () => ({ stopReason: 'end_turn' }),
+        getSessionId: () => 'cursor-rollback',
+        restart: async () => { throw new Error('restart rejected'); },
+        dispose: async () => {},
+      };
+    },
+  });
+  t.after(() => session.dispose());
+  session.sendUserMessage('start native');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  await assert.rejects(session.setPermissionProfile('unrestricted'), /restart rejected/);
+  assert.equal(opts.permissionProfile, 'safe');
+  await assert.rejects(
+    session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 }),
+    /restart rejected/,
+  );
+  assert.deepEqual([opts.workflow, opts.phase, opts.capabilityEpoch], ['direct', 'implementing', 1]);
 });
 
 test('Cursor never switches transports after the native prompt starts', async (t) => {
