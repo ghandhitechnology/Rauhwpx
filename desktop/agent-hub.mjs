@@ -687,18 +687,43 @@ export async function startDetachedHub({
   execPath,
   log = console,
   readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS,
+  expectedProtocol,
 } = {}) {
   const paths = hubRunPaths(runDir);
   const token = env.RHWP_AGENT_TOKEN ?? env.RHWP_AGENT_DEV_TOKEN ?? 'dev';
   const health = await readHubHealth(port, { fetchImpl, token });
   if (health?.ok) {
-    return {
-      started: false,
-      ready: true,
-      alreadyRunning: true,
-      pid: hubPidFromHealth(health),
-      log: paths.log,
-    };
+    const compatible = expectedProtocol === undefined
+      || Number(health.protocol) === Number(expectedProtocol);
+    if (compatible) {
+      return {
+        started: false,
+        ready: true,
+        alreadyRunning: true,
+        pid: hubPidFromHealth(health),
+        log: paths.log,
+      };
+    }
+
+    // A repository update can leave the previous detached hub alive on the
+    // fixed development port. It is authenticated by this same ctl token, so
+    // replace it before spawning instead of letting the new child die with
+    // EADDRINUSE and surfacing only a readiness timeout.
+    log.log?.(`[rauhwpx] replacing protocol v${health.protocol ?? 'unknown'} agent hub with v${expectedProtocol}`);
+    const stopped = await stopHubByPort(port, {
+      pidPath: paths.pid,
+      fetchImpl,
+      token,
+    });
+    if (!stopped.stopped) {
+      return {
+        started: false,
+        ready: false,
+        pid: hubPidFromHealth(health),
+        log: paths.log,
+        error: 'incompatible-hub-still-running',
+      };
+    }
   }
 
   // A stale PID file cannot prove process identity. Never kill it implicitly.

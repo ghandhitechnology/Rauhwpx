@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseCtlArgs, runCtl, ctlUsage } from '../ctl.mjs';
+import { EXPECTED_HUB_PROTOCOL, parseCtlArgs, runCtl, ctlUsage } from '../ctl.mjs';
 import { isHubHealthy, stopHubByPort } from '../../../desktop/agent-hub.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -41,6 +41,61 @@ test('status is down when nothing is listening', async () => {
   assert.equal(code, 1);
   assert.equal(result.ready, false);
   assert.match(stdout.chunks.join(''), /"ready":false/);
+});
+
+test('ctl replaces an authenticated detached hub from an older protocol', { timeout: 30_000 }, async () => {
+  const port = await freePort();
+  const runDir = await mkdtemp(join(tmpdir(), 'rhwp-ctl-upgrade-'));
+  const stdout = { chunks: [], write(chunk) { this.chunks.push(String(chunk)); } };
+  const legacy = createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/healthz') {
+      res.end(JSON.stringify({
+        ok: true,
+        pid: process.pid,
+        launchId: 'legacy-hub',
+        protocol: EXPECTED_HUB_PROTOCOL - 1,
+      }));
+      return;
+    }
+    if (req.url === '/shutdown' && req.method === 'POST') {
+      res.setHeader('connection', 'close');
+      res.end(JSON.stringify({ status: 'shutting-down' }), () => {
+        legacy.closeAllConnections?.();
+        legacy.close();
+      });
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: { message: 'not found' } }));
+  });
+  await new Promise((resolve, reject) => {
+    legacy.once('error', reject);
+    legacy.listen(port, '127.0.0.1', resolve);
+  });
+
+  try {
+    const started = await runCtl('start', {
+      port,
+      runDir,
+      repoRoot: REPO_ROOT,
+      scriptPath: SCRIPT,
+      agentDir: AGENT_DIR,
+      json: true,
+      stdout,
+      env: { ...process.env, RHWP_AGENT_PORT: String(port) },
+    });
+    assert.equal(started.code, 0, stdout.chunks.join(''));
+    assert.equal(started.result.ready, true);
+    const health = await (await fetch(`http://127.0.0.1:${port}/healthz`, {
+      headers: { authorization: 'Bearer dev' },
+    })).json();
+    assert.equal(health.protocol, EXPECTED_HUB_PROTOCOL);
+  } finally {
+    await stopHubByPort(port, { pidPath: join(runDir, 'rhwp-agent.pid') });
+    await new Promise((resolve) => legacy.close(resolve)).catch(() => {});
+    await rm(runDir, { recursive: true, force: true });
+  }
 });
 
 test('ctl start/stop roundtrip without holding the terminal', { timeout: 30_000 }, async () => {

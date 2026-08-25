@@ -2055,27 +2055,6 @@ impl DocumentCore {
             }
         };
 
-        // ── 단 영역 조회 헬퍼 ──
-        let find_column_area = |page: u32, rx: f64| -> (f64, f64) {
-            self.find_page(page)
-                .map(|(pc, _, _)| {
-                    let areas = &pc.layout.column_areas;
-                    areas
-                        .iter()
-                        .find(|ca| rx >= ca.x - 2.0 && rx <= ca.x + ca.width + 2.0)
-                        .or_else(|| {
-                            areas.iter().min_by(|a, b| {
-                                let da = (rx - (a.x + a.width / 2.0)).abs();
-                                let db = (rx - (b.x + b.width / 2.0)).abs();
-                                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                            })
-                        })
-                        .map(|ca| (ca.x, ca.x + ca.width))
-                        .unwrap_or((0.0, 0.0))
-                })
-                .unwrap_or((0.0, 0.0))
-        };
-
         // ── 메인 루프 ──
         let mut rects: Vec<String> = Vec::new();
         let mut expected_segments = 0usize;
@@ -2186,35 +2165,14 @@ impl DocumentCore {
                 if let Some((lh, rh)) = cursor_pair {
                     debug_assert_eq!(lh.page, rh.page);
                     last_segment_page = Some(lh.page);
-                    let partial_start = range_start > line_char_start;
-
-                    let selection_continues = cell_ctx.is_none()
-                        && ((range_end < sel_end) ||
-                        (para_idx < end_para_idx && range_end == sel_end) ||
-                        // 같은 문단 내 강제 줄바꿈: 줄 끝까지 선택되고 다음 줄 시작이 sel_end이면 확장
-                        (range_end == sel_end && range_end >= line_char_end && line_idx + 1 < line_count));
-
-                    let (area_left, area_right) = if cell_ctx.is_none() {
-                        find_column_area(rh.page, rh.x)
-                    } else {
-                        (0.0, 0.0)
-                    };
-
-                    // y/h는 항상 left_hit 기준 (right_hit가 다음 줄에 있을 수 있음)
-                    let (page_idx, rect_x, rect_y, rect_h) = if !partial_start && cell_ctx.is_none()
-                    {
-                        (lh.page, area_left, lh.y, lh.h)
-                    } else {
-                        (lh.page, lh.x, lh.y, lh.h)
-                    };
-
-                    let width = if selection_continues {
-                        (area_right - rect_x).max(0.0)
-                    } else if !partial_start && cell_ctx.is_none() {
-                        (rh.x - rect_x).max(0.0)
-                    } else {
-                        (rh.x - lh.x).abs()
-                    };
+                    // 선택 잉크는 줄/단의 가용 폭이 아니라 실제 시작·끝 캐럿 사이만 덮는다.
+                    // 문단 경계나 다음 줄로 선택이 이어져도 오른쪽 여백은 선택된 텍스트가 아니다.
+                    // y/h는 항상 left_hit 기준 (right_hit가 다음 줄에 있을 수 있음).
+                    let page_idx = lh.page;
+                    let rect_x = lh.x.min(rh.x);
+                    let rect_y = lh.y;
+                    let rect_h = lh.h;
+                    let width = (rh.x - lh.x).abs();
 
                     if width > 0.01 {
                         rendered_segments += 1;
