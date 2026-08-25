@@ -618,6 +618,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let skillsPanelOpen = false;
   let settingsPanelOpen = false;
   let versionsPanelOpen = false;
+  let deferredVersionsOpenTimer: number | null = null;
   /** 에이전트 집중 모드 — 스레드 레일과 대화 무대로 문서를 덮는다. */
   let fullscreen = false;
   let threadsRailCollapsed = readStoredThreadsRailCollapsed();
@@ -2610,9 +2611,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function setVersionsPanelOpen(open: boolean): void {
     if (!versionController) return;
+    if (deferredVersionsOpenTimer !== null) {
+      window.clearTimeout(deferredVersionsOpenTimer);
+      deferredVersionsOpenTimer = null;
+    }
     if (fullscreen) {
       setFullscreen(false);
-      window.setTimeout(() => setVersionsPanelOpen(open), FS_MOTION_SETTLE_MS);
+      deferredVersionsOpenTimer = window.setTimeout(() => {
+        deferredVersionsOpenTimer = null;
+        setVersionsPanelOpen(open);
+      }, FS_MOTION_SETTLE_MS);
       return;
     }
     if (open && referenceLibrary.isOpen()) referenceLibrary.setOpen(false);
@@ -5774,6 +5782,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       if (conversationScrollUnlock !== null) {
         window.clearTimeout(conversationScrollUnlock);
         conversationScrollUnlock = null;
+      }
+      if (deferredVersionsOpenTimer !== null) {
+        window.clearTimeout(deferredVersionsOpenTimer);
+        deferredVersionsOpenTimer = null;
       }
       window.removeEventListener('resize', measure);
       document.removeEventListener('pointerdown', onDocPointerDown);

@@ -42,9 +42,11 @@ test('completion applies before prompting and retries only source finalization',
   const start = source.indexOf('private async confirmCompletion');
   const end = source.indexOf('private requestSourceDisposition', start);
   const completion = source.slice(start, end);
-  assert.ok(completion.indexOf('complete(application!') < completion.indexOf('requestSourceDisposition()'));
+  const ensureApplied = completion.indexOf('this.completion.ensureApplied');
+  const requestSourceDisposition = completion.indexOf('requestSourceDisposition()');
+  assert.notEqual(ensureApplied, -1);
+  assert.ok(ensureApplied < requestSourceDisposition);
   assert.ok(completion.indexOf('requestSourceDisposition()') < completion.indexOf('finalizeSourceDisposition'));
-  assert.match(completion, /this\.completion\.ensureApplied/);
   assert.match(completion, /this\.completion\.finalize/);
   assert.match(source, /적용한 병합을 안전하게 마무리/);
   assert.match(source, /finish\('keep'\)/);

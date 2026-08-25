@@ -126,7 +126,9 @@ export class MergeResolverWindow {
     document.body.appendChild(this.root!);
     document.body.classList.add('merge-resolver-open');
     document.addEventListener('keydown', this.onKeyDownBound, true);
-    void this.loadPreviews();
+    void this.loadPreviews().catch((cause) => {
+      this.announce(`미리보기 실패: ${mergeErrorMessage(cause, '문서를 미리 볼 수 없습니다.')}`);
+    });
     this.renderConflictList();
     const first = options.analysis.conflicts[0];
     if (first) this.selectConflict(first.id);
@@ -137,7 +139,7 @@ export class MergeResolverWindow {
     return this.completionPromise;
   }
 
-  /** Closing saves by default. Discard must always be explicit. */
+  /** 닫을 때는 기본적으로 저장하며, 폐기는 항상 명시적으로 선택해야 한다. */
   async close(options: MergeResolverCloseOptions = {}): Promise<void> {
     if (!this.options || !this.state || !this.root || this.busy) return;
     if (this.completion.hasPending) {
@@ -519,10 +521,18 @@ export class MergeResolverWindow {
   }
 
   private scheduleMaterialize(): void {
-    if (!this.state || this.state.unresolvedCount > 0) return;
-    if (this.materializeTimer) clearTimeout(this.materializeTimer);
+    if (!this.state) return;
+    if (this.materializeTimer) {
+      clearTimeout(this.materializeTimer);
+      this.materializeTimer = null;
+    }
     this.materializeAbort?.abort();
-    this.materializeTimer = setTimeout(() => void this.materializeResult(), 150);
+    this.materializeAbort = null;
+    if (this.state.unresolvedCount > 0) return;
+    this.materializeTimer = setTimeout(() => {
+      this.materializeTimer = null;
+      void this.materializeResult();
+    }, 150);
   }
 
   private async materializeResult(): Promise<void> {
@@ -551,7 +561,15 @@ export class MergeResolverWindow {
         : `검증 실패: ${materialized.validation.errors
           .map((error) => mergeErrorMessage(error, '문서 구조를 검증하지 못했습니다.'))
           .join(' ')}`);
-      if (materialized.document) await this.panes.get('result')?.load(materialized.document);
+      if (materialized.document) {
+        try {
+          await this.panes.get('result')?.load(materialized.document);
+        } catch (cause) {
+          if (abort.signal.aborted || sequence !== this.materializeSequence) return;
+          this.announce(`병합 결과 미리보기 실패: ${mergeErrorMessage(cause, '문서를 미리 볼 수 없습니다.')}`);
+          return;
+        }
+      }
       this.announce(materialized.validation.valid ? '병합 결과가 준비되었습니다.' : '병합 결과를 검증하지 못했습니다.');
     } catch (cause) {
       if (abort.signal.aborted || sequence !== this.materializeSequence) return;
@@ -662,8 +680,7 @@ export class MergeResolverWindow {
         resolve(value);
       };
       cancel.addEventListener('click', () => finish('keep'));
-      // Dismissing the post-merge branch choice is intentionally equivalent
-      // to its safe default: keep the source branch.
+      // 병합 후 브랜치 선택 창을 닫으면 안전한 기본값인 소스 브랜치 유지로 처리한다.
       overlay.addEventListener('click', (event) => { if (event.target === overlay) finish('keep'); });
       dialog.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') { event.preventDefault(); finish('keep'); }
@@ -816,11 +833,13 @@ export class MergeResolverWindow {
     const modifier = event.ctrlKey || event.metaKey;
     if (modifier && event.key.toLowerCase() === 'z') {
       event.preventDefault();
+      if (this.busy || this.completion.hasPending) return;
       event.shiftKey ? this.redo() : this.undo();
       return;
     }
     if (modifier && event.key.toLowerCase() === 'y') {
       event.preventDefault();
+      if (this.busy || this.completion.hasPending) return;
       this.redo();
       return;
     }

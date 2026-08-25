@@ -109,6 +109,7 @@ test('repository creation atomically writes main, its initial commit, and copied
   assert.equal(created.branch.target, created.commit.id);
   assert.deepEqual((await store.listCommits(created.repository.id)).map((commit) => commit.id), [created.commit.id]);
   assert.deepEqual([...(await store.getBlob(created.commit.blobId))!.bytes], [1, 2, 3]);
+  assert.deepEqual([...(await store.getBlobSizes([created.commit.blobId])).entries()], [[created.commit.blobId, 3]]);
   assert.equal((await store.getCompareSnapshot(created.commit.compareSnapshotId))?.snapshot.meta.name, 'Initial');
 });
 
@@ -699,7 +700,7 @@ test('criss-cross history returns every nearest merge base in deterministic orde
   );
 });
 
-test('merge draft CRUD uses updatedAt CAS and keeps draft heads and assets reachable', async () => {
+test('branch deletion invalidates matching merge drafts and releases their unshared assets', async () => {
   const created = await repository();
   const { store, repository: repo, branch: main, commit: root } = created;
   const source = await store.createBranch({
@@ -745,13 +746,13 @@ test('merge draft CRUD uses updatedAt CAS and keeps draft heads and assets reach
     expectedBranchRevision: incoming.branch.revision,
   });
   const collected = await store.collectGarbage(repo.id, deleted.revision);
-  assert.equal(collected.garbageCollected.commits, 0);
-  assert.ok(await store.getCommit(incoming.commit.id));
-  assert.ok(await store.getBlob(assetId));
-  await store.deleteMergeDraft(repo.id, saved.id, saved.updatedAt);
+  assert.equal(collected.garbageCollected.commits, 1);
+  assert.equal(await store.getCommit(incoming.commit.id), null);
+  assert.equal(await store.getMergeDraft(saved.id), null);
+  assert.equal(await store.getBlob(assetId), null);
 });
 
-test('merge completion rejects a source branch delete/recreate ABA with the same head and revision', async () => {
+test('source branch deletion invalidates a merge draft before a same-head recreation', async () => {
   const created = await repository();
   const { store, repository: repo, branch: main, commit: root } = created;
   const incoming = await store.createCheckpoint({
@@ -803,6 +804,7 @@ test('merge completion rejects a source branch delete/recreate ABA with the same
   assert.equal(recreated.branch.target, source.branch.target);
   assert.equal(recreated.branch.revision, source.branch.revision);
   assert.notEqual(recreated.branch.generation, source.branch.generation);
+  assert.equal(await store.getMergeDraft(draft.id), null);
   await assert.rejects(
     store.completeFastForwardMerge({
       repositoryId: repo.id,
@@ -816,7 +818,7 @@ test('merge completion rejects a source branch delete/recreate ABA with the same
       deleteSource: false,
       draftId: draft.id,
     }),
-    (error) => error instanceof VersionError && error.code === 'STALE_WORKSPACE',
+    (error) => error instanceof VersionError && error.code === 'MERGE_DRAFT_NOT_FOUND',
   );
 });
 
@@ -837,6 +839,17 @@ test('fast-forward completion and merge checkpoint completion update refs and dr
     reason: 'manual',
     ...payload(3, 'Fast forward'),
   });
+  const ffDraft = mergeDraft(first, incoming.branch);
+  ffDraft.mode = 'fast-forward';
+  ffDraft.sourceHead = incoming.commit.id;
+  ffDraft.sourceBranchRevision = incoming.branch.revision;
+  ffDraft.targetBranchGeneration = main.generation;
+  ffDraft.sourceBranchGeneration = incoming.branch.generation;
+  const savedFfDraft = await store.putMergeDraft({ draft: ffDraft, expectedUpdatedAt: null });
+  const extraFfDraft = await store.putMergeDraft({
+    draft: { ...ffDraft, id: mergeDraftId('draft-ff-extra'), updatedAt: ffDraft.updatedAt + 1 },
+    expectedUpdatedAt: null,
+  });
   const ff = await store.completeFastForwardMerge({
     repositoryId: repo.id,
     branch: main.name,
@@ -847,10 +860,13 @@ test('fast-forward completion and merge checkpoint completion update refs and dr
     sourceBranch: incoming.branch.name,
     expectedSourceRevision: incoming.branch.revision,
     deleteSource: true,
+    draftId: savedFfDraft.id,
   });
   assert.equal(ff.branch.target, incoming.commit.id);
   assert.equal(ff.sourceBranch, null);
   assert.equal(await store.getBranch(repo.id, incoming.branch.name), null);
+  assert.equal(await store.getMergeDraft(savedFfDraft.id), null);
+  assert.equal(await store.getMergeDraft(extraFfDraft.id), null);
 
   const divergedSource = await store.createBranch({
     repositoryId: repo.id,
@@ -874,6 +890,17 @@ test('fast-forward completion and merge checkpoint completion update refs and dr
     reason: 'manual',
     ...payload(5, 'Incoming side'),
   });
+  const checkpointDraft = mergeDraft(
+    { ...first, repository: incomingSide.repository, branch: current.branch },
+    incomingSide.branch,
+  );
+  checkpointDraft.currentHead = current.commit.id;
+  checkpointDraft.sourceHead = incomingSide.commit.id;
+  checkpointDraft.targetBranchRevision = current.branch.revision;
+  checkpointDraft.sourceBranchRevision = incomingSide.branch.revision;
+  checkpointDraft.targetBranchGeneration = current.branch.generation;
+  checkpointDraft.sourceBranchGeneration = incomingSide.branch.generation;
+  const savedCheckpointDraft = await store.putMergeDraft({ draft: checkpointDraft, expectedUpdatedAt: null });
   const completed = await store.completeMergeCheckpoint({
     repositoryId: repo.id,
     branch: current.branch.name,
@@ -883,6 +910,7 @@ test('fast-forward completion and merge checkpoint completion update refs and dr
     sourceBranch: incomingSide.branch.name,
     expectedSourceRevision: incomingSide.branch.revision,
     deleteSource: true,
+    draftId: savedCheckpointDraft.id,
     merge: {
       sourceBranchAtMerge: incomingSide.branch.name,
       targetBranchAtMerge: current.branch.name,
@@ -895,6 +923,7 @@ test('fast-forward completion and merge checkpoint completion update refs and dr
   assert.equal(completed.commit.reason, 'merge');
   assert.equal(completed.commit.merge?.conflictCount, 2);
   assert.equal(completed.sourceBranch, null);
+  assert.equal(await store.getMergeDraft(savedCheckpointDraft.id), null);
 
   // A later ordinary checkpoint can be undone before the merge history entry.
   // Its ref movement leaves the merge head unchanged but advances the branch
@@ -942,6 +971,25 @@ test('fast-forward completion and merge checkpoint completion update refs and dr
   assert.equal(undone.targetBranch.target, current.commit.id);
   assert.equal(undone.sourceBranch?.target, incomingSide.commit.id);
   assert.ok(undone.repository.revision > metadataAdvanced.revision);
+  const redoAssetBytes = new Uint8Array([88, 87, 86]);
+  const redoAssetId = hashBytes(redoAssetBytes);
+  const redoDraft = mergeDraft(
+    { ...first, repository: undone.repository, branch: undone.targetBranch },
+    undone.sourceBranch!,
+  );
+  redoDraft.id = mergeDraftId('draft-before-redo');
+  redoDraft.currentHead = undone.targetBranch.target;
+  redoDraft.sourceHead = undone.sourceBranch!.target;
+  redoDraft.targetBranchRevision = undone.targetBranch.revision;
+  redoDraft.sourceBranchRevision = undone.sourceBranch!.revision;
+  redoDraft.targetBranchGeneration = undone.targetBranch.generation;
+  redoDraft.sourceBranchGeneration = undone.sourceBranch!.generation;
+  redoDraft.manualAssetBlobIds = [redoAssetId];
+  const savedRedoDraft = await store.putMergeDraft({
+    draft: redoDraft,
+    expectedUpdatedAt: null,
+    assetBlobs: [{ id: redoAssetId, byteLength: redoAssetBytes.byteLength, bytes: redoAssetBytes }],
+  });
   const redone = await store.restoreCompositeRefs({
     repositoryId: repo.id,
     expectedRepositoryRevision: undone.repository.revision,
@@ -962,6 +1010,8 @@ test('fast-forward completion and merge checkpoint completion update refs and dr
   });
   assert.equal(redone.targetBranch.target, completed.commit.id);
   assert.equal(redone.sourceBranch, null);
+  assert.equal(await store.getMergeDraft(savedRedoDraft.id), null);
+  assert.equal(await store.getBlob(redoAssetId), null);
   await assert.rejects(
     store.restoreCompositeRefs({
       repositoryId: repo.id,

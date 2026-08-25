@@ -46,7 +46,13 @@ function post(message: MergeWorkerResponse, transfer: Transferable[] = []): void
 }
 
 async function exportsReady(): Promise<StructuralMergeExports> {
-  wasmReady ??= init().then(() => undefined);
+  if (!wasmReady) {
+    const initializing = init().then(() => undefined);
+    wasmReady = initializing.catch((error) => {
+      wasmReady = null;
+      throw error;
+    });
+  }
   await wasmReady;
   const exports = wasmModule as unknown as Partial<StructuralMergeExports>;
   if (
@@ -141,9 +147,8 @@ function detectFormat(bytes: Uint8Array): 'hwp' | 'hwpx' | 'unknown' {
 
 function pendingHostValidation(bytes: Uint8Array): MergeValidationResult {
   return {
-    // Rust returning bytes proves its internal adapter completed, but it is not
-    // the final application gate. The controller must load, export, reload,
-    // compare structure, and check resource dependencies in fresh WASM docs.
+    // Rust가 바이트를 반환해도 내부 어댑터 완료만 확인된다. 최종 적용 전 컨트롤러가
+    // 새 WASM 문서에서 로드, 내보내기, 재로드, 구조 비교, 리소스 종속성 검사를 수행한다.
     valid: false,
     errors: ['Host parse/export/reload and resource validation is pending.'],
     checks: {

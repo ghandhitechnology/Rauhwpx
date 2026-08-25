@@ -29,6 +29,17 @@ test('one semantic analysis supplies both checkpoint stats and the AI title summ
   assert.match(checkpoint, /analysis\.titleSummary/);
 });
 
+test('complete current merge manifests are reused before walking their ancestors', () => {
+  const ensure = method('async #ensureFullMergeManifest(', 'async #flushDeferredSave(');
+  const persisted = ensure.indexOf('const persisted = commit.mergeManifestId');
+  const recurse = ensure.indexOf('this.#ensureFullMergeManifest(repositoryId, parent, memo)');
+  assert.ok(persisted >= 0 && persisted < recurse);
+  assert.match(ensure, /persisted\.analysisVersion === MERGE_MANIFEST_VERSION/);
+  assert.match(ensure, /persisted\.coverage === 'full-document'/);
+  assert.match(ensure, /persisted\.parentManifestIds\[index\] === parentManifest\.id/);
+  assert.ok(ensure.indexOf('if (attachedParents.every(Boolean)) return persisted') < recurse);
+});
+
 test('workspace tokens bind async content reads and compares to one document revision', () => {
   const token = method('#captureWorkspaceToken(): WorkspaceToken {', '#assertWorkspaceToken(');
   assert.match(token, /documentId: id/);
@@ -140,6 +151,8 @@ test('sidebar dirty state is cached against HEAD and full repository usage is re
   assert.match(semantic, /currentFingerprint !== head\.contentFingerprint/);
 
   const build = method('async #buildState(', '#syncTransientState(');
+  assert.match(build, /getBlobSizes\(/);
+  assert.doesNotMatch(build, /getBlob\(/);
   assert.match(build, /getRepositoryStorageUsage\(this\.#repository\.id\)/);
   assert.match(build, /dirty: this\.#isSemanticDirty\(\)/);
   assert.match(build, /storageBytes: repositoryUsage\?\.totalBytes \?\? 0/);

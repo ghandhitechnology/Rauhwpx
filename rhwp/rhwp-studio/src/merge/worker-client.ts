@@ -37,7 +37,11 @@ export interface MergeDocumentMaterializeOutput {
 interface WorkerLike {
   postMessage(message: MergeWorkerRequest): void;
   addEventListener(type: 'message', listener: (event: MessageEvent<MergeWorkerResponse>) => void): void;
+  addEventListener(type: 'error', listener: (event: ErrorEvent) => void): void;
+  addEventListener(type: 'messageerror', listener: (event: MessageEvent<unknown>) => void): void;
   removeEventListener(type: 'message', listener: (event: MessageEvent<MergeWorkerResponse>) => void): void;
+  removeEventListener(type: 'error', listener: (event: ErrorEvent) => void): void;
+  removeEventListener(type: 'messageerror', listener: (event: MessageEvent<unknown>) => void): void;
   terminate(): void;
 }
 
@@ -137,6 +141,9 @@ export class MergeWorkerClient {
   private readonly uncertainVirtualBases = new WeakSet<object>();
   private readonly factory: MergeWorkerFactory;
   private readonly onMessageBound: (event: MessageEvent<MergeWorkerResponse>) => void;
+  private readonly onErrorBound: (event: ErrorEvent) => void;
+  private readonly onMessageErrorBound: () => void;
+  private disposed = false;
 
   constructor(factory: MergeWorkerFactory = () => new Worker(
     new URL('./merge.worker.ts', import.meta.url),
@@ -144,6 +151,10 @@ export class MergeWorkerClient {
   )) {
     this.factory = factory;
     this.onMessageBound = (event) => this.onMessage(event.data);
+    this.onErrorBound = (event) => this.restartWorker(
+      event.error ?? new Error(event.message || 'The merge worker failed.'),
+    );
+    this.onMessageErrorBound = () => this.restartWorker(new Error('The merge worker returned an unreadable message.'));
     this.worker = this.createWorker();
   }
 
@@ -153,6 +164,7 @@ export class MergeWorkerClient {
     incoming: unknown,
     options: MergeWorkerCallOptions = {},
   ): Promise<MergeAnalysis> {
+    if (this.disposed) return Promise.reject(new DOMException('The merge worker was disposed.', 'AbortError'));
     if (base && typeof base === 'object' && this.uncertainVirtualBases.has(base)) {
       options.onProgress?.({ operation: 'analyze', phase: 'budget-exceeded', elapsedMs: 0 });
       return Promise.resolve(budgetAnalysis(base, current, incoming));
@@ -243,19 +255,29 @@ export class MergeWorkerClient {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     for (const pending of this.pending.values()) {
       this.finishTimers(pending);
       pending.reject(new DOMException('The merge worker was disposed.', 'AbortError'));
     }
     this.pending.clear();
-    this.worker.removeEventListener('message', this.onMessageBound);
+    this.removeWorkerListeners(this.worker);
     this.worker.terminate();
   }
 
   private createWorker(): WorkerLike {
     const worker = this.factory();
     worker.addEventListener('message', this.onMessageBound);
+    worker.addEventListener('error', this.onErrorBound);
+    worker.addEventListener('messageerror', this.onMessageErrorBound);
     return worker;
+  }
+
+  private removeWorkerListeners(worker: WorkerLike): void {
+    worker.removeEventListener('message', this.onMessageBound);
+    worker.removeEventListener('error', this.onErrorBound);
+    worker.removeEventListener('messageerror', this.onMessageErrorBound);
   }
 
   private request<T>(
@@ -263,6 +285,9 @@ export class MergeWorkerClient {
     options: MergeWorkerCallOptions,
     timeoutFallback?: () => T,
   ): Promise<T> {
+    if (this.disposed) {
+      return Promise.reject(new DOMException('The merge worker was disposed.', 'AbortError'));
+    }
     if (options.signal?.aborted) {
       return Promise.reject(options.signal.reason ?? new DOMException('Aborted', 'AbortError'));
     }
@@ -344,14 +369,18 @@ export class MergeWorkerClient {
       phase: 'budget-exceeded',
       elapsedMs: Math.max(0, performance.now() - pending.startedAt),
     });
-    if (!pending.timeoutFallback) return;
+    if (!pending.timeoutFallback) {
+      this.settle(id, () => pending.reject(new Error('The merge worker exceeded its time budget.')));
+      this.restartWorker(new Error('A concurrent merge request was cancelled after the time budget was exceeded.'));
+      return;
+    }
     const fallback = pending.timeoutFallback();
     this.settle(id, () => pending.resolve(fallback));
     this.restartWorker(new Error('A concurrent merge request was cancelled after the soft budget was exceeded.'));
   }
 
   private restartWorker(reason?: unknown): void {
-    this.worker.removeEventListener('message', this.onMessageBound);
+    this.removeWorkerListeners(this.worker);
     this.worker.terminate();
     if (reason !== undefined) {
       for (const [id, pending] of this.pending) {
@@ -360,7 +389,7 @@ export class MergeWorkerClient {
         pending.reject(reason);
       }
     }
-    this.worker = this.createWorker();
+    if (!this.disposed) this.worker = this.createWorker();
   }
 
   private settle(id: number, action: () => void): void {

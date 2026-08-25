@@ -7,10 +7,11 @@ html.desktop-mac body.merge-resolver-open #menu-bar::after {
 }
 
 .merge-resolver-window {
-  --merge-border: color-mix(in srgb, currentColor 18%, transparent);
-  --merge-muted: color-mix(in srgb, currentColor 66%, transparent);
+  --merge-border: color-mix(in srgb, currentcolor 18%, transparent);
+  --merge-muted: color-mix(in srgb, currentcolor 66%, transparent);
   --merge-surface: var(--bg-color, #fff);
-  --merge-panel: color-mix(in srgb, var(--merge-surface) 94%, currentColor 6%);
+  --merge-panel: color-mix(in srgb, var(--merge-surface) 94%, currentcolor 6%);
+
   position: fixed;
   inset: 0;
   z-index: 10000;

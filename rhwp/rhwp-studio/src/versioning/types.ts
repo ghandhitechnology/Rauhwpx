@@ -140,11 +140,9 @@ export type MergeNodeKind =
   | 'style'
   | 'resource'
   | 'unknown-control'
-  | string;
+  | (string & {});
 
 export type MergeDocumentPath = readonly string[];
-export type MergeValue = unknown;
-export type TypedMergeValue = unknown;
 
 export type MergeRelation = 'already-integrated' | 'fast-forward' | 'diverged';
 
@@ -152,7 +150,7 @@ export type MergeResolution =
   | { kind: 'current' }
   | { kind: 'incoming' }
   | { kind: 'both'; order: 'current-first' | 'incoming-first' }
-  | { kind: 'manual'; payload: TypedMergeValue };
+  | { kind: 'manual'; payload: unknown };
 
 export type MergeConflictReason =
   | 'same-field-changed'
@@ -168,9 +166,9 @@ export interface MergeConflict {
   kind: MergeNodeKind;
   path: MergeDocumentPath;
   reason: MergeConflictReason;
-  base: MergeValue;
-  current: MergeValue;
-  incoming: MergeValue;
+  base: unknown;
+  current: unknown;
+  incoming: unknown;
   supportsBoth: boolean;
   /** False for opaque/atomic values that can only choose one complete side. */
   supportsManual?: boolean;
@@ -229,7 +227,7 @@ export interface VersionMergeDraft {
   analysisVersion: number;
   conflicts: MergeConflict[];
   resolutions: Record<string, MergeResolution>;
-  automaticResult: MergeValue;
+  automaticResult: unknown;
   manualAssetBlobIds: BlobId[];
   history: MergeDraftHistoryEntry[];
   historyIndex: number;

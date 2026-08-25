@@ -269,6 +269,7 @@ function runCli(spec, prompt, timeoutMs, {
     let outputExceeded = false;
     let child;
     let timer = null;
+    let stopping = false;
 
     const finish = (value) => {
       if (settled) return;
@@ -278,11 +279,12 @@ function runCli(spec, prompt, timeoutMs, {
       resolve(value);
     };
     const stop = () => {
-      if (child) terminateProcess(child);
+      if (!child || stopping) return;
+      stopping = true;
+      terminateProcess(child);
     };
     const abort = () => {
       stop();
-      finish(null);
     };
 
     try {
@@ -298,12 +300,6 @@ function runCli(spec, prompt, timeoutMs, {
       return;
     }
 
-    timer = setTimeout(abort, timeoutMs);
-    signal?.addEventListener?.('abort', abort, { once: true });
-    if (signal?.aborted) {
-      abort();
-      return;
-    }
     child.stdout?.setEncoding?.('utf8');
     child.stdout?.on?.('data', (chunk) => {
       if (outputExceeded) return;
@@ -311,22 +307,26 @@ function runCli(spec, prompt, timeoutMs, {
       if (Buffer.byteLength(stdout, 'utf8') > MAX_CLI_OUTPUT_BYTES) {
         outputExceeded = true;
         stop();
-        finish(null);
       }
     });
     child.stdout?.on?.('error', () => {});
     child.stderr?.on?.('data', () => {});
     child.stderr?.on?.('error', () => {});
     child.on?.('error', () => finish(null));
-    const onExit = (code) => {
-      if (outputExceeded || code !== 0) {
+    child.on?.('close', (code) => {
+      if (stopping || outputExceeded || code !== 0) {
         finish(null);
         return;
       }
       finish(extractCheckpointTitleText(stdout));
-    };
-    child.on?.('close', onExit);
-    child.on?.('exit', (code) => setImmediate(() => onExit(code)));
+    });
+
+    timer = setTimeout(abort, timeoutMs);
+    signal?.addEventListener?.('abort', abort, { once: true });
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
 
     if (spec.stdin) {
       child.stdin?.on?.('error', abort);
@@ -362,14 +362,51 @@ async function prepareCliWorkspace(provider, prompt, deps) {
   }
 }
 
-async function runPreparedCli(workspace, prompt, timeoutMs, deps) {
-  return runCli(workspace.spec, prompt, timeoutMs, {
-    cwd: workspace.tempRoot,
-    signal: deps.signal,
-    spawnProcess: deps.spawnProcess,
-    terminateProcess: deps.terminateProcess,
-    env: workspace.env,
+async function prepareCliWorkspaceBounded(provider, prompt, timeoutMs, deps) {
+  if (timeoutMs <= 0 || deps.signal?.aborted) return null;
+  const stopped = Symbol('stopped');
+  let timer;
+  let detachExternal = () => {};
+  let stop;
+  const aborted = new Promise((resolve) => {
+    stop = () => resolve(stopped);
+    timer = setTimeout(stop, timeoutMs);
+    if (deps.signal) {
+      deps.signal.addEventListener('abort', stop, { once: true });
+      detachExternal = () => deps.signal.removeEventListener('abort', stop);
+      if (deps.signal.aborted) stop();
+    }
   });
+  if (deps.signal?.aborted) {
+    clearTimeout(timer);
+    detachExternal();
+    return null;
+  }
+
+  const running = prepareCliWorkspace(provider, prompt, deps);
+  try {
+    const workspace = await Promise.race([running, aborted]);
+    if (workspace !== stopped) return workspace;
+    void running.then(disposeCliWorkspace, () => {});
+    return null;
+  } finally {
+    clearTimeout(timer);
+    detachExternal();
+  }
+}
+
+async function runPreparedCli(workspace, prompt, timeoutMs, deps) {
+  try {
+    return await runCli(workspace.spec, prompt, timeoutMs, {
+      cwd: workspace.tempRoot,
+      signal: deps.signal,
+      spawnProcess: deps.spawnProcess,
+      terminateProcess: deps.terminateProcess,
+      env: workspace.env,
+    });
+  } finally {
+    await disposeCliWorkspace(workspace);
+  }
 }
 
 async function disposeCliWorkspace(workspace) {
@@ -440,7 +477,7 @@ async function boundedAttempt(operation, timeoutMs, externalSignal) {
   }
 }
 
-async function runTimedProvider(provider, model, prompt, timeoutMs, deps) {
+async function runTimedProvider(provider, model, prompt, timeoutMs, overallDeadline, deps) {
   if (deps.runProvider || provider === 'pi') {
     return boundedAttempt(
       (signal) => runProvider(provider, model, prompt, timeoutMs, { ...deps, signal }),
@@ -449,24 +486,33 @@ async function runTimedProvider(provider, model, prompt, timeoutMs, deps) {
     );
   }
 
-  // Temp-dir setup is outside the provider clock so a slow mkdtemp cannot
-  // abort the attempt before spawn/terminateProcess.
   let workspace;
   try {
-    workspace = await prepareCliWorkspace(provider, prompt, deps);
+    workspace = await prepareCliWorkspaceBounded(
+      provider,
+      prompt,
+      overallDeadline - Date.now(),
+      deps,
+    );
   } catch {
     return null;
   }
-  try {
-    if (deps.signal?.aborted) return null;
-    return await boundedAttempt(
-      (signal) => runPreparedCli(workspace, prompt, timeoutMs, { ...deps, signal }),
-      timeoutMs,
-      deps.signal,
-    );
-  } finally {
+  if (!workspace) return null;
+  if (deps.signal?.aborted) {
     await disposeCliWorkspace(workspace);
+    return null;
   }
+  const remaining = overallDeadline - Date.now();
+  if (remaining <= 0) {
+    await disposeCliWorkspace(workspace);
+    return null;
+  }
+  const runTimeoutMs = Math.max(1, Math.min(timeoutMs, remaining));
+  return boundedAttempt(
+    (signal) => runPreparedCli(workspace, prompt, runTimeoutMs, { ...deps, signal }),
+    runTimeoutMs,
+    deps.signal,
+  );
 }
 
 /** Generate opportunistically. Every unavailable, invalid, failed, or timed-out route falls through. */
@@ -477,15 +523,23 @@ export async function generateCheckpointTitle(raw, deps = {}) {
   const startedAt = Date.now();
   const overallTimeoutMs = deps.overallTimeoutMs ?? CHECKPOINT_TITLE_OVERALL_TIMEOUT_MS;
   const providerTimeoutMs = deps.providerTimeoutMs ?? CHECKPOINT_TITLE_PROVIDER_TIMEOUT_MS;
+  const overallDeadline = startedAt + overallTimeoutMs;
 
   for (const provider of PROVIDER_ORDER) {
     if (deps.signal?.aborted) break;
     const route = deps.readiness?.[provider];
     if (route?.ready !== true || typeof route.model !== 'string' || !route.model) continue;
-    const remaining = overallTimeoutMs - (Date.now() - startedAt);
+    const remaining = overallDeadline - Date.now();
     if (remaining <= 0) break;
     const timeoutMs = Math.max(1, Math.min(providerTimeoutMs, remaining));
-    const output = await runTimedProvider(provider, route.model, prompt, timeoutMs, deps);
+    const output = await runTimedProvider(
+      provider,
+      route.model,
+      prompt,
+      timeoutMs,
+      overallDeadline,
+      deps,
+    );
     const title = cleanCheckpointTitle(output);
     if (!title) continue;
     return {

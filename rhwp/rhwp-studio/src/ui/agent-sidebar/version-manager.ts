@@ -131,10 +131,16 @@ interface VersionTextPromptOptions {
   validate?: (value: string) => string | null;
 }
 
+interface VersionTextPrompt {
+  promise: Promise<string | null>;
+  cancel(): void;
+}
+
 let textPromptSequence = 0;
 
-function requestVersionText(options: VersionTextPromptOptions): Promise<string | null> {
-  return new Promise((resolve) => {
+function requestVersionText(options: VersionTextPromptOptions): VersionTextPrompt {
+  let cancelPrompt = (): void => undefined;
+  const promise = new Promise<string | null>((resolve) => {
     const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const promptId = `ag-version-text-prompt-${++textPromptSequence}`;
     const overlay = el('div', 'ag-version-prompt-overlay');
@@ -175,6 +181,7 @@ function requestVersionText(options: VersionTextPromptOptions): Promise<string |
       returnFocus?.focus();
       resolve(value);
     };
+    cancelPrompt = () => finish(null);
     const submit = (): void => {
       const value = input.value.trim();
       const validation = !value && !options.optional
@@ -213,6 +220,7 @@ function requestVersionText(options: VersionTextPromptOptions): Promise<string |
     input.focus();
     input.select();
   });
+  return { promise, cancel: () => cancelPrompt() };
 }
 
 function formatBytes(value: number): string {
@@ -491,7 +499,19 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   let selectedCommitId: string | null = null;
   let active = false;
   let actionPending = false;
+  let activeTextPrompt: VersionTextPrompt | null = null;
   const comparedCommits = new Set<string>();
+
+  async function promptVersionText(options: VersionTextPromptOptions): Promise<string | null> {
+    activeTextPrompt?.cancel();
+    const prompt = requestVersionText(options);
+    activeTextPrompt = prompt;
+    try {
+      return await prompt.promise;
+    } finally {
+      if (activeTextPrompt === prompt) activeTextPrompt = null;
+    }
+  }
 
   function setBusy(pending: boolean): void {
     actionPending = pending;
@@ -526,7 +546,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   }
 
   function askName(label: string, initial = ''): Promise<string | null> {
-    return requestVersionText({
+    return promptVersionText({
       title: label,
       label: '이름',
       initial,
@@ -681,7 +701,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       amend.type = 'button';
       amend.dataset.versionMutation = 'true';
       amend.addEventListener('click', () => void (async () => {
-        const next = await requestVersionText({
+        const next = await promptVersionText({
           title: '커밋 메시지 수정',
           label: '메시지',
           initial: selected.title,
@@ -784,11 +804,12 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       const actions = el('div', 'ag-versions-ref-actions');
       if (!branch.isActive) {
         const mergeDirection = `${branch.name} → ${current.activeBranch ?? '현재'}`;
-        const merge = el('button', 'ag-versions-primary', mergeDirection);
+        const mergeLabel = `병합: ${mergeDirection}`;
+        const merge = el('button', 'ag-versions-primary', mergeLabel);
         merge.type = 'button';
         merge.dataset.versionAction = 'merge';
         merge.dataset.versionMutation = 'true';
-        merge.dataset.versionTitle = mergeDirection;
+        merge.dataset.versionTitle = mergeLabel;
         merge.setAttribute('aria-label', `${branch.name}에서 ${current.activeBranch ?? '현재 브랜치'}로 병합`);
         merge.addEventListener('click', () => void perform(() => controller.startMerge(branch.name)));
         actions.appendChild(merge);
@@ -870,7 +891,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     shelf.dataset.versionPrerequisiteTitle = '보관할 변경 내용이 없습니다.';
     shelf.disabled = !current.dirty;
     shelf.addEventListener('click', () => void (async () => {
-      const title = await requestVersionText({
+      const title = await promptVersionText({
         title: '현재 변경 보관',
         label: '보관 이름 (선택)',
         optional: true,
@@ -953,10 +974,11 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     const targetBranch = current.activeBranch ?? 'main';
     activeBranch.querySelector('.ag-versions-branch-name')!.textContent = targetBranch;
     activeBranch.setAttribute('aria-label', `현재 브랜치 ${targetBranch} 보기`);
-    mergeButton.textContent = `… → ${targetBranch}`;
+    mergeButton.textContent = `병합: … → ${targetBranch}`;
     const mergeDirection = `다른 브랜치 → ${targetBranch}`;
-    mergeButton.dataset.versionTitle = mergeDirection;
-    mergeButton.setAttribute('aria-label', mergeDirection);
+    const mergeLabel = `병합: ${mergeDirection}`;
+    mergeButton.dataset.versionTitle = mergeLabel;
+    mergeButton.setAttribute('aria-label', mergeLabel);
     storage.textContent = current.storageQuotaBytes
       ? `${formatBytes(current.storageBytes)} / ${formatBytes(current.storageQuotaBytes)}`
       : `${formatBytes(current.storageBytes)} 사용`;
@@ -1001,7 +1023,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
 
   closeButton.addEventListener('click', () => page.dispatchEvent(new CustomEvent('ag-versions-close')));
   checkpointButton.addEventListener('click', () => void (async () => {
-    const message = await requestVersionText({
+    const message = await promptVersionText({
       title: '새 커밋 만들기',
       label: '메시지 (비워 두면 자동 제목)',
       optional: true,
@@ -1024,7 +1046,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     }
     const source = candidates.length === 1
       ? candidates[0].name
-      : await requestVersionText({
+      : await promptVersionText({
           title: `현재 브랜치로 병합 · → ${current.activeBranch ?? '현재'}`,
           label: `소스 브랜치 (${candidates.map((branch) => branch.name).join(', ')})`,
           validate: (value) => candidates.some((branch) => branch.name === value)
@@ -1065,8 +1087,11 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     },
     close(): void {
       active = false;
+      activeTextPrompt?.cancel();
     },
     dispose(): void {
+      active = false;
+      activeTextPrompt?.cancel();
       unsubscribe();
     },
   };

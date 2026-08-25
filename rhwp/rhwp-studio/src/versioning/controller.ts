@@ -433,7 +433,7 @@ export class DocumentVersionController implements VersionManagerController {
     await this.#enqueue(async () => {
       await this.#refreshData(false);
       await this.#guardMutation();
-      await this.#createCheckpoint({ reason: 'manual', message, allowSameContent: true });
+      await this.#createCheckpoint({ reason: 'manual', message });
     });
   }
 
@@ -1165,9 +1165,8 @@ export class DocumentVersionController implements VersionManagerController {
       incoming.blob.bytes,
       {
         manifests: {
-          // A synthesized virtual document has no single source path map. Empty
-          // base hints keep matching conservative while head manifests still
-          // propagate stable identities from legacy histories.
+          // 합성한 가상 문서에는 단일 소스 경로 맵이 없다. 빈 Base 힌트로 보수적으로
+          // 일치시키고, 각 HEAD 매니페스트는 이전 기록의 안정적인 식별자를 계속 전달한다.
           base: baseManifests.length === 1 ? baseManifests[0] : { entries: [] },
           current: currentManifest,
           incoming: incomingManifest,
@@ -1405,10 +1404,9 @@ export class DocumentVersionController implements VersionManagerController {
     if (!request.materialized.validation.valid || !request.materialized.document) {
       throw new VersionError('MERGE_VALIDATION_FAILED', '해결한 병합 결과가 올바른 문서가 아닙니다.');
     }
-    // Resolver edits are intentionally local (and undoable) until completion.
-    // Persist the exact state being completed before the store transaction checks
-    // that every conflict has an explicit resolution. This also leaves a fully
-    // resumable draft behind if a later validation or ref CAS fails.
+    // 리졸버 편집은 완료 전까지 로컬 Undo 대상으로 유지한다. 저장소 트랜잭션이 모든
+    // 충돌의 명시적 해결을 검사하기 전에 완료할 상태를 그대로 저장해, 이후 검증이나
+    // ref CAS가 실패해도 완전히 재개할 수 있는 초안을 남긴다.
     const persistedDraft = await this.#store.getMergeDraft(request.draft.id);
     if (!persistedDraft || persistedDraft.repositoryId !== request.draft.repositoryId) {
       throw new VersionError('MERGE_DRAFT_NOT_FOUND', '병합 초안을 찾을 수 없습니다.');
@@ -1784,6 +1782,29 @@ export class DocumentVersionController implements VersionManagerController {
       if (!commit || commit.repositoryId !== repositoryId) {
         throw new VersionError('COMMIT_NOT_FOUND', `병합 식별 정보를 만들 커밋 ${id}을(를) 찾을 수 없습니다.`);
       }
+      const persisted = commit.mergeManifestId
+        ? await this.#store.getMergeManifest(commit.mergeManifestId)
+        : null;
+      if (
+        persisted
+        && persisted.repositoryId === repositoryId
+        && persisted.commitId === id
+        && persisted.analysisVersion === MERGE_MANIFEST_VERSION
+        && persisted.coverage === 'full-document'
+        && persisted.parentManifestIds.length === commit.parents.length
+      ) {
+        const attachedParents = await Promise.all(commit.parents.map(async (parentId, index) => {
+          const parentCommit = await this.#store.getCommit(parentId);
+          if (!parentCommit || parentCommit.repositoryId !== repositoryId || !parentCommit.mergeManifestId) return false;
+          const parentManifest = await this.#store.getMergeManifest(parentCommit.mergeManifestId);
+          return parentManifest?.repositoryId === repositoryId
+            && parentManifest.commitId === parentId
+            && parentManifest.analysisVersion === MERGE_MANIFEST_VERSION
+            && parentManifest.coverage === 'full-document'
+            && persisted.parentManifestIds[index] === parentManifest.id;
+        }));
+        if (attachedParents.every(Boolean)) return persisted;
+      }
       const parents: VersionMergeManifest[] = [];
       for (const parent of commit.parents) {
         parents.push(await this.#ensureFullMergeManifest(repositoryId, parent, memo));
@@ -1905,14 +1926,10 @@ export class DocumentVersionController implements VersionManagerController {
     ).filter((id) => loadedCommitIds.has(id));
     const graphRows = layoutCommitGraph(this.#commits, [], preferredHeads);
     const rowById = new Map(graphRows.map((row) => [row.commitId, row]));
-    const blobLengths = new Map<string, number>();
-    await Promise.all([...new Set([
+    const blobLengths = await this.#store.getBlobSizes([...new Set([
       ...this.#commits.map((commit) => commit.blobId),
       ...this.#shelves.map((shelf) => shelf.blobId),
-    ])].map(async (id) => {
-      const blob = await this.#store.getBlob(id);
-      if (blob) blobLengths.set(id, blob.byteLength);
-    }));
+    ])]);
 
     const active = branchRefs.find((branch) => branch.name === this.#activeBranch) ?? null;
     const commitViews: VersionCommitView[] = this.#commits.map((commit) => {

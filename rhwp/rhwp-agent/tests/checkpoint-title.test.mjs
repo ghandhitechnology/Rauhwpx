@@ -221,6 +221,20 @@ class HungProcess extends EventEmitter {
   signalCode = null;
 }
 
+async function waitForMissing(filePath) {
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline) {
+    try {
+      await fs.access(filePath);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(`Expected ${filePath} to be removed`);
+}
+
 test('a timed-out CLI attempt terminates its owned process tree', async () => {
   let spawned;
   let terminated = 0;
@@ -288,4 +302,135 @@ test('external cancellation terminates an active CLI attempt', async () => {
 
   assert.equal(await pending, null);
   assert.equal(terminated, 1);
+});
+
+test('workspace setup stops at the overall deadline and disposes a late result', async () => {
+  let resolveCreated;
+  const created = new Promise((resolve) => { resolveCreated = resolve; });
+  let spawned = false;
+  const pending = generateCheckpointTitle(request(), {
+    readiness: readiness({
+      pi: { ready: false, model: '' },
+      grok: { ready: false, model: '' },
+      claude: { ready: false, model: '' },
+    }),
+    overallTimeoutMs: 10,
+    async mkdtemp(prefix) {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const tempRoot = await fs.mkdtemp(prefix);
+      resolveCreated(tempRoot);
+      return tempRoot;
+    },
+    spawnProcess() {
+      spawned = true;
+      return new HungProcess();
+    },
+  });
+
+  assert.equal(await Promise.race([
+    pending.then(() => 'result'),
+    created.then(() => 'workspace'),
+  ]), 'result');
+  assert.equal(await pending, null);
+  assert.equal(spawned, false);
+  const tempRoot = await created;
+  await waitForMissing(tempRoot);
+});
+
+test('external cancellation bounds workspace setup and disposes a late result', async () => {
+  let resolveCreated;
+  const created = new Promise((resolve) => { resolveCreated = resolve; });
+  const controller = new AbortController();
+  const pending = generateCheckpointTitle(request(), {
+    readiness: readiness({
+      pi: { ready: false, model: '' },
+      grok: { ready: false, model: '' },
+      claude: { ready: false, model: '' },
+    }),
+    signal: controller.signal,
+    async mkdtemp(prefix) {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const tempRoot = await fs.mkdtemp(prefix);
+      resolveCreated(tempRoot);
+      return tempRoot;
+    },
+  });
+  setTimeout(() => controller.abort(), 5);
+
+  assert.equal(await Promise.race([
+    pending.then(() => 'result'),
+    created.then(() => 'workspace'),
+  ]), 'result');
+  assert.equal(await pending, null);
+  const tempRoot = await created;
+  await waitForMissing(tempRoot);
+});
+
+test('CLI workspace remains until a terminated child closes', async () => {
+  let proc;
+  let cwd;
+  let resolveTerminated;
+  const terminated = new Promise((resolve) => { resolveTerminated = resolve; });
+  const pending = generateCheckpointTitle(request(), {
+    readiness: readiness({
+      pi: { ready: false, model: '' },
+      grok: { ready: false, model: '' },
+      claude: { ready: false, model: '' },
+    }),
+    providerTimeoutMs: 60,
+    overallTimeoutMs: 200,
+    spawnProcess(command, argv, options) {
+      cwd = options.cwd;
+      proc = new HungProcess();
+      return proc;
+    },
+    terminateProcess(child) {
+      child.emit('exit', null, 'SIGTERM');
+      resolveTerminated();
+    },
+  });
+
+  await terminated;
+  await new Promise((resolve) => setImmediate(resolve));
+  await fs.access(cwd);
+  proc.signalCode = 'SIGTERM';
+  proc.emit('close', null, 'SIGTERM');
+
+  assert.equal(await pending, null);
+  await assert.rejects(() => fs.access(cwd), { code: 'ENOENT' });
+});
+
+test('oversized CLI output keeps its workspace until the child closes', async () => {
+  let proc;
+  let cwd;
+  let resolveTerminated;
+  const terminated = new Promise((resolve) => { resolveTerminated = resolve; });
+  const pending = generateCheckpointTitle(request(), {
+    readiness: readiness({
+      pi: { ready: false, model: '' },
+      grok: { ready: false, model: '' },
+      claude: { ready: false, model: '' },
+    }),
+    providerTimeoutMs: 500,
+    overallTimeoutMs: 1_000,
+    spawnProcess(command, argv, options) {
+      cwd = options.cwd;
+      proc = new HungProcess();
+      queueMicrotask(() => proc.stdout.emit('data', 'x'.repeat(2 * 1024 * 1024)));
+      return proc;
+    },
+    terminateProcess(child) {
+      child.emit('exit', null, 'SIGTERM');
+      resolveTerminated();
+    },
+  });
+
+  await terminated;
+  await new Promise((resolve) => setImmediate(resolve));
+  await fs.access(cwd);
+  proc.signalCode = 'SIGTERM';
+  proc.emit('close', null, 'SIGTERM');
+
+  assert.equal(await pending, null);
+  await assert.rejects(() => fs.access(cwd), { code: 'ENOENT' });
 });
