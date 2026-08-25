@@ -14,6 +14,10 @@ const agentTypewriter = readFileSync(
   new URL('../src/agent/typewriter-reveal.ts', import.meta.url),
   'utf8',
 );
+const keyboardHandler = readFileSync(
+  new URL('../src/engine/input-handler-keyboard.ts', import.meta.url),
+  'utf8',
+);
 
 test('user caret moves immediately without smooth interpolation', () => {
   assert.doesNotMatch(caretRenderer, /is-gliding|glideDuration|transitionDuration/);
@@ -25,6 +29,14 @@ test('user caret uses a classical hard blink', () => {
   assert.match(editorCss, /animation:\s*caret-blink 1s step-end infinite/);
   assert.match(editorCss, /@keyframes caret-blink/);
   assert.doesNotMatch(editorCss, /caret-pulse|\.caret\.is-blinking[^}]*ease-in-out/s);
+});
+
+test('only erase keys receive a short caret transition', () => {
+  assert.match(caretRenderer, /beginEraseMotion\(\)/);
+  assert.match(caretRenderer, /eraseMotionDepth > 0/);
+  assert.match(keyboardHandler, /withEraseCaretMotion\(this,/);
+  assert.match(editorCss, /\.caret\.is-erasing\s*\{\s*transition:\s*transform 50ms ease-out;/);
+  assert.match(editorCss, /prefers-reduced-motion:[^}]+[\s\S]*\.caret\.is-erasing\s*\{\s*transition:\s*none;/);
 });
 
 test('agent edits retain their separate typewriter reveal', () => {

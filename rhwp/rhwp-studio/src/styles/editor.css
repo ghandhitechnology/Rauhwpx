@@ -293,6 +293,11 @@
   animation: caret-blink 1s step-end infinite;
 }
 
+/* 삭제만 살짝 따라가게 하고, 입력/탐색 캐럿은 계속 즉시 이동시킨다. */
+.caret.is-erasing {
+  transition: transform 50ms ease-out;
+}
+
 @keyframes caret-blink {
   0%, 49% { opacity: 1; }
   50%, 100% { opacity: 0; }
@@ -312,6 +317,10 @@
   .caret.is-blinking {
     animation: none;
     opacity: 1;
+  }
+
+  .caret.is-erasing {
+    transition: none;
   }
 }
 

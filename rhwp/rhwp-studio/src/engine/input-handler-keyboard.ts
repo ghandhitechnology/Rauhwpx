@@ -71,6 +71,16 @@ function hasCurrentRhwpClipboardMarker(self: any, html: string): boolean {
   return !!token && token === self.rhwpClipboardToken;
 }
 
+/** Backspace/Delete로 생긴 캐럿 이동에만 짧은 완화를 허용한다. */
+function withEraseCaretMotion(self: any, erase: () => void): void {
+  self.caret.beginEraseMotion();
+  try {
+    erase();
+  } finally {
+    self.caret.endEraseMotion();
+  }
+}
+
 function isNestedCellPosition(pos: DocumentPosition): boolean {
   return pos.parentParaIndex !== undefined && (pos.cellPath?.length ?? 0) > 1;
 }
@@ -667,12 +677,14 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     // Backspace / Delete는 handleBackspace/handleDelete에서 처리
     if (e.key === 'Backspace' || e.key === 'Delete') {
       e.preventDefault();
-      const pos = this.cursor.getPosition();
-      if (e.key === 'Backspace') {
-        this.handleBackspace(pos, false);
-      } else {
-        this.handleDelete(pos, false);
-      }
+      withEraseCaretMotion(this, () => {
+        const pos = this.cursor.getPosition();
+        if (e.key === 'Backspace') {
+          this.handleBackspace(pos, false);
+        } else {
+          this.handleDelete(pos, false);
+        }
+      });
       return;
     }
 
@@ -726,6 +738,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     // Backspace / Delete
     if (e.key === 'Backspace' || e.key === 'Delete') {
       e.preventDefault();
+      this.caret.beginEraseMotion();
       const target = { sectionIdx: this.cursor.fnSectionIdx, paraIdx: this.cursor.fnParaIdx, controlIdx: this.cursor.fnControlIdx, footnoteIndex: this.cursor.fnFootnoteIndex, pageNum: this.cursor.fnPageNum };
       const innerParaIdx = this.cursor.fnInnerParaIdx;
       const fnOff = this.cursor.fnCharOffset;
@@ -785,6 +798,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
           this.afterEdit();
         } catch { /* ignore */ }
       }
+      this.caret.endEraseMotion();
       return;
     }
 
@@ -1257,18 +1271,20 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     case 'Delete': {
       e.preventDefault();
       if (this.isFormMode?.() && e.altKey) return;
-      if (this.cursor.hasSelection()) {
-        this.deleteSelection();
-      } else if (e.altKey) {
-        // Alt/Option+Backspace/Delete: 단어 삭제 (macOS standard)
-        this.cursor.setAnchor();
-        this.cursor.moveToWordBoundary(e.key === 'Backspace' ? -1 : 1);
-        if (this.cursor.hasSelection()) this.deleteSelection();
-      } else if (e.key === 'Backspace') {
-        this.handleBackspace(pos, inCell);
-      } else {
-        this.handleDelete(pos, inCell);
-      }
+      withEraseCaretMotion(this, () => {
+        if (this.cursor.hasSelection()) {
+          this.deleteSelection();
+        } else if (e.altKey) {
+          // Alt/Option+Backspace/Delete: 단어 삭제 (macOS standard)
+          this.cursor.setAnchor();
+          this.cursor.moveToWordBoundary(e.key === 'Backspace' ? -1 : 1);
+          if (this.cursor.hasSelection()) this.deleteSelection();
+        } else if (e.key === 'Backspace') {
+          this.handleBackspace(pos, inCell);
+        } else {
+          this.handleDelete(pos, inCell);
+        }
+      });
       break;
     }
     case 'Enter': {
@@ -1476,33 +1492,37 @@ export function handleCtrlKey(this: any, e: KeyboardEvent): void {
     case 'backspace': {
       e.preventDefault();
       if (this.isFormMode?.()) return;
-      if (this.cursor.hasSelection()) {
-        this.deleteSelection();
-      } else if (e.metaKey && !e.ctrlKey) {
-        // Cmd+Backspace (macOS): 줄 시작까지 삭제
-        this.cursor.setAnchor();
-        this.cursor.moveToLineStart();
-        if (this.cursor.hasSelection()) this.deleteSelection();
-      } else {
-        // Ctrl+Backspace (Win/Linux): 이전 단어 경계까지 삭제
-        this.cursor.setAnchor();
-        this.cursor.moveToWordBoundary(-1);
-        if (this.cursor.hasSelection()) this.deleteSelection();
-      }
+      withEraseCaretMotion(this, () => {
+        if (this.cursor.hasSelection()) {
+          this.deleteSelection();
+        } else if (e.metaKey && !e.ctrlKey) {
+          // Cmd+Backspace (macOS): 줄 시작까지 삭제
+          this.cursor.setAnchor();
+          this.cursor.moveToLineStart();
+          if (this.cursor.hasSelection()) this.deleteSelection();
+        } else {
+          // Ctrl+Backspace (Win/Linux): 이전 단어 경계까지 삭제
+          this.cursor.setAnchor();
+          this.cursor.moveToWordBoundary(-1);
+          if (this.cursor.hasSelection()) this.deleteSelection();
+        }
+      });
       break;
     }
     case 'delete': {
       if (!e.ctrlKey) break;
       e.preventDefault();
       if (this.isFormMode?.()) return;
-      if (this.cursor.hasSelection()) {
-        this.deleteSelection();
-      } else {
-        // Ctrl+Delete (Win/Linux): 다음 단어 경계까지 삭제
-        this.cursor.setAnchor();
-        this.cursor.moveToWordBoundary(1);
-        if (this.cursor.hasSelection()) this.deleteSelection();
-      }
+      withEraseCaretMotion(this, () => {
+        if (this.cursor.hasSelection()) {
+          this.deleteSelection();
+        } else {
+          // Ctrl+Delete (Win/Linux): 다음 단어 경계까지 삭제
+          this.cursor.setAnchor();
+          this.cursor.moveToWordBoundary(1);
+          if (this.cursor.hasSelection()) this.deleteSelection();
+        }
+      });
       break;
     }
     case 'home': {
