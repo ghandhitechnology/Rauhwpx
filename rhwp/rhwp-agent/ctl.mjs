@@ -23,6 +23,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_AGENT_DIR = HERE;
 const DEFAULT_REPO_ROOT = resolve(HERE, '..', '..');
 const DEFAULT_SCRIPT = resolve(HERE, 'server.mjs');
+export const EXPECTED_HUB_PROTOCOL = 4;
 
 export const CTL_COMMANDS = ['start', 'stop', 'restart', 'status'];
 
@@ -82,7 +83,7 @@ export async function runCtl(command, {
 
   if (command === 'status') {
     const body = await readHubHealth(port, { token });
-    const ready = body?.ok === true;
+    const ready = body?.ok === true && Number(body.protocol) === EXPECTED_HUB_PROTOCOL;
     const pid = ready ? Number(body.pid) || null : null;
     return print(
       { ready, pid, url: hubHealthUrl(port), log: paths.log },
@@ -122,6 +123,7 @@ export async function runCtl(command, {
     env,
     extraDirs: [resolve(repoRoot, 'node_modules', '.bin')],
     execPath: process.execPath,
+    expectedProtocol: EXPECTED_HUB_PROTOCOL,
   });
   const pid = result.pid;
   if (result.alreadyRunning) {
