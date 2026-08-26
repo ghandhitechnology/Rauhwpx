@@ -5689,6 +5689,52 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   grid-column: 1;
 }
 
+/* 설정은 focus title bar를 유지한 채 두 번째 grid row를 채운다. */
+.ag-workspace-settings-back {
+  display: none;
+}
+
+.ag-fullscreen .ag-settings-page {
+  position: relative;
+  inset: auto;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  z-index: 3;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  transform: none;
+}
+
+.ag-fullscreen .ag-settings-page > .ag-threads-header {
+  display: none;
+}
+
+.ag-fullscreen.ag-settings-open .ag-workspace-settings-back {
+  display: inline-flex;
+}
+
+.ag-fullscreen.ag-settings-open .ag-workspace-threads-btn,
+.ag-fullscreen.ag-settings-open .ag-workspace-document-context,
+.ag-fullscreen.ag-settings-open .ag-workspace-agent-context,
+.ag-fullscreen.ag-settings-open .ag-environment-wrap {
+  display: none;
+}
+
+.ag-fullscreen.ag-settings-open .ag-workspace-settings-btn {
+  background: var(--ag-selected);
+  color: var(--ag-text);
+}
+
+/* focus mode keeps conversation surfaces mounted, so settings explicitly
+   removes both from the visual and accessibility stage. */
+.ag-fullscreen.ag-settings-open .ag-chat-page,
+.ag-fullscreen.ag-settings-open .ag-threads-page {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 /* ─── 손그림 버튼 ─────────────────────────────────────
    사이드바와 전체 화면 작업 공간의 버튼은 기계적인 고른 모서리 대신 펜으로
    그린 듯한 윤곽을 쓴다. 두 가지를 함께 쓴다:

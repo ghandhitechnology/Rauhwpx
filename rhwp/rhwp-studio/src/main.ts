@@ -45,10 +45,17 @@ import { addRecentDoc, listRecentDocs } from '@/recent/recent-store';
 import { showDropConfirmDialog } from '@/ui/drop-confirm-dialog';
 import { initRhwpDev } from '@/core/rhwp-dev';
 import { DocumentDirtyState } from '@/core/document-dirty-state';
-import { initThemeSync, setThemeMode, getThemeMode, getEffectiveTheme } from '@/core/theme';
+import {
+  applyTheme,
+  getEffectiveTheme,
+  getThemeMode,
+  initThemeSync,
+  setThemeMode,
+  syncThemeMenu,
+} from '@/core/theme';
 import { analyzeDocumentFonts } from '@/core/document-font-status';
 import { detectLocalFonts, getLocalFontState, loadStoredLocalFonts } from '@/core/local-fonts';
-import { userSettings } from '@/core/user-settings';
+import { userSettings, type EditorScalarSettings } from '@/core/user-settings';
 import { AutosaveManager, type AutosaveScheduleSettings, type AutosaveStatus } from '@/recovery/autosave-manager';
 import {
   clearRecoverableAutosaveDrafts,
@@ -696,6 +703,10 @@ async function initialize(): Promise<void> {
       const agentSidebar = initAgentSidebar({
         bridge: agentBridge,
         eventBus,
+        editorSettingsRuntime: {
+          preview: applyEditorSettingsPreview,
+          committed: commitEditorSettingsRuntime,
+        },
         versionController,
         openClassicVersionControl: () => openClassicDocumentHistory(commandServices),
         getDocumentContext: () => {
@@ -1117,16 +1128,28 @@ function setupEventListeners(): void {
   });
 }
 
-/** 문서 초기화 공통 시퀀스 (loadFile, createNewDocument 양쪽에서 사용) */
-function applySavedTextMarkSettings(): void {
-  const view = userSettings.getViewSettings();
-  wasm.setShowControlCodes(view.showControlCodes);
-  wasm.setShowParagraphMarks(view.showParagraphMarks);
-  syncTextMarkMenu(view.showControlCodes, view.showParagraphMarks);
-  // #2204: 짤림보기(잘림 보기) 저장 설정 복원. clipView=켜짐 => clip 미적용(clipEnabled=false).
-  const clipEnabled = !view.clipView;
+function applyEditorSettingsPreview(settings: EditorScalarSettings): void {
+  applyTheme(settings.theme.mode);
+  syncThemeMenu(settings.theme.mode);
+  wasm.setShowControlCodes(settings.view.showControlCodes);
+  wasm.setShowParagraphMarks(settings.view.showParagraphMarks);
+  syncTextMarkMenu(settings.view.showControlCodes, settings.view.showParagraphMarks);
+  const clipEnabled = !settings.view.clipView;
   wasm.setClipEnabled(clipEnabled);
   syncClipMenu(clipEnabled);
+  eventBus.emit('document-view-changed');
+}
+
+function commitEditorSettingsRuntime(settings: EditorScalarSettings): void {
+  applyEditorSettingsPreview(settings);
+  eventBus.emit('autosave-settings-changed');
+  eventBus.emit('font-settings-changed');
+  eventBus.emit('command-state-changed');
+}
+
+/** 문서 초기화 공통 시퀀스 (loadFile, createNewDocument 양쪽에서 사용) */
+function applySavedTextMarkSettings(): void {
+  applyEditorSettingsPreview(userSettings.getEditorScalarSettings());
 }
 
 async function initializeDocument(
