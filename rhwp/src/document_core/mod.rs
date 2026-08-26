@@ -14,7 +14,7 @@ pub mod queries;
 pub mod table_calc;
 pub mod validation;
 
-use crate::model::document::Document;
+use crate::model::document::{Document, Section};
 use crate::model::event::DocumentEvent;
 use crate::model::paragraph::Paragraph;
 use crate::model::table::TableTransposeData;
@@ -114,6 +114,71 @@ pub(crate) struct RenderNormalizationState {
     pub(crate) overlay: Arc<RenderNormalizationOverlay>,
 }
 
+#[derive(Default)]
+pub(crate) struct DocumentEventLog {
+    events: Vec<DocumentEvent>,
+    section_revisions: Vec<u64>,
+    next_revision: u64,
+}
+
+impl DocumentEventLog {
+    fn push(&mut self, event: DocumentEvent) {
+        self.mark_section_changed(event.section_index());
+        self.events.push(event);
+    }
+
+    fn clear(&mut self) {
+        // batch 이벤트 소비는 문서 상태를 바꾸지 않으므로 snapshot revision은 유지한다.
+        self.events.clear();
+    }
+
+    fn mark_section_changed(&mut self, section_idx: usize) {
+        self.next_revision = self.next_revision.wrapping_add(1).max(1);
+        if self.section_revisions.len() <= section_idx {
+            self.section_revisions.resize(section_idx + 1, 0);
+        }
+        self.section_revisions[section_idx] = self.next_revision;
+    }
+
+    fn mark_all_sections_changed(&mut self, section_count: usize) {
+        for section_idx in 0..section_count {
+            self.mark_section_changed(section_idx);
+        }
+    }
+
+    fn section_revisions(&self, section_count: usize) -> Vec<u64> {
+        let mut revisions = self.section_revisions.clone();
+        revisions.resize(section_count, 0);
+        revisions.truncate(section_count);
+        revisions
+    }
+
+    fn restore_section_revisions(&mut self, revisions: &[u64]) {
+        self.section_revisions.clear();
+        self.section_revisions.extend_from_slice(revisions);
+    }
+}
+
+impl std::ops::Deref for DocumentEventLog {
+    type Target = [DocumentEvent];
+
+    fn deref(&self) -> &Self::Target {
+        &self.events
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SnapshotSection {
+    pub(crate) revision: u64,
+    pub(crate) section: Arc<Section>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DocumentSnapshot {
+    pub(crate) document_shell: Document,
+    pub(crate) sections: Vec<SnapshotSection>,
+}
+
 /// HWP 문서 핵심 도메인 모델
 ///
 /// 문서 데이터, 레이아웃 상태, 설정, 캐시를 포함한다.
@@ -186,12 +251,12 @@ pub struct DocumentCore {
     /// Batch 모드 플래그 — true이면 paginate() 스킵
     pub(crate) batch_mode: bool,
     /// 이벤트 로그 (Command 실행 시 누적)
-    pub(crate) event_log: Vec<DocumentEvent>,
+    pub(crate) event_log: DocumentEventLog,
     /// 글상자 오버플로우 연결 캐시 (섹션별, 지연 계산)
     pub(crate) overflow_links_cache:
         RefCell<HashMap<usize, Vec<queries::doc_tree_nav::OverflowLink>>>,
-    /// Undo/Redo용 Document 스냅샷 저장소 (ID → 불변 Document 상태)
-    pub(crate) snapshot_store: Vec<(u32, Arc<Document>)>,
+    /// Undo/Redo용 Document 스냅샷 저장소 (ID → 구역 공유 불변 Document 상태)
+    pub(crate) snapshot_store: Vec<(u32, Arc<DocumentSnapshot>)>,
     /// 다음 스냅샷 ID
     pub(crate) next_snapshot_id: u32,
     /// 머리말/꼬리말 감추기: (global_page_index, is_header) 조합
@@ -374,7 +439,7 @@ impl DocumentCore {
             page_tree_cache_order: RefCell::new(VecDeque::new()),
             layer_tree_json_cache: RefCell::new(Vec::new()),
             batch_mode: false,
-            event_log: Vec::new(),
+            event_log: DocumentEventLog::default(),
             overflow_links_cache: RefCell::new(HashMap::new()),
             snapshot_store: Vec::new(),
             next_snapshot_id: 0,

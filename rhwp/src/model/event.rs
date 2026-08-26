@@ -130,6 +130,34 @@ pub enum DocumentEvent {
 }
 
 impl DocumentEvent {
+    pub(crate) fn section_index(&self) -> usize {
+        match self {
+            DocumentEvent::TextInserted { section, .. }
+            | DocumentEvent::TextDeleted { section, .. }
+            | DocumentEvent::ParagraphSplit { section, .. }
+            | DocumentEvent::ParagraphMerged { section, .. }
+            | DocumentEvent::ParagraphDeleted { section, .. }
+            | DocumentEvent::ParagraphInserted { section, .. }
+            | DocumentEvent::CharFormatChanged { section, .. }
+            | DocumentEvent::ParaFormatChanged { section, .. }
+            | DocumentEvent::TableRowInserted { section, .. }
+            | DocumentEvent::TableRowDeleted { section, .. }
+            | DocumentEvent::TableColumnInserted { section, .. }
+            | DocumentEvent::TableColumnDeleted { section, .. }
+            | DocumentEvent::CellsMerged { section, .. }
+            | DocumentEvent::CellSplit { section, .. }
+            | DocumentEvent::CellTextChanged { section, .. }
+            | DocumentEvent::TableCellsTransposed { section, .. }
+            | DocumentEvent::PictureInserted { section, .. }
+            | DocumentEvent::PictureDeleted { section, .. }
+            | DocumentEvent::PictureMoved { section, .. }
+            | DocumentEvent::PictureResized { section, .. }
+            | DocumentEvent::FootnoteDeleted { section, .. }
+            | DocumentEvent::ContentPasted { section, .. }
+            | DocumentEvent::HtmlImported { section, .. } => *section,
+        }
+    }
+
     /// 이벤트를 JSON 객체 문자열로 직렬화한다.
     pub fn to_json(&self) -> String {
         match self {

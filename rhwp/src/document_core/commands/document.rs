@@ -3,7 +3,9 @@
 use crate::document_core::validation::{
     CellPath, ValidationReport, ValidationWarning, WarningKind,
 };
-use crate::document_core::{DocumentCore, DEFAULT_FALLBACK_FONT};
+use crate::document_core::{
+    DocumentCore, DocumentEventLog, DocumentSnapshot, SnapshotSection, DEFAULT_FALLBACK_FONT,
+};
 use crate::error::HwpError;
 use crate::model::control::Control;
 use crate::model::document::Document;
@@ -635,7 +637,7 @@ impl DocumentCore {
             page_tree_cache_order: RefCell::new(VecDeque::new()),
             layer_tree_json_cache: RefCell::new(Vec::new()),
             batch_mode: false,
-            event_log: Vec::new(),
+            event_log: DocumentEventLog::default(),
             overflow_links_cache: RefCell::new(HashMap::new()),
             snapshot_store: Vec::new(),
             next_snapshot_id: 0,
@@ -2072,10 +2074,70 @@ impl DocumentCore {
 
     // ─── Undo/Redo 스냅샷 API ──────────────────────────
 
-    fn store_snapshot(&mut self, document: Arc<Document>) -> u32 {
+    fn clone_document_shell(document: &Document) -> Document {
+        let Document {
+            header,
+            doc_properties,
+            doc_info,
+            sections: _,
+            preview,
+            bin_data_content,
+            extra_streams,
+            hwpx_aux_entries,
+            is_hwp3_variant,
+            is_hwpx_variant,
+            provenance,
+        } = document;
+        Document {
+            header: header.clone(),
+            doc_properties: doc_properties.clone(),
+            doc_info: doc_info.clone(),
+            sections: Vec::new(),
+            preview: preview.clone(),
+            bin_data_content: bin_data_content.clone(),
+            extra_streams: extra_streams.clone(),
+            hwpx_aux_entries: hwpx_aux_entries.clone(),
+            is_hwp3_variant: *is_hwp3_variant,
+            is_hwpx_variant: *is_hwpx_variant,
+            provenance: provenance.clone(),
+        }
+    }
+
+    fn capture_snapshot(&self) -> DocumentSnapshot {
+        let section_revisions = self
+            .event_log
+            .section_revisions(self.document.sections.len());
+        let baseline = self
+            .snapshot_store
+            .last()
+            .map(|(_, snapshot)| snapshot.as_ref());
+        let sections = self
+            .document
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(section_idx, section)| {
+                let revision = section_revisions[section_idx];
+                let shared = baseline
+                    .and_then(|snapshot| snapshot.sections.get(section_idx))
+                    .filter(|snapshot_section| snapshot_section.revision == revision)
+                    .map(|snapshot_section| Arc::clone(&snapshot_section.section));
+                SnapshotSection {
+                    revision,
+                    section: shared.unwrap_or_else(|| Arc::new(section.clone())),
+                }
+            })
+            .collect();
+        DocumentSnapshot {
+            document_shell: Self::clone_document_shell(&self.document),
+            sections,
+        }
+    }
+
+    fn store_snapshot(&mut self, snapshot: Arc<DocumentSnapshot>) -> u32 {
         let id = self.next_snapshot_id;
         self.next_snapshot_id += 1;
-        self.snapshot_store.push((id, document));
+        self.snapshot_store.push((id, snapshot));
         // 최대 100개 제한 — 초과 시 가장 오래된 스냅샷 제거.
         // [Task #2328] studio 히스토리(rhwp-studio/src/engine/history.ts 의
         // WASM_MAX_SNAPSHOTS)와 양방향 결합. 이 값을 studio 예산(MAX-2)보다 낮추면
@@ -2088,23 +2150,23 @@ impl DocumentCore {
         id
     }
 
-    /// 현재 Document를 클론하여 스냅샷 저장소에 보관한다.
+    /// 현재 Document의 전역 상태와 변경 구역을 캡처하여 스냅샷 저장소에 보관한다.
     /// 반환값: 스냅샷 ID (u32)
     pub fn save_snapshot_native(&mut self) -> u32 {
-        self.store_snapshot(Arc::new(self.document.clone()))
+        self.store_snapshot(Arc::new(self.capture_snapshot()))
     }
 
     /// 기존 스냅샷의 불변 Document 상태를 공유하는 새 ID를 만든다.
     ///
     /// 호출자가 현재 문서와 `source_id`가 같은 상태임을 보장하는 history 경계에서만 쓴다.
     pub fn share_snapshot_native(&mut self, source_id: u32) -> Result<u32, HwpError> {
-        let document = self
+        let snapshot = self
             .snapshot_store
             .iter()
             .find(|(id, _)| *id == source_id)
-            .map(|(_, document)| Arc::clone(document))
+            .map(|(_, snapshot)| Arc::clone(snapshot))
             .ok_or_else(|| HwpError::RenderError(format!("스냅샷 {} 없음", source_id)))?;
-        Ok(self.store_snapshot(document))
+        Ok(self.store_snapshot(snapshot))
     }
 
     /// 현재 Document IR은 건드리지 않고, 그로부터 파생된 모든 조판 캐시를 다시 만든다.
@@ -2137,20 +2199,75 @@ impl DocumentCore {
     /// 지정 ID의 스냅샷으로 Document를 복원한다.
     /// 스타일 재해소 + 문단 구성 + 페이지네이션까지 수행.
     pub fn restore_snapshot_native(&mut self, id: u32) -> Result<String, HwpError> {
-        let idx = self
+        let snapshot = self
             .snapshot_store
             .iter()
-            .position(|(sid, _)| *sid == id)
+            .find(|(snapshot_id, _)| *snapshot_id == id)
+            .map(|(_, snapshot)| Arc::clone(snapshot))
             .ok_or_else(|| HwpError::RenderError(format!("스냅샷 {} 없음", id)))?;
-        let (_, document) = &self.snapshot_store[idx];
-        self.document = document.as_ref().clone();
+        let target_revisions: Vec<u64> = snapshot
+            .sections
+            .iter()
+            .map(|section| section.revision)
+            .collect();
+        let current_revisions = self
+            .event_log
+            .section_revisions(self.document.sections.len());
+        let same_section_count = self.document.sections.len() == snapshot.sections.len();
+        let mut current_sections = std::mem::take(&mut self.document.sections);
+        let mut restored = snapshot.document_shell.clone();
+        restored.sections.reserve(snapshot.sections.len());
+        for (section_idx, snapshot_section) in snapshot.sections.iter().enumerate() {
+            if same_section_count && current_revisions[section_idx] == snapshot_section.revision {
+                restored
+                    .sections
+                    .push(std::mem::take(&mut current_sections[section_idx]));
+            } else {
+                restored
+                    .sections
+                    .push(snapshot_section.section.as_ref().clone());
+            }
+        }
+        self.document = restored;
         self.refresh_layout_native();
+        self.event_log.restore_section_revisions(&target_revisions);
         Ok(super::super::helpers::json_ok())
     }
 
     /// 지정 ID의 스냅샷을 저장소에서 제거하여 메모리를 해제한다.
     pub fn discard_snapshot_native(&mut self, id: u32) {
         self.snapshot_store.retain(|(sid, _)| *sid != id);
+    }
+
+    /// 스냅샷 저장소의 구조 공유 점유량을 진단한다.
+    pub fn snapshot_storage_stats_native(&self) -> String {
+        let unique_snapshots: HashSet<usize> = self
+            .snapshot_store
+            .iter()
+            .map(|(_, snapshot)| Arc::as_ptr(snapshot) as usize)
+            .collect();
+        let unique_sections: HashSet<usize> = self
+            .snapshot_store
+            .iter()
+            .flat_map(|(_, snapshot)| {
+                snapshot
+                    .sections
+                    .iter()
+                    .map(|section| Arc::as_ptr(&section.section) as usize)
+            })
+            .collect();
+        let section_references = self
+            .snapshot_store
+            .iter()
+            .map(|(_, snapshot)| snapshot.sections.len())
+            .sum::<usize>();
+        format!(
+            "{{\"snapshotIds\":{},\"uniqueSnapshots\":{},\"sectionReferences\":{},\"uniqueSections\":{}}}",
+            self.snapshot_store.len(),
+            unique_snapshots.len(),
+            section_references,
+            unique_sections.len()
+        )
     }
 
     pub fn measure_width_diagnostic_native(
@@ -2496,6 +2613,50 @@ mod replace_content_tests {
         core.restore_snapshot_native(shared_id)
             .expect("discarding one ID must not invalidate the shared ID");
         assert_eq!(serialized_document(&core), original);
+    }
+
+    #[test]
+    fn unique_snapshots_share_unchanged_sections_and_restore_each_state() {
+        let mut core = DocumentCore::from_bytes(HML).expect("HML source should open");
+        core.document
+            .sections
+            .push(core.document.sections[0].clone());
+        core.refresh_layout_native();
+        let before_text = core.document.sections[0].paragraphs[0].text.clone();
+        let before_id = core.save_snapshot_native();
+
+        core.insert_text_native(0, 0, 0, "X")
+            .expect("section-local edit should succeed");
+        let after_text = core.document.sections[0].paragraphs[0].text.clone();
+        let after_id = core.save_snapshot_native();
+
+        let before = &core
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == before_id)
+            .expect("before snapshot")
+            .1;
+        let after = &core
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == after_id)
+            .expect("after snapshot")
+            .1;
+        assert!(!Arc::ptr_eq(
+            &before.sections[0].section,
+            &after.sections[0].section
+        ));
+        assert!(Arc::ptr_eq(
+            &before.sections[1].section,
+            &after.sections[1].section
+        ));
+
+        core.restore_snapshot_native(before_id)
+            .expect("before snapshot restore");
+        assert_eq!(core.document.sections[0].paragraphs[0].text, before_text);
+        core.restore_snapshot_native(after_id)
+            .expect("after snapshot restore");
+        assert_eq!(core.document.sections[0].paragraphs[0].text, after_text);
     }
 
     #[test]

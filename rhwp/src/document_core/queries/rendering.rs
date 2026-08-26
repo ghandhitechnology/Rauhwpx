@@ -2826,6 +2826,7 @@ impl DocumentCore {
     /// 렌더 정규화의 section revision은 구조/기하 변경을 뜻하므로 여기서는 유지한다.
     /// 해당 path revision은 mutation 진입점에서 별도로 증가시킨다.
     pub(crate) fn mark_section_pagination_dirty(&mut self, section_idx: usize) {
+        self.event_log.mark_section_changed(section_idx);
         if section_idx < self.dirty_sections.len() {
             self.dirty_sections[section_idx] = true;
         }
@@ -2944,6 +2945,8 @@ impl DocumentCore {
 
     /// 모든 구역을 dirty로 표시한다.
     pub(crate) fn mark_all_sections_dirty(&mut self) {
+        self.event_log
+            .mark_all_sections_changed(self.document.sections.len());
         for d in &mut self.dirty_sections {
             *d = true;
         }

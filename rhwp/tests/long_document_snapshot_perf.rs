@@ -60,6 +60,7 @@ fn long_document_snapshot_history_perf() {
             peak_rss = Some(peak_rss.unwrap_or(rss).max(rss));
         }
     }
+    let snapshot_stats = document.snapshot_storage_stats_native();
 
     let restore_started = Instant::now();
     document
@@ -86,7 +87,7 @@ fn long_document_snapshot_history_perf() {
     );
 
     eprintln!(
-        "RHWP_SNAPSHOT_PROFILE commands={} snapshot_ids={} snapshot_ms={:.3} restore_ms={:.3} baseline_rss_bytes={} peak_rss_bytes={} retained_rss_bytes={}",
+        "RHWP_SNAPSHOT_PROFILE commands={} snapshot_ids={} snapshot_ms={:.3} restore_ms={:.3} baseline_rss_bytes={} peak_rss_bytes={} retained_rss_bytes={} storage={}",
         command_count,
         snapshot_ids.len() * 2,
         snapshot_elapsed.as_secs_f64() * 1000.0,
@@ -97,5 +98,6 @@ fn long_document_snapshot_history_perf() {
             .zip(baseline_rss)
             .map(|(peak, baseline)| peak.saturating_sub(baseline))
             .unwrap_or(0),
+        snapshot_stats,
     );
 }
