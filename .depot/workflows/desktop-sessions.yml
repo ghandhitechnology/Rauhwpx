@@ -59,6 +59,10 @@ jobs:
             echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium" >> "$GITHUB_ENV"
             exit 0
           fi
+          if [ -x /usr/bin/chromium-browser ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser" >> "$GITHUB_ENV"
+            exit 0
+          fi
           curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/chrome.deb
