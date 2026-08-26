@@ -31,6 +31,12 @@ export class HwpDocument {
   /** 페이지 정보를 JSON 문자열로 반환한다. */
   getPageInfo(pageNum: number): string;
 
+  /** 전체 페이지 정보를 JSON 배열 문자열로 반환한다. */
+  getAllPageInfo(): string;
+
+  /** Web Canvas 이미지 캐시 점유량을 JSON 문자열로 반환한다. */
+  getWebCanvasImageCacheStats(): string;
+
   /** 문서 정보를 JSON 문자열로 반환한다. */
   getDocumentInfo(): string;
 

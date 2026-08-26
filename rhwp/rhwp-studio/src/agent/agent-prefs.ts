@@ -30,6 +30,10 @@ export interface AgentPrefsStorage {
   setItem(key: string, value: string): void;
 }
 
+export type AgentPrefsSaveResult =
+  | { ok: true; value: AgentPrefs }
+  | { ok: false; value: AgentPrefs; error: string };
+
 function isAgentName(value: unknown): value is AgentName {
   return value === 'claude' || value === 'codex' || value === 'pi'
     || value === 'grok' || value === 'cursor';
@@ -102,16 +106,29 @@ export function saveAgentPrefs(
   partial: Partial<AgentPrefs>,
   storage?: AgentPrefsStorage | null,
 ): AgentPrefs {
+  return trySaveAgentPrefs(partial, storage).value;
+}
+
+/** 저장 실패를 숨기지 않는 설정 허브용 API. */
+export function trySaveAgentPrefs(
+  partial: Partial<AgentPrefs>,
+  storage?: AgentPrefsStorage | null,
+): AgentPrefsSaveResult {
   const store = resolveStorage(storage);
   const current = loadAgentPrefs(store);
   const next = normalizeAgentPrefs({ ...current, ...partial });
-  if (!store) return next;
+  if (!store) return { ok: false, value: next, error: '설정을 저장할 수 있는 저장소가 없습니다.' };
   try {
     store.setItem(STORAGE_KEY, JSON.stringify(next));
   } catch (err) {
     console.warn('[agent-prefs] localStorage 저장 실패:', err);
+    return {
+      ok: false,
+      value: next,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
-  return next;
+  return { ok: true, value: next };
 }
 
 export const AGENT_PREFS_STORAGE_KEY = STORAGE_KEY;

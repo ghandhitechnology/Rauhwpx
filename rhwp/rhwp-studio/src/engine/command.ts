@@ -26,6 +26,12 @@ export interface EditCommand {
    * CommandHistory 가 스냅샷 예산을 WASM 상한과 정합시키는 데 쓴다.
    */
   snapshotResourceCount?(): number;
+  /** 현재 문서와 같은 기존 스냅샷을 이 명령의 before 상태로 공유한다. */
+  reuseCurrentSnapshot?(wasm: WasmBridge, sourceId: number): void;
+  /** 현재 문서가 이 명령의 실행 후 상태일 때 공유할 수 있는 스냅샷 ID. */
+  currentSnapshotId?(): number | null;
+  /** 현재 문서가 이 명령의 undo 후 상태일 때 공유할 수 있는 스냅샷 ID. */
+  undoSnapshotId?(): number | null;
   /** page-local refresh 판정을 위한 가벼운 텍스트 편집 payload. */
   getPageLocalTextEditOptions?(): { insertedText?: string; deleteCount?: number };
   /** 방금 실행한 mutation effect를 한 번만 반환한다. */
@@ -764,6 +770,18 @@ export class DeleteSelectionCommand implements EditCommand {
 
   snapshotResourceCount(): number {
     return this.snapshot.snapshotResourceCount();
+  }
+
+  reuseCurrentSnapshot(wasm: WasmBridge, sourceId: number): void {
+    this.snapshot.reuseCurrentSnapshot(wasm, sourceId);
+  }
+
+  currentSnapshotId(): number | null {
+    return this.snapshot.currentSnapshotId();
+  }
+
+  undoSnapshotId(): number | null {
+    return this.snapshot.undoSnapshotId();
   }
 
   discard(wasm: WasmBridge): void {
@@ -2305,7 +2323,7 @@ export class SnapshotCommand implements EditCommand {
     }
 
     // 최초 실행: before 저장 → 작업 수행 → after 저장
-    this.beforeId = wasm.saveSnapshot();
+    if (this.beforeId === null) this.beforeId = wasm.saveSnapshot();
     // [Task #2328] operation 또는 after-save 중 어느 것이 throw 하든 커맨드가
     // 히스토리에 등록되지 못해 discard 주체가 사라진다 → 스냅샷 영구 누수(orphan
     // → WASM 무통보 축출 재발). after-save(대용량 문서 클론 시 메모리 압박 등)까지
@@ -2338,6 +2356,18 @@ export class SnapshotCommand implements EditCommand {
   /** [Task #2328] 현재 살아있는 before/after 스냅샷 id 개수. */
   snapshotResourceCount(): number {
     return (this.beforeId !== null ? 1 : 0) + (this.afterId !== null ? 1 : 0);
+  }
+
+  reuseCurrentSnapshot(wasm: WasmBridge, sourceId: number): void {
+    if (this.beforeId === null) this.beforeId = wasm.shareSnapshot(sourceId);
+  }
+
+  currentSnapshotId(): number | null {
+    return this.afterId;
+  }
+
+  undoSnapshotId(): number | null {
+    return this.beforeId;
   }
 
   discard(wasm: WasmBridge): void {

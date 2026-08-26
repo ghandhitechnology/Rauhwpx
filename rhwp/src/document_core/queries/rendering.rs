@@ -481,6 +481,8 @@ fn apply_page_number_layouts_for_section(result: &mut PaginationResult, section:
     }
 }
 
+const PAGE_RENDER_CACHE_CAPACITY: usize = 32;
+
 impl DocumentCore {
     /// 페이지 렌더 트리를 생성하여 반환한다 (native bridge / 외부 렌더러용).
     pub fn build_page_render_tree(&self, page_num: u32) -> Result<PageRenderTree, HwpError> {
@@ -1329,6 +1331,7 @@ impl DocumentCore {
         let fp = self.layer_output_options_fingerprint(profile);
         if let Some(variants) = self.layer_tree_json_cache.borrow().get(idx) {
             if let Some((_, json)) = variants.iter().find(|(f, _)| *f == fp) {
+                self.touch_page_render_cache(idx);
                 return Ok(json.clone());
             }
         }
@@ -1718,6 +1721,21 @@ impl DocumentCore {
             page_border_bottom,
             cols_json,
         ))
+    }
+
+    /// 전체 페이지 정보를 단일 JSON 배열로 반환한다.
+    pub fn get_all_page_info_native(&self) -> Result<String, HwpError> {
+        let page_count = self.page_count();
+        let mut json = String::with_capacity(page_count as usize * 320);
+        json.push('[');
+        for page_num in 0..page_count {
+            if page_num > 0 {
+                json.push(',');
+            }
+            json.push_str(&self.get_page_info_native(page_num)?);
+        }
+        json.push(']');
+        Ok(json)
     }
 
     /// 구역 정의(SectionDef)를 JSON으로 반환 (네이티브 에러 타입)
@@ -2787,7 +2805,7 @@ impl DocumentCore {
 
     /// 구역을 재조판하고 dirty로 표시한다.
     pub(crate) fn recompose_section(&mut self, section_idx: usize) {
-        self.invalidate_page_tree_cache();
+        self.invalidate_page_tree_cache_from_section(section_idx);
         self.composed[section_idx] = compose_section(&self.document.sections[section_idx]);
         self.mark_section_dirty(section_idx);
         // 전체 문단 dirty (모두 재측정 필요)
@@ -2808,6 +2826,7 @@ impl DocumentCore {
     /// 렌더 정규화의 section revision은 구조/기하 변경을 뜻하므로 여기서는 유지한다.
     /// 해당 path revision은 mutation 진입점에서 별도로 증가시킨다.
     pub(crate) fn mark_section_pagination_dirty(&mut self, section_idx: usize) {
+        self.event_log.mark_section_changed(section_idx);
         if section_idx < self.dirty_sections.len() {
             self.dirty_sections[section_idx] = true;
         }
@@ -2848,7 +2867,7 @@ impl DocumentCore {
 
     /// 단일 문단만 재조판한다.
     pub(crate) fn recompose_paragraph(&mut self, section_idx: usize, para_idx: usize) {
-        self.invalidate_page_tree_cache();
+        self.invalidate_page_tree_cache_from_section(section_idx);
         let para = &self.document.sections[section_idx].paragraphs[para_idx];
         self.composed[section_idx][para_idx] = compose_paragraph(para);
         self.mark_section_dirty(section_idx);
@@ -2857,7 +2876,7 @@ impl DocumentCore {
 
     /// composed 벡터에 새 문단 항목을 삽입한다 (문단 분할/붙여넣기 후).
     pub(crate) fn insert_composed_paragraph(&mut self, section_idx: usize, para_idx: usize) {
-        self.invalidate_page_tree_cache();
+        self.invalidate_page_tree_cache_from_section(section_idx);
         let para = &self.document.sections[section_idx].paragraphs[para_idx];
         let composed = compose_paragraph(para);
         self.composed[section_idx].insert(para_idx, composed);
@@ -2891,7 +2910,7 @@ impl DocumentCore {
 
     /// composed 벡터에서 문단 항목을 제거한다 (문단 병합/삭제 후).
     pub(crate) fn remove_composed_paragraph(&mut self, section_idx: usize, para_idx: usize) {
-        self.invalidate_page_tree_cache();
+        self.invalidate_page_tree_cache_from_section(section_idx);
         if para_idx < self.composed[section_idx].len() {
             self.composed[section_idx].remove(para_idx);
         }
@@ -2926,6 +2945,8 @@ impl DocumentCore {
 
     /// 모든 구역을 dirty로 표시한다.
     pub(crate) fn mark_all_sections_dirty(&mut self) {
+        self.event_log
+            .mark_all_sections_changed(self.document.sections.len());
         for d in &mut self.dirty_sections {
             *d = true;
         }
@@ -3237,7 +3258,7 @@ impl DocumentCore {
             }
         }
         self.deferred_pagination_descriptor = None;
-        self.invalidate_page_tree_cache();
+        self.invalidate_page_tree_cache_from_section(section_index);
         DeferredPaginationStepResult {
             state: DeferredPaginationJobState::Complete,
             revision,
@@ -3321,7 +3342,11 @@ impl DocumentCore {
             .filter(|dirty| *dirty)
             .count();
         let issue2424_invalidate_started = issue2424_profile_enabled.then(std::time::Instant::now);
-        self.invalidate_page_tree_cache();
+        if let Some(section_idx) = self.dirty_sections.iter().position(|dirty| *dirty) {
+            self.invalidate_page_tree_cache_from_section(section_idx);
+        } else {
+            self.layout_engine.clear_layout_caches();
+        }
         let issue2424_invalidate_elapsed = issue2424_invalidate_started
             .map(|started| started.elapsed())
             .unwrap_or_default();
@@ -4833,19 +4858,102 @@ impl DocumentCore {
         for i in from..cache.len() {
             cache[i] = None;
         }
+        self.page_tree_cache_order
+            .borrow_mut()
+            .retain(|page| *page < from);
         let mut json_cache = self.layer_tree_json_cache.borrow_mut();
         for i in from..json_cache.len() {
             json_cache[i].clear();
         }
     }
 
+    /// 변경 구역보다 앞선 페이지의 완성된 렌더 트리는 유지한다.
+    pub(crate) fn invalidate_page_tree_cache_from_section(&self, section_idx: usize) {
+        let first_page = self
+            .pagination
+            .iter()
+            .take(section_idx)
+            .map(|result| result.pages.len())
+            .sum::<usize>();
+        self.invalidate_page_tree_cache_from(first_page as u32);
+        // 셀 레이아웃 캐시는 IR 포인터를 키로 쓰므로 구역 경계와 무관하게 비운다.
+        self.layout_engine.clear_layout_caches();
+    }
+
+    pub(crate) fn invalidate_page_tree_cache_page(&self, page_num: u32) {
+        let page = page_num as usize;
+        if let Some(slot) = self.page_tree_cache.borrow_mut().get_mut(page) {
+            *slot = None;
+        }
+        self.page_tree_cache_order
+            .borrow_mut()
+            .retain(|cached_page| *cached_page != page);
+        if let Some(variants) = self.layer_tree_json_cache.borrow_mut().get_mut(page) {
+            variants.clear();
+        }
+    }
+
     /// 페이지 렌더 트리 캐시 전체 무효화.
     pub(crate) fn invalidate_page_tree_cache(&self) {
         self.page_tree_cache.borrow_mut().clear();
+        self.page_tree_cache_order.borrow_mut().clear();
         self.layer_tree_json_cache.borrow_mut().clear();
         // [Task #1949] IR 이 바뀌는 재조판 경계에서 셀 단위 레이아웃 캐시(포인터 키)도
         // 함께 비워 다른 IR 의 셀 포인터 재사용으로 인한 오재사용을 방지한다.
         self.layout_engine.clear_layout_caches();
+    }
+
+    /// 성능 계측용 렌더 캐시 점유량.
+    pub(crate) fn render_cache_stats(&self) -> (usize, usize, usize) {
+        let page_tree_count = self
+            .page_tree_cache
+            .borrow()
+            .iter()
+            .filter(|entry| entry.is_some())
+            .count();
+        let json_cache = self.layer_tree_json_cache.borrow();
+        let json_variant_count = json_cache.iter().map(Vec::len).sum();
+        let json_bytes = json_cache
+            .iter()
+            .flatten()
+            .map(|(_, json)| json.len())
+            .sum();
+        (page_tree_count, json_variant_count, json_bytes)
+    }
+
+    fn touch_page_render_cache(&self, page: usize) {
+        let mut order = self.page_tree_cache_order.borrow_mut();
+        order.retain(|cached_page| *cached_page != page);
+        order.push_back(page);
+    }
+
+    fn cache_page_tree(&self, page: usize, tree: PageRenderTree) {
+        {
+            let mut cache = self.page_tree_cache.borrow_mut();
+            if cache.len() <= page {
+                cache.resize_with(page + 1, || None);
+            }
+            cache[page] = Some(tree);
+        }
+
+        let evicted = {
+            let mut order = self.page_tree_cache_order.borrow_mut();
+            order.retain(|cached_page| *cached_page != page);
+            order.push_back(page);
+            (order.len() > PAGE_RENDER_CACHE_CAPACITY)
+                .then(|| order.pop_front())
+                .flatten()
+        };
+        let Some(evicted) = evicted else {
+            return;
+        };
+
+        if let Some(slot) = self.page_tree_cache.borrow_mut().get_mut(evicted) {
+            *slot = None;
+        }
+        if let Some(variants) = self.layer_tree_json_cache.borrow_mut().get_mut(evicted) {
+            variants.clear();
+        }
     }
 
     /// 캐시된 페이지 렌더 트리를 반환한다 (캐시 미스 시 빌드 후 캐시).
@@ -4853,27 +4961,21 @@ impl DocumentCore {
         let idx = page_num as usize;
 
         // 캐시 크기 확보 + 히트 확인
-        {
+        let cached = {
             let mut cache = self.page_tree_cache.borrow_mut();
             if cache.len() <= idx {
                 cache.resize_with(idx + 1, || None);
             }
-            if let Some(ref tree) = cache[idx] {
-                return Ok(tree.clone());
-            }
+            cache[idx].clone()
+        };
+        if let Some(tree) = cached {
+            self.touch_page_render_cache(idx);
+            return Ok(tree);
         }
 
         // 캐시 미스 → 빌드
         let tree = self.build_page_tree(page_num)?;
-        let cloned = tree.clone();
-
-        {
-            let mut cache = self.page_tree_cache.borrow_mut();
-            if cache.len() <= idx {
-                cache.resize_with(idx + 1, || None);
-            }
-            cache[idx] = Some(cloned);
-        }
+        self.cache_page_tree(idx, tree.clone());
 
         Ok(tree)
     }
@@ -4896,11 +4998,9 @@ impl DocumentCore {
 
         if !cached {
             let tree = self.build_page_tree(page_num)?;
-            let mut cache = self.page_tree_cache.borrow_mut();
-            if cache.len() <= idx {
-                cache.resize_with(idx + 1, || None);
-            }
-            cache[idx] = Some(tree);
+            self.cache_page_tree(idx, tree);
+        } else {
+            self.touch_page_render_cache(idx);
         }
 
         let cache = self.page_tree_cache.borrow();
@@ -5736,6 +5836,116 @@ mod tests {
     #[test]
     fn issue_2308_document_core_remains_send() {
         assert_send::<DocumentCore>();
+    }
+
+    #[test]
+    fn page_render_cache_is_bounded_and_evicts_least_recently_used_page() {
+        let core = DocumentCore::new_empty();
+        let inserted = PAGE_RENDER_CACHE_CAPACITY + 3;
+        for page in 0..inserted {
+            core.cache_page_tree(page, PageRenderTree::new(page as u32, 100.0, 100.0));
+            let mut json_cache = core.layer_tree_json_cache.borrow_mut();
+            if json_cache.len() <= page {
+                json_cache.resize_with(page + 1, Vec::new);
+            }
+            json_cache[page].push((0, format!("page-{page}")));
+        }
+
+        assert_eq!(core.render_cache_stats().0, PAGE_RENDER_CACHE_CAPACITY);
+        assert_eq!(core.render_cache_stats().1, PAGE_RENDER_CACHE_CAPACITY);
+        for page in 0..3 {
+            assert!(core.page_tree_cache.borrow()[page].is_none());
+            assert!(core.layer_tree_json_cache.borrow()[page].is_empty());
+        }
+
+        core.touch_page_render_cache(3);
+        core.cache_page_tree(inserted, PageRenderTree::new(inserted as u32, 100.0, 100.0));
+        assert!(core.page_tree_cache.borrow()[3].is_some());
+        assert!(core.page_tree_cache.borrow()[4].is_none());
+        assert_eq!(
+            core.page_tree_cache_order.borrow().len(),
+            PAGE_RENDER_CACHE_CAPACITY
+        );
+    }
+
+    #[test]
+    fn section_invalidation_preserves_render_trees_before_changed_section() {
+        let bytes = include_bytes!("../../../samples/hwp-multi-001.hwp");
+        let core = DocumentCore::from_bytes(bytes).expect("multi-section fixture parses");
+        assert!(core.pagination.len() > 1);
+        let changed_section = 1;
+        let first_changed_page = core.pagination[0].pages.len();
+        let page_count = core.page_count() as usize;
+        assert!(first_changed_page > 0);
+        assert!(page_count <= PAGE_RENDER_CACHE_CAPACITY);
+
+        for page in 0..page_count {
+            core.cache_page_tree(page, PageRenderTree::new(page as u32, 100.0, 100.0));
+            let mut json_cache = core.layer_tree_json_cache.borrow_mut();
+            if json_cache.len() <= page {
+                json_cache.resize_with(page + 1, Vec::new);
+            }
+            json_cache[page].push((0, format!("page-{page}")));
+        }
+
+        core.invalidate_page_tree_cache_from_section(changed_section);
+
+        for page in 0..first_changed_page {
+            assert!(core.page_tree_cache.borrow()[page].is_some());
+            assert_eq!(core.layer_tree_json_cache.borrow()[page].len(), 1);
+        }
+        for page in first_changed_page..page_count {
+            assert!(core.page_tree_cache.borrow()[page].is_none());
+            assert!(core.layer_tree_json_cache.borrow()[page].is_empty());
+        }
+    }
+
+    #[test]
+    fn later_section_text_edit_keeps_earlier_section_render_trees() {
+        let bytes = include_bytes!("../../../samples/hwp-multi-001.hwp");
+        let mut core = DocumentCore::from_bytes(bytes).expect("multi-section fixture parses");
+        let changed_section = 1;
+        let first_changed_page = core.pagination[0].pages.len();
+        let page_count = core.page_count() as usize;
+        assert!(first_changed_page > 0);
+        assert!(page_count <= PAGE_RENDER_CACHE_CAPACITY);
+        for page in 0..page_count {
+            core.cache_page_tree(page, PageRenderTree::new(page as u32, 100.0, 100.0));
+        }
+        let paragraph = core.document.sections[changed_section]
+            .paragraphs
+            .iter()
+            .position(|paragraph| !paragraph.text.is_empty())
+            .expect("editable paragraph in later section");
+
+        core.insert_text_native(changed_section, paragraph, 0, "가")
+            .expect("later section text edit");
+
+        for page in 0..first_changed_page {
+            assert!(core.page_tree_cache.borrow()[page].is_some());
+        }
+    }
+
+    #[test]
+    fn all_page_info_matches_individual_page_queries() {
+        let bytes =
+            include_bytes!("../../../samples/basic/issue1994_behindtext_table_20200830.hwp");
+        let core = DocumentCore::from_bytes(bytes).expect("fixture parses");
+        let all: Vec<serde_json::Value> =
+            serde_json::from_str(&core.get_all_page_info_native().expect("all page info"))
+                .expect("all page info JSON");
+        assert_eq!(all.len(), core.page_count() as usize);
+        assert!(all.len() > 1);
+
+        for page in [0, all.len() / 2, all.len() - 1] {
+            let individual: serde_json::Value = serde_json::from_str(
+                &core
+                    .get_page_info_native(page as u32)
+                    .expect("individual page info"),
+            )
+            .expect("individual page info JSON");
+            assert_eq!(all[page], individual);
+        }
     }
 
     #[test]

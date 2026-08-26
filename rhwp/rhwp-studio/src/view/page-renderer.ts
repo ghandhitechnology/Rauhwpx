@@ -1,5 +1,5 @@
 import { WasmBridge } from '@/core/wasm-bridge';
-import type { LayerRenderProfile } from '@/core/types';
+import type { LayerRenderProfile, PageInfo } from '@/core/types';
 import { layerPaintOpReplayPlane } from './canvaskit/replay-plane';
 import type { CanvasKitLayerRenderer, CanvasKitRenderDiagnostics } from './canvaskit-renderer';
 import { collectVectorRawSvgDataUrls } from './raw-svg-prefetch';
@@ -62,6 +62,7 @@ export class PageRenderer {
   private imageRetryCounts = new Map<number, string>();
   private layerSummaryCache = new Map<number, LayerSummaryCacheEntry>();
   private canvaskitDiagnosticsByPage = new Map<number, CanvasKitRenderDiagnostics>();
+  private pageInfoByPage = new Map<number, PageInfo>();
   private flowSplitSupported: boolean | null = null;
 
   constructor(
@@ -86,6 +87,7 @@ export class PageRenderer {
     this.cancelAll();
     if (!preserveCanvasKitDiagnostics) this.releaseAllPageDiagnostics();
     this.layerSummaryCache.clear();
+    this.pageInfoByPage.clear();
     this.backend = backend;
     this.renderProfile = renderProfile;
     this.canvaskitRenderer = canvaskitRenderer;
@@ -96,6 +98,7 @@ export class PageRenderer {
     this.cancelAll();
     this.releaseAllPageDiagnostics();
     this.layerSummaryCache.clear();
+    this.pageInfoByPage.clear();
   }
 
   /** 페이지를 Canvas에 렌더링한다 (renderScale = zoom × DPR) */
@@ -106,7 +109,9 @@ export class PageRenderer {
     _displayScale: number,
     dpr: number,
     context: PageRenderContext = {},
+    pageInfo?: PageInfo,
   ): PageRenderResult {
+    if (pageInfo) this.pageInfoByPage.set(pageIdx, pageInfo);
     if (this.backend === 'canvaskit') {
       this.layerSummaryCache.delete(pageIdx);
       const renderedCanvas = this.renderPageCanvasKit(pageIdx, canvas, renderScale);
@@ -204,10 +209,12 @@ export class PageRenderer {
 
   releasePageDiagnostics(pageIdx: number): void {
     this.canvaskitDiagnosticsByPage.delete(pageIdx);
+    this.pageInfoByPage.delete(pageIdx);
   }
 
   releaseAllPageDiagnostics(): void {
     this.canvaskitDiagnosticsByPage.clear();
+    this.pageInfoByPage.clear();
   }
 
   private renderPageCanvasKit(
@@ -230,7 +237,7 @@ export class PageRenderer {
 
     let renderStarted = false;
     try {
-      const pageInfo = this.wasm.getPageInfo(pageIdx);
+      const pageInfo = this.pageInfoByPage.get(pageIdx) ?? this.wasm.getPageInfo(pageIdx);
       canvas.width = Math.max(1, Math.floor(pageInfo.width * renderScale));
       canvas.height = Math.max(1, Math.floor(pageInfo.height * renderScale));
       const tree = this.wasm.getPageLayerTreeObject(pageIdx, this.renderProfile);
@@ -606,7 +613,13 @@ export class PageRenderer {
    * 페이지를 본문 layer (flow) 만 Canvas 에 렌더링한다 (Task #516, Stage 5.2).
    * BehindText / InFrontOfText plane 은 제외 — overlay canvas 로 별도 표시.
    */
-  renderPageFlow(pageIdx: number, canvas: HTMLCanvasElement, scale: number): void {
+  renderPageFlow(
+    pageIdx: number,
+    canvas: HTMLCanvasElement,
+    scale: number,
+    pageInfo?: PageInfo,
+  ): void {
+    if (pageInfo) this.pageInfoByPage.set(pageIdx, pageInfo);
     this.wasm.renderPageToCanvasFiltered(pageIdx, canvas, scale, 'flow', this.renderProfile);
     this.drawMarginGuides(pageIdx, canvas, scale);
     this.scheduleReRender(pageIdx, canvas, scale, 0, 0, {
@@ -786,7 +799,7 @@ export class PageRenderer {
 
   /** 편집 용지 여백 가이드라인을 캔버스에 그린다 (4모서리 L자 표시) */
   private drawMarginGuides(pageIdx: number, canvas: HTMLCanvasElement, scale: number): void {
-    const pageInfo = this.wasm.getPageInfo(pageIdx);
+    const pageInfo = this.pageInfoByPage.get(pageIdx) ?? this.wasm.getPageInfo(pageIdx);
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
@@ -1049,12 +1062,14 @@ export class PageRenderer {
     this.imageRetryCounts.clear();
     this.layerSummaryCache.clear();
     this.canvaskitDiagnosticsByPage.clear();
+    this.pageInfoByPage.clear();
   }
 
   dispose(): void {
     this.cancelAll();
     this.layerSummaryCache.clear();
     this.canvaskitDiagnosticsByPage.clear();
+    this.pageInfoByPage.clear();
     this.canvaskitRenderer = null;
   }
 }

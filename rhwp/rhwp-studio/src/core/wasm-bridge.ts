@@ -133,6 +133,14 @@ export interface DeferredPaginationResult {
   pageCount: number;
 }
 
+export interface WebCanvasImageCacheStats {
+  decodedCanvasEntries: number;
+  decodedCanvasPixels: number;
+  decodedCanvasRgbaBytes: number;
+  htmlImageEntries: number;
+  htmlImageSourceBytes: number;
+}
+
 import { fontFamilyChainForDisplay } from './font-substitution';
 import type { FileSystemFileHandleLike } from '@/command/file-system-access';
 import {
@@ -616,6 +624,27 @@ export class WasmBridge {
   getPageInfo(pageNum: number): PageInfo {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.getPageInfo(pageNum));
+  }
+
+  getAllPageInfo(): PageInfo[] {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const doc = this.doc as unknown as { getAllPageInfo?: () => string };
+    if (typeof doc.getAllPageInfo === 'function') {
+      const pages: unknown = JSON.parse(doc.getAllPageInfo());
+      if (!Array.isArray(pages)) {
+        throw new Error('[WasmBridge] 전체 페이지 정보가 배열이 아닙니다');
+      }
+      return pages as PageInfo[];
+    }
+
+    const pages: PageInfo[] = [];
+    for (let page = 0; page < this.pageCount; page++) pages.push(this.getPageInfo(page));
+    return pages;
+  }
+
+  getWebCanvasImageCacheStats(): WebCanvasImageCacheStats {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(this.doc.getWebCanvasImageCacheStats()) as WebCanvasImageCacheStats;
   }
 
   refreshLayout(): void {
@@ -2749,6 +2778,14 @@ export class WasmBridge {
   saveSnapshot(): number {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.saveSnapshot();
+  }
+
+  shareSnapshot(sourceId: number): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const document = this.doc as HwpDocument & {
+      shareSnapshot?: (id: number) => number;
+    };
+    return document.shareSnapshot?.(sourceId) ?? document.saveSnapshot();
   }
 
   restoreSnapshot(id: number): void {

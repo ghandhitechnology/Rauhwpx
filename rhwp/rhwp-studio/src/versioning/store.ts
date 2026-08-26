@@ -338,10 +338,11 @@ function cloneValue<Value>(value: Value): Value {
   return structuredClone(value);
 }
 
-function cloneMemoryState(state: MemoryState): MemoryState {
-  const cloneMap = <Value>(source: Map<IDBValidKey, Value>): Map<IDBValidKey, Value> => new Map(
-    [...source].map(([key, value]) => [key, cloneValue(value)]),
-  );
+function forkMemoryState(state: MemoryState): MemoryState {
+  // Transaction reads and writes clone rows at the boundary, so unchanged rows are immutable
+  // and can be shared with the rollback source instead of cloning the full repository graph.
+  const cloneMap = <Value>(source: Map<IDBValidKey, Value>): Map<IDBValidKey, Value> =>
+    new Map(source);
   return {
     repositories: cloneMap(state.repositories),
     commits: cloneMap(state.commits),
@@ -577,7 +578,8 @@ function preparePayload(payload: Pick<CheckpointPayload, 'bytes' | 'blobId' | 'c
   compareSnapshot: VersionCompareSnapshot;
 } {
   const computedBlobId = hashBytes(payload.bytes);
-  const computedSnapshotId = hashCompareSnapshot(payload.compareSnapshot);
+  const serializedSnapshot = serializeCompareSnapshot(payload.compareSnapshot);
+  const computedSnapshotId = compareSnapshotId(hashBytes(serializedSnapshot));
   assertPayloadId(computedBlobId, payload.blobId, 'Blob ID');
   assertPayloadId(computedSnapshotId, payload.compareSnapshotId, 'Compare snapshot ID');
   return {
@@ -588,7 +590,7 @@ function preparePayload(payload: Pick<CheckpointPayload, 'bytes' | 'blobId' | 'c
     },
     compareSnapshot: {
       id: computedSnapshotId,
-      byteLength: serializeCompareSnapshot(payload.compareSnapshot).byteLength,
+      byteLength: serializedSnapshot.byteLength,
       snapshot: cloneValue(payload.compareSnapshot),
     },
   };
@@ -1189,7 +1191,7 @@ export class VersionGraphStore {
     if (!this.#factory) {
       if (mode === 'readonly') return operation(memoryTransaction(this.#memory));
       const result = this.#memoryWriteTail.catch(() => undefined).then(async () => {
-        const working = cloneMemoryState(this.#memory);
+        const working = forkMemoryState(this.#memory);
         const value = await operation(memoryTransaction(working));
         this.#memory = working;
         return cloneValue(value);

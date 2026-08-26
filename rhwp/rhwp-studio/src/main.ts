@@ -45,10 +45,17 @@ import { addRecentDoc, listRecentDocs } from '@/recent/recent-store';
 import { showDropConfirmDialog } from '@/ui/drop-confirm-dialog';
 import { initRhwpDev } from '@/core/rhwp-dev';
 import { DocumentDirtyState } from '@/core/document-dirty-state';
-import { initThemeSync, setThemeMode, getThemeMode, getEffectiveTheme } from '@/core/theme';
+import {
+  applyTheme,
+  getEffectiveTheme,
+  getThemeMode,
+  initThemeSync,
+  setThemeMode,
+  syncThemeMenu,
+} from '@/core/theme';
 import { analyzeDocumentFonts } from '@/core/document-font-status';
 import { detectLocalFonts, getLocalFontState, loadStoredLocalFonts } from '@/core/local-fonts';
-import { userSettings } from '@/core/user-settings';
+import { userSettings, type EditorScalarSettings } from '@/core/user-settings';
 import { AutosaveManager, type AutosaveScheduleSettings, type AutosaveStatus } from '@/recovery/autosave-manager';
 import {
   clearRecoverableAutosaveDrafts,
@@ -94,6 +101,7 @@ import {
 } from '@/desktop-integration';
 import { initAgentBridge, type AgentBridge } from './agent/bridge.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
+import { showEditingSettingsFallback } from './ui/agent-sidebar/settings-editing-fallback.ts';
 import { AGENT_LABEL } from './ui/agent-sidebar/providers.ts';
 import { initInlinePrompt } from './agent/inline-prompt.ts';
 import { DocumentVersionController, persistActiveBranch } from './versioning/controller.ts';
@@ -276,6 +284,20 @@ function setAgentEditingLease(lease: AgentEditingLease): void {
 /** 렌더러 초기화 후에 생성되는 에이전트 브리지 — 저장 가드가 대기 편집을 조회한다. */
 let agentBridgeRef: AgentBridge | null = null;
 let versionControllerRef: DocumentVersionController | null = null;
+let agentSidebarReady = false;
+
+eventBus.on('settings:open', (payload) => {
+  if (agentSidebarReady) return;
+  const destination = (payload as { destination?: unknown } | undefined)?.destination;
+  if (destination !== undefined && destination !== 'editing') return;
+  showEditingSettingsFallback({
+    eventBus,
+    runtime: {
+      preview: applyEditorSettingsPreview,
+      committed: commitEditorSettingsRuntime,
+    },
+  });
+});
 
 const commandServices: CommandServices = {
   eventBus,
@@ -662,6 +684,7 @@ async function initialize(): Promise<void> {
     if (import.meta.env.DEV) {
       (window as any).__inputHandler = inputHandler;
       (window as any).__canvasView = canvasView;
+      (window as any).__rendererSession = rendererSession;
       (window as any).__renderBackend = null;
       (window as any).__renderBackendRequest = renderBackendRequest;
       (window as any).__rendererRuntimeRequest = rendererRuntimeRequest;
@@ -696,6 +719,10 @@ async function initialize(): Promise<void> {
       const agentSidebar = initAgentSidebar({
         bridge: agentBridge,
         eventBus,
+        editorSettingsRuntime: {
+          preview: applyEditorSettingsPreview,
+          committed: commitEditorSettingsRuntime,
+        },
         versionController,
         openClassicVersionControl: () => openClassicDocumentHistory(commandServices),
         getDocumentContext: () => {
@@ -712,6 +739,7 @@ async function initialize(): Promise<void> {
           void runLibraryMove(commandServices, target, () => activeDocumentId);
         },
       });
+      agentSidebarReady = true;
       initInlinePrompt({
         wasm,
         eventBus,
@@ -1117,16 +1145,28 @@ function setupEventListeners(): void {
   });
 }
 
-/** 문서 초기화 공통 시퀀스 (loadFile, createNewDocument 양쪽에서 사용) */
-function applySavedTextMarkSettings(): void {
-  const view = userSettings.getViewSettings();
-  wasm.setShowControlCodes(view.showControlCodes);
-  wasm.setShowParagraphMarks(view.showParagraphMarks);
-  syncTextMarkMenu(view.showControlCodes, view.showParagraphMarks);
-  // #2204: 짤림보기(잘림 보기) 저장 설정 복원. clipView=켜짐 => clip 미적용(clipEnabled=false).
-  const clipEnabled = !view.clipView;
+function applyEditorSettingsPreview(settings: EditorScalarSettings): void {
+  applyTheme(settings.theme.mode);
+  syncThemeMenu(settings.theme.mode);
+  wasm.setShowControlCodes(settings.view.showControlCodes);
+  wasm.setShowParagraphMarks(settings.view.showParagraphMarks);
+  syncTextMarkMenu(settings.view.showControlCodes, settings.view.showParagraphMarks);
+  const clipEnabled = !settings.view.clipView;
   wasm.setClipEnabled(clipEnabled);
   syncClipMenu(clipEnabled);
+  eventBus.emit('document-view-changed');
+}
+
+function commitEditorSettingsRuntime(settings: EditorScalarSettings): void {
+  applyEditorSettingsPreview(settings);
+  eventBus.emit('autosave-settings-changed');
+  eventBus.emit('font-settings-changed');
+  eventBus.emit('command-state-changed');
+}
+
+/** 문서 초기화 공통 시퀀스 (loadFile, createNewDocument 양쪽에서 사용) */
+function applySavedTextMarkSettings(): void {
+  applyEditorSettingsPreview(userSettings.getEditorScalarSettings());
 }
 
 async function initializeDocument(

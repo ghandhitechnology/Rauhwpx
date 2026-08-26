@@ -42,6 +42,8 @@ The agent reads structure, text ranges, tables, fields and rendered pages, then 
 
 Download a build from [Releases](https://github.com/ghandhitechnology/Rauhwpx/releases): macOS arm64 DMG/ZIP (signed), Windows x64 installer (unsigned for now — SmartScreen warns until we get a certificate).
 
+Testers can download the current pre-release from the [nightly tag](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly).
+
 You supply your own agent CLI. Claude, Codex and Pi can each be installed and signed in from **Settings → Connection** inside the app.
 
 ## Development
@@ -57,6 +59,10 @@ For standalone hub work, `npm start` from the root runs it on http://127.0.0.1:5
 
 Rust: `cargo test`, `cargo clippy`, `cargo fmt`. Studio: `npm test`, `npm run build`, `npm run e2e:*`.
 
+## 기여하기
+
+[CONTRIBUTING.md](CONTRIBUTING.md)에서 로컬 설정, PR 전에 실행할 검사, [AGENTS.md](AGENTS.md)의 설명 형식을 확인하세요.
+
 ## Releasing
 
 Push a `v*` tag matching `package.json` and GitHub Actions builds and attaches the installers.
@@ -67,6 +73,20 @@ git push origin v1.1.0
 ```
 
 macOS signing uses the `macos-release` environment: `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`. Local Windows build: `npm run dist:win` on Windows.
+
+### Nightly
+
+GitHub Actions builds nightly desktop installers at 4:00am KST (`0 19 * * *` UTC). Run it manually from **Actions → Nightly desktop release**. A manual run publishes only from `main`.
+
+Testers download the current build from the [nightly pre-release](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly). Each successful run replaces that pre-release and moves the `nightly` tag.
+
+The workflow builds signed and notarized macOS arm64 DMG and ZIP installers. It also builds an unsigned Windows x64 NSIS installer, matching tagged releases. There is no Linux desktop nightly.
+
+`.github/workflows/nightly.yml` remains the Linux engine and Studio verification workflow. It does not publish installers.
+
+macOS uses the same `macos-release` environment as tagged releases. The required secrets are `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_SPECIFIC_PASSWORD`. If any secret is missing, the macOS job fails and GitHub does not publish a partial nightly. If `macos-release` requires a reviewer, the scheduled run waits for approval.
+
+The nightly app version and artifact names use `<version>-nightly.<date>.<sha>`. `<date>` is the UTC `YYYYMMDD` date, and `<sha>` is the first seven commit SHA characters.
 
 ## Layout
 

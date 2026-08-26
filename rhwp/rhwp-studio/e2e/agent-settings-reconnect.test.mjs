@@ -4,7 +4,7 @@
  * 시나리오 (허브를 실제로 껐다 켜며 진행):
  *   a. 허브 없이 로드 → 채팅에 연결 배너(재시도 카운트다운 + 지금 다시 연결)가 뜬다
  *   b. 허브 기동 → 백오프 자동 재시도로 붙고 배너가 사라진다 (기동 순서 무관 복구)
- *   c. 설정 페이지 — 연결/기본 설정/글쓰기 보정/사용량 네 구역, 제공자 프로브 결과 표시
+ *   c. 설정 페이지 — 연결 목적지의 허브/사용량과 제공자 프로브 결과 표시
  *   d. 허브 강제 종료 → 배너 재등장, [지금 다시 연결] 클릭이 즉시 재시도를 건다
  *   e. 허브 재기동 → 다시 자동 복구
  *
@@ -37,7 +37,7 @@ async function findAvailablePort(startPort, attempts = 20) {
   throw new Error(`failed to find an available port starting at ${startPort}`);
 }
 
-async function waitForHttp(url, label, child, timeoutMs = 45000) {
+async function waitForHttp(url, label, child, timeoutMs = 45000, init = undefined) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {
@@ -45,7 +45,7 @@ async function waitForHttp(url, label, child, timeoutMs = 45000) {
       throw new Error(`${label} 프로세스가 준비 전 종료 (code=${child.exitCode ?? child.signalCode})`);
     }
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, init);
       if (response.ok) return;
       lastError = new Error(`status ${response.status}`);
     } catch (error) {
@@ -105,7 +105,13 @@ function startHub() {
     { RHWP_AGENT_PORT: String(hubPort), RHWP_AGENT_TOKEN: HUB_TOKEN, RHWP_USAGE_DIR: usageDir },
     path.join(repoRoot, 'target', 'rhwp-agent-settings-e2e-hub.log'),
   );
-  return waitForHttp(`http://127.0.0.1:${hubPort}/healthz`, 'rhwp-agent 허브', hub);
+  return waitForHttp(
+    `http://127.0.0.1:${hubPort}/healthz`,
+    'rhwp-agent 허브',
+    hub,
+    45000,
+    { headers: { authorization: `Bearer ${HUB_TOKEN}` } },
+  );
 }
 
 const vite = spawnLogged(
@@ -171,26 +177,35 @@ try {
     await page.waitForFunction(
       () => document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'),
     );
-    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 350)));
+    await page.click('#ag-settings-tab-connections');
+    await page.waitForFunction(
+      () => document.querySelector('#ag-settings-tab-connections')?.getAttribute('aria-selected') === 'true',
+    );
+    await page.waitForFunction(
+      () => document.querySelector(
+        '#ag-settings-pane-connections .ag-settings-hub-row .ag-settings-row-detail',
+      )?.textContent === '연결됨',
+    );
     const settings = await page.evaluate(() => {
       const panel = document.querySelector('#ag-settings-panel');
-      const sections = [...(panel?.querySelectorAll('.ag-settings-section-title') ?? [])]
+      const destination = panel?.querySelector('#ag-settings-pane-connections');
+      const sections = [...(destination?.querySelectorAll('.ag-settings-section-title') ?? [])]
         .map((n) => n.textContent);
       return {
         sections,
-        hubDetail: panel?.querySelector('.ag-settings-hub-row .ag-settings-row-detail')?.textContent,
-        providerRows: panel?.querySelectorAll('.ag-settings-provider-row').length ?? 0,
-        hasPlanSelect: !!panel?.querySelector('.ag-settings-select'),
+        hubDetail: destination?.querySelector('.ag-settings-hub-row .ag-settings-row-detail')?.textContent,
+        providerRows: destination?.querySelectorAll('.ag-settings-provider-row').length ?? 0,
+        hasPlanSelect: !!destination?.querySelector('.ag-settings-select'),
         ariaHidden: panel?.getAttribute('aria-hidden'),
       };
     });
     assert(settings.ariaHidden === 'false', '설정 페이지가 열려야 한다');
-    for (const name of ['연결', '기본 설정', '글쓰기 보정', '사용량']) {
+    for (const name of ['연결', '사용량']) {
       assert(settings.sections.includes(name), `${name} 구역이 있어야 한다 (${settings.sections})`);
     }
     assert(settings.hubDetail === '연결됨', `허브 행 상태: ${settings.hubDetail}`);
-    assert(settings.providerRows === 2, `제공자 행 2개여야 한다: ${settings.providerRows}`);
-    // 제공자 프로브는 비동기 — 두 행 모두 '확인 중…' 이 걷힐 때까지 기다린다.
+    assert(settings.providerRows === 5, `제공자 행 5개여야 한다: ${settings.providerRows}`);
+    // 제공자 프로브는 비동기 — 모든 행에서 '확인 중…' 이 걷힐 때까지 기다린다.
     await page.waitForFunction(
       () => [...document.querySelectorAll('.ag-settings-provider-row .ag-settings-row-detail')]
         .every((n) => n.textContent && n.textContent !== '확인 중…'),
