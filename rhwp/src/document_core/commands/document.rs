@@ -2214,6 +2214,19 @@ impl DocumentCore {
             .event_log
             .section_revisions(self.document.sections.len());
         let same_section_count = self.document.sections.len() == snapshot.sections.len();
+        let changed_sections: Vec<usize> = if same_section_count {
+            snapshot
+                .sections
+                .iter()
+                .enumerate()
+                .filter_map(|(section_idx, snapshot_section)| {
+                    (current_revisions[section_idx] != snapshot_section.revision)
+                        .then_some(section_idx)
+                })
+                .collect()
+        } else {
+            (0..snapshot.sections.len()).collect()
+        };
         let mut current_sections = std::mem::take(&mut self.document.sections);
         let mut restored = snapshot.document_shell.clone();
         restored.sections.reserve(snapshot.sections.len());
@@ -2229,7 +2242,17 @@ impl DocumentCore {
             }
         }
         self.document = restored;
-        self.refresh_layout_native();
+        if same_section_count {
+            self.styles = resolve_styles(&self.document.doc_info, self.dpi);
+            for &section_idx in &changed_sections {
+                self.recompose_section(section_idx);
+            }
+            if !changed_sections.is_empty() {
+                self.paginate();
+            }
+        } else {
+            self.refresh_layout_native();
+        }
         self.event_log.restore_section_revisions(&target_revisions);
         Ok(super::super::helpers::json_ok())
     }
@@ -2623,11 +2646,13 @@ mod replace_content_tests {
             .push(core.document.sections[0].clone());
         core.refresh_layout_native();
         let before_text = core.document.sections[0].paragraphs[0].text.clone();
+        let before_pages = core.page_count();
         let before_id = core.save_snapshot_native();
 
         core.insert_text_native(0, 0, 0, "X")
             .expect("section-local edit should succeed");
         let after_text = core.document.sections[0].paragraphs[0].text.clone();
+        let after_pages = core.page_count();
         let after_id = core.save_snapshot_native();
 
         let before = &core
@@ -2654,9 +2679,11 @@ mod replace_content_tests {
         core.restore_snapshot_native(before_id)
             .expect("before snapshot restore");
         assert_eq!(core.document.sections[0].paragraphs[0].text, before_text);
+        assert_eq!(core.page_count(), before_pages);
         core.restore_snapshot_native(after_id)
             .expect("after snapshot restore");
         assert_eq!(core.document.sections[0].paragraphs[0].text, after_text);
+        assert_eq!(core.page_count(), after_pages);
     }
 
     #[test]
