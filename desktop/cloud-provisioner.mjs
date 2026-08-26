@@ -22,9 +22,14 @@ function runProcess(spawnImpl, command, args, { input, timeoutMs = 30_000, onLin
     });
     const stdout = [];
     const stderr = [];
+    const carry = { stdout: '', stderr: '' };
     let outputSize = 0;
     let settled = false;
-    const capture = (target, chunk) => {
+    const emitLogLine = (line) => {
+      if (!line) return;
+      onLine(line.startsWith('RAUHWpx_RECEIPT=') ? 'RAUHWpx_RECEIPT=' : line);
+    };
+    const capture = (target, stream, chunk) => {
       outputSize += chunk.length;
       if (outputSize > OUTPUT_LIMIT) {
         child.kill('SIGKILL');
@@ -32,10 +37,10 @@ function runProcess(spawnImpl, command, args, { input, timeoutMs = 30_000, onLin
         return;
       }
       target.push(chunk);
-      for (const line of stripControl(chunk.toString('utf8')).split(/\r?\n/)) {
-        if (!line) continue;
-        onLine(line.startsWith('RAUHWpx_RECEIPT=') ? 'RAUHWpx_RECEIPT=' : line);
-      }
+      const text = carry[stream] + stripControl(chunk.toString('utf8'));
+      const lines = text.split(/\r?\n/);
+      carry[stream] = lines.pop() ?? '';
+      for (const line of lines) emitLogLine(line);
     };
     const rejectOnce = (error) => {
       if (settled) return;
@@ -48,9 +53,11 @@ function runProcess(spawnImpl, command, args, { input, timeoutMs = 30_000, onLin
       rejectOnce(new Error(`${command} timed out`));
     }, timeoutMs);
     child.once('error', rejectOnce);
-    child.stdout.on('data', (chunk) => capture(stdout, chunk));
-    child.stderr.on('data', (chunk) => capture(stderr, chunk));
+    child.stdout.on('data', (chunk) => capture(stdout, 'stdout', chunk));
+    child.stderr.on('data', (chunk) => capture(stderr, 'stderr', chunk));
     child.once('close', (code, signal) => {
+      emitLogLine(carry.stdout);
+      emitLogLine(carry.stderr);
       if (settled) return;
       settled = true;
       clearTimeout(timer);

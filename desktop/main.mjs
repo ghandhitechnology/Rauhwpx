@@ -511,12 +511,12 @@ async function checkForAppUpdates({ manual = true } = {}) {
   updateCheckPromise = (async () => {
     try {
       if (process.platform === 'linux' && !process.env.APPIMAGE) {
-        return await checkForDebUpdates({ manual });
+        return await checkForDebUpdates({ manual: manualUpdateCheck });
       }
       return await autoUpdater.checkForUpdates();
     } catch (error) {
       console.warn('[rauhwpx] update check failed:', error?.message ?? error);
-      if (!manual) return null;
+      if (!manualUpdateCheck) return null;
       const { response } = await dialog.showMessageBox({
         type: 'warning',
         message: 'Rauhwpx could not check for updates',

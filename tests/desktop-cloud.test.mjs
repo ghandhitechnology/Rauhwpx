@@ -140,6 +140,8 @@ test('Tailscale HTTPS port persists through profiles, UI conversion, and provisi
   assert.equal(receipt.tailscaleHttpsPort, 8443);
   const provisionerSource = await readFile(new URL('../desktop/cloud-provisioner.mjs', import.meta.url), 'utf8');
   assert.match(provisionerSource, /line.startsWith\('RAUHWpx_RECEIPT='\) \? 'RAUHWpx_RECEIPT=' : line/);
+  assert.match(provisionerSource, /carry\[stream\] \+ stripControl/);
+  assert.match(provisionerSource, /emitLogLine\(carry\.stdout\)/);
   assert.match(provisionerTest.installRemoteCommand({
     channel: 'stable', transport: 'tailscale', publicHost: '', tailscaleHttpsPort: 8443,
   }), /RAUHWpx_TAILSCALE_HTTPS_PORT=8443/);
