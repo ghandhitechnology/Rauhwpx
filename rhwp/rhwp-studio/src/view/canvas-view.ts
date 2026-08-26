@@ -327,8 +327,9 @@ export class CanvasView {
     const scrollY = this.viewportManager.getScrollY();
     const { height: vpHeight } = this.viewportManager.getViewportSize();
 
-    const prefetchPages = this.virtualScroll.getPrefetchPages(scrollY, vpHeight);
-    const visiblePages = this.virtualScroll.getVisiblePages(scrollY, vpHeight);
+    const pageWindow = this.virtualScroll.getPageWindow(scrollY, vpHeight);
+    const prefetchPages = pageWindow.prefetch;
+    const visiblePages = pageWindow.visible;
     const visibleSet = new Set(visiblePages);
 
     // 벗어난 페이지 해제
