@@ -9,8 +9,8 @@ use rhwp::wasm_api::HwpDocument;
 #[test]
 #[ignore = "local long-document performance diagnostic; run explicitly"]
 fn long_document_late_section_text_edit_perf() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("samples/2025 행정업무운영 편람(최종).hwpx");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/2025 행정업무운영 편람(최종).hwpx");
     let bytes = fs::read(&path).expect("read 390-page long-document fixture");
     let repeats = std::env::var("RHWP_LONG_EDIT_REPEATS")
         .ok()
