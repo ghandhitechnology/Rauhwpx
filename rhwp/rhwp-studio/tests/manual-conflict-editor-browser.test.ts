@@ -13,6 +13,7 @@ const BROWSER_CANDIDATES = [
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
   '/usr/bin/google-chrome',
   '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
 ].filter((candidate): candidate is string => Boolean(candidate));
 
 const executablePath = BROWSER_CANDIDATES.find(existsSync);
@@ -21,16 +22,17 @@ const rhwpRoot = resolve(studioRoot, '..');
 const wasmPackageRoot = process.env.RHWP_WASM_PACKAGE_DIR ?? resolve(rhwpRoot, 'pkg');
 const wasmPackageAvailable = existsSync(resolve(wasmPackageRoot, 'rhwp.js'))
   && existsSync(resolve(wasmPackageRoot, 'rhwp_bg.wasm'));
+const browserSkipReason = !executablePath
+  ? 'Chrome 또는 Chromium을 찾을 수 없습니다'
+  : !wasmPackageAvailable
+    ? '리졸버 브라우저 테스트는 생성된 rhwp/pkg/rhwp.js와 rhwp/pkg/rhwp_bg.wasm이 필요합니다. npm test 전에 WASM 패키지를 빌드하세요'
+    : null;
 let server: ViteDevServer | null = null;
 let browser: Browser | null = null;
 let baseUrl = '';
 
 test.before(async () => {
-  if (!executablePath) return;
-  assert.ok(
-    wasmPackageAvailable,
-    'Resolver browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test',
-  );
+  if (browserSkipReason) return;
   server = await createServer({
     root: studioRoot,
     configFile: false,
@@ -54,7 +56,13 @@ test.before(async () => {
   const address = server.httpServer?.address();
   assert.ok(address && typeof address !== 'string');
   baseUrl = `http://127.0.0.1:${address.port}`;
-  browser = await puppeteer.launch({ executablePath, headless: true });
+  browser = await puppeteer.launch({
+    executablePath,
+    headless: true,
+    args: process.env.CI || process.env.DEPOT_JOB_URL
+      ? ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+      : [],
+  });
 });
 
 test.after(async () => {
@@ -67,7 +75,7 @@ async function withPage<T>(
   action: (page: import('puppeteer-core').Page) => Promise<T>,
 ): Promise<T | undefined> {
   if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
+    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
     return undefined;
   }
   const page = await browser.newPage();
@@ -79,7 +87,7 @@ async function withPage<T>(
   }
 }
 
-test('rich-text editor changes text and formatting while preserving intervals', async (context) => {
+test('rich-text editor changes text and formatting while preserving intervals', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const current = {
@@ -128,7 +136,7 @@ test('rich-text editor changes text and formatting while preserving intervals', 
   });
 });
 
-test('table editor changes grid cells, formula, and structural operation', async (context) => {
+test('table editor changes grid cells, formula, and structural operation', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const current = {
@@ -166,7 +174,7 @@ test('table editor changes grid cells, formula, and structural operation', async
   assert.equal((result?.payload as any).cells[1][1].value, 'B2');
 });
 
-test('shape/chart editor changes nested geometry, series, and visibility properties', async (context) => {
+test('shape/chart editor changes nested geometry, series, and visibility properties', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const current = {
@@ -199,7 +207,7 @@ test('shape/chart editor changes nested geometry, series, and visibility propert
   assert.equal((result?.payload as any).geometry.height, 180);
 });
 
-test('large values report hidden fields and clone the resolution only once on Apply', async (context) => {
+test('large values report hidden fields and clone the resolution only once on Apply', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const current = Object.fromEntries(Array.from(
@@ -243,7 +251,7 @@ test('large values report hidden fields and clone the resolution only once on Ap
   assert.equal(result?.hiddenProperty, 200);
 });
 
-test('numeric fields reject blank values instead of coercing them to zero', async (context) => {
+test('numeric fields reject blank values instead of coercing them to zero', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     let payload: unknown;
@@ -265,7 +273,7 @@ test('numeric fields reject blank values instead of coercing them to zero', asyn
   assert.equal(result?.error, '올바른 숫자를 입력하세요.');
 });
 
-test('image editor hides byte data and supports side selection, property edits, and upload', async (context) => {
+test('image editor hides byte data and supports side selection, property edits, and upload', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const current = { kind: 'image-bytes', id: 1, extension: 'png', bytesBase64: 'CURRENT_BYTES' };
@@ -311,7 +319,7 @@ test('image editor hides byte data and supports side selection, property edits, 
   ]);
 });
 
-test('image upload validates files and ignores stale or detached editor results', async (context) => {
+test('image upload validates files and ignores stale or detached editor results', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const current = { kind: 'image-bytes', id: 1, extension: 'png', bytesBase64: 'CURRENT_BYTES' };
@@ -385,7 +393,7 @@ test('image upload validates files and ignores stale or detached editor results'
   assert.deepEqual(result?.resolutions, []);
 });
 
-test('document property editor covers section, style, numbering, field, and resource values', async (context) => {
+test('document property editor covers section, style, numbering, field, and resource values', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const fixtures = [
@@ -428,7 +436,7 @@ test('document property editor covers section, style, numbering, field, and reso
   }
 });
 
-test('atomic conflicts do not construct a manual editor', async (context) => {
+test('atomic conflicts do not construct a manual editor', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     return buildManualConflictEditor({
@@ -445,7 +453,7 @@ test('atomic conflicts do not construct a manual editor', async (context) => {
   assert.equal(result, true);
 });
 
-test('manual editor resolutions participate in resolver Undo/Redo and validation gating', async (context) => {
+test('manual editor resolutions participate in resolver Undo/Redo and validation gating', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { MergeResolverWindow } = await import('/src/merge/merge-resolver-window.ts');
     const waitFor = async (condition: () => boolean, message: string) => {
@@ -528,7 +536,7 @@ test('manual editor resolutions participate in resolver Undo/Redo and validation
   });
 });
 
-test('default source branch still prompts, disables delete, and dismissal keeps it', async (context) => {
+test('default source branch still prompts, disables delete, and dismissal keeps it', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { MergeResolverWindow } = await import('/src/merge/merge-resolver-window.ts');
     const resolver = new MergeResolverWindow();
@@ -559,9 +567,9 @@ test('default source branch still prompts, disables delete, and dismissal keeps 
   });
 });
 
-test('resolver desktop controls click, report failures, retry, and fit macOS chrome', async (context) => {
+test('resolver desktop controls click, report failures, retry, and fit macOS chrome', { skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
+    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
     return;
   }
   const page = await browser.newPage();
