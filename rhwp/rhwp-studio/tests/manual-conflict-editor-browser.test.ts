@@ -81,7 +81,7 @@ async function withPage<T>(
   }
 }
 
-test('rich-text editor changes text and formatting while preserving intervals', async (context) => {
+test('rich-text editor changes text and formatting while preserving intervals', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const current = {
@@ -130,7 +130,7 @@ test('rich-text editor changes text and formatting while preserving intervals', 
   });
 });
 
-test('table editor changes grid cells, formula, and structural operation', async (context) => {
+test('table editor changes grid cells, formula, and structural operation', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const current = {
@@ -168,7 +168,7 @@ test('table editor changes grid cells, formula, and structural operation', async
   assert.equal((result?.payload as any).cells[1][1].value, 'B2');
 });
 
-test('shape/chart editor changes nested geometry, series, and visibility properties', async (context) => {
+test('shape/chart editor changes nested geometry, series, and visibility properties', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const current = {
@@ -201,7 +201,7 @@ test('shape/chart editor changes nested geometry, series, and visibility propert
   assert.equal((result?.payload as any).geometry.height, 180);
 });
 
-test('large values report hidden fields and clone the resolution only once on Apply', async (context) => {
+test('large values report hidden fields and clone the resolution only once on Apply', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const current = Object.fromEntries(Array.from(
@@ -245,7 +245,7 @@ test('large values report hidden fields and clone the resolution only once on Ap
   assert.equal(result?.hiddenProperty, 200);
 });
 
-test('numeric fields reject blank values instead of coercing them to zero', async (context) => {
+test('numeric fields reject blank values instead of coercing them to zero', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     let payload: unknown;
@@ -267,7 +267,7 @@ test('numeric fields reject blank values instead of coercing them to zero', asyn
   assert.equal(result?.error, '올바른 숫자를 입력하세요.');
 });
 
-test('image editor hides byte data and supports side selection, property edits, and upload', async (context) => {
+test('image editor hides byte data and supports side selection, property edits, and upload', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const current = { kind: 'image-bytes', id: 1, extension: 'png', bytesBase64: 'CURRENT_BYTES' };
@@ -313,7 +313,7 @@ test('image editor hides byte data and supports side selection, property edits, 
   ]);
 });
 
-test('image upload validates files and ignores stale or detached editor results', async (context) => {
+test('image upload validates files and ignores stale or detached editor results', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const current = { kind: 'image-bytes', id: 1, extension: 'png', bytesBase64: 'CURRENT_BYTES' };
@@ -387,7 +387,7 @@ test('image upload validates files and ignores stale or detached editor results'
   assert.deepEqual(result?.resolutions, []);
 });
 
-test('document property editor covers section, style, numbering, field, and resource values', async (context) => {
+test('document property editor covers section, style, numbering, field, and resource values', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     const fixtures = [
@@ -430,7 +430,7 @@ test('document property editor covers section, style, numbering, field, and reso
   }
 });
 
-test('atomic conflicts do not construct a manual editor', async (context) => {
+test('atomic conflicts do not construct a manual editor', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
     return buildManualConflictEditor({
@@ -447,7 +447,7 @@ test('atomic conflicts do not construct a manual editor', async (context) => {
   assert.equal(result, true);
 });
 
-test('manual editor resolutions participate in resolver Undo/Redo and validation gating', async (context) => {
+test('manual editor resolutions participate in resolver Undo/Redo and validation gating', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { MergeResolverWindow } = await import('/src/merge/merge-resolver-window.ts');
     const waitFor = async (condition: () => boolean, message: string) => {
@@ -530,7 +530,7 @@ test('manual editor resolutions participate in resolver Undo/Redo and validation
   });
 });
 
-test('default source branch still prompts, disables delete, and dismissal keeps it', async (context) => {
+test('default source branch still prompts, disables delete, and dismissal keeps it', { skip: browserSkipReason ?? false }, async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { MergeResolverWindow } = await import('/src/merge/merge-resolver-window.ts');
     const resolver = new MergeResolverWindow();
@@ -561,7 +561,7 @@ test('default source branch still prompts, disables delete, and dismissal keeps 
   });
 });
 
-test('resolver desktop controls click, report failures, retry, and fit macOS chrome', async (context) => {
+test('resolver desktop controls click, report failures, retry, and fit macOS chrome', { skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
     context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
     return;

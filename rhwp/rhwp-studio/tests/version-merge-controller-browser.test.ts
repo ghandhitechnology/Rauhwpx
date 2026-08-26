@@ -84,7 +84,7 @@ test.after(async () => {
   await server?.close();
 });
 
-test('dirty merge entry creates a real pre-merge checkpoint before already-integrated exit', { timeout: 30_000 }, async (context) => {
+test('dirty merge entry creates a real pre-merge checkpoint before already-integrated exit', { timeout: 30_000, skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
     context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
     return;
@@ -179,7 +179,7 @@ test('dirty merge entry creates a real pre-merge checkpoint before already-integ
   }
 });
 
-test('clean fast-forward is reviewed and keeps the source branch by default', { timeout: 30_000 }, async (context) => {
+test('clean fast-forward is reviewed and keeps the source branch by default', { timeout: 30_000, skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
     context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
     return;
@@ -316,7 +316,7 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
   }
 });
 
-test('diverged clean merge creates ordered parents and Undo/Redo moves bytes with refs', { timeout: 45_000 }, async (context) => {
+test('diverged clean merge creates ordered parents and Undo/Redo moves bytes with refs', { timeout: 45_000, skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
     context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
     return;
@@ -565,7 +565,7 @@ test('diverged clean merge creates ordered parents and Undo/Redo moves bytes wit
   }
 });
 
-test('HWPX branch transitions stay clean and do not create phantom checkpoints', { timeout: 45_000 }, async (context) => {
+test('HWPX branch transitions stay clean and do not create phantom checkpoints', { timeout: 45_000, skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
     context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
     return;
@@ -639,7 +639,7 @@ test('HWPX branch transitions stay clean and do not create phantom checkpoints',
   }
 });
 
-test('HWPX controller durably completes clean and conflicted merges with composite Undo/Redo', { timeout: 120_000 }, async (context) => {
+test('HWPX controller durably completes clean and conflicted merges with composite Undo/Redo', { timeout: 120_000, skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
     context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
     return;
@@ -932,7 +932,7 @@ test('HWPX controller durably completes clean and conflicted merges with composi
   }
 });
 
-test('real resolver completes clean and conflicted HWP/HWPX worker merges', { timeout: 90_000 }, async (context) => {
+test('real resolver completes clean and conflicted HWP/HWPX worker merges', { timeout: 90_000, skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
     context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
     return;
