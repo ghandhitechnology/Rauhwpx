@@ -171,7 +171,7 @@ export class CanvasKitLayerRenderer {
   private static readonly MAX_SVG_GLYPH_CACHE_ENTRIES = 128;
   private static readonly MAX_ENCODED_IMAGE_BASE64_LENGTH = 24 * 1024 * 1024;
   private static readonly MAX_DECODED_IMAGE_PIXELS = 32 * 1024 * 1024;
-  private static readonly MAX_IMAGE_CACHE_PIXELS = 64 * 1024 * 1024;
+  private static readonly MAX_IMAGE_CACHE_PIXELS = 16 * 1024 * 1024;
   private static readonly MAX_BITMAP_GLYPH_BASE64_LENGTH = Math.ceil(4 * 1024 * 1024 / 3) * 4;
   private static readonly MAX_STATIC_SVG_GLYPH_BYTES = 1024 * 1024;
   private static readonly MAX_PLACEHOLDER_DASH_SEGMENTS_PER_AXIS = 2048;

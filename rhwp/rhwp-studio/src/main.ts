@@ -684,6 +684,7 @@ async function initialize(): Promise<void> {
     if (import.meta.env.DEV) {
       (window as any).__inputHandler = inputHandler;
       (window as any).__canvasView = canvasView;
+      (window as any).__rendererSession = rendererSession;
       (window as any).__renderBackend = null;
       (window as any).__renderBackendRequest = renderBackendRequest;
       (window as any).__rendererRuntimeRequest = rendererRuntimeRequest;

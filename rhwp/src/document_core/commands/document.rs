@@ -3,10 +3,13 @@
 use crate::document_core::validation::{
     CellPath, ValidationReport, ValidationWarning, WarningKind,
 };
-use crate::document_core::{DocumentCore, DEFAULT_FALLBACK_FONT};
+use crate::document_core::{
+    DocumentCore, DocumentEventLog, DocumentSnapshot, SnapshotParagraph, SnapshotSection,
+    DEFAULT_FALLBACK_FONT,
+};
 use crate::error::HwpError;
 use crate::model::control::Control;
-use crate::model::document::Document;
+use crate::model::document::{Document, Section};
 use crate::model::paragraph::{LineSeg, Paragraph};
 use crate::model::shape::{Caption, DrawingObjAttr, ShapeObject};
 use crate::renderer::composer::{compose_section, reflow_line_segs};
@@ -15,7 +18,8 @@ use crate::renderer::page_layout::PageLayoutInfo;
 use crate::renderer::style_resolver::{resolve_styles, ResolvedStyleSet};
 use crate::renderer::{px_to_hwpunit, DEFAULT_DPI};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 /// HWP 내보내기 + 자기 재로드 검증 결과 (#178 Stage 6).
 ///
@@ -631,9 +635,10 @@ impl DocumentCore {
             deferred_pagination_descriptor: None,
             pending_pagination_job: None,
             page_tree_cache: RefCell::new(Vec::new()),
+            page_tree_cache_order: RefCell::new(VecDeque::new()),
             layer_tree_json_cache: RefCell::new(Vec::new()),
             batch_mode: false,
-            event_log: Vec::new(),
+            event_log: DocumentEventLog::default(),
             overflow_links_cache: RefCell::new(HashMap::new()),
             snapshot_store: Vec::new(),
             next_snapshot_id: 0,
@@ -1599,7 +1604,7 @@ impl DocumentCore {
         self.measured_sections = Vec::new();
         self.dirty_paragraphs = Vec::new();
         self.para_column_map = Vec::new();
-        self.page_tree_cache.borrow_mut().clear();
+        self.invalidate_page_tree_cache();
         self.snapshot_store.clear();
         self.next_snapshot_id = 0;
         self.source_format = crate::parser::FileFormat::Hwp;
@@ -2070,12 +2075,107 @@ impl DocumentCore {
 
     // ─── Undo/Redo 스냅샷 API ──────────────────────────
 
-    /// 현재 Document를 클론하여 스냅샷 저장소에 보관한다.
-    /// 반환값: 스냅샷 ID (u32)
-    pub fn save_snapshot_native(&mut self) -> u32 {
+    fn clone_document_shell(document: &Document) -> Document {
+        let Document {
+            header,
+            doc_properties,
+            doc_info,
+            sections: _,
+            preview,
+            bin_data_content,
+            extra_streams,
+            hwpx_aux_entries,
+            is_hwp3_variant,
+            is_hwpx_variant,
+            provenance,
+        } = document;
+        Document {
+            header: header.clone(),
+            doc_properties: doc_properties.clone(),
+            doc_info: doc_info.clone(),
+            sections: Vec::new(),
+            preview: preview.clone(),
+            bin_data_content: bin_data_content.clone(),
+            extra_streams: extra_streams.clone(),
+            hwpx_aux_entries: hwpx_aux_entries.clone(),
+            is_hwp3_variant: *is_hwp3_variant,
+            is_hwpx_variant: *is_hwpx_variant,
+            provenance: provenance.clone(),
+        }
+    }
+
+    fn clone_section_shell(section: &Section) -> Section {
+        Section {
+            section_def: section.section_def.clone(),
+            paragraphs: Vec::new(),
+            raw_stream: section.raw_stream.clone(),
+        }
+    }
+
+    fn capture_snapshot(&self) -> DocumentSnapshot {
+        let section_revisions = self
+            .event_log
+            .section_revisions(self.document.sections.len());
+        let baseline = self
+            .snapshot_store
+            .last()
+            .map(|(_, snapshot)| snapshot.as_ref());
+        let sections = self
+            .document
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(section_idx, section)| {
+                let revision = section_revisions[section_idx];
+                let paragraph_sequence_revision =
+                    self.event_log.paragraph_sequence_revision(section_idx);
+                let paragraph_revisions = self
+                    .event_log
+                    .paragraph_revisions(section_idx, section.paragraphs.len());
+                let baseline_section = baseline
+                    .and_then(|snapshot| snapshot.sections.get(section_idx))
+                    .filter(|snapshot_section| {
+                        snapshot_section.paragraph_sequence_revision == paragraph_sequence_revision
+                            && snapshot_section.paragraphs.len() == section.paragraphs.len()
+                    });
+                let paragraphs = section
+                    .paragraphs
+                    .iter()
+                    .enumerate()
+                    .map(|(paragraph_idx, paragraph)| {
+                        let paragraph_revision = paragraph_revisions[paragraph_idx];
+                        let shared = baseline_section
+                            .and_then(|snapshot_section| {
+                                snapshot_section.paragraphs.get(paragraph_idx)
+                            })
+                            .filter(|snapshot_paragraph| {
+                                snapshot_paragraph.revision == paragraph_revision
+                            })
+                            .map(|snapshot_paragraph| Arc::clone(&snapshot_paragraph.paragraph));
+                        SnapshotParagraph {
+                            revision: paragraph_revision,
+                            paragraph: shared.unwrap_or_else(|| Arc::new(paragraph.clone())),
+                        }
+                    })
+                    .collect();
+                SnapshotSection {
+                    revision,
+                    paragraph_sequence_revision,
+                    section_shell: Self::clone_section_shell(section),
+                    paragraphs,
+                }
+            })
+            .collect();
+        DocumentSnapshot {
+            document_shell: Self::clone_document_shell(&self.document),
+            sections,
+        }
+    }
+
+    fn store_snapshot(&mut self, snapshot: Arc<DocumentSnapshot>) -> u32 {
         let id = self.next_snapshot_id;
         self.next_snapshot_id += 1;
-        self.snapshot_store.push((id, self.document.clone()));
+        self.snapshot_store.push((id, snapshot));
         // 최대 100개 제한 — 초과 시 가장 오래된 스냅샷 제거.
         // [Task #2328] studio 히스토리(rhwp-studio/src/engine/history.ts 의
         // WASM_MAX_SNAPSHOTS)와 양방향 결합. 이 값을 studio 예산(MAX-2)보다 낮추면
@@ -2086,6 +2186,25 @@ impl DocumentCore {
             self.snapshot_store.remove(0);
         }
         id
+    }
+
+    /// 현재 Document의 전역 상태와 변경 구역을 캡처하여 스냅샷 저장소에 보관한다.
+    /// 반환값: 스냅샷 ID (u32)
+    pub fn save_snapshot_native(&mut self) -> u32 {
+        self.store_snapshot(Arc::new(self.capture_snapshot()))
+    }
+
+    /// 기존 스냅샷의 불변 Document 상태를 공유하는 새 ID를 만든다.
+    ///
+    /// 호출자가 현재 문서와 `source_id`가 같은 상태임을 보장하는 history 경계에서만 쓴다.
+    pub fn share_snapshot_native(&mut self, source_id: u32) -> Result<u32, HwpError> {
+        let snapshot = self
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == source_id)
+            .map(|(_, snapshot)| Arc::clone(snapshot))
+            .ok_or_else(|| HwpError::RenderError(format!("스냅샷 {} 없음", source_id)))?;
+        Ok(self.store_snapshot(snapshot))
     }
 
     /// 현재 Document IR은 건드리지 않고, 그로부터 파생된 모든 조판 캐시를 다시 만든다.
@@ -2118,20 +2237,211 @@ impl DocumentCore {
     /// 지정 ID의 스냅샷으로 Document를 복원한다.
     /// 스타일 재해소 + 문단 구성 + 페이지네이션까지 수행.
     pub fn restore_snapshot_native(&mut self, id: u32) -> Result<String, HwpError> {
-        let idx = self
+        let snapshot = self
             .snapshot_store
             .iter()
-            .position(|(sid, _)| *sid == id)
+            .find(|(snapshot_id, _)| *snapshot_id == id)
+            .map(|(_, snapshot)| Arc::clone(snapshot))
             .ok_or_else(|| HwpError::RenderError(format!("스냅샷 {} 없음", id)))?;
-        let (_, doc) = self.snapshot_store[idx].clone();
-        self.document = doc;
-        self.refresh_layout_native();
+        let target_revisions: Vec<u64> = snapshot
+            .sections
+            .iter()
+            .map(|section| section.revision)
+            .collect();
+        let target_paragraph_sequence_revisions: Vec<u64> = snapshot
+            .sections
+            .iter()
+            .map(|section| section.paragraph_sequence_revision)
+            .collect();
+        let target_paragraph_revisions: Vec<Vec<u64>> = snapshot
+            .sections
+            .iter()
+            .map(|section| {
+                section
+                    .paragraphs
+                    .iter()
+                    .map(|paragraph| paragraph.revision)
+                    .collect()
+            })
+            .collect();
+        let current_revisions = self
+            .event_log
+            .section_revisions(self.document.sections.len());
+        let current_paragraph_sequence_revisions: Vec<u64> = self
+            .document
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(section_idx, _)| self.event_log.paragraph_sequence_revision(section_idx))
+            .collect();
+        let current_paragraph_revisions: Vec<Vec<u64>> = self
+            .document
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(section_idx, section)| {
+                self.event_log
+                    .paragraph_revisions(section_idx, section.paragraphs.len())
+            })
+            .collect();
+        let same_section_count = self.document.sections.len() == snapshot.sections.len();
+        let changed_sections: Vec<usize> = if same_section_count {
+            snapshot
+                .sections
+                .iter()
+                .enumerate()
+                .filter_map(|(section_idx, snapshot_section)| {
+                    (current_revisions[section_idx] != snapshot_section.revision)
+                        .then_some(section_idx)
+                })
+                .collect()
+        } else {
+            (0..snapshot.sections.len()).collect()
+        };
+        let selectively_changed_paragraphs: Vec<Option<Vec<usize>>> = snapshot
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(section_idx, snapshot_section)| {
+                if !same_section_count
+                    || current_paragraph_sequence_revisions[section_idx]
+                        != snapshot_section.paragraph_sequence_revision
+                    || current_paragraph_revisions[section_idx].len()
+                        != snapshot_section.paragraphs.len()
+                {
+                    return None;
+                }
+                Some(
+                    snapshot_section
+                        .paragraphs
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(paragraph_idx, snapshot_paragraph)| {
+                            (current_paragraph_revisions[section_idx][paragraph_idx]
+                                != snapshot_paragraph.revision)
+                                .then_some(paragraph_idx)
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        let mut current_sections = std::mem::take(&mut self.document.sections);
+        let mut restored = snapshot.document_shell.clone();
+        restored.sections.reserve(snapshot.sections.len());
+        for (section_idx, snapshot_section) in snapshot.sections.iter().enumerate() {
+            if same_section_count && current_revisions[section_idx] == snapshot_section.revision {
+                restored
+                    .sections
+                    .push(std::mem::take(&mut current_sections[section_idx]));
+            } else {
+                let mut section = snapshot_section.section_shell.clone();
+                let can_move_unchanged_paragraphs = same_section_count
+                    && current_paragraph_sequence_revisions[section_idx]
+                        == snapshot_section.paragraph_sequence_revision
+                    && current_sections[section_idx].paragraphs.len()
+                        == snapshot_section.paragraphs.len();
+                if can_move_unchanged_paragraphs {
+                    let current_paragraphs =
+                        std::mem::take(&mut current_sections[section_idx].paragraphs);
+                    section
+                        .paragraphs
+                        .reserve(snapshot_section.paragraphs.len());
+                    for (paragraph_idx, (current_paragraph, snapshot_paragraph)) in
+                        current_paragraphs
+                            .into_iter()
+                            .zip(&snapshot_section.paragraphs)
+                            .enumerate()
+                    {
+                        if current_paragraph_revisions[section_idx][paragraph_idx]
+                            == snapshot_paragraph.revision
+                        {
+                            section.paragraphs.push(current_paragraph);
+                        } else {
+                            section
+                                .paragraphs
+                                .push(snapshot_paragraph.paragraph.as_ref().clone());
+                        }
+                    }
+                } else {
+                    section.paragraphs = snapshot_section
+                        .paragraphs
+                        .iter()
+                        .map(|paragraph| paragraph.paragraph.as_ref().clone())
+                        .collect();
+                }
+                restored.sections.push(section);
+            }
+        }
+        self.document = restored;
+        if same_section_count {
+            self.styles = resolve_styles(&self.document.doc_info, self.dpi);
+            for &section_idx in &changed_sections {
+                match &selectively_changed_paragraphs[section_idx] {
+                    Some(paragraphs) if !paragraphs.is_empty() => {
+                        for &paragraph_idx in paragraphs {
+                            self.recompose_paragraph(section_idx, paragraph_idx);
+                        }
+                    }
+                    _ => self.recompose_section(section_idx),
+                }
+            }
+            if !changed_sections.is_empty() {
+                self.paginate();
+            }
+        } else {
+            self.refresh_layout_native();
+        }
+        self.event_log.restore_snapshot_revisions(
+            &target_revisions,
+            &target_paragraph_sequence_revisions,
+            &target_paragraph_revisions,
+        );
         Ok(super::super::helpers::json_ok())
     }
 
     /// 지정 ID의 스냅샷을 저장소에서 제거하여 메모리를 해제한다.
     pub fn discard_snapshot_native(&mut self, id: u32) {
         self.snapshot_store.retain(|(sid, _)| *sid != id);
+    }
+
+    /// 스냅샷 저장소의 구조 공유 점유량을 진단한다.
+    pub fn snapshot_storage_stats_native(&self) -> String {
+        let unique_snapshots: HashSet<usize> = self
+            .snapshot_store
+            .iter()
+            .map(|(_, snapshot)| Arc::as_ptr(snapshot) as usize)
+            .collect();
+        let unique_paragraphs: HashSet<usize> = self
+            .snapshot_store
+            .iter()
+            .flat_map(|(_, snapshot)| {
+                snapshot.sections.iter().flat_map(|section| {
+                    section
+                        .paragraphs
+                        .iter()
+                        .map(|paragraph| Arc::as_ptr(&paragraph.paragraph) as usize)
+                })
+            })
+            .collect();
+        let section_references = self
+            .snapshot_store
+            .iter()
+            .map(|(_, snapshot)| snapshot.sections.len())
+            .sum::<usize>();
+        let paragraph_references = self
+            .snapshot_store
+            .iter()
+            .flat_map(|(_, snapshot)| &snapshot.sections)
+            .map(|section| section.paragraphs.len())
+            .sum::<usize>();
+        format!(
+            "{{\"snapshotIds\":{},\"uniqueSnapshots\":{},\"sectionReferences\":{},\"paragraphReferences\":{},\"uniqueParagraphs\":{}}}",
+            self.snapshot_store.len(),
+            unique_snapshots.len(),
+            section_references,
+            paragraph_references,
+            unique_paragraphs.len()
+        )
     }
 
     pub fn measure_width_diagnostic_native(
@@ -2442,6 +2752,148 @@ mod replace_content_tests {
 
     fn serialized_document(core: &DocumentCore) -> Vec<u8> {
         core.export_hwp_native().expect("document should serialize")
+    }
+
+    #[test]
+    fn shared_snapshot_ids_retain_one_immutable_document_state() {
+        let mut core = DocumentCore::from_bytes(HML).expect("HML source should open");
+        let original = serialized_document(&core);
+        let source_id = core.save_snapshot_native();
+        let shared_id = core
+            .share_snapshot_native(source_id)
+            .expect("existing snapshot should be shareable");
+
+        let source = core
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == source_id)
+            .map(|(_, document)| document)
+            .expect("source snapshot");
+        let shared = core
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == shared_id)
+            .map(|(_, document)| document)
+            .expect("shared snapshot");
+        assert!(Arc::ptr_eq(source, shared));
+
+        core.document.doc_properties.page_start_num += 1;
+        core.restore_snapshot_native(shared_id)
+            .expect("shared ID should restore the original state");
+        assert_eq!(serialized_document(&core), original);
+
+        core.discard_snapshot_native(source_id);
+        core.document.doc_properties.page_start_num += 2;
+        core.restore_snapshot_native(shared_id)
+            .expect("discarding one ID must not invalidate the shared ID");
+        assert_eq!(serialized_document(&core), original);
+    }
+
+    #[test]
+    fn unique_snapshots_share_unchanged_sections_and_restore_each_state() {
+        let mut core = DocumentCore::from_bytes(HML).expect("HML source should open");
+        core.document
+            .sections
+            .push(core.document.sections[0].clone());
+        core.refresh_layout_native();
+        let before_text = core.document.sections[0].paragraphs[0].text.clone();
+        let before_pages = core.page_count();
+        let before_id = core.save_snapshot_native();
+
+        core.insert_text_native(0, 0, 0, "X")
+            .expect("section-local edit should succeed");
+        let after_text = core.document.sections[0].paragraphs[0].text.clone();
+        let after_pages = core.page_count();
+        let after_id = core.save_snapshot_native();
+
+        let before = &core
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == before_id)
+            .expect("before snapshot")
+            .1;
+        let after = &core
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == after_id)
+            .expect("after snapshot")
+            .1;
+        assert!(!Arc::ptr_eq(
+            &before.sections[0].paragraphs[0].paragraph,
+            &after.sections[0].paragraphs[0].paragraph
+        ));
+        for (before_paragraph, after_paragraph) in before.sections[0]
+            .paragraphs
+            .iter()
+            .zip(&after.sections[0].paragraphs)
+            .skip(1)
+        {
+            assert!(Arc::ptr_eq(
+                &before_paragraph.paragraph,
+                &after_paragraph.paragraph
+            ));
+        }
+        for (before_paragraph, after_paragraph) in before.sections[1]
+            .paragraphs
+            .iter()
+            .zip(&after.sections[1].paragraphs)
+        {
+            assert!(Arc::ptr_eq(
+                &before_paragraph.paragraph,
+                &after_paragraph.paragraph
+            ));
+        }
+
+        core.restore_snapshot_native(before_id)
+            .expect("before snapshot restore");
+        assert_eq!(core.document.sections[0].paragraphs[0].text, before_text);
+        assert_eq!(core.page_count(), before_pages);
+        core.restore_snapshot_native(after_id)
+            .expect("after snapshot restore");
+        assert_eq!(core.document.sections[0].paragraphs[0].text, after_text);
+        assert_eq!(core.page_count(), after_pages);
+    }
+
+    #[test]
+    fn paragraph_sequence_changes_keep_snapshot_indices_independent() {
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native()
+            .expect("blank document creation");
+        core.insert_text_native(0, 0, 0, "앞뒤")
+            .expect("seed paragraph");
+        let before_id = core.save_snapshot_native();
+
+        core.split_paragraph_native(0, 0, 1, None)
+            .expect("split paragraph");
+        let after_id = core.save_snapshot_native();
+        let before = &core
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == before_id)
+            .expect("before snapshot")
+            .1;
+        let after = &core
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == after_id)
+            .expect("after snapshot")
+            .1;
+        assert_eq!(before.sections[0].paragraphs.len(), 1);
+        assert_eq!(after.sections[0].paragraphs.len(), 2);
+        assert!(!Arc::ptr_eq(
+            &before.sections[0].paragraphs[0].paragraph,
+            &after.sections[0].paragraphs[0].paragraph
+        ));
+
+        core.restore_snapshot_native(before_id)
+            .expect("restore before split");
+        assert_eq!(core.document.sections[0].paragraphs.len(), 1);
+        assert_eq!(core.document.sections[0].paragraphs[0].text, "앞뒤");
+        core.restore_snapshot_native(after_id)
+            .expect("restore after split");
+        assert_eq!(core.document.sections[0].paragraphs.len(), 2);
+        assert_eq!(core.document.sections[0].paragraphs[0].text, "앞");
+        assert_eq!(core.document.sections[0].paragraphs[1].text, "뒤");
     }
 
     #[test]
