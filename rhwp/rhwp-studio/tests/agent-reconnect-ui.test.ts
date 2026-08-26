@@ -52,12 +52,17 @@ test('reconnectNow 는 허브가 뜬 뒤에 붙는다', () => {
 
 test('채팅에 연결 배너가 있고 실패 뒤에만 나타난다', () => {
   assert.match(source, /const connBanner = el\('div', 'ag-conn-banner'\)/);
-  assert.match(source, /chatPage\.append\(header, connBanner, messages, review, planSurface, questionController\.root, composer\)/);
+  assert.match(source, /chatPage\.append\(header, connBanner, messages, review, planSurface, composer\)/);
   // 첫 시도(attempt 0)는 조용히 지나간다.
   assert.match(source, /if \(connAttempt === 0\) \{\s*connBanner\.hidden = true;/);
   assert.match(source, /연결하는 중… \(\$\{connAttempt\}번째 시도\)/);
   assert.match(source, /에이전트에 연결하는 중이에요 · \$\{Math\.ceil\(remainMs \/ 1000\)\}초 후 다시 시도/);
   assert.match(css, /\.ag-conn-banner\s*\{/);
+});
+
+test('재연결과 스레드 복원은 대기 질문을 메시지 흐름에 다시 장착한다', () => {
+  assert.match(source, /renderMessagesFromThread\(currentThread\);[\s\S]*questionController\.setVisible\(showingLiveQuestion\);[\s\S]*if \(showingLiveQuestion\) mountLiveQuestion\(\)/);
+  assert.match(source, /questionController\.request\(liveQuestion, stored\);[\s\S]*mountLiveQuestion\(\);/);
 });
 
 test('배너 카운트다운은 1초마다 갱신되고 정리된다', () => {

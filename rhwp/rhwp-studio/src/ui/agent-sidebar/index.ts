@@ -572,6 +572,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let planCardPending = false;
   let followConversation = true;
   let conversationScrollRaf: number | null = null;
+  let conversationScrollTargetNode: HTMLElement | null = null;
+  let conversationScrollSmooth = false;
+  let conversationScrollLastFrame = 0;
   let conversationScrollLock = false;
   let conversationScrollUnlock: number | null = null;
   let replyPending = false;
@@ -1602,7 +1605,27 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (conversationScrollLock) return;
     followConversation = isConversationFollowingTurn();
   };
+  const onMessagesWheel = (event: WheelEvent): void => {
+    if (event.deltaY < 0) stopFollowingConversation();
+  };
+  let messagesTouchStartY: number | null = null;
+  const onMessagesTouchStart = (event: TouchEvent): void => {
+    messagesTouchStartY = event.touches[0]?.clientY ?? null;
+  };
+  const onMessagesTouchMove = (event: TouchEvent): void => {
+    const y = event.touches[0]?.clientY;
+    if (y !== undefined && messagesTouchStartY !== null && y - messagesTouchStartY > 6) {
+      stopFollowingConversation();
+    }
+  };
+  const onMessagesPointerDown = (event: PointerEvent): void => {
+    if (event.target === messages && event.offsetX >= messages.clientWidth) stopFollowingConversation();
+  };
   messages.addEventListener('scroll', onMessagesScroll, { passive: true });
+  messages.addEventListener('wheel', onMessagesWheel, { passive: true });
+  messages.addEventListener('touchstart', onMessagesTouchStart, { passive: true });
+  messages.addEventListener('touchmove', onMessagesTouchMove, { passive: true });
+  messages.addEventListener('pointerdown', onMessagesPointerDown);
   const messagesMutationObserver = typeof MutationObserver === 'function'
     ? new MutationObserver(() => {
         if (followConversation) scrollConversationToEnd();
@@ -1743,7 +1766,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         ?? createUserQuestionHistoryMessage(interaction, outcome);
       if (!target.messages.includes(historyMessage)) target.messages.push(historyMessage);
       upsertThread(target);
-      if (target === currentThread) appendConversation(renderUserQuestionHistory(historyMessage));
+      if (target === currentThread) {
+        const historyCard = renderUserQuestionHistory(historyMessage);
+        withAutoScroll(() => {
+          if (questionController.root.parentElement === messages) {
+            questionController.root.replaceWith(historyCard);
+          } else appendConversation(historyCard);
+        });
+      }
     },
   });
   // 도크가 차지하는 높이를 입력기에 알려 계획 복원 버튼(overlay)이 겹치지 않게 한다.
@@ -1756,7 +1786,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   dockResizeObserver?.observe(fleetView.root);
   // 사이드바에서는 변경 검토와 계획을 분리한다. 계획은 입력기 바로 위에
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
-  chatPage.append(header, connBanner, messages, review, planSurface, questionController.root, composer);
+  chatPage.append(header, connBanner, messages, review, planSurface, composer);
 
   /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다.
    *  펼쳐진 사이드바의 현재 폭이 아니라 max-content(말줄임 바닥)로 잰다.
@@ -2323,7 +2353,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     reviewResize.inert = !detailActive;
     if (focusLayoutActive) {
       chatPage.setAttribute('aria-hidden', 'false');
-      if (composer.parentElement !== chatPage) chatPage.append(questionController.root, composer);
+      if (composer.parentElement !== chatPage) chatPage.appendChild(composer);
     }
     applyPlanMinimizedState();
   }
@@ -2458,7 +2488,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     threadsPage.setAttribute('aria-hidden', 'true');
     chatPage.setAttribute('aria-hidden', 'false');
     // 변경 검토·계획·입력기는 다시 사이드바의 분리된 inline 흐름으로 돌아간다.
-    chatPage.append(review, planSurface, questionController.root, composer);
+    chatPage.append(review, planSurface, composer);
     applyPlanMinimizedState();
   }
 
@@ -3819,6 +3849,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         appendConversation(el('div', 'ag-msg ag-msg-system', msg.text));
       }
     }
+    if (questionController.interaction()?.threadId === thread.id) {
+      questionController.setVisible(true);
+      mountLiveQuestion();
+    }
     scrollConversationToEnd();
   }
 
@@ -4366,6 +4400,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     );
     const showingLiveQuestion = liveQuestion?.threadId === currentThread.id;
     questionController.setVisible(showingLiveQuestion);
+    if (showingLiveQuestion) mountLiveQuestion();
     if (liveQuestion && !showingLiveQuestion) {
       enterReadOnlyMode('에이전트가 다른 채팅에서 답변을 기다리는 중');
       setThreadsPanelOpen(false);
@@ -4608,6 +4643,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     messages.insertBefore(node, conversationTail());
   }
 
+  function mountLiveQuestion(): void {
+    const interaction = questionController.interaction();
+    if (interaction?.threadId !== currentThread.id || questionController.root.parentElement === messages) return;
+    withAutoScroll(() => appendConversation(questionController.root));
+  }
+
   function resetConversation(): void {
     replyPending = false;
     turnPending.hidden = true;
@@ -4618,6 +4659,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function latestTurnAnchor(): HTMLElement | null {
+    if (questionController.hasPending() && questionController.root.parentElement === messages) {
+      return questionController.root;
+    }
     const last = messagesEnd.previousElementSibling;
     const content = last === turnPending ? turnPending.previousElementSibling : last;
     if (!(content instanceof HTMLElement)) return null;
@@ -4631,7 +4675,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function conversationScrollTarget(node: HTMLElement): number {
-    const target = Math.max(0, conversationAnchorTop(node) - conversationFocusOffset());
+    const offset = node === questionController.root ? 0 : conversationFocusOffset();
+    const target = Math.max(0, conversationAnchorTop(node) - offset);
     return Math.min(target, Math.max(0, messages.scrollHeight - messages.clientHeight));
   }
 
@@ -4662,19 +4707,59 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }, ms);
   }
 
+  function cancelConversationScroll(): void {
+    conversationScrollTargetNode = null;
+    conversationScrollSmooth = false;
+    conversationScrollLastFrame = 0;
+    if (conversationScrollRaf !== null) window.cancelAnimationFrame(conversationScrollRaf);
+    conversationScrollRaf = null;
+  }
+
+  function stopFollowingConversation(): void {
+    followConversation = false;
+    cancelConversationScroll();
+    conversationScrollLock = false;
+    if (conversationScrollUnlock !== null) {
+      window.clearTimeout(conversationScrollUnlock);
+      conversationScrollUnlock = null;
+    }
+  }
+
+  function animateConversationScroll(now: number): void {
+    conversationScrollRaf = null;
+    const node = conversationScrollTargetNode;
+    if (!node?.isConnected || !followConversation) {
+      cancelConversationScroll();
+      return;
+    }
+
+    const target = conversationScrollTarget(node);
+    const distance = target - messages.scrollTop;
+    if (!conversationScrollSmooth || Math.abs(distance) <= 1) {
+      lockConversationScroll(80);
+      messages.scrollTop = target;
+      conversationScrollTargetNode = null;
+      conversationScrollLastFrame = 0;
+      return;
+    }
+
+    const elapsed = conversationScrollLastFrame === 0
+      ? 16
+      : Math.min(32, Math.max(8, now - conversationScrollLastFrame));
+    conversationScrollLastFrame = now;
+    const progress = 1 - Math.exp(-elapsed / 90);
+    lockConversationScroll(80);
+    messages.scrollTop += distance * progress;
+    conversationScrollRaf = window.requestAnimationFrame(animateConversationScroll);
+  }
+
   function scrollConversationToMessage(node: HTMLElement, opts?: { smooth?: boolean }): void {
     followConversation = true;
     syncConversationSpacer();
     const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const smooth = opts?.smooth !== false && !reduce;
-    if (conversationScrollRaf !== null) window.cancelAnimationFrame(conversationScrollRaf);
-    conversationScrollRaf = window.requestAnimationFrame(() => {
-      conversationScrollRaf = null;
-      const target = conversationScrollTarget(node);
-      if (Math.abs(messages.scrollTop - target) <= 2) return;
-      lockConversationScroll(smooth ? 480 : 80);
-      messages.scrollTo({ top: target, behavior: smooth ? 'smooth' : 'auto' });
-    });
+    conversationScrollTargetNode = node;
+    conversationScrollSmooth = opts?.smooth !== false && !reduce;
+    if (conversationScrollRaf === null) conversationScrollRaf = window.requestAnimationFrame(animateConversationScroll);
   }
 
   function updateTurnPending(agent?: AgentName): void {
@@ -5159,6 +5244,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       case 'user-question-requested': {
         flushPendingAssistantRender();
         flushAssistantBuffer({ kind: 'progress' });
+        compactStreamIntoActivity(e.interaction.agent);
+        streamBubble = null;
         let target = e.interaction.threadId === currentThread.id ? currentThread : getThread(e.interaction.threadId);
         if (!target) break;
         // A fresh renderer starts on a disposable empty thread. On reconnect,
@@ -5178,6 +5265,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         if (target === currentThread) {
           questionController.setVisible(true);
           questionController.request(e.interaction, stored);
+          mountLiveQuestion();
           persistCurrentThread();
         } else {
           upsertThread(target);
@@ -5258,7 +5346,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             && pendingUserQuestionMatchesInteraction(currentThread.pendingUserQuestion, liveQuestion)
             ? currentThread.pendingUserQuestion
             : undefined;
+          questionController.setVisible(true);
           questionController.request(liveQuestion, stored);
+          mountLiveQuestion();
         }
         if (currentThread.pendingUserQuestion) {
           const pendingId = currentThread.pendingUserQuestion.interaction.interactionId;
@@ -6254,11 +6344,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       messagesResizeObserver?.disconnect();
       dockResizeObserver?.disconnect();
       messages.removeEventListener('scroll', onMessagesScroll);
+      messages.removeEventListener('wheel', onMessagesWheel);
+      messages.removeEventListener('touchstart', onMessagesTouchStart);
+      messages.removeEventListener('touchmove', onMessagesTouchMove);
+      messages.removeEventListener('pointerdown', onMessagesPointerDown);
       if (configHideTimer !== null) window.clearTimeout(configHideTimer);
-      if (conversationScrollRaf !== null) {
-        window.cancelAnimationFrame(conversationScrollRaf);
-        conversationScrollRaf = null;
-      }
+      cancelConversationScroll();
       if (conversationScrollUnlock !== null) {
         window.clearTimeout(conversationScrollUnlock);
         conversationScrollUnlock = null;

@@ -254,7 +254,7 @@ try {
           id: 'surface', header: 'Surface', multiSelect: true,
           question: 'Which surfaces should be verified together?',
           options: [
-            { label: 'Drawer', description: 'Verify the composer-attached question drawer.' },
+            { label: 'Question', description: 'Verify the inline transcript question card.' },
             { label: 'History', description: 'Verify the immutable resolved history card.' },
             { label: 'Reconnect', description: 'Verify reload and reconnect reconstruction.' },
           ],
@@ -271,6 +271,10 @@ try {
     });
 
     await page.waitForSelector('.ag-user-question[data-inactive="false"] .ag-question-option', { timeout: 10_000 });
+    assert(
+      await page.$eval('.ag-user-question', (node) => node.parentElement?.classList.contains('ag-messages')),
+      'Live question is parented by the transcript',
+    );
     assert(await page.$eval('.ag-question-count', (node) => node.textContent === '1 / 2'), 'First card is active');
     // The prompt receives focus when a card opens, so number shortcuts must
     // select options without stealing an editable control's keystrokes.
@@ -302,25 +306,54 @@ try {
     }));
     assert(restored.value === 'Keep my reconnect\ndraft', 'Other draft and Shift+Enter newline restored after reload');
     assert(restored.label === '현재 질문의 직접 답변' && restored.maxLength === 2_000, 'Other composer semantics restored');
+    assert(
+      await page.$eval('.ag-user-question', (node) => node.parentElement?.classList.contains('ag-messages')),
+      'Reloaded live question is remounted in the transcript',
+    );
 
     await page.click('.ag-question-back');
     const selectedAfterReload = await page.$$eval(
       '.ag-question-option[data-selected="true"]',
       (nodes) => nodes.map((node) => node.querySelector('.ag-question-option-label')?.textContent),
     );
-    assert(selectedAfterReload.join(',') === 'Drawer,History', 'Multi-select draft restored atomically');
+    assert(selectedAfterReload.join(',') === 'Question,History', 'Multi-select draft restored atomically');
     await page.click('.ag-question-next');
 
     for (const [width, height] of [[320, 600], [420, 900], [600, 900]]) {
       await page.setViewport({ width: Math.max(720, width + 120), height });
       await page.evaluate((value) => document.documentElement.style.setProperty('--ag-sidebar-width', `${value}px`), width);
-      await delay(100);
-      const layout = await page.$eval('.ag-user-question', (node) => ({
-        width: Math.round(node.getBoundingClientRect().width),
-        scrollWidth: node.scrollWidth,
-        clientWidth: node.clientWidth,
-      }));
-      assert(layout.scrollWidth <= layout.clientWidth + 1, `${width}px drawer has no horizontal overflow`);
+      await page.waitForFunction(() => {
+        const messages = document.querySelector('.ag-messages');
+        const question = document.querySelector('.ag-user-question[data-inactive="false"]');
+        const actions = question?.querySelector('.ag-question-actions');
+        if (!(messages instanceof HTMLElement) || !(question instanceof HTMLElement) || !(actions instanceof HTMLElement)) return false;
+        const viewport = messages.getBoundingClientRect();
+        const card = question.getBoundingClientRect();
+        const actionRow = actions.getBoundingClientRect();
+        return question.parentElement === messages
+          && card.top >= viewport.top
+          && actionRow.bottom <= viewport.bottom + 2;
+      }, { timeout: 10_000 });
+      const layout = await page.$eval('.ag-user-question', (node) => {
+        const messages = node.parentElement;
+        const actions = node.querySelector('.ag-question-actions');
+        const viewport = messages.getBoundingClientRect();
+        const card = node.getBoundingClientRect();
+        const actionRow = actions.getBoundingClientRect();
+        return {
+          parentIsTranscript: messages.classList.contains('ag-messages'),
+          questionTop: card.top,
+          transcriptTop: viewport.top,
+          actionBottom: actionRow.bottom,
+          transcriptBottom: viewport.bottom,
+          scrollWidth: node.scrollWidth,
+          clientWidth: node.clientWidth,
+        };
+      });
+      assert(layout.parentIsTranscript, `${width}px question remains in the transcript`);
+      assert(layout.questionTop >= layout.transcriptTop, `${width}px question top stays in the transcript viewport`);
+      assert(layout.actionBottom <= layout.transcriptBottom + 2, `${width}px action row stays in the transcript viewport`);
+      assert(layout.scrollWidth <= layout.clientWidth + 1, `${width}px question has no horizontal overflow`);
       await screenshot(page, `ask-user-question-${width}x${height}`);
     }
 
@@ -334,7 +367,7 @@ try {
     assert(a11y.optionPressed === 'true' && a11y.promptIsHtmlSafe, 'Selected Other and plain-text provider content are accessible');
 
     await page.click('.ag-question-disclosure');
-    assert(await page.$eval('.ag-question-disclosure', (node) => node.getAttribute('aria-expanded') === 'false'), 'Drawer collapses without cancelling');
+    assert(await page.$eval('.ag-question-disclosure', (node) => node.getAttribute('aria-expanded') === 'false'), 'Question card collapses without cancelling');
     await page.click('.ag-question-disclosure');
     // Drop the Studio socket at submit time. Enter must still route through
     // the question composer, buffer one response ID, and resume after reconnect.
@@ -352,12 +385,20 @@ try {
     const response = await providerResult;
     assert(response.ok === true && response.result?.status === 'answered', 'Original provider call resumed after submission');
     assert(
-      response.result.answers.surface.selected.join(',') === 'Drawer,History'
+      response.result.answers.surface.selected.join(',') === 'Question,History'
         && response.result.answers.detail.otherText === 'Keep my reconnect\ndraft',
       'Provider received selections and Other text on the original call',
     );
     await page.waitForSelector('.ag-question-history');
-    assert(await page.$eval('.ag-question-history', (node) => node.textContent.includes('답변 완료')), 'Resolved question remains in history');
+    const resolvedHistory = await page.$eval('.ag-question-history', (node) => ({
+      answered: node.textContent.includes('답변 완료'),
+      parentIsTranscript: node.parentElement?.classList.contains('ag-messages'),
+      transientCount: document.querySelectorAll('.ag-user-question').length,
+    }));
+    assert(
+      resolvedHistory.answered && resolvedHistory.parentIsTranscript && resolvedHistory.transientCount === 0,
+      'Resolved history replaces the live card inline',
+    );
     await screenshot(page, 'ask-user-question-resolved-history');
 
     const recordingPath = path.join(targetDir, 'ask-user-question-reconnect.mp4');
@@ -380,16 +421,16 @@ try {
     }
 
     // The fake provider intentionally keeps turns open after a tool result.
-    // End the answered turn, then verify the drawer's own Stop path.
+    // End the answered turn, then verify the question card's own Stop path.
     await page.click('.ag-send');
     await page.waitForFunction(() => window.__agentBridge?.isTurnRunning?.() === false, { timeout: 10_000 });
-    await beginTurn('direct', 'Begin a second turn that will be stopped from the question drawer.');
+    await beginTurn('direct', 'Begin a second turn that will be stopped from the question card.');
     const stoppedProviderResult = provider.call('ask_user_question', {
       questions: [{
         id: 'stop', header: 'Stop', question: 'Should this blocked turn be stopped?', allowOther: false,
         options: [
           { label: 'Continue', description: 'Keep the provider turn running.' },
-          { label: 'Stop now', description: 'Cancel the provider turn from the drawer.' },
+          { label: 'Stop now', description: 'Cancel the provider turn from the question card.' },
         ],
       }],
     });
@@ -432,7 +473,7 @@ try {
       { timeout: 30_000 },
     );
     const stoppedResponse = await stoppedProviderResult;
-    assert(stoppedResponse.ok === false && stoppedResponse.error?.code === 'USER_QUESTION_CANCELLED', 'Drawer Stop cancels the original provider call');
+    assert(stoppedResponse.ok === false && stoppedResponse.error?.code === 'USER_QUESTION_CANCELLED', 'Question Stop cancels the original provider call');
     assert(!await page.evaluate(() => Boolean(window.__agentBridge?.pendingQuestionCancellation)), 'Reloaded bridge clears the cancellation marker after hub resolution');
     await page.waitForFunction(
       () => window.__agentBridge?.isTurnRunning?.() === false
@@ -474,7 +515,7 @@ try {
     await page.waitForFunction(() => window.__agentBridge?.isTurnRunning?.() === false, { timeout: 10_000 });
 
     // Finally, sever the provider MCP transport while a question is live. The
-    // drawer must settle as expired with no idle timeout or stuck editing lease.
+    // transcript card must settle as expired with no idle timeout or stuck editing lease.
     await beginTurn('direct', 'Begin a final turn whose provider connection will be lost.');
     const lostProviderResult = provider.call('ask_user_question', {
       questions: [{
@@ -490,8 +531,9 @@ try {
     const lostResponse = await lostProviderResult;
     assert(lostResponse.error?.code === 'SOCKET_CLOSED', 'Mock provider observed the connection loss');
     await page.waitForFunction(() => [...document.querySelectorAll('.ag-question-history')]
-      .some((node) => node.textContent?.includes('만료')));
-    assert(await page.$eval('.ag-user-question', (node) => node.dataset.inactive === 'true'), 'Provider loss removes the live drawer');
+      .some((node) => node.textContent?.includes('만료') && node.parentElement?.classList.contains('ag-messages'))
+      && !document.querySelector('.ag-user-question'));
+    assert(!await page.$('.ag-user-question'), 'Provider loss removes the transient question node');
     await screenshot(page, 'ask-user-question-provider-loss-history');
     await page.click('.ag-send');
   });

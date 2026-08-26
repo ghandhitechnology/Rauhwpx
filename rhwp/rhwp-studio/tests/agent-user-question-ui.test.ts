@@ -39,16 +39,24 @@ test('question interaction uses strict protocol v4 and a reconnect-idempotent an
   );
 });
 
-test('drawer is composer-attached and blocks ordinary chat without hiding Stop', () => {
-  assert.match(sidebar, /chatPage\.append\([^;]*questionController\.root[^;]*\)/);
+test('pending question is an ordered transcript card and blocks ordinary chat without hiding Stop', () => {
+  assert.match(sidebar, /chatPage\.append\(header, connBanner, messages, review, planSurface, composer\)/);
+  assert.match(sidebar, /function mountLiveQuestion\(\): void \{[\s\S]*questionController\.root\.parentElement === messages\) return;[\s\S]*appendConversation\(questionController\.root\)/);
+  assert.match(sidebar, /case 'user-question-requested': \{[\s\S]*flushAssistantBuffer\(\{ kind: 'progress' \}\);[\s\S]*compactStreamIntoActivity\(e\.interaction\.agent\);[\s\S]*streamBubble = null;[\s\S]*questionController\.request\(e\.interaction, stored\);[\s\S]*mountLiveQuestion\(\);/);
   assert.match(sidebar, /if \(questionController\.hasPending\(\)\) \{[\s\S]*questionController\.handleComposerSubmit\(\)/);
   assert.match(controller, /const stop = element\('button', 'ag-question-stop', '중지'\)/);
   assert.match(controller, /stop\.addEventListener\('click', options\.stop\)/);
   assert.match(css, /\.ag-user-question \{/);
   assert.match(css, /--ag-question-surface: var\(--ag-input-bg\)/);
   assert.match(css, /--ag-question-border/);
-  assert.match(css, /\.ag-user-question:not\(\[data-inactive='true'\]\) \+ \.ag-composer/);
-  assert.match(css, /border-radius: 0 0 var\(--ag-r-panel\) var\(--ag-r-panel\)/);
+  assert.match(css, /\.ag-user-question\s*\{[^}]*align-self:\s*stretch;[^}]*max-width:\s*100%;[^}]*max-height:\s*min\(70dvh, 580px, 100%\);/s);
+  assert.doesNotMatch(css, /\.ag-user-question:not\(\[data-inactive='true'\]\) \+ \.ag-composer/);
+});
+
+test('question resolution replaces the mounted live card with immutable history', () => {
+  assert.match(sidebar, /const historyCard = renderUserQuestionHistory\(historyMessage\)/);
+  assert.match(sidebar, /questionController\.root\.parentElement === messages[\s\S]*questionController\.root\.replaceWith\(historyCard\)/);
+  assert.match(sidebar, /else appendConversation\(historyCard\)/);
 });
 
 test('cards support single, multiple, Other, navigation and atomic submission', () => {
