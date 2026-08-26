@@ -127,7 +127,7 @@ impl DocumentEventLog {
         self.events.push(event);
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         // batch 이벤트 소비는 문서 상태를 바꾸지 않으므로 snapshot revision은 유지한다.
         self.events.clear();
     }
