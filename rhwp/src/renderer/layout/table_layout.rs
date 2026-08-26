@@ -54,6 +54,72 @@ fn cell_para_line_anchor_y(
     }
 }
 
+/// A caption followed by a paragraph-anchored picture is one local content
+/// stack.  Some producers save every LINE_SEG in that stack with the same
+/// positive cell-local origin.  Treating that origin as editable top spacing
+/// shifts the whole stack down, while the later picture still needs the
+/// relative distance encoded by its own vpos.
+fn caption_picture_stack_vpos_origin(cell: &crate::model::table::Cell) -> i32 {
+    let has_visible_text = |para: &Paragraph| {
+        para.text
+            .chars()
+            .any(|ch| !ch.is_whitespace() && ch != '\u{FFFC}')
+    };
+    let has_layout_control = |para: &Paragraph| {
+        para.controls.iter().any(|ctrl| {
+            matches!(
+                ctrl,
+                Control::Picture(_) | Control::Shape(_) | Control::Table(_) | Control::Equation(_)
+            )
+        })
+    };
+    let Some(first_content_idx) = cell
+        .paragraphs
+        .iter()
+        .position(|para| has_visible_text(para) || has_layout_control(para))
+    else {
+        return 0;
+    };
+    let first_content = &cell.paragraphs[first_content_idx];
+    if !has_visible_text(first_content) {
+        return 0;
+    }
+
+    let picture_follows_caption = cell.paragraphs.iter().enumerate().any(|(para_idx, para)| {
+        let control_text_positions = para.control_text_positions();
+        para.controls.iter().enumerate().any(|(ctrl_idx, ctrl)| {
+            let Control::Picture(pic) = ctrl else {
+                return false;
+            };
+            if pic.common.treat_as_char
+                || !matches!(pic.common.text_wrap, TextWrap::TopAndBottom)
+                || !matches!(pic.common.vert_rel_to, VertRelTo::Para)
+            {
+                return false;
+            }
+            if para_idx > first_content_idx {
+                return true;
+            }
+            para_idx == first_content_idx
+                && control_text_positions.get(ctrl_idx).is_some_and(|&pos| {
+                    para.text
+                        .chars()
+                        .take(pos)
+                        .any(|ch| !ch.is_whitespace() && ch != '\u{FFFC}')
+                })
+        })
+    });
+    if !picture_follows_caption {
+        return 0;
+    }
+
+    first_content
+        .line_segs
+        .first()
+        .map(|seg| seg.vertical_pos.max(0))
+        .unwrap_or(0)
+}
+
 fn has_initial_tac_shape_host(paragraphs: &[Paragraph]) -> bool {
     paragraphs.first().is_some_and(|para| {
         para.text.trim().is_empty()
@@ -757,6 +823,9 @@ struct HorizontalCellVars {
     inner_height: f64,
     text_y_start: f64,
     use_top_vpos_anchor: bool,
+    /// Positive saved origin shared by a caption + picture stack.  This is
+    /// layout metadata, not user-removable paragraph spacing.
+    caption_stack_vpos_origin: i32,
     /// [Task #2211] 저장 LINE_SEG 흐름이 자체 스택 합보다 압축된 셀 —
     /// 문단 배치를 저장 vpos 스냅으로 강제한다 (valign 무관).
     trust_stored_cell_flow: bool,
@@ -2910,6 +2979,7 @@ impl LayoutEngine {
             inner_height,
             text_y_start,
             use_top_vpos_anchor,
+            caption_stack_vpos_origin,
             trust_stored_cell_flow,
             has_nested_table,
             section_index,
@@ -2992,7 +3062,9 @@ impl LayoutEngine {
                             text_y_start,
                             content_cell_y,
                             pad_top,
-                            first_seg.vertical_pos,
+                            first_seg
+                                .vertical_pos
+                                .saturating_sub(caption_stack_vpos_origin),
                             self.dpi,
                             use_top_vpos_anchor,
                         );
@@ -3105,7 +3177,7 @@ impl LayoutEngine {
                     section_index,
                     cp_idx,
                     cell_context.clone(),
-                    !use_top_vpos_anchor,
+                    !use_top_vpos_anchor || caption_stack_vpos_origin > 0,
                     is_last_para,
                     0.0,
                     None,
@@ -3352,7 +3424,8 @@ impl LayoutEngine {
                                             text_y_start,
                                             content_cell_y,
                                             pad_top,
-                                            seg.vertical_pos,
+                                            seg.vertical_pos
+                                                .saturating_sub(caption_stack_vpos_origin),
                                             self.dpi,
                                             use_top_vpos_anchor,
                                         )
@@ -4589,11 +4662,21 @@ impl LayoutEngine {
                 .paragraphs
                 .iter()
                 .any(|p| p.controls.iter().any(|c| matches!(c, Control::Table(_))));
+            let caption_stack_vpos_origin = if matches!(effective_valign, VerticalAlign::Top) {
+                caption_picture_stack_vpos_origin(cell)
+            } else {
+                0
+            };
             let first_line_vpos = cell
                 .paragraphs
                 .first()
                 .and_then(|p| p.line_segs.first())
-                .map(|ls| hwpunit_to_px(ls.vertical_pos, self.dpi));
+                .map(|ls| {
+                    hwpunit_to_px(
+                        ls.vertical_pos.saturating_sub(caption_stack_vpos_origin),
+                        self.dpi,
+                    )
+                });
             // [Task #2211] 저장 LINE_SEG 흐름 extent(각 seg 의 vpos+lh 최댓값)가
             // 자체 스택 합(total_content_height)보다 작으면 — 예: 악보 셀처럼
             // 빈 앵커 줄이 TopAndBottom 그림 높이에 흡수된 문서 — 한컴 저장
@@ -4712,6 +4795,7 @@ impl LayoutEngine {
                         inner_height,
                         text_y_start,
                         use_top_vpos_anchor,
+                        caption_stack_vpos_origin,
                         trust_stored_cell_flow,
                         has_nested_table,
                         section_index,
