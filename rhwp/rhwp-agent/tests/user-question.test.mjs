@@ -4,10 +4,12 @@ import test from 'node:test';
 
 import {
   createUserQuestionInteraction,
+  isAskUserQuestionTool,
   normalizeMcpUserQuestionRequest,
   normalizeProviderUserQuestionRequest,
   sameUserQuestionRequest,
   userQuestionAnswersForMcp,
+  userQuestionArgsFromToolInput,
   validateUserQuestionAnswers,
 } from '../user-question.mjs';
 
@@ -47,6 +49,44 @@ test('MCP questions normalize into stable canonical options', () => {
   assert.equal(request.questions[0].mode, 'multiple');
   assert.equal(request.questions[0].allowOther, false);
   assert.deepEqual(request.questions[0].options.map((option) => option.id), ['option-1', 'option-2']);
+});
+
+test('MCP wrappers and provider prefixes still identify the question tool', () => {
+  assert.equal(isAskUserQuestionTool('ask_user_question'), true);
+  assert.equal(isAskUserQuestionTool('mcp__rhwp__ask_user_question'), true);
+  assert.equal(isAskUserQuestionTool('rhwp__ask_user_question'), true);
+  assert.equal(isAskUserQuestionTool('get_structure'), false);
+
+  const inner = {
+    questions: [{
+      id: 'format',
+      header: 'Format',
+      question: 'Which format should I use?',
+      options: [
+        { label: 'Brief', description: 'Keep it compact.' },
+        { label: 'Detailed', description: 'Include supporting detail.' },
+      ],
+    }],
+  };
+  assert.equal(userQuestionArgsFromToolInput(inner), inner);
+  assert.deepEqual(
+    userQuestionArgsFromToolInput({
+      name: 'mcp__rhwp__ask_user_question',
+      args: inner,
+      toolName: 'ask_user_question',
+    }),
+    inner,
+  );
+  const wrapped = normalizeMcpUserQuestionRequest(
+    userQuestionArgsFromToolInput({
+      name: 'mcp__rhwp__ask_user_question',
+      args: inner,
+      toolCallId: '',
+      toolName: 'ask_user_question',
+    }),
+    'scope-ticket',
+  );
+  assert.equal(wrapped.questions[0].id, 'format');
 });
 
 test('canonical requests reject duplicate question and option identities', () => {

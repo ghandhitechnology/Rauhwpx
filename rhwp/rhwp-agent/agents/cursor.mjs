@@ -284,6 +284,36 @@ function toolCallArgs(kind, inner) {
   return args ?? inner ?? {};
 }
 
+function acpRawInput(update) {
+  const rawInput = update?.rawInput;
+  return rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput) ? rawInput : {};
+}
+
+function acpToolArgs(rawInput) {
+  if (
+    rawInput.args
+    && typeof rawInput.args === 'object'
+    && !Array.isArray(rawInput.args)
+    && (rawInput.name || rawInput.toolName || rawInput.tool || Array.isArray(rawInput.args.questions))
+  ) {
+    return rawInput.args;
+  }
+  return rawInput;
+}
+
+/** ACP tool_call 이름을 stream-json MCP 경로와 같은 짧은 도구명으로 맞춘다. */
+function projectAcpToolCall(update) {
+  const rawInput = acpRawInput(update);
+  const args = acpToolArgs(rawInput);
+  const fromWrapper = mcpToolLabel({ args: rawInput });
+  const fromUpdate = mcpToolLabel({ name: update?.name ?? update?.title, args: rawInput });
+  const labeled = fromWrapper !== 'mcp' ? fromWrapper : fromUpdate;
+  return {
+    tool: Array.isArray(args.questions) ? 'ask_user_question' : labeled,
+    args,
+  };
+}
+
 /**
  * tool_call 페이로드에서 oneof 멤버 키를 고른다 (없으면 빈 문자열).
  *
@@ -804,14 +834,21 @@ export function createCursorSession(opts, {
     const previous = acpToolState.get(callId) ?? {};
     const merged = { ...previous, ...update };
     acpToolState.set(callId, merged);
-    if (!previous.emitted) {
+    const projected = projectAcpToolCall(merged);
+    const argsJson = JSON.stringify(projected.args);
+    const shouldEmit = !previous.emitted
+      || (projected.tool === 'ask_user_question'
+        && (previous.projectedTool !== 'ask_user_question' || previous.projectedArgsJson !== argsJson));
+    if (shouldEmit) {
       merged.emitted = true;
+      merged.projectedTool = projected.tool;
+      merged.projectedArgsJson = argsJson;
       onEvent({
         type: 'tool-call',
         agent: 'cursor',
         callId,
-        tool: String(merged.name ?? merged.title ?? merged.kind ?? 'tool'),
-        argsJson: JSON.stringify(merged.rawInput ?? {}),
+        tool: projected.tool,
+        argsJson,
       });
     }
     const status = String(merged.status ?? '');

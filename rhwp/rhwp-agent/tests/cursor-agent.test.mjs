@@ -488,6 +488,70 @@ test('formatCursorExitError falls back to a plain message without stderr', () =>
   );
 });
 
+test('native ACP MCP question calls emit the canonical root-scope ticket', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-acp-question-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const events = [];
+  let onSessionUpdate;
+  const native = createCursorSession({
+    ...baseOpts,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+    onEvent: (event) => events.push(event),
+  }, {
+    createAcpSession(input) {
+      onSessionUpdate = input.onSessionUpdate;
+      return {
+        async configure() {
+          input.onSessionStarted({ sessionId: 'cursor-acp-question', setupResponse: {} });
+        },
+        async prompt() {
+          onSessionUpdate({
+            sessionUpdate: 'tool_call',
+            toolCallId: 'q-1',
+            kind: 'mcp',
+            title: 'Ask the user',
+          });
+          onSessionUpdate({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'q-1',
+            name: 'mcp__rhwp__ask_user_question',
+            rawInput: {
+              name: 'mcp__rhwp__ask_user_question',
+              args: {
+                questions: [{
+                  id: 'format',
+                  header: 'Format',
+                  question: 'Which format should I use?',
+                  options: [
+                    { label: 'Brief', description: 'Keep it compact.' },
+                    { label: 'Detailed', description: 'Include supporting detail.' },
+                  ],
+                }],
+              },
+              toolName: 'ask_user_question',
+            },
+          });
+          return { stopReason: 'end_turn' };
+        },
+        getSessionId: () => 'cursor-acp-question',
+        hasSeenPromptUpdate: () => true,
+        restart: async () => {},
+        cancel: async () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+  t.after(() => native.dispose());
+
+  native.sendUserMessage('ask first');
+  await new Promise((resolve) => setImmediate(resolve));
+  const calls = events.filter((event) => event.type === 'tool-call');
+  assert.equal(calls.at(-1)?.tool, 'ask_user_question');
+  assert.deepEqual(JSON.parse(calls.at(-1).argsJson).questions[0].id, 'format');
+});
+
 test('native ACP keeps one Cursor session across turns and streams through unified events', async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-native-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

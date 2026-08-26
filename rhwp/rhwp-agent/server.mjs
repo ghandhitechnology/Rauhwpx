@@ -44,10 +44,12 @@ import { ReferenceStore } from './reference-store.mjs';
 import { createReferenceHttpHandler, isAllowedStudioOrigin } from './reference-http.mjs';
 import {
   createUserQuestionInteraction,
+  isAskUserQuestionTool,
   normalizeMcpUserQuestionRequest,
   normalizeProviderUserQuestionRequest,
   sameUserQuestionRequest,
   userQuestionAnswersForMcp,
+  userQuestionArgsFromToolInput,
   validateUserQuestionAnswers,
 } from './user-question.mjs';
 import {
@@ -1276,11 +1278,11 @@ function makeBackendEventHandler(record, generation) {
     // The fallback question tool is a first-class blocking interaction. Keep
     // its provider bookkeeping out of the generic tool activity transcript;
     // the dedicated requested/resolved lifecycle is the only Studio surface.
-    if (evt.type === 'tool-call' && evt.tool === 'ask_user_question') {
+    if (evt.type === 'tool-call' && isAskUserQuestionTool(evt.tool)) {
       if (evt.callId) record.suppressedUserQuestionCallIds.add(evt.callId);
       let questions = null;
       try {
-        const args = JSON.parse(evt.argsJson ?? '{}');
+        const args = userQuestionArgsFromToolInput(JSON.parse(evt.argsJson ?? '{}'));
         questions = normalizeMcpUserQuestionRequest(args, 'scope-ticket').questions;
       } catch {
         // The MCP boundary will return the detailed schema error. Keep this

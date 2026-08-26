@@ -81,6 +81,24 @@ export function normalizeProviderUserQuestionRequest(input) {
   return structuredClone(request);
 }
 
+export function isAskUserQuestionTool(name) {
+  return String(name ?? '')
+    .replace(/^mcp__rhwp__/, '')
+    .replace(/^rhwp__/, '')
+    .replace(/^rhwp[:.]/, '') === 'ask_user_question';
+}
+
+/** Provider streams wrap MCP args; recover the canonical question payload. */
+export function userQuestionArgsFromToolInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  if (Array.isArray(input.questions)) return input;
+  const nested = input.args;
+  if (nested && typeof nested === 'object' && !Array.isArray(nested) && Array.isArray(nested.questions)) {
+    return nested;
+  }
+  return input;
+}
+
 export function normalizeMcpUserQuestionRequest(args, providerRequestId) {
   const parsed = z.object(MCP_USER_QUESTION_SHAPE).strict().parse(args);
   return normalizeProviderUserQuestionRequest({
