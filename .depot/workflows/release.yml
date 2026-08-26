@@ -17,7 +17,7 @@ on:
     tags:
       - 'v*'
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false

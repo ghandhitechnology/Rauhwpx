@@ -1,13 +1,13 @@
 # Depot CI Migration
 # Source: .github/workflows/desktop-sessions.yml
 #
-# Changes made:
-# - Run on depot-ubuntu-latest. Depot CI has no macOS/Windows sandboxes, and
-#   ${{ matrix.os }} (macos-15 / windows-latest) cannot schedule here.
-# - Build the pinned WASM engine before Studio npm test so
-#   rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm exist for browser merge tests.
-# - Install Google Chrome and set PUPPETEER_EXECUTABLE_PATH for those tests.
-# - Raise the timeout to 90 minutes so the WASM compile fits.
+# 변경 사항:
+# - depot-ubuntu-latest에서 실행. Depot CI에는 macOS/Windows 샌드박스가 없고
+#   ${{ matrix.os }}(macos-15 / windows-latest)는 여기서 스케줄할 수 없습니다.
+# - Studio npm test 전에 고정 WASM 엔진을 빌드해
+#   rhwp/pkg/rhwp.js와 rhwp/pkg/rhwp_bg.wasm이 브라우저 병합 테스트에 있게 합니다.
+# - 해당 테스트를 위해 Google Chrome을 설치하고 PUPPETEER_EXECUTABLE_PATH를 설정합니다.
+# - WASM 컴파일이 들어가도록 제한 시간을 90분으로 올립니다.
 
 name: Desktop session checks
 on:
@@ -62,7 +62,16 @@ jobs:
           curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/chrome.deb
-          echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome" >> "$GITHUB_ENV"
+          if [ -x /usr/bin/google-chrome ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome" >> "$GITHUB_ENV"
+          elif [ -x /usr/bin/chromium ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium" >> "$GITHUB_ENV"
+          elif [ -x /usr/bin/chromium-browser ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser" >> "$GITHUB_ENV"
+          else
+            echo "지원하는 브라우저 실행 파일을 찾지 못했습니다." >&2
+            exit 1
+          fi
       - name: Install dependencies
         shell: bash
         run: |

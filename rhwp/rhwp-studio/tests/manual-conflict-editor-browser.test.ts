@@ -23,9 +23,9 @@ const wasmPackageRoot = process.env.RHWP_WASM_PACKAGE_DIR ?? resolve(rhwpRoot, '
 const wasmPackageAvailable = existsSync(resolve(wasmPackageRoot, 'rhwp.js'))
   && existsSync(resolve(wasmPackageRoot, 'rhwp_bg.wasm'));
 const browserSkipReason = !executablePath
-  ? 'Chrome or Chromium is unavailable'
+  ? 'Chrome 또는 Chromium을 찾을 수 없습니다'
   : !wasmPackageAvailable
-    ? 'Resolver browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test'
+    ? '리졸버 브라우저 테스트는 생성된 rhwp/pkg/rhwp.js와 rhwp/pkg/rhwp_bg.wasm이 필요합니다. npm test 전에 WASM 패키지를 빌드하세요'
     : null;
 let server: ViteDevServer | null = null;
 let browser: Browser | null = null;
@@ -75,7 +75,7 @@ async function withPage<T>(
   action: (page: import('puppeteer-core').Page) => Promise<T>,
 ): Promise<T | undefined> {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
+    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
     return undefined;
   }
   const page = await browser.newPage();
@@ -569,7 +569,7 @@ test('default source branch still prompts, disables delete, and dismissal keeps 
 
 test('resolver desktop controls click, report failures, retry, and fit macOS chrome', { skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
+    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
     return;
   }
   const page = await browser.newPage();

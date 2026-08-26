@@ -24,9 +24,9 @@ const wasmPackageRoot = process.env.RHWP_WASM_PACKAGE_DIR ?? resolve(rhwpRoot, '
 const wasmPackageAvailable = existsSync(resolve(wasmPackageRoot, 'rhwp.js'))
   && existsSync(resolve(wasmPackageRoot, 'rhwp_bg.wasm'));
 const browserSkipReason = !executablePath
-  ? 'Chrome or Chromium is unavailable'
+  ? 'Chrome 또는 Chromium을 찾을 수 없습니다'
   : !wasmPackageAvailable
-    ? 'Real WASM browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test'
+    ? '실제 WASM 브라우저 테스트는 생성된 rhwp/pkg/rhwp.js와 rhwp/pkg/rhwp_bg.wasm이 필요합니다. npm test 전에 WASM 패키지를 빌드하세요'
     : null;
 let server: ViteDevServer | null = null;
 let browser: Browser | null = null;
@@ -92,7 +92,7 @@ test.after(async () => {
 
 test('dirty merge entry creates a real pre-merge checkpoint before already-integrated exit', { timeout: 30_000, skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
+    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
     return;
   }
   const page = await browser.newPage();
@@ -187,7 +187,7 @@ test('dirty merge entry creates a real pre-merge checkpoint before already-integ
 
 test('clean fast-forward is reviewed and keeps the source branch by default', { timeout: 30_000, skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
+    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
     return;
   }
   const page = await browser.newPage();
@@ -324,7 +324,7 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
 
 test('diverged clean merge creates ordered parents and Undo/Redo moves bytes with refs', { timeout: 45_000, skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
+    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
     return;
   }
   const page = await browser.newPage();
@@ -573,7 +573,7 @@ test('diverged clean merge creates ordered parents and Undo/Redo moves bytes wit
 
 test('HWPX branch transitions stay clean and do not create phantom checkpoints', { timeout: 45_000, skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
+    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
     return;
   }
   const page = await browser.newPage();
@@ -647,7 +647,7 @@ test('HWPX branch transitions stay clean and do not create phantom checkpoints',
 
 test('HWPX controller durably completes clean and conflicted merges with composite Undo/Redo', { timeout: 120_000, skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
+    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
     return;
   }
   const page = await browser.newPage();
@@ -940,7 +940,7 @@ test('HWPX controller durably completes clean and conflicted merges with composi
 
 test('real resolver completes clean and conflicted HWP/HWPX worker merges', { timeout: 90_000, skip: browserSkipReason ?? false }, async (context) => {
   if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
+    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
     return;
   }
   const page = await browser.newPage();
