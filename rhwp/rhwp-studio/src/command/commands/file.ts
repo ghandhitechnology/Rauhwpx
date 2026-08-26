@@ -63,6 +63,7 @@ import {
   searchNearbyNativeDocuments,
   verifyNativePick,
   saveDesktopPortableHistoryFile,
+  writeDesktopPortableHistoryFile,
 } from '@/desktop-integration';
 import {
   moveToLibraryDocument,
@@ -70,6 +71,7 @@ import {
   type LibraryMoveResult,
 } from '@/library/move-to-document';
 import {
+  isPortableHistoryFileName,
   PORTABLE_HISTORY_FOLDER_HISTORY_NAME,
   PORTABLE_HISTORY_MIME_TYPE,
   type PortableHistoryFolder,
@@ -326,20 +328,40 @@ async function saveAsFormat(services: CommandServices, format: SaveFormat): Prom
   }
 }
 
-async function saveWithHistory(services: CommandServices): Promise<void> {
+async function saveWithHistory(services: CommandServices): Promise<SaveCurrentDocumentResult> {
   try {
-    if (!await resolvePendingAgentEditsBeforeSave(services)) return;
+    if (!await resolvePendingAgentEditsBeforeSave(services)) return 'cancelled';
     flushDeferredPaginationBeforeExplicitOutput(services, 'save-with-history');
     if (!services.createPortableHistoryBundle) {
       throw new Error('버전 기록 서비스를 사용할 수 없습니다.');
     }
 
     const bundle = await services.createPortableHistoryBundle();
+    const currentHandle = services.wasm.currentFileHandle;
+    if (
+      currentHandle?.identityKind === 'native-path'
+      && isPortableHistoryFileName(currentHandle.name)
+    ) {
+      const written = await writeDesktopPortableHistoryFile(currentHandle, bundle);
+      if (written === 'saved') {
+        services.wasm.fileName = currentHandle.name;
+        services.documentState.markClean('save-with-history');
+        services.eventBus.emit('document-context-changed');
+        services.eventBus.emit('document-saved', {
+          reason: 'save-with-history',
+          fileName: currentHandle.name,
+          sourceFormat: services.wasm.getSourceFormat(),
+        });
+        showToast({ message: '문서와 전체 버전 기록을 저장했습니다.', durationMs: 3000 });
+        return 'saved';
+      }
+    }
+
     const desktopResult = await saveDesktopPortableHistoryFile(bundle);
-    if (desktopResult === 'cancelled') return;
+    if (desktopResult === 'cancelled') return 'cancelled';
     if (desktopResult === 'saved') {
       showToast({ message: '문서와 전체 버전 기록을 폴더로 저장했습니다.', durationMs: 3000 });
-      return;
+      return 'saved';
     }
 
     const windowLike = window as FileSystemWindowLike;
@@ -354,11 +376,11 @@ async function saveWithHistory(services: CommandServices): Promise<void> {
           : await picked.getDirectoryHandle(bundle.folderName, { create: true });
         await writePortableHistoryFolderToDirectory(folder, bundle);
       } catch (error) {
-        if (isUserCancelError(error)) return;
+        if (isUserCancelError(error)) return 'cancelled';
         throw error;
       }
       showToast({ message: '문서와 전체 버전 기록을 폴더로 저장했습니다.', durationMs: 3000 });
-      return;
+      return 'saved';
     }
 
     const history = bundle.files.find((file) => file.name === PORTABLE_HISTORY_FOLDER_HISTORY_NAME);
@@ -368,8 +390,10 @@ async function saveWithHistory(services: CommandServices): Promise<void> {
       bundle.folderName,
     );
     showToast({ message: '문서와 전체 버전 기록을 저장했습니다.', durationMs: 3000 });
+    return 'saved';
   } catch (error) {
     reportSaveError('file:save-with-history', error);
+    return 'failed';
   }
 }
 
@@ -395,6 +419,12 @@ export type SaveCurrentDocumentResult = 'saved' | 'cancelled' | 'failed' | 'unsu
 
 export async function saveCurrentDocument(services: CommandServices): Promise<SaveCurrentDocumentResult> {
   try {
+    if (
+      isPortableHistoryFileName(services.wasm.fileName)
+      || isPortableHistoryFileName(services.wasm.currentFileHandle?.name ?? '')
+    ) {
+      return saveWithHistory(services);
+    }
     if (!await resolvePendingAgentEditsBeforeSave(services)) return 'cancelled';
     flushDeferredPaginationBeforeExplicitOutput(services, 'save');
     const sourceFormat = services.wasm.getSourceFormat();

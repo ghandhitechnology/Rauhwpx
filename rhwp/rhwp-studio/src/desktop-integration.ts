@@ -83,6 +83,11 @@ export interface RhwpDesktopApi {
     bytes: Uint8Array,
     identity: DocumentOwnershipIdentity,
   ) => Promise<{ name: string; byteLength: number }>;
+  writePortableHistoryFile?: (
+    handleId: string,
+    files: ReadonlyArray<{ name: string; bytes: Uint8Array }>,
+    identity: DocumentOwnershipIdentity,
+  ) => Promise<{ name: string; byteLength: number }>;
   isSameNativeFile?: (firstHandleId: string, secondHandleId: string) => Promise<boolean>;
   rememberNativeDocument?: (
     documentId: string,
@@ -575,6 +580,33 @@ export async function saveDesktopPortableHistoryFile(
     })),
   });
   return result ? 'saved' : 'cancelled';
+}
+
+/** Overwrite an already-open native `.rhwpx` package without showing a save picker. */
+export async function writeDesktopPortableHistoryFile(
+  handle: FileSystemFileHandleLike | null | undefined,
+  folder: { folderName: string; files: ReadonlyArray<{ name: string; bytes: Uint8Array }> },
+  win?: DesktopHost,
+): Promise<'saved' | 'unavailable'> {
+  const metadata = handle ? nativeHandleMetadata.get(handle) : null;
+  const api = desktopHost(win)?.rhwpDesktop ?? metadata?.api;
+  if (
+    !handle
+    || handle.identityKind !== 'native-path'
+    || !metadata?.identity
+    || !api?.writePortableHistoryFile
+  ) {
+    return 'unavailable';
+  }
+  await api.writePortableHistoryFile(
+    metadata.handleId,
+    folder.files.map((file) => ({
+      name: file.name,
+      bytes: new Uint8Array(file.bytes),
+    })),
+    metadata.identity,
+  );
+  return 'saved';
 }
 
 export async function rememberNativeDocument(

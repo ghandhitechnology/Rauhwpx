@@ -169,6 +169,20 @@ test('portable history round trip restores commits, refs, shelves, manifests, dr
   assert.deepEqual(folder.files[0]?.bytes, bytes);
   assert.deepEqual(folder.files[1]?.bytes, opened.currentDocumentBytes);
 
+  const renamed = createPortableHistoryFolder({
+    documentFileName: 'report.rhwpx',
+    sourceFormat: 'hwpx',
+    activeBranch: branchName('review'),
+    currentBlobId: fixture.head.blobId,
+    snapshot: fixture.snapshot,
+    createdAt: 123,
+  });
+  assert.equal(renamed.folderName, 'report.rhwpx');
+  assert.deepEqual(renamed.files.map((file) => file.name), [
+    PORTABLE_HISTORY_FOLDER_HISTORY_NAME,
+    'report.hwpx',
+  ]);
+
   const destination = new VersionGraphStore({ indexedDB: null });
   const imported = await destination.importRepositorySnapshot(opened.snapshot);
   assert.equal(imported.imported, true);

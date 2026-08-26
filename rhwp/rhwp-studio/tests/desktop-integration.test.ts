@@ -23,6 +23,7 @@ import {
   releaseReplacedNativeFileHandle,
   searchNearbyNativeDocuments,
   saveDesktopPortableHistoryFile,
+  writeDesktopPortableHistoryFile,
   suppressDesktopServiceWorker,
   type NativeFileHandleDescriptor,
 } from '../src/desktop-integration.ts';
@@ -247,6 +248,50 @@ test('portable history export uses the dedicated desktop save boundary', async (
     ],
   }]);
   assert.equal(await saveDesktopPortableHistoryFile(folder, {}), 'unavailable');
+});
+
+test('open portable history packages can be rewritten in place through the native handle', async () => {
+  const rewritten: Array<{ handleId: string; names: string[] }> = [];
+  const win = {
+    rhwpDesktop: {
+      pickNativeOpenFile: async () => ({
+        kind: 'file' as const,
+        handleId: 'bundle',
+        name: 'report.rhwpx',
+      }),
+      readNativeFile: async () => ({ name: 'report.rhwpx', bytes: new Uint8Array([1]) }),
+      writeNativeFile: async () => ({ name: 'report.rhwpx', byteLength: 0 }),
+      writePortableHistoryFile: async (handleId: string, files: Array<{ name: string }>, identity: {
+        documentId: string;
+      }) => {
+        assert.equal(identity.documentId, 'document-a');
+        rewritten.push({ handleId, names: files.map((file) => file.name) });
+        return { name: 'report.rhwpx', byteLength: 8 };
+      },
+      releaseNativeFile: async () => {},
+    },
+  };
+  const handle = await pickDesktopNativeOpenFile(win);
+  assert.ok(handle);
+  bindNativeFileHandleIdentity(handle, {
+    documentId: 'document-a',
+    sourceDigest: 'blake3:a',
+    useSourceDigest: false,
+  });
+  const folder = {
+    folderName: 'report.rhwpx',
+    files: [
+      { name: 'history', bytes: new Uint8Array([1, 2, 3]) },
+      { name: 'report.hwpx', bytes: new Uint8Array([4, 5]) },
+    ],
+  };
+  assert.equal(await writeDesktopPortableHistoryFile(handle, folder, win), 'saved');
+  assert.deepEqual(rewritten, [{ handleId: 'bundle', names: ['history', 'report.hwpx'] }]);
+  assert.equal(await writeDesktopPortableHistoryFile(null, folder, win), 'unavailable');
+  assert.equal(
+    await writeDesktopPortableHistoryFile({ name: 'report.rhwpx' } as never, folder, win),
+    'unavailable',
+  );
 });
 
 test('native document bookmarks restore opaque handles without exposing a path', async () => {

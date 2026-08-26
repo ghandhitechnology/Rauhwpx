@@ -42,3 +42,25 @@ test('failed document replacement clears and republishes document context', () =
     /on\('document-context-changed', \(\) => \{[\s\S]*?void this\.refresh\(\)/,
   );
 });
+
+test('opening a portable history package enables native version control and keeps the bundle handle', () => {
+  assert.match(main, /userSettings\.setUseHancomGit\(true\)/);
+  assert.match(
+    main,
+    /retainNativeBundleHandle[\s\S]*?identityKind === 'native-path'[\s\S]*?isPortableHistoryFileName/,
+  );
+  assert.match(
+    main,
+    /retainNativeBundleHandle \? data\.fileHandle : null/,
+  );
+  assert.match(
+    main,
+    /if \(!retainNativeBundleHandle\) \{[\s\S]*?releaseUnusedSaveTarget/,
+  );
+  const fileCommands = source('../src/command/commands/file.ts');
+  assert.match(fileCommands, /writeDesktopPortableHistoryFile\(currentHandle, bundle\)/);
+  assert.match(
+    fileCommands,
+    /isPortableHistoryFileName\(services\.wasm\.fileName\)[\s\S]*?return saveWithHistory\(services\)/,
+  );
+});
