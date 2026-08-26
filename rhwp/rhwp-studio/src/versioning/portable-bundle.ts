@@ -93,7 +93,7 @@ function checkedFileName(fileName: string, sourceFormat: PortableSourceFormat): 
     || normalized.includes('\\')
   ) return `document.${sourceFormat}`;
   if (normalized.toLowerCase().endsWith(`.${sourceFormat}`)) return normalized;
-  const base = normalized.replace(/\.(hwp|hwpx|hml)$/i, '') || 'document';
+  const base = normalized.replace(/\.(hwp|hwpx|hml|rhwpx)$/i, '') || 'document';
   return `${base}.${sourceFormat}`;
 }
 

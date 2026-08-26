@@ -1597,11 +1597,20 @@ async function openDocumentBytes(data: OpenDocumentBytesEvent) {
       }
       const store = new VersionGraphStore();
       const imported = await store.importRepositorySnapshot(bundle.snapshot);
+      const retainNativeBundleHandle = Boolean(
+        data.fileHandle
+        && data.fileHandle.identityKind === 'native-path'
+        && isPortableHistoryFileName(data.fileName),
+      );
+      const openFileName = retainNativeBundleHandle
+        ? data.fileName
+        : bundle.documentFileName;
       try {
+        userSettings.setUseHancomGit(true);
         await loadBytes(
           bundle.currentDocumentBytes,
-          bundle.documentFileName,
-          null,
+          openFileName,
+          retainNativeBundleHandle ? data.fileHandle : null,
           performance.now(),
           {
             grant: {
@@ -1626,7 +1635,9 @@ async function openDocumentBytes(data: OpenDocumentBytesEvent) {
       } finally {
         await store.close();
       }
-      await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
+      if (!retainNativeBundleHandle) {
+        await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
+      }
       showToast({ message: '문서와 전체 버전 기록을 불러왔습니다.', durationMs: 3500 });
       return true;
     }

@@ -771,6 +771,16 @@ ipcMain.handle('desktop:native-file-write', (event, handleId, bytes, identity) =
   const session = sessionForEvent(event);
   return nativeFiles.write(session.sessionId, handleId, bytes, identity, documentLeases);
 });
+ipcMain.handle('desktop:native-file-write-portable-history', (event, handleId, files, identity) => {
+  const session = sessionForEvent(event);
+  return nativeFiles.writePortableHistory(
+    session.sessionId,
+    handleId,
+    files,
+    identity,
+    documentLeases,
+  );
+});
 ipcMain.handle('desktop:native-file-is-same', (event, firstHandleId, secondHandleId) => {
   const session = sessionForEvent(event);
   return nativeFiles.isSameEntry(session.sessionId, firstHandleId, secondHandleId);

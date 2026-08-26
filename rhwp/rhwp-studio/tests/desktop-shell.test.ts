@@ -290,6 +290,7 @@ test('desktop package registers supported document associations without bundling
   assert.notEqual(historyAssociation?.name, 'Hangul document');
   assert.equal(historyAssociation?.isPackage, true);
   assert.match(desktopMain, /desktop:save-portable-history-file/);
+  assert.match(desktopMain, /desktop:native-file-write-portable-history/);
   assert.match(desktopMain, /writePortableHistoryFolder\(/);
   assert.match(desktopMain, /RauHWPX history bundle/);
   assert.ok(rootPackage.build.asarUnpack.includes('rhwp/rhwp-agent/**'));

@@ -529,6 +529,36 @@ test('portable history bundles replace as a folder containing the document and h
     const read = await files.read('session-a', opened.descriptor.handleId);
     assert.equal(read.name, 'report.rhwpx');
     assert.deepEqual(read.bytes, history);
+
+    const nextHistory = new Uint8Array(24).fill(9);
+    nextHistory.set(new TextEncoder().encode('RAUHWPX-HISTORY\0'));
+    const nextDocument = new Uint8Array([0x50, 0x4b, 6, 7, 8]);
+    const active = identity('document-a', 'blake3:a');
+    const leases = new DocumentLeaseManager({ createId: () => 'open' });
+    const reservation = leases.reserve(
+      'session-a', active, files.pathForSender('session-a', opened.descriptor.handleId),
+    );
+    assert.equal(reservation.ok, true);
+    if (!reservation.ok) return;
+    leases.commit('session-a', reservation.reservationId);
+
+    await assert.rejects(
+      files.write('session-a', opened.descriptor.handleId, nextDocument, active, leases),
+      /folder packages/,
+    );
+
+    await files.writePortableHistory(
+      'session-a',
+      opened.descriptor.handleId,
+      [
+        { name: 'history', bytes: nextHistory },
+        { name: 'report.hwpx', bytes: nextDocument },
+      ],
+      active,
+      leases,
+    );
+    assert.deepEqual(await readPortableHistoryBytes(target), nextHistory);
+    assert.deepEqual(new Uint8Array(await readFs(join(target, 'report.hwpx'))), nextDocument);
   });
 });
 

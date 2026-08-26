@@ -35,6 +35,12 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
     bytes,
     identity,
   ),
+  writePortableHistoryFile: (handleId, files, identity) => ipcRenderer.invoke(
+    'desktop:native-file-write-portable-history',
+    handleId,
+    files,
+    identity,
+  ),
   isSameNativeFile: (firstHandleId, secondHandleId) => ipcRenderer.invoke(
     'desktop:native-file-is-same',
     firstHandleId,

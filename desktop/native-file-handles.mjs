@@ -48,6 +48,9 @@ function hasValidZipDirectory(bytes) {
 export function validateNativeDocumentBytes(filePath, bytes) {
   if (!(bytes instanceof Uint8Array)) throw new Error('Native file writes require byte data');
   const extension = extname(filePath).toLowerCase();
+  if (extension === '.rhwpx') {
+    throw new Error('RHWPX history bundles must be written as folder packages');
+  }
   if (extension === '.hwp') {
     // The in-process writer always emits CFB v3: a 512-byte header followed by
     // whole 512-byte sectors. This catches empty/truncated/wrong-format IPC
@@ -359,6 +362,39 @@ export class NativeFileHandleRegistry {
       entry.writeChain = write.catch(() => {});
       await write;
       return { name: entry.name, byteLength: bytes.byteLength };
+    } finally {
+      entry.activeWrites -= 1;
+      if (entry.activeWrites === 0 && entry.releaseRequested) this.#deleteEntry(entry);
+    }
+  }
+
+  async writePortableHistory(senderSessionId, handleId, files, identity, leases) {
+    const entry = this.#entryForSender(senderSessionId, handleId);
+    entry.activeWrites += 1;
+    try {
+      this.validateSave(senderSessionId, handleId, identity, leases);
+      if (!isPortableHistoryBundleName(entry.canonicalPath)) {
+        throw new Error('Only RHWPX folders can receive portable history writes');
+      }
+      const write = entry.writeChain.then(async () => {
+        this.validateSave(senderSessionId, handleId, identity, leases);
+        await writePortableHistoryFolder(entry.canonicalPath, files);
+        const history = Array.isArray(files)
+          ? files.find((file) => file?.name === PORTABLE_HISTORY_INNER_FILE)
+          : null;
+        const historyBytes = history?.bytes instanceof Uint8Array
+          ? history.bytes
+          : new Uint8Array(history?.bytes ?? []);
+        if (historyBytes.byteLength > 0) {
+          this.#refreshBookmarkDigest(identity, entry, historyBytes);
+        }
+      });
+      entry.writeChain = write.catch(() => {});
+      await write;
+      const byteLength = Array.isArray(files)
+        ? files.reduce((sum, file) => sum + (file?.bytes?.byteLength ?? file?.bytes?.length ?? 0), 0)
+        : 0;
+      return { name: entry.name, byteLength };
     } finally {
       entry.activeWrites -= 1;
       if (entry.activeWrites === 0 && entry.releaseRequested) this.#deleteEntry(entry);
