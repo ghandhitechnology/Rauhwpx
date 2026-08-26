@@ -118,12 +118,34 @@ pub(crate) struct RenderNormalizationState {
 pub(crate) struct DocumentEventLog {
     events: Vec<DocumentEvent>,
     section_revisions: Vec<u64>,
+    paragraph_sequence_revisions: Vec<u64>,
+    paragraph_revisions: Vec<Vec<u64>>,
     next_revision: u64,
 }
 
 impl DocumentEventLog {
     fn push(&mut self, event: DocumentEvent) {
-        self.mark_section_changed(event.section_index());
+        let section_idx = event.section_index();
+        let paragraph_idx = event.paragraph_index();
+        let revision = self.next_revision();
+        Self::set_revision(&mut self.section_revisions, section_idx, revision);
+        if event.may_change_paragraph_sequence() {
+            Self::set_revision(
+                &mut self.paragraph_sequence_revisions,
+                section_idx,
+                revision,
+            );
+        } else {
+            if self.paragraph_revisions.len() <= section_idx {
+                self.paragraph_revisions
+                    .resize_with(section_idx + 1, Vec::new);
+            }
+            Self::set_revision(
+                &mut self.paragraph_revisions[section_idx],
+                paragraph_idx,
+                revision,
+            );
+        }
         self.events.push(event);
     }
 
@@ -133,17 +155,32 @@ impl DocumentEventLog {
     }
 
     fn mark_section_changed(&mut self, section_idx: usize) {
-        self.next_revision = self.next_revision.wrapping_add(1).max(1);
-        if self.section_revisions.len() <= section_idx {
-            self.section_revisions.resize(section_idx + 1, 0);
-        }
-        self.section_revisions[section_idx] = self.next_revision;
+        let revision = self.next_revision();
+        Self::set_revision(&mut self.section_revisions, section_idx, revision);
     }
 
     fn mark_all_sections_changed(&mut self, section_count: usize) {
         for section_idx in 0..section_count {
-            self.mark_section_changed(section_idx);
+            let revision = self.next_revision();
+            Self::set_revision(&mut self.section_revisions, section_idx, revision);
+            Self::set_revision(
+                &mut self.paragraph_sequence_revisions,
+                section_idx,
+                revision,
+            );
         }
+    }
+
+    fn next_revision(&mut self) -> u64 {
+        self.next_revision = self.next_revision.wrapping_add(1).max(1);
+        self.next_revision
+    }
+
+    fn set_revision(revisions: &mut Vec<u64>, index: usize, revision: u64) {
+        if revisions.len() <= index {
+            revisions.resize(index + 1, 0);
+        }
+        revisions[index] = revision;
     }
 
     fn section_revisions(&self, section_count: usize) -> Vec<u64> {
@@ -153,9 +190,38 @@ impl DocumentEventLog {
         revisions
     }
 
-    fn restore_section_revisions(&mut self, revisions: &[u64]) {
+    fn paragraph_sequence_revision(&self, section_idx: usize) -> u64 {
+        self.paragraph_sequence_revisions
+            .get(section_idx)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn paragraph_revisions(&self, section_idx: usize, paragraph_count: usize) -> Vec<u64> {
+        let mut revisions = self
+            .paragraph_revisions
+            .get(section_idx)
+            .cloned()
+            .unwrap_or_default();
+        revisions.resize(paragraph_count, 0);
+        revisions.truncate(paragraph_count);
+        revisions
+    }
+
+    fn restore_snapshot_revisions(
+        &mut self,
+        section_revisions: &[u64],
+        paragraph_sequence_revisions: &[u64],
+        paragraph_revisions: &[Vec<u64>],
+    ) {
         self.section_revisions.clear();
-        self.section_revisions.extend_from_slice(revisions);
+        self.section_revisions.extend_from_slice(section_revisions);
+        self.paragraph_sequence_revisions.clear();
+        self.paragraph_sequence_revisions
+            .extend_from_slice(paragraph_sequence_revisions);
+        self.paragraph_revisions.clear();
+        self.paragraph_revisions
+            .extend_from_slice(paragraph_revisions);
     }
 }
 
@@ -168,9 +234,17 @@ impl std::ops::Deref for DocumentEventLog {
 }
 
 #[derive(Clone)]
+pub(crate) struct SnapshotParagraph {
+    pub(crate) revision: u64,
+    pub(crate) paragraph: Arc<Paragraph>,
+}
+
+#[derive(Clone)]
 pub(crate) struct SnapshotSection {
     pub(crate) revision: u64,
-    pub(crate) section: Arc<Section>,
+    pub(crate) paragraph_sequence_revision: u64,
+    pub(crate) section_shell: Section,
+    pub(crate) paragraphs: Vec<SnapshotParagraph>,
 }
 
 #[derive(Clone)]

@@ -4,11 +4,12 @@ use crate::document_core::validation::{
     CellPath, ValidationReport, ValidationWarning, WarningKind,
 };
 use crate::document_core::{
-    DocumentCore, DocumentEventLog, DocumentSnapshot, SnapshotSection, DEFAULT_FALLBACK_FONT,
+    DocumentCore, DocumentEventLog, DocumentSnapshot, SnapshotParagraph, SnapshotSection,
+    DEFAULT_FALLBACK_FONT,
 };
 use crate::error::HwpError;
 use crate::model::control::Control;
-use crate::model::document::Document;
+use crate::model::document::{Document, Section};
 use crate::model::paragraph::{LineSeg, Paragraph};
 use crate::model::shape::{Caption, DrawingObjAttr, ShapeObject};
 use crate::renderer::composer::{compose_section, reflow_line_segs};
@@ -2103,6 +2104,14 @@ impl DocumentCore {
         }
     }
 
+    fn clone_section_shell(section: &Section) -> Section {
+        Section {
+            section_def: section.section_def.clone(),
+            paragraphs: Vec::new(),
+            raw_stream: section.raw_stream.clone(),
+        }
+    }
+
     fn capture_snapshot(&self) -> DocumentSnapshot {
         let section_revisions = self
             .event_log
@@ -2118,13 +2127,42 @@ impl DocumentCore {
             .enumerate()
             .map(|(section_idx, section)| {
                 let revision = section_revisions[section_idx];
-                let shared = baseline
+                let paragraph_sequence_revision =
+                    self.event_log.paragraph_sequence_revision(section_idx);
+                let paragraph_revisions = self
+                    .event_log
+                    .paragraph_revisions(section_idx, section.paragraphs.len());
+                let baseline_section = baseline
                     .and_then(|snapshot| snapshot.sections.get(section_idx))
-                    .filter(|snapshot_section| snapshot_section.revision == revision)
-                    .map(|snapshot_section| Arc::clone(&snapshot_section.section));
+                    .filter(|snapshot_section| {
+                        snapshot_section.paragraph_sequence_revision == paragraph_sequence_revision
+                            && snapshot_section.paragraphs.len() == section.paragraphs.len()
+                    });
+                let paragraphs = section
+                    .paragraphs
+                    .iter()
+                    .enumerate()
+                    .map(|(paragraph_idx, paragraph)| {
+                        let paragraph_revision = paragraph_revisions[paragraph_idx];
+                        let shared = baseline_section
+                            .and_then(|snapshot_section| {
+                                snapshot_section.paragraphs.get(paragraph_idx)
+                            })
+                            .filter(|snapshot_paragraph| {
+                                snapshot_paragraph.revision == paragraph_revision
+                            })
+                            .map(|snapshot_paragraph| Arc::clone(&snapshot_paragraph.paragraph));
+                        SnapshotParagraph {
+                            revision: paragraph_revision,
+                            paragraph: shared.unwrap_or_else(|| Arc::new(paragraph.clone())),
+                        }
+                    })
+                    .collect();
                 SnapshotSection {
                     revision,
-                    section: shared.unwrap_or_else(|| Arc::new(section.clone())),
+                    paragraph_sequence_revision,
+                    section_shell: Self::clone_section_shell(section),
+                    paragraphs,
                 }
             })
             .collect();
@@ -2210,9 +2248,42 @@ impl DocumentCore {
             .iter()
             .map(|section| section.revision)
             .collect();
+        let target_paragraph_sequence_revisions: Vec<u64> = snapshot
+            .sections
+            .iter()
+            .map(|section| section.paragraph_sequence_revision)
+            .collect();
+        let target_paragraph_revisions: Vec<Vec<u64>> = snapshot
+            .sections
+            .iter()
+            .map(|section| {
+                section
+                    .paragraphs
+                    .iter()
+                    .map(|paragraph| paragraph.revision)
+                    .collect()
+            })
+            .collect();
         let current_revisions = self
             .event_log
             .section_revisions(self.document.sections.len());
+        let current_paragraph_sequence_revisions: Vec<u64> = self
+            .document
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(section_idx, _)| self.event_log.paragraph_sequence_revision(section_idx))
+            .collect();
+        let current_paragraph_revisions: Vec<Vec<u64>> = self
+            .document
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(section_idx, section)| {
+                self.event_log
+                    .paragraph_revisions(section_idx, section.paragraphs.len())
+            })
+            .collect();
         let same_section_count = self.document.sections.len() == snapshot.sections.len();
         let changed_sections: Vec<usize> = if same_section_count {
             snapshot
@@ -2236,9 +2307,42 @@ impl DocumentCore {
                     .sections
                     .push(std::mem::take(&mut current_sections[section_idx]));
             } else {
-                restored
-                    .sections
-                    .push(snapshot_section.section.as_ref().clone());
+                let mut section = snapshot_section.section_shell.clone();
+                let can_move_unchanged_paragraphs = same_section_count
+                    && current_paragraph_sequence_revisions[section_idx]
+                        == snapshot_section.paragraph_sequence_revision
+                    && current_sections[section_idx].paragraphs.len()
+                        == snapshot_section.paragraphs.len();
+                if can_move_unchanged_paragraphs {
+                    let current_paragraphs =
+                        std::mem::take(&mut current_sections[section_idx].paragraphs);
+                    section
+                        .paragraphs
+                        .reserve(snapshot_section.paragraphs.len());
+                    for (paragraph_idx, (current_paragraph, snapshot_paragraph)) in
+                        current_paragraphs
+                            .into_iter()
+                            .zip(&snapshot_section.paragraphs)
+                            .enumerate()
+                    {
+                        if current_paragraph_revisions[section_idx][paragraph_idx]
+                            == snapshot_paragraph.revision
+                        {
+                            section.paragraphs.push(current_paragraph);
+                        } else {
+                            section
+                                .paragraphs
+                                .push(snapshot_paragraph.paragraph.as_ref().clone());
+                        }
+                    }
+                } else {
+                    section.paragraphs = snapshot_section
+                        .paragraphs
+                        .iter()
+                        .map(|paragraph| paragraph.paragraph.as_ref().clone())
+                        .collect();
+                }
+                restored.sections.push(section);
             }
         }
         self.document = restored;
@@ -2253,7 +2357,11 @@ impl DocumentCore {
         } else {
             self.refresh_layout_native();
         }
-        self.event_log.restore_section_revisions(&target_revisions);
+        self.event_log.restore_snapshot_revisions(
+            &target_revisions,
+            &target_paragraph_sequence_revisions,
+            &target_paragraph_revisions,
+        );
         Ok(super::super::helpers::json_ok())
     }
 
@@ -2269,14 +2377,16 @@ impl DocumentCore {
             .iter()
             .map(|(_, snapshot)| Arc::as_ptr(snapshot) as usize)
             .collect();
-        let unique_sections: HashSet<usize> = self
+        let unique_paragraphs: HashSet<usize> = self
             .snapshot_store
             .iter()
             .flat_map(|(_, snapshot)| {
-                snapshot
-                    .sections
-                    .iter()
-                    .map(|section| Arc::as_ptr(&section.section) as usize)
+                snapshot.sections.iter().flat_map(|section| {
+                    section
+                        .paragraphs
+                        .iter()
+                        .map(|paragraph| Arc::as_ptr(&paragraph.paragraph) as usize)
+                })
             })
             .collect();
         let section_references = self
@@ -2284,12 +2394,19 @@ impl DocumentCore {
             .iter()
             .map(|(_, snapshot)| snapshot.sections.len())
             .sum::<usize>();
+        let paragraph_references = self
+            .snapshot_store
+            .iter()
+            .flat_map(|(_, snapshot)| &snapshot.sections)
+            .map(|section| section.paragraphs.len())
+            .sum::<usize>();
         format!(
-            "{{\"snapshotIds\":{},\"uniqueSnapshots\":{},\"sectionReferences\":{},\"uniqueSections\":{}}}",
+            "{{\"snapshotIds\":{},\"uniqueSnapshots\":{},\"sectionReferences\":{},\"paragraphReferences\":{},\"uniqueParagraphs\":{}}}",
             self.snapshot_store.len(),
             unique_snapshots.len(),
             section_references,
-            unique_sections.len()
+            paragraph_references,
+            unique_paragraphs.len()
         )
     }
 
@@ -2668,13 +2785,30 @@ mod replace_content_tests {
             .expect("after snapshot")
             .1;
         assert!(!Arc::ptr_eq(
-            &before.sections[0].section,
-            &after.sections[0].section
+            &before.sections[0].paragraphs[0].paragraph,
+            &after.sections[0].paragraphs[0].paragraph
         ));
-        assert!(Arc::ptr_eq(
-            &before.sections[1].section,
-            &after.sections[1].section
-        ));
+        for (before_paragraph, after_paragraph) in before.sections[0]
+            .paragraphs
+            .iter()
+            .zip(&after.sections[0].paragraphs)
+            .skip(1)
+        {
+            assert!(Arc::ptr_eq(
+                &before_paragraph.paragraph,
+                &after_paragraph.paragraph
+            ));
+        }
+        for (before_paragraph, after_paragraph) in before.sections[1]
+            .paragraphs
+            .iter()
+            .zip(&after.sections[1].paragraphs)
+        {
+            assert!(Arc::ptr_eq(
+                &before_paragraph.paragraph,
+                &after_paragraph.paragraph
+            ));
+        }
 
         core.restore_snapshot_native(before_id)
             .expect("before snapshot restore");
