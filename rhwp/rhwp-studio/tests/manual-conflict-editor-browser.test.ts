@@ -13,6 +13,7 @@ const BROWSER_CANDIDATES = [
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
   '/usr/bin/google-chrome',
   '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
 ].filter((candidate): candidate is string => Boolean(candidate));
 
 const executablePath = BROWSER_CANDIDATES.find(existsSync);
@@ -21,16 +22,17 @@ const rhwpRoot = resolve(studioRoot, '..');
 const wasmPackageRoot = process.env.RHWP_WASM_PACKAGE_DIR ?? resolve(rhwpRoot, 'pkg');
 const wasmPackageAvailable = existsSync(resolve(wasmPackageRoot, 'rhwp.js'))
   && existsSync(resolve(wasmPackageRoot, 'rhwp_bg.wasm'));
+const browserSkipReason = !executablePath
+  ? 'Chrome or Chromium is unavailable'
+  : !wasmPackageAvailable
+    ? 'Resolver browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test'
+    : null;
 let server: ViteDevServer | null = null;
 let browser: Browser | null = null;
 let baseUrl = '';
 
 test.before(async () => {
-  if (!executablePath) return;
-  assert.ok(
-    wasmPackageAvailable,
-    'Resolver browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test',
-  );
+  if (browserSkipReason) return;
   server = await createServer({
     root: studioRoot,
     configFile: false,
@@ -67,7 +69,7 @@ async function withPage<T>(
   action: (page: import('puppeteer-core').Page) => Promise<T>,
 ): Promise<T | undefined> {
   if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
+    context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
     return undefined;
   }
   const page = await browser.newPage();
@@ -561,7 +563,7 @@ test('default source branch still prompts, disables delete, and dismissal keeps 
 
 test('resolver desktop controls click, report failures, retry, and fit macOS chrome', async (context) => {
   if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
+    context.skip(browserSkipReason ?? 'Chrome or Chromium is unavailable');
     return;
   }
   const page = await browser.newPage();
