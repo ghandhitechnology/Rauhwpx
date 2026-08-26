@@ -2,7 +2,8 @@ name: Nightly desktop release
 
 on:
   schedule:
-    - cron: '0 5 * * *'
+    # 4:00am KST (GitHub Actions cron uses UTC).
+    - cron: '0 19 * * *'
   workflow_dispatch:
 
 permissions:
