@@ -2805,7 +2805,7 @@ impl DocumentCore {
 
     /// 구역을 재조판하고 dirty로 표시한다.
     pub(crate) fn recompose_section(&mut self, section_idx: usize) {
-        self.invalidate_page_tree_cache();
+        self.invalidate_page_tree_cache_from_section(section_idx);
         self.composed[section_idx] = compose_section(&self.document.sections[section_idx]);
         self.mark_section_dirty(section_idx);
         // 전체 문단 dirty (모두 재측정 필요)
@@ -2866,7 +2866,7 @@ impl DocumentCore {
 
     /// 단일 문단만 재조판한다.
     pub(crate) fn recompose_paragraph(&mut self, section_idx: usize, para_idx: usize) {
-        self.invalidate_page_tree_cache();
+        self.invalidate_page_tree_cache_from_section(section_idx);
         let para = &self.document.sections[section_idx].paragraphs[para_idx];
         self.composed[section_idx][para_idx] = compose_paragraph(para);
         self.mark_section_dirty(section_idx);
@@ -2875,7 +2875,7 @@ impl DocumentCore {
 
     /// composed 벡터에 새 문단 항목을 삽입한다 (문단 분할/붙여넣기 후).
     pub(crate) fn insert_composed_paragraph(&mut self, section_idx: usize, para_idx: usize) {
-        self.invalidate_page_tree_cache();
+        self.invalidate_page_tree_cache_from_section(section_idx);
         let para = &self.document.sections[section_idx].paragraphs[para_idx];
         let composed = compose_paragraph(para);
         self.composed[section_idx].insert(para_idx, composed);
@@ -2909,7 +2909,7 @@ impl DocumentCore {
 
     /// composed 벡터에서 문단 항목을 제거한다 (문단 병합/삭제 후).
     pub(crate) fn remove_composed_paragraph(&mut self, section_idx: usize, para_idx: usize) {
-        self.invalidate_page_tree_cache();
+        self.invalidate_page_tree_cache_from_section(section_idx);
         if para_idx < self.composed[section_idx].len() {
             self.composed[section_idx].remove(para_idx);
         }
@@ -3255,7 +3255,7 @@ impl DocumentCore {
             }
         }
         self.deferred_pagination_descriptor = None;
-        self.invalidate_page_tree_cache();
+        self.invalidate_page_tree_cache_from_section(section_index);
         DeferredPaginationStepResult {
             state: DeferredPaginationJobState::Complete,
             revision,
@@ -3339,7 +3339,11 @@ impl DocumentCore {
             .filter(|dirty| *dirty)
             .count();
         let issue2424_invalidate_started = issue2424_profile_enabled.then(std::time::Instant::now);
-        self.invalidate_page_tree_cache();
+        if let Some(section_idx) = self.dirty_sections.iter().position(|dirty| *dirty) {
+            self.invalidate_page_tree_cache_from_section(section_idx);
+        } else {
+            self.layout_engine.clear_layout_caches();
+        }
         let issue2424_invalidate_elapsed = issue2424_invalidate_started
             .map(|started| started.elapsed())
             .unwrap_or_default();
@@ -4860,6 +4864,19 @@ impl DocumentCore {
         }
     }
 
+    /// 변경 구역보다 앞선 페이지의 완성된 렌더 트리는 유지한다.
+    pub(crate) fn invalidate_page_tree_cache_from_section(&self, section_idx: usize) {
+        let first_page = self
+            .pagination
+            .iter()
+            .take(section_idx)
+            .map(|result| result.pages.len())
+            .sum::<usize>();
+        self.invalidate_page_tree_cache_from(first_page as u32);
+        // 셀 레이아웃 캐시는 IR 포인터를 키로 쓰므로 구역 경계와 무관하게 비운다.
+        self.layout_engine.clear_layout_caches();
+    }
+
     pub(crate) fn invalidate_page_tree_cache_page(&self, page_num: u32) {
         let page = page_num as usize;
         if let Some(slot) = self.page_tree_cache.borrow_mut().get_mut(page) {
@@ -5846,6 +5863,38 @@ mod tests {
             core.page_tree_cache_order.borrow().len(),
             PAGE_RENDER_CACHE_CAPACITY
         );
+    }
+
+    #[test]
+    fn section_invalidation_preserves_render_trees_before_changed_section() {
+        let bytes = include_bytes!("../../../samples/hwp-multi-001.hwp");
+        let core = DocumentCore::from_bytes(bytes).expect("multi-section fixture parses");
+        assert!(core.pagination.len() > 1);
+        let changed_section = 1;
+        let first_changed_page = core.pagination[0].pages.len();
+        let page_count = core.page_count() as usize;
+        assert!(first_changed_page > 0);
+        assert!(page_count <= PAGE_RENDER_CACHE_CAPACITY);
+
+        for page in 0..page_count {
+            core.cache_page_tree(page, PageRenderTree::new(page as u32, 100.0, 100.0));
+            let mut json_cache = core.layer_tree_json_cache.borrow_mut();
+            if json_cache.len() <= page {
+                json_cache.resize_with(page + 1, Vec::new);
+            }
+            json_cache[page].push((0, format!("page-{page}")));
+        }
+
+        core.invalidate_page_tree_cache_from_section(changed_section);
+
+        for page in 0..first_changed_page {
+            assert!(core.page_tree_cache.borrow()[page].is_some());
+            assert_eq!(core.layer_tree_json_cache.borrow()[page].len(), 1);
+        }
+        for page in first_changed_page..page_count {
+            assert!(core.page_tree_cache.borrow()[page].is_none());
+            assert!(core.layer_tree_json_cache.borrow()[page].is_empty());
+        }
     }
 
     #[test]
