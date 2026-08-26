@@ -190,8 +190,8 @@ pub struct DocumentCore {
     /// 글상자 오버플로우 연결 캐시 (섹션별, 지연 계산)
     pub(crate) overflow_links_cache:
         RefCell<HashMap<usize, Vec<queries::doc_tree_nav::OverflowLink>>>,
-    /// Undo/Redo용 Document 스냅샷 저장소 (ID → Document 클론)
-    pub(crate) snapshot_store: Vec<(u32, Document)>,
+    /// Undo/Redo용 Document 스냅샷 저장소 (ID → 불변 Document 상태)
+    pub(crate) snapshot_store: Vec<(u32, Arc<Document>)>,
     /// 다음 스냅샷 ID
     pub(crate) next_snapshot_id: u32,
     /// 머리말/꼬리말 감추기: (global_page_index, is_header) 조합

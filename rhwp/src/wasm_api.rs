@@ -6178,6 +6178,13 @@ impl HwpDocument {
         self.save_snapshot_native()
     }
 
+    /// 기존 스냅샷과 같은 불변 Document 상태를 공유하는 새 ID를 반환한다.
+    #[wasm_bindgen(js_name = shareSnapshot)]
+    pub fn share_snapshot(&mut self, source_id: u32) -> Result<u32, JsValue> {
+        self.share_snapshot_native(source_id)
+            .map_err(|error| error.into())
+    }
+
     /// 지정 ID의 스냅샷으로 Document를 복원한다.
     #[wasm_bindgen(js_name = restoreSnapshot)]
     pub fn restore_snapshot(&mut self, id: u32) -> Result<String, JsValue> {

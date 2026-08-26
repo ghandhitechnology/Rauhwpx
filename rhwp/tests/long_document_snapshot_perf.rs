@@ -34,10 +34,16 @@ fn long_document_snapshot_history_perf() {
     let mut peak_rss = baseline_rss;
     let mut snapshot_elapsed = Duration::ZERO;
     let mut snapshot_ids = Vec::with_capacity(command_count);
+    let mut previous_after_id = None;
 
     for _ in 0..command_count {
         let started = Instant::now();
-        let before_id = document.save_snapshot_native();
+        let before_id = match previous_after_id {
+            Some(after_id) => document
+                .share_snapshot_native(after_id)
+                .expect("share unchanged prior after snapshot"),
+            None => document.save_snapshot_native(),
+        };
         snapshot_elapsed += started.elapsed();
 
         document
@@ -48,6 +54,7 @@ fn long_document_snapshot_history_perf() {
         let after_id = document.save_snapshot_native();
         snapshot_elapsed += started.elapsed();
         snapshot_ids.push((before_id, after_id));
+        previous_after_id = Some(after_id);
 
         if let Some(rss) = resident_bytes() {
             peak_rss = Some(peak_rss.unwrap_or(rss).max(rss));

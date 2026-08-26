@@ -2780,6 +2780,14 @@ export class WasmBridge {
     return this.doc.saveSnapshot();
   }
 
+  shareSnapshot(sourceId: number): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const document = this.doc as HwpDocument & {
+      shareSnapshot?: (id: number) => number;
+    };
+    return document.shareSnapshot?.(sourceId) ?? document.saveSnapshot();
+  }
+
   restoreSnapshot(id: number): void {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     const doc = this.doc;

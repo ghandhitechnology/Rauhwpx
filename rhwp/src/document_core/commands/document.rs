@@ -16,6 +16,7 @@ use crate::renderer::style_resolver::{resolve_styles, ResolvedStyleSet};
 use crate::renderer::{px_to_hwpunit, DEFAULT_DPI};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 /// HWP 내보내기 + 자기 재로드 검증 결과 (#178 Stage 6).
 ///
@@ -2071,12 +2072,10 @@ impl DocumentCore {
 
     // ─── Undo/Redo 스냅샷 API ──────────────────────────
 
-    /// 현재 Document를 클론하여 스냅샷 저장소에 보관한다.
-    /// 반환값: 스냅샷 ID (u32)
-    pub fn save_snapshot_native(&mut self) -> u32 {
+    fn store_snapshot(&mut self, document: Arc<Document>) -> u32 {
         let id = self.next_snapshot_id;
         self.next_snapshot_id += 1;
-        self.snapshot_store.push((id, self.document.clone()));
+        self.snapshot_store.push((id, document));
         // 최대 100개 제한 — 초과 시 가장 오래된 스냅샷 제거.
         // [Task #2328] studio 히스토리(rhwp-studio/src/engine/history.ts 의
         // WASM_MAX_SNAPSHOTS)와 양방향 결합. 이 값을 studio 예산(MAX-2)보다 낮추면
@@ -2087,6 +2086,25 @@ impl DocumentCore {
             self.snapshot_store.remove(0);
         }
         id
+    }
+
+    /// 현재 Document를 클론하여 스냅샷 저장소에 보관한다.
+    /// 반환값: 스냅샷 ID (u32)
+    pub fn save_snapshot_native(&mut self) -> u32 {
+        self.store_snapshot(Arc::new(self.document.clone()))
+    }
+
+    /// 기존 스냅샷의 불변 Document 상태를 공유하는 새 ID를 만든다.
+    ///
+    /// 호출자가 현재 문서와 `source_id`가 같은 상태임을 보장하는 history 경계에서만 쓴다.
+    pub fn share_snapshot_native(&mut self, source_id: u32) -> Result<u32, HwpError> {
+        let document = self
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == source_id)
+            .map(|(_, document)| Arc::clone(document))
+            .ok_or_else(|| HwpError::RenderError(format!("스냅샷 {} 없음", source_id)))?;
+        Ok(self.store_snapshot(document))
     }
 
     /// 현재 Document IR은 건드리지 않고, 그로부터 파생된 모든 조판 캐시를 다시 만든다.
@@ -2124,8 +2142,8 @@ impl DocumentCore {
             .iter()
             .position(|(sid, _)| *sid == id)
             .ok_or_else(|| HwpError::RenderError(format!("스냅샷 {} 없음", id)))?;
-        let (_, doc) = self.snapshot_store[idx].clone();
-        self.document = doc;
+        let (_, document) = &self.snapshot_store[idx];
+        self.document = document.as_ref().clone();
         self.refresh_layout_native();
         Ok(super::super::helpers::json_ok())
     }
@@ -2443,6 +2461,41 @@ mod replace_content_tests {
 
     fn serialized_document(core: &DocumentCore) -> Vec<u8> {
         core.export_hwp_native().expect("document should serialize")
+    }
+
+    #[test]
+    fn shared_snapshot_ids_retain_one_immutable_document_state() {
+        let mut core = DocumentCore::from_bytes(HML).expect("HML source should open");
+        let original = serialized_document(&core);
+        let source_id = core.save_snapshot_native();
+        let shared_id = core
+            .share_snapshot_native(source_id)
+            .expect("existing snapshot should be shareable");
+
+        let source = core
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == source_id)
+            .map(|(_, document)| document)
+            .expect("source snapshot");
+        let shared = core
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == shared_id)
+            .map(|(_, document)| document)
+            .expect("shared snapshot");
+        assert!(Arc::ptr_eq(source, shared));
+
+        core.document.doc_properties.page_start_num += 1;
+        core.restore_snapshot_native(shared_id)
+            .expect("shared ID should restore the original state");
+        assert_eq!(serialized_document(&core), original);
+
+        core.discard_snapshot_native(source_id);
+        core.document.doc_properties.page_start_num += 2;
+        core.restore_snapshot_native(shared_id)
+            .expect("discarding one ID must not invalidate the shared ID");
+        assert_eq!(serialized_document(&core), original);
     }
 
     #[test]
