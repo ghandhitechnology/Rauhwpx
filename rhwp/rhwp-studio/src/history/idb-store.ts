@@ -17,7 +17,7 @@ type MetaRow = DocHistoryEntryMeta;
 
 type MemEntry = {
   meta: MetaRow;
-  irSnapshotJson?: string;
+  irSnapshot?: CompareDocumentSnapshot;
   legacyBytes?: Uint8Array;
 };
 
@@ -82,16 +82,7 @@ type BlobRow = { id: string; snapshotJson?: string; data?: ArrayBuffer };
 export async function getHistoryPayload(id: string): Promise<HistoryPayload | null> {
   const mem = memory.get(id);
   if (mem) {
-    if (mem.irSnapshotJson) {
-      try {
-        return {
-          kind: 'ir',
-          snapshot: JSON.parse(mem.irSnapshotJson) as CompareDocumentSnapshot,
-        };
-      } catch {
-        return null;
-      }
-    }
+    if (mem.irSnapshot) return { kind: 'ir', snapshot: mem.irSnapshot };
     if (mem.legacyBytes) return { kind: 'legacy', bytes: mem.legacyBytes };
     return null;
   }
@@ -195,7 +186,10 @@ export async function saveHistoryIrSnapshot(
       const oldest = [...memory.entries()].sort((a, b) => a[1].meta.createdAt - b[1].meta.createdAt)[0];
       if (oldest) memory.delete(oldest[0]);
     }
-    memory.set(id, { meta, irSnapshotJson: json });
+    memory.set(id, {
+      meta,
+      irSnapshot: JSON.parse(json) as CompareDocumentSnapshot,
+    });
     return meta;
   }
 
