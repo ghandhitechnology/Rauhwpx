@@ -222,7 +222,7 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "assignPictureImage(sec: number, parentParaIdx: number, cellPathJson: string, controlIdx: number, imageData: Uint8Array, naturalWidthPx: number, naturalHeightPx: number, extension: string)"
   },
   {
-    "method": "changeShapeZOrder",
+    "method": "changeObjectZOrder",
     "kind": "document",
     "parameters": [
       "sec",
@@ -230,7 +230,7 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "ci",
       "operation"
     ],
-    "signature": "changeShapeZOrder(sec: number, para: number, ci: number, operation: string)"
+    "signature": "changeObjectZOrder(sec: number, para: number, ci: number, operation: string)"
   },
   {
     "method": "copyControl",
