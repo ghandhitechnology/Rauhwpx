@@ -830,11 +830,7 @@ impl DocumentCore {
             self.hidden_header_footer.insert(key);
             true
         };
-        // 렌더 트리 캐시 무효화
-        let mut cache = self.page_tree_cache.borrow_mut();
-        if let Some(slot) = cache.get_mut(page_num as usize) {
-            *slot = None;
-        }
+        self.invalidate_page_tree_cache_page(page_num);
         Ok(format!("{{\"ok\":true,\"hidden\":{}}}", hidden))
     }
 

@@ -15,7 +15,7 @@ use crate::renderer::page_layout::PageLayoutInfo;
 use crate::renderer::style_resolver::{resolve_styles, ResolvedStyleSet};
 use crate::renderer::{px_to_hwpunit, DEFAULT_DPI};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// HWP 내보내기 + 자기 재로드 검증 결과 (#178 Stage 6).
 ///
@@ -631,6 +631,7 @@ impl DocumentCore {
             deferred_pagination_descriptor: None,
             pending_pagination_job: None,
             page_tree_cache: RefCell::new(Vec::new()),
+            page_tree_cache_order: RefCell::new(VecDeque::new()),
             layer_tree_json_cache: RefCell::new(Vec::new()),
             batch_mode: false,
             event_log: Vec::new(),
@@ -1599,7 +1600,7 @@ impl DocumentCore {
         self.measured_sections = Vec::new();
         self.dirty_paragraphs = Vec::new();
         self.para_column_map = Vec::new();
-        self.page_tree_cache.borrow_mut().clear();
+        self.invalidate_page_tree_cache();
         self.snapshot_store.clear();
         self.next_snapshot_id = 0;
         self.source_format = crate::parser::FileFormat::Hwp;

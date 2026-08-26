@@ -481,6 +481,8 @@ fn apply_page_number_layouts_for_section(result: &mut PaginationResult, section:
     }
 }
 
+const PAGE_RENDER_CACHE_CAPACITY: usize = 32;
+
 impl DocumentCore {
     /// 페이지 렌더 트리를 생성하여 반환한다 (native bridge / 외부 렌더러용).
     pub fn build_page_render_tree(&self, page_num: u32) -> Result<PageRenderTree, HwpError> {
@@ -1329,6 +1331,7 @@ impl DocumentCore {
         let fp = self.layer_output_options_fingerprint(profile);
         if let Some(variants) = self.layer_tree_json_cache.borrow().get(idx) {
             if let Some((_, json)) = variants.iter().find(|(f, _)| *f == fp) {
+                self.touch_page_render_cache(idx);
                 return Ok(json.clone());
             }
         }
@@ -4833,15 +4836,32 @@ impl DocumentCore {
         for i in from..cache.len() {
             cache[i] = None;
         }
+        self.page_tree_cache_order
+            .borrow_mut()
+            .retain(|page| *page < from);
         let mut json_cache = self.layer_tree_json_cache.borrow_mut();
         for i in from..json_cache.len() {
             json_cache[i].clear();
         }
     }
 
+    pub(crate) fn invalidate_page_tree_cache_page(&self, page_num: u32) {
+        let page = page_num as usize;
+        if let Some(slot) = self.page_tree_cache.borrow_mut().get_mut(page) {
+            *slot = None;
+        }
+        self.page_tree_cache_order
+            .borrow_mut()
+            .retain(|cached_page| *cached_page != page);
+        if let Some(variants) = self.layer_tree_json_cache.borrow_mut().get_mut(page) {
+            variants.clear();
+        }
+    }
+
     /// 페이지 렌더 트리 캐시 전체 무효화.
     pub(crate) fn invalidate_page_tree_cache(&self) {
         self.page_tree_cache.borrow_mut().clear();
+        self.page_tree_cache_order.borrow_mut().clear();
         self.layer_tree_json_cache.borrow_mut().clear();
         // [Task #1949] IR 이 바뀌는 재조판 경계에서 셀 단위 레이아웃 캐시(포인터 키)도
         // 함께 비워 다른 IR 의 셀 포인터 재사용으로 인한 오재사용을 방지한다.
@@ -4866,32 +4886,61 @@ impl DocumentCore {
         (page_tree_count, json_variant_count, json_bytes)
     }
 
+    fn touch_page_render_cache(&self, page: usize) {
+        let mut order = self.page_tree_cache_order.borrow_mut();
+        order.retain(|cached_page| *cached_page != page);
+        order.push_back(page);
+    }
+
+    fn cache_page_tree(&self, page: usize, tree: PageRenderTree) {
+        {
+            let mut cache = self.page_tree_cache.borrow_mut();
+            if cache.len() <= page {
+                cache.resize_with(page + 1, || None);
+            }
+            cache[page] = Some(tree);
+        }
+
+        let evicted = {
+            let mut order = self.page_tree_cache_order.borrow_mut();
+            order.retain(|cached_page| *cached_page != page);
+            order.push_back(page);
+            (order.len() > PAGE_RENDER_CACHE_CAPACITY)
+                .then(|| order.pop_front())
+                .flatten()
+        };
+        let Some(evicted) = evicted else {
+            return;
+        };
+
+        if let Some(slot) = self.page_tree_cache.borrow_mut().get_mut(evicted) {
+            *slot = None;
+        }
+        if let Some(variants) = self.layer_tree_json_cache.borrow_mut().get_mut(evicted) {
+            variants.clear();
+        }
+    }
+
     /// 캐시된 페이지 렌더 트리를 반환한다 (캐시 미스 시 빌드 후 캐시).
     pub(crate) fn build_page_tree_cached(&self, page_num: u32) -> Result<PageRenderTree, HwpError> {
         let idx = page_num as usize;
 
         // 캐시 크기 확보 + 히트 확인
-        {
+        let cached = {
             let mut cache = self.page_tree_cache.borrow_mut();
             if cache.len() <= idx {
                 cache.resize_with(idx + 1, || None);
             }
-            if let Some(ref tree) = cache[idx] {
-                return Ok(tree.clone());
-            }
+            cache[idx].clone()
+        };
+        if let Some(tree) = cached {
+            self.touch_page_render_cache(idx);
+            return Ok(tree);
         }
 
         // 캐시 미스 → 빌드
         let tree = self.build_page_tree(page_num)?;
-        let cloned = tree.clone();
-
-        {
-            let mut cache = self.page_tree_cache.borrow_mut();
-            if cache.len() <= idx {
-                cache.resize_with(idx + 1, || None);
-            }
-            cache[idx] = Some(cloned);
-        }
+        self.cache_page_tree(idx, tree.clone());
 
         Ok(tree)
     }
@@ -4914,11 +4963,9 @@ impl DocumentCore {
 
         if !cached {
             let tree = self.build_page_tree(page_num)?;
-            let mut cache = self.page_tree_cache.borrow_mut();
-            if cache.len() <= idx {
-                cache.resize_with(idx + 1, || None);
-            }
-            cache[idx] = Some(tree);
+            self.cache_page_tree(idx, tree);
+        } else {
+            self.touch_page_render_cache(idx);
         }
 
         let cache = self.page_tree_cache.borrow();
@@ -5754,6 +5801,36 @@ mod tests {
     #[test]
     fn issue_2308_document_core_remains_send() {
         assert_send::<DocumentCore>();
+    }
+
+    #[test]
+    fn page_render_cache_is_bounded_and_evicts_least_recently_used_page() {
+        let core = DocumentCore::new_empty();
+        let inserted = PAGE_RENDER_CACHE_CAPACITY + 3;
+        for page in 0..inserted {
+            core.cache_page_tree(page, PageRenderTree::new(page as u32, 100.0, 100.0));
+            let mut json_cache = core.layer_tree_json_cache.borrow_mut();
+            if json_cache.len() <= page {
+                json_cache.resize_with(page + 1, Vec::new);
+            }
+            json_cache[page].push((0, format!("page-{page}")));
+        }
+
+        assert_eq!(core.render_cache_stats().0, PAGE_RENDER_CACHE_CAPACITY);
+        assert_eq!(core.render_cache_stats().1, PAGE_RENDER_CACHE_CAPACITY);
+        for page in 0..3 {
+            assert!(core.page_tree_cache.borrow()[page].is_none());
+            assert!(core.layer_tree_json_cache.borrow()[page].is_empty());
+        }
+
+        core.touch_page_render_cache(3);
+        core.cache_page_tree(inserted, PageRenderTree::new(inserted as u32, 100.0, 100.0));
+        assert!(core.page_tree_cache.borrow()[3].is_some());
+        assert!(core.page_tree_cache.borrow()[4].is_none());
+        assert_eq!(
+            core.page_tree_cache_order.borrow().len(),
+            PAGE_RENDER_CACHE_CAPACITY
+        );
     }
 
     #[test]

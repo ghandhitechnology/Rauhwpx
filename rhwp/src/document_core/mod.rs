@@ -28,7 +28,7 @@ use crate::renderer::style_resolver::ResolvedStyleSet;
 use crate::renderer::typeset::ResumableTablePaginationJob;
 use crate::renderer::DEFAULT_DPI;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 /// 기본 폰트 fallback 경로
@@ -177,6 +177,8 @@ pub struct DocumentCore {
     pub(crate) pending_pagination_job: Option<PendingPaginationJob>,
     /// 페이지별 렌더 트리 캐시 (지연 구축, 부분 무효화)
     pub(crate) page_tree_cache: RefCell<Vec<Option<PageRenderTree>>>,
+    /// 페이지 렌더 캐시 LRU 순서. 앞이 가장 오래된 페이지다.
+    pub(crate) page_tree_cache_order: RefCell<VecDeque<usize>>,
     /// [Task #2222] 페이지 레이어 트리 JSON 캐시 — (출력옵션 지문, 직렬화 결과).
     /// 이미지 base64 인라인으로 페이지당 1MB 급이라 재직렬화(실측 15ms/회)가
     /// 렌더 자체와 맞먹는다. 편집 무효화는 page_tree_cache 와 동일 지점에서.
@@ -369,6 +371,7 @@ impl DocumentCore {
             deferred_pagination_descriptor: None,
             pending_pagination_job: None,
             page_tree_cache: RefCell::new(Vec::new()),
+            page_tree_cache_order: RefCell::new(VecDeque::new()),
             layer_tree_json_cache: RefCell::new(Vec::new()),
             batch_mode: false,
             event_log: Vec::new(),
