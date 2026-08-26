@@ -364,3 +364,22 @@ test('provider environments precreate every private CLI state directory', async 
     }
   }
 });
+
+test('unreferenced blob delete is gated on the row actually disappearing', async (t) => {
+  const { root, database } = await fixture(t);
+  const blobs = new BlobStore(database, { root: path.join(root, 'objects') });
+  database.prepare(`INSERT INTO devices(id, name, created_at, last_seen_at) VALUES ('device', 'Device', 1, 1)`).run();
+  const documentBytes = Buffer.from('keep-me');
+  const digest = createHash('sha256').update(documentBytes).digest('hex');
+  const initialized = await blobs.initUpload({
+    deviceId: 'device', sha256: digest, size: documentBytes.length, name: 'doc', kind: 'document',
+  });
+  await blobs.appendChunk({ uploadId: initialized.uploadId, deviceId: 'device', offset: 0, bytes: documentBytes });
+  database.prepare('UPDATE blobs SET ref_count = 1 WHERE sha256 = ?').run(digest);
+  const storagePath = blobs.get(digest).storage_path;
+  assert.equal(await blobs.removeUnreferenced(digest), false);
+  await fs.access(storagePath);
+  database.prepare('UPDATE blobs SET ref_count = 0 WHERE sha256 = ?').run(digest);
+  assert.equal(await blobs.removeUnreferenced(digest), true);
+  await assert.rejects(fs.access(storagePath), { code: 'ENOENT' });
+});

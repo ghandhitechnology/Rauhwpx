@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - 'feat/**'
+  workflow_dispatch:
 
 permissions:
   contents: read

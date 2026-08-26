@@ -1,34 +1,47 @@
-# Depot CI Migration
-# Source: .github/workflows/desktop-sessions.yml
-#
-# No changes were necessary.
+# Depot CI copy of .github/workflows/desktop-sessions.yml.
+# Depot CI sandboxes are Ubuntu only. Keep GitHub-hosted macOS/Windows labels
+# in .github/workflows. Map those session jobs to Ubuntu here. Job names stay
+# Session tests (${{ matrix.os }}) so the check titles match GitHub Actions.
 
 name: Desktop session checks
+
 on:
   pull_request:
   push:
     branches:
       - main
       - 'feat/**'
+  workflow_dispatch:
+
 permissions:
   contents: read
+
 concurrency:
   group: desktop-sessions-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
   session-tests:
     name: Session tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - macos-15
-          - windows-latest
-    runs-on: ${{ matrix.os }}
+        include:
+          - os: macos-15
+            runner: depot-ubuntu-24.04
+          - os: windows-latest
+            runner: depot-ubuntu-24.04
+          - os: ubuntu-24.04
+            runner: depot-ubuntu-24.04
+          - os: ubuntu-24.04-arm
+            runner: depot-ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
@@ -38,12 +51,27 @@ jobs:
             package-lock.json
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
+
+      - name: Install pinned Rust toolchain for browser merge tests
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack for browser merge tests
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build WASM engine for browser merge tests
+        working-directory: rhwp
+        run: wasm-pack build --target web
+
       - name: Install dependencies
         shell: bash
         run: |
           npm ci
           npm --prefix rhwp/rhwp-agent ci
           npm --prefix rhwp/rhwp-studio ci
+
       - name: Check desktop and hub syntax
         shell: bash
         run: |
@@ -51,7 +79,70 @@ jobs:
           node --check desktop/agent-hub.mjs
           node --check desktop/session-manager.mjs
           node --check rhwp/rhwp-agent/server.mjs
+
       - name: Test agent hub and process lifecycle
         run: npm --prefix rhwp/rhwp-agent test
+
       - name: Test Studio session persistence and desktop contracts
         run: npm --prefix rhwp/rhwp-studio test
+
+  linux-packaging:
+    name: Linux package (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: depot-ubuntu-24.04
+            arch: x64
+          - runner: depot-ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            rhwp/rhwp-studio/package-lock.json
+            rhwp/rhwp-agent/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build WASM engine
+        working-directory: rhwp
+        run: wasm-pack build --target web
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Build AppImage and Debian package
+        run: npm run dist:linux:${{ matrix.arch }}
+
+      - name: Verify Linux artifacts
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          if [ "${EXPECTED_ARCH}" = arm64 ]; then
+            test -f release/Rauhwpx-*-arm64.AppImage
+            test -f release/Rauhwpx-*-arm64.deb
+            test -f release/latest-linux-arm64.yml
+          else
+            test -f release/Rauhwpx-*-x86_64.AppImage
+            test -f release/Rauhwpx-*-amd64.deb
+            test -f release/latest-linux.yml
+          fi
