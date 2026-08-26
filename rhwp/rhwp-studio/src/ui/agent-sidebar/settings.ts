@@ -405,8 +405,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const navButtons = new Map<SettingsDestination, HTMLButtonElement>();
   const destinations: ReadonlyArray<{ id: SettingsDestination; label: string }> = [
     { id: 'editing', label: '편집' },
-    { id: 'ai', label: 'AI' },
-    { id: 'connections', label: '연결' },
+    { id: 'ai', label: 'AI 설정' },
+    { id: 'connections', label: 'AI 연결' },
   ];
   for (const destination of destinations) {
     const button = el('button', 'ag-settings-nav-button', destination.label);
@@ -948,7 +948,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // ── 6. 템플릿 ─────────────────────────────────────────
   const templatesSection = createSection('템플릿');
-  const templatesNote = el('p', 'ag-settings-note', 'HWP/HWPX 파일을 기기 전체 템플릿으로 보관합니다. 채팅에서는 /templates로 선택하세요.');
+  const templatesNote = el('p', 'ag-settings-note', '채팅에서는 /templates로 선택하세요.');
   const templatesList = el('div', 'ag-template-list');
   const templatesStatus = el('p', 'ag-settings-cliproxy-error');
   templatesStatus.hidden = true;
@@ -1182,14 +1182,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const aiFooter = el('div', 'ag-settings-apply-footer');
   aiFooter.append(aiStatus, aiCancel, aiApply);
   const aiContent = el('div', 'ag-settings-destination-content');
-  aiContent.append(defaults.root, instructionsSection.root, calibration.root, aiFooter);
+  aiContent.append(defaults.root, instructionsSection.root, calibration.root, templatesSection.root, aiFooter);
   panes.get('ai')?.appendChild(aiContent);
 
   const connectionContent = el('div', 'ag-settings-destination-content');
   connectionContent.append(connection.root, usageSection.root);
   panes.get('connections')?.appendChild(connectionContent);
-
-  editingSettings.documentResources.appendChild(templatesSection.root);
 
   aiApply.addEventListener('click', () => void applyAiDraft());
   aiCancel.addEventListener('click', cancelAiDraft);

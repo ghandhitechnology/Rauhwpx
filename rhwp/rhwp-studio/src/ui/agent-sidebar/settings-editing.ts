@@ -15,6 +15,7 @@ import {
 } from '../../core/local-fonts.ts';
 import type { EventBus } from '../../core/event-bus.ts';
 import { FontSetEditDialog } from '../font-set-edit-dialog.ts';
+import { createChevron } from '../chevron.ts';
 import {
   cloneEditorDraft,
   editorDraftEquals,
@@ -45,14 +46,14 @@ function group(title: string, description?: string): { root: HTMLElement; body: 
 
 function toggleRow(
   label: string,
-  description: string,
+  description?: string,
 ): { root: HTMLLabelElement; input: HTMLInputElement } {
   const root = el('label', 'ag-settings-control-row ag-settings-toggle-row');
   const copy = el('span', 'ag-settings-control-copy');
-  copy.append(
-    el('span', 'ag-settings-control-label', label),
-    el('span', 'ag-settings-control-description', description),
-  );
+  copy.append(el('span', 'ag-settings-control-label', label));
+  if (description) {
+    copy.append(el('span', 'ag-settings-control-description', description));
+  }
   const input = document.createElement('input');
   input.type = 'checkbox';
   input.className = 'ag-settings-toggle-input';
@@ -66,17 +67,17 @@ function toggleRow(
 
 function numberRow(
   label: string,
-  description: string,
+  description: string | undefined,
   min: number,
   max: number,
   unit: string,
 ): { root: HTMLLabelElement; input: HTMLInputElement } {
   const root = el('label', 'ag-settings-control-row');
   const copy = el('span', 'ag-settings-control-copy');
-  copy.append(
-    el('span', 'ag-settings-control-label', label),
-    el('span', 'ag-settings-control-description', description),
-  );
+  copy.append(el('span', 'ag-settings-control-label', label));
+  if (description) {
+    copy.append(el('span', 'ag-settings-control-description', description));
+  }
   const field = el('span', 'ag-settings-number-field');
   const input = document.createElement('input');
   input.type = 'number';
@@ -107,7 +108,6 @@ function localFontStatus(state: LocalFontState): string {
 
 export interface EditingSettingsController {
   element: HTMLElement;
-  documentResources: HTMLElement;
   open(): void;
   isDirty(): boolean;
   apply(): boolean;
@@ -145,10 +145,7 @@ export function createEditingSettings(options: {
   const appearance = group('화면과 보기', '편집 화면과 문서 표시 방식을 정합니다.');
   const themeRow = el('div', 'ag-settings-control-row');
   const themeCopy = el('span', 'ag-settings-control-copy');
-  themeCopy.append(
-    el('span', 'ag-settings-control-label', '테마'),
-    el('span', 'ag-settings-control-description', '앱 화면의 밝기를 선택합니다.'),
-  );
+  themeCopy.append(el('span', 'ag-settings-control-label', '테마'));
   const themeChoices = el('div', 'ag-settings-segmented');
   themeChoices.setAttribute('role', 'radiogroup');
   themeChoices.setAttribute('aria-label', '테마');
@@ -168,7 +165,7 @@ export function createEditingSettings(options: {
   themeRow.append(themeCopy, themeChoices);
 
   const paragraphMarks = toggleRow('문단 부호', '문단 끝에 ¶ 표시를 보여 줍니다.');
-  const controlCodes = toggleRow('조판 부호', '개체와 조판 제어 표시를 문단 부호와 함께 보여 줍니다.');
+  const controlCodes = toggleRow('조판 부호');
   const clipView = toggleRow('잘림 보기', '편집용지 경계 밖의 내용을 계속 보여 줍니다.');
   const pictureRatio = toggleRow('그림 비율 유지', '그림 속성을 열 때 너비와 높이의 비율을 기본으로 고정합니다.');
   appearance.body.append(
@@ -201,16 +198,26 @@ export function createEditingSettings(options: {
   const fonts = group('글꼴', '최근 글꼴, 대표 글꼴, 이 기기의 로컬 글꼴을 관리합니다.');
   const recentFonts = toggleRow('최근 사용 글꼴 보이기', '글꼴 메뉴에 직접 적용한 글꼴을 최신순으로 표시합니다.');
   const recentCount = numberRow('표시 개수', '최근 글꼴 목록에 표시할 개수입니다.', 1, 5, '개');
-  const fontSetHeader = el('div', 'ag-settings-resource-header');
-  const fontSetHeaderCopy = el('div', 'ag-settings-control-copy');
-  fontSetHeaderCopy.append(
+  const fontSets = el('div', 'ag-settings-disclosure');
+  const fontSetHeader = el('div', 'ag-settings-disclosure-header');
+  const fontSetToggle = el('button', 'ag-settings-disclosure-toggle');
+  fontSetToggle.type = 'button';
+  fontSetToggle.setAttribute('aria-expanded', 'false');
+  fontSetToggle.setAttribute('aria-controls', 'ag-settings-font-set-list');
+  const fontSetCount = el('span', 'ag-settings-disclosure-count');
+  fontSetToggle.append(
+    createChevron('ag-settings-disclosure-chevron'),
     el('span', 'ag-settings-control-label', '대표 글꼴'),
-    el('span', 'ag-settings-control-description', '언어별 글꼴을 한 묶음으로 적용합니다.'),
+    fontSetCount,
   );
-  const addFontSet = el('button', 'ag-settings-btn', '대표 글꼴 추가');
+  const addFontSet = el('button', 'ag-settings-btn', '추가');
   addFontSet.type = 'button';
-  fontSetHeader.append(fontSetHeaderCopy, addFontSet);
-  const fontSetList = el('div', 'ag-settings-resource-list');
+  addFontSet.setAttribute('aria-label', '대표 글꼴 추가');
+  fontSetHeader.append(fontSetToggle, addFontSet);
+  const fontSetList = el('div', 'ag-settings-resource-list ag-settings-font-set-list');
+  fontSetList.id = 'ag-settings-font-set-list';
+  fontSetList.hidden = true;
+  fontSets.append(fontSetHeader, fontSetList);
 
   const localHeader = el('div', 'ag-settings-resource-header');
   const localCopy = el('div', 'ag-settings-control-copy');
@@ -224,7 +231,16 @@ export function createEditingSettings(options: {
   clearFonts.type = 'button';
   localActions.append(detectFonts, clearFonts);
   localHeader.append(localCopy, localActions);
-  fonts.body.append(recentFonts.root, recentCount.root, fontSetHeader, fontSetList, localHeader);
+  fonts.body.append(recentFonts.root, recentCount.root, fontSets, localHeader);
+
+  const setFontSetsOpen = (open: boolean): void => {
+    fontSetList.hidden = !open;
+    fontSetToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    fontSets.classList.toggle('ag-open', open);
+  };
+  fontSetToggle.addEventListener('click', () => {
+    setFontSetsOpen(fontSetList.hidden !== false);
+  });
 
   recentFonts.input.addEventListener('change', () => {
     draft.font.showRecentFonts = recentFonts.input.checked;
@@ -238,8 +254,8 @@ export function createEditingSettings(options: {
   const renderFontSets = (): void => {
     fontSetList.replaceChildren();
     const appendRow = (fontSet: FontSet, index: number | null) => {
-      const row = el('div', 'ag-settings-resource-row');
-      const copy = el('div', 'ag-settings-control-copy');
+      const row = el('div', 'ag-settings-resource-row ag-settings-font-set-row');
+      const copy = el('div', 'ag-settings-control-copy ag-settings-font-set-copy');
       const name = el('span', 'ag-settings-control-label', fontSet.name);
       const summary = el(
         'span',
@@ -282,6 +298,8 @@ export function createEditingSettings(options: {
     };
     BUILTIN_FONT_SETS.forEach((fontSet) => appendRow(fontSet, null));
     userSettings.getUserFontSets().forEach((fontSet, index) => appendRow(fontSet, index));
+    const total = BUILTIN_FONT_SETS.length + userSettings.getUserFontSets().length;
+    fontSetCount.textContent = `${total}개`;
   };
 
   addFontSet.addEventListener('click', () => {
@@ -291,6 +309,7 @@ export function createEditingSettings(options: {
         return;
       }
       renderFontSets();
+      setFontSetsOpen(true);
       eventBus?.emit('font-settings-changed');
     }).show();
   });
@@ -333,17 +352,15 @@ export function createEditingSettings(options: {
   });
 
   const files = group('저장과 파일', '문서 복구와 파일 저장 안내를 정합니다.');
-  const recovery = toggleRow('복구용 자동 저장', '편집 중인 문서의 복구본을 주기적으로 만듭니다.');
-  const recoveryInterval = numberRow('복구 간격', '대형 문서는 간격을 길게 두면 멈춤을 줄일 수 있습니다.', 1, 120, '분');
-  const idleSave = toggleRow('쉴 때 자동 저장', '입력이 멈춘 뒤 복구본을 만듭니다.');
+  const recovery = toggleRow('복구용 자동 저장');
+  const recoveryInterval = numberRow('복구 간격', undefined, 1, 120, '분');
+  const idleSave = toggleRow('쉴 때 자동 저장');
   const idleDelay = numberRow('대기 시간', '마지막 입력 뒤 자동 저장까지 기다리는 시간입니다.', 5, 600, '초');
-  const pdfGuidance = toggleRow('PDF 저장 안내', 'PDF 저장을 시작하기 전에 인쇄 대상 선택 방법을 보여 줍니다.');
   files.body.append(
     recovery.root,
     recoveryInterval.root,
     idleSave.root,
     idleDelay.root,
-    pdfGuidance.root,
   );
   recovery.input.addEventListener('change', () => {
     draft.autosave.recoveryEnabled = recovery.input.checked;
@@ -361,15 +378,9 @@ export function createEditingSettings(options: {
     draft.autosave.idleDelaySeconds = Number(idleDelay.input.value);
     renderDirty();
   });
-  pdfGuidance.input.addEventListener('change', () => {
-    draft.dialog.showPdfPrintGuidance = pdfGuidance.input.checked;
-    render();
-  });
-
-  const documentGroup = group('문서 자원', '문서 템플릿과 버전 관리 방식을 선택합니다.');
+  const documentGroup = group('문서 자원');
   const versionControl = toggleRow('한컴용 Git 사용하기', '기본 문서 이력 대신 브랜치 기반 버전 관리를 사용합니다.');
-  const documentResources = el('div', 'ag-settings-document-resources');
-  documentGroup.body.append(versionControl.root, documentResources);
+  documentGroup.body.append(versionControl.root);
   versionControl.input.addEventListener('change', () => {
     draft.versionControl.useHancomGit = versionControl.input.checked;
     render();
@@ -413,11 +424,10 @@ export function createEditingSettings(options: {
     recentCount.input.disabled = !draft.font.showRecentFonts;
     recovery.input.checked = draft.autosave.recoveryEnabled;
     recoveryInterval.input.value = String(draft.autosave.recoveryIntervalMinutes);
-    recoveryInterval.input.disabled = !draft.autosave.recoveryEnabled;
+    recoveryInterval.root.hidden = !draft.autosave.recoveryEnabled;
     idleSave.input.checked = draft.autosave.idleSaveEnabled;
     idleDelay.input.value = String(draft.autosave.idleDelaySeconds);
     idleDelay.input.disabled = !draft.autosave.idleSaveEnabled;
-    pdfGuidance.input.checked = draft.dialog.showPdfPrintGuidance;
     versionControl.input.checked = draft.versionControl.useHancomGit;
     renderDirty();
   }
@@ -500,7 +510,6 @@ export function createEditingSettings(options: {
 
   return {
     element,
-    documentResources,
     open(): void {
       if (!isDirty()) {
         baseline = userSettings.getEditorScalarSettings();

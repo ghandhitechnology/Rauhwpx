@@ -104,6 +104,7 @@ test('목적지 이동과 닫기는 적용·버리기·계속 편집 선택을 �
   assert.match(settings, /async function resolveDirtyExit\(\): Promise<boolean>/);
   assert.match(settings, /requestClose: resolveDirtyExit/);
   assert.match(settings, /dialog\.setAttribute\('aria-modal', 'true'\)/);
+  assert.match(settingsCss, /\.ag-settings-dirty-dialog \{[\s\S]*--ag-bg: var\(--n-surface\)[\s\S]*background: var\(--n-surface\)/);
 });
 
 test('설정 탐색은 넓은 rail과 좁은 고정 tabs로 반응한다', () => {
@@ -114,6 +115,15 @@ test('설정 탐색은 넓은 rail과 좁은 고정 tabs로 반응한다', () =>
   assert.match(settings, /button\.setAttribute\('role', 'tab'\)/);
 });
 
+test('설정 적용 버튼은 카드 없이 콘텐츠 하단에 머문다', () => {
+  assert.match(
+    settingsCss,
+    /\.ag-settings-apply-footer \{[\s\S]*position: static;[\s\S]*background: transparent;/,
+  );
+  const footerRule = settingsCss.match(/\.ag-settings-apply-footer \{([\s\S]*?)\n\}/)?.[1] ?? '';
+  assert.doesNotMatch(footerRule, /bottom:|z-index:|border:|border-radius:|box-shadow:|backdrop-filter:/);
+});
+
 test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', () => {
   for (const title of ['연결', '기본 설정', '글쓰기 보정', '템플릿', '사용량']) {
     assert.match(settings, new RegExp(`createSection\\('${title}'\\)`));
@@ -122,9 +132,39 @@ test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', 
     assert.match(editingSettings, new RegExp(`group\\('${title}'`));
   }
   assert.match(settings, /\{ id: 'editing', label: '편집' \}/);
-  assert.match(settings, /\{ id: 'ai', label: 'AI' \}/);
-  assert.match(settings, /\{ id: 'connections', label: '연결' \}/);
+  assert.match(settings, /\{ id: 'ai', label: 'AI 설정' \}/);
+  assert.match(settings, /\{ id: 'connections', label: 'AI 연결' \}/);
   assert.match(settingsCss, /\.ag-settings-section-title/);
+});
+
+test('복구 간격은 복구용 자동 저장을 켰 때만 보인다', () => {
+  assert.match(
+    editingSettings,
+    /recoveryInterval\.root\.hidden = !draft\.autosave\.recoveryEnabled/,
+  );
+});
+
+test('대표 글꼴은 접을 수 있는 압축 목록으로 보인다', () => {
+  assert.match(editingSettings, /fontSetList\.hidden = true/);
+  assert.match(editingSettings, /ag-settings-resource-list ag-settings-font-set-list/);
+  assert.match(editingSettings, /ag-settings-resource-row ag-settings-font-set-row/);
+  assert.match(settingsCss, /\.ag-settings-font-set-list \{[\s\S]*gap: 0/);
+  assert.match(settingsCss, /\.ag-settings-font-set-list\[hidden\] \{\s*display: none/);
+  assert.match(settingsCss, /\.ag-settings-font-set-row \{[\s\S]*min-height: 42px/);
+});
+
+test('저장 설정은 짧은 라벨만 보이고 PDF 안내는 기본값을 쓴다', () => {
+  for (const removedCopy of [
+    '편집 중인 문서의 복구본을 주기적으로 만듭니다.',
+    '대형 문서는 간격을 길게 두면 멈춤을 줄일 수 있습니다.',
+    '입력이 멈춘 뒤 복구본을 만듭니다.',
+    'PDF 저장 안내',
+    '문서 템플릿과 버전 관리 방식을 선택합니다.',
+  ]) {
+    assert.doesNotMatch(editingSettings, new RegExp(removedCopy));
+  }
+  assert.match(settings, /채팅에서는 \/templates로 선택하세요\./);
+  assert.doesNotMatch(settings, /HWP\/HWPX 파일을 기기 전체 템플릿으로 보관합니다/);
 });
 
 test('한컴용 Git 토글은 기본 이력과 Git 버전 관리 진입을 전환한다', () => {
@@ -145,6 +185,11 @@ test('버전 버튼은 설정과 관계없이 표시되고 현재 버전 관리 
 });
 
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {
+  assert.match(
+    settings,
+    /aiContent\.append\(defaults\.root, instructionsSection\.root, calibration\.root, templatesSection\.root, aiFooter\)/,
+  );
+  assert.doesNotMatch(editingSettings, /documentResources/);
   assert.match(settings, /requestTemplateName\('템플릿 추가'/);
   assert.match(settings, /bridge\.addTemplate\(file, name\)/);
   assert.match(settings, /bridge\.renameTemplate\(id, name\)/);

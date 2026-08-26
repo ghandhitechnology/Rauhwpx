@@ -1303,6 +1303,13 @@
   padding: 10px 12px;
 }
 
+/* 설명 없는 행은 min-height를 풀어서 라벨+컨트롤만으로 높이를 잡는다. */
+.ag-settings-control-row:not(:has(.ag-settings-control-description)),
+.ag-settings-control-row.ag-settings-toggle-row:not(:has(.ag-settings-control-description)),
+.ag-settings-resource-header:not(:has(.ag-settings-control-description)) {
+  min-height: 0;
+}
+
 .ag-settings-control-copy {
   display: flex;
   flex: 1 1 auto;
@@ -1380,11 +1387,123 @@
   font-variant-numeric: tabular-nums;
 }
 
-.ag-settings-resource-list,
-.ag-settings-document-resources {
+.ag-settings-resource-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.ag-settings-disclosure {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ag-settings-disclosure-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 4px 4px 4px 10px;
+  border-bottom: 1px solid var(--ag-border);
+}
+
+.ag-settings-disclosure-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: stretch;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-settings-disclosure-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.ag-settings-disclosure-chevron {
+  flex: 0 0 auto;
+  color: var(--ag-text-muted);
+  transform: rotate(-90deg);
+  transition: transform 120ms ease;
+}
+
+.ag-settings-disclosure-toggle[aria-expanded='true'] .ag-settings-disclosure-chevron {
+  transform: rotate(0deg);
+}
+
+.ag-settings-disclosure-count {
+  overflow: hidden;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-settings-font-set-list {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-bg-2);
+}
+
+.ag-settings-font-set-list[hidden] {
+  display: none;
+}
+
+.ag-settings-font-set-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 42px;
+  padding: 6px 10px;
+  gap: 10px;
+  border: 0;
+  border-bottom: 1px solid var(--ag-border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.ag-settings-font-set-row:last-child {
+  border-bottom: 0;
+}
+
+.ag-settings-font-set-copy {
+  gap: 1px;
+}
+
+.ag-settings-font-set-copy .ag-settings-control-label,
+.ag-settings-font-set-copy .ag-settings-control-description {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-settings-font-set-row .ag-settings-actions {
+  flex-wrap: nowrap;
+}
+
+.ag-settings-font-set-row .ag-settings-btn {
+  min-height: 26px;
+  padding-inline: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-settings-disclosure-chevron {
+    transition: none;
+  }
 }
 
 .ag-settings-resource-badge {
@@ -1396,26 +1515,16 @@
   font-weight: 700;
 }
 
-.ag-settings-document-resources > .ag-settings-section {
-  margin-top: 8px;
-}
-
 .ag-settings-apply-footer {
-  position: sticky;
-  bottom: 0;
-  z-index: 3;
+  position: static;
   display: flex;
   align-items: center;
   gap: 8px;
   justify-content: flex-end;
-  min-height: 54px;
-  margin: 22px -8px -76px;
-  padding: 8px;
-  border: 1px solid var(--ag-border);
-  border-radius: var(--ag-r-panel);
-  background: color-mix(in srgb, var(--ag-bg) 92%, transparent);
-  box-shadow: var(--n-elev-2);
-  backdrop-filter: blur(12px);
+  min-height: 44px;
+  margin: 22px 0 -76px;
+  padding: 8px 0;
+  background: transparent;
 }
 
 .ag-settings-apply-status {
@@ -1458,12 +1567,17 @@
 }
 
 .ag-settings-dirty-dialog {
+  --ag-bg: var(--n-surface);
+  --ag-border-strong: var(--n-hairline-strong);
+  --ag-text: var(--n-text);
+  --ag-text-secondary: var(--n-text-secondary);
+  --ag-err: var(--ui-danger);
   box-sizing: border-box;
   width: min(420px, 100%);
   padding: 20px;
   border: 1px solid var(--ag-border-strong);
   border-radius: var(--ag-r-panel);
-  background: var(--ag-bg);
+  background: var(--n-surface);
   box-shadow: var(--n-elev-4);
   color: var(--ag-text);
 }

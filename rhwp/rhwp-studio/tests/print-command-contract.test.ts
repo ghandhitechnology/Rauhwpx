@@ -84,7 +84,7 @@ test('PDF 경로는 안내·진행 모달을 닫은 뒤 native 인쇄창을 호�
   assert.match(pdfDialogSource, /printProgressText\('pdf'/);
   assert.match(commandSource, /getShowPdfPrintGuidance\(\)/);
   assert.match(commandSource, /setShowPdfPrintGuidance\(false\)/);
-  assert.match(editingSettingsSource, /PDF 저장 안내/);
+  assert.doesNotMatch(editingSettingsSource, /PDF 저장 안내/);
   assert.match(commandSource, /dialog\.closeBeforePrint\(\)/);
   assert.match(commandSource, /await waitForHostPaint\(\)/);
   assert.match(commandSource, /document\.title = pdfPrintTitle\(wasm\.fileName\)/);
