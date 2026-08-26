@@ -27,6 +27,7 @@ export interface NativeFileHandleDescriptor {
   handleId: string;
   name: string;
   saveTargetCreated?: boolean;
+  verifiedDocumentId?: string;
 }
 
 export interface DocumentOwnershipIdentity {
@@ -66,6 +67,10 @@ export interface RhwpDesktopApi {
     suggestedName: string;
     extension: 'hwp' | 'hwpx' | 'hml';
   }) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
+  savePortableHistoryFile?: (payload: {
+    suggestedName: string;
+    files: ReadonlyArray<{ name: string; bytes: Uint8Array }>;
+  }) => Promise<{ fileName: string; byteLength: number } | null>;
   releaseNativeFile?: (handleId: string) => Promise<void>;
   readNativeFile?: (handleId: string) => Promise<NativeFileReadResult>;
   getNativeFileSourcePath?: (handleId: string) => Promise<string | null>;
@@ -76,6 +81,11 @@ export interface RhwpDesktopApi {
   writeNativeFile?: (
     handleId: string,
     bytes: Uint8Array,
+    identity: DocumentOwnershipIdentity,
+  ) => Promise<{ name: string; byteLength: number }>;
+  writePortableHistoryFile?: (
+    handleId: string,
+    files: ReadonlyArray<{ name: string; bytes: Uint8Array }>,
     identity: DocumentOwnershipIdentity,
   ) => Promise<{ name: string; byteLength: number }>;
   isSameNativeFile?: (firstHandleId: string, secondHandleId: string) => Promise<boolean>;
@@ -204,6 +214,7 @@ const nativeHandleMetadata = new WeakMap<FileSystemFileHandleLike, {
   api: RhwpDesktopApi;
   handleId: string;
   identity: DocumentOwnershipIdentity | null;
+  readonly verifiedDocumentId: string | null;
 }>();
 const browserLaunchId = createSessionId('launch');
 const BROWSER_SESSION_ID_KEY = 'rhwp-renderer-session-id-v1';
@@ -399,7 +410,16 @@ function validNativeDescriptor(value: unknown): value is NativeFileHandleDescrip
     && typeof descriptor.handleId === 'string'
     && descriptor.handleId.length > 0
     && typeof descriptor.name === 'string'
-    && descriptor.name.length > 0;
+    && descriptor.name.length > 0
+    && (
+      descriptor.verifiedDocumentId === undefined
+      || (
+        typeof descriptor.verifiedDocumentId === 'string'
+        && descriptor.verifiedDocumentId.length > 0
+        && descriptor.verifiedDocumentId === descriptor.verifiedDocumentId.trim()
+        && !descriptor.verifiedDocumentId.includes('\0')
+      )
+    );
 }
 
 export function createNativeFileHandle(
@@ -467,8 +487,20 @@ export function createNativeFileHandle(
       return 'granted';
     },
   };
-  nativeHandleMetadata.set(handle, { api, handleId: descriptor.handleId, identity: null });
+  nativeHandleMetadata.set(handle, {
+    api,
+    handleId: descriptor.handleId,
+    identity: null,
+    verifiedDocumentId: descriptor.verifiedDocumentId ?? null,
+  });
   return handle;
+}
+
+/** Main-issued identity derived from the exact canonical path bookmark. */
+export function getNativeFileHandleVerifiedDocumentId(
+  handle: FileSystemFileHandleLike | null | undefined,
+): string | null {
+  return handle ? nativeHandleMetadata.get(handle)?.verifiedDocumentId ?? null : null;
 }
 
 export function bindNativeFileHandleIdentity(
@@ -549,6 +581,49 @@ export async function pickDesktopNativeSaveFile(
   if ('owned' in result) throw new Error('다른 창에서 이미 열려 있는 문서입니다.');
   if (!validNativeDescriptor(result)) throw new Error('Desktop save picker returned an invalid handle');
   return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
+}
+
+export async function saveDesktopPortableHistoryFile(
+  folder: { folderName: string; files: ReadonlyArray<{ name: string; bytes: Uint8Array }> },
+  win?: DesktopHost,
+): Promise<'saved' | 'cancelled' | 'unavailable'> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.savePortableHistoryFile) return 'unavailable';
+  const result = await api.savePortableHistoryFile({
+    suggestedName: folder.folderName,
+    files: folder.files.map((file) => ({
+      name: file.name,
+      bytes: new Uint8Array(file.bytes),
+    })),
+  });
+  return result ? 'saved' : 'cancelled';
+}
+
+/** Overwrite an already-open native `.rhwpx` package without showing a save picker. */
+export async function writeDesktopPortableHistoryFile(
+  handle: FileSystemFileHandleLike | null | undefined,
+  folder: { folderName: string; files: ReadonlyArray<{ name: string; bytes: Uint8Array }> },
+  win?: DesktopHost,
+): Promise<'saved' | 'unavailable'> {
+  const metadata = handle ? nativeHandleMetadata.get(handle) : null;
+  const api = desktopHost(win)?.rhwpDesktop ?? metadata?.api;
+  if (
+    !handle
+    || handle.identityKind !== 'native-path'
+    || !metadata?.identity
+    || !api?.writePortableHistoryFile
+  ) {
+    return 'unavailable';
+  }
+  await api.writePortableHistoryFile(
+    metadata.handleId,
+    folder.files.map((file) => ({
+      name: file.name,
+      bytes: new Uint8Array(file.bytes),
+    })),
+    metadata.identity,
+  );
+  return 'saved';
 }
 
 export async function rememberNativeDocument(

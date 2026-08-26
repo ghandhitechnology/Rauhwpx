@@ -429,6 +429,13 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 현재 파일/편집 세션 정체성을 유지한 채 문서 내용만 교체한다.
+    #[wasm_bindgen(js_name = replaceContentFromBytes)]
+    pub fn replace_content_from_bytes(&mut self, data: &[u8]) -> Result<String, JsValue> {
+        self.replace_content_from_bytes_native(data)
+            .map_err(|error| error.into())
+    }
+
     /// 빈 문서 생성 (테스트/미리보기용)
     ///
     /// 기본 A4 구역 1개 + 빈 문단 1개를 포함한다. 구역 0개 문서는 모든
@@ -646,6 +653,12 @@ impl HwpDocument {
         )
     }
 
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = getWebCanvasImageCacheStats)]
+    pub fn get_web_canvas_image_cache_stats(&self) -> String {
+        crate::renderer::web_canvas::image_cache_stats_json()
+    }
+
     /// 특정 페이지를 기존 PageRenderTree 경로로 Canvas 2D에 직접 렌더링한다.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = renderPageToCanvasLegacy)]
@@ -776,6 +789,12 @@ impl HwpDocument {
     #[wasm_bindgen(js_name = getPageInfo)]
     pub fn get_page_info(&self, page_num: u32) -> Result<String, JsValue> {
         self.get_page_info_native(page_num).map_err(|e| e.into())
+    }
+
+    /// 전체 페이지 정보를 JSON 배열로 반환한다.
+    #[wasm_bindgen(js_name = getAllPageInfo)]
+    pub fn get_all_page_info(&self) -> Result<String, JsValue> {
+        self.get_all_page_info_native().map_err(|e| e.into())
     }
 
     /// 구역의 용지 설정(PageDef)을 HWPUNIT 원본값으로 반환한다.
@@ -6157,6 +6176,13 @@ impl HwpDocument {
     #[wasm_bindgen(js_name = saveSnapshot)]
     pub fn save_snapshot(&mut self) -> u32 {
         self.save_snapshot_native()
+    }
+
+    /// 기존 스냅샷과 같은 불변 Document 상태를 공유하는 새 ID를 반환한다.
+    #[wasm_bindgen(js_name = shareSnapshot)]
+    pub fn share_snapshot(&mut self, source_id: u32) -> Result<u32, JsValue> {
+        self.share_snapshot_native(source_id)
+            .map_err(|error| error.into())
     }
 
     /// 지정 ID의 스냅샷으로 Document를 복원한다.

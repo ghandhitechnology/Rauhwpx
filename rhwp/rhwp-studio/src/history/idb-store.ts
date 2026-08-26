@@ -138,8 +138,27 @@ async function deleteOldestIfOverLimit(db: IDBDatabase): Promise<void> {
   }
 }
 
-function cloneSnapshot(s: CompareDocumentSnapshot): CompareDocumentSnapshot {
-  return JSON.parse(JSON.stringify(s)) as CompareDocumentSnapshot;
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x7f) {
+      bytes += 1;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
 }
 
 /** IR 스냅샷 저장 — 문단 stable_id가 JSON에 포함되어 이력 비교 시 identity 모드에 적합 */
@@ -151,7 +170,7 @@ export async function saveHistoryIrSnapshot(
   const id = globalThis.crypto?.randomUUID?.() ?? `h_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
   const createdAt = Date.now();
   const json = JSON.stringify(snapshot);
-  const byteLength = new TextEncoder().encode(json).length;
+  const byteLength = utf8ByteLength(json);
   const meta: MetaRow = {
     id,
     label: label.trim() || `스냅샷 ${new Date(createdAt).toLocaleString('ko-KR')}`,
@@ -167,7 +186,10 @@ export async function saveHistoryIrSnapshot(
       const oldest = [...memory.entries()].sort((a, b) => a[1].meta.createdAt - b[1].meta.createdAt)[0];
       if (oldest) memory.delete(oldest[0]);
     }
-    memory.set(id, { meta, irSnapshot: cloneSnapshot(snapshot) });
+    memory.set(id, {
+      meta,
+      irSnapshot: JSON.parse(json) as CompareDocumentSnapshot,
+    });
     return meta;
   }
 

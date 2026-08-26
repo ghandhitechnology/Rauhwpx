@@ -8,6 +8,8 @@ use serde::Serialize;
 use crate::model::control::Control;
 use crate::model::style::{LineSpacingType, UnderlineType};
 
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) mod cache_budget;
 pub mod canvas;
 pub mod canvaskit_policy;
 pub mod composer;

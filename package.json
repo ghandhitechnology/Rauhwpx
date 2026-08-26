@@ -72,6 +72,15 @@
         "name": "Hangul document",
         "description": "Hangul word-processing document",
         "role": "Editor"
+      },
+      {
+        "ext": [
+          "rhwpx"
+        ],
+        "name": "Rauhwpx history bundle",
+        "description": "Rauhwpx history bundle",
+        "role": "Editor",
+        "isPackage": true
       }
     ],
     "directories": {
@@ -108,6 +117,18 @@
             "LSItemContentTypes": [
               "com.hataewook.rauhwpx.hwpx-document"
             ]
+          },
+          {
+            "CFBundleTypeExtensions": [
+              "rhwpx"
+            ],
+            "CFBundleTypeName": "RauHWPX history bundle",
+            "CFBundleTypeRole": "Editor",
+            "LSHandlerRank": "Default",
+            "LSTypeIsPackage": true,
+            "LSItemContentTypes": [
+              "com.hataewook.rauhwpx.history-bundle"
+            ]
           }
         ],
         "UTExportedTypeDeclarations": [
@@ -121,6 +142,19 @@
             "UTTypeTagSpecification": {
               "public.filename-extension": [
                 "hwpx"
+              ]
+            }
+          },
+          {
+            "UTTypeConformsTo": [
+              "com.apple.package",
+              "public.composite-content"
+            ],
+            "UTTypeDescription": "RauHWPX history bundle",
+            "UTTypeIdentifier": "com.hataewook.rauhwpx.history-bundle",
+            "UTTypeTagSpecification": {
+              "public.filename-extension": [
+                "rhwpx"
               ]
             }
           }

@@ -59,7 +59,7 @@ test('focus mode environment panel is persistent, informative, and opens changes
   assert.match(source, /environmentPlanSection\.appendChild\(environmentPlan\)/);
   assert.match(source, /environmentChangesSection\.appendChild\(environmentChanges\)/);
   assert.match(source, /environmentPanel\.append\([\s\S]*environmentPlanSection,[\s\S]*environmentChangesSection/);
-  assert.match(source, /workspaceTrailing\.append\(workspaceAgentContext, environmentWrap, workspaceExitBtn\)/);
+  assert.match(source, /workspaceTrailing\.append\(workspaceAgentContext, environmentWrap, workspaceSettingsBtn, workspaceExitBtn\)/);
   assert.match(source, /environmentToggle\.addEventListener\('click',[\s\S]*setEnvironmentPanelOpen\(!environmentPanelOpen\)/);
   assert.match(source, /environmentChanges\.addEventListener\('click',[\s\S]*setReviewColCollapsed\(false\);[\s\S]*setEnvironmentPanelOpen\(false\)/);
   assert.match(source, /environmentPlan\.addEventListener\('click',[\s\S]*setPlanColCollapsed\(false\);[\s\S]*setEnvironmentPanelOpen\(false\)/);

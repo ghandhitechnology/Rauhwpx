@@ -24,7 +24,7 @@ await runTest('agent fullscreen workspace shell', async ({ page }) => {
       barRect: barRect && { x: barRect.x, y: barRect.y, width: barRect.width, height: barRect.height },
       threadsRect: threadsRect && { x: threadsRect.x, y: threadsRect.y, width: threadsRect.width },
       chatRect: chatRect && { x: chatRect.x, y: chatRect.y, width: chatRect.width },
-      selectedTab: root?.querySelector('.ag-workspace-tab[aria-selected="true"]')?.innerText?.trim(),
+      title: root?.querySelector('.ag-workspace-title')?.textContent?.trim(),
     };
   });
 
@@ -36,12 +36,38 @@ await runTest('agent fullscreen workspace shell', async ({ page }) => {
   assert.equal(conversation.barRect?.height, 48);
   assert.equal(conversation.threadsRect?.y, 48);
   assert.equal(conversation.chatRect?.y, 48);
-  assert.equal(conversation.selectedTab, '대화');
+  assert.equal(conversation.title, '대화');
   await screenshot(page, 'agent-workspace-conversation');
 
-  await page.click('.ag-workspace-tab[aria-controls="ag-review-column"]');
+  await page.click('.ag-workspace-settings-btn');
   await page.waitForFunction(
-    () => document.querySelector('#agent-sidebar')?.classList.contains('ag-workspace-changes'),
+    () => document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'),
+  );
+  const wideSettings = await page.evaluate(() => {
+    const root = document.querySelector('#agent-sidebar');
+    const page = root?.querySelector('.ag-settings-page');
+    const nav = root?.querySelector('.ag-settings-nav');
+    const chat = root?.querySelector('.ag-chat-page');
+    return {
+      title: root?.querySelector('.ag-workspace-title')?.textContent,
+      pageWidth: page?.getBoundingClientRect().width,
+      navDirection: nav ? getComputedStyle(nav).flexDirection : '',
+      chatVisibility: chat ? getComputedStyle(chat).visibility : '',
+    };
+  });
+  assert.equal(wideSettings.title, '설정');
+  assert.equal(wideSettings.pageWidth, 1440);
+  assert.equal(wideSettings.navDirection, 'column');
+  assert.equal(wideSettings.chatVisibility, 'hidden');
+  await screenshot(page, 'agent-workspace-wide-settings');
+  await page.click('.ag-workspace-settings-back');
+  await page.waitForFunction(
+    () => !document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'),
+  );
+
+  await page.click('.ag-environment-changes');
+  await page.waitForFunction(
+    () => document.querySelector('#agent-sidebar')?.classList.contains('ag-review-drawer-open'),
   );
   await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 220)));
 
@@ -52,7 +78,7 @@ await runTest('agent fullscreen workspace shell', async ({ page }) => {
     const surfaceRect = surface?.getBoundingClientRect();
     const style = surface ? getComputedStyle(surface) : null;
     return {
-      selectedTab: root?.querySelector('.ag-workspace-tab[aria-selected="true"]')?.innerText?.trim(),
+      drawerOpen: root?.classList.contains('ag-review-drawer-open') ?? false,
       surfaceRect: surfaceRect && {
         x: surfaceRect.x,
         y: surfaceRect.y,
@@ -61,19 +87,24 @@ await runTest('agent fullscreen workspace shell', async ({ page }) => {
       },
       borderRadius: style?.borderRadius,
       boxShadow: style?.boxShadow,
-      composerInChanges: composer?.parentElement === surface,
+      hasComposer: !!composer,
+      composerOutsideChanges: !!composer && composer.parentElement !== surface,
     };
   });
 
-  assert.equal(changes.selectedTab, '변경 사항');
+  assert.equal(changes.drawerOpen, true);
   assert.equal(changes.surfaceRect?.y, 48);
   assert.equal(changes.surfaceRect?.height, 852);
   assert.equal(changes.borderRadius, '0px');
   assert.equal(changes.boxShadow, 'none');
-  assert.equal(changes.composerInChanges, true);
+  assert.equal(changes.hasComposer, true);
+  assert.equal(changes.composerOutsideChanges, true);
   await screenshot(page, 'agent-workspace-changes');
 
-  await page.click('.ag-workspace-tab[aria-controls="ag-chat-page"]');
+  await page.click('.ag-review-column-close');
+  await page.waitForFunction(
+    () => !document.querySelector('#agent-sidebar')?.classList.contains('ag-review-drawer-open'),
+  );
   await page.click('.ag-workspace-threads-btn');
   await page.setViewport({ width: 720, height: 780, deviceScaleFactor: 1 });
   await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 320)));
@@ -96,4 +127,42 @@ await runTest('agent fullscreen workspace shell', async ({ page }) => {
   assert.ok((compact.composerX ?? -1) >= 0);
   assert.ok((compact.composerRight ?? 721) <= 720);
   await screenshot(page, 'agent-workspace-compact');
+
+  await page.click('.ag-workspace-settings-btn');
+  await page.waitForFunction(
+    () => document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'),
+  );
+  const compactSettings = await page.evaluate(() => {
+    const root = document.querySelector('#agent-sidebar');
+    const page = root?.querySelector('.ag-settings-page');
+    const nav = root?.querySelector('.ag-settings-nav');
+    const threads = root?.querySelector('.ag-threads-page');
+    const chat = root?.querySelector('.ag-chat-page');
+    return {
+      title: root?.querySelector('.ag-workspace-title')?.textContent,
+      pageWidth: page?.getBoundingClientRect().width,
+      navDirection: nav ? getComputedStyle(nav).flexDirection : '',
+      backVisible: !!root?.querySelector('.ag-workspace-settings-back')?.getClientRects().length,
+      threadsVisibility: threads ? getComputedStyle(threads).visibility : '',
+      chatVisibility: chat ? getComputedStyle(chat).visibility : '',
+    };
+  });
+  assert.equal(compactSettings.title, '설정');
+  assert.equal(compactSettings.pageWidth, 720);
+  assert.equal(compactSettings.navDirection, 'row');
+  assert.equal(compactSettings.backVisible, true);
+  assert.equal(compactSettings.threadsVisibility, 'hidden');
+  assert.equal(compactSettings.chatVisibility, 'hidden');
+  await screenshot(page, 'agent-workspace-compact-settings');
+
+  await page.click('.ag-workspace-settings-back');
+  await page.waitForFunction(
+    () => !document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'),
+  );
+  const returned = await page.evaluate(() => ({
+    fullscreen: document.querySelector('#agent-sidebar')?.classList.contains('ag-fullscreen'),
+    title: document.querySelector('.ag-workspace-title')?.textContent,
+  }));
+  assert.equal(returned.fullscreen, true);
+  assert.equal(returned.title, '대화');
 });

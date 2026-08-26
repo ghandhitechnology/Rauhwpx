@@ -40,6 +40,7 @@ import {
   resolveModelForAgent,
 } from '../../agent/models.ts';
 import { loadAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
+import { userSettings } from '../../core/user-settings.ts';
 import { renderChatMarkdown } from './chat-markdown.ts';
 import { appendMarkdown, planToMarkdown } from './plan-markdown.ts';
 import {
@@ -83,10 +84,15 @@ import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts'
 import { createEffortSlider } from './effort-slider.ts';
 import { createSubagentFleet, isSpawnToolName } from './subagent-fleet.ts';
 import { createSettingsPanel } from './settings.ts';
+import type { EditorSettingsRuntime, SettingsDestination } from './settings-contract.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { maybeStartInitialSetup, type InitialSetupUi } from '../initial-setup/initial-setup.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
 import { createReferenceLibrary } from './reference-library.ts';
+import {
+  createVersionManagerPage,
+  type VersionManagerController,
+} from './version-manager.ts';
 import {
   isDesktopApp,
   openPublishedDocumentInNewWindow,
@@ -106,11 +112,13 @@ import type {
   InlinePromptSubmission,
 } from '../../agent/inline-prompt-context.ts';
 import { createUserQuestionController } from './user-question-controller.ts';
+import './sidebar-button-modern.css';
 
 export interface AgentSidebarDeps {
   bridge: AgentBridge;
   /** inset 전환 후 용지 가운데 정렬을 요청할 때 사용 */
   eventBus?: EventBus;
+  editorSettingsRuntime?: EditorSettingsRuntime;
   /** 헤더에 표시할 현재 문서와 선택 상태. */
   getDocumentContext?: () => {
     documentId?: string | null;
@@ -122,6 +130,10 @@ export interface AgentSidebarDeps {
     documentId: string | null;
     fileName: string | null;
   }) => void;
+  /** 현재 문서의 로컬 커밋과 브랜치를 관리한다. */
+  versionController?: VersionManagerController;
+  /** 기존 RHWP 문서 이력 대화상자를 연다. */
+  openClassicVersionControl?: () => void;
 }
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
@@ -513,10 +525,19 @@ function createSketchFilterDefs(): SVGSVGElement {
 
 export function initAgentSidebar(deps: AgentSidebarDeps): {
   root: HTMLElement;
+  openVersions(): void;
   sendInlinePrompt(submission: InlinePromptSubmission): InlinePromptSendResult;
   dispose(): void;
 } {
-  const { bridge, eventBus, getDocumentContext, moveToLibraryDocument } = deps;
+  const {
+    bridge,
+    eventBus,
+    editorSettingsRuntime,
+    getDocumentContext,
+    moveToLibraryDocument,
+    versionController,
+    openClassicVersionControl,
+  } = deps;
 
   // 개인 기본값(설정 탭에서 저장) — 새 대화가 이 조합으로 열린다.
   let agentPrefs: AgentPrefs = loadAgentPrefs();
@@ -529,6 +550,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let connRetryAt: number | null = null;
   let connCountdownTimer: number | null = null;
   let turnRunning = bridge.isTurnRunning();
+  let mergeResolverLocked = false;
   /** 지금 노란 불이 붙어 있는 스레드 — 턴이 끝나면 초록 점으로 넘긴다. */
   let runStatusThreadId: string | null = null;
   let workflowTransitionPending = false;
@@ -605,6 +627,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let restoringLiveQuestion = false;
   let skillsPanelOpen = false;
   let settingsPanelOpen = false;
+  let versionsPanelOpen = false;
+  let deferredVersionsOpenTimer: number | null = null;
   /** 에이전트 집중 모드 — 스레드 레일과 대화 무대로 문서를 덮는다. */
   let fullscreen = false;
   let threadsRailCollapsed = readStoredThreadsRailCollapsed();
@@ -1180,11 +1204,23 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   settingsBtn.appendChild(createIcon('gear'));
   settingsBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    setSettingsPanelOpen(true);
+    requestSettingsOpen();
+  });
+
+  const versionsBtn = el('button', 'ag-header-icon-btn ag-versions-btn');
+  versionsBtn.type = 'button';
+  versionsBtn.setAttribute('aria-label', '버전');
+  versionsBtn.setAttribute('aria-expanded', 'false');
+  versionsBtn.setAttribute('aria-controls', 'ag-versions-panel');
+  versionsBtn.title = '버전';
+  versionsBtn.appendChild(createIcon('changes'));
+  versionsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openConfiguredVersionControl();
   });
 
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
-  headerActions.append(threadsBtn, settingsBtn);
+  headerActions.append(threadsBtn, versionsBtn, settingsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
@@ -1335,12 +1371,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   workspaceThreadsBtn.setAttribute('aria-label', '대화 목록 접기');
   workspaceThreadsBtn.title = '대화 목록 접기';
   workspaceThreadsBtn.appendChild(createColumnIcon());
+  const workspaceSettingsBack = el('button', 'ag-workspace-icon-btn ag-workspace-settings-back');
+  workspaceSettingsBack.type = 'button';
+  workspaceSettingsBack.setAttribute('aria-label', '대화로 돌아가기');
+  workspaceSettingsBack.title = '대화로 돌아가기';
+  workspaceSettingsBack.appendChild(createIcon('close'));
 
   const workspaceDocumentContext = el('div', 'ag-workspace-document-context');
   const workspaceDocumentName = el('span', 'ag-workspace-document-name', '문서 없음');
   const workspaceSelectionContext = el('span', 'ag-workspace-selection-context', '선택 없음');
   workspaceDocumentContext.append(workspaceDocumentName, workspaceSelectionContext);
-  workspaceLeading.append(workspaceThreadsBtn, workspaceDocumentContext);
+  workspaceLeading.append(workspaceSettingsBack, workspaceThreadsBtn, workspaceDocumentContext);
 
   const workspaceTitle = el('div', 'ag-workspace-title', '대화');
 
@@ -1415,7 +1456,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   workspaceExitBtn.setAttribute('aria-label', '문서 편집기로 돌아가기');
   workspaceExitBtn.title = '문서 편집기로 돌아가기 (Esc)';
   workspaceExitBtn.append(createIcon('contract'), el('span', 'ag-workspace-exit-label', '편집기로 돌아가기'));
-  workspaceTrailing.append(workspaceAgentContext, environmentWrap, workspaceExitBtn);
+  const workspaceSettingsBtn = el('button', 'ag-workspace-icon-btn ag-workspace-settings-btn');
+  workspaceSettingsBtn.type = 'button';
+  workspaceSettingsBtn.setAttribute('aria-label', '설정');
+  workspaceSettingsBtn.setAttribute('aria-controls', 'ag-settings-panel');
+  workspaceSettingsBtn.setAttribute('aria-expanded', 'false');
+  workspaceSettingsBtn.title = '설정';
+  workspaceSettingsBtn.appendChild(createIcon('gear'));
+  workspaceTrailing.append(workspaceAgentContext, environmentWrap, workspaceSettingsBtn, workspaceExitBtn);
   workspaceBar.append(workspaceLeading, workspaceTitle, workspaceTrailing);
 
   function refreshEnvironmentFilenameMarquee(): void {
@@ -1459,6 +1507,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   workspaceThreadsBtn.addEventListener('click', () => {
     setThreadsRailCollapsed(!threadsRailCollapsed);
   });
+  workspaceSettingsBack.addEventListener('click', () => void requestSettingsClose(workspaceSettingsBtn));
+  workspaceSettingsBtn.addEventListener('click', () => {
+    if (settingsPanelOpen) return;
+    requestSettingsOpen();
+  });
   environmentToggle.addEventListener('click', () => {
     setEnvironmentPanelOpen(!environmentPanelOpen);
   });
@@ -1477,7 +1530,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     setEnvironmentPanelOpen(false);
     window.requestAnimationFrame(() => planColumnClose.focus({ preventScroll: true }));
   });
-  workspaceExitBtn.addEventListener('click', () => setFullscreen(false));
+  workspaceExitBtn.addEventListener('click', () => {
+    if (settingsPanelOpen) {
+      void requestSettingsClose(workspaceExitBtn, () => setFullscreen(false));
+      return;
+    }
+    setFullscreen(false);
+  });
   applyEnvironmentPanelState();
 
   const chatPage = el('div', 'ag-chat-page');
@@ -1854,12 +1913,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       documentName: getDocumentContext?.().documentName ?? currentDocKey,
     }),
     onOpenChange(open) {
+      if (open && settingsPanelOpen && settingsPanel.isDirty()) {
+        referenceLibrary.setOpen(false);
+        void requestSettingsClose(undefined, () => referenceLibrary.setOpen(true));
+        return;
+      }
       root.classList.toggle('ag-references-open', open);
       if (open) {
         setConfigPanelOpen(false);
         threadsPanelOpen = false;
         skillsPanelOpen = false;
         closeSettingsPage();
+        closeVersionsPage();
         root.classList.remove('ag-threads-open', 'ag-skills-open');
         threadsBtn.setAttribute('aria-expanded', 'false');
         skillsBtn.setAttribute('aria-expanded', 'false');
@@ -2006,6 +2071,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
      여기서 관리한다(스킬 페이지와 같은 계약). */
   const settingsPanel = createSettingsPanel({
     bridge,
+    eventBus,
+    editorRuntime: editorSettingsRuntime ?? {
+      preview: () => undefined,
+      committed: () => undefined,
+    },
     getSelection: () => ({
       agent: selectedAgent,
       model: selectedModel,
@@ -2022,16 +2092,28 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     beginAgentConnect: (agent) => settingsPanel.beginAgentConnect(agent),
     openCalibration: (options) => writingStyleCalibration.open(options),
   });
-  settingsPage.addEventListener('ag-settings-close', () => {
-    setSettingsPanelOpen(false);
-    settingsBtn.focus();
+  settingsPage.addEventListener('ag-settings-close-request', () => {
+    void requestSettingsClose(fullscreen ? workspaceSettingsBtn : settingsBtn);
   });
   settingsPage.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     e.preventDefault();
     e.stopPropagation();
-    setSettingsPanelOpen(false);
-    settingsBtn.focus();
+    void requestSettingsClose(fullscreen ? workspaceSettingsBtn : settingsBtn);
+  });
+
+  const versionManagerPage = versionController
+    ? createVersionManagerPage(versionController)
+    : null;
+  const versionsPage = versionManagerPage?.element ?? el('section', 'ag-versions-page');
+  if (!versionManagerPage) {
+    versionsPage.id = 'ag-versions-panel';
+    versionsPage.setAttribute('aria-hidden', 'true');
+    versionsPage.inert = true;
+  }
+  versionsPage.addEventListener('ag-versions-close', () => {
+    setVersionsPanelOpen(false);
+    versionsBtn.focus();
   });
 
   const reviewResize = el('div', 'ag-review-resize');
@@ -2048,6 +2130,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     skillsPage,
     referenceLibrary.page,
     settingsPage,
+    versionsPage,
     reviewColumn,
     planColumn,
     railResize,
@@ -2362,6 +2445,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function setFullscreen(on: boolean): void {
     if (fullscreen === on) return;
+    if (on && settingsPanelOpen && settingsPanel.isDirty()) {
+      void requestSettingsClose(undefined, () => setFullscreen(true));
+      return;
+    }
     fullscreen = on;
     hideThreadPopover();
     cancelFsMotionTimers();
@@ -2408,6 +2495,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       threadsPanelOpen = false;
       skillsPanelOpen = false;
       closeSettingsPage();
+      closeVersionsPage();
       root.classList.remove('ag-threads-open', 'ag-skills-open');
       threadsBtn.setAttribute('aria-expanded', 'false');
       skillsBtn.setAttribute('aria-expanded', 'false');
@@ -2523,16 +2611,51 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     settingsPanelOpen = false;
     root.classList.remove('ag-settings-open');
     settingsBtn.setAttribute('aria-expanded', 'false');
+    workspaceSettingsBtn.setAttribute('aria-expanded', 'false');
+    workspaceSettingsBtn.classList.remove('ag-active');
+    workspaceTitle.textContent = '대화';
     settingsPage.setAttribute('aria-hidden', 'true');
     settingsPanel.close();
   }
 
+  async function requestSettingsClose(
+    returnFocus?: HTMLElement,
+    afterClose?: () => void,
+  ): Promise<boolean> {
+    if (!settingsPanelOpen) {
+      afterClose?.();
+      return true;
+    }
+    if (!await settingsPanel.requestClose()) return false;
+    closeSettingsPage();
+    chatPage.setAttribute('aria-hidden', 'false');
+    root.classList.remove('ag-settings-open');
+    returnFocus?.focus();
+    afterClose?.();
+    return true;
+  }
+
+  function closeVersionsPage(): void {
+    versionsPanelOpen = false;
+    root.classList.remove('ag-versions-open');
+    versionsBtn.setAttribute('aria-expanded', 'false');
+    versionsPage.setAttribute('aria-hidden', 'true');
+    versionsPage.inert = true;
+    chatPage.inert = false;
+    versionManagerPage?.close();
+  }
+
   function setSkillsPanelOpen(open: boolean): void {
+    if (open && settingsPanelOpen && settingsPanel.isDirty()) {
+      void requestSettingsClose(undefined, () => setSkillsPanelOpen(true));
+      return;
+    }
     if (open && referenceLibrary.isOpen()) referenceLibrary.setOpen(false);
     skillsPanelOpen = open;
     if (open) setConfigPanelOpen(false);
     threadsPanelOpen = false;
     closeSettingsPage();
+    closeVersionsPage();
     root.classList.toggle('ag-skills-open', open);
     root.classList.remove('ag-threads-open');
     skillsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -2553,7 +2676,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   /** 설정 페이지 — setSkillsPanelOpen 과 같은 문법(무대 전환 + 상호 배제). */
-  function setSettingsPanelOpen(open: boolean): void {
+  function setSettingsPanelOpen(open: boolean, destination?: SettingsDestination): void {
+    if (!open && settingsPanelOpen && settingsPanel.isDirty()) {
+      void requestSettingsClose(fullscreen ? workspaceSettingsBtn : settingsBtn);
+      return;
+    }
     if (open && referenceLibrary.isOpen()) referenceLibrary.setOpen(false);
     settingsPanelOpen = open;
     if (open) {
@@ -2563,9 +2690,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       root.classList.remove('ag-threads-open', 'ag-skills-open');
       skillsBtn.setAttribute('aria-expanded', 'false');
       skillsPage.setAttribute('aria-hidden', 'true');
+      closeVersionsPage();
     }
     root.classList.toggle('ag-settings-open', open);
     settingsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    workspaceSettingsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    workspaceSettingsBtn.classList.toggle('ag-active', open);
+    workspaceTitle.textContent = open ? '설정' : '대화';
     settingsPage.setAttribute('aria-hidden', open ? 'false' : 'true');
     if (fullscreen) {
       // 전체 화면에서 목록 관련 aria 는 레일 접힘 상태를 뜻하므로 덮어쓰지 않는다.
@@ -2576,11 +2707,71 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     chatPage.setAttribute('aria-hidden', open ? 'true' : 'false');
     if (open) {
-      settingsPanel.open();
-      settingsPage.querySelector<HTMLElement>('.ag-settings-close')?.focus();
+      setCollapsed(false);
+      settingsPanel.open(destination);
+      settingsPage.querySelector<HTMLElement>('.ag-settings-nav-button.ag-active')?.focus();
     } else {
       settingsPanel.close();
     }
+  }
+
+  function requestSettingsOpen(destination?: SettingsDestination): void {
+    if (eventBus) {
+      eventBus.emit('settings:open', destination ? { destination } : undefined);
+      return;
+    }
+    setCollapsed(false);
+    setSettingsPanelOpen(true, destination);
+  }
+
+  function openConfiguredVersionControl(): void {
+    if (!userSettings.getUseHancomGit() && openClassicVersionControl) {
+      closeVersionsPage();
+      openClassicVersionControl();
+      return;
+    }
+    setVersionsPanelOpen(true);
+  }
+
+  function setVersionsPanelOpen(open: boolean): void {
+    if (!versionController) return;
+    if (open && settingsPanelOpen && settingsPanel.isDirty()) {
+      void requestSettingsClose(undefined, () => setVersionsPanelOpen(true));
+      return;
+    }
+    if (deferredVersionsOpenTimer !== null) {
+      window.clearTimeout(deferredVersionsOpenTimer);
+      deferredVersionsOpenTimer = null;
+    }
+    if (fullscreen) {
+      setFullscreen(false);
+      deferredVersionsOpenTimer = window.setTimeout(() => {
+        deferredVersionsOpenTimer = null;
+        setVersionsPanelOpen(open);
+      }, FS_MOTION_SETTLE_MS);
+      return;
+    }
+    if (open && referenceLibrary.isOpen()) referenceLibrary.setOpen(false);
+    versionsPanelOpen = open;
+    if (open) {
+      setConfigPanelOpen(false);
+      threadsPanelOpen = false;
+      skillsPanelOpen = false;
+      closeSettingsPage();
+      root.classList.remove('ag-threads-open', 'ag-skills-open');
+      threadsBtn.setAttribute('aria-expanded', 'false');
+      skillsBtn.setAttribute('aria-expanded', 'false');
+      threadsPage.setAttribute('aria-hidden', 'true');
+      skillsPage.setAttribute('aria-hidden', 'true');
+    }
+    root.classList.toggle('ag-versions-open', open);
+    versionsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    versionsPage.setAttribute('aria-hidden', open ? 'false' : 'true');
+    versionsPage.inert = !open;
+    chatPage.setAttribute('aria-hidden', open ? 'true' : 'false');
+    chatPage.inert = open;
+    if (open) versionManagerPage?.open();
+    else versionManagerPage?.close();
   }
 
   function showSkillList(): void {
@@ -2940,7 +3131,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const base: SlashOption[] = [
       { value: '/plan', label: '/plan', detail: '계획 모드로 전환', workflow: 'plan' },
       { value: '/build', label: '/build', detail: '바로 실행 모드로 전환', workflow: 'direct' },
-      { value: '/calibration', label: '/calibration', detail: '말투 모방 캘리브레이션 열기', local: 'calibration' },
+      { value: '/calibration', label: '/calibration', detail: '말투를 맞출까요? 열기', local: 'calibration' },
       { value: '/settings', label: '/settings', detail: '설정 열기 (연결·기본값·사용량)', local: 'settings' },
       { value: '/templates', label: '/templates', detail: '문서 템플릿 선택', local: 'templates' },
       { value: '/skills', label: '/skills', detail: '스킬 라이브러리 열기', local: 'skills' },
@@ -3011,7 +3202,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       return;
     }
     if (option.local === 'calibration') { input.value = ''; writingStyleCalibration.open(); return; }
-    if (option.local === 'settings') { input.value = ''; setSettingsPanelOpen(true); return; }
+    if (option.local === 'settings') { input.value = ''; requestSettingsOpen(); return; }
     if (option.local === 'templates') {
       input.value = '/templates ';
       input.focus();
@@ -3084,7 +3275,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   });
   composer.addEventListener('submit', (e) => {
     e.preventDefault();
-    if (readOnlyDocLabel !== null) return;
+    if (readOnlyDocLabel !== null || mergeResolverLocked) return;
     if (questionController.hasPending()) {
       if (!questionController.handleComposerSubmit()) bridge.interrupt();
       return;
@@ -3139,7 +3330,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         return;
       }
       if (text === '/calibration') { input.value = ''; writingStyleCalibration.open(); return; }
-      if (text === '/settings') { input.value = ''; setSettingsPanelOpen(true); return; }
+      if (text === '/settings') { input.value = ''; requestSettingsOpen(); return; }
       if (text === '/skills') { input.value = ''; setSkillsPanelOpen(true); return; }
       if (text === '/skill-create') { input.value = ''; beginSkillCreate(); return; }
       const editCommand = text.match(/^\/skill-edit\s+([a-z0-9-]+)$/);
@@ -3943,11 +4134,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       rebuildThreadsList();
       return;
     }
+    if (open && settingsPanelOpen && settingsPanel.isDirty()) {
+      void requestSettingsClose(undefined, () => setThreadsPanelOpen(true));
+      return;
+    }
     if (open && referenceLibrary.isOpen()) referenceLibrary.setOpen(false);
     threadsPanelOpen = open;
     if (open) setConfigPanelOpen(false);
     if (open) skillsPanelOpen = false;
     closeSettingsPage();
+    closeVersionsPage();
     root.classList.toggle('ag-threads-open', open);
     root.classList.remove('ag-skills-open');
     threadsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -4227,7 +4423,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function updateComposer(): void {
     // 다른 문서의 채팅 열람 중에는 연결/작업 상태와 무관하게 잠긴다.
-    if (readOnlyDocLabel !== null) {
+    if (mergeResolverLocked) {
+      input.disabled = true;
+      send.disabled = true;
+      composerSkillClear.disabled = true;
+      input.placeholder = '병합 검토 중에는 에이전트 작업을 시작할 수 없습니다';
+    } else if (readOnlyDocLabel !== null) {
       input.disabled = true;
       send.disabled = true;
       composerSkillClear.disabled = true;
@@ -5249,6 +5450,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   /** 실행 중이거나 첨부를 커밋하거나 전환 중에는 모드·모델·권한을 바꿀 수 없다. */
   function isControlLocked(): boolean {
+    if (mergeResolverLocked) return true;
     return turnRunning || attachmentsSending || chatStartPendingThreadId !== null
       || workflowTransitionPending || planActionPending || planningPhase === 'switching';
   }
@@ -5808,6 +6010,25 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         eventBus.on('cursor-format-changed', updateDocumentContext),
         eventBus.on('picture-object-selection-changed', updateDocumentContext),
         eventBus.on('table-object-selection-changed', updateDocumentContext),
+        eventBus.on('merge-resolver-lock-changed', (locked) => {
+          mergeResolverLocked = locked === true;
+          root.classList.toggle('ag-merge-resolver-locked', mergeResolverLocked);
+          updateComposer();
+        }),
+        eventBus.on('versions:open', () => {
+          setCollapsed(false);
+          openConfiguredVersionControl();
+        }),
+        eventBus.on('settings:open', (payload) => {
+          const requested = (payload as { destination?: unknown } | undefined)?.destination;
+          const destination: SettingsDestination | undefined = requested === 'editing'
+            || requested === 'ai'
+            || requested === 'connections'
+            ? requested
+            : undefined;
+          setCollapsed(false);
+          setSettingsPanelOpen(true, destination);
+        }),
       ]
     : [];
 
@@ -5826,6 +6047,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function sendInlinePrompt(submission: InlinePromptSubmission): InlinePromptSendResult {
     const prompt = submission.prompt.trim();
     if (!prompt) return { ok: false, reason: '지시를 입력해 주세요' };
+    if (mergeResolverLocked) return { ok: false, reason: '병합 검토를 먼저 완료하거나 닫아 주세요' };
     if (readOnlyDocLabel !== null) return { ok: false, reason: '다른 문서의 채팅을 열람 중입니다' };
     if (connState !== 'connected') return { ok: false, reason: '에이전트 허브에 연결되어 있지 않습니다' };
     if (turnRunning) return { ok: false, reason: '에이전트가 응답 중입니다' };
@@ -5837,6 +6059,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (threadsPanelOpen) setThreadsPanelOpen(false);
     if (skillsPanelOpen) setSkillsPanelOpen(false);
     if (settingsPanelOpen) setSettingsPanelOpen(false);
+    if (versionsPanelOpen) setVersionsPanelOpen(false);
     const userMessage = recordUserMessage(prompt, [], {
       label: submission.selection.label,
       excerpt: submission.selection.excerpt,
@@ -5853,6 +6076,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   return {
     root,
+    openVersions(): void {
+      setCollapsed(false);
+      openConfiguredVersionControl();
+    },
     sendInlinePrompt,
     dispose(): void {
       questionController.dispose();
@@ -5875,6 +6102,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         window.clearTimeout(conversationScrollUnlock);
         conversationScrollUnlock = null;
       }
+      if (deferredVersionsOpenTimer !== null) {
+        window.clearTimeout(deferredVersionsOpenTimer);
+        deferredVersionsOpenTimer = null;
+      }
       window.removeEventListener('resize', measure);
       document.removeEventListener('pointerdown', onDocPointerDown);
       document.removeEventListener('keydown', onDocKeyDown);
@@ -5890,6 +6121,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       clearConnCountdown();
       writingStyleCalibration.dispose();
       settingsPanel.dispose();
+      versionManagerPage?.dispose();
+      versionController?.dispose?.();
       initialSetup?.dispose();
       clearAttachmentDrag();
       root.removeEventListener('dragenter', onAttachmentDragEnter);

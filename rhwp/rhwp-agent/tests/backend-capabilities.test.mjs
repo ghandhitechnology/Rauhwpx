@@ -27,6 +27,7 @@ import {
   parallelWorkBriefFor,
   providerInteractionMode,
   providerToolNoteFor,
+  RHWP_SUBAGENTS,
   systemBriefFor,
   validateExecutionMode,
 } from '../agents/backend.mjs';
@@ -417,6 +418,13 @@ test('every write-capable brief directs batched writes through apply_edits', () 
     assert.match(writeBrief, /recovery guidance in the error message/);
     assert.doesNotMatch(writeBrief, /ONE AT A TIME/);
   }
+});
+
+test('doc-editor subagent prompt batches independent writes through apply_edits', () => {
+  const prompt = RHWP_SUBAGENTS['doc-editor'].prompt;
+  assert.match(prompt, /apply_edits/);
+  assert.match(prompt, /up to 32 items/);
+  assert.doesNotMatch(prompt, /one write at a time/i);
 });
 
 test('all workflow system prompts default document design to black and white', () => {

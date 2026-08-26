@@ -29,14 +29,19 @@ test('규율 블록은 금지 패턴과 보정 규칙을 함께 싣는다', () =
   assert.match(block, /does not apply to your chat replies/);
   assert.match(block, /Meaning is invariant/);
   assert.match(block, /Style decides how a sentence is built, never what it asserts/);
+  assert.match(block, /Have a temperature/);
 });
 
-test('개인 프로필이 있으면 리듬 수치를 프로필에 넘긴다', () => {
+test('개인 프로필이 있으면 초상을 따르고 수치에 맞추지 않는다', () => {
   const generic = humanizerPromptBlock('direct');
   const profiled = humanizerPromptBlock('direct', { personalProfile: true });
-  assert.match(generic, /Put an 8자 sentence next to a 40자 one/);
-  assert.doesNotMatch(profiled, /Put an 8자 sentence next to a 40자 one/);
-  assert.match(profiled, /come from the user's personal profile above/);
+  assert.match(generic, /because a person would, not because a rubric said to/);
+  assert.match(generic, /Have a temperature/);
+  assert.doesNotMatch(profiled, /because a person would, not because a rubric said to/);
+  assert.match(profiled, /Inhabit that person/);
+  assert.match(profiled, /Do not write to the measured numbers/);
+  assert.match(profiled, /They yield to the portrait above/);
+  assert.doesNotMatch(profiled, /Write like a person, not like a cleaned-up model/);
 });
 
 test('영어 프로필에는 영어 규율 블록이 붙는다', () => {

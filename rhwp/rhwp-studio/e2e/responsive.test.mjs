@@ -51,6 +51,19 @@ async function run() {
           return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetHeight > 0;
         };
 
+        const toolbarItems = toolbar
+          ? [...toolbar.children].filter(isVisible).map((item) => item.getBoundingClientRect())
+          : [];
+        const toolbarRows = new Set(toolbarItems.map((rect) => Math.round(rect.top))).size;
+        const toolbarItemsOverlap = toolbarItems.some((rect, index) =>
+          toolbarItems.slice(index + 1).some((other) =>
+            Math.min(rect.right, other.right) > Math.max(rect.left, other.left)
+            && Math.min(rect.bottom, other.bottom) > Math.max(rect.top, other.top),
+          ),
+        );
+        const toolbarRect = toolbar?.getBoundingClientRect();
+        const styleBarRect = styleBar?.getBoundingClientRect();
+
         return {
           hasCanvas: !!canvas,
           canvasWidth: canvas?.offsetWidth ?? 0,
@@ -59,8 +72,13 @@ async function run() {
           menuBarHeight: menuBar?.offsetHeight ?? 0,
           toolbarVisible: isVisible(toolbar),
           toolbarHeight: toolbar?.offsetHeight ?? 0,
+          toolbarRows,
+          toolbarItemsOverlap,
           styleBarVisible: isVisible(styleBar),
           styleBarHeight: styleBar?.offsetHeight ?? 0,
+          styleBarBelowToolbar: Boolean(
+            toolbarRect && styleBarRect && styleBarRect.top >= toolbarRect.bottom,
+          ),
           statusBarVisible: isVisible(statusBar),
           editorVisible: isVisible(editor),
           pageCount: window.__wasm?.pageCount ?? 0,
@@ -78,8 +96,10 @@ async function run() {
         check(tc, result.statusBarVisible, `상태 표시줄 표시`);
       } else if (vp.name === 'tablet') {
         check(tc, result.menuBarVisible, `메뉴바 표시`);
-        check(tc, result.toolbarHeight <= 44,
-          `도구 상자 축소 또는 숨김 (h=${result.toolbarHeight})`);
+        check(tc, result.toolbarRows >= 2,
+          `도구 상자 그룹 줄바꿈 (rows=${result.toolbarRows})`);
+        check(tc, !result.toolbarItemsOverlap, `도구 상자 항목 겹침 없음`);
+        check(tc, result.styleBarBelowToolbar, `서식 도구가 줄바꿈된 도구 상자 아래에 배치`);
         check(tc, result.styleBarVisible, `서식 도구 표시 (스크롤)`);
       } else if (vp.name === 'mobile') {
         check(tc, result.menuBarVisible, `메뉴바 표시`);

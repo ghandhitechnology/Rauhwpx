@@ -162,7 +162,7 @@ test('present_implementation_plan 스키마가 완전한 구조를 강제한다'
   assert.ok(!IMPLEMENTATION_PLAN_SHAPE.steps.safeParse([]).success);
 });
 
-test('신규 도구 5개가 모두 있다', () => {
+test('핵심 시맨틱 쓰기 도구 5개가 모두 있다', () => {
   for (const name of ['apply_list', 'list_numberings', 'get_para_format', 'get_char_format', 'verify_changes']) {
     assert.ok(byName.has(name), `missing tool: ${name}`);
   }

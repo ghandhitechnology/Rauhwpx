@@ -1,6 +1,6 @@
 import { extname, isAbsolute, resolve } from 'node:path';
 
-export const DOCUMENT_EXTENSIONS = new Set(['.hwp', '.hwpx', '.hml']);
+export const DOCUMENT_EXTENSIONS = new Set(['.hwp', '.hwpx', '.hml', '.rhwpx']);
 
 export function documentPathsFromArgv(argv, { cwd = process.cwd() } = {}) {
   const paths = [];

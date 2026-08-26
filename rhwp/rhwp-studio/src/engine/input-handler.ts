@@ -8,6 +8,7 @@ import { CommandHistory } from './history';
 import { DeleteSelectionCommand, ApplyCharFormatCommand, ApplyParaFormatCommand, SnapshotCommand, SetFormValueCommand, TextMutationEffectAccumulator, IMMEDIATE_TEXT_MUTATION_EFFECTS, applyCharFormatToTarget } from './command';
 import type { OperationDescriptor, ParaFormatTarget, RefreshPolicy, TextMutationEffects, EditCommand, EditContext, FormValueTarget } from './command';
 import { CapturedSnapshotCommand } from './captured-snapshot-command.ts';
+import type { CapturedSnapshotCallbacks } from './captured-snapshot-command.ts';
 import { VirtualScroll } from '@/view/virtual-scroll';
 import { ViewportManager } from '@/view/viewport-manager';
 import type {
@@ -20,6 +21,7 @@ import type {
   LayerNode,
   LayerTextRunOp,
   PageInfo,
+  DocumentInfo,
 } from '@/core/types';
 import type { CommandDispatcher } from '@/command/dispatcher';
 import type { EditorEditMode } from '@/command/types';
@@ -2757,7 +2759,11 @@ export class InputHandler {
    * Apply an autonomous headless mutation as one atomic, undoable history entry.
    * The exact before state is restored if the callback or after-snapshot capture fails.
    */
-  executeAppliedSnapshot<T>(operationType: string, operation: (wasm: WasmBridge) => T): T {
+  executeAppliedSnapshot<T>(
+    operationType: string,
+    operation: (wasm: WasmBridge) => T,
+    callbacks: CapturedSnapshotCallbacks = {},
+  ): T {
     if (this.readOnly) {
       throw new Error('This template preview is read-only');
     }
@@ -2802,6 +2808,7 @@ export class InputHandler {
       cursorAfter,
       beforeId,
       afterId,
+      callbacks,
     );
     beforeId = null;
     afterId = null;
@@ -2822,6 +2829,25 @@ export class InputHandler {
       console.warn('[InputHandler] committed autonomous edit refresh failed:', error);
     }
     return result;
+  }
+
+  /** 현재 문서의 파일 정체성을 유지하며 버전 payload를 한 번의 Undo 항목으로 적용한다. */
+  replaceContentFromBytes(
+    data: Uint8Array,
+    callbacks: CapturedSnapshotCallbacks = {},
+  ): DocumentInfo {
+    this.finalizeCompositionBeforeCursorMove();
+    this.flushDeferredPaginationIfNeeded('before-version-content-replace', false);
+    return this.executeAppliedSnapshot(
+      'version:replace_content',
+      (wasm) => {
+        const info = wasm.replaceContentFromBytes(data);
+        this.clearTableResizeRuntimeCache();
+        this.resetDerivedStateAfterHistoryJump();
+        return info;
+      },
+      callbacks,
+    );
   }
 
   /** 승인처럼 여러 임시 스냅샷이 필요한 외부 편집기의 저장소 여유를 확보한다. */
@@ -4028,6 +4054,12 @@ export class InputHandler {
     this.eventBus.emit('command-state-changed');
   }
 
+  /** 소유 워크플로가 현재 문서 변경을 차단하고 있는지 반환한다. */
+  isReadOnly(): boolean { return this.readOnly; }
+
+  /** 소유 워크플로가 스냅샷을 적용하는 동안 사용자 직접 편집이 중단되었는지 반환한다. */
+  isUserEditingLocked(): boolean { return this.userEditingLocked; }
+
   /** 활성 에이전트 턴에는 사용자 입력만 잠그고 에이전트 snapshot 경로는 유지한다. */
   setUserEditingLocked(locked: boolean): void {
     if (this.userEditingLocked === locked) return;
@@ -4914,16 +4946,28 @@ export class InputHandler {
   }
 
   /** Undo 가능한가? */
-  canUndo(): boolean { return this.history.canUndo(); }
+  canUndo(): boolean { return !this.readOnly && this.history.canUndo(); }
 
   /** Redo 가능한가? */
-  canRedo(): boolean { return this.history.canRedo(); }
+  canRedo(): boolean { return !this.readOnly && this.history.canRedo(); }
 
   /** Undo 실행 (커맨드 시스템용) */
-  performUndo(): void { this.handleUndo(); }
+  performUndo(ignoreReadOnly = false): void {
+    if (this.readOnly && !ignoreReadOnly) return;
+    this.handleUndo();
+  }
 
   /** Redo 실행 (커맨드 시스템용) */
-  performRedo(): void { this.handleRedo(); }
+  performRedo(ignoreReadOnly = false): void {
+    if (this.readOnly && !ignoreReadOnly) return;
+    this.handleRedo();
+  }
+
+  /** 시험적 워크플로를 되돌린 뒤 redo 상태를 영구 폐기한다. */
+  discardRedoHistory(): void { this.history.discardRedo(this.wasm); }
+
+  /** 보상 교체 결과는 유지하되 실패 상태로 되돌리는 undo는 막는다. */
+  discardLatestUndoHistory(): void { this.history.discardUndoTop(this.wasm); }
 
   /** 복사 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */
   performCopy(): void {

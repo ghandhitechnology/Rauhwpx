@@ -36,6 +36,11 @@ const agentSidebarCss = readFileSync(
   'utf8',
 );
 
+const mergeResolverCss = readFileSync(
+  new URL('../src/merge/merge-resolver.css', import.meta.url),
+  'utf8',
+);
+
 test('macOS releases select and verify the Xcode Developer ID identity', () => {
   assert.equal(rootPackage.build?.mac?.identity, CERTIFICATE_SELECTOR);
   assert.equal(rootPackage.build?.mac?.notarize, true);
@@ -91,5 +96,17 @@ test('macOS title-bar drag regions never cover interactive controls', () => {
   assert.match(
     agentSidebarCss,
     /html\.desktop-mac \.ag-fullscreen \.ag-workspace-bar button,[\s\S]*?-webkit-app-region:\s*no-drag/,
+  );
+  assert.match(
+    mergeResolverCss,
+    /html\.desktop-mac body\.merge-resolver-open #menu-bar::after\s*\{[^}]*-webkit-app-region:\s*no-drag/s,
+  );
+  assert.match(
+    mergeResolverCss,
+    /html\.desktop-mac \.merge-resolver-header\s*\{[^}]*padding-left:\s*calc\(16px \+ var\(--desktop-traffic-light-inset/s,
+  );
+  assert.match(
+    mergeResolverCss,
+    /html\.desktop-mac \.merge-resolver-header-actions,[\s\S]*?-webkit-app-region:\s*no-drag/,
   );
 });
