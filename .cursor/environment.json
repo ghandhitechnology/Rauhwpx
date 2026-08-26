@@ -1,0 +1,15 @@
+{
+  "name": "Rauhwpx (rhwp)",
+  "install": "cd rhwp && wasm-pack build --target web && npm --prefix rhwp-studio ci && npm --prefix rhwp-agent ci",
+  "terminals": [
+    {
+      "name": "studio-dev",
+      "command": "cd rhwp/rhwp-studio && npm run dev"
+    },
+    {
+      "name": "agent-hub",
+      "command": "cd rhwp/rhwp-agent && npm start"
+    }
+  ],
+  "ports": [7700, 5175]
+}
