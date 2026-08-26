@@ -725,7 +725,7 @@ fn print_help() {
     println!("      --font-style            @font-face local() 참조 삽입 (폰트 데이터 미포함)");
     println!("      --embed-fonts           폰트 서브셋 임베딩 (사용 글자만 base64)");
     println!("      --embed-fonts=full      폰트 전체 임베딩 (base64)");
-    println!("      --font-path <경로>      폰트 파일 탐색 경로 (여러 번 지정 가능)");
+    println!("      --font-path <경로>      폰트 파일 또는 디렉토리 (여러 번 지정 가능)");
     println!("      --json                  산출물 매니페스트를 JSON으로 stdout에 출력");
     println!();
     println!("  export-render-tree <파일.hwp> [옵션]");
@@ -751,7 +751,7 @@ fn print_help() {
     println!(
         "      --profile <프로필>      출력 프로필: screen|print|high-quality|fast-preview (기본: high-quality)"
     );
-    println!("      --font-path <경로>      폰트 파일 탐색 경로 (여러 번 지정 가능)");
+    println!("      --font-path <경로>      폰트 파일 또는 디렉토리 (여러 번 지정 가능)");
     println!("                              한컴 전용 폰트 (HY견명조 등) 가 시스템에 없을 때 ttfs 디렉토리 지정");
     println!("      --scale <배율>          렌더링 배율 (기본: 1.0)");
     println!("      --max-dimension <픽셀>  한 변 최대 픽셀 (longest edge). VLM 입력 한도용.");
@@ -807,7 +807,7 @@ fn print_help() {
         "      --profile <프로필>      layer 출력 프로필: screen|print|high-quality|fast-preview"
     );
     println!("      --raster-dpi <DPI>      direct backend fallback raster DPI (기본값: 144)");
-    println!("      --font-path <경로>      폰트 파일 탐색 경로 (여러 번 지정 가능)");
+    println!("      --font-path <경로>      폰트 파일 또는 디렉토리 (여러 번 지정 가능)");
     println!("      --fallback-serif <명>   PDF serif generic fallback family");
     println!("      --fallback-sans <명>    PDF sans-serif generic fallback family");
     println!("      --fallback-mono <명>    PDF monospace generic fallback family");
@@ -2428,7 +2428,7 @@ fn print_export_pdf_usage() {
         "      --profile <프로필>   layer 출력 프로필 (screen|print|high-quality|fast-preview)"
     );
     eprintln!("      --raster-dpi <DPI>    direct backend fallback raster DPI (기본값: 144)");
-    eprintln!("      --font-path <경로>   폰트 파일 탐색 경로 (여러 번 지정 가능)");
+    eprintln!("      --font-path <경로>   폰트 파일 또는 디렉토리 (여러 번 지정 가능)");
     eprintln!("      --fallback-serif <명>");
     eprintln!("      --fallback-sans <명>");
     eprintln!("      --fallback-mono <명>");

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use skia_safe::{
     font, paint, Canvas, Color, Font, FontMgr, FontStyle, Paint, PathEffect, Rect, Typeface,
@@ -16,13 +16,151 @@ use crate::renderer::{clamp_tab_leader_end_x, TextStyle};
 use super::font_lookup::{
     legacy_typeface_for_style, match_system_family_style, SystemFontFamilies,
 };
-use super::renderer::colorref_to_skia;
+use super::renderer::{colorref_to_skia, typeface_for_style, TypefaceCatalog};
+
+const SANS_CJK_FALLBACK_FAMILIES: &[&str] = &[
+    "Noto Sans KR",
+    "Noto Sans CJK KR",
+    "Nanum Gothic",
+    "Malgun Gothic",
+    "맑은 고딕",
+    "Apple SD Gothic Neo",
+    "Noto Serif KR",
+    "Noto Serif CJK KR",
+    "Nanum Myeongjo",
+    "Batang",
+    "바탕",
+    "AppleMyungjo",
+    "DejaVu Sans",
+    "Arial",
+    "sans-serif",
+];
+
+const SERIF_CJK_FALLBACK_FAMILIES: &[&str] = &[
+    "Noto Serif KR",
+    "Noto Serif CJK KR",
+    "Nanum Myeongjo",
+    "Batang",
+    "바탕",
+    "AppleMyungjo",
+    "Noto Sans KR",
+    "Noto Sans CJK KR",
+    "Nanum Gothic",
+    "Malgun Gothic",
+    "맑은 고딕",
+    "Apple SD Gothic Neo",
+    "DejaVu Serif",
+    "Times New Roman",
+    "serif",
+];
+
+const MONO_CJK_FALLBACK_FAMILIES: &[&str] = &[
+    "GulimChe",
+    "굴림체",
+    "D2Coding",
+    "Noto Sans Mono",
+    "monospace",
+];
+
+fn prefers_monospace_cjk_fallback(family: &str) -> bool {
+    let lower = family.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    // KoPub uses `돋움체`/`바탕체` in proportional publication-face names.
+    if lower.starts_with("kopub")
+        && (lower.contains("돋움체")
+            || lower.contains("바탕체")
+            || lower.contains("dotum")
+            || lower.contains("batang"))
+    {
+        return false;
+    }
+    let has_mono_token = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|token| matches!(token, "mono" | "monospace"));
+    family.contains("굴림체")
+        || family.contains("바탕체")
+        || lower.contains("gulimche")
+        || lower.contains("batangche")
+        || lower.contains("coding")
+        || lower.contains("courier")
+        || has_mono_token
+}
+
+fn prefers_serif_cjk_fallback(family: &str) -> bool {
+    let lower = family.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let explicitly_sans = [
+        "고딕",
+        "돋움",
+        "굴림",
+        "그래픽",
+        "헤드라인",
+        "gothic",
+        "dotum",
+        "gulim",
+        "graphic",
+        "headline",
+        "sans",
+    ]
+    .iter()
+    .any(|token| lower.contains(token));
+    !explicitly_sans
+        && [
+            "명조", "바탕", "궁서", "myeong", "myung", "batang", "gungsuh", "gungseo", "serif",
+        ]
+        .iter()
+        .any(|token| lower.contains(token))
+}
+
+fn cjk_fallback_families(family: &str) -> &'static [&'static str] {
+    if prefers_monospace_cjk_fallback(family) {
+        MONO_CJK_FALLBACK_FAMILIES
+    } else if prefers_serif_cjk_fallback(family) {
+        SERIF_CJK_FALLBACK_FAMILIES
+    } else {
+        SANS_CJK_FALLBACK_FAMILIES
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharacterTypefaceSource {
+    ExplicitChain,
+    SystemCharacterFallback,
+}
+
+fn typeface_for_character(
+    typeface_chain: &[Typeface],
+    font_mgr: &FontMgr,
+    font_style: FontStyle,
+    codepoint: i32,
+) -> Option<(Typeface, CharacterTypefaceSource)> {
+    if let Some(typeface) = typeface_chain
+        .iter()
+        .find(|typeface| typeface.unichar_to_glyph(codepoint) != 0)
+        .cloned()
+    {
+        return Some((typeface, CharacterTypefaceSource::ExplicitChain));
+    }
+
+    // Use an empty family name deliberately. Asking CoreText for an arbitrary missing
+    // document family can trigger downloadable-font IPC and hang a headless macOS render.
+    // The explicit chain above already tried every installed requested/fallback family;
+    // this final query asks only for a system face that owns the character.
+    font_mgr
+        .match_family_style_character("", font_style, &[], codepoint)
+        .filter(|typeface| typeface.unichar_to_glyph(codepoint) != 0)
+        .map(|typeface| (typeface, CharacterTypefaceSource::SystemCharacterFallback))
+}
 
 pub(super) struct SkiaTextReplay<'a> {
     pub(super) canvas: &'a Canvas,
     pub(super) font_mgr: &'a FontMgr,
-    pub(super) custom_typefaces: &'a HashMap<String, Typeface>,
-    pub(super) bundled_typefaces: &'a HashMap<String, Typeface>,
+    pub(super) custom_typefaces: &'a TypefaceCatalog,
+    pub(super) bundled_typefaces: &'a TypefaceCatalog,
     pub(super) system_families: &'a SystemFontFamilies,
     pub(super) output_options: &'a LayerOutputOptions,
 }
@@ -77,24 +215,9 @@ impl SkiaTextReplay<'_> {
                     families.push(base);
                 }
                 // 한글 fallback (CJK glyph 미보유 폰트로 fallback 시 사각형 방지).
-                // SVG 경로의 CSS font chain 과 동일한 한글 폴백 폰트 순서.
-                families.extend([
-                    "Noto Sans KR",
-                    "Noto Serif KR",
-                    "Noto Sans CJK KR",
-                    "Noto Serif CJK KR",
-                    "Nanum Gothic",
-                    "Nanum Myeongjo",
-                    "Malgun Gothic",
-                    "맑은 고딕",
-                    "Batang",
-                    "바탕",
-                    "Apple SD Gothic Neo",
-                    "AppleMyungjo",
-                    "DejaVu Sans",
-                    "Arial",
-                    "sans-serif",
-                ]);
+                // 명조/바탕/궁서 계열을 sans로 바꾸면 글리프 폭·획·줄바꿈이 모두
+                // 달라지므로 원본 family 분류에 맞는 계열을 먼저 시도한다.
+                families.extend(cjk_fallback_families(&style.font_family));
                 // 1) 사용자 지정 폰트 (--font-path) 우선 검색
                 // 2) 시스템 FontMgr 검색 (한글 fallback chain 포함)
                 // 3) 마지막 fallback (legacy_make_typeface)
@@ -111,7 +234,9 @@ impl SkiaTextReplay<'_> {
                             }
                         };
                     for family in &families {
-                        if let Some(tf) = self.custom_typefaces.get(*family).cloned() {
+                        if let Some(tf) =
+                            typeface_for_style(self.custom_typefaces, family, font_style)
+                        {
                             push(&mut chain, &mut seen, tf);
                         }
                     }
@@ -131,7 +256,9 @@ impl SkiaTextReplay<'_> {
                     // 서체로 렌더했다(r23 발산 −6.9pp). 폰트 미설치 환경(#2293)
                     // 에서는 앞 단계가 비므로 종전대로 번들이 한국어를 구제한다.
                     for family in &families {
-                        if let Some(tf) = self.bundled_typefaces.get(*family).cloned() {
+                        if let Some(tf) =
+                            typeface_for_style(self.bundled_typefaces, family, font_style)
+                        {
                             push(&mut chain, &mut seen, tf);
                         }
                     }
@@ -145,11 +272,17 @@ impl SkiaTextReplay<'_> {
                     let visible_char = sample.chars().find(|ch| !ch.is_whitespace());
                     if let Some(ch) = visible_char {
                         let codepoint = ch as i32;
-                        if let Some(tf) = typeface_chain
-                            .iter()
-                            .find(|tf| tf.unichar_to_glyph(codepoint) != 0)
-                            .cloned()
-                        {
+                        // Keep the explicit chain compact for deterministic body-text
+                        // metrics, but do not drop symbols which live outside that chain.
+                        // SVG/browser rendering performs a character-aware system fallback
+                        // here (notably for U+25B8 numbering markers in Arial tables), so
+                        // ask Skia's FontMgr for an equivalent last-resort face.
+                        if let Some((tf, _source)) = typeface_for_character(
+                            &typeface_chain,
+                            self.font_mgr,
+                            font_style,
+                            codepoint,
+                        ) {
                             let mut font = Font::new(tf, size);
                             font.set_edging(font::Edging::AntiAlias);
                             return Some(font);
@@ -816,5 +949,92 @@ impl SkiaTextReplay<'_> {
             is_para_end,
             is_line_break_end,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_myeongjo_batang_and_gungseo_families_prefer_serif_cjk_fallbacks() {
+        for family in [
+            "한양신명조",
+            "HYSinMyeongJo-Medium",
+            "휴먼명조",
+            "-윤명조120",
+            "바탕",
+            "궁서",
+        ] {
+            assert!(
+                prefers_serif_cjk_fallback(family),
+                "{family} should be classified as a serif CJK family"
+            );
+            assert_eq!(cjk_fallback_families(family)[0], "Noto Serif KR");
+        }
+    }
+
+    #[test]
+    fn gothic_dotum_gulim_and_headline_families_keep_sans_cjk_fallbacks() {
+        for family in ["한양중고딕", "HY헤드라인M", "굴림", "돋움", "Noto Sans KR"] {
+            assert!(
+                !prefers_serif_cjk_fallback(family),
+                "{family} should be classified as a sans CJK family"
+            );
+            assert_eq!(cjk_fallback_families(family)[0], "Noto Sans KR");
+        }
+    }
+
+    #[test]
+    fn unknown_and_empty_families_preserve_the_existing_sans_default() {
+        for family in ["", "Unknown Legacy Font"] {
+            assert!(!prefers_serif_cjk_fallback(family));
+            assert_eq!(cjk_fallback_families(family)[0], "Noto Sans KR");
+        }
+    }
+
+    #[test]
+    fn fixed_width_korean_families_match_the_shared_monospace_contract() {
+        for family in [
+            "굴림체",
+            "바탕체",
+            "GulimChe",
+            "BatangChe",
+            "D2Coding ligature",
+            "Courier New",
+            "Noto Sans Mono",
+        ] {
+            assert!(prefers_monospace_cjk_fallback(family), "{family}");
+            assert_eq!(cjk_fallback_families(family)[0], "GulimChe");
+        }
+        for proportional_kopub in [
+            "KoPub돋움체 Light",
+            "KoPub바탕체 Medium",
+            "KOPUB바탕체",
+            "KoPub Dotum Light",
+            "KoPub Batang Medium",
+        ] {
+            assert!(
+                !prefers_monospace_cjk_fallback(proportional_kopub),
+                "{proportional_kopub}"
+            );
+        }
+        for proportional_monotype in ["Monotype Corsiva", "Monotype Sorts"] {
+            assert!(
+                !prefers_monospace_cjk_fallback(proportional_monotype),
+                "{proportional_monotype}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_explicit_chain_reaches_character_aware_system_fallback() {
+        let font_mgr = FontMgr::default();
+        let (typeface, source) =
+            typeface_for_character(&[], &font_mgr, FontStyle::normal(), '\u{25B8}' as i32)
+                .expect("supported platforms provide a system face for the common triangle marker");
+
+        assert_eq!(source, CharacterTypefaceSource::SystemCharacterFallback);
+        assert_ne!(typeface.unichar_to_glyph('\u{25B8}' as i32), 0);
     }
 }

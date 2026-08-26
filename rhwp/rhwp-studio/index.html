@@ -446,11 +446,40 @@
         <button class="tb-btn" title="하이퍼링크"><span class="tb-sprite icon-hyperlink"></span><span class="tb-label">하이퍼<br/>링크</span></button>
       </div>
       <span class="tb-sep"></span>
-      <div class="tb-group tb-rotate-group" style="display:none">
+      <div class="tb-group tb-mode-group tb-object-context-group tb-rotate-group" data-toolbar-mode="object" style="display:none">
+        <span class="tb-mode-label">개체</span>
+        <span class="tb-sep"></span>
+        <button class="tb-btn" data-cmd="insert:picture-props" title="개체 속성"><span class="tb-sprite icon-obj-props"></span><span class="tb-label">개체<br/>속성</span></button>
+        <button class="tb-btn" data-cmd="insert:caption-toggle" title="캡션 넣기"><span class="tb-icon-text">C</span><span class="tb-label">캡션</span></button>
+        <span class="tb-sep"></span>
+        <button class="tb-btn" data-cmd="insert:arrange-front" title="맨 앞으로"><span class="tb-icon-text">⇈</span><span class="tb-label">맨<br/>앞으로</span></button>
+        <button class="tb-btn" data-cmd="insert:arrange-forward" title="앞으로"><span class="tb-icon-text">↑</span><span class="tb-label">앞으로</span></button>
+        <button class="tb-btn" data-cmd="insert:arrange-backward" title="뒤로"><span class="tb-icon-text">↓</span><span class="tb-label">뒤로</span></button>
+        <button class="tb-btn" data-cmd="insert:arrange-back" title="맨 뒤로"><span class="tb-icon-text">⇊</span><span class="tb-label">맨<br/>뒤로</span></button>
+        <span class="tb-sep"></span>
         <button class="tb-btn" data-cmd="insert:rotate-ccw" title="왼쪽 90° 회전"><span class="tb-icon-text">&#x21B6;</span><span class="tb-label">왼쪽<br/>회전</span></button>
         <button class="tb-btn" data-cmd="insert:rotate-cw" title="오른쪽 90° 회전"><span class="tb-icon-text">&#x21B7;</span><span class="tb-label">오른쪽<br/>회전</span></button>
         <button class="tb-btn" data-cmd="insert:flip-horz" title="좌우 대칭"><span class="tb-icon-text">&#x21C4;</span><span class="tb-label">좌우<br/>대칭</span></button>
         <button class="tb-btn" data-cmd="insert:flip-vert" title="상하 대칭"><span class="tb-icon-text">&#x21C5;</span><span class="tb-label">상하<br/>대칭</span></button>
+        <span class="tb-sep"></span>
+        <button class="tb-btn" data-cmd="insert:group-shapes" title="개체 묶기"><span class="tb-icon-text">⊞</span><span class="tb-label">묶기</span></button>
+        <button class="tb-btn" data-cmd="insert:ungroup-shapes" title="개체 풀기"><span class="tb-icon-text">⊟</span><span class="tb-label">풀기</span></button>
+        <button class="tb-btn tb-context-danger" data-cmd="insert:picture-delete" title="개체 지우기"><span class="tb-icon-text">×</span><span class="tb-label">지우기</span></button>
+      </div>
+      <div class="tb-group tb-mode-group tb-table-context-group" data-toolbar-mode="table" style="display:none">
+        <span class="tb-mode-label">표</span>
+        <span class="tb-sep"></span>
+        <button class="tb-btn" data-cmd="table:cell-props" title="표/셀 속성"><span class="tb-sprite icon-table"></span><span class="tb-label">표/셀<br/>속성</span></button>
+        <button class="tb-btn" data-cmd="table:insert-row-col" title="줄/칸 추가"><span class="tb-icon-text">＋</span><span class="tb-label">줄/칸<br/>추가</span></button>
+        <button class="tb-btn" data-cmd="table:delete-row-col" title="줄/칸 지우기"><span class="tb-icon-text">−</span><span class="tb-label">줄/칸<br/>지우기</span></button>
+        <span class="tb-sep"></span>
+        <button class="tb-btn" data-cmd="table:cell-merge" title="셀 합치기"><span class="tb-icon-text">⊕</span><span class="tb-label">셀<br/>합치기</span></button>
+        <button class="tb-btn" data-cmd="table:cell-split" title="셀 나누기"><span class="tb-icon-text">⊞</span><span class="tb-label">셀<br/>나누기</span></button>
+        <button class="tb-btn" data-cmd="table:cell-width-equal" title="셀 너비를 같게"><span class="tb-icon-text">↔</span><span class="tb-label">너비<br/>같게</span></button>
+        <button class="tb-btn" data-cmd="table:cell-height-equal" title="셀 높이를 같게"><span class="tb-icon-text">↕</span><span class="tb-label">높이<br/>같게</span></button>
+        <span class="tb-sep"></span>
+        <button class="tb-btn" data-cmd="table:caption-toggle" title="캡션 넣기"><span class="tb-icon-text">C</span><span class="tb-label">캡션</span></button>
+        <button class="tb-btn tb-context-danger" data-cmd="table:delete" title="표 지우기"><span class="tb-icon-text">×</span><span class="tb-label">표<br/>지우기</span></button>
       </div>
       <span class="tb-sep"></span>
       <div class="tb-group">
@@ -475,7 +504,7 @@
         <button class="tb-btn" data-cmd="edit:compare-documents" title="문서 비교 (Alt+Shift+V)"><span class="tb-icon-text">≍</span><span class="tb-label">문서<br/>비교</span></button>
       </div>
       <!-- 머리말/꼬리말 편집 모드 전용 도구상자 (숨김) -->
-      <div class="tb-group tb-headerfooter-group" style="display:none">
+      <div class="tb-group tb-mode-group tb-headerfooter-group" data-toolbar-mode="header-footer" style="display:none">
         <span class="tb-hf-label">머리말</span>
         <span class="tb-sep"></span>
         <button class="tb-btn" data-cmd="page:headerfooter-prev" title="이전"><span class="tb-icon-text">◀</span><span class="tb-label">이전</span></button>
@@ -489,7 +518,7 @@
         <button class="tb-btn" data-cmd="page:insert-field-filename" title="파일 이름 삽입"><span class="tb-icon-text">F</span><span class="tb-label">파일명</span></button>
       </div>
       <!-- 주석 편집 모드 전용 도구상자 (숨김) -->
-      <div class="tb-group tb-mode-group tb-note-group" style="display:none">
+      <div class="tb-group tb-mode-group tb-note-group" data-toolbar-mode="note" style="display:none">
         <span class="tb-note-label">주석</span>
         <span class="tb-sep"></span>
         <button class="tb-btn" data-cmd="insert:footnote" title="각주"><span class="tb-sprite icon-footnote"></span><span class="tb-label">각주</span></button>

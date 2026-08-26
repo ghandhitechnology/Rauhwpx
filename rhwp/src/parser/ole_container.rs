@@ -309,6 +309,7 @@ fn strip_ole_presentation_header_wmf(data: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn test_strip_no_emf_magic() {
@@ -347,5 +348,28 @@ mod tests {
         // CFB 매직이 아닌 임의 바이트
         let bytes: Vec<u8> = (0..128u8).collect();
         assert!(parse_ole_container(&bytes).is_none());
+    }
+
+    #[test]
+    fn hancell_ole_presentation_exposes_a_renderable_wmf_preview() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/한셀OLE.hwp");
+        let bytes = std::fs::read(path).expect("read Hancell OLE fixture");
+        let document = crate::parser::parse_hwp(&bytes).expect("parse Hancell OLE fixture");
+        let ole_bytes = document.bin_data_content[0].data.load();
+        let container = parse_ole_container(&ole_bytes).expect("parse embedded OLE container");
+        let wmf = container
+            .preview_wmf
+            .as_deref()
+            .expect("extract OLE presentation WMF");
+
+        let converted =
+            crate::wmf::converter::WMFConverter::new(wmf, crate::wmf::converter::SVGPlayer::new())
+                .run()
+                .expect("convert OLE presentation WMF");
+        let svg = String::from_utf8(converted).expect("WMF converter emits UTF-8 SVG");
+        assert!(
+            svg.contains("<image"),
+            "spreadsheet preview must retain its DIB"
+        );
     }
 }

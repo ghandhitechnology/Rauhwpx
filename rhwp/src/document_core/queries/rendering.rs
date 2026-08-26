@@ -33,6 +33,67 @@ use std::fmt::Write as _;
 const MAX_EMBEDDED_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_EMBEDDED_FONT_BYTES_PER_PAGE: usize = 64 * 1024 * 1024;
 
+/// Render-only marker for the synthetic one-picture paragraphs produced by the
+/// #2004 cell floating-stack compatibility projection. Bit 30 is reserved by
+/// HWP5 and is set only on the cloned render-normalization tree, never on the
+/// stored document model.
+pub(crate) const CELL_FLOATING_STACK_PROJECTION_TAG: u32 = 1 << 30;
+
+const PAGE_BORDER_FILL_STYLE_KEYS: &[&str] = &[
+    "borderLeft",
+    "borderRight",
+    "borderTop",
+    "borderBottom",
+    "fillType",
+    "fillColor",
+    "patternColor",
+    "patternType",
+    "fillAlpha",
+    "gradientType",
+    "gradientAngle",
+    "gradientCenterX",
+    "gradientCenterY",
+    "gradientBlur",
+    "gradientStepCenter",
+    "gradientColors",
+    "gradientPositions",
+    "imageFillMode",
+    "imageBrightness",
+    "imageContrast",
+    "imageEffect",
+    "imageBinDataId",
+    "diagonalLine",
+    "diagonalSlash",
+    "diagonalBackSlash",
+    "diagonalWidth",
+    "diagonalColor",
+    "centerLine",
+];
+
+fn image_fill_mode_json_name(mode: crate::model::style::ImageFillMode) -> &'static str {
+    use crate::model::style::ImageFillMode;
+
+    match mode {
+        ImageFillMode::TileAll => "tileAll",
+        ImageFillMode::TileHorzTop => "tileHorzTop",
+        ImageFillMode::TileHorzBottom => "tileHorzBottom",
+        ImageFillMode::TileVertLeft => "tileVertLeft",
+        ImageFillMode::TileVertRight => "tileVertRight",
+        ImageFillMode::FitToSize => "fitToSize",
+        ImageFillMode::Total => "total",
+        ImageFillMode::Center => "center",
+        ImageFillMode::CenterTop => "centerTop",
+        ImageFillMode::CenterBottom => "centerBottom",
+        ImageFillMode::LeftCenter => "leftCenter",
+        ImageFillMode::LeftTop => "leftTop",
+        ImageFillMode::LeftBottom => "leftBottom",
+        ImageFillMode::RightCenter => "rightCenter",
+        ImageFillMode::RightTop => "rightTop",
+        ImageFillMode::RightBottom => "rightBottom",
+        ImageFillMode::None => "none",
+    }
+}
+
 fn load_bounded_embedded_font_bytes(
     contents: &[crate::model::bin_data::BinDataContent],
     font_ids: &[u16],
@@ -81,12 +142,37 @@ fn floating_stack_picture_common(ctrl: &Control) -> Option<&crate::model::shape:
     }
 }
 
+/// Whether this paragraph is one marked member of the render-only #2004 cell
+/// picture-stack projection. Both direct pictures and `ShapeObject::Picture`
+/// use the same projection contract.
+pub(crate) fn is_projected_cell_stack_picture_paragraph(
+    paragraph: &Paragraph,
+    control_index: usize,
+) -> bool {
+    use crate::model::shape::TextWrap;
+
+    !paragraph
+        .text
+        .chars()
+        .any(|c| c > '\u{001F}' && c != '\u{FFFC}')
+        && paragraph.controls.len() == 1
+        && control_index == 0
+        && paragraph.line_segs.len() == 1
+        && paragraph.line_segs[0].tag & CELL_FLOATING_STACK_PROJECTION_TAG != 0
+        && floating_stack_picture_common(&paragraph.controls[control_index]).is_some_and(|common| {
+            common.treat_as_char
+                && matches!(common.text_wrap, TextWrap::Square)
+                && !common.allow_overlap
+        })
+}
+
 /// 한 문단이 "동일 위치·겹침불허·전면급 부동 그림 다수" 스택인지.
 /// 한글은 이런 그림을 쪽당 1장씩 배치하지만 rhwp 는 앵커 쪽에 겹쳐 그린다(#2004 부동 변종).
-/// 게이트를 좁혀(모든 컨트롤이 tac=false·Square·overlap=false·전면급 그림 + 동일 세로오프셋 +
-/// 개수≥2 + 가시 텍스트 없음) 일반 부동개체 문단 오검출을 차단한다.
+/// 게이트를 좁혀(모든 컨트롤이 tac=false·Square·overlap=false·전면급 그림 +
+/// horz=Para/Left + 동일 세로오프셋 + 개수≥2 + 가시 텍스트 없음) 일반 부동개체
+/// 문단과 inline 변환으로 위치 의미가 바뀌는 page/right/outside 개체를 차단한다.
 fn para_is_floating_image_stack(para: &Paragraph, min_height_hu: i32) -> bool {
-    use crate::model::shape::TextWrap;
+    use crate::model::shape::{HorzAlign, HorzRelTo, TextWrap};
     if para.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}') {
         return false;
     }
@@ -104,6 +190,8 @@ fn para_is_floating_image_stack(para: &Paragraph, min_height_hu: i32) -> bool {
         if common.treat_as_char
             || !matches!(common.text_wrap, TextWrap::Square)
             || common.allow_overlap
+            || !matches!(common.horz_rel_to, HorzRelTo::Para)
+            || !matches!(common.horz_align, HorzAlign::Left)
             || (common.height as i32) < min_height_hu
         {
             return false;
@@ -177,7 +265,8 @@ fn reclassify_cell_floating_stacks(para: &mut Paragraph, min_height_hu: i32) -> 
                                 line_spacing: 0,
                                 column_start: 0,
                                 segment_width: template.segment_width,
-                                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+                                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE
+                                    | CELL_FLOATING_STACK_PROJECTION_TAG,
                             }];
                             cum_vpos = cum_vpos.saturating_add(img_h);
                             reclassify_floating_pictures_inline(&mut sp);
@@ -193,6 +282,47 @@ fn reclassify_cell_floating_stacks(para: &mut Paragraph, min_height_hu: i32) -> 
         }
     }
     changed
+}
+
+/// Return the authored table outer-top inset for a continuation fragment of the
+/// render-only #2004 cell picture-stack projection.
+///
+/// The gate intentionally requires a cell made entirely from at least two of
+/// the marked one-picture paragraphs. Ordinary RowBreak tables and source
+/// document paragraphs can therefore never acquire this compatibility inset.
+pub(crate) fn projected_cell_stack_continuation_outer_top_hu(
+    table: &crate::model::table::Table,
+    is_continuation: bool,
+) -> i32 {
+    use crate::model::shape::{TextWrap, VertRelTo};
+    use crate::model::table::TablePageBreak;
+
+    if !is_continuation
+        || table.outer_margin_top <= 0
+        || table.common.treat_as_char
+        || !matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+        || !matches!(table.common.vert_rel_to, VertRelTo::Para)
+        || !matches!(table.page_break, TablePageBreak::RowBreak)
+        || table.row_count != 1
+        || table.col_count != 1
+        || table.cells.len() != 1
+    {
+        return 0;
+    }
+
+    let has_projected_stack_cell = table.cells.iter().all(|cell| {
+        cell.paragraphs.len() >= 2
+            && cell
+                .paragraphs
+                .iter()
+                .all(|paragraph| is_projected_cell_stack_picture_paragraph(paragraph, 0))
+    });
+
+    if has_projected_stack_cell {
+        table.outer_margin_top as i32
+    } else {
+        0
+    }
 }
 
 fn uses_hwp3_origin_page_tolerance(document: &Document) -> bool {
@@ -1918,7 +2048,7 @@ impl DocumentCore {
             "\"borderRight\":{\"type\":0,\"width\":0,\"color\":\"#000000\"},",
             "\"borderTop\":{\"type\":0,\"width\":0,\"color\":\"#000000\"},",
             "\"borderBottom\":{\"type\":0,\"width\":0,\"color\":\"#000000\"},",
-            "\"fillType\":\"none\",\"fillColor\":\"#ffffff\",\"patternColor\":\"#000000\",\"patternType\":0"
+            "\"fillType\":\"none\",\"fillColor\":\"#ffffff\",\"patternColor\":\"#000000\",\"patternType\":0,\"fillAlpha\":0"
         )
         .to_string();
 
@@ -1945,20 +2075,74 @@ impl DocumentCore {
                     })
                     .collect::<Vec<_>>()
                     .join(",");
-                let (fill_type, fill_color, pattern_color, pattern_type) =
-                    match (&bf.fill.fill_type, &bf.fill.solid) {
-                        (FillType::Solid, Some(solid)) => (
-                            "solid",
-                            color_ref_to_css(solid.background_color),
-                            color_ref_to_css(solid.pattern_color),
-                            solid.pattern_type,
-                        ),
-                        _ => ("none", "#ffffff".to_string(), "#000000".to_string(), 0),
-                    };
-                border_json = format!(
-                    "{},\"fillType\":\"{}\",\"fillColor\":\"{}\",\"patternColor\":\"{}\",\"patternType\":{}",
-                    borders, fill_type, fill_color, pattern_color, pattern_type
-                );
+                let fill_json = match bf.fill.fill_type {
+                    FillType::Solid => {
+                        if let Some(solid) = &bf.fill.solid {
+                            format!(
+                                "\"fillType\":\"solid\",\"fillColor\":\"{}\",\"patternColor\":\"{}\",\"patternType\":{},\"fillAlpha\":{}",
+                                color_ref_to_css(solid.background_color),
+                                color_ref_to_css(solid.pattern_color),
+                                solid.pattern_type,
+                                bf.fill.alpha,
+                            )
+                        } else {
+                            format!(
+                                "\"fillType\":\"solid\",\"fillColor\":\"#ffffff\",\"patternColor\":\"#000000\",\"patternType\":0,\"fillAlpha\":{}",
+                                bf.fill.alpha,
+                            )
+                        }
+                    }
+                    FillType::Image => {
+                        if let Some(image) = &bf.fill.image {
+                            format!(
+                                "\"fillType\":\"image\",\"fillColor\":\"#ffffff\",\"patternColor\":\"#000000\",\"patternType\":0,\"fillAlpha\":{},\"imageFillMode\":\"{}\",\"imageBrightness\":{},\"imageContrast\":{},\"imageEffect\":{},\"imageBinDataId\":{}",
+                                bf.fill.alpha,
+                                image_fill_mode_json_name(image.fill_mode),
+                                image.brightness,
+                                image.contrast,
+                                image.effect,
+                                image.bin_data_id,
+                            )
+                        } else {
+                            format!(
+                                "\"fillType\":\"image\",\"fillColor\":\"#ffffff\",\"patternColor\":\"#000000\",\"patternType\":0,\"fillAlpha\":{}",
+                                bf.fill.alpha,
+                            )
+                        }
+                    }
+                    FillType::Gradient => {
+                        if let Some(gradient) = &bf.fill.gradient {
+                            let colors = gradient
+                                .colors
+                                .iter()
+                                .map(|color| color_ref_to_css(*color))
+                                .collect::<Vec<_>>();
+                            format!(
+                                "\"fillType\":\"gradient\",\"fillColor\":\"#ffffff\",\"patternColor\":\"#000000\",\"patternType\":0,\"fillAlpha\":{},\"gradientType\":{},\"gradientAngle\":{},\"gradientCenterX\":{},\"gradientCenterY\":{},\"gradientBlur\":{},\"gradientStepCenter\":{},\"gradientColors\":{},\"gradientPositions\":{}",
+                                bf.fill.alpha,
+                                gradient.gradient_type,
+                                gradient.angle,
+                                gradient.center_x,
+                                gradient.center_y,
+                                gradient.blur,
+                                gradient.step_center,
+                                serde_json::to_string(&colors).unwrap_or_else(|_| "[]".to_string()),
+                                serde_json::to_string(&gradient.positions)
+                                    .unwrap_or_else(|_| "[]".to_string()),
+                            )
+                        } else {
+                            format!(
+                                "\"fillType\":\"gradient\",\"fillColor\":\"#ffffff\",\"patternColor\":\"#000000\",\"patternType\":0,\"fillAlpha\":{}",
+                                bf.fill.alpha,
+                            )
+                        }
+                    }
+                    FillType::None => format!(
+                        "\"fillType\":\"none\",\"fillColor\":\"#ffffff\",\"patternColor\":\"#000000\",\"patternType\":0,\"fillAlpha\":{}",
+                        bf.fill.alpha,
+                    ),
+                };
+                border_json = format!("{borders},{fill_json}");
             }
         }
 
@@ -1991,7 +2175,63 @@ impl DocumentCore {
         use crate::document_core::helpers::{json_bool, json_i16, json_str, json_u32};
         use crate::model::page::{PageBorderBasis, PageBorderUiBasis};
 
-        let border_fill_id = self.create_border_fill_from_json(json);
+        let section = self
+            .document
+            .sections
+            .get(section_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("구역 {} 범위 초과", section_idx)))?;
+        let current_border_fill_id = section.section_def.page_border_fill.border_fill_id;
+        let border_fill_count = self.document.doc_info.border_fills.len();
+        let requested_border_fill_id = json_u32(json, "borderFillId");
+        if let Some(id) = requested_border_fill_id {
+            if id > u16::MAX as u32 || (id > 0 && id as usize > border_fill_count) {
+                return Err(HwpError::RenderError(format!(
+                    "테두리/배경 ID {} 범위 초과 (총 {}개)",
+                    id, border_fill_count
+                )));
+            }
+        }
+
+        let has_style_patch = PAGE_BORDER_FILL_STYLE_KEYS
+            .iter()
+            .any(|key| json.contains(&format!("\"{key}\"")));
+        let requested_fill_type = json_str(json, "fillType");
+        let uses_reference_only_fill = matches!(
+            requested_fill_type.as_deref(),
+            Some("image") | Some("gradient")
+        );
+        let border_fill_id = if uses_reference_only_fill {
+            let requested_id = requested_border_fill_id
+                .map(|id| id as u16)
+                .unwrap_or(current_border_fill_id);
+            let input = serde_json::from_str::<serde_json::Value>(json).ok();
+            let current = self
+                .get_page_border_fill_native(section_idx)
+                .ok()
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok());
+            let style_is_identity =
+                input
+                    .as_ref()
+                    .zip(current.as_ref())
+                    .is_some_and(|(input, current)| {
+                        PAGE_BORDER_FILL_STYLE_KEYS.iter().all(|key| {
+                            input.get(key).is_none() || input.get(key) == current.get(key)
+                        })
+                    });
+            if requested_id != current_border_fill_id || !style_is_identity {
+                return Err(HwpError::RenderError(
+                    "이미지/그러데이션 쪽 배경은 기존 borderFillId의 무손실 재적용만 지원합니다"
+                        .to_string(),
+                ));
+            }
+            requested_id
+        } else if has_style_patch {
+            self.create_border_fill_from_json(json)
+        } else {
+            requested_border_fill_id
+                .map(|id| id as u16)
+                .unwrap_or(current_border_fill_id)
+        };
         let section = self
             .document
             .sections
@@ -2050,17 +2290,16 @@ impl DocumentCore {
         pbf.attr = attr;
         pbf.border_fill_id = border_fill_id;
 
-        let apply_page = json_str(json, "applyPage").unwrap_or_else(|| "all".to_string());
-        let hide_first = apply_page == "exceptFirst";
+        let hide_first = json_str(json, "applyPage").map(|value| value == "exceptFirst");
         if let Some(v) = json_bool(json, "hideBorder") {
             sd.hide_border = v;
-        } else {
-            sd.hide_border = hide_first;
+        } else if let Some(v) = hide_first {
+            sd.hide_border = v;
         }
         if let Some(v) = json_bool(json, "hideFill") {
             sd.hide_fill = v;
-        } else {
-            sd.hide_fill = hide_first;
+        } else if let Some(v) = hide_first {
+            sd.hide_fill = v;
         }
 
         let flags = &mut sd.flags;
@@ -5834,6 +6073,226 @@ mod tests {
     fn assert_send<T: Send>() {}
 
     #[test]
+    fn issue_2004_cell_stack_projection_marks_paragraphs_and_preserves_offsets() {
+        use crate::model::image::Picture;
+        use crate::model::paragraph::LineSeg;
+        use crate::model::shape::{
+            CommonObjAttr, HorzAlign, HorzRelTo, ShapeObject, TextWrap, VertRelTo,
+        };
+        use crate::model::table::{Cell, Table, TablePageBreak};
+
+        let picture = |horizontal_offset: i32, vertical_offset: i32| {
+            let mut picture = Picture::default();
+            picture.common.width = 45_000;
+            picture.common.height = 50_000;
+            picture.common.horizontal_offset = horizontal_offset as u32;
+            picture.common.vertical_offset = vertical_offset as u32;
+            picture.common.treat_as_char = false;
+            picture.common.text_wrap = TextWrap::Square;
+            picture.common.allow_overlap = false;
+            picture.common.horz_rel_to = HorzRelTo::Para;
+            picture.common.horz_align = HorzAlign::Left;
+            Control::Picture(Box::new(picture))
+        };
+        let stack = Paragraph {
+            text: "\u{FFFC}\u{FFFC}".into(),
+            controls: vec![picture(1_580, -3_360), picture(-750, -2_940)],
+            line_segs: vec![LineSeg {
+                vertical_pos: 123,
+                segment_width: 40_000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let table = Table {
+            row_count: 1,
+            col_count: 1,
+            page_break: TablePageBreak::RowBreak,
+            outer_margin_top: 283,
+            common: CommonObjAttr {
+                text_wrap: TextWrap::TopAndBottom,
+                vert_rel_to: VertRelTo::Para,
+                ..Default::default()
+            },
+            cells: vec![Cell {
+                paragraphs: vec![stack],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut outer = Paragraph {
+            controls: vec![Control::Table(Box::new(table))],
+            ..Default::default()
+        };
+
+        assert!(reclassify_cell_floating_stacks(&mut outer, 40_000));
+        let Control::Table(table) = &outer.controls[0] else {
+            panic!("projected host control must remain a table");
+        };
+        let projected = &table.cells[0].paragraphs;
+        assert_eq!(projected.len(), 2);
+        for paragraph in projected {
+            assert_eq!(paragraph.controls.len(), 1);
+            assert_eq!(paragraph.line_segs.len(), 1);
+            assert_ne!(
+                paragraph.line_segs[0].tag & CELL_FLOATING_STACK_PROJECTION_TAG,
+                0
+            );
+            let Control::Picture(picture) = &paragraph.controls[0] else {
+                panic!("stack member must remain a picture");
+            };
+            assert!(picture.common.treat_as_char);
+        }
+        let Control::Picture(first) = &projected[0].controls[0] else {
+            unreachable!();
+        };
+        let Control::Picture(second) = &projected[1].controls[0] else {
+            unreachable!();
+        };
+        assert_eq!(first.common.horizontal_offset as i32, 1_580);
+        assert_eq!(first.common.vertical_offset as i32, -3_360);
+        assert_eq!(second.common.horizontal_offset as i32, -750);
+        assert_eq!(second.common.vertical_offset as i32, -2_940);
+        assert_eq!(
+            projected_cell_stack_continuation_outer_top_hu(table, true),
+            283
+        );
+        assert_eq!(
+            projected_cell_stack_continuation_outer_top_hu(table, false),
+            0,
+            "the first fragment keeps its existing host spacing"
+        );
+        let mut projected_shape_stack = table.as_ref().clone();
+        for paragraph in &mut projected_shape_stack.cells[0].paragraphs {
+            let Control::Picture(picture) = paragraph.controls.pop().expect("projected picture")
+            else {
+                unreachable!();
+            };
+            paragraph.controls = vec![Control::Shape(Box::new(ShapeObject::Picture(picture)))];
+        }
+        assert_eq!(
+            projected_cell_stack_continuation_outer_top_hu(&projected_shape_stack, true),
+            283,
+            "ShapeObject::Picture projections share the same continuation contract"
+        );
+        let mut multicell = table.as_ref().clone();
+        multicell.col_count = 2;
+        multicell.cells.push(Cell::default());
+        assert_eq!(
+            projected_cell_stack_continuation_outer_top_hu(&multicell, true),
+            0,
+            "a local projected stack must not alter a multi-cell table's global margin"
+        );
+        let mut zero_margin = table.as_ref().clone();
+        zero_margin.outer_margin_top = 0;
+        assert_eq!(
+            projected_cell_stack_continuation_outer_top_hu(&zero_margin, true),
+            0
+        );
+    }
+
+    #[test]
+    fn issue_2004_projection_rejects_unrepresentable_horizontal_references() {
+        use crate::model::image::Picture;
+        use crate::model::shape::{HorzAlign, HorzRelTo, TextWrap};
+
+        let stack = || {
+            let picture = || {
+                let mut picture = Picture::default();
+                picture.common.height = 50_000;
+                picture.common.treat_as_char = false;
+                picture.common.text_wrap = TextWrap::Square;
+                picture.common.allow_overlap = false;
+                picture.common.horz_rel_to = HorzRelTo::Para;
+                picture.common.horz_align = HorzAlign::Left;
+                Control::Picture(Box::new(picture))
+            };
+            Paragraph {
+                text: "\u{FFFC}\u{FFFC}".into(),
+                controls: vec![picture(), picture()],
+                ..Default::default()
+            }
+        };
+
+        assert!(para_is_floating_image_stack(&stack(), 40_000));
+
+        let mut right = stack();
+        let Control::Picture(picture) = &mut right.controls[0] else {
+            unreachable!();
+        };
+        picture.common.horz_align = HorzAlign::Right;
+        assert!(!para_is_floating_image_stack(&right, 40_000));
+
+        let mut outside = stack();
+        let Control::Picture(picture) = &mut outside.controls[0] else {
+            unreachable!();
+        };
+        picture.common.horz_align = HorzAlign::Outside;
+        assert!(!para_is_floating_image_stack(&outside, 40_000));
+
+        let mut page_relative = stack();
+        let Control::Picture(picture) = &mut page_relative.controls[0] else {
+            unreachable!();
+        };
+        picture.common.horz_rel_to = HorzRelTo::Page;
+        assert!(!para_is_floating_image_stack(&page_relative, 40_000));
+    }
+
+    #[test]
+    fn issue_2004_single_picture_cell_is_not_projection_marked() {
+        use crate::model::image::Picture;
+        use crate::model::paragraph::LineSeg;
+        use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+        use crate::model::table::{Cell, Table, TablePageBreak};
+
+        let mut picture = Picture::default();
+        picture.common.height = 50_000;
+        picture.common.text_wrap = TextWrap::Square;
+        let source_tag = LineSeg::TAG_SINGLE_SEGMENT_LINE;
+        let table = Table {
+            page_break: TablePageBreak::RowBreak,
+            outer_margin_top: 283,
+            common: CommonObjAttr {
+                text_wrap: TextWrap::TopAndBottom,
+                vert_rel_to: VertRelTo::Para,
+                ..Default::default()
+            },
+            cells: vec![Cell {
+                paragraphs: vec![Paragraph {
+                    text: "\u{FFFC}".into(),
+                    controls: vec![Control::Picture(Box::new(picture))],
+                    line_segs: vec![LineSeg {
+                        tag: source_tag,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut outer = Paragraph {
+            controls: vec![Control::Table(Box::new(table))],
+            ..Default::default()
+        };
+
+        assert!(!reclassify_cell_floating_stacks(&mut outer, 40_000));
+        let Control::Table(table) = &outer.controls[0] else {
+            unreachable!();
+        };
+        assert_eq!(table.cells[0].paragraphs[0].line_segs[0].tag, source_tag);
+        assert_eq!(
+            table.cells[0].paragraphs[0].line_segs[0].tag & CELL_FLOATING_STACK_PROJECTION_TAG,
+            0
+        );
+        assert_eq!(
+            projected_cell_stack_continuation_outer_top_hu(table, true),
+            0,
+            "an ordinary non-projected RowBreak cell must not repeat its top margin"
+        );
+    }
+
+    #[test]
     fn issue_2308_document_core_remains_send() {
         assert_send::<DocumentCore>();
     }
@@ -6788,6 +7247,76 @@ mod tests {
             (sample16_top - 49.2).abs() < 0.2,
             "sample16 page-basis UI should use body top minus spacing and double-line outset: top={sample16_top}"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn page_image_fill_reference_roundtrip_preserves_semantics_and_bytes() {
+        fn state(
+            core: &DocumentCore,
+        ) -> (
+            serde_json::Value,
+            usize,
+            String,
+            Option<(u16, String, Vec<u8>)>,
+        ) {
+            let props = core.get_page_border_fill_native(0).unwrap();
+            let props: serde_json::Value = serde_json::from_str(&props).unwrap();
+            let border_fill_id = core.document.sections[0]
+                .section_def
+                .page_border_fill
+                .border_fill_id;
+            let border_fill = &core.document.doc_info.border_fills[(border_fill_id - 1) as usize];
+            let image = border_fill.fill.image.as_ref().unwrap();
+            let bin_data = core
+                .document
+                .bin_data_content
+                .iter()
+                .find(|content| content.id == image.bin_data_id)
+                .map(|content| (content.id, content.extension.clone(), content.data.load()));
+            (
+                props,
+                core.document.doc_info.border_fills.len(),
+                format!("{border_fill:?}"),
+                bin_data,
+            )
+        }
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("samples/issue2816/imgbrush_total_page_fill.hwpx");
+        let bytes = std::fs::read(path).unwrap();
+        let mut core = DocumentCore::from_bytes(&bytes).unwrap();
+        let before = state(&core);
+        assert_eq!(before.0["fillType"], "image");
+        assert_eq!(before.0["imageFillMode"], "total");
+        assert_eq!(before.0["imageBinDataId"], 1);
+        assert!(before
+            .3
+            .as_ref()
+            .is_some_and(|(_, _, bytes)| !bytes.is_empty()));
+        let snapshot = core.save_snapshot_native();
+        let border_fill_id = before.0["borderFillId"].as_u64().unwrap();
+
+        core.set_page_border_fill_native(
+            0,
+            &serde_json::json!({"borderFillId": border_fill_id}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(state(&core), before);
+
+        core.set_page_border_fill_native(0, &before.0.to_string())
+            .unwrap();
+        assert_eq!(state(&core), before);
+
+        let exported = core.export_hwpx_native().unwrap();
+        let reparsed = DocumentCore::from_bytes(&exported).unwrap();
+        assert_eq!(state(&reparsed), before);
+
+        core.set_page_border_fill_native(0, r#"{"spacingLeft":1234}"#)
+            .unwrap();
+        assert_ne!(state(&core).0, before.0);
+        core.restore_snapshot_native(snapshot).unwrap();
+        assert_eq!(state(&core), before);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

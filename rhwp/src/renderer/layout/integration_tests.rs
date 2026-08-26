@@ -35,6 +35,91 @@ mod tests {
         crate::document_core::DocumentCore::from_bytes(&data).ok()
     }
 
+    #[test]
+    fn table_in_textbox_repeated_body_rows_define_base_column_tracks() {
+        let Some(core) = load_document("samples/table-in-tbox.hwp") else {
+            return;
+        };
+        let table = core.document.sections[0]
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| &paragraph.controls)
+            .filter_map(|control| match control {
+                Control::Shape(shape) => shape.drawing()?.text_box.as_ref(),
+                _ => None,
+            })
+            .flat_map(|text_box| &text_box.paragraphs)
+            .flat_map(|paragraph| &paragraph.controls)
+            .find_map(|control| match control {
+                Control::Table(table) if table.row_count == 34 && table.col_count == 8 => {
+                    Some(table.as_ref())
+                }
+                _ => None,
+            })
+            .expect("34x8 table inside the first-page text box");
+        assert!(table.common.treat_as_char, "fixture table must stay inline");
+
+        let widths = core.layout_engine.resolve_column_widths(table, 8);
+        let resolved_segments = [
+            widths[0] + widths[1],
+            widths[2],
+            widths[3],
+            widths[4] + widths[5],
+            widths[6],
+            widths[7],
+        ];
+        let serialized_segments = [10_012, 6_572, 5_152, 10_296, 6_732, 5_504]
+            .map(|width| crate::renderer::hwpunit_to_px(width, core.dpi));
+
+        for (index, (resolved, serialized)) in resolved_segments
+            .into_iter()
+            .zip(serialized_segments)
+            .enumerate()
+        {
+            assert!(
+                (resolved - serialized).abs() < 0.01,
+                "segment {index} must preserve the repeated body-row width: resolved={resolved}, serialized={serialized}, columns={widths:?}",
+            );
+        }
+
+        let tree = core
+            .build_page_render_tree(0)
+            .expect("table-in-tbox page 1 render tree");
+        let mut nodes = Vec::new();
+        collect_render_nodes(&tree.root, &mut nodes);
+        let table_node = nodes
+            .into_iter()
+            .find(|node| {
+                matches!(
+                    &node.node_type,
+                    RenderNodeType::Table(table) if table.row_count == 34 && table.col_count == 8
+                )
+            })
+            .expect("34x8 table render node");
+        let mut body_cells = table_node
+            .children
+            .iter()
+            .filter_map(|node| match &node.node_type {
+                RenderNodeType::TableCell(cell) if cell.row == 3 => Some(node),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        body_cells.sort_by_key(|node| match &node.node_type {
+            RenderNodeType::TableCell(cell) => cell.col,
+            _ => unreachable!(),
+        });
+        assert_eq!(body_cells.len(), serialized_segments.len());
+        for (index, (cell, serialized)) in
+            body_cells.into_iter().zip(serialized_segments).enumerate()
+        {
+            assert!(
+                (cell.bbox.width - serialized).abs() < 0.1,
+                "rendered segment {index} must preserve its serialized body-row width: rendered={}, serialized={serialized}",
+                cell.bbox.width,
+            );
+        }
+    }
+
     fn collect_render_nodes<'a>(node: &'a RenderNode, out: &mut Vec<&'a RenderNode>) {
         out.push(node);
         for child in &node.children {
@@ -2653,6 +2738,249 @@ mod tests {
         assert!(
             next_y - host_y < 30.0,
             "shape flow was consumed twice: HOST y={host_y}, NEXT y={next_y}"
+        );
+    }
+
+    #[test]
+    fn aift_saved_residual_rowbreak_keeps_terminal_blank_continuation() {
+        let Some(core) = load_document("samples/aift.hwp") else {
+            return;
+        };
+        let paragraphs = &core.document.sections[2].paragraphs;
+        let host = &paragraphs[236];
+        let Control::Table(table) = &host.controls[0] else {
+            panic!("aift s2/p236 control 0 must be the target table");
+        };
+        let saved_split =
+            crate::renderer::float_placement::native_single_cell_rowbreak_saved_residual_split_hu(
+                core.document.layout_profile().native_hwp5_layout(),
+                host,
+                table,
+                paragraphs.get(237),
+            );
+        assert_eq!(
+            saved_split,
+            Some((8464, 3289)),
+            "aift s2/p236 must retain its exact saved residual split evidence"
+        );
+
+        let page_count: usize = core
+            .pagination
+            .iter()
+            .map(|section| section.pages.len())
+            .sum();
+        assert_eq!(
+            page_count, 74,
+            "saved residual split must not change page count"
+        );
+
+        let page19_dump = core.dump_page_items(Some(18));
+        let page20_dump = core.dump_page_items(Some(19));
+        let page19_item = page19_dump
+            .lines()
+            .find(|line| line.contains("PartialTable") && line.contains("pi=236 ci=0"))
+            .expect("aift page 19 must contain the first saved-residual fragment");
+        let page20_item = page20_dump
+            .lines()
+            .find(|line| line.contains("PartialTable") && line.contains("pi=236 ci=0"))
+            .expect("aift page 20 must preserve the terminal empty continuation");
+        assert!(
+            page19_item.contains("rows=0..1")
+                && page19_item.contains("cont=false")
+                && page19_item.contains("start_cut=[] end_cut=[1]"),
+            "unexpected first fragment: {page19_item}"
+        );
+        assert!(
+            page20_item.contains("rows=0..1")
+                && page20_item.contains("cont=true")
+                && page20_item.contains("start_cut=[1] end_cut=[]"),
+            "unexpected terminal continuation: {page20_item}"
+        );
+
+        let page19 = core
+            .build_page_render_tree(18)
+            .expect("aift page 19 render tree");
+        let page20 = core
+            .build_page_render_tree(19)
+            .expect("aift page 20 render tree");
+        let target_table_bbox = |root: &RenderNode| {
+            let mut nodes = Vec::new();
+            collect_render_nodes(root, &mut nodes);
+            nodes.into_iter().find_map(|node| match &node.node_type {
+                RenderNodeType::Table(meta)
+                    if meta.section_index == Some(2)
+                        && meta.para_index == Some(236)
+                        && meta.control_index == Some(0) =>
+                {
+                    Some(node.bbox)
+                }
+                _ => None,
+            })
+        };
+        let first_bbox = target_table_bbox(&page19.root).expect("page 19 target table bbox");
+        let terminal_bbox = target_table_bbox(&page20.root).expect("page 20 target table bbox");
+        let object_height = crate::renderer::hwpunit_to_px(8464, core.dpi);
+        let residual_height = crate::renderer::hwpunit_to_px(3289, core.dpi);
+        assert!(
+            (first_bbox.height - object_height).abs() < 0.6,
+            "first fragment height={} expected={object_height}",
+            first_bbox.height
+        );
+        assert!(
+            (terminal_bbox.height - residual_height).abs() < 0.6,
+            "terminal fragment height={} expected={residual_height}",
+            terminal_bbox.height
+        );
+
+        let mut page20_nodes = Vec::new();
+        collect_render_nodes(&page20.root, &mut page20_nodes);
+        let following_top = page20_nodes
+            .into_iter()
+            .find_map(|node| match &node.node_type {
+                RenderNodeType::TextLine(line)
+                    if line.section_index == Some(2)
+                        && line.para_index == Some(237)
+                        && line.line_index == Some(0) =>
+                {
+                    Some(node.bbox.y)
+                }
+                _ => None,
+            })
+            .expect("page 20 following paragraph first line");
+        assert!(
+            following_top + 0.1 >= terminal_bbox.y + terminal_bbox.height,
+            "following text y={following_top} must start below terminal table bottom={}",
+            terminal_bbox.y + terminal_bbox.height
+        );
+    }
+
+    #[test]
+    fn cached_saved_residual_terminal_band_respects_changed_column_height() {
+        let Some(mut core) = load_document("samples/aift.hwp") else {
+            return;
+        };
+        let paragraphs = &core.document.sections[2].paragraphs;
+        let Control::Table(table) = &paragraphs[236].controls[0] else {
+            unreachable!();
+        };
+        assert_eq!(
+            crate::renderer::float_placement::native_single_cell_rowbreak_saved_residual_split_hu(
+                true,
+                &paragraphs[236],
+                table,
+                paragraphs.get(237),
+            ),
+            Some((8464, 3289)),
+            "fixture must retain the saved residual source contract"
+        );
+
+        let section_page_base = core.pagination[..2]
+            .iter()
+            .map(|result| result.pages.len())
+            .sum::<usize>();
+        let (terminal_page, terminal_column) = core.pagination[2]
+            .pages
+            .iter()
+            .enumerate()
+            .find_map(|(page_index, page)| {
+                page.column_contents
+                    .iter()
+                    .enumerate()
+                    .find_map(|(column_index, column)| {
+                        column
+                            .items
+                            .iter()
+                            .any(|item| {
+                                matches!(
+                                    item,
+                                    PageItem::PartialTable {
+                                        para_index: 236,
+                                        control_index: 0,
+                                        is_continuation: true,
+                                        start_cut,
+                                        end_cut,
+                                        ..
+                                    } if !start_cut.is_empty() && end_cut.is_empty()
+                                )
+                            })
+                            .then_some((page_index, column_index))
+                    })
+            })
+            .expect("fixture must contain the saved terminal continuation");
+        let page_content = &mut core.pagination[2].pages[terminal_page];
+        page_content.layout.body_area.height = 20.0;
+        for area in &mut page_content.layout.column_areas {
+            area.height = 20.0;
+        }
+        for (column_index, column) in page_content.column_contents.iter_mut().enumerate() {
+            if let Some(zone_layout) = &mut column.zone_layout {
+                zone_layout.body_area.height = 20.0;
+                for area in &mut zone_layout.column_areas {
+                    area.height = 20.0;
+                }
+            }
+            if column_index == terminal_column {
+                column.items.retain(|item| {
+                    matches!(
+                        item,
+                        PageItem::PartialTable {
+                            para_index: 236,
+                            control_index: 0,
+                            is_continuation: true,
+                            start_cut,
+                            end_cut,
+                            ..
+                        } if !start_cut.is_empty() && end_cut.is_empty()
+                    )
+                });
+            } else {
+                column.items.clear();
+            }
+        }
+        let page = core
+            .build_page_render_tree((section_page_base + terminal_page) as u32)
+            .expect("changed-height terminal page render tree");
+        let mut nodes = Vec::new();
+        collect_render_nodes(&page.root, &mut nodes);
+        let terminal_bbox = nodes
+            .iter()
+            .copied()
+            .find_map(|node| match &node.node_type {
+                RenderNodeType::Table(meta)
+                    if meta.section_index == Some(2)
+                        && meta.para_index == Some(236)
+                        && meta.control_index == Some(0) =>
+                {
+                    Some(node.bbox)
+                }
+                _ => None,
+            })
+            .expect("terminal target table bbox");
+        fn contains_target_table(node: &RenderNode) -> bool {
+            matches!(
+                &node.node_type,
+                RenderNodeType::Table(meta)
+                    if meta.section_index == Some(2)
+                        && meta.para_index == Some(236)
+                        && meta.control_index == Some(0)
+            ) || node.children.iter().any(contains_target_table)
+        }
+        let column_bottom = nodes
+            .iter()
+            .copied()
+            .find_map(|node| match node.node_type {
+                RenderNodeType::Column(_) if contains_target_table(node) => {
+                    Some(node.bbox.y + node.bbox.height)
+                }
+                _ => None,
+            })
+            .expect("terminal column bbox");
+        assert!(
+            terminal_bbox.y + terminal_bbox.height <= column_bottom + 0.6,
+            "terminal residual y={} height={} bottom={} must stay within column bottom={column_bottom}",
+            terminal_bbox.y,
+            terminal_bbox.height,
+            terminal_bbox.y + terminal_bbox.height,
         );
     }
 }

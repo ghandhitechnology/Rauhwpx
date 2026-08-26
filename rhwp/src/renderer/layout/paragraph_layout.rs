@@ -21,13 +21,260 @@ use super::utils::{
     numbering_format_to_number_format, resolve_numbering_id,
 };
 use super::{CellContext, LayoutEngine};
+use crate::document_core::queries::rendering::is_projected_cell_stack_picture_paragraph;
 use crate::model::bin_data::BinDataContent;
 use crate::model::control::Control;
 use crate::model::paragraph::{LineSeg, Paragraph};
-use crate::model::shape::{ShapeObject, TextWrap, VertRelTo};
+use crate::model::shape::{HorzAlign, HorzRelTo, ShapeObject, TextWrap, VertRelTo};
 use crate::model::style::{Alignment, HeadType, LineSpacingType, Numbering, UnderlineType};
 
 const CAPTION_CELL_SENTINEL: usize = 65534;
+
+/// Return the original signed horizontal offset for a picture that the #2004
+/// render-only cell-stack projection converted to TAC. The projection rebases
+/// vertical flow through its synthetic line segment, so `vertical_offset` is
+/// deliberately not applied here.
+fn projected_cell_stack_picture_horizontal_offset_px(
+    para: &Paragraph,
+    control_index: usize,
+    dpi: f64,
+) -> f64 {
+    if !is_projected_cell_stack_picture_paragraph(para, control_index) {
+        return 0.0;
+    }
+
+    let common = match para.controls.get(control_index) {
+        Some(Control::Picture(picture)) => &picture.common,
+        Some(Control::Shape(shape)) => match shape.as_ref() {
+            ShapeObject::Picture(picture) => &picture.common,
+            _ => return 0.0,
+        },
+        _ => return 0.0,
+    };
+    // Inline flow can preserve a paragraph-left offset exactly. Page-relative
+    // and right/inside/outside alignment need the original floating reference
+    // box, which this compatibility projection deliberately does not invent.
+    if !matches!(common.horz_rel_to, HorzRelTo::Para)
+        || !matches!(common.horz_align, HorzAlign::Left)
+    {
+        return 0.0;
+    }
+    hwpunit_to_px(common.horizontal_offset as i32, dpi)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_projected_cell_stack_unmatched_picture(
+    tree: &mut PageRenderTree,
+    para: &Paragraph,
+    section_index: usize,
+    para_index: usize,
+    control_index: usize,
+    cell_ctx: Option<&CellContext>,
+    x: f64,
+    y: f64,
+) -> bool {
+    if !is_projected_cell_stack_picture_paragraph(para, control_index)
+        || !matches!(para.controls.get(control_index), Some(Control::Picture(_)))
+    {
+        return false;
+    }
+    tree.set_inline_shape_position(section_index, para_index, control_index, cell_ctx, x, y);
+    true
+}
+
+#[cfg(test)]
+mod cell_stack_projection_offset_tests {
+    use super::{
+        hwpunit_to_px, projected_cell_stack_picture_horizontal_offset_px,
+        register_projected_cell_stack_unmatched_picture,
+    };
+    use crate::document_core::queries::rendering::CELL_FLOATING_STACK_PROJECTION_TAG;
+    use crate::model::control::Control;
+    use crate::model::image::Picture;
+    use crate::model::paragraph::{LineSeg, Paragraph};
+    use crate::model::shape::{HorzAlign, HorzRelTo, ShapeObject, TextWrap};
+    use crate::renderer::render_tree::PageRenderTree;
+
+    fn projected_picture(horizontal_offset: i32, vertical_offset: i32) -> Paragraph {
+        let mut picture = Picture::default();
+        picture.common.horizontal_offset = horizontal_offset as u32;
+        picture.common.vertical_offset = vertical_offset as u32;
+        picture.common.treat_as_char = true;
+        picture.common.text_wrap = TextWrap::Square;
+        picture.common.allow_overlap = false;
+        picture.common.horz_rel_to = HorzRelTo::Para;
+        picture.common.horz_align = HorzAlign::Left;
+        Paragraph {
+            text: "\u{FFFC}".into(),
+            controls: vec![Control::Picture(Box::new(picture))],
+            line_segs: vec![LineSeg {
+                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE | CELL_FLOATING_STACK_PROJECTION_TAG,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn projected_shape_picture(horizontal_offset: i32, vertical_offset: i32) -> Paragraph {
+        let mut picture = Picture::default();
+        picture.common.horizontal_offset = horizontal_offset as u32;
+        picture.common.vertical_offset = vertical_offset as u32;
+        picture.common.treat_as_char = true;
+        picture.common.text_wrap = TextWrap::Square;
+        picture.common.allow_overlap = false;
+        picture.common.horz_rel_to = HorzRelTo::Para;
+        picture.common.horz_align = HorzAlign::Left;
+        Paragraph {
+            text: "\u{FFFC}".into(),
+            controls: vec![Control::Shape(Box::new(ShapeObject::Picture(Box::new(
+                picture,
+            ))))],
+            line_segs: vec![LineSeg {
+                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE | CELL_FLOATING_STACK_PROJECTION_TAG,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn applies_original_signed_horizontal_offset_and_ignores_vertical_offset() {
+        let positive = projected_picture(1_580, -3_360);
+        let negative = projected_picture(-750, 44_000);
+
+        assert!(
+            (projected_cell_stack_picture_horizontal_offset_px(&positive, 0, 96.0)
+                - hwpunit_to_px(1_580, 96.0))
+            .abs()
+                < 0.001
+        );
+        assert!(
+            (projected_cell_stack_picture_horizontal_offset_px(&negative, 0, 96.0)
+                - hwpunit_to_px(-750, 96.0))
+            .abs()
+                < 0.001
+        );
+    }
+
+    #[test]
+    fn ordinary_or_structurally_different_tac_pictures_get_no_offset() {
+        let mut ordinary_tac = projected_picture(1_580, -3_360);
+        ordinary_tac.line_segs[0].tag &= !CELL_FLOATING_STACK_PROJECTION_TAG;
+        assert_eq!(
+            projected_cell_stack_picture_horizontal_offset_px(&ordinary_tac, 0, 96.0),
+            0.0
+        );
+
+        let mut non_square = projected_picture(1_580, -3_360);
+        let Control::Picture(picture) = &mut non_square.controls[0] else {
+            unreachable!();
+        };
+        picture.common.text_wrap = TextWrap::TopAndBottom;
+        assert_eq!(
+            projected_cell_stack_picture_horizontal_offset_px(&non_square, 0, 96.0),
+            0.0
+        );
+
+        let mut visible_text = projected_picture(1_580, -3_360);
+        visible_text.text = "caption".into();
+        assert_eq!(
+            projected_cell_stack_picture_horizontal_offset_px(&visible_text, 0, 96.0),
+            0.0
+        );
+
+        let mut extra_control = projected_picture(1_580, -3_360);
+        extra_control.controls.push(Control::Table(Box::default()));
+        assert_eq!(
+            projected_cell_stack_picture_horizontal_offset_px(&extra_control, 0, 96.0),
+            0.0
+        );
+
+        let shape_picture = projected_shape_picture(1_580, -3_360);
+        assert_eq!(
+            projected_cell_stack_picture_horizontal_offset_px(&shape_picture, 0, 96.0),
+            hwpunit_to_px(1_580, 96.0)
+        );
+
+        let negative_shape_picture = projected_shape_picture(-750, 44_000);
+        assert_eq!(
+            projected_cell_stack_picture_horizontal_offset_px(&negative_shape_picture, 0, 96.0),
+            hwpunit_to_px(-750, 96.0)
+        );
+    }
+
+    #[test]
+    fn right_outside_and_page_relative_projections_are_rejected() {
+        let mut right = projected_picture(1_580, 0);
+        let Control::Picture(picture) = &mut right.controls[0] else {
+            unreachable!();
+        };
+        picture.common.horz_align = HorzAlign::Right;
+        assert_eq!(
+            projected_cell_stack_picture_horizontal_offset_px(&right, 0, 96.0),
+            0.0
+        );
+
+        let mut outside = projected_picture(1_580, 0);
+        let Control::Picture(picture) = &mut outside.controls[0] else {
+            unreachable!();
+        };
+        picture.common.horz_align = HorzAlign::Outside;
+        assert_eq!(
+            projected_cell_stack_picture_horizontal_offset_px(&outside, 0, 96.0),
+            0.0
+        );
+
+        let mut page_relative = projected_picture(1_580, 0);
+        let Control::Picture(picture) = &mut page_relative.controls[0] else {
+            unreachable!();
+        };
+        picture.common.horz_rel_to = HorzRelTo::Page;
+        assert_eq!(
+            projected_cell_stack_picture_horizontal_offset_px(&page_relative, 0, 96.0),
+            0.0
+        );
+    }
+
+    #[test]
+    fn unmatched_projected_picture_registers_only_after_inline_emit() {
+        let projected = projected_picture(1_580, 0);
+        let mut tree = PageRenderTree::new(0, 100.0, 100.0);
+        assert!(register_projected_cell_stack_unmatched_picture(
+            &mut tree, &projected, 0, 7, 0, None, 21.0, 30.0,
+        ));
+        assert_eq!(
+            tree.get_inline_shape_position(0, 7, 0, None),
+            Some((21.0, 30.0))
+        );
+
+        let mut ordinary_tac = projected;
+        ordinary_tac.line_segs[0].tag &= !CELL_FLOATING_STACK_PROJECTION_TAG;
+        let mut ordinary_tree = PageRenderTree::new(0, 100.0, 100.0);
+        assert!(!register_projected_cell_stack_unmatched_picture(
+            &mut ordinary_tree,
+            &ordinary_tac,
+            0,
+            7,
+            0,
+            None,
+            21.0,
+            30.0,
+        ));
+        assert_eq!(ordinary_tree.get_inline_shape_position(0, 7, 0, None), None);
+
+        let shape_picture = projected_shape_picture(1_580, 0);
+        assert!(!register_projected_cell_stack_unmatched_picture(
+            &mut ordinary_tree,
+            &shape_picture,
+            0,
+            7,
+            0,
+            None,
+            21.0,
+            30.0,
+        ));
+    }
+}
 
 /// `RHWP_LAYOUT_DEBUG=1` 로 활성화되는 layout 디버그 로깅 여부.
 /// Phase 1 (#517) — 본질 정정 (#467/#491/#496) 시 결함 측정·재현 자동화에 사용.
@@ -211,10 +458,125 @@ mod inline_equation_alignment_tests {
     }
 }
 
+#[cfg(test)]
+mod empty_cell_tac_picture_baseline_tests {
+    use super::{
+        empty_cell_tac_picture_line_uses_stored_baseline, hwpunit_to_px, inline_picture_baseline_y,
+    };
+    use crate::model::control::Control;
+    use crate::model::image::Picture;
+    use crate::model::paragraph::Paragraph;
+    use crate::model::shape::TextWrap;
+
+    fn tac_top_and_bottom_picture(height: u32) -> Picture {
+        let mut picture = Picture::default();
+        picture.common.height = height;
+        picture.common.treat_as_char = true;
+        picture.common.text_wrap = TextWrap::TopAndBottom;
+        picture
+    }
+
+    fn qualifies(
+        controls: Vec<Control>,
+        offsets: &[(usize, f64, usize)],
+        line_runs_empty: bool,
+    ) -> bool {
+        empty_cell_tac_picture_line_uses_stored_baseline(
+            &Paragraph {
+                controls,
+                ..Default::default()
+            },
+            offsets,
+            line_runs_empty,
+            hwpunit_to_px(19_800, 96.0),
+            hwpunit_to_px(16_830, 96.0),
+            96.0,
+        )
+    }
+
+    #[test]
+    fn empty_cell_tac_picture_uses_stored_baseline_minus_picture_height() {
+        let offsets = [(0, 100.0, 0)];
+        let baseline = hwpunit_to_px(16_830, 96.0);
+        assert!(qualifies(
+            vec![Control::Picture(Box::new(tac_top_and_bottom_picture(
+                5_102,
+            )))],
+            &offsets,
+            true,
+        ));
+
+        let line_y = 749.0;
+        let picture_height = hwpunit_to_px(5_102, 96.0);
+        let picture_y = inline_picture_baseline_y(line_y, baseline, picture_height);
+        let expected_offset = hwpunit_to_px(16_830 - 5_102, 96.0);
+        assert!((picture_y - line_y - expected_offset).abs() < 0.01);
+    }
+
+    #[test]
+    fn nonempty_non_tac_and_mixed_cell_lines_keep_table_fallback() {
+        let offsets = [(0, 100.0, 0)];
+        let tac_picture = tac_top_and_bottom_picture(5_102);
+        assert!(!qualifies(
+            vec![Control::Picture(Box::new(tac_picture.clone()))],
+            &offsets,
+            false,
+        ));
+
+        let mut non_tac_picture = tac_picture.clone();
+        non_tac_picture.common.treat_as_char = false;
+        assert!(!qualifies(
+            vec![Control::Picture(Box::new(non_tac_picture))],
+            &offsets,
+            true,
+        ));
+
+        assert!(!qualifies(
+            vec![
+                Control::Picture(Box::new(tac_picture)),
+                Control::Table(Box::default()),
+            ],
+            &[(0, 100.0, 0), (0, 100.0, 1)],
+            true,
+        ));
+    }
+}
+
 fn is_caption_cell_context(cell_ctx: Option<&CellContext>) -> bool {
     cell_ctx
         .and_then(|ctx| ctx.path.last())
         .is_some_and(|entry| entry.cell_index == CAPTION_CELL_SENTINEL)
+}
+
+/// Empty table-cell lines normally delegate TAC object emission to
+/// `table_layout`.  A picture-only TopAndBottom line whose stored baseline is
+/// materially below the picture, however, must be emitted here so the picture
+/// keeps its character-baseline placement.  The table pass observes the
+/// registered inline position and suppresses its line-top fallback.
+fn empty_cell_tac_picture_line_uses_stored_baseline(
+    para: &Paragraph,
+    line_tac_offsets: &[(usize, f64, usize)],
+    line_runs_empty: bool,
+    raw_line_height: f64,
+    baseline: f64,
+    dpi: f64,
+) -> bool {
+    line_runs_empty
+        && !line_tac_offsets.is_empty()
+        && line_tac_offsets.iter().all(|(_, _, control_index)| {
+            let Some(Control::Picture(pic)) = para.controls.get(*control_index) else {
+                return false;
+            };
+            let picture_height = hwpunit_to_px(pic.common.height as i32, dpi);
+            pic.common.treat_as_char
+                && matches!(pic.common.text_wrap, TextWrap::TopAndBottom)
+                && raw_line_height > picture_height + 4.0
+                && baseline > picture_height + 4.0
+        })
+}
+
+fn inline_picture_baseline_y(line_y: f64, baseline: f64, picture_height: f64) -> f64 {
+    (line_y + baseline - picture_height).max(line_y)
 }
 
 /// HWP5 원본 LineSeg가 저장한 column-relative 줄 시작점을 일반 본문 줄에 적용한다.
@@ -1885,6 +2247,7 @@ impl LayoutEngine {
                     table_para_y,
                     false,
                     false,
+                    false,
                 );
                 if table_bottom > max_table_bottom {
                     max_table_bottom = table_bottom;
@@ -1935,6 +2298,7 @@ impl LayoutEngine {
                 Some(inline_x + om_left),
                 None,
                 table_para_y,
+                false,
                 false,
                 false,
             );
@@ -2203,6 +2567,9 @@ impl LayoutEngine {
                                 }
                             };
                             let original_size_hu = pic.crop_reference_size();
+                            let image_x = x + projected_cell_stack_picture_horizontal_offset_px(
+                                p, tac_ci, self.dpi,
+                            );
                             // [Task #1151 v7 항목 7] ImageNode 생성 helper 통합.
                             let img_node = make_picture_image_node(
                                 tree,
@@ -2215,9 +2582,19 @@ impl LayoutEngine {
                                 original_size_hu,
                                 bin_data_id,
                                 image_data,
-                                BoundingBox::new(x, img_y, tac_w, pic_h),
+                                BoundingBox::new(image_x, img_y, tac_w, pic_h),
                             );
                             line_node.children.push(img_node);
+                            register_projected_cell_stack_unmatched_picture(
+                                tree,
+                                p,
+                                section_index,
+                                para_index,
+                                tac_ci,
+                                cell_ctx,
+                                image_x,
+                                img_y,
+                            );
                             x += tac_w;
                         }
                     }
@@ -5024,6 +5401,10 @@ impl LayoutEngine {
                                     }
                                 };
                                 let original_size_hu = pic.crop_reference_size();
+                                let image_x = x
+                                    + projected_cell_stack_picture_horizontal_offset_px(
+                                        p, tac_ci, self.dpi,
+                                    );
                                 // [Task #1151 v7 항목 7] ImageNode 생성 helper 통합.
                                 let img_node = make_picture_image_node(
                                     tree,
@@ -5036,7 +5417,7 @@ impl LayoutEngine {
                                     original_size_hu,
                                     bin_data_id,
                                     image_data,
-                                    BoundingBox::new(x, img_y, tac_w, pic_h),
+                                    BoundingBox::new(image_x, img_y, tac_w, pic_h),
                                 );
                                 line_node.children.push(img_node);
                                 // [Task #864 Stage G] inline TAC picture 의 위치 등록.
@@ -5052,7 +5433,7 @@ impl LayoutEngine {
                                     para_index,
                                     tac_ci,
                                     cell_ctx.as_ref(),
-                                    x,
+                                    image_x,
                                     img_y,
                                 );
                             }
@@ -5082,13 +5463,16 @@ impl LayoutEngine {
                             } else {
                                 (y + baseline - shape_h).max(y)
                             };
+                            let shape_x = x + projected_cell_stack_picture_horizontal_offset_px(
+                                p, tac_ci, self.dpi,
+                            );
                             // 인라인 좌표 등록 → shape_layout.rs에서 이 Shape를 스킵
                             tree.set_inline_shape_position(
                                 section_index,
                                 para_index,
                                 tac_ci,
                                 cell_ctx.as_ref(),
-                                x,
+                                shape_x,
                                 shape_y,
                             );
                         }
@@ -5246,6 +5630,7 @@ impl LayoutEngine {
                                     Some(x + tac_table_om.0),
                                     None,
                                     None,
+                                    false,
                                     false,
                                     false,
                                 );
@@ -6064,11 +6449,23 @@ impl LayoutEngine {
         let anchor_x = vars.x_start + vars.numbering_marker_width;
         let mut empty_line_mark_x = anchor_x;
         let mut empty_line_logical_end = vars.line_char_end;
-        // runs가 없는 빈 줄에서 treat_as_char 이미지 렌더링
-        // 테이블 셀 내부에서는 table_layout.rs가 layout_picture로 이미 처리하므로 스킵.
-        // 셀 외부에서 해당 줄 범위에 걸린 TAC만 여기서 렌더링.
-        let empty_line_tac_allowed =
-            cell_ctx.is_none() || is_caption_cell_context(cell_ctx.as_ref());
+        // runs가 없는 빈 줄에서 treat_as_char 이미지 렌더링.
+        // 일반 셀은 table_layout.rs에 위임하되, 저장 baseline이 그림보다 훨씬 아래인
+        // picture-only 줄은 여기서 baseline 정렬 후 inline 위치를 등록한다. 표 경로는
+        // 그 등록을 보고 line-top fallback을 억제한다.
+        let empty_line_tac_allowed = cell_ctx.is_none()
+            || is_caption_cell_context(cell_ctx.as_ref())
+            || para.is_some_and(|p| {
+                is_projected_cell_stack_picture_paragraph(p, 0)
+                    || empty_cell_tac_picture_line_uses_stored_baseline(
+                        p,
+                        line_tac_offsets,
+                        comp_line.runs.is_empty(),
+                        vars.raw_lh,
+                        vars.baseline,
+                        self.dpi,
+                    )
+            });
         if empty_line_tac_allowed && !line_tac_offsets.is_empty() {
             if let (Some(p), Some(bdc)) = (para, bin_data_content) {
                 // TAC 이미지 전체 폭 계산 후 문단 정렬 적용
@@ -6092,12 +6489,16 @@ impl LayoutEngine {
                                 .max(shape.shape_attr().current_height as i32);
                             let shape_h = hwpunit_to_px(shape_h_hu, self.dpi);
                             let shape_y = (vars.y + vars.baseline - shape_h).max(vars.y);
+                            let shape_x = img_x
+                                + projected_cell_stack_picture_horizontal_offset_px(
+                                    p, tac_ci, self.dpi,
+                                );
                             tree.set_inline_shape_position(
                                 vars.section_index,
                                 vars.para_index,
                                 tac_ci,
                                 cell_ctx.as_ref(),
-                                img_x,
+                                shape_x,
                                 shape_y,
                             );
                             img_x += tac_w;
@@ -6131,7 +6532,7 @@ impl LayoutEngine {
                             let base_img_y = if label_extra > 0.0 {
                                 vars.y + label_extra
                             } else {
-                                (vars.y + vars.baseline - pic_h).max(vars.y)
+                                inline_picture_baseline_y(vars.y, vars.baseline, pic_h)
                             };
                             let img_y = base_img_y + sibling_reserved_px;
                             let bin_data_id = pic.image_attr.bin_data_id;
@@ -6148,6 +6549,10 @@ impl LayoutEngine {
                                 }
                             };
                             let original_size_hu = pic.crop_reference_size();
+                            let image_x = img_x
+                                + projected_cell_stack_picture_horizontal_offset_px(
+                                    p, tac_ci, self.dpi,
+                                );
                             // [Task #1151 v7 항목 7] ImageNode 생성 helper 통합.
                             let img_node = make_picture_image_node(
                                 tree,
@@ -6160,7 +6565,7 @@ impl LayoutEngine {
                                 original_size_hu,
                                 bin_data_id,
                                 image_data,
-                                BoundingBox::new(img_x, img_y, tac_w, pic_h),
+                                BoundingBox::new(image_x, img_y, tac_w, pic_h),
                             );
                             line_node.children.push(img_node);
                             // [Task #418/#376] layout_shape_item 의 Task #347 분기 (빈 문단 +
@@ -6171,7 +6576,7 @@ impl LayoutEngine {
                                 vars.para_index,
                                 tac_ci,
                                 cell_ctx.as_ref(),
-                                img_x,
+                                image_x,
                                 img_y,
                             );
                             img_x += tac_w;
