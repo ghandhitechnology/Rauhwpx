@@ -57,6 +57,10 @@ For standalone hub work, `npm start` from the root runs it on http://127.0.0.1:5
 
 Rust: `cargo test`, `cargo clippy`, `cargo fmt`. Studio: `npm test`, `npm run build`, `npm run e2e:*`.
 
+## 기여하기
+
+[CONTRIBUTING.md](CONTRIBUTING.md)에서 로컬 설정, PR 전에 실행할 검사, [AGENTS.md](AGENTS.md)의 설명 형식을 확인하세요.
+
 ## Releasing
 
 Push a `v*` tag matching `package.json` and GitHub Actions builds and attaches the installers.
