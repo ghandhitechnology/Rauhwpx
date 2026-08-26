@@ -13,6 +13,8 @@ const BROWSER_CANDIDATES = [
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
   '/usr/bin/google-chrome',
   '/usr/bin/chromium',
+  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
 ].filter((candidate): candidate is string => Boolean(candidate));
 
 const executablePath = BROWSER_CANDIDATES.find(existsSync);
@@ -27,10 +29,14 @@ let baseUrl = '';
 
 test.before(async () => {
   if (!executablePath) return;
-  assert.ok(
-    wasmPackageAvailable,
-    'Resolver browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test',
-  );
+  if (!wasmPackageAvailable) {
+    assert.equal(
+      Boolean(process.env.CI),
+      false,
+      'Resolver browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test',
+    );
+    return;
+  }
   server = await createServer({
     root: studioRoot,
     configFile: false,
@@ -67,7 +73,7 @@ async function withPage<T>(
   action: (page: import('puppeteer-core').Page) => Promise<T>,
 ): Promise<T | undefined> {
   if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
+    context.skip('Chrome/Chromium or generated WASM package is unavailable');
     return undefined;
   }
   const page = await browser.newPage();
@@ -561,7 +567,7 @@ test('default source branch still prompts, disables delete, and dismissal keeps 
 
 test('resolver desktop controls click, report failures, retry, and fit macOS chrome', async (context) => {
   if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
+    context.skip('Chrome/Chromium or generated WASM package is unavailable');
     return;
   }
   const page = await browser.newPage();
