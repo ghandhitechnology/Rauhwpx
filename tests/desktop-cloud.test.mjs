@@ -89,7 +89,7 @@ test('cloud profile accepts Tailscale and rejects insecure endpoints', () => {
   }), /HTTPS/);
 });
 
-test('Tailscale HTTPS port persists through profiles, UI conversion, and provisioning receipts', () => {
+test('Tailscale HTTPS port persists through profiles, UI conversion, and provisioning receipts', async () => {
   const custom = normalizeCloudProfile({
     endpoint: 'https://vps.example.ts.net:8443/rauhwpx-cloud',
     ssh: { host: 'vps.example.ts.net', user: 'rauhwpx', useTailscaleSsh: true },

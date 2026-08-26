@@ -56,12 +56,13 @@ const DEFAULT_DRAFT: CloudProfileDraft = {
 };
 
 function cloneDraft(draft: CloudProfileDraft): CloudProfileDraft {
+  const { serverPublicKey, ...rest } = draft;
   return {
-    ...draft,
+    ...rest,
     name: draft.name.trim(),
     host: draft.host.trim(),
     sshUser: draft.sshUser.trim(),
-    serverPublicKey: draft.serverPublicKey?.trim(),
+    ...(typeof serverPublicKey === 'string' ? { serverPublicKey: serverPublicKey.trim() } : {}),
     auth: draft.auth.kind === 'key-file'
       ? { kind: 'key-file', keyPath: draft.auth.keyPath.trim() }
       : { kind: 'ssh-agent' },
