@@ -1,7 +1,13 @@
 # Depot CI Migration
 # Source: .github/workflows/desktop-sessions.yml
 #
-# No changes were necessary.
+# Changes made:
+# - Run on depot-ubuntu-latest. Depot CI has no macOS/Windows sandboxes, and
+#   ${{ matrix.os }} (macos-15 / windows-latest) cannot schedule here.
+# - Build the pinned WASM engine before Studio npm test so
+#   rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm exist for browser merge tests.
+# - Install Chromium and set PUPPETEER_EXECUTABLE_PATH for those tests.
+# - Raise the timeout to 90 minutes so the WASM compile fits.
 
 name: Desktop session checks
 on:
@@ -17,15 +23,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   session-tests:
-    name: Session tests (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - macos-15
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    name: Session tests (depot-ubuntu-latest)
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Check out source
         uses: actions/checkout@v5
@@ -38,6 +38,30 @@ jobs:
             package-lock.json
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
+      - name: Install pinned Rust toolchain for browser merge tests
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack for browser merge tests
+        run: cargo install wasm-pack --version 0.15.0 --locked
+      - name: Build WASM engine for browser merge tests
+        working-directory: rhwp
+        run: wasm-pack build --target web
+      - name: Install Chromium for browser merge tests
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          if ! sudo apt-get install -y --no-install-recommends chromium-browser; then
+            sudo apt-get install -y --no-install-recommends chromium
+          fi
+          if [ -x /usr/bin/chromium ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium" >> "$GITHUB_ENV"
+          elif [ -x /usr/bin/chromium-browser ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser" >> "$GITHUB_ENV"
+          elif [ -x /usr/bin/google-chrome ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome" >> "$GITHUB_ENV"
+          fi
       - name: Install dependencies
         shell: bash
         run: |
