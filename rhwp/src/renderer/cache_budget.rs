@@ -25,6 +25,14 @@ impl WeightedLruBudget {
         self.order.push_back(key);
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.weights.len()
+    }
+
+    pub(crate) fn total_weight(&self) -> usize {
+        self.total_weight
+    }
+
     pub(crate) fn record(&mut self, key: u64, weight: usize) -> Vec<u64> {
         if let Some(previous) = self.weights.remove(&key) {
             self.total_weight = self.total_weight.saturating_sub(previous);

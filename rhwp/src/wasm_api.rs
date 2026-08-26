@@ -653,6 +653,12 @@ impl HwpDocument {
         )
     }
 
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = getWebCanvasImageCacheStats)]
+    pub fn get_web_canvas_image_cache_stats(&self) -> String {
+        crate::renderer::web_canvas::image_cache_stats_json()
+    }
+
     /// 특정 페이지를 기존 PageRenderTree 경로로 Canvas 2D에 직접 렌더링한다.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = renderPageToCanvasLegacy)]

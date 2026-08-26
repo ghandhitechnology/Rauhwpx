@@ -227,6 +227,25 @@ fn get_cached_html_image(key: u64) -> Option<HtmlImageElement> {
     IMAGE_CACHE.with(|cache| cache.borrow_mut().get(key))
 }
 
+pub(crate) fn image_cache_stats_json() -> String {
+    let (decoded_entries, decoded_pixels) = DECODED_CANVAS_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        (cache.budget.len(), cache.budget.total_weight())
+    });
+    let (html_entries, html_source_bytes) = IMAGE_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        (cache.budget.len(), cache.budget.total_weight())
+    });
+    serde_json::json!({
+        "decodedCanvasEntries": decoded_entries,
+        "decodedCanvasPixels": decoded_pixels,
+        "decodedCanvasRgbaBytes": decoded_pixels.saturating_mul(4),
+        "htmlImageEntries": html_entries,
+        "htmlImageSourceBytes": html_source_bytes,
+    })
+    .to_string()
+}
+
 /// 빠른 해시 (FNV-1a 64비트)
 #[cfg(target_arch = "wasm32")]
 fn hash_bytes(data: &[u8]) -> u64 {

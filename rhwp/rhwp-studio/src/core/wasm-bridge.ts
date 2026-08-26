@@ -133,6 +133,14 @@ export interface DeferredPaginationResult {
   pageCount: number;
 }
 
+export interface WebCanvasImageCacheStats {
+  decodedCanvasEntries: number;
+  decodedCanvasPixels: number;
+  decodedCanvasRgbaBytes: number;
+  htmlImageEntries: number;
+  htmlImageSourceBytes: number;
+}
+
 import { fontFamilyChainForDisplay } from './font-substitution';
 import type { FileSystemFileHandleLike } from '@/command/file-system-access';
 import {
@@ -632,6 +640,11 @@ export class WasmBridge {
     const pages: PageInfo[] = [];
     for (let page = 0; page < this.pageCount; page++) pages.push(this.getPageInfo(page));
     return pages;
+  }
+
+  getWebCanvasImageCacheStats(): WebCanvasImageCacheStats {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(this.doc.getWebCanvasImageCacheStats()) as WebCanvasImageCacheStats;
   }
 
   refreshLayout(): void {
