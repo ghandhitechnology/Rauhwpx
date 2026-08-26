@@ -565,8 +565,9 @@ fn write_offset<W: Write>(
     w: &mut Writer<W>,
     sa: &ShapeComponentAttr,
 ) -> Result<(), SerializeError> {
-    let x = sa.offset_x.to_string();
-    let y = sa.offset_y.to_string();
+    // 한컴은 음수 HWPUNIT을 unsigned 32-bit decimal로 기록한다.
+    let x = (sa.offset_x as u32).to_string();
+    let y = (sa.offset_y as u32).to_string();
     empty_tag(w, "hp:offset", &[("x", &x), ("y", &y)])
 }
 

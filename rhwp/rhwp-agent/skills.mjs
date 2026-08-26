@@ -359,9 +359,9 @@ export class SkillRegistry {
     }
     const writingStyle = this.writingStyleStore ? await this.writingStyleStore.promptBlock() : '';
     const styleStatus = this.writingStyleStore && writingStyle ? await this.writingStyleStore.status() : null;
-    // 문서에 글이 들어가는 단계에서만 작문 규율을 얹는다. 개인 문체 프로필이 먼저 오고,
-    // 규율 블록은 그 아래에서 "문서 > 개인 문체 > 규율" 우선순위를 스스로 밝힌다.
-    // 프로필이 있으면 리듬 수치는 프로필 쪽 기준선 하나만 남긴다.
+    // 문서에 글이 들어가는 단계에서만 작문 규율을 얹는다. 개인 목소리 초상이 먼저 오고,
+    // 규율 블록은 그 아래에서 "문서 > 초상 > 규율" 우선순위를 스스로 밝힌다.
+    // 프로필이 있으면 리듬 수치는 프로필 쪽 지문만 남기고, 규율이 두 번째 목소리를 얹지 않는다.
     const humanizer = humanizerPromptBlock(phase, {
       language: styleStatus?.language === 'en' ? 'en' : 'ko',
       personalProfile: Boolean(styleStatus?.active),

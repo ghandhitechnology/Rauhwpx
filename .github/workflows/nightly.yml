@@ -43,7 +43,7 @@ jobs:
   app:
     name: Desktop, agent, and Studio checks
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - name: Check out source
@@ -58,6 +58,19 @@ jobs:
             package-lock.json
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build WASM engine
+        working-directory: rhwp
+        run: wasm-pack build --target web
 
       - name: Install dependencies
         run: |

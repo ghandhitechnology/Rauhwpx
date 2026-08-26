@@ -106,6 +106,7 @@ async function startHub(t) {
       RHWP_LAUNCH_ID: LAUNCH_ID,
       RHWP_WORK_DIR: workRoot,
       RHWP_TEMPLATES_DIR: path.join(workRoot, 'templates'),
+      RHWP_AGENT_INSTRUCTIONS_DIR: path.join(workRoot, 'agent-instructions'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

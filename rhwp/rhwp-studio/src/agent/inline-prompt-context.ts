@@ -127,7 +127,7 @@ export function buildInlineSelection(extracted: ExtractedSelection): InlinePromp
     '사용자가 편집기에서 아래 범위를 선택한 채 이 요청을 보냈다.',
     `- 범위: sectionIdx ${start.sectionIdx} paraIdx ${start.paraIdx} charOffset ${start.charOffset}`
       + ` → sectionIdx ${end.sectionIdx} paraIdx ${end.paraIdx} charOffset ${end.charOffset}`,
-    '- 오프셋은 0-based 텍스트 오프셋 (get_text_range/replace_text 와 같은 좌표계)',
+    '- 오프셋은 0-based 텍스트 오프셋 (get_text_range/replace_range 와 같은 좌표계)',
     `- 선택 텍스트${extracted.truncated ? ' (길어서 앞부분만 표시)' : ''}:`,
     '<<<SELECTION',
     extracted.text,

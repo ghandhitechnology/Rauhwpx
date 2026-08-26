@@ -423,6 +423,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   cursor: pointer;
 }
 
+.ag-header-icon-btn[hidden] {
+  display: none;
+}
+
 .ag-header-icon-btn .ag-icon {
   width: 14px;
   height: 14px;
@@ -741,7 +745,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-chat-page,
 .ag-threads-page,
 .ag-skills-page,
-.ag-settings-page {
+.ag-settings-page,
+.ag-versions-page {
   position: absolute;
   inset: 0;
   display: flex;
@@ -763,7 +768,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-threads-open .ag-chat-page,
 .ag-skills-open .ag-chat-page,
-.ag-settings-open .ag-chat-page {
+.ag-settings-open .ag-chat-page,
+.ag-versions-open .ag-chat-page {
   opacity: 0;
   transform: translateX(-16px);
   visibility: hidden;
@@ -777,7 +783,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-threads-page,
 .ag-skills-page,
-.ag-settings-page {
+.ag-settings-page,
+.ag-versions-page {
   gap: 10px;
   padding: 12px 12px 16px;
   opacity: 0;
@@ -804,7 +811,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-skills-open .ag-skills-page,
-.ag-settings-open .ag-settings-page {
+.ag-settings-open .ag-settings-page,
+.ag-versions-open .ag-versions-page {
   opacity: 1;
   transform: translateX(0);
   visibility: visible;
@@ -1534,10 +1542,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   .ag-chat-page,
   .ag-threads-page,
   .ag-settings-page,
+  .ag-versions-page,
   .ag-threads-open .ag-chat-page,
   .ag-threads-open .ag-threads-page,
   .ag-settings-open .ag-chat-page,
-  .ag-settings-open .ag-settings-page {
+  .ag-settings-open .ag-settings-page,
+  .ag-versions-open .ag-chat-page,
+  .ag-versions-open .ag-versions-page {
     transition: none;
   }
 }
@@ -5676,6 +5687,52 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-fullscreen.ag-workspace-compact .ag-plan-column,
 .ag-fullscreen.ag-workspace-compact.ag-plan-collapsed .ag-plan-column {
   grid-column: 1;
+}
+
+/* 설정은 focus title bar를 유지한 채 두 번째 grid row를 채운다. */
+.ag-workspace-settings-back {
+  display: none;
+}
+
+.ag-fullscreen .ag-settings-page {
+  position: relative;
+  inset: auto;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  z-index: 3;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  transform: none;
+}
+
+.ag-fullscreen .ag-settings-page > .ag-threads-header {
+  display: none;
+}
+
+.ag-fullscreen.ag-settings-open .ag-workspace-settings-back {
+  display: inline-flex;
+}
+
+.ag-fullscreen.ag-settings-open .ag-workspace-threads-btn,
+.ag-fullscreen.ag-settings-open .ag-workspace-document-context,
+.ag-fullscreen.ag-settings-open .ag-workspace-agent-context,
+.ag-fullscreen.ag-settings-open .ag-environment-wrap {
+  display: none;
+}
+
+.ag-fullscreen.ag-settings-open .ag-workspace-settings-btn {
+  background: var(--ag-selected);
+  color: var(--ag-text);
+}
+
+/* 집중 모드는 대화 화면을 계속 붙여 두므로 설정을 열 때 두 화면을
+   시각 영역과 접근성 트리에서 함께 걷어낸다. */
+.ag-fullscreen.ag-settings-open .ag-chat-page,
+.ag-fullscreen.ag-settings-open .ag-threads-page {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 /* ─── 손그림 버튼 ─────────────────────────────────────

@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import type { FileSystemFileHandleLike } from '../src/command/file-system-access.ts';
+import {
+  createNativeFileHandle,
+  getNativeFileHandleVerifiedDocumentId,
+} from '../src/desktop-integration.ts';
 import {
   documentSourceDigest,
   resolveDocumentPreflight,
@@ -122,6 +127,40 @@ test('preferred documentId survives native-path reopens that cannot compare hand
     sourceDigest: digest,
     useSourceDigest: false,
   });
+});
+
+test('main-issued native identity survives stale handles and feeds the active version repository key', async () => {
+  const bytes = new Uint8Array([12, 13]);
+  const selected = createNativeFileHandle({
+    kind: 'file',
+    handleId: 'restored-native',
+    name: 'report.hwp',
+    verifiedDocumentId: 'original-history',
+  }, {
+    readNativeFile: async () => ({ name: 'report.hwp', bytes }),
+    writeNativeFile: async () => ({ name: 'report.hwp', byteLength: bytes.byteLength }),
+    isSameNativeFile: async () => {
+      throw new DOMException('stale native handle', 'NotSupportedError');
+    },
+  });
+  const issuedDocumentId = getNativeFileHandleVerifiedDocumentId(selected);
+  assert.equal(issuedDocumentId, 'original-history');
+  const result = await resolveDocumentPreflight(
+    bytes,
+    selected,
+    [recent('broken-reopen', documentSourceDigest(bytes), handle('stale.hwp', async () => false))],
+    () => 'another-broken-reopen',
+    issuedDocumentId ? { kind: 'verified', documentId: issuedDocumentId } : null,
+  );
+  assert.equal(result.documentId, 'original-history');
+  assert.equal(result.useSourceDigest, false);
+
+  const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  assert.match(main, /const verifiedGrant = grant \?\?/,
+    'an explicit project/recent grant must retain priority over native metadata');
+  assert.match(main, /activeDocumentId = ownership\.identity\.documentId/);
+  assert.match(main, /getDocumentId: \(\) => activeDocumentId/,
+    'the recovered identity must remain the version repository lookup key');
 });
 
 test('successful isSameEntry=false keeps identical copies logically separate', async () => {

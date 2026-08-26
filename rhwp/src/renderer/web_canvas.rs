@@ -12,6 +12,7 @@ use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlImageElement};
 
+use super::cache_budget::WeightedLruBudget;
 use super::layer_renderer::{LayerRenderResult, LayerRenderer};
 use super::pua_oldhangul::map_pua_old_hangul;
 use super::render_tree::{
@@ -35,6 +36,9 @@ use crate::paint::{
 };
 
 const TEXT_MARK_CLIP_RIGHT_PAD: f64 = 48.0;
+const WEB_IMAGE_CACHE_MAX_ENTRIES: usize = 200;
+const DECODED_CANVAS_CACHE_MAX_PIXELS: usize = 16_777_216;
+const HTML_IMAGE_CACHE_MAX_SOURCE_BYTES: usize = 33_554_432;
 
 /// Canvas 폰트의 실측 폭을 레이아웃 advance에 맞출 때 적용할 배율을 계산한다.
 ///
@@ -91,19 +95,89 @@ use super::form_caption::display_form_caption;
 use super::layout::{compute_char_positions, is_halfwidth_cjk_quote, split_into_clusters};
 use crate::model::control::FormType;
 
+#[cfg(target_arch = "wasm32")]
+struct DecodedCanvasCache {
+    entries: std::collections::HashMap<u64, Option<HtmlCanvasElement>>,
+    budget: WeightedLruBudget,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl DecodedCanvasCache {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            budget: WeightedLruBudget::new(
+                WEB_IMAGE_CACHE_MAX_ENTRIES,
+                DECODED_CANVAS_CACHE_MAX_PIXELS,
+            ),
+        }
+    }
+
+    fn get(&mut self, key: u64) -> Option<Option<HtmlCanvasElement>> {
+        let value = self.entries.get(&key).cloned();
+        if value.is_some() {
+            self.budget.touch(key);
+        }
+        value
+    }
+
+    fn insert(&mut self, key: u64, value: Option<HtmlCanvasElement>) {
+        let pixels = value
+            .as_ref()
+            .map(|canvas| canvas.width() as usize * canvas.height() as usize)
+            .unwrap_or(0);
+        self.entries.insert(key, value);
+        for evicted in self.budget.record(key, pixels) {
+            if let Some(Some(canvas)) = self.entries.remove(&evicted) {
+                canvas.set_width(0);
+                canvas.set_height(0);
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct HtmlImageCache {
+    entries: std::collections::HashMap<u64, HtmlImageElement>,
+    budget: WeightedLruBudget,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl HtmlImageCache {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            budget: WeightedLruBudget::new(
+                WEB_IMAGE_CACHE_MAX_ENTRIES,
+                HTML_IMAGE_CACHE_MAX_SOURCE_BYTES,
+            ),
+        }
+    }
+
+    fn get(&mut self, key: u64) -> Option<HtmlImageElement> {
+        let value = self.entries.get(&key).cloned();
+        if value.is_some() {
+            self.budget.touch(key);
+        }
+        value
+    }
+
+    fn insert(&mut self, key: u64, value: HtmlImageElement, source_bytes: usize) {
+        self.entries.insert(key, value);
+        for evicted in self.budget.record(key, source_bytes) {
+            self.entries.remove(&evicted);
+        }
+    }
+}
+
 // 이미지 캐시: data 해시 → HtmlImageElement
 // WASM 단일 스레드이므로 thread_local 안전
 #[cfg(target_arch = "wasm32")]
 thread_local! {
-    static IMAGE_CACHE: std::cell::RefCell<std::collections::HashMap<u64, HtmlImageElement>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static DECODED_CANVAS_CACHE: std::cell::RefCell<
-        std::collections::HashMap<u64, Option<HtmlCanvasElement>>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
+    static IMAGE_CACHE: std::cell::RefCell<HtmlImageCache> =
+        std::cell::RefCell::new(HtmlImageCache::new());
+    static DECODED_CANVAS_CACHE: std::cell::RefCell<DecodedCanvasCache> =
+        std::cell::RefCell::new(DecodedCanvasCache::new());
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -136,6 +210,40 @@ fn decode_image_to_canvas(data: &[u8]) -> Option<HtmlCanvasElement> {
         .ok()?;
     ctx.put_image_data(&image_data, 0.0, 0.0).ok()?;
     Some(canvas)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn get_or_decode_image_canvas(key: u64, data: &[u8]) -> Option<HtmlCanvasElement> {
+    if let Some(cached) = DECODED_CANVAS_CACHE.with(|cache| cache.borrow_mut().get(key)) {
+        return cached;
+    }
+    let canvas = decode_image_to_canvas(data);
+    DECODED_CANVAS_CACHE.with(|cache| cache.borrow_mut().insert(key, canvas.clone()));
+    canvas
+}
+
+#[cfg(target_arch = "wasm32")]
+fn get_cached_html_image(key: u64) -> Option<HtmlImageElement> {
+    IMAGE_CACHE.with(|cache| cache.borrow_mut().get(key))
+}
+
+pub(crate) fn image_cache_stats_json() -> String {
+    let (decoded_entries, decoded_pixels) = DECODED_CANVAS_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        (cache.budget.len(), cache.budget.total_weight())
+    });
+    let (html_entries, html_source_bytes) = IMAGE_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        (cache.budget.len(), cache.budget.total_weight())
+    });
+    serde_json::json!({
+        "decodedCanvasEntries": decoded_entries,
+        "decodedCanvasPixels": decoded_pixels,
+        "decodedCanvasRgbaBytes": decoded_pixels.saturating_mul(4),
+        "htmlImageEntries": html_entries,
+        "htmlImageSourceBytes": html_source_bytes,
+    })
+    .to_string()
 }
 
 /// 빠른 해시 (FNV-1a 64비트)
@@ -2703,18 +2811,7 @@ impl Renderer for WebCanvasRenderer {
     fn draw_image(&mut self, data: &[u8], x: f64, y: f64, w: f64, h: f64) {
         let key = hash_bytes(data);
 
-        let decoded = DECODED_CANVAS_CACHE.with(|cache| {
-            let mut c = cache.borrow_mut();
-            if let Some(slot) = c.get(&key) {
-                return slot.clone();
-            }
-            if c.len() > 200 {
-                c.clear();
-            }
-            let canvas = decode_image_to_canvas(data);
-            c.insert(key, canvas.clone());
-            canvas
-        });
+        let decoded = get_or_decode_image_canvas(key, data);
         if let Some(canvas) = decoded {
             let _ = self
                 .ctx
@@ -2723,10 +2820,7 @@ impl Renderer for WebCanvasRenderer {
         }
 
         // 캐시에서 이미 로드된 이미지를 찾는다
-        let cached = IMAGE_CACHE.with(|cache| {
-            let c = cache.borrow();
-            c.get(&key).cloned()
-        });
+        let cached = get_cached_html_image(key);
 
         if let Some(img) = cached {
             if img.complete() && img.natural_width() > 0 {
@@ -2766,12 +2860,7 @@ impl Renderer for WebCanvasRenderer {
 
             // 캐시에 저장 (로드 전이라도 저장 — 다음 렌더링에서 재사용)
             IMAGE_CACHE.with(|cache| {
-                let mut c = cache.borrow_mut();
-                // 캐시 크기 제한 (최대 200개)
-                if c.len() > 200 {
-                    c.clear();
-                }
-                c.insert(key, img.clone());
+                cache.borrow_mut().insert(key, img.clone(), data_url.len());
             });
 
             // 이미지가 즉시 사용 가능하면 그리기
@@ -2813,18 +2902,7 @@ impl WebCanvasRenderer {
     ) {
         let key = hash_bytes(data);
 
-        let decoded = DECODED_CANVAS_CACHE.with(|cache| {
-            let mut c = cache.borrow_mut();
-            if let Some(slot) = c.get(&key) {
-                return slot.clone();
-            }
-            if c.len() > 200 {
-                c.clear();
-            }
-            let canvas = decode_image_to_canvas(data);
-            c.insert(key, canvas.clone());
-            canvas
-        });
+        let decoded = get_or_decode_image_canvas(key, data);
         if let Some(canvas) = decoded {
             let _ = self
                 .ctx
@@ -2834,10 +2912,7 @@ impl WebCanvasRenderer {
             return;
         }
 
-        let cached = IMAGE_CACHE.with(|cache| {
-            let c = cache.borrow();
-            c.get(&key).cloned()
-        });
+        let cached = get_cached_html_image(key);
 
         if let Some(img) = cached {
             if img.complete() && img.natural_width() > 0 {

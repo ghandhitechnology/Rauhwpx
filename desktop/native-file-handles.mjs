@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { open, opendir, readFile, realpath, rename, rm } from 'node:fs/promises';
+import { open, opendir, mkdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, normalize, win32 } from 'node:path';
 
-const SUPPORTED_EXTENSIONS = new Set(['.hwp', '.hwpx', '.hml']);
+const SUPPORTED_EXTENSIONS = new Set(['.hwp', '.hwpx', '.hml', '.rhwpx']);
+const PORTABLE_HISTORY_INNER_FILE = 'history';
 const NEARBY_DIRECTORY_CAP = 12;
 const NEARBY_FILE_CAP = 8;
 const NEARBY_DIR_ENTRY_CAP = 256;
@@ -47,6 +48,9 @@ function hasValidZipDirectory(bytes) {
 export function validateNativeDocumentBytes(filePath, bytes) {
   if (!(bytes instanceof Uint8Array)) throw new Error('Native file writes require byte data');
   const extension = extname(filePath).toLowerCase();
+  if (extension === '.rhwpx') {
+    throw new Error('RHWPX history bundles must be written as folder packages');
+  }
   if (extension === '.hwp') {
     // The in-process writer always emits CFB v3: a 512-byte header followed by
     // whole 512-byte sectors. This catches empty/truncated/wrong-format IPC
@@ -131,6 +135,92 @@ export async function writeNativeFileAtomically(
   }
 }
 
+function isPortableHistoryBundleName(filePath) {
+  return extname(filePath).toLowerCase() === '.rhwpx';
+}
+
+function portableHistoryFileName(name) {
+  const normalized = String(name ?? '').normalize('NFC').trim();
+  if (
+    !normalized
+    || normalized.length > 255
+    || normalized.includes('\0')
+    || normalized.includes('/')
+    || normalized.includes('\\')
+    || normalized === '.'
+    || normalized === '..'
+  ) {
+    throw new Error('History bundle file names must be a single path segment');
+  }
+  return normalized;
+}
+
+export async function writePortableHistoryFolder(
+  folderPath,
+  files,
+  {
+    platform = process.platform,
+    mkdirImpl = mkdir,
+    renameImpl = rename,
+    rmImpl = rm,
+    writeFileImpl = writeNativeFileAtomically,
+  } = {},
+) {
+  validateNativeDocumentPath(folderPath, { platform });
+  if (!isPortableHistoryBundleName(folderPath)) {
+    throw new Error('History export target must use the .rhwpx extension');
+  }
+  if (!Array.isArray(files) || files.length < 2 || files.length > 8) {
+    throw new Error('History bundle folders must contain the document and history files');
+  }
+  const entries = files.map((file) => ({
+    name: portableHistoryFileName(file?.name),
+    bytes: file?.bytes instanceof Uint8Array ? file.bytes : new Uint8Array(file?.bytes ?? []),
+  }));
+  if (!entries.some((file) => file.name === PORTABLE_HISTORY_INNER_FILE)) {
+    throw new Error('History bundle folders must include a history payload');
+  }
+  const totalLength = entries.reduce((sum, file) => sum + file.bytes.byteLength, 0);
+  if (totalLength < 20 || totalLength > 512 * 1024 * 1024) {
+    throw new Error('Portable history data is empty or exceeds the 512 MiB limit');
+  }
+
+  const temporaryPath = `${folderPath}.rauhwpx-${process.pid}-${randomUUID()}.tmp`;
+  try {
+    await mkdirImpl(temporaryPath);
+    for (const file of entries) {
+      await writeFileImpl(join(temporaryPath, file.name), file.bytes, { platform });
+    }
+    await rmImpl(folderPath, { recursive: true, force: true });
+    await retryWindowsRename(() => renameImpl(temporaryPath, folderPath), platform);
+    await syncParentDirectory(folderPath, platform);
+  } catch (error) {
+    await rmImpl(temporaryPath, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+export async function readPortableHistoryBytes(
+  targetPath,
+  {
+    readFileImpl = readFile,
+    statImpl = stat,
+  } = {},
+) {
+  try {
+    const info = await statImpl(targetPath);
+    if (info.isDirectory()) {
+      if (!isPortableHistoryBundleName(targetPath)) {
+        throw new Error('Only RHWPX folders can be opened as history bundles');
+      }
+      return new Uint8Array(await readFileImpl(join(targetPath, PORTABLE_HISTORY_INNER_FILE)));
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  return new Uint8Array(await readFileImpl(targetPath));
+}
+
 export function validateNativeDocumentPath(filePath, { platform = process.platform } = {}) {
   const absolute = typeof filePath === 'string'
     && (platform === 'win32' ? win32.isAbsolute(filePath) : isAbsolute(filePath));
@@ -138,7 +228,7 @@ export function validateNativeDocumentPath(filePath, { platform = process.platfo
     throw new Error('Native document paths must be absolute');
   }
   if (!SUPPORTED_EXTENSIONS.has(extname(filePath).toLowerCase())) {
-    throw new Error('Only HWP, HWPX, and HML files can be opened');
+    throw new Error('Only HWP, HWPX, HML, and RHWPX files can be opened');
   }
   return filePath;
 }
@@ -246,7 +336,7 @@ export class NativeFileHandleRegistry {
     const entry = this.#entryForSender(senderSessionId, handleId);
     return {
       name: entry.name,
-      bytes: new Uint8Array(await this.#readFile(entry.canonicalPath)),
+      bytes: await readPortableHistoryBytes(entry.canonicalPath, { readFileImpl: this.#readFile }),
     };
   }
 
@@ -278,6 +368,39 @@ export class NativeFileHandleRegistry {
     }
   }
 
+  async writePortableHistory(senderSessionId, handleId, files, identity, leases) {
+    const entry = this.#entryForSender(senderSessionId, handleId);
+    entry.activeWrites += 1;
+    try {
+      this.validateSave(senderSessionId, handleId, identity, leases);
+      if (!isPortableHistoryBundleName(entry.canonicalPath)) {
+        throw new Error('Only RHWPX folders can receive portable history writes');
+      }
+      const write = entry.writeChain.then(async () => {
+        this.validateSave(senderSessionId, handleId, identity, leases);
+        await writePortableHistoryFolder(entry.canonicalPath, files);
+        const history = Array.isArray(files)
+          ? files.find((file) => file?.name === PORTABLE_HISTORY_INNER_FILE)
+          : null;
+        const historyBytes = history?.bytes instanceof Uint8Array
+          ? history.bytes
+          : new Uint8Array(history?.bytes ?? []);
+        if (historyBytes.byteLength > 0) {
+          this.#refreshBookmarkDigest(identity, entry, historyBytes);
+        }
+      });
+      entry.writeChain = write.catch(() => {});
+      await write;
+      const byteLength = Array.isArray(files)
+        ? files.reduce((sum, file) => sum + (file?.bytes?.byteLength ?? file?.bytes?.length ?? 0), 0)
+        : 0;
+      return { name: entry.name, byteLength };
+    } finally {
+      entry.activeWrites -= 1;
+      if (entry.activeWrites === 0 && entry.releaseRequested) this.#deleteEntry(entry);
+    }
+  }
+
   async isSameEntry(senderSessionId, firstHandleId, secondHandleId) {
     const first = this.#entryForSender(senderSessionId, firstHandleId);
     const second = this.#entryForSender(senderSessionId, secondHandleId);
@@ -296,6 +419,17 @@ export class NativeFileHandleRegistry {
     }
     let nextDigest = previous?.digest ?? null;
     if (digest !== undefined) nextDigest = parseStoredDigest(digest);
+    // A canonical path has one logical owner. Old builds could accumulate
+    // duplicate owners after every broken reopen; the first loaded owner is
+    // used until a successful remember cleans the ambiguity up.
+    for (const [otherDocumentId, bookmark] of this.#bookmarks) {
+      if (
+        otherDocumentId !== documentId
+        && this.#ownershipKey(bookmark.path) === entry.ownershipPath
+      ) {
+        this.#bookmarks.delete(otherDocumentId);
+      }
+    }
     if (this.#bookmarks.has(documentId)) this.#bookmarks.delete(documentId);
     this.#bookmarks.set(documentId, { path: entry.canonicalPath, digest: nextDigest });
     while (this.#bookmarks.size > 200) {
@@ -336,7 +470,7 @@ export class NativeFileHandleRegistry {
     }
     return {
       name: probe.name,
-      bytes: new Uint8Array(await this.#readFile(canonicalPath)),
+      bytes: await readPortableHistoryBytes(canonicalPath, { readFileImpl: this.#readFile }),
     };
   }
 
@@ -478,7 +612,9 @@ export class NativeFileHandleRegistry {
         const isDirectory = typeof entry !== 'string'
           && typeof entry.isDirectory === 'function'
           && entry.isDirectory();
-        if (isDirectory || !SUPPORTED_EXTENSIONS.has(extname(name).toLowerCase())) continue;
+        const supported = SUPPORTED_EXTENSIONS.has(extname(name).toLowerCase());
+        if (!supported) continue;
+        if (isDirectory && extname(name).toLowerCase() !== '.rhwpx') continue;
         files.push(join(dir, name));
       }
     } catch {
@@ -511,7 +647,20 @@ export class NativeFileHandleRegistry {
   }
 
   #descriptor(entry) {
-    return Object.freeze({ kind: 'file', handleId: entry.handleId, name: entry.name });
+    const verifiedDocumentId = this.#documentIdForOwnershipPath(entry.ownershipPath);
+    return Object.freeze({
+      kind: 'file',
+      handleId: entry.handleId,
+      name: entry.name,
+      ...(verifiedDocumentId ? { verifiedDocumentId } : {}),
+    });
+  }
+
+  #documentIdForOwnershipPath(ownershipPath) {
+    for (const [documentId, bookmark] of this.#bookmarks) {
+      if (this.#ownershipKey(bookmark.path) === ownershipPath) return documentId;
+    }
+    return null;
   }
 }
 

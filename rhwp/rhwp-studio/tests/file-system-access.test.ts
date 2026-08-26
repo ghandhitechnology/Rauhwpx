@@ -49,10 +49,11 @@ function createHandle(name: string, fileContent = 'fixture') {
   };
 }
 
-test('isSupportedDocumentFileName은 HWP/HWPX/HML 확장자를 허용한다', () => {
+test('isSupportedDocumentFileName은 HWP/HWPX/HML/RHWPX 확장자를 허용한다', () => {
   assert.equal(isSupportedDocumentFileName('sample.hwp'), true);
   assert.equal(isSupportedDocumentFileName('sample.HWPX'), true);
   assert.equal(isSupportedDocumentFileName('sample.HML'), true);
+  assert.equal(isSupportedDocumentFileName('sample.RHWPX'), true);
   assert.equal(isSupportedDocumentFileName(' sample.hwpx '), true);
   assert.equal(isSupportedDocumentFileName('sample.txt'), false);
   assert.equal(isSupportedDocumentFileName('sample.hwp.exe'), false);
@@ -65,6 +66,7 @@ test('HWP_DOCUMENT_ACCEPT는 넓은 binary MIME을 등록하지 않는다', () =
     'application/hwp+zip': ['.hwpx'],
     'application/xml': ['.hml'],
     'text/xml': ['.hml'],
+    'application/vnd.rauhwpx.history': ['.rhwpx'],
   });
   assert.equal(Object.hasOwn(HWP_DOCUMENT_ACCEPT, 'application/octet-stream'), false);
   assert.equal(Object.hasOwn(HWP_DOCUMENT_ACCEPT, '*/*'), false);

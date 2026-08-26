@@ -121,6 +121,24 @@ test('SnapshotCommand 는 점유 스냅샷 id 수를 보고한다(예산 계산�
   assert.match(block, /beforeId !== null[\s\S]*afterId !== null/, 'before/after 살아있는 id 수 반환');
 });
 
+test('연속 스냅샷 명령은 직전 after 상태를 다음 before ID로 공유한다', () => {
+  const reuse = methodBlock(command, 'reuseCurrentSnapshot(wasm: WasmBridge, sourceId: number): void {');
+  assert.match(reuse, /this\.beforeId === null[\s\S]*wasm\.shareSnapshot\(sourceId\)/,
+    'before 상태가 없을 때만 immutable snapshot 상태를 공유해야 함');
+
+  const execute = methodBlock(history, 'execute(command: EditCommand, wasm: WasmBridge): DocumentPosition {');
+  const idxReuse = execute.indexOf('command.reuseCurrentSnapshot?.(wasm, this.currentSnapshotId)');
+  const idxExecute = execute.indexOf('command.execute(wasm)');
+  assert.ok(idxReuse !== -1 && idxExecute !== -1 && idxReuse < idxExecute,
+    'operation 실행 전에 현재 snapshot 상태를 before ID로 공유해야 함');
+  assert.match(execute, /this\.currentSnapshotId = command\.currentSnapshotId\?\.\(\) \?\? null/,
+    '실행 후 현재 상태는 새 after snapshot ID를 가리켜야 함');
+
+  const undo = methodBlock(history, 'undo(wasm: WasmBridge): DocumentPosition | null {');
+  assert.match(undo, /command\.undo\(wasm\)[\s\S]*this\.currentSnapshotId = command\.undoSnapshotId\?\.\(\) \?\? null/,
+    'undo 후 현재 상태는 before snapshot ID를 가리켜야 함');
+});
+
 // [Task #2328 후속] 히스토리 밖에서 장기 점유되는 스냅샷(에이전트 pending replace)
 // 배선 — 예산에 포함되지 않으면 WASM 이 아직 참조 중인 undo 스냅샷을 무통보 축출한다.
 

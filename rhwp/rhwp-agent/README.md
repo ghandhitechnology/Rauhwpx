@@ -176,7 +176,11 @@ answer the same `usage-report`; the key is stored next to the usage log as
 `<app data>/rhwp/usage/` as append-only `events.jsonl` (pruned to 8 days) plus
 `plans.json`, overridable with `RHWP_USAGE_DIR`.
 
-## Writing-style calibration (v2)
+## Writing-style calibration (v3)
+
+The calibrated profile is a person to inhabit, not a sentence-recipe.
+`style.md` leads with a voice portrait; measured numbers are a fingerprint
+checked after drafting, never a target to write toward.
 
 `writing-style-catalog-request` returns `writing-style-catalog` with the
 available Codex and Claude models plus only the OpenRouter models configured
@@ -267,6 +271,8 @@ check that file rather than this summary when the exact surface matters.
 
 - Product skill support: `read_product_skill` (enabled skills and their text
   resources only; no arbitrary local paths)
+- Instruction read/write: `read_agent_instructions`, `update_agent_instructions`
+  (app-scoped AGENTS.md; writes are proposals until confirmed in Settings > 지시)
 - Reference read: `list_reference_files`, `search_reference_files`,
   `read_reference_chunk`, `read_reference_image` (restricted to global + active
   document + active chat)
@@ -316,10 +322,13 @@ check that file rather than this summary when the exact surface matters.
 - Hub Browserbase proxy: `browserbase_start`, `browserbase_end`,
   `browserbase_navigate`, `browserbase_act`, `browserbase_observe`,
   `browserbase_extract`
+- Background copy-layout: `delegate_copy_layout`, `update_copy_layout_job`,
+  `complete_copy_layout_job`, `register_copy_layout_template`
 
-Every definition has one explicit category: `document-read`, `document-write`,
-`reference-read`, `template-read`, `download-write`, `artifact-write`,
-`planning-control`, or `browser`. Browser, download, and
+Every definition has one explicit category: `instruction-read`, `instruction-write`,
+`document-read`, `document-write`, `reference-read`, `template-read`, `download-write`,
+`artifact-write`, `planning-control`, `background-control`, `background-worker`, or
+`browser`. Browser, download, and
 planning-control calls are accepted only for plan-origin chats (including the
 implementing phase). Document writes are rejected by the hub during planning
 and awaiting approval.
@@ -435,13 +444,16 @@ literal `/`.
 - `ctl.mjs` — background start/stop/status (`npm start` at the repo root)
 - `planning-state.mjs` — plan transitions, canonical plan ids, epochs, and hub gates
 - `download-manager.mjs` — confined per-chat downloader
-- `provider-health.mjs` — cached `claude`/`codex` CLI version probes (single-flight)
+- `provider-health.mjs` — cached CLI version probes for configured backends (single-flight)
 - `usage-store.mjs` — token-usage JSONL log, plan budgets, rolling-window summary
 - `cliproxy.mjs` — CLIProxyAPI management client for official 5h/weekly plan usage
 - `browserbase-session.mjs` — lazy official Browserbase MCP sidecar proxy
 - `agents/claude.mjs` — `claude -p` stream-json persistent-process backend
 - `agents/codex.mjs` — `codex exec --json` per-turn spawn backend (`exec resume` continuity)
-- `agents/backend.mjs` — shared helpers + `SYSTEM_BRIEF`
+- `agents/grok.mjs` — `grok -p` stream-json backend
+- `agents/pi.mjs` — `pi` CLI backend
+- `agents/cursor.mjs` — `cursor-agent` backend
+- `agents/backend.mjs` — shared helpers + system brief composition
 - `tools.mjs` — MCP tool definitions (name/description/input schema/validation), single source of truth
 - `skills.mjs` / `skill-generator.mjs` — isolated skill storage, validation, prompt context, and AI drafts
 - `mcp-stdio.mjs` — MCP stdio server → WS forwarder (stdout reserved for MCP frames)

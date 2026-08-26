@@ -21,6 +21,12 @@ import { fileURLToPath } from 'node:url';
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const commandSrc = readFileSync(join(rootDir, 'src/engine/command.ts'), 'utf8');
 
+const deleteImmediateStart = commandSrc.indexOf('export function deleteSelectionImmediate');
+const deleteImmediateEnd = commandSrc.indexOf('export class DeleteSelectionCommand', deleteImmediateStart);
+assert.notEqual(deleteImmediateStart, -1, 'deleteSelectionImmediate function not found');
+assert.notEqual(deleteImmediateEnd, -1, 'DeleteSelectionCommand class not found');
+const deleteImmediate = commandSrc.slice(deleteImmediateStart, deleteImmediateEnd);
+
 /** `export class NAME ...` 부터 다음 `export class` 전까지 클래스 본문을 추출. */
 function classBlock(name: string): string {
   const start = commandSrc.indexOf(`export class ${name}`);
@@ -31,24 +37,25 @@ function classBlock(name: string): string {
 
 test('DeleteSelectionCommand 셀 삭제가 최내곽 셀 대상 ...ByPath 로 라우팅한다', () => {
   const block = classBlock('DeleteSelectionCommand');
-  assert.match(block, /deleteRangeInCellByPath\(/,
+  assert.match(block, /deleteSelectionImmediate\(wasm, start, end\)/,
+    '커맨드는 복합 편집과 공유하는 즉시 삭제 경로를 써야 한다');
+  assert.match(deleteImmediate, /deleteRangeInCellByPath\(/,
     '중첩 셀 선택 삭제는 deleteRangeInCellByPath 로 최내곽 셀을 대상으로 해야 한다');
-  assert.match(block, /cellParaIndexOf\(start\)/,
+  assert.match(deleteImmediate, /cellParaIndexOf\(start\)/,
     '셀 문단 인덱스는 cellPath[last] 에서 읽어야 한다');
-  assert.match(block, /cellParaIndexOf\(end\)/,
+  assert.match(deleteImmediate, /cellParaIndexOf\(end\)/,
     '선택 끝 문단 인덱스도 cellPath[last] 기준이어야 한다');
 });
 
 test('DeleteSelectionCommand 가 flat 셀 축 API/좌표를 쓰지 않는다', () => {
-  const block = classBlock('DeleteSelectionCommand');
-  assert.doesNotMatch(block, /wasm\.deleteRangeInCell\(/,
+  assert.doesNotMatch(deleteImmediate, /wasm\.deleteRangeInCell\(/,
     'flat deleteRangeInCell 은 cellPath[0](최외곽) 좌표라 중첩 셀에서 바깥 셀을 삭제한다');
-  assert.doesNotMatch(block, /wasm\.getTextInCell\(/,
+  assert.doesNotMatch(deleteImmediate, /wasm\.getTextInCell\(/,
     'flat getTextInCell 대신 getTextInCellByPath 를 써야 한다');
-  assert.doesNotMatch(block, /wasm\.getCellParagraphLength\(/,
+  assert.doesNotMatch(deleteImmediate, /wasm\.getCellParagraphLength\(/,
     'flat getCellParagraphLength 는 외부 표 기준 레거시 좌표를 쓴다');
-  assert.doesNotMatch(block, /start\.cellParaIndex!/,
+  assert.doesNotMatch(deleteImmediate, /start\.cellParaIndex!/,
     '중첩 셀에서 start.cellParaIndex 는 바깥 셀 문단 인덱스다 (cellParaIndexOf 사용)');
-  assert.doesNotMatch(block, /end\.cellParaIndex!/,
+  assert.doesNotMatch(deleteImmediate, /end\.cellParaIndex!/,
     '중첩 셀에서 end.cellParaIndex 는 바깥 셀 문단 인덱스다 (cellParaIndexOf 사용)');
 });

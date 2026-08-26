@@ -28,6 +28,8 @@ test('bundled present-plan skill ends planning through the structured presentati
   assert.equal(parseSkillMarkdown(markdown, 'present-plan').name, 'present-plan');
   assert.match(markdown, /present_implementation_plan/);
   assert.match(markdown, /chat action that opens the plan review sidebar/);
+  assert.match(markdown, /renewed discovery/);
+  assert.doesNotMatch(markdown, /revise the complete plan and present its replacement through the same tool/i);
 
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-required-skill-test-'));
   t.after(() => fs.rm(temp, { recursive: true, force: true }));

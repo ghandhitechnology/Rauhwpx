@@ -7,6 +7,7 @@ import {
   app,
   BrowserWindow,
   Menu,
+  clipboard,
   dialog,
   ipcMain,
   nativeTheme,
@@ -36,7 +37,13 @@ import {
   resolveGeneratedDocumentArtifact,
 } from './generated-document-artifact.mjs';
 import { launchRequest } from './launch-routing.mjs';
-import { NativeFileHandleRegistry, validateNativeDocumentBytes } from './native-file-handles.mjs';
+import {
+  NativeFileHandleRegistry,
+  validateNativeDocumentBytes,
+  writeNativeFileAtomically,
+  writePortableHistoryFolder,
+} from './native-file-handles.mjs';
+import { SerializedStateWriter } from './serialized-state-writer.mjs';
 import { SessionManager } from './session-manager.mjs';
 import {
   STUDIO_URL,
@@ -50,6 +57,7 @@ import { CloudHandoffStore } from './cloud-handoff.mjs';
 import { CloudProvisioner } from './cloud-provisioner.mjs';
 import { applyCloudRecovery } from './cloud-result.mjs';
 import { isNewerStableVersion, selectDebAsset } from './update-policy.mjs';
+import { deliverPlainTextPaste } from './plain-text-paste.mjs';
 
 const { autoUpdater } = electronUpdater;
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -207,6 +215,7 @@ class AgentHubOwner {
         RHWP_OWNER_PID: String(process.pid),
         RHWP_RUNTIME_DIR: this.runtimeDir,
         RHWP_WORK_DIR: this.workDir,
+        RHWP_AGENT_INSTRUCTIONS_DIR: join(app.getPath('userData'), 'agent-instructions'),
         RHWP_OWN_RUNTIME_DIR: '1',
         RHWP_OWN_WORK_DIR: '1',
         RHWP_SECRET_BROKER: 'ipc',
@@ -302,6 +311,10 @@ const sessions = new SessionManager({
 const documentLeases = new DocumentLeaseManager();
 const nativeFiles = new NativeFileHandleRegistry();
 const nativeBookmarkFile = join(app.getPath('userData'), 'native-document-bookmarks.json');
+const nativeBookmarkWriter = new SerializedStateWriter({
+  write: (snapshot) => writeFile(nativeBookmarkFile, snapshot, 'utf8'),
+  onError: (error) => console.warn('[rauhwpx] native bookmark persist failed:', error),
+});
 
 function normalizeCloudScope(payload = {}) {
   const threadId = typeof payload.threadId === 'string' && payload.threadId.length <= 256
@@ -371,12 +384,8 @@ async function loadNativeBookmarks() {
   }
 }
 
-async function persistNativeBookmarks() {
-  try {
-    await writeFile(nativeBookmarkFile, JSON.stringify(nativeFiles.dumpBookmarks()), 'utf8');
-  } catch (error) {
-    console.warn('[rauhwpx] native bookmark persist failed:', error);
-  }
+function persistNativeBookmarks() {
+  return nativeBookmarkWriter.enqueue(JSON.stringify(nativeFiles.dumpBookmarks()));
 }
 
 let updateDownloadReady = false;
@@ -537,6 +546,17 @@ function installMenu() {
     accelerator: 'CmdOrCtrl+Shift+N',
     click: () => queueLaunch(launchRequest({ source: 'new-window' })),
   };
+  const pasteWithoutFormatting = {
+    id: 'edit-paste-without-formatting',
+    label: 'Paste Without Formatting',
+    accelerator: 'CmdOrCtrl+Shift+V',
+    click: (_menuItem, browserWindow) => {
+      deliverPlainTextPaste(
+        browserWindow ?? BrowserWindow.getFocusedWindow(),
+        () => clipboard.readText(),
+      );
+    },
+  };
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(isMac ? [{
       label: 'Rauhwpx',
@@ -561,7 +581,21 @@ function installMenu() {
         { role: isMac ? 'close' : 'quit' },
       ],
     },
-    { role: 'editMenu' },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        pasteWithoutFormatting,
+        { role: 'delete' },
+        { type: 'separator' },
+        { role: 'selectAll' },
+      ],
+    },
     { role: 'viewMenu' },
     { role: 'windowMenu' },
     ...(isMac ? [] : [{ role: 'help', submenu: [{ role: 'about' }] }]),
@@ -791,8 +825,10 @@ ipcMain.handle('desktop:pick-native-open-file', async (event, options = {}) => {
   }
   const picked = await dialog.showOpenDialog(window, {
     ...(defaultPath ? { defaultPath } : {}),
-    filters: [{ name: 'HWP/HWPX/HML documents', extensions: ['hwp', 'hwpx', 'hml'] }],
-    properties: ['openFile'],
+    filters: [{ name: 'HWP/HWPX/HML documents and RauHWPX history', extensions: ['hwp', 'hwpx', 'hml', 'rhwpx'] }],
+    properties: process.platform === 'darwin'
+      ? ['openFile']
+      : ['openFile', 'openDirectory'],
   });
   if (picked.canceled || !picked.filePaths[0]) return null;
   const result = await nativeFiles.create(session.sessionId, picked.filePaths[0]);
@@ -836,6 +872,29 @@ ipcMain.handle('desktop:pick-native-save-file', async (event, options = {}) => {
   }
   return { ...result.descriptor, saveTargetCreated: result.created };
 });
+ipcMain.handle('desktop:save-portable-history-file', async (event, payload = {}) => {
+  sessionForEvent(event);
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window) throw new Error('History export sender window is unavailable');
+  const rawName = basename(String(payload.suggestedName ?? 'document.rhwpx'));
+  const suggestedName = rawName.toLowerCase().endsWith('.rhwpx') ? rawName : `${rawName}.rhwpx`;
+  const files = Array.isArray(payload.files) ? payload.files : [];
+  const picked = await dialog.showSaveDialog(window, {
+    defaultPath: suggestedName,
+    filters: [{ name: 'RauHWPX history bundle', extensions: ['rhwpx'] }],
+    properties: ['showOverwriteConfirmation', 'createDirectory'],
+  });
+  if (picked.canceled || !picked.filePath) return null;
+  const filePath = extname(picked.filePath) ? picked.filePath : `${picked.filePath}.rhwpx`;
+  if (extname(filePath).toLowerCase() !== '.rhwpx') {
+    throw new Error('History export target must use the .rhwpx extension');
+  }
+  await writePortableHistoryFolder(filePath, files);
+  return { fileName: basename(filePath), byteLength: files.reduce(
+    (sum, file) => sum + (file?.bytes?.byteLength ?? file?.bytes?.length ?? 0),
+    0,
+  ) };
+});
 ipcMain.handle('desktop:release-native-file', (event, handleId) => {
   const session = sessionForEvent(event);
   nativeFiles.releaseHandle(session.sessionId, handleId);
@@ -858,16 +917,26 @@ ipcMain.handle('desktop:native-file-write', (event, handleId, bytes, identity) =
   if (session.cloudLocked) throw new Error('The cloud agent currently owns this document');
   return nativeFiles.write(session.sessionId, handleId, bytes, identity, documentLeases);
 });
+ipcMain.handle('desktop:native-file-write-portable-history', (event, handleId, files, identity) => {
+  const session = sessionForEvent(event);
+  return nativeFiles.writePortableHistory(
+    session.sessionId,
+    handleId,
+    files,
+    identity,
+    documentLeases,
+  );
+});
 ipcMain.handle('desktop:native-file-is-same', (event, firstHandleId, secondHandleId) => {
   const session = sessionForEvent(event);
   return nativeFiles.isSameEntry(session.sessionId, firstHandleId, secondHandleId);
 });
-ipcMain.handle('desktop:remember-native-document', (event, documentId, handleId, digest) => {
+ipcMain.handle('desktop:remember-native-document', async (event, documentId, handleId, digest) => {
   const session = sessionForEvent(event);
   if (typeof documentId !== 'string' || !documentId) throw new Error('documentId required');
   if (typeof handleId !== 'string' || !handleId) throw new Error('handleId required');
   nativeFiles.rememberDocument(documentId, session.sessionId, handleId, digest);
-  void persistNativeBookmarks();
+  await persistNativeBookmarks();
 });
 ipcMain.handle('desktop:reopen-native-document', async (event, documentId) => {
   const session = sessionForEvent(event);
@@ -1144,6 +1213,7 @@ ipcMain.handle('desktop:close-response', async (event, requestId, allowClose) =>
       return false;
     }
   }
+  await persistNativeBookmarks();
   session.allowCloseOnce = true;
   session.window.close();
   return true;

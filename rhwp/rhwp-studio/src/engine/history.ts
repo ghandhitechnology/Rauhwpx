@@ -38,6 +38,7 @@ export class CommandHistory {
   private redoStack: EditCommand[] = [];
   private maxSize = 1000;
   private lastExecutionEffects: TextMutationEffects = NO_TEXT_MUTATION_EFFECTS;
+  private currentSnapshotId: number | null = null;
   /**
    * [Task #2328] 히스토리 밖에서 장기 점유 중인 WASM 스냅샷 id 수
    * (에이전트 pending replace 의 되돌림 스냅샷 등). 같은 Rust 저장소를 쓰므로
@@ -100,6 +101,7 @@ export class CommandHistory {
   /** 복합 편집이 임시로 여러 snapshot id를 잡기 전에 WASM 저장소 여유를 확보한다. */
   prepareSnapshotCapacity(wasm: WasmBridge, additionalIds: number): void {
     const reserve = Math.max(0, Math.min(WASM_MAX_SNAPSHOTS, Math.trunc(additionalIds)));
+    this.currentSnapshotId = null;
     // 새 편집은 어차피 redo를 무효화하므로 먼저 해제해 불필요한 undo 축출을 줄인다.
     discardAll(this.redoStack, wasm);
     this.redoStack = [];
@@ -111,7 +113,12 @@ export class CommandHistory {
   /** 명령 실행 + 히스토리 기록. 실행 후 커서 위치 반환 */
   execute(command: EditCommand, wasm: WasmBridge): DocumentPosition {
     this.lastExecutionEffects = NO_TEXT_MUTATION_EFFECTS;
+    if (this.currentSnapshotId !== null) {
+      command.reuseCurrentSnapshot?.(wasm, this.currentSnapshotId);
+    }
+    this.currentSnapshotId = null;
     const cursorAfter = command.execute(wasm);
+    this.currentSnapshotId = command.currentSnapshotId?.() ?? null;
     this.captureExecutionEffects(command);
 
     // 직전 명령과 병합 시도
@@ -161,6 +168,7 @@ export class CommandHistory {
     //   복구되지 않는 오류이므로, 오염 엔트리를 제거·discard 하고 전파한다
     //   (스냅샷 복원은 문서 전체 치환이라 다음(더 오래된) 엔트리 undo 가 안전).
     let cursorAfter: DocumentPosition;
+    this.currentSnapshotId = null;
     try {
       cursorAfter = command.undo(wasm);
     } catch (e) {
@@ -168,6 +176,7 @@ export class CommandHistory {
       command.discard?.(wasm);
       throw e;
     }
+    this.currentSnapshotId = command.undoSnapshotId?.() ?? null;
     this.undoStack.pop();
     this.redoStack.push(command);
     return cursorAfter;
@@ -181,6 +190,7 @@ export class CommandHistory {
 
     // [Task #2328] undo 와 동일 하이브리드 — 성공 시 이동, 실패 시 오염 엔트리 드롭.
     let cursorAfter: DocumentPosition;
+    this.currentSnapshotId = null;
     try {
       cursorAfter = command.execute(wasm);
     } catch (e) {
@@ -188,6 +198,7 @@ export class CommandHistory {
       command.discard?.(wasm);
       throw e;
     }
+    this.currentSnapshotId = command.currentSnapshotId?.() ?? null;
     this.captureExecutionEffects(command);
     this.redoStack.pop();
     this.undoStack.push(command);
@@ -197,6 +208,7 @@ export class CommandHistory {
   /** execute() 없이 히스토리에만 기록 (IME compositionend용 — 텍스트가 이미 문서에 있는 경우) */
   recordWithoutExecute(command: EditCommand, wasm?: WasmBridge): void {
     this.lastExecutionEffects = NO_TEXT_MUTATION_EFFECTS;
+    this.currentSnapshotId = command.currentSnapshotId?.() ?? null;
     // 직전 명령과 병합 시도
     if (this.undoStack.length > 0) {
       const last = this.undoStack[this.undoStack.length - 1];
@@ -230,6 +242,19 @@ export class CommandHistory {
   canUndo(): boolean { return this.undoStack.length > 0; }
   canRedo(): boolean { return this.redoStack.length > 0; }
 
+  /** 실패한 시험적 편집을 되돌린 뒤 해당 이력을 폐기한다. */
+  discardRedo(wasm: WasmBridge): void {
+    if (this.redoStack.length > 0) this.currentSnapshotId = null;
+    discardAll(this.redoStack, wasm);
+    this.redoStack = [];
+  }
+
+  /** 이미 적용된 보상 교체 상태는 유지하면서 해당 이력을 폐기한다. */
+  discardUndoTop(wasm: WasmBridge): void {
+    this.currentSnapshotId = null;
+    this.undoStack.pop()?.discard?.(wasm);
+  }
+
   /**
    * [Task #2337] 직전 undo/redo 로 방금 이동한 커맨드를 조회한다.
    * undo() 후 방금 되돌린 커맨드는 redoStack top(peekRedoTop), redo() 후 방금 다시
@@ -247,6 +272,7 @@ export class CommandHistory {
     }
     this.undoStack = [];
     this.redoStack = [];
+    this.currentSnapshotId = null;
     this.lastExecutionEffects = NO_TEXT_MUTATION_EFFECTS;
   }
 }

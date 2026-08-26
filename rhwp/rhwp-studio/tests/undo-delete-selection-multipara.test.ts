@@ -36,7 +36,7 @@ function classBlock(src: string, name: string): string {
 const block = classBlock(commandSrc, 'DeleteSelectionCommand');
 
 test('undo 는 스냅샷 복원에 위임한다', () => {
-  assert.match(block, /new SnapshotCommand\('deleteSelection'/, '스냅샷 커맨드에 위임');
+  assert.match(block, /new SnapshotCommand\(\s*'deleteSelection'/, '스냅샷 커맨드에 위임');
   assert.match(block, /undo\(wasm: WasmBridge\): DocumentPosition \{\s*\n\s*return this\.snapshot\.undo\(wasm\);/,
     'undo 는 스냅샷 복원만 한다');
 });

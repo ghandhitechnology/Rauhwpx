@@ -396,7 +396,6 @@ export class TableObjectRenderer {
     angleDeg: number = 0,
   ): void {
     this.clearBordersOnly();
-    this.clearDragPreview();
     this.ensureAttached();
 
     const scrollContent = this.container.querySelector('#scroll-content');
@@ -409,17 +408,17 @@ export class TableObjectRenderer {
     const width = bbox.width * zoom;
     const height = bbox.height * zoom;
 
-    const el = document.createElement('div');
-    el.style.cssText =
-      `position:absolute;` +
-      `left:${left}px;top:${top}px;` +
-      `width:${width}px;height:${height}px;` +
-      `border:1px solid #000;box-sizing:border-box;pointer-events:none;`;
-    if (angleDeg !== 0) {
-      el.style.transform = `rotate(${angleDeg}deg)`;
+    if (!this.previewEl) {
+      this.previewEl = document.createElement('div');
+      this.previewEl.style.cssText =
+        'position:absolute;border:1px solid #000;box-sizing:border-box;pointer-events:none;';
+      this.layer.appendChild(this.previewEl);
     }
-    this.layer.appendChild(el);
-    this.previewEl = el;
+    this.previewEl.style.left = `${left}px`;
+    this.previewEl.style.top = `${top}px`;
+    this.previewEl.style.width = `${width}px`;
+    this.previewEl.style.height = `${height}px`;
+    this.previewEl.style.transform = angleDeg === 0 ? '' : `rotate(${angleDeg}deg)`;
   }
 
   /** 레이어가 DOM에 없으면 재부착한다 */

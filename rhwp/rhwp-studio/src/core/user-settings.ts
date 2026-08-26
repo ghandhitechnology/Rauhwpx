@@ -25,6 +25,8 @@ export interface FontSettings {
   showRecentFonts: boolean;
   /** 최근 사용 글꼴 표시 개수 (1~5) */
   recentFontCount: number;
+  /** 최근 직접 적용한 글꼴 이름 (최신순, 최대 5개) */
+  recentFonts: string[];
 }
 
 /** 앱 UI 테마 설정값 */
@@ -54,6 +56,12 @@ export interface ViewSettings {
   clipView: boolean;
 }
 
+/** 버전 관리 설정 */
+export interface VersionControlSettings {
+  /** 한컴 문서용 Git 스타일 버전 관리 사용 여부 */
+  useHancomGit: boolean;
+}
+
 /** 복구용 자동저장 설정 */
 export interface AutosaveSettings {
   /** 복구용 자동저장 사용 여부 */
@@ -73,8 +81,23 @@ export interface AppSettings {
   theme: ThemeSettings;
   dialog: DialogSettings;
   view: ViewSettings;
+  versionControl: VersionControlSettings;
   autosave: AutosaveSettings;
 }
+
+/** 설정 허브에서 한 번에 초안/저장하는 편집기 스칼라 설정. */
+export interface EditorScalarSettings {
+  font: Pick<FontSettings, 'showRecentFonts' | 'recentFontCount'>;
+  theme: ThemeSettings;
+  dialog: DialogSettings;
+  view: ViewSettings;
+  versionControl: VersionControlSettings;
+  autosave: AutosaveSettings;
+}
+
+export type SettingsSaveResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: string };
 
 /** 언어 인덱스 상수 (HWP 7개 언어) */
 export const LANG = {
@@ -123,11 +146,12 @@ const STORAGE_KEY = 'rhwp-settings';
 
 function defaultSettings(): AppSettings {
   return {
-    version: 1,
+    version: 2,
     font: {
       fontSets: [],
       showRecentFonts: true,
       recentFontCount: 3,
+      recentFonts: [],
     },
     theme: {
       mode: 'system',
@@ -140,6 +164,9 @@ function defaultSettings(): AppSettings {
       showParagraphMarks: false,
       showControlCodes: false,
       clipView: true,
+    },
+    versionControl: {
+      useHancomGit: false,
     },
     autosave: {
       recoveryEnabled: true,
@@ -164,100 +191,207 @@ function normalizeNumber(value: unknown, fallback: number, min: number, max: num
   return Math.min(max, Math.max(min, Math.round(number)));
 }
 
+function normalizeRecentFonts(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const candidate of value) {
+    if (typeof candidate !== 'string') continue;
+    const name = candidate.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    normalized.push(name);
+    if (normalized.length === 5) break;
+  }
+  return normalized;
+}
+
+function cloneEditorScalarSettings(settings: EditorScalarSettings): EditorScalarSettings {
+  return {
+    font: { ...settings.font },
+    theme: { ...settings.theme },
+    dialog: { ...settings.dialog },
+    view: { ...settings.view },
+    versionControl: { ...settings.versionControl },
+    autosave: { ...settings.autosave },
+  };
+}
+
+/** 저장된 모든 스키마 버전을 v2의 안전한 값으로 올린다. */
+export function normalizeAppSettings(raw: unknown): AppSettings {
+  const parsed = raw && typeof raw === 'object' ? raw as Partial<AppSettings> : {};
+  const defaults = defaultSettings();
+  const dialog: Partial<DialogSettings> = parsed.dialog ?? {};
+  const view: Partial<ViewSettings> = parsed.view ?? {};
+  const versionControl: Partial<VersionControlSettings> = parsed.versionControl ?? {};
+  const autosave: Partial<AutosaveSettings> = parsed.autosave ?? {};
+  const showParagraphMarks = normalizeBoolean(view.showParagraphMarks, defaults.view.showParagraphMarks);
+  const showControlCodes = showParagraphMarks
+    && normalizeBoolean(view.showControlCodes, defaults.view.showControlCodes);
+  return {
+    version: 2,
+    font: {
+      ...defaults.font,
+      ...(parsed.font ?? {}),
+      fontSets: Array.isArray(parsed.font?.fontSets) ? parsed.font.fontSets : defaults.font.fontSets,
+      showRecentFonts: normalizeBoolean(parsed.font?.showRecentFonts, defaults.font.showRecentFonts),
+      recentFontCount: normalizeNumber(parsed.font?.recentFontCount, defaults.font.recentFontCount, 1, 5),
+      recentFonts: normalizeRecentFonts(parsed.font?.recentFonts),
+    },
+    theme: { mode: normalizeThemeMode(parsed.theme?.mode) },
+    dialog: {
+      picturePropsKeepRatio: normalizeBoolean(dialog.picturePropsKeepRatio, defaults.dialog.picturePropsKeepRatio),
+      showPdfPrintGuidance: normalizeBoolean(dialog.showPdfPrintGuidance, defaults.dialog.showPdfPrintGuidance),
+    },
+    view: {
+      showParagraphMarks,
+      showControlCodes,
+      clipView: normalizeBoolean(view.clipView, defaults.view.clipView),
+    },
+    versionControl: {
+      useHancomGit: normalizeBoolean(versionControl.useHancomGit, defaults.versionControl.useHancomGit),
+    },
+    autosave: {
+      recoveryEnabled: normalizeBoolean(autosave.recoveryEnabled, defaults.autosave.recoveryEnabled),
+      recoveryIntervalMinutes: normalizeNumber(
+        autosave.recoveryIntervalMinutes,
+        defaults.autosave.recoveryIntervalMinutes,
+        1,
+        120,
+      ),
+      idleSaveEnabled: normalizeBoolean(autosave.idleSaveEnabled, defaults.autosave.idleSaveEnabled),
+      idleDelaySeconds: normalizeNumber(
+        autosave.idleDelaySeconds,
+        defaults.autosave.idleDelaySeconds,
+        5,
+        600,
+      ),
+    },
+  };
+}
+
 /** 사용자 환경설정 서비스 (싱글턴) */
 class UserSettingsService {
   private data: AppSettings;
+  private readonly hancomGitListeners = new Set<(enabled: boolean) => void>();
+  private readonly listeners = new Set<(settings: AppSettings, source: 'local' | 'external') => void>();
 
   constructor() {
     this.data = this.load();
+    if (typeof window !== 'undefined') {
+      window.addEventListener('storage', (event) => {
+        if (event.key !== STORAGE_KEY) return;
+        const previousHancomGit = this.data.versionControl.useHancomGit;
+        this.data = this.load();
+        if (previousHancomGit !== this.data.versionControl.useHancomGit) {
+          this.hancomGitListeners.forEach((listener) => listener(this.data.versionControl.useHancomGit));
+        }
+        this.notify('external');
+      });
+    }
   }
 
   private load(): AppSettings {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return defaultSettings();
-      const parsed = JSON.parse(raw) as Partial<AppSettings>;
-      // 기본값 병합
-      const defaults = defaultSettings();
-      const dialog: Partial<DialogSettings> = parsed.dialog ?? {};
-      const view: Partial<ViewSettings> = parsed.view ?? {};
-      const autosave: Partial<AutosaveSettings> = parsed.autosave ?? {};
-      return {
-        version: parsed.version ?? defaults.version,
-        font: {
-          ...defaults.font,
-          ...(parsed.font ?? {}),
-        },
-        theme: {
-          ...defaults.theme,
-          ...(parsed.theme ?? {}),
-          mode: normalizeThemeMode(parsed.theme?.mode),
-        },
-        dialog: {
-          ...defaults.dialog,
-          ...dialog,
-          picturePropsKeepRatio: normalizeBoolean(
-            dialog.picturePropsKeepRatio,
-            defaults.dialog.picturePropsKeepRatio,
-          ),
-          showPdfPrintGuidance: normalizeBoolean(
-            dialog.showPdfPrintGuidance,
-            defaults.dialog.showPdfPrintGuidance,
-          ),
-        },
-        view: {
-          ...defaults.view,
-          ...view,
-          showParagraphMarks: normalizeBoolean(
-            view.showParagraphMarks,
-            defaults.view.showParagraphMarks,
-          ),
-          showControlCodes: normalizeBoolean(
-            view.showControlCodes,
-            defaults.view.showControlCodes,
-          ),
-          clipView: normalizeBoolean(
-            view.clipView,
-            defaults.view.clipView,
-          ),
-        },
-        autosave: {
-          ...defaults.autosave,
-          ...autosave,
-          recoveryEnabled: normalizeBoolean(
-            autosave.recoveryEnabled,
-            defaults.autosave.recoveryEnabled,
-          ),
-          recoveryIntervalMinutes: normalizeNumber(
-            autosave.recoveryIntervalMinutes,
-            defaults.autosave.recoveryIntervalMinutes,
-            1,
-            120,
-          ),
-          idleSaveEnabled: normalizeBoolean(
-            autosave.idleSaveEnabled,
-            defaults.autosave.idleSaveEnabled,
-          ),
-          idleDelaySeconds: normalizeNumber(
-            autosave.idleDelaySeconds,
-            defaults.autosave.idleDelaySeconds,
-            5,
-            600,
-          ),
-        },
-      };
+      return normalizeAppSettings(JSON.parse(raw));
     } catch {
       return defaultSettings();
     }
   }
 
   save(): void {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.data));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.data));
+    } catch (error) {
+      console.warn('[user-settings] 사용자 설정 저장 실패:', error);
+    }
+    this.notify('local');
+  }
+
+  private notify(source: 'local' | 'external'): void {
+    this.listeners.forEach((listener) => listener(this.data, source));
+  }
+
+  /** 같은 창과 다른 문서 창의 사용자 설정 변경을 구독한다. */
+  subscribe(listener: (settings: AppSettings, source: 'local' | 'external') => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   /** 전체 설정 반환 */
   getAll(): AppSettings {
     return this.data;
+  }
+
+  /** 설정 허브용 방어적 스냅샷. fontSets 같은 자원은 포함하지 않는다. */
+  getEditorScalarSettings(): EditorScalarSettings {
+    return cloneEditorScalarSettings({
+      font: {
+        showRecentFonts: this.data.font.showRecentFonts,
+        recentFontCount: this.data.font.recentFontCount,
+      },
+      theme: this.data.theme,
+      dialog: this.data.dialog,
+      view: this.data.view,
+      versionControl: this.data.versionControl,
+      autosave: this.data.autosave,
+    });
+  }
+
+  /** 편집기 스칼라 설정을 단일 localStorage 쓰기로 저장한다. */
+  tryApplyEditorScalarSettings(next: EditorScalarSettings): SettingsSaveResult<EditorScalarSettings> {
+    const normalized = cloneEditorScalarSettings({
+      font: {
+        showRecentFonts: normalizeBoolean(next.font.showRecentFonts, true),
+        recentFontCount: normalizeNumber(next.font.recentFontCount, 3, 1, 5),
+      },
+      theme: { mode: normalizeThemeMode(next.theme.mode) },
+      dialog: {
+        picturePropsKeepRatio: normalizeBoolean(next.dialog.picturePropsKeepRatio, true),
+        showPdfPrintGuidance: normalizeBoolean(next.dialog.showPdfPrintGuidance, true),
+      },
+      view: {
+        showParagraphMarks: normalizeBoolean(next.view.showParagraphMarks, false),
+        showControlCodes: normalizeBoolean(next.view.showControlCodes, false),
+        clipView: normalizeBoolean(next.view.clipView, true),
+      },
+      versionControl: {
+        useHancomGit: normalizeBoolean(next.versionControl.useHancomGit, false),
+      },
+      autosave: {
+        recoveryEnabled: normalizeBoolean(next.autosave.recoveryEnabled, true),
+        recoveryIntervalMinutes: normalizeNumber(next.autosave.recoveryIntervalMinutes, 10, 1, 120),
+        idleSaveEnabled: normalizeBoolean(next.autosave.idleSaveEnabled, true),
+        idleDelaySeconds: normalizeNumber(next.autosave.idleDelaySeconds, 10, 5, 600),
+      },
+    });
+    if (normalized.view.showControlCodes) normalized.view.showParagraphMarks = true;
+    if (!normalized.view.showParagraphMarks) normalized.view.showControlCodes = false;
+
+    const previous = this.data;
+    const updated: AppSettings = {
+      ...previous,
+      version: 2,
+      font: { ...previous.font, ...normalized.font },
+      theme: normalized.theme,
+      dialog: normalized.dialog,
+      view: normalized.view,
+      versionControl: normalized.versionControl,
+      autosave: normalized.autosave,
+    };
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    this.data = updated;
+    if (previous.versionControl.useHancomGit !== updated.versionControl.useHancomGit) {
+      this.hancomGitListeners.forEach((listener) => listener(updated.versionControl.useHancomGit));
+    }
+    this.notify('local');
+    return { ok: true, value: cloneEditorScalarSettings(normalized) };
   }
 
   /** 글꼴 설정 반환 */
@@ -268,6 +402,19 @@ class UserSettingsService {
   /** 글꼴 설정 업데이트 */
   updateFontSettings(partial: Partial<FontSettings>): void {
     Object.assign(this.data.font, partial);
+    this.data.font.recentFontCount = normalizeNumber(this.data.font.recentFontCount, 3, 1, 5);
+    this.data.font.recentFonts = normalizeRecentFonts(this.data.font.recentFonts);
+    this.save();
+  }
+
+  /** 직접 적용한 글꼴을 최신순으로 기록한다. 대표 글꼴 세트는 호출하지 않는다. */
+  recordRecentFont(fontName: string): void {
+    const name = fontName.trim();
+    if (!name || name.startsWith('__fontset__')) return;
+    this.data.font.recentFonts = normalizeRecentFonts([
+      name,
+      ...this.data.font.recentFonts.filter((item) => item !== name),
+    ]);
     this.save();
   }
 
@@ -317,12 +464,14 @@ class UserSettingsService {
   /** 문단부호 표시 설정 */
   setShowParagraphMarks(value: boolean): void {
     this.data.view.showParagraphMarks = value;
+    if (!value) this.data.view.showControlCodes = false;
     this.save();
   }
 
   /** 조판부호 표시 설정 */
   setShowControlCodes(value: boolean): void {
     this.data.view.showControlCodes = value;
+    if (value) this.data.view.showParagraphMarks = true;
     this.save();
   }
 
@@ -330,6 +479,25 @@ class UserSettingsService {
   setClipView(value: boolean): void {
     this.data.view.clipView = value;
     this.save();
+  }
+
+  /** 한컴 문서용 Git 스타일 버전 관리 사용 여부 */
+  getUseHancomGit(): boolean {
+    return this.data.versionControl.useHancomGit;
+  }
+
+  /** 한컴 문서용 Git 스타일 버전 관리 설정 */
+  setUseHancomGit(value: boolean): void {
+    if (this.data.versionControl.useHancomGit === value) return;
+    this.data.versionControl.useHancomGit = value;
+    this.save();
+    this.hancomGitListeners.forEach((listener) => listener(value));
+  }
+
+  /** 한컴용 Git 설정 변경 구독 */
+  subscribeUseHancomGit(listener: (enabled: boolean) => void): () => void {
+    this.hancomGitListeners.add(listener);
+    return () => this.hancomGitListeners.delete(listener);
   }
 
   /** 복구용 자동저장 설정 반환 */

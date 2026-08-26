@@ -130,6 +130,75 @@ pub enum DocumentEvent {
 }
 
 impl DocumentEvent {
+    pub(crate) fn section_index(&self) -> usize {
+        match self {
+            DocumentEvent::TextInserted { section, .. }
+            | DocumentEvent::TextDeleted { section, .. }
+            | DocumentEvent::ParagraphSplit { section, .. }
+            | DocumentEvent::ParagraphMerged { section, .. }
+            | DocumentEvent::ParagraphDeleted { section, .. }
+            | DocumentEvent::ParagraphInserted { section, .. }
+            | DocumentEvent::CharFormatChanged { section, .. }
+            | DocumentEvent::ParaFormatChanged { section, .. }
+            | DocumentEvent::TableRowInserted { section, .. }
+            | DocumentEvent::TableRowDeleted { section, .. }
+            | DocumentEvent::TableColumnInserted { section, .. }
+            | DocumentEvent::TableColumnDeleted { section, .. }
+            | DocumentEvent::CellsMerged { section, .. }
+            | DocumentEvent::CellSplit { section, .. }
+            | DocumentEvent::CellTextChanged { section, .. }
+            | DocumentEvent::TableCellsTransposed { section, .. }
+            | DocumentEvent::PictureInserted { section, .. }
+            | DocumentEvent::PictureDeleted { section, .. }
+            | DocumentEvent::PictureMoved { section, .. }
+            | DocumentEvent::PictureResized { section, .. }
+            | DocumentEvent::FootnoteDeleted { section, .. }
+            | DocumentEvent::ContentPasted { section, .. }
+            | DocumentEvent::HtmlImported { section, .. } => *section,
+        }
+    }
+
+    pub(crate) fn paragraph_index(&self) -> usize {
+        match self {
+            DocumentEvent::TextInserted { para, .. }
+            | DocumentEvent::TextDeleted { para, .. }
+            | DocumentEvent::ParagraphSplit { para, .. }
+            | DocumentEvent::ParagraphMerged { para, .. }
+            | DocumentEvent::ParagraphDeleted { para, .. }
+            | DocumentEvent::ParagraphInserted { para, .. }
+            | DocumentEvent::CharFormatChanged { para, .. }
+            | DocumentEvent::ParaFormatChanged { para, .. }
+            | DocumentEvent::TableRowInserted { para, .. }
+            | DocumentEvent::TableRowDeleted { para, .. }
+            | DocumentEvent::TableColumnInserted { para, .. }
+            | DocumentEvent::TableColumnDeleted { para, .. }
+            | DocumentEvent::CellsMerged { para, .. }
+            | DocumentEvent::CellSplit { para, .. }
+            | DocumentEvent::CellTextChanged { para, .. }
+            | DocumentEvent::TableCellsTransposed { para, .. }
+            | DocumentEvent::PictureInserted { para, .. }
+            | DocumentEvent::PictureDeleted { para, .. }
+            | DocumentEvent::PictureMoved { para, .. }
+            | DocumentEvent::PictureResized { para, .. }
+            | DocumentEvent::FootnoteDeleted { para, .. }
+            | DocumentEvent::ContentPasted { para, .. }
+            | DocumentEvent::HtmlImported { para, .. } => *para,
+        }
+    }
+
+    pub(crate) fn may_change_paragraph_sequence(&self) -> bool {
+        matches!(
+            self,
+            DocumentEvent::ParagraphSplit { .. }
+                | DocumentEvent::ParagraphMerged { .. }
+                | DocumentEvent::ParagraphDeleted { .. }
+                | DocumentEvent::ParagraphInserted { .. }
+                | DocumentEvent::PictureInserted { .. }
+                | DocumentEvent::ContentPasted { .. }
+                | DocumentEvent::HtmlImported { .. }
+        )
+    }
+
     /// 이벤트를 JSON 객체 문자열로 직렬화한다.
     pub fn to_json(&self) -> String {
         match self {

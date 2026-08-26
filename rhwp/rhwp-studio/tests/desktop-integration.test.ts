@@ -5,9 +5,12 @@ import { readFileSync } from 'node:fs';
 import {
   bindNativeFileHandleIdentity,
   captureDesktopNativeDroppedFile,
+  createNativeFileHandle,
   ensureDesktopAgentHub,
+  getNativeFileHandleVerifiedDocumentId,
   getNativeFileSourcePath,
   installDesktopGeneratedDocumentHandling,
+  installDesktopPlainTextPasteHandling,
   installWebAppShell,
   isDesktopApp,
   openPublishedDocumentInNewWindow,
@@ -19,7 +22,10 @@ import {
   restoreNativeDocument,
   releaseReplacedNativeFileHandle,
   searchNearbyNativeDocuments,
+  saveDesktopPortableHistoryFile,
+  writeDesktopPortableHistoryFile,
   suppressDesktopServiceWorker,
+  type NativeFileHandleDescriptor,
 } from '../src/desktop-integration.ts';
 
 const source = readFileSync(new URL('../src/desktop-integration.ts', import.meta.url), 'utf8');
@@ -158,6 +164,25 @@ test('generated-document startup fallback and event delivery open only once', as
   assert.deepEqual(opened, [{ fileName: 'report.hwpx', readOnly: true }]);
 });
 
+test('desktop plain-paste events deliver only non-empty clipboard text', () => {
+  let listener: ((text: string) => void) | undefined;
+  const pasted: string[] = [];
+  const installed = installDesktopPlainTextPasteHandling(
+    (text) => pasted.push(text),
+    {
+      rhwpDesktop: {
+        onPastePlainText: (callback) => { listener = callback; },
+      },
+    },
+  );
+
+  assert.equal(installed, true);
+  listener?.('plain text');
+  listener?.('');
+  assert.deepEqual(pasted, ['plain text']);
+  assert.equal(installDesktopPlainTextPasteHandling(() => {}, {}), false);
+});
+
 test('Electron Save As returns a temporary opaque handle and releases failed targets', async () => {
   const released: string[] = [];
   const win = {
@@ -186,6 +211,87 @@ test('Electron Save As returns a temporary opaque handle and releases failed tar
   await handle?.releaseUnusedSaveTarget?.();
   await handle?.releaseUnusedSaveTarget?.();
   assert.deepEqual(released, ['drop-target', 'save-target']);
+});
+
+test('portable history export uses the dedicated desktop save boundary', async () => {
+  const writes: Array<{
+    suggestedName: string;
+    files: Array<{ name: string; bytes: number[] }>;
+  }> = [];
+  const folder = {
+    folderName: 'report.rhwpx',
+    files: [
+      { name: 'history', bytes: new Uint8Array([1, 2, 3]) },
+      { name: 'report.hwpx', bytes: new Uint8Array([4, 5]) },
+    ],
+  };
+  const result = await saveDesktopPortableHistoryFile(
+    folder,
+    {
+      rhwpDesktop: {
+        savePortableHistoryFile: async ({ suggestedName, files }) => {
+          writes.push({
+            suggestedName,
+            files: files.map((file) => ({ name: file.name, bytes: [...file.bytes] })),
+          });
+          return { fileName: suggestedName, byteLength: 5 };
+        },
+      },
+    },
+  );
+  assert.equal(result, 'saved');
+  assert.deepEqual(writes, [{
+    suggestedName: 'report.rhwpx',
+    files: [
+      { name: 'history', bytes: [1, 2, 3] },
+      { name: 'report.hwpx', bytes: [4, 5] },
+    ],
+  }]);
+  assert.equal(await saveDesktopPortableHistoryFile(folder, {}), 'unavailable');
+});
+
+test('open portable history packages can be rewritten in place through the native handle', async () => {
+  const rewritten: Array<{ handleId: string; names: string[] }> = [];
+  const win = {
+    rhwpDesktop: {
+      pickNativeOpenFile: async () => ({
+        kind: 'file' as const,
+        handleId: 'bundle',
+        name: 'report.rhwpx',
+      }),
+      readNativeFile: async () => ({ name: 'report.rhwpx', bytes: new Uint8Array([1]) }),
+      writeNativeFile: async () => ({ name: 'report.rhwpx', byteLength: 0 }),
+      writePortableHistoryFile: async (handleId: string, files: Array<{ name: string }>, identity: {
+        documentId: string;
+      }) => {
+        assert.equal(identity.documentId, 'document-a');
+        rewritten.push({ handleId, names: files.map((file) => file.name) });
+        return { name: 'report.rhwpx', byteLength: 8 };
+      },
+      releaseNativeFile: async () => {},
+    },
+  };
+  const handle = await pickDesktopNativeOpenFile(win);
+  assert.ok(handle);
+  bindNativeFileHandleIdentity(handle, {
+    documentId: 'document-a',
+    sourceDigest: 'blake3:a',
+    useSourceDigest: false,
+  });
+  const folder = {
+    folderName: 'report.rhwpx',
+    files: [
+      { name: 'history', bytes: new Uint8Array([1, 2, 3]) },
+      { name: 'report.hwpx', bytes: new Uint8Array([4, 5]) },
+    ],
+  };
+  assert.equal(await writeDesktopPortableHistoryFile(handle, folder, win), 'saved');
+  assert.deepEqual(rewritten, [{ handleId: 'bundle', names: ['history', 'report.hwpx'] }]);
+  assert.equal(await writeDesktopPortableHistoryFile(null, folder, win), 'unavailable');
+  assert.equal(
+    await writeDesktopPortableHistoryFile({ name: 'report.rhwpx' } as never, folder, win),
+    'unavailable',
+  );
 });
 
 test('native document bookmarks restore opaque handles without exposing a path', async () => {
@@ -217,6 +323,36 @@ test('native document bookmarks restore opaque handles without exposing a path',
   const restored = await restoreNativeDocument('document-a', win);
   assert.equal(restored === 'owned' ? null : restored?.identityKind, 'native-path');
   assert.equal(restored === 'owned' ? null : restored?.name, 'report.hwp');
+});
+
+test('native descriptor identity is validated and remains private immutable metadata', () => {
+  const descriptor: NativeFileHandleDescriptor = {
+    kind: 'file',
+    handleId: 'restored',
+    name: 'report.hwp',
+    verifiedDocumentId: 'document-a',
+  };
+  const api = {
+    readNativeFile: async () => ({ name: 'report.hwp', bytes: new Uint8Array() }),
+    writeNativeFile: async () => ({ name: 'report.hwp', byteLength: 0 }),
+  };
+  const handle = createNativeFileHandle(descriptor, api);
+  assert.equal(getNativeFileHandleVerifiedDocumentId(handle), 'document-a');
+  assert.equal('verifiedDocumentId' in handle, false);
+  descriptor.verifiedDocumentId = 'renderer-hint';
+  assert.equal(getNativeFileHandleVerifiedDocumentId(handle), 'document-a');
+
+  for (const verifiedDocumentId of ['', ' document-a', 'document-a ', 'document\0a', null]) {
+    assert.throws(
+      () => createNativeFileHandle({
+        kind: 'file',
+        handleId: 'invalid',
+        name: 'report.hwp',
+        verifiedDocumentId,
+      } as unknown as NativeFileHandleDescriptor, api),
+      /Invalid native file handle descriptor/,
+    );
+  }
 });
 
 test('agents can resolve only the exact path behind the active opaque desktop handle', async () => {

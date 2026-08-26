@@ -1,13 +1,14 @@
 /**
- * 개인 문체 프로필의 정량 계층.
+ * 개인 목소리 프로필의 정량 계층.
  *
  * 문체 캘리브레이션에서 "숫자로 셀 수 있는 것"은 전부 여기서 결정한다. LLM 은
- * 해석(어떤 습관인지, 왜 그렇게 쓰는지)만 맡고, 문장 길이 분포·종결어미 비율·
- * 쉼표 밀도 같은 값은 코드가 계산한다. 같은 원고를 두 번 넣으면 같은 기준선이
+ * 초상(어떤 사람인지, 어디서 고르지 않은지)만 맡고, 문장 길이 분포·종결어미 비율·
+ * 쉼표 밀도 같은 값은 코드가 계산한다. 같은 원고를 두 번 넣으면 같은 지문이
  * 나와야 하고, 모델이 지어낸 수치가 프로필에 들어가면 안 되기 때문이다.
  *
- * 이 프로필은 검사용이 아니라 작성용이다. 밴드는 "이 범위를 벗어나면 잘못"이
- * 아니라 "이 범위를 목표로 쓴다"는 뜻으로 읽힌다.
+ * 이 숫자는 작성 레시피가 아니다. 밴드는 "이 범위를 목표로 쓴다"가 아니라
+ * "초고를 쓴 뒤, 목소리를 잃었는지 보는 지문"이다. 맞추려고 문장을 늘리거나
+ * 자르면 기계가 된다.
  */
 
 const KO_PAGE_CHARS = 1_800;
@@ -281,8 +282,8 @@ export function deriveBands(metrics, confidence = 'medium') {
   return {
     unit: metrics.language === 'ko' ? '자' : 'words',
     sentenceLength: { low: sentenceLow, median: Math.round(metrics.sentenceLength.median), high: sentenceHigh },
-    // 저자가 실제로 가진 편차를 그대로 목표로 삼는다. 더 흔들라고 요구하면
-    // 프로필이 아니라 일반론이 된다 — AI 티는 규율 블록이 따로 잡는다.
+    // 저자가 실제로 가진 편차를 지문으로 남긴다. 더 흔들라고 요구하면
+    // 초상이 아니라 일반론이 된다 — 남은 기계 티는 규율 블록이 잡는다.
     sentenceVariation: { targetCv: round(Math.max(0.15, metrics.sentenceLength.cv), 2), observedCv: metrics.sentenceLength.cv },
     paragraphSentences: { low: paraLow, median: Math.round(metrics.paragraphSentences.median), high: paraHigh },
     dominantEnding: dominantEnding ? { kind: dominantEnding[0], share: dominantEnding[1] } : null,
@@ -300,39 +301,39 @@ const ENDING_LABEL_KO = {
 };
 
 /**
- * 작성 시점에 그대로 읽히는 짧은 기준선 문장들.
- * "검사하라"가 아니라 "이 값을 목표로 써라"로 읽히게 쓴다.
+ * 작성 시점에 그대로 읽히는 짧은 지문 문장들.
+ * "이 값을 목표로 써라"가 아니라 "쓴 뒤에 이 폭을 통째로 비웠으면 목소리를 잃었다"로 읽히게 쓴다.
  */
 export function baselineLines(bands, language = 'ko') {
   if (!bands) return [];
   const lines = [];
   const unit = bands.unit;
   lines.push(language === 'ko'
-    ? `문장 길이: 중앙값 ${bands.sentenceLength.median}${unit}, 대부분 ${bands.sentenceLength.low}–${bands.sentenceLength.high}${unit}. 이 폭 안에서 길고 짧은 문장을 섞는다.`
-    : `Sentence length: median ${bands.sentenceLength.median} ${unit}, most fall in ${bands.sentenceLength.low}–${bands.sentenceLength.high}. Mix long and short inside that range.`);
+    ? `문장 길이 지문: 중앙값 ${bands.sentenceLength.median}${unit}, 대부분 ${bands.sentenceLength.low}–${bands.sentenceLength.high}${unit}. 초고를 쓴 뒤 문장이 이 폭을 통째로 비우면 목소리를 잃은 것이다. 맞추려고 글자를 보태거나 빼지 않는다.`
+    : `Sentence-length fingerprint: median ${bands.sentenceLength.median} ${unit}, most fall in ${bands.sentenceLength.low}–${bands.sentenceLength.high}. After drafting, if your sentences abandoned that spread, you left the voice. Do not pad or trim to hit it.`);
   lines.push(language === 'ko'
-    ? `길이 편차: 원고의 변동계수는 ${bands.sentenceVariation.targetCv} 다. 같은 폭으로 길고 짧은 문장을 섞는다.`
-    : `Length variance: the samples run at a coefficient of variation of ${bands.sentenceVariation.targetCv}. Mix long and short at that spread.`);
+    ? `길이 편차 지문: 원고의 변동계수는 ${bands.sentenceVariation.targetCv} 다. 같은 폭으로 길고 짧은 문장이 섞여 있는지만 본다.`
+    : `Length-variance fingerprint: the samples run at a coefficient of variation of ${bands.sentenceVariation.targetCv}. Check that long and short still mix at that spread; do not manufacture variation.`);
   lines.push(language === 'ko'
-    ? `문단: 문장 ${bands.paragraphSentences.low}–${bands.paragraphSentences.high}개, 중앙값 ${bands.paragraphSentences.median}개.`
-    : `Paragraphs: ${bands.paragraphSentences.low}–${bands.paragraphSentences.high} sentences, median ${bands.paragraphSentences.median}.`);
+    ? `문단 지문: 문장 ${bands.paragraphSentences.low}–${bands.paragraphSentences.high}개, 중앙값 ${bands.paragraphSentences.median}개.`
+    : `Paragraph fingerprint: ${bands.paragraphSentences.low}–${bands.paragraphSentences.high} sentences, median ${bands.paragraphSentences.median}.`);
   if (bands.dominantEnding) {
     const label = ENDING_LABEL_KO[bands.dominantEnding.kind] ?? bands.dominantEnding.kind;
-    lines.push(`종결어미: ${label} ${Math.round(bands.dominantEnding.share * 100)}% 를 기본으로 쓰고, 나머지 비율만큼만 다른 어미를 섞는다.`);
+    lines.push(`종결어미 지문: ${label} ${Math.round(bands.dominantEnding.share * 100)}% 가 기본이다. 나머지 비율만큼만 다른 어미가 섞인다.`);
   }
   lines.push(language === 'ko'
-    ? `접속어로 문장을 여는 비율: ${Math.round(bands.connectiveOpenRate.max * 100)}% 이하. 순서만으로 논리가 보이면 접속어를 쓰지 않는다.`
-    : `Sentences opening with a connective: at most ${Math.round(bands.connectiveOpenRate.max * 100)}%. Drop the connective when order already carries the logic.`);
+    ? `접속어로 문장을 여는 비율: 원고는 ${Math.round(bands.connectiveOpenRate.max * 100)}% 이하. 이 사람보다 접속어를 자주 쓰기 시작하면 기계다.`
+    : `Sentences opening with a connective: the samples stay at most ${Math.round(bands.connectiveOpenRate.max * 100)}%. Opening more often than that is the machine, not them.`);
   lines.push(language === 'ko'
-    ? `쉼표: 문장당 ${bands.commasPerSentence.target}개 안팎.`
-    : `Commas: about ${bands.commasPerSentence.target} per sentence.`);
+    ? `쉼표 지문: 문장당 ${bands.commasPerSentence.target}개 안팎.`
+    : `Comma fingerprint: about ${bands.commasPerSentence.target} per sentence.`);
   lines.push(language === 'ko'
-    ? `완충 표현(~할 수 있습니다 류): 1,000자당 ${bands.hedgesPer1kChars.max}회 이하. 불확실성이 실제로 있을 때만 쓴다.`
-    : `Hedges: at most ${bands.hedgesPer1kChars.max} per 1,000 characters, and only where the uncertainty is real.`);
+    ? `완충 표현(~할 수 있습니다 류): 1,000자당 ${bands.hedgesPer1kChars.max}회 이하. 이 사람이 실제로 머뭇거린 곳에만 남긴다.`
+    : `Hedges: at most ${bands.hedgesPer1kChars.max} per 1,000 characters, and only where this person would actually hesitate.`);
   if (bands.digitsPer1kChars.observed > 0) {
     lines.push(language === 'ko'
-      ? `수치 밀도: 1,000자당 숫자 ${bands.digitsPer1kChars.observed}자. 추상어 대신 수치·날짜·고유명사를 이 밀도로 넣는다.`
-      : `Concreteness: ${bands.digitsPer1kChars.observed} digit characters per 1,000. Reach for numbers, dates, and proper nouns at that density.`);
+      ? `수치 밀도 지문: 1,000자당 숫자 ${bands.digitsPer1kChars.observed}자. 이 사람이 숫자로 말하는 자리에서 추상어로 바꾸지 않는다.`
+      : `Concreteness fingerprint: ${bands.digitsPer1kChars.observed} digit characters per 1,000. Where they reach for a number, do not swap in an abstraction.`);
   }
   return lines;
 }
