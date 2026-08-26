@@ -2821,6 +2821,48 @@ mod replace_content_tests {
     }
 
     #[test]
+    fn paragraph_sequence_changes_keep_snapshot_indices_independent() {
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native()
+            .expect("blank document creation");
+        core.insert_text_native(0, 0, 0, "앞뒤")
+            .expect("seed paragraph");
+        let before_id = core.save_snapshot_native();
+
+        core.split_paragraph_native(0, 0, 1, None)
+            .expect("split paragraph");
+        let after_id = core.save_snapshot_native();
+        let before = &core
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == before_id)
+            .expect("before snapshot")
+            .1;
+        let after = &core
+            .snapshot_store
+            .iter()
+            .find(|(id, _)| *id == after_id)
+            .expect("after snapshot")
+            .1;
+        assert_eq!(before.sections[0].paragraphs.len(), 1);
+        assert_eq!(after.sections[0].paragraphs.len(), 2);
+        assert!(!Arc::ptr_eq(
+            &before.sections[0].paragraphs[0].paragraph,
+            &after.sections[0].paragraphs[0].paragraph
+        ));
+
+        core.restore_snapshot_native(before_id)
+            .expect("restore before split");
+        assert_eq!(core.document.sections[0].paragraphs.len(), 1);
+        assert_eq!(core.document.sections[0].paragraphs[0].text, "앞뒤");
+        core.restore_snapshot_native(after_id)
+            .expect("restore after split");
+        assert_eq!(core.document.sections[0].paragraphs.len(), 2);
+        assert_eq!(core.document.sections[0].paragraphs[0].text, "앞");
+        assert_eq!(core.document.sections[0].paragraphs[1].text, "뒤");
+    }
+
+    #[test]
     fn replacement_preserves_live_identity_preferences_and_snapshots() {
         let mut core = DocumentCore::from_bytes(HML).expect("HML source should open");
         core.file_name = "kept-name.hml".to_string();
