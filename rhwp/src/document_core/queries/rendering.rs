@@ -5898,6 +5898,32 @@ mod tests {
     }
 
     #[test]
+    fn later_section_text_edit_keeps_earlier_section_render_trees() {
+        let bytes = include_bytes!("../../../samples/hwp-multi-001.hwp");
+        let mut core = DocumentCore::from_bytes(bytes).expect("multi-section fixture parses");
+        let changed_section = 1;
+        let first_changed_page = core.pagination[0].pages.len();
+        let page_count = core.page_count() as usize;
+        assert!(first_changed_page > 0);
+        assert!(page_count <= PAGE_RENDER_CACHE_CAPACITY);
+        for page in 0..page_count {
+            core.cache_page_tree(page, PageRenderTree::new(page as u32, 100.0, 100.0));
+        }
+        let paragraph = core.document.sections[changed_section]
+            .paragraphs
+            .iter()
+            .position(|paragraph| !paragraph.text.is_empty())
+            .expect("editable paragraph in later section");
+
+        core.insert_text_native(changed_section, paragraph, 0, "가")
+            .expect("later section text edit");
+
+        for page in 0..first_changed_page {
+            assert!(core.page_tree_cache.borrow()[page].is_some());
+        }
+    }
+
+    #[test]
     fn all_page_info_matches_individual_page_queries() {
         let bytes =
             include_bytes!("../../../samples/basic/issue1994_behindtext_table_20200830.hwp");
