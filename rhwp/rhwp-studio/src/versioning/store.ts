@@ -578,7 +578,8 @@ function preparePayload(payload: Pick<CheckpointPayload, 'bytes' | 'blobId' | 'c
   compareSnapshot: VersionCompareSnapshot;
 } {
   const computedBlobId = hashBytes(payload.bytes);
-  const computedSnapshotId = hashCompareSnapshot(payload.compareSnapshot);
+  const serializedSnapshot = serializeCompareSnapshot(payload.compareSnapshot);
+  const computedSnapshotId = compareSnapshotId(hashBytes(serializedSnapshot));
   assertPayloadId(computedBlobId, payload.blobId, 'Blob ID');
   assertPayloadId(computedSnapshotId, payload.compareSnapshotId, 'Compare snapshot ID');
   return {
@@ -589,7 +590,7 @@ function preparePayload(payload: Pick<CheckpointPayload, 'bytes' | 'blobId' | 'c
     },
     compareSnapshot: {
       id: computedSnapshotId,
-      byteLength: serializeCompareSnapshot(payload.compareSnapshot).byteLength,
+      byteLength: serializedSnapshot.byteLength,
       snapshot: cloneValue(payload.compareSnapshot),
     },
   };
