@@ -2929,11 +2929,16 @@ impl LayoutEngine {
         // 셀 내 문단 + 컨트롤 통합 레이아웃
         let mut para_y = text_y_start;
         let mut has_preceding_text = false;
+        // Picture/shape controls also set `has_preceding_text`, but they must not
+        // make a later picture look like captioned content.  Keep visible text as
+        // a separate signal for the caption + floating-picture stack contract.
+        let mut has_preceding_visible_text = false;
         for (cp_idx, (composed, para)) in composed_paras
             .iter()
             .zip(cell.paragraphs.iter())
             .enumerate()
         {
+            let visible_text_before_para = has_preceding_visible_text;
             let cell_context = if let Some(ref ctx) = enclosing_cell_ctx {
                 let mut new_ctx = ctx.clone();
                 if let Some(last) = new_ctx.path.last_mut() {
@@ -3115,6 +3120,7 @@ impl LayoutEngine {
                     .any(|line| line.runs.iter().any(|run| !run.text.trim().is_empty()));
                 if has_visible_text {
                     has_preceding_text = true;
+                    has_preceding_visible_text = true;
                 }
             } else {
                 // has_table_ctrl: 표가 포함된 문단
@@ -3165,6 +3171,7 @@ impl LayoutEngine {
             };
             let mut tac_img_y = para_y_before_compose;
             let mut rendered_top_and_bottom_non_inline = false;
+            let control_text_positions = para.control_text_positions();
 
             for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
                 match ctrl {
@@ -3312,11 +3319,19 @@ impl LayoutEngine {
                                 pic.common.vert_rel_to,
                                 crate::model::shape::VertRelTo::Para
                             );
+                            let visible_text_before_picture = visible_text_before_para
+                                || control_text_positions.get(ctrl_idx).is_some_and(|&pos| {
+                                    para.text
+                                        .chars()
+                                        .take(pos)
+                                        .any(|ch| !ch.is_whitespace() && ch != '\u{FFFC}')
+                                });
                             // [Task #2226] 텍스트 없는 문단에서 seg.vpos > 0 이면 그
                             // 줄은 flow 그림에 밀려난 위치다 — 그림 오프셋의 원점은
                             // 문단 시작이므로 앵커에 vpos 를 더하면 그림이 셀 아래로
                             // 이탈한다 (주보 p2 로고 표 붓글씨 셀: line vpos 51.3px).
-                            let displaced_empty_line_para = para.text.trim().is_empty()
+                            let displaced_empty_line_para = !visible_text_before_picture
+                                && para.text.trim().is_empty()
                                 && para
                                     .line_segs
                                     .first()
@@ -3324,6 +3339,25 @@ impl LayoutEngine {
                             let anchor_y = if displaced_empty_line_para {
                                 // Square 포함 모든 비인라인 그림 — 원점은 문단 시작.
                                 content_cell_y + pad_top
+                            } else if top_and_bottom_para && visible_text_before_picture {
+                                // A saved cell vpos is relative to the vertically
+                                // aligned content stack.  Preserve it when a
+                                // caption paragraph precedes this picture instead
+                                // of treating the picture as the cell's only item.
+                                para.line_segs
+                                    .first()
+                                    .filter(|seg| seg.vertical_pos >= 0)
+                                    .map(|seg| {
+                                        cell_para_line_anchor_y(
+                                            text_y_start,
+                                            content_cell_y,
+                                            pad_top,
+                                            seg.vertical_pos,
+                                            self.dpi,
+                                            use_top_vpos_anchor,
+                                        )
+                                    })
+                                    .unwrap_or(para_y_before_compose)
                             } else if top_and_bottom_para || overlay_para {
                                 para.line_segs
                                     .first()
@@ -3386,6 +3420,7 @@ impl LayoutEngine {
                             //   BOTTOM = content_bottom − pic_h − vOffset
                             let pic_y = if top_and_bottom_para
                                 && pic.common.flow_with_text
+                                && !visible_text_before_picture
                                 && !unrestricted_take_place_cell_float
                                 && !detached_from_inline_table_flow
                             {
