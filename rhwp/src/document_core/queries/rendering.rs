@@ -4848,6 +4848,24 @@ impl DocumentCore {
         self.layout_engine.clear_layout_caches();
     }
 
+    /// 성능 계측용 렌더 캐시 점유량.
+    pub(crate) fn render_cache_stats(&self) -> (usize, usize, usize) {
+        let page_tree_count = self
+            .page_tree_cache
+            .borrow()
+            .iter()
+            .filter(|entry| entry.is_some())
+            .count();
+        let json_cache = self.layer_tree_json_cache.borrow();
+        let json_variant_count = json_cache.iter().map(Vec::len).sum();
+        let json_bytes = json_cache
+            .iter()
+            .flatten()
+            .map(|(_, json)| json.len())
+            .sum();
+        (page_tree_count, json_variant_count, json_bytes)
+    }
+
     /// 캐시된 페이지 렌더 트리를 반환한다 (캐시 미스 시 빌드 후 캐시).
     pub(crate) fn build_page_tree_cached(&self, page_num: u32) -> Result<PageRenderTree, HwpError> {
         let idx = page_num as usize;
