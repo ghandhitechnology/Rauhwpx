@@ -358,7 +358,10 @@ test('CanvasView forwards text-edit invalidation as static overlay reuse context
   assert.match(source, /allowStaticOverlayReuse:\s*true/);
   assert.match(source, /allowStaticOverlayReuse:\s*false/);
   assert.match(source, /renderCanvas\(pageIndex,\s*canvas,\s*renderContext\)/);
-  assert.match(source, /renderPage\(pageIdx,\s*canvas,\s*renderScale,\s*zoom,\s*dpr,\s*renderContext\)/);
+  assert.match(
+    source,
+    /renderPage\(\s*pageIdx,\s*canvas,\s*renderScale,\s*zoom,\s*dpr,\s*renderContext,\s*pageInfo,\s*\)/,
+  );
 });
 
 test('CanvasView coalesces text-edit invalidations before rerendering a page', () => {
