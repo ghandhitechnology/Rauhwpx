@@ -1,0 +1,302 @@
+name: Nightly desktop release
+
+on:
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare nightly identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      date: ${{ steps.identity.outputs.date }}
+      sha: ${{ steps.identity.outputs.sha }}
+      short_sha: ${{ steps.identity.outputs.short_sha }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Fetch current nightly tag
+        run: git fetch origin tag nightly --no-tags || true
+
+      - name: Compute nightly identity and notes
+        id: identity
+        run: |
+          set -euo pipefail
+          base_version="$(jq -r .version package.json)"
+          date="$(date -u +%F)"
+          compact_date="${date//-/}"
+          sha="${GITHUB_SHA}"
+          short_sha="${sha:0:7}"
+          version="${base_version}-nightly.${compact_date}.${short_sha}"
+
+          {
+            echo "version=${version}"
+            echo "date=${date}"
+            echo "sha=${sha}"
+            echo "short_sha=${short_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "VERSION=${version}"
+            echo "DATE=${date}"
+            echo "SHA=${sha}"
+            echo "SHORT_SHA=${short_sha}"
+          } > nightly-identity.env
+
+          {
+            echo "# Rauhwpx nightly pre-release"
+            echo
+            echo "- UTC date: ${date}"
+            echo "- Full SHA: ${sha}"
+            echo "- Short SHA: ${short_sha}"
+            echo "- Version: ${version}"
+            echo
+            echo "## Changelog"
+            echo
+            changelog=""
+            if git rev-parse --verify --quiet refs/tags/nightly >/dev/null &&
+              git merge-base --is-ancestor nightly HEAD; then
+              changelog="$(git log nightly..HEAD --pretty=format:'- %s (%h)')"
+            else
+              changelog="$(git log -20 --pretty=format:'- %s (%h)')"
+            fi
+            if [[ -n "${changelog}" ]]; then
+              printf '%s\n' "${changelog}"
+            else
+              echo "- No commits since the previous nightly."
+            fi
+          } > nightly-notes.md
+
+      - name: Upload nightly identity
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-identity
+          if-no-files-found: error
+          path: |
+            nightly-identity.env
+            nightly-notes.md
+
+  macos:
+    name: Build macOS nightly installers
+    needs: prepare
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: macos-release
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            rhwp/rhwp-studio/package-lock.json
+            rhwp/rhwp-agent/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build WASM engine
+        working-directory: rhwp
+        run: wasm-pack build --target web
+
+      - name: Install studio and desktop dependencies
+        run: |
+          npm ci
+          npm --prefix rhwp/rhwp-studio ci
+          npm --prefix rhwp/rhwp-agent ci --omit=dev
+
+      - name: Set nightly package version
+        run: npm version --no-git-tag-version "${{ needs.prepare.outputs.version }}"
+
+      - name: Verify Developer ID and Apple ID notarization secrets
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "Required macos-release secret is missing: ${name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build signed and notarized macOS installers
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: true
+          CSC_NAME: "TAEWOOK HA (C8M34MMT8W)"
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: npm run dist:mac
+
+      - name: Verify Developer ID signature and notarization
+        env:
+          EXPECTED_IDENTITY: "Developer ID Application: TAEWOOK HA (C8M34MMT8W)"
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' app_path; do
+            codesign --verify --deep --strict --verbose=2 "${app_path}"
+            signing_info="$(codesign -dv --verbose=4 "${app_path}" 2>&1)"
+            printf '%s\n' "${signing_info}"
+            if ! grep -F "Authority=${EXPECTED_IDENTITY}" <<<"${signing_info}"; then
+              echo "App was not signed with ${EXPECTED_IDENTITY}: ${app_path}" >&2
+              exit 1
+            fi
+            if grep -E 'Signature=(adhoc|unofficial)|Authority=Apple Development' <<<"${signing_info}"; then
+              echo "Rejected development or ad-hoc signature: ${app_path}" >&2
+              exit 1
+            fi
+            xcrun stapler validate "${app_path}"
+          done < <(find release -type d -name 'Rauhwpx.app' -print0)
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-nightly
+          if-no-files-found: error
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.zip.blockmap
+            release/latest-mac.yml
+
+  windows:
+    name: Build Windows nightly installer
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            rhwp/rhwp-studio/package-lock.json
+            rhwp/rhwp-agent/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build WASM engine
+        working-directory: rhwp
+        shell: bash
+        run: wasm-pack build --target web
+
+      - name: Install studio and desktop dependencies
+        shell: bash
+        run: |
+          npm ci
+          npm --prefix rhwp/rhwp-studio ci
+          npm --prefix rhwp/rhwp-agent ci --omit=dev
+
+      - name: Set nightly package version
+        shell: bash
+        run: npm version --no-git-tag-version "${{ needs.prepare.outputs.version }}"
+
+      - name: Build Windows installer
+        shell: bash
+        run: npm run dist:win
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nightly
+          if-no-files-found: error
+          path: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml
+
+  publish:
+    name: Publish nightly GitHub Release
+    if: github.ref == 'refs/heads/main'
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum ./*.dmg ./*.zip ./*.exe > SHA256SUMS.txt
+
+      - name: Publish nightly GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source release/nightly-identity.env
+          extras=()
+          if [ -f release/latest-mac.yml ]; then extras+=(release/latest-mac.yml); fi
+          if [ -f release/latest.yml ]; then extras+=(release/latest.yml); fi
+          for blockmap in release/*.zip.blockmap; do
+            if [ -f "${blockmap}" ]; then extras+=("${blockmap}"); fi
+          done
+
+          gh release delete nightly --yes --cleanup-tag || true
+          git tag -f nightly "$GITHUB_SHA"
+          git push origin refs/tags/nightly --force
+          gh release create nightly \
+            release/*.dmg \
+            release/*.zip \
+            release/*.exe \
+            release/*.exe.blockmap \
+            release/SHA256SUMS.txt \
+            "${extras[@]}" \
+            --prerelease \
+            --latest=false \
+            --target "$GITHUB_SHA" \
+            --title "Rauhwpx nightly ${DATE} (${SHORT_SHA})" \
+            --notes-file release/nightly-notes.md
