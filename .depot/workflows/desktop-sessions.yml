@@ -6,7 +6,7 @@
 #   ${{ matrix.os }} (macos-15 / windows-latest) cannot schedule here.
 # - Build the pinned WASM engine before Studio npm test so
 #   rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm exist for browser merge tests.
-# - Install Chromium and set PUPPETEER_EXECUTABLE_PATH for those tests.
+# - Install Google Chrome and set PUPPETEER_EXECUTABLE_PATH for those tests.
 # - Raise the timeout to 90 minutes so the WASM compile fits.
 
 name: Desktop session checks
@@ -48,20 +48,21 @@ jobs:
       - name: Build WASM engine for browser merge tests
         working-directory: rhwp
         run: wasm-pack build --target web
-      - name: Install Chromium for browser merge tests
+      - name: Install Google Chrome for browser merge tests
         run: |
           set -euo pipefail
-          sudo apt-get update
-          if ! sudo apt-get install -y --no-install-recommends chromium-browser; then
-            sudo apt-get install -y --no-install-recommends chromium
+          if [ -x /usr/bin/google-chrome ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome" >> "$GITHUB_ENV"
+            exit 0
           fi
           if [ -x /usr/bin/chromium ]; then
             echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium" >> "$GITHUB_ENV"
-          elif [ -x /usr/bin/chromium-browser ]; then
-            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser" >> "$GITHUB_ENV"
-          elif [ -x /usr/bin/google-chrome ]; then
-            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome" >> "$GITHUB_ENV"
+            exit 0
           fi
+          curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/chrome.deb
+          echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome" >> "$GITHUB_ENV"
       - name: Install dependencies
         shell: bash
         run: |
