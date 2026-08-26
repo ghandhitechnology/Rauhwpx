@@ -490,6 +490,8 @@ export function createEditingSettings(options: {
     if (source !== 'external') return;
     const external = userSettings.getEditorScalarSettings();
     runtime.committed(external);
+    // 다른 창에서 대표 글꼴이 바뀌면 행이 가진 배열 인덱스도 다시 맞춘다.
+    renderFontSets();
     if (isDirty()) {
       conflictSnapshot = external;
       conflict.hidden = false;

@@ -302,7 +302,11 @@ class UserSettingsService {
   }
 
   save(): void {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.data));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.data));
+    } catch (error) {
+      console.warn('[user-settings] 사용자 설정 저장 실패:', error);
+    }
     this.notify('local');
   }
 

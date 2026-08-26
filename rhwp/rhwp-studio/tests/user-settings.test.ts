@@ -299,6 +299,34 @@ test('편집 설정 스냅샷은 복제되고 저장 실패 시 메모리 값을
   }
 });
 
+test('최근 글꼴 저장이 실패해도 선택 동작과 메모리 목록은 유지된다', () => {
+  const originalStorage = (globalThis as { localStorage?: Storage }).localStorage;
+  const originalWarn = console.warn;
+  const original = {
+    ...userSettings.getFontSettings(),
+    recentFonts: [...userSettings.getFontSettings().recentFonts],
+  };
+  const warnings: unknown[][] = [];
+  (globalThis as { localStorage?: Storage }).localStorage = {
+    getItem: () => null,
+    setItem: () => { throw new Error('quota'); },
+  } as unknown as Storage;
+  console.warn = (...args: unknown[]) => { warnings.push(args); };
+  try {
+    assert.doesNotThrow(() => userSettings.recordRecentFont('저장 실패 글꼴'));
+    assert.equal(userSettings.getFontSettings().recentFonts[0], '저장 실패 글꼴');
+    assert.equal(warnings.length, 1);
+  } finally {
+    console.warn = originalWarn;
+    (globalThis as { localStorage?: Storage }).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+    } as unknown as Storage;
+    userSettings.updateFontSettings(original);
+    (globalThis as { localStorage?: Storage }).localStorage = originalStorage;
+  }
+});
+
 test('최근 글꼴은 중복 없이 최신순 다섯 개만 남는다', () => {
   const originalStorage = (globalThis as { localStorage?: Storage }).localStorage;
   const original = { ...userSettings.getFontSettings(), recentFonts: [...userSettings.getFontSettings().recentFonts] };

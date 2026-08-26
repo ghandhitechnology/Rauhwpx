@@ -27,8 +27,8 @@ test('성공한 직접 글꼴 선택만 MRU에 기록하고 대표 글꼴은 분
 
   assert.ok(fontSetReturn >= 0 && firstRecentWrite > fontSetReturn);
   assert.match(changeHandler, /if \(fontSet\) \{\s*this\.applyFontSet\(fontSet\);\s*return;/);
-  assert.match(changeHandler, /if \(fontId >= 0\) \{\s*this\.eventBus\.emit\('format-char', \{ fontId \}[\s\S]*userSettings\.recordRecentFont\(name\);/);
-  assert.match(changeHandler, /this\.eventBus\.emit\('format-char', \{ fontIds: ids \}[\s\S]*userSettings\.recordRecentFont\(name\);/);
+  assert.match(changeHandler, /if \(fontId >= 0\) \{\s*this\.eventBus\.emit\('format-char', \{ fontId \}[\s\S]*?userSettings\.recordRecentFont\(name\);/);
+  assert.match(changeHandler, /this\.eventBus\.emit\('format-char', \{ fontIds: ids \}[\s\S]*?userSettings\.recordRecentFont\(name\);/);
 });
 
 test('글꼴 설정 변경 이벤트가 드롭다운과 열린 메뉴를 다시 만든다', () => {

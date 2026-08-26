@@ -101,6 +101,7 @@ import {
 } from '@/desktop-integration';
 import { initAgentBridge, type AgentBridge } from './agent/bridge.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
+import { showEditingSettingsFallback } from './ui/agent-sidebar/settings-editing-fallback.ts';
 import { AGENT_LABEL } from './ui/agent-sidebar/providers.ts';
 import { initInlinePrompt } from './agent/inline-prompt.ts';
 import { DocumentVersionController, persistActiveBranch } from './versioning/controller.ts';
@@ -283,6 +284,20 @@ function setAgentEditingLease(lease: AgentEditingLease): void {
 /** 렌더러 초기화 후에 생성되는 에이전트 브리지 — 저장 가드가 대기 편집을 조회한다. */
 let agentBridgeRef: AgentBridge | null = null;
 let versionControllerRef: DocumentVersionController | null = null;
+let agentSidebarReady = false;
+
+eventBus.on('settings:open', (payload) => {
+  if (agentSidebarReady) return;
+  const destination = (payload as { destination?: unknown } | undefined)?.destination;
+  if (destination !== undefined && destination !== 'editing') return;
+  showEditingSettingsFallback({
+    eventBus,
+    runtime: {
+      preview: applyEditorSettingsPreview,
+      committed: commitEditorSettingsRuntime,
+    },
+  });
+});
 
 const commandServices: CommandServices = {
   eventBus,
@@ -723,6 +738,7 @@ async function initialize(): Promise<void> {
           void runLibraryMove(commandServices, target, () => activeDocumentId);
         },
       });
+      agentSidebarReady = true;
       initInlinePrompt({
         wasm,
         eventBus,

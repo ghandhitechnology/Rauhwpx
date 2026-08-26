@@ -80,6 +80,12 @@ test('/settings 슬래시 명령이 설정 페이지를 연다', () => {
 test('모든 설정 진입점은 목적지를 보존하는 하나의 허브를 연다', () => {
   assert.match(toolCommandsSource, /eventBus\.emit\('settings:open', \{ destination: 'editing' \}\)/);
   assert.match(source, /eventBus\.on\('settings:open'/);
+  assert.match(mainSource, /import \{ showEditingSettingsFallback \} from '\.\/ui\/agent-sidebar\/settings-editing-fallback\.ts'/);
+  assert.match(
+    mainSource,
+    /eventBus\.on\('settings:open',[\s\S]*if \(agentSidebarReady\) return;[\s\S]*showEditingSettingsFallback/,
+  );
+  assert.match(mainSource, /const agentSidebar = initAgentSidebar\([\s\S]*agentSidebarReady = true;/);
   assert.match(source, /setSettingsPanelOpen\(true, destination\)/);
   assert.match(source, /function requestSettingsOpen\(destination\?: SettingsDestination\)/);
   assert.match(source, /eventBus\.emit\('settings:open', destination \? \{ destination \} : undefined\)/);
@@ -152,6 +158,9 @@ test('대표 글꼴은 접을 수 있는 압축 목록으로 보인다', () => {
   assert.match(settingsCss, /\.ag-settings-font-set-list \{[\s\S]*gap: 0/);
   assert.match(settingsCss, /\.ag-settings-font-set-list\[hidden\] \{\s*display: none/);
   assert.match(settingsCss, /\.ag-settings-font-set-row \{[\s\S]*min-height: 42px/);
+  const externalChange = editingSettings.slice(editingSettings.indexOf('const unsubscribe = userSettings.subscribe'));
+  assert.ok(externalChange.indexOf('renderFontSets();') > externalChange.indexOf('runtime.committed(external);'));
+  assert.ok(externalChange.indexOf('renderFontSets();') < externalChange.indexOf('if (isDirty())'));
 });
 
 test('저장 설정은 짧은 라벨만 보이고 PDF 안내는 기본값을 쓴다', () => {

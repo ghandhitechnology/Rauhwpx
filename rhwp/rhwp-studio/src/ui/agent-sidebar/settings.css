@@ -1160,6 +1160,59 @@
 
 /* ─── 목적지 셸 ─────────────────────────────────────── */
 
+.ag-settings-fallback-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10020;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--modal-overlay-bg, rgba(17, 18, 20, 0.48));
+}
+
+.ag-settings-fallback-dialog {
+  position: relative;
+  right: auto;
+  display: flex;
+  width: min(720px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: 8px;
+  background: var(--ag-bg);
+  box-shadow: var(--n-elev-4);
+  color: var(--ag-text);
+}
+
+.ag-settings-fallback-header {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--ag-border);
+}
+
+.ag-settings-fallback-header h1 {
+  margin: 0;
+  font-size: var(--font-size-lg, 15px);
+}
+
+.ag-settings-fallback-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+}
+
+.ag-settings-fallback-dialog > .ag-settings-apply-footer {
+  min-height: 48px;
+  margin: 0;
+  padding: 10px 14px;
+  border-top: 1px solid var(--ag-border);
+  background: var(--ag-bg);
+}
+
 .ag-settings-page {
   container-name: settings-hub;
   container-type: inline-size;

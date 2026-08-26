@@ -5726,8 +5726,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   color: var(--ag-text);
 }
 
-/* focus mode keeps conversation surfaces mounted, so settings explicitly
-   removes both from the visual and accessibility stage. */
+/* 집중 모드는 대화 화면을 계속 붙여 두므로 설정을 열 때 두 화면을
+   시각 영역과 접근성 트리에서 함께 걷어낸다. */
 .ag-fullscreen.ag-settings-open .ag-chat-page,
 .ag-fullscreen.ag-settings-open .ag-threads-page {
   opacity: 0;

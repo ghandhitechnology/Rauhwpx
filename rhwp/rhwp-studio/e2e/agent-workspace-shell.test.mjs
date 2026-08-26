@@ -87,7 +87,8 @@ await runTest('agent fullscreen workspace shell', async ({ page }) => {
       },
       borderRadius: style?.borderRadius,
       boxShadow: style?.boxShadow,
-      composerOutsideChanges: composer?.parentElement !== surface,
+      hasComposer: !!composer,
+      composerOutsideChanges: !!composer && composer.parentElement !== surface,
     };
   });
 
@@ -96,6 +97,7 @@ await runTest('agent fullscreen workspace shell', async ({ page }) => {
   assert.equal(changes.surfaceRect?.height, 852);
   assert.equal(changes.borderRadius, '0px');
   assert.equal(changes.boxShadow, 'none');
+  assert.equal(changes.hasComposer, true);
   assert.equal(changes.composerOutsideChanges, true);
   await screenshot(page, 'agent-workspace-changes');
 

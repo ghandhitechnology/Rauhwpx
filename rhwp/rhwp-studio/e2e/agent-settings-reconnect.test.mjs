@@ -181,7 +181,11 @@ try {
     await page.waitForFunction(
       () => document.querySelector('#ag-settings-tab-connections')?.getAttribute('aria-selected') === 'true',
     );
-    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 350)));
+    await page.waitForFunction(
+      () => document.querySelector(
+        '#ag-settings-pane-connections .ag-settings-hub-row .ag-settings-row-detail',
+      )?.textContent === '연결됨',
+    );
     const settings = await page.evaluate(() => {
       const panel = document.querySelector('#ag-settings-panel');
       const destination = panel?.querySelector('#ag-settings-pane-connections');
