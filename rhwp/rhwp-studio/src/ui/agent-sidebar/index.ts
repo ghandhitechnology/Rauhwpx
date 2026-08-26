@@ -105,6 +105,7 @@ import type {
   InlinePromptSendResult,
   InlinePromptSubmission,
 } from '../../agent/inline-prompt-context.ts';
+import './sidebar-button-modern.css';
 
 export interface AgentSidebarDeps {
   bridge: AgentBridge;

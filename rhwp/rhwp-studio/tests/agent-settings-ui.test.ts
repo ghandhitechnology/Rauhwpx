@@ -21,6 +21,7 @@ const settings = readSource('../src/ui/agent-sidebar/settings.ts');
 const editingSettings = readSource('../src/ui/agent-sidebar/settings-editing.ts');
 const settingsCss = readSource('../src/ui/agent-sidebar/settings.css');
 const css = readSource('../src/ui/agent-sidebar/agent-sidebar.css');
+const buttonCss = readSource('../src/ui/agent-sidebar/sidebar-button-modern.css');
 const icons = readSource('../src/ui/agent-sidebar/icons.ts');
 const editCommandsSource = readSource('../src/command/commands/edit.ts');
 const toolCommandsSource = readSource('../src/command/commands/tool.ts');
@@ -187,7 +188,7 @@ test('버전 버튼은 설정과 관계없이 표시되고 현재 버전 관리 
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {
   assert.match(
     settings,
-    /aiContent\.append\(defaults\.root, instructionsSection\.root, calibration\.root, templatesSection\.root, aiFooter\)/,
+    /aiContent\.append\(calibration\.root, instructionsSection\.root, defaults\.root, templatesSection\.root, aiFooter\)/,
   );
   assert.doesNotMatch(editingSettings, /documentResources/);
   assert.match(settings, /requestTemplateName\('템플릿 추가'/);
@@ -427,12 +428,16 @@ test('토큰·시각 표기는 짧게 (폭이 흔들리지 않게)', () => {
   assert.equal(formatResetAt(now - 1_000, now), '곧 리셋');
 });
 
-test('설정의 채움 버튼도 손그림 윤곽을 쓴다', () => {
-  const filled = css.match(/[^{}]+\{[^}]*filter:\s*var\(--ag-sketch-line\)[^}]*\}/gs) ?? [];
-  const selectors = filled.map((rule) => rule.slice(0, rule.indexOf('{'))).join('\n');
-  for (const sel of ['.ag-settings-primary', '.ag-conn-banner-retry', '.ag-hub-retry-btn']) {
-    assert.ok(selectors.includes(sel), `${sel} should use the sketch filter`);
-  }
+test('사이드바 버튼은 마지막에 불러온 얇고 반듯한 스타일을 공유한다', () => {
+  assert.match(source, /import '\.\/sidebar-button-modern\.css';/);
+  assert.ok(
+    source.indexOf("import './sidebar-button-modern.css';")
+      > source.indexOf("from './settings.ts';"),
+  );
+  assert.match(buttonCss, /--ag-button-radius: 5px/);
+  assert.match(buttonCss, /\.ag-root button,[\s\S]*filter: none !important/);
+  assert.match(buttonCss, /\.ag-root \.ag-settings-nav-button \{[\s\S]*min-height: 34px/);
+  assert.match(buttonCss, /\.ag-root \.ag-send \{[\s\S]*height: var\(--ag-button-height\)/);
 });
 
 test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조색을 모두 갖춘다', () => {

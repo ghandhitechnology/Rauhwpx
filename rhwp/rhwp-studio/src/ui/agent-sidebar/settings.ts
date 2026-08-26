@@ -1182,7 +1182,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const aiFooter = el('div', 'ag-settings-apply-footer');
   aiFooter.append(aiStatus, aiCancel, aiApply);
   const aiContent = el('div', 'ag-settings-destination-content');
-  aiContent.append(defaults.root, instructionsSection.root, calibration.root, templatesSection.root, aiFooter);
+  aiContent.append(calibration.root, instructionsSection.root, defaults.root, templatesSection.root, aiFooter);
   panes.get('ai')?.appendChild(aiContent);
 
   const connectionContent = el('div', 'ag-settings-destination-content');
