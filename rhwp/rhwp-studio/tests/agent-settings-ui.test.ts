@@ -141,6 +141,7 @@ test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', 
   assert.match(settings, /\{ id: 'editing', label: '편집' \}/);
   assert.match(settings, /\{ id: 'ai', label: 'AI 설정' \}/);
   assert.match(settings, /\{ id: 'connections', label: 'AI 연결' \}/);
+  assert.match(settings, /connectionContent\.append\(connection\.root, \.\.\.\(cloudSettings \? \[cloudSettings\] : \[\]\), usageSection\.root\)/);
   assert.match(settingsCss, /\.ag-settings-section-title/);
 });
 

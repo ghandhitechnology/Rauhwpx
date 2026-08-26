@@ -69,6 +69,8 @@ const launchId = randomUUID();
 const hubToken = createHubToken();
 const devOrigin = devUrl ? new URL(devUrl).origin : null;
 
+const CLOUD_CLOSE_WAIT_MS = 120_000;
+
 function isTrustedRendererUrl(rawUrl) {
   try {
     const url = new URL(rawUrl);
@@ -501,7 +503,10 @@ function configureAutoUpdater() {
 }
 
 async function checkForAppUpdates({ manual = true } = {}) {
-  if (updateCheckPromise) return updateCheckPromise;
+  if (updateCheckPromise) {
+    if (manual) manualUpdateCheck = true;
+    return updateCheckPromise;
+  }
   manualUpdateCheck = manual;
   updateCheckPromise = (async () => {
     try {
@@ -1163,6 +1168,10 @@ ipcMain.handle('cloud:resolve-result', async (event, payload = {}) => {
       throw new Error('Open the origin document on its origin device before replacing it');
     }
   }
+  if (action === 'replace' || action === 'keep-both') {
+    const recoveryBytes = await readFile(handoff.recoveryPath);
+    validateNativeDocumentBytes(handoff.originPath || handoff.recoveryPath, recoveryBytes);
+  }
   const resolution = await applyCloudRecovery({
     recoveryPath: handoff.recoveryPath,
     resultDigest: handoff.resultDigest,
@@ -1171,9 +1180,6 @@ ipcMain.handle('cloud:resolve-result', async (event, payload = {}) => {
     action,
     resolutionId: handoff.id,
   });
-  if (resolution.bytes && resolution.path) {
-    validateNativeDocumentBytes(basename(resolution.path), resolution.bytes);
-  }
   for (const candidate of sessions.windows()) {
     const candidateSession = sessions.sessionForSender(candidate.webContents);
     const lease = documentLeases.leaseForSession(candidateSession.sessionId);
@@ -1199,16 +1205,36 @@ ipcMain.handle('desktop:close-response', async (event, requestId, allowClose) =>
     return false;
   }
   if (session.cloudTransferPromise) {
+    let timer;
     try {
-      await session.cloudTransferPromise;
+      await Promise.race([
+        session.cloudTransferPromise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Cloud transfer close wait timed out')), CLOUD_CLOSE_WAIT_MS);
+        }),
+      ]);
     } catch {
       quitRequested = false;
       return false;
+    } finally {
+      clearTimeout(timer);
     }
   }
   if (session.cloudTransferIntent) {
-    const completed = await session.cloudTransferIntent.promise;
-    if (!completed) {
+    let timer;
+    const result = await Promise.race([
+      session.cloudTransferIntent.promise.then((completed) => ({ completed })),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ completed: false, timeout: true }), CLOUD_CLOSE_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (result.timeout && session.cloudTransferIntent && !session.cloudTransferIntent.settled) {
+      session.cloudTransferIntent.settled = true;
+      session.cloudTransferIntent.settle(false);
+      session.cloudTransferIntent = null;
+    }
+    if (!result.completed) {
       quitRequested = false;
       return false;
     }

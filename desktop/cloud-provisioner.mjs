@@ -33,7 +33,8 @@ function runProcess(spawnImpl, command, args, { input, timeoutMs = 30_000, onLin
       }
       target.push(chunk);
       for (const line of stripControl(chunk.toString('utf8')).split(/\r?\n/)) {
-        if (line) onLine(line);
+        if (!line) continue;
+        onLine(line.startsWith('RAUHWpx_RECEIPT=') ? 'RAUHWpx_RECEIPT=' : line);
       }
     };
     const rejectOnce = (error) => {

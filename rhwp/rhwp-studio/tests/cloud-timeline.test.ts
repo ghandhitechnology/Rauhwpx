@@ -70,13 +70,14 @@ function thread(): ChatThread {
 
 test('portable cloud timeline round-trips visible messages, tools and subagents', () => {
   const exported = exportCloudTimeline(thread(), '2026-08-23T11:00:00.000Z');
-  const parsed = parseCloudTimeline(structuredClone(exported));
+  const source = structuredClone(exported);
+  const parsed = parseCloudTimeline(source);
 
   assert.equal(parsed?.schema, CLOUD_TIMELINE_SCHEMA);
   assert.equal(parsed?.thread.messages.length, 4);
   assert.equal(parsed?.thread.messages[1]?.kind, 'activity');
   assert.equal(parsed?.thread.messages[2]?.kind, 'tasks');
-  assert.notEqual(parsed?.thread.messages, exported.thread.messages);
+  assert.notEqual(parsed?.thread.messages, source.thread.messages);
 });
 test('timeline import keeps local identity while adopting remote transcript', () => {
   const imported = importCloudTimeline(exportCloudTimeline(thread(), '2026-08-23T11:00:00.000Z'), {

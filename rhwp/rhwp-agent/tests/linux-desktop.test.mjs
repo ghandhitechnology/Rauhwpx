@@ -44,6 +44,8 @@ test('Linux packages cover AppImage and deb on x64 and arm64', () => {
     ],
   );
   assert.equal(rootPackage.build?.deb?.depends?.includes('libsecret-1-0'), true);
+  assert.equal(rootPackage.build?.deb?.depends?.includes('libgtk-3-0 | libgtk-3-0t64'), true);
+  assert.equal(rootPackage.build?.deb?.depends?.includes('libatspi2.0-0 | libatspi2.0-0t64'), true);
   assert.equal(rootPackage.license, 'MIT');
   assert.match(rootPackage.homepage ?? '', /^https:\/\//);
   assert.match(rootPackage.build?.linux?.maintainer ?? '', /<[^>]+@[^>]+>/);
@@ -74,7 +76,7 @@ test('Linux packages register every supported document MIME type', () => {
 
 test('Linux checks and releases run on native Ubuntu x64 and arm64 runners', () => {
   for (const workflow of [desktopChecks, releaseWorkflow]) {
-    assert.match(workflow, /ubuntu-24\.04\b/);
+    assert.match(workflow, /ubuntu-24\.04(?!-arm)\b/);
     assert.match(workflow, /ubuntu-24\.04-arm\b/);
   }
   assert.match(releaseWorkflow, /release\/\*\.AppImage/);
@@ -137,7 +139,7 @@ test('Linux secret vault accepts secure keyrings and locks down persisted cipher
       });
       await vault.set('rhwp.test', `secret-${backend}`);
       assert.equal(await vault.get('rhwp.test'), `secret-${backend}`);
-      assert.doesNotMatch(await fs.readFile(filePath, 'utf8'), new RegExp(`secret-${backend}$`));
+      assert.doesNotMatch(await fs.readFile(filePath, 'utf8'), new RegExp(`secret-${backend}`));
       if (process.platform !== 'win32') {
         assert.equal((await fs.stat(directory)).mode & 0o777, 0o700);
         assert.equal((await fs.stat(filePath)).mode & 0o777, 0o600);

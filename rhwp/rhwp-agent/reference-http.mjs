@@ -217,7 +217,7 @@ export function createReferenceHttpHandler({ store, tokens, allowedScopes }) {
           scope: resolvedScope.scope,
           scopeId: resolvedScope.scopeId,
         });
-        const encodedName = encodeURIComponent(file.name).replaceAll('%20', ' ');
+        const encodedName = encodeURIComponent(file.name);
         const asciiName = file.name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
         res.writeHead(200, {
           'content-type': file.mimeType,

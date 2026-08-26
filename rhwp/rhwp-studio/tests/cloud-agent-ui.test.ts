@@ -51,6 +51,8 @@ test('cloud transfer includes portable timeline, exact document bytes and refere
   assert.match(sidebar, /timeline: exportCloudTimeline\(currentThread\)/);
   assert.match(sidebar, /const bytes = await cloudController\.readReference\(descriptor\)/);
   assert.match(sidebar, /references\.push\(\{ \.\.\.descriptor, bytes \}\)/);
+  assert.match(sidebar, /permissionProfile: 'unrestricted'/);
+  assert.doesNotMatch(sidebar, /async function transferCurrentSession[\s\S]*setPermissionProfile\('unrestricted'\)/);
   assert.match(main, /await saveCurrentDocument\(commandServices\)/);
   assert.match(main, /exportDocumentForFormat\(wasm, format\)/);
 });
@@ -74,6 +76,8 @@ test('desktop close waits for a requested handoff through the local turn boundar
   assert.match(sidebar, /await clearCloudTransferIntent\(\)/);
   assert.match(cloudUi, /refresh\(selectedScope\(\)\)/);
   assert.match(desktop, /cloudSetTransferIntent/);
+  const desktopMain = readFileSync(new URL('../../desktop/main.mjs', import.meta.url), 'utf8');
+  assert.match(desktopMain, /CLOUD_CLOSE_WAIT_MS = 120_000/);
 });
 
 test('result preview requires explicit resolution and external conflicts cannot replace', () => {
@@ -82,7 +86,9 @@ test('result preview requires explicit resolution and external conflicts cannot 
   assert.match(cloudUi, /resolveResult\('keep-both'\)/);
   assert.match(cloudUi, /resolveResult\('replace'\)/);
   assert.match(main, /open-document-bytes/);
-  assert.match(main, /resolution\.action === 'replace'/);
+  assert.match(main, /resolution\.action !== 'replace'/);
+  assert.match(main, /requestId/);
+  assert.match(main, /open-document-bytes:done/);
   assert.match(desktop, /cloudResolveResult/);
   assert.match(desktop, /cloudReadReference/);
 });

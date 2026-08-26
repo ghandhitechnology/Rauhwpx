@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { CloudError } from './protocol.mjs';
@@ -10,9 +11,13 @@ function command(spawnProcess, executable, args, {
   input,
   timeoutMs = 30_000,
   rejectStdoutOverflow = false,
+  env,
 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawnProcess(executable, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawnProcess(executable, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      ...(env ? { env } : {}),
+    });
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -93,7 +98,7 @@ export class PodmanRunner {
   async start(session, { workerToken, controlSocket }) {
     const providerAuth = path.join(this.config.providerAuthDirectory, session.provider);
     await fs.mkdir(providerAuth, { recursive: true, mode: 0o700 });
-    const name = `rauhwpx-${session.id.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 48)}`;
+    const name = `rauhwpx-${createHash('sha256').update(session.id).digest('hex').slice(0, 32)}`;
     return command(this.spawnProcess, 'podman', [
       '--cgroup-manager=cgroupfs', 'run', '--detach', '--replace', '--name', name,
       '--label', 'com.rauhwpx.cloud=true',
@@ -119,10 +124,12 @@ export class PodmanRunner {
       '--volume', `${path.dirname(controlSocket)}:/run/rauhwpx:ro,Z`,
       '--env', `RAUHWpx_SESSION_ID=${session.id}`,
       '--env', `RAUHWpx_PROVIDER=${session.provider}`,
-      '--env', `RAUHWpx_WORKER_TOKEN=${workerToken}`,
+      '--env', 'RAUHWpx_WORKER_TOKEN',
       '--env', 'RAUHWpx_CONTROL_SOCKET=/run/rauhwpx/control.sock',
       this.config.workerImage,
-    ]);
+    ], {
+      env: { ...process.env, RAUHWpx_WORKER_TOKEN: workerToken },
+    });
   }
 
   async stop(sandboxId) {

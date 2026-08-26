@@ -48,7 +48,7 @@ curl --fail --location --silent --show-error "${RAUHWpx_RELEASE_SHA256_URL:-${AR
 curl --fail --location --silent --show-error "${RAUHWpx_RELEASE_BUNDLE_URL:-${ARCHIVE_URL}.sigstore.json}" --output "$ARCHIVE.sigstore.json"
 cosign verify-blob "$ARCHIVE" \
   --bundle "$ARCHIVE.sigstore.json" \
-  --certificate-identity-regexp '^https://github.com/ghandhitechnology/Rauhwpx/.github/workflows/release.yml@refs/(heads|tags)/' \
+  --certificate-identity-regexp '^https://github\.com/ghandhitechnology/Rauhwpx/\.github/workflows/release\.yml@refs/tags/' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' >/dev/null
 
 mkdir "$TMP/unpacked"

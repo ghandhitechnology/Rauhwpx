@@ -63,8 +63,8 @@ test('Podman runner keeps private rootless networking, mounts only control socke
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-podman-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const calls = [];
-  const spawnProcess = (executable, args) => {
-    calls.push({ executable, args });
+  const spawnProcess = (executable, args, options = {}) => {
+    calls.push({ executable, args, env: options.env });
     const child = new EventEmitter();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
@@ -111,6 +111,13 @@ test('Podman runner keeps private rootless networking, mounts only control socke
   assert.ok(args.includes('--read-only'));
   assert.ok(args.includes('max-size=1048576'));
   assert.ok(args.some((value) => value.includes('/workspace:rw,size=2048')));
+  assert.equal(args.includes('--env'), true);
+  const tokenIndex = args.indexOf('RAUHWpx_WORKER_TOKEN');
+  assert.ok(tokenIndex > 0 && args[tokenIndex - 1] === '--env');
+  assert.equal(args.some((value) => String(value).includes('worker-token')), false);
+  assert.equal(calls[0].env?.RAUHWpx_WORKER_TOKEN, 'worker-token');
+  const nameIndex = args.indexOf('--name');
+  assert.match(args[nameIndex + 1], /^rauhwpx-[a-f0-9]{32}$/);
   const workspaceTmpfs = args[args.indexOf('--tmpfs') + 1];
   const secondTmpfsIndex = args.indexOf('--tmpfs', args.indexOf('--tmpfs') + 1);
   const temporaryTmpfs = args[secondTmpfsIndex + 1];

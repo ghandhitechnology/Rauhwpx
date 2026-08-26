@@ -140,7 +140,7 @@ export interface AgentSidebarDeps {
   cloudController?: CloudController;
   prepareCloudTransfer?: () => Promise<CloudDocumentPayload | null>;
   setCloudDocumentLease?: (cloudOwned: boolean, sessionId: string | null) => void;
-  applyCloudResult?: (result: CloudDownloadResult, resolution: CloudResultResolution) => void;
+  applyCloudResult?: (result: CloudDownloadResult, resolution: CloudResultResolution) => void | Promise<void>;
   prepareCloudTakeover?: () => Promise<boolean>;
   applyCloudTakeover?: (takeover: CloudTakeoverPayload) => Promise<{
     documentId: string;
@@ -1531,7 +1531,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     onTimeline: (timeline) => applyCloudTimeline(timeline),
     onResultResolved: (result, resolution) => {
       if (result.timeline) applyCloudTimeline(result.timeline);
-      deps.applyCloudResult?.(result, resolution);
+      void deps.applyCloudResult?.(result, resolution);
     },
     onBeforeTakeover: () => deps.prepareCloudTakeover?.() ?? Promise.resolve(true),
     onTakeover: async (takeover) => {
@@ -1624,11 +1624,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   async function transferCurrentSession(): Promise<void> {
     const document = await deps.prepareCloudTransfer?.();
     if (!document) throw new Error('문서 저장이 완료되지 않아 클라우드 전송을 시작하지 않았습니다.');
-    if (permissionProfile !== 'unrestricted') {
-      permissionProfile = 'unrestricted';
-      bridge.setPermissionProfile('unrestricted');
-      updatePermissionButton();
-    }
     flushAssistantBuffer();
     persistCurrentThread();
     const references = await collectCloudReferences();

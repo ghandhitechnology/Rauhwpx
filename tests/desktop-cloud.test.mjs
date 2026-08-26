@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -138,6 +138,8 @@ test('Tailscale HTTPS port persists through profiles, UI conversion, and provisi
     tailscaleHttpsPort: 8443,
   })}`);
   assert.equal(receipt.tailscaleHttpsPort, 8443);
+  const provisionerSource = await readFile(new URL('../desktop/cloud-provisioner.mjs', import.meta.url), 'utf8');
+  assert.match(provisionerSource, /line.startsWith\('RAUHWpx_RECEIPT='\) \? 'RAUHWpx_RECEIPT=' : line/);
   assert.match(provisionerTest.installRemoteCommand({
     channel: 'stable', transport: 'tailscale', publicHost: '', tailscaleHttpsPort: 8443,
   }), /RAUHWpx_TAILSCALE_HTTPS_PORT=8443/);
@@ -252,7 +254,7 @@ test('result resolution replaces unchanged origins and preserves conflicts', asy
   const recoveryPath = path.join(directory, 'recovery.hwpx');
   const original = Buffer.from('original');
   const cloud = Buffer.from('cloud-result');
-  await writeFile(originalPath, original);
+  await writeFile(originalPath, original, { mode: 0o644 });
   await writeFile(recoveryPath, cloud);
   const replaced = await applyCloudRecovery({
     recoveryPath,
@@ -264,6 +266,9 @@ test('result resolution replaces unchanged origins and preserves conflicts', asy
   });
   assert.equal(replaced.action, 'replace');
   assert.deepEqual(await readFile(originalPath), cloud);
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(originalPath)).mode & 0o777, 0o644);
+  }
   assert.deepEqual(await readFile(recoveryPath), cloud, 'recovery remains until the durable resolution receipt');
   const retriedReplace = await applyCloudRecovery({
     recoveryPath,
@@ -1024,6 +1029,37 @@ test('timeline downloads require a verified portable timeline envelope', async (
     makeClient({ schema: 'wrong', version: 1 }).downloadTimeline('session-1'),
     /portable timeline schema/,
   );
+});
+
+test('result downloads reject a missing content digest', async () => {
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://cloud.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'cloud.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const vault = memoryVault({
+    'cloud.profile': JSON.stringify(profile),
+    'cloud.refresh': 'refresh',
+  });
+  const bytes = Buffer.from('document-bytes');
+  const client = new CloudClient({
+    vault,
+    fetchImpl: signedFetch(async (url) => {
+      if (url.endsWith('/v1/token/refresh')) return jsonResponse({
+        accessToken: 'access',
+        accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        refreshToken: 'refresh',
+      });
+      return new Response(bytes, {
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-length': String(bytes.length),
+          'x-rauhwpx-server-key': SERVER_KEY,
+        },
+      });
+    }),
+  });
+  await assert.rejects(client.downloadResult('result-1'), /digest does not match/);
 });
 
 test('downloaded results reopen from verified local recovery and disappear after resolution', async (t) => {

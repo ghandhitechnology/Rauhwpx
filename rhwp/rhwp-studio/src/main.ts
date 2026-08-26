@@ -514,23 +514,49 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
   });
 }
 
-function applyCloudResult(result: CloudDownloadResult, resolution: CloudResultResolution): void {
-  if (resolution.action === 'replace') {
-    eventBus.emit('open-document-bytes', {
-      bytes: resolution.bytes ?? result.bytes,
-      fileName: result.fileName,
-      skipUnsavedGuard: true,
+function applyCloudResult(result: CloudDownloadResult, resolution: CloudResultResolution): Promise<void> {
+  if (resolution.action !== 'replace') {
+    if (resolution.action === 'keep-both') {
+      const copy = resolution.preservedCopyName ?? result.preservedCopyName ?? resolution.path ?? result.fileName;
+      const reason = resolution.conflict === 'external-change' ? '원본 변경을 감지해 ' : '';
+      showToast({ message: `${reason}원본과 ${copy}을 모두 보관했습니다.`, durationMs: 4500 });
+      return Promise.resolve();
+    }
+    showToast({ message: '클라우드 결과를 버렸습니다.', durationMs: 3000 });
+    return Promise.resolve();
+  }
+  const requestId = `cloud-result-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  const opened = new Promise<void>((resolve, reject) => {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const off = eventBus.on('open-document-bytes:done', (payload) => {
+      const outcome = payload as { requestId?: string; ok: boolean; error?: string };
+      if (outcome.requestId !== requestId) return;
+      off();
+      if (timeout) clearTimeout(timeout);
+      if (outcome.ok) resolve();
+      else reject(new Error(outcome.error || '클라우드 결과 열기가 취소되었습니다.'));
     });
-    showToast({ message: `${result.fileName}에 클라우드 결과를 반영했습니다.`, durationMs: 3500 });
-    return;
-  }
-  if (resolution.action === 'keep-both') {
-    const copy = resolution.preservedCopyName ?? result.preservedCopyName ?? resolution.path ?? result.fileName;
-    const reason = resolution.conflict === 'external-change' ? '원본 변경을 감지해 ' : '';
-    showToast({ message: `${reason}원본과 ${copy}을 모두 보관했습니다.`, durationMs: 4500 });
-    return;
-  }
-  showToast({ message: '클라우드 결과를 버렸습니다.', durationMs: 3000 });
+    timeout = setTimeout(() => {
+      off();
+      reject(new Error('클라우드 결과 열기 시간이 초과되었습니다.'));
+    }, 90_000);
+  });
+  eventBus.emit('open-document-bytes', {
+    bytes: resolution.bytes ?? result.bytes,
+    fileName: result.fileName,
+    fileHandle: null,
+    requestId,
+    skipUnsavedGuard: true,
+  });
+  return opened.then(
+    () => {
+      showToast({ message: `${result.fileName}에 클라우드 결과를 반영했습니다.`, durationMs: 3500 });
+    },
+    (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      showToast({ message: `클라우드 결과를 열지 못했습니다: ${message}`, durationMs: 4500 });
+    },
+  );
 }
 
 async function applyCloudTakeover(takeover: CloudTakeoverPayload): Promise<{
