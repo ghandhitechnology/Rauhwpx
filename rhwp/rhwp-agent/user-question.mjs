@@ -88,7 +88,7 @@ export function isAskUserQuestionTool(name) {
     .replace(/^rhwp[:.]/, '') === 'ask_user_question';
 }
 
-/** Provider streams wrap MCP args; recover the canonical question payload. */
+/** Provider 스트림은 MCP 인수를 래핑한다. 정규 질문 페이로드를 복구한다. */
 export function userQuestionArgsFromToolInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   if (Array.isArray(input.questions)) return input;

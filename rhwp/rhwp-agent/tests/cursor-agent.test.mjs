@@ -548,8 +548,8 @@ test('native ACP MCP question calls emit the canonical root-scope ticket', async
   native.sendUserMessage('ask first');
   await new Promise((resolve) => setImmediate(resolve));
   const calls = events.filter((event) => event.type === 'tool-call');
-  assert.equal(calls.at(-1)?.tool, 'ask_user_question');
-  assert.deepEqual(JSON.parse(calls.at(-1).argsJson).questions[0].id, 'format');
+  assert.deepEqual(calls.map((event) => event.tool), ['ask_user_question']);
+  assert.deepEqual(JSON.parse(calls[0].argsJson).questions[0].id, 'format');
 });
 
 test('native ACP keeps one Cursor session across turns and streams through unified events', async (t) => {

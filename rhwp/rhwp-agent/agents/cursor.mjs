@@ -301,17 +301,22 @@ function acpToolArgs(rawInput) {
   return rawInput;
 }
 
-/** ACP tool_call 이름을 stream-json MCP 경로와 같은 짧은 도구명으로 맞춘다. */
+/** ACP tool_call 이름을 stream-json MCP 경로와 같은 짧은 도구명으로 맞춘다.
+ * MCP 는 title 만으로 도구를 알 수 없으므로 이름이나 질문 페이로드가 올 때까지 보류한다. */
 function projectAcpToolCall(update) {
   const rawInput = acpRawInput(update);
   const args = acpToolArgs(rawInput);
+  if (Array.isArray(args.questions)) {
+    return { tool: 'ask_user_question', args };
+  }
   const fromWrapper = mcpToolLabel({ args: rawInput });
-  const fromUpdate = mcpToolLabel({ name: update?.name ?? update?.title, args: rawInput });
+  const namedUpdate = String(update?.kind ?? '') === 'mcp'
+    ? { name: update?.name, args: rawInput }
+    : { name: update?.name ?? update?.title, args: rawInput };
+  const fromUpdate = mcpToolLabel(namedUpdate);
   const labeled = fromWrapper !== 'mcp' ? fromWrapper : fromUpdate;
-  return {
-    tool: Array.isArray(args.questions) ? 'ask_user_question' : labeled,
-    args,
-  };
+  if (String(update?.kind ?? '') === 'mcp' && labeled === 'mcp') return null;
+  return { tool: labeled, args };
 }
 
 /**
@@ -835,6 +840,7 @@ export function createCursorSession(opts, {
     const merged = { ...previous, ...update };
     acpToolState.set(callId, merged);
     const projected = projectAcpToolCall(merged);
+    if (!projected) return;
     const argsJson = JSON.stringify(projected.args);
     const shouldEmit = !previous.emitted
       || (projected.tool === 'ask_user_question'
