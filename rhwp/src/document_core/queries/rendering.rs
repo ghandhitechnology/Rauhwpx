@@ -1723,6 +1723,21 @@ impl DocumentCore {
         ))
     }
 
+    /// 전체 페이지 정보를 단일 JSON 배열로 반환한다.
+    pub fn get_all_page_info_native(&self) -> Result<String, HwpError> {
+        let page_count = self.page_count();
+        let mut json = String::with_capacity(page_count as usize * 320);
+        json.push('[');
+        for page_num in 0..page_count {
+            if page_num > 0 {
+                json.push(',');
+            }
+            json.push_str(&self.get_page_info_native(page_num)?);
+        }
+        json.push(']');
+        Ok(json)
+    }
+
     /// 구역 정의(SectionDef)를 JSON으로 반환 (네이티브 에러 타입)
     pub fn get_section_def_native(&self, section_idx: usize) -> Result<String, HwpError> {
         let section = self
@@ -5831,6 +5846,28 @@ mod tests {
             core.page_tree_cache_order.borrow().len(),
             PAGE_RENDER_CACHE_CAPACITY
         );
+    }
+
+    #[test]
+    fn all_page_info_matches_individual_page_queries() {
+        let bytes =
+            include_bytes!("../../../samples/basic/issue1994_behindtext_table_20200830.hwp");
+        let core = DocumentCore::from_bytes(bytes).expect("fixture parses");
+        let all: Vec<serde_json::Value> =
+            serde_json::from_str(&core.get_all_page_info_native().expect("all page info"))
+                .expect("all page info JSON");
+        assert_eq!(all.len(), core.page_count() as usize);
+        assert!(all.len() > 1);
+
+        for page in [0, all.len() / 2, all.len() - 1] {
+            let individual: serde_json::Value = serde_json::from_str(
+                &core
+                    .get_page_info_native(page as u32)
+                    .expect("individual page info"),
+            )
+            .expect("individual page info JSON");
+            assert_eq!(all[page], individual);
+        }
     }
 
     #[test]

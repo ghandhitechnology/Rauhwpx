@@ -785,6 +785,12 @@ impl HwpDocument {
         self.get_page_info_native(page_num).map_err(|e| e.into())
     }
 
+    /// 전체 페이지 정보를 JSON 배열로 반환한다.
+    #[wasm_bindgen(js_name = getAllPageInfo)]
+    pub fn get_all_page_info(&self) -> Result<String, JsValue> {
+        self.get_all_page_info_native().map_err(|e| e.into())
+    }
+
     /// 구역의 용지 설정(PageDef)을 HWPUNIT 원본값으로 반환한다.
     #[wasm_bindgen(js_name = getPageDef)]
     pub fn get_page_def(&self, section_idx: u32) -> Result<String, JsValue> {

@@ -618,6 +618,22 @@ export class WasmBridge {
     return JSON.parse(this.doc.getPageInfo(pageNum));
   }
 
+  getAllPageInfo(): PageInfo[] {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const doc = this.doc as unknown as { getAllPageInfo?: () => string };
+    if (typeof doc.getAllPageInfo === 'function') {
+      const pages: unknown = JSON.parse(doc.getAllPageInfo());
+      if (!Array.isArray(pages)) {
+        throw new Error('[WasmBridge] 전체 페이지 정보가 배열이 아닙니다');
+      }
+      return pages as PageInfo[];
+    }
+
+    const pages: PageInfo[] = [];
+    for (let page = 0; page < this.pageCount; page++) pages.push(this.getPageInfo(page));
+    return pages;
+  }
+
   refreshLayout(): void {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     try {

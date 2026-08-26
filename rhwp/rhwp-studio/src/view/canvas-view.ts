@@ -127,14 +127,7 @@ export class CanvasView {
     this.applyRendererSelection(selection);
 
     const pageCount = this.wasm.pageCount;
-    this.pages = [];
-    for (let i = 0; i < pageCount; i++) {
-      try {
-        this.pages.push(this.wasm.getPageInfo(i));
-      } catch (e) {
-        console.error(`[CanvasView] 페이지 ${i} 정보 조회 실패:`, e);
-      }
-    }
+    this.pages = this.collectPageInfo(pageCount);
 
     if (this.pages.length === 0) {
       console.error('[CanvasView] 로드된 페이지가 없습니다');
@@ -162,6 +155,26 @@ export class CanvasView {
     await Promise.resolve();
 
     console.log(`[CanvasView] ${this.pages.length}/${pageCount}페이지 로드, 총 높이: ${this.virtualScroll.getTotalHeight()}px`);
+  }
+
+  private collectPageInfo(pageCount: number): PageInfo[] {
+    try {
+      const pages = this.wasm.getAllPageInfo();
+      if (pages.length === pageCount) return pages;
+      console.warn(`[CanvasView] 전체 페이지 정보 개수 불일치: ${pages.length}/${pageCount}`);
+    } catch (error) {
+      console.warn('[CanvasView] 전체 페이지 정보 조회 실패, 개별 조회로 대체:', error);
+    }
+
+    const pages: PageInfo[] = [];
+    for (let page = 0; page < pageCount; page++) {
+      try {
+        pages.push(this.wasm.getPageInfo(page));
+      } catch (error) {
+        console.error(`[CanvasView] 페이지 ${page} 정보 조회 실패:`, error);
+      }
+    }
+    return pages;
   }
 
   /** WASM 문서 교체 직후 호출하여 이전 문서의 renderer와 canvas를 동기적으로 분리한다. */
@@ -782,14 +795,7 @@ export class CanvasView {
 
     // 페이지 정보 재수집 (페이지 수/크기가 변경될 수 있음)
     const pageCount = this.wasm.pageCount;
-    this.pages = [];
-    for (let i = 0; i < pageCount; i++) {
-      try {
-        this.pages.push(this.wasm.getPageInfo(i));
-      } catch (e) {
-        console.error(`[CanvasView] 페이지 ${i} 정보 조회 실패:`, e);
-      }
-    }
+    this.pages = this.collectPageInfo(pageCount);
 
     this.recalcLayout();
 
