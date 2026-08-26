@@ -12,6 +12,7 @@ use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlImageElement};
 
+use super::cache_budget::WeightedLruBudget;
 use super::layer_renderer::{LayerRenderResult, LayerRenderer};
 use super::pua_oldhangul::map_pua_old_hangul;
 use super::render_tree::{
@@ -35,11 +36,8 @@ use crate::paint::{
 };
 
 const TEXT_MARK_CLIP_RIGHT_PAD: f64 = 48.0;
-#[cfg(any(target_arch = "wasm32", test))]
 const WEB_IMAGE_CACHE_MAX_ENTRIES: usize = 200;
-#[cfg(any(target_arch = "wasm32", test))]
 const DECODED_CANVAS_CACHE_MAX_PIXELS: usize = 16_777_216;
-#[cfg(target_arch = "wasm32")]
 const HTML_IMAGE_CACHE_MAX_SOURCE_BYTES: usize = 33_554_432;
 
 /// Canvas 폰트의 실측 폭을 레이아웃 advance에 맞출 때 적용할 배율을 계산한다.
@@ -97,90 +95,10 @@ use super::form_caption::display_form_caption;
 use super::layout::{compute_char_positions, is_halfwidth_cjk_quote, split_into_clusters};
 use crate::model::control::FormType;
 
-#[cfg(any(target_arch = "wasm32", test))]
-struct CacheBudget {
-    max_entries: usize,
-    max_weight: usize,
-    total_weight: usize,
-    weights: std::collections::HashMap<u64, usize>,
-    order: std::collections::VecDeque<u64>,
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-impl CacheBudget {
-    fn new(max_entries: usize, max_weight: usize) -> Self {
-        Self {
-            max_entries,
-            max_weight,
-            total_weight: 0,
-            weights: std::collections::HashMap::new(),
-            order: std::collections::VecDeque::new(),
-        }
-    }
-
-    fn touch(&mut self, key: u64) {
-        if !self.weights.contains_key(&key) {
-            return;
-        }
-        self.order.retain(|cached| *cached != key);
-        self.order.push_back(key);
-    }
-
-    fn record(&mut self, key: u64, weight: usize) -> Vec<u64> {
-        if let Some(previous) = self.weights.remove(&key) {
-            self.total_weight = self.total_weight.saturating_sub(previous);
-            self.order.retain(|cached| *cached != key);
-        }
-        self.weights.insert(key, weight);
-        self.total_weight = self.total_weight.saturating_add(weight);
-        self.order.push_back(key);
-
-        let mut evicted = Vec::new();
-        while self.weights.len() > self.max_entries
-            || (self.total_weight > self.max_weight && self.weights.len() > 1)
-        {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(removed_weight) = self.weights.remove(&oldest) {
-                self.total_weight = self.total_weight.saturating_sub(removed_weight);
-                evicted.push(oldest);
-            }
-        }
-        evicted
-    }
-}
-
-#[cfg(test)]
-mod image_cache_budget_tests {
-    use super::CacheBudget;
-
-    #[test]
-    fn weighted_lru_evicts_oldest_entries_until_inside_budget() {
-        let mut budget = CacheBudget::new(3, 16);
-        assert!(budget.record(1, 10).is_empty());
-        assert_eq!(budget.record(2, 10), vec![1]);
-        budget.touch(2);
-        assert!(budget.record(3, 6).is_empty());
-        assert_eq!(budget.record(4, 6), vec![2]);
-        assert_eq!(budget.total_weight, 12);
-        assert_eq!(budget.order.into_iter().collect::<Vec<_>>(), vec![3, 4]);
-    }
-
-    #[test]
-    fn weighted_lru_keeps_one_oversized_image_for_reuse() {
-        let mut budget = CacheBudget::new(200, 16);
-        assert!(budget.record(1, 100).is_empty());
-        assert_eq!(budget.total_weight, 100);
-        assert_eq!(budget.record(2, 1), vec![1]);
-        assert_eq!(budget.total_weight, 1);
-    }
-}
-
 #[cfg(target_arch = "wasm32")]
 struct DecodedCanvasCache {
     entries: std::collections::HashMap<u64, Option<HtmlCanvasElement>>,
-    budget: CacheBudget,
+    budget: WeightedLruBudget,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -188,7 +106,10 @@ impl DecodedCanvasCache {
     fn new() -> Self {
         Self {
             entries: std::collections::HashMap::new(),
-            budget: CacheBudget::new(WEB_IMAGE_CACHE_MAX_ENTRIES, DECODED_CANVAS_CACHE_MAX_PIXELS),
+            budget: WeightedLruBudget::new(
+                WEB_IMAGE_CACHE_MAX_ENTRIES,
+                DECODED_CANVAS_CACHE_MAX_PIXELS,
+            ),
         }
     }
 
@@ -218,7 +139,7 @@ impl DecodedCanvasCache {
 #[cfg(target_arch = "wasm32")]
 struct HtmlImageCache {
     entries: std::collections::HashMap<u64, HtmlImageElement>,
-    budget: CacheBudget,
+    budget: WeightedLruBudget,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -226,7 +147,7 @@ impl HtmlImageCache {
     fn new() -> Self {
         Self {
             entries: std::collections::HashMap::new(),
-            budget: CacheBudget::new(
+            budget: WeightedLruBudget::new(
                 WEB_IMAGE_CACHE_MAX_ENTRIES,
                 HTML_IMAGE_CACHE_MAX_SOURCE_BYTES,
             ),
