@@ -4,10 +4,11 @@ export class CanvasPool {
   private available: HTMLCanvasElement[] = [];
   private inUse = new Map<number, HTMLCanvasElement>();
   private availableBackingPixels = 0;
+  private readonly maxRetainedBackingPixels: number;
 
-  constructor(
-    private readonly maxRetainedBackingPixels = DEFAULT_MAX_RETAINED_BACKING_PIXELS,
-  ) {}
+  constructor(maxRetainedBackingPixels = DEFAULT_MAX_RETAINED_BACKING_PIXELS) {
+    this.maxRetainedBackingPixels = maxRetainedBackingPixels;
+  }
 
   /** Canvas를 할당한다 (풀에서 꺼내거나 새로 생성) */
   acquire(pageIdx: number): HTMLCanvasElement {
