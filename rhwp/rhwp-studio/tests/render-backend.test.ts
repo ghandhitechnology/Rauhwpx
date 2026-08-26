@@ -195,10 +195,31 @@ test('CanvasKit contains malformed images and bounds both decode caches', () => 
   assert.match(source, /MAX_IMAGE_FAILURE_CACHE_ENTRIES = 128/);
   assert.match(source, /encodedImageDimensions\(bytes\)/);
   assert.match(source, /MAX_DECODED_IMAGE_PIXELS = 32 \* 1024 \* 1024/);
-  assert.match(source, /MAX_IMAGE_CACHE_PIXELS = 64 \* 1024 \* 1024/);
+  assert.match(source, /MAX_IMAGE_CACHE_PIXELS = 16 \* 1024 \* 1024/);
   assert.match(source, /oldest\?\.image\.delete\?\.\(\)/);
   assert.match(source, /generation !== this\.documentGeneration/);
   assert.match(source, /resetDocumentResources\(\): void/);
+});
+
+test('page render hot path reuses batched metadata and scans overlays once', () => {
+  const view = readFileSync(new URL('../src/view/canvas-view.ts', import.meta.url), 'utf8');
+  const renderer = readFileSync(new URL('../src/view/page-renderer.ts', import.meta.url), 'utf8');
+
+  assert.match(view, /renderContext,\s*pageInfo,\s*\)/);
+  assert.match(renderer, /if \(pageInfo\) this\.pageInfoByPage\.set\(pageIdx, pageInfo\)/);
+  assert.match(
+    renderer,
+    /this\.pageInfoByPage\.get\(pageIdx\) \?\? this\.wasm\.getPageInfo\(pageIdx\)/,
+  );
+  assert.match(
+    view,
+    /querySelectorAll<HTMLElement>\('\[data-rhwp-overlay-page\], \[data-rhwp-grid-page\]'\)/,
+  );
+  assert.doesNotMatch(
+    view,
+    /querySelectorAll<HTMLElement>\(\s*`\[data-rhwp-overlay-page="\$\{pageIdx\}"/,
+  );
+  assert.match(view, /gridOverlaysByPage\.get\(pageIdx\) \?\? \[\]/);
 });
 
 test('CanvasKit distinguishes missing-picture editor and print replay', () => {
