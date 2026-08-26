@@ -26,6 +26,9 @@ fn long_document_snapshot_history_perf() {
         .clamp(2, 20);
     let mut document = HwpDocument::from_bytes(&bytes).expect("load long-document fixture");
     assert_eq!(document.page_count(), 390);
+    let initial_length = document
+        .get_paragraph_length_native(12, 42)
+        .expect("read initial paragraph length");
 
     let baseline_rss = resident_bytes();
     let mut peak_rss = baseline_rss;
@@ -54,18 +57,22 @@ fn long_document_snapshot_history_perf() {
     document
         .restore_snapshot_native(snapshot_ids[0].0)
         .expect("restore first before snapshot");
-    let before_text = document
-        .get_paragraph_text_native(12, 42)
-        .expect("read restored before paragraph");
-    assert!(!before_text.starts_with('X'));
+    assert_eq!(
+        document
+            .get_paragraph_length_native(12, 42)
+            .expect("read restored before paragraph length"),
+        initial_length
+    );
 
     document
         .restore_snapshot_native(snapshot_ids[command_count - 1].1)
         .expect("restore final after snapshot");
-    let after_text = document
-        .get_paragraph_text_native(12, 42)
-        .expect("read restored after paragraph");
-    assert!(after_text.starts_with(&"X".repeat(command_count)));
+    assert_eq!(
+        document
+            .get_paragraph_length_native(12, 42)
+            .expect("read restored after paragraph length"),
+        initial_length + command_count
+    );
 
     eprintln!(
         "RHWP_SNAPSHOT_PROFILE commands={} snapshot_ids={} snapshot_ms={:.3} baseline_rss_bytes={} peak_rss_bytes={} retained_rss_bytes={}",
