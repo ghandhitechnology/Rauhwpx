@@ -2,6 +2,7 @@
 # Depot CI sandboxes are Ubuntu only. Keep GitHub-hosted macOS/Windows labels
 # in .github/workflows. Map those session jobs to Ubuntu here. Job names stay
 # Session tests (${{ matrix.os }}) so the check titles match GitHub Actions.
+# Studio browser merge tests need rhwp/pkg, so wasm-pack runs before npm test.
 
 name: Desktop session checks
 

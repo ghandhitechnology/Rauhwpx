@@ -14,6 +14,8 @@ const BROWSER_CANDIDATES = [
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
   '/usr/bin/google-chrome',
   '/usr/bin/chromium',
+  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
 ].filter((candidate): candidate is string => Boolean(candidate));
 
 const executablePath = BROWSER_CANDIDATES.find(existsSync);
@@ -28,10 +30,17 @@ let baseUrl = '';
 
 test.before(async () => {
   if (!executablePath) return;
-  assert.ok(
-    wasmPackageAvailable,
-    'Real WASM browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test',
-  );
+  if (!wasmPackageAvailable) {
+    // Local `npm test` should skip when Chrome is present but pkg/ is not.
+    // Session CI (GitHub + Depot) still fail closed so a missing WASM build
+    // cannot silently drop the merge browser suites.
+    assert.equal(
+      Boolean(process.env.CI),
+      false,
+      'Real WASM browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test',
+    );
+    return;
+  }
   server = await createServer({
     root: studioRoot,
     configFile: false,
@@ -84,7 +93,7 @@ test.after(async () => {
 
 test('dirty merge entry creates a real pre-merge checkpoint before already-integrated exit', { timeout: 30_000 }, async (context) => {
   if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
+    context.skip('Chrome/Chromium or generated WASM package is unavailable');
     return;
   }
   const page = await browser.newPage();
@@ -179,7 +188,7 @@ test('dirty merge entry creates a real pre-merge checkpoint before already-integ
 
 test('clean fast-forward is reviewed and keeps the source branch by default', { timeout: 30_000 }, async (context) => {
   if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
+    context.skip('Chrome/Chromium or generated WASM package is unavailable');
     return;
   }
   const page = await browser.newPage();
@@ -316,7 +325,7 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
 
 test('diverged clean merge creates ordered parents and Undo/Redo moves bytes with refs', { timeout: 45_000 }, async (context) => {
   if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
+    context.skip('Chrome/Chromium or generated WASM package is unavailable');
     return;
   }
   const page = await browser.newPage();
@@ -565,7 +574,7 @@ test('diverged clean merge creates ordered parents and Undo/Redo moves bytes wit
 
 test('HWPX branch transitions stay clean and do not create phantom checkpoints', { timeout: 45_000 }, async (context) => {
   if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
+    context.skip('Chrome/Chromium or generated WASM package is unavailable');
     return;
   }
   const page = await browser.newPage();
@@ -639,7 +648,7 @@ test('HWPX branch transitions stay clean and do not create phantom checkpoints',
 
 test('HWPX controller durably completes clean and conflicted merges with composite Undo/Redo', { timeout: 120_000 }, async (context) => {
   if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
+    context.skip('Chrome/Chromium or generated WASM package is unavailable');
     return;
   }
   const page = await browser.newPage();
@@ -932,7 +941,7 @@ test('HWPX controller durably completes clean and conflicted merges with composi
 
 test('real resolver completes clean and conflicted HWP/HWPX worker merges', { timeout: 90_000 }, async (context) => {
   if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
+    context.skip('Chrome/Chromium or generated WASM package is unavailable');
     return;
   }
   const page = await browser.newPage();

@@ -14,6 +14,10 @@ const desktopChecks = readFileSync(
   new URL('../../../.github/workflows/desktop-sessions.yml', import.meta.url),
   'utf8',
 );
+const depotDesktopChecks = readFileSync(
+  new URL('../../../.depot/workflows/desktop-sessions.yml', import.meta.url),
+  'utf8',
+);
 const releaseWorkflow = readFileSync(
   new URL('../../../.github/workflows/release.yml', import.meta.url),
   'utf8',
@@ -72,6 +76,14 @@ test('Linux packages register every supported document MIME type', () => {
   assert.equal(associations.get('hwp'), 'application/x-hwp');
   assert.equal(associations.get('hwpx'), 'application/vnd.hancom.hwpx');
   assert.equal(associations.get('hml'), 'application/x-hml');
+});
+
+test('Desktop session checks build WASM so browser merge tests can run', () => {
+  for (const workflow of [desktopChecks, depotDesktopChecks]) {
+    assert.match(workflow, /toolchain:\s*1\.93\.1/);
+    assert.match(workflow, /wasm-pack --version 0\.15\.0/);
+    assert.match(workflow, /wasm-pack build --target web/);
+  }
 });
 
 test('Linux checks and releases run on native Ubuntu x64 and arm64 runners', () => {
