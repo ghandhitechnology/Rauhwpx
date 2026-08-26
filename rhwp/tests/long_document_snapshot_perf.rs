@@ -61,9 +61,11 @@ fn long_document_snapshot_history_perf() {
         }
     }
 
+    let restore_started = Instant::now();
     document
         .restore_snapshot_native(snapshot_ids[0].0)
         .expect("restore first before snapshot");
+    let mut restore_elapsed = restore_started.elapsed();
     assert_eq!(
         document
             .get_paragraph_length_native(12, 42)
@@ -71,9 +73,11 @@ fn long_document_snapshot_history_perf() {
         initial_length
     );
 
+    let restore_started = Instant::now();
     document
         .restore_snapshot_native(snapshot_ids[command_count - 1].1)
         .expect("restore final after snapshot");
+    restore_elapsed += restore_started.elapsed();
     assert_eq!(
         document
             .get_paragraph_length_native(12, 42)
@@ -82,10 +86,11 @@ fn long_document_snapshot_history_perf() {
     );
 
     eprintln!(
-        "RHWP_SNAPSHOT_PROFILE commands={} snapshot_ids={} snapshot_ms={:.3} baseline_rss_bytes={} peak_rss_bytes={} retained_rss_bytes={}",
+        "RHWP_SNAPSHOT_PROFILE commands={} snapshot_ids={} snapshot_ms={:.3} restore_ms={:.3} baseline_rss_bytes={} peak_rss_bytes={} retained_rss_bytes={}",
         command_count,
         snapshot_ids.len() * 2,
         snapshot_elapsed.as_secs_f64() * 1000.0,
+        restore_elapsed.as_secs_f64() * 1000.0,
         baseline_rss.unwrap_or(0),
         peak_rss.unwrap_or(0),
         peak_rss
