@@ -1549,6 +1549,48 @@ fn char_level_break_hwp(
 }
 
 #[cfg(test)]
+mod wrap_band_perf_tests {
+    use super::*;
+    use crate::model::shape::TextFlow;
+
+    #[test]
+    #[ignore = "수동 장문단 성능 계측"]
+    fn long_wrap_band_fill_perf() {
+        const LINE_COUNT: usize = 20_000;
+        let text_chars = vec!['\n'; LINE_COUNT];
+        let tokens = (0..LINE_COUNT)
+            .map(|idx| BreakToken::LineBreak { idx })
+            .collect::<Vec<_>>();
+        let plan = LineBandPlan {
+            exclusions: vec![FloatExclusion {
+                rect: LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 80.0,
+                    height: 2_000.0,
+                },
+                geometry: WrapGeometry::Side(TextFlow::BothSides),
+            }],
+            column_w_px: 600.0,
+            ls_type: LineSpacingType::Percent,
+            ls_value: 160.0,
+            dpi: 96.0,
+        };
+
+        let started = std::time::Instant::now();
+        let results = fill_lines(&tokens, &text_chars, 600.0, 0.0, 48.0, 0, 0, Some(&plan));
+        let elapsed = started.elapsed();
+
+        assert_eq!(results.len(), LINE_COUNT + 1);
+        eprintln!(
+            "long_wrap_band_fill lines={} elapsed_us={}",
+            LINE_COUNT,
+            elapsed.as_micros()
+        );
+    }
+}
+
+#[cfg(test)]
 mod grapheme_reflow_tests {
     use super::*;
     use crate::renderer::style_resolver::{ResolvedCharStyle, ResolvedParaStyle};
