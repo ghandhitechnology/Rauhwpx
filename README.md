@@ -76,7 +76,7 @@ macOS signing uses the `macos-release` environment: `MACOS_CERTIFICATE`, `MACOS_
 
 ### Nightly
 
-GitHub Actions builds nightly desktop installers at 05:00 UTC. Run it manually from **Actions → Nightly desktop release**. A manual run publishes only from `main`.
+GitHub Actions builds nightly desktop installers at 4:00am KST (`0 19 * * *` UTC). Run it manually from **Actions → Nightly desktop release**. A manual run publishes only from `main`.
 
 Testers download the current build from the [nightly pre-release](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly). Each successful run replaces that pre-release and moves the `nightly` tag.
 

@@ -6,6 +6,7 @@ const nightlyReleaseWorkflow = readFileSync(
   new URL('../../../.github/workflows/nightly-release.yml', import.meta.url),
   'utf8',
 );
+const readme = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8');
 
 function workflowJob(jobId: string): string {
   const marker = `  ${jobId}:\n`;
@@ -23,7 +24,10 @@ const windowsJob = workflowJob('windows');
 const publishJob = workflowJob('publish');
 
 test('nightly desktop releases run daily and on demand without cancellation', () => {
-  assert.match(nightlyReleaseWorkflow, /cron:\s*['"]0 5 \* \* \*['"]/);
+  assert.match(nightlyReleaseWorkflow, /4:00am KST/);
+  assert.match(nightlyReleaseWorkflow, /cron:\s*['"]0 19 \* \* \*['"]/);
+  assert.match(readme, /4:00am KST/);
+  assert.match(readme, /0 19 \* \* \*/);
   assert.match(nightlyReleaseWorkflow, /^\s+workflow_dispatch:\s*$/m);
   assert.match(nightlyReleaseWorkflow, /cancel-in-progress:\s*false/);
 });
