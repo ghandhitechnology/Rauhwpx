@@ -50,8 +50,8 @@ export function buildMergeManifest(
     const hinted = candidate ? inheritedByIdentity.get(candidate) : undefined;
     const hashed = inheritedByHash.get(`${kind}\u0000${hash}`) ?? undefined;
     const positioned = inheritedByPath.get(`${kind}\u0000${path.join('\u0000')}`);
-    // A path is identity evidence only when the whole sibling sequence kept
-    // its size and at least one unchanged anchor proves it did not shift.
+    // 전체 형제 목록의 크기가 유지되고 변경되지 않은 기준점으로 이동하지 않았음이
+    // 확인된 경우에만 경로를 식별 근거로 사용한다.
     const safePositioned = positioned && safePositionedIdentities.has(positioned.identity)
       ? positioned
       : undefined;
@@ -122,8 +122,8 @@ export function buildMergeManifest(
     }
   }
 
-  // Resolve unchanged or embedded-identity nodes first. This prevents an
-  // insertion at an old path from stealing the identity of a shifted node.
+  // 변경되지 않았거나 자체 식별자가 있는 노드를 먼저 처리해, 이전 경로에 삽입된
+  // 노드가 이동한 노드의 식별자를 가져가지 않게 한다.
   seeds.sort((left, right) => {
     const leftInherited = Boolean(
       (left.identityHint && inheritedByIdentity.has(left.identityHint))
@@ -169,18 +169,29 @@ export function buildMergeManifest(
 }
 
 export function snapshotToMergeTree(snapshot: CompareDocumentSnapshot): unknown {
+  const paragraphsBySection = new Map<number, CompareDocumentSnapshot['paragraphs']>();
+  for (const paragraph of snapshot.paragraphs) {
+    const paragraphs = paragraphsBySection.get(paragraph.section) ?? [];
+    paragraphs.push(paragraph);
+    paragraphsBySection.set(paragraph.section, paragraphs);
+  }
+  const controlsByParagraph = new Map<string, CompareDocumentSnapshot['controls']>();
+  for (const control of snapshot.controls) {
+    const key = `${control.section}\u0000${control.paragraph}`;
+    const controls = controlsByParagraph.get(key) ?? [];
+    controls.push(control);
+    controlsByParagraph.set(key, controls);
+  }
   const sections = Array.from({ length: snapshot.meta.sectionCount }, (_, section) => ({
     stableId: `section:${section}`,
     kind: 'section',
-    paragraphs: snapshot.paragraphs
-      .filter((paragraph) => paragraph.section === section)
+    paragraphs: (paragraphsBySection.get(section) ?? [])
       .map((paragraph) => ({
         stableId: paragraph.stableId || `paragraph:${section}:${paragraph.paragraph}`,
         kind: 'paragraph',
         text: paragraph.text,
         signature: paragraph.signature,
-        controls: snapshot.controls
-          .filter((control) => control.section === section && control.paragraph === paragraph.paragraph)
+        controls: (controlsByParagraph.get(`${section}\u0000${paragraph.paragraph}`) ?? [])
           .map((control) => ({
             stableId: control.key,
             kind: control.kind,

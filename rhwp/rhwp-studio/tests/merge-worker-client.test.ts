@@ -1,22 +1,59 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { MergeWorkerClient } from '../src/merge/worker-client.ts';
 import type { MergeWorkerRequest, MergeWorkerResponse } from '../src/merge/worker-protocol.ts';
 
+const mergeWorkerSource = readFileSync(new URL('../src/merge/merge.worker.ts', import.meta.url), 'utf8');
+
+async function waitFor(predicate: () => boolean, timeoutMs = 250): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for observable state');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 class FakeWorker {
   listeners = new Set<(event: MessageEvent<MergeWorkerResponse>) => void>();
+  errorListeners = new Set<(event: ErrorEvent) => void>();
+  messageErrorListeners = new Set<(event: MessageEvent<unknown>) => void>();
   terminated = false;
   request: MergeWorkerRequest | null = null;
 
   postMessage(request: MergeWorkerRequest): void { this.request = request; }
-  addEventListener(_type: 'message', listener: (event: MessageEvent<MergeWorkerResponse>) => void): void { this.listeners.add(listener); }
-  removeEventListener(_type: 'message', listener: (event: MessageEvent<MergeWorkerResponse>) => void): void { this.listeners.delete(listener); }
+  addEventListener(type: 'message', listener: (event: MessageEvent<MergeWorkerResponse>) => void): void;
+  addEventListener(type: 'error', listener: (event: ErrorEvent) => void): void;
+  addEventListener(type: 'messageerror', listener: (event: MessageEvent<unknown>) => void): void;
+  addEventListener(type: string, listener: ((event: MessageEvent<MergeWorkerResponse>) => void) | ((event: ErrorEvent) => void)): void {
+    if (type === 'message') this.listeners.add(listener as (event: MessageEvent<MergeWorkerResponse>) => void);
+    else if (type === 'error') this.errorListeners.add(listener as (event: ErrorEvent) => void);
+    else this.messageErrorListeners.add(listener as (event: MessageEvent<unknown>) => void);
+  }
+  removeEventListener(type: 'message', listener: (event: MessageEvent<MergeWorkerResponse>) => void): void;
+  removeEventListener(type: 'error', listener: (event: ErrorEvent) => void): void;
+  removeEventListener(type: 'messageerror', listener: (event: MessageEvent<unknown>) => void): void;
+  removeEventListener(type: string, listener: ((event: MessageEvent<MergeWorkerResponse>) => void) | ((event: ErrorEvent) => void)): void {
+    if (type === 'message') this.listeners.delete(listener as (event: MessageEvent<MergeWorkerResponse>) => void);
+    else if (type === 'error') this.errorListeners.delete(listener as (event: ErrorEvent) => void);
+    else this.messageErrorListeners.delete(listener as (event: MessageEvent<unknown>) => void);
+  }
   terminate(): void { this.terminated = true; }
   emit(message: MergeWorkerResponse): void {
     for (const listener of this.listeners) listener({ data: message } as MessageEvent<MergeWorkerResponse>);
   }
+  emitError(message: string): void {
+    for (const listener of this.errorListeners) listener({ message } as ErrorEvent);
+  }
+  emitMessageError(): void {
+    for (const listener of this.messageErrorListeners) listener({ data: null } as MessageEvent<unknown>);
+  }
 }
+
+test('rejected WASM initialization clears cached readiness for a retry', () => {
+  assert.match(mergeWorkerSource, /wasmReady = initializing\.catch\(\(error\) => \{\s*wasmReady = null;\s*throw error;/);
+});
 
 test('worker client forwards analysis and progress', async () => {
   const worker = new FakeWorker();
@@ -147,7 +184,17 @@ test('document virtual-base synthesis forwards format and preserves input buffer
 test('document analysis and materialization forward optional identity manifests', async () => {
   const worker = new FakeWorker();
   const client = new MergeWorkerClient(() => worker);
-  const manifests = { base: { entries: ['b'] }, current: { entries: ['c'] }, incoming: { entries: ['i'] } };
+  const entry = (identity: string) => ({
+    identity,
+    kind: 'paragraph' as const,
+    path: ['sections', '0', 'paragraphs', '0'],
+    propertyHash: 'blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' as const,
+  });
+  const manifests = {
+    base: { entries: [entry('b')] },
+    current: { entries: [entry('c')] },
+    incoming: { entries: [entry('i')] },
+  };
   const analysisPending = client.analyzeDocument(
     new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]), { manifests },
   );
@@ -202,4 +249,74 @@ test('document manifest export returns full structural entry seeds', async () =>
     identityHint: 'section-0',
   }]);
   client.dispose();
+});
+
+test('worker errors reject every pending request, stop heartbeats, and restart cleanly', async () => {
+  const workers: FakeWorker[] = [];
+  const client = new MergeWorkerClient(() => {
+    const worker = new FakeWorker();
+    workers.push(worker);
+    return worker;
+  });
+  const progress: string[] = [];
+  const first = client.materialize({ analysisVersion: 1, result: {}, conflicts: [], automaticOperationCount: 0 }, {}, {
+    onProgress: ({ phase }) => progress.push(phase),
+  });
+  const second = client.buildDocumentManifest(new Uint8Array([1]), {
+    onProgress: ({ phase }) => progress.push(phase),
+  });
+  workers[0].emitError('worker crashed');
+  await assert.rejects(first, /worker crashed/);
+  await assert.rejects(second, /worker crashed/);
+  const progressAfterFailure = progress.length;
+  await assert.rejects(
+    waitFor(() => progress.length > progressAfterFailure, 150),
+    /Timed out waiting for observable state/,
+  );
+  assert.equal(progress.length, progressAfterFailure);
+  assert.equal(workers[0].terminated, true);
+  assert.equal(workers[0].listeners.size + workers[0].errorListeners.size + workers[0].messageErrorListeners.size, 0);
+  assert.equal(workers.length, 2);
+  client.dispose();
+});
+
+test('worker message errors reject pending requests', async () => {
+  const workers: FakeWorker[] = [];
+  const client = new MergeWorkerClient(() => {
+    const worker = new FakeWorker();
+    workers.push(worker);
+    return worker;
+  });
+  const pending = client.buildDocumentManifest(new Uint8Array([1]));
+  workers[0].emitMessageError();
+  await assert.rejects(pending, /unreadable message/);
+  assert.equal(workers.length, 2);
+  client.dispose();
+});
+
+test('requests without a conservative fallback hard-timeout and restart the worker', async () => {
+  const workers: FakeWorker[] = [];
+  const client = new MergeWorkerClient(() => {
+    const worker = new FakeWorker();
+    workers.push(worker);
+    return worker;
+  });
+  await assert.rejects(
+    client.buildDocumentManifest(new Uint8Array([1]), { softBudgetMs: 5 }),
+    /exceeded its time budget/,
+  );
+  assert.equal(workers[0].terminated, true);
+  assert.equal(workers.length, 2);
+  client.dispose();
+});
+
+test('dispose rejects pending and future requests and removes every worker listener', async () => {
+  const worker = new FakeWorker();
+  const client = new MergeWorkerClient(() => worker);
+  const pending = client.buildDocumentManifest(new Uint8Array([1]));
+  client.dispose();
+  await assert.rejects(pending, { name: 'AbortError' });
+  await assert.rejects(client.buildDocumentManifest(new Uint8Array([2])), { name: 'AbortError' });
+  assert.equal(worker.listeners.size + worker.errorListeners.size + worker.messageErrorListeners.size, 0);
+  assert.equal(worker.terminated, true);
 });

@@ -230,13 +230,13 @@ export class CommandHistory {
   canUndo(): boolean { return this.undoStack.length > 0; }
   canRedo(): boolean { return this.redoStack.length > 0; }
 
-  /** Discard a failed speculative edit after it has been undone. */
+  /** 실패한 시험적 편집을 되돌린 뒤 해당 이력을 폐기한다. */
   discardRedo(wasm: WasmBridge): void {
     discardAll(this.redoStack, wasm);
     this.redoStack = [];
   }
 
-  /** Drop a compensating replacement while keeping its already-applied state. */
+  /** 이미 적용된 보상 교체 상태는 유지하면서 해당 이력을 폐기한다. */
   discardUndoTop(wasm: WasmBridge): void {
     this.undoStack.pop()?.discard?.(wasm);
   }

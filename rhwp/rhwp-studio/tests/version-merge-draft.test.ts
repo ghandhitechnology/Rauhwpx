@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { retainedMergeDraftLocalState } from '../src/versioning/merge-draft.ts';
 import {
+  blobId,
   branchGeneration,
   branchName,
   commitId,
@@ -12,7 +13,7 @@ import {
   type VersionMergeDraft,
 } from '../src/versioning/types.ts';
 
-const hash = (digit: string) => `blake3:${digit.repeat(64)}` as const;
+const hash = (digit: string) => blobId(`blake3:${digit.repeat(64)}`);
 const branch = (name: string, target: string, generation: string, revision = 1): BranchRef => ({
   repositoryId: repositoryId('repository'),
   kind: 'branch',

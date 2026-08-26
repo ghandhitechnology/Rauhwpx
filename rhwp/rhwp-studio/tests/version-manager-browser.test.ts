@@ -183,6 +183,8 @@ async function openPage(context: test.TestContext): Promise<Page | null> {
     Object.assign(window, {
       __versionManagerHarness: {
         calls,
+        close: () => manager.close(),
+        dispose: () => manager.dispose(),
         setBlocked(reason: string | null) {
           state.mutationBlockedReason = reason;
           listener(state);
@@ -192,6 +194,20 @@ async function openPage(context: test.TestContext): Promise<Page | null> {
   });
   return page;
 }
+
+test('closing the page cancels an open merge prompt before it can start work', async (context) => {
+  const page = await openPage(context);
+  if (!page) return;
+  try {
+    await page.click('.ag-versions-toolbar [data-version-mutation]');
+    await page.waitForSelector('.ag-version-prompt-overlay');
+    await page.evaluate(() => (window as any).__versionManagerHarness.close());
+    assert.equal(await page.$('.ag-version-prompt-overlay'), null);
+    assert.deepEqual(await page.evaluate(() => (window as any).__versionManagerHarness.calls), []);
+  } finally {
+    await page.close();
+  }
+});
 
 test('branch graph stays operable, directional, locked, and responsive', async (context) => {
   const page = await openPage(context);
@@ -204,7 +220,15 @@ test('branch graph stays operable, directional, locked, and responsive', async (
       /HEAD feature/,
     );
     assert.equal(await page.$eval('.ag-versions-branch-pill', (node) => node.getAttribute('aria-label')), '현재 브랜치 feature 보기');
-    assert.equal(await page.$eval('.ag-versions-toolbar [data-version-mutation]', (node) => node.textContent), '… → feature');
+    const toolbarMerge = '.ag-versions-toolbar [data-version-mutation]';
+    assert.equal(await page.$eval(toolbarMerge, (node) => node.textContent), '병합: … → feature');
+    assert.equal(await page.$eval(toolbarMerge, (node) => node.getAttribute('title')), '병합: 다른 브랜치 → feature');
+    assert.equal(await page.$eval(toolbarMerge, (node) => node.getAttribute('aria-label')), '병합: 다른 브랜치 → feature');
+    await page.click(toolbarMerge);
+    await page.type('.ag-version-prompt-input', 'docs');
+    await page.click('.ag-version-prompt-actions .ag-versions-primary');
+    await page.waitForFunction(() => (window as any).__versionManagerHarness.calls.length === 1);
+    assert.deepEqual(await page.evaluate(() => (window as any).__versionManagerHarness.calls), [['merge', 'docs']]);
 
     await page.click('[data-commit-id="docs3"]');
     await page.keyboard.press('ArrowDown');
@@ -217,13 +241,14 @@ test('branch graph stays operable, directional, locked, and responsive', async (
 
     await page.click('[data-tab="branches"]');
     const docsMerge = '[data-branch-name="docs"] [data-version-action="merge"]';
-    assert.equal(await page.$eval(docsMerge, (node) => node.textContent), 'docs → feature');
-    assert.equal(await page.$eval(docsMerge, (node) => node.getAttribute('title')), 'docs → feature');
+    assert.equal(await page.$eval(docsMerge, (node) => node.textContent), '병합: docs → feature');
+    assert.equal(await page.$eval(docsMerge, (node) => node.getAttribute('title')), '병합: docs → feature');
     assert.equal(await page.$eval(docsMerge, (node) => node.getAttribute('aria-label')), 'docs에서 feature로 병합');
     await page.click(docsMerge);
     await page.click('[data-branch-name="hotfix"] [data-version-action="switch"]');
-    await page.waitForFunction(() => (window as any).__versionManagerHarness.calls.length === 2);
+    await page.waitForFunction(() => (window as any).__versionManagerHarness.calls.length === 3);
     assert.deepEqual(await page.evaluate(() => (window as any).__versionManagerHarness.calls), [
+      ['merge', 'docs'],
       ['merge', 'docs'],
       ['switch', 'hotfix'],
     ]);

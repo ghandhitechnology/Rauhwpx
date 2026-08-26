@@ -23,7 +23,6 @@ const css = readSource('../src/ui/agent-sidebar/agent-sidebar.css');
 const icons = readSource('../src/ui/agent-sidebar/icons.ts');
 const editCommandsSource = readSource('../src/command/commands/edit.ts');
 const mainSource = readSource('../src/main.ts');
-const toolbarCss = readSource('../src/styles/toolbar.css');
 
 test('설정과 버전 페이지는 무대에 다른 페이지와 나란히 선다', () => {
   assert.match(
@@ -93,13 +92,11 @@ test('한컴용 Git 토글은 기본 이력과 Git 버전 관리 진입을 전�
   assert.match(editCommandsSource, /new HistoryDialog\(services, compareSessionStore\)/);
 });
 
-test('Git 버전 버튼은 설정이 켜진 동안에만 표시된다', () => {
-  assert.match(source, /versionsBtn\.hidden = !enabled/);
-  assert.match(source, /userSettings\.subscribeUseHancomGit\(syncVersionsButtonVisibility\)/);
-  assert.match(css, /\.ag-header-icon-btn\[hidden\]\s*\{\s*display: none;/);
-  assert.match(mainSource, /gitVersionToolbarButton\.hidden = !enabled/);
-  assert.match(mainSource, /userSettings\.subscribeUseHancomGit\(syncGitVersionToolbar\)/);
-  assert.match(toolbarCss, /\.tb-btn\[hidden\]\s*\{\s*display: none;/);
+test('버전 버튼은 설정과 관계없이 표시되고 현재 버전 관리 방식을 연다', () => {
+  assert.doesNotMatch(source, /versionsBtn\.hidden/);
+  assert.match(source, /versionsBtn\.addEventListener\('click',[\s\S]*openConfiguredVersionControl\(\)/);
+  assert.doesNotMatch(mainSource, /gitVersionToolbarButton/);
+  assert.match(editCommandsSource, /userSettings\.getUseHancomGit\(\)[\s\S]*versions:open[\s\S]*openClassicDocumentHistory/);
 });
 
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {

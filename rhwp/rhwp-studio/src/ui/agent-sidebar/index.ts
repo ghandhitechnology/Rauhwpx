@@ -618,6 +618,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let skillsPanelOpen = false;
   let settingsPanelOpen = false;
   let versionsPanelOpen = false;
+  let deferredVersionsOpenTimer: number | null = null;
   /** 에이전트 집중 모드 — 스레드 레일과 대화 무대로 문서를 덮는다. */
   let fullscreen = false;
   let threadsRailCollapsed = readStoredThreadsRailCollapsed();
@@ -1213,12 +1214,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   versionsBtn.setAttribute('aria-controls', 'ag-versions-panel');
   versionsBtn.title = '버전';
   versionsBtn.appendChild(createIcon('changes'));
-  const syncVersionsButtonVisibility = (enabled = userSettings.getUseHancomGit()): void => {
-    versionsBtn.hidden = !enabled;
-    if (!enabled && versionsPanelOpen) closeVersionsPage();
-  };
-  syncVersionsButtonVisibility();
-  const unsubscribeHancomGitVisibility = userSettings.subscribeUseHancomGit(syncVersionsButtonVisibility);
   versionsBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     openConfiguredVersionControl();
@@ -2616,9 +2611,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function setVersionsPanelOpen(open: boolean): void {
     if (!versionController) return;
+    if (deferredVersionsOpenTimer !== null) {
+      window.clearTimeout(deferredVersionsOpenTimer);
+      deferredVersionsOpenTimer = null;
+    }
     if (fullscreen) {
       setFullscreen(false);
-      window.setTimeout(() => setVersionsPanelOpen(open), FS_MOTION_SETTLE_MS);
+      deferredVersionsOpenTimer = window.setTimeout(() => {
+        deferredVersionsOpenTimer = null;
+        setVersionsPanelOpen(open);
+      }, FS_MOTION_SETTLE_MS);
       return;
     }
     if (open && referenceLibrary.isOpen()) referenceLibrary.setOpen(false);
@@ -3001,7 +3003,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const base: SlashOption[] = [
       { value: '/plan', label: '/plan', detail: '계획 모드로 전환', workflow: 'plan' },
       { value: '/build', label: '/build', detail: '바로 실행 모드로 전환', workflow: 'direct' },
-      { value: '/calibration', label: '/calibration', detail: '말투 모방 캘리브레이션 열기', local: 'calibration' },
+      { value: '/calibration', label: '/calibration', detail: '말투를 맞출까요? 열기', local: 'calibration' },
       { value: '/settings', label: '/settings', detail: '설정 열기 (연결·기본값·사용량)', local: 'settings' },
       { value: '/templates', label: '/templates', detail: '문서 템플릿 선택', local: 'templates' },
       { value: '/skills', label: '/skills', detail: '스킬 라이브러리 열기', local: 'skills' },
@@ -5781,6 +5783,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         window.clearTimeout(conversationScrollUnlock);
         conversationScrollUnlock = null;
       }
+      if (deferredVersionsOpenTimer !== null) {
+        window.clearTimeout(deferredVersionsOpenTimer);
+        deferredVersionsOpenTimer = null;
+      }
       window.removeEventListener('resize', measure);
       document.removeEventListener('pointerdown', onDocPointerDown);
       document.removeEventListener('keydown', onDocKeyDown);
@@ -5796,7 +5802,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       clearConnCountdown();
       writingStyleCalibration.dispose();
       settingsPanel.dispose();
-      unsubscribeHancomGitVisibility();
       versionManagerPage?.dispose();
       versionController?.dispose?.();
       initialSetup?.dispose();

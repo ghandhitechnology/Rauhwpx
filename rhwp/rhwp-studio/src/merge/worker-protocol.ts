@@ -1,10 +1,14 @@
-import type { MergeManifestEntrySeed, MergeResolution } from '../versioning/types.ts';
+import type { MergeManifestEntry, MergeManifestEntrySeed, MergeResolution } from '../versioning/types.ts';
 import type { MergeAnalysis, MergeValidationResult } from './domain.ts';
 
+export interface MergeDocumentManifest {
+  entries: readonly MergeManifestEntry[];
+}
+
 export interface MergeDocumentManifests {
-  base: unknown;
-  current: unknown;
-  incoming: unknown;
+  base: MergeDocumentManifest;
+  current: MergeDocumentManifest;
+  incoming: MergeDocumentManifest;
 }
 
 export type MergeWorkerOperation =

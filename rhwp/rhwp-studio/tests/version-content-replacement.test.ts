@@ -20,7 +20,15 @@ test('version content replacement is routed through one callback-capable applied
   assert.match(method, /finalizeCompositionBeforeCursorMove\(\)/);
   assert.match(method, /flushDeferredPaginationIfNeeded\('before-version-content-replace', false\)/);
   assert.match(method, /'version:replace_content'/);
-  assert.match(method, /wasm\.replaceContentFromBytes\(data\)/);
+  assert.match(method, /const info = wasm\.replaceContentFromBytes\(data\)/);
+  assert.ok(
+    method.indexOf('wasm.replaceContentFromBytes(data)')
+      < method.indexOf('this.clearTableResizeRuntimeCache()'),
+  );
+  assert.ok(
+    method.indexOf('this.clearTableResizeRuntimeCache()')
+      < method.indexOf('this.resetDerivedStateAfterHistoryJump()'),
+  );
   assert.match(method, /callbacks/);
 });
 
@@ -52,8 +60,29 @@ test('WasmBridge replacement preserves the JS file binding fields', () => {
   assert.notEqual(methodStart, -1);
   const method = bridge.slice(methodStart, bridge.indexOf('\n  }', methodStart) + 4);
 
-  assert.match(method, /this\.doc\.replaceContentFromBytes\(data\)/);
+  assert.match(method, /const doc = this\.doc;[\s\S]*?doc\.replaceContentFromBytes\(data\)/);
   assert.doesNotMatch(method, /_fileName|_currentFileHandle|_documentDigest|releaseDocument|new HwpDocument/);
+});
+
+test('WasmBridge load and replacement populate external images with a document generation guard', () => {
+  const bridge = source('src/core/wasm-bridge.ts');
+  const loadStart = bridge.indexOf('loadDocument(data: Uint8Array, fileName?: string): DocumentInfo {');
+  const loadEnd = bridge.indexOf('\n  replaceContentFromBytes(', loadStart);
+  const load = bridge.slice(loadStart, loadEnd);
+  const replacementStart = bridge.indexOf('replaceContentFromBytes(data: Uint8Array): DocumentInfo {');
+  const replacement = bridge.slice(replacementStart, bridge.indexOf('\n  }', replacementStart) + 4);
+  const populationStart = bridge.indexOf('private async populateExternalImagesFromDevServer(');
+  const populationEnd = bridge.indexOf('\n  /**', populationStart);
+  const population = bridge.slice(populationStart, populationEnd);
+
+  assert.match(load, /populateExternalImagesFromDevServer\(nextDoc, this\.documentGeneration\)/);
+  assert.match(replacement, /const generation = \+\+this\.documentGeneration/);
+  assert.match(replacement, /populateExternalImagesFromDevServer\(doc, generation\)/);
+  assert.match(population, /this\.doc !== doc \|\| this\.documentGeneration !== generation/);
+  assert.match(population, /const buf = await res\.arrayBuffer\(\);[\s\S]*?this\.doc !== doc/);
+  assert.match(population, /doc\.injectExternalImage\(/);
+  assert.doesNotMatch(population, /this\.doc\.injectExternalImage\(/);
+  assert.match(bridge, /restoreSnapshot\(id: number\): void \{[\s\S]*?const generation = \+\+this\.documentGeneration;[\s\S]*?populateExternalImagesFromDevServer\(doc, generation\)/);
 });
 
 test('raw replacement stays outside the generic agent mutation catalog', () => {

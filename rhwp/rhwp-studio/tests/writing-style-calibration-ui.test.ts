@@ -68,6 +68,17 @@ test('long analysis has server-authored activity without a browser deadline', ()
   assert.doesNotMatch(calibration, /chain-of-thought|reasoning trace|추론 과정/i);
 });
 
+test('wizard intro and progress copy use the signed first-run voice', () => {
+  assert.match(calibration, /const introTitle = el\('h2', 'ag-calibration-title', '말투를 맞출까요\?'\)/);
+  assert.match(
+    calibration,
+    /'Noticing temperament and unevenness': '기질과 고르지 않은 결을 짚고 있습니다\.'/,
+  );
+  assert.doesNotMatch(calibration, /말투 모방/);
+  assert.doesNotMatch(calibration, /기온과 태도/);
+  assert.doesNotMatch(calibration, /고르지 않은 곳/);
+});
+
 test('knowledge-network progress is bounded, accessible, and reduced-motion safe', () => {
   assert.match(calibration, /createKnowledgeNetwork/);
   assert.match(calibration, /aria-label', '문서의 표현 관계가 지식 지도로 연결되는 모습'/);

@@ -322,15 +322,6 @@ registry.registerAll(tableCommands);
 registry.registerAll(pageCommands);
 registry.registerAll(toolCommands);
 
-const gitVersionToolbarButton = document.querySelector<HTMLButtonElement>(
-  '.tb-btn[data-cmd="edit:document-history"]',
-);
-const syncGitVersionToolbar = (enabled = userSettings.getUseHancomGit()): void => {
-  if (gitVersionToolbarButton) gitVersionToolbarButton.hidden = !enabled;
-};
-syncGitVersionToolbar();
-userSettings.subscribeUseHancomGit(syncGitVersionToolbar);
-
 // 상태 바 요소
 const sbMessage = () => document.getElementById('sb-message')!;
 const sbPage = () => document.getElementById('sb-page')!;

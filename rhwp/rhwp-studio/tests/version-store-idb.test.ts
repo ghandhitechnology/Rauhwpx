@@ -27,12 +27,12 @@ test('browser IndexedDB reuses its connection and reads repository indexes witho
     logLevel: 'silent',
     server: { host: '127.0.0.1', port: 0 },
   });
-  await server.listen();
-  const address = server.httpServer?.address();
-  assert.ok(address && typeof address !== 'string');
-  const browser = await puppeteer.launch({ executablePath, headless: true });
-
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>> | undefined;
   try {
+    await server.listen();
+    const address = server.httpServer?.address();
+    assert.ok(address && typeof address !== 'string');
+    browser = await puppeteer.launch({ executablePath, headless: true });
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${address.port}/tests/fixtures/version-store-idb.html`);
     const result = await page.evaluate(async () => {
@@ -41,9 +41,11 @@ test('browser IndexedDB reuses its connection and reads repository indexes witho
         const request = indexedDB.deleteDatabase(versioning.VERSION_DATABASE_NAME);
         request.onsuccess = () => resolve();
         request.onerror = () => reject(request.error);
+        request.onblocked = () => reject(new Error('deleteDatabase was blocked'));
       });
       await new Promise<void>((resolve, reject) => {
         const request = indexedDB.open(versioning.VERSION_DATABASE_NAME, 1);
+        request.onblocked = () => reject(new Error('open was blocked'));
         request.onupgradeneeded = () => {
           const database = request.result;
           const repositories = database.createObjectStore('repositories', { keyPath: 'id' });
@@ -228,6 +230,7 @@ test('browser IndexedDB reuses its connection and reads repository indexes witho
         const found = await store.findRepositoryByDocumentId(created.repository.documentId);
         const refs = await store.listRefs(created.repository.id);
         const shelves = await store.listShelves(created.repository.id);
+        const blobSizes = await store.getBlobSizes([created.commit.blobId, checkpoint.commit.blobId]);
         return {
           openCount,
           migratedSchemaVersion: migrated?.schemaVersion,
@@ -246,6 +249,7 @@ test('browser IndexedDB reuses its connection and reads repository indexes witho
           found: found?.id,
           refCount: refs.length,
           shelfCount: shelves.length,
+          blobSizes: [blobSizes.get(created.commit.blobId), blobSizes.get(checkpoint.commit.blobId)],
           head: checkpoint.branch.target,
           commit: checkpoint.commit.id,
         };
@@ -271,9 +275,10 @@ test('browser IndexedDB reuses its connection and reads repository indexes witho
     assert.equal(result.found, result.repository);
     assert.equal(result.refCount, 1);
     assert.equal(result.shelfCount, 0);
+    assert.deepEqual(result.blobSizes, [2, 2]);
     assert.equal(result.head, result.commit);
   } finally {
-    await browser.close();
+    await browser?.close();
     await server.close();
   }
 });

@@ -182,8 +182,8 @@ export class DocumentPreviewPane {
       this.statusEl.textContent = `${this.source.label ?? this.source.fileName} / ${this.pageIndex + 1}쪽`;
       if (this.anchor?.pageIndex === this.pageIndex) {
         this.marker.hidden = false;
-        this.marker.style.left = `${Math.floor(this.anchor.x * scale)}px`;
-        this.marker.style.top = `${Math.floor(this.anchor.y * scale)}px`;
+        this.marker.style.left = `${this.canvas.offsetLeft + Math.floor(this.anchor.x * scale)}px`;
+        this.marker.style.top = `${this.canvas.offsetTop + Math.floor(this.anchor.y * scale)}px`;
         this.marker.style.width = `${Math.max(12, Math.floor(this.anchor.width * scale))}px`;
         this.marker.style.height = `${Math.max(12, Math.floor(this.anchor.height * scale))}px`;
       } else {

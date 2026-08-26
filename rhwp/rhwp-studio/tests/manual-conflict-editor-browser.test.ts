@@ -199,6 +199,72 @@ test('shape/chart editor changes nested geometry, series, and visibility propert
   assert.equal((result?.payload as any).geometry.height, 180);
 });
 
+test('large values report hidden fields and clone the resolution only once on Apply', async (context) => {
+  const result = await withPage(context, (page) => page.evaluate(async () => {
+    const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
+    const current = Object.fromEntries(Array.from(
+      { length: 201 },
+      (_, index) => [`property${String(index).padStart(3, '0')}`, index],
+    ));
+    let payload: Record<string, number> | undefined;
+    const editor = buildManualConflictEditor({
+      conflict: {
+        id: 'large', kind: 'document-property', path: ['properties'],
+        reason: 'same-field-changed', base: current, current, incoming: current,
+        supportsBoth: false, supportsManual: true, fingerprint: 'large-fingerprint',
+      },
+      initialValue: current,
+      onResolve: (value) => { payload = value as Record<string, number>; },
+    })!;
+    document.body.appendChild(editor);
+
+    const nativeClone = window.structuredClone;
+    let cloneCount = 0;
+    window.structuredClone = ((value: unknown) => {
+      cloneCount += 1;
+      return nativeClone(value);
+    }) as typeof structuredClone;
+    try {
+      editor.querySelector<HTMLButtonElement>('button:last-child')!.click();
+    } finally {
+      window.structuredClone = nativeClone;
+    }
+
+    return {
+      cloneCount,
+      controlCount: editor.querySelectorAll('.merge-structured-field').length,
+      hint: [...editor.querySelectorAll('.merge-manual-hint')].map((node) => node.textContent),
+      hiddenProperty: payload?.property200,
+    };
+  }));
+  assert.equal(result?.cloneCount, 1);
+  assert.equal(result?.controlCount, 200);
+  assert.ok(result?.hint.includes('속성이 많아 200개 이후 속성은 숨겼습니다.'));
+  assert.equal(result?.hiddenProperty, 200);
+});
+
+test('numeric fields reject blank values instead of coercing them to zero', async (context) => {
+  const result = await withPage(context, (page) => page.evaluate(async () => {
+    const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
+    let payload: unknown;
+    const editor = buildManualConflictEditor({
+      conflict: {
+        id: 'number', kind: 'shape-geometry', path: ['shapes', '1', 'width'],
+        reason: 'same-field-changed', base: 10, current: 20, incoming: 30,
+        supportsBoth: false, supportsManual: true, fingerprint: 'number-fingerprint',
+      },
+      initialValue: 20,
+      onResolve: (value) => { payload = value; },
+    })!;
+    document.body.appendChild(editor);
+    editor.querySelector<HTMLInputElement>('input[type="number"]')!.value = '';
+    editor.querySelector<HTMLButtonElement>('button:last-child')!.click();
+    return { payload, error: editor.querySelector('.merge-manual-error')?.textContent };
+  }));
+  assert.equal(result?.payload, undefined);
+  assert.equal(result?.error, '올바른 숫자를 입력하세요.');
+});
+
 test('image editor hides byte data and supports side selection, property edits, and upload', async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
@@ -229,7 +295,11 @@ test('image editor hides byte data and supports side selection, property edits, 
     transfer.items.add(new File([new Uint8Array([1, 2, 3])], 'replacement.webp', { type: 'image/webp' }));
     upload.files = transfer.files;
     upload.dispatchEvent(new Event('change', { bubbles: true }));
-    await new Promise((resolve) => setTimeout(resolve));
+    const deadline = performance.now() + 1_000;
+    while (resolutions.length < 3) {
+      if (performance.now() >= deadline) throw new Error('이미지 업로드 결과를 기다리는 시간이 초과되었습니다.');
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
     return { family: editor.dataset.editorFamily, hiddenBytes, resolutions };
   }));
   assert.equal(result?.family, 'image');
@@ -239,6 +309,80 @@ test('image editor hides byte data and supports side selection, property edits, 
     { kind: 'image-bytes', id: 1, extension: 'gif', bytesBase64: 'CURRENT_BYTES' },
     { kind: 'image-bytes', id: 1, extension: 'webp', bytesBase64: 'UPLOADED' },
   ]);
+});
+
+test('image upload validates files and ignores stale or detached editor results', async (context) => {
+  const result = await withPage(context, (page) => page.evaluate(async () => {
+    const { buildManualConflictEditor } = await import('/src/merge/manual-conflict-editor.ts');
+    const current = { kind: 'image-bytes', id: 1, extension: 'png', bytesBase64: 'CURRENT_BYTES' };
+    const conflict = {
+      id: 'image-guard', kind: 'image-bytes', path: ['resources', 'image-1'],
+      reason: 'same-field-changed' as const, base: current, current, incoming: current,
+      supportsBoth: false, supportsManual: true, fingerprint: 'image-guard-fingerprint',
+    };
+    const setFile = (input: HTMLInputElement, file: File) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    const waitFor = async (condition: () => boolean, message: string) => {
+      const deadline = performance.now() + 1_000;
+      while (!condition()) {
+        if (performance.now() >= deadline) throw new Error(message);
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+    };
+
+    let uploadCalls = 0;
+    const validationEditor = buildManualConflictEditor({
+      conflict,
+      initialValue: current,
+      onResolve: () => undefined,
+      uploadAsset: async () => {
+        uploadCalls += 1;
+        return {};
+      },
+    })!;
+    document.body.appendChild(validationEditor);
+    const validationInput = validationEditor.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const validationError = validationEditor.querySelector<HTMLElement>('.merge-manual-error')!;
+    setFile(validationInput, new File(['plain text'], 'not-image.txt', { type: 'text/plain' }));
+    await waitFor(() => validationError.textContent?.includes('PNG, JPEG, GIF, BMP, WEBP') === true, '이미지 형식 오류가 표시되지 않았습니다.');
+    const mimeError = validationError.textContent;
+    setFile(validationInput, new File([new Uint8Array(5 * 1024 * 1024 + 1)], 'large.png', { type: 'image/png' }));
+    await waitFor(() => validationError.textContent?.includes('5MB 이하') === true, '이미지 크기 오류가 표시되지 않았습니다.');
+    const sizeError = validationError.textContent;
+    validationEditor.remove();
+
+    const resolutions: unknown[] = [];
+    const pending: Array<(payload: unknown) => void> = [];
+    const guardedEditor = buildManualConflictEditor({
+      conflict,
+      initialValue: current,
+      onResolve: (payload) => { resolutions.push(payload); },
+      uploadAsset: () => new Promise((resolve) => { pending.push(resolve); }),
+    })!;
+    document.body.appendChild(guardedEditor);
+    const guardedInput = guardedEditor.querySelector<HTMLInputElement>('input[type="file"]')!;
+    setFile(guardedInput, new File(['first'], 'first.png', { type: 'image/png' }));
+    await waitFor(() => pending.length === 1, '첫 번째 업로드가 시작되지 않았습니다.');
+    setFile(guardedInput, new File(['second'], 'second.png', { type: 'image/png' }));
+    await waitFor(() => pending.length === 2, '두 번째 업로드가 시작되지 않았습니다.');
+    pending[0]!({ upload: 'stale' });
+    await Promise.resolve();
+    await Promise.resolve();
+    guardedEditor.remove();
+    pending[1]!({ upload: 'detached' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    return { uploadCalls, mimeError, sizeError, resolutions };
+  }));
+  assert.equal(result?.uploadCalls, 0);
+  assert.equal(result?.mimeError, 'PNG, JPEG, GIF, BMP, WEBP 이미지 파일만 올릴 수 있습니다.');
+  assert.equal(result?.sizeError, '이미지는 5MB 이하만 올릴 수 있습니다.');
+  assert.deepEqual(result?.resolutions, []);
 });
 
 test('document property editor covers section, style, numbering, field, and resource values', async (context) => {
@@ -304,6 +448,13 @@ test('atomic conflicts do not construct a manual editor', async (context) => {
 test('manual editor resolutions participate in resolver Undo/Redo and validation gating', async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { MergeResolverWindow } = await import('/src/merge/merge-resolver-window.ts');
+    const waitFor = async (condition: () => boolean, message: string) => {
+      const deadline = performance.now() + 2_000;
+      while (!condition()) {
+        if (performance.now() >= deadline) throw new Error(message);
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+    };
     const now = Date.now();
     const conflict = {
       id: 'undo-text', kind: 'text', path: ['sections', '0', 'paragraphs', '0', 'text'],
@@ -343,13 +494,13 @@ test('manual editor resolutions participate in resolver Undo/Redo and validation
     document.querySelector<HTMLButtonElement>('.merge-manual-family-rich-text .merge-structured-fields > button')!.click();
     const resolutionAfterApply = resolver.snapshot()?.resolutions['undo-text'];
     const disabledBeforeValidation = complete.disabled;
-    await new Promise((resolve) => setTimeout(resolve, 220));
+    await waitFor(() => !complete.disabled, '수동 해결 검증이 완료되지 않았습니다.');
     const enabledAfterValidation = !complete.disabled;
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true }));
     const unresolvedAfterUndo = resolver.snapshot()?.unresolvedCount;
     const disabledAfterUndo = complete.disabled;
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, shiftKey: true, bubbles: true }));
-    await new Promise((resolve) => setTimeout(resolve, 220));
+    await waitFor(() => !complete.disabled, '다시 실행 후 검증이 완료되지 않았습니다.');
     const resolutionAfterRedo = resolver.snapshot()?.resolutions['undo-text'];
     const enabledAfterRedoValidation = !complete.disabled;
     await resolver.close();
@@ -428,6 +579,7 @@ test('resolver desktop controls click, report failures, retry, and fit macOS chr
         finalized: [] as string[],
         closed: [] as string[],
       };
+      let releaseComplete: (() => void) | undefined;
       const draft = {
         id: 'desktop-controls-draft', repositoryId: 'repository', targetBranch: 'main', sourceBranch: 'source',
         baseCommitIds: ['base'], currentHead: 'current', sourceHead: 'incoming',
@@ -437,6 +589,10 @@ test('resolver desktop controls click, report failures, retry, and fit macOS chr
       };
       const harness = {
         events,
+        releaseComplete() {
+          releaseComplete?.();
+          releaseComplete = undefined;
+        },
         open() {
           const resolver = new MergeResolverWindow();
           resolver.open({
@@ -461,7 +617,7 @@ test('resolver desktop controls click, report failures, retry, and fit macOS chr
             discardDraft: async () => { events.discarded += 1; },
             complete: async () => {
               events.completeAttempts += 1;
-              await new Promise((resolve) => setTimeout(resolve, 120));
+              await new Promise<void>((resolve) => { releaseComplete = resolve; });
               if (events.completeAttempts === 1) throw new Error('테스트 저장 실패');
               return {} as any;
             },
@@ -537,6 +693,7 @@ test('resolver desktop controls click, report failures, retry, and fit macOS chr
     await page.waitForFunction(() => (
       document.querySelector('.merge-resolver-footer .merge-primary-button')?.textContent === '처리 중…'
     ));
+    await page.evaluate(() => (window as any).__mergeResolverHarness.releaseComplete());
     await page.waitForSelector('.merge-action-status[data-kind="error"]');
     assert.match(
       await page.$eval('.merge-action-status', (node) => node.textContent ?? ''),
@@ -547,6 +704,8 @@ test('resolver desktop controls click, report failures, retry, and fit macOS chr
       false,
     );
     await page.click('.merge-resolver-footer .merge-primary-button');
+    await page.waitForFunction(() => (window as any).__mergeResolverHarness.events.completeAttempts === 2);
+    await page.evaluate(() => (window as any).__mergeResolverHarness.releaseComplete());
     await page.waitForSelector('.merge-confirm-overlay');
     assert.equal(await page.$eval('.merge-confirm-dialog h2', (node) => node.textContent), '소스 브랜치');
     assert.equal(await page.$('.merge-action-status:not(:empty)'), null);

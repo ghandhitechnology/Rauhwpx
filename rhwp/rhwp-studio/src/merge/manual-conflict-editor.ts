@@ -24,6 +24,21 @@ interface EditableLeaf {
   value: string | number | boolean | null;
 }
 
+interface CollectedLeaves {
+  leaves: EditableLeaf[];
+  truncated: boolean;
+}
+
+const MAX_EDITABLE_LEAVES = 200;
+const MAX_IMAGE_UPLOAD_BYTES = 5 * 1024 * 1024;
+const ALLOWED_IMAGE_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/bmp',
+  'image/webp',
+]);
+
 const TABLE_OPERATIONS = [
   'insert-row',
   'delete-row',
@@ -52,25 +67,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function collectLeaves(value: unknown, path: (string | number)[] = [], output: EditableLeaf[] = []): EditableLeaf[] {
-  if (output.length >= 200 || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return output;
-  if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
-    output.push({ path, value: value as EditableLeaf['value'] });
-    return output;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((child, index) => {
-      if (output.length < 200) collectLeaves(child, [...path, index], output);
-    });
-    return output;
-  }
-  if (isRecord(value)) {
-    for (const key of Object.keys(value).sort()) {
-      if (output.length >= 200) break;
-      collectLeaves(value[key], [...path, key], output);
+function collectLeaves(value: unknown): CollectedLeaves {
+  const leaves: EditableLeaf[] = [];
+  let truncated = false;
+
+  const visit = (child: unknown, path: (string | number)[]): void => {
+    if (child instanceof ArrayBuffer || ArrayBuffer.isView(child)) return;
+    if (child === null || ['string', 'number', 'boolean'].includes(typeof child)) {
+      if (leaves.length >= MAX_EDITABLE_LEAVES) {
+        truncated = true;
+        return;
+      }
+      leaves.push({ path, value: child as EditableLeaf['value'] });
+      return;
     }
-  }
-  return output;
+    if (Array.isArray(child)) {
+      for (let index = 0; index < child.length && !truncated; index += 1) {
+        visit(child[index], [...path, index]);
+      }
+      return;
+    }
+    if (isRecord(child)) {
+      for (const key of Object.keys(child).sort()) {
+        visit(child[key], [...path, key]);
+        if (truncated) break;
+      }
+    }
+  };
+
+  visit(value, []);
+  return { leaves, truncated };
 }
 
 function pathLabel(path: ValuePath, fallback: string): string {
@@ -86,19 +112,20 @@ function keyAt(path: ValuePath): string {
 
 function setAtPath(root: unknown, path: ValuePath, value: unknown): unknown {
   if (path.length === 0) return value;
-  const copy = cloneValue(root);
-  let cursor = copy as Record<string | number, unknown>;
+  let cursor = root as Record<string | number, unknown>;
   for (let index = 0; index < path.length - 1; index += 1) {
     cursor = cursor[path[index]!] as Record<string | number, unknown>;
   }
   cursor[path.at(-1)!] = value;
-  return copy;
+  return root;
 }
 
 function readControl(control: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, original: EditableLeaf['value']): unknown {
   if (typeof original === 'boolean' && control instanceof HTMLInputElement) return control.checked;
   if (typeof original === 'number') {
-    const parsed = Number(control.value);
+    const value = control.value.trim();
+    if (!value) throw new Error('올바른 숫자를 입력하세요.');
+    const parsed = Number(value);
     if (!Number.isFinite(parsed)) throw new Error('올바른 숫자를 입력하세요.');
     return parsed;
   }
@@ -227,12 +254,13 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
 
   const error = node('p', 'merge-manual-error');
   error.setAttribute('role', 'alert');
-  let result = cloneValue(options.initialValue);
-  const leaves = collectLeaves(options.initialValue).filter((leaf) => !excludedLeaf(family, leaf));
+  const collected = collectLeaves(options.initialValue);
+  const leaves = collected.leaves.filter((leaf) => !excludedLeaf(family, leaf));
   const controls: Array<{
     leaf: EditableLeaf;
     control: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
   }> = [];
+  let uploadGeneration = 0;
 
   if (family === 'image') {
     const source = node('fieldset', 'merge-image-source');
@@ -246,6 +274,7 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
       const button = node('button', 'merge-secondary-button', label);
       button.type = 'button';
       button.addEventListener('click', () => {
+        uploadGeneration += 1;
         if (options.onChooseSide) options.onChooseSide(side);
         else options.onResolve(cloneValue(payload));
       });
@@ -255,19 +284,28 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
     uploadLabel.appendChild(node('span', '', '대체 이미지 올리기'));
     const upload = document.createElement('input');
     upload.type = 'file';
-    upload.accept = 'image/*';
+    upload.accept = [...ALLOWED_IMAGE_MIME_TYPES].join(',');
     upload.setAttribute('aria-label', '대체 이미지 올리기');
     upload.addEventListener('change', () => {
       const file = upload.files?.[0];
       if (!file) return;
+      const generation = ++uploadGeneration;
       void (async () => {
         try {
+          if (!ALLOWED_IMAGE_MIME_TYPES.has(file.type.toLowerCase())) {
+            throw new Error('PNG, JPEG, GIF, BMP, WEBP 이미지 파일만 올릴 수 있습니다.');
+          }
+          if (file.size > MAX_IMAGE_UPLOAD_BYTES) {
+            throw new Error('이미지는 5MB 이하만 올릴 수 있습니다.');
+          }
           const payload = options.uploadAsset
             ? await options.uploadAsset(file, conflict)
             : { name: file.name, mimeType: file.type, bytes: new Uint8Array(await file.arrayBuffer()) };
-          options.onResolve(payload);
+          if (generation !== uploadGeneration || !section.isConnected) return;
           error.textContent = '';
+          options.onResolve(payload);
         } catch (cause) {
+          if (generation !== uploadGeneration || !section.isConnected) return;
           error.textContent = mergeErrorMessage(cause, '값을 적용하지 못했습니다. 입력 내용을 확인하고 다시 시도해 주세요.');
         }
       })();
@@ -289,16 +327,19 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
     grid.setAttribute('aria-label', '편집 가능한 표 셀');
     const body = document.createElement('tbody');
     const positions = tableLeaves.map((leaf) => tableCellPosition(leaf)!);
+    const leavesByPosition = new Map(
+      tableLeaves.map((leaf, index) => {
+        const { row, column } = positions[index]!;
+        return [`${row}:${column}`, leaf] as const;
+      }),
+    );
     const rowCount = Math.max(...positions.map(({ row }) => row)) + 1;
     const columnCount = Math.max(...positions.map(({ column }) => column)) + 1;
     for (let row = 0; row < rowCount; row += 1) {
       const tr = document.createElement('tr');
       for (let column = 0; column < columnCount; column += 1) {
         const cell = document.createElement('td');
-        const leaf = tableLeaves.find((candidate) => {
-          const position = tableCellPosition(candidate);
-          return position?.row === row && position.column === column;
-        });
+        const leaf = leavesByPosition.get(`${row}:${column}`);
         if (leaf) {
           const label = node('label', 'merge-table-cell-field');
           label.dataset.fieldPath = leaf.path.join('.');
@@ -327,13 +368,17 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
   if (leaves.length === 0) {
     fieldset.appendChild(node('p', 'merge-manual-hint', '직접 편집할 수 있는 속성이 없습니다. 현재 변경이나 가져올 변경을 선택하세요.'));
   }
+  if (collected.truncated) {
+    fieldset.appendChild(node('p', 'merge-manual-hint', '속성이 많아 200개 이후 속성은 숨겼습니다.'));
+  }
 
   const apply = node('button', 'merge-secondary-button', '직접 편집 적용');
   apply.type = 'button';
   apply.disabled = controls.length === 0;
   apply.addEventListener('click', () => {
+    uploadGeneration += 1;
     try {
-      result = cloneValue(options.initialValue);
+      let result = cloneValue(options.initialValue);
       for (const { leaf, control } of controls) {
         result = setAtPath(result, leaf.path, readControl(control, leaf.value));
       }

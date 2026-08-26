@@ -2840,7 +2840,12 @@ export class InputHandler {
     this.flushDeferredPaginationIfNeeded('before-version-content-replace', false);
     return this.executeAppliedSnapshot(
       'version:replace_content',
-      (wasm) => wasm.replaceContentFromBytes(data),
+      (wasm) => {
+        const info = wasm.replaceContentFromBytes(data);
+        this.clearTableResizeRuntimeCache();
+        this.resetDerivedStateAfterHistoryJump();
+        return info;
+      },
       callbacks,
     );
   }
@@ -4049,10 +4054,10 @@ export class InputHandler {
     this.eventBus.emit('command-state-changed');
   }
 
-  /** Whether document mutations are currently blocked by an owning workflow. */
+  /** 소유 워크플로가 현재 문서 변경을 차단하고 있는지 반환한다. */
   isReadOnly(): boolean { return this.readOnly; }
 
-  /** Whether direct user edits are paused while an owning workflow applies snapshots. */
+  /** 소유 워크플로가 스냅샷을 적용하는 동안 사용자 직접 편집이 중단되었는지 반환한다. */
   isUserEditingLocked(): boolean { return this.userEditingLocked; }
 
   /** 활성 에이전트 턴에는 사용자 입력만 잠그고 에이전트 snapshot 경로는 유지한다. */
@@ -4958,10 +4963,10 @@ export class InputHandler {
     this.handleRedo();
   }
 
-  /** Permanently drop redo state after rolling back a speculative workflow. */
+  /** 시험적 워크플로를 되돌린 뒤 redo 상태를 영구 폐기한다. */
   discardRedoHistory(): void { this.history.discardRedo(this.wasm); }
 
-  /** Keep a compensating replacement applied but prevent undoing back into failed state. */
+  /** 보상 교체 결과는 유지하되 실패 상태로 되돌리는 undo는 막는다. */
   discardLatestUndoHistory(): void { this.history.discardUndoTop(this.wasm); }
 
   /** 복사 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */

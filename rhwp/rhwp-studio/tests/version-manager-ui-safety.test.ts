@@ -19,9 +19,24 @@ test('버전 이름 입력은 브라우저 프롬프트 대신 앱 내 대화상
   assert.match(source, /if \(title !== null\) await perform\(\(\) => controller\.createShelf\(title \|\| undefined\)\)/);
 });
 
-test('수동 커밋은 이미 저장한 내용에도 명시적인 기록을 남긴다', () => {
+test('버전 입력 대화상자는 페이지가 닫히거나 해제될 때 취소된다', () => {
+  assert.match(source, /interface VersionTextPrompt \{\s*promise: Promise<string \| null>;\s*cancel\(\): void;/);
+  assert.match(source, /let activeTextPrompt: VersionTextPrompt \| null = null;/);
+  assert.match(source, /activeTextPrompt = prompt;/);
+  assert.equal((source.match(/activeTextPrompt\?\.cancel\(\);/g) ?? []).length, 3);
+});
+
+test('수동 커밋은 같은 내용일 때 태그 또는 변경 없음 경로를 사용한다', () => {
   const controller = readSource('../src/versioning/controller.ts');
-  assert.match(controller, /#createCheckpoint\(\{ reason: 'manual', message, allowSameContent: true \}\)/);
+  assert.match(controller, /#createCheckpoint\(\{ reason: 'manual', message \}\)/);
+  assert.doesNotMatch(controller, /reason: 'manual', message, allowSameContent: true/);
+});
+
+test('전체 화면 뒤 버전 페이지를 여는 지연 타이머는 완료와 해제 때 정리된다', () => {
+  const sidebar = readSource('../src/ui/agent-sidebar/index.ts');
+  assert.match(sidebar, /let deferredVersionsOpenTimer: number \| null = null/);
+  assert.match(sidebar, /deferredVersionsOpenTimer = window\.setTimeout\(\(\) => \{\s*deferredVersionsOpenTimer = null;/);
+  assert.match(sidebar, /if \(deferredVersionsOpenTimer !== null\) \{\s*window\.clearTimeout\(deferredVersionsOpenTimer\);\s*deferredVersionsOpenTimer = null;/);
 });
 
 test('사용자 용어는 체크포인트 대신 Git 커밋으로 통일한다', () => {
@@ -142,7 +157,8 @@ test('브랜치 탭은 평평한 ref 행과 축약된 동작을 유지한다', (
   assert.match(source, /row\.dataset\.branchName = branch\.name/);
   assert.match(source, /merge\.dataset\.versionAction = 'merge'/);
   assert.match(source, /const mergeDirection = `\$\{branch\.name\} → \$\{current\.activeBranch \?\? '현재'\}`/);
-  assert.match(source, /const merge = el\('button', 'ag-versions-primary', mergeDirection\)/);
+  assert.match(source, /const mergeLabel = `병합: \$\{mergeDirection\}`/);
+  assert.match(source, /const merge = el\('button', 'ag-versions-primary', mergeLabel\)/);
   assert.match(source, /switchButton\.dataset\.versionAction = 'switch'/);
   assert.match(source, /rename\.dataset\.versionAction = 'rename'/);
   assert.match(source, /remove\.dataset\.versionAction = 'delete'/);
@@ -159,9 +175,9 @@ test('버전 관리자는 2px 이하 모서리와 방향성 병합 이름을 사
   for (const match of css.matchAll(/border-radius:\s*(\d+)px/g)) {
     assert.ok(Number(match[1]) <= 2, `round radius remains at ${match[1]}px`);
   }
-  assert.match(source, /mergeButton\.setAttribute\('aria-label', mergeDirection\)/);
-  assert.match(source, /mergeButton\.textContent = `… → \$\{targetBranch\}`/);
+  assert.match(source, /mergeButton\.setAttribute\('aria-label', mergeLabel\)/);
+  assert.match(source, /mergeButton\.textContent = `병합: … → \$\{targetBranch\}`/);
   assert.match(source, /activeBranch\.setAttribute\('aria-label', `현재 브랜치 \$\{targetBranch\} 보기`\)/);
   assert.match(source, /commit\.isHead && branch === current\.activeBranch \? `HEAD \$\{branch\}` : `브랜치 \$\{branch\}`/);
-  assert.match(source, /merge\.dataset\.versionTitle = mergeDirection/);
+  assert.match(source, /merge\.dataset\.versionTitle = mergeLabel/);
 });

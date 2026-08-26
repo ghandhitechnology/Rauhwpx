@@ -914,6 +914,37 @@ function assertDraftMatchesRefs(
   }
 }
 
+async function deleteMergeDrafts(
+  tx: GraphTransaction,
+  repositoryId: RepositoryId,
+  shouldDelete: (draft: VersionMergeDraft) => boolean,
+): Promise<void> {
+  const removed = (await tx.listMergeDrafts(repositoryId)).filter(shouldDelete);
+  if (removed.length === 0) return;
+  for (const draft of removed) await tx.delete('mergeDrafts', draft.id);
+
+  const candidateAssets = new Set(removed.flatMap((draft) => draft.manualAssetBlobIds));
+  if (candidateAssets.size === 0) return;
+  const [commits, shelves, remainingDrafts] = await Promise.all([
+    tx.getAll('commits'),
+    tx.getAll('shelves'),
+    tx.getAll('mergeDrafts'),
+  ]);
+  const retained = new Set([
+    ...commits.map((commit) => commit.blobId),
+    ...shelves.map((shelf) => shelf.blobId),
+    ...remainingDrafts.flatMap((draft) => draft.manualAssetBlobIds),
+  ]);
+  for (const assetId of candidateAssets) {
+    if (!retained.has(assetId)) await tx.delete('blobs', assetId);
+  }
+}
+
+function draftNamesBranch(draft: VersionMergeDraft, branch: BranchName): boolean {
+  const key = normalizedRefKey(branch);
+  return normalizedRefKey(draft.targetBranch) === key || normalizedRefKey(draft.sourceBranch) === key;
+}
+
 export class VersionGraphStore {
   readonly #factory: IDBFactory | null;
   #database: Promise<IDBDatabase> | null = null;
@@ -1526,7 +1557,10 @@ export class VersionGraphStore {
         .filter((manifest) => manifest.repositoryId === repositoryId);
       const manifestByCommit = new Map(storedManifests.map((manifest) => [manifest.commitId, manifest]));
       const visiting = new Set<CommitId>();
+      const ensured = new Map<CommitId, VersionMergeManifest>();
       const ensure = async (id: CommitId): Promise<VersionMergeManifest> => {
+        const cached = ensured.get(id);
+        if (cached) return cached;
         const commit = byId.get(id);
         assertCommitInRepository(commit, repositoryId);
         if (visiting.has(id)) {
@@ -1548,6 +1582,7 @@ export class VersionGraphStore {
             await tx.put('commits', updated);
           }
           visiting.delete(id);
+          ensured.set(id, existing);
           return existing;
         }
         const snapshot = await tx.get('compareSnapshots', commit.compareSnapshotId);
@@ -1568,6 +1603,7 @@ export class VersionGraphStore {
         byId.set(id, updated);
         manifestByCommit.set(id, manifest);
         visiting.delete(id);
+        ensured.set(id, manifest);
         return manifest;
       };
       return ensure(commitId);
@@ -1652,7 +1688,7 @@ export class VersionGraphStore {
       if (expectedUpdatedAt !== undefined && draft.updatedAt !== expectedUpdatedAt) {
         stale('The merge draft changed');
       }
-      await tx.delete('mergeDrafts', id);
+      await deleteMergeDrafts(tx, repositoryId, (candidate) => candidate.id === id);
     }));
   }
 
@@ -1714,6 +1750,18 @@ export class VersionGraphStore {
         throw new VersionError('CORRUPT_BLOB', 'Stored version bytes failed verification');
       }
       return blob;
+    });
+  }
+
+  async getBlobSizes(ids: readonly BlobId[]): Promise<Map<BlobId, number>> {
+    const unique = [...new Set(ids)];
+    return this.#transaction('readonly', async (tx) => {
+      const sizes = new Map<BlobId, number>();
+      for (const id of unique) {
+        const blob = await tx.get('blobs', id);
+        if (blob) sizes.set(id, blob.byteLength);
+      }
+      return sizes;
     });
   }
 
@@ -1823,7 +1871,11 @@ export class VersionGraphStore {
       const updatedRepository = nextRepositoryRevision(repository);
       await tx.put('refs', toRefRow(updatedBranch));
       if (input.deleteSource) await tx.delete('refs', sourceKey);
-      if (input.draftId) await tx.delete('mergeDrafts', input.draftId);
+      if (input.draftId || input.deleteSource) {
+        await deleteMergeDrafts(tx, input.repositoryId, (draft) => (
+          draft.id === input.draftId || (input.deleteSource && draftNamesBranch(draft, sourceBranch.name))
+        ));
+      }
       await tx.put('repositories', updatedRepository);
       return {
         repository: updatedRepository,
@@ -1936,7 +1988,11 @@ export class VersionGraphStore {
       await tx.put('commits', commit);
       await tx.put('refs', toRefRow(updatedBranch));
       if (input.deleteSource) await tx.delete('refs', sourceKey);
-      if (input.draftId) await tx.delete('mergeDrafts', input.draftId);
+      if (input.draftId || input.deleteSource) {
+        await deleteMergeDrafts(tx, input.repositoryId, (draft) => (
+          draft.id === input.draftId || (input.deleteSource && draftNamesBranch(draft, sourceBranch.name))
+        ));
+      }
       await tx.put('repositories', updatedRepository);
       return {
         repository: updatedRepository,
@@ -2015,7 +2071,10 @@ export class VersionGraphStore {
       if (!changed) return { repository, targetBranch, sourceBranch };
       await tx.put('refs', toRefRow(targetBranch));
       if (sourceBranch) await tx.put('refs', toRefRow(sourceBranch));
-      else await tx.delete('refs', sourceKey);
+      else {
+        await tx.delete('refs', sourceKey);
+        await deleteMergeDrafts(tx, input.repositoryId, (draft) => draftNamesBranch(draft, input.sourceBranch));
+      }
       const updatedRepository = nextRepositoryRevision(repository);
       await tx.put('repositories', updatedRepository);
       return { repository: updatedRepository, targetBranch, sourceBranch };
@@ -2097,6 +2156,7 @@ export class VersionGraphStore {
         throw new VersionError('LAST_BRANCH', 'The final branch cannot be deleted');
       }
       await tx.delete('refs', key);
+      await deleteMergeDrafts(tx, input.repositoryId, (draft) => draftNamesBranch(draft, input.branch));
       const updatedRepository = nextRepositoryRevision(repository);
       await tx.put('repositories', updatedRepository);
       return updatedRepository;
