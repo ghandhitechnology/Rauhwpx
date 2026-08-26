@@ -2298,6 +2298,33 @@ impl DocumentCore {
         } else {
             (0..snapshot.sections.len()).collect()
         };
+        let selectively_changed_paragraphs: Vec<Option<Vec<usize>>> = snapshot
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(section_idx, snapshot_section)| {
+                if !same_section_count
+                    || current_paragraph_sequence_revisions[section_idx]
+                        != snapshot_section.paragraph_sequence_revision
+                    || current_paragraph_revisions[section_idx].len()
+                        != snapshot_section.paragraphs.len()
+                {
+                    return None;
+                }
+                Some(
+                    snapshot_section
+                        .paragraphs
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(paragraph_idx, snapshot_paragraph)| {
+                            (current_paragraph_revisions[section_idx][paragraph_idx]
+                                != snapshot_paragraph.revision)
+                                .then_some(paragraph_idx)
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
         let mut current_sections = std::mem::take(&mut self.document.sections);
         let mut restored = snapshot.document_shell.clone();
         restored.sections.reserve(snapshot.sections.len());
@@ -2349,7 +2376,14 @@ impl DocumentCore {
         if same_section_count {
             self.styles = resolve_styles(&self.document.doc_info, self.dpi);
             for &section_idx in &changed_sections {
-                self.recompose_section(section_idx);
+                match &selectively_changed_paragraphs[section_idx] {
+                    Some(paragraphs) if !paragraphs.is_empty() => {
+                        for &paragraph_idx in paragraphs {
+                            self.recompose_paragraph(section_idx, paragraph_idx);
+                        }
+                    }
+                    _ => self.recompose_section(section_idx),
+                }
             }
             if !changed_sections.is_empty() {
                 self.paginate();
