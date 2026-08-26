@@ -18,10 +18,13 @@ const readSource = (relativePath: string) => readFileSync(
 ).replace(/\r\n/g, '\n');
 const source = readSource('../src/ui/agent-sidebar/index.ts');
 const settings = readSource('../src/ui/agent-sidebar/settings.ts');
+const editingSettings = readSource('../src/ui/agent-sidebar/settings-editing.ts');
 const settingsCss = readSource('../src/ui/agent-sidebar/settings.css');
 const css = readSource('../src/ui/agent-sidebar/agent-sidebar.css');
+const buttonCss = readSource('../src/ui/agent-sidebar/sidebar-button-modern.css');
 const icons = readSource('../src/ui/agent-sidebar/icons.ts');
 const editCommandsSource = readSource('../src/command/commands/edit.ts');
+const toolCommandsSource = readSource('../src/command/commands/tool.ts');
 const mainSource = readSource('../src/main.ts');
 
 test('설정과 버전 페이지는 무대에 다른 페이지와 나란히 선다', () => {
@@ -43,7 +46,7 @@ test('스킬 페이지와 같은 전환 계약을 탄다', () => {
 });
 
 test('목록·스킬·설정·버전 페이지는 서로를 닫는다', () => {
-  assert.match(source, /function setSettingsPanelOpen\(open: boolean\): void/);
+  assert.match(source, /function setSettingsPanelOpen\(open: boolean, destination\?: SettingsDestination\): void/);
   assert.match(source, /root\.classList\.toggle\('ag-settings-open', open\)/);
   // 설정을 열면 목록/스킬이 닫히고,
   assert.match(
@@ -69,23 +72,115 @@ test('헤더에 설정(기어) 버튼이 있다', () => {
 
 test('/settings 슬래시 명령이 설정 페이지를 연다', () => {
   assert.match(source, /value: '\/settings'[^\n]*local: 'settings'/);
-  assert.match(source, /option\.local === 'settings'[^\n]*setSettingsPanelOpen\(true\)/);
-  assert.match(source, /text === '\/settings'[^\n]*setSettingsPanelOpen\(true\)/);
+  assert.match(source, /option\.local === 'settings'[^\n]*requestSettingsOpen\(\)/);
+  assert.match(source, /text === '\/settings'[^\n]*requestSettingsOpen\(\)/);
   assert.ok(source.indexOf("if (text === '/settings')") < source.indexOf('recordUserMessage(messageText,'));
 });
 
-test('설정은 연결·기본 설정·버전 관리·글쓰기 보정·템플릿·사용량 묶음이다', () => {
-  for (const title of ['연결', '기본 설정', '버전 관리', '글쓰기 보정', '템플릿', '사용량']) {
+test('모든 설정 진입점은 목적지를 보존하는 하나의 허브를 연다', () => {
+  assert.match(toolCommandsSource, /eventBus\.emit\('settings:open', \{ destination: 'editing' \}\)/);
+  assert.match(source, /eventBus\.on\('settings:open'/);
+  assert.match(mainSource, /import \{ showEditingSettingsFallback \} from '\.\/ui\/agent-sidebar\/settings-editing-fallback\.ts'/);
+  assert.match(
+    mainSource,
+    /eventBus\.on\('settings:open',[\s\S]*if \(agentSidebarReady\) return;[\s\S]*showEditingSettingsFallback/,
+  );
+  assert.match(mainSource, /const agentSidebar = initAgentSidebar\([\s\S]*agentSidebarReady = true;/);
+  assert.match(source, /setSettingsPanelOpen\(true, destination\)/);
+  assert.match(source, /function requestSettingsOpen\(destination\?: SettingsDestination\)/);
+  assert.match(source, /eventBus\.emit\('settings:open', destination \? \{ destination \} : undefined\)/);
+  assert.ok((source.match(/requestSettingsOpen\(\)/g) ?? []).length >= 4);
+  assert.match(settings, /sessionStorage\.setItem\('rhwp-settings-destination', destination\)/);
+  assert.match(settings, /open\(destination\?: SettingsDestination\)/);
+});
+
+test('집중 모드는 설정 제목·기어·대화 복귀 동작을 유지한다', () => {
+  assert.match(source, /ag-workspace-settings-back/);
+  assert.match(source, /ag-workspace-settings-btn/);
+  assert.match(source, /workspaceTitle\.textContent = open \? '설정' : '대화'/);
+  assert.match(source, /requestSettingsClose\(workspaceSettingsBtn\)/);
+  assert.match(css, /\.ag-fullscreen \.ag-settings-page \{[\s\S]*grid-row: 2/);
+  assert.match(css, /\.ag-fullscreen\.ag-settings-open \.ag-workspace-settings-back/);
+});
+
+test('목적지 이동과 닫기는 적용·버리기·계속 편집 선택을 거친다', () => {
+  assert.match(settings, /DirtyExitChoice/);
+  assert.match(settings, /'적용'/);
+  assert.match(settings, /'버리기'/);
+  assert.match(settings, /'계속 편집'/);
+  assert.match(settings, /async function resolveDirtyExit\(\): Promise<boolean>/);
+  assert.match(settings, /requestClose: resolveDirtyExit/);
+  assert.match(settings, /dialog\.setAttribute\('aria-modal', 'true'\)/);
+  assert.match(settingsCss, /\.ag-settings-dirty-dialog \{[\s\S]*--ag-bg: var\(--n-surface\)[\s\S]*background: var\(--n-surface\)/);
+});
+
+test('설정 탐색은 넓은 rail과 좁은 고정 tabs로 반응한다', () => {
+  assert.match(settingsCss, /\.ag-settings-layout \{[\s\S]*grid-template-columns: 176px minmax\(0, 1fr\)/);
+  assert.match(settingsCss, /@container settings-hub \(max-width: 760px\)/);
+  assert.match(settingsCss, /\.ag-settings-nav \{[\s\S]*flex-direction: row/);
+  assert.match(settings, /navigation\.setAttribute\('role', 'tablist'\)/);
+  assert.match(settings, /button\.setAttribute\('role', 'tab'\)/);
+});
+
+test('설정 적용 버튼은 카드 없이 콘텐츠 하단에 머문다', () => {
+  assert.match(
+    settingsCss,
+    /\.ag-settings-apply-footer \{[\s\S]*position: static;[\s\S]*background: transparent;/,
+  );
+  const footerRule = settingsCss.match(/\.ag-settings-apply-footer \{([\s\S]*?)\n\}/)?.[1] ?? '';
+  assert.doesNotMatch(footerRule, /bottom:|z-index:|border:|border-radius:|box-shadow:|backdrop-filter:/);
+});
+
+test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', () => {
+  for (const title of ['연결', '기본 설정', '글쓰기 보정', '템플릿', '사용량']) {
     assert.match(settings, new RegExp(`createSection\\('${title}'\\)`));
   }
+  for (const title of ['화면과 보기', '글꼴', '저장과 파일', '문서 자원']) {
+    assert.match(editingSettings, new RegExp(`group\\('${title}'`));
+  }
+  assert.match(settings, /\{ id: 'editing', label: '편집' \}/);
+  assert.match(settings, /\{ id: 'ai', label: 'AI 설정' \}/);
+  assert.match(settings, /\{ id: 'connections', label: 'AI 연결' \}/);
   assert.match(settingsCss, /\.ag-settings-section-title/);
 });
 
+test('복구 간격은 복구용 자동 저장을 켰 때만 보인다', () => {
+  assert.match(
+    editingSettings,
+    /recoveryInterval\.root\.hidden = !draft\.autosave\.recoveryEnabled/,
+  );
+});
+
+test('대표 글꼴은 접을 수 있는 압축 목록으로 보인다', () => {
+  assert.match(editingSettings, /fontSetList\.hidden = true/);
+  assert.match(editingSettings, /ag-settings-resource-list ag-settings-font-set-list/);
+  assert.match(editingSettings, /ag-settings-resource-row ag-settings-font-set-row/);
+  assert.match(settingsCss, /\.ag-settings-font-set-list \{[\s\S]*gap: 0/);
+  assert.match(settingsCss, /\.ag-settings-font-set-list\[hidden\] \{\s*display: none/);
+  assert.match(settingsCss, /\.ag-settings-font-set-row \{[\s\S]*min-height: 42px/);
+  const externalChange = editingSettings.slice(editingSettings.indexOf('const unsubscribe = userSettings.subscribe'));
+  assert.ok(externalChange.indexOf('renderFontSets();') > externalChange.indexOf('runtime.committed(external);'));
+  assert.ok(externalChange.indexOf('renderFontSets();') < externalChange.indexOf('if (isDirty())'));
+});
+
+test('저장 설정은 짧은 라벨만 보이고 PDF 안내는 기본값을 쓴다', () => {
+  for (const removedCopy of [
+    '편집 중인 문서의 복구본을 주기적으로 만듭니다.',
+    '대형 문서는 간격을 길게 두면 멈춤을 줄일 수 있습니다.',
+    '입력이 멈춘 뒤 복구본을 만듭니다.',
+    'PDF 저장 안내',
+    '문서 템플릿과 버전 관리 방식을 선택합니다.',
+  ]) {
+    assert.doesNotMatch(editingSettings, new RegExp(removedCopy));
+  }
+  assert.match(settings, /채팅에서는 \/templates로 선택하세요\./);
+  assert.doesNotMatch(settings, /HWP\/HWPX 파일을 기기 전체 템플릿으로 보관합니다/);
+});
+
 test('한컴용 Git 토글은 기본 이력과 Git 버전 관리 진입을 전환한다', () => {
-  assert.match(settings, /'한컴용 Git 사용하기'/);
-  assert.match(settings, /hancomGitToggle\.setAttribute\('role', 'switch'\)/);
-  assert.match(settings, /hancomGitToggle\.checked = userSettings\.getUseHancomGit\(\)/);
-  assert.match(settings, /userSettings\.setUseHancomGit\(hancomGitToggle\.checked\)/);
+  assert.match(editingSettings, /toggleRow\('한컴용 Git 사용하기'/);
+  assert.match(editingSettings, /draft\.versionControl\.useHancomGit = versionControl\.input\.checked/);
+  assert.match(editingSettings, /userSettings\.tryApplyEditorScalarSettings\(next\)/);
   assert.match(settingsCss, /\.ag-settings-toggle-input:checked \+ \.ag-settings-toggle-track/);
   assert.match(source, /function openConfiguredVersionControl\(\): void/);
   assert.match(source, /!userSettings\.getUseHancomGit\(\) && openClassicVersionControl/);
@@ -100,6 +195,11 @@ test('버전 버튼은 설정과 관계없이 표시되고 현재 버전 관리 
 });
 
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {
+  assert.match(
+    settings,
+    /aiContent\.append\(calibration\.root, instructionsSection\.root, defaults\.root, templatesSection\.root, aiFooter\)/,
+  );
+  assert.doesNotMatch(editingSettings, /documentResources/);
   assert.match(settings, /requestTemplateName\('템플릿 추가'/);
   assert.match(settings, /bridge\.addTemplate\(file, name\)/);
   assert.match(settings, /bridge\.renameTemplate\(id, name\)/);
@@ -217,7 +317,7 @@ test('자동 하네스 업데이트 실패는 프로바이더 카드에 조용�
   assert.match(settingsCss, /\.ag-settings-row-detail\.ag-update-required/);
 });
 
-test('기본 설정은 select 셋이고 저장 후 사이드바에 알린다', () => {
+test('AI 기본 설정은 Apply 전까지 초안이고 성공 후 사이드바에 알린다', () => {
   assert.match(settings, /createSelect\(\s*'기본 제공자'/);
   assert.match(settings, /createSelect\('기본 모델', \[\]\)/);
   assert.match(settings, /createSelect\('추론 강도', \[\]\)/);
@@ -228,11 +328,20 @@ test('기본 설정은 select 셋이고 저장 후 사이드바에 알린다', (
   assert.match(settingsCss, /\.ag-settings-field\[hidden\]\s*\{[^}]*display:\s*none;/s);
   assert.match(settings, /createSelect\('권한 프로필', PERMISSION_OPTIONS\)/);
   assert.match(settings, /const select = el\('select', 'ag-settings-select'\)/);
-  assert.match(settings, /prefs = saveAgentPrefs\(partial\)/);
-  assert.match(settings, /applyDefaults\(prefs\)/);
+  assert.match(settings, /prefsDraft = normalizeAgentPrefs\(\{ \.\.\.prefsDraft, \.\.\.partial \}\)/);
+  assert.match(settings, /const result = trySaveAgentPrefs\(nextPrefs\)/);
+  assert.match(settings, /applyDefaults\(result\.value\)/);
   assert.match(settings, /'새 대화부터 적용돼요\.'/);
-  // 전체 접근을 기본값으로 굳히려면 한 번 확인한다.
-  assert.match(settings, /next === 'unrestricted' && !window\.confirm\(UNRESTRICTED_DEFAULT_WARNING\)/);
+  assert.match(settings, /nextPrefs\.defaultPermissionProfile === 'unrestricted'[\s\S]*window\.confirm\(UNRESTRICTED_DEFAULT_WARNING\)/);
+  assert.match(settings, /saveAgentInstructions\(\)[\s\S]*trySaveAgentPrefs\(nextPrefs\)/);
+  assert.match(settings, /agentField\.select\.disabled = aiPrefsSaving/);
+  assert.match(settings, /modelField\.select\.disabled = aiPrefsSaving/);
+  assert.match(settings, /effortField\.select\.disabled = aiPrefsSaving/);
+  assert.match(settings, /permissionField\.select\.disabled = aiPrefsSaving/);
+  assert.match(
+    settings,
+    /aiPrefsSaving = true;[\s\S]*try \{[\s\S]*await saveAgentInstructions\(\)[\s\S]*finally \{[\s\S]*aiPrefsSaving = false;/,
+  );
 });
 
 test('사이드바는 저장된 기본값으로 시작하고 새 대화에 적용한다', () => {
@@ -336,12 +445,16 @@ test('토큰·시각 표기는 짧게 (폭이 흔들리지 않게)', () => {
   assert.equal(formatResetAt(now - 1_000, now), '곧 리셋');
 });
 
-test('설정의 채움 버튼도 손그림 윤곽을 쓴다', () => {
-  const filled = css.match(/[^{}]+\{[^}]*filter:\s*var\(--ag-sketch-line\)[^}]*\}/gs) ?? [];
-  const selectors = filled.map((rule) => rule.slice(0, rule.indexOf('{'))).join('\n');
-  for (const sel of ['.ag-settings-primary', '.ag-conn-banner-retry', '.ag-hub-retry-btn']) {
-    assert.ok(selectors.includes(sel), `${sel} should use the sketch filter`);
-  }
+test('사이드바 버튼은 마지막에 불러온 얇고 반듯한 스타일을 공유한다', () => {
+  assert.match(source, /import '\.\/sidebar-button-modern\.css';/);
+  assert.ok(
+    source.indexOf("import './sidebar-button-modern.css';")
+      > source.indexOf("from './settings.ts';"),
+  );
+  assert.match(buttonCss, /--ag-button-radius: 5px/);
+  assert.match(buttonCss, /\.ag-root button,[\s\S]*filter: none !important/);
+  assert.match(buttonCss, /\.ag-root \.ag-settings-nav-button \{[\s\S]*min-height: 34px/);
+  assert.match(buttonCss, /\.ag-root \.ag-send \{[\s\S]*height: var\(--ag-button-height\)/);
 });
 
 test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조색을 모두 갖춘다', () => {
@@ -402,7 +515,7 @@ test('grok · cursor 사용량도 세션 · 오늘 · 주간 토큰으로 보인
 test('cursor 모델 선택은 구독/API 과금 풀로 나뉘어 보인다', () => {
   // 설정 페이지의 기본 모델 셀렉트는 그룹 라벨을 optgroup 으로 그린다.
   assert.match(settings, /function fillSelectGrouped\(/);
-  assert.match(settings, /fillSelectGrouped\(modelField\.select, modelGroupsForAgent\(prefs\.defaultAgent\)\)/);
+  assert.match(settings, /fillSelectGrouped\(modelField\.select, modelGroupsForAgent\(prefsDraft\.defaultAgent\)\)/);
   // 입력기 모델 메뉴도 같은 그룹 머리글을 쓴다.
   assert.match(source, /modelGroupsForAgent\(selectedAgent\)/);
   assert.match(source, /ag-llm-group-label/);

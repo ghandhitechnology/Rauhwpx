@@ -1,18 +1,4 @@
-/**
- * 설정 탭 — 사이드바의 한 페이지(스킬 페이지와 같은 무대 전환을 탄다).
- *
- * 묶음을 한 스크롤에 세운다:
- *  1. 연결 — 허브와 CLI 상태, 모달 설치/로그인, 재연결·세션 재시작
- *  2. 기본 설정 — 다음 대화부터 쓸 프로바이더·모델·강도·권한
- *  3. 버전 관리 — 기본 이력 또는 한컴용 Git 전환
- *  4. 지시 — 이 앱 전용 AGENTS.md 읽기·편집
- *  5. 글쓰기 보정 — 문체 보정 상태와 재보정 진입
- *  6. 템플릿 — 기기 전체 HWP/HWPX 서식
- *  7. 사용량 — CLIProxyAPI 연결, 요금제별 5시간·주간 한도, 오늘 누적, 모델별 내역
- *
- * 페이지 전환(열기/닫기)은 index.ts 가 클래스로 관리하고, 이 모듈은
- * 자기 DOM 과 데이터 갱신만 맡는다.
- */
+/** 설정 허브의 탐색과 AI·연결 목적지를 소유한다. 편집 설정은 전용 모듈이 맡는다. */
 import './settings.css';
 
 import {
@@ -23,12 +9,23 @@ import {
   resolveModelForAgent,
   type AgentModelGroup,
 } from '../../agent/models.ts';
-import { loadAgentPrefs, saveAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
-import { userSettings } from '../../core/user-settings.ts';
+import {
+  loadAgentPrefs,
+  normalizeAgentPrefs,
+  trySaveAgentPrefs,
+  type AgentPrefs,
+} from '../../agent/agent-prefs.ts';
 import { createIcon } from './icons.ts';
+import { createEditingSettings } from './settings-editing.ts';
+import type {
+  DirtyExitChoice,
+  EditorSettingsRuntime,
+  SettingsDestination,
+} from './settings-contract.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
 import { formatRelativeTime, formatResetAt, formatShortDate, formatTokens } from './usage-format.ts';
 import type { AgentBridge } from '../../agent/bridge.ts';
+import type { EventBus } from '../../core/event-bus.ts';
 import type {
   AgentName,
   AgentInstructionsDraft,
@@ -269,6 +266,8 @@ interface PiDraftModel {
 
 export interface SettingsPanelDeps {
   bridge: AgentBridge;
+  eventBus?: EventBus;
+  editorRuntime: EditorSettingsRuntime;
   /** 지금 대화가 쓰고 있는 조합 — 기본값과 다를 수 있다. */
   getSelection: () => {
     agent: AgentName;
@@ -285,8 +284,10 @@ export interface SettingsPanelDeps {
 
 export interface SettingsPanel {
   element: HTMLElement;
-  open(): void;
+  open(destination?: SettingsDestination): void;
   close(): void;
+  requestClose(): Promise<boolean>;
+  isDirty(): boolean;
   /** 첫 실행 마법사 카드에서도 같은 설치/로그인 모달을 연다. */
   openAgentSetup(agent: AgentName): void;
   /**
@@ -299,10 +300,20 @@ export interface SettingsPanel {
 }
 
 export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
-  const { bridge, getSelection, applyDefaults, openCalibration, reconnectSession } = deps;
+  const {
+    bridge,
+    eventBus,
+    editorRuntime,
+    getSelection,
+    applyDefaults,
+    openCalibration,
+    reconnectSession,
+  } = deps;
 
   let disposed = false;
   let prefs: AgentPrefs = loadAgentPrefs();
+  let prefsBaseline: AgentPrefs = { ...prefs };
+  let prefsDraft: AgentPrefs = { ...prefs };
   let connectionState: ConnectionState = bridge.getConnectionState();
   let providers: ProviderStatusMap | null = null;
   let usage: UsageSummary | null = null;
@@ -312,8 +323,20 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let instructionsDraftRevision = 0;
   let instructionsDirty = false;
   let instructionsBusy = false;
+  let aiPrefsSaving = false;
   let instructionsProposalBusy = false;
   let instructionsMessage = '';
+  let currentDestination: SettingsDestination = 'editing';
+  let lastDestination: SettingsDestination = 'editing';
+  try {
+    const storedDestination = sessionStorage.getItem('rhwp-settings-destination');
+    if (storedDestination === 'editing' || storedDestination === 'ai' || storedDestination === 'connections') {
+      currentDestination = storedDestination;
+      lastDestination = storedDestination;
+    }
+  } catch {
+    // 세션 저장소가 없어도 기본 목적지로 계속 진행한다.
+  }
   let templates: DocumentTemplate[] = [];
   let templatesBusy = false;
   let templatesMessage = '';
@@ -370,12 +393,51 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   close.title = '채팅으로 돌아가기';
   close.appendChild(createIcon('close'));
   close.addEventListener('click', () => {
-    element.dispatchEvent(new CustomEvent('ag-settings-close', { bubbles: true }));
+    element.dispatchEvent(new CustomEvent('ag-settings-close-request', { bubbles: true }));
   });
   header.append(title, close);
 
+  const layout = el('div', 'ag-settings-layout');
+  const navigation = el('nav', 'ag-settings-nav');
+  navigation.setAttribute('aria-label', '설정 범주');
+  navigation.setAttribute('role', 'tablist');
   const body = el('div', 'ag-settings-body');
-  element.append(header, body);
+  const panes = new Map<SettingsDestination, HTMLElement>();
+  const navButtons = new Map<SettingsDestination, HTMLButtonElement>();
+  const destinations: ReadonlyArray<{ id: SettingsDestination; label: string }> = [
+    { id: 'editing', label: '편집' },
+    { id: 'ai', label: 'AI 설정' },
+    { id: 'connections', label: 'AI 연결' },
+  ];
+  for (const destination of destinations) {
+    const button = el('button', 'ag-settings-nav-button', destination.label);
+    button.type = 'button';
+    button.id = `ag-settings-tab-${destination.id}`;
+    button.dataset.destination = destination.id;
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-controls', `ag-settings-pane-${destination.id}`);
+    const pane = el('section', 'ag-settings-pane');
+    pane.id = `ag-settings-pane-${destination.id}`;
+    pane.dataset.destination = destination.id;
+    pane.setAttribute('role', 'tabpanel');
+    pane.setAttribute('aria-labelledby', button.id);
+    navigation.appendChild(button);
+    panes.set(destination.id, pane);
+    navButtons.set(destination.id, button);
+  }
+  layout.append(navigation, body);
+  body.append(...panes.values());
+  element.append(header, layout);
+
+  let shellReady = false;
+  const editingSettings = createEditingSettings({
+    eventBus,
+    runtime: editorRuntime,
+    onDirtyChange: () => {
+      if (shellReady) renderDestinationState();
+    },
+  });
+  panes.get('editing')?.appendChild(editingSettings.element);
 
   // ── 1. 연결 ────────────────────────────────────────────
   const connection = createSection('연결');
@@ -798,41 +860,19 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   agentField.select.addEventListener('change', () => {
     const value = agentField.select.value;
     const agent = PROVIDER_ORDER.find((name) => name === value) ?? 'claude';
-    commitPrefs({ defaultAgent: agent });
+    stagePrefs({ defaultAgent: agent });
   });
   modelField.select.addEventListener('change', () => {
-    commitPrefs({ defaultModel: modelField.select.value });
+    stagePrefs({ defaultModel: modelField.select.value });
   });
   effortField.select.addEventListener('change', () => {
-    commitPrefs({ defaultEffort: effortField.select.value });
+    stagePrefs({ defaultEffort: effortField.select.value });
   });
   permissionField.select.addEventListener('change', () => {
     const next: PermissionProfile =
       permissionField.select.value === 'unrestricted' ? 'unrestricted' : 'safe';
-    // 전체 접근을 기본값으로 굳히는 건 대화 하나보다 넓은 결정이다 — 한 번 묻는다.
-    if (next === 'unrestricted' && !window.confirm(UNRESTRICTED_DEFAULT_WARNING)) {
-      permissionField.select.value = prefs.defaultPermissionProfile;
-      return;
-    }
-    commitPrefs({ defaultPermissionProfile: next });
+    stagePrefs({ defaultPermissionProfile: next });
   });
-
-  // ── 3. 버전 관리 ──────────────────────────────────────
-  const versionControl = createSection('버전 관리');
-  const hancomGitRow = el('label', 'ag-settings-row ag-settings-toggle-row');
-  const hancomGitLabel = el('span', 'ag-settings-row-name', '한컴용 Git 사용하기');
-  const hancomGitToggle = document.createElement('input');
-  hancomGitToggle.type = 'checkbox';
-  hancomGitToggle.className = 'ag-settings-toggle-input';
-  hancomGitToggle.setAttribute('role', 'switch');
-  hancomGitToggle.checked = userSettings.getUseHancomGit();
-  const hancomGitTrack = el('span', 'ag-settings-toggle-track');
-  hancomGitTrack.setAttribute('aria-hidden', 'true');
-  hancomGitRow.append(hancomGitLabel, hancomGitToggle, hancomGitTrack);
-  hancomGitToggle.addEventListener('change', () => {
-    userSettings.setUseHancomGit(hancomGitToggle.checked);
-  });
-  versionControl.body.append(hancomGitRow);
 
   // ── 4. 지시 ──────────────────────────────────────────
   const instructionsSection = createSection('지시');
@@ -870,11 +910,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     instructionsProposalActions,
   );
   const instructionsActions = el('div', 'ag-settings-actions');
-  const instructionsSave = el('button', 'ag-settings-primary', '저장');
-  instructionsSave.type = 'button';
   const instructionsReload = el('button', 'ag-settings-btn', '다시 불러오기');
   instructionsReload.type = 'button';
-  instructionsActions.append(instructionsSave, instructionsReload);
+  instructionsActions.append(instructionsReload);
   instructionsSection.body.append(
     instructionsNote,
     instructionsProposal,
@@ -888,8 +926,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     instructionsDirty = instructionsEditor.value !== (agentInstructions?.content ?? '');
     instructionsMessage = '';
     renderAgentInstructions();
+    renderDestinationState();
   });
-  instructionsSave.addEventListener('click', () => void saveAgentInstructions());
   instructionsProposalConfirm.addEventListener('click', () => void confirmAgentInstructionsDraft());
   instructionsProposalReject.addEventListener('click', () => void rejectAgentInstructionsDraft());
   instructionsReload.addEventListener('click', () => {
@@ -911,7 +949,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // ── 6. 템플릿 ─────────────────────────────────────────
   const templatesSection = createSection('템플릿');
-  const templatesNote = el('p', 'ag-settings-note', 'HWP/HWPX 파일을 기기 전체 템플릿으로 보관합니다. 채팅에서는 /templates로 선택하세요.');
+  const templatesNote = el('p', 'ag-settings-note', '채팅에서는 /templates로 선택하세요.');
   const templatesList = el('div', 'ag-template-list');
   const templatesStatus = el('p', 'ag-settings-cliproxy-error');
   templatesStatus.hidden = true;
@@ -1135,19 +1173,245 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     apiUsageBlocks.set(agent, { root: block, session, day, week, models, updated });
   }
 
-  body.append(
-    connection.root,
-    defaults.root,
-    versionControl.root,
-    instructionsSection.root,
-    calibration.root,
-    templatesSection.root,
-    usageSection.root,
-  );
+  const aiStatus = el('p', 'ag-settings-apply-status');
+  aiStatus.hidden = true;
+  aiStatus.setAttribute('role', 'status');
+  const aiCancel = el('button', 'ag-settings-btn', '취소');
+  aiCancel.type = 'button';
+  const aiApply = el('button', 'ag-settings-primary', '적용');
+  aiApply.type = 'button';
+  const aiFooter = el('div', 'ag-settings-apply-footer');
+  aiFooter.append(aiStatus, aiCancel, aiApply);
+  const aiContent = el('div', 'ag-settings-destination-content');
+  aiContent.append(calibration.root, instructionsSection.root, defaults.root, templatesSection.root, aiFooter);
+  panes.get('ai')?.appendChild(aiContent);
+
+  const connectionContent = el('div', 'ag-settings-destination-content');
+  connectionContent.append(connection.root, usageSection.root);
+  panes.get('connections')?.appendChild(connectionContent);
+
+  aiApply.addEventListener('click', () => void applyAiDraft());
+  aiCancel.addEventListener('click', cancelAiDraft);
+  for (const [destination, button] of navButtons) {
+    button.addEventListener('click', () => void requestDestination(destination));
+    button.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight'
+        && event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      const index = destinations.findIndex((item) => item.id === destination);
+      const delta = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1;
+      const next = destinations[(index + delta + destinations.length) % destinations.length];
+      if (next) void requestDestination(next.id);
+    });
+  }
+  shellReady = true;
 
   setupKey.input.addEventListener('input', renderAgentSetup);
 
   // ── 상태 → DOM ────────────────────────────────────────
+
+  function samePrefs(left: AgentPrefs, right: AgentPrefs): boolean {
+    return left.defaultAgent === right.defaultAgent
+      && left.defaultModel === right.defaultModel
+      && left.defaultEffort === right.defaultEffort
+      && left.defaultPermissionProfile === right.defaultPermissionProfile;
+  }
+
+  function isAiDirty(): boolean {
+    return instructionsDirty || !samePrefs(prefsDraft, prefsBaseline);
+  }
+
+  function isCurrentDestinationDirty(): boolean {
+    if (currentDestination === 'editing') return editingSettings.isDirty();
+    if (currentDestination === 'ai') return isAiDirty();
+    return false;
+  }
+
+  function renderDestinationState(): void {
+    for (const destination of destinations) {
+      const selected = destination.id === currentDestination;
+      const button = navButtons.get(destination.id);
+      const pane = panes.get(destination.id);
+      button?.classList.toggle('ag-active', selected);
+      button?.setAttribute('aria-selected', String(selected));
+      button?.setAttribute('tabindex', selected ? '0' : '-1');
+      if (pane) {
+        pane.hidden = !selected;
+        pane.inert = !selected;
+      }
+    }
+    const dirty = isAiDirty();
+    aiApply.disabled = !dirty || instructionsBusy || aiPrefsSaving;
+    aiCancel.disabled = !dirty || instructionsBusy || aiPrefsSaving;
+    agentField.select.disabled = aiPrefsSaving;
+    modelField.select.disabled = aiPrefsSaving;
+    effortField.select.disabled = aiPrefsSaving;
+    permissionField.select.disabled = aiPrefsSaving;
+  }
+
+  function selectDestination(destination: SettingsDestination): void {
+    currentDestination = destination;
+    lastDestination = destination;
+    try {
+      sessionStorage.setItem('rhwp-settings-destination', destination);
+    } catch {
+      // 세션 저장소가 막혀도 설정 탐색은 계속 동작한다.
+    }
+    renderDestinationState();
+    panes.get(destination)?.scrollTo({ top: 0 });
+  }
+
+  function stagePrefs(partial: Partial<AgentPrefs>): void {
+    prefsDraft = normalizeAgentPrefs({ ...prefsDraft, ...partial });
+    syncPrefsInputs();
+    aiStatus.hidden = true;
+    renderDestinationState();
+  }
+
+  async function applyAiDraft(): Promise<boolean> {
+    const nextPrefs = normalizeAgentPrefs(prefsDraft);
+    if (instructionsDirty) {
+      const maxChars = agentInstructions?.maxChars ?? 30_000;
+      if (!agentInstructions || instructionsEditor.value.length > maxChars) {
+        instructionsMessage = 'AGENTS.md 내용을 확인한 뒤 다시 시도하세요.';
+        renderAgentInstructions();
+        return false;
+      }
+    }
+    if (nextPrefs.defaultPermissionProfile === 'unrestricted'
+      && prefsBaseline.defaultPermissionProfile !== 'unrestricted'
+      && !window.confirm(UNRESTRICTED_DEFAULT_WARNING)) {
+      aiStatus.textContent = '전체 접근 권한 적용을 취소했습니다.';
+      aiStatus.hidden = false;
+      return false;
+    }
+    if (instructionsDirty) {
+      aiPrefsSaving = true;
+      renderDestinationState();
+      try {
+        const savedInstructions = await saveAgentInstructions();
+        if (!savedInstructions) return false;
+      } finally {
+        aiPrefsSaving = false;
+        if (!disposed) renderDestinationState();
+      }
+    }
+    if (!samePrefs(nextPrefs, prefsBaseline)) {
+      const result = trySaveAgentPrefs(nextPrefs);
+      if (!result.ok) {
+        prefsDraft = nextPrefs;
+        aiStatus.textContent = `AI 기본값을 저장하지 못했습니다 · ${result.error}`;
+        aiStatus.hidden = false;
+        renderDestinationState();
+        return false;
+      }
+      prefs = result.value;
+      prefsBaseline = { ...result.value };
+      prefsDraft = { ...result.value };
+      applyDefaults(result.value);
+    }
+    aiStatus.textContent = 'AI 설정을 적용했습니다.';
+    aiStatus.hidden = false;
+    syncPrefsInputs();
+    renderDestinationState();
+    return true;
+  }
+
+  function cancelAiDraft(): void {
+    prefsDraft = { ...prefsBaseline };
+    if (agentInstructions) {
+      instructionsEditor.value = agentInstructions.content;
+      instructionsDraftRevision = agentInstructions.revision;
+    }
+    instructionsDirty = false;
+    instructionsMessage = '';
+    aiStatus.hidden = true;
+    syncPrefsInputs();
+    renderAgentInstructions();
+    renderDestinationState();
+  }
+
+  function askDirtyExit(): Promise<DirtyExitChoice> {
+    const previousFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const overlay = el('div', 'ag-settings-dirty-overlay');
+    overlay.setAttribute('role', 'presentation');
+    const dialog = el('div', 'ag-settings-dirty-dialog');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-labelledby', 'ag-settings-dirty-title');
+    dialog.setAttribute('aria-describedby', 'ag-settings-dirty-description');
+    const dialogTitle = el('h2', 'ag-settings-dirty-title', '변경 사항을 적용할까요?');
+    dialogTitle.id = 'ag-settings-dirty-title';
+    const description = el(
+      'p',
+      'ag-settings-dirty-description',
+      '적용하지 않은 설정이 있습니다. 이동하기 전에 처리해 주세요.',
+    );
+    description.id = 'ag-settings-dirty-description';
+    const actions = el('div', 'ag-settings-dirty-actions');
+    const applyButton = el('button', 'ag-settings-primary', '적용');
+    applyButton.type = 'button';
+    const discardButton = el('button', 'ag-settings-btn ag-settings-danger', '버리기');
+    discardButton.type = 'button';
+    const continueButton = el('button', 'ag-settings-btn', '계속 편집');
+    continueButton.type = 'button';
+    actions.append(applyButton, discardButton, continueButton);
+    dialog.append(dialogTitle, description, actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    return new Promise((resolve) => {
+      const finish = (choice: DirtyExitChoice) => {
+        overlay.remove();
+        previousFocus?.focus();
+        resolve(choice);
+      };
+      applyButton.addEventListener('click', () => finish('apply'));
+      discardButton.addEventListener('click', () => finish('discard'));
+      continueButton.addEventListener('click', () => finish('continue'));
+      overlay.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          finish('continue');
+          return;
+        }
+        if (event.key !== 'Tab') return;
+        const first = applyButton;
+        const last = continueButton;
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      });
+      requestAnimationFrame(() => continueButton.focus());
+    });
+  }
+
+  async function resolveDirtyExit(): Promise<boolean> {
+    if (!isCurrentDestinationDirty()) return true;
+    const choice = await askDirtyExit();
+    if (choice === 'continue') return false;
+    if (choice === 'discard') {
+      if (currentDestination === 'editing') editingSettings.cancel();
+      if (currentDestination === 'ai') cancelAiDraft();
+      return true;
+    }
+    if (currentDestination === 'editing') return editingSettings.apply();
+    if (currentDestination === 'ai') return applyAiDraft();
+    return true;
+  }
+
+  async function requestDestination(destination: SettingsDestination): Promise<void> {
+    if (destination === currentDestination) return;
+    if (!await resolveDirtyExit()) return;
+    selectDestination(destination);
+    navButtons.get(destination)?.focus();
+  }
 
   function templateSize(bytes: number): string {
     return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -1270,12 +1534,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     return withTemplateMutation(() => bridge.deleteTemplate(id));
   }
 
-  function commitPrefs(partial: Partial<AgentPrefs>): void {
-    prefs = saveAgentPrefs(partial);
-    syncPrefsInputs();
-    applyDefaults(prefs);
-  }
-
   /** 설정이 끝나기 전의 pi 는 기본 제공자 후보에서 빠진다. */
   function selectableAgents(): readonly AgentName[] {
     return PROVIDER_ORDER.filter((agent) => agent !== 'pi' || piStatus?.setupComplete === true);
@@ -1286,19 +1544,19 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       agentField.select,
       selectableAgents().map((agent) => ({ id: agent, label: AGENT_LABEL[agent] })),
     );
-    agentField.select.value = prefs.defaultAgent;
-    fillSelectGrouped(modelField.select, modelGroupsForAgent(prefs.defaultAgent));
-    modelField.select.value = resolveModelForAgent(prefs.defaultAgent, prefs.defaultModel);
-    const effortOptions = effortsForAgent(prefs.defaultAgent, prefs.defaultModel);
+    agentField.select.value = prefsDraft.defaultAgent;
+    fillSelectGrouped(modelField.select, modelGroupsForAgent(prefsDraft.defaultAgent));
+    modelField.select.value = resolveModelForAgent(prefsDraft.defaultAgent, prefsDraft.defaultModel);
+    const effortOptions = effortsForAgent(prefsDraft.defaultAgent, prefsDraft.defaultModel);
     // 추론 강도가 없는 프로바이더(cursor 등)에서는 줄 자체를 접는다.
     effortField.field.hidden = effortOptions.length === 0;
     fillSelect(effortField.select, [...effortOptions].reverse());
     effortField.select.value = resolveEffortForAgent(
-      prefs.defaultAgent,
-      prefs.defaultEffort,
-      prefs.defaultModel,
+      prefsDraft.defaultAgent,
+      prefsDraft.defaultEffort,
+      prefsDraft.defaultModel,
     );
-    permissionField.select.value = prefs.defaultPermissionProfile;
+    permissionField.select.value = prefsDraft.defaultPermissionProfile;
   }
 
   function renderCurrentSelection(): void {
@@ -2305,16 +2563,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       if (changedByAgent) instructionsMessage = '승인한 에이전트 변경안을 AGENTS.md에 적용했어요.';
     }
     renderAgentInstructions();
+    if (shellReady) renderDestinationState();
   }
 
   function renderAgentInstructions(): void {
     const maxChars = agentInstructions?.maxChars ?? 30_000;
     instructionsEditor.maxLength = maxChars;
     instructionsEditor.disabled = instructionsBusy || !agentInstructions;
-    instructionsSave.disabled = instructionsBusy
-      || connectionState !== 'connected'
-      || !agentInstructions
-      || !instructionsDirty;
     instructionsReload.disabled = instructionsBusy || connectionState !== 'connected';
     instructionsMeta.textContent = agentInstructions
       ? `AGENTS.md · r${agentInstructions.revision} · ${instructionsEditor.value.length.toLocaleString()} / ${maxChars.toLocaleString()}자`
@@ -2360,8 +2615,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }
   }
 
-  async function saveAgentInstructions(): Promise<void> {
-    if (instructionsBusy || connectionState !== 'connected' || !agentInstructions || !instructionsDirty) return;
+  async function saveAgentInstructions(): Promise<boolean> {
+    if (!instructionsDirty) return true;
+    if (instructionsBusy || connectionState !== 'connected' || !agentInstructions) return false;
     instructionsBusy = true;
     instructionsMessage = '';
     renderAgentInstructions();
@@ -2369,7 +2625,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       instructionsEditor.value,
       instructionsDraftRevision,
     );
-    if (disposed) return;
+    if (disposed) return false;
     instructionsBusy = false;
     if (status) {
       acceptAgentInstructions(status, 'user', true);
@@ -2378,6 +2634,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       instructionsMessage = '저장하지 못했어요. 최신 지시를 다시 불러온 뒤 시도하세요.';
     }
     renderAgentInstructions();
+    renderDestinationState();
+    return Boolean(status);
   }
 
   async function confirmAgentInstructionsDraft(): Promise<void> {
@@ -2453,12 +2711,20 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   renderTemplates();
   renderUsage();
   renderPi();
+  renderDestinationState();
 
   return {
     element,
-    open(): void {
-      prefs = loadAgentPrefs();
+    open(destination?: SettingsDestination): void {
+      if (!isAiDirty()) {
+        prefs = loadAgentPrefs();
+        prefsBaseline = { ...prefs };
+        prefsDraft = { ...prefs };
+      }
       connectionState = bridge.getConnectionState();
+      editingSettings.open();
+      if (destination) selectDestination(destination);
+      else selectDestination(lastDestination);
       syncPrefsInputs();
       renderCurrentSelection();
       renderConnection();
@@ -2475,8 +2741,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       void refreshTemplates();
     },
     close(): void {
+      if (editingSettings.isDirty()) editingSettings.cancel();
+      if (isAiDirty()) cancelAiDraft();
       closeAgentSetup();
       finishTemplateName(null);
+    },
+    requestClose: resolveDirtyExit,
+    isDirty(): boolean {
+      return editingSettings.isDirty() || isAiDirty();
     },
     openAgentSetup,
     beginAgentConnect,
@@ -2646,6 +2918,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       }
       if (setupProgressCreepTimer) clearInterval(setupProgressCreepTimer);
       if (piProgressCreepTimer) clearInterval(piProgressCreepTimer);
+      editingSettings.dispose();
       element.remove();
       setupOverlay.remove();
       finishTemplateName(null);

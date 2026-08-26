@@ -1,0 +1,107 @@
+/* Flat, compact button geometry shared by the agent sidebar and focus workspace.
+   This file loads after the component styles so the visual system can be removed
+   as one unit without changing button markup or behavior. */
+.ag-root {
+  --ag-button-radius: 5px;
+  --ag-button-radius-compact: 4px;
+  --ag-button-height: 28px;
+  --ag-button-height-compact: 26px;
+}
+
+/* The previous button layer intentionally distorted outlines. Keep every hit
+   target and state, but render the controls with precise modern geometry. */
+.ag-root button,
+.ag-root [role='button'] {
+  border-radius: var(--ag-button-radius);
+  filter: none !important;
+}
+
+.ag-root :is(
+  .ag-header-icon-btn,
+  .ag-workspace-icon-btn,
+  .ag-reference-quick-add,
+  .ag-reference-remove,
+  .ag-references-close
+) {
+  width: var(--ag-button-height);
+  height: var(--ag-button-height);
+  flex-basis: var(--ag-button-height);
+  border-radius: var(--ag-button-radius);
+}
+
+.ag-root :is(
+  .ag-permission-btn,
+  .ag-skills-btn,
+  .ag-takeover-btn,
+  .ag-conn-banner-retry,
+  .ag-hub-retry-btn,
+  .ag-settings-btn,
+  .ag-references-btn,
+  .ag-reference-add
+) {
+  min-height: var(--ag-button-height-compact);
+  height: var(--ag-button-height-compact);
+  padding-inline: 8px;
+  border-radius: var(--ag-button-radius-compact);
+  box-shadow: none;
+}
+
+.ag-root .ag-settings-btn {
+  border-color: var(--ag-border);
+  background: transparent;
+}
+
+.ag-root .ag-settings-primary {
+  min-height: var(--ag-button-height);
+  height: var(--ag-button-height);
+  padding-inline: 11px;
+  border-radius: var(--ag-button-radius);
+  box-shadow: none;
+}
+
+.ag-root .ag-settings-nav {
+  gap: 2px;
+}
+
+.ag-root .ag-settings-nav-button {
+  min-height: 34px;
+  padding-inline: 10px;
+  border-radius: var(--ag-button-radius);
+  font-weight: 600;
+}
+
+.ag-root .ag-settings-nav-button.ag-active {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--ag-accent) 12%, var(--ag-bg-2));
+}
+
+.ag-root .ag-send {
+  width: var(--ag-button-height);
+  height: var(--ag-button-height);
+  border-radius: var(--ag-button-radius);
+  box-shadow: none;
+}
+
+.ag-root :is(
+  .ag-threads-new,
+  .ag-skills-new,
+  .ag-skill-generate,
+  .ag-skill-save,
+  .ag-skill-copy,
+  .ag-skill-secondary,
+  .ag-skill-danger,
+  .ag-skill-toggle,
+  .ag-skill-upload-label,
+  .ag-workspace-exit-btn
+) {
+  border-radius: var(--ag-button-radius);
+  box-shadow: none;
+  filter: none !important;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ag-root button,
+  .ag-root [role='button'] {
+    transition-duration: 120ms;
+  }
+}

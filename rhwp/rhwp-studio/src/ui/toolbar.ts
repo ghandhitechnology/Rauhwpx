@@ -11,7 +11,7 @@ import {
   type FontMenuEntry,
 } from '@/ui/font-menu-filter';
 
-type FontMenuCategory = 'all' | 'current' | 'document' | 'fontSets' | 'system';
+type FontMenuCategory = 'all' | 'current' | 'document' | 'recent' | 'fontSets' | 'system';
 
 const BASE_FONTS = ['함초롬바탕', '함초롬돋움', '맑은 고딕', '나눔고딕', '바탕', '돋움', '궁서'];
 
@@ -19,6 +19,7 @@ const FONT_MENU_CATEGORIES: ReadonlyArray<{ id: FontMenuCategory; label: string 
   { id: 'all', label: '모든 글꼴' },
   { id: 'current', label: '현재 글꼴' },
   { id: 'document', label: '문서 글꼴' },
+  { id: 'recent', label: '최근 글꼴' },
   { id: 'fontSets', label: '대표 글꼴' },
   { id: 'system', label: '시스템 글꼴' },
 ];
@@ -114,6 +115,10 @@ export class Toolbar {
     });
 
     eventBus.on('local-fonts-changed', () => {
+      this.refreshFontDropdown();
+    });
+
+    eventBus.on('font-settings-changed', () => {
       this.refreshFontDropdown();
     });
   }
@@ -282,6 +287,7 @@ export class Toolbar {
         const fontId = this.wasm.findOrCreateFontId(name);
         if (fontId >= 0) {
           this.eventBus.emit('format-char', { fontId } as CharProperties);
+          userSettings.recordRecentFont(name);
         }
       } else {
         // 특정 언어만 적용 (fontIds 배열)
@@ -300,6 +306,7 @@ export class Toolbar {
             }
           }
           this.eventBus.emit('format-char', { fontIds: ids } as CharProperties);
+          userSettings.recordRecentFont(name);
         }
       }
     });
@@ -745,7 +752,7 @@ export class Toolbar {
     const categories = document.createElement('div');
     categories.className = 'font-picker-categories';
     categories.setAttribute('role', 'tablist');
-    for (const category of FONT_MENU_CATEGORIES) {
+    for (const category of this.getFontMenuCategories()) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'font-picker-category';
@@ -829,7 +836,8 @@ export class Toolbar {
     const heading = menu.querySelector<HTMLElement>('[data-role="heading"]');
     const list = menu.querySelector<HTMLElement>('[data-role="list"]');
     if (!heading || !list) return;
-    const category = FONT_MENU_CATEGORIES.find(item => item.id === this.fontMenuCategory)!;
+    const category = this.getFontMenuCategories().find(item => item.id === this.fontMenuCategory)
+      ?? FONT_MENU_CATEGORIES[0];
     const entries = filterFontMenuEntries(
       this.getFontMenuEntries(this.fontMenuCategory),
       this.fontMenuQuery,
@@ -864,6 +872,12 @@ export class Toolbar {
   }
 
   private getFontMenuEntries(category: FontMenuCategory): FontMenuEntry[] {
+    const fontSettings = userSettings.getFontSettings();
+    const recentFonts = fontSettings.showRecentFonts
+      ? fontSettings.recentFonts
+        .slice(0, fontSettings.recentFontCount)
+        .map(name => ({ value: name, label: name }))
+      : [];
     const current = this.fontName.value && !this.fontName.value.startsWith('__fontset__')
       ? [{ value: this.fontName.value, label: this.fontName.value }]
       : [];
@@ -878,6 +892,8 @@ export class Toolbar {
         return current;
       case 'document':
         return documentFonts;
+      case 'recent':
+        return recentFonts;
       case 'fontSets':
         return fontSets;
       case 'system':
@@ -885,12 +901,21 @@ export class Toolbar {
       case 'all':
         return this.uniqueFontMenuEntries([
           ...current,
+          ...recentFonts,
           ...documentFonts,
           ...baseFonts,
           ...fontSets,
           ...getLocalFonts().map(name => ({ value: name, label: name })),
         ]);
     }
+  }
+
+  private getFontMenuCategories(): ReadonlyArray<{ id: FontMenuCategory; label: string }> {
+    const fontSettings = userSettings.getFontSettings();
+    return FONT_MENU_CATEGORIES.filter(category => (
+      category.id !== 'recent'
+      || (fontSettings.showRecentFonts && fontSettings.recentFonts.length > 0)
+    ));
   }
 
   private uniqueFontMenuEntries(entries: readonly FontMenuEntry[]): FontMenuEntry[] {

@@ -6,6 +6,7 @@ import {
   loadAgentPrefs,
   normalizeAgentPrefs,
   saveAgentPrefs,
+  trySaveAgentPrefs,
 } from '../src/agent/agent-prefs.ts';
 import { setCursorModels, setPiModels } from '../src/agent/models.ts';
 import type { PiModelConfig } from '../src/agent/types.ts';
@@ -164,6 +165,19 @@ test('쓰기가 실패해도 호출자는 값을 받는다', () => {
     },
   );
   assert.equal(prefs.defaultModel, 'opus');
+});
+
+test('결과형 저장 API는 쓰기 실패를 호출자에게 남긴다', () => {
+  const result = trySaveAgentPrefs(
+    { defaultAgent: 'claude', defaultModel: 'opus' },
+    {
+      getItem: () => null,
+      setItem: () => { throw new Error('quota'); },
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.value.defaultModel, 'opus');
+  if (!result.ok) assert.match(result.error, /quota/);
 });
 
 test('grok 기본값은 저장되고 모르는 모델/강도는 grok 기준으로 접힌다', () => {

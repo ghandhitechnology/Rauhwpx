@@ -22,8 +22,8 @@ const pdfDialogSource = readFileSync(
   new URL('../src/ui/pdf-print-dialog.ts', import.meta.url),
   'utf8',
 );
-const optionsDialogSource = readFileSync(
-  new URL('../src/ui/options-dialog.ts', import.meta.url),
+const editingSettingsSource = readFileSync(
+  new URL('../src/ui/agent-sidebar/settings-editing.ts', import.meta.url),
   'utf8',
 );
 const printHtml = readFileSync(
@@ -84,7 +84,7 @@ test('PDF 경로는 안내·진행 모달을 닫은 뒤 native 인쇄창을 호�
   assert.match(pdfDialogSource, /printProgressText\('pdf'/);
   assert.match(commandSource, /getShowPdfPrintGuidance\(\)/);
   assert.match(commandSource, /setShowPdfPrintGuidance\(false\)/);
-  assert.match(optionsDialogSource, /PDF로 저장할 때 저장 방법 안내 표시/);
+  assert.doesNotMatch(editingSettingsSource, /PDF 저장 안내/);
   assert.match(commandSource, /dialog\.closeBeforePrint\(\)/);
   assert.match(commandSource, /await waitForHostPaint\(\)/);
   assert.match(commandSource, /document\.title = pdfPrintTitle\(wasm\.fileName\)/);
