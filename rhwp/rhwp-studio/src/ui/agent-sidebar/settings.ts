@@ -323,6 +323,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let instructionsDraftRevision = 0;
   let instructionsDirty = false;
   let instructionsBusy = false;
+  let aiPrefsSaving = false;
   let instructionsProposalBusy = false;
   let instructionsMessage = '';
   let currentDestination: SettingsDestination = 'editing';
@@ -1240,8 +1241,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       }
     }
     const dirty = isAiDirty();
-    aiApply.disabled = !dirty || instructionsBusy;
-    aiCancel.disabled = !dirty || instructionsBusy;
+    aiApply.disabled = !dirty || instructionsBusy || aiPrefsSaving;
+    aiCancel.disabled = !dirty || instructionsBusy || aiPrefsSaving;
+    agentField.select.disabled = aiPrefsSaving;
+    modelField.select.disabled = aiPrefsSaving;
+    effortField.select.disabled = aiPrefsSaving;
+    permissionField.select.disabled = aiPrefsSaving;
   }
 
   function selectDestination(destination: SettingsDestination): void {
@@ -1281,8 +1286,15 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       return false;
     }
     if (instructionsDirty) {
-      const savedInstructions = await saveAgentInstructions();
-      if (!savedInstructions) return false;
+      aiPrefsSaving = true;
+      renderDestinationState();
+      try {
+        const savedInstructions = await saveAgentInstructions();
+        if (!savedInstructions) return false;
+      } finally {
+        aiPrefsSaving = false;
+        if (!disposed) renderDestinationState();
+      }
     }
     if (!samePrefs(nextPrefs, prefsBaseline)) {
       const result = trySaveAgentPrefs(nextPrefs);

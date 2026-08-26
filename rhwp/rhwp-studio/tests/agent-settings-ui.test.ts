@@ -334,6 +334,14 @@ test('AI 기본 설정은 Apply 전까지 초안이고 성공 후 사이드바�
   assert.match(settings, /'새 대화부터 적용돼요\.'/);
   assert.match(settings, /nextPrefs\.defaultPermissionProfile === 'unrestricted'[\s\S]*window\.confirm\(UNRESTRICTED_DEFAULT_WARNING\)/);
   assert.match(settings, /saveAgentInstructions\(\)[\s\S]*trySaveAgentPrefs\(nextPrefs\)/);
+  assert.match(settings, /agentField\.select\.disabled = aiPrefsSaving/);
+  assert.match(settings, /modelField\.select\.disabled = aiPrefsSaving/);
+  assert.match(settings, /effortField\.select\.disabled = aiPrefsSaving/);
+  assert.match(settings, /permissionField\.select\.disabled = aiPrefsSaving/);
+  assert.match(
+    settings,
+    /aiPrefsSaving = true;[\s\S]*try \{[\s\S]*await saveAgentInstructions\(\)[\s\S]*finally \{[\s\S]*aiPrefsSaving = false;/,
+  );
 });
 
 test('사이드바는 저장된 기본값으로 시작하고 새 대화에 적용한다', () => {

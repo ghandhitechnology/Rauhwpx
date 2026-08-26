@@ -1625,6 +1625,7 @@
   --ag-text: var(--n-text);
   --ag-text-secondary: var(--n-text-secondary);
   --ag-err: var(--ui-danger);
+
   box-sizing: border-box;
   width: min(420px, 100%);
   padding: 20px;
