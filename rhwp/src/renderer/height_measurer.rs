@@ -140,6 +140,23 @@ fn empty_paragraph_fallback_line_metrics(
     ))
 }
 
+/// Whether a composed table-cell line contributes its stored trailing spacing.
+///
+/// Full-cell and partial-cell paint both stop at the final visible line box.  The
+/// one exception is a non-inline CellBreak table: there the last spacing is a
+/// structural pagination advance between paragraph units, not trailing paint.
+#[inline]
+pub(crate) fn include_table_cell_line_spacing(
+    table: &Table,
+    is_cell_last_line: bool,
+    cell_para_count: usize,
+) -> bool {
+    !is_cell_last_line
+        || (cell_para_count > 1
+            && !table.common.treat_as_char
+            && matches!(table.page_break, TablePageBreak::CellBreak))
+}
+
 /// 문단의 측정된 높이 정보
 #[derive(Debug, Clone)]
 pub struct MeasuredParagraph {
@@ -1253,17 +1270,14 @@ impl HeightMeasurer {
                                                         && is_cell_last_line),
                                             )
                                         };
-                                        // [Task #874 #4 / #1086] CellBreak/TAC 표는 기존
-                                        // trailing geometry 를 보존(aift.hwp pi=123, KTX TOC),
-                                        // block RowBreak 표는 렌더 가시 높이처럼 셀 마지막 줄
-                                        // trailing 을 제외(k-water-rfp pi=180).
-                                        let is_block_rowbreak =
-                                            matches!(table.page_break, TablePageBreak::RowBreak)
-                                                && !table.common.treat_as_char;
-                                        let include_trailing_ls =
-                                            !is_cell_last_line || cell_para_count > 1;
-                                        let include_trailing_ls = include_trailing_ls
-                                            && (!is_cell_last_line || !is_block_rowbreak);
+                                        // Paint excludes the final visible gap.  Only a
+                                        // fragmentable, non-inline CellBreak cell keeps it as a
+                                        // structural paragraph-unit advance.
+                                        let include_trailing_ls = include_table_cell_line_spacing(
+                                            table,
+                                            is_cell_last_line,
+                                            cell_para_count,
+                                        );
                                         if include_trailing_ls {
                                             h + hwpunit_to_px(line.line_spacing, self.dpi)
                                         } else {
@@ -1439,18 +1453,17 @@ impl HeightMeasurer {
                     content_height + total_pad
                 };
                 // [Task #1763] 한컴 선언 셀높이 권위 — 저장 cell.height 는 trailing ls
-                // 미포함(825행 주석 원칙)인데, 다문단 셀 측정은 셀 마지막 줄 trailing ls
-                // 를 포함(#874/#1086 보존 조건)해 required 가 선언높이를 초과 확장할 수
-                // 있다(2501937 row0: 콘텐츠 10016HU + trailing 600HU + pad → 149.1px >
-                // 선언 142.2px, 한글은 선언 유지). 초과분이 전적으로 trailing ls 때문이면
-                // (trailing 제외 콘텐츠+pad 가 선언 안) 선언높이로 clamp — 콘텐츠가 진짜
-                // 초과하는 기존 보존 케이스(aift/KTX)는 조건 미충족으로 불변.
-                // RowBreak(행 단위 쪽나눔) 표는 TAC 여부와 무관하게 clamp 제외 —
-                // 분할 배치가 trailing 포함 측정에 정합 (rowbreak-problem-pages p11~13).
+                // 미포함(825행 주석 원칙)이다. 비-TAC CellBreak 다문단 셀은 분할용
+                // structural trailing 을 보존하므로 required 가 선언높이를 초과할 수 있다
+                // (2501937 row0: 콘텐츠 10016HU + trailing 600HU + pad → 149.1px >
+                // 선언 142.2px). 초과분이 전적으로 그 trailing 이면 선언높이로 clamp.
+                // TAC/RowBreak 는 측정 단계에서 마지막 가시 gap 을 이미 제외하므로 같은
+                // helper 로 0을 반환해 여기서 이중 차감하지 않는다.
                 let cell_last_trailing_ls = if cell.text_direction == 0
                     && !has_nested_table_in_cell
                     && cell.paragraphs.len() > 1
                     && !matches!(table.page_break, TablePageBreak::RowBreak)
+                    && include_table_cell_line_spacing(table, true, cell.paragraphs.len())
                 {
                     cell.paragraphs
                         .last()
@@ -1806,17 +1819,11 @@ impl HeightMeasurer {
                                                         && is_cell_last_line),
                                             )
                                         };
-                                        // [Task #874 #4 / #1086] CellBreak/TAC 표는 기존
-                                        // trailing geometry 를 보존(aift.hwp pi=123, KTX TOC),
-                                        // block RowBreak 표는 렌더 가시 높이처럼 셀 마지막 줄
-                                        // trailing 을 제외(k-water-rfp pi=180).
-                                        let is_block_rowbreak =
-                                            matches!(table.page_break, TablePageBreak::RowBreak)
-                                                && !table.common.treat_as_char;
-                                        let include_trailing_ls =
-                                            !is_cell_last_line || cell_para_count > 1;
-                                        let include_trailing_ls = include_trailing_ls
-                                            && (!is_cell_last_line || !is_block_rowbreak);
+                                        let include_trailing_ls = include_table_cell_line_spacing(
+                                            table,
+                                            is_cell_last_line,
+                                            cell_para_count,
+                                        );
                                         if include_trailing_ls {
                                             h + hwpunit_to_px(line.line_spacing, self.dpi)
                                         } else {
@@ -2928,6 +2935,7 @@ mod tests {
     use super::*;
     use crate::model::paragraph::{LineSeg, Paragraph};
     use crate::model::table::{Cell, Table};
+    use crate::renderer::layout::LayoutEngine;
 
     fn wide_tac_table(width: u32) -> Box<Table> {
         Box::new(Table {
@@ -3082,6 +3090,95 @@ mod tests {
         let measured = measurer.measure_table(&table, 0, 0, &styles);
         assert_eq!(measured.row_heights.len(), 2);
         assert!(measured.total_height > 0.0);
+    }
+
+    fn stored_two_paragraph_table(treat_as_char: bool, page_break: TablePageBreak) -> Table {
+        let paragraph = || Paragraph {
+            char_count: 1,
+            line_segs: vec![LineSeg {
+                line_height: 1600,
+                line_spacing: 960,
+                segment_width: 10_000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        Table {
+            row_count: 1,
+            col_count: 1,
+            page_break,
+            common: CommonObjAttr {
+                treat_as_char,
+                width: 10_000,
+                ..Default::default()
+            },
+            cells: vec![Cell {
+                row_span: 1,
+                col_span: 1,
+                width: 10_000,
+                paragraphs: vec![paragraph(), paragraph()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn whole_row_cut_height_shares_final_line_spacing_policy_with_measurer() {
+        let measurer = HeightMeasurer::with_default_dpi();
+        let styles = ResolvedStyleSet::default();
+
+        for (treat_as_char, page_break) in [
+            (true, TablePageBreak::None),
+            (true, TablePageBreak::RowBreak),
+            (true, TablePageBreak::CellBreak),
+            (false, TablePageBreak::CellBreak),
+        ] {
+            let table = stored_two_paragraph_table(treat_as_char, page_break);
+            let measured = measurer.measure_table(&table, 0, 0, &styles).row_heights[0];
+            // A layout engine owns per-document pointer-keyed cell-unit caches; use the same
+            // lifecycle as production instead of reusing one engine across unrelated fixtures.
+            let layout = LayoutEngine::new(DEFAULT_DPI);
+            let cut = layout.row_cut_content_height(&table, 0, &[], &[], &styles);
+            assert!(
+                (cut - measured).abs() < 0.001,
+                "tac={treat_as_char} break={page_break:?}: cut={cut} measured={measured}",
+            );
+        }
+    }
+
+    #[test]
+    fn tac_multi_paragraph_cell_excludes_final_spacing_for_atomic_and_rowbreak_tables() {
+        let measurer = HeightMeasurer::with_default_dpi();
+        let styles = ResolvedStyleSet::default();
+        // Two 1600-HU line boxes plus only the first line's 960-HU advance.
+        let expected = hwpunit_to_px(4160, DEFAULT_DPI);
+
+        for page_break in [TablePageBreak::None, TablePageBreak::RowBreak] {
+            let table = stored_two_paragraph_table(true, page_break);
+            let measured = measurer.measure_table(&table, 0, 0, &styles);
+            assert!(
+                (measured.row_heights[0] - expected).abs() < 0.001,
+                "TAC {page_break:?}: row={} expected={expected}",
+                measured.row_heights[0]
+            );
+        }
+    }
+
+    #[test]
+    fn non_tac_cellbreak_keeps_structural_final_spacing() {
+        let measurer = HeightMeasurer::with_default_dpi();
+        let styles = ResolvedStyleSet::default();
+        let table = stored_two_paragraph_table(false, TablePageBreak::CellBreak);
+        let measured = measurer.measure_table(&table, 0, 0, &styles);
+        // CellBreak exposes paragraph units to pagination, so both 960-HU advances remain.
+        let expected = hwpunit_to_px(5120, DEFAULT_DPI);
+
+        assert!(
+            (measured.row_heights[0] - expected).abs() < 0.001,
+            "row={} expected={expected}",
+            measured.row_heights[0]
+        );
     }
 
     #[test]

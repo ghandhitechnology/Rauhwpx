@@ -33,6 +33,10 @@ PIXEL_DIFF_THRESHOLD = 32  # task1274 기본과 동일
 INK_WHITE_CUTOFF = 245     # 이 값 이상(모든 채널)이면 배경(잉크 아님)
 
 
+class ExportError(RuntimeError):
+    """Raised when rhwp cannot render a requested page."""
+
+
 def rhwp_bin():
     for p in ("target/release/rhwp.exe", "target/release/rhwp",
               "target/debug/rhwp.exe", "target/debug/rhwp"):
@@ -65,11 +69,11 @@ def export_rhwp_png(binary, hwp, page0, dpi, out_path, font_paths):
     res = subprocess.run(cmd, capture_output=True, text=True,
                          encoding="utf-8", errors="replace")
     if res.returncode != 0:
-        sys.exit(f"export-png 실패(p{page0}):\n{res.stderr}")
+        raise ExportError(f"export-png 실패(p{page0}):\n{res.stderr}")
     # rhwp 는 page_00N.png 또는 <stem>_00N.png 형태로 낼 수 있음 — 가장 최근 png 채택
     cand = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir) if f.lower().endswith(".png")]
     if not cand:
-        sys.exit(f"export-png 산출 PNG 없음(p{page0}) in {tmp_dir}\n{res.stdout}")
+        raise ExportError(f"export-png 산출 PNG 없음(p{page0}) in {tmp_dir}\n{res.stdout}")
     # 파일명에 (page0+1) 또는 page0 이 들어간 것을 우선
     want = [c for c in cand if f"{page0 + 1:03d}" in os.path.basename(c)
             or f"{page0 + 1}" in os.path.basename(c)]
@@ -173,16 +177,25 @@ def main():
     ap.add_argument("--dpi", type=float, default=96.0)
     ap.add_argument("--out", default="output/poc/oracle")
     ap.add_argument("--font-path", action="append", default=[])
+    ap.add_argument(
+        "--metrics-only",
+        action="store_true",
+        help="compute metrics without retaining page, overlay, or review PNGs",
+    )
     args = ap.parse_args()
 
     binary = rhwp_bin()
     pages = parse_pages(args.pages)
-    for sub in ("rhwp_png", "pdf_png", "overlay", "review"):
+    output_dirs = ["rhwp_png", "pdf_png"]
+    if not args.metrics_only:
+        output_dirs.extend(["overlay", "review"])
+    for sub in output_dirs:
         os.makedirs(os.path.join(args.out, sub), exist_ok=True)
 
     pdf_doc = fitz.open(args.pdf)
     n_pdf = pdf_doc.page_count
     results = []
+    export_error = None
     for p in pages:  # 1-based
         if p < 1 or p > n_pdf:
             print(f"[skip] page {p} (PDF pages=1..{n_pdf})")
@@ -190,26 +203,46 @@ def main():
         page0 = p - 1
         rhwp_png = os.path.join(args.out, "rhwp_png", f"page_{p:03d}.png")
         pdf_png = os.path.join(args.out, "pdf_png", f"page_{p:03d}.png")
-        export_rhwp_png(binary, args.hwp, page0, args.dpi, rhwp_png, args.font_path)
+        try:
+            export_rhwp_png(binary, args.hwp, page0, args.dpi, rhwp_png, args.font_path)
+        except ExportError as error:
+            export_error = str(error)
+            print(export_error, file=sys.stderr)
+            break
         render_pdf_png(pdf_doc, page0, args.dpi, pdf_png)
 
         ra = Image.open(rhwp_png).convert("RGB")
         pb = Image.open(pdf_png).convert("RGB")
         ca, cb = to_common_canvas(ra, pb)
         metrics, masks = compute_metrics(ca, cb)
-        overlay = build_overlay(ca, cb, masks)
-        overlay_png = os.path.join(args.out, "overlay", f"overlay_{p:03d}.png")
-        overlay.save(overlay_png)
 
         cap = (f"page {p}  pixel_match={metrics['pixel_match_percent']:.2f}%  "
                f"ink_match={metrics['ink_match_percent']:.2f}%  "
                f"proxy={metrics['visual_accuracy_proxy_percent']:.2f}%")
-        review = build_review(ca, cb, overlay, cap)
-        review_png = os.path.join(args.out, "review", f"review_{p:03d}.png")
-        review.save(review_png)
-
-        row = {"page": p, "rhwp_png": rhwp_png, "pdf_png": pdf_png,
-               "overlay_png": overlay_png, "review_png": review_png, **metrics}
+        row = {"page": p, **metrics}
+        if args.metrics_only:
+            # Close the source image handles before unlinking on Windows. The
+            # common canvases and NumPy masks retain everything needed above.
+            ra.close()
+            pb.close()
+            for path in (rhwp_png, pdf_png):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        else:
+            overlay = build_overlay(ca, cb, masks)
+            overlay_png = os.path.join(args.out, "overlay", f"overlay_{p:03d}.png")
+            overlay.save(overlay_png)
+            review = build_review(ca, cb, overlay, cap)
+            review_png = os.path.join(args.out, "review", f"review_{p:03d}.png")
+            review.save(review_png)
+            row.update({
+                "rhwp_png": rhwp_png,
+                "pdf_png": pdf_png,
+                "overlay_png": overlay_png,
+                "review_png": review_png,
+            })
         results.append(row)
         print(f"[page {p}] {cap}")
 
@@ -223,7 +256,8 @@ def main():
     with open(os.path.join(args.out, "metrics.json"), "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
     print(f"metrics: {os.path.join(args.out, 'metrics.json')}")
+    return 1 if export_error is not None else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

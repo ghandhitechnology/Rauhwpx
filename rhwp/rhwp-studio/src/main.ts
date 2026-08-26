@@ -114,6 +114,18 @@ import {
 } from './versioning/index.ts';
 import type { AgentEditingLease } from './agent/types.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
+import {
+  contextualEditingToolbarMode,
+  contextualObjectCommandEnabled,
+  type ContextualEditingToolbarMode,
+} from '@/ui/contextual-editing-toolbar';
+import {
+  canGroupTopLevelBodyObjects,
+  canUngroupTopLevelBodyObject,
+  isTopLevelBodyObject,
+  isTopLevelLayerOrderTarget,
+  objectAddressScope,
+} from '@/core/object-address';
 
 const wasm = new WasmBridge();
 const eventBus = new EventBus();
@@ -217,6 +229,8 @@ function getContext(): EditorContext {
   const hasDoc = wasm.pageCount > 0;
   const canEditFormField = inputHandler?.canEditCurrentFormField() ?? false;
   const isFormMode = editMode === 'form';
+  const selectedObject = inputHandler?.getSelectedPictureRef() ?? null;
+  const selectedObjects = inputHandler?.getSelectedPictureRefs() ?? [];
   return {
     hasDocument: hasDoc,
     hasSelection: inputHandler?.hasSelection() ?? false,
@@ -227,6 +241,9 @@ function getContext(): EditorContext {
     hasTableTransposeClipboard: wasm.hasTableTransposeClipboard(),
     inTableObjectSelection: inputHandler?.isInTableObjectSelection() ?? false,
     inPictureObjectSelection: inputHandler?.isInPictureObjectSelection() ?? false,
+    canArrangeSelectedObject: !!selectedObject && isTopLevelLayerOrderTarget(selectedObject),
+    canGroupSelectedObjects: canGroupTopLevelBodyObjects(selectedObjects),
+    canUngroupSelectedObject: canUngroupTopLevelBodyObject(selectedObject),
     inField: inputHandler?.isInField() ?? false,
     isEditable: !documentReadOnly && !agentEditingLease.active && (!isFormMode || canEditFormField),
     readOnly: documentReadOnly,
@@ -1087,37 +1104,101 @@ function setupEventListeners(): void {
     }
   });
 
-  // 개체 선택 시 회전/대칭 버튼 그룹 표시/숨김
-  const rotateGroup = document.querySelector('.tb-rotate-group') as HTMLElement | null;
+  const modeGroups = Array.from(
+    document.querySelectorAll<HTMLElement>('#icon-toolbar > .tb-mode-group[data-toolbar-mode]'),
+  );
+  const defaultTbGroups = Array.from(
+    document.querySelectorAll<HTMLElement>('#icon-toolbar > .tb-group:not(.tb-mode-group), #icon-toolbar > .tb-sep'),
+  );
+  let objectSelected = false;
+  let tableObjectSelected = false;
+  let headerFooterActive = false;
   let noteToolbarActive = false;
-  if (rotateGroup) {
-    eventBus.on('picture-object-selection-changed', (selected) => {
-      rotateGroup.style.display = (selected as boolean) && !noteToolbarActive ? '' : 'none';
+
+  const applyContextualToolbarMode = (): ContextualEditingToolbarMode => {
+    const context = getContext();
+    const mode = contextualEditingToolbarMode({
+      objectSelected,
+      inTable: tableObjectSelected
+        || context.inTableObjectSelection
+        || context.inCellSelectionMode
+        || context.inTable,
+      headerFooterActive,
+      noteActive: noteToolbarActive,
     });
-  }
+    defaultTbGroups.forEach((element) => {
+      element.style.display = mode === 'default' ? '' : 'none';
+    });
+    modeGroups.forEach((group) => {
+      group.style.display = group.dataset.toolbarMode === mode ? '' : 'none';
+      if (group.dataset.toolbarMode === mode) {
+        const selectedObject = inputHandler?.getSelectedPictureRef() ?? null;
+        const selectedObjects = inputHandler?.getSelectedPictureRefs() ?? [];
+        const selectedObjectScope = selectedObject ? objectAddressScope(selectedObject) : null;
+        const objectSelection = {
+          kind: selectedObject?.type ?? null,
+          count: selectedObjects.length,
+          topLevel: selectedObjects.length > 0 && selectedObjects.every(isTopLevelBodyObject),
+          arrangeable: context.canArrangeSelectedObject,
+          groupable: context.canGroupSelectedObjects,
+          ungroupable: context.canUngroupSelectedObject,
+          deletable: Boolean(
+            selectedObject
+            && (
+              selectedObjectScope === 'body'
+              || (selectedObjectScope === 'cell' && selectedObject.type === 'image')
+            ),
+          ),
+          propertyEditable: Boolean(
+            selectedObject
+            && selectedObjectScope !== 'memo'
+            && (selectedObjectScope !== 'note' || selectedObject.type === 'equation'),
+          ),
+        };
+        group.querySelectorAll<HTMLButtonElement>('.tb-btn[data-cmd]').forEach((button) => {
+          const command = button.dataset.cmd ?? '';
+          button.disabled = !dispatcher.isEnabled(command)
+            || (mode === 'object' && !contextualObjectCommandEnabled(command, objectSelection));
+        });
+      }
+    });
+    document.getElementById('icon-toolbar')?.setAttribute('data-context-mode', mode);
+    return mode;
+  };
+
+  eventBus.on('picture-object-selection-changed', (selected) => {
+    objectSelected = selected as boolean;
+    if (objectSelected) {
+      tableObjectSelected = false;
+      setBasicToolboxExpanded(true);
+    }
+    applyContextualToolbarMode();
+  });
+  eventBus.on('table-object-selection-changed', (selected) => {
+    tableObjectSelected = selected as boolean;
+    if (tableObjectSelected) {
+      objectSelected = false;
+      setBasicToolboxExpanded(true);
+    }
+    applyContextualToolbarMode();
+  });
+  eventBus.on('cursor-format-changed', applyContextualToolbarMode);
+  eventBus.on('command-state-changed', applyContextualToolbarMode);
 
   // 머리말/꼬리말 편집 모드 시 도구상자 전환 + 본문 dimming
-  const hfGroup = document.querySelector('.tb-headerfooter-group') as HTMLElement | null;
-  const hfLabel = hfGroup?.querySelector('.tb-hf-label') as HTMLElement | null;
-  const noteGroup = document.querySelector('.tb-note-group') as HTMLElement | null;
-  const defaultTbGroups = document.querySelectorAll('#icon-toolbar > .tb-group:not(.tb-headerfooter-group):not(.tb-note-group):not(.tb-rotate-group), #icon-toolbar > .tb-sep');
+  const hfLabel = document.querySelector<HTMLElement>('.tb-headerfooter-group .tb-hf-label');
   const scrollContainer = document.getElementById('scroll-container');
-  const styleBar = document.getElementById('style-bar');
 
   eventBus.on('headerFooterModeChanged', (mode) => {
     const isActive = (mode as string) !== 'none';
+    headerFooterActive = isActive;
     // 접힌 기본 도구 상자는 머리말/꼬리말 전용 버튼을 가리므로 모드 진입 시 펼친다.
     if (isActive) setBasicToolboxExpanded(true);
     // 도구상자 전환
-    if (hfGroup) {
-      hfGroup.style.display = isActive ? '' : 'none';
-    }
     if (hfLabel) {
       hfLabel.textContent = (mode as string) === 'header' ? '머리말' : (mode as string) === 'footer' ? '꼬리말' : '';
     }
-    defaultTbGroups.forEach((el) => {
-      (el as HTMLElement).style.display = isActive ? 'none' : '';
-    });
+    applyContextualToolbarMode();
     // 서식 도구 모음은 머리말/꼬리말 편집 시에도 유지 (문단/글자 모양 설정 필요)
     // 본문 dimming
     if (scrollContainer) {
@@ -1133,16 +1214,10 @@ function setupEventListeners(): void {
     const isActive = active as boolean;
     noteToolbarActive = isActive;
     if (isActive) setBasicToolboxExpanded(true);
-    if (noteGroup) {
-      noteGroup.style.display = isActive ? '' : 'none';
-    }
-    if (rotateGroup && isActive) {
-      rotateGroup.style.display = 'none';
-    }
-    defaultTbGroups.forEach((el) => {
-      (el as HTMLElement).style.display = isActive ? 'none' : '';
-    });
+    applyContextualToolbarMode();
   });
+
+  applyContextualToolbarMode();
 }
 
 function applyEditorSettingsPreview(settings: EditorScalarSettings): void {
@@ -1187,7 +1262,6 @@ async function initializeDocument(
     totalSections = docInfo.sectionCount ?? 1;
     sbSection().textContent = `구역: 1 / ${totalSections}`;
     applySavedTextMarkSettings();
-    inputHandler?.deactivate();
     await updateLoadProgress(82, '페이지 렌더 준비 중...');
     await canvasView?.loadDocument();
     prepareCanvasKitLocalFonts(docInfo.fontsUsed);
@@ -1399,6 +1473,7 @@ async function loadBytes(
   await updateLoadProgress(25, '문서 파싱 및 쪽 계산 중...');
   let docInfo: DocumentInfo;
   try {
+    inputHandler?.deactivate();
     docInfo = wasm.loadDocument(data, fileName);
     await commitDesktopDocument(ownership.reservationId);
     fileHandle?.adoptSaveTarget?.();
@@ -1584,6 +1659,7 @@ async function createNewDocument(): Promise<void> {
   if (reservationId === null) throw new DocumentOwnedElsewhereError();
   try {
     msg.textContent = '새 문서 생성 중...';
+    inputHandler?.deactivate();
     const docInfo = wasm.createNewDocument();
     await commitDesktopDocument(reservationId);
     activeDocumentId = identity.documentId;

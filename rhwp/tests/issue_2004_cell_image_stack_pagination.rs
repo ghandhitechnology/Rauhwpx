@@ -16,6 +16,9 @@
 use std::fs;
 use std::path::Path;
 
+use rhwp::document_core::DocumentCore;
+use rhwp::renderer::render_tree::{RenderNode, RenderNodeType};
+
 fn page_count_of(rel: &str) -> u32 {
     let repo_root = env!("CARGO_MANIFEST_DIR");
     let path = Path::new(repo_root).join(rel);
@@ -23,6 +26,31 @@ fn page_count_of(rel: &str) -> u32 {
     let doc = rhwp::wasm_api::HwpDocument::from_bytes(&bytes)
         .unwrap_or_else(|e| panic!("parse {}: {:?}", rel, e));
     doc.page_count()
+}
+
+fn target_table_node(node: &RenderNode) -> Option<&RenderNode> {
+    if let RenderNodeType::Table(table) = &node.node_type {
+        if table.para_index == Some(42) && table.control_index == Some(0) {
+            return Some(node);
+        }
+    }
+    node.children.iter().find_map(target_table_node)
+}
+
+fn body_y(node: &RenderNode) -> Option<f64> {
+    if matches!(node.node_type, RenderNodeType::Body { .. }) {
+        return Some(node.bbox.y);
+    }
+    node.children.iter().find_map(body_y)
+}
+
+fn image_bboxes(node: &RenderNode, out: &mut Vec<(f64, f64, f64, f64)>) {
+    if matches!(node.node_type, RenderNodeType::Image(_)) {
+        out.push((node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height));
+    }
+    for child in &node.children {
+        image_bboxes(child, out);
+    }
 }
 
 #[test]
@@ -45,4 +73,49 @@ fn cell_image_stack_hwpx_paginates_to_8_pages() {
          이미지 스택 미분할(#2004), 9p+면 과분할 회귀.",
         pages
     );
+}
+
+#[test]
+fn cell_image_stack_continuations_repeat_authored_outer_top() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/issue2004_cell_image_stack.hwp");
+    let bytes = fs::read(&path).expect("read #2004 fixture");
+    let core = DocumentCore::from_bytes(&bytes).expect("parse #2004 fixture");
+    let expected_outer_top = 283.0 * 96.0 / 7200.0;
+    let expected_image_x = [107.2, 114.1, 106.8, 105.3];
+
+    for page_index in 4..=7 {
+        let tree = core
+            .build_page_render_tree(page_index)
+            .unwrap_or_else(|error| panic!("render page {}: {error}", page_index + 1));
+        let body_top = body_y(&tree.root).expect("body bbox");
+        let table = target_table_node(&tree.root).expect("#2004 continuation table");
+        let table_top = table.bbox.y;
+        assert!(
+            (table_top - body_top - expected_outer_top).abs() <= 0.15,
+            "page {} continuation must reopen the authored 283HU outer-top: \
+             body={body_top:.2}, table={table_top:.2}",
+            page_index + 1
+        );
+
+        let mut images = Vec::new();
+        image_bboxes(table, &mut images);
+        assert_eq!(
+            images.len(),
+            1,
+            "page {} must contain only the signed-offset inline image, not the unshifted fallback: {images:?}",
+            page_index + 1
+        );
+        assert!(
+            (images[0].0 - expected_image_x[page_index as usize - 4]).abs() <= 0.15,
+            "page {} picture x must preserve its authored signed horizontal offset: {:?}",
+            page_index + 1,
+            images[0]
+        );
+        assert!(
+            (images[0].1 - (table_top + 1.0)).abs() <= 0.15,
+            "page {} picture y must remain rebased to the fragment content top: {:?}",
+            page_index + 1,
+            images[0]
+        );
+    }
 }

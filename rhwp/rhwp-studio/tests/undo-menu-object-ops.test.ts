@@ -16,7 +16,7 @@ const insertSrc = readFileSync(join(rootDir, 'src/command/commands/insert.ts'), 
 
 // recordObjectMutation 경유로 라우팅돼야 하는 개체 뮤테이터(속성 setter 는 setProps 공유·별건).
 const OBJECT_MUTATORS = [
-  'changeShapeZOrder',
+  'changeObjectZOrder',
   'deleteShapeControl',
   'deleteEquationControl',
   'deleteCellPictureControlByPath',

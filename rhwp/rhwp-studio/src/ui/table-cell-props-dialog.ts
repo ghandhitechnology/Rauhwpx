@@ -4,25 +4,12 @@ import type { WasmBridge } from '@/core/wasm-bridge';
 import type { CellProperties, TableProperties } from '@/core/types';
 import type { EventBus } from '@/core/event-bus';
 import type { CommandServices } from '@/command/types';
-
-const HWPUNIT_PER_MM = 7200 / 25.4;
-
-function hwpunitToMm(hu: number): number {
-  return Math.round(hu * 25.4 / 7200 * 10) / 10;
-}
-
-function mmToHwpunit(mm: number): number {
-  return Math.round(mm * HWPUNIT_PER_MM);
-}
-
-/** HWP16 (i16) → mm */
-function hwp16ToMm(hu: number): number {
-  return Math.round(hu * 25.4 / 7200 * 10) / 10;
-}
-
-function mmToHwp16(mm: number): number {
-  return Math.round(mm * HWPUNIT_PER_MM);
-}
+import {
+  hwp16ToMm,
+  hwpunitToMm,
+  readHwp16Input,
+  readHwpunitInput,
+} from './table-property-units';
 
 const DOC_PAPER_COLOR = 'var(--doc-paper)';
 const PREVIEW_GUIDE_STROKE = 'var(--ui-border-light)';
@@ -643,7 +630,7 @@ export class TableCellPropsDialog extends ModalDialog {
 
   private getSelectedWrap(): string {
     const idx = this.wrapBtns.findIndex(b => b.classList.contains('active'));
-    return idx >= 0 ? this.wrapValues[idx] : 'Square';
+    return idx >= 0 ? this.wrapValues[idx] : (this.tableProps?.textWrap ?? 'Square');
   }
 
   // ─── 여백/캡션 탭 ──────────────────────────
@@ -1356,15 +1343,15 @@ export class TableCellPropsDialog extends ModalDialog {
     // 셀 속성 수정
     const newCellProps: Record<string, unknown> = {};
     if (this.cellApplySizeCheck.checked) {
-      newCellProps.width = mmToHwpunit(parseFloat(this.cellWidthInput.value) || 0);
-      newCellProps.height = mmToHwpunit(parseFloat(this.cellHeightInput.value) || 0);
+      newCellProps.width = readHwpunitInput(this.cellWidthInput, this.cellProps.width);
+      newCellProps.height = readHwpunitInput(this.cellHeightInput, this.cellProps.height);
     }
     newCellProps.applyInnerMargin = this.cellPaddingCheck.checked;
     if (this.cellPaddingCheck.checked) {
-      newCellProps.paddingLeft = mmToHwp16(parseFloat(this.cellPaddingInputs['left'].value) || 0);
-      newCellProps.paddingRight = mmToHwp16(parseFloat(this.cellPaddingInputs['right'].value) || 0);
-      newCellProps.paddingTop = mmToHwp16(parseFloat(this.cellPaddingInputs['top'].value) || 0);
-      newCellProps.paddingBottom = mmToHwp16(parseFloat(this.cellPaddingInputs['bottom'].value) || 0);
+      newCellProps.paddingLeft = readHwp16Input(this.cellPaddingInputs['left'], this.cellProps.paddingLeft);
+      newCellProps.paddingRight = readHwp16Input(this.cellPaddingInputs['right'], this.cellProps.paddingRight);
+      newCellProps.paddingTop = readHwp16Input(this.cellPaddingInputs['top'], this.cellProps.paddingTop);
+      newCellProps.paddingBottom = readHwp16Input(this.cellPaddingInputs['bottom'], this.cellProps.paddingBottom);
     }
     const activeVAlign = this.cellVAlignBtns.findIndex(b => b.classList.contains('active'));
     if (activeVAlign >= 0) newCellProps.verticalAlign = activeVAlign;
@@ -1400,25 +1387,27 @@ export class TableCellPropsDialog extends ModalDialog {
       textWrap: this.getSelectedWrap(),
       vertRelTo: this.vertRelSelect.value,
       vertAlign: this.vertAlignSelect.value,
-      vertOffset: mmToHwpunit(parseFloat(this.vertOffsetInput.value) || 0),
+      vertOffset: readHwpunitInput(this.vertOffsetInput, this.tableProps.vertOffset),
       horzRelTo: this.horzRelSelect.value,
       horzAlign: this.horzAlignSelect.value,
-      horzOffset: mmToHwpunit(parseFloat(this.horzOffsetInput.value) || 0),
+      horzOffset: readHwpunitInput(this.horzOffsetInput, this.tableProps.horzOffset),
       restrictInPage: this.restrictInPageCheck.checked,
       allowOverlap: this.allowOverlapCheck.checked,
       keepWithAnchor: this.keepWithAnchorCheck.checked,
       pageBreak: pbValue,
       repeatHeader: this.tableRepeatHeaderCheck.checked,
-      paddingLeft: mmToHwp16(parseFloat(this.tablePaddingInputs['left'].value) || 0),
-      paddingRight: mmToHwp16(parseFloat(this.tablePaddingInputs['right'].value) || 0),
-      paddingTop: mmToHwp16(parseFloat(this.tablePaddingInputs['top'].value) || 0),
-      paddingBottom: mmToHwp16(parseFloat(this.tablePaddingInputs['bottom'].value) || 0),
-      cellSpacing: this.borderCellSpacingInput ? mmToHwp16(parseFloat(this.borderCellSpacingInput.value) || 0) : this.tableProps.cellSpacing,
+      paddingLeft: readHwp16Input(this.tablePaddingInputs['left'], this.tableProps.paddingLeft),
+      paddingRight: readHwp16Input(this.tablePaddingInputs['right'], this.tableProps.paddingRight),
+      paddingTop: readHwp16Input(this.tablePaddingInputs['top'], this.tableProps.paddingTop),
+      paddingBottom: readHwp16Input(this.tablePaddingInputs['bottom'], this.tableProps.paddingBottom),
+      cellSpacing: this.borderCellSpacingInput
+        ? readHwp16Input(this.borderCellSpacingInput, this.tableProps.cellSpacing)
+        : this.tableProps.cellSpacing,
       // 바깥 여백
-      outerLeft: mmToHwp16(parseFloat(this.marginOuterInputs['left'].value) || 0),
-      outerRight: mmToHwp16(parseFloat(this.marginOuterInputs['right'].value) || 0),
-      outerTop: mmToHwp16(parseFloat(this.marginOuterInputs['top'].value) || 0),
-      outerBottom: mmToHwp16(parseFloat(this.marginOuterInputs['bottom'].value) || 0),
+      outerLeft: readHwp16Input(this.marginOuterInputs['left'], this.tableProps.outerLeft),
+      outerRight: readHwp16Input(this.marginOuterInputs['right'], this.tableProps.outerRight),
+      outerTop: readHwp16Input(this.marginOuterInputs['top'], this.tableProps.outerTop),
+      outerBottom: readHwp16Input(this.marginOuterInputs['bottom'], this.tableProps.outerBottom),
     };
 
     // 캡션 속성 (가운데 = 캡션 없음)
@@ -1429,8 +1418,14 @@ export class TableCellPropsDialog extends ModalDialog {
       newTableProps.captionDirection = parseInt(this.captionDirSelect.value, 10);
       const activeCapBtn = this.captionPosBtns.find(b => b.classList.contains('active'));
       newTableProps.captionVertAlign = activeCapBtn ? parseInt(activeCapBtn.dataset.sub!, 10) : 0;
-      newTableProps.captionSpacing = mmToHwp16(parseFloat(this.captionSpacingInput.value) || 0);
-      newTableProps.captionWidth = mmToHwpunit(parseFloat(this.captionWidthInput.value) || 0);
+      newTableProps.captionSpacing = readHwp16Input(
+        this.captionSpacingInput,
+        this.tableProps.hasCaption ? this.tableProps.captionSpacing : undefined,
+      );
+      newTableProps.captionWidth = readHwpunitInput(
+        this.captionWidthInput,
+        this.tableProps.hasCaption ? this.tableProps.captionWidth : undefined,
+      );
     }
 
     // 표 테두리/배경 (table 모드에서만 테두리/배경 탭 존재)

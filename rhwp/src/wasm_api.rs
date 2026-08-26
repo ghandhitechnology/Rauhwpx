@@ -4110,8 +4110,26 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
-    /// Shape z-order 변경
+    /// 최상위 floating 개체(도형/그림/표/수식) z-order 변경
     /// operation: "front" | "back" | "forward" | "backward"
+    #[wasm_bindgen(js_name = changeObjectZOrder)]
+    pub fn change_object_z_order(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        operation: &str,
+    ) -> Result<String, JsValue> {
+        self.change_object_z_order_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            operation,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 기존 JS 호출자 호환용 별칭.
     #[wasm_bindgen(js_name = changeShapeZOrder)]
     pub fn change_shape_z_order(
         &mut self,
@@ -4120,13 +4138,7 @@ impl HwpDocument {
         control_idx: u32,
         operation: &str,
     ) -> Result<String, JsValue> {
-        self.change_shape_z_order_native(
-            section_idx as usize,
-            parent_para_idx as usize,
-            control_idx as usize,
-            operation,
-        )
-        .map_err(|e| e.into())
+        self.change_object_z_order(section_idx, parent_para_idx, control_idx, operation)
     }
 
     /// 선택된 개체들을 하나의 GroupShape로 묶는다.

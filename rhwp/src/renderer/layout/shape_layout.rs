@@ -258,6 +258,43 @@ fn push_ole_raw_svg_render_node(
     parent.children.push(node);
 }
 
+fn place_wmf_svg_document(
+    svg_bytes: &[u8],
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Option<String> {
+    let svg = std::str::from_utf8(svg_bytes).ok()?;
+    let root_start = svg.find("<svg")?;
+    let root_end = svg[root_start..].find('>')? + root_start;
+    let close_start = svg.rfind("</svg>")?;
+    if close_start <= root_end {
+        return None;
+    }
+    let root_attrs = svg[root_start + 4..root_end].trim();
+    let body = &svg[root_end + 1..close_start];
+    if !body.contains("data:image/") || body.contains(" width=\"-") || body.contains(" height=\"-")
+    {
+        return None;
+    }
+    Some(format!(
+        "<svg x=\"{x:.2}\" y=\"{y:.2}\" width=\"{width:.2}\" height=\"{height:.2}\" preserveAspectRatio=\"xMidYMid meet\" {root_attrs}>{body}</svg>"
+    ))
+}
+
+fn wmf_svg_render_fragment(svg_bytes: &[u8], x: f64, y: f64, width: f64, height: f64) -> String {
+    if let Some(svg) = place_wmf_svg_document(svg_bytes, x, y, width, height) {
+        return svg;
+    }
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(svg_bytes);
+    let href = format!("data:image/svg+xml;base64,{encoded}");
+    format!(
+        "<image x=\"{x:.2}\" y=\"{y:.2}\" width=\"{width:.2}\" height=\"{height:.2}\" preserveAspectRatio=\"xMidYMid meet\" xlink:href=\"{href}\" href=\"{href}\"/>"
+    )
+}
+
 fn push_ole_empty_para_end_anchor(
     tree: &mut PageRenderTree,
     parent: &mut RenderNode,
@@ -2143,20 +2180,15 @@ impl LayoutEngine {
                             }
 
                             // [#3363] EMF 부재 시 WMF 프레젠테이션 폴백 — HWP3 내장
-                            // OLE(글맵시 등)의 OlePres000 은 표준 WMF 다. 기존 WMF
-                            // 그림 경로와 동일하게 SVG 로 변환해 data URI 로 배치한다.
+                            // OLE(글맵시 등)의 OlePres000 은 표준 WMF 다. 변환 SVG를
+                            // 직접 배치해 네이티브 렌더러가 내부 DIB까지 해석하게 한다.
                             if !rendered {
                                 if let Some(wmf_bytes) = container.preview_wmf.as_ref() {
                                     if let Some(svg_bytes) =
                                         crate::renderer::svg::convert_wmf_to_svg(wmf_bytes)
                                     {
-                                        use base64::Engine;
-                                        let b64 = base64::engine::general_purpose::STANDARD
-                                            .encode(&svg_bytes);
-                                        let href = format!("data:image/svg+xml;base64,{}", b64);
-                                        let svg_fragment = format!(
-                                            "<image x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" preserveAspectRatio=\"xMidYMid meet\" xlink:href=\"{}\" href=\"{}\"/>",
-                                            render_x, render_y, render_w, render_h, href, href
+                                        let svg_fragment = wmf_svg_render_fragment(
+                                            &svg_bytes, render_x, render_y, render_w, render_h,
                                         );
                                         push_ole_raw_svg_render_node(
                                             tree,
@@ -3914,6 +3946,31 @@ mod tests {
     use super::*;
     use crate::model::paragraph::{CharShapeRef, LineSeg};
     use crate::renderer::style_resolver::{ResolvedCharStyle, ResolvedParaStyle};
+
+    #[test]
+    fn wmf_svg_document_is_positioned_without_recursive_svg_data_uri() {
+        let converted = br#"<?xml version="1.0"?><svg viewBox="0 0 400 54" xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,AAAA"/></svg>"#;
+
+        let placed = place_wmf_svg_document(converted, 113.39, 132.27, 399.99, 54.01)
+            .expect("position WMF converter output");
+
+        assert!(
+            placed.starts_with("<svg x=\"113.39\" y=\"132.27\" width=\"399.99\" height=\"54.01\"")
+        );
+        assert!(placed.contains("viewBox=\"0 0 400 54\""));
+        assert!(placed.contains("data:image/png;base64,AAAA"));
+        assert!(!placed.contains("data:image/svg+xml"));
+        assert!(!placed.contains("<?xml"));
+    }
+
+    #[test]
+    fn flipped_wmf_raster_keeps_legacy_svg_data_uri_path() {
+        let converted = br#"<svg viewBox="0 0 1152 648" xmlns="http://www.w3.org/2000/svg"><g transform="translate(0,648) scale(1,-1)"><image height="-648" href="data:image/png;base64,AAAA" width="1152"/></g></svg>"#;
+
+        assert!(place_wmf_svg_document(converted, 0.0, 0.0, 100.0, 50.0).is_none());
+        assert!(wmf_svg_render_fragment(converted, 0.0, 0.0, 100.0, 50.0)
+            .starts_with("<image x=\"0.00\" y=\"0.00\""));
+    }
 
     fn line_seg(text_start: u32, vertical_pos: i32) -> LineSeg {
         LineSeg {

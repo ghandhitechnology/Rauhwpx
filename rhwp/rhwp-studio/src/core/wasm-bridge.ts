@@ -1986,9 +1986,9 @@ export class WasmBridge {
     return JSON.parse(this.doc.deleteEquationControl(sec, para, ci));
   }
 
-  changeShapeZOrder(sec: number, para: number, ci: number, operation: string): { ok: boolean; zOrder?: number } {
+  changeObjectZOrder(sec: number, para: number, ci: number, operation: string): { ok: boolean; zOrder?: number } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    return JSON.parse(this.doc.changeShapeZOrder(sec, para, ci, operation));
+    return JSON.parse(this.doc.changeObjectZOrder(sec, para, ci, operation));
   }
 
   groupShapes(sec: number, targets: { paraIdx: number; controlIdx: number }[]): { ok: boolean; paraIdx: number; controlIdx: number } {
