@@ -47,6 +47,7 @@ export class CanvasView {
   private scrollContent: HTMLElement;
   private pages: PageInfo[] = [];
   private currentVisiblePages: number[] = [];
+  private gridOverlaysByPage = new Map<number, HTMLElement[]>();
   private unsubscribers: (() => void)[] = [];
   private pendingTextEditRefreshes = new Map<number, PageRenderContext>();
   private textEditRefreshRafId: number | null = null;
@@ -483,7 +484,15 @@ export class CanvasView {
     let renderedCanvas = canvas;
     const rendererDecisionKey = this.activeRendererDecisionKey;
     try {
-      renderResult = this.pageRenderer.renderPage(pageIdx, canvas, renderScale, zoom, dpr, renderContext);
+      renderResult = this.pageRenderer.renderPage(
+        pageIdx,
+        canvas,
+        renderScale,
+        zoom,
+        dpr,
+        renderContext,
+        pageInfo,
+      );
       if (renderResult.renderedCanvas && renderResult.renderedCanvas !== canvas) {
         renderedCanvas = renderResult.renderedCanvas;
         this.canvasPool.replace(pageIdx, canvas, renderedCanvas);
@@ -677,10 +686,22 @@ export class CanvasView {
     for (const pageIdx of this.canvasPool.activePages) {
       const canvas = this.canvasPool.getCanvas(pageIdx);
       if (canvas) this.applyPageBox(canvas, pageIdx);
-      this.scrollContent.querySelectorAll<HTMLElement>(
-        `[data-rhwp-overlay-page="${pageIdx}"], [data-rhwp-grid-page="${pageIdx}"]`,
-      ).forEach((element) => this.applyPageBox(element, pageIdx));
     }
+    this.forEachRenderedPageOverlay((element, pageIdx) => this.applyPageBox(element, pageIdx));
+  }
+
+  private forEachRenderedPageOverlay(
+    callback: (element: HTMLElement, pageIdx: number) => void,
+  ): void {
+    this.scrollContent
+      .querySelectorAll<HTMLElement>('[data-rhwp-overlay-page], [data-rhwp-grid-page]')
+      .forEach((element) => {
+        const rawPage = element.dataset.rhwpOverlayPage ?? element.dataset.rhwpGridPage;
+        const pageIdx = Number(rawPage);
+        if (Number.isInteger(pageIdx) && this.canvasPool.has(pageIdx)) {
+          callback(element, pageIdx);
+        }
+      });
   }
 
   private applyPageBox(element: HTMLElement, pageIdx: number): void {
@@ -761,6 +782,7 @@ export class CanvasView {
 
   private updateRenderedPageZoomPreview(): void {
     const zoom = this.viewportManager.getZoom();
+    const scaleByPage = new Map<number, number>();
     for (const pageIdx of this.canvasPool.activePages) {
       const canvas = this.canvasPool.getCanvas(pageIdx);
       if (!canvas) continue;
@@ -768,11 +790,13 @@ export class CanvasView {
       const scale = Number.isFinite(renderedZoom) && renderedZoom > 0
         ? zoom / renderedZoom
         : 1;
+      scaleByPage.set(pageIdx, scale);
       this.applyZoomPreviewBox(canvas, pageIdx, scale);
-      this.scrollContent.querySelectorAll<HTMLElement>(
-        `[data-rhwp-overlay-page="${pageIdx}"], [data-rhwp-grid-page="${pageIdx}"]`,
-      ).forEach((element) => this.applyZoomPreviewBox(element, pageIdx, scale));
     }
+    this.forEachRenderedPageOverlay((element, pageIdx) => {
+      const scale = scaleByPage.get(pageIdx);
+      if (scale !== undefined) this.applyZoomPreviewBox(element, pageIdx, scale);
+    });
   }
 
   private applyZoomPreviewBox(element: HTMLElement, pageIdx: number, scale: number): void {
@@ -998,6 +1022,7 @@ export class CanvasView {
     );
     applyGridOverlayBox(overlay, canvas);
     this.scrollContent.appendChild(overlay);
+    const elements = [overlay];
 
     const clipCorners = createGridClipCornerOverlay(
       pageIdx,
@@ -1008,19 +1033,23 @@ export class CanvasView {
     if (clipCorners) {
       applyGridOverlayBox(clipCorners, canvas);
       this.scrollContent.appendChild(clipCorners);
+      elements.push(clipCorners);
     }
+    this.gridOverlaysByPage.set(pageIdx, elements);
   }
 
   private removeGridOverlay(pageIdx: number): void {
-    this.scrollContent
-      .querySelectorAll(`[data-rhwp-grid-page="${pageIdx}"]`)
-      .forEach((el) => el.remove());
+    for (const element of this.gridOverlaysByPage.get(pageIdx) ?? []) {
+      element.remove();
+    }
+    this.gridOverlaysByPage.delete(pageIdx);
   }
 
   private removeAllGridOverlays(): void {
-    this.scrollContent
-      .querySelectorAll('[data-rhwp-grid-page]')
-      .forEach((el) => el.remove());
+    for (const elements of this.gridOverlaysByPage.values()) {
+      for (const element of elements) element.remove();
+    }
+    this.gridOverlaysByPage.clear();
   }
 
   /** 전체 정리 */
