@@ -1,0 +1,118 @@
+# Depot CI Migration
+# Source: .github/workflows/nightly-release.yml
+#
+# Changes made:
+# - Changed runs-on from "ubuntu-latest" to "depot-ubuntu-latest".
+# - DISABLED macos / windows installer jobs: Depot CI has no macOS or Windows
+#   sandboxes. Signed nightly installers stay on GitHub Actions
+#   (.github/workflows/nightly-release.yml).
+# - DISABLED publish: a second nightly GitHub Release would race and force-push
+#   the moving nightly tag.
+# - Added a Linux verify job that builds the pinned WASM engine and Studio so
+#   the scheduled Depot run still gates the nightly source.
+
+name: Nightly desktop release
+on:
+  schedule:
+    # 4:00am KST (GitHub Actions cron uses UTC).
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+jobs:
+  prepare:
+    name: Prepare nightly identity
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      date: ${{ steps.identity.outputs.date }}
+      sha: ${{ steps.identity.outputs.sha }}
+      short_sha: ${{ steps.identity.outputs.short_sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Compute nightly identity
+        id: identity
+        run: |
+          set -euo pipefail
+          base_version="$(jq -r .version package.json)"
+          date="$(date -u +%F)"
+          compact_date="${date//-/}"
+          sha="${GITHUB_SHA}"
+          short_sha="${sha:0:7}"
+          version="${base_version}-nightly.${compact_date}.${short_sha}"
+          {
+            echo "version=${version}"
+            echo "date=${date}"
+            echo "sha=${sha}"
+            echo "short_sha=${short_sha}"
+          } >> "${GITHUB_OUTPUT}"
+  verify:
+    name: Verify nightly Studio build
+    needs: prepare
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            rhwp/rhwp-studio/package-lock.json
+            rhwp/rhwp-agent/package-lock.json
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+      - name: Build WASM engine
+        working-directory: rhwp
+        run: wasm-pack build --target web
+      - name: Install studio and desktop dependencies
+        run: |
+          npm ci
+          npm --prefix rhwp/rhwp-studio ci
+          npm --prefix rhwp/rhwp-agent ci --omit=dev
+      - name: Set nightly package version
+        run: npm version --no-git-tag-version "${{ needs.prepare.outputs.version }}"
+      - name: Build Studio
+        run: npm --prefix rhwp/rhwp-studio run build
+  macos:
+    name: Build macOS nightly installer
+    if: false # DISABLED: Depot CI has no macOS sandboxes. Signed nightly Mac installers stay on GitHub Actions.
+    needs: prepare
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Skip native macOS nightly
+        run: echo "macOS nightly signing runs only on GitHub Actions."
+  windows:
+    name: Build Windows nightly installer
+    if: false # DISABLED: Depot CI has no Windows sandboxes. Windows nightly installers stay on GitHub Actions.
+    needs: prepare
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Skip native Windows nightly
+        run: echo "Windows nightly installers run only on GitHub Actions."
+  publish:
+    name: Publish nightly GitHub Release
+    if: false # DISABLED: the moving nightly tag and GitHub Release stay on GitHub Actions.
+    needs: [macos, windows]
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Skip Depot nightly publish
+        run: echo "Nightly GitHub Releases are published by .github/workflows/nightly-release.yml."

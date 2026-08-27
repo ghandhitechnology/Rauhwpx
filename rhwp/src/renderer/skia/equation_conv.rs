@@ -1,4 +1,6 @@
-use skia_safe::{font, paint, Canvas, Color, Font, FontMgr, FontStyle, Paint, PathBuilder};
+use skia_safe::{
+    font, paint, Canvas, Color, Font, FontMgr, FontStyle, Paint, PathBuilder, Typeface,
+};
 
 use super::font_lookup::{
     legacy_typeface_for_style, match_system_family_style, SystemFontFamilies,
@@ -11,8 +13,20 @@ use crate::renderer::equation::layout::{
 };
 use crate::renderer::equation::symbols::{DecoKind, FontStyleKind};
 
-const EQ_FONT_FAMILY: &str =
-    "Latin Modern Math, STIX Two Math, Cambria Math, DejaVu Sans, Times New Roman, serif";
+/// Keep the native equation stack aligned with the SVG/canvas equation paths.
+///
+/// STIX Two Math exposes only a regular face on macOS. Choosing it before
+/// STIX Two Text therefore turns EqEdit's default italic variables upright.
+/// STIX Two Text has real italic faces and is also the first portable fallback
+/// used by the other equation renderers when Latin Modern Math is unavailable.
+const EQ_FONT_FAMILIES: &[&str] = &[
+    "Latin Modern Math",
+    "STIX Two Text",
+    "STIX Two Math",
+    "Times New Roman",
+    "Times",
+    "serif",
+];
 
 pub fn render_equation(
     canvas: &Canvas,
@@ -696,12 +710,7 @@ fn draw_text(
         (false, true) => FontStyle::italic(),
         (false, false) => FontStyle::normal(),
     };
-    let typeface = EQ_FONT_FAMILY
-        .split(',')
-        .map(str::trim)
-        .filter(|family| !family.is_empty())
-        .find_map(|family| match_system_family_style(font_mgr, system_families, family, font_style))
-        .or_else(|| legacy_typeface_for_style(font_mgr, font_style));
+    let typeface = equation_typeface_for_text(font_mgr, system_families, font_style, text);
     let mut font = if let Some(typeface) = typeface {
         Font::new(typeface, font_size as f32)
     } else {
@@ -723,6 +732,44 @@ fn draw_text(
         x
     };
     canvas.draw_str(text, (draw_x as f32, baseline_y as f32), &font, &paint);
+}
+
+fn equation_typeface_for_text(
+    font_mgr: &FontMgr,
+    system_families: &SystemFontFamilies,
+    font_style: FontStyle,
+    text: &str,
+) -> Option<Typeface> {
+    equation_typeface_for_text_in_families(
+        EQ_FONT_FAMILIES,
+        font_mgr,
+        system_families,
+        font_style,
+        text,
+    )
+}
+
+fn equation_typeface_for_text_in_families(
+    families: &[&str],
+    font_mgr: &FontMgr,
+    system_families: &SystemFontFamilies,
+    font_style: FontStyle,
+    text: &str,
+) -> Option<Typeface> {
+    families
+        .iter()
+        .copied()
+        .filter_map(|family| {
+            match_system_family_style(font_mgr, system_families, family, font_style)
+        })
+        .find(|typeface| typeface_covers_text(typeface, text))
+        .or_else(|| legacy_typeface_for_style(font_mgr, font_style))
+}
+
+fn typeface_covers_text(typeface: &Typeface, text: &str) -> bool {
+    text.chars()
+        .filter(|character| !character.is_whitespace())
+        .all(|character| typeface.unichar_to_glyph(character as i32) != 0)
 }
 
 fn draw_stretch_bracket(
@@ -1006,4 +1053,87 @@ fn colorref_to_skia(color: u32, alpha_scale: f32) -> Color {
     let r = (color & 0xFF) as u8;
     let a = (255.0 * alpha_scale.clamp(0.0, 1.0)).round() as u8;
     Color::from_argb(a, r, g, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::skia::font_lookup::collect_system_families;
+
+    #[test]
+    fn native_equation_family_order_matches_portable_equation_renderers() {
+        assert_eq!(
+            EQ_FONT_FAMILIES,
+            [
+                "Latin Modern Math",
+                "STIX Two Text",
+                "STIX Two Math",
+                "Times New Roman",
+                "Times",
+                "serif",
+            ]
+        );
+    }
+
+    #[test]
+    fn installed_stix_text_italic_precedes_regular_only_math_face() {
+        let font_mgr = FontMgr::default();
+        let system_families = collect_system_families(&font_mgr);
+        if !system_families.contains("STIX Two Text") || !system_families.contains("STIX Two Math")
+        {
+            return;
+        }
+
+        let selected = equation_typeface_for_text_in_families(
+            &["STIX Two Text", "STIX Two Math"],
+            &font_mgr,
+            &system_families,
+            FontStyle::italic(),
+            "f",
+        )
+        .expect("a STIX equation face");
+
+        assert_eq!(selected.family_name(), "STIX Two Text");
+        assert_eq!(selected.font_style().slant(), FontStyle::italic().slant());
+    }
+
+    #[test]
+    fn unsupported_text_symbol_falls_through_to_math_face() {
+        let font_mgr = FontMgr::default();
+        let system_families = collect_system_families(&font_mgr);
+        if !system_families.contains("STIX Two Text") || !system_families.contains("STIX Two Math")
+        {
+            return;
+        }
+
+        let text_face = match_system_family_style(
+            &font_mgr,
+            &system_families,
+            "STIX Two Text",
+            FontStyle::normal(),
+        )
+        .expect("installed STIX Two Text face");
+        let math_face = match_system_family_style(
+            &font_mgr,
+            &system_families,
+            "STIX Two Math",
+            FontStyle::normal(),
+        )
+        .expect("installed STIX Two Math face");
+        if typeface_covers_text(&text_face, "→") || !typeface_covers_text(&math_face, "→") {
+            return;
+        }
+
+        let selected = equation_typeface_for_text_in_families(
+            &["STIX Two Text", "STIX Two Math"],
+            &font_mgr,
+            &system_families,
+            FontStyle::normal(),
+            "→",
+        )
+        .expect("an equation face containing right arrow");
+
+        assert_eq!(selected.family_name(), "STIX Two Math");
+        assert!(typeface_covers_text(&selected, "→"));
+    }
 }

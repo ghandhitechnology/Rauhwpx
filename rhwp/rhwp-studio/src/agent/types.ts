@@ -23,6 +23,8 @@ export interface AgentEditingLease {
   waitingForUser?: boolean;
 }
 export type PermissionProfile = 'safe' | 'unrestricted';
+/** Codex Fast 서비스 티어. 다른 프로바이더는 항상 standard. */
+export type ServiceTier = 'standard' | 'fast';
 export type WritingStyleLanguage = 'ko' | 'en';
 export type WritingStyleProgressState =
   | 'queued'
@@ -646,6 +648,7 @@ export type SidebarEvent =
       model?: string;
       effort?: string;
       permissionProfile?: PermissionProfile;
+      serviceTier?: ServiceTier;
       threadId?: string;
       documentId?: string | null;
       documentName?: string | null;
@@ -666,6 +669,7 @@ export type SidebarEvent =
   | { type: 'agent-instructions-error'; code: string; message: string; status?: AgentInstructionsStatus }
   | { type: 'chat-template-changed'; template: DocumentTemplate | null; reason?: string }
   | { type: 'permission-changed'; permissionProfile: PermissionProfile }
+  | { type: 'service-tier-changed'; serviceTier: ServiceTier }
   | ({ type: 'workflow-changed' } & AgentWorkflowState)
   | ({ type: 'plan-ready'; plan: StructuredPlan } & AgentWorkflowState)
   | ({ type: 'plan-approved'; planId: string } & AgentWorkflowState)

@@ -30,6 +30,7 @@
     "e2e:unsaved-guard": "node e2e/unsaved-changes-guard.test.mjs",
     "e2e:undo": "node e2e/undo-contracts.test.mjs",
     "e2e:undo-object-selection": "node e2e/undo-object-selection.test.mjs",
+    "e2e:contextual-toolbar": "node e2e/contextual-editing-toolbar.test.mjs --mode=headless",
     "e2e:clipboard-priority": "node e2e/task-871-clipboard-priority.test.mjs",
     "e2e:editor-interactions": "node e2e/editor-table-interactions.test.mjs",
     "e2e:drag-autoscroll": "node e2e/drag-selection-autoscroll.test.mjs",

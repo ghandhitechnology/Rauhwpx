@@ -10,7 +10,8 @@
 //! 극단 지연으로 `export-pdf` 가 통째로 멎었다(#2268, 누적 4회 관측).
 //!
 //! 폰트는 호출자가 `--font-path`(`options.font_paths`) 또는 `RHWP_FONT_PATH`
-//! 로 지정하거나 시스템에 설치해 쓴다. 이 모듈은 그 순서만 정의한다.
+//! 로 파일이나 디렉토리를 지정하거나 시스템에 설치해 쓴다. 디렉토리는
+//! 하위 항목만 읽고 재귀하지 않는다. 이 모듈은 그 순서만 정의한다.
 //!
 //! # 조달 순서
 //!
@@ -30,6 +31,48 @@ pub const FONT_PATH_ENV: &str = "RHWP_FONT_PATH";
 
 /// 저장소 번들 오픈소스 폰트 — 최후 폴백(#2293 한국어 드롭 방지).
 pub const BUNDLED_OPENSOURCE_DIR: &str = "ttfs/opensource";
+
+/// 네이티브 렌더러가 직접 읽을 수 있는 SFNT 파일인지 판별한다.
+pub fn is_font_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "ttf" | "otf" | "ttc"
+                )
+            })
+}
+
+/// 파일/디렉토리 입력을 실제 SFNT 파일 목록으로 펼친다.
+///
+/// 호출자가 지정한 source 순서는 보존하고 각 디렉토리 안에서는 파일 경로로
+/// 정렬한다. 하위 디렉토리는 탐색하지 않는다.
+pub fn font_files(sources: &[PathBuf]) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for source in sources {
+        if is_font_file(source) {
+            files.push(source.clone());
+            continue;
+        }
+        if !source.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(source) else {
+            continue;
+        };
+        let mut directory_files = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| is_font_file(path))
+            .collect::<Vec<_>>();
+        directory_files.sort();
+        files.extend(directory_files);
+    }
+    files
+}
 
 /// `RHWP_FONT_PATH` 를 읽어 경로 목록으로 나눈다.
 ///
@@ -95,22 +138,19 @@ pub fn search_dirs(extra: &[PathBuf]) -> Vec<PathBuf> {
     dirs
 }
 
-/// custom typeface 로더(skia `with_font_paths`)용 디렉터리 — **시스템·번들 제외**.
+/// custom typeface 로더(skia `with_font_paths`)용 source — **시스템·번들 제외**.
 ///
-/// skia 의 custom 로더는 family 당 typeface 1개만 담아 굵기(스타일) 변형을
-/// 표현하지 못하고, 해석 체인에서 시스템 매칭보다 앞선다(#2864 이전 필드
-/// 검증 의미론). 그래서 여기에는 사용자가 의도한 폰트(호출자 지정 → 환경
-/// 변수)만 담는다:
-/// - 시스템 디렉터리를 넣으면 regular 파일이 family 를 선점해 bold run 이
-///   전부 regular 로 렌더된다(#3300) — 시스템 폰트는
-///   `FontMgr::match_family_style`(정상 스타일 매칭)이 담당한다.
+/// custom 로더는 해석 체인에서 시스템 매칭보다 앞선다. 그래서 여기에는
+/// 사용자가 의도한 폰트(호출자 지정 → 환경변수)만 담는다:
+/// - 시스템 폰트는 이 로더에서 중복 탐색하지 않고
+///   `FontMgr::match_family_style`이 담당한다.
 /// - 번들 opensource 를 넣으면 깊은 폴백(Noto Sans KR)이 시스템 1순위를
 ///   제치고 선점된다(#3300, r23 발산 −6.9pp) — 번들은 별도 최후-폴백 로더
 ///   (`bundled_font_dirs`)로 체인 말미에만 선다.
-pub fn custom_font_dirs(extra: &[PathBuf]) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = extra.to_vec();
-    dirs.extend(env_font_paths());
-    dirs
+pub fn custom_font_sources(extra: &[PathBuf]) -> Vec<PathBuf> {
+    let mut sources: Vec<PathBuf> = extra.to_vec();
+    sources.extend(env_font_paths());
+    sources
 }
 
 /// 번들 최후-폴백 로더용 디렉터리 — 폰트 미설치 환경(CI headless·컨테이너)
@@ -123,32 +163,49 @@ pub fn bundled_font_dirs() -> Vec<PathBuf> {
 /// `fontdb` 에 조달 순서대로 폰트를 적재한다.
 ///
 /// 시스템 폰트는 `load_system_fonts()` 가 담당하므로 여기서는 호출자 지정 →
-/// 환경변수 → 번들 순으로 디렉터리만 추가한다. 존재하지 않는 경로는 건너뛰되,
+/// 환경변수 → 번들 순으로 파일/디렉토리를 추가한다. 디렉토리는 재귀하지
+/// 않는다. 존재하지 않는 경로는 건너뛰되,
 /// `extra`(사용자가 명시한 경로)만 경고한다 — 환경변수·번들은 없을 수 있다.
 pub fn load_into_fontdb(fontdb: &mut usvg::fontdb::Database, extra: &[PathBuf]) {
-    for dir in extra {
-        if dir.exists() {
-            fontdb.load_fonts_dir(dir);
+    for source in extra {
+        if source.exists() {
+            for file in font_files(std::slice::from_ref(source)) {
+                if let Err(error) = fontdb.load_font_file(&file) {
+                    eprintln!(
+                        "WARN: font file '{}' could not be loaded: {error}",
+                        file.display()
+                    );
+                }
+            }
         } else {
             eprintln!(
                 "WARN: font path '{}' not found. 해당 경로의 폰트는 로드하지 않습니다.",
-                dir.display()
+                source.display()
             );
         }
     }
-    for dir in env_font_paths() {
-        if dir.exists() {
-            fontdb.load_fonts_dir(&dir);
+    for source in env_font_paths() {
+        if source.exists() {
+            for file in font_files(std::slice::from_ref(&source)) {
+                if let Err(error) = fontdb.load_font_file(&file) {
+                    eprintln!(
+                        "WARN: {FONT_PATH_ENV} font file '{}' could not be loaded: {error}",
+                        file.display()
+                    );
+                }
+            }
         } else {
             eprintln!(
                 "WARN: {FONT_PATH_ENV} entry '{}' not found. 해당 경로의 폰트는 로드하지 않습니다.",
-                dir.display()
+                source.display()
             );
         }
     }
     let bundled = Path::new(BUNDLED_OPENSOURCE_DIR);
     if bundled.exists() {
-        fontdb.load_fonts_dir(bundled);
+        for file in font_files(&[bundled.to_path_buf()]) {
+            let _ = fontdb.load_font_file(file);
+        }
     }
 }
 
@@ -231,14 +288,14 @@ mod tests {
     }
 
     /// [#3300] custom 로더 목록은 시스템·번들을 포함하면 안 된다.
-    /// - 시스템: family 당 1 typeface 라 굵기 변형 소실(regular 선점)
+    /// - 시스템: FontMgr 스타일 매칭과 중복되며 custom 우선순위를 잘못 가져갈 수 있음
     /// - 번들: 깊은 폴백(Noto)이 시스템 1순위를 제치고 본문을 렌더(r23 −6.9pp)
     #[test]
-    fn custom_font_dirs_excludes_system_and_bundled() {
+    fn custom_font_sources_excludes_system_and_bundled() {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var(FONT_PATH_ENV, "/tmp/env-fonts");
         let extra = vec![PathBuf::from("/tmp/caller")];
-        let dirs = custom_font_dirs(&extra);
+        let dirs = custom_font_sources(&extra);
         assert_eq!(
             dirs,
             vec![
@@ -254,6 +311,36 @@ mod tests {
             !dirs.contains(&PathBuf::from(BUNDLED_OPENSOURCE_DIR)),
             "번들은 custom 이 아니라 최후-폴백 로더로 간다"
         );
+        std::env::remove_var(FONT_PATH_ENV);
+    }
+
+    #[test]
+    fn font_files_accepts_exact_files_and_sorts_non_recursive_directories() {
+        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fonts");
+        let exact = fixture_dir.join("RHWPExactFaceSmoke.ttc");
+
+        assert_eq!(
+            font_files(std::slice::from_ref(&exact)),
+            vec![exact.clone()]
+        );
+
+        let files = font_files(std::slice::from_ref(&fixture_dir));
+        assert_eq!(
+            files,
+            vec![fixture_dir.join("RHWPBitmapSvgGlyphSmoke.ttf"), exact,],
+            "디렉토리 source는 SFNT 하위 파일만 경로 순으로 내놓아야 한다"
+        );
+    }
+
+    #[test]
+    fn env_font_path_accepts_exact_font_file() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let exact = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fonts/RHWPBitmapSvgGlyphSmoke.ttf");
+        std::env::set_var(FONT_PATH_ENV, &exact);
+
+        assert_eq!(font_files(&custom_font_sources(&[])), vec![exact]);
+
         std::env::remove_var(FONT_PATH_ENV);
     }
 

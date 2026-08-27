@@ -6,7 +6,9 @@
 use super::composer::{compose_paragraph, effective_text_for_metrics, ComposedParagraph};
 use super::float_placement::{
     float_exclusion, flow_cursor_after_float, horizontal_range, is_para_topbottom_float,
-    native_empty_host_rowbreak_line_advance_hu, signed_hwpunit, FloatLaneSet,
+    native_empty_host_rowbreak_line_advance_hu,
+    native_single_cell_rowbreak_saved_residual_split_hu,
+    native_uniform_cellbreak_fragment_spacing_hu, signed_hwpunit, FloatLaneSet,
     FloatPlacementContext,
 };
 use super::font_metrics_data;
@@ -22,6 +24,7 @@ use super::{
     format_number, hwpunit_to_px, px_to_hwpunit, ArrowStyle, AutoNumberCounter, LineStyle,
     NumberFormat as NumFmt, PathCommand, ShapeStyle, StrokeDash, TextStyle, DEFAULT_DPI,
 };
+use crate::document_core::queries::rendering::projected_cell_stack_continuation_outer_top_hu;
 use crate::model::bin_data::BinDataContent;
 use crate::model::control::Control;
 use crate::model::footnote::{FootnoteShape, NumberFormat};
@@ -98,6 +101,86 @@ fn host_para_laid_out_on_page(
             _ => false,
         })
     })
+}
+
+/// Native-HWP contract for the pic-in-table co-anchored table pair.
+///
+/// Hancom ignores the ordinary whitespace placeholder before the TAC table,
+/// then positions both the TAC table and its immediately following floating
+/// counterpart from the same authored outer-margin box. Keep this deliberately
+/// narrower than generic whitespace/TAC handling: PUA receipt fillers, visible
+/// text, ordinary single tables, different table geometry, and non-reset line
+/// ladders retain their established paths.
+fn native_whitespace_coanchored_table_margin_pair(
+    native_hwp5_layout: bool,
+    para: &Paragraph,
+    control_index: usize,
+) -> bool {
+    use crate::model::table::TablePageBreak;
+
+    let cell_signature = |table: &crate::model::table::Table| {
+        let mut signature = table
+            .cells
+            .iter()
+            .map(|cell| (cell.row, cell.col, cell.row_span, cell.col_span, cell.width))
+            .collect::<Vec<_>>();
+        signature.sort_unstable();
+        signature
+    };
+
+    if !native_hwp5_layout
+        || para.text.is_empty()
+        || !para.text.chars().all(char::is_whitespace)
+        || para.line_segs.len() != 2
+        || para.line_segs[0].vertical_pos <= 0
+        || para.line_segs[1].vertical_pos != 0
+    {
+        return false;
+    }
+
+    para.controls
+        .windows(2)
+        .enumerate()
+        .any(|(pair_index, pair)| {
+            if control_index != pair_index && control_index != pair_index + 1 {
+                return false;
+            }
+            let [Control::Table(inline), Control::Table(floating)] = pair else {
+                return false;
+            };
+            let shared_geometry = inline.row_count >= 2
+                && inline.col_count >= 2
+                && inline.row_count == floating.row_count
+                && inline.col_count == floating.col_count
+                && inline.cells.len() == floating.cells.len()
+                && inline.common.width == floating.common.width
+                && cell_signature(inline) == cell_signature(floating)
+                && inline.outer_margin_left > 0
+                && inline.outer_margin_right > 0
+                && inline.outer_margin_top > 0
+                && inline.outer_margin_bottom > 0
+                && inline.outer_margin_left == floating.outer_margin_left
+                && inline.outer_margin_right == floating.outer_margin_right
+                && inline.outer_margin_top == floating.outer_margin_top
+                && inline.outer_margin_bottom == floating.outer_margin_bottom
+                && matches!(inline.page_break, TablePageBreak::RowBreak)
+                && matches!(floating.page_break, TablePageBreak::RowBreak);
+            let shared_placement = [inline.as_ref(), floating.as_ref()].iter().all(|table| {
+                matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+                    && matches!(table.common.vert_rel_to, VertRelTo::Para)
+                    && matches!(table.common.vert_align, VertAlign::Top)
+                    && matches!(table.common.horz_align, HorzAlign::Left)
+                    && signed_hwpunit(table.common.horizontal_offset) == 0
+                    && signed_hwpunit(table.common.vertical_offset) == 0
+            });
+
+            shared_geometry
+                && shared_placement
+                && inline.common.treat_as_char
+                && !floating.common.treat_as_char
+                && matches!(inline.common.horz_rel_to, HorzRelTo::Para)
+                && matches!(floating.common.horz_rel_to, HorzRelTo::Column)
+        })
 }
 
 const ENDNOTE_BETWEEN_NOTES_BASE_FLOW_HU: i32 = 1984;
@@ -1020,6 +1103,13 @@ fn repeats_native_empty_host_rowbreak_fragment_margin(
         paragraphs.get(para_index + 1),
     )
     .is_some()
+        || native_single_cell_rowbreak_saved_residual_split_hu(
+            native_hwp5_layout,
+            para,
+            table,
+            paragraphs.get(para_index + 1),
+        )
+        .is_some()
 }
 
 /// Paint the first, unsplit form of the strict native-HWP empty-host RowBreak table at the
@@ -1032,6 +1122,74 @@ fn empty_host_float_raw_top(
     fragment_outer_top_px: f64,
 ) -> f64 {
     (para_y + vertical_offset_px).max(para_y) + fragment_outer_top_px
+}
+
+fn hwpx_empty_host_float_outer_top_px(
+    hwpx_stored_layout: bool,
+    table: &crate::model::table::Table,
+    dpi: f64,
+) -> f64 {
+    if hwpx_stored_layout && table.common.flow_with_text && is_para_topbottom_float(&table.common) {
+        hwpunit_to_px(table.outer_margin_top as i32, dpi)
+    } else {
+        0.0
+    }
+}
+
+/// Apply the native single-cell wrapper's outer-top inset only when the table is placed from an
+/// empty host paragraph. `table_y_start` may already be below this floor because a float lane or
+/// exclusion pushed it down; taking the maximum preserves that placement without double-insetting.
+fn native_empty_host_single_cell_outer_top_floor(
+    native_hwp5_layout: bool,
+    is_empty_host: bool,
+    uses_saved_text_frame: bool,
+    table: &crate::model::table::Table,
+    para_y: f64,
+    table_y_start: f64,
+    dpi: f64,
+) -> f64 {
+    let uses_flowing_outer_box = table.common.flow_with_text
+        && table_layout::native_single_cell_para_float_uses_outer_margin_x(
+            table,
+            native_hwp5_layout,
+            0,
+        );
+    if !is_empty_host || (!uses_flowing_outer_box && !uses_saved_text_frame) {
+        return table_y_start;
+    }
+
+    let raw_y = para_y
+        + hwpunit_to_px(signed_hwpunit(table.common.vertical_offset), dpi)
+        + hwpunit_to_px(table.outer_margin_top as i32, dpi);
+    table_y_start.max(raw_y)
+}
+
+/// Exact host-side witness for the native saved text-frame contract.
+///
+/// The table signature alone is insufficient: the authored p9 object is the sole control of an
+/// empty paragraph and carries one stored, positive-vpos line segment. Visible hosts and synthetic
+/// layout lines must retain the ordinary measured-row path.
+fn native_empty_host_saved_single_cell_text_frame(
+    native_hwp5_layout: bool,
+    para: &Paragraph,
+    control_index: usize,
+    table: &crate::model::table::Table,
+) -> bool {
+    native_hwp5_layout
+        && control_index == 0
+        && para.controls.len() == 1
+        && matches!(para.controls.first(), Some(Control::Table(_)))
+        && !para_has_visible_text(para)
+        && para.line_segs.len() == 1
+        && para.line_segs.first().is_some_and(|seg| {
+            seg.vertical_pos > 0
+                && seg.tag & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0
+        })
+        && table_layout::native_saved_single_cell_text_frame_uses_declared_height(
+            table,
+            native_hwp5_layout,
+            0,
+        )
 }
 
 fn para_line_spacing_px(para: &Paragraph, dpi: f64) -> f64 {
@@ -2285,6 +2443,19 @@ impl LayoutEngine {
         self.clip_enabled.set(enabled);
     }
 
+    /// Establish the authoritative paper/body geometry before any table cell-unit measurement.
+    /// `cell_units` caches body-height-sensitive reset and nested-fragment metadata, so changing
+    /// that geometry must invalidate the cache instead of preserving units measured against an
+    /// unset or previous page context.
+    pub(crate) fn set_page_layout_context(&self, paper_width: f64, body_area: LayoutRect) {
+        let next = (body_area.x, body_area.y, body_area.width, body_area.height);
+        let previous = self.current_body_area.replace(next);
+        self.current_paper_width.set(paper_width);
+        if (previous.2 - next.2).abs() > 0.01 || (previous.3 - next.3).abs() > 0.01 {
+            self.cell_units_cache.borrow_mut().clear();
+        }
+    }
+
     /// 투명선 표시 여부를 설정한다.
     pub fn set_show_transparent_borders(&self, enabled: bool) {
         self.show_transparent_borders.set(enabled);
@@ -2351,6 +2522,7 @@ impl LayoutEngine {
         wrap_around_paras: &[super::pagination::WrapAroundPara],
     ) -> PageRenderTree {
         let layout = &page_content.layout;
+        self.set_page_layout_context(layout.page_width, layout.body_area);
         let mut tree = PageRenderTree::new(
             page_content.page_index,
             layout.page_width,
@@ -2684,6 +2856,7 @@ impl LayoutEngine {
                             None,
                             false,
                             is_header,
+                            false,
                         );
                     }
                 }
@@ -2730,6 +2903,7 @@ impl LayoutEngine {
                                     i,
                                     ci,
                                     outer_hf_ref.clone(),
+                                    is_header,
                                 );
                             }
                             let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
@@ -3522,6 +3696,7 @@ impl LayoutEngine {
                                         None,
                                         false,
                                         false,
+                                        false,
                                     );
                                 }
                                 _ => {}
@@ -3598,6 +3773,7 @@ impl LayoutEngine {
         inner_para_index: usize,
         inner_control_index: usize,
         outer_hf_ref: Option<crate::renderer::render_tree::HeaderFooterImageRef>,
+        is_header: bool,
     ) {
         let rotation = pic.shape_attr.rotation_angle.rem_euclid(360);
         let uses_rotated_frame = rotation != 0
@@ -3624,6 +3800,16 @@ impl LayoutEngine {
             hwpunit_to_px(pic_height_hu, self.dpi)
         };
 
+        // HWP5 scopes a floating header picture's Paper-relative coordinates to
+        // the header content box.  The Hancom oracle for pic-in-head-02.hwp makes
+        // this visible on every page: its 47640 HU-wide banner starts at the
+        // 20 mm page margin, not at physical-paper x=0.  Keep footer behavior
+        // unchanged until an equivalent official fixture establishes it.
+        let position_paper_area = if is_header && self.profile.get().native_hwp5_layout() {
+            area
+        } else {
+            paper_area
+        };
         let (frame_x, frame_y) = self.compute_object_position(
             &pic.common,
             frame_width,
@@ -3631,7 +3817,7 @@ impl LayoutEngine {
             area,
             area,
             body_area,
-            paper_area,
+            position_paper_area,
             para_y,
             Alignment::Left,
         );
@@ -6693,6 +6879,17 @@ impl LayoutEngine {
             let margin_right = para_style.map(|s| s.margin_right).unwrap_or(0.0);
             let table_y_before = y_offset;
             let tbl_is_square = matches!(t.common.text_wrap, crate::model::shape::TextWrap::Square);
+            let native_coanchored_margin_pair = native_whitespace_coanchored_table_margin_pair(
+                self.profile.get().native_hwp5_layout(),
+                para,
+                control_index,
+            );
+            let native_saved_text_frame_outer_box = native_empty_host_saved_single_cell_text_frame(
+                self.profile.get().native_hwp5_layout(),
+                para,
+                control_index,
+                t,
+            );
             // インラインTAC表: paragraph_layoutで計算された位置を使用
             let inline_pos = if is_tac {
                 tree.get_inline_shape_position(
@@ -6710,6 +6907,12 @@ impl LayoutEngine {
             let tac_already_rendered_inline = is_tac && inline_pos.is_some();
             let tbl_inline_x = if let Some((ix, _)) = inline_pos {
                 Some(ix)
+            } else if native_coanchored_margin_pair && !is_tac {
+                Some(
+                    col_area.x
+                        + effective_margin
+                        + hwpunit_to_px(t.outer_margin_left as i32, self.dpi),
+                )
             } else if !is_tac
                 && tbl_is_square
                 && matches!(t.common.horz_rel_to, crate::model::shape::HorzRelTo::Para)
@@ -6759,7 +6962,7 @@ impl LayoutEngine {
                                 .unwrap_or(false)
                     })
                     .unwrap_or(false);
-                let leading = if line0_has_real_text {
+                let leading = if native_coanchored_margin_pair || line0_has_real_text {
                     0.0
                 } else {
                     composed
@@ -6949,7 +7152,7 @@ impl LayoutEngine {
                         horizontal_range(&t.common, width_px, placement_ctx, self.dpi);
                     let v_offset_px =
                         hwpunit_to_px(signed_hwpunit(t.common.vertical_offset), self.dpi);
-                    let fragment_outer_top_px = native_empty_host_rowbreak_line_advance_hu(
+                    let native_fragment_outer_top_px = native_empty_host_rowbreak_line_advance_hu(
                         self.profile.get().native_hwp5_layout(),
                         para,
                         t,
@@ -6957,6 +7160,17 @@ impl LayoutEngine {
                     )
                     .map(|_| hwpunit_to_px(t.outer_margin_top as i32, self.dpi))
                     .unwrap_or(0.0);
+                    // Hancom-authored HWPX positions a flow-with-text TopAndBottom table by its
+                    // outer margin box.  Move the empty-host lane anchor with the painted table so
+                    // `(painted_bottom - lane_top)` remains the same table-only reservation; the
+                    // stored following-paragraph ladder already accounts for both outer margins.
+                    let hwpx_margin_box_outer_top_px = hwpx_empty_host_float_outer_top_px(
+                        self.profile.get().hwpx_stored_layout(),
+                        t,
+                        self.dpi,
+                    );
+                    let fragment_outer_top_px =
+                        native_fragment_outer_top_px + hwpx_margin_box_outer_top_px;
                     let raw_top = empty_host_float_raw_top(
                         para_y_for_table,
                         v_offset_px,
@@ -7000,6 +7214,7 @@ impl LayoutEngine {
                     tbl_inline_x,
                     None,
                     Some(para_y_for_table),
+                    false,
                     false,
                     false,
                 );
@@ -7148,6 +7363,20 @@ impl LayoutEngine {
                 } else {
                     table_y_start
                 };
+                let table_y_start = if native_coanchored_margin_pair && !is_tac {
+                    table_y_start + hwpunit_to_px(t.outer_margin_top as i32, self.dpi)
+                } else {
+                    table_y_start
+                };
+                let table_y_start = native_empty_host_single_cell_outer_top_floor(
+                    self.profile.get().native_hwp5_layout(),
+                    is_current_empty_para_float,
+                    native_saved_text_frame_outer_box,
+                    t,
+                    para_y_for_table,
+                    table_y_start,
+                    self.dpi,
+                );
                 let allow_para_top_bleed =
                     is_current_visible_para_float && signed_hwpunit(t.common.vertical_offset) < 0;
                 let table_visual_end = if tac_already_rendered_inline {
@@ -7175,6 +7404,7 @@ impl LayoutEngine {
                         Some(para_y_for_table + visible_outer_top_px),
                         allow_para_top_bleed,
                         false,
+                        native_saved_text_frame_outer_box,
                     );
                     // A TAC table remains an inline flow object even when its persisted wrap
                     // mode says Behind/InFrontOfText. `layout_table` correctly returns the
@@ -7921,6 +8151,7 @@ impl LayoutEngine {
                                 None,
                                 false,
                                 false,
+                                false,
                             );
                             y_offset = y_offset.max(tac_new_y);
                         }
@@ -8067,6 +8298,17 @@ impl LayoutEngine {
             para_index,
             control_index,
         );
+        let native_cellbreak_fragment_spacing_hu =
+            paragraphs
+                .get(para_index)
+                .and_then(|para| match para.controls.get(control_index) {
+                    Some(Control::Table(table)) => native_uniform_cellbreak_fragment_spacing_hu(
+                        self.profile.get().native_hwp5_layout(),
+                        para,
+                        table,
+                    ),
+                    _ => None,
+                });
         // 비-TAC 자리차지 표에서 vert offset이 있으면 문단 시작 y 전달.
         // layout_partial_table 내부에서 vert_offset을 적용하므로 이중 적용 방지.
         // [Task #712] HwpUnit=u32 이라 `vertical_offset > 0` 가드는 음수 비트표현
@@ -8091,6 +8333,26 @@ impl LayoutEngine {
         } else {
             y_offset
         };
+        // [#2004] The compatibility projection turns one empty-cell picture stack into
+        // one TAC paragraph per page. Hancom reopens the authored table outer-top margin
+        // on every continuation. The strict #2439 path already applies its own margin,
+        // so keep this projection-only inset mutually exclusive with that contract.
+        let projected_stack_continuation_top = if repeat_fragment_outer_margin {
+            0.0
+        } else {
+            paragraphs
+                .get(para_index)
+                .and_then(|para| para.controls.get(control_index))
+                .and_then(|control| match control {
+                    Control::Table(table) => Some(hwpunit_to_px(
+                        projected_cell_stack_continuation_outer_top_hu(table, is_continuation),
+                        self.dpi,
+                    )),
+                    _ => None,
+                })
+                .unwrap_or(0.0)
+        };
+        let pt_y_start = pt_y_start + projected_stack_continuation_top;
         let pt_y_before = y_offset;
         y_offset = self.layout_partial_table(
             tree,
@@ -8114,6 +8376,7 @@ impl LayoutEngine {
             pt_margin_right,
             pt_mt,
             false,
+            native_cellbreak_fragment_spacing_hu,
         );
         if render_deferred_rowbreak_host_text_after {
             if let Some(para) = paragraphs.get(para_index) {
@@ -8192,12 +8455,20 @@ impl LayoutEngine {
                     }
                 }
             }
-            // #2439: typeset reserves this margin for every proven native-HWP RowBreak
-            // fragment.  Keep it outside `last_item_content_bottom`: it is trailing flow, not
-            // painted content, and therefore must not trigger an overflow report.
-            if !is_tac && repeat_fragment_outer_margin {
-                if let Some(Control::Table(table)) = para.controls.get(control_index) {
-                    y_offset += hwpunit_to_px(table.outer_margin_bottom as i32, self.dpi);
+            // Typeset reserves this trailing spacing for structurally proven native-HWP split
+            // fragments (#2439 RowBreak and issue2063 CellBreak). Keep it outside
+            // `last_item_content_bottom`: it is flow, not painted content, and must not trigger
+            // an overflow report.
+            if !is_tac {
+                if let Some((_, trailing)) = native_cellbreak_fragment_spacing_hu {
+                    // Keep the stored line gap outside painted-content accounting. Together with
+                    // the repeated outer-top inset this is one fragment boundary reserve, not a
+                    // per-row height adjustment.
+                    y_offset += hwpunit_to_px(trailing, self.dpi);
+                } else if repeat_fragment_outer_margin {
+                    if let Some(Control::Table(table)) = para.controls.get(control_index) {
+                        y_offset += hwpunit_to_px(table.outer_margin_bottom as i32, self.dpi);
+                    }
                 }
             }
         }
@@ -9789,6 +10060,7 @@ impl LayoutEngine {
                         None,
                         None,
                         None,
+                        false,
                         false,
                         false,
                     );

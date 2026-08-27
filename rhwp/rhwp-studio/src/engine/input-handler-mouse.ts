@@ -9,6 +9,7 @@ import { computeLineEndpointRecord } from './object-drag-record';
 import { editableTargetFromPosition } from './edit-target';
 import { findWordSelectionRange } from './word-selection';
 import { CursorState } from './cursor';
+import { isTopLevelBodyObject } from '@/core/object-address';
 
 function readCurrentParagraphText(self: any) {
   if (self.cursor.isInHeaderFooter()) {
@@ -170,18 +171,7 @@ function selectOleObjectFromHit(this: any, oleHit: any): void {
   this.cursor.exitCellSelectionMode();
   this.cellSelectionRenderer?.clear();
   this.exitPictureObjectSelectionIfNeeded();
-  this.cursor.enterPictureObjectSelectionDirect(
-    oleHit.sec,
-    oleHit.ppi,
-    oleHit.ci,
-    'ole',
-    oleHit.cellIdx,
-    oleHit.cellParaIdx,
-    oleHit.headerFooter,
-    oleHit.outerTableControlIdx,
-    oleHit.cellPath,
-    oleHit.noteRef,
-  );
+  this.cursor.enterPictureObjectSelectionRef({ ...oleHit, type: 'ole' });
   this.active = true;
   this.caret.hide();
   this.fieldMarker.hide();
@@ -190,6 +180,28 @@ function selectOleObjectFromHit(this: any, oleHit: any): void {
   this.eventBus.emit('picture-object-selection-changed', true);
   this.eventBus.emit('command-state-changed');
   this.textarea.focus();
+}
+
+function isObjectBorderHit(
+  self: any,
+  pageIdx: number,
+  pageX: number,
+  pageY: number,
+  ref: any,
+): boolean {
+  const bbox = self.findPictureBbox(ref);
+  if (!bbox || bbox.pageIndex !== pageIdx) return false;
+  const tolerance = 5;
+  const nearLeft = Math.abs(pageX - bbox.x) <= tolerance;
+  const nearRight = Math.abs(pageX - (bbox.x + bbox.w)) <= tolerance;
+  const nearTop = Math.abs(pageY - bbox.y) <= tolerance;
+  const nearBottom = Math.abs(pageY - (bbox.y + bbox.h)) <= tolerance;
+  const inVerticalRange = pageY >= bbox.y - tolerance && pageY <= bbox.y + bbox.h + tolerance;
+  const inHorizontalRange = pageX >= bbox.x - tolerance && pageX <= bbox.x + bbox.w + tolerance;
+  return (nearLeft && inVerticalRange)
+    || (nearRight && inVerticalRange)
+    || (nearTop && inHorizontalRange)
+    || (nearBottom && inHorizontalRange);
 }
 
 function selectProtectedCell(this: any, hit: any): void {
@@ -971,15 +983,7 @@ export function onClick(this: any, e: MouseEvent): void {
           // 머리말 안 그림 객체 선택 → context menu 에 "개체 속성" 표시 가능
           this.cursor.clearSelection();
           this.exitPictureObjectSelectionIfNeeded();
-          this.cursor.enterPictureObjectSelectionDirect(
-            picHit.sec, picHit.ppi, picHit.ci, picHit.type as any,
-            picHit.cellIdx, picHit.cellParaIdx,
-            (picHit as any).headerFooter,
-            (picHit as any).outerTableControlIdx,
-            (picHit as any).cellPath,
-            undefined,
-            (picHit as any).missing,
-          );
+          this.cursor.enterPictureObjectSelectionRef(picHit);
           this.active = true;
           this.caret.hide();
           this.selectionRenderer.clear();
@@ -1167,7 +1171,7 @@ export function onClick(this: any, e: MouseEvent): void {
           && ref.sec === hit.sectionIndex
           && ref.ppi === hit.parentParaIndex
           && ref.ci === hit.controlIndex
-          && !this.isShapeBorderClickByRef(pageX, pageY, hit.sectionIndex, hit.parentParaIndex, hit.controlIndex)) {
+          && !isObjectBorderHit(this, pageIdx, pageX, pageY, ref)) {
         // 같은 글상자 내부 클릭 → 객체 선택 해제 + 텍스트 편집 진입
         this.cursor.exitPictureObjectSelection();
         this.pictureObjectRenderer?.clear();
@@ -1189,12 +1193,12 @@ export function onClick(this: any, e: MouseEvent): void {
     // hit.isTextBox && hit.parentParaIndex/controlIndex 가 있는 경우 (글상자 안 hit)
     // 만 경계선 검사 — 한컴 UX 정합 (글상자 BBox 테두리만 객체 선택).
     if (hit.isTextBox && hit.parentParaIndex !== undefined && hit.controlIndex !== undefined) {
-      if (this.isShapeBorderClickByRef(pageX, pageY, hit.sectionIndex, hit.parentParaIndex, hit.controlIndex)) {
+      const textBoxHit = this.findPictureAtClick(pageIdx, pageX, pageY);
+      if (textBoxHit?.type === 'shape'
+          && isObjectBorderHit(this, pageIdx, pageX, pageY, textBoxHit)) {
         this.cursor.clearSelection();
         this.exitPictureObjectSelectionIfNeeded();
-        this.cursor.enterPictureObjectSelectionDirect(
-          hit.sectionIndex, hit.parentParaIndex, hit.controlIndex, 'shape',
-        );
+        this.cursor.enterPictureObjectSelectionRef(textBoxHit);
         this.active = true;
         this.caret.hide();
         this.selectionRenderer.clear();
@@ -1208,13 +1212,13 @@ export function onClick(this: any, e: MouseEvent): void {
     // [Task #919] 글상자 외곽 클릭 감지 — 글상자 바깥에서 외곽 근처 클릭
     // hit 가 본문 paragraph 이고 인접 paragraph 에 글상자 컨트롤이 있는 경우.
     if (!hit.isTextBox) {
-      const shapeHit = this.findShapeByOuterClick(pageX, pageY, hit.sectionIndex, hit.paragraphIndex);
+      const shapeHit = this.findShapeByOuterClick(
+        pageIdx, pageX, pageY, hit.sectionIndex, hit.paragraphIndex,
+      );
       if (shapeHit) {
         this.cursor.clearSelection();
         this.exitPictureObjectSelectionIfNeeded();
-        this.cursor.enterPictureObjectSelectionDirect(
-          shapeHit.sec, shapeHit.ppi, shapeHit.ci, 'shape',
-        );
+        this.cursor.enterPictureObjectSelectionRef(shapeHit);
         this.active = true;
         this.caret.hide();
         this.selectionRenderer.clear();
@@ -1235,14 +1239,7 @@ export function onClick(this: any, e: MouseEvent): void {
       if (tbPic && (tbPic.type === 'image' || tbPic.type === 'equation') && (tbPic as any).cellPath) {
         this.cursor.clearSelection();
         this.exitPictureObjectSelectionIfNeeded();
-        this.cursor.enterPictureObjectSelectionDirect(
-          tbPic.sec, tbPic.ppi, tbPic.ci, tbPic.type,
-          tbPic.cellIdx, tbPic.cellParaIdx, (tbPic as any).headerFooter,
-          (tbPic as any).outerTableControlIdx,
-          (tbPic as any).cellPath,
-          (tbPic as any).noteRef,
-          (tbPic as any).missing,
-        );
+        this.cursor.enterPictureObjectSelectionRef(tbPic);
         this.active = true;
         this.caret.hide();
         this.selectionRenderer.clear();
@@ -1294,10 +1291,7 @@ export function onClick(this: any, e: MouseEvent): void {
           this.cursor.clearSelection();
           this.exitPictureObjectSelectionIfNeeded();
           // [Task #825] picHit.headerFooter 동반 시 머리말/꼬리말 그림 marker 보존.
-          this.cursor.enterPictureObjectSelectionDirect(
-            picHit.sec, picHit.ppi, picHit.ci, 'line',
-            undefined, undefined, (picHit as any).headerFooter,
-          );
+          this.cursor.enterPictureObjectSelectionRef({ ...picHit, type: 'line' });
           this.active = true;
           this.caret.hide();
           this.selectionRenderer.clear();
@@ -1331,14 +1325,11 @@ export function onClick(this: any, e: MouseEvent): void {
           // (글상자 내부 영역은 위쪽 hit.isTextBox 분기 + isShapeBorderClick 으로
           // 이미 처리됨. 본 분기는 hit_test_native 가 textbox_hit 매칭 못한 케이스
           // 또는 글상자 안 표/이미지 hit 등으로 textbox 처리가 안 된 케이스.)
-          if (this.isShapeBorderClickByRef(pageX, pageY, picHit.sec, picHit.ppi, picHit.ci)) {
+          if (isObjectBorderHit(this, pageIdx, pageX, pageY, picHit)) {
             bringShapeToFront.call(this, picHit);
             this.cursor.clearSelection();
             this.exitPictureObjectSelectionIfNeeded();
-            this.cursor.enterPictureObjectSelectionDirect(
-              picHit.sec, picHit.ppi, picHit.ci, 'shape',
-              undefined, undefined, (picHit as any).headerFooter,
-            );
+            this.cursor.enterPictureObjectSelectionRef({ ...picHit, type: 'shape' });
             this.active = true;
             this.caret.hide();
             this.selectionRenderer.clear();
@@ -1353,14 +1344,7 @@ export function onClick(this: any, e: MouseEvent): void {
         // 이미지/방정식/OLE → 객체 선택 (z-order 미지원)
         this.cursor.clearSelection();
         this.exitPictureObjectSelectionIfNeeded();
-        this.cursor.enterPictureObjectSelectionDirect(
-          picHit.sec, picHit.ppi, picHit.ci, picHit.type,
-          picHit.cellIdx, picHit.cellParaIdx, (picHit as any).headerFooter,
-          (picHit as any).outerTableControlIdx,
-          (picHit as any).cellPath,
-          (picHit as any).noteRef,
-          (picHit as any).missing,
-        );
+        this.cursor.enterPictureObjectSelectionRef(picHit);
         this.active = true;
         this.caret.hide();
         this.selectionRenderer.clear();
@@ -2124,7 +2108,12 @@ export function onMouseUp(this: any, _e: MouseEvent): void {
  * @param angleDeg 회전각 (도)
  */
 function bringShapeToFront(this: any, picHit: any): void {
-  if (picHit.type === 'shape' || picHit.type === 'line' || picHit.type === 'group' || picHit.type === 'ole') {
+  if (isTopLevelBodyObject(picHit) && (
+    picHit.type === 'shape'
+    || picHit.type === 'line'
+    || picHit.type === 'group'
+    || picHit.type === 'ole'
+  )) {
     try {
       // [Task #2759] 선택 시 z순서 변경도 문서 뮤테이션 — 메뉴 정렬(insert.ts:427 등)의
       // recordObjectMutation 과 동형으로 snapshot 기록해 undo 가능·redo 무효화·스냅샷 undo
@@ -2134,7 +2123,7 @@ function bringShapeToFront(this: any, picHit: any): void {
         kind: 'snapshot',
         operationType: 'changeZOrder',
         operation: (wasm: any) => {
-          wasm.changeShapeZOrder(picHit.sec, picHit.ppi, picHit.ci, 'front');
+          wasm.changeObjectZOrder(picHit.sec, picHit.ppi, picHit.ci, 'front');
           return pos;
         },
       });

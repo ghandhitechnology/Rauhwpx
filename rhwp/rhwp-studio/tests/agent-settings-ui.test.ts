@@ -135,7 +135,7 @@ test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', 
   for (const title of ['연결', '기본 설정', '글쓰기 보정', '템플릿', '사용량']) {
     assert.match(settings, new RegExp(`createSection\\('${title}'\\)`));
   }
-  for (const title of ['화면과 보기', '글꼴', '저장과 파일', '문서 자원']) {
+  for (const title of ['화면과 보기', '글꼴', '저장과 파일']) {
     assert.match(editingSettings, new RegExp(`group\\('${title}'`));
   }
   assert.match(settings, /\{ id: 'editing', label: '편집' \}/);
@@ -178,9 +178,11 @@ test('저장 설정은 짧은 라벨만 보이고 PDF 안내는 기본값을 쓴
 });
 
 test('한컴용 Git 토글은 기본 이력과 Git 버전 관리 진입을 전환한다', () => {
-  assert.match(editingSettings, /toggleRow\('한컴용 Git 사용하기'/);
-  assert.match(editingSettings, /draft\.versionControl\.useHancomGit = versionControl\.input\.checked/);
+  assert.match(settings, /createToggleRow\('한컴용 Git 사용하기 \(beta\)'\)/);
+  assert.match(settings, /userSettings\.setUseHancomGit\(hancomGit\.input\.checked\)/);
+  assert.match(settings, /instructionsSection\.body\.append\([\s\S]*hancomGit\.root/);
   assert.match(editingSettings, /userSettings\.tryApplyEditorScalarSettings\(next\)/);
+  assert.match(editingSettings, /next\.versionControl\.useHancomGit = userSettings\.getUseHancomGit\(\)/);
   assert.match(settingsCss, /\.ag-settings-toggle-input:checked \+ \.ag-settings-toggle-track/);
   assert.match(source, /function openConfiguredVersionControl\(\): void/);
   assert.match(source, /!userSettings\.getUseHancomGit\(\) && openClassicVersionControl/);
@@ -412,11 +414,14 @@ test('한도가 없으면 누적치만 말한다', () => {
 
 test('앱 전용 지시는 에이전트 변경안을 사용자 승인 전까지 분리한다', () => {
   assert.match(settings, /createSection\('지시'\)/);
-  assert.match(settings, /Rauhwpx 채팅에만 적용됩니다/);
+  assert.doesNotMatch(settings, /Rauhwpx 채팅에만 적용됩니다/);
   assert.match(settings, /agent-instructions-draft/);
   assert.match(settings, /bridge\.confirmAgentInstructionsDraft\(draft\)/);
   assert.match(settings, /bridge\.rejectAgentInstructionsDraft\(draft\)/);
   assert.match(settings, /승인 전에는 AGENTS\.md에 저장되지 않습니다/);
+  assert.doesNotMatch(settings, /AGENTS\.md · r\$\{/);
+  assert.doesNotMatch(settings, /instructionsMeta/);
+  assert.doesNotMatch(settings, /연결 후 불러옵니다/);
   assert.match(settingsCss, /\.ag-settings-instructions-proposal/);
 });
 

@@ -31,6 +31,12 @@ export interface EditorContext {
   inTableObjectSelection: boolean;
   /** 그림 객체 선택 모드인가? */
   inPictureObjectSelection: boolean;
+  /** 선택 개체를 현재 주소 도메인의 z-order API로 정렬할 수 있는가? */
+  canArrangeSelectedObject: boolean;
+  /** 선택 개체 전체를 주소 손실 없이 묶을 수 있는가? */
+  canGroupSelectedObjects: boolean;
+  /** 선택 그룹을 주소 손실 없이 풀 수 있는가? */
+  canUngroupSelectedObject: boolean;
   /** 커서가 누름틀 필드 내부인가? */
   inField: boolean;
   /** 편집 가능 모드인가? (vs 읽기 전용) */

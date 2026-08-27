@@ -8,7 +8,71 @@ use crate::error::HwpError;
 use crate::model::control::Control;
 use crate::model::event::DocumentEvent;
 use crate::model::path::{path_from_flat, PathSegment};
-use crate::model::shape::common_obj_offsets;
+use crate::model::shape::{
+    common_obj_offsets, Caption, HorzAlign, HorzRelTo, TextWrap, VertAlign, VertRelTo,
+};
+use crate::model::table::{Table, TablePageBreak};
+
+/// Format-neutral table properties exposed to Studio and agent callers.
+///
+/// HWP5 keeps an encoded copy of these values in `raw_ctrl_data`, while HWPX does not.
+/// Query and edit paths must therefore use this semantic view. Raw bytes are only an HWP5
+/// export cache synchronized after semantic edits.
+struct SemanticTableProperties<'a> {
+    cell_spacing: i16,
+    padding: crate::model::Padding,
+    page_break: TablePageBreak,
+    repeat_header: bool,
+    border_fill_id: u16,
+    caption: Option<&'a Caption>,
+    table_width: u32,
+    table_height: u32,
+    outer_left: i16,
+    outer_right: i16,
+    outer_top: i16,
+    outer_bottom: i16,
+    treat_as_char: bool,
+    text_wrap: TextWrap,
+    vert_rel_to: VertRelTo,
+    vert_align: VertAlign,
+    horz_rel_to: HorzRelTo,
+    horz_align: HorzAlign,
+    vert_offset: i32,
+    horz_offset: i32,
+    restrict_in_page: bool,
+    allow_overlap: bool,
+    keep_with_anchor: bool,
+}
+
+impl<'a> From<&'a Table> for SemanticTableProperties<'a> {
+    fn from(table: &'a Table) -> Self {
+        Self {
+            cell_spacing: table.cell_spacing,
+            padding: table.padding,
+            page_break: table.page_break,
+            repeat_header: table.repeat_header,
+            border_fill_id: table.border_fill_id,
+            caption: table.caption.as_ref(),
+            table_width: table.common.width,
+            table_height: table.common.height,
+            outer_left: table.outer_margin_left,
+            outer_right: table.outer_margin_right,
+            outer_top: table.outer_margin_top,
+            outer_bottom: table.outer_margin_bottom,
+            treat_as_char: table.common.treat_as_char,
+            text_wrap: table.common.text_wrap,
+            vert_rel_to: table.common.vert_rel_to,
+            vert_align: table.common.vert_align,
+            horz_rel_to: table.common.horz_rel_to,
+            horz_align: table.common.horz_align,
+            vert_offset: table.common.vertical_offset as i32,
+            horz_offset: table.common.horizontal_offset as i32,
+            restrict_in_page: table.common.flow_with_text,
+            allow_overlap: table.common.allow_overlap,
+            keep_with_anchor: table.common.prevent_page_break != 0,
+        }
+    }
+}
 
 impl DocumentCore {
     pub(crate) fn get_table_mut(
@@ -762,6 +826,52 @@ impl DocumentCore {
                 ).to_string()
             }
         }
+    }
+
+    /// A getter payload passed back unchanged is a no-op, including its expanded BorderFill.
+    fn table_border_fill_update_is_noop(&self, bf_id: u16, json: &str) -> bool {
+        const KEYS: [&str; 15] = [
+            "borderFillId",
+            "borderLeft",
+            "borderRight",
+            "borderTop",
+            "borderBottom",
+            "fillType",
+            "fillColor",
+            "patternColor",
+            "patternType",
+            "diagonalLine",
+            "diagonalSlash",
+            "diagonalBackSlash",
+            "diagonalWidth",
+            "diagonalColor",
+            "centerLine",
+        ];
+
+        let Ok(incoming) = serde_json::from_str::<serde_json::Value>(json) else {
+            return false;
+        };
+        let Ok(expected) = serde_json::from_str::<serde_json::Value>(&format!(
+            "{{{}}}",
+            self.build_border_fill_json_by_id(bf_id)
+        )) else {
+            return false;
+        };
+        let (Some(incoming), Some(expected)) = (incoming.as_object(), expected.as_object()) else {
+            return false;
+        };
+
+        let mut compared = false;
+        for key in KEYS {
+            let Some(value) = incoming.get(key) else {
+                continue;
+            };
+            compared = true;
+            if expected.get(key) != Some(value) {
+                return false;
+            }
+        }
+        compared
     }
 
     /// UI 조회에서는 셀 고유 값보다 cellzone overlay가 실제 표시 상태에 가깝다.
@@ -2006,52 +2116,17 @@ impl DocumentCore {
             }
         };
 
-        let pb = match table.page_break {
-            crate::model::table::TablePageBreak::None => 0,
-            crate::model::table::TablePageBreak::CellBreak => 1,
-            crate::model::table::TablePageBreak::RowBreak => 2,
+        let semantic = SemanticTableProperties::from(table.as_ref());
+        let pb = match semantic.page_break {
+            TablePageBreak::None => 0,
+            TablePageBreak::CellBreak => 1,
+            TablePageBreak::RowBreak => 2,
         };
 
-        let bf_json = self.build_border_fill_json_by_id(table.border_fill_id);
-
-        // raw_ctrl_data에서 표 크기 & 바깥 여백 추출 (parse_common_obj_attr 정합)
-        // [0..4]=flags, [4..8]=v_offset, [8..12]=h_offset, [12..16]=width, [16..20]=height
-        let rd = &table.raw_ctrl_data;
-        let table_width = if rd.len() >= common_obj_offsets::WIDTH.end {
-            u32::from_le_bytes(rd[common_obj_offsets::WIDTH].try_into().unwrap())
-        } else {
-            0
-        };
-        let table_height = if rd.len() >= common_obj_offsets::HEIGHT.end {
-            u32::from_le_bytes(rd[common_obj_offsets::HEIGHT].try_into().unwrap())
-        } else {
-            0
-        };
-        // outer_margin: [24..32] (parse_common_obj_attr 정합)
-        // [20..24]=z_order, [24..26]=left, [26..28]=right, [28..30]=top, [30..32]=bottom
-        let outer_left = if rd.len() >= common_obj_offsets::MARGIN_LEFT.end {
-            i16::from_le_bytes(rd[common_obj_offsets::MARGIN_LEFT].try_into().unwrap())
-        } else {
-            0
-        };
-        let outer_right = if rd.len() >= common_obj_offsets::MARGIN_RIGHT.end {
-            i16::from_le_bytes(rd[common_obj_offsets::MARGIN_RIGHT].try_into().unwrap())
-        } else {
-            0
-        };
-        let outer_top = if rd.len() >= common_obj_offsets::MARGIN_TOP.end {
-            i16::from_le_bytes(rd[common_obj_offsets::MARGIN_TOP].try_into().unwrap())
-        } else {
-            0
-        };
-        let outer_bottom = if rd.len() >= common_obj_offsets::MARGIN_BOTTOM.end {
-            i16::from_le_bytes(rd[common_obj_offsets::MARGIN_BOTTOM].try_into().unwrap())
-        } else {
-            0
-        };
+        let bf_json = self.build_border_fill_json_by_id(semantic.border_fill_id);
 
         // 캡션 정보
-        let caption_json = if let Some(ref cap) = table.caption {
+        let caption_json = if let Some(cap) = semantic.caption {
             let dir = match cap.direction {
                 crate::model::shape::CaptionDirection::Left => 0,
                 crate::model::shape::CaptionDirection::Right => 1,
@@ -2078,78 +2153,53 @@ impl DocumentCore {
             ",\"hasCaption\":false".to_string()
         };
 
-        // HWPX: common 필드에서 직접 읽기. HWP: attr 비트 연산 (common에도 동일하게 파싱됨)
-        let treat_as_char = table.common.treat_as_char;
-        let text_wrap = match table.common.text_wrap {
-            crate::model::shape::TextWrap::Square => "Square",
-            crate::model::shape::TextWrap::Tight => "Square",
-            crate::model::shape::TextWrap::Through => "Square",
-            crate::model::shape::TextWrap::TopAndBottom => "TopAndBottom",
-            crate::model::shape::TextWrap::BehindText => "BehindText",
-            crate::model::shape::TextWrap::InFrontOfText => "InFrontOfText",
+        let text_wrap = match semantic.text_wrap {
+            TextWrap::Square => "Square",
+            TextWrap::Tight => "Tight",
+            TextWrap::Through => "Through",
+            TextWrap::TopAndBottom => "TopAndBottom",
+            TextWrap::BehindText => "BehindText",
+            TextWrap::InFrontOfText => "InFrontOfText",
         };
-        let vert_rel_to = match table.common.vert_rel_to {
-            crate::model::shape::VertRelTo::Paper => "Paper",
-            crate::model::shape::VertRelTo::Page => "Page",
-            crate::model::shape::VertRelTo::Para => "Para",
+        let vert_rel_to = match semantic.vert_rel_to {
+            VertRelTo::Paper => "Paper",
+            VertRelTo::Page => "Page",
+            VertRelTo::Para => "Para",
         };
-        let vert_align = match table.common.vert_align {
-            crate::model::shape::VertAlign::Top => "Top",
-            crate::model::shape::VertAlign::Center => "Center",
-            crate::model::shape::VertAlign::Bottom => "Bottom",
-            crate::model::shape::VertAlign::Inside => "Inside",
-            crate::model::shape::VertAlign::Outside => "Outside",
+        let vert_align = match semantic.vert_align {
+            VertAlign::Top => "Top",
+            VertAlign::Center => "Center",
+            VertAlign::Bottom => "Bottom",
+            VertAlign::Inside => "Inside",
+            VertAlign::Outside => "Outside",
         };
-        let horz_rel_to = match table.common.horz_rel_to {
-            crate::model::shape::HorzRelTo::Paper => "Paper",
-            crate::model::shape::HorzRelTo::Page => "Page",
-            crate::model::shape::HorzRelTo::Column => "Column",
-            crate::model::shape::HorzRelTo::Para => "Para",
+        let horz_rel_to = match semantic.horz_rel_to {
+            HorzRelTo::Paper => "Paper",
+            HorzRelTo::Page => "Page",
+            HorzRelTo::Column => "Column",
+            HorzRelTo::Para => "Para",
         };
-        let horz_align = match table.common.horz_align {
-            crate::model::shape::HorzAlign::Left => "Left",
-            crate::model::shape::HorzAlign::Center => "Center",
-            crate::model::shape::HorzAlign::Right => "Right",
-            crate::model::shape::HorzAlign::Inside => "Inside",
-            crate::model::shape::HorzAlign::Outside => "Outside",
-        };
-        // CommonObjAttr: flags/v_offset/h_offset
-        let vert_offset = if rd.len() >= common_obj_offsets::V_OFFSET.end {
-            i32::from_le_bytes(rd[common_obj_offsets::V_OFFSET].try_into().unwrap())
-        } else {
-            0
-        };
-        let horz_offset = if rd.len() >= common_obj_offsets::H_OFFSET.end {
-            i32::from_le_bytes(rd[common_obj_offsets::H_OFFSET].try_into().unwrap())
-        } else {
-            0
-        };
-        let restrict_in_page = (table.attr >> 13) & 0x01 != 0;
-        let allow_overlap = (table.attr >> 14) & 0x01 != 0;
-        // prevent_page_break: CommonObjAttr::PREVENT_PAGE_BREAK
-        let keep_with_anchor = if rd.len() >= common_obj_offsets::PREVENT_PAGE_BREAK.end {
-            i32::from_le_bytes(
-                rd[common_obj_offsets::PREVENT_PAGE_BREAK]
-                    .try_into()
-                    .unwrap(),
-            ) != 0
-        } else {
-            false
+        let horz_align = match semantic.horz_align {
+            HorzAlign::Left => "Left",
+            HorzAlign::Center => "Center",
+            HorzAlign::Right => "Right",
+            HorzAlign::Inside => "Inside",
+            HorzAlign::Outside => "Outside",
         };
 
         Ok(format!(
             "{{\"cellSpacing\":{},\"paddingLeft\":{},\"paddingRight\":{},\"paddingTop\":{},\"paddingBottom\":{},\"pageBreak\":{},\"repeatHeader\":{},{},\"tableWidth\":{},\"tableHeight\":{},\"outerLeft\":{},\"outerRight\":{},\"outerTop\":{},\"outerBottom\":{}{},\"treatAsChar\":{},\"textWrap\":\"{}\",\"vertRelTo\":\"{}\",\"vertAlign\":\"{}\",\"horzRelTo\":\"{}\",\"horzAlign\":\"{}\",\"vertOffset\":{},\"horzOffset\":{},\"restrictInPage\":{},\"allowOverlap\":{},\"keepWithAnchor\":{}}}",
-            table.cell_spacing,
-            table.padding.left, table.padding.right, table.padding.top, table.padding.bottom,
-            pb, table.repeat_header,
+            semantic.cell_spacing,
+            semantic.padding.left, semantic.padding.right, semantic.padding.top, semantic.padding.bottom,
+            pb, semantic.repeat_header,
             bf_json,
-            table_width, table_height,
-            outer_left, outer_right, outer_top, outer_bottom,
+            semantic.table_width, semantic.table_height,
+            semantic.outer_left, semantic.outer_right, semantic.outer_top, semantic.outer_bottom,
             caption_json,
-            treat_as_char,
+            semantic.treat_as_char,
             text_wrap, vert_rel_to, vert_align, horz_rel_to, horz_align,
-            vert_offset, horz_offset,
-            restrict_in_page, allow_overlap, keep_with_anchor,
+            semantic.vert_offset, semantic.horz_offset,
+            semantic.restrict_in_page, semantic.allow_overlap, semantic.keep_with_anchor,
         ))
     }
 
@@ -2175,6 +2225,7 @@ impl DocumentCore {
             .unwrap_or((0, 0, 0));
 
         let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        let mut common_changed = false;
 
         if let Some(v) = json_i16(json, "cellSpacing") {
             table.cell_spacing = v;
@@ -2192,44 +2243,65 @@ impl DocumentCore {
             table.padding.bottom = v;
         }
         if let Some(v) = json_u8(json, "pageBreak") {
-            table.page_break = match v {
+            let value = match v {
                 1 => crate::model::table::TablePageBreak::CellBreak,
                 2 => crate::model::table::TablePageBreak::RowBreak,
                 _ => crate::model::table::TablePageBreak::None,
             };
-            // HWP5 직렬화기는 raw_table_record_attr(파싱 원본)이 있으면 그대로 쓰므로
-            // 동기화하지 않으면 .hwp 저장 시 쪽나눔 편집이 유실된다.
-            table.sync_raw_record_attr();
+            if table.page_break != value {
+                table.page_break = value;
+                // HWP5 직렬화기는 raw_table_record_attr(파싱 원본)이 있으면 그대로 쓰므로
+                // 동기화하지 않으면 .hwp 저장 시 쪽나눔 편집이 유실된다.
+                table.sync_raw_record_attr();
+            }
         }
         if let Some(v) = json_bool(json, "repeatHeader") {
-            table.repeat_header = v;
-            table.sync_raw_record_attr();
+            if table.repeat_header != v {
+                table.repeat_header = v;
+                table.sync_raw_record_attr();
+            }
         }
         if let Some(v) = json_bool(json, "treatAsChar") {
-            if v {
-                table.attr |= 0x01;
-            } else {
-                table.attr &= !0x01;
+            if table.common.treat_as_char != v {
+                if v {
+                    table.attr |= 0x01;
+                    table.common.attr |= 0x01;
+                } else {
+                    table.attr &= !0x01;
+                    table.common.attr &= !0x01;
+                }
+                table.common.treat_as_char = v;
+                common_changed = true;
             }
-            table.common.treat_as_char = v;
         }
 
         // 위치 속성: attr 비트 필드
         if let Some(v) = json_str(json, "textWrap") {
             let bits: u32 = match v.as_str() {
                 "Square" => 0,
+                "Tight" => 0,
+                "Through" => 0,
                 "TopAndBottom" => 1,
                 "BehindText" => 2,
                 "InFrontOfText" => 3,
                 _ => 0,
             };
-            table.attr = (table.attr & !(0x07 << 21)) | (bits << 21);
-            table.common.text_wrap = match bits {
-                1 => crate::model::shape::TextWrap::TopAndBottom,
-                2 => crate::model::shape::TextWrap::BehindText,
-                3 => crate::model::shape::TextWrap::InFrontOfText,
-                _ => crate::model::shape::TextWrap::Square,
+            let value = match v.as_str() {
+                "Tight" => TextWrap::Tight,
+                "Through" => TextWrap::Through,
+                _ => match bits {
+                    1 => TextWrap::TopAndBottom,
+                    2 => TextWrap::BehindText,
+                    3 => TextWrap::InFrontOfText,
+                    _ => TextWrap::Square,
+                },
             };
+            if table.common.text_wrap != value {
+                table.attr = (table.attr & !(0x07 << 21)) | (bits << 21);
+                table.common.attr = (table.common.attr & !(0x07 << 21)) | (bits << 21);
+                table.common.text_wrap = value;
+                common_changed = true;
+            }
         }
         if let Some(v) = json_str(json, "vertRelTo") {
             let bits: u32 = match v.as_str() {
@@ -2238,12 +2310,17 @@ impl DocumentCore {
                 "Para" => 2,
                 _ => 0,
             };
-            table.attr = (table.attr & !(0x03 << 3)) | (bits << 3);
-            table.common.vert_rel_to = match bits {
-                1 => crate::model::shape::VertRelTo::Page,
-                2 => crate::model::shape::VertRelTo::Para,
-                _ => crate::model::shape::VertRelTo::Paper,
+            let value = match bits {
+                1 => VertRelTo::Page,
+                2 => VertRelTo::Para,
+                _ => VertRelTo::Paper,
             };
+            if table.common.vert_rel_to != value {
+                table.attr = (table.attr & !(0x03 << 3)) | (bits << 3);
+                table.common.attr = (table.common.attr & !(0x03 << 3)) | (bits << 3);
+                table.common.vert_rel_to = value;
+                common_changed = true;
+            }
         }
         if let Some(v) = json_str(json, "vertAlign") {
             let bits: u32 = match v.as_str() {
@@ -2254,14 +2331,19 @@ impl DocumentCore {
                 "Outside" => 4,
                 _ => 0,
             };
-            table.attr = (table.attr & !(0x07 << 5)) | (bits << 5);
-            table.common.vert_align = match bits {
-                1 => crate::model::shape::VertAlign::Center,
-                2 => crate::model::shape::VertAlign::Bottom,
-                3 => crate::model::shape::VertAlign::Inside,
-                4 => crate::model::shape::VertAlign::Outside,
-                _ => crate::model::shape::VertAlign::Top,
+            let value = match bits {
+                1 => VertAlign::Center,
+                2 => VertAlign::Bottom,
+                3 => VertAlign::Inside,
+                4 => VertAlign::Outside,
+                _ => VertAlign::Top,
             };
+            if table.common.vert_align != value {
+                table.attr = (table.attr & !(0x07 << 5)) | (bits << 5);
+                table.common.attr = (table.common.attr & !(0x07 << 5)) | (bits << 5);
+                table.common.vert_align = value;
+                common_changed = true;
+            }
         }
         if let Some(v) = json_str(json, "horzRelTo") {
             let bits: u32 = match v.as_str() {
@@ -2271,13 +2353,18 @@ impl DocumentCore {
                 "Para" => 3,
                 _ => 0,
             };
-            table.attr = (table.attr & !(0x03 << 8)) | (bits << 8);
-            table.common.horz_rel_to = match bits {
-                1 => crate::model::shape::HorzRelTo::Page,
-                2 => crate::model::shape::HorzRelTo::Column,
-                3 => crate::model::shape::HorzRelTo::Para,
-                _ => crate::model::shape::HorzRelTo::Paper,
+            let value = match bits {
+                1 => HorzRelTo::Page,
+                2 => HorzRelTo::Column,
+                3 => HorzRelTo::Para,
+                _ => HorzRelTo::Paper,
             };
+            if table.common.horz_rel_to != value {
+                table.attr = (table.attr & !(0x03 << 8)) | (bits << 8);
+                table.common.attr = (table.common.attr & !(0x03 << 8)) | (bits << 8);
+                table.common.horz_rel_to = value;
+                common_changed = true;
+            }
         }
         if let Some(v) = json_str(json, "horzAlign") {
             let bits: u32 = match v.as_str() {
@@ -2288,90 +2375,96 @@ impl DocumentCore {
                 "Outside" => 4,
                 _ => 0,
             };
-            table.attr = (table.attr & !(0x07 << 10)) | (bits << 10);
-            table.common.horz_align = match bits {
-                1 => crate::model::shape::HorzAlign::Center,
-                2 => crate::model::shape::HorzAlign::Right,
-                3 => crate::model::shape::HorzAlign::Inside,
-                4 => crate::model::shape::HorzAlign::Outside,
-                _ => crate::model::shape::HorzAlign::Left,
+            let value = match bits {
+                1 => HorzAlign::Center,
+                2 => HorzAlign::Right,
+                3 => HorzAlign::Inside,
+                4 => HorzAlign::Outside,
+                _ => HorzAlign::Left,
             };
-        }
-        table.common.attr = table.attr;
-        // 위치 오프셋: CommonObjAttr [0..4]=flags, [4..8]=v_offset, [8..12]=h_offset
-        while table.raw_ctrl_data.len() < common_obj_offsets::H_OFFSET.end {
-            table.raw_ctrl_data.push(0);
+            if table.common.horz_align != value {
+                table.attr = (table.attr & !(0x07 << 10)) | (bits << 10);
+                table.common.attr = (table.common.attr & !(0x07 << 10)) | (bits << 10);
+                table.common.horz_align = value;
+                common_changed = true;
+            }
         }
         if let Some(v) = json_i32(json, "vertOffset") {
-            table.raw_ctrl_data[common_obj_offsets::V_OFFSET].copy_from_slice(&v.to_le_bytes());
-            table.common.vertical_offset = v as u32;
+            if table.common.vertical_offset != v as u32 {
+                table.common.vertical_offset = v as u32;
+                common_changed = true;
+            }
         }
         if let Some(v) = json_i32(json, "horzOffset") {
-            table.raw_ctrl_data[common_obj_offsets::H_OFFSET].copy_from_slice(&v.to_le_bytes());
-            table.common.horizontal_offset = v as u32;
+            if table.common.horizontal_offset != v as u32 {
+                table.common.horizontal_offset = v as u32;
+                common_changed = true;
+            }
         }
         // restrictInPage → attr bit 13
         if let Some(v) = json_bool(json, "restrictInPage") {
-            if v {
-                table.attr |= 1 << 13;
-                table.common.flow_with_text = true;
-            } else {
-                table.attr &= !(1 << 13);
-                table.common.flow_with_text = false;
+            if table.common.flow_with_text != v {
+                if v {
+                    table.attr |= 1 << 13;
+                    table.common.attr |= 1 << 13;
+                } else {
+                    table.attr &= !(1 << 13);
+                    table.common.attr &= !(1 << 13);
+                }
+                table.common.flow_with_text = v;
+                common_changed = true;
             }
-            table.common.attr = table.attr;
         }
         // allowOverlap → attr bit 14
         if let Some(v) = json_bool(json, "allowOverlap") {
-            if v {
-                table.attr |= 1 << 14;
-                table.common.allow_overlap = true;
-            } else {
-                table.attr &= !(1 << 14);
-                table.common.allow_overlap = false;
+            if table.common.allow_overlap != v {
+                if v {
+                    table.attr |= 1 << 14;
+                    table.common.attr |= 1 << 14;
+                } else {
+                    table.attr &= !(1 << 14);
+                    table.common.attr &= !(1 << 14);
+                }
+                table.common.allow_overlap = v;
+                common_changed = true;
             }
-            table.common.attr = table.attr;
         }
-        // attr 비트 변경을 raw_ctrl_data FLAGS(0..4)에도 반영. HWP5 직렬화기
-        // (serialize_table)는 raw_ctrl_data 가 있으면 그대로 기록하므로, 여기
-        // 반영하지 않으면 글자처럼 취급/배치/기준/정렬/쪽영역제한/겹침 변경이
-        // 저장 파일에서 통째로 유실되고 재로드 시 원복된다. V_OFFSET/H_OFFSET/
-        // PREVENT_PAGE_BREAK/MARGIN_* 패치와 동일 규칙 (미변경 시에는 파싱
-        // 원본 attr 를 그대로 다시 쓰는 항등 연산이라 무해).
-        table.raw_ctrl_data[common_obj_offsets::FLAGS].copy_from_slice(&table.attr.to_le_bytes());
         // keepWithAnchor → prevent_page_break
-        // CommonObjAttr::PREVENT_PAGE_BREAK (parse_common_obj_attr 정합)
         if let Some(v) = json_bool(json, "keepWithAnchor") {
-            while table.raw_ctrl_data.len() < common_obj_offsets::PREVENT_PAGE_BREAK.end {
-                table.raw_ctrl_data.push(0);
-            }
             let val: i32 = if v { 1 } else { 0 };
-            table.raw_ctrl_data[common_obj_offsets::PREVENT_PAGE_BREAK]
-                .copy_from_slice(&val.to_le_bytes());
-            table.common.prevent_page_break = val;
+            if table.common.prevent_page_break != val {
+                table.common.prevent_page_break = val;
+                common_changed = true;
+            }
         }
 
-        // 바깥 여백 (CommonObjAttr margin ranges, parse_common_obj_attr 정합)
-        if table.raw_ctrl_data.len() >= common_obj_offsets::MARGIN_BOTTOM.end {
-            if let Some(v) = json_i16(json, "outerLeft") {
-                table.raw_ctrl_data[common_obj_offsets::MARGIN_LEFT]
-                    .copy_from_slice(&v.to_le_bytes());
+        // HWPX serializes the duplicate outer_margin_* fields. Keep both semantic copies aligned.
+        if let Some(v) = json_i16(json, "outerLeft") {
+            if table.common.margin.left != v || table.outer_margin_left != v {
                 table.common.margin.left = v;
+                table.outer_margin_left = v;
+                common_changed = true;
             }
-            if let Some(v) = json_i16(json, "outerRight") {
-                table.raw_ctrl_data[common_obj_offsets::MARGIN_RIGHT]
-                    .copy_from_slice(&v.to_le_bytes());
+        }
+        if let Some(v) = json_i16(json, "outerRight") {
+            if table.common.margin.right != v || table.outer_margin_right != v {
                 table.common.margin.right = v;
+                table.outer_margin_right = v;
+                common_changed = true;
             }
-            if let Some(v) = json_i16(json, "outerTop") {
-                table.raw_ctrl_data[common_obj_offsets::MARGIN_TOP]
-                    .copy_from_slice(&v.to_le_bytes());
+        }
+        if let Some(v) = json_i16(json, "outerTop") {
+            if table.common.margin.top != v || table.outer_margin_top != v {
                 table.common.margin.top = v;
+                table.outer_margin_top = v;
+                common_changed = true;
             }
-            if let Some(v) = json_i16(json, "outerBottom") {
-                table.raw_ctrl_data[common_obj_offsets::MARGIN_BOTTOM]
-                    .copy_from_slice(&v.to_le_bytes());
+        }
+        if let Some(v) = json_i16(json, "outerBottom") {
+            if table.common.margin.bottom != v || table.outer_margin_bottom != v {
                 table.common.margin.bottom = v;
+                table.outer_margin_bottom = v;
+                common_changed = true;
             }
         }
 
@@ -2422,19 +2515,14 @@ impl DocumentCore {
                 caption_created = true;
                 // attr bit 29: 캡션 존재 플래그 (한컴 호환성)
                 table.attr |= 1 << 29;
-                table.common.attr = table.attr;
-                // raw_table_record_attr(HWPTAG_TABLE)와 ctrl 헤더 attr는 비트 배치가
-                // 다르다. ctrl attr를 그대로 덮으면 쪽나눔 bit 0-1이 오염되므로
-                // 각각 제 위치(FLAGS / record attr bit 0-2)에만 동기화한다.
-                table.raw_ctrl_data[common_obj_offsets::FLAGS]
-                    .copy_from_slice(&table.attr.to_le_bytes());
+                table.common.attr |= 1 << 29;
+                common_changed = true;
                 table.sync_raw_record_attr();
             } else if !has_cap && table.caption.is_some() {
                 table.caption = None;
                 table.attr &= !(1 << 29);
-                table.common.attr = table.attr;
-                table.raw_ctrl_data[common_obj_offsets::FLAGS]
-                    .copy_from_slice(&table.attr.to_le_bytes());
+                table.common.attr &= !(1 << 29);
+                common_changed = true;
                 table.sync_raw_record_attr();
                 caption_changed = true;
             }
@@ -2442,34 +2530,54 @@ impl DocumentCore {
         // 캡션 속성 수정
         if let Some(ref mut cap) = table.caption {
             if let Some(v) = json_u8(json, "captionDirection") {
-                cap.direction = match v {
+                let value = match v {
                     0 => crate::model::shape::CaptionDirection::Left,
                     1 => crate::model::shape::CaptionDirection::Right,
                     2 => crate::model::shape::CaptionDirection::Top,
                     _ => crate::model::shape::CaptionDirection::Bottom,
                 };
-                caption_changed = true;
+                if cap.direction != value {
+                    cap.direction = value;
+                    caption_changed = true;
+                }
             }
             if let Some(v) = json_i16(json, "captionSpacing") {
-                cap.spacing = v;
-                caption_changed = true;
+                if cap.spacing != v {
+                    cap.spacing = v;
+                    caption_changed = true;
+                }
             }
             if let Some(v) = json_u32(json, "captionWidth") {
-                cap.width = v;
-                caption_changed = true;
+                if cap.width != v {
+                    cap.width = v;
+                    caption_changed = true;
+                }
             }
             if let Some(v) = json_u8(json, "captionVertAlign") {
-                cap.vert_align = match v {
+                let value = match v {
                     1 => crate::model::shape::CaptionVertAlign::Center,
                     2 => crate::model::shape::CaptionVertAlign::Bottom,
                     _ => crate::model::shape::CaptionVertAlign::Top,
                 };
-                caption_changed = true;
+                if cap.vert_align != value {
+                    cap.vert_align = value;
+                    caption_changed = true;
+                }
             }
         }
         if caption_changed || caption_created {
             table.dirty = true;
         }
+
+        // HWP5 retains CommonObjAttr bytes as an export cache. HWPX does not have that cache,
+        // so keep it absent and let each exporter derive bytes from semantic fields.
+        if common_changed && !table.raw_ctrl_data.is_empty() {
+            table.raw_ctrl_data =
+                crate::document_core::converters::common_obj_attr_writer::serialize_common_obj_attr(
+                    &table.common,
+                );
+        }
+        let current_table_border_fill_id = table.border_fill_id;
 
         // BorderFill 변경 — 표 테두리/배경/대각선 변경 시 모든 셀에도 동일 적용
         // (HWP 렌더링은 cell.border_fill_id를 사용, table.border_fill_id는 페이지 분할용)
@@ -2481,7 +2589,9 @@ impl DocumentCore {
             || json.contains("\"diagonalWidth\"")
             || json.contains("\"diagonalColor\"")
             || json.contains("\"centerLine\"");
-        if has_border_fill_change {
+        let border_fill_is_noop =
+            self.table_border_fill_update_is_noop(current_table_border_fill_id, json);
+        if has_border_fill_change && !border_fill_is_noop {
             let new_bf_id = self.create_border_fill_from_json(json);
             let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
             table.border_fill_id = new_bf_id;

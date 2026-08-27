@@ -53,6 +53,7 @@ import type {
   AgentWorkflowState,
   OpenRouterCredits,
   PermissionProfile,
+  ServiceTier,
   PiCatalogModel,
   PiModelConfig,
   PiStatus,
@@ -104,6 +105,7 @@ export interface AgentBridge {
   getEditingLease(): AgentEditingLease;
   onEditingLeaseChange(cb: (lease: AgentEditingLease) => void): () => void;
   getPermissionProfile(): PermissionProfile;
+  getServiceTier(): ServiceTier;
   getWorkflowState(): AgentWorkflowState;
   /** 다른 탭이 연결을 차지한 상태에서 현재 탭이 스튜디오 연결을 다시 가져온다. */
   takeOverConnection(): void;
@@ -164,6 +166,7 @@ export interface AgentBridge {
   approvePlan(planId: string): boolean;
   requestPlanChanges(planId: string, feedback?: string): boolean;
   setPermissionProfile(profile: PermissionProfile): void;
+  setServiceTier(tier: ServiceTier): void;
   listSkills(): void;
   readSkill(name: string): string;
   validateSkill(skill: { name: string; files: ProductSkillFile[] }): string;
@@ -1004,6 +1007,7 @@ class AgentBridgeImpl implements AgentBridge {
   private selectedModel: string | null = null;
   private selectedEffort: string | null = null;
   private permissionProfile: PermissionProfile = 'safe';
+  private serviceTier: ServiceTier = 'standard';
   private workflow: AgentWorkflow = 'direct';
   private phase: AgentPhase = 'direct';
   private capabilityEpoch: number | null = null;
@@ -1021,6 +1025,7 @@ class AgentBridgeImpl implements AgentBridge {
     model?: string;
     effort?: string;
     permissionProfile?: PermissionProfile;
+    serviceTier?: ServiceTier;
     workflow: AgentWorkflow;
     threadId: string;
     documentId: string | null;
@@ -1332,6 +1337,7 @@ class AgentBridgeImpl implements AgentBridge {
           ...(pending.model ? { model: pending.model } : {}),
           ...(pending.effort ? { effort: pending.effort } : {}),
           ...(pending.permissionProfile ? { permissionProfile: pending.permissionProfile } : {}),
+          ...(pending.serviceTier ? { serviceTier: pending.serviceTier } : {}),
           ...(pending.force ? { force: true } : {}),
         });
       }
@@ -1558,6 +1564,7 @@ class AgentBridgeImpl implements AgentBridge {
           if (typeof session.documentName === 'string' || session.documentName === null) this.documentName = session.documentName;
           this.turnRunning = session.status === 'running';
           this.permissionProfile = session.permissionProfile === 'unrestricted' ? 'unrestricted' : 'safe';
+          this.serviceTier = session.serviceTier === 'fast' ? 'fast' : 'standard';
           this.activeTemplateId = typeof session.activeTemplateId === 'string' ? session.activeTemplateId : null;
           this.activeTemplate = this.activeTemplateId
             ? this.templateCatalog.templates.find((template) => template.id === this.activeTemplateId) ?? null
@@ -1598,6 +1605,7 @@ class AgentBridgeImpl implements AgentBridge {
             ...(typeof session.documentId === 'string' || session.documentId === null ? { documentId: session.documentId } : {}),
             ...(typeof session.documentName === 'string' || session.documentName === null ? { documentName: session.documentName } : {}),
             permissionProfile: this.permissionProfile,
+            serviceTier: this.serviceTier,
             ...this.workflowState(),
           });
           if (pendingQuestion) {
@@ -1725,6 +1733,7 @@ class AgentBridgeImpl implements AgentBridge {
         if (typeof msg.model === 'string') this.selectedModel = msg.model;
         if (typeof msg.effort === 'string') this.selectedEffort = msg.effort;
         if (msg.permissionProfile === 'safe' || msg.permissionProfile === 'unrestricted') this.permissionProfile = msg.permissionProfile;
+        if (msg.serviceTier === 'fast' || msg.serviceTier === 'standard') this.serviceTier = msg.serviceTier;
         if (typeof msg.threadId === 'string') this.threadId = msg.threadId;
         if (typeof msg.documentId === 'string' || msg.documentId === null) this.documentId = msg.documentId;
         if (typeof msg.documentName === 'string' || msg.documentName === null) this.documentName = msg.documentName;
@@ -1739,6 +1748,7 @@ class AgentBridgeImpl implements AgentBridge {
           ...(typeof msg.documentId === 'string' || msg.documentId === null ? { documentId: msg.documentId } : {}),
           ...(typeof msg.documentName === 'string' || msg.documentName === null ? { documentName: msg.documentName } : {}),
           permissionProfile: this.permissionProfile,
+          serviceTier: this.serviceTier,
           ...this.workflowState(),
         });
         this.flushQueuedMessages();
@@ -1748,6 +1758,13 @@ class AgentBridgeImpl implements AgentBridge {
         if (msg.permissionProfile === 'safe' || msg.permissionProfile === 'unrestricted') {
           this.permissionProfile = msg.permissionProfile;
           this.emit({ type: 'permission-changed', permissionProfile: this.permissionProfile });
+        }
+        break;
+      }
+      case 'chat-service-tier-changed': {
+        if (msg.serviceTier === 'fast' || msg.serviceTier === 'standard') {
+          this.serviceTier = msg.serviceTier;
+          this.emit({ type: 'service-tier-changed', serviceTier: this.serviceTier });
         }
         break;
       }
@@ -2228,6 +2245,10 @@ class AgentBridgeImpl implements AgentBridge {
     return this.permissionProfile;
   }
 
+  getServiceTier(): ServiceTier {
+    return this.serviceTier;
+  }
+
   getWorkflowState() {
     return this.workflowState();
   }
@@ -2265,6 +2286,7 @@ class AgentBridgeImpl implements AgentBridge {
       ...(this.selectedModel ? { model: this.selectedModel } : {}),
       ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
       permissionProfile,
+      serviceTier: this.serviceTier,
       ...(force ? { force: true } : {}),
     };
     this.pendingChatStart = {
@@ -2272,6 +2294,7 @@ class AgentBridgeImpl implements AgentBridge {
       model: this.selectedModel ?? undefined,
       effort: this.selectedEffort ?? undefined,
       permissionProfile,
+      serviceTier: this.serviceTier,
       workflow,
       threadId,
       documentId,
@@ -2305,6 +2328,7 @@ class AgentBridgeImpl implements AgentBridge {
     this.syncEditingLease();
     // 전체 접근은 현재 채팅 하나에만 적용하고 새 스레드나 다시 연 스레드의 기본값으로 삼지 않는다.
     this.permissionProfile = 'safe';
+    this.serviceTier = 'standard';
     this.resetWorkflowState();
     if (this.state === 'connected') {
       this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-stop' });
@@ -2367,6 +2391,7 @@ class AgentBridgeImpl implements AgentBridge {
             ...((pending?.model ?? this.selectedModel) ? { model: pending?.model ?? this.selectedModel } : {}),
             ...((pending?.effort ?? this.selectedEffort) ? { effort: pending?.effort ?? this.selectedEffort } : {}),
             permissionProfile: pending?.permissionProfile ?? this.permissionProfile,
+            serviceTier: pending?.serviceTier ?? this.serviceTier,
             ...(pending?.force ? { force: true } : {}),
           });
         } else {
@@ -2375,6 +2400,7 @@ class AgentBridgeImpl implements AgentBridge {
             model: this.selectedModel ?? undefined,
             effort: this.selectedEffort ?? undefined,
             permissionProfile: this.permissionProfile,
+            serviceTier: this.serviceTier,
             workflow: this.workflow,
             threadId: context.threadId,
             documentId: context.documentId,
@@ -2688,6 +2714,12 @@ class AgentBridgeImpl implements AgentBridge {
 
   setPermissionProfile(profile: PermissionProfile): void {
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-permission-set', permissionProfile: profile });
+  }
+
+  setServiceTier(tier: ServiceTier): void {
+    this.serviceTier = tier === 'fast' ? 'fast' : 'standard';
+    if (this.activeAgent === null) return;
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-service-tier-set', serviceTier: this.serviceTier });
   }
 
   listSkills(): void {

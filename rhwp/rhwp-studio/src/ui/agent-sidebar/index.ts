@@ -18,6 +18,7 @@ import type {
   AgentWorkflowState,
   DocRange,
   PermissionProfile,
+  ServiceTier,
   PendingChangeSet,
   PendingEditsChangeEvent,
   PendingOp,
@@ -38,6 +39,8 @@ import {
   modelSupportsImages,
   resolveEffortForAgent,
   resolveModelForAgent,
+  resolveServiceTier,
+  agentSupportsFast,
 } from '../../agent/models.ts';
 import { loadAgentPrefs, type AgentPrefs } from '../../agent/agent-prefs.ts';
 import { userSettings } from '../../core/user-settings.ts';
@@ -544,6 +547,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let selectedAgent: AgentName = bridge.getActiveAgent() ?? agentPrefs.defaultAgent;
   let selectedModel = resolveModelForAgent(selectedAgent, agentPrefs.defaultModel);
   let selectedEffort = resolveEffortForAgent(selectedAgent, agentPrefs.defaultEffort, selectedModel);
+  let selectedServiceTier: ServiceTier = resolveServiceTier(selectedAgent, null);
   let connState: ConnectionState = bridge.getConnectionState();
   /** 지금까지 실패한 연결 시도 수 · 다음 자동 재시도 시각 (배너 카운트다운). */
   let connAttempt = 0;
@@ -615,6 +619,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     agent: selectedAgent,
     model: selectedModel,
     effort: selectedEffort,
+    serviceTier: selectedServiceTier,
     docKey: currentDocKey,
     documentId: currentDocumentId,
   });
@@ -686,6 +691,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function startCurrentBridgeChat(force = false): void {
     // 새 채팅·스레드 전환(force)만 입력기를 잠근다. 모델/추론 강도만 바꿀 때는
     // 같은 대화를 다시 열 뿐이라 입력칸·피커가 비활성으로 깜빡이지 않게 둔다.
+    bridge.setServiceTier(selectedServiceTier);
     if (force) chatStartPendingThreadId = currentThread.id;
     const history = serializeThreadMessagesForProviderHistory(currentThread.messages);
     bridge.startChat(selectedAgent, selectedModel, selectedEffort, force, permissionProfile, chatWorkflow,
@@ -904,6 +910,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     setSelectedAgent(agent);
     selectedModel = resolveModelForAgent(agent, selectedModel);
     selectedEffort = resolveEffortForAgent(agent, selectedEffort, selectedModel);
+    selectedServiceTier = resolveServiceTier(agent, selectedServiceTier);
     rebuildLlmMenu();
     rebuildEffortMenu();
     updateWorkspaceAgentContext();
@@ -3024,11 +3031,44 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     skillResources.value = '';
   });
 
+  function applyFastCommand(action: 'on' | 'off' | 'status' | 'toggle'): void {
+    if (!agentSupportsFast(selectedAgent)) {
+      systemMessage('Fast는 Codex에서만 사용할 수 있습니다.');
+      return;
+    }
+    if (action === 'status') {
+      systemMessage(selectedServiceTier === 'fast'
+        ? 'Codex Fast가 켜져 있습니다. 다음 턴부터 우선 처리됩니다.'
+        : 'Codex Fast가 꺼져 있습니다.');
+      return;
+    }
+    if (isControlLocked()) {
+      systemMessage('응답이 끝난 뒤에 Fast를 바꿀 수 있습니다.');
+      return;
+    }
+    const next: ServiceTier = action === 'toggle'
+      ? (selectedServiceTier === 'fast' ? 'standard' : 'fast')
+      : (action === 'on' ? 'fast' : 'standard');
+    if (next === selectedServiceTier) {
+      systemMessage(next === 'fast'
+        ? 'Codex Fast가 이미 켜져 있습니다.'
+        : 'Codex Fast가 이미 꺼져 있습니다.');
+      return;
+    }
+    selectedServiceTier = next;
+    currentThread.serviceTier = next;
+    persistCurrentThread();
+    if (bridge.getActiveAgent() === 'codex') bridge.setServiceTier(next);
+    systemMessage(next === 'fast'
+      ? 'Codex Fast를 켰습니다. 다음 턴부터 우선 처리됩니다.'
+      : 'Codex Fast를 껐습니다.');
+  }
+
   type SlashOption = {
     value: string;
     label: string;
     detail: string;
-    local?: 'skills' | 'create' | 'calibration' | 'settings' | 'templates';
+    local?: 'skills' | 'create' | 'calibration' | 'settings' | 'templates' | 'fast';
     workflow?: AgentWorkflow;
     templateId?: string;
     skillName?: string;
@@ -3131,6 +3171,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const base: SlashOption[] = [
       { value: '/plan', label: '/plan', detail: '계획 모드로 전환', workflow: 'plan' },
       { value: '/build', label: '/build', detail: '바로 실행 모드로 전환', workflow: 'direct' },
+      ...(agentSupportsFast(selectedAgent)
+        ? [{
+            value: '/fast',
+            label: '/fast',
+            detail: selectedServiceTier === 'fast' ? 'Codex Fast 끄기' : 'Codex Fast 켜기',
+            local: 'fast' as const,
+          }]
+        : []),
       { value: '/calibration', label: '/calibration', detail: '말투를 맞출까요? 열기', local: 'calibration' },
       { value: '/settings', label: '/settings', detail: '설정 열기 (연결·기본값·사용량)', local: 'settings' },
       { value: '/templates', label: '/templates', detail: '문서 템플릿 선택', local: 'templates' },
@@ -3211,6 +3259,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     if (option.local === 'skills') { input.value = ''; setSkillsPanelOpen(true); return; }
     if (option.local === 'create') { input.value = ''; beginSkillCreate(); return; }
+    if (option.local === 'fast') { input.value = ''; applyFastCommand(selectedServiceTier === 'fast' ? 'off' : 'on'); return; }
     input.value = `${option.value} `;
     input.focus();
   }
@@ -3327,6 +3376,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         input.value = '';
         setSlashMenuOpen(false);
         requestWorkflow(text === '/plan' ? 'plan' : 'direct');
+        return;
+      }
+      const fastCommand = text.match(/^\/fast(?:\s+(on|off|status))?$/i);
+      if (fastCommand) {
+        input.value = '';
+        setSlashMenuOpen(false);
+        const arg = fastCommand[1]?.toLowerCase();
+        applyFastCommand(arg === 'on' || arg === 'off' || arg === 'status' ? arg : 'toggle');
+        return;
+      }
+      if (/^\/fast\b/i.test(text)) {
+        input.value = '';
+        setSlashMenuOpen(false);
+        systemMessage('지원하지 않는 /fast 인자입니다. on, off, status를 쓰거나 /fast만 입력하세요.');
         return;
       }
       if (text === '/calibration') { input.value = ''; writingStyleCalibration.open(); return; }
@@ -3454,6 +3517,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     currentThread.agent = selectedAgent;
     currentThread.model = selectedModel;
     currentThread.effort = selectedEffort;
+    currentThread.serviceTier = selectedServiceTier;
     currentThread.workflow = chatWorkflow;
     if (activePlan) currentThread.latestPlan = activePlan;
     else delete currentThread.latestPlan;
@@ -3764,6 +3828,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function applyThreadMeta(thread: ChatThread): void {
     selectedModel = resolveModelForAgent(thread.agent, thread.model);
     selectedEffort = resolveEffortForAgent(thread.agent, thread.effort, selectedModel);
+    selectedServiceTier = resolveServiceTier(thread.agent, thread.serviceTier);
     setSelectedAgent(thread.agent);
     rebuildLlmMenu();
     rebuildEffortMenu();
@@ -4164,6 +4229,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const nextEffort = resolveEffortForAgent(nextAgent, agentPrefs.defaultEffort, nextModel);
     selectedModel = nextModel;
     selectedEffort = nextEffort;
+    selectedServiceTier = resolveServiceTier(nextAgent, null);
     setSelectedAgent(nextAgent);
     rebuildLlmMenu();
     rebuildEffortMenu();
@@ -4207,6 +4273,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       agent: selectedAgent,
       model: selectedModel,
       effort: selectedEffort,
+      serviceTier: selectedServiceTier,
       docKey: currentDocKey,
       documentId: currentDocumentId,
     });
@@ -5109,6 +5176,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         currentThread.agent = selectedAgent;
         currentThread.model = selectedModel;
         currentThread.effort = selectedEffort;
+        if (e.serviceTier === 'fast' || e.serviceTier === 'standard') {
+          selectedServiceTier = resolveServiceTier(selectedAgent, e.serviceTier);
+          currentThread.serviceTier = selectedServiceTier;
+        }
         if (e.permissionProfile) {
           permissionProfile = e.permissionProfile;
           updatePermissionButton();
@@ -5157,6 +5228,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             ? '전체 접근을 켰습니다. 계획 단계는 계속 읽기 전용이며, 계획을 승인해 실행 단계로 전환하면 전체 접근을 적용합니다.'
             : '전체 접근을 켰습니다. 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이미 검토 대기 중인 변경은 그대로 남습니다.'
           : '안전 모드로 돌아왔습니다. 문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영되고, 파일과 명령은 프로젝트 범위로 제한됩니다.');
+        break;
+      case 'service-tier-changed':
+        selectedServiceTier = resolveServiceTier(selectedAgent, e.serviceTier);
+        currentThread.serviceTier = selectedServiceTier;
+        persistCurrentThread();
         break;
       case 'reference-status': {
         const message = currentThread.messages.find((item) => item.messageId === e.messageId);

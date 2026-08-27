@@ -1,4 +1,4 @@
-import type { AgentName, PiModelConfig } from './types.ts';
+import type { AgentName, PiModelConfig, ServiceTier } from './types.ts';
 
 export interface AgentModelOption {
   /** CLI `--model` / `-m` 에 넘기는 값 */
@@ -311,4 +311,21 @@ export function labelForEffort(
   model?: string | null,
 ): string {
   return effortsForAgent(agent, model).find((e) => e.id === effortId)?.label ?? effortId;
+}
+
+export function isServiceTier(value: unknown): value is ServiceTier {
+  return value === 'standard' || value === 'fast';
+}
+
+/** Fast 티어는 Codex exec 의 service_tier 만 이해한다. */
+export function agentSupportsFast(agent: AgentName): boolean {
+  return agent === 'codex';
+}
+
+export function resolveServiceTier(
+  agent: AgentName,
+  requested?: string | null,
+): ServiceTier {
+  if (!agentSupportsFast(agent)) return 'standard';
+  return requested === 'fast' ? 'fast' : 'standard';
 }

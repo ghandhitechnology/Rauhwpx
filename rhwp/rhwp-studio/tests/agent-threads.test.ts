@@ -408,6 +408,32 @@ test('persisted Pi chats remain available after reload', () => {
   assert.equal(getThread('pi-thread')?.agent, 'pi');
 });
 
+test('legacy threads default to the standard service tier', () => {
+  mem.clear();
+  storage.setItem('rhwp-agent-threads', JSON.stringify([{
+    id: 'legacy-fast',
+    title: '이전 대화',
+    titleRequested: false,
+    createdAt: 1,
+    updatedAt: 2,
+    agent: 'codex',
+    model: 'gpt-5.6-sol',
+    effort: 'medium',
+    messages: [{ role: 'user', text: '안녕' }],
+  }]));
+  assert.equal(getThread('legacy-fast')?.serviceTier, 'standard');
+});
+
+test('Codex Fast service tier survives thread persistence', () => {
+  mem.clear();
+  const t = createEmptyThread({
+    agent: 'codex', model: 'gpt-5.6-sol', effort: 'medium', serviceTier: 'fast',
+  });
+  t.messages.push({ role: 'user', text: '빠르게' });
+  upsertThread(t);
+  assert.equal(getThread(t.id)?.serviceTier, 'fast');
+});
+
 test('legacy threads migrate to direct workflow', () => {
   mem.clear();
   storage.setItem('rhwp-agent-threads', JSON.stringify([{

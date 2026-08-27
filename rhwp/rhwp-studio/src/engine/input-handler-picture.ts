@@ -6,6 +6,7 @@ import type { HeaderFooterObjectRef, ObjectResizeTarget } from './command';
 import { computeArrowResize, MIN_SIZE_HWP, type ArrowKey } from './picture-resize';
 import { computeRotationRecord } from './object-drag-record';
 import type { CellPathLike } from '@/core/types';
+import { objectAddressScope } from '@/core/object-address';
 import { showToast } from '@/ui/toast';
 
 type PictureObjectRef = {
@@ -18,6 +19,7 @@ type PictureObjectRef = {
   outerTableControlIdx?: number;
   cellPath?: CellPathLike;
   noteRef?: any;
+  memoRef?: any;
   x1?: number;
   y1?: number;
   x2?: number;
@@ -62,7 +64,7 @@ function matchesControlRef(ctrl: any, ref: PictureObjectRef, layoutType: string)
 }
 
 function syncOleObjectCaret(this: any, ref: PictureObjectRef, zoom: number): void {
-  if (ref.type !== 'ole' || ref.cellPath || ref.noteRef || ref.headerFooter) return;
+  if (ref.type !== 'ole' || ref.cellPath || ref.noteRef || ref.memoRef || ref.headerFooter) return;
   try {
     const rect = this.wasm.getCursorRect(ref.sec, ref.ppi, 0);
     if (rect) this.caret.show(rect, zoom);
@@ -117,13 +119,19 @@ function isAboveControl(a: any, b: any): boolean {
 
 /** 적중한 layout 컨트롤에서 PictureObjectRef 를 구성한다(line 은 끝점 포함). */
 function controlToRef(ctrl: any): PictureObjectRef {
-  if (ctrl.type === 'line') {
-    return { sec: ctrl.secIdx, ppi: ctrl.paraIdx, ci: ctrl.controlIdx, type: 'line',
-      x1: ctrl.x1, y1: ctrl.y1, x2: ctrl.x2, y2: ctrl.y2 };
-  }
-  return { sec: ctrl.secIdx, ppi: ctrl.paraIdx, ci: ctrl.controlIdx, type: ctrl.type,
+  const ref: PictureObjectRef = {
+    sec: ctrl.secIdx, ppi: ctrl.paraIdx, ci: ctrl.controlIdx, type: ctrl.type,
     cellIdx: ctrl.cellIdx, cellParaIdx: ctrl.cellParaIdx, outerTableControlIdx: ctrl.outerTableControlIdx,
-    cellPath: ctrl.cellPath, noteRef: ctrl.noteRef, headerFooter: ctrl.headerFooter, missing: ctrl.missing };
+    cellPath: ctrl.cellPath, noteRef: ctrl.noteRef, memoRef: ctrl.memoRef,
+    headerFooter: ctrl.headerFooter, missing: ctrl.missing,
+  };
+  if (ctrl.type === 'line') {
+    ref.x1 = ctrl.x1;
+    ref.y1 = ctrl.y1;
+    ref.x2 = ctrl.x2;
+    ref.y2 = ctrl.y2;
+  }
+  return ref;
 }
 
 /** 클릭 좌표에서 그림, 글상자, 수식, OLE 개체를 찾는다. */
@@ -220,7 +228,7 @@ export function findPictureAtClick(this: any,
         }
       }
       if (shapeHit && nestedPic) {
-        return { sec: nestedPic.secIdx, ppi: nestedPic.paraIdx, ci: nestedPic.controlIdx, type: nestedPic.type, cellIdx: nestedPic.cellIdx, cellParaIdx: nestedPic.cellParaIdx, outerTableControlIdx: nestedPic.outerTableControlIdx, cellPath: nestedPic.cellPath, noteRef: nestedPic.noteRef, headerFooter: nestedPic.headerFooter, missing: nestedPic.missing };
+        return controlToRef(nestedPic);
       }
     }
     // Task #516 결함 3 (옵션 3-C): BehindText 그림은 텍스트 영역 위에서는 후순위.
@@ -316,7 +324,7 @@ export function findPictureAtClick(this: any,
         for (const ctrl of behindCtrls) {
           if (pageX >= ctrl.x && pageX <= ctrl.x + ctrl.w &&
               pageY >= ctrl.y && pageY <= ctrl.y + ctrl.h) {
-            return { sec: ctrl.secIdx, ppi: ctrl.paraIdx, ci: ctrl.controlIdx, type: ctrl.type, cellIdx: ctrl.cellIdx, cellParaIdx: ctrl.cellParaIdx, outerTableControlIdx: ctrl.outerTableControlIdx, cellPath: ctrl.cellPath, noteRef: ctrl.noteRef, headerFooter: ctrl.headerFooter, missing: ctrl.missing };
+            return controlToRef(ctrl);
           }
         }
       }
@@ -573,7 +581,20 @@ export function isObjectSizeProtected(this: any, ref: PictureObjectRef | null | 
 }
 
 /** 개체를 타입에 따라 삭제한다. */
-export function deleteObjectControl(this: any, ref: PictureObjectRef): void {
+export function canDeleteObjectControl(ref: PictureObjectRef): boolean {
+  const scope = objectAddressScope(ref);
+  return scope === 'body' || (scope === 'cell' && ref.type === 'image');
+}
+
+/**
+ * 지원하는 주소 도메인의 개체만 삭제한다.
+ *
+ * 셀 안 도형과 머리말/꼬리말/각주 개체를 본문 API로 넘기면 같은 숫자 주소의
+ * 엉뚱한 본문 개체가 지워질 수 있다. 전용 경로 API가 생기기 전까지는 명시적으로
+ * 거부해 문서 손상을 막는다.
+ */
+export function deleteObjectControl(this: any, ref: PictureObjectRef): boolean {
+  if (!canDeleteObjectControl(ref)) return false;
   if (ref.type === 'shape' || ref.type === 'group' || ref.type === 'line' || ref.type === 'ole') {
     this.wasm.deleteShapeControl(ref.sec, ref.ppi, ref.ci);
   } else if (ref.type === 'equation') {
@@ -581,10 +602,11 @@ export function deleteObjectControl(this: any, ref: PictureObjectRef): void {
   } else {
     if (hasCellPath(ref)) {
       this.wasm.deleteCellPictureControlByPath(ref.sec, ref.ppi, ref.cellPath, ref.ci);
-      return;
+      return true;
     }
     this.wasm.deletePictureControl(ref.sec, ref.ppi, ref.ci);
   }
+  return true;
 }
 
 // ─── Shift+방향키 크기 조절 (#1231) ─────────────────────

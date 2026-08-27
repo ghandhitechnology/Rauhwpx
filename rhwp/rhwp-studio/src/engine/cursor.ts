@@ -1,5 +1,6 @@
 import type { DocumentPosition, CursorRect, LineInfo, CellPathEntry, NavContextEntry, CellBbox } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
+import { sameAddressedObject } from '@/core/object-address';
 // [#2756] 셀 좌표 축 헬퍼는 command.ts 와 단일 정의를 공유한다(축 유도 복제 금지).
 import { cellAxisPath } from './command';
 
@@ -15,6 +16,7 @@ type PictureSelectionRef = {
   outerTableControlIdx?: number;
   cellPath?: CellPathEntry[];
   noteRef?: any;
+  memoRef?: any;
   headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
   /** [Task #2230] 그림 미지정 placeholder — 더블클릭 시 그림 지정 진입. */
   missing?: boolean;
@@ -1561,11 +1563,33 @@ export class CursorState {
     cellPath?: CellPathEntry[],
     noteRef?: any,
     missing?: boolean,
+    memoRef?: any,
   ): void {
     this.exitTableObjectSelection();
     this._pictureObjectSelected = true;
-    this.selectedPictureRef = { sec, ppi, ci, type, cellIdx, cellParaIdx, outerTableControlIdx, cellPath, noteRef, headerFooter, missing };
+    this.selectedPictureRef = {
+      sec, ppi, ci, type, cellIdx, cellParaIdx, outerTableControlIdx,
+      cellPath, noteRef, memoRef, headerFooter, missing,
+    };
     this.selectedPictureRefs = [{ ...this.selectedPictureRef }];
+  }
+
+  /** Address-preserving object selection entry point for layout/hit-test refs. */
+  enterPictureObjectSelectionRef(ref: PictureSelectionRef): void {
+    this.enterPictureObjectSelectionDirect(
+      ref.sec,
+      ref.ppi,
+      ref.ci,
+      ref.type,
+      ref.cellIdx,
+      ref.cellParaIdx,
+      ref.headerFooter,
+      ref.outerTableControlIdx,
+      ref.cellPath,
+      ref.noteRef,
+      ref.missing,
+      ref.memoRef,
+    );
   }
 
   /** Shift+클릭: 개체를 다중 선택에 추가/제거 (토글) */
@@ -1583,12 +1607,7 @@ export class CursorState {
       typeof refOrSec === 'number'
         ? { sec: refOrSec, ppi: ppi!, ci: ci!, type: type! }
         : refOrSec;
-    const idx = this.selectedPictureRefs.findIndex(r =>
-      r.sec === ref.sec &&
-      r.ppi === ref.ppi &&
-      r.ci === ref.ci &&
-      JSON.stringify(r.cellPath ?? []) === JSON.stringify(ref.cellPath ?? []),
-    );
+    const idx = this.selectedPictureRefs.findIndex(r => sameAddressedObject(r, ref));
     if (idx >= 0) {
       this.selectedPictureRefs.splice(idx, 1);
       if (this.selectedPictureRefs.length === 0) {

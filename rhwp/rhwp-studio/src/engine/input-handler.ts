@@ -1659,9 +1659,34 @@ export class InputHandler {
 
   /** [Task #919] 클릭 좌표 근처에 글상자가 있는지 확인 (글상자 바깥에서 외곽 근처 클릭) */
   findShapeByOuterClick(
-    pageX: number, pageY: number,
+    pageIdx: number, pageX: number, pageY: number,
     sec: number, paragraphIndex: number,
-  ): { sec: number; ppi: number; ci: number } | null {
+  ): { sec: number; ppi: number; ci: number; type: 'shape'; cellIdx?: number; cellParaIdx?: number; outerTableControlIdx?: number; cellPath?: CellPathLike; noteRef?: unknown; memoRef?: unknown; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } } | null {
+    try {
+      const layout = this.wasm.getPageControlLayout(pageIdx);
+      for (const item of layout.controls) {
+        if (item.type !== 'shape') continue;
+        if (item.secIdx === undefined || item.paraIdx === undefined || item.controlIdx === undefined) continue;
+        if (item.secIdx !== sec || Math.abs(item.paraIdx - paragraphIndex) > 2) continue;
+        if (!isPointNearBoxBorder(pageX, pageY, {
+          x: item.x, y: item.y, width: item.w, height: item.h,
+        })) continue;
+        return {
+          sec: item.secIdx,
+          ppi: item.paraIdx,
+          ci: item.controlIdx,
+          type: 'shape',
+          cellIdx: item.cellIdx,
+          cellParaIdx: item.cellParaIdx,
+          outerTableControlIdx: item.outerTableControlIdx,
+          cellPath: item.cellPath,
+          noteRef: item.noteRef,
+          memoRef: item.memoRef,
+          headerFooter: item.headerFooter,
+        };
+      }
+    } catch { /* 레이아웃 조회 실패 시 본문 전용 API로 보조 */ }
+
     // 현재 문단 및 인접 문단 (±2) 검사 — findTableByOuterClick 동일 패턴
     for (let offset = 0; offset <= 2; offset++) {
       const candidates = offset === 0
@@ -1672,7 +1697,7 @@ export class InputHandler {
         // Shape 컨트롤은 paragraph 의 어느 위치든 있을 수 있으므로 0..N 시도
         for (let ci = 0; ci < 10; ci++) {
           if (this.isShapeBorderClickByRef(pageX, pageY, sec, ppi, ci)) {
-            return { sec, ppi, ci };
+            return { sec, ppi, ci, type: 'shape' };
           }
         }
       }
@@ -3727,7 +3752,7 @@ export class InputHandler {
   /** 그림/글상자 클릭 감지 — getPageControlLayout으로 개체 bbox 겹침 확인 */
   private findPictureAtClick(
     pageIdx: number, pageX: number, pageY: number,
-  ): { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; noteRef?: any; x1?: number; y1?: number; x2?: number; y2?: number } | null {
+  ): { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; outerTableControlIdx?: number; cellPath?: CellPathLike; noteRef?: any; memoRef?: any; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number }; missing?: boolean; x1?: number; y1?: number; x2?: number; y2?: number } | null {
     return _picture.findPictureAtClick.call(this, pageIdx, pageX, pageY);
   }
 
@@ -3749,8 +3774,8 @@ export class InputHandler {
   }
 
   /** 개체를 타입에 따라 삭제한다 (그림/글상자 분기) */
-  private deleteObjectControl(ref: { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole' }): void {
-    _picture.deleteObjectControl.call(this, ref);
+  private deleteObjectControl(ref: { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellPath?: CellPathLike; noteRef?: unknown; memoRef?: unknown; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } }): boolean {
+    return _picture.deleteObjectControl.call(this, ref);
   }
 
   /** [Task #2230] 그림 미지정 placeholder 에 그림 지정 (파일 선택 → assignPictureImage) */
@@ -3948,8 +3973,16 @@ export class InputHandler {
     this.clearPendingCharFormat();
     this.caret.hide();
     this.fieldMarker.hide();
+    this.cursor.exitPictureObjectSelection();
+    this.pictureObjectRenderer?.clear();
+    this.cursor.exitTableObjectSelection();
+    this.tableObjectRenderer?.clear();
+    this.cursor.exitCellSelectionMode();
+    this.cellSelectionRenderer?.clear();
     this.cursor.clearSelection();
     this.selectionRenderer.clear();
+    this.eventBus.emit('picture-object-selection-changed', false);
+    this.eventBus.emit('table-object-selection-changed', false);
     this.history.clear(this.wasm);
   }
 
@@ -4311,10 +4344,10 @@ export class InputHandler {
   isInPictureObjectSelection(): boolean { return this.cursor.isInPictureObjectSelection(); }
 
   /** 선택된 그림/글상자 참조 반환 ([Task #825] headerFooter 동반 시 머리말/꼬리말 picture marker) */
-  getSelectedPictureRef(): { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; outerTableControlIdx?: number; cellPath?: Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }>; noteRef?: any; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } } | null { return this.cursor.getSelectedPictureRef(); }
+  getSelectedPictureRef(): { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; outerTableControlIdx?: number; cellPath?: Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }>; noteRef?: any; memoRef?: any; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } } | null { return this.cursor.getSelectedPictureRef(); }
 
   /** 다중 선택된 개체 목록 */
-  getSelectedPictureRefs(): { sec: number; ppi: number; ci: number; type: string }[] { return this.cursor.getSelectedPictureRefs(); }
+  getSelectedPictureRefs(): { sec: number; ppi: number; ci: number; type: string; cellPath?: CellPathLike; noteRef?: unknown; memoRef?: unknown; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } }[] { return this.cursor.getSelectedPictureRefs(); }
 
   /** 다중 선택 상태인가? */
   isMultiPictureSelection(): boolean { return this.cursor.isMultiPictureSelection(); }
@@ -5053,7 +5086,7 @@ export class InputHandler {
     // 개체 선택 모드 → 복사 + 삭제
     if (this.cursor.isInPictureObjectSelection()) {
       const ref = this.cursor.getSelectedPictureRef();
-      if (ref) {
+      if (ref && _picture.canDeleteObjectControl(ref)) {
         // 클립보드에 복사
         this.performCopy();
         // 삭제
@@ -5098,7 +5131,7 @@ export class InputHandler {
     if (this.editMode === 'form') return;
     if (this.cursor.isInPictureObjectSelection()) {
       const ref = this.cursor.getSelectedPictureRef();
-      if (ref) {
+      if (ref && _picture.canDeleteObjectControl(ref)) {
         this.cursor.moveOutOfSelectedPicture();
         this.pictureObjectRenderer?.clear();
         this.eventBus.emit('picture-object-selection-changed', false);
