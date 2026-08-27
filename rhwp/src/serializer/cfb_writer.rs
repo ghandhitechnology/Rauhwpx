@@ -15,7 +15,7 @@ use crate::model::bin_data::{BinData, BinDataType};
 use crate::model::document::{Document, Preview};
 
 use super::body_text::serialize_section;
-use super::doc_info::serialize_doc_info;
+use super::doc_info::{serialize_doc_info, surgical_update_section_count};
 use super::header::serialize_file_header;
 use super::mini_cfb;
 use super::SerializeError;
@@ -43,14 +43,37 @@ pub fn serialize_hwp(doc: &Document) -> Result<Vec<u8>, SerializeError> {
         serialize_file_header(&doc.header)
     };
 
-    // 2. DocInfo 직렬화
-    let doc_info_bytes = serialize_doc_info(&doc.doc_info, &doc.doc_properties);
-
-    // 3. BodyText 섹션별 직렬화
+    // 2. BodyText 섹션별 직렬화 — 실제 방출 스트림 수를 먼저 확정한다.
     let mut section_bytes_list = Vec::new();
     for section in &doc.sections {
         let section_bytes = serialize_section(section);
         section_bytes_list.push(section_bytes);
+    }
+
+    // 3. DocInfo 직렬화 — DOCUMENT_PROPERTIES.section_count 는 **실제로 방출한
+    // BodyText/SectionN 스트림 수**로 확정한다.
+    //
+    // 한글은 이 값을 구역 스트림 탐색의 상한으로 읽으므로, 선언값이 실제보다
+    // 크면 없는 구역에서 손상 판정을 내고(forceopen 도 실패) 작으면 뒤쪽 구역이
+    // 렌더링되지 않는다. 어느 쪽이든 이 값의 권위는 입력 모델이 아니라 이 자리 —
+    // "몇 개를 실제로 썼는가" 를 아는 유일한 지점이다.
+    //
+    // HWP5 네이티브 왕복은 DOCUMENT_PROPERTIES 를 raw 로 통과시키므로(스트림
+    // 봉인 + 레코드 봉인), 입력이 이미 어긋난 경우(선언 2 / IR 구역 1)나 구역
+    // 집합이 바뀐 편집이 raw 바이트에 그대로 남는다. 모델이 아니라 방출 바이트를
+    // 고치는 이유는 봉인을 깨면 DocInfo 전체가 재생성되어 모델링되지 않은 원본
+    // 바이트를 잃기 때문이다.
+    let emitted_sections = section_bytes_list.len().min(u16::MAX as usize) as u16;
+    let mut doc_info_bytes = serialize_doc_info(&doc.doc_info, &doc.doc_properties);
+    if surgical_update_section_count(&mut doc_info_bytes, emitted_sections).is_err() {
+        // 레코드가 없는 병리적 스트림에서만 봉인을 깨고 모델 writer 로 재생성한다.
+        let mut props = doc.doc_properties.clone();
+        props.section_count = emitted_sections;
+        props.raw_data = None;
+        let mut doc_info = doc.doc_info.clone();
+        doc_info.raw_stream = None;
+        doc_info.raw_stream_dirty = true;
+        doc_info_bytes = serialize_doc_info(&doc_info, &props);
     }
 
     // 4. 압축 여부 결정

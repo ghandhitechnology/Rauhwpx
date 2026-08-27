@@ -792,3 +792,51 @@ fn test_serialize_bullet_layout_and_roundtrip() {
     assert_eq!(parsed_info.bullets[0].char_shape_id, 2);
     assert_eq!(parsed_info.bullets[0].text_distance, 50);
 }
+
+fn sample_doc_properties(section_count: u16) -> DocProperties {
+    DocProperties {
+        section_count,
+        page_start_num: 1,
+        footnote_start_num: 3,
+        endnote_start_num: 4,
+        picture_start_num: 5,
+        table_start_num: 6,
+        equation_start_num: 7,
+        raw_data: None,
+        caret_list_id: 11,
+        caret_para_id: 22,
+        caret_char_pos: 33,
+    }
+}
+
+/// 국소 패치가 section_count 만 바꾸고 나머지 DOCUMENT_PROPERTIES 바이트는 보존한다.
+#[test]
+fn surgical_update_section_count_patches_only_the_count_field() {
+    let props = sample_doc_properties(2);
+    let mut stream = serialize_doc_info(&DocInfo::default(), &props);
+    let before = stream.clone();
+
+    surgical_update_section_count(&mut stream, 1).expect("DOCUMENT_PROPERTIES 패치");
+
+    assert_eq!(stream.len(), before.len());
+    let mut expected = before.clone();
+    expected[4..6].copy_from_slice(&1u16.to_le_bytes());
+    assert_eq!(
+        stream, expected,
+        "DocInfo 에서 section_count(offset 4) 외 바이트가 바뀌면 안 된다"
+    );
+
+    let (_, parsed) = parse_doc_info(&stream).unwrap();
+    assert_eq!(parsed.section_count, 1);
+    assert_eq!(parsed.page_start_num, 1);
+    assert_eq!(parsed.footnote_start_num, 3);
+    assert_eq!(parsed.caret_list_id, 11);
+    assert_eq!(parsed.caret_para_id, 22);
+    assert_eq!(parsed.caret_char_pos, 33);
+}
+
+#[test]
+fn surgical_update_section_count_rejects_stream_without_doc_properties() {
+    let err = surgical_update_section_count(&mut vec![0, 1, 2, 3], 1).unwrap_err();
+    assert!(err.contains("DOCUMENT_PROPERTIES"));
+}
