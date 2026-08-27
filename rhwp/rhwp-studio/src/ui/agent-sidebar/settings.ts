@@ -898,11 +898,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // ── 4. 지시 ──────────────────────────────────────────
   const instructionsSection = createSection('지시');
-  const instructionsNote = el(
-    'p',
-    'ag-settings-note',
-    '이 AGENTS.md는 Rauhwpx 채팅에만 적용됩니다. 프로젝트나 다른 에이전트 앱에는 전달되지 않아요.',
-  );
   const instructionsEditor = document.createElement('textarea');
   instructionsEditor.className = 'ag-settings-instructions-editor';
   instructionsEditor.rows = 11;
@@ -944,7 +939,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     hancomGit.input.checked = enabled;
   });
   instructionsSection.body.append(
-    instructionsNote,
     instructionsProposal,
     instructionsEditor,
     instructionsMeta,
