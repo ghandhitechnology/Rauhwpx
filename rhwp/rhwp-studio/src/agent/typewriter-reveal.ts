@@ -3,7 +3,11 @@ import type { EventBus } from '../core/event-bus.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
 import type { SelectionRect } from '../core/types.ts';
 import type { AgentName, DocRange } from './types.ts';
-import { pointAtNewScalarOffset } from './exact-text-diff.ts';
+import {
+  computeExactTextDiff,
+  pointAtNewScalarOffset,
+  rangeForNewScalarOffsets,
+} from './exact-text-diff.ts';
 import { measureInkRange } from './selection-ink.ts';
 
 /** insertText/replaceText 가 emit 하는 이벤트 페이로드. range 는 op.range 의
@@ -26,14 +30,15 @@ export interface RevealChunk {
 /**
  * 타자기가 덮을 구간. oldText 가 없으면 삽입 전체, 있으면 exact diff 의
  * 추가/교체 훙크만. 삭제만 있는 훙크는 새 글자가 없으므로 빠진다.
- *
- * 현재는 enqueue 와 같이 새 문자열 전체를 한 덩어리로 돌려 기존 동작을 고정한다.
- * 추가분만 공개하는 동작은 테스트가 먼저 잠근다.
  */
-export function revealChunksForInsertedText(text: string, _oldText?: string): RevealChunk[] {
-  const end = scalarLen(text);
-  if (end === 0) return [];
-  return [{ start: 0, end, text }];
+export function revealChunksForInsertedText(text: string, oldText?: string): RevealChunk[] {
+  if (oldText === undefined) {
+    const end = scalarLen(text);
+    return end === 0 ? [] : [{ start: 0, end, text }];
+  }
+  return computeExactTextDiff(oldText, text).hunks
+    .filter((hunk) => hunk.newEnd > hunk.newStart)
+    .map((hunk) => ({ start: hunk.newStart, end: hunk.newEnd, text: hunk.newText }));
 }
 
 /** 글자당 공개 시간(ms). 60~80cps 대역 — 사람 타자보다 빠르되 '타이핑'으로 읽힌다. */
@@ -57,8 +62,11 @@ interface RevealItem {
   agent: AgentName;
   /** 라이브 참조 — pending-edits 의 shift 로직이 제자리 갱신한다. */
   range: DocRange;
+  /** 교체/삽입 전체 문자열. hunkStart 와 함께 문서 좌표를 다시 계산한다. */
   text: string;
   textLen: number;
+  /** 이 항목이 공개하는 구간이 전체 text 에서 시작하는 스칼라 오프셋. */
+  hunkStart: number;
   enqueuedAt: number;
   revealStart: number | null;
   durationMs: number;
@@ -77,9 +85,10 @@ function scalarLen(s: string): number {
  * 에이전트 텍스트의 타자기 공개(typewriter reveal).
  *
  * 편집은 이미 문서에 한 번에 커밋·레이아웃된 상태다(재레이아웃 없음). 이 컨트롤러는
- * 새 텍스트 영역을 용지색 커버로 즉시 덮고, 하나의 rAF 루프에서 글자 단위로 커버를
- * 걷어내며 에이전트 캐럿을 공개 지점에 붙여 움직인다. 커버는 z-index 9 로 틴트 잉크
- * (z6)·마커(z7)까지 함께 덮으므로 텍스트는 '틴트된 채로' 타이핑되어 나타난다.
+ * 추가된 텍스트 영역을 용지색 커버로 즉시 덮고, 하나의 rAF 루프에서 글자 단위로 커버를
+ * 걷어내며 에이전트 캐럿을 공개 지점에 붙여 움직인다. 교체에서 원문과 같은 접두/접미는
+ * 덮지 않는다. 커버는 z-index 9 로 틴트 잉크(z6)·마커(z7)까지 함께 덮으므로 추가분은
+ * '틴트된 채로' 타이핑되어 나타난다.
  *
  * 좌표는 매 프레임 wasm 프로브로 다시 구한다 — 공개 중의 줌/스크롤/후속 편집 shift 에
  * 자동으로 따라간다. 프로브 실패(주소 드리프트)는 해당 공개를 즉시 완료 처리한다.
@@ -146,24 +155,29 @@ export class AgentTypewriterReveal {
   }
 
   private enqueue(e: AgentTextInsertedEvent): void {
-    const len = scalarLen(e.text);
-    if (len === 0) return;
+    const chunks = revealChunksForInsertedText(e.text, e.oldText);
+    if (chunks.length === 0) return;
     if (this.reduceMotion?.matches) {
       // 공개 애니메이션 없이 카메라만 한 번에 맞춘다.
-      this.jumpCameraTo(e.range);
+      const first = chunks[0];
+      this.jumpCameraTo(rangeForNewScalarOffsets(e.range, e.text, first.start, first.end));
       return;
     }
     const now = performance.now();
-    this.queue.push({
-      agent: e.agent,
-      range: e.range,
-      text: e.text,
-      textLen: len,
-      enqueuedAt: now,
-      revealStart: null,
-      durationMs: Math.max(REVEAL_MIN_MS, Math.min(REVEAL_MAX_MS, len * REVEAL_PER_CHAR_MS)),
-      cachedRects: null,
-    });
+    for (const chunk of chunks) {
+      const len = chunk.end - chunk.start;
+      this.queue.push({
+        agent: e.agent,
+        range: e.range,
+        text: e.text,
+        textLen: len,
+        hunkStart: chunk.start,
+        enqueuedAt: now,
+        revealStart: null,
+        durationMs: Math.max(REVEAL_MIN_MS, Math.min(REVEAL_MAX_MS, len * REVEAL_PER_CHAR_MS)),
+        cachedRects: null,
+      });
+    }
     // 같은 틱 안에서 커버를 먼저 세워 새 텍스트가 repaint 에 팝으로 나타나지 않게 한다.
     this.renderFrame(now, 0);
     if (this.rafId === null) {
@@ -395,7 +409,7 @@ export class AgentTypewriterReveal {
       if (!scrollContent) return;
       const vm = this.deps.canvasView.getViewportManager();
       const zoom = vm.getZoom();
-      const rect = this.probeCaret({ range, text: '', textLen: 0 } as RevealItem, 0);
+      const rect = this.probeCaret({ range, text: '', textLen: 0, hunkStart: 0 } as RevealItem, 0);
       const pos = this.pagePosition(rect, scrollContent.clientWidth, zoom);
       if (!pos) return;
       const { height: viewHeight } = vm.getViewportSize();
@@ -410,7 +424,9 @@ export class AgentTypewriterReveal {
 
   private probeRects(item: RevealItem): SelectionRect[] {
     if (item.cachedRects) return item.cachedRects;
-    const r = item.range;
+    const r = rangeForNewScalarOffsets(
+      item.range, item.text, item.hunkStart, item.hunkStart + item.textLen,
+    );
     const cell = r.cell;
     const wasm = this.deps.wasm;
     item.cachedRects = measureInkRange(r, {
@@ -450,11 +466,11 @@ export class AgentTypewriterReveal {
 
   private probeCaret(item: RevealItem, scalarOffset: number): SelectionRect {
     const r = item.range;
-    // range 는 라이브 참조라 시작/끝 좌표가 항상 현재 문서 기준이다. 삽입 텍스트의
-    // 줄바꿈이 문단을 가르므로 실제 텍스트로 상대 오프셋 → 문서 좌표를 계산한다.
-    const point = scalarOffset <= 0
-      ? { paraIdx: r.startParaIdx, charOffset: r.startCharOffset }
-      : pointAtNewScalarOffset(r, item.text, Math.min(scalarOffset, item.textLen));
+    // range 는 라이브 참조라 시작 좌표가 항상 현재 문서 기준이다. 공개 구간은
+    // 전체 삽입 문자열의 hunkStart 부터이므로 그 오프셋으로 문서 좌표를 계산한다.
+    const point = pointAtNewScalarOffset(
+      r, item.text, item.hunkStart + Math.max(0, Math.min(scalarOffset, item.textLen)),
+    );
     const cell = r.cell;
     const rect = cell
       ? this.deps.wasm.getCursorRectInCell(

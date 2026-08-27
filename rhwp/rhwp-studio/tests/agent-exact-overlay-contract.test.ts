@@ -28,6 +28,9 @@ test('typewriter reveal is bounded, one-shot, and reduced-motion safe', () => {
   // 청크 하나의 공개 시간은 상한이 있고, reduced-motion 은 공개 자체를 건너뛴다.
   assert.match(revealSrc, /const REVEAL_MAX_MS = 900/);
   assert.match(revealSrc, /this\.reduceMotion\?\.matches/);
+  // 교체는 exact diff 의 추가 훙크만 덮는다. 원문 접두/접미는 다시 타자하지 않는다.
+  assert.match(revealSrc, /computeExactTextDiff\(oldText, text\)/);
+  assert.match(pendingSrc, /emit\('agent-text-inserted'[\s\S]*oldText: deletedText/);
   // 커버(z9)는 잉크(z6)·마커(z7)·앵커(z8) 위, 캐럿(z10) 아래에 선다.
   assert.match(overlayCss, /\.ag-reveal-cover[\s\S]*z-index: 9/);
   assert.match(overlayCss, /\.ag-typewriter-caret[\s\S]*z-index: 10/);
