@@ -904,7 +904,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   instructionsEditor.spellcheck = false;
   instructionsEditor.placeholder = 'AGENTS.md를 불러오는 중…';
   instructionsEditor.setAttribute('aria-label', '앱 전용 AGENTS.md 지시');
-  const instructionsMeta = el('p', 'ag-settings-note');
   const instructionsStatus = el('p', 'ag-settings-instructions-status');
   instructionsStatus.hidden = true;
   const instructionsProposal = el('div', 'ag-settings-instructions-proposal');
@@ -941,7 +940,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   instructionsSection.body.append(
     instructionsProposal,
     instructionsEditor,
-    instructionsMeta,
     instructionsStatus,
     instructionsActions,
     hancomGit.root,
@@ -2596,9 +2594,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     instructionsEditor.maxLength = maxChars;
     instructionsEditor.disabled = instructionsBusy || !agentInstructions;
     instructionsReload.disabled = instructionsBusy || connectionState !== 'connected';
-    instructionsMeta.textContent = agentInstructions
-      ? `${instructionsEditor.value.length.toLocaleString()} / ${maxChars.toLocaleString()}자`
-      : '연결 후 불러옵니다.';
     instructionsStatus.textContent = instructionsMessage;
     instructionsStatus.hidden = !instructionsMessage;
     const proposal = pendingAgentInstructionsDraft;

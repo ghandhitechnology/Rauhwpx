@@ -420,10 +420,8 @@ test('앱 전용 지시는 에이전트 변경안을 사용자 승인 전까지 
   assert.match(settings, /bridge\.rejectAgentInstructionsDraft\(draft\)/);
   assert.match(settings, /승인 전에는 AGENTS\.md에 저장되지 않습니다/);
   assert.doesNotMatch(settings, /AGENTS\.md · r\$\{/);
-  assert.match(
-    settings,
-    /instructionsMeta\.textContent = agentInstructions\s*\? `\$\{instructionsEditor\.value\.length\.toLocaleString\(\)\} \/ \$\{maxChars\.toLocaleString\(\)\}자`/,
-  );
+  assert.doesNotMatch(settings, /instructionsMeta/);
+  assert.doesNotMatch(settings, /연결 후 불러옵니다/);
   assert.match(settingsCss, /\.ag-settings-instructions-proposal/);
 });
 
