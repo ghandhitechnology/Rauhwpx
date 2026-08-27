@@ -5107,6 +5107,12 @@ impl DocumentCore {
     }
 
     /// 변경 구역보다 앞선 페이지의 완성된 렌더 트리는 유지한다.
+    ///
+    /// 페이지 트리 무효화는 구역 범위로만 적용한다. cell_units / nested-text-flag 캐시는
+    /// 포인터가 안정적인 텍스트 편집에서는 `invalidate_cell_units_after_text_edit`가,
+    /// IR 구조가 바뀌는 경우에는 전체 `invalidate_page_tree_cache` / 명시적
+    /// `clear_layout_caches`가 담당한다. 여기서 일괄 비우면 #2214 Stage 3 scoped
+    /// eviction이 no-op가 된다.
     pub(crate) fn invalidate_page_tree_cache_from_section(&self, section_idx: usize) {
         let first_page = self
             .pagination
@@ -5115,8 +5121,6 @@ impl DocumentCore {
             .map(|result| result.pages.len())
             .sum::<usize>();
         self.invalidate_page_tree_cache_from(first_page as u32);
-        // 셀 레이아웃 캐시는 IR 포인터를 키로 쓰므로 구역 경계와 무관하게 비운다.
-        self.layout_engine.clear_layout_caches();
     }
 
     pub(crate) fn invalidate_page_tree_cache_page(&self, page_num: u32) {
