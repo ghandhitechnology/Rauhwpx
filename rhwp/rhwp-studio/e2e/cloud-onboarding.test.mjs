@@ -71,8 +71,34 @@ async function buttonByText(page, label) {
   throw new Error(`Cloud 설정 버튼을 찾지 못했습니다. label=${label}`);
 }
 
+// 사이드바 화면 전환은 280ms 동안 밀려 들어오고 밀려 나간다. Puppeteer 는 좌표를 먼저
+// 재고 그 다음에 마우스를 보내므로, 움직이는 요소는 몇 픽셀 옆을 맞고 조용히 실패한다.
+// 두 프레임 연속 같은 사각형일 때만 누른다.
+async function settleBox(handle) {
+  let previous = null;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const box = await handle.evaluate((node) => new Promise((resolve) => {
+      requestAnimationFrame(() => {
+        const rect = node.getBoundingClientRect();
+        resolve([rect.x, rect.y, rect.width, rect.height].map(Math.round).join(','));
+      });
+    }));
+    if (box === previous) return;
+    previous = box;
+  }
+  throw new Error('요소 위치가 멎지 않았습니다.');
+}
+
 async function clickButton(page, label) {
   const handle = await buttonByText(page, label);
+  await settleBox(handle);
+  await handle.click();
+  await handle.dispose();
+}
+
+async function clickStable(page, selector) {
+  const handle = await page.waitForSelector(selector, { visible: true, timeout: 15_000 });
+  await settleBox(handle);
   await handle.click();
   await handle.dispose();
 }
@@ -116,13 +142,13 @@ async function waitForTitle(page, title) {
 }
 
 async function openChoice(page) {
-  await page.click('#agent-sidebar .ag-cloud-btn');
+  await clickStable(page, '#agent-sidebar .ag-cloud-btn');
   await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
   await waitForTitle(page, 'Cloud 서버 선택');
 }
 
 async function chooseMode(page, mode) {
-  await page.click(`.ag-cloud-setup-option[data-server-mode="${mode}"]`);
+  await clickStable(page, `.ag-cloud-setup-option[data-server-mode="${mode}"]`);
   await page.waitForFunction(
     (value) => document.querySelector(`.ag-cloud-setup-option[data-server-mode="${value}"]`)
       ?.getAttribute('aria-checked') === 'true',
@@ -139,18 +165,19 @@ async function openCloud(page) {
 }
 
 async function manageCloud(page) {
-  await page.click('#agent-sidebar .ag-settings-btn');
+  await clickStable(page, '#agent-sidebar .ag-settings-btn');
   await page.waitForFunction(() => document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'));
-  await page.click('#ag-settings-tab-connections');
+  await clickStable(page, '#ag-settings-tab-connections');
   await page.waitForFunction(
     () => document.querySelector('#ag-settings-tab-connections')?.getAttribute('aria-selected') === 'true',
+    { timeout: 15_000 },
   );
-  await page.click('.ag-cloud-settings-action');
+  await clickStable(page, '.ag-cloud-settings-action');
   await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
 }
 
 async function closeSettings(page) {
-  await page.click('#agent-sidebar .ag-settings-close');
+  await clickStable(page, '#agent-sidebar .ag-settings-close');
   await page.waitForFunction(() => !document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'));
 }
 
@@ -503,7 +530,7 @@ try {
   );
   assert.equal(await page.$eval('.ag-cloud-setup-options', (node) => node.getAttribute('role')), 'radiogroup');
   await page.evaluate(() => window.__cloudHarness.clearCalls());
-  await page.click('.ag-cloud-setup-option[data-server-mode="self-hosted"]');
+  await clickStable(page, '.ag-cloud-setup-option[data-server-mode="self-hosted"]');
   await page.waitForFunction(() => document.querySelector('.ag-cloud-setup-option[data-server-mode="self-hosted"]')?.getAttribute('aria-checked') === 'true');
   assert.deepEqual(
     await page.evaluate(() => window.__cloudHarness.calls.filter((call) => call.method === 'cloudSelectServerMode').map((call) => call.payload)),
@@ -779,7 +806,7 @@ try {
     detail: '앱 제공 서버 · 앱 제공 서버 1, rauhwpx-1.up.railway.app',
     action: '관리',
   });
-  await page.click('.ag-cloud-setup-close');
+  await clickStable(page, '.ag-cloud-setup-close');
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
   await manageCloud(page);
   await waitForTitle(page, '앱 제공 서버가 준비되었습니다');
@@ -847,9 +874,9 @@ try {
   assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /앱 샌드박스를 먼저 종료하세요/);
   console.log('  PASS a live app sandbox blocks a self-hosted install instead of leaking a paid server');
 
-  await page.click('.ag-cloud-setup-close');
+  await clickStable(page, '.ag-cloud-setup-close');
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
-  await page.click('#agent-sidebar .ag-cloud-btn');
+  await clickStable(page, '#agent-sidebar .ag-cloud-btn');
   await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
   await waitForTitle(page, '앱 제공 서버를 준비하지 못했습니다');
   await clickButton(page, '서버 종료');
@@ -877,7 +904,15 @@ try {
   );
   await clickButton(page, '서버 종료');
   await waitForTitle(page, 'Cloud 서버 선택');
-  // 원격 서버가 남았다는 사실을 숨기면 사용자는 계속 요금을 낸다.
+  // 원격 서버가 남았다는 사실을 숨기면 사용자는 계속 요금을 낸다. 눈에 보여야 한다.
+  assert.match(
+    await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent),
+    /남은 서버를 확인하세요/,
+  );
+  assert.match(
+    await page.$eval('.ag-cloud-setup-callout p', (node) => node.textContent),
+    /남은 서버는 공급자 콘솔에서 직접 삭제하세요/,
+  );
   assert.match(
     await page.$eval('.ag-cloud-setup-live', (node) => node.textContent),
     /남은 서버는 공급자 콘솔에서 직접 삭제하세요/,
