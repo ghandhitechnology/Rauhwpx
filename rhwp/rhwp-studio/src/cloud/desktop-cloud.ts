@@ -1,5 +1,6 @@
 import type { RhwpDesktopApi } from '../desktop-integration.ts';
 import { parseCloudTimeline } from './timeline.ts';
+import { LOCAL_SESSION_PROVIDERS } from './types.ts';
 import type {
   CloudCommandRequest,
   CloudDownloadResult,
@@ -33,7 +34,8 @@ export interface CloudDesktopApi {
   }) => Promise<unknown>;
   cloudPair?: (payload: { code: string; profile?: CloudProfileDraft }) => Promise<unknown>;
   cloudSelectServerMode?: (payload: { mode: CloudServerMode }) => Promise<unknown>;
-  cloudSpawnSandbox?: (payload: { providerId?: string }) => Promise<unknown>;
+  cloudSaveSandboxCredential?: (payload: { provider: string; apiKey: string }) => Promise<unknown>;
+  cloudSpawnSandbox?: (payload: { providerId?: string; provider?: string; apiKey?: string }) => Promise<unknown>;
   cloudSandboxStatus?: () => Promise<unknown>;
   cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
   cloudTransfer?: (payload: CloudTransferRequest) => Promise<unknown>;
@@ -56,7 +58,8 @@ export interface CloudController {
   provision(installChannel?: 'stable' | 'prerelease', profile?: CloudProfileDraft): Promise<CloudSnapshot>;
   pair(code: string, profile?: CloudProfileDraft): Promise<CloudSnapshot>;
   selectServerMode(mode: CloudServerMode): Promise<CloudSnapshot>;
-  spawnSandbox(providerId?: string): Promise<CloudSnapshot>;
+  saveSandboxCredential(payload: { provider: string; apiKey: string }): Promise<CloudSnapshot>;
+  spawnSandbox(providerId?: string, credential?: { provider: string; apiKey?: string }): Promise<CloudSnapshot>;
   sandboxStatus(): Promise<CloudSnapshot>;
   teardownSandbox(options?: { force?: boolean }): Promise<CloudSnapshot>;
   transfer(request: CloudTransferRequest): Promise<CloudSnapshot>;
@@ -189,7 +192,14 @@ function parseProfile(value: unknown): CloudProfileState | null {
 function parseServer(value: unknown, profile: CloudProfileState): CloudServerState | null {
   const fallbackMode = profile.kind === 'configured' ? profile.mode : null;
   if (value === undefined) {
-    return { mode: fallbackMode, preferredMode: null, providers: [], lifecycle: 'idle', message: null };
+    return {
+      mode: fallbackMode,
+      preferredMode: null,
+      providers: [],
+      lifecycle: 'idle',
+      message: null,
+      credential: { provider: null, stored: false, localProviders: [] },
+    };
   }
   const server = record(value);
   if (!server || !Array.isArray(server.providers)) return null;
@@ -208,12 +218,24 @@ function parseServer(value: unknown, profile: CloudProfileState): CloudServerSta
     }];
   });
   if (providers.length !== server.providers.length) return null;
+  const credentialRaw = record(server.credential);
+  const localProvidersRaw = credentialRaw?.localProviders;
+  const credential = {
+    provider: typeof credentialRaw?.provider === 'string' && credentialRaw.provider.trim()
+      ? credentialRaw.provider
+      : null,
+    stored: credentialRaw?.stored === true,
+    localProviders: Array.isArray(localProvidersRaw)
+      ? LOCAL_SESSION_PROVIDERS.filter((provider) => localProvidersRaw.includes(provider))
+      : [],
+  };
   return {
     mode: parseServerMode(server.mode) ?? fallbackMode,
     preferredMode: parseServerMode(server.preferredMode),
     providers,
     lifecycle,
     message: typeof server.message === 'string' ? server.message : null,
+    credential,
   };
 }
 
@@ -439,6 +461,7 @@ function unavailableSnapshot(): CloudSnapshot {
       providers: [],
       lifecycle: 'idle',
       message: null,
+      credential: { provider: null, stored: false, localProviders: [] },
     },
     lease: { owner: 'local' },
     session: { kind: 'idle' },
@@ -548,7 +571,12 @@ export function createCloudController(
     }),
     pair: (code, profile) => call('cloudPair', { code, ...(profile ? { profile } : {}) }),
     selectServerMode: (mode) => call('cloudSelectServerMode', { mode }),
-    spawnSandbox: (providerId) => call('cloudSpawnSandbox', providerId ? { providerId } : {}),
+    saveSandboxCredential: (payload) => call('cloudSaveSandboxCredential', payload),
+    spawnSandbox: (providerId, credential) => call('cloudSpawnSandbox', {
+      ...(providerId ? { providerId } : {}),
+      ...(credential?.provider ? { provider: credential.provider } : {}),
+      ...(credential?.apiKey ? { apiKey: credential.apiKey } : {}),
+    }),
     sandboxStatus: () => call('cloudSandboxStatus'),
     teardownSandbox: (options = {}) => call('cloudTeardownSandbox', { force: options.force === true }),
     transfer: (request) => call('cloudTransfer', request),

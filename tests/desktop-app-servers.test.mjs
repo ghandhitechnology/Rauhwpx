@@ -187,6 +187,16 @@ test('the Railway provider refuses to pretend when it has no configuration', asy
   assert.equal(env.token, 'railway-token');
   assert.equal(env.apiUrl, 'https://backboard.railway.com/graphql/v2');
   assert.match(env.image, /rauhwpx-cloud/);
+
+  const packaged = railwayConfigFromEnv({}, {
+    token: 'packaged-token',
+    projectId: 'packaged-project',
+    environmentId: 'packaged-environment',
+  });
+  assert.equal(packaged.token, 'packaged-token');
+  assert.equal(railwayConfigFromEnv({
+    RAUHWpx_RAILWAY_TOKEN: 'env-wins',
+  }, packaged).token, 'env-wins');
 });
 
 test('the Railway provider creates a reachable sandbox and returns a pairing receipt', async () => {
@@ -230,6 +240,36 @@ test('the Railway provider creates a reachable sandbox and returns a pairing rec
   assert.match(variables.variables.RAUHWpx_BOOTSTRAP_TOKEN, /^[A-Za-z0-9_-]{32,}$/);
   assert.equal(variables.variables.RAUHWpx_PORT, '7740');
   assert.equal(variables.variables.RAUHWpx_BASE_PATH, '/rauhwpx-cloud');
+});
+
+test('a Railway spawn seeds the saved agent key onto the sandbox', async () => {
+  const { provider, transport } = railwayProvider(SPAWN_ROUTES);
+  await provider.spawn({
+    credentials: { provider: 'codex', apiKey: 'sk-user' },
+  });
+  const variables = transport.calls[0].variables.input.variables;
+  assert.equal(variables.RAUHWpx_SANDBOX_PROVIDER, 'codex');
+  assert.equal(variables.RAUHWpx_PROVIDER_KEY_CODEX, 'sk-user');
+  assert.equal(variables.RAUHWpx_PROVIDER_KEY_CLAUDE, undefined);
+});
+
+test('a Railway spawn copies a local provider session onto the sandbox', async () => {
+  const session = { provider: 'codex', files: [{ path: '.codex/auth.json', text: '{"token":"oauth"}' }] };
+  const { provider, transport } = railwayProvider(SPAWN_ROUTES);
+  await provider.spawn({ credentials: { provider: 'codex', session } });
+  const variables = transport.calls[0].variables.input.variables;
+  assert.equal(variables.RAUHWpx_SANDBOX_PROVIDER, 'codex');
+  assert.equal(variables.RAUHWpx_PROVIDER_KEY_CODEX, undefined);
+  assert.deepEqual(
+    JSON.parse(Buffer.from(variables.RAUHWpx_PROVIDER_SESSION, 'base64').toString('utf8')),
+    session,
+  );
+
+  const rejected = railwayProvider(SPAWN_ROUTES);
+  await assert.rejects(
+    rejected.provider.spawn({ credentials: { provider: 'codex', session: { provider: 'codex', files: [] } } }),
+    { code: 'PROVIDER_SESSION_INVALID' },
+  );
 });
 
 test('a Railway sandbox that never becomes usable is removed instead of left behind', async () => {
@@ -383,7 +423,17 @@ function appServerStub(overrides = {}) {
   return provider;
 }
 
-function sandboxCoordinator({ provider = appServerStub(), records = [], vault = memoryVault(), appServers } = {}) {
+function sandboxCoordinator({
+  provider = appServerStub(),
+  records = [],
+  vault = memoryVault(),
+  appServers,
+  idleTimeoutMs,
+  setTimeoutFn,
+  clearTimeoutFn,
+  collectProviderSession = () => null,
+  listLocalSessions = () => [],
+} = {}) {
   const client = new CloudClient({
     vault,
     fetchImpl: signedFetch(async (url) => {
@@ -407,6 +457,11 @@ function sandboxCoordinator({ provider = appServerStub(), records = [], vault = 
     provisioner: {},
     recoveryDir: '/unused',
     appServers: appServers ?? [provider],
+    idleTimeoutMs: idleTimeoutMs ?? 0,
+    setTimeoutFn: setTimeoutFn ?? setTimeout,
+    clearTimeoutFn: clearTimeoutFn ?? clearTimeout,
+    collectProviderSession,
+    listLocalSessions,
   });
   return { coordinator, client, provider, vault };
 }
@@ -426,6 +481,7 @@ test('an unconfigured build advertises the app option without letting a spawn st
     }],
     lifecycle: 'idle',
     message: null,
+    credential: { provider: null, stored: false, localProviders: [] },
   });
   await assert.rejects(coordinator.spawnAppServer(), { code: 'PROVIDER_NOT_CONFIGURED' });
   assert.equal(provider.calls.spawn, 0);
@@ -444,6 +500,7 @@ test('concurrent spawns share one sandbox and the choice survives a restart', as
   const vault = memoryVault();
   const { coordinator, provider, client } = sandboxCoordinator({ vault });
   await coordinator.start();
+  await coordinator.saveSandboxCredential({ provider: 'codex', apiKey: 'sk-test' });
   const [first, second] = await Promise.all([coordinator.spawnAppServer(), coordinator.spawnAppServer()]);
   assert.equal(provider.calls.spawn, 1, 'a paid sandbox is never created twice');
   assert.equal(first, second);
@@ -470,6 +527,7 @@ test('concurrent spawns share one sandbox and the choice survives a restart', as
 test('a live sandbox cannot be abandoned by switching to a user server', async () => {
   const { coordinator } = sandboxCoordinator();
   await coordinator.start();
+  await coordinator.saveSandboxCredential({ provider: 'codex', apiKey: 'sk-test' });
   await coordinator.spawnAppServer();
   const userProfile = {
     name: 'Office VPS',
@@ -502,6 +560,7 @@ test('teardown protects live cloud work, forgets credentials, and repeats safely
   const records = [{ id: 'handoff-1', state: 'running', resolvedAt: null }];
   const { coordinator, provider, vault } = sandboxCoordinator({ records });
   await coordinator.start();
+  await coordinator.saveSandboxCredential({ provider: 'codex', apiKey: 'sk-test' });
   await coordinator.spawnAppServer();
   assert.equal(vault.values.has('cloud.refresh'), true);
 
@@ -514,8 +573,9 @@ test('teardown protects live cloud work, forgets credentials, and repeats safely
   assert.equal(removed.profile.kind, 'unconfigured');
   assert.equal(removed.server.mode, null);
   assert.equal(removed.server.lifecycle, 'idle');
-  assert.equal(vault.values.has('cloud.refresh'), false, 'sandbox credentials do not outlive the sandbox');
+  assert.equal(vault.values.has('cloud.refresh'), false, 'sandbox pairing tokens do not outlive the sandbox');
   assert.equal(vault.values.has('cloud.profile'), false);
+  assert.equal(vault.values.has('cloud.sandbox.credential'), true, 'the user API key survives teardown');
 
   const again = await coordinator.teardownAppServer();
   assert.equal(provider.calls.teardown, 1, 'a torn down sandbox is not torn down twice');
@@ -542,6 +602,7 @@ test('a failed spawn reports an actionable lifecycle and stays retryable', async
   const { coordinator } = sandboxCoordinator({ provider });
   coordinator.on('event', (event) => events.push(event.type));
   await coordinator.start();
+  await coordinator.saveSandboxCredential({ provider: 'codex', apiKey: 'sk-test' });
   await assert.rejects(coordinator.spawnAppServer(), { code: 'SANDBOX_DEPLOY_FAILED' });
   const failed = await coordinator.snapshot();
   assert.equal(failed.server.lifecycle, 'error');
@@ -562,6 +623,7 @@ test('sandbox status refreshes the lifecycle from the provider', async () => {
   const { coordinator } = sandboxCoordinator({ provider });
   await coordinator.start();
   assert.equal((await coordinator.appServerStatus()).server.lifecycle, 'idle', 'a user server has no sandbox status');
+  await coordinator.saveSandboxCredential({ provider: 'codex', apiKey: 'sk-test' });
   await coordinator.spawnAppServer();
   assert.equal((await coordinator.appServerStatus()).server.lifecycle, 'ready');
   lifecycle = 'error';
@@ -574,6 +636,7 @@ test('a sandbox this build cannot manage still has a way out', async () => {
   const vault = memoryVault();
   const spawned = sandboxCoordinator({ vault });
   await spawned.coordinator.start();
+  await spawned.coordinator.saveSandboxCredential({ provider: 'codex', apiKey: 'sk-test' });
   await spawned.coordinator.spawnAppServer();
 
   const stranger = sandboxCoordinator({ vault, appServers: [appServerStub({ id: 'fly' })] });
@@ -619,4 +682,91 @@ test('selecting a server mode persists before anything is provisioned', async ()
   assert.equal(chosen.server.mode, null, 'nothing is configured yet');
   assert.equal(await client.loadServerMode(), 'self-hosted');
   await assert.rejects(coordinator.selectServerMode('fly'), /server mode/);
+});
+
+test('a configured build still refuses to spawn without an agent API key', async () => {
+  const { coordinator, provider } = sandboxCoordinator();
+  await coordinator.start();
+  await assert.rejects(coordinator.spawnAppServer(), { code: 'PROVIDER_KEY_REQUIRED' });
+  assert.equal(provider.calls.spawn, 0);
+});
+
+test('a coordinator spawn uses a local login when no API key is stored', async () => {
+  const session = { provider: 'codex', files: [{ path: '.codex/auth.json', text: '{"token":"oauth"}' }] };
+  const provider = appServerStub();
+  let spawned = null;
+  const original = provider.spawn;
+  provider.spawn = async (request) => {
+    spawned = request.credentials;
+    return original(request);
+  };
+  const { coordinator } = sandboxCoordinator({
+    provider,
+    collectProviderSession: (name) => (name === 'codex' ? session : null),
+    listLocalSessions: () => ['codex'],
+  });
+  await coordinator.start();
+  assert.deepEqual((await coordinator.snapshot()).server.credential, {
+    provider: null,
+    stored: false,
+    localProviders: ['codex'],
+  });
+  await coordinator.spawnAppServer({ credentials: { provider: 'codex' } });
+  assert.deepEqual(spawned, { provider: 'codex', apiKey: '', session });
+});
+
+test('a stored key for another agent does not ride along with a local login', async () => {
+  const session = { provider: 'claude', files: [{ path: '.claude.json', text: '{}' }] };
+  const provider = appServerStub();
+  let spawned = null;
+  const original = provider.spawn;
+  provider.spawn = async (request) => {
+    spawned = request.credentials;
+    return original(request);
+  };
+  const { coordinator } = sandboxCoordinator({
+    provider,
+    collectProviderSession: (name) => (name === 'claude' ? session : null),
+    listLocalSessions: () => ['claude'],
+  });
+  await coordinator.start();
+  await coordinator.saveSandboxCredential({ provider: 'codex', apiKey: 'sk-codex' });
+  await coordinator.spawnAppServer({ credentials: { provider: 'claude' } });
+  assert.deepEqual(spawned, { provider: 'claude', apiKey: '', session });
+});
+
+test('Pi still needs an API key because it has no copyable login files', async () => {
+  const { coordinator, provider } = sandboxCoordinator({
+    collectProviderSession: (name) => (name === 'codex'
+      ? { provider: 'codex', files: [{ path: '.codex/auth.json', text: '{}' }] }
+      : null),
+    listLocalSessions: () => ['codex'],
+  });
+  await coordinator.start();
+  await assert.rejects(coordinator.spawnAppServer({ credentials: { provider: 'pi' } }), {
+    code: 'PROVIDER_KEY_REQUIRED',
+  });
+  assert.equal(provider.calls.spawn, 0);
+});
+
+test('an idle sandbox tears itself down so the official project stops paying', async () => {
+  const timers = [];
+  const { coordinator, provider } = sandboxCoordinator({
+    idleTimeoutMs: 30_000,
+    setTimeoutFn: (fn, ms) => {
+      timers.push({ fn, ms });
+      return timers.length;
+    },
+    clearTimeoutFn: () => {
+      timers.length = 0;
+    },
+  });
+  await coordinator.start();
+  await coordinator.saveSandboxCredential({ provider: 'codex', apiKey: 'sk-test' });
+  await coordinator.spawnAppServer();
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].ms, 30_000);
+  await timers[0].fn();
+  assert.equal(provider.calls.teardown, 1);
+  assert.equal((await coordinator.snapshot()).server.lifecycle, 'idle');
 });

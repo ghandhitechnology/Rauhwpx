@@ -90,6 +90,10 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          RAUHWpx_REQUIRE_PACKAGED_RAILWAY: '1'
+          RAUHWpx_RAILWAY_TOKEN: ${{ secrets.RAUHWpx_RAILWAY_TOKEN }}
+          RAUHWpx_RAILWAY_PROJECT_ID: ${{ secrets.RAUHWpx_RAILWAY_PROJECT_ID }}
+          RAUHWpx_RAILWAY_ENVIRONMENT_ID: ${{ secrets.RAUHWpx_RAILWAY_ENVIRONMENT_ID }}
         run: npm run dist:mac
       - name: Verify Developer ID signature and notarization
         env:

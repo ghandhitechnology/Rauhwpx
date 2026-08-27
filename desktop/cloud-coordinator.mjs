@@ -1,6 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { readFile, rm } from 'node:fs/promises';
-import { hostname } from 'node:os';
+import { homedir, hostname } from 'node:os';
+import { collectProviderSession, listLocalSessionProviders } from '../cloud/src/provider-session.mjs';
+import { SANDBOX_AGENT_PROVIDERS } from './cloud-railway.mjs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AppServerError, createAppServerRegistry } from './cloud-app-server.mjs';
@@ -132,14 +134,62 @@ export class CloudCoordinator extends EventEmitter {
   #spawnPromise = null;
   #teardownPromise = null;
   #preferredMode = null;
+  #idleTimer = null;
+  #idleTimeoutMs;
+  #armTimer;
+  #disarmTimer;
+  #collectProviderSession;
+  #listLocalSessions;
 
-  constructor({ client, store, provisioner, recoveryDir, appServers = [] }) {
+  constructor({
+    client,
+    store,
+    provisioner,
+    recoveryDir,
+    appServers = [],
+    idleTimeoutMs = 30 * 60 * 1000,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
+    collectProviderSession: collectSession = (provider) => collectProviderSession(provider, { home: homedir() }),
+    listLocalSessions = () => listLocalSessionProviders({ home: homedir() }),
+  }) {
     super();
     this.#client = client;
     this.#store = store;
     this.#provisioner = provisioner;
     this.#recoveryDir = recoveryDir;
     this.#appServers = Array.isArray(appServers) ? createAppServerRegistry(appServers) : appServers;
+    this.#idleTimeoutMs = Number(idleTimeoutMs);
+    this.#armTimer = setTimeoutFn;
+    this.#disarmTimer = clearTimeoutFn;
+    this.#collectProviderSession = collectSession;
+    this.#listLocalSessions = listLocalSessions;
+  }
+
+  hasBillableSandbox() {
+    return this.#sandboxLifecycle === 'provisioning'
+      || this.#sandboxLifecycle === 'ready'
+      || this.#sandboxLifecycle === 'tearing-down';
+  }
+
+  #clearIdleTeardown() {
+    if (this.#idleTimer !== null) this.#disarmTimer(this.#idleTimer);
+    this.#idleTimer = null;
+  }
+
+  #scheduleIdleTeardown() {
+    this.#clearIdleTeardown();
+    if (!Number.isFinite(this.#idleTimeoutMs) || this.#idleTimeoutMs <= 0) return;
+    this.#idleTimer = this.#armTimer(() => {
+      this.#idleTimer = null;
+      return this.teardownAppServer({ force: false }).catch(() => {
+        this.#scheduleIdleTeardown();
+      });
+    }, this.#idleTimeoutMs);
+  }
+
+  #touchSandboxActivity() {
+    if (this.#sandboxLifecycle === 'ready') this.#scheduleIdleTeardown();
   }
 
   async start() {
@@ -153,6 +203,7 @@ export class CloudCoordinator extends EventEmitter {
         this.#sandboxMessage = this.#sandboxLifecycle === 'error'
           ? 'This app sandbox is not paired with this device.'
           : null;
+        if (this.#sandboxLifecycle === 'ready') this.#scheduleIdleTeardown();
       }
     }
     const records = await this.#store.load();
@@ -182,6 +233,7 @@ export class CloudCoordinator extends EventEmitter {
   }
 
   stop() {
+    this.#clearIdleTeardown();
     for (const controller of this.#watchers.values()) controller.abort();
     this.#watchers.clear();
     for (const timer of this.#recoveryTimers.values()) clearTimeout(timer);
@@ -284,6 +336,11 @@ export class CloudCoordinator extends EventEmitter {
         providers: this.#appServers.list(),
         lifecycle: this.#sandboxLifecycle,
         message: this.#sandboxMessage,
+        credential: {
+          ...(await this.#client.describeSandboxCredential?.().catch(() => ({ provider: null, stored: false }))
+            ?? { provider: null, stored: false }),
+          localProviders: this.#listLocalSessions?.() ?? [],
+        },
       },
       lease: selected && !selected.resolvedAt && (selected === localMatch || !scoped) && !['failed', 'cancelled', 'expired'].includes(selected.state)
         ? { owner: 'cloud', sessionId: selected.cloudSessionId ?? selected.id, acquiredAt: selected.createdAt }
@@ -460,6 +517,11 @@ export class CloudCoordinator extends EventEmitter {
     return this.snapshot();
   }
 
+  async saveSandboxCredential(payload) {
+    await this.#client.saveSandboxCredential(payload);
+    return this.snapshot();
+  }
+
   #appServerFor(providerId) {
     if (!this.#appServers.size) {
       throw new AppServerError('This build does not include app-provided servers', {
@@ -493,14 +555,43 @@ export class CloudCoordinator extends EventEmitter {
     });
   }
 
-  async #spawnAppServer({ providerId = null, deviceName = hostname() } = {}) {
+  async #spawnAppServer({ providerId = null, deviceName = hostname(), credentials = null } = {}) {
+    if (credentials?.apiKey) await this.#client.saveSandboxCredential(credentials);
     const current = await this.#client.loadProfile().catch(() => null);
-    if (current?.mode === 'app-hosted' && await this.#client.isPaired().catch(() => false)) {
-      this.#setSandboxLifecycle('ready');
-      this.#preferredMode = await this.#client.saveServerMode('app-hosted').catch(() => 'app-hosted');
-      return this.snapshot({ extra: { sandbox: { ok: true, reused: true } } });
+    if (current?.mode === 'app-hosted') {
+      if (await this.#client.isPaired().catch(() => false)) {
+        this.#setSandboxLifecycle('ready');
+        this.#preferredMode = await this.#client.saveServerMode('app-hosted').catch(() => 'app-hosted');
+        this.#scheduleIdleTeardown();
+        return this.snapshot({ extra: { sandbox: { ok: true, reused: true } } });
+      }
+      throw new AppServerError('An app sandbox is already registered. Tear it down before creating another.', {
+        code: 'SANDBOX_STILL_ACTIVE',
+        retryable: false,
+      });
     }
     const provider = this.#appServerFor(providerId);
+    const storedCredentials = await this.#client.loadSandboxCredential?.().catch(() => null) ?? null;
+    const agent = SANDBOX_AGENT_PROVIDERS.includes(credentials?.provider)
+      ? credentials.provider
+      : storedCredentials?.provider;
+    const session = agent ? this.#collectProviderSession?.(agent) ?? null : null;
+    const apiKey = typeof credentials?.apiKey === 'string' && credentials.apiKey
+      ? credentials.apiKey
+      : agent && storedCredentials?.provider === agent
+        ? storedCredentials.apiKey ?? ''
+        : '';
+    if (!apiKey && !session) {
+      throw new AppServerError('Save an agent API key before starting an app sandbox.', {
+        code: 'PROVIDER_KEY_REQUIRED',
+        retryable: false,
+      });
+    }
+    const spawnCredentials = {
+      provider: agent ?? storedCredentials?.provider,
+      apiKey,
+      ...(session ? { session } : {}),
+    };
     this.#setSandboxLifecycle('provisioning', 'Starting an app-provided sandbox.');
     this.#emit({ type: 'sandbox-provision-started', providerId: provider.id });
     let spawned = null;
@@ -508,6 +599,7 @@ export class CloudCoordinator extends EventEmitter {
       spawned = await provider.spawn({
         deviceName,
         limits: current?.limits,
+        credentials: spawnCredentials,
         onLine: (line) => this.#emit({ type: 'provision-log', line }),
       });
       const profile = normalizeCloudProfile({
@@ -536,6 +628,7 @@ export class CloudCoordinator extends EventEmitter {
       });
       this.#preferredMode = await this.#client.saveServerMode('app-hosted').catch(() => 'app-hosted');
       this.#setSandboxLifecycle('ready');
+      this.#scheduleIdleTeardown();
       const snapshot = await this.snapshot({ extra: { sandbox: { ok: true, reused: false } } });
       this.#emit({ type: 'sandbox-ready', providerId: provider.id, snapshot });
       return snapshot;
@@ -596,6 +689,7 @@ export class CloudCoordinator extends EventEmitter {
   }
 
   async #teardownAppServer({ force = false } = {}) {
+    this.#clearIdleTeardown();
     const profile = await this.#client.loadProfile().catch(() => null);
     if (profile?.mode !== 'app-hosted') {
       this.#setSandboxLifecycle('idle');
@@ -662,6 +756,7 @@ export class CloudCoordinator extends EventEmitter {
   }
 
   async transfer(payload, { originSessionId, originPath = null }) {
+    this.#touchSandboxActivity();
     const bytes = Buffer.from(payload?.document?.bytes ?? []);
     const goal = goalFromTransfer(payload);
     const record = await this.#store.create({
@@ -785,6 +880,7 @@ export class CloudCoordinator extends EventEmitter {
   }
 
   async command({ sessionId, command, expectedVersion, payload = {}, message, messageId }) {
+    this.#touchSandboxActivity();
     const queuedMessageId = command === 'queue-message' && message
       ? String(messageId ?? `message-${Date.now()}`)
       : null;

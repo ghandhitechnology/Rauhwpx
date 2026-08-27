@@ -6,6 +6,8 @@ const PROFILE_SECRET = 'cloud.profile';
 const REFRESH_SECRET = 'cloud.refresh';
 const DEVICE_SECRET = 'cloud.device';
 const SERVER_MODE_SECRET = 'cloud.server-mode';
+const SANDBOX_CREDENTIAL_SECRET = 'cloud.sandbox.credential';
+const SANDBOX_AGENT_PROVIDERS = Object.freeze(['claude', 'codex', 'pi', 'grok', 'cursor']);
 const PAIRING_CODE_RE = /^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const SERVER_KEY_RE = /^ed25519:[A-Za-z0-9_-]{59}$/;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
@@ -323,6 +325,34 @@ export class CloudClient {
     if (!CLOUD_SERVER_MODES.includes(mode)) throw new CloudHttpError('Unsupported cloud server mode');
     await this.#vault.set(SERVER_MODE_SECRET, mode);
     return mode;
+  }
+
+  async saveSandboxCredential({ provider, apiKey } = {}) {
+    if (!SANDBOX_AGENT_PROVIDERS.includes(provider)) {
+      throw new Error('Choose a supported agent before starting an app sandbox.');
+    }
+    const key = String(apiKey ?? '').trim();
+    if (!key || key.length > 8192) throw new Error('Enter the API key for the agent that will run on the sandbox.');
+    await this.#vault.set(SANDBOX_CREDENTIAL_SECRET, JSON.stringify({ provider, apiKey: key }));
+    return { provider, stored: true };
+  }
+
+  async loadSandboxCredential() {
+    const stored = await this.#vault.get(SANDBOX_CREDENTIAL_SECRET).catch(() => null);
+    if (!stored) return null;
+    try {
+      const parsed = JSON.parse(stored);
+      const provider = SANDBOX_AGENT_PROVIDERS.includes(parsed?.provider) ? parsed.provider : '';
+      const apiKey = typeof parsed?.apiKey === 'string' ? parsed.apiKey.trim() : '';
+      return provider && apiKey ? { provider, apiKey } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async describeSandboxCredential() {
+    const stored = await this.loadSandboxCredential();
+    return { provider: stored?.provider ?? null, stored: Boolean(stored) };
   }
 
   /** 샌드박스를 철거할 때 프로필과 자격 증명을 함께 지운다. */

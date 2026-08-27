@@ -70,7 +70,7 @@ podman push ghcr.io/ghandhitechnology/rauhwpx-cloud:stable
 
 Run `bash cloud/install/build-runtime-assets.sh` first because the image copies the built Studio runtime, agent hub, and `rhwp` binary from `cloud/runtime-assets`.
 
-The desktop build reads its provider configuration from the environment. Tokens never live in the repository.
+The desktop build reads its provider configuration from the environment, then from `desktop/packaged-railway.json` written at pack time. Official release workflows set `RAUHWpx_REQUIRE_PACKAGED_RAILWAY=1` and the three required values from GitHub secrets so a downloaded installer can spawn a sandbox. Tokens never live in the repository. A downloader who already logged in locally can spawn without pasting a key: the desktop copies that agent's OAuth files into the new sandbox at create time. An API key remains the fallback, and Pi still needs one. The sandbox tears down on quit or after 30 minutes idle.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
@@ -85,7 +85,7 @@ Without all three required values the app still shows the app-provided option, n
 
 Each spawn generates a fresh 32-byte bootstrap token, sets it as a service variable, waits for the deployment and the health route, then redeems one pairing code through `POST /v1/pairing/bootstrap`. The desktop pins the server key returned by the health route and rejects a mismatch. A spawn that fails at any step deletes the service before reporting the error, so a failed attempt leaves no paid resource behind. Teardown refuses while cloud work is live unless the caller forces it, deletes the service, and forgets the stored profile and tokens.
 
-Provider credentials cannot be entered interactively in a sandbox. The entrypoint installs the CLI named by `RAUHWpx_SANDBOX_PROVIDER` and seeds any of `RAUHWpx_PROVIDER_KEY_CLAUDE`, `RAUHWpx_PROVIDER_KEY_CODEX`, `RAUHWpx_PROVIDER_KEY_GROK`, `RAUHWpx_PROVIDER_KEY_PI`, and `RAUHWpx_PROVIDER_KEY_CURSOR` through `provider login <name> --api-key-stdin`, so keys never appear in a process argument list.
+Provider credentials cannot be entered interactively in a sandbox. The entrypoint installs the CLI named by `RAUHWpx_SANDBOX_PROVIDER`. If `RAUHWpx_PROVIDER_SESSION` is set, it writes the encoded local OAuth files into `provider-auth` before workers start. It also seeds any of `RAUHWpx_PROVIDER_KEY_CLAUDE`, `RAUHWpx_PROVIDER_KEY_CODEX`, `RAUHWpx_PROVIDER_KEY_GROK`, `RAUHWpx_PROVIDER_KEY_PI`, and `RAUHWpx_PROVIDER_KEY_CURSOR` through `provider login <name> --api-key-stdin`, so keys never appear in a process argument list. The session blob stays on the control plane environment allowlist and is not passed to workers.
 
 ## Worker boundary
 

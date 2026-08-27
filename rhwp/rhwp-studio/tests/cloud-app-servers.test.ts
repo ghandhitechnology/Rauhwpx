@@ -112,6 +112,7 @@ test('the parser keeps app sandboxes, user hosts, and legacy snapshots apart', (
   assert.equal(appSnapshot?.profile.kind, 'configured');
   assert.equal(appSnapshot?.profile.kind === 'configured' ? appSnapshot.profile.mode : null, 'app-hosted');
   assert.deepEqual(appSnapshot?.server.providers, [RAILWAY_PROVIDER]);
+  assert.deepEqual(appSnapshot?.server.credential, { provider: null, stored: false, localProviders: [] });
   assert.equal(snapshotSandbox(appSnapshot!)?.sandbox.host, 'sandbox-1.up.railway.app');
   assert.equal(snapshotProfile(appSnapshot!), undefined, 'a sandbox never fills the SSH form');
 
@@ -138,6 +139,7 @@ test('the parser keeps app sandboxes, user hosts, and legacy snapshots apart', (
     providers: [],
     lifecycle: 'idle',
     message: null,
+    credential: { provider: null, stored: false, localProviders: [] },
   });
 
   const base = {
@@ -200,6 +202,7 @@ test('the controller forwards every server mode call to its own IPC channel', as
   const controller = createCloudController(api as never);
   await controller.selectServerMode('app-hosted');
   await controller.spawnSandbox('railway');
+  await controller.spawnSandbox('railway', { provider: 'codex', apiKey: 'sk-test' });
   await controller.spawnSandbox();
   await controller.sandboxStatus();
   await controller.teardownSandbox();
@@ -207,6 +210,7 @@ test('the controller forwards every server mode call to its own IPC channel', as
   assert.deepEqual(calls, [
     ['select', { mode: 'app-hosted' }],
     ['spawn', { providerId: 'railway' }],
+    ['spawn', { providerId: 'railway', provider: 'codex', apiKey: 'sk-test' }],
     ['spawn', {}],
     ['status', undefined],
     ['teardown', { force: false }],
@@ -367,7 +371,7 @@ test('the dialog offers both servers and every sandbox action', () => {
   assert.match(onboarding, /role', 'radiogroup'/);
   assert.match(onboarding, /dataset\.serverMode = mode/);
   assert.match(onboarding, /controller\.selectServerMode\(mode\)/);
-  assert.match(onboarding, /controller\.spawnSandbox\(providerId\)/);
+  assert.match(onboarding, /controller\.spawnSandbox\(providerId, credential\)/);
   assert.match(onboarding, /controller\.teardownSandbox\(\)/);
   assert.match(onboarding, /controller\.sandboxStatus\(\)/);
   assert.match(onboarding, /남은 서버는 공급자 콘솔에서 직접 삭제하세요/);
@@ -376,16 +380,20 @@ test('the dialog offers both servers and every sandbox action', () => {
   assert.match(onboarding, /'앱 제공 서버를 종료하지 못했습니다'\n\s*: '앱 제공 서버를 준비하지 못했습니다'/);
   assert.match(onboarding, /운영자가 \$\{provider\.missingConfig\.join\(', '\)\}/);
   assert.match(onboarding, /state\.kind !== 'sandbox-intro' && state\.kind !== 'sandbox-failed'/);
+  assert.match(onboarding, /이 Mac의 로그인/);
+  assert.match(onboarding, /localProviders\.includes\(agent\.value\)/);
+  assert.match(onboarding, /provider: agent\.value/);
   assert.match(onboarding, /kind: 'sandbox-provisioning'/);
   assert.match(onboarding, /앱 제공 서버를 종료하고 있습니다/);
   assert.match(onboarding, /앱 제공 서버 · /);
   assert.match(onboardingCss, /\.ag-cloud-setup-option\.ag-selected/);
   assert.match(cloudUi, /appHosted/);
   assert.match(preload, /cloudSelectServerMode: \(payload\) => ipcRenderer\.invoke\('cloud:select-server-mode', payload\)/);
+  assert.match(preload, /cloudSaveSandboxCredential: \(payload\) => ipcRenderer\.invoke\('cloud:save-sandbox-credential', payload\)/);
   assert.match(preload, /cloudSpawnSandbox: \(payload\) => ipcRenderer\.invoke\('cloud:spawn-sandbox', payload\)/);
   assert.match(preload, /cloudSandboxStatus: \(\) => ipcRenderer\.invoke\('cloud:sandbox-status'\)/);
   assert.match(preload, /cloudTeardownSandbox: \(payload\) => ipcRenderer\.invoke\('cloud:teardown-sandbox', payload\)/);
-  for (const channel of ['cloud:select-server-mode', 'cloud:spawn-sandbox', 'cloud:sandbox-status', 'cloud:teardown-sandbox']) {
+  for (const channel of ['cloud:select-server-mode', 'cloud:save-sandbox-credential', 'cloud:spawn-sandbox', 'cloud:sandbox-status', 'cloud:teardown-sandbox']) {
     assert.match(desktopMain, new RegExp(`ipcMain\\.handle\\('${channel}'`));
   }
   assert.match(desktopMain, /createRailwayServerProvider\(\{/);

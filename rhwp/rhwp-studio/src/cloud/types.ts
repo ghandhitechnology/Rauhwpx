@@ -42,12 +42,21 @@ export interface CloudAppServerProvider {
   missingConfig: string[];
 }
 
+export const LOCAL_SESSION_PROVIDERS = ['claude', 'codex', 'grok', 'cursor'] as const;
+
+export interface CloudSandboxCredential {
+  provider: string | null;
+  stored: boolean;
+  localProviders: string[];
+}
+
 export interface CloudServerState {
   mode: CloudServerMode | null;
   preferredMode: CloudServerMode | null;
   providers: CloudAppServerProvider[];
   lifecycle: SandboxLifecycle;
   message: string | null;
+  credential?: CloudSandboxCredential;
 }
 
 interface CloudProfileStateBase {

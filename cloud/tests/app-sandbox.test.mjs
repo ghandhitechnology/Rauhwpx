@@ -239,6 +239,7 @@ test('the local worker cannot inherit the control plane environment', () => {
     RAUHWpx_STUDIO_DIST: '/app/studio',
     RAUHWpx_BOOTSTRAP_TOKEN: BOOTSTRAP_TOKEN,
     RAUHWpx_PROVIDER_KEY_CODEX: 'operator-openai-key',
+    RAUHWpx_PROVIDER_SESSION: 'encoded-oauth-blob',
     RAILWAY_TOKEN: 'railway-secret',
     RAUHWpx_DATA_DIR: '/var/lib/rauhwpx-cloud',
     NODE_OPTIONS: '--require=/tmp/inject.cjs',
@@ -247,6 +248,7 @@ test('the local worker cannot inherit the control plane environment', () => {
   // 워커와 provider CLI 는 같은 uid 로 돈다. 워커 환경에 남은 비밀은 에이전트가 읽을 수 있다.
   assert.equal(filtered.RAUHWpx_BOOTSTRAP_TOKEN, undefined);
   assert.equal(filtered.RAUHWpx_PROVIDER_KEY_CODEX, undefined);
+  assert.equal(filtered.RAUHWpx_PROVIDER_SESSION, undefined);
   assert.equal(filtered.RAILWAY_TOKEN, undefined);
   assert.equal(filtered.RAUHWpx_DATA_DIR, undefined);
   assert.equal(filtered.NODE_OPTIONS, undefined);
@@ -305,6 +307,7 @@ test('the app sandbox image runs the control plane with the local runner and a b
   assert.match(entrypoint, /exec node "\$CLOUD_ROOT\/src\/main\.mjs"/);
   assert.match(entrypoint, /export RAUHWpx_PORT="\$PORT"/);
   assert.match(entrypoint, /provider login "\$provider" --api-key-stdin/);
+  assert.match(entrypoint, /seed-provider-session\.mjs/);
   assert.match(entrypoint, /chmod 0700 "\$DATA_DIR"/);
   assert.match(entrypoint, /chmod 0711 "\$CONTROL_DIR" "\$WORKSPACE_ROOT"/);
   // 자격 증명은 stdin으로만 넘긴다. 명령줄 인자는 컨테이너 안에서 ps로 보인다.

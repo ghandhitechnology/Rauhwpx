@@ -34,6 +34,9 @@ seed_provider() {
 if [[ ${RAUHWpx_SANDBOX_INSTALL_PROVIDER:-1} == 1 ]]; then
   node "$CLOUD_ROOT/src/cli.mjs" provider install "${RAUHWpx_SANDBOX_PROVIDER:-codex}" >/dev/null
 fi
+if [[ -n ${RAUHWpx_PROVIDER_SESSION:-} ]]; then
+  node "$CLOUD_ROOT/src/seed-provider-session.mjs"
+fi
 seed_provider claude RAUHWpx_PROVIDER_KEY_CLAUDE
 seed_provider codex RAUHWpx_PROVIDER_KEY_CODEX
 seed_provider grok RAUHWpx_PROVIDER_KEY_GROK

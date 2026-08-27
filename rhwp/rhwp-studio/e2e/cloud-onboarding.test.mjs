@@ -278,6 +278,7 @@ function cloudMock() {
       providers: structuredClone(providers),
       lifecycle,
       message: serverMessage,
+      credential: { provider: 'codex', stored: true },
     },
     lease: { owner: 'local' },
     session: { kind: 'idle' },
@@ -525,7 +526,7 @@ try {
     }))),
     [
       { mode: 'app-hosted', heading: '앱에서 제공하는 서버', note: 'Railway 사용 가능', checked: 'true' },
-      { mode: 'self-hosted', heading: '내 서버 사용', note: 'SSH와 비밀번호 없는 sudo가 필요합니다', checked: 'false' },
+      { mode: 'self-hosted', heading: '내 서버 사용', note: '고급 · SSH와 비밀번호 없는 sudo가 필요합니다', checked: 'false' },
     ],
   );
   assert.equal(await page.$eval('.ag-cloud-setup-options', (node) => node.getAttribute('role')), 'radiogroup');
@@ -789,7 +790,7 @@ try {
   assert.match(await page.$eval('.ag-cloud-setup-technical pre', (node) => node.textContent), /reports crashed/);
   assert.deepEqual(
     await page.evaluate(() => window.__cloudHarness.calls.filter((call) => call.method === 'cloudSpawnSandbox').map((call) => call.payload)),
-    [{ providerId: 'railway' }],
+    [{ providerId: 'railway', provider: 'codex' }],
   );
   console.log('  PASS a failed sandbox spawn reports the provider detail and stays recoverable');
 

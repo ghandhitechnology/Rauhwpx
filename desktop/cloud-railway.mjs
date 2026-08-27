@@ -1,5 +1,8 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { encodeProviderSession } from '../cloud/src/provider-session.mjs';
 import { AppServerError } from './cloud-app-server.mjs';
 
 export const RAILWAY_API_URL = 'https://backboard.railway.com/graphql/v2';
@@ -63,14 +66,57 @@ function trimmed(value, limit = 256) {
   return result.length > limit ? '' : result;
 }
 
-export function railwayConfigFromEnv(environment = process.env) {
+export const SANDBOX_AGENT_PROVIDERS = Object.freeze(['claude', 'codex', 'pi', 'grok', 'cursor']);
+
+const PROVIDER_KEY_ENV = Object.freeze({
+  claude: 'RAUHWpx_PROVIDER_KEY_CLAUDE',
+  codex: 'RAUHWpx_PROVIDER_KEY_CODEX',
+  grok: 'RAUHWpx_PROVIDER_KEY_GROK',
+  pi: 'RAUHWpx_PROVIDER_KEY_PI',
+  cursor: 'RAUHWpx_PROVIDER_KEY_CURSOR',
+});
+
+/** 공식 빌드가 CI에서 심는 Railway 설정. 저장소에는 두지 않는다. */
+export function loadPackagedRailwayConfig(directory) {
+  try {
+    const raw = JSON.parse(readFileSync(join(directory, 'packaged-railway.json'), 'utf8'));
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    return {
+      token: trimmed(raw.token, 4096),
+      projectId: trimmed(raw.projectId),
+      environmentId: trimmed(raw.environmentId),
+      image: trimmed(raw.image, 512),
+      region: trimmed(raw.region, 64),
+      apiUrl: trimmed(raw.apiUrl, 2048),
+    };
+  } catch {
+    return {};
+  }
+}
+
+export function railwayConfigFromEnv(environment = process.env, packaged = {}) {
   return {
-    token: trimmed(environment.RAUHWpx_RAILWAY_TOKEN, 4096),
-    projectId: trimmed(environment.RAUHWpx_RAILWAY_PROJECT_ID),
-    environmentId: trimmed(environment.RAUHWpx_RAILWAY_ENVIRONMENT_ID),
-    image: trimmed(environment.RAUHWpx_RAILWAY_IMAGE, 512) || RAILWAY_DEFAULT_IMAGE,
-    region: trimmed(environment.RAUHWpx_RAILWAY_REGION, 64),
-    apiUrl: trimmed(environment.RAUHWpx_RAILWAY_API_URL, 2048) || RAILWAY_API_URL,
+    token: trimmed(environment.RAUHWpx_RAILWAY_TOKEN, 4096) || trimmed(packaged.token, 4096),
+    projectId: trimmed(environment.RAUHWpx_RAILWAY_PROJECT_ID) || trimmed(packaged.projectId),
+    environmentId: trimmed(environment.RAUHWpx_RAILWAY_ENVIRONMENT_ID) || trimmed(packaged.environmentId),
+    image: trimmed(environment.RAUHWpx_RAILWAY_IMAGE, 512)
+      || trimmed(packaged.image, 512)
+      || RAILWAY_DEFAULT_IMAGE,
+    region: trimmed(environment.RAUHWpx_RAILWAY_REGION, 64) || trimmed(packaged.region, 64),
+    apiUrl: trimmed(environment.RAUHWpx_RAILWAY_API_URL, 2048) || trimmed(packaged.apiUrl, 2048) || RAILWAY_API_URL,
+  };
+}
+
+export function packagedRailwayRecord(config) {
+  const missing = missingConfiguration(config);
+  if (missing.length) return {};
+  return {
+    token: config.token,
+    projectId: config.projectId,
+    environmentId: config.environmentId,
+    ...(config.image ? { image: config.image } : {}),
+    ...(config.region ? { region: config.region } : {}),
+    ...(config.apiUrl && config.apiUrl !== RAILWAY_API_URL ? { apiUrl: config.apiUrl } : {}),
   };
 }
 
@@ -182,8 +228,8 @@ export function createRailwayServerProvider({
     return payload.data;
   }
 
-  function sandboxVariables(bootstrapToken, limits) {
-    return {
+  function sandboxVariables(bootstrapToken, limits, credentials = null) {
+    const variables = {
       RAUHWpx_HOST: '0.0.0.0',
       RAUHWpx_PORT: String(SANDBOX_PORT),
       PORT: String(SANDBOX_PORT),
@@ -193,6 +239,21 @@ export function createRailwayServerProvider({
       RAUHWpx_MAX_RUNNING: String(limits?.maxRunningSessions ?? 2),
       RAUHWpx_MAX_QUEUED: String(limits?.maxQueuedSessions ?? 20),
     };
+    const provider = SANDBOX_AGENT_PROVIDERS.includes(credentials?.provider) ? credentials.provider : '';
+    const apiKey = trimmed(credentials?.apiKey, 8192);
+    if (provider) variables.RAUHWpx_SANDBOX_PROVIDER = provider;
+    if (provider && apiKey) variables[PROVIDER_KEY_ENV[provider]] = apiKey;
+    if (provider && credentials?.session) {
+      try {
+        variables.RAUHWpx_PROVIDER_SESSION = encodeProviderSession(credentials.session);
+      } catch (error) {
+        throw new AppServerError(error instanceof Error ? error.message : 'Provider session is invalid', {
+          code: 'PROVIDER_SESSION_INVALID',
+          retryable: false,
+        });
+      }
+    }
+    return variables;
   }
 
   async function latestDeployment(sandbox, { signal } = {}) {
@@ -276,7 +337,13 @@ export function createRailwayServerProvider({
       };
     },
 
-    async spawn({ deviceName = 'Rauhwpx desktop', limits = null, signal, onLine = () => {} } = {}) {
+    async spawn({
+      deviceName = 'Rauhwpx desktop',
+      limits = null,
+      credentials = null,
+      signal,
+      onLine = () => {},
+    } = {}) {
       const bootstrapToken = randomBytes(32).toString('base64url');
       onLine('Creating an app-provided sandbox');
       const created = await graphql(SERVICE_CREATE, {
@@ -285,7 +352,7 @@ export function createRailwayServerProvider({
           environmentId: config.environmentId,
           name: sandboxName(),
           source: { image: config.image },
-          variables: sandboxVariables(bootstrapToken, limits),
+          variables: sandboxVariables(bootstrapToken, limits, credentials),
         },
       }, { signal });
       const serviceId = trimmed(created.serviceCreate?.id, 128);

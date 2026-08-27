@@ -82,6 +82,7 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
   cloudProvision: (payload) => ipcRenderer.invoke('cloud:provision', payload),
   cloudPair: (payload) => ipcRenderer.invoke('cloud:pair', payload),
   cloudSelectServerMode: (payload) => ipcRenderer.invoke('cloud:select-server-mode', payload),
+  cloudSaveSandboxCredential: (payload) => ipcRenderer.invoke('cloud:save-sandbox-credential', payload),
   cloudSpawnSandbox: (payload) => ipcRenderer.invoke('cloud:spawn-sandbox', payload),
   cloudSandboxStatus: () => ipcRenderer.invoke('cloud:sandbox-status'),
   cloudTeardownSandbox: (payload) => ipcRenderer.invoke('cloud:teardown-sandbox', payload),
