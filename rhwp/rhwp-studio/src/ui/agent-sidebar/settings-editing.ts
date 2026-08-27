@@ -142,7 +142,7 @@ export function createEditingSettings(options: {
   conflictActions.append(conflictReload, conflictKeep);
   conflict.append(conflictCopy, conflictActions);
 
-  const appearance = group('화면과 보기', '편집 화면과 문서 표시 방식을 정합니다.');
+  const appearance = group('화면과 보기');
   const themeRow = el('div', 'ag-settings-control-row');
   const themeCopy = el('span', 'ag-settings-control-copy');
   themeCopy.append(el('span', 'ag-settings-control-label', '테마'));
