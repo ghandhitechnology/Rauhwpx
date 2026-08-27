@@ -351,7 +351,7 @@ export function createEditingSettings(options: {
     detectFonts.disabled = !isLocalFontAccessSupported();
   });
 
-  const files = group('저장과 파일', '문서 복구와 파일 저장 안내를 정합니다.');
+  const files = group('저장과 파일');
   const recovery = toggleRow('복구용 자동 저장');
   const recoveryInterval = numberRow('복구 간격', undefined, 1, 120, '분');
   const idleSave = toggleRow('쉴 때 자동 저장');
