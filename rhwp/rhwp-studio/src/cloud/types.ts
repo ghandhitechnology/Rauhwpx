@@ -148,11 +148,18 @@ export interface CloudResultSummary {
   preservedCopyName: string | null;
 }
 
+/** 철거 결과. 이 빌드가 다룰 수 없는 샌드박스는 연결만 놓고 원격 서버는 남는다. */
+export interface CloudSandboxOutcome {
+  removed: boolean;
+  unmanaged: boolean;
+}
+
 export interface CloudSnapshot {
   revision: number;
   available: boolean;
   profile: CloudProfileState;
   server: CloudServerState;
+  sandbox?: CloudSandboxOutcome;
   lease: CloudDocumentLease;
   session: CloudSessionState;
   sessions: Exclude<CloudSessionState, { kind: 'idle' }>[];

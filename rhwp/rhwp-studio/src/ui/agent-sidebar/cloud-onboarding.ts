@@ -463,7 +463,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     try {
       const next = await deps.controller.teardownSandbox();
       if (!operationIsCurrent(operation)) return;
-      setState(createCloudSetupState(next, intent), '앱 제공 서버를 종료했습니다.');
+      setState(createCloudSetupState(next, intent), next.sandbox?.unmanaged === true
+        ? '연결을 놓았습니다. 남은 서버는 공급자 콘솔에서 직접 삭제하세요.'
+        : '앱 제공 서버를 종료했습니다.');
     } catch (error) {
       if (!operationIsCurrent(operation)) return;
       setState({

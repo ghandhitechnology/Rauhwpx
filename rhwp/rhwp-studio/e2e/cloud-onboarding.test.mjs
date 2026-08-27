@@ -213,6 +213,7 @@ function cloudMock() {
   let spawnError = 'Railway deployment reports crashed';
   let spawnLeavesSandbox = false;
   let teardownError = null;
+  let sandboxUnmanaged = false;
   let sandboxSeq = 0;
 
   const wait = () => new Promise((resolve) => setTimeout(resolve, 80));
@@ -296,6 +297,15 @@ function cloudMock() {
     setTeardownError(message) {
       teardownError = message;
     },
+    /** 이 빌드가 공급자를 모르는 상태. 상태 조회는 실패를 알리고 철거는 연결만 놓는다. */
+    setSandboxUnmanaged(host) {
+      sandboxUnmanaged = true;
+      connection = 'error';
+      lifecycle = 'error';
+      serverMessage = `This app cannot manage the railway sandbox at ${host}.`
+        + ' Release it here, then delete the server in the provider console.';
+      publish();
+    },
     serverState() {
       return { preferredMode, lifecycle, mode: sandbox ? 'app-hosted' : profile ? 'self-hosted' : null };
     },
@@ -365,6 +375,15 @@ function cloudMock() {
         teardownError = null;
         throw new Error(message);
       }
+      if (sandboxUnmanaged) {
+        sandboxUnmanaged = false;
+        sandbox = null;
+        connection = 'unknown';
+        lifecycle = 'idle';
+        serverMessage = null;
+        preferredMode = null;
+        return { snapshot: { ...snapshot(), sandbox: { ok: true, removed: false, unmanaged: true } } };
+      }
       lifecycle = 'tearing-down';
       publish();
       await wait();
@@ -373,7 +392,7 @@ function cloudMock() {
       lifecycle = 'idle';
       serverMessage = null;
       preferredMode = null;
-      return { snapshot: snapshot() };
+      return { snapshot: { ...snapshot(), sandbox: { ok: true, removed: true, unmanaged: false } } };
     },
     async cloudSaveProfile(payload) {
       record('cloudSaveProfile', payload);
@@ -447,6 +466,8 @@ try {
     userDataDir: tempDir,
   });
   const page = await browser.newPage();
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
   await page.evaluateOnNewDocument(cloudMock);
   await page.goto(viteUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
@@ -838,7 +859,35 @@ try {
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
   console.log('  PASS a stranded sandbox is removable from the failure screen');
 
+  await page.evaluate(() => window.__cloudHarness.clearCalls());
+  await openChoice(page);
+  await chooseMode(page, 'app-hosted');
+  await clickButton(page, '서버 만들기');
+  await waitForTitle(page, '앱 제공 서버가 준비되었습니다');
+  await page.evaluate(() => window.__cloudHarness.setSandboxUnmanaged('rauhwpx-4.up.railway.app'));
+  await clickButton(page, '상태 확인');
+  await waitForTitle(page, '앱 제공 서버를 준비하지 못했습니다');
+  assert.match(
+    await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent),
+    /이 앱이 관리할 수 없는 샌드박스입니다/,
+  );
+  assert.match(
+    await page.$eval('.ag-cloud-setup-callout p', (node) => node.textContent),
+    /공급자 콘솔에서 남은 서버를 직접 삭제하세요/,
+  );
+  await clickButton(page, '서버 종료');
+  await waitForTitle(page, 'Cloud 서버 선택');
+  // 원격 서버가 남았다는 사실을 숨기면 사용자는 계속 요금을 낸다.
+  assert.match(
+    await page.$eval('.ag-cloud-setup-live', (node) => node.textContent),
+    /남은 서버는 공급자 콘솔에서 직접 삭제하세요/,
+  );
+  await clickButton(page, '취소');
+  await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
+  console.log('  PASS an unmanageable sandbox is released and the leftover server is disclosed');
+
   assert.equal(await page.evaluate(() => typeof window.rhwpDesktop.onCloudEvent), 'function');
+  assert.deepEqual(pageErrors, [], '온보딩 도중 잡히지 않은 예외가 없어야 한다');
   console.log('  PASS the desktop event bridge remains attached throughout onboarding');
 } finally {
   await browser?.close().catch(() => {});

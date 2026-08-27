@@ -408,11 +408,16 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
   if (raw.takeover !== undefined && !takeover) return null;
   const server = parseServer(raw.server, profile);
   if (!server) return null;
+  const sandboxOutcome = record(raw.sandbox);
+  const sandbox = sandboxOutcome
+    ? { removed: sandboxOutcome.removed === true, unmanaged: sandboxOutcome.unmanaged === true }
+    : undefined;
   return {
     revision,
     available: raw.available,
     profile,
     server,
+    ...(sandbox ? { sandbox } : {}),
     lease,
     session,
     sessions: sessions as Exclude<CloudSessionState, { kind: 'idle' }>[],

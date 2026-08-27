@@ -158,6 +158,18 @@ test('the parser keeps app sandboxes, user hosts, and legacy snapshots apart', (
     ...base,
     server: { mode: null, preferredMode: null, providers: [{ providerId: '' }], lifecycle: 'idle', message: null },
   }), null);
+
+  // 철거가 원격 서버를 실제로 지웠는지는 사용자에게 알려야 한다.
+  const idleServer = { mode: null, preferredMode: null, providers: [], lifecycle: 'idle', message: null };
+  assert.deepEqual(
+    parseCloudSnapshot({ ...base, server: idleServer, sandbox: { ok: true, removed: false, unmanaged: true } })?.sandbox,
+    { removed: false, unmanaged: true },
+  );
+  assert.deepEqual(
+    parseCloudSnapshot({ ...base, server: idleServer, sandbox: { ok: true, removed: true } })?.sandbox,
+    { removed: true, unmanaged: false },
+  );
+  assert.equal(parseCloudSnapshot({ ...base, server: idleServer })?.sandbox, undefined);
   assert.equal(parseCloudSnapshot({
     ...base,
     profile: {
@@ -334,6 +346,13 @@ test('app server failures read as something the user can act on', () => {
   assert.equal(mapSandboxIssue(new Error('App sandbox failed identity verification')).title, '샌드박스 ID를 확인하지 못했습니다');
   assert.equal(mapSandboxIssue(new Error('something else')).title, '앱 제공 서버를 준비하지 못했습니다');
 
+  // 이 빌드가 다룰 수 없는 샌드박스는 종료로 연결을 놓고 콘솔에서 직접 지워야 한다.
+  const unmanaged = mapSandboxIssue(new Error(
+    'This app cannot manage the railway sandbox at sandbox-1.up.railway.app. Release it here, then delete the server in the provider console.',
+  ));
+  assert.equal(unmanaged.title, '이 앱이 관리할 수 없는 샌드박스입니다');
+  assert.match(unmanaged.guidance, /공급자 콘솔/);
+
   // 내 서버로 옮기려다 막힌 사용자는 SSH 오류가 아니라 샌드박스 종료 안내를 받아야 한다.
   assert.equal(
     mapCloudSetupIssue(new Error('Shut down the app-provided sandbox before connecting your own server.')).title,
@@ -351,6 +370,7 @@ test('the dialog offers both servers and every sandbox action', () => {
   assert.match(onboarding, /controller\.spawnSandbox\(providerId\)/);
   assert.match(onboarding, /controller\.teardownSandbox\(\)/);
   assert.match(onboarding, /controller\.sandboxStatus\(\)/);
+  assert.match(onboarding, /남은 서버는 공급자 콘솔에서 직접 삭제하세요/);
   assert.match(onboarding, /'앱 제공 서버를 종료하지 못했습니다'\n\s*: '앱 제공 서버를 준비하지 못했습니다'/);
   assert.match(onboarding, /운영자가 \$\{provider\.missingConfig\.join\(', '\)\}/);
   assert.match(onboarding, /state\.kind !== 'sandbox-intro' && state\.kind !== 'sandbox-failed'/);
