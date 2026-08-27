@@ -255,4 +255,9 @@ test('the app sandbox image runs the control plane with the local runner and a b
   assert.match(entrypoint, /provider login "\$provider" --api-key-stdin/);
   // 자격 증명은 stdin으로만 넘긴다. 명령줄 인자는 컨테이너 안에서 ps로 보인다.
   assert.doesNotMatch(entrypoint, /--api-key[= ]\$/);
+
+  // 릴리스가 이미지를 만들지 않으면 앱 제공 경로는 배포되지 않은 이미지를 가리킨다.
+  const workflow = await fs.readFile(new URL('../.github/workflows/release.yml', root), 'utf8');
+  assert.match(workflow, /podman build --tag rauhwpx-cloud-sandbox-release --file cloud\/install\/Containerfile\.sandbox cloud/);
+  assert.match(workflow, /sandbox image must use the local runner/);
 });

@@ -344,6 +344,17 @@ jobs:
           podman run --rm --user 1000:1000 --entrypoint node \
             rauhwpx-cloud-worker-release /app/document-runtime/smoke.mjs
 
+      # 앱 제공 샌드박스 이미지는 컨트롤 플레인과 워커를 한 컨테이너에서 돌린다.
+      - name: Build and smoke-test app sandbox image
+        run: |
+          podman build --tag rauhwpx-cloud-sandbox-release --file cloud/install/Containerfile.sandbox cloud
+          podman run --rm --entrypoint node rauhwpx-cloud-sandbox-release \
+            --input-type=module -e 'import { parseConfig } from "/app/src/config.mjs";
+          const config = parseConfig(process.env);
+          if (config.runner !== "local") throw new Error("sandbox image must use the local runner");
+          if (config.workerUid !== 1001) throw new Error("sandbox image must drop workers to uid 1001");
+          console.log(JSON.stringify({ runner: config.runner, workerUid: config.workerUid }));'
+
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
