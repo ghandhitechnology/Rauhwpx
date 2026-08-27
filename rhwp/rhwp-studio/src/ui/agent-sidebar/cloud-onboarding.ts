@@ -433,7 +433,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
           draft,
           intent,
           issue: mapSandboxIssue(new Error(next.server.message ?? 'App sandbox is not ready')),
-          retryable: true,
+          phase: 'spawn',
         }, '앱 제공 서버를 준비하지 못했습니다.');
         return;
       }
@@ -448,7 +448,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         draft,
         intent,
         issue: mapSandboxIssue(error),
-        retryable: true,
+        phase: 'spawn',
       }, '앱 제공 서버를 준비하지 못했습니다.');
     }
   }
@@ -471,8 +471,27 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         draft,
         intent,
         issue: mapSandboxIssue(error),
-        retryable: false,
+        phase: 'teardown',
       }, '앱 제공 서버를 종료하지 못했습니다.');
+    }
+  }
+
+  /** 공급자에게 직접 물어 화면을 되살린다. 실패 화면에 갇힌 사용자가 앱을 다시 시작하지 않아도 되게 한다. */
+  async function refreshSandbox(): Promise<void> {
+    if (!state || (state.kind !== 'sandbox-ready' && state.kind !== 'sandbox-failed')) return;
+    const { intent } = state;
+    const draft = state.kind === 'sandbox-failed' ? state.draft : defaultCloudProfileDraft(snapshotProfile(snapshot));
+    const phase = state.kind === 'sandbox-failed' ? state.phase : 'spawn';
+    const operation = beginOperation();
+    liveStatus.textContent = '앱 제공 서버 상태를 확인하고 있습니다.';
+    try {
+      const next = await deps.controller.sandboxStatus();
+      if (!operationIsCurrent(operation)) return;
+      setState(createCloudSetupState(next, intent), '앱 제공 서버 상태를 확인했습니다.');
+    } catch (error) {
+      if (!operationIsCurrent(operation)) return;
+      setState({ kind: 'sandbox-failed', draft, intent, issue: mapSandboxIssue(error), phase },
+        '앱 제공 서버 상태를 확인하지 못했습니다.');
     }
   }
 
@@ -591,29 +610,42 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       );
       footer.append(cancel);
     } else if (state.kind === 'sandbox-failed') {
-      const { draft, intent, issue, retryable } = state;
-      title.textContent = '앱 제공 서버를 준비하지 못했습니다';
+      const { draft, intent, issue, phase } = state;
+      const live = Boolean(snapshotSandbox(snapshot));
+      title.textContent = phase === 'teardown'
+        ? '앱 제공 서버를 종료하지 못했습니다'
+        : '앱 제공 서버를 준비하지 못했습니다';
       body.append(
-        description('다시 시도하거나 내 서버를 연결해 계속할 수 있습니다.'),
+        description(phase === 'teardown'
+          ? '샌드박스가 아직 남아 있습니다. 문제를 해결한 뒤 다시 종료하세요.'
+          : '다시 시도하거나 내 서버를 연결해 계속할 수 있습니다.'),
         callout('cloud', issue.title, issue.guidance),
         issueDetails(issue),
       );
-      const useOwn = button('내 서버 사용');
-      useOwn.addEventListener('click', () => setState({ kind: 'intro', draft, intent }));
-      footer.append(cancel, useOwn);
-      if (snapshotSandbox(snapshot)) {
-        const teardown = button('서버 종료', 'danger');
+      footer.append(cancel);
+      const refresh = button('상태 확인');
+      refresh.addEventListener('click', () => { void refreshSandbox(); });
+      if (phase === 'teardown') {
+        footer.append(refresh);
+        const teardown = button('다시 종료', 'danger');
         teardown.addEventListener('click', () => { void teardownSandbox(); });
         footer.append(teardown);
-      }
-      if (retryable) {
-        const retry = button('다시 시도', 'primary');
-        retry.addEventListener('click', () => { void spawnSandbox(); });
-        footer.append(retry);
-      } else {
         const backToChoice = button('서버 다시 선택', 'primary');
         backToChoice.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
         footer.append(backToChoice);
+      } else {
+        const useOwn = button('내 서버 사용');
+        useOwn.addEventListener('click', () => setState({ kind: 'intro', draft, intent }));
+        footer.append(useOwn);
+        if (live) {
+          footer.append(refresh);
+          const teardown = button('서버 종료', 'danger');
+          teardown.addEventListener('click', () => { void teardownSandbox(); });
+          footer.append(teardown);
+        }
+        const retry = button('다시 시도', 'primary');
+        retry.addEventListener('click', () => { void spawnSandbox(); });
+        footer.append(retry);
       }
     } else if (state.kind === 'sandbox-ready') {
       const { intent, name, sandbox } = state;
@@ -625,8 +657,11 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       if (snapshot.server.message) {
         body.appendChild(callout('cloud', '서버 상태', snapshot.server.message));
       }
+      const refresh = button('상태 확인');
+      refresh.addEventListener('click', () => { void refreshSandbox(); });
       const teardown = button('서버 종료', 'danger');
       teardown.addEventListener('click', () => { void teardownSandbox(); });
+      footer.append(refresh);
       const primary = button(intent === 'transfer' ? 'Cloud로 계속' : '완료', 'primary');
       primary.addEventListener('click', () => {
         if (intent === 'transfer') {

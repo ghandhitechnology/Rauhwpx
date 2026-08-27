@@ -277,7 +277,7 @@ test('a configured server skips the choice and lands on its own screen', () => {
 
   const failed = createCloudSetupState(appHosted('error'), 'manage');
   assert.equal(failed.kind, 'sandbox-failed');
-  assert.equal(failed.kind === 'sandbox-failed' ? failed.retryable : null, true);
+  assert.equal(failed.kind === 'sandbox-failed' ? failed.phase : null, 'spawn');
   assert.equal(failed.kind === 'sandbox-failed' ? failed.issue.title : null, '샌드박스를 시작하지 못했습니다');
 });
 
@@ -350,6 +350,8 @@ test('the dialog offers both servers and every sandbox action', () => {
   assert.match(onboarding, /controller\.selectServerMode\(mode\)/);
   assert.match(onboarding, /controller\.spawnSandbox\(providerId\)/);
   assert.match(onboarding, /controller\.teardownSandbox\(\)/);
+  assert.match(onboarding, /controller\.sandboxStatus\(\)/);
+  assert.match(onboarding, /'앱 제공 서버를 종료하지 못했습니다'\n\s*: '앱 제공 서버를 준비하지 못했습니다'/);
   assert.match(onboarding, /운영자가 \$\{provider\.missingConfig\.join\(', '\)\}/);
   assert.match(onboarding, /state\.kind !== 'sandbox-intro' && state\.kind !== 'sandbox-failed'/);
   assert.match(onboarding, /kind: 'sandbox-provisioning'/);

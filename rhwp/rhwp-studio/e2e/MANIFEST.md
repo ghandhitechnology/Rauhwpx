@@ -33,7 +33,7 @@ e2e 스크립트의 **단일 권위 목록**이다. 파일 추가/변경/폐기 
 | `body-outside-click-fallback.test.mjs` | 진단 | hold | 보류 ② 본문 외곽 클릭 fallback 결함 — 가설 (b) master page 글상자 hit 확정 e2e | hwpctl_Action_Table__v1.1.hwp | 수동 | legacy-name · 보류② 이슈 종속 |
 | `canvas-render-diff.test.mjs` | 상시 | active | Browser canvas visual diff between the legacy PageRenderTree path  | — | npm+CI |  |
 | `canvaskit-font-coverage.test.mjs` | 상시 | active | CanvasKit 번들 폰트 등록/커버리지 검증 (NotoSansKR) | — | npm+CI |  |
-| `cloud-onboarding.test.mjs` | 상시 | active | Cloud VPS 온보딩: Tailscale 기본 경로 / 공개 HTTPS 고급 설정 / 검증·재시도 / 트랜잭션 설치·페어링 / 비동기 경합 / 포커스 격리 / 반응형 레이아웃 | — | npm e2e:cloud-onboarding | Linux 호환 Chromium 경로 |
+| `cloud-onboarding.test.mjs` | 상시 | active | Cloud 온보딩: 서버 방식 선택 / 앱 제공 샌드박스 생성·상태·종료 / 내 VPS Tailscale 기본 경로 / 공개 HTTPS 고급 설정 / 검증·재시도 / 트랜잭션 설치·페어링 / 비동기 경합 / 포커스 격리 / 반응형 레이아웃 | — | npm e2e:cloud-onboarding | Linux 호환 Chromium 경로 |
 | `command-palette.test.mjs` | 상시 | active | /커맨드 팔레트 | — | 수동 |  |
 | `copy-paste.test.mjs` | 상시 | active | 텍스트 블럭 복사/붙여넣기 버그 (Task 227) | — | 수동 |  |
 | `debug-pagination.mjs` | 진단 | active | E2E 디버그: 50줄 입력 후 페이지네이션 확인 | — | 수동 | 수동 디버그 |

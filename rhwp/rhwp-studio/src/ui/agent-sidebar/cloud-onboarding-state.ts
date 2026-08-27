@@ -26,6 +26,9 @@ export interface CloudSetupIssue {
   detail: string;
 }
 
+/** 실패한 단계가 남은 자원을 결정한다. 생성 실패는 남긴 것이 없고, 종료 실패는 유료 샌드박스를 남긴다. */
+export type SandboxFailurePhase = 'spawn' | 'teardown';
+
 export type CloudSetupState =
   | { kind: 'choose'; draft: CloudProfileDraft; intent: CloudSetupIntent; mode: CloudServerMode }
   | {
@@ -46,7 +49,7 @@ export type CloudSetupState =
       draft: CloudProfileDraft;
       intent: CloudSetupIntent;
       issue: CloudSetupIssue;
-      retryable: boolean;
+      phase: SandboxFailurePhase;
     }
   | {
       kind: 'sandbox-ready';
@@ -350,7 +353,7 @@ function entryState(snapshot: CloudSnapshot, intent: CloudSetupIntent, fallback?
       draft: defaultCloudProfileDraft(fallback),
       intent,
       issue: mapSandboxIssue(new Error(detail ?? 'App sandbox is not ready')),
-      retryable: true,
+      phase: 'spawn',
     };
   }
   const profile = snapshotProfile(snapshot);

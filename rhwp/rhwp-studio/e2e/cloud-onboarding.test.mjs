@@ -115,10 +115,51 @@ async function waitForTitle(page, title) {
   );
 }
 
-async function openCloud(page) {
+async function openChoice(page) {
   await page.click('#agent-sidebar .ag-cloud-btn');
   await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
+  await waitForTitle(page, 'Cloud 서버 선택');
+}
+
+async function chooseMode(page, mode) {
+  await page.click(`.ag-cloud-setup-option[data-server-mode="${mode}"]`);
+  await page.waitForFunction(
+    (value) => document.querySelector(`.ag-cloud-setup-option[data-server-mode="${value}"]`)
+      ?.getAttribute('aria-checked') === 'true',
+    { timeout: 10_000 },
+    mode,
+  );
+  await clickButton(page, '계속');
+}
+
+async function openCloud(page) {
+  await openChoice(page);
+  await chooseMode(page, 'self-hosted');
   await waitForTitle(page, '내 VPS에서 Cloud 시작하기');
+}
+
+async function manageCloud(page) {
+  await page.click('#agent-sidebar .ag-settings-btn');
+  await page.waitForFunction(() => document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'));
+  await page.click('#ag-settings-tab-connections');
+  await page.waitForFunction(
+    () => document.querySelector('#ag-settings-tab-connections')?.getAttribute('aria-selected') === 'true',
+  );
+  await page.click('.ag-cloud-settings-action');
+  await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
+}
+
+async function closeSettings(page) {
+  await page.click('#agent-sidebar .ag-settings-close');
+  await page.waitForFunction(() => !document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'));
+}
+
+async function settingsCard(page) {
+  return await page.evaluate(() => ({
+    status: document.querySelector('.ag-cloud-settings-status')?.textContent?.trim() ?? '',
+    detail: document.querySelector('.ag-cloud-settings-detail')?.textContent?.trim() ?? '',
+    action: document.querySelector('.ag-cloud-settings-action')?.textContent?.trim() ?? '',
+  }));
 }
 
 async function assertResponsiveDialog(page, viewport) {
@@ -156,26 +197,60 @@ async function assertResponsiveDialog(page, viewport) {
 
 function cloudMock() {
   const calls = [];
+  const railway = { providerId: 'railway', displayName: 'Railway', configured: true, missingConfig: [] };
   let revision = 0;
   let profile = null;
+  let sandbox = null;
   let connection = 'unknown';
   let testFailures = 0;
   let testDelays = [];
   let listener = null;
+  let providers = [{ ...railway }];
+  let preferredMode = null;
+  let lifecycle = 'idle';
+  let serverMessage = null;
+  let spawnFailures = 0;
+  let spawnError = 'Railway deployment reports crashed';
+  let spawnLeavesSandbox = false;
+  let teardownError = null;
+  let sandboxSeq = 0;
 
   const wait = () => new Promise((resolve) => setTimeout(resolve, 80));
+  const profileState = () => {
+    if (sandbox) {
+      return {
+        kind: 'configured',
+        mode: 'app-hosted',
+        name: sandbox.displayName,
+        sandbox: structuredClone(sandbox),
+        connection,
+        serviceVersion: connection === 'ready' ? '1.0.0-e2e' : null,
+        message: null,
+      };
+    }
+    if (profile) {
+      return {
+        kind: 'configured',
+        mode: 'self-hosted',
+        profile: structuredClone(profile),
+        connection,
+        serviceVersion: connection === 'ready' ? '1.0.0-e2e' : null,
+        message: null,
+      };
+    }
+    return { kind: 'unconfigured' };
+  };
   const snapshot = () => ({
     revision: ++revision,
     available: true,
-    profile: profile
-      ? {
-          kind: 'configured',
-          profile: structuredClone(profile),
-          connection,
-          serviceVersion: connection === 'ready' ? '1.0.0-e2e' : null,
-          message: null,
-        }
-      : { kind: 'unconfigured' },
+    profile: profileState(),
+    server: {
+      mode: sandbox ? 'app-hosted' : profile ? 'self-hosted' : null,
+      preferredMode,
+      providers: structuredClone(providers),
+      lifecycle,
+      message: serverMessage,
+    },
     lease: { owner: 'local' },
     session: { kind: 'idle' },
     sessions: [],
@@ -202,8 +277,27 @@ function cloudMock() {
     },
     setUnconfigured() {
       profile = null;
+      sandbox = null;
       connection = 'unknown';
+      lifecycle = 'idle';
+      serverMessage = null;
+      preferredMode = null;
       publish();
+    },
+    setProviders(next) {
+      providers = structuredClone(next);
+      publish();
+    },
+    setSpawnFailures(count, message, { leavesSandbox = false } = {}) {
+      spawnFailures = count;
+      spawnLeavesSandbox = leavesSandbox;
+      if (message) spawnError = message;
+    },
+    setTeardownError(message) {
+      teardownError = message;
+    },
+    serverState() {
+      return { preferredMode, lifecycle, mode: sandbox ? 'app-hosted' : profile ? 'self-hosted' : null };
     },
   };
 
@@ -211,6 +305,74 @@ function cloudMock() {
     platform: 'linux',
     async cloudGetState(payload) {
       record('cloudGetState', payload);
+      return { snapshot: snapshot() };
+    },
+    async cloudSelectServerMode(payload) {
+      record('cloudSelectServerMode', payload);
+      preferredMode = payload.mode;
+      return { snapshot: snapshot() };
+    },
+    async cloudSpawnSandbox(payload) {
+      record('cloudSpawnSandbox', payload);
+      if (sandbox) return { snapshot: snapshot() };
+      lifecycle = 'provisioning';
+      serverMessage = null;
+      publish();
+      await wait();
+      if (spawnFailures > 0) {
+        spawnFailures -= 1;
+        if (spawnLeavesSandbox) {
+          sandboxSeq += 1;
+          sandbox = {
+            providerId: payload.providerId ?? 'railway',
+            sandboxId: `sbx-${sandboxSeq}`,
+            displayName: `앱 제공 서버 ${sandboxSeq}`,
+            region: 'us-west2',
+            host: `rauhwpx-${sandboxSeq}.up.railway.app`,
+            createdAt: new Date(1_700_000_000_000).toISOString(),
+          };
+          connection = 'error';
+        }
+        lifecycle = 'error';
+        serverMessage = spawnError;
+        publish();
+        throw new Error(spawnError);
+      }
+      sandboxSeq += 1;
+      sandbox = {
+        providerId: payload.providerId ?? 'railway',
+        sandboxId: `sbx-${sandboxSeq}`,
+        displayName: `앱 제공 서버 ${sandboxSeq}`,
+        region: 'us-west2',
+        host: `rauhwpx-${sandboxSeq}.up.railway.app`,
+        createdAt: new Date(1_700_000_000_000).toISOString(),
+      };
+      connection = 'ready';
+      lifecycle = 'ready';
+      serverMessage = null;
+      preferredMode = 'app-hosted';
+      return { snapshot: snapshot() };
+    },
+    async cloudSandboxStatus() {
+      record('cloudSandboxStatus');
+      return { snapshot: snapshot() };
+    },
+    async cloudTeardownSandbox(payload) {
+      record('cloudTeardownSandbox', payload);
+      // 진행 중인 작업이 있으면 수명주기를 건드리기 전에 거절한다. 데스크톱 조정자와 같은 순서다.
+      if (teardownError && payload.force !== true) {
+        const message = teardownError;
+        teardownError = null;
+        throw new Error(message);
+      }
+      lifecycle = 'tearing-down';
+      publish();
+      await wait();
+      sandbox = null;
+      connection = 'unknown';
+      lifecycle = 'idle';
+      serverMessage = null;
+      preferredMode = null;
       return { snapshot: snapshot() };
     },
     async cloudSaveProfile(payload) {
@@ -232,8 +394,10 @@ function cloudMock() {
     async cloudProvision(payload) {
       record('cloudProvision', payload);
       await wait();
+      if (sandbox) throw new Error('Shut down the app-provided sandbox before connecting your own server.');
       profile = structuredClone(payload.profile);
       connection = 'ready';
+      preferredMode = 'self-hosted';
       return { snapshot: snapshot() };
     },
     async cloudPair(payload) {
@@ -241,6 +405,7 @@ function cloudMock() {
       await wait();
       profile = structuredClone(payload.profile);
       connection = 'ready';
+      preferredMode = 'self-hosted';
       return { snapshot: snapshot() };
     },
     async cloudSetTransferIntent(payload) {
@@ -297,7 +462,47 @@ try {
 
   console.log('Cloud onboarding E2E');
 
+  assert.deepEqual(await settingsCard(page), {
+    status: '설정되지 않음',
+    detail: '앱 제공 서버 또는 내 서버에서 에이전트를 계속 실행합니다.',
+    action: '설정',
+  });
+  await openChoice(page);
+  assert.deepEqual(
+    await page.$$eval('.ag-cloud-setup-option', (nodes) => nodes.map((node) => ({
+      mode: node.dataset.serverMode,
+      heading: node.querySelector('strong')?.textContent?.trim(),
+      note: node.querySelector('.ag-cloud-setup-option-note')?.textContent?.trim(),
+      checked: node.getAttribute('aria-checked'),
+    }))),
+    [
+      { mode: 'app-hosted', heading: '앱에서 제공하는 서버', note: 'Railway 사용 가능', checked: 'true' },
+      { mode: 'self-hosted', heading: '내 서버 사용', note: 'SSH와 비밀번호 없는 sudo가 필요합니다', checked: 'false' },
+    ],
+  );
+  assert.equal(await page.$eval('.ag-cloud-setup-options', (node) => node.getAttribute('role')), 'radiogroup');
+  await page.evaluate(() => window.__cloudHarness.clearCalls());
+  await page.click('.ag-cloud-setup-option[data-server-mode="self-hosted"]');
+  await page.waitForFunction(() => document.querySelector('.ag-cloud-setup-option[data-server-mode="self-hosted"]')?.getAttribute('aria-checked') === 'true');
+  assert.deepEqual(
+    await page.evaluate(() => window.__cloudHarness.calls.filter((call) => call.method === 'cloudSelectServerMode').map((call) => call.payload)),
+    [{ mode: 'self-hosted' }],
+  );
+  assert.equal(await page.evaluate(() => window.__cloudHarness.serverState().preferredMode), 'self-hosted');
+  await clickButton(page, '취소');
+  await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
+  await page.evaluate(() => window.__cloudHarness.setUnconfigured());
+  console.log('  PASS the server choice offers both modes and persists the selection');
+
   await openCloud(page);
+  await clickButton(page, '뒤로');
+  await waitForTitle(page, 'Cloud 서버 선택');
+  assert.equal(
+    await page.$eval('.ag-cloud-setup-option[data-server-mode="self-hosted"]', (node) => node.getAttribute('aria-checked')),
+    'true',
+  );
+  await chooseMode(page, 'self-hosted');
+  await waitForTitle(page, '내 VPS에서 Cloud 시작하기');
   assert.match(await page.$eval('.ag-cloud-setup-description', (node) => node.textContent), /앱을 닫아도 에이전트는 계속 작업/);
   assert.equal(await page.$$eval('.ag-cloud-setup-requirements li', (nodes) => nodes.length), 3);
   console.log('  PASS intro explains the private VPS journey');
@@ -478,6 +683,160 @@ try {
     },
   );
   console.log('  PASS existing environments validate identity and activate transactionally');
+
+  await clickButton(page, 'Cloud로 계속');
+  await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
+  await page.evaluate(() => {
+    window.__cloudHarness.setUnconfigured();
+    window.__cloudHarness.setProviders([
+      { providerId: 'railway', displayName: 'Railway', configured: false, missingConfig: ['RAILWAY_TOKEN', 'RAILWAY_PROJECT_ID'] },
+    ]);
+    window.__cloudHarness.clearCalls();
+  });
+  await openChoice(page);
+  assert.equal(
+    await page.$eval('.ag-cloud-setup-option[data-server-mode="app-hosted"] .ag-cloud-setup-option-note', (node) => node.textContent.trim()),
+    '이 빌드에서는 아직 사용할 수 없습니다',
+  );
+  assert.equal(
+    await page.$eval('.ag-cloud-setup-option[data-server-mode="self-hosted"]', (node) => node.getAttribute('aria-checked')),
+    'true',
+  );
+  await chooseMode(page, 'app-hosted');
+  await waitForTitle(page, '앱 제공 서버를 사용할 수 없습니다');
+  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /Railway 설정 필요/);
+  assert.match(await page.$eval('.ag-cloud-setup-callout p', (node) => node.textContent), /RAILWAY_TOKEN, RAILWAY_PROJECT_ID/);
+  assert.equal(await page.evaluate(() => window.__cloudHarness.calls.some((call) => call.method === 'cloudSpawnSandbox')), false);
+  await clickButton(page, '내 서버 사용');
+  await waitForTitle(page, '내 VPS에서 Cloud 시작하기');
+  await clickButton(page, '뒤로');
+  await waitForTitle(page, 'Cloud 서버 선택');
+  await clickButton(page, '취소');
+  await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
+  console.log('  PASS an unconfigured app provider fails loudly and offers the private VPS path');
+
+  await page.evaluate(() => {
+    window.__cloudHarness.setProviders([
+      { providerId: 'railway', displayName: 'Railway', configured: true, missingConfig: [] },
+    ]);
+    window.__cloudHarness.setSpawnFailures(1, 'Railway deployment reports crashed');
+    window.__cloudHarness.clearCalls();
+  });
+  await openChoice(page);
+  assert.equal(
+    await page.$eval('.ag-cloud-setup-option[data-server-mode="app-hosted"]', (node) => node.getAttribute('aria-checked')),
+    'true',
+  );
+  await clickButton(page, '계속');
+  await waitForTitle(page, '앱 제공 서버 사용');
+  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /Railway/);
+  await clickButton(page, '뒤로');
+  await waitForTitle(page, 'Cloud 서버 선택');
+  await clickButton(page, '계속');
+  await waitForTitle(page, '앱 제공 서버 사용');
+  await clickButton(page, '서버 만들기');
+  await waitForTitle(page, '앱 제공 서버 준비 중');
+  await waitForTitle(page, '앱 제공 서버를 준비하지 못했습니다');
+  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /샌드박스를 시작하지 못했습니다/);
+  assert.match(await page.$eval('.ag-cloud-setup-technical pre', (node) => node.textContent), /reports crashed/);
+  assert.deepEqual(
+    await page.evaluate(() => window.__cloudHarness.calls.filter((call) => call.method === 'cloudSpawnSandbox').map((call) => call.payload)),
+    [{ providerId: 'railway' }],
+  );
+  console.log('  PASS a failed sandbox spawn reports the provider detail and stays recoverable');
+
+  assert.deepEqual(
+    await page.$$eval('.ag-cloud-setup-footer button', (nodes) => nodes.map((node) => node.textContent.trim())),
+    ['취소', '내 서버 사용', '다시 시도'],
+  );
+  await clickButton(page, '다시 시도');
+  await waitForTitle(page, '앱 제공 서버 준비 중');
+  await waitForTitle(page, '앱 제공 서버가 준비되었습니다');
+  assert.match(await page.$eval('.ag-cloud-setup-callout p', (node) => node.textContent), /rauhwpx-1\.up\.railway\.app/);
+  assert.deepEqual(await settingsCard(page), {
+    status: '연결됨',
+    detail: '앱 제공 서버 · 앱 제공 서버 1, rauhwpx-1.up.railway.app',
+    action: '관리',
+  });
+  await page.click('.ag-cloud-setup-close');
+  await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
+  await manageCloud(page);
+  await waitForTitle(page, '앱 제공 서버가 준비되었습니다');
+  console.log('  PASS retry provisions the sandbox and the stored choice skips the picker');
+
+  await page.evaluate(() => {
+    window.__cloudHarness.setTeardownError('Finish or cancel the cloud work on this sandbox before shutting it down.');
+    window.__cloudHarness.clearCalls();
+  });
+  await clickButton(page, '서버 종료');
+  await waitForTitle(page, '앱 제공 서버를 종료하지 못했습니다');
+  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /진행 중인 클라우드 작업이 있습니다/);
+  assert.deepEqual(
+    await page.evaluate(() => window.__cloudHarness.calls.filter((call) => call.method === 'cloudTeardownSandbox').map((call) => call.payload)),
+    [{ force: false }],
+  );
+  assert.deepEqual(
+    await page.$$eval('.ag-cloud-setup-footer button', (nodes) => nodes.map((node) => node.textContent.trim())),
+    ['취소', '상태 확인', '다시 종료', '서버 다시 선택'],
+  );
+  await clickButton(page, '상태 확인');
+  await waitForTitle(page, '앱 제공 서버가 준비되었습니다');
+  assert.equal(await page.evaluate(() => window.__cloudHarness.calls.some((call) => call.method === 'cloudSandboxStatus')), true);
+  console.log('  PASS a refused teardown keeps the sandbox and the status check restores the ready screen');
+
+  await page.evaluate(() => window.__cloudHarness.clearCalls());
+  await clickButton(page, '서버 종료');
+  await waitForTitle(page, '앱 제공 서버 종료 중');
+  await waitForTitle(page, 'Cloud 서버 선택');
+  assert.deepEqual(await settingsCard(page), {
+    status: '설정되지 않음',
+    detail: '앱 제공 서버 또는 내 서버에서 에이전트를 계속 실행합니다.',
+    action: '설정',
+  });
+  await clickButton(page, '취소');
+  await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
+  await closeSettings(page);
+  console.log('  PASS teardown releases the sandbox and returns the user to the server choice');
+
+  await page.evaluate(() => {
+    window.__cloudHarness.setSpawnFailures(1, 'App sandbox failed identity verification', { leavesSandbox: true });
+    window.__cloudHarness.clearCalls();
+  });
+  await openChoice(page);
+  await chooseMode(page, 'app-hosted');
+  await waitForTitle(page, '앱 제공 서버 사용');
+  await clickButton(page, '서버 만들기');
+  await waitForTitle(page, '앱 제공 서버를 준비하지 못했습니다');
+  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /샌드박스 ID를 확인하지 못했습니다/);
+  assert.deepEqual(
+    await page.$$eval('.ag-cloud-setup-footer button', (nodes) => nodes.map((node) => node.textContent.trim())),
+    ['취소', '내 서버 사용', '상태 확인', '서버 종료', '다시 시도'],
+  );
+  for (const viewport of [{ width: 375, height: 667 }, { width: 1280, height: 800 }]) {
+    await assertResponsiveDialog(page, viewport);
+  }
+  await clickButton(page, '내 서버 사용');
+  await waitForTitle(page, '내 VPS에서 Cloud 시작하기');
+  await clickButton(page, 'VPS 연결');
+  await fillInput(page, 'VPS 주소', 'second-vps.tailnet.ts.net');
+  await clickButton(page, '연결 확인');
+  await waitForTitle(page, '연결할 수 있습니다');
+  await clickButton(page, 'Cloud 환경 설치');
+  await waitForTitle(page, 'Cloud 설정을 마치지 못했습니다');
+  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /앱 샌드박스를 먼저 종료하세요/);
+  console.log('  PASS a live app sandbox blocks a self-hosted install instead of leaking a paid server');
+
+  await page.click('.ag-cloud-setup-close');
+  await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
+  await page.click('#agent-sidebar .ag-cloud-btn');
+  await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
+  await waitForTitle(page, '앱 제공 서버를 준비하지 못했습니다');
+  await clickButton(page, '서버 종료');
+  await waitForTitle(page, '앱 제공 서버 종료 중');
+  await waitForTitle(page, 'Cloud 서버 선택');
+  await clickButton(page, '취소');
+  await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
+  console.log('  PASS a stranded sandbox is removable from the failure screen');
 
   assert.equal(await page.evaluate(() => typeof window.rhwpDesktop.onCloudEvent), 'function');
   console.log('  PASS the desktop event bridge remains attached throughout onboarding');
