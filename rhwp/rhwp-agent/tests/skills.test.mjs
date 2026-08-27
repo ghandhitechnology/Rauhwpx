@@ -28,6 +28,8 @@ test('bundled present-plan skill ends planning through the structured presentati
   assert.equal(parseSkillMarkdown(markdown, 'present-plan').name, 'present-plan');
   assert.match(markdown, /present_implementation_plan/);
   assert.match(markdown, /chat action that opens the plan review sidebar/);
+  assert.match(markdown, /renewed discovery/);
+  assert.doesNotMatch(markdown, /revise the complete plan and present its replacement through the same tool/i);
 
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-required-skill-test-'));
   t.after(() => fs.rm(temp, { recursive: true, force: true }));
@@ -151,6 +153,9 @@ test('Claude unrestricted and Codex profiles change only the permission boundary
   assert.ok(fullCodex.includes('mcp_servers.rhwp.default_tools_approval_mode="auto"'));
   assert.ok(safeCodex.includes('--ignore-user-config'));
   assert.ok(safeCodex.includes('skill_search'));
+  assert.equal(safeCodex.includes('service_tier="fast"'), false);
+  const fastCodex = buildCodexArgv({ ...backendOpts, permissionProfile: 'safe', serviceTier: 'fast' }, null);
+  assert.ok(fastCodex.includes('service_tier="fast"'));
 });
 
 test('Claude sandbox startup errors are surfaced without leaking the hub token', () => {

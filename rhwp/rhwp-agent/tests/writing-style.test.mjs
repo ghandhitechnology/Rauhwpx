@@ -25,13 +25,36 @@ function longKoreanSample() {
   return `${block}\n\n`.repeat(160);
 }
 
+function presencePayload() {
+  return {
+    portrait: '숫자에 기대 단정하고, 길어지면 스스로 자른다.',
+    temperature: '건조하고 조금 성급하다.',
+    unevenness: '문단 길이가 고르지 않고, 어떤 생각은 한 줄로 끝낸다.',
+    stance: '판단을 미루지 않는다. 모르는 것은 모른다고 한다.',
+    refusals: ['추상명사로 문장을 연다', '세 가지로 맞춰 나열한다'],
+  };
+}
+
+function analysisOutput(overrides = {}) {
+  return {
+    enoughSample: true,
+    pageEquivalent: 10,
+    summary: '요약.',
+    unsupportedFiles: [],
+    presence: presencePayload(),
+    axes: axisPayload(),
+    adaptation: [],
+    ...overrides,
+  };
+}
+
 function axisPayload() {
   return STYLE_AXES.map((axis, index) => ({
     axis: axis.id,
     evidenceCount: index === 0 ? 12 : 2,
     observation: `${axis.ko} 관찰입니다.`,
     directives: [`${axis.ko}: 숫자를 먼저 쓰고 판단을 뒤에 붙인다.`],
-    patterns: index === 0 ? ['<수치> 기준으로 <판단>. <조건>이면 <대안>.'] : [],
+    patterns: index === 0 ? ['a figure lands, then a short verdict'] : [],
   }));
 }
 
@@ -46,16 +69,20 @@ test('calibration input rejects unsupported files and accepts authored text', ()
   );
 });
 
-test('calibration prompt asks for writing directives, not a style critique', () => {
+test('calibration prompt asks for a person to inhabit, not a writing specification', () => {
   const checked = validateCalibrationInput({ language: 'en', files: [upload('sample.txt', 'A long sample')] });
   const prompt = buildCalibrationPrompt({ ...checked, metrics: null });
-  assert.match(prompt, /writing\*\* specification/);
-  assert.match(prompt, /not a checklist for grading/);
-  assert.match(prompt, /before\*\* the sentence exists/);
+  assert.match(prompt, /person\*\* a drafting agent will inhabit/);
+  assert.match(prompt, /not a style guide, not a checklist/);
+  assert.match(prompt, /Brief an actor; do not issue a recipe/);
   assert.match(prompt, /never quote more than four consecutive words/);
-  // 프롬프트는 통계 재현이 아니라 글의 결을 우선하도록 요구한다.
-  assert.match(prompt, /## Read for feel first/);
+  assert.match(prompt, /## Soul first/);
+  assert.match(prompt, /`portrait`/);
+  assert.match(prompt, /`refusals`/);
   assert.match(prompt, /profile the one that carries the voice/);
+  assert.match(prompt, /Do not emit anti-AI rules/);
+  assert.doesNotMatch(prompt, /Write directives in the imperative/);
+  assert.match(prompt, /never as a fill-in-the-blank template/);
   for (const axis of STYLE_AXES) assert.ok(prompt.includes(axis.id), `${axis.id} 축이 프롬프트에 있어야 한다`);
 });
 
@@ -63,21 +90,22 @@ test('measured numbers are handed to the model as settled context', () => {
   const checked = validateCalibrationInput({ language: 'ko', files: [upload('sample.txt', 'x')] });
   const metrics = analyzeText(longKoreanSample(), 'ko');
   const prompt = buildCalibrationPrompt({ ...checked, metrics });
-  assert.match(prompt, /These numbers are settled; do not restate, recompute, or contradict them/);
+  assert.match(prompt, /These numbers are a fingerprint, not a recipe/);
   assert.ok(prompt.includes('"sentenceLength"'));
 });
 
-test('style.md is rendered by code with covenant, baselines, and rule strength', () => {
+test('style.md is rendered by code with portrait, covenant, fingerprint, and habit strength', () => {
   const metrics = analyzeText(longKoreanSample(), 'ko');
   const markdown = renderStyleMarkdown({
     language: 'ko',
+    presence: presencePayload(),
     axes: [
       {
         axis: 'sentence_architecture',
         title: STYLE_AXES[0],
         observation: '짧은 단정과 긴 설명을 번갈아 쓴다.',
-        directives: ['수치를 문장 앞에 놓는다.'],
-        patterns: ['<수치> 기준으로 <판단>.'],
+        directives: ['나쁜 소식은 문장이 숨을 곳이 없을 때까지 짧아진다.'],
+        patterns: ['a figure lands, then a short verdict'],
         evidenceCount: 12,
         strength: 'strict',
       },
@@ -98,13 +126,16 @@ test('style.md is rendered by code with covenant, baselines, and rule strength',
     stability: 0.9,
     summary: '짧은 단정형 문장이 반복됩니다.',
   });
+  assert.match(markdown, /## 이 사람/);
+  assert.match(markdown, /숫자에 기대 단정하고/);
   assert.match(markdown, /## 지키는 선/);
   assert.match(markdown, /사실·수치·날짜·고유명사/);
-  assert.match(markdown, /## 기준선 \(원고에서 측정\)/);
-  assert.match(markdown, /문장 길이: 중앙값/);
-  assert.match(markdown, /\*\*기본 규칙\*\*/);
+  assert.match(markdown, /## 지문 \(쓴 뒤에만 본다\)/);
+  assert.match(markdown, /문장 길이 지문: 중앙값/);
+  assert.match(markdown, /\*\*분명한 습관\*\*/);
   assert.match(markdown, /뚜렷한 습관이 보이지 않는다/);
   assert.match(markdown, /표본 신뢰도 high/);
+  assert.doesNotMatch(markdown, /## 작성 지시/);
 });
 
 test('calibration measures the corpus itself and returns a structured profile', async () => {
@@ -119,14 +150,11 @@ test('calibration measures the corpus itself and returns a structured profile', 
         assert.match(prompt, /Korean/);
         assert.ok((await fs.readdir(cwd)).includes('01-essay.txt'));
         return JSON.stringify({
-          structured_output: {
-            enoughSample: true,
+          structured_output: analysisOutput({
             pageEquivalent: 0,
             summary: '간결한 문장과 구체적인 예시가 반복됩니다.',
-            unsupportedFiles: [],
-            axes: axisPayload(),
             adaptation: [{ genre: '이메일', guidance: '인사말은 한 줄로 줄인다.' }],
-          },
+          }),
         });
       },
     },
@@ -139,12 +167,14 @@ test('calibration measures the corpus itself and returns a structured profile', 
   assert.ok(args.includes('model_reasoning_effort="medium"'));
   // 쪽수는 모델의 자기 신고(0)가 아니라 측정값에서 나온다.
   assert.ok(result.pageEstimate >= 10);
-  assert.equal(result.profile.version, 2);
+  assert.equal(result.profile.version, 3);
   assert.ok(result.profile.metrics.sentences > 100);
   assert.equal(result.profile.axes.length, STYLE_AXES.length);
   assert.equal(result.profile.axes[0].strength, 'strict');
   assert.equal(result.profile.axes[1].strength, 'advisory');
-  assert.match(result.markdown, /## 작성 지시/);
+  assert.equal(result.profile.presence.portrait, presencePayload().portrait);
+  assert.match(result.markdown, /## 이 사람/);
+  assert.match(result.markdown, /## 문장에서 하는 일/);
   assert.ok(progress.some((event) => event.phase === 'measuring' && event.completed === 1));
   assert.ok(progress.some((event) => event.phase === 'analyzing' && event.activity === 'model-analysis'));
   assert.ok(progress.every((event) => !('reasoning' in event) && !('thinking' in event)));
@@ -176,10 +206,7 @@ test('binary samples are extracted locally before the single model analysis pass
       run: async (args, prompt) => {
         prompts.push(prompt);
         return JSON.stringify({
-          structured_output: {
-            enoughSample: true, pageEquivalent: 0, summary: '요약.',
-            unsupportedFiles: [], axes: axisPayload(), adaptation: [],
-          },
+          structured_output: analysisOutput({ pageEquivalent: 0, summary: '요약.' }),
         });
       },
     },
@@ -197,10 +224,7 @@ test('a failed extraction degrades to an advisory profile instead of failing', a
       run: async (args) => {
         if (args[args.indexOf('--sandbox') + 1] === 'workspace-write') return JSON.stringify({ structured_output: { files: [{ source: '01-report.hwp', extracted: false, reason: 'unreadable' }] } });
         return JSON.stringify({
-          structured_output: {
-            enoughSample: true, pageEquivalent: 14, summary: '요약.',
-            unsupportedFiles: [], axes: axisPayload(), adaptation: [],
-          },
+          structured_output: analysisOutput({ pageEquivalent: 14, summary: '요약.' }),
         });
       },
     },
@@ -234,10 +258,7 @@ test('Claude calibration uses the selected model and schema-constrained CLI outp
       runClaude: async (args) => {
         argv = args;
         return JSON.stringify({
-          structured_output: {
-            enoughSample: true, pageEquivalent: 10, summary: '요약.',
-            unsupportedFiles: [], axes: axisPayload(), adaptation: [],
-          },
+          structured_output: analysisOutput({ pageEquivalent: 10, summary: '요약.' }),
         });
       },
     },
@@ -266,10 +287,7 @@ test('Pi calibration sends the explicitly selected configured model to OpenRoute
       openRouter: {
         chat: async ({ model }) => {
           requestedModel = model;
-          return JSON.stringify({
-            enoughSample: true, pageEquivalent: 10, summary: '요약.',
-            unsupportedFiles: [], axes: axisPayload(), adaptation: [],
-          });
+          return JSON.stringify(analysisOutput({ pageEquivalent: 10, summary: '요약.' }));
         },
       },
     },
@@ -295,11 +313,20 @@ test('Pi prompt sampling represents every source and the newest appended documen
   assert.match(sample, /NEW_APPEND_MARKER/);
 });
 
+test('analysis structure validation rejects a missing voice portrait', () => {
+  assert.throws(
+    () => validateAnalysisStructure(analysisOutput({
+      presence: { portrait: '', temperature: '', unevenness: '', stance: '', refusals: [] },
+    })),
+    (error) => error?.code === 'INVALID_RESULT' && /incomplete/i.test(error.message),
+  );
+});
+
 test('analysis structure validation rejects a partial seven-axis result', () => {
   assert.throws(
     () => validateAnalysisStructure({
       enoughSample: true, pageEquivalent: 10, summary: '요약', unsupportedFiles: [],
-      axes: axisPayload().slice(0, 6), adaptation: [],
+      presence: presencePayload(), axes: axisPayload().slice(0, 6), adaptation: [],
     }),
     (error) => error?.code === 'INVALID_RESULT' && /seven/i.test(error.message),
   );
@@ -324,8 +351,9 @@ test('writing-style store persists the structured profile and injects generative
   assert.equal(status.additionalInstruction, '');
   assert.equal((await store.profile()).confidence, 'medium');
   const block = await store.promptBlock();
-  assert.match(block, /specification for producing text, not a checklist for grading it/);
-  assert.match(block, /baselines are targets you write toward/);
+  assert.match(block, /person to inhabit, not a specification to satisfy/);
+  assert.match(block, /fingerprint you glance at after a paragraph/);
+  assert.match(block, /Generic polish is the failure mode/);
   assert.match(block, /Precedence/);
   assert.match(block, /Prefer concrete verbs/);
 

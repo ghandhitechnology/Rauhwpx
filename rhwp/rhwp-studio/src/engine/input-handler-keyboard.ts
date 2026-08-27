@@ -1,7 +1,7 @@
 /** input-handler keyboard methods — extracted from InputHandler class */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { InsertTextCommand, InsertLineBreakCommand, InsertTabCommand, SplitParagraphCommand, SplitParagraphInCellCommand, InsertTextInHeaderFooterCommand, SplitParagraphInHeaderFooterCommand, SplitParagraphInFootnoteCommand, DeleteTextInFootnoteCommand, MergeParagraphInFootnoteCommand } from './command';
+import { InsertTextCommand, InsertLineBreakCommand, InsertTabCommand, SplitParagraphCommand, SplitParagraphInCellCommand, InsertTextInHeaderFooterCommand, SplitParagraphInHeaderFooterCommand, SplitParagraphInFootnoteCommand, DeleteTextInFootnoteCommand, MergeParagraphInFootnoteCommand, deleteSelectionImmediate } from './command';
 import { matchShortcut, defaultShortcuts } from '@/command/shortcut-map';
 import * as _connector from './input-handler-connector';
 import {
@@ -13,6 +13,7 @@ import {
 } from './navigation-keymap';
 import type { DocumentPosition, CellBbox, CellPathLike } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
+import { canDeleteObjectControl } from './input-handler-picture';
 
 const RHWP_CLIPBOARD_MARKER_RE = /<!--\s*rhwp-studio-clipboard:([A-Za-z0-9._:-]+)\s*-->/;
 const PAGINATION_BOUNDARY_KEYS = new Set([
@@ -69,6 +70,16 @@ function readRhwpClipboardToken(html: string): string | null {
 function hasCurrentRhwpClipboardMarker(self: any, html: string): boolean {
   const token = readRhwpClipboardToken(html);
   return !!token && token === self.rhwpClipboardToken;
+}
+
+/** Backspace/Delete로 생긴 캐럿 이동에만 짧은 완화를 허용한다. */
+function withEraseCaretMotion(self: any, erase: () => void): void {
+  self.caret.beginEraseMotion();
+  try {
+    erase();
+  } finally {
+    self.caret.endEraseMotion();
+  }
 }
 
 function isNestedCellPosition(pos: DocumentPosition): boolean {
@@ -142,9 +153,13 @@ type PictureDeleteRef = {
   ci: number;
   type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole';
   cellPath?: CellPathLike;
+  noteRef?: unknown;
+  memoRef?: unknown;
+  headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
 };
 
 function deleteSelectedObject(wasm: WasmBridge, ref: PictureDeleteRef): void {
+  if (!canDeleteObjectControl(ref)) return;
   if (ref.type === 'image') {
     if (ref.cellPath && ref.cellPath.length > 0) {
       wasm.deleteCellPictureControlByPath(ref.sec, ref.ppi, ref.cellPath, ref.ci);
@@ -242,29 +257,38 @@ function positionAfterPasteResult(pos: DocumentPosition, parsed: any): DocumentP
   return newPos;
 }
 
-function pastePlainText(this: any, text: string, hasSelection: boolean): void {
-  if (hasSelection) {
-    this.deleteSelection();
-  }
+export function pastePlainText(this: any, text: string): void {
   if (!text) return;
 
-  const lines = text.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i]) {
-      this.executeOperation({
-        kind: 'command',
-        command: new InsertTextCommand(
-          this.cursor.getPosition(),
-          lines[i],
-          undefined,
-          this.peekPendingCharFormat?.(),
-        ),
-      });
-    }
-    if (i < lines.length - 1 && !this.cursor.isInCell()) {
-      this.executeOperation({ kind: 'command', command: new SplitParagraphCommand(this.cursor.getPosition()) });
-    }
-  }
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const selection = this.cursor.getSelectionOrdered();
+  const insertAt = selection?.start ?? this.cursor.getPosition();
+  const charFormat = this.peekPendingCharFormat?.();
+  this.cursor.clearSelection();
+
+  // 선택 삭제·다중 문단 삽입을 하나의 스냅샷으로 묶어 paste 한 번이 undo 한 번이 되게 한다.
+  this.executeOperation({
+    kind: 'snapshot',
+    operationType: 'pastePlainText',
+    operation: (wasm: WasmBridge) => {
+      let position = insertAt;
+      if (selection) {
+        position = deleteSelectionImmediate(wasm, selection.start, selection.end);
+      }
+
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i]) {
+          position = new InsertTextCommand(position, lines[i], undefined, charFormat).execute(wasm);
+        }
+        if (i < lines.length - 1) {
+          position = position.parentParaIndex !== undefined || (position.cellPath?.length ?? 0) > 0
+            ? new SplitParagraphInCellCommand(position).execute(wasm)
+            : new SplitParagraphCommand(position).execute(wasm);
+        }
+      }
+      return position;
+    },
+  });
 }
 
 export function prepareRhwpInternalClipboardHtml(self: any, html: string, text = ''): string {
@@ -421,6 +445,16 @@ const chordMapG: Record<string, string> = {
  */
 export function onKeyDown(this: any, e: KeyboardEvent): void {
   if (!this.active) return;
+
+  // ClipboardEvent에는 modifier 정보가 없다. 키가 눌린 구간에서만 다음 paste를
+  // 일반 텍스트로 처리한다. 시간 기반 타이머는 뒤의 관계없는 paste를 오염시킬 수 있다.
+  this.pasteWithoutFormattingArmed = (
+    (e.ctrlKey || e.metaKey) &&
+    e.shiftKey &&
+    !e.altKey &&
+    (e.code === 'KeyV' || e.key.toLowerCase() === 'v')
+  );
+
   if (this.readOnly || this.userEditingLocked) {
     const key = e.key.toLowerCase();
     const primaryShortcut = (e.ctrlKey || e.metaKey) && ['a', 'c', 'f', 'p'].includes(key);
@@ -648,12 +682,14 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     // Backspace / Delete는 handleBackspace/handleDelete에서 처리
     if (e.key === 'Backspace' || e.key === 'Delete') {
       e.preventDefault();
-      const pos = this.cursor.getPosition();
-      if (e.key === 'Backspace') {
-        this.handleBackspace(pos, false);
-      } else {
-        this.handleDelete(pos, false);
-      }
+      withEraseCaretMotion(this, () => {
+        const pos = this.cursor.getPosition();
+        if (e.key === 'Backspace') {
+          this.handleBackspace(pos, false);
+        } else {
+          this.handleDelete(pos, false);
+        }
+      });
       return;
     }
 
@@ -707,6 +743,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     // Backspace / Delete
     if (e.key === 'Backspace' || e.key === 'Delete') {
       e.preventDefault();
+      this.caret.beginEraseMotion();
       const target = { sectionIdx: this.cursor.fnSectionIdx, paraIdx: this.cursor.fnParaIdx, controlIdx: this.cursor.fnControlIdx, footnoteIndex: this.cursor.fnFootnoteIndex, pageNum: this.cursor.fnPageNum };
       const innerParaIdx = this.cursor.fnInnerParaIdx;
       const fnOff = this.cursor.fnCharOffset;
@@ -766,6 +803,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
           this.afterEdit();
         } catch { /* ignore */ }
       }
+      this.caret.endEraseMotion();
       return;
     }
 
@@ -837,7 +875,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       const ref = this.cursor.getSelectedPictureRef();
-      if (ref) {
+      if (ref && canDeleteObjectControl(ref)) {
         this.cursor.moveOutOfSelectedPicture();
         this.pictureObjectRenderer?.clear();
         this.eventBus.emit('picture-object-selection-changed', false);
@@ -1238,18 +1276,20 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     case 'Delete': {
       e.preventDefault();
       if (this.isFormMode?.() && e.altKey) return;
-      if (this.cursor.hasSelection()) {
-        this.deleteSelection();
-      } else if (e.altKey) {
-        // Alt/Option+Backspace/Delete: 단어 삭제 (macOS standard)
-        this.cursor.setAnchor();
-        this.cursor.moveToWordBoundary(e.key === 'Backspace' ? -1 : 1);
-        if (this.cursor.hasSelection()) this.deleteSelection();
-      } else if (e.key === 'Backspace') {
-        this.handleBackspace(pos, inCell);
-      } else {
-        this.handleDelete(pos, inCell);
-      }
+      withEraseCaretMotion(this, () => {
+        if (this.cursor.hasSelection()) {
+          this.deleteSelection();
+        } else if (e.altKey) {
+          // Alt/Option+Backspace/Delete: 단어 삭제 (macOS standard)
+          this.cursor.setAnchor();
+          this.cursor.moveToWordBoundary(e.key === 'Backspace' ? -1 : 1);
+          if (this.cursor.hasSelection()) this.deleteSelection();
+        } else if (e.key === 'Backspace') {
+          this.handleBackspace(pos, inCell);
+        } else {
+          this.handleDelete(pos, inCell);
+        }
+      });
       break;
     }
     case 'Enter': {
@@ -1409,6 +1449,12 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
   }
 }
 
+export function onKeyUp(this: any, e: KeyboardEvent): void {
+  if (e.code === 'KeyV' || e.key.toLowerCase() === 'v') {
+    this.pasteWithoutFormattingArmed = false;
+  }
+}
+
 export function handleCtrlKey(this: any, e: KeyboardEvent): void {
   // Ctrl+/ → 커맨드 팔레트 열기
   if (e.key === '/' && !e.shiftKey && !e.altKey) {
@@ -1451,33 +1497,37 @@ export function handleCtrlKey(this: any, e: KeyboardEvent): void {
     case 'backspace': {
       e.preventDefault();
       if (this.isFormMode?.()) return;
-      if (this.cursor.hasSelection()) {
-        this.deleteSelection();
-      } else if (e.metaKey && !e.ctrlKey) {
-        // Cmd+Backspace (macOS): 줄 시작까지 삭제
-        this.cursor.setAnchor();
-        this.cursor.moveToLineStart();
-        if (this.cursor.hasSelection()) this.deleteSelection();
-      } else {
-        // Ctrl+Backspace (Win/Linux): 이전 단어 경계까지 삭제
-        this.cursor.setAnchor();
-        this.cursor.moveToWordBoundary(-1);
-        if (this.cursor.hasSelection()) this.deleteSelection();
-      }
+      withEraseCaretMotion(this, () => {
+        if (this.cursor.hasSelection()) {
+          this.deleteSelection();
+        } else if (e.metaKey && !e.ctrlKey) {
+          // Cmd+Backspace (macOS): 줄 시작까지 삭제
+          this.cursor.setAnchor();
+          this.cursor.moveToLineStart();
+          if (this.cursor.hasSelection()) this.deleteSelection();
+        } else {
+          // Ctrl+Backspace (Win/Linux): 이전 단어 경계까지 삭제
+          this.cursor.setAnchor();
+          this.cursor.moveToWordBoundary(-1);
+          if (this.cursor.hasSelection()) this.deleteSelection();
+        }
+      });
       break;
     }
     case 'delete': {
       if (!e.ctrlKey) break;
       e.preventDefault();
       if (this.isFormMode?.()) return;
-      if (this.cursor.hasSelection()) {
-        this.deleteSelection();
-      } else {
-        // Ctrl+Delete (Win/Linux): 다음 단어 경계까지 삭제
-        this.cursor.setAnchor();
-        this.cursor.moveToWordBoundary(1);
-        if (this.cursor.hasSelection()) this.deleteSelection();
-      }
+      withEraseCaretMotion(this, () => {
+        if (this.cursor.hasSelection()) {
+          this.deleteSelection();
+        } else {
+          // Ctrl+Delete (Win/Linux): 다음 단어 경계까지 삭제
+          this.cursor.setAnchor();
+          this.cursor.moveToWordBoundary(1);
+          if (this.cursor.hasSelection()) this.deleteSelection();
+        }
+      });
       break;
     }
     case 'home': {
@@ -1553,6 +1603,16 @@ export function handleCtrlKey(this: any, e: KeyboardEvent): void {
 }
 
 export function handleSelectAll(this: any): void {
+  if (this.cursor.isInCell() && !this.cursor.isInTextBox()) {
+    this.cursor.exitCellSelectionMode();
+    this.cellSelectionRenderer?.clear();
+    if (this.cursor.selectAllInCurrentCell()) {
+      this.updateCaret();
+      this.eventBus.emit('command-state-changed');
+    }
+    return;
+  }
+
   // anchor를 문서 시작, focus를 문서 끝으로 설정
   this.cursor.moveTo({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 });
   this.cursor.setAnchor();
@@ -1688,6 +1748,9 @@ export function onCut(this: any, e: ClipboardEvent): void {
 }
 
 export function onPaste(this: any, e: ClipboardEvent): void {
+  const pasteWithoutFormatting = this.pasteWithoutFormattingArmed === true;
+  this.pasteWithoutFormattingArmed = false;
+
   if (!this.active) return;
   e.preventDefault();
   if (this.readOnly || this.userEditingLocked) return;
@@ -1711,6 +1774,10 @@ export function onPaste(this: any, e: ClipboardEvent): void {
   const clipboardData = e.clipboardData;
   const html = clipboardData?.getData('text/html') || '';
   const text = clipboardData?.getData('text/plain') || '';
+  if (pasteWithoutFormatting) {
+    pastePlainText.call(this, text);
+    return;
+  }
   const hasCurrentInternalMarker = hasCurrentRhwpClipboardMarker(this, html);
   const internalClipboardText = this.wasm.getClipboardText?.() || '';
   const hasMatchingInternalControlText =
@@ -1817,8 +1884,8 @@ export function onPaste(this: any, e: ClipboardEvent): void {
     return;
   }
 
-  // 플레인 텍스트 붙여넣기 (fallback — 기존 InsertTextCommand 사용, 정밀 undo 유지)
-  pastePlainText.call(this, text, hasSelection);
+  // 플레인 텍스트 붙여넣기 fallback도 동일한 원자적 경로를 쓴다.
+  pastePlainText.call(this, text);
 }
 
 /** 클립보드의 이미지 파일을 커서 위치에 삽입한다. */

@@ -44,11 +44,12 @@ test('표본이 얇으면 신뢰도가 내려가고 밴드가 넓어진다', () 
   assert.ok(loose.sentenceLength.low <= tight.sentenceLength.low);
 });
 
-test('기준선 문장은 검사 지시가 아니라 작성 지시로 읽힌다', () => {
+test('기준선 문장은 작성 중 목표가 아니라 쓴 뒤의 지문으로 읽힌다', () => {
   const metrics = analyzeText(KO_SAMPLE, 'ko');
   const lines = baselineLines(deriveBands(metrics, 'medium'), 'ko');
-  assert.ok(lines.some((line) => /문장 길이: 중앙값/.test(line)));
+  assert.ok(lines.some((line) => /문장 길이 지문: 중앙값/.test(line)));
   assert.ok(lines.some((line) => /종결어미/.test(line)));
+  assert.ok(lines.some((line) => /맞추려고 글자를 보태거나 빼지 않는다/.test(line)));
   assert.ok(lines.every((line) => !/검사|위반|점검/.test(line)));
 });
 

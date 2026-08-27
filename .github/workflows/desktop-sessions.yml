@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - 'feat/**'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,8 +24,6 @@ jobs:
         os:
           - macos-15
           - windows-latest
-          - ubuntu-24.04
-          - ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
 
@@ -41,6 +40,19 @@ jobs:
             package-lock.json
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
+
+      - name: Install pinned Rust toolchain for browser merge tests
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack for browser merge tests
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build WASM engine for browser merge tests
+        working-directory: rhwp
+        run: wasm-pack build --target web
 
       - name: Install dependencies
         shell: bash

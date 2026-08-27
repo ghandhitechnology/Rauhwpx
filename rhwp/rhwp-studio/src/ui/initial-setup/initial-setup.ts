@@ -128,7 +128,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   const calCopy = el(
     'p',
     'rhwp-setup-cal-copy',
-    '원고 10페이지를 올려서 에이전트가 말투를 따라하게 할 수 있습니다.',
+    '원고 10페이지를 올리면, 에이전트가 문장 규칙이 아니라 그 목소리로 씁니다.',
   );
   const calActions = el('div', 'rhwp-setup-cal-actions');
   const calSkip = el('button', 'rhwp-setup-text-btn', '나중에 하기');

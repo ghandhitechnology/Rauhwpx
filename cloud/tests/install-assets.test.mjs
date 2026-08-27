@@ -41,6 +41,10 @@ test('installer is streamable, channel-aware, preserves Serve routes, and emits 
   assert.match(source, /provider install claude/);
   assert.match(source, /provider install cursor/);
   assert.doesNotMatch(source, /for provider in claude codex pi grok cursor/);
+  assert.ok(source.includes('github\\.com/ghandhitechnology/Rauhwpx/\\.github/workflows/release\\.yml@refs/tags/'));
+  assert.doesNotMatch(source, /refs\/\(heads\|tags\)/);
+  assert.match(source, /Strict-Transport-Security "max-age=31536000; includeSubDomains"/);
+  assert.match(source, /X-Content-Type-Options "nosniff"/);
   const syntax = spawnSync('/bin/bash', ['-n', filename], { encoding: 'utf8' });
   assert.equal(syntax.status, 0, syntax.stderr);
   const update = await fs.readFile(path.join(root, 'install/update.sh'), 'utf8');
@@ -56,6 +60,8 @@ test('installer is streamable, channel-aware, preserves Serve routes, and emits 
   assert.match(update, /podman --cgroup-manager=cgroupfs run --rm[\s\S]*--uidmap 0:1:1000[\s\S]*--gidmap 1000:0:1[\s\S]*--entrypoint \/app\/bin\/rhwp/);
   assert.match(update, /chmod -R a\+rX "\$DESTINATION"/);
   assert.doesNotMatch(update, /(^|\s)(?:exec\s+)?runuser\s+--user/m);
+  assert.ok(update.includes('github\\.com/ghandhitechnology/Rauhwpx/\\.github/workflows/release\\.yml@refs/tags/'));
+  assert.doesNotMatch(update, /refs\/\(heads\|tags\)/);
   const wrapper = await fs.readFile(path.join(root, 'install/rauhwpx-cloud'), 'utf8');
   assert.match(wrapper, /cd \/var\/lib\/rauhwpx-cloud\s+exec \/usr\/sbin\/runuser --user rauhwpx-cloud/);
   assert.doesNotMatch(wrapper, /(^|\s)(?:exec\s+)?runuser\s+--user/m);
@@ -71,6 +77,7 @@ test('installer is streamable, channel-aware, preserves Serve routes, and emits 
 
 test('service and Podman assets keep the trust boundaries explicit', async () => {
   const service = await fs.readFile(path.join(root, 'install/rauhwpx-cloud.service'), 'utf8');
+  const updateService = await fs.readFile(path.join(root, 'install/rauhwpx-cloud-update.service'), 'utf8');
   const runner = await fs.readFile(path.join(root, 'src/podman-runner.mjs'), 'utf8');
   assert.match(service, /User=rauhwpx-cloud/);
   assert.match(service, /ProtectSystem=strict/);
@@ -78,15 +85,20 @@ test('service and Podman assets keep the trust boundaries explicit', async () =>
   assert.match(service, /ProtectKernelTunables=no/);
   assert.match(service, /ProtectKernelModules=yes/);
   assert.match(service, /ProtectControlGroups=yes/);
+  assert.match(updateService, /Wants=network-online.target/);
+  assert.match(updateService, /After=network-online.target rauhwpx-cloud.service/);
   assert.doesNotMatch(runner, /--network=host/);
   assert.match(runner, /--security-opt=no-new-privileges/);
   assert.match(runner, /--cap-drop=all/);
   assert.match(runner, /--read-only/);
-  assert.match(runner, /--read-only/);
-  assert.match(runner, /\/workspace:rw,size=/);
   assert.match(runner, /\/workspace:rw,size=\$\{this\.config\.workspaceBytes\},mode=1777/);
   assert.match(runner, /\/tmp:rw,size=268435456,mode=1777/);
   assert.doesNotMatch(runner, /mode=1777,(?:uid|gid)=/);
+  assert.match(runner, /createHash\('sha256'\)\.update\(session\.id\)/);
+  assert.doesNotMatch(runner, /slice\(0, 48\)/);
+  assert.match(runner, /'--env', 'RAUHWpx_WORKER_TOKEN'/);
+  assert.doesNotMatch(runner, /RAUHWpx_WORKER_TOKEN=\$\{workerToken\}/);
+  assert.match(runner, /env: \{ \.\.\.process\.env, RAUHWpx_WORKER_TOKEN: workerToken \}/);
   const worker = await fs.readFile(path.join(root, 'worker/main.mjs'), 'utf8');
   assert.match(worker, /process\.umask\(0o077\)/);
   assert.match(runner, /path\.dirname\(endpoint\.socketPath\).*\/run\/rauhwpx:ro,Z/);
@@ -186,4 +198,6 @@ test('worker image packages the real Studio, agent hub, Chromium, and locked run
   assert.match(workflow, /Build native reference extractor[\s\S]*cargo build --release --locked --bin rhwp[\s\S]*Build dedicated headless Studio runtime/);
   const syntax = spawnSync('/bin/bash', ['-n', path.join(root, 'install/build-runtime-assets.sh')], { encoding: 'utf8' });
   assert.equal(syntax.status, 0, syntax.stderr);
+  const releaseSyntax = spawnSync('/bin/bash', ['-n', path.join(root, 'install/package-release.sh')], { encoding: 'utf8' });
+  assert.equal(releaseSyntax.status, 0, releaseSyntax.stderr);
 });

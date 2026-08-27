@@ -38,17 +38,22 @@ import {
 import type {
   AgentBridgeDeps,
   AgentBridgeOptions,
+  AgentInstructionsDraft,
+  AgentInstructionsStatus,
   AgentEditingLease,
   AgentName,
   AgentAuthMethod,
   AgentSetupAuthStart,
   AgentSetupStatus,
   AgentSetupStatusMap,
+  CheckpointTitleRequest,
+  CheckpointTitleResult,
   AgentPhase,
   AgentWorkflow,
   AgentWorkflowState,
   OpenRouterCredits,
   PermissionProfile,
+  ServiceTier,
   PiCatalogModel,
   PiModelConfig,
   PiStatus,
@@ -96,6 +101,7 @@ export interface AgentBridge {
   getEditingLease(): AgentEditingLease;
   onEditingLeaseChange(cb: (lease: AgentEditingLease) => void): () => void;
   getPermissionProfile(): PermissionProfile;
+  getServiceTier(): ServiceTier;
   getWorkflowState(): AgentWorkflowState;
   /** 다른 탭이 연결을 차지한 상태에서 현재 탭이 스튜디오 연결을 다시 가져온다. */
   takeOverConnection(): void;
@@ -134,6 +140,8 @@ export interface AgentBridge {
   stopChat(): void;
   /** gpt-5.6-luna 로 스레드 제목 생성 요청. */
   requestTitle(threadId: string, preview: string): string;
+  /** 커밋 메시지는 부수 정보다. 오프라인, 실패, 타임아웃이면 null. */
+  requestCheckpointTitle(input: CheckpointTitleRequest): Promise<CheckpointTitleResult | null>;
   sendUserMessage(text: string, skillName?: string, stagedReferenceIds?: string[]): Promise<string | null>;
   listTemplates(): Promise<TemplateCatalog>;
   addTemplate(file: File, name?: string): Promise<DocumentTemplate>;
@@ -154,6 +162,7 @@ export interface AgentBridge {
   approvePlan(planId: string): void;
   requestPlanChanges(planId: string, feedback?: string): void;
   setPermissionProfile(profile: PermissionProfile): void;
+  setServiceTier(tier: ServiceTier): void;
   listSkills(): void;
   readSkill(name: string): string;
   validateSkill(skill: { name: string; files: ProductSkillFile[] }): string;
@@ -162,6 +171,10 @@ export interface AgentBridge {
   deleteSkill(name: string): string;
   generateSkillDraft(input: { goal: string; triggerExamples?: string; nonTriggerExamples?: string; resourceNotes?: string; existingSkill?: string }): string;
   requestWritingStyleStatus(): string;
+  requestAgentInstructions(): Promise<AgentInstructionsStatus | null>;
+  saveAgentInstructions(content: string, expectedRevision: number): Promise<AgentInstructionsStatus | null>;
+  confirmAgentInstructionsDraft(draft: AgentInstructionsDraft): Promise<AgentInstructionsStatus | null>;
+  rejectAgentInstructionsDraft(draft: AgentInstructionsDraft): Promise<boolean>;
   requestWritingStyleCatalog(refresh?: boolean): Promise<WritingStyleCatalog | null>;
   calibrateWritingStyle(input: {
     language: WritingStyleLanguage;
@@ -256,6 +269,49 @@ function readDocumentTemplate(value: unknown): DocumentTemplate | null {
     revision: Number(item['revision']),
     createdAt: String(item['createdAt'] ?? ''),
     updatedAt: String(item['updatedAt'] ?? ''),
+  };
+}
+
+function readAgentInstructionsStatus(value: unknown): AgentInstructionsStatus | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  const revision = Number(item['revision']);
+  const maxChars = Number(item['maxChars']);
+  if (item['fileName'] !== 'AGENTS.md' || item['scope'] !== 'rauhwpx-app'
+    || typeof item['content'] !== 'string'
+    || !Number.isSafeInteger(revision) || revision < 1
+    || !Number.isSafeInteger(maxChars) || maxChars < 1) return null;
+  return {
+    fileName: 'AGENTS.md',
+    scope: 'rauhwpx-app',
+    content: item['content'],
+    revision,
+    updatedAt: typeof item['updatedAt'] === 'string' ? item['updatedAt'] : null,
+    maxChars,
+  };
+}
+
+function readAgentInstructionsDraft(value: unknown): AgentInstructionsDraft | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  const expectedRevision = Number(item['expectedRevision']);
+  if (typeof item['id'] !== 'string' || !item['id']
+    || typeof item['content'] !== 'string'
+    || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1
+    || (item['reason'] !== null && typeof item['reason'] !== 'string')
+    || typeof item['requestedBy'] !== 'string'
+    || typeof item['createdAt'] !== 'string' || !Number.isFinite(Date.parse(item['createdAt']))
+    || typeof item['expiresAt'] !== 'string' || !Number.isFinite(Date.parse(item['expiresAt']))
+    || typeof item['confirmationToken'] !== 'string' || !item['confirmationToken']) return null;
+  return {
+    id: item['id'],
+    content: item['content'],
+    expectedRevision,
+    reason: item['reason'] as string | null,
+    requestedBy: item['requestedBy'],
+    createdAt: item['createdAt'],
+    expiresAt: item['expiresAt'],
+    confirmationToken: item['confirmationToken'],
   };
 }
 
@@ -762,6 +818,27 @@ function readPiCatalog(value: unknown): PiCatalogModel[] {
   return out;
 }
 
+function readCheckpointTitleResult(value: unknown): CheckpointTitleResult | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const src = value as Record<string, unknown>;
+  const provider = src['provider'];
+  const title = src['title'];
+  const revision = src['titleRevision'];
+  if (provider !== 'pi' && provider !== 'codex' && provider !== 'grok' && provider !== 'claude') return null;
+  if (typeof src['commitId'] !== 'string' || !src['commitId']) return null;
+  if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return null;
+  if (typeof title !== 'string' || !title || title.trim() !== title
+    || /[\r\n\u0000-\u001f\u007f]/.test(title) || [...title].length > 72) return null;
+  if (typeof src['model'] !== 'string' || !src['model']) return null;
+  return {
+    commitId: src['commitId'],
+    titleRevision: revision,
+    title,
+    provider,
+    model: src['model'],
+  };
+}
+
 function isPiSetupState(value: unknown): value is 'preparing' | 'downloading' | 'installing' | 'configuring' | 'verifying' | 'done' {
   return value === 'preparing' || value === 'downloading' || value === 'installing'
     || value === 'configuring' || value === 'verifying' || value === 'done';
@@ -799,6 +876,7 @@ class AgentBridgeImpl implements AgentBridge {
   private selectedModel: string | null = null;
   private selectedEffort: string | null = null;
   private permissionProfile: PermissionProfile = 'safe';
+  private serviceTier: ServiceTier = 'standard';
   private workflow: AgentWorkflow = 'direct';
   private phase: AgentPhase = 'direct';
   private capabilityEpoch: number | null = null;
@@ -816,6 +894,7 @@ class AgentBridgeImpl implements AgentBridge {
     model?: string;
     effort?: string;
     permissionProfile?: PermissionProfile;
+    serviceTier?: ServiceTier;
     workflow: AgentWorkflow;
     threadId: string;
     documentId: string | null;
@@ -1051,6 +1130,7 @@ class AgentBridgeImpl implements AgentBridge {
           ...(pending.model ? { model: pending.model } : {}),
           ...(pending.effort ? { effort: pending.effort } : {}),
           ...(pending.permissionProfile ? { permissionProfile: pending.permissionProfile } : {}),
+          ...(pending.serviceTier ? { serviceTier: pending.serviceTier } : {}),
           ...(pending.force ? { force: true } : {}),
         });
       }
@@ -1274,6 +1354,7 @@ class AgentBridgeImpl implements AgentBridge {
           if (typeof session.documentName === 'string' || session.documentName === null) this.documentName = session.documentName;
           this.turnRunning = session.status === 'running';
           this.permissionProfile = session.permissionProfile === 'unrestricted' ? 'unrestricted' : 'safe';
+          this.serviceTier = session.serviceTier === 'fast' ? 'fast' : 'standard';
           this.activeTemplateId = typeof session.activeTemplateId === 'string' ? session.activeTemplateId : null;
           this.activeTemplate = this.activeTemplateId
             ? this.templateCatalog.templates.find((template) => template.id === this.activeTemplateId) ?? null
@@ -1290,6 +1371,7 @@ class AgentBridgeImpl implements AgentBridge {
             ...(typeof session.documentId === 'string' || session.documentId === null ? { documentId: session.documentId } : {}),
             ...(typeof session.documentName === 'string' || session.documentName === null ? { documentName: session.documentName } : {}),
             permissionProfile: this.permissionProfile,
+            serviceTier: this.serviceTier,
             ...this.workflowState(),
           });
           if (this.turnRunning) {
@@ -1348,6 +1430,7 @@ class AgentBridgeImpl implements AgentBridge {
         if (typeof msg.model === 'string') this.selectedModel = msg.model;
         if (typeof msg.effort === 'string') this.selectedEffort = msg.effort;
         if (msg.permissionProfile === 'safe' || msg.permissionProfile === 'unrestricted') this.permissionProfile = msg.permissionProfile;
+        if (msg.serviceTier === 'fast' || msg.serviceTier === 'standard') this.serviceTier = msg.serviceTier;
         if (typeof msg.threadId === 'string') this.threadId = msg.threadId;
         if (typeof msg.documentId === 'string' || msg.documentId === null) this.documentId = msg.documentId;
         if (typeof msg.documentName === 'string' || msg.documentName === null) this.documentName = msg.documentName;
@@ -1362,6 +1445,7 @@ class AgentBridgeImpl implements AgentBridge {
           ...(typeof msg.documentId === 'string' || msg.documentId === null ? { documentId: msg.documentId } : {}),
           ...(typeof msg.documentName === 'string' || msg.documentName === null ? { documentName: msg.documentName } : {}),
           permissionProfile: this.permissionProfile,
+          serviceTier: this.serviceTier,
           ...this.workflowState(),
         });
         this.flushQueuedMessages();
@@ -1371,6 +1455,13 @@ class AgentBridgeImpl implements AgentBridge {
         if (msg.permissionProfile === 'safe' || msg.permissionProfile === 'unrestricted') {
           this.permissionProfile = msg.permissionProfile;
           this.emit({ type: 'permission-changed', permissionProfile: this.permissionProfile });
+        }
+        break;
+      }
+      case 'chat-service-tier-changed': {
+        if (msg.serviceTier === 'fast' || msg.serviceTier === 'standard') {
+          this.serviceTier = msg.serviceTier;
+          this.emit({ type: 'service-tier-changed', serviceTier: this.serviceTier });
         }
         break;
       }
@@ -1442,6 +1533,47 @@ class AgentBridgeImpl implements AgentBridge {
           ...(changedTemplate && ['added', 'renamed', 'replaced', 'deleted'].includes(msg.change?.type)
             ? { change: { type: msg.change.type, template: changedTemplate } }
             : {}),
+        });
+        break;
+      }
+      case 'agent-instructions': {
+        const status = readAgentInstructionsStatus(msg.status);
+        if (!status) break;
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, status);
+        this.emit({
+          type: 'agent-instructions',
+          status,
+          changedBy: typeof msg.changedBy === 'string' ? msg.changedBy : 'system',
+        });
+        break;
+      }
+      case 'agent-instructions-draft': {
+        const draft = readAgentInstructionsDraft(msg.draft);
+        if (draft) this.emit({ type: 'agent-instructions-draft', draft });
+        break;
+      }
+      case 'agent-instructions-draft-cleared': {
+        const outcome = msg.outcome === 'confirmed'
+          || msg.outcome === 'rejected'
+          || msg.outcome === 'expired'
+          || msg.outcome === 'replaced'
+          || msg.outcome === 'stale'
+          ? msg.outcome
+          : null;
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, outcome === 'rejected');
+        if (typeof msg.draftId === 'string' && outcome) {
+          this.emit({ type: 'agent-instructions-draft-cleared', draftId: msg.draftId, outcome });
+        }
+        break;
+      }
+      case 'agent-instructions-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        const status = readAgentInstructionsStatus(msg.status);
+        this.emit({
+          type: 'agent-instructions-error',
+          code: typeof msg.code === 'string' ? msg.code : 'INSTRUCTIONS_ERROR',
+          message: typeof msg.message === 'string' ? msg.message : 'AGENTS.md request failed',
+          ...(status ? { status } : {}),
         });
         break;
       }
@@ -1638,6 +1770,12 @@ class AgentBridgeImpl implements AgentBridge {
         });
         break;
       }
+      case 'checkpoint-title-result': {
+        if (typeof msg.requestId === 'string') {
+          this.requests.settle(msg.requestId, readCheckpointTitleResult(msg.result));
+        }
+        break;
+      }
       case 'agent-event': {
         const event = msg.event as AgentStreamEvent | undefined;
         if (!event || typeof event.type !== 'string') break;
@@ -1776,6 +1914,10 @@ class AgentBridgeImpl implements AgentBridge {
     return this.permissionProfile;
   }
 
+  getServiceTier(): ServiceTier {
+    return this.serviceTier;
+  }
+
   getWorkflowState() {
     return this.workflowState();
   }
@@ -1813,6 +1955,7 @@ class AgentBridgeImpl implements AgentBridge {
       ...(this.selectedModel ? { model: this.selectedModel } : {}),
       ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
       permissionProfile: this.permissionProfile,
+      serviceTier: this.serviceTier,
       ...(force ? { force: true } : {}),
     };
     this.pendingChatStart = {
@@ -1820,6 +1963,7 @@ class AgentBridgeImpl implements AgentBridge {
       model: this.selectedModel ?? undefined,
       effort: this.selectedEffort ?? undefined,
       permissionProfile: this.permissionProfile,
+      serviceTier: this.serviceTier,
       workflow,
       threadId,
       documentId,
@@ -1842,6 +1986,7 @@ class AgentBridgeImpl implements AgentBridge {
     // Full access is deliberately scoped to one live chat and never becomes
     // the default for a new or reopened thread.
     this.permissionProfile = 'safe';
+    this.serviceTier = 'standard';
     this.resetWorkflowState();
     if (this.state === 'connected') {
       this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-stop' });
@@ -1868,6 +2013,20 @@ class AgentBridgeImpl implements AgentBridge {
     return requestId;
   }
 
+  requestCheckpointTitle(input: CheckpointTitleRequest): Promise<CheckpointTitleResult | null> {
+    return this.request<CheckpointTitleResult>(
+      {
+        type: 'checkpoint-title-request',
+        commitId: input.commitId,
+        titleRevision: input.titleRevision,
+        appLanguage: input.appLanguage,
+        summary: input.summary,
+      },
+      'checkpoint-title',
+      45_000,
+    );
+  }
+
   sendUserMessage(text: string, skillName?: string, stagedReferenceIds: string[] = []): Promise<string | null> {
     const context = this.referenceContext();
     const messageId = stagedReferenceIds.length > 0 ? `message-${++this.requestSeq}` : undefined;
@@ -1888,6 +2047,7 @@ class AgentBridgeImpl implements AgentBridge {
             ...(this.selectedModel ? { model: this.selectedModel } : {}),
             ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
             permissionProfile: this.permissionProfile,
+            serviceTier: this.serviceTier,
           });
         } else {
           this.pendingChatStart = {
@@ -1895,6 +2055,7 @@ class AgentBridgeImpl implements AgentBridge {
             model: this.selectedModel ?? undefined,
             effort: this.selectedEffort ?? undefined,
             permissionProfile: this.permissionProfile,
+            serviceTier: this.serviceTier,
             workflow: this.workflow,
             threadId: context.threadId,
             documentId: context.documentId,
@@ -2210,6 +2371,12 @@ class AgentBridgeImpl implements AgentBridge {
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-permission-set', permissionProfile: profile });
   }
 
+  setServiceTier(tier: ServiceTier): void {
+    this.serviceTier = tier === 'fast' ? 'fast' : 'standard';
+    if (this.activeAgent === null) return;
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-service-tier-set', serviceTier: this.serviceTier });
+  }
+
   listSkills(): void {
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skills-list', requestId: `skills-${++this.requestSeq}` });
   }
@@ -2254,6 +2421,47 @@ class AgentBridgeImpl implements AgentBridge {
     const requestId = `writing-style-status-${++this.requestSeq}`;
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'writing-style-status-request', requestId });
     return requestId;
+  }
+
+  requestAgentInstructions(): Promise<AgentInstructionsStatus | null> {
+    return this.request<AgentInstructionsStatus>(
+      { type: 'agent-instructions-request' },
+      'agent-instructions',
+    );
+  }
+
+  saveAgentInstructions(
+    content: string,
+    expectedRevision: number,
+  ): Promise<AgentInstructionsStatus | null> {
+    return this.request<AgentInstructionsStatus>(
+      { type: 'agent-instructions-save', content, expectedRevision },
+      'agent-instructions-save',
+    );
+  }
+
+  confirmAgentInstructionsDraft(
+    draft: AgentInstructionsDraft,
+  ): Promise<AgentInstructionsStatus | null> {
+    return this.request<AgentInstructionsStatus>(
+      {
+        type: 'agent-instructions-draft-confirm',
+        draftId: draft.id,
+        confirmationToken: draft.confirmationToken,
+      },
+      'agent-instructions-confirm',
+    );
+  }
+
+  rejectAgentInstructionsDraft(draft: AgentInstructionsDraft): Promise<boolean> {
+    return this.request<boolean>(
+      {
+        type: 'agent-instructions-draft-reject',
+        draftId: draft.id,
+        confirmationToken: draft.confirmationToken,
+      },
+      'agent-instructions-reject',
+    ).then((result) => result === true);
   }
 
   requestWritingStyleCatalog(refresh = false): Promise<WritingStyleCatalog | null> {

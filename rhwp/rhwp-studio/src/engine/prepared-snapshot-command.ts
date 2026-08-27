@@ -62,6 +62,14 @@ export class PreparedSnapshotCommand implements EditCommand {
     return (this.beforeId !== null ? 1 : 0) + (this.afterId !== null ? 1 : 0);
   }
 
+  currentSnapshotId(): number | null {
+    return this.afterId;
+  }
+
+  undoSnapshotId(): number | null {
+    return this.beforeId;
+  }
+
   discard(wasm: WasmBridge): void {
     if (this.beforeId !== null) {
       wasm.discardSnapshot(this.beforeId);

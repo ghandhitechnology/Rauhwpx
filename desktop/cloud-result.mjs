@@ -36,6 +36,7 @@ async function exclusiveCopy(bytes, requestedPath) {
 
 async function replaceFile(targetPath, bytes, platform) {
   const temp = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.cloud-${randomUUID()}.tmp`);
+  const originalMode = await fs.stat(targetPath).then((details) => details.mode & 0o777, () => null);
   await fs.writeFile(temp, bytes, { mode: 0o600 });
   const verified = await fs.readFile(temp);
   if (verified.length !== bytes.length || sha256(verified) !== sha256(bytes)) {
@@ -44,6 +45,7 @@ async function replaceFile(targetPath, bytes, platform) {
   }
   if (platform !== 'win32') {
     await fs.rename(temp, targetPath);
+    if (originalMode !== null) await fs.chmod(targetPath, originalMode);
     return;
   }
   const backup = path.join(

@@ -12,7 +12,7 @@
         "maxColdDocumentLoadAndInitialRenderMs": 30000,
         "maxWarmReplayMs": 5000,
         "maxWarmRendererDurationMs": 4000,
-        "maxImageCachePixels": 67108864
+        "maxImageCachePixels": 16777216
       },
       "notes": "Basic line segmentation sample from the existing CanvasKit representative suite.",
       "browserParityThresholds": {
@@ -88,7 +88,7 @@
         "maxColdDocumentLoadAndInitialRenderMs": 30000,
         "maxWarmReplayMs": 5000,
         "maxWarmRendererDurationMs": 4000,
-        "maxImageCachePixels": 67108864
+        "maxImageCachePixels": 16777216
       },
       "diagnosticAxes": [
         "control-mark",
@@ -121,7 +121,7 @@
         "maxColdDocumentLoadAndInitialRenderMs": 30000,
         "maxWarmReplayMs": 5000,
         "maxWarmRendererDurationMs": 4000,
-        "maxImageCachePixels": 67108864
+        "maxImageCachePixels": 16777216
       },
       "baselineTier": "representative"
     },
@@ -531,7 +531,7 @@
         "maxColdDocumentLoadAndInitialRenderMs": 30000,
         "maxWarmReplayMs": 5000,
         "maxWarmRendererDurationMs": 4000,
-        "maxImageCachePixels": 67108864
+        "maxImageCachePixels": 16777216
       },
       "notes": "Batang/Hancom font mapping sample for CanvasKit text fallback parity.",
       "browserParityThresholds": {
@@ -558,7 +558,7 @@
         "maxColdDocumentLoadAndInitialRenderMs": 30000,
         "maxWarmReplayMs": 5000,
         "maxWarmRendererDurationMs": 4000,
-        "maxImageCachePixels": 67108864
+        "maxImageCachePixels": 16777216
       },
       "canvaskitReadinessExpectations": {
         "glyphOutlinePayloadKinds": [
@@ -714,7 +714,7 @@
         "maxColdDocumentLoadAndInitialRenderMs": 30000,
         "maxWarmReplayMs": 5000,
         "maxWarmRendererDurationMs": 4000,
-        "maxImageCachePixels": 67108864
+        "maxImageCachePixels": 16777216
       },
       "notes": "Baseline table layout, borders, and cell clipping.",
       "browserParityThresholds": {
@@ -997,7 +997,7 @@
         "maxColdDocumentLoadAndInitialRenderMs": 30000,
         "maxWarmReplayMs": 5000,
         "maxWarmRendererDurationMs": 4000,
-        "maxImageCachePixels": 67108864
+        "maxImageCachePixels": 16777216
       },
       "notes": "Image crop and fill semantics.",
       "browserParityThresholds": {

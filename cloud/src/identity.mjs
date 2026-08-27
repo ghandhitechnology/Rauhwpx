@@ -6,13 +6,19 @@ export function loadOrCreateServerIdentity(dataDirectory) {
   mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
   const privatePath = path.join(dataDirectory, 'server-ed25519-private.pem');
   const publicPath = path.join(dataDirectory, 'server-ed25519-public.pem');
-  if (!existsSync(privatePath) || !existsSync(publicPath)) {
+  if (!existsSync(privatePath)) {
     const pair = generateKeyPairSync('ed25519');
-    writeFileSync(privatePath, pair.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
-    writeFileSync(publicPath, pair.publicKey.export({ type: 'spki', format: 'pem' }), { mode: 0o644 });
+    try {
+      writeFileSync(privatePath, pair.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600, flag: 'wx' });
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+    }
   }
   const privateKey = readFileSync(privatePath, 'utf8');
-  const publicKey = readFileSync(publicPath, 'utf8');
+  const publicKey = createPublicKey(privateKey).export({ type: 'spki', format: 'pem' });
+  if (!existsSync(publicPath) || readFileSync(publicPath, 'utf8') !== publicKey) {
+    writeFileSync(publicPath, publicKey, { mode: 0o644 });
+  }
   const encodedKey = createPublicKey(publicKey).export({ type: 'spki', format: 'der' }).toString('base64url');
   const serverPublicKey = `ed25519:${encodedKey}`;
   const serverId = createHash('sha256').update(encodedKey).digest('hex').slice(0, 24);

@@ -34,6 +34,7 @@ function parseStringArray(guardSrc: string, name: string): string[] {
 const guardSrc = source('src/core/mutation-method-registry.ts');
 const MUTATING = parseStringArray(guardSrc, 'MUTATING_METHODS');
 const EXCLUDED = parseStringArray(guardSrc, 'EXCLUDED_NON_DOCUMENT');
+const EDITOR_ROUTED = parseStringArray(guardSrc, 'EDITOR_ROUTED_MUTATING_METHODS');
 
 // ── (1) 드리프트: 브리지 공개 메서드 분류 강제 ──────────────────────────────
 
@@ -66,7 +67,7 @@ test('MUTATING_VERB 는 MUTATING_METHODS 전 항목을 커버한다(drift 사각
 });
 
 test('드리프트: 문서-변경형 브리지 공개 메서드는 모두 분류돼야 한다', () => {
-  const classified = new Set([...MUTATING, ...EXCLUDED]);
+  const classified = new Set([...MUTATING, ...EDITOR_ROUTED, ...EXCLUDED]);
   const unclassified = bridgePublicMethods()
     .filter((n) => MUTATING_VERB.test(n))
     .filter((n) => !classified.has(n));
@@ -80,7 +81,10 @@ test('드리프트: 문서-변경형 브리지 공개 메서드는 모두 분류
 });
 
 test('MUTATING_METHODS / EXCLUDED_NON_DOCUMENT 는 서로 겹치지 않는다', () => {
-  const dup = MUTATING.filter((m) => EXCLUDED.includes(m));
+  const allMutating = [...MUTATING, ...EDITOR_ROUTED];
+  const dup = allMutating.filter(
+    (method, index) => EXCLUDED.includes(method) || allMutating.indexOf(method) !== index,
+  );
   assert.deepEqual(dup, [], `양쪽에 중복 분류됨: ${dup.join(', ')}`);
 });
 
@@ -88,7 +92,7 @@ test('MUTATING_METHODS 는 모두 실제 브리지 공개 메서드여야 한다
   // 브리지에서 메서드가 rename/제거되면 목록의 옛 이름이 드리프트·원장 검사에서
   // 무의미해지므로(권위 목록 사각), 목록 항목이 전부 실재하는지 역방향으로 강제한다.
   const bridge = new Set(bridgePublicMethods());
-  const missing = MUTATING.filter((m) => !bridge.has(m));
+  const missing = [...MUTATING, ...EDITOR_ROUTED].filter((m) => !bridge.has(m));
   assert.deepEqual(
     missing,
     [],

@@ -3495,12 +3495,51 @@ fn korean_gothic_substitute(font_name: &str) -> Option<&'static str> {
 
 /// 폰트명으로 TTF/OTF 파일을 탐색한다.
 #[cfg(not(target_arch = "wasm32"))]
+fn normalized_font_lookup_name(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn matching_font_face_index(path: &std::path::Path, font_name: &str) -> Option<u32> {
+    let data = std::fs::read(path).ok()?;
+    let mut requested = font_local_aliases(font_name)
+        .into_iter()
+        .map(normalized_font_lookup_name)
+        .collect::<std::collections::BTreeSet<_>>();
+    requested.insert(normalized_font_lookup_name(font_name));
+    let face_count = ttf_parser::fonts_in_collection(&data).unwrap_or(1).min(256);
+    for face_index in 0..face_count {
+        let Ok(face) = ttf_parser::Face::parse(&data, face_index) else {
+            continue;
+        };
+        if face.names().into_iter().any(|name| {
+            matches!(
+                name.name_id,
+                ttf_parser::name_id::FAMILY
+                    | ttf_parser::name_id::FULL_NAME
+                    | ttf_parser::name_id::POST_SCRIPT_NAME
+                    | ttf_parser::name_id::TYPOGRAPHIC_FAMILY
+                    | ttf_parser::name_id::COMPATIBLE_FULL
+                    | ttf_parser::name_id::WWS_FAMILY
+            ) && name
+                .to_string()
+                .is_some_and(|value| requested.contains(&normalized_font_lookup_name(&value)))
+        }) {
+            return Some(face_index);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn find_font_file(
     font_name: &str,
     extra_paths: &[std::path::PathBuf],
-) -> Option<std::path::PathBuf> {
-    use std::path::Path;
-
+) -> Option<(std::path::PathBuf, u32)> {
     // 폰트명 → 파일명 후보 생성
     let candidates: Vec<String> = {
         let mut files: Vec<String> = known_font_filenames(font_name)
@@ -3533,6 +3572,16 @@ fn find_font_file(
         files
     };
 
+    // 정확한 파일 source는 이름 테이블의 family/full/PostScript 별칭으로 먼저
+    // 판별한다. 이 경로가 없으면 기존 디렉토리 파일명 후보 탐색을 사용한다.
+    for source in crate::renderer::font_paths::custom_font_sources(extra_paths) {
+        if crate::renderer::font_paths::is_font_file(&source) {
+            if let Some(face_index) = matching_font_face_index(&source, font_name) {
+                return Some((source, face_index));
+            }
+        }
+    }
+
     // [#2864] 탐색 경로(우선순위 순)는 renderer::font_paths 가 단일 정의한다.
     // 호출자 지정 → RHWP_FONT_PATH → OS 시스템 경로 → ttfs/opensource(최후 폴백).
     // 종전의 ttfs/hwp·ttfs/windows(로컬 전용)와 /mnt/c/Windows/Fonts(WSL2 전용)는
@@ -3547,7 +3596,8 @@ fn find_font_file(
         for candidate in &candidates {
             let path = dir.join(candidate);
             if path.exists() {
-                return Some(path);
+                let face_index = matching_font_face_index(&path, font_name).unwrap_or(0);
+                return Some((path, face_index));
             }
         }
     }
@@ -3650,11 +3700,11 @@ pub fn generate_font_style(
                     css.push_str(&line);
                     continue;
                 }
-                if let Some(font_path) = find_font_file(font_name, font_paths) {
+                if let Some((font_path, face_index)) = find_font_file(font_name, font_paths) {
                     if let Ok(font_data) = std::fs::read(&font_path) {
                         // codepoint → glyph ID 변환 (ttf-parser cmap 사용)
                         let mut remapper = subsetter::GlyphRemapper::new();
-                        if let Ok(face) = ttf_parser::Face::parse(&font_data, 0) {
+                        if let Ok(face) = ttf_parser::Face::parse(&font_data, face_index) {
                             // glyph 0 (.notdef) 항상 포함
                             remapper.remap(0);
                             for ch in chars {
@@ -3664,7 +3714,7 @@ pub fn generate_font_style(
                             }
                         }
                         // 서브셋 추출
-                        match subsetter::subset(&font_data, 0, &remapper) {
+                        match subsetter::subset(&font_data, face_index, &remapper) {
                             Ok(subset_data) => {
                                 let b64 =
                                     base64::engine::general_purpose::STANDARD.encode(&subset_data);
@@ -3713,7 +3763,7 @@ pub fn generate_font_style(
                     css.push_str(&line);
                     continue;
                 }
-                if let Some(font_path) = find_font_file(font_name, font_paths) {
+                if let Some((font_path, _face_index)) = find_font_file(font_name, font_paths) {
                     if let Ok(font_data) = std::fs::read(&font_path) {
                         let b64 = base64::engine::general_purpose::STANDARD.encode(&font_data);
                         css.push_str(&format!(

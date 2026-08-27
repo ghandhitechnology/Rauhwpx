@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.7.0"
   },
   "dependencies": {
     "puppeteer-core": "25.3.0"
@@ -12,7 +12,7 @@
   "scripts": {
     "start": "node src/main.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check src/*.mjs document-runtime/*.mjs worker/*.mjs install/*.mjs",
+    "check": "for f in src/*.mjs document-runtime/*.mjs worker/*.mjs install/*.mjs; do node --check \"$f\" || exit 1; done",
     "smoke:studio": "node document-runtime/smoke.mjs"
   }
 }

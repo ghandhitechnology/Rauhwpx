@@ -58,12 +58,12 @@ export class Scheduler {
     const runningSessions = this.sessionStore.database.prepare(`SELECT * FROM sessions WHERE status = 'running'`).all();
     for (const session of runningSessions) {
       if (session.takeover_requested_at && this.now() - session.takeover_requested_at >= TAKEOVER_ACK_TIMEOUT_MS) {
-        await this.runner.stop(session.sandbox_id);
+        if (session.sandbox_id) await this.runner.stop(session.sandbox_id);
         this.sessionStore.acknowledgeTakeover(session.id, { forced: true });
         continue;
       }
       if (session.pause_requested_at && this.now() - session.pause_requested_at >= PAUSE_ACK_TIMEOUT_MS) {
-        await this.runner.stop(session.sandbox_id);
+        if (session.sandbox_id) await this.runner.stop(session.sandbox_id);
         this.sessionStore.suspend(session.id, {
           code: 'PAUSE_TIMEOUT',
           message: 'Worker did not reach a stable pause boundary within five minutes',
@@ -71,7 +71,7 @@ export class Scheduler {
         continue;
       }
       if (session.started_at && this.now() >= session.started_at + session.max_duration_seconds * 1000) {
-        await this.runner.stop(session.sandbox_id);
+        if (session.sandbox_id) await this.runner.stop(session.sandbox_id);
         this.sessionStore.suspend(session.id, { code: 'DURATION_LIMIT', message: 'Session duration limit reached' });
         continue;
       }

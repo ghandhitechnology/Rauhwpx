@@ -63,8 +63,8 @@ test('Podman runner keeps private rootless networking, mounts only control socke
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-podman-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const calls = [];
-  const spawnProcess = (executable, args) => {
-    calls.push({ executable, args });
+  const spawnProcess = (executable, args, options = {}) => {
+    calls.push({ executable, args, env: options.env });
     const child = new EventEmitter();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
@@ -111,6 +111,13 @@ test('Podman runner keeps private rootless networking, mounts only control socke
   assert.ok(args.includes('--read-only'));
   assert.ok(args.includes('max-size=1048576'));
   assert.ok(args.some((value) => value.includes('/workspace:rw,size=2048')));
+  assert.equal(args.includes('--env'), true);
+  const tokenIndex = args.indexOf('RAUHWpx_WORKER_TOKEN');
+  assert.ok(tokenIndex > 0 && args[tokenIndex - 1] === '--env');
+  assert.equal(args.some((value) => String(value).includes('worker-token')), false);
+  assert.equal(calls[0].env?.RAUHWpx_WORKER_TOKEN, 'worker-token');
+  const nameIndex = args.indexOf('--name');
+  assert.match(args[nameIndex + 1], /^rauhwpx-[a-f0-9]{32}$/);
   const workspaceTmpfs = args[args.indexOf('--tmpfs') + 1];
   const secondTmpfsIndex = args.indexOf('--tmpfs', args.indexOf('--tmpfs') + 1);
   const temporaryTmpfs = args[secondTmpfsIndex + 1];
@@ -394,4 +401,23 @@ test('provider environments precreate every private CLI state directory', async 
       assert.equal(stat.mode & 0o777, 0o700, directory);
     }
   }
+});
+
+test('unreferenced blob delete is gated on the row actually disappearing', async (t) => {
+  const { root, database } = await fixture(t);
+  const blobs = new BlobStore(database, { root: path.join(root, 'objects') });
+  database.prepare(`INSERT INTO devices(id, name, created_at, last_seen_at) VALUES ('device', 'Device', 1, 1)`).run();
+  const documentBytes = Buffer.from('keep-me');
+  const digest = createHash('sha256').update(documentBytes).digest('hex');
+  const initialized = await blobs.initUpload({
+    deviceId: 'device', sha256: digest, size: documentBytes.length, name: 'doc', kind: 'document',
+  });
+  await blobs.appendChunk({ uploadId: initialized.uploadId, deviceId: 'device', offset: 0, bytes: documentBytes });
+  database.prepare('UPDATE blobs SET ref_count = 1 WHERE sha256 = ?').run(digest);
+  const storagePath = blobs.get(digest).storage_path;
+  assert.equal(await blobs.removeUnreferenced(digest), false);
+  await fs.access(storagePath);
+  database.prepare('UPDATE blobs SET ref_count = 0 WHERE sha256 = ?').run(digest);
+  assert.equal(await blobs.removeUnreferenced(digest), true);
+  await assert.rejects(fs.access(storagePath), { code: 'ENOENT' });
 });

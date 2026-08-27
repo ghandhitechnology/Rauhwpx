@@ -104,6 +104,9 @@ export function buildCodexArgv(opts, threadId) {
     ...(opts.effort
       ? ['-c', `model_reasoning_effort=${JSON.stringify(opts.effort)}`]
       : []),
+    ...(opts.serviceTier === 'fast'
+      ? ['-c', 'service_tier="fast"']
+      : []),
   ];
   const common = [
     '--json', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules',
@@ -462,6 +465,11 @@ export function createCodexSession(opts, {
       if (turnOpen) throw new Error('Permission profile can only change between turns');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
       opts.permissionProfile = profile;
+    },
+    setServiceTier(tier) {
+      if (turnOpen) throw new Error('Service tier can only change between turns');
+      if (tier !== 'standard' && tier !== 'fast') throw new Error(`Unknown service tier: ${tier}`);
+      opts.serviceTier = tier;
     },
     async setExecutionMode(mode) {
       if (turnOpen) throw new Error('Execution mode can only change between turns');

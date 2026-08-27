@@ -40,6 +40,8 @@ export function openDatabase(filename) {
   for (const migration of migrations) {
     if (applied.has(migration.version)) continue;
     transaction(database, () => {
+      const already = database.prepare('SELECT version FROM schema_migrations WHERE version = ?').get(migration.version);
+      if (already) return;
       database.exec(migration.sql);
       database.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(migration.version, Date.now());
     });

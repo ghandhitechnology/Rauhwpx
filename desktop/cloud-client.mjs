@@ -682,7 +682,7 @@ export class CloudClient {
     if (!bytes.length || bytes.length > MAX_RESULT_BYTES) throw new CloudHttpError('Cloud result size is invalid');
     const expected = response.headers.get('x-content-sha256') || '';
     const sha256 = digest(bytes);
-    if (expected && expected !== sha256) throw new CloudHttpError('Cloud result digest does not match');
+    if (!expected || expected !== sha256) throw new CloudHttpError('Cloud result digest does not match');
     const encodedName = response.headers.get('x-document-name') || '';
     let name = encodedName;
     try { name = decodeURIComponent(encodedName); } catch {}

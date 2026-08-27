@@ -110,6 +110,14 @@ test('plan document writes are blocked until implementing', () => {
     category: 'document-write', tool: 'insert_text', workflow: 'plan', phase: 'implementing',
     expectedEpoch: 7, receivedEpoch: 7,
   }), true);
+  assert.throws(() => authorizeToolCall({
+    category: 'instruction-write', tool: 'update_agent_instructions', workflow: 'plan', phase: 'planning',
+    expectedEpoch: 7, receivedEpoch: 7,
+  }), (error) => error.code === 'PLAN_WRITE_BLOCKED');
+  assert.equal(authorizeToolCall({
+    category: 'instruction-write', tool: 'update_agent_instructions', workflow: 'plan', phase: 'implementing',
+    expectedEpoch: 7, receivedEpoch: 7,
+  }), true);
 });
 
 test('plan calls fail closed on missing/stale epochs; direct calls keep legacy compatibility', () => {

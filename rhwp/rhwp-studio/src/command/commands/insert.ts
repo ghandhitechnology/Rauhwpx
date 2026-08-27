@@ -12,6 +12,12 @@ import type { ShapeType } from '@/ui/shape-picker';
 import type { CellPathLike } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
 import type { InputHandler } from '@/engine/input-handler';
+import {
+  canGroupTopLevelBodyObjects,
+  canUngroupTopLevelBodyObject,
+  isTopLevelLayerOrderTarget,
+  objectAddressScope,
+} from '@/core/object-address';
 
 /** 스텁 커맨드 생성 헬퍼 */
 function stub(id: string, label: string, icon?: string, shortcut?: string): CommandDef {
@@ -427,52 +433,52 @@ export const insertCommands: CommandDef[] = [
   {
     id: 'insert:arrange-front',
     label: '맨 앞으로',
-    canExecute: (ctx) => ctx.inPictureObjectSelection,
+    canExecute: (ctx) => ctx.inPictureObjectSelection && ctx.canArrangeSelectedObject,
     execute(services) {
       const ih = services.getInputHandler();
       if (!ih) return;
       const ref = ih.getSelectedPictureRef();
-      if (!ref || ref.type !== 'shape') return;
-      recordObjectMutation(ih, 'changeZOrder', (wasm) => wasm.changeShapeZOrder(ref.sec, ref.ppi, ref.ci, 'front'));
+      if (!ref || !isTopLevelLayerOrderTarget(ref)) return;
+      recordObjectMutation(ih, 'changeZOrder', (wasm) => wasm.changeObjectZOrder(ref.sec, ref.ppi, ref.ci, 'front'));
       ih.exitPictureObjectSelectionAndAfterEdit();
     },
   },
   {
     id: 'insert:arrange-forward',
     label: '앞으로',
-    canExecute: (ctx) => ctx.inPictureObjectSelection,
+    canExecute: (ctx) => ctx.inPictureObjectSelection && ctx.canArrangeSelectedObject,
     execute(services) {
       const ih = services.getInputHandler();
       if (!ih) return;
       const ref = ih.getSelectedPictureRef();
-      if (!ref || ref.type !== 'shape') return;
-      recordObjectMutation(ih, 'changeZOrder', (wasm) => wasm.changeShapeZOrder(ref.sec, ref.ppi, ref.ci, 'forward'));
+      if (!ref || !isTopLevelLayerOrderTarget(ref)) return;
+      recordObjectMutation(ih, 'changeZOrder', (wasm) => wasm.changeObjectZOrder(ref.sec, ref.ppi, ref.ci, 'forward'));
       ih.exitPictureObjectSelectionAndAfterEdit();
     },
   },
   {
     id: 'insert:arrange-backward',
     label: '뒤로',
-    canExecute: (ctx) => ctx.inPictureObjectSelection,
+    canExecute: (ctx) => ctx.inPictureObjectSelection && ctx.canArrangeSelectedObject,
     execute(services) {
       const ih = services.getInputHandler();
       if (!ih) return;
       const ref = ih.getSelectedPictureRef();
-      if (!ref || ref.type !== 'shape') return;
-      recordObjectMutation(ih, 'changeZOrder', (wasm) => wasm.changeShapeZOrder(ref.sec, ref.ppi, ref.ci, 'backward'));
+      if (!ref || !isTopLevelLayerOrderTarget(ref)) return;
+      recordObjectMutation(ih, 'changeZOrder', (wasm) => wasm.changeObjectZOrder(ref.sec, ref.ppi, ref.ci, 'backward'));
       ih.exitPictureObjectSelectionAndAfterEdit();
     },
   },
   {
     id: 'insert:arrange-back',
     label: '맨 뒤로',
-    canExecute: (ctx) => ctx.inPictureObjectSelection,
+    canExecute: (ctx) => ctx.inPictureObjectSelection && ctx.canArrangeSelectedObject,
     execute(services) {
       const ih = services.getInputHandler();
       if (!ih) return;
       const ref = ih.getSelectedPictureRef();
-      if (!ref || ref.type !== 'shape') return;
-      recordObjectMutation(ih, 'changeZOrder', (wasm) => wasm.changeShapeZOrder(ref.sec, ref.ppi, ref.ci, 'back'));
+      if (!ref || !isTopLevelLayerOrderTarget(ref)) return;
+      recordObjectMutation(ih, 'changeZOrder', (wasm) => wasm.changeObjectZOrder(ref.sec, ref.ppi, ref.ci, 'back'));
       ih.exitPictureObjectSelectionAndAfterEdit();
     },
   },
@@ -484,7 +490,7 @@ export const insertCommands: CommandDef[] = [
       const ih = services.getInputHandler();
       if (!ih) return;
       const ref = ih.getSelectedPictureRef();
-      if (!ref) return;
+      if (!ref || !isObjectDeleteTargetSupported(ref)) return;
       recordObjectMutation(ih, 'deleteObject', (wasm) => {
         if (ref.type === 'shape' || ref.type === 'line' || ref.type === 'group') {
           wasm.deleteShapeControl(ref.sec, ref.ppi, ref.ci);
@@ -503,12 +509,12 @@ export const insertCommands: CommandDef[] = [
   {
     id: 'insert:group-shapes',
     label: '개체 묶기',
-    canExecute: (ctx) => ctx.inPictureObjectSelection,
+    canExecute: (ctx) => ctx.inPictureObjectSelection && ctx.canGroupSelectedObjects,
     execute(services) {
       const ih = services.getInputHandler();
       if (!ih) return;
       const refs = ih.getSelectedPictureRefs();
-      if (refs.length < 2) return;
+      if (!canGroupTopLevelBodyObjects(refs)) return;
       const sec = refs[0].sec;
       const targets = refs.map(r => ({ paraIdx: r.ppi, controlIdx: r.ci }));
       try {
@@ -525,12 +531,12 @@ export const insertCommands: CommandDef[] = [
   {
     id: 'insert:ungroup-shapes',
     label: '개체 풀기',
-    canExecute: (ctx) => ctx.inPictureObjectSelection,
+    canExecute: (ctx) => ctx.inPictureObjectSelection && ctx.canUngroupSelectedObject,
     execute(services) {
       const ih = services.getInputHandler();
       if (!ih) return;
       const ref = ih.getSelectedPictureRef();
-      if (!ref || ref.type !== 'group') return;
+      if (!ref || !canUngroupTopLevelBodyObject(ref)) return;
       try {
         recordObjectMutation(ih, 'ungroupShape', (wasm) => wasm.ungroupShape(ref.sec, ref.ppi, ref.ci));
         ih.exitPictureObjectSelectionAndAfterEdit();
@@ -581,8 +587,15 @@ type PictureRef = {
   ci: number;
   type: string;
   cellPath?: CellPathLike;
+  noteRef?: unknown;
+  memoRef?: unknown;
   headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
 };
+
+function isObjectDeleteTargetSupported(ref: PictureRef): boolean {
+  const scope = objectAddressScope(ref);
+  return scope === 'body' || (scope === 'cell' && ref.type === 'image');
+}
 
 /** 선택 개체의 속성을 조회/변경 헬퍼 (shape/picture 분기) */
 function getProps(services: import('../types').CommandServices, ref: PictureRef): Record<string, unknown> {

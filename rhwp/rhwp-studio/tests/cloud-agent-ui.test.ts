@@ -51,6 +51,9 @@ test('cloud transfer includes portable timeline, exact document bytes and refere
   assert.match(sidebar, /timeline: exportCloudTimeline\(currentThread\)/);
   assert.match(sidebar, /const bytes = await cloudController\.readReference\(descriptor\)/);
   assert.match(sidebar, /references\.push\(\{ \.\.\.descriptor, bytes \}\)/);
+  assert.match(sidebar, /permissionProfile: 'unrestricted'/);
+  const transfer = sidebar.match(/async function transferCurrentSession\(\)[\s\S]*?\n  function ensureCloudTransferIntent/)?.[0] ?? '';
+  assert.doesNotMatch(transfer, /setPermissionProfile\('unrestricted'\)/);
   assert.match(main, /await saveCurrentDocument\(commandServices\)/);
   assert.match(main, /exportDocumentForFormat\(wasm, format\)/);
 });
@@ -68,12 +71,20 @@ test('desktop close waits for a requested handoff through the local turn boundar
   assert.match(sidebar, /awaitPendingCloudTransferForClose\(\): Promise<void>/);
   assert.match(sidebar, /if \(turnRunning\) \{[\s\S]*cloudTransferPending = true;[\s\S]*ensureCloudTransferCloseWaiter\(\)/);
   assert.match(sidebar, /if \(cloudTransferPending\) requestCloudTransfer\(\)/);
+  const cancel = sidebar.match(/function cancelPendingCloudTransfer\(\): void \{[\s\S]*?\n  \}/)?.[0] ?? '';
+  const pendingOff = cancel.indexOf('cloudTransferPending = false;');
+  const waitingOff = cancel.indexOf('setWaitingForLocalTurn(false)');
+  const clearOff = cancel.indexOf('clearCloudTransferIntent');
+  assert.ok(pendingOff >= 0 && waitingOff >= 0 && clearOff > pendingOff && clearOff > waitingOff);
+  assert.match(cancel, /failPendingCloudTransfer/);
   assert.match(main, /await awaitPendingCloudTransferForClose\(\)/);
   assert.match(main, /return false;[\s\S]*const allowClose = await canReplaceCurrentDocument\(\)/);
   assert.match(sidebar, /setTransferIntent\(\{ \.\.\.intent, pending: true \}\)/);
   assert.match(sidebar, /await clearCloudTransferIntent\(\)/);
   assert.match(cloudUi, /refresh\(selectedScope\(\)\)/);
   assert.match(desktop, /cloudSetTransferIntent/);
+  const desktopMainSource = readFileSync(new URL('../../../desktop/main.mjs', import.meta.url), 'utf8');
+  assert.match(desktopMainSource, /CLOUD_CLOSE_WAIT_MS = 120_000/);
 });
 
 test('result preview requires explicit resolution and external conflicts cannot replace', () => {
@@ -82,7 +93,9 @@ test('result preview requires explicit resolution and external conflicts cannot 
   assert.match(cloudUi, /resolveResult\('keep-both'\)/);
   assert.match(cloudUi, /resolveResult\('replace'\)/);
   assert.match(main, /open-document-bytes/);
-  assert.match(main, /resolution\.action === 'replace'/);
+  assert.match(main, /resolution\.action !== 'replace'/);
+  assert.match(main, /requestId/);
+  assert.match(main, /open-document-bytes:done/);
   assert.match(desktop, /cloudResolveResult/);
   assert.match(desktop, /cloudReadReference/);
 });

@@ -133,6 +133,14 @@ export interface DeferredPaginationResult {
   pageCount: number;
 }
 
+export interface WebCanvasImageCacheStats {
+  decodedCanvasEntries: number;
+  decodedCanvasPixels: number;
+  decodedCanvasRgbaBytes: number;
+  htmlImageEntries: number;
+  htmlImageSourceBytes: number;
+}
+
 import { fontFamilyChainForDisplay } from './font-substitution';
 import type { FileSystemFileHandleLike } from '@/command/file-system-access';
 import {
@@ -193,6 +201,7 @@ function installCanvasFontSubstitution(): void {
 
 export class WasmBridge {
   private doc: HwpDocument | null = null;
+  private documentGeneration = 0;
   private initialized = false;
   private _fileName = FALLBACK_DOCUMENT_FILE_NAME;
   private _currentFileHandle: FileSystemFileHandleLike | null = null;
@@ -271,6 +280,7 @@ export class WasmBridge {
    * 비교 상세 창 등 보조 WasmBridge 인스턴스에서 반복 로드 시 메모리 누수를 줄이기 위해 사용한다.
    */
   releaseDocument(): void {
+    this.documentGeneration++;
     if (this.doc) {
       try {
         this.doc.free();
@@ -303,7 +313,7 @@ export class WasmBridge {
       // [Task #741 후속] 외부 file path 그림은 dev 환경에서 fetch로 채운다 (basename 기준,
       // HWP 파일과 같은 dir의 image를 찾는 방식 — dev 환경에서는 samples/ 아래
       // Vite asset). fetch하지 못한 그림은 placeholder로 표시.
-      void this.populateExternalImagesFromDevServer();
+      void this.populateExternalImagesFromDevServer(nextDoc, this.documentGeneration);
 
       return info;
     } catch (error) {
@@ -324,20 +334,35 @@ export class WasmBridge {
     }
   }
 
+  /** 현재 파일 바인딩을 유지한 채 완전히 파싱된 문서 내용으로 교체한다. */
+  replaceContentFromBytes(data: Uint8Array): DocumentInfo {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const doc = this.doc;
+    const raw = doc.replaceContentFromBytes(data);
+    const generation = ++this.documentGeneration;
+    this.ensureParagraphStableIds();
+    void this.populateExternalImagesFromDevServer(doc, generation);
+    return JSON.parse(raw) as DocumentInfo;
+  }
+
   /** [Task #741 후속] 외부 file path 그림을 dev 서버에서 fetch + inject. */
-  private async populateExternalImagesFromDevServer(): Promise<void> {
-    if (!this.doc) return;
+  private async populateExternalImagesFromDevServer(
+    doc: HwpDocument,
+    generation: number,
+  ): Promise<void> {
+    if (this.doc !== doc || this.documentGeneration !== generation) return;
     // [#3348] /samples/ fetch는 vite dev 서버 전용(server.fs.allow). 프로덕션 빌드
     // (Pages·확장)에는 경로가 없어 실패 로그만 쌓이므로 dev 외에는 시도하지 않는다.
     // 프로덕션 사이드카 공급 UX는 #3313 잔여 범위.
     if (!import.meta.env.DEV) return;
     try {
-      const basenamesJson = this.doc.getExternalImageBasenames();
+      const basenamesJson = doc.getExternalImageBasenames();
       const basenames: string[] = JSON.parse(basenamesJson);
       if (basenames.length === 0) return;
       console.log(`[WasmBridge] 외부 image ${basenames.length}개 fetch 시도`);
       let totalInjected = 0;
       for (const name of basenames) {
+        if (this.doc !== doc || this.documentGeneration !== generation) return;
         try {
           const url = `/samples/${name}`;
           const res = await fetch(url);
@@ -346,11 +371,12 @@ export class WasmBridge {
             continue;
           }
           const buf = await res.arrayBuffer();
+          if (this.doc !== doc || this.documentGeneration !== generation) return;
           // [Task #741 후속] OS 절대 경로는 X-File-Path header로 전달받아 dialog에
           // 표시해 한컴 viewer와 정합 (resolved local path 기준).
           const filePathHeader = res.headers.get('X-File-Path');
           const displayPath = filePathHeader ? decodeURI(filePathHeader) : '';
-          const injected = this.doc.injectExternalImage(name, new Uint8Array(buf), displayPath);
+          const injected = doc.injectExternalImage(name, new Uint8Array(buf), displayPath);
           totalInjected += injected;
           console.log(`[WasmBridge] 외부 image inject: ${name} → ${displayPath || url} (${buf.byteLength} bytes, ${injected}개)`);
         } catch (e) {
@@ -359,7 +385,7 @@ export class WasmBridge {
       }
       // [#3313] 주입은 첫 렌더 이후에 끝나므로, 주입이 있었으면 뷰 갱신 훅을 호출한다.
       // 훅 없이는 페이지 트리 캐시만 무효화되고 화면은 재요청 전까지 이전 프레임을 유지한다.
-      if (totalInjected > 0) {
+      if (totalInjected > 0 && this.doc === doc && this.documentGeneration === generation) {
         this.onExternalImagesInjected?.(totalInjected);
       }
     } catch (e) {
@@ -378,6 +404,7 @@ export class WasmBridge {
       this.doc = HwpDocument.createEmpty();
     }
     const info: DocumentInfo = JSON.parse(this.doc.createBlankDocument());
+    this.documentGeneration++;
     this.ensureParagraphStableIds();
     this._fileName = NEW_DOCUMENT_FILE_NAME;
     this._currentFileHandle = null;
@@ -490,6 +517,43 @@ export class WasmBridge {
     }
   }
 
+  /** 아직 바이트를 불러오지 않은 항목을 포함해 문서가 보존한 외부 이미지 종속성. */
+  getExternalImageReferences(): Array<{
+    key?: string;
+    binDataId?: number;
+    originalPath?: string;
+    basename?: string;
+    extension?: string;
+    loaded: boolean;
+  }> {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const getReferences = (this.doc as any).getExternalImageReferences;
+    if (typeof getReferences !== 'function') {
+      throw new Error('문서의 외부 이미지 종속성 정보를 사용할 수 없습니다');
+    }
+    const raw = getReferences.call(this.doc);
+    if (typeof raw !== 'string') {
+      throw new Error('문서의 외부 이미지 종속성 정보 형식이 올바르지 않습니다');
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error('문서의 외부 이미지 종속성 정보를 읽지 못했습니다');
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error('문서의 외부 이미지 종속성 정보 형식이 올바르지 않습니다');
+    }
+    return parsed.filter((reference): reference is {
+      key?: string;
+      binDataId?: number;
+      originalPath?: string;
+      basename?: string;
+      extension?: string;
+      loaded: boolean;
+    } => Boolean(reference && typeof reference === 'object' && typeof reference.loaded === 'boolean'));
+  }
+
   /** 사용자 명시 요청에 의한 lineseg reflow (#177). 반환: reflow된 문단 수. */
   reflowLinesegs(): number {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
@@ -560,6 +624,27 @@ export class WasmBridge {
   getPageInfo(pageNum: number): PageInfo {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.getPageInfo(pageNum));
+  }
+
+  getAllPageInfo(): PageInfo[] {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const doc = this.doc as unknown as { getAllPageInfo?: () => string };
+    if (typeof doc.getAllPageInfo === 'function') {
+      const pages: unknown = JSON.parse(doc.getAllPageInfo());
+      if (!Array.isArray(pages)) {
+        throw new Error('[WasmBridge] 전체 페이지 정보가 배열이 아닙니다');
+      }
+      return pages as PageInfo[];
+    }
+
+    const pages: PageInfo[] = [];
+    for (let page = 0; page < this.pageCount; page++) pages.push(this.getPageInfo(page));
+    return pages;
+  }
+
+  getWebCanvasImageCacheStats(): WebCanvasImageCacheStats {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(this.doc.getWebCanvasImageCacheStats()) as WebCanvasImageCacheStats;
   }
 
   refreshLayout(): void {
@@ -1901,9 +1986,9 @@ export class WasmBridge {
     return JSON.parse(this.doc.deleteEquationControl(sec, para, ci));
   }
 
-  changeShapeZOrder(sec: number, para: number, ci: number, operation: string): { ok: boolean; zOrder?: number } {
+  changeObjectZOrder(sec: number, para: number, ci: number, operation: string): { ok: boolean; zOrder?: number } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    return JSON.parse(this.doc.changeShapeZOrder(sec, para, ci, operation));
+    return JSON.parse(this.doc.changeObjectZOrder(sec, para, ci, operation));
   }
 
   groupShapes(sec: number, targets: { paraIdx: number; controlIdx: number }[]): { ok: boolean; paraIdx: number; controlIdx: number } {
@@ -2695,9 +2780,20 @@ export class WasmBridge {
     return this.doc.saveSnapshot();
   }
 
+  shareSnapshot(sourceId: number): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const document = this.doc as HwpDocument & {
+      shareSnapshot?: (id: number) => number;
+    };
+    return document.shareSnapshot?.(sourceId) ?? document.saveSnapshot();
+  }
+
   restoreSnapshot(id: number): void {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    this.doc.restoreSnapshot(id);
+    const doc = this.doc;
+    doc.restoreSnapshot(id);
+    const generation = ++this.documentGeneration;
+    void this.populateExternalImagesFromDevServer(doc, generation);
   }
 
   discardSnapshot(id: number): void {

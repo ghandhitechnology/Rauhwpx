@@ -3,8 +3,17 @@ import { createCloudRuntime } from './runtime.mjs';
 
 const config = parseConfig();
 const runtime = createCloudRuntime(config);
-const started = await runtime.start();
-console.log(JSON.stringify({ event: 'cloud.started', ...started }));
+try {
+  const started = await runtime.start();
+  console.log(JSON.stringify({ event: 'cloud.started', ...started }));
+} catch (error) {
+  console.error(JSON.stringify({
+    event: 'cloud.start_failed',
+    message: error.message,
+    code: error.code,
+  }));
+  process.exit(1);
+}
 
 let stopping = false;
 async function stop(signal) {
@@ -14,5 +23,14 @@ async function stop(signal) {
   await runtime.stop();
 }
 
-process.once('SIGINT', () => { void stop('SIGINT').then(() => process.exit(0)); });
-process.once('SIGTERM', () => { void stop('SIGTERM').then(() => process.exit(0)); });
+function shutdown(signal) {
+  stop(signal).then(
+    () => process.exit(0),
+    (error) => {
+      console.error(JSON.stringify({ event: 'cloud.stop_failed', signal, message: error.message }));
+      process.exit(1);
+    },
+  );
+}
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));

@@ -21,7 +21,7 @@ import {
   saveCurrentDocument,
 } from '@/command/commands/file';
 import { exportDocumentForFormat } from '@/command/save-document-format';
-import { editCommands } from '@/command/commands/edit';
+import { editCommands, openClassicDocumentHistory } from '@/command/commands/edit';
 import {
   setBasicToolboxExpanded,
   syncClipMenu,
@@ -51,10 +51,17 @@ import { addRecentDoc, listRecentDocs } from '@/recent/recent-store';
 import { showDropConfirmDialog } from '@/ui/drop-confirm-dialog';
 import { initRhwpDev } from '@/core/rhwp-dev';
 import { DocumentDirtyState } from '@/core/document-dirty-state';
-import { initThemeSync, setThemeMode, getThemeMode, getEffectiveTheme } from '@/core/theme';
+import {
+  applyTheme,
+  getEffectiveTheme,
+  getThemeMode,
+  initThemeSync,
+  setThemeMode,
+  syncThemeMenu,
+} from '@/core/theme';
 import { analyzeDocumentFonts } from '@/core/document-font-status';
 import { detectLocalFonts, getLocalFontState, loadStoredLocalFonts } from '@/core/local-fonts';
-import { userSettings } from '@/core/user-settings';
+import { userSettings, type EditorScalarSettings } from '@/core/user-settings';
 import { AutosaveManager, type AutosaveScheduleSettings, type AutosaveStatus } from '@/recovery/autosave-manager';
 import {
   clearRecoverableAutosaveDrafts,
@@ -83,10 +90,12 @@ import {
   cancelDesktopDocument,
   captureDesktopNativeDroppedFile,
   commitDesktopDocument,
+  getNativeFileHandleVerifiedDocumentId,
   getRendererSessionContext,
   installDesktopCloseHandling,
   installDesktopFileHandling,
   installDesktopGeneratedDocumentHandling,
+  installDesktopPlainTextPasteHandling,
   installDesktopWindowChrome,
   installWebAppShell,
   pickDesktopNativeOpenFile,
@@ -99,11 +108,32 @@ import {
 import { initAgentBridge, type AgentBridge, type ChatHistoryEntry } from './agent/bridge.ts';
 import type { AgentName } from './agent/types.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
+import { showEditingSettingsFallback } from './ui/agent-sidebar/settings-editing-fallback.ts';
 import { AGENT_LABEL } from './ui/agent-sidebar/providers.ts';
 import { initInlinePrompt } from './agent/inline-prompt.ts';
+import { DocumentVersionController, persistActiveBranch } from './versioning/controller.ts';
+import {
+  VersionGraphStore,
+  documentId as versionDocumentId,
+  isPortableHistoryBytes,
+  isPortableHistoryFileName,
+  openPortableHistoryBundle,
+} from './versioning/index.ts';
 import type { AgentEditingLease } from './agent/types.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
 import type { CloudDownloadResult, CloudResultResolution, CloudTakeoverPayload } from './cloud/types.ts';
+import {
+  contextualEditingToolbarMode,
+  contextualObjectCommandEnabled,
+  type ContextualEditingToolbarMode,
+} from '@/ui/contextual-editing-toolbar';
+import {
+  canGroupTopLevelBodyObjects,
+  canUngroupTopLevelBodyObject,
+  isTopLevelBodyObject,
+  isTopLevelLayerOrderTarget,
+  objectAddressScope,
+} from '@/core/object-address';
 
 const wasm = new WasmBridge();
 const eventBus = new EventBus();
@@ -140,6 +170,12 @@ async function completeHostSave(fileName?: string): Promise<{ ok: true; wasDirty
   const wasDirty = documentState.isDirty();
   if (fileName) wasm.fileName = fileName;
   documentState.markClean('host-save');
+  eventBus.emit('document-context-changed');
+  eventBus.emit('document-saved', {
+    reason: 'host-save',
+    fileName: wasm.fileName,
+    sourceFormat: wasm.getSourceFormat(),
+  });
   await autosaveManager.discardCurrentDraft('host-save');
   return { ok: true, wasDirty };
 }
@@ -203,6 +239,8 @@ function getContext(): EditorContext {
   const hasDoc = wasm.pageCount > 0;
   const canEditFormField = inputHandler?.canEditCurrentFormField() ?? false;
   const isFormMode = editMode === 'form';
+  const selectedObject = inputHandler?.getSelectedPictureRef() ?? null;
+  const selectedObjects = inputHandler?.getSelectedPictureRefs() ?? [];
   return {
     hasDocument: hasDoc,
     hasSelection: inputHandler?.hasSelection() ?? false,
@@ -213,6 +251,9 @@ function getContext(): EditorContext {
     hasTableTransposeClipboard: wasm.hasTableTransposeClipboard(),
     inTableObjectSelection: inputHandler?.isInTableObjectSelection() ?? false,
     inPictureObjectSelection: inputHandler?.isInPictureObjectSelection() ?? false,
+    canArrangeSelectedObject: !!selectedObject && isTopLevelLayerOrderTarget(selectedObject),
+    canGroupSelectedObjects: canGroupTopLevelBodyObjects(selectedObjects),
+    canUngroupSelectedObject: canUngroupTopLevelBodyObject(selectedObject),
     inField: inputHandler?.isInField() ?? false,
     isEditable: !documentReadOnly && !agentEditingLease.active && (!isFormMode || canEditFormField),
     readOnly: documentReadOnly,
@@ -490,23 +531,49 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
   });
 }
 
-function applyCloudResult(result: CloudDownloadResult, resolution: CloudResultResolution): void {
-  if (resolution.action === 'replace') {
-    eventBus.emit('open-document-bytes', {
-      bytes: resolution.bytes ?? result.bytes,
-      fileName: result.fileName,
-      skipUnsavedGuard: true,
+function applyCloudResult(result: CloudDownloadResult, resolution: CloudResultResolution): Promise<void> {
+  if (resolution.action !== 'replace') {
+    if (resolution.action === 'keep-both') {
+      const copy = resolution.preservedCopyName ?? result.preservedCopyName ?? resolution.path ?? result.fileName;
+      const reason = resolution.conflict === 'external-change' ? '원본 변경을 감지해 ' : '';
+      showToast({ message: `${reason}원본과 ${copy}을 모두 보관했습니다.`, durationMs: 4500 });
+      return Promise.resolve();
+    }
+    showToast({ message: '클라우드 결과를 버렸습니다.', durationMs: 3000 });
+    return Promise.resolve();
+  }
+  const requestId = `cloud-result-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  const opened = new Promise<void>((resolve, reject) => {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const off = eventBus.on('open-document-bytes:done', (payload) => {
+      const outcome = payload as { requestId?: string; ok: boolean; error?: string };
+      if (outcome.requestId !== requestId) return;
+      off();
+      if (timeout) clearTimeout(timeout);
+      if (outcome.ok) resolve();
+      else reject(new Error(outcome.error || '클라우드 결과 열기가 취소되었습니다.'));
     });
-    showToast({ message: `${result.fileName}에 클라우드 결과를 반영했습니다.`, durationMs: 3500 });
-    return;
-  }
-  if (resolution.action === 'keep-both') {
-    const copy = resolution.preservedCopyName ?? result.preservedCopyName ?? resolution.path ?? result.fileName;
-    const reason = resolution.conflict === 'external-change' ? '원본 변경을 감지해 ' : '';
-    showToast({ message: `${reason}원본과 ${copy}을 모두 보관했습니다.`, durationMs: 4500 });
-    return;
-  }
-  showToast({ message: '클라우드 결과를 버렸습니다.', durationMs: 3000 });
+    timeout = setTimeout(() => {
+      off();
+      reject(new Error('클라우드 결과 열기 시간이 초과되었습니다.'));
+    }, 90_000);
+  });
+  eventBus.emit('open-document-bytes', {
+    bytes: resolution.bytes ?? result.bytes,
+    fileName: result.fileName,
+    fileHandle: null,
+    requestId,
+    skipUnsavedGuard: true,
+  });
+  return opened.then(
+    () => {
+      showToast({ message: `${result.fileName}에 클라우드 결과를 반영했습니다.`, durationMs: 3500 });
+    },
+    (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      showToast({ message: `클라우드 결과를 열지 못했습니다: ${message}`, durationMs: 4500 });
+    },
+  );
 }
 
 async function applyCloudTakeover(takeover: CloudTakeoverPayload): Promise<{
@@ -552,6 +619,21 @@ async function applyCloudTakeover(takeover: CloudTakeoverPayload): Promise<{
 /** 렌더러 초기화 후에 생성되는 에이전트 브리지 — 저장 가드가 대기 편집을 조회한다. */
 let agentBridgeRef: AgentBridge | null = null;
 let awaitPendingCloudTransferForClose: () => Promise<void> = () => Promise.resolve();
+let versionControllerRef: DocumentVersionController | null = null;
+let agentSidebarReady = false;
+
+eventBus.on('settings:open', (payload) => {
+  if (agentSidebarReady) return;
+  const destination = (payload as { destination?: unknown } | undefined)?.destination;
+  if (destination !== undefined && destination !== 'editing') return;
+  showEditingSettingsFallback({
+    eventBus,
+    runtime: {
+      preview: applyEditorSettingsPreview,
+      committed: commitEditorSettingsRuntime,
+    },
+  });
+});
 
 const commandServices: CommandServices = {
   eventBus,
@@ -563,6 +645,10 @@ const commandServices: CommandServices = {
   pickOpenHandle: pickDesktopNativeOpenFile,
   pickSaveHandle: pickDesktopNativeSaveFile,
   validateSaveHandle: reserveSaveHandleForWrite,
+  createPortableHistoryBundle: async () => {
+    if (!versionControllerRef) throw new Error('버전 기록 서비스를 사용할 수 없습니다.');
+    return versionControllerRef.createPortableHistoryBundle();
+  },
   setEditMode,
   getPendingAgentEdits: () => {
     const pending = agentBridgeRef?.pendingEdits;
@@ -915,6 +1001,9 @@ async function initialize(): Promise<void> {
       if (readOnly) setDocumentReadOnly(true);
       eventBus.emit('open-document-bytes', { bytes, fileName });
     });
+    installDesktopPlainTextPasteHandling((text) => {
+      inputHandler?.performPlainTextPaste(text);
+    });
     void loadFromUrlParam();
     void offerAutosaveRecoveryIfIdle();
     installPwaFileHandling(window as FileHandlingWindowLike, {
@@ -922,7 +1011,7 @@ async function initialize(): Promise<void> {
         eventBus.emit('open-document-bytes', payload);
       },
       notifyUnsupportedFile(fileName) {
-        showLoadError(new Error(`지원하지 않는 파일 형식입니다: ${fileName}. HWP/HWPX/HML 파일만 지원합니다.`));
+        showLoadError(new Error(`지원하지 않는 파일 형식입니다: ${fileName}. HWP/HWPX/HML/RHWPX 파일만 지원합니다.`));
       },
       notifyError(error) {
         showLoadError(error);
@@ -936,6 +1025,7 @@ async function initialize(): Promise<void> {
     if (import.meta.env.DEV) {
       (window as any).__inputHandler = inputHandler;
       (window as any).__canvasView = canvasView;
+      (window as any).__rendererSession = rendererSession;
       (window as any).__renderBackend = null;
       (window as any).__renderBackendRequest = renderBackendRequest;
       (window as any).__rendererRuntimeRequest = rendererRuntimeRequest;
@@ -959,9 +1049,24 @@ async function initialize(): Promise<void> {
       agentBridgeRef = agentBridge;
       agentBridge.onEditingLeaseChange(setAgentEditingLease);
       installCloudDocumentRuntimeApi(agentBridge);
+      const versionController = new DocumentVersionController({
+        wasm,
+        eventBus,
+        documentState,
+        getInputHandler: () => inputHandler,
+        getDocumentId: () => activeDocumentId,
+        agentBridge,
+      });
+      versionControllerRef = versionController;
       const agentSidebar = initAgentSidebar({
         bridge: agentBridge,
         eventBus,
+        editorSettingsRuntime: {
+          preview: applyEditorSettingsPreview,
+          committed: commitEditorSettingsRuntime,
+        },
+        versionController,
+        openClassicVersionControl: () => openClassicDocumentHistory(commandServices),
         getDocumentContext: () => {
           const documentName = wasm.pageCount > 0 ? wasm.fileName : null;
           let selectionLabel: string | null = null;
@@ -982,6 +1087,7 @@ async function initialize(): Promise<void> {
         applyCloudTakeover,
       });
       awaitPendingCloudTransferForClose = agentSidebar.awaitPendingCloudTransferForClose;
+      agentSidebarReady = true;
       initInlinePrompt({
         wasm,
         eventBus,
@@ -992,6 +1098,7 @@ async function initialize(): Promise<void> {
       });
       if (import.meta.env.DEV) {
         (window as any).__agentBridge = agentBridge;
+        (window as any).__versionController = versionController;
       }
     } catch (agentError) {
       console.error('[main] 에이전트 사이드바 초기화 실패 (기능 비활성화):', agentError);
@@ -1053,7 +1160,7 @@ function setupFileInput(): void {
     const file = input.files?.[0];
     if (!file) return;
     if (!isSupportedDocumentFileName(file.name)) {
-      alert('HWP/HWPX/HML 파일만 지원합니다.');
+      alert('HWP/HWPX/HML/RHWPX 파일만 지원합니다.');
       fileInput.value = '';
       return;
     }
@@ -1096,7 +1203,7 @@ function setupFileInput(): void {
     const isImage = imageExts.some(ext => dropName.endsWith(ext));
     const isDoc = isSupportedDocumentFileName(dropName);
     if (!isImage && !isDoc) {
-      alert('HWP/HWPX/HML 파일 또는 이미지 파일만 지원합니다.');
+      alert('HWP/HWPX/HML/RHWPX 파일 또는 이미지 파일만 지원합니다.');
       return;
     }
 
@@ -1157,7 +1264,7 @@ function setupFileInput(): void {
       return;
     }
 
-    // HWP/HWPX/HML — loadFile 내부 unsaved 가드는 드롭 확인 이후에 동작한다.
+    // HWP/HWPX/HML/RHWPX — loadFile 내부 unsaved 가드는 드롭 확인 이후에 동작한다.
     let fileHandle: FileSystemFileHandleLike | null;
     try {
       fileHandle = await droppedFileHandle;
@@ -1328,37 +1435,101 @@ function setupEventListeners(): void {
     }
   });
 
-  // 개체 선택 시 회전/대칭 버튼 그룹 표시/숨김
-  const rotateGroup = document.querySelector('.tb-rotate-group') as HTMLElement | null;
+  const modeGroups = Array.from(
+    document.querySelectorAll<HTMLElement>('#icon-toolbar > .tb-mode-group[data-toolbar-mode]'),
+  );
+  const defaultTbGroups = Array.from(
+    document.querySelectorAll<HTMLElement>('#icon-toolbar > .tb-group:not(.tb-mode-group), #icon-toolbar > .tb-sep'),
+  );
+  let objectSelected = false;
+  let tableObjectSelected = false;
+  let headerFooterActive = false;
   let noteToolbarActive = false;
-  if (rotateGroup) {
-    eventBus.on('picture-object-selection-changed', (selected) => {
-      rotateGroup.style.display = (selected as boolean) && !noteToolbarActive ? '' : 'none';
+
+  const applyContextualToolbarMode = (): ContextualEditingToolbarMode => {
+    const context = getContext();
+    const mode = contextualEditingToolbarMode({
+      objectSelected,
+      inTable: tableObjectSelected
+        || context.inTableObjectSelection
+        || context.inCellSelectionMode
+        || context.inTable,
+      headerFooterActive,
+      noteActive: noteToolbarActive,
     });
-  }
+    defaultTbGroups.forEach((element) => {
+      element.style.display = mode === 'default' ? '' : 'none';
+    });
+    modeGroups.forEach((group) => {
+      group.style.display = group.dataset.toolbarMode === mode ? '' : 'none';
+      if (group.dataset.toolbarMode === mode) {
+        const selectedObject = inputHandler?.getSelectedPictureRef() ?? null;
+        const selectedObjects = inputHandler?.getSelectedPictureRefs() ?? [];
+        const selectedObjectScope = selectedObject ? objectAddressScope(selectedObject) : null;
+        const objectSelection = {
+          kind: selectedObject?.type ?? null,
+          count: selectedObjects.length,
+          topLevel: selectedObjects.length > 0 && selectedObjects.every(isTopLevelBodyObject),
+          arrangeable: context.canArrangeSelectedObject,
+          groupable: context.canGroupSelectedObjects,
+          ungroupable: context.canUngroupSelectedObject,
+          deletable: Boolean(
+            selectedObject
+            && (
+              selectedObjectScope === 'body'
+              || (selectedObjectScope === 'cell' && selectedObject.type === 'image')
+            ),
+          ),
+          propertyEditable: Boolean(
+            selectedObject
+            && selectedObjectScope !== 'memo'
+            && (selectedObjectScope !== 'note' || selectedObject.type === 'equation'),
+          ),
+        };
+        group.querySelectorAll<HTMLButtonElement>('.tb-btn[data-cmd]').forEach((button) => {
+          const command = button.dataset.cmd ?? '';
+          button.disabled = !dispatcher.isEnabled(command)
+            || (mode === 'object' && !contextualObjectCommandEnabled(command, objectSelection));
+        });
+      }
+    });
+    document.getElementById('icon-toolbar')?.setAttribute('data-context-mode', mode);
+    return mode;
+  };
+
+  eventBus.on('picture-object-selection-changed', (selected) => {
+    objectSelected = selected as boolean;
+    if (objectSelected) {
+      tableObjectSelected = false;
+      setBasicToolboxExpanded(true);
+    }
+    applyContextualToolbarMode();
+  });
+  eventBus.on('table-object-selection-changed', (selected) => {
+    tableObjectSelected = selected as boolean;
+    if (tableObjectSelected) {
+      objectSelected = false;
+      setBasicToolboxExpanded(true);
+    }
+    applyContextualToolbarMode();
+  });
+  eventBus.on('cursor-format-changed', applyContextualToolbarMode);
+  eventBus.on('command-state-changed', applyContextualToolbarMode);
 
   // 머리말/꼬리말 편집 모드 시 도구상자 전환 + 본문 dimming
-  const hfGroup = document.querySelector('.tb-headerfooter-group') as HTMLElement | null;
-  const hfLabel = hfGroup?.querySelector('.tb-hf-label') as HTMLElement | null;
-  const noteGroup = document.querySelector('.tb-note-group') as HTMLElement | null;
-  const defaultTbGroups = document.querySelectorAll('#icon-toolbar > .tb-group:not(.tb-headerfooter-group):not(.tb-note-group):not(.tb-rotate-group), #icon-toolbar > .tb-sep');
+  const hfLabel = document.querySelector<HTMLElement>('.tb-headerfooter-group .tb-hf-label');
   const scrollContainer = document.getElementById('scroll-container');
-  const styleBar = document.getElementById('style-bar');
 
   eventBus.on('headerFooterModeChanged', (mode) => {
     const isActive = (mode as string) !== 'none';
+    headerFooterActive = isActive;
     // 접힌 기본 도구 상자는 머리말/꼬리말 전용 버튼을 가리므로 모드 진입 시 펼친다.
     if (isActive) setBasicToolboxExpanded(true);
     // 도구상자 전환
-    if (hfGroup) {
-      hfGroup.style.display = isActive ? '' : 'none';
-    }
     if (hfLabel) {
       hfLabel.textContent = (mode as string) === 'header' ? '머리말' : (mode as string) === 'footer' ? '꼬리말' : '';
     }
-    defaultTbGroups.forEach((el) => {
-      (el as HTMLElement).style.display = isActive ? 'none' : '';
-    });
+    applyContextualToolbarMode();
     // 서식 도구 모음은 머리말/꼬리말 편집 시에도 유지 (문단/글자 모양 설정 필요)
     // 본문 dimming
     if (scrollContainer) {
@@ -1374,28 +1545,34 @@ function setupEventListeners(): void {
     const isActive = active as boolean;
     noteToolbarActive = isActive;
     if (isActive) setBasicToolboxExpanded(true);
-    if (noteGroup) {
-      noteGroup.style.display = isActive ? '' : 'none';
-    }
-    if (rotateGroup && isActive) {
-      rotateGroup.style.display = 'none';
-    }
-    defaultTbGroups.forEach((el) => {
-      (el as HTMLElement).style.display = isActive ? 'none' : '';
-    });
+    applyContextualToolbarMode();
   });
+
+  applyContextualToolbarMode();
+}
+
+function applyEditorSettingsPreview(settings: EditorScalarSettings): void {
+  applyTheme(settings.theme.mode);
+  syncThemeMenu(settings.theme.mode);
+  wasm.setShowControlCodes(settings.view.showControlCodes);
+  wasm.setShowParagraphMarks(settings.view.showParagraphMarks);
+  syncTextMarkMenu(settings.view.showControlCodes, settings.view.showParagraphMarks);
+  const clipEnabled = !settings.view.clipView;
+  wasm.setClipEnabled(clipEnabled);
+  syncClipMenu(clipEnabled);
+  eventBus.emit('document-view-changed');
+}
+
+function commitEditorSettingsRuntime(settings: EditorScalarSettings): void {
+  applyEditorSettingsPreview(settings);
+  eventBus.emit('autosave-settings-changed');
+  eventBus.emit('font-settings-changed');
+  eventBus.emit('command-state-changed');
 }
 
 /** 문서 초기화 공통 시퀀스 (loadFile, createNewDocument 양쪽에서 사용) */
 function applySavedTextMarkSettings(): void {
-  const view = userSettings.getViewSettings();
-  wasm.setShowControlCodes(view.showControlCodes);
-  wasm.setShowParagraphMarks(view.showParagraphMarks);
-  syncTextMarkMenu(view.showControlCodes, view.showParagraphMarks);
-  // #2204: 짤림보기(잘림 보기) 저장 설정 복원. clipView=켜짐 => clip 미적용(clipEnabled=false).
-  const clipEnabled = !view.clipView;
-  wasm.setClipEnabled(clipEnabled);
-  syncClipMenu(clipEnabled);
+  applyEditorSettingsPreview(userSettings.getEditorScalarSettings());
 }
 
 async function initializeDocument(
@@ -1416,7 +1593,6 @@ async function initializeDocument(
     totalSections = docInfo.sectionCount ?? 1;
     sbSection().textContent = `구역: 1 / ${totalSections}`;
     applySavedTextMarkSettings();
-    inputHandler?.deactivate();
     await updateLoadProgress(82, '페이지 렌더 준비 중...');
     await canvasView?.loadDocument();
     prepareCanvasKitLocalFonts(docInfo.fontsUsed);
@@ -1546,12 +1722,16 @@ async function reserveDocumentOpen(
   skipRecent = false,
   grant?: VerifiedDocumentGrant | null,
 ): Promise<{ identity: DocumentPreflightIdentity; reservationId: string | null | undefined }> {
+  const mainIssuedDocumentId = getNativeFileHandleVerifiedDocumentId(fileHandle);
+  const verifiedGrant = grant ?? (mainIssuedDocumentId
+    ? { kind: 'verified' as const, documentId: mainIssuedDocumentId }
+    : null);
   const resolved = await resolveDocumentPreflight(
     data,
     fileHandle,
     await listRecentDocs(),
     undefined,
-    grant,
+    verifiedGrant,
   );
   const identity = skipRecent
     ? { ...resolved, documentId: createActiveDocumentId(), useSourceDigest: false }
@@ -1631,12 +1811,14 @@ async function loadBytes(
   await updateLoadProgress(25, '문서 파싱 및 쪽 계산 중...');
   let docInfo: DocumentInfo;
   try {
+    inputHandler?.deactivate();
     docInfo = wasm.loadDocument(data, fileName);
     await commitDesktopDocument(ownership.reservationId);
     fileHandle?.adoptSaveTarget?.();
   } catch (error) {
     await cancelDesktopDocument(ownership.reservationId).catch(() => {});
     activeDocumentId = null;
+    eventBus.emit('document-context-changed');
     await releaseDesktopDocument().catch(() => {});
     await releaseReplacedNativeFileHandle(previousFileHandle, null).catch(() => {});
     await autosaveManager.endDocument({ discardDraft: true, reason: 'failed-document-replacement' })
@@ -1815,6 +1997,7 @@ async function createNewDocument(): Promise<void> {
   if (reservationId === null) throw new DocumentOwnedElsewhereError();
   try {
     msg.textContent = '새 문서 생성 중...';
+    inputHandler?.deactivate();
     const docInfo = wasm.createNewDocument();
     await commitDesktopDocument(reservationId);
     activeDocumentId = identity.documentId;
@@ -1829,6 +2012,7 @@ async function createNewDocument(): Promise<void> {
   } catch (error) {
     await cancelDesktopDocument(reservationId).catch(() => {});
     activeDocumentId = null;
+    eventBus.emit('document-context-changed');
     await releaseDesktopDocument().catch(() => {});
     await releaseReplacedNativeFileHandle(previousFileHandle, null).catch(() => {});
     await autosaveManager.endDocument({ discardDraft: true, reason: 'failed-new-document' })
@@ -1843,7 +2027,11 @@ async function canReplaceCurrentDocument(skipUnsavedGuard?: boolean): Promise<bo
     showToast({ message: '에이전트가 편집을 마친 뒤 문서를 바꿀 수 있습니다.', durationMs: 2600 });
     return false;
   }
-  return skipUnsavedGuard === true || await confirmSaveBeforeReplacingDocument(commandServices);
+  const allowed = skipUnsavedGuard === true
+    || await confirmSaveBeforeReplacingDocument(commandServices);
+  if (!allowed) return false;
+  await versionControllerRef?.whenIdle();
+  return true;
 }
 
 async function openDocumentBytes(data: OpenDocumentBytesEvent) {
@@ -1852,6 +2040,61 @@ async function openDocumentBytes(data: OpenDocumentBytesEvent) {
     return false;
   }
   try {
+    if (isPortableHistoryFileName(data.fileName) || isPortableHistoryBytes(data.bytes)) {
+      const bundle = openPortableHistoryBundle(data.bytes);
+      const probe = new WasmBridge();
+      try {
+        await probe.initialize();
+        probe.loadDocument(bundle.currentDocumentBytes, bundle.documentFileName);
+      } finally {
+        probe.releaseDocument();
+      }
+      const store = new VersionGraphStore();
+      const imported = await store.importRepositorySnapshot(bundle.snapshot);
+      const retainNativeBundleHandle = Boolean(
+        data.fileHandle
+        && data.fileHandle.identityKind === 'native-path'
+        && isPortableHistoryFileName(data.fileName),
+      );
+      const openFileName = retainNativeBundleHandle
+        ? data.fileName
+        : bundle.documentFileName;
+      try {
+        userSettings.setUseHancomGit(true);
+        await loadBytes(
+          bundle.currentDocumentBytes,
+          openFileName,
+          retainNativeBundleHandle ? data.fileHandle : null,
+          performance.now(),
+          {
+            grant: {
+              kind: 'verified',
+              documentId: bundle.snapshot.repository.documentId,
+            },
+          },
+        );
+        persistActiveBranch(bundle.snapshot.repository.documentId, bundle.activeBranch);
+        await versionControllerRef?.refresh().catch((error) => {
+          console.warn('[versioning] 가져온 기록 새로고침 실패:', error);
+        });
+      } catch (error) {
+        if (imported.imported) {
+          await store.removeImportedRepository(
+            bundle.snapshot.repository.id,
+            versionDocumentId(bundle.snapshot.repository.documentId),
+            bundle.snapshot.repository.revision,
+          ).catch(() => undefined);
+        }
+        throw error;
+      } finally {
+        await store.close();
+      }
+      if (!retainNativeBundleHandle) {
+        await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
+      }
+      showToast({ message: '문서와 전체 버전 기록을 불러왔습니다.', durationMs: 3500 });
+      return true;
+    }
     await loadBytes(data.bytes, data.fileName, data.fileHandle, performance.now(), {
       grant: data.grant,
     });

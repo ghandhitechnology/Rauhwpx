@@ -1,6 +1,6 @@
 use skia_safe::{
-    paint, png_encoder, surfaces, Canvas, Color, Font, FontMgr, FontStyle, Paint, PathBuilder,
-    PathEffect, RRect, Rect, Typeface,
+    gradient, paint, png_encoder, surfaces, Canvas, Color, Color4f, Font, FontMgr, FontStyle,
+    Paint, PathBuilder, PathEffect, RRect, Rect, TileMode, Typeface,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -20,7 +20,9 @@ use crate::renderer::layer_renderer::{
     RasterRenderOutput,
 };
 use crate::renderer::render_tree::RenderLayerInfo;
-use crate::renderer::{svg_arc_to_beziers, LineStyle, PathCommand, ShapeStyle, StrokeDash};
+use crate::renderer::{
+    svg_arc_to_beziers, GradientFillInfo, LineStyle, PathCommand, ShapeStyle, StrokeDash,
+};
 
 use super::equation_conv::render_equation;
 use super::font_lookup::{
@@ -286,17 +288,83 @@ const FORM_CJK_FAMILIES: &[&str] = &[
     "Noto Sans KR",
 ];
 
+pub(super) type TypefaceCatalog = HashMap<String, Vec<Typeface>>;
+
+fn normalize_typeface_alias(value: &str) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!normalized.is_empty()).then(|| normalized.to_lowercase())
+}
+
+fn typeface_aliases(face: &ttf_parser::Face<'_>, typeface: &Typeface) -> BTreeSet<String> {
+    let mut aliases = BTreeSet::new();
+    let mut insert = |value: &str| {
+        if let Some(alias) = normalize_typeface_alias(value) {
+            aliases.insert(alias);
+        }
+    };
+
+    insert(&typeface.family_name());
+    for localized in typeface.new_family_name_iterator() {
+        insert(&localized.string);
+    }
+    if let Some(postscript_name) = typeface.post_script_name() {
+        insert(&postscript_name);
+    }
+    for name in face.names() {
+        if matches!(
+            name.name_id,
+            ttf_parser::name_id::FAMILY
+                | ttf_parser::name_id::FULL_NAME
+                | ttf_parser::name_id::POST_SCRIPT_NAME
+                | ttf_parser::name_id::TYPOGRAPHIC_FAMILY
+                | ttf_parser::name_id::COMPATIBLE_FULL
+                | ttf_parser::name_id::WWS_FAMILY
+        ) {
+            if let Some(value) = name.to_string() {
+                insert(&value);
+            }
+        }
+    }
+    aliases
+}
+
+fn typeface_style_distance(candidate: FontStyle, requested: FontStyle) -> (u8, i32, i32) {
+    (
+        u8::from(candidate.slant() != requested.slant()),
+        (*candidate.width() - *requested.width()).abs(),
+        (*candidate.weight() - *requested.weight()).abs(),
+    )
+}
+
+pub(super) fn typeface_for_style(
+    catalog: &TypefaceCatalog,
+    family: &str,
+    requested: FontStyle,
+) -> Option<Typeface> {
+    let alias = normalize_typeface_alias(family)?;
+    catalog
+        .get(&alias)?
+        .iter()
+        .enumerate()
+        .min_by_key(|(index, face)| {
+            (
+                typeface_style_distance(face.font_style(), requested),
+                *index,
+            )
+        })
+        .map(|(_, face)| face.clone())
+}
+
 pub struct SkiaLayerRenderer {
     font_mgr: FontMgr,
-    /// 사용자 지정 폰트 디렉토리에서 미리 로드한 폰트 캐시.
-    /// key = primary face name (Typeface::family_name), value = Typeface.
-    /// SVG 의 `--font-path` 와 같은 패턴으로 ttfs 디렉토리의 한컴 전용 폰트 (HY견명조 등) 도 사용 가능.
-    custom_typefaces: HashMap<String, Typeface>,
+    /// 사용자 지정 폰트 source에서 미리 로드한 폰트 카탈로그.
+    /// key = 정규화한 family/full/PostScript 별칭, value = 파일 우선순위의 style face.
+    custom_typefaces: TypefaceCatalog,
     /// [#3300] 번들 최후-폴백 폰트(ttfs/opensource). custom 과 분리해 해석
     /// 체인에서 custom·시스템 매칭 **뒤**에만 선다 — custom 에 섞으면 깊은
     /// 폴백(Noto Sans KR)이 시스템 1순위(문서 지정 맑은 고딕 등)를 제치고
     /// 본문 전체를 폴백 서체로 렌더한다(r23 발산 −6.9pp).
-    bundled_typefaces: HashMap<String, Typeface>,
+    bundled_typefaces: TypefaceCatalog,
     /// 시스템에 실제 존재하는 font family 목록.
     /// headless macOS 에서 missing family 를 CoreText 에 넘기면 downloadable font
     /// lookup IPC가 영구 대기할 수 있어, match_family_style 호출 전 사전 필터로 사용한다.
@@ -325,31 +393,31 @@ impl SkiaLayerRenderer {
         })
     }
 
-    fn load_typefaces_from_dirs(
+    fn load_typefaces_from_sources(
         font_mgr: &FontMgr,
-        dirs: &[std::path::PathBuf],
-        into: &mut HashMap<String, Typeface>,
+        sources: &[std::path::PathBuf],
+        into: &mut TypefaceCatalog,
     ) {
-        for dir in dirs {
-            if !dir.exists() {
+        for path in crate::renderer::font_paths::font_files(sources) {
+            let Ok(data) = std::fs::read(&path) else {
                 continue;
-            }
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let ext = path
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_lowercase());
-                    if !matches!(ext.as_deref(), Some("ttf") | Some("otf") | Some("ttc")) {
-                        continue;
-                    }
-                    if let Ok(data) = std::fs::read(&path) {
-                        let skia_data = skia_safe::Data::new_copy(&data);
-                        if let Some(typeface) = font_mgr.new_from_data(&skia_data, None) {
-                            let family = typeface.family_name();
-                            into.entry(family).or_insert(typeface);
-                        }
+            };
+            let face_count = ttf_parser::fonts_in_collection(&data).unwrap_or(1).min(256);
+            for face_index in 0..face_count {
+                let Ok(face) = ttf_parser::Face::parse(&data, face_index) else {
+                    continue;
+                };
+                let Some(typeface) = font_mgr.new_from_data(&data, Some(face_index as usize))
+                else {
+                    continue;
+                };
+                for alias in typeface_aliases(&face, &typeface) {
+                    let faces = into.entry(alias).or_default();
+                    if !faces
+                        .iter()
+                        .any(|existing| existing.unique_id() == typeface.unique_id())
+                    {
+                        faces.push(typeface.clone());
                     }
                 }
             }
@@ -362,10 +430,18 @@ impl SkiaLayerRenderer {
         // [#2864] 조달 순서는 renderer::font_paths 가 단일 정의한다.
         // [#3300] custom(호출자+환경변수)과 번들 최후-폴백을 분리 적재한다 —
         // 시스템 디렉터리는 어느 쪽에도 넣지 않는다(스타일 매칭은 FontMgr 담당).
-        let custom_dirs = crate::renderer::font_paths::custom_font_dirs(font_paths);
-        Self::load_typefaces_from_dirs(&self.font_mgr, &custom_dirs, &mut self.custom_typefaces);
+        let custom_sources = crate::renderer::font_paths::custom_font_sources(font_paths);
+        Self::load_typefaces_from_sources(
+            &self.font_mgr,
+            &custom_sources,
+            &mut self.custom_typefaces,
+        );
         let bundled_dirs = crate::renderer::font_paths::bundled_font_dirs();
-        Self::load_typefaces_from_dirs(&self.font_mgr, &bundled_dirs, &mut self.bundled_typefaces);
+        Self::load_typefaces_from_sources(
+            &self.font_mgr,
+            &bundled_dirs,
+            &mut self.bundled_typefaces,
+        );
         self
     }
 
@@ -559,6 +635,11 @@ impl SkiaLayerRenderer {
             paint.set_color(colorref_to_skia(color, style.opacity as f32));
             Some(paint)
         };
+        let make_gradient_fill_paint =
+            |gradient: &GradientFillInfo,
+             bbox: &crate::renderer::render_tree::BoundingBox,
+             opacity: f32|
+             -> Option<Paint> { gradient_fill_paint(gradient, bbox, opacity) };
         let make_stroke_paint = |style: &ShapeStyle| -> Option<Paint> {
             let mut paint = Paint::default();
             paint.set_anti_alias(true);
@@ -1073,17 +1154,13 @@ impl SkiaLayerRenderer {
                             let sk_path = builder.detach();
                             if let Some(fill) = path
                                 .gradient
-                                .as_ref()
-                                .and_then(|gradient| gradient.colors.first().copied())
-                                .map(|color| {
-                                    let mut paint = Paint::default();
-                                    paint.set_anti_alias(true);
-                                    paint.set_style(paint::Style::Fill);
-                                    paint.set_color(colorref_to_skia(
-                                        color,
+                                .as_deref()
+                                .and_then(|gradient| {
+                                    make_gradient_fill_paint(
+                                        gradient,
+                                        bbox,
                                         path.style.opacity as f32,
-                                    ));
-                                    paint
+                                    )
                                 })
                                 .or_else(|| make_fill_paint(&path.style))
                             {
@@ -1257,7 +1334,7 @@ impl SkiaLayerRenderer {
     fn make_form_font(&self, size: f32) -> Font {
         let style = FontStyle::default();
         for family in FORM_CJK_FAMILIES {
-            if let Some(tf) = self.custom_typefaces.get(*family).cloned() {
+            if let Some(tf) = typeface_for_style(&self.custom_typefaces, family, style) {
                 return Font::new(tf, size);
             }
             if let Some(tf) =
@@ -1267,7 +1344,7 @@ impl SkiaLayerRenderer {
             }
             // [#3300] 시스템 폰트가 없는 headless 환경에서는 번들 폰트가
             // custom·system 뒤의 최후 폴백으로 form caption의 한국어를 구제한다.
-            if let Some(tf) = self.bundled_typefaces.get(*family).cloned() {
+            if let Some(tf) = typeface_for_style(&self.bundled_typefaces, family, style) {
                 return Font::new(tf, size);
             }
         }
@@ -1511,6 +1588,75 @@ fn parse_css_color(s: &str) -> Option<Color> {
     Some(Color::from_rgb(r, g, b))
 }
 
+fn gradient_fill_paint(
+    gradient: &GradientFillInfo,
+    bbox: &crate::renderer::render_tree::BoundingBox,
+    opacity: f32,
+) -> Option<Paint> {
+    if gradient.colors.len() < 2 || bbox.width <= 0.0 || bbox.height <= 0.0 {
+        return None;
+    }
+
+    let colors = gradient
+        .colors
+        .iter()
+        .map(|&color| Color4f::from(colorref_to_skia(color, opacity)))
+        .collect::<Vec<_>>();
+    let positions = if gradient.positions.len() == colors.len()
+        && gradient
+            .positions
+            .iter()
+            .all(|position| position.is_finite() && (0.0..=1.0).contains(position))
+        && gradient.positions.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        Some(
+            gradient
+                .positions
+                .iter()
+                .map(|position| position.clamp(0.0, 1.0) as f32)
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+    let colors = gradient::Colors::new(&colors, positions.as_deref(), TileMode::Clamp, None);
+    let gradient_spec = gradient::Gradient::new(colors, gradient::Interpolation::default());
+
+    let shader = if gradient.gradient_type == 2 {
+        let center = (
+            (bbox.x + bbox.width * gradient.center_x as f64 / 100.0) as f32,
+            (bbox.y + bbox.height * gradient.center_y as f64 / 100.0) as f32,
+        );
+        gradient::shaders::radial_gradient(
+            (center, (bbox.width.max(bbox.height) / 2.0) as f32),
+            &gradient_spec,
+            None,
+        )
+    } else {
+        let angle = ((gradient.angle % 360 + 360) % 360) as f64;
+        let radians = angle.to_radians();
+        let sin = radians.sin();
+        let cos = radians.cos();
+        let center_x = bbox.x + bbox.width / 2.0;
+        let center_y = bbox.y + bbox.height / 2.0;
+        let start = (
+            (center_x - sin * bbox.width / 2.0) as f32,
+            (center_y - cos * bbox.height / 2.0) as f32,
+        );
+        let end = (
+            (center_x + sin * bbox.width / 2.0) as f32,
+            (center_y + cos * bbox.height / 2.0) as f32,
+        );
+        gradient::shaders::linear_gradient((start, end), &gradient_spec, None)
+    }?;
+
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_style(paint::Style::Fill);
+    paint.set_shader(shader);
+    Some(paint)
+}
+
 pub(super) fn colorref_to_skia(color: ColorRef, alpha_scale: f32) -> Color {
     let b = ((color >> 16) & 0xFF) as u8;
     let g = ((color >> 8) & 0xFF) as u8;
@@ -1557,6 +1703,72 @@ mod tests {
             &FORM_CJK_FAMILIES[FORM_CJK_FAMILIES.len() - 2..],
             &["Noto Sans KR ExtraLight", "Noto Sans KR"],
             "form caption은 system 후보 뒤에 bundled Noto 최후 폴백까지 탐색해야 한다"
+        );
+    }
+
+    #[test]
+    fn exact_font_file_registers_family_full_and_postscript_alias() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fonts/RHWPBitmapSvgGlyphSmoke.ttf");
+        let font_mgr = FontMgr::default();
+        let mut catalog = TypefaceCatalog::new();
+
+        SkiaLayerRenderer::load_typefaces_from_sources(
+            &font_mgr,
+            std::slice::from_ref(&fixture),
+            &mut catalog,
+        );
+
+        let by_family =
+            typeface_for_style(&catalog, "RHWP Bitmap SVG Glyph Smoke", FontStyle::normal())
+                .expect("family alias resolves");
+        let by_full_name = typeface_for_style(
+            &catalog,
+            "RHWP Bitmap SVG Glyph Smoke Regular",
+            FontStyle::normal(),
+        )
+        .expect("full name alias resolves");
+        let by_postscript = typeface_for_style(
+            &catalog,
+            "RHWPBITMAPSVGGLYPHSMOKE-REGULAR",
+            FontStyle::normal(),
+        )
+        .expect("PostScript alias resolves case-insensitively");
+
+        assert_eq!(by_family.unique_id(), by_full_name.unique_id());
+        assert_eq!(by_family.unique_id(), by_postscript.unique_id());
+    }
+
+    #[test]
+    fn custom_typeface_lookup_selects_style_instead_of_first_loaded_face() {
+        use skia_safe::utils::CustomTypefaceBuilder;
+
+        let make_face = |style| {
+            let mut builder = CustomTypefaceBuilder::new();
+            builder.set_font_style(style);
+            let path = skia_safe::Path::new();
+            builder.set_glyph(1, 10.0, &path);
+            builder.detach().expect("custom typeface")
+        };
+        let bold = make_face(FontStyle::bold());
+        let regular = make_face(FontStyle::normal());
+        let mut catalog = TypefaceCatalog::new();
+        catalog.insert(
+            normalize_typeface_alias("RHWP Style Selection").unwrap(),
+            vec![bold.clone(), regular.clone()],
+        );
+
+        assert_eq!(
+            typeface_for_style(&catalog, "RHWP Style Selection", FontStyle::normal())
+                .unwrap()
+                .unique_id(),
+            regular.unique_id()
+        );
+        assert_eq!(
+            typeface_for_style(&catalog, "RHWP Style Selection", FontStyle::bold())
+                .unwrap()
+                .unique_id(),
+            bold.unique_id()
         );
     }
 
@@ -2322,7 +2534,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_shape_fallback_fills_for_gradient_pattern_ellipse_path_and_line() {
+    fn renders_shape_fills_for_gradient_pattern_ellipse_path_and_line() {
         let gradient = GradientFillInfo {
             gradient_type: 1,
             angle: 0,
@@ -2413,6 +2625,49 @@ mod tests {
         assert_channel(ellipse_pixel, 0, 180, 255);
         assert_channel(path_pixel, 2, 180, 255);
         assert_channel(line_pixel, 0, 180, 255);
+    }
+
+    #[test]
+    fn renders_linear_gradient_across_path_bbox() {
+        let path = PathNode::new(
+            vec![
+                PathCommand::MoveTo(2.0, 2.0),
+                PathCommand::LineTo(10.0, 2.0),
+                PathCommand::LineTo(10.0, 18.0),
+                PathCommand::LineTo(2.0, 18.0),
+                PathCommand::ClosePath,
+            ],
+            ShapeStyle::default(),
+            Some(Box::new(GradientFillInfo {
+                gradient_type: 1,
+                angle: 0,
+                center_x: 50,
+                center_y: 50,
+                colors: vec![0x008fc5a9, 0x00ffffff],
+                positions: vec![0.0, 1.0],
+            })),
+        );
+        let tree = PageLayerTree::new(
+            12.0,
+            20.0,
+            LayerNode::leaf(
+                BoundingBox::new(0.0, 0.0, 12.0, 20.0),
+                None,
+                vec![PaintOp::path(BoundingBox::new(2.0, 2.0, 8.0, 16.0), path)],
+            ),
+        );
+
+        let output = SkiaLayerRenderer::new()
+            .render_raster_with_options(&tree, RasterRenderOptions::default())
+            .expect("render gradient path");
+        let image = decode_rgba(&output.bytes);
+        let top = *image.get_pixel(6, 3);
+        let bottom = *image.get_pixel(6, 17);
+
+        assert!(
+            bottom[0] > top[0] + 50 && bottom[1] > top[1] + 30,
+            "gradient must vary across the path instead of flattening to its first color: top={top:?}, bottom={bottom:?}"
+        );
     }
 
     #[test]

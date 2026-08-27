@@ -193,10 +193,11 @@ export class BlobStore {
   async removeUnreferenced(sha256) {
     const blob = this.get(sha256);
     if (!blob || blob.ref_count > 0) return false;
-    transaction(this.database, () => {
+    const deleted = transaction(this.database, () => {
       this.database.prepare(`DELETE FROM uploads WHERE sha256 = ? AND status = 'complete'`).run(sha256);
-      this.database.prepare('DELETE FROM blobs WHERE sha256 = ? AND ref_count = 0').run(sha256);
+      return this.database.prepare('DELETE FROM blobs WHERE sha256 = ? AND ref_count = 0').run(sha256);
     });
+    if (deleted.changes === 0) return false;
     await fs.rm(blob.storage_path, { force: true });
     return true;
   }

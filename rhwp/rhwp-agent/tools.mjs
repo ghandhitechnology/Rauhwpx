@@ -138,6 +138,8 @@ const UNIT_NOTE = 'Lengths are in mm, font sizes in pt, colors "#RRGGBB". (Inter
 const EQUATION_SYNTAX = 'Write HWP equation script (한컴 수식) — NOT LaTeX. Core tokens: {a} over {b} (fraction) · sqrt {x} / root n of x · x^{2} y_{i} (sup/sub) · int _{0} ^{inf}, sum _{k=1} ^{n}, prod, lim _{x -> 0} · PMATRIX{ a & b # c & d } (또한 MATRIX/BMATRIX/DMATRIX; & = column, # = row) · cases{...} · greek by name: alpha beta pi omega, uppercase GAMMA SIGMA · arrows: ->, <-, <-> · decorations: bar x, vec x, hat x, dot x · rm/it font toggle · ~ thin space, # line break. Examples: "x = {-b +- sqrt {b^2 - 4ac}} over {2a}" · "int _{0} ^{inf} e^{-x^2} dx = {sqrt pi} over 2" · "sum _{k=1} ^{n} k = {n(n+1)} over 2". The script is validated by actually rendering it BEFORE insertion; syntax errors return INVALID_SCRIPT and nothing is inserted.';
 
 export const TOOL_CATEGORIES = Object.freeze([
+  'instruction-read',
+  'instruction-write',
   'document-read',
   'document-write',
   'reference-read',
@@ -157,11 +159,11 @@ export const TOOL_CATEGORIES = Object.freeze([
  * destructive 로 표시하지 않는다. 그렇게 표시하면 Codex 안전 모드
  * (`workspace-write` + `approval_policy=never`)가 문서 편집 도구를 거절한다.
  *
- * @param {'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'background-control'|'background-worker'|'browser'} category
+ * @param {'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'background-control'|'background-worker'|'browser'} category
  */
 export function toolAnnotations(category) {
   return {
-    readOnlyHint: category === 'document-read' || category === 'reference-read' || category === 'template-read',
+    readOnlyHint: category === 'instruction-read' || category === 'document-read' || category === 'reference-read' || category === 'template-read',
     destructiveHint: category === 'download-write',
     openWorldHint: category === 'browser' || category === 'download-write',
   };
@@ -189,6 +191,20 @@ export const IMPLEMENTATION_PLAN_SHAPE = Object.freeze({
  * @type {Array<{ name: string, description: string, shape: Record<string, any>, validate?: (args: any) => void }>}
  */
 const BASE_TOOL_DEFINITIONS = [
+  {
+    name: 'read_agent_instructions',
+    description: 'Read the app-scoped AGENTS.md used only by Rauhwpx chats. It contains durable user preferences and returns content, revision, and updatedAt. Read it before editing so update_agent_instructions can reject stale writes. This is not a project AGENTS.md and is never shared with agent harnesses outside this app.',
+    shape: {},
+  },
+  {
+    name: 'update_agent_instructions',
+    description: 'Propose a complete replacement for the app-scoped AGENTS.md. The proposal is short-lived and is not persisted until the user explicitly confirms it in Rauhwpx Settings > 지시. Use this when the user asks to save or change durable instructions, or for a small proactive proposal after a repeated preference or correction. Never propose one-off task details, secrets, credentials, or sensitive inferred facts. Read first and pass its revision as expectedRevision so concurrent changes are not overwritten, then tell the user what you proposed and where to confirm it.',
+    shape: {
+      content: z.string().max(30_000).describe('Complete replacement content for the app-only AGENTS.md'),
+      expectedRevision: z.number().int().min(1).describe('Revision returned by read_agent_instructions or the current app_agents_md prompt block'),
+      reason: z.string().min(1).max(500).optional().describe('Short user-facing reason for the durable instruction change'),
+    },
+  },
   {
     name: 'read_product_skill',
     description: 'Read an enabled rhwp product skill or one of its supporting text resources. Use this after the enabled-skill catalog says a skill matches the request. Start with SKILL.md, then read only the referenced files needed for the current task. This never reads provider-global skills or arbitrary filesystem paths.',
@@ -1037,8 +1053,10 @@ const BASE_TOOL_DEFINITIONS = [
   },
 ];
 
-/** @type {Readonly<Record<string, 'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'background-control'|'background-worker'|'browser'>>} */
+/** @type {Readonly<Record<string, 'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'background-control'|'background-worker'|'browser'>>} */
 export const TOOL_CLASSIFICATIONS = Object.freeze({
+  read_agent_instructions: 'instruction-read',
+  update_agent_instructions: 'instruction-write',
   read_product_skill: 'document-read',
   list_reference_files: 'reference-read',
   search_reference_files: 'reference-read',
@@ -1122,10 +1140,10 @@ export const TOOL_DEFINITIONS = Object.freeze(BASE_TOOL_DEFINITIONS.map((definit
 }));
 
 export const TOOL_PROFILES = Object.freeze({
-  direct: Object.freeze(['document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'background-control']),
-  planning: Object.freeze(['document-read', 'reference-read', 'template-read', 'download-write', 'planning-control', 'browser']),
-  'awaiting-approval': Object.freeze(['document-read', 'reference-read', 'template-read', 'download-write', 'browser']),
-  implementing: Object.freeze(['document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'browser', 'background-control']),
+  direct: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'background-control']),
+  planning: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'planning-control', 'browser']),
+  'awaiting-approval': Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser']),
+  implementing: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'browser', 'background-control']),
   'copy-layout-worker': Object.freeze([
     'read_product_skill',
     'get_document_info',

@@ -163,8 +163,8 @@ export function authorizeToolCall(input) {
   if (input.phase === 'switching') {
     throw workflowError('WORKFLOW_SWITCHING', 'Provider capabilities are switching; retry after the implementing phase begins');
   }
-  if (input.category === 'document-write' && input.phase !== 'implementing') {
-    throw workflowError('PLAN_WRITE_BLOCKED', `Document writes are blocked during the ${input.phase} phase`);
+  if ((input.category === 'document-write' || input.category === 'instruction-write') && input.phase !== 'implementing') {
+    throw workflowError('PLAN_WRITE_BLOCKED', `Writes are blocked during the ${input.phase} phase`);
   }
   if (input.category === 'planning-control' && input.phase !== 'planning') {
     throw workflowError('INVALID_PLAN_PHASE', `${input.tool} is only available during the planning phase`);
