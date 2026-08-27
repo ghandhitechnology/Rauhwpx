@@ -279,6 +279,25 @@ function userEdit(
 
 // ─── 원자적 교체 ─────────────────────────────────────────
 
+test('replaceText: 타자기 공개에 원문(oldText)을 함께 emit 한다', () => {
+  const { mgr, eventBus } = makeManager([paraOf('검토 후 제출한다.')]);
+  const payloads: Array<{ text?: string; oldText?: string }> = [];
+  eventBus.on('agent-text-inserted', (payload) => {
+    payloads.push(payload as { text?: string; oldText?: string });
+  });
+  const text = '검토 후 제출한다.';
+  mgr.replaceText({
+    sectionIdx: 0,
+    startParaIdx: 0,
+    startCharOffset: 0,
+    endParaIdx: 0,
+    endCharOffset: [...text].length,
+  }, '검토 후 즉시 제출한다.', 'claude');
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].oldText, text);
+  assert.equal(payloads[0].text, '검토 후 즉시 제출한다.');
+});
+
 test('replaceText: 하나의 op 로 기록되고 시작 지점 글자 모양이 삽입 텍스트에 적용된다', () => {
   // "hello world" — "world" 부분은 charShapeId 7
   const para = paraOf('hello ');

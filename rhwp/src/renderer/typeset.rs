@@ -8,6 +8,7 @@
 //! Chromium LayoutNG의 Break Token 패턴, LibreOffice Writer의 Master/Follow Chain,
 //! MS Word/OOXML의 cantSplit/tblHeader를 참고.
 
+use crate::document_core::queries::rendering::projected_cell_stack_continuation_outer_top_hu;
 use crate::model::control::Control;
 use crate::model::footnote::FootnoteShape;
 use crate::model::header_footer::HeaderFooterApply;
@@ -17,7 +18,10 @@ use crate::model::shape::CaptionDirection;
 use crate::renderer::composer::ComposedParagraph;
 use crate::renderer::float_placement::{
     horizontal_range, is_page_bottom_fixed_float, is_para_topbottom_float,
-    native_empty_host_rowbreak_line_advance_hu, signed_hwpunit, FloatLaneSet,
+    native_empty_host_rowbreak_line_advance_hu,
+    native_single_cell_rowbreak_saved_residual_split_hu,
+    native_uniform_cellbreak_fragment_spacing_hu,
+    para_square_rowbreak_first_fragment_top_offset_px, signed_hwpunit, FloatLaneSet,
     FloatPlacementContext,
 };
 use crate::renderer::height_cursor::HeightCursor;
@@ -117,6 +121,8 @@ struct BlockTableContinuationPreparedState {
     host_spacing_before: f64,
     host_spacing_after_only: f64,
     strict_following_plain_text_fit: bool,
+    native_cellbreak_fragment_spacing_hu: Option<(i32, i32)>,
+    saved_residual_split_hu: Option<(i32, i32)>,
     budget_para_start_height: f64,
 }
 
@@ -579,11 +585,28 @@ fn row_split_meets_min_top_keep(
     keep_height >= MIN_TOP_KEEP_PX
 }
 
-/// Flow spacing repeated around a proven non-TAC RowBreak table fragment.
+/// Prevent the generous HWPX/segless split tolerance from starting a later row when the current
+/// fragment has no content budget left after reserving visible cell padding. The first row remains
+/// exempt so an oversized row can always make progress on a fresh page; native stored-layout
+/// tables retain their stricter established path.
+#[inline]
+fn row_cut_must_defer_without_content_budget(
+    row: usize,
+    cursor_row: usize,
+    content_budget: f64,
+    split_overflow_tolerance: f64,
+) -> bool {
+    split_overflow_tolerance >= HWPX_ROWBREAK_SPLIT_ROW_OVERFLOW_TOLERANCE_PX
+        && row != cursor_row
+        && content_budget <= 0.1
+}
+
+/// Flow spacing repeated around a structurally proven non-TAC split-table fragment.
 ///
 /// The first fragment keeps the formatted host-before value (paragraph spacing + outer top),
 /// while a continuation repeats only the table's outer top.  Every fragment reserves the outer
-/// bottom.  `repeat_outer_margin` is the narrow native-HWP evidence gate; applying this to every
+/// bottom. `native_cellbreak_fragment_spacing_hu` carries the distinct CellBreak stored-gap
+/// contract. `repeat_outer_margin` is the narrow RowBreak evidence gate; applying it to every
 /// RowBreak table is disproven by the #2097 COM page pins. `vertical_offset` remains a
 /// first-fragment-only concern at the call site.
 fn partial_rowbreak_fragment_spacing_px(
@@ -591,8 +614,17 @@ fn partial_rowbreak_fragment_spacing_px(
     first_fragment_host_before: f64,
     is_continuation: bool,
     repeat_outer_margin: bool,
+    native_cellbreak_fragment_spacing_hu: Option<(i32, i32)>,
     dpi: f64,
 ) -> (f64, f64) {
+    if let Some((top, trailing)) = native_cellbreak_fragment_spacing_hu {
+        let before = if is_continuation {
+            hwpunit_to_px(top, dpi)
+        } else {
+            first_fragment_host_before
+        };
+        return (before, hwpunit_to_px(trailing, dpi));
+    }
     let repeats_outer_margin = repeat_outer_margin
         && !table.common.treat_as_char
         && is_para_topbottom_float(&table.common)
@@ -600,11 +632,15 @@ fn partial_rowbreak_fragment_spacing_px(
             table.page_break,
             crate::model::table::TablePageBreak::RowBreak
         );
+    let projected_stack_outer_top = hwpunit_to_px(
+        projected_cell_stack_continuation_outer_top_hu(table, is_continuation),
+        dpi,
+    );
     let before = if is_continuation {
         if repeats_outer_margin {
             hwpunit_to_px(table.outer_margin_top as i32, dpi)
         } else {
-            0.0
+            projected_stack_outer_top
         }
     } else {
         first_fragment_host_before
@@ -615,6 +651,27 @@ fn partial_rowbreak_fragment_spacing_px(
         0.0
     };
     (before, bottom)
+}
+
+/// First-fragment vertical inset shared by the early fit gate and the fragment scanner.
+///
+/// Square/Para RowBreak tables include their outer top margin in the visible inset.  The
+/// TopAndBottom path keeps its established positive-offset-only contract.
+fn partial_rowbreak_first_fragment_vertical_offset_px(
+    table: &crate::model::table::Table,
+    dpi: f64,
+) -> f64 {
+    let square_offset = para_square_rowbreak_first_fragment_top_offset_px(table, dpi);
+    if square_offset > 0.0 {
+        return square_offset;
+    }
+    if is_para_topbottom_float(&table.common) {
+        let vertical_offset = signed_hwpunit(table.common.vertical_offset);
+        if vertical_offset > 0 {
+            return hwpunit_to_px(vertical_offset, dpi);
+        }
+    }
+    0.0
 }
 /// [#2097] 쪽 하단 압축 수용치 — 한글은 쪽 경계에서 행/블록이 잔여를 이 이내로
 /// 초과하면 압축해 끼워 넣는다 (1741000 실측 초과 10.4px 수용).
@@ -4819,7 +4876,13 @@ impl TypesetEngine {
             // 렌더러 build_single_column: 매 항목 후 prev_layout_para 갱신, 표/Shape/
             // PartialTable 배치 후 page/lazy base 무효화(LINE_SEG lh 가 개체 높이를
             // 반영 못 해 drift 유발 → 직후 paragraph 는 lazy 역산으로 재산출). 단단 전용.
-            if st.col_count == 1 {
+            // A paragraph may finish by flushing the current page (for example a saved empty
+            // ladder followed by an explicit break). `push_new_page()` has already reset the
+            // vpos cursor in that case, so do not immediately seed the fresh page with the
+            // paragraph that belongs to the previous page. Carrying that stale predecessor made
+            // a zero-vpos heading snap to the previous page's bottom before the next table was
+            // considered (#1753/#1755).
+            if st.col_count == 1 && !st.current_items.is_empty() {
                 st.vpos_prev_layout_para = Some(para_idx);
                 // [#2243] 저장-앵커 사다리 dirty 태깅: 저장 lineseg 없는 문단(생성기
                 // 누락)은 한글이 fresh 재계산으로 키울 수 있어, 그 뒤 기계 사다리
@@ -13802,6 +13865,54 @@ impl TypesetEngine {
         st.deferred_table_controls = remaining;
     }
 
+    /// Placement order for controls owned by a table paragraph.
+    ///
+    /// Hancom sorts positive-offset floats only for an empty/whitespace host whose stored lines
+    /// form one continuous flow.  Visible hosts, negative offsets, and a stored vpos reset retain
+    /// source order.  In particular, once sorting is disabled no TAC/non-TAC tiebreak may reorder
+    /// the controls afterward.
+    fn table_paragraph_control_order(
+        &self,
+        para: &Paragraph,
+        fmt: &FormattedParagraph,
+    ) -> Vec<usize> {
+        let has_negative_para_float = para.controls.iter().any(|ctrl| {
+            matches!(
+                ctrl,
+                Control::Table(table)
+                    if is_para_topbottom_float(&table.common)
+                        && signed_hwpunit(table.common.vertical_offset) < 0
+            )
+        });
+        let has_mid_para_vpos_reset = para.line_segs.windows(2).any(|lines| {
+            (lines[0].tag | lines[1].tag)
+                & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY
+                == 0
+                && lines[1].text_start > lines[0].text_start
+                && lines[1].vertical_pos <= 0
+                && lines[0].vertical_pos > 0
+        });
+        let should_sort = !para_has_non_whitespace_text(para)
+            && !has_negative_para_float
+            && !has_mid_para_vpos_reset;
+        let mut order: Vec<usize> = (0..para.controls.len()).collect();
+        if should_sort {
+            order.sort_by_key(|&control_index| match &para.controls[control_index] {
+                Control::Table(table) => {
+                    let vertical_offset = if is_para_topbottom_float(&table.common) {
+                        signed_hwpunit(table.common.vertical_offset)
+                    } else {
+                        0
+                    };
+                    let flow_tiebreak = u8::from(self.is_effective_tac_table(para, table, fmt));
+                    (vertical_offset, flow_tiebreak)
+                }
+                _ => (0, 1),
+            });
+        }
+        order
+    }
+
     /// 표가 포함된 문단을 처리한다.
     /// 각 컨트롤(표/도형)에 대해 format → fits → place/split 패턴 적용.
     #[allow(clippy::too_many_arguments)]
@@ -13966,53 +14077,14 @@ impl TypesetEngine {
         // vertical_offset 재정렬(#986/#1088)은 그대로 유지한다.
         // 경계: `signed_hwpunit < 0` 인 음수만 트리거하며, offset == 0 은 음수가 아니므로
         // 양수와 함께 정렬을 유지한다(0/양수=정렬 ON, 음수 혼재=정렬 OFF).
-        let has_negative_para_float = para.controls.iter().any(|ctrl| {
-            matches!(
-                ctrl,
-                Control::Table(t)
-                    if is_para_topbottom_float(&t.common)
-                        && signed_hwpunit(t.common.vertical_offset) < 0
-            )
-        });
         // [#2287 후속/1.hwpx p58] 문단 내부 저장 vpos 리셋(ls[k] vpos<=0, 직전
-        // vpos>5000)이 있는 host 는 컨트롤이 서로 다른 쪽의 저장 줄에 앉는
+        // vpos>0)이 있는 host 는 컨트롤이 서로 다른 저장 줄에 앉는
         // 구조 — v_off 오름차순 정렬(#986/#1088)이 저장 줄 순서를 뒤집으면
         // (1.hwpx pi=322: TAC(v_off 0)가 자리차지(v_off 1768) 앞으로) 리셋
-        // 경계 배치가 무너져 두 표가 같은 쪽에 겹친다. #1639 음수-혼재와
+        // 경계 배치가 무너져 두 표가 같은 쪽에 겹친다. text_start 증가+양수→0 전이는
+        // 임의 5000HU 임계와 무관하게 저장 리셋으로 본다. #1639 음수-혼재와
         // 동일하게 정렬을 끄고 배열(저장) 순서를 보존한다.
-        let has_mid_para_vpos_reset = para.line_segs.windows(2).any(|w| {
-            (w[0].tag | w[1].tag) & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY
-                == 0
-                && w[1].vertical_pos <= 0
-                && w[0].vertical_pos > 5000
-        });
-        let should_sort_para_float_tables = !para_has_non_whitespace_text(para)
-            && !has_negative_para_float
-            && !has_mid_para_vpos_reset;
-        let float_table_voffset = |ctrl: &Control| -> i32 {
-            match ctrl {
-                Control::Table(t)
-                    if should_sort_para_float_tables && is_para_topbottom_float(&t.common) =>
-                {
-                    t.common.vertical_offset as i32
-                }
-                _ => 0,
-            }
-        };
-        let table_flow_tiebreak = |ctrl: &Control| -> u8 {
-            match ctrl {
-                Control::Table(t) if !self.is_effective_tac_table(para, t, &fmt) => 0,
-                Control::Table(t) if self.is_effective_tac_table(para, t, &fmt) => 1,
-                _ => 1,
-            }
-        };
-        let mut ctrl_order: Vec<usize> = (0..para.controls.len()).collect();
-        ctrl_order.sort_by_key(|&i| {
-            (
-                float_table_voffset(&para.controls[i]),
-                table_flow_tiebreak(&para.controls[i]),
-            )
-        });
+        let ctrl_order = self.table_paragraph_control_order(para, &fmt);
         // is_first_table/is_last_table 는 배열순서가 아닌 "놓이는 순서(ctrl_order)"
         // 기준으로 잡아, pre/post 텍스트와 spacing 이 실제 배치 첫/마지막 표에 붙도록 한다.
         let first_placed_table = ctrl_order
@@ -14869,34 +14941,20 @@ impl TypesetEngine {
             is_para_topbottom_float(&table.common) && para_has_non_whitespace_text(para);
         let signed_vertical_offset = vertical_offset as i32;
         let total_lines = fmt.line_heights.len();
-        let pre_table_end_line = if !is_visible_para_float
-            && signed_vertical_offset > 0
-            && !para.text.is_empty()
-        {
-            total_lines
-        } else if table.common.treat_as_char
-            && total_lines > 1
-            && para.text.chars().any(|c| c.is_alphanumeric())
-        {
-            // 전폭 TAC 표가 자동 줄바꿈으로 자기 줄(line index N)에 놓인 경우(\n 없음):
-            // 한컴은 LINE_SEG 순서대로 line0=텍스트 → lineN=표 로 렌더한다.
-            // control_text_positions() 는 char_offsets 가 비면 무용하므로, 표 줄의 높이
-            // (표 본체 + outer margin top/bottom)와 일치하는 LINE_SEG 인덱스로 판정한다.
-            // PUA 필러/공백만 있는 문단(예: 복학원서.hwp pi=16 — 한컴이 표 폭만큼 필러로
-            // 줄바꿈시킨 케이스)은 is_alphanumeric() 가 false 라 제외 → compute_tac_leading
-            // 경로 유지. (Task #853, Task #842 결함 #2 의 PUA 필러 판정과 정합)
-            let om_top = hwpunit_to_px(table.outer_margin_top as i32, self.dpi);
-            let om_bot = hwpunit_to_px(table.outer_margin_bottom as i32, self.dpi);
-            let tbl_line_h = hwpunit_to_px(table.common.height as i32, self.dpi) + om_top + om_bot;
-            para.line_segs
-                .iter()
-                .enumerate()
-                .find(|(_, ls)| (hwpunit_to_px(ls.line_height, self.dpi) - tbl_line_h).abs() < 1.0)
-                .map(|(i, _)| i)
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let pre_table_end_line =
+            if !is_visible_para_float && signed_vertical_offset > 0 && !para.text.is_empty() {
+                total_lines
+            } else if table.common.treat_as_char && total_lines > 1 {
+                // 전폭 TAC 표가 자동 줄바꿈으로 자기 줄(line index N)에 놓인 경우(\n 없음):
+                // 한컴은 LINE_SEG 순서대로 line0=텍스트 → lineN=표 로 렌더한다.
+                // visible-text 경로는 종전 line-height 증거를 그대로 유지한다. 공백 prefix
+                // 뒤의 컨트롤은 raw UTF-16 위치가 지목한 줄과 유일한 표-높이 증거가
+                // 일치할 때만 인정한다. PUA 필러 host 는 whitespace 가 아니므로 종전
+                // compute_tac_leading 경로를 유지한다.
+                self.tac_pre_table_end_line(para, ctrl_idx, table)
+            } else {
+                0
+            };
 
         // [Task #439] Square wrap (어울림) 표 식별.
         // 어울림 표는 호스트 문단 텍스트와 같은 수직 영역에 배치되므로
@@ -15266,6 +15324,90 @@ impl TypesetEngine {
                 None
             }
         })
+    }
+
+    /// Number of stored text lines preceding a multiline TAC table.
+    ///
+    /// Alphanumeric hosts retain the established line-height lookup.  A whitespace-only prefix
+    /// is accepted only when the control's UTF-16 position and a unique stored table-height line
+    /// identify the same nonzero line.  This keeps PUA filler hosts on their legacy path.
+    fn tac_pre_table_end_line(
+        &self,
+        para: &Paragraph,
+        control_index: usize,
+        table: &crate::model::table::Table,
+    ) -> usize {
+        let om_top = hwpunit_to_px(table.outer_margin_top as i32, self.dpi);
+        let om_bot = hwpunit_to_px(table.outer_margin_bottom as i32, self.dpi);
+        let table_line_h = hwpunit_to_px(table.common.height as i32, self.dpi) + om_top + om_bot;
+
+        if para.text.chars().any(|c| c.is_alphanumeric()) {
+            return para
+                .line_segs
+                .iter()
+                .enumerate()
+                .find(|(_, seg)| {
+                    (hwpunit_to_px(seg.line_height, self.dpi) - table_line_h).abs() < 1.0
+                })
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+        }
+
+        let Some(control_char_pos) = para.control_text_positions().get(control_index).copied()
+        else {
+            return 0;
+        };
+        if control_char_pos == 0
+            || !para
+                .text
+                .chars()
+                .take(control_char_pos)
+                .all(char::is_whitespace)
+        {
+            return 0;
+        }
+        let control_line = para
+            .line_segs
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, seg)| para.utf16_pos_to_char_idx(seg.text_start) <= control_char_pos)
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+
+        let text_height_matches: Vec<usize> = para
+            .line_segs
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, seg)| {
+                ((hwpunit_to_px(seg.text_height, self.dpi) - table_line_h).abs() < 1.0)
+                    .then_some(idx)
+            })
+            .collect();
+        let height_witness = if text_height_matches.is_empty() {
+            let line_height_matches: Vec<usize> = para
+                .line_segs
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, seg)| {
+                    ((hwpunit_to_px(seg.line_height, self.dpi) - table_line_h).abs() < 1.0)
+                        .then_some(idx)
+                })
+                .collect();
+            match line_height_matches.as_slice() {
+                [idx] => Some(*idx),
+                _ => None,
+            }
+        } else {
+            match text_height_matches.as_slice() {
+                [idx] => Some(*idx),
+                _ => None,
+            }
+        };
+
+        height_witness
+            .filter(|witness| *witness == control_line && control_line > 0)
+            .unwrap_or(0)
     }
 
     fn is_effective_tac_table(
@@ -16024,6 +16166,27 @@ impl TypesetEngine {
                 mt.max_padding_for_row(r)
             };
             let budget = (avail_for_rows - consumed - cs_before - padding).max(0.0);
+            // A zero content budget means the remaining page space cannot even reserve this row
+            // fragment's visible padding. `advance_row_cut` still returns its first text unit to
+            // guarantee progress; combined with the generous HWPX/segless 64px split tolerance
+            // that used to paint a new row below the body instead of deferring it. Keep forced
+            // progress only when this is the first row on a fresh fragment. Native stored-layout
+            // tables keep their established strict-tolerance path.
+            if row_cut_must_defer_without_content_budget(
+                r,
+                cursor_row,
+                budget,
+                rowbreak_split_row_overflow_tolerance,
+            ) {
+                if std::env::var("RHWP_DIAG_SCAN").is_ok() {
+                    eprintln!(
+                        "DIAG_SCAN CUT_DEFER_NO_BUDGET r={} consumed={:.1} padding={:.1} avail={:.1}",
+                        r, consumed, padding, avail_for_rows
+                    );
+                }
+                end_row = r;
+                break;
+            }
             let res = layout_engine.advance_row_cut(table, r, row_start_cut, budget, styles);
             // [#2236 진단] 인트라 컷 시도 결과 — 동작 불변.
             if std::env::var("RHWP_DIAG_SCAN").is_ok() {
@@ -17053,6 +17216,11 @@ impl TypesetEngine {
         let cs = mt.cell_spacing;
         let can_intra_split = !mt.cells.is_empty();
         let base_available = st.base_available_height();
+        let native_cellbreak_fragment_spacing_hu = native_uniform_cellbreak_fragment_spacing_hu(
+            st.profile.native_hwp5_layout(),
+            para,
+            table,
+        );
         // Partial table borders are rendered against the visible body area. The paginator-level
         // bottom tolerance is useful for text fit heuristics, but if row cuts spend it here the
         // table fragment can be painted into the footer/body edge and get clipped.
@@ -17062,6 +17230,7 @@ impl TypesetEngine {
         // 셀 패딩/중첩 표 높이 계산에만 의존하므로 ad hoc 인스턴스로 충분하다.
         let layout_engine = crate::renderer::layout::LayoutEngine::new(self.dpi);
         layout_engine.set_layout_profile(st.profile);
+        layout_engine.set_page_layout_context(st.layout.page_width, st.layout.body_area);
         layout_engine
             .set_render_normalization_overlay(std::sync::Arc::clone(&self.render_normalization));
         // [Task #993] rowspan(row_span>1) 셀이 걸친 행 — 컷 모델(advance_row_cut)은
@@ -17121,6 +17290,13 @@ impl TypesetEngine {
             );
         }
 
+        let saved_residual_split_hu = native_single_cell_rowbreak_saved_residual_split_hu(
+            st.profile.native_hwp5_layout(),
+            para,
+            table,
+            paragraphs_all.get(para_idx + 1),
+        );
+
         // 첫 행이 남은 공간보다 크면 다음 페이지로 (인트라-로우 분할 가능성 확인).
         // Task #398: rowspan>1 셀이 행 0의 시작점이면 블록 전체 높이로 판정.
         // [Task #1046 Stage 2] 첫(비연속) fragment 의 렌더러 y_start 점프 — host_spacing.before
@@ -17134,21 +17310,11 @@ impl TypesetEngine {
                 table,
                 ft.host_spacing.before,
                 false,
-                ft.strict_following_plain_text_fit,
+                ft.strict_following_plain_text_fit || saved_residual_split_hu.is_some(),
+                native_cellbreak_fragment_spacing_hu,
                 self.dpi,
             );
-            let vert_off = {
-                use crate::model::shape::{TextWrap as TW, VertRelTo as VR};
-                let is_para_topbottom = !table.common.treat_as_char
-                    && matches!(table.common.text_wrap, TW::TopAndBottom)
-                    && matches!(table.common.vert_rel_to, VR::Para);
-                let v = table.common.vertical_offset as i32;
-                if is_para_topbottom && v > 0 {
-                    hwpunit_to_px(v, self.dpi)
-                } else {
-                    0.0
-                }
-            };
+            let vert_off = partial_rowbreak_first_fragment_vertical_offset_px(table, self.dpi);
             host_before + vert_off + fragment_outer_bottom
         };
         let remaining_on_page =
@@ -17416,6 +17582,8 @@ impl TypesetEngine {
             host_spacing_before: ft.host_spacing.before,
             host_spacing_after_only: ft.host_spacing.spacing_after_only,
             strict_following_plain_text_fit: ft.strict_following_plain_text_fit,
+            native_cellbreak_fragment_spacing_hu,
+            saved_residual_split_hu,
             budget_para_start_height,
         };
         let source = BlockTableContinuationSource {
@@ -17489,6 +17657,9 @@ impl TypesetEngine {
             let host_spacing_before = prepared.host_spacing_before;
             let host_spacing_after_only = prepared.host_spacing_after_only;
             let strict_following_plain_text_fit = prepared.strict_following_plain_text_fit;
+            let native_cellbreak_fragment_spacing_hu =
+                prepared.native_cellbreak_fragment_spacing_hu;
+            let saved_residual_split_hu = prepared.saved_residual_split_hu;
             let budget_para_start_height = prepared.budget_para_start_height;
             let cursor_row = continuation.row;
             let is_continuation = continuation.is_continuation;
@@ -17503,6 +17674,7 @@ impl TypesetEngine {
             if !start_cut_is_block
                 && !start_cut.is_empty()
                 && can_intra_split
+                && saved_residual_split_hu.is_none()
                 && layout_engine
                     .advance_row_cut(table, cursor_row, start_cut, f64::MAX, styles)
                     .consumed_height
@@ -17529,34 +17701,41 @@ impl TypesetEngine {
                     table,
                     host_spacing_before,
                     is_continuation,
-                    strict_following_plain_text_fit,
+                    strict_following_plain_text_fit || saved_residual_split_hu.is_some(),
+                    native_cellbreak_fragment_spacing_hu,
                     self.dpi,
                 );
             let vert_offset_overhead = if is_continuation {
                 0.0
             } else {
-                use crate::model::shape::{TextWrap as TW3, VertRelTo as VR3};
-                let is_para_topbottom = !table.common.treat_as_char
-                    && matches!(table.common.text_wrap, TW3::TopAndBottom)
-                    && matches!(table.common.vert_rel_to, VR3::Para);
-                // HwpUnit=u32 이므로 음수 (u32 wrap) 는 i32 로 캐스트 후 확인.
-                let v_off_i32 = table.common.vertical_offset as i32;
-                if is_para_topbottom && v_off_i32 > 0 {
-                    let raw = hwpunit_to_px(v_off_i32, self.dpi);
-                    // [#2015] host 텍스트가 pre-emit(pre_emit_visible_rowbreak_host_text)
-                    // 되어 current_height 를 para_start → para_start+host_h 로 전진시킨 경우,
-                    // vert_off(para_start 기준 표 오프셋)를 그대로 빼면 host_h 만큼 이중계상되어
-                    // 앵커가 body 바닥 아래로 밀린다(91.2px 오버플로우). 표의 참 오프셋은
-                    // current_height 기준 (vert_off − host_h) 이므로 pre-emit host_h 만큼 감액.
-                    // layout(table_partial.rs) 도 동일 감액을 적용해 typeset 컷과 정합한다.
-                    let host_h = st
-                        .pre_emitted_host_heights
-                        .get(&para_idx)
-                        .copied()
-                        .unwrap_or(0.0);
-                    (raw - host_h).max(0.0)
+                let square_first_fragment_top_offset =
+                    para_square_rowbreak_first_fragment_top_offset_px(table, self.dpi);
+                if square_first_fragment_top_offset > 0.0 {
+                    partial_rowbreak_first_fragment_vertical_offset_px(table, self.dpi)
                 } else {
-                    0.0
+                    use crate::model::shape::{TextWrap as TW3, VertRelTo as VR3};
+                    let is_para_topbottom = !table.common.treat_as_char
+                        && matches!(table.common.text_wrap, TW3::TopAndBottom)
+                        && matches!(table.common.vert_rel_to, VR3::Para);
+                    // HwpUnit=u32 이므로 음수 (u32 wrap) 는 i32 로 캐스트 후 확인.
+                    let v_off_i32 = table.common.vertical_offset as i32;
+                    if is_para_topbottom && v_off_i32 > 0 {
+                        let raw = hwpunit_to_px(v_off_i32, self.dpi);
+                        // [#2015] host 텍스트가 pre-emit(pre_emit_visible_rowbreak_host_text)
+                        // 되어 current_height 를 para_start → para_start+host_h 로 전진시킨 경우,
+                        // vert_off(para_start 기준 표 오프셋)를 그대로 빼면 host_h 만큼 이중계상되어
+                        // 앵커가 body 바닥 아래로 밀린다(91.2px 오버플로우). 표의 참 오프셋은
+                        // current_height 기준 (vert_off − host_h) 이므로 pre-emit host_h 만큼 감액.
+                        // layout(table_partial.rs) 도 동일 감액을 적용해 typeset 컷과 정합한다.
+                        let host_h = st
+                            .pre_emitted_host_heights
+                            .get(&para_idx)
+                            .copied()
+                            .unwrap_or(0.0);
+                        (raw - host_h).max(0.0)
+                    } else {
+                        0.0
+                    }
                 }
             };
             // [Task #1860] 빈 host out-of-flow para float(비-TAC, TopAndBottom,
@@ -17711,44 +17890,90 @@ impl TypesetEngine {
                 };
 
             // [Task #1025] split_block_start: 블록 분할 시 연속분 커서 복귀 기록.
+            let saved_residual_scan = saved_residual_split_hu.and_then(
+                |(object_height_hu, residual_height_hu)| {
+                    let object_height = hwpunit_to_px(object_height_hu, self.dpi);
+                    let residual_height = hwpunit_to_px(residual_height_hu, self.dpi);
+                    let first_band = !is_continuation
+                        && cursor_row == 0
+                        && start_cut.is_empty()
+                        && cut_row_h.first().is_some_and(|height| {
+                            *height > object_height + 0.5
+                                && object_height <= avail_for_rows + 0.1
+                        });
+                    if first_band {
+                        let full_cut = layout_engine.advance_row_cut(
+                            table,
+                            cursor_row,
+                            start_cut,
+                            f64::MAX,
+                            styles,
+                        );
+                        if full_cut.fully_consumed && !full_cut.end_cut.is_empty() {
+                            return Some(BlockTableRowScan {
+                                consumed: object_height,
+                                end_row: 1,
+                                split_block_start: None,
+                                split_end_cut: full_cut.end_cut,
+                                split_end_limit: object_height,
+                            });
+                        }
+                    }
+
+                    let terminal_band = is_continuation
+                        && cursor_row == 0
+                        && !start_cut.is_empty()
+                        && residual_height > 0.0
+                        && residual_height <= avail_for_rows + 0.1;
+                    terminal_band.then_some(BlockTableRowScan {
+                        consumed: residual_height,
+                        end_row: 1,
+                        split_block_start: None,
+                        split_end_cut: Vec::new(),
+                        split_end_limit: 0.0,
+                    })
+                },
+            );
             let BlockTableRowScan {
                 mut consumed,
                 mut end_row,
                 mut split_block_start,
                 mut split_end_cut,
                 mut split_end_limit,
-            } = self.scan_block_table_split_rows(
-                st,
-                layout_engine,
-                mt,
-                table,
-                styles,
-                cut_row_h,
-                rowspan_touched,
-                start_cut,
-                BlockRowScanVars {
-                    cursor_row,
-                    row_count,
-                    cs,
-                    can_intra_split,
-                    is_continuation,
-                    avail_for_rows,
-                    header_overhead,
-                    landscape_rowbreak_bleed,
-                    landscape_whole_row_tolerance,
-                    landscape_short_row_tolerance,
-                    landscape_short_row_max_height,
-                    rowbreak_split_row_overflow_tolerance,
-                    strict_painted_bottom_fit: strict_following_plain_text_fit,
-                },
-                BlockTableRowScan {
-                    consumed: 0.0,
-                    end_row: cursor_row,
-                    split_block_start: None,
-                    split_end_cut: Vec::new(),
-                    split_end_limit: 0.0,
-                },
-            );
+            } = saved_residual_scan.unwrap_or_else(|| {
+                self.scan_block_table_split_rows(
+                    st,
+                    layout_engine,
+                    mt,
+                    table,
+                    styles,
+                    cut_row_h,
+                    rowspan_touched,
+                    start_cut,
+                    BlockRowScanVars {
+                        cursor_row,
+                        row_count,
+                        cs,
+                        can_intra_split,
+                        is_continuation,
+                        avail_for_rows,
+                        header_overhead,
+                        landscape_rowbreak_bleed,
+                        landscape_whole_row_tolerance,
+                        landscape_short_row_tolerance,
+                        landscape_short_row_max_height,
+                        rowbreak_split_row_overflow_tolerance,
+                        strict_painted_bottom_fit: strict_following_plain_text_fit,
+                    },
+                    BlockTableRowScan {
+                        consumed: 0.0,
+                        end_row: cursor_row,
+                        split_block_start: None,
+                        split_end_cut: Vec::new(),
+                        split_end_limit: 0.0,
+                    },
+                )
+            });
             if end_row <= cursor_row {
                 end_row = cursor_row + 1;
             }
@@ -18854,6 +19079,8 @@ fn endnote_separator_height_px(shape: &FootnoteShape, dpi: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document_core::queries::rendering::CELL_FLOATING_STACK_PROJECTION_TAG;
+    use crate::model::image::Picture;
     use crate::model::page::{ColumnDef, PageDef};
     use crate::model::paragraph::{LineSeg, Paragraph};
     use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
@@ -19166,6 +19393,26 @@ mod tests {
     }
 
     #[test]
+    fn generous_row_cut_tolerance_requires_real_content_budget_after_padding() {
+        assert!(
+            row_cut_must_defer_without_content_budget(35, 24, 0.0, 64.0),
+            "a later row with no budget after padding must move to the next page",
+        );
+        assert!(
+            !row_cut_must_defer_without_content_budget(24, 24, 0.0, 64.0),
+            "an oversized first row must still make progress on a fresh page",
+        );
+        assert!(
+            !row_cut_must_defer_without_content_budget(35, 24, 0.2, 64.0),
+            "positive non-rounding budget keeps the established HWPX split path",
+        );
+        assert!(
+            !row_cut_must_defer_without_content_budget(35, 24, 0.0, 2.0),
+            "native stored-layout tables keep their strict-tolerance behavior",
+        );
+    }
+
+    #[test]
     fn issue2439_partial_rowbreak_repeats_outer_margins_without_repeating_vertical_offset() {
         let table = Table {
             page_break: TablePageBreak::RowBreak,
@@ -19187,6 +19434,7 @@ mod tests {
             first_host_before,
             false,
             true,
+            None,
             DEFAULT_DPI,
         );
         let continuation = partial_rowbreak_fragment_spacing_px(
@@ -19194,6 +19442,7 @@ mod tests {
             first_host_before,
             true,
             true,
+            None,
             DEFAULT_DPI,
         );
 
@@ -19210,9 +19459,285 @@ mod tests {
             first_host_before,
             true,
             false,
+            None,
             DEFAULT_DPI,
         );
         assert_eq!(ungated, (0.0, 0.0));
+    }
+
+    #[test]
+    fn issue2004_projected_stack_repeats_only_continuation_outer_top() {
+        let projected_picture_paragraph = || {
+            let mut picture = Picture::default();
+            picture.common.treat_as_char = true;
+            picture.common.text_wrap = TextWrap::Square;
+            picture.common.allow_overlap = false;
+            Paragraph {
+                controls: vec![Control::Picture(Box::new(picture))],
+                line_segs: vec![LineSeg {
+                    tag: LineSeg::TAG_SINGLE_SEGMENT_LINE | CELL_FLOATING_STACK_PROJECTION_TAG,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        };
+        let table = Table {
+            row_count: 1,
+            col_count: 1,
+            page_break: TablePageBreak::RowBreak,
+            outer_margin_top: 283,
+            outer_margin_bottom: 283,
+            common: CommonObjAttr {
+                treat_as_char: false,
+                text_wrap: TextWrap::TopAndBottom,
+                vert_rel_to: VertRelTo::Para,
+                ..Default::default()
+            },
+            cells: vec![Cell {
+                paragraphs: vec![projected_picture_paragraph(), projected_picture_paragraph()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let first_host_before = 17.0;
+        let outer_top = hwpunit_to_px(283, DEFAULT_DPI);
+
+        let first = partial_rowbreak_fragment_spacing_px(
+            &table,
+            first_host_before,
+            false,
+            false,
+            None,
+            DEFAULT_DPI,
+        );
+        let continuation = partial_rowbreak_fragment_spacing_px(
+            &table,
+            first_host_before,
+            true,
+            false,
+            None,
+            DEFAULT_DPI,
+        );
+
+        assert_eq!(first, (first_host_before, 0.0));
+        assert!((continuation.0 - outer_top).abs() < 0.01);
+        assert_eq!(
+            continuation.1, 0.0,
+            "#2004 repeats only outer-top, not the generic fragment outer-bottom"
+        );
+    }
+
+    #[test]
+    fn square_para_rowbreak_first_fit_includes_offset_and_outer_top() {
+        let table = Table {
+            page_break: TablePageBreak::RowBreak,
+            outer_margin_top: 200,
+            common: CommonObjAttr {
+                treat_as_char: false,
+                text_wrap: TextWrap::Square,
+                vert_rel_to: VertRelTo::Para,
+                vert_align: crate::model::shape::VertAlign::Top,
+                vertical_offset: 300,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let expected = hwpunit_to_px(500, DEFAULT_DPI);
+        let actual = partial_rowbreak_first_fragment_vertical_offset_px(&table, DEFAULT_DPI);
+        assert!(
+            (actual - expected).abs() < 0.001,
+            "actual={actual} expected={expected}"
+        );
+
+        let mut continuation = table;
+        continuation.common.vertical_offset = 0;
+        assert_eq!(
+            partial_rowbreak_first_fragment_vertical_offset_px(&continuation, DEFAULT_DPI),
+            0.0,
+            "a continuation does not repeat the first-fragment vertical inset"
+        );
+    }
+
+    #[test]
+    fn whitespace_prefix_tac_uses_utf16_control_line_and_rejects_pua_filler() {
+        let table = Table {
+            outer_margin_top: 141,
+            outer_margin_bottom: 141,
+            common: CommonObjAttr {
+                treat_as_char: true,
+                height: 19_350,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut para = Paragraph {
+            text: "  ".to_string(),
+            char_count: 10,
+            char_offsets: vec![0, 9],
+            line_segs: vec![
+                LineSeg {
+                    text_start: 0,
+                    vertical_pos: 2_080,
+                    line_height: 1_300,
+                    text_height: 1_300,
+                    line_spacing: 780,
+                    ..Default::default()
+                },
+                LineSeg {
+                    text_start: 1,
+                    vertical_pos: 4_160,
+                    line_height: 19_632,
+                    text_height: 19_632,
+                    line_spacing: 780,
+                    ..Default::default()
+                },
+            ],
+            controls: vec![Control::Table(Box::new(table.clone()))],
+            ..Default::default()
+        };
+        let engine = TypesetEngine::new(DEFAULT_DPI);
+
+        assert_eq!(para.control_text_positions(), vec![1]);
+        assert_eq!(para.utf16_pos_to_char_idx(para.line_segs[1].text_start), 1);
+        assert_eq!(engine.tac_pre_table_end_line(&para, 0, &table), 1);
+
+        para.text = "\u{e000} ".to_string();
+        assert_eq!(
+            engine.tac_pre_table_end_line(&para, 0, &table),
+            0,
+            "PUA filler hosts retain the established leading-width path"
+        );
+
+        para.text = "  ".to_string();
+        para.line_segs[0].text_height = 19_632;
+        assert_eq!(
+            engine.tac_pre_table_end_line(&para, 0, &table),
+            0,
+            "ambiguous stored height witnesses must not move the table"
+        );
+    }
+
+    #[test]
+    fn table_control_order_respects_stored_vpos_reset_and_existing_sort_contracts() {
+        let tac_table = || {
+            Control::Table(Box::new(Table {
+                common: CommonObjAttr {
+                    treat_as_char: true,
+                    height: 10_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }))
+        };
+        let float_table = |vertical_offset: i32| {
+            Control::Table(Box::new(Table {
+                common: CommonObjAttr {
+                    treat_as_char: false,
+                    text_wrap: TextWrap::TopAndBottom,
+                    vert_rel_to: VertRelTo::Para,
+                    vertical_offset: vertical_offset as u32,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }))
+        };
+        let fmt = FormattedParagraph {
+            total_height: 0.0,
+            line_heights: vec![1.0, 1.0],
+            line_spacings: vec![0.0, 0.0],
+            spacing_before: 0.0,
+            spacing_after: 0.0,
+            height_for_fit: 0.0,
+            fresh_recomposed: false,
+        };
+        let engine = TypesetEngine::new(DEFAULT_DPI);
+
+        let reset_host = Paragraph {
+            text: " ".to_string(),
+            line_segs: vec![
+                LineSeg {
+                    text_start: 0,
+                    vertical_pos: 3_648,
+                    ..Default::default()
+                },
+                LineSeg {
+                    text_start: 9,
+                    vertical_pos: 0,
+                    ..Default::default()
+                },
+            ],
+            controls: vec![tac_table(), float_table(0), tac_table()],
+            ..Default::default()
+        };
+        assert_eq!(
+            engine.table_paragraph_control_order(&reset_host, &fmt),
+            vec![0, 1, 2],
+            "a stored 3648→0 reset keeps the authoritative control order"
+        );
+
+        let positive_only = Paragraph {
+            controls: vec![float_table(300), float_table(100)],
+            ..Default::default()
+        };
+        assert_eq!(
+            engine.table_paragraph_control_order(&positive_only, &fmt),
+            vec![1, 0],
+            "positive-only empty hosts retain vertical-offset sorting"
+        );
+
+        let negative_mixed = Paragraph {
+            controls: vec![float_table(-100), float_table(300)],
+            ..Default::default()
+        };
+        assert_eq!(
+            engine.table_paragraph_control_order(&negative_mixed, &fmt),
+            vec![0, 1],
+            "negative offsets retain source order"
+        );
+
+        let visible_host = Paragraph {
+            text: "title".to_string(),
+            controls: vec![float_table(300), float_table(100)],
+            ..Default::default()
+        };
+        assert_eq!(
+            engine.table_paragraph_control_order(&visible_host, &fmt),
+            vec![0, 1],
+            "visible hosts retain source order"
+        );
+    }
+
+    #[test]
+    fn issue2063_cellbreak_repeats_one_stored_fragment_gap() {
+        let table = Table {
+            page_break: TablePageBreak::CellBreak,
+            ..Default::default()
+        };
+        let top = hwpunit_to_px(141, DEFAULT_DPI);
+        let trailing = hwpunit_to_px(459, DEFAULT_DPI);
+        let first = partial_rowbreak_fragment_spacing_px(
+            &table,
+            top,
+            false,
+            false,
+            Some((141, 459)),
+            DEFAULT_DPI,
+        );
+        let continuation = partial_rowbreak_fragment_spacing_px(
+            &table,
+            0.0,
+            true,
+            false,
+            Some((141, 459)),
+            DEFAULT_DPI,
+        );
+
+        assert!((first.0 - top).abs() < 0.01);
+        assert!((first.1 - trailing).abs() < 0.01);
+        assert!((continuation.0 - top).abs() < 0.01);
+        assert!((continuation.1 - trailing).abs() < 0.01);
+        assert!((continuation.0 + continuation.1 - hwpunit_to_px(600, DEFAULT_DPI)).abs() < 0.01);
     }
 
     fn para_at_vpos(vpos: i32) -> Paragraph {
@@ -19285,6 +19810,8 @@ mod tests {
             host_spacing_before: 0.0,
             host_spacing_after_only: 0.0,
             strict_following_plain_text_fit: false,
+            native_cellbreak_fragment_spacing_hu: None,
+            saved_residual_split_hu: None,
             budget_para_start_height: 0.0,
         };
         let flow_layout =

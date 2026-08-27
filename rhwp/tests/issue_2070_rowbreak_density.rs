@@ -5,7 +5,7 @@
 //! | 문서 | 기준 PDF | rhwp 핀 | 잔여 |
 //! |---|---|---|---|
 //! | 시장구조조사 (RowBreak 변종 최대 인스턴스, pi=1298 2195행×8열 외 3표) | 315쪽 (`pdf/task2070/...-2022.pdf`) | 307 (잠정) | −8 |
-//! | 화성시 별표2 (CellBreak 원문 타깃) | 162쪽 (`pdf/issue2063_huge_cellbreak_table-2020.pdf`) | 159 (잠정) | −3 |
+//! | 화성시 별표2 (CellBreak 원문 타깃) | 162쪽 (`pdf/issue2063_huge_cellbreak_table-2020.pdf`) | 162 | 0 |
 //!
 //! 본 수정(행미 공백 유령 줄 + aim=true 패딩 0 존중 + 비-Percent 줄간격
 //! 2×스케일 /2)으로 시장구조조사가 606→307쪽 회복 (행 피치 50.4→22.0px =
@@ -49,7 +49,8 @@ fn sijang_rowbreak_density_pin() {
 fn huge_cellbreak_table_pin() {
     let pages = page_count_of("samples/issue2063_huge_cellbreak_table.hwp");
     assert_eq!(
-        pages, 159,
-        "화성시 별표2 잠정 159쪽 (PDF 정답 162, 잔여 −3 — #2070 원문). 실측 {pages}p."
+        pages, 162,
+        "화성시 별표2 162쪽 (PDF 정답 162). 실측 {pages}p: native CellBreak 본문행의 \
+         일정한 저장 line-spacing 조건에서 fragment 경계 공백 누락/중복을 점검하세요."
     );
 }

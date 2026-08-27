@@ -53,11 +53,11 @@ test('onMouseUp 은 직선 끝점 종료를 finishLineEndpointDrag 로 위임한
 // ── 결함 3: 클릭 z순서 변경 ────────────────────────────────────────────────
 test('bringShapeToFront 는 z순서 변경을 executeOperation snapshot 으로 기록한다', () => {
   const body = fnBody(mouseSrc, 'function bringShapeToFront');
-  // 미라우팅 회귀: this.wasm.changeShapeZOrder( 직접 호출이 남으면 히스토리 우회.
-  assert.doesNotMatch(body, /this\.wasm\.changeShapeZOrder\s*\(/,
-    'this.wasm.changeShapeZOrder 직접 호출 금지 — executeOperation 경유여야 함');
+  // 미라우팅 회귀: this.wasm.changeObjectZOrder( 직접 호출이 남으면 히스토리 우회.
+  assert.doesNotMatch(body, /this\.wasm\.changeObjectZOrder\s*\(/,
+    'this.wasm.changeObjectZOrder 직접 호출 금지 — executeOperation 경유여야 함');
   assert.match(body, /executeOperation\(/, 'executeOperation 경유');
   assert.match(body, /kind:\s*'snapshot'/, "kind:'snapshot' 로 기록(메뉴 정렬 경로와 동형)");
   assert.match(body, /operationType:\s*'changeZOrder'/, 'changeZOrder 로 분류');
-  assert.match(body, /wasm\.changeShapeZOrder\s*\(/, '뮤테이션 자체는 operation 콜백에 존재');
+  assert.match(body, /wasm\.changeObjectZOrder\s*\(/, '뮤테이션 자체는 operation 콜백에 존재');
 });

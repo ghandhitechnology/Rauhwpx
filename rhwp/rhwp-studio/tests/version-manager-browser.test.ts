@@ -39,7 +39,13 @@ test.before(async () => {
   const address = server.httpServer?.address();
   assert.ok(address && typeof address !== 'string');
   baseUrl = `http://127.0.0.1:${address.port}`;
-  browser = await puppeteer.launch({ executablePath, headless: true });
+  browser = await puppeteer.launch({
+    executablePath,
+    headless: true,
+    args: process.env.CI || process.env.DEPOT_JOB_URL
+      ? ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+      : [],
+  });
 });
 
 test.after(async () => {

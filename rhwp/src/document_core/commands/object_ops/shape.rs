@@ -1,6 +1,6 @@
 //! 도형 생성/속성/그룹 native 명령 (object_ops 분할, #1904).
 
-use super::MIN_SHAPE_SIZE;
+use super::{LayerOrderEntry, MIN_SHAPE_SIZE};
 use crate::document_core::helpers::{get_textbox_from_shape, get_textbox_from_shape_mut};
 use crate::document_core::DocumentCore;
 use crate::error::HwpError;
@@ -1197,7 +1197,8 @@ impl DocumentCore {
         // --- 도형 구조 조립 ---
         let w_i = width as i32;
         let h_i = height as i32;
-        let new_z_order = self.max_shape_z_order_in_section(section_idx) + 1;
+        let new_z_order =
+            super::max_layer_z_order(&self.document.sections[section_idx]).saturating_add(1);
 
         // ctrl_id 결정
         let is_connector = shape_type.starts_with("connector-");
@@ -1578,9 +1579,9 @@ impl DocumentCore {
             insert_para_idx, insert_ctrl_idx
         )))
     }
-    /// 글상자(Shape) z-order 변경 (네이티브).
+    /// 최상위 floating 개체의 z-order 변경 (네이티브).
     /// operation: "front" | "back" | "forward" | "backward"
-    pub fn change_shape_z_order_native(
+    pub fn change_object_z_order_native(
         &mut self,
         section_idx: usize,
         para_idx: usize,
@@ -1591,55 +1592,49 @@ impl DocumentCore {
             HwpError::RenderError(format!("구역 인덱스 {} 범위 초과", section_idx))
         })?;
 
-        // 구역 내 모든 Shape의 (z_order, para_idx, ctrl_idx) 수집
-        let mut shape_infos: Vec<(i32, usize, usize)> = Vec::new();
-        for (pi, para) in section.paragraphs.iter().enumerate() {
-            for (ci, ctrl) in para.controls.iter().enumerate() {
-                if let Control::Shape(shape) = ctrl {
-                    shape_infos.push((shape.z_order(), pi, ci));
-                }
-            }
-        }
+        // 렌더 안정 순서와 같은 (z_order, paragraph, control) 키를 사용한다.
+        let mut entries = super::layer_order_entries(section);
+        entries.sort_by_key(|entry| (entry.z_order, entry.para_idx, entry.control_idx));
 
-        // (z_order, para_idx, ctrl_idx) 기준 정렬 — 렌더링 순서와 동일
-        shape_infos.sort();
-
-        let target_pos = shape_infos
+        let target_pos = entries
             .iter()
-            .position(|&(_, pi, ci)| pi == para_idx && ci == control_idx)
-            .ok_or_else(|| HwpError::RenderError("대상 Shape를 찾을 수 없습니다".to_string()))?;
-        let current_z = shape_infos[target_pos].0;
-        let last_pos = shape_infos.len() - 1;
+            .position(|entry| entry.para_idx == para_idx && entry.control_idx == control_idx)
+            .ok_or_else(|| {
+                HwpError::RenderError("대상 최상위 floating 개체를 찾을 수 없습니다".to_string())
+            })?;
+        let target = entries[target_pos];
+        let current_z = target.z_order;
+        let last_pos = entries.len() - 1;
 
-        // (대상 새 z_order, 이웃 변경 정보 Option<(para_idx, ctrl_idx, 새 z_order)>)
-        let changes: Option<(i32, Option<(usize, usize, i32)>)> = match operation {
+        // (대상 새 z_order, 이웃 변경 정보 Option<(entry, 새 z_order)>)
+        let changes: Option<(i32, Option<(LayerOrderEntry, i32)>)> = match operation {
             "front" => {
                 if target_pos == last_pos {
                     None // 이미 맨 앞
                 } else {
-                    let max_z = shape_infos[last_pos].0;
-                    Some((max_z + 1, None))
+                    let max_z = entries[last_pos].z_order;
+                    Some((max_z.saturating_add(1), None))
                 }
             }
             "back" => {
                 if target_pos == 0 {
                     None // 이미 맨 뒤
                 } else {
-                    let min_z = shape_infos[0].0;
-                    Some((min_z - 1, None))
+                    let min_z = entries[0].z_order;
+                    Some((min_z.saturating_sub(1), None))
                 }
             }
             "forward" => {
                 if target_pos >= last_pos {
                     None // 이미 맨 앞
                 } else {
-                    let neighbor = shape_infos[target_pos + 1];
-                    if current_z == neighbor.0 {
+                    let neighbor = entries[target_pos + 1];
+                    if current_z == neighbor.z_order {
                         // 같은 z_order — 대상만 +1하여 이웃 위로 이동
-                        Some((current_z + 1, None))
+                        Some((current_z.saturating_add(1), None))
                     } else {
                         // 다른 z_order — 이웃과 z_order 교환
-                        Some((neighbor.0, Some((neighbor.1, neighbor.2, current_z))))
+                        Some((neighbor.z_order, Some((neighbor, current_z))))
                     }
                 }
             }
@@ -1647,13 +1642,13 @@ impl DocumentCore {
                 if target_pos == 0 {
                     None // 이미 맨 뒤
                 } else {
-                    let neighbor = shape_infos[target_pos - 1];
-                    if current_z == neighbor.0 {
+                    let neighbor = entries[target_pos - 1];
+                    if current_z == neighbor.z_order {
                         // 같은 z_order — 대상만 -1하여 이웃 아래로 이동
-                        Some((current_z - 1, None))
+                        Some((current_z.saturating_sub(1), None))
                     } else {
                         // 다른 z_order — 이웃과 z_order 교환
-                        Some((neighbor.0, Some((neighbor.1, neighbor.2, current_z))))
+                        Some((neighbor.z_order, Some((neighbor, current_z))))
                     }
                 }
             }
@@ -1678,12 +1673,16 @@ impl DocumentCore {
         // z_order 변경: 대상 + 이웃
         {
             let section = &mut self.document.sections[section_idx];
-            if let Control::Shape(shape) = &mut section.paragraphs[para_idx].controls[control_idx] {
-                shape.common_mut().z_order = new_z;
+            if !super::set_layer_z_order(section, target, new_z) {
+                return Err(HwpError::RenderError(
+                    "대상 최상위 floating 개체의 종류가 변경되었습니다".to_string(),
+                ));
             }
-            if let Some((n_pi, n_ci, n_z)) = neighbor_change {
-                if let Control::Shape(shape) = &mut section.paragraphs[n_pi].controls[n_ci] {
-                    shape.common_mut().z_order = n_z;
+            if let Some((neighbor, neighbor_z)) = neighbor_change {
+                if !super::set_layer_z_order(section, neighbor, neighbor_z) {
+                    return Err(HwpError::RenderError(
+                        "이웃 최상위 floating 개체의 종류가 변경되었습니다".to_string(),
+                    ));
                 }
             }
         }
@@ -1691,11 +1690,23 @@ impl DocumentCore {
         self.document.sections[section_idx].raw_stream = None;
         self.recompose_section(section_idx);
         self.paginate_if_needed();
+        self.invalidate_page_tree_cache();
 
         Ok(crate::document_core::helpers::json_ok_with(&format!(
             "\"zOrder\":{}",
             new_z
         )))
+    }
+
+    /// 기존 네이티브 호출자 호환용 별칭.
+    pub fn change_shape_z_order_native(
+        &mut self,
+        section_idx: usize,
+        para_idx: usize,
+        control_idx: usize,
+        operation: &str,
+    ) -> Result<String, HwpError> {
+        self.change_object_z_order_native(section_idx, para_idx, control_idx, operation)
     }
     /// 도형 내부 좌표만 스케일 (common/shape_attr은 변경하지 않음)
     fn scale_shape_coords(child: &mut crate::model::shape::ShapeObject, sx: f64, sy: f64) {
@@ -1860,29 +1871,6 @@ impl DocumentCore {
             sa.raw_rendering = Vec::new();
         }
     }
-    /// 구역 내 모든 Shape의 z_order 최대값을 반환 (새 Shape 생성 시 사용)
-    fn max_shape_z_order_in_section(&self, section_idx: usize) -> i32 {
-        self.document
-            .sections
-            .get(section_idx)
-            .map(|section| {
-                section
-                    .paragraphs
-                    .iter()
-                    .flat_map(|p| p.controls.iter())
-                    .filter_map(|ctrl| {
-                        if let Control::Shape(shape) = ctrl {
-                            Some(shape.z_order())
-                        } else {
-                            None
-                        }
-                    })
-                    .max()
-                    .unwrap_or(-1)
-            })
-            .unwrap_or(-1)
-    }
-
     // ─── 개체 묶기/풀기 API ──────────────────────────────
     /// 선택된 개체들을 GroupShape로 묶는다.
     /// targets: [(para_idx, control_idx), ...] — 같은 구역 내 Shape 또는 Picture
@@ -2003,7 +1991,8 @@ impl DocumentCore {
         }
 
         // 3) GroupShape 조립
-        let new_z_order = self.max_shape_z_order_in_section(section_idx) + 1;
+        let new_z_order =
+            super::max_layer_z_order(&self.document.sections[section_idx]).saturating_add(1);
         let group = GroupShape {
             common: CommonObjAttr {
                 ctrl_id: 0x24636f6e, // '$con' — 그룹 컨테이너
@@ -2726,6 +2715,145 @@ mod resize_clamp_tests {
             Control::Shape(s) => s.common(),
             _ => panic!("expected shape"),
         }
+    }
+
+    fn push_picture(core: &mut DocumentCore, z_order: i32) -> (usize, usize) {
+        let para_idx = 0;
+        let para = &mut core.document.sections[0].paragraphs[para_idx];
+        let control_idx = para.controls.len();
+        let mut picture = crate::model::image::Picture::default();
+        picture.common.z_order = z_order;
+        para.controls.push(Control::Picture(Box::new(picture)));
+        para.ctrl_data_records.push(None);
+        (para_idx, control_idx)
+    }
+
+    fn control_z_order(core: &DocumentCore, para_idx: usize, control_idx: usize) -> i32 {
+        match &core.document.sections[0].paragraphs[para_idx].controls[control_idx] {
+            Control::Shape(shape) => shape.common().z_order,
+            Control::Picture(picture) => picture.common.z_order,
+            Control::Table(table) => table.common.z_order,
+            Control::Equation(equation) => equation.common.z_order,
+            _ => panic!("expected a layer-order object"),
+        }
+    }
+
+    fn push_floating_table(core: &mut DocumentCore, z_order: i32) -> (usize, usize) {
+        let para_idx = 0;
+        let para = &mut core.document.sections[0].paragraphs[para_idx];
+        let control_idx = para.controls.len();
+        let mut table = crate::model::table::Table::default();
+        table.common.treat_as_char = false;
+        table.common.z_order = z_order;
+        para.controls.push(Control::Table(Box::new(table)));
+        para.ctrl_data_records.push(None);
+        (para_idx, control_idx)
+    }
+
+    fn push_equation(core: &mut DocumentCore, z_order: i32, treat_as_char: bool) -> (usize, usize) {
+        let para_idx = 0;
+        let para = &mut core.document.sections[0].paragraphs[para_idx];
+        let control_idx = para.controls.len();
+        let mut equation = crate::model::control::Equation::default();
+        equation.common.treat_as_char = treat_as_char;
+        equation.common.z_order = z_order;
+        para.controls.push(Control::Equation(Box::new(equation)));
+        para.ctrl_data_records.push(None);
+        (para_idx, control_idx)
+    }
+
+    #[test]
+    fn mixed_picture_and_shape_share_section_layer_order() {
+        let mut core = make_test_core();
+        let (shape_para, shape_ctrl) = create_rectangle(&mut core);
+        if let Control::Shape(shape) =
+            &mut core.document.sections[0].paragraphs[shape_para].controls[shape_ctrl]
+        {
+            shape.common_mut().z_order = 9;
+        }
+        let (picture_para, picture_ctrl) = push_picture(&mut core, 2);
+
+        core.change_object_z_order_native(0, picture_para, picture_ctrl, "front")
+            .expect("move picture to front");
+
+        assert_eq!(control_z_order(&core, shape_para, shape_ctrl), 9);
+        assert_eq!(control_z_order(&core, picture_para, picture_ctrl), 10);
+    }
+
+    #[test]
+    fn floating_table_and_equation_share_layer_order_but_inline_equation_does_not() {
+        let mut core = make_test_core();
+        let (table_para, table_ctrl) = push_floating_table(&mut core, 8);
+        let (equation_para, equation_ctrl) = push_equation(&mut core, 11, false);
+        let (_, inline_equation_ctrl) = push_equation(&mut core, 90, true);
+        let (picture_para, picture_ctrl) = push_picture(&mut core, 2);
+
+        core.change_object_z_order_native(0, picture_para, picture_ctrl, "front")
+            .expect("move picture above floating table and equation");
+
+        assert_eq!(control_z_order(&core, table_para, table_ctrl), 8);
+        assert_eq!(control_z_order(&core, equation_para, equation_ctrl), 11);
+        assert_eq!(control_z_order(&core, 0, inline_equation_ctrl), 90);
+        assert_eq!(control_z_order(&core, picture_para, picture_ctrl), 12);
+    }
+
+    #[test]
+    fn duplicate_picture_and_shape_z_orders_move_deterministically() {
+        let mut core = make_test_core();
+        let (shape_para, shape_ctrl) = create_rectangle(&mut core);
+        if let Control::Shape(shape) =
+            &mut core.document.sections[0].paragraphs[shape_para].controls[shape_ctrl]
+        {
+            shape.common_mut().z_order = 4;
+        }
+        let (picture_para, picture_ctrl) = push_picture(&mut core, 4);
+
+        core.change_object_z_order_native(0, shape_para, shape_ctrl, "forward")
+            .expect("move shape across equal-z picture");
+        assert_eq!(control_z_order(&core, shape_para, shape_ctrl), 5);
+        assert_eq!(control_z_order(&core, picture_para, picture_ctrl), 4);
+
+        core.change_object_z_order_native(0, picture_para, picture_ctrl, "forward")
+            .expect("swap picture with shape");
+        assert_eq!(control_z_order(&core, shape_para, shape_ctrl), 4);
+        assert_eq!(control_z_order(&core, picture_para, picture_ctrl), 5);
+    }
+
+    #[test]
+    fn new_picture_and_shape_use_shared_max_layer_order() {
+        let mut core = make_test_core();
+        let (shape_para, shape_ctrl) = create_rectangle(&mut core);
+        if let Control::Shape(shape) =
+            &mut core.document.sections[0].paragraphs[shape_para].controls[shape_ctrl]
+        {
+            shape.common_mut().z_order = 12;
+        }
+
+        core.insert_picture_native(
+            0,
+            0,
+            0,
+            &[],
+            &[1, 2, 3],
+            900,
+            600,
+            12,
+            8,
+            "png",
+            "layer-order-test",
+            Some(0),
+            Some(0),
+        )
+        .expect("insert picture");
+        let picture_ctrl = core.document.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .position(|control| matches!(control, Control::Picture(_)))
+            .expect("inserted picture");
+        assert_eq!(control_z_order(&core, 0, picture_ctrl), 13);
+
+        let (_, next_shape_ctrl) = create_rectangle(&mut core);
+        assert_eq!(control_z_order(&core, 0, next_shape_ctrl), 14);
     }
 
     /// 리사이즈 핸들을 반대편 너머로 잡아끌 때 studio가 width=0 을 보내도

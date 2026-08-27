@@ -557,7 +557,11 @@ export interface ControlLayoutItem {
   cellParaIdx?: number;
   /** 각주/미주 내부 컨트롤인 경우 원본 위치 */
   noteRef?: NoteControlRef;
+  /** 메모 내부 컨트롤인 경우 원본 위치 (현재 편집 API는 미지원). */
+  memoRef?: unknown;
   outerTableControlIdx?: number;
+  /** 표 셀/글상자/캡션 내부 컨트롤의 전체 컨테이너 경로. */
+  cellPath?: CellPathLike;
   headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
   /**
    * [Task #1280 v2] 렌더 정렬키 — 겹침 클릭 시 "최상단 개체" 판정용.
@@ -589,6 +593,9 @@ export interface ObjectRef {
   /** 표 셀 내 수식인 경우: 셀 내 문단 인덱스 */
   cellParaIdx?: number;
   noteRef?: NoteControlRef;
+  memoRef?: unknown;
+  cellPath?: CellPathLike;
+  headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
 }
 
 /** WASM getShapeProperties() 반환 타입 */

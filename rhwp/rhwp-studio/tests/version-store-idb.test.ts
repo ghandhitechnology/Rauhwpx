@@ -32,7 +32,13 @@ test('browser IndexedDB reuses its connection and reads repository indexes witho
     await server.listen();
     const address = server.httpServer?.address();
     assert.ok(address && typeof address !== 'string');
-    browser = await puppeteer.launch({ executablePath, headless: true });
+    browser = await puppeteer.launch({
+      executablePath,
+      headless: true,
+      args: process.env.CI || process.env.DEPOT_JOB_URL
+        ? ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        : [],
+    });
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${address.port}/tests/fixtures/version-store-idb.html`);
     const result = await page.evaluate(async () => {

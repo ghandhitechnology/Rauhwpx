@@ -89,3 +89,66 @@ fn issue_2211_left_column_last_paragraph_fits_in_page() {
         "성서읽기 줄 y={y2:.1} — 한컴 ≈661 대비 이탈 (#2211 중간 누적 회귀)"
     );
 }
+
+fn find_table<'a>(
+    node: &'a serde_json::Value,
+    rows: u64,
+    cols: u64,
+) -> Option<&'a serde_json::Value> {
+    if node.get("type").and_then(|v| v.as_str()) == Some("Table")
+        && node.get("rows").and_then(|v| v.as_u64()) == Some(rows)
+        && node.get("cols").and_then(|v| v.as_u64()) == Some(cols)
+    {
+        return Some(node);
+    }
+    node.get("children")?
+        .as_array()?
+        .iter()
+        .find_map(|child| find_table(child, rows, cols))
+}
+
+fn row_single_span_height(table: &serde_json::Value, row: u64) -> f64 {
+    table["children"]
+        .as_array()
+        .expect("table children")
+        .iter()
+        .filter(|cell| {
+            cell.get("type").and_then(|v| v.as_str()) == Some("Cell")
+                && cell.get("row").and_then(|v| v.as_u64()) == Some(row)
+        })
+        .filter_map(|cell| cell["bbox"]["h"].as_f64())
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn table_in_textbox_multiline_row_consumes_saved_common_height_residual() {
+    let repo_root = env!("CARGO_MANIFEST_DIR");
+    let hwp_path = Path::new(repo_root).join("samples/table-in-tbox.hwp");
+    let bytes = fs::read(&hwp_path).unwrap_or_else(|e| panic!("read {}: {e}", hwp_path.display()));
+    let doc = rhwp::wasm_api::HwpDocument::from_bytes(&bytes).expect("parse table-in-tbox fixture");
+    let json = doc
+        .get_page_render_tree(0)
+        .expect("render table-in-tbox page 1");
+    let tree: serde_json::Value = serde_json::from_str(&json).expect("parse render tree JSON");
+    let main = find_table(&tree, 34, 8).expect("34x8 main table inside textbox");
+
+    let total_h = main["bbox"]["h"].as_f64().expect("main table height");
+    let multiline_h = row_single_span_height(main, 1);
+    let final_h = row_single_span_height(main, 33);
+
+    assert!(
+        (32.0..33.0).contains(&multiline_h),
+        "two-line institution row must include 141+141HU vertical padding (Hancom 32.44px), \
+         got {multiline_h:.2}px"
+    );
+    assert!(
+        (19.0..20.0).contains(&final_h),
+        "common-height residual belongs to the overflowing multiline row, not the final row \
+         (Hancom final row 19.50px), got {final_h:.2}px"
+    );
+    assert!(
+        (677.0..678.5).contains(&total_h),
+        "row redistribution must preserve the authored total table height (~677.8px), \
+         got {total_h:.2}px"
+    );
+}

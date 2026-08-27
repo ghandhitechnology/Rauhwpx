@@ -16,6 +16,7 @@ const editorRoutedMethods = new Set(EDITOR_ROUTED_MUTATING_METHODS);
 const MUTATING_EXPORT_VERB = /^(insert|delete|create|apply|add|remove|move|resize|merge|split|update|toggle|replace|paste|assign|group|ungroup|change|clear|evaluate|transpose|ensure|findOrCreate|reflow|refresh|setPage|setSection|setColumn|setCell|setTable|setPicture|setShape|setEquation|setNote|setChar|setPara|setField|setForm|setNumbering|setHeaderFooter|setActiveField|renameBookmark)/;
 
 const SEMANTIC_ALIASES: Readonly<Record<string, string>> = {
+  changeShapeZOrder: 'changeObjectZOrder',
   insertClickHereFieldInCell: 'insertClickHereField',
   insertClickHereFieldInCellEx: 'insertClickHereField',
   insertClickHereFieldByPath: 'insertClickHereField',

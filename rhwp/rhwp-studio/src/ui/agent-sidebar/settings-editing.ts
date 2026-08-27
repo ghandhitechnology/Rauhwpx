@@ -142,7 +142,7 @@ export function createEditingSettings(options: {
   conflictActions.append(conflictReload, conflictKeep);
   conflict.append(conflictCopy, conflictActions);
 
-  const appearance = group('화면과 보기', '편집 화면과 문서 표시 방식을 정합니다.');
+  const appearance = group('화면과 보기');
   const themeRow = el('div', 'ag-settings-control-row');
   const themeCopy = el('span', 'ag-settings-control-copy');
   themeCopy.append(el('span', 'ag-settings-control-label', '테마'));
@@ -195,7 +195,7 @@ export function createEditingSettings(options: {
     render();
   });
 
-  const fonts = group('글꼴', '최근 글꼴, 대표 글꼴, 이 기기의 로컬 글꼴을 관리합니다.');
+  const fonts = group('글꼴');
   const recentFonts = toggleRow('최근 사용 글꼴 보이기', '글꼴 메뉴에 직접 적용한 글꼴을 최신순으로 표시합니다.');
   const recentCount = numberRow('표시 개수', '최근 글꼴 목록에 표시할 개수입니다.', 1, 5, '개');
   const fontSets = el('div', 'ag-settings-disclosure');
@@ -351,7 +351,7 @@ export function createEditingSettings(options: {
     detectFonts.disabled = !isLocalFontAccessSupported();
   });
 
-  const files = group('저장과 파일', '문서 복구와 파일 저장 안내를 정합니다.');
+  const files = group('저장과 파일');
   const recovery = toggleRow('복구용 자동 저장');
   const recoveryInterval = numberRow('복구 간격', undefined, 1, 120, '분');
   const idleSave = toggleRow('쉴 때 자동 저장');
@@ -378,14 +378,6 @@ export function createEditingSettings(options: {
     draft.autosave.idleDelaySeconds = Number(idleDelay.input.value);
     renderDirty();
   });
-  const documentGroup = group('문서 자원');
-  const versionControl = toggleRow('한컴용 Git 사용하기', '기본 문서 이력 대신 브랜치 기반 버전 관리를 사용합니다.');
-  documentGroup.body.append(versionControl.root);
-  versionControl.input.addEventListener('change', () => {
-    draft.versionControl.useHancomGit = versionControl.input.checked;
-    render();
-  });
-
   const status = el('p', 'ag-settings-apply-status');
   status.hidden = true;
   status.setAttribute('role', 'status');
@@ -396,7 +388,7 @@ export function createEditingSettings(options: {
   apply.type = 'button';
   footer.append(status, cancel, apply);
 
-  element.append(conflict, appearance.root, fonts.root, files.root, documentGroup.root, footer);
+  element.append(conflict, appearance.root, fonts.root, files.root, footer);
 
   function isDirty(): boolean {
     return !editorDraftEquals(normalizeEditorDraft(draft), normalizeEditorDraft(baseline));
@@ -428,7 +420,6 @@ export function createEditingSettings(options: {
     idleSave.input.checked = draft.autosave.idleSaveEnabled;
     idleDelay.input.value = String(draft.autosave.idleDelaySeconds);
     idleDelay.input.disabled = !draft.autosave.idleSaveEnabled;
-    versionControl.input.checked = draft.versionControl.useHancomGit;
     renderDirty();
   }
 
@@ -440,6 +431,7 @@ export function createEditingSettings(options: {
 
   function applyDraft(): boolean {
     const next = normalizeEditorDraft(draft);
+    next.versionControl.useHancomGit = userSettings.getUseHancomGit();
     const result = userSettings.tryApplyEditorScalarSettings(next);
     if (!result.ok) {
       status.textContent = `설정을 저장하지 못했습니다 · ${result.error}`;

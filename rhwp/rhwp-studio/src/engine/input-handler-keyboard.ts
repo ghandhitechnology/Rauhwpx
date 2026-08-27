@@ -13,6 +13,7 @@ import {
 } from './navigation-keymap';
 import type { DocumentPosition, CellBbox, CellPathLike } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
+import { canDeleteObjectControl } from './input-handler-picture';
 
 const RHWP_CLIPBOARD_MARKER_RE = /<!--\s*rhwp-studio-clipboard:([A-Za-z0-9._:-]+)\s*-->/;
 const PAGINATION_BOUNDARY_KEYS = new Set([
@@ -152,9 +153,13 @@ type PictureDeleteRef = {
   ci: number;
   type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole';
   cellPath?: CellPathLike;
+  noteRef?: unknown;
+  memoRef?: unknown;
+  headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
 };
 
 function deleteSelectedObject(wasm: WasmBridge, ref: PictureDeleteRef): void {
+  if (!canDeleteObjectControl(ref)) return;
   if (ref.type === 'image') {
     if (ref.cellPath && ref.cellPath.length > 0) {
       wasm.deleteCellPictureControlByPath(ref.sec, ref.ppi, ref.cellPath, ref.ci);
@@ -870,7 +875,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       const ref = this.cursor.getSelectedPictureRef();
-      if (ref) {
+      if (ref && canDeleteObjectControl(ref)) {
         this.cursor.moveOutOfSelectedPicture();
         this.pictureObjectRenderer?.clear();
         this.eventBus.emit('picture-object-selection-changed', false);

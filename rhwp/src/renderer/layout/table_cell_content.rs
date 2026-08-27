@@ -433,21 +433,10 @@ impl LayoutEngine {
         let row_count = table.row_count as usize;
         let cell_spacing = hwpunit_to_px(table.cell_spacing as i32, self.dpi);
 
-        // 열 폭 계산
-        let mut col_widths = vec![0.0f64; col_count];
-        for cell in &table.cells {
-            if cell.col_span == 1 && (cell.col as usize) < col_count {
-                let w = hwpunit_to_px(cell.width as i32, self.dpi);
-                if w > col_widths[cell.col as usize] {
-                    col_widths[cell.col as usize] = w;
-                }
-            }
-        }
-        for c in 0..col_count {
-            if col_widths[c] <= 0.0 {
-                col_widths[c] = container.width / col_count as f64;
-            }
-        }
+        // 글상자 안에서도 일반 표와 같은 병합 셀 제약을 사용한다. 미지 열을
+        // container 균등폭으로 채우면 반복 본문 행의 저장 폭보다 머리 행이 우선되어
+        // 모든 내부 세로선이 이동한다.
+        let mut col_widths = self.resolve_column_widths(table, col_count);
 
         // 글상자 내부 표: 셀 너비 합이 컨테이너 폭을 초과하면 비례 축소
         let col_sum: f64 = col_widths.iter().sum();

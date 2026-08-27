@@ -1,8 +1,9 @@
 # Depot CI copy of .github/workflows/desktop-sessions.yml.
-# Depot CI sandboxes are Ubuntu only. Keep GitHub-hosted macOS/Windows labels
-# in .github/workflows. Map those session jobs to Ubuntu here. Job names stay
-# Session tests (${{ matrix.os }}) so the check titles match GitHub Actions.
-# Studio browser merge tests need rhwp/pkg, so wasm-pack runs before npm test.
+# Depot CI sandboxes are Ubuntu only. Keep GitHub-hosted macOS/Windows session
+# jobs in .github/workflows. Linux session tests run here with Chrome and a
+# 90-minute timeout so wasm-pack plus Studio browser merge tests can finish.
+# Linux packaging stays on Depot because electron-builder --linux needs a
+# Linux sandbox; GitHub-hosted Linux session jobs were removed in #122.
 
 name: Desktop session checks
 
@@ -23,22 +24,9 @@ concurrency:
 
 jobs:
   session-tests:
-    name: Session tests (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            runner: depot-ubuntu-24.04
-          - os: windows-latest
-            runner: depot-ubuntu-24.04
-          - os: ubuntu-24.04
-            runner: depot-ubuntu-24.04
-          - os: ubuntu-24.04-arm
-            runner: depot-ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-
+    name: Session tests (depot-ubuntu-latest)
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Check out source
         uses: actions/checkout@v5
@@ -65,6 +53,35 @@ jobs:
       - name: Build WASM engine for browser merge tests
         working-directory: rhwp
         run: wasm-pack build --target web
+
+      - name: Install Google Chrome for browser merge tests
+        run: |
+          set -euo pipefail
+          if [ -x /usr/bin/google-chrome ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ -x /usr/bin/chromium ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ -x /usr/bin/chromium-browser ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/chrome.deb
+          if [ -x /usr/bin/google-chrome ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome" >> "$GITHUB_ENV"
+          elif [ -x /usr/bin/chromium ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium" >> "$GITHUB_ENV"
+          elif [ -x /usr/bin/chromium-browser ]; then
+            echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser" >> "$GITHUB_ENV"
+          else
+            echo "지원하는 브라우저 실행 파일을 찾지 못했습니다." >&2
+            exit 1
+          fi
 
       - name: Install dependencies
         shell: bash
