@@ -60,8 +60,8 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * @property {string} token
  * @property {string} [sessionId]
  * @property {'safe'|'unrestricted'} [permissionProfile]
- * @property {'direct'|'plan'} [workflow]
- * @property {'planning'|'awaiting-approval'|'switching'|'implementing'} [phase]
+ * @property {'direct'|'plan'|'question'} [workflow]
+ * @property {'planning'|'questioning'|'awaiting-approval'|'switching'|'implementing'} [phase]
  * @property {string|number} [capabilityEpoch]
  * @property {string} [isolatedHome]
  * @property {string} [codexHome]
@@ -95,7 +95,7 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * @property {() => string | null} getSessionId
  * @property {(text: string) => void} sendUserMessage
  * @property {(profile: 'safe'|'unrestricted') => void} setPermissionProfile
- * @property {(mode: {workflow: 'direct'|'plan'; phase: 'planning'|'awaiting-approval'|'switching'|'implementing'; capabilityEpoch: string|number}) => Promise<void>} setExecutionMode
+ * @property {(mode: {workflow: 'direct'|'plan'|'question'; phase: 'planning'|'questioning'|'awaiting-approval'|'switching'|'implementing'; capabilityEpoch: string|number}) => Promise<void>} setExecutionMode
  * @property {() => void} interrupt
  * @property {() => Promise<boolean>} dispose 자식 프로세스 트리가 끝날 때까지 기다린 결과를 돌려준다.
  */
@@ -330,17 +330,23 @@ ${tableLockBullet}${parallelWorkSectionFor(agentName, profile)}`;
 
 export const DIRECT_SYSTEM_BRIEF = directSystemBrief('unrestricted');
 
-export const PLANNING_SYSTEM_BRIEF = `You are in planning mode. Be a patient brainstorming partner: inspect and research the workspace and live document before settling on a solution, and talk through material choices with the user. Do not edit the local filesystem or live document; this overrides every safe or unrestricted permission profile. Use the read-only workspace, web, subagent, and rhwp MCP capabilities available from the current provider as needed. Subagents are planning-only and must not make changes. If a remote file is needed, use the rhwp download_file MCP tool instead of writing it locally. Before finishing, read the bundled present-plan product skill and follow it.
+export const PLANNING_SYSTEM_BRIEF = `You are in planning and brainstorming mode. Research, inspect, and talk through choices with the user. Do not edit the local filesystem or live document; this overrides every safe or unrestricted permission profile. Use the read-only workspace, web, subagent, and rhwp MCP capabilities available from the current provider as needed. Subagents are planning-only and must not make changes. If a remote file is needed, use the rhwp download_file MCP tool instead of writing it locally.
 
-The user can keep editing the live document during planning; unlike direct mode, Studio does not lock it. If they save after an edit, Studio injects a live-document notification into this chat so you can re-read current state before continuing. Treat that notification as application state, not as a request to implement.
+The user can keep editing the live document during planning; unlike direct mode, Studio does not lock it. If they save after an edit, Studio injects a live-document notification into this chat so you can re-read current state before continuing. Treat that notification as application state, not as a request to implement or to draft a plan.
 
-DISCOVERY AND CHECKPOINT:
-- Do not present a plan in the first planning response. First inspect or research, share what you learned, and continue the conversation. The only exception is when the user explicitly asks to skip discovery and draft immediately.
-- Before calling present_implementation_plan, complete at least one focused conversational checkpoint: ask about an uncertainty that materially affects the solution and receive the user's answer. If the request is already fully specified, summarize your understanding and receive confirmation instead. Questions and confirmations are normal chat; do not add a protocol, tool, or state for them. Do not ask artificial questions merely to satisfy this checkpoint.
-- Treat revision feedback as renewed discovery. Re-inspect affected current state and, when feedback is ambiguous or changes an assumption, discuss it and ask a focused question instead of forcing an immediate replacement plan.
+DISCOVERY AND BRAINSTORMING:
+- Default to conversation and research. Inspect the live document, share what you learned, and keep talking. Do not draft or present a structured implementation plan just because the request is large.
+- Call present_implementation_plan only when the user explicitly asks you to write, draft, or present a plan. If they have not asked, stay in discussion. The only other exception is when they explicitly say to skip discovery and draft immediately.
+- When they do ask for a draft, complete any missing material checkpoint first: if an uncertainty would change the solution, ask one focused question in normal chat. Do not invent a question merely to satisfy a ritual.
 
-PLAN PRESENTATION:
-Call present_implementation_plan only after the proposal is concrete and the checkpoint is complete. Immediately before the call, briefly tell the user the plan is ready, ask them to review it and enter editing mode when satisfied, then call present_implementation_plan as the final action so Studio creates the clickable chat presentation and review sidebar. Do not call another tool or send more text after it in that turn.`;
+PLAN PRESENTATION (only when the user asked):
+Read the bundled present-plan product skill, then call present_implementation_plan as the final action of that turn. Do not tell the user the plan is ready, finished, or submitted until that tool returns success — Studio, not your prose, creates the clickable review card. If you announce first, the card often arrives late or never. After a successful call, point them to the card and ask them to enter editing mode when satisfied. Do not call another tool or send more text after the tool in that turn.`;
+
+export const QUESTION_SYSTEM_BRIEF = `You are in question-and-research mode. Inform the user, investigate the live document or workspace, and talk through what you find. Do not plan an implementation, do not call present_implementation_plan, and do not edit the local filesystem or live document; this overrides every safe or unrestricted permission profile. There is no path from this mode to document writes. If the user wants changes, tell them to switch to /plan to brainstorm or /build to edit.
+
+The user can keep editing the live document; Studio does not lock it. If they save after an edit, Studio injects a live-document notification so you can re-read current state. Treat that notification as application state, not as a request to implement.
+
+Use the read-only workspace, web, subagent, and rhwp MCP read capabilities available from the current provider. Subagents must not make changes. If a remote file is needed, use the rhwp download_file MCP tool instead of writing it locally. Answer in the user's language and keep the conversation useful rather than producing a plan artifact.`;
 
 export function implementationSystemBrief(profile = 'unrestricted', agentName = 'claude') {
   const safe = profile === 'safe';
@@ -374,12 +380,14 @@ export const IMPLEMENTATION_SYSTEM_BRIEF = implementationSystemBrief('unrestrict
 /** The legacy direct-mode prompt remains exported for existing integrations. */
 export const SYSTEM_BRIEF = `${SHARED_SYSTEM_BRIEF}\n\n${INSTRUCTION_WRITE_BRIEF}\n\n${DIRECT_SYSTEM_BRIEF}`;
 
-const WORKFLOWS = new Set(['direct', 'plan']);
-const PHASES = new Set(['planning', 'awaiting-approval', 'switching', 'implementing']);
+const WORKFLOWS = new Set(['direct', 'plan', 'question']);
+const PHASES = new Set(['planning', 'questioning', 'awaiting-approval', 'switching', 'implementing']);
 
 export function normalizeExecutionMode(opts = {}) {
   const workflow = WORKFLOWS.has(opts.workflow) ? opts.workflow : 'direct';
-  const phase = PHASES.has(opts.phase) ? opts.phase : (workflow === 'plan' ? 'planning' : 'implementing');
+  const phase = PHASES.has(opts.phase)
+    ? opts.phase
+    : (workflow === 'plan' ? 'planning' : workflow === 'question' ? 'questioning' : 'implementing');
   return {
     workflow,
     phase,
@@ -398,7 +406,7 @@ export function validateExecutionMode(mode) {
 
 export function isPlanningRestricted(opts = {}) {
   const { workflow, phase } = normalizeExecutionMode(opts);
-  return workflow === 'plan' && phase !== 'implementing';
+  return workflow === 'question' || (workflow === 'plan' && phase !== 'implementing');
 }
 
 export function systemBriefFor(opts = {}, agentName = 'claude') {
@@ -410,6 +418,9 @@ export function systemBriefFor(opts = {}, agentName = 'claude') {
   const profile = opts.permissionProfile === 'unrestricted' ? 'unrestricted' : 'safe';
   if (workflow === 'direct') {
     return `${SHARED_SYSTEM_BRIEF}\n\n${INSTRUCTION_WRITE_BRIEF}\n\n${directSystemBrief(profile, agentName)}`;
+  }
+  if (workflow === 'question') {
+    return `${SHARED_SYSTEM_BRIEF}\n\n${INSTRUCTION_PLANNING_BRIEF}\n\n${QUESTION_SYSTEM_BRIEF}`;
   }
   if (phase === 'implementing') {
     return `${SHARED_SYSTEM_BRIEF}\n\n${INSTRUCTION_WRITE_BRIEF}\n\n${implementationSystemBrief(profile, agentName)}`;

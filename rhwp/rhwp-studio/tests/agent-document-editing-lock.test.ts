@@ -63,6 +63,7 @@ test('bridge owns the lease and retains it until every in-flight tool settles', 
 test('plan mode leaves the document editable while a planning turn is running', () => {
   assert.equal(planModeAllowsUserEditing('plan', 'planning'), true);
   assert.equal(planModeAllowsUserEditing('plan', 'awaiting-approval'), true);
+  assert.equal(planModeAllowsUserEditing('question', 'questioning'), true);
   assert.equal(planModeAllowsUserEditing('plan', 'switching'), false);
   assert.equal(planModeAllowsUserEditing('plan', 'implementing'), false);
   assert.equal(planModeAllowsUserEditing('direct', 'direct'), false);
@@ -75,6 +76,12 @@ test('plan mode leaves the document editable while a planning turn is running', 
   assert.deepEqual(
     deriveAgentEditingLease({
       turnRunning: true, activeToolRequests: 0, agent: 'codex', workflow: 'plan', phase: 'awaiting-approval',
+    }),
+    { active: false, agent: 'codex' },
+  );
+  assert.deepEqual(
+    deriveAgentEditingLease({
+      turnRunning: true, activeToolRequests: 2, agent: 'codex', workflow: 'question', phase: 'questioning',
     }),
     { active: false, agent: 'codex' },
   );
@@ -102,6 +109,9 @@ test('planning saves after a user edit notify the hub mid-plan', () => {
   assert.match(bridge, /eventBus\.on\('document-changed', \(\) => this\.markUserDocumentEdit\(\)\)/);
   assert.match(bridge, /eventBus\.on\('document-mutated', \(\) => this\.markUserDocumentEdit\(\)\)/);
   assert.match(bridge, /eventBus\.on\('document-saved', \(\) => this\.notifyPlanningDocumentSaved\(\)\)/);
+  assert.match(bridge, /this\.pendingChatStart = null;[\s\S]*this\.notifyPlanningDocumentSaved\(\)/);
+  assert.match(bridge, /case 'chat-started':[\s\S]*this\.notifyPlanningDocumentSaved\(\)/);
+  assert.match(bridge, /case 'workflow-changed':[\s\S]*this\.notifyPlanningDocumentSaved\(\)/);
   assert.match(bridge, /type: 'chat-document-saved'/);
   assert.match(bridge, /type: 'planning-document-saved'/);
   assert.match(sidebar, /case 'planning-document-saved':/);

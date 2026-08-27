@@ -930,8 +930,10 @@ function drainTemplateCompletion(record) {
 }
 
 function planningDocumentSavedAllowed(activeSession) {
-  return activeSession?.planning?.workflow === 'plan'
-    && (activeSession.planning.phase === 'planning' || activeSession.planning.phase === 'awaiting-approval');
+  const workflow = activeSession?.planning?.workflow;
+  const phase = activeSession?.planning?.phase;
+  return workflow === 'question'
+    || (workflow === 'plan' && (phase === 'planning' || phase === 'awaiting-approval'));
 }
 
 function queuePlanningDocumentSaved(record, msg) {
@@ -1224,7 +1226,7 @@ function resolvePermissionProfile(value) {
 }
 
 function resolveWorkflow(value) {
-  return value === 'plan' ? 'plan' : 'direct';
+  return value === 'plan' || value === 'question' ? value : 'direct';
 }
 
 const CHAT_HISTORY_MAX_MESSAGES = 40;
@@ -1618,7 +1620,7 @@ async function requestImplementationPlanChanges(record, sock, msg) {
 }
 
 async function setChatWorkflow(record, sock, msg) {
-  if (msg.workflow !== 'direct' && msg.workflow !== 'plan') {
+  if (msg.workflow !== 'direct' && msg.workflow !== 'plan' && msg.workflow !== 'question') {
     throw workflowError('INVALID_WORKFLOW', `Unknown workflow: ${String(msg.workflow)}`);
   }
   const activeSession = record.agentSession;
@@ -1649,7 +1651,11 @@ async function setChatWorkflow(record, sock, msg) {
     initialCapabilityEpoch: record.nextCapabilityEpoch++,
     allocateEpoch: () => record.nextCapabilityEpoch++,
   });
-  const phase = msg.workflow === 'plan' ? 'planning' : 'implementing';
+  const phase = msg.workflow === 'plan'
+    ? 'planning'
+    : msg.workflow === 'question'
+      ? 'questioning'
+      : 'implementing';
   // Codex setExecutionMode 는 자식 재시작을 기다리므로, 스냅샷·도구 게이트는
   // 재시작 전에 구상으로 바꿔 둔다. 실패하면 이전 상태로 되돌린다.
   activeSession.planning = nextPlanning;

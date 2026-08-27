@@ -53,7 +53,7 @@ test('bridge reconnect keeps explicit workflow and re-synchronizes server author
   assert.match(bridgeSource, /workflow: pending\.workflow/);
   assert.match(bridgeSource, /this\.syncWorkflowState\(session, this\.workflow, this\.phase\)/);
   assert.match(bridgeSource, /this\.syncWorkflowState\(msg, fallbackWorkflow, fallbackPhase\)/);
-  assert.match(bridgeSource, /if \(this\.workflow === 'plan' \|\| this\.workflowSwitchPending\)/);
+  assert.match(bridgeSource, /if \(this\.workflow === 'plan' \|\| this\.workflow === 'question' \|\| this\.workflowSwitchPending\)/);
   assert.match(bridgeSource, /activeCapabilityEpoch: this\.capabilityEpoch/);
   assert.match(bridgeSource, /this\.workflow === 'direct' \|\| this\.phase === 'implementing'/);
 });

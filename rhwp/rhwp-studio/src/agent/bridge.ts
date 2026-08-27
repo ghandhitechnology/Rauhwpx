@@ -1238,10 +1238,10 @@ class AgentBridgeImpl implements AgentBridge {
 
   private resetWorkflowState(workflow: AgentWorkflow = 'direct') {
     this.workflow = workflow;
-    this.phase = workflow === 'plan' ? 'planning' : 'direct';
+    this.phase = workflow === 'plan' ? 'planning' : workflow === 'question' ? 'questioning' : 'direct';
     this.capabilityEpoch = null;
     this.latestPlan = null;
-    if (workflow !== 'plan') this.userEditedSincePlanningNotify = false;
+    if (!planModeAllowsUserEditing(this.workflow, this.phase)) this.userEditedSincePlanningNotify = false;
     this.syncEditingLease();
   }
 
@@ -1429,6 +1429,7 @@ class AgentBridgeImpl implements AgentBridge {
           this.finishWorkflowSwitch();
           this.syncWorkflowState(session, this.workflow, this.phase);
           this.pendingChatStart = null;
+          this.notifyPlanningDocumentSaved();
           this.emit({
             type: 'chat-started',
             agent: session.agent,
@@ -1467,7 +1468,7 @@ class AgentBridgeImpl implements AgentBridge {
               console.warn('[AgentBridge] reconnect endTurn 실패:', e);
             }
           }
-          if (this.workflow === 'plan' || this.workflowSwitchPending) {
+          if (this.workflow === 'plan' || this.workflow === 'question' || this.workflowSwitchPending) {
             this.finishWorkflowSwitch();
             this.syncEditingLease();
           } else {
@@ -1526,6 +1527,7 @@ class AgentBridgeImpl implements AgentBridge {
           ...this.workflowState(),
         });
         this.flushQueuedMessages();
+        this.notifyPlanningDocumentSaved();
         break;
       }
       case 'chat-permission-changed': {
@@ -1564,6 +1566,7 @@ class AgentBridgeImpl implements AgentBridge {
         this.syncWorkflowState(msg, 'direct', 'planning');
         this.emit({ type: 'workflow-changed', ...this.workflowState() });
         this.flushQueuedMessages();
+        this.notifyPlanningDocumentSaved();
         break;
       }
       case 'plan-ready': {

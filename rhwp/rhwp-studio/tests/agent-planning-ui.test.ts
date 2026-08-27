@@ -8,9 +8,9 @@ const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 
 const markdown = readFileSync(new URL('../src/ui/agent-sidebar/plan-markdown.ts', import.meta.url), 'utf8');
 
 test('plan and build slash commands accept a trailing prompt and switch before sending', () => {
-  assert.match(source, /const planInvocation = text\.match\(\/\^\\\/plan\(\?:\\s\+\(\[\\s\\S\]\*\)\)\?\$\/i\)/);
-  assert.match(source, /const buildInvocation = text\.match\(\/\^\\\/build\(\?:\\s\+\(\[\\s\\S\]\*\)\)\?\$\/i\)/);
-  assert.match(source, /if \(!requestWorkflow\(planInvocation \? 'plan' : 'direct'\)\) return;/);
+  assert.match(source, /const workflowInvocation = text\.match\(\/\^\\\/\(plan\|build\|question\)\(\?:\\s\+\(\[\\s\\S\]\*\)\)\?\$\/i\)/);
+  assert.match(source, /command === 'question' \? 'question'/);
+  assert.match(source, /if \(!requestWorkflow\(next\)\) return;/);
   assert.match(source, /if \(!rest\) \{\s*input\.focus\(\);\s*return;\s*\}/);
   assert.match(source, /text = rest;/);
   assert.match(source, /function requestWorkflow\(next: AgentWorkflow\): boolean/);
@@ -18,12 +18,13 @@ test('plan and build slash commands accept a trailing prompt and switch before s
 
 test('workflow switches use local slash commands and plan mode defaults to full access', () => {
   assert.match(source, /value: '\/plan',[^\n]*workflow: 'plan'/);
+  assert.match(source, /value: '\/question',[^\n]*workflow: 'question'/);
   assert.match(source, /value: '\/build',[^\n]*workflow: 'direct'/);
   assert.match(source, /if \(option\.workflow\) \{\s*input\.value = '';\s*requestWorkflow\(option\.workflow\);\s*return;/);
-  assert.match(source, /if \(planInvocation \|\| buildInvocation\) \{[\s\S]*requestWorkflow\(planInvocation \? 'plan' : 'direct'\)/);
+  assert.match(source, /if \(workflowInvocation\) \{[\s\S]*requestWorkflow\(next\)/);
   // 로컬 명령은 사용자 메시지 기록과 에이전트 전송 전에 끝난다.
-  assert.ok(source.indexOf('const planInvocation = text.match') < source.indexOf('recordUserMessage(messageText,'));
-  assert.ok(source.indexOf('const planInvocation = text.match') < source.indexOf('bridge.sendUserMessage(requestText, skillNameForMessage,'));
+  assert.ok(source.indexOf('const workflowInvocation = text.match') < source.indexOf('recordUserMessage(messageText,'));
+  assert.ok(source.indexOf('const workflowInvocation = text.match') < source.indexOf('bridge.sendUserMessage(requestText, skillNameForMessage,'));
   assert.doesNotMatch(source, /ag-workflow-item|workflowGroup|workflowItems/);
   assert.doesNotMatch(css, /\.ag-workflow(?:-item)?\s*\{/);
   assert.match(source, /composerUtilityActions\.append\(phaseBadge, permissionBtn, skillsBtn\)/);
@@ -40,6 +41,7 @@ test('workflow switches use local slash commands and plan mode defaults to full 
 test('planning phase shows a persistent compact Korean label and skips a badge in direct mode', () => {
   assert.match(source, /PLANNING_PHASE_LABEL: Record<AgentPhase, string>/);
   assert.match(source, /planning: '구상 중'/);
+  assert.match(source, /questioning: '질문 중'/);
   assert.match(source, /'awaiting-approval': '승인 대기'/);
   assert.match(source, /switching: '전환 중'/);
   assert.match(source, /implementing: '실행 중'/);
@@ -121,7 +123,7 @@ test('plan mode warns once about full remote-browser control and scoped download
   assert.match(source, /browserbaseNoticePending = true/);
   assert.match(
     source,
-    /case 'workflow-changed':[\s\S]*applyWorkflow\(e\.workflow\);[\s\S]*if \(e\.workflow === 'plan' && browserbaseNoticePending\) \{\s*browserbaseNoticePending = false;\s*systemMessage\(BROWSERBASE_ENABLED_NOTICE\);/,
+    /case 'workflow-changed':[\s\S]*applyWorkflow\(e\.workflow\);[\s\S]*if \(\(e\.workflow === 'plan' \|\| e\.workflow === 'question'\) && browserbaseNoticePending\) \{\s*browserbaseNoticePending = false;\s*systemMessage\(BROWSERBASE_ENABLED_NOTICE\);/,
   );
   assert.doesNotMatch(
     source,
@@ -210,6 +212,12 @@ test('sidebar consumes the planning bridge contract and its sidebar events', () 
   }
   assert.match(source, /function syncPlanningFromBridge\(\)/);
   assert.match(source, /case 'chat-started':[\s\S]*syncPlanningFromBridge\(\);/);
+});
+
+test('plan card submission is announced from the tool call, not from assistant prose', () => {
+  assert.match(source, /event\.tool === 'present_implementation_plan'/);
+  assert.match(source, /계획 카드를 만드는 중입니다/);
+  assert.match(source, /계획 카드가 도착하지 않았습니다/);
 });
 
 test('saving the document during planning notifies the agent instead of locking the editor', () => {
