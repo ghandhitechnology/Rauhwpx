@@ -33,7 +33,10 @@ export function createCloudRuntime(config, dependencies = {}) {
   const database = dependencies.database ?? openDatabase(config.databasePath);
   const identity = dependencies.identity ?? loadOrCreateServerIdentity(config.dataDirectory);
   const blobStore = dependencies.blobStore ?? new BlobStore(database, { root: config.blobDirectory });
-  const auth = dependencies.auth ?? new AuthService(database, { retrySecret: identity.privateKey });
+  const auth = dependencies.auth ?? new AuthService(database, {
+    retrySecret: identity.privateKey,
+    bootstrapToken: config.bootstrapToken,
+  });
   const sessionStore = dependencies.sessionStore ?? new SessionStore(database, blobStore, {
     maxQueuedSessions: config.maxQueuedSessions,
   });

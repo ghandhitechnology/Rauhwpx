@@ -23,11 +23,21 @@ function basePath(value) {
   return pathValue;
 }
 
+function bootstrapToken(value) {
+  if (value === undefined || value === '') return '';
+  const token = String(value);
+  if (!/^[A-Za-z0-9_-]{32,256}$/.test(token)) {
+    throw new CloudError('CONFIG_INVALID', 'RAUHWpx_BOOTSTRAP_TOKEN is invalid');
+  }
+  return token;
+}
+
 export function parseConfig(environment = process.env) {
   const dataDirectory = path.resolve(environment.RAUHWpx_DATA_DIR || '/var/lib/rauhwpx-cloud');
   return {
     host: environment.RAUHWpx_HOST || '127.0.0.1',
     port: port(environment.RAUHWpx_PORT || '7740'),
+    bootstrapToken: bootstrapToken(environment.RAUHWpx_BOOTSTRAP_TOKEN),
     basePath: basePath(environment.RAUHWpx_BASE_PATH),
     dataDirectory,
     databasePath: path.join(dataDirectory, 'cloud.sqlite3'),

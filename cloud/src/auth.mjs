@@ -48,10 +48,11 @@ function publicDevice(row) {
 }
 
 export class AuthService {
-  constructor(database, { now = Date.now, retrySecret = null } = {}) {
+  constructor(database, { now = Date.now, retrySecret = null, bootstrapToken = '' } = {}) {
     this.database = database;
     this.now = now;
     this.retryKey = createHash('sha256').update(retrySecret ?? this.#databaseRetrySecret()).digest();
+    this.bootstrapToken = String(bootstrapToken ?? '');
   }
 
   #databaseRetrySecret() {
@@ -96,6 +97,27 @@ export class AuthService {
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(randomUUID(), hashPairingCode(code, salt), salt, createdByDeviceId, intendedName, now + PAIRING_TTL_MS, now);
     return { code, expiresAt: now + PAIRING_TTL_MS };
+  }
+
+  /**
+   * 앱이 제공하는 샌드박스는 SSH가 없으므로 배포 시 주입한 부트스트랩 토큰으로
+   * 첫 페어링 코드를 받는다. 기기가 하나라도 페어링되면 이 경로는 영구히 닫힌다.
+   */
+  issueBootstrapPairing({ token, deviceName = null } = {}) {
+    if (!this.bootstrapToken) {
+      throw new CloudError('BOOTSTRAP_DISABLED', 'Bootstrap pairing is not enabled on this server', 404);
+    }
+    if (typeof token !== 'string' || !token
+      || !sameBuffer(hashToken(token), hashToken(this.bootstrapToken))) {
+      throw new CloudError('BOOTSTRAP_TOKEN_INVALID', 'Bootstrap token is invalid', 401);
+    }
+    return transaction(this.database, () => {
+      const paired = this.database.prepare('SELECT COUNT(*) AS count FROM devices WHERE revoked_at IS NULL').get();
+      if (paired.count > 0) {
+        throw new CloudError('BOOTSTRAP_CLOSED', 'Bootstrap pairing closed after the first device paired', 409);
+      }
+      return this.createPairingCode({ intendedName: deviceName });
+    });
   }
 
   redeemPairingCode({ code, deviceName }) {

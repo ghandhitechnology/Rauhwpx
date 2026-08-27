@@ -131,6 +131,17 @@ export function createCloudHttpHandler({
         });
         return;
       }
+      if (request.method === 'POST' && pathname === '/v1/pairing/bootstrap') {
+        const input = parsePairingCreate(await readJson(request));
+        json(response, 201, {
+          ...auth.issueBootstrapPairing({ token: bearer(request), deviceName: input.deviceName }),
+          serverPublicKey: identity.serverPublicKey,
+          serverId: identity.serverId,
+          protocolVersion: PROTOCOL_VERSION,
+          version: SERVICE_VERSION,
+        });
+        return;
+      }
       if (request.method === 'POST' && pathname === '/v1/pairing/redeem') {
         json(response, 200, auth.redeemPairingCode(parsePairingRedeem(await readJson(request))));
         return;
