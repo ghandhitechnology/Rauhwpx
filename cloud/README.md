@@ -60,6 +60,8 @@ The desktop offers two server modes. Self-hosted installs this service on a user
 
 Sandbox hosts cannot run nested containers, so the sandbox image runs the control plane and its session workers in one container. Set `RAUHWpx_RUNNER=local` and the service starts each worker as a process under `RAUHWpx_WORKER_UID` with its own workspace and a copy of the provider credentials. `install/Containerfile.sandbox` and `install/sandbox-entrypoint.sh` build that image.
 
+The local runner keeps the same trust boundary the rootless worker container has. `RAUHWpx_DATA_DIR` stays mode 0700 so the worker uid cannot reach the database, the blob store, or the server identity key. Session workspaces therefore live outside it under `RAUHWpx_WORKSPACE_ROOT`, which defaults to `/var/lib/rauhwpx-workspaces` and must not sit inside the data directory. The service refuses to boot on that misconfiguration instead of failing once per session. The worker receives an explicit environment holding only runtime paths and its own session values, so the bootstrap token and the seeded provider keys never reach the provider CLI that runs under the same uid.
+
 ```bash
 podman build --tag ghcr.io/ghandhitechnology/rauhwpx-cloud:stable \
   --file cloud/install/Containerfile.sandbox cloud

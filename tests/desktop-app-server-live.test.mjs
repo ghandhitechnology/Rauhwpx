@@ -61,6 +61,8 @@ async function bootControlPlane(t, variables) {
     RAUHWpx_MAX_RUNNING: variables.RAUHWpx_MAX_RUNNING,
     RAUHWpx_MAX_QUEUED: variables.RAUHWpx_MAX_QUEUED,
     RAUHWpx_RUNNER: 'local',
+    // 작업 디렉터리는 0700 데이터 디렉터리 밖에 있어야 워커 uid가 지나갈 수 있다.
+    RAUHWpx_WORKSPACE_ROOT: `${dataDirectory}-workspaces`,
     RAUHWpx_PROVIDER_CLI_DIR: path.join(dataDirectory, 'provider-cli'),
   });
   const runtime = createCloudRuntime(config, {
@@ -70,6 +72,7 @@ async function bootControlPlane(t, variables) {
   t.after(async () => {
     await runtime.stop();
     await fs.rm(dataDirectory, { recursive: true, force: true });
+    await fs.rm(config.workspaceRoot, { recursive: true, force: true });
   });
   return { config, runtime, started, origin: `http://127.0.0.1:${port}`, port };
 }

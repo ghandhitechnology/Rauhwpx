@@ -39,8 +39,8 @@ COPY install/sandbox-entrypoint.sh /app/install/sandbox-entrypoint.sh
 
 RUN groupadd --system --gid 1001 rauhwpx-worker \
   && useradd --system --uid 1001 --gid 1001 --no-create-home rauhwpx-worker \
-  && mkdir -p /run/rauhwpx /var/lib/rauhwpx-cloud /opt/rauhwpx-cloud/provider-cli \
-  && chmod 0711 /run/rauhwpx \
+  && mkdir -p /run/rauhwpx /var/lib/rauhwpx-cloud /var/lib/rauhwpx-workspaces /opt/rauhwpx-cloud/provider-cli \
+  && chmod 0711 /run/rauhwpx /var/lib/rauhwpx-workspaces \
   && chmod 0755 /opt/rauhwpx-cloud/provider-cli \
   && chmod 0755 /app/bin/rhwp /app/install/sandbox-entrypoint.sh \
   && /app/bin/rhwp --version
@@ -60,7 +60,8 @@ ENV PATH=/app/bin:/opt/rauhwpx-provider-cli/node_modules/.bin:/usr/local/bin:/us
     RAUHWpx_PROVIDER_CLI_DIR=/opt/rauhwpx-cloud/provider-cli \
     RAUHWpx_HOST=0.0.0.0 \
     RAUHWpx_PORT=7740 \
-    RAUHWpx_DATA_DIR=/var/lib/rauhwpx-cloud
+    RAUHWpx_DATA_DIR=/var/lib/rauhwpx-cloud \
+    RAUHWpx_WORKSPACE_ROOT=/var/lib/rauhwpx-workspaces
 
 EXPOSE 7740
 ENTRYPOINT ["/app/install/sandbox-entrypoint.sh"]

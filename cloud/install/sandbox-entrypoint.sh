@@ -6,6 +6,7 @@ set -euo pipefail
 CLOUD_ROOT=/app
 DATA_DIR=${RAUHWpx_DATA_DIR:-/var/lib/rauhwpx-cloud}
 CONTROL_DIR=${RAUHWpx_WORKER_CONTROL_DIR:-/run/rauhwpx}
+WORKSPACE_ROOT=${RAUHWpx_WORKSPACE_ROOT:-/var/lib/rauhwpx-workspaces}
 PROVIDER_CLI_DIR=${RAUHWpx_PROVIDER_CLI_DIR:-/opt/rauhwpx-cloud/provider-cli}
 
 if [[ -z ${RAUHWpx_BOOTSTRAP_TOKEN:-} ]]; then
@@ -16,9 +17,10 @@ fi
 # Railway 같은 플랫폼은 PORT만 주입한다. 서비스가 실제로 듣는 포트와 어긋나면 도메인이 죽는다.
 if [[ -n ${PORT:-} ]]; then export RAUHWpx_PORT="$PORT"; fi
 
-mkdir -p "$DATA_DIR" "$CONTROL_DIR" "$PROVIDER_CLI_DIR"
+mkdir -p "$DATA_DIR" "$CONTROL_DIR" "$WORKSPACE_ROOT" "$PROVIDER_CLI_DIR"
 chmod 0700 "$DATA_DIR"
-chmod 0711 "$CONTROL_DIR"
+# 워커 uid는 데이터 디렉터리를 통과할 수 없다. 작업 디렉터리와 컨트롤 소켓만 지나갈 수 있어야 한다.
+chmod 0711 "$CONTROL_DIR" "$WORKSPACE_ROOT"
 
 seed_provider() {
   local provider=$1 variable=$2

@@ -49,6 +49,11 @@ function userId(value, name) {
   return parsed;
 }
 
+function contains(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 export function parseConfig(environment = process.env) {
   const dataDirectory = path.resolve(environment.RAUHWpx_DATA_DIR || '/var/lib/rauhwpx-cloud');
   const runner = runnerKind(environment.RAUHWpx_RUNNER);
@@ -60,6 +65,15 @@ export function parseConfig(environment = process.env) {
   const workerControlDirectory = environment.RAUHWpx_WORKER_CONTROL_DIR
     ? path.resolve(environment.RAUHWpx_WORKER_CONTROL_DIR)
     : path.join(dataDirectory, 'worker-control');
+  const workspaceRoot = environment.RAUHWpx_WORKSPACE_ROOT
+    ? path.resolve(environment.RAUHWpx_WORKSPACE_ROOT)
+    : runner === 'local'
+      ? '/var/lib/rauhwpx-workspaces'
+      : path.join(dataDirectory, 'workspaces');
+  if (runner === 'local' && workerUid !== null && contains(dataDirectory, workspaceRoot)) {
+    // 데이터 디렉터리는 0700이라 워커 uid가 통과하지 못한다. 세션마다 EACCES로 죽는 대신 부팅에서 막는다.
+    throw new CloudError('CONFIG_INVALID', 'RAUHWpx_WORKSPACE_ROOT must live outside RAUHWpx_DATA_DIR');
+  }
   return {
     host: environment.RAUHWpx_HOST || '127.0.0.1',
     port: port(environment.RAUHWpx_PORT || '7740'),
@@ -68,7 +82,7 @@ export function parseConfig(environment = process.env) {
     runner,
     workerUid,
     workerGid: userId(environment.RAUHWpx_WORKER_GID, 'RAUHWpx_WORKER_GID') ?? workerUid,
-    workspaceRoot: path.join(dataDirectory, 'workspaces'),
+    workspaceRoot,
     dataDirectory,
     databasePath: path.join(dataDirectory, 'cloud.sqlite3'),
     blobDirectory: path.join(dataDirectory, 'objects'),
