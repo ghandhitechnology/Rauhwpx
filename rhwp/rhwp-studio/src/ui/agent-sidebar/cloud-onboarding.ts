@@ -438,14 +438,14 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     setState({ kind: 'sandbox-intro', draft, intent, provider });
   }
 
-  async function spawnSandbox(): Promise<void> {
+  async function spawnSandbox(credential?: { provider: string; apiKey?: string }): Promise<void> {
     if (!state || (state.kind !== 'sandbox-intro' && state.kind !== 'sandbox-failed')) return;
     const { draft, intent } = state;
     const providerId = state.kind === 'sandbox-intro' ? state.provider.providerId : undefined;
     const operation = beginOperation();
     setState({ kind: 'sandbox-provisioning', draft, intent }, '앱 제공 서버를 준비하고 있습니다.');
     try {
-      const next = await deps.controller.spawnSandbox(providerId);
+      const next = await deps.controller.spawnSandbox(providerId, credential);
       if (!operationIsCurrent(operation)) return;
       const ready = snapshotSandbox(next);
       if (!ready) {
@@ -574,7 +574,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         serverOption(
           'app-hosted',
           '앱에서 제공하는 서버',
-          '앱이 관리하는 샌드박스를 즉시 만들어 사용합니다. 준비할 것이 없습니다.',
+          '앱이 관리하는 샌드박스를 즉시 만들어 사용합니다. 에이전트 API 키만 있으면 됩니다.',
           mode === 'app-hosted',
           provider
             ? provider.configured
@@ -587,7 +587,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
           '내 서버 사용',
           '보유한 Ubuntu 또는 Debian VPS에 개인 Cloud 환경을 설치합니다.',
           mode === 'self-hosted',
-          'SSH와 비밀번호 없는 sudo가 필요합니다',
+          '고급 · SSH와 비밀번호 없는 sudo가 필요합니다',
         ),
       );
       body.appendChild(options);
@@ -599,14 +599,78 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       footer.append(cancel, primary);
     } else if (state.kind === 'sandbox-intro') {
       const { draft, intent, provider } = state;
+      const stored = snapshot.server.credential;
+      const agents = [
+        ['codex', 'Codex'],
+        ['claude', 'Claude'],
+        ['pi', 'Pi'],
+        ['grok', 'Grok'],
+        ['cursor', 'Cursor'],
+      ] as const;
       title.textContent = '앱 제공 서버 사용';
       body.append(
-        description('앱이 관리하는 샌드박스를 만들고 이 기기를 자동으로 연결합니다. 준비할 것은 없습니다.'),
+        description('앱이 관리하는 샌드박스를 만들고 이 기기를 자동으로 연결합니다. 종료하거나 잠시 비우면 서버도 함께 사라집니다.'),
         callout('cloud', provider.displayName, '문서와 작업 상태는 앱이 운영하는 샌드박스로 전송되고, 종료하면 함께 지워집니다.'),
       );
+      const agentRoot = el('label', 'ag-cloud-setup-field');
+      agentRoot.appendChild(el('span', 'ag-cloud-setup-label', '에이전트'));
+      const agent = el('select', 'ag-cloud-setup-input') as HTMLSelectElement;
+      agent.dataset.cloudField = 'sandbox-provider';
+      for (const [id, label] of agents) {
+        const option = document.createElement('option');
+        option.value = id;
+        option.textContent = label;
+        agent.appendChild(option);
+      }
+      agent.value = stored?.provider && agents.some(([id]) => id === stored.provider) ? stored.provider : 'codex';
+      agentRoot.appendChild(agent);
+      body.appendChild(agentRoot);
+      const localProviders = stored?.localProviders ?? [];
+      const agentLabel = () => agents.find(([id]) => id === agent.value)?.[1] ?? agent.value;
+      const usesLocalLogin = () => localProviders.includes(agent.value);
+      const localHint = callout(
+        'check',
+        '이 Mac의 로그인',
+        `${agentLabel()} 로그인을 이 서버에 복사합니다.`,
+      );
+      localHint.hidden = !usesLocalLogin();
+      body.appendChild(localHint);
+      let apiKey = '';
+      if (stored?.stored) {
+        body.append(callout('cloud', '저장된 키', '이전에 저장한 API 키로 서버를 만듭니다. 아래에 새 키를 넣으면 바꿉니다.'));
+      }
+      const keyField = inputField('에이전트 API 키', 'name', '', {
+        type: 'password',
+        placeholder: usesLocalLogin() || stored?.stored
+          ? '로컬 로그인이나 저장된 키를 쓰려면 비워 두세요'
+          : 'sk-…',
+        autocomplete: 'off',
+      });
+      keyField.input.dataset.cloudField = 'sandbox-api-key';
+      keyField.input.addEventListener('input', () => { apiKey = keyField.input.value; });
+      agent.addEventListener('change', () => {
+        localHint.hidden = !usesLocalLogin();
+        const copy = localHint.querySelector('p');
+        if (copy) copy.textContent = `${agentLabel()} 로그인을 이 서버에 복사합니다.`;
+        keyField.input.placeholder = usesLocalLogin() || stored?.stored
+          ? '로컬 로그인이나 저장된 키를 쓰려면 비워 두세요'
+          : 'sk-…';
+      });
+      body.appendChild(keyField.root);
       back.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
       const primary = button('서버 만들기', 'primary');
-      primary.addEventListener('click', () => { void spawnSandbox(); });
+      primary.addEventListener('click', () => {
+        const nextKey = apiKey.trim();
+        if (!stored?.stored && !nextKey && !usesLocalLogin()) {
+          keyField.input.setAttribute('aria-invalid', 'true');
+          keyField.input.focus();
+          return;
+        }
+        void spawnSandbox({
+          provider: agent.value,
+          ...(nextKey ? { apiKey: nextKey } : {}),
+        });
+      });
       footer.append(back, cancel, primary);
     } else if (state.kind === 'sandbox-unavailable') {
       const { draft, intent, provider } = state;

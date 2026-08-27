@@ -197,6 +197,13 @@ export function validateCloudProfileDraft(
 export function mapSandboxIssue(error: unknown): CloudSetupIssue {
   const detail = error instanceof Error ? error.message : String(error);
   const normalized = detail.toLowerCase();
+  if (/provider_key_required|save an agent api key/.test(normalized)) {
+    return {
+      title: '에이전트 키가 필요합니다',
+      guidance: '이 Mac에 로그인한 에이전트를 고르거나 API 키를 입력하세요.',
+      detail,
+    };
+  }
   if (/not configured|railway_token|railway_project_id|railway_environment_id/.test(normalized)) {
     return {
       title: '앱 제공 서버가 아직 준비되지 않았습니다',
