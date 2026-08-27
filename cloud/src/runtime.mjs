@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
-import { chmod } from 'node:fs/promises';
+import { chmod, chown } from 'node:fs/promises';
 import http from 'node:http';
 import { AuthService } from './auth.mjs';
 import { BlobStore } from './blob-store.mjs';
 import { openDatabase } from './database.mjs';
 import { createCloudHttpHandler } from './http-server.mjs';
 import { loadOrCreateServerIdentity } from './identity.mjs';
+import { LocalRunner } from './local-runner.mjs';
 import { PodmanRunner } from './podman-runner.mjs';
 import { ProviderManager } from './provider-manager.mjs';
 import { RedactedLogger } from './redacted-logger.mjs';
@@ -30,6 +31,7 @@ function close(server) {
 export function createCloudRuntime(config, dependencies = {}) {
   mkdirSync(config.dataDirectory, { recursive: true, mode: 0o700 });
   mkdirSync(config.workerControlDirectory, { recursive: true, mode: 0o700 });
+  if (config.runner === 'local') mkdirSync(config.workspaceRoot, { recursive: true, mode: 0o711 });
   const database = dependencies.database ?? openDatabase(config.databasePath);
   const identity = dependencies.identity ?? loadOrCreateServerIdentity(config.dataDirectory);
   const blobStore = dependencies.blobStore ?? new BlobStore(database, { root: config.blobDirectory });
@@ -47,7 +49,8 @@ export function createCloudRuntime(config, dependencies = {}) {
     providerCliDirectory: config.providerCliDirectory,
     vault,
   });
-  const runner = dependencies.runner ?? new PodmanRunner(config);
+  const runner = dependencies.runner
+    ?? (config.runner === 'local' ? new LocalRunner(config) : new PodmanRunner(config));
   const scheduler = dependencies.scheduler ?? new Scheduler(sessionStore, runner, {
     logger,
     maxRunningSessions: config.maxRunningSessions,
@@ -85,6 +88,11 @@ export function createCloudRuntime(config, dependencies = {}) {
       if (existsSync(config.workerControlSocket)) unlinkSync(config.workerControlSocket);
       await listen(workerServer, config.workerControlSocket);
       await chmod(config.workerControlSocket, 0o600);
+      // local 실행에서는 워커가 다른 uid이므로 소켓 소유자를 워커로 옮긴다. 인증은 세션별 워커 토큰이 한다.
+      if (config.runner === 'local' && config.workerUid !== null) {
+        await chmod(config.workerControlDirectory, 0o711);
+        await chown(config.workerControlSocket, config.workerUid, config.workerGid ?? config.workerUid);
+      }
       await listen(publicServer, config.port, config.host);
       await providerManager.probeAll();
       await scheduler.start();

@@ -8,7 +8,8 @@ process.umask(0o077);
 const sessionId = process.env.RAUHWpx_SESSION_ID;
 const token = process.env.RAUHWpx_WORKER_TOKEN;
 const socketPath = process.env.RAUHWpx_CONTROL_SOCKET;
-const workspace = '/workspace';
+const workspace = process.env.RAUHWpx_WORKSPACE || '/workspace';
+const providerAuth = process.env.RAUHWpx_PROVIDER_AUTH || '/provider-auth';
 if (!sessionId || !token || !socketPath) throw new Error('Worker identity is incomplete');
 
 const client = new WorkerClient({ socketPath, token, sessionId });
@@ -21,7 +22,7 @@ function safeName(name) {
 
 try {
   await fs.mkdir(path.join(workspace, 'home'), { recursive: true, mode: 0o700 });
-  await fs.cp('/provider-auth', path.join(workspace, 'home'), { recursive: true, force: false });
+  await fs.cp(providerAuth, path.join(workspace, 'home'), { recursive: true, force: false });
   const manifest = await client.manifest();
   const { credentials } = await client.credentials();
   const inputDirectory = path.join(workspace, 'input');
