@@ -956,7 +956,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       enable.addEventListener('click', () => void perform(() => controller.enable()));
       notice.replaceChildren(
         el('strong', '', '문서 변경을 안전하게 되돌리세요'),
-        el('span', '', '커밋과 브랜치는 이 기기에만 저장됩니다. 원본 파일은 일반 저장 전까지 바뀌지 않습니다.'),
+        el('span', '', '커밋과 브랜치는 이 기기에만 저장됩니다.'),
         enable,
       );
     }
