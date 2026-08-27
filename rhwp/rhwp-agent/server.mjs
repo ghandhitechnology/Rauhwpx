@@ -2958,6 +2958,7 @@ function sendBrowserbaseError(record, sock, requestId, error) {
  * 있어 섞지 않는다). 턴이 도는 중이면 떠 있는 브라우저는 두고 다음 호출부터 새 키를 쓴다.
  */
 async function applyBrowserbaseOverride(record, msg) {
+  const revision = record.browserbaseSession.beginCredentialChange();
   const override = normalizeBrowserbaseOverride({
     apiKey: msg.apiKey,
     projectId: msg.projectId,
@@ -2967,7 +2968,11 @@ async function applyBrowserbaseOverride(record, msg) {
     const verified = await validateBrowserbaseCredentials({ apiKey: override.apiKey, projectId: override.projectId ?? null });
     override.projectId = verified.projectId;
   }
-  return record.browserbaseSession.setOverride(override, { restart: record.agentSession?.status !== 'running' });
+  return record.browserbaseSession.applyVerifiedOverride(
+    override,
+    { restart: record.agentSession?.status !== 'running' },
+    revision,
+  );
 }
 
 function providerModeRequest(activeSession, phase) {
@@ -4157,6 +4162,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'browserbase-credentials-clear': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      record.browserbaseSession.beginCredentialChange();
       void record.browserbaseSession.setOverride(null, { restart: record.agentSession?.status !== 'running' })
         .then((status) => replyToStudio(record, sock, { v: 1, type: 'browserbase-status', requestId, status }))
         .catch((e) => sendBrowserbaseError(record, sock, requestId, e));

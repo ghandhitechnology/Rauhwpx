@@ -3473,7 +3473,7 @@ export class AgentBridgeImpl implements AgentBridge {
       'browserbase-credentials',
       30_000,
     );
-    // Reconnects replay only a candidate the hub has actually accepted.
+    // 재연결 시에는 허브가 실제로 수락한 자격 증명만 다시 보낸다.
     if (status) this.browserbaseOverride = candidate;
     return status;
   }

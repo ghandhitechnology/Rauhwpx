@@ -731,9 +731,18 @@ test('원격 브라우저 구역은 연결 바로 아래 서고, 키는 앱 수�
   assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, browserbaseSection\.root, usageSection\.root\)/);
   // 키 칸은 비밀번호 칸이고 자동완성에 걸리지 않는다.
   assert.match(settings, /createTextField\('Browserbase 키', \{\s*type: 'password',\s*placeholder: 'bb_live_…',\s*autocomplete: 'new-password',\s*\}\)/);
+  assert.match(settings, /createTextField\('Gemini 키', \{\s*type: 'password',\s*placeholder: 'AIza…',\s*autocomplete: 'new-password',\s*\}\)/);
   assert.match(settings, /createTextField\('프로젝트 ID', \{ placeholder: '비우면 계정에서 골라요' \}\)/);
-  // 적용은 허브 검증을 거치고, 성공해야만 탭 보관소에 남긴다; 키 칸은 비운다.
-  assert.match(settings, /const status = await bridge\.setBrowserbaseCredentials\(override\);[\s\S]*if \(status\) \{[\s\S]*saveBrowserbaseOverride\(\{ \.\.\.override,[\s\S]*browserbaseKey\.input\.value = '';/);
+  // 적용은 허브 검증을 거치고, 성공한 if (status) 안에서만 보관·칸 비우기가 일어난다.
+  const submit = settings.match(
+    /async function submitBrowserbase\(\): Promise<void> \{[\s\S]*?\n  async function resetBrowserbase/,
+  )?.[0] ?? '';
+  const success = submit.match(/if \(status\) \{[\s\S]*?\n    \} else if \(!browserbaseMessage\)/)?.[0] ?? '';
+  assert.match(success, /saveBrowserbaseOverride\(\{ \.\.\.override,/);
+  assert.match(success, /browserbaseKey\.input\.value = '';/);
+  assert.match(success, /browserbaseGemini\.input\.value = '';/);
+  assert.doesNotMatch(submit.slice(0, submit.indexOf(success)), /saveBrowserbaseOverride/);
+  assert.doesNotMatch(submit.slice(submit.indexOf(success) + success.length), /saveBrowserbaseOverride/);
   // 자동으로 채워진 옛 프로젝트 ID는 새 키와 섞지 않는다.
   assert.match(settings, /browserbaseKey\.input\.addEventListener\('input',[\s\S]*if \(browserbaseProjectAutoFilled\) \{[\s\S]*browserbaseProject\.input\.value = '';/);
   // 되돌리기는 허브가 성공한 뒤에만 브리지와 탭 보관소를 함께 비운다.
