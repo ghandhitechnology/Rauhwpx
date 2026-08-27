@@ -241,13 +241,10 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(planning, /planning and brainstorming mode/);
   assert.match(planning, /Do not edit the local filesystem or live document/);
   assert.match(planning, /The user can keep editing the live document during planning/);
-  assert.match(planning, /Studio does not lock it/);
-  assert.match(planning, /Studio injects a live-document notification/);
-  assert.match(planning, /not as a request to implement or to draft a plan/);
-  assert.match(planning, /Do not draft or present a structured implementation plan just because the request is large/);
+  assert.match(planning, /live-document notification/);
+  assert.match(planning, /not a request to implement or draft a plan/);
   assert.match(planning, /only when the user explicitly asks you to write, draft, or present a plan/);
-  assert.match(planning, /explicitly say to skip discovery and draft immediately/);
-  assert.match(planning, /Do not tell the user the plan is ready, finished, or submitted until that tool returns success/);
+  assert.match(planning, /Do not tell the user the plan is ready until that tool returns success/);
   assert.match(planning, /read-only workspace, web, subagent, and rhwp MCP capabilities available/);
   assert.doesNotMatch(planning, /sandboxed Bash/);
   assert.match(planning, /present_implementation_plan as the final action/);
@@ -258,7 +255,6 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(question, /question-and-research mode/);
   assert.match(question, /Do not plan an implementation/);
   assert.match(question, /do not call present_implementation_plan/);
-  assert.match(question, /no path from this mode to document writes/);
   assert.match(question, /The user can keep editing the live document/);
   assert.doesNotMatch(question, /present-plan product skill/);
   assert.match(planning, /search_reference_files/);

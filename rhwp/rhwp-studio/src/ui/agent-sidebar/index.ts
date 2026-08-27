@@ -4423,9 +4423,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         : chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'
           ? '계획에서 바꿀 부분을 알려주세요'
           : chatWorkflow === 'question'
-            ? '궁금한 점을 물어보세요'
+            ? '질문을 입력하세요'
           : chatWorkflow === 'plan' && planningPhase === 'planning'
-            ? '구상하거나 조사할 내용을 입력하세요'
+            ? '구상할 내용을 입력하세요'
             : '문서 작업을 입력하세요';
     }
     const sendLabel = turnRunning ? '중지' : '보내기';
@@ -4926,7 +4926,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         }
         if (event.tool === 'present_implementation_plan') {
           planCardPending = true;
-          systemMessage('계획 카드를 만드는 중입니다. 카드가 채팅에 나타난 뒤에만 제출이 끝난 것입니다.');
+          systemMessage('계획 카드를 만드는 중');
         }
         // 도구 전 설명은 최종 답변과 구분된 진행 이정표로 보관한다.
         flushAssistantBuffer({ kind: 'progress' });
@@ -4986,7 +4986,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           && !event.errorMessage
           && turnFailedToolCount === 0;
         if (planCardPending && !turnPresentedPlan) {
-          systemMessage('계획 카드가 도착하지 않았습니다. 계획이 필요하면 다시 요청해 주세요.');
+          systemMessage('계획 카드가 도착하지 않았습니다');
         }
         planCardPending = false;
         const editingPhase = chatWorkflow === 'direct' || planningPhase === 'implementing';
@@ -5682,7 +5682,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         rebuildReview();
         return true;
       case 'planning-document-saved':
-        systemMessage('문서가 저장되어 계획 중인 에이전트에 알렸습니다. 최신 문서 상태를 다시 읽습니다.');
+        systemMessage('문서를 저장했습니다');
         return true;
       case 'plan-invalidated':
         planApprovable = false;

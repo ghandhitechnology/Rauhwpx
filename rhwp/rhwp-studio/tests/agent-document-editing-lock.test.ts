@@ -115,7 +115,7 @@ test('planning saves after a user edit notify the hub mid-plan', () => {
   assert.match(bridge, /type: 'chat-document-saved'/);
   assert.match(bridge, /type: 'planning-document-saved'/);
   assert.match(sidebar, /case 'planning-document-saved':/);
-  assert.match(sidebar, /문서가 저장되어 계획 중인 에이전트에 알렸습니다/);
+  assert.match(sidebar, /문서를 저장했습니다/);
 });
 
 test('entering plan mode unlocks the lease immediately and holds messages until the hub finishes', () => {

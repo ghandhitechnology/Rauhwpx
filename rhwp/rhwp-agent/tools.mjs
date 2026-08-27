@@ -904,7 +904,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'present_implementation_plan',
-    description: 'Present a complete implementation plan for user review. Call this only in the plan workflow and only after the user explicitly asked you to write, draft, or present a plan. Do not announce that the plan is ready before this tool returns. The hub assigns the authoritative planId, stores the canonical plan, emits plan-ready to Studio, and moves the plan workflow to awaiting-approval. This is a control action, not document approval.',
+    description: 'Present a complete implementation plan for user review. Call only after the user asked for a plan. Do not say the plan is ready before this tool returns. The hub assigns planId, stores the plan, emits plan-ready, and moves to awaiting-approval.',
     shape: IMPLEMENTATION_PLAN_SHAPE,
   },
   {

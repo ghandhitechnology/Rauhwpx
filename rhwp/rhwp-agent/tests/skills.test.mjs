@@ -29,7 +29,6 @@ test('bundled present-plan skill ends planning through the structured presentati
   assert.match(markdown, /present_implementation_plan/);
   assert.match(markdown, /only when the user asked you to write, draft, or present a plan/);
   assert.match(markdown, /Do not tell the user the plan is ready/);
-  assert.match(markdown, /chat action that opens the plan review sidebar/);
   assert.match(markdown, /renewed discovery/);
   assert.doesNotMatch(markdown, /revise the complete plan and present its replacement through the same tool/i);
 

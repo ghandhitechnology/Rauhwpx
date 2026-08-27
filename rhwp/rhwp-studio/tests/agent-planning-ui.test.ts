@@ -216,13 +216,13 @@ test('sidebar consumes the planning bridge contract and its sidebar events', () 
 
 test('plan card submission is announced from the tool call, not from assistant prose', () => {
   assert.match(source, /event\.tool === 'present_implementation_plan'/);
-  assert.match(source, /계획 카드를 만드는 중입니다/);
+  assert.match(source, /계획 카드를 만드는 중/);
   assert.match(source, /계획 카드가 도착하지 않았습니다/);
 });
 
 test('saving the document during planning notifies the agent instead of locking the editor', () => {
   assert.match(source, /case 'planning-document-saved':/);
-  assert.match(source, /문서가 저장되어 계획 중인 에이전트에 알렸습니다/);
+  assert.match(source, /문서를 저장했습니다/);
   assert.match(source, /if \(e\.reason !== 'document-saved'\) \{/);
   assert.match(bridge, /type: 'chat-document-saved'/);
 });
