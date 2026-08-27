@@ -408,6 +408,7 @@ installed into `~/.claude`, `~/.agents`, or `~/.codex`.
 - `/skill-create` — create an AI-assisted draft
 - `/skill-edit <name>` / `/skill-delete <name>` — manage a user skill
 - `/<skill-name> [request]` — explicitly activate an enabled skill
+- `/fast [on|off|status]` — Codex Fast service tier (Codex only; next turn uses `service_tier="fast"`)
 
 Skills containing scripts are marked in the UI. Review scripts before saving
 or invoking them; in Full access mode they inherit the agent's broad access.

@@ -80,6 +80,7 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * @property {Record<string, string>} [providerEnv]
  * @property {string} [model]
  * @property {string} [effort]
+ * @property {'standard'|'fast'} [serviceTier]
  * @property {string} [toolProfile]
  * @property {string} [agentRole]
  * @property {string[]} [shellAllowPrefixes] 백그라운드 작업자 헬퍼 실행용 스코프 셸
