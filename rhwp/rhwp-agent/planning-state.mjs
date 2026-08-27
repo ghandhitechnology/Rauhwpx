@@ -183,3 +183,20 @@ export function buildApprovedPlanPrompt(approved) {
     JSON.stringify(approved.plan, null, 2),
   ].filter(Boolean).join('\n\n');
 }
+
+/** @param {{revision?: unknown, fileName?: unknown}} [details] */
+export function buildPlanningDocumentSavedPrompt(details = {}) {
+  const revision = details.revision;
+  const revisionLine = Number.isSafeInteger(revision)
+    ? `Current document revision after the save: ${revision}.`
+    : '';
+  const fileName = typeof details.fileName === 'string' ? details.fileName.trim() : '';
+  const nameLine = fileName ? `Saved document name: ${fileName}.` : '';
+  return [
+    "This is Studio's automatic live-document notification — not a user-typed message and not a request to implement.",
+    'The user saved the live open document after editing it during planning. Previous document observations may be stale.',
+    revisionLine,
+    nameLine,
+    'Re-read the current live document with get_structure (and any ranges you already inspected) before continuing. Do not edit the local filesystem or live document. Continue planning from the updated state. If a presented plan no longer matches, replace it only after the usual discovery checkpoint.',
+  ].filter(Boolean).join('\n\n');
+}

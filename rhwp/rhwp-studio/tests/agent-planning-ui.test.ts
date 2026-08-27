@@ -195,11 +195,19 @@ test('sidebar consumes the planning bridge contract and its sidebar events', () 
     'plan-approved',
     'plan-invalidated',
     'implementation-started',
+    'planning-document-saved',
   ]) {
     assert.match(source, new RegExp(`case '${event}':`));
   }
   assert.match(source, /function syncPlanningFromBridge\(\)/);
   assert.match(source, /case 'chat-started':[\s\S]*syncPlanningFromBridge\(\);/);
+});
+
+test('saving the document during planning notifies the agent instead of locking the editor', () => {
+  assert.match(source, /case 'planning-document-saved':/);
+  assert.match(source, /문서가 저장되어 계획 중인 에이전트에 알렸습니다/);
+  assert.match(source, /if \(e\.reason !== 'document-saved'\) \{/);
+  assert.match(bridge, /type: 'chat-document-saved'/);
 });
 
 test('pending HWP review stays unchanged for plan-driven implementations', () => {

@@ -33,6 +33,7 @@ test('bridge exposes plan commands and emits every server lifecycle event', () =
     'chat-workflow-set',
     'chat-plan-approve',
     'chat-plan-request-changes',
+    'chat-document-saved',
   ]) {
     assert.match(bridgeSource, new RegExp(`type: '${message}'`));
   }

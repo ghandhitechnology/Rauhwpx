@@ -5578,16 +5578,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         setPlanningPhase(e.phase);
         rebuildReview();
         return true;
+      case 'planning-document-saved':
+        systemMessage('문서가 저장되어 계획 중인 에이전트에 알렸습니다. 최신 문서 상태를 다시 읽습니다.');
+        return true;
       case 'plan-invalidated':
         planApprovable = false;
         settlePlanAttention();
         activePlanHistorical = activePlan !== null;
         setPlanningPhase(e.phase);
-        systemMessage(
-          e.reason
-            ? `계획이 더 이상 유효하지 않습니다 (${e.reason}). 새 계획을 기다리세요.`
-            : '계획이 더 이상 유효하지 않습니다. 새 계획을 기다리세요.',
-        );
+        if (e.reason !== 'document-saved') {
+          systemMessage(
+            e.reason
+              ? `계획이 더 이상 유효하지 않습니다 (${e.reason}). 새 계획을 기다리세요.`
+              : '계획이 더 이상 유효하지 않습니다. 새 계획을 기다리세요.',
+          );
+        }
         rebuildReview();
         return true;
       default:

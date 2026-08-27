@@ -23,7 +23,7 @@ import { PendingEditManager } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
 import { PendingRequestRegistry } from './pending-requests.ts';
 import { AgentTypewriterReveal } from './typewriter-reveal.ts';
-import { deriveAgentEditingLease } from './editing-lease.ts';
+import { deriveAgentEditingLease, planModeAllowsUserEditing } from './editing-lease.ts';
 import {
   setCursorModels as setCursorModelRegistry,
   setPiModels as setPiModelRegistry,
@@ -883,6 +883,9 @@ class AgentBridgeImpl implements AgentBridge {
   private activeToolRequests = 0;
   private editingLease: AgentEditingLease = { active: false, agent: 'codex' };
   private editingLeaseListeners = new Set<(lease: AgentEditingLease) => void>();
+  /** 구상 중 사용자 편집이 있었고, 저장 알림을 아직 보내지 않았다. */
+  private userEditedSincePlanningNotify = false;
+  private documentNotifyUnsubs: Array<() => void> = [];
   private turnHadError = false;
   private pendingTurnOpen = false;
   private pendingChatStart: {
@@ -953,6 +956,11 @@ class AgentBridgeImpl implements AgentBridge {
     });
 
     this.options = opts;
+    this.documentNotifyUnsubs.push(
+      deps.eventBus.on('document-changed', () => this.markUserDocumentEdit()),
+      deps.eventBus.on('document-mutated', () => this.markUserDocumentEdit()),
+      deps.eventBus.on('document-saved', () => this.notifyPlanningDocumentSaved()),
+    );
     window.addEventListener('focus', this.onResume);
     window.addEventListener('online', this.onResume);
     document.addEventListener('visibilitychange', this.onVisibility);
@@ -1224,6 +1232,8 @@ class AgentBridgeImpl implements AgentBridge {
     this.phase = workflow === 'plan' ? 'planning' : 'direct';
     this.capabilityEpoch = null;
     this.latestPlan = null;
+    if (workflow !== 'plan') this.userEditedSincePlanningNotify = false;
+    this.syncEditingLease();
   }
 
   private syncWorkflowState(
@@ -1245,6 +1255,10 @@ class AgentBridgeImpl implements AgentBridge {
     } else if (!preservePlan) {
       this.latestPlan = null;
     }
+    if (!planModeAllowsUserEditing(this.workflow, this.phase)) {
+      this.userEditedSincePlanningNotify = false;
+    }
+    this.syncEditingLease();
   }
 
   private canStagePendingEdits() {
@@ -1258,11 +1272,37 @@ class AgentBridgeImpl implements AgentBridge {
     this.pendingTurnOpen = true;
   }
 
+  private markUserDocumentEdit(): void {
+    if (planModeAllowsUserEditing(this.workflow, this.phase)) {
+      this.userEditedSincePlanningNotify = true;
+    }
+  }
+
+  private notifyPlanningDocumentSaved(): void {
+    if (!planModeAllowsUserEditing(this.workflow, this.phase)) return;
+    if (!this.userEditedSincePlanningNotify) return;
+    if (!this.activeAgent || this.state !== 'connected') return;
+    this.userEditedSincePlanningNotify = false;
+    const sent = this.sendJson({
+      v: AGENT_PROTOCOL_VERSION,
+      type: 'chat-document-saved',
+      revision: this.revision.revision,
+      ...(this.documentName ? { fileName: this.documentName } : {}),
+    });
+    if (!sent) {
+      this.userEditedSincePlanningNotify = true;
+      return;
+    }
+    this.emit({ type: 'planning-document-saved', revision: this.revision.revision });
+  }
+
   private syncEditingLease(): void {
     const next = deriveAgentEditingLease({
       turnRunning: this.turnRunning,
       activeToolRequests: this.activeToolRequests,
       agent: this.editingAgent,
+      workflow: this.workflow,
+      phase: this.phase,
     });
     if (next.active === this.editingLease.active && next.agent === this.editingLease.agent) return;
     this.editingLease = next;
@@ -2605,6 +2645,8 @@ class AgentBridgeImpl implements AgentBridge {
     this.listeners.clear();
     this.revealUnsub?.();
     this.revealUnsub = null;
+    for (const off of this.documentNotifyUnsubs) off();
+    this.documentNotifyUnsubs = [];
     this.reveal.dispose();
     this.pendingEdits.dispose();
     this.overlay.dispose();

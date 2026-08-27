@@ -628,6 +628,7 @@ export type SidebarEvent =
   | ({ type: 'plan-approved'; planId: string } & AgentWorkflowState)
   | ({ type: 'plan-invalidated'; planId: string | null; reason?: string } & AgentWorkflowState)
   | ({ type: 'implementation-started'; planId: string } & AgentWorkflowState)
+  | { type: 'planning-document-saved'; revision: number }
   | { type: 'skills-catalog'; catalog: SkillCatalog }
   | { type: 'skill-detail'; requestId: string; revision: number; skill: ProductSkill }
   | { type: 'skill-saved'; requestId: string; revision: number; skill: ProductSkill }

@@ -4,7 +4,7 @@ import test from 'node:test';
 
 import { CommandDispatcher } from '../src/command/dispatcher.ts';
 import { EventBus } from '../src/core/event-bus.ts';
-import { deriveAgentEditingLease } from '../src/agent/editing-lease.ts';
+import { deriveAgentEditingLease, planModeAllowsUserEditing } from '../src/agent/editing-lease.ts';
 
 const source = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const bridge = source('../src/agent/bridge.ts');
@@ -51,13 +51,61 @@ test('bridge owns the lease and retains it until every in-flight tool settles', 
     deriveAgentEditingLease({ turnRunning: false, activeToolRequests: 0, agent: 'pi' }),
     { active: false, agent: 'pi' },
   );
-  assert.match(bridge, /deriveAgentEditingLease\(\{[\s\S]*turnRunning: this\.turnRunning,[\s\S]*activeToolRequests: this\.activeToolRequests/);
+  assert.match(bridge, /deriveAgentEditingLease\(\{[\s\S]*turnRunning: this\.turnRunning,[\s\S]*activeToolRequests: this\.activeToolRequests[\s\S]*workflow: this\.workflow,[\s\S]*phase: this\.phase/);
   assert.match(bridge, /case 'turn-start':[\s\S]*this\.editingAgent = event\.agent;[\s\S]*this\.syncEditingLease\(\)/);
   assert.match(bridge, /case 'turn-end':[\s\S]*this\.turnRunning = false;[\s\S]*this\.syncEditingLease\(\)/);
   assert.match(bridge, /this\.activeToolRequests \+= 1;[\s\S]*\.finally\(\(\) => \{[\s\S]*this\.activeToolRequests = Math\.max\(0, this\.activeToolRequests - 1\);[\s\S]*this\.syncEditingLease\(\)/);
   assert.match(bridge, /case 'welcome':[\s\S]*this\.turnRunning = session\.status === 'running';[\s\S]*this\.syncEditingLease\(\)/);
   assert.match(bridge, /stopChat\(\): void[\s\S]*waitForAuthoritativeTurnEnd = this\.state === 'connected' && this\.turnRunning;[\s\S]*if \(!waitForAuthoritativeTurnEnd\) this\.turnRunning = false;[\s\S]*this\.syncEditingLease\(\)/);
   assert.match(bridge, /dispose\(\): void[\s\S]*this\.activeToolRequests = 0;[\s\S]*this\.syncEditingLease\(\)/);
+});
+
+test('plan mode leaves the document editable while a planning turn is running', () => {
+  assert.equal(planModeAllowsUserEditing('plan', 'planning'), true);
+  assert.equal(planModeAllowsUserEditing('plan', 'awaiting-approval'), true);
+  assert.equal(planModeAllowsUserEditing('plan', 'switching'), false);
+  assert.equal(planModeAllowsUserEditing('plan', 'implementing'), false);
+  assert.equal(planModeAllowsUserEditing('direct', 'direct'), false);
+  assert.deepEqual(
+    deriveAgentEditingLease({
+      turnRunning: true, activeToolRequests: 2, agent: 'claude', workflow: 'plan', phase: 'planning',
+    }),
+    { active: false, agent: 'claude' },
+  );
+  assert.deepEqual(
+    deriveAgentEditingLease({
+      turnRunning: true, activeToolRequests: 0, agent: 'codex', workflow: 'plan', phase: 'awaiting-approval',
+    }),
+    { active: false, agent: 'codex' },
+  );
+  assert.deepEqual(
+    deriveAgentEditingLease({
+      turnRunning: false, activeToolRequests: 0, agent: 'claude', workflow: 'plan', phase: 'switching',
+    }),
+    { active: true, agent: 'claude' },
+  );
+  assert.deepEqual(
+    deriveAgentEditingLease({
+      turnRunning: true, activeToolRequests: 0, agent: 'grok', workflow: 'plan', phase: 'implementing',
+    }),
+    { active: true, agent: 'grok' },
+  );
+  assert.deepEqual(
+    deriveAgentEditingLease({
+      turnRunning: true, activeToolRequests: 0, agent: 'pi', workflow: 'direct', phase: 'direct',
+    }),
+    { active: true, agent: 'pi' },
+  );
+});
+
+test('planning saves after a user edit notify the hub mid-plan', () => {
+  assert.match(bridge, /eventBus\.on\('document-changed', \(\) => this\.markUserDocumentEdit\(\)\)/);
+  assert.match(bridge, /eventBus\.on\('document-mutated', \(\) => this\.markUserDocumentEdit\(\)\)/);
+  assert.match(bridge, /eventBus\.on\('document-saved', \(\) => this\.notifyPlanningDocumentSaved\(\)\)/);
+  assert.match(bridge, /type: 'chat-document-saved'/);
+  assert.match(bridge, /type: 'planning-document-saved'/);
+  assert.match(sidebar, /case 'planning-document-saved':/);
+  assert.match(sidebar, /문서가 저장되어 계획 중인 에이전트에 알렸습니다/);
 });
 
 test('user input gates remain separate from autonomous agent mutation paths', () => {

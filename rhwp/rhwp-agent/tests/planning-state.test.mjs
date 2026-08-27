@@ -5,6 +5,7 @@ import {
   PlanningState,
   authorizeToolCall,
   buildApprovedPlanPrompt,
+  buildPlanningDocumentSavedPrompt,
 } from '../planning-state.mjs';
 
 const serverSource = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
@@ -154,4 +155,20 @@ test('approved execution prompt contains only the authoritative plan record', ()
   assert.match(prompt, /distinguish completed, blocked, and deferred items/);
   assert.match(prompt, /never claim partial work is complete/);
   assert.match(prompt, /"goal": "Implement feature"/);
+});
+
+test('document-saved follow-up asks the planner to re-read live state', () => {
+  const prompt = buildPlanningDocumentSavedPrompt({ revision: 12, fileName: '초안.hwpx' });
+  assert.match(prompt, /automatic live-document notification/);
+  assert.match(prompt, /not a request to implement/);
+  assert.match(prompt, /Current document revision after the save: 12/);
+  assert.match(prompt, /Saved document name: 초안\.hwpx/);
+  assert.match(prompt, /get_structure/);
+  assert.match(prompt, /Do not edit the local filesystem or live document/);
+  assert.match(serverSource, /case 'chat-document-saved'/);
+  assert.match(serverSource, /queuePlanningDocumentSaved\(record, msg\)/);
+  assert.match(serverSource, /if \(evt\.type === 'turn-end'\) drainPlanningDocumentSaved\(record\)/);
+  assert.match(serverSource, /reason: 'document-saved'/);
+  assert.match(serverSource, /promptOverride: prompt/);
+  assert.match(serverSource, /sessionStatusOverride: 'idle'/);
 });

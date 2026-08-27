@@ -240,6 +240,9 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.doesNotMatch(planning, /update_agent_instructions/);
   assert.match(planning, /patient brainstorming partner/);
   assert.match(planning, /Do not edit the local filesystem or live document/);
+  assert.match(planning, /The user can keep editing the live document during planning/);
+  assert.match(planning, /Studio does not lock it/);
+  assert.match(planning, /Studio injects a live-document notification/);
   assert.match(planning, /Do not present a plan in the first planning response/);
   assert.match(planning, /explicitly asks to skip discovery and draft immediately/);
   assert.match(planning, /complete at least one focused conversational checkpoint/);

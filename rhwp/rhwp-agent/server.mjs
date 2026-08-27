@@ -26,7 +26,7 @@ import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS } from './tools.mjs';
 import { replayMissedTurnEnd } from './turn-outcome-replay.mjs';
-import { PlanningState, authorizeToolCall, buildApprovedPlanPrompt, workflowError } from './planning-state.mjs';
+import { PlanningState, authorizeToolCall, buildApprovedPlanPrompt, buildPlanningDocumentSavedPrompt, workflowError } from './planning-state.mjs';
 import { DownloadManager } from './download-manager.mjs';
 import { DocumentSnapshotManager } from './document-snapshot-manager.mjs';
 import { ArtifactStore } from './artifact-store.mjs';
@@ -240,6 +240,7 @@ const sessions = new HubSessionRegistry({
       templateJobs: new Map(),
       activeTemplateJobId: null,
       pendingTemplateCompletions: [],
+      pendingDocumentSaved: null,
       browserbaseSession: new BrowserbaseSession({ log }),
       downloadManager: new DownloadManager({ rootDir: workDir }),
       documentSnapshotManager: new DocumentSnapshotManager({ rootDir: workDir }),
@@ -922,6 +923,66 @@ function drainTemplateCompletion(record) {
   }
 }
 
+function planningDocumentSavedAllowed(activeSession) {
+  return activeSession?.planning?.workflow === 'plan'
+    && (activeSession.planning.phase === 'planning' || activeSession.planning.phase === 'awaiting-approval');
+}
+
+function queuePlanningDocumentSaved(record, msg) {
+  const activeSession = record.agentSession;
+  if (!planningDocumentSavedAllowed(activeSession)) return;
+  record.pendingDocumentSaved = {
+    threadId: activeSession.threadId,
+    revision: Number.isSafeInteger(msg.revision) ? msg.revision : undefined,
+    fileName: typeof msg.fileName === 'string' ? msg.fileName : undefined,
+  };
+  drainPlanningDocumentSaved(record);
+}
+
+function drainPlanningDocumentSaved(record) {
+  const activeSession = record.agentSession;
+  const pending = record.pendingDocumentSaved;
+  if (!pending || !activeSession || activeSession.status !== 'idle') return;
+  if (pending.threadId !== activeSession.threadId || !planningDocumentSavedAllowed(activeSession)) {
+    record.pendingDocumentSaved = null;
+    return;
+  }
+  const phase = activeSession.planning.phase;
+  record.pendingDocumentSaved = null;
+  const prompt = buildPlanningDocumentSavedPrompt(pending);
+  activeSession.status = 'running';
+  if (phase === 'awaiting-approval') {
+    const planId = activeSession.planning.latestPlan?.planId;
+    if (!planId) {
+      activeSession.status = 'idle';
+      return;
+    }
+    void requestImplementationPlanChanges(record, record.studioSocket, {
+      planId,
+      reason: 'document-saved',
+      promptOverride: prompt,
+      sessionStatusOverride: 'idle',
+    }).catch((error) => {
+      if (record.agentSession === activeSession) {
+        if (activeSession.status === 'running') activeSession.status = 'idle';
+        if (!record.pendingDocumentSaved) record.pendingDocumentSaved = pending;
+      }
+      sendChatError(record.studioSocket, error);
+    });
+    return;
+  }
+  try {
+    activeSession.backend.sendUserMessage(addAgentInstructionsContext(addActiveDocumentContext(
+      activeSession,
+      addTemplateContext(record, activeSession, prompt),
+    )));
+  } catch (error) {
+    activeSession.status = 'idle';
+    record.pendingDocumentSaved = pending;
+    log(`planning document-saved dispatch failed: ${error?.message ?? error}`);
+  }
+}
+
 function queueTemplateCompletion(record, job) {
   if (job.completionQueued) return;
   job.completionQueued = true;
@@ -1122,11 +1183,13 @@ function makeBackendEventHandler(record, generation) {
     const delivered = sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt });
     if (evt.type === 'turn-end' && !delivered) record.missedTurnEnd = evt;
     if (evt.type === 'turn-end') drainTemplateCompletion(record);
+    if (evt.type === 'turn-end') drainPlanningDocumentSaved(record);
   };
 }
 
 function disposeSession(record) {
   record.pendingReferenceMessage = null;
+  record.pendingDocumentSaved = null;
   const activeSession = record.agentSession;
   if (!activeSession) return Promise.resolve();
   const wasRunning = activeSession.status === 'running';
@@ -1412,6 +1475,7 @@ async function startSession(
     workflowTransition: Promise.resolve(),
   };
   queueMicrotask(() => drainTemplateCompletion(record));
+  queueMicrotask(() => drainPlanningDocumentSaved(record));
   return record.agentSession;
 }
 
@@ -1498,19 +1562,31 @@ async function requestImplementationPlanChanges(record, sock, msg) {
   requireWorkflowSwitchBackend(activeSession);
   activeSession.planning.requestChanges({
     planId: String(msg.planId ?? ''),
-    sessionStatus: activeSession.status,
+    sessionStatus: msg.sessionStatusOverride ?? activeSession.status,
   });
   sendJson(sock, {
     v: 1,
     type: 'plan-invalidated',
     planId: String(msg.planId ?? ''),
-    reason: typeof msg.feedback === 'string' ? msg.feedback : 'changes-requested',
+    reason: typeof msg.reason === 'string' && msg.reason
+      ? msg.reason
+      : (typeof msg.feedback === 'string' ? msg.feedback : 'changes-requested'),
     ...activeSession.planning.snapshot(),
     latestPlan: null,
   });
   try {
     await activeSession.backend.setExecutionMode(providerModeRequest(activeSession, 'planning'));
     if (record.agentSession !== activeSession) return;
+    const promptOverride = typeof msg.promptOverride === 'string' ? msg.promptOverride.trim() : '';
+    if (promptOverride) {
+      activeSession.status = 'running';
+      activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
+        record,
+        activeSession,
+        addReferenceContext(activeSession, promptOverride, promptOverride),
+      )));
+      return;
+    }
     if (typeof msg.feedback === 'string' && msg.feedback.trim()) {
       activeSession.status = 'running';
       const revisionPrompt = [
@@ -1930,6 +2006,10 @@ async function handleStudioMessage(record, sock, msg) {
     case 'implementation-plan-request-changes':
     case 'plan-request-changes': {
       void requestImplementationPlanChanges(record, sock, msg).catch((error) => sendChatError(sock, error));
+      return;
+    }
+    case 'chat-document-saved': {
+      queuePlanningDocumentSaved(record, msg);
       return;
     }
     case 'skills-list': {
