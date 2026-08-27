@@ -193,6 +193,13 @@ export function mapSandboxIssue(error: unknown): CloudSetupIssue {
       detail,
     };
   }
+  if (/cannot manage the/.test(normalized)) {
+    return {
+      title: '이 앱이 관리할 수 없는 샌드박스입니다',
+      guidance: '서버 종료로 연결을 놓은 뒤, 공급자 콘솔에서 남은 서버를 직접 삭제하세요.',
+      detail,
+    };
+  }
   if (/does not include app-provided|provider_unavailable|unknown app server provider/.test(normalized)) {
     return {
       title: '이 빌드에는 앱 제공 서버가 없습니다',

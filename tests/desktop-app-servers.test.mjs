@@ -356,7 +356,7 @@ test('the client remembers the chosen server mode and verifies bootstrap receipt
 function appServerStub(overrides = {}) {
   const calls = { spawn: 0, teardown: 0, status: 0 };
   const provider = {
-    id: 'railway',
+    id: overrides.id ?? 'railway',
     displayName: 'Railway sandbox',
     calls,
     configuration: overrides.configuration ?? (() => ({ configured: true, missing: [] })),
@@ -383,7 +383,7 @@ function appServerStub(overrides = {}) {
   return provider;
 }
 
-function sandboxCoordinator({ provider = appServerStub(), records = [], vault = memoryVault() } = {}) {
+function sandboxCoordinator({ provider = appServerStub(), records = [], vault = memoryVault(), appServers } = {}) {
   const client = new CloudClient({
     vault,
     fetchImpl: signedFetch(async (url) => {
@@ -406,7 +406,7 @@ function sandboxCoordinator({ provider = appServerStub(), records = [], vault = 
     store: { load: async () => records, list: async () => records },
     provisioner: {},
     recoveryDir: '/unused',
-    appServers: [provider],
+    appServers: appServers ?? [provider],
   });
   return { coordinator, client, provider, vault };
 }
@@ -568,6 +568,46 @@ test('sandbox status refreshes the lifecycle from the provider', async () => {
   const broken = await coordinator.appServerStatus();
   assert.equal(broken.server.lifecycle, 'error');
   assert.match(broken.server.message, /CRASHED/);
+});
+
+test('a sandbox this build cannot manage still has a way out', async () => {
+  const vault = memoryVault();
+  const spawned = sandboxCoordinator({ vault });
+  await spawned.coordinator.start();
+  await spawned.coordinator.spawnAppServer();
+
+  const stranger = sandboxCoordinator({ vault, appServers: [appServerStub({ id: 'fly' })] });
+  const events = [];
+  stranger.coordinator.on('event', (event) => events.push(event.type));
+  const resumed = await stranger.coordinator.start();
+  assert.equal(resumed.server.lifecycle, 'error', 'an unmanageable sandbox never reports itself ready');
+  assert.match(resumed.server.message, /cannot manage the railway sandbox/);
+
+  const status = await stranger.coordinator.appServerStatus();
+  assert.equal(status.server.lifecycle, 'error');
+  assert.match(status.profile.message, /provider console/);
+
+  const released = await stranger.coordinator.teardownAppServer();
+  assert.equal(released.profile.kind, 'unconfigured');
+  assert.equal(released.server.lifecycle, 'idle');
+  assert.equal(released.sandbox.unmanaged, true, 'the remote sandbox is not claimed to be removed');
+  assert.equal(released.sandbox.removed, false);
+  assert.ok(events.includes('sandbox-abandoned'));
+  assert.equal(vault.values.has('cloud.refresh'), false);
+
+  await stranger.coordinator.saveProfile({
+    profile: {
+      name: 'Office VPS',
+      host: 'vps.example.ts.net',
+      sshUser: 'cloud',
+      sshPort: 22,
+      tailscaleHttpsPort: 443,
+      auth: { kind: 'ssh-agent' },
+      transport: { kind: 'tailscale' },
+      serverPublicKey: SERVER_KEY,
+    },
+  });
+  assert.equal((await stranger.coordinator.snapshot()).profile.mode, 'self-hosted');
 });
 
 test('selecting a server mode persists before anything is provisioned', async () => {

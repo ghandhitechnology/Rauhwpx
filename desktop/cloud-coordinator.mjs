@@ -73,6 +73,12 @@ const SERVER_TO_LOCAL_STATE = Object.freeze({
   failed: 'failed',
 });
 
+function unmanagedSandboxMessage(sandbox) {
+  const where = sandbox?.host ? ` at ${sandbox.host}` : '';
+  return `This app cannot manage the ${sandbox?.providerId || 'app-provided'} sandbox${where}.`
+    + ' Release it here, then delete the server in the provider console.';
+}
+
 function cloudState(value, fallback = 'queued') {
   return SERVER_TO_LOCAL_STATE[String(value ?? '').toLowerCase()] ?? fallback;
 }
@@ -140,10 +146,14 @@ export class CloudCoordinator extends EventEmitter {
     this.#preferredMode = await this.#client.loadServerMode?.().catch(() => null) ?? null;
     const profile = await this.#client.loadProfile().catch(() => null);
     if (profile?.mode === 'app-hosted') {
-      this.#sandboxLifecycle = await this.#client.isPaired().catch(() => false) ? 'ready' : 'error';
-      this.#sandboxMessage = this.#sandboxLifecycle === 'error'
-        ? 'This app sandbox is not paired with this device.'
-        : null;
+      const unmanaged = this.#sandboxProvider(profile.sandbox) ? null : unmanagedSandboxMessage(profile.sandbox);
+      if (unmanaged) this.#setSandboxLifecycle('error', unmanaged);
+      else {
+        this.#sandboxLifecycle = await this.#client.isPaired().catch(() => false) ? 'ready' : 'error';
+        this.#sandboxMessage = this.#sandboxLifecycle === 'error'
+          ? 'This app sandbox is not paired with this device.'
+          : null;
+      }
     }
     const records = await this.#store.load();
     for (const record of records) {
@@ -439,6 +449,12 @@ export class CloudCoordinator extends EventEmitter {
     this.#sandboxMessage = message;
   }
 
+  /** 저장된 샌드박스의 공급자가 이 빌드에 없을 수 있다. 그때도 사용자는 연결을 놓을 수 있어야 한다. */
+  #sandboxProvider(sandbox) {
+    const providerId = sandbox?.providerId;
+    return providerId && this.#appServers.has(providerId) ? this.#appServers.get(providerId) : null;
+  }
+
   async selectServerMode(mode) {
     this.#preferredMode = await this.#client.saveServerMode(mode);
     return this.snapshot();
@@ -548,7 +564,12 @@ export class CloudCoordinator extends EventEmitter {
       }
       return this.snapshot();
     }
-    const provider = this.#appServers.get(profile.sandbox.providerId);
+    const provider = this.#sandboxProvider(profile.sandbox);
+    if (!provider) {
+      const message = unmanagedSandboxMessage(profile.sandbox);
+      this.#setSandboxLifecycle('error', message);
+      return this.snapshot({ profileConnection: 'error', profileMessage: message });
+    }
     try {
       const status = await provider.status(profile.sandbox);
       this.#setSandboxLifecycle(status.lifecycle, status.message ?? null);
@@ -591,7 +612,13 @@ export class CloudCoordinator extends EventEmitter {
         );
       }
     }
-    const provider = this.#appServers.get(profile.sandbox.providerId);
+    const provider = this.#sandboxProvider(profile.sandbox);
+    if (!provider) {
+      await this.#client.forgetProfile();
+      this.#setSandboxLifecycle('idle');
+      this.#emit({ type: 'sandbox-abandoned', providerId: profile.sandbox.providerId, sandboxId: profile.sandbox.sandboxId });
+      return this.snapshot({ extra: { sandbox: { ok: true, removed: false, unmanaged: true } } });
+    }
     this.#setSandboxLifecycle('tearing-down', 'Shutting down the app sandbox.');
     this.#emit({ type: 'sandbox-teardown-started', providerId: provider.id });
     try {
