@@ -71,6 +71,12 @@ test('desktop close waits for a requested handoff through the local turn boundar
   assert.match(sidebar, /awaitPendingCloudTransferForClose\(\): Promise<void>/);
   assert.match(sidebar, /if \(turnRunning\) \{[\s\S]*cloudTransferPending = true;[\s\S]*ensureCloudTransferCloseWaiter\(\)/);
   assert.match(sidebar, /if \(cloudTransferPending\) requestCloudTransfer\(\)/);
+  const cancel = sidebar.match(/function cancelPendingCloudTransfer\(\): void \{[\s\S]*?\n  \}/)?.[0] ?? '';
+  const pendingOff = cancel.indexOf('cloudTransferPending = false;');
+  const waitingOff = cancel.indexOf('setWaitingForLocalTurn(false)');
+  const clearOff = cancel.indexOf('clearCloudTransferIntent');
+  assert.ok(pendingOff >= 0 && waitingOff >= 0 && clearOff > pendingOff && clearOff > waitingOff);
+  assert.match(cancel, /failPendingCloudTransfer/);
   assert.match(main, /await awaitPendingCloudTransferForClose\(\)/);
   assert.match(main, /return false;[\s\S]*const allowClose = await canReplaceCurrentDocument\(\)/);
   assert.match(sidebar, /setTransferIntent\(\{ \.\.\.intent, pending: true \}\)/);

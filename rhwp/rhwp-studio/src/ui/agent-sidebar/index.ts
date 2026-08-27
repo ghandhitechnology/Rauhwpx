@@ -1683,6 +1683,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function cancelPendingCloudTransfer(): void {
     if (!cloudTransferPending) return;
+    cloudTransferPending = false;
+    cloudUi.setWaitingForLocalTurn(false);
     const cancellation = new Error('클라우드 전송 예약을 취소했습니다.');
     void clearCloudTransferIntent().then(
       () => failPendingCloudTransfer(cancellation),
