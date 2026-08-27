@@ -463,9 +463,16 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     try {
       const next = await deps.controller.teardownSandbox();
       if (!operationIsCurrent(operation)) return;
-      setState(createCloudSetupState(next, intent), next.sandbox?.unmanaged === true
-        ? '연결을 놓았습니다. 남은 서버는 공급자 콘솔에서 직접 삭제하세요.'
-        : '앱 제공 서버를 종료했습니다.');
+      const released = next.sandbox?.unmanaged === true;
+      const settled = createCloudSetupState(next, intent);
+      setState(
+        released && settled.kind === 'choose'
+          ? { ...settled, notice: `${name}의 연결만 놓았습니다. 남은 서버는 공급자 콘솔에서 직접 삭제하세요.` }
+          : settled,
+        released
+          ? '연결을 놓았습니다. 남은 서버는 공급자 콘솔에서 직접 삭제하세요.'
+          : '앱 제공 서버를 종료했습니다.',
+      );
     } catch (error) {
       if (!operationIsCurrent(operation)) return;
       setState({
@@ -538,6 +545,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const provider = appServerProvider(snapshot);
       title.textContent = 'Cloud 서버 선택';
       body.append(description('에이전트가 앱을 닫아도 계속 작업할 서버를 고르세요. 나중에 바꿀 수 있습니다.'));
+      if (state.notice) body.append(callout('cloud', '남은 서버를 확인하세요', state.notice));
       const options = el('div', 'ag-cloud-setup-options');
       options.setAttribute('role', 'radiogroup');
       options.setAttribute('aria-label', 'Cloud 서버 선택');

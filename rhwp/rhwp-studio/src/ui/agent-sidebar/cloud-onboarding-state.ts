@@ -30,7 +30,14 @@ export interface CloudSetupIssue {
 export type SandboxFailurePhase = 'spawn' | 'teardown';
 
 export type CloudSetupState =
-  | { kind: 'choose'; draft: CloudProfileDraft; intent: CloudSetupIntent; mode: CloudServerMode }
+  | {
+      kind: 'choose';
+      draft: CloudProfileDraft;
+      intent: CloudSetupIntent;
+      mode: CloudServerMode;
+      /** 놓고 온 유료 서버처럼 다음 화면까지 살아 있어야 하는 사실. */
+      notice?: string;
+    }
   | {
       kind: 'sandbox-intro';
       draft: CloudProfileDraft;

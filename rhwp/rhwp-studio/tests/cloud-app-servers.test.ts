@@ -371,6 +371,8 @@ test('the dialog offers both servers and every sandbox action', () => {
   assert.match(onboarding, /controller\.teardownSandbox\(\)/);
   assert.match(onboarding, /controller\.sandboxStatus\(\)/);
   assert.match(onboarding, /남은 서버는 공급자 콘솔에서 직접 삭제하세요/);
+  // 놓고 온 유료 서버는 화면에 보여야 한다. 스크린 리더 전용 안내로는 부족하다.
+  assert.match(onboarding, /state\.notice.*callout\('cloud', '남은 서버를 확인하세요', state\.notice\)/);
   assert.match(onboarding, /'앱 제공 서버를 종료하지 못했습니다'\n\s*: '앱 제공 서버를 준비하지 못했습니다'/);
   assert.match(onboarding, /운영자가 \$\{provider\.missingConfig\.join\(', '\)\}/);
   assert.match(onboarding, /state\.kind !== 'sandbox-intro' && state\.kind !== 'sandbox-failed'/);
