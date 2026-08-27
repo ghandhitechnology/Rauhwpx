@@ -3262,11 +3262,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       }
     }
     if (!activeComposerSkill) {
-      if (text === '/plan' || text === '/build') {
+      const planInvocation = text.match(/^\/plan(?:\s+([\s\S]*))?$/i);
+      const buildInvocation = text.match(/^\/build(?:\s+([\s\S]*))?$/i);
+      if (planInvocation || buildInvocation) {
+        const rest = ((planInvocation?.[1] ?? buildInvocation?.[1]) ?? '').trim();
         input.value = '';
         setSlashMenuOpen(false);
-        requestWorkflow(text === '/plan' ? 'plan' : 'direct');
-        return;
+        if (!requestWorkflow(planInvocation ? 'plan' : 'direct')) return;
+        if (!rest) {
+          input.focus();
+          return;
+        }
+        text = rest;
       }
       if (text === '/calibration') { input.value = ''; writingStyleCalibration.open(); return; }
       if (text === '/settings') { input.value = ''; requestSettingsOpen(); return; }
@@ -5304,13 +5311,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
    * 모드 전환 요청. 계획 모드로 들어갈 때만 원격 브라우저 전체 제어를
    * 한 번 경고하고, 검토 대기 중인 문서 편집이 있으면 막는다.
    */
-  function requestWorkflow(next: AgentWorkflow): void {
+  function requestWorkflow(next: AgentWorkflow): boolean {
     const restartCompletedPlan = next === 'plan'
       && chatWorkflow === 'plan'
       && planningPhase === 'implementing';
     if (next === chatWorkflow && !restartCompletedPlan) {
       input.focus();
-      return;
+      return true;
     }
     if (isControlLocked() || connState !== 'connected') {
       systemMessage(
@@ -5319,7 +5326,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           : '전환 중에는 작업 방식을 바꿀 수 없습니다.',
       );
       updateWorkflowControl();
-      return;
+      return false;
     }
     if (next === 'plan') {
       if (hasPendingDocumentEdits()) {
@@ -5327,13 +5334,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           '검토 대기 중인 문서 편집이 있습니다. 먼저 승인하거나 거절한 뒤 계획 모드로 전환하세요.',
         );
         updateWorkflowControl();
-        return;
+        return false;
       }
       if (!browserbaseAcknowledged) {
         if (!window.confirm(BROWSERBASE_FULL_CONTROL_WARNING)) {
           updateWorkflowControl();
           input.focus();
-          return;
+          return false;
         }
         browserbaseAcknowledged = true;
         browserbaseNoticePending = true;
@@ -5346,6 +5353,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     applyWorkflow(next);
     bridge.setWorkflow(next);
     input.focus();
+    return true;
   }
 
   function recordPlan(plan: StructuredPlan): void {

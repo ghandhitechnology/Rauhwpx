@@ -7,14 +7,23 @@ const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', im
 const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
 const markdown = readFileSync(new URL('../src/ui/agent-sidebar/plan-markdown.ts', import.meta.url), 'utf8');
 
+test('plan and build slash commands accept a trailing prompt and switch before sending', () => {
+  assert.match(source, /const planInvocation = text\.match\(\/\^\\\/plan\(\?:\\s\+\(\[\\s\\S\]\*\)\)\?\$\/i\)/);
+  assert.match(source, /const buildInvocation = text\.match\(\/\^\\\/build\(\?:\\s\+\(\[\\s\\S\]\*\)\)\?\$\/i\)/);
+  assert.match(source, /if \(!requestWorkflow\(planInvocation \? 'plan' : 'direct'\)\) return;/);
+  assert.match(source, /if \(!rest\) \{\s*input\.focus\(\);\s*return;\s*\}/);
+  assert.match(source, /text = rest;/);
+  assert.match(source, /function requestWorkflow\(next: AgentWorkflow\): boolean/);
+});
+
 test('workflow switches use local slash commands and plan mode defaults to full access', () => {
   assert.match(source, /value: '\/plan',[^\n]*workflow: 'plan'/);
   assert.match(source, /value: '\/build',[^\n]*workflow: 'direct'/);
   assert.match(source, /if \(option\.workflow\) \{\s*input\.value = '';\s*requestWorkflow\(option\.workflow\);\s*return;/);
-  assert.match(source, /if \(text === '\/plan' \|\| text === '\/build'\) \{[\s\S]*requestWorkflow\(text === '\/plan' \? 'plan' : 'direct'\);\s*return;/);
+  assert.match(source, /if \(planInvocation \|\| buildInvocation\) \{[\s\S]*requestWorkflow\(planInvocation \? 'plan' : 'direct'\)/);
   // 로컬 명령은 사용자 메시지 기록과 에이전트 전송 전에 끝난다.
-  assert.ok(source.indexOf("if (text === '/plan' || text === '/build')") < source.indexOf('recordUserMessage(messageText,'));
-  assert.ok(source.indexOf("if (text === '/plan' || text === '/build')") < source.indexOf('bridge.sendUserMessage(requestText, skillNameForMessage,'));
+  assert.ok(source.indexOf('const planInvocation = text.match') < source.indexOf('recordUserMessage(messageText,'));
+  assert.ok(source.indexOf('const planInvocation = text.match') < source.indexOf('bridge.sendUserMessage(requestText, skillNameForMessage,'));
   assert.doesNotMatch(source, /ag-workflow-item|workflowGroup|workflowItems/);
   assert.doesNotMatch(css, /\.ag-workflow(?:-item)?\s*\{/);
   assert.match(source, /composerUtilityActions\.append\(phaseBadge, permissionBtn, skillsBtn\)/);

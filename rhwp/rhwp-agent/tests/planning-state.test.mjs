@@ -68,6 +68,15 @@ test('requesting plan workflow again after implementation starts a fresh plannin
   assert.match(serverSource, /const phase = msg\.workflow === 'plan' \? 'planning' : 'implementing'/);
 });
 
+test('hub applies planning state before Codex restart and serializes later studio messages', () => {
+  assert.match(serverSource, /activeSession\.planning = nextPlanning;[\s\S]*await activeSession\.backend\.setExecutionMode\(/);
+  assert.match(serverSource, /if \(record\.agentSession === activeSession\) activeSession\.planning = previousPlanning;/);
+  assert.match(serverSource, /case 'chat-workflow-set':[\s\S]*await transition;/);
+  assert.match(serverSource, /studioMessageQueue 가 이 전환을 기다리지 않으면/);
+  assert.match(serverSource, /if \(record\.agentSession\?\.workflowTransition\) \{\s*await record\.agentSession\.workflowTransition;/);
+  assert.match(serverSource, /workflow: record\.agentSession\?\.planning\.snapshot\(\)\.workflow,/);
+});
+
 test('approval requires idle and the latest authoritative plan id', () => {
   const busy = state();
   busy.present(plan());

@@ -1632,19 +1632,27 @@ async function setChatWorkflow(record, sock, msg) {
   }
   requireWorkflowSwitchBackend(activeSession);
   const previousPlanId = activeSession.planning.latestPlan?.planId ?? null;
+  const previousPlanning = activeSession.planning;
   const nextPlanning = new PlanningState({
     workflow: msg.workflow,
     initialCapabilityEpoch: record.nextCapabilityEpoch++,
     allocateEpoch: () => record.nextCapabilityEpoch++,
   });
   const phase = msg.workflow === 'plan' ? 'planning' : 'implementing';
-  await activeSession.backend.setExecutionMode({
-    workflow: msg.workflow,
-    phase,
-    capabilityEpoch: nextPlanning.capabilityEpoch,
-  });
-  if (record.agentSession !== activeSession) return;
+  // Codex setExecutionMode 는 자식 재시작을 기다리므로, 스냅샷·도구 게이트는
+  // 재시작 전에 구상으로 바꿔 둔다. 실패하면 이전 상태로 되돌린다.
   activeSession.planning = nextPlanning;
+  try {
+    await activeSession.backend.setExecutionMode({
+      workflow: msg.workflow,
+      phase,
+      capabilityEpoch: nextPlanning.capabilityEpoch,
+    });
+  } catch (error) {
+    if (record.agentSession === activeSession) activeSession.planning = previousPlanning;
+    throw error;
+  }
+  if (record.agentSession !== activeSession) return;
   if (msg.workflow === 'direct') void record.browserbaseSession.cleanup('workflow changed to direct');
   if (previousPlanId) {
     sendJson(sock, {
@@ -1661,6 +1669,9 @@ async function setChatWorkflow(record, sock, msg) {
 async function handleStudioMessage(record, sock, msg) {
   switch (msg.type) {
     case 'chat-start': {
+      if (record.agentSession?.workflowTransition) {
+        await record.agentSession.workflowTransition;
+      }
       const agent = msg.agent;
       if (!KNOWN_AGENTS.has(agent)) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: `unknown agent: ${String(agent)}` });
@@ -1985,7 +1996,11 @@ async function handleStudioMessage(record, sock, msg) {
     case 'chat-workflow-set': {
       const transitionOwner = record.agentSession;
       if (!transitionOwner) {
-        void setChatWorkflow(record, sock, msg).catch((error) => sendChatError(sock, error));
+        try {
+          await setChatWorkflow(record, sock, msg);
+        } catch (error) {
+          sendChatError(sock, error);
+        }
         return;
       }
       const transition = transitionOwner.workflowTransition.then(() => {
@@ -1993,7 +2008,13 @@ async function handleStudioMessage(record, sock, msg) {
         return setChatWorkflow(record, sock, msg);
       });
       transitionOwner.workflowTransition = transition.catch(() => undefined);
-      void transition.catch((error) => sendChatError(sock, error));
+      // studioMessageQueue 가 이 전환을 기다리지 않으면 Codex 재시작 중에
+      // chat-user-message 가 바로 실행 모드 턴으로 들어가 문서를 잠근다.
+      try {
+        await transition;
+      } catch (error) {
+        sendChatError(sock, error);
+      }
       return;
     }
     case 'chat-plan-approve':
@@ -2868,6 +2889,7 @@ function handleMcpMessage(record, sock, msg) {
         tool,
         args,
         ...(activeTemplate ? { template: activeTemplate } : {}),
+        workflow: record.agentSession?.planning.snapshot().workflow,
         phase: record.agentSession?.planning.snapshot().phase,
         capabilityEpoch: record.agentSession?.planning.capabilityEpoch,
       });

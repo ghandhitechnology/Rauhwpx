@@ -886,6 +886,9 @@ class AgentBridgeImpl implements AgentBridge {
   /** 구상 중 사용자 편집이 있었고, 저장 알림을 아직 보내지 않았다. */
   private userEditedSincePlanningNotify = false;
   private documentNotifyUnsubs: Array<() => void> = [];
+  /** /plan 전환이 허브(특히 Codex setExecutionMode) 왕복을 기다리는 동안. */
+  private workflowSwitchPending = false;
+  private workflowBeforeSwitch: { workflow: AgentWorkflow; phase: AgentPhase } | null = null;
   private turnHadError = false;
   private pendingTurnOpen = false;
   private pendingChatStart: {
@@ -1272,6 +1275,30 @@ class AgentBridgeImpl implements AgentBridge {
     this.pendingTurnOpen = true;
   }
 
+  private finishWorkflowSwitch(): void {
+    this.workflowSwitchPending = false;
+    this.workflowBeforeSwitch = null;
+  }
+
+  private revertWorkflowSwitch(): void {
+    const previous = this.workflowBeforeSwitch;
+    this.finishWorkflowSwitch();
+    if (!previous) return;
+    this.workflow = previous.workflow;
+    this.phase = previous.phase;
+    this.syncEditingLease();
+  }
+
+  private beginWorkflowSwitch(workflow: AgentWorkflow): void {
+    const restartCompletedPlan = workflow === 'plan'
+      && this.workflow === 'plan'
+      && this.phase === 'implementing';
+    if (this.workflow === workflow && !restartCompletedPlan) return;
+    this.workflowBeforeSwitch = { workflow: this.workflow, phase: this.phase };
+    this.workflowSwitchPending = true;
+    this.resetWorkflowState(workflow);
+  }
+
   private markUserDocumentEdit(): void {
     if (planModeAllowsUserEditing(this.workflow, this.phase)) {
       this.userEditedSincePlanningNotify = true;
@@ -1392,7 +1419,8 @@ class AgentBridgeImpl implements AgentBridge {
           this.activeTemplate = this.activeTemplateId
             ? this.templateCatalog.templates.find((template) => template.id === this.activeTemplateId) ?? null
             : null;
-          this.syncWorkflowState(session, 'direct', 'direct');
+          this.finishWorkflowSwitch();
+          this.syncWorkflowState(session, this.workflow, this.phase);
           this.pendingChatStart = null;
           this.emit({
             type: 'chat-started',
@@ -1431,10 +1459,16 @@ class AgentBridgeImpl implements AgentBridge {
               console.warn('[AgentBridge] reconnect endTurn 실패:', e);
             }
           }
-          this.resetWorkflowState();
+          if (this.workflow === 'plan' || this.workflowSwitchPending) {
+            this.finishWorkflowSwitch();
+            this.syncEditingLease();
+          } else {
+            this.resetWorkflowState();
+          }
         }
         this.syncEditingLease();
         this.emit({ type: 'workflow-changed', ...this.workflowState() });
+        this.flushQueuedMessages();
         if (wasRunning && !this.turnRunning) {
           // 연결이 끊긴 사이에 끝난 턴 — 잃어버린 turn-end 를 합성해 UI 를 되돌린다.
           if (this.pendingTurnOpen) {
@@ -1465,7 +1499,10 @@ class AgentBridgeImpl implements AgentBridge {
         if (typeof msg.threadId === 'string') this.threadId = msg.threadId;
         if (typeof msg.documentId === 'string' || msg.documentId === null) this.documentId = msg.documentId;
         if (typeof msg.documentName === 'string' || msg.documentName === null) this.documentName = msg.documentName;
-        this.syncWorkflowState(msg, 'direct', 'direct');
+        const fallbackWorkflow = this.workflow;
+        const fallbackPhase = this.phase;
+        this.finishWorkflowSwitch();
+        this.syncWorkflowState(msg, fallbackWorkflow, fallbackPhase);
         this.emit({
           type: 'chat-started',
           agent: isAgentName(msg.agent) ? msg.agent : this.selectedAgent,
@@ -1506,8 +1543,10 @@ class AgentBridgeImpl implements AgentBridge {
         break;
       }
       case 'workflow-changed': {
+        this.finishWorkflowSwitch();
         this.syncWorkflowState(msg, 'direct', 'planning');
         this.emit({ type: 'workflow-changed', ...this.workflowState() });
+        this.flushQueuedMessages();
         break;
       }
       case 'plan-ready': {
@@ -1774,6 +1813,16 @@ class AgentBridgeImpl implements AgentBridge {
       case 'chat-error': {
         // 시작 실패 시 대기 중이던 메시지를 정리하지 않으면 sendUserMessage promise가
         // 영원히 미해결로 남아 컴포저가 잠기고, 다음 chat-started에 스테일 메시지가 흘러간다.
+        // 구상 전환과 무관한 오류(AGENT_BUSY 등)로 낙관적 잠금 해제를 되돌리면
+        // Codex 재시작 중에 문서가 다시 잠긴다.
+        const errorCode = typeof msg.code === 'string' ? msg.code : 'RPC_ERROR';
+        if (
+          errorCode === 'BACKEND_SWITCH_FAILED'
+          || errorCode === 'INVALID_WORKFLOW'
+          || errorCode === 'WORKFLOW_ERROR'
+        ) {
+          this.revertWorkflowSwitch();
+        }
         for (const message of this.queuedMessages) message.resolve(null);
         this.queuedMessages = [];
         this.pendingChatStart = null;
@@ -1865,6 +1914,15 @@ class AgentBridgeImpl implements AgentBridge {
     const args = msg.args;
     const agent: AgentName = isAgentName(msg.agent) ? msg.agent : (this.activeAgent ?? 'claude');
     this.editingAgent = agent;
+    // 허브가 이미 구상 중이면 로컬 전환이 늦어도 도구 호출로 문서를 잠그지 않는다.
+    if (
+      isAgentWorkflow(msg.workflow)
+      && isAgentPhase(msg.phase)
+      && planModeAllowsUserEditing(msg.workflow, msg.phase)
+    ) {
+      this.workflow = msg.workflow;
+      this.phase = msg.phase;
+    }
     this.activeToolRequests += 1;
     this.syncEditingLease();
     void this.executor
@@ -2048,44 +2106,29 @@ class AgentBridgeImpl implements AgentBridge {
     const messageId = stagedReferenceIds.length > 0 ? `message-${++this.requestSeq}` : undefined;
     return new Promise((resolve) => {
       const message = { text, skillName, context, messageId, stagedReferenceIds: [...stagedReferenceIds], resolve };
-      if (this.activeAgent === null) {
-        this.queuedMessages.push(message);
-        if (this.state === 'connected') {
-          this.sendJson({
-            v: AGENT_PROTOCOL_VERSION,
-            type: 'chat-start',
-            agent: this.selectedAgent,
-            workflow: this.workflow,
-            threadId: context.threadId,
-            documentId: context.documentId,
-            documentName: context.documentName ?? null,
-            history: this.chatHistory,
-            ...(this.selectedModel ? { model: this.selectedModel } : {}),
-            ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
-            permissionProfile: this.permissionProfile,
-          });
-        } else {
-          this.pendingChatStart = {
-            agent: this.selectedAgent,
-            model: this.selectedModel ?? undefined,
-            effort: this.selectedEffort ?? undefined,
-            permissionProfile: this.permissionProfile,
-            workflow: this.workflow,
-            threadId: context.threadId,
-            documentId: context.documentId,
-            documentName: context.documentName ?? null,
-            history: this.chatHistory,
-          };
-        }
-        return;
-      }
-      if (this.queuedMessages.length > 0) {
+      if (this.workflowSwitchPending || this.activeAgent === null || this.queuedMessages.length > 0) {
         this.queuedMessages.push(message);
         this.flushQueuedMessages();
         return;
       }
       this.dispatchUserMessage(message);
     });
+  }
+
+  private rememberPendingChatStart(): void {
+    if (this.pendingChatStart) return;
+    const context = this.referenceContext();
+    this.pendingChatStart = {
+      agent: this.selectedAgent,
+      model: this.selectedModel ?? undefined,
+      effort: this.selectedEffort ?? undefined,
+      permissionProfile: this.permissionProfile,
+      workflow: this.workflow,
+      threadId: context.threadId,
+      documentId: context.documentId,
+      documentName: context.documentName ?? null,
+      history: this.chatHistory,
+    };
   }
 
   private dispatchUserMessage(message: (typeof this.queuedMessages)[number]): void {
@@ -2103,7 +2146,29 @@ class AgentBridgeImpl implements AgentBridge {
   }
 
   private flushQueuedMessages(): void {
-    if (this.state !== 'connected') return;
+    if (this.workflowSwitchPending) return;
+    if (this.queuedMessages.length === 0) return;
+    if (this.state !== 'connected') {
+      if (this.activeAgent === null) this.rememberPendingChatStart();
+      return;
+    }
+    if (this.activeAgent === null) {
+      const context = this.referenceContext();
+      this.sendJson({
+        v: AGENT_PROTOCOL_VERSION,
+        type: 'chat-start',
+        agent: this.selectedAgent,
+        workflow: this.workflow,
+        threadId: context.threadId,
+        documentId: context.documentId,
+        documentName: context.documentName ?? null,
+        history: this.chatHistory,
+        ...(this.selectedModel ? { model: this.selectedModel } : {}),
+        ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
+        permissionProfile: this.permissionProfile,
+      });
+      return;
+    }
     const queued = this.queuedMessages;
     this.queuedMessages = [];
     for (const message of queued) this.dispatchUserMessage(message);
@@ -2365,6 +2430,9 @@ class AgentBridgeImpl implements AgentBridge {
   }
 
   setWorkflow(workflow: AgentWorkflow): void {
+    // Codex 등 허브 전환은 프로세스 재시작을 기다리므로, 구상 모드 잠금 해제는
+    // 로컬에서 즉시 적용한다. 메시지 전송은 workflow-changed 까지 미룬다.
+    this.beginWorkflowSwitch(workflow);
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-workflow-set', workflow });
   }
 

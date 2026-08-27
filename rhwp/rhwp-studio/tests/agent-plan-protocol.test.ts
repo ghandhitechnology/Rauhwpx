@@ -51,8 +51,9 @@ test('bridge exposes plan commands and emits every server lifecycle event', () =
 
 test('bridge reconnect keeps explicit workflow and re-synchronizes server authority', () => {
   assert.match(bridgeSource, /workflow: pending\.workflow/);
-  assert.match(bridgeSource, /this\.syncWorkflowState\(session, 'direct', 'direct'\)/);
-  assert.match(bridgeSource, /this\.syncWorkflowState\(msg, 'direct', 'direct'\)/);
+  assert.match(bridgeSource, /this\.syncWorkflowState\(session, this\.workflow, this\.phase\)/);
+  assert.match(bridgeSource, /this\.syncWorkflowState\(msg, fallbackWorkflow, fallbackPhase\)/);
+  assert.match(bridgeSource, /if \(this\.workflow === 'plan' \|\| this\.workflowSwitchPending\)/);
   assert.match(bridgeSource, /activeCapabilityEpoch: this\.capabilityEpoch/);
   assert.match(bridgeSource, /this\.workflow === 'direct' \|\| this\.phase === 'implementing'/);
 });

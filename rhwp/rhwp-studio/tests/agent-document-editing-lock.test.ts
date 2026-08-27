@@ -108,6 +108,16 @@ test('planning saves after a user edit notify the hub mid-plan', () => {
   assert.match(sidebar, /문서가 저장되어 계획 중인 에이전트에 알렸습니다/);
 });
 
+test('entering plan mode unlocks the lease immediately and holds messages until the hub finishes', () => {
+  assert.match(bridge, /this\.beginWorkflowSwitch\(workflow\);[\s\S]*type: 'chat-workflow-set'/);
+  assert.match(bridge, /this\.workflowSwitchPending = true;[\s\S]*this\.resetWorkflowState\(workflow\)/);
+  assert.match(bridge, /if \(this\.workflowSwitchPending \|\| this\.activeAgent === null \|\| this\.queuedMessages\.length > 0\)/);
+  assert.match(bridge, /if \(this\.workflowSwitchPending\) return;/);
+  assert.match(bridge, /case 'workflow-changed':[\s\S]*this\.finishWorkflowSwitch\(\);[\s\S]*this\.flushQueuedMessages\(\)/);
+  assert.match(bridge, /BACKEND_SWITCH_FAILED[\s\S]*INVALID_WORKFLOW[\s\S]*WORKFLOW_ERROR[\s\S]*this\.revertWorkflowSwitch\(\)/);
+  assert.match(bridge, /planModeAllowsUserEditing\(msg\.workflow, msg\.phase\)[\s\S]*this\.workflow = msg\.workflow;[\s\S]*this\.phase = msg\.phase/);
+});
+
 test('user input gates remain separate from autonomous agent mutation paths', () => {
   assert.match(input, /executeOperation\(desc:[\s\S]*this\.userEditingLocked && desc\.meta\?\.origin !== 'agent'/);
   assert.match(input, /executeAppliedSnapshot[\s\S]*if \(this\.readOnly\)/);
