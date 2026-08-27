@@ -211,7 +211,7 @@ export function mapSandboxIssue(error: unknown): CloudSetupIssue {
       detail,
     };
   }
-  if (/deployment|deploy/.test(normalized)) {
+  if (/deployment|deploy|reports crashed|reports failed/.test(normalized)) {
     return {
       title: '샌드박스를 시작하지 못했습니다',
       guidance: '잠시 후 다시 시도하세요. 계속 실패하면 내 서버를 사용하세요.',
