@@ -414,7 +414,7 @@ test('한도가 없으면 누적치만 말한다', () => {
 
 test('앱 전용 지시는 에이전트 변경안을 사용자 승인 전까지 분리한다', () => {
   assert.match(settings, /createSection\('지시'\)/);
-  assert.match(settings, /Rauhwpx 채팅에만 적용됩니다/);
+  assert.doesNotMatch(settings, /Rauhwpx 채팅에만 적용됩니다/);
   assert.match(settings, /agent-instructions-draft/);
   assert.match(settings, /bridge\.confirmAgentInstructionsDraft\(draft\)/);
   assert.match(settings, /bridge\.rejectAgentInstructionsDraft\(draft\)/);
