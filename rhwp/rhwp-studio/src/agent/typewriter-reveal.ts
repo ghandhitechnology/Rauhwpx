@@ -12,6 +12,28 @@ export interface AgentTextInsertedEvent {
   agent: AgentName;
   range: DocRange;
   text: string;
+  /** 교체 원문. 있으면 공통 접두/접미는 덮지 않고 추가분만 타자기 공개한다. */
+  oldText?: string;
+}
+
+/** 새 문자열 안에서의 공개 구간. start/end 는 Unicode 스칼라 오프셋. */
+export interface RevealChunk {
+  start: number;
+  end: number;
+  text: string;
+}
+
+/**
+ * 타자기가 덮을 구간. oldText 가 없으면 삽입 전체, 있으면 exact diff 의
+ * 추가/교체 훙크만. 삭제만 있는 훙크는 새 글자가 없으므로 빠진다.
+ *
+ * 현재는 enqueue 와 같이 새 문자열 전체를 한 덩어리로 돌려 기존 동작을 고정한다.
+ * 추가분만 공개하는 동작은 테스트가 먼저 잠근다.
+ */
+export function revealChunksForInsertedText(text: string, _oldText?: string): RevealChunk[] {
+  const end = scalarLen(text);
+  if (end === 0) return [];
+  return [{ start: 0, end, text }];
 }
 
 /** 글자당 공개 시간(ms). 60~80cps 대역 — 사람 타자보다 빠르되 '타이핑'으로 읽힌다. */
