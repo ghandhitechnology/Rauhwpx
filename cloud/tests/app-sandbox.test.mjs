@@ -12,7 +12,7 @@ import { BlobStore } from '../src/blob-store.mjs';
 import { parseConfig } from '../src/config.mjs';
 import { openDatabase } from '../src/database.mjs';
 import { createCloudHttpHandler } from '../src/http-server.mjs';
-import { LocalRunner } from '../src/local-runner.mjs';
+import { LocalRunner, workerEnvironment } from '../src/local-runner.mjs';
 import { SessionStore } from '../src/session-store.mjs';
 
 const BOOTSTRAP_TOKEN = randomBytes(32).toString('base64url');
@@ -135,7 +135,22 @@ test('config gates the local runner and keeps the control socket outside the dat
   assert.equal(local.workerUid, 1001);
   assert.equal(local.workerGid, 1001);
   assert.equal(local.workerControlSocket, '/run/rauhwpx/control.sock');
-  assert.equal(local.workspaceRoot, '/tmp/rauhwpx-data/workspaces');
+  // 데이터 디렉터리는 0700이라 워커 uid가 통과할 수 없다. 작업 디렉터리는 그 밖에 있어야 한다.
+  assert.equal(local.workspaceRoot, '/var/lib/rauhwpx-workspaces');
+  assert.equal(podman.workspaceRoot, '/tmp/rauhwpx-data/workspaces');
+  assert.equal(
+    parseConfig({ ...base, RAUHWpx_RUNNER: 'local', RAUHWpx_WORKER_UID: '1001', RAUHWpx_WORKSPACE_ROOT: '/srv/work' }).workspaceRoot,
+    '/srv/work',
+  );
+  assert.throws(
+    () => parseConfig({
+      ...base,
+      RAUHWpx_RUNNER: 'local',
+      RAUHWpx_WORKER_UID: '1001',
+      RAUHWpx_WORKSPACE_ROOT: '/tmp/rauhwpx-data/workspaces',
+    }),
+    { code: 'CONFIG_INVALID' },
+  );
 
   assert.throws(() => parseConfig({ ...base, RAUHWpx_RUNNER: 'docker' }), { code: 'CONFIG_INVALID' });
   assert.throws(() => parseConfig({ ...base, RAUHWpx_BOOTSTRAP_TOKEN: 'short' }), { code: 'CONFIG_INVALID' });
@@ -200,6 +215,10 @@ test('local runner isolates each session workspace and cleans it up on stop', as
   assert.equal(await fs.readFile(copied, 'utf8'), '{"token":"x"}');
   assert.ok(start.options.env.RAUHWpx_PROVIDER_AUTH.startsWith(path.join(config.workspaceRoot, first)));
 
+  // TMPDIR 이 없으면 mkdtemp 를 쓰는 도구가 전부 실패한다.
+  assert.equal(start.options.env.TMPDIR, path.join(config.workspaceRoot, first, 'tmp'));
+  assert.equal(await fs.access(start.options.env.TMPDIR).then(() => true, () => false), true);
+
   await runner.stop(first);
   assert.equal(start.child.killed, 'SIGTERM');
   assert.equal(await fs.access(path.join(config.workspaceRoot, first)).then(() => true, () => false), false);
@@ -209,6 +228,37 @@ test('local runner isolates each session workspace and cleans it up on stop', as
   await runner.stop('local-missing');
   await runner.stop(second);
   assert.deepEqual(await runner.list(), []);
+});
+
+test('the local worker cannot inherit the control plane environment', () => {
+  const filtered = workerEnvironment({
+    PATH: '/app/bin:/usr/bin',
+    LANG: 'C.UTF-8',
+    HTTPS_PROXY: 'http://proxy.internal',
+    PUPPETEER_EXECUTABLE_PATH: '/usr/bin/chromium',
+    RAUHWpx_STUDIO_DIST: '/app/studio',
+    RAUHWpx_BOOTSTRAP_TOKEN: BOOTSTRAP_TOKEN,
+    RAUHWpx_PROVIDER_KEY_CODEX: 'operator-openai-key',
+    RAILWAY_TOKEN: 'railway-secret',
+    RAUHWpx_DATA_DIR: '/var/lib/rauhwpx-cloud',
+    NODE_OPTIONS: '--require=/tmp/inject.cjs',
+  }, { RAUHWpx_SESSION_ID: 'session-one', RAUHWpx_WORKER_TOKEN: 'ra_wt_first' });
+
+  // 워커와 provider CLI 는 같은 uid 로 돈다. 워커 환경에 남은 비밀은 에이전트가 읽을 수 있다.
+  assert.equal(filtered.RAUHWpx_BOOTSTRAP_TOKEN, undefined);
+  assert.equal(filtered.RAUHWpx_PROVIDER_KEY_CODEX, undefined);
+  assert.equal(filtered.RAILWAY_TOKEN, undefined);
+  assert.equal(filtered.RAUHWpx_DATA_DIR, undefined);
+  assert.equal(filtered.NODE_OPTIONS, undefined);
+  assert.deepEqual(filtered, {
+    PATH: '/app/bin:/usr/bin',
+    LANG: 'C.UTF-8',
+    HTTPS_PROXY: 'http://proxy.internal',
+    PUPPETEER_EXECUTABLE_PATH: '/usr/bin/chromium',
+    RAUHWpx_STUDIO_DIST: '/app/studio',
+    RAUHWpx_SESSION_ID: 'session-one',
+    RAUHWpx_WORKER_TOKEN: 'ra_wt_first',
+  });
 });
 
 test('local runner reports a failed spawn instead of attaching a dead sandbox', async (t) => {
@@ -241,6 +291,8 @@ test('the app sandbox image runs the control plane with the local runner and a b
   assert.match(containerfile, /RAUHWpx_RUNNER=local/);
   assert.match(containerfile, /RAUHWpx_WORKER_UID=1001/);
   assert.match(containerfile, /RAUHWpx_WORKER_CONTROL_DIR=\/run\/rauhwpx/);
+  assert.match(containerfile, /RAUHWpx_WORKSPACE_ROOT=\/var\/lib\/rauhwpx-workspaces/);
+  assert.match(containerfile, /chmod 0711 \/run\/rauhwpx \/var\/lib\/rauhwpx-workspaces/);
   assert.match(containerfile, /COPY src \/app\/src/);
   assert.match(containerfile, /COPY worker \/app\/worker/);
   assert.match(containerfile, /COPY document-runtime \/app\/document-runtime/);
@@ -253,6 +305,8 @@ test('the app sandbox image runs the control plane with the local runner and a b
   assert.match(entrypoint, /exec node "\$CLOUD_ROOT\/src\/main\.mjs"/);
   assert.match(entrypoint, /export RAUHWpx_PORT="\$PORT"/);
   assert.match(entrypoint, /provider login "\$provider" --api-key-stdin/);
+  assert.match(entrypoint, /chmod 0700 "\$DATA_DIR"/);
+  assert.match(entrypoint, /chmod 0711 "\$CONTROL_DIR" "\$WORKSPACE_ROOT"/);
   // 자격 증명은 stdin으로만 넘긴다. 명령줄 인자는 컨테이너 안에서 ps로 보인다.
   assert.doesNotMatch(entrypoint, /--api-key[= ]\$/);
 

@@ -6,6 +6,49 @@ import { CloudError } from './protocol.mjs';
 
 const STOP_GRACE_MS = 5_000;
 
+/** 워커가 이미지에서 받아야 하는 실행 경로. 값은 비밀이 아니고 경로뿐이다. */
+const WORKER_RUNTIME_ENV = Object.freeze([
+  'PUPPETEER_EXECUTABLE_PATH',
+  'RAUHWpx_AGENT_ROOT',
+  'RAUHWpx_DOCUMENT_RUNTIME',
+  'RAUHWpx_PI_PREFIX',
+  'RAUHWpx_PROVIDER_CLI_PREFIX',
+  'RAUHWpx_STUDIO_DIST',
+  'RHWP_BIN',
+]);
+
+const WORKER_BASE_ENV = Object.freeze([
+  'ALL_PROXY',
+  'HTTPS_PROXY',
+  'HTTP_PROXY',
+  'LANG',
+  'LANGUAGE',
+  'LC_ALL',
+  'NODE_EXTRA_CA_CERTS',
+  'NO_PROXY',
+  'PATH',
+  'SSL_CERT_DIR',
+  'SSL_CERT_FILE',
+  'TZ',
+  'all_proxy',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+]);
+
+/**
+ * Podman 실행에서는 워커 컨테이너가 컨트롤 플레인 환경을 물려받지 않는다. local 실행도 같아야 한다.
+ * 워커와 provider CLI는 같은 uid로 돌기 때문에 워커 환경에 남은 비밀은 에이전트가 읽을 수 있다.
+ */
+export function workerEnvironment(environment, session) {
+  const result = {};
+  for (const name of [...WORKER_BASE_ENV, ...WORKER_RUNTIME_ENV]) {
+    const value = environment?.[name];
+    if (typeof value === 'string' && value) result[name] = value;
+  }
+  return { ...result, ...session };
+}
+
 async function chownTree(root, uid, gid) {
   await fs.chown(root, uid, gid);
   for (const entry of await fs.readdir(root, { withFileTypes: true })) {
@@ -49,6 +92,8 @@ export class LocalRunner {
     // 워커는 컨트롤 플레인의 데이터 디렉터리를 지날 수 없다. 세션마다 자격 증명 사본을 준다.
     const providerAuth = path.join(workspace, 'provider-auth');
     await fs.cp(source, providerAuth, { recursive: true, force: true });
+    // TMPDIR 은 워크스페이스 안이라 세션과 함께 사라진다. 없으면 mkdtemp 를 쓰는 도구가 전부 실패한다.
+    await fs.mkdir(path.join(workspace, 'tmp'), { recursive: true, mode: 0o700 });
     const { workerUid, workerGid } = this.config;
     if (workerUid !== null) {
       await chownTree(workspace, workerUid, workerGid ?? workerUid);
@@ -60,8 +105,7 @@ export class LocalRunner {
       detached: true,
       stdio: ['ignore', 'ignore', 'pipe'],
       ...(workerUid === null ? {} : { uid: workerUid, gid: workerGid ?? workerUid }),
-      env: {
-        ...process.env,
+      env: workerEnvironment(process.env, {
         HOME: home,
         CODEX_HOME: path.join(home, '.codex'),
         GROK_HOME: path.join(home, '.grok'),
@@ -73,7 +117,7 @@ export class LocalRunner {
         RAUHWpx_CONTROL_SOCKET: controlSocket,
         RAUHWpx_WORKSPACE: workspace,
         RAUHWpx_PROVIDER_AUTH: providerAuth,
-      },
+      }),
     });
     const entry = { sessionId: session.id, child, workspace, running: true };
     this.children.set(sandboxId, entry);
