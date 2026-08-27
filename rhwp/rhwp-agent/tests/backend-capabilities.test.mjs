@@ -238,7 +238,7 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(planning, /cannot change it/);
   assert.match(planning, /defer submitting the update until implementation mode/);
   assert.doesNotMatch(planning, /update_agent_instructions/);
-  assert.match(planning, /planning and brainstorming mode/);
+  assert.match(planning, /planning mode/);
   assert.match(planning, /Do not edit the local filesystem or live document/);
   assert.match(planning, /The user can keep editing the live document during planning/);
   assert.match(planning, /live-document notification/);

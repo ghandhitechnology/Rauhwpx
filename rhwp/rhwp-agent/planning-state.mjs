@@ -169,7 +169,13 @@ export function authorizeToolCall(input) {
     throw workflowError('PLAN_WORKFLOW_REQUIRED', `${input.tool} is available only to chats that originated in the plan or question workflow`);
   }
   if (input.workflow === 'question') {
-    if (input.category === 'document-write' || input.category === 'instruction-write') {
+    if (
+      input.category === 'document-write'
+      || input.category === 'instruction-write'
+      || input.category === 'artifact-write'
+      || input.category === 'background-control'
+      || input.category === 'background-worker'
+    ) {
       throw workflowError('QUESTION_WRITE_BLOCKED', 'Writes are blocked in question mode');
     }
     return true;

@@ -171,6 +171,16 @@ test('question mode can research but never write or present a plan', () => {
     category: 'planning-control', tool: 'present_implementation_plan', workflow: 'question', phase: 'questioning',
     expectedEpoch: 7, receivedEpoch: 7,
   }), (error) => error.code === 'PLAN_WORKFLOW_REQUIRED');
+  for (const [category, tool] of [
+    ['artifact-write', 'publish_artifact'],
+    ['background-control', 'delegate_copy_layout'],
+    ['background-worker', 'update_copy_layout_job'],
+  ]) {
+    assert.throws(() => authorizeToolCall({
+      category, tool, workflow: 'question', phase: 'questioning',
+      expectedEpoch: 7, receivedEpoch: 7,
+    }), (error) => error.code === 'QUESTION_WRITE_BLOCKED');
+  }
 });
 
 test('approved execution prompt contains only the authoritative plan record', () => {
