@@ -17,6 +17,7 @@ import {
 } from '../../agent/agent-prefs.ts';
 import { createIcon } from './icons.ts';
 import { createEditingSettings } from './settings-editing.ts';
+import { userSettings } from '../../core/user-settings.ts';
 import type {
   DirtyExitChoice,
   EditorSettingsRuntime,
@@ -174,6 +175,27 @@ function formatUsd(value: number): string {
   if (value < 0.01) return `$${value.toFixed(4)}`;
   if (value < 1) return `$${value.toFixed(3)}`;
   return `$${value.toFixed(2)}`;
+}
+
+function createToggleRow(
+  label: string,
+  description?: string,
+): { root: HTMLLabelElement; input: HTMLInputElement } {
+  const root = el('label', 'ag-settings-control-row ag-settings-toggle-row');
+  const copy = el('span', 'ag-settings-control-copy');
+  copy.append(el('span', 'ag-settings-control-label', label));
+  if (description) {
+    copy.append(el('span', 'ag-settings-control-description', description));
+  }
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.className = 'ag-settings-toggle-input';
+  input.setAttribute('role', 'switch');
+  input.setAttribute('aria-label', label);
+  const track = el('span', 'ag-settings-toggle-track');
+  track.setAttribute('aria-hidden', 'true');
+  root.append(copy, input, track);
+  return { root, input };
 }
 
 function createSection(title: string): { root: HTMLElement; body: HTMLElement } {
@@ -913,6 +935,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const instructionsReload = el('button', 'ag-settings-btn', '다시 불러오기');
   instructionsReload.type = 'button';
   instructionsActions.append(instructionsReload);
+  const hancomGit = createToggleRow('한컴용 Git 사용하기 (beta)');
+  hancomGit.input.checked = userSettings.getUseHancomGit();
+  hancomGit.input.addEventListener('change', () => {
+    userSettings.setUseHancomGit(hancomGit.input.checked);
+  });
+  const unsubscribeHancomGit = userSettings.subscribeUseHancomGit((enabled) => {
+    hancomGit.input.checked = enabled;
+  });
   instructionsSection.body.append(
     instructionsNote,
     instructionsProposal,
@@ -920,6 +950,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     instructionsMeta,
     instructionsStatus,
     instructionsActions,
+    hancomGit.root,
   );
 
   instructionsEditor.addEventListener('input', () => {
@@ -2572,8 +2603,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     instructionsEditor.disabled = instructionsBusy || !agentInstructions;
     instructionsReload.disabled = instructionsBusy || connectionState !== 'connected';
     instructionsMeta.textContent = agentInstructions
-      ? `AGENTS.md · r${agentInstructions.revision} · ${instructionsEditor.value.length.toLocaleString()} / ${maxChars.toLocaleString()}자`
-      : 'AGENTS.md · 연결 후 불러옵니다.';
+      ? `${instructionsEditor.value.length.toLocaleString()} / ${maxChars.toLocaleString()}자`
+      : '연결 후 불러옵니다.';
     instructionsStatus.textContent = instructionsMessage;
     instructionsStatus.hidden = !instructionsMessage;
     const proposal = pendingAgentInstructionsDraft;
@@ -2918,6 +2949,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       }
       if (setupProgressCreepTimer) clearInterval(setupProgressCreepTimer);
       if (piProgressCreepTimer) clearInterval(piProgressCreepTimer);
+      unsubscribeHancomGit();
       editingSettings.dispose();
       element.remove();
       setupOverlay.remove();

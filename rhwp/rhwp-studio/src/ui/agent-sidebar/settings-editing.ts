@@ -378,14 +378,6 @@ export function createEditingSettings(options: {
     draft.autosave.idleDelaySeconds = Number(idleDelay.input.value);
     renderDirty();
   });
-  const documentGroup = group('문서 자원');
-  const versionControl = toggleRow('한컴용 Git 사용하기', '기본 문서 이력 대신 브랜치 기반 버전 관리를 사용합니다.');
-  documentGroup.body.append(versionControl.root);
-  versionControl.input.addEventListener('change', () => {
-    draft.versionControl.useHancomGit = versionControl.input.checked;
-    render();
-  });
-
   const status = el('p', 'ag-settings-apply-status');
   status.hidden = true;
   status.setAttribute('role', 'status');
@@ -396,7 +388,7 @@ export function createEditingSettings(options: {
   apply.type = 'button';
   footer.append(status, cancel, apply);
 
-  element.append(conflict, appearance.root, fonts.root, files.root, documentGroup.root, footer);
+  element.append(conflict, appearance.root, fonts.root, files.root, footer);
 
   function isDirty(): boolean {
     return !editorDraftEquals(normalizeEditorDraft(draft), normalizeEditorDraft(baseline));
@@ -428,7 +420,6 @@ export function createEditingSettings(options: {
     idleSave.input.checked = draft.autosave.idleSaveEnabled;
     idleDelay.input.value = String(draft.autosave.idleDelaySeconds);
     idleDelay.input.disabled = !draft.autosave.idleSaveEnabled;
-    versionControl.input.checked = draft.versionControl.useHancomGit;
     renderDirty();
   }
 
@@ -440,6 +431,7 @@ export function createEditingSettings(options: {
 
   function applyDraft(): boolean {
     const next = normalizeEditorDraft(draft);
+    next.versionControl.useHancomGit = userSettings.getUseHancomGit();
     const result = userSettings.tryApplyEditorScalarSettings(next);
     if (!result.ok) {
       status.textContent = `설정을 저장하지 못했습니다 · ${result.error}`;
