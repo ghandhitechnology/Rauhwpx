@@ -195,7 +195,7 @@ export function createEditingSettings(options: {
     render();
   });
 
-  const fonts = group('글꼴', '최근 글꼴, 대표 글꼴, 이 기기의 로컬 글꼴을 관리합니다.');
+  const fonts = group('글꼴');
   const recentFonts = toggleRow('최근 사용 글꼴 보이기', '글꼴 메뉴에 직접 적용한 글꼴을 최신순으로 표시합니다.');
   const recentCount = numberRow('표시 개수', '최근 글꼴 목록에 표시할 개수입니다.', 1, 5, '개');
   const fontSets = el('div', 'ag-settings-disclosure');
