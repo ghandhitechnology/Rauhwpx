@@ -1,10 +1,13 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { normalizeCloudProfile } from './cloud-profile.mjs';
+import { CLOUD_SERVER_MODES, normalizeCloudEndpoint, normalizeCloudProfile } from './cloud-profile.mjs';
 
 const PROFILE_SECRET = 'cloud.profile';
 const REFRESH_SECRET = 'cloud.refresh';
 const DEVICE_SECRET = 'cloud.device';
+const SERVER_MODE_SECRET = 'cloud.server-mode';
+const PAIRING_CODE_RE = /^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
+const SERVER_KEY_RE = /^ed25519:[A-Za-z0-9_-]{59}$/;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_RESULT_BYTES = 64 * 1024 * 1024;
 const MAX_TIMELINE_BYTES = 100 * 1024 * 1024;
@@ -308,6 +311,84 @@ export class CloudClient {
 
   async isPaired() {
     return Boolean(await this.#vault.get(REFRESH_SECRET));
+  }
+
+  /** 사용자가 마지막으로 고른 서버 방식을 기억해 다음 설정을 그 화면에서 시작한다. */
+  async loadServerMode() {
+    const stored = await this.#vault.get(SERVER_MODE_SECRET).catch(() => null);
+    return CLOUD_SERVER_MODES.includes(stored) ? stored : null;
+  }
+
+  async saveServerMode(mode) {
+    if (!CLOUD_SERVER_MODES.includes(mode)) throw new CloudHttpError('Unsupported cloud server mode');
+    await this.#vault.set(SERVER_MODE_SECRET, mode);
+    return mode;
+  }
+
+  /** 샌드박스를 철거할 때 프로필과 자격 증명을 함께 지운다. */
+  async forgetProfile() {
+    return this.#withCredentialLock(async () => {
+      this.#profileGeneration += 1;
+      try {
+        this.#profile = null;
+        this.#accessToken = '';
+        this.#accessExpiresAt = 0;
+        await Promise.all([
+          this.#vault.delete(PROFILE_SECRET).catch(() => false),
+          this.#vault.delete(REFRESH_SECRET).catch(() => false),
+          this.#vault.delete(DEVICE_SECRET).catch(() => false),
+        ]);
+        return true;
+      } finally {
+        this.#profileGeneration += 1;
+      }
+    });
+  }
+
+  /** 핀 없는 엔드포인트의 health를 읽어 샌드박스가 살아났는지 확인한다. */
+  async probeEndpointHealth(endpoint, { signal } = {}) {
+    return this.#request('/v1/health', {
+      auth: false,
+      profile: { endpoint: normalizeCloudEndpoint(endpoint), serverPublicKey: '' },
+      timeoutMs: 10_000,
+      signal,
+    });
+  }
+
+  /**
+   * SSH가 없는 앱 제공 샌드박스는 배포 시 주입한 부트스트랩 토큰으로 첫 페어링 코드를 받는다.
+   * 응답은 방금 만든 nonce에 묶인 서버 서명으로 검증하므로 재생된 영수증은 통과하지 못한다.
+   */
+  async bootstrapPairing({ endpoint, bootstrapToken, deviceName = '', serverPublicKey, signal } = {}) {
+    const normalizedEndpoint = normalizeCloudEndpoint(endpoint);
+    if (!SERVER_KEY_RE.test(String(serverPublicKey ?? ''))) {
+      throw new CloudHttpError('App sandbox did not present a valid server identity', {
+        code: 'SERVER_IDENTITY_INVALID',
+      });
+    }
+    if (!/^[A-Za-z0-9_-]{32,256}$/.test(String(bootstrapToken ?? ''))) {
+      throw new CloudHttpError('App sandbox bootstrap token is invalid', { code: 'BOOTSTRAP_TOKEN_INVALID' });
+    }
+    const profile = { endpoint: normalizedEndpoint, serverPublicKey };
+    const result = await this.#request('/v1/pairing/bootstrap', {
+      method: 'POST',
+      auth: false,
+      profile,
+      headers: { authorization: `Bearer ${bootstrapToken}` },
+      body: { deviceName: String(deviceName ?? '').slice(0, 120) },
+      signal,
+    });
+    if (result.serverPublicKey !== serverPublicKey) {
+      throw new CloudHttpError('App sandbox identity changed during pairing', {
+        code: 'SERVER_IDENTITY_MISMATCH',
+      });
+    }
+    if (!PAIRING_CODE_RE.test(String(result.code ?? ''))) {
+      throw new CloudHttpError('App sandbox returned an invalid pairing code', {
+        code: 'BOOTSTRAP_RECEIPT_INVALID',
+      });
+    }
+    return { endpoint: normalizedEndpoint, serverPublicKey, pairingCode: result.code };
   }
 
   async deviceId() {
