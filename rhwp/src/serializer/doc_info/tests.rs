@@ -837,6 +837,6 @@ fn surgical_update_section_count_patches_only_the_count_field() {
 
 #[test]
 fn surgical_update_section_count_rejects_stream_without_doc_properties() {
-    let err = surgical_update_section_count(&mut vec![0, 1, 2, 3], 1).unwrap_err();
+    let err = surgical_update_section_count(&mut [0, 1, 2, 3], 1).unwrap_err();
     assert!(err.contains("DOCUMENT_PROPERTIES"));
 }
