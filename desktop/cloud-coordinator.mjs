@@ -3,8 +3,21 @@ import { readFile, rm } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { AppServerError, createAppServerRegistry } from './cloud-app-server.mjs';
 import { normalizeCloudProfile, normalizeTailscaleHttpsPort } from './cloud-profile.mjs';
 import { sha256Hex, writeVerifiedRecoveryFile } from './cloud-handoff.mjs';
+
+/** 샌드박스를 철거하면 사라지는 작업 상태. 사용자가 먼저 정리해야 한다. */
+const LIVE_HANDOFF_STATES = Object.freeze([
+  'preparing',
+  'uploading',
+  'committing',
+  'queued',
+  'running',
+  'suspended',
+  'completed',
+  'downloading',
+]);
 
 function uiProfileToStored(input, current = null) {
   const source = input?.profile ?? input ?? {};
@@ -107,16 +120,31 @@ export class CloudCoordinator extends EventEmitter {
   #remoteSessions = new Map();
   #snapshotChain = Promise.resolve();
   #revision = 0;
+  #appServers;
+  #sandboxLifecycle = 'idle';
+  #sandboxMessage = null;
+  #spawnPromise = null;
+  #teardownPromise = null;
+  #preferredMode = null;
 
-  constructor({ client, store, provisioner, recoveryDir }) {
+  constructor({ client, store, provisioner, recoveryDir, appServers = [] }) {
     super();
     this.#client = client;
     this.#store = store;
     this.#provisioner = provisioner;
     this.#recoveryDir = recoveryDir;
+    this.#appServers = Array.isArray(appServers) ? createAppServerRegistry(appServers) : appServers;
   }
 
   async start() {
+    this.#preferredMode = await this.#client.loadServerMode?.().catch(() => null) ?? null;
+    const profile = await this.#client.loadProfile().catch(() => null);
+    if (profile?.mode === 'app-hosted') {
+      this.#sandboxLifecycle = await this.#client.isPaired().catch(() => false) ? 'ready' : 'error';
+      this.#sandboxMessage = this.#sandboxLifecycle === 'error'
+        ? 'This app sandbox is not paired with this device.'
+        : null;
+    }
     const records = await this.#store.load();
     for (const record of records) {
       if (record.resolvedAt && record.recoveryCleanupPath) {
@@ -202,30 +230,51 @@ export class CloudCoordinator extends EventEmitter {
       const publicSession = this.#publicSession(record);
       if (publicSession.kind !== 'idle') publicSessionsById.set(publicSession.sessionId, publicSession);
     }
-    const profileState = profile ? {
-      kind: 'configured',
-      profile: {
-        name: profile.name,
-        host: profile.ssh.host,
-        sshUser: profile.ssh.user,
-        sshPort: profile.ssh.port,
-        tailscaleHttpsPort: profile.tailscaleHttpsPort,
-        auth: profile.ssh.keyPath
-          ? { kind: 'key-file', keyPath: profile.ssh.keyPath }
-          : { kind: 'ssh-agent' },
-        transport: profile.transport === 'tailscale'
-          ? { kind: 'tailscale' }
-          : { kind: 'https', endpoint: profile.endpoint },
-        serverPublicKey: profile.serverPublicKey || undefined,
-      },
-      connection: profileConnection ?? (paired ? 'ready' : 'unknown'),
-      serviceVersion: null,
-      message: profileMessage,
-    } : { kind: 'unconfigured' };
+    const connection = profileConnection ?? (paired ? 'ready' : 'unknown');
+    const profileState = !profile
+      ? { kind: 'unconfigured' }
+      : profile.mode === 'app-hosted'
+        ? {
+            kind: 'configured',
+            mode: 'app-hosted',
+            name: profile.name,
+            sandbox: this.#publicSandbox(profile.sandbox),
+            connection,
+            serviceVersion: null,
+            message: profileMessage,
+          }
+        : {
+            kind: 'configured',
+            mode: 'self-hosted',
+            profile: {
+              name: profile.name,
+              host: profile.ssh.host,
+              sshUser: profile.ssh.user,
+              sshPort: profile.ssh.port,
+              tailscaleHttpsPort: profile.tailscaleHttpsPort,
+              auth: profile.ssh.keyPath
+                ? { kind: 'key-file', keyPath: profile.ssh.keyPath }
+                : { kind: 'ssh-agent' },
+              transport: profile.transport === 'tailscale'
+                ? { kind: 'tailscale' }
+                : { kind: 'https', endpoint: profile.endpoint },
+              serverPublicKey: profile.serverPublicKey || undefined,
+            },
+            connection,
+            serviceVersion: null,
+            message: profileMessage,
+          };
     return {
       revision: ++this.#revision,
       available: true,
       profile: profileState,
+      server: {
+        mode: profile?.mode ?? null,
+        preferredMode: this.#preferredMode,
+        providers: this.#appServers.list(),
+        lifecycle: this.#sandboxLifecycle,
+        message: this.#sandboxMessage,
+      },
       lease: selected && !selected.resolvedAt && (selected === localMatch || !scoped) && !['failed', 'cancelled', 'expired'].includes(selected.state)
         ? { owner: 'cloud', sessionId: selected.cloudSessionId ?? selected.id, acquiredAt: selected.createdAt }
         : { owner: 'local' },
@@ -271,10 +320,27 @@ export class CloudCoordinator extends EventEmitter {
     return this.snapshot(options);
   }
 
+  /** 앱 샌드박스를 먼저 철거하지 않으면 유료 자원이 주인 없이 남는다. */
+  #assertNotReplacingSandbox(current, next) {
+    if (current?.mode === 'app-hosted' && next.mode !== 'app-hosted') {
+      throw new AppServerError(
+        'Shut down the app-provided sandbox before connecting your own server.',
+        { code: 'SANDBOX_STILL_ACTIVE', retryable: false },
+      );
+    }
+  }
+
+  async #adoptSelfHostedMode() {
+    this.#preferredMode = await this.#client.saveServerMode('self-hosted').catch(() => this.#preferredMode);
+    this.#setSandboxLifecycle('idle');
+  }
+
   async saveProfile(input) {
     const current = await this.#client.loadProfile().catch(() => null);
     const profile = uiProfileToStored(input, current);
+    this.#assertNotReplacingSandbox(current, profile);
     await this.#client.saveProfile(profile);
+    await this.#adoptSelfHostedMode();
     return this.snapshot();
   }
 
@@ -282,6 +348,9 @@ export class CloudCoordinator extends EventEmitter {
     const current = await this.#client.loadProfile().catch(() => null);
     const profile = input?.profile ? uiProfileToStored(input, current) : current;
     if (!profile) throw new Error('Cloud VPS is not configured');
+    if (profile.mode !== 'self-hosted') {
+      throw new Error('This connection uses an app-provided sandbox, which has no SSH check');
+    }
     const preflight = await this.#provisioner.preflight(profile.ssh, {
       onLine: (line) => this.#emit({ type: 'provision-log', line }),
     });
@@ -300,6 +369,10 @@ export class CloudCoordinator extends EventEmitter {
     const current = await this.#client.loadProfile().catch(() => null);
     const profile = profileDraft ? uiProfileToStored(profileDraft, current) : current;
     if (!profile) throw new Error('Provide a VPS profile before provisioning');
+    if (profile.mode !== 'self-hosted') {
+      throw new Error('App-provided sandboxes are created by the app, not installed over SSH');
+    }
+    this.#assertNotReplacingSandbox(current, profile);
     this.#emit({ type: 'provision-started' });
     const receipt = await this.#provisioner.provision(profile.ssh, {
       channel: installChannel,
@@ -341,9 +414,198 @@ export class CloudCoordinator extends EventEmitter {
       tokens: credentials,
       device: credentials.device,
     } : { preserveCredentials });
+    await this.#adoptSelfHostedMode();
     const snapshot = await this.snapshot({ extra: { provision: { ok: true, receipt, health } } });
     this.#emit({ type: 'provision-completed', snapshot });
     return snapshot;
+  }
+
+  #publicSandbox(sandbox) {
+    const descriptor = sandbox && this.#appServers.has(sandbox.providerId)
+      ? this.#appServers.describe(sandbox.providerId)
+      : null;
+    return {
+      providerId: sandbox.providerId,
+      sandboxId: sandbox.sandboxId,
+      displayName: descriptor?.displayName ?? sandbox.providerId,
+      region: sandbox.region,
+      host: sandbox.host,
+      createdAt: sandbox.createdAt,
+    };
+  }
+
+  #setSandboxLifecycle(lifecycle, message = null) {
+    this.#sandboxLifecycle = lifecycle;
+    this.#sandboxMessage = message;
+  }
+
+  async selectServerMode(mode) {
+    this.#preferredMode = await this.#client.saveServerMode(mode);
+    return this.snapshot();
+  }
+
+  #appServerFor(providerId) {
+    if (!this.#appServers.size) {
+      throw new AppServerError('This build does not include app-provided servers', {
+        code: 'PROVIDER_UNAVAILABLE',
+        retryable: false,
+      });
+    }
+    const provider = providerId ? this.#appServers.get(providerId) : this.#appServers.preferred();
+    const configuration = provider.configuration();
+    if (configuration.configured !== true) {
+      throw new AppServerError(
+        `App-provided servers are not configured on this build: ${(configuration.missing ?? []).join(', ')}`,
+        { code: 'PROVIDER_NOT_CONFIGURED', retryable: false },
+      );
+    }
+    return provider;
+  }
+
+  /** 동시 요청은 진행 중인 생성 작업을 공유해 유료 샌드박스를 중복 생성하지 않는다. */
+  spawnAppServer(options = {}) {
+    if (this.#spawnPromise) return this.#spawnPromise;
+    if (this.#teardownPromise) {
+      return Promise.reject(new AppServerError('An app sandbox is being torn down. Try again once it finishes.', {
+        code: 'SANDBOX_BUSY',
+      }));
+    }
+    const operation = this.#spawnAppServer(options);
+    this.#spawnPromise = operation;
+    return operation.finally(() => {
+      if (this.#spawnPromise === operation) this.#spawnPromise = null;
+    });
+  }
+
+  async #spawnAppServer({ providerId = null, deviceName = hostname() } = {}) {
+    const current = await this.#client.loadProfile().catch(() => null);
+    if (current?.mode === 'app-hosted' && await this.#client.isPaired().catch(() => false)) {
+      this.#setSandboxLifecycle('ready');
+      this.#preferredMode = await this.#client.saveServerMode('app-hosted').catch(() => 'app-hosted');
+      return this.snapshot({ extra: { sandbox: { ok: true, reused: true } } });
+    }
+    const provider = this.#appServerFor(providerId);
+    this.#setSandboxLifecycle('provisioning', 'Starting an app-provided sandbox.');
+    this.#emit({ type: 'sandbox-provision-started', providerId: provider.id });
+    let spawned = null;
+    try {
+      spawned = await provider.spawn({
+        deviceName,
+        limits: current?.limits,
+        onLine: (line) => this.#emit({ type: 'provision-log', line }),
+      });
+      const profile = normalizeCloudProfile({
+        mode: 'app-hosted',
+        name: provider.displayName,
+        endpoint: spawned.receipt.endpoint,
+        serverPublicKey: spawned.receipt.serverPublicKey,
+        sandbox: spawned.sandbox,
+        provider: current?.provider ?? 'codex',
+        limits: current?.limits,
+      });
+      const pairing = await this.#client.redeemPairingCode(spawned.receipt.pairingCode, deviceName, {
+        profile,
+        persist: false,
+      });
+      const health = await this.#client.health(profile);
+      if (health.ok !== true || health.serverPublicKey !== spawned.receipt.serverPublicKey) {
+        throw new AppServerError('App sandbox failed identity verification', {
+          code: 'SANDBOX_IDENTITY_MISMATCH',
+          retryable: false,
+        });
+      }
+      await this.#client.activateProfile(profile, {
+        tokens: pairing.credentials,
+        device: pairing.credentials.device,
+      });
+      this.#preferredMode = await this.#client.saveServerMode('app-hosted').catch(() => 'app-hosted');
+      this.#setSandboxLifecycle('ready');
+      const snapshot = await this.snapshot({ extra: { sandbox: { ok: true, reused: false } } });
+      this.#emit({ type: 'sandbox-ready', providerId: provider.id, snapshot });
+      return snapshot;
+    } catch (error) {
+      if (spawned?.sandbox) {
+        await provider.teardown(spawned.sandbox).catch((cleanupError) => {
+          this.#emit({ type: 'sandbox-cleanup-failed', providerId: provider.id, error: cleanupError.message });
+        });
+      }
+      this.#setSandboxLifecycle('error', error.message);
+      this.#emit({
+        type: 'sandbox-provision-failed',
+        providerId: provider.id,
+        error: error.message,
+        snapshot: await this.snapshot(),
+      });
+      throw error;
+    }
+  }
+
+  async appServerStatus() {
+    const profile = await this.#client.loadProfile().catch(() => null);
+    if (profile?.mode !== 'app-hosted') {
+      if (this.#sandboxLifecycle !== 'provisioning' && this.#sandboxLifecycle !== 'tearing-down') {
+        this.#setSandboxLifecycle('idle');
+      }
+      return this.snapshot();
+    }
+    const provider = this.#appServers.get(profile.sandbox.providerId);
+    try {
+      const status = await provider.status(profile.sandbox);
+      this.#setSandboxLifecycle(status.lifecycle, status.message ?? null);
+      return this.snapshot({ extra: { sandbox: { ok: true, status: status.status ?? null } } });
+    } catch (error) {
+      this.#setSandboxLifecycle('error', error.message);
+      return this.snapshot({ profileConnection: 'error', profileMessage: error.message });
+    }
+  }
+
+  /** 이미 사라진 샌드박스도 같은 결과를 돌려준다. */
+  teardownAppServer(options = {}) {
+    if (this.#teardownPromise) return this.#teardownPromise;
+    if (this.#spawnPromise) {
+      return Promise.reject(new AppServerError('An app sandbox is still being created. Try again once it finishes.', {
+        code: 'SANDBOX_BUSY',
+      }));
+    }
+    const operation = this.#teardownAppServer(options);
+    this.#teardownPromise = operation;
+    return operation.finally(() => {
+      if (this.#teardownPromise === operation) this.#teardownPromise = null;
+    });
+  }
+
+  async #teardownAppServer({ force = false } = {}) {
+    const profile = await this.#client.loadProfile().catch(() => null);
+    if (profile?.mode !== 'app-hosted') {
+      this.#setSandboxLifecycle('idle');
+      return this.snapshot({ extra: { sandbox: { ok: true, removed: false } } });
+    }
+    if (!force) {
+      const live = (await this.#store.list()).filter((record) => (
+        !record.resolvedAt && LIVE_HANDOFF_STATES.includes(record.state)
+      ));
+      if (live.length) {
+        throw new AppServerError(
+          'Finish or cancel the cloud work on this sandbox before shutting it down.',
+          { code: 'SANDBOX_HAS_WORK', retryable: false },
+        );
+      }
+    }
+    const provider = this.#appServers.get(profile.sandbox.providerId);
+    this.#setSandboxLifecycle('tearing-down', 'Shutting down the app sandbox.');
+    this.#emit({ type: 'sandbox-teardown-started', providerId: provider.id });
+    try {
+      const result = await provider.teardown(profile.sandbox);
+      await this.#client.forgetProfile();
+      this.#setSandboxLifecycle('idle');
+      const snapshot = await this.snapshot({ extra: { sandbox: { ok: true, removed: result.removed === true } } });
+      this.#emit({ type: 'sandbox-torn-down', providerId: provider.id, snapshot });
+      return snapshot;
+    } catch (error) {
+      this.#setSandboxLifecycle('error', error.message);
+      this.#emit({ type: 'sandbox-teardown-failed', providerId: provider.id, error: error.message });
+      throw error;
+    }
   }
 
   async pair({ code, profile: profileDraft } = {}) {
@@ -352,6 +614,7 @@ export class CloudCoordinator extends EventEmitter {
     if (!profile?.serverPublicKey) {
       throw new Error('Enter the VPS server identity key before pairing this device');
     }
+    this.#assertNotReplacingSandbox(current, profile);
     const pairing = await this.#client.redeemPairingCode(code, hostname(), {
       profile,
       persist: false,
@@ -364,6 +627,8 @@ export class CloudCoordinator extends EventEmitter {
       tokens: pairing.credentials,
       device: pairing.credentials.device,
     });
+    if (profile.mode === 'self-hosted') await this.#adoptSelfHostedMode();
+    else this.#setSandboxLifecycle('ready');
     const snapshot = await this.snapshot();
     this.#emit({ type: 'paired', snapshot });
     return snapshot;

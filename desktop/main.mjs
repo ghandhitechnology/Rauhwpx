@@ -55,6 +55,7 @@ import { CloudClient } from './cloud-client.mjs';
 import { CloudCoordinator } from './cloud-coordinator.mjs';
 import { CloudHandoffStore } from './cloud-handoff.mjs';
 import { CloudProvisioner } from './cloud-provisioner.mjs';
+import { createRailwayServerProvider } from './cloud-railway.mjs';
 import { applyCloudRecovery } from './cloud-result.mjs';
 import { isNewerStableVersion, selectDebAsset } from './update-policy.mjs';
 import { deliverPlainTextPaste } from './plain-text-paste.mjs';
@@ -1032,6 +1033,26 @@ ipcMain.handle('cloud:pair', async (event, payload) => {
   const session = sessionForEvent(event);
   return scopedCloudSnapshot(session, await requireCloudCoordinator().pair(payload));
 });
+ipcMain.handle('cloud:select-server-mode', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().selectServerMode(payload?.mode));
+});
+ipcMain.handle('cloud:spawn-sandbox', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().spawnAppServer({
+    providerId: payload?.providerId ?? null,
+  }));
+});
+ipcMain.handle('cloud:sandbox-status', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().appServerStatus());
+});
+ipcMain.handle('cloud:teardown-sandbox', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().teardownAppServer({
+    force: payload?.force === true,
+  }));
+});
 ipcMain.handle('cloud:transfer-intent', async (event, payload = {}) => {
   const session = sessionForEvent(event);
   const scope = normalizeCloudScope(payload);
@@ -1294,6 +1315,11 @@ if (!hasSingleInstanceLock) {
         knownHostsPath: join(app.getPath('userData'), 'cloud', 'ssh-known-hosts'),
       }),
       recoveryDir: join(app.getPath('userData'), 'cloud', 'recovery'),
+      appServers: [createRailwayServerProvider({
+        fetchImpl: (...args) => net.fetch(...args),
+        probeHealth: (endpoint, options) => cloudClient.probeEndpointHealth(endpoint, options),
+        acquireReceipt: (request) => cloudClient.bootstrapPairing(request),
+      })],
     });
     cloudCoordinator.on('event', queueCloudBroadcast);
     await cloudCoordinator.start();
