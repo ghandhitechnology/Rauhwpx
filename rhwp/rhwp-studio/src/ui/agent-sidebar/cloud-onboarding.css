@@ -164,6 +164,56 @@
   line-height: 1.5;
 }
 
+.ag-cloud-setup-options {
+  display: grid;
+  gap: 10px;
+}
+
+.ag-cloud-setup-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 13px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-card);
+  background: var(--ag-bg-2);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-cloud-setup-option:hover {
+  border-color: color-mix(in srgb, var(--accent-primary) 40%, var(--ag-border));
+}
+
+.ag-cloud-setup-option.ag-selected {
+  border-color: var(--accent-primary);
+  background: color-mix(in srgb, var(--accent-primary) 9%, var(--ag-bg-2));
+}
+
+.ag-cloud-setup-option-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.ag-cloud-setup-option-copy strong {
+  font-size: var(--font-size-md, 13px);
+}
+
+.ag-cloud-setup-option-copy p {
+  margin: 0;
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.5;
+}
+
+.ag-cloud-setup-option-note {
+  color: var(--ag-text-tertiary, var(--ag-text-secondary));
+  font-size: var(--font-size-sm, 11px);
+}
+
 .ag-cloud-setup-requirements {
   display: grid;
   gap: 8px;

@@ -274,14 +274,17 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     switch (session.kind) {
       case 'idle':
         const profileReady = snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready';
+        const appHosted = snapshot.profile.kind === 'configured' && snapshot.profile.mode === 'app-hosted';
         panelStatus.textContent = profileReady
-          ? 'VPS가 준비되어 있습니다.'
+          ? appHosted ? '앱 제공 서버가 준비되어 있습니다.' : '내 서버가 준비되어 있습니다.'
           : snapshot.profile.kind === 'configured'
-            ? 'VPS 연결을 확인해야 합니다.'
-            : 'VPS 설정이 필요합니다.';
-        panelDetail.textContent = snapshot.profile.kind === 'configured'
-          ? `${snapshot.profile.profile.name} · ${snapshot.profile.profile.host}`
-          : 'SSH와 Tailscale 연결을 설정하세요.';
+            ? appHosted ? '앱 제공 서버 상태를 확인해야 합니다.' : 'VPS 연결을 확인해야 합니다.'
+            : 'Cloud 서버를 선택해야 합니다.';
+        panelDetail.textContent = snapshot.profile.kind !== 'configured'
+          ? '앱 제공 서버를 쓰거나 내 서버를 연결하세요.'
+          : snapshot.profile.mode === 'app-hosted'
+            ? `${snapshot.profile.name} · ${snapshot.profile.sandbox.host || snapshot.profile.sandbox.sandboxId}`
+            : `${snapshot.profile.profile.name} · ${snapshot.profile.profile.host}`;
         panelActions.append(action(profileReady ? '클라우드로 계속' : 'Cloud 설정', () => {
           const focusTrigger = panelTrigger ?? sidebarButton;
           closePanel();

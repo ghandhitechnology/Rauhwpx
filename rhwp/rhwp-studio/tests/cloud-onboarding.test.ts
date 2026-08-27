@@ -14,6 +14,13 @@ const baseSnapshot = {
   revision: 1,
   available: true,
   profile: { kind: 'unconfigured' as const },
+  server: {
+    mode: null,
+    preferredMode: null,
+    providers: [],
+    lifecycle: 'idle' as const,
+    message: null,
+  },
   lease: { owner: 'local' as const },
   session: { kind: 'idle' as const },
   sessions: [],
@@ -114,6 +121,7 @@ test('ready profiles open as connected while active drafts ignore snapshot refre
     ...baseSnapshot,
     profile: {
       kind: 'configured' as const,
+      mode: 'self-hosted' as const,
       profile,
       connection: 'ready' as const,
       serviceVersion: '1.0.0',
@@ -150,6 +158,7 @@ test('configured public HTTPS profiles are preserved when Manage opens', () => {
     ...baseSnapshot,
     profile: {
       kind: 'configured' as const,
+      mode: 'self-hosted' as const,
       profile: publicProfile,
       connection: 'ready' as const,
       serviceVersion: '1.0.0',

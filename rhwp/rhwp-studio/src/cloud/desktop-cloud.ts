@@ -3,8 +3,12 @@ import { parseCloudTimeline } from './timeline.ts';
 import type {
   CloudCommandRequest,
   CloudDownloadResult,
+  CloudConnectionState,
   CloudProfileDraft,
   CloudProfileState,
+  CloudSandboxSummary,
+  CloudServerMode,
+  CloudServerState,
   CloudSessionBase,
   CloudSessionState,
   CloudSnapshot,
@@ -17,6 +21,8 @@ import type {
   CloudResultResolution,
 } from './types.ts';
 
+const SANDBOX_LIFECYCLES = ['idle', 'provisioning', 'ready', 'error', 'tearing-down'] as const;
+
 export interface CloudDesktopApi {
   cloudGetState?: (payload: CloudSessionScope) => Promise<unknown>;
   cloudSaveProfile?: (payload: { profile: CloudProfileDraft }) => Promise<unknown>;
@@ -26,6 +32,10 @@ export interface CloudDesktopApi {
     profile?: CloudProfileDraft;
   }) => Promise<unknown>;
   cloudPair?: (payload: { code: string; profile?: CloudProfileDraft }) => Promise<unknown>;
+  cloudSelectServerMode?: (payload: { mode: CloudServerMode }) => Promise<unknown>;
+  cloudSpawnSandbox?: (payload: { providerId?: string }) => Promise<unknown>;
+  cloudSandboxStatus?: () => Promise<unknown>;
+  cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
   cloudTransfer?: (payload: CloudTransferRequest) => Promise<unknown>;
   cloudSetTransferIntent?: (payload: CloudTransferIntentRequest) => Promise<unknown>;
   cloudReadReference?: (payload: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<unknown>;
@@ -45,6 +55,10 @@ export interface CloudController {
   testProfile(profile?: CloudProfileDraft): Promise<CloudSnapshot>;
   provision(installChannel?: 'stable' | 'prerelease', profile?: CloudProfileDraft): Promise<CloudSnapshot>;
   pair(code: string, profile?: CloudProfileDraft): Promise<CloudSnapshot>;
+  selectServerMode(mode: CloudServerMode): Promise<CloudSnapshot>;
+  spawnSandbox(providerId?: string): Promise<CloudSnapshot>;
+  sandboxStatus(): Promise<CloudSnapshot>;
+  teardownSandbox(options?: { force?: boolean }): Promise<CloudSnapshot>;
   transfer(request: CloudTransferRequest): Promise<CloudSnapshot>;
   setTransferIntent(request: CloudTransferIntentRequest): Promise<CloudSnapshot>;
   readReference(reference: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>): Promise<Uint8Array>;
@@ -123,26 +137,83 @@ function parseProfileDraft(value: unknown): CloudProfileDraft | null {
   };
 }
 
+function parseSandboxSummary(value: unknown): CloudSandboxSummary | null {
+  const sandbox = record(value);
+  if (!sandbox) return null;
+  const providerId = string(sandbox.providerId).trim();
+  const sandboxId = string(sandbox.sandboxId).trim();
+  const createdAt = strictIso(sandbox.createdAt);
+  if (!providerId || !sandboxId || !createdAt) return null;
+  return {
+    providerId,
+    sandboxId,
+    displayName: string(sandbox.displayName).trim() || providerId,
+    region: string(sandbox.region).trim(),
+    host: string(sandbox.host).trim(),
+    createdAt,
+  };
+}
+
+function parseServerMode(value: unknown): CloudServerMode | null {
+  return value === 'self-hosted' || value === 'app-hosted' ? value : null;
+}
+
 function parseProfile(value: unknown): CloudProfileState | null {
   const state = record(value);
   if (!state) return null;
   if (state.kind === 'unconfigured') return { kind: 'unconfigured' };
-  const profile = parseProfileDraft(state.profile);
-  if (state.kind !== 'configured' || !profile) return null;
-  const connection = state.connection === 'testing' || state.connection === 'ready' || state.connection === 'error'
+  if (state.kind !== 'configured') return null;
+  const connection: CloudConnectionState | null = state.connection === 'testing' || state.connection === 'ready'
+    || state.connection === 'error' || state.connection === 'unknown'
     ? state.connection
-    : state.connection === 'unknown'
-      ? 'unknown'
-      : null;
+    : null;
   if (!connection
     || (state.serviceVersion !== null && typeof state.serviceVersion !== 'string')
     || (state.message !== null && typeof state.message !== 'string')) return null;
-  return {
-    kind: 'configured',
-    profile,
+  const shared = {
+    kind: 'configured' as const,
     connection,
     serviceVersion: typeof state.serviceVersion === 'string' ? state.serviceVersion : null,
     message: typeof state.message === 'string' ? state.message : null,
+  };
+  if (state.mode === 'app-hosted') {
+    const sandbox = parseSandboxSummary(state.sandbox);
+    const name = string(state.name).trim();
+    return sandbox && name ? { ...shared, mode: 'app-hosted', name, sandbox } : null;
+  }
+  const profile = parseProfileDraft(state.profile);
+  if (!profile || (state.mode !== undefined && state.mode !== 'self-hosted')) return null;
+  return { ...shared, mode: 'self-hosted', profile };
+}
+
+function parseServer(value: unknown, profile: CloudProfileState): CloudServerState | null {
+  const fallbackMode = profile.kind === 'configured' ? profile.mode : null;
+  if (value === undefined) {
+    return { mode: fallbackMode, preferredMode: null, providers: [], lifecycle: 'idle', message: null };
+  }
+  const server = record(value);
+  if (!server || !Array.isArray(server.providers)) return null;
+  const lifecycle = SANDBOX_LIFECYCLES.find((entry) => entry === server.lifecycle);
+  if (!lifecycle || (server.message !== null && typeof server.message !== 'string')) return null;
+  const providers = server.providers.flatMap((entry) => {
+    const provider = record(entry);
+    const providerId = string(provider?.providerId).trim();
+    if (!provider || !providerId || typeof provider.configured !== 'boolean'
+      || !Array.isArray(provider.missingConfig)) return [];
+    return [{
+      providerId,
+      displayName: string(provider.displayName).trim() || providerId,
+      configured: provider.configured,
+      missingConfig: provider.missingConfig.filter((item): item is string => typeof item === 'string'),
+    }];
+  });
+  if (providers.length !== server.providers.length) return null;
+  return {
+    mode: parseServerMode(server.mode) ?? fallbackMode,
+    preferredMode: parseServerMode(server.preferredMode),
+    providers,
+    lifecycle,
+    message: typeof server.message === 'string' ? server.message : null,
   };
 }
 
@@ -335,10 +406,13 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
   if (raw.timeline !== null && !timeline) return null;
   const takeover = raw.takeover === undefined ? undefined : parseTakeover(raw.takeover);
   if (raw.takeover !== undefined && !takeover) return null;
+  const server = parseServer(raw.server, profile);
+  if (!server) return null;
   return {
     revision,
     available: raw.available,
     profile,
+    server,
     lease,
     session,
     sessions: sessions as Exclude<CloudSessionState, { kind: 'idle' }>[],
@@ -354,6 +428,13 @@ function unavailableSnapshot(): CloudSnapshot {
     revision: 0,
     available: false,
     profile: { kind: 'unconfigured' },
+    server: {
+      mode: null,
+      preferredMode: null,
+      providers: [],
+      lifecycle: 'idle',
+      message: null,
+    },
     lease: { owner: 'local' },
     session: { kind: 'idle' },
     sessions: [],
@@ -461,6 +542,10 @@ export function createCloudController(
       ...(profile ? { profile } : {}),
     }),
     pair: (code, profile) => call('cloudPair', { code, ...(profile ? { profile } : {}) }),
+    selectServerMode: (mode) => call('cloudSelectServerMode', { mode }),
+    spawnSandbox: (providerId) => call('cloudSpawnSandbox', providerId ? { providerId } : {}),
+    sandboxStatus: () => call('cloudSandboxStatus'),
+    teardownSandbox: (options = {}) => call('cloudTeardownSandbox', { force: options.force === true }),
     transfer: (request) => call('cloudTransfer', request),
     setTransferIntent: (request) => call('cloudSetTransferIntent', request),
     async readReference(reference) {
