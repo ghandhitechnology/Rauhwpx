@@ -153,6 +153,9 @@ test('Claude unrestricted and Codex profiles change only the permission boundary
   assert.ok(fullCodex.includes('mcp_servers.rhwp.default_tools_approval_mode="auto"'));
   assert.ok(safeCodex.includes('--ignore-user-config'));
   assert.ok(safeCodex.includes('skill_search'));
+  assert.equal(safeCodex.includes('service_tier="fast"'), false);
+  const fastCodex = buildCodexArgv({ ...backendOpts, permissionProfile: 'safe', serviceTier: 'fast' }, null);
+  assert.ok(fastCodex.includes('service_tier="fast"'));
 });
 
 test('Claude sandbox startup errors are surfaced without leaking the hub token', () => {
