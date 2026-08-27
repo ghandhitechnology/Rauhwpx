@@ -48,6 +48,12 @@ function cloudOwnsConversation(snapshot: CloudSnapshot): boolean {
   return snapshot.lease.owner === 'cloud';
 }
 
+function serverLabel(snapshot: CloudSnapshot): string {
+  return snapshot.profile.kind === 'configured' && snapshot.profile.mode === 'app-hosted'
+    ? '앱 제공 서버'
+    : '내 서버';
+}
+
 function sessionKindLabel(kind: CloudSnapshot['session']['kind']): string {
   switch (kind) {
     case 'waiting-local-turn': return '전송 대기';
@@ -136,7 +142,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   panelHead.append(panelTitle, panelClose);
   const panelBody = el('div', 'ag-cloud-panel-body');
   const sessionPicker = el('label', 'ag-cloud-session-picker');
-  const sessionPickerLabel = el('span', 'ag-cloud-session-picker-label', 'VPS 작업');
+  const sessionPickerLabel = el('span', 'ag-cloud-session-picker-label', '클라우드 작업');
   const sessionSelect = el('select', 'ag-cloud-session-select') as HTMLSelectElement;
   sessionPicker.append(sessionPickerLabel, sessionSelect);
   const panelStatus = el('div', 'ag-cloud-panel-status');
@@ -315,7 +321,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelActions.append(action('취소', () => command('cancel')));
         break;
       case 'running':
-        panelStatus.textContent = session.currentActivity || 'VPS에서 작업 중입니다.';
+        panelStatus.textContent = session.currentActivity || `${serverLabel(snapshot)}에서 작업 중입니다.`;
         panelDetail.textContent = `${session.turn}/${session.turnLimit}턴 · ${formatDuration(session.elapsedMs)} / ${formatDuration(session.timeLimitMs)}`;
         panelActions.append(
           action('일시 중지', () => command('pause')),

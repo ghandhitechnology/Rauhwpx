@@ -101,7 +101,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   document.body.appendChild(overlay);
 
   const settingsElement = el('section', 'ag-settings-section ag-cloud-settings');
-  const settingsTitle = el('h3', 'ag-settings-section-title', 'Cloud VPS');
+  const settingsTitle = el('h3', 'ag-settings-section-title', 'Cloud 서버');
   const settingsCard = el('div', 'ag-cloud-settings-card');
   const settingsIcon = el('span', 'ag-cloud-settings-icon');
   settingsIcon.appendChild(createIcon('cloud'));
