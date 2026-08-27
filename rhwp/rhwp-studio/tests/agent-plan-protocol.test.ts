@@ -67,8 +67,19 @@ test('a failed replacement cannot dispatch into the disposed previous session', 
   );
   assert.match(
     bridgeSource,
-    /const pending = this\.pendingChatStart;[\s\S]*agent: pending\?\.agent \?\? this\.selectedAgent,[\s\S]*workflow: pending\?\.workflow \?\? this\.workflow/,
+    /const pending = this\.pendingChatStart \?\? \{[\s\S]*agent: this\.selectedAgent,[\s\S]*workflow: this\.workflow[\s\S]*this\.pendingChatStart = pending;[\s\S]*agent: pending\.agent,[\s\S]*workflow: pending\.workflow/,
   );
+});
+
+test('connected first message records pendingChatStart so reconnect can retry the start', () => {
+  const sendUserOffset = bridgeSource.indexOf('\n  sendUserMessage(');
+  const sendUserSource = bridgeSource.slice(
+    sendUserOffset,
+    bridgeSource.indexOf('\n  private dispatchUserMessage(', sendUserOffset),
+  );
+  assert.match(sendUserSource, /this\.pendingChatStart = pending;/);
+  assert.match(sendUserSource, /if \(this\.state === 'connected'\) \{[\s\S]*type: 'chat-start'/);
+  assert.doesNotMatch(sendUserSource, /\} else \{\s*this\.pendingChatStart = \{/);
 });
 
 test('new chat defaults direct while an explicit plan start is carried on the wire', () => {
@@ -81,6 +92,6 @@ test('new chat defaults direct while an explicit plan start is carried on the wi
   );
   assert.doesNotMatch(startChatSource, /this\.resetWorkflowState\(workflow\)/);
   assert.doesNotMatch(startChatSource, /this\.permissionProfile = permissionProfile/);
-  assert.match(startChatSource, /permissionProfile,\s*\n\s*workflow,/);
+  assert.match(startChatSource, /permissionProfile,\s*\n\s*serviceTier: this\.serviceTier,\s*\n\s*workflow,/);
   assert.match(bridgeSource, /this\.resetWorkflowState\(\);[\s\S]*?type: 'chat-stop'/);
 });

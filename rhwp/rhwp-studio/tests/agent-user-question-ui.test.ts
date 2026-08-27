@@ -27,6 +27,10 @@ test('question interaction uses strict protocol v4 and a reconnect-idempotent an
   );
   assert.match(
     bridge,
+    /case 'chat-error': \{[\s\S]*const chatStartFailed = this\.pendingChatStart !== null;[\s\S]*if \(chatStartFailed\) \{[\s\S]*const droppedQuestion = this\.pendingUserQuestion;[\s\S]*reason: 'request-invalidated'/,
+  );
+  assert.match(
+    bridge,
     /pendingQuestionCancellation\?\.interactionId === interaction\.interactionId[\s\S]*flushPendingQuestionCancellation\(\)[\s\S]*break;/,
   );
   assert.match(

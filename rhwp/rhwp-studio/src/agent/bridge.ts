@@ -2067,6 +2067,18 @@ class AgentBridgeImpl implements AgentBridge {
               console.warn('[AgentBridge] chat-error endTurn 실패:', e);
             }
           }
+          const droppedQuestion = this.pendingUserQuestion;
+          this.pendingUserQuestion = null;
+          this.pendingUserQuestionId = null;
+          this.pendingQuestionAnswer = null;
+          this.clearPendingQuestionCancellation();
+          if (droppedQuestion) {
+            this.emit({
+              type: 'user-question-resolved',
+              interactionId: droppedQuestion.interactionId,
+              outcome: { status: 'expired', reason: 'request-invalidated' },
+            });
+          }
           this.activeAgent = null;
           this.turnRunning = false;
           this.syncEditingLease();
@@ -2377,36 +2389,36 @@ class AgentBridgeImpl implements AgentBridge {
       const message = { text, skillName, context, messageId, stagedReferenceIds: [...stagedReferenceIds], resolve };
       if (this.activeAgent === null) {
         this.queuedMessages.push(message);
+        // 연결 중에도 시작 대기를 남겨 재접속이 첫 메시지를 다시 보낼 수 있게 한다.
+        const pending = this.pendingChatStart ?? {
+          agent: this.selectedAgent,
+          model: this.selectedModel ?? undefined,
+          effort: this.selectedEffort ?? undefined,
+          permissionProfile: this.permissionProfile,
+          serviceTier: this.serviceTier,
+          workflow: this.workflow,
+          threadId: context.threadId,
+          documentId: context.documentId,
+          documentName: context.documentName ?? null,
+          history: this.chatHistory,
+        };
+        this.pendingChatStart = pending;
         if (this.state === 'connected') {
-          const pending = this.pendingChatStart;
           this.sendJson({
             v: AGENT_PROTOCOL_VERSION,
             type: 'chat-start',
-            agent: pending?.agent ?? this.selectedAgent,
-            workflow: pending?.workflow ?? this.workflow,
-            threadId: pending?.threadId ?? context.threadId,
-            documentId: pending?.documentId ?? context.documentId,
-            documentName: pending?.documentName ?? context.documentName ?? null,
-            history: pending?.history ?? this.chatHistory,
-            ...((pending?.model ?? this.selectedModel) ? { model: pending?.model ?? this.selectedModel } : {}),
-            ...((pending?.effort ?? this.selectedEffort) ? { effort: pending?.effort ?? this.selectedEffort } : {}),
-            permissionProfile: pending?.permissionProfile ?? this.permissionProfile,
-            serviceTier: pending?.serviceTier ?? this.serviceTier,
-            ...(pending?.force ? { force: true } : {}),
+            agent: pending.agent,
+            workflow: pending.workflow,
+            threadId: pending.threadId,
+            documentId: pending.documentId,
+            documentName: pending.documentName,
+            history: pending.history,
+            ...(pending.model ? { model: pending.model } : {}),
+            ...(pending.effort ? { effort: pending.effort } : {}),
+            permissionProfile: pending.permissionProfile ?? this.permissionProfile,
+            serviceTier: pending.serviceTier ?? this.serviceTier,
+            ...(pending.force ? { force: true } : {}),
           });
-        } else {
-          this.pendingChatStart = {
-            agent: this.selectedAgent,
-            model: this.selectedModel ?? undefined,
-            effort: this.selectedEffort ?? undefined,
-            permissionProfile: this.permissionProfile,
-            serviceTier: this.serviceTier,
-            workflow: this.workflow,
-            threadId: context.threadId,
-            documentId: context.documentId,
-            documentName: context.documentName ?? null,
-            history: this.chatHistory,
-          };
         }
         return;
       }
