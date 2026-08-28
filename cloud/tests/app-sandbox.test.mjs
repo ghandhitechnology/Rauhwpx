@@ -308,6 +308,8 @@ test('the app sandbox image runs the control plane with the local runner and a b
   assert.match(entrypoint, /export RAUHWpx_PORT="\$PORT"/);
   assert.match(entrypoint, /provider login "\$provider" --api-key-stdin/);
   assert.match(entrypoint, /seed-provider-session\.mjs/);
+  assert.match(entrypoint, /sandbox\.provider_session_failed/);
+  assert.match(entrypoint, /sandbox\.provider_install_failed/);
   assert.match(entrypoint, /chmod 0700 "\$DATA_DIR"/);
   assert.match(entrypoint, /chmod 0711 "\$CONTROL_DIR" "\$WORKSPACE_ROOT"/);
   // 자격 증명은 stdin으로만 넘긴다. 명령줄 인자는 컨테이너 안에서 ps로 보인다.

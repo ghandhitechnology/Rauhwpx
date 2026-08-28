@@ -26,16 +26,21 @@ seed_provider() {
   local provider=$1 variable=$2
   local key=${!variable:-}
   [[ -n $key ]] || return 0
-  printf '%s' "$key" \
-    | node "$CLOUD_ROOT/src/cli.mjs" provider login "$provider" --api-key-stdin >/dev/null
-  echo "{\"event\":\"sandbox.provider_seeded\",\"provider\":\"$provider\"}"
+  if printf '%s' "$key" \
+    | node "$CLOUD_ROOT/src/cli.mjs" provider login "$provider" --api-key-stdin >/dev/null; then
+    echo "{\"event\":\"sandbox.provider_seeded\",\"provider\":\"$provider\"}"
+  else
+    echo "{\"event\":\"sandbox.provider_login_failed\",\"provider\":\"$provider\"}"
+  fi
 }
 
 if [[ ${RAUHWpx_SANDBOX_INSTALL_PROVIDER:-1} == 1 ]]; then
-  node "$CLOUD_ROOT/src/cli.mjs" provider install "${RAUHWpx_SANDBOX_PROVIDER:-codex}" >/dev/null
+  node "$CLOUD_ROOT/src/cli.mjs" provider install "${RAUHWpx_SANDBOX_PROVIDER:-codex}" >/dev/null \
+    || echo '{"event":"sandbox.provider_install_failed"}'
 fi
 if [[ -n ${RAUHWpx_PROVIDER_SESSION:-} ]]; then
-  node "$CLOUD_ROOT/src/seed-provider-session.mjs"
+  node "$CLOUD_ROOT/src/seed-provider-session.mjs" \
+    || echo '{"event":"sandbox.provider_session_failed"}'
 fi
 seed_provider claude RAUHWpx_PROVIDER_KEY_CLAUDE
 seed_provider codex RAUHWpx_PROVIDER_KEY_CODEX
