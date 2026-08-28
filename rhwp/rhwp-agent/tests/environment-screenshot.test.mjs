@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   takeEnvironmentScreenshot,
   capScreenshotDir,
+  convertXwdToPng,
 } from '../environment-screenshot.mjs';
 import { sessionDisplayReady, buildCodexArgv } from '../agents/codex.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS, TOOL_CLASSIFICATIONS } from '../tools.mjs';
@@ -28,6 +29,31 @@ test('capScreenshotDir deletes oldest files past the bound', async (t) => {
   const result = await capScreenshotDir(root, { maxFiles: 2, maxBytes: 10_000 });
   assert.equal(result.kept, 2);
   assert.deepEqual(result.deleted, ['shot-0.png', 'shot-1.png', 'shot-2.png']);
+});
+
+test('convertXwdToPng reads standard XWD header offsets', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-xwd-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const xwdPath = path.join(root, 'display.xwd');
+  const pngPath = path.join(root, 'display.png');
+  const xwd = Buffer.alloc(104);
+  xwd.writeUInt32BE(100, 0); // header_size
+  xwd.writeUInt32BE(7, 4); // file_version
+  xwd.writeUInt32BE(2, 8); // pixmap_format: ZPixmap
+  xwd.writeUInt32BE(24, 12); // pixmap_depth
+  xwd.writeUInt32BE(1, 16); // pixmap_width
+  xwd.writeUInt32BE(1, 20); // pixmap_height
+  xwd.writeUInt32BE(0, 28); // byte_order: LSBFirst
+  xwd.writeUInt32BE(32, 44); // bits_per_pixel
+  xwd.writeUInt32BE(4, 48); // bytes_per_line
+  Buffer.from([3, 2, 1, 0]).copy(xwd, 100);
+  await fs.writeFile(xwdPath, xwd);
+
+  await convertXwdToPng(xwdPath, pngPath);
+  const png = await fs.readFile(pngPath);
+  assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  assert.equal(png.readUInt32BE(16), 1);
+  assert.equal(png.readUInt32BE(20), 1);
 });
 
 test('takeEnvironmentScreenshot refuses without DISPLAY', async () => {

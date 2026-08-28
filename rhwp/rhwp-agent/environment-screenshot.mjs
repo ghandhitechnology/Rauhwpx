@@ -99,12 +99,12 @@ export async function convertXwdToPng(xwdPath, pngPath) {
   const buffer = await fs.readFile(xwdPath);
   if (buffer.length < 100) throw screenshotError('XWD_INVALID', 'XWD dump is too small');
   const headerSize = buffer.readUInt32BE(0);
-  const pixmapDepth = buffer.readUInt32BE(16);
-  const width = buffer.readUInt32BE(20);
-  const height = buffer.readUInt32BE(24);
-  const bitsPerPixel = buffer.readUInt32BE(40);
-  const bytesPerLine = buffer.readUInt32BE(44);
-  const byteOrder = buffer.readUInt32BE(48);
+  const pixmapDepth = buffer.readUInt32BE(12);
+  const width = buffer.readUInt32BE(16);
+  const height = buffer.readUInt32BE(20);
+  const byteOrder = buffer.readUInt32BE(28);
+  const bitsPerPixel = buffer.readUInt32BE(44);
+  const bytesPerLine = buffer.readUInt32BE(48);
   if (!width || !height || width > 8_192 || height > 8_192) {
     throw screenshotError('XWD_INVALID', `XWD geometry out of range: ${width}x${height}`);
   }
