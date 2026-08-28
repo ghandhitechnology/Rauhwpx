@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { createSessionDisplay } from '../document-runtime/session-display.mjs';
 import { WorkerClient } from './client.mjs';
 
 process.umask(0o077);
@@ -55,23 +56,37 @@ try {
     JSON.stringify(resolvedManifest),
     { mode: 0o600 },
   );
-  const runtimePath = process.env.RAUHWpx_DOCUMENT_RUNTIME || '/app/document-runtime/run.mjs';
-  const runtime = await import(pathToFileURL(runtimePath).href);
-  if (typeof runtime.runSession !== 'function') throw new Error('Document runtime must export runSession');
-  const outcome = await runtime.runSession({
-    manifest: resolvedManifest,
+  // One session, one screen. Display start failures stay soft — document tools keep working.
+  const sessionDisplay = createSessionDisplay({
     workspace,
-    credentials,
-    client,
+    onEvent: (event) => {
+      console.log(JSON.stringify(event));
+      client.event(event.type, event).catch(() => {});
+    },
   });
-  if (outcome?.paused !== true && outcome?.suspended !== true && outcome?.takenOver !== true) {
-    if (!outcome?.timelinePath) throw new Error('Document runtime did not return timelinePath');
-    if (!outcome?.resultPath) throw new Error('Document runtime did not return resultPath');
-    const result = await client.upload(outcome.resultPath, {
-      name: outcome.resultName || manifest.resources.find((resource) => resource.kind === 'document')?.name || 'result.hwpx',
-      kind: 'result',
+  await sessionDisplay.start();
+  try {
+    const runtimePath = process.env.RAUHWpx_DOCUMENT_RUNTIME || '/app/document-runtime/run.mjs';
+    const runtime = await import(pathToFileURL(runtimePath).href);
+    if (typeof runtime.runSession !== 'function') throw new Error('Document runtime must export runSession');
+    const outcome = await runtime.runSession({
+      manifest: resolvedManifest,
+      workspace,
+      credentials,
+      client,
+      sessionDisplay,
     });
-    await client.publishResult(result);
+    if (outcome?.paused !== true && outcome?.suspended !== true && outcome?.takenOver !== true) {
+      if (!outcome?.timelinePath) throw new Error('Document runtime did not return timelinePath');
+      if (!outcome?.resultPath) throw new Error('Document runtime did not return resultPath');
+      const result = await client.upload(outcome.resultPath, {
+        name: outcome.resultName || manifest.resources.find((resource) => resource.kind === 'document')?.name || 'result.hwpx',
+        kind: 'result',
+      });
+      await client.publishResult(result);
+    }
+  } finally {
+    await sessionDisplay.stop().catch(() => {});
   }
 } catch (error) {
   await client.suspend(error.code || 'WORKER_FAILED', error.message || String(error)).catch((suspendError) => {

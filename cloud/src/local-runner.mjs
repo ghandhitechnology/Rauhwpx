@@ -39,6 +39,9 @@ const WORKER_BASE_ENV = Object.freeze([
 /**
  * Podman 실행에서는 워커 컨테이너가 컨트롤 플레인 환경을 물려받지 않는다. local 실행도 같아야 한다.
  * 워커와 provider CLI는 같은 uid로 돌기 때문에 워커 환경에 남은 비밀은 에이전트가 읽을 수 있다.
+ *
+ * DISPLAY / XAUTHORITY 는 컨트롤 플레인에서 물려받지 않는다. 세션 워커가 SessionDisplay 로
+ * 직접 띄운 뒤에야 hub env 에 실어 보낸다 (session 값으로만 전달 가능).
  */
 export function workerEnvironment(environment, session) {
   const result = {};

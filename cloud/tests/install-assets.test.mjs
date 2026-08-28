@@ -137,6 +137,11 @@ test('worker image packages the real Studio, agent hub, Chromium, and locked run
   const buildAssets = await fs.readFile(path.join(root, 'install/build-runtime-assets.sh'), 'utf8');
   assert.match(containerfile, /^FROM node:24-bookworm-slim@sha256:[a-f0-9]{64}/m);
   assert.match(containerfile, /chromium="\$CHROMIUM_VERSION"/);
+  assert.match(containerfile, /\bxvfb\b/);
+  assert.match(containerfile, /\bxauth\b/);
+  assert.match(containerfile, /\bx11-utils\b/);
+  assert.match(containerfile, /\bx11-apps\b/);
+  assert.match(containerfile, /matchbox-window-manager/);
   assert.match(containerfile, /COPY install\/provider-runtime\/package\.json install\/provider-runtime\/package-lock\.json/);
   assert.match(containerfile, /npm ci --omit=dev/);
   assert.match(containerfile, /COPY runtime-assets\/studio \/app\/studio/);

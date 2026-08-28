@@ -242,6 +242,8 @@ test('the local worker cannot inherit the control plane environment', () => {
     RAILWAY_TOKEN: 'railway-secret',
     RAUHWpx_DATA_DIR: '/var/lib/rauhwpx-cloud',
     NODE_OPTIONS: '--require=/tmp/inject.cjs',
+    DISPLAY: ':0',
+    XAUTHORITY: '/root/.Xauthority',
   }, { RAUHWpx_SESSION_ID: 'session-one', RAUHWpx_WORKER_TOKEN: 'ra_wt_first' });
 
   // 워커와 provider CLI 는 같은 uid 로 돈다. 워커 환경에 남은 비밀은 에이전트가 읽을 수 있다.
@@ -250,6 +252,8 @@ test('the local worker cannot inherit the control plane environment', () => {
   assert.equal(filtered.RAILWAY_TOKEN, undefined);
   assert.equal(filtered.RAUHWpx_DATA_DIR, undefined);
   assert.equal(filtered.NODE_OPTIONS, undefined);
+  assert.equal(filtered.DISPLAY, undefined);
+  assert.equal(filtered.XAUTHORITY, undefined);
   assert.deepEqual(filtered, {
     PATH: '/app/bin:/usr/bin',
     LANG: 'C.UTF-8',
@@ -298,6 +302,11 @@ test('the app sandbox image runs the control plane with the local runner and a b
   assert.match(containerfile, /COPY document-runtime \/app\/document-runtime/);
   assert.match(containerfile, /useradd --system --uid 1001/);
   assert.match(containerfile, /ENTRYPOINT \["\/app\/install\/sandbox-entrypoint\.sh"\]/);
+  assert.match(containerfile, /\bxvfb\b/);
+  assert.match(containerfile, /\bxauth\b/);
+  assert.match(containerfile, /\bx11-utils\b/);
+  assert.match(containerfile, /\bx11-apps\b/);
+  assert.match(containerfile, /matchbox-window-manager/);
   assert.doesNotMatch(containerfile, /^USER /m);
 
   const entrypoint = await fs.readFile(new URL('install/sandbox-entrypoint.sh', root), 'utf8');

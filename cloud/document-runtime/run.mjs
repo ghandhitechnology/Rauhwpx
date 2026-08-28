@@ -136,6 +136,7 @@ export async function runSession({
   credentials,
   client,
   createHarness = createStudioHarness,
+  sessionDisplay = null,
 }) {
   if (!manifest || typeof manifest !== 'object' || !manifest.sessionId || !manifest.provider) {
     throw runtimeError('MANIFEST_INVALID', 'Cloud worker manifest identity is incomplete');
@@ -258,14 +259,33 @@ export async function runSession({
       document,
       references,
       timeline,
+      displayEnv: sessionDisplay?.environment ?? null,
       onEvent: async (event) => {
+        if (event?.type?.startsWith?.('environment.')) recorder.recordEnvironmentEvent(event);
         recorder.consume(event);
         await forwardEvent(client, event);
       },
     });
+    if (sessionDisplay?.snapshot) {
+      recorder.recordEnvironmentEvent({
+        type: sessionDisplay.status === 'ready' ? 'environment.display_ready' : `environment.display_${sessionDisplay.status}`,
+        ...sessionDisplay.snapshot(),
+      });
+    }
     await harness.start({ history: recorder.history({ excludeTrailingUserText: stableRecovery ? null : initialGoal }) });
 
     while (!finishReady && turnNumber < maxTurns && Date.now() < deadline) {
+      if (sessionDisplay && sessionDisplay.status === 'error') {
+        const restarted = await sessionDisplay.restart({ reason: 'health-loop' });
+        recorder.recordEnvironmentEvent({
+          type: restarted.status === 'ready' ? 'environment.display_restarted' : 'environment.display_failed',
+          ...restarted,
+        });
+        await forwardEvent(client, {
+          type: restarted.status === 'ready' ? 'environment.display_restarted' : 'environment.display_failed',
+          ...restarted,
+        });
+      }
       for (const message of messages) {
         if (turnNumber >= maxTurns || Date.now() >= deadline) break;
         const content = String(message.content ?? '').trim();

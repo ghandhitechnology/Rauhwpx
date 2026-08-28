@@ -9,6 +9,11 @@ RUN apt-get update \
     chromium="$CHROMIUM_VERSION" \
     curl \
     fonts-noto-cjk \
+    matchbox-window-manager \
+    x11-apps \
+    x11-utils \
+    xauth \
+    xvfb \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/rauhwpx-provider-cli
