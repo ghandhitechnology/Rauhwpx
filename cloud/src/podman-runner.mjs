@@ -92,30 +92,62 @@ export class PodmanRunner {
     this.spawnProcess = spawnProcess;
   }
 
+  #globalArgs() {
+    return this.config.podmanConnection ? ['--connection', this.config.podmanConnection] : [];
+  }
+
+  #runtimeArgs() {
+    return this.config.platform === 'darwin' ? [] : ['--cgroup-manager=cgroupfs'];
+  }
+
   async list({ all = false } = {}) {
     const args = [
-      '--cgroup-manager=cgroupfs', 'ps', '--no-trunc', ...(all ? ['--all'] : []), '--filter', 'label=com.rauhwpx.cloud=true',
+      ...this.#globalArgs(), ...this.#runtimeArgs(), 'ps', '--no-trunc', ...(all ? ['--all'] : []), '--filter', 'label=com.rauhwpx.cloud=true',
       '--format', 'json',
     ];
     const output = await command(this.spawnProcess, 'podman', args, { rejectStdoutOverflow: true });
     return parseInventory(output);
   }
 
-  async start(session, { workerToken, controlSocket }) {
+  async probeControl(controlEndpoint) {
+    if (!controlEndpoint?.baseUrl) return;
+    const script = 'fetch(process.env.RAUHWpx_CONTROL_PROBE+"/v1/health").then(r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`)}).catch(e=>{console.error(e.message);process.exit(1)})';
+    await command(this.spawnProcess, 'podman', [
+      ...this.#globalArgs(), ...this.#runtimeArgs(), 'run', '--rm',
+      '--entrypoint', 'node', '--env', `RAUHWpx_CONTROL_PROBE=${controlEndpoint.baseUrl}`,
+      this.config.workerImage, '-e', script,
+    ], { timeoutMs: 45_000 });
+  }
+
+  async start(session, { workerToken, controlEndpoint, controlSocket }) {
+    const endpoint = controlEndpoint ?? (controlSocket ? { socketPath: controlSocket } : null);
+    if (!endpoint) throw new CloudError('WORKER_CONTROL_UNAVAILABLE', 'Worker control endpoint is unavailable', 503);
     const providerAuth = path.join(this.config.providerAuthDirectory, session.provider);
     await fs.mkdir(providerAuth, { recursive: true, mode: 0o700 });
     const name = `rauhwpx-${createHash('sha256').update(session.id).digest('hex').slice(0, 32)}`;
+    const macos = this.config.platform === 'darwin';
+    const identityArgs = macos
+      ? ['--userns=keep-id:uid=1000,gid=1000']
+      : [
+        '--uidmap', '0:1:1000',
+        '--uidmap', '1000:0:1',
+        '--uidmap', '1001:1001:64535',
+        '--gidmap', '0:1:1000',
+        '--gidmap', '1000:0:1',
+        '--gidmap', '1001:1001:64535',
+      ];
+    const controlArgs = endpoint.baseUrl
+      ? ['--env', `RAUHWpx_CONTROL_URL=${endpoint.baseUrl}`]
+      : [
+        '--volume', `${path.dirname(endpoint.socketPath)}:/run/rauhwpx:ro,Z`,
+        '--env', 'RAUHWpx_CONTROL_SOCKET=/run/rauhwpx/control.sock',
+      ];
     return command(this.spawnProcess, 'podman', [
-      '--cgroup-manager=cgroupfs', 'run', '--detach', '--replace', '--name', name,
+      ...this.#globalArgs(), ...this.#runtimeArgs(), 'run', '--detach', '--replace', '--name', name,
       '--label', 'com.rauhwpx.cloud=true',
       '--label', `com.rauhwpx.session=${session.id}`,
       '--log-driver', 'k8s-file', '--log-opt', 'max-size=1048576',
-      '--uidmap', '0:1:1000',
-      '--uidmap', '1000:0:1',
-      '--uidmap', '1001:1001:64535',
-      '--gidmap', '0:1:1000',
-      '--gidmap', '1000:0:1',
-      '--gidmap', '1001:1001:64535',
+      ...identityArgs,
       '--security-opt=no-new-privileges', '--cap-drop=all', '--read-only',
       '--cpus', String(this.config.workerCpuCount),
       '--memory', String(this.config.workerMemoryBytes),
@@ -126,12 +158,11 @@ export class PodmanRunner {
       // startup umask keeps every created file private.
       '--tmpfs', `/workspace:rw,size=${this.config.workspaceBytes},mode=1777`,
       '--tmpfs', '/tmp:rw,size=268435456,mode=1777',
-      '--volume', `${providerAuth}:/provider-auth:ro,Z`,
-      '--volume', `${path.dirname(controlSocket)}:/run/rauhwpx:ro,Z`,
+      '--volume', `${providerAuth}:/provider-auth:ro${macos ? '' : ',Z'}`,
       '--env', `RAUHWpx_SESSION_ID=${session.id}`,
       '--env', `RAUHWpx_PROVIDER=${session.provider}`,
       '--env', 'RAUHWpx_WORKER_TOKEN',
-      '--env', 'RAUHWpx_CONTROL_SOCKET=/run/rauhwpx/control.sock',
+      ...controlArgs,
       this.config.workerImage,
     ], {
       env: { ...process.env, RAUHWpx_WORKER_TOKEN: workerToken },
@@ -140,7 +171,7 @@ export class PodmanRunner {
 
   async stop(sandboxId) {
     if (!sandboxId) return;
-    await command(this.spawnProcess, 'podman', ['--cgroup-manager=cgroupfs', 'rm', '--force', sandboxId]).catch((error) => {
+    await command(this.spawnProcess, 'podman', [...this.#globalArgs(), ...this.#runtimeArgs(), 'rm', '--force', sandboxId]).catch((error) => {
       if (error.code !== 'PODMAN_FAILED') throw error;
     });
   }

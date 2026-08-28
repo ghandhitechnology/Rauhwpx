@@ -9,11 +9,12 @@ process.umask(0o077);
 const sessionId = process.env.RAUHWpx_SESSION_ID;
 const token = process.env.RAUHWpx_WORKER_TOKEN;
 const socketPath = process.env.RAUHWpx_CONTROL_SOCKET;
+const baseUrl = process.env.RAUHWpx_CONTROL_URL;
 const workspace = process.env.RAUHWpx_WORKSPACE || '/workspace';
 const providerAuth = process.env.RAUHWpx_PROVIDER_AUTH || '/provider-auth';
-if (!sessionId || !token || !socketPath) throw new Error('Worker identity is incomplete');
+if (!sessionId || !token || (!socketPath && !baseUrl)) throw new Error('Worker identity is incomplete');
 
-const client = new WorkerClient({ socketPath, token, sessionId });
+const client = new WorkerClient({ socketPath, baseUrl, token, sessionId });
 // After four silent heartbeats the control plane considers this worker lost;
 // a clean crash with a stderr trace beats a zombie still holding its tokens.
 let heartbeatFailures = 0;

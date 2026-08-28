@@ -3,6 +3,7 @@ import type { PortableCloudTimelineV1 } from './timeline.ts';
 
 export type CloudTransportDraft =
   | { kind: 'tailscale' }
+  | { kind: 'ssh-tunnel' }
   | { kind: 'https'; endpoint: string };
 
 export type CloudSshAuthDraft =

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { PassThrough } from 'node:stream';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -12,7 +14,8 @@ import { PROVIDER_AUTH } from '../cloud/src/provider-auth.mjs';
 import { PROVIDERS } from '../cloud/src/protocol.mjs';
 import { CloudHandoffStore, sha256Hex } from '../desktop/cloud-handoff.mjs';
 import { normalizeCloudProfile, normalizeTailscaleHttpsPort } from '../desktop/cloud-profile.mjs';
-import { sshArguments, __test as provisionerTest } from '../desktop/cloud-provisioner.mjs';
+import { CloudProvisioner, sshArguments, __test as provisionerTest } from '../desktop/cloud-provisioner.mjs';
+import { SshTunnelManager, __test as tunnelTest } from '../desktop/cloud-ssh-tunnel.mjs';
 import { applyCloudRecovery } from '../desktop/cloud-result.mjs';
 
 const SERVER_IDENTITY = generateKeyPairSync('ed25519');
@@ -116,6 +119,100 @@ test('cloud profile accepts Tailscale and rejects insecure endpoints', () => {
     endpoint: 'http://vps.example.com',
     ssh: { host: 'vps.example.com', user: 'rauhwpx', useTailscaleSsh: false },
   }), /HTTPS/);
+});
+
+test('ordinary SSH profiles use a managed loopback tunnel without Tailscale', () => {
+  const profile = coordinatorTest.uiProfileToStored({
+    name: 'Office Mac mini', host: 'mac-mini.local', sshUser: 'macadmin', sshPort: 2222,
+    auth: { kind: 'key-file', keyPath: '/Users/me/.ssh/mac-mini' },
+    transport: { kind: 'ssh-tunnel' },
+  });
+  assert.equal(profile.version, 2);
+  assert.equal(profile.transport, 'ssh-tunnel');
+  assert.deepEqual(profile.api, {
+    kind: 'ssh-tunnel', remoteHost: '127.0.0.1', remotePort: 7740, basePath: '/rauhwpx-cloud',
+  });
+  assert.equal(profile.endpoint, 'http://127.0.0.1:7740/rauhwpx-cloud');
+  assert.equal(profile.ssh.useTailscaleSsh, false);
+  const args = tunnelTest.sshTunnelArguments(profile, '/tmp/known-hosts', 43123);
+  assert.ok(args.includes('StrictHostKeyChecking=accept-new'));
+  assert.ok(args.includes('127.0.0.1:43123:127.0.0.1:7740'));
+  assert.ok(args.includes('ServerAliveInterval=15'));
+  assert.equal(args.includes('tailscale'), false);
+  const receipt = provisionerTest.parseProvisionReceipt(`RAUHWpx_RECEIPT=${JSON.stringify({
+    endpoint: 'http://127.0.0.1:7740/rauhwpx-cloud', transport: 'ssh-tunnel',
+    serverPublicKey: SERVER_KEY, pairingCode: 'ABCD-EFGH-JKLM',
+  })}`);
+  assert.equal(receipt.transport, 'ssh-tunnel');
+  const pinned = coordinatorTest.uiProfileToStored({
+    name: 'Office Mac mini', host: 'mac-mini.local', sshUser: 'macadmin', sshPort: 2222,
+    auth: { kind: 'ssh-agent' }, transport: { kind: 'ssh-tunnel' }, serverPublicKey: SERVER_KEY,
+  });
+  const differentHost = coordinatorTest.uiProfileToStored({
+    name: 'Other Mac mini', host: 'other-mac.local', sshUser: 'macadmin', sshPort: 2222,
+    auth: { kind: 'ssh-agent' }, transport: { kind: 'ssh-tunnel' },
+  }, pinned);
+  assert.equal(differentHost.serverPublicKey, '', 'a different SSH host must not inherit the old server identity');
+});
+
+test('stopping a tunnel also cancels an in-flight SSH connection', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'rauhwpx-tunnel-stop-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let spawned;
+  const didSpawn = new Promise((resolve) => { spawned = resolve; });
+  const spawnImpl = () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin = new PassThrough();
+    child.exitCode = null;
+    child.kill = () => {
+      if (child.exitCode !== null) return;
+      child.exitCode = 143;
+      queueMicrotask(() => child.emit('close', null, 'SIGTERM'));
+    };
+    spawned();
+    return child;
+  };
+  const manager = new SshTunnelManager({ spawnImpl, knownHostsPath: path.join(root, 'known-hosts') });
+  const pending = manager.acquire({
+    api: { kind: 'ssh-tunnel' },
+    ssh: { host: 'mac-mini.local', user: 'macadmin' },
+  });
+  const rejected = assert.rejects(pending, /SSH tunnel exited|stopped/);
+  await didSpawn;
+  await manager.stop();
+  await rejected;
+});
+
+test('preflight recognizes an Apple silicon macOS host over normal SSH', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'rauhwpx-macos-preflight-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const calls = [];
+  const spawnImpl = (command, args) => {
+    calls.push({ command, args });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin = new PassThrough();
+    child.kill = () => {};
+    queueMicrotask(() => {
+      child.stdout.end('arch=arm64\nos=macos version=14.6.1\npreflight=ok\n');
+      child.stderr.end();
+      child.emit('close', 0, null);
+    });
+    return child;
+  };
+  const provisioner = new CloudProvisioner({
+    spawnImpl,
+    installerPath: path.join(root, 'install.sh'),
+    knownHostsPath: path.join(root, 'known-hosts'),
+  });
+  const result = await provisioner.preflight({ host: 'mac-mini.local', user: 'macadmin', port: 22 });
+  assert.deepEqual(result, { platform: 'darwin', os: 'macos', version: '14.6.1', arch: 'arm64' });
+  assert.equal(calls[0].command, 'ssh');
+  assert.ok(calls[0].args.includes('StrictHostKeyChecking=accept-new'));
+  assert.equal(calls[0].args.some((value) => String(value).includes('/etc/os-release') && String(value).includes('sw_vers')), true);
 });
 
 test('Tailscale HTTPS port persists through profiles, UI conversion, and provisioning receipts', async () => {

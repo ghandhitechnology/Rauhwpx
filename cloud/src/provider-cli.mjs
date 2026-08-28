@@ -119,8 +119,13 @@ export class ProviderCliManager {
     if (item.kind === 'npm') {
       await this.#installNpmBundle(env);
     } else if (item.kind === 'archive') {
-      if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch)) {
-        throw new CloudError('PROVIDER_PLATFORM_UNSUPPORTED', `${provider} is not available on this VPS architecture`);
+      const archiveArchitecture = process.platform === 'darwin' && process.arch === 'arm64'
+        ? 'arm64'
+        : process.platform === 'linux' && ['x64', 'arm64'].includes(process.arch)
+          ? process.arch
+          : null;
+      if (!archiveArchitecture) {
+        throw new CloudError('PROVIDER_PLATFORM_UNSUPPORTED', `${provider} is not available on this Cloud host architecture`);
       }
       const versionRoot = path.join(env.HOME, '.local', 'share', 'cursor-agent', 'versions');
       await mkdir(versionRoot, { recursive: true, mode: 0o700 });
@@ -130,9 +135,9 @@ export class ProviderCliManager {
       const destination = path.join(versionRoot, item.version);
       try {
         await mkdir(extracted, { mode: 0o700 });
-        await run('curl', ['--fail', '--location', '--silent', '--show-error', item.urls[process.arch], '--output', archive], { env });
+        await run('curl', ['--fail', '--location', '--silent', '--show-error', item.urls[archiveArchitecture], '--output', archive], { env });
         const actualDigest = await fileSha256(archive);
-        if (actualDigest !== item.sha256[process.arch]) {
+        if (actualDigest !== item.sha256[archiveArchitecture]) {
           throw new CloudError('PROVIDER_ARCHIVE_INVALID', `${provider} archive digest did not match`, 502);
         }
         await run('tar', ['-xzf', archive, '--strip-components=1', '-C', extracted], { env });
@@ -189,12 +194,23 @@ export class ProviderCliManager {
       cursor: ['login'],
     };
     const env = this.environment(provider);
-    const command = item.kind === 'npm'
-      ? path.join(this.config.providerCliDirectory, 'current', 'node_modules', '.bin', item.bin)
-      : path.join(this.config.providerAuthDirectory, 'cursor', '.local', 'bin', item.bin);
-    await run(command, argumentsByProvider[provider], {
-      env: { ...env, NO_OPEN_BROWSER: '1' },
-    });
+    if (item.kind === 'archive' && process.platform === 'darwin') {
+      await run('podman', [
+        ...(this.config.podmanConnection ? ['--connection', this.config.podmanConnection] : []),
+        'run', '--rm', '--interactive',
+        '--volume', `${env.HOME}:/workspace/home`,
+        '--entrypoint', item.bin,
+        this.config.workerImage,
+        ...argumentsByProvider[provider],
+      ], { env: { ...env, NO_OPEN_BROWSER: '1' } });
+    } else {
+      const command = item.kind === 'npm'
+        ? path.join(this.config.providerCliDirectory, 'current', 'node_modules', '.bin', item.bin)
+        : path.join(this.config.providerAuthDirectory, 'cursor', '.local', 'bin', item.bin);
+      await run(command, argumentsByProvider[provider], {
+        env: { ...env, NO_OPEN_BROWSER: '1' },
+      });
+    }
     return this.providerManager.probe(provider);
   }
 

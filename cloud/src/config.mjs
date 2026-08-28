@@ -56,6 +56,11 @@ function contains(parent, child) {
 
 export function parseConfig(environment = process.env) {
   const dataDirectory = path.resolve(environment.RAUHWpx_DATA_DIR || '/var/lib/rauhwpx-cloud');
+  const platform = environment.RAUHWpx_PLATFORM || process.platform;
+  const workerControlMode = environment.RAUHWpx_WORKER_CONTROL_MODE || (platform === 'darwin' ? 'http' : 'socket');
+  if (!['http', 'socket'].includes(workerControlMode)) {
+    throw new CloudError('CONFIG_INVALID', 'RAUHWpx_WORKER_CONTROL_MODE is invalid');
+  }
   const runner = runnerKind(environment.RAUHWpx_RUNNER);
   const workerUid = userId(environment.RAUHWpx_WORKER_UID, 'RAUHWpx_WORKER_UID');
   if (runner === 'local' && workerUid === null && process.getuid?.() === 0) {
@@ -75,6 +80,7 @@ export function parseConfig(environment = process.env) {
     throw new CloudError('CONFIG_INVALID', 'RAUHWpx_WORKSPACE_ROOT must live outside RAUHWpx_DATA_DIR');
   }
   return {
+    platform,
     host: environment.RAUHWpx_HOST || '127.0.0.1',
     port: port(environment.RAUHWpx_PORT || '7740'),
     bootstrapToken: bootstrapToken(environment.RAUHWpx_BOOTSTRAP_TOKEN),
@@ -88,9 +94,11 @@ export function parseConfig(environment = process.env) {
     blobDirectory: path.join(dataDirectory, 'objects'),
     workerControlDirectory,
     workerControlSocket: path.join(workerControlDirectory, 'control.sock'),
+    workerControlMode,
     providerAuthDirectory: path.join(dataDirectory, 'provider-auth'),
     providerCliDirectory: environment.RAUHWpx_PROVIDER_CLI_DIR || '/opt/rauhwpx-cloud/provider-cli',
     workerImage: environment.RAUHWpx_WORKER_IMAGE || 'ghcr.io/ghandhitechnology/rauhwpx-cloud-worker:stable',
+    podmanConnection: environment.RAUHWpx_PODMAN_CONNECTION || null,
     releaseChannel: environment.RAUHWpx_CHANNEL === 'prerelease' ? 'prerelease' : 'stable',
     maxRunningSessions: positiveInteger(
       environment.RAUHWpx_MAX_RUNNING,

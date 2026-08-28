@@ -50,6 +50,9 @@ export function createCloudRuntime(config, dependencies = {}) {
     providerAuthDirectory: config.providerAuthDirectory,
     providerCliDirectory: config.providerCliDirectory,
     vault,
+    podmanConnection: config.podmanConnection,
+    workerImage: config.workerImage,
+    useContainerProbe: config.platform === 'darwin',
   });
   const runner = dependencies.runner
     ?? (config.runner === 'local' ? new LocalRunner(config, {
@@ -60,7 +63,7 @@ export function createCloudRuntime(config, dependencies = {}) {
   const scheduler = dependencies.scheduler ?? new Scheduler(sessionStore, runner, {
     logger,
     maxRunningSessions: config.maxRunningSessions,
-    controlSocket: config.workerControlSocket,
+    controlEndpoint: config.workerControlMode === 'socket' ? { socketPath: config.workerControlSocket } : null,
     dataDirectory: config.dataDirectory,
     maintenance: async () => {
       auth.prune();
@@ -107,25 +110,47 @@ export function createCloudRuntime(config, dependencies = {}) {
     publicServer,
     workerServer,
     async start() {
-      auth.prune();
-      logger.prune();
-      await blobStore.pruneStaleUploads();
-      if (existsSync(config.workerControlSocket)) unlinkSync(config.workerControlSocket);
-      await listen(workerServer, config.workerControlSocket);
-      await chmod(config.workerControlSocket, 0o600);
-      // local 실행에서는 워커가 다른 uid이므로 소켓 소유자를 워커로 옮긴다. 인증은 세션별 워커 토큰이 한다.
-      if (config.runner === 'local' && config.workerUid !== null) {
-        await chmod(config.workerControlDirectory, 0o711);
-        await chown(config.workerControlSocket, config.workerUid, config.workerGid ?? config.workerUid);
+      try {
+        auth.prune();
+        logger.prune();
+        await blobStore.pruneStaleUploads();
+        if (config.workerControlMode === 'socket') {
+          if (existsSync(config.workerControlSocket)) unlinkSync(config.workerControlSocket);
+          await listen(workerServer, config.workerControlSocket);
+          await chmod(config.workerControlSocket, 0o600);
+          // local 실행에서는 워커가 다른 uid이므로 소켓 소유자를 워커로 옮긴다. 인증은 세션별 워커 토큰이 한다.
+          if (config.runner === 'local' && config.workerUid !== null) {
+            await chmod(config.workerControlDirectory, 0o711);
+            await chown(config.workerControlSocket, config.workerUid, config.workerGid ?? config.workerUid);
+          }
+          scheduler.controlEndpoint = { socketPath: config.workerControlSocket };
+        } else {
+          await listen(workerServer, 0, '127.0.0.1');
+          const address = workerServer.address();
+          if (!address || typeof address === 'string') throw new Error('Worker control endpoint did not bind to TCP');
+          scheduler.controlEndpoint = {
+            baseUrl: `http://host.containers.internal:${address.port}`,
+            hostUrl: `http://127.0.0.1:${address.port}`,
+          };
+          await runner.probeControl?.(scheduler.controlEndpoint);
+        }
+        await listen(publicServer, config.port, config.host);
+        await providerManager.probeAll();
+        await scheduler.start();
+        return {
+          endpoint: `http://${config.host}:${config.port}${config.basePath}`,
+          workerControlSocket: scheduler.controlEndpoint.socketPath ?? null,
+          workerControlUrl: scheduler.controlEndpoint.hostUrl ?? null,
+          serverPublicKey: identity.serverPublicKey,
+        };
+      } catch (error) {
+        await Promise.allSettled([
+          ...(publicServer.listening ? [close(publicServer)] : []),
+          ...(workerServer.listening ? [close(workerServer)] : []),
+        ]);
+        if (config.workerControlMode === 'socket' && existsSync(config.workerControlSocket)) unlinkSync(config.workerControlSocket);
+        throw error;
       }
-      await listen(publicServer, config.port, config.host);
-      await providerManager.probeAll();
-      await scheduler.start();
-      return {
-        endpoint: `http://${config.host}:${config.port}${config.basePath}`,
-        workerControlSocket: config.workerControlSocket,
-        serverPublicKey: identity.serverPublicKey,
-      };
     },
     async stop() {
       await scheduler.stop();
@@ -133,7 +158,7 @@ export function createCloudRuntime(config, dependencies = {}) {
       // workers cannot survive a restart and double-execute their session.
       await runner.stopAll?.();
       await Promise.allSettled([close(publicServer), close(workerServer)]);
-      if (existsSync(config.workerControlSocket)) unlinkSync(config.workerControlSocket);
+      if (config.workerControlMode === 'socket' && existsSync(config.workerControlSocket)) unlinkSync(config.workerControlSocket);
       database.close();
     },
   };

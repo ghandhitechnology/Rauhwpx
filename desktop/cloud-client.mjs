@@ -211,6 +211,7 @@ function sseFrames(buffer) {
 export class CloudClient {
   #vault;
   #fetch;
+  #transport;
   #profile = null;
   #accessToken = '';
   #accessExpiresAt = 0;
@@ -218,11 +219,12 @@ export class CloudClient {
   #profileGeneration = 0;
   #credentialChain = Promise.resolve();
 
-  constructor({ vault, fetchImpl = globalThis.fetch } = {}) {
+  constructor({ vault, fetchImpl = globalThis.fetch, transport = null } = {}) {
     if (!vault) throw new Error('CloudClient requires a secret vault');
     if (typeof fetchImpl !== 'function') throw new Error('CloudClient requires fetch');
     this.#vault = vault;
     this.#fetch = fetchImpl;
+    this.#transport = transport;
   }
 
   async loadProfile() {
@@ -237,7 +239,11 @@ export class CloudClient {
     const profile = normalizeCloudProfile(raw);
     const previous = await this.loadProfile().catch(() => null);
     return this.activateProfile(profile, {
-      preserveCredentials: Boolean(previous && previous.endpoint === profile.endpoint),
+      preserveCredentials: Boolean(
+        previous
+        && previous.serverPublicKey
+        && previous.serverPublicKey === profile.serverPublicKey,
+      ),
     });
   }
 
@@ -954,7 +960,10 @@ export class CloudClient {
     const auth = options.auth !== false;
     const headers = { ...(options.headers ?? {}) };
     const method = String(options.method ?? 'GET').toUpperCase();
-    const requestUrl = joinEndpoint(profile.endpoint, pathname);
+    const lease = this.#transport
+      ? await this.#transport.acquire(profile, { signal: options.signal })
+      : { baseUrl: profile.endpoint, release() {} };
+    const requestUrl = joinEndpoint(lease.baseUrl, pathname);
     const parsedRequestUrl = new URL(requestUrl);
     const proofContext = profile.serverPublicKey ? {
       nonce: randomBytes(24).toString('base64url'),
@@ -996,6 +1005,7 @@ export class CloudClient {
     } finally {
       if (timeout) clearTimeout(timeout);
       if (abort) options.signal?.removeEventListener('abort', abort);
+      lease.release();
     }
     const expectedDigest = proofContext ? verifyResponseProof(profile, response, proofContext) : null;
     const isEventStream = response.headers.get('content-type')?.toLowerCase().startsWith('text/event-stream');

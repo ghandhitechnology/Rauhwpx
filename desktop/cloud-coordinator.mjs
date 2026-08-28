@@ -119,20 +119,32 @@ function uiProfileToStored(input, current = null) {
   const endpoint = explicitEndpoint
     || (canReuseEndpoint ? current.endpoint : '')
     || `https://${host}${transport === 'tailscale' ? tailscalePortSuffix : ''}/rauhwpx-cloud`;
+  const api = transport === 'ssh-tunnel'
+    ? { kind: 'ssh-tunnel', remoteHost: '127.0.0.1', remotePort: 7740, basePath: '/rauhwpx-cloud' }
+    : transport === 'tailscale'
+      ? { kind: 'tailscale-https', endpoint, httpsPort: tailscaleHttpsPort }
+      : { kind: 'public-https', endpoint };
   const auth = source.auth ?? {};
+  const sshUser = source.sshUser ?? source.ssh?.user ?? current?.ssh?.user;
+  const sshPort = source.sshPort ?? source.ssh?.port ?? current?.ssh?.port;
+  const canReuseIdentity = current?.transport === transport
+    && current?.ssh?.host === host
+    && current?.ssh?.user === sshUser
+    && current?.ssh?.port === sshPort;
   return normalizeCloudProfile({
     name: source.name ?? current?.name,
     endpoint,
+    api,
     provider: source.provider ?? current?.provider ?? 'codex',
-    transport: transport === 'tailscale' ? 'tailscale' : 'public-https',
+    transport: transport === 'tailscale' ? 'tailscale' : transport === 'ssh-tunnel' ? 'ssh-tunnel' : 'public-https',
     serverPublicKey: source.serverPublicKey
-      ?? (current?.endpoint === endpoint ? current.serverPublicKey : ''),
+      ?? (canReuseIdentity && current?.endpoint === endpoint ? current.serverPublicKey : ''),
     tailscaleHttpsPort,
     limits: source.limits ?? current?.limits,
     ssh: {
       host,
-      user: source.sshUser ?? source.ssh?.user ?? current?.ssh?.user,
-      port: source.sshPort ?? source.ssh?.port ?? current?.ssh?.port,
+      user: sshUser,
+      port: sshPort,
       keyPath: auth.kind === 'key-file'
         ? auth.keyPath
         : source.ssh?.keyPath ?? current?.ssh?.keyPath ?? '',
@@ -406,7 +418,9 @@ export class CloudCoordinator extends EventEmitter {
                 : { kind: 'ssh-agent' },
               transport: profile.transport === 'tailscale'
                 ? { kind: 'tailscale' }
-                : { kind: 'https', endpoint: profile.endpoint },
+                : profile.transport === 'ssh-tunnel'
+                  ? { kind: 'ssh-tunnel' }
+                  : { kind: 'https', endpoint: profile.endpoint },
               serverPublicKey: profile.serverPublicKey || undefined,
             },
             connection,
@@ -550,7 +564,6 @@ export class CloudCoordinator extends EventEmitter {
     } else {
       preserveCredentials = Boolean(
         current
-        && current.endpoint === updated.endpoint
         && current.serverPublicKey === updated.serverPublicKey
         && await this.#client.isPaired(),
       );

@@ -58,6 +58,7 @@ import { CloudHandoffStore } from './cloud-handoff.mjs';
 import { collectProviderAuth as collectImportedProviderAuth } from './cloud-provider-auth.mjs';
 import { CloudProvisioner } from './cloud-provisioner.mjs';
 import { createRailwayServerProvider } from './cloud-railway.mjs';
+import { CloudApiTransport, SshTunnelManager } from './cloud-ssh-tunnel.mjs';
 import { collectProviderAuth } from './provider-auth.mjs';
 import { applyCloudRecovery } from './cloud-result.mjs';
 import { isNewerStableVersion, selectDebAsset } from './update-policy.mjs';
@@ -304,6 +305,7 @@ let quitRequested = false;
 let desktopReady = false;
 let secretVault = null;
 let cloudCoordinator = null;
+let cloudTransport = null;
 let cloudBroadcastChain = Promise.resolve();
 const CLOUD_BROADCAST_COALESCE_MS = 100;
 let cloudBroadcastTimer = null;
@@ -1322,9 +1324,14 @@ if (!hasSingleInstanceLock) {
       filePath: join(app.getPath('userData'), 'secrets.json'),
       safeStorage,
     });
+    const knownHostsPath = join(app.getPath('userData'), 'cloud', 'ssh-known-hosts');
+    cloudTransport = new CloudApiTransport({
+      tunnelManager: new SshTunnelManager({ knownHostsPath }),
+    });
     const cloudClient = new CloudClient({
       vault: secretVault,
       fetchImpl: (...args) => net.fetch(...args),
+      transport: cloudTransport,
     });
     cloudCoordinator = new CloudCoordinator({
       client: cloudClient,
@@ -1335,7 +1342,7 @@ if (!hasSingleInstanceLock) {
         installerPath: unpackedPath(join(__dirname, '..', 'cloud', 'install', 'install.sh')),
         bootstrapDir: unpackedPath(join(__dirname, '..', 'cloud', 'release')),
         appVersion: app.getVersion(),
-        knownHostsPath: join(app.getPath('userData'), 'cloud', 'ssh-known-hosts'),
+        knownHostsPath,
       }),
       recoveryDir: join(app.getPath('userData'), 'cloud', 'recovery'),
       appServers: [createRailwayServerProvider({
@@ -1411,6 +1418,7 @@ if (!hasSingleInstanceLock) {
     quitting = true;
     void Promise.allSettled([
       cloudCoordinator?.stop(),
+      cloudTransport?.stop(),
       hubOwner.teardown(),
     ]).finally(() => {
       teardownFinished = true;

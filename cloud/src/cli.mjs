@@ -21,6 +21,9 @@ const sessionStore = new SessionStore(database, new BlobStore(database, { root: 
 const providerManager = new ProviderManager(sessionStore, {
   providerAuthDirectory: config.providerAuthDirectory,
   providerCliDirectory: config.providerCliDirectory,
+  podmanConnection: config.podmanConnection,
+  workerImage: config.workerImage,
+  useContainerProbe: config.platform === 'darwin',
   vault,
 });
 const providerCli = new ProviderCliManager(config, providerManager, vault);

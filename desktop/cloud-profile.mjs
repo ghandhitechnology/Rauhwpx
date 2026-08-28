@@ -72,7 +72,8 @@ export function normalizeSshConfig(raw = {}) {
   const port = boundedInteger(raw.port, 22, 1, 65535, 'SSH port');
   const keyPath = String(raw.keyPath ?? '').trim();
   if (keyPath.includes('\0') || keyPath.length > 4096) throw new Error('SSH key path is invalid');
-  const useTailscaleSsh = raw.useTailscaleSsh !== false;
+  const useTailscaleSsh = raw.useTailscaleSsh === true
+    || (raw.useTailscaleSsh == null && isTailscaleHost(host));
   if (useTailscaleSsh && !isTailscaleHost(host)) {
     throw new Error('Tailscale SSH requires a Tailscale IP or MagicDNS hostname');
   }
@@ -108,6 +109,47 @@ export function normalizeSandbox(raw = {}) {
   });
 }
 
+function normalizeApi(raw, ssh) {
+  const source = raw.api && typeof raw.api === 'object' ? raw.api : null;
+  const legacyTransport = raw.transport === 'public-https' || raw.transport === 'tailscale' || raw.transport === 'ssh-tunnel'
+    ? raw.transport
+    : isTailscaleHost(ssh.host) ? 'tailscale' : 'public-https';
+  const kind = source?.kind ?? (
+    legacyTransport === 'tailscale'
+      ? 'tailscale-https'
+      : legacyTransport === 'ssh-tunnel'
+        ? 'ssh-tunnel'
+        : 'public-https'
+  );
+  if (kind === 'ssh-tunnel') {
+    const remotePort = boundedInteger(source?.remotePort, 7740, 1, 65535, 'Cloud service port');
+    if (remotePort !== 7740) throw new Error('SSH tunnel Cloud service port must be 7740');
+    const basePath = String(source?.basePath ?? '/rauhwpx-cloud');
+    if (basePath !== '/rauhwpx-cloud') throw new Error('SSH tunnel Cloud base path is invalid');
+    return Object.freeze({
+      kind,
+      remoteHost: '127.0.0.1',
+      remotePort,
+      basePath,
+    });
+  }
+  if (kind !== 'tailscale-https' && kind !== 'public-https') {
+    throw new Error('Unsupported cloud transport');
+  }
+  const endpoint = normalizeCloudEndpoint(source?.endpoint ?? raw.endpoint);
+  const endpointPort = Number(new URL(endpoint).port || 443);
+  const httpsPort = normalizeTailscaleHttpsPort(
+    source?.httpsPort ?? raw.tailscaleHttpsPort,
+    kind === 'tailscale-https' ? endpointPort : 443,
+  );
+  if (kind === 'tailscale-https' && endpointPort !== httpsPort) {
+    throw new Error('Cloud endpoint port must match the Tailscale HTTPS port');
+  }
+  return Object.freeze(kind === 'tailscale-https'
+    ? { kind, endpoint, httpsPort }
+    : { kind, endpoint });
+}
+
 export function normalizeCloudLimits(raw = {}) {
   return Object.freeze({
     maxRunningSessions: boundedInteger(
@@ -139,9 +181,11 @@ export function normalizeCloudProfile(raw = {}) {
   const mode = raw.mode == null ? 'self-hosted' : String(raw.mode);
   if (!CLOUD_SERVER_MODES.includes(mode)) throw new Error(`Unsupported cloud server mode: ${mode}`);
   const appHosted = mode === 'app-hosted';
-  const endpoint = normalizeCloudEndpoint(raw.endpoint);
   const ssh = appHosted ? null : normalizeSshConfig(raw.ssh);
   const sandbox = appHosted ? normalizeSandbox(raw.sandbox) : null;
+  const api = appHosted
+    ? { kind: 'public-https', endpoint: normalizeCloudEndpoint(raw.endpoint) }
+    : normalizeApi(raw, ssh);
   const provider = raw.provider == null ? 'codex' : String(raw.provider).toLowerCase();
   if (!CLOUD_PROVIDERS.includes(provider)) throw new Error(`Unsupported cloud provider: ${provider}`);
   const serverPublicKey = String(raw.serverPublicKey ?? '').trim();
@@ -162,23 +206,20 @@ export function normalizeCloudProfile(raw = {}) {
   }
   const transport = appHosted
     ? 'public-https'
-    : raw.transport === 'public-https' || raw.transport === 'tailscale'
-      ? raw.transport
-      : isTailscaleHost(ssh.host) ? 'tailscale' : 'public-https';
-  const endpointPort = Number(new URL(endpoint).port || 443);
-  const tailscaleHttpsPort = normalizeTailscaleHttpsPort(
-    raw.tailscaleHttpsPort,
-    transport === 'tailscale' ? endpointPort : 443,
-  );
-  if (transport === 'tailscale' && endpointPort !== tailscaleHttpsPort) {
-    throw new Error('Cloud endpoint port must match the Tailscale HTTPS port');
-  }
+    : api.kind === 'tailscale-https'
+      ? 'tailscale'
+      : api.kind === 'public-https' ? 'public-https' : 'ssh-tunnel';
+  const endpoint = api.kind === 'ssh-tunnel'
+    ? `http://127.0.0.1:${api.remotePort}${api.basePath}`
+    : api.endpoint;
+  const tailscaleHttpsPort = api.kind === 'tailscale-https' ? api.httpsPort : 443;
   return Object.freeze({
-    version: 1,
+    version: 2,
     mode,
     id: appHosted ? `app-hosted:${sandbox.providerId}:${sandbox.sandboxId}` : 'personal-vps',
     name: String(raw.name ?? '').trim().slice(0, 80) || (appHosted ? 'App sandbox' : 'Personal VPS'),
     endpoint,
+    api,
     ssh,
     sandbox,
     provider,

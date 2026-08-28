@@ -5,11 +5,14 @@ import { pipeline } from 'node:stream/promises';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
-function request(socketPath, token, method, pathname, { body, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+function request(target, token, method, pathname, { body, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const bytes = body === undefined ? null : Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
     const requestHandle = http.request({
-      socketPath,
+      ...(target.socketPath ? { socketPath: target.socketPath } : {
+        hostname: target.url.hostname,
+        port: target.url.port,
+      }),
       method,
       path: pathname,
       headers: {
@@ -47,15 +50,16 @@ async function responseJson(response) {
 }
 
 export class WorkerClient {
-  constructor({ socketPath, token, sessionId }) {
-    this.socketPath = socketPath;
+  constructor({ socketPath, baseUrl, token, sessionId }) {
+    if (!socketPath && !baseUrl) throw new Error('Worker control endpoint is required');
+    this.target = socketPath ? { socketPath } : { url: new URL(baseUrl) };
     this.token = token;
     this.sessionId = sessionId;
     this.prefix = `/v1/internal/worker/${encodeURIComponent(sessionId)}`;
   }
 
   async json(method, action, body) {
-    return responseJson(await request(this.socketPath, this.token, method, `${this.prefix}${action}`, { body }));
+    return responseJson(await request(this.target, this.token, method, `${this.prefix}${action}`, { body }));
   }
 
   manifest() { return this.json('GET', '/manifest'); }
@@ -73,7 +77,7 @@ export class WorkerClient {
   suspend(code, message) { return this.json('POST', '/suspend', { code, message }); }
 
   async download(blobId, destination) {
-    const response = await request(this.socketPath, this.token, 'GET', `${this.prefix}/blobs/${blobId}`);
+    const response = await request(this.target, this.token, 'GET', `${this.prefix}/blobs/${blobId}`);
     if (response.statusCode !== 200) return responseJson(response);
     const digest = createHash('sha256');
     response.on('data', (chunk) => digest.update(chunk));
@@ -91,7 +95,7 @@ export class WorkerClient {
     while (state.status !== 'complete') {
       const chunk = bytes.subarray(state.offset, state.offset + state.chunkSize);
       state = await responseJson(await request(
-        this.socketPath,
+        this.target,
         this.token,
         'POST',
         `${this.prefix}/uploads/${state.uploadId}/chunks`,
