@@ -904,7 +904,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'present_implementation_plan',
-    description: 'Present a complete implementation plan for user review. The hub assigns the authoritative planId, stores the canonical plan, emits plan-ready to Studio, and moves the plan workflow to awaiting-approval. This is a control action, not document approval.',
+    description: 'Present a complete implementation plan for user review. Call only after the user asked for a plan. Do not say the plan is ready before this tool returns. The hub assigns planId, stores the plan, emits plan-ready, and moves to awaiting-approval.',
     shape: IMPLEMENTATION_PLAN_SHAPE,
   },
   {
@@ -1130,6 +1130,7 @@ export const TOOL_DEFINITIONS = Object.freeze(BASE_TOOL_DEFINITIONS.map((definit
 export const TOOL_PROFILES = Object.freeze({
   direct: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'background-control']),
   planning: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'planning-control', 'browser']),
+  question: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser']),
   'awaiting-approval': Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser']),
   implementing: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'browser', 'background-control']),
   'copy-layout-worker': Object.freeze([

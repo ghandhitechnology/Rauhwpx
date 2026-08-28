@@ -87,6 +87,13 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(!planning.has('update_agent_instructions'));
   assert.ok(!planning.has('insert_text'));
 
+  const question = new Set(filterToolDefinitions('question').map((definition) => definition.name));
+  assert.ok(question.has('get_structure'));
+  assert.ok(question.has('download_file'));
+  assert.ok(question.has('browserbase_act'));
+  assert.ok(!question.has('present_implementation_plan'));
+  assert.ok(!question.has('insert_text'));
+
   const implementing = new Set(filterToolDefinitions('implementing').map((definition) => definition.name));
   assert.equal(implementing.size, TOOL_DEFINITIONS.length - 3);
   assert.ok(implementing.has('insert_text'));
