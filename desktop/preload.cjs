@@ -89,6 +89,7 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
   cloudSetTransferIntent: (payload) => ipcRenderer.invoke('cloud:transfer-intent', payload),
   cloudReadReference: (payload) => ipcRenderer.invoke('cloud:read-reference', payload),
   cloudCommand: (payload) => ipcRenderer.invoke('cloud:command', payload),
+  cloudDismissSession: (payload) => ipcRenderer.invoke('cloud:dismiss-session', payload),
   cloudCompleteTakeover: (payload) => ipcRenderer.invoke('cloud:complete-takeover', payload),
   cloudDownloadResult: (payload) => ipcRenderer.invoke('cloud:download-result', payload),
   cloudResolveResult: (payload) => ipcRenderer.invoke('cloud:resolve-result', payload),

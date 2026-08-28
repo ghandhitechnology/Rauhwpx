@@ -18,12 +18,13 @@ const SSE_STREAM_DIGEST = digest(Buffer.from(SSE_STREAM_PROTOCOL));
 const RESPONSE_PROOF_CONTEXT = Symbol('rauhwpx-response-proof-context');
 
 export class CloudHttpError extends Error {
-  constructor(message, { status = 0, code = '', details = null } = {}) {
+  constructor(message, { status = 0, code = '', details = null, retryable = null } = {}) {
     super(message);
     this.name = 'CloudHttpError';
     this.status = status;
     this.code = code;
     this.details = details;
+    this.retryable = typeof retryable === 'boolean' ? retryable : null;
   }
 }
 
@@ -77,15 +78,27 @@ function joinEndpoint(endpoint, pathname) {
 async function responseJson(response) {
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > MAX_JSON_BYTES) {
-    throw new CloudHttpError('Cloud response is too large', { status: response.status });
+    throw new CloudHttpError('Cloud response is too large', {
+      status: response.status,
+      code: 'CLOUD_RESPONSE_TOO_LARGE',
+      retryable: false,
+    });
   }
   const text = await response.text();
   if (Buffer.byteLength(text) > MAX_JSON_BYTES) {
-    throw new CloudHttpError('Cloud response is too large', { status: response.status });
+    throw new CloudHttpError('Cloud response is too large', {
+      status: response.status,
+      code: 'CLOUD_RESPONSE_TOO_LARGE',
+      retryable: false,
+    });
   }
   if (!text) return {};
   try { return JSON.parse(text); } catch {
-    throw new CloudHttpError('Cloud returned invalid JSON', { status: response.status });
+    throw new CloudHttpError('Cloud returned invalid JSON', {
+      status: response.status,
+      code: 'CLOUD_RESPONSE_INVALID',
+      retryable: false,
+    });
   }
 }
 
@@ -311,6 +324,46 @@ export class CloudClient {
 
   async isPaired() {
     return Boolean(await this.#vault.get(REFRESH_SECRET));
+  }
+
+  async assertTransferReady() {
+    let profile;
+    try {
+      profile = await this.#requiredProfile();
+    } catch (error) {
+      if (error?.code === 'CLOUD_NOT_CONFIGURED') throw error;
+      throw new CloudHttpError('Stored cloud profile could not be read', {
+        code: 'CLOUD_PROFILE_UNREADABLE',
+        retryable: false,
+        details: { cause: String(error?.message ?? error) },
+      });
+    }
+    let paired;
+    try {
+      paired = await this.isPaired();
+    } catch (error) {
+      throw new CloudHttpError('Cloud pairing credentials could not be read', {
+        code: 'CLOUD_CREDENTIALS_UNAVAILABLE',
+        retryable: false,
+        details: { cause: String(error?.message ?? error) },
+      });
+    }
+    if (!paired) {
+      throw new CloudHttpError('This device must be paired with the VPS', {
+        status: 401,
+        code: 'PAIRING_REQUIRED',
+        retryable: false,
+      });
+    }
+    const health = await this.health(profile);
+    if (health?.protocolVersion !== 1) {
+      throw new CloudHttpError('Cloud server protocol is not compatible with this app', {
+        code: 'CLOUD_PROTOCOL_INCOMPATIBLE',
+        retryable: false,
+        details: { expected: 1, received: health?.protocolVersion ?? null },
+      });
+    }
+    return { profile, health };
   }
 
   /** 사용자가 마지막으로 고른 서버 방식을 기억해 다음 설정을 그 화면에서 시작한다. */
@@ -835,7 +888,12 @@ export class CloudClient {
 
   async #requiredProfile() {
     const profile = await this.loadProfile();
-    if (!profile) throw new Error('Cloud VPS is not configured');
+    if (!profile) {
+      throw new CloudHttpError('Cloud server is not configured', {
+        code: 'CLOUD_NOT_CONFIGURED',
+        retryable: false,
+      });
+    }
     return profile;
   }
 
@@ -860,6 +918,7 @@ export class CloudClient {
         if (!refreshToken) throw new CloudHttpError('This device must be paired with the VPS', {
           status: 401,
           code: 'PAIRING_REQUIRED',
+          retryable: false,
         });
         const tokens = await this.#request('/v1/token/refresh', {
           method: 'POST',
@@ -917,7 +976,10 @@ export class CloudClient {
       if (options.signal?.aborted) abort();
     }
     const timeout = timeoutMs > 0
-      ? setTimeout(() => controller.abort(new Error('Cloud request timed out')), timeoutMs)
+      ? setTimeout(() => controller.abort(new CloudHttpError('Cloud request timed out', {
+        code: 'ETIMEDOUT',
+        retryable: true,
+      })), timeoutMs)
       : null;
     let response;
     try {

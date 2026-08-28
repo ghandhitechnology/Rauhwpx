@@ -7,7 +7,7 @@
     "node": ">=24.7.0"
   },
   "dependencies": {
-    "puppeteer-core": "25.3.0"
+    "puppeteer-core": "25.6.0"
   },
   "scripts": {
     "start": "node src/main.mjs",

@@ -192,7 +192,7 @@ test('the Railway provider refuses to pretend when it has no configuration', asy
   });
   assert.equal(env.token, 'railway-token');
   assert.equal(env.apiUrl, 'https://backboard.railway.com/graphql/v2');
-  assert.match(env.image, /rauhwpx-cloud/);
+  assert.equal(env.image, 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.10');
 });
 
 test('the Railway provider creates a reachable sandbox and returns a pairing receipt', async () => {
@@ -244,6 +244,35 @@ test('the Railway provider creates a reachable sandbox and returns a pairing rec
   assert.equal(variables.variables.RAUHWpx_DATA_DIR, '/var/lib/rauhwpx-cloud');
   assert.equal(variables.variables.RAUHWpx_SANDBOX_INSTALL_PROVIDER, '0');
   assert.equal(variables.variables.RAUHWpx_PROVIDER_KEY_CODEX, undefined);
+});
+
+test('Railway reconciles a service when the create response is interrupted', async () => {
+  const routes = {
+    ...SPAWN_ROUTES,
+    RauhwpxServiceCreate: () => { throw new Error('connection reset after create'); },
+    RauhwpxProjectServices: (_variables, calls) => ({
+      data: {
+        project: {
+          services: {
+            edges: [{ node: {
+              id: 'service-1',
+              name: calls.find((call) => call.name === 'RauhwpxServiceCreate').variables.input.name,
+            } }],
+          },
+        },
+      },
+    }),
+  };
+  const { provider, transport } = railwayProvider(routes);
+  const lines = [];
+  const spawned = await provider.spawn({ onLine: (line) => lines.push(line) });
+  assert.equal(spawned.sandbox.sandboxId, 'service-1');
+  assert.deepEqual(transport.names().slice(0, 3), [
+    'RauhwpxServiceCreate',
+    'RauhwpxProjectServices',
+    'RauhwpxServiceInstanceUpdate',
+  ]);
+  assert.ok(lines.includes('Recovered the sandbox after an interrupted Railway response'));
 });
 
 test('Railway spawn injects only the selected provider credentials', async () => {

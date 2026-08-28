@@ -1160,6 +1160,11 @@ ipcMain.handle('cloud:command', async (event, payload) => {
   const operation = await requireCloudCoordinator().command(payload);
   return scopedCloudSnapshot(session, operation);
 });
+ipcMain.handle('cloud:dismiss-session', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const operation = await requireCloudCoordinator().dismissSession(payload);
+  return scopedCloudSnapshot(session, operation);
+});
 ipcMain.handle('cloud:complete-takeover', async (event, payload) => {
   const session = sessionForEvent(event);
   const operation = await requireCloudCoordinator().completeTakeover(payload);
@@ -1404,8 +1409,10 @@ if (!hasSingleInstanceLock) {
     if (teardownStarted) return;
     teardownStarted = true;
     quitting = true;
-    cloudCoordinator?.stop();
-    void hubOwner.teardown().finally(() => {
+    void Promise.allSettled([
+      cloudCoordinator?.stop(),
+      hubOwner.teardown(),
+    ]).finally(() => {
       teardownFinished = true;
       app.exit(0);
     });

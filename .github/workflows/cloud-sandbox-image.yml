@@ -2,6 +2,11 @@ name: Publish cloud sandbox edge image
 
 on:
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Optional immutable GHCR tag for this build
+        required: false
+        type: string
   push:
     tags:
       - 'cloud-sandbox-v*'
@@ -66,13 +71,34 @@ jobs:
           const config = parseConfig(process.env);
           if (config.runner !== "local") throw new Error("sandbox image must use the local runner");
           if (config.workerUid !== 1001) throw new Error("sandbox image must drop workers to uid 1001");'
+          podman run --rm --entrypoint bash rauhwpx-cloud-sandbox-edge -lc '
+            set -e
+            mkdir -p /tmp/smoke-home /tmp/smoke-tmp
+            chown -R 1001:1001 /tmp/smoke-home /tmp/smoke-tmp
+            setpriv --reuid=1001 --regid=1001 --clear-groups \
+              env HOME=/tmp/smoke-home TMPDIR=/tmp/smoke-tmp \
+              node /app/document-runtime/smoke.mjs
+          '
 
-      - name: Publish edge image
+      - name: Publish edge and immutable images
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rauhwpx-cloud"
+          immutable_tag="$REQUESTED_TAG"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == cloud-sandbox-v* ]]; then
+            immutable_tag="${GITHUB_REF_NAME#cloud-sandbox-v}"
+          fi
+          if [[ -n "$immutable_tag" && ! "$immutable_tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "Invalid immutable image tag: $immutable_tag" >&2
+            exit 1
+          fi
           printf '%s' "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          if [[ -n "$immutable_tag" ]]; then
+            podman tag rauhwpx-cloud-sandbox-edge "$image:$immutable_tag"
+            podman push "$image:$immutable_tag"
+          fi
           podman tag rauhwpx-cloud-sandbox-edge "$image:edge"
           podman push "$image:edge"

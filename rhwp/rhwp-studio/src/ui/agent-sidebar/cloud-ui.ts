@@ -235,6 +235,14 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     });
   }
 
+  function dismissSession(): void {
+    const session = snapshot.session;
+    if (session.kind !== 'failed' && session.kind !== 'cancelled') return;
+    void operation(async () => {
+      await deps.controller.dismissSession(session.sessionId);
+    });
+  }
+
   async function download(): Promise<void> {
     const session = snapshot.session;
     if (session.kind !== 'completed') return;
@@ -379,10 +387,12 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelStatus.textContent = session.message;
         panelDetail.textContent = session.code;
         if (session.retryable) panelActions.append(action('새 클라우드 작업으로 다시 전송', deps.onRequestTransfer, 'ag-primary'));
+        panelActions.append(action('기록 지우기', dismissSession));
         break;
       case 'cancelled':
         panelStatus.textContent = '클라우드 작업을 취소했습니다.';
         panelDetail.textContent = '문서 편집 권한이 이 기기로 돌아왔습니다.';
+        panelActions.append(action('기록 지우기', dismissSession));
         break;
     }
   }

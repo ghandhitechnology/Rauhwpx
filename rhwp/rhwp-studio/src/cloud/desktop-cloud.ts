@@ -40,6 +40,7 @@ export interface CloudDesktopApi {
   cloudSetTransferIntent?: (payload: CloudTransferIntentRequest) => Promise<unknown>;
   cloudReadReference?: (payload: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<unknown>;
   cloudCommand?: (payload: CloudCommandRequest) => Promise<unknown>;
+  cloudDismissSession?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudCompleteTakeover?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudDownloadResult?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudResolveResult?: (payload: { sessionId: string; action: CloudResultAction }) => Promise<unknown>;
@@ -63,6 +64,7 @@ export interface CloudController {
   setTransferIntent(request: CloudTransferIntentRequest): Promise<CloudSnapshot>;
   readReference(reference: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>): Promise<Uint8Array>;
   command(request: CloudCommandRequest): Promise<CloudSnapshot>;
+  dismissSession(sessionId: string): Promise<CloudSnapshot>;
   completeTakeover(sessionId: string): Promise<CloudSnapshot>;
   downloadResult(sessionId: string): Promise<CloudDownloadResult>;
   resolveResult(sessionId: string, action: CloudResultAction): Promise<CloudResultResolution>;
@@ -561,6 +563,7 @@ export function createCloudController(
       return raw.bytes;
     },
     command: (request) => call('cloudCommand', request),
+    dismissSession: (sessionId) => call('cloudDismissSession', { sessionId }),
     completeTakeover: (sessionId) => call('cloudCompleteTakeover', { sessionId }),
     async downloadResult(sessionId) {
       const fn = api?.cloudDownloadResult;

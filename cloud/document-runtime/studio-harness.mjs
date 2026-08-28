@@ -361,6 +361,44 @@ export async function uploadRequiredReferences({
   }
 }
 
+const CHROMIUM_ARGS = Object.freeze([
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
+  '--disable-background-networking',
+  '--disable-component-update',
+  '--disable-crash-reporter',
+  '--disable-default-apps',
+  '--disable-extensions',
+  '--disable-sync',
+  '--metrics-recording-only',
+  '--no-first-run',
+]);
+
+async function launchChromium(puppeteer, chromiumPath) {
+  const failures = [];
+  for (const pipe of [true, false]) {
+    try {
+      return await puppeteer.launch({
+        executablePath: chromiumPath,
+        headless: true,
+        pipe,
+        dumpio: process.env.RAUHWpx_CHROMIUM_DUMPIO === '1',
+        args: [...CHROMIUM_ARGS],
+      });
+    } catch (error) {
+      failures.push(`${pipe ? 'pipe' : 'port'}: ${error?.message ?? error}`);
+      if (/ENOENT|Browser was not found|Could not find Chrome/i.test(String(error?.message ?? error))) break;
+    }
+  }
+  throw runtimeError(
+    'BROWSER_LAUNCH_FAILED',
+    'Cloud document browser could not start',
+    new Error(failures.join(' | ')),
+  );
+}
+
 export async function createStudioHarness({
   manifest,
   workspace,
@@ -449,24 +487,7 @@ export async function createStudioHarness({
     hub.stdout?.resume();
     await waitForHub(hubPort, hubToken, hub);
 
-    browser = await puppeteer.launch({
-      executablePath: chromiumPath,
-      headless: true,
-      pipe: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-background-networking',
-        '--disable-component-update',
-        '--disable-default-apps',
-        '--disable-extensions',
-        '--disable-sync',
-        '--metrics-recording-only',
-        '--no-first-run',
-      ],
-    });
+    browser = await launchChromium(puppeteer, chromiumPath);
     page = await browser.newPage();
     let pageErrorTail = '';
     const appendPageError = (message) => {
@@ -531,8 +552,6 @@ export async function createStudioHarness({
       'DOCUMENT_LOAD_TIMEOUT',
       'Cloud Studio document load timed out',
     );
-    await uploadRequiredReferences({ page, bootstrap, origin, references, scopeId: thread.id, onEvent });
-
     return {
       async start({ history }) {
         if (started) return;
@@ -559,6 +578,7 @@ export async function createStudioHarness({
           bootstrap,
           manifest.provider,
         );
+        await uploadRequiredReferences({ page, bootstrap, origin, references, scopeId: thread.id, onEvent });
       },
       async runTurn(prompt, { timeoutMs }) {
         const sentAt = Date.now();

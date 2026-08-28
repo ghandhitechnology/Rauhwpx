@@ -105,10 +105,29 @@ export class CloudHandoffStore {
       if (parsed.takeoverReceipts != null && !Array.isArray(parsed.takeoverReceipts)) {
         throw new Error('Unsupported handoff takeover receipts');
       }
+      let migrated = false;
       for (const record of parsed.records) {
         try {
           const validated = validateRecord(record);
-          this.#records.set(validated.id, Object.freeze({ ...validated }));
+          const terminal = TERMINAL_STATES.has(validated.state);
+          const normalized = {
+            ...validated,
+            errorCode: typeof validated.errorCode === 'string' ? validated.errorCode : null,
+            retryable: typeof validated.retryable === 'boolean' ? validated.retryable : null,
+            failurePhase: typeof validated.failurePhase === 'string' ? validated.failurePhase : null,
+            destination: validated.destination && typeof validated.destination === 'object'
+              ? { ...validated.destination }
+              : null,
+            ...(terminal ? {
+              documentStagingPath: null,
+              resources: (validated.resources ?? []).map(({ stagingPath: _stagingPath, ...resource }) => resource),
+            } : {}),
+          };
+          if (terminal && validated.documentStagingPath) {
+            await fs.rm(path.join(this.#payloadRoot, validated.id), { recursive: true, force: true }).catch(() => {});
+            migrated = true;
+          }
+          this.#records.set(normalized.id, Object.freeze(normalized));
         } catch {}
       }
       for (const receipt of parsed.takeoverReceipts ?? []) {
@@ -119,6 +138,17 @@ export class CloudHandoffStore {
             Object.freeze({ ...validated }),
           );
         } catch {}
+      }
+      if (migrated) await this.#persist().catch(() => {});
+      const activePayloadIds = new Set(
+        [...this.#records.values()]
+          .filter((record) => !TERMINAL_STATES.has(record.state) && record.documentStagingPath)
+          .map((record) => record.id),
+      );
+      for (const entry of await fs.readdir(this.#payloadRoot, { withFileTypes: true }).catch(() => [])) {
+        if (entry.isDirectory() && !activePayloadIds.has(entry.name)) {
+          await fs.rm(path.join(this.#payloadRoot, entry.name), { recursive: true, force: true }).catch(() => {});
+        }
       }
     } catch (error) {
       if (error?.code !== 'ENOENT') {
@@ -142,6 +172,7 @@ export class CloudHandoffStore {
     goal,
     limits,
     resources = [],
+    destination = null,
   }) {
     await this.load();
     const bytes = Buffer.from(documentBytes ?? []);
@@ -204,10 +235,14 @@ export class CloudHandoffStore {
       limits: { ...safeRecord(limits) },
       resources: stagedResources,
       timeline: timeline && typeof timeline === 'object' ? structuredClone(timeline) : null,
+      destination: destination && typeof destination === 'object' ? structuredClone(destination) : null,
       lastEventSequence: 0,
       createdAt: now,
       updatedAt: now,
       error: null,
+      errorCode: null,
+      retryable: null,
+      failurePhase: null,
     });
     this.#records.set(record.id, record);
     try {
@@ -228,9 +263,15 @@ export class CloudHandoffStore {
     if (!TRANSITIONS[current.state]?.has(nextState)) {
       throw new Error(`Invalid cloud handoff transition: ${current.state} -> ${nextState}`);
     }
+    const terminal = TERMINAL_STATES.has(nextState);
+    if (terminal) await fs.rm(path.join(this.#payloadRoot, id), { recursive: true, force: true });
     const next = Object.freeze({
       ...current,
       ...safeRecord(patch),
+      ...(terminal ? {
+        documentStagingPath: null,
+        resources: (current.resources ?? []).map(({ stagingPath: _stagingPath, ...resource }) => resource),
+      } : {}),
       id: current.id,
       version: current.version,
       state: nextState,
@@ -284,8 +325,15 @@ export class CloudHandoffStore {
   async remove(id) {
     await this.load();
     const removed = this.#records.delete(id);
-    if (removed) await this.#persist();
+    if (removed) {
+      await fs.rm(path.join(this.#payloadRoot, id), { recursive: true, force: true });
+      await this.#persist();
+    }
     return removed;
+  }
+
+  async dismiss(id) {
+    return this.remove(id);
   }
 
   async consumeTakeoverBoundary(sessionId, operationId) {

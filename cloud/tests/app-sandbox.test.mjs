@@ -215,13 +215,17 @@ test('local runner isolates each session workspace and cleans it up on stop', as
   assert.equal(await fs.readFile(copied, 'utf8'), '{"token":"x"}');
   assert.ok(start.options.env.RAUHWpx_PROVIDER_AUTH.startsWith(path.join(config.workspaceRoot, first)));
 
-  // TMPDIR 이 없으면 mkdtemp 를 쓰는 도구가 전부 실패한다.
-  assert.equal(start.options.env.TMPDIR, path.join(config.workspaceRoot, first, 'tmp'));
-  assert.equal(await fs.access(start.options.env.TMPDIR).then(() => true, () => false), true);
+  // Chromium's singleton Unix socket must stay below the platform path limit.
+  const temporaryDirectory = start.options.env.TMPDIR;
+  assert.match(temporaryDirectory, /^\/tmp\/rw-[a-f0-9]{12}$/);
+  assert.ok(Buffer.byteLength(path.join(temporaryDirectory, 'org.chromium.Chromium.XXXXXX', 'SingletonSocket')) < 108);
+  assert.equal(temporaryDirectory.startsWith(path.join(config.workspaceRoot, first)), false);
+  assert.equal(await fs.access(temporaryDirectory).then(() => true, () => false), true);
 
   await runner.stop(first);
   assert.equal(start.child.killed, 'SIGTERM');
   assert.equal(await fs.access(path.join(config.workspaceRoot, first)).then(() => true, () => false), false);
+  assert.equal(await fs.access(temporaryDirectory).then(() => true, () => false), false);
   assert.deepEqual((await runner.list()).map((entry) => entry.sessionId), ['session-two']);
 
   await runner.stop(first);

@@ -91,18 +91,22 @@ export class LocalRunner {
   async start(session, { workerToken, controlSocket }) {
     const sandboxId = `local-${randomUUID()}`;
     const workspace = path.join(this.config.workspaceRoot, sandboxId);
+    // Chromium's process-singleton socket is limited to a 108-byte Unix path.
+    // Keep its TMPDIR short instead of nesting it under the durable workspace path.
+    const temporaryDirectory = path.join('/tmp', `rw-${sandboxId.slice(-12)}`);
     const source = path.join(this.config.providerAuthDirectory, session.provider);
     await fs.mkdir(source, { recursive: true, mode: 0o700 });
     await fs.mkdir(workspace, { recursive: true, mode: 0o700 });
     // 워커는 컨트롤 플레인의 데이터 디렉터리를 지날 수 없다. 세션마다 자격 증명 사본을 준다.
     const providerAuth = path.join(workspace, 'provider-auth');
     await fs.cp(source, providerAuth, { recursive: true, force: true });
-    // TMPDIR 은 워크스페이스 안이라 세션과 함께 사라진다. 없으면 mkdtemp 를 쓰는 도구가 전부 실패한다.
-    await fs.mkdir(path.join(workspace, 'tmp'), { recursive: true, mode: 0o700 });
+    await fs.mkdir(temporaryDirectory, { recursive: false, mode: 0o700 });
     const { workerUid, workerGid } = this.config;
     if (workerUid !== null) {
       await chownTree(workspace, workerUid, workerGid ?? workerUid);
+      await fs.chown(temporaryDirectory, workerUid, workerGid ?? workerUid);
       await fs.chmod(workspace, 0o700);
+      await fs.chmod(temporaryDirectory, 0o700);
     }
     const home = path.join(workspace, 'home');
     const child = this.spawnProcess(this.nodeExecutable, [this.workerEntry], {
@@ -115,7 +119,7 @@ export class LocalRunner {
         CODEX_HOME: path.join(home, '.codex'),
         GROK_HOME: path.join(home, '.grok'),
         PI_CODING_AGENT_DIR: path.join(home, '.pi', 'agent'),
-        TMPDIR: path.join(workspace, 'tmp'),
+        TMPDIR: temporaryDirectory,
         RAUHWpx_SESSION_ID: session.id,
         RAUHWpx_PROVIDER: session.provider,
         RAUHWpx_WORKER_TOKEN: workerToken,
@@ -124,7 +128,7 @@ export class LocalRunner {
         RAUHWpx_PROVIDER_AUTH: providerAuth,
       }),
     });
-    const entry = { sessionId: session.id, child, workspace, running: true };
+    const entry = { sessionId: session.id, child, workspace, temporaryDirectory, running: true };
     this.children.set(sandboxId, entry);
     // stderr is the worker's only diagnostics channel; an unread pipe fills
     // up and blocks the worker, so keep a bounded tail and log it on exit.
@@ -139,7 +143,10 @@ export class LocalRunner {
       entry.running = false;
       if (this.children.get(sandboxId) === entry) {
         this.children.delete(sandboxId);
-        void fs.rm(workspace, { recursive: true, force: true }).catch(() => {});
+        void Promise.allSettled([
+          fs.rm(workspace, { recursive: true, force: true }),
+          fs.rm(temporaryDirectory, { recursive: true, force: true }),
+        ]);
       }
       if (code) this.onWorkerExit?.(sandboxId, session.id, code, stderrTail.trim());
     };
@@ -152,7 +159,10 @@ export class LocalRunner {
     await new Promise((resolve) => setImmediate(resolve));
     if (entry.error) {
       this.children.delete(sandboxId);
-      await fs.rm(workspace, { recursive: true, force: true }).catch(() => {});
+      await Promise.allSettled([
+        fs.rm(workspace, { recursive: true, force: true }),
+        fs.rm(temporaryDirectory, { recursive: true, force: true }),
+      ]);
       throw new CloudError('WORKER_SPAWN_FAILED', entry.error.message, 503);
     }
     return sandboxId;
@@ -180,6 +190,9 @@ export class LocalRunner {
       clearTimeout(timer);
     }
     entry.running = false;
-    await fs.rm(entry.workspace, { recursive: true, force: true }).catch(() => {});
+    await Promise.allSettled([
+      fs.rm(entry.workspace, { recursive: true, force: true }),
+      fs.rm(entry.temporaryDirectory, { recursive: true, force: true }),
+    ]);
   }
 }

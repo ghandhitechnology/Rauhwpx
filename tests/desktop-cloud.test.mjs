@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -74,6 +74,32 @@ function portableTimeline(overrides = {}) {
     },
   };
 }
+
+test('transfer recovery retries only explicit transport and server failures', () => {
+  assert.equal(coordinatorTest.nonRetryableTransferError(new Error('local payload is corrupt')), true);
+  assert.equal(coordinatorTest.nonRetryableTransferError(new TypeError('fetch failed')), false);
+  assert.equal(coordinatorTest.nonRetryableTransferError(new TypeError('Cannot read properties of undefined')), true);
+  assert.equal(coordinatorTest.nonRetryableTransferError(new CloudHttpError('busy', { status: 500 })), false);
+  assert.equal(coordinatorTest.nonRetryableTransferError(new CloudHttpError('rate limited', { status: 429 })), false);
+  assert.equal(coordinatorTest.nonRetryableTransferError(new CloudHttpError('bad request', { status: 400 })), true);
+  assert.equal(coordinatorTest.nonRetryableTransferError(Object.assign(new Error('configured wrong'), {
+    retryable: false,
+  })), true);
+
+  const readiness = {
+    profile: {
+      endpoint: 'https://one.example/rauhwpx-cloud',
+      serverPublicKey: SERVER_KEY,
+      mode: 'app-hosted',
+      sandbox: { providerId: 'railway', sandboxId: 'sandbox-one' },
+    },
+    health: { protocolVersion: 1, version: '1.1.0' },
+  };
+  const destination = coordinatorTest.destinationFromReadiness(readiness);
+  assert.equal(coordinatorTest.sameDestination(destination, { ...destination, runtimeVersion: '1.1.1' }), true);
+  assert.equal(coordinatorTest.sameDestination(destination, { ...destination, sandboxId: 'sandbox-two' }), false);
+  assert.equal(coordinatorTest.sameDestination(destination, null), false);
+});
 
 test('cloud profile accepts Tailscale and rejects insecure endpoints', () => {
   const profile = normalizeCloudProfile({
@@ -250,6 +276,88 @@ test('handoff store persists transitions and ignores replayed events', async (t)
   assert.equal(record.cloudSessionId, 'cloud-1');
   assert.equal(record.lastEventSequence, 7);
   assert.equal(record.originDocumentId, 'document-1');
+});
+
+test('snapshot selection does not let an updated stale failure hide newer live work', async () => {
+  const base = {
+    version: 1,
+    revision: 1,
+    originSessionId: 'desktop-selection',
+    originDocumentId: 'document-selection',
+    threadId: 'thread-selection',
+    documentName: 'selection.hwpx',
+    documentDigest: 'a'.repeat(64),
+    documentSize: 1,
+    limits: {},
+  };
+  const records = [
+    {
+      ...base,
+      id: 'stale-failure',
+      state: 'failed',
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-30T00:00:00.000Z',
+      error: 'old failure',
+      errorCode: 'CLOUD_NOT_CONFIGURED',
+      retryable: false,
+    },
+    {
+      ...base,
+      id: 'live-session',
+      cloudSessionId: 'cloud-live',
+      state: 'suspended',
+      createdAt: '2026-08-20T00:00:00.000Z',
+      updatedAt: '2026-08-20T00:00:00.000Z',
+      error: null,
+    },
+  ];
+  const coordinator = new CloudCoordinator({
+    client: { loadProfile: async () => null, isPaired: async () => false },
+    store: { list: async () => records },
+    provisioner: {},
+  });
+  const snapshot = await coordinator.snapshot({
+    originSessionId: 'desktop-selection',
+    documentId: 'document-selection',
+  });
+  assert.equal(snapshot.session.kind, 'suspended');
+  assert.equal(snapshot.session.sessionId, 'cloud-live');
+  assert.equal(snapshot.lease.owner, 'cloud');
+});
+
+test('loading legacy terminal handoffs removes their staged payloads', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-terminal-migration-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'handoffs.json');
+  const store = new CloudHandoffStore({ filePath });
+  const created = await store.create({
+    sessionId: 'desktop-legacy',
+    documentId: 'document-legacy',
+    documentName: 'legacy.hwpx',
+    documentBytes: Buffer.from('legacy-document'),
+    provider: 'codex',
+  });
+  const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+  persisted.records[0].state = 'failed';
+  persisted.records[0].error = 'old terminal failure';
+  await writeFile(filePath, `${JSON.stringify(persisted)}\n`);
+
+  const reloaded = new CloudHandoffStore({ filePath });
+  const [record] = await reloaded.load();
+  assert.equal(record.state, 'failed');
+  assert.equal(record.documentStagingPath, null);
+  assert.deepEqual(record.resources, []);
+  await assert.rejects(access(path.join(directory, 'pending-payloads', created.id)), {
+    code: 'ENOENT',
+  });
+  const coordinator = new CloudCoordinator({
+    client: { loadProfile: async () => null, isPaired: async () => false },
+    store: reloaded,
+    provisioner: {},
+  });
+  const snapshot = await coordinator.dismissSession({ sessionId: created.id });
+  assert.deepEqual(await reloaded.list(), []);
+  assert.equal(snapshot.session.kind, 'idle');
 });
 
 test('result resolution replaces unchanged origins and preserves conflicts', async (t) => {
@@ -1444,4 +1552,92 @@ test('AUTH_REQUIRED fails the transfer once instead of retrying recovery', async
   assert.equal(records[0].error, 'codex must be authenticated on this VPS');
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(transferCalls, 1);
+});
+
+test('concurrent requests cannot stage duplicate document transfers', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-duplicate-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const profile = { endpoint: 'https://sandbox.example/rauhwpx-cloud', mode: 'app-hosted', serverPublicKey: SERVER_KEY, sandbox: { providerId: 'railway', sandboxId: 'sandbox-1' } };
+  const client = {
+    assertTransferReady: async () => ({ profile, health: { protocolVersion: 1, version: '1.1.0' } }),
+    loadProfile: async () => profile,
+    isPaired: async () => true,
+    transfer: async ({ signal }) => new Promise((_resolve, reject) => {
+      const stopped = () => reject(Object.assign(new Error('stopped'), { code: 'ECONNRESET' }));
+      if (signal.aborted) stopped();
+      else signal.addEventListener('abort', stopped, { once: true });
+    }),
+  };
+  const coordinator = new CloudCoordinator({
+    client,
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  const payload = {
+    agent: 'codex',
+    threadId: 'thread-duplicate',
+    documentId: 'document-duplicate',
+    document: { fileName: 'duplicate.hwpx', bytes: Buffer.from('document') },
+    timeline: portableTimeline(),
+  };
+  const first = coordinator.transfer(payload, { originSessionId: 'desktop-duplicate' });
+  while ((await store.list()).length === 0) await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(
+    coordinator.transfer(payload, { originSessionId: 'desktop-duplicate' }),
+    (error) => error.code === 'TRANSFER_ALREADY_ACTIVE',
+  );
+  assert.equal((await store.list()).length, 1);
+  const stopped = assert.rejects(first, /stopped/);
+  await coordinator.stop();
+  await stopped;
+});
+
+test('missing cloud configuration fails once instead of entering transfer recovery', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-unconfigured-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  let networkCalls = 0;
+  const client = new CloudClient({
+    vault: memoryVault(),
+    fetchImpl: async () => {
+      networkCalls += 1;
+      throw new Error('an unconfigured transfer must not reach the network');
+    },
+  });
+  await assert.rejects(client.profile(), (error) => (
+    error.code === 'CLOUD_NOT_CONFIGURED'
+    && error.message === 'Cloud server is not configured'
+  ));
+
+  const coordinator = new CloudCoordinator({
+    client,
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+    collectProviderAuth: async () => ({
+      secrets: { OPENAI_API_KEY: 'sk-proj-local' },
+      files: {},
+    }),
+  });
+  t.after(() => coordinator.stop());
+  await assert.rejects(
+    coordinator.transfer({
+      agent: 'codex',
+      threadId: 'thread-unconfigured',
+      documentId: 'document-unconfigured',
+      document: { fileName: 'document.hwpx', bytes: Buffer.from('document') },
+      timeline: portableTimeline(),
+      limits: { maxDurationMs: 15 * 60_000, maxTurns: 8 },
+    }, { originSessionId: 'desktop-unconfigured' }),
+    (error) => error.code === 'CLOUD_NOT_CONFIGURED',
+  );
+  assert.deepEqual(await store.list(), []);
+  await assert.rejects(
+    access(path.join(directory, 'pending-payloads')),
+    (error) => error.code === 'ENOENT',
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(networkCalls, 0);
 });

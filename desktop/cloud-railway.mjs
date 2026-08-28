@@ -4,7 +4,7 @@ import { AppServerError } from './cloud-app-server.mjs';
 import { sandboxCredentialVariables } from './provider-auth.mjs';
 
 export const RAILWAY_API_URL = 'https://backboard.railway.com/graphql/v2';
-export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:stable';
+export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.10';
 export const SANDBOX_BASE_PATH = '/rauhwpx-cloud';
 export const SANDBOX_PORT = 7740;
 
@@ -37,6 +37,13 @@ mutation RauhwpxServiceCreate($input: ServiceCreateInput!) {
 const SERVICE_DOMAIN_CREATE = `
 mutation RauhwpxServiceDomainCreate($input: ServiceDomainCreateInput!) {
   serviceDomainCreate(input: $input) { id domain }
+}`;
+
+const PROJECT_SERVICES = `
+query RauhwpxProjectServices($projectId: String!) {
+  project(id: $projectId) {
+    services { edges { node { id name } } }
+  }
 }`;
 
 const SERVICE_INSTANCE_UPDATE = `
@@ -289,6 +296,18 @@ export function createRailwayServerProvider({
     }
   }
 
+  async function findServiceByName(name) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const data = await graphql(PROJECT_SERVICES, { projectId: config.projectId });
+      const service = data.project?.services?.edges
+        ?.map((edge) => edge?.node)
+        .find((candidate) => candidate?.name === name);
+      if (service?.id) return service;
+      if (attempt < 2) await sleep(500);
+    }
+    return null;
+  }
+
   async function removeService(sandbox, { signal } = {}) {
     const data = await graphql(SERVICE_DELETE, {
       id: sandbox.sandboxId,
@@ -318,16 +337,26 @@ export function createRailwayServerProvider({
       onLine = () => {},
     } = {}) {
       const bootstrapToken = randomBytes(32).toString('base64url');
+      const serviceName = sandboxName();
       onLine('Creating an app-provided sandbox');
-      const created = await graphql(SERVICE_CREATE, {
-        input: {
-          projectId: config.projectId,
-          environmentId: config.environmentId,
-          name: sandboxName(),
-          source: { image: config.image },
-          variables: sandboxVariables(bootstrapToken, limits, credentials),
-        },
-      }, { signal });
+      let created;
+      try {
+        created = await graphql(SERVICE_CREATE, {
+          input: {
+            projectId: config.projectId,
+            environmentId: config.environmentId,
+            name: serviceName,
+            source: { image: config.image },
+            variables: sandboxVariables(bootstrapToken, limits, credentials),
+          },
+        }, { signal });
+      } catch (error) {
+        if (error?.retryable === false) throw error;
+        const reconciled = await findServiceByName(serviceName).catch(() => null);
+        if (!reconciled) throw error;
+        created = { serviceCreate: reconciled };
+        onLine('Recovered the sandbox after an interrupted Railway response');
+      }
       const serviceId = trimmed(created.serviceCreate?.id, 128);
       if (!serviceId) {
         throw new AppServerError('Railway did not return a sandbox service id', {
