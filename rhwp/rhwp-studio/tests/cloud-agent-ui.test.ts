@@ -64,6 +64,13 @@ test('cloud lease locks local editing and queued messages cross only at a remote
   assert.match(cloudUi, /command: 'queue-message'/);
   assert.match(main, /setCloudDocumentLease/);
   assert.match(main, /syncDocumentReadOnly/);
+  assert.match(main, /documentReadOnly = previewDocumentReadOnly \|\| cloudDocumentLeaseSessionId !== null/);
+  assert.match(main, /inputHandler\?\.setReadOnly\(documentReadOnly\)/);
+  assert.match(main, /inputHandler\?\.setUserEditingLocked\(lease\.active\)/);
+  assert.doesNotMatch(
+    main.match(/function syncDocumentReadOnly\(\): void \{[\s\S]*?\n\}/)?.[0] ?? '',
+    /planModeAllowsUserEditing/,
+  );
   assert.match(cloudUi, /completeTakeover\(session\.sessionId\)/);
 });
 
