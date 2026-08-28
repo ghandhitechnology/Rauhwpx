@@ -332,5 +332,5 @@ test('the app sandbox image runs the control plane with the local runner and a b
   const edgeWorkflow = await fs.readFile(new URL('../.github/workflows/cloud-sandbox-image.yml', root), 'utf8');
   assert.match(edgeWorkflow, /packages: write/);
   assert.match(edgeWorkflow, /podman push "\$image:edge"/);
-  assert.match(edgeWorkflow, /"visibility":"public"/);
+  assert.doesNotMatch(edgeWorkflow, /api\.github\.com\/user\/packages/);
 });
