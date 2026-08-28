@@ -14,6 +14,7 @@ import {
   parseUploadInit,
 } from './protocol.mjs';
 import { SERVICE_VERSION } from './version.mjs';
+import { parseProviderCredentialBody } from './provider-credentials.mjs';
 import {
   SSE_STREAM_DIGEST,
   SSE_STREAM_PROTOCOL,
@@ -104,6 +105,7 @@ export function createCloudHttpHandler({
   config,
   logger,
   vault,
+  seedProvider,
 }, { workerOnly = false } = {}) {
   const authenticate = (request) => auth.authenticate(bearer(request));
   const authenticateWorker = (request, sessionId) => sessionStore.authenticateWorker(sessionId, bearer(request));
@@ -317,6 +319,13 @@ export function createCloudHttpHandler({
       if (request.method === 'POST' && pathname === '/v1/pairing') {
         const input = parsePairingCreate(await readJson(request));
         json(response, 201, auth.createPairingCode({ createdByDeviceId: device.id, intendedName: input.deviceName }));
+        return;
+      }
+      const providerCredentials = pathname.match(/^\/v1\/providers\/([^/]+)\/credentials$/);
+      if (request.method === 'POST' && providerCredentials) {
+        if (typeof seedProvider !== 'function') throw new CloudError('NOT_FOUND', 'Endpoint was not found', 404);
+        const input = parseProviderCredentialBody(decodeURIComponent(providerCredentials[1]), await readJson(request));
+        json(response, 200, await seedProvider(input));
         return;
       }
       if (request.method === 'GET' && pathname === '/v1/sessions') {

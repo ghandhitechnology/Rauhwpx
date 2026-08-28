@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { AppServerError, createAppServerRegistry } from './cloud-app-server.mjs';
 import { normalizeCloudProfile, normalizeTailscaleHttpsPort } from './cloud-profile.mjs';
 import { sha256Hex, writeVerifiedRecoveryFile } from './cloud-handoff.mjs';
+import { hasProviderAuth } from './provider-auth.mjs';
 
 /** 샌드박스를 철거하면 사라지는 작업 상태. 사용자가 먼저 정리해야 한다. */
 const LIVE_HANDOFF_STATES = Object.freeze([
@@ -21,6 +22,16 @@ const LIVE_HANDOFF_STATES = Object.freeze([
 
 /** Deterministic failures must not retry a full re-upload forever. */
 const MAX_TRANSFER_RECOVERY_ATTEMPTS = 5;
+const NON_RETRYABLE_TRANSFER_CODES = new Set([
+  'AUTH_REQUIRED',
+  'PROVIDER_KEY_REQUIRED',
+  'PROVIDER_UNAVAILABLE',
+]);
+
+function nonRetryableTransferError(error) {
+  if (NON_RETRYABLE_TRANSFER_CODES.has(String(error?.code ?? ''))) return true;
+  return /must be authenticated on this VPS/i.test(String(error?.message ?? ''));
+}
 
 function uiProfileToStored(input, current = null) {
   const source = input?.profile ?? input ?? {};
@@ -139,14 +150,16 @@ export class CloudCoordinator extends EventEmitter {
   #statusPromise = null;
   #teardownPromise = null;
   #preferredMode = null;
+  #collectProviderAuth;
 
-  constructor({ client, store, provisioner, recoveryDir, appServers = [] }) {
+  constructor({ client, store, provisioner, recoveryDir, appServers = [], collectProviderAuth = null } = {}) {
     super();
     this.#client = client;
     this.#store = store;
     this.#provisioner = provisioner;
     this.#recoveryDir = recoveryDir;
     this.#appServers = Array.isArray(appServers) ? createAppServerRegistry(appServers) : appServers;
+    this.#collectProviderAuth = typeof collectProviderAuth === 'function' ? collectProviderAuth : null;
   }
 
   async start() {
@@ -475,6 +488,27 @@ export class CloudCoordinator extends EventEmitter {
     return this.snapshot();
   }
 
+  async #providerAuth(provider) {
+    if (!provider || typeof this.#collectProviderAuth !== 'function') return null;
+    try {
+      return await this.#collectProviderAuth(provider);
+    } catch {
+      return null;
+    }
+  }
+
+  async #seedRemoteProvider(provider) {
+    if (!provider || typeof this.#client.seedProviderCredentials !== 'function') return;
+    const auth = await this.#providerAuth(provider);
+    if (!hasProviderAuth(auth)) return;
+    try {
+      await this.#client.seedProviderCredentials(auth);
+    } catch (error) {
+      if (error?.status === 404 || error?.code === 'NOT_FOUND') return;
+      throw error;
+    }
+  }
+
   #appServerFor(providerId) {
     if (!this.#appServers.size) {
       throw new AppServerError('This build does not include app-provided servers', {
@@ -546,6 +580,7 @@ export class CloudCoordinator extends EventEmitter {
       spawned = await provider.spawn({
         deviceName,
         limits: current?.limits,
+        credentials: await this.#providerAuth(current?.provider ?? 'codex'),
         signal: controller.signal,
         onLine: (line) => this.#emit({ type: 'provision-log', line }),
       });
@@ -755,6 +790,7 @@ export class CloudCoordinator extends EventEmitter {
     const controller = new AbortController();
     this.#transferControllers.set(record.id, controller);
     try {
+      await this.#seedRemoteProvider(record.provider);
       const transferPromise = this.#client.transfer({
         sessionId: record.id,
         threadId: record.threadId,
@@ -832,8 +868,12 @@ export class CloudCoordinator extends EventEmitter {
         }
       }
       if (current && ['preparing', 'uploading', 'committing'].includes(current.state)) {
-        await this.#store.patch(record.id, { error: error.message, recoveryAttempt: 1 });
-        this.#scheduleTransferRecovery(record.id, 1);
+        if (nonRetryableTransferError(error)) {
+          await this.#store.transition(record.id, 'failed', { error: error.message, recoveryAttempt: 1 });
+        } else {
+          await this.#store.patch(record.id, { error: error.message, recoveryAttempt: 1 });
+          this.#scheduleTransferRecovery(record.id, 1);
+        }
       }
       this.#emit({ type: 'session-transfer-failed', handoffId: record.id, error: error.message });
       throw error;
@@ -1260,6 +1300,7 @@ export class CloudCoordinator extends EventEmitter {
       }
       const staged = await this.#store.readPayload(record.id);
       if (record.state === 'preparing') record = await this.#store.transition(record.id, 'uploading');
+      await this.#seedRemoteProvider(record.provider);
       let committed = false;
       const controller = new AbortController();
       this.#transferControllers.set(record.id, controller);
@@ -1350,9 +1391,11 @@ export class CloudCoordinator extends EventEmitter {
       const latest = await this.#store.get(record.id);
       if (latest && ['preparing', 'uploading', 'committing'].includes(latest.state)) {
         const attempt = Number(latest.recoveryAttempt ?? 0) + 1;
-        if (attempt >= MAX_TRANSFER_RECOVERY_ATTEMPTS) {
+        if (nonRetryableTransferError(error) || attempt >= MAX_TRANSFER_RECOVERY_ATTEMPTS) {
           await this.#store.transition(record.id, 'failed', {
-            error: `Cloud transfer recovery failed ${attempt} times: ${error.message}`,
+            error: nonRetryableTransferError(error)
+              ? error.message
+              : `Cloud transfer recovery failed ${attempt} times: ${error.message}`,
             recoveryAttempt: attempt,
           });
           this.#emit({

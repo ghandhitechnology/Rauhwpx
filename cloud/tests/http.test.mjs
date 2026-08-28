@@ -61,7 +61,7 @@ async function assertResponseProof(response, identity, { nonce, method = 'GET', 
   return { bytes, digest, canonical };
 }
 
-async function fixture(t, { workerOnly = false } = {}) {
+async function fixture(t, { workerOnly = false, seedProvider } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-cloud-http-'));
   const database = openDatabase(path.join(root, 'cloud.sqlite3'));
   const blobStore = new BlobStore(database, { root: path.join(root, 'objects'), chunkBytes: 8 });
@@ -71,7 +71,9 @@ async function fixture(t, { workerOnly = false } = {}) {
   const config = { basePath: '/rauhwpx-cloud', maxRunningSessions: 2, maxQueuedSessions: 20 };
   const logger = { error() {} };
   const vault = { list: () => [], get: () => null };
-  const server = http.createServer(createCloudHttpHandler({ auth, blobStore, sessionStore, identity, config, logger, vault }, { workerOnly }));
+  const server = http.createServer(createCloudHttpHandler({
+    auth, blobStore, sessionStore, identity, config, logger, vault, seedProvider,
+  }, { workerOnly }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   const base = `http://127.0.0.1:${address.port}`;
@@ -493,4 +495,40 @@ test('worker API accepts only the session worker token', async (t) => {
   assert.equal(takeover.takeover.status, 'ready');
   assert.equal(takeover.takeover.boundary.checkpoint.blobId, checkpoint.id);
   assert.equal(takeover.takeover.boundary.timeline.blobId, timeline.id);
+});
+
+test('a paired device can seed provider credentials for every agent', async (t) => {
+  const seeded = [];
+  const { base, auth } = await fixture(t, {
+    seedProvider: async (input) => {
+      seeded.push(input);
+      return { provider: input.provider, available: true, authenticated: true };
+    },
+  });
+  const tokens = await pairOverHttp(auth, base);
+  for (const provider of ['claude', 'codex', 'grok', 'pi', 'cursor']) {
+    const response = await publicFetch(`${base}/v1/providers/${provider}/credentials`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${tokens.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ apiKey: `key-${provider}` }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { provider, available: true, authenticated: true });
+  }
+  assert.deepEqual(seeded.map((item) => item.provider), ['claude', 'codex', 'grok', 'pi', 'cursor']);
+  assert.deepEqual(seeded.map((item) => item.apiKey), ['key-claude', 'key-codex', 'key-grok', 'key-pi', 'key-cursor']);
+
+  const missing = await publicFetch(`${base}/v1/providers/codex/credentials`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokens.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({}),
+  });
+  assert.equal(missing.status, 400);
+  assert.equal((await missing.json()).error.code, 'PROVIDER_KEY_REQUIRED');
 });

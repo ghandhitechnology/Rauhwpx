@@ -440,6 +440,16 @@ export class CloudClient {
     return this.#request('/v1/profile');
   }
 
+  async seedProviderCredentials({ provider, apiKey = null, files = [] } = {}) {
+    return this.#request(`/v1/providers/${encodeURIComponent(provider)}/credentials`, {
+      method: 'POST',
+      body: {
+        ...(apiKey ? { apiKey } : {}),
+        ...(files.length ? { files } : {}),
+      },
+    });
+  }
+
   async createPairingCode(deviceName = '') {
     return this.#request('/v1/pairing', { method: 'POST', body: { deviceName } });
   }

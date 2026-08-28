@@ -843,3 +843,102 @@ test('verified result confirmation retries online without another app restart', 
 function createDigest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
+
+test('transfer seeds the selected provider before creating the remote session', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-seed-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const calls = [];
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      seedProviderCredentials: async (auth) => {
+        calls.push(['seed', auth]);
+        return { provider: auth.provider, authenticated: true };
+      },
+      transfer: async ({ provider }) => {
+        calls.push(['transfer', provider]);
+        return { id: 'cloud-1', status: 'queued', stateVersion: 1 };
+      },
+      watchSession: async () => {},
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+    collectProviderAuth: async (provider) => ({
+      provider,
+      apiKey: 'sk-proj-codex',
+      files: [],
+    }),
+  });
+  t.after(() => coordinator.stop());
+  await coordinator.transfer({
+    threadId: 'thread-1', documentId: 'document-1',
+    document: { fileName: 'source.hwpx', bytes: new Uint8Array(Buffer.from('document')) },
+    timeline: {
+      schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(),
+      thread: {
+        id: 'thread-1', title: 'Task', createdAt: Date.now(), updatedAt: Date.now(),
+        agent: 'codex', model: 'gpt-5.6', effort: 'high', messages: [],
+      },
+    },
+    agent: 'codex', model: 'gpt-5.6', effort: 'high', workflow: 'direct', references: [],
+  }, { originSessionId: 'desktop-1' });
+  assert.deepEqual(calls, [
+    ['seed', { provider: 'codex', apiKey: 'sk-proj-codex', files: [] }],
+    ['transfer', 'codex'],
+  ]);
+});
+
+test('AUTH_REQUIRED fails the transfer once instead of retrying five times', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-auth-required-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-1',
+    threadId: 'thread-1',
+    documentId: 'document-1',
+    documentName: 'source.hwpx',
+    documentBytes: Buffer.from('document'),
+    timeline: {
+      schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(),
+      thread: {
+        id: 'thread-1', title: 'Task', createdAt: Date.now(), updatedAt: Date.now(),
+        agent: 'codex', model: 'gpt-5.6', effort: 'high', messages: [],
+      },
+    },
+    provider: 'codex',
+    limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  let transfers = 0;
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      transfer: async () => {
+        transfers += 1;
+        const error = new Error('codex must be authenticated on this VPS');
+        error.code = 'AUTH_REQUIRED';
+        throw error;
+      },
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(() => coordinator.stop());
+  await coordinator.start();
+  let record = null;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    record = await store.get(created.id);
+    if (record.state === 'failed') break;
+    await delay(10);
+  }
+  assert.equal(record.state, 'failed');
+  assert.match(record.error, /must be authenticated on this VPS/);
+  assert.doesNotMatch(record.error, /failed 5 times/);
+  assert.equal(transfers, 1);
+});
+
