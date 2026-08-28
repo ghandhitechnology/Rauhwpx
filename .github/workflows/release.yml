@@ -336,6 +336,11 @@ jobs:
       - name: Build dedicated headless Studio runtime
         run: bash cloud/install/build-runtime-assets.sh
 
+      - name: Install live display test dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends x11-apps
+
       - name: Verify cloud runtime
         run: npm --prefix cloud test
 
