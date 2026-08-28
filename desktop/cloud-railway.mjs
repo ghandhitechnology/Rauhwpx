@@ -58,6 +58,12 @@ query RauhwpxLatestDeployment($projectId: String!, $environmentId: String!, $ser
   }
 }`;
 
+const DEPLOYMENT_LOGS = `
+query RauhwpxDeploymentLogs($deploymentId: String!) {
+  buildLogs(deploymentId: $deploymentId, limit: 30) { message }
+  runtimeLogs: deploymentLogs(deploymentId: $deploymentId, limit: 30) { message }
+}`;
+
 function trimmed(value, limit = 256) {
   const result = String(value ?? '').trim();
   return result.length > limit ? '' : result;
@@ -192,6 +198,13 @@ export function createRailwayServerProvider({
       RAUHWpx_CHANNEL: 'stable',
       RAUHWpx_MAX_RUNNING: String(limits?.maxRunningSessions ?? 2),
       RAUHWpx_MAX_QUEUED: String(limits?.maxQueuedSessions ?? 20),
+      RAUHWpx_RUNNER: 'local',
+      RAUHWpx_WORKER_UID: '1001',
+      RAUHWpx_WORKER_GID: '1001',
+      RAUHWpx_WORKER_CONTROL_DIR: '/run/rauhwpx',
+      RAUHWpx_WORKSPACE_ROOT: '/var/lib/rauhwpx-workspaces',
+      RAUHWpx_DATA_DIR: '/var/lib/rauhwpx-cloud',
+      RAUHWpx_SANDBOX_INSTALL_PROVIDER: '0',
     };
   }
 
@@ -206,6 +219,21 @@ export function createRailwayServerProvider({
     return node ? { id: trimmed(node.id), status: trimmed(node.status, 64).toUpperCase() } : null;
   }
 
+  async function deploymentFailureDetail(deployment) {
+    if (!deployment?.id) return '';
+    try {
+      const data = await graphql(DEPLOYMENT_LOGS, { deploymentId: deployment.id }, { allowNotFound: true });
+      const entries = [
+        ...(Array.isArray(data?.buildLogs) ? data.buildLogs : []),
+        ...(Array.isArray(data?.runtimeLogs) ? data.runtimeLogs : []),
+      ];
+      const lines = entries.map((entry) => trimmed(entry?.message, 240)).filter(Boolean);
+      return lines.slice(-4).join(' ');
+    } catch {
+      return '';
+    }
+  }
+
   async function waitForDeployment(sandbox, { signal, onLine }) {
     const deadline = Date.now() + deployTimeoutMs;
     let attempt = 0;
@@ -214,9 +242,13 @@ export function createRailwayServerProvider({
       const lifecycle = deployment ? DEPLOY_STATUS_LIFECYCLE[deployment.status] ?? 'provisioning' : 'provisioning';
       if (lifecycle === 'ready') return deployment;
       if (lifecycle === 'error') {
-        throw new AppServerError(`Railway deployment ended in ${deployment.status}`, {
-          code: 'SANDBOX_DEPLOY_FAILED',
-        });
+        const detail = await deploymentFailureDetail(deployment);
+        throw new AppServerError(
+          detail
+            ? `Railway deployment ended in ${deployment.status}: ${detail}`
+            : `Railway deployment ended in ${deployment.status}`,
+          { code: 'SANDBOX_DEPLOY_FAILED' },
+        );
       }
       if (Date.now() >= deadline) {
         throw new AppServerError('Railway deployment did not become ready in time', {

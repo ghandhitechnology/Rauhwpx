@@ -283,6 +283,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -355,6 +356,17 @@ jobs:
           if (config.workerUid !== 1001) throw new Error("sandbox image must drop workers to uid 1001");
           console.log(JSON.stringify({ runner: config.runner, workerUid: config.workerUid }));'
 
+      - name: Publish app sandbox architecture image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET_ARCH: ${{ matrix.asset_arch }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rauhwpx-cloud"
+          printf '%s' "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          podman tag rauhwpx-cloud-sandbox-release "$image:stable-$ASSET_ARCH"
+          podman push "$image:stable-$ASSET_ARCH"
+
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
@@ -387,9 +399,30 @@ jobs:
             release/rauhwpx-cloud-linux-${{ matrix.asset_arch }}.tar.gz.sigstore.json
             release/rauhwpx-cloud-bootstrap-linux-${{ matrix.asset_arch }}.tar.gz
 
+  cloud-image:
+    name: Publish multi-architecture cloud sandbox image
+    needs: cloud
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Publish stable manifest
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rauhwpx-cloud"
+          printf '%s' "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          podman manifest create "$image:stable"
+          podman manifest add "$image:stable" "docker://$image:stable-amd64"
+          podman manifest add "$image:stable" "docker://$image:stable-arm64"
+          podman manifest push --all "$image:stable" "docker://$image:stable"
+
   publish:
     name: Publish GitHub Release
-    needs: [macos, windows, linux, cloud]
+    needs: [macos, windows, linux, cloud, cloud-image]
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

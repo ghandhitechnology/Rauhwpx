@@ -102,6 +102,12 @@ const SPAWN_ROUTES = Object.freeze({
   RauhwpxLatestDeployment: {
     data: { deployments: { edges: [{ node: { id: 'deployment-1', status: 'SUCCESS' } }] } },
   },
+  RauhwpxDeploymentLogs: {
+    data: {
+      buildLogs: [{ message: 'RAUHWpx_WORKER_UID is required when the local runner runs as root' }],
+      runtimeLogs: [],
+    },
+  },
   RauhwpxServiceDelete: { data: { serviceDelete: true } },
 });
 
@@ -230,6 +236,13 @@ test('the Railway provider creates a reachable sandbox and returns a pairing rec
   assert.match(variables.variables.RAUHWpx_BOOTSTRAP_TOKEN, /^[A-Za-z0-9_-]{32,}$/);
   assert.equal(variables.variables.RAUHWpx_PORT, '7740');
   assert.equal(variables.variables.RAUHWpx_BASE_PATH, '/rauhwpx-cloud');
+  assert.equal(variables.variables.RAUHWpx_RUNNER, 'local');
+  assert.equal(variables.variables.RAUHWpx_WORKER_UID, '1001');
+  assert.equal(variables.variables.RAUHWpx_WORKER_GID, '1001');
+  assert.equal(variables.variables.RAUHWpx_WORKER_CONTROL_DIR, '/run/rauhwpx');
+  assert.equal(variables.variables.RAUHWpx_WORKSPACE_ROOT, '/var/lib/rauhwpx-workspaces');
+  assert.equal(variables.variables.RAUHWpx_DATA_DIR, '/var/lib/rauhwpx-cloud');
+  assert.equal(variables.variables.RAUHWpx_SANDBOX_INSTALL_PROVIDER, '0');
 });
 
 test('a Railway sandbox that never becomes usable is removed instead of left behind', async () => {
@@ -240,7 +253,10 @@ test('a Railway sandbox that never becomes usable is removed instead of left beh
     },
   };
   const crashed = railwayProvider(failedDeploy);
-  await assert.rejects(crashed.provider.spawn({ onLine: () => {} }), { code: 'SANDBOX_DEPLOY_FAILED' });
+  await assert.rejects(
+    crashed.provider.spawn({ onLine: () => {} }),
+    (error) => error.code === 'SANDBOX_DEPLOY_FAILED' && /local runner runs as root/.test(error.message),
+  );
   assert.equal(crashed.transport.names().at(-1), 'RauhwpxServiceDelete');
 
   const unhealthy = railwayProvider(SPAWN_ROUTES, {
