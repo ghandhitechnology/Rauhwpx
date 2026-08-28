@@ -106,10 +106,18 @@ async function commitStableBoundary({ client, checkpoint, timeline, turnNumber }
   return boundary;
 }
 
+let forwardFailures = 0;
+
 async function forwardEvent(client, event) {
   const type = event?.type === 'agent' ? 'agent.event' : String(event?.type ?? 'runtime.event')
     .toLowerCase().replace(/[^a-z0-9._-]/g, '-').slice(0, 64);
-  await client.event(type || 'runtime.event', event).catch(() => {});
+  await client.event(type || 'runtime.event', event).catch((error) => {
+    // Live activity is lossy by design, but repeated drops still leave a trace.
+    forwardFailures += 1;
+    if (forwardFailures === 1 || forwardFailures % 100 === 0) {
+      console.warn(`[worker] event forwarding failed ${forwardFailures} times: ${error?.message ?? error}`);
+    }
+  });
 }
 
 function resultName(documentName, extension) {

@@ -41,11 +41,10 @@ export class Scheduler {
   }
 
   async #tick() {
-    // Acquire both Podman inventories before touching session state. A failed or
-    // malformed inventory must stop recovery instead of looking like zero live
+    // Acquire the full inventory once per tick. A failed or malformed
+    // inventory must stop recovery instead of looking like zero live
     // sandboxes and invalidating healthy workers.
-    const live = await this.runner.list();
-    const allSandboxes = await this.runner.list({ all: true });
+    const sandboxes = await this.runner.list({ all: true });
     if (this.maintenance && this.now() - this.lastMaintenanceAt >= MAINTENANCE_INTERVAL_MS) {
       await this.maintenance().catch((error) => {
         this.logger?.error('maintenance.failed', { code: error.code, message: error.message });
@@ -53,7 +52,9 @@ export class Scheduler {
       this.lastMaintenanceAt = this.now();
     }
     await this.sessionStore.expireRetainedSessions();
-    const liveIds = new Set(live.map((sandbox) => sandbox.sandboxId));
+    const liveIds = new Set(
+      sandboxes.filter((sandbox) => sandbox.running !== false).map((sandbox) => sandbox.sandboxId),
+    );
     const runningSessions = this.sessionStore.database.prepare(`SELECT * FROM sessions WHERE status = 'running'`).all();
     for (const session of runningSessions) {
       if (session.takeover_requested_at && this.now() - session.takeover_requested_at >= TAKEOVER_ACK_TIMEOUT_MS) {
@@ -83,7 +84,7 @@ export class Scheduler {
         this.sessionStore.requeueInterruptedSession(session.id, 'heartbeat_expired');
       }
     }
-    for (const sandbox of allSandboxes) {
+    for (const sandbox of sandboxes) {
       const session = this.sessionStore.database.prepare('SELECT status FROM sessions WHERE id = ?').get(sandbox.sessionId);
       if (session?.status === 'running' && liveIds.has(sandbox.sandboxId)) continue;
       await this.runner.stop(sandbox.sandboxId);

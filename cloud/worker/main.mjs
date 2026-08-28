@@ -13,7 +13,18 @@ const providerAuth = process.env.RAUHWpx_PROVIDER_AUTH || '/provider-auth';
 if (!sessionId || !token || !socketPath) throw new Error('Worker identity is incomplete');
 
 const client = new WorkerClient({ socketPath, token, sessionId });
-const heartbeat = setInterval(() => { void client.heartbeat().catch(() => {}); }, 15_000);
+// After four silent heartbeats the control plane considers this worker lost;
+// a clean crash with a stderr trace beats a zombie still holding its tokens.
+let heartbeatFailures = 0;
+const heartbeat = setInterval(() => {
+  client.heartbeat().then(() => { heartbeatFailures = 0; }, () => {
+    heartbeatFailures += 1;
+    if (heartbeatFailures >= 4) {
+      console.error(`[worker] control plane unreachable after ${heartbeatFailures} heartbeats; stopping`);
+      process.exit(1);
+    }
+  });
+}, 15_000);
 heartbeat.unref();
 
 function safeName(name) {
@@ -63,7 +74,9 @@ try {
     await client.publishResult(result);
   }
 } catch (error) {
-  await client.suspend(error.code || 'WORKER_FAILED', error.message || String(error)).catch(() => {});
+  await client.suspend(error.code || 'WORKER_FAILED', error.message || String(error)).catch((suspendError) => {
+    console.error('[worker] failed to report suspension:', suspendError?.message ?? suspendError);
+  });
   throw error;
 } finally {
   clearInterval(heartbeat);

@@ -402,7 +402,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     if (!state || state.kind !== 'choose') return;
     state = { ...state, mode };
     renderDialog();
-    await deps.controller.selectServerMode(mode).catch(() => {});
+    await deps.controller.selectServerMode(mode).catch(() => {
+      liveStatus.textContent = '선택한 서버 방식을 저장하지 못했습니다. 다시 시도해 주세요.';
+    });
   }
 
   function openSandboxStep(draft: CloudProfileDraft, intent: CloudSetupIntent): void {
@@ -868,11 +870,16 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     }
     if (snapshot.profile.kind === 'unconfigured') {
       const provider = appServerProvider(snapshot);
+      settingsAction.textContent = '설정';
+      if (snapshot.server.lifecycle === 'provisioning') {
+        settingsStatus.textContent = '서버 준비 중';
+        settingsDetail.textContent = '앱 제공 서버를 만들고 있습니다.';
+        return;
+      }
       settingsStatus.textContent = '설정되지 않음';
       settingsDetail.textContent = provider?.configured
         ? '앱 제공 서버 또는 내 서버에서 에이전트를 계속 실행합니다.'
         : '내 VPS에서 에이전트를 계속 실행합니다.';
-      settingsAction.textContent = '설정';
       return;
     }
     const labels = {

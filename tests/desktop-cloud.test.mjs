@@ -973,7 +973,11 @@ test('transfer uploads the raw portable timeline and idempotently activates the 
 
 test('committed handoffs clear their staged payload without losing metadata', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-clear-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Wait for any trailing debounced write so cleanup cannot race it.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const record = await store.create({
     sessionId: 'desktop-session',
@@ -1066,7 +1070,11 @@ test('result downloads reject a missing content digest', async () => {
 
 test('downloaded results reopen from verified local recovery and disappear after resolution', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-reopen-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Wait for any trailing debounced write so cleanup cannot race it.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const record = await store.create({
     sessionId: 'desktop-session',

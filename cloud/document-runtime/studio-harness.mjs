@@ -526,17 +526,22 @@ export async function createStudioHarness({
       async start({ history }) {
         if (started) return;
         started = true;
-        await page.evaluate((secret, input) => window.rauhwpxCloudRuntime.startChat(secret, input), bootstrap, {
-          agent: manifest.provider,
-          model: execution.model,
-          effort: execution.effort,
-          workflow: execution.workflow,
-          permissionProfile: execution.permissionProfile,
-          threadId: thread.id,
-          documentId: thread.documentId ?? manifest.clientContext?.documentId ?? null,
-          documentName: document.name,
-          history,
-        });
+        await withTimeout(
+          page.evaluate((secret, input) => window.rauhwpxCloudRuntime.startChat(secret, input), bootstrap, {
+            agent: manifest.provider,
+            model: execution.model,
+            effort: execution.effort,
+            workflow: execution.workflow,
+            permissionProfile: execution.permissionProfile,
+            threadId: thread.id,
+            documentId: thread.documentId ?? manifest.clientContext?.documentId ?? null,
+            documentName: document.name,
+            history,
+          }),
+          startupTimeoutMs,
+          'STUDIO_START_TIMEOUT',
+          'Cloud Studio chat start timed out',
+        );
         await page.waitForFunction(
           (secret, provider) => window.rauhwpxCloudRuntime.status(secret).activeAgent === provider,
           { timeout: 30_000 },
@@ -546,16 +551,26 @@ export async function createStudioHarness({
       },
       async runTurn(prompt, { timeoutMs }) {
         const sentAt = Date.now();
-        await page.evaluate((secret, text) => window.rauhwpxCloudRuntime.sendUserMessage(secret, text), bootstrap, prompt);
+        await withTimeout(
+          page.evaluate((secret, text) => window.rauhwpxCloudRuntime.sendUserMessage(secret, text), bootstrap, prompt),
+          30_000,
+          'TURN_SEND_TIMEOUT',
+          'Cloud Studio did not accept the user message',
+        );
         let sawStart = false;
         let planId = null;
         let implementationStarted = execution.workflow !== 'plan';
         let approvalRequested = false;
         while (Date.now() - sentAt < timeoutMs) {
-          const entries = await page.evaluate(
-            (secret, after) => window.rauhwpxCloudRuntime.drainEvents(secret, after),
-            bootstrap,
-            eventSequence,
+          const entries = await withTimeout(
+            page.evaluate(
+              (secret, after) => window.rauhwpxCloudRuntime.drainEvents(secret, after),
+              bootstrap,
+              eventSequence,
+            ),
+            30_000,
+            'EVENT_DRAIN_TIMEOUT',
+            'Cloud Studio event drain timed out',
           );
           for (const entry of entries) {
             eventSequence = Math.max(eventSequence, Number(entry.seq) || 0);
@@ -573,10 +588,15 @@ export async function createStudioHarness({
               if (execution.workflow === 'plan' && !implementationStarted) {
                 if (!planId) throw runtimeError('PLAN_NOT_PRESENTED', 'Planning workflow ended without a structured implementation plan');
                 if (approvalRequested) throw runtimeError('PLAN_APPROVAL_FAILED', 'Planning workflow ended again before implementation started');
-                await page.evaluate(
-                  (secret, selectedPlanId) => window.rauhwpxCloudRuntime.approvePlan(secret, selectedPlanId),
-                  bootstrap,
-                  planId,
+                await withTimeout(
+                  page.evaluate(
+                    (secret, selectedPlanId) => window.rauhwpxCloudRuntime.approvePlan(secret, selectedPlanId),
+                    bootstrap,
+                    planId,
+                  ),
+                  30_000,
+                  'PLAN_APPROVAL_TIMEOUT',
+                  'Cloud Studio plan approval timed out',
                 );
                 approvalRequested = true;
                 sawStart = false;
@@ -593,10 +613,15 @@ export async function createStudioHarness({
         throw runtimeError('TURN_TIMEOUT', 'Cloud provider turn exceeded the session deadline');
       },
       async exportDocument(format, destination) {
-        const metadata = await page.evaluate(
-          (secret, selectedFormat) => window.rauhwpxCloudRuntime.prepareExport(secret, selectedFormat),
-          bootstrap,
-          format,
+        const metadata = await withTimeout(
+          page.evaluate(
+            (secret, selectedFormat) => window.rauhwpxCloudRuntime.prepareExport(secret, selectedFormat),
+            bootstrap,
+            format,
+          ),
+          120_000,
+          'EXPORT_PREPARE_TIMEOUT',
+          'Cloud Studio export preparation timed out',
         );
         if (!Number.isSafeInteger(metadata.size) || metadata.size < 1 || metadata.size > MAX_EXPORT_BYTES) {
           throw runtimeError('RESULT_TOO_LARGE', 'Studio returned an invalid or oversized document result');
@@ -605,11 +630,16 @@ export async function createStudioHarness({
         const digest = createHash('sha256');
         try {
           for (let offset = 0; offset < metadata.size; offset += EXPORT_CHUNK_BYTES) {
-            const chunk = await page.evaluate(
-              (secret, start, size) => window.rauhwpxCloudRuntime.readExportChunk(secret, start, size),
-              bootstrap,
-              offset,
-              Math.min(EXPORT_CHUNK_BYTES, metadata.size - offset),
+            const chunk = await withTimeout(
+              page.evaluate(
+                (secret, start, size) => window.rauhwpxCloudRuntime.readExportChunk(secret, start, size),
+                bootstrap,
+                offset,
+                Math.min(EXPORT_CHUNK_BYTES, metadata.size - offset),
+              ),
+              60_000,
+              'EXPORT_CHUNK_TIMEOUT',
+              'Cloud Studio export chunk read timed out',
             );
             const bytes = Buffer.from(chunk.dataBase64, 'base64');
             if (chunk.offset !== offset || chunk.size !== bytes.length || bytes.length < 1) {

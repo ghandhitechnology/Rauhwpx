@@ -31,10 +31,18 @@ function formatBytes(bytes: number): string {
 }
 
 function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
   const minutes = Math.floor(ms / 60_000);
   const hours = Math.floor(minutes / 60);
   if (hours > 0) return `${hours}시간 ${minutes % 60}분`;
-  return `${Math.max(1, minutes)}분`;
+  if (seconds < 60) return `${Math.max(0, seconds)}초`;
+  return `${minutes}분`;
+}
+
+/** The desktop preload is the only source of live cloud snapshots. */
+function cloudCapable(): boolean {
+  const desktop = (globalThis as { rhwpDesktop?: { cloudGetState?: unknown } }).rhwpDesktop;
+  return typeof desktop?.cloudGetState === 'function';
 }
 
 function sessionIsActive(snapshot: CloudSnapshot): boolean {
@@ -474,7 +482,14 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     render();
   });
   onboarding.sync(snapshot);
-  void deps.controller.refresh(selectedScope()).catch(() => { render(); });
+  void deps.controller.refresh(selectedScope()).catch((error) => {
+    render();
+    // A build without the desktop bridge stays quiet; a real cloud build must
+    // not hide a failed first refresh behind a permanently empty panel.
+    if (cloudCapable()) {
+      deps.onError(error instanceof Error ? error.message : String(error));
+    }
+  });
 
   return {
     sidebarButton,

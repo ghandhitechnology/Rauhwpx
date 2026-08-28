@@ -50,7 +50,11 @@ export function createCloudRuntime(config, dependencies = {}) {
     vault,
   });
   const runner = dependencies.runner
-    ?? (config.runner === 'local' ? new LocalRunner(config) : new PodmanRunner(config));
+    ?? (config.runner === 'local' ? new LocalRunner(config, {
+      onWorkerExit: (sandboxId, sessionId, code, stderrTail) => {
+        logger.error('worker.exited', { sandboxId, code, stderr: stderrTail || undefined }, sessionId);
+      },
+    }) : new PodmanRunner(config));
   const scheduler = dependencies.scheduler ?? new Scheduler(sessionStore, runner, {
     logger,
     maxRunningSessions: config.maxRunningSessions,
@@ -104,6 +108,9 @@ export function createCloudRuntime(config, dependencies = {}) {
     },
     async stop() {
       await scheduler.stop();
+      // Kill every worker before the control socket disappears so detached
+      // workers cannot survive a restart and double-execute their session.
+      await runner.stopAll?.();
       await Promise.allSettled([close(publicServer), close(workerServer)]);
       if (existsSync(config.workerControlSocket)) unlinkSync(config.workerControlSocket);
       database.close();

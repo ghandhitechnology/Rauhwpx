@@ -66,7 +66,7 @@ function parseInventory(output) {
   if (!Array.isArray(entries) || entries.length > MAX_LIST_ENTRIES) throw invalidInventory();
   return entries.map((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw invalidInventory();
-    const { Id: sandboxId, Labels: labels } = entry;
+    const { Id: sandboxId, Labels: labels, State } = entry;
     if (typeof sandboxId !== 'string' || !/^[a-f0-9]{64}$/i.test(sandboxId)) throw invalidInventory();
     if (!labels || typeof labels !== 'object' || Array.isArray(labels)) throw invalidInventory();
     const sessionId = labels['com.rauhwpx.session'];
@@ -76,7 +76,13 @@ function parseInventory(output) {
       || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
       throw invalidInventory();
     }
-    return { sandboxId, sessionId };
+    return {
+      sandboxId,
+      sessionId,
+      // Older podman output omits State; absent state stays live so the
+      // scheduler never stops a healthy worker on a guess.
+      running: State ? State === 'running' : true,
+    };
   });
 }
 
@@ -137,5 +143,11 @@ export class PodmanRunner {
     await command(this.spawnProcess, 'podman', ['--cgroup-manager=cgroupfs', 'rm', '--force', sandboxId]).catch((error) => {
       if (error.code !== 'PODMAN_FAILED') throw error;
     });
+  }
+
+  /** Graceful shutdown must not leave worker containers behind. */
+  async stopAll() {
+    const sandboxes = await this.list({ all: true }).catch(() => []);
+    await Promise.allSettled(sandboxes.map((sandbox) => this.stop(sandbox.sandboxId)));
   }
 }

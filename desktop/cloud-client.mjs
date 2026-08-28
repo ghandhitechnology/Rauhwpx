@@ -281,7 +281,7 @@ export class CloudClient {
         this.#profile = profile;
         if (tokens) {
           this.#accessToken = tokens.accessToken;
-          this.#accessExpiresAt = Date.parse(tokens.accessExpiresAt) || Date.now() + 14 * 60_000;
+          this.#accessExpiresAt = Number(tokens.accessExpiresAt) || Date.parse(tokens.accessExpiresAt) || Date.now() + 14 * 60_000;
         } else if (!preserveCredentials) {
           this.#accessToken = '';
           this.#accessExpiresAt = 0;
@@ -740,7 +740,19 @@ export class CloudClient {
         failures = 0;
       } catch (error) {
         if (signal?.aborted || error?.name === 'AbortError') break;
+        // A missing session or a broken stream proof never recovers by retrying;
+        // surface it instead of looping in silence.
+        if (error?.status === 404
+          || error?.code === 'SESSION_NOT_FOUND'
+          || error?.code === 'SSE_PROOF_INVALID'
+          || error?.code === 'SSE_PAYLOAD_INVALID') {
+          throw error;
+        }
         failures += 1;
+        // Long outages (sleep/wake, tunnel drops) must recover, so the cap is
+        // generous; a permanently failing handler still terminates with an
+        // error instead of looping in silence.
+        if (failures >= 20) throw error;
       }
       await delay(Math.min(30_000, retryBaseMs * (2 ** failures)), undefined, { signal }).catch(() => {});
     }
@@ -785,7 +797,7 @@ export class CloudClient {
 
   async #acceptTokens(tokens) {
     this.#accessToken = tokens.accessToken;
-    this.#accessExpiresAt = Date.parse(tokens.accessExpiresAt) || Date.now() + 14 * 60_000;
+    this.#accessExpiresAt = Number(tokens.accessExpiresAt) || Date.parse(tokens.accessExpiresAt) || Date.now() + 14 * 60_000;
     await this.#vault.set(REFRESH_SECRET, tokens.refreshToken);
   }
 

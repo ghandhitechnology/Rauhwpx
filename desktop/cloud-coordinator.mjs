@@ -19,6 +19,9 @@ const LIVE_HANDOFF_STATES = Object.freeze([
   'downloading',
 ]);
 
+/** Deterministic failures must not retry a full re-upload forever. */
+const MAX_TRANSFER_RECOVERY_ATTEMPTS = 5;
+
 function uiProfileToStored(input, current = null) {
   const source = input?.profile ?? input ?? {};
   const host = String(source.host ?? source.ssh?.host ?? current?.ssh?.host ?? '').trim();
@@ -124,12 +127,16 @@ export class CloudCoordinator extends EventEmitter {
   #takeoverControllers = new Map();
   #takeoverPromises = new Map();
   #remoteSessions = new Map();
+  #remoteWatchSequence = new Map();
+  #timelinePending = new Map();
   #snapshotChain = Promise.resolve();
   #revision = 0;
   #appServers;
   #sandboxLifecycle = 'idle';
   #sandboxMessage = null;
   #spawnPromise = null;
+  #spawnController = null;
+  #statusPromise = null;
   #teardownPromise = null;
   #preferredMode = null;
 
@@ -192,6 +199,11 @@ export class CloudCoordinator extends EventEmitter {
     this.#transferControllers.clear();
     for (const controller of this.#takeoverControllers.values()) controller.abort();
     this.#takeoverControllers.clear();
+    // An in-flight spawn can hold a billable provider sandbox for minutes;
+    // aborting lets its cleanup path run instead of orphaning the service.
+    this.#spawnController?.abort(new Error('Cloud coordinator stopped'));
+    this.#spawnController = null;
+    this.#store.flush?.();
   }
 
   snapshot(options = {}) {
@@ -341,7 +353,10 @@ export class CloudCoordinator extends EventEmitter {
   }
 
   async #adoptSelfHostedMode() {
-    this.#preferredMode = await this.#client.saveServerMode('self-hosted').catch(() => this.#preferredMode);
+    this.#preferredMode = await this.#client.saveServerMode('self-hosted').catch((error) => {
+      this.#emit({ type: 'server-mode-persist-failed', mode: 'self-hosted', error: error.message });
+      return this.#preferredMode;
+    });
     this.#setSandboxLifecycle('idle');
   }
 
@@ -369,7 +384,7 @@ export class CloudCoordinator extends EventEmitter {
       health = await this.#client.health(profile).catch((error) => ({ ok: false, error: error.message }));
     }
     return this.snapshot({
-      profileConnection: health?.ok === false ? 'error' : 'ready',
+      profileConnection: health == null ? 'unknown' : (health.ok === false ? 'error' : 'ready'),
       profileMessage: health?.error ?? null,
       extra: { test: { ok: true, preflight, health } },
     });
@@ -496,18 +511,42 @@ export class CloudCoordinator extends EventEmitter {
   async #spawnAppServer({ providerId = null, deviceName = hostname() } = {}) {
     const current = await this.#client.loadProfile().catch(() => null);
     if (current?.mode === 'app-hosted' && await this.#client.isPaired().catch(() => false)) {
-      this.#setSandboxLifecycle('ready');
-      this.#preferredMode = await this.#client.saveServerMode('app-hosted').catch(() => 'app-hosted');
-      return this.snapshot({ extra: { sandbox: { ok: true, reused: true } } });
+      const provider = this.#sandboxProvider(current.sandbox);
+      const status = provider ? await provider.status(current.sandbox).catch(() => null) : null;
+      if (status?.lifecycle === 'provisioning') {
+        throw new AppServerError('The app sandbox is still starting. Try again once it finishes.', {
+          code: 'SANDBOX_BUSY',
+        });
+      }
+      if (status?.lifecycle === 'error') {
+        this.#setSandboxLifecycle('error', status.message ?? null);
+        throw new AppServerError(status.message ?? 'The app sandbox is in a failed state. Shut it down and start a new one.', {
+          code: 'SANDBOX_DEPLOY_FAILED',
+        });
+      }
+      if (!status || status.lifecycle === 'ready') {
+        this.#setSandboxLifecycle('ready');
+        this.#preferredMode = await this.#client.saveServerMode('app-hosted').catch((error) => {
+          this.#emit({ type: 'server-mode-persist-failed', mode: 'app-hosted', error: error.message });
+          return 'app-hosted';
+        });
+        return this.snapshot({ extra: { sandbox: { ok: true, reused: true } } });
+      }
+      // lifecycle 'idle': the deployment was deleted out-of-band, so a fresh
+      // sandbox is provisioned instead of reusing one that no longer exists.
+      this.#emit({ type: 'provision-log', line: status.message ?? 'The previous app sandbox no longer exists.' });
     }
     const provider = this.#appServerFor(providerId);
     this.#setSandboxLifecycle('provisioning', 'Starting an app-provided sandbox.');
     this.#emit({ type: 'sandbox-provision-started', providerId: provider.id });
     let spawned = null;
+    const controller = new AbortController();
+    this.#spawnController = controller;
     try {
       spawned = await provider.spawn({
         deviceName,
         limits: current?.limits,
+        signal: controller.signal,
         onLine: (line) => this.#emit({ type: 'provision-log', line }),
       });
       const profile = normalizeCloudProfile({
@@ -534,12 +573,18 @@ export class CloudCoordinator extends EventEmitter {
         tokens: pairing.credentials,
         device: pairing.credentials.device,
       });
-      this.#preferredMode = await this.#client.saveServerMode('app-hosted').catch(() => 'app-hosted');
+      this.#preferredMode = await this.#client.saveServerMode('app-hosted').catch((error) => {
+        this.#emit({ type: 'server-mode-persist-failed', mode: 'app-hosted', error: error.message });
+        return 'app-hosted';
+      });
       this.#setSandboxLifecycle('ready');
       const snapshot = await this.snapshot({ extra: { sandbox: { ok: true, reused: false } } });
       this.#emit({ type: 'sandbox-ready', providerId: provider.id, snapshot });
       return snapshot;
     } catch (error) {
+      if (error?.cleanupFailed) {
+        this.#emit({ type: 'sandbox-cleanup-failed', providerId: provider.id, error: error.cleanupFailed });
+      }
       if (spawned?.sandbox) {
         await provider.teardown(spawned.sandbox).catch((cleanupError) => {
           this.#emit({ type: 'sandbox-cleanup-failed', providerId: provider.id, error: cleanupError.message });
@@ -553,10 +598,22 @@ export class CloudCoordinator extends EventEmitter {
         snapshot: await this.snapshot(),
       });
       throw error;
+    } finally {
+      if (this.#spawnController === controller) this.#spawnController = null;
     }
   }
 
-  async appServerStatus() {
+  /** Concurrent polls share one provider request instead of stacking duplicates. */
+  appServerStatus(options = {}) {
+    if (!this.#statusPromise) {
+      this.#statusPromise = this.#appServerStatus(options).finally(() => {
+        this.#statusPromise = null;
+      });
+    }
+    return this.#statusPromise;
+  }
+
+  async #appServerStatus() {
     const profile = await this.#client.loadProfile().catch(() => null);
     if (profile?.mode !== 'app-hosted') {
       if (this.#sandboxLifecycle !== 'provisioning' && this.#sandboxLifecycle !== 'tearing-down') {
@@ -575,7 +632,8 @@ export class CloudCoordinator extends EventEmitter {
       this.#setSandboxLifecycle(status.lifecycle, status.message ?? null);
       return this.snapshot({ extra: { sandbox: { ok: true, status: status.status ?? null } } });
     } catch (error) {
-      this.#setSandboxLifecycle('error', error.message);
+      // A transport failure says nothing about the sandbox itself; keep the
+      // last known lifecycle and surface the connection problem instead.
       return this.snapshot({ profileConnection: 'error', profileMessage: error.message });
     }
   }
@@ -730,11 +788,12 @@ export class CloudCoordinator extends EventEmitter {
             committed = true;
             await this.#store.transition(record.id, 'committing');
           }
+          // The per-window broadcast snapshot is built by the main process;
+          // blocking the upload on a full snapshot per chunk stalls it.
           this.#emit({
             type: 'session-transfer-progress',
             handoffId: record.id,
             progress,
-            snapshot: await this.snapshot(),
           });
         },
       });
@@ -852,21 +911,25 @@ export class CloudCoordinator extends EventEmitter {
       if (!handoff) this.#remoteSessions.set(sessionId, result.session);
       if (handoff) {
         const nextState = cloudState(result.session.status ?? result.session.state, handoff.state);
-        await this.#store.applyEvent(handoff.id, {
-          sequence: Number(result.eventSeq) || handoff.lastEventSequence + 1,
-          state: nextState,
-          patch: {
-            serverVersion: result.session.stateVersion ?? result.session.version ?? handoff.serverVersion,
-            statusMessage: result.session.suspendedReason?.message ?? null,
-            pauseRequested: result.session.pauseRequested === true,
-            ...(typeof result.session.takeoverRequested === 'boolean'
-              ? { takeoverRequested: result.session.takeoverRequested }
-              : {}),
-            ...(typeof result.session.takeoverReady === 'boolean'
-              ? { takeoverReady: result.session.takeoverReady }
-              : {}),
-          },
-        });
+        const patch = {
+          serverVersion: result.session.stateVersion ?? result.session.version ?? handoff.serverVersion,
+          statusMessage: result.session.suspendedReason?.message ?? null,
+          pauseRequested: result.session.pauseRequested === true,
+          ...(typeof result.session.takeoverRequested === 'boolean'
+            ? { takeoverRequested: result.session.takeoverRequested }
+            : {}),
+          ...(typeof result.session.takeoverReady === 'boolean'
+            ? { takeoverReady: result.session.takeoverReady }
+            : {}),
+        };
+        const eventSeq = Number(result.eventSeq);
+        if (Number.isSafeInteger(eventSeq) && eventSeq > handoff.lastEventSequence) {
+          await this.#store.applyEvent(handoff.id, { sequence: eventSeq, state: nextState, patch });
+        } else {
+          // Without a real event sequence the watermark must not advance, or
+          // the next genuine SSE event is discarded as a duplicate.
+          await this.#store.patch(handoff.id, patch);
+        }
       }
     }
     const snapshot = await this.snapshot({
@@ -1056,10 +1119,16 @@ export class CloudCoordinator extends EventEmitter {
         const takeoverReady = event.type === 'session.takeover_ready'
           ? true
           : current.takeoverReady ?? false;
-        if (event.type === 'timeline.updated' || state === 'completed') {
-          await this.#syncLocalTimeline(sessionId, handoffId).catch((error) => {
+        if (event.type === 'timeline.updated') this.#timelinePending.set(sessionId, true);
+        const owesTimelineSync = event.type === 'timeline.updated' || this.#timelinePending.get(sessionId) !== false;
+        if ((event.type === 'timeline.updated' || state === 'completed') && owesTimelineSync) {
+          try {
+            await this.#syncLocalTimeline(sessionId, handoffId);
+            this.#timelinePending.set(sessionId, false);
+          } catch (error) {
+            this.#timelinePending.set(sessionId, true);
             this.#emit({ type: 'timeline-sync-error', sessionId, error: error.message });
-          });
+          }
         }
         const updated = await this.#store.applyEvent(handoffId, {
           sequence: event.sequence,
@@ -1087,12 +1156,14 @@ export class CloudCoordinator extends EventEmitter {
           sessionId,
           event,
           handoff: updated,
-          snapshot: await this.snapshot({ selectedSessionId: sessionId }),
         });
         if (['downloaded', 'cancelled', 'expired', 'failed'].includes(updated?.state)) controller.abort();
       },
     }).catch((error) => this.#emit({ type: 'session-stream-error', sessionId, error: error.message }))
-      .finally(() => this.#watchers.delete(sessionId));
+      .finally(() => {
+        this.#watchers.delete(sessionId);
+        this.#timelinePending.delete(sessionId);
+      });
   }
 
   async #finalizeTransferCancellation(record) {
@@ -1189,7 +1260,7 @@ export class CloudCoordinator extends EventEmitter {
       }
       const staged = await this.#store.readPayload(record.id);
       if (record.state === 'preparing') record = await this.#store.transition(record.id, 'uploading');
-      if (record.state === 'uploading') record = await this.#store.transition(record.id, 'committing');
+      let committed = false;
       const controller = new AbortController();
       this.#transferControllers.set(record.id, controller);
       const transferPromise = this.#client.transfer({
@@ -1217,12 +1288,17 @@ export class CloudCoordinator extends EventEmitter {
             ...(Number.isSafeInteger(eventSeq) && eventSeq > 0 ? { lastEventSequence: eventSeq } : {}),
           });
         },
-        onProgress: async (progress) => this.#emit({
-          type: 'session-recovery-progress',
-          handoffId: record.id,
-          progress,
-          snapshot: await this.snapshot(),
-        }),
+        onProgress: async (progress) => {
+          if (progress.phase === 'committing' && !committed) {
+            committed = true;
+            await this.#store.transition(record.id, 'committing');
+          }
+          this.#emit({
+            type: 'session-recovery-progress',
+            handoffId: record.id,
+            progress,
+          });
+        },
       });
       this.#transferPromises.set(record.id, transferPromise);
       const session = await transferPromise;
@@ -1237,6 +1313,7 @@ export class CloudCoordinator extends EventEmitter {
         return;
       }
       const state = cloudState(session.state ?? session.status);
+      if (!committed) await this.#store.transition(record.id, 'committing');
       const updated = await this.#store.transition(record.id, state, {
         cloudSessionId: session.id ?? session.sessionId ?? record.id,
         serverVersion: session.stateVersion ?? session.version ?? 1,
@@ -1273,6 +1350,19 @@ export class CloudCoordinator extends EventEmitter {
       const latest = await this.#store.get(record.id);
       if (latest && ['preparing', 'uploading', 'committing'].includes(latest.state)) {
         const attempt = Number(latest.recoveryAttempt ?? 0) + 1;
+        if (attempt >= MAX_TRANSFER_RECOVERY_ATTEMPTS) {
+          await this.#store.transition(record.id, 'failed', {
+            error: `Cloud transfer recovery failed ${attempt} times: ${error.message}`,
+            recoveryAttempt: attempt,
+          });
+          this.#emit({
+            type: 'session-transfer-failed',
+            handoffId: record.id,
+            error: error.message,
+            snapshot: await this.snapshot(),
+          });
+          return;
+        }
         await this.#store.patch(record.id, { recoveryAttempt: attempt, error: error.message }).catch(() => {});
         this.#scheduleTransferRecovery(record.id, attempt);
       }
@@ -1572,30 +1662,52 @@ export class CloudCoordinator extends EventEmitter {
     if (!sessionId || this.#watchers.has(sessionId)) return;
     const controller = new AbortController();
     this.#watchers.set(sessionId, controller);
-    void this.#client.watchSession(sessionId, 0, {
+    // Resume from the last seen sequence instead of replaying the full history
+    // every time a window refreshes.
+    const after = this.#remoteWatchSequence.get(sessionId) ?? 0;
+    void this.#client.watchSession(sessionId, after, {
       signal: controller.signal,
       onEvent: async (event) => {
+        this.#remoteWatchSequence.set(sessionId, event.sequence);
         const source = event.session ?? event.payload?.session ?? event.payload ?? event;
-        const session = await this.#hydrateRemoteTakeover(
-          await this.#client.session(sessionId),
-          source.boundary ?? event.boundary ?? null,
-        );
+        // Agent activity deltas carry no session state; refetching the full
+        // session for each one adds a round trip per keystroke of the agent.
+        const cached = this.#remoteSessions.get(sessionId);
+        const needsRefetch = !cached
+          || event.type !== 'agent.event'
+          || Boolean(source.boundary ?? event.boundary)
+          || cached.takeoverRequested
+          || cached.takeoverReady;
+        const session = needsRefetch
+          ? await this.#hydrateRemoteTakeover(
+              await this.#client.session(sessionId),
+              source.boundary ?? event.boundary ?? null,
+            )
+          : cached;
         this.#remoteSessions.set(sessionId, session);
-        if (event.type === 'timeline.updated' || session.status === 'completed') {
-          await this.#syncRemoteTimeline(sessionId).catch((error) => {
+        if (event.type === 'timeline.updated') this.#timelinePending.set(sessionId, true);
+        const owesTimelineSync = event.type === 'timeline.updated' || this.#timelinePending.get(sessionId) !== false;
+        if ((event.type === 'timeline.updated' || session.status === 'completed') && owesTimelineSync) {
+          try {
+            await this.#syncRemoteTimeline(sessionId);
+            this.#timelinePending.set(sessionId, false);
+          } catch (error) {
+            this.#timelinePending.set(sessionId, true);
             this.#emit({ type: 'timeline-sync-error', sessionId, error: error.message });
-          });
+          }
         }
         this.#emit({
           type: 'remote-session-event',
           sessionId,
           event,
-          snapshot: await this.snapshot({ selectedSessionId: sessionId }),
         });
         if (['purged', 'cancelled', 'failed'].includes(session.status)) controller.abort();
       },
     }).catch((error) => this.#emit({ type: 'remote-session-stream-error', sessionId, error: error.message }))
-      .finally(() => this.#watchers.delete(sessionId));
+      .finally(() => {
+        this.#watchers.delete(sessionId);
+        this.#timelinePending.delete(sessionId);
+      });
   }
 
   #publicRemoteSession(session) {

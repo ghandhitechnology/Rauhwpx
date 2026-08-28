@@ -75,16 +75,20 @@ function errorBody(error) {
   return {
     error: {
       code: error.code ?? 'INTERNAL_ERROR',
-      message: error.status && error.status < 500 ? error.message : 'Cloud service failed',
+      // CloudError messages are hand-written for clients; unexpected faults
+      // stay generic so internals never leak.
+      message: error instanceof CloudError ? error.message : 'Cloud service failed',
       ...(error.details === undefined ? {} : { details: error.details }),
     },
   };
 }
 
-function positiveSequence(value) {
+function positiveSequence(value, label = 'after') {
   if (value === null || value === undefined || value === '') return 0;
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new CloudError('INVALID_REQUEST', 'after must be a non-negative integer');
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new CloudError('INVALID_REQUEST', `${label} must be a non-negative integer`);
+  }
   return parsed;
 }
 
@@ -215,7 +219,7 @@ export function createCloudHttpHandler({
         }
         const workerChunk = action.match(/^\/uploads\/([^/]+)\/chunks$/);
         if (request.method === 'POST' && workerChunk) {
-          const offset = positiveSequence(request.headers['x-upload-offset']);
+          const offset = positiveSequence(request.headers['x-upload-offset'], 'x-upload-offset');
           const bytes = await readBytes(request, TRANSFER_LIMITS.chunkBytes);
           json(response, 200, await blobStore.appendChunk({
             uploadId: workerChunk[1], deviceId: session.origin_device_id, offset, bytes,
@@ -422,7 +426,7 @@ export function createCloudHttpHandler({
       }
       const chunkRoute = pathname.match(/^\/v1\/uploads\/([^/]+)\/chunks$/);
       if (request.method === 'POST' && chunkRoute) {
-        const offset = positiveSequence(request.headers['x-upload-offset']);
+        const offset = positiveSequence(request.headers['x-upload-offset'], 'x-upload-offset');
         const bytes = await readBytes(request, TRANSFER_LIMITS.chunkBytes);
         json(response, 200, await blobStore.appendChunk({ uploadId: chunkRoute[1], deviceId: device.id, offset, bytes }));
         return;
@@ -460,12 +464,21 @@ export function createCloudHttpHandler({
       }
       throw new CloudError('NOT_FOUND', 'Endpoint was not found', 404);
     } catch (error) {
-      logger?.error('http.request_failed', {
-        method: request.method,
-        pathname,
-        code: error.code,
-        message: error.message,
-      });
+      const status = error.status ?? 500;
+      // Routine client errors (expired tokens, retries) must not bury real
+      // faults, so only 5xx land at error level.
+      const entry = status >= 500
+        ? { level: 'error', event: 'http.request_failed' }
+        : { level: 'info', event: 'http.request_rejected' };
+      const log = logger?.[entry.level];
+      if (typeof log === 'function') {
+        log.call(logger, entry.event, {
+          method: request.method,
+          pathname,
+          code: error.code,
+          message: error.message,
+        });
+      }
       if (!response.headersSent) json(response, error.status ?? 500, errorBody(error));
       else response.destroy();
     }

@@ -14,6 +14,8 @@ const ACCESS_TTL_MS = 15 * 60 * 1000;
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PAIRING_TTL_MS = 10 * 60 * 1000;
 const ROTATION_RETRY_GRACE_MS = 30 * 1000;
+const LAST_SEEN_WRITE_INTERVAL_MS = 60 * 1000;
+const BOOTSTRAP_CONSUMED_KEY = 'auth.bootstrap.consumed';
 
 function hashToken(value) {
   return createHash('sha256').update(value).digest();
@@ -28,6 +30,13 @@ function hashPairingCode(code, salt) {
     memory: 64 * 1024,
     passes: 3,
   });
+}
+
+/** Deterministic, keyed seek value so redemption is one indexed lookup. */
+function pairingCodeSeek(key, code) {
+  return createHash('sha256').update('rauhwpx-pairing-seek\0').update(key).update(
+    Buffer.from(code.normalize('NFKC').toUpperCase()),
+  ).digest();
 }
 
 function sameBuffer(left, right) {
@@ -93,15 +102,19 @@ export class AuthService {
     const code = pairingCode();
     const salt = randomBytes(16);
     this.database.prepare(`
-      INSERT INTO pairing_codes(id, code_hash, salt, created_by_device_id, intended_name, expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(randomUUID(), hashPairingCode(code, salt), salt, createdByDeviceId, intendedName, now + PAIRING_TTL_MS, now);
+      INSERT INTO pairing_codes(id, code_hash, code_seek, salt, created_by_device_id, intended_name, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      randomUUID(), hashPairingCode(code, salt), pairingCodeSeek(this.retryKey, code), salt,
+      createdByDeviceId, intendedName, now + PAIRING_TTL_MS, now,
+    );
     return { code, expiresAt: now + PAIRING_TTL_MS };
   }
 
   /**
    * 앱이 제공하는 샌드박스는 SSH가 없으므로 배포 시 주입한 부트스트랩 토큰으로
    * 첫 페어링 코드를 받는다. 기기가 하나라도 페어링되면 이 경로는 영구히 닫힌다.
+   * 기기를 전부 폐기해도 다시 열리지 않는다.
    */
   issueBootstrapPairing({ token, deviceName = null } = {}) {
     if (!this.bootstrapToken) {
@@ -112,8 +125,9 @@ export class AuthService {
       throw new CloudError('BOOTSTRAP_TOKEN_INVALID', 'Bootstrap token is invalid', 401);
     }
     return transaction(this.database, () => {
+      const consumed = this.database.prepare('SELECT value FROM metadata WHERE key = ?').get(BOOTSTRAP_CONSUMED_KEY);
       const paired = this.database.prepare('SELECT COUNT(*) AS count FROM devices WHERE revoked_at IS NULL').get();
-      if (paired.count > 0) {
+      if (consumed || paired.count > 0) {
         throw new CloudError('BOOTSTRAP_CLOSED', 'Bootstrap pairing closed after the first device paired', 409);
       }
       return this.createPairingCode({ intendedName: deviceName });
@@ -122,10 +136,17 @@ export class AuthService {
 
   redeemPairingCode({ code, deviceName }) {
     const now = this.now();
+    const seek = pairingCodeSeek(this.retryKey, code);
+    // The seek match avoids argon2 work on misses; legacy rows without a seek
+    // value keep the original hash comparison until they expire.
     const candidates = this.database.prepare(`
-      SELECT * FROM pairing_codes WHERE used_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 20
-    `).all(now);
-    const match = candidates.find((candidate) => sameBuffer(candidate.code_hash, hashPairingCode(code, candidate.salt)));
+      SELECT * FROM pairing_codes WHERE used_at IS NULL AND expires_at > ? AND (code_seek = ? OR code_seek IS NULL)
+      ORDER BY created_at DESC LIMIT 20
+    `).all(now, seek);
+    const match = candidates.find((candidate) => (
+      candidate.code_seek !== null
+      || sameBuffer(candidate.code_hash, hashPairingCode(code, candidate.salt))
+    ));
     if (!match) throw new CloudError('PAIRING_CODE_INVALID', 'Pairing code is invalid or expired', 401);
     return transaction(this.database, () => {
       const consumed = this.database.prepare(`
@@ -136,6 +157,8 @@ export class AuthService {
       this.database.prepare(`
         INSERT INTO devices(id, name, created_at, last_seen_at) VALUES (?, ?, ?, ?)
       `).run(deviceId, deviceName, now, now);
+      this.database.prepare('INSERT OR IGNORE INTO metadata(key, value) VALUES (?, ?)')
+        .run(BOOTSTRAP_CONSUMED_KEY, '1');
       return this.#issueTokenFamily(deviceId, now);
     });
   }
@@ -187,11 +210,15 @@ export class AuthService {
     if (!row || row.token_expires_at <= now || row.family_expires_at <= now || row.revoked_at || row.family_revoked_at) {
       throw new CloudError('UNAUTHORIZED', 'Access token is expired or revoked', 401);
     }
+    // synchronous = FULL makes every write an fsync, so keep the per-request
+    // bookkeeping to statements that actually change a value.
     this.database.prepare(`
-      UPDATE refresh_tokens SET activated_at = COALESCE(activated_at, ?)
-      WHERE family_id = ? AND generation = ?
+      UPDATE refresh_tokens SET activated_at = ?
+      WHERE family_id = ? AND generation = ? AND activated_at IS NULL
     `).run(now, row.token_family_id, row.token_generation);
-    this.database.prepare('UPDATE devices SET last_seen_at = ? WHERE id = ?').run(now, row.id);
+    if (!row.last_seen_at || now - row.last_seen_at >= LAST_SEEN_WRITE_INTERVAL_MS) {
+      this.database.prepare('UPDATE devices SET last_seen_at = ? WHERE id = ?').run(now, row.id);
+    }
     return publicDevice({ ...row, last_seen_at: now });
   }
 

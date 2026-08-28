@@ -348,7 +348,11 @@ export function createRailwayServerProvider({
           },
         };
       } catch (error) {
-        await removeService(sandbox, {}).catch(() => {});
+        try {
+          await removeService(sandbox, {});
+        } catch (cleanupError) {
+          error.cleanupFailed = cleanupError.message;
+        }
         throw error;
       }
     },

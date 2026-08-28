@@ -302,6 +302,9 @@ let desktopReady = false;
 let secretVault = null;
 let cloudCoordinator = null;
 let cloudBroadcastChain = Promise.resolve();
+const CLOUD_BROADCAST_COALESCE_MS = 100;
+let cloudBroadcastTimer = null;
+let cloudBroadcastPending = null;
 const pendingLaunches = [launchRequest({ argv: process.argv, source: 'initial' })];
 const runtimeDir = join(app.getPath('temp'), 'rauhwpx', 'runtime', launchId);
 const workDir = join(app.getPath('userData'), 'launch-work', launchId);
@@ -368,9 +371,21 @@ async function broadcastCloudEvent(payload) {
 }
 
 function queueCloudBroadcast(payload) {
-  cloudBroadcastChain = cloudBroadcastChain
-    .then(() => broadcastCloudEvent(payload))
-    .catch((error) => console.warn('[rauhwpx] cloud event broadcast failed:', error));
+  // Bursts (upload progress, agent deltas) collapse into one trailing
+  // broadcast per window; every payload carries the full snapshot, so only
+  // the latest matters.
+  cloudBroadcastPending = payload;
+  if (cloudBroadcastTimer) return;
+  cloudBroadcastTimer = setTimeout(() => {
+    cloudBroadcastTimer = null;
+    const latest = cloudBroadcastPending;
+    cloudBroadcastPending = null;
+    if (!latest) return;
+    cloudBroadcastChain = cloudBroadcastChain
+      .then(() => broadcastCloudEvent(latest))
+      .catch((error) => console.warn('[rauhwpx] cloud event broadcast failed:', error));
+  }, CLOUD_BROADCAST_COALESCE_MS);
+  cloudBroadcastTimer.unref?.();
 }
 
 function requireCloudCoordinator() {
@@ -1112,7 +1127,7 @@ ipcMain.handle('cloud:transfer', async (event, payload) => {
     throw new Error('Cloud agents require Full access');
   }
   if (session.cloudLocked) throw new Error('This document is already owned by a cloud session');
-  if (session.cloudTransferPromise) return session.cloudTransferPromise;
+  if (session.cloudTransferPromise) return scopedCloudSnapshot(session, await session.cloudTransferPromise);
   const lease = documentLeases.leaseForSession(session.sessionId);
   const transfer = requireCloudCoordinator().transfer(payload, {
     originSessionId: session.sessionId,

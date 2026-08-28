@@ -149,7 +149,12 @@ test('desktop event watcher recovers after an extended network outage', async ()
 
 test('backend SSE payload advances the durable desktop handoff', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-sse-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-1',
@@ -215,7 +220,12 @@ test('backend SSE payload advances the durable desktop handoff', async (t) => {
 
 test('VPS restart can requeue a running durable handoff', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-requeue-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-1',
@@ -244,7 +254,12 @@ test('VPS restart can requeue a running durable handoff', async (t) => {
 
 test('command response advances state before its matching SSE event arrives', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-command-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-1',
@@ -295,7 +310,12 @@ test('command response advances state before its matching SSE event arrives', as
 
 test('queued message remains accepted when SSE wins the command response race', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-message-race-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so the cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-1', threadId: 'thread-1', documentId: 'document-1',
@@ -352,7 +372,12 @@ test('queued message remains accepted when SSE wins the command response race', 
 
 test('activation receipt skips historical staged events before watching live updates', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-activation-replay-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   let watchAfter = null;
   const coordinator = new CloudCoordinator({
@@ -505,7 +530,12 @@ test('verified result confirmation resumes after a crash boundary without redown
 
 test('cancelling during activation aborts the transfer and remotely cancels exactly once', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-cancel-race-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   let createdResolve;
   const created = new Promise((resolve) => { createdResolve = resolve; });
@@ -613,7 +643,12 @@ test('persisted transfer cancellation is remotely finalized after an app restart
 
 test('takeover waits for and verifies the frozen checkpoint and timeline boundary', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-takeover-race-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-1', threadId: 'thread-1', documentId: 'document-1',
@@ -756,7 +791,12 @@ test('cross-device takeover completion fails closed without a frozen operation r
 
 test('verified result confirmation retries online without another app restart', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-confirm-retry-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-1', threadId: 'thread-1', documentId: 'document-1',

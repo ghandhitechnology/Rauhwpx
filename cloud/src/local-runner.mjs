@@ -68,19 +68,21 @@ export class LocalRunner {
     spawnProcess = spawn,
     workerEntry = process.env.RAUHWpx_WORKER_ENTRY || '/app/worker/main.mjs',
     nodeExecutable = process.execPath,
+    onWorkerExit = () => {},
   } = {}) {
     this.config = config;
     this.spawnProcess = spawnProcess;
     this.workerEntry = workerEntry;
     this.nodeExecutable = nodeExecutable;
+    this.onWorkerExit = onWorkerExit;
     this.children = new Map();
   }
 
-  /** all 여부와 무관하게 살아 있는 자식만 있다. 재시작하면 비어 있고 스케줄러가 다시 큐에 넣는다. */
-  async list() {
+  /** all=true 이면 종료된 자식도 돌려준다. 항목에는 running 플래그가 붙는다. */
+  async list({ all = false } = {}) {
     return [...this.children.entries()]
-      .filter(([, entry]) => entry.running)
-      .map(([sandboxId, entry]) => ({ sandboxId, sessionId: entry.sessionId }));
+      .filter(([, entry]) => all || entry.running)
+      .map(([sandboxId, entry]) => ({ sandboxId, sessionId: entry.sessionId, running: entry.running }));
   }
 
   async start(session, { workerToken, controlSocket }) {
@@ -121,13 +123,29 @@ export class LocalRunner {
     });
     const entry = { sessionId: session.id, child, workspace, running: true };
     this.children.set(sandboxId, entry);
+    // stderr is the worker's only diagnostics channel; an unread pipe fills
+    // up and blocks the worker, so keep a bounded tail and log it on exit.
+    let stderrTail = '';
+    if (typeof child.stderr?.on === 'function') {
+      child.stderr.on('data', (chunk) => {
+        stderrTail = `${stderrTail}${chunk}`.slice(-8_192);
+      });
+      child.stderr.unref?.();
+    }
+    const exited = (code) => {
+      entry.running = false;
+      if (this.children.get(sandboxId) === entry) {
+        this.children.delete(sandboxId);
+        void fs.rm(workspace, { recursive: true, force: true }).catch(() => {});
+      }
+      if (code) this.onWorkerExit?.(sandboxId, session.id, code, stderrTail.trim());
+    };
     child.once('error', (error) => {
       entry.running = false;
       entry.error = error;
     });
-    child.once('exit', () => { entry.running = false; });
+    child.once('exit', (code) => exited(code));
     child.unref();
-    child.stderr?.unref?.();
     await new Promise((resolve) => setImmediate(resolve));
     if (entry.error) {
       this.children.delete(sandboxId);
@@ -135,6 +153,11 @@ export class LocalRunner {
       throw new CloudError('WORKER_SPAWN_FAILED', entry.error.message, 503);
     }
     return sandboxId;
+  }
+
+  /** Graceful shutdown must not leave detached workers running. */
+  async stopAll() {
+    await Promise.allSettled([...this.children.keys()].map((sandboxId) => this.stop(sandboxId)));
   }
 
   /** 이미 사라진 샌드박스도 같은 결과를 돌려준다. 작업 디렉터리는 항상 지운다. */

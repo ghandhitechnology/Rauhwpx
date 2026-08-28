@@ -18,6 +18,9 @@ export const CLOUD_HANDOFF_STATES = Object.freeze([
 ]);
 
 const TERMINAL_STATES = new Set(['downloaded', 'cancelled', 'expired', 'failed']);
+
+/** Debounce window for watermark-only stream writes. */
+const CLOUD_HANDOFF_PERSIST_DEBOUNCE_MS = 250;
 const TRANSITIONS = Object.freeze({
   preparing: new Set(['uploading', 'completed', 'expired', 'failed', 'cancelled']),
   uploading: new Set(['committing', 'completed', 'expired', 'failed', 'cancelled']),
@@ -85,6 +88,7 @@ export class CloudHandoffStore {
   #takeoverReceipts = new Map();
   #loaded = false;
   #writeChain = Promise.resolve();
+  #persistTimer = null;
 
   constructor({ filePath }) {
     if (!filePath) throw new Error('Cloud handoff store requires a file path');
@@ -257,7 +261,9 @@ export class CloudHandoffStore {
         updatedAt: new Date().toISOString(),
       });
       this.#records.set(id, next);
-      await this.#persist();
+      // High-frequency stream events must not rewrite the whole store on every
+      // tick; a debounced write still survives crashes via server replay.
+      this.#schedulePersist();
       return next;
     }
     return this.transition(id, eventState, patch);
@@ -367,6 +373,24 @@ export class CloudHandoffStore {
     const operation = this.#writeChain.then(() => atomicJsonWrite(this.#filePath, snapshot));
     this.#writeChain = operation.catch(() => {});
     return operation;
+  }
+
+  /** Trailing write for watermark-only updates; state changes persist immediately. */
+  #schedulePersist() {
+    if (this.#persistTimer) return;
+    this.#persistTimer = setTimeout(() => {
+      this.#persistTimer = null;
+      this.#persist().catch(() => {});
+    }, CLOUD_HANDOFF_PERSIST_DEBOUNCE_MS);
+    this.#persistTimer.unref?.();
+  }
+
+  flush() {
+    if (this.#persistTimer) {
+      clearTimeout(this.#persistTimer);
+      this.#persistTimer = null;
+    }
+    return this.#persist().catch(() => {});
   }
 }
 

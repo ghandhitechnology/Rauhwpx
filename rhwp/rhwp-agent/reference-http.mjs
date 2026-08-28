@@ -91,7 +91,22 @@ function errorStatus(error) {
     case 'REFERENCE_EXTRACTION_TIMEOUT': return 504;
     case 'REFERENCE_EXTRACTOR_UNAVAILABLE': return 503;
     case 'REFERENCE_STORE_CORRUPT': return 500;
-    default: return 400;
+    // Known validation faults are client errors; anything unexpected (missing
+    // store artifacts, allocation conflicts, disk faults) is a server fault
+    // and must not read as a 400.
+    case 'REFERENCE_ID_INVALID':
+    case 'REFERENCE_NAME_INVALID':
+    case 'REFERENCE_SCOPE_ID_INVALID':
+    case 'REFERENCE_SCOPE_ID_REQUIRED':
+    case 'REFERENCE_SCOPE_INVALID':
+    case 'REFERENCE_QUERY_REQUIRED':
+    case 'REFERENCE_TYPE_REQUIRED':
+    case 'REFERENCE_FILE_EMPTY':
+    case 'REFERENCE_EMPTY_TEXT':
+    case 'REFERENCE_SIZE_MISMATCH': return 400;
+    case 'REFERENCE_NOT_TEXT':
+    case 'REFERENCE_NOT_IMAGE': return 415;
+    default: return 500;
   }
 }
 

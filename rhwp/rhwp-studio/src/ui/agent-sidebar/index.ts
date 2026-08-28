@@ -3525,6 +3525,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       scrollConversationToMessage(userBubble, { smooth: true });
       void cloudUi.queueMessage(cloudText, messageId).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
+        userBubble.remove();
+        input.value = cloudText;
+        resizeComposerInput();
         systemMessage(`메시지를 대기열에 넣지 못했습니다: ${message}`);
       });
       return;
