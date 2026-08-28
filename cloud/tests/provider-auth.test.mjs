@@ -121,6 +121,7 @@ test('ProviderManager treats imported files and vault secrets as authenticated',
   assert.equal(withFiles.authenticated, true);
   assert.equal(withFiles.authRequired, false);
 
+  await applyProviderAuth('pi', parseProviderAuth('pi', AUTH_BUNDLES.pi), { vault, authDirectory });
   const emptyRoot = path.join(authDirectory, 'empty');
   const emptyManager = new ProviderManager(sessions, {
     providerAuthDirectory: emptyRoot,
