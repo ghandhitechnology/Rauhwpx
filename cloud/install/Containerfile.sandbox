@@ -2,7 +2,7 @@
 # 컨트롤 플레인과 세션 워커가 한 컨테이너를 공유하고, 워커만 전용 uid로 내려간다.
 FROM node:24-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
 
-ARG CHROMIUM_VERSION=151.0.7922.137-1~deb12u1
+ARG CHROMIUM_VERSION=151.0.7922.173-1~deb12u1
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
