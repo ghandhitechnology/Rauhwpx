@@ -15,7 +15,8 @@ Access-controlled routes use opaque Bearer access tokens. Access tokens expire a
 - `GET /v1/profile` returns paired devices, provider readiness, setup actions, and service limits.
 - `POST /v1/pairing` creates another one-time device code.
 - `POST /v1/uploads/init` and `POST /v1/uploads/:id/chunks` implement resumable content-addressed uploads.
-- `POST /v1/sessions` stages a session from completed document, timeline, and reference blob IDs.
+- `PUT /v1/providers/:provider/auth` imports the named provider's API key and allow-listed auth files from a paired device, then re-probes readiness.
+- `POST /v1/sessions` stages a session from completed document, timeline, and reference blob IDs. The selected provider must already be available and authenticated.
 - `POST /v1/sessions/:id/commands` accepts idempotent control commands. State controls require `payload.expectedVersion`.
 - `GET /v1/sessions` and `GET /v1/sessions/:id` reconcile session state across paired devices.
 - `GET /v1/sessions/:id/events?after=N` replays ordered SSE events and then follows live events.
@@ -29,7 +30,7 @@ Sessions are staged until `session.activate` commits the handoff. Supported comm
 
 ## Provider management
 
-Provider credentials are created independently on the VPS. Local desktop credentials are never accepted by the handoff API.
+Provider credentials live on the VPS. A paired desktop imports the selected provider's local API key or auth files through `PUT /v1/providers/:provider/auth` before it stages a session. The control plane stores API keys in the vault and OAuth state under `/var/lib/rauhwpx-cloud/provider-auth`, then re-probes readiness. Interactive VPS login remains available.
 
 ```bash
 sudo rauhwpx-cloud provider install codex

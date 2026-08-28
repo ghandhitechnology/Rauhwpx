@@ -4,6 +4,7 @@ import { hostname } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AppServerError, createAppServerRegistry } from './cloud-app-server.mjs';
+import { collectProviderAuth, isPermanentTransferError } from './cloud-provider-auth.mjs';
 import { normalizeCloudProfile, normalizeTailscaleHttpsPort } from './cloud-profile.mjs';
 import { sha256Hex, writeVerifiedRecoveryFile } from './cloud-handoff.mjs';
 
@@ -139,14 +140,32 @@ export class CloudCoordinator extends EventEmitter {
   #statusPromise = null;
   #teardownPromise = null;
   #preferredMode = null;
+  #collectProviderAuth;
 
-  constructor({ client, store, provisioner, recoveryDir, appServers = [] }) {
+  constructor({
+    client,
+    store,
+    provisioner,
+    recoveryDir,
+    appServers = [],
+    collectProviderAuth: collectAuth = collectProviderAuth,
+  }) {
     super();
     this.#client = client;
     this.#store = store;
     this.#provisioner = provisioner;
     this.#recoveryDir = recoveryDir;
     this.#appServers = Array.isArray(appServers) ? createAppServerRegistry(appServers) : appServers;
+    this.#collectProviderAuth = collectAuth;
+  }
+
+  async #providerAuthFor(provider) {
+    if (!provider || typeof this.#collectProviderAuth !== 'function') return null;
+    try {
+      return await this.#collectProviderAuth(provider);
+    } catch {
+      return null;
+    }
   }
 
   async start() {
@@ -767,6 +786,7 @@ export class CloudCoordinator extends EventEmitter {
         timeline: payload?.timeline,
         resources: payload?.references ?? [],
         limits: record.limits,
+        providerAuth: await this.#providerAuthFor(payload?.agent),
         signal: controller.signal,
         onSessionCreated: async ({ sessionId, stateVersion }) => {
           this.#transferRemoteSessions.set(record.id, { sessionId, stateVersion });
@@ -832,8 +852,15 @@ export class CloudCoordinator extends EventEmitter {
         }
       }
       if (current && ['preparing', 'uploading', 'committing'].includes(current.state)) {
-        await this.#store.patch(record.id, { error: error.message, recoveryAttempt: 1 });
-        this.#scheduleTransferRecovery(record.id, 1);
+        if (isPermanentTransferError(error)) {
+          await this.#store.transition(record.id, 'failed', {
+            error: error.message,
+            recoveryAttempt: 1,
+          });
+        } else {
+          await this.#store.patch(record.id, { error: error.message, recoveryAttempt: 1 });
+          this.#scheduleTransferRecovery(record.id, 1);
+        }
       }
       this.#emit({ type: 'session-transfer-failed', handoffId: record.id, error: error.message });
       throw error;
@@ -1275,6 +1302,7 @@ export class CloudCoordinator extends EventEmitter {
         timeline: record.timeline,
         resources: staged.resources,
         limits: record.limits,
+        providerAuth: await this.#providerAuthFor(record.provider),
         signal: controller.signal,
         onSessionCreated: async ({ sessionId, stateVersion }) => {
           this.#transferRemoteSessions.set(record.id, { sessionId, stateVersion });
@@ -1350,9 +1378,11 @@ export class CloudCoordinator extends EventEmitter {
       const latest = await this.#store.get(record.id);
       if (latest && ['preparing', 'uploading', 'committing'].includes(latest.state)) {
         const attempt = Number(latest.recoveryAttempt ?? 0) + 1;
-        if (attempt >= MAX_TRANSFER_RECOVERY_ATTEMPTS) {
+        if (isPermanentTransferError(error) || attempt >= MAX_TRANSFER_RECOVERY_ATTEMPTS) {
           await this.#store.transition(record.id, 'failed', {
-            error: `Cloud transfer recovery failed ${attempt} times: ${error.message}`,
+            error: isPermanentTransferError(error)
+              ? error.message
+              : `Cloud transfer recovery failed ${attempt} times: ${error.message}`,
             recoveryAttempt: attempt,
           });
           this.#emit({

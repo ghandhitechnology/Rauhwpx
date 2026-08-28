@@ -104,6 +104,7 @@ export function createCloudHttpHandler({
   config,
   logger,
   vault,
+  applyProviderAuth = null,
 }, { workerOnly = false } = {}) {
   const authenticate = (request) => auth.authenticate(bearer(request));
   const authenticateWorker = (request, sessionId) => sessionStore.authenticateWorker(sessionId, bearer(request));
@@ -325,6 +326,14 @@ export function createCloudHttpHandler({
       }
       if (request.method === 'POST' && pathname === '/v1/sessions') {
         json(response, 201, sessionStore.createSession(device, parseSessionCreate(await readJson(request))));
+        return;
+      }
+      const providerAuthRoute = pathname.match(/^\/v1\/providers\/([^/]+)\/auth$/);
+      if (request.method === 'PUT' && providerAuthRoute) {
+        if (typeof applyProviderAuth !== 'function') {
+          throw new CloudError('AUTH_IMPORT_UNAVAILABLE', 'This VPS cannot import provider credentials', 501);
+        }
+        json(response, 200, await applyProviderAuth(decodeURIComponent(providerAuthRoute[1]), await readJson(request)));
         return;
       }
       const sessionRoute = pathname.match(/^\/v1\/sessions\/([^/]+)(\/events|\/commands|\/timeline|\/checkpoint|\/takeover)?$/);

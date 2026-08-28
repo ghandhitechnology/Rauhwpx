@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import { basename, dirname, extname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -54,6 +55,7 @@ import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 import { CloudClient } from './cloud-client.mjs';
 import { CloudCoordinator } from './cloud-coordinator.mjs';
 import { CloudHandoffStore } from './cloud-handoff.mjs';
+import { collectProviderAuth } from './cloud-provider-auth.mjs';
 import { CloudProvisioner } from './cloud-provisioner.mjs';
 import { createRailwayServerProvider } from './cloud-railway.mjs';
 import { applyCloudRecovery } from './cloud-result.mjs';
@@ -1335,6 +1337,12 @@ if (!hasSingleInstanceLock) {
         probeHealth: (endpoint, options) => cloudClient.probeEndpointHealth(endpoint, options),
         acquireReceipt: (request) => cloudClient.bootstrapPairing(request),
       })],
+      collectProviderAuth: (provider) => collectProviderAuth(provider, {
+        homeDir: os.homedir(),
+        env: process.env,
+        readSecret: (key) => secretVault.get(key),
+        readFileImpl: readFile,
+      }),
     });
     cloudCoordinator.on('event', queueCloudBroadcast);
     await cloudCoordinator.start();

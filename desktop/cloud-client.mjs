@@ -444,6 +444,22 @@ export class CloudClient {
     return this.#request('/v1/pairing', { method: 'POST', body: { deviceName } });
   }
 
+  async putProviderAuth(provider, providerAuth, { signal } = {}) {
+    try {
+      return await this.#request(`/v1/providers/${encodeURIComponent(provider)}/auth`, {
+        method: 'PUT',
+        signal,
+        body: {
+          secrets: providerAuth?.secrets ?? {},
+          files: providerAuth?.files ?? {},
+        },
+      });
+    } catch (error) {
+      if (error instanceof CloudHttpError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
   async transfer({
     sessionId,
     threadId,
@@ -456,6 +472,7 @@ export class CloudClient {
     timeline = [],
     resources = [],
     limits,
+    providerAuth = null,
     onProgress = () => {},
     onSessionCreated = () => {},
     onSessionActivated = () => {},
@@ -465,6 +482,9 @@ export class CloudClient {
     if (!document.length) throw new Error('A saved document is required for cloud transfer');
     if (document.length > MAX_RESULT_BYTES) throw new Error('Document exceeds the 64 MiB cloud limit');
     if (!validPortableTimeline(timeline)) throw new Error('Portable cloud timeline is invalid');
+    if (providerAuth && (Object.keys(providerAuth.secrets ?? {}).length || Object.keys(providerAuth.files ?? {}).length)) {
+      await this.putProviderAuth(provider, providerAuth, { signal });
+    }
     const documentUpload = await this.uploadBlob({
       bytes: document,
       name: documentName,

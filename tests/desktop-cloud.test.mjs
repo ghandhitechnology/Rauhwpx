@@ -5,8 +5,11 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { CloudClient, __test as clientTest } from '../desktop/cloud-client.mjs';
+import { CloudClient, CloudHttpError, __test as clientTest } from '../desktop/cloud-client.mjs';
 import { CloudCoordinator, __test as coordinatorTest } from '../desktop/cloud-coordinator.mjs';
+import { collectProviderAuth, DESKTOP_PROVIDER_AUTH } from '../desktop/cloud-provider-auth.mjs';
+import { PROVIDER_AUTH } from '../cloud/src/provider-auth.mjs';
+import { PROVIDERS } from '../cloud/src/protocol.mjs';
 import { CloudHandoffStore, sha256Hex } from '../desktop/cloud-handoff.mjs';
 import { normalizeCloudProfile, normalizeTailscaleHttpsPort } from '../desktop/cloud-profile.mjs';
 import { sshArguments, __test as provisionerTest } from '../desktop/cloud-provisioner.mjs';
@@ -1176,4 +1179,159 @@ test('resolved recovery cleanup resumes idempotently after an app restart', asyn
 
   await coordinator.start();
   assert.equal((await store.get(record.id)).recoveryCleanupPath, null);
+});
+
+test('desktop and VPS provider auth catalogs stay aligned', () => {
+  assert.deepEqual(Object.keys(DESKTOP_PROVIDER_AUTH), [...PROVIDERS]);
+  for (const provider of PROVIDERS) {
+    assert.equal(DESKTOP_PROVIDER_AUTH[provider].secretName, PROVIDER_AUTH[provider].secretName);
+    for (const file of DESKTOP_PROVIDER_AUTH[provider].files) {
+      assert.ok(PROVIDER_AUTH[provider].files.includes(file.destination), `${provider} ${file.destination}`);
+    }
+  }
+});
+
+test('collectProviderAuth gathers API keys and allow-listed files for every provider', async (t) => {
+  const homeDir = await mkdtemp(path.join(tmpdir(), 'rauhwpx-provider-home-'));
+  t.after(() => rm(homeDir, { recursive: true, force: true }));
+  const secrets = {
+    'rhwp.claude.api-key': 'sk-ant-local',
+    'rhwp.codex.api-key': 'sk-proj-local',
+    'rhwp.pi.openrouter-api-key': 'sk-or-local',
+    'rhwp.grok.api-key': 'xai-local',
+    'rhwp.cursor.api-key': 'cur-local',
+  };
+  await mkdir(path.join(homeDir, '.claude'), { recursive: true });
+  await mkdir(path.join(homeDir, '.codex'), { recursive: true });
+  await mkdir(path.join(homeDir, '.grok'), { recursive: true });
+  await mkdir(path.join(homeDir, '.cursor'), { recursive: true });
+  await writeFile(path.join(homeDir, '.claude', '.credentials.json'), '{"oauth":"claude"}');
+  await writeFile(path.join(homeDir, '.codex', 'auth.json'), '{"token":"codex"}');
+  await writeFile(path.join(homeDir, '.grok', 'auth.json'), '{"token":"grok"}');
+  await writeFile(path.join(homeDir, '.cursor', 'cli-config.json'), '{"auth":"cursor"}');
+  for (const provider of PROVIDERS) {
+    const bundle = await collectProviderAuth(provider, {
+      homeDir,
+      env: {},
+      readSecret: async (key) => secrets[key] ?? null,
+    });
+    assert.equal(bundle.secrets[DESKTOP_PROVIDER_AUTH[provider].secretName], secrets[DESKTOP_PROVIDER_AUTH[provider].secretId]);
+    if (provider !== 'pi') assert.ok(Object.keys(bundle.files).length > 0, provider);
+  }
+});
+
+test('transfer imports provider auth before staging the session', async () => {
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://cloud.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'cloud.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const vault = memoryVault({
+    'cloud.profile': JSON.stringify(profile),
+    'cloud.refresh': 'refresh-old',
+  });
+  const requests = [];
+  const client = new CloudClient({
+    vault,
+    fetchImpl: signedFetch(async (url, options) => {
+      const body = options.body && String(options.headers['content-type']).includes('json')
+        ? JSON.parse(options.body)
+        : null;
+      requests.push({ url, options, body });
+      if (url.endsWith('/v1/token/refresh')) return jsonResponse({
+        accessToken: 'access',
+        accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        refreshToken: 'refresh-new',
+        refreshExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      });
+      if (url.endsWith('/v1/providers/codex/auth')) return jsonResponse({
+        provider: { provider: 'codex', available: true, authenticated: true },
+        importedSecrets: Object.keys(body.secrets),
+        importedFiles: Object.keys(body.files),
+      });
+      if (url.endsWith('/v1/uploads/init')) return jsonResponse({
+        uploadId: `upload-${requests.length}`,
+        chunkSize: 1024,
+        offset: body.size,
+        status: 'complete',
+        blobExists: true,
+        blob: { id: body.sha256, sha256: body.sha256, size: body.size },
+      });
+      if (url.endsWith('/v1/sessions')) return jsonResponse({
+        id: 'handoff-auth-01',
+        status: 'staged',
+        stateVersion: 1,
+      }, { status: 201 });
+      if (url.endsWith('/v1/sessions/handoff-auth-01/commands')) return jsonResponse({
+        session: { id: 'handoff-auth-01', status: 'queued', stateVersion: 2 },
+      });
+      throw new Error(`unexpected request ${url}`);
+    }),
+  });
+  await client.transfer({
+    sessionId: 'handoff-auth-01',
+    provider: 'codex',
+    executionConfig: { model: 'gpt-5.6', effort: 'high', workflow: 'direct', permissionProfile: 'unrestricted' },
+    goal: 'Continue',
+    documentName: 'document.hwpx',
+    documentBytes: Buffer.from('document'),
+    timeline: portableTimeline(),
+    limits: { maxDurationMinutes: 480, maxTurns: 100 },
+    providerAuth: {
+      secrets: { OPENAI_API_KEY: 'sk-proj-moved' },
+      files: { '.codex/auth.json': '{"token":"moved"}' },
+    },
+  });
+  const imported = requests.find((request) => request.url.endsWith('/v1/providers/codex/auth'));
+  const created = requests.find((request) => request.url.endsWith('/v1/sessions'));
+  assert.deepEqual(imported.body, {
+    secrets: { OPENAI_API_KEY: 'sk-proj-moved' },
+    files: { '.codex/auth.json': '{"token":"moved"}' },
+  });
+  assert.ok(requests.indexOf(imported) < requests.indexOf(created));
+});
+
+test('AUTH_REQUIRED fails the transfer once instead of retrying recovery', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-auth-fail-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  let transferCalls = 0;
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => true,
+      transfer: async () => {
+        transferCalls += 1;
+        throw new CloudHttpError('codex must be authenticated on this VPS', {
+          status: 409,
+          code: 'AUTH_REQUIRED',
+        });
+      },
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+    collectProviderAuth: async () => ({
+      secrets: { OPENAI_API_KEY: 'sk-proj-local' },
+      files: { '.codex/auth.json': '{"token":"local"}' },
+    }),
+  });
+  t.after(() => coordinator.stop());
+  await assert.rejects(
+    coordinator.transfer({
+      agent: 'codex',
+      threadId: 'thread-auth',
+      documentId: 'document-auth',
+      document: { fileName: 'document.hwpx', bytes: Buffer.from('document') },
+      timeline: portableTimeline(),
+      limits: { maxDurationMs: 15 * 60_000, maxTurns: 8 },
+    }, { originSessionId: 'desktop-auth' }),
+    (error) => error.code === 'AUTH_REQUIRED',
+  );
+  const records = await store.list();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].state, 'failed');
+  assert.equal(records[0].error, 'codex must be authenticated on this VPS');
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(transferCalls, 1);
 });

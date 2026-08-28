@@ -8,6 +8,7 @@ import { createCloudHttpHandler } from './http-server.mjs';
 import { loadOrCreateServerIdentity } from './identity.mjs';
 import { LocalRunner } from './local-runner.mjs';
 import { PodmanRunner } from './podman-runner.mjs';
+import { applyProviderAuth, parseProviderAuth } from './provider-auth.mjs';
 import { ProviderManager } from './provider-manager.mjs';
 import { RedactedLogger } from './redacted-logger.mjs';
 import { Scheduler } from './scheduler.mjs';
@@ -66,7 +67,23 @@ export function createCloudRuntime(config, dependencies = {}) {
       await blobStore.pruneStaleUploads();
     },
   });
-  const services = { auth, blobStore, sessionStore, identity, config, logger, vault };
+  const services = {
+    auth,
+    blobStore,
+    sessionStore,
+    identity,
+    config,
+    logger,
+    vault,
+    applyProviderAuth: async (provider, raw) => {
+      const imported = await applyProviderAuth(provider, parseProviderAuth(provider, raw), {
+        vault,
+        authDirectory: config.providerAuthDirectory,
+      });
+      const status = await providerManager.probe(provider);
+      return { ...imported, provider: status };
+    },
+  };
   const publicServer = http.createServer(createCloudHttpHandler(services));
   const workerServer = http.createServer(createCloudHttpHandler(services, { workerOnly: true }));
   publicServer.requestTimeout = 30_000;

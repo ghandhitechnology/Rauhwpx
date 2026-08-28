@@ -16,7 +16,9 @@ import { AuthService } from '../src/auth.mjs';
 import { BlobStore } from '../src/blob-store.mjs';
 import { openDatabase } from '../src/database.mjs';
 import { createCloudHttpHandler } from '../src/http-server.mjs';
+import { applyProviderAuth, parseProviderAuth } from '../src/provider-auth.mjs';
 import { SessionStore } from '../src/session-store.mjs';
+import { SecretVault } from '../src/secret-vault.mjs';
 import {
   SSE_STREAM_DIGEST,
   canonicalResponse,
@@ -61,7 +63,7 @@ async function assertResponseProof(response, identity, { nonce, method = 'GET', 
   return { bytes, digest, canonical };
 }
 
-async function fixture(t, { workerOnly = false } = {}) {
+async function fixture(t, { workerOnly = false, withProviderAuth = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-cloud-http-'));
   const database = openDatabase(path.join(root, 'cloud.sqlite3'));
   const blobStore = new BlobStore(database, { root: path.join(root, 'objects'), chunkBytes: 8 });
@@ -70,8 +72,24 @@ async function fixture(t, { workerOnly = false } = {}) {
   const identity = testIdentity();
   const config = { basePath: '/rauhwpx-cloud', maxRunningSessions: 2, maxQueuedSessions: 20 };
   const logger = { error() {} };
-  const vault = { list: () => [], get: () => null };
-  const server = http.createServer(createCloudHttpHandler({ auth, blobStore, sessionStore, identity, config, logger, vault }, { workerOnly }));
+  const vault = withProviderAuth
+    ? new SecretVault(database, { dataDirectory: root })
+    : { list: () => [], get: () => null };
+  const apply = withProviderAuth
+    ? async (provider, raw) => {
+      const imported = await applyProviderAuth(provider, parseProviderAuth(provider, raw), {
+        vault,
+        authDirectory: path.join(root, 'provider-auth'),
+      });
+      return {
+        ...imported,
+        provider: sessionStore.setProviderStatus(provider, { available: true, authenticated: true, version: '1' }),
+      };
+    }
+    : null;
+  const server = http.createServer(createCloudHttpHandler({
+    auth, blobStore, sessionStore, identity, config, logger, vault, applyProviderAuth: apply,
+  }, { workerOnly }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   const base = `http://127.0.0.1:${address.port}`;
@@ -81,7 +99,7 @@ async function fixture(t, { workerOnly = false } = {}) {
     database.close();
     await fs.rm(root, { recursive: true, force: true });
   });
-  return { base, database, blobStore, auth, sessionStore, identity };
+  return { base, database, blobStore, auth, sessionStore, identity, root };
 }
 
 async function pairOverHttp(auth, base) {
@@ -493,4 +511,50 @@ test('worker API accepts only the session worker token', async (t) => {
   assert.equal(takeover.takeover.status, 'ready');
   assert.equal(takeover.takeover.boundary.checkpoint.blobId, checkpoint.id);
   assert.equal(takeover.takeover.boundary.timeline.blobId, timeline.id);
+});
+
+test('paired devices import provider auth before a session can be staged', async (t) => {
+  const { base, auth, sessionStore, root } = await fixture(t, { withProviderAuth: true });
+  const tokens = await pairOverHttp(auth, base);
+  sessionStore.setProviderStatus('codex', { available: true, authenticated: false, version: 'codex 1' });
+  const document = await uploadOverHttp(base, tokens.accessToken, Buffer.from('source'), {
+    name: 'source.hwpx', kind: 'document',
+  });
+  const blocked = await publicFetch(`${base}/v1/sessions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokens.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'session_auth_import_01', provider: 'codex', goal: 'Work',
+      originDocument: { blobId: document.id, size: document.size, name: 'source.hwpx' },
+    }),
+  });
+  assert.equal(blocked.status, 409);
+  assert.equal((await blocked.json()).error.code, 'AUTH_REQUIRED');
+
+  const imported = await publicFetch(`${base}/v1/providers/codex/auth`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${tokens.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      secrets: { OPENAI_API_KEY: 'sk-proj-http' },
+      files: { '.codex/auth.json': '{"token":"imported"}' },
+    }),
+  });
+  assert.equal(imported.status, 200);
+  const receipt = await imported.json();
+  assert.equal(receipt.provider.authenticated, true);
+  assert.equal(
+    await fs.readFile(path.join(root, 'provider-auth', 'codex', '.codex', 'auth.json'), 'utf8'),
+    '{"token":"imported"}',
+  );
+
+  const created = await publicFetch(`${base}/v1/sessions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokens.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'session_auth_import_01', provider: 'codex', goal: 'Work',
+      originDocument: { blobId: document.id, size: document.size, name: 'source.hwpx' },
+    }),
+  });
+  assert.equal(created.status, 201);
+  assert.equal((await created.json()).status, 'staged');
 });
