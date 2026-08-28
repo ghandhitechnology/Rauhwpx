@@ -32,6 +32,8 @@ const PLANNING_EXCLUDED_TOOLS = 'bash,edit,write';
  */
 const ENV_PASSTHROUGH = [
   'PATH', 'HOME', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR',
+  // Cloud session virtual desktop — only present when the worker started Xvfb.
+  'DISPLAY', 'XAUTHORITY', 'RAUHWpx_SESSION_DISPLAY',
   // Windows 에서 cross-spawn/셸이 요구하는 값들.
   'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'TEMP', 'TMP',
 ];

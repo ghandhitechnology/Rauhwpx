@@ -107,7 +107,12 @@ export function buildCodexArgv(opts, threadId) {
   ];
   const common = [
     '--json', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules',
-    '--disable', 'apps', '--disable', 'browser_use', '--disable', 'computer_use',
+    '--disable', 'apps',
+    // Cloud sessions with a ready SessionDisplay may drive the virtual desktop.
+    // Desktop and title/calibrator jobs keep computer use off.
+    ...(sessionDisplayReady(opts)
+      ? []
+      : ['--disable', 'browser_use', '--disable', 'computer_use']),
     '--disable', 'image_generation',
     // 네이티브 서브에이전트는 항상 켠다. `--disable multi_agent` 는 0.147.0 에서
     // 실제로 스폰을 막지 못하므로(프로브 확인) 토글할 이유가 없고, 명시적으로 켜 두면
@@ -120,6 +125,14 @@ export function buildCodexArgv(opts, threadId) {
   return threadId
     ? ['exec', 'resume', ...common, threadId, '-']
     : ['exec', ...common, '-C', opts.rootDir, '-'];
+}
+
+/** Cloud harness sets RAUHWpx_SESSION_DISPLAY=ready on the hub when Xvfb is up. */
+export function sessionDisplayReady(opts = {}, env = process.env) {
+  const flag = opts.sessionDisplay ?? env.RAUHWpx_SESSION_DISPLAY;
+  if (flag === 'ready') return true;
+  if (flag === 'error' || flag === 'stopped' || flag === 'starting') return false;
+  return false;
 }
 
 /**
