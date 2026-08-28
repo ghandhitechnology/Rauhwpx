@@ -26,6 +26,7 @@ const NON_RETRYABLE_TRANSFER_CODES = new Set([
   'AUTH_REQUIRED',
   'PROVIDER_KEY_REQUIRED',
   'PROVIDER_UNAVAILABLE',
+  'SANDBOX_AUTH_UNSUPPORTED',
 ]);
 
 function nonRetryableTransferError(error) {
@@ -504,8 +505,14 @@ export class CloudCoordinator extends EventEmitter {
     try {
       await this.#client.seedProviderCredentials(auth);
     } catch (error) {
-      if (error?.status === 404 || error?.code === 'NOT_FOUND') return;
-      throw error;
+      if (error?.status !== 404 && error?.code !== 'NOT_FOUND') throw error;
+      const remote = await this.#client.profile().catch(() => null);
+      const status = remote?.providers?.find((item) => item.provider === provider);
+      if (status?.authenticated) return;
+      throw new AppServerError(
+        `${provider} is signed in on this computer, but this cloud sandbox cannot receive that login. Shut the sandbox down and start a new one from an updated build.`,
+        { code: 'SANDBOX_AUTH_UNSUPPORTED', retryable: false },
+      );
     }
   }
 

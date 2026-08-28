@@ -891,6 +891,53 @@ test('transfer seeds the selected provider before creating the remote session', 
   ]);
 });
 
+test('an old sandbox image cannot silently drop local provider login', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-old-image-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      profile: async () => ({ providers: [{ provider: 'codex', authenticated: false }] }),
+      seedProviderCredentials: async () => {
+        const error = new Error('Endpoint was not found');
+        error.status = 404;
+        error.code = 'NOT_FOUND';
+        throw error;
+      },
+      transfer: async () => {
+        throw new Error('transfer must not run when seed is unsupported');
+      },
+      watchSession: async () => {},
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+    collectProviderAuth: async (provider) => ({
+      provider,
+      apiKey: null,
+      files: [{ path: '.codex/auth.json', content: '{"token":"oauth"}' }],
+    }),
+  });
+  t.after(() => coordinator.stop());
+  await assert.rejects(coordinator.transfer({
+    threadId: 'thread-1', documentId: 'document-1',
+    document: { fileName: 'source.hwpx', bytes: new Uint8Array(Buffer.from('document')) },
+    timeline: {
+      schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(),
+      thread: {
+        id: 'thread-1', title: 'Task', createdAt: Date.now(), updatedAt: Date.now(),
+        agent: 'codex', model: 'gpt-5.6', effort: 'high', messages: [],
+      },
+    },
+    agent: 'codex', model: 'gpt-5.6', effort: 'high', workflow: 'direct', references: [],
+  }, { originSessionId: 'desktop-1' }), { code: 'SANDBOX_AUTH_UNSUPPORTED' });
+  const [record] = await store.list();
+  assert.equal(record.state, 'failed');
+  assert.match(record.error, /cannot receive that login/);
+});
+
 test('AUTH_REQUIRED fails the transfer once instead of retrying five times', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-auth-required-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
