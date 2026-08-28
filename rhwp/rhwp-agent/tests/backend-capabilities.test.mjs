@@ -167,10 +167,18 @@ test('execution mode validation rejects impossible direct workflow phases', () =
   assert.doesNotThrow(() => validateExecutionMode({
     workflow: 'direct', phase: 'implementing', capabilityEpoch: 1,
   }));
+  assert.doesNotThrow(() => validateExecutionMode({
+    workflow: 'question', phase: 'questioning', capabilityEpoch: 1,
+  }));
+  assert.throws(
+    () => validateExecutionMode({ workflow: 'question', phase: 'planning', capabilityEpoch: 1 }),
+    /Invalid execution mode: question\/planning/,
+  );
 });
 
 test('provider interaction modes fail closed on explicit invalid state', () => {
   assert.equal(providerInteractionMode({}), 'default');
+  assert.equal(providerInteractionMode({ workflow: 'question', phase: 'questioning' }), 'plan');
   assert.throws(
     () => providerInteractionMode({ workflow: 'unknown', phase: 'planning' }),
     /Unknown workflow: unknown/,
@@ -270,6 +278,24 @@ test('awaiting approval and switching remain read-only regardless of full profil
   }
 });
 
+test('question workflow uses native Plan capabilities without write tools', () => {
+  const opts = {
+    ...baseOpts,
+    workflow: 'question',
+    phase: 'questioning',
+    capabilityEpoch: 3,
+    permissionProfile: 'unrestricted',
+  };
+  assert.equal(providerInteractionMode(opts), 'plan');
+  const claude = buildClaudeArgv(opts, sessionId, false);
+  assert.equal(argValue(claude, '--permission-mode'), 'plan');
+  assert.equal(argValue(claude, '--tools').split(',').includes('Write'), false);
+  assert.equal(argValue(claude, '--tools').split(',').includes('Edit'), false);
+  const codex = buildCodexArgv(opts, null);
+  assert.ok(codex.includes('sandbox_mode="read-only"'));
+  assert.ok(codex.includes('web_search="live"'));
+});
+
 test('Claude SDK projects plan and build intent independently from access', () => {
   const requestUserInput = async () => ({ status: 'cancelled', reason: 'user-stop' });
   const plan = buildClaudeSdkOptions({
@@ -303,23 +329,27 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(planning, /cannot change it/);
   assert.match(planning, /defer submitting the update until implementation mode/);
   assert.doesNotMatch(planning, /update_agent_instructions/);
-  assert.match(planning, /patient brainstorming partner/);
+  assert.match(planning, /planning mode/);
   assert.match(planning, /Do not edit the local filesystem or live document/);
-  assert.match(planning, /Do not present a plan in the first planning response/);
-  assert.match(planning, /explicitly asks to skip discovery and draft immediately/);
-  assert.match(planning, /complete at least one focused conversational checkpoint/);
-  assert.match(planning, /summarize your understanding and use the same interaction for a concise confirmation/);
-  assert.match(planning, /native blocking question interaction when available, otherwise use ask_user_question/);
-  assert.doesNotMatch(planning, /Questions and confirmations are normal chat/);
-  assert.match(planning, /Do not ask artificial questions/);
+  assert.match(planning, /The user can keep editing the live document during planning/);
+  assert.match(planning, /live-document notification/);
+  assert.match(planning, /not a request to implement or draft a plan/);
+  assert.match(planning, /native question interaction or ask_user_question/);
+  assert.match(planning, /only when the user explicitly asks you to write, draft, or present a plan/);
+  assert.match(planning, /Do not tell the user the plan is ready until that tool returns success/);
   assert.match(planning, /read-only workspace, web, subagent, and rhwp MCP capabilities available/);
   assert.doesNotMatch(planning, /sandboxed Bash/);
-  assert.match(planning, /tell the user the plan is ready/);
-  assert.match(planning, /review it and enter editing mode when satisfied/);
   assert.match(planning, /present_implementation_plan as the final action/);
   assert.match(planning, /present-plan product skill/);
-  assert.match(planning, /clickable chat presentation and review sidebar/);
   assert.match(planning, /download_file/);
+
+  const question = systemBriefFor({ workflow: 'question', phase: 'questioning' });
+  assert.match(question, /question-and-research mode/);
+  assert.match(question, /Do not plan an implementation/);
+  assert.match(question, /do not call present_implementation_plan/);
+  assert.match(question, /The user can keep editing the live document/);
+  assert.match(question, /native question interaction or ask_user_question/);
+  assert.doesNotMatch(question, /present-plan product skill/);
   assert.match(planning, /search_reference_files/);
   assert.match(planning, /untrusted reference data/);
 

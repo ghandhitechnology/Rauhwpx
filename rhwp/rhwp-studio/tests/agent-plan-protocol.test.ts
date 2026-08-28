@@ -33,6 +33,7 @@ test('bridge exposes plan commands and emits every server lifecycle event', () =
     'chat-workflow-set',
     'chat-plan-approve',
     'chat-plan-request-changes',
+    'chat-document-saved',
   ]) {
     assert.match(bridgeSource, new RegExp(`type: '${message}'`));
   }
@@ -50,8 +51,9 @@ test('bridge exposes plan commands and emits every server lifecycle event', () =
 
 test('bridge reconnect keeps explicit workflow and re-synchronizes server authority', () => {
   assert.match(bridgeSource, /workflow: pending\.workflow/);
-  assert.match(bridgeSource, /this\.syncWorkflowState\(session, 'direct', 'direct'\)/);
-  assert.match(bridgeSource, /this\.syncWorkflowState\(msg, 'direct', 'direct'\)/);
+  assert.match(bridgeSource, /this\.syncWorkflowState\(session, this\.workflow, this\.phase\)/);
+  assert.match(bridgeSource, /this\.syncWorkflowState\(msg, fallbackWorkflow, fallbackPhase\)/);
+  assert.match(bridgeSource, /if \(this\.workflow === 'plan' \|\| this\.workflow === 'question' \|\| this\.workflowSwitchPending\)/);
   assert.match(bridgeSource, /activeCapabilityEpoch: this\.capabilityEpoch/);
   assert.match(bridgeSource, /this\.workflow === 'direct' \|\| this\.phase === 'implementing'/);
 });
@@ -67,7 +69,7 @@ test('a failed replacement cannot dispatch into the disposed previous session', 
   );
   assert.match(
     bridgeSource,
-    /const pending = this\.pendingChatStart \?\? \{[\s\S]*agent: this\.selectedAgent,[\s\S]*workflow: this\.workflow[\s\S]*this\.pendingChatStart = pending;[\s\S]*agent: pending\.agent,[\s\S]*workflow: pending\.workflow/,
+    /this\.rememberPendingChatStart\(\);[\s\S]*const pending = this\.pendingChatStart;[\s\S]*agent: pending\.agent,[\s\S]*workflow: pending\.workflow/,
   );
 });
 
@@ -77,8 +79,9 @@ test('connected first message records pendingChatStart so reconnect can retry th
     sendUserOffset,
     bridgeSource.indexOf('\n  private dispatchUserMessage(', sendUserOffset),
   );
-  assert.match(sendUserSource, /this\.pendingChatStart = pending;/);
-  assert.match(sendUserSource, /if \(this\.state === 'connected'\) \{[\s\S]*type: 'chat-start'/);
+  assert.match(sendUserSource, /this\.rememberPendingChatStart\(\);/);
+  assert.match(sendUserSource, /this\.pendingChatStart = \{/);
+  assert.match(sendUserSource, /if \(pending && this\.state === 'connected' && !this\.workflowSwitchPending\) \{[\s\S]*type: 'chat-start'/);
   assert.doesNotMatch(sendUserSource, /\} else \{\s*this\.pendingChatStart = \{/);
 });
 

@@ -100,18 +100,18 @@ test('Claude Agent SDK callback round-trips captured AskUserQuestion input and p
   });
 });
 
-test('Claude native options expose AskUserQuestion in direct and plan workflows', () => {
-  for (const workflow of ['direct', 'plan']) {
+test('Claude native options expose AskUserQuestion in direct, plan, and question workflows', () => {
+  for (const workflow of ['direct', 'plan', 'question']) {
     const opts = {
       ...baseOpts,
       workflow,
-      phase: workflow === 'plan' ? 'planning' : 'implementing',
+      phase: workflow === 'plan' ? 'planning' : workflow === 'question' ? 'questioning' : 'implementing',
     };
     const sdk = buildClaudeSdkOptions(opts, '00000000-0000-4000-8000-000000000000', false, new AbortController());
     assert.ok(sdk.tools.includes('AskUserQuestion'));
     assert.equal(typeof sdk.canUseTool, 'function');
-    assert.equal(sdk.permissionMode, workflow === 'plan' ? 'plan' : 'default');
-    if (workflow === 'plan') {
+    assert.equal(sdk.permissionMode, workflow === 'direct' ? 'default' : 'plan');
+    if (workflow !== 'direct') {
       assert.ok(!sdk.tools.includes('Write'));
       assert.ok(!sdk.tools.includes('Edit'));
     }
@@ -299,6 +299,7 @@ test('Codex native selection requires app-server and detects the default-mode fe
   assert.equal(selectCodexUserInputTransport(baseOpts, capabilities), 'native-app-server');
   assert.equal(selectCodexUserInputTransport(baseOpts, { ...capabilities, features: [] }), 'legacy-mcp');
   assert.equal(selectCodexUserInputTransport({ ...baseOpts, workflow: 'plan', phase: 'planning' }, { ...capabilities, features: [] }), 'native-app-server');
+  assert.equal(selectCodexUserInputTransport({ ...baseOpts, workflow: 'question', phase: 'questioning' }, { ...capabilities, features: [] }), 'native-app-server');
   assert.equal(selectCodexUserInputTransport({ ...baseOpts, workflow: 'plan', phase: 'implementing' }, { ...capabilities, features: [] }), 'legacy-mcp');
   assert.equal(selectCodexUserInputTransport({ ...baseOpts, agentRole: 'copy-layout-worker:1' }, capabilities), 'legacy-mcp');
 });

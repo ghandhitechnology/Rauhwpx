@@ -59,7 +59,7 @@ function capabilityConfig(opts) {
     // app-server has no `--ignore-rules` flag. A zero project-doc budget is
     // its config-level equivalent; Rau supplies the complete brief itself.
     '-c', 'project_doc_max_bytes=0',
-    ...(opts.workflow === 'plan' ? ['-c', 'web_search="live"'] : []),
+    ...(opts.workflow === 'plan' || opts.workflow === 'question' ? ['-c', 'web_search="live"'] : []),
     ...(opts.effort ? ['-c', `model_reasoning_effort=${JSON.stringify(opts.effort)}`] : []),
   ];
 }

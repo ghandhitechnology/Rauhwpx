@@ -110,7 +110,7 @@ export function buildCodexArgv(opts, threadId) {
     '-c', 'mcp_servers.rhwp.default_tools_approval_mode="auto"',
     '-c', 'approval_policy="never"',
     '-c', `sandbox_mode="${planningRestricted ? 'read-only' : (unrestricted ? 'danger-full-access' : 'workspace-write')}"`,
-    ...(opts.workflow === 'plan' ? ['-c', 'web_search="live"'] : []),
+    ...(opts.workflow === 'plan' || opts.workflow === 'question' ? ['-c', 'web_search="live"'] : []),
     ...(opts.effort
       ? ['-c', `model_reasoning_effort=${JSON.stringify(opts.effort)}`]
       : []),

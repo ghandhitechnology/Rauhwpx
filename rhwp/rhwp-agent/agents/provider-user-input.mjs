@@ -413,7 +413,8 @@ export function codexDefaultModeUserInputEnabled(features) {
 export function selectCodexUserInputTransport(opts, capabilities = {}) {
   if (typeof opts?.requestUserInput !== 'function' || !isRootUserInputContext({ agentRole: opts.agentRole })) return 'legacy-mcp';
   if (capabilities.transport !== 'app-server' || !methodAvailable(capabilities, CODEX_REQUEST_USER_INPUT_METHOD)) return 'legacy-mcp';
-  const nativePlanPhase = opts.workflow === 'plan' && opts.phase === 'planning';
+  const nativePlanPhase = (opts.workflow === 'plan' && opts.phase === 'planning')
+    || (opts.workflow === 'question' && opts.phase === 'questioning');
   if (!nativePlanPhase && !codexDefaultModeUserInputEnabled(capabilities.features)) return 'legacy-mcp';
   return 'native-app-server';
 }

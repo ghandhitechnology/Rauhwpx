@@ -93,7 +93,7 @@ export function readExtensionConfig(
 ): PiExtensionConfig {
   const workflow = env.RHWP_AGENT_WORKFLOW ?? env.RHWP_WORKFLOW ?? 'direct';
   const phase = env.RHWP_AGENT_PHASE ?? env.RHWP_PLAN_PHASE
-    ?? (workflow === 'plan' ? 'planning' : 'implementing');
+    ?? (workflow === 'plan' ? 'planning' : workflow === 'question' ? 'questioning' : 'implementing');
   return {
     hubHttp: env.RHWP_HUB_HTTP ?? 'http://127.0.0.1:5175',
     wsUrl: env.RHWP_WS_URL ?? 'ws://127.0.0.1:5175/mcp',
@@ -103,7 +103,7 @@ export function readExtensionConfig(
     workflow,
     phase,
     capabilityEpoch: env.RHWP_CAPABILITY_EPOCH,
-    toolProfile: env.RHWP_TOOL_PROFILE ?? (workflow === 'plan' ? phase : 'direct'),
+    toolProfile: env.RHWP_TOOL_PROFILE ?? (workflow === 'direct' ? 'direct' : phase === 'questioning' ? 'question' : phase),
     permissionProfile: env.RHWP_PERMISSION_PROFILE ?? 'safe',
     rootDir: env.RHWP_ROOT_DIR ?? cwd,
   };
@@ -335,9 +335,9 @@ export async function prepareInsertImageArgs(
 // 순수 로직 — 단계/권한 가드
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** 계획 워크플로에서 아직 구현 단계로 넘어가지 않았는지. */
+/** 구상·질문 워크플로에서 아직 구현 단계로 넘어가지 않았는지. */
 export function isPlanningRestricted(workflow: string, phase: string): boolean {
-  return workflow === 'plan' && phase !== 'implementing';
+  return workflow === 'question' || (workflow === 'plan' && phase !== 'implementing');
 }
 
 /** target 이 rootDir 밖으로 나가는지. rootDir 가 비면 검사하지 않는다. */
@@ -364,8 +364,10 @@ export function guardToolCall(
     && isPlanningRestricted(config.workflow, config.phase)) {
     return {
       block: true,
-      reason: `Planning phase: the built-in ${toolName} tool is disabled. Inspect only, then call `
-        + 'present_implementation_plan when the proposal is concrete.',
+      reason: config.workflow === 'question'
+        ? `Question mode: the built-in ${toolName} tool is disabled. Inspect and answer; do not edit.`
+        : `Planning phase: the built-in ${toolName} tool is disabled. Inspect only, and call `
+          + 'present_implementation_plan only when the user asks for a plan.',
     };
   }
   if (config.permissionProfile === 'safe' && PATH_GUARDED_TOOLS.includes(toolName)) {

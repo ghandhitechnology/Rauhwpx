@@ -34,8 +34,8 @@ export type WritingStyleProgressState =
   | 'analyzing'
   | 'synthesizing'
   | 'saving';
-export type AgentWorkflow = 'direct' | 'plan';
-export type AgentPhase = 'direct' | 'planning' | 'awaiting-approval' | 'switching' | 'implementing';
+export type AgentWorkflow = 'direct' | 'plan' | 'question';
+export type AgentPhase = 'direct' | 'planning' | 'questioning' | 'awaiting-approval' | 'switching' | 'implementing';
 
 export type UserQuestionMode = 'single' | 'multiple';
 
@@ -206,12 +206,13 @@ export interface AgentWorkflowState {
 }
 
 export function isAgentWorkflow(value: unknown): value is AgentWorkflow {
-  return value === 'direct' || value === 'plan';
+  return value === 'direct' || value === 'plan' || value === 'question';
 }
 
 export function isAgentPhase(value: unknown): value is AgentPhase {
   return value === 'direct'
     || value === 'planning'
+    || value === 'questioning'
     || value === 'awaiting-approval'
     || value === 'switching'
     || value === 'implementing';
@@ -675,6 +676,7 @@ export type SidebarEvent =
   | ({ type: 'plan-approved'; planId: string } & AgentWorkflowState)
   | ({ type: 'plan-invalidated'; planId: string | null; reason?: string } & AgentWorkflowState)
   | ({ type: 'implementation-started'; planId: string } & AgentWorkflowState)
+  | { type: 'planning-document-saved'; revision: number }
   | { type: 'skills-catalog'; catalog: SkillCatalog }
   | { type: 'skill-detail'; requestId: string; revision: number; skill: ProductSkill }
   | { type: 'skill-saved'; requestId: string; revision: number; skill: ProductSkill }

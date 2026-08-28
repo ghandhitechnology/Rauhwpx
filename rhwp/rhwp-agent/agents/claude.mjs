@@ -44,7 +44,6 @@ import {
 // Agent/Workflow 는 모든 모드에서 켠다 — --tools 제한은 서브에이전트에도 상속되므로
 // (CLI 확인: 2.1.235) planning 의 read-only 경계가 서브에이전트에서도 유지된다.
 const DIRECT_TOOLS = 'Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch,Agent,Workflow';
-const PLAN_IMPLEMENTATION_TOOLS = DIRECT_TOOLS;
 const PLANNING_TOOLS = 'Read,Glob,Grep,Bash,WebSearch,WebFetch,Agent,Workflow';
 const STDERR_TAIL_LIMIT = 16_000;
 /**
@@ -154,10 +153,7 @@ export function buildClaudeArgv(opts, sessionId, resume) {
   const unrestricted = opts.permissionProfile === 'unrestricted';
   const planningRestricted = isPlanningRestricted(opts);
   const interactionMode = providerInteractionMode(opts);
-  const planWorkflow = opts.workflow === 'plan';
-  const activeTools = planWorkflow
-    ? (planningRestricted ? PLANNING_TOOLS : PLAN_IMPLEMENTATION_TOOLS)
-    : DIRECT_TOOLS;
+  const activeTools = planningRestricted ? PLANNING_TOOLS : DIRECT_TOOLS;
   const capabilityEnv = mcpCapabilityEnv(opts);
   const runtime = mcpRuntimeFor(opts);
   const mcpConfig = {
@@ -235,10 +231,7 @@ export function buildClaudeSdkOptions(opts, sessionId, resume, abortController) 
   const unrestricted = opts.permissionProfile === 'unrestricted';
   const planningRestricted = isPlanningRestricted(opts);
   const interactionMode = providerInteractionMode(opts);
-  const planWorkflow = opts.workflow === 'plan';
-  const activeTools = planWorkflow
-    ? (planningRestricted ? PLANNING_TOOLS : PLAN_IMPLEMENTATION_TOOLS)
-    : DIRECT_TOOLS;
+  const activeTools = planningRestricted ? PLANNING_TOOLS : DIRECT_TOOLS;
   const capabilityEnv = mcpCapabilityEnv(opts);
   const runtime = mcpRuntimeFor(opts);
   const allow = [

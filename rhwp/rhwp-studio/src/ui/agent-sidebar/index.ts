@@ -361,7 +361,7 @@ const CONN_LABEL: Record<ConnectionState, string> = {
 /** 리뷰 카드에 개별 표시할 최대 op 수 (초과분은 "외 N건"으로 축약). */
 const MAX_REVIEW_OP_LINES = 6;
 
-/* ── 계획 모드 (Direct / Plan) ────────────────────────────
+/* ── 작업 방식 (Direct / Plan / Question) ─────────────────
    계약은 `agent/types.ts`(AgentWorkflow · AgentPhase · StructuredPlan ·
    AgentWorkflowState)와 `agent/bridge.ts`(getWorkflowState · setWorkflow ·
    approvePlan · requestPlanChanges)에 있다. 사이드바는 그 상태를 그리고,
@@ -371,6 +371,7 @@ const MAX_REVIEW_OP_LINES = 6;
 const PLANNING_PHASE_LABEL: Record<AgentPhase, string> = {
   direct: '바로 실행',
   planning: '구상 중',
+  questioning: '질문 중',
   'awaiting-approval': '승인 대기',
   switching: '전환 중',
   implementing: '실행 중',
@@ -567,6 +568,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let turnToolCount = 0;
   let turnFailedToolCount = 0;
   let turnPresentedPlan = false;
+  let planCardPending = false;
   let followConversation = true;
   let conversationScrollRaf: number | null = null;
   let conversationScrollLock = false;
@@ -680,7 +682,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let planApprovable = activePlan !== null && planningPhase === 'awaiting-approval';
   let planActionPending = false;
   /** 이 채팅에서 원격 브라우저 전체 제어 경고를 이미 받았는가. */
-  let browserbaseAcknowledged = chatWorkflow === 'plan';
+  let browserbaseAcknowledged = chatWorkflow === 'plan' || chatWorkflow === 'question';
   /** 계획 모드 전환이 서버에서 확인된 뒤에만 활성화 안내를 표시한다. */
   let browserbaseNoticePending = false;
   let planHistory: StructuredPlan[] = initialWorkflowState.latestPlan ? [initialWorkflowState.latestPlan] : [];
@@ -2573,18 +2575,23 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function updatePermissionButton(): void {
     const unrestricted = permissionProfile === 'unrestricted';
-    const planReadOnly = chatWorkflow === 'plan' && planningPhase !== 'implementing';
+    const planReadOnly = chatWorkflow === 'question'
+      || (chatWorkflow === 'plan' && planningPhase !== 'implementing');
     permissionBtn.textContent = unrestricted ? '전체' : '안전';
     permissionBtn.setAttribute(
       'aria-label',
       unrestricted && planReadOnly
-        ? '실행 단계 권한: 전체 접근, 계획 단계는 읽기 전용'
+        ? (chatWorkflow === 'question'
+          ? '실행 단계 권한: 전체 접근, 질문 단계는 읽기 전용'
+          : '실행 단계 권한: 전체 접근, 계획 단계는 읽기 전용')
         : unrestricted ? '에이전트 권한: 전체 접근' : '에이전트 권한: 안전',
     );
     permissionBtn.setAttribute('aria-pressed', unrestricted ? 'true' : 'false');
     permissionBtn.classList.toggle('ag-permission-unrestricted', unrestricted);
     permissionBtn.title = unrestricted && planReadOnly
-      ? '계획 단계는 읽기 전용입니다. 승인 후 실행 단계부터 전체 접근을 적용합니다. 클릭하여 안전 모드로 전환'
+      ? (chatWorkflow === 'question'
+        ? '질문 단계는 읽기 전용입니다. /build 로 전환하면 전체 접근을 적용합니다. 클릭하여 안전 모드로 전환'
+        : '계획 단계는 읽기 전용입니다. 승인 후 실행 단계부터 전체 접근을 적용합니다. 클릭하여 안전 모드로 전환')
       : unrestricted
       ? '에이전트가 승인 없이 문서를 편집하고, 파일·명령이 노트북 전체에 접근할 수 있습니다. 클릭하여 안전 모드로 전환'
       : '문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영됩니다. 파일과 명령은 프로젝트 안에서만 사용합니다';
@@ -3169,7 +3176,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (!match || input.value.trimStart().startsWith('//')) { setSlashMenuOpen(false); return; }
     const query = match[1].toLowerCase();
     const base: SlashOption[] = [
-      { value: '/plan', label: '/plan', detail: '계획 모드로 전환', workflow: 'plan' },
+      { value: '/plan', label: '/plan', detail: '구상·조사 모드로 전환', workflow: 'plan' },
+      { value: '/question', label: '/question', detail: '질문·조사 모드로 전환', workflow: 'question' },
       { value: '/build', label: '/build', detail: '바로 실행 모드로 전환', workflow: 'direct' },
       ...(agentSupportsFast(selectedAgent)
         ? [{
@@ -3372,11 +3380,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       }
     }
     if (!activeComposerSkill) {
-      if (text === '/plan' || text === '/build') {
+      const workflowInvocation = text.match(/^\/(plan|build|question)(?:\s+([\s\S]*))?$/i);
+      if (workflowInvocation) {
+        const rest = (workflowInvocation[2] ?? '').trim();
+        const command = workflowInvocation[1].toLowerCase();
+        const next = command === 'plan' ? 'plan' : command === 'question' ? 'question' : 'direct';
         input.value = '';
         setSlashMenuOpen(false);
-        requestWorkflow(text === '/plan' ? 'plan' : 'direct');
-        return;
+        if (!requestWorkflow(next)) return;
+        if (!rest) {
+          input.focus();
+          return;
+        }
+        text = rest;
       }
       const fastCommand = text.match(/^\/fast(?:\s+(on|off|status))?$/i);
       if (fastCommand) {
@@ -4521,8 +4537,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           ? '추가 요청을 입력하세요 (선택)'
         : chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'
           ? '계획에서 바꿀 부분을 알려주세요'
+          : chatWorkflow === 'question'
+            ? '질문을 입력하세요'
           : chatWorkflow === 'plan' && planningPhase === 'planning'
-            ? '무엇을 계획할지 입력하세요'
+            ? '구상할 내용을 입력하세요'
             : '문서 작업을 입력하세요';
     }
     const questionPending = questionController.hasPending();
@@ -4996,6 +5014,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         turnToolCount = 0;
         turnFailedToolCount = 0;
         turnPresentedPlan = false;
+        planCardPending = false;
         // 새 턴의 서브에이전트는 새 카드에 모인다.
         suppressedSpawnCalls.clear();
         fleetView.beginTurn();
@@ -5022,6 +5041,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           suppressedSpawnCalls.add(event.callId);
           turnToolCount += 1;
           break;
+        }
+        if (event.tool === 'present_implementation_plan') {
+          planCardPending = true;
+          systemMessage('계획 카드를 만드는 중');
         }
         // 도구 전 설명은 최종 답변과 구분된 진행 이정표로 보관한다.
         flushAssistantBuffer({ kind: 'progress' });
@@ -5080,6 +5103,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           && event.stopReason !== 'exited'
           && !event.errorMessage
           && turnFailedToolCount === 0;
+        if (planCardPending && !turnPresentedPlan) {
+          systemMessage('계획 카드가 도착하지 않았습니다');
+        }
+        planCardPending = false;
         const editingPhase = chatWorkflow === 'direct' || planningPhase === 'implementing';
         if (turnToolCount > 0 && !turnPresentedPlan && !finalBubble && completed && editingPhase) {
           appendCheckDocumentMessage(event.agent);
@@ -5536,7 +5563,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function updateWorkflowControl(): void {
-    const planActive = chatWorkflow === 'plan';
+    const planActive = chatWorkflow === 'plan' || chatWorkflow === 'question';
     phaseBadge.hidden = !planActive || planningPhase === 'direct';
     phaseBadge.textContent = PLANNING_PHASE_LABEL[planningPhase];
     phaseBadge.dataset.phase = planningPhase;
@@ -5561,7 +5588,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (workflow === 'direct') {
       planningPhase = 'direct';
       planApprovable = false;
-    } else if (planningPhase === 'direct') {
+    } else if (workflow === 'question') {
+      planningPhase = 'questioning';
+      planApprovable = false;
+    } else if (planningPhase === 'direct' || planningPhase === 'questioning') {
       planningPhase = 'planning';
     }
     updateWorkflowControl();
@@ -5573,13 +5603,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
    * 모드 전환 요청. 계획 모드로 들어갈 때만 원격 브라우저 전체 제어를
    * 한 번 경고하고, 검토 대기 중인 문서 편집이 있으면 막는다.
    */
-  function requestWorkflow(next: AgentWorkflow): void {
+  function requestWorkflow(next: AgentWorkflow): boolean {
     const restartCompletedPlan = next === 'plan'
       && chatWorkflow === 'plan'
       && planningPhase === 'implementing';
     if (next === chatWorkflow && !restartCompletedPlan) {
       input.focus();
-      return;
+      return true;
     }
     if (isControlLocked() || connState !== 'connected') {
       systemMessage(
@@ -5588,21 +5618,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           : '전환 중에는 작업 방식을 바꿀 수 없습니다.',
       );
       updateWorkflowControl();
-      return;
+      return false;
     }
-    if (next === 'plan') {
-      if (hasPendingDocumentEdits()) {
+    if (next === 'plan' || next === 'question') {
+      if (next === 'plan' && hasPendingDocumentEdits()) {
         systemMessage(
-          '검토 대기 중인 문서 편집이 있습니다. 먼저 승인하거나 거절한 뒤 계획 모드로 전환하세요.',
+          '검토 대기 중인 문서 편집이 있습니다. 먼저 승인하거나 거절한 뒤 구상 모드로 전환하세요.',
         );
         updateWorkflowControl();
-        return;
+        return false;
       }
       if (!browserbaseAcknowledged) {
         if (!window.confirm(BROWSERBASE_FULL_CONTROL_WARNING)) {
           updateWorkflowControl();
           input.focus();
-          return;
+          return false;
         }
         browserbaseAcknowledged = true;
         browserbaseNoticePending = true;
@@ -5611,6 +5641,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     workflowTransitionPending = true;
     bridge.setWorkflow(next);
     input.focus();
+    return true;
   }
 
   function recordPlan(plan: StructuredPlan): void {
@@ -5818,7 +5849,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           recordPlan(e.latestPlan);
           rebuildReview();
         }
-        if (e.workflow === 'plan' && browserbaseNoticePending) {
+        if ((e.workflow === 'plan' || e.workflow === 'question') && browserbaseNoticePending) {
           browserbaseNoticePending = false;
           systemMessage(BROWSERBASE_ENABLED_NOTICE);
         } else if (e.workflow === 'direct') {
@@ -5828,6 +5859,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       case 'plan-ready':
         planActionPending = false;
         turnPresentedPlan = true;
+        planCardPending = false;
         activePlan = e.plan;
         activePlanHistorical = false;
         planMinimized = false;
@@ -5857,17 +5889,22 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         setPlanningPhase(e.phase);
         rebuildReview();
         return true;
+      case 'planning-document-saved':
+        systemMessage('문서를 저장했습니다');
+        return true;
       case 'plan-invalidated':
         planActionPending = false;
         planApprovable = false;
         settlePlanAttention();
         activePlanHistorical = activePlan !== null;
         setPlanningPhase(e.phase);
-        systemMessage(
-          e.reason
-            ? `계획이 더 이상 유효하지 않습니다 (${e.reason}). 새 계획을 기다리세요.`
-            : '계획이 더 이상 유효하지 않습니다. 새 계획을 기다리세요.',
-        );
+        if (e.reason !== 'document-saved') {
+          systemMessage(
+            e.reason
+              ? `계획이 더 이상 유효하지 않습니다 (${e.reason}). 새 계획을 기다리세요.`
+              : '계획이 더 이상 유효하지 않습니다. 새 계획을 기다리세요.',
+          );
+        }
         rebuildReview();
         return true;
       default:
@@ -5902,7 +5939,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         planApprovable = state.phase === 'awaiting-approval';
       }
     }
-    if (chatWorkflow === 'plan') browserbaseAcknowledged = true;
+    if (chatWorkflow === 'plan' || chatWorkflow === 'question') browserbaseAcknowledged = true;
     threadWorkflows.set(currentThread.id, chatWorkflow);
     updateWorkflowControl();
     updateComposer();
@@ -5925,8 +5962,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     planMinimized = false;
     planApprovable = false;
     chatWorkflow = threadWorkflows.get(threadId) ?? 'direct';
-    planningPhase = chatWorkflow === 'plan' ? 'planning' : 'direct';
-    browserbaseAcknowledged = chatWorkflow === 'plan';
+    planningPhase = chatWorkflow === 'plan'
+      ? 'planning'
+      : chatWorkflow === 'question'
+        ? 'questioning'
+        : 'direct';
+    browserbaseAcknowledged = chatWorkflow === 'plan' || chatWorkflow === 'question';
     updateWorkflowControl();
     updateComposer();
     rebuildReview();

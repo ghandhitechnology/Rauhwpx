@@ -15,9 +15,11 @@ const SESSION_ID = process.env.RHWP_SESSION_ID
 const AGENT_NAME = process.env.RHWP_AGENT_NAME ?? 'unknown';
 const AGENT_ROLE = process.env.RHWP_AGENT_ROLE ?? 'chat';
 const WORKFLOW = process.env.RHWP_AGENT_WORKFLOW ?? process.env.RHWP_WORKFLOW ?? 'direct';
-const PHASE = process.env.RHWP_AGENT_PHASE ?? process.env.RHWP_PLAN_PHASE ?? (WORKFLOW === 'plan' ? 'planning' : 'implementing');
+const PHASE = process.env.RHWP_AGENT_PHASE ?? process.env.RHWP_PLAN_PHASE
+  ?? (WORKFLOW === 'plan' ? 'planning' : WORKFLOW === 'question' ? 'questioning' : 'implementing');
 const CAPABILITY_EPOCH = process.env.RHWP_CAPABILITY_EPOCH;
-const TOOL_PROFILE = process.env.RHWP_TOOL_PROFILE ?? (WORKFLOW === 'plan' ? PHASE : 'direct');
+const TOOL_PROFILE = process.env.RHWP_TOOL_PROFILE
+  ?? (WORKFLOW === 'direct' ? 'direct' : PHASE === 'questioning' ? 'question' : PHASE);
 const CONNECT_TIMEOUT_MS = 5_000;
 const CALL_TIMEOUT_MS = 180_000;
 
