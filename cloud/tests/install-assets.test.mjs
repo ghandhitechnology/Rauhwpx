@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { promises as fs } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import test from 'node:test';
@@ -135,10 +135,12 @@ test('macOS installer uses launchd, a dedicated Podman machine, and verified rel
     const syntax = spawnSync('/bin/bash', ['-n', path.join(root, 'install', filename)], { encoding: 'utf8' });
     assert.equal(syntax.status, 0, syntax.stderr);
   }
-  const lint = spawnSync('/usr/bin/plutil', ['-lint', path.join(root, 'install/com.hataewook.rauhwpx-cloud.plist')], { encoding: 'utf8' });
-  assert.equal(lint.status, 0, lint.stderr);
-  const updateLint = spawnSync('/usr/bin/plutil', ['-lint', path.join(root, 'install/com.hataewook.rauhwpx-cloud-update.plist')], { encoding: 'utf8' });
-  assert.equal(updateLint.status, 0, updateLint.stderr);
+  if (existsSync('/usr/bin/plutil')) {
+    const lint = spawnSync('/usr/bin/plutil', ['-lint', path.join(root, 'install/com.hataewook.rauhwpx-cloud.plist')], { encoding: 'utf8' });
+    assert.equal(lint.status, 0, lint.stderr);
+    const updateLint = spawnSync('/usr/bin/plutil', ['-lint', path.join(root, 'install/com.hataewook.rauhwpx-cloud-update.plist')], { encoding: 'utf8' });
+    assert.equal(updateLint.status, 0, updateLint.stderr);
+  }
 });
 
 test('all provider installers are allowlisted and version-pinned', async () => {
