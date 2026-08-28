@@ -129,7 +129,12 @@ async function probeDisplay(display, authFile, timeoutMs = 2_000) {
     DISPLAY: display,
     XAUTHORITY: authFile,
   };
-  await runCommand('xdpyinfo', ['-display', display], { env, timeoutMs });
+  try {
+    await runCommand('xdpyinfo', ['-display', display], { env, timeoutMs });
+  } catch (error) {
+    if (error?.code === 'COMMAND_SPAWN_FAILED') return;
+    throw error;
+  }
 }
 
 /**

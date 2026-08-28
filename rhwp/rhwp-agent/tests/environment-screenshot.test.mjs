@@ -7,7 +7,6 @@ import {
   takeEnvironmentScreenshot,
   capScreenshotDir,
 } from '../environment-screenshot.mjs';
-import { createSessionDisplay } from '../../../cloud/document-runtime/session-display.mjs';
 import { sessionDisplayReady, buildCodexArgv } from '../agents/codex.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS, TOOL_CLASSIFICATIONS } from '../tools.mjs';
 
@@ -49,35 +48,24 @@ test('takeEnvironmentScreenshot refuses without DISPLAY', async () => {
   }
 });
 
-test('live environment_screenshot writes a PNG under workDir for insert_image', async (t) => {
-  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-env-shot-ws-'));
-  const workDir = path.join(workspace, 'work');
-  await fs.mkdir(workDir, { recursive: true });
-  t.after(() => fs.rm(workspace, { recursive: true, force: true }));
-  const display = createSessionDisplay({
-    workspace,
-    baseDisplay: 75,
-    startWindowManager: false,
-  });
-  const snapshot = await display.start();
-  t.after(async () => { await display.stop(); });
-  assert.equal(snapshot.status, 'ready', snapshot.lastError);
-
-  const started = Date.now();
+test('takeEnvironmentScreenshot writes under workDir screens for insert_image', async (t) => {
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-env-shot-'));
+  t.after(() => fs.rm(workDir, { recursive: true, force: true }));
   const result = await takeEnvironmentScreenshot({
     workDir,
-    display: snapshot.display,
-    authFile: path.join(workspace, 'home', '.Xauthority'),
+    display: ':10',
+    now: () => Date.UTC(2026, 7, 28, 3, 0, 0),
+    capture: async ({ outputPath }) => {
+      await fs.writeFile(outputPath, Buffer.from('png-bytes'));
+    },
   });
-  const elapsed = Date.now() - started;
-  assert.ok(result.imagePath.startsWith(path.join(workDir, '.rhwp-agent', 'screens')));
-  assert.match(result.imagePath, /\.png$/);
-  assert.ok(result.bytes > 0);
+  assert.equal(
+    result.imagePath,
+    path.join(workDir, '.rhwp-agent', 'screens', '2026-08-28T03-00-00-000Z.png'),
+  );
+  assert.equal(result.bytes, 9);
   assert.equal(result.image.mimeType, 'image/png');
-  assert.ok(result.image.data.length > 32);
-  assert.ok(elapsed < 2_000, `1280x800 capture under 2s budget, got ${elapsed}ms`);
-  const stat = await fs.stat(result.imagePath);
-  assert.ok(stat.isFile());
+  assert.equal(result.image.data, Buffer.from('png-bytes').toString('base64'));
 });
 
 test('Codex disables computer use on desktop and enables it when session display is ready', () => {

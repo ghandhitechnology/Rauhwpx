@@ -127,12 +127,8 @@ export function buildCodexArgv(opts, threadId) {
     : ['exec', ...common, '-C', opts.rootDir, '-'];
 }
 
-/** Cloud harness sets RAUHWpx_SESSION_DISPLAY=ready on the hub when Xvfb is up. */
 export function sessionDisplayReady(opts = {}, env = process.env) {
-  const flag = opts.sessionDisplay ?? env.RAUHWpx_SESSION_DISPLAY;
-  if (flag === 'ready') return true;
-  if (flag === 'error' || flag === 'stopped' || flag === 'starting') return false;
-  return false;
+  return (opts.sessionDisplay ?? env.RAUHWpx_SESSION_DISPLAY) === 'ready';
 }
 
 /**

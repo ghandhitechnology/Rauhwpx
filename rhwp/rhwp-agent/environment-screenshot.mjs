@@ -221,6 +221,7 @@ export async function takeEnvironmentScreenshot({
   display = process.env.DISPLAY,
   authFile = process.env.XAUTHORITY,
   now = Date.now,
+  capture = captureDisplayPng,
 } = {}) {
   if (!display || process.env.RAUHWpx_SESSION_DISPLAY === 'error') {
     throw screenshotError(
@@ -236,7 +237,7 @@ export async function takeEnvironmentScreenshot({
   const stamp = new Date(now()).toISOString().replace(/[:.]/g, '-');
   const imagePath = path.join(screensDir, `${stamp}.png`);
   const started = Date.now();
-  await captureDisplayPng({ display, authFile, outputPath: imagePath });
+  await capture({ display, authFile, outputPath: imagePath });
   const elapsedMs = Date.now() - started;
   const cap = await capScreenshotDir(screensDir);
   const bytes = (await fs.stat(imagePath)).size;

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -10,6 +11,11 @@ import {
   allocateDisplay,
   createSessionDisplay,
 } from '../document-runtime/session-display.mjs';
+import { takeEnvironmentScreenshot } from '../../rhwp/rhwp-agent/environment-screenshot.mjs';
+
+function xvfbAvailable() {
+  return spawnSync('Xvfb', ['-help'], { encoding: 'utf8' }).error?.code !== 'ENOENT';
+}
 
 function fakeChild(pid = 4242) {
   const child = new EventEmitter();
@@ -54,16 +60,11 @@ test('SessionDisplay reaches ready, restarts once on crash, then stops', async (
       assert.equal(args[0], ':91');
       launches += 1;
       xvfb = fakeChild(5000 + launches);
-      // Pretend the X socket appeared by creating the unix dir entry the probe expects.
-      // The real probe uses xdpyinfo; stub by short-circuiting with a child that stays up
-      // and monkey-patching probe via overriding after spawn — instead we use the live
-      // Xvfb on hosts that have it when RAUHWpx_SESSION_DISPLAY_LIVE=1.
       queueMicrotask(() => xvfb.stderr.emit('data', Buffer.from('')));
       return xvfb;
     },
   });
 
-  // Without a real X socket the fake spawn fails soft into error.
   const started = await display.start();
   assert.equal(started.status, 'error');
   assert.ok(events.includes('environment.display_starting'));
@@ -97,7 +98,7 @@ test('SessionDisplay fail-soft when Xvfb binary is missing', async (t) => {
   await display.stop();
 });
 
-test('live Xvfb supervisor reaches ready under the current uid', async (t) => {
+test('live Xvfb supervisor reaches ready, restarts, and screenshots', { skip: !xvfbAvailable() }, async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-display-live-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const events = [];
@@ -119,11 +120,20 @@ test('live Xvfb supervisor reaches ready under the current uid', async (t) => {
   assert.deepEqual(display.environment?.DISPLAY, snapshot.display);
   assert.equal(display.environment?.RAUHWpx_SESSION_DISPLAY, 'ready');
 
-  // Crash-restart once.
+  const workDir = path.join(root, 'work');
+  await fs.mkdir(workDir, { recursive: true });
+  const shot = await takeEnvironmentScreenshot({
+    workDir,
+    display: snapshot.display,
+    authFile: path.join(root, 'home', '.Xauthority'),
+  });
+  assert.ok(shot.imagePath.startsWith(path.join(workDir, '.rhwp-agent', 'screens')));
+  assert.ok(shot.bytes > 0);
+  assert.ok(shot.elapsedMs < 2_000, `1280x800 capture under 2s, got ${shot.elapsedMs}ms`);
+
   const childPid = snapshot.pid;
   process.kill(childPid, 'SIGTERM');
   await delay(800);
-  // Auto-restart from exit handler may still be settling.
   let guard = 0;
   while (display.status !== 'ready' && guard < 40) {
     await delay(50);

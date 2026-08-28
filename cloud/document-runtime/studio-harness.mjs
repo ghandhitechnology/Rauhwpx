@@ -419,8 +419,6 @@ export async function createStudioHarness({
         'node_modules',
         '.bin',
       )}:/usr/local/bin:/usr/bin:/bin`,
-      // Session display values come from the worker-owned SessionDisplay, never from
-      // an inherited control-plane DISPLAY. Absent means document tools stay up alone.
       ...(displayEnv?.DISPLAY && displayEnv?.XAUTHORITY
         ? {
           DISPLAY: String(displayEnv.DISPLAY),

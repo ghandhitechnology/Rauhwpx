@@ -56,7 +56,6 @@ try {
     JSON.stringify(resolvedManifest),
     { mode: 0o600 },
   );
-  // One session, one screen. Display start failures stay soft — document tools keep working.
   const sessionDisplay = createSessionDisplay({
     workspace,
     onEvent: (event) => {
