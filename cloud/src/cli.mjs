@@ -56,6 +56,11 @@ try {
     const provider = rest[0];
     const apiKey = rest.includes('--api-key-stdin') ? await readSecretFromStdin() : null;
     console.log(JSON.stringify(await providerCli.login(provider, { apiKey })));
+  } else if (command === 'provider' && action === 'seed-session') {
+    console.log(JSON.stringify({
+      seeded: true,
+      providers: await providerCli.seedSession(),
+    }));
   } else if (command === 'provider' && action === 'status') {
     console.log(JSON.stringify(await providerCli.status(rest[0])));
   } else if (command === 'doctor') {
@@ -63,7 +68,7 @@ try {
     console.log(JSON.stringify(result, null, 2));
     if (!result.ok) process.exitCode = 1;
   } else {
-    console.error('Usage: cli.mjs pairing create [device-name] | status | doctor | provider install|login|status <provider> [--api-key-stdin] | provider-secret set|delete <provider> <name>');
+    console.error('Usage: cli.mjs pairing create [device-name] | status | doctor | provider install|login|status <provider> [--api-key-stdin] | provider seed-session | provider-secret set|delete <provider> <name>');
     process.exitCode = 2;
   }
 } finally {

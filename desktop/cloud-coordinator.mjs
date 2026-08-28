@@ -4,9 +4,14 @@ import { hostname } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AppServerError, createAppServerRegistry } from './cloud-app-server.mjs';
-import { collectProviderAuth, isPermanentTransferError } from './cloud-provider-auth.mjs';
+import {
+  DESKTOP_PROVIDER_AUTH,
+  isPermanentTransferError,
+  PERMANENT_TRANSFER_CODES,
+} from './cloud-provider-auth.mjs';
 import { normalizeCloudProfile, normalizeTailscaleHttpsPort } from './cloud-profile.mjs';
 import { sha256Hex, writeVerifiedRecoveryFile } from './cloud-handoff.mjs';
+import { hasProviderAuth } from './provider-auth.mjs';
 
 /** 샌드박스를 철거하면 사라지는 작업 상태. 사용자가 먼저 정리해야 한다. */
 const LIVE_HANDOFF_STATES = Object.freeze([
@@ -22,6 +27,37 @@ const LIVE_HANDOFF_STATES = Object.freeze([
 
 /** Deterministic failures must not retry a full re-upload forever. */
 const MAX_TRANSFER_RECOVERY_ATTEMPTS = 5;
+const NON_RETRYABLE_TRANSFER_CODES = new Set([
+  ...PERMANENT_TRANSFER_CODES,
+  'PROVIDER_KEY_REQUIRED',
+  'SANDBOX_AUTH_UNSUPPORTED',
+]);
+
+function nonRetryableTransferError(error) {
+  if (NON_RETRYABLE_TRANSFER_CODES.has(String(error?.code ?? ''))) return true;
+  if (isPermanentTransferError(error)) return true;
+  return /must be authenticated on this VPS/i.test(String(error?.message ?? ''));
+}
+
+function importedAuthFromCollected(auth) {
+  if (!auth || typeof auth !== 'object') return null;
+  if (auth.secrets && typeof auth.secrets === 'object' && !Array.isArray(auth.secrets)) {
+    const files = auth.files && typeof auth.files === 'object' && !Array.isArray(auth.files)
+      ? auth.files
+      : {};
+    if (!Object.keys(auth.secrets).length && !Object.keys(files).length) return null;
+    return { secrets: auth.secrets, files };
+  }
+  const spec = DESKTOP_PROVIDER_AUTH[auth.provider];
+  const secrets = {};
+  if (auth.apiKey && spec?.secretName) secrets[spec.secretName] = auth.apiKey;
+  const files = {};
+  for (const file of Array.isArray(auth.files) ? auth.files : []) {
+    if (file?.path && file.content) files[file.path] = file.content;
+  }
+  if (!Object.keys(secrets).length && !Object.keys(files).length) return null;
+  return { secrets, files };
+}
 
 function uiProfileToStored(input, current = null) {
   const source = input?.profile ?? input ?? {};
@@ -141,6 +177,7 @@ export class CloudCoordinator extends EventEmitter {
   #teardownPromise = null;
   #preferredMode = null;
   #collectProviderAuth;
+  #collectImportedAuth;
 
   constructor({
     client,
@@ -148,24 +185,29 @@ export class CloudCoordinator extends EventEmitter {
     provisioner,
     recoveryDir,
     appServers = [],
-    collectProviderAuth: collectAuth = collectProviderAuth,
-  }) {
+    collectProviderAuth = null,
+    collectImportedAuth = null,
+  } = {}) {
     super();
     this.#client = client;
     this.#store = store;
     this.#provisioner = provisioner;
     this.#recoveryDir = recoveryDir;
     this.#appServers = Array.isArray(appServers) ? createAppServerRegistry(appServers) : appServers;
-    this.#collectProviderAuth = collectAuth;
+    this.#collectProviderAuth = typeof collectProviderAuth === 'function' ? collectProviderAuth : null;
+    this.#collectImportedAuth = typeof collectImportedAuth === 'function' ? collectImportedAuth : null;
   }
 
   async #providerAuthFor(provider) {
-    if (!provider || typeof this.#collectProviderAuth !== 'function') return null;
-    try {
-      return await this.#collectProviderAuth(provider);
-    } catch {
-      return null;
+    if (!provider) return null;
+    if (typeof this.#collectImportedAuth === 'function') {
+      try {
+        return await this.#collectImportedAuth(provider);
+      } catch {
+        return null;
+      }
     }
+    return importedAuthFromCollected(await this.#providerAuth(provider));
   }
 
   async start() {
@@ -494,6 +536,33 @@ export class CloudCoordinator extends EventEmitter {
     return this.snapshot();
   }
 
+  async #providerAuth(provider) {
+    if (!provider || typeof this.#collectProviderAuth !== 'function') return null;
+    try {
+      return await this.#collectProviderAuth(provider);
+    } catch {
+      return null;
+    }
+  }
+
+  async #seedRemoteProvider(provider) {
+    if (!provider || typeof this.#client.seedProviderCredentials !== 'function') return;
+    const auth = await this.#providerAuth(provider);
+    if (!hasProviderAuth(auth)) return;
+    try {
+      await this.#client.seedProviderCredentials(auth);
+    } catch (error) {
+      if (error?.status !== 404 && error?.code !== 'NOT_FOUND') throw error;
+      const remote = await this.#client.profile().catch(() => null);
+      const status = remote?.providers?.find((item) => item.provider === provider);
+      if (status?.authenticated) return;
+      throw new AppServerError(
+        `${provider} is signed in on this computer, but this cloud sandbox cannot receive that login. Shut the sandbox down and start a new one from an updated build.`,
+        { code: 'SANDBOX_AUTH_UNSUPPORTED', retryable: false },
+      );
+    }
+  }
+
   #appServerFor(providerId) {
     if (!this.#appServers.size) {
       throw new AppServerError('This build does not include app-provided servers', {
@@ -565,6 +634,7 @@ export class CloudCoordinator extends EventEmitter {
       spawned = await provider.spawn({
         deviceName,
         limits: current?.limits,
+        credentials: await this.#providerAuth(current?.provider ?? 'codex'),
         signal: controller.signal,
         onLine: (line) => this.#emit({ type: 'provision-log', line }),
       });
@@ -774,6 +844,7 @@ export class CloudCoordinator extends EventEmitter {
     const controller = new AbortController();
     this.#transferControllers.set(record.id, controller);
     try {
+      await this.#seedRemoteProvider(record.provider);
       const transferPromise = this.#client.transfer({
         sessionId: record.id,
         threadId: record.threadId,
@@ -852,11 +923,8 @@ export class CloudCoordinator extends EventEmitter {
         }
       }
       if (current && ['preparing', 'uploading', 'committing'].includes(current.state)) {
-        if (isPermanentTransferError(error)) {
-          await this.#store.transition(record.id, 'failed', {
-            error: error.message,
-            recoveryAttempt: 1,
-          });
+        if (nonRetryableTransferError(error)) {
+          await this.#store.transition(record.id, 'failed', { error: error.message, recoveryAttempt: 1 });
         } else {
           await this.#store.patch(record.id, { error: error.message, recoveryAttempt: 1 });
           this.#scheduleTransferRecovery(record.id, 1);
@@ -1287,6 +1355,7 @@ export class CloudCoordinator extends EventEmitter {
       }
       const staged = await this.#store.readPayload(record.id);
       if (record.state === 'preparing') record = await this.#store.transition(record.id, 'uploading');
+      await this.#seedRemoteProvider(record.provider);
       let committed = false;
       const controller = new AbortController();
       this.#transferControllers.set(record.id, controller);
@@ -1378,9 +1447,9 @@ export class CloudCoordinator extends EventEmitter {
       const latest = await this.#store.get(record.id);
       if (latest && ['preparing', 'uploading', 'committing'].includes(latest.state)) {
         const attempt = Number(latest.recoveryAttempt ?? 0) + 1;
-        if (isPermanentTransferError(error) || attempt >= MAX_TRANSFER_RECOVERY_ATTEMPTS) {
+        if (nonRetryableTransferError(error) || attempt >= MAX_TRANSFER_RECOVERY_ATTEMPTS) {
           await this.#store.transition(record.id, 'failed', {
-            error: isPermanentTransferError(error)
+            error: nonRetryableTransferError(error)
               ? error.message
               : `Cloud transfer recovery failed ${attempt} times: ${error.message}`,
             recoveryAttempt: attempt,

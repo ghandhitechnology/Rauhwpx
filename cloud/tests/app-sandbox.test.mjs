@@ -314,6 +314,8 @@ test('the app sandbox image runs the control plane with the local runner and a b
   assert.match(entrypoint, /exec node "\$CLOUD_ROOT\/src\/main\.mjs"/);
   assert.match(entrypoint, /export RAUHWpx_PORT="\$PORT"/);
   assert.match(entrypoint, /provider login "\$provider" --api-key-stdin/);
+  assert.match(entrypoint, /provider seed-session/);
+  assert.match(entrypoint, /sandbox\.provider_session_seeded/);
   assert.match(entrypoint, /sandbox\.provider_login_failed/);
   assert.match(entrypoint, /sandbox\.provider_install_failed/);
   assert.match(entrypoint, /chmod 0700 "\$DATA_DIR"/);

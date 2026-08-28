@@ -44,4 +44,12 @@ seed_provider grok RAUHWpx_PROVIDER_KEY_GROK
 seed_provider pi RAUHWpx_PROVIDER_KEY_PI
 seed_provider cursor RAUHWpx_PROVIDER_KEY_CURSOR
 
+if [[ -n ${RAUHWpx_PROVIDER_SESSION:-} ]]; then
+  if node "$CLOUD_ROOT/src/cli.mjs" provider seed-session >/dev/null; then
+    echo '{"event":"sandbox.provider_session_seeded"}'
+  else
+    echo '{"event":"sandbox.provider_session_failed"}'
+  fi
+fi
+
 exec node "$CLOUD_ROOT/src/main.mjs"

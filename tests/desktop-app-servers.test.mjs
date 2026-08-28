@@ -243,6 +243,30 @@ test('the Railway provider creates a reachable sandbox and returns a pairing rec
   assert.equal(variables.variables.RAUHWpx_WORKSPACE_ROOT, '/var/lib/rauhwpx-workspaces');
   assert.equal(variables.variables.RAUHWpx_DATA_DIR, '/var/lib/rauhwpx-cloud');
   assert.equal(variables.variables.RAUHWpx_SANDBOX_INSTALL_PROVIDER, '0');
+  assert.equal(variables.variables.RAUHWpx_PROVIDER_KEY_CODEX, undefined);
+});
+
+test('Railway spawn injects only the selected provider credentials', async () => {
+  const { provider, transport } = railwayProvider(SPAWN_ROUTES);
+  await provider.spawn({
+    credentials: {
+      provider: 'codex',
+      apiKey: 'sk-proj-codex',
+      files: [{ path: '.codex/auth.json', content: '{"token":"oauth"}' }],
+    },
+  });
+  const variables = transport.calls[0].variables.input.variables;
+  assert.equal(variables.RAUHWpx_PROVIDER_KEY_CODEX, 'sk-proj-codex');
+  assert.equal(variables.RAUHWpx_PROVIDER_KEY_CLAUDE, undefined);
+  assert.equal(variables.RAUHWpx_PROVIDER_KEY_GROK, undefined);
+  assert.equal(variables.RAUHWpx_PROVIDER_KEY_PI, undefined);
+  assert.equal(variables.RAUHWpx_PROVIDER_KEY_CURSOR, undefined);
+  assert.match(variables.RAUHWpx_PROVIDER_SESSION, /^[A-Za-z0-9_-]+$/);
+  const session = JSON.parse(Buffer.from(variables.RAUHWpx_PROVIDER_SESSION, 'base64url').toString('utf8'));
+  assert.deepEqual(session, {
+    v: 1,
+    providers: [{ provider: 'codex', files: [{ path: '.codex/auth.json', content: '{"token":"oauth"}' }] }],
+  });
 });
 
 test('a Railway sandbox that never becomes usable is removed instead of left behind', async () => {
@@ -370,14 +394,15 @@ test('the client remembers the chosen server mode and verifies bootstrap receipt
 });
 
 function appServerStub(overrides = {}) {
-  const calls = { spawn: 0, teardown: 0, status: 0 };
+  const calls = { spawn: 0, teardown: 0, status: 0, spawnOptions: [] };
   const provider = {
     id: overrides.id ?? 'railway',
     displayName: 'Railway sandbox',
     calls,
     configuration: overrides.configuration ?? (() => ({ configured: true, missing: [] })),
-    spawn: overrides.spawn ?? (async () => {
+    spawn: overrides.spawn ?? (async (options) => {
       calls.spawn += 1;
+      calls.spawnOptions.push(options);
       return {
         sandbox: SANDBOX,
         receipt: {
@@ -399,7 +424,13 @@ function appServerStub(overrides = {}) {
   return provider;
 }
 
-function sandboxCoordinator({ provider = appServerStub(), records = [], vault = memoryVault(), appServers } = {}) {
+function sandboxCoordinator({
+  provider = appServerStub(),
+  records = [],
+  vault = memoryVault(),
+  appServers,
+  collectProviderAuth = null,
+} = {}) {
   const client = new CloudClient({
     vault,
     fetchImpl: signedFetch(async (url) => {
@@ -423,6 +454,7 @@ function sandboxCoordinator({ provider = appServerStub(), records = [], vault = 
     provisioner: {},
     recoveryDir: '/unused',
     appServers: appServers ?? [provider],
+    collectProviderAuth,
   });
   return { coordinator, client, provider, vault };
 }
@@ -635,4 +667,28 @@ test('selecting a server mode persists before anything is provisioned', async ()
   assert.equal(chosen.server.mode, null, 'nothing is configured yet');
   assert.equal(await client.loadServerMode(), 'self-hosted');
   await assert.rejects(coordinator.selectServerMode('fly'), /server mode/);
+});
+
+test('sandbox spawn forwards only the selected provider credentials', async () => {
+  const collected = [];
+  const provider = appServerStub();
+  const { coordinator } = sandboxCoordinator({
+    provider,
+    collectProviderAuth: async (name) => {
+      collected.push(name);
+      return {
+        provider: name,
+        apiKey: name === 'codex' ? 'sk-proj-codex' : 'sk-other',
+        files: [],
+      };
+    },
+  });
+  await coordinator.start();
+  await coordinator.spawnAppServer();
+  assert.deepEqual(collected, ['codex']);
+  assert.deepEqual(provider.calls.spawnOptions[0].credentials, {
+    provider: 'codex',
+    apiKey: 'sk-proj-codex',
+    files: [],
+  });
 });

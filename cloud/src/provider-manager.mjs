@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { PROVIDER_AUTH } from './provider-auth.mjs';
 import { PROVIDERS } from './protocol.mjs';
+import { PROVIDER_AUTH_FILES } from './provider-credentials.mjs';
 
 const COMMANDS = Object.freeze({
   claude: 'claude',
@@ -37,7 +38,7 @@ export class ProviderManager {
   #authState(provider) {
     const secrets = this.vault?.list().filter((credential) => credential.provider === provider) ?? [];
     const root = this.providerAuthDirectory ? path.join(this.providerAuthDirectory, provider) : '';
-    const authFiles = PROVIDER_AUTH[provider]?.files ?? [];
+    const authFiles = PROVIDER_AUTH[provider]?.files ?? PROVIDER_AUTH_FILES[provider] ?? [];
     const authenticated = secrets.length > 0 || authFiles.some((filename) => existsSync(path.join(root, filename)));
     return {
       authenticated,

@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AppServerError } from './cloud-app-server.mjs';
+import { sandboxCredentialVariables } from './provider-auth.mjs';
 
 export const RAILWAY_API_URL = 'https://backboard.railway.com/graphql/v2';
 export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:stable';
@@ -188,7 +189,7 @@ export function createRailwayServerProvider({
     return payload.data;
   }
 
-  function sandboxVariables(bootstrapToken, limits) {
+  function sandboxVariables(bootstrapToken, limits, credentials) {
     return {
       RAUHWpx_HOST: '0.0.0.0',
       RAUHWpx_PORT: String(SANDBOX_PORT),
@@ -205,6 +206,7 @@ export function createRailwayServerProvider({
       RAUHWpx_WORKSPACE_ROOT: '/var/lib/rauhwpx-workspaces',
       RAUHWpx_DATA_DIR: '/var/lib/rauhwpx-cloud',
       RAUHWpx_SANDBOX_INSTALL_PROVIDER: '0',
+      ...sandboxCredentialVariables(credentials),
     };
   }
 
@@ -308,7 +310,13 @@ export function createRailwayServerProvider({
       };
     },
 
-    async spawn({ deviceName = 'Rauhwpx desktop', limits = null, signal, onLine = () => {} } = {}) {
+    async spawn({
+      deviceName = 'Rauhwpx desktop',
+      limits = null,
+      credentials = null,
+      signal,
+      onLine = () => {},
+    } = {}) {
       const bootstrapToken = randomBytes(32).toString('base64url');
       onLine('Creating an app-provided sandbox');
       const created = await graphql(SERVICE_CREATE, {
@@ -317,7 +325,7 @@ export function createRailwayServerProvider({
           environmentId: config.environmentId,
           name: sandboxName(),
           source: { image: config.image },
-          variables: sandboxVariables(bootstrapToken, limits),
+          variables: sandboxVariables(bootstrapToken, limits, credentials),
         },
       }, { signal });
       const serviceId = trimmed(created.serviceCreate?.id, 128);

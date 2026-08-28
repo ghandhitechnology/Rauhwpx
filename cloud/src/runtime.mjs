@@ -14,6 +14,7 @@ import { RedactedLogger } from './redacted-logger.mjs';
 import { Scheduler } from './scheduler.mjs';
 import { SecretVault } from './secret-vault.mjs';
 import { SessionStore } from './session-store.mjs';
+import { ProviderCliManager } from './provider-cli.mjs';
 
 function listen(server, target, host) {
   return new Promise((resolve, reject) => {
@@ -67,6 +68,8 @@ export function createCloudRuntime(config, dependencies = {}) {
       await blobStore.pruneStaleUploads();
     },
   });
+  const providerCli = dependencies.providerCli ?? new ProviderCliManager(config, providerManager, vault);
+  const seedProvider = dependencies.seedProvider ?? ((input) => providerCli.seed(input.provider, input));
   const services = {
     auth,
     blobStore,
@@ -75,6 +78,7 @@ export function createCloudRuntime(config, dependencies = {}) {
     config,
     logger,
     vault,
+    seedProvider,
     applyProviderAuth: async (provider, raw) => {
       const imported = await applyProviderAuth(provider, parseProviderAuth(provider, raw), {
         vault,
