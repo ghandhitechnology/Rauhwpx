@@ -10,6 +10,7 @@ import { CloudClient } from '../desktop/cloud-client.mjs';
 import { CloudCoordinator } from '../desktop/cloud-coordinator.mjs';
 import { CloudHandoffStore } from '../desktop/cloud-handoff.mjs';
 import { normalizeCloudProfile } from '../desktop/cloud-profile.mjs';
+import { collectProviderAuth } from '../desktop/provider-auth.mjs';
 
 const SERVER_IDENTITY = generateKeyPairSync('ed25519');
 const SERVER_KEY = `ed25519:${SERVER_IDENTITY.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
@@ -844,7 +845,7 @@ function createDigest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-test('transfer seeds the selected provider before creating the remote session', async (t) => {
+test('transfer seeds an env-only provider key before creating the remote session', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-seed-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
@@ -866,10 +867,11 @@ test('transfer seeds the selected provider before creating the remote session', 
     store,
     provisioner: {},
     recoveryDir: path.join(directory, 'recovery'),
-    collectProviderAuth: async (provider) => ({
-      provider,
-      apiKey: 'sk-proj-codex',
-      files: [],
+    collectProviderAuth: (provider) => collectProviderAuth(provider, {
+      vault: memoryVault(),
+      homeDir: path.join(directory, 'missing-home'),
+      cliRoot: path.join(directory, 'missing-cli'),
+      env: { OPENAI_API_KEY: 'sk-proj-codex' },
     }),
   });
   t.after(() => coordinator.stop());
@@ -891,23 +893,25 @@ test('transfer seeds the selected provider before creating the remote session', 
   ]);
 });
 
-test('an old sandbox image cannot silently drop local provider login', async (t) => {
+test('a PUT-only sandbox falls through from seed to transfer-time auth import', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-old-image-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const calls = [];
   const coordinator = new CloudCoordinator({
     client: {
       loadProfile: async () => null,
       isPaired: async () => false,
-      profile: async () => ({ providers: [{ provider: 'codex', authenticated: false }] }),
       seedProviderCredentials: async () => {
+        calls.push(['seed']);
         const error = new Error('Endpoint was not found');
         error.status = 404;
         error.code = 'NOT_FOUND';
         throw error;
       },
-      transfer: async () => {
-        throw new Error('transfer must not run when seed is unsupported');
+      transfer: async ({ providerAuth }) => {
+        calls.push(['transfer', providerAuth]);
+        return { id: 'cloud-put-only', status: 'queued', stateVersion: 1 };
       },
       watchSession: async () => {},
     },
@@ -919,9 +923,10 @@ test('an old sandbox image cannot silently drop local provider login', async (t)
       apiKey: null,
       files: [{ path: '.codex/auth.json', content: '{"token":"oauth"}' }],
     }),
+    collectImportedAuth: async () => null,
   });
   t.after(() => coordinator.stop());
-  await assert.rejects(coordinator.transfer({
+  const transferred = await coordinator.transfer({
     threadId: 'thread-1', documentId: 'document-1',
     document: { fileName: 'source.hwpx', bytes: new Uint8Array(Buffer.from('document')) },
     timeline: {
@@ -932,10 +937,15 @@ test('an old sandbox image cannot silently drop local provider login', async (t)
       },
     },
     agent: 'codex', model: 'gpt-5.6', effort: 'high', workflow: 'direct', references: [],
-  }, { originSessionId: 'desktop-1' }), { code: 'SANDBOX_AUTH_UNSUPPORTED' });
-  const [record] = await store.list();
-  assert.equal(record.state, 'failed');
-  assert.match(record.error, /cannot receive that login/);
+  }, { originSessionId: 'desktop-1' });
+  assert.equal(transferred.session.sessionId, 'cloud-put-only');
+  assert.deepEqual(calls, [
+    ['seed'],
+    ['transfer', {
+      secrets: {},
+      files: { '.codex/auth.json': '{"token":"oauth"}' },
+    }],
+  ]);
 });
 
 test('AUTH_REQUIRED fails the transfer once instead of retrying five times', async (t) => {
@@ -988,4 +998,3 @@ test('AUTH_REQUIRED fails the transfer once instead of retrying five times', asy
   assert.doesNotMatch(record.error, /failed 5 times/);
   assert.equal(transfers, 1);
 });
-

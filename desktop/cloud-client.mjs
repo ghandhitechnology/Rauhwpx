@@ -436,8 +436,8 @@ export class CloudClient {
     };
   }
 
-  async profile() {
-    return this.#request('/v1/profile');
+  async profile({ signal } = {}) {
+    return this.#request('/v1/profile', { signal });
   }
 
   async seedProviderCredentials({ provider, apiKey = null, files = [] } = {}) {
@@ -465,7 +465,10 @@ export class CloudClient {
         },
       });
     } catch (error) {
-      if (error instanceof CloudHttpError && error.status === 404) return null;
+      if (error instanceof CloudHttpError && (
+        error.status === 404
+        || (error.status === 501 && error.code === 'AUTH_IMPORT_UNAVAILABLE')
+      )) return null;
       throw error;
     }
   }
@@ -493,7 +496,24 @@ export class CloudClient {
     if (document.length > MAX_RESULT_BYTES) throw new Error('Document exceeds the 64 MiB cloud limit');
     if (!validPortableTimeline(timeline)) throw new Error('Portable cloud timeline is invalid');
     if (providerAuth && (Object.keys(providerAuth.secrets ?? {}).length || Object.keys(providerAuth.files ?? {}).length)) {
-      await this.putProviderAuth(provider, providerAuth, { signal });
+      const imported = await this.putProviderAuth(provider, providerAuth, { signal });
+      if (imported === null) {
+        // A POST-only sandbox may already have accepted the coordinator's seed.
+        // Only reject after both import protocols are unavailable and the remote
+        // still reports that the selected provider is unauthenticated.
+        const remote = await this.profile({ signal });
+        const status = remote?.providers?.find((item) => item.provider === provider);
+        if (!status?.authenticated) {
+          throw new CloudHttpError(
+            `${provider} is signed in on this computer, but this cloud server cannot import that login. Update or replace it with a compatible cloud runtime, then try again.`,
+            {
+              status: 409,
+              code: 'SANDBOX_AUTH_UNSUPPORTED',
+              details: status ?? null,
+            },
+          );
+        }
+      }
     }
     const documentUpload = await this.uploadBlob({
       bytes: document,

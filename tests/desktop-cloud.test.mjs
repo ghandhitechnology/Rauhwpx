@@ -1291,6 +1291,116 @@ test('transfer imports provider auth before staging the session', async () => {
   assert.ok(requests.indexOf(imported) < requests.indexOf(created));
 });
 
+test('transfer accepts a POST-seeded sandbox when PUT auth import is unavailable', async () => {
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://cloud.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'cloud.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const requests = [];
+  const client = new CloudClient({
+    vault: memoryVault({
+      'cloud.profile': JSON.stringify(profile),
+      'cloud.refresh': 'refresh-old',
+    }),
+    fetchImpl: signedFetch(async (url, options) => {
+      const body = options.body && String(options.headers['content-type']).includes('json')
+        ? JSON.parse(options.body)
+        : null;
+      requests.push({ url, body });
+      if (url.endsWith('/v1/token/refresh')) return jsonResponse({
+        accessToken: 'access',
+        accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        refreshToken: 'refresh-new',
+        refreshExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      });
+      if (url.endsWith('/v1/providers/codex/auth')) return jsonResponse({
+        error: { code: 'NOT_FOUND', message: 'Endpoint was not found' },
+      }, { status: 404 });
+      if (url.endsWith('/v1/profile')) return jsonResponse({
+        providers: [{ provider: 'codex', available: true, authenticated: true }],
+      });
+      if (url.endsWith('/v1/uploads/init')) return jsonResponse({
+        uploadId: `upload-${requests.length}`,
+        chunkSize: 1024,
+        offset: body.size,
+        status: 'complete',
+        blobExists: true,
+        blob: { id: body.sha256, sha256: body.sha256, size: body.size },
+      });
+      if (url.endsWith('/v1/sessions')) return jsonResponse({
+        id: 'handoff-post-only', status: 'staged', stateVersion: 1,
+      }, { status: 201 });
+      if (url.endsWith('/v1/sessions/handoff-post-only/commands')) return jsonResponse({
+        session: { id: 'handoff-post-only', status: 'queued', stateVersion: 2 },
+      });
+      throw new Error(`unexpected request ${url}`);
+    }),
+  });
+  await client.transfer({
+    sessionId: 'handoff-post-only',
+    provider: 'codex',
+    executionConfig: { model: 'gpt-5.6', effort: 'high', workflow: 'direct', permissionProfile: 'unrestricted' },
+    goal: 'Continue',
+    documentName: 'document.hwpx',
+    documentBytes: Buffer.from('document'),
+    timeline: portableTimeline(),
+    limits: { maxDurationMinutes: 480, maxTurns: 100 },
+    providerAuth: { secrets: {}, files: { '.codex/auth.json': '{"token":"moved"}' } },
+  });
+  const imported = requests.find((request) => request.url.endsWith('/v1/providers/codex/auth'));
+  const checked = requests.find((request) => request.url.endsWith('/v1/profile'));
+  const uploaded = requests.find((request) => request.url.endsWith('/v1/uploads/init'));
+  assert.ok(requests.indexOf(imported) < requests.indexOf(checked));
+  assert.ok(requests.indexOf(checked) < requests.indexOf(uploaded));
+});
+
+test('transfer reports unsupported auth only after both import protocols are unavailable', async () => {
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://cloud.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'cloud.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const requests = [];
+  const client = new CloudClient({
+    vault: memoryVault({
+      'cloud.profile': JSON.stringify(profile),
+      'cloud.refresh': 'refresh-old',
+    }),
+    fetchImpl: signedFetch(async (url) => {
+      requests.push(url);
+      if (url.endsWith('/v1/token/refresh')) return jsonResponse({
+        accessToken: 'access',
+        accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        refreshToken: 'refresh-new',
+        refreshExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      });
+      if (url.endsWith('/v1/providers/codex/auth')) return jsonResponse({
+        error: { code: 'AUTH_IMPORT_UNAVAILABLE', message: 'This VPS cannot import provider credentials' },
+      }, { status: 501 });
+      if (url.endsWith('/v1/profile')) return jsonResponse({
+        providers: [{ provider: 'codex', available: true, authenticated: false }],
+      });
+      throw new Error(`unexpected request ${url}`);
+    }),
+  });
+  await assert.rejects(client.transfer({
+    sessionId: 'handoff-unsupported',
+    provider: 'codex',
+    executionConfig: { model: 'gpt-5.6', effort: 'high', workflow: 'direct', permissionProfile: 'unrestricted' },
+    goal: 'Continue',
+    documentName: 'document.hwpx',
+    documentBytes: Buffer.from('document'),
+    timeline: portableTimeline(),
+    limits: { maxDurationMinutes: 480, maxTurns: 100 },
+    providerAuth: { secrets: {}, files: { '.codex/auth.json': '{"token":"moved"}' } },
+  }), (error) => (
+    error.code === 'SANDBOX_AUTH_UNSUPPORTED'
+    && /cannot import that login/.test(error.message)
+  ));
+  assert.equal(requests.filter((url) => url.endsWith('/v1/uploads/init')).length, 0);
+});
+
 test('AUTH_REQUIRED fails the transfer once instead of retrying recovery', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-auth-fail-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

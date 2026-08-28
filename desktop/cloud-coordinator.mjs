@@ -202,9 +202,11 @@ export class CloudCoordinator extends EventEmitter {
     if (!provider) return null;
     if (typeof this.#collectImportedAuth === 'function') {
       try {
-        return await this.#collectImportedAuth(provider);
+        const imported = await this.#collectImportedAuth(provider);
+        if (imported) return imported;
       } catch {
-        return null;
+        // The shared seed collector below covers older desktop auth locations
+        // and keeps transfer compatible when the import-specific collector is stale.
       }
     }
     return importedAuthFromCollected(await this.#providerAuth(provider));
@@ -552,14 +554,9 @@ export class CloudCoordinator extends EventEmitter {
     try {
       await this.#client.seedProviderCredentials(auth);
     } catch (error) {
-      if (error?.status !== 404 && error?.code !== 'NOT_FOUND') throw error;
-      const remote = await this.#client.profile().catch(() => null);
-      const status = remote?.providers?.find((item) => item.provider === provider);
-      if (status?.authenticated) return;
-      throw new AppServerError(
-        `${provider} is signed in on this computer, but this cloud sandbox cannot receive that login. Shut the sandbox down and start a new one from an updated build.`,
-        { code: 'SANDBOX_AUTH_UNSUPPORTED', retryable: false },
-      );
+      if (error?.status !== 404) throw error;
+      // Some sandboxes import auth during transfer through PUT /auth but do not
+      // expose this newer seed route. Let transfer negotiate that fallback.
     }
   }
 

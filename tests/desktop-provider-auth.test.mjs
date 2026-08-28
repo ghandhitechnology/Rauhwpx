@@ -5,8 +5,10 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { PROVIDER_AUTH_FILES, PROVIDER_KEY_ENV } from '../cloud/src/provider-credentials.mjs';
+import { DESKTOP_PROVIDER_AUTH as TRANSFER_PROVIDER_AUTH } from '../desktop/cloud-provider-auth.mjs';
 import {
   PROVIDER_AUTH_FILES as DESKTOP_AUTH_FILES,
+  PROVIDER_API_KEY_ENV,
   PROVIDER_KEY_ENV as DESKTOP_KEY_ENV,
   PROVIDER_SECRET_IDS,
   collectProviderAuth,
@@ -18,6 +20,9 @@ import {
 test('desktop and cloud keep the same provider auth contract', () => {
   assert.deepEqual(DESKTOP_AUTH_FILES, PROVIDER_AUTH_FILES);
   assert.deepEqual(DESKTOP_KEY_ENV, PROVIDER_KEY_ENV);
+  for (const [provider, envName] of Object.entries(PROVIDER_API_KEY_ENV)) {
+    assert.equal(envName, TRANSFER_PROVIDER_AUTH[provider].envName);
+  }
 });
 
 function memoryVault(initial = {}) {
@@ -45,6 +50,23 @@ test('collectProviderAuth reads only the selected provider secret', async (t) =>
   const variables = sandboxCredentialVariables(codex);
   assert.equal(variables.RAUHWpx_PROVIDER_KEY_CODEX, 'sk-proj-codex');
   assert.equal(variables.RAUHWpx_PROVIDER_KEY_CLAUDE, undefined);
+});
+
+test('collectProviderAuth maps only the selected provider environment key', async () => {
+  const auth = await collectProviderAuth('codex', {
+    vault: memoryVault(),
+    homeDir: '/missing-provider-home',
+    cliRoot: '/missing-provider-cli',
+    env: {
+      [PROVIDER_API_KEY_ENV.codex]: '  sk-proj-from-env  ',
+      [PROVIDER_API_KEY_ENV.claude]: 'sk-ant-must-not-leak',
+    },
+  });
+  assert.deepEqual(auth, {
+    provider: 'codex',
+    apiKey: 'sk-proj-from-env',
+    files: [],
+  });
 });
 
 test('every provider can supply a cloud seed payload', async (t) => {

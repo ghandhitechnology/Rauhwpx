@@ -28,6 +28,14 @@ export const PROVIDER_SECRET_IDS = Object.freeze({
   pi: 'rhwp.pi.openrouter-api-key',
 });
 
+export const PROVIDER_API_KEY_ENV = Object.freeze({
+  claude: 'ANTHROPIC_API_KEY',
+  codex: 'OPENAI_API_KEY',
+  grok: 'XAI_API_KEY',
+  pi: 'OPENROUTER_API_KEY',
+  cursor: 'CURSOR_API_KEY',
+});
+
 const PROVIDERS = Object.freeze(Object.keys(PROVIDER_AUTH_FILES));
 const MAX_AUTH_FILE_BYTES = 64 * 1024;
 const MAX_PROVIDER_SESSION_BYTES = 256 * 1024;
@@ -147,6 +155,10 @@ export async function collectProviderAuth(provider, {
   env = process.env,
 } = {}) {
   const name = assertProvider(provider);
+  const storedKey = await readSecret(vault, PROVIDER_SECRET_IDS[name]);
+  const environmentKey = typeof env?.[PROVIDER_API_KEY_ENV[name]] === 'string'
+    ? env[PROVIDER_API_KEY_ENV[name]].trim()
+    : '';
   const files = [];
   const seen = new Set();
   for (const candidate of sourceCandidates(name, { homeDir, cliRoot, env }).filter(Boolean)) {
@@ -158,7 +170,7 @@ export async function collectProviderAuth(provider, {
   }
   return {
     provider: name,
-    apiKey: await readSecret(vault, PROVIDER_SECRET_IDS[name]),
+    apiKey: storedKey || environmentKey || null,
     files,
   };
 }
