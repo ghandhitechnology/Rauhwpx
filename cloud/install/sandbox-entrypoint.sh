@@ -39,7 +39,8 @@ if [[ ${RAUHWpx_SANDBOX_INSTALL_PROVIDER:-1} == 1 ]]; then
     || echo '{"event":"sandbox.provider_install_failed"}'
 fi
 if [[ -n ${RAUHWpx_PROVIDER_SESSION:-} ]]; then
-  node "$CLOUD_ROOT/src/seed-provider-session.mjs"
+  node "$CLOUD_ROOT/src/seed-provider-session.mjs" \
+    || echo '{"event":"sandbox.provider_session_failed"}'
 fi
 seed_provider claude RAUHWpx_PROVIDER_KEY_CLAUDE
 seed_provider codex RAUHWpx_PROVIDER_KEY_CODEX
