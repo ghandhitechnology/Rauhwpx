@@ -27,7 +27,8 @@ test('bundled present-plan skill ends planning through the structured presentati
   const markdown = readFileSync(new URL('../skills/present-plan/SKILL.md', import.meta.url), 'utf8');
   assert.equal(parseSkillMarkdown(markdown, 'present-plan').name, 'present-plan');
   assert.match(markdown, /present_implementation_plan/);
-  assert.match(markdown, /chat action that opens the plan review sidebar/);
+  assert.match(markdown, /only when the user asked you to write, draft, or present a plan/);
+  assert.match(markdown, /Do not tell the user the plan is ready/);
   assert.match(markdown, /renewed discovery/);
   assert.doesNotMatch(markdown, /revise the complete plan and present its replacement through the same tool/i);
 

@@ -244,6 +244,18 @@ test('executor: planning and unknown phases reject every write before mutation',
   assert.deepEqual(calls, []);
 });
 
+test('executor: question mode rejects every write before mutation', async () => {
+  const { executor, calls } = makeExecutor();
+  await expectToolError(executor.execute('insert_text', {}, 'claude', {
+    workflow: 'question',
+    phase: 'questioning',
+    capabilityEpoch: 4,
+    activePhase: 'questioning',
+    activeCapabilityEpoch: 4,
+  }), 'QUESTION_MODE_READ_ONLY');
+  assert.deepEqual(calls, []);
+});
+
 test('executor: implementing requires the current capability epoch', async () => {
   const { executor, calls } = makeExecutor();
   await expectToolError(executor.execute('insert_text', {
