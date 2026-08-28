@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { CloudClient, __test as clientTest } from '../desktop/cloud-client.mjs';
+import { CloudClient, CloudHttpError, __test as clientTest } from '../desktop/cloud-client.mjs';
 import { CloudCoordinator, __test as coordinatorTest } from '../desktop/cloud-coordinator.mjs';
+import { collectProviderAuth, DESKTOP_PROVIDER_AUTH } from '../desktop/cloud-provider-auth.mjs';
+import { PROVIDER_AUTH } from '../cloud/src/provider-auth.mjs';
+import { PROVIDERS } from '../cloud/src/protocol.mjs';
 import { CloudHandoffStore, sha256Hex } from '../desktop/cloud-handoff.mjs';
 import { normalizeCloudProfile, normalizeTailscaleHttpsPort } from '../desktop/cloud-profile.mjs';
 import { sshArguments, __test as provisionerTest } from '../desktop/cloud-provisioner.mjs';
@@ -71,6 +74,32 @@ function portableTimeline(overrides = {}) {
     },
   };
 }
+
+test('transfer recovery retries only explicit transport and server failures', () => {
+  assert.equal(coordinatorTest.nonRetryableTransferError(new Error('local payload is corrupt')), true);
+  assert.equal(coordinatorTest.nonRetryableTransferError(new TypeError('fetch failed')), false);
+  assert.equal(coordinatorTest.nonRetryableTransferError(new TypeError('Cannot read properties of undefined')), true);
+  assert.equal(coordinatorTest.nonRetryableTransferError(new CloudHttpError('busy', { status: 500 })), false);
+  assert.equal(coordinatorTest.nonRetryableTransferError(new CloudHttpError('rate limited', { status: 429 })), false);
+  assert.equal(coordinatorTest.nonRetryableTransferError(new CloudHttpError('bad request', { status: 400 })), true);
+  assert.equal(coordinatorTest.nonRetryableTransferError(Object.assign(new Error('configured wrong'), {
+    retryable: false,
+  })), true);
+
+  const readiness = {
+    profile: {
+      endpoint: 'https://one.example/rauhwpx-cloud',
+      serverPublicKey: SERVER_KEY,
+      mode: 'app-hosted',
+      sandbox: { providerId: 'railway', sandboxId: 'sandbox-one' },
+    },
+    health: { protocolVersion: 1, version: '1.1.0' },
+  };
+  const destination = coordinatorTest.destinationFromReadiness(readiness);
+  assert.equal(coordinatorTest.sameDestination(destination, { ...destination, runtimeVersion: '1.1.1' }), true);
+  assert.equal(coordinatorTest.sameDestination(destination, { ...destination, sandboxId: 'sandbox-two' }), false);
+  assert.equal(coordinatorTest.sameDestination(destination, null), false);
+});
 
 test('cloud profile accepts Tailscale and rejects insecure endpoints', () => {
   const profile = normalizeCloudProfile({
@@ -247,6 +276,88 @@ test('handoff store persists transitions and ignores replayed events', async (t)
   assert.equal(record.cloudSessionId, 'cloud-1');
   assert.equal(record.lastEventSequence, 7);
   assert.equal(record.originDocumentId, 'document-1');
+});
+
+test('snapshot selection does not let an updated stale failure hide newer live work', async () => {
+  const base = {
+    version: 1,
+    revision: 1,
+    originSessionId: 'desktop-selection',
+    originDocumentId: 'document-selection',
+    threadId: 'thread-selection',
+    documentName: 'selection.hwpx',
+    documentDigest: 'a'.repeat(64),
+    documentSize: 1,
+    limits: {},
+  };
+  const records = [
+    {
+      ...base,
+      id: 'stale-failure',
+      state: 'failed',
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-30T00:00:00.000Z',
+      error: 'old failure',
+      errorCode: 'CLOUD_NOT_CONFIGURED',
+      retryable: false,
+    },
+    {
+      ...base,
+      id: 'live-session',
+      cloudSessionId: 'cloud-live',
+      state: 'suspended',
+      createdAt: '2026-08-20T00:00:00.000Z',
+      updatedAt: '2026-08-20T00:00:00.000Z',
+      error: null,
+    },
+  ];
+  const coordinator = new CloudCoordinator({
+    client: { loadProfile: async () => null, isPaired: async () => false },
+    store: { list: async () => records },
+    provisioner: {},
+  });
+  const snapshot = await coordinator.snapshot({
+    originSessionId: 'desktop-selection',
+    documentId: 'document-selection',
+  });
+  assert.equal(snapshot.session.kind, 'suspended');
+  assert.equal(snapshot.session.sessionId, 'cloud-live');
+  assert.equal(snapshot.lease.owner, 'cloud');
+});
+
+test('loading legacy terminal handoffs removes their staged payloads', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-terminal-migration-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'handoffs.json');
+  const store = new CloudHandoffStore({ filePath });
+  const created = await store.create({
+    sessionId: 'desktop-legacy',
+    documentId: 'document-legacy',
+    documentName: 'legacy.hwpx',
+    documentBytes: Buffer.from('legacy-document'),
+    provider: 'codex',
+  });
+  const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+  persisted.records[0].state = 'failed';
+  persisted.records[0].error = 'old terminal failure';
+  await writeFile(filePath, `${JSON.stringify(persisted)}\n`);
+
+  const reloaded = new CloudHandoffStore({ filePath });
+  const [record] = await reloaded.load();
+  assert.equal(record.state, 'failed');
+  assert.equal(record.documentStagingPath, null);
+  assert.deepEqual(record.resources, []);
+  await assert.rejects(access(path.join(directory, 'pending-payloads', created.id)), {
+    code: 'ENOENT',
+  });
+  const coordinator = new CloudCoordinator({
+    client: { loadProfile: async () => null, isPaired: async () => false },
+    store: reloaded,
+    provisioner: {},
+  });
+  const snapshot = await coordinator.dismissSession({ sessionId: created.id });
+  assert.deepEqual(await reloaded.list(), []);
+  assert.equal(snapshot.session.kind, 'idle');
 });
 
 test('result resolution replaces unchanged origins and preserves conflicts', async (t) => {
@@ -973,7 +1084,11 @@ test('transfer uploads the raw portable timeline and idempotently activates the 
 
 test('committed handoffs clear their staged payload without losing metadata', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-clear-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Wait for any trailing debounced write so cleanup cannot race it.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const record = await store.create({
     sessionId: 'desktop-session',
@@ -1066,7 +1181,11 @@ test('result downloads reject a missing content digest', async () => {
 
 test('downloaded results reopen from verified local recovery and disappear after resolution', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-reopen-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Wait for any trailing debounced write so cleanup cannot race it.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const record = await store.create({
     sessionId: 'desktop-session',
@@ -1168,4 +1287,357 @@ test('resolved recovery cleanup resumes idempotently after an app restart', asyn
 
   await coordinator.start();
   assert.equal((await store.get(record.id)).recoveryCleanupPath, null);
+});
+
+test('desktop and VPS provider auth catalogs stay aligned', () => {
+  assert.deepEqual(Object.keys(DESKTOP_PROVIDER_AUTH), [...PROVIDERS]);
+  for (const provider of PROVIDERS) {
+    assert.equal(DESKTOP_PROVIDER_AUTH[provider].secretName, PROVIDER_AUTH[provider].secretName);
+    for (const file of DESKTOP_PROVIDER_AUTH[provider].files) {
+      assert.ok(PROVIDER_AUTH[provider].files.includes(file.destination), `${provider} ${file.destination}`);
+    }
+  }
+});
+
+test('collectProviderAuth gathers API keys and allow-listed files for every provider', async (t) => {
+  const homeDir = await mkdtemp(path.join(tmpdir(), 'rauhwpx-provider-home-'));
+  t.after(() => rm(homeDir, { recursive: true, force: true }));
+  const secrets = {
+    'rhwp.claude.api-key': 'sk-ant-local',
+    'rhwp.codex.api-key': 'sk-proj-local',
+    'rhwp.pi.openrouter-api-key': 'sk-or-local',
+    'rhwp.grok.api-key': 'xai-local',
+    'rhwp.cursor.api-key': 'cur-local',
+  };
+  await mkdir(path.join(homeDir, '.claude'), { recursive: true });
+  await mkdir(path.join(homeDir, '.codex'), { recursive: true });
+  await mkdir(path.join(homeDir, '.grok'), { recursive: true });
+  await mkdir(path.join(homeDir, '.cursor'), { recursive: true });
+  await writeFile(path.join(homeDir, '.claude', '.credentials.json'), '{"oauth":"claude"}');
+  await writeFile(path.join(homeDir, '.codex', 'auth.json'), '{"token":"codex"}');
+  await writeFile(path.join(homeDir, '.grok', 'auth.json'), '{"token":"grok"}');
+  await writeFile(path.join(homeDir, '.cursor', 'cli-config.json'), '{"auth":"cursor"}');
+  for (const provider of PROVIDERS) {
+    const bundle = await collectProviderAuth(provider, {
+      homeDir,
+      env: {},
+      readSecret: async (key) => secrets[key] ?? null,
+    });
+    assert.equal(bundle.secrets[DESKTOP_PROVIDER_AUTH[provider].secretName], secrets[DESKTOP_PROVIDER_AUTH[provider].secretId]);
+    if (provider !== 'pi') assert.ok(Object.keys(bundle.files).length > 0, provider);
+  }
+});
+
+test('transfer imports provider auth before staging the session', async () => {
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://cloud.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'cloud.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const vault = memoryVault({
+    'cloud.profile': JSON.stringify(profile),
+    'cloud.refresh': 'refresh-old',
+  });
+  const requests = [];
+  const client = new CloudClient({
+    vault,
+    fetchImpl: signedFetch(async (url, options) => {
+      const body = options.body && String(options.headers['content-type']).includes('json')
+        ? JSON.parse(options.body)
+        : null;
+      requests.push({ url, options, body });
+      if (url.endsWith('/v1/token/refresh')) return jsonResponse({
+        accessToken: 'access',
+        accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        refreshToken: 'refresh-new',
+        refreshExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      });
+      if (url.endsWith('/v1/providers/codex/auth')) return jsonResponse({
+        provider: { provider: 'codex', available: true, authenticated: true },
+        importedSecrets: Object.keys(body.secrets),
+        importedFiles: Object.keys(body.files),
+      });
+      if (url.endsWith('/v1/uploads/init')) return jsonResponse({
+        uploadId: `upload-${requests.length}`,
+        chunkSize: 1024,
+        offset: body.size,
+        status: 'complete',
+        blobExists: true,
+        blob: { id: body.sha256, sha256: body.sha256, size: body.size },
+      });
+      if (url.endsWith('/v1/sessions')) return jsonResponse({
+        id: 'handoff-auth-01',
+        status: 'staged',
+        stateVersion: 1,
+      }, { status: 201 });
+      if (url.endsWith('/v1/sessions/handoff-auth-01/commands')) return jsonResponse({
+        session: { id: 'handoff-auth-01', status: 'queued', stateVersion: 2 },
+      });
+      throw new Error(`unexpected request ${url}`);
+    }),
+  });
+  await client.transfer({
+    sessionId: 'handoff-auth-01',
+    provider: 'codex',
+    executionConfig: { model: 'gpt-5.6', effort: 'high', workflow: 'direct', permissionProfile: 'unrestricted' },
+    goal: 'Continue',
+    documentName: 'document.hwpx',
+    documentBytes: Buffer.from('document'),
+    timeline: portableTimeline(),
+    limits: { maxDurationMinutes: 480, maxTurns: 100 },
+    providerAuth: {
+      secrets: { OPENAI_API_KEY: 'sk-proj-moved' },
+      files: { '.codex/auth.json': '{"token":"moved"}' },
+    },
+  });
+  const imported = requests.find((request) => request.url.endsWith('/v1/providers/codex/auth'));
+  const created = requests.find((request) => request.url.endsWith('/v1/sessions'));
+  assert.deepEqual(imported.body, {
+    secrets: { OPENAI_API_KEY: 'sk-proj-moved' },
+    files: { '.codex/auth.json': '{"token":"moved"}' },
+  });
+  assert.ok(requests.indexOf(imported) < requests.indexOf(created));
+});
+
+test('transfer accepts a POST-seeded sandbox when PUT auth import is unavailable', async () => {
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://cloud.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'cloud.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const requests = [];
+  const client = new CloudClient({
+    vault: memoryVault({
+      'cloud.profile': JSON.stringify(profile),
+      'cloud.refresh': 'refresh-old',
+    }),
+    fetchImpl: signedFetch(async (url, options) => {
+      const body = options.body && String(options.headers['content-type']).includes('json')
+        ? JSON.parse(options.body)
+        : null;
+      requests.push({ url, body });
+      if (url.endsWith('/v1/token/refresh')) return jsonResponse({
+        accessToken: 'access',
+        accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        refreshToken: 'refresh-new',
+        refreshExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      });
+      if (url.endsWith('/v1/providers/codex/auth')) return jsonResponse({
+        error: { code: 'NOT_FOUND', message: 'Endpoint was not found' },
+      }, { status: 404 });
+      if (url.endsWith('/v1/profile')) return jsonResponse({
+        providers: [{ provider: 'codex', available: true, authenticated: true }],
+      });
+      if (url.endsWith('/v1/uploads/init')) return jsonResponse({
+        uploadId: `upload-${requests.length}`,
+        chunkSize: 1024,
+        offset: body.size,
+        status: 'complete',
+        blobExists: true,
+        blob: { id: body.sha256, sha256: body.sha256, size: body.size },
+      });
+      if (url.endsWith('/v1/sessions')) return jsonResponse({
+        id: 'handoff-post-only', status: 'staged', stateVersion: 1,
+      }, { status: 201 });
+      if (url.endsWith('/v1/sessions/handoff-post-only/commands')) return jsonResponse({
+        session: { id: 'handoff-post-only', status: 'queued', stateVersion: 2 },
+      });
+      throw new Error(`unexpected request ${url}`);
+    }),
+  });
+  await client.transfer({
+    sessionId: 'handoff-post-only',
+    provider: 'codex',
+    executionConfig: { model: 'gpt-5.6', effort: 'high', workflow: 'direct', permissionProfile: 'unrestricted' },
+    goal: 'Continue',
+    documentName: 'document.hwpx',
+    documentBytes: Buffer.from('document'),
+    timeline: portableTimeline(),
+    limits: { maxDurationMinutes: 480, maxTurns: 100 },
+    providerAuth: { secrets: {}, files: { '.codex/auth.json': '{"token":"moved"}' } },
+  });
+  const imported = requests.find((request) => request.url.endsWith('/v1/providers/codex/auth'));
+  const checked = requests.find((request) => request.url.endsWith('/v1/profile'));
+  const uploaded = requests.find((request) => request.url.endsWith('/v1/uploads/init'));
+  assert.ok(requests.indexOf(imported) < requests.indexOf(checked));
+  assert.ok(requests.indexOf(checked) < requests.indexOf(uploaded));
+});
+
+test('transfer reports unsupported auth only after both import protocols are unavailable', async () => {
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://cloud.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'cloud.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const requests = [];
+  const client = new CloudClient({
+    vault: memoryVault({
+      'cloud.profile': JSON.stringify(profile),
+      'cloud.refresh': 'refresh-old',
+    }),
+    fetchImpl: signedFetch(async (url) => {
+      requests.push(url);
+      if (url.endsWith('/v1/token/refresh')) return jsonResponse({
+        accessToken: 'access',
+        accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        refreshToken: 'refresh-new',
+        refreshExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      });
+      if (url.endsWith('/v1/providers/codex/auth')) return jsonResponse({
+        error: { code: 'AUTH_IMPORT_UNAVAILABLE', message: 'This VPS cannot import provider credentials' },
+      }, { status: 501 });
+      if (url.endsWith('/v1/profile')) return jsonResponse({
+        providers: [{ provider: 'codex', available: true, authenticated: false }],
+      });
+      throw new Error(`unexpected request ${url}`);
+    }),
+  });
+  await assert.rejects(client.transfer({
+    sessionId: 'handoff-unsupported',
+    provider: 'codex',
+    executionConfig: { model: 'gpt-5.6', effort: 'high', workflow: 'direct', permissionProfile: 'unrestricted' },
+    goal: 'Continue',
+    documentName: 'document.hwpx',
+    documentBytes: Buffer.from('document'),
+    timeline: portableTimeline(),
+    limits: { maxDurationMinutes: 480, maxTurns: 100 },
+    providerAuth: { secrets: {}, files: { '.codex/auth.json': '{"token":"moved"}' } },
+  }), (error) => (
+    error.code === 'SANDBOX_AUTH_UNSUPPORTED'
+    && /cannot import that login/.test(error.message)
+  ));
+  assert.equal(requests.filter((url) => url.endsWith('/v1/uploads/init')).length, 0);
+});
+
+test('AUTH_REQUIRED fails the transfer once instead of retrying recovery', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-auth-fail-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  let transferCalls = 0;
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => true,
+      transfer: async () => {
+        transferCalls += 1;
+        throw new CloudHttpError('codex must be authenticated on this VPS', {
+          status: 409,
+          code: 'AUTH_REQUIRED',
+        });
+      },
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+    collectProviderAuth: async () => ({
+      secrets: { OPENAI_API_KEY: 'sk-proj-local' },
+      files: { '.codex/auth.json': '{"token":"local"}' },
+    }),
+  });
+  t.after(() => coordinator.stop());
+  await assert.rejects(
+    coordinator.transfer({
+      agent: 'codex',
+      threadId: 'thread-auth',
+      documentId: 'document-auth',
+      document: { fileName: 'document.hwpx', bytes: Buffer.from('document') },
+      timeline: portableTimeline(),
+      limits: { maxDurationMs: 15 * 60_000, maxTurns: 8 },
+    }, { originSessionId: 'desktop-auth' }),
+    (error) => error.code === 'AUTH_REQUIRED',
+  );
+  const records = await store.list();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].state, 'failed');
+  assert.equal(records[0].error, 'codex must be authenticated on this VPS');
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(transferCalls, 1);
+});
+
+test('concurrent requests cannot stage duplicate document transfers', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-duplicate-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const profile = { endpoint: 'https://sandbox.example/rauhwpx-cloud', mode: 'app-hosted', serverPublicKey: SERVER_KEY, sandbox: { providerId: 'railway', sandboxId: 'sandbox-1' } };
+  const client = {
+    assertTransferReady: async () => ({ profile, health: { protocolVersion: 1, version: '1.1.0' } }),
+    loadProfile: async () => profile,
+    isPaired: async () => true,
+    transfer: async ({ signal }) => new Promise((_resolve, reject) => {
+      const stopped = () => reject(Object.assign(new Error('stopped'), { code: 'ECONNRESET' }));
+      if (signal.aborted) stopped();
+      else signal.addEventListener('abort', stopped, { once: true });
+    }),
+  };
+  const coordinator = new CloudCoordinator({
+    client,
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  const payload = {
+    agent: 'codex',
+    threadId: 'thread-duplicate',
+    documentId: 'document-duplicate',
+    document: { fileName: 'duplicate.hwpx', bytes: Buffer.from('document') },
+    timeline: portableTimeline(),
+  };
+  const first = coordinator.transfer(payload, { originSessionId: 'desktop-duplicate' });
+  while ((await store.list()).length === 0) await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(
+    coordinator.transfer(payload, { originSessionId: 'desktop-duplicate' }),
+    (error) => error.code === 'TRANSFER_ALREADY_ACTIVE',
+  );
+  assert.equal((await store.list()).length, 1);
+  const stopped = assert.rejects(first, /stopped/);
+  await coordinator.stop();
+  await stopped;
+});
+
+test('missing cloud configuration fails once instead of entering transfer recovery', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-unconfigured-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  let networkCalls = 0;
+  const client = new CloudClient({
+    vault: memoryVault(),
+    fetchImpl: async () => {
+      networkCalls += 1;
+      throw new Error('an unconfigured transfer must not reach the network');
+    },
+  });
+  await assert.rejects(client.profile(), (error) => (
+    error.code === 'CLOUD_NOT_CONFIGURED'
+    && error.message === 'Cloud server is not configured'
+  ));
+
+  const coordinator = new CloudCoordinator({
+    client,
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+    collectProviderAuth: async () => ({
+      secrets: { OPENAI_API_KEY: 'sk-proj-local' },
+      files: {},
+    }),
+  });
+  t.after(() => coordinator.stop());
+  await assert.rejects(
+    coordinator.transfer({
+      agent: 'codex',
+      threadId: 'thread-unconfigured',
+      documentId: 'document-unconfigured',
+      document: { fileName: 'document.hwpx', bytes: Buffer.from('document') },
+      timeline: portableTimeline(),
+      limits: { maxDurationMs: 15 * 60_000, maxTurns: 8 },
+    }, { originSessionId: 'desktop-unconfigured' }),
+    (error) => error.code === 'CLOUD_NOT_CONFIGURED',
+  );
+  assert.deepEqual(await store.list(), []);
+  await assert.rejects(
+    access(path.join(directory, 'pending-payloads')),
+    (error) => error.code === 'ENOENT',
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(networkCalls, 0);
 });

@@ -134,6 +134,7 @@ try {
     chromiumPath,
     rhwpBin,
   });
+  await harness.start({ history: [] });
   const destination = path.join(workspace, `roundtrip${extension}`);
   const receipt = await harness.exportDocument(selected.format, destination);
   const output = await fs.readFile(destination);

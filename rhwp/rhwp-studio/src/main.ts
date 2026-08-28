@@ -536,7 +536,7 @@ function applyCloudResult(result: CloudDownloadResult, resolution: CloudResultRe
     if (resolution.action === 'keep-both') {
       const copy = resolution.preservedCopyName ?? result.preservedCopyName ?? resolution.path ?? result.fileName;
       const reason = resolution.conflict === 'external-change' ? '원본 변경을 감지해 ' : '';
-      showToast({ message: `${reason}원본과 ${copy}을 모두 보관했습니다.`, durationMs: 4500 });
+      showToast({ message: `${reason}두 파일을 모두 보관했습니다: 원본, ${copy}`, durationMs: 4500 });
       return Promise.resolve();
     }
     showToast({ message: '클라우드 결과를 버렸습니다.', durationMs: 3000 });

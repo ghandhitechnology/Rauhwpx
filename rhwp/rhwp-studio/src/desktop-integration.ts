@@ -16,6 +16,7 @@ import type {
   CloudCommandRequest,
   CloudProfileDraft,
   CloudResultAction,
+  CloudServerMode,
   CloudSessionScope,
   CloudTransferIntentRequest,
   CloudTransferRequest,
@@ -146,10 +147,15 @@ export interface RhwpDesktopApi {
     profile?: CloudProfileDraft;
   }) => Promise<unknown>;
   cloudPair?: (payload: { code: string; profile?: CloudProfileDraft }) => Promise<unknown>;
+  cloudSelectServerMode?: (payload: { mode: CloudServerMode }) => Promise<unknown>;
+  cloudSpawnSandbox?: (payload: { providerId?: string }) => Promise<unknown>;
+  cloudSandboxStatus?: () => Promise<unknown>;
+  cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
   cloudTransfer?: (payload: CloudTransferRequest) => Promise<unknown>;
   cloudSetTransferIntent?: (payload: CloudTransferIntentRequest) => Promise<unknown>;
   cloudReadReference?: (payload: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<unknown>;
   cloudCommand?: (payload: CloudCommandRequest) => Promise<unknown>;
+  cloudDismissSession?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudCompleteTakeover?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudDownloadResult?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudResolveResult?: (payload: { sessionId: string; action: CloudResultAction }) => Promise<unknown>;

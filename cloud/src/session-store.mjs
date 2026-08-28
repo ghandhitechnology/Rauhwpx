@@ -122,6 +122,11 @@ export class SessionStore {
     const session = transaction(this.database, () => {
       const existing = this.database.prepare('SELECT * FROM sessions WHERE id = ?').get(id);
       if (existing) {
+        if (existing.status === 'purged') {
+          // A purged row is a shell with no resources; replaying it as success
+          // would hand the client a session id that can never activate.
+          throw new CloudError('SESSION_EXISTS', 'Session ID was already used and purged', 409);
+        }
         if (existing.origin_device_id === device.id
           && existing.provider === input.provider
           && existing.origin_sha256 === input.originDocument.blobId) return publicSession(existing);
@@ -352,7 +357,9 @@ export class SessionStore {
       const provider = this.providerStatus(session.provider);
       if (!provider.available) throw new CloudError('PROVIDER_UNAVAILABLE', `${session.provider} is not ready on this VPS`, 409, provider);
       if (!provider.authenticated) throw new CloudError('AUTH_REQUIRED', `${session.provider} must be authenticated on this VPS`, 409, provider);
-      this.database.prepare('UPDATE sessions SET pause_requested_at = NULL WHERE id = ?').run(session.id);
+      // The duration budget covers agent work, not wall time spent suspended;
+      // clearing started_at lets the next claim restamp a fresh run.
+      this.database.prepare('UPDATE sessions SET pause_requested_at = NULL, started_at = NULL WHERE id = ?').run(session.id);
       return updateStatus('queued', 'session.queued', { resumed: true }, now + STAGED_RETENTION_MS);
     }
     if (command.type === 'message.queue') {
@@ -974,7 +981,7 @@ export class SessionStore {
         const now = this.now();
         this.database.prepare(`
           UPDATE sessions SET status = ?, state_version = state_version + 1, pause_requested_at = NULL, finishing_at = NULL, sandbox_id = NULL,
-            worker_token_hash = NULL, worker_heartbeat_at = NULL, expires_at = ?, updated_at = ? WHERE id = ?
+            worker_token_hash = NULL, worker_heartbeat_at = NULL, started_at = NULL, expires_at = ?, updated_at = ? WHERE id = ?
         `).run(status, now + (paused ? SUSPENDED_RETENTION_MS : STAGED_RETENTION_MS), now, row.id);
         this.database.prepare(`
           UPDATE session_messages SET status = 'queued', delivered_at = NULL
@@ -1007,7 +1014,7 @@ export class SessionStore {
       const status = paused ? 'suspended' : 'queued';
       this.database.prepare(`
         UPDATE sessions SET status = ?, state_version = state_version + 1, pause_requested_at = NULL, finishing_at = NULL, sandbox_id = NULL,
-          worker_token_hash = NULL, worker_heartbeat_at = NULL, expires_at = ?, updated_at = ? WHERE id = ?
+          worker_token_hash = NULL, worker_heartbeat_at = NULL, started_at = NULL, expires_at = ?, updated_at = ? WHERE id = ?
       `).run(status, this.now() + (paused ? SUSPENDED_RETENTION_MS : STAGED_RETENTION_MS), this.now(), sessionId);
       this.database.prepare(`
         UPDATE session_messages SET status = 'queued', delivered_at = NULL

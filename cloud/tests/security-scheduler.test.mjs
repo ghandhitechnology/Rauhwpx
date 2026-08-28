@@ -228,12 +228,12 @@ test('scheduler inventory failures propagate before session recovery mutates sta
   const tickScheduler = new Scheduler(sessionStore, {
     list: async () => {
       listCalls += 1;
-      if (listCalls === 1) return [];
-      throw inventoryError;
+      if (listCalls === 1) throw inventoryError;
+      return [];
     },
   });
   await assert.rejects(tickScheduler.tick(), (error) => error === inventoryError);
-  assert.equal(listCalls, 2);
+  assert.equal(listCalls, 1);
   assert.deepEqual(mutations, [], 'neither recovery nor maintenance may mutate state from an incomplete inventory');
 });
 
@@ -263,12 +263,12 @@ test('scheduler does not requeue a running session whose full sandbox ID is stil
     clearSandbox: () => {},
   };
   const runner = {
-    list: async () => { listCalls += 1; return [{ sandboxId: fullSandboxId, sessionId: 'session-live' }]; },
+    list: async () => { listCalls += 1; return [{ sandboxId: fullSandboxId, sessionId: 'session-live', running: true }]; },
     stop: async (id) => { stops.push(id); },
   };
   const scheduler = new Scheduler(sessionStore, runner, { maxRunningSessions: 1 });
   await scheduler.tick();
-  assert.equal(listCalls, 2);
+  assert.equal(listCalls, 1);
   assert.deepEqual(requeues, []);
   assert.deepEqual(stops, []);
 });

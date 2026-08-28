@@ -3,7 +3,9 @@ import { createWriteStream, promises as fs } from 'node:fs';
 import http from 'node:http';
 import { pipeline } from 'node:stream/promises';
 
-function request(socketPath, token, method, pathname, { body, headers = {} } = {}) {
+const DEFAULT_TIMEOUT_MS = 120_000;
+
+function request(socketPath, token, method, pathname, { body, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const bytes = body === undefined ? null : Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
     const requestHandle = http.request({
@@ -18,6 +20,11 @@ function request(socketPath, token, method, pathname, { body, headers = {} } = {
       },
     }, resolve);
     requestHandle.once('error', reject);
+    // Inactivity timeout: a stalled control plane aborts the call while a
+    // healthy streaming transfer that keeps moving is never cut off.
+    requestHandle.setTimeout(timeoutMs, () => {
+      requestHandle.destroy(new Error(`Worker control request timed out after ${timeoutMs} ms`));
+    });
     requestHandle.end(bytes);
   });
 }

@@ -122,6 +122,35 @@ export class TimelineRecorder {
     this.#touch();
   }
 
+  /**
+   * Persist session-display lifecycle events in the portable timeline.
+   * Same JSON shape the worker logs (type, status, display, …).
+   */
+  recordEnvironmentEvent(event) {
+    if (!event || typeof event !== 'object') return null;
+    const type = String(event.type ?? '');
+    if (!type.startsWith('environment.')) return null;
+    this.timeline.thread.messages.push({
+      role: 'system',
+      kind: 'environment',
+      text: boundedText(type, 256),
+      agent: this.timeline.thread.agent,
+      environment: {
+        type,
+        status: event.status ?? null,
+        display: event.display ?? null,
+        width: event.width ?? null,
+        height: event.height ?? null,
+        pid: event.pid ?? null,
+        reason: event.reason ?? null,
+        message: boundedText(event.message, 1_000) || null,
+        at: event.at ?? new Date(this.now()).toISOString(),
+      },
+    });
+    this.#touch();
+    return event;
+  }
+
   consume(sidebarEvent) {
     if (sidebarEvent?.type !== 'agent' || !sidebarEvent.event || typeof sidebarEvent.event !== 'object') return null;
     const event = sidebarEvent.event;

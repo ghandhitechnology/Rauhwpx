@@ -361,6 +361,44 @@ export async function uploadRequiredReferences({
   }
 }
 
+const CHROMIUM_ARGS = Object.freeze([
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
+  '--disable-background-networking',
+  '--disable-component-update',
+  '--disable-crash-reporter',
+  '--disable-default-apps',
+  '--disable-extensions',
+  '--disable-sync',
+  '--metrics-recording-only',
+  '--no-first-run',
+]);
+
+async function launchChromium(puppeteer, chromiumPath) {
+  const failures = [];
+  for (const pipe of [true, false]) {
+    try {
+      return await puppeteer.launch({
+        executablePath: chromiumPath,
+        headless: true,
+        pipe,
+        dumpio: process.env.RAUHWpx_CHROMIUM_DUMPIO === '1',
+        args: [...CHROMIUM_ARGS],
+      });
+    } catch (error) {
+      failures.push(`${pipe ? 'pipe' : 'port'}: ${error?.message ?? error}`);
+      if (/ENOENT|Browser was not found|Could not find Chrome/i.test(String(error?.message ?? error))) break;
+    }
+  }
+  throw runtimeError(
+    'BROWSER_LAUNCH_FAILED',
+    'Cloud document browser could not start',
+    new Error(failures.join(' | ')),
+  );
+}
+
 export async function createStudioHarness({
   manifest,
   workspace,
@@ -368,6 +406,7 @@ export async function createStudioHarness({
   document,
   references,
   timeline,
+  displayEnv = null,
   onEvent = async () => {},
   studioRoot = process.env.RAUHWpx_STUDIO_DIST || '/app/studio',
   agentRoot = process.env.RAUHWpx_AGENT_ROOT || '/app/rhwp-agent',
@@ -418,6 +457,16 @@ export async function createStudioHarness({
         'node_modules',
         '.bin',
       )}:/usr/local/bin:/usr/bin:/bin`,
+      ...(displayEnv?.DISPLAY && displayEnv?.XAUTHORITY
+        ? {
+          DISPLAY: String(displayEnv.DISPLAY),
+          XAUTHORITY: String(displayEnv.XAUTHORITY),
+          RAUHWpx_SESSION_DISPLAY: String(displayEnv.RAUHWpx_SESSION_DISPLAY || 'ready'),
+          ...(displayEnv.RAUHWpx_SCREENSHOT_DIR
+            ? { RAUHWpx_SCREENSHOT_DIR: String(displayEnv.RAUHWpx_SCREENSHOT_DIR) }
+            : {}),
+        }
+        : {}),
     };
     if (manifest.provider === 'pi') env.RHWP_PI_DIR = await preparePiRuntime({
       workspace, credentials, model: execution.model, effort: execution.effort,
@@ -438,24 +487,7 @@ export async function createStudioHarness({
     hub.stdout?.resume();
     await waitForHub(hubPort, hubToken, hub);
 
-    browser = await puppeteer.launch({
-      executablePath: chromiumPath,
-      headless: true,
-      pipe: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-background-networking',
-        '--disable-component-update',
-        '--disable-default-apps',
-        '--disable-extensions',
-        '--disable-sync',
-        '--metrics-recording-only',
-        '--no-first-run',
-      ],
-    });
+    browser = await launchChromium(puppeteer, chromiumPath);
     page = await browser.newPage();
     let pageErrorTail = '';
     const appendPageError = (message) => {
@@ -520,42 +552,56 @@ export async function createStudioHarness({
       'DOCUMENT_LOAD_TIMEOUT',
       'Cloud Studio document load timed out',
     );
-    await uploadRequiredReferences({ page, bootstrap, origin, references, scopeId: thread.id, onEvent });
-
     return {
       async start({ history }) {
         if (started) return;
         started = true;
-        await page.evaluate((secret, input) => window.rauhwpxCloudRuntime.startChat(secret, input), bootstrap, {
-          agent: manifest.provider,
-          model: execution.model,
-          effort: execution.effort,
-          workflow: execution.workflow,
-          permissionProfile: execution.permissionProfile,
-          threadId: thread.id,
-          documentId: thread.documentId ?? manifest.clientContext?.documentId ?? null,
-          documentName: document.name,
-          history,
-        });
+        await withTimeout(
+          page.evaluate((secret, input) => window.rauhwpxCloudRuntime.startChat(secret, input), bootstrap, {
+            agent: manifest.provider,
+            model: execution.model,
+            effort: execution.effort,
+            workflow: execution.workflow,
+            permissionProfile: execution.permissionProfile,
+            threadId: thread.id,
+            documentId: thread.documentId ?? manifest.clientContext?.documentId ?? null,
+            documentName: document.name,
+            history,
+          }),
+          startupTimeoutMs,
+          'STUDIO_START_TIMEOUT',
+          'Cloud Studio chat start timed out',
+        );
         await page.waitForFunction(
           (secret, provider) => window.rauhwpxCloudRuntime.status(secret).activeAgent === provider,
           { timeout: 30_000 },
           bootstrap,
           manifest.provider,
         );
+        await uploadRequiredReferences({ page, bootstrap, origin, references, scopeId: thread.id, onEvent });
       },
       async runTurn(prompt, { timeoutMs }) {
         const sentAt = Date.now();
-        await page.evaluate((secret, text) => window.rauhwpxCloudRuntime.sendUserMessage(secret, text), bootstrap, prompt);
+        await withTimeout(
+          page.evaluate((secret, text) => window.rauhwpxCloudRuntime.sendUserMessage(secret, text), bootstrap, prompt),
+          30_000,
+          'TURN_SEND_TIMEOUT',
+          'Cloud Studio did not accept the user message',
+        );
         let sawStart = false;
         let planId = null;
         let implementationStarted = execution.workflow !== 'plan';
         let approvalRequested = false;
         while (Date.now() - sentAt < timeoutMs) {
-          const entries = await page.evaluate(
-            (secret, after) => window.rauhwpxCloudRuntime.drainEvents(secret, after),
-            bootstrap,
-            eventSequence,
+          const entries = await withTimeout(
+            page.evaluate(
+              (secret, after) => window.rauhwpxCloudRuntime.drainEvents(secret, after),
+              bootstrap,
+              eventSequence,
+            ),
+            30_000,
+            'EVENT_DRAIN_TIMEOUT',
+            'Cloud Studio event drain timed out',
           );
           for (const entry of entries) {
             eventSequence = Math.max(eventSequence, Number(entry.seq) || 0);
@@ -573,10 +619,15 @@ export async function createStudioHarness({
               if (execution.workflow === 'plan' && !implementationStarted) {
                 if (!planId) throw runtimeError('PLAN_NOT_PRESENTED', 'Planning workflow ended without a structured implementation plan');
                 if (approvalRequested) throw runtimeError('PLAN_APPROVAL_FAILED', 'Planning workflow ended again before implementation started');
-                await page.evaluate(
-                  (secret, selectedPlanId) => window.rauhwpxCloudRuntime.approvePlan(secret, selectedPlanId),
-                  bootstrap,
-                  planId,
+                await withTimeout(
+                  page.evaluate(
+                    (secret, selectedPlanId) => window.rauhwpxCloudRuntime.approvePlan(secret, selectedPlanId),
+                    bootstrap,
+                    planId,
+                  ),
+                  30_000,
+                  'PLAN_APPROVAL_TIMEOUT',
+                  'Cloud Studio plan approval timed out',
                 );
                 approvalRequested = true;
                 sawStart = false;
@@ -593,10 +644,15 @@ export async function createStudioHarness({
         throw runtimeError('TURN_TIMEOUT', 'Cloud provider turn exceeded the session deadline');
       },
       async exportDocument(format, destination) {
-        const metadata = await page.evaluate(
-          (secret, selectedFormat) => window.rauhwpxCloudRuntime.prepareExport(secret, selectedFormat),
-          bootstrap,
-          format,
+        const metadata = await withTimeout(
+          page.evaluate(
+            (secret, selectedFormat) => window.rauhwpxCloudRuntime.prepareExport(secret, selectedFormat),
+            bootstrap,
+            format,
+          ),
+          120_000,
+          'EXPORT_PREPARE_TIMEOUT',
+          'Cloud Studio export preparation timed out',
         );
         if (!Number.isSafeInteger(metadata.size) || metadata.size < 1 || metadata.size > MAX_EXPORT_BYTES) {
           throw runtimeError('RESULT_TOO_LARGE', 'Studio returned an invalid or oversized document result');
@@ -605,11 +661,16 @@ export async function createStudioHarness({
         const digest = createHash('sha256');
         try {
           for (let offset = 0; offset < metadata.size; offset += EXPORT_CHUNK_BYTES) {
-            const chunk = await page.evaluate(
-              (secret, start, size) => window.rauhwpxCloudRuntime.readExportChunk(secret, start, size),
-              bootstrap,
-              offset,
-              Math.min(EXPORT_CHUNK_BYTES, metadata.size - offset),
+            const chunk = await withTimeout(
+              page.evaluate(
+                (secret, start, size) => window.rauhwpxCloudRuntime.readExportChunk(secret, start, size),
+                bootstrap,
+                offset,
+                Math.min(EXPORT_CHUNK_BYTES, metadata.size - offset),
+              ),
+              60_000,
+              'EXPORT_CHUNK_TIMEOUT',
+              'Cloud Studio export chunk read timed out',
             );
             const bytes = Buffer.from(chunk.dataBase64, 'base64');
             if (chunk.offset !== offset || chunk.size !== bytes.length || bytes.length < 1) {

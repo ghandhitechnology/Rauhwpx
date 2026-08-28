@@ -10,6 +10,7 @@ import { CloudClient } from '../desktop/cloud-client.mjs';
 import { CloudCoordinator } from '../desktop/cloud-coordinator.mjs';
 import { CloudHandoffStore } from '../desktop/cloud-handoff.mjs';
 import { normalizeCloudProfile } from '../desktop/cloud-profile.mjs';
+import { collectProviderAuth } from '../desktop/provider-auth.mjs';
 
 const SERVER_IDENTITY = generateKeyPairSync('ed25519');
 const SERVER_KEY = `ed25519:${SERVER_IDENTITY.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
@@ -149,7 +150,12 @@ test('desktop event watcher recovers after an extended network outage', async ()
 
 test('backend SSE payload advances the durable desktop handoff', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-sse-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-1',
@@ -215,7 +221,12 @@ test('backend SSE payload advances the durable desktop handoff', async (t) => {
 
 test('VPS restart can requeue a running durable handoff', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-requeue-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-1',
@@ -244,7 +255,12 @@ test('VPS restart can requeue a running durable handoff', async (t) => {
 
 test('command response advances state before its matching SSE event arrives', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-command-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-1',
@@ -295,7 +311,12 @@ test('command response advances state before its matching SSE event arrives', as
 
 test('queued message remains accepted when SSE wins the command response race', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-message-race-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so the cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-1', threadId: 'thread-1', documentId: 'document-1',
@@ -352,7 +373,12 @@ test('queued message remains accepted when SSE wins the command response race', 
 
 test('activation receipt skips historical staged events before watching live updates', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-activation-replay-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   let watchAfter = null;
   const coordinator = new CloudCoordinator({
@@ -505,7 +531,12 @@ test('verified result confirmation resumes after a crash boundary without redown
 
 test('cancelling during activation aborts the transfer and remotely cancels exactly once', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-cancel-race-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   let createdResolve;
   const created = new Promise((resolve) => { createdResolve = resolve; });
@@ -613,7 +644,12 @@ test('persisted transfer cancellation is remotely finalized after an app restart
 
 test('takeover waits for and verifies the frozen checkpoint and timeline boundary', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-takeover-race-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-1', threadId: 'thread-1', documentId: 'document-1',
@@ -756,7 +792,12 @@ test('cross-device takeover completion fails closed without a frozen operation r
 
 test('verified result confirmation retries online without another app restart', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-confirm-retry-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Watermark-only stream applies persist on a trailing debounce; wait for
+    // it so cleanup does not race the final atomic write.
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-1', threadId: 'thread-1', documentId: 'document-1',
@@ -803,3 +844,157 @@ test('verified result confirmation retries online without another app restart', 
 function createDigest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
+
+test('transfer seeds an env-only provider key before creating the remote session', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-seed-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const calls = [];
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      seedProviderCredentials: async (auth) => {
+        calls.push(['seed', auth]);
+        return { provider: auth.provider, authenticated: true };
+      },
+      transfer: async ({ provider }) => {
+        calls.push(['transfer', provider]);
+        return { id: 'cloud-1', status: 'queued', stateVersion: 1 };
+      },
+      watchSession: async () => {},
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+    collectProviderAuth: (provider) => collectProviderAuth(provider, {
+      vault: memoryVault(),
+      homeDir: path.join(directory, 'missing-home'),
+      cliRoot: path.join(directory, 'missing-cli'),
+      env: { OPENAI_API_KEY: 'sk-proj-codex' },
+    }),
+  });
+  t.after(() => coordinator.stop());
+  await coordinator.transfer({
+    threadId: 'thread-1', documentId: 'document-1',
+    document: { fileName: 'source.hwpx', bytes: new Uint8Array(Buffer.from('document')) },
+    timeline: {
+      schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(),
+      thread: {
+        id: 'thread-1', title: 'Task', createdAt: Date.now(), updatedAt: Date.now(),
+        agent: 'codex', model: 'gpt-5.6', effort: 'high', messages: [],
+      },
+    },
+    agent: 'codex', model: 'gpt-5.6', effort: 'high', workflow: 'direct', references: [],
+  }, { originSessionId: 'desktop-1' });
+  assert.deepEqual(calls, [
+    ['seed', { provider: 'codex', apiKey: 'sk-proj-codex', files: [] }],
+    ['transfer', 'codex'],
+  ]);
+});
+
+test('a PUT-only sandbox falls through from seed to transfer-time auth import', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-old-image-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const calls = [];
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      seedProviderCredentials: async () => {
+        calls.push(['seed']);
+        const error = new Error('Endpoint was not found');
+        error.status = 404;
+        error.code = 'NOT_FOUND';
+        throw error;
+      },
+      transfer: async ({ providerAuth }) => {
+        calls.push(['transfer', providerAuth]);
+        return { id: 'cloud-put-only', status: 'queued', stateVersion: 1 };
+      },
+      watchSession: async () => {},
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+    collectProviderAuth: async (provider) => ({
+      provider,
+      apiKey: null,
+      files: [{ path: '.codex/auth.json', content: '{"token":"oauth"}' }],
+    }),
+    collectImportedAuth: async () => null,
+  });
+  t.after(() => coordinator.stop());
+  const transferred = await coordinator.transfer({
+    threadId: 'thread-1', documentId: 'document-1',
+    document: { fileName: 'source.hwpx', bytes: new Uint8Array(Buffer.from('document')) },
+    timeline: {
+      schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(),
+      thread: {
+        id: 'thread-1', title: 'Task', createdAt: Date.now(), updatedAt: Date.now(),
+        agent: 'codex', model: 'gpt-5.6', effort: 'high', messages: [],
+      },
+    },
+    agent: 'codex', model: 'gpt-5.6', effort: 'high', workflow: 'direct', references: [],
+  }, { originSessionId: 'desktop-1' });
+  assert.equal(transferred.session.sessionId, 'cloud-put-only');
+  assert.deepEqual(calls, [
+    ['seed'],
+    ['transfer', {
+      secrets: {},
+      files: { '.codex/auth.json': '{"token":"oauth"}' },
+    }],
+  ]);
+});
+
+test('AUTH_REQUIRED fails the transfer once instead of retrying five times', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-auth-required-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-1',
+    threadId: 'thread-1',
+    documentId: 'document-1',
+    documentName: 'source.hwpx',
+    documentBytes: Buffer.from('document'),
+    timeline: {
+      schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(),
+      thread: {
+        id: 'thread-1', title: 'Task', createdAt: Date.now(), updatedAt: Date.now(),
+        agent: 'codex', model: 'gpt-5.6', effort: 'high', messages: [],
+      },
+    },
+    provider: 'codex',
+    limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  let transfers = 0;
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      transfer: async () => {
+        transfers += 1;
+        const error = new Error('codex must be authenticated on this VPS');
+        error.code = 'AUTH_REQUIRED';
+        throw error;
+      },
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(() => coordinator.stop());
+  await coordinator.start();
+  let record = null;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    record = await store.get(created.id);
+    if (record.state === 'failed') break;
+    await delay(10);
+  }
+  assert.equal(record.state, 'failed');
+  assert.match(record.error, /must be authenticated on this VPS/);
+  assert.doesNotMatch(record.error, /failed 5 times/);
+  assert.equal(transfers, 1);
+});

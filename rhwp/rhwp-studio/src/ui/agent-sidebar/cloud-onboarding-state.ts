@@ -1,4 +1,10 @@
-import type { CloudProfileDraft, CloudSnapshot } from '../../cloud/types.ts';
+import type {
+  CloudAppServerProvider,
+  CloudProfileDraft,
+  CloudSandboxSummary,
+  CloudServerMode,
+  CloudSnapshot,
+} from '../../cloud/types.ts';
 
 export type CloudSetupIntent = 'transfer' | 'manage';
 export type CloudSetupStage = 'installing';
@@ -20,7 +26,45 @@ export interface CloudSetupIssue {
   detail: string;
 }
 
+/** 실패한 단계가 남은 자원을 결정한다. 생성 실패는 남긴 것이 없고, 종료 실패는 유료 샌드박스를 남긴다. */
+export type SandboxFailurePhase = 'spawn' | 'teardown';
+
 export type CloudSetupState =
+  | {
+      kind: 'choose';
+      draft: CloudProfileDraft;
+      intent: CloudSetupIntent;
+      mode: CloudServerMode;
+      /** 놓고 온 유료 서버처럼 다음 화면까지 살아 있어야 하는 사실. */
+      notice?: string;
+    }
+  | {
+      kind: 'sandbox-intro';
+      draft: CloudProfileDraft;
+      intent: CloudSetupIntent;
+      provider: CloudAppServerProvider;
+    }
+  | {
+      kind: 'sandbox-unavailable';
+      draft: CloudProfileDraft;
+      intent: CloudSetupIntent;
+      provider: CloudAppServerProvider | null;
+    }
+  | { kind: 'sandbox-provisioning'; draft: CloudProfileDraft; intent: CloudSetupIntent }
+  | {
+      kind: 'sandbox-failed';
+      draft: CloudProfileDraft;
+      intent: CloudSetupIntent;
+      issue: CloudSetupIssue;
+      phase: SandboxFailurePhase;
+    }
+  | {
+      kind: 'sandbox-ready';
+      intent: CloudSetupIntent;
+      name: string;
+      sandbox: CloudSandboxSummary;
+    }
+  | { kind: 'sandbox-tearing-down'; intent: CloudSetupIntent; name: string }
   | { kind: 'intro'; draft: CloudProfileDraft; intent: CloudSetupIntent }
   | { kind: 'editing'; draft: CloudProfileDraft; intent: CloudSetupIntent; errors: CloudFieldErrors }
   | { kind: 'checking'; draft: CloudProfileDraft; intent: CloudSetupIntent }
@@ -146,9 +190,90 @@ export function validateCloudProfileDraft(
   return errors;
 }
 
+export function mapSandboxIssue(error: unknown): CloudSetupIssue {
+  const detail = error instanceof Error ? error.message : String(error);
+  const normalized = detail.toLowerCase();
+  if (/not configured|railway_token|railway_project_id|railway_environment_id/.test(normalized)) {
+    return {
+      title: '앱 제공 서버가 아직 준비되지 않았습니다',
+      guidance: '이 빌드에는 앱 서버 설정이 없습니다. 내 서버를 사용하거나 앱을 업데이트하세요.',
+      detail,
+    };
+  }
+  if (/cannot manage the/.test(normalized)) {
+    return {
+      title: '이 앱이 관리할 수 없는 샌드박스입니다',
+      guidance: '서버 종료로 연결을 놓은 뒤, 공급자 콘솔에서 남은 서버를 직접 삭제하세요.',
+      detail,
+    };
+  }
+  if (/does not include app-provided|provider_unavailable|unknown app server provider/.test(normalized)) {
+    return {
+      title: '이 빌드에는 앱 제공 서버가 없습니다',
+      guidance: '내 서버를 연결해 사용하세요.',
+      detail,
+    };
+  }
+  if (/rejected the configured api token|unauthorized/.test(normalized)) {
+    return {
+      title: '앱 서버 자격 증명이 거부되었습니다',
+      guidance: '앱 제공 서버를 사용할 수 없습니다. 잠시 후 다시 시도하거나 내 서버를 사용하세요.',
+      detail,
+    };
+  }
+  if (/unreachable|timed out|timeout|fetch failed|failed to fetch/.test(normalized)) {
+    return {
+      title: '앱 서버에 연결할 수 없습니다',
+      guidance: '네트워크 연결을 확인한 뒤 다시 시도하세요.',
+      detail,
+    };
+  }
+  if (/deployment|deploy|reports crashed|reports failed/.test(normalized)) {
+    return {
+      title: '샌드박스를 시작하지 못했습니다',
+      guidance: '잠시 후 다시 시도하세요. 계속 실패하면 내 서버를 사용하세요.',
+      detail,
+    };
+  }
+  if (/health|did not answer/.test(normalized)) {
+    return {
+      title: '샌드박스가 응답하지 않습니다',
+      guidance: '샌드박스를 다시 만들어 보세요.',
+      detail,
+    };
+  }
+  if (/before shutting it down|has_work/.test(normalized)) {
+    return {
+      title: '진행 중인 클라우드 작업이 있습니다',
+      guidance: '작업을 마치거나 취소한 뒤 샌드박스를 종료하세요.',
+      detail,
+    };
+  }
+  if (/shut down the app-provided sandbox|sandbox_still_active/.test(normalized)) {
+    return {
+      title: '앱 샌드박스를 먼저 종료하세요',
+      guidance: '앱 제공 서버를 종료한 뒤 내 서버를 연결하세요.',
+      detail,
+    };
+  }
+  if (/identity|signature|pinned/.test(normalized)) {
+    return {
+      title: '샌드박스 ID를 확인하지 못했습니다',
+      guidance: '샌드박스를 종료하고 다시 만드세요.',
+      detail,
+    };
+  }
+  return {
+    title: '앱 제공 서버를 준비하지 못했습니다',
+    guidance: '다시 시도하거나 내 서버를 사용하세요.',
+    detail,
+  };
+}
+
 export function mapCloudSetupIssue(error: unknown, transport: CloudProfileDraft['transport']['kind'] = 'tailscale'): CloudSetupIssue {
   const detail = error instanceof Error ? error.message : String(error);
   const normalized = detail.toLowerCase();
+  if (/shut down the app-provided sandbox|sandbox_still_active/.test(normalized)) return mapSandboxIssue(error);
   if (/permission denied|authentication failed|publickey/.test(normalized)) {
     return { title: 'SSH 인증에 실패했습니다', guidance: 'SSH agent에 키를 추가하거나 올바른 개인 키 파일을 선택하세요.', detail };
   }
@@ -197,21 +322,88 @@ export function mapCloudSetupIssue(error: unknown, transport: CloudProfileDraft[
 }
 
 export function snapshotProfile(snapshot: CloudSnapshot): CloudProfileDraft | undefined {
-  return snapshot.profile.kind === 'configured' ? defaultCloudProfileDraft(snapshot.profile.profile) : undefined;
+  return snapshot.profile.kind === 'configured' && snapshot.profile.mode === 'self-hosted'
+    ? defaultCloudProfileDraft(snapshot.profile.profile)
+    : undefined;
+}
+
+/** 설정을 마친 공급자를 먼저 고르고, 없으면 첫 공급자를 돌려 설정 안내를 보여준다. */
+export function appServerProvider(snapshot: CloudSnapshot): CloudAppServerProvider | null {
+  const providers = snapshot.server.providers;
+  return providers.find((provider) => provider.configured) ?? providers[0] ?? null;
+}
+
+export function snapshotSandbox(snapshot: CloudSnapshot): { name: string; sandbox: CloudSandboxSummary } | null {
+  return snapshot.profile.kind === 'configured' && snapshot.profile.mode === 'app-hosted'
+    ? { name: snapshot.profile.name, sandbox: snapshot.profile.sandbox }
+    : null;
+}
+
+function chooseState(snapshot: CloudSnapshot, intent: CloudSetupIntent, draft: CloudProfileDraft): CloudSetupState {
+  const preferred = snapshot.server.preferredMode
+    ?? (snapshot.server.providers.some((provider) => provider.configured) ? 'app-hosted' : 'self-hosted');
+  return { kind: 'choose', draft, intent, mode: preferred };
+}
+
+/**
+ * 저장된 연결이 이미 모드를 정했으면 모드 선택을 건너뛴다. 선택 화면은 아직 아무것도 고르지 않은
+ * 사용자에게만 의미가 있고, 연결이 끊긴 서버를 고치려던 사용자를 처음으로 되돌리면 안 된다.
+ */
+function entryState(snapshot: CloudSnapshot, intent: CloudSetupIntent, fallback?: CloudProfileDraft): CloudSetupState {
+  const connected = snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready';
+  const sandbox = snapshotSandbox(snapshot);
+  if (sandbox) {
+    const { lifecycle, message } = snapshot.server;
+    if (lifecycle === 'tearing-down') return { kind: 'sandbox-tearing-down', intent, name: sandbox.name };
+    if (lifecycle === 'provisioning') {
+      return { kind: 'sandbox-provisioning', draft: defaultCloudProfileDraft(fallback), intent };
+    }
+    if (connected && lifecycle !== 'error') {
+      return { kind: 'sandbox-ready', intent, name: sandbox.name, sandbox: sandbox.sandbox };
+    }
+    const detail = message ?? (snapshot.profile.kind === 'configured' ? snapshot.profile.message : null);
+    return {
+      kind: 'sandbox-failed',
+      draft: defaultCloudProfileDraft(fallback),
+      intent,
+      issue: mapSandboxIssue(new Error(detail ?? 'App sandbox is not ready')),
+      phase: 'spawn',
+    };
+  }
+  const profile = snapshotProfile(snapshot);
+  if (profile) return connected ? { kind: 'connected', profile, intent } : { kind: 'intro', draft: profile, intent };
+  if (snapshot.server.lifecycle === 'provisioning') {
+    return { kind: 'sandbox-provisioning', draft: defaultCloudProfileDraft(fallback), intent };
+  }
+  return chooseState(snapshot, intent, defaultCloudProfileDraft(fallback));
 }
 
 export function createCloudSetupState(snapshot: CloudSnapshot, intent: CloudSetupIntent): CloudSetupState {
-  const profile = snapshotProfile(snapshot);
-  if (profile && snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready') {
-    return { kind: 'connected', profile, intent };
-  }
-  return { kind: 'intro', draft: defaultCloudProfileDraft(profile), intent };
+  return entryState(snapshot, intent, snapshotProfile(snapshot));
 }
 
 export function reconcileCloudSetupState(state: CloudSetupState, snapshot: CloudSnapshot): CloudSetupState {
+  const sandbox = snapshotSandbox(snapshot);
+  const sandboxReady = Boolean(sandbox) && snapshot.profile.kind === 'configured'
+    && snapshot.profile.connection === 'ready' && snapshot.server.lifecycle !== 'error';
+  if (state.kind === 'sandbox-ready' || state.kind === 'sandbox-tearing-down') {
+    if (state.kind === 'sandbox-tearing-down' && snapshot.server.lifecycle === 'tearing-down') return state;
+    if (sandboxReady && sandbox) {
+      return state.kind === 'sandbox-ready'
+        && state.name === sandbox.name
+        && state.sandbox.sandboxId === sandbox.sandbox.sandboxId
+        ? state
+        : { kind: 'sandbox-ready', intent: state.intent, name: sandbox.name, sandbox: sandbox.sandbox };
+    }
+    return entryState(snapshot, state.intent, snapshotProfile(snapshot));
+  }
   if (state.kind !== 'connected') return state;
+  if (sandboxReady && sandbox) {
+    return { kind: 'sandbox-ready', intent: state.intent, name: sandbox.name, sandbox: sandbox.sandbox };
+  }
   const profile = snapshotProfile(snapshot);
-  return profile && snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready'
-    ? draftsEqual(profile, state.profile) ? state : { ...state, profile }
-    : { kind: 'intro', draft: defaultCloudProfileDraft(profile ?? state.profile), intent: state.intent };
+  if (profile && snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready') {
+    return draftsEqual(profile, state.profile) ? state : { ...state, profile };
+  }
+  return entryState(snapshot, state.intent, profile ?? state.profile);
 }

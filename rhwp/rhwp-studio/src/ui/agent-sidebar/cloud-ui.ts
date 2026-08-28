@@ -31,10 +31,18 @@ function formatBytes(bytes: number): string {
 }
 
 function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
   const minutes = Math.floor(ms / 60_000);
   const hours = Math.floor(minutes / 60);
   if (hours > 0) return `${hours}시간 ${minutes % 60}분`;
-  return `${Math.max(1, minutes)}분`;
+  if (seconds < 60) return `${Math.max(0, seconds)}초`;
+  return `${minutes}분`;
+}
+
+/** The desktop preload is the only source of live cloud snapshots. */
+function cloudCapable(): boolean {
+  const desktop = (globalThis as { rhwpDesktop?: { cloudGetState?: unknown } }).rhwpDesktop;
+  return typeof desktop?.cloudGetState === 'function';
 }
 
 function sessionIsActive(snapshot: CloudSnapshot): boolean {
@@ -46,6 +54,12 @@ function sessionIsActive(snapshot: CloudSnapshot): boolean {
 
 function cloudOwnsConversation(snapshot: CloudSnapshot): boolean {
   return snapshot.lease.owner === 'cloud';
+}
+
+function serverLabel(snapshot: CloudSnapshot): string {
+  return snapshot.profile.kind === 'configured' && snapshot.profile.mode === 'app-hosted'
+    ? '앱 제공 서버'
+    : '내 서버';
 }
 
 function sessionKindLabel(kind: CloudSnapshot['session']['kind']): string {
@@ -136,7 +150,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   panelHead.append(panelTitle, panelClose);
   const panelBody = el('div', 'ag-cloud-panel-body');
   const sessionPicker = el('label', 'ag-cloud-session-picker');
-  const sessionPickerLabel = el('span', 'ag-cloud-session-picker-label', 'VPS 작업');
+  const sessionPickerLabel = el('span', 'ag-cloud-session-picker-label', '클라우드 작업');
   const sessionSelect = el('select', 'ag-cloud-session-select') as HTMLSelectElement;
   sessionPicker.append(sessionPickerLabel, sessionSelect);
   const panelStatus = el('div', 'ag-cloud-panel-status');
@@ -221,6 +235,14 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     });
   }
 
+  function dismissSession(): void {
+    const session = snapshot.session;
+    if (session.kind !== 'failed' && session.kind !== 'cancelled') return;
+    void operation(async () => {
+      await deps.controller.dismissSession(session.sessionId);
+    });
+  }
+
   async function download(): Promise<void> {
     const session = snapshot.session;
     if (session.kind !== 'completed') return;
@@ -274,14 +296,17 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     switch (session.kind) {
       case 'idle':
         const profileReady = snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready';
+        const appHosted = snapshot.profile.kind === 'configured' && snapshot.profile.mode === 'app-hosted';
         panelStatus.textContent = profileReady
-          ? 'VPS가 준비되어 있습니다.'
+          ? appHosted ? '앱 제공 서버가 준비되어 있습니다.' : '내 서버가 준비되어 있습니다.'
           : snapshot.profile.kind === 'configured'
-            ? 'VPS 연결을 확인해야 합니다.'
-            : 'VPS 설정이 필요합니다.';
-        panelDetail.textContent = snapshot.profile.kind === 'configured'
-          ? `${snapshot.profile.profile.name} · ${snapshot.profile.profile.host}`
-          : 'SSH와 Tailscale 연결을 설정하세요.';
+            ? appHosted ? '앱 제공 서버 상태를 확인해야 합니다.' : 'VPS 연결을 확인해야 합니다.'
+            : 'Cloud 서버를 선택해야 합니다.';
+        panelDetail.textContent = snapshot.profile.kind !== 'configured'
+          ? '앱 제공 서버를 쓰거나 내 서버를 연결하세요.'
+          : snapshot.profile.mode === 'app-hosted'
+            ? `${snapshot.profile.name} · ${snapshot.profile.sandbox.host || snapshot.profile.sandbox.sandboxId}`
+            : `${snapshot.profile.profile.name} · ${snapshot.profile.profile.host}`;
         panelActions.append(action(profileReady ? '클라우드로 계속' : 'Cloud 설정', () => {
           const focusTrigger = panelTrigger ?? sidebarButton;
           closePanel();
@@ -312,7 +337,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelActions.append(action('취소', () => command('cancel')));
         break;
       case 'running':
-        panelStatus.textContent = session.currentActivity || 'VPS에서 작업 중입니다.';
+        panelStatus.textContent = session.currentActivity || `${serverLabel(snapshot)}에서 작업 중입니다.`;
         panelDetail.textContent = `${session.turn}/${session.turnLimit}턴 · ${formatDuration(session.elapsedMs)} / ${formatDuration(session.timeLimitMs)}`;
         panelActions.append(
           action('일시 중지', () => command('pause')),
@@ -362,10 +387,12 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelStatus.textContent = session.message;
         panelDetail.textContent = session.code;
         if (session.retryable) panelActions.append(action('새 클라우드 작업으로 다시 전송', deps.onRequestTransfer, 'ag-primary'));
+        panelActions.append(action('기록 지우기', dismissSession));
         break;
       case 'cancelled':
         panelStatus.textContent = '클라우드 작업을 취소했습니다.';
         panelDetail.textContent = '문서 편집 권한이 이 기기로 돌아왔습니다.';
+        panelActions.append(action('기록 지우기', dismissSession));
         break;
     }
   }
@@ -465,7 +492,14 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     render();
   });
   onboarding.sync(snapshot);
-  void deps.controller.refresh(selectedScope()).catch(() => { render(); });
+  void deps.controller.refresh(selectedScope()).catch((error) => {
+    render();
+    // A build without the desktop bridge stays quiet; a real cloud build must
+    // not hide a failed first refresh behind a permanently empty panel.
+    if (cloudCapable()) {
+      deps.onError(error instanceof Error ? error.message : String(error));
+    }
+  });
 
   return {
     sidebarButton,

@@ -30,7 +30,7 @@ test('cloud action is available in sidebar and fullscreen headers', () => {
   assert.match(onboarding, /controller\.pair\(pairingCode, draft\)/);
   assert.match(onboarding, /operationEpoch/);
   assert.match(onboarding, /node\.inert = true/);
-  assert.match(onboarding, /preserveOnOpen && state\?\.kind === 'install-failed'/);
+  assert.match(onboarding, /preserveOnOpen\s*\n?\s*&& \(state\?\.kind === 'install-failed' \|\| state\?\.kind === 'sandbox-failed'\)/);
   assert.match(onboarding, /연결 정보 수정/);
   assert.match(onboarding, /role', 'dialog'/);
   assert.match(onboarding, /aria-modal', 'true'/);

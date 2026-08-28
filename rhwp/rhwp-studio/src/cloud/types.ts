@@ -20,15 +20,47 @@ export interface CloudProfileDraft {
   serverPublicKey?: string;
 }
 
+export type CloudServerMode = 'self-hosted' | 'app-hosted';
+export type CloudConnectionState = 'unknown' | 'testing' | 'ready' | 'error';
+
+/** 앱이 제공하는 샌드박스의 수명주기. 사용자가 다음 행동을 고를 수 있는 단위로만 나눈다. */
+export type SandboxLifecycle = 'idle' | 'provisioning' | 'ready' | 'error' | 'tearing-down';
+
+export interface CloudSandboxSummary {
+  providerId: string;
+  sandboxId: string;
+  displayName: string;
+  region: string;
+  host: string;
+  createdAt: string;
+}
+
+export interface CloudAppServerProvider {
+  providerId: string;
+  displayName: string;
+  configured: boolean;
+  missingConfig: string[];
+}
+
+export interface CloudServerState {
+  mode: CloudServerMode | null;
+  preferredMode: CloudServerMode | null;
+  providers: CloudAppServerProvider[];
+  lifecycle: SandboxLifecycle;
+  message: string | null;
+}
+
+interface CloudProfileStateBase {
+  kind: 'configured';
+  connection: CloudConnectionState;
+  serviceVersion: string | null;
+  message: string | null;
+}
+
 export type CloudProfileState =
   | { kind: 'unconfigured' }
-  | {
-      kind: 'configured';
-      profile: CloudProfileDraft;
-      connection: 'unknown' | 'testing' | 'ready' | 'error';
-      serviceVersion: string | null;
-      message: string | null;
-    };
+  | (CloudProfileStateBase & { mode: 'self-hosted'; profile: CloudProfileDraft })
+  | (CloudProfileStateBase & { mode: 'app-hosted'; name: string; sandbox: CloudSandboxSummary });
 
 export interface CloudQueuedMessage {
   id: string;
@@ -116,10 +148,18 @@ export interface CloudResultSummary {
   preservedCopyName: string | null;
 }
 
+/** 철거 결과. 이 빌드가 다룰 수 없는 샌드박스는 연결만 놓고 원격 서버는 남는다. */
+export interface CloudSandboxOutcome {
+  removed: boolean;
+  unmanaged: boolean;
+}
+
 export interface CloudSnapshot {
   revision: number;
   available: boolean;
   profile: CloudProfileState;
+  server: CloudServerState;
+  sandbox?: CloudSandboxOutcome;
   lease: CloudDocumentLease;
   session: CloudSessionState;
   sessions: Exclude<CloudSessionState, { kind: 'idle' }>[];

@@ -106,10 +106,18 @@ async function commitStableBoundary({ client, checkpoint, timeline, turnNumber }
   return boundary;
 }
 
+let forwardFailures = 0;
+
 async function forwardEvent(client, event) {
   const type = event?.type === 'agent' ? 'agent.event' : String(event?.type ?? 'runtime.event')
     .toLowerCase().replace(/[^a-z0-9._-]/g, '-').slice(0, 64);
-  await client.event(type || 'runtime.event', event).catch(() => {});
+  await client.event(type || 'runtime.event', event).catch((error) => {
+    // Live activity is lossy by design, but repeated drops still leave a trace.
+    forwardFailures += 1;
+    if (forwardFailures === 1 || forwardFailures % 100 === 0) {
+      console.warn(`[worker] event forwarding failed ${forwardFailures} times: ${error?.message ?? error}`);
+    }
+  });
 }
 
 function resultName(documentName, extension) {
@@ -128,6 +136,7 @@ export async function runSession({
   credentials,
   client,
   createHarness = createStudioHarness,
+  sessionDisplay = null,
 }) {
   if (!manifest || typeof manifest !== 'object' || !manifest.sessionId || !manifest.provider) {
     throw runtimeError('MANIFEST_INVALID', 'Cloud worker manifest identity is incomplete');
@@ -250,14 +259,33 @@ export async function runSession({
       document,
       references,
       timeline,
+      displayEnv: sessionDisplay?.environment ?? null,
       onEvent: async (event) => {
+        if (event?.type?.startsWith?.('environment.')) recorder.recordEnvironmentEvent(event);
         recorder.consume(event);
         await forwardEvent(client, event);
       },
     });
+    if (sessionDisplay?.snapshot) {
+      recorder.recordEnvironmentEvent({
+        type: sessionDisplay.status === 'ready' ? 'environment.display_ready' : `environment.display_${sessionDisplay.status}`,
+        ...sessionDisplay.snapshot(),
+      });
+    }
     await harness.start({ history: recorder.history({ excludeTrailingUserText: stableRecovery ? null : initialGoal }) });
 
     while (!finishReady && turnNumber < maxTurns && Date.now() < deadline) {
+      if (sessionDisplay && sessionDisplay.status === 'error') {
+        const restarted = await sessionDisplay.restart({ reason: 'health-loop' });
+        recorder.recordEnvironmentEvent({
+          type: restarted.status === 'ready' ? 'environment.display_restarted' : 'environment.display_failed',
+          ...restarted,
+        });
+        await forwardEvent(client, {
+          type: restarted.status === 'ready' ? 'environment.display_restarted' : 'environment.display_failed',
+          ...restarted,
+        });
+      }
       for (const message of messages) {
         if (turnNumber >= maxTurns || Date.now() >= deadline) break;
         const content = String(message.content ?? '').trim();

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, dirname, extname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -54,7 +55,10 @@ import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 import { CloudClient } from './cloud-client.mjs';
 import { CloudCoordinator } from './cloud-coordinator.mjs';
 import { CloudHandoffStore } from './cloud-handoff.mjs';
+import { collectProviderAuth as collectImportedProviderAuth } from './cloud-provider-auth.mjs';
 import { CloudProvisioner } from './cloud-provisioner.mjs';
+import { createRailwayServerProvider } from './cloud-railway.mjs';
+import { collectProviderAuth } from './provider-auth.mjs';
 import { applyCloudRecovery } from './cloud-result.mjs';
 import { isNewerStableVersion, selectDebAsset } from './update-policy.mjs';
 import { deliverPlainTextPaste } from './plain-text-paste.mjs';
@@ -301,6 +305,9 @@ let desktopReady = false;
 let secretVault = null;
 let cloudCoordinator = null;
 let cloudBroadcastChain = Promise.resolve();
+const CLOUD_BROADCAST_COALESCE_MS = 100;
+let cloudBroadcastTimer = null;
+let cloudBroadcastPending = null;
 const pendingLaunches = [launchRequest({ argv: process.argv, source: 'initial' })];
 const runtimeDir = join(app.getPath('temp'), 'rauhwpx', 'runtime', launchId);
 const workDir = join(app.getPath('userData'), 'launch-work', launchId);
@@ -367,9 +374,21 @@ async function broadcastCloudEvent(payload) {
 }
 
 function queueCloudBroadcast(payload) {
-  cloudBroadcastChain = cloudBroadcastChain
-    .then(() => broadcastCloudEvent(payload))
-    .catch((error) => console.warn('[rauhwpx] cloud event broadcast failed:', error));
+  // Bursts (upload progress, agent deltas) collapse into one trailing
+  // broadcast per window; every payload carries the full snapshot, so only
+  // the latest matters.
+  cloudBroadcastPending = payload;
+  if (cloudBroadcastTimer) return;
+  cloudBroadcastTimer = setTimeout(() => {
+    cloudBroadcastTimer = null;
+    const latest = cloudBroadcastPending;
+    cloudBroadcastPending = null;
+    if (!latest) return;
+    cloudBroadcastChain = cloudBroadcastChain
+      .then(() => broadcastCloudEvent(latest))
+      .catch((error) => console.warn('[rauhwpx] cloud event broadcast failed:', error));
+  }, CLOUD_BROADCAST_COALESCE_MS);
+  cloudBroadcastTimer.unref?.();
 }
 
 function requireCloudCoordinator() {
@@ -1032,6 +1051,26 @@ ipcMain.handle('cloud:pair', async (event, payload) => {
   const session = sessionForEvent(event);
   return scopedCloudSnapshot(session, await requireCloudCoordinator().pair(payload));
 });
+ipcMain.handle('cloud:select-server-mode', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().selectServerMode(payload?.mode));
+});
+ipcMain.handle('cloud:spawn-sandbox', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().spawnAppServer({
+    providerId: payload?.providerId ?? null,
+  }));
+});
+ipcMain.handle('cloud:sandbox-status', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().appServerStatus());
+});
+ipcMain.handle('cloud:teardown-sandbox', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().teardownAppServer({
+    force: payload?.force === true,
+  }));
+});
 ipcMain.handle('cloud:transfer-intent', async (event, payload = {}) => {
   const session = sessionForEvent(event);
   const scope = normalizeCloudScope(payload);
@@ -1091,7 +1130,7 @@ ipcMain.handle('cloud:transfer', async (event, payload) => {
     throw new Error('Cloud agents require Full access');
   }
   if (session.cloudLocked) throw new Error('This document is already owned by a cloud session');
-  if (session.cloudTransferPromise) return session.cloudTransferPromise;
+  if (session.cloudTransferPromise) return scopedCloudSnapshot(session, await session.cloudTransferPromise);
   const lease = documentLeases.leaseForSession(session.sessionId);
   const transfer = requireCloudCoordinator().transfer(payload, {
     originSessionId: session.sessionId,
@@ -1119,6 +1158,11 @@ ipcMain.handle('cloud:transfer', async (event, payload) => {
 ipcMain.handle('cloud:command', async (event, payload) => {
   const session = sessionForEvent(event);
   const operation = await requireCloudCoordinator().command(payload);
+  return scopedCloudSnapshot(session, operation);
+});
+ipcMain.handle('cloud:dismiss-session', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const operation = await requireCloudCoordinator().dismissSession(payload);
   return scopedCloudSnapshot(session, operation);
 });
 ipcMain.handle('cloud:complete-takeover', async (event, payload) => {
@@ -1294,6 +1338,21 @@ if (!hasSingleInstanceLock) {
         knownHostsPath: join(app.getPath('userData'), 'cloud', 'ssh-known-hosts'),
       }),
       recoveryDir: join(app.getPath('userData'), 'cloud', 'recovery'),
+      appServers: [createRailwayServerProvider({
+        fetchImpl: (...args) => net.fetch(...args),
+        probeHealth: (endpoint, options) => cloudClient.probeEndpointHealth(endpoint, options),
+        acquireReceipt: (request) => cloudClient.bootstrapPairing(request),
+      })],
+      collectProviderAuth: (provider) => collectProviderAuth(provider, {
+        vault: secretVault,
+        homeDir: homedir(),
+      }),
+      collectImportedAuth: (provider) => collectImportedProviderAuth(provider, {
+        homeDir: homedir(),
+        env: process.env,
+        readSecret: (key) => secretVault.get(key),
+        readFileImpl: readFile,
+      }),
     });
     cloudCoordinator.on('event', queueCloudBroadcast);
     await cloudCoordinator.start();
@@ -1350,8 +1409,10 @@ if (!hasSingleInstanceLock) {
     if (teardownStarted) return;
     teardownStarted = true;
     quitting = true;
-    cloudCoordinator?.stop();
-    void hubOwner.teardown().finally(() => {
+    void Promise.allSettled([
+      cloudCoordinator?.stop(),
+      hubOwner.teardown(),
+    ]).finally(() => {
       teardownFinished = true;
       app.exit(0);
     });

@@ -5,16 +5,15 @@ import { access, copyFile, mkdir, mkdtemp, readlink, rename, rm, symlink } from 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CloudError, PROVIDERS } from './protocol.mjs';
+import {
+  PROVIDER_KEY_NAMES,
+  parseProviderSession,
+  writeProviderAuthFiles,
+} from './provider-credentials.mjs';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const lock = JSON.parse(readFileSync(path.resolve(directory, '../install/providers.lock.json'), 'utf8'));
-const KEY_NAMES = Object.freeze({
-  claude: 'ANTHROPIC_API_KEY',
-  codex: 'OPENAI_API_KEY',
-  pi: 'OPENROUTER_API_KEY',
-  grok: 'XAI_API_KEY',
-  cursor: 'CURSOR_API_KEY',
-});
+const KEY_NAMES = PROVIDER_KEY_NAMES;
 
 function run(command, args, { env, stdio = 'inherit' } = {}) {
   return new Promise((resolve, reject) => {
@@ -156,11 +155,29 @@ export class ProviderCliManager {
     return this.providerManager.probe(provider);
   }
 
+  async seed(provider, { apiKey = null, files = [] } = {}) {
+    assertProvider(provider);
+    if (apiKey !== null && String(apiKey).trim()) {
+      this.vault.set(provider, KEY_NAMES[provider], String(apiKey).trim());
+    }
+    writeProviderAuthFiles(this.config.providerAuthDirectory, provider, files);
+    return this.providerManager.probe(provider);
+  }
+
+  async seedSession(encoded = process.env.RAUHWpx_PROVIDER_SESSION) {
+    const session = parseProviderSession(encoded);
+    if (!session) return [];
+    const results = [];
+    for (const item of session.providers) {
+      results.push(await this.seed(item.provider, { files: item.files }));
+    }
+    return results;
+  }
+
   async login(provider, { apiKey = null } = {}) {
     const item = assertProvider(provider);
     if (apiKey !== null) {
-      this.vault.set(provider, KEY_NAMES[provider], apiKey.trim());
-      return this.providerManager.probe(provider);
+      return this.seed(provider, { apiKey });
     }
     if (provider === 'pi') {
       throw new CloudError('API_KEY_STDIN_REQUIRED', 'Pi login requires --api-key-stdin with an OpenRouter API key');

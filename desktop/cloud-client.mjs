@@ -1,10 +1,13 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { normalizeCloudProfile } from './cloud-profile.mjs';
+import { CLOUD_SERVER_MODES, normalizeCloudEndpoint, normalizeCloudProfile } from './cloud-profile.mjs';
 
 const PROFILE_SECRET = 'cloud.profile';
 const REFRESH_SECRET = 'cloud.refresh';
 const DEVICE_SECRET = 'cloud.device';
+const SERVER_MODE_SECRET = 'cloud.server-mode';
+const PAIRING_CODE_RE = /^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
+const SERVER_KEY_RE = /^ed25519:[A-Za-z0-9_-]{59}$/;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_RESULT_BYTES = 64 * 1024 * 1024;
 const MAX_TIMELINE_BYTES = 100 * 1024 * 1024;
@@ -15,12 +18,13 @@ const SSE_STREAM_DIGEST = digest(Buffer.from(SSE_STREAM_PROTOCOL));
 const RESPONSE_PROOF_CONTEXT = Symbol('rauhwpx-response-proof-context');
 
 export class CloudHttpError extends Error {
-  constructor(message, { status = 0, code = '', details = null } = {}) {
+  constructor(message, { status = 0, code = '', details = null, retryable = null } = {}) {
     super(message);
     this.name = 'CloudHttpError';
     this.status = status;
     this.code = code;
     this.details = details;
+    this.retryable = typeof retryable === 'boolean' ? retryable : null;
   }
 }
 
@@ -74,15 +78,27 @@ function joinEndpoint(endpoint, pathname) {
 async function responseJson(response) {
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > MAX_JSON_BYTES) {
-    throw new CloudHttpError('Cloud response is too large', { status: response.status });
+    throw new CloudHttpError('Cloud response is too large', {
+      status: response.status,
+      code: 'CLOUD_RESPONSE_TOO_LARGE',
+      retryable: false,
+    });
   }
   const text = await response.text();
   if (Buffer.byteLength(text) > MAX_JSON_BYTES) {
-    throw new CloudHttpError('Cloud response is too large', { status: response.status });
+    throw new CloudHttpError('Cloud response is too large', {
+      status: response.status,
+      code: 'CLOUD_RESPONSE_TOO_LARGE',
+      retryable: false,
+    });
   }
   if (!text) return {};
   try { return JSON.parse(text); } catch {
-    throw new CloudHttpError('Cloud returned invalid JSON', { status: response.status });
+    throw new CloudHttpError('Cloud returned invalid JSON', {
+      status: response.status,
+      code: 'CLOUD_RESPONSE_INVALID',
+      retryable: false,
+    });
   }
 }
 
@@ -278,7 +294,7 @@ export class CloudClient {
         this.#profile = profile;
         if (tokens) {
           this.#accessToken = tokens.accessToken;
-          this.#accessExpiresAt = Date.parse(tokens.accessExpiresAt) || Date.now() + 14 * 60_000;
+          this.#accessExpiresAt = Number(tokens.accessExpiresAt) || Date.parse(tokens.accessExpiresAt) || Date.now() + 14 * 60_000;
         } else if (!preserveCredentials) {
           this.#accessToken = '';
           this.#accessExpiresAt = 0;
@@ -308,6 +324,124 @@ export class CloudClient {
 
   async isPaired() {
     return Boolean(await this.#vault.get(REFRESH_SECRET));
+  }
+
+  async assertTransferReady() {
+    let profile;
+    try {
+      profile = await this.#requiredProfile();
+    } catch (error) {
+      if (error?.code === 'CLOUD_NOT_CONFIGURED') throw error;
+      throw new CloudHttpError('Stored cloud profile could not be read', {
+        code: 'CLOUD_PROFILE_UNREADABLE',
+        retryable: false,
+        details: { cause: String(error?.message ?? error) },
+      });
+    }
+    let paired;
+    try {
+      paired = await this.isPaired();
+    } catch (error) {
+      throw new CloudHttpError('Cloud pairing credentials could not be read', {
+        code: 'CLOUD_CREDENTIALS_UNAVAILABLE',
+        retryable: false,
+        details: { cause: String(error?.message ?? error) },
+      });
+    }
+    if (!paired) {
+      throw new CloudHttpError('This device must be paired with the VPS', {
+        status: 401,
+        code: 'PAIRING_REQUIRED',
+        retryable: false,
+      });
+    }
+    const health = await this.health(profile);
+    if (health?.protocolVersion !== 1) {
+      throw new CloudHttpError('Cloud server protocol is not compatible with this app', {
+        code: 'CLOUD_PROTOCOL_INCOMPATIBLE',
+        retryable: false,
+        details: { expected: 1, received: health?.protocolVersion ?? null },
+      });
+    }
+    return { profile, health };
+  }
+
+  /** 사용자가 마지막으로 고른 서버 방식을 기억해 다음 설정을 그 화면에서 시작한다. */
+  async loadServerMode() {
+    const stored = await this.#vault.get(SERVER_MODE_SECRET).catch(() => null);
+    return CLOUD_SERVER_MODES.includes(stored) ? stored : null;
+  }
+
+  async saveServerMode(mode) {
+    if (!CLOUD_SERVER_MODES.includes(mode)) throw new CloudHttpError('Unsupported cloud server mode');
+    await this.#vault.set(SERVER_MODE_SECRET, mode);
+    return mode;
+  }
+
+  /** 샌드박스를 철거할 때 프로필과 자격 증명을 함께 지운다. */
+  async forgetProfile() {
+    return this.#withCredentialLock(async () => {
+      this.#profileGeneration += 1;
+      try {
+        this.#profile = null;
+        this.#accessToken = '';
+        this.#accessExpiresAt = 0;
+        await Promise.all([
+          this.#vault.delete(PROFILE_SECRET).catch(() => false),
+          this.#vault.delete(REFRESH_SECRET).catch(() => false),
+          this.#vault.delete(DEVICE_SECRET).catch(() => false),
+        ]);
+        return true;
+      } finally {
+        this.#profileGeneration += 1;
+      }
+    });
+  }
+
+  /** 핀 없는 엔드포인트의 health를 읽어 샌드박스가 살아났는지 확인한다. */
+  async probeEndpointHealth(endpoint, { signal } = {}) {
+    return this.#request('/v1/health', {
+      auth: false,
+      profile: { endpoint: normalizeCloudEndpoint(endpoint), serverPublicKey: '' },
+      timeoutMs: 10_000,
+      signal,
+    });
+  }
+
+  /**
+   * SSH가 없는 앱 제공 샌드박스는 배포 시 주입한 부트스트랩 토큰으로 첫 페어링 코드를 받는다.
+   * 응답은 방금 만든 nonce에 묶인 서버 서명으로 검증하므로 재생된 영수증은 통과하지 못한다.
+   */
+  async bootstrapPairing({ endpoint, bootstrapToken, deviceName = '', serverPublicKey, signal } = {}) {
+    const normalizedEndpoint = normalizeCloudEndpoint(endpoint);
+    if (!SERVER_KEY_RE.test(String(serverPublicKey ?? ''))) {
+      throw new CloudHttpError('App sandbox did not present a valid server identity', {
+        code: 'SERVER_IDENTITY_INVALID',
+      });
+    }
+    if (!/^[A-Za-z0-9_-]{32,256}$/.test(String(bootstrapToken ?? ''))) {
+      throw new CloudHttpError('App sandbox bootstrap token is invalid', { code: 'BOOTSTRAP_TOKEN_INVALID' });
+    }
+    const profile = { endpoint: normalizedEndpoint, serverPublicKey };
+    const result = await this.#request('/v1/pairing/bootstrap', {
+      method: 'POST',
+      auth: false,
+      profile,
+      headers: { authorization: `Bearer ${bootstrapToken}` },
+      body: { deviceName: String(deviceName ?? '').slice(0, 120) },
+      signal,
+    });
+    if (result.serverPublicKey !== serverPublicKey) {
+      throw new CloudHttpError('App sandbox identity changed during pairing', {
+        code: 'SERVER_IDENTITY_MISMATCH',
+      });
+    }
+    if (!PAIRING_CODE_RE.test(String(result.code ?? ''))) {
+      throw new CloudHttpError('App sandbox returned an invalid pairing code', {
+        code: 'BOOTSTRAP_RECEIPT_INVALID',
+      });
+    }
+    return { endpoint: normalizedEndpoint, serverPublicKey, pairingCode: result.code };
   }
 
   async deviceId() {
@@ -355,12 +489,41 @@ export class CloudClient {
     };
   }
 
-  async profile() {
-    return this.#request('/v1/profile');
+  async profile({ signal } = {}) {
+    return this.#request('/v1/profile', { signal });
+  }
+
+  async seedProviderCredentials({ provider, apiKey = null, files = [] } = {}) {
+    return this.#request(`/v1/providers/${encodeURIComponent(provider)}/credentials`, {
+      method: 'POST',
+      body: {
+        ...(apiKey ? { apiKey } : {}),
+        ...(files.length ? { files } : {}),
+      },
+    });
   }
 
   async createPairingCode(deviceName = '') {
     return this.#request('/v1/pairing', { method: 'POST', body: { deviceName } });
+  }
+
+  async putProviderAuth(provider, providerAuth, { signal } = {}) {
+    try {
+      return await this.#request(`/v1/providers/${encodeURIComponent(provider)}/auth`, {
+        method: 'PUT',
+        signal,
+        body: {
+          secrets: providerAuth?.secrets ?? {},
+          files: providerAuth?.files ?? {},
+        },
+      });
+    } catch (error) {
+      if (error instanceof CloudHttpError && (
+        error.status === 404
+        || (error.status === 501 && error.code === 'AUTH_IMPORT_UNAVAILABLE')
+      )) return null;
+      throw error;
+    }
   }
 
   async transfer({
@@ -375,6 +538,7 @@ export class CloudClient {
     timeline = [],
     resources = [],
     limits,
+    providerAuth = null,
     onProgress = () => {},
     onSessionCreated = () => {},
     onSessionActivated = () => {},
@@ -384,6 +548,26 @@ export class CloudClient {
     if (!document.length) throw new Error('A saved document is required for cloud transfer');
     if (document.length > MAX_RESULT_BYTES) throw new Error('Document exceeds the 64 MiB cloud limit');
     if (!validPortableTimeline(timeline)) throw new Error('Portable cloud timeline is invalid');
+    if (providerAuth && (Object.keys(providerAuth.secrets ?? {}).length || Object.keys(providerAuth.files ?? {}).length)) {
+      const imported = await this.putProviderAuth(provider, providerAuth, { signal });
+      if (imported === null) {
+        // A POST-only sandbox may already have accepted the coordinator's seed.
+        // Only reject after both import protocols are unavailable and the remote
+        // still reports that the selected provider is unauthenticated.
+        const remote = await this.profile({ signal });
+        const status = remote?.providers?.find((item) => item.provider === provider);
+        if (!status?.authenticated) {
+          throw new CloudHttpError(
+            `${provider} is signed in on this computer, but this cloud server cannot import that login. Update or replace it with a compatible cloud runtime, then try again.`,
+            {
+              status: 409,
+              code: 'SANDBOX_AUTH_UNSUPPORTED',
+              details: status ?? null,
+            },
+          );
+        }
+      }
+    }
     const documentUpload = await this.uploadBlob({
       bytes: document,
       name: documentName,
@@ -659,7 +843,19 @@ export class CloudClient {
         failures = 0;
       } catch (error) {
         if (signal?.aborted || error?.name === 'AbortError') break;
+        // A missing session or a broken stream proof never recovers by retrying;
+        // surface it instead of looping in silence.
+        if (error?.status === 404
+          || error?.code === 'SESSION_NOT_FOUND'
+          || error?.code === 'SSE_PROOF_INVALID'
+          || error?.code === 'SSE_PAYLOAD_INVALID') {
+          throw error;
+        }
         failures += 1;
+        // Long outages (sleep/wake, tunnel drops) must recover, so the cap is
+        // generous; a permanently failing handler still terminates with an
+        // error instead of looping in silence.
+        if (failures >= 20) throw error;
       }
       await delay(Math.min(30_000, retryBaseMs * (2 ** failures)), undefined, { signal }).catch(() => {});
     }
@@ -692,7 +888,12 @@ export class CloudClient {
 
   async #requiredProfile() {
     const profile = await this.loadProfile();
-    if (!profile) throw new Error('Cloud VPS is not configured');
+    if (!profile) {
+      throw new CloudHttpError('Cloud server is not configured', {
+        code: 'CLOUD_NOT_CONFIGURED',
+        retryable: false,
+      });
+    }
     return profile;
   }
 
@@ -704,7 +905,7 @@ export class CloudClient {
 
   async #acceptTokens(tokens) {
     this.#accessToken = tokens.accessToken;
-    this.#accessExpiresAt = Date.parse(tokens.accessExpiresAt) || Date.now() + 14 * 60_000;
+    this.#accessExpiresAt = Number(tokens.accessExpiresAt) || Date.parse(tokens.accessExpiresAt) || Date.now() + 14 * 60_000;
     await this.#vault.set(REFRESH_SECRET, tokens.refreshToken);
   }
 
@@ -717,6 +918,7 @@ export class CloudClient {
         if (!refreshToken) throw new CloudHttpError('This device must be paired with the VPS', {
           status: 401,
           code: 'PAIRING_REQUIRED',
+          retryable: false,
         });
         const tokens = await this.#request('/v1/token/refresh', {
           method: 'POST',
@@ -774,7 +976,10 @@ export class CloudClient {
       if (options.signal?.aborted) abort();
     }
     const timeout = timeoutMs > 0
-      ? setTimeout(() => controller.abort(new Error('Cloud request timed out')), timeoutMs)
+      ? setTimeout(() => controller.abort(new CloudHttpError('Cloud request timed out', {
+        code: 'ETIMEDOUT',
+        retryable: true,
+      })), timeoutMs)
       : null;
     let response;
     try {

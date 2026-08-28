@@ -68,7 +68,15 @@ export function createSecretVault({ filePath, safeStorage, platform = process.pl
       entries = raw?.version === 1 && raw?.secrets && typeof raw.secrets === 'object'
         ? { ...raw.secrets }
         : {};
-    } catch {}
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        // Keep the unreadable file around instead of letting the next persist() overwrite it.
+        const corrupt = `${filePath}.corrupt-${Date.now()}`;
+        await fs.rename(filePath, corrupt).catch(() => {});
+        console.warn(`[rauhwpx] cloud credential store was unreadable; moved it to ${path.basename(corrupt)}`);
+      }
+      entries = {};
+    }
   }
 
   function persist() {

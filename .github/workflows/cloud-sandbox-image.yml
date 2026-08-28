@@ -1,0 +1,104 @@
+name: Publish cloud sandbox edge image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Optional immutable GHCR tag for this build
+        required: false
+        type: string
+  push:
+    tags:
+      - 'cloud-sandbox-v*'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: cloud-sandbox-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish Railway sandbox image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            cloud/package-lock.json
+            cloud/install/provider-runtime/package-lock.json
+            rhwp/rhwp-studio/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build cloud runtime assets
+        run: |
+          wasm-pack build rhwp --target web
+          cargo build --manifest-path rhwp/Cargo.toml --release --locked --bin rhwp
+          npm --prefix cloud ci
+          npm --prefix rhwp/rhwp-studio ci
+          bash cloud/install/build-runtime-assets.sh
+
+      - name: Install live display test dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends x11-apps
+
+      - name: Verify cloud runtime
+        run: npm --prefix cloud test
+
+      - name: Build and smoke-test sandbox image
+        run: |
+          podman build --tag rauhwpx-cloud-sandbox-edge --file cloud/install/Containerfile.sandbox cloud
+          podman run --rm --entrypoint node rauhwpx-cloud-sandbox-edge \
+            --input-type=module -e 'import { parseConfig } from "/app/src/config.mjs";
+          const config = parseConfig(process.env);
+          if (config.runner !== "local") throw new Error("sandbox image must use the local runner");
+          if (config.workerUid !== 1001) throw new Error("sandbox image must drop workers to uid 1001");'
+          podman run --rm --entrypoint bash rauhwpx-cloud-sandbox-edge -lc '
+            set -e
+            mkdir -p /tmp/smoke-home /tmp/smoke-tmp
+            chown -R 1001:1001 /tmp/smoke-home /tmp/smoke-tmp
+            setpriv --reuid=1001 --regid=1001 --clear-groups \
+              env HOME=/tmp/smoke-home TMPDIR=/tmp/smoke-tmp \
+              node /app/document-runtime/smoke.mjs
+          '
+
+      - name: Publish edge and immutable images
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rauhwpx-cloud"
+          immutable_tag="$REQUESTED_TAG"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == cloud-sandbox-v* ]]; then
+            immutable_tag="${GITHUB_REF_NAME#cloud-sandbox-v}"
+          fi
+          if [[ -n "$immutable_tag" && ! "$immutable_tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "Invalid immutable image tag: $immutable_tag" >&2
+            exit 1
+          fi
+          printf '%s' "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          if [[ -n "$immutable_tag" ]]; then
+            podman tag rauhwpx-cloud-sandbox-edge "$image:$immutable_tag"
+            podman push "$image:$immutable_tag"
+          fi
+          podman tag rauhwpx-cloud-sandbox-edge "$image:edge"
+          podman push "$image:edge"

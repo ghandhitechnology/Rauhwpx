@@ -1,13 +1,16 @@
 import './cloud-onboarding.css';
 
 import type { CloudController } from '../../cloud/desktop-cloud.ts';
-import type { CloudProfileDraft, CloudSnapshot } from '../../cloud/types.ts';
+import type { CloudProfileDraft, CloudServerMode, CloudSnapshot } from '../../cloud/types.ts';
 import {
+  appServerProvider,
   createCloudSetupState,
   defaultCloudProfileDraft,
   mapCloudSetupIssue,
+  mapSandboxIssue,
   reconcileCloudSetupState,
   snapshotProfile,
+  snapshotSandbox,
   validateCloudProfileDraft,
   type CloudProfileField,
   type CloudSetupIntent,
@@ -42,8 +45,17 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-function hasDraft(state: CloudSetupState): state is Exclude<CloudSetupState, { kind: 'connected' }> {
-  return state.kind !== 'connected';
+type DraftlessKind = 'connected' | 'sandbox-ready' | 'sandbox-tearing-down';
+
+function hasDraft(state: CloudSetupState): state is Exclude<CloudSetupState, { kind: DraftlessKind }> {
+  return state.kind !== 'connected' && state.kind !== 'sandbox-ready' && state.kind !== 'sandbox-tearing-down';
+}
+
+function operationActive(state: CloudSetupState | null): boolean {
+  return state?.kind === 'installing'
+    || state?.kind === 'pairing'
+    || state?.kind === 'sandbox-provisioning'
+    || state?.kind === 'sandbox-tearing-down';
 }
 
 export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboarding {
@@ -89,7 +101,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   document.body.appendChild(overlay);
 
   const settingsElement = el('section', 'ag-settings-section ag-cloud-settings');
-  const settingsTitle = el('h3', 'ag-settings-section-title', 'Cloud VPS');
+  const settingsTitle = el('h3', 'ag-settings-section-title', 'Cloud 서버');
   const settingsCard = el('div', 'ag-cloud-settings-card');
   const settingsIcon = el('span', 'ag-cloud-settings-icon');
   settingsIcon.appendChild(createIcon('cloud'));
@@ -111,7 +123,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
 
   function setState(next: CloudSetupState, announcement = ''): void {
     state = next;
-    deps.onSetupStateChange(next.kind === 'installing' || next.kind === 'pairing');
+    deps.onSetupStateChange(operationActive(next));
     if (announcement) liveStatus.textContent = announcement;
     renderDialog();
   }
@@ -140,7 +152,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
 
   function currentDraft(): CloudProfileDraft {
     if (!state) return defaultCloudProfileDraft(snapshotProfile(snapshot));
-    return state.kind === 'connected' ? defaultCloudProfileDraft(state.profile) : state.draft;
+    if (state.kind === 'connected') return defaultCloudProfileDraft(state.profile);
+    if (!hasDraft(state)) return defaultCloudProfileDraft(snapshotProfile(snapshot));
+    return state.draft;
   }
 
   function resetConditionalDrafts(draft: CloudProfileDraft): void {
@@ -160,8 +174,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     setModalIsolation(false);
     const focusTarget = trigger;
     trigger = null;
-    const operationActive = state?.kind === 'installing' || state?.kind === 'pairing';
-    if (operationActive) preserveOnOpen = true;
+    if (operationActive(state)) preserveOnOpen = true;
     else {
       operationEpoch += 1;
       if (!preserveOnOpen) state = null;
@@ -385,22 +398,292 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     }
   }
 
+  async function selectMode(mode: CloudServerMode): Promise<void> {
+    if (!state || state.kind !== 'choose') return;
+    state = { ...state, mode };
+    renderDialog();
+    await deps.controller.selectServerMode(mode).catch(() => {
+      liveStatus.textContent = '선택한 서버 방식을 저장하지 못했습니다. 다시 시도해 주세요.';
+    });
+  }
+
+  function openSandboxStep(draft: CloudProfileDraft, intent: CloudSetupIntent): void {
+    const provider = appServerProvider(snapshot);
+    if (!provider || !provider.configured) {
+      setState(
+        { kind: 'sandbox-unavailable', draft, intent, provider },
+        '앱 제공 서버를 사용할 수 없습니다.',
+      );
+      return;
+    }
+    setState({ kind: 'sandbox-intro', draft, intent, provider });
+  }
+
+  async function spawnSandbox(): Promise<void> {
+    if (!state || (state.kind !== 'sandbox-intro' && state.kind !== 'sandbox-failed')) return;
+    const { draft, intent } = state;
+    const providerId = state.kind === 'sandbox-intro' ? state.provider.providerId : undefined;
+    const operation = beginOperation();
+    setState({ kind: 'sandbox-provisioning', draft, intent }, '앱 제공 서버를 준비하고 있습니다.');
+    try {
+      const next = await deps.controller.spawnSandbox(providerId);
+      if (!operationIsCurrent(operation)) return;
+      const ready = snapshotSandbox(next);
+      if (!ready) {
+        setState({
+          kind: 'sandbox-failed',
+          draft,
+          intent,
+          issue: mapSandboxIssue(new Error(next.server.message ?? 'App sandbox is not ready')),
+          phase: 'spawn',
+        }, '앱 제공 서버를 준비하지 못했습니다.');
+        return;
+      }
+      setState(
+        { kind: 'sandbox-ready', intent, name: ready.name, sandbox: ready.sandbox },
+        '앱 제공 서버가 준비되었습니다.',
+      );
+    } catch (error) {
+      if (!operationIsCurrent(operation)) return;
+      setState({
+        kind: 'sandbox-failed',
+        draft,
+        intent,
+        issue: mapSandboxIssue(error),
+        phase: 'spawn',
+      }, '앱 제공 서버를 준비하지 못했습니다.');
+    }
+  }
+
+  async function teardownSandbox(): Promise<void> {
+    if (!state || (state.kind !== 'sandbox-ready' && state.kind !== 'sandbox-failed')) return;
+    const { intent } = state;
+    const name = state.kind === 'sandbox-ready' ? state.name : snapshotSandbox(snapshot)?.name ?? '앱 제공 서버';
+    const draft = state.kind === 'sandbox-failed' ? state.draft : defaultCloudProfileDraft(snapshotProfile(snapshot));
+    const operation = beginOperation();
+    setState({ kind: 'sandbox-tearing-down', intent, name }, '앱 제공 서버를 종료하고 있습니다.');
+    try {
+      const next = await deps.controller.teardownSandbox();
+      if (!operationIsCurrent(operation)) return;
+      const released = next.sandbox?.unmanaged === true;
+      const settled = createCloudSetupState(next, intent);
+      setState(
+        released && settled.kind === 'choose'
+          ? { ...settled, notice: `${name}의 연결만 놓았습니다. 남은 서버는 공급자 콘솔에서 직접 삭제하세요.` }
+          : settled,
+        released
+          ? '연결을 놓았습니다. 남은 서버는 공급자 콘솔에서 직접 삭제하세요.'
+          : '앱 제공 서버를 종료했습니다.',
+      );
+    } catch (error) {
+      if (!operationIsCurrent(operation)) return;
+      setState({
+        kind: 'sandbox-failed',
+        draft,
+        intent,
+        issue: mapSandboxIssue(error),
+        phase: 'teardown',
+      }, '앱 제공 서버를 종료하지 못했습니다.');
+    }
+  }
+
+  /** 공급자에게 직접 물어 화면을 되살린다. 실패 화면에 갇힌 사용자가 앱을 다시 시작하지 않아도 되게 한다. */
+  async function refreshSandbox(): Promise<void> {
+    if (!state || (state.kind !== 'sandbox-ready' && state.kind !== 'sandbox-failed')) return;
+    const { intent } = state;
+    const draft = state.kind === 'sandbox-failed' ? state.draft : defaultCloudProfileDraft(snapshotProfile(snapshot));
+    const phase = state.kind === 'sandbox-failed' ? state.phase : 'spawn';
+    const operation = beginOperation();
+    liveStatus.textContent = '앱 제공 서버 상태를 확인하고 있습니다.';
+    try {
+      const next = await deps.controller.sandboxStatus();
+      if (!operationIsCurrent(operation)) return;
+      setState(createCloudSetupState(next, intent), '앱 제공 서버 상태를 확인했습니다.');
+    } catch (error) {
+      if (!operationIsCurrent(operation)) return;
+      setState({ kind: 'sandbox-failed', draft, intent, issue: mapSandboxIssue(error), phase },
+        '앱 제공 서버 상태를 확인하지 못했습니다.');
+    }
+  }
+
+  function serverOption(
+    mode: CloudServerMode,
+    heading: string,
+    text: string,
+    selected: boolean,
+    note = '',
+  ): HTMLButtonElement {
+    const option = el('button', 'ag-cloud-setup-option') as HTMLButtonElement;
+    option.type = 'button';
+    option.dataset.serverMode = mode;
+    option.setAttribute('role', 'radio');
+    option.setAttribute('aria-checked', String(selected));
+    if (selected) option.classList.add('ag-selected');
+    const copy = el('div', 'ag-cloud-setup-option-copy');
+    copy.append(el('strong', '', heading), el('p', '', text));
+    if (note) copy.appendChild(el('span', 'ag-cloud-setup-option-note', note));
+    option.append(copy);
+    option.addEventListener('click', () => { void selectMode(mode); });
+    return option;
+  }
+
   function renderDialog(): void {
     if (!state) return;
     body.replaceChildren();
     footer.replaceChildren();
     closeButton.textContent = '';
     closeButton.appendChild(createIcon('close'));
-    const operationActive = state.kind === 'installing' || state.kind === 'pairing';
-    closeButton.setAttribute('aria-label', operationActive ? '설정을 숨기고 작업 계속' : 'Cloud 설정 닫기');
-    dialog.setAttribute('aria-busy', String(state.kind === 'checking' || state.kind === 'installing' || state.kind === 'pairing'));
+    const busy = operationActive(state);
+    closeButton.setAttribute('aria-label', busy ? '설정을 숨기고 작업 계속' : 'Cloud 설정 닫기');
+    dialog.setAttribute('aria-busy', String(busy || state.kind === 'checking'));
 
     const back = button('뒤로');
-    const cancel = button(operationActive ? '숨기기' : '취소');
+    const cancel = button(busy ? '숨기기' : '취소');
     cancel.addEventListener('click', () => close());
     closeButton.onclick = () => close();
 
-    if (state.kind === 'intro') {
+    if (state.kind === 'choose') {
+      const { draft, intent, mode } = state;
+      const provider = appServerProvider(snapshot);
+      title.textContent = 'Cloud 서버 선택';
+      body.append(description('에이전트가 앱을 닫아도 계속 작업할 서버를 고르세요. 나중에 바꿀 수 있습니다.'));
+      if (state.notice) body.append(callout('cloud', '남은 서버를 확인하세요', state.notice));
+      const options = el('div', 'ag-cloud-setup-options');
+      options.setAttribute('role', 'radiogroup');
+      options.setAttribute('aria-label', 'Cloud 서버 선택');
+      options.append(
+        serverOption(
+          'app-hosted',
+          '앱에서 제공하는 서버',
+          '앱이 관리하는 샌드박스를 즉시 만들어 사용합니다. 준비할 것이 없습니다.',
+          mode === 'app-hosted',
+          provider
+            ? provider.configured
+              ? `${provider.displayName} 사용 가능`
+              : '이 빌드에서는 아직 사용할 수 없습니다'
+            : '이 빌드에는 포함되지 않았습니다',
+        ),
+        serverOption(
+          'self-hosted',
+          '내 서버 사용',
+          '보유한 Ubuntu 또는 Debian VPS에 개인 Cloud 환경을 설치합니다.',
+          mode === 'self-hosted',
+          'SSH와 비밀번호 없는 sudo가 필요합니다',
+        ),
+      );
+      body.appendChild(options);
+      const primary = button('계속', 'primary');
+      primary.addEventListener('click', () => {
+        if (mode === 'app-hosted') openSandboxStep(draft, intent);
+        else setState({ kind: 'intro', draft, intent });
+      });
+      footer.append(cancel, primary);
+    } else if (state.kind === 'sandbox-intro') {
+      const { draft, intent, provider } = state;
+      title.textContent = '앱 제공 서버 사용';
+      body.append(
+        description('앱이 관리하는 샌드박스를 만들고 이 기기를 자동으로 연결합니다. 준비할 것은 없습니다.'),
+        callout('cloud', provider.displayName, '문서와 작업 상태는 앱이 운영하는 샌드박스로 전송되고, 종료하면 함께 지워집니다.'),
+      );
+      back.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
+      const primary = button('서버 만들기', 'primary');
+      primary.addEventListener('click', () => { void spawnSandbox(); });
+      footer.append(back, cancel, primary);
+    } else if (state.kind === 'sandbox-unavailable') {
+      const { draft, intent, provider } = state;
+      title.textContent = '앱 제공 서버를 사용할 수 없습니다';
+      body.append(
+        description('이 빌드에는 앱 제공 서버 설정이 없습니다. 내 서버를 연결하면 지금 바로 사용할 수 있습니다.'),
+        callout(
+          'cloud',
+          provider ? `${provider.displayName} 설정 필요` : '앱 제공 서버 없음',
+          provider?.missingConfig.length
+            ? `운영자가 ${provider.missingConfig.join(', ')}을 설정해야 합니다.`
+            : '앱을 업데이트하거나 내 서버를 사용하세요.',
+        ),
+      );
+      back.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
+      const primary = button('내 서버 사용', 'primary');
+      primary.addEventListener('click', () => setState({ kind: 'intro', draft, intent }));
+      footer.append(back, cancel, primary);
+    } else if (state.kind === 'sandbox-provisioning') {
+      title.textContent = '앱 제공 서버 준비 중';
+      body.append(
+        description('샌드박스를 만들고 이 기기를 연결하고 있습니다. 이 창을 숨겨도 작업은 계속됩니다.'),
+        el('div', 'ag-cloud-setup-indeterminate'),
+        el('p', 'ag-cloud-setup-wait', '보통 1분 안에 끝납니다.'),
+      );
+      footer.append(cancel);
+    } else if (state.kind === 'sandbox-tearing-down') {
+      title.textContent = '앱 제공 서버 종료 중';
+      body.append(
+        description(`${state.name}을 종료하고 저장된 연결 정보를 지우고 있습니다.`),
+        el('div', 'ag-cloud-setup-indeterminate'),
+      );
+      footer.append(cancel);
+    } else if (state.kind === 'sandbox-failed') {
+      const { draft, intent, issue, phase } = state;
+      const live = Boolean(snapshotSandbox(snapshot));
+      title.textContent = phase === 'teardown'
+        ? '앱 제공 서버를 종료하지 못했습니다'
+        : '앱 제공 서버를 준비하지 못했습니다';
+      body.append(
+        description(phase === 'teardown'
+          ? '샌드박스가 아직 남아 있습니다. 문제를 해결한 뒤 다시 종료하세요.'
+          : '다시 시도하거나 내 서버를 연결해 계속할 수 있습니다.'),
+        callout('cloud', issue.title, issue.guidance),
+        issueDetails(issue),
+      );
+      footer.append(cancel);
+      const refresh = button('상태 확인');
+      refresh.addEventListener('click', () => { void refreshSandbox(); });
+      if (phase === 'teardown') {
+        footer.append(refresh);
+        const teardown = button('다시 종료', 'danger');
+        teardown.addEventListener('click', () => { void teardownSandbox(); });
+        footer.append(teardown);
+        const backToChoice = button('서버 다시 선택', 'primary');
+        backToChoice.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
+        footer.append(backToChoice);
+      } else {
+        const useOwn = button('내 서버 사용');
+        useOwn.addEventListener('click', () => setState({ kind: 'intro', draft, intent }));
+        footer.append(useOwn);
+        if (live) {
+          footer.append(refresh);
+          const teardown = button('서버 종료', 'danger');
+          teardown.addEventListener('click', () => { void teardownSandbox(); });
+          footer.append(teardown);
+        }
+        const retry = button('다시 시도', 'primary');
+        retry.addEventListener('click', () => { void spawnSandbox(); });
+        footer.append(retry);
+      }
+    } else if (state.kind === 'sandbox-ready') {
+      const { intent, name, sandbox } = state;
+      title.textContent = '앱 제공 서버가 준비되었습니다';
+      body.append(
+        callout('check', name, sandbox.host || sandbox.sandboxId),
+        description('이제 작업을 Cloud로 보내면 앱을 닫아도 앱 샌드박스에서 에이전트가 계속 작업합니다.'),
+      );
+      if (snapshot.server.message) {
+        body.appendChild(callout('cloud', '서버 상태', snapshot.server.message));
+      }
+      const refresh = button('상태 확인');
+      refresh.addEventListener('click', () => { void refreshSandbox(); });
+      const teardown = button('서버 종료', 'danger');
+      teardown.addEventListener('click', () => { void teardownSandbox(); });
+      footer.append(refresh);
+      const primary = button(intent === 'transfer' ? 'Cloud로 계속' : '완료', 'primary');
+      primary.addEventListener('click', () => {
+        if (intent === 'transfer') {
+          close(false);
+          deps.onCloseSettings();
+          deps.onRequestTransfer();
+        } else close(true);
+      });
+      footer.append(teardown, primary);
+    } else if (state.kind === 'intro') {
       const { draft, intent } = state;
       const usesTailscale = draft.transport.kind === 'tailscale';
       title.textContent = '내 VPS에서 Cloud 시작하기';
@@ -425,7 +708,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       primary.addEventListener('click', () => setState({ kind: 'editing', draft, intent, errors: {} }));
       const existing = button('이미 설치한 환경 연결');
       existing.addEventListener('click', () => setState({ kind: 'existing', draft, intent, errors: {}, pairingCode: '' }));
-      footer.append(existing, primary);
+      back.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'self-hosted' }));
+      footer.append(back, existing, primary);
     } else if (state.kind === 'editing') {
       title.textContent = 'VPS 연결 정보';
       body.append(description(state.draft.transport.kind === 'tailscale'
@@ -466,7 +750,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         'primary',
       );
       retry.addEventListener('click', () => {
-        if (!state || state.kind === 'connected') return;
+        if (!state || !hasDraft(state)) return;
         if (installFailure) {
           if (state.kind === 'install-failed' && state.retry === 'pair') {
             setState({
@@ -585,9 +869,17 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       return;
     }
     if (snapshot.profile.kind === 'unconfigured') {
-      settingsStatus.textContent = '설정되지 않음';
-      settingsDetail.textContent = '내 VPS에서 에이전트를 계속 실행합니다.';
+      const provider = appServerProvider(snapshot);
       settingsAction.textContent = '설정';
+      if (snapshot.server.lifecycle === 'provisioning') {
+        settingsStatus.textContent = '서버 준비 중';
+        settingsDetail.textContent = '앱 제공 서버를 만들고 있습니다.';
+        return;
+      }
+      settingsStatus.textContent = '설정되지 않음';
+      settingsDetail.textContent = provider?.configured
+        ? '앱 제공 서버 또는 내 서버에서 에이전트를 계속 실행합니다.'
+        : '내 VPS에서 에이전트를 계속 실행합니다.';
       return;
     }
     const labels = {
@@ -596,18 +888,31 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       error: '연결에 문제가 있습니다',
       unknown: '연결 상태 확인 필요',
     } as const;
-    settingsStatus.textContent = labels[snapshot.profile.connection];
-    settingsDetail.textContent = `${snapshot.profile.profile.name}, ${snapshot.profile.profile.host}`;
+    const lifecycleLabels = {
+      provisioning: '서버 준비 중',
+      'tearing-down': '서버 종료 중',
+      error: '서버에 문제가 있습니다',
+    } as const;
+    const lifecycle = snapshot.server.lifecycle;
+    const sandboxLabel = lifecycle === 'provisioning' || lifecycle === 'tearing-down' || lifecycle === 'error'
+      ? lifecycleLabels[lifecycle]
+      : null;
+    settingsStatus.textContent = snapshot.profile.mode === 'app-hosted' && sandboxLabel
+      ? sandboxLabel
+      : labels[snapshot.profile.connection];
+    settingsDetail.textContent = snapshot.profile.mode === 'app-hosted'
+      ? `앱 제공 서버 · ${snapshot.profile.name}${snapshot.profile.sandbox.host ? `, ${snapshot.profile.sandbox.host}` : ''}`
+      : `내 서버 · ${snapshot.profile.profile.name}, ${snapshot.profile.profile.host}`;
     settingsAction.textContent = '관리';
   }
 
   function open(intent: CloudSetupIntent, nextTrigger: HTMLElement): void {
     trigger = nextTrigger;
-    const operationActive = state?.kind === 'installing' || state?.kind === 'pairing';
-    const preservedFailure = preserveOnOpen && state?.kind === 'install-failed';
-    if (!operationActive && !preservedFailure) {
+    const preservedFailure = preserveOnOpen
+      && (state?.kind === 'install-failed' || state?.kind === 'sandbox-failed');
+    if (!operationActive(state) && !preservedFailure) {
       state = createCloudSetupState(snapshot, intent);
-      resetConditionalDrafts(state.kind === 'connected' ? state.profile : state.draft);
+      resetConditionalDrafts(hasDraft(state) ? state.draft : currentDraft());
     }
     preserveOnOpen = false;
     visible = true;
