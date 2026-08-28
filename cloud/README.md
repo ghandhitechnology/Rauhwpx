@@ -90,3 +90,7 @@ Provider credentials cannot be entered interactively in a sandbox. The entrypoin
 ## Worker boundary
 
 The public listener rejects worker routes. Each sandbox receives a unique token and a mode-0600 Unix control socket. The worker downloads only its session blobs, verifies each digest, and runs in a read-only rootless container with private networking, bounded CPU, memory, pids, workspace tmpfs, and unrestricted outbound connections. Each stable turn commits the exported document and portable timeline through one SQLite transaction before pause, takeover, or completion can revoke the worker. The headless Studio runtime implements `document-runtime/run.mjs` according to `document-runtime/README.md`.
+
+### Session virtual desktop
+
+Every cloud worker session starts one Xvfb display (`SessionDisplay`) owned by the worker uid. Computer-use capable providers see that `DISPLAY` when the display is `ready`. `environment_screenshot` writes a PNG under the session work directory (inside `RHWP_IMAGE_ROOTS`) so `insert_image` can place it in the open HWP document. Display start or crash failures are fail-soft: document tools keep running. The screenshot directory is capped (20 files / 32 MB). There is no live Studio viewer of the virtual desktop — agents inspect the screen through screenshots.
