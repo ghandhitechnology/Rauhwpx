@@ -30,7 +30,7 @@ use crate::model::control::Control;
 use crate::model::footnote::{FootnoteShape, NumberFormat};
 use crate::model::header_footer::MasterPage;
 use crate::model::page::{PageBorderBasis, PageBorderFill};
-use crate::model::paragraph::Paragraph;
+use crate::model::paragraph::{LineSeg, Paragraph};
 use crate::model::shape::{
     Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, ShapeObject, SizeCriterion,
     TextWrap, VertAlign, VertRelTo,
@@ -74,6 +74,26 @@ fn inline_control_line_index(para: &Paragraph, control_index: usize) -> usize {
         .find(|(_, ls)| (ls.text_start as usize) <= ctrl_text_pos)
         .map(|(i, _)| i)
         .unwrap_or(0)
+}
+
+/// 머리말/꼬리말 텍스트 전용 밴드의 내용 높이.
+///
+/// [#6186 후속] 문단마다 `line_height` 최댓값만 쓰면 줄바꿈된 문단은 한 줄로
+/// 잡혀 CENTER/BOTTOM 여백이 과대해진다. wrap-zone 세그먼트는 같은 줄에 여러
+/// 개가 있으므로, FIRST_SEGMENT 가 있으면 줄 시작만 합산하고 없으면 세그먼트
+/// 전체를 한 줄로 본다.
+fn header_footer_content_height_px(hf_paragraphs: &[Paragraph], dpi: f64) -> f64 {
+    hf_paragraphs
+        .iter()
+        .map(|para| {
+            let segs = &para.line_segs;
+            let has_line_starts = segs.iter().any(LineSeg::is_first_segment);
+            segs.iter()
+                .filter(|seg| !has_line_starts || seg.is_first_segment())
+                .map(|seg| hwpunit_to_px(seg.line_height, dpi))
+                .sum::<f64>()
+        })
+        .sum()
 }
 
 /// [PR #17] 호스트 문단이 이 페이지에서 이미 조판되었는지 (= 인라인 객체를 줄 안에
@@ -2819,11 +2839,7 @@ impl LayoutEngine {
         } else {
             0
         };
-        let content_h: f64 = hf_paragraphs
-            .iter()
-            .filter_map(|para| para.line_segs.iter().map(|seg| seg.line_height).max())
-            .map(|lh| hwpunit_to_px(lh, self.dpi))
-            .sum();
+        let content_h = header_footer_content_height_px(hf_paragraphs, self.dpi);
         // 정렬 기준은 **문서가 선언한 밴드 높이**(HWPX subList `textHeight`)다.
         // 공유 `layout.footer_area` 는 아래 여백까지 품고 있고(그 rect 는 쪽 계산에도
         // 쓰여 건드리면 쪽수가 흔들린다 — issue_1733 등 8핀 실측), 한글의 세로 정렬은

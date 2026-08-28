@@ -27,22 +27,37 @@ use rhwp::renderer::DEFAULT_DPI;
 
 /// 이슈 문서와 같은 선언 밴드 높이(2834 HU ≈ 37.79px @96dpi).
 const BAND_HEIGHT_HU: u32 = 2834;
+/// 줄바꿈 회귀용 — 두 줄(2200 HU)보다 높고 footer_area(A4 기본 4252 HU)보다 낮음.
+const MULTILINE_BAND_HEIGHT_HU: u32 = 4000;
 /// 이슈 문서와 같은 줄 높이(1100 HU ≈ 14.67px). BOTTOM 정렬 여백 ≈ 23px.
 const LINE_HEIGHT_HU: i32 = 1100;
 
 fn footer_with_bottom_align() -> DocumentCore {
+    footer_with_bottom_align_lines(1, BAND_HEIGHT_HU)
+}
+
+fn footer_with_wrapped_bottom_align() -> DocumentCore {
+    footer_with_bottom_align_lines(2, MULTILINE_BAND_HEIGHT_HU)
+}
+
+fn footer_with_bottom_align_lines(line_count: usize, band_height_hu: u32) -> DocumentCore {
     let mut core = DocumentCore::new_empty();
     core.create_blank_document_native().expect("blank");
     core.create_header_footer_native(0, false, 0)
         .expect("create footer");
-    core.insert_text_in_header_footer_native(0, false, 0, 0, 0, "2 - N")
+    let text = if line_count > 1 {
+        "첫째줄\n둘째줄"
+    } else {
+        "2 - N"
+    };
+    core.insert_text_in_header_footer_native(0, false, 0, 0, 0, text)
         .expect("footer text");
 
     let mut ir = core.document().clone();
     for para in &mut ir.sections[0].paragraphs {
         for ctrl in &mut para.controls {
             if let Control::Footer(footer) = ctrl {
-                apply_bottom_band(footer);
+                apply_bottom_band(footer, line_count, band_height_hu);
             }
         }
     }
@@ -50,25 +65,20 @@ fn footer_with_bottom_align() -> DocumentCore {
     core
 }
 
-fn apply_bottom_band(footer: &mut Footer) {
+fn apply_bottom_band(footer: &mut Footer, line_count: usize, band_height_hu: u32) {
     footer.list_attr = 2 << 21;
-    footer.text_height = BAND_HEIGHT_HU;
+    footer.text_height = band_height_hu;
     footer.text_width = 48188;
     for para in &mut footer.paragraphs {
-        if para.line_segs.is_empty() {
-            para.line_segs.push(LineSeg {
+        para.line_segs = (0..line_count)
+            .map(|i| LineSeg {
+                text_start: i as u32 * 4,
                 line_height: LINE_HEIGHT_HU,
                 text_height: LINE_HEIGHT_HU,
+                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
                 ..Default::default()
-            });
-        } else {
-            for seg in &mut para.line_segs {
-                seg.line_height = LINE_HEIGHT_HU;
-                if seg.text_height <= 0 {
-                    seg.text_height = LINE_HEIGHT_HU;
-                }
-            }
-        }
+            })
+            .collect();
     }
 }
 
@@ -83,14 +93,40 @@ fn footer_ir(core: &DocumentCore) -> &Footer {
     panic!("꼬리말 컨트롤이 없다");
 }
 
-fn expected_line_top(core: &DocumentCore, footer_node: &RenderNode) -> f64 {
-    let footer = footer_ir(core);
-    let content_h: f64 = footer
+fn content_height_px(footer: &Footer) -> f64 {
+    footer
+        .paragraphs
+        .iter()
+        .map(|para| {
+            let segs = &para.line_segs;
+            let has_line_starts = segs.iter().any(LineSeg::is_first_segment);
+            segs.iter()
+                .filter(|seg| !has_line_starts || seg.is_first_segment())
+                .map(|seg| hwpunit_to_px(seg.line_height, DEFAULT_DPI))
+                .sum::<f64>()
+        })
+        .sum()
+}
+
+fn max_only_content_height_px(footer: &Footer) -> f64 {
+    footer
         .paragraphs
         .iter()
         .filter_map(|para| para.line_segs.iter().map(|seg| seg.line_height).max())
         .map(|lh| hwpunit_to_px(lh, DEFAULT_DPI))
-        .sum();
+        .sum()
+}
+
+fn expected_line_top(core: &DocumentCore, footer_node: &RenderNode) -> f64 {
+    let footer = footer_ir(core);
+    let content_h = content_height_px(footer);
+    let band_h = hwpunit_to_px(footer.text_height as i32, DEFAULT_DPI).min(footer_node.bbox.height);
+    footer_node.bbox.y + (band_h - content_h).max(0.0)
+}
+
+fn max_only_line_top(core: &DocumentCore, footer_node: &RenderNode) -> f64 {
+    let footer = footer_ir(core);
+    let content_h = max_only_content_height_px(footer);
     let band_h = hwpunit_to_px(footer.text_height as i32, DEFAULT_DPI).min(footer_node.bbox.height);
     footer_node.bbox.y + (band_h - content_h).max(0.0)
 }
@@ -110,6 +146,18 @@ fn first_line_top(node: &RenderNode) -> Option<f64> {
         .chain(own)
         .fold(None, |acc: Option<f64>, top| {
             Some(acc.map_or(top, |best: f64| best.min(top)))
+        })
+}
+
+fn last_line_bottom(node: &RenderNode) -> Option<f64> {
+    let own = matches!(node.node_type, RenderNodeType::TextLine(_))
+        .then_some(node.bbox.y + node.bbox.height);
+    node.children
+        .iter()
+        .filter_map(last_line_bottom)
+        .chain(own)
+        .fold(None, |acc: Option<f64>, bottom| {
+            Some(acc.map_or(bottom, |best: f64| best.max(bottom)))
         })
 }
 
@@ -192,4 +240,45 @@ fn issue_6186_footer_vertalign_survives_hwpx_roundtrip() {
     );
     assert_eq!(footer.text_height, BAND_HEIGHT_HU);
     assert_footer_bottom_aligned(&again);
+}
+
+/// 한 문단에 줄이 둘이면 `content_h` 는 줄 높이 합이어야 한다. 문단 max() 만
+/// 쓰면 BOTTOM 여백이 한 줄분 과대해져 마지막 줄이 선언 밴드를 넘는다.
+#[test]
+fn issue_6186_multiline_footer_sums_every_rendered_line() {
+    let core = footer_with_wrapped_bottom_align();
+    let footer = footer_ir(&core);
+    assert_eq!(footer.paragraphs[0].line_segs.len(), 2, "한 문단 두 줄");
+    assert_eq!(footer.text_height, MULTILINE_BAND_HEIGHT_HU);
+
+    let page = core.build_page_render_tree(0).expect("page 1 render tree");
+    let node = footer_node(&page.root).expect("꼬리말 노드");
+    let line_top = first_line_top(node).expect("꼬리말 줄");
+    let expected = expected_line_top(&core, node);
+    let max_only = max_only_line_top(&core, node);
+
+    assert!(
+        (max_only - expected).abs() > 8.0,
+        "max() 계약과 줄 합 계약이 갈라져야 회귀를 잠글 수 있다 — \
+         합 {expected:.1}, max {max_only:.1}"
+    );
+    assert!(
+        (line_top - expected).abs() <= 2.0,
+        "줄바꿈 꼬리말은 모든 줄 높이를 합산해 정렬해야 한다 — 줄 위끝 {line_top:.1} \
+         (기대 {expected:.1}, max-only {max_only:.1})"
+    );
+    assert!(
+        (line_top - max_only).abs() > 8.0,
+        "한 줄 max 여백으로 내려가면 안 된다 — 줄 위끝 {line_top:.1}, max-only {max_only:.1}"
+    );
+
+    let band_bottom = node.bbox.y
+        + hwpunit_to_px(MULTILINE_BAND_HEIGHT_HU as i32, DEFAULT_DPI).min(node.bbox.height);
+    if let Some(last_bottom) = last_line_bottom(node) {
+        assert!(
+            last_bottom <= band_bottom + 2.0,
+            "마지막 줄이 선언 밴드를 넘으면 안 된다 — 줄 아래끝 {last_bottom:.1}, \
+             밴드 아래끝 {band_bottom:.1}"
+        );
+    }
 }
