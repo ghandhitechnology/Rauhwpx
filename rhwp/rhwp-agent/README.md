@@ -200,8 +200,11 @@ contents remain local in the writing-style app-data directory.
 
 Studio starts a chat with `workflow: "direct" | "plan"`. It can send
 `chat-workflow-set`, `chat-plan-approve`, and `chat-plan-request-changes` while
-the chat is idle. The hub emits `workflow-changed`, `plan-ready`,
-`plan-approved`, `plan-invalidated`, and `implementation-started`.
+the chat is idle. During planning and awaiting-approval, Studio does not lock
+the live document; after a user edit, `chat-document-saved` notifies the hub so
+it can inject a live-document follow-up (queued until the current turn is idle).
+The hub emits `workflow-changed`, `plan-ready`, `plan-approved`,
+`plan-invalidated`, and `implementation-started`.
 
 `present_implementation_plan` accepts `goal`, `title`, `summary`,
 `assumptions`, `decisions`, `steps`, `files`, `validation`, `risks`, and

@@ -142,7 +142,14 @@ export function assertToolCapability(tool: string, capability?: ToolCapabilityCo
       'Raw engine edits commit immediately and bypass the user’s review gate, so they are unavailable in the 안전 permission profile. Use the staged semantic write tools instead, or ask the user to switch the chat to 전체 접근.',
     );
   }
-  if (!isDocumentWriteTool(tool) || capability?.workflow !== 'plan') return;
+  if (!isDocumentWriteTool(tool)) return;
+  if (capability?.workflow === 'question') {
+    throw new AgentToolError(
+      'QUESTION_MODE_READ_ONLY',
+      'Document-write tools are disabled in question mode. Switch to /plan to brainstorm or /build to edit.',
+    );
+  }
+  if (capability?.workflow !== 'plan') return;
   if (capability.phase !== 'implementing' || capability.activePhase !== 'implementing') {
     throw new AgentToolError(
       'PLAN_MODE_READ_ONLY',
