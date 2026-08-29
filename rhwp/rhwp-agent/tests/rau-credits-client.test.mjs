@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createRauCreditsClient, storeRauApiKey } from '../rau-credits-client.mjs';
+import { createRauCreditsClient, storeRauAccessToken } from '../rau-credits-client.mjs';
 
 function jsonResponse(body, { ok = true, status = 200 } = {}) {
   return { ok, status, json: async () => body };
@@ -11,7 +11,7 @@ test('Rau credit polling survives transient connectivity failures', async () => 
   const responses = [
     new TypeError('network down'),
     jsonResponse({ status: 'pending' }),
-    jsonResponse({ status: 'ready', apiKey: 'sk-or-v1-ready' }),
+    jsonResponse({ status: 'ready', accessToken: 'rau_v1_ready' }),
   ];
   let clock = 0;
   const client = createRauCreditsClient({
@@ -25,7 +25,7 @@ test('Rau credit polling survives transient connectivity failures', async () => 
     sleep: async (ms) => { clock += ms; },
   });
 
-  assert.deepEqual(await client.redeem('device-1'), { key: 'sk-or-v1-ready', email: null });
+  assert.deepEqual(await client.redeem('device-1'), { key: 'rau_v1_ready', email: null });
   assert.equal(clock, 2_000);
 });
 
@@ -35,17 +35,17 @@ test('Rau redeem hands the logged-in account email to the key store', async () =
     baseUrl: 'https://credits.rau.test',
     fetchImpl: async () => jsonResponse({
       status: 'ready',
-      apiKey: 'sk-or-v1-ready',
+      accessToken: 'rau_v1_ready',
       email: 'andy@example.com',
     }),
   });
   const redeemed = await client.redeem('device-1');
-  const status = await storeRauApiKey(async (key, opts = {}) => {
+  const status = await storeRauAccessToken(async (key, opts = {}) => {
     stored.push({ key, account: opts.account ?? null });
     return { setupComplete: true };
   }, redeemed.key, { account: redeemed.email });
   assert.deepEqual(status, { setupComplete: true });
-  assert.deepEqual(stored, [{ key: 'sk-or-v1-ready', account: 'andy@example.com' }]);
+  assert.deepEqual(stored, [{ key: 'rau_v1_ready', account: 'andy@example.com' }]);
 });
 
 test('Rau credit acknowledgement is sent only after local setup can succeed', async () => {
@@ -65,17 +65,17 @@ test('Rau credit acknowledgement is sent only after local setup can succeed', as
   }]);
 });
 
-test('new Rau keys are retried while OpenRouter propagates them', async () => {
+test('new Rau access tokens are retried while proxy state propagates', async () => {
   const delays = [];
   let attempts = 0;
-  const status = await storeRauApiKey(async (key) => {
+  const status = await storeRauAccessToken(async (key) => {
     attempts += 1;
-    assert.equal(key, 'sk-or-v1-new');
+    assert.equal(key, 'rau_v1_new');
     if (attempts < 3) {
       throw Object.assign(new Error('not ready'), { code: 'OPENROUTER_KEY_INVALID' });
     }
     return { keyConfigured: true };
-  }, 'sk-or-v1-new', {
+  }, 'rau_v1_new', {
     sleep: async (ms) => { delays.push(ms); },
   });
 
@@ -84,16 +84,42 @@ test('new Rau keys are retried while OpenRouter propagates them', async () => {
   assert.deepEqual(delays, [250, 500]);
 });
 
-test('Rau key setup does not retry storage failures', async () => {
+test('Rau token setup does not retry storage failures', async () => {
   let attempts = 0;
   await assert.rejects(
-    storeRauApiKey(async () => {
+    storeRauAccessToken(async () => {
       attempts += 1;
       throw Object.assign(new Error('vault failed'), { code: 'SECRET_STORE_FAILED' });
-    }, 'sk-or-v1-new', { sleep: async () => {} }),
+    }, 'rau_v1_new', { sleep: async () => {} }),
     { code: 'SECRET_STORE_FAILED' },
   );
   assert.equal(attempts, 1);
+});
+
+test('Rau client exposes the proxy URL and sends the current token for replacement and revocation', async () => {
+  const calls = [];
+  const client = createRauCreditsClient({
+    baseUrl: 'https://credits.rau.test/',
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url, method: init.method, authorization: init.headers?.Authorization ?? null });
+      return jsonResponse({ revoked: true, id: 'next' });
+    },
+  });
+  assert.equal(client.openRouterBaseUrl, 'https://credits.rau.test/v1/openrouter');
+  await client.createDeviceSession({ replaceAccessToken: 'rau_v1_old' });
+  await client.revokeAccessToken('rau_v1_old');
+  assert.deepEqual(calls, [
+    {
+      url: 'https://credits.rau.test/v1/device-sessions',
+      method: 'POST',
+      authorization: 'Bearer rau_v1_old',
+    },
+    {
+      url: 'https://credits.rau.test/v1/access/revoke',
+      method: 'POST',
+      authorization: 'Bearer rau_v1_old',
+    },
+  ]);
 });
 
 test('Rau credit requests time out while reading the response body', async () => {

@@ -670,6 +670,36 @@ test('Rau profile shares the Pi prefix but keeps a separate secret and locked ca
   await fs.rm(rauRoot, { recursive: true, force: true });
 });
 
+test('proxy-backed Rau drops legacy provider keys and persists only revocable Rau tokens', async () => {
+  const rootDir = await tmpRoot();
+  const secretStore = createMemorySecretStore({ [RAU_SECRET_ID]: 'sk-or-v1-legacy-exposed' });
+  const manager = await createPiManager({
+    rootDir,
+    openRouter: fakeOpenRouter(),
+    secretStore,
+    secretId: RAU_SECRET_ID,
+    lockedModels: RAU_LOCKED_MODELS,
+    skipLegacyKey: true,
+    providerBaseUrl: 'https://credits.rau.test/v1/openrouter',
+    credentialPrefix: 'rau_v1_',
+  }).init();
+
+  assert.equal(manager.apiKey(), null);
+  assert.equal(await secretStore.get(RAU_SECRET_ID), null);
+  assert.equal((await manager.status()).setupComplete, false);
+  const clearedModels = await readJson(manager.modelsPath);
+  assert.equal(clearedModels.providers.openrouter.apiKey, undefined);
+  assert.equal(clearedModels.providers.openrouter.baseUrl, 'https://credits.rau.test/v1/openrouter');
+
+  const connected = await manager.setApiKey('rau_v1_account_b', { account: 'b@example.com' });
+  assert.equal(connected.setupComplete, true);
+  assert.equal(connected.account, 'b@example.com');
+  assert.equal(await secretStore.get(RAU_SECRET_ID), 'rau_v1_account_b');
+  await assert.rejects(() => manager.setApiKey('sk-or-v1-not-allowed'), { code: 'OPENROUTER_KEY_INVALID' });
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
 test('clearing an API key reports vault deletion failure and clears memory', async () => {
   const rootDir = await tmpRoot();
   let stored = null;
