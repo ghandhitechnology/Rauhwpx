@@ -163,7 +163,8 @@ export function defaultRauRoot(env = process.env, platform = process.platform, h
  *           now?: () => number, openRouter?: ReturnType<typeof createOpenRouter>,
  *           npmCommand?: string, nodeCommand?: string, packageSpec?: string, platform?: string,
  *           baseEnv?: NodeJS.ProcessEnv, secretStore?: object, secretId?: string,
- *           lockedModels?: readonly object[] | null, skipLegacyKey?: boolean }} [deps]
+ *           lockedModels?: readonly object[] | null, skipLegacyKey?: boolean,
+ *           providerBaseUrl?: string, credentialPrefix?: string|null }} [deps]
  */
 export function createPiManager({
   rootDir = defaultPiRoot(),
@@ -181,6 +182,8 @@ export function createPiManager({
   secretId = OPENROUTER_SECRET_ID,
   lockedModels = null,
   skipLegacyKey = false,
+  providerBaseUrl = 'https://openrouter.ai/api/v1',
+  credentialPrefix = null,
 } = {}) {
   const prefixDir = prefixDirOverride ?? path.join(rootDir, 'prefix');
   const locked = Array.isArray(lockedModels) && lockedModels.length > 0
@@ -289,6 +292,7 @@ export function createPiManager({
   }
 
   async function readConfig() {
+    let discardedCredential = false;
     try {
       const raw = JSON.parse(await fs.readFile(configPath, 'utf8'));
       const models = (Array.isArray(raw?.models) ? raw.models : [])
@@ -327,6 +331,18 @@ export function createPiManager({
       // Preserve access until the desktop vault can migrate it; new keys are never stored here.
       apiKey = legacyKey;
     }
+    // Rau used to persist a reusable OpenRouter key. Proxy-backed builds accept
+    // only revocable Rau tokens and remove the old secret during migration.
+    if (apiKey && credentialPrefix && !apiKey.startsWith(credentialPrefix)) {
+      if (secretStore?.available) {
+        try { await secretStore.delete(secretId); }
+        catch (error) { secretStoreError = error?.message ?? '이전 자격증명을 지우지 못했어요.'; }
+      }
+      apiKey = null;
+      config.keyTail = null;
+      config.account = null;
+      discardedCredential = true;
+    }
     if (locked) {
       config.models = locked.map((model) => normalizeStoredModel(model)).filter(Boolean);
       config.defaultModelId = config.models.some((model) => model.id === config.defaultModelId)
@@ -335,6 +351,10 @@ export function createPiManager({
     }
     installedVersion = await readInstalledVersion();
     config.setupComplete = Boolean(apiKey) && config.models.length > 0;
+    if (discardedCredential) {
+      await writeModelsJson();
+      await persistConfig();
+    }
   }
 
   function load() {
@@ -358,7 +378,7 @@ export function createPiManager({
   /** agent/models.json에는 비밀이 아닌 모델 설정만 쓴다. */
   async function writeModelsJson() {
     const provider = {
-      baseUrl: 'https://openrouter.ai/api/v1',
+      baseUrl: providerBaseUrl,
       api: 'openai-completions',
       models: config.models.map((model) => ({
         id: model.id,
@@ -724,6 +744,9 @@ export function createPiManager({
       await load();
       const trimmed = String(key ?? '').trim();
       if (!trimmed) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키를 입력하세요');
+      if (credentialPrefix && !trimmed.startsWith(credentialPrefix)) {
+        throw piError('OPENROUTER_KEY_INVALID', 'Rau 접근 토큰 형식을 확인할 수 없어요');
+      }
       const check = await client.validateKey(trimmed);
       if (!check.valid) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키가 거절됐어요');
       // 보안 저장소가 없으면 models.json(0600)에 보관한다 — load() 가 읽고, vault 가

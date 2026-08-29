@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 function emptyState() {
-  return { users: {}, sessions: {} };
+  return { users: {}, sessions: {}, accessTokens: {} };
 }
 
 export function createMemoryStore(initial = emptyState()) {

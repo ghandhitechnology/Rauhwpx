@@ -16,11 +16,10 @@ function abortError() {
 }
 
 /**
- * A newly provisioned OpenRouter child key can briefly be unavailable to the
- * validation endpoint. Retry only the read-only validation step before the
- * manager persists the key.
+ * A newly issued Rau access token can briefly race the proxy's persisted state.
+ * Retry only the read-only validation step before the manager persists it.
  */
-export async function storeRauApiKey(setApiKey, key, {
+export async function storeRauAccessToken(setAccessToken, token, {
   signal,
   account = null,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -35,7 +34,7 @@ export async function storeRauApiKey(setApiKey, key, {
   for (let attempt = 0; ; attempt += 1) {
     if (signal?.aborted) throw abortError();
     try {
-      return await setApiKey(key, { account });
+      return await setAccessToken(token, { account });
     } catch (error) {
       if (!retryable.has(error?.code) || attempt >= retryMs.length) throw error;
       await sleep(retryMs[attempt]);
@@ -109,14 +108,26 @@ export function createRauCreditsClient({
 
   return {
     origin,
-    createDeviceSession({ signal } = {}) {
-      return request('/v1/device-sessions', { method: 'POST' }, { signal });
+    openRouterBaseUrl: `${origin}/v1/openrouter`,
+    createDeviceSession({ signal, replaceAccessToken = null } = {}) {
+      return request('/v1/device-sessions', {
+        method: 'POST',
+        ...(replaceAccessToken ? { headers: { Authorization: `Bearer ${replaceAccessToken}` } } : {}),
+      }, { signal });
     },
     pollDeviceSession(id, { signal } = {}) {
       return request(`/v1/device-sessions/${encodeURIComponent(id)}`, {}, { signal });
     },
     acknowledgeDeviceSession(id, { signal } = {}) {
       return request(`/v1/device-sessions/${encodeURIComponent(id)}/acknowledge`, { method: 'POST' }, { signal });
+    },
+    revokeAccessToken(token, { signal } = {}) {
+      const value = String(token ?? '').trim();
+      if (!value) return Promise.resolve({ revoked: false });
+      return request('/v1/access/revoke', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${value}` },
+      }, { signal });
     },
     /**
      * ready 가 될 때까지 폴링한다. 저장 확인 전까지 같은 키를 다시 받을 수 있다.
@@ -144,8 +155,8 @@ export function createRauCreditsClient({
           await sleep(POLL_INTERVAL_MS);
           continue;
         }
-        if (next.status === 'ready' && typeof next.apiKey === 'string' && next.apiKey) {
-          return { key: next.apiKey, email: typeof next.email === 'string' ? next.email : null };
+        if (next.status === 'ready' && typeof next.accessToken === 'string' && next.accessToken) {
+          return { key: next.accessToken, email: typeof next.email === 'string' ? next.email : null };
         }
         if (next.status === 'redeemed') {
           throw creditsError('RAU_LOGIN_REDEEMED', '이 로그인 세션은 이미 사용됐어요. 다시 연결해 주세요.');

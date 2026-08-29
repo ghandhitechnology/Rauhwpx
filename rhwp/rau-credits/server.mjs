@@ -38,7 +38,8 @@ const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve
 if (isMain) {
   assertCreditsEnv();
   const port = Number(process.env.PORT ?? DEFAULT_PORT);
-  const { server, origin, dbPath } = createCreditsHttpServer({ port });
+  const { server, service, origin, dbPath } = createCreditsHttpServer({ port });
+  await service.migrateLegacyKeys();
   server.listen(port, '0.0.0.0', () => {
     process.stderr.write(`[rau-credits] listening on 0.0.0.0:${port} origin=${origin} db=${dbPath}\n`);
   });

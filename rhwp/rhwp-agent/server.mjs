@@ -41,7 +41,7 @@ import {
   RAU_LOCKED_MODELS,
   RAU_SECRET_ID,
 } from './pi-manager.mjs';
-import { createRauCreditsClient, storeRauApiKey } from './rau-credits-client.mjs';
+import { createRauCreditsClient, storeRauAccessToken } from './rau-credits-client.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
 import { createOpenRouter, creditBalanceEmpty } from './openrouter.mjs';
 import { createIpcSecretStore } from './secret-store.mjs';
@@ -151,7 +151,11 @@ const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, wri
 const PI_ROOT = defaultPiRoot();
 const RAU_ROOT = defaultRauRoot();
 const openRouter = createOpenRouter({ cacheDir: PI_ROOT });
-const rauOpenRouter = createOpenRouter({ cacheDir: RAU_ROOT });
+const rauCredits = createRauCreditsClient();
+const rauOpenRouter = createOpenRouter({
+  cacheDir: RAU_ROOT,
+  baseUrl: rauCredits.openRouterBaseUrl,
+});
 const secretStore = createIpcSecretStore();
 const piManager = await createPiManager({ rootDir: PI_ROOT, openRouter, secretStore }).init();
 const rauManager = await createPiManager({
@@ -162,8 +166,9 @@ const rauManager = await createPiManager({
   secretId: RAU_SECRET_ID,
   lockedModels: RAU_LOCKED_MODELS,
   skipLegacyKey: true,
+  providerBaseUrl: rauCredits.openRouterBaseUrl,
+  credentialPrefix: 'rau_v1_',
 }).init();
-const rauCredits = createRauCreditsClient();
 let rauLogin = null;
 let npmPrefixMutationQueue = Promise.resolve();
 function mutateSharedNpmPrefix(operation) {
@@ -2323,13 +2328,16 @@ async function handleStudioMessage(record, sock, msg) {
         const login = { id: null, abort };
         rauLogin = login;
         run = (async () => {
-          const session = await rauCredits.createDeviceSession({ signal: abort.signal });
+          const session = await rauCredits.createDeviceSession({
+            signal: abort.signal,
+            replaceAccessToken: rauManager.apiKey(),
+          });
           login.id = session.id;
           authUrl = session.loginUrl;
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-auth-started', requestId, agent, authUrl });
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-progress', agent, state: 'authorizing', authUrl });
           const { key, email } = await rauCredits.redeem(session.id, { signal: abort.signal });
-          rauStatus = await storeRauApiKey(rauManager.setApiKey.bind(rauManager), key, {
+          rauStatus = await storeRauAccessToken(rauManager.setApiKey.bind(rauManager), key, {
             signal: abort.signal,
             account: email,
           });
@@ -2445,7 +2453,10 @@ async function handleStudioMessage(record, sock, msg) {
       }
       const rauSessions = [...sessions.values()]
         .filter((session) => session.agentSession?.agent === 'rau');
+      const accessToken = rauManager.apiKey();
       void Promise.all(rauSessions.map(disposeSession))
+        .then(() => rauCredits.revokeAccessToken(accessToken)
+          .catch((error) => log(`Rau access-token revocation failed: ${error?.message ?? error}`)))
         .then(() => rauManager.clearApiKey())
         .then(async (status) => {
           rauStatus = status;
