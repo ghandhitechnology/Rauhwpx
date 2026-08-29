@@ -2443,7 +2443,10 @@ async function handleStudioMessage(record, sock, msg) {
         sendAgentSetupError(record, sock, requestId, msg.agent, new Error('연결 해제 요청을 확인하지 못했어요.'));
         return;
       }
-      void rauManager.clearApiKey()
+      const rauSessions = [...sessions.values()]
+        .filter((session) => session.agentSession?.agent === 'rau');
+      void Promise.all(rauSessions.map(disposeSession))
+        .then(() => rauManager.clearApiKey())
         .then(async (status) => {
           rauStatus = status;
           await refreshOpenRouterCredits(true);
@@ -2599,6 +2602,7 @@ async function handleStudioMessage(record, sock, msg) {
           {
             health: providerHealth.cached(),
             piStatus,
+            rauStatus,
             currentSelection: record.agentSession ? { agent: record.agentSession.agent, model: record.agentSession.model, effort: record.agentSession.effort } : null,
           },
         );

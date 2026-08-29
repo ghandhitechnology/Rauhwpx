@@ -22,10 +22,13 @@ test('Rau redeem stores the Rau secret and can drop only the local key', async (
   assert.match(source, /code: 'RAU_CREDITS_EMPTY'/);
   assert.match(source, /creditBalanceEmpty\(rauCreditsBalance\)/);
   assert.match(source, /case 'agent-setup-disconnect'/);
+  assert.match(source, /filter\(\(session\) => session\.agentSession\?\.agent === 'rau'\)/);
+  assert.match(source, /Promise\.all\(rauSessions\.map\(disposeSession\)\)/);
   assert.match(source, /rauManager\.clearApiKey\(\)/);
   assert.match(source, /isOpenRouterCreditError\(evt\.message\)/);
   assert.match(source, /piManager: selection\.agent === 'rau' \? rauManager : piManager/);
   assert.match(source, /openRouter: selection\.agent === 'rau' \? rauOpenRouter : openRouter/);
+  assert.match(source, /health: providerHealth\.cached\(\),\s*\n\s*piStatus,\s*\n\s*rauStatus,/);
   for (const mutation of source.matchAll(/(?:piManager|rauManager)\.(?:install|automaticUpdate)\(/g)) {
     const index = mutation.index;
     const start = source.lastIndexOf('\n', index);

@@ -5255,6 +5255,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         break;
       case 'agent-setup-status':
         rauSetupComplete = e.statuses.rau?.setupComplete === true;
+        if (!rauSetupComplete && lastUsage?.rau) {
+          lastUsage = { ...lastUsage, rau: undefined };
+        }
         syncProviderMenu();
         // 브리지가 cursor 모델 레지스트리를 먼저 갱신했다 — 목록과 선택값을 다시 읽는다.
         if (selectedAgent === 'cursor') {

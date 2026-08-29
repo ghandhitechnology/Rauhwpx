@@ -92,12 +92,16 @@ test('first login mints a $5 key, delivers it until acknowledged, and reuses it'
 
 test('the same email through a second WorkOS identity reuses the first $5 key', async () => {
   const minted = [];
+  let magicLoginCount = 0;
   const credits = createCreditsService({
     origin: 'https://credits.rau.test',
     sessionSecret: 'test-secret-for-rau-credits',
     store: createMemoryStore(),
     authenticateWorkos: async () => ({ id: 'user_google', email: 'Andy@Example.com' }),
-    authenticateMagic: async () => ({ id: 'user_magic', email: 'andy@example.com' }),
+    authenticateMagic: async () => ({
+      id: 'user_magic',
+      email: magicLoginCount++ === 0 ? 'andy@example.com' : null,
+    }),
     createOpenRouterKey: async () => {
       minted.push(1);
       return { key: `sk-or-v1-shared-${minted.length}`, id: `or-${minted.length}` };
@@ -111,6 +115,10 @@ test('the same email through a second WorkOS identity reuses the first $5 key', 
 
   assert.equal(minted.length, 1, 'the same mailbox must not mint a second $5');
   assert.equal((await credits.redeemDeviceSession(magic.id)).apiKey, 'sk-or-v1-shared-1');
+
+  const repeatedMagic = await credits.createDeviceSession();
+  await credits.completeMagicLogin(repeatedMagic.id, 'invalid-email', '123456');
+  assert.equal(minted.length, 1, 'the linked WorkOS identity must reuse the key without an email');
 });
 
 test('a pending session past the TTL cannot be completed into a minted key', async () => {
@@ -369,6 +377,26 @@ test('spoofed X-Forwarded-For hops cannot evade the per-client throttle', async 
       headers: { 'X-Forwarded-For': '198.51.100.99, 203.0.113.7' },
     });
     assert.equal(blocked.status, 429);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('WorkOS callback is throttled per client IP', async () => {
+  let completed = 0;
+  const server = http.createServer(creditsRequestListener({
+    async completeLogin() { completed += 1; },
+  }));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    for (let i = 0; i < 20; i += 1) {
+      const res = await fetch(`http://127.0.0.1:${port}/callback?code=${i}&state=session`);
+      assert.equal(res.status, 200);
+    }
+    const blocked = await fetch(`http://127.0.0.1:${port}/callback?code=blocked&state=session`);
+    assert.equal(blocked.status, 429);
+    assert.equal(completed, 20);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

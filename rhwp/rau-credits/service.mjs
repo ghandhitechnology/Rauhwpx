@@ -202,9 +202,12 @@ export function createCreditsService({
         }
       }
       if (existingKey) {
+        if (existingId !== workosUserId) {
+          state.users[workosUserId] = { ...state.users[existingId] };
+        }
         if (normalizedEmail) {
           state.emailIndex ??= {};
-          state.emailIndex[normalizedEmail] = existingId;
+          state.emailIndex[normalizedEmail] = workosUserId;
         }
         return existingKey;
       }
@@ -524,6 +527,10 @@ export function creditsRequestListener(service) {
         return;
       }
       if (req.method === 'GET' && url.pathname === '/callback') {
+        if (!limiter.check(`callback:${ip}`, 20, TEN_MINUTES)) {
+          throttled(url.searchParams.get('state') ?? '');
+          return;
+        }
         try {
           await service.completeLogin(url.searchParams.get('code'), url.searchParams.get('state'));
           send(200, renderDonePage());

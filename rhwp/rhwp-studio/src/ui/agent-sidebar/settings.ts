@@ -1120,7 +1120,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const rauUsageCredits = el('span', 'ag-settings-row-detail');
   rauUsageHead.append(rauUsageName, rauUsageCredits);
   const rauUsageMeters = el('div', 'ag-settings-meters');
-  const rauUsageEmpty = el('p', 'ag-settings-note', 'Trial credits are empty. Connect another model.');
+  const rauUsageEmpty = el('p', 'ag-settings-note', '체험 크레딧을 다 썼어요. 다른 모델을 연결해 주세요.');
   rauUsageEmpty.hidden = true;
   const rauUsageDay = el('div', 'ag-settings-usage-day');
   const rauUsageWeek = el('div', 'ag-settings-usage-day');
@@ -1367,12 +1367,22 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     renderDestinationState();
   }
 
-  function persistPrefs(nextPrefs: AgentPrefs): ReturnType<typeof trySaveAgentPrefs> {
+  function persistPrefs(
+    nextPrefs: AgentPrefs,
+    { preserveDraft = false }: { preserveDraft?: boolean } = {},
+  ): ReturnType<typeof trySaveAgentPrefs> {
+    const previousDraft = prefsDraft;
     const result = trySaveAgentPrefs(nextPrefs);
     if (result.ok) {
       prefs = result.value;
       prefsBaseline = { ...result.value };
-      prefsDraft = { ...result.value };
+      prefsDraft = preserveDraft
+        ? {
+          ...previousDraft,
+          defaultAgent: result.value.defaultAgent,
+          defaultModel: result.value.defaultModel,
+        }
+        : { ...result.value };
       applyDefaults(result.value);
     }
     return result;
@@ -2095,8 +2105,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       setupStatuses = statuses;
       if (prefs.defaultAgent === 'rau' && statuses.rau?.setupComplete !== true) {
         const fallback = selectableAgents()[0] ?? 'claude';
-        stagePrefs({ defaultAgent: fallback, defaultModel: resolveModelForAgent(fallback, null) });
-        persistPrefs(prefsDraft);
+        persistPrefs({
+          ...prefs,
+          defaultAgent: fallback,
+          defaultModel: resolveModelForAgent(fallback, null),
+        }, { preserveDraft: true });
       }
     } else if (!setupMessage) setupMessage = '이 기기 연결을 끊지 못했어요.';
     renderAgentSetup();
@@ -3067,8 +3080,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
             && setupStatuses.rau?.setupComplete !== true;
           setupStatuses = ev.statuses;
           if (rauWasIncomplete && ev.statuses.rau?.setupComplete === true) {
-            stagePrefs({ defaultAgent: 'rau', defaultModel: 'z-ai/glm-5.3-flash' });
-            persistPrefs(prefsDraft);
+            persistPrefs({
+              ...prefs,
+              defaultAgent: 'rau',
+              defaultModel: 'z-ai/glm-5.3-flash',
+            }, { preserveDraft: true });
           }
           // 로그인·설치가 아직 진행 중이면 주기 방송이 카드 상태(주소·코드)를 지우지 않는다.
           const inFlight = setupAgent !== null && setupBusy

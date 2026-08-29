@@ -565,6 +565,7 @@ test('Rau 는 목록 맨 앞이고 흰 테두리 · 로그인 전용 설정 · $
   assert.match(source, /function rauCreditsEmpty\(\): boolean/);
   assert.match(source, /체험 크레딧이 다 됐어요\. 다른 모델을 연결해 주세요\./);
   assert.match(source, /case 'usage-report':\s*\n\s*lastUsage = e\.usage/);
+  assert.match(source, /if \(!rauSetupComplete && lastUsage\?\.rau\)/);
   assert.match(source, /selectedAgent === 'rau' && !rauSetupComplete/);
   assert.ok(source.indexOf("return { ok: false, reason: 'Rau 연결을 먼저 완료해 주세요' }")
     < source.indexOf('const userMessage = recordUserMessage(prompt'));
@@ -577,6 +578,7 @@ test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대
   assert.match(settings, /setupAccountEmail\.textContent = status\?\.account/);
   assert.match(settings, /계정 이메일을 확인할 수 없습니다/);
   assert.doesNotMatch(settings, /연결된 키 \*\*\*\*/);
+  assert.match(settings, /체험 크레딧을 다 썼어요\. 다른 모델을 연결해 주세요\./);
   // 잔량 막대는 사용량 갱신마다 다시 그린다.
   assert.match(settings, /renderUsage\(\): void \{\s*\n\s*renderCliproxy\(\);\s*\n\s*renderRauUsage\(\);\s*\n\s*renderRauAccount\(\);/);
   assert.match(settingsCss, /\.ag-agent-setup-account \{[\s\S]*?border-radius: 12px/);
@@ -615,9 +617,9 @@ test('Rau 로그아웃 뒤 설치된 런타임을 연결 상태로 오인하지 
   assert.match(settings, /if \(agent === 'rau' && !configured\) \{[\s\S]*row\.detail\.textContent = detected \? '로그인 필요'/);
   assert.match(settings, /const statuses = await bridge\.disconnectAgent\('rau'\)/);
   assert.match(settings, /if \(statuses\) setupStatuses = statuses;[\s\S]*renderAgentSetup\(\);/);
-  assert.match(settings, /prefs\.defaultAgent === 'rau'[\s\S]*const fallback = selectableAgents\(\)\[0\][\s\S]*persistPrefs\(prefsDraft\)/);
+  assert.match(settings, /prefs\.defaultAgent === 'rau'[\s\S]*const fallback = selectableAgents\(\)\[0\][\s\S]*persistPrefs\(\{[\s\S]*\.\.\.prefs,[\s\S]*defaultAgent: fallback,[\s\S]*\}, \{ preserveDraft: true \}\)/);
   assert.match(settings, /const rauWasIncomplete = setupStatuses !== null[\s\S]*rauWasIncomplete && ev\.statuses\.rau\?\.setupComplete === true/);
-  assert.match(settings, /function persistPrefs[\s\S]*applyDefaults\(result\.value\)/);
+  assert.match(settings, /function persistPrefs[\s\S]*preserveDraft[\s\S]*previousDraft[\s\S]*applyDefaults\(result\.value\)/);
 });
 
 test('설정 모달은 프로바이더별 설치 안내와 API 키 힌트를 갖는다', () => {
