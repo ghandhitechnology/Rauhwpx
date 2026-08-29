@@ -474,7 +474,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     }
   }
 
-  async function teardownSandbox(): Promise<void> {
+  async function teardownSandbox(options: { force?: boolean } = {}): Promise<void> {
     if (!state || (state.kind !== 'sandbox-ready' && state.kind !== 'sandbox-failed')) return;
     const { intent } = state;
     const name = state.kind === 'sandbox-ready' ? state.name : snapshotSandbox(snapshot)?.name ?? '앱 제공 서버';
@@ -482,7 +482,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     const operation = beginOperation();
     setState({ kind: 'sandbox-tearing-down', intent, name }, '앱 제공 서버를 종료하고 있습니다.');
     try {
-      const next = await deps.controller.teardownSandbox();
+      const next = await deps.controller.teardownSandbox(options);
       if (!operationIsCurrent(operation)) return;
       const released = next.sandbox?.unmanaged === true;
       const settled = createCloudSetupState(next, intent);
@@ -657,10 +657,16 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const refresh = button('상태 확인');
       refresh.addEventListener('click', () => { void refreshSandbox(); });
       if (phase === 'teardown') {
-        footer.append(refresh);
+        const hasLiveWork = /before shutting it down|has_work/i.test(issue.detail);
+        if (!hasLiveWork) footer.append(refresh);
         const teardown = button('다시 종료', 'danger');
         teardown.addEventListener('click', () => { void teardownSandbox(); });
         footer.append(teardown);
+        if (hasLiveWork) {
+          const abandon = button('작업을 버리고 종료', 'danger');
+          abandon.addEventListener('click', () => { void teardownSandbox({ force: true }); });
+          footer.append(abandon);
+        }
         const backToChoice = button('서버 다시 선택', 'primary');
         backToChoice.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
         footer.append(backToChoice);

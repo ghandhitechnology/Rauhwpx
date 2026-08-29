@@ -786,6 +786,22 @@ function sandboxCoordinator({
   appServers,
   collectProviderAuth = null,
 } = {}) {
+  const clearedPayloads = [];
+  const store = {
+    load: async () => records,
+    list: async () => records,
+    get: async (id) => records.find((record) => record.id === id) ?? null,
+    transition: async (id, state, patch = {}) => {
+      const index = records.findIndex((record) => record.id === id);
+      if (index < 0) throw new Error('Cloud handoff does not exist');
+      records[index] = { ...records[index], ...patch, state };
+      return records[index];
+    },
+    clearPayload: async (id) => {
+      clearedPayloads.push(id);
+      return true;
+    },
+  };
   const client = new CloudClient({
     vault,
     fetchImpl: signedFetch(async (url) => {
@@ -805,13 +821,13 @@ function sandboxCoordinator({
   });
   const coordinator = new CloudCoordinator({
     client,
-    store: { load: async () => records, list: async () => records },
+    store,
     provisioner: {},
     recoveryDir: '/unused',
     appServers: appServers ?? [provider],
     collectProviderAuth,
   });
-  return { coordinator, client, provider, vault };
+  return { coordinator, client, provider, vault, store, clearedPayloads };
 }
 
 test('an unconfigured build advertises the app option without letting a spawn start', async () => {
@@ -975,8 +991,11 @@ test('a live sandbox cannot be abandoned by switching to a user server', async (
 });
 
 test('teardown protects live cloud work, forgets credentials, and repeats safely', async () => {
-  const records = [{ id: 'handoff-1', state: 'running', resolvedAt: null }];
-  const { coordinator, provider, vault } = sandboxCoordinator({ records });
+  const records = [
+    { id: 'handoff-1', state: 'suspended', resolvedAt: null },
+    { id: 'handoff-2', state: 'completed', resolvedAt: null },
+  ];
+  const { coordinator, provider, vault, clearedPayloads } = sandboxCoordinator({ records });
   await coordinator.start();
   await coordinator.spawnAppServer();
   assert.equal(vault.values.has('cloud.refresh'), true);
@@ -992,10 +1011,33 @@ test('teardown protects live cloud work, forgets credentials, and repeats safely
   assert.equal(removed.server.lifecycle, 'idle');
   assert.equal(vault.values.has('cloud.refresh'), false, 'sandbox credentials do not outlive the sandbox');
   assert.equal(vault.values.has('cloud.profile'), false);
+  assert.deepEqual(records.map(({ state, error }) => ({ state, error })), [
+    { state: 'cancelled', error: 'The app sandbox was shut down before this cloud work finished.' },
+    { state: 'expired', error: 'The app sandbox was shut down before this cloud work finished.' },
+  ]);
+  assert.deepEqual(clearedPayloads, ['handoff-1', 'handoff-2']);
 
   const again = await coordinator.teardownAppServer();
   assert.equal(provider.calls.teardown, 1, 'a torn down sandbox is not torn down twice');
   assert.equal(again.server.lifecycle, 'idle');
+});
+
+test('a failed provider teardown preserves live cloud work and credentials', async () => {
+  const records = [{ id: 'handoff-1', state: 'suspended', resolvedAt: null }];
+  const provider = appServerStub({
+    teardown: async () => {
+      throw new AppServerError('Railway teardown failed', { code: 'PROVIDER_REJECTED' });
+    },
+  });
+  const { coordinator, vault, clearedPayloads } = sandboxCoordinator({ records, provider });
+  await coordinator.start();
+  await coordinator.spawnAppServer();
+
+  await assert.rejects(coordinator.teardownAppServer({ force: true }), { code: 'PROVIDER_REJECTED' });
+  assert.equal(records[0].state, 'suspended');
+  assert.deepEqual(clearedPayloads, []);
+  assert.equal(vault.values.has('cloud.refresh'), true);
+  assert.equal(vault.values.has('cloud.profile'), true);
 });
 
 test('a failed spawn reports an actionable lifecycle and stays retryable', async () => {
