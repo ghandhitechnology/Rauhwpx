@@ -81,6 +81,14 @@ function normalizePendingAppSandbox(raw) {
   };
 }
 
+function directHttpsTarget(endpoint, serverPublicKey = '') {
+  return Object.freeze({
+    kind: 'direct-https',
+    endpoint: normalizeCloudEndpoint(endpoint),
+    serverPublicKey,
+  });
+}
+
 function transportErrorCode(error) {
   let current = error;
   for (let depth = 0; current && depth < 6; depth += 1) {
@@ -590,7 +598,8 @@ export class CloudClient {
   async probeEndpointHealth(endpoint, { signal } = {}) {
     return this.#request('/v1/health', {
       auth: false,
-      profile: { endpoint: normalizeCloudEndpoint(endpoint), serverPublicKey: '' },
+      target: directHttpsTarget(endpoint),
+      retryAttempts: 1,
       timeoutMs: 10_000,
       signal,
     });
@@ -619,11 +628,11 @@ export class CloudClient {
     if (!/^[A-Za-z0-9_-]{32,256}$/.test(String(bootstrapToken ?? ''))) {
       throw new CloudHttpError('App sandbox bootstrap token is invalid', { code: 'BOOTSTRAP_TOKEN_INVALID' });
     }
-    const profile = { endpoint: normalizedEndpoint, serverPublicKey };
+    const target = directHttpsTarget(normalizedEndpoint, serverPublicKey);
     const result = await this.#request('/v1/pairing/bootstrap', {
       method: 'POST',
       auth: false,
-      profile,
+      target,
       headers: { authorization: `Bearer ${bootstrapToken}` },
       body: { deviceName: String(deviceName ?? '').slice(0, 120) },
       signal,
@@ -1319,7 +1328,9 @@ export class CloudClient {
       maxResponseBytes: options.maxResponseBytes ?? MAX_JSON_BYTES,
     });
     const body = await responseJson(response);
-    const profile = options.profile ?? await this.#requiredProfile();
+    const profile = options.target?.kind === 'direct-https'
+      ? options.target
+      : options.profile ?? await this.#requiredProfile();
     verifyServerPin(profile, response, body);
     return body;
   }
@@ -1344,7 +1355,8 @@ export class CloudClient {
 
   async #rawRequestOnce(pathname, options = {}) {
     if (options.signal?.aborted) throw abortReason(options.signal);
-    const profile = options.profile ?? await this.#requiredProfile();
+    const direct = options.target?.kind === 'direct-https';
+    const profile = direct ? options.target : options.profile ?? await this.#requiredProfile();
     const auth = options.auth !== false;
     const headers = { ...(options.headers ?? {}) };
     const method = String(options.method ?? 'GET').toUpperCase();
@@ -1354,9 +1366,9 @@ export class CloudClient {
       headers['content-type'] = 'application/json';
       body = JSON.stringify(options.body);
     }
-    const lease = this.#transport
-      ? await this.#transport.acquire(profile, { signal: options.signal })
-      : { baseUrl: profile.endpoint, release() {} };
+    const lease = direct || !this.#transport
+      ? { baseUrl: profile.endpoint, release() {} }
+      : await this.#transport.acquire(profile, { signal: options.signal });
     const requestUrl = joinEndpoint(lease.baseUrl, pathname);
     const parsedRequestUrl = new URL(requestUrl);
     const proofContext = profile.serverPublicKey ? {

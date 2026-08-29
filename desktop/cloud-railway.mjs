@@ -421,14 +421,19 @@ export function createRailwayServerProvider({
         if (health?.ok === true && /^ed25519:[A-Za-z0-9_-]{59}$/.test(String(health.serverPublicKey ?? ''))) {
           return health;
         }
-        lastError = new Error('sandbox health response is incomplete');
+        throw new AppServerError('App sandbox returned an invalid health response', {
+          code: 'SANDBOX_HEALTH_INVALID',
+          retryable: false,
+        });
       } catch (error) {
+        if (signal?.aborted) throw signal.reason ?? error;
+        if (error?.retryable !== true) throw error;
         lastError = error;
       }
       if (Date.now() >= deadline) {
         throw new AppServerError(
           `App sandbox did not answer its health check: ${lastError?.message ?? 'unknown error'}`,
-          { code: 'SANDBOX_UNHEALTHY' },
+          { code: 'SANDBOX_UNHEALTHY', cause: lastError ?? undefined },
         );
       }
       attempt += 1;
