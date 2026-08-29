@@ -718,3 +718,52 @@ fn test_table_paragraph_diagnostics() {
 
     eprintln!("=== 진단 완료 ===\n");
 }
+
+fn list_header_data(text_width: u32, text_height: u32, ext_flags: u16) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&0u16.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes());
+    data.extend_from_slice(&text_width.to_le_bytes());
+    data.extend_from_slice(&text_height.to_le_bytes());
+    data.push(0);
+    data.push(0);
+    data.extend_from_slice(&ext_flags.to_le_bytes());
+    data
+}
+
+fn raw_list_header(level: u16, data: Vec<u8>) -> crate::model::document::RawRecord {
+    crate::model::document::RawRecord {
+        tag_id: tags::HWPTAG_LIST_HEADER,
+        level,
+        data,
+    }
+}
+
+#[test]
+fn hwp5_extension_master_sets_replace_base() {
+    let records = vec![
+        raw_list_header(2, list_header_data(1000, 2000, 0)),
+        raw_list_header(2, list_header_data(1000, 2000, 0x0003)),
+    ];
+    let pages = parse_master_pages_from_raw(&records);
+    assert_eq!(pages.len(), 2);
+    assert!(!pages[0].is_extension);
+    assert!(!pages[0].replace_base);
+    assert!(pages[1].is_extension);
+    assert!(pages[1].overlap);
+    assert!(
+        pages[1].replace_base,
+        "HWP5 확장 바탕쪽은 기본 홀/짝 바탕쪽을 대체해야 한다"
+    );
+}
+
+#[test]
+fn hwp5_base_master_does_not_set_replace_base() {
+    let records = vec![raw_list_header(2, list_header_data(1000, 2000, 0x0001))];
+    let pages = parse_master_pages_from_raw(&records);
+    assert_eq!(pages.len(), 1);
+    assert!(!pages[0].is_extension);
+    assert!(pages[0].overlap);
+    assert!(!pages[0].replace_base);
+}
