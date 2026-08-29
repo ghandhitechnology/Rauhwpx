@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { replaceFile } from './fs-replace.mjs';
+import { recoverReplacedFile, replaceFile } from './fs-replace.mjs';
 
 export const CLOUD_HANDOFF_STATES = Object.freeze([
   'preparing',
@@ -111,6 +111,7 @@ export class CloudHandoffStore {
   }
 
   async #load() {
+    await recoverReplacedFile(this.#filePath, this.#platform);
     try {
       const parsed = JSON.parse(await fs.readFile(this.#filePath, 'utf8'));
       if (parsed?.version !== 1 || !Array.isArray(parsed.records)) throw new Error('Unsupported handoff store');

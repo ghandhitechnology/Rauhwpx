@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { replaceFile } from './fs-replace.mjs';
+import { recoverReplacedFile, replaceFile } from './fs-replace.mjs';
 
 const KEY_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const LINUX_SECURE_STORAGE_BACKENDS = new Set([
@@ -32,6 +32,7 @@ export function createSecretVault({ filePath, safeStorage, platform = process.pl
 
   async function load() {
     if (loaded) return;
+    await recoverReplacedFile(filePath, platform);
     loaded = true;
     try {
       const raw = JSON.parse(await fs.readFile(filePath, 'utf8'));
