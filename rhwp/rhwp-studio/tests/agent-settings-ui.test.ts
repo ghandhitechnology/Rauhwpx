@@ -65,7 +65,7 @@ test('헤더에 설정(기어) 버튼이 있다', () => {
   assert.match(source, /settingsBtn\.setAttribute\('aria-label', '설정'\)/);
   assert.match(source, /settingsBtn\.setAttribute\('aria-controls', 'ag-settings-panel'\)/);
   assert.match(source, /settingsBtn\.appendChild\(createIcon\('gear'\)\)/);
-  assert.match(source, /headerActions\.append\(threadsBtn, versionsBtn, settingsBtn\)/);
+  assert.match(source, /headerActions\.append\(versionsBtn, settingsBtn, threadsBtn\)/);
   assert.match(icons, /gear: 'M/);
   assert.match(icons, /refresh: 'M/);
 });
@@ -190,8 +190,11 @@ test('한컴용 Git 토글은 기본 이력과 Git 버전 관리 진입을 전�
   assert.match(editCommandsSource, /new HistoryDialog\(services, compareSessionStore\)/);
 });
 
-test('버전 버튼은 설정과 관계없이 표시되고 현재 버전 관리 방식을 연다', () => {
-  assert.doesNotMatch(source, /versionsBtn\.hidden/);
+test('버전 버튼은 한컴독스 Git 설정을 따르고 현재 버전 관리 방식을 연다', () => {
+  assert.match(source, /versionsBtn\.hidden = !enabled/);
+  assert.match(source, /applyHancomGitVisibility\(userSettings\.getUseHancomGit\(\)\)/);
+  assert.match(source, /userSettings\.subscribeUseHancomGit\(applyHancomGitVisibility\)/);
+  assert.match(source, /unsubscribeHancomGitVisibility\(\)/);
   assert.match(source, /versionsBtn\.addEventListener\('click',[\s\S]*openConfiguredVersionControl\(\)/);
   assert.doesNotMatch(mainSource, /gitVersionToolbarButton/);
   assert.match(editCommandsSource, /userSettings\.getUseHancomGit\(\)[\s\S]*versions:open[\s\S]*openClassicDocumentHistory/);
