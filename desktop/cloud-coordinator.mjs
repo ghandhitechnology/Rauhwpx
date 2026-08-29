@@ -837,6 +837,7 @@ export class CloudCoordinator extends EventEmitter {
       spawned = await provider.spawn({
         deviceName,
         limits: current?.limits,
+        selectedProvider: current?.provider ?? 'codex',
         credentials: await this.#providerAuth(current?.provider ?? 'codex'),
         signal: controller.signal,
         onLine: (line) => this.#emit({ type: 'provision-log', line }),

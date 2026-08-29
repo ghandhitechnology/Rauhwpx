@@ -79,6 +79,30 @@ jobs:
               env HOME=/tmp/smoke-home TMPDIR=/tmp/smoke-tmp \
               node /app/document-runtime/smoke.mjs
           '
+          sandbox_id=$(podman run --detach --memory=768m \
+            --publish 127.0.0.1:17740:7740 \
+            --env RAUHWpx_BOOTSTRAP_TOKEN=0123456789abcdefghijklmnopqrstuvwxyz_ABCD \
+            --env RAUHWpx_SANDBOX_INSTALL_PROVIDER=0 \
+            --env RAUHWpx_SANDBOX_PROVIDER=codex \
+            rauhwpx-cloud-sandbox-edge)
+          cleanup() { podman rm --force "$sandbox_id" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          healthy=0
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:17740/rauhwpx-cloud/v1/health >/dev/null; then
+              healthy=1
+              break
+            fi
+            if ! podman inspect --format '{{.State.Running}}' "$sandbox_id" | grep -qx true; then
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$healthy" != 1 ]]; then
+            podman logs "$sandbox_id"
+            exit 1
+          fi
+          podman logs "$sandbox_id" | grep -q '"event":"cloud.started"'
 
       - name: Publish edge and immutable images
         env:

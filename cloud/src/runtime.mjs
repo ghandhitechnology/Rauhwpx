@@ -135,7 +135,7 @@ export function createCloudRuntime(config, dependencies = {}) {
           await runner.probeControl?.(scheduler.controlEndpoint);
         }
         await listen(publicServer, config.port, config.host);
-        await providerManager.probeAll();
+        await providerManager.probeAll(config.startupProviders);
         await scheduler.start();
         return {
           endpoint: `http://${config.host}:${config.port}${config.basePath}`,

@@ -104,7 +104,11 @@ export class ProviderManager {
     });
   }
 
-  async probeAll() {
-    return Promise.all(PROVIDERS.map((provider) => this.probe(provider)));
+  async probeAll(providers = PROVIDERS) {
+    const results = [];
+    // Provider CLIs are memory-heavy in small app sandboxes. Sequential probes
+    // avoid a five-process cold-start spike while retaining full VPS checks.
+    for (const provider of providers) results.push(await this.probe(provider));
+    return results;
   }
 }

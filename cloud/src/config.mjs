@@ -1,6 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
-import { CloudError, DEFAULT_LIMITS } from './protocol.mjs';
+import { CloudError, DEFAULT_LIMITS, PROVIDERS } from './protocol.mjs';
 
 function port(value) {
   const parsed = Number(value);
@@ -47,6 +47,14 @@ function userId(value, name) {
     throw new CloudError('CONFIG_INVALID', `${name} is invalid`);
   }
   return parsed;
+}
+
+function startupProviders(value) {
+  if (value === undefined || value === '') return [...PROVIDERS];
+  if (!PROVIDERS.includes(value)) {
+    throw new CloudError('CONFIG_INVALID', 'RAUHWpx_SANDBOX_PROVIDER is invalid');
+  }
+  return [value];
 }
 
 function contains(parent, child) {
@@ -97,6 +105,7 @@ export function parseConfig(environment = process.env) {
     workerControlMode,
     providerAuthDirectory: path.join(dataDirectory, 'provider-auth'),
     providerCliDirectory: environment.RAUHWpx_PROVIDER_CLI_DIR || '/opt/rauhwpx-cloud/provider-cli',
+    startupProviders: startupProviders(environment.RAUHWpx_SANDBOX_PROVIDER),
     workerImage: environment.RAUHWpx_WORKER_IMAGE || 'ghcr.io/ghandhitechnology/rauhwpx-cloud-worker:stable',
     podmanConnection: environment.RAUHWpx_PODMAN_CONNECTION || null,
     releaseChannel: environment.RAUHWpx_CHANNEL === 'prerelease' ? 'prerelease' : 'stable',

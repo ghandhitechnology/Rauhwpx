@@ -3,6 +3,7 @@ import { createCloudRuntime } from './runtime.mjs';
 
 const config = parseConfig();
 const runtime = createCloudRuntime(config);
+console.log(JSON.stringify({ event: 'cloud.starting', providers: config.startupProviders }));
 try {
   const started = await runtime.start();
   console.log(JSON.stringify({ event: 'cloud.started', ...started }));

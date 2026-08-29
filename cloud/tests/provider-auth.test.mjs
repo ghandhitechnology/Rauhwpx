@@ -132,3 +132,26 @@ test('ProviderManager treats imported files and vault secrets as authenticated',
   assert.equal(existsSync(path.join(emptyRoot, 'pi')), false);
   assert.equal(withVaultOnly.authenticated, true);
 });
+
+test('ProviderManager probes only selected providers and never overlaps CLI startup', async (t) => {
+  const { vault, authDirectory, sessions } = await vaultFixture(t);
+  let active = 0;
+  let maximumActive = 0;
+  const commands = [];
+  const manager = new ProviderManager(sessions, {
+    providerAuthDirectory: authDirectory,
+    vault,
+    spawnProcess: (command) => {
+      commands.push(command);
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      const child = versionProcess(command);
+      child.on('close', () => { active -= 1; });
+      return child;
+    },
+  });
+
+  await manager.probeAll(['codex', 'pi']);
+  assert.deepEqual(commands, ['codex', 'pi']);
+  assert.equal(maximumActive, 1);
+});

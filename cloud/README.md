@@ -78,7 +78,7 @@ The desktop build reads its provider configuration from the environment. Tokens 
 | `RAUHWpx_RAILWAY_TOKEN` | yes | Railway API token that owns the sandbox project |
 | `RAUHWpx_RAILWAY_PROJECT_ID` | yes | Project that receives sandbox services |
 | `RAUHWpx_RAILWAY_ENVIRONMENT_ID` | yes | Environment inside that project |
-| `RAUHWpx_RAILWAY_IMAGE` | no | Sandbox image, defaults to `ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.11` |
+| `RAUHWpx_RAILWAY_IMAGE` | no | Sandbox image, defaults to `ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.12` |
 | `RAUHWpx_RAILWAY_REGION` | no | Railway region for the sandbox instance |
 | `RAUHWpx_RAILWAY_API_URL` | no | Alternate GraphQL endpoint for testing |
 

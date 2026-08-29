@@ -198,7 +198,7 @@ test('the Railway provider refuses to pretend when it has no configuration', asy
   });
   assert.equal(env.token, 'railway-token');
   assert.equal(env.apiUrl, 'https://backboard.railway.com/graphql/v2');
-  assert.equal(env.image, 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.11');
+  assert.equal(env.image, 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.12');
 });
 
 test('the Railway provider creates a reachable sandbox and returns a pairing receipt', async () => {
@@ -249,6 +249,7 @@ test('the Railway provider creates a reachable sandbox and returns a pairing rec
   assert.equal(variables.variables.RAUHWpx_WORKSPACE_ROOT, '/var/lib/rauhwpx-workspaces');
   assert.equal(variables.variables.RAUHWpx_DATA_DIR, '/var/lib/rauhwpx-cloud');
   assert.equal(variables.variables.RAUHWpx_SANDBOX_INSTALL_PROVIDER, '0');
+  assert.equal(variables.variables.RAUHWpx_SANDBOX_PROVIDER, 'codex');
   assert.equal(variables.variables.RAUHWpx_PROVIDER_KEY_CODEX, undefined);
 });
 
@@ -450,6 +451,7 @@ test('Railway deployment polling survives exhausted transient query failures', a
 test('Railway spawn injects only the selected provider credentials', async () => {
   const { provider, transport } = railwayProvider(SPAWN_ROUTES);
   await provider.spawn({
+    selectedProvider: 'codex',
     credentials: {
       provider: 'codex',
       apiKey: 'sk-proj-codex',
@@ -457,6 +459,7 @@ test('Railway spawn injects only the selected provider credentials', async () =>
     },
   });
   const variables = transport.calls[0].variables.input.variables;
+  assert.equal(variables.RAUHWpx_SANDBOX_PROVIDER, 'codex');
   assert.equal(variables.RAUHWpx_PROVIDER_KEY_CODEX, 'sk-proj-codex');
   assert.equal(variables.RAUHWpx_PROVIDER_KEY_CLAUDE, undefined);
   assert.equal(variables.RAUHWpx_PROVIDER_KEY_GROK, undefined);
@@ -589,18 +592,18 @@ test('Railway status maps deployments to lifecycles and teardown is idempotent',
   assert.deepEqual(await already.provider.teardown(SANDBOX), { lifecycle: 'idle', removed: false });
 });
 
-test('Railway teardown retries an ambiguous delete without leaving a paid service', async () => {
+test('Railway teardown reconciles an ambiguous delete without replaying the mutation', async () => {
   let deleteCalls = 0;
   const { provider } = railwayProvider({
     RauhwpxServiceDelete: () => {
       deleteCalls += 1;
-      if (deleteCalls === 1) throw new TypeError('connection reset after delete commit');
-      return { data: { serviceDelete: true } };
+      throw new TypeError('connection reset after delete commit');
     },
+    RauhwpxProjectServices: { data: { project: { services: { edges: [] } } } },
   }, { queryMaxAttempts: 2, sleep: async () => {} });
 
   assert.deepEqual(await provider.teardown(SANDBOX), { lifecycle: 'idle', removed: true });
-  assert.equal(deleteCalls, 2);
+  assert.equal(deleteCalls, 1);
 });
 
 test('cancelling an ambiguous Railway create performs only bounded orphan reconciliation', async () => {

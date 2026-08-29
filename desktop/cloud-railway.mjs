@@ -4,7 +4,7 @@ import { AppServerError } from './cloud-app-server.mjs';
 import { sandboxCredentialVariables } from './provider-auth.mjs';
 
 export const RAILWAY_API_URL = 'https://backboard.railway.com/graphql/v2';
-export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.11';
+export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.12';
 export const SANDBOX_BASE_PATH = '/rauhwpx-cloud';
 export const SANDBOX_PORT = 7740;
 
@@ -308,7 +308,7 @@ export function createRailwayServerProvider({
     throw lastError;
   }
 
-  function sandboxVariables(bootstrapToken, limits, credentials) {
+  function sandboxVariables(bootstrapToken, limits, credentials, selectedProvider = 'codex') {
     return {
       RAUHWpx_HOST: '0.0.0.0',
       RAUHWpx_PORT: String(SANDBOX_PORT),
@@ -325,6 +325,7 @@ export function createRailwayServerProvider({
       RAUHWpx_WORKSPACE_ROOT: '/var/lib/rauhwpx-workspaces',
       RAUHWpx_DATA_DIR: '/var/lib/rauhwpx-cloud',
       RAUHWpx_SANDBOX_INSTALL_PROVIDER: '0',
+      RAUHWpx_SANDBOX_PROVIDER: selectedProvider,
       ...sandboxCredentialVariables(credentials),
     };
   }
@@ -538,11 +539,25 @@ export function createRailwayServerProvider({
   }
 
   async function removeService(sandbox, { signal } = {}) {
-    const data = await graphql(SERVICE_DELETE, {
-      id: sandbox.sandboxId,
-      environmentId: sandbox.environmentId || config.environmentId || null,
-    }, { signal, allowNotFound: true, retryTransient: true });
-    return data === null ? 'already-removed' : 'removed';
+    try {
+      const data = await graphql(SERVICE_DELETE, {
+        id: sandbox.sandboxId,
+        environmentId: sandbox.environmentId || config.environmentId || null,
+      }, { signal, allowNotFound: true, retryTransient: false });
+      return data === null ? 'already-removed' : 'removed';
+    } catch (error) {
+      // Railway can commit a delete and then return a transport or GraphQL
+      // error. Do not replay the mutation; prove the paid service is absent.
+      const existing = await findServiceById(sandbox.sandboxId, {
+        projectId: sandbox.projectId || config.projectId,
+        attempts: Math.min(3, safeReconcileAttempts),
+      }).catch((reconcileError) => {
+        error.reconcileFailed = reconcileError.message;
+        return undefined;
+      });
+      if (existing === null) return 'removed';
+      throw error;
+    }
   }
 
   async function cleanupAmbiguousCreate(serviceName, cancellation, onLine) {
@@ -583,6 +598,7 @@ export function createRailwayServerProvider({
     async spawn({
       deviceName = 'Rauhwpx desktop',
       limits = null,
+      selectedProvider = 'codex',
       credentials = null,
       signal,
       onLine = () => {},
@@ -600,7 +616,7 @@ export function createRailwayServerProvider({
             environmentId: config.environmentId,
             name: serviceName,
             source: { image: config.image },
-            variables: sandboxVariables(bootstrapToken, limits, credentials),
+            variables: sandboxVariables(bootstrapToken, limits, credentials, selectedProvider),
           },
         }, { signal });
       } catch (error) {
