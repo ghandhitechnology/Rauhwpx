@@ -405,7 +405,7 @@
 
 .ag-calibration-provider-group {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   overflow: hidden;
   border: 1px solid var(--n-hairline-strong);
   border-radius: var(--n-radius-field);

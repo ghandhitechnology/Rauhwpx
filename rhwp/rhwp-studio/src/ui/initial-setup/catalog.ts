@@ -2,6 +2,7 @@ import { AGENT_MODELS, modelsForAgent } from '../../agent/models.ts';
 import type { AgentName, AgentSetupStatusMap } from '../../agent/types.ts';
 
 export const PROVIDER_VENDOR: Record<AgentName, string> = {
+  rau: 'Rau',
   claude: 'Anthropic',
   codex: 'OpenAI',
   pi: 'OpenRouter',
@@ -10,7 +11,7 @@ export const PROVIDER_VENDOR: Record<AgentName, string> = {
 };
 
 /** 기본 프로바이더 — 설정되지 않았을 때 흰 CTA 를 준다. */
-export const SUGGESTED_AGENT: AgentName = 'codex';
+export const SUGGESTED_AGENT: AgentName = 'rau';
 
 export function previewModelLabels(agent: AgentName): string[] {
   if (agent === 'pi') {

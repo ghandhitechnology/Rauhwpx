@@ -463,8 +463,9 @@ test('사이드바 버튼은 마지막에 불러온 얇고 반듯한 스타일�
 });
 
 test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조색을 모두 갖춘다', () => {
-  // 연결 목록과 입력기 피커는 다섯 프로바이더를 같은 순서로 세운다.
-  assert.deepEqual([...PROVIDER_ORDER], ['claude', 'codex', 'pi', 'grok', 'cursor']);
+  // 연결 목록과 입력기 피커는 여섯 프로바이더를 같은 순서로 세운다.
+  assert.deepEqual([...PROVIDER_ORDER], ['rau', 'claude', 'codex', 'pi', 'grok', 'cursor']);
+  assert.equal(AGENT_LABEL.rau, 'Rau');
   assert.equal(AGENT_LABEL.grok, 'Grok');
   assert.equal(AGENT_LABEL.cursor, 'Cursor');
   // 두 화면 모두 표를 다시 베끼지 않고 공용 모듈에서 가져다 쓴다.
@@ -477,16 +478,19 @@ test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조
   // cursor 표기는 언제나 "Cursor" 다.
   assert.doesNotMatch(settings, /'Cursor Agent'|'cursor-agent'/);
   // 단색 로고는 마스크로 그리므로 마스크 목록과 CSS 규칙이 함께 있어야 한다.
-  assert.deepEqual([...MASK_ICON_AGENTS], ['codex', 'pi', 'grok', 'cursor']);
+  assert.deepEqual([...MASK_ICON_AGENTS], ['rau', 'codex', 'pi', 'grok', 'cursor']);
   // 마스크가 아닌 프로바이더만 이미지 경로를 갖는다.
   assert.equal(PROVIDER_ICON_SRC.claude, '/icons/provider-claude.png');
   assert.equal(PROVIDER_ICON_SRC.grok, undefined);
   assert.equal(PROVIDER_ICON_SRC.cursor, undefined);
+  assert.match(css, /\.ag-provider-icon-mask\[data-agent='rau'\][\s\S]*?rau\.png/);
   assert.match(css, /\.ag-provider-icon-mask\[data-agent='grok'\][\s\S]*?provider-grok\.svg/);
   assert.match(css, /\.ag-provider-icon-mask\[data-agent='cursor'\][\s\S]*?provider-cursor\.svg/);
   // 강조색은 라이트/다크 팔레트에 모두 있고 data-agent 로 갈린다.
+  assert.equal((css.match(/--ag-rau:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-grok:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-cursor:/g) ?? []).length, 2);
+  assert.equal((css.match(/--ag-rau-wash:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-grok-wash:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-cursor-wash:/g) ?? []).length, 2);
   assert.match(css, /\.ag-root\[data-agent='grok'\] \{\s*--ag-accent: var\(--ag-grok\);/);
@@ -527,8 +531,21 @@ test('cursor 모델 선택은 구독/API 과금 풀로 나뉘어 보인다', () 
   assert.match(css, /\.ag-llm-group-label \{[\s\S]*?flex-basis: 100%/);
 });
 
+test('Rau 는 목록 맨 앞이고 흰 테두리 · 로그인 전용 설정 · $0 전송 잠금을 갖는다', () => {
+  assert.equal(PROVIDER_ORDER[0], 'rau');
+  assert.match(settingsCss, /\.ag-settings-provider-row\[data-agent='rau'\][\s\S]*?border-color:\s*#fff/);
+  assert.match(settings, /if \(agent === 'rau'\) \{\s*\n\s*if \(oauthTitle\) oauthTitle\.textContent = 'Rau로 시작'/);
+  assert.match(settings, /setupApiToggle\.hidden = true/);
+  assert.match(settings, /setupKeyBox\.hidden = true/);
+  assert.match(settings, /이 기기에서 끊기/);
+  assert.match(source, /function rauCreditsEmpty\(\): boolean/);
+  assert.match(source, /체험 크레딧이 다 됐어요\. 다른 모델을 연결해 주세요\./);
+  assert.match(source, /case 'usage-report':\s*\n\s*lastUsage = e\.usage/);
+});
+
 test('설정 모달은 프로바이더별 설치 안내와 API 키 힌트를 갖는다', () => {
   assert.match(settings, /const SETUP_INSTALL_NOTE: Record<AgentName, string>/);
+  assert.match(settings, /rau: '브라우저로 로그인하면 \$5 체험 크레딧이 바로 연결됩니다\.'/);
   assert.match(settings, /cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다\.'/);
   assert.match(settings, /grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다\.'/);
   assert.match(settings, /const API_KEY_PLACEHOLDER: Record<AgentName, string>/);

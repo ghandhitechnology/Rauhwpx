@@ -40,6 +40,18 @@ const ENV_PASSTHROUGH = [
 const CREDENTIAL_NAME = /(API_KEY|AUTH_TOKEN|OAUTH_TOKEN|SECRET|ACCESS_KEY|BEARER)/i;
 /** 오류 문자열에서 API 키처럼 보이는 토큰을 지운다. */
 const SECRET_LIKE = /\b(?:sk|pk)-[A-Za-z0-9_-]{12,}/g;
+const CREDIT_ERROR = /(?:\b402\b|payment required|insufficient (?:credits|quota)|credit(?:s)? (?:exhausted|depleted|exceeded)|out of credits)/i;
+
+export function isOpenRouterCreditError(text) {
+  return CREDIT_ERROR.test(String(text ?? ''));
+}
+
+export function formatOpenRouterCreditError(text, agent = 'pi') {
+  if (!isOpenRouterCreditError(text)) return null;
+  return agent === 'rau'
+    ? 'Rau 체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.'
+    : 'OpenRouter 크레딧이 부족합니다.';
+}
 
 /**
  * @typedef {import('./backend.mjs').BackendOptions & {
@@ -47,6 +59,7 @@ const SECRET_LIKE = /\b(?:sk|pk)-[A-Za-z0-9_-]{12,}/g;
  *   piRoot?: string,
  *   openRouterApiKey?: string,
  *   reasoning?: boolean,
+ *   agentName?: 'pi' | 'rau',
  * }} PiBackendOptions
  *
  * piBin  — pi 실행 파일 경로(`<piRoot>/prefix/node_modules/.bin/pi`).
@@ -145,7 +158,9 @@ export function buildPiEnv(opts, sourceEnv = process.env) {
  * @param {NodeJS.Signals | null} signal
  * @param {string} token
  */
-export function formatPiExitError(stderrText, code, signal, token) {
+export function formatPiExitError(stderrText, code, signal, token, agent = 'pi') {
+  const credit = formatOpenRouterCreditError(stderrText, agent);
+  if (credit) return credit;
   let clean = String(stderrText ?? '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
   if (token) clean = clean.split(token).join('[redacted]');
   clean = clean.replace(SECRET_LIKE, '[redacted]');
@@ -257,8 +272,9 @@ export function createPiSession(opts, {
         if (message.stopReason === 'error') {
           // json 모드의 API 오류는 종료 코드 0 으로 끝난다. 이유는 여기에만 있다.
           const detail = String(message.errorMessage ?? 'pi turn failed');
-          turnFailureMessage = detail;
-          onEvent({ type: 'error', agent: 'pi', message: detail });
+          turnFailureMessage = formatOpenRouterCreditError(detail, opts.agentName)
+            ?? detail;
+          onEvent({ type: 'error', agent: 'pi', message: turnFailureMessage });
         }
         return;
       }
@@ -367,7 +383,7 @@ export function createPiSession(opts, {
             onEvent({
               type: 'error',
               agent: 'pi',
-              message: formatPiExitError(stderrTail, code, signal, opts.token),
+              message: formatPiExitError(stderrTail, code, signal, opts.token, opts.agentName),
             });
             endTurn({ type: 'turn-end', agent: 'pi', stopReason: 'exited' });
           } else {

@@ -6,7 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createPiManager, defaultPiRoot } from '../pi-manager.mjs';
+import { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS } from '../../rau-credits/catalog.mjs';
+import { createPiManager, defaultPiRoot, PI_SECRET_ID, RAU_SECRET_ID } from '../pi-manager.mjs';
 import { createMemorySecretStore } from '../secret-store.mjs';
 
 const PI_PACKAGE = '@earendil-works/pi-coding-agent';
@@ -618,4 +619,51 @@ test('syncAssets rewrites settings.json without an install', async () => {
   );
 
   await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Rau profile shares the Pi prefix but keeps a separate secret and locked catalog', async () => {
+  const prefixDir = await tmpRoot();
+  const piRoot = await tmpRoot();
+  const rauRoot = await tmpRoot();
+  const secretStore = createMemorySecretStore();
+  const pi = createPiManager({
+    rootDir: piRoot,
+    prefixDir,
+    openRouter: fakeOpenRouter(),
+    secretStore,
+    secretId: PI_SECRET_ID,
+  });
+  const rau = createPiManager({
+    rootDir: rauRoot,
+    prefixDir,
+    openRouter: fakeOpenRouter(),
+    secretStore,
+    secretId: RAU_SECRET_ID,
+    lockedModels: RAU_LOCKED_MODELS,
+    skipLegacyKey: true,
+  });
+
+  await pi.setApiKey('sk-or-v1-pi-key-aaaa');
+  const rauStatus = await rau.setApiKey('sk-or-v1-rau-key-bbbb');
+  assert.equal(await secretStore.get(PI_SECRET_ID), 'sk-or-v1-pi-key-aaaa');
+  assert.equal(await secretStore.get(RAU_SECRET_ID), 'sk-or-v1-rau-key-bbbb');
+  assert.equal(pi.apiKey(), 'sk-or-v1-pi-key-aaaa');
+  assert.equal(rau.apiKey(), 'sk-or-v1-rau-key-bbbb');
+  assert.equal(rauStatus.setupComplete, true);
+  assert.equal(rauStatus.defaultModelId, RAU_DEFAULT_MODEL_ID);
+  assert.equal(rauStatus.models.length, 4);
+  assert.equal((await pi.status()).setupComplete, false);
+  await assert.rejects(() => rau.setModels([{ id: RAU_DEFAULT_MODEL_ID }]), (error) => {
+    assert.equal(error.code, 'PI_MODELS_LOCKED');
+    return true;
+  });
+  await rau.clearApiKey();
+  assert.equal(await secretStore.get(RAU_SECRET_ID), null);
+  assert.equal(await secretStore.get(PI_SECRET_ID), 'sk-or-v1-pi-key-aaaa');
+  assert.equal((await rau.status()).setupComplete, false);
+  assert.equal(pi.apiKey(), 'sk-or-v1-pi-key-aaaa');
+
+  await fs.rm(prefixDir, { recursive: true, force: true });
+  await fs.rm(piRoot, { recursive: true, force: true });
+  await fs.rm(rauRoot, { recursive: true, force: true });
 });

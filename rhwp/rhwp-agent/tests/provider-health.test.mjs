@@ -171,6 +171,7 @@ test('pi reports 설치되지 않았어요 until a bin path exists', async () =>
   assert.equal(result.pi.version, null);
   assert.equal(result.pi.error, '설치되지 않았어요');
   assert.ok(Number.isFinite(result.pi.checkedAt));
+  assert.equal(result.rau, result.pi);
 });
 
 test('an installed pi is probed through its own bin path', async () => {

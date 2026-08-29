@@ -25,6 +25,7 @@ import type {
   SidebarEvent,
   StructuredPlan,
   SkillCatalog,
+  UsageSummary,
   ProductSkill,
   ProductSkillIcon,
   DocumentTemplate,
@@ -889,8 +890,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
   });
 
-  /* pi 는 설치·키·모델이 다 끝나야 입력기 메뉴에 선다 (설정 탭에는 늘 있다). */
+  /* pi · rau 는 설정이 끝나야 입력기 메뉴에 선다 (설정 탭에는 늘 있다). */
   let piSetupComplete = false;
+  let rauSetupComplete = false;
+  let lastUsage: UsageSummary | null = null;
 
   const header = el('header', 'ag-header');
   const selectors = el('div', 'ag-selectors');
@@ -947,6 +950,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function syncProviderMenu(): void {
     const pi = providerItems.get('pi');
     if (pi) pi.hidden = !piSetupComplete && selectedAgent !== 'pi';
+    const rau = providerItems.get('rau');
+    if (rau) rau.hidden = !rauSetupComplete && selectedAgent !== 'rau';
+  }
+
+  function rauCreditsEmpty(): boolean {
+    const credits = lastUsage?.rau;
+    return rauSetupComplete && credits != null && credits.balanceUsd <= 0 && !credits.error;
   }
 
   syncProviderMenu();
@@ -3277,10 +3287,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       return;
     }
     if (planningPhase === 'switching' || chatStartPendingThreadId !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
+    if (selectedAgent === 'rau' && rauCreditsEmpty()) {
+      systemMessage('체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.');
+      return;
+    }
     let text = input.value.trim();
     if ((!text && !activeComposerSkill && !referenceLibrary.hasDrafts()) || connState !== 'connected') return;
     if (referenceLibrary.hasImageDrafts() && !modelSupportsImages(selectedAgent, selectedModel)) {
-      systemMessage('현재 Pi 모델은 이미지 입력을 지원하지 않습니다. 이미지 지원 모델로 바꾼 뒤 다시 보내 주세요.');
+      systemMessage(`현재 ${AGENT_LABEL[selectedAgent]} 모델은 이미지 입력을 지원하지 않습니다. 이미지 지원 모델로 바꾼 뒤 다시 보내 주세요.`);
       return;
     }
     if (!text && !activeComposerSkill) {
@@ -4411,6 +4425,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       send.disabled = true;
       composerSkillClear.disabled = true;
       input.placeholder = `"${readOnlyDocLabel}" 문서의 채팅 — 읽기 전용`;
+    } else if (selectedAgent === 'rau' && rauCreditsEmpty()) {
+      input.disabled = connState !== 'connected';
+      send.disabled = true;
+      composerSkillClear.disabled = input.disabled;
+      input.placeholder = '체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.';
     } else {
       const chatStarting = chatStartPendingThreadId !== null;
       input.disabled = connState !== 'connected' || attachmentsSending || chatStarting;
@@ -5226,6 +5245,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         refreshSidebarWidthMin();
         break;
       case 'agent-setup-status':
+        rauSetupComplete = e.statuses.rau?.setupComplete === true;
+        syncProviderMenu();
         // 브리지가 cursor 모델 레지스트리를 먼저 갱신했다 — 목록과 선택값을 다시 읽는다.
         if (selectedAgent === 'cursor') {
           selectedModel = resolveModelForAgent('cursor', selectedModel);
@@ -5234,15 +5255,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           rebuildEffortMenu();
           refreshSidebarWidthMin();
         }
+        updateComposer();
+        break;
+      case 'usage-report':
+        lastUsage = e.usage;
+        updateComposer();
         break;
       case 'writing-style-status':
       case 'writing-style-progress':
       case 'writing-style-result':
       case 'writing-style-error':
       case 'writing-style-catalog':
-      // 프로바이더 상태·사용량·pi 설정 진행은 설정 탭이 이미 받아 그렸다.
+        break;
+      // 프로바이더 상태·pi 설정 진행은 설정 탭이 이미 받아 그렸다.
       case 'provider-status':
-      case 'usage-report':
       case 'pi-setup-progress':
       case 'pi-catalog':
       case 'pi-error':

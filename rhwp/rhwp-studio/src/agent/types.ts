@@ -14,7 +14,7 @@ import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 
 export const AGENT_PROTOCOL_VERSION = 3;
 
-export type AgentName = 'claude' | 'codex' | 'pi' | 'grok' | 'cursor';
+export type AgentName = 'claude' | 'codex' | 'pi' | 'grok' | 'cursor' | 'rau';
 
 /** 활성 턴에서 파생되는 사용자 편집 잠금 상태. */
 export interface AgentEditingLease {
@@ -311,6 +311,8 @@ export interface AgentSetupStatus {
   keyTail: string | null;
   authenticating: boolean;
   setupComplete: boolean;
+  /** Rau 체험 잔액이 0 일 때. 다른 프로바이더는 보내지 않는다. */
+  exhausted?: boolean;
   latestVersion: string | null;
   updateRequired: boolean;
   error: string | null;
@@ -402,6 +404,8 @@ export interface UsageSummary {
   cliproxy?: CliproxyStatus;
   /** pi(OpenRouter) 가 설정돼 있을 때만 온다. */
   openrouter?: OpenRouterCredits;
+  /** Rau 체험 키 잔액. */
+  rau?: OpenRouterCredits;
 }
 
 /** pi 사용자가 OpenRouter 카탈로그에서 고른 모델 하나 (최대 3개). */
@@ -437,6 +441,8 @@ export interface PiStatus {
   models: PiModelConfig[];
   defaultModelId: string | null;
   setupComplete: boolean;
+  /** Rau 체험 잔액이 0 일 때 true — 목록에는 남고 전송만 막는다. */
+  exhausted?: boolean;
   latestVersion: string | null;
   updateRequired: boolean;
   error: string | null;
@@ -505,6 +511,7 @@ const USAGE_PLAN_GUARDS: Record<AgentName, (value: unknown) => boolean> = {
   pi: isApiOnlyUsagePlan,
   grok: isApiOnlyUsagePlan,
   cursor: isApiOnlyUsagePlan,
+  rau: isApiOnlyUsagePlan,
 };
 
 export function isUsagePlanForAgent(agent: AgentName, value: unknown): boolean {

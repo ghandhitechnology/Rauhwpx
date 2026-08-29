@@ -61,6 +61,7 @@ const API_USAGE_AGENTS: readonly AgentName[] = ['grok', 'cursor'];
 
 /** 설치 안내 — cursor 는 npm 이 아니라 공식 설치 스크립트로 받는다. */
 const SETUP_INSTALL_NOTE: Record<AgentName, string> = {
+  rau: '브라우저로 로그인하면 $5 체험 크레딧이 바로 연결됩니다.',
   claude: 'Claude CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
   codex: 'Codex CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
   pi: 'Pi 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
@@ -70,6 +71,7 @@ const SETUP_INSTALL_NOTE: Record<AgentName, string> = {
 
 /** API 키 입력칸 힌트 — 키 접두사가 있는 프로바이더만 형태를 보여준다. */
 const API_KEY_PLACEHOLDER: Record<AgentName, string> = {
+  rau: '',
   claude: 'sk-ant-…',
   codex: 'sk-proj-…',
   pi: 'sk-or-…',
@@ -736,7 +738,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupDoneClose.type = 'button';
   const setupDoneChange = el('button', 'ag-settings-btn', '로그인 방식 변경');
   setupDoneChange.type = 'button';
-  setupDonePane.append(setupDoneMark, setupDoneTitle, setupDoneDetail, setupDoneChange, setupDoneClose);
+  const setupDoneDisconnect = el('button', 'ag-settings-btn', '이 기기에서 끊기');
+  setupDoneDisconnect.type = 'button';
+  setupDoneDisconnect.hidden = true;
+  setupDonePane.append(setupDoneMark, setupDoneTitle, setupDoneDetail, setupDoneChange, setupDoneDisconnect, setupDoneClose);
 
   setupGeneric.append(
     setupHero,
@@ -798,6 +803,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupReauth = true;
     setupMessage = '';
     renderAgentSetup();
+  });
+  setupDoneDisconnect.addEventListener('click', () => {
+    void disconnectRau();
   });
   setupOverlay.addEventListener('pointerdown', (event) => {
     if (event.target === setupOverlay) closeAgentSetup();
@@ -1166,6 +1174,22 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const piUsageUpdated = el('div', 'ag-settings-usage-updated');
   piUsageBlock.append(piUsageHead, piUsageDay, piUsageWeek, piUsageModels, piUsageUpdated);
   usageSection.body.appendChild(piUsageBlock);
+
+  const rauUsageBlock = el('div', 'ag-settings-usage-block');
+  rauUsageBlock.dataset.agent = 'rau';
+  const rauUsageHead = el('div', 'ag-settings-usage-head');
+  const rauUsageName = el('span', 'ag-settings-row-name');
+  rauUsageName.append(createProviderIcon('rau'), document.createTextNode(AGENT_LABEL.rau));
+  const rauUsageCredits = el('span', 'ag-settings-row-detail');
+  rauUsageHead.append(rauUsageName, rauUsageCredits);
+  const rauUsageEmpty = el('p', 'ag-settings-note', '체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.');
+  rauUsageEmpty.hidden = true;
+  const rauUsageDay = el('div', 'ag-settings-usage-day');
+  const rauUsageWeek = el('div', 'ag-settings-usage-day');
+  const rauUsageModels = el('div', 'ag-settings-usage-models');
+  const rauUsageUpdated = el('div', 'ag-settings-usage-updated');
+  rauUsageBlock.append(rauUsageHead, rauUsageEmpty, rauUsageDay, rauUsageWeek, rauUsageModels, rauUsageUpdated);
+  usageSection.body.appendChild(rauUsageBlock);
 
   // grok · cursor 는 요금제도 잔액도 없다 — 허브가 기록한 세션 · 오늘 · 주간 토큰을 그대로 보여준다.
   const apiUsageBlocks = new Map<
@@ -1557,9 +1581,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     return withTemplateMutation(() => bridge.deleteTemplate(id));
   }
 
-  /** 설정이 끝나기 전의 pi 는 기본 제공자 후보에서 빠진다. */
+  /** 설정이 끝나기 전의 pi · rau 는 기본 제공자 후보에서 빠진다. */
   function selectableAgents(): readonly AgentName[] {
-    return PROVIDER_ORDER.filter((agent) => agent !== 'pi' || piStatus?.setupComplete === true);
+    return PROVIDER_ORDER.filter((agent) => {
+      if (agent === 'pi') return piStatus?.setupComplete === true;
+      if (agent === 'rau') return setupStatuses?.rau?.setupComplete === true;
+      return true;
+    });
   }
 
   function syncPrefsInputs(): void {
@@ -1708,6 +1736,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   async function continueAgentConnect(agent: AgentName): Promise<void> {
     await refreshSetupStatuses();
+    if (agent === 'rau') {
+      if (disposed || setupAgent !== agent) return;
+      renderAgentSetup();
+      if (connectionState !== 'connected') return;
+      if (isAgentLoggedIn(agent)) return;
+      await startSetupAuth('oauth');
+      return;
+    }
     if (agent === 'pi') {
       try {
         const next = await bridge.requestPiStatus();
@@ -1868,9 +1904,25 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupHeroTitle.textContent = AGENT_LABEL[agent];
     setupInstallNote.textContent = SETUP_INSTALL_NOTE[agent];
     setupKey.input.placeholder = API_KEY_PLACEHOLDER[agent];
-    setupInstallPane.hidden = available;
-    setupAuthPane.hidden = !available || (connected && !setupReauth);
+    const oauthTitle = setupOauth.querySelector('strong');
+    const oauthDetail = setupOauth.querySelector('span');
+    if (agent === 'rau') {
+      if (oauthTitle) oauthTitle.textContent = 'Rau로 시작';
+      if (oauthDetail) oauthDetail.textContent = '브라우저 로그인 · $5 체험 크레딧';
+      setupInstallPane.hidden = true;
+      setupApiToggle.hidden = true;
+      setupKeyBox.hidden = true;
+      setupAuthPane.hidden = connected && !setupReauth;
+    } else {
+      if (oauthTitle) oauthTitle.textContent = '브라우저로 로그인';
+      if (oauthDetail) oauthDetail.textContent = '구독 계정 또는 웹 계정 연결';
+      setupApiToggle.hidden = false;
+      setupInstallPane.hidden = available;
+      setupAuthPane.hidden = !available || (connected && !setupReauth);
+    }
     setupDonePane.hidden = !connected || setupReauth;
+    setupDoneChange.hidden = agent === 'rau';
+    setupDoneDisconnect.hidden = agent !== 'rau' || !connected || setupReauth;
     setupDoneDetail.textContent = status?.authMethod === 'api-key' && status.keyTail
       ? `API 키 ****${status.keyTail}`
       : status?.authenticated
@@ -1934,6 +1986,22 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     else if (!setupMessage) setupMessage = '설치를 완료하지 못했어요.';
     renderAgentSetup();
     renderProviders();
+  }
+
+  async function disconnectRau(): Promise<void> {
+    if (setupBusy || connectionState !== 'connected') return;
+    setupBusy = true;
+    setupMessage = '';
+    renderAgentSetup();
+    const statuses = await bridge.disconnectAgent('rau');
+    if (disposed) return;
+    setupBusy = false;
+    if (statuses) setupStatuses = statuses;
+    else if (!setupMessage) setupMessage = '이 기기 연결을 끊지 못했어요.';
+    renderAgentSetup();
+    renderProviders();
+    renderUsage();
+    syncPrefsInputs();
   }
 
   async function startSetupAuth(method: AgentAuthMethod): Promise<void> {
@@ -2094,6 +2162,29 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   }
 
   /** pi 사용량 — 요금제 대신 잔액, 미터 대신 오늘·주간 누적. */
+  function renderRauUsage(): void {
+    const setup = setupStatuses?.rau;
+    rauUsageBlock.hidden = setup?.setupComplete !== true && setup?.connected !== true;
+    if (rauUsageBlock.hidden) return;
+    const credits = usage?.rau ?? null;
+    const empty = credits != null && credits.balanceUsd <= 0 && !credits.error;
+    rauUsageCredits.textContent = credits
+      ? (credits.error ?? `잔액 ${formatUsd(credits.balanceUsd)} / $5`)
+      : '잔액 확인 중…';
+    rauUsageEmpty.hidden = !empty;
+    const providerUsage = usage?.providers?.rau ?? null;
+    rauUsageDay.textContent = providerUsage
+      ? `오늘 · ${formatTokens(providerUsage.day.weightedTokens)} 토큰 · ${providerUsage.day.turns}턴`
+      : '오늘 · 기록 없음';
+    rauUsageWeek.textContent = providerUsage
+      ? `주간 · ${formatTokens(providerUsage.week.weightedTokens)} 토큰 · ${providerUsage.week.turns}턴`
+      : '주간 · 기록 없음';
+    rauUsageModels.replaceChildren(...buildModelRows(providerUsage, 'rau'));
+    rauUsageUpdated.textContent = providerUsage?.updatedAt
+      ? `${formatRelativeTime(providerUsage.updatedAt)} 기록`
+      : '';
+  }
+
   function renderPiUsage(): void {
     piUsageBlock.hidden = piStatus?.setupComplete !== true;
     if (piUsageBlock.hidden) return;
@@ -2147,6 +2238,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   function renderUsage(): void {
     renderCliproxy();
+    renderRauUsage();
     renderPiUsage();
     renderApiUsage();
     for (const agent of PLAN_AGENTS) {
@@ -2816,6 +2908,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           break;
         case 'agent-setup-status': {
           setupStatuses = ev.statuses;
+          if (setupAgent === 'rau' && ev.statuses.rau?.setupComplete === true) {
+            stagePrefs({ defaultAgent: 'rau', defaultModel: 'z-ai/glm-5.3-flash' });
+            trySaveAgentPrefs({ defaultAgent: 'rau', defaultModel: 'z-ai/glm-5.3-flash' });
+          }
           // 로그인·설치가 아직 진행 중이면 주기 방송이 카드 상태(주소·코드)를 지우지 않는다.
           const inFlight = setupAgent !== null && setupBusy
             && (ev.statuses[setupAgent]?.authenticating === true

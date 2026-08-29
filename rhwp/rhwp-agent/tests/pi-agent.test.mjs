@@ -3,7 +3,14 @@ import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import test from 'node:test';
 
-import { buildPiArgv, buildPiEnv, createPiSession, formatPiExitError } from '../agents/pi.mjs';
+import {
+  buildPiArgv,
+  buildPiEnv,
+  createPiSession,
+  formatOpenRouterCreditError,
+  formatPiExitError,
+  isOpenRouterCreditError,
+} from '../agents/pi.mjs';
 
 const baseOpts = {
   rootDir: '/tmp/rhwp',
@@ -260,6 +267,18 @@ test('formatPiExitError redacts key-shaped strings and falls back without stderr
   assert.equal(
     formatPiExitError('', null, 'SIGKILL', 'tok'),
     'Pi 실행이 중단되었습니다 (signal SIGKILL). Pi가 오류 설명을 제공하지 않았습니다.',
+  );
+});
+
+test('OpenRouter 402 blocks a Rau turn with the empty-credit copy', () => {
+  assert.equal(isOpenRouterCreditError('OpenRouter 402 Payment Required'), true);
+  assert.equal(
+    formatOpenRouterCreditError('HTTP 402: insufficient credits', 'rau'),
+    'Rau 체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.',
+  );
+  assert.match(
+    formatPiExitError('402 Payment Required: out of credits', 1, null, '', 'rau'),
+    /체험 크레딧이 다 됐어요/,
   );
 });
 
