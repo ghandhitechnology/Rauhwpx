@@ -78,8 +78,10 @@ async function bootControlPlane(t, variables) {
   return { config, runtime, started, origin: `http://127.0.0.1:${port}`, port };
 }
 
-async function liveHarness(t, { boot = true } = {}) {
+async function liveHarness(t, { boot = true, healthStatuses = [] } = {}) {
   const deployStatus = { value: 'SUCCESS' };
+  const pendingHealthStatuses = [...healthStatuses];
+  let healthRequests = 0;
   const calls = [];
   let plane = null;
   const desktopDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-live-desktop-'));
@@ -111,6 +113,11 @@ async function liveHarness(t, { boot = true } = {}) {
     const requested = new URL(typeof input === 'string' ? input : input.url);
     assert.equal(requested.hostname, SANDBOX_HOST, 'the desktop only talks to the sandbox domain');
     if (!plane) throw new TypeError('fetch failed');
+    if (requested.pathname === `${BASE_PATH}/v1/health`) {
+      healthRequests += 1;
+      const status = pendingHealthStatuses.shift();
+      if (status) return Promise.resolve(new Response('Application not found', { status }));
+    }
     return fetch(new URL(`${requested.pathname}${requested.search}`, plane.origin), options);
   };
 
@@ -146,11 +153,24 @@ async function liveHarness(t, { boot = true } = {}) {
     provider,
     vault,
     deployStatus,
+    healthRequests: () => healthRequests,
     names: () => calls.map((call) => call.name),
     createVariables: () => calls.find((call) => call.name === 'RauhwpxServiceCreate')?.variables.input.variables,
     plane: () => plane,
   };
 }
+
+test('Railway onboarding waits through a transient route miss before health', async (t) => {
+  const live = await liveHarness(t, { healthStatuses: [404] });
+  await live.coordinator.start();
+
+  const ready = await live.coordinator.spawnAppServer({ deviceName: 'Rauhwpx integration' });
+
+  assert.equal(ready.server.lifecycle, 'ready');
+  assert.equal(live.healthRequests() >= 2, true);
+  assert.equal(live.names().includes('RauhwpxServiceDelete'), false);
+  await live.coordinator.teardownAppServer();
+});
 
 test('the app-provided path pairs against a real control plane and closes bootstrap for good', async (t) => {
   const live = await liveHarness(t);
