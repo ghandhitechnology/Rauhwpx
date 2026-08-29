@@ -525,6 +525,22 @@ test('a Railway sandbox that never becomes usable is removed instead of left beh
   await assert.rejects(offline.spawn({ onLine: () => {} }), { code: 'PROVIDER_UNREACHABLE' });
 });
 
+test('Railway fails immediately on deterministic health errors and removes the service', async () => {
+  let probes = 0;
+  const { provider, transport } = railwayProvider(SPAWN_ROUTES, {
+    probeHealth: async () => {
+      probes += 1;
+      throw new Error('SSH host is required');
+    },
+    healthTimeoutMs: 60_000,
+    sleep: async () => { throw new Error('deterministic health failures must not sleep'); },
+  });
+
+  await assert.rejects(provider.spawn({ onLine: () => {} }), /SSH host is required/);
+  assert.equal(probes, 1);
+  assert.equal(transport.names().filter((name) => name === 'RauhwpxServiceDelete').length, 1);
+});
+
 test('Railway status maps deployments to lifecycles and teardown is idempotent', async () => {
   const lifecycles = [
     ['BUILDING', 'provisioning'],
