@@ -12,6 +12,7 @@ import test from 'node:test';
 import { CloudClient } from '../desktop/cloud-client.mjs';
 import { CloudCoordinator } from '../desktop/cloud-coordinator.mjs';
 import { createRailwayServerProvider } from '../desktop/cloud-railway.mjs';
+import { CloudApiTransport, SshTunnelManager } from '../desktop/cloud-ssh-tunnel.mjs';
 import { parseConfig } from '../cloud/src/config.mjs';
 import { createCloudRuntime } from '../cloud/src/runtime.mjs';
 
@@ -77,10 +78,12 @@ async function bootControlPlane(t, variables) {
   return { config, runtime, started, origin: `http://127.0.0.1:${port}`, port };
 }
 
-function liveHarness(t, { boot = true } = {}) {
+async function liveHarness(t, { boot = true } = {}) {
   const deployStatus = { value: 'SUCCESS' };
   const calls = [];
   let plane = null;
+  const desktopDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-live-desktop-'));
+  t.after(() => fs.rm(desktopDirectory, { recursive: true, force: true }));
 
   const routes = {
     RauhwpxServiceCreate: async (variables) => {
@@ -112,7 +115,15 @@ function liveHarness(t, { boot = true } = {}) {
   };
 
   const vault = memoryVault();
-  const client = new CloudClient({ vault, fetchImpl: sandboxFetch });
+  const client = new CloudClient({
+    vault,
+    fetchImpl: sandboxFetch,
+    transport: new CloudApiTransport({
+      tunnelManager: new SshTunnelManager({
+        knownHostsPath: path.join(desktopDirectory, 'ssh-known-hosts'),
+      }),
+    }),
+  });
   const provider = createRailwayServerProvider({
     config: RAILWAY_CONFIG,
     fetchImpl: railwayFetch,
@@ -126,7 +137,7 @@ function liveHarness(t, { boot = true } = {}) {
     client,
     store: { load: async () => [], list: async () => [] },
     provisioner: {},
-    recoveryDir: path.join(os.tmpdir(), 'rauhwpx-live-recovery'),
+    recoveryDir: path.join(desktopDirectory, 'recovery'),
     appServers: [provider],
   });
   return {
@@ -142,7 +153,7 @@ function liveHarness(t, { boot = true } = {}) {
 }
 
 test('the app-provided path pairs against a real control plane and closes bootstrap for good', async (t) => {
-  const live = liveHarness(t);
+  const live = await liveHarness(t);
   await live.coordinator.start();
   assert.equal(await live.client.isPaired(), false);
 
@@ -198,7 +209,7 @@ test('the app-provided path pairs against a real control plane and closes bootst
 });
 
 test('a sandbox that never answers is deleted and leaves the desktop unconfigured', async (t) => {
-  const live = liveHarness(t, { boot: false });
+  const live = await liveHarness(t, { boot: false });
   await live.coordinator.start();
   await assert.rejects(live.coordinator.spawnAppServer(), { code: 'SANDBOX_UNHEALTHY' });
   assert.equal(live.names().at(-1), 'RauhwpxServiceDelete', 'the paid service is removed');
