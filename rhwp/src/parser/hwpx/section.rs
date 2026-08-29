@@ -225,13 +225,11 @@ fn parse_master_page_start(e: &quick_xml::events::BytesStart, master_page: &mut 
             _ => {}
         }
     }
-    // 한컴 HWPX -> HWP5 저장본은 LAST_PAGE 바탕쪽을 확장 바탕쪽으로 저장하면서
-    // pageDuplicate="0"인 경우에도 overlap bit를 함께 세운다.
-    if is_last_page {
+    // 한컴 HWPX -> HWP5 저장본은 확장 바탕쪽(LAST_PAGE·OPTIONAL_PAGE)을 저장하면서
+    // pageDuplicate="0"인 경우에도 overlap bit를 함께 세운다. overlap bit 만으로는
+    // 겹치게 하기 의도를 알 수 없고, XML 의 pageDuplicate 를 봐야 한다.
+    if is_last_page || is_optional_page {
         master_page.replace_base = page_duplicate == Some(false);
-        master_page.overlap = true;
-    }
-    if is_optional_page {
         master_page.overlap = true;
     }
     master_page.ext_flags = u16::from(master_page.overlap)

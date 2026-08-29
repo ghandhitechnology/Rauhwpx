@@ -2,7 +2,7 @@
 //! 고정한다. 종전에는 파서가 이 선언을 `LAST_PAGE` 에만 반영해 임의 쪽 바탕쪽이
 //! 기본 바탕쪽 위에 덧그려졌고, 쪽번호가 같은 좌표에 포개졌다.
 //!
-//! 비공개 korea 샘플은 가져오지 않는다. IR 왕복과 pagination 계약으로 같은 형상을 잠근다.
+//! 비공개 korea 샘플은 가져오지 않는다. IR 왕복과 렌더 트리로 같은 형상을 잠근다.
 #![cfg(not(target_arch = "wasm32"))]
 
 use rhwp::document_core::DocumentCore;
@@ -47,32 +47,23 @@ fn doc_with_odd_and_optional_master(replace_base: bool) -> Document {
     doc
 }
 
-fn last_page_masters(core: &DocumentCore) -> (bool, usize) {
-    let page = core
-        .pagination
-        .first()
-        .and_then(|r| r.pages.last())
-        .expect("구역에 쪽이 있어야 함");
-    let extra = page.extra_master_pages.len();
-    let active_is_extension = page
-        .active_master_page
-        .as_ref()
-        .and_then(|mp_ref| {
-            core.document()
-                .sections
-                .get(mp_ref.section_index)
-                .and_then(|s| s.section_def.master_pages.get(mp_ref.master_page_index))
-        })
-        .map(|mp| mp.is_extension && mp.replace_base)
-        .unwrap_or(false);
-    (active_is_extension, extra)
-}
-
-fn master_page_children(root: &RenderNode) -> usize {
+fn master_page_children(root: &RenderNode) -> Vec<&RenderNode> {
     root.children
         .iter()
         .filter(|c| matches!(c.node_type, RenderNodeType::MasterPage))
-        .count()
+        .collect()
+}
+
+fn visible_texts(node: &RenderNode, out: &mut Vec<String>) {
+    if let RenderNodeType::TextRun(tr) = &node.node_type {
+        let text = tr.display_or_text().trim();
+        if !text.is_empty() {
+            out.push(text.to_string());
+        }
+    }
+    for child in &node.children {
+        visible_texts(child, out);
+    }
 }
 
 #[test]
@@ -96,20 +87,34 @@ fn optional_page_page_duplicate_0_roundtrips_replace_base() {
 fn optional_page_master_does_not_stack_on_the_base_master() {
     let bytes = serialize_hwpx(&doc_with_odd_and_optional_master(true)).expect("serialize");
     let core = DocumentCore::from_bytes(&bytes).expect("parse");
-    let (active_is_extension, extra) = last_page_masters(&core);
-    assert!(
-        active_is_extension,
-        "임의 쪽 바탕쪽이 기본 홀/짝 바탕쪽을 대체해야 한다"
-    );
-    assert_eq!(
-        extra, 0,
-        "extra_master_pages 가 있으면 쪽번호·머리말이 같은 좌표에 포개진다"
-    );
-
     let tree = core.build_page_render_tree(0).expect("render tree");
+    let masters = master_page_children(&tree.root);
+    let rendered: Vec<Vec<String>> = masters
+        .iter()
+        .map(|m| {
+            let mut t = Vec::new();
+            visible_texts(m, &mut t);
+            t
+        })
+        .collect();
+
     assert_eq!(
-        master_page_children(&tree.root),
+        masters.len(),
         1,
-        "그려진 바탕쪽이 한 겹이어야 한다"
+        "바탕쪽이 겹쳐 그려지면 쪽번호·머리말이 같은 좌표에 포개진다. \
+         그려진 바탕쪽 {}겹, 각 글자: {rendered:?}",
+        masters.len()
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|t| t.iter().any(|s| s.contains("임의"))),
+        "확장 바탕쪽 글자가 그려져야 한다: {rendered:?}"
+    );
+    assert!(
+        !rendered
+            .iter()
+            .any(|t| t.iter().any(|s| s.contains("홀수"))),
+        "기본 홀수 바탕쪽 글자가 남아 있으면 덧그리기다: {rendered:?}"
     );
 }

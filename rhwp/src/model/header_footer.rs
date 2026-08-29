@@ -74,8 +74,9 @@ pub struct MasterPage {
     pub overlap: bool,
     /// 렌더링 시 기존 기본 바탕쪽을 대체한다.
     ///
-    /// HWPX `LAST_PAGE pageDuplicate="0"`는 HWP5 저장 contract상 overlap bit가 켜질 수 있지만,
-    /// 렌더링 의미는 마지막쪽 전용 바탕쪽으로 기본 홀/짝 바탕쪽을 대체하는 쪽에 가깝다.
+    /// HWPX `LAST_PAGE`/`OPTIONAL_PAGE` 의 `pageDuplicate="0"` 은 HWP5 저장 contract상
+    /// overlap bit가 켜질 수 있지만, 렌더링 의미는 확장 바탕쪽이 기본 홀/짝 바탕쪽을
+    /// 대체하는 쪽에 가깝다.
     pub replace_base: bool,
     /// 확장 플래그 raw 값 (LIST_HEADER byte 18-19)
     pub ext_flags: u16,

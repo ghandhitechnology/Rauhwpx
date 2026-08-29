@@ -34,10 +34,9 @@ fn master_page_type_str(mp: &MasterPage) -> &'static str {
     }
 }
 
-/// pageDuplicate 문자열 (parser 의 역). LAST_PAGE 는 replace_base 면 "0", 그 외 overlap 기준.
+/// pageDuplicate 문자열 (parser 의 역). 확장 바탕쪽은 replace_base 면 "0", 그 외 overlap 기준.
 fn page_duplicate_str(mp: &MasterPage) -> &'static str {
-    if mp.is_extension && mp.ext_flags & 0x04 == 0 {
-        // LAST_PAGE
+    if mp.is_extension {
         if mp.replace_base {
             "0"
         } else {
