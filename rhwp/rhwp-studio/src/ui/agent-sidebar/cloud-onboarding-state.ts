@@ -278,8 +278,19 @@ export function mapCloudSetupIssue(error: unknown, transport: CloudProfileDraft[
   const detail = error instanceof Error ? error.message : String(error);
   const normalized = detail.toLowerCase();
   if (/shut down the app-provided sandbox|sandbox_still_active/.test(normalized)) return mapSandboxIssue(error);
+  if (/spawn .*enoent|enoent.*spawn|ssh .*not (?:found|installed)/.test(normalized)) {
+    return {
+      title: '이 기기에 OpenSSH 클라이언트가 없습니다',
+      guidance: 'Windows 설정의 선택 기능에서 OpenSSH 클라이언트를 설치하거나 macOS·Linux에서 ssh를 사용할 수 있는지 확인한 뒤 다시 시도하세요.',
+      detail,
+    };
+  }
   if (/permission denied|authentication failed|publickey/.test(normalized)) {
-    return { title: 'SSH 인증에 실패했습니다', guidance: 'SSH agent에 키를 추가하거나 올바른 개인 키 파일을 선택하세요.', detail };
+    return {
+      title: 'SSH 인증에 실패했습니다',
+      guidance: 'SSH agent에 키를 추가하거나 올바른 개인 키 파일을 선택하세요. Windows에서는 OpenSSH 인증 에이전트 서비스를 실행한 뒤 ssh-add로 키를 등록하세요.',
+      detail,
+    };
   }
   if (/timed out|timeout|econnrefused|could not resolve|name or service not known|no route to host/.test(normalized)) {
     return {

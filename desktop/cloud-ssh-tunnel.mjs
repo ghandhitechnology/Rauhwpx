@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
-import { normalizeCloudProfile } from './cloud-profile.mjs';
+import { normalizeCloudProfile, sshOptionFilePath } from './cloud-profile.mjs';
 
 const START_TIMEOUT_MS = 20_000;
 const STOP_TIMEOUT_MS = 5_000;
@@ -27,7 +27,7 @@ function sshTunnelArguments(profile, knownHostsPath, localPort) {
     '-o', 'ServerAliveCountMax=3',
     '-o', 'ExitOnForwardFailure=yes',
     '-o', 'ClearAllForwardings=yes',
-    '-o', `UserKnownHostsFile=${knownHostsPath}`,
+    '-o', sshOptionFilePath('UserKnownHostsFile', knownHostsPath),
     '-o', 'StrictHostKeyChecking=accept-new',
     '-p', String(ssh.port),
     ...(ssh.keyPath ? ['-i', ssh.keyPath, '-o', 'IdentitiesOnly=yes'] : []),

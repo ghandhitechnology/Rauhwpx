@@ -344,6 +344,21 @@ test('ssh arguments do not invoke a shell and pin known hosts', () => {
   assert.throws(() => sshArguments({ host: '-oProxyCommand=bad', user: 'x' }, '/tmp/kh', 'true'));
 });
 
+test('ssh known-hosts paths with spaces stay intact inside the -o value', () => {
+  const spaced = 'C:\\Users\\Foo Bar\\AppData\\Roaming\\Rauhwpx\\cloud\\ssh-known-hosts';
+  const args = sshArguments({ host: '100.97.8.94', user: 'cloud-user', port: 22 }, spaced, 'sudo -n true');
+  assert.ok(args.includes(`UserKnownHostsFile="${spaced}"`));
+  const tunnelProfile = coordinatorTest.uiProfileToStored({
+    host: 'mac-mini.local', sshUser: 'macadmin', transport: { kind: 'ssh-tunnel' },
+  });
+  const tunnel = tunnelTest.sshTunnelArguments(
+    tunnelProfile,
+    '/Users/Foo Bar/Library/Application Support/Rauhwpx/cloud/ssh-known-hosts',
+    43123,
+  );
+  assert.ok(tunnel.some((option) => option === 'UserKnownHostsFile="/Users/Foo Bar/Library/Application Support/Rauhwpx/cloud/ssh-known-hosts"'));
+});
+
 test('handoff store persists transitions and ignores replayed events', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

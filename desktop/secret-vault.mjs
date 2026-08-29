@@ -1,44 +1,14 @@
-import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { replaceFile } from './fs-replace.mjs';
 
 const KEY_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
-const LOCK_CODES = new Set(['EPERM', 'EBUSY', 'ENOTEMPTY', 'EACCES']);
 const LINUX_SECURE_STORAGE_BACKENDS = new Set([
   'gnome_libsecret',
   'kwallet',
   'kwallet5',
   'kwallet6',
 ]);
-
-async function retryWindows(operation, platform) {
-  const delays = [50, 100, 200, 400, 800];
-  for (let attempt = 0; ; attempt += 1) {
-    try { return await operation(); } catch (error) {
-      if (platform !== 'win32' || !LOCK_CODES.has(error?.code) || attempt >= delays.length) throw error;
-      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
-    }
-  }
-}
-
-async function replaceFile(temp, target, platform) {
-  if (platform !== 'win32') return fs.rename(temp, target);
-  const previous = path.join(path.dirname(target), `.${path.basename(target)}.previous-write-${randomUUID()}`);
-  let moved = false;
-  try {
-    await retryWindows(() => fs.rename(target, previous), platform);
-    moved = true;
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-  }
-  try {
-    await retryWindows(() => fs.rename(temp, target), platform);
-  } catch (error) {
-    if (moved) await retryWindows(() => fs.rename(previous, target), platform).catch(() => {});
-    throw error;
-  }
-  if (moved) await retryWindows(() => fs.rm(previous, { force: true }), platform);
-}
 
 /** OS-backed encrypted secret storage owned exclusively by Electron main. */
 export function createSecretVault({ filePath, safeStorage, platform = process.platform }) {

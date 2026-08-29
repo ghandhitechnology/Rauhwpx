@@ -58,6 +58,12 @@ function operationActive(state: CloudSetupState | null): boolean {
     || state?.kind === 'sandbox-tearing-down';
 }
 
+function desktopPlatform(): string {
+  const bridge = (globalThis as { rhwpDesktop?: { platform?: string } }).rhwpDesktop;
+  if (bridge?.platform) return bridge.platform;
+  return typeof navigator !== 'undefined' && /win/i.test(navigator.platform) ? 'win32' : '';
+}
+
 export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboarding {
   let snapshot = deps.controller.getSnapshot();
   let state: CloudSetupState | null = null;
@@ -296,7 +302,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     }
     let keyPath: ReturnType<typeof inputField> | null = null;
     if (draft.auth.kind === 'key-file') {
-      keyPath = inputField('개인 키 파일', 'keyPath', draft.auth.keyPath || cachedKeyPath, { placeholder: '/Users/me/.ssh/id_ed25519' });
+      keyPath = inputField('개인 키 파일', 'keyPath', draft.auth.keyPath || cachedKeyPath, {
+        placeholder: desktopPlatform() === 'win32' ? 'C:\\Users\\me\\.ssh\\id_ed25519' : '/Users/me/.ssh/id_ed25519',
+      });
       advancedGrid.appendChild(keyPath.root);
     }
     advanced.append(advancedSummary, advancedGrid);

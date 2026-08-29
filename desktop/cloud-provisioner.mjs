@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { normalizeSshConfig, normalizeTailscaleHttpsPort } from './cloud-profile.mjs';
+import { normalizeSshConfig, normalizeTailscaleHttpsPort, sshOptionFilePath } from './cloud-profile.mjs';
 
 const OUTPUT_LIMIT = 2 * 1024 * 1024;
 const BOOTSTRAP_LIMIT = 1024 * 1024 * 1024;
@@ -308,7 +308,7 @@ export function sshArguments(sshConfig, knownHostsPath, remoteCommand, { acceptN
     '-o', 'ConnectTimeout=12',
     '-o', 'ServerAliveInterval=15',
     '-o', 'ServerAliveCountMax=3',
-    '-o', `UserKnownHostsFile=${knownHostsPath}`,
+    '-o', sshOptionFilePath('UserKnownHostsFile', knownHostsPath),
     '-o', `StrictHostKeyChecking=${acceptNew ? 'accept-new' : 'yes'}`,
     '-p', String(ssh.port),
     ...(ssh.keyPath ? ['-i', ssh.keyPath, '-o', 'IdentitiesOnly=yes'] : []),
