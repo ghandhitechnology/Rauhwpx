@@ -54,6 +54,10 @@
   gap: 6px;
 }
 
+.ag-settings-provider-row[data-agent='rau'] {
+  border-color: #fff;
+}
+
 .ag-settings-row-text {
   display: flex;
   flex: 1 1 auto;
@@ -610,6 +614,115 @@
   line-height: 1.15;
 }
 
+/* Rau OAuth 완료는 계정 카드 위에서 잠깐만 알린다. */
+.ag-agent-setup-auth-feedback[hidden] {
+  display: none;
+}
+
+.ag-agent-setup-auth-feedback {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--ag-ok) 42%, var(--ag-border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ag-ok) 8%, var(--ag-bg));
+}
+
+.ag-agent-setup-auth-feedback-mark {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--ag-ok) 15%, transparent);
+  color: var(--ag-ok);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ag-agent-setup-auth-feedback-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ag-agent-setup-auth-feedback-copy strong {
+  font-size: var(--font-size-base, 12px);
+}
+
+.ag-agent-setup-auth-feedback-copy span {
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+}
+
+/* ── Rau 계정 카드 ─────────────────────────────────── */
+
+.ag-agent-setup-account[hidden] {
+  display: none;
+}
+
+.ag-agent-setup-account {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--ag-border);
+  border-radius: 12px;
+  background: var(--ag-bg-2);
+}
+
+.ag-agent-setup-account-email {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--ag-text);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.ag-agent-setup-account-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ag-agent-setup-account-rows:empty {
+  display: none;
+}
+
+.ag-agent-setup-account-meter {
+  gap: 6px;
+}
+
+.ag-agent-setup-account-meter .ag-settings-meter-value {
+  font-size: var(--font-size-base, 12px);
+}
+
+.ag-agent-setup-account-meter .ag-settings-meter-track {
+  height: 8px;
+  border-radius: 999px;
+}
+
+.ag-agent-setup-account-meter .ag-settings-meter-fill {
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    var(--ag-accent),
+    color-mix(in srgb, var(--ag-accent) 62%, var(--ag-ok))
+  );
+}
+
+.ag-agent-setup-account-meter.ag-settings-meter-warn .ag-settings-meter-fill {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--ag-err) 82%, var(--ag-accent)),
+    var(--ag-err)
+  );
+}
+
 .ag-agent-setup-progress {
   height: 3px;
   overflow: hidden;
@@ -814,6 +927,35 @@
   background: color-mix(in srgb, var(--ag-ok) 16%, transparent);
   color: var(--ag-ok);
   font-size: 22px;
+}
+
+.ag-agent-setup-done.ag-agent-setup-rau-actions {
+  align-items: center;
+  flex-direction: row;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 0;
+  text-align: left;
+}
+
+.ag-agent-setup-rau-actions .ag-agent-setup-done-mark,
+.ag-agent-setup-rau-actions > strong,
+.ag-agent-setup-rau-actions > .ag-agent-setup-copy {
+  display: none;
+}
+
+.ag-agent-setup-rau-actions .ag-settings-btn,
+.ag-agent-setup-rau-actions .ag-agent-setup-primary {
+  width: auto;
+  height: 34px;
+  min-height: 34px;
+  align-self: auto;
+  padding-inline: 13px;
+  white-space: nowrap;
+}
+
+.ag-agent-setup-rau-actions > [hidden] {
+  display: none;
 }
 
 .ag-provider-setup-btn {
@@ -1139,7 +1281,6 @@
   white-space: nowrap;
 }
 
-.ag-settings-model-turns,
 .ag-settings-model-tokens,
 .ag-settings-model-cost {
   flex: 0 0 auto;

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createOpenRouter } from '../openrouter.mjs';
+import { createOpenRouter, creditBalanceEmpty } from '../openrouter.mjs';
 
 function jsonResponse(status, body) {
   return new Response(JSON.stringify(body), {
@@ -199,7 +199,11 @@ test('credits compute the balance and cache for five minutes', async () => {
     now: () => clock,
     fetchImpl: async (url) => {
       hits += 1;
-      assert.equal(String(url), 'https://openrouter.ai/api/v1/credits');
+      const path = String(url);
+      if (path.endsWith('/key')) {
+        return jsonResponse(200, { data: { limit: null, usage: 0 } });
+      }
+      assert.equal(path, 'https://openrouter.ai/api/v1/credits');
       return jsonResponse(200, { data: { total_credits: 25, total_usage: 4.257891 } });
     },
   });
@@ -209,14 +213,64 @@ test('credits compute the balance and cache for five minutes', async () => {
   assert.equal(credits.totalUsageUsd, 4.257891);
   assert.equal(credits.balanceUsd, 20.742109);
   assert.equal(credits.checkedAt, 5_000);
+  assert.equal(hits, 2);
 
   await client.credits('sk-good');
-  assert.equal(hits, 1);
-  await client.credits('sk-good', true);
   assert.equal(hits, 2);
+  await client.credits('sk-good', true);
+  assert.equal(hits, 4);
   clock += 6 * 60 * 1000;
   await client.credits('sk-good');
-  assert.equal(hits, 3);
+  assert.equal(hits, 6);
+});
+
+test('credits for a limited key use /key remaining and skip /credits', async () => {
+  const urls = [];
+  const client = createOpenRouter({
+    fetchImpl: async (url) => {
+      urls.push(String(url));
+      if (String(url).endsWith('/key')) {
+        return jsonResponse(200, {
+          data: { limit: 5, usage: 1.25, limit_remaining: 3.75, is_free_tier: false },
+        });
+      }
+      return jsonResponse(403, {
+        error: { message: 'Only management keys can perform this operation' },
+      });
+    },
+  });
+
+  const credits = await client.credits('sk-child');
+  assert.equal(credits.totalCreditsUsd, 5);
+  assert.equal(credits.totalUsageUsd, 1.25);
+  assert.equal(credits.balanceUsd, 3.75);
+  assert.deepEqual(urls, ['https://openrouter.ai/api/v1/key']);
+  assert.equal(creditBalanceEmpty(credits), false);
+});
+
+test('credits for a limited key without limit_remaining use limit minus usage', async () => {
+  const client = createOpenRouter({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith('/key')) {
+        return jsonResponse(200, { data: { limit: 5, usage: 1.25 } });
+      }
+      return jsonResponse(403, { error: { message: 'Only management keys can perform this operation' } });
+    },
+  });
+  const credits = await client.credits('sk-child');
+  assert.equal(credits.balanceUsd, 3.75);
+});
+
+test('creditBalanceEmpty ignores fetch-error placeholders', () => {
+  assert.equal(creditBalanceEmpty({
+    balanceUsd: 0,
+    totalCreditsUsd: 0,
+    totalUsageUsd: 0,
+    error: 'OpenRouter 키가 거절됐어요',
+  }), false);
+  assert.equal(creditBalanceEmpty({ balanceUsd: 0 }), true);
+  assert.equal(creditBalanceEmpty({ balanceUsd: 3.75 }), false);
+  assert.equal(creditBalanceEmpty(null), false);
 });
 
 test('credits reject a bad key with OPENROUTER_KEY_INVALID', async () => {
@@ -225,6 +279,30 @@ test('credits reject a bad key with OPENROUTER_KEY_INVALID', async () => {
     assert.equal(error.code, 'OPENROUTER_KEY_INVALID');
     return true;
   });
+});
+
+test('credit cache and in-flight work are isolated by trimmed key', async () => {
+  let releaseFirst;
+  let hits = 0;
+  const client = createOpenRouter({
+    fetchImpl: async (_url, init) => {
+      hits += 1;
+      const key = init.headers.Authorization.replace('Bearer ', '');
+      if (key === 'sk-first') {
+        await new Promise((resolve) => { releaseFirst = resolve; });
+        return jsonResponse(200, { data: { limit: 5, usage: 4 } });
+      }
+      return jsonResponse(200, { data: { limit: 5, usage: 1 } });
+    },
+  });
+
+  const first = client.credits('sk-first');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal((await client.credits('  sk-second  ')).balanceUsd, 4);
+  releaseFirst();
+  assert.equal((await first).balanceUsd, 1);
+  assert.equal((await client.credits('sk-second')).balanceUsd, 4);
+  assert.equal(hits, 2);
 });
 
 test('chat posts a non-streaming completion and returns assistant text', async () => {

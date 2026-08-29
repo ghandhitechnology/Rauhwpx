@@ -91,7 +91,9 @@ test('카드 모델 목록은 정적 카탈로그를 짧게 보여 준다', () =
   assert.deepEqual(previewModelLabels('grok'), ['Grok 4.6', 'Grok 4.5']);
   assert.deepEqual(previewModelLabels('pi'), ['OpenRouter에서 고름', '최대 3개']);
   assert.deepEqual(previewModelLabels('cursor'), ['Auto', '구독 · API 모델']);
-  assert.equal(SUGGESTED_AGENT, 'codex');
+  assert.deepEqual(previewModelLabels('rau'), ['GLM 5.3 Flash', 'DeepSeek V4 Flash', 'Qwen 3.8 Flash', 'Solar Pro 4']);
+  assert.equal(SUGGESTED_AGENT, 'rau');
+  assert.equal(PROVIDER_ORDER[0], 'rau');
   for (const agent of PROVIDER_ORDER) {
     assert.ok(PROVIDER_VENDOR[agent]);
   }
@@ -104,6 +106,7 @@ test('연결됨은 available 만으로 치지 않는다', () => {
     pi: status({ agent: 'pi', setupComplete: true }),
     grok: status({ agent: 'grok', authenticated: true }),
     cursor: status({ agent: 'cursor' }),
+    rau: status({ agent: 'rau' }),
   };
   assert.equal(isProviderConfigured('claude', statuses), false);
   assert.equal(isProviderConfigured('codex', statuses), true);
@@ -146,7 +149,10 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(setup, /\(beginAgentConnect \?\? openAgentSetup\)\(agent\)/);
   assert.match(setup, /openCalibration\(\{ elevate: true \}\)/);
 
-  assert.match(css, /grid-template-columns: repeat\(5, minmax\(0, 1fr\)\)/);
+  assert.match(css, /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(css, /\.rhwp-setup-card:nth-child\(6\)/);
+  assert.match(css, /\.rhwp-setup-card\[data-agent='rau'\] \{\s*border-color: #ffffff/);
+  assert.match(css, /\.rhwp-setup-card\[data-agent='rau'\]\[data-suggested='true'\]::before \{\s*content: none/);
   assert.match(css, /rhwp-setup-cal\[hidden\]/);
   assert.match(css, /prefers-reduced-motion: reduce/);
   assert.match(css, /--setup-spring-snappy: linear\(/);

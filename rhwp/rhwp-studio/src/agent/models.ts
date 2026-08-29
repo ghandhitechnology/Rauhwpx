@@ -27,6 +27,12 @@ type StaticAgentName = Exclude<AgentName, 'pi'>;
 
 /** 프로바이더별 선택 가능 모델 (강함 → 약함). 프로바이더 전환 시 UI가 이 목록으로 교체된다. */
 export const AGENT_MODELS: Record<StaticAgentName, readonly AgentModelOption[]> = {
+  rau: [
+    { id: 'z-ai/glm-5.3-flash', label: 'GLM 5.3 Flash' },
+    { id: 'deepseek/deepseek-v4-flash-0731', label: 'DeepSeek V4 Flash' },
+    { id: 'qwen/qwen3.8-flash', label: 'Qwen 3.8 Flash' },
+    { id: 'upstage/solar-pro4', label: 'Solar Pro 4' },
+  ],
   claude: [
     { id: 'fable', label: 'Fable 5' },
     { id: 'opus', label: 'Opus 5' },
@@ -90,6 +96,7 @@ const PI_EFFORT_LABELS: Record<string, string> = {
 const PI_EFFORTS_STRONG_TO_WEAK = ['high', 'medium', 'low'] as const;
 
 export const DEFAULT_AGENT_MODEL: Record<StaticAgentName, string> = {
+  rau: 'z-ai/glm-5.3-flash',
   claude: 'sonnet',
   codex: 'gpt-5.6-sol',
   grok: 'grok-4.6',
@@ -98,6 +105,7 @@ export const DEFAULT_AGENT_MODEL: Record<StaticAgentName, string> = {
 
 /** cursor 는 추론 강도 옵션이 없다 — effortsForAgent 가 빈 목록을 준다. */
 export const DEFAULT_AGENT_EFFORT: Record<StaticAgentName, string> = {
+  rau: 'medium',
   claude: 'high',
   codex: 'medium',
   grok: 'high',
@@ -211,9 +219,12 @@ export function isModelForAgent(agent: AgentName, model: string): boolean {
   return AGENT_MODELS[agent].some((m) => m.id === model);
 }
 
+const RAU_IMAGE_MODELS = new Set(['qwen/qwen3.8-flash']);
+
 export function modelSupportsImages(agent: AgentName, model?: string | null): boolean {
-  if (agent !== 'pi') return true;
-  return findPiModel(resolveModelForAgent('pi', model))?.supportsImages === true;
+  if (agent === 'pi') return findPiModel(resolveModelForAgent('pi', model))?.supportsImages === true;
+  if (agent === 'rau') return RAU_IMAGE_MODELS.has(resolveModelForAgent('rau', model));
+  return true;
 }
 
 export function resolveModelForAgent(agent: AgentName, model?: string | null): string {
@@ -245,6 +256,8 @@ export function effortsForAgent(
   model?: string | null,
 ): readonly AgentEffortOption[] {
   switch (agent) {
+    case 'rau':
+      return PI_EFFORTS_STRONG_TO_WEAK.map((id) => ({ id, label: PI_EFFORT_LABELS[id] ?? id }));
     case 'pi': {
       const cfg = findPiModel(resolveModelForAgent('pi', model));
       if (!cfg) return [];
