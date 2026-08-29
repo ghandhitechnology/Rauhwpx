@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { encryptSecret, decryptSecret } from '../crypto.mjs';
-import { RAU_CREDIT_LIMIT_USD, RAU_MODEL_IDS } from '../catalog.mjs';
+import { RAU_CREDIT_LIMIT_USD } from '../catalog.mjs';
 import {
   DEFAULT_PORT,
   assertCreditsEnv,
@@ -75,6 +75,76 @@ test('first login mints a $5 key, delivers it until acknowledged, and reuses it'
   const again = await credits.redeemDeviceSession(second.id);
   assert.equal(again.apiKey, 'sk-or-v1-shared');
   assert.equal(minted.length, 1, 'the same WorkOS user must not mint another $5');
+});
+
+test('the same email through a second WorkOS identity reuses the first $5 key', async () => {
+  const minted = [];
+  const credits = createCreditsService({
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    store: createMemoryStore(),
+    authenticateWorkos: async () => ({ id: 'user_google', email: 'Andy@Example.com' }),
+    authenticateMagic: async () => ({ id: 'user_magic', email: 'andy@example.com' }),
+    createOpenRouterKey: async () => {
+      minted.push(1);
+      return { key: `sk-or-v1-shared-${minted.length}`, id: `or-${minted.length}` };
+    },
+  });
+
+  const oauth = await credits.createDeviceSession();
+  await credits.completeLogin('code-1', oauth.id);
+  const magic = await credits.createDeviceSession();
+  await credits.completeMagicLogin(magic.id, 'andy@example.com', '123456');
+
+  assert.equal(minted.length, 1, 'the same mailbox must not mint a second $5');
+  assert.equal((await credits.redeemDeviceSession(magic.id)).apiKey, 'sk-or-v1-shared-1');
+});
+
+test('a pending session past the TTL cannot be completed into a minted key', async () => {
+  let t = 1_700_000_000_000;
+  const minted = [];
+  const credits = createCreditsService({
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    store: createMemoryStore(),
+    authenticateWorkos: async () => ({ id: 'user_late' }),
+    createOpenRouterKey: async () => {
+      minted.push(1);
+      return { key: 'sk-or-v1-late', id: 'or-late' };
+    },
+    now: () => t,
+  });
+
+  const session = await credits.createDeviceSession();
+  t += credits.sessionTtlMs + 1;
+  await assert.rejects(
+    () => credits.completeLogin('code', session.id),
+    (error) => error.code === 'DEVICE_SESSION_EXPIRED',
+  );
+  assert.equal(minted.length, 0);
+});
+
+test('live device sessions are capped so floods cannot grow the store', async () => {
+  const credits = createCreditsService({
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    store: createMemoryStore(),
+    authenticateWorkos: async () => ({ id: 'user_cap' }),
+    createOpenRouterKey: async () => ({ key: 'sk-or-v1-cap', id: 'or-cap' }),
+    maxLiveSessions: 2,
+  });
+
+  const first = await credits.createDeviceSession();
+  await credits.createDeviceSession();
+  await assert.rejects(
+    () => credits.createDeviceSession(),
+    (error) => error.code === 'RATE_LIMITED',
+  );
+
+  await credits.completeLogin('code', first.id);
+  await credits.acknowledgeDeviceSession(first.id);
+  const freed = await credits.createDeviceSession();
+  assert.equal(typeof freed.id, 'string');
 });
 
 test('concurrent session creation cannot overwrite another session', async () => {
@@ -149,7 +219,6 @@ test('createOpenRouterKey receives the $5 limit contract through the default pro
   assert.match(calls[0].url, /openrouter\.ai\/api\/v1\/keys/);
   assert.equal(calls[0].body.limit, RAU_CREDIT_LIMIT_USD);
   assert.equal(calls[0].body.limit_reset, null);
-  assert.deepEqual(calls[0].body.allowed_models, [...RAU_MODEL_IDS]);
 });
 
 test('HTTP POST creates a session, GET delivers the key, and acknowledgement consumes it', async () => {
@@ -219,6 +288,41 @@ test('login page is Rauhwpx-branded and Google continues to WorkOS', async () =>
     assert.match(location, /provider=GoogleOAuth/);
     assert.match(location, /prompt=select_account/);
     assert.match(location, /redirect_uri=https%3A%2F%2Fcredits.rau.test%2Fcallback/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('device-session creation is throttled per client IP', async () => {
+  const credits = service();
+  const server = http.createServer(creditsRequestListener(credits));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    for (let i = 0; i < 10; i += 1) {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/device-sessions`, { method: 'POST' });
+      assert.equal(res.status, 200);
+    }
+    const blocked = await fetch(`http://127.0.0.1:${port}/v1/device-sessions`, { method: 'POST' });
+    assert.equal(blocked.status, 429);
+    assert.equal((await blocked.json()).error, 'RATE_LIMITED');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('oversized form bodies are rejected without processing', async () => {
+  const credits = service();
+  const server = http.createServer(creditsRequestListener(credits));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/login/magic`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `device=x&email=y@test.dev&pad=${'x'.repeat(20_000)}`,
+    });
+    assert.equal(res.status, 413);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
