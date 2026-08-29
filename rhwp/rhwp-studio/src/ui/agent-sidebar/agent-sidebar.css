@@ -85,6 +85,7 @@ body.ag-sidebar-animating .ag-root {
   --ag-hover: var(--n-fill-hover);
   --ag-active: var(--n-fill-active);
   --ag-selected: var(--n-fill-selected);
+  --ag-rau: #8d8680;
   --ag-claude: #c4785a;
   --ag-codex: #5b8fd4;
   --ag-pi: #4a9a86;
@@ -92,6 +93,7 @@ body.ag-sidebar-animating .ag-root {
      와 같은 밝기대(대비 5.4:1)에 둔다 — 더 어두우면 채움 버튼 글자가 뭉갠다. */
   --ag-grok: #758ca3;
   --ag-cursor: #7f7ca4;
+  --ag-rau-wash: rgba(141, 134, 128, 0.10);
   --ag-claude-wash: rgba(196, 120, 90, 0.10);
   --ag-codex-wash: rgba(91, 143, 212, 0.10);
   --ag-pi-wash: rgba(74, 154, 134, 0.10);
@@ -158,6 +160,10 @@ body.ag-sidebar-animating .ag-root {
   width: 12px;
   height: 12px;
   color: inherit;
+}
+
+.ag-root[data-agent='rau'] {
+  --ag-accent: var(--ag-rau);
 }
 
 .ag-root[data-agent='codex'] {
@@ -245,11 +251,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   --ag-border-strong: rgba(255, 255, 255, 0.14);
   --ag-hover: rgba(255, 255, 255, 0.075);
   --ag-active: rgba(255, 255, 255, 0.12);
+  --ag-rau: #d4cdc4;
   --ag-claude: #d49174;
   --ag-codex: #7aa8e0;
   --ag-pi: #6cc0aa;
   --ag-grok: #8fa8c0;
   --ag-cursor: #a9a5d1;
+  --ag-rau-wash: rgba(212, 205, 196, 0.16);
   --ag-claude-wash: rgba(212, 145, 116, 0.16);
   --ag-codex-wash: rgba(122, 168, 224, 0.16);
   --ag-pi-wash: rgba(108, 192, 170, 0.16);
@@ -1519,6 +1527,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   box-shadow: 0 0 0 3px var(--ag-claude-wash);
 }
 
+.ag-root[data-agent='rau'] .ag-thread-rename-input:focus {
+  box-shadow: 0 0 0 3px var(--ag-rau-wash);
+}
+
 .ag-root[data-agent='codex'] .ag-thread-rename-input:focus {
   box-shadow: 0 0 0 3px var(--ag-codex-wash);
 }
@@ -1623,6 +1635,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   mask: url('/icons/provider-codex.png') center / contain no-repeat;
 }
 
+.ag-provider-icon-mask[data-agent='rau'] {
+  -webkit-mask-image: url('/icons/rau.png');
+  mask-image: url('/icons/rau.png');
+}
+
 /* π · Grok · Cursor 는 우리가 그린 단색 글리프 — 같은 마스크 계약을 탄다. */
 .ag-provider-icon-mask[data-agent='pi'] {
   -webkit-mask-image: url('/icons/provider-pi.svg');
@@ -1637,6 +1654,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-provider-icon-mask[data-agent='cursor'] {
   -webkit-mask-image: url('/icons/provider-cursor.svg');
   mask-image: url('/icons/provider-cursor.svg');
+}
+
+.ag-root[data-agent='rau'] .ag-provider .ag-provider-icon-mask {
+  color: var(--ag-rau);
 }
 
 .ag-root[data-agent='codex'] .ag-provider .ag-provider-icon-mask {
@@ -1661,6 +1682,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ag-root[data-agent='rau'] .ag-provider .ag-model-name {
+  color: var(--ag-rau);
 }
 
 .ag-root[data-agent='claude'] .ag-provider .ag-model-name {
@@ -1838,6 +1863,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-provider-item .ag-provider-icon-mask {
   color: var(--ag-text);
+}
+
+.ag-provider-item[data-agent='rau'] .ag-provider-icon-mask {
+  color: var(--ag-rau);
 }
 
 .ag-provider-item[data-agent='codex'] .ag-provider-icon-mask {
@@ -2670,6 +2699,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   scrollbar-gutter: stable;
 }
 
+.ag-review-card.ag-rau,
 .ag-review-card.ag-claude,
 .ag-review-card.ag-codex,
 .ag-review-card.ag-grok,
@@ -3140,6 +3170,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   to { opacity: 1; transform: none; }
 }
 
+.ag-plan-card.ag-rau,
 .ag-plan-card.ag-claude,
 .ag-plan-card.ag-codex,
 .ag-plan-card.ag-pi,
@@ -3801,6 +3832,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   box-shadow: var(--n-elev-2), 0 0 0 3px var(--ag-claude-wash);
 }
 
+.ag-root[data-agent='rau'] .ag-composer:focus-within {
+  box-shadow: var(--n-elev-2), 0 0 0 3px var(--ag-rau-wash);
+}
+
 .ag-root[data-agent='codex'] .ag-composer:focus-within {
   box-shadow: var(--n-elev-2), 0 0 0 3px var(--ag-codex-wash);
 }
@@ -3997,6 +4032,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   pointer-events: none;
 }
 
+.ag-skill-token[data-agent='rau'] { --ag-skill-color: var(--ag-rau); }
 .ag-skill-token[data-agent='codex'] { --ag-skill-color: var(--ag-codex); }
 .ag-skill-token[data-agent='pi'] { --ag-skill-color: var(--ag-pi); }
 .ag-skill-token[data-agent='grok'] { --ag-skill-color: var(--ag-grok); }
@@ -5561,6 +5597,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   box-shadow: none;
 }
 
+.ag-fullscreen .ag-review-card.ag-rau,
 .ag-fullscreen .ag-review-card.ag-claude,
 .ag-fullscreen .ag-review-card.ag-codex,
 .ag-fullscreen .ag-review-card.ag-grok,
@@ -6511,6 +6548,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   color: var(--ag-accent);
 }
 
+.ag-fleet.ag-rau { --ag-accent: var(--ag-rau); }
 .ag-fleet.ag-claude { --ag-accent: var(--ag-claude); }
 .ag-fleet.ag-codex { --ag-accent: var(--ag-codex); }
 .ag-fleet.ag-pi { --ag-accent: var(--ag-pi); }

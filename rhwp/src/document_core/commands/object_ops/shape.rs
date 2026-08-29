@@ -1669,6 +1669,9 @@ impl DocumentCore {
                 )))
             }
         };
+        let neighbor_para_idx = neighbor_change
+            .as_ref()
+            .map(|(neighbor, _)| neighbor.para_idx);
 
         // z_order 변경: 대상 + 이웃
         {
@@ -1684,6 +1687,16 @@ impl DocumentCore {
                         "이웃 최상위 floating 개체의 종류가 변경되었습니다".to_string(),
                     ));
                 }
+            }
+        }
+
+        // 스냅샷 복원은 문단 revision이 같으면 현재 IR을 재사용한다. z_order만
+        // 바꾸면 문단 구조는 그대로라 revision을 직접 올려야 복원이 된다.
+        self.event_log.mark_paragraph_changed(section_idx, para_idx);
+        if let Some(neighbor_para) = neighbor_para_idx {
+            if neighbor_para != para_idx {
+                self.event_log
+                    .mark_paragraph_changed(section_idx, neighbor_para);
             }
         }
 
@@ -2760,6 +2773,26 @@ mod resize_clamp_tests {
         para.controls.push(Control::Equation(Box::new(equation)));
         para.ctrl_data_records.push(None);
         (para_idx, control_idx)
+    }
+
+    #[test]
+    fn z_order_snapshot_restore_keeps_exact_stack() {
+        let mut core = make_test_core();
+        let (back_para, back_ctrl) = push_picture(&mut core, 1);
+        let (front_para, front_ctrl) = push_picture(&mut core, 2);
+        let snapshot = core.save_snapshot_native();
+
+        core.change_object_z_order_native(0, back_para, back_ctrl, "front")
+            .expect("move back picture to front");
+        assert_eq!(control_z_order(&core, back_para, back_ctrl), 3);
+        assert_eq!(control_z_order(&core, front_para, front_ctrl), 2);
+
+        core.restore_snapshot_native(snapshot)
+            .expect("restore snapshot after z-order change");
+        core.discard_snapshot_native(snapshot);
+
+        assert_eq!(control_z_order(&core, back_para, back_ctrl), 1);
+        assert_eq!(control_z_order(&core, front_para, front_ctrl), 2);
     }
 
     #[test]

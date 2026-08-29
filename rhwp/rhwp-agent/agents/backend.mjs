@@ -4,7 +4,7 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
 /**
  * Shared helpers for agent CLI backends.
  *
- * @typedef {'claude' | 'codex' | 'pi' | 'grok' | 'cursor'} AgentName
+ * @typedef {'claude' | 'codex' | 'pi' | 'grok' | 'cursor' | 'rau'} AgentName
  *
  * parentTaskId: 서브에이전트/워크플로가 낸 이벤트를 스폰한 task 카드에 귀속시키는
  * 선택 필드. 하니스가 CLI 의 parent 식별자(claude: parent_tool_use_id)를 taskId 로

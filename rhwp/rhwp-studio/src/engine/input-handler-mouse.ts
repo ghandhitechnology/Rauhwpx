@@ -8,6 +8,7 @@ import { MoveLineEndpointCommand } from './command';
 import { computeLineEndpointRecord } from './object-drag-record';
 import { editableTargetFromPosition } from './edit-target';
 import { findWordSelectionRange } from './word-selection';
+import { selectCurrentTableCell } from './table-cell-selection';
 import { CursorState } from './cursor';
 import { isTopLevelBodyObject } from '@/core/object-address';
 
@@ -1519,6 +1520,10 @@ export function onDblClick(this: any, e: MouseEvent): void {
   }
 
   if (this.cursor.isInTableObjectSelection()) return;
+  if (selectCurrentTableCell(this)) {
+    e.preventDefault();
+    return;
+  }
   if (selectCurrentWord(this)) e.preventDefault();
 }
 

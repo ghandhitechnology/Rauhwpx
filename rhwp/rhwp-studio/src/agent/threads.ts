@@ -245,7 +245,7 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
     && typeof t.createdAt === 'number'
     && typeof t.updatedAt === 'number'
     && (t.agent === 'claude' || t.agent === 'codex' || t.agent === 'pi'
-      || t.agent === 'grok' || t.agent === 'cursor')
+      || t.agent === 'grok' || t.agent === 'cursor' || t.agent === 'rau')
     && typeof t.model === 'string'
     && typeof t.effort === 'string'
     && Array.isArray(t.messages)
@@ -254,7 +254,7 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
 
 function parseAgentName(value: unknown): AgentName | undefined {
   return value === 'claude' || value === 'codex' || value === 'pi'
-    || value === 'grok' || value === 'cursor'
+    || value === 'grok' || value === 'cursor' || value === 'rau'
     ? value
     : undefined;
 }

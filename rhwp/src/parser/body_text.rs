@@ -730,7 +730,8 @@ fn parse_master_pages_from_raw(raw_records: &[RawRecord]) -> Vec<MasterPage> {
             apply_to,
             is_extension,
             overlap,
-            replace_base: false,
+            // HWP5 overlap bit 는 겹치게 하기와 대체를 구분하지 못한다. 확장 바탕쪽은 대체.
+            replace_base: is_extension,
             ext_flags,
             page_front: false, // HWP5 바이너리 바탕쪽엔 pageFront 개념 없음
             text_direction: 0, // HWP5 바이너리 바탕쪽엔 textDirection 개념 없음
