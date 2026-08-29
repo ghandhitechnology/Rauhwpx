@@ -427,7 +427,8 @@ export function createRailwayServerProvider({
         });
       } catch (error) {
         if (signal?.aborted) throw signal.reason ?? error;
-        if (error?.retryable !== true) throw error;
+        // Railway can report deployment success before its generated domain reaches the service.
+        if (error?.retryable !== true && error?.status !== 404) throw error;
         lastError = error;
       }
       if (Date.now() >= deadline) {
