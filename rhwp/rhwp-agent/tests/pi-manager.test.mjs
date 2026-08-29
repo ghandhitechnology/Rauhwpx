@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS } from '../rau-catalog.mjs';
+import { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS } from '../../rau-credits/catalog.mjs';
 import { createPiManager, defaultPiRoot, PI_SECRET_ID, RAU_SECRET_ID } from '../pi-manager.mjs';
 import { createMemorySecretStore } from '../secret-store.mjs';
 

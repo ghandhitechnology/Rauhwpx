@@ -531,21 +531,21 @@ test('cursor 모델 선택은 구독/API 과금 풀로 나뉘어 보인다', () 
   assert.match(css, /\.ag-llm-group-label \{[\s\S]*?flex-basis: 100%/);
 });
 
-test('Rau 는 목록 맨 앞이고 흰 테두리 · 직접 OpenRouter 연결을 갖는다', () => {
+test('Rau 는 목록 맨 앞이고 흰 테두리 · 로그인 전용 설정 · $0 전송 잠금을 갖는다', () => {
   assert.equal(PROVIDER_ORDER[0], 'rau');
   assert.match(settingsCss, /\.ag-settings-provider-row\[data-agent='rau'\][\s\S]*?border-color:\s*#fff/);
-  assert.match(settings, /agent === 'rau' \? 'OpenRouter로 연결' : '브라우저로 로그인'/);
-  assert.match(settings, /agent === 'rau'[\s\S]*?'브라우저 로그인 · 내 OpenRouter 계정'/);
-  assert.match(settings, /rau: 'sk-or-…'/);
+  assert.match(settings, /if \(agent === 'rau'\) \{\s*\n\s*if \(oauthTitle\) oauthTitle\.textContent = 'Rau로 시작'/);
+  assert.match(settings, /setupApiToggle\.hidden = true/);
+  assert.match(settings, /setupKeyBox\.hidden = true/);
   assert.match(settings, /이 기기에서 끊기/);
-  assert.doesNotMatch(source, /function rauCreditsEmpty\(\): boolean/);
-  assert.doesNotMatch(source, /체험 크레딧/);
+  assert.match(source, /function rauCreditsEmpty\(\): boolean/);
+  assert.match(source, /체험 크레딧이 다 됐어요\. 다른 모델을 연결해 주세요\./);
   assert.match(source, /case 'usage-report':\s*\n\s*lastUsage = e\.usage/);
 });
 
 test('설정 모달은 프로바이더별 설치 안내와 API 키 힌트를 갖는다', () => {
   assert.match(settings, /const SETUP_INSTALL_NOTE: Record<AgentName, string>/);
-  assert.match(settings, /rau: 'Rau 실행에 필요한 패키지를 설치한 뒤 OpenRouter 계정을 직접 연결합니다\.'/);
+  assert.match(settings, /rau: '브라우저로 로그인하면 \$5 체험 크레딧이 바로 연결됩니다\.'/);
   assert.match(settings, /cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다\.'/);
   assert.match(settings, /grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다\.'/);
   assert.match(settings, /const API_KEY_PLACEHOLDER: Record<AgentName, string>/);

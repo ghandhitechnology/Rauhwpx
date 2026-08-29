@@ -115,7 +115,7 @@ export interface AgentBridge {
   /** 브라우저 로그인 뒤 받은 인증 코드를 진행 중인 CLI 로그인에 전달한다. */
   submitAgentAuthCode(agent: AgentName, code: string): void;
   cancelAgentSetup(agent: AgentName): void;
-  /** 이 기기에 저장된 Rau OpenRouter 키만 지운다. */
+  /** 이 기기의 Rau 키만 지운다. 호스티드 $5 키는 서버에 남는다. */
   disconnectAgent(agent: AgentName): Promise<AgentSetupStatusMap | null>;
   /** 누적 사용량 요약. 응답이 없으면 null. */
   requestUsage(refresh?: boolean): Promise<UsageSummary | null>;
@@ -588,6 +588,7 @@ function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatu
     keyTail: typeof src['keyTail'] === 'string' ? src['keyTail'] : null,
     authenticating: src['authenticating'] === true,
     setupComplete: src['setupComplete'] === true,
+    ...(src['exhausted'] === true ? { exhausted: true } : {}),
     latestVersion: typeof src['latestVersion'] === 'string' ? src['latestVersion'] : null,
     updateRequired: src['updateRequired'] === true,
     error: typeof src['error'] === 'string' ? src['error'] : null,
@@ -791,6 +792,7 @@ function readPiStatus(value: unknown): PiStatus {
     models: readPiModels(src['models']),
     defaultModelId: typeof src['defaultModelId'] === 'string' ? src['defaultModelId'] : null,
     setupComplete: src['setupComplete'] === true,
+    ...(src['exhausted'] === true ? { exhausted: true } : {}),
     latestVersion: typeof src['latestVersion'] === 'string' ? src['latestVersion'] : null,
     updateRequired: src['updateRequired'] === true,
     error: typeof src['error'] === 'string' ? src['error'] : null,

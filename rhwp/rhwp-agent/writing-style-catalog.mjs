@@ -43,7 +43,7 @@ export function buildWritingStyleCatalog({
     },
     {
       id: 'rau', name: 'Rau', available: providerAvailable('rau', health, piStatus, rauStatus),
-      error: rauStatus?.setupComplete ? null : 'Connect Rau with OpenRouter.',
+      error: rauStatus?.setupComplete ? null : 'Connect Rau to use trial credits.',
       models: piModels(rauStatus),
     },
     {

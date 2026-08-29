@@ -33,7 +33,7 @@ export const PI_PLANS = {
   api: { session5h: null, week: null },
 };
 
-/** rau 는 별도 OpenRouter 키와 고정 모델 목록을 쓴다. */
+/** rau 는 체험 OpenRouter 키 — 한도는 호스티드 $5 잔액이다. */
 export const RAU_PLANS = {
   api: { session5h: null, week: null },
 };
