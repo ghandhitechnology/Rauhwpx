@@ -61,7 +61,7 @@ test('summary aggregates rolling windows, weights and percents', async () => {
   const store = await createUsageStore({ rootDir, now: time.now }).init();
 
   const empty = store.summary();
-  assert.deepEqual(empty.plans, { claude: 'pro', codex: 'plus', pi: 'api', grok: 'api', cursor: 'api' });
+  assert.deepEqual(empty.plans, { claude: 'pro', codex: 'plus', pi: 'api', grok: 'api', cursor: 'api', rau: 'api' });
   assert.equal(empty.providers.claude.updatedAt, null);
   assert.equal(empty.providers.claude.session.turns, 0);
   assert.equal(empty.providers.claude.session.percent, 0);
@@ -150,12 +150,12 @@ test('plans are validated, persisted and reloaded', async () => {
   await store.setPlan('codex', 'pro');
 
   const saved = JSON.parse(await fs.readFile(path.join(rootDir, 'plans.json'), 'utf8'));
-  assert.deepEqual(saved, { claude: 'max20x', codex: 'pro', pi: 'api', grok: 'api', cursor: 'api' });
+  assert.deepEqual(saved, { claude: 'max20x', codex: 'pro', pi: 'api', grok: 'api', cursor: 'api', rau: 'api' });
   const stat = await fs.stat(path.join(rootDir, 'plans.json'));
   assert.equal(stat.mode & 0o777, process.platform === 'win32' ? 0o666 : 0o600);
 
   const reloaded = await createUsageStore({ rootDir, now: time.now }).init();
-  assert.deepEqual(reloaded.plans(), { claude: 'max20x', codex: 'pro', pi: 'api', grok: 'api', cursor: 'api' });
+  assert.deepEqual(reloaded.plans(), { claude: 'max20x', codex: 'pro', pi: 'api', grok: 'api', cursor: 'api', rau: 'api' });
   assert.deepEqual(reloaded.summary().providers.claude.limit, CLAUDE_PLANS.max20x);
 
   await store.flush();

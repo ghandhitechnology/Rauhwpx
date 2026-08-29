@@ -110,8 +110,8 @@ test('사용량·프로바이더 타입과 SidebarEvent 항목이 types.ts 에 �
   assert.match(types, /\| \{ type: 'usage-report'; usage: UsageSummary \}/);
 });
 
-test('프로바이더 상태·사용량 정규화는 다섯 프로바이더를 모두 채운다', () => {
-  for (const agent of ['claude', 'codex', 'pi', 'grok', 'cursor']) {
+test('프로바이더 상태·사용량 정규화는 여섯 프로바이더를 모두 채운다', () => {
+  for (const agent of ['rau', 'claude', 'codex', 'pi', 'grok', 'cursor']) {
     assert.match(bridge, new RegExp(`${agent}: readProviderHealth\\(src\\['${agent}'\\]\\)`));
     assert.match(bridge, new RegExp(`${agent}: readProviderUsage\\(providers\\['${agent}'\\]\\)`));
     assert.match(bridge, new RegExp(`${agent}: readAgentSetupStatus\\(src\\['${agent}'\\], '${agent}'\\)`));
@@ -125,7 +125,7 @@ test('프로바이더 상태·사용량 정규화는 다섯 프로바이더를 �
 });
 
 test('cursor 모델 목록은 agent-setup-status 를 타고 레지스트리로 들어간다', () => {
-  assert.match(types, /export type AgentName = 'claude' \| 'codex' \| 'pi' \| 'grok' \| 'cursor';/);
+  assert.match(types, /export type AgentName = 'claude' \| 'codex' \| 'pi' \| 'grok' \| 'cursor' \| 'rau';/);
   assert.match(types, /models\?: readonly string\[\];/);
   assert.match(bridge, /setCursorModels as setCursorModelRegistry/);
   assert.match(bridge, /if \(statuses\.cursor\.models\) setCursorModelRegistry\(statuses\.cursor\.models\);/);

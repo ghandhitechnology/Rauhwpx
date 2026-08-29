@@ -36,7 +36,7 @@ export type AgentPrefsSaveResult =
 
 function isAgentName(value: unknown): value is AgentName {
   return value === 'claude' || value === 'codex' || value === 'pi'
-    || value === 'grok' || value === 'cursor';
+    || value === 'grok' || value === 'cursor' || value === 'rau';
 }
 
 function isPermissionProfile(value: unknown): value is PermissionProfile {

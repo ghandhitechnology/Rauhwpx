@@ -40,6 +40,13 @@ test('workflow switches use local slash commands without changing the access pro
   assert.match(source, /workflowTransitionPending = true;\s*bridge\.setWorkflow\(next\)/);
 });
 
+test('composer submit keeps plan-transition locks and Rau credit gates', () => {
+  assert.match(
+    source,
+    /if \(planningPhase === 'switching' \|\| workflowTransitionPending \|\| planActionPending[\s\S]*selectedAgent === 'rau' && !rauSetupComplete[\s\S]*rauCreditsEmpty\(\)/,
+  );
+});
+
 test('planning phase shows a persistent compact Korean label and skips a badge in direct mode', () => {
   assert.match(source, /PLANNING_PHASE_LABEL: Record<AgentPhase, string>/);
   assert.match(source, /planning: '구상 중'/);

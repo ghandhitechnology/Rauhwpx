@@ -8,7 +8,7 @@ import spawn from 'cross-spawn';
 import { WebSocketServer } from 'ws';
 import { createClaudeSession, prepareClaudeHome } from './agents/claude.mjs';
 import { createCodexSession, prepareCodexHome } from './agents/codex.mjs';
-import { createPiSession } from './agents/pi.mjs';
+import { createPiSession, isOpenRouterCreditError } from './agents/pi.mjs';
 import { createGrokSession, prepareGrokHome } from './agents/grok.mjs';
 import { createCursorSession, prepareCursorHome } from './agents/cursor.mjs';
 import { generateChatTitle } from './agents/title.mjs';
@@ -41,9 +41,16 @@ import { BrowserbaseSession } from './browserbase-session.mjs';
 import { createProviderHealth } from './provider-health.mjs';
 import { createUsageStore } from './usage-store.mjs';
 import { createCliproxyClient } from './cliproxy.mjs';
-import { createPiManager, defaultPiRoot } from './pi-manager.mjs';
+import {
+  createPiManager,
+  defaultPiRoot,
+  defaultRauRoot,
+  RAU_LOCKED_MODELS,
+  RAU_SECRET_ID,
+} from './pi-manager.mjs';
+import { createRauCreditsClient, storeRauApiKey } from './rau-credits-client.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
-import { createOpenRouter } from './openrouter.mjs';
+import { createOpenRouter, creditBalanceEmpty } from './openrouter.mjs';
 import { createIpcSecretStore } from './secret-store.mjs';
 import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
 import { resolveHwpExtractor } from './reference-extractor.mjs';
@@ -162,9 +169,28 @@ const writingStyleStore = await new WritingStyleStore().init();
 const agentInstructionsStore = await new AgentInstructionsStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
 const PI_ROOT = defaultPiRoot();
+const RAU_ROOT = defaultRauRoot();
 const openRouter = createOpenRouter({ cacheDir: PI_ROOT });
+const rauOpenRouter = createOpenRouter({ cacheDir: RAU_ROOT });
 const secretStore = createIpcSecretStore();
 const piManager = await createPiManager({ rootDir: PI_ROOT, openRouter, secretStore }).init();
+const rauManager = await createPiManager({
+  rootDir: RAU_ROOT,
+  prefixDir: piManager.prefixDir,
+  openRouter: rauOpenRouter,
+  secretStore,
+  secretId: RAU_SECRET_ID,
+  lockedModels: RAU_LOCKED_MODELS,
+  skipLegacyKey: true,
+}).init();
+const rauCredits = createRauCreditsClient();
+let rauLogin = null;
+let npmPrefixMutationQueue = Promise.resolve();
+function mutateSharedNpmPrefix(operation) {
+  const running = npmPrefixMutationQueue.then(operation, operation);
+  npmPrefixMutationQueue = running.catch(() => {});
+  return running;
+}
 const cliSetup = await createCliSetupManager({ secretStore }).init();
 // App-managed bins are available to auxiliary CLI calls as soon as installation completes.
 // 허브가 관리하는 API 키는 process.env 에 올리지 않는다 — npm lifecycle 스크립트,
@@ -190,11 +216,14 @@ let sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
 let cursorModelIds = [];
 /** pi 상태는 동기 경로(resolveModel/startSession)에서도 필요해 캐시해 둔다. */
 let piStatus = await piManager.status();
+let rauStatus = await rauManager.status();
 /** OpenRouter 잔액. 키가 있을 때만 채워지고 사용량 리포트에 얹힌다. */
 let openRouterCredits = null;
-if (piStatus.installed) {
+let rauCreditsBalance = null;
+if (piStatus.installed || rauStatus.installed) {
   // 저장소가 갱신되면 확장/스킬도 따라와야 한다 — 실패해도 허브는 그대로 뜬다.
   await piManager.syncAssets().catch((error) => log(`pi asset sync failed: ${error?.message ?? error}`));
+  await rauManager.syncAssets().catch((error) => log(`rau asset sync failed: ${error?.message ?? error}`));
 }
 const providerHealth = createProviderHealth({
   piBin: () => (piStatus.installed ? piManager.piBin : null),
@@ -380,7 +409,8 @@ function refreshSessionCredentials(agent) {
 
 /** CLI 설치·인증을 cli-setup-manager 가 관리하는 에이전트들. */
 const CLI_SETUP_AGENTS = ['claude', 'codex', 'grok', 'cursor'];
-const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi']);
+const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi', 'rau']);
+const OPENROUTER_AGENTS = new Set(['pi', 'rau']);
 const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
 
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
@@ -398,17 +428,35 @@ const SESSION_FACTORIES = {
   claude: createClaudeSession,
   codex: createCodexSession,
   pi: createPiSession,
+  rau: createPiSession,
   grok: createGrokSession,
   cursor: createCursorSession,
 };
+
+function openRouterManager(agent) {
+  if (agent === 'rau') return rauManager;
+  if (agent === 'pi') return piManager;
+  return null;
+}
+
+function openRouterStatus(agent) {
+  if (agent === 'rau') return rauStatus;
+  if (agent === 'pi') return piStatus;
+  return null;
+}
+
+function rauTrialEmpty() {
+  if (!rauStatus.setupComplete) return false;
+  return creditBalanceEmpty(rauCreditsBalance);
+}
 
 function unknownAgentError(agent) {
   return Object.assign(new Error(`unknown agent: ${String(agent)}`), { code: 'INVALID_REQUEST' });
 }
 
-/** pi 모델은 사용자가 고른 것뿐이다 — 정적 목록이 아니라 캐시된 상태에서 찾는다. */
-function piModelConfig(id) {
-  return piStatus.models.find((model) => model.id === id) ?? null;
+/** pi/rau 모델은 캐시된 상태에서 찾는다. */
+function piModelConfig(id, agent = 'pi') {
+  return (openRouterStatus(agent)?.models ?? []).find((model) => model.id === id) ?? null;
 }
 
 async function refreshPiStatus() {
@@ -416,23 +464,42 @@ async function refreshPiStatus() {
   return piStatus;
 }
 
-function piAgentSetupStatus() {
+async function refreshRauStatus() {
+  rauStatus = await rauManager.status();
+  return rauStatus;
+}
+
+function openRouterAgentSetupStatus(agent) {
+  const status = openRouterStatus(agent);
   return {
-    agent: 'pi',
-    installed: piStatus.installed,
-    available: piStatus.installed,
-    installing: piStatus.installing,
-    version: piStatus.version,
-    authenticated: piStatus.keyConfigured,
-    authMethod: piStatus.keyConfigured ? 'api-key' : null,
-    keyTail: piStatus.keyTail,
+    agent,
+    installed: status.installed,
+    available: status.installed,
+    installing: status.installing,
+    version: status.version,
+    authenticated: status.keyConfigured,
+    authMethod: status.keyConfigured ? 'api-key' : null,
+    keyTail: status.keyTail,
+    account: status.account ?? null,
     authenticating: false,
-    setupComplete: piStatus.setupComplete,
-    connected: piStatus.setupComplete,
-    latestVersion: piStatus.latestVersion ?? null,
-    updateRequired: piStatus.updateRequired === true,
-    error: piStatus.error,
+    setupComplete: status.setupComplete,
+    connected: status.setupComplete,
+    latestVersion: status.latestVersion ?? null,
+    updateRequired: status.updateRequired === true,
+    error: status.error,
   };
+}
+
+function piAgentSetupStatus() {
+  return openRouterAgentSetupStatus('pi');
+}
+
+function rauAgentSetupStatus() {
+  const status = openRouterAgentSetupStatus('rau');
+  status.authenticating = Boolean(rauLogin);
+  if (status.authenticated) status.authMethod = 'oauth';
+  if (rauTrialEmpty()) status.exhausted = true;
+  return status;
 }
 
 /** 모델 목록 조회가 상태 응답을 붙잡아 둘 수 있는 상한. */
@@ -482,7 +549,7 @@ async function agentSetupStatuses() {
   cursorModelIds = cursor.authenticated ? (cursorModelProbe ?? cursorModelIds) : [];
   cursor.models = [...cursorModelIds];
   cliSetupStatus = { claude, codex, grok, cursor };
-  return { claude, codex, grok, cursor, pi: piAgentSetupStatus() };
+  return { claude, codex, grok, cursor, pi: piAgentSetupStatus(), rau: rauAgentSetupStatus() };
 }
 
 let harnessUpdateTimer = null;
@@ -519,7 +586,7 @@ async function runAutomaticHarnessUpdates() {
     cliSetupStatus.codex = await cliSetup.automaticUpdate('codex', { canActivate });
     cliSetupStatus.grok = await cliSetup.automaticUpdate('grok', { canActivate });
     cliSetupStatus.cursor = await cliSetup.automaticUpdate('cursor', { canActivate });
-    piStatus = await piManager.automaticUpdate({ canActivate });
+    piStatus = await mutateSharedNpmPrefix(() => piManager.automaticUpdate({ canActivate }));
     const statuses = await agentSetupStatuses();
     if (Object.values(statuses).some((status) => status.updateRequired)) {
       nextDelay = HARNESS_UPDATE_FAILURE_RETRY_MS;
@@ -560,10 +627,11 @@ function sendAgentSetupError(record, sock, requestId, agent, error, fallback = '
 }
 
 function resolveModel(agent, requested) {
-  if (agent === 'pi') {
-    if (typeof requested === 'string' && piModelConfig(requested)) return requested;
-    if (piStatus.defaultModelId && piModelConfig(piStatus.defaultModelId)) return piStatus.defaultModelId;
-    return piStatus.models[0]?.id ?? null;
+  if (OPENROUTER_AGENTS.has(agent)) {
+    const status = openRouterStatus(agent);
+    if (typeof requested === 'string' && piModelConfig(requested, agent)) return requested;
+    if (status.defaultModelId && piModelConfig(status.defaultModelId, agent)) return status.defaultModelId;
+    return status.models[0]?.id ?? null;
   }
   if (agent === 'cursor') {
     // auto 는 CLI 기본 모델. 캐시된 목록의 id 는 그대로 받고, 목록이 아직 비어
@@ -592,12 +660,12 @@ function resolveModel(agent, requested) {
 }
 
 function resolveEffort(agent, model, requested) {
-  if (agent === 'pi') {
+  if (OPENROUTER_AGENTS.has(agent)) {
     // 추론을 지원하지 않는 모델은 effort 자체가 없다 — 붙이면 요청이 거부된다.
-    const efforts = piModelConfig(model)?.efforts ?? [];
+    const efforts = piModelConfig(model, agent)?.efforts ?? [];
     if (efforts.length === 0) return null;
     if (typeof requested === 'string' && efforts.includes(requested)) return requested;
-    const preferred = piModelConfig(model)?.defaultEffort;
+    const preferred = piModelConfig(model, agent)?.defaultEffort;
     return efforts.includes(preferred) ? preferred : efforts[0];
   }
   // cursor CLI 에는 reasoning effort 선택이 없다.
@@ -888,6 +956,7 @@ function writingStyleCatalog(record) {
   return buildWritingStyleCatalog({
     health: providerHealth.cached(),
     piStatus,
+    rauStatus,
     currentSelection: activeSession ? { agent: activeSession.agent, model: activeSession.model, effort: activeSession.effort } : null,
   });
 }
@@ -918,25 +987,39 @@ function replyToStudio(record, sock, obj) {
 function usageSnapshot() {
   const usage = cliproxy.applyToSummary(usageStore.summary());
   if (openRouterCredits) usage.openrouter = openRouterCredits;
+  if (rauCreditsBalance) usage.rau = rauCreditsBalance;
   return usage;
+}
+
+function emptyCreditsError(error) {
+  return {
+    balanceUsd: 0,
+    totalCreditsUsd: 0,
+    totalUsageUsd: 0,
+    checkedAt: Date.now(),
+    error: String(error?.message ?? error),
+  };
 }
 
 /** 잔액 조회는 5분 캐시된다 — refresh 일 때만 실제로 다시 부른다. */
 async function refreshOpenRouterCredits(refresh = false) {
   if (!piStatus.keyConfigured) {
     openRouterCredits = null;
+  } else {
+    try {
+      openRouterCredits = await piManager.credits(refresh === true);
+    } catch (error) {
+      openRouterCredits = emptyCreditsError(error);
+    }
+  }
+  if (!rauStatus.keyConfigured) {
+    rauCreditsBalance = null;
     return;
   }
   try {
-    openRouterCredits = await piManager.credits(refresh === true);
+    rauCreditsBalance = await rauManager.credits(refresh === true);
   } catch (error) {
-    openRouterCredits = {
-      balanceUsd: 0,
-      totalCreditsUsd: 0,
-      totalUsageUsd: 0,
-      checkedAt: Date.now(),
-      error: String(error?.message ?? error),
-    };
+    rauCreditsBalance = emptyCreditsError(error);
   }
 }
 
@@ -1059,16 +1142,20 @@ function checkpointTitleDeps(record, health, signal) {
 }
 
 function auxDeps(record, requestedAgent, cliAgent) {
-  const agent = requestedAgent === 'pi' || requestedAgent === 'claude' || requestedAgent === 'codex'
+  const agent = requestedAgent === 'pi' || requestedAgent === 'rau'
+    || requestedAgent === 'claude' || requestedAgent === 'codex'
     ? requestedAgent
     : (record.agentSession?.agent ?? null);
+  const manager = agent === 'rau' ? rauManager : piManager;
+  const router = agent === 'rau' ? rauOpenRouter : openRouter;
   const health = providerHealth.cached();
   // 프로브 전이면 CLI 가 있다고 보고 기존 경로를 먼저 태운다.
   const cliAvailable = health ? health[cliAgent]?.available !== false : true;
   return {
-    useOpenRouter: piStatus.setupComplete && (agent === 'pi' || !cliAvailable),
-    piManager,
-    openRouter,
+    useOpenRouter: (agent === 'rau' && rauStatus.setupComplete)
+      || (piStatus.setupComplete && (agent === 'pi' || !cliAvailable)),
+    piManager: manager,
+    openRouter: router,
     workDir: record.workDir,
     cwd: record.workDir,
     isolatedHome: record.isolatedHome,
@@ -1355,10 +1442,13 @@ async function launchTemplateJob(record, job) {
       helperPath,
       jobDir,
     }),
-    piBin: piManager.piBin,
-    piRoot: piManager.rootDir,
-    openRouterApiKey: job.agent === 'pi' ? piManager.apiKey() : undefined,
-    reasoning: job.agent === 'pi' ? Boolean(piModelConfig(job.model)?.reasoning) : false,
+    piBin: (job.agent === 'rau' ? rauManager : piManager).piBin,
+    piRoot: job.agent === 'rau' ? rauManager.rootDir : piManager.rootDir,
+    openRouterApiKey: openRouterManager(job.agent)?.apiKey() ?? undefined,
+    agentName: OPENROUTER_AGENTS.has(job.agent) ? job.agent : 'pi',
+    reasoning: OPENROUTER_AGENTS.has(job.agent)
+      ? Boolean(piModelConfig(job.model, job.agent)?.reasoning)
+      : false,
   };
   const createBackend = SESSION_FACTORIES[job.agent];
   if (!createBackend) throw unknownAgentError(job.agent);
@@ -1451,6 +1541,16 @@ function makeBackendEventHandler(record, generation) {
       });
       sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
       return;
+    }
+    if (evt.type === 'error' && activeSession.agent === 'rau' && isOpenRouterCreditError(evt.message)) {
+      rauCreditsBalance = {
+        balanceUsd: 0,
+        totalCreditsUsd: Number(rauCreditsBalance?.totalCreditsUsd) || 5,
+        totalUsageUsd: Number(rauCreditsBalance?.totalUsageUsd) || 5,
+        checkedAt: Date.now(),
+        error: null,
+      };
+      sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
     }
     if (evt.type === 'turn-start') record.missedTurnEnd = null;
     if (evt.type === 'turn-end') settleAgentTurn(record, activeSession, evt);
@@ -1756,11 +1856,12 @@ async function startSession(
     capabilityEpoch: planning.capabilityEpoch,
     toolProfile: planning.mcpEnvironment().RHWP_TOOL_PROFILE,
     mcpEnvironment: planning.mcpEnvironment(),
-    // pi 전용 — 설치 경로와 영속 루트, 그리고 선택한 모델의 추론 지원 여부.
-    piBin: piManager.piBin,
-    piRoot: piManager.rootDir,
-    openRouterApiKey: agent === 'pi' ? piManager.apiKey() : undefined,
-    reasoning: agent === 'pi' ? Boolean(piModelConfig(model)?.reasoning) : false,
+    // pi · rau 전용 — 설치 경로와 영속 루트, 그리고 선택한 모델의 추론 지원 여부.
+    piBin: (agent === 'rau' ? rauManager : piManager).piBin,
+    piRoot: agent === 'rau' ? rauManager.rootDir : piManager.rootDir,
+    openRouterApiKey: openRouterManager(agent)?.apiKey() ?? undefined,
+    agentName: OPENROUTER_AGENTS.has(agent) ? agent : 'pi',
+    reasoning: OPENROUTER_AGENTS.has(agent) ? Boolean(piModelConfig(model, agent)?.reasoning) : false,
   };
   const createBackend = SESSION_FACTORIES[agent];
   if (!createBackend) throw unknownAgentError(agent);
@@ -2034,11 +2135,25 @@ async function handleStudioMessage(record, sock, msg) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: `unknown agent: ${String(agent)}` });
         return;
       }
-      // 설정이 끝나지 않은 pi 로는 세션을 열지 않는다 — 살아 있는 세션도 건드리지 않는다.
+      // 설정이 끝나지 않은 pi/rau 로는 세션을 열지 않는다 — 살아 있는 세션도 건드리지 않는다.
       if (agent === 'pi' && !piStatus.setupComplete) {
         sendJson(sock, {
           v: 1, type: 'chat-error', code: 'PI_NOT_CONFIGURED',
           message: 'Pi 설정을 먼저 끝내 주세요 (설치 · OpenRouter 키 · 모델 선택).',
+        });
+        return;
+      }
+      if (agent === 'rau' && !rauStatus.setupComplete) {
+        sendJson(sock, {
+          v: 1, type: 'chat-error', code: 'RAU_NOT_CONFIGURED',
+          message: 'Rau 연결을 먼저 끝내 주세요.',
+        });
+        return;
+      }
+      if (agent === 'rau' && rauTrialEmpty()) {
+        sendJson(sock, {
+          v: 1, type: 'chat-error', code: 'RAU_CREDITS_EMPTY',
+          message: 'Rau 체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.',
         });
         return;
       }
@@ -2521,7 +2636,15 @@ async function handleStudioMessage(record, sock, msg) {
         ...(Number.isFinite(entry.totalBytes) ? { totalBytes: entry.totalBytes } : {}),
       });
       const installing = agent === 'pi'
-        ? piManager.install(progress).then((status) => { piStatus = status; })
+        ? mutateSharedNpmPrefix(() => piManager.install(progress)).then(async (status) => {
+          piStatus = status;
+          rauStatus = await rauManager.status();
+        })
+        : agent === 'rau'
+          ? mutateSharedNpmPrefix(() => rauManager.install(progress)).then(async (status) => {
+            rauStatus = status;
+            piStatus = await piManager.status();
+          })
         : cliSetup.install(agent, progress).then((status) => { cliSetupStatus[agent] = status; });
       void installing
         .then(agentSetupStatuses)
@@ -2542,6 +2665,59 @@ async function handleStudioMessage(record, sock, msg) {
       }
       let authUrl = null;
       let run;
+      if (agent === 'rau' && method === 'oauth') {
+        if (rauLogin?.abort) rauLogin.abort.abort();
+        const abort = new AbortController();
+        const login = { id: null, abort };
+        rauLogin = login;
+        run = (async () => {
+          const session = await rauCredits.createDeviceSession({ signal: abort.signal });
+          login.id = session.id;
+          authUrl = session.loginUrl;
+          replyToStudio(record, sock, { v: 1, type: 'agent-setup-auth-started', requestId, agent, authUrl });
+          replyToStudio(record, sock, { v: 1, type: 'agent-setup-progress', agent, state: 'authorizing', authUrl });
+          const { key, email } = await rauCredits.redeem(session.id, { signal: abort.signal });
+          rauStatus = await storeRauApiKey(rauManager.setApiKey.bind(rauManager), key, {
+            signal: abort.signal,
+            account: email,
+          });
+          await rauCredits.acknowledgeDeviceSession(session.id, { signal: abort.signal })
+            .catch((error) => {
+              if (error?.code === 'RAU_LOGIN_CANCELLED') throw error;
+              log(`Rau credit session acknowledgement failed: ${error?.message ?? error}`);
+            });
+          if (!rauStatus.installed) {
+            rauStatus = await mutateSharedNpmPrefix(() => rauManager.install((entry) => replyToStudio(record, sock, {
+              v: 1,
+              type: 'agent-setup-progress',
+              agent,
+              state: entry.state,
+              ...(Number.isFinite(entry.percent) ? { percent: entry.percent } : {}),
+              ...(entry.detail ? { detail: entry.detail } : {}),
+              ...(entry.activity === true ? { activity: true } : {}),
+            })));
+            piStatus = await piManager.status();
+          }
+          await refreshOpenRouterCredits(true);
+        })();
+        void run
+          .then(agentSetupStatuses)
+          .then((statuses) => {
+            if (rauLogin === login) rauLogin = null;
+            replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses });
+            void providerHealth.check(true).then((providers) => replyToStudio(record, sock, { v: 1, type: 'provider-status', providers }));
+            replyToStudio(record, sock, { v: 1, type: 'usage-report', usage: usageSnapshot() });
+          })
+          .catch((e) => {
+            if (rauLogin === login) rauLogin = null;
+            if (e?.code === 'RAU_LOGIN_CANCELLED' || e?.code === 'AGENT_AUTH_CANCELLED') {
+              void agentSetupStatuses().then((statuses) => replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses }));
+              return;
+            }
+            sendAgentSetupError(record, sock, null, agent, e, 'AGENT_AUTH_FAILED');
+          });
+        return;
+      }
       if (agent === 'pi' && method === 'oauth') {
         const callbackUrl = `http://127.0.0.1:${hubPort}/oauth/openrouter/callback`;
         authUrl = piManager.beginOAuth(callbackUrl).authUrl;
@@ -2601,8 +2777,32 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'agent-setup-cancel': {
       const agent = msg.agent;
-      if (agent === 'pi') void piManager.cancelSetup();
+      if (agent === 'rau') {
+        rauLogin?.abort.abort();
+        rauLogin = null;
+        void rauManager.cancelSetup();
+      } else if (agent === 'pi') void piManager.cancelSetup();
       else if (CLI_SETUP_AGENTS.includes(agent)) void cliSetup.cancel(agent);
+      return;
+    }
+    case 'agent-setup-disconnect': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      if (msg.agent !== 'rau') {
+        sendAgentSetupError(record, sock, requestId, msg.agent, new Error('연결 해제 요청을 확인하지 못했어요.'));
+        return;
+      }
+      const rauSessions = [...sessions.values()]
+        .filter((session) => session.agentSession?.agent === 'rau');
+      void Promise.all(rauSessions.map(disposeSession))
+        .then(() => rauManager.clearApiKey())
+        .then(async (status) => {
+          rauStatus = status;
+          await refreshOpenRouterCredits(true);
+          const statuses = await agentSetupStatuses();
+          replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses });
+          replyToStudio(record, sock, { v: 1, type: 'usage-report', usage: usageSnapshot() });
+        })
+        .catch((e) => sendAgentSetupError(record, sock, requestId, 'rau', e, 'AGENT_SETUP_FAILED'));
       return;
     }
     case 'usage-request': {
@@ -2636,7 +2836,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'pi-install': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      void piManager.install((progress) => replyToStudio(record, sock, {
+      void mutateSharedNpmPrefix(() => piManager.install((progress) => replyToStudio(record, sock, {
         v: 1,
         type: 'pi-setup-progress',
         requestId,
@@ -2646,7 +2846,7 @@ async function handleStudioMessage(record, sock, msg) {
         ...(Number.isFinite(progress.receivedBytes) ? { receivedBytes: progress.receivedBytes } : {}),
         ...(Number.isFinite(progress.totalBytes) ? { totalBytes: progress.totalBytes } : {}),
         ...(progress.activity === true ? { activity: true } : {}),
-      }))
+      })))
         .then((status) => {
           piStatus = status;
           replyToStudio(record, sock, { v: 1, type: 'pi-status', requestId, status });
@@ -2750,6 +2950,7 @@ async function handleStudioMessage(record, sock, msg) {
           {
             health: providerHealth.cached(),
             piStatus,
+            rauStatus,
             currentSelection: record.agentSession ? { agent: record.agentSession.agent, model: record.agentSession.model, effort: record.agentSession.effort } : null,
           },
         );
@@ -2791,9 +2992,9 @@ async function handleStudioMessage(record, sock, msg) {
               effort: selection.effort,
             },
             {
-              useOpenRouter: selection.agent === 'pi',
-              piManager,
-              openRouter,
+              useOpenRouter: selection.agent === 'pi' || selection.agent === 'rau',
+              piManager: selection.agent === 'rau' ? rauManager : piManager,
+              openRouter: selection.agent === 'rau' ? rauOpenRouter : openRouter,
               projectRoot: ROOT,
               workDir: record.workDir,
               isolatedHome: record.isolatedHome,

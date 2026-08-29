@@ -20,10 +20,11 @@ const piStatus = {
   ],
 };
 
-test('catalog exposes Codex, Claude, and only the Pi models the user configured', () => {
+test('catalog exposes Codex, Claude, Rau, and only the Pi models the user configured', () => {
   const catalog = buildWritingStyleCatalog({ health, piStatus });
-  assert.deepEqual(catalog.providers.map((provider) => provider.id), ['codex', 'claude', 'pi']);
+  assert.deepEqual(catalog.providers.map((provider) => provider.id), ['codex', 'claude', 'rau', 'pi']);
   assert.equal(catalog.providers.find((provider) => provider.id === 'codex').available, false);
+  assert.equal(catalog.providers.find((provider) => provider.id === 'rau').available, false);
   assert.deepEqual(catalog.providers.find((provider) => provider.id === 'pi').models.map((model) => model.id), ['openai/gpt-5.4']);
   assert.deepEqual(catalog.defaultSelection, { agent: 'claude', model: 'sonnet', effort: 'high' });
 });

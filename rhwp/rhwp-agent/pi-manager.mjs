@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS } from '../rau-credits/catalog.mjs';
 import { createOpenRouter } from './openrouter.mjs';
 import { fetchLatestPackage, replaceFileAtomically, updatePrefixAtomically } from './harness-update.mjs';
 import { bundledNpmLaunch } from './npm-runtime.mjs';
@@ -41,7 +42,10 @@ const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const REGISTRY_TIMEOUT_MS = 10_000;
 /** 진행 이벤트는 이 간격으로만 내보낸다 — 청크마다 WS 를 두드리지 않는다. */
 const PROGRESS_INTERVAL_MS = 150;
-const OPENROUTER_SECRET_ID = 'rhwp.pi.openrouter-api-key';
+export const PI_SECRET_ID = 'rhwp.pi.openrouter-api-key';
+export const RAU_SECRET_ID = 'rhwp.rau.openrouter-api-key';
+const OPENROUTER_SECRET_ID = PI_SECRET_ID;
+export { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS };
 const INSTALL_PROGRESS = Object.freeze({
   preparing: 8,
   downloadStart: 12,
@@ -77,6 +81,7 @@ const SKILLS_SOURCE_DIR = path.join(MODULE_DIR, 'pi', 'skills');
  * @property {string|null} version
  * @property {boolean} keyConfigured
  * @property {string|null} keyTail
+ * @property {string|null} account
  * @property {PiModelConfig[]} models
  * @property {string|null} defaultModelId
  * @property {boolean} setupComplete
@@ -112,6 +117,11 @@ function keyTailOf(key) {
   return trimmed ? trimmed.slice(-4) : null;
 }
 
+/** 저장된 로그인 계정 — 이메일 형식이 아니면 버린다. */
+function storedAccount(raw) {
+  return typeof raw === 'string' && raw.includes('@') ? raw.trim() : null;
+}
+
 /** reasoning 모델에만 붙는다 — pi 의 thinking 레벨을 OpenRouter effort 로 매핑한다. */
 function thinkingLevelMap() {
   return {
@@ -135,17 +145,29 @@ export function defaultPiRoot(env = process.env, platform = process.platform, ho
   return platformPath.join(env.XDG_DATA_HOME || platformPath.join(home, '.local', 'share'), 'rhwp', 'pi');
 }
 
+export function defaultRauRoot(env = process.env, platform = process.platform, home = os.homedir()) {
+  const platformPath = platform === 'win32' ? path.win32 : path.posix;
+  if (env.RHWP_RAU_DIR) return platformPath.resolve(env.RHWP_RAU_DIR);
+  if (platform === 'darwin') return platformPath.join(home, 'Library', 'Application Support', 'rhwp', 'rau');
+  if (platform === 'win32') {
+    return platformPath.join(env.APPDATA || platformPath.join(home, 'AppData', 'Roaming'), 'rhwp', 'rau');
+  }
+  return platformPath.join(env.XDG_DATA_HOME || platformPath.join(home, '.local', 'share'), 'rhwp', 'rau');
+}
+
 /**
  * pi CLI 설치본과 그 에이전트 홈(모델·키·스킬)을 관리한다.
  * 설치는 single-flight 이고, 루트가 없어도 status() 는 그냥 미설치로 답한다.
  *
- * @param {{ rootDir?: string, spawnProcess?: typeof spawn, fetchImpl?: typeof fetch,
+ * @param {{ rootDir?: string, prefixDir?: string, spawnProcess?: typeof spawn, fetchImpl?: typeof fetch,
  *           now?: () => number, openRouter?: ReturnType<typeof createOpenRouter>,
  *           npmCommand?: string, nodeCommand?: string, packageSpec?: string, platform?: string,
- *           baseEnv?: NodeJS.ProcessEnv, secretStore?: object }} [deps]
+ *           baseEnv?: NodeJS.ProcessEnv, secretStore?: object, secretId?: string,
+ *           lockedModels?: readonly object[] | null, skipLegacyKey?: boolean }} [deps]
  */
 export function createPiManager({
   rootDir = defaultPiRoot(),
+  prefixDir: prefixDirOverride = null,
   spawnProcess = spawn,
   fetchImpl = globalThis.fetch,
   now = Date.now,
@@ -156,8 +178,15 @@ export function createPiManager({
   platform = process.platform,
   baseEnv = process.env,
   secretStore = null,
+  secretId = OPENROUTER_SECRET_ID,
+  lockedModels = null,
+  skipLegacyKey = false,
 } = {}) {
-  const prefixDir = path.join(rootDir, 'prefix');
+  const prefixDir = prefixDirOverride ?? path.join(rootDir, 'prefix');
+  const locked = Array.isArray(lockedModels) && lockedModels.length > 0
+    ? lockedModels.map((model) => ({ ...model, pricing: { ...model.pricing } }))
+    : null;
+  const modelCap = locked ? locked.length : MAX_MODELS;
   const agentDir = path.join(rootDir, 'agent');
   const sessionsDir = path.join(rootDir, 'sessions');
   const configPath = path.join(rootDir, CONFIG_FILE);
@@ -175,6 +204,8 @@ export function createPiManager({
     version: CONFIG_VERSION,
     installedVersion: null,
     keyTail: null,
+    /** 로그인한 계정 이메일 — Rau 체험 로그인이 알려 준다. */
+    account: null,
     models: [],
     defaultModelId: null,
     setupComplete: false,
@@ -263,7 +294,7 @@ export function createPiManager({
       const models = (Array.isArray(raw?.models) ? raw.models : [])
         .map(normalizeStoredModel)
         .filter(Boolean)
-        .slice(0, MAX_MODELS);
+        .slice(0, modelCap);
       const defaultModelId = models.some((model) => model.id === raw?.defaultModelId)
         ? raw.defaultModelId
         : (models[0]?.id ?? null);
@@ -271,6 +302,7 @@ export function createPiManager({
         version: CONFIG_VERSION,
         installedVersion: typeof raw?.installedVersion === 'string' ? raw.installedVersion : null,
         keyTail: typeof raw?.keyTail === 'string' ? raw.keyTail : null,
+        account: storedAccount(raw?.account),
         models,
         defaultModelId,
         setupComplete: false,
@@ -278,13 +310,13 @@ export function createPiManager({
     } catch {
       // 설정 파일이 없거나 깨졌으면 빈 상태로 시작한다.
     }
-    const legacyKey = await readLegacyStoredKey();
+    const legacyKey = skipLegacyKey ? null : await readLegacyStoredKey();
     if (secretStore?.available) {
       try {
-        apiKey = await secretStore.get(OPENROUTER_SECRET_ID);
+        apiKey = await secretStore.get(secretId);
         if (!apiKey && legacyKey) {
-          await secretStore.set(OPENROUTER_SECRET_ID, legacyKey);
-          apiKey = await secretStore.get(OPENROUTER_SECRET_ID);
+          await secretStore.set(secretId, legacyKey);
+          apiKey = await secretStore.get(secretId);
           if (apiKey === legacyKey) await writeModelsJson();
         }
       } catch (error) {
@@ -294,6 +326,12 @@ export function createPiManager({
     } else {
       // Preserve access until the desktop vault can migrate it; new keys are never stored here.
       apiKey = legacyKey;
+    }
+    if (locked) {
+      config.models = locked.map((model) => normalizeStoredModel(model)).filter(Boolean);
+      config.defaultModelId = config.models.some((model) => model.id === config.defaultModelId)
+        ? config.defaultModelId
+        : (config.models.find((model) => model.id === RAU_DEFAULT_MODEL_ID)?.id ?? config.models[0]?.id ?? null);
     }
     installedVersion = await readInstalledVersion();
     config.setupComplete = Boolean(apiKey) && config.models.length > 0;
@@ -309,6 +347,7 @@ export function createPiManager({
       version: CONFIG_VERSION,
       installedVersion: installedVersion ?? config.installedVersion ?? null,
       keyTail: config.keyTail,
+      account: config.account,
       models: config.models,
       defaultModelId: config.defaultModelId,
       setupComplete: config.setupComplete,
@@ -502,6 +541,7 @@ export function createPiManager({
       version: installedVersion,
       keyConfigured: Boolean(apiKey),
       keyTail: apiKey ? keyTailOf(apiKey) : null,
+      account: config.account,
       models: config.models.map((model) => ({ ...model, pricing: { ...model.pricing } })),
       defaultModelId: config.defaultModelId,
       setupComplete: config.setupComplete,
@@ -549,6 +589,7 @@ export function createPiManager({
     /** 스폰 없이 파일만 본다 — 부팅/웰컴 푸시에서 자주 불린다. */
     async status() {
       await load();
+      installedVersion = await readInstalledVersion();
       return currentStatus();
     },
 
@@ -673,8 +714,13 @@ export function createPiManager({
       return currentStatus();
     },
 
-    /** OpenRouter 키를 확인하고 OS-backed vault에 저장한다. */
-    async setApiKey(key) {
+    /**
+     * OpenRouter 키를 확인하고 OS-backed vault에 저장한다.
+     *
+     * @param {string} key
+     * @param {{ account?: string|null }} [opts] 로그인한 계정 이메일 (Rau 체험 로그인).
+     */
+    async setApiKey(key, { account = null } = {}) {
       await load();
       const trimmed = String(key ?? '').trim();
       if (!trimmed) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키를 입력하세요');
@@ -682,10 +728,17 @@ export function createPiManager({
       if (!check.valid) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키가 거절됐어요');
       // 보안 저장소가 없으면 models.json(0600)에 보관한다 — load() 가 읽고, vault 가
       // 생기면 기존 이관 경로가 vault 로 옮긴 뒤 파일에서 지운다.
-      if (secretStore?.available) await secretStore.set(OPENROUTER_SECRET_ID, trimmed);
+      if (secretStore?.available) await secretStore.set(secretId, trimmed);
       apiKey = trimmed;
       secretStoreError = null;
       config.keyTail = keyTailOf(trimmed);
+      // 계정이 함께 오면 갱신한다. 없으면(API 키 직접 입력) 이전 값을 지운다.
+      config.account = storedAccount(account);
+      if (locked && config.models.length === 0) {
+        config.models = locked.map((model) => normalizeStoredModel(model)).filter(Boolean);
+        config.defaultModelId = config.models.find((model) => model.id === RAU_DEFAULT_MODEL_ID)?.id
+          ?? config.models[0]?.id ?? null;
+      }
       config.setupComplete = config.models.length > 0;
       await serialized(async () => {
         await writeModelsJson();
@@ -737,6 +790,29 @@ export function createPiManager({
       return this.setApiKey(body.key);
     },
 
+    /** 로컬 키만 지운다. 호스티드 $5 키는 서버에 남는다. */
+    async clearApiKey() {
+      await load();
+      if (secretStore?.available) {
+        try {
+          await secretStore.delete(secretId);
+          secretStoreError = null;
+        } catch (error) {
+          secretStoreError = error?.message ?? 'OS 보안 저장소에서 키를 지우지 못했어요.';
+        }
+      }
+      apiKey = null;
+      config.keyTail = null;
+      config.account = null;
+      config.setupComplete = false;
+      client.clearCache();
+      await serialized(async () => {
+        await writeModelsJson();
+        await persistConfig();
+      });
+      return currentStatus();
+    },
+
     async cancelSetup() {
       oauthFlow = null;
       const proc = installProcess;
@@ -755,6 +831,9 @@ export function createPiManager({
       await load();
       const requested = Array.isArray(models) ? models : [];
       if (requested.length === 0) throw piError('PI_MODELS_EMPTY', '모델을 하나 이상 고르세요');
+      if (locked) {
+        throw piError('PI_MODELS_LOCKED', 'Rau 모델은 앱이 정해 둔 목록만 씁니다');
+      }
       if (requested.length > MAX_MODELS) {
         throw piError('PI_TOO_MANY_MODELS', `모델은 최대 ${MAX_MODELS}개까지 고를 수 있어요`);
       }

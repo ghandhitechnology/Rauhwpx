@@ -33,6 +33,11 @@ export const PI_PLANS = {
   api: { session5h: null, week: null },
 };
 
+/** rau 는 체험 OpenRouter 키 — 한도는 호스티드 $5 잔액이다. */
+export const RAU_PLANS = {
+  api: { session5h: null, week: null },
+};
+
 /** grok/cursor 는 공개된 요금제 예산 정보가 없다 — 종량제 한 칸만 둔다. */
 export const GROK_PLANS = {
   api: { session5h: null, week: null },
@@ -42,14 +47,15 @@ export const CURSOR_PLANS = {
   api: { session5h: null, week: null },
 };
 
-export const AGENTS = /** @type {const} */ (['claude', 'codex', 'pi', 'grok', 'cursor']);
-export const DEFAULT_PLANS = { claude: 'pro', codex: 'plus', pi: 'api', grok: 'api', cursor: 'api' };
+export const AGENTS = /** @type {const} */ (['claude', 'codex', 'pi', 'grok', 'cursor', 'rau']);
+export const DEFAULT_PLANS = { claude: 'pro', codex: 'plus', pi: 'api', grok: 'api', cursor: 'api', rau: 'api' };
 export const PLAN_TABLES = {
   claude: CLAUDE_PLANS,
   codex: CODEX_PLANS,
   pi: PI_PLANS,
   grok: GROK_PLANS,
   cursor: CURSOR_PLANS,
+  rau: RAU_PLANS,
 };
 
 export function defaultUsageRoot(env = process.env, platform = process.platform, home = os.homedir()) {
@@ -149,7 +155,7 @@ function parseEventLine(line) {
 export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now } = {}) {
   const eventsPath = path.join(rootDir, EVENTS_FILE);
   const plansPath = path.join(rootDir, PLANS_FILE);
-  /** @type {Array<{ ts: number, agent: 'claude'|'codex'|'pi'|'grok'|'cursor', model: string, inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheCreationTokens: number, costUsd: number, weightedTokens: number }>} */
+  /** @type {Array<{ ts: number, agent: 'claude'|'codex'|'pi'|'grok'|'cursor'|'rau', model: string, inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheCreationTokens: number, costUsd: number, weightedTokens: number }>} */
   let events = [];
   let plans = { ...DEFAULT_PLANS };
   /** 파일 쓰기는 직렬화한다 — 같은 줄에 두 이벤트가 섞이지 않도록. */
@@ -267,7 +273,7 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
         outputTokens: toCount(outputTokens),
         cacheReadTokens: toCount(cacheReadTokens),
         cacheCreationTokens: toCount(cacheCreationTokens),
-        // pi 는 OpenRouter 청구액을 그대로 들고 온다 — 다른 프로바이더는 0 이다.
+        // pi · rau 는 OpenRouter 청구액을 그대로 들고 온다 — 다른 프로바이더는 0 이다.
         costUsd: toCost(costUsd),
         weightedTokens: 0,
       };
@@ -291,7 +297,7 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
     },
 
     /**
-     * @param {'claude'|'codex'|'pi'|'grok'|'cursor'} agent
+     * @param {'claude'|'codex'|'pi'|'grok'|'cursor'|'rau'} agent
      * @param {string} plan
      */
     async setPlan(agent, plan) {

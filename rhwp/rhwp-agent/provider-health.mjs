@@ -181,7 +181,7 @@ export function createProviderHealth({
     },
     /**
      * @param {boolean} [refresh] true 면 캐시를 무시하고 다시 프로브한다.
-     * @returns {Promise<{ claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, pi: ProviderHealth }>}
+     * @returns {Promise<{ claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, pi: ProviderHealth, rau: ProviderHealth }>}
      */
     check(refresh = false) {
       if (!refresh && cache && now() - cache.checkedAt < cacheTtlMs) {
@@ -196,6 +196,7 @@ export function createProviderHealth({
           const result = {};
           CLI_AGENTS.forEach((agent, index) => { result[agent] = healths[index]; });
           result.pi = healths[CLI_AGENTS.length];
+          result.rau = result.pi;
           cache = { result, checkedAt: now() };
           return result;
         });

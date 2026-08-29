@@ -23,23 +23,31 @@ function piModels(piStatus) {
     pricing: model.pricing && typeof model.pricing === 'object' ? { ...model.pricing } : null,
   }));
 }
-function providerAvailable(id, health, piStatus) {
+function providerAvailable(id, health, piStatus, rauStatus) {
   if (id === 'pi') return Boolean(piStatus?.setupComplete);
+  if (id === 'rau') return Boolean(rauStatus?.setupComplete);
   return health?.[id]?.available !== false;
 }
 
-export function buildWritingStyleCatalog({ health = null, piStatus = null, currentSelection = null } = {}) {
+export function buildWritingStyleCatalog({
+  health = null, piStatus = null, rauStatus = null, currentSelection = null,
+} = {}) {
   const providers = [
     {
-      id: 'codex', name: 'Codex', available: providerAvailable('codex', health, piStatus),
+      id: 'codex', name: 'Codex', available: providerAvailable('codex', health, piStatus, rauStatus),
       error: health?.codex?.error ?? null, models: CODEX_MODELS.map((model) => ({ ...model, efforts: [...model.efforts] })),
     },
     {
-      id: 'claude', name: 'Claude', available: providerAvailable('claude', health, piStatus),
+      id: 'claude', name: 'Claude', available: providerAvailable('claude', health, piStatus, rauStatus),
       error: health?.claude?.error ?? null, models: CLAUDE_MODELS.map((model) => ({ ...model, efforts: [...model.efforts] })),
     },
     {
-      id: 'pi', name: 'Pi · OpenRouter', available: providerAvailable('pi', health, piStatus),
+      id: 'rau', name: 'Rau', available: providerAvailable('rau', health, piStatus, rauStatus),
+      error: rauStatus?.setupComplete ? null : 'Connect Rau to use trial credits.',
+      models: piModels(rauStatus),
+    },
+    {
+      id: 'pi', name: 'Pi · OpenRouter', available: providerAvailable('pi', health, piStatus, rauStatus),
       error: piStatus?.setupComplete ? null : 'Configure an OpenRouter key and at least one Pi model.',
       models: piModels(piStatus),
     },

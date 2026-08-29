@@ -235,7 +235,7 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
     && typeof t.createdAt === 'number'
     && typeof t.updatedAt === 'number'
     && (t.agent === 'claude' || t.agent === 'codex' || t.agent === 'pi'
-      || t.agent === 'grok' || t.agent === 'cursor')
+      || t.agent === 'grok' || t.agent === 'cursor' || t.agent === 'rau')
     && typeof t.model === 'string'
     && typeof t.effort === 'string'
     && Array.isArray(t.messages)
@@ -244,7 +244,7 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
 
 function isAgentName(value: unknown): value is AgentName {
   return value === 'claude' || value === 'codex' || value === 'pi'
-    || value === 'grok' || value === 'cursor';
+    || value === 'grok' || value === 'cursor' || value === 'rau';
 }
 
 function nonEmptyString(value: unknown): string | null {
@@ -446,10 +446,7 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
         }];
       })
       : undefined;
-    const agent: AgentName | undefined = message.agent === 'claude' || message.agent === 'codex'
-      || message.agent === 'pi' || message.agent === 'grok' || message.agent === 'cursor'
-      ? message.agent
-      : undefined;
+    const agent: AgentName | undefined = isAgentName(message.agent) ? message.agent : undefined;
     const skillIcon: ProductSkillIcon | undefined = message.skillIcon === 'pencil'
       || message.skillIcon === 'bot' || message.skillIcon === 'system'
       ? message.skillIcon

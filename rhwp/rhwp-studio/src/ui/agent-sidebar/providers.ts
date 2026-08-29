@@ -8,6 +8,7 @@
 import type { AgentName } from '../../agent/types.ts';
 
 export const AGENT_LABEL: Record<AgentName, string> = {
+  rau: 'Rau',
   claude: 'Claude',
   codex: 'Codex',
   pi: 'Pi',
@@ -17,6 +18,7 @@ export const AGENT_LABEL: Record<AgentName, string> = {
 
 /** 프로바이더가 서는 정식 순서 — 연결 목록과 입력기 피커가 같이 쓴다. */
 export const PROVIDER_ORDER = [
+  'rau',
   'claude',
   'codex',
   'pi',
@@ -30,7 +32,7 @@ const providerOrderIsComplete: ProviderOrderGap extends never ? true : ProviderO
 void providerOrderIsComplete;
 
 /** 단색 로고는 마스크로 그린다 — currentColor 를 타고 테마에 맞는다. */
-export const MASK_ICON_AGENTS: readonly AgentName[] = ['codex', 'pi', 'grok', 'cursor'];
+export const MASK_ICON_AGENTS: readonly AgentName[] = ['rau', 'codex', 'pi', 'grok', 'cursor'];
 
 export const PROVIDER_ICON_SRC: Partial<Record<AgentName, string>> = {
   claude: '/icons/provider-claude.png',

@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 // settings.ts 는 CSS 를 가져오므로 Node 에서 불러올 수 없다 — 계기판 숫자
 // 규칙만 css 없는 모듈에서 실제로 검증하고, DOM 계약은 소스 텍스트로 본다.
-import { formatRelativeTime, formatResetAt, formatTokens } from '../src/ui/agent-sidebar/usage-format.ts';
+import {
+  formatRelativeTime,
+  formatResetAt,
+  formatTokens,
+  formatUsageAge,
+  formatUsageReset,
+} from '../src/ui/agent-sidebar/usage-format.ts';
 // providers.ts 는 CSS 를 안 가져오므로 표를 텍스트가 아니라 값으로 직접 본다.
 import {
   AGENT_LABEL,
@@ -239,10 +245,10 @@ test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에
   assert.match(settings, /'브라우저로 로그인'/);
   assert.match(settings, /'API 키 입력'/);
   assert.match(settings, /const detected = health\?\.available === true \|\| setup\?\.available === true/);
-  assert.match(settings, /detected \|\| setup\?\.connected \|\| setup\?\.setupComplete \? '재설정' : '설정'/);
+  assert.match(settings, /row\.setup\.textContent = \(agent === 'rau' \? configured : detected \|\| configured\) \? '재설정' : '설정'/);
   assert.match(settings, /const detected = providers\?\.\[agent\]\?\.available === true/);
   assert.match(settings, /const available = detected \|\| status\?\.available === true \|\| status\?\.installed === true/);
-  assert.match(settings, /const connected = detected \|\| status\?\.connected === true \|\| status\?\.setupComplete === true/);
+  assert.match(settings, /const connected = agent === 'rau' \? configured : detected \|\| configured/);
   assert.match(settings, /CLI 연결이 확인되었습니다/);
   assert.doesNotMatch(settings, /필요한 CLI와 인증을 한 번에 설정합니다/);
   assert.match(settings, /piOauth\.addEventListener\('click', \(\) => void startSetupAuth\('oauth'\)\)/);
@@ -335,7 +341,7 @@ test('AI 기본 설정은 Apply 전까지 초안이고 성공 후 사이드바�
   assert.match(settings, /applyDefaults\(result\.value\)/);
   assert.match(settings, /'새 대화부터 적용돼요\.'/);
   assert.match(settings, /nextPrefs\.defaultPermissionProfile === 'unrestricted'[\s\S]*window\.confirm\(UNRESTRICTED_DEFAULT_WARNING\)/);
-  assert.match(settings, /saveAgentInstructions\(\)[\s\S]*trySaveAgentPrefs\(nextPrefs\)/);
+  assert.match(settings, /saveAgentInstructions\(\)[\s\S]*persistPrefs\(nextPrefs\)/);
   assert.match(settings, /agentField\.select\.disabled = aiPrefsSaving/);
   assert.match(settings, /modelField\.select\.disabled = aiPrefsSaving/);
   assert.match(settings, /effortField\.select\.disabled = aiPrefsSaving/);
@@ -380,16 +386,26 @@ test('요금제 선택값은 프로바이더별로 다르고 허브에 저장된
 });
 
 test('사용량 미터는 5시간·주간·오늘·모델별을 보여주고 80%에서 경고로 넘어간다', () => {
-  assert.match(settings, /buildMeter\('5시간'/);
-  assert.match(settings, /buildMeter\('주간'/);
-  assert.match(settings, /오늘 · \$\{formatTokens\(providerUsage\.day\.weightedTokens\)\}/);
-  assert.match(settings, /'모델별'/);
+  assert.match(settings, /buildMeter\('5h'/);
+  assert.match(settings, /buildMeter\('Week'/);
+  assert.match(settings, /formatUsageWindow\('Today', providerUsage\.day\)/);
+  assert.match(settings, /'Models'/);
   assert.match(settings, /const METER_WARN_PERCENT = 80;/);
   assert.match(settings, /if \(percent >= METER_WARN_PERCENT\) row\.classList\.add\('ag-settings-meter-warn'\)/);
   // 막대는 100% 를 넘겨도 가득 찬 상태로 멈춘다.
   assert.match(settings, /Math\.min\(100, Math\.max\(0, percent\)\)/);
   assert.match(settingsCss, /\.ag-settings-meter-warn \.ag-settings-meter-fill/);
   assert.match(settingsCss, /color-mix\(in srgb, var\(--ag-err\)/);
+});
+
+test('모든 프로바이더 사용량은 영문 단위와 세로 구분자를 쓴다', () => {
+  assert.match(settings, /return `\$\{label\} \| \$\{window_\.turns\}calls \| \$\{formatCompactTokens/);
+  const modelRows = settings.match(/function buildModelRows[\s\S]*?return rows;/)?.[0] ?? '';
+  assert.doesNotMatch(modelRows, /if \(agent === 'rau'\)/);
+  assert.match(settings, /metrics\.join\('\ \| '\)/);
+  for (const label of ['Session', 'Today', 'Week']) {
+    assert.match(settings, new RegExp(`formatUsageWindow\\('${label}'`));
+  }
 });
 
 test('사용량 묶음에서 CLIProxyAPI 를 연결할 수 있다', () => {
@@ -403,13 +419,17 @@ test('사용량 묶음에서 CLIProxyAPI 를 연결할 수 있다', () => {
   assert.match(settings, /실제 사용량을 보여줘요/);
   assert.match(settings, /remote-management\.secret-key/);
   assert.match(settings, /ui\.plan\.hidden = actual/);
-  assert.match(settings, /actual \? '실제' : '추정'/);
+  assert.match(settings, /actual \? 'Actual' : 'Estimated'/);
   assert.match(settingsCss, /\.ag-settings-input/);
   assert.match(settingsCss, /\.ag-settings-cliproxy-error/);
+  assert.ok(
+    settings.indexOf('usageSection.body.appendChild(cliproxyCard)')
+      > settings.indexOf('apiUsageBlocks.set(agent'),
+  );
 });
 
 test('한도가 없으면 누적치만 말한다', () => {
-  assert.match(settings, /\$\{formatTokens\(window_\.weightedTokens\)\} 토큰 · \$\{window_\.turns\}턴/);
+  assert.match(settings, /\$\{window_\.turns\}calls \| \$\{formatCompactTokens\(window_\.weightedTokens\)\}/);
 });
 
 test('앱 전용 지시는 에이전트 변경안을 사용자 승인 전까지 분리한다', () => {
@@ -448,6 +468,10 @@ test('토큰·시각 표기는 짧게 (폭이 흔들리지 않게)', () => {
   assert.equal(formatResetAt(now + 5 * 60_000, now), '5분 후 리셋');
   assert.equal(formatResetAt(now + 3 * 3_600_000, now), '3시간 후 리셋');
   assert.equal(formatResetAt(now - 1_000, now), '곧 리셋');
+  assert.equal(formatUsageAge(now - 5 * 60_000, now), '5m ago');
+  assert.equal(formatUsageAge(now - 3 * 3_600_000, now), '3h ago');
+  assert.equal(formatUsageReset(now + 5 * 60_000, now), 'Resets in 5m');
+  assert.equal(formatUsageReset(now + 3 * 3_600_000, now), 'Resets in 3h');
 });
 
 test('사이드바 버튼은 마지막에 불러온 얇고 반듯한 스타일을 공유한다', () => {
@@ -463,8 +487,9 @@ test('사이드바 버튼은 마지막에 불러온 얇고 반듯한 스타일�
 });
 
 test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조색을 모두 갖춘다', () => {
-  // 연결 목록과 입력기 피커는 다섯 프로바이더를 같은 순서로 세운다.
-  assert.deepEqual([...PROVIDER_ORDER], ['claude', 'codex', 'pi', 'grok', 'cursor']);
+  // 연결 목록과 입력기 피커는 여섯 프로바이더를 같은 순서로 세운다.
+  assert.deepEqual([...PROVIDER_ORDER], ['rau', 'claude', 'codex', 'pi', 'grok', 'cursor']);
+  assert.equal(AGENT_LABEL.rau, 'Rau');
   assert.equal(AGENT_LABEL.grok, 'Grok');
   assert.equal(AGENT_LABEL.cursor, 'Cursor');
   // 두 화면 모두 표를 다시 베끼지 않고 공용 모듈에서 가져다 쓴다.
@@ -477,16 +502,19 @@ test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조
   // cursor 표기는 언제나 "Cursor" 다.
   assert.doesNotMatch(settings, /'Cursor Agent'|'cursor-agent'/);
   // 단색 로고는 마스크로 그리므로 마스크 목록과 CSS 규칙이 함께 있어야 한다.
-  assert.deepEqual([...MASK_ICON_AGENTS], ['codex', 'pi', 'grok', 'cursor']);
+  assert.deepEqual([...MASK_ICON_AGENTS], ['rau', 'codex', 'pi', 'grok', 'cursor']);
   // 마스크가 아닌 프로바이더만 이미지 경로를 갖는다.
   assert.equal(PROVIDER_ICON_SRC.claude, '/icons/provider-claude.png');
   assert.equal(PROVIDER_ICON_SRC.grok, undefined);
   assert.equal(PROVIDER_ICON_SRC.cursor, undefined);
+  assert.match(css, /\.ag-provider-icon-mask\[data-agent='rau'\][\s\S]*?rau\.png/);
   assert.match(css, /\.ag-provider-icon-mask\[data-agent='grok'\][\s\S]*?provider-grok\.svg/);
   assert.match(css, /\.ag-provider-icon-mask\[data-agent='cursor'\][\s\S]*?provider-cursor\.svg/);
   // 강조색은 라이트/다크 팔레트에 모두 있고 data-agent 로 갈린다.
+  assert.equal((css.match(/--ag-rau:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-grok:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-cursor:/g) ?? []).length, 2);
+  assert.equal((css.match(/--ag-rau-wash:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-grok-wash:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-cursor-wash:/g) ?? []).length, 2);
   assert.match(css, /\.ag-root\[data-agent='grok'\] \{\s*--ag-accent: var\(--ag-grok\);/);
@@ -508,7 +536,7 @@ test('grok · cursor 사용량도 세션 · 오늘 · 주간 토큰으로 보인
   assert.match(settings, /const API_USAGE_AGENTS: readonly AgentName\[\] = \['grok', 'cursor'\]/);
   assert.match(settings, /function renderApiUsage\(\): void/);
   assert.match(settings, /renderPiUsage\(\);\s*\n\s*renderApiUsage\(\);/);
-  assert.match(settings, /세션 · \$\{formatTokens\(providerUsage\.session\.weightedTokens\)\} 토큰 · \$\{providerUsage\.session\.turns\}턴/);
+  assert.match(settings, /formatUsageWindow\('Session', providerUsage\.session\)/);
   assert.match(settings, /ui\.models\.replaceChildren\(\.\.\.buildModelRows\(providerUsage, agent\)\)/);
   // 요금제 셀렉트는 붙지 않는다 — API 사용량 한 가지뿐이다.
   assert.doesNotMatch(settings, /USAGE_PLANS\[agent\]\s*\?\?/);
@@ -527,8 +555,76 @@ test('cursor 모델 선택은 구독/API 과금 풀로 나뉘어 보인다', () 
   assert.match(css, /\.ag-llm-group-label \{[\s\S]*?flex-basis: 100%/);
 });
 
+test('Rau 는 목록 맨 앞이고 흰 테두리 · 로그인 전용 설정 · $0 전송 잠금을 갖는다', () => {
+  assert.equal(PROVIDER_ORDER[0], 'rau');
+  assert.match(settingsCss, /\.ag-settings-provider-row\[data-agent='rau'\][\s\S]*?border-color:\s*#fff/);
+  assert.match(settings, /if \(agent === 'rau'\) \{\s*\n\s*if \(oauthTitle\) oauthTitle\.textContent = 'Rau로 시작'/);
+  assert.match(settings, /setupApiToggle\.hidden = true/);
+  assert.match(settings, /setupKeyBox\.hidden = true/);
+  assert.match(settings, /로그아웃/);
+  assert.match(source, /function rauCreditsEmpty\(\): boolean/);
+  assert.match(source, /체험 크레딧이 다 됐어요\. 다른 모델을 연결해 주세요\./);
+  assert.match(source, /case 'usage-report':\s*\n\s*lastUsage = e\.usage/);
+  assert.match(source, /if \(!rauSetupComplete && lastUsage\?\.rau\)/);
+  assert.match(source, /selectedAgent === 'rau' && !rauSetupComplete/);
+  assert.ok(source.indexOf("return { ok: false, reason: 'Rau 연결을 먼저 완료해 주세요' }")
+    < source.indexOf('const userMessage = recordUserMessage(prompt'));
+  assert.ok(source.indexOf("return { ok: false, reason: '체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.' }")
+    < source.indexOf('const userMessage = recordUserMessage(prompt'));
+});
+
+test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대를 함께 보여 준다', () => {
+  assert.match(settings, /setupAccountTitle = el\('h3', 'ag-agent-setup-section-title', '로그인된 계정'\)/);
+  assert.match(settings, /setupAccountEmail\.textContent = status\?\.account/);
+  assert.match(settings, /계정 이메일을 확인할 수 없습니다/);
+  assert.doesNotMatch(settings, /연결된 키 \*\*\*\*/);
+  assert.match(settings, /체험 크레딧을 다 썼어요\. 다른 모델을 연결해 주세요\./);
+  // 잔량 막대는 사용량 갱신마다 다시 그린다.
+  assert.match(settings, /renderUsage\(\): void \{\s*\n\s*renderCliproxy\(\);\s*\n\s*renderRauUsage\(\);\s*\n\s*renderRauAccount\(\);/);
+  assert.match(settingsCss, /\.ag-agent-setup-account \{[\s\S]*?border-radius: 12px/);
+  assert.match(settingsCss, /\.ag-agent-setup-account-meter \.ag-settings-meter-track \{[\s\S]*?height: 8px/);
+});
+
+test('Rau 재설정은 압축 동작만 두고 OAuth 완료를 잠깐 알린다', () => {
+  assert.match(settings, /type RauAuthFeedback = 'idle' \| 'success'/);
+  assert.match(settings, /'로그인이 완료되었습니다'/);
+  assert.match(settings, /'계정을 확인하고 계속하세요\.'/);
+  assert.match(settings, /setupDoneClose\.textContent = agent === 'rau' && rauAuthFeedback === 'success' \? '계속' : '완료'/);
+  // 로컬 Rau OAuth가 진행 중이고 완료 상태가 도착한 경우에만 성공 피드백을 시작한다.
+  assert.match(
+    settings,
+    /const rauOauthCompleted = setupAgent === 'rau'[\s\S]*rauOauthFlowInProgress[\s\S]*ev\.statuses\.rau\?\.setupComplete === true[\s\S]*setupOverlay\.getAttribute\('aria-hidden'\) === 'false'/,
+  );
+  assert.equal((settings.match(/showRauAuthSuccess\(\);/g) ?? []).length, 1);
+  assert.match(settings, /rauAuthFeedbackTimer = setTimeout\([\s\S]*?rauAuthFeedback = 'idle';[\s\S]*?}, 1800\)/);
+  assert.match(settings, /function openAgentSetup[\s\S]*resetRauAuthFeedback\(\);[\s\S]*function closeAgentSetup[\s\S]*resetRauAuthFeedback\(\)/);
+  assert.match(settings, /async function startSetupAuth[\s\S]*resetRauAuthFeedback\(\);[\s\S]*rauOauthFlowInProgress = setupAgent === 'rau' && method === 'oauth'/);
+  assert.match(settings, /dispose\(\): void \{[\s\S]*if \(rauAuthFeedbackTimer\) \{[\s\S]*clearTimeout\(rauAuthFeedbackTimer\)/);
+  // 기존 성공 제목과 큰 체크는 다른 프로바이더용으로 남고 Rau에서만 숨는다.
+  assert.match(settings, /setupDonePane\.classList\.toggle\('ag-agent-setup-rau-actions', agent === 'rau'/);
+  assert.match(settingsCss, /\.ag-agent-setup-done\.ag-agent-setup-rau-actions \{[\s\S]*flex-direction: row/);
+  assert.match(settingsCss, /\.ag-agent-setup-rau-actions \.ag-agent-setup-done-mark,[\s\S]*display: none/);
+  assert.match(settingsCss, /\.ag-agent-setup-rau-actions > \[hidden\] \{\s*display: none/);
+  assert.match(settingsCss, /\.ag-agent-setup-auth-feedback-mark \{[\s\S]*width: 20px;[\s\S]*border-radius: 5px/);
+});
+
+test('Rau 로그아웃 뒤 설치된 런타임을 연결 상태로 오인하지 않는다', () => {
+  assert.match(
+    settings,
+    /const configured = status\?\.connected === true \|\| status\?\.setupComplete === true;\s*\n\s*const connected = agent === 'rau' \? configured : detected \|\| configured/,
+  );
+  assert.match(settings, /row\.setup\.textContent = \(agent === 'rau' \? configured : detected \|\| configured\) \? '재설정' : '설정'/);
+  assert.match(settings, /if \(agent === 'rau' && !configured\) \{[\s\S]*row\.detail\.textContent = detected \? '로그인 필요'/);
+  assert.match(settings, /const statuses = await bridge\.disconnectAgent\('rau'\)/);
+  assert.match(settings, /if \(statuses\) setupStatuses = statuses;[\s\S]*renderAgentSetup\(\);/);
+  assert.match(settings, /prefs\.defaultAgent === 'rau'[\s\S]*const fallback = selectableAgents\(\)\[0\][\s\S]*persistPrefs\(\{[\s\S]*\.\.\.prefs,[\s\S]*defaultAgent: fallback,[\s\S]*\}, \{ preserveDraft: true \}\)/);
+  assert.match(settings, /const rauWasIncomplete = setupStatuses !== null[\s\S]*rauWasIncomplete && ev\.statuses\.rau\?\.setupComplete === true/);
+  assert.match(settings, /function persistPrefs[\s\S]*preserveDraft[\s\S]*previousDraft[\s\S]*applyDefaults\(result\.value\)/);
+});
+
 test('설정 모달은 프로바이더별 설치 안내와 API 키 힌트를 갖는다', () => {
   assert.match(settings, /const SETUP_INSTALL_NOTE: Record<AgentName, string>/);
+  assert.match(settings, /rau: '브라우저로 로그인하면 \$5 체험 크레딧이 바로 연결됩니다\.'/);
   assert.match(settings, /cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다\.'/);
   assert.match(settings, /grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다\.'/);
   assert.match(settings, /const API_KEY_PLACEHOLDER: Record<AgentName, string>/);

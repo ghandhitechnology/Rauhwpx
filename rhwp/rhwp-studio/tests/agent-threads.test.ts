@@ -408,6 +408,24 @@ test('persisted Pi chats remain available after reload', () => {
   assert.equal(getThread('pi-thread')?.agent, 'pi');
 });
 
+test('persisted Rau chats keep the provider on the thread and messages', () => {
+  mem.clear();
+  storage.setItem('rhwp-agent-threads', JSON.stringify([{
+    id: 'rau-thread',
+    title: 'Rau 대화',
+    titleRequested: false,
+    createdAt: 1,
+    updatedAt: 2,
+    agent: 'rau',
+    model: 'rau-trial',
+    effort: 'medium',
+    messages: [{ role: 'assistant', text: '체험 답변', agent: 'rau' }],
+  }]));
+  const restored = getThread('rau-thread');
+  assert.equal(restored?.agent, 'rau');
+  assert.equal(restored?.messages[0]?.agent, 'rau');
+});
+
 test('legacy threads default to the standard service tier', () => {
   mem.clear();
   storage.setItem('rhwp-agent-threads', JSON.stringify([{

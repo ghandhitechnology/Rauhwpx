@@ -119,6 +119,8 @@ export interface AgentBridge {
   /** 브라우저 로그인 뒤 받은 인증 코드를 진행 중인 CLI 로그인에 전달한다. */
   submitAgentAuthCode(agent: AgentName, code: string): void;
   cancelAgentSetup(agent: AgentName): void;
+  /** 이 기기의 Rau 키만 지운다. 호스티드 $5 키는 서버에 남는다. */
+  disconnectAgent(agent: AgentName): Promise<AgentSetupStatusMap | null>;
   /** 누적 사용량 요약. 응답이 없으면 null. */
   requestUsage(refresh?: boolean): Promise<UsageSummary | null>;
   /** 요금제를 바꾸고 갱신된 요약을 돌려받는다. */
@@ -256,7 +258,7 @@ const STUDIO_INSTANCE_ID = globalThis.crypto?.randomUUID?.()
   ?? `studio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
 function isAgentName(v: unknown): v is AgentName {
-  return v === 'claude' || v === 'codex' || v === 'pi' || v === 'grok' || v === 'cursor';
+  return v === 'claude' || v === 'codex' || v === 'pi' || v === 'grok' || v === 'cursor' || v === 'rau';
 }
 
 function isBoundedText(value: unknown, max: number): value is string {
@@ -681,6 +683,7 @@ function readProviderHealth(value: unknown): ProviderHealth {
 function readProviderStatus(value: unknown): ProviderStatusMap {
   const src = (value ?? {}) as Record<string, unknown>;
   return {
+    rau: readProviderHealth(src['rau']),
     claude: readProviderHealth(src['claude']),
     codex: readProviderHealth(src['codex']),
     pi: readProviderHealth(src['pi']),
@@ -706,6 +709,7 @@ function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatu
     keyTail: typeof src['keyTail'] === 'string' ? src['keyTail'] : null,
     authenticating: src['authenticating'] === true,
     setupComplete: src['setupComplete'] === true,
+    ...(src['exhausted'] === true ? { exhausted: true } : {}),
     latestVersion: typeof src['latestVersion'] === 'string' ? src['latestVersion'] : null,
     updateRequired: src['updateRequired'] === true,
     error: typeof src['error'] === 'string' ? src['error'] : null,
@@ -717,6 +721,7 @@ function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatu
 function readAgentSetupStatuses(value: unknown): AgentSetupStatusMap {
   const src = (value ?? {}) as Record<string, unknown>;
   return {
+    rau: readAgentSetupStatus(src['rau'], 'rau'),
     claude: readAgentSetupStatus(src['claude'], 'claude'),
     codex: readAgentSetupStatus(src['codex'], 'codex'),
     pi: readAgentSetupStatus(src['pi'], 'pi'),
@@ -836,6 +841,7 @@ function readUsageSummary(value: unknown): UsageSummary | null {
   const plans = (src['plans'] ?? {}) as Record<string, unknown>;
   const providers = (src['providers'] ?? {}) as Record<string, unknown>;
   const openrouter = readOpenRouterCredits(src['openrouter']);
+  const rau = readOpenRouterCredits(src['rau']);
   return {
     plans: {
       claude: typeof plans['claude'] === 'string' ? plans['claude'] : 'pro',
@@ -843,6 +849,7 @@ function readUsageSummary(value: unknown): UsageSummary | null {
       pi: typeof plans['pi'] === 'string' ? plans['pi'] : 'api',
       grok: typeof plans['grok'] === 'string' ? plans['grok'] : 'api',
       cursor: typeof plans['cursor'] === 'string' ? plans['cursor'] : 'api',
+      rau: typeof plans['rau'] === 'string' ? plans['rau'] : 'api',
     },
     providers: {
       claude: readProviderUsage(providers['claude']),
@@ -850,9 +857,11 @@ function readUsageSummary(value: unknown): UsageSummary | null {
       pi: readProviderUsage(providers['pi']),
       grok: readProviderUsage(providers['grok']),
       cursor: readProviderUsage(providers['cursor']),
+      rau: readProviderUsage(providers['rau']),
     },
     cliproxy: readCliproxyStatus(src['cliproxy']),
     ...(openrouter ? { openrouter } : {}),
+    ...(rau ? { rau } : {}),
   };
 }
 
@@ -904,6 +913,7 @@ function readPiStatus(value: unknown): PiStatus {
     models: readPiModels(src['models']),
     defaultModelId: typeof src['defaultModelId'] === 'string' ? src['defaultModelId'] : null,
     setupComplete: src['setupComplete'] === true,
+    ...(src['exhausted'] === true ? { exhausted: true } : {}),
     latestVersion: typeof src['latestVersion'] === 'string' ? src['latestVersion'] : null,
     updateRequired: src['updateRequired'] === true,
     error: typeof src['error'] === 'string' ? src['error'] : null,
@@ -3069,6 +3079,10 @@ class AgentBridgeImpl implements AgentBridge {
 
   cancelAgentSetup(agent: AgentName): void {
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-cancel', agent });
+  }
+
+  disconnectAgent(agent: AgentName): Promise<AgentSetupStatusMap | null> {
+    return this.request<AgentSetupStatusMap>({ type: 'agent-setup-disconnect', agent }, 'agent-setup-disconnect');
   }
 
   requestUsage(refresh = false): Promise<UsageSummary | null> {
