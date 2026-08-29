@@ -53,6 +53,7 @@ import type {
 } from '../../agent/types.ts';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'replaced';
+type RauAuthFeedback = 'idle' | 'success';
 
 /**
  * 요금제 셀렉트를 갖는 프로바이더 — 구독 한도가 있는 둘뿐이다.
@@ -392,6 +393,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let setupCodePending = false;
   /** 브라우저 로그인이 진행 중인 동안 카드에 직접 그릴 인증 주소와 기기 코드. */
   let setupOauthPending = false;
+  let rauOauthFlowInProgress = false;
+  let rauAuthFeedback: RauAuthFeedback = 'idle';
+  let rauAuthFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
   let setupAuthUrl: string | null = null;
   let setupUserCode: string | null = null;
   let setupCopyResetTimer: ReturnType<typeof setTimeout> | null = null;
@@ -750,6 +754,29 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupCodeBox,
   );
 
+  const setupRauAuthFeedback = el('div', 'ag-agent-setup-auth-feedback');
+  setupRauAuthFeedback.hidden = true;
+  setupRauAuthFeedback.setAttribute('role', 'status');
+  setupRauAuthFeedback.setAttribute('aria-live', 'polite');
+  const setupRauAuthFeedbackMark = el('span', 'ag-agent-setup-auth-feedback-mark', '✓');
+  setupRauAuthFeedbackMark.setAttribute('aria-hidden', 'true');
+  const setupRauAuthFeedbackCopy = el('div', 'ag-agent-setup-auth-feedback-copy');
+  setupRauAuthFeedbackCopy.append(
+    el('strong', '', '로그인이 완료되었습니다'),
+    el('span', '', '계정을 확인하고 계속하세요.'),
+  );
+  setupRauAuthFeedback.append(setupRauAuthFeedbackMark, setupRauAuthFeedbackCopy);
+
+  // Rau 전용 계정 카드 — 로그인한 계정과 체험 크레딧 잔량을 한 장에 보여 준다.
+  const setupAccountPane = el('div', 'ag-agent-setup-account');
+  setupAccountPane.hidden = true;
+  const setupAccountTitle = el('h3', 'ag-agent-setup-section-title', '로그인된 계정');
+  const setupAccountEmail = el('p', 'ag-agent-setup-account-email');
+  const setupAccountRows = el('div', 'ag-agent-setup-account-rows');
+  const setupAccountEmpty = el('p', 'ag-settings-note', '체험 크레딧을 다 썼어요. 다른 모델을 연결해 주세요.');
+  setupAccountEmpty.hidden = true;
+  setupAccountPane.append(setupAccountTitle, setupAccountEmail, setupAccountRows, setupAccountEmpty);
+
   const setupDonePane = el('div', 'ag-agent-setup-pane ag-agent-setup-done');
   const setupDoneMark = el('span', 'ag-agent-setup-done-mark', '✓');
   const setupDoneTitle = el('strong', '', '연결되었습니다');
@@ -758,13 +785,15 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupDoneClose.type = 'button';
   const setupDoneChange = el('button', 'ag-settings-btn', '로그인 방식 변경');
   setupDoneChange.type = 'button';
-  const setupDoneDisconnect = el('button', 'ag-settings-btn', '이 기기에서 끊기');
+  const setupDoneDisconnect = el('button', 'ag-settings-btn', '로그아웃');
   setupDoneDisconnect.type = 'button';
   setupDoneDisconnect.hidden = true;
   setupDonePane.append(setupDoneMark, setupDoneTitle, setupDoneDetail, setupDoneChange, setupDoneDisconnect, setupDoneClose);
 
   setupGeneric.append(
     setupHero,
+    setupRauAuthFeedback,
+    setupAccountPane,
     setupProgress,
     setupProgressLine,
     setupError,
@@ -804,6 +833,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (setupAgent) bridge.cancelAgentSetup(setupAgent);
     setupBusy = false;
     setupCodePending = false;
+    resetRauAuthFeedback();
     clearSetupAuthPrompt();
     renderAgentSetup();
   });
@@ -1655,7 +1685,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       const setup = setupStatuses?.[agent];
       const health = providers?.[agent] ?? null;
       const detected = health?.available === true || setup?.available === true;
-      row.setup.textContent = detected || setup?.connected || setup?.setupComplete ? '재설정' : '설정';
+      const configured = setup?.connected === true || setup?.setupComplete === true;
+      row.setup.textContent = (agent === 'rau' ? configured : detected || configured) ? '재설정' : '설정';
       row.detail.classList.toggle('ag-update-required', setup?.updateRequired === true);
       if (setup?.updateRequired) {
         row.detail.textContent = '업데이트 필요';
@@ -1664,6 +1695,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       if (!health) {
         row.dot.dataset.state = 'unknown';
         row.detail.textContent = connectionState === 'connected' ? '확인 중…' : '허브에 연결되면 확인해요';
+        continue;
+      }
+      if (agent === 'rau' && !configured) {
+        row.dot.dataset.state = 'disconnected';
+        row.detail.textContent = detected ? '로그인 필요' : (health.error ?? '실행할 수 없어요');
         continue;
       }
       row.dot.dataset.state = health.available ? 'connected' : 'disconnected';
@@ -1690,6 +1726,26 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }
     setupAuthCopy.textContent = '주소 복사';
     setupUserCodeCopy.textContent = '코드 복사';
+  }
+
+  function resetRauAuthFeedback(): void {
+    if (rauAuthFeedbackTimer) {
+      clearTimeout(rauAuthFeedbackTimer);
+      rauAuthFeedbackTimer = null;
+    }
+    rauOauthFlowInProgress = false;
+    rauAuthFeedback = 'idle';
+  }
+
+  function showRauAuthSuccess(): void {
+    if (rauAuthFeedbackTimer) clearTimeout(rauAuthFeedbackTimer);
+    rauOauthFlowInProgress = false;
+    rauAuthFeedback = 'success';
+    rauAuthFeedbackTimer = setTimeout(() => {
+      rauAuthFeedbackTimer = null;
+      rauAuthFeedback = 'idle';
+      renderAgentSetup();
+    }, 1800);
   }
 
   /**
@@ -1803,6 +1859,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupBusy = false;
     setupReauth = false;
     setupCodePending = false;
+    resetRauAuthFeedback();
     clearSetupAuthPrompt();
     resetSetupInstallProgress();
     setupKey.input.value = '';
@@ -1824,6 +1881,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (!setupOverlay.isConnected) return;
     if (setupBusy && setupAgent) bridge.cancelAgentSetup(setupAgent);
     setupBusy = false;
+    resetRauAuthFeedback();
     clearSetupAuthPrompt();
     setupOverlay.classList.remove('ag-open');
     setupOverlay.setAttribute('aria-hidden', 'true');
@@ -1921,7 +1979,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const status = setupStatuses?.[agent] ?? null;
     const detected = providers?.[agent]?.available === true;
     const available = detected || status?.available === true || status?.installed === true;
-    const connected = detected || status?.connected === true || status?.setupComplete === true;
+    // Rau 런타임 설치 여부는 로그인 상태가 아니다. 로그아웃 뒤 남은 바이너리 때문에
+    // 연결된 화면으로 돌아가지 않도록 허브가 확인한 키 상태만 신뢰한다.
+    const configured = status?.connected === true || status?.setupComplete === true;
+    const connected = agent === 'rau' ? configured : detected || configured;
     setupHeroIcon.replaceChildren(createProviderIcon(agent));
     setupHeroTitle.textContent = AGENT_LABEL[agent];
     setupInstallNote.textContent = SETUP_INSTALL_NOTE[agent];
@@ -1943,6 +2004,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       setupAuthPane.hidden = !available || (connected && !setupReauth);
     }
     setupDonePane.hidden = !connected || setupReauth;
+    setupDonePane.classList.toggle('ag-agent-setup-rau-actions', agent === 'rau' && connected && !setupReauth);
+    setupDoneClose.textContent = agent === 'rau' && rauAuthFeedback === 'success' ? '계속' : '완료';
     setupDoneChange.hidden = agent === 'rau';
     setupDoneDisconnect.hidden = agent !== 'rau' || !connected || setupReauth;
     setupDoneDetail.textContent = status?.authMethod === 'api-key' && status.keyTail
@@ -1950,6 +2013,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       : status?.authenticated
         ? `${AGENT_LABEL[agent]} 웹 계정으로 로그인했습니다.`
         : `${AGENT_LABEL[agent]} CLI 연결이 확인되었습니다.`;
+    setupRauAuthFeedback.hidden = agent !== 'rau' || rauAuthFeedback !== 'success';
+    renderRauAccount();
     setupError.textContent = setupMessage;
     setupError.hidden = !setupMessage;
     setupProgress.hidden = setupProgressPercent <= 0;
@@ -2012,6 +2077,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   async function disconnectRau(): Promise<void> {
     if (setupBusy || connectionState !== 'connected') return;
+    resetRauAuthFeedback();
     setupBusy = true;
     setupMessage = '';
     renderAgentSetup();
@@ -2031,6 +2097,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const keyInput = setupAgent === 'pi' ? piKeyInput.input : setupKey.input;
     const key = method === 'api-key' ? keyInput.value.trim() : '';
     if (method === 'api-key' && !key) return;
+    resetRauAuthFeedback();
+    rauOauthFlowInProgress = setupAgent === 'rau' && method === 'oauth';
     setupBusy = true;
     setupMessage = '';
     clearSetupAuthPrompt();
@@ -2043,6 +2111,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (!started) {
       setupBusy = false;
       setupMessage = '로그인을 시작하지 못했어요.';
+      resetRauAuthFeedback();
       clearSetupAuthPrompt();
       renderAgentSetup();
       return;
@@ -2190,16 +2259,51 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   /** 체험 크레딧 미터 — 쓴 달러를 한도($5)에 대한 비율로 보여준다. */
   function rauCreditMeter(): HTMLElement | null {
+    const percent = rauCreditPercent();
+    const credits = usage?.rau ?? null;
+    if (percent === null || !credits) return null;
+    return meterRow(
+      'Trial credits',
+      `${percent.toFixed(1)}% | ${formatUsd(credits.balanceUsd)} / ${formatUsd(credits.totalCreditsUsd)} left`,
+      percent,
+    );
+  }
+
+  /** 쓴 비율(0–100). 크레딧을 못 읽었거나 한도가 없으면 null. */
+  function rauCreditPercent(): number | null {
     const credits = usage?.rau ?? null;
     if (!credits || credits.error) return null;
     const limit = credits.totalCreditsUsd;
     if (!Number.isFinite(limit) || limit <= 0) return null;
-    const used = Math.min(100, Math.max(0, (credits.totalUsageUsd / limit) * 100));
-    return meterRow(
-      'Trial credits',
-      `${used.toFixed(1)}% | ${formatUsd(credits.balanceUsd)} / ${formatUsd(limit)} left`,
-      used,
-    );
+    return Math.min(100, Math.max(0, (credits.totalUsageUsd / limit) * 100));
+  }
+
+  /**
+   * Rau 계정 카드 — 로그인한 계정과 남은 체험 크레딧.
+   * 계정 이메일이 없으면(옛 로그인) 키 꼬리를 대신 보여 준다.
+   */
+  function renderRauAccount(): void {
+    const agent = setupAgent;
+    const status = agent ? setupStatuses?.[agent] ?? null : null;
+    const connected = status?.setupComplete === true || status?.connected === true;
+    setupAccountPane.hidden = agent !== 'rau' || !connected || setupReauth;
+    if (setupAccountPane.hidden) return;
+    setupAccountEmail.textContent = status?.account
+      ?? (status?.keyTail ? `연결된 키 ****${status.keyTail}` : '연결된 계정');
+    const credits = usage?.rau ?? null;
+    const percent = rauCreditPercent();
+    const rows: HTMLElement[] = [];
+    if (percent !== null && credits) {
+      const row = meterRow(
+        '체험 크레딧',
+        `${formatUsd(credits.balanceUsd)} 남음 / ${formatUsd(credits.totalCreditsUsd)}`,
+        percent,
+      );
+      row.classList.add('ag-agent-setup-account-meter');
+      rows.push(row);
+    }
+    setupAccountRows.replaceChildren(...rows);
+    setupAccountEmpty.hidden = !(percent !== null && credits && credits.balanceUsd <= 0);
   }
 
   /** rau 사용량 — 크레딧 미터와 오늘·주간 누적. */
@@ -2276,6 +2380,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   function renderUsage(): void {
     renderCliproxy();
     renderRauUsage();
+    renderRauAccount();
     renderPiUsage();
     renderApiUsage();
     for (const agent of PLAN_AGENTS) {
@@ -2942,6 +3047,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           renderProviders();
           break;
         case 'agent-setup-status': {
+          const rauOauthCompleted = setupAgent === 'rau'
+            && rauOauthFlowInProgress
+            && ev.statuses.rau?.setupComplete === true
+            && setupOverlay.getAttribute('aria-hidden') === 'false';
           setupStatuses = ev.statuses;
           if (setupAgent === 'rau' && ev.statuses.rau?.setupComplete === true) {
             stagePrefs({ defaultAgent: 'rau', defaultModel: 'z-ai/glm-5.3-flash' });
@@ -2957,6 +3066,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
             setupCodePending = false;
             clearSetupAuthPrompt();
           }
+          if (rauOauthCompleted) showRauAuthSuccess();
           renderProviders();
           renderAgentSetup();
           // 설정을 마친 grok · cursor 는 기록이 없어도 사용량 칸을 연다.
@@ -2985,6 +3095,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
             setupBusy = false;
             setupCodePending = false;
             setupMessage = ev.message;
+            resetRauAuthFeedback();
             clearSetupAuthPrompt();
             resetSetupInstallProgress();
             if (setupAgent === 'pi') piMessage = ev.message;
@@ -3066,6 +3177,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       if (setupCopyResetTimer) {
         clearTimeout(setupCopyResetTimer);
         setupCopyResetTimer = null;
+      }
+      if (rauAuthFeedbackTimer) {
+        clearTimeout(rauAuthFeedbackTimer);
+        rauAuthFeedbackTimer = null;
       }
       if (setupProgressCreepTimer) clearInterval(setupProgressCreepTimer);
       if (piProgressCreepTimer) clearInterval(piProgressCreepTimer);

@@ -245,10 +245,10 @@ test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에
   assert.match(settings, /'브라우저로 로그인'/);
   assert.match(settings, /'API 키 입력'/);
   assert.match(settings, /const detected = health\?\.available === true \|\| setup\?\.available === true/);
-  assert.match(settings, /detected \|\| setup\?\.connected \|\| setup\?\.setupComplete \? '재설정' : '설정'/);
+  assert.match(settings, /row\.setup\.textContent = \(agent === 'rau' \? configured : detected \|\| configured\) \? '재설정' : '설정'/);
   assert.match(settings, /const detected = providers\?\.\[agent\]\?\.available === true/);
   assert.match(settings, /const available = detected \|\| status\?\.available === true \|\| status\?\.installed === true/);
-  assert.match(settings, /const connected = detected \|\| status\?\.connected === true \|\| status\?\.setupComplete === true/);
+  assert.match(settings, /const connected = agent === 'rau' \? configured : detected \|\| configured/);
   assert.match(settings, /CLI 연결이 확인되었습니다/);
   assert.doesNotMatch(settings, /필요한 CLI와 인증을 한 번에 설정합니다/);
   assert.match(settings, /piOauth\.addEventListener\('click', \(\) => void startSetupAuth\('oauth'\)\)/);
@@ -561,10 +561,54 @@ test('Rau 는 목록 맨 앞이고 흰 테두리 · 로그인 전용 설정 · $
   assert.match(settings, /if \(agent === 'rau'\) \{\s*\n\s*if \(oauthTitle\) oauthTitle\.textContent = 'Rau로 시작'/);
   assert.match(settings, /setupApiToggle\.hidden = true/);
   assert.match(settings, /setupKeyBox\.hidden = true/);
-  assert.match(settings, /이 기기에서 끊기/);
+  assert.match(settings, /로그아웃/);
   assert.match(source, /function rauCreditsEmpty\(\): boolean/);
   assert.match(source, /체험 크레딧이 다 됐어요\. 다른 모델을 연결해 주세요\./);
   assert.match(source, /case 'usage-report':\s*\n\s*lastUsage = e\.usage/);
+});
+
+test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대를 함께 보여 준다', () => {
+  assert.match(settings, /setupAccountTitle = el\('h3', 'ag-agent-setup-section-title', '로그인된 계정'\)/);
+  assert.match(settings, /setupAccountEmail\.textContent = status\?\.account/);
+  assert.match(settings, /연결된 키 \*\*\*\*/);
+  // 잔량 막대는 사용량 갱신마다 다시 그린다.
+  assert.match(settings, /renderUsage\(\): void \{\s*\n\s*renderCliproxy\(\);\s*\n\s*renderRauUsage\(\);\s*\n\s*renderRauAccount\(\);/);
+  assert.match(settingsCss, /\.ag-agent-setup-account \{[\s\S]*?border-radius: 12px/);
+  assert.match(settingsCss, /\.ag-agent-setup-account-meter \.ag-settings-meter-track \{[\s\S]*?height: 8px/);
+});
+
+test('Rau 재설정은 압축 동작만 두고 OAuth 완료를 잠깐 알린다', () => {
+  assert.match(settings, /type RauAuthFeedback = 'idle' \| 'success'/);
+  assert.match(settings, /'로그인이 완료되었습니다'/);
+  assert.match(settings, /'계정을 확인하고 계속하세요\.'/);
+  assert.match(settings, /setupDoneClose\.textContent = agent === 'rau' && rauAuthFeedback === 'success' \? '계속' : '완료'/);
+  // 로컬 Rau OAuth가 진행 중이고 완료 상태가 도착한 경우에만 성공 피드백을 시작한다.
+  assert.match(
+    settings,
+    /const rauOauthCompleted = setupAgent === 'rau'[\s\S]*rauOauthFlowInProgress[\s\S]*ev\.statuses\.rau\?\.setupComplete === true[\s\S]*setupOverlay\.getAttribute\('aria-hidden'\) === 'false'/,
+  );
+  assert.equal((settings.match(/showRauAuthSuccess\(\);/g) ?? []).length, 1);
+  assert.match(settings, /rauAuthFeedbackTimer = setTimeout\([\s\S]*?rauAuthFeedback = 'idle';[\s\S]*?}, 1800\)/);
+  assert.match(settings, /function openAgentSetup[\s\S]*resetRauAuthFeedback\(\);[\s\S]*function closeAgentSetup[\s\S]*resetRauAuthFeedback\(\)/);
+  assert.match(settings, /async function startSetupAuth[\s\S]*resetRauAuthFeedback\(\);[\s\S]*rauOauthFlowInProgress = setupAgent === 'rau' && method === 'oauth'/);
+  assert.match(settings, /dispose\(\): void \{[\s\S]*if \(rauAuthFeedbackTimer\) \{[\s\S]*clearTimeout\(rauAuthFeedbackTimer\)/);
+  // 기존 성공 제목과 큰 체크는 다른 프로바이더용으로 남고 Rau에서만 숨는다.
+  assert.match(settings, /setupDonePane\.classList\.toggle\('ag-agent-setup-rau-actions', agent === 'rau'/);
+  assert.match(settingsCss, /\.ag-agent-setup-done\.ag-agent-setup-rau-actions \{[\s\S]*flex-direction: row/);
+  assert.match(settingsCss, /\.ag-agent-setup-rau-actions \.ag-agent-setup-done-mark,[\s\S]*display: none/);
+  assert.match(settingsCss, /\.ag-agent-setup-rau-actions > \[hidden\] \{\s*display: none/);
+  assert.match(settingsCss, /\.ag-agent-setup-auth-feedback-mark \{[\s\S]*width: 20px;[\s\S]*border-radius: 5px/);
+});
+
+test('Rau 로그아웃 뒤 설치된 런타임을 연결 상태로 오인하지 않는다', () => {
+  assert.match(
+    settings,
+    /const configured = status\?\.connected === true \|\| status\?\.setupComplete === true;\s*\n\s*const connected = agent === 'rau' \? configured : detected \|\| configured/,
+  );
+  assert.match(settings, /row\.setup\.textContent = \(agent === 'rau' \? configured : detected \|\| configured\) \? '재설정' : '설정'/);
+  assert.match(settings, /if \(agent === 'rau' && !configured\) \{[\s\S]*row\.detail\.textContent = detected \? '로그인 필요'/);
+  assert.match(settings, /const statuses = await bridge\.disconnectAgent\('rau'\)/);
+  assert.match(settings, /if \(statuses\) setupStatuses = statuses;[\s\S]*renderAgentSetup\(\);/);
 });
 
 test('설정 모달은 프로바이더별 설치 안내와 API 키 힌트를 갖는다', () => {

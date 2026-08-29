@@ -81,6 +81,7 @@ const SKILLS_SOURCE_DIR = path.join(MODULE_DIR, 'pi', 'skills');
  * @property {string|null} version
  * @property {boolean} keyConfigured
  * @property {string|null} keyTail
+ * @property {string|null} account
  * @property {PiModelConfig[]} models
  * @property {string|null} defaultModelId
  * @property {boolean} setupComplete
@@ -114,6 +115,11 @@ function perMillion(price) {
 function keyTailOf(key) {
   const trimmed = String(key ?? '').trim();
   return trimmed ? trimmed.slice(-4) : null;
+}
+
+/** 저장된 로그인 계정 — 이메일 형식이 아니면 버린다. */
+function storedAccount(raw) {
+  return typeof raw === 'string' && raw.includes('@') ? raw.trim() : null;
 }
 
 /** reasoning 모델에만 붙는다 — pi 의 thinking 레벨을 OpenRouter effort 로 매핑한다. */
@@ -198,6 +204,8 @@ export function createPiManager({
     version: CONFIG_VERSION,
     installedVersion: null,
     keyTail: null,
+    /** 로그인한 계정 이메일 — Rau 체험 로그인이 알려 준다. */
+    account: null,
     models: [],
     defaultModelId: null,
     setupComplete: false,
@@ -294,6 +302,7 @@ export function createPiManager({
         version: CONFIG_VERSION,
         installedVersion: typeof raw?.installedVersion === 'string' ? raw.installedVersion : null,
         keyTail: typeof raw?.keyTail === 'string' ? raw.keyTail : null,
+        account: storedAccount(raw?.account),
         models,
         defaultModelId,
         setupComplete: false,
@@ -338,6 +347,7 @@ export function createPiManager({
       version: CONFIG_VERSION,
       installedVersion: installedVersion ?? config.installedVersion ?? null,
       keyTail: config.keyTail,
+      account: config.account,
       models: config.models,
       defaultModelId: config.defaultModelId,
       setupComplete: config.setupComplete,
@@ -531,6 +541,7 @@ export function createPiManager({
       version: installedVersion,
       keyConfigured: Boolean(apiKey),
       keyTail: apiKey ? keyTailOf(apiKey) : null,
+      account: config.account,
       models: config.models.map((model) => ({ ...model, pricing: { ...model.pricing } })),
       defaultModelId: config.defaultModelId,
       setupComplete: config.setupComplete,
@@ -703,8 +714,13 @@ export function createPiManager({
       return currentStatus();
     },
 
-    /** OpenRouter 키를 확인하고 OS-backed vault에 저장한다. */
-    async setApiKey(key) {
+    /**
+     * OpenRouter 키를 확인하고 OS-backed vault에 저장한다.
+     *
+     * @param {string} key
+     * @param {{ account?: string|null }} [opts] 로그인한 계정 이메일 (Rau 체험 로그인).
+     */
+    async setApiKey(key, { account = null } = {}) {
       await load();
       const trimmed = String(key ?? '').trim();
       if (!trimmed) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키를 입력하세요');
@@ -716,6 +732,8 @@ export function createPiManager({
       apiKey = trimmed;
       secretStoreError = null;
       config.keyTail = keyTailOf(trimmed);
+      // 계정이 함께 오면 갱신한다. 없으면(API 키 직접 입력) 이전 값을 지운다.
+      config.account = storedAccount(account);
       if (locked && config.models.length === 0) {
         config.models = locked.map((model) => normalizeStoredModel(model)).filter(Boolean);
         config.defaultModelId = config.models.find((model) => model.id === RAU_DEFAULT_MODEL_ID)?.id
@@ -780,6 +798,7 @@ export function createPiManager({
       }
       apiKey = null;
       config.keyTail = null;
+      config.account = null;
       config.setupComplete = false;
       client.clearCache();
       await serialized(async () => {

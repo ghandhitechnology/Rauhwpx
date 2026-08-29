@@ -309,6 +309,8 @@ export interface AgentSetupStatus {
   authenticated: boolean;
   authMethod: AgentAuthMethod | null;
   keyTail: string | null;
+  /** 로그인한 계정 이메일 — Rau 체험 로그인이 알려 준다. */
+  account?: string | null;
   authenticating: boolean;
   setupComplete: boolean;
   /** Rau 체험 잔액이 0 일 때. 다른 프로바이더는 보내지 않는다. */

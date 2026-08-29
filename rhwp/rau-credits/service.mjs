@@ -26,6 +26,12 @@ function creditsError(code, message) {
   return error;
 }
 
+/** WorkOS 가 돌려준 계정 이메일. 없으면 null — 데스크톱은 키 꼬리로 대체한다. */
+function loginEmail(body) {
+  const raw = body?.user?.email ?? body?.email;
+  return typeof raw === 'string' && raw.includes('@') ? raw.trim() : null;
+}
+
 /**
  * WorkOS + one $5 OpenRouter key per user.
  *
@@ -38,8 +44,8 @@ function creditsError(code, message) {
  *   store?: ReturnType<typeof createMemoryStore>,
  *   fetchImpl?: typeof fetch,
  *   now?: () => number,
- *   authenticateWorkos?: (code: string) => Promise<{ id: string }>,
- *   authenticateMagic?: (email: string, code: string) => Promise<{ id: string }>,
+ *   authenticateWorkos?: (code: string) => Promise<{ id: string, email?: string|null }>,
+ *   authenticateMagic?: (email: string, code: string) => Promise<{ id: string, email?: string|null }>,
  *   sendMagicAuth?: (email: string) => Promise<void>,
  *   createOpenRouterKey?: (input: { name: string }) => Promise<{ key: string, id?: string }>,
  * }} deps
@@ -98,7 +104,7 @@ export function createCreditsService({
     if (!response.ok || typeof id !== 'string' || !id) {
       throw creditsError('WORKOS_AUTH_FAILED', '로그인을 완료하지 못했어요');
     }
-    return { id };
+    return { id, email: loginEmail(body) };
   }
 
   async function defaultAuthenticateMagic(email, code) {
@@ -118,7 +124,7 @@ export function createCreditsService({
     if (!response.ok || typeof id !== 'string' || !id) {
       throw creditsError('WORKOS_AUTH_FAILED', '코드를 확인하지 못했어요');
     }
-    return { id };
+    return { id, email: loginEmail(body) ?? String(email ?? '').trim() };
   }
 
   async function defaultSendMagic(email) {
@@ -180,7 +186,8 @@ export function createCreditsService({
     });
   }
 
-  async function finishDeviceLogin(deviceId, userId) {
+  async function finishDeviceLogin(deviceId, userId, email = null) {
+    const accountEmail = typeof email === 'string' && email.includes('@') ? email.trim() : null;
     const session = (await store.load()).sessions[deviceId];
     if (!session || session.status !== 'pending') {
       throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없거나 만료됐어요');
@@ -196,9 +203,10 @@ export function createCreditsService({
       }
       current.status = 'ready';
       current.workosUserId = userId;
+      current.email = accountEmail;
       current.apiKeyCiphertext = encryptSecret(sessionSecret, apiKey);
     });
-    return { deviceId, workosUserId: userId };
+    return { deviceId, workosUserId: userId, email: accountEmail };
   }
 
   return {
@@ -217,6 +225,8 @@ export function createCreditsService({
       url.searchParams.set('redirect_uri', redirectUri);
       url.searchParams.set('response_type', 'code');
       url.searchParams.set('provider', chosen);
+      // IdP 세션이 남아 있어도 로그아웃한 사용자가 다른 계정을 고를 수 있어야 한다.
+      url.searchParams.set('prompt', 'select_account');
       url.searchParams.set('state', deviceId);
       return url.toString();
     },
@@ -253,12 +263,13 @@ export function createCreditsService({
 
     async completeLogin(code, state) {
       const user = await resolveUser(String(code ?? ''));
-      return finishDeviceLogin(String(state ?? ''), user.id);
+      return finishDeviceLogin(String(state ?? ''), user.id, user.email ?? null);
     },
 
     async completeMagicLogin(deviceId, email, code) {
-      const user = await resolveMagicUser(String(email ?? '').trim(), String(code ?? '').trim());
-      return finishDeviceLogin(String(deviceId ?? ''), user.id);
+      const submitted = String(email ?? '').trim();
+      const user = await resolveMagicUser(submitted, String(code ?? '').trim());
+      return finishDeviceLogin(String(deviceId ?? ''), user.id, user.email ?? submitted);
     },
 
     async redeemDeviceSession(id) {
@@ -274,7 +285,11 @@ export function createCreditsService({
       if (session.status !== 'ready' || typeof apiKey !== 'string' || !apiKey) {
         throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션을 확인할 수 없어요');
       }
-      return { status: 'ready', apiKey };
+      // 이메일은 로그인한 계정을 카드에 보여 주는 용도 — redeem 응답에 한 번만 실린다.
+      const accountEmail = typeof session.email === 'string' && session.email.includes('@')
+        ? session.email
+        : null;
+      return { status: 'ready', apiKey, ...(accountEmail ? { email: accountEmail } : {}) };
     },
 
     async acknowledgeDeviceSession(id) {

@@ -176,6 +176,7 @@ test('status on a missing root reports not installed and never spawns', async ()
     version: null,
     keyConfigured: false,
     keyTail: null,
+    account: null,
     models: [],
     defaultModelId: null,
     setupComplete: false,
@@ -644,7 +645,7 @@ test('Rau profile shares the Pi prefix but keeps a separate secret and locked ca
   });
 
   await pi.setApiKey('sk-or-v1-pi-key-aaaa');
-  const rauStatus = await rau.setApiKey('sk-or-v1-rau-key-bbbb');
+  const rauStatus = await rau.setApiKey('sk-or-v1-rau-key-bbbb', { account: 'andy@example.com' });
   assert.equal(await secretStore.get(PI_SECRET_ID), 'sk-or-v1-pi-key-aaaa');
   assert.equal(await secretStore.get(RAU_SECRET_ID), 'sk-or-v1-rau-key-bbbb');
   assert.equal(pi.apiKey(), 'sk-or-v1-pi-key-aaaa');
@@ -661,6 +662,7 @@ test('Rau profile shares the Pi prefix but keeps a separate secret and locked ca
   assert.equal(await secretStore.get(RAU_SECRET_ID), null);
   assert.equal(await secretStore.get(PI_SECRET_ID), 'sk-or-v1-pi-key-aaaa');
   assert.equal((await rau.status()).setupComplete, false);
+  assert.equal((await rau.status()).account, null);
   assert.equal(pi.apiKey(), 'sk-or-v1-pi-key-aaaa');
 
   await fs.rm(prefixDir, { recursive: true, force: true });

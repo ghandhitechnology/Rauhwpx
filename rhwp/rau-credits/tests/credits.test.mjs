@@ -106,6 +106,26 @@ test('pending polling is read-only and cannot save stale session state', async (
   assert.equal(saves, 1);
 });
 
+test('redeem hands the logged-in email to the desktop and keeps it for repeat polls', async () => {
+  const credits = service({
+    authenticateWorkos: async () => ({ id: 'user_abc', email: 'andy@example.com' }),
+  });
+  const session = await credits.createDeviceSession();
+  await credits.completeLogin('code-1', session.id);
+
+  assert.equal((await credits.redeemDeviceSession(session.id)).email, 'andy@example.com');
+  assert.equal((await credits.redeemDeviceSession(session.id)).email, 'andy@example.com');
+});
+
+test('magic-code login falls back to the submitted email when WorkOS omits it', async () => {
+  const credits = service({
+    authenticateMagic: async () => ({ id: 'user_magic' }),
+  });
+  const session = await credits.createDeviceSession();
+  await credits.completeMagicLogin(session.id, 'andy@example.com', '123456');
+  assert.equal((await credits.redeemDeviceSession(session.id)).email, 'andy@example.com');
+});
+
 test('createOpenRouterKey receives the $5 limit contract through the default provisioner', async () => {
   const calls = [];
   const credits = createCreditsService({
@@ -197,6 +217,7 @@ test('login page is Rauhwpx-branded and Google continues to WorkOS', async () =>
     const location = cont.headers.get('location') ?? '';
     assert.match(location, /user_management\/authorize/);
     assert.match(location, /provider=GoogleOAuth/);
+    assert.match(location, /prompt=select_account/);
     assert.match(location, /redirect_uri=https%3A%2F%2Fcredits.rau.test%2Fcallback/);
   } finally {
     await new Promise((resolve) => server.close(resolve));

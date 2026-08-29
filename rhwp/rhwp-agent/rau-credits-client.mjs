@@ -21,6 +21,7 @@ function abortError() {
  */
 export async function storeRauApiKey(setApiKey, key, {
   signal,
+  account = null,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   retryMs = KEY_VALIDATION_RETRY_MS,
 } = {}) {
@@ -33,7 +34,7 @@ export async function storeRauApiKey(setApiKey, key, {
   for (let attempt = 0; ; attempt += 1) {
     if (signal?.aborted) throw abortError();
     try {
-      return await setApiKey(key);
+      return await setApiKey(key, { account });
     } catch (error) {
       if (!retryable.has(error?.code) || attempt >= retryMs.length) throw error;
       await sleep(retryMs[attempt]);
@@ -90,8 +91,11 @@ export function createRauCreditsClient({
     },
     /**
      * ready 가 될 때까지 폴링한다. 저장 확인 전까지 같은 키를 다시 받을 수 있다.
+     * 로그인한 계정 이메일은 redeem 응답에 한 번만 실려 오므로 함께 돌려준다.
+     *
      * @param {string} id
      * @param {{ signal?: AbortSignal }} [opts]
+     * @returns {Promise<{ key: string, email: string|null }>}
      */
     async redeem(id, { signal } = {}) {
       const started = now();
@@ -111,7 +115,7 @@ export function createRauCreditsClient({
           continue;
         }
         if (next.status === 'ready' && typeof next.apiKey === 'string' && next.apiKey) {
-          return next.apiKey;
+          return { key: next.apiKey, email: typeof next.email === 'string' ? next.email : null };
         }
         if (next.status === 'redeemed') {
           throw creditsError('RAU_LOGIN_REDEEMED', '이 로그인 세션은 이미 사용됐어요. 다시 연결해 주세요.');

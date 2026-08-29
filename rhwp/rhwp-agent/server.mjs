@@ -450,6 +450,7 @@ function openRouterAgentSetupStatus(agent) {
     authenticated: status.keyConfigured,
     authMethod: status.keyConfigured ? 'api-key' : null,
     keyTail: status.keyTail,
+    account: status.account ?? null,
     authenticating: false,
     setupComplete: status.setupComplete,
     connected: status.setupComplete,
@@ -2316,8 +2317,11 @@ async function handleStudioMessage(record, sock, msg) {
           authUrl = session.loginUrl;
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-auth-started', requestId, agent, authUrl });
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-progress', agent, state: 'authorizing', authUrl });
-          const key = await rauCredits.redeem(session.id, { signal: abort.signal });
-          rauStatus = await storeRauApiKey(rauManager.setApiKey.bind(rauManager), key, { signal: abort.signal });
+          const { key, email } = await rauCredits.redeem(session.id, { signal: abort.signal });
+          rauStatus = await storeRauApiKey(rauManager.setApiKey.bind(rauManager), key, {
+            signal: abort.signal,
+            account: email,
+          });
           await rauCredits.acknowledgeDeviceSession(session.id)
             .catch((error) => log(`Rau credit session acknowledgement failed: ${error?.message ?? error}`));
           if (!rauStatus.installed) {

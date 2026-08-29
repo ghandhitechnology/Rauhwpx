@@ -25,8 +25,27 @@ test('Rau credit polling survives transient connectivity failures', async () => 
     sleep: async (ms) => { clock += ms; },
   });
 
-  assert.equal(await client.redeem('device-1'), 'sk-or-v1-ready');
+  assert.deepEqual(await client.redeem('device-1'), { key: 'sk-or-v1-ready', email: null });
   assert.equal(clock, 2_000);
+});
+
+test('Rau redeem hands the logged-in account email to the key store', async () => {
+  const stored = [];
+  const client = createRauCreditsClient({
+    baseUrl: 'https://credits.rau.test',
+    fetchImpl: async () => jsonResponse({
+      status: 'ready',
+      apiKey: 'sk-or-v1-ready',
+      email: 'andy@example.com',
+    }),
+  });
+  const redeemed = await client.redeem('device-1');
+  const status = await storeRauApiKey(async (key, opts = {}) => {
+    stored.push({ key, account: opts.account ?? null });
+    return { setupComplete: true };
+  }, redeemed.key, { account: redeemed.email });
+  assert.deepEqual(status, { setupComplete: true });
+  assert.deepEqual(stored, [{ key: 'sk-or-v1-ready', account: 'andy@example.com' }]);
 });
 
 test('Rau credit acknowledgement is sent only after local setup can succeed', async () => {
