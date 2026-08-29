@@ -140,7 +140,7 @@ test('spawn fails fast when no session directory is configured', () => {
   );
 });
 
-test('waitFor on settled ids drops the abort listener and swallows a later abort', async () => {
+test('waitFor on settled ids does not arm abort', async () => {
   const manager = createSubagentManager({
     piBin: '/pi/bin/pi',
     model: 'deepseek/deepseek-chat-v3.1',
@@ -182,4 +182,40 @@ test('waitFor still rejects when the signal aborts a running child', async () =>
   await assert.rejects(waiting, /Wait aborted/);
   rec.proc.emit('exit', 0, null);
   await rec.done;
+});
+
+test('waitFor throws when the signal is already aborted and a child is still running', async () => {
+  const manager = createSubagentManager({
+    piBin: '/pi/bin/pi',
+    model: 'deepseek/deepseek-chat-v3.1',
+    sessionDir: '/pi/sessions',
+    env: {},
+    spawnProcess() {
+      return new FakeChild();
+    },
+  });
+  const rec = manager.spawn({ prompt: '1쪽', name: '1쪽', cwd: process.cwd() });
+  const ac = new AbortController();
+  ac.abort();
+  await assert.rejects(manager.waitFor([rec.id], ac.signal), /Wait aborted/);
+  rec.proc.emit('exit', 0, null);
+  await rec.done;
+});
+
+test('waitFor on settled ids ignores a signal that is already aborted', async () => {
+  const manager = createSubagentManager({
+    piBin: '/pi/bin/pi',
+    model: 'deepseek/deepseek-chat-v3.1',
+    sessionDir: '/pi/sessions',
+    env: {},
+    spawnProcess() {
+      return new FakeChild();
+    },
+  });
+  const rec = manager.spawn({ prompt: '1쪽', name: '1쪽', cwd: process.cwd() });
+  rec.proc.emit('exit', 0, null);
+  const ac = new AbortController();
+  ac.abort();
+  await manager.waitFor([rec.id], ac.signal);
+  assert.equal(manager.get(rec.id)?.status, 'done');
 });

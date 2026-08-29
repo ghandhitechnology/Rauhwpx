@@ -288,30 +288,26 @@ export function createSubagentManager(opts: {
     if (unique.length === 0) throw new Error('Provide at least one subagent id.');
     const records = requireKnown(unique);
     const pending = () => records.filter((rec) => rec.status === 'running').map((rec) => rec.id);
-    let rejectAbort: ((error: Error) => void) | null = null;
-    const onAbort = () => {
-      rejectAbort?.(new Error('Wait aborted. Subagents keep running.'));
-    };
-    const abort = new Promise<void>((_resolve, reject) => {
-      rejectAbort = reject;
-      if (!signal) return;
-      if (signal.aborted) {
-        onAbort();
-        return;
+    while (pending().length > 0) {
+      if (signal?.aborted) {
+        throw new Error('Wait aborted. Subagents keep running.');
       }
-      signal.addEventListener('abort', onAbort, { once: true });
-    });
-    abort.catch(() => {});
-    try {
-      while (pending().length > 0) {
-        onPending?.(pending());
+      onPending?.(pending());
+      let onAbort: (() => void) | undefined;
+      const abort = new Promise<void>((_resolve, reject) => {
+        if (!signal) return;
+        onAbort = () => reject(new Error('Wait aborted. Subagents keep running.'));
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      });
+      try {
         await Promise.race([
           Promise.all(records.filter((rec) => rec.status === 'running').map((rec) => rec.done)),
           abort,
         ]);
+      } finally {
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
       }
-    } finally {
-      signal?.removeEventListener('abort', onAbort);
     }
   }
 
