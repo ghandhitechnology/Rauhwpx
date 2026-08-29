@@ -147,6 +147,33 @@ test('live device sessions are capped so floods cannot grow the store', async ()
   assert.equal(typeof freed.id, 'string');
 });
 
+test('a corrupted stored record re-mints instead of locking the account out', async () => {
+  const minted = [];
+  const store = createMemoryStore();
+  const credits = createCreditsService({
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    store,
+    authenticateWorkos: async () => ({ id: 'user_rot', email: 'andy@example.com' }),
+    createOpenRouterKey: async () => {
+      minted.push(1);
+      return { key: `sk-or-v1-rot-${minted.length}`, id: `or-rot-${minted.length}` };
+    },
+  });
+  const session = await credits.createDeviceSession();
+  await credits.completeLogin('code-1', session.id);
+  assert.equal(minted.length, 1);
+
+  const state = await store.load();
+  state.users.user_rot.keyCiphertext = 'not:a:valid:ciphertext';
+  await store.save(state);
+
+  const retry = await credits.createDeviceSession();
+  await credits.completeLogin('code-2', retry.id);
+  assert.equal(minted.length, 2, 'an undecryptable record must mint a replacement key');
+  assert.equal((await credits.redeemDeviceSession(retry.id)).apiKey, 'sk-or-v1-rot-2');
+});
+
 test('concurrent session creation cannot overwrite another session', async () => {
   const credits = service();
   const [first, second] = await Promise.all([
@@ -306,6 +333,29 @@ test('device-session creation is throttled per client IP', async () => {
     const blocked = await fetch(`http://127.0.0.1:${port}/v1/device-sessions`, { method: 'POST' });
     assert.equal(blocked.status, 429);
     assert.equal((await blocked.json()).error, 'RATE_LIMITED');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('spoofed X-Forwarded-For hops cannot evade the per-client throttle', async () => {
+  const credits = service();
+  const server = http.createServer(creditsRequestListener(credits));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    for (let i = 0; i < 10; i += 1) {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/device-sessions`, {
+        method: 'POST',
+        headers: { 'X-Forwarded-For': `198.51.100.${i}, 203.0.113.7` },
+      });
+      assert.equal(res.status, 200);
+    }
+    const blocked = await fetch(`http://127.0.0.1:${port}/v1/device-sessions`, {
+      method: 'POST',
+      headers: { 'X-Forwarded-For': '198.51.100.99, 203.0.113.7' },
+    });
+    assert.equal(blocked.status, 429);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

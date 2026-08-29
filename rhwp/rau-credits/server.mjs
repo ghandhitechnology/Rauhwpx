@@ -1,5 +1,6 @@
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   DEFAULT_PORT,
@@ -32,7 +33,7 @@ export function createCreditsHttpServer(options = {}) {
   return { server, service, origin, dbPath };
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 
 if (isMain) {
   assertCreditsEnv();

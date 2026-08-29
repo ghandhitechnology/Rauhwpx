@@ -192,12 +192,21 @@ export function createCreditsService({
       const byEmail = normalizedEmail ? state.emailIndex?.[normalizedEmail] : null;
       const existingId = state.users[workosUserId] ? workosUserId : byEmail;
       const existing = existingId ? state.users[existingId] : null;
+      let existingKey = null;
       if (existing?.keyCiphertext) {
+        try {
+          existingKey = decryptSecret(sessionSecret, existing.keyCiphertext);
+        } catch {
+          // SESSION_SECRET 회전 등으로 복호화가 깨진 레코드는 없는 것으로 본다 — 재발급으로 잠금을 푼다.
+          existingKey = null;
+        }
+      }
+      if (existingKey) {
         if (normalizedEmail) {
           state.emailIndex ??= {};
           state.emailIndex[normalizedEmail] = existingId;
         }
-        return decryptSecret(sessionSecret, existing.keyCiphertext);
+        return existingKey;
       }
       const minted = await mintKey({ name: `rau-${workosUserId.slice(0, 12)}` });
       state.users[workosUserId] = {
@@ -357,10 +366,12 @@ async function readForm(req) {
   return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
 }
 
+/** Railway 엣지가 덧붙이는 마지막 XFF 홉이 실제 접속 주소다. 첫 홉은 클라이언트가 위조할 수 있다. */
 function clientIp(req) {
   const forwarded = req.headers['x-forwarded-for'];
   if (typeof forwarded === 'string' && forwarded.trim()) {
-    return forwarded.split(',')[0].trim();
+    const hops = forwarded.split(',').map((hop) => hop.trim()).filter(Boolean);
+    if (hops.length > 0) return hops[hops.length - 1];
   }
   return req.socket?.remoteAddress ?? 'unknown';
 }
