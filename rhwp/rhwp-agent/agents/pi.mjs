@@ -213,6 +213,9 @@ export function createPiSession(opts, {
 } = {}) {
   const onEvent = opts.onEvent;
 
+  // rau 허니스도 같은 세션 루틴을 쓴다 — 이벤트는 호출자가 준 이름으로 낸다.
+  const agent = opts.agentName === 'rau' ? 'rau' : 'pi';
+
   // pi 세션 id 는 우리가 발급한다. 첫 스폰은 세션 파일을 만들고(“creating a new
   // session” 경고가 stderr 에 찍힌다) 이후 스폰은 같은 파일을 이어 쓴다.
   let sessionId = crypto.randomUUID();
@@ -241,7 +244,7 @@ export function createPiSession(opts, {
           sessionId = String(e.id);
           onEvent({
             type: 'session-info',
-            agent: 'pi',
+            agent,
             sessionId,
             model: opts.model ?? undefined,
           });
@@ -252,7 +255,7 @@ export function createPiSession(opts, {
         // thinking_*/toolcall_* 델타는 흘리지 않는다. 도구는 tool_execution_* 로 본다.
         const sub = e.assistantMessageEvent;
         if (sub?.type === 'text_delta' && sub.delta) {
-          onEvent({ type: 'text-delta', agent: 'pi', text: String(sub.delta) });
+          onEvent({ type: 'text-delta', agent, text: String(sub.delta) });
         }
         return;
       }
@@ -263,7 +266,7 @@ export function createPiSession(opts, {
         if (usage) {
           onEvent({
             type: 'usage',
-            agent: 'pi',
+            agent,
             model: opts.model ?? null,
             usage: usage.usage,
             costUsd: usage.costUsd,
@@ -274,14 +277,14 @@ export function createPiSession(opts, {
           const detail = String(message.errorMessage ?? 'pi turn failed');
           turnFailureMessage = formatOpenRouterCreditError(detail, opts.agentName)
             ?? detail;
-          onEvent({ type: 'error', agent: 'pi', message: turnFailureMessage });
+          onEvent({ type: 'error', agent, message: turnFailureMessage });
         }
         return;
       }
       if (type === 'tool_execution_start') {
         onEvent({
           type: 'tool-call',
-          agent: 'pi',
+          agent,
           callId: String(e.toolCallId ?? ''),
           tool: String(e.toolName ?? 'tool'),
           argsJson: JSON.stringify(e.args ?? {}),
@@ -291,7 +294,7 @@ export function createPiSession(opts, {
       if (type === 'tool_execution_end') {
         onEvent({
           type: 'tool-result',
-          agent: 'pi',
+          agent,
           callId: String(e.toolCallId ?? ''),
           ok: !e.isError,
           resultPreview: truncate(JSON.stringify(e.result?.content ?? e.result ?? null)),
@@ -305,7 +308,7 @@ export function createPiSession(opts, {
         return;
       }
       if (type === 'error') {
-        onEvent({ type: 'error', agent: 'pi', message: String(e.message ?? 'unknown error') });
+        onEvent({ type: 'error', agent, message: String(e.message ?? 'unknown error') });
       }
     };
   }
@@ -317,7 +320,7 @@ export function createPiSession(opts, {
   }
 
   return {
-    agent: 'pi',
+    agent,
     getSessionId() {
       return sessionId;
     },
@@ -326,11 +329,11 @@ export function createPiSession(opts, {
       turnOpen = true;
       turnCompleted = false;
       turnFailureMessage = null;
-      onEvent({ type: 'turn-start', agent: 'pi' });
+      onEvent({ type: 'turn-start', agent });
 
       if (!opts.model) {
-        onEvent({ type: 'error', agent: 'pi', message: 'Pi 모델이 선택되지 않았습니다.' });
-        endTurn({ type: 'turn-end', agent: 'pi', stopReason: 'exited' });
+        onEvent({ type: 'error', agent, message: 'Pi 모델이 선택되지 않았습니다.' });
+        endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
         return;
       }
 
@@ -352,8 +355,8 @@ export function createPiSession(opts, {
           stdio: ['ignore', 'pipe', 'pipe'],
         });
       } catch (e) {
-        onEvent({ type: 'error', agent: 'pi', message: `failed to start pi: ${e?.message ?? e}` });
-        endTurn({ type: 'turn-end', agent: 'pi', stopReason: 'exited' });
+        onEvent({ type: 'error', agent, message: `failed to start pi: ${e?.message ?? e}` });
+        endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
         return;
       }
       child = proc;
@@ -370,24 +373,24 @@ export function createPiSession(opts, {
         if (proc !== child) return;
         process.stderr.write(`[pi] spawn error: ${err?.message ?? err}\n`);
         if (turnOpen) {
-          onEvent({ type: 'error', agent: 'pi', message: `pi process error: ${err?.message ?? err}` });
-          endTurn({ type: 'turn-end', agent: 'pi', stopReason: 'exited' });
+          onEvent({ type: 'error', agent, message: `pi process error: ${err?.message ?? err}` });
+          endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
         }
       });
       proc.on('exit', (code, signal) => {
         if (proc !== child) return;
         if (turnOpen && !disposed) {
           if (turnFailureMessage) {
-            endTurn({ type: 'turn-end', agent: 'pi', stopReason: 'failed', errorMessage: turnFailureMessage });
+            endTurn({ type: 'turn-end', agent, stopReason: 'failed', errorMessage: turnFailureMessage });
           } else if (!turnCompleted && code !== 0) {
             onEvent({
               type: 'error',
-              agent: 'pi',
+              agent,
               message: formatPiExitError(stderrTail, code, signal, opts.token, opts.agentName),
             });
-            endTurn({ type: 'turn-end', agent: 'pi', stopReason: 'exited' });
+            endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
           } else {
-            endTurn({ type: 'turn-end', agent: 'pi', stopReason: turnCompleted ? 'completed' : 'exited' });
+            endTurn({ type: 'turn-end', agent, stopReason: turnCompleted ? 'completed' : 'exited' });
           }
         }
         child = null;
@@ -417,7 +420,7 @@ export function createPiSession(opts, {
     },
     interrupt() {
       killChild();
-      endTurn({ type: 'turn-end', agent: 'pi', stopReason: 'interrupted' });
+      endTurn({ type: 'turn-end', agent, stopReason: 'interrupted' });
     },
     dispose() {
       disposed = true;

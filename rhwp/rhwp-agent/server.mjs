@@ -43,7 +43,7 @@ import {
 } from './pi-manager.mjs';
 import { createRauCreditsClient, storeRauApiKey } from './rau-credits-client.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
-import { createOpenRouter } from './openrouter.mjs';
+import { createOpenRouter, creditBalanceEmpty } from './openrouter.mjs';
 import { createIpcSecretStore } from './secret-store.mjs';
 import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
 import { resolveHwpExtractor } from './reference-extractor.mjs';
@@ -417,8 +417,7 @@ function openRouterStatus(agent) {
 
 function rauTrialEmpty() {
   if (!rauStatus.setupComplete) return false;
-  const balance = Number(rauCreditsBalance?.balanceUsd);
-  return Number.isFinite(balance) && balance <= 0;
+  return creditBalanceEmpty(rauCreditsBalance);
 }
 
 function unknownAgentError(agent) {

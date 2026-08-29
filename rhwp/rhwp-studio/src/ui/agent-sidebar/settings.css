@@ -1143,7 +1143,6 @@
   white-space: nowrap;
 }
 
-.ag-settings-model-turns,
 .ag-settings-model-tokens,
 .ag-settings-model-cost {
   flex: 0 0 auto;

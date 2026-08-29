@@ -175,6 +175,29 @@ test('a tool-call turn maps to the unified event sequence and settles', () => {
   session.dispose();
 });
 
+test('rau harness events carry the rau agent name', () => {
+  const { session, events, spawns } = startSession({ agentName: 'rau' });
+  session.sendUserMessage('probe the document');
+  const { proc } = spawns[0];
+
+  proc.emitJson(
+    SESSION_LINE,
+    { type: 'agent_start' },
+    { type: 'turn_start' },
+    {
+      type: 'message_update',
+      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: '확인했습니다.' },
+    },
+    { type: 'agent_settled' },
+  );
+  proc.exit(0);
+
+  assert.ok(events.length > 0);
+  for (const event of events) assert.equal(event.agent, 'rau');
+  assert.equal(events.at(-1).type, 'turn-end');
+  session.dispose();
+});
+
 test('thinking deltas stay out of the transcript', () => {
   const { session, events, spawns } = startSession();
   session.sendUserMessage('explain');

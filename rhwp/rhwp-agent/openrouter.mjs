@@ -36,6 +36,43 @@ function toUsd(value) {
   return Number.isFinite(amount) ? amount : 0;
 }
 
+function roundUsd(value) {
+  return Math.round(value * 1e6) / 1e6;
+}
+
+/**
+ * 한도가 있는 키의 잔액. 한도가 없으면 null — 그때는 계정 /credits 를 쓴다.
+ *
+ * @param {object} data GET /key 의 data
+ * @param {number} checkedAt
+ * @returns {{ balanceUsd: number, totalCreditsUsd: number, totalUsageUsd: number, checkedAt: number }|null}
+ */
+function creditsFromKeyLimit(data, checkedAt) {
+  const limit = data?.limit === null || data?.limit === undefined ? null : Number(data.limit);
+  if (!Number.isFinite(limit)) return null;
+  const usage = toUsd(data?.usage);
+  const remaining = data?.limit_remaining === null || data?.limit_remaining === undefined
+    ? Math.max(0, limit - usage)
+    : toUsd(data.limit_remaining);
+  return {
+    balanceUsd: roundUsd(remaining),
+    totalCreditsUsd: limit,
+    totalUsageUsd: usage,
+    checkedAt,
+  };
+}
+
+/**
+ * 체험 한도 소진인지. 조회 실패 placeholder(error 필드)는 소진이 아니다.
+ *
+ * @param {object|null|undefined} credits
+ */
+export function creditBalanceEmpty(credits) {
+  if (!credits || credits.error) return false;
+  const balance = Number(credits.balanceUsd);
+  return Number.isFinite(balance) && balance <= 0;
+}
+
 /** 텍스트를 넣고 텍스트를 받을 수 있는 모델만 남긴다. 필드가 없으면 통과시킨다. */
 function isTextModel(entry) {
   const arch = entry?.architecture ?? {};
@@ -264,6 +301,8 @@ export function createOpenRouter({
 
     /**
      * 크레딧 잔액. 5분 캐시하고 refresh 로 건너뛴다.
+     * 한도가 있는 키(Rau 체험 키)는 /key 의 남은 한도를 쓰고, /credits 는
+     * 관리 키 전용이라 자식 키에서 403 이 난다.
      *
      * @param {string} key
      * @param {boolean} [refresh]
@@ -276,6 +315,16 @@ export function createOpenRouter({
       }
       if (!refresh && creditsInFlight) return creditsInFlight;
       const loading = (async () => {
+        const keyResult = await request('/key', { key: trimmed });
+        if (keyResult.status === 401 || keyResult.status === 403) {
+          throw openRouterError('OPENROUTER_KEY_INVALID', 'OpenRouter 키가 거절됐어요');
+        }
+        if (!keyResult.ok) throw httpError(keyResult, '키 확인');
+        const fromLimit = creditsFromKeyLimit(keyResult.parsed?.data ?? {}, now());
+        if (fromLimit) {
+          creditsCache = { credits: fromLimit, fetchedAt: now() };
+          return fromLimit;
+        }
         const result = await request('/credits', { key: trimmed });
         if (result.status === 401 || result.status === 403) {
           throw openRouterError('OPENROUTER_KEY_INVALID', 'OpenRouter 키가 거절됐어요');
@@ -285,7 +334,7 @@ export function createOpenRouter({
         const totalCreditsUsd = toUsd(data.total_credits);
         const totalUsageUsd = toUsd(data.total_usage);
         const credits = {
-          balanceUsd: Math.round((totalCreditsUsd - totalUsageUsd) * 1e6) / 1e6,
+          balanceUsd: roundUsd(totalCreditsUsd - totalUsageUsd),
           totalCreditsUsd,
           totalUsageUsd,
           checkedAt: now(),

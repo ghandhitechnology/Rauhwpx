@@ -18,6 +18,7 @@ test('Rau redeem stores the Rau secret and can drop only the local key', async (
   assert.match(block, /rauCredits\.acknowledgeDeviceSession\(session\.id\)/);
   assert.doesNotMatch(block, /piManager\.setApiKey/);
   assert.match(source, /code: 'RAU_CREDITS_EMPTY'/);
+  assert.match(source, /creditBalanceEmpty\(rauCreditsBalance\)/);
   assert.match(source, /case 'agent-setup-disconnect'/);
   assert.match(source, /rauManager\.clearApiKey\(\)/);
   assert.match(source, /isOpenRouterCreditError\(evt\.message\)/);

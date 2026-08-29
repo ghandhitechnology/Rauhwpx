@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 // settings.ts 는 CSS 를 가져오므로 Node 에서 불러올 수 없다 — 계기판 숫자
 // 규칙만 css 없는 모듈에서 실제로 검증하고, DOM 계약은 소스 텍스트로 본다.
-import { formatRelativeTime, formatResetAt, formatTokens } from '../src/ui/agent-sidebar/usage-format.ts';
+import {
+  formatRelativeTime,
+  formatResetAt,
+  formatTokens,
+  formatUsageAge,
+  formatUsageReset,
+} from '../src/ui/agent-sidebar/usage-format.ts';
 // providers.ts 는 CSS 를 안 가져오므로 표를 텍스트가 아니라 값으로 직접 본다.
 import {
   AGENT_LABEL,
@@ -380,16 +386,26 @@ test('요금제 선택값은 프로바이더별로 다르고 허브에 저장된
 });
 
 test('사용량 미터는 5시간·주간·오늘·모델별을 보여주고 80%에서 경고로 넘어간다', () => {
-  assert.match(settings, /buildMeter\('5시간'/);
-  assert.match(settings, /buildMeter\('주간'/);
-  assert.match(settings, /오늘 · \$\{formatTokens\(providerUsage\.day\.weightedTokens\)\}/);
-  assert.match(settings, /'모델별'/);
+  assert.match(settings, /buildMeter\('5h'/);
+  assert.match(settings, /buildMeter\('Week'/);
+  assert.match(settings, /formatUsageWindow\('Today', providerUsage\.day\)/);
+  assert.match(settings, /'Models'/);
   assert.match(settings, /const METER_WARN_PERCENT = 80;/);
   assert.match(settings, /if \(percent >= METER_WARN_PERCENT\) row\.classList\.add\('ag-settings-meter-warn'\)/);
   // 막대는 100% 를 넘겨도 가득 찬 상태로 멈춘다.
   assert.match(settings, /Math\.min\(100, Math\.max\(0, percent\)\)/);
   assert.match(settingsCss, /\.ag-settings-meter-warn \.ag-settings-meter-fill/);
   assert.match(settingsCss, /color-mix\(in srgb, var\(--ag-err\)/);
+});
+
+test('모든 프로바이더 사용량은 영문 단위와 세로 구분자를 쓴다', () => {
+  assert.match(settings, /return `\$\{label\} \| \$\{window_\.turns\}calls \| \$\{formatCompactTokens/);
+  const modelRows = settings.match(/function buildModelRows[\s\S]*?return rows;/)?.[0] ?? '';
+  assert.doesNotMatch(modelRows, /if \(agent === 'rau'\)/);
+  assert.match(settings, /metrics\.join\('\ \| '\)/);
+  for (const label of ['Session', 'Today', 'Week']) {
+    assert.match(settings, new RegExp(`formatUsageWindow\\('${label}'`));
+  }
 });
 
 test('사용량 묶음에서 CLIProxyAPI 를 연결할 수 있다', () => {
@@ -403,13 +419,17 @@ test('사용량 묶음에서 CLIProxyAPI 를 연결할 수 있다', () => {
   assert.match(settings, /실제 사용량을 보여줘요/);
   assert.match(settings, /remote-management\.secret-key/);
   assert.match(settings, /ui\.plan\.hidden = actual/);
-  assert.match(settings, /actual \? '실제' : '추정'/);
+  assert.match(settings, /actual \? 'Actual' : 'Estimated'/);
   assert.match(settingsCss, /\.ag-settings-input/);
   assert.match(settingsCss, /\.ag-settings-cliproxy-error/);
+  assert.ok(
+    settings.indexOf('usageSection.body.appendChild(cliproxyCard)')
+      > settings.indexOf('apiUsageBlocks.set(agent'),
+  );
 });
 
 test('한도가 없으면 누적치만 말한다', () => {
-  assert.match(settings, /\$\{formatTokens\(window_\.weightedTokens\)\} 토큰 · \$\{window_\.turns\}턴/);
+  assert.match(settings, /\$\{window_\.turns\}calls \| \$\{formatCompactTokens\(window_\.weightedTokens\)\}/);
 });
 
 test('앱 전용 지시는 에이전트 변경안을 사용자 승인 전까지 분리한다', () => {
@@ -448,6 +468,10 @@ test('토큰·시각 표기는 짧게 (폭이 흔들리지 않게)', () => {
   assert.equal(formatResetAt(now + 5 * 60_000, now), '5분 후 리셋');
   assert.equal(formatResetAt(now + 3 * 3_600_000, now), '3시간 후 리셋');
   assert.equal(formatResetAt(now - 1_000, now), '곧 리셋');
+  assert.equal(formatUsageAge(now - 5 * 60_000, now), '5m ago');
+  assert.equal(formatUsageAge(now - 3 * 3_600_000, now), '3h ago');
+  assert.equal(formatUsageReset(now + 5 * 60_000, now), 'Resets in 5m');
+  assert.equal(formatUsageReset(now + 3 * 3_600_000, now), 'Resets in 3h');
 });
 
 test('사이드바 버튼은 마지막에 불러온 얇고 반듯한 스타일을 공유한다', () => {
@@ -512,7 +536,7 @@ test('grok · cursor 사용량도 세션 · 오늘 · 주간 토큰으로 보인
   assert.match(settings, /const API_USAGE_AGENTS: readonly AgentName\[\] = \['grok', 'cursor'\]/);
   assert.match(settings, /function renderApiUsage\(\): void/);
   assert.match(settings, /renderPiUsage\(\);\s*\n\s*renderApiUsage\(\);/);
-  assert.match(settings, /세션 · \$\{formatTokens\(providerUsage\.session\.weightedTokens\)\} 토큰 · \$\{providerUsage\.session\.turns\}턴/);
+  assert.match(settings, /formatUsageWindow\('Session', providerUsage\.session\)/);
   assert.match(settings, /ui\.models\.replaceChildren\(\.\.\.buildModelRows\(providerUsage, agent\)\)/);
   // 요금제 셀렉트는 붙지 않는다 — API 사용량 한 가지뿐이다.
   assert.doesNotMatch(settings, /USAGE_PLANS\[agent\]\s*\?\?/);

@@ -24,7 +24,13 @@ import type {
   SettingsDestination,
 } from './settings-contract.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
-import { formatRelativeTime, formatResetAt, formatShortDate, formatTokens } from './usage-format.ts';
+import {
+  formatResetAt,
+  formatShortDate,
+  formatTokens,
+  formatUsageAge,
+  formatUsageReset,
+} from './usage-format.ts';
 import type { AgentBridge } from '../../agent/bridge.ts';
 import type { EventBus } from '../../core/event-bus.ts';
 import type {
@@ -177,6 +183,20 @@ function formatUsd(value: number): string {
   if (value < 0.01) return `$${value.toFixed(4)}`;
   if (value < 1) return `$${value.toFixed(3)}`;
   return `$${value.toFixed(2)}`;
+}
+
+/** Provider usage cards use one compact token unit. */
+function formatCompactTokens(value: number): string {
+  return `${formatTokens(value).toLowerCase()} tok`;
+}
+
+function formatUsageWindow(label: string, window_: UsageWindow | null): string {
+  if (!window_) return `${label} | No usage`;
+  return `${label} | ${window_.turns}calls | ${formatCompactTokens(window_.weightedTokens)}`;
+}
+
+function formatUsageUpdated(timestamp: number | null | undefined): string {
+  return timestamp ? `Updated ${formatUsageAge(timestamp)}` : '';
 }
 
 function createToggleRow(
@@ -1060,6 +1080,25 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // ── 7. 사용량 ─────────────────────────────────────────
   const usageSection = createSection('사용량');
+
+  // rau 를 섹션 맨 위에 둔다 — 체험 크레딧 상태가 첫눈에 보이는 자리다.
+  const rauUsageBlock = el('div', 'ag-settings-usage-block');
+  rauUsageBlock.dataset.agent = 'rau';
+  const rauUsageHead = el('div', 'ag-settings-usage-head');
+  const rauUsageName = el('span', 'ag-settings-row-name');
+  rauUsageName.append(createProviderIcon('rau'), document.createTextNode(AGENT_LABEL.rau));
+  const rauUsageCredits = el('span', 'ag-settings-row-detail');
+  rauUsageHead.append(rauUsageName, rauUsageCredits);
+  const rauUsageMeters = el('div', 'ag-settings-meters');
+  const rauUsageEmpty = el('p', 'ag-settings-note', 'Trial credits are empty. Connect another model.');
+  rauUsageEmpty.hidden = true;
+  const rauUsageDay = el('div', 'ag-settings-usage-day');
+  const rauUsageWeek = el('div', 'ag-settings-usage-day');
+  const rauUsageModels = el('div', 'ag-settings-usage-models');
+  const rauUsageUpdated = el('div', 'ag-settings-usage-updated');
+  rauUsageBlock.append(rauUsageHead, rauUsageMeters, rauUsageEmpty, rauUsageDay, rauUsageWeek, rauUsageModels, rauUsageUpdated);
+  usageSection.body.appendChild(rauUsageBlock);
+
   const cliproxyCard = el('div', 'ag-settings-usage-block ag-settings-cliproxy');
   const cliproxyHead = el('div', 'ag-settings-usage-head');
   const cliproxyName = el('span', 'ag-settings-row-name');
@@ -1101,8 +1140,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     cliproxyError,
     cliproxyActions,
   );
-  usageSection.body.appendChild(cliproxyCard);
-
   cliproxyConnect.addEventListener('click', () => {
     void connectCliproxy();
   });
@@ -1175,22 +1212,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   piUsageBlock.append(piUsageHead, piUsageDay, piUsageWeek, piUsageModels, piUsageUpdated);
   usageSection.body.appendChild(piUsageBlock);
 
-  const rauUsageBlock = el('div', 'ag-settings-usage-block');
-  rauUsageBlock.dataset.agent = 'rau';
-  const rauUsageHead = el('div', 'ag-settings-usage-head');
-  const rauUsageName = el('span', 'ag-settings-row-name');
-  rauUsageName.append(createProviderIcon('rau'), document.createTextNode(AGENT_LABEL.rau));
-  const rauUsageCredits = el('span', 'ag-settings-row-detail');
-  rauUsageHead.append(rauUsageName, rauUsageCredits);
-  const rauUsageEmpty = el('p', 'ag-settings-note', '체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.');
-  rauUsageEmpty.hidden = true;
-  const rauUsageDay = el('div', 'ag-settings-usage-day');
-  const rauUsageWeek = el('div', 'ag-settings-usage-day');
-  const rauUsageModels = el('div', 'ag-settings-usage-models');
-  const rauUsageUpdated = el('div', 'ag-settings-usage-updated');
-  rauUsageBlock.append(rauUsageHead, rauUsageEmpty, rauUsageDay, rauUsageWeek, rauUsageModels, rauUsageUpdated);
-  usageSection.body.appendChild(rauUsageBlock);
-
   // grok · cursor 는 요금제도 잔액도 없다 — 허브가 기록한 세션 · 오늘 · 주간 토큰을 그대로 보여준다.
   const apiUsageBlocks = new Map<
     AgentName,
@@ -1219,6 +1240,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     usageSection.body.appendChild(block);
     apiUsageBlocks.set(agent, { root: block, session, day, week, models, updated });
   }
+  usageSection.body.appendChild(cliproxyCard);
 
   const aiStatus = el('p', 'ag-settings-apply-status');
   aiStatus.hidden = true;
@@ -2064,28 +2086,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     calibrationBtn.textContent = '보정 시작';
   }
 
-  function buildMeter(
-    label: string,
-    window_: UsageWindow | null,
-    limit: number | null,
-    actual: boolean,
-  ): HTMLElement {
+  /** 미터 행 DOM — 라벨·값·진행 막대. percent 가 null 이면 막대 없는 행이다. */
+  function meterRow(label: string, value: string, percent: number | null): HTMLElement {
     const row = el('div', 'ag-settings-meter');
     const head = el('div', 'ag-settings-meter-head');
-    const hasLimit = limit !== null && limit > 0;
-    const percent = window_ && (actual || hasLimit)
-      ? (window_.percent ?? (hasLimit ? (window_.weightedTokens / limit!) * 100 : null))
-      : null;
-    let value: string;
-    if (!window_) value = '기록 없음';
-    else if (percent !== null && actual) {
-      const reset = formatResetAt(window_.resetsAt);
-      value = reset ? `${percent.toFixed(1)}% · ${reset}` : `${percent.toFixed(1)}%`;
-    } else if (percent !== null) {
-      value = `${percent.toFixed(1)}% · ${formatTokens(window_.weightedTokens)} / ${formatTokens(limit!)} 토큰`;
-    } else {
-      value = `${formatTokens(window_.weightedTokens)} 토큰 · ${window_.turns}턴`;
-    }
     head.append(
       el('span', 'ag-settings-meter-label', label),
       el('span', 'ag-settings-meter-value', value),
@@ -2103,22 +2107,45 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     return row;
   }
 
+  function buildMeter(
+    label: string,
+    window_: UsageWindow | null,
+    limit: number | null,
+    actual: boolean,
+  ): HTMLElement {
+    const hasLimit = limit !== null && limit > 0;
+    const percent = window_ && (actual || hasLimit)
+      ? (window_.percent ?? (hasLimit ? (window_.weightedTokens / limit!) * 100 : null))
+      : null;
+    let value: string;
+    if (!window_) value = 'No usage';
+    else if (percent !== null && actual) {
+      const reset = formatUsageReset(window_.resetsAt);
+      value = reset ? `${percent.toFixed(1)}% | ${reset}` : `${percent.toFixed(1)}%`;
+    } else if (percent !== null) {
+      value = `${percent.toFixed(1)}% | ${formatCompactTokens(window_.weightedTokens)} / ${formatCompactTokens(limit!)}`;
+    } else {
+      value = `${window_.turns}calls | ${formatCompactTokens(window_.weightedTokens)}`;
+    }
+    return meterRow(label, value, percent);
+  }
+
   function buildModelRows(providerUsage: ProviderUsage | null, agent: AgentName): HTMLElement[] {
     const entries = Object.entries(providerUsage?.byModel ?? {});
     if (entries.length === 0) return [];
     entries.sort((a, b) => b[1].weightedTokens - a[1].weightedTokens);
-    const rows: HTMLElement[] = [el('div', 'ag-settings-usage-models-title', '모델별')];
+    const rows: HTMLElement[] = [el('div', 'ag-settings-usage-models-title', 'Models')];
     for (const [model, stats] of entries) {
       const row = el('div', 'ag-settings-model-row');
+      const metrics = [
+        `${stats.turns}calls`,
+        formatCompactTokens(stats.weightedTokens),
+        ...(typeof stats.costUsd === 'number' && stats.costUsd > 0 ? [formatUsd(stats.costUsd)] : []),
+      ];
       row.append(
         el('span', 'ag-settings-model-name', labelForModel(agent, model)),
-        el('span', 'ag-settings-model-turns', `${stats.turns}턴`),
-        el('span', 'ag-settings-model-tokens', `${formatTokens(stats.weightedTokens)} 토큰`),
+        el('span', 'ag-settings-model-tokens', metrics.join(' | ')),
       );
-      // 비용은 pi(OpenRouter) 모델에만 붙는다.
-      if (typeof stats.costUsd === 'number' && stats.costUsd > 0) {
-        row.append(el('span', 'ag-settings-model-cost', formatUsd(stats.costUsd)));
-      }
       rows.push(row);
     }
     return rows;
@@ -2161,28 +2188,42 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     cliproxyDisconnect.disabled = connectionState !== 'connected';
   }
 
-  /** pi 사용량 — 요금제 대신 잔액, 미터 대신 오늘·주간 누적. */
+  /** 체험 크레딧 미터 — 쓴 달러를 한도($5)에 대한 비율로 보여준다. */
+  function rauCreditMeter(): HTMLElement | null {
+    const credits = usage?.rau ?? null;
+    if (!credits || credits.error) return null;
+    const limit = credits.totalCreditsUsd;
+    if (!Number.isFinite(limit) || limit <= 0) return null;
+    const used = Math.min(100, Math.max(0, (credits.totalUsageUsd / limit) * 100));
+    return meterRow(
+      'Trial credits',
+      `${used.toFixed(1)}% | ${formatUsd(credits.balanceUsd)} / ${formatUsd(limit)} left`,
+      used,
+    );
+  }
+
+  /** rau 사용량 — 크레딧 미터와 오늘·주간 누적. */
   function renderRauUsage(): void {
     const setup = setupStatuses?.rau;
     rauUsageBlock.hidden = setup?.setupComplete !== true && setup?.connected !== true;
     if (rauUsageBlock.hidden) return;
     const credits = usage?.rau ?? null;
+    const meter = rauCreditMeter();
+    rauUsageMeters.replaceChildren(...(meter ? [meter] : []));
+    rauUsageCredits.textContent = meter
+      ? ''
+      : (credits?.error ?? (credits ? `${formatUsd(credits.balanceUsd)} / $5 left` : 'Checking balance…'));
     const empty = credits != null && credits.balanceUsd <= 0 && !credits.error;
-    rauUsageCredits.textContent = credits
-      ? (credits.error ?? `잔액 ${formatUsd(credits.balanceUsd)} / $5`)
-      : '잔액 확인 중…';
     rauUsageEmpty.hidden = !empty;
     const providerUsage = usage?.providers?.rau ?? null;
     rauUsageDay.textContent = providerUsage
-      ? `오늘 · ${formatTokens(providerUsage.day.weightedTokens)} 토큰 · ${providerUsage.day.turns}턴`
-      : '오늘 · 기록 없음';
+      ? formatUsageWindow('Today', providerUsage.day)
+      : formatUsageWindow('Today', null);
     rauUsageWeek.textContent = providerUsage
-      ? `주간 · ${formatTokens(providerUsage.week.weightedTokens)} 토큰 · ${providerUsage.week.turns}턴`
-      : '주간 · 기록 없음';
+      ? formatUsageWindow('Week', providerUsage.week)
+      : formatUsageWindow('Week', null);
     rauUsageModels.replaceChildren(...buildModelRows(providerUsage, 'rau'));
-    rauUsageUpdated.textContent = providerUsage?.updatedAt
-      ? `${formatRelativeTime(providerUsage.updatedAt)} 기록`
-      : '';
+    rauUsageUpdated.textContent = formatUsageUpdated(providerUsage?.updatedAt);
   }
 
   function renderPiUsage(): void {
@@ -2190,19 +2231,17 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (piUsageBlock.hidden) return;
     const credits = usage?.openrouter ?? null;
     piUsageCredits.textContent = credits
-      ? (credits.error ?? `잔액 ${formatUsd(credits.balanceUsd)} / 충전 ${formatUsd(credits.totalCreditsUsd)}`)
-      : '잔액 확인 중…';
+      ? (credits.error ?? `Balance ${formatUsd(credits.balanceUsd)} | Added ${formatUsd(credits.totalCreditsUsd)}`)
+      : 'Checking balance…';
     const providerUsage = usage?.providers?.pi ?? null;
     piUsageDay.textContent = providerUsage
-      ? `오늘 · ${formatTokens(providerUsage.day.weightedTokens)} 토큰 · ${providerUsage.day.turns}턴`
-      : '오늘 · 기록 없음';
+      ? formatUsageWindow('Today', providerUsage.day)
+      : formatUsageWindow('Today', null);
     piUsageWeek.textContent = providerUsage
-      ? `주간 · ${formatTokens(providerUsage.week.weightedTokens)} 토큰 · ${providerUsage.week.turns}턴`
-      : '주간 · 기록 없음';
+      ? formatUsageWindow('Week', providerUsage.week)
+      : formatUsageWindow('Week', null);
     piUsageModels.replaceChildren(...buildModelRows(providerUsage, 'pi'));
-    piUsageUpdated.textContent = providerUsage?.updatedAt
-      ? `${formatRelativeTime(providerUsage.updatedAt)} 기록`
-      : '';
+    piUsageUpdated.textContent = formatUsageUpdated(providerUsage?.updatedAt);
   }
 
   /** grok · cursor 사용량 — 한도가 없어 미터 대신 세션 · 오늘 · 주간 누적만 쓴다. */
@@ -2221,18 +2260,16 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         && setup?.connected !== true;
       if (ui.root.hidden) continue;
       ui.session.textContent = providerUsage
-        ? `세션 · ${formatTokens(providerUsage.session.weightedTokens)} 토큰 · ${providerUsage.session.turns}턴`
-        : '세션 · 기록 없음';
+        ? formatUsageWindow('Session', providerUsage.session)
+        : formatUsageWindow('Session', null);
       ui.day.textContent = providerUsage
-        ? `오늘 · ${formatTokens(providerUsage.day.weightedTokens)} 토큰 · ${providerUsage.day.turns}턴`
-        : '오늘 · 기록 없음';
+        ? formatUsageWindow('Today', providerUsage.day)
+        : formatUsageWindow('Today', null);
       ui.week.textContent = providerUsage
-        ? `주간 · ${formatTokens(providerUsage.week.weightedTokens)} 토큰 · ${providerUsage.week.turns}턴`
-        : '주간 · 기록 없음';
+        ? formatUsageWindow('Week', providerUsage.week)
+        : formatUsageWindow('Week', null);
       ui.models.replaceChildren(...buildModelRows(providerUsage, agent));
-      ui.updated.textContent = providerUsage?.updatedAt
-        ? `${formatRelativeTime(providerUsage.updatedAt)} 기록`
-        : '';
+      ui.updated.textContent = formatUsageUpdated(providerUsage?.updatedAt);
     }
   }
 
@@ -2250,26 +2287,24 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       if (USAGE_PLANS[agent].some((option) => option.id === plan)) ui.plan.value = plan;
       ui.plan.hidden = actual;
       ui.meters.replaceChildren(
-        buildMeter('5시간', providerUsage?.session ?? null, providerUsage?.limit.session5h ?? null, actual),
-        buildMeter('주간', providerUsage?.week ?? null, providerUsage?.limit.week ?? null, actual),
+        buildMeter('5h', providerUsage?.session ?? null, providerUsage?.limit.session5h ?? null, actual),
+        buildMeter('Week', providerUsage?.week ?? null, providerUsage?.limit.week ?? null, actual),
       );
       const account = (usage?.cliproxy?.accounts ?? []).find((item) => item.agent === agent);
       const accountLine = actual && account
-        ? [account.email ?? account.name, account.planType].filter(Boolean).join(' · ')
+        ? [account.email ?? account.name, account.planType].filter(Boolean).join(' | ')
         : '';
       ui.day.textContent = providerUsage
         ? [
-          `오늘 · ${formatTokens(providerUsage.day.weightedTokens)} 토큰 · ${providerUsage.day.turns}턴`,
+          formatUsageWindow('Today', providerUsage.day),
           accountLine,
-        ].filter(Boolean).join(' · ')
-        : '오늘 · 기록 없음';
+        ].filter(Boolean).join(' | ')
+        : formatUsageWindow('Today', null);
       ui.models.replaceChildren(...buildModelRows(providerUsage, agent));
-      const stamp = providerUsage?.updatedAt
-        ? `${formatRelativeTime(providerUsage.updatedAt)} 기록`
-        : '';
+      const stamp = formatUsageUpdated(providerUsage?.updatedAt);
       ui.updated.textContent = stamp
-        ? `${stamp} · ${actual ? '실제' : '추정'}`
-        : (actual ? '실제' : '추정');
+        ? `${stamp} | ${actual ? 'Actual' : 'Estimated'}`
+        : (actual ? 'Actual' : 'Estimated');
     }
   }
 
