@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -10,7 +10,9 @@ import {
   childSystemPrompt,
   createSubagentManager,
   normalizeRole,
+  resolveSubagentSessionDir,
   spawnIdFromResult,
+  terminalFleetStatus,
 } from '../pi/extension/subagents.ts';
 
 test('role and child prompt stay on the rhwp document surface', () => {
@@ -111,4 +113,73 @@ test('manager caps running children and wait/cancel settle the records', async (
   assert.match(cancelled[0], /Cancelled sa-2/);
   await second.done;
   assert.equal(manager.get('sa-2')?.status, 'error');
+  assert.equal(terminalFleetStatus(manager.get('sa-1')), 'completed');
+  assert.equal(terminalFleetStatus(manager.get('sa-2')), 'stopped');
+});
+
+test('spawn fails fast when no session directory is configured', () => {
+  assert.throws(
+    () => resolveSubagentSessionDir({}, {}),
+    /session dir is not set/,
+  );
+  assert.equal(
+    resolveSubagentSessionDir({}, { PI_CODING_AGENT_DIR: '/pi/agent' }),
+    path.resolve('/pi/agent', '..', 'sessions'),
+  );
+  const manager = createSubagentManager({
+    piBin: '/pi/bin/pi',
+    model: 'deepseek/deepseek-chat-v3.1',
+    env: {},
+    spawnProcess() {
+      throw new Error('should not spawn');
+    },
+  });
+  assert.throws(
+    () => manager.spawn({ prompt: '1쪽', name: '1쪽', cwd: process.cwd() }),
+    /session dir is not set/,
+  );
+});
+
+test('waitFor on settled ids drops the abort listener and swallows a later abort', async () => {
+  const manager = createSubagentManager({
+    piBin: '/pi/bin/pi',
+    model: 'deepseek/deepseek-chat-v3.1',
+    sessionDir: '/pi/sessions',
+    env: {},
+    spawnProcess() {
+      return new FakeChild();
+    },
+  });
+  const rec = manager.spawn({ prompt: '1쪽', name: '1쪽', cwd: process.cwd() });
+  rec.proc.emit('exit', 0, null);
+  const ac = new AbortController();
+  await manager.waitFor([rec.id], ac.signal);
+  assert.equal(getEventListeners(ac.signal, 'abort').length, 0);
+
+  const unhandled = [];
+  const onUnhandled = (reason) => { unhandled.push(reason); };
+  process.on('unhandledRejection', onUnhandled);
+  ac.abort();
+  await new Promise((resolve) => setImmediate(resolve));
+  process.off('unhandledRejection', onUnhandled);
+  assert.deepEqual(unhandled, []);
+});
+
+test('waitFor still rejects when the signal aborts a running child', async () => {
+  const manager = createSubagentManager({
+    piBin: '/pi/bin/pi',
+    model: 'deepseek/deepseek-chat-v3.1',
+    sessionDir: '/pi/sessions',
+    env: {},
+    spawnProcess() {
+      return new FakeChild();
+    },
+  });
+  const rec = manager.spawn({ prompt: '1쪽', name: '1쪽', cwd: process.cwd() });
+  const ac = new AbortController();
+  const waiting = manager.waitFor([rec.id], ac.signal);
+  ac.abort();
+  await assert.rejects(waiting, /Wait aborted/);
+  rec.proc.emit('exit', 0, null);
+  await rec.done;
 });

@@ -28,6 +28,7 @@ export const CHILD_EXCLUDED_TOOLS = [
 export const SUBAGENT_ROLES = ['doc-editor', 'doc-researcher', 'general'] as const;
 export type SubagentRole = (typeof SUBAGENT_ROLES)[number];
 export type SubagentStatus = 'running' | 'done' | 'error';
+export type FleetTerminalStatus = 'completed' | 'failed' | 'stopped';
 
 const ROLE_PROMPTS: Record<SubagentRole, string> = {
   'doc-editor':
@@ -126,6 +127,37 @@ function truncateOutput(text: string, maxBytes: number): string {
   return `[출력 일부 생략]\n\n${kept}`;
 }
 
+export function resolveSubagentSessionDir(
+  opts: { sessionDir?: string },
+  env: Record<string, string | undefined>,
+): string {
+  const agentDir = env.PI_CODING_AGENT_DIR;
+  const sessionDir = opts.sessionDir
+    ?? env.RHWP_PI_SESSION_DIR
+    ?? (agentDir ? path.resolve(agentDir, '..', 'sessions') : '');
+  if (!sessionDir) {
+    throw new Error('Pi session dir is not set — cannot spawn a subagent.');
+  }
+  return sessionDir;
+}
+
+export function terminalFleetStatus(
+  rec: Pick<PiSubagentRecord, 'status' | 'errorText'>,
+): FleetTerminalStatus {
+  switch (rec.status) {
+    case 'done':
+      return 'completed';
+    case 'error':
+      return rec.errorText === 'cancelled' ? 'stopped' : 'failed';
+    case 'running':
+      return 'failed';
+    default: {
+      const _exhaustive: never = rec.status;
+      return _exhaustive;
+    }
+  }
+}
+
 function planningRestrictedFromEnv(env: Record<string, string | undefined>): boolean {
   const workflow = env.RHWP_AGENT_WORKFLOW ?? env.RHWP_WORKFLOW ?? 'direct';
   const phase = env.RHWP_AGENT_PHASE ?? env.RHWP_PLAN_PHASE
@@ -196,7 +228,7 @@ export function createSubagentManager(opts: {
     const id = `sa-${++seq}`;
     const role = normalizeRole(params.role);
     const title = String(params.name ?? '').trim().slice(0, 160) || 'subagent';
-    const sessionDir = opts.sessionDir ?? env.RHWP_PI_SESSION_DIR ?? path.join(env.PI_CODING_AGENT_DIR ?? '', '..', 'sessions');
+    const sessionDir = resolveSubagentSessionDir(opts, env);
     const argv = buildChildArgv({
       model,
       effort: opts.effort ?? env.RHWP_PI_EFFORT ?? null,
@@ -256,22 +288,30 @@ export function createSubagentManager(opts: {
     if (unique.length === 0) throw new Error('Provide at least one subagent id.');
     const records = requireKnown(unique);
     const pending = () => records.filter((rec) => rec.status === 'running').map((rec) => rec.id);
+    let rejectAbort: ((error: Error) => void) | null = null;
+    const onAbort = () => {
+      rejectAbort?.(new Error('Wait aborted. Subagents keep running.'));
+    };
     const abort = new Promise<void>((_resolve, reject) => {
+      rejectAbort = reject;
       if (!signal) return;
       if (signal.aborted) {
-        reject(new Error('Wait aborted. Subagents keep running.'));
+        onAbort();
         return;
       }
-      signal.addEventListener('abort', () => {
-        reject(new Error('Wait aborted. Subagents keep running.'));
-      }, { once: true });
+      signal.addEventListener('abort', onAbort, { once: true });
     });
-    while (pending().length > 0) {
-      onPending?.(pending());
-      await Promise.race([
-        Promise.all(records.filter((rec) => rec.status === 'running').map((rec) => rec.done)),
-        abort,
-      ]);
+    abort.catch(() => {});
+    try {
+      while (pending().length > 0) {
+        onPending?.(pending());
+        await Promise.race([
+          Promise.all(records.filter((rec) => rec.status === 'running').map((rec) => rec.done)),
+          abort,
+        ]);
+      }
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
     }
   }
 
@@ -445,7 +485,12 @@ export default async function rhwpPiSubagents(pi: ExtensionAPI): Promise<void> {
         sections.push(section);
         remaining -= bytes;
       }
-      return textResult(sections.join('\n\n'));
+      return textResult(sections.join('\n\n'), {
+        records: [...new Set(ids)].map((id) => {
+          const rec = manager.get(id);
+          return { id, status: rec ? terminalFleetStatus(rec) : 'failed' };
+        }),
+      });
     },
   });
 

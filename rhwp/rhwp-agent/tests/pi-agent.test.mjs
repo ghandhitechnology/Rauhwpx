@@ -520,6 +520,65 @@ test('subagent_spawn maps onto fleet task cards', () => {
   session.dispose();
 });
 
+test('subagent_wait maps each child terminal status onto its fleet card', () => {
+  const events = [];
+  const mapper = createPiFleetMapper((event) => events.push(event));
+  mapper.onToolStart({
+    toolCallId: 'call-ok',
+    toolName: 'subagent_spawn',
+    args: { name: 'ok' },
+  });
+  mapper.onToolEnd({
+    toolCallId: 'call-ok',
+    toolName: 'subagent_spawn',
+    result: { details: { id: 'sa-1' } },
+  });
+  mapper.onToolStart({
+    toolCallId: 'call-fail',
+    toolName: 'subagent_spawn',
+    args: { name: 'fail' },
+  });
+  mapper.onToolEnd({
+    toolCallId: 'call-fail',
+    toolName: 'subagent_spawn',
+    result: { details: { id: 'sa-2' } },
+  });
+  mapper.onToolStart({
+    toolCallId: 'call-stop',
+    toolName: 'subagent_spawn',
+    args: { name: 'stop' },
+  });
+  mapper.onToolEnd({
+    toolCallId: 'call-stop',
+    toolName: 'subagent_spawn',
+    result: { details: { id: 'sa-3' } },
+  });
+  mapper.onToolStart({
+    toolCallId: 'call-wait',
+    toolName: 'subagent_wait',
+    args: { ids: ['sa-1', 'sa-2', 'sa-3'] },
+  });
+  mapper.onToolEnd({
+    toolCallId: 'call-wait',
+    toolName: 'subagent_wait',
+    isError: false,
+    result: {
+      details: {
+        records: [
+          { id: 'sa-1', status: 'completed' },
+          { id: 'sa-2', status: 'failed' },
+          { id: 'sa-3', status: 'stopped' },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(events.filter((event) => event.type === 'task-end'), [
+    { type: 'task-end', agent: 'pi', taskId: 'call-ok', status: 'completed' },
+    { type: 'task-end', agent: 'pi', taskId: 'call-fail', status: 'failed' },
+    { type: 'task-end', agent: 'pi', taskId: 'call-stop', status: 'stopped' },
+  ]);
+});
+
 test('unwaited subagents are stopped when the turn ends', () => {
   const events = [];
   const mapper = createPiFleetMapper((event) => events.push(event));

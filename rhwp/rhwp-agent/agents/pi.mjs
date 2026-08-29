@@ -225,6 +225,14 @@ export function createPiFleetMapper(onEvent) {
       }
       if (tool === WAIT_TOOL) {
         const ids = idsFrom(callId, args);
+        const records = waitRecordsFromResult(event.result);
+        if (records.length > 0) {
+          for (const rec of records) {
+            const taskId = taskIdBySubagent.get(rec.id);
+            if (taskId) emitEnd(taskId, rec.status);
+          }
+          return;
+        }
         const status = event.isError ? 'failed' : 'completed';
         for (const taskId of taskIdsFor(ids.length > 0 ? ids : [...taskIdBySubagent.keys()])) {
           emitEnd(taskId, status);
@@ -239,6 +247,28 @@ export function createPiFleetMapper(onEvent) {
       for (const taskId of [...running]) emitEnd(taskId, status);
     },
   };
+}
+
+function waitRecordsFromResult(result) {
+  const rec = result && typeof result === 'object' ? result : null;
+  const records = rec?.details?.records;
+  if (!Array.isArray(records)) return [];
+  return records.flatMap((entry) => {
+    if (!entry || typeof entry.id !== 'string') return [];
+    const status = fleetStatusFromWait(entry.status);
+    return status ? [{ id: entry.id, status }] : [];
+  });
+}
+
+function fleetStatusFromWait(status) {
+  switch (status) {
+    case 'completed':
+    case 'failed':
+    case 'stopped':
+      return status;
+    default:
+      return null;
+  }
 }
 
 function spawnIdFromToolResult(result) {
