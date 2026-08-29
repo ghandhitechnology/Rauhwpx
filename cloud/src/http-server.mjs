@@ -109,7 +109,9 @@ export function createCloudHttpHandler({
   seedProvider,
 }, { workerOnly = false } = {}) {
   const authenticate = (request) => auth.authenticate(bearer(request));
-  const authenticateWorker = (request, sessionId) => sessionStore.authenticateWorker(sessionId, bearer(request));
+  const authenticateWorker = (request, sessionId, options) => (
+    sessionStore.authenticateWorker(sessionId, bearer(request), options)
+  );
 
   return async function cloudHttpHandler(request, response) {
     const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host || '127.0.0.1'}`);
@@ -163,7 +165,9 @@ export function createCloudHttpHandler({
         if (!workerOnly) throw new CloudError('NOT_FOUND', 'Endpoint was not found', 404);
         const sessionId = decodeURIComponent(internal[1]);
         const action = internal[2] ?? '';
-        const session = authenticateWorker(request, sessionId);
+        const session = authenticateWorker(request, sessionId, {
+          allowCompletedResultRetry: request.method === 'POST' && action === '/result',
+        });
         if (request.method === 'POST' && action === '/heartbeat') {
           json(response, 200, { ok: sessionStore.heartbeat(sessionId) });
           return;

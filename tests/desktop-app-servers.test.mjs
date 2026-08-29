@@ -86,9 +86,15 @@ function railwayProvider(routes, overrides = {}) {
       serverPublicKey,
       pairingCode: 'ABCD-EFGH-JKLM',
     })),
-    sleep: async () => {},
+    sleep: overrides.sleep ?? (async () => {}),
     deployTimeoutMs: overrides.deployTimeoutMs ?? 1_000,
     healthTimeoutMs: overrides.healthTimeoutMs ?? 1_000,
+    requestTimeoutMs: overrides.requestTimeoutMs,
+    queryMaxAttempts: overrides.queryMaxAttempts,
+    retryBaseMs: overrides.retryBaseMs,
+    reconcileAttempts: overrides.reconcileAttempts,
+    reconcileBaseMs: overrides.reconcileBaseMs,
+    random: overrides.random,
   });
   return { provider, transport };
 }
@@ -192,7 +198,7 @@ test('the Railway provider refuses to pretend when it has no configuration', asy
   });
   assert.equal(env.token, 'railway-token');
   assert.equal(env.apiUrl, 'https://backboard.railway.com/graphql/v2');
-  assert.equal(env.image, 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.10');
+  assert.equal(env.image, 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.11');
 });
 
 test('the Railway provider creates a reachable sandbox and returns a pairing receipt', async () => {
@@ -275,6 +281,172 @@ test('Railway reconciles a service when the create response is interrupted', asy
   assert.ok(lines.includes('Recovered the sandbox after an interrupted Railway response'));
 });
 
+test('Railway retries only safe queries across rate limits and transport failures', async () => {
+  let attempts = 0;
+  const sleeps = [];
+  const { provider, transport } = railwayProvider({
+    RauhwpxLatestDeployment: () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return { status: 429, body: { errors: [{ message: 'Too Many Requests' }] } };
+      }
+      if (attempts === 2) throw new TypeError('connection reset');
+      if (attempts === 3) return { status: 503, body: { error: 'temporarily unavailable' } };
+      return { data: { deployments: { edges: [{ node: { id: 'deployment-1', status: 'SUCCESS' } }] } } };
+    },
+  }, {
+    queryMaxAttempts: 4,
+    retryBaseMs: 10,
+    random: () => 0.5,
+    sleep: async (ms) => { sleeps.push(ms); },
+  });
+
+  const status = await provider.status(SANDBOX);
+  assert.equal(status.lifecycle, 'ready');
+  assert.equal(attempts, 4);
+  assert.deepEqual(sleeps, [10, 20, 40]);
+  assert.deepEqual(transport.names(), Array(4).fill('RauhwpxLatestDeployment'));
+});
+
+test('Railway retries transient GraphQL errors returned with HTTP 200', async () => {
+  let attempts = 0;
+  const { provider } = railwayProvider({
+    RauhwpxLatestDeployment: () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          data: null,
+          errors: [{ message: 'Internal server error', extensions: { code: 'INTERNAL_SERVER_ERROR' } }],
+        };
+      }
+      return { data: { deployments: { edges: [{ node: { id: 'deployment-1', status: 'SUCCESS' } }] } } };
+    },
+  }, { queryMaxAttempts: 2, sleep: async () => {} });
+
+  assert.equal((await provider.status(SANDBOX)).lifecycle, 'ready');
+  assert.equal(attempts, 2);
+});
+
+test('Railway keeps timeout and caller cancellation active while reading response bodies', async () => {
+  let cancelledBodies = 0;
+  const stalledFetch = async () => new Response(new ReadableStream({
+    cancel() { cancelledBodies += 1; },
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  const provider = createRailwayServerProvider({
+    config: RAILWAY_CONFIG,
+    fetchImpl: stalledFetch,
+    probeHealth: async () => ({ ok: true, serverPublicKey: SERVER_KEY }),
+    acquireReceipt: async () => ({}),
+    requestTimeoutMs: 20,
+    queryMaxAttempts: 1,
+  });
+
+  await assert.rejects(provider.status(SANDBOX), (error) => (
+    error.code === 'PROVIDER_UNREACHABLE' && /timed out/.test(error.message)
+  ));
+  const controller = new AbortController();
+  const pending = provider.status(SANDBOX, { signal: controller.signal });
+  setTimeout(() => controller.abort(new Error('caller cancelled')), 10);
+  await assert.rejects(pending, /caller cancelled/);
+  assert.equal(cancelledBodies, 2, 'both stalled bodies were actively cancelled');
+});
+
+test('Railway waits through eventual service visibility without replaying service creation', async () => {
+  let createCalls = 0;
+  let listCalls = 0;
+  const routes = {
+    ...SPAWN_ROUTES,
+    RauhwpxServiceCreate: () => {
+      createCalls += 1;
+      return { status: 429, body: { errors: [{ message: 'response lost behind a rate limit' }] } };
+    },
+    RauhwpxProjectServices: (_variables, calls) => {
+      listCalls += 1;
+      const createdName = calls.find((call) => call.name === 'RauhwpxServiceCreate').variables.input.name;
+      return {
+        data: {
+          project: {
+            services: {
+              edges: listCalls >= 7 ? [{ node: { id: 'service-1', name: createdName } }] : [],
+            },
+          },
+        },
+      };
+    },
+  };
+  const { provider, transport } = railwayProvider(routes, {
+    queryMaxAttempts: 1,
+    reconcileAttempts: 8,
+  });
+
+  const spawned = await provider.spawn({ onLine: () => {} });
+  assert.equal(spawned.sandbox.sandboxId, 'service-1');
+  assert.equal(createCalls, 1, 'an ambiguous mutation is never replayed');
+  assert.equal(listCalls, 7, 'reconciliation tolerates several eventually-consistent misses');
+  assert.equal(transport.names().filter((name) => name === 'RauhwpxServiceCreate').length, 1);
+});
+
+test('Railway reconciles an accepted domain mutation instead of creating a second domain', async () => {
+  let domainCreateCalls = 0;
+  let domainListCalls = 0;
+  const routes = {
+    ...SPAWN_ROUTES,
+    RauhwpxServiceDomainCreate: () => {
+      domainCreateCalls += 1;
+      throw new TypeError('connection reset after domain commit');
+    },
+    RauhwpxServiceDomains: () => {
+      domainListCalls += 1;
+      return {
+        data: {
+          domains: {
+            serviceDomains: domainListCalls >= 4
+              ? [{ id: 'domain-1', domain: 'sandbox-1.up.railway.app', targetPort: 7740 }]
+              : [],
+          },
+        },
+      };
+    },
+  };
+  const { provider, transport } = railwayProvider(routes, {
+    queryMaxAttempts: 1,
+    reconcileAttempts: 6,
+  });
+  const lines = [];
+
+  const spawned = await provider.spawn({ onLine: (line) => lines.push(line) });
+  assert.equal(spawned.sandbox.host, 'sandbox-1.up.railway.app');
+  assert.equal(domainCreateCalls, 1, 'serviceDomainCreate is never blindly replayed');
+  assert.equal(domainListCalls, 4);
+  assert.equal(transport.names().filter((name) => name === 'RauhwpxServiceDomainCreate').length, 1);
+  assert.ok(lines.includes('Recovered the sandbox domain after an interrupted Railway response'));
+});
+
+test('Railway deployment polling survives exhausted transient query failures', async () => {
+  let deploymentCalls = 0;
+  const routes = {
+    ...SPAWN_ROUTES,
+    RauhwpxLatestDeployment: () => {
+      deploymentCalls += 1;
+      if (deploymentCalls === 1) {
+        return { status: 503, body: { errors: [{ message: 'control plane overloaded' }] } };
+      }
+      if (deploymentCalls === 2) throw new TypeError('connection reset');
+      if (deploymentCalls === 3) {
+        return { data: { deployments: { edges: [{ node: { id: 'deployment-1', status: 'BUILDING' } }] } } };
+      }
+      return { data: { deployments: { edges: [{ node: { id: 'deployment-1', status: 'SUCCESS' } }] } } };
+    },
+  };
+  const { provider } = railwayProvider(routes, { queryMaxAttempts: 1 });
+  const lines = [];
+
+  const spawned = await provider.spawn({ onLine: (line) => lines.push(line) });
+  assert.equal(spawned.sandbox.sandboxId, 'service-1');
+  assert.equal(deploymentCalls, 4);
+  assert.equal(lines.filter((line) => line.startsWith('Railway status is temporarily unavailable')).length, 2);
+});
+
 test('Railway spawn injects only the selected provider credentials', async () => {
   const { provider, transport } = railwayProvider(SPAWN_ROUTES);
   await provider.spawn({
@@ -306,11 +478,19 @@ test('a Railway sandbox that never becomes usable is removed instead of left beh
     },
   };
   const crashed = railwayProvider(failedDeploy);
+  let journalCreates = 0;
+  let journalClears = 0;
   await assert.rejects(
-    crashed.provider.spawn({ onLine: () => {} }),
+    crashed.provider.spawn({
+      onLine: () => {},
+      onSandboxCreated: async () => { journalCreates += 1; },
+      onSandboxRemoved: async () => { journalClears += 1; },
+    }),
     (error) => error.code === 'SANDBOX_DEPLOY_FAILED' && /local runner runs as root/.test(error.message),
   );
   assert.equal(crashed.transport.names().at(-1), 'RauhwpxServiceDelete');
+  assert.equal(journalCreates, 1, 'the service id is journaled before deployment polling');
+  assert.equal(journalClears, 1, 'confirmed cleanup clears the pending journal');
 
   const unhealthy = railwayProvider(SPAWN_ROUTES, {
     probeHealth: async () => { throw new Error('fetch failed'); },
@@ -335,6 +515,9 @@ test('a Railway sandbox that never becomes usable is removed instead of left beh
     fetchImpl: async () => { throw new TypeError('fetch failed'); },
     probeHealth: async () => ({ ok: true, serverPublicKey: SERVER_KEY }),
     acquireReceipt: async () => ({}),
+    sleep: async () => {},
+    queryMaxAttempts: 1,
+    reconcileAttempts: 2,
   });
   await assert.rejects(offline.spawn({ onLine: () => {} }), { code: 'PROVIDER_UNREACHABLE' });
 });
@@ -358,12 +541,44 @@ test('Railway status maps deployments to lifecycles and teardown is idempotent',
 
   const gone = railwayProvider({
     RauhwpxLatestDeployment: { body: { errors: [{ message: 'Service not found' }] } },
+    RauhwpxProjectServices: { data: { project: { services: { edges: [] } } } },
   });
   assert.deepEqual(await gone.provider.status(SANDBOX), {
     lifecycle: 'idle',
     status: 'REMOVED',
     message: 'This sandbox no longer exists.',
   });
+
+  const awaitingDeployment = railwayProvider({
+    RauhwpxLatestDeployment: { data: { deployments: { edges: [] } } },
+    RauhwpxProjectServices: {
+      data: {
+        project: {
+          services: { edges: [{ node: { id: 'service-1', name: 'rauhwpx-sandbox-live' } }] },
+        },
+      },
+    },
+  });
+  assert.deepEqual(await awaitingDeployment.provider.status(SANDBOX), {
+    lifecycle: 'provisioning',
+    status: 'NO_DEPLOYMENT',
+    message: 'Railway has not published a deployment for this sandbox yet.',
+  });
+
+  let uncertainCalls = 0;
+  const uncertain = railwayProvider({
+    RauhwpxLatestDeployment: { data: { deployments: { edges: [] } } },
+    RauhwpxProjectServices: () => {
+      uncertainCalls += 1;
+      if (uncertainCalls === 1) return { data: { project: { services: { edges: [] } } } };
+      throw new TypeError('Railway connection reset');
+    },
+  });
+  await assert.rejects(
+    uncertain.provider.status(SANDBOX),
+    (error) => error.code === 'PROVIDER_UNREACHABLE',
+    'a later control-plane error must not turn an earlier empty list into proof of deletion',
+  );
 
   const removed = railwayProvider({ RauhwpxServiceDelete: { data: { serviceDelete: true } } });
   assert.deepEqual(await removed.provider.teardown(SANDBOX), { lifecycle: 'idle', removed: true });
@@ -374,6 +589,84 @@ test('Railway status maps deployments to lifecycles and teardown is idempotent',
   assert.deepEqual(await already.provider.teardown(SANDBOX), { lifecycle: 'idle', removed: false });
 });
 
+test('Railway teardown retries an ambiguous delete without leaving a paid service', async () => {
+  let deleteCalls = 0;
+  const { provider } = railwayProvider({
+    RauhwpxServiceDelete: () => {
+      deleteCalls += 1;
+      if (deleteCalls === 1) throw new TypeError('connection reset after delete commit');
+      return { data: { serviceDelete: true } };
+    },
+  }, { queryMaxAttempts: 2, sleep: async () => {} });
+
+  assert.deepEqual(await provider.teardown(SANDBOX), { lifecycle: 'idle', removed: true });
+  assert.equal(deleteCalls, 2);
+});
+
+test('cancelling an ambiguous Railway create performs only bounded orphan reconciliation', async () => {
+  const cancellation = new Error('user cancelled');
+  const controller = new AbortController();
+  controller.abort(cancellation);
+  let listCalls = 0;
+  const sleeps = [];
+  const { provider, transport } = railwayProvider({
+    RauhwpxServiceCreate: () => { throw cancellation; },
+    RauhwpxProjectServices: () => {
+      listCalls += 1;
+      return { data: { project: { services: { edges: [] } } } };
+    },
+  }, {
+    reconcileAttempts: 10,
+    sleep: async (ms) => { sleeps.push(ms); },
+  });
+
+  await assert.rejects(provider.spawn({ signal: controller.signal, onLine: () => {} }), /user cancelled/);
+  assert.equal(listCalls, 3);
+  assert.equal(sleeps.length, 2);
+  assert.equal(transport.names().filter((name) => name === 'RauhwpxServiceCreate').length, 1);
+});
+
+test('cancelling during ambiguous Railway reconciliation removes a service that appears after the abort', async () => {
+  const cancellation = new Error('user cancelled during reconciliation');
+  const controller = new AbortController();
+  let listCalls = 0;
+  let deleteCalls = 0;
+  const { provider, transport } = railwayProvider({
+    RauhwpxServiceCreate: {
+      body: { errors: [{ message: 'committed, response unavailable', extensions: { code: 'INTERNAL_SERVER_ERROR' } }] },
+    },
+    RauhwpxProjectServices: (_variables, calls) => {
+      listCalls += 1;
+      const name = calls.find((call) => call.name === 'RauhwpxServiceCreate').variables.input.name;
+      return {
+        data: {
+          project: {
+            services: { edges: listCalls >= 2 ? [{ node: { id: 'service-late', name } }] : [] },
+          },
+        },
+      };
+    },
+    RauhwpxServiceDelete: () => {
+      deleteCalls += 1;
+      return { data: { serviceDelete: true } };
+    },
+  }, {
+    reconcileAttempts: 10,
+    sleep: async (_ms, { signal } = {}) => {
+      controller.abort(cancellation);
+      throw signal?.reason ?? cancellation;
+    },
+  });
+
+  await assert.rejects(
+    provider.spawn({ signal: controller.signal, onLine: () => {} }),
+    /user cancelled during reconciliation/,
+  );
+  assert.equal(listCalls, 2, 'bounded uncancelled cleanup sees the eventually visible service');
+  assert.equal(deleteCalls, 1);
+  assert.equal(transport.names().filter((name) => name === 'RauhwpxServiceCreate').length, 1);
+});
+
 test('the client remembers the chosen server mode and verifies bootstrap receipts', async () => {
   const vault = memoryVault();
   const responses = [];
@@ -382,6 +675,12 @@ test('the client remembers the chosen server mode and verifies bootstrap receipt
     fetchImpl: signedFetch(async () => responses.shift()),
   });
   assert.equal(await client.loadServerMode(), null);
+  assert.equal(await client.loadPendingAppSandbox(), null);
+  const pending = await client.savePendingAppSandbox({ providerId: 'railway', sandbox: SANDBOX });
+  assert.equal(pending.sandbox.sandboxId, 'service-1');
+  assert.equal((await client.loadPendingAppSandbox()).providerId, 'railway');
+  await client.clearPendingAppSandbox();
+  assert.equal(await client.loadPendingAppSandbox(), null);
   assert.equal(await client.saveServerMode('app-hosted'), 'app-hosted');
   assert.equal(await client.loadServerMode(), 'app-hosted');
   await assert.rejects(client.saveServerMode('fly'), /server mode/);
@@ -432,6 +731,7 @@ function appServerStub(overrides = {}) {
     spawn: overrides.spawn ?? (async (options) => {
       calls.spawn += 1;
       calls.spawnOptions.push(options);
+      await options.onSandboxCreated?.(SANDBOX);
       return {
         sandbox: SANDBOX,
         receipt: {
@@ -542,6 +842,79 @@ test('concurrent spawns share one sandbox and the choice survives a restart', as
   assert.equal(resumed.server.preferredMode, 'app-hosted');
   assert.equal(resumed.server.lifecycle, 'ready');
   assert.equal(resumed.profile.mode, 'app-hosted');
+});
+
+test('startup removes a journaled sandbox left by an interrupted spawn', async () => {
+  const vault = memoryVault();
+  const provider = appServerStub();
+  const pending = sandboxCoordinator({ vault, provider });
+  await pending.client.savePendingAppSandbox({ providerId: 'railway', sandbox: SANDBOX });
+
+  const snapshot = await pending.coordinator.start();
+
+  assert.equal(provider.calls.teardown, 1);
+  assert.equal(await pending.client.loadPendingAppSandbox(), null);
+  assert.equal(snapshot.server.lifecycle, 'idle');
+});
+
+test('startup keeps an activated sandbox when only journal clearing was interrupted', async () => {
+  const vault = memoryVault();
+  const provider = appServerStub();
+  const initial = sandboxCoordinator({ vault, provider });
+  await initial.coordinator.start();
+  await initial.coordinator.spawnAppServer();
+  await initial.client.savePendingAppSandbox({ providerId: 'railway', sandbox: SANDBOX });
+
+  const restarted = sandboxCoordinator({ vault, provider });
+  const snapshot = await restarted.coordinator.start();
+
+  assert.equal(provider.calls.teardown, 0, 'a matching activated profile proves the sandbox is owned');
+  assert.equal(await restarted.client.loadPendingAppSandbox(), null);
+  assert.equal(snapshot.server.lifecycle, 'ready');
+});
+
+test('an existing unpaired sandbox blocks a replacement spawn', async () => {
+  const profile = normalizeCloudProfile({
+    mode: 'app-hosted',
+    name: 'Railway sandbox',
+    endpoint: 'https://sandbox-1.up.railway.app/rauhwpx-cloud',
+    serverPublicKey: SERVER_KEY,
+    sandbox: SANDBOX,
+  });
+  const vault = memoryVault({ 'cloud.profile': JSON.stringify(profile) });
+  const { coordinator, provider } = sandboxCoordinator({ vault });
+
+  const started = await coordinator.start();
+  assert.equal(started.server.lifecycle, 'error');
+  await assert.rejects(coordinator.spawnAppServer(), {
+    code: 'SANDBOX_PAIRING_REQUIRED',
+  });
+  assert.equal(provider.calls.spawn, 0, 'the existing paid sandbox is not orphaned by a replacement');
+});
+
+test('a provider status failure never reuses or replaces the saved sandbox', async () => {
+  const vault = memoryVault();
+  const initial = sandboxCoordinator({ vault });
+  await initial.coordinator.start();
+  await initial.coordinator.spawnAppServer();
+
+  let statusCalls = 0;
+  const provider = appServerStub({
+    status: async () => {
+      statusCalls += 1;
+      const error = new Error('Railway control plane is temporarily unavailable');
+      error.code = 'ETIMEDOUT';
+      throw error;
+    },
+  });
+  const resumed = sandboxCoordinator({ vault, provider });
+  await resumed.coordinator.start();
+
+  await assert.rejects(resumed.coordinator.spawnAppServer(), {
+    code: 'SANDBOX_STATUS_UNAVAILABLE',
+  });
+  assert.equal(statusCalls, 1);
+  assert.equal(provider.calls.spawn, 0, 'unknown provider state must not create a second paid sandbox');
 });
 
 test('a live sandbox cannot be abandoned by switching to a user server', async () => {

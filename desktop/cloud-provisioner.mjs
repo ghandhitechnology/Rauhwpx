@@ -1,6 +1,8 @@
 import { spawn as nodeSpawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { normalizeSshConfig, normalizeTailscaleHttpsPort } from './cloud-profile.mjs';
 
 const OUTPUT_LIMIT = 2 * 1024 * 1024;
@@ -8,6 +10,20 @@ const BOOTSTRAP_LIMIT = 1024 * 1024 * 1024;
 const INSTALL_TIMEOUT_MS = 30 * 60_000;
 const EXPECTED_CLOUD_PROTOCOL = 1;
 const CHANNELS = new Set(['stable', 'prerelease']);
+const SSH_RETRY_ATTEMPTS = 3;
+
+const TRANSIENT_SSH_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETDOWN',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'EPIPE',
+  'ETIMEDOUT',
+]);
+
+const TRANSIENT_SSH_MESSAGE = /(?:connection (?:closed|refused|reset|timed out)|connection to .* closed|broken pipe|connection reset by peer|could not resolve hostname|host is down|kex_exchange_identification|network is (?:down|unreachable)|no route to host|operation timed out|ssh_exchange_identification|temporary failure in name resolution)/i;
 
 function stripControl(value) {
   return String(value ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
@@ -50,9 +66,20 @@ function runProcess(spawnImpl, command, args, { input, timeoutMs = 30_000, onLin
     };
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      rejectOnce(new Error(`${command} timed out`));
+      rejectOnce(Object.assign(new Error(`${command} timed out`), { code: 'ETIMEDOUT' }));
     }, timeoutMs);
     child.once('error', rejectOnce);
+    // SSH can reject a command before Electron finishes streaming an installer
+    // or bootstrap archive. A pipe then reports EPIPE on stdin; without an
+    // error listener Node treats it as an uncaught process error.
+    child.stdin?.on('error', (cause) => {
+      const error = Object.assign(
+        new Error(`${command} input failed: ${cause.message}`),
+        { code: cause.code || 'SSH_STDIN_FAILED', cause },
+      );
+      child.kill('SIGTERM');
+      rejectOnce(error);
+    });
     child.stdout.on('data', (chunk) => capture(stdout, 'stdout', chunk));
     child.stderr.on('data', (chunk) => capture(stderr, 'stderr', chunk));
     child.once('close', (code, signal) => {
@@ -75,9 +102,42 @@ function runProcess(spawnImpl, command, args, { input, timeoutMs = 30_000, onLin
         reject(error);
       }
     });
-    if (input != null) child.stdin.end(input);
-    else child.stdin.end();
+    try {
+      if (input != null) child.stdin.end(input);
+      else child.stdin.end();
+    } catch (cause) {
+      child.kill('SIGTERM');
+      rejectOnce(Object.assign(
+        new Error(`${command} input failed: ${cause.message}`),
+        { code: cause.code || 'SSH_STDIN_FAILED', cause },
+      ));
+    }
   });
+}
+
+function transientSshFailure(error) {
+  if (TRANSIENT_SSH_CODES.has(String(error?.code ?? '').toUpperCase())) return true;
+  if (Number(error?.result?.code) !== 255) return false;
+  return TRANSIENT_SSH_MESSAGE.test(String(error?.message ?? ''));
+}
+
+async function retryTransientSsh(operation, {
+  attempts = SSH_RETRY_ATTEMPTS,
+  onLine = () => {},
+  sleep = (ms) => delay(ms),
+} = {}) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !transientSshFailure(error)) throw error;
+      onLine(`SSH connection was interrupted; retrying (${attempt + 1}/${attempts})`);
+      await sleep(Math.min(1_000, 200 * (2 ** (attempt - 1))));
+    }
+  }
+  throw lastError;
 }
 
 function sshDestination(ssh) {
@@ -125,7 +185,37 @@ function bundledInstallRemoteCommand({ channel, transport, publicHost, tailscale
   ].join('; ');
 }
 
-function existingInstallRemoteCommand({ transport, publicHost, tailscaleHttpsPort, requiredVersion = '' }) {
+function receiptCacheCommands(platform, requestId) {
+  const normalized = String(requestId ?? randomBytes(16).toString('hex'));
+  if (!/^[a-f0-9]{32}$/.test(normalized)) throw new Error('Provision receipt request id is invalid');
+  const directory = platform === 'darwin'
+    ? '/Library/Application Support/Rauhwpx Cloud/provision-receipts'
+    : '/var/lib/rauhwpx-cloud/provision-receipts';
+  return {
+    before: [
+      `RECEIPT_DIR='${directory}'`,
+      'sudo -n install -d -m 0700 "$RECEIPT_DIR"',
+      'sudo -n find "$RECEIPT_DIR" -type f -name \'*.receipt\' -mmin +15 -delete >/dev/null 2>&1 || true',
+      `RECEIPT_FILE="$RECEIPT_DIR/${normalized}.receipt"`,
+      'if sudo -n test -s "$RECEIPT_FILE"; then sudo -n cat "$RECEIPT_FILE"; exit 0; fi',
+    ],
+    after: [
+      'RECEIPT_LINE="RAUHWpx_RECEIPT=$RECEIPT"',
+      'printf "%s\\n" "$RECEIPT_LINE" | sudo -n sh -c \'umask 077; cat >"$1"\' sh "$RECEIPT_FILE.tmp"',
+      'sudo -n mv -f "$RECEIPT_FILE.tmp" "$RECEIPT_FILE"',
+      'sudo -n cat "$RECEIPT_FILE"',
+    ],
+  };
+}
+
+function existingInstallRemoteCommand({
+  transport,
+  publicHost,
+  tailscaleHttpsPort,
+  requiredVersion = '',
+  requestId,
+}) {
+  const receiptCache = receiptCacheCommands('linux', requestId);
   const endpoint = transport === 'tailscale'
     ? [
         `EXISTING_PORT=$(sudo -n sed -n 's/^RAUHWpx_TAILSCALE_HTTPS_PORT=//p' /etc/rauhwpx-cloud.env | tail -1) || exit 0`,
@@ -162,6 +252,7 @@ function existingInstallRemoteCommand({ transport, publicHost, tailscaleHttpsPor
     'sudo -n curl --fail --silent http://127.0.0.1:7740/v1/health >/dev/null || exit 0',
     ...endpoint,
     'sudo -n curl --fail --silent --connect-timeout 10 "$ENDPOINT/v1/health" >/dev/null || exit 0',
+    ...receiptCache.before,
     'PAIRING_JSON=$(sudo -n /usr/local/bin/rauhwpx-cloud pairing create "Origin device")',
     `RECEIPT=$(sudo -n /opt/rauhwpx-node/bin/node -e '
       const pairing=JSON.parse(process.argv[1]);
@@ -169,7 +260,42 @@ function existingInstallRemoteCommand({ transport, publicHost, tailscaleHttpsPor
       if(process.argv[3]) receipt.tailscaleHttpsPort=Number(process.argv[3]);
       process.stdout.write(JSON.stringify(receipt));
     ' "$PAIRING_JSON" "$ENDPOINT" "$RECEIPT_PORT" "${transport}")`,
-    'printf "RAUHWpx_RECEIPT=%s\\n" "$RECEIPT"',
+    ...receiptCache.after,
+  ].join('; ');
+}
+
+function existingMacosInstallRemoteCommand({ requiredVersion = '', requestId } = {}) {
+  const receiptCache = receiptCacheCommands('darwin', requestId);
+  return [
+    'set -eu',
+    'sudo -n launchctl print system/com.hataewook.rauhwpx-cloud >/dev/null 2>&1 || exit 0',
+    'sudo -n test -x /usr/local/bin/rauhwpx-cloud || exit 0',
+    `EXISTING_BASE=$(sudo -n sed -n 's/^RAUHWpx_BASE_PATH=//p' '/Library/Application Support/Rauhwpx Cloud/cloud.env' | tail -1) || exit 0`,
+    '[ "$EXISTING_BASE" = /rauhwpx-cloud ] || exit 0',
+    `EXISTING_HOST=$(sudo -n sed -n 's/^RAUHWpx_HOST=//p' '/Library/Application Support/Rauhwpx Cloud/cloud.env' | tail -1) || exit 0`,
+    '[ "$EXISTING_HOST" = 127.0.0.1 ] || exit 0',
+    `EXISTING_PORT=$(sudo -n sed -n 's/^RAUHWpx_PORT=//p' '/Library/Application Support/Rauhwpx Cloud/cloud.env' | tail -1) || exit 0`,
+    '[ "$EXISTING_PORT" = 7740 ] || exit 0',
+    'sudo -n test -x /opt/homebrew/opt/node@24/bin/node || exit 0',
+    `EXISTING_PROTOCOL=$(sudo -n /opt/homebrew/opt/node@24/bin/node -e 'import("/Library/Application Support/Rauhwpx Cloud/current/src/protocol.mjs").then((m)=>process.stdout.write(String(m.PROTOCOL_VERSION)))') || exit 0`,
+    `[ "$EXISTING_PROTOCOL" = ${EXPECTED_CLOUD_PROTOCOL} ] || exit 0`,
+    ...(requiredVersion ? [
+      `EXISTING_VERSION=$(sudo -n /opt/homebrew/opt/node@24/bin/node -p 'require("/Library/Application Support/Rauhwpx Cloud/current/package.json").version') || exit 0`,
+      `[ "$EXISTING_VERSION" = "${requiredVersion}" ] || exit 0`,
+    ] : []),
+    'sudo -n curl --fail --silent --connect-timeout 10 http://127.0.0.1:7740/v1/health >/dev/null || exit 0',
+    ...receiptCache.before,
+    'PAIRING_JSON=$(sudo -n /usr/local/bin/rauhwpx-cloud pairing create "Origin device")',
+    `RECEIPT=$(sudo -n /opt/homebrew/opt/node@24/bin/node -e '
+      const pairing=JSON.parse(process.argv[1]);
+      process.stdout.write(JSON.stringify({
+        endpoint:"http://127.0.0.1:7740/rauhwpx-cloud",
+        serverPublicKey:pairing.serverPublicKey,
+        pairingCode:pairing.code,
+        transport:"ssh-tunnel"
+      }));
+    ' "$PAIRING_JSON")`,
+    ...receiptCache.after,
   ].join('; ');
 }
 
@@ -180,6 +306,8 @@ export function sshArguments(sshConfig, knownHostsPath, remoteCommand, { acceptN
     '-o', 'PasswordAuthentication=no',
     '-o', 'KbdInteractiveAuthentication=no',
     '-o', 'ConnectTimeout=12',
+    '-o', 'ServerAliveInterval=15',
+    '-o', 'ServerAliveCountMax=3',
     '-o', `UserKnownHostsFile=${knownHostsPath}`,
     '-o', `StrictHostKeyChecking=${acceptNew ? 'accept-new' : 'yes'}`,
     '-p', String(ssh.port),
@@ -189,47 +317,58 @@ export function sshArguments(sshConfig, knownHostsPath, remoteCommand, { acceptN
   ];
 }
 
+function invalidProvisionReceipt(message) {
+  return Object.assign(new Error(message), { code: 'PROVISION_RECEIPT_INVALID' });
+}
+
 function parseProvisionReceipt(stdout) {
   const line = stdout.split(/\r?\n/).findLast((candidate) => candidate.startsWith('RAUHWpx_RECEIPT='));
-  if (!line) throw new Error('VPS installer did not return a provisioning receipt');
+  if (!line) throw invalidProvisionReceipt('VPS installer did not return a provisioning receipt');
   let receipt;
   try { receipt = JSON.parse(line.slice('RAUHWpx_RECEIPT='.length)); } catch {
-    throw new Error('VPS installer returned an invalid provisioning receipt');
+    throw invalidProvisionReceipt('VPS installer returned an invalid provisioning receipt');
   }
   if (!/^ed25519:[A-Za-z0-9_-]{59}$/.test(String(receipt.serverPublicKey ?? ''))) {
-    throw new Error('VPS installer did not return a valid server identity');
+    throw invalidProvisionReceipt('VPS installer did not return a valid server identity');
   }
   let endpoint;
   try { endpoint = new URL(receipt.endpoint); } catch {
-    throw new Error('VPS installer did not return a secure endpoint');
+    throw invalidProvisionReceipt('VPS installer did not return a secure endpoint');
   }
   const loopbackTunnel = receipt.transport === 'ssh-tunnel'
     && endpoint.protocol === 'http:'
     && endpoint.hostname === '127.0.0.1'
     && Number(endpoint.port) === 7740;
   if ((!loopbackTunnel && endpoint.protocol !== 'https:') || endpoint.username || endpoint.password) {
-    throw new Error('VPS installer did not return a secure endpoint');
+    throw invalidProvisionReceipt('VPS installer did not return a secure endpoint');
   }
   if (receipt.tailscaleHttpsPort !== undefined) {
     if (typeof receipt.tailscaleHttpsPort !== 'number') {
-      throw new Error('VPS installer returned an invalid Tailscale HTTPS port');
+      throw invalidProvisionReceipt('VPS installer returned an invalid Tailscale HTTPS port');
     }
     let port;
     try { port = normalizeTailscaleHttpsPort(receipt.tailscaleHttpsPort); } catch {
-      throw new Error('VPS installer returned an invalid Tailscale HTTPS port');
+      throw invalidProvisionReceipt('VPS installer returned an invalid Tailscale HTTPS port');
     }
     if (Number(endpoint.port || 443) !== port) {
-      throw new Error('VPS installer endpoint does not match its Tailscale HTTPS port');
+      throw invalidProvisionReceipt('VPS installer endpoint does not match its Tailscale HTTPS port');
     }
   }
   if (receipt.pairingCode != null && !/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(receipt.pairingCode)) {
-    throw new Error('VPS installer returned an invalid pairing code');
+    throw invalidProvisionReceipt('VPS installer returned an invalid pairing code');
   }
   return receipt;
 }
 
 export class CloudProvisioner {
-  constructor({ spawnImpl = nodeSpawn, installerPath, bootstrapDir = '', appVersion = '', knownHostsPath }) {
+  constructor({
+    spawnImpl = nodeSpawn,
+    installerPath,
+    bootstrapDir = '',
+    appVersion = '',
+    knownHostsPath,
+    retrySleep = (ms) => delay(ms),
+  }) {
     if (!installerPath) throw new Error('CloudProvisioner requires an installer path');
     if (!knownHostsPath) throw new Error('CloudProvisioner requires a known-hosts path');
     this.spawn = spawnImpl;
@@ -237,6 +376,7 @@ export class CloudProvisioner {
     this.bootstrapDir = bootstrapDir;
     this.appVersion = appVersion;
     this.knownHostsPath = knownHostsPath;
+    this.retrySleep = retrySleep;
   }
 
   async #bootstrap(machineArchitecture) {
@@ -261,16 +401,38 @@ export class CloudProvisioner {
   }
 
   async #reuseExisting(ssh, options, onLine) {
-    const remote = existingInstallRemoteCommand(options);
-    const result = await runProcess(
+    const remote = options.platform === 'darwin'
+      ? existingMacosInstallRemoteCommand(options)
+      : existingInstallRemoteCommand(options);
+    const result = await retryTransientSsh(() => runProcess(
       this.spawn,
       'ssh',
       sshArguments(ssh, this.knownHostsPath, remote),
       { timeoutMs: 30_000, onLine },
-    );
+    ), { onLine, sleep: this.retrySleep });
     if (!result.stdout.split(/\r?\n/).some((line) => line.startsWith('RAUHWpx_RECEIPT='))) return null;
     onLine('Using the compatible Cloud service already installed on this VPS');
     return parseProvisionReceipt(result.stdout);
+  }
+
+  async #installWithRecovery(ssh, options, preflight, onLine, install) {
+    let failure;
+    try {
+      const result = await install();
+      return { ...parseProvisionReceipt(result.stdout), preflight };
+    } catch (error) {
+      if (!transientSshFailure(error) && error?.code !== 'PROVISION_RECEIPT_INVALID') throw error;
+      failure = error;
+    }
+
+    onLine('The installer response was interrupted; checking the installed Cloud service');
+    const recovered = await this.#reuseExisting(ssh, {
+      ...options,
+      platform: preflight.platform,
+    }, onLine);
+    if (!recovered) throw failure;
+    onLine('Recovered the Cloud installation after the interrupted installer response');
+    return { ...recovered, preflight, recovered: true };
   }
 
   async preflight(sshConfig, { onLine = () => {} } = {}) {
@@ -285,12 +447,12 @@ export class CloudProvisioner {
       ...(ssh.useTailscaleSsh ? ['command -v tailscale >/dev/null', 'tailscale status --json >/dev/null'] : []),
       'printf "preflight=ok\\n"',
     ].join('; ');
-    const result = await runProcess(
+    const result = await retryTransientSsh(() => runProcess(
       this.spawn,
       'ssh',
       sshArguments(ssh, this.knownHostsPath, remote, { acceptNew: true }),
       { timeoutMs: 25_000, onLine },
-    );
+    ), { onLine, sleep: this.retrySleep });
     const output = `${result.stdout}\n${result.stderr}`;
     if (!output.includes('preflight=ok')) throw new Error('VPS preflight did not complete');
     const os = output.match(/os=([^\s]+) version=([^\s]+)/);
@@ -326,6 +488,13 @@ export class CloudProvisioner {
       throw new Error('Mac Cloud hosts require the SSH tunnel transport');
     }
     if (preflight.platform === 'darwin') {
+      const existing = await this.#reuseExisting(ssh, {
+        platform: 'darwin',
+        transport,
+        publicHost,
+        tailscaleHttpsPort: servePort,
+      }, onLine);
+      if (existing) return { ...existing, preflight, reused: true };
       const installerPath = path.join(path.dirname(this.installerPath), 'install-macos.sh');
       const installer = await fs.readFile(installerPath);
       const remote = installRemoteCommand({
@@ -334,13 +503,16 @@ export class CloudProvisioner {
         publicHost,
         tailscaleHttpsPort: servePort,
       });
-      const result = await runProcess(
+      return this.#installWithRecovery(ssh, {
+        transport,
+        publicHost,
+        tailscaleHttpsPort: servePort,
+      }, preflight, onLine, () => runProcess(
         this.spawn,
         'ssh',
         sshArguments(ssh, this.knownHostsPath, remote),
         { input: installer, timeoutMs: INSTALL_TIMEOUT_MS, onLine },
-      );
-      return { ...parseProvisionReceipt(result.stdout), preflight };
+      ));
     }
     const existing = await this.#reuseExisting(ssh, {
       transport,
@@ -358,13 +530,17 @@ export class CloudProvisioner {
         tailscaleHttpsPort: servePort,
         assetArchitecture: bootstrap.assetArchitecture,
       });
-      const result = await runProcess(
+      return this.#installWithRecovery(ssh, {
+        transport,
+        publicHost,
+        tailscaleHttpsPort: servePort,
+        requiredVersion: this.appVersion,
+      }, preflight, onLine, () => runProcess(
         this.spawn,
         'ssh',
         sshArguments(ssh, this.knownHostsPath, remote),
         { input: bootstrap.bytes, timeoutMs: INSTALL_TIMEOUT_MS, onLine },
-      );
-      return { ...parseProvisionReceipt(result.stdout), preflight };
+      ));
     }
     const installer = await fs.readFile(this.installerPath);
     if (!installer.length || installer.length > 2 * 1024 * 1024) throw new Error('Cloud installer is missing or invalid');
@@ -374,13 +550,16 @@ export class CloudProvisioner {
       publicHost,
       tailscaleHttpsPort: servePort,
     });
-    const result = await runProcess(
+    return this.#installWithRecovery(ssh, {
+      transport,
+      publicHost,
+      tailscaleHttpsPort: servePort,
+    }, preflight, onLine, () => runProcess(
       this.spawn,
       'ssh',
       sshArguments(ssh, this.knownHostsPath, remote),
       { input: installer, timeoutMs: INSTALL_TIMEOUT_MS, onLine },
-    );
-    return { ...parseProvisionReceipt(result.stdout), preflight };
+    ));
   }
 
   async verify(sshConfig, { onLine = () => {} } = {}) {
@@ -409,7 +588,10 @@ export const __test = {
   bootstrapArchitecture,
   bundledInstallRemoteCommand,
   existingInstallRemoteCommand,
+  existingMacosInstallRemoteCommand,
   installRemoteCommand,
   parseProvisionReceipt,
+  retryTransientSsh,
   runProcess,
+  transientSshFailure,
 };

@@ -26,7 +26,7 @@
     "dist:linux": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --linux AppImage deb --publish never",
     "dist:linux:x64": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --linux AppImage deb --x64 --publish never",
     "dist:linux:arm64": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --linux AppImage deb --arm64 --publish never",
-    "test:cloud": "node --test tests/desktop-cloud.test.mjs tests/desktop-cloud-protocol.test.mjs tests/desktop-provider-auth.test.mjs tests/desktop-app-servers.test.mjs tests/desktop-app-server-live.test.mjs && npm --prefix cloud test",
+    "test:cloud": "node --test tests/desktop-cloud.test.mjs tests/desktop-cloud-protocol.test.mjs tests/desktop-cloud-client-reliability.test.mjs tests/desktop-cloud-connection-reliability.test.mjs tests/desktop-cloud-handoff-reliability.test.mjs tests/desktop-cloud-provisioner-recovery.test.mjs tests/desktop-provider-auth.test.mjs tests/desktop-app-servers.test.mjs tests/desktop-app-server-live.test.mjs && npm --prefix cloud test",
     "check:cloud": "node --check desktop/cloud-*.mjs && npm --prefix cloud run check"
   },
   "dependencies": {

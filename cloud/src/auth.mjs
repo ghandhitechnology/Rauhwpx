@@ -13,7 +13,12 @@ import { CloudError } from './protocol.mjs';
 const ACCESS_TTL_MS = 15 * 60 * 1000;
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PAIRING_TTL_MS = 10 * 60 * 1000;
-const ROTATION_RETRY_GRACE_MS = 30 * 1000;
+const PAIRING_RETRY_GRACE_MS = 2 * 60 * 1000;
+// The desktop may spend up to four 10-second request deadlines plus backoff
+// retrying the same refresh token after a committed response is lost. Keep the
+// sealed receipt comfortably beyond that horizon so a slow network retry is
+// not mistaken for credential theft and used to revoke the device family.
+const ROTATION_RETRY_GRACE_MS = 2 * 60 * 1000;
 const LAST_SEEN_WRITE_INTERVAL_MS = 60 * 1000;
 const BOOTSTRAP_CONSUMED_KEY = 'auth.bootstrap.consumed';
 
@@ -97,6 +102,37 @@ export class AuthService {
     }
   }
 
+  #pairingReceiptAad(requestId, codeSeek, deviceName) {
+    return Buffer.from(`${requestId}:${Buffer.from(codeSeek).toString('hex')}:${deviceName}`);
+  }
+
+  #sealPairingReceipt(requestId, codeSeek, deviceName, tokens) {
+    const nonce = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', this.retryKey, nonce);
+    cipher.setAAD(this.#pairingReceiptAad(requestId, codeSeek, deviceName));
+    const ciphertext = Buffer.concat([cipher.update(JSON.stringify(tokens)), cipher.final()]);
+    return { nonce, ciphertext, authTag: cipher.getAuthTag() };
+  }
+
+  #openPairingReceipt(row, requestId, codeSeek, deviceName) {
+    if (!sameBuffer(row.code_seek, codeSeek) || row.device_name !== deviceName) {
+      throw new CloudError(
+        'PAIRING_REQUEST_CONFLICT',
+        'Pairing request id was already used with different details',
+        409,
+      );
+    }
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', this.retryKey, row.nonce);
+      decipher.setAAD(this.#pairingReceiptAad(requestId, codeSeek, deviceName));
+      decipher.setAuthTag(row.auth_tag);
+      return JSON.parse(Buffer.concat([decipher.update(row.ciphertext), decipher.final()]).toString('utf8'));
+    } catch (error) {
+      if (error instanceof CloudError) throw error;
+      throw new CloudError('PAIRING_RETRY_UNAVAILABLE', 'Pairing retry receipt could not be opened', 401);
+    }
+  }
+
   createPairingCode({ createdByDeviceId = null, intendedName = null } = {}) {
     const now = this.now();
     const code = pairingCode();
@@ -134,9 +170,21 @@ export class AuthService {
     });
   }
 
-  redeemPairingCode({ code, deviceName }) {
+  redeemPairingCode({ code, deviceName, requestId = null }) {
     const now = this.now();
     const seek = pairingCodeSeek(this.retryKey, code);
+    if (requestId) {
+      const receipt = this.database.prepare(`
+        SELECT * FROM pairing_redemption_receipts WHERE request_id = ?
+      `).get(requestId);
+      if (receipt) {
+        if (receipt.retry_until <= now) {
+          this.database.prepare('DELETE FROM pairing_redemption_receipts WHERE request_id = ?').run(requestId);
+        } else {
+          return this.#openPairingReceipt(receipt, requestId, seek, deviceName);
+        }
+      }
+    }
     // The seek match avoids argon2 work on misses; legacy rows without a seek
     // value keep the original hash comparison until they expire.
     const candidates = this.database.prepare(`
@@ -159,7 +207,19 @@ export class AuthService {
       `).run(deviceId, deviceName, now, now);
       this.database.prepare('INSERT OR IGNORE INTO metadata(key, value) VALUES (?, ?)')
         .run(BOOTSTRAP_CONSUMED_KEY, '1');
-      return this.#issueTokenFamily(deviceId, now);
+      const tokens = this.#issueTokenFamily(deviceId, now);
+      if (requestId) {
+        const receipt = this.#sealPairingReceipt(requestId, seek, deviceName, tokens);
+        this.database.prepare(`
+          INSERT INTO pairing_redemption_receipts(
+            request_id, code_seek, device_name, nonce, ciphertext, auth_tag, retry_until, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          requestId, seek, deviceName, receipt.nonce, receipt.ciphertext, receipt.authTag,
+          now + PAIRING_RETRY_GRACE_MS, now,
+        );
+      }
+      return tokens;
     });
   }
 
@@ -298,6 +358,7 @@ export class AuthService {
     const now = this.now();
     this.database.prepare('DELETE FROM access_tokens WHERE expires_at <= ?').run(now);
     this.database.prepare('DELETE FROM pairing_codes WHERE expires_at <= ?').run(now);
+    this.database.prepare('DELETE FROM pairing_redemption_receipts WHERE retry_until <= ?').run(now);
     this.database.prepare('DELETE FROM refresh_rotation_receipts WHERE retry_until <= ?').run(now);
     this.database.prepare('DELETE FROM token_families WHERE expires_at <= ?').run(now);
   }

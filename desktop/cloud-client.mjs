@@ -6,6 +6,7 @@ const PROFILE_SECRET = 'cloud.profile';
 const REFRESH_SECRET = 'cloud.refresh';
 const DEVICE_SECRET = 'cloud.device';
 const SERVER_MODE_SECRET = 'cloud.server-mode';
+const PENDING_APP_SANDBOX_SECRET = 'cloud.pending-app-sandbox';
 const PAIRING_CODE_RE = /^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const SERVER_KEY_RE = /^ed25519:[A-Za-z0-9_-]{59}$/;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
@@ -16,6 +17,27 @@ const SSE_PROOF_VERSION = 'RAUHWpx-sse-event-v1';
 const SSE_STREAM_PROTOCOL = 'rauhwpx-sse-v1';
 const SSE_STREAM_DIGEST = digest(Buffer.from(SSE_STREAM_PROTOCOL));
 const RESPONSE_PROOF_CONTEXT = Symbol('rauhwpx-response-proof-context');
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_RETRY_BASE_MS = 200;
+const SAFE_REQUEST_ATTEMPTS = 4;
+const TRANSFER_READINESS_ATTEMPTS = 5;
+const UPLOAD_REQUEST_ATTEMPTS = 5;
+const MAX_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+const TRANSIENT_TRANSPORT_CODES = new Set([
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETDOWN',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'EPIPE',
+  'ETIMEDOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
 
 export class CloudHttpError extends Error {
   constructor(message, { status = 0, code = '', details = null, retryable = null } = {}) {
@@ -26,6 +48,132 @@ export class CloudHttpError extends Error {
     this.details = details;
     this.retryable = typeof retryable === 'boolean' ? retryable : null;
   }
+}
+
+function retryableHttpStatus(status) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function boundedAttempts(value, fallback) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 10 ? parsed : fallback;
+}
+
+function normalizePendingAppSandbox(raw) {
+  const record = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  const providerId = String(record?.providerId ?? '');
+  const sandbox = record?.sandbox;
+  if (record?.version !== 1
+    || !/^[a-z][a-z0-9-]{1,31}$/.test(providerId)
+    || !sandbox || typeof sandbox !== 'object'
+    || sandbox.providerId !== providerId
+    || typeof sandbox.sandboxId !== 'string' || !sandbox.sandboxId.trim()) {
+    throw new CloudHttpError('Pending app sandbox journal is invalid', {
+      code: 'SANDBOX_JOURNAL_INVALID',
+      retryable: false,
+    });
+  }
+  return {
+    version: 1,
+    providerId,
+    sandbox: { ...sandbox },
+    createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
+  };
+}
+
+function transportErrorCode(error) {
+  let current = error;
+  for (let depth = 0; current && depth < 6; depth += 1) {
+    const code = String(current.code ?? '').toUpperCase();
+    if (code) return code;
+    current = current.cause;
+  }
+  return '';
+}
+
+function normalizeTransportError(error) {
+  if (error instanceof CloudHttpError) return error;
+  const code = transportErrorCode(error);
+  const message = String(error?.message ?? error ?? '').trim();
+  const typeErrorTransportMessage = error?.name === 'TypeError'
+    && /^(?:fetch failed|failed to fetch|networkerror|terminated)$/i.test(message);
+  if (!TRANSIENT_TRANSPORT_CODES.has(code) && !typeErrorTransportMessage) return error;
+  const normalized = new CloudHttpError(message || 'Cloud transport failed', {
+    code: code || 'CLOUD_TRANSPORT_ERROR',
+    retryable: true,
+    details: code ? { causeCode: code } : null,
+  });
+  normalized.cause = error;
+  return normalized;
+}
+
+function abortReason(signal, fallback) {
+  return signal?.reason ?? fallback ?? new DOMException('The operation was aborted', 'AbortError');
+}
+
+async function retryDelay(attempt, { baseMs = DEFAULT_RETRY_BASE_MS, signal } = {}) {
+  if (signal?.aborted) throw abortReason(signal);
+  const normalizedBase = Math.max(0, Math.min(Number(baseMs) || 0, 10_000));
+  const waitMs = Math.min(5_000, normalizedBase * (2 ** Math.max(0, attempt - 1)));
+  if (waitMs === 0) {
+    await Promise.resolve();
+    if (signal?.aborted) throw abortReason(signal);
+    return;
+  }
+  try {
+    await delay(waitMs, undefined, { signal });
+  } catch (error) {
+    if (signal?.aborted) throw abortReason(signal, error);
+    throw error;
+  }
+}
+
+async function boundedResponseBytes(response, maximum = Infinity, { timeoutMs = 0 } = {}) {
+  const limit = Number.isFinite(maximum) && maximum >= 0 ? maximum : Infinity;
+  const declaredHeader = response.headers.get('content-length');
+  const declared = declaredHeader === null ? NaN : Number(declaredHeader);
+  if (Number.isFinite(declared) && declared > limit) {
+    throw new CloudHttpError('Cloud response is too large', {
+      status: response.status,
+      code: 'CLOUD_RESPONSE_TOO_LARGE',
+      retryable: false,
+    });
+  }
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  let timedOut = false;
+  const timeoutError = new CloudHttpError('Cloud response body timed out', {
+    code: 'ETIMEDOUT',
+    retryable: true,
+  });
+  const timeout = timeoutMs > 0 ? setTimeout(() => {
+    timedOut = true;
+    void reader.cancel(timeoutError).catch(() => {});
+  }, timeoutMs) : null;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (timedOut) throw timeoutError;
+      if (done) break;
+      const chunk = Buffer.from(value);
+      size += chunk.length;
+      if (size > limit) {
+        await reader.cancel().catch(() => {});
+        throw new CloudHttpError('Cloud response is too large', {
+          status: response.status,
+          code: 'CLOUD_RESPONSE_TOO_LARGE',
+          retryable: false,
+        });
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, size);
 }
 
 function digest(bytes) {
@@ -109,6 +257,7 @@ function verifyServerPin(profile, response, body = null) {
     throw new CloudHttpError('Cloud server identity does not match the paired VPS', {
       status: response.status,
       code: 'SERVER_IDENTITY_MISMATCH',
+      retryable: retryableHttpStatus(response.status),
     });
   }
 }
@@ -147,6 +296,7 @@ function verifyResponseProof(profile, response, context) {
     throw new CloudHttpError('Cloud response is missing a valid identity proof', {
       status: response.status,
       code: 'SERVER_PROOF_MISSING',
+      retryable: retryableHttpStatus(response.status),
     });
   }
   const canonical = canonicalResponse({ ...context, status: response.status, digest: contentDigest });
@@ -154,6 +304,7 @@ function verifyResponseProof(profile, response, context) {
     throw new CloudHttpError('Cloud response identity proof is invalid', {
       status: response.status,
       code: 'SERVER_PROOF_INVALID',
+      retryable: retryableHttpStatus(response.status),
     });
   }
   return contentDigest;
@@ -332,7 +483,12 @@ export class CloudClient {
     return Boolean(await this.#vault.get(REFRESH_SECRET));
   }
 
-  async assertTransferReady() {
+  async assertTransferReady({
+    retryAttempts = TRANSFER_READINESS_ATTEMPTS,
+    retryBaseMs = DEFAULT_RETRY_BASE_MS,
+    timeoutMs = 10_000,
+    signal,
+  } = {}) {
     let profile;
     try {
       profile = await this.#requiredProfile();
@@ -361,7 +517,12 @@ export class CloudClient {
         retryable: false,
       });
     }
-    const health = await this.health(profile);
+    const health = await this.health(profile, {
+      retryAttempts,
+      retryBaseMs,
+      timeoutMs,
+      signal,
+    });
     if (health?.protocolVersion !== 1) {
       throw new CloudHttpError('Cloud server protocol is not compatible with this app', {
         code: 'CLOUD_PROTOCOL_INCOMPATIBLE',
@@ -382,6 +543,27 @@ export class CloudClient {
     if (!CLOUD_SERVER_MODES.includes(mode)) throw new CloudHttpError('Unsupported cloud server mode');
     await this.#vault.set(SERVER_MODE_SECRET, mode);
     return mode;
+  }
+
+  async loadPendingAppSandbox() {
+    const stored = await this.#vault.get(PENDING_APP_SANDBOX_SECRET);
+    return stored ? normalizePendingAppSandbox(stored) : null;
+  }
+
+  async savePendingAppSandbox({ providerId, sandbox, createdAt = new Date().toISOString() }) {
+    const record = normalizePendingAppSandbox({
+      version: 1,
+      providerId,
+      sandbox,
+      createdAt,
+    });
+    await this.#vault.set(PENDING_APP_SANDBOX_SECRET, JSON.stringify(record));
+    return record;
+  }
+
+  async clearPendingAppSandbox() {
+    await this.#vault.delete(PENDING_APP_SANDBOX_SECRET);
+    return true;
   }
 
   /** 샌드박스를 철거할 때 프로필과 자격 증명을 함께 지운다. */
@@ -418,7 +600,16 @@ export class CloudClient {
    * SSH가 없는 앱 제공 샌드박스는 배포 시 주입한 부트스트랩 토큰으로 첫 페어링 코드를 받는다.
    * 응답은 방금 만든 nonce에 묶인 서버 서명으로 검증하므로 재생된 영수증은 통과하지 못한다.
    */
-  async bootstrapPairing({ endpoint, bootstrapToken, deviceName = '', serverPublicKey, signal } = {}) {
+  async bootstrapPairing({
+    endpoint,
+    bootstrapToken,
+    deviceName = '',
+    serverPublicKey,
+    signal,
+    retryAttempts = SAFE_REQUEST_ATTEMPTS,
+    retryBaseMs = DEFAULT_RETRY_BASE_MS,
+    timeoutMs = 10_000,
+  } = {}) {
     const normalizedEndpoint = normalizeCloudEndpoint(endpoint);
     if (!SERVER_KEY_RE.test(String(serverPublicKey ?? ''))) {
       throw new CloudHttpError('App sandbox did not present a valid server identity', {
@@ -436,6 +627,9 @@ export class CloudClient {
       headers: { authorization: `Bearer ${bootstrapToken}` },
       body: { deviceName: String(deviceName ?? '').slice(0, 120) },
       signal,
+      retryAttempts,
+      retryBaseMs,
+      timeoutMs,
     });
     if (result.serverPublicKey !== serverPublicKey) {
       throw new CloudHttpError('App sandbox identity changed during pairing', {
@@ -461,23 +655,46 @@ export class CloudClient {
     }
   }
 
-  async health(profileOverride = null) {
+  async health(profileOverride = null, options = {}) {
     const profile = profileOverride ? normalizeCloudProfile(profileOverride) : await this.#requiredProfile();
     return this.#request('/v1/health', {
       auth: false,
       expectedPin: Boolean(profile.serverPublicKey),
       profile,
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      retryAttempts: options.retryAttempts,
+      retryBaseMs: options.retryBaseMs,
     });
   }
 
-  async redeemPairingCode(code, deviceName, { profile: profileOverride = null, persist = true } = {}) {
+  async redeemPairingCode(code, deviceName, {
+    profile: profileOverride = null,
+    persist = true,
+    signal,
+    retryAttempts = SAFE_REQUEST_ATTEMPTS,
+    retryBaseMs = DEFAULT_RETRY_BASE_MS,
+    timeoutMs = 10_000,
+  } = {}) {
     const profile = profileOverride ? normalizeCloudProfile(profileOverride) : await this.#requiredProfile();
+    // The server durably binds this id to the first issued token family.  A
+    // dropped response can therefore be retried without consuming another
+    // one-time pairing code or creating another device.
+    const requestId = randomUUID();
     const result = await this.#request('/v1/pairing/redeem', {
       method: 'POST',
       auth: false,
       expectedPin: Boolean(profile.serverPublicKey),
-      body: { code: String(code ?? '').trim(), deviceName: String(deviceName ?? '').trim() },
+      body: {
+        code: String(code ?? '').trim(),
+        deviceName: String(deviceName ?? '').trim(),
+        requestId,
+      },
       profile,
+      signal,
+      retryAttempts,
+      retryBaseMs,
+      timeoutMs,
     });
     if (!validTokenBundle(result)) throw new CloudHttpError('Cloud pairing response is invalid');
     if (persist) {
@@ -662,69 +879,191 @@ export class CloudClient {
     return activated.session ?? created;
   }
 
-  async uploadBlob({ bytes, name, kind, sessionId, onProgress = () => {}, signal }) {
+  async uploadBlob({
+    bytes,
+    name,
+    kind,
+    sessionId,
+    onProgress = () => {},
+    signal,
+    retryAttempts = UPLOAD_REQUEST_ATTEMPTS,
+    retryBaseMs = DEFAULT_RETRY_BASE_MS,
+    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  }) {
     const payload = Buffer.from(bytes ?? []);
     const sha256 = digest(payload);
-    const initialized = await this.#request('/v1/uploads/init', {
+    const maximumAttempts = boundedAttempts(retryAttempts, UPLOAD_REQUEST_ATTEMPTS);
+    const initBody = { sha256, size: payload.length, name, kind, sessionId };
+    let failures = 0;
+    let reportedOffset = -1;
+
+    const retryableUploadError = (error) => error?.retryable === true || [
+      'UPLOAD_DIGEST_MISMATCH',
+      'UPLOAD_NOT_FOUND',
+      'UPLOAD_OFFSET_MISMATCH',
+    ].includes(String(error?.code ?? '').toUpperCase());
+    const recover = async (rawError) => {
+      const error = normalizeTransportError(rawError);
+      if (signal?.aborted) throw abortReason(signal, error);
+      failures += 1;
+      if (!retryableUploadError(error) || failures >= maximumAttempts) throw error;
+      await retryDelay(failures, { baseMs: retryBaseMs, signal });
+    };
+    const normalizeState = (raw) => {
+      const offset = Number(raw?.offset);
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > payload.length) {
+        throw new CloudHttpError('Cloud upload returned an invalid offset', {
+          code: 'INVALID_UPLOAD_OFFSET',
+          retryable: false,
+        });
+      }
+      const advertisedChunkSize = Number(raw?.chunkSize);
+      const chunkSize = Number.isSafeInteger(advertisedChunkSize) && advertisedChunkSize > 0
+        ? Math.min(advertisedChunkSize, MAX_UPLOAD_CHUNK_BYTES)
+        : 1024 * 1024;
+      const complete = raw?.blobExists === true || raw?.status === 'complete';
+      if (!complete && (typeof raw?.uploadId !== 'string' || !raw.uploadId)) {
+        throw new CloudHttpError('Cloud upload did not return an upload id', {
+          code: 'INVALID_UPLOAD_ID',
+          retryable: false,
+        });
+      }
+      return { raw, offset, chunkSize, complete };
+    };
+    const initializeOnce = async () => normalizeState(await this.#request('/v1/uploads/init', {
       method: 'POST',
       signal,
-      body: { sha256, size: payload.length, name, kind, sessionId },
-    });
-    if (initialized.blobExists) {
-      await onProgress({ loaded: payload.length, total: payload.length });
-      return {
-        ...initialized,
-        sha256,
-        size: payload.length,
-        blobId: initialized.blob?.id ?? sha256,
-      };
-    }
-    const chunkSize = Math.max(64 * 1024, Math.min(Number(initialized.chunkSize) || 1024 * 1024, 8 * 1024 * 1024));
-    let offset = Math.max(0, Math.min(Number(initialized.offset) || 0, payload.length));
-    let finalProgress = null;
-    while (offset < payload.length) {
-      const chunk = payload.subarray(offset, Math.min(offset + chunkSize, payload.length));
-      const progress = await this.#request(`/v1/uploads/${encodeURIComponent(initialized.uploadId)}/chunks`, {
-        method: 'POST',
-        signal,
-        headers: {
-          'content-type': 'application/octet-stream',
-          'x-upload-offset': String(offset),
-        },
-        rawBody: chunk,
-      });
-      const nextOffset = Number(progress.offset);
-      if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset || nextOffset > payload.length) {
-        throw new CloudHttpError('Cloud upload returned an invalid offset', { code: 'INVALID_UPLOAD_OFFSET' });
+      timeoutMs,
+      retryAttempts: 1,
+      body: initBody,
+    }));
+    const initialize = async () => {
+      for (;;) {
+        try {
+          return await initializeOnce();
+        } catch (error) {
+          await recover(error);
+        }
       }
-      offset = nextOffset;
-      finalProgress = progress;
-      await onProgress({ loaded: offset, total: payload.length });
-    }
-    return {
-      ...initialized,
-      sha256,
-      size: payload.length,
-      offset,
-      blobId: finalProgress?.blob?.id ?? sha256,
     };
+    const reportProgress = async (offset) => {
+      if (offset === reportedOffset) return;
+      reportedOffset = offset;
+      await onProgress({ loaded: offset, total: payload.length });
+    };
+
+    let state = await initialize();
+    let durableOffset = state.complete ? payload.length : state.offset;
+    failures = 0;
+    if (state.offset > 0 || state.complete) await reportProgress(state.complete ? payload.length : state.offset);
+    for (;;) {
+      if (state.complete) {
+        await reportProgress(payload.length);
+        return {
+          ...state.raw,
+          sha256,
+          size: payload.length,
+          offset: payload.length,
+          blobId: state.raw.blob?.id ?? sha256,
+        };
+      }
+      if (state.offset >= payload.length) {
+        throw new CloudHttpError('Cloud upload completed without a stored blob', {
+          code: 'INVALID_UPLOAD_STATE',
+          retryable: false,
+        });
+      }
+      const offset = state.offset;
+      const chunk = payload.subarray(offset, Math.min(offset + state.chunkSize, payload.length));
+      try {
+        const progress = await this.#request(
+          `/v1/uploads/${encodeURIComponent(state.raw.uploadId)}/chunks`,
+          {
+            method: 'POST',
+            signal,
+            timeoutMs,
+            retryAttempts: 1,
+            headers: {
+              'content-type': 'application/octet-stream',
+              'x-upload-offset': String(offset),
+            },
+            rawBody: chunk,
+          },
+        );
+        const next = normalizeState(progress);
+        if (next.offset <= offset) {
+          throw new CloudHttpError('Cloud upload returned an invalid offset', {
+            code: 'INVALID_UPLOAD_OFFSET',
+            retryable: false,
+          });
+        }
+        state = next;
+        durableOffset = state.complete ? payload.length : state.offset;
+        failures = 0;
+        await reportProgress(state.complete ? payload.length : state.offset);
+      } catch (error) {
+        let terminalError = null;
+        try {
+          await recover(error);
+        } catch (caught) {
+          terminalError = caught;
+        }
+        if (terminalError) {
+          // The final allowed chunk may have committed before its response was
+          // lost. One last authoritative init is a read/reconcile operation,
+          // not a replay; accept it only when it proves durable progress.
+          if (retryableUploadError(terminalError) && !signal?.aborted) {
+            try {
+              const reconciled = await initializeOnce();
+              const reconciledOffset = reconciled.complete ? payload.length : reconciled.offset;
+              if (reconciledOffset > durableOffset) {
+                state = reconciled;
+                durableOffset = reconciledOffset;
+                failures = 0;
+                await reportProgress(reconciledOffset);
+                continue;
+              }
+            } catch {
+              // Preserve the original ambiguous chunk failure when the final
+              // reconciliation itself is unavailable or proves no progress.
+            }
+          }
+          throw terminalError;
+        }
+        // A chunk POST is ambiguous when its response is lost. Re-running init
+        // asks the server for its durable offset instead of blindly duplicating
+        // a write that may already have committed.
+        state = await initialize();
+        const reconciledOffset = state.complete ? payload.length : state.offset;
+        if (reconciledOffset > durableOffset) {
+          durableOffset = reconciledOffset;
+          failures = 0;
+        }
+        if (state.offset > 0 || state.complete) {
+          await reportProgress(state.complete ? payload.length : state.offset);
+        }
+      }
+    }
   }
 
-  async session(sessionId) {
-    return this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}`);
+  async session(sessionId, options = {}) {
+    return this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}`, options);
   }
 
-  async sessions() {
-    const result = await this.#request('/v1/sessions');
+  async sessions(options = {}) {
+    const result = await this.#request('/v1/sessions', options);
     return Array.isArray(result.sessions) ? result.sessions : [];
   }
 
-  async takeoverState(sessionId) {
-    return this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}/takeover`);
+  async takeoverState(sessionId, options = {}) {
+    return this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}/takeover`, options);
   }
 
-  async downloadTimeline(sessionId) {
-    const response = await this.#rawRequest(`/v1/sessions/${encodeURIComponent(sessionId)}/timeline`);
+  async downloadTimeline(sessionId, options = {}) {
+    const response = await this.#rawRequest(`/v1/sessions/${encodeURIComponent(sessionId)}/timeline`, {
+      ...options,
+      maxResponseBytes: MAX_TIMELINE_BYTES,
+    });
     const declared = Number(response.headers.get('content-length'));
     if (Number.isFinite(declared) && declared > MAX_TIMELINE_BYTES) {
       throw new CloudHttpError('Cloud timeline exceeds 100 MiB');
@@ -758,8 +1097,11 @@ export class CloudClient {
     };
   }
 
-  async downloadCheckpoint(sessionId) {
-    const response = await this.#rawRequest(`/v1/sessions/${encodeURIComponent(sessionId)}/checkpoint`);
+  async downloadCheckpoint(sessionId, options = {}) {
+    const response = await this.#rawRequest(`/v1/sessions/${encodeURIComponent(sessionId)}/checkpoint`, {
+      ...options,
+      maxResponseBytes: MAX_RESULT_BYTES,
+    });
     const declared = Number(response.headers.get('content-length'));
     if (Number.isFinite(declared) && declared > MAX_RESULT_BYTES) {
       throw new CloudHttpError('Cloud checkpoint exceeds 64 MiB');
@@ -791,14 +1133,29 @@ export class CloudClient {
     return this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}/commands`, {
       method: 'POST',
       signal: options.signal,
+      retryAttempts: options.retryAttempts ?? SAFE_REQUEST_ATTEMPTS,
+      retryBaseMs: options.retryBaseMs,
+      timeoutMs: options.timeoutMs ?? 10_000,
       body: { commandId, type, payload },
     });
   }
 
-  async readEvents(sessionId, after = 0, { signal, onEvent = () => {} } = {}) {
+  async readEvents(sessionId, after = 0, {
+    signal,
+    onEvent = () => {},
+    nonStreamTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  } = {}) {
     const response = await this.#rawRequest(
       `/v1/sessions/${encodeURIComponent(sessionId)}/events?after=${encodeURIComponent(after)}`,
-      { headers: { accept: 'text/event-stream' }, signal, timeoutMs: 0 },
+      {
+        headers: { accept: 'text/event-stream' },
+        signal,
+        timeoutMs: 0,
+        retryAttempts: 1,
+        stream: true,
+        maxResponseBytes: MAX_JSON_BYTES,
+        nonStreamTimeoutMs,
+      },
     );
     const profile = await this.#requiredProfile();
     const proofContext = response[RESPONSE_PROOF_CONTEXT];
@@ -868,8 +1225,11 @@ export class CloudClient {
     return sequence;
   }
 
-  async downloadResult(resultId) {
-    const response = await this.#rawRequest(`/v1/results/${encodeURIComponent(resultId)}`);
+  async downloadResult(resultId, options = {}) {
+    const response = await this.#rawRequest(`/v1/results/${encodeURIComponent(resultId)}`, {
+      ...options,
+      maxResponseBytes: MAX_RESULT_BYTES,
+    });
     const declared = Number(response.headers.get('content-length'));
     if (Number.isFinite(declared) && declared > MAX_RESULT_BYTES) {
       throw new CloudHttpError('Cloud result exceeds 64 MiB');
@@ -885,9 +1245,13 @@ export class CloudClient {
     return { bytes, sha256, size: bytes.length, name };
   }
 
-  async confirmResultDownloaded(resultId, { sha256, size }) {
+  async confirmResultDownloaded(resultId, { sha256, size }, options = {}) {
     return this.#request(`/v1/results/${encodeURIComponent(resultId)}/download-confirmed`, {
       method: 'POST',
+      signal: options.signal,
+      retryAttempts: options.retryAttempts ?? 1,
+      retryBaseMs: options.retryBaseMs,
+      timeoutMs: options.timeoutMs,
       body: { sha256, size },
     });
   }
@@ -931,6 +1295,8 @@ export class CloudClient {
           auth: false,
           body: { refreshToken },
           retryAuth: false,
+          retryAttempts: SAFE_REQUEST_ATTEMPTS,
+          timeoutMs: 10_000,
         });
         if (!validTokenBundle(tokens)) throw new CloudHttpError('Cloud token response is invalid');
         return this.#withCredentialLock(async () => {
@@ -948,7 +1314,10 @@ export class CloudClient {
   }
 
   async #request(pathname, options = {}) {
-    const response = await this.#rawRequest(pathname, options);
+    const response = await this.#rawRequest(pathname, {
+      ...options,
+      maxResponseBytes: options.maxResponseBytes ?? MAX_JSON_BYTES,
+    });
     const body = await responseJson(response);
     const profile = options.profile ?? await this.#requiredProfile();
     verifyServerPin(profile, response, body);
@@ -956,10 +1325,35 @@ export class CloudClient {
   }
 
   async #rawRequest(pathname, options = {}) {
+    const method = String(options.method ?? 'GET').toUpperCase();
+    const defaultAttempts = method === 'GET' && options.stream !== true ? SAFE_REQUEST_ATTEMPTS : 1;
+    const maximumAttempts = boundedAttempts(options.retryAttempts, defaultAttempts);
+    let attempt = 0;
+    for (;;) {
+      try {
+        return await this.#rawRequestOnce(pathname, options);
+      } catch (rawError) {
+        const error = normalizeTransportError(rawError);
+        if (options.signal?.aborted) throw abortReason(options.signal, error);
+        attempt += 1;
+        if (error?.retryable !== true || attempt >= maximumAttempts) throw error;
+        await retryDelay(attempt, { baseMs: options.retryBaseMs, signal: options.signal });
+      }
+    }
+  }
+
+  async #rawRequestOnce(pathname, options = {}) {
+    if (options.signal?.aborted) throw abortReason(options.signal);
     const profile = options.profile ?? await this.#requiredProfile();
     const auth = options.auth !== false;
     const headers = { ...(options.headers ?? {}) };
     const method = String(options.method ?? 'GET').toUpperCase();
+    if (auth) headers.authorization = `Bearer ${await this.#ensureAccessToken()}`;
+    let body = options.rawBody;
+    if (body == null && options.body != null) {
+      headers['content-type'] = 'application/json';
+      body = JSON.stringify(options.body);
+    }
     const lease = this.#transport
       ? await this.#transport.acquire(profile, { signal: options.signal })
       : { baseUrl: profile.endpoint, release() {} };
@@ -971,24 +1365,23 @@ export class CloudClient {
       pathAndQuery: `${parsedRequestUrl.pathname}${parsedRequestUrl.search}`,
     } : null;
     if (proofContext) headers['x-rauhwpx-request-nonce'] = proofContext.nonce;
-    if (auth) headers.authorization = `Bearer ${await this.#ensureAccessToken()}`;
-    let body = options.rawBody;
-    if (body == null && options.body != null) {
-      headers['content-type'] = 'application/json';
-      body = JSON.stringify(options.body);
-    }
-    const timeoutMs = options.timeoutMs ?? 30_000;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     const controller = timeoutMs > 0 ? new AbortController() : null;
     const abort = controller ? () => controller.abort(options.signal?.reason) : null;
     if (abort) {
       options.signal?.addEventListener('abort', abort, { once: true });
       if (options.signal?.aborted) abort();
     }
+    const timeoutError = new CloudHttpError('Cloud request timed out', {
+      code: 'ETIMEDOUT',
+      retryable: true,
+    });
+    let timedOut = false;
     const timeout = timeoutMs > 0
-      ? setTimeout(() => controller.abort(new CloudHttpError('Cloud request timed out', {
-        code: 'ETIMEDOUT',
-        retryable: true,
-      })), timeoutMs)
+      ? setTimeout(() => {
+        timedOut = true;
+        controller.abort(timeoutError);
+      }, timeoutMs)
       : null;
     let response;
     try {
@@ -1002,33 +1395,46 @@ export class CloudClient {
         signal: controller?.signal ?? options.signal,
         cache: 'no-store',
       });
+      const expectedDigest = proofContext ? verifyResponseProof(profile, response, proofContext) : null;
+      const isEventStream = options.stream === true
+        && response.headers.get('content-type')?.toLowerCase().startsWith('text/event-stream');
+      if (!isEventStream) {
+        const bytes = await boundedResponseBytes(response, options.maxResponseBytes, {
+          // Real SSE streams are intentionally unbounded in time. If a proxy
+          // serves a non-streaming error body instead, bound that body just like
+          // every ordinary control response.
+          timeoutMs: options.stream === true && timeoutMs === 0
+            ? options.nonStreamTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
+            : 0,
+        });
+        if (proofContext && digest(bytes) !== expectedDigest) {
+          throw new CloudHttpError('Cloud response body failed identity verification', {
+            status: response.status,
+            code: 'SERVER_BODY_TAMPERED',
+            retryable: false,
+          });
+        }
+        response = new Response(bytes.length ? bytes : null, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      }
+      if (proofContext) Object.defineProperty(response, RESPONSE_PROOF_CONTEXT, { value: proofContext });
+    } catch (rawError) {
+      if (options.signal?.aborted) throw abortReason(options.signal, rawError);
+      if (timedOut) throw timeoutError;
+      throw normalizeTransportError(rawError);
     } finally {
       if (timeout) clearTimeout(timeout);
       if (abort) options.signal?.removeEventListener('abort', abort);
       lease.release();
     }
-    const expectedDigest = proofContext ? verifyResponseProof(profile, response, proofContext) : null;
-    const isEventStream = response.headers.get('content-type')?.toLowerCase().startsWith('text/event-stream');
-    if (proofContext && !isEventStream) {
-      const bytes = Buffer.from(await response.arrayBuffer());
-      if (digest(bytes) !== expectedDigest) {
-        throw new CloudHttpError('Cloud response body failed identity verification', {
-          status: response.status,
-          code: 'SERVER_BODY_TAMPERED',
-        });
-      }
-      response = new Response(bytes.length ? bytes : null, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
-    }
-    if (proofContext) Object.defineProperty(response, RESPONSE_PROOF_CONTEXT, { value: proofContext });
     if (response.status === 401 && auth && options.retryAuth !== false) {
       this.#accessToken = '';
       this.#accessExpiresAt = 0;
       await this.#ensureAccessToken();
-      return this.#rawRequest(pathname, { ...options, retryAuth: false });
+      return this.#rawRequestOnce(pathname, { ...options, retryAuth: false });
     }
     if (!response.ok) {
       const payload = await responseJson(response).catch(() => ({}));
@@ -1037,6 +1443,9 @@ export class CloudClient {
         status: response.status,
         code: cloudError.code,
         details: cloudError.details,
+        retryable: typeof cloudError.retryable === 'boolean'
+          ? cloudError.retryable
+          : retryableHttpStatus(response.status),
       });
     }
     return response;

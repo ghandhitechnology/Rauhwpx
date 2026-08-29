@@ -521,6 +521,111 @@ test('worker API accepts only the session worker token', async (t) => {
   assert.equal(takeover.takeover.boundary.timeline.blobId, timeline.id);
 });
 
+test('worker result retry survives a lost commit response and immediate origin purge', async (t) => {
+  const { base, auth, blobStore, sessionStore, database } = await fixture(t, { workerOnly: true });
+  const tokens = auth.redeemPairingCode({
+    code: auth.createPairingCode().code,
+    deviceName: 'Origin',
+  });
+  sessionStore.setProviderStatus('codex', { available: true, version: 'codex 1' });
+  const source = Buffer.from('source');
+  const sourceUpload = await blobStore.initUpload({
+    deviceId: tokens.device.id,
+    sha256: createHash('sha256').update(source).digest('hex'),
+    size: source.length,
+    name: 'source.hwpx',
+    kind: 'document',
+  });
+  const document = (await blobStore.appendChunk({
+    uploadId: sourceUpload.uploadId,
+    deviceId: tokens.device.id,
+    offset: 0,
+    bytes: source,
+  })).blob;
+  sessionStore.createSession(tokens.device, {
+    sessionId: 'session_result_retry_01',
+    provider: 'codex',
+    goal: 'Finish reliably',
+    originDocument: { blobId: document.id, size: document.size, name: 'source.hwpx' },
+    resources: [],
+    timeline: null,
+    limits: { maxDurationSeconds: 3600, maxTurns: 10 },
+  });
+  sessionStore.executeCommand(tokens.device, 'session_result_retry_01', {
+    commandId: 'activate_result_retry_01',
+    type: 'session.activate',
+    payload: { expectedVersion: 1 },
+  });
+  sessionStore.claimNextSession();
+  sessionStore.prepareWorker('session_result_retry_01', 'ra_wt_result_retry');
+  assert.deepEqual(sessionStore.claimFinish('session_result_retry_01'), { ready: true, messages: [] });
+
+  const resultBytes = Buffer.from('result');
+  const resultUpload = await blobStore.initUpload({
+    deviceId: tokens.device.id,
+    sessionId: 'session_result_retry_01',
+    sha256: createHash('sha256').update(resultBytes).digest('hex'),
+    size: resultBytes.length,
+    name: 'result.hwpx',
+    kind: 'result',
+  });
+  const result = (await blobStore.appendChunk({
+    uploadId: resultUpload.uploadId,
+    deviceId: tokens.device.id,
+    offset: 0,
+    bytes: resultBytes,
+  })).blob;
+
+  let attempts = 0;
+  let committedResolve;
+  const committed = new Promise((resolve) => { committedResolve = resolve; });
+  const proxy = http.createServer((clientRequest, clientResponse) => {
+    attempts += 1;
+    const upstream = http.request(new URL(clientRequest.url, base), {
+      method: clientRequest.method,
+      headers: clientRequest.headers,
+    }, (upstreamResponse) => {
+      if (attempts === 1) {
+        upstreamResponse.resume();
+        upstreamResponse.once('end', () => {
+          committedResolve();
+          clientRequest.socket.destroy();
+        });
+        return;
+      }
+      clientResponse.writeHead(upstreamResponse.statusCode, upstreamResponse.headers);
+      upstreamResponse.pipe(clientResponse);
+    });
+    upstream.once('error', (error) => clientRequest.socket.destroy(error));
+    clientRequest.pipe(upstream);
+  });
+  await new Promise((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    proxy.closeAllConnections();
+    await new Promise((resolve) => proxy.close(resolve));
+  });
+  const proxyBase = `http://127.0.0.1:${proxy.address().port}`;
+  const publish = new WorkerClient({
+    baseUrl: proxyBase,
+    token: 'ra_wt_result_retry',
+    sessionId: 'session_result_retry_01',
+  }).publishResult(result);
+  await committed;
+  assert.equal(sessionStore.getSession('session_result_retry_01').status, 'completed');
+  assert.equal(database.prepare(`
+    SELECT COUNT(*) AS count FROM worker_result_retry_receipts WHERE session_id = ?
+  `).get('session_result_retry_01').count, 1);
+  await sessionStore.confirmResultDownloaded(tokens.device, 'session_result_retry_01', {
+    sha256: result.id,
+    size: result.size,
+  });
+
+  const receipt = await publish;
+  assert.equal(receipt.status, 'purged');
+  assert.equal(attempts, 2);
+  assert.equal(sessionStore.getSession('session_result_retry_01').status, 'purged');
+});
+
 test('paired devices import provider auth before a session can be staged', async (t) => {
   const { base, auth, sessionStore, root } = await fixture(t, { withProviderAuth: true });
   const tokens = await pairOverHttp(auth, base);

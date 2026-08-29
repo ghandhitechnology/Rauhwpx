@@ -665,6 +665,79 @@ test('candidate provisioning keeps the working profile and credentials when veri
   assert.equal((await client.health()).ok, true);
 });
 
+test('concurrent self-host provisioning shares one installer and pairing operation', async () => {
+  let profile = null;
+  let paired = false;
+  let provisionCalls = 0;
+  let healthCalls = 0;
+  let pairingCalls = 0;
+  let releaseProvision;
+  const provisionReleased = new Promise((resolve) => { releaseProvision = resolve; });
+  const client = {
+    loadProfile: async () => profile,
+    isPaired: async () => paired,
+    health: async () => {
+      healthCalls += 1;
+      return { ok: true, serverPublicKey: SERVER_KEY };
+    },
+    redeemPairingCode: async () => {
+      pairingCalls += 1;
+      return {
+        credentials: {
+          accessToken: 'candidate-access',
+          refreshToken: 'candidate-refresh',
+          device: { id: 'candidate-device' },
+        },
+      };
+    },
+    activateProfile: async (candidate) => {
+      profile = candidate;
+      paired = true;
+    },
+    saveServerMode: async (mode) => mode,
+  };
+  const coordinator = new CloudCoordinator({
+    client,
+    store: { list: async () => [] },
+    provisioner: {
+      provision: async () => {
+        provisionCalls += 1;
+        await provisionReleased;
+        return {
+          endpoint: 'https://candidate.example.ts.net/rauhwpx-cloud',
+          serverPublicKey: SERVER_KEY,
+          pairingCode: 'ABCD-EFGH-JKLM',
+          tailscaleHttpsPort: 443,
+        };
+      },
+    },
+    recoveryDir: '/unused',
+  });
+  const options = {
+    installChannel: 'stable',
+    profile: {
+      name: 'Candidate VPS',
+      host: 'candidate.example.ts.net',
+      sshUser: 'cloud',
+      sshPort: 22,
+      tailscaleHttpsPort: 443,
+      auth: { kind: 'ssh-agent' },
+      transport: { kind: 'tailscale' },
+    },
+  };
+
+  const first = coordinator.provision(options);
+  const second = coordinator.provision(options);
+  releaseProvision();
+  const [firstSnapshot, secondSnapshot] = await Promise.all([first, second]);
+
+  assert.equal(provisionCalls, 1);
+  assert.equal(healthCalls, 1);
+  assert.equal(pairingCalls, 1);
+  assert.equal(firstSnapshot, secondSnapshot);
+  assert.equal(firstSnapshot.profile.connection, 'ready');
+});
+
 test('candidate pairing keeps the working profile and credentials when health verification fails', async () => {
   const candidateIdentity = generateKeyPairSync('ed25519');
   const candidateKey = `ed25519:${candidateIdentity.publicKey.export({

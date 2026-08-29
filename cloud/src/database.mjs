@@ -14,6 +14,8 @@ const migrations = [
   { version: 6, sql: readFileSync(path.join(migrationsDirectory, '006_refresh_rotation_receipts.sql'), 'utf8') },
   { version: 7, sql: readFileSync(path.join(migrationsDirectory, '007_atomic_takeover_boundaries.sql'), 'utf8') },
   { version: 8, sql: readFileSync(path.join(migrationsDirectory, '008_pairing_seek.sql'), 'utf8') },
+  { version: 9, sql: readFileSync(path.join(migrationsDirectory, '009_pairing_retry_receipts.sql'), 'utf8') },
+  { version: 10, sql: readFileSync(path.join(migrationsDirectory, '010_worker_result_retry_receipts.sql'), 'utf8') },
 ];
 
 export function transaction(database, callback) {

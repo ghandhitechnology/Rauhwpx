@@ -8,6 +8,7 @@ const COMPLETED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const SUSPENDED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const TAKEOVER_RETENTION_MS = 24 * 60 * 60 * 1000;
 const STAGED_RETENTION_MS = 24 * 60 * 60 * 1000;
+const WORKER_RESULT_RETRY_MS = 5 * 60 * 1000;
 const MUTABLE_STATES = new Set(['staged', 'queued', 'running', 'suspended']);
 
 function parseEvent(row) {
@@ -430,13 +431,24 @@ export class SessionStore {
     if (changed.changes !== 1) throw new CloudError('INVALID_SESSION_STATE', 'Session is no longer running', 409);
   }
 
-  authenticateWorker(sessionId, workerToken) {
+  authenticateWorker(sessionId, workerToken, { allowCompletedResultRetry = false } = {}) {
     const row = this.getSessionRow(sessionId);
-    if (row.status !== 'running' || !row.worker_token_hash || typeof workerToken !== 'string') {
+    const receipt = allowCompletedResultRetry
+      ? this.database.prepare(`
+        SELECT token_hash FROM worker_result_retry_receipts
+        WHERE session_id = ? AND retry_until > ?
+      `).get(sessionId, this.now())
+      : null;
+    const expectedHash = row.status === 'running'
+      ? row.worker_token_hash
+      : allowCompletedResultRetry && ['completed', 'purged'].includes(row.status)
+        ? receipt?.token_hash
+        : null;
+    if (!expectedHash || typeof workerToken !== 'string') {
       throw new CloudError('WORKER_UNAUTHORIZED', 'Worker token is invalid', 401);
     }
     const actual = createHash('sha256').update(workerToken).digest();
-    const expected = Buffer.from(row.worker_token_hash);
+    const expected = Buffer.from(expectedHash);
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
       throw new CloudError('WORKER_UNAUTHORIZED', 'Worker token is invalid', 401);
     }
@@ -903,7 +915,7 @@ export class SessionStore {
       event = this.#appendEventInTransaction(sessionId, exhausted ? 'session.suspended' : 'turn.completed', { turnsUsed, reason });
       return this.getSession(sessionId);
     });
-    this.#notify(event);
+    if (event) this.#notify(event);
     return result;
   }
 
@@ -911,28 +923,55 @@ export class SessionStore {
     if (!Number.isSafeInteger(size) || size < 1 || size > TRANSFER_LIMITS.maxDocumentBytes) {
       throw new CloudError('RESULT_TOO_LARGE', 'Result must be between 1 byte and 64 MiB', 413);
     }
-    this.#requireBlob({ blobId, size }, 'Result');
     let event;
     const result = transaction(this.database, () => {
       const row = this.getSessionRow(sessionId);
+      if (row.status === 'completed'
+        && row.result_sha256 === blobId
+        && row.result_size === size) {
+        return this.getSession(sessionId);
+      }
+      if (row.status === 'purged'
+        && row.result_sha256 === blobId
+        && row.result_size === size) {
+        const receipt = this.database.prepare(`
+          SELECT 1 FROM worker_result_retry_receipts
+          WHERE session_id = ? AND blob_sha256 = ? AND size = ? AND retry_until > ?
+        `).get(sessionId, blobId, size, this.now());
+        if (receipt) return this.getSession(sessionId);
+      }
       if (row.status !== 'running') throw new CloudError('INVALID_SESSION_STATE', 'Session cannot publish a result', 409);
       if (!row.finishing_at) throw new CloudError('FINISH_NOT_CLAIMED', 'Worker must atomically claim completion before publishing', 409);
       const queued = this.database.prepare(`
         SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND status = 'queued'
       `).get(sessionId).count;
       if (queued) throw new CloudError('PENDING_MESSAGES', 'Session has pending messages', 409, { count: queued });
+      this.#requireBlob({ blobId, size }, 'Result');
       const now = this.now();
       this.database.prepare(`
         UPDATE sessions SET status = 'completed', state_version = state_version + 1, result_sha256 = ?, result_size = ?,
-          completed_at = ?, expires_at = ?, finishing_at = NULL, sandbox_id = NULL, worker_token_hash = NULL,
+          completed_at = ?, expires_at = ?, finishing_at = NULL, sandbox_id = NULL,
           worker_heartbeat_at = NULL, takeover_requested_at = NULL, takeover_requested_by = NULL,
           updated_at = ? WHERE id = ?
       `).run(blobId, size, now, now + COMPLETED_RETENTION_MS, now, sessionId);
+      if (row.worker_token_hash) {
+        this.database.prepare(`
+          INSERT INTO worker_result_retry_receipts(
+            session_id, token_hash, blob_sha256, size, retry_until, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(session_id) DO UPDATE SET
+            token_hash = excluded.token_hash,
+            blob_sha256 = excluded.blob_sha256,
+            size = excluded.size,
+            retry_until = excluded.retry_until,
+            created_at = excluded.created_at
+        `).run(sessionId, row.worker_token_hash, blobId, size, now + WORKER_RESULT_RETRY_MS, now);
+      }
       this.database.prepare('UPDATE blobs SET ref_count = ref_count + 1 WHERE sha256 = ?').run(blobId);
       event = this.#appendEventInTransaction(sessionId, 'session.completed', { status: 'completed', result: { sha256: blobId, size } });
       return this.getSession(sessionId);
     });
-    this.#notify(event);
+    if (event) this.#notify(event);
     return result;
   }
 
@@ -1032,6 +1071,7 @@ export class SessionStore {
   }
 
   async expireRetainedSessions() {
+    this.database.prepare('DELETE FROM worker_result_retry_receipts WHERE retry_until <= ?').run(this.now());
     const rows = this.database.prepare(`
       SELECT id FROM sessions
       WHERE status IN ('staged', 'suspended', 'completed', 'cancelled', 'failed') AND expires_at <= ?

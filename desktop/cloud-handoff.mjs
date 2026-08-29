@@ -87,6 +87,7 @@ export class CloudHandoffStore {
   #records = new Map();
   #takeoverReceipts = new Map();
   #loaded = false;
+  #loadPromise = null;
   #writeChain = Promise.resolve();
   #persistTimer = null;
 
@@ -96,9 +97,17 @@ export class CloudHandoffStore {
     this.#payloadRoot = path.join(path.dirname(filePath), 'pending-payloads');
   }
 
-  async load() {
-    if (this.#loaded) return this.list();
-    this.#loaded = true;
+  load() {
+    if (this.#loadPromise) return this.#loadPromise;
+    if (this.#loaded) return Promise.resolve(this.#listedRecords());
+    const operation = this.#load();
+    this.#loadPromise = operation;
+    return operation.finally(() => {
+      if (this.#loadPromise === operation) this.#loadPromise = null;
+    });
+  }
+
+  async #load() {
     try {
       const parsed = JSON.parse(await fs.readFile(this.#filePath, 'utf8'));
       if (parsed?.version !== 1 || !Array.isArray(parsed.records)) throw new Error('Unsupported handoff store');
@@ -156,7 +165,8 @@ export class CloudHandoffStore {
         await fs.rename(this.#filePath, corrupt).catch(() => {});
       }
     }
-    return this.list();
+    this.#loaded = true;
+    return this.#listedRecords();
   }
 
   async create({
@@ -316,7 +326,12 @@ export class CloudHandoffStore {
   }
 
   async list({ activeOnly = false } = {}) {
-    if (!this.#loaded) await this.load();
+    if (this.#loadPromise) await this.#loadPromise;
+    else if (!this.#loaded) await this.load();
+    return this.#listedRecords({ activeOnly });
+  }
+
+  #listedRecords({ activeOnly = false } = {}) {
     return [...this.#records.values()]
       .filter((record) => !activeOnly || !TERMINAL_STATES.has(record.state))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));

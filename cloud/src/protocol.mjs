@@ -84,6 +84,11 @@ export function parsePairingRedeem(value) {
   return {
     code: string(input.code, 'code', { min: 8, max: 128 }),
     deviceName: string(input.deviceName, 'deviceName', { min: 1, max: 120 }),
+    requestId: optionalString(input.requestId, 'requestId', {
+      min: 8,
+      max: 128,
+      pattern: /^[A-Za-z0-9_-]+$/,
+    }),
   };
 }
 

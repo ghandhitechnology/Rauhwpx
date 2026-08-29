@@ -46,7 +46,7 @@ test('database migrates with WAL, FULL sync, and foreign keys', async (t) => {
     journalMode: 'wal',
     synchronous: 2,
     foreignKeys: 1,
-    migrationVersion: 8,
+    migrationVersion: 10,
   });
 });
 
@@ -86,7 +86,7 @@ test('existing version-one state upgrades without losing resources or event sequ
 
   const upgraded = openDatabase(filename);
   t.after(() => upgraded.close());
-  assert.equal(databasePragmas(upgraded).migrationVersion, 8);
+  assert.equal(databasePragmas(upgraded).migrationVersion, 10);
   assert.equal(upgraded.prepare(`SELECT next_event_seq FROM sessions WHERE id = 'session'`).get().next_event_seq, 8);
   assert.equal(upgraded.prepare(`SELECT name FROM session_resources WHERE session_id = 'session'`).get().name, 'doc.hwp');
   assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info('sessions') WHERE name IN ('execution_config_json', 'pause_requested_at', 'finishing_at')`).get().count, 3);
@@ -144,6 +144,19 @@ test('refresh crash retry survives a service restart without weakening reuse det
   );
   assert.equal(restartedAuth.authenticate(rotated.accessToken).id, initial.device.id);
   assert.throws(() => restartedAuth.refresh(initial.refreshToken), { code: 'REFRESH_TOKEN_REUSED' });
+});
+
+test('refresh retry receipt outlives the client maximum request and backoff schedule', async (t) => {
+  let clock = 1_800_000_000_000;
+  const { auth } = await fixture(t, { now: () => clock });
+  const pairing = auth.createPairingCode();
+  const initial = auth.redeemPairingCode({ code: pairing.code, deviceName: 'Slow desktop' });
+  const rotated = auth.refresh(initial.refreshToken);
+
+  clock += 119_000;
+  assert.deepEqual(auth.refresh(initial.refreshToken), rotated);
+  assert.equal(auth.authenticate(rotated.accessToken).id, initial.device.id);
+  assert.throws(() => auth.refresh(initial.refreshToken), { code: 'REFRESH_TOKEN_REUSED' });
 });
 
 test('expired uploads recycle their unique reservation and result uploads stay desktop-sized', async (t) => {

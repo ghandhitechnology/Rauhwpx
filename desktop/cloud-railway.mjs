@@ -4,7 +4,7 @@ import { AppServerError } from './cloud-app-server.mjs';
 import { sandboxCredentialVariables } from './provider-auth.mjs';
 
 export const RAILWAY_API_URL = 'https://backboard.railway.com/graphql/v2';
-export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.10';
+export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.11';
 export const SANDBOX_BASE_PATH = '/rauhwpx-cloud';
 export const SANDBOX_PORT = 7740;
 
@@ -12,6 +12,12 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 const DEPLOY_TIMEOUT_MS = 12 * 60_000;
 const HEALTH_TIMEOUT_MS = 5 * 60_000;
+const QUERY_MAX_ATTEMPTS = 4;
+const QUERY_RETRY_BASE_MS = 400;
+const QUERY_RETRY_MAX_MS = 5_000;
+const RECONCILE_MAX_ATTEMPTS = 10;
+const RECONCILE_BASE_MS = 500;
+const RECONCILE_MAX_MS = 3_000;
 
 /** Railway 배포 상태를 샌드박스 수명주기로 좁힌다. */
 const DEPLOY_STATUS_LIFECYCLE = Object.freeze({
@@ -37,6 +43,13 @@ mutation RauhwpxServiceCreate($input: ServiceCreateInput!) {
 const SERVICE_DOMAIN_CREATE = `
 mutation RauhwpxServiceDomainCreate($input: ServiceDomainCreateInput!) {
   serviceDomainCreate(input: $input) { id domain }
+}`;
+
+const SERVICE_DOMAINS = `
+query RauhwpxServiceDomains($projectId: String!, $environmentId: String!, $serviceId: String!) {
+  domains(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) {
+    serviceDomains { id domain targetPort }
+  }
 }`;
 
 const PROJECT_SERVICES = `
@@ -111,6 +124,58 @@ function notFound(errors) {
   ));
 }
 
+function transientGraphqlFailure(errors) {
+  return (Array.isArray(errors) ? errors : []).some((error) => {
+    const code = String(error?.extensions?.code ?? '').toUpperCase();
+    if (['INTERNAL_SERVER_ERROR', 'SERVICE_UNAVAILABLE', 'TIMEOUT', 'TOO_MANY_REQUESTS'].includes(code)) {
+      return true;
+    }
+    return /internal server error|rate limit|temporar(?:y|ily) unavailable|timed?\s*out|try again/i
+      .test(String(error?.message ?? ''));
+  });
+}
+
+function transientHttpStatus(status) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+async function readResponseText(response, signal) {
+  const declared = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+    throw new AppServerError('Railway API response is too large', { code: 'PROVIDER_RESPONSE_INVALID' });
+  }
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  let aborted = signal?.aborted === true;
+  const abort = () => {
+    aborted = true;
+    void reader.cancel(signal?.reason).catch(() => {});
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+  if (aborted) abort();
+  try {
+    for (;;) {
+      if (aborted) throw signal?.reason ?? new Error('Railway API request was cancelled');
+      const { done, value } = await reader.read();
+      if (aborted) throw signal?.reason ?? new Error('Railway API request was cancelled');
+      if (done) break;
+      const chunk = Buffer.from(value);
+      size += chunk.length;
+      if (size > MAX_RESPONSE_BYTES) {
+        void reader.cancel().catch(() => {});
+        throw new AppServerError('Railway API response is too large', { code: 'PROVIDER_RESPONSE_INVALID' });
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    signal?.removeEventListener('abort', abort);
+    try { reader.releaseLock(); } catch {}
+  }
+  return Buffer.concat(chunks, size).toString('utf8');
+}
+
 export function createRailwayServerProvider({
   config = railwayConfigFromEnv(),
   fetchImpl = globalThis.fetch,
@@ -119,12 +184,31 @@ export function createRailwayServerProvider({
   sleep = (ms, options) => delay(ms, undefined, options),
   deployTimeoutMs = DEPLOY_TIMEOUT_MS,
   healthTimeoutMs = HEALTH_TIMEOUT_MS,
+  requestTimeoutMs = REQUEST_TIMEOUT_MS,
+  queryMaxAttempts = QUERY_MAX_ATTEMPTS,
+  retryBaseMs = QUERY_RETRY_BASE_MS,
+  reconcileAttempts = RECONCILE_MAX_ATTEMPTS,
+  reconcileBaseMs = RECONCILE_BASE_MS,
+  random = Math.random,
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('Railway provider requires fetch');
   if (typeof probeHealth !== 'function') throw new Error('Railway provider requires a health probe');
   if (typeof acquireReceipt !== 'function') throw new Error('Railway provider requires a receipt acquirer');
 
-  async function graphql(document, variables, { signal, allowNotFound = false } = {}) {
+  const safeQueryAttempts = Math.max(1, Math.min(10, Math.trunc(Number(queryMaxAttempts)) || 1));
+  const safeReconcileAttempts = Math.max(1, Math.min(30, Math.trunc(Number(reconcileAttempts)) || 1));
+
+  function retryDelay(attempt) {
+    const base = Math.min(QUERY_RETRY_MAX_MS, Math.max(1, Number(retryBaseMs) || 1) * (2 ** attempt));
+    const jitter = Math.max(0, Math.min(1, Number(random()) || 0));
+    return Math.max(1, Math.round(base * (0.75 + (jitter * 0.5))));
+  }
+
+  function reconcileDelay(attempt) {
+    return Math.min(RECONCILE_MAX_MS, Math.max(1, Number(reconcileBaseMs) || 1) * (2 ** attempt));
+  }
+
+  async function graphqlOnce(document, variables, { signal, allowNotFound = false } = {}) {
     const missing = missingConfiguration(config);
     if (missing.length) {
       throw new AppServerError(
@@ -136,8 +220,12 @@ export function createRailwayServerProvider({
     const abort = () => controller.abort(signal?.reason);
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
-    const timer = setTimeout(() => controller.abort(new Error('Railway API request timed out')), REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => controller.abort(new Error('Railway API request timed out')),
+      Math.max(1, Number(requestTimeoutMs) || REQUEST_TIMEOUT_MS),
+    );
     let response;
+    let text;
     try {
       response = await fetchImpl(config.apiUrl, {
         method: 'POST',
@@ -150,22 +238,18 @@ export function createRailwayServerProvider({
         signal: controller.signal,
         cache: 'no-store',
       });
+      text = await readResponseText(response, controller.signal);
     } catch (error) {
-      throw new AppServerError(`Railway API is unreachable: ${error.message}`, {
+      if (signal?.aborted) throw signal.reason ?? error;
+      if (error instanceof AppServerError) throw error;
+      const reason = controller.signal.aborted ? controller.signal.reason : error;
+      throw new AppServerError(`Railway API is unreachable: ${reason?.message ?? error.message}`, {
         code: 'PROVIDER_UNREACHABLE',
-        cause: error,
+        cause: reason ?? error,
       });
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
-    }
-    const declared = Number(response.headers?.get?.('content-length'));
-    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
-      throw new AppServerError('Railway API response is too large', { code: 'PROVIDER_RESPONSE_INVALID' });
-    }
-    const text = await response.text();
-    if (Buffer.byteLength(text) > MAX_RESPONSE_BYTES) {
-      throw new AppServerError('Railway API response is too large', { code: 'PROVIDER_RESPONSE_INVALID' });
     }
     if (response.status === 401 || response.status === 403) {
       throw new AppServerError('Railway rejected the configured API token', {
@@ -175,25 +259,53 @@ export function createRailwayServerProvider({
     }
     let payload;
     try { payload = text ? JSON.parse(text) : {}; } catch {
-      throw new AppServerError('Railway API returned invalid JSON', { code: 'PROVIDER_RESPONSE_INVALID' });
+      throw new AppServerError('Railway API returned invalid JSON', {
+        code: 'PROVIDER_RESPONSE_INVALID',
+        retryable: transientHttpStatus(response.status),
+      });
     }
     if (payload.errors?.length) {
       if (allowNotFound && notFound(payload.errors)) return null;
       throw new AppServerError(graphqlMessage(payload.errors), {
         code: 'PROVIDER_REJECTED',
-        retryable: response.status >= 500,
+        retryable: transientHttpStatus(response.status) || transientGraphqlFailure(payload.errors),
       });
     }
     if (!response.ok) {
       throw new AppServerError(`Railway API failed with HTTP ${response.status}`, {
         code: 'PROVIDER_REJECTED',
-        retryable: response.status >= 500 || response.status === 429,
+        retryable: transientHttpStatus(response.status),
       });
     }
     if (!payload.data || typeof payload.data !== 'object') {
-      throw new AppServerError('Railway API returned no data', { code: 'PROVIDER_RESPONSE_INVALID' });
+      throw new AppServerError('Railway API returned no data', {
+        code: 'PROVIDER_RESPONSE_INVALID',
+        retryable: transientHttpStatus(response.status),
+      });
     }
     return payload.data;
+  }
+
+  async function graphql(document, variables, {
+    signal,
+    allowNotFound = false,
+    retryTransient = false,
+    onRetry = null,
+  } = {}) {
+    const attempts = retryTransient ? safeQueryAttempts : 1;
+    let lastError;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await graphqlOnce(document, variables, { signal, allowNotFound });
+      } catch (error) {
+        lastError = error;
+        if (signal?.aborted || error?.retryable !== true || attempt + 1 >= attempts) throw error;
+        const delayMs = retryDelay(attempt);
+        onRetry?.({ attempt: attempt + 1, delayMs, error });
+        await sleep(delayMs, { signal });
+      }
+    }
+    throw lastError;
   }
 
   function sandboxVariables(bootstrapToken, limits, credentials) {
@@ -217,21 +329,25 @@ export function createRailwayServerProvider({
     };
   }
 
-  async function latestDeployment(sandbox, { signal } = {}) {
+  async function latestDeployment(sandbox, { signal, onRetry } = {}) {
     const data = await graphql(LATEST_DEPLOYMENT, {
       projectId: sandbox.projectId || config.projectId,
       environmentId: sandbox.environmentId || config.environmentId,
       serviceId: sandbox.sandboxId,
-    }, { signal, allowNotFound: true });
+    }, { signal, allowNotFound: true, retryTransient: true, onRetry });
     if (!data) return null;
     const node = data.deployments?.edges?.[0]?.node;
     return node ? { id: trimmed(node.id), status: trimmed(node.status, 64).toUpperCase() } : null;
   }
 
-  async function deploymentFailureDetail(deployment) {
+  async function deploymentFailureDetail(deployment, { signal } = {}) {
     if (!deployment?.id) return '';
     try {
-      const data = await graphql(DEPLOYMENT_LOGS, { deploymentId: deployment.id }, { allowNotFound: true });
+      const data = await graphql(DEPLOYMENT_LOGS, { deploymentId: deployment.id }, {
+        signal,
+        allowNotFound: true,
+        retryTransient: true,
+      });
       const entries = [
         ...(Array.isArray(data?.buildLogs) ? data.buildLogs : []),
         ...(Array.isArray(data?.runtimeLogs) ? data.runtimeLogs : []),
@@ -246,26 +362,50 @@ export function createRailwayServerProvider({
   async function waitForDeployment(sandbox, { signal, onLine }) {
     const deadline = Date.now() + deployTimeoutMs;
     let attempt = 0;
+    let lastStatus = 'PENDING';
+    let lastPollError = null;
     for (;;) {
-      const deployment = await latestDeployment(sandbox, { signal });
-      const lifecycle = deployment ? DEPLOY_STATUS_LIFECYCLE[deployment.status] ?? 'provisioning' : 'provisioning';
-      if (lifecycle === 'ready') return deployment;
-      if (lifecycle === 'error') {
-        const detail = await deploymentFailureDetail(deployment);
-        throw new AppServerError(
-          detail
-            ? `Railway deployment ended in ${deployment.status}: ${detail}`
-            : `Railway deployment ended in ${deployment.status}`,
-          { code: 'SANDBOX_DEPLOY_FAILED' },
-        );
+      let deployment = null;
+      try {
+        deployment = await latestDeployment(sandbox, {
+          signal,
+          onRetry: ({ error }) => {
+            lastPollError = error;
+          },
+        });
+        lastPollError = null;
+        lastStatus = deployment?.status ?? lastStatus;
+        const lifecycle = deployment ? DEPLOY_STATUS_LIFECYCLE[deployment.status] ?? 'provisioning' : 'provisioning';
+        if (lifecycle === 'ready') return deployment;
+        if (lifecycle === 'error') {
+          const detail = await deploymentFailureDetail(deployment, { signal });
+          throw new AppServerError(
+            detail
+              ? `Railway deployment ended in ${deployment.status}: ${detail}`
+              : `Railway deployment ended in ${deployment.status}`,
+            { code: 'SANDBOX_DEPLOY_FAILED' },
+          );
+        }
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason ?? error;
+        if (error?.retryable !== true || error?.code === 'SANDBOX_DEPLOY_FAILED') throw error;
+        lastPollError = error;
       }
       if (Date.now() >= deadline) {
-        throw new AppServerError('Railway deployment did not become ready in time', {
+        const detail = lastPollError
+          ? ` Last status check failed: ${trimmed(lastPollError.message, 240)}`
+          : ` Last deployment status was ${lastStatus}.`;
+        throw new AppServerError(`Railway deployment did not become ready in time.${detail}`, {
           code: 'SANDBOX_DEPLOY_TIMEOUT',
+          cause: lastPollError ?? undefined,
         });
       }
       attempt += 1;
-      if (attempt % 4 === 1) onLine(`Waiting for the app sandbox deployment (${deployment?.status ?? 'PENDING'})`);
+      if (lastPollError) {
+        onLine(`Railway status is temporarily unavailable (${trimmed(lastPollError.message, 160)}); retrying`);
+      } else if (attempt % 4 === 1) {
+        onLine(`Waiting for the app sandbox deployment (${deployment?.status ?? lastStatus})`);
+      }
       await sleep(Math.min(10_000, 2_000 * attempt), { signal });
     }
   }
@@ -296,14 +436,103 @@ export function createRailwayServerProvider({
     }
   }
 
-  async function findServiceByName(name) {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const data = await graphql(PROJECT_SERVICES, { projectId: config.projectId });
-      const service = data.project?.services?.edges
-        ?.map((edge) => edge?.node)
-        .find((candidate) => candidate?.name === name);
-      if (service?.id) return service;
-      if (attempt < 2) await sleep(500);
+  async function findServiceByName(name, {
+    signal,
+    onLine = () => {},
+    attempts = safeReconcileAttempts,
+  } = {}) {
+    const maximumAttempts = Math.max(1, Math.min(safeReconcileAttempts, Number(attempts) || 1));
+    let lastError = null;
+    for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+      try {
+        const data = await graphql(PROJECT_SERVICES, { projectId: config.projectId }, {
+          // This reconciliation loop is already the bounded retry policy. Avoid
+          // multiplying the query retry count while Railway is fully offline.
+          signal,
+          retryTransient: false,
+        });
+        const service = data.project?.services?.edges
+          ?.map((edge) => edge?.node)
+          .find((candidate) => candidate?.name === name);
+        if (service?.id) return service;
+        lastError = null;
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason ?? error;
+        lastError = error;
+        if (error?.retryable === false) break;
+      }
+      if (attempt + 1 < maximumAttempts) {
+        if (attempt === 0 || attempt % 3 === 2) {
+          onLine(lastError
+            ? `Waiting to reconcile the sandbox after a Railway error (${trimmed(lastError.message, 120)})`
+            : 'Waiting for Railway to publish the new sandbox service');
+        }
+        await sleep(reconcileDelay(attempt), signal ? { signal } : {});
+      }
+    }
+    return null;
+  }
+
+  async function findServiceById(serviceId, { signal, projectId = config.projectId, attempts = 3 } = {}) {
+    const maximumAttempts = Math.max(1, Math.min(safeReconcileAttempts, Number(attempts) || 1));
+    let lastError = null;
+    for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+      try {
+        const data = await graphql(PROJECT_SERVICES, { projectId }, {
+          signal,
+          retryTransient: false,
+        });
+        lastError = null;
+        const service = data.project?.services?.edges
+          ?.map((edge) => edge?.node)
+          .find((candidate) => candidate?.id === serviceId);
+        if (service?.id) return service;
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason ?? error;
+        lastError = error;
+        if (error?.retryable === false) throw error;
+      }
+      if (attempt + 1 < maximumAttempts) await sleep(reconcileDelay(attempt), signal ? { signal } : {});
+    }
+    // Only a successful final observation may prove absence. A transient error
+    // after an earlier empty list leaves the paid service state unknown.
+    if (lastError) throw lastError;
+    return null;
+  }
+
+  function usableDomain(node) {
+    const domain = trimmed(node?.domain, 253).toLowerCase();
+    if (!domain || !/^(?!-)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain)) return null;
+    return { id: trimmed(node?.id, 128), domain };
+  }
+
+  async function findServiceDomain(sandbox, { signal, onLine = () => {} } = {}) {
+    let lastError = null;
+    for (let attempt = 0; attempt < safeReconcileAttempts; attempt += 1) {
+      try {
+        const data = await graphql(SERVICE_DOMAINS, {
+          projectId: sandbox.projectId || config.projectId,
+          environmentId: sandbox.environmentId || config.environmentId,
+          serviceId: sandbox.sandboxId,
+        }, { signal, retryTransient: false });
+        const domains = Array.isArray(data.domains?.serviceDomains) ? data.domains.serviceDomains : [];
+        const matching = domains.find((candidate) => Number(candidate?.targetPort) === SANDBOX_PORT);
+        const recovered = usableDomain(matching);
+        if (recovered) return recovered;
+        lastError = null;
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason ?? error;
+        lastError = error;
+        if (error?.retryable === false) break;
+      }
+      if (attempt + 1 < safeReconcileAttempts) {
+        if (attempt === 0 || attempt % 3 === 2) {
+          onLine(lastError
+            ? `Waiting to reconcile the sandbox domain after a Railway error (${trimmed(lastError.message, 120)})`
+            : 'Waiting for Railway to publish the sandbox domain');
+        }
+        await sleep(reconcileDelay(attempt), { signal });
+      }
     }
     return null;
   }
@@ -312,8 +541,30 @@ export function createRailwayServerProvider({
     const data = await graphql(SERVICE_DELETE, {
       id: sandbox.sandboxId,
       environmentId: sandbox.environmentId || config.environmentId || null,
-    }, { signal, allowNotFound: true });
+    }, { signal, allowNotFound: true, retryTransient: true });
     return data === null ? 'already-removed' : 'removed';
+  }
+
+  async function cleanupAmbiguousCreate(serviceName, cancellation, onLine) {
+    // Cancellation can race an accepted serviceCreate response. Reconciliation
+    // here is deliberately uncancelled and tightly bounded so a user abort
+    // cannot strand a billable service that Railway made visible moments later.
+    const reconciled = await findServiceByName(serviceName, {
+      onLine,
+      attempts: Math.min(3, safeReconcileAttempts),
+    }).catch((cleanupError) => {
+      if (cancellation && typeof cancellation === 'object') cancellation.cleanupFailed = cleanupError.message;
+      return null;
+    });
+    if (!reconciled?.id) return;
+    try {
+      await removeService({
+        sandboxId: reconciled.id,
+        environmentId: config.environmentId,
+      });
+    } catch (cleanupError) {
+      if (cancellation && typeof cancellation === 'object') cancellation.cleanupFailed = cleanupError.message;
+    }
   }
 
   return {
@@ -335,6 +586,8 @@ export function createRailwayServerProvider({
       credentials = null,
       signal,
       onLine = () => {},
+      onSandboxCreated = async () => {},
+      onSandboxRemoved = async () => {},
     } = {}) {
       const bootstrapToken = randomBytes(32).toString('base64url');
       const serviceName = sandboxName();
@@ -351,17 +604,48 @@ export function createRailwayServerProvider({
           },
         }, { signal });
       } catch (error) {
+        if (signal?.aborted) {
+          const cancellation = signal.reason instanceof Error ? signal.reason : error;
+          await cleanupAmbiguousCreate(serviceName, cancellation, onLine);
+          throw cancellation;
+        }
         if (error?.retryable === false) throw error;
-        const reconciled = await findServiceByName(serviceName).catch(() => null);
+        // Never replay serviceCreate after an ambiguous transport/server error:
+        // Railway may have committed the mutation before its response was lost.
+        let reconciliationError = null;
+        const reconciled = await findServiceByName(serviceName, { signal, onLine }).catch((caught) => {
+          reconciliationError = caught;
+          return null;
+        });
+        if (signal?.aborted) {
+          const cancellation = signal.reason instanceof Error ? signal.reason : reconciliationError ?? error;
+          await cleanupAmbiguousCreate(serviceName, cancellation, onLine);
+          throw cancellation;
+        }
         if (!reconciled) throw error;
         created = { serviceCreate: reconciled };
         onLine('Recovered the sandbox after an interrupted Railway response');
       }
-      const serviceId = trimmed(created.serviceCreate?.id, 128);
+      let serviceId = trimmed(created.serviceCreate?.id, 128);
       if (!serviceId) {
-        throw new AppServerError('Railway did not return a sandbox service id', {
-          code: 'PROVIDER_RESPONSE_INVALID',
+        let reconciliationError = null;
+        const reconciled = await findServiceByName(serviceName, { signal, onLine }).catch((caught) => {
+          reconciliationError = caught;
+          return null;
         });
+        if (signal?.aborted) {
+          const cancellation = signal.reason instanceof Error ? signal.reason : reconciliationError
+            ?? new Error('Sandbox creation was cancelled');
+          await cleanupAmbiguousCreate(serviceName, cancellation, onLine);
+          throw cancellation;
+        }
+        serviceId = trimmed(reconciled?.id, 128);
+        if (!serviceId) {
+          throw new AppServerError('Railway did not return a sandbox service id', {
+            code: 'PROVIDER_RESPONSE_INVALID',
+          });
+        }
+        onLine('Recovered the sandbox id after an incomplete Railway response');
       }
       const sandbox = {
         providerId: 'railway',
@@ -374,6 +658,9 @@ export function createRailwayServerProvider({
         createdAt: new Date().toISOString(),
       };
       try {
+        // Persist the billable id before domain/deployment/bootstrap work. If
+        // the desktop exits after this boundary, startup can find and remove it.
+        await onSandboxCreated(sandbox);
         if (config.region) {
           await graphql(SERVICE_INSTANCE_UPDATE, {
             serviceId,
@@ -382,22 +669,36 @@ export function createRailwayServerProvider({
           }, { signal });
         }
         onLine('Publishing the sandbox HTTPS domain');
-        const domainResult = await graphql(SERVICE_DOMAIN_CREATE, {
-          input: {
-            environmentId: config.environmentId,
-            serviceId,
-            targetPort: SANDBOX_PORT,
-          },
-        }, { signal });
-        const domain = trimmed(domainResult.serviceDomainCreate?.domain, 253).toLowerCase();
-        if (!domain || !/^(?!-)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain)) {
+        let domainNode;
+        try {
+          const domainResult = await graphql(SERVICE_DOMAIN_CREATE, {
+            input: {
+              environmentId: config.environmentId,
+              serviceId,
+              targetPort: SANDBOX_PORT,
+            },
+          }, { signal });
+          domainNode = usableDomain(domainResult.serviceDomainCreate);
+          if (!domainNode) {
+            domainNode = await findServiceDomain(sandbox, { signal, onLine });
+            if (domainNode) onLine('Recovered the sandbox domain after an incomplete Railway response');
+          }
+        } catch (error) {
+          if (error?.retryable === false) throw error;
+          // serviceDomainCreate is not blindly replayed. The documented domains
+          // query lets us distinguish an accepted mutation from a rejected one.
+          domainNode = await findServiceDomain(sandbox, { signal, onLine }).catch(() => null);
+          if (!domainNode) throw error;
+          onLine('Recovered the sandbox domain after an interrupted Railway response');
+        }
+        if (!domainNode) {
           throw new AppServerError('Railway did not return a usable sandbox domain', {
             code: 'PROVIDER_RESPONSE_INVALID',
           });
         }
-        sandbox.host = domain;
-        sandbox.domainId = trimmed(domainResult.serviceDomainCreate?.id, 128);
-        const endpoint = `https://${domain}${SANDBOX_BASE_PATH}`;
+        sandbox.host = domainNode.domain;
+        sandbox.domainId = domainNode.id;
+        const endpoint = `https://${domainNode.domain}${SANDBOX_BASE_PATH}`;
         await waitForDeployment(sandbox, { signal, onLine });
         const health = await waitForHealth(endpoint, { signal, onLine });
         onLine('Pairing this device with the app sandbox');
@@ -419,6 +720,7 @@ export function createRailwayServerProvider({
       } catch (error) {
         try {
           await removeService(sandbox, {});
+          await onSandboxRemoved(sandbox);
         } catch (cleanupError) {
           error.cleanupFailed = cleanupError.message;
         }
@@ -428,7 +730,23 @@ export function createRailwayServerProvider({
 
     async status(sandbox, { signal } = {}) {
       const deployment = await latestDeployment(sandbox, { signal });
-      if (!deployment) return { lifecycle: 'idle', status: 'REMOVED', message: 'This sandbox no longer exists.' };
+      if (!deployment) {
+        // An empty deployment history occurs during propagation and redeploys;
+        // it is not evidence that the paid service was deleted. Confirm the
+        // service id is absent before letting the coordinator replace it.
+        const service = await findServiceById(sandbox.sandboxId, {
+          signal,
+          projectId: sandbox.projectId || config.projectId,
+        });
+        if (service) {
+          return {
+            lifecycle: 'provisioning',
+            status: 'NO_DEPLOYMENT',
+            message: 'Railway has not published a deployment for this sandbox yet.',
+          };
+        }
+        return { lifecycle: 'idle', status: 'REMOVED', message: 'This sandbox no longer exists.' };
+      }
       const lifecycle = DEPLOY_STATUS_LIFECYCLE[deployment.status] ?? 'provisioning';
       return {
         lifecycle,

@@ -12,6 +12,8 @@ async function digestFile(filename) {
 }
 
 export class BlobStore {
+  #uploadLocks = new Map();
+
   constructor(database, { root, now = Date.now, chunkBytes = TRANSFER_LIMITS.chunkBytes } = {}) {
     this.database = database;
     this.root = root;
@@ -27,7 +29,25 @@ export class BlobStore {
     return this.database.prepare('SELECT * FROM blobs WHERE sha256 = ?').get(sha256) ?? null;
   }
 
-  async initUpload({ deviceId, sha256, size, name, kind, sessionId = null }) {
+  #serializeUpload(key, operation) {
+    const previous = this.#uploadLocks.get(key) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(operation);
+    this.#uploadLocks.set(key, current);
+    return current.finally(() => {
+      if (this.#uploadLocks.get(key) === current) this.#uploadLocks.delete(key);
+    });
+  }
+
+  #uploadKey({ deviceId, sha256, size, kind, sessionId = null }) {
+    return JSON.stringify(['upload', deviceId, sha256, size, kind, sessionId]);
+  }
+
+  initUpload(input) {
+    const key = this.#uploadKey(input);
+    return this.#serializeUpload(key, () => this.#initUpload(input));
+  }
+
+  async #initUpload({ deviceId, sha256, size, name, kind, sessionId = null }) {
     const blob = this.get(sha256);
     if (blob) {
       if (blob.size !== size) throw new CloudError('BLOB_SIZE_MISMATCH', 'Stored blob size does not match upload', 409);
@@ -89,7 +109,21 @@ export class BlobStore {
     }
   }
 
-  async appendChunk({ uploadId, deviceId, offset, bytes }) {
+  appendChunk(input) {
+    const upload = this.database.prepare('SELECT * FROM uploads WHERE id = ?').get(input.uploadId);
+    const key = upload
+      ? this.#uploadKey({
+          deviceId: upload.device_id,
+          sha256: upload.sha256,
+          size: upload.size,
+          kind: upload.kind,
+          sessionId: upload.session_id,
+        })
+      : `missing:${input.uploadId}`;
+    return this.#serializeUpload(key, () => this.#appendChunk(input));
+  }
+
+  async #appendChunk({ uploadId, deviceId, offset, bytes }) {
     const upload = this.database.prepare('SELECT * FROM uploads WHERE id = ?').get(uploadId);
     if (!upload || upload.device_id !== deviceId) throw new CloudError('UPLOAD_NOT_FOUND', 'Upload was not found', 404);
     if (upload.status !== 'uploading') {
