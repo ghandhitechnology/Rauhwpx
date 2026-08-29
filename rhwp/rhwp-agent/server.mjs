@@ -41,7 +41,7 @@ import {
   RAU_LOCKED_MODELS,
   RAU_SECRET_ID,
 } from './pi-manager.mjs';
-import { createRauCreditsClient } from './rau-credits-client.mjs';
+import { createRauCreditsClient, storeRauApiKey } from './rau-credits-client.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
 import { createOpenRouter } from './openrouter.mjs';
 import { createIpcSecretStore } from './secret-store.mjs';
@@ -2318,7 +2318,9 @@ async function handleStudioMessage(record, sock, msg) {
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-auth-started', requestId, agent, authUrl });
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-progress', agent, state: 'authorizing', authUrl });
           const key = await rauCredits.redeem(session.id, { signal: abort.signal });
-          rauStatus = await rauManager.setApiKey(key);
+          rauStatus = await storeRauApiKey(rauManager.setApiKey.bind(rauManager), key, { signal: abort.signal });
+          await rauCredits.acknowledgeDeviceSession(session.id)
+            .catch((error) => log(`Rau credit session acknowledgement failed: ${error?.message ?? error}`));
           if (!rauStatus.installed) {
             rauStatus = await rauManager.install((entry) => replyToStudio(record, sock, {
               v: 1,

@@ -1,11 +1,44 @@
 const DEFAULT_URL = 'https://rau-credits-production.up.railway.app';
 const POLL_INTERVAL_MS = 1_000;
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
+const TRANSIENT_POLL_RETRIES = 5;
+const KEY_VALIDATION_RETRY_MS = [250, 500, 1_000, 2_000];
 
 function creditsError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+function abortError() {
+  return creditsError('RAU_LOGIN_CANCELLED', 'Rau 로그인을 취소했어요.');
+}
+
+/**
+ * A newly provisioned OpenRouter child key can briefly be unavailable to the
+ * validation endpoint. Retry only the read-only validation step before the
+ * manager persists the key.
+ */
+export async function storeRauApiKey(setApiKey, key, {
+  signal,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  retryMs = KEY_VALIDATION_RETRY_MS,
+} = {}) {
+  const retryable = new Set([
+    'OPENROUTER_KEY_INVALID',
+    'OPENROUTER_HTTP',
+    'OPENROUTER_TIMEOUT',
+    'OPENROUTER_UNREACHABLE',
+  ]);
+  for (let attempt = 0; ; attempt += 1) {
+    if (signal?.aborted) throw abortError();
+    try {
+      return await setApiKey(key);
+    } catch (error) {
+      if (!retryable.has(error?.code) || attempt >= retryMs.length) throw error;
+      await sleep(retryMs[attempt]);
+    }
+  }
 }
 
 export function rauCreditsUrl(env = process.env) {
@@ -52,16 +85,31 @@ export function createRauCreditsClient({
     pollDeviceSession(id) {
       return request(`/v1/device-sessions/${encodeURIComponent(id)}`);
     },
+    acknowledgeDeviceSession(id) {
+      return request(`/v1/device-sessions/${encodeURIComponent(id)}/acknowledge`, { method: 'POST' });
+    },
     /**
-     * ready 가 될 때까지 폴링한다. 키는 한 세션에 한 번만 온다.
+     * ready 가 될 때까지 폴링한다. 저장 확인 전까지 같은 키를 다시 받을 수 있다.
      * @param {string} id
      * @param {{ signal?: AbortSignal }} [opts]
      */
     async redeem(id, { signal } = {}) {
       const started = now();
+      let transientFailures = 0;
       while (true) {
-        if (signal?.aborted) throw creditsError('RAU_LOGIN_CANCELLED', 'Rau 로그인을 취소했어요.');
-        const next = await this.pollDeviceSession(id);
+        if (signal?.aborted) throw abortError();
+        let next;
+        try {
+          next = await this.pollDeviceSession(id);
+          transientFailures = 0;
+        } catch (error) {
+          if (error?.code !== 'RAU_CREDITS_UNREACHABLE' || transientFailures >= TRANSIENT_POLL_RETRIES) {
+            throw error;
+          }
+          transientFailures += 1;
+          await sleep(POLL_INTERVAL_MS);
+          continue;
+        }
         if (next.status === 'ready' && typeof next.apiKey === 'string' && next.apiKey) {
           return next.apiKey;
         }

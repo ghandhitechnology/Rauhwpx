@@ -14,7 +14,8 @@ test('Rau redeem stores the Rau secret and can drop only the local key', async (
   const start = source.indexOf("if (agent === 'rau' && method === 'oauth')");
   assert.notEqual(start, -1, 'Rau oauth 핸들러를 찾지 못했어요');
   const block = source.slice(start, source.indexOf("if (agent === 'pi' && method === 'oauth')", start));
-  assert.match(block, /rauManager\.setApiKey\(key\)/);
+  assert.match(block, /storeRauApiKey\(rauManager\.setApiKey\.bind\(rauManager\), key/);
+  assert.match(block, /rauCredits\.acknowledgeDeviceSession\(session\.id\)/);
   assert.doesNotMatch(block, /piManager\.setApiKey/);
   assert.match(source, /code: 'RAU_CREDITS_EMPTY'/);
   assert.match(source, /case 'agent-setup-disconnect'/);

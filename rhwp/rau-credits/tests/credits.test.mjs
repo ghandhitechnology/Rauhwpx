@@ -40,7 +40,7 @@ test('encrypt round-trips the OpenRouter secret', () => {
   assert.equal(decryptSecret('session', packed), 'sk-or-v1-secret');
 });
 
-test('first login mints a $5 key and a second device reuses it', async () => {
+test('first login mints a $5 key, delivers it until acknowledged, and reuses it', async () => {
   const minted = [];
   const credits = createCreditsService({
     origin: 'https://credits.rau.test',
@@ -61,6 +61,11 @@ test('first login mints a $5 key and a second device reuses it', async () => {
   assert.equal(redeemed.apiKey, 'sk-or-v1-shared');
   assert.equal(minted.length, 1);
 
+  const repeated = await credits.redeemDeviceSession(first.id);
+  assert.equal(repeated.status, 'ready');
+  assert.equal(repeated.apiKey, 'sk-or-v1-shared');
+
+  await credits.acknowledgeDeviceSession(first.id);
   const already = await credits.redeemDeviceSession(first.id);
   assert.equal(already.status, 'redeemed');
   assert.equal(already.apiKey, undefined);
@@ -70,6 +75,35 @@ test('first login mints a $5 key and a second device reuses it', async () => {
   const again = await credits.redeemDeviceSession(second.id);
   assert.equal(again.apiKey, 'sk-or-v1-shared');
   assert.equal(minted.length, 1, 'the same WorkOS user must not mint another $5');
+});
+
+test('concurrent session creation cannot overwrite another session', async () => {
+  const credits = service();
+  const [first, second] = await Promise.all([
+    credits.createDeviceSession(),
+    credits.createDeviceSession(),
+  ]);
+
+  await credits.assertPendingDevice(first.id);
+  await credits.assertPendingDevice(second.id);
+});
+
+test('pending polling is read-only and cannot save stale session state', async () => {
+  const backing = createMemoryStore();
+  let saves = 0;
+  const store = {
+    load: () => backing.load(),
+    save: async (state) => {
+      saves += 1;
+      await backing.save(state);
+    },
+  };
+  const credits = service({ store });
+  const session = await credits.createDeviceSession();
+  assert.equal(saves, 1);
+
+  assert.deepEqual(await credits.redeemDeviceSession(session.id), { status: 'pending' });
+  assert.equal(saves, 1);
 });
 
 test('createOpenRouterKey receives the $5 limit contract through the default provisioner', async () => {
@@ -98,7 +132,7 @@ test('createOpenRouterKey receives the $5 limit contract through the default pro
   assert.deepEqual(calls[0].body.allowed_models, [...RAU_MODEL_IDS]);
 });
 
-test('HTTP POST creates a session and GET redeems the key once', async () => {
+test('HTTP POST creates a session, GET delivers the key, and acknowledgement consumes it', async () => {
   const credits = service();
   const server = http.createServer(creditsRequestListener(credits));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -118,6 +152,21 @@ test('HTTP POST creates a session and GET redeems the key once', async () => {
       .then((res) => res.json());
     assert.equal(ready.status, 'ready');
     assert.equal(ready.apiKey, 'sk-or-v1-minted-1');
+
+    const repeated = await fetch(`http://127.0.0.1:${port}/v1/device-sessions/${created.id}`)
+      .then((res) => res.json());
+    assert.equal(repeated.apiKey, 'sk-or-v1-minted-1');
+
+    const acknowledged = await fetch(
+      `http://127.0.0.1:${port}/v1/device-sessions/${created.id}/acknowledge`,
+      { method: 'POST' },
+    ).then((res) => res.json());
+    assert.equal(acknowledged.status, 'redeemed');
+
+    const redeemed = await fetch(`http://127.0.0.1:${port}/v1/device-sessions/${created.id}`)
+      .then((res) => res.json());
+    assert.equal(redeemed.status, 'redeemed');
+    assert.equal(redeemed.apiKey, undefined);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

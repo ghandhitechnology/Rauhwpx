@@ -62,18 +62,23 @@ export function createCreditsService({
   if (!sessionSecret) throw new Error('sessionSecret is required');
 
   const redirectUri = `${origin.replace(/\/$/, '')}/callback`;
+  let mutationChain = Promise.resolve();
 
-  async function mutate(task) {
-    const state = await store.load();
-    const result = await task(state);
-    await store.save(state);
-    return result;
+  function mutate(task) {
+    const running = mutationChain.then(async () => {
+      const state = await store.load();
+      const result = await task(state);
+      await store.save(state);
+      return result;
+    });
+    mutationChain = running.then(() => undefined, () => undefined);
+    return running;
   }
 
   function pruneSessions(state) {
     const cutoff = now() - SESSION_TTL_MS;
     for (const [id, session] of Object.entries(state.sessions)) {
-      if (session.status === 'pending' && session.createdAt < cutoff) delete state.sessions[id];
+      if (session.createdAt < cutoff) delete state.sessions[id];
     }
   }
 
@@ -191,7 +196,7 @@ export function createCreditsService({
       }
       current.status = 'ready';
       current.workosUserId = userId;
-      current.apiKey = apiKey;
+      current.apiKeyCiphertext = encryptSecret(sessionSecret, apiKey);
     });
     return { deviceId, workosUserId: userId };
   }
@@ -257,20 +262,34 @@ export function createCreditsService({
     },
 
     async redeemDeviceSession(id) {
+      const session = (await store.load()).sessions[id];
+      if (!session) throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없어요');
+      if (now() - session.createdAt > SESSION_TTL_MS) return { status: 'expired' };
+      if (session.status === 'pending') return { status: 'pending' };
+      if (session.status === 'redeemed') return { status: 'redeemed' };
+      const ciphertext = session.apiKeyCiphertext;
+      const apiKey = typeof ciphertext === 'string'
+        ? decryptSecret(sessionSecret, ciphertext)
+        : session.apiKey;
+      if (session.status !== 'ready' || typeof apiKey !== 'string' || !apiKey) {
+        throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션을 확인할 수 없어요');
+      }
+      return { status: 'ready', apiKey };
+    },
+
+    async acknowledgeDeviceSession(id) {
       return mutate((state) => {
-        pruneSessions(state);
         const session = state.sessions[id];
         if (!session) throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없어요');
-        if (session.status === 'pending') return { status: 'pending' };
         if (session.status === 'redeemed') return { status: 'redeemed' };
-        if (session.status !== 'ready' || !session.apiKey) {
-          throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션을 확인할 수 없어요');
+        if (session.status !== 'ready') {
+          throw creditsError('DEVICE_SESSION_INVALID', '완료되지 않은 로그인 세션이에요');
         }
-        const apiKey = session.apiKey;
         session.status = 'redeemed';
         session.redeemedAt = now();
         delete session.apiKey;
-        return { status: 'ready', apiKey };
+        delete session.apiKeyCiphertext;
+        return { status: 'redeemed' };
       });
     },
   };
@@ -327,6 +346,11 @@ export function creditsRequestListener(service) {
       const redeem = url.pathname.match(/^\/v1\/device-sessions\/([^/]+)$/);
       if (req.method === 'GET' && redeem) {
         send(200, await service.redeemDeviceSession(decodeURIComponent(redeem[1])));
+        return;
+      }
+      const acknowledge = url.pathname.match(/^\/v1\/device-sessions\/([^/]+)\/acknowledge$/);
+      if (req.method === 'POST' && acknowledge) {
+        send(200, await service.acknowledgeDeviceSession(decodeURIComponent(acknowledge[1])));
         return;
       }
       if (req.method === 'GET' && url.pathname === '/login') {
