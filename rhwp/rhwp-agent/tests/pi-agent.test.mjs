@@ -189,12 +189,45 @@ test('rau harness events carry the rau agent name', () => {
       type: 'message_update',
       assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: '확인했습니다.' },
     },
+    {
+      type: 'tool_execution_start',
+      toolCallId: 'call-spawn',
+      toolName: 'subagent_spawn',
+      args: { name: '2쪽 정리', role: 'doc-editor' },
+    },
+    {
+      type: 'tool_execution_end',
+      toolCallId: 'call-spawn',
+      toolName: 'subagent_spawn',
+      result: { details: { id: 'sa-1' } },
+    },
+    {
+      type: 'tool_execution_start',
+      toolCallId: 'call-wait',
+      toolName: 'subagent_wait',
+      args: { ids: ['sa-1'] },
+    },
+    {
+      type: 'tool_execution_end',
+      toolCallId: 'call-wait',
+      toolName: 'subagent_wait',
+      result: { details: { records: [{ id: 'sa-1', status: 'completed' }] } },
+    },
     { type: 'agent_settled' },
   );
   proc.exit(0);
 
   assert.ok(events.length > 0);
   for (const event of events) assert.equal(event.agent, 'rau');
+  assert.equal(spawns[0].options.env.RHWP_AGENT_NAME, 'rau');
+  assert.deepEqual(events.filter((event) => event.type.startsWith('task-')), [
+    {
+      type: 'task-start', agent: 'rau', taskId: 'call-spawn', callId: 'call-spawn',
+      title: '2쪽 정리', role: 'doc-editor', taskKind: 'agent',
+    },
+    { type: 'task-progress', agent: 'rau', taskId: 'call-spawn', activity: 'waiting' },
+    { type: 'task-end', agent: 'rau', taskId: 'call-spawn', status: 'completed' },
+  ]);
   assert.equal(events.at(-1).type, 'turn-end');
   session.dispose();
 });
@@ -347,18 +380,20 @@ test('argv omits thinking for non-reasoning models and never doubles the provide
   assert.equal(argv.includes('--thinking'), false);
 });
 
-test('pi brief tells the model to use subagent_spawn for document regions', () => {
-  for (const mode of [
-    { workflow: 'direct', phase: 'implementing' },
-    { workflow: 'plan', phase: 'implementing' },
-  ]) {
-    const argv = buildPiArgv({ ...baseOpts, ...mode }, 'sess-1');
-    const brief = argv[argv.indexOf('--append-system-prompt') + 1];
-    assert.doesNotMatch(brief, /Workflow tool/, mode.phase);
-    assert.match(brief, /subagent_spawn/, mode.phase);
-    assert.match(brief, /role=doc-editor/, mode.phase);
-    assert.match(brief, /subagent_wait/, mode.phase);
-    assert.match(brief, /ONE apply_edits call/, mode.phase);
+test('pi and rau briefs tell the model to use subagent_spawn for document regions', () => {
+  for (const agentName of ['pi', 'rau']) {
+    for (const mode of [
+      { workflow: 'direct', phase: 'implementing' },
+      { workflow: 'plan', phase: 'implementing' },
+    ]) {
+      const argv = buildPiArgv({ ...baseOpts, ...mode, agentName }, 'sess-1');
+      const brief = argv[argv.indexOf('--append-system-prompt') + 1];
+      assert.doesNotMatch(brief, /Workflow tool/, `${agentName} ${mode.phase}`);
+      assert.match(brief, /subagent_spawn/, `${agentName} ${mode.phase}`);
+      assert.match(brief, /role=doc-editor/, `${agentName} ${mode.phase}`);
+      assert.match(brief, /subagent_wait/, `${agentName} ${mode.phase}`);
+      assert.match(brief, /ONE apply_edits call/, `${agentName} ${mode.phase}`);
+    }
   }
 });
 
@@ -406,6 +441,7 @@ test('the child env is built from scratch without ambient provider keys', () => 
   assert.equal(env.RHWP_PI_EFFORT, 'high');
   assert.equal(env.RHWP_PI_REASONING, '1');
   assert.equal(env.RHWP_PI_SESSION_DIR, path.join('/pi', 'sessions'));
+  assert.equal(buildPiEnv({ ...baseOpts, agentName: 'rau' }, sourceEnv).RHWP_AGENT_NAME, 'rau');
 
   assert.equal(buildPiEnv({ ...baseOpts }, sourceEnv).RHWP_TOOL_PROFILE, 'direct');
   assert.equal(

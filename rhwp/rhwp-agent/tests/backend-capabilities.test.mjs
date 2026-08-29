@@ -303,6 +303,7 @@ test('parallel-work guidance is tuned to each provider surface', () => {
   assert.match(pi, /subagent_wait until every agent/);
   assert.match(pi, /Never call subagent_wait for an MCP-managed background job/);
   assert.match(pi, /ONE apply_edits call/);
+  assert.equal(parallelWorkBriefFor('rau'), pi);
 
   const grok = parallelWorkBriefFor('grok');
   assert.match(grok, /spawn_subagent/);
@@ -332,12 +333,14 @@ test('provider tool notes correct activated skill text per collaboration surface
     ['grok', /never collect them with get_command_or_subagent_output/],
     ['cursor', /there is no polling tool/],
     ['pi', /never call subagent_wait or subagent_list for one/],
+    ['rau', /never call subagent_wait or subagent_list for one/],
   ]) {
     const note = providerToolNoteFor(agent);
     assert.match(note, fragment, agent);
     assert.match(note, /delegate_copy_layout/, agent);
     assert.match(note, /hub will start a new turn carrying/, agent);
   }
+  assert.equal(providerToolNoteFor('rau'), providerToolNoteFor('pi'));
   assert.equal(providerToolNoteFor('mystery'), '', '알 수 없는 provider 는 주석을 붙이지 않는다');
 });
 

@@ -98,6 +98,7 @@ export function clampPromptArg(prompt) {
  * @param {string} sessionId
  */
 export function buildPiArgv(opts, sessionId) {
+  const agent = opts.agentName === 'rau' ? 'rau' : 'pi';
   const piRoot = opts.piRoot ?? '';
   const modelId = String(opts.model ?? '').replace(/^openrouter\//, '');
   const argv = ['--mode', 'json', '--model', `openrouter/${modelId}`];
@@ -106,8 +107,8 @@ export function buildPiArgv(opts, sessionId) {
   argv.push(
     '--session-dir', path.join(piRoot, 'sessions'),
     '--session-id', sessionId,
-    // 'pi' 를 명시한다 — 미지정은 클로드 기본 브리프(스폰 지시 포함)를 낳았다.
-    '--append-system-prompt', systemBriefFor(opts, 'pi'),
+    // provider 를 명시한다 — 미지정은 클로드 기본 브리프(스폰 지시 포함)를 낳았다.
+    '--append-system-prompt', systemBriefFor(opts, agent),
     // 워크스페이스의 CLAUDE.md/AGENTS.md 를 끌어오지 않는다.
     '--no-context-files',
   );
@@ -123,6 +124,7 @@ export function buildPiArgv(opts, sessionId) {
  * @param {NodeJS.ProcessEnv} [sourceEnv]
  */
 export function buildPiEnv(opts, sourceEnv = process.env) {
+  const agent = opts.agentName === 'rau' ? 'rau' : 'pi';
   /** @type {Record<string, string>} */
   const env = {};
   for (const name of ENV_PASSTHROUGH) {
@@ -143,7 +145,7 @@ export function buildPiEnv(opts, sourceEnv = process.env) {
     PI_OFFLINE: '1',
     RHWP_WS_URL: `ws://127.0.0.1:${opts.hubPort}/mcp`,
     RHWP_AGENT_TOKEN: String(opts.token ?? ''),
-    RHWP_AGENT_NAME: 'pi',
+    RHWP_AGENT_NAME: agent,
     RHWP_HUB_HTTP: `http://127.0.0.1:${opts.hubPort}`,
     RHWP_ROOT_DIR: String(opts.rootDir ?? ''),
     RHWP_PERMISSION_PROFILE: opts.permissionProfile ?? 'safe',
@@ -160,8 +162,12 @@ export function buildPiEnv(opts, sourceEnv = process.env) {
 /**
  * pi 확장의 subagent_* 도구 호출을 편대 task-* 이벤트로 옮긴다.
  * 자식 본문은 json 스트림에 없으므로 카드는 스폰/대기/취소와 턴 종료로만 움직인다.
+ *
+ * @param {(event: any) => void} onEvent
+ * @param {'pi' | 'rau'} [agentName]
  */
-export function createPiFleetMapper(onEvent) {
+export function createPiFleetMapper(onEvent, agentName = 'pi') {
+  const agent = agentName === 'rau' ? 'rau' : 'pi';
   /** @type {Map<string, string>} sa-N → taskId(스폰 callId) */
   const taskIdBySubagent = new Map();
   /** @type {Map<string, { tool: string, args: Record<string, unknown> }>} */
@@ -171,7 +177,7 @@ export function createPiFleetMapper(onEvent) {
 
   function emitEnd(taskId, status, summary) {
     if (!running.delete(taskId)) return;
-    onEvent({ type: 'task-end', agent: 'pi', taskId, status, ...(summary ? { summary } : {}) });
+    onEvent({ type: 'task-end', agent, taskId, status, ...(summary ? { summary } : {}) });
   }
 
   function taskIdsFor(ids) {
@@ -196,7 +202,7 @@ export function createPiFleetMapper(onEvent) {
         running.add(callId);
         onEvent({
           type: 'task-start',
-          agent: 'pi',
+          agent,
           taskId: callId,
           callId,
           title: String(args.name ?? args.title ?? 'subagent'),
@@ -207,7 +213,7 @@ export function createPiFleetMapper(onEvent) {
       }
       if (tool === WAIT_TOOL) {
         for (const taskId of taskIdsFor(idsFrom(callId, args))) {
-          onEvent({ type: 'task-progress', agent: 'pi', taskId, activity: 'waiting' });
+          onEvent({ type: 'task-progress', agent, taskId, activity: 'waiting' });
         }
       }
     },
@@ -359,7 +365,7 @@ export function createPiSession(opts, {
   let stderrTail = '';
   let childExitPromise = Promise.resolve();
   let resolveChildExit = null;
-  const fleet = createPiFleetMapper(onEvent);
+  const fleet = createPiFleetMapper(onEvent, agent);
 
   function endTurn(evt) {
     if (!turnOpen) return;

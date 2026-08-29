@@ -248,7 +248,7 @@ const PARALLEL_WORK_SHARED = `- Sibling agents editing disjoint paragraph ranges
  * @param {AgentName} [agentName]
  */
 export function parallelWorkBriefFor(agentName = 'claude') {
-  if (agentName === 'pi') {
+  if (agentName === 'pi' || agentName === 'rau') {
     return `PARALLEL WORK:
 - For large document tasks, spawn agents with subagent_spawn. Use role=doc-editor for edits and role=doc-researcher for research. Give each editor ONE contiguous paragraph range (for example one page or one section) and state that range plus the goal in its prompt. Each agent re-reads its own region before writing.
 ${PARALLEL_WORK_SHARED}
@@ -304,12 +304,14 @@ function parallelWorkSectionFor(agentName, profile) {
  * @returns {string}
  */
 export function providerToolNoteFor(agentName = 'claude') {
+  const piNote = 'Your collaboration tools are subagent_spawn/subagent_wait/subagent_check/subagent_list/subagent_cancel, and they manage subagents spawned by this chat only. Background hub jobs such as delegate_copy_layout are not collaboration agents: never call subagent_wait or subagent_list for one — end your turn and the hub will start a new turn carrying its completion.';
   const notes = {
     claude: 'Your collaboration tools are the native Agent and Workflow tools, and their results arrive automatically as task notifications. Background hub jobs such as delegate_copy_layout are not Agent tasks: never poll or wait for them — end your turn and the hub will start a new turn carrying their completion.',
     codex: 'Your collaboration tools are spawn_agent/wait_agent, and they manage collaboration agents only. Background hub jobs such as delegate_copy_layout are not collaboration agents: never call wait_agent or list_agents for one — end your turn and the hub will start a new turn carrying its completion.',
     grok: 'Your collaboration tools are spawn_subagent/get_command_or_subagent_output, available only under full access. Background hub jobs such as delegate_copy_layout are not your subagents: never collect them with get_command_or_subagent_output — end your turn and the hub will start a new turn carrying their completion.',
     cursor: 'Subagents run as native task calls whose transcripts arrive when each finishes; there is no polling tool. Background hub jobs such as delegate_copy_layout are not Task subagents: end your turn and the hub will start a new turn carrying their completion.',
-    pi: 'Your collaboration tools are subagent_spawn/subagent_wait/subagent_check/subagent_list/subagent_cancel, and they manage pi children only. Background hub jobs such as delegate_copy_layout are not collaboration agents: never call subagent_wait or subagent_list for one — end your turn and the hub will start a new turn carrying its completion.',
+    pi: piNote,
+    rau: piNote,
   };
   return notes[agentName] ?? '';
 }
